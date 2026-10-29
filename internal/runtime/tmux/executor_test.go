@@ -584,6 +584,32 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 			t.Errorf("fifth call = %q, want respawn-pane", respawn)
 		}
 	})
+
+	// An empty GC_CITY_NAME withholds the server's value, which can name a
+	// different city (upstream #8151); the respawned pane must not get it back.
+	t.Run("empty city name", func(t *testing.T) {
+		exec := &fakeExecutor{out: "agent\t@1.%0"}
+		tm := NewTmux()
+		tm.exec = exec
+		ops := &tmuxStartOps{tm: tm}
+
+		env := map[string]string{
+			"GC_CITY":      "/tmp/city",
+			"GC_CITY_NAME": "",
+		}
+		if err := ops.respawnAgent("gc-test-city-name-pin", "/proj", "claude", env); err != nil {
+			t.Fatalf("respawnAgent: %v", err)
+		}
+		if len(exec.calls) != 5 {
+			t.Fatalf("tmux calls = %d (%v), want 5 (set-environment, adopt check, pane lookup, respawn-pane, the input fence's environment read)", len(exec.calls), exec.calls)
+		}
+		if setEnv := strings.Join(exec.calls[0], " "); !strings.Contains(setEnv, "set-environment -t =gc-test-city-name-pin -r GC_CITY_NAME") {
+			t.Errorf("first call = %q, want GC_CITY_NAME marked removed from the session env", setEnv)
+		}
+		if respawn := strings.Join(exec.calls[3], " "); !strings.Contains(respawn, "respawn-pane") {
+			t.Errorf("fourth call = %q, want respawn-pane", respawn)
+		}
+	})
 }
 
 // No withheld CREDENTIAL means no extra tmux round-trip. The nesting-detection
@@ -600,6 +626,7 @@ func TestRespawnAgentSkipsSessionEnvMarkingWhenNoCredentialWithheld(t *testing.T
 
 	env := map[string]string{
 		"GC_CITY":                "/tmp/city",
+		"GC_CITY_NAME":           "own-city", // a stamped name is a value, not a withholding
 		"CLAUDECODE":             "",
 		"CLAUDE_CODE_ENTRYPOINT": "",
 		"CODEX_THREAD_ID":        "",
@@ -1222,23 +1249,29 @@ func TestNewSessionWithCommandAndEnvMarksUnsetKeysRemovedFromSessionEnv(t *testi
 		"GC_CITY":             "/tmp/city",
 		"CLAUDECODE":          "",
 		"GC_CONTROLLER_TOKEN": "",
+		"GC_CITY_NAME":        "",
 	}
 	if err := tm.NewSessionWithCommandAndEnv("gc-test-token-pin", "", "claude", env); err != nil {
 		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
 	}
 
-	var marked bool
+	durable := []string{"GC_CONTROLLER_TOKEN", "GC_CITY_NAME"}
+	marked := map[string]bool{}
 	for _, call := range exec.calls {
 		joined := strings.Join(call, " ")
-		if strings.Contains(joined, "set-environment") && strings.Contains(joined, "-r GC_CONTROLLER_TOKEN") {
-			marked = true
+		for _, key := range durable {
+			if strings.Contains(joined, "set-environment") && strings.Contains(joined, "-r "+key) {
+				marked[key] = true
+			}
 		}
 		if strings.Contains(joined, "set-environment") && strings.Contains(joined, "CLAUDECODE") {
 			t.Errorf("new-session marked the nesting flag CLAUDECODE in the session env: %v", call)
 		}
 	}
-	if !marked {
-		t.Errorf("new-session never marked GC_CONTROLLER_TOKEN removed from the session env; the first respawn would leak it: %v", exec.calls)
+	for _, key := range durable {
+		if !marked[key] {
+			t.Errorf("new-session never marked %s removed from the session env; the first respawn would leak it: %v", key, exec.calls)
+		}
 	}
 }
 

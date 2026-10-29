@@ -776,16 +776,19 @@ func validateUnsetEnvKeys(env map[string]string) error {
 // SURVIVE into later processes, rather than only applying to the command tmux
 // execs first.
 //
-// That is controller-scope credentials plus the BEADS_ namespace. A selected
-// workspace can pin any current or future BEADS_ key empty to prevent ambient
-// state from redirecting it, and a warm respawn must retain that choice. The
-// other keys a session env pins empty — CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, the
-// CODEX_ pair — are nesting-detection flags, not authority: the `env -u` prefix
-// already gives them the behavior they need on the launched command.
+// That is controller-scope credentials, the BEADS_ namespace and GC_CITY_NAME.
+// A selected workspace can pin any current or future BEADS_ key empty to
+// prevent ambient state from redirecting it, and a warm respawn must retain
+// that choice. GC_CITY_NAME is pinned empty for the same reason: the server's
+// value can name a different city, and a script in a respawned pane would act
+// on it (upstream #8151). The other keys a session env pins empty — CLAUDECODE,
+// CLAUDE_CODE_ENTRYPOINT, the CODEX_ pair — are nesting-detection flags, not
+// authority: the `env -u` prefix already gives them the behavior they need on
+// the launched command.
 func durableWithholdKeys(env map[string]string) []string {
 	var keys []string
 	for _, k := range sessionEnvUnsetKeys(env) {
-		if processenv.IsControllerOnlyEnv(k) || strings.HasPrefix(k, "BEADS_") {
+		if processenv.IsControllerOnlyEnv(k) || strings.HasPrefix(k, "BEADS_") || k == "GC_CITY_NAME" {
 			keys = append(keys, k)
 		}
 	}
@@ -841,9 +844,10 @@ func (t *Tmux) markSessionEnvRemoved(session string, keys []string) error {
 // Requires tmux >= 3.2.
 //
 // Empty-valued keys are WITHHELD by the `env -u` command prefix, which covers
-// the command new-session execs. Controller-scope credentials additionally get
-// the durable session-environment marker, which covers every process started in
-// the session afterwards — above all respawn-pane. Both are required for those
+// the command new-session execs. The keys [durableWithholdKeys] names,
+// controller-scope credentials among them, additionally get the durable
+// session-environment marker, which covers every process started in the
+// session afterwards — above all respawn-pane. Both are required for those
 // keys and each was falsified against a real tmux 3.4: new-session starts the
 // command before any follow-up can land, so the marker alone leaves the CREATED
 // pane exposed; the prefix alone leaves the RESPAWNED pane exposed.

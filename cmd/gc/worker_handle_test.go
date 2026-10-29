@@ -2813,3 +2813,76 @@ func TestAttachmentHoldsClassifiesWithErrorsIs(t *testing.T) {
 		})
 	}
 }
+
+// TestResolvedWorkerSessionEnvSetsOwnCityName covers the worker-boundary
+// create and resume env compositions: both build the session env directly
+// (never through resolveTemplate), so a supervisor's GC_CITY_NAME for a
+// different city leaks into the session unless the builder writes the key
+// itself (upstream #8151).
+func TestResolvedWorkerSessionEnvSetsOwnCityName(t *testing.T) {
+	t.Setenv("GC_CITY_NAME", "neighbor-city")
+
+	// Resume (and the create-path overlay the caller applies): the helper
+	// has the city config, so the name is the cfg's effective city name.
+	cityDir := t.TempDir()
+	gcDir := filepath.Join(cityDir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gcDir, "settings.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	claude := config.BuiltinProviders()["claude"]
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "own-city"},
+		Agents: []config.Agent{{
+			Name:     "worker",
+			Provider: "claude",
+		}},
+		Providers: map[string]config.ProviderSpec{
+			"claude": claude,
+		},
+	}
+	resolved := &config.ResolvedProvider{Name: "claude"}
+
+	env := resolvedWorkerSessionEnvWithConfig(cityDir, cfg, resolved)
+	if got := env["GC_CITY_NAME"]; got != "own-city" {
+		t.Errorf("resolvedWorkerSessionEnvWithConfig: GC_CITY_NAME = %q, want %q", got, "own-city")
+	}
+
+	// The resume resolver composes its env through the same helper.
+	runtimeCfg, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+		Template: "worker",
+		WorkDir:  cityDir,
+	}, "")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
+	if runtimeCfg == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
+	}
+	if got := runtimeCfg.SessionEnv["GC_CITY_NAME"]; got != "own-city" {
+		t.Errorf("resolvedWorkerRuntimeWithConfig: SessionEnv[GC_CITY_NAME] = %q, want %q", got, "own-city")
+	}
+}
+
+// TestResolvedWorkerSessionEnvCityNameFallsBackToBasename covers AC-7 for
+// the worker boundary: with no registered identity and no [workspace].name
+// (or a nil cfg), the name is the city directory basename — the same value
+// runDiscoveredCommand gives pack commands — never the ambient neighbor.
+func TestResolvedWorkerSessionEnvCityNameFallsBackToBasename(t *testing.T) {
+	t.Setenv("GC_CITY_NAME", "neighbor-city")
+
+	cityDir := t.TempDir()
+	resolved := &config.ResolvedProvider{Name: "claude"}
+
+	for label, cfg := range map[string]*config.City{
+		"nil cfg":     nil,
+		"unnamed cfg": {},
+	} {
+		env := resolvedWorkerSessionEnvWithConfig(cityDir, cfg, resolved)
+		if got := env["GC_CITY_NAME"]; got != filepath.Base(cityDir) {
+			t.Errorf("%s: GC_CITY_NAME = %q, want city directory basename %q", label, got, filepath.Base(cityDir))
+		}
+	}
+}

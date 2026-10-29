@@ -334,7 +334,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 
 	// Step 8: Build agent environment.
+	// GC_CITY_NAME is the city's effective runtime identity — the same
+	// name the beacon and TemplateParams carry. Always written, even when
+	// empty: an omitted key would inherit the supervisor's value for a
+	// different city through the tmux server or os.Environ() (#8151).
 	agentEnv := map[string]string{
+		"GC_CITY_NAME":        p.cityName,
 		"GC_SESSION_NAME":     sessName,
 		"GC_SESSION_ID":       sessionBeadID,
 		"GC_TEMPLATE":         templateNameFor(cfgAgent, qualifiedName),

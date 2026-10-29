@@ -1156,6 +1156,54 @@ func TestProvider_RelaunchWithholdsControllerTokenFromRespawnedPane(t *testing.T
 	}
 }
 
+// TestProvider_RelaunchWithholdsEmptyCityNameFromRespawnedPane is the same
+// respawn check for an empty GC_CITY_NAME. A session with no resolved city name,
+// or one targeting a remote city, pins the key empty so the pane does not
+// inherit the server's value, which can name a different city (upstream
+// #8151). The `env -u` prefix covers only the created pane, so the pin has to
+// survive in the session environment for the respawned one.
+func TestProvider_RelaunchWithholdsEmptyCityNameFromRespawnedPane(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	const nameVar = "GC_CITY_NAME"
+	t.Setenv(nameVar, "neighbor-city")
+
+	// A private socket, so the server forks from THIS process and its global
+	// environment carries the neighbour's name.
+	cfg := DefaultConfig()
+	cfg.SocketName = privateSocketName("rc")
+	p := NewProviderWithConfig(cfg)
+	name := "gc-test-relaunch-city-name-pin"
+	_ = p.Stop(name)
+	defer func() { _ = p.Stop(name) }()
+
+	workDir := t.TempDir()
+	marker := filepath.Join(workDir, "marker")
+	agentCmd := func(tag string) string {
+		return fmt.Sprintf(`sh -c 'printf %%s "%s=[${%s-ABSENT}]" > %s; sleep 300'`, tag, nameVar, marker)
+	}
+
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command: agentCmd("created"),
+		WorkDir: workDir,
+		Env:     map[string]string{nameVar: ""},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitForMarker(t, marker, "created=[ABSENT]")
+
+	// Relaunch without Env, as in the controller-token test: the pin has to
+	// survive in the session environment on its own.
+	if err := p.Relaunch(context.Background(), name, runtime.Config{
+		Command: agentCmd("respawned"),
+		WorkDir: workDir,
+	}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	waitForMarker(t, marker, "respawned=[ABSENT]")
+}
+
 // The warm-box upgrade path. A box provisioned by a gc whose create path built
 // only the one-shot `env -u` prefix carries no session-env marker, and a warm
 // box is explicitly long-lived — without re-assertion at relaunch it would hand

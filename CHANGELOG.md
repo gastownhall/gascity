@@ -526,6 +526,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its next pass, so a script need not retry. An operator on the controller
   host can still restart any session with `gc session reset <session>`.
 
+- **Remove `GC_CITY_NAME` from `[order.env]` tables and webhook rule `args`
+  before you deploy: it is now a controller-owned variable.** Agent
+  sessions, exec orders and their condition checks, and `proxy_process`
+  services now get their own city's `GC_CITY_NAME`. Before, only pack
+  commands set it, and every other process inherited the supervisor's
+  value, which names a different city when one supervisor runs several. An
+  order whose `[order.env]` sets it stops running: the controller skips it
+  and logs `[order.env] cannot override controller-owned env key
+  "GC_CITY_NAME"`. A webhook rule with an arg of that name fails config
+  validation, so `gc start` and a controller reload refuse the city. Running
+  sessions are not restarted for this change and keep the value they
+  inherited: restart each long-lived session once (`gc session reset <id>`,
+  or `gc restart` for the whole city). A shared supervisor environment no
+  longer needs to export `GC_CITY_NAME` (#8151).
+
 ### Added
 
 - **`[events.mirror]` writes a copy of the city's event log outside `.gc`**

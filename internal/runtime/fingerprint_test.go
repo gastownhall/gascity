@@ -972,3 +972,21 @@ func TestCoreFingerprintDriftFields(t *testing.T) {
 		t.Fatalf("CoreFingerprintDriftFields with missing breakdown = %v, want empty", got)
 	}
 }
+
+// TestConfigFingerprintIgnoresCityName guards upstream #8151's rollout:
+// sessions now carry GC_CITY_NAME, but it must stay out of
+// envFingerprintAllow. GC_CITY / GC_CITY_PATH already fingerprint city
+// identity, and a live session's name is a runtime identity, not a
+// behavioral one — fingerprinting it would drain every running session
+// for config drift on upgrade. Sessions pick the value up at their next
+// start instead.
+func TestConfigFingerprintIgnoresCityName(t *testing.T) {
+	a := Config{Command: "claude", Env: map[string]string{"GC_CITY": "/city", "GC_CITY_NAME": "alpha"}}
+	b := Config{Command: "claude", Env: map[string]string{"GC_CITY": "/city", "GC_CITY_NAME": "beta"}}
+	if ConfigFingerprint(a) != ConfigFingerprint(b) {
+		t.Error("configs differing only in GC_CITY_NAME must share a fingerprint")
+	}
+	if CoreFingerprint(a) != CoreFingerprint(b) {
+		t.Error("configs differing only in GC_CITY_NAME must share a core fingerprint")
+	}
+}
