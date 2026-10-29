@@ -118,10 +118,14 @@ func retainedTypesNameOp(value string) bool {
 	return false
 }
 
-// reaperOpRowsScopes lists the bd scopes the core reaper visits: the city
-// and every rig that is not suspended, each scope directory once. A scope
-// served over http is left out, as the reaper order is not dispatched there.
-func reaperOpRowsScopes(cityPath string, cfg *config.City) []reaperOpRowsScope {
+// reaperOpRowsScopes lists the bd scopes the core reaper visits that doctor
+// may read: the city and every rig that is not suspended, each scope
+// directory once. A scope served over http is left out, as the reaper order
+// is not dispatched there. So is a scope skipped says doctor must not read
+// (the doctor store gate; nil skips none): on the proxied path any bd read of
+// a stopped store starts its proxy and Dolt child, and the gate's stand-ins
+// already report that scope.
+func reaperOpRowsScopes(cityPath string, cfg *config.City, skipped func(scopeRoot string) bool) []reaperOpRowsScope {
 	if cfg == nil {
 		return nil
 	}
@@ -130,7 +134,7 @@ func reaperOpRowsScopes(cityPath string, cfg *config.City) []reaperOpRowsScope {
 	add := func(label, dir string, run func() beads.CommandRunner) {
 		key := filepath.Clean(dir)
 		if seen[key] || !providerUsesBdStoreContract(rawBeadsProviderForScope(dir, cityPath)) ||
-			orderScopeBackend(cityPath, dir) == "http" {
+			orderScopeBackend(cityPath, dir) == "http" || (skipped != nil && skipped(dir)) {
 			return
 		}
 		seen[key] = true

@@ -2,10 +2,14 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/rollout"
 )
@@ -147,4 +151,91 @@ func TestOpsRecordingDoctorCheckKeepsAnErrorWhenTheReaperHoldsBack(t *testing.T)
 	if r.Status != doctor.StatusError || !strings.Contains(r.Message, "the core reaper does not purge or prune 1 scope(s)") {
 		t.Fatalf("result = %v %q, want the Error kept with the reaper warning added", r.Status, r.Message)
 	}
+}
+
+// reaperOpRowsScopesTestCity is a bd city (Dolt metadata) with rigs on every
+// kind of scope the core reaper does or does not visit, and the path of rig
+// cold, whose store the doctor store gate skips.
+func reaperOpRowsScopesTestCity(t *testing.T) (string, *config.City, string) {
+	t.Helper()
+	t.Setenv("GC_BEADS", "")
+	cityPath := orderBackendTestCity(t, `{"database":"dolt","backend":"dolt","dolt_database":"hq"}`)
+	rig := func(name, metadata string) config.Rig {
+		dir := filepath.Join(cityPath, "rigs", name)
+		if metadata != "" {
+			writeScopeBeadsMetadata(t, dir, metadata)
+		}
+		return config.Rig{Name: name, Path: dir}
+	}
+	dolt := func(db string) string {
+		return `{"database":"dolt","backend":"dolt","dolt_database":"` + db + `"}`
+	}
+	api := rig("api", dolt("api"))
+	cold := rig("cold", dolt("cold"))
+	parked := rig("parked", dolt("parked"))
+	parked.SuspendedOnStart = true
+	filed := rig("filed", "")
+	if err := os.MkdirAll(filepath.Join(filed.Path, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filed.Path, ".gc", "beads.json"), []byte("[]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{
+		api,
+		cold,
+		rig("served", `{"database":"beads","backend":"http"}`),
+		parked,
+		filed,
+		{Name: "api-again", Path: api.Path},
+	}}
+	return cityPath, cfg, cold.Path
+}
+
+func reaperOpRowsScopeLabels(scopes []reaperOpRowsScope) []string {
+	labels := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		labels = append(labels, scope.label)
+	}
+	return labels
+}
+
+// TestReaperOpRowsScopesAreTheReapersScopesDoctorMayRead: doctor probes the
+// city and each rig the core reaper visits (a bd scope, not suspended, not
+// served over http), each scope directory once, and never a scope the doctor
+// store gate skips: on the proxied path any bd read of a stopped store starts
+// its proxy and Dolt child, which doctor must never do.
+func TestReaperOpRowsScopesAreTheReapersScopesDoctorMayRead(t *testing.T) {
+	cityPath, cfg, cold := reaperOpRowsScopesTestCity(t)
+	skipped := func(scopeRoot string) bool { return samePath(scopeRoot, cold) }
+	if got, want := reaperOpRowsScopeLabels(reaperOpRowsScopes(cityPath, cfg, skipped)), []string{"city", "rig:api"}; !slices.Equal(got, want) {
+		t.Fatalf("scopes = %q, want %q", got, want)
+	}
+	// The check doctor registers reads its scopes through the gate it is given.
+	c := newOpsRecordingDoctorCheck(cityPath, cfg, rollout.ForTest(), nil, skipped)
+	if c.reaperScopes == nil {
+		t.Fatal("the ops-recording check probes no reaper scope")
+	}
+	if got, want := reaperOpRowsScopeLabels(c.reaperScopes()), []string{"city", "rig:api"}; !slices.Equal(got, want) {
+		t.Fatalf("the check's scopes = %q, want %q", got, want)
+	}
+}
+
+// TestBuildDoctorChecksOpsRecordingNeverProbesAStoppedRigStore: the
+// ops-recording check walks the rigs from a city-level check, so the doctor
+// store gate is what keeps its op-row probe from waking a stopped rig.
+func TestBuildDoctorChecksOpsRecordingNeverProbesAStoppedRigStore(t *testing.T) {
+	cityDir, cfg := doctorStoreGateCity(t)
+	stubDoctorStoreLiveness(t, "rigstore")
+
+	checks := buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{SkipCityDoltCheck: true, SkipManagedDoltCheck: true, SkipRigDoltChecks: true})
+	for _, c := range checks {
+		if ops, ok := c.(*opsRecordingDoctorCheck); ok {
+			if got, want := reaperOpRowsScopeLabels(ops.reaperScopes()), []string{"city"}; !slices.Equal(got, want) {
+				t.Fatalf("the ops-recording check probes %q, want %q: rig rigstore's store is stopped", got, want)
+			}
+			return
+		}
+	}
+	t.Fatal("no ops-recording check registered")
 }

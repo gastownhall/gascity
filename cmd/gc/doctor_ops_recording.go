@@ -37,12 +37,15 @@ type opsRecordingDoctorCheck struct {
 	// sessions routes the city store to its sessions class.
 	sessions func(beads.Store) beads.Store
 	clk      clock.Clock
-	// reaperScopes lists the bd scopes the core reaper visits; nil checks
-	// none.
+	// reaperScopes lists the bd scopes the core reaper visits that doctor
+	// may read; nil checks none.
 	reaperScopes func() []reaperOpRowsScope
 }
 
-func newOpsRecordingDoctorCheck(cityPath string, cfg *config.City, flags rollout.Flags, resolveErr error) *opsRecordingDoctorCheck {
+// newOpsRecordingDoctorCheck builds the check. storeSkipped is the doctor
+// store gate's answer to whether doctor must not read a scope's store; the
+// reaper's op-row probe leaves such a scope out (nil skips none).
+func newOpsRecordingDoctorCheck(cityPath string, cfg *config.City, flags rollout.Flags, resolveErr error, storeSkipped func(scopeRoot string) bool) *opsRecordingDoctorCheck {
 	return &opsRecordingDoctorCheck{
 		cfg:        cfg,
 		flags:      flags,
@@ -51,7 +54,7 @@ func newOpsRecordingDoctorCheck(cityPath string, cfg *config.City, flags rollout
 		sessions:   func(store beads.Store) beads.Store { return cliSessionStore(store, cfg, cityPath) },
 		clk:        clock.Real{},
 		reaperScopes: func() []reaperOpRowsScope {
-			return reaperOpRowsScopes(cityPath, cfg)
+			return reaperOpRowsScopes(cityPath, cfg, storeSkipped)
 		},
 	}
 }

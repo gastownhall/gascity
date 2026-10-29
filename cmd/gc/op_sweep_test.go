@@ -1399,7 +1399,7 @@ func TestOpsBuiltinDefaultRecordsOnARealSplitCity(t *testing.T) {
 	}
 
 	// Doctor over the CLI composition.
-	c := newOpsRecordingDoctorCheck(root, cfg, rollout.ForTest(), nil)
+	c := newOpsRecordingDoctorCheck(root, cfg, rollout.ForTest(), nil, nil)
 	c.open = func() (beads.Store, error) { return work, nil }
 	c.sessions = func(beads.Store) beads.Store { return cliSess }
 	c.clk = &clock.Fake{Time: opSweepT0}
