@@ -39,13 +39,15 @@ func TestActivityLive(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = p.Stop("act-a") })
 
-	// herdr does not list, and therefore cannot name, a pane until something
-	// reports an agent onto it (`pane report-agent`/`pane report-agent-session`).
-	// A bare integration-less pane sits in `pane list` with no name field at
-	// all, so name-keyed queries (agent.list/agent.get, and this tracker) have
-	// nothing to seed from until the first report. Resolve the pane id via
-	// `pane list` (name-independent) and report once to establish identity —
-	// this mirrors what any real herdr-integrated agent does on attach.
+	// herdr does not list a pane at all until something reports an agent
+	// onto it (`pane report-agent`). A report carries the agent LABEL
+	// (`--agent`), not a registration: the pane only becomes an agent NAMED
+	// act-a once a name is registered on it (`agent rename`, the same
+	// registration `agent start` makes), which is what name-keyed queries
+	// (agent.list/agent.get, and this tracker) seed from. Resolve the pane id
+	// via `pane list` (name-independent), report, then register the name.
+	// Every report below keeps the same label: a later report with a
+	// different label clears the registered name.
 	paneID := firstPaneID(t, session)
 	report := func(state string) {
 		t.Helper()
@@ -55,7 +57,15 @@ func TestActivityLive(t *testing.T) {
 			t.Fatalf("pane report-agent %s: %v: %s", state, err, out)
 		}
 	}
+	register := func() {
+		t.Helper()
+		out, err := exec.Command("herdr", "--session", session, "agent", "rename", paneID, "act-a").CombinedOutput()
+		if err != nil {
+			t.Fatalf("agent rename %s act-a: %v: %s", paneID, err, out)
+		}
+	}
 	report("idle")
+	register()
 
 	// Cold seed is synchronous: the very first call after identity is
 	// established observes the live agent.
@@ -87,7 +97,7 @@ func TestActivityLive(t *testing.T) {
 	t.Logf("idle stamp frozen at %v", frozen)
 
 	// Unknown-status revision leg: reported states stick, so use a second
-	// pane reported into the "unknown" state (herdr never names/lists a pane
+	// pane reported into the "unknown" state (herdr never lists a pane
 	// nothing has reported an agent onto, so this leg needs its own report
 	// call, same as act-a above — an unreported pane never appears here at
 	// all). A quiet cat must age. Whether real output re-stamps depends on
@@ -106,6 +116,9 @@ func TestActivityLive(t *testing.T) {
 		"--source", "gctest", "--agent", "act-b", "--state", agentStatusUnknown).CombinedOutput()
 	if err != nil {
 		t.Fatalf("pane report-agent unknown: %v: %s", err, out)
+	}
+	if out, err = exec.Command("herdr", "--session", session, "agent", "rename", bPaneID, "act-b").CombinedOutput(); err != nil {
+		t.Fatalf("agent rename act-b: %v: %s", err, out)
 	}
 	waitActivity(t, p, "act-b", 5*time.Second, func(got time.Time) bool {
 		return !got.IsZero()

@@ -289,6 +289,23 @@ func TestActivityRemovedAgentReturnsZero(t *testing.T) {
 	})
 }
 
+// The tracker keys entries by registered name only. An unnamed registry pane
+// must leave no entry keyed by its detected kind: "claude" is shared by every
+// Claude pane, so one such entry would collapse all of them into a single
+// activity stamp — and an unnamed pane is no session at all.
+func TestActivityIgnoresUnnamedPanes(t *testing.T) {
+	f, sock := newFakeHerdrServer(t)
+	f.setRawAgents(`[{"agent":"claude","name":"alpha","pane_id":"w1:p1"},{"agent":"claude","pane_id":"w1:p3"}]`)
+	p := activityTestProvider(t, sock)
+
+	waitActivity(t, p, "alpha", 2*time.Second, func(got time.Time) bool {
+		return !got.IsZero()
+	})
+	if got := lastActivity(t, p, "claude"); !got.IsZero() {
+		t.Errorf("GetLastActivity(\"claude\") = %v; the detected kind must never be an activity key", got)
+	}
+}
+
 // Stopping the tracker releases its goroutines (subscription stream included).
 // Production never stops it — the tracker lives as long as the provider — but
 // the release path keeps tests hermetic and bounds a future teardown hook.

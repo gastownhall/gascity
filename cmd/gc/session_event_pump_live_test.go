@@ -53,11 +53,11 @@ func TestSessionEventPumpLiveHerdr(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = p.Stop(agentName) })
 
-	// Register the pane as an agent under the gc session name BEFORE the pump
-	// subscribes. The stream builds its pane-to-session map from herdr's agent
-	// registry, and herdr 0.8.0 registers nothing for a raw-command pane, so
-	// without this every frame for this pane arrives unattributed and the pump
-	// drops it by design.
+	// Report the pane and register the gc session name on it BEFORE the pump
+	// subscribes (herdrtest.ReportAgent does both). The stream builds its
+	// pane-to-session map from registered names only, and herdr registers
+	// nothing for a raw-command pane, so without this every frame for this
+	// pane arrives unattributed and the pump drops it by design.
 	herdrtest.ReportAgent(t, session, agentName, "working", func() string { return herdrLivePaneID(p, agentName) })
 
 	pokeCh := make(chan struct{}, 1)
