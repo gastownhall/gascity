@@ -69,3 +69,30 @@ func TestEffectiveWorkQueryOpenMailDoesNotStarveRoutedWisp(t *testing.T) {
 		})
 	}
 }
+
+// AC-2: an older open mail wisp must not hide a newer assigned wisp task from
+// the assigned-ready tier. The type is matched the way the hook matches it:
+// trimmed, case-folded, and read from the legacy "type" key when
+// "issue_type" is absent.
+func TestEffectiveWorkQueryBD104ServesAssignedTaskBehindOlderMailWisp(t *testing.T) {
+	requireJQ(t)
+	a := singleSessionConfigAgent()
+	task := `{"id":"gcg-assigned-task","status":"open","issue_type":"task","assignee":"` + mailTestSessionID + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:05:00Z","metadata":{}}`
+	for _, tc := range []struct {
+		name    string
+		typeKey string
+	}{
+		{"issue_type=message", `"issue_type":"message"`},
+		{"issue_type=Message", `"issue_type":"Message"`},
+		{"issue_type padded", `"issue_type":" message "`},
+		{"legacy type key", `"type":"message"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mail := `{"id":"gcg-mail-old","status":"open",` + tc.typeKey + `,"assignee":"` + mailTestSessionID + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
+			out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), mailTestEnv(), fakeBdEphemeralStore(mail+","+task))
+			if strings.Contains(out, "gcg-mail-old") || !strings.Contains(out, "gcg-assigned-task") {
+				t.Fatalf("assigned-ready tier served %q, want the assigned task gcg-assigned-task and no message bead", out)
+			}
+		})
+	}
+}
