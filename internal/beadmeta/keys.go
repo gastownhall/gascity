@@ -271,18 +271,23 @@ const (
 	RootBeadIDMetadataKey               = "gc.root_bead_id"
 	RootSettleFailedAtMetadataKey       = "gc.root_settle_failed_at"
 	RootSettleFailedMetadataKey         = "gc.root_settle_failed"
-	RootStoreRefMetadataKey             = "gc.root_store_ref"
-	RouteQuarantineMetadataKey          = "gc.route_recovery_quarantined"
-	RouteQuarantineReasonMetadataKey    = "gc.route_recovery_quarantine_reason"
-	RoutedToMetadataKey                 = "gc.routed_to"
-	RunTargetMetadataKey                = "gc.run_target"
-	RuntimeVarsMetadataKey              = "gc.graphv2_vars.v1"
-	ScopeKindMetadataKey                = "gc.scope_kind"
-	ScopeNameMetadataKey                = "gc.scope_name"
-	ScopeRefMetadataKey                 = "gc.scope_ref"
-	ScopeRoleMetadataKey                = "gc.scope_role"
-	SessionAffinityMetadataKey          = "gc.session_affinity"
-	SessionIDMetadataKey                = "gc.session_id"
+	// RootStoreRefMetadataKey records the SCOPE a graph tree runs in:
+	// city:<name> or rig:<name>. It is never a location. On a split city every
+	// graph bead lives in the city binding whatever its scope (the S4
+	// placement rule), so a reader that needs the bead finds it by residence
+	// (the binding probe first), and only takes the scope from this key.
+	RootStoreRefMetadataKey          = "gc.root_store_ref"
+	RouteQuarantineMetadataKey       = "gc.route_recovery_quarantined"
+	RouteQuarantineReasonMetadataKey = "gc.route_recovery_quarantine_reason"
+	RoutedToMetadataKey              = "gc.routed_to"
+	RunTargetMetadataKey             = "gc.run_target"
+	RuntimeVarsMetadataKey           = "gc.graphv2_vars.v1"
+	ScopeKindMetadataKey             = "gc.scope_kind"
+	ScopeNameMetadataKey             = "gc.scope_name"
+	ScopeRefMetadataKey              = "gc.scope_ref"
+	ScopeRoleMetadataKey             = "gc.scope_role"
+	SessionAffinityMetadataKey       = "gc.session_affinity"
+	SessionIDMetadataKey             = "gc.session_id"
 	// StrandedMetadataKey ("true"), StrandedSessionMetadataKey (the closed
 	// session's bead ID) and StrandedAssigneeMetadataKey (the claim's assignee
 	// when it was kept) mark a claim a close kept because no lane serves it

@@ -522,7 +522,9 @@ adopts it.
   op answers a same-key retry whatever the session waits on: only a
   request no op under its key answers is refused 409 `pending_interaction`,
   writing nothing (`Accept`'s front-door step, the API's
-  `rejectPendingInteraction`), so a retry of a message that
+  `rejectPendingInteraction` over `lanesubmit.CheckPending`, whose look
+  is bounded at 5 s and refuses a look that fails, times out or panics
+  503 `pending_check_unavailable`), so a retry of a message that
   raised an approval is not told to answer it before sending text its 202
   already accepted (request_id rule 8). The
   LRU still holds the key while the request runs (a concurrent same-key

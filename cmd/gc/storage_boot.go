@@ -113,6 +113,10 @@ type storageRoutes struct {
 	// stores map, which holds what storage boot opened. The keys are the bare
 	// engines the census read.
 	relics map[beads.Store]bool
+	// rigMarkers locates the per-rig import records the S4 relic-free
+	// predicate reads (rigGraphRelicFree). Nil means unknown, and unknown keeps
+	// every rig's relic leg.
+	rigMarkers *rigGraphMarkers
 }
 
 // hasLegacyResidents reports the boot census's verdict for a binding store.
@@ -833,6 +837,13 @@ func openStorageRoutes(plan *storebinding.StoragePlan, target infraBindingTarget
 	}
 	for _, class := range planned.AssignedClasses.Classes() {
 		routes.stores[class] = store
+	}
+	if target.Root != "" {
+		markers := &rigGraphMarkers{bindingRoot: target.Root, cityPath: cityPath}
+		if cfg != nil {
+			markers.rigs = append([]config.Rig(nil), cfg.Rigs...)
+		}
+		routes.rigMarkers = markers
 	}
 	return routes, nil
 }

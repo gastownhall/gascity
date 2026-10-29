@@ -917,9 +917,16 @@ func (cs *controllerState) completionReconcileInputs(plane storePlane) (events.P
 	// A suspended rig is not swept: it runs nothing, and a bd read restarts
 	// its retired proxy and Dolt.
 	suspendedRigs := buildEffectiveSuspendedRigNames(cs.cfg, loadSuspensionStateBestEffort(cs.cityPath))
+	// On a split city a rig's workflow roots live in the binding (the S4
+	// placement rule), which leads this list. A rig store is swept only while
+	// it may still hold pre-S4 roots; once the rig is proven relic-free its
+	// store holds only work and is not scanned.
 	rigStores := make(map[string]beads.Store, len(cs.beadStores))
 	for name, store := range cs.beadStores {
 		if suspendedRigs[name] {
+			continue
+		}
+		if splitRigGraphRelicFree(cs.storageRoutes, name) {
 			continue
 		}
 		rigStores[name] = splitStrictWorkView(store)
@@ -3832,4 +3839,15 @@ func (cs *controllerState) AdapterRegistry() *extmsg.AdapterRegistry {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.adapterReg
+}
+
+// RigGraphRelicFree reports whether rig's own store is proven to hold no graph
+// row (the S4 relic-free predicate), so API readers may skip it as a graph
+// leg. A city that relocates nothing answers false: there the rig store IS
+// where the rig's graph rows live, and nothing is skipped.
+func (cs *controllerState) RigGraphRelicFree(rig string) bool {
+	cs.mu.RLock()
+	routes := cs.storageRoutes
+	cs.mu.RUnlock()
+	return splitRigGraphRelicFree(routes, rig)
 }

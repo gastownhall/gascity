@@ -797,16 +797,22 @@ func infraClearedNotePath(cityPath string) string {
 // readInfraClearedNote reads the cleared note. An unreadable or undecodable
 // note is an error, never an absence.
 func readInfraClearedNote(cityPath string) (infraClearedNote, bool, error) {
-	data, err := os.ReadFile(infraClearedNotePath(cityPath))
+	return readInfraClearedNoteAt(infraClearedNotePath(cityPath))
+}
+
+// readInfraClearedNoteAt reads a cleared note at path: the city's, or a rig's
+// (rigGraphClearedNotePath), which share one format.
+func readInfraClearedNoteAt(path string) (infraClearedNote, bool, error) {
+	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return infraClearedNote{}, false, nil
 	}
 	if err != nil {
-		return infraClearedNote{}, true, fmt.Errorf("reading the cleared note %s: %w", infraClearedNotePath(cityPath), err)
+		return infraClearedNote{}, true, fmt.Errorf("reading the cleared note %s: %w", path, err)
 	}
 	var note infraClearedNote
 	if err := json.Unmarshal(data, &note); err != nil {
-		return infraClearedNote{}, true, fmt.Errorf("decoding the cleared note %s: %w", infraClearedNotePath(cityPath), err)
+		return infraClearedNote{}, true, fmt.Errorf("decoding the cleared note %s: %w", path, err)
 	}
 	return note, true, nil
 }

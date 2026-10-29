@@ -17,6 +17,13 @@ func isGraphConvoyID(s *Server, id string) bool {
 	}
 	stores := s.state.BeadStores()
 	for _, rigName := range sortedRigNames(stores) {
+		// On a split city a rig's graph convoys live in the binding asked
+		// above (the S4 placement rule). A rig store is asked only while it
+		// may still hold pre-S4 graph rows; a relic-free rig holds only work,
+		// whose convoys are never graph convoys.
+		if rigGraphLegRetired(s.state, rigName) {
+			continue
+		}
 		store := stores[rigName]
 		b, err := store.Get(id)
 		if err != nil {

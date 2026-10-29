@@ -471,7 +471,20 @@ func workflowEventRoot(state State, bead beads.Bead) (workflowStoreInfo, beads.B
 		return workflowStoreInfo{}, beads.Bead{}, false
 	}
 
-	if info, ok := workflowStoreByRef(state, bead.Metadata[beadmeta.RootStoreRefMetadataKey]); ok && info.store != nil {
+	// gc.root_store_ref is the run's SCOPE, never its location (S4 §2.1). On a
+	// split city every new root lives in the graph binding whatever its scope,
+	// so the binding is probed FIRST: a rig-scoped root there must not be
+	// shadowed by the rig store the metadata names, and an id held by both (an
+	// import's copy before its clear) resolves to the binding's row, as every
+	// by-id read does. The store the metadata names is then probed as the
+	// relic leg — a pre-S4 rig tree — unless that rig is proven relic-free.
+	if info, ok := workflowGraphStoreInfo(state); ok {
+		if root, ok := workflowRootInStore(info.store, rootID); ok {
+			return info, root, true
+		}
+	}
+	if info, ok := workflowStoreByRef(state, bead.Metadata[beadmeta.RootStoreRefMetadataKey]); ok && info.store != nil &&
+		!workflowRigLegRetired(state, info) {
 		root, ok := workflowRootInStore(info.store, rootID)
 		if ok {
 			return info, root, true
@@ -480,7 +493,7 @@ func workflowEventRoot(state State, bead beads.Bead) (workflowStoreInfo, beads.B
 
 	matches := make([]workflowRootMatch, 0, 2)
 	for _, info := range workflowStores(state) {
-		if info.store == nil {
+		if info.store == nil || workflowRigLegRetired(state, info) {
 			continue
 		}
 		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
