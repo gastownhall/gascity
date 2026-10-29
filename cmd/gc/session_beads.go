@@ -1199,9 +1199,13 @@ func sweepAssignedWorkLegs(legs WorkLegs, stderr io.Writer, visit func(index int
 // session release) ignore it; the stranded-repair path reads Failed to avoid
 // reporting a clean repair — or closing the session bead — when an unassign did
 // not land, so a stale-assignee item is not masked behind a "repaired" close.
+// Held counts the claims kept because their gc.detached probe did not attest
+// the runtime dead: work that may still run, which keeps the session bead open
+// for the stranded repair as a failed unassign does.
 type unclaimResult struct {
 	Released int
 	Failed   int
+	Held     int
 }
 
 // unclaimWorkAssignedToRetiredSessionBead detaches every work bead a retired
@@ -1561,6 +1565,7 @@ func unclaimWorkAssignedToRetiredSessionInfo(
 	}
 	res.Failed += len(out.Failed)
 	res.Released = len(out.Released)
+	res.Held = out.HeldDetached()
 	return res
 }
 
@@ -1603,8 +1608,10 @@ const strandedRepairCloseReason = "stranded-repair"
 // during the brief poolFreeable && hasAssignedWork window) can never be repaired
 // on a stale first-episode timestamp. An absent marker means no confirmed
 // stranding episode is in progress (the diagnostic early-returned — no recorder,
-// the work passed the detached-probe liveness filter, or the session recovered
-// and cleared it), so the repair defers.
+// the detached-probe filter held every claim, or the session recovered and
+// cleared it), so the repair defers. The release probes each claim carrying
+// gc.detached again: one whose probe does not attest its runtime dead stays
+// assigned, and so does the session bead.
 //
 // The unassign step must land before the close: unclaimWorkAssignedToRetiredSessionInfo
 // reports how many releases failed via unclaimResult. If any failed, the session
@@ -1648,6 +1655,14 @@ func repairStrandedPoolWorkerBead(
 		// The denominator counts every attempt, including releases that correctly
 		// no-oped because the work had already moved to a live worker.
 		fmt.Fprintf(stderr, "session beads: stranded-repair for %s deferred: %d of %d unassign(s) failed; leaving session bead open for retry\n", info.ID, res.Failed, res.Failed+res.Released) //nolint:errcheck
+		return false
+	}
+	if res.Held > 0 {
+		// A claim whose detached runtime may still run stays assigned, so the
+		// session bead stays open with it: closed, the bead would leave work
+		// that is not stranded assigned to a retired session. The repair
+		// retries each tick, and the hold is logged rate-throttled
+		// (detachedProbeAllowsOrphanRelease).
 		return false
 	}
 	// A claim no lane serves stayed assigned (O5): the close completes, and

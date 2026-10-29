@@ -21,5 +21,6 @@ runtime_inventory_integration_test.go
 seam_conformance_test.go
 session_env_file_integration_test.go
 session_object_integration_test.go
+socket_path_integration_test.go
 tmux_test.go
 wake_pane_integration_test.go

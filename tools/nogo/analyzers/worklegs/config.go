@@ -33,21 +33,27 @@ var Analyzer = New(Config{
 		},
 	},
 	// The release primitives (R9 REL): every release path goes through
-	// ReleaseClaims, whose body (releaseListed) alone names the two release
-	// writes; the rest is their own layering.
+	// ReleaseClaims, whose body (releaseListed) hands each claim to
+	// releaseServed, which alone names the release writes; the rest is their
+	// own layering.
 	Releases: map[string]map[string]string{
-		"workAssignment.ReleaseWorkBead": {"releaseListed": "the verb's body"},
-		"releaseOrphanedPoolAssignment":  {"releaseListed": "the verb's body (the orphan write)"},
+		"workAssignment.ReleaseWorkBead":         {"releaseServed": "the verb's release of one claim"},
+		"workAssignment.ReleaseDetachedWorkBead": {"releaseServed": "the verb's release of one claim whose detached probe attested it dead"},
+		"releaseOrphanedPoolAssignment":          {"releaseServed": "the verb's release of one claim (the orphan write)"},
+		"workAssignment.releaseWorkBead": {
+			"workAssignment.ReleaseWorkBead":         "its body",
+			"workAssignment.ReleaseDetachedWorkBead": "its body, clearing gc.detached in the release write",
+		},
 		"releasePoolAssignmentWithRecheck": {
 			"releaseOrphanedPoolAssignment": "its fallback tier",
 		},
 		"releaseWorkAssignmentIfRevisionMatches": {
-			"workAssignment.ReleaseWorkBead": "its revision-fenced tier",
+			"workAssignment.releaseWorkBead": "its revision-fenced tier",
 			"releaseOrphanedPoolAssignment":  "its revision-fenced tier",
 		},
-		"releaseWorkAssignmentIfCurrent": {"workAssignment.ReleaseWorkBead": "its assignee-fenced tier"},
+		"releaseWorkAssignmentIfCurrent": {"workAssignment.releaseWorkBead": "its assignee-fenced tier"},
 		"releaseAssignmentFenced": {
-			"workAssignment.ReleaseWorkBead":   "its fenced tier",
+			"workAssignment.releaseWorkBead":   "its fenced tier",
 			"workAssignment.ReassignWorkBead":  "a reassignment's fenced write, not a release",
 			"releasePoolAssignmentWithRecheck": "its fenced write",
 		},

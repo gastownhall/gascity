@@ -142,24 +142,88 @@ func (t *Tmux) attachCommandArgs(target string, witness namedSocketWitness) []st
 	return append(args, "attach-session", "-t", target)
 }
 
-// namedSocketPath resolves the exact path tmux uses for a named -L socket.
-// tmux honors TMUX_TMPDIR here; TMPDIR is deliberately not a fallback.
-func namedSocketPath(socketName string) string {
-	tmpDir := os.Getenv("TMUX_TMPDIR")
-	if tmpDir == "" {
-		tmpDir = "/tmp"
+// TmpdirEnv is the environment variable tmux places its -L sockets under
+// (SocketDir).
+const TmpdirEnv = "TMUX_TMPDIR"
+
+// SocketPath returns the socket path a tmux client in this process's
+// environment talks to for ref. An absolute ref is a -S socket path and is
+// returned cleaned. Any other ref is a -L socket name in SocketDir of this
+// process's TMUX_TMPDIR.
+func SocketPath(ref string) string {
+	if filepath.IsAbs(ref) {
+		return filepath.Clean(ref)
 	}
-	return filepath.Join(tmpDir, fmt.Sprintf("tmux-%d", os.Getuid()), socketName)
+	return filepath.Join(SocketDir(os.Getenv(TmpdirEnv)), ref)
 }
 
-// serverSocketPath returns the socket path of the server t talks to: its
-// named -L socket, or tmux's "default" socket when SocketName is empty.
-func (t *Tmux) serverSocketPath() string {
-	name := t.cfg.SocketName
-	if name == "" {
-		name = "default"
+// LiveSockets returns the names of the sockets in dir, a SocketDir, that a
+// tmux server may still answer on: each unix socket there unless it refuses
+// connections on a stable inode or is gone by the time it is dialed, so one
+// whose observation ctx cuts short counts. A dir that does not exist holds
+// none.
+func LiveSockets(ctx context.Context, dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
 	}
-	return namedSocketPath(name)
+	if err != nil {
+		return nil, err
+	}
+	var live []string
+	for _, entry := range entries {
+		if entry.Type()&os.ModeSocket == 0 {
+			continue
+		}
+		if observeNamedSocket(ctx, filepath.Join(dir, entry.Name())) != nil {
+			live = append(live, entry.Name())
+		}
+	}
+	return live, nil
+}
+
+// SocketDir returns the tmux-<uid> directory a tmux client whose
+// TMUX_TMPDIR is tmuxTmpdir keeps its -L sockets in. Its parent is
+// tmuxTmpdir resolved through symlinks, or /tmp resolved through symlinks
+// when tmuxTmpdir is empty or does not resolve; tmux never reads TMPDIR. A
+// tmuxTmpdir that resolves to something other than a directory is kept, as
+// tmux keeps it: tmux then fails to create the directory instead of falling
+// back to /tmp, so a socket path below it observes nothing.
+func SocketDir(tmuxTmpdir string) string {
+	return filepath.Join(socketBaseDir(tmuxTmpdir), fmt.Sprintf("tmux-%d", os.Getuid()))
+}
+
+// socketBaseDir is the directory tmux puts its tmux-<uid> directory in for
+// a TMUX_TMPDIR value (see SocketDir).
+func socketBaseDir(tmuxTmpdir string) string {
+	if tmuxTmpdir != "" {
+		if resolved, err := filepath.EvalSymlinks(tmuxTmpdir); err == nil {
+			return resolved
+		}
+	}
+	if resolved, err := filepath.EvalSymlinks("/tmp"); err == nil {
+		return resolved
+	}
+	return "/tmp"
+}
+
+// namedSocketPath resolves the exact path tmux uses for a named -L socket.
+func namedSocketPath(socketName string) string {
+	return SocketPath(socketName)
+}
+
+// serverSocketPath returns the socket path of the server t talks to.
+func (t *Tmux) serverSocketPath() string {
+	return namedSocketPath(t.socketLabel())
+}
+
+// socketLabel returns the -L socket name of the server t talks to: its
+// SocketName, or tmux's "default" when SocketName is empty.
+func (t *Tmux) socketLabel() string {
+	if t.cfg.SocketName == "" {
+		return "default"
+	}
+	return t.cfg.SocketName
 }
 
 // observeServerSocket observes path with the injected observer, or with
@@ -201,19 +265,58 @@ func observeNamedSocketWith(
 	lstat func(string) (os.FileInfo, error),
 	dial func(context.Context, string) (net.Conn, error),
 ) error {
+	state, err := classifyNamedSocketWith(ctx, path, lstat, dial)
+	switch state {
+	case namedSocketMissing, namedSocketVanished, namedSocketRefused:
+		return nil
+	default:
+		return err
+	}
+}
+
+// namedSocketState is what one observation of a named socket path proved.
+type namedSocketState int
+
+const (
+	// namedSocketUnknown proves nothing: an lstat, dial or context failure,
+	// a non-socket file, or a socket whose identity changed mid-observation.
+	namedSocketUnknown namedSocketState = iota
+	// namedSocketMissing: no file exists at the path.
+	namedSocketMissing
+	// namedSocketVanished: a socket file was there, then the dial found no
+	// file and the path is now absent.
+	namedSocketVanished
+	// namedSocketRefused: the socket refused the connection on a stable
+	// inode, or refused it and was then removed. The server that owned the
+	// inode is gone.
+	namedSocketRefused
+	// namedSocketLive: a server accepted the connection and its peer pid
+	// was read.
+	namedSocketLive
+)
+
+// classifyNamedSocketWith observes path once. Every state except
+// namedSocketMissing, namedSocketVanished and namedSocketRefused comes with
+// an error describing the observation.
+func classifyNamedSocketWith(
+	ctx context.Context,
+	path string,
+	lstat func(string) (os.FileInfo, error),
+	dial func(context.Context, string) (net.Conn, error),
+) (namedSocketState, error) {
 	before, err := lstatWithContext(ctx, lstat, path)
 	if contextErr := ctx.Err(); contextErr != nil {
-		return fmt.Errorf("path=%s inode=unknown peer_pid=unknown lstat=%w", path, contextErr)
+		return namedSocketUnknown, fmt.Errorf("path=%s inode=unknown peer_pid=unknown lstat=%w", path, contextErr)
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return namedSocketMissing, nil
 	}
 	if err != nil {
-		return fmt.Errorf("path=%s inode=unknown peer_pid=unknown lstat=%w", path, err)
+		return namedSocketUnknown, fmt.Errorf("path=%s inode=unknown peer_pid=unknown lstat=%w", path, err)
 	}
 	inode := socketInode(before)
 	if before.Mode()&os.ModeSocket == 0 {
-		return fmt.Errorf("path=%s inode=%s peer_pid=unknown reason=not-unix-socket", path, inode)
+		return namedSocketUnknown, fmt.Errorf("path=%s inode=%s peer_pid=unknown reason=not-unix-socket", path, inode)
 	}
 
 	conn, err := dial(ctx, path)
@@ -221,31 +324,31 @@ func observeNamedSocketWith(
 		defer func() { _ = conn.Close() }()
 		unixConn, ok := conn.(*net.UnixConn)
 		if !ok {
-			return fmt.Errorf("path=%s inode=%s peer_pid=unknown reason=unexpected-connection-type-%T", path, inode, conn)
+			return namedSocketUnknown, fmt.Errorf("path=%s inode=%s peer_pid=unknown reason=unexpected-connection-type-%T", path, inode, conn)
 		}
 		peerPID, peerErr := socketPeerPID(unixConn)
 		if peerErr != nil {
-			return fmt.Errorf("path=%s inode=%s peer_pid=unknown peer_pid_reason=%w", path, inode, peerErr)
+			return namedSocketUnknown, fmt.Errorf("path=%s inode=%s peer_pid=unknown peer_pid_reason=%w", path, inode, peerErr)
 		}
-		return fmt.Errorf("path=%s inode=%s peer_pid=%d reason=live-unix-socket", path, inode, peerPID)
+		return namedSocketLive, fmt.Errorf("path=%s inode=%s peer_pid=%d reason=live-unix-socket", path, inode, peerPID)
 	}
 
 	after, afterErr := lstatWithContext(ctx, lstat, path)
 	if contextErr := ctx.Err(); contextErr != nil {
-		return fmt.Errorf("path=%s inode=%s peer_pid=unknown post_lstat=%w", path, inode, contextErr)
+		return namedSocketUnknown, fmt.Errorf("path=%s inode=%s peer_pid=unknown post_lstat=%w", path, inode, contextErr)
 	}
 	pathAbsent := errors.Is(afterErr, os.ErrNotExist)
 	stable := afterErr == nil && os.SameFile(before, after)
 	if errors.Is(err, syscall.ECONNREFUSED) && (pathAbsent || stable) {
-		return nil
+		return namedSocketRefused, nil
 	}
 	if errors.Is(err, os.ErrNotExist) && pathAbsent {
-		return nil
+		return namedSocketVanished, nil
 	}
 	if afterErr != nil {
-		return fmt.Errorf("path=%s inode=%s peer_pid=unknown dial=%w post_lstat=%w", path, inode, err, afterErr)
+		return namedSocketUnknown, fmt.Errorf("path=%s inode=%s peer_pid=unknown dial=%w post_lstat=%w", path, inode, err, afterErr)
 	}
-	return fmt.Errorf("path=%s inode=%s peer_pid=unknown dial=%w post_inode=%s reason=socket-identity-changed-or-dial-failed", path, inode, err, socketInode(after))
+	return namedSocketUnknown, fmt.Errorf("path=%s inode=%s peer_pid=unknown dial=%w post_inode=%s reason=socket-identity-changed-or-dial-failed", path, inode, err, socketInode(after))
 }
 
 type lstatResult struct {

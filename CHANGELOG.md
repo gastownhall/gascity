@@ -526,6 +526,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its next pass, so a script need not retry. An operator on the controller
   host can still restart any session with `gc session reset <session>`.
 
+- **gc no longer restarts the supervisor where it would lose its tmux
+  sessions, and may refuse the first `gc start` after the upgrade.** tmux
+  places its sockets under `TMUX_TMPDIR` (it never reads `TMPDIR`), and a
+  supervisor reaches its sessions' tmux servers only under its own. The
+  supervisor's systemd unit and launchd plist now always set
+  `TMUX_TMPDIR`, to the value the installing shell has or to empty (which
+  tmux reads as unset), so a restart by the service manager (a crash
+  restart, `systemctl --user restart`, a reboot) keeps the directory the
+  file records instead of taking whatever the service manager's
+  environment holds. Before `gc start`, `gc supervisor start` or
+  `gc supervisor install` replaces or starts the supervisor, it compares
+  the socket directory the new one would use with where the sessions are:
+  the running supervisor's, or with none running, the installed
+  service's, while a tmux server there still answers. When they differ it
+  refuses, names both directories, and leaves the sessions alone. To keep
+  them where they are, run `gc supervisor install` with `TMUX_TMPDIR` set
+  as the refusal reports their supervisor has it (for one an earlier `gc`
+  installed, often unset: `env -u TMUX_TMPDIR gc supervisor install`),
+  then run `gc start` with that same `TMUX_TMPDIR`. The install writes the
+  value into the service file, which a restart onto the new `gc` then
+  keeps; running only `gc start` that way is not enough after the upgrade,
+  because its restart onto the new `gc` runs from the old service file,
+  which takes the service manager's `TMUX_TMPDIR`. To move the sessions
+  instead, run `gc supervisor stop --wait`, then `gc start`. Expect the
+  refusal after the upgrade when your shell or your desktop session's
+  service manager exports a `TMUX_TMPDIR` the running supervisor does not
+  have, and later from a shell (cron, an IDE task) whose `TMUX_TMPDIR`
+  differs from the one the service file records. Where `systemctl --user`
+  cannot reach the user manager (cron, `sudo -u`, `su`), `gc start` still
+  falls back to a supervisor outside the service, as before; for a unit an
+  earlier `gc` installed, which takes the manager's `TMUX_TMPDIR`, the
+  check then assumes the manager's default (unset).
+
 ### Added
 
 - **`[events.mirror]` writes a copy of the city's event log outside `.gc`**

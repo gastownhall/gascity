@@ -6168,30 +6168,27 @@ type strandedAssignedWork struct {
 	store beads.Store
 }
 
+// filterDetachedStrandedDiagnosticWork keeps the work the stranded diagnostic
+// lists: work without gc.detached, and work whose probe attests its runtime
+// dead, whose gc.detached it clears. Work whose probe reports it alive, or
+// observed nothing (error or timeout), may still run, so it is held out
+// (detachedProbeAllowsOrphanRelease): a diagnostic over held work alone
+// records no event and stamps no stranded marker, which the stranded repair
+// would release that work on once the marker aged.
 func filterDetachedStrandedDiagnosticWork(work []strandedAssignedWork) []strandedAssignedWork {
 	if len(work) == 0 {
 		return work
 	}
 	out := make([]strandedAssignedWork, 0, len(work))
 	for _, item := range work {
-		spec := strings.TrimSpace(item.bead.Metadata[detachedProbeMetadataKey])
-		if spec == "" {
-			out = append(out, item)
+		allowed, dead := detachedProbeAllowsOrphanRelease(item.bead)
+		if !allowed {
 			continue
 		}
-		result := probeDetachedWork(context.Background(), spec)
-		switch result.Status {
-		case detachedProbeAlive:
-			log.Printf("session reconciler: suppressing session.stranded for %s: detached probe alive: %s", item.bead.ID, spec)
-			continue
-		case detachedProbeDead:
-			log.Printf("session reconciler: clearing dead detached probe for %s before session.stranded: %s", item.bead.ID, spec)
+		if dead {
 			clearDetachedProbeMetadata(item.store, item.bead.ID)
-			out = append(out, item)
-		default:
-			log.Printf("session reconciler: preserving session.stranded for %s after detached probe %s: %v", item.bead.ID, result.Status, result.Err)
-			out = append(out, item)
 		}
+		out = append(out, item)
 	}
 	return out
 }

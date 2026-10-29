@@ -658,7 +658,7 @@ func TestCloseEffectEdges(t *testing.T) {
 		}
 	})
 	t.Run("a detached probe alive keeps the slot unstamped (SESS-624)", func(t *testing.T) {
-		installFakeTmux(t, "exit 0")
+		installFakeTmuxServer(t, "gctest-c5c1", fakeTmuxListSessions("handoff"))
 		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
 		c.work(t, "in_progress", detachedClaim())
 		s := c.run(t, gone().tmux())
@@ -667,15 +667,87 @@ func TestCloseEffectEdges(t *testing.T) {
 		}
 	})
 	t.Run("a detached probe dead stamps the slot (SESS-624)", func(t *testing.T) {
-		installFakeTmux(t, "exit 1")
+		installFakeTmuxServer(t, "gctest-c5c1", fakeTmuxListSessions())
 		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
 		c.work(t, "in_progress", detachedClaim())
 		if s := c.run(t, gone().tmux()); s.Outcome != settledLanded || c.row(t).Metadata[strandedEventEmittedKey] == "" {
 			t.Fatalf("settlement %+v, want the marker stamped", s)
 		}
 	})
+	t.Run("a detached probe that observed nothing leaves the slot unsearched and unstamped (AC-6)", func(t *testing.T) {
+		for _, p := range []struct {
+			name  string
+			setup func(t *testing.T)
+		}{
+			{"error: no server socket", func(t *testing.T) {
+				t.Setenv("TMUX_TMPDIR", shortTmuxTmpDir(t))
+				installFakeTmux(t, "exit 1")
+			}},
+			{"error: the server does not answer", func(t *testing.T) { installFakeTmuxServer(t, "gctest-c5c1", "exit 2") }},
+			{"timeout", func(t *testing.T) { installFakeTmuxServer(t, "gctest-c5c1", "sleep 2") }},
+		} {
+			t.Run(p.name, func(t *testing.T) {
+				p.setup(t)
+				k := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+				k.work(t, "in_progress", detachedClaim())
+				w := *k.w
+				w.Env = &reconcileEnv{Cfg: k.cfg}
+				v := txView{It: k.decide(), World: &w, Row: k.w.Census.Rows[k.k].Info, Fence: txFence{Work: &txWork{}}}
+				got, err := strandedProbe(context.Background(), effectReads{legs: testWorkLegs(w.CityPath, k.cfg, k.store, nil)}, v)
+				if err != nil || got.searched || len(got.ids) != 0 {
+					t.Fatalf("probe = %+v, %v: want unsearched with nothing listed stranded", got, err)
+				}
+				s := k.run(t, gone().tmux())
+				if b := k.row(t); s.Cause != causeStranded || b.Metadata[strandedEventEmittedKey] != "" || len(s.Facts.Events) != 0 {
+					t.Fatalf("settlement %+v marker %q, want refused stranded with no marker and no event", s, b.Metadata[strandedEventEmittedKey])
+				}
+			})
+		}
+	})
+	t.Run("an aged marker keeps a detached claim its probe does not attest dead, and the row open (SESS-625)", func(t *testing.T) {
+		for _, p := range []struct {
+			name  string
+			setup func(t *testing.T)
+		}{
+			{"alive", func(t *testing.T) { installFakeTmuxServer(t, "gctest-c5c1", fakeTmuxListSessions("handoff")) }},
+			{"error: no server socket", func(t *testing.T) {
+				t.Setenv("TMUX_TMPDIR", shortTmuxTmpDir(t))
+				installFakeTmux(t, "exit 1")
+			}},
+			{"error: the server does not answer", func(t *testing.T) { installFakeTmuxServer(t, "gctest-c5c1", "exit 2") }},
+			{"timeout", func(t *testing.T) { installFakeTmuxServer(t, "gctest-c5c1", "sleep 2") }},
+		} {
+			t.Run(p.name, func(t *testing.T) {
+				p.setup(t)
+				at := gatherNow.Add(-time.Hour).Format(time.RFC3339)
+				c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", at, strandedEventEmittedKey, at)
+				claim := c.work(t, "in_progress", detachedClaim())
+				s := c.run(t, gone().tmux())
+				got, _ := c.store.Get(claim.ID)
+				if s.Cause != causeDetachedHeld || c.row(t).Status == "closed" {
+					t.Fatalf("settlement %+v row %s, want refused %s with the row open", s, c.row(t).Status, causeDetachedHeld)
+				}
+				if got.Assignee != c.k.ID || got.Metadata[beadmeta.DetachedMetadataKey] == "" {
+					t.Fatalf("claim assignee %q gc.detached %q, want the held claim kept", got.Assignee, got.Metadata[beadmeta.DetachedMetadataKey])
+				}
+			})
+		}
+	})
+	t.Run("an aged marker releases a dead detached claim, clearing gc.detached, then closes stranded-repair (SESS-625)", func(t *testing.T) {
+		installFakeTmuxServer(t, "gctest-c5c1", fakeTmuxListSessions())
+		at := gatherNow.Add(-time.Hour).Format(time.RFC3339)
+		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", at, strandedEventEmittedKey, at)
+		claim := c.work(t, "in_progress", detachedClaim())
+		s := c.run(t, gone().tmux())
+		if b := c.row(t); s.Outcome != settledLanded || b.Metadata["state"] != strandedRepairCloseReason {
+			t.Fatalf("settlement %+v row %v, want closed stranded-repair", s, b.Metadata)
+		}
+		if got, _ := c.store.Get(claim.ID); got.Assignee != "" || got.Metadata[beadmeta.DetachedMetadataKey] != "" {
+			t.Fatalf("claim assignee %q gc.detached %q, want released with gc.detached cleared", got.Assignee, got.Metadata[beadmeta.DetachedMetadataKey])
+		}
+	})
 	t.Run("an orphan whose served claim the release keeps does not close", func(t *testing.T) {
-		installFakeTmux(t, "exit 0") // the claim's detached probe is alive
+		installFakeTmuxServer(t, "gctest-c5c1", fakeTmuxListSessions("handoff")) // the claim's detached probe is alive
 		c := orphan(t)
 		claim := c.work(t, "in_progress", detachedClaim())
 		s := c.run(t, gone().tmux())
@@ -694,7 +766,7 @@ func TestCloseEffectEdges(t *testing.T) {
 		}
 	})
 	t.Run("a short budget never counts a live handoff stranded", func(t *testing.T) {
-		installFakeTmux(t, "exit 0") // alive
+		installFakeTmuxServer(t, "gctest-c5c1", fakeTmuxListSessions("handoff")) // alive
 		for _, c := range []struct {
 			name     string
 			blocked  bool // the read waits out the Probe's bound
@@ -855,7 +927,7 @@ func (s blockedListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 // ConditionalWritesResolveTarget keeps the inner store's fenced writes.
 func (s blockedListStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
 
-// detachedClaim is a routed claim with a detached runtime installFakeTmux
+// detachedClaim is a routed claim with a detached runtime installFakeTmuxServer
 // answers for.
 func detachedClaim() map[string]string {
 	meta := routedClaim()

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -29,13 +30,79 @@ func TestReleasePoliciesTable(t *testing.T) {
 		releaseKilledSeat:     {statuses: []string{"open", "in_progress"}, startedKeeps: true, lane: laneDirect, seatRoute: true},
 		releaseDrainAck:       {statuses: []string{"in_progress"}, startedNamedKeeps: true, lane: laneCarried, seatRoute: true},
 		releaseCloseCascade:   {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true},
-		releaseStrandedRepair: {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true},
-		releaseOrphan:         {statuses: []string{"open", "in_progress"}, lane: laneDirect, pool: true},
+		releaseStrandedRepair: {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true, detached: true},
+		releaseOrphan:         {statuses: []string{"open", "in_progress"}, lane: laneDirect, pool: true, detached: true},
 		releaseRetired:        {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true},
 		releaseLadder:         {statuses: []string{"in_progress"}, lane: laneCarried, seatRoute: true},
+		releaseStalled:        {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true},
 	}
 	if !reflect.DeepEqual(releasePolicies, want) {
 		t.Fatalf("releasePolicies = %+v\nwant %+v", releasePolicies, want)
+	}
+}
+
+// No release path reopens a claim still carrying its gc.detached. The claim's
+// socket is gone, so a probe observes nothing: the paths with the detached
+// hold keep the claim, and every other path gives it back without probing
+// and clears gc.detached in the release write itself. Left on the reopened
+// bead, the probe would ride into the claim's next assignment, and the next
+// orphan or stranded pass would hold that claim for good on a socket no
+// probe can reach. The store fails a metadata-only write, so a clear that
+// rode a second write would leave the probe behind.
+func TestReleaseListedNeverReopensAClaimWithItsDetachedProbe(t *testing.T) {
+	spec := "tmux:" + filepath.Join(t.TempDir(), "gone") + ":soak-loop"
+	paths := []struct {
+		name string
+		why  releaseWhy
+	}{
+		{"killed seat", releaseKilledSeat},
+		{"drain-ack", releaseDrainAck},
+		{"close cascade", releaseCloseCascade},
+		{"stranded repair", releaseStrandedRepair},
+		{"orphan", releaseOrphan},
+		{"retired", releaseRetired},
+		{"ladder", releaseLadder},
+		{"stalled", releaseStalled},
+	}
+	if len(paths) != len(releasePolicies) {
+		t.Fatalf("%d paths for %d release policies: give the new policy a row", len(paths), len(releasePolicies))
+	}
+	resetDetachedProbeHoldLogForTest()
+	t.Cleanup(resetDetachedProbeHoldLogForTest)
+	for _, path := range paths {
+		t.Run(path.name, func(t *testing.T) {
+			p := releasePolicies[path.why]
+			store := &failSecondWriteStore{MemStore: beads.NewMemStore()}
+			// A started claim keeps the killed seat whole, so its claim is
+			// open; every other path gives back an in_progress claim.
+			status := "in_progress"
+			if p.startedKeeps {
+				status = "open"
+			}
+			claim := createWork(t, store, status, "worker-dead", map[string]string{
+				beadmeta.RoutedToMetadataKey: "worker",
+				detachedProbeMetadataKey:     spec,
+			})
+			store.updateCalls = 0
+
+			out := releaseListed([]seatWorkHit{{store: store, bead: claim}}, path.why, releaseSeat{}, testPoolReleaseConfig(), ReleaseOpts{})
+			got, err := store.Get(claim.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.detached {
+				if out.Why[claim.ID] != keptDetachedAlive || got.Assignee != "worker-dead" || got.Metadata[detachedProbeMetadataKey] != spec {
+					t.Fatalf("why=%q assignee=%q gc.detached=%q, want the claim held with its probe", out.Why[claim.ID], got.Assignee, got.Metadata[detachedProbeMetadataKey])
+				}
+				return
+			}
+			if len(out.Released) != 1 || store.updateCalls != 1 {
+				t.Fatalf("released %d claim(s) in %d write(s) (why %q), want it released in one write", len(out.Released), store.updateCalls, out.Why[claim.ID])
+			}
+			if got.Status != "open" || got.Assignee != "" || got.Metadata[detachedProbeMetadataKey] != "" {
+				t.Fatalf("status=%q assignee=%q gc.detached=%q, want reopened without gc.detached", got.Status, got.Assignee, got.Metadata[detachedProbeMetadataKey])
+			}
+		})
 	}
 }
 

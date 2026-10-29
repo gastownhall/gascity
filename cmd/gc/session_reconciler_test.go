@@ -9,6 +9,7 @@ import (
 	"io"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -3674,7 +3675,7 @@ func TestEmitSessionStrandedDiagnostic_CarriesTypedPayload(t *testing.T) {
 func TestEmitSessionStrandedDiagnostic_DetachedProbeAliveSuppressesEvent(t *testing.T) {
 	store := beads.NewMemStore()
 	session, work := createDetachedStrandedWork(t, store, "tmux:gctest-stranded:soak-loop")
-	installFakeTmux(t, "exit 0")
+	installFakeTmuxServer(t, "gctest-stranded", fakeTmuxListSessions("soak-loop"))
 	rec := emitStrandedDiagnosticForTest(t, store, &session)
 
 	if stranded := rec.strandedEvents(); len(stranded) != 0 {
@@ -3695,7 +3696,7 @@ func TestEmitSessionStrandedDiagnostic_DetachedProbeAliveSuppressesEvent(t *test
 func TestEmitSessionStrandedDiagnostic_DetachedProbeDeadClearsAndEmits(t *testing.T) {
 	store := beads.NewMemStore()
 	session, work := createDetachedStrandedWork(t, store, "tmux:gctest-stranded:soak-loop")
-	installFakeTmux(t, "exit 1")
+	installFakeTmuxServer(t, "gctest-stranded", fakeTmuxListSessions())
 	rec := emitStrandedDiagnosticForTest(t, store, &session)
 
 	stranded := rec.strandedEvents()
@@ -3714,25 +3715,82 @@ func TestEmitSessionStrandedDiagnostic_DetachedProbeDeadClearsAndEmits(t *testin
 	}
 }
 
-func TestEmitSessionStrandedDiagnostic_DetachedProbeErrorEmitsNormally(t *testing.T) {
+// unobservedStrandedProbes are the detached probes of the gctest-stranded
+// socket that observe nothing: no server socket, a server that does not
+// answer, and one that outlasts the probe's bound.
+var unobservedStrandedProbes = []struct {
+	name  string
+	setup func(t *testing.T)
+}{
+	{"error: no server socket", func(t *testing.T) {
+		t.Setenv("TMUX_TMPDIR", shortTmuxTmpDir(t))
+		installFakeTmux(t, "exit 1")
+	}},
+	{"error: the server does not answer", func(t *testing.T) { installFakeTmuxServer(t, "gctest-stranded", "exit 2") }},
+	{"timeout", func(t *testing.T) { installFakeTmuxServer(t, "gctest-stranded", "sleep 2") }},
+}
+
+// A detached probe that observed nothing is no evidence the work stopped, so
+// the diagnostic holds that work out as it holds work whose probe is alive:
+// with nothing else stranded it records no session.stranded and stamps no
+// stranded_event_emitted_at, the marker the stranded repair releases the
+// work on once it ages, and gc.detached stays.
+func TestEmitSessionStrandedDiagnostic_UnobservedDetachedProbeHoldsTheWork(t *testing.T) {
+	for _, p := range unobservedStrandedProbes {
+		t.Run(p.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			session, work := createDetachedStrandedWork(t, store, "tmux:gctest-stranded:soak-loop")
+			p.setup(t)
+			rec := emitStrandedDiagnosticForTest(t, store, &session)
+
+			if stranded := rec.strandedEvents(); len(stranded) != 0 {
+				t.Fatalf("session.stranded events = %d, want 0 while the detached probe observes nothing; events: %+v", len(stranded), rec.events)
+			}
+			row, err := store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("Get session bead: %v", err)
+			}
+			if marker := row.Metadata[strandedEventEmittedKey]; marker != "" {
+				t.Fatalf("%s = %q, want unstamped: the stranded repair would release the held work once it aged", strandedEventEmittedKey, marker)
+			}
+			got, err := store.Get(work.ID)
+			if err != nil {
+				t.Fatalf("Get work bead: %v", err)
+			}
+			if got.Metadata[detachedProbeMetadataKey] != "tmux:gctest-stranded:soak-loop" {
+				t.Fatalf("gc.detached = %q, want preserved while the probe observes nothing", got.Metadata[detachedProbeMetadataKey])
+			}
+		})
+	}
+}
+
+// The slot's other work is still stranded while one claim is held: the
+// diagnostic lists only that work, never the claim whose probe observed
+// nothing.
+func TestEmitSessionStrandedDiagnostic_ListsOnlyWorkTheDetachedProbeDoesNotHold(t *testing.T) {
 	store := beads.NewMemStore()
-	session, work := createDetachedStrandedWork(t, store, "tmux:gctest-stranded:soak-loop")
-	installFakeTmux(t, "exit 2")
+	session, held := createDetachedStrandedWork(t, store, "tmux:gctest-stranded:soak-loop")
+	plain, err := store.Create(beads.Bead{Title: "stranded work", Type: "task", Assignee: session.ID})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(plain.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("Update work bead status: %v", err)
+	}
+	installFakeTmuxServer(t, "gctest-stranded", "exit 2")
 	rec := emitStrandedDiagnosticForTest(t, store, &session)
 
 	stranded := rec.strandedEvents()
 	if len(stranded) != 1 {
-		t.Fatalf("session.stranded events = %d, want 1 when detached probe errors; events: %+v", len(stranded), rec.events)
+		t.Fatalf("session.stranded events = %d, want 1 for the unprobed work; events: %+v", len(stranded), rec.events)
 	}
-	if !strings.Contains(stranded[0].Message, work.ID) {
-		t.Fatalf("session.stranded message = %q, want work bead %q", stranded[0].Message, work.ID)
+	var payload api.SessionStrandedPayload
+	if err := json.Unmarshal(stranded[0].Payload, &payload); err != nil {
+		t.Fatalf("decoding session.stranded payload: %v", err)
 	}
-	got, err := store.Get(work.ID)
-	if err != nil {
-		t.Fatalf("Get work bead: %v", err)
-	}
-	if got.Metadata[detachedProbeMetadataKey] != "tmux:gctest-stranded:soak-loop" {
-		t.Fatalf("gc.detached = %q, want preserved after probe error", got.Metadata[detachedProbeMetadataKey])
+	if !slices.Equal(payload.WorkBeadIDs, []string{plain.ID}) || strings.Contains(stranded[0].Message, held.ID) {
+		t.Fatalf("stranded work = %v (message %q), want only %s: %s is held", payload.WorkBeadIDs, stranded[0].Message, plain.ID, held.ID)
 	}
 }
 

@@ -762,11 +762,15 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 
 // killExistingOrphans terminates any untracked runtime whose session ID and
 // city match the session about to start, then confirms each is dead. It returns
-// a non-nil error only when an orphan could not be confirmed dead, so callers
-// gating a Start can refuse rather than race a survivor for the same work. A
-// scan error is logged and treated as fail-closed (see FindRuntimesBySessionID):
-// the roots the scan did surface are still killed, and matching the started
-// replacement is impossible because it does not exist yet.
+// a non-nil error when an orphan could not be confirmed dead, or, terminating
+// nothing, when the provider claims one of them as a live runtime it does not
+// list (LiveUnlisted, an error wrapping runtime.ErrRuntimeUnavailable), so
+// callers gating a Start can refuse rather than race a survivor for the same
+// work. A scan error is logged and treated as fail-closed (see
+// FindRuntimesBySessionID): the orphans the scan did surface are still
+// terminated unless one of them is LiveUnlisted, which terminates none, and
+// matching the started replacement is impossible because it does not exist
+// yet.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	_ = ctx
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
@@ -778,7 +782,7 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(err))
 	}
 	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
-	var termErrs []error
+	var orphans []runtime.LiveRuntime
 	for _, live := range found {
 		if live.IsTracked || live.SessionID != sessionID {
 			continue
@@ -795,6 +799,20 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 			log.Printf("session: leaving process-table root for %s pid=%d alone: city infrastructure (managed Dolt watchdog or bd proxy)", sessionID, live.PID)
 			continue
 		}
+		// The provider claims this root as a live runtime of its own that it
+		// does not list: a pane of its socket that it cannot reach or that a
+		// failed listing missed. It is not an orphan, and a replacement would
+		// race it for the session's work, so the start refuses and terminates
+		// nothing. The reconciler defers a refused start without recording a
+		// failure, so the refusal is logged here.
+		if live.LiveUnlisted {
+			log.Printf("session: refusing to start %s: live runtime pid=%d ppid=%d belongs to the provider but is not listed by it", sessionID, live.PID, live.PPID)
+			return fmt.Errorf("live runtime pid=%d ppid=%d for session %s belongs to the provider but is not listed by it: %w", live.PID, live.PPID, sessionID, runtime.ErrRuntimeUnavailable)
+		}
+		orphans = append(orphans, live)
+	}
+	var termErrs []error
+	for _, live := range orphans {
 		if err := scanner.TerminateRuntime(live); err != nil {
 			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)
 			termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))

@@ -528,40 +528,36 @@ func assignedWorkOwnerStore(cfg *config.City, cityStore beads.Store, rigStores m
 	return storeForPoolAssignment(cfg, cityStore, rigStores, wb)
 }
 
+// detachedProbeAllowsOrphanRelease reports whether the orphaned work bead may
+// be released and whether its gc.detached probe must then be cleared. Work
+// with a probe is released only when the probe attests its runtime dead; a
+// probe that observed nothing (error or timeout) holds the work, tick after
+// tick, until an observation decides it. The orphan releases, the stranded
+// repair and the stranded diagnostic all decide by it, so work held here is
+// neither released nor listed stranded. The hold log is rate-throttled per
+// bead so a namespace that stays unobservable cannot flood the controller log.
 func detachedProbeAllowsOrphanRelease(wb beads.Bead) (bool, bool) {
 	spec := strings.TrimSpace(wb.Metadata[detachedProbeMetadataKey])
 	if spec == "" {
-		clearDetachedProbeErrorCount(wb.ID)
+		// An operator clearing gc.detached ends any hold, so a later hold
+		// on this bead logs at once.
+		forgetDetachedProbeHold(wb.ID)
 		return true, false
 	}
 
 	result := probeDetachedWork(context.Background(), spec)
 	switch result.Status {
 	case detachedProbeAlive:
-		clearDetachedProbeErrorCount(wb.ID)
-		log.Printf("releaseOrphanedPoolAssignments: skipping release: detached probe alive for %s: %s", wb.ID, spec)
+		forgetDetachedProbeHold(wb.ID)
+		log.Printf("detached work %s: holding its claim: detached probe alive: %s", wb.ID, spec)
 		return false, false
 	case detachedProbeDead:
-		clearDetachedProbeErrorCount(wb.ID)
-		log.Printf("releaseOrphanedPoolAssignments: releasing %s: detached probe dead: %s", wb.ID, spec)
-		return true, true
-	case detachedProbeError, detachedProbeTimeout:
-		count := incrementDetachedProbeErrorCount(wb.ID)
-		if count < detachedProbeErrorThreshold {
-			log.Printf("releaseOrphanedPoolAssignments: detached probe %s for %s: %v (error %d/%d)", result.Status, wb.ID, result.Err, count, detachedProbeErrorThreshold)
-			return false, false
-		}
-		clearDetachedProbeErrorCount(wb.ID)
-		log.Printf("releaseOrphanedPoolAssignments: releasing %s: detached probe %s after %d errors: %v", wb.ID, result.Status, count, result.Err)
+		forgetDetachedProbeHold(wb.ID)
+		log.Printf("detached work %s: detached probe dead: %s", wb.ID, spec)
 		return true, true
 	default:
-		count := incrementDetachedProbeErrorCount(wb.ID)
-		if count < detachedProbeErrorThreshold {
-			log.Printf("releaseOrphanedPoolAssignments: detached probe unknown result for %s: %q (error %d/%d)", wb.ID, result.Status, count, detachedProbeErrorThreshold)
-			return false, false
-		}
-		clearDetachedProbeErrorCount(wb.ID)
-		return true, true
+		logDetachedProbeHold(wb.ID, "detached work %s: holding its claim: detached probe %s: %s: %v", wb.ID, result.Status, spec, result.Err)
+		return false, false
 	}
 }
 
@@ -702,18 +698,22 @@ func isCanonicalWorkflowRoot(wb beads.Bead) bool {
 //
 //  1. beads.ConditionalAssignmentReleaser.ReleaseIfCurrent when the store
 //     offers it for this snapshot shape (in_progress with a non-empty assignee
-//     — the verb's contract) AND the bead carries no active continuation-group
-//     routing vector (see beadHasActiveContinuationGroup). On BdStore this
-//     runs bd's conditional-release verb (`bd update --if-assignee
-//     --if-status`); a bd without it answers ErrConditionalReleaseUnsupported
-//     and the release falls through to 2.
+//     — the verb's contract), the bead carries no active continuation-group
+//     routing vector (see beadHasActiveContinuationGroup), AND the release
+//     clears no dead gc.detached probe. On BdStore this runs bd's
+//     conditional-release verb (`bd update --if-assignee --if-status`); a bd
+//     without it answers ErrConditionalReleaseUnsupported and the release
+//     falls through to 2.
 //  2. Otherwise releasePoolAssignmentWithRecheck: status, assignee and the
-//     affinity metadata as one write fenced on the snapshot's (status,
-//     assignee), so a claim landing after the snapshot is never clobbered.
-//     Because the one write also clears the affinity metadata, it is the
-//     correct path for continuation-group beads: the group is never exposed on
-//     an open, unassigned bead. A store that cannot fence the write is refused
-//     and logged rather than written blind.
+//     metadata as one write fenced on the snapshot's (status, assignee), so a
+//     claim landing after the snapshot is never clobbered. Because the one
+//     write also clears the metadata, it is the correct path for
+//     continuation-group beads, whose group is never exposed on an open,
+//     unassigned bead, and for a dead gc.detached, which a failed second
+//     write would leave on the reopened bead: its next claim would inherit
+//     the dead probe, and once that probe's socket is gone, hold for good. A
+//     store that cannot fence the write is refused and logged rather than
+//     written blind.
 func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetached bool) bool {
 	if store == nil || strings.TrimSpace(wb.ID) == "" {
 		return false
@@ -732,16 +732,18 @@ func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetach
 		}
 		return released
 	}
-	// On the legacy path, continuation-group beads bypass ReleaseIfCurrent: it swaps
-	// only status/assignee, so clearing the group would need a second write, and
-	// that gap would expose the routing vector on a claimable bead. The fenced
-	// fallback clears status, assignee, and affinity metadata in one write.
-	if !beadHasActiveContinuationGroup(wb) {
+	// On the legacy path, ReleaseIfCurrent swaps only status/assignee, so the
+	// metadata clear rides a second write. A continuation-group bead and a
+	// dead gc.detached bypass it: a group left in that gap is exposed on a
+	// claimable bead, and a probe left by a failed second write rides into the
+	// next claim. The fenced fallback clears status, assignee, and metadata in
+	// one write.
+	if !beadHasActiveContinuationGroup(wb) && !clearDetached {
 		if released, handled := releasePoolAssignmentIfCurrent(store, wb); handled {
 			if !released {
 				return false
 			}
-			clearReleasedPoolAssignmentMetadata(store, wb.ID, clearDetached)
+			clearReleasedPoolAssignmentMetadata(store, wb.ID)
 			return true
 		}
 	}
@@ -805,17 +807,15 @@ func releasePoolAssignmentIfCurrent(store beads.Store, wb beads.Bead) (released,
 	return released, true
 }
 
-// clearReleasedPoolAssignmentMetadata clears session-affinity (and optionally
-// detached-probe) metadata after a successful conditional release. The clear
-// rides a separate metadata-only write because ReleaseIfCurrent only swaps
-// status/assignee. A failure here does not undo the release: stale affinity
-// keys are overwritten on the next assignment, and detached-probe metadata is
-// only consulted for release candidates, which an open unassigned bead is not.
-func clearReleasedPoolAssignmentMetadata(store beads.Store, id string, clearDetached bool) {
+// clearReleasedPoolAssignmentMetadata clears session-affinity metadata after a
+// successful conditional release. The clear rides a separate metadata-only
+// write because ReleaseIfCurrent only swaps status/assignee. A failure here
+// does not undo the release: stale affinity keys are overwritten on the next
+// assignment. Metadata a failed clear must not leave behind (a continuation
+// group, a dead gc.detached) never reaches this write: such releases take
+// releasePoolAssignmentWithRecheck.
+func clearReleasedPoolAssignmentMetadata(store beads.Store, id string) {
 	metadata := clearedSessionAffinityMetadata()
-	if clearDetached {
-		metadata[detachedProbeMetadataKey] = ""
-	}
 	if err := store.Update(id, beads.UpdateOpts{Metadata: metadata}); err != nil {
 		log.Printf("releaseOrphanedPoolAssignments: clearing metadata after releasing %s: %v", id, err)
 	}
@@ -824,17 +824,18 @@ func clearReleasedPoolAssignmentMetadata(store beads.Store, id string, clearDeta
 // releasePoolAssignmentWithRecheck is the release for snapshots
 // ReleaseIfCurrent cannot take: open-status strands (#2793), assignee-less
 // in_progress recovery, continuation-group beads (beadHasActiveContinuationGroup),
-// and stores without the verb. It writes status, assignee and the affinity
-// metadata as ONE write fenced on the snapshot's (status, assignee)
-// (releaseAssignmentFenced): bd's guarded update on BdStore, otherwise an
-// UpdateIfMatch on a live re-read's revision. A claim that lands after the
-// snapshot fails the fence and is kept; the next sweep decides again.
+// releases that clear a dead gc.detached, and stores without the verb. It
+// writes status, assignee and the metadata as ONE write fenced on the
+// snapshot's (status, assignee) (releaseAssignmentFenced): bd's guarded update
+// on BdStore, otherwise an UpdateIfMatch on a live re-read's revision. A claim
+// that lands after the snapshot fails the fence and is kept; the next sweep
+// decides again.
 //
 // A store that can fence neither way (a bd without --if-status/--if-assignee,
 // a legacy SQLite layout, the exec store) is refused and logged, never released
 // by an unconditional write: a clobbered claim reads back empty and leaves no
-// trace. Such a bead stays assigned until its snapshot fits ReleaseIfCurrent or
-// the store can fence.
+// trace. Such a bead stays assigned until the store can fence or, for a release
+// that need not be one write, its snapshot fits ReleaseIfCurrent.
 func releasePoolAssignmentWithRecheck(store beads.Store, wb beads.Bead, clearDetached bool) bool {
 	opts := beads.UpdateOpts{
 		Assignee: stringPtr(""),
