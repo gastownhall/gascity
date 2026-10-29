@@ -1,6 +1,7 @@
 package herdr
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -111,5 +112,51 @@ func TestStartAcceptsStartupDialogsWithoutStartupTurn(t *testing.T) {
 	}
 	if strings.Contains(calls, "agent wait") || strings.Contains(calls, "agent prompt") {
 		t.Fatalf("a session with no startup text must not wait or prompt:\n%s", calls)
+	}
+}
+
+// captureStartupDialogWarnings swaps startupDialogWarningOut for a buffer for
+// the duration of the test and returns it.
+func captureStartupDialogWarnings(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	old := startupDialogWarningOut
+	startupDialogWarningOut = &buf
+	t.Cleanup(func() { startupDialogWarningOut = old })
+	return &buf
+}
+
+// AC-4: a dialog step that fails — pane read errors, or the trust cursor never
+// reaches the trust row (ErrWorkspaceTrustUnconfirmed) — is non-fatal: Start
+// returns nil, the tail still runs, exactly one warning line goes to
+// startupDialogWarningOut, and Enter is never sent from an unconfirmed frame.
+func TestStartStartupDialogFailureIsNonFatal(t *testing.T) {
+	cases := []struct{ name, flag string }{
+		{"pane read fails", "pane_read_fails"},
+		{"trust cursor never reaches the trust row", "trust_stuck"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, state := newFakeHerdrProvider(t)
+			listenHerdrSocket(t, p)
+			setState(t, state, "trust_dialog")
+			setState(t, state, tc.flag)
+			warnings := captureStartupDialogWarnings(t)
+
+			if err := p.Start(context.Background(), "gastown__witness", dialogEnabledConfig()); err != nil {
+				t.Fatalf("Start: %v (a dialog step failure must not fail Start)", err)
+			}
+			calls := fakeCalls(t, state)
+			if !strings.Contains(calls, "agent wait") || !strings.Contains(calls, "agent prompt %5 do work") {
+				t.Fatalf("startup tail did not proceed after the dialog step failed:\n%s", calls)
+			}
+			if strings.Contains(calls, "pane send-keys %5 enter") {
+				t.Fatalf("Enter was sent from an unconfirmed trust frame:\n%s", calls)
+			}
+			warnLines := strings.Split(strings.TrimRight(warnings.String(), "\n"), "\n")
+			if len(warnLines) != 1 || !strings.HasPrefix(warnLines[0], `warning: session "gastown__witness": `) {
+				t.Fatalf("startup-dialog warnings = %q; want exactly one warning line for gastown__witness", warnings.String())
+			}
+		})
 	}
 }
