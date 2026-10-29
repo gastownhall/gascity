@@ -144,6 +144,12 @@ func writeGasTownAgentFiles(t *testing.T, cityDir string, agents []gasTownAgent)
 			b.WriteString("suspended = true\n")
 		}
 		if a.Pool != nil {
+			// Every pool instance gets its own working directory.
+			workDir := ".gc/worktrees/{{.AgentBase}}"
+			if a.Dir != "" {
+				workDir = ".gc/worktrees/{{.Rig}}/{{.AgentBase}}"
+			}
+			fmt.Fprintf(&b, "work_dir = %s\n", quote(workDir))
 			fmt.Fprintf(&b, "min_active_sessions = %d\n", a.Pool.Min)
 			fmt.Fprintf(&b, "max_active_sessions = %d\n", a.Pool.Max)
 			fmt.Fprintf(&b, "scale_check = %s\n", quote(a.Pool.Check))

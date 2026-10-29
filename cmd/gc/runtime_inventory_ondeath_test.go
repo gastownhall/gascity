@@ -1300,7 +1300,7 @@ func TestCityRuntimePublishesPoolDeathHandlersAtStartAndReload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = f.WriteString("\n[[agent]]\nname = \"worker\"\nscope = \"city\"\nstart_command = \"true\"\nmin_active_sessions = 0\nmax_active_sessions = 2\n")
+	_, err = f.WriteString("\n[[agent]]\nname = \"worker\"\nscope = \"city\"\nwork_dir = \".gc/worktrees/{{.AgentBase}}\"\nstart_command = \"true\"\nmin_active_sessions = 0\nmax_active_sessions = 2\n")
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}

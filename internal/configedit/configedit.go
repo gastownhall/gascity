@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
+	"github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -192,6 +193,11 @@ func validateCityForEdit(cityRoot string, cfg *config.City) error {
 func (e *Editor) validateForEdit(cfg *config.City) error {
 	if err := validateCityForEdit(e.cityRoot(), cfg); err != nil {
 		return err
+	}
+	cityPath := filepath.Dir(e.tomlPath)
+	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
+	if err := workdir.ValidatePoolWorkDirIsolation(cityPath, cityName, cfg.Agents, cfg.Rigs); err != nil {
+		return fmt.Errorf("%w: agents: %w", ErrValidation, err)
 	}
 	if err := config.ReservedPrefixSplitRefusalForEdit(e.fs, e.tomlPath, cfg); err != nil {
 		return fmt.Errorf("%w: rigs: %w", ErrValidation, err)

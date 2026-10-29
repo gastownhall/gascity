@@ -273,6 +273,7 @@ suspended = true
 func TestGastown_Reconciler_PoolScaling(t *testing.T) {
 	agentBlocks := fmt.Sprintf(`[[agent]]
 name = "scaler"
+work_dir = ".gc/worktrees/{{.AgentBase}}"
 start_command = %s
 min_active_sessions = 1
 max_active_sessions = 3

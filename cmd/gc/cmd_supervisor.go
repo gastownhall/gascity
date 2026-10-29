@@ -39,6 +39,7 @@ import (
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/transcriptmeta"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/spf13/cobra"
 )
@@ -3065,6 +3066,11 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		return config.ValidateAgents(cfg.Agents)
 	}); err != nil {
 		return fmt.Errorf("validate agents: %w", err)
+	}
+	if err := runStep("validating_pool_workdir_isolation", func() error {
+		return workdirutil.ValidatePoolWorkDirIsolation(cityPath, cityName, cfg.Agents, cfg.Rigs)
+	}); err != nil {
+		return fmt.Errorf("validate pool work_dir isolation: %w", err)
 	}
 
 	// Skill collision validation precedes materialization so a

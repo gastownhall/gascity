@@ -504,7 +504,7 @@ func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]strin
 		"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"1s\"\n\n"+
 			"[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n"+
 			"[[named_session]]\ntemplate = \"worker\"\nmode = \"always\"\n\n"+
-			"[[agent]]\nname = \"polecat\"\nstart_command = %q\nmin_active_sessions = 0\nmax_active_sessions = 3\nscale_check = %q\n",
+			"[[agent]]\nname = \"polecat\"\nwork_dir = \".gc/worktrees/{{.AgentBase}}\"\nstart_command = %q\nmin_active_sessions = 0\nmax_active_sessions = 3\nscale_check = %q\n",
 		cityName, startCommand, startCommand, polecatScaleCheck,
 	)
 	configPath := filepath.Join(t.TempDir(), "review-formula.toml")

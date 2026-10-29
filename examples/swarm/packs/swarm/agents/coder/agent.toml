@@ -1,4 +1,5 @@
 scope = "rig"
+work_dir = ".gc/worktrees/{{.Rig}}/{{.AgentBase}}"
 nudge = "Run gc ready --metadata-field gc.routed_to=$GC_TEMPLATE --unassigned, check mail, then claim and work on a task."
 idle_timeout = "2h"
 min_active_sessions = 1

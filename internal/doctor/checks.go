@@ -123,6 +123,12 @@ func (c *ConfigValidCheck) Run(ctx *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("agent validation: %v", err)
 		return r
 	}
+	cityName := config.EffectiveCityName(c.cfg, filepath.Base(ctx.CityPath))
+	if err := workdir.ValidatePoolWorkDirIsolation(ctx.CityPath, cityName, c.cfg.Agents, c.cfg.Rigs); err != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("agent validation: %v", err)
+		return r
+	}
 	if err := config.ValidateRigs(c.cfg.Rigs, config.EffectiveHQPrefix(c.cfg)); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("rig validation: %v", err)

@@ -1,3 +1,4 @@
+work_dir = ".gc/worktrees/{{.AgentBase}}"
 install_hooks = ["claude"]
 process_names = ["claude"]
 ready_prompt_prefix = "claude"

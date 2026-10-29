@@ -1,4 +1,5 @@
 scope = "rig"
+work_dir = ".gc/worktrees/{{.Rig}}/{{.AgentBase}}"
 start_command = "gc agent-script --script {{.ConfigDir}}/assets/scripts/lifecycle-polecat-claim-handoff.yaml"
 lifecycle = "one_shot"
 nudge = "Find work, create a branch, implement, push, hand off to refinery."

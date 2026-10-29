@@ -37,6 +37,7 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -1008,6 +1009,9 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 	}
 	if err := config.ValidateAgents(newCfg.Agents); err != nil {
 		return failWithWarnings(fmt.Errorf("validating agents: %w", err))
+	}
+	if err := workdirutil.ValidatePoolWorkDirIsolation(cityRoot, loadedCityName(newCfg, cityRoot), newCfg.Agents, newCfg.Rigs); err != nil {
+		return failWithWarnings(fmt.Errorf("validating pool work_dir isolation: %w", err))
 	}
 	if err := config.ValidateServices(newCfg.Services); err != nil {
 		return failWithWarnings(fmt.Errorf("validating services: %w", err))

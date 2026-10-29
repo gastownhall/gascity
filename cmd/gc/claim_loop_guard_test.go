@@ -805,7 +805,7 @@ func writeClaimLoopCityConfig(t *testing.T, tomlPath string, maxActive int) {
 	t.Helper()
 	clearInheritedBeadsEnv(t)
 	requireNoLeakedDoltAfterForPaths(t, filepath.Dir(tomlPath))
-	data := fmt.Sprintf("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n[[agent]]\nname = \"dog\"\nstart_command = \"true\"\nmax_active_sessions = %d\n", maxActive)
+	data := fmt.Sprintf("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n[[agent]]\nname = \"dog\"\nwork_dir = \".gc/worktrees/{{.AgentBase}}\"\nstart_command = \"true\"\nmax_active_sessions = %d\n", maxActive)
 	if err := os.WriteFile(tomlPath, []byte(data), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
