@@ -104,6 +104,8 @@ type demandMigrationKey struct{ repair, leg string }
 type demandMigrationSweep struct {
 	counts   map[demandMigrationKey]int
 	problems []string
+	// assigned is the assigned work the repairs were run over.
+	assigned []beads.Bead
 }
 
 // sweep runs legacy's demand-pass migration repairs over the city's work legs
@@ -155,6 +157,7 @@ func (c *v2DemandMigrationsCheck) sweep(fix bool, stderr io.Writer) demandMigrat
 	// sessions live only in the binding.
 	assigned, assignedStores, assignedRefs, _, assignedPartial := collectAssignedWorkBeadsWithStores(c.cityPath, c.cfg, city, rigs, suspended, sessions,
 		newReadyDemandCache().withSessionsStore(beads.SessionStore{Store: sessionsStore}))
+	s.assigned = assigned
 	if assignedPartial {
 		s.problems = append(s.problems, "assigned collection partial")
 	}

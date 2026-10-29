@@ -64,13 +64,38 @@ func TestDoctorDemandSweepReadsClosedNamedSessionsFromTheSessionsStore(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
+			// A session template makes the runtime name differ from the
+			// identity, so only the closed named-session index can name it.
+			cfg.Workspace.SessionTemplate = "{{.City}}-{{.Agent}}"
 			cfg.Agents = append(cfg.Agents, config.Agent{Name: "probe", StartCommand: "true"})
 			cfg.NamedSessions = append(cfg.NamedSessions, config.NamedSession{Template: "probe", Mode: "on_demand"})
+			identity := cfg.NamedSessions[len(cfg.NamedSessions)-1].QualifiedName()
+			runtimeName := config.NamedSessionRuntimeName(loadedCityName(cfg, cityPath), cfg.Workspace, identity)
+			if runtimeName == identity {
+				t.Fatalf("premise: runtime name %q equals the identity", runtimeName)
+			}
 			work, err := openCityStoreAt(cityPath)
 			if err != nil {
 				t.Fatalf("opening the city work store: %v", err)
 			}
 			t.Cleanup(func() { _ = closeBeadStoreHandle(work) })
+			// A closed named session in the sessions store (the binding on a
+			// split city) and ready work filed under its runtime name.
+			sessions := cliSessionStore(work, cfg, cityPath)
+			closed, err := sessions.Create(beads.Bead{
+				Title: "probe", Type: session.BeadType, Labels: []string{session.LabelSession},
+				Metadata: map[string]string{session.NamedSessionIdentityMetadata: identity, "session_name": runtimeName, "state": "asleep"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sessions.Close(closed.ID); err != nil {
+				t.Fatal(err)
+			}
+			filed, err := work.Create(beads.Bead{Title: "work for the named session", Type: "task", Assignee: runtimeName})
+			if err != nil {
+				t.Fatal(err)
+			}
 			spy := &sessionListSpy{Store: work}
 			c := newV2DemandMigrationsCheck(cfg, cityPath, func(path string) (beads.Store, error) {
 				if path == cityPath {
@@ -79,8 +104,16 @@ func TestDoctorDemandSweepReadsClosedNamedSessionsFromTheSessionsStore(t *testin
 				return openCityStoreAt(path)
 			})
 
-			if sweep := c.sweep(false, io.Discard); len(sweep.problems) != 0 {
+			sweep := c.sweep(false, io.Discard)
+			if len(sweep.problems) != 0 {
 				t.Fatalf("sweep problems = %q, want none", sweep.problems)
+			}
+			collected := false
+			for _, b := range sweep.assigned {
+				collected = collected || b.ID == filed.ID
+			}
+			if !collected {
+				t.Fatalf("the sweep did not collect %s, ready work assigned to the closed named session's runtime name %q", filed.ID, runtimeName)
 			}
 			got := spy.sessionLists()
 			switch {
