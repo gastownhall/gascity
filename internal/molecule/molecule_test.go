@@ -2422,9 +2422,10 @@ func (s *stampFailStore) SetMetadataBatch(id string, kvs map[string]string) erro
 // own activation update — the write that clears gc.instantiating — fails
 // once, and the same row then refuses its failure stamp a configured
 // number of attempts. skipActivations moves the activation fault to a
-// later bead. Embedding the beads.Store interface promotes no graph-apply
-// capability, so Instantiate takes the fenced sequential path without
-// touching the process-wide graph-apply flag.
+// later bead; stampFault overrides the refusal fault. Embedding the
+// beads.Store interface promotes no graph-apply capability, so Instantiate
+// takes the fenced sequential path without touching the process-wide
+// graph-apply flag.
 type rootActivationFailStore struct {
 	*stampFailStore
 	activationErr   error
@@ -2432,6 +2433,7 @@ type rootActivationFailStore struct {
 	faultedID       string
 	refuseStamps    int
 	skipActivations int
+	stampFault      error
 }
 
 // newRootActivationFailStore returns a store whose root refuses both its
@@ -2439,7 +2441,7 @@ type rootActivationFailStore struct {
 // attempt).
 func newRootActivationFailStore(refuseStamps int) *rootActivationFailStore {
 	return &rootActivationFailStore{
-		stampFailStore: &stampFailStore{Store: beads.NewMemStore(), refusals: map[string]int{}},
+		stampFailStore: &stampFailStore{Store: beads.NewMemStore(), refusals: map[string]int{}, faults: map[string]error{}},
 		activationErr:  fmt.Errorf("injected activation conflict"),
 		refuseStamps:   refuseStamps,
 	}
@@ -2453,6 +2455,9 @@ func (s *rootActivationFailStore) Update(id string, opts beads.UpdateOpts) error
 			s.activationFired = true
 			s.faultedID = id
 			s.refusals[id] = s.refuseStamps
+			if s.stampFault != nil {
+				s.faults[id] = s.stampFault
+			}
 			return s.activationErr
 		}
 	}
@@ -2739,6 +2744,96 @@ func TestInstantiateNonGraphFailureRetriesRefusedStamp(t *testing.T) {
 	rootID, bodyID := store.created[0], store.created[1]
 	if got, want := strings.Join(store.calls, ","), strings.Join([]string{rootID, bodyID, rootID}, ","); got != want {
 		t.Errorf("stamp calls = [%s], want [%s] (root refused, body stamped, root retried)", got, want)
+	}
+}
+
+func TestMarkFailedReportingRetriesOnceAndJoinsEveryFailure(t *testing.T) {
+	base := beads.NewMemStore()
+	ids := make([]string, 3)
+	for i := range ids {
+		b, err := base.Create(beads.Bead{Title: fmt.Sprintf("b%d", i+1), Type: "task"})
+		if err != nil {
+			t.Fatalf("create bead %d: %v", i+1, err)
+		}
+		ids[i] = b.ID
+	}
+	faultB2 := fmt.Errorf("stamp fault b2")
+	faultB3 := fmt.Errorf("stamp fault b3")
+	store := &stampFailStore{
+		Store:    base,
+		refusals: map[string]int{ids[0]: 1, ids[1]: -1, ids[2]: -1}, // b1 once, b2 and b3 always
+		faults:   map[string]error{ids[1]: faultB2, ids[2]: faultB3},
+	}
+
+	err := markFailedReporting(store, ids)
+	if err == nil {
+		t.Fatal("markFailedReporting succeeded; want the joined stamp failures")
+	}
+	wantCalls := strings.Join([]string{ids[0], ids[1], ids[2], ids[0], ids[1], ids[2]}, ",")
+	if got := strings.Join(store.calls, ","); got != wantCalls {
+		t.Errorf("stamp calls = [%s], want [%s] (pass 1 over all, pass 2 over the refused)", got, wantCalls)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, ids[0]) {
+		t.Errorf("markFailedReporting error names the retried bead %s: %s", ids[0], msg)
+	}
+	for _, id := range ids[1:] {
+		if !strings.Contains(msg, id) {
+			t.Errorf("markFailedReporting error does not name %s: %s", id, msg)
+		}
+	}
+	if !errors.Is(err, faultB2) || !errors.Is(err, faultB3) {
+		t.Errorf("markFailedReporting error = %v, want it to wrap both stamp faults", err)
+	}
+	b1, err := base.Get(ids[0])
+	if err != nil {
+		t.Fatalf("Get(%s): %v", ids[0], err)
+	}
+	if b1.Metadata[beadmeta.MoleculeFailedMetadataKey] != "true" {
+		t.Errorf("b1 molecule_failed = %q, want true after the retry", b1.Metadata[beadmeta.MoleculeFailedMetadataKey])
+	}
+}
+
+// The stamp faults are text in the mint error — a stamp fault's typed
+// identity (ErrNotFound, DeadlineExceeded) must never take over the
+// cause's — while the reporting path keeps every fault's identity.
+func TestStampFaultsKeepTheirTypeOutOfInstantiationErrors(t *testing.T) {
+	for name, fault := range map[string]error{
+		"not found":         fmt.Errorf("bead gone: %w", beads.ErrNotFound),
+		"deadline exceeded": fmt.Errorf("write timed out: %w", context.DeadlineExceeded),
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := newRootActivationFailStore(-1)
+			store.stampFault = fault
+
+			_, err := Instantiate(context.Background(), store, twoStepGraphWorkflowRecipe(), Options{})
+			if err == nil {
+				t.Fatal("Instantiate succeeded; want the injected activation failure")
+			}
+			if !store.activationFired {
+				t.Fatal("the injected activation fault never fired; the mint took another path")
+			}
+			if errors.Is(err, fault) {
+				t.Errorf("Instantiate error carries the stamp fault's type (%v); want the cause's only", fault)
+			}
+			if !errors.Is(err, store.activationErr) {
+				t.Error("Instantiate error does not wrap the activation fault")
+			}
+
+			base := beads.NewMemStore()
+			b, err := base.Create(beads.Bead{Title: "orphan", Type: "task"})
+			if err != nil {
+				t.Fatalf("create bead: %v", err)
+			}
+			reporting := &stampFailStore{
+				Store:    base,
+				refusals: map[string]int{b.ID: -1},
+				faults:   map[string]error{b.ID: fault},
+			}
+			if err := markFailedReporting(reporting, []string{b.ID}); !errors.Is(err, fault) {
+				t.Errorf("markFailedReporting error = %v, want it to keep the stamp fault's type", err)
+			}
+		})
 	}
 }
 
