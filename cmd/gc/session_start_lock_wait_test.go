@@ -523,3 +523,77 @@ func TestReconcileSessionBeads_BusySessionLockOverAtomicCloseStoreLeavesRowAndWa
 		}
 	})
 }
+
+// Kills: a start gate that sits behind the async start slot, the limiter slot
+// or the endpoint's capacity admission, so a session waiting on its held
+// mutation lock spends a limiter slot and the half-open endpoint's only probe
+// for the whole wait. Both are read while the pass is parked in the wait,
+// because a skipped start hands them back before the pass returns. The probe
+// needs a half-open endpoint, because a closed breaker admits however many
+// tickets are out; the slot needs the async path, which the sync run leaves
+// out.
+func TestExecutePlannedStarts_BusySessionHoldsNoSlotOrProbeWhileItWaitsAtTheGate(t *testing.T) {
+	for _, async := range []bool{false, true} {
+		name := "sync"
+		if async {
+			name = "async"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				e := newBusyStartEnv(t)
+				e.openEndpoint(t)
+				e.makeProbeDue()
+				limiter := newAsyncStartLimiter(1)
+				var tracker asyncStartTracker
+				opts := append([]startExecutionOption(nil), e.startOptions...)
+				if async {
+					opts = append(opts, withAsyncStartExecution(), withAsyncStartLimiter(limiter), withAsyncStartTracker(&tracker))
+				}
+				release := holdSessionMutationLock(t, e.s.info.ID)
+
+				began := time.Now()
+				done := make(chan int, 1)
+				go func() {
+					done <- executePlannedStartsTraced(context.Background(), []startCandidate{e.s}, e.cfg, e.desiredState, e.sp, e.store, "", e.city, e.clk, e.rec, 0, &e.log, &e.log, e.trace, opts...)
+				}()
+				synctest.Wait()
+
+				select {
+				case woken := <-done:
+					t.Fatalf("the pass returned (woken = %d) before the lock wait ended: the busy session was not held at the gate", woken)
+				default:
+				}
+				if async {
+					limiter.mu.Lock()
+					inFlight := limiter.inFlight
+					limiter.mu.Unlock()
+					if inFlight != 0 {
+						t.Fatalf("limiter slots in flight while the busy session waits = %d, want 0: the gate comes before the slot", inFlight)
+					}
+				}
+				ticket, ok := e.guard.Admit(capacityTestEndpoint, "outside", "outside")
+				if !ok || !ticket.probe {
+					t.Fatalf("Admit(%s) while the busy session waits = (admitted %v, probe %v), want the half-open probe: the gate comes before the capacity ticket", capacityTestEndpoint, ok, ticket != nil && ticket.probe)
+				}
+				abandonCapacityTicket(ticket, e.rec, &e.log)
+
+				woken := <-done
+				if elapsed := time.Since(began); elapsed != testGateWaitBound {
+					t.Fatalf("elapsed = %v, want the pass to give up after exactly %v", elapsed, testGateWaitBound)
+				}
+				if woken != 0 || e.sp.CountCalls("Start", e.s.name()) != 0 {
+					t.Fatalf("woken = %d, Start calls for the busy session = %d, want it skipped", woken, e.sp.CountCalls("Start", e.s.name()))
+				}
+				if log := e.log.String(); !strings.Contains(log, testOutcomeSkippedSessionBusy) || !strings.Contains(log, "session="+e.s.name()) {
+					t.Fatalf("stderr = %q, want a %s line for %s", log, testOutcomeSkippedSessionBusy, e.s.name())
+				}
+				next, ok := e.guard.Admit(capacityTestEndpoint, "next", "next")
+				if !ok || !next.probe {
+					t.Fatalf("Admit(%s) after the busy skip = (admitted %v, probe %v), want the probe free for the next session", capacityTestEndpoint, ok, next != nil && next.probe)
+				}
+				abandonCapacityTicket(next, e.rec, &e.log)
+				release()
+			})
+		})
+	}
+}
