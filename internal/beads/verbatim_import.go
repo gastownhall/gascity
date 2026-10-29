@@ -16,6 +16,12 @@ import (
 // creation time would make it a different bead to every check that keys a
 // bead by (id, created_at).
 //
+// The one sanctioned caller is `gc storage recover-stranded --restore-purge`
+// (cmd/gc/infra_class_purge_restore.go), which restores only rows the purge
+// ledger recorded deleting: a verbatim import bypasses id minting, which is
+// safe only for rows the store itself held before. Any new caller is a
+// decision about that, and needs its own storeclass allowlist row.
+//
 // Edges are not imported: a row's inline Dependencies are ignored, and the
 // caller restores edges with DepAdd once the rows exist. The caller is also
 // responsible for refusing an id the store already holds; an implementation

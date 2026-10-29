@@ -920,3 +920,105 @@ func TestPurgeStatusNamesARemedyForAnUnreadableLedger(t *testing.T) {
 		t.Errorf("status over an unreadable ledger exited %d without a remedy:\n%s", code, out)
 	}
 }
+
+// TestRestorePurgeRestoresOnlyWhatAPurgeRecorded: a backup the ledger does
+// not know, or a known backup with a row added by hand, is refused before
+// anything is written, so the restore cannot write arbitrary rows under
+// fixed ids.
+func TestRestorePurgeRestoresOnlyWhatAPurgeRecorded(t *testing.T) {
+	city := newMCShapedPurgeCity(t)
+	var stdout, stderr bytes.Buffer
+	if code := runStrandedPurge(t, city, confirmedPurge(mcPurgeRows), &stdout, &stderr); code != 0 {
+		t.Fatalf("purge exited %d: %s", code, stderr.String())
+	}
+	backup := purgeBackupFiles(t, city)[0]
+	raw, err := os.ReadFile(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged := infraRecoverChoiceRecord{
+		Format: infraRecoverChoicesFormat, Choice: infraPurgeChoice, Store: infraRecoverChoiceStoreWork,
+		Entry: infraBackupEntry{Bead: beads.Bead{ID: "mc-forged", Title: "not purged", Status: "open", Type: "message", CreatedAt: mustParseTime(t, mcFirstMailAt)}},
+	}
+	line, err := json.Marshal(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := storageOperatorRequest{CityPath: city.cityPath, Cfg: city.cfg, FleetStopped: true}
+
+	// A known backup with a row added by hand.
+	if err := os.WriteFile(backup, append(append(raw, line...), '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := doStorageRestorePurge(context.Background(), request, backup, false, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "mc-forged") {
+		t.Errorf("a backup with a forged row restored (exit %d): %s", code, stderr.String())
+	}
+
+	// A file the ledger never recorded.
+	elsewhere := filepath.Join(t.TempDir(), "hand-built.jsonl")
+	if err := os.WriteFile(elsewhere, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := doStorageRestorePurge(context.Background(), request, elsewhere, false, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "not a backup the purge ledger records") {
+		t.Errorf("a backup the ledger does not know restored (exit %d): %s", code, stderr.String())
+	}
+	if got := countPurgeRowsOfType(purgeWorkRows(t, city), "message"); got != 0 {
+		t.Errorf("a refused restore wrote %d row(s)", got)
+	}
+}
+
+// TestPurgeStrandedResumesAfterTheEdgesWereRemoved: a run that died after it
+// removed the edges and before it deleted the rows resumes from its backup,
+// which still holds the edges, rather than refusing.
+func TestPurgeStrandedResumesAfterTheEdgesWereRemoved(t *testing.T) {
+	city := newMCShapedPurgeCity(t)
+	var workID string
+	for _, b := range purgeWorkRows(t, city) {
+		if b.Type == "task" {
+			workID = b.ID
+		}
+	}
+	if err := openPurgeWorkStore(t, city.workPath).DepAdd("mc-wisp-0001", workID, "relates-to"); err != nil {
+		t.Fatal(err)
+	}
+	prev := infraPurgeAfterEdgesRemoved
+	infraPurgeAfterEdgesRemoved = func() error { return errors.New("simulated crash after the edges") }
+	t.Cleanup(func() { infraPurgeAfterEdgesRemoved = prev })
+	var stdout, stderr bytes.Buffer
+	if code := runStrandedPurge(t, city, confirmedPurge(mcPurgeRows), &stdout, &stderr); code == 0 {
+		t.Fatalf("the crashed run exited 0")
+	}
+	infraPurgeAfterEdgesRemoved = prev
+	if deps, _ := openPurgeWorkStore(t, city.workPath).DepList("mc-wisp-0001", "down"); len(deps) != 0 {
+		t.Fatalf("the crash point is after the edge removal, yet the edge is still there: %+v", deps)
+	}
+	files := purgeBackupFiles(t, city)
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runStrandedPurge(t, city, confirmedPurge(mcPurgeRows), &stdout, &stderr); code != 0 {
+		t.Fatalf("the resume exited %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "resuming") {
+		t.Errorf("the run did not resume:\n%s", stdout.String())
+	}
+	if after := purgeBackupFiles(t, city); !slices.Equal(after, files) {
+		t.Errorf("backups = %v, want only %v", after, files)
+	}
+	records, err := readInfraPurgeBackup(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		if record.Entry.Bead.ID == "mc-wisp-0001" && len(record.Entry.Deps) != 1 {
+			t.Errorf("the backup lost the edge: %+v", record.Entry.Deps)
+		}
+	}
+	if code, out := runPurgeStatus(t, city); code != 0 || !strings.Contains(out, "purged stranded: 791 bead(s)") {
+		t.Errorf("status after the resume exited %d:\n%s", code, out)
+	}
+}

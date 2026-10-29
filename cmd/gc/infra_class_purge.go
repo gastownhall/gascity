@@ -198,6 +198,7 @@ var (
 	infraPurgeAfterBackup         = func() error { return nil }
 	infraPurgeBeforeBindingGuard  = func() error { return nil }
 	infraPurgeAfterDeleteRecorded = func() error { return nil }
+	infraPurgeAfterEdgesRemoved   = func() error { return nil }
 )
 
 // validateStrandedPurgeFlags refuses purge flags that do not belong together:
@@ -843,33 +844,58 @@ func infraPurgeKeys(rows []beads.Bead) []infraPurgeRowKey {
 }
 
 // infraPurgeBackupCovers returns the ids of entries the backup at path does
-// not hold exactly (the row and its edges as the work store holds them now).
-// None means a resume may delete from that backup.
+// not cover. An entry is covered when the backup holds its row exactly and
+// every edge it has now: a run interrupted after the delete removed the edges
+// and before it removed the rows leaves rows with fewer edges than their
+// backup, and that is still the backup to resume from. None means a resume
+// may delete from that backup.
 func infraPurgeBackupCovers(path string, entries []infraBackupEntry) ([]string, error) {
 	records, err := readInfraPurgeBackup(path)
 	if err != nil {
 		return nil, err
 	}
-	held := make(map[string][]byte, len(records))
+	held := make(map[string]infraBackupEntry, len(records))
 	for _, record := range records {
-		encoded, err := json.Marshal(record.Entry)
-		if err != nil {
-			return nil, err
-		}
-		held[record.Entry.Bead.ID] = encoded
+		held[record.Entry.Bead.ID] = record.Entry
 	}
 	var missing []string
 	for _, entry := range entries {
-		encoded, err := json.Marshal(entry)
-		if err != nil {
-			return nil, err
-		}
-		if !bytes.Equal(held[entry.Bead.ID], encoded) {
+		backed, ok := held[entry.Bead.ID]
+		if !ok || !infraPurgeEntryCovers(backed, entry) {
 			missing = append(missing, entry.Bead.ID)
 		}
 	}
 	sort.Strings(missing)
 	return missing, nil
+}
+
+// infraPurgeEntryCovers reports whether backed, a backup entry, holds now's
+// row exactly and a superset of its edges.
+func infraPurgeEntryCovers(backed, now infraBackupEntry) bool {
+	wantRow, err := json.Marshal(backed.Bead)
+	if err != nil {
+		return false
+	}
+	gotRow, err := json.Marshal(now.Bead)
+	if err != nil || !bytes.Equal(wantRow, gotRow) || backed.Class != now.Class {
+		return false
+	}
+	return infraPurgeEdgesSubset(now.Deps, backed.Deps) && infraPurgeEdgesSubset(now.Dependents, backed.Dependents)
+}
+
+// infraPurgeEdgesSubset reports whether every edge of sub is in super, with
+// its type and payload.
+func infraPurgeEdgesSubset(sub, super []infraBackupEdge) bool {
+	have := make(map[infraBackupEdge]bool, len(super))
+	for _, edge := range super {
+		have[edge] = true
+	}
+	for _, edge := range sub {
+		if !have[edge] {
+			return false
+		}
+	}
+	return true
 }
 
 // infraPurgeKeysGone returns the keys the work store no longer holds as the
@@ -932,6 +958,9 @@ func deleteInfraPurgeRows(source beads.Store, entries []infraBackupEntry) error 
 				}
 			}
 		}
+	}
+	if err := infraPurgeAfterEdgesRemoved(); err != nil {
+		return err
 	}
 	ids := make([]string, 0, len(entries))
 	for _, entry := range entries {

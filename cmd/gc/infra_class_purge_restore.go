@@ -19,6 +19,15 @@ package main
 //     store holds, or the edge could not be put back;
 //   - an edge carrying a payload needs a store that can write one.
 //
+// It restores only what a purge deleted: the backup must be one the ledger
+// recorded, every row must be one the ledger recorded for that backup (by id
+// and created_at), and every row must be of a purge type and classify as its
+// class. A hand-built file therefore cannot use this to write arbitrary rows
+// under fixed ids. This is the only sanctioned caller of
+// beads.VerbatimImporter (it needs the storeclass allowlist row when T1
+// lands): verbatim import bypasses id minting, and that is safe only for rows
+// the store itself held before.
+//
 // Rows are imported verbatim (beads.VerbatimImporter: bd import keeps the
 // timestamps) and re-read and compared field for field before any edge is
 // written, because adding an edge may touch a row's updated_at. Then the
@@ -31,11 +40,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
 // doStorageRestorePurge is --restore-purge.
@@ -48,6 +59,13 @@ func doStorageRestorePurge(ctx context.Context, request storageOperatorRequest, 
 	defer session.close()
 	target, source := session.target, session.source
 
+	backupPath = filepath.Clean(backupPath)
+	if abs, err := filepath.Abs(backupPath); err == nil {
+		backupPath = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(backupPath); err == nil {
+		backupPath = resolved
+	}
 	records, err := readInfraPurgeBackup(backupPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -56,6 +74,10 @@ func doStorageRestorePurge(ctx context.Context, request storageOperatorRequest, 
 	ledger, err := readInfraPurgeLedger(target)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v. Nothing was written\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if refusal := infraRestoreScopeRefusal(ledger, backupPath, records, session.manifest.Generation); refusal != "" {
+		fmt.Fprintf(stderr, "%s: %s. Nothing was written\n", logPrefix, refusal) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	all, err := source.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
@@ -268,4 +290,49 @@ func restorePurgeEdgePresent(source beads.Store, edge infraBackupEdge) (bool, er
 		}
 	}
 	return false, nil
+}
+
+// infraRestoreScopeRefusal names why the backup's rows are not all rows a
+// purge recorded deleting under it, or returns "" when they are.
+func infraRestoreScopeRefusal(ledger []infraPurgeLedgerRecord, backupPath string, records []infraRecoverChoiceRecord, gen coordclass.Generation) string {
+	recorded := map[infraPurgeRowKey]bool{}
+	known := false
+	for _, record := range ledger {
+		if filepath.Clean(record.Backup) != backupPath {
+			continue
+		}
+		known = true
+		if record.Event != infraPurgeEventBackedUp && record.Event != infraPurgeEventPurged {
+			continue
+		}
+		for _, key := range record.Rows {
+			key.CreatedAt = key.CreatedAt.UTC().Truncate(time.Second)
+			recorded[key] = true
+		}
+	}
+	if !known {
+		return fmt.Sprintf("%s is not a backup the purge ledger records; --%s restores only what a purge deleted", backupPath, strandedRestorePurgeFlag)
+	}
+	if len(records) == 0 {
+		return fmt.Sprintf("%s holds no rows", backupPath)
+	}
+	var stray []string
+	for _, record := range records {
+		b := record.Entry.Bead
+		key := infraPurgeRowKey{ID: b.ID, CreatedAt: b.CreatedAt.UTC().Truncate(time.Second)}
+		class, purgeable := infraPurgeTypes[b.Type]
+		switch {
+		case !recorded[key]:
+			stray = append(stray, fmt.Sprintf("%s (the ledger records no purge of this row under this backup)", key))
+		case !purgeable:
+			stray = append(stray, fmt.Sprintf("%s (type %q is not a purge type)", b.ID, b.Type))
+		case coordclass.ClassifyAt(b, gen) != class:
+			stray = append(stray, fmt.Sprintf("%s (classifies as %s, not %s)", b.ID, coordclass.ClassifyAt(b, gen), class))
+		}
+	}
+	if len(stray) > 0 {
+		sort.Strings(stray)
+		return fmt.Sprintf("%d row(s) of %s are not rows a purge deleted: %s", len(stray), backupPath, strings.Join(stray, "; "))
+	}
+	return ""
 }
