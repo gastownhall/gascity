@@ -71,3 +71,34 @@ func TestProcessAliveScriptRunsUnderBWKAwk(t *testing.T) {
 		}
 	}
 }
+
+// #7551: an agent pane running gc under its executable's on-disk name (a Nix
+// wrapProgram target is `.gc-wrapped`) satisfies process_names = ["gc"]. The
+// running test binary plays the gc binary, as GC_BIN = os.Executable() does.
+func TestPaneTreeRunsNamesAcceptsRunningGCExecutable(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	self := filepath.Base(exe)
+	if self == "gc" {
+		t.Fatalf("test executable is named %q; the wrapped-name case is vacuous", self)
+	}
+	out := strings.Join([]string{
+		"agent 100",
+		processSectionComm,
+		"100 1 zsh",
+		"101 100 " + self,
+		processSectionArgs,
+		"100 1 zsh",
+		"101 100 " + exe + " convoy control --serve --follow r/core.control-dispatcher",
+	}, "\n")
+
+	alive, degraded := paneTreeRunsNames(out, proctable.ProcessNameSet([]string{"gc"}))
+	if !alive || degraded {
+		t.Errorf("paneTreeRunsNames(%s child, [gc]) = alive %v, degraded %v; want alive, not degraded", self, alive, degraded)
+	}
+	if alive, _ := paneTreeRunsNames(out, proctable.ProcessNameSet([]string{"claude"})); alive {
+		t.Errorf("paneTreeRunsNames(%s child, [claude]) = alive, want not alive", self)
+	}
+}
