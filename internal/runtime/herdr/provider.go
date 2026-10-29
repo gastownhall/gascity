@@ -863,7 +863,10 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // never sees raw shell sessions at all); each bound candidate is verified
 // running before it is listed. Registry agents that don't correspond to any
 // bound gc session (foreign/manual agents) are appended under their own
-// names.
+// names. A registry entry with no registered name is a pane herdr detected
+// but nobody named: it is no session's runtime and is never listed as one —
+// the startup adoption barrier consumes this enumeration, and a phantom
+// entry here becomes an adopted session bead on every supervisor start.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	ctx := context.Background()
 	agents, err := p.c.listAgents(ctx)
@@ -884,6 +887,9 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 		}
 	}
 	for _, a := range agents {
+		if a.Name == "" {
+			continue
+		}
 		if !mapped[a.Name] && strings.HasPrefix(a.Name, prefix) && !seen[a.Name] {
 			seen[a.Name] = true
 			out = append(out, a.Name)

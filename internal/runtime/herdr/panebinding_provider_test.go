@@ -60,7 +60,11 @@ agent_get)
     printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"idle"}}}'
   fi ;;
 agent_list)
-  printf '%s' '{"result":{"agents":[]}}' ;;
+  if [ -e "$STATE/agents.json" ]; then
+    cat "$STATE/agents.json"
+  else
+    printf '%s' '{"result":{"agents":[]}}'
+  fi ;;
 agent_start)
   if [ -e "$STATE/name_taken" ]; then
     # A concurrent Start won the name and its agent is live: herdr rejects the
@@ -508,5 +512,51 @@ func TestListRunningSkipsGonePanes(t *testing.T) {
 	got, err := p.ListRunning("gastown__")
 	if err != nil || len(got) != 0 {
 		t.Fatalf("ListRunning = %v, %v; want empty", got, err)
+	}
+}
+
+// setRegistryAgents pins the fake's `agent list` answer to literal herdr JSON,
+// so a test exercises gc's decode against the real wire shape rather than this
+// package's own struct tags.
+func setRegistryAgents(t *testing.T, state, raw string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(state, "agents.json"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ListRunning lists exactly the bound sessions plus named foreign agents. A
+// registry entry with no registered name is a pane herdr detected but nobody
+// named: it is no session's runtime and must never be listed as one — the
+// startup adoption barrier consumes this enumeration, and a phantom kind-named
+// entry gets adopted as a session bead on every supervisor start.
+func TestListRunningOmitsUnnamedRegistryEntries(t *testing.T) {
+	p, state := newFakeHerdrProvider(t)
+	setState(t, state, "busy")
+	setRegistryAgents(t, state, `{"result":{"agents":[`+
+		`{"agent":"opencode","pane_id":"w3:p1","agent_status":"idle"},`+
+		`{"agent":"shell","name":"manual-1","pane_id":"w4:p1","agent_status":"idle"}]}}`)
+	for _, name := range []string{"alpha", "beta"} {
+		bindTestPane(t, p, name, bindModeShell)
+		if err := p.SetMeta(name, metaBoundName, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := map[string]bool{"alpha": true, "beta": true, "manual-1": true}
+	got, err := p.ListRunning("")
+	if err != nil {
+		t.Fatalf("ListRunning: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ListRunning = %v; want exactly %v", got, want)
+	}
+	for _, n := range got {
+		if !want[n] {
+			t.Fatalf("ListRunning = %v; unexpected %q", got, n)
+		}
+	}
+
+	if got, err := p.ListRunning("op"); err != nil || len(got) != 0 {
+		t.Fatalf("ListRunning(\"op\") = %v, %v; the unnamed kind-named pane must not list under any prefix", got, err)
 	}
 }
