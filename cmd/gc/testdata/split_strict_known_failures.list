@@ -3,6 +3,7 @@
 # scripts/split-strict-baseline (two or more full runs; a test that failed in
 # some runs but not all is refused unless it is in split_strict_known_flaky.list).
 # The nightly downward ratchet (--check) fails on an entry that now passes.
+TestAnEarlierMigrationsReclassifiedRowsKeepTheFenceOpen	fails under the gate: drain fence fails closed = false, want true (probe error: loading session "gcg-session-904dc4b6bb": getting bead "gcg-session-904dc4b6bb": bead not found)
 TestAnUnknownClassNameStaysOnTheWorkLedger	fails under the gate: unknown class resolved to 0x6315ef68e20, want the work store 0x6315cefe540
 TestApplyBeadEventToStoresDefersAnUnconfirmableClose	fails under the gate: convoy open after the sweep, want closed
 TestApplyBeadEventToStoresRevalidatesInferredCloses	fails under the gate: convoy status = "open", want "closed"
@@ -17,7 +18,9 @@ TestCLIJournalRowCloseAfterALostRingIsAnnounced	fails under the gate: op.changed
 TestCLIJournalRowWritesReachOpChangedThroughTheDoorbell	fails under the gate: op.changed statuses = [] (replies [refused test: no lane runs refused test: no lane runs refused test: no lane runs], events [bead.created gc-1])
 TestCLIMailStoreIsIdentityWhenNothingRelocates	fails under the gate: the one-shot messaging route returned 0x1042ae0b05e0, want the work store 0x1042ae2bb500
 TestCLIStorageRoutesBypassACityWithNoStorageSection	fails under the gate: the one-shot session route returned 0x141292219040, want the work store 0x1412906feb60
+TestCLIStorageRoutesKeepTheWorkStoreForABrokenSingleStoreCity	fails under the gate: a single-store city with a broken config routed sessions to 0x1abba9089160, want the work store 0x1abba85d8d20
 TestCLIStorageRoutesRefuseAnUnconvergedCity	fails under the gate: work resolved to 0x563e1e561c0 on a refused city, want the work store 0x563e278ce00
+TestCLIStorageRoutesRefuseWhenCityConfigFailsToLoad	fails under the gate: work resolved to 0xa08540efc0 on an unloadable config, want the work store 0xa086d06540
 TestCityRuntimeBeadReconcileTick_IdleClaimNudgeSeesReadyUnassignedRoutedTrigger	fails under the gate: idle-claim nudge count = "0", want 1 for ready routed unassigned trigger; output=""
 TestCityRuntimeBuildDesiredState_StandaloneIncludesRigStores	fails under the gate: store = &{0x1399298b5dc0 0x139929411140 2}, want city store
 TestCityRuntimeClassAccessorsAreIdentity	fails under the gate: CityRuntime.graphBeadStore() = 0x1399289b35a0, want cityBeadStore 0x139929104e00
@@ -97,6 +100,7 @@ TestConvergeListAllRigsAggregatesCityAndRigStores	fails under the gate: rig bead
 TestConvergeListAllRigsAppliesStateFilterAcrossScopes	fails under the gate: got entries map[string]string{"city active":"active"}, want only two active loops
 TestConvergeListAllRigsContinuesAfterRigStoreError	fails under the gate: frontend loop rig = "", want frontend
 TestConvergeTestGateUsesRigStorePath	fails under the gate: Execute: exit
+TestCrossStoreGateLaneReadsNothingOnASingleStoreCity	fails under the gate: the gate pass issued 2 read(s) on a single-store city, want 0
 TestDeadlineSkipWarnsOnlyForASkippedHandoff	fails under the gate: session beads = 0, want 1
 TestDeltaPassReadBudgetScalesWithWorkNotWithCorpus	fails under the gate: route repair over a 4-bead corpus cost 7 round trip(s) for 2 named bead(s), budget 3
 TestDemandReadTrace_LegNamesTheStoreThatServedIt	fails under the gate: minted wisp gc-1 has Ephemeral=true, want false: policy-wrapped=false (a wrapped front door maps the wisp policy onto the ephemeral tier under bd-1.0.5; a reloc
@@ -105,32 +109,46 @@ TestDetachedOrphanDeltaRepairsOnlyEventNamedBeads	fails under the gate: the delt
 TestDirectJSONWriterPayloadsValidateDeclaredSchemas	fails under the gate: run [sling dog-1 gcg-2 --dry-run --json] = 1; stderr="bead \"gcg-2\" not found in store city:test-city\n  verify the bead ID, or use --force if it exists in a r
 TestDispatchReadyWaitNudges_EnqueuesDeterministicNudge	fails under the gate: pending=0 inFlight=0 dead=0, want 1/0/0
 TestDoBdReleaseIfCurrentRefusesAnOldBdWithoutSQL	fails under the gate: openStoreAtForCity returned *splittest.view, want policy-wrapped *beads.BdStore
-TestDoMoleculeAutocloseResolvesRigStoreForRigBead	fails under the gate: rig molecule root status = "open", want closed (autoclose did not resolve the rig store)
 TestDoPrimeClaudeHookPersistsProviderSessionKeyFromHookStdin	fails under the gate: bead "gcg-1" is not in this store: bead not found
 TestDoPrimeCodexHookPersistsProviderSessionKeyFromHookStdin	fails under the gate: bead "gcg-1" is not in this store: bead not found
 TestDoPrimeGeminiHookPersistsProviderSessionKey	fails under the gate: bead "gcg-1" is not in this store: bead not found
 TestDoPrimeHookIgnoresProviderSessionKeyFromHookStdinForUnsupportedProvider	fails under the gate: bead "gcg-1" is not in this store: bead not found
 TestDoPrimeHookPersistsGenericProviderSessionKey	fails under the gate: bead "gcg-1" is not in this store: bead not found
 TestDoPrimeHookWarnsWhenRequiredProviderSessionKeyMissing	fails under the gate: bead "gcg-1" is not in this store: bead not found
-TestDoWispAutocloseUsesBeadsDirStoreRoot	fails under the gate: molecule status = "open", want closed
 TestDoorbellRetriesARowALocalWriteFenced	fails under the gate: rows waiting after the fence lifted = 1 (retry running true), want none and the retry ended
 TestDoorbellRowWaitsOutAQuiescentCity	fails under the gate: rows waiting after the city resumed = 1 (retry running true), want none and the retry ended
 TestExecutorIdentityResidueCheckSingleStoreCityComparesStoresByEngine	fails under the gate: sameStoreEngine(*main.beadPolicyGraphStore, *splittest.view) = false, want true: both serve the one city engine
 TestFindUniqueBeadAcrossStoresViewRefusesABindingRigCollision	fails under the gate: a binding/rig collision resolved to city (class binding); the write that follows lands on one ledger and not the other
 TestForeignBeadClosedTakesTheFactFromTheLiveRead	fails under the gate: convoy open after a confirmed close, want closed
 TestFormulaBeadResolverSkipsSuspendedRigs	fails under the gate: resolving gc-9003 in the serving rig = {ID: Title: Status: Type: Priority:<nil> CreatedAt:0001-01-01 00:00:00 +0000 UTC UpdatedAt:0001-01-01 00:00:00 +0000 UTC 
+TestFormulaCookAttachFailedMetaStampReportsTheLiveGraft	fails under the gate: attached root cc-2: bead "cc-2" is not in this store: bead not found
 TestFormulaCookAttachGraphV2AllowsDifferentLiveBareBeadRoots	fails under the gate: graph roots = [], want two independent roots
 TestFormulaCookAttachGraphV2ClosesSyntheticConvoyOnPostPrepareFailure	fails under the gate: formula cook succeeded, want post-prepare conflict failure
 TestFormulaCookAttachGraphV2CreatesFreshRootForBareBeadTarget	fails under the gate: workflow roots = [], want two independent graph.v2 attach roots
 TestFormulaCookAttachGraphV2RejectsLiveLegacySourceWorkflow	fails under the gate: formula cook succeeded, want source workflow conflict
+TestFormulaCookAttachGraphV2StampsMetaOnTheWorkflowRoot	fails under the gate: workflow root gcg-3: bead "gcg-3" is not in this store: bead not found
+TestFormulaCookAttachGraphV2StampsMetaUnderTheSourceWorkflowLock	fails under the gate: workflow root cc-3: bead "cc-3" is not in this store: bead not found
 TestFormulaCookAttachInRigScopeStaysServedOnASplitCity	fails under the gate: the rig store holds dep wf-1 -> gcg-2 (blocks) whose target it cannot resolve: bead "gcg-2" is not in this store: bead not found
 TestFormulaCookAttachIsIdempotent	fails under the gate: re-cook minted a second workflow root (gcg-2 then gcg-5); the idempotent lookup read a store that does not hold the root
+TestFormulaCookAttachStampsMetaOnTheRoot	fails under the gate: legacy-work: get attached root gcg-2: bead "gcg-2" is not in this store: bead not found
+TestFormulaCookAttachStampsMetaOnTheSubDAGRoot	fails under the gate: attached sub-DAG root gcg-2: bead "gcg-2" is not in this store: bead not found
 TestFormulaCookAttachStaysOnTheOneStoreOnASingleStoreCity	fails under the gate: graph-work: sub-DAG root gcg-3 is not in the one store: bead "gcg-3" is not in this store: bead not found
 TestFormulaCookGraphV2StaysOnTheOneStoreOnSingleStoreCity	fails under the gate: cooked root gcg-1 is not resident in the single store: bead "gcg-1" is not in this store: bead not found
 TestFormulaCookRootOnlyLegacyWispStaysOnTheOneStoreOnSingleStoreCity	fails under the gate: root-only wisp gcg-1 is not resident in the single store: bead "gcg-1" is not in this store: bead not found
 TestFormulaCookStandaloneGraphV2StampsRunRootStoreScope	fails under the gate: get root gcg-1: bead "gcg-1" is not in this store: bead not found
 TestFormulaCookStandaloneGraphV2StampsRunRootStoreScopeForRig	fails under the gate: get root gcg-1: bead "gcg-1" is not in this store: bead not found
+TestHandoffAutoOpensNoOpStore	fails under the gate: auto mail beads = 0, want 1
+TestHandoffContentRequireRidesAnUnrecordedRestart	fails under the gate: mail beads = 0, want 1
+TestHandoffKeyOnASessionTheControllerDoesNotRestartWarns	fails under the gate: mails = 0, want 2 (nothing dedups an unrecorded key)
+TestHandoffMailFailureClosesBothOps	fails under the gate: reading session bead: bead "gcg-1" is not in this store: bead not found
+TestHandoffNoticeRefusalReportsTheRestartOp	fails under the gate: reading session bead: bead "gcg-1" is not in this store: bead not found
+TestHandoffReplaySendsNoMail	fails under the gate: mail beads = 0, want the first run's only
+TestHandoffSameKeyRerunWithAnotherSubjectReplays	fails under the gate: mail beads = [], want the first run's subject A only
+TestHandoffSweptRestartOpReplaysWhenTheRowShowsTheRestart	fails under the gate: restarting the session row: bead "gcg-1" is not in this store: bead not found
+TestHookClaimDrainFenceFailsClosedOnAStorageGateRefusal	fails under the gate: code = 0, want 2 (fence failed closed: unknown, not empty and not drained); stderr=gc hook --claim: drain-pending probe unavailable for gcg-session-904dc4b6bb: 
+TestHookDiscoveryDrainFenceFailsClosedOnAStorageGateRefusal	fails under the gate: code = 0, want 2 (fence failed closed); stderr=gc hook: drain-pending probe unavailable for gcg-session-904dc4b6bb: loading session "gcg-session-904dc4b6bb": ge
 TestHookDrainLeavesADeferredSubmitForThePoller	fails under the gate: session beads = 0, want 1
+TestHookDrainPendingProbeCarriesTheStorageGateRefusal	fails under the gate: the probe's error lost the standing-refusal mark, so the fence cannot tell it from a hiccup: loading session "gcg-session-904dc4b6bb": getting bead "gcg-session
 TestHookIdentityFallbackResolvesAsBefore	fails under the gate: session beads = 0, want 1
 TestHookRequestBudget	fails under the gate: session beads = 0, want 1
 TestHookRequestBudgetOnAWorkerSite	fails under the gate: session beads = 0, want 1
@@ -177,20 +195,19 @@ TestOpenControlStoreAtForCityPreservesFileAndExecProviderStores	fails under the 
 TestOpenStoreAtForCityUsesRigBdStoreUnderFileBackedCity	fails under the gate: openStoreAtForCity(rig) returned *splittest.view, want *beads.BdStore
 TestOpenStoreAtForCityUsesRigFileStoreUnderBdBackedCity	fails under the gate: openStoreAtForCity(rig) returned *splittest.view, want *beads.FileStore
 TestOpenStoreAtForCityUsesRigScopedDoltConfigWithoutProcessEnvSync	fails under the gate: openStoreAtForCity returned *splittest.view, want *beads.BdStore
-TestOrderDispatchCachesLastRunBetweenDispatches	fails under the gate: expected only seed bead, got 2
 TestOrderDispatchClosedTrackingHistoryStillChecksOpenWispWork	fails under the gate: exec must NOT run — closed order-tracking history must not bypass the strict open-wisp check while prior step work is still open
 TestOrderDispatchExecCooldown	fails under the gate: exec should not have run — cooldown not elapsed
 TestOrderDispatchGateStaysOnTheOneStoreOnSingleStoreCity	fails under the gate: gate store list = [0x349c917560], want exactly the one store the city has
 TestOrderDispatchOpenWispWithOpenStepsBlocksRedispatch	fails under the gate: exec must NOT run — prior wisp has open step beads, the cooldown gate must treat it as in-flight (tr-kds01)
 TestOrderDispatchRefreshesCachedLastRunBeforeDueDispatch	fails under the gate: due cached dispatch did not refresh persisted order history
 TestOrderDispatchReservedOrdersRemainSubjectToTriggerEligibility	fails under the gate: not-due reserved order dispatches = 1, want 0
-TestOrderDispatchRigCooldownIndependent	fails under the gate: rig-a bead count = 2, want 1 (seed only)
 TestOrderDispatchSkipsOpenWork	fails under the gate: exec should not have run — open work exists
 TestOrderDispatchSkipsRigConditionWhenLegacyOpenWorkReadFails	fails under the gate: rig store has 1 new run bead(s), want 0 when legacy open-work state cannot be read
 TestOrderDispatchSkipsRigCooldownWhenLegacyOpenWorkReadFails	fails under the gate: rig store has 2 new run bead(s), want 0 when legacy last-run state cannot be read
 TestOrderDispatchSkipsRigEventWhenLegacyCursorReadFails	fails under the gate: rig store has 1 new run bead(s), want 0 when legacy event cursor cannot be read
 TestOrderDispatchTrackingStaysOnTheOneStoreOnSingleStoreCity	fails under the gate: ordersStoreFor returned *splittest.view(0x75527b020e0), want the identical store value 0x7552730e000
 TestOrderDispatchWispStaysOnTheOneStoreOnSingleStoreCity	fails under the gate: graphStoreFor returned *splittest.view(0x1ed316d78840), want the identical store value 0x1ed31656d260
+TestOrderGatePoursWorkIsLazyAndFailsSafe	fails under the gate: poursWork was asked on a single-store city
 TestOrderSweepTrackingConfirmAboveThresholdSweepsAndPrunes	fails under the gate: sc-02 should be preserved at the retain floor: bead "sc-02" is not in this store: bead not found
 TestOrderSweepTrackingRequiresConfirm	fails under the gate: cmdOrderSweepTrackingWithOptions (no confirm) = 0, want 1; stderr: warning: this city does not import required builtin pack(s) core; run "gc doctor --fix" to ad
 TestOrderTrackingRetentionWatchdog_LogsPrunedCount	fails under the gate: stderr = "", want 'pruned' in output
@@ -221,6 +238,7 @@ TestPrepareWaitWakeState_ContinuesWhenGlobalListCaps	fails under the gate: wait_
 TestPrepareWaitWakeState_ContinuesWhenOneSessionLookupCaps	fails under the gate: wait_lookup_capped_label = "", want session label
 TestPrepareWaitWakeState_UsesTargetedLookupForMissingSessionEpoch	fails under the gate: Get IDs = [gc-1 gc-2 gc-2], want targeted lookup for gc-1
 TestPrimeHookAsksForTheStepReminderBeforeProvingItsSession	fails under the gate: session beads = 0, want 1
+TestPrimeHookCapturesClaudeIDAfterSyncOnLiveKeylessRow	fails under the gate: get session bead: bead "gcg-1" is not in this store: bead not found
 TestPrimeHookReadsItsSessionStartMailWhileTheStepReminderIsOutstanding	fails under the gate: session beads = 0, want 1
 TestPrimeHookReapsPollersAlongsideItsReads	fails under the gate: session beads = 0, want 1
 TestQuiescentCloseReadsNothingAndConvergesAfterResume	fails under the gate: convoy open after resume, want closed
@@ -228,15 +246,21 @@ TestRefreshDesiredStateDefersFreshSessionCreationOnSingleStoreCity	fails under t
 TestRefusedCityNeverPlacesAClassOnTheWorkLedger	fails under the gate: work resolved to 0x13992869ec00 on a refused city, want the work store
 TestRelicEditQuiescesWithTheBindingCacheEqualToTheEngine	fails under the gate: city store is *splittest.storageCacheView
 TestRelocatedBeadClassesAgreeWithClassStoreRouting	fails under the gate: class graph: resolveClassStore routes away = true, relocatedBeadClasses names it = false
+TestRequestRestartSweptRestartOpReplaysOnlyWhilePending	fails under the gate: restarting the session row: bead "gcg-1" is not in this store: bead not found
 TestResolveClassStoreAgreesWithThePlacementPlan	fails under the gate: "work": the front door writes to 0x17d3cae56a0, the plan reads 0x17d3cd2c7e0 () — a bead written through one is invisible to the other
 TestResolveClassStoreIsIdentityWithoutRoutes	fails under the gate: class work resolved to 0x17d3c8b0260, want the work store 0x17d3b73c620
 TestResolveClassStoreLeavesWorkOnTheWorkStore	fails under the gate: work resolved to 0x6315e717240, want the work store 0x6315fda48c0
 TestResolveMailTargetsForCommand_RuntimeNameUsesLiveConfiguredNamedSessionMailbox	fails under the gate: recipients = []string{"gcw/gas-city-architect", "gcg-1", "gas-city-architect"}, want []string{"gcw/gas-city-architect", "gcw-1", "gas-city-architect"}
 TestResolveNudgeTarget_MaterializesNamedSessionFromAlias	fails under the gate: resolveSessionID(created canonical): session not found: "myrig--witness"
+TestRestartVerbsDoNotReplayEachOthersKey	fails under the gate: mail beads = 0, want 1
+TestRestartVerbsKeepAnInvalidKeyInvalid	fails under the gate: reading session bead: bead "gcg-1" is not in this store: bead not found
 TestRouteRecoveryDeltaReadCountDoesNotScaleWithCandidates	fails under the gate: 2 candidates cost 5 read(s) and 8 cost 17; the re-verify is still per-bead
 TestRouteRecoveryDeltaRepairsOnlyEventNamedBeadsAndBatchesTheReVerify	fails under the gate: delta pass issued 7 read(s) for 3 candidates, want 1 batched IN-list read
 TestRouteRecoveryFallsBackToTheBatchWriteWhenTheCASIsUnsupported	fails under the gate: CAS calls = 0, want 1 (tried before falling back)
 TestRouteWaitList_ThreeRungByteIdentical	fails under the gate: persisted wait count = 0, want 2
+TestRowFirstRestartDurableWriteFailedPokeExitsZero	fails under the gate: open messages = 0, want 1
+TestRowFirstRestartWorkerSiteSkipsMeta	fails under the gate: session beads = 0, want exactly one: []
+TestRowFirstRestartWorkerSiteTakesTheCheckedWrite	fails under the gate: session beads = 0, want exactly one: []
 TestRunControlDispatcherRejectsCrossScopeDrain	fails under the gate: error = loading control bead gc-1 from the scoped control store for scope "/data/tmp/gct2443462-2641091013/TestRunControlDispatcherRejectsCrossScopeDrain1908007
 TestRunControlDispatcherRetryEvalRecyclesPooledSession	fails under the gate: runControlDispatcher(retry-eval): loading bead gcg-4: getting bead "gcg-4": bead not found
 TestRunControllerLatchesSessionReconciler	fails under the gate: v2 planner did not boot within the hang budget (1m0s):
@@ -253,10 +277,12 @@ TestSessionKillOpKeyReplaysAcrossARestart	fails under the gate: reviving the ses
 TestSessionKillOpRecordsTheGenerationAndCloses	fails under the gate: reading session bead: bead "gcg-1" is not in this store: bead not found
 TestSessionKillOpRefusesAGenerationThatMovedBeforeTheLease	fails under the gate: minting generation 5: bead "gcg-1" is not in this store: bead not found
 TestSessionKillOpUnreadableRow	fails under the gate: damaging the session row: bead "gcg-1" is not in this store: bead not found
+TestSessionResetKeyCannotNameARestartRequestsOp	fails under the gate: mail beads = 0, want 1
 TestSessionResetOpRecordsARestartFresh	fails under the gate: reading session bead: bead "gcg-1" is not in this store: bead not found
 TestSessionResetOpRollbackOrderAtPropose	fails under the gate: reading session bead: bead "gcg-1" is not in this store: bead not found
 TestSessionStartMailRefusesAClosedOwnSession	fails under the gate: session beads = 0, want 1
 TestSessionStartWithoutAProvenSessionServesNothingForAClosedSession	fails under the gate: session beads = 0, want 1
+TestSessionSubmitFallbackResumesTheHoldOfAnOpenLaneOp	fails under the gate: suspending the session: loading session "gcg-1": bead "gcg-1" is not in this store: bead not found
 TestSessionSuspendOpRecordsBothPaths	fails under the gate: reading session bead: bead "gcg-1" is not in this store: bead not found
 TestSessionVerbOpExpiredOpenOpReplaysFailed	fails under the gate: reading session bead: bead "gcg-1" is not in this store: bead not found
 TestSessionVerbOpInProgressRefuses	fails under the gate: reading session bead: bead "gcg-1" is not in this store: bead not found
@@ -275,14 +301,7 @@ TestSingleStoreCityIsUntouchedByTheEmitSeam	fails under the gate: the resolver d
 TestSplitEnvTopologies	fails under the gate: resolveClassStore("graph") on the single-store topology did not collapse to the work store
 TestSplitEnvTopologiesWithRigLeg	fails under the gate: resolveClassStore("graph") on the single-store topology did not collapse to the work store
 TestSplitTopologyConformance	fails under the gate: minted wisp gc-2 has Ephemeral=true, want false: policy-wrapped=false (a wrapped front door maps the wisp policy onto the ephemeral tier under bd-1.0.5; a reloc
-TestStartupHealthEpisodesCheckActiveQuarantineBelowThresholdIsError	fails under the gate: status = 0, want error (active quarantine below count threshold must still surface): &doctor.CheckResult{Name:"startup-health-episodes", Status:0, Severity:0, M
-TestStartupHealthEpisodesCheckAtThresholdIsError	fails under the gate: status = 0, want error (at/above wake-attempt threshold): &doctor.CheckResult{Name:"startup-health-episodes", Status:0, Severity:0, Message:"no active startup-h
-TestStartupHealthEpisodesCheckDeterministicOrdering	fails under the gate: status = 0, want error: &doctor.CheckResult{Name:"startup-health-episodes", Status:0, Severity:0, Message:"no active startup-health episodes", Details:[]string(
-TestStartupHealthEpisodesCheckDuplicateSessionNamesBothReported	fails under the gate: status = 0, want error: &doctor.CheckResult{Name:"startup-health-episodes", Status:0, Severity:0, Message:"no active startup-health episodes", Details:[]string(
-TestStartupHealthEpisodesCheckMalformedEpisodeIsError	fails under the gate: status = 0, want error (malformed episode missing session name): &doctor.CheckResult{Name:"startup-health-episodes", Status:0, Severity:0, Message:"no active st
-TestStartupHealthEpisodesCheckMixedKindsBothDistinguished	fails under the gate: status = 0, want error: &doctor.CheckResult{Name:"startup-health-episodes", Status:0, Severity:0, Message:"no active startup-health episodes", Details:[]string(
-TestStartupHealthEpisodesCheckRendersRequiredFields	fails under the gate: status = 0, want error: &doctor.CheckResult{Name:"startup-health-episodes", Status:0, Severity:0, Message:"no active startup-health episodes", Details:[]string(
-TestStartupHealthEpisodesCheckStalledResetKindIsDistinguished	fails under the gate: status = 0, want error: &doctor.CheckResult{Name:"startup-health-episodes", Status:0, Severity:0, Message:"no active startup-health episodes", Details:[]string(
+TestStandingGateRefusalIsNotTransient	fails under the gate: stranded-city refusal: err=loading session "gcg-session-904dc4b6bb": getting bead "gcg-session-904dc4b6bb": bead not found transient=false failsClosed=false; wa
 TestStorageGateServesAConvergedCityFromTheBinding	fails under the gate: work stopped resolving to the work store on a converged city
 TestStoreOpensWithoutTheMemoStayOwned	fails under the gate: store 0 closed 0 times, want 1
 TestSweepOrderTrackingCommandClosesAllStaleTracking	fails under the gate: Get(gcg-1): bead "gcg-1" is not in this store: bead not found
@@ -291,10 +310,11 @@ TestSweepOrderTrackingCommandPrunesClosedTrackingWithConfiguredPolicy	fails unde
 TestWaitInspectJSONFailuresUseCommandFailureEnvelope	fails under the gate: stderr = "gc wait inspect: bead \"wj-1\" is not in this store: bead not found\n", want "is not a wait"
 TestWaitNudgeWithdrawalClosesTheWorkStoreAfterUsingItOnAnUnrelocatedCity	fails under the gate: fixture is relocated: the nudges route did not hand back the work store
 TestWaitReadyJSONReportsClosedWaitRetryIdentity	fails under the gate: close wait: bead "gcg-1" is not in this store: bead not found
-TestWakeStartRefusal	fails under the gate: WakeStartRefusal = "", want "startup-health quarantine"
 TestWarmupBootPathWorkBeadStaysOnTheWorkLedger	fails under the gate: work resolved to 0x7552903d3a0 on a converged city, want the work store 0x755293156a0
 TestWarmupMailStaysOnTheWorkStoreWithoutAStorageSection	fails under the gate: an unsplit city's warm-up mail is not in its work store: bead "gcg-1" is not in this store: bead not found
 TestWispAutocloseClosesRootOnlyWispViaGraphResidentInputConvoy	fails under the gate: DepAdd(tracks) in the graph store: bead "gc-1" is not in this store: bead not found
+TestWispGCAbandonedRootHolderGuardSeesAWorkSource	fails under the gate: attached wisp gc-1 status="closed" with a live work source, want open
+TestWispGCClosesAnAbandonedWorkClassMoleculeRoot	fails under the gate: abandoned work-class molecule root gc-1 status="open", want closed
 TestWispGC_UnsplitCitySessionPurgeLeavesWorkStore	fails under the gate: closed molecule Get = <nil>, want ErrNotFound (the GC must have run for this test to mean anything)
 TestWispStepInjectionAnswersThroughTheController	fails under the gate: session beads = 0, want 1
 TestWispStepInjectionFallsBackOnAnyControllerFailure	fails under the gate: session beads = 0, want 1
