@@ -298,7 +298,7 @@ func (cr *CityRuntime) poolDeathHook() poolDeathHookRunner {
 
 // runPoolDeathHook runs one name's on_death hook and reports it on stderr
 // the way the tick always has.
-func runPoolDeathHook(run poolDeathHookRunner, stderr io.Writer, _ events.Recorder, name string, info poolDeathInfo) error {
+func runPoolDeathHook(run poolDeathHookRunner, stderr io.Writer, rec events.Recorder, name string, info poolDeathInfo) error {
 	out, err := run(info.Command, info.Dir, info.Env)
 	if err != nil {
 		fmt.Fprintf(stderr, "on_death %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
@@ -309,6 +309,7 @@ func runPoolDeathHook(run poolDeathHookRunner, stderr io.Writer, _ events.Record
 	// and is left alone.
 	if strings.Contains(out, config.RecoveryHookMarker) {
 		fmt.Fprintf(stderr, "on_death %s: %s\n", name, strings.TrimSpace(out)) //nolint:errcheck // best-effort stderr
+		publishRecoveryReleaseFailures(rec, out, info.Agent)
 	}
 	return err
 }

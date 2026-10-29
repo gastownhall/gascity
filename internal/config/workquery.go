@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -1533,9 +1534,37 @@ type RecoveryFailure struct {
 // ParseRecoveryFailures reads the failure lines the default on_death/on_boot
 // hooks print and returns one RecoveryFailure per marked line. Lines that do
 // not match the hooks' format are skipped.
-func ParseRecoveryFailures(_ string) []RecoveryFailure {
-	return nil // RED skeleton: parsing lands in the GREEN step.
+//
+// A bd error can span several lines; the lines after a marked line, up to the
+// next marked line, belong to that failure's Error.
+func ParseRecoveryFailures(out string) []RecoveryFailure {
+	var failures []RecoveryFailure
+	open := false // the last marked line was a failure, so continuation lines extend it
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, RecoveryHookMarker) {
+			m := recoveryFailureLine.FindStringSubmatch(line)
+			if m == nil {
+				open = false
+				continue
+			}
+			failures = append(failures, RecoveryFailure{Hook: m[1], BeadID: m[2], Error: m[3]})
+			open = true
+			continue
+		}
+		if open {
+			failures[len(failures)-1].Error += "\n" + line
+		}
+	}
+	for i := range failures {
+		failures[i].Error = strings.TrimRight(failures[i].Error, "\n")
+	}
+	return failures
 }
+
+// recoveryFailureLine matches the failure line the default recovery hooks print:
+// `gc-recovery: on_death release failed for <id>: <error>` (and the on_boot
+// `reopen` form). It is the parse side of the printf in buildOnDeath/buildOnBoot.
+var recoveryFailureLine = regexp.MustCompile(`^` + regexp.QuoteMeta(RecoveryHookMarker) + ` (on_death|on_boot) (?:release|reopen) failed for (\S+): ?(.*)$`)
 
 // EffectiveOnDeath returns the on_death command for this agent.
 // If OnDeath is set, returns it. Otherwise returns the default recovery hook
@@ -1567,11 +1596,15 @@ func recoveryReadShell(hook, name, read, filter string) string {
 		`else printf '` + RecoveryHookMarker + ` ` + hook + ` read failed: bd ` + name + ` (exit %s)\n' "$?" >&3; fi; `
 }
 
+// buildOnDeath returns the default on_death hook for a pool instance, and ""
+// for any other agent: a named agent's session is not a leased pool seat, so
+// there is nothing to release (and the controller only runs on_death for pool
+// instances).
 func buildOnDeath(a *Agent, topo QueryTopology) string {
-	route := a.QualifiedName()
-	if a.PoolName != "" {
-		route = a.PoolName
+	if a.PoolName == "" {
+		return ""
 	}
+	route := a.PoolName
 	_ = topo
 	listRead := recoveryReadShell("on_death", "list",
 		`bd list --assignee=`+a.QualifiedName()+` --status=in_progress --json`,
@@ -1579,21 +1612,24 @@ func buildOnDeath(a *Agent, topo QueryTopology) string {
 	ephemeralRead := recoveryReadShell("on_death", "query",
 		bdQueryEphemeralStatusShell("in_progress"),
 		`jq -r --arg assignee `+shellquote.Quote(a.QualifiedName())+` '.[] | select((.assignee // "") == $assignee) | [.id, `+jqMeta(beadmeta.RunTargetMetadataKey)+`, `+jqMeta(beadmeta.RoutedToMetadataKey)+`] | @tsv'`)
-	// Reset both assignee and status: clearing assignee alone leaves the bead
-	// invisible to every work_query tier (Tier 1 needs assignee match, Tiers
-	// 2/3 only match "ready" status). The next worker re-claims via Tier 3.
-	// If routed metadata is missing entirely, backfill the canonical
-	// gc.run_target route so reopened direct-assigned work does not stay
-	// invisible.
+	// Release through `bd reclaim --id`, which reverts a bead to open and clears
+	// its assignee only when the lease is expired, so a bead a live session has
+	// since re-claimed is left alone. It is deliberately run without
+	// --older-than, --force or --assignee, as BdStore.ReclaimStale does.
+	// A bead the reclaim did not revert (count 0, `reclaimed` null) is not
+	// written; the route backfill below follows only a bead whose id appears in
+	// the reclaimed list. If routed metadata is missing entirely, backfill the
+	// canonical gc.run_target route so reopened direct-assigned work does not
+	// stay invisible.
 	return `exec 3>&1; { ` +
 		listRead +
 		ephemeralRead +
 		`} | ` +
 		`while IFS="$(printf '\t')" read -r id run_target routed_to; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`if [ -n "$run_target" ] || [ -n "$routed_to" ]; then ` +
-		`if ! err=$(bd update "$id" --assignee "" --status open 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
-		`else if ! err=$(bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+route) + ` 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
+		`if ! out=$(bd reclaim --id "$id" --json 2>&1); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$out"; continue; fi; ` +
+		`if [ -z "$run_target" ] && [ -z "$routed_to" ] && printf '%s' "$out" | jq -e --arg id "$id" '(.reclaimed // []) | any(.id == $id)' >/dev/null 2>&1; then ` +
+		`if ! err=$(bd update "$id" --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+route) + ` 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
 		`fi; ` +
 		`done`
 }

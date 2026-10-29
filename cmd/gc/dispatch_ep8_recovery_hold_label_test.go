@@ -61,6 +61,10 @@ case "$1" in
     printf '%s\n' "$*" >> "$BD_LOG"
     printf '[{"id":"ga-held-work","type":"task","labels":["hold:mayor"],"metadata":{"gc.run_target":"gascity/builder"}}]'
     ;;
+  reclaim)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '{"reclaimed":[{"id":"ga-held-work"}],"count":1}'
+    ;;
   update)
     printf '%s\n' "$*" >> "$BD_LOG"
     ;;
@@ -69,8 +73,8 @@ case "$1" in
     ;;
 esac
 `)
-	if !strings.Contains(log, "update ga-held-work --assignee  --status open") {
-		t.Fatalf("on_death hook log = %q, want the hold-labeled bead reopened unconditionally (buildOnDeath is correctly hold-blind: recovery is not a dispatch decision)", log)
+	if !strings.Contains(log, "reclaim --id ga-held-work --json") {
+		t.Fatalf("on_death hook log = %q, want the hold-labeled bead reclaimed unconditionally (buildOnDeath is correctly hold-blind: recovery is not a dispatch decision)", log)
 	}
 
 	// The crashed session's on_death hook just reopened ga-held-work as

@@ -100,10 +100,10 @@ func oldEffectiveOnDeath(a *Agent, topo QueryTopology) string {
 	if a.OnDeath != "" {
 		return a.OnDeath
 	}
-	route := a.QualifiedName()
-	if a.PoolName != "" {
-		route = a.PoolName
+	if a.PoolName == "" {
+		return ""
 	}
+	route := a.PoolName
 	_ = topo
 	ephemeralRead := `if r=$(` + bdQueryEphemeralStatusShell("in_progress") + ` 2>/dev/null); then printf '%s\n' "$r" | ` +
 		`jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; ` +
@@ -116,9 +116,9 @@ func oldEffectiveOnDeath(a *Agent, topo QueryTopology) string {
 		`} | ` +
 		`while IFS="$(printf '\t')" read -r id run_target routed_to; do ` +
 		`[ -z "$id" ] && continue; ` +
-		`if [ -n "$run_target" ] || [ -n "$routed_to" ]; then ` +
-		`if ! err=$(bd update "$id" --assignee "" --status open 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
-		`else if ! err=$(bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+route) + ` 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
+		`if ! out=$(bd reclaim --id "$id" --json 2>&1); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$out"; continue; fi; ` +
+		`if [ -z "$run_target" ] && [ -z "$routed_to" ] && printf '%s' "$out" | jq -e --arg id "$id" '(.reclaimed // []) | any(.id == $id)' >/dev/null 2>&1; then ` +
+		`if ! err=$(bd update "$id" --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+route) + ` 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
 		`fi; ` +
 		`done`
 }

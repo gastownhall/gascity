@@ -607,6 +607,7 @@ go_library(
         "reconcile_tick.go",
         "reconcile_wake.go",
         "reconcile_wiring.go",
+        "recovery_release_failed_event.go",
         "remote_client.go",
         "remote_stage.go",
         "remote_target.go",

@@ -6562,15 +6562,19 @@ on_boot = "echo booted"
 
 func TestEffectiveOnDeathDefault(t *testing.T) {
 	a := Agent{
-		Name:              "dog",
+		Name:              "dog-1",
 		Dir:               "myrig",
 		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		PoolName: "myrig/dog",
 	}
 	got := a.EffectiveOnDeath()
-	for _, want := range []string{"bd list --assignee=myrig/dog", "--status=in_progress", `--assignee "" --status open`, "--set-metadata 'gc.run_target=myrig/dog'"} {
+	for _, want := range []string{"bd list --assignee=myrig/dog-1", "--status=in_progress", `bd reclaim --id "$id" --json`, "--set-metadata 'gc.run_target=myrig/dog'"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("EffectiveOnDeath() = %q, want %q", got, want)
 		}
+	}
+	if strings.Contains(got, `--assignee ""`) || strings.Contains(got, "--status open") {
+		t.Errorf("EffectiveOnDeath() = %q, want release through bd reclaim, not a bd update of assignee/status", got)
 	}
 }
 
@@ -6587,110 +6591,8 @@ func TestEffectiveOnDeathCustom(t *testing.T) {
 
 func TestEffectiveOnDeathFixedAgent(t *testing.T) {
 	a := Agent{Name: "mayor"}
-	got := a.EffectiveOnDeath()
-	for _, want := range []string{"bd list --assignee=mayor", "--status=in_progress", `--assignee "" --status open`, "--set-metadata 'gc.run_target=mayor'"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("EffectiveOnDeath() = %q, want %q", got, want)
-		}
-	}
-}
-
-func TestEffectiveOnDeathBackfillsMissingRouteOnReopen(t *testing.T) {
-	a := Agent{
-		Name:              "dog-1",
-		Dir:               "hello-world",
-		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
-		PoolName: "hello-world/dog",
-	}
-
-	log := runLifecycleHookCommand(t, a.EffectiveOnDeath(), `#!/bin/sh
-set -eu
-case "$1" in
-  list)
-    printf '%s\n' "$*" >> "$BD_LOG"
-    printf '[{"id":"ga-missing","type":"wisp","metadata":{}}]'
-    ;;
-  update)
-    printf '%s\n' "$*" >> "$BD_LOG"
-    ;;
-  *)
-    exit 1
-    ;;
-esac
-`)
-	if !strings.Contains(log, "list --assignee=hello-world/dog-1 --status=in_progress --json") {
-		t.Fatalf("hook log = %q, want storage-spanning list query", log)
-	}
-	if !strings.Contains(log, "--status open") {
-		t.Fatalf("hook log = %q, want reopened status", log)
-	}
-	if !strings.Contains(log, "--set-metadata gc.run_target=hello-world/dog") {
-		t.Fatalf("hook log = %q, want fallback route for ownerless reopened work", log)
-	}
-}
-
-func TestEffectiveOnDeathPreservesExistingRouteOnReopen(t *testing.T) {
-	a := Agent{
-		Name:              "dog-1",
-		Dir:               "hello-world",
-		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
-		PoolName: "hello-world/dog",
-	}
-
-	log := runLifecycleHookCommand(t, a.EffectiveOnDeath(), `#!/bin/sh
-set -eu
-case "$1" in
-  list)
-    printf '%s\n' "$*" >> "$BD_LOG"
-    printf '[{"id":"ga-routed","type":"wisp","metadata":{"gc.routed_to":"already/routed"}}]'
-    ;;
-  update)
-    printf '%s\n' "$*" >> "$BD_LOG"
-    ;;
-  *)
-    exit 1
-    ;;
-esac
-`)
-	if !strings.Contains(log, "list --assignee=hello-world/dog-1 --status=in_progress --json") {
-		t.Fatalf("hook log = %q, want storage-spanning list query", log)
-	}
-	if !strings.Contains(log, "--status open") {
-		t.Fatalf("hook log = %q, want reopened status", log)
-	}
-	if strings.Contains(log, "--set-metadata") {
-		t.Fatalf("hook log = %q, want existing route preserved without overwrite", log)
-	}
-}
-
-func TestEffectiveOnDeathPreservesExistingRunTargetOnReopen(t *testing.T) {
-	a := Agent{
-		Name:              "dog-1",
-		Dir:               "hello-world",
-		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
-		PoolName: "hello-world/dog",
-	}
-
-	log := runLifecycleHookCommand(t, a.EffectiveOnDeath(), `#!/bin/sh
-set -eu
-case "$1" in
-  list)
-    printf '%s\n' "$*" >> "$BD_LOG"
-    printf '[{"id":"ga-run-target","type":"wisp","metadata":{"gc.run_target":"hello-world/dog"}}]'
-    ;;
-  update)
-    printf '%s\n' "$*" >> "$BD_LOG"
-    ;;
-  *)
-    exit 1
-    ;;
-esac
-`)
-	if !strings.Contains(log, "update ga-run-target --assignee  --status open") {
-		t.Fatalf("hook log = %q, want run_target-only work reopened", log)
-	}
-	if strings.Contains(log, "--set-metadata") {
-		t.Fatalf("hook log = %q, want existing gc.run_target preserved without gc.routed_to overwrite", log)
+	if got := a.EffectiveOnDeath(); got != "" {
+		t.Errorf("EffectiveOnDeath() = %q, want no default hook for a non-pool agent", got)
 	}
 }
 
@@ -6713,6 +6615,10 @@ case "$1" in
     printf '%s\n' "$*" >> "$BD_LOG"
     printf '[{"id":"ga-ephemeral-death","assignee":"hello-world/dog-1","status":"in_progress","ephemeral":true,"metadata":{}}]'
     ;;
+  reclaim)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '{"reclaimed":[{"id":"%s"}],"count":1}' "$3"
+    ;;
   update)
     printf '%s\n' "$*" >> "$BD_LOG"
     ;;
@@ -6724,7 +6630,7 @@ esac
 	if !strings.Contains(log, "query --json ephemeral=true AND status=in_progress --limit=0") {
 		t.Fatalf("hook log = %q, want ephemeral in-progress query", log)
 	}
-	if !strings.Contains(log, "update ga-ephemeral-death --assignee  --status open --set-metadata gc.run_target=hello-world/dog") {
+	if !strings.Contains(log, "reclaim --id ga-ephemeral-death --json") || !strings.Contains(log, "update ga-ephemeral-death --set-metadata gc.run_target=hello-world/dog") {
 		t.Fatalf("hook log = %q, want ephemeral in-progress work reopened with fallback route", log)
 	}
 }
@@ -6748,6 +6654,10 @@ case "$1" in
     printf '%s\n' "$*" >> "$BD_LOG"
     printf '[{"id":"ga-legacy-ephemeral-death","assignee":"hello-world/dog-1","status":"in_progress","ephemeral":true,"metadata":{}}]'
     ;;
+  reclaim)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '{"reclaimed":[{"id":"%s"}],"count":1}' "$3"
+    ;;
   update)
     printf '%s\n' "$*" >> "$BD_LOG"
     ;;
@@ -6759,7 +6669,7 @@ esac
 	if !strings.Contains(log, "query --json ephemeral=true AND status=in_progress --limit=0") {
 		t.Fatalf("hook log = %q, want legacy ephemeral in-progress query", log)
 	}
-	if !strings.Contains(log, "update ga-legacy-ephemeral-death --assignee  --status open --set-metadata gc.run_target=hello-world/dog") {
+	if !strings.Contains(log, "reclaim --id ga-legacy-ephemeral-death --json") || !strings.Contains(log, "update ga-legacy-ephemeral-death --set-metadata gc.run_target=hello-world/dog") {
 		t.Fatalf("hook log = %q, want legacy ephemeral in-progress work reopened with fallback route", log)
 	}
 }

@@ -109,13 +109,13 @@ func TestPhase0ConfigDefaults_OnBootUnclaimsRoutedWorkByDefault(t *testing.T) {
 }
 
 func TestPhase0ConfigDefaults_OnDeathUnclaimsAssignedWorkByDefault(t *testing.T) {
-	a := Agent{Name: "worker", Dir: "myrig"}
+	a := Agent{Name: "worker-1", Dir: "myrig", PoolName: "myrig/worker"}
 
 	got := a.EffectiveOnDeath()
 	for _, want := range []string{
-		"bd list --assignee=myrig/worker",
+		"bd list --assignee=myrig/worker-1",
 		"--status=in_progress",
-		"--assignee \"\"",
+		"bd reclaim --id",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("EffectiveOnDeath() = %q, want %q", got, want)

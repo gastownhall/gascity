@@ -524,7 +524,7 @@ func planPoolOnBootHooks(cfg *config.City, cityPath string, stderr io.Writer) []
 // Each hook's log lines are buffered and written in a single call, so an
 // agent's failure and its recovery diagnostic stay together instead of
 // interleaving with another agent's.
-func runPoolOnBootHooks(hooks []poolOnBootHook, runner ScaleCheckRunner, stderr io.Writer, _ events.Recorder) {
+func runPoolOnBootHooks(hooks []poolOnBootHook, runner ScaleCheckRunner, stderr io.Writer, rec events.Recorder) {
 	if len(hooks) == 0 {
 		return
 	}
@@ -574,6 +574,7 @@ func runPoolOnBootHooks(hooks []poolOnBootHook, runner ScaleCheckRunner, stderr 
 			// verbatim and carries no marker, so its arbitrary stdout is left alone.
 			if strings.Contains(out, config.RecoveryHookMarker) {
 				fmt.Fprintf(&block, "on_boot %s: %s\n", hook.agent, strings.TrimSpace(out)) //nolint:errcheck // bytes.Buffer
+				publishRecoveryReleaseFailures(rec, out, hook.agent)
 			}
 		}(hook)
 	}

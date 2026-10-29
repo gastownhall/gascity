@@ -129,8 +129,15 @@ esac
 		if !strings.Contains(log, "update ga-1 --set-metadata gc.run_target=hello-world/dog") {
 			t.Fatalf("bd log = %q, want run_target backfill for the reclaimed bead", log)
 		}
-		if strings.Contains(log, "--status") || strings.Contains(log, "--assignee") {
-			t.Fatalf("bd log = %q, the backfill must not touch status or assignee", log)
+		for _, line := range strings.Split(log, "\n") {
+			// The initial `bd list --assignee=... --status=...` read is expected;
+			// only the writes (reclaim/update) must stay off status and assignee.
+			if strings.HasPrefix(line, "list ") {
+				continue
+			}
+			if strings.Contains(line, "--status") || strings.Contains(line, "--assignee") {
+				t.Fatalf("bd log = %q, the backfill must not touch status or assignee (line %q)", log, line)
+			}
 		}
 		if strings.Contains(stdout, RecoveryHookMarker) {
 			t.Fatalf("stdout = %q, a clean release prints no recovery diagnostic", stdout)

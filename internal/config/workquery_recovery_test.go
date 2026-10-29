@@ -27,7 +27,7 @@ func TestDefaultRecoveryHooksSurfaceFailures(t *testing.T) {
 		name   string
 		script string
 	}{
-		{"on_death", (&Agent{Name: "worker"}).EffectiveOnDeathFor(QueryTopology{})},
+		{"on_death", (&Agent{Name: "worker-1", PoolName: "worker"}).EffectiveOnDeathFor(QueryTopology{})},
 		{"on_boot", (&Agent{Name: "worker"}).EffectiveOnBootFor(QueryTopology{})},
 	} {
 		if !strings.Contains(tc.script, RecoveryHookMarker) {
