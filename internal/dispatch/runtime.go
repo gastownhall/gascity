@@ -189,14 +189,15 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 	opts.view = &rootView{}
 	if bead.Status != "open" {
 		// A control bead that is not open — typically stuck at in_progress
-		// after a rogue `bd update --status in_progress` from a worker —
-		// can silently strand an entire workflow because the serve loop
-		// treats the no-op return as a successful processed cycle. Emit a
-		// specific trace line so the skip is visible in the dispatcher
-		// trace log instead of looking identical to a processed cycle.
-		// See bug investigation on workflow ga-ttn5z where 20+ minutes of
-		// processing cycles silently no-op'd because ga-fw2fm had been
-		// moved to in_progress by its implement-change worker.
+		// after a rogue `bd update --status in_progress` from a worker — is a
+		// no-op: nothing here can advance it. Emit a specific trace line so
+		// the skip is visible in the dispatcher trace log, and return
+		// Processed=false with a nil error so the cmd dispatch layer can
+		// report the no-op to the serve drain instead of letting it count as
+		// a processed cycle. See the bug investigation on workflow ga-ttn5z,
+		// where 20+ minutes of processing cycles silently no-op'd because
+		// ga-fw2fm had been moved to in_progress by its implement-change
+		// worker.
 		opts.tracef("process-control bead=%s kind=%s skip reason=bead_not_open status=%s",
 			bead.ID, bead.Metadata[beadmeta.KindMetadataKey], bead.Status)
 		return ControlResult{}, nil
