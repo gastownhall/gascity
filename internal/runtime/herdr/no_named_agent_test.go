@@ -22,13 +22,21 @@ func registryFake(t *testing.T, registered []string, rejection string) (bin, tra
 	entries := make([]string, 0, len(registered))
 	for i, entry := range registered {
 		name, pane := fmt.Sprintf("a%d", i), entry
-		// "<name>=<pane>" registers an agent whose name and pane differ, which is
-		// how the name branch of the lookup gets exercised: delivery passes a
-		// pane id to the predicate, waitForIdleOutcome passes an agent name.
+		// Entries carry herdr's agent-object shape: "agent" is the detected
+		// kind every pane of that kind shares, "name" the registered agent
+		// name. "<pane>" registers a<i> on the pane; "<name>=<pane>"
+		// registers name on pane, which is how the name branch of the lookup
+		// gets exercised: delivery passes a pane id to the predicate,
+		// waitForIdleOutcome passes an agent name. "=<pane>" is an agent
+		// herdr detected but nobody named, so herdr omits "name" entirely.
 		if n, p, ok := strings.Cut(entry, "="); ok {
 			name, pane = n, p
 		}
-		entries = append(entries, fmt.Sprintf(`{"agent":"%s","pane_id":"%s","agent_status":"working"}`, name, pane))
+		agent := fmt.Sprintf(`{"agent":"opencode","pane_id":"%s","agent_status":"working"}`, pane)
+		if name != "" {
+			agent = fmt.Sprintf(`{"agent":"opencode","name":"%s","pane_id":"%s","agent_status":"working"}`, name, pane)
+		}
+		entries = append(entries, agent)
 	}
 	list := `{"result":{"agents":[` + strings.Join(entries, ",") + `]}}`
 	if registered == nil {
