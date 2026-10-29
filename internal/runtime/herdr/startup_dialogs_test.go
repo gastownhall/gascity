@@ -154,3 +154,24 @@ func TestStartStartupDialogFailureIsNonFatal(t *testing.T) {
 		})
 	}
 }
+
+// An adopted holder is a live session whose winning Start already answered
+// its dialogs; re-running the matcher could answer an in-session dialog.
+func TestStartAdoptedHolderSkipsStartupDialogs(t *testing.T) {
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
+	setState(t, state, "name_taken")
+	setState(t, state, "trust_dialog")
+
+	cfg := runtime.Config{Command: "claude", ProcessNames: []string{"claude"}, Nudge: "do work"}
+	if err := p.Start(context.Background(), "gastown__worker", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	calls := fakeCalls(t, state)
+	if !strings.Contains(calls, "agent start") || strings.Contains(calls, "agent prompt") {
+		t.Fatalf("test setup: Start did not adopt the live holder:\n%s", calls)
+	}
+	if strings.Contains(calls, "pane read") || strings.Contains(calls, "pane send-keys") {
+		t.Fatalf("adopted holder was put through the dialog step:\n%s", calls)
+	}
+}
