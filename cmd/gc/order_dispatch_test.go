@@ -11160,3 +11160,49 @@ func TestShellExecRunnerScrubsSessionScopedEnv(t *testing.T) {
 		}
 	}
 }
+
+func TestMergeOrderExecEnvExplicitAndUnrelatedKeysSurvive(t *testing.T) {
+	environ := []string{
+		"PATH=/usr/bin",
+		"HOME=/h",
+		"FOO=bar",
+		"GC_SESSION_ID=gc-seat-123",
+		"GC_ALIAS=seat",
+		"BEADS_ACTOR=seat",
+	}
+	env := []string{"GC_ALIAS=reporter", "BEADS_ACTOR=order:x"}
+
+	merged := mergeOrderExecEnv(environ, env)
+
+	counts := map[string]int{}
+	values := map[string]string{}
+	for _, entry := range merged {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		counts[key]++
+		if counts[key] == 1 {
+			values[key] = value
+		}
+	}
+	for _, key := range []string{"PATH", "HOME", "FOO"} {
+		if counts[key] != 1 {
+			t.Fatalf("merged env lost or duplicated unrelated key %s: %v", key, merged)
+		}
+	}
+	for _, key := range []string{"GC_ALIAS", "BEADS_ACTOR"} {
+		if counts[key] != 1 {
+			t.Fatalf("merged env must define %s exactly once (explicit curated value wins), got %d copies: %v", key, counts[key], merged)
+		}
+	}
+	if got := values["GC_ALIAS"]; got != "reporter" {
+		t.Fatalf("GC_ALIAS = %q, want the explicit curated value %q: %v", got, "reporter", merged)
+	}
+	if got := values["BEADS_ACTOR"]; got != "order:x" {
+		t.Fatalf("BEADS_ACTOR = %q, want the explicit curated value %q: %v", got, "order:x", merged)
+	}
+	if counts["GC_SESSION_ID"] != 0 {
+		t.Fatalf("merged env kept the dispatcher's session identity: %v", merged)
+	}
+}
