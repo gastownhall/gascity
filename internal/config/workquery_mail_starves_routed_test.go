@@ -96,3 +96,26 @@ func TestEffectiveWorkQueryBD104ServesAssignedTaskBehindOlderMailWisp(t *testing
 		})
 	}
 }
+
+// AC-3: an in_progress mail wisp must not occupy the in_progress
+// crash-recovery slot, on either single-store compatibility mode.
+func TestEffectiveWorkQueryInProgressSkipsAssignedMailWisp(t *testing.T) {
+	requireJQ(t)
+	a := singleSessionConfigAgent()
+	mail := `{"id":"gcg-mail-claimed","status":"in_progress","issue_type":"message","assignee":"` + mailTestSessionID + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
+	task := `{"id":"gcg-progress-task","status":"in_progress","issue_type":"task","assignee":"` + mailTestSessionID + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:05:00Z","metadata":{}}`
+	for _, tc := range []struct {
+		name string
+		topo QueryTopology
+	}{
+		{"bd-1.0.4", QueryTopology{}},
+		{"bd-1.0.5", QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(tc.topo), mailTestEnv(), fakeBdEphemeralStore(mail+","+task))
+			if strings.Contains(out, "gcg-mail-claimed") || !strings.Contains(out, "gcg-progress-task") {
+				t.Fatalf("in_progress tier served %q, want the in_progress task gcg-progress-task and no message bead", out)
+			}
+		})
+	}
+}
