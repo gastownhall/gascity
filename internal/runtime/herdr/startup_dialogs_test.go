@@ -160,3 +160,21 @@ func TestStartStartupDialogFailureIsNonFatal(t *testing.T) {
 		})
 	}
 }
+
+// AC-5: a Start that adopts a live holder must not run the dialog step — the
+// holder is a live, already-primed session whose winning Start answered its
+// dialogs, and the matcher's rate-limit phase could otherwise select "Stop"
+// on an in-session dialog and exit a working agent. Regression guard.
+func TestStartAdoptedHolderSkipsStartupDialogs(t *testing.T) {
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
+	setState(t, state, "name_taken")
+
+	if err := p.Start(context.Background(), "gastown__witness", dialogEnabledConfig()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	calls := fakeCalls(t, state)
+	if strings.Contains(calls, "pane read") || strings.Contains(calls, "pane send-keys") {
+		t.Fatalf("adopted a live holder but still ran the dialog step:\n%s", calls)
+	}
+}
