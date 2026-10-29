@@ -1,9 +1,9 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -76,13 +76,11 @@ func reaperOpRowsHeldBack(scope reaperOpRowsScope) (string, error) {
 	if err != nil {
 		return fmt.Sprintf("holds op rows and %s could not be read: %v", reaperRetainedTypesKey, err), nil
 	}
-	var setting struct {
-		Value string `json:"value"`
-	}
-	if err := json.Unmarshal(out, &setting); err != nil {
+	namesOp, err := retainedTypesNameOp(out)
+	if err != nil {
 		return fmt.Sprintf("holds op rows and %s could not be read: %v", reaperRetainedTypesKey, err), nil
 	}
-	if !retainedTypesNameOp(setting.Value) {
+	if !namesOp {
 		return fmt.Sprintf("holds op rows and %s does not name %s", reaperRetainedTypesKey, reaperOpRowType), nil
 	}
 	return "", nil
@@ -100,22 +98,18 @@ func reaperCensusCount(out []byte) (int, error) {
 	return n, nil
 }
 
-// retainedTypesNameOp reports whether a stored types.retained value (a comma
-// list or a JSON array of type names) names the op row type.
-func retainedTypesNameOp(value string) bool {
-	list := strings.Map(func(r rune) rune {
-		switch r {
-		case '[', ']', '"', ' ', '\t', '\r', '\n':
-			return -1
-		}
-		return r
-	}, value)
-	for _, name := range strings.Split(list, ",") {
-		if name == reaperOpRowType {
-			return true
-		}
+// retainedTypesNameOp reports whether the types.retained value in `bd config
+// get --json` output names the op row type. bd's sweep parses that value as it
+// parses types.custom, with one function (a JSON array of type names, else a
+// comma list, each name trimmed), so this reads it with doctor's reader of
+// types.custom. A mis-spelled list such as [op] or "op" then names no op, as
+// for bd. reaper.sh's retained_types_name_op reads the setting the same way.
+func retainedTypesNameOp(out []byte) (bool, error) {
+	names, err := doctor.ParseCustomTypesConfigJSON(out)
+	if err != nil {
+		return false, err
 	}
-	return false
+	return slices.Contains(names, reaperOpRowType), nil
 }
 
 // reaperOpRowsScopes lists the bd scopes the core reaper visits that doctor

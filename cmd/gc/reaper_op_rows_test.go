@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -61,6 +64,7 @@ func TestReaperOpRowsHeldBack(t *testing.T) {
 		{"op rows, types.retained names other types", fakeReaperScopeBd{census: "1", help: honorsRetainedTypesHelp, retained: "operation,molecule"}, "holds op rows and types.retained does not name op", ""},
 		{"op rows, types.retained names op", fakeReaperScopeBd{census: "1", help: honorsRetainedTypesHelp, retained: "molecule, op"}, "", ""},
 		{"op rows, types.retained a JSON list naming op", fakeReaperScopeBd{census: "1", help: honorsRetainedTypesHelp, retained: `["op"]`}, "", ""},
+		{"op rows, types.retained a mis-spelled list", fakeReaperScopeBd{census: "1", help: honorsRetainedTypesHelp, retained: "[op,fact]"}, "holds op rows and types.retained does not name op", ""},
 		{"census fails", fakeReaperScopeBd{censusErr: errors.New("dolt down")}, "", "counting op rows: dolt down"},
 		{"census unreadable", fakeReaperScopeBd{census: "id"}, "", `counting op rows: the census returned "COUNT(*)\nid"`},
 	} {
@@ -280,6 +284,86 @@ func TestReaperOpRowCensusSQLIsTheReapers(t *testing.T) {
 	reaper := strings.ReplaceAll(reaperOpRowCensusFromScript(t, "hq"), "`hq`.", "")
 	if got, want := normalize(reaperOpRowCensusSQL), normalize(reaper); got != want {
 		t.Fatalf("doctor's census\n  %s\nis not reaper.sh's\n  %s", got, want)
+	}
+}
+
+// TestReaperRetainedTypesParseIsBds: doctor and reaper.sh read a stored
+// types.retained value as bd's sweep does (ParseTypeList: a JSON array of
+// strings, else a comma list, each name trimmed), so neither lets the purge
+// run on a value from which bd keeps no op row. Each value goes through
+// retainedTypesNameOp and through reaper.sh's own retained_types_name_op.
+func TestReaperRetainedTypesParseIsBds(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is required to run reaper.sh's parser")
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq is required to run reaper.sh's parser")
+	}
+	reaper := readBundledPackFileForTest(t, "core", "assets/scripts/reaper.sh")
+	parser := regexp.MustCompile(`(?ms)^retained_types_name_op\(\) \{$.*?^\}$`).FindString(reaper)
+	opRowType := regexp.MustCompile(`(?m)^OP_ROW_TYPE="([^"]*)"$`).FindStringSubmatch(reaper)
+	if parser == "" || opRowType == nil {
+		t.Fatal("reaper.sh no longer defines retained_types_name_op and OP_ROW_TYPE; update this test")
+	}
+	if opRowType[1] != reaperOpRowType {
+		t.Fatalf("reaper.sh's OP_ROW_TYPE is %q, doctor's is %q", opRowType[1], reaperOpRowType)
+	}
+	for _, tc := range []struct {
+		value   string
+		namesOp bool
+	}{
+		{"op", true},
+		{" op ", true},
+		{"molecule, op", true},
+		{"molecule,op,", true},
+		{`["op"]`, true},
+		{`["op","molecule"]`, true},
+		{` ["molecule", " op "] `, true},
+		{"[\n\"op\"\n]", true},
+		{`["\u006fp"]`, true},
+		// Go's JSON decoder leaves a null element empty, so bd reads ["op"].
+		{`["op", null]`, true},
+		// bd trims every Unicode space, a no-break space included.
+		{"\u00a0op", true},
+		{"", false},
+		{"molecule", false},
+		{"operation,molecule", false},
+		{"OP", false},
+		{"[op]", false},
+		{"[op,fact]", false},
+		{`"op"`, false},
+		{"o p", false},
+		{"op]", false},
+		// Not JSON, so a comma list whose names are `["op"` and `]`.
+		{`["op",]`, false},
+		{`["op", 1]`, false},
+		{`["op,fact"]`, false},
+		{`[["op"]]`, false},
+		{`["op"] ["x"]`, false},
+		// A newline inside a name does not split it.
+		{"x\nop", false},
+		{"null", false},
+		{"[]", false},
+	} {
+		out, err := json.Marshal(map[string]string{"key": reaperRetainedTypesKey, "value": tc.value})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := retainedTypesNameOp(out); err != nil || got != tc.namesOp {
+			t.Errorf("retainedTypesNameOp(%q) = %v, %v; want %v", tc.value, got, err, tc.namesOp)
+		}
+		cmd := exec.Command(bash, "-c", parser+"\nretained_types_name_op")
+		cmd.Env = append(os.Environ(), "OP_ROW_TYPE="+reaperOpRowType)
+		cmd.Stdin = bytes.NewReader(out)
+		err = cmd.Run()
+		var exitErr *exec.ExitError
+		if err != nil && !errors.As(err, &exitErr) {
+			t.Fatalf("running reaper.sh's retained_types_name_op: %v", err)
+		}
+		if got := err == nil; got != tc.namesOp {
+			t.Errorf("reaper.sh retained_types_name_op(%q) = %v, want %v", tc.value, got, tc.namesOp)
+		}
 	}
 }
 

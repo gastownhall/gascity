@@ -68,6 +68,9 @@ func TestReaperHoldsPurgeAndPruneBackOnAScopeWithOpRows(t *testing.T) {
 		{"bd does not honor types.retained", "", "op", "its bd does not honor types.retained"},
 		{"types.retained unset", reaperRetainedTypesHelp, "", "types.retained does not name op"},
 		{"types.retained names other types", reaperRetainedTypesHelp, "molecule,operation", "types.retained does not name op"},
+		// bd reads these as the names `[op` and `fact]`, and `"op"`: no op.
+		{"types.retained a list mis-spelled with brackets", reaperRetainedTypesHelp, "[op,fact]", "types.retained does not name op"},
+		{"types.retained a name mis-spelled with quotes", reaperRetainedTypesHelp, `"op"`, "types.retained does not name op"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newReaperOpRowsFixture(t, "4", tc.help, tc.retained)

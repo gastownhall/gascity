@@ -333,14 +333,23 @@ get_sql_rows() {
     SQL_ROWS_RESULT=$(printf '%s\n' "$output" | tail -n +2 | tr -d '\r' | sed '/^[[:space:]]*$/d')
 }
 
-# retained_types_name_op VALUE reports whether a stored types.retained value
-# (a comma list or a JSON array of type names) names the op row type.
+# retained_types_name_op reads `gc bd config get --json` output on stdin and
+# reports whether its types.retained value names the op row type. It parses the
+# value as bd's sweep does (ParseTypeList): a JSON array of type names, else a
+# comma list, each name trimmed. So a mis-spelled list such as [op] or "op"
+# names no op here, as for bd. The doctor reads the setting the same way
+# (cmd/gc/reaper_op_rows.go).
 retained_types_name_op() {
-    local list="${1//[][\"[:space:]]/}"
-    case ",$list," in
-        *",$OP_ROW_TYPE,"*) return 0 ;;
-    esac
-    return 1
+    jq -e --arg type "$OP_ROW_TYPE" '
+        def trimmed: sub("^\\s+"; "") | sub("\\s+$"; "");
+        (.value // "" | trimmed) as $value
+        | (if $value | startswith("[") then $value | try fromjson catch null else null end) as $list
+        | if ($list | type) == "array" and all($list[]; type == "string" or type == "null")
+          then $list | map(values)
+          else $value | split(",")
+          end
+        | any(.[]; trimmed == $type)
+    ' >/dev/null 2>&1
 }
 
 # op_rows_guard VERB reports whether VERB (purge or prune) may delete closed
@@ -354,7 +363,6 @@ op_rows_guard() {
     local verb="$1"
     local help
     local setting
-    local retained
 
     OP_ROWS_GUARD_REASON=""
     if ! get_sql_count "op row" "
@@ -373,8 +381,7 @@ op_rows_guard() {
         return 1
     fi
     if ! setting=$(scope_bd config get --json "$RETAINED_TYPES_KEY" 2>/dev/null) ||
-        ! retained=$(printf '%s' "$setting" | jq -r '.value // ""' 2>/dev/null) ||
-        ! retained_types_name_op "$retained"; then
+        ! printf '%s' "$setting" | retained_types_name_op; then
         OP_ROWS_GUARD_REASON="holds op rows and $RETAINED_TYPES_KEY does not name $OP_ROW_TYPE"
         return 1
     fi
