@@ -19,10 +19,10 @@ import (
 //
 // Read tiers are declared per method and preserved from the ops they replace:
 //   - RecentRunsAll / OpenRuns (the dispatch cooldown/single-flight index) and
-//     StaleOpenRuns (the stale-tracking sweep) read the LIVE tier — cache-bypass
-//     is the duplicate-dispatch guarantee, and for the sweep it is the only way
-//     to see tracking beads the dispatcher wrote through its own uncached
-//     handle.
+//     StaleOpenRuns / OrphanedOpenRuns (the stale- and orphaned-tracking
+//     sweeps) read the LIVE tier — cache-bypass is the duplicate-dispatch
+//     guarantee, and for the sweeps it is the only way to see tracking beads
+//     the dispatcher wrote through its own uncached handle.
 //   - LastRun / Cursor preserve the dispatcher's pre-existing bare-List tier so
 //     the migration is behavior-preserving.
 //   - Get / RunDetail are the by-id detail reads (bare Get).
@@ -178,15 +178,23 @@ func (s *Store) StaleOpenRuns(cutoff time.Time) ([]OrderRun, error) {
 
 // OrphanedOpenRuns lists every OPEN tracking bead EXCEPT pre-dispatch
 // trigger-env-failure markers (which the open-work gate intentionally keeps open
-// until the normal stale sweep), decoded into OrderRun across both tiers. It is
-// the typed read half of the orphaned-order-tracking startup sweep; the caller
-// closes the returned runs via CloseRuns. Names are best-effort (the sweep closes
-// by ID and does not resolve names).
+// until the normal stale sweep), decoded into OrderRun across both tiers on the
+// LIVE tier. It is the typed read half of the orphaned-order-tracking startup
+// sweep; the caller closes the returned runs via CloseRuns. Names are
+// best-effort (the sweep closes by ID and does not resolve names).
 func (s *Store) OrphanedOpenRuns() ([]OrderRun, error) {
 	if s.store.Store == nil {
 		return nil, nil
 	}
-	all, err := s.store.ListByLabel(labelOrderTracking, 0, beads.WithBothTiers)
+	// LIVE for the same reason as StaleOpenRuns: the startup sweep exists to
+	// clean up after a controller that died holding tracking beads, and a
+	// cache primed by the very process doing the sweeping cannot be trusted
+	// to contain them (#5832).
+	all, err := beads.HandlesFor(s.store.Store).Live.List(beads.ListQuery{
+		Label:         labelOrderTracking,
+		IncludeClosed: false,
+		TierMode:      beads.TierBoth,
+	})
 	if err != nil {
 		return nil, err
 	}

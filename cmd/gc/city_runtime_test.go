@@ -2318,6 +2318,45 @@ func TestOrderTrackingSweepWatchdogSeesBeadsWrittenBehindTheCache(t *testing.T) 
 	}
 }
 
+// TestOrphanedOrderTrackingSweepSeesBeadsWrittenBehindTheCache is the same
+// proof for the STARTUP sweep, which is the other sweep reader. It is the net
+// that is supposed to catch tracking beads orphaned by a controller that died
+// holding them — and it runs inside the very process whose cache cannot be
+// trusted to contain them (#5832).
+func TestOrphanedOrderTrackingSweepSeesBeadsWrittenBehindTheCache(t *testing.T) {
+	backing := beads.NewMemStore()
+	cached := beads.NewCachingStoreForTest(backing, nil)
+	if err := cached.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime(): %v", err)
+	}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	store := wrapStoreWithBeadPolicies(cached, cfg)
+
+	orphan, err := backing.Create(beads.Bead{
+		Title:  "order:" + orderTrackingSweepOrder,
+		Labels: []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(orphan): %v", err)
+	}
+
+	// The startup path (CityRuntime.sweepOrphanedOrderTracking) opens its own
+	// store from cityPath rather than using standaloneCityStore, so drive the
+	// sweep function directly with the production-shaped store. What this pins
+	// is the READER: OrphanedOpenRuns must see a bead the cache never absorbed.
+	if _, err := sweepOrphanedOrderTrackingLimit(store, orderTrackingSweepCloseBudget); err != nil {
+		t.Fatalf("sweepOrphanedOrderTrackingLimit(): %v", err)
+	}
+
+	got, err := backing.Get(orphan.ID)
+	if err != nil {
+		t.Fatalf("Get(orphan): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("orphaned tracking status = %s, want closed — the startup sweep read a cached snapshot (#5832)", got.Status)
+	}
+}
+
 func TestOrderTrackingSweepWatchdogUsesCloseBudget(t *testing.T) {
 	store := beads.NewMemStore()
 	ids := make([]string, 0, orderTrackingSweepCloseBudget+1)

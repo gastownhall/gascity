@@ -160,6 +160,16 @@ func TestRecentRunsAllOpenRunsUseLiveTier(t *testing.T) {
 	}
 	assertAllLive(t, "StaleOpenRuns", spy.queries)
 	assertSweepQueryShape(t, "StaleOpenRuns", spy.queries)
+
+	// OrphanedOpenRuns feeds the startup sweep, which cleans up after a
+	// controller that died holding tracking beads — a cache primed by the very
+	// process doing the sweeping cannot be trusted to contain them.
+	spy.queries = nil
+	if _, err := st.OrphanedOpenRuns(); err != nil {
+		t.Fatalf("OrphanedOpenRuns(): %v", err)
+	}
+	assertAllLive(t, "OrphanedOpenRuns", spy.queries)
+	assertSweepQueryShape(t, "OrphanedOpenRuns", spy.queries)
 }
 
 func assertAllLive(t *testing.T, name string, queries []beads.ListQuery) {
@@ -438,6 +448,45 @@ func TestOrphanedOpenRunsExcludesTriggerEnvFailed(t *testing.T) {
 	}
 	if len(runs) != 1 || runs[0].Scoped != "a" {
 		t.Fatalf("OrphanedOpenRuns() = %+v, want only a (trigger-env-failed excluded)", runs)
+	}
+}
+
+// TestStaleAndOrphanedSweepsReadTheLiveTierLikeOpenRuns proves BOTH sweep
+// readers bypass the caching snapshot the way their sibling OpenRuns does: a
+// tracking bead written straight to the backing after the cache was primed is
+// visible to OpenRuns and must be visible to both sweeps too (#5832).
+func TestStaleAndOrphanedSweepsReadTheLiveTierLikeOpenRuns(t *testing.T) {
+	backing := beads.NewMemStore()
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	written, err := backing.Create(beads.Bead{Title: "order:digest", Labels: []string{"order-run:digest", labelOrderTracking}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := ordersStoreOver(cache)
+
+	open, err := store.OpenRuns()
+	if err != nil {
+		t.Fatalf("OpenRuns: %v", err)
+	}
+	if !runsContain(open, written.ID) {
+		t.Fatalf("OpenRuns() = %v; want it to see %s (sibling baseline)", open, written.ID)
+	}
+	stale, err := store.StaleOpenRuns(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("StaleOpenRuns: %v", err)
+	}
+	if !runsContain(stale, written.ID) {
+		t.Errorf("StaleOpenRuns() = %v; missed %s that OpenRuns sees (read the cache snapshot, not the Live tier)", stale, written.ID)
+	}
+	orphaned, err := store.OrphanedOpenRuns()
+	if err != nil {
+		t.Fatalf("OrphanedOpenRuns: %v", err)
+	}
+	if !runsContain(orphaned, written.ID) {
+		t.Errorf("OrphanedOpenRuns() = %v; missed %s that OpenRuns sees (read the cache snapshot, not the Live tier)", orphaned, written.ID)
 	}
 }
 
