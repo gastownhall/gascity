@@ -233,3 +233,22 @@ func TestAssignedReadyServesUnheldAssignmentBehindHeldHead(t *testing.T) {
 		})
 	}
 }
+
+// TestAssignedReadyStaysHumanTransparent: bd's human label is not a dispatch
+// hold, nor is a non-canonical hold:human label, so a task assigned to the seat
+// that carries one is still served ahead of routed work on every reader shape.
+func TestAssignedReadyStaysHumanTransparent(t *testing.T) {
+	for topoName, topo := range assignedHoldTopologies() {
+		for _, label := range []string{beadmeta.HumanLabel, "hold:human"} {
+			t.Run(topoName+"/"+label, func(t *testing.T) {
+				got, _ := runFilteredQuery(t, assignedHoldPoolAgent().EffectiveWorkQueryFor(topo), assignedHoldSeatEnv(), []fakeReaderRow{
+					assignedOpenRow("labeled", assignedHoldTestAlias, label),
+					routedOpenRow("routed", assignedHoldTestAlias),
+				})
+				if len(got) != 1 || got[0].ID != "labeled" {
+					t.Fatalf("query served %+v, want the %s-labeled assignment ahead of the routed step", got, label)
+				}
+			})
+		}
+	}
+}
