@@ -42,6 +42,15 @@ type fakeStore struct {
 	// write; a non-nil return fails the write (nothing is recorded or stored).
 	SetMetadataErrFunc func(key string) error
 
+	// CloseLog records the ID of every bead closed through CloseBead or
+	// CloseOpenDescendants, in close order.
+	CloseLog []string
+
+	// CloseDescendantErrFunc, when non-nil, is consulted before each
+	// CloseOpenDescendants close; a non-nil return fails the walk, leaving
+	// that bead and everything after it open.
+	CloseDescendantErrFunc func(id string) error
+
 	ActivatedWispIDs []string
 }
 
@@ -133,6 +142,50 @@ func (s *fakeStore) CloseBead(id, reason string) error {
 			rec.metadata = map[string]string{}
 		}
 		rec.metadata["close_reason"] = reason
+	}
+	s.CloseLog = append(s.CloseLog, id)
+	return nil
+}
+
+// CloseOpenDescendants walks the record's children post-order — a child's
+// own children close before the child does — and closes every non-closed
+// bead it reaches with close_reason=reason. Unlike Children, the walk
+// visits closed beads too, so open work nested under a closed intermediate
+// is still reached; closed beads are left untouched.
+func (s *fakeStore) CloseOpenDescendants(id, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.beads[id]
+	if !ok {
+		return fmt.Errorf("bead %q: %w", id, beads.ErrNotFound)
+	}
+	return s.closeDescendantsLocked(rec.children, reason)
+}
+
+func (s *fakeStore) closeDescendantsLocked(children []string, reason string) error {
+	for _, childID := range children {
+		child, ok := s.beads[childID]
+		if !ok {
+			continue
+		}
+		if err := s.closeDescendantsLocked(child.children, reason); err != nil {
+			return err
+		}
+		if child.info.Status == "closed" {
+			continue
+		}
+		if s.CloseDescendantErrFunc != nil {
+			if err := s.CloseDescendantErrFunc(childID); err != nil {
+				return fmt.Errorf("closing descendant %q: %w", childID, err)
+			}
+		}
+		child.info.Status = "closed"
+		child.info.ClosedAt = time.Now()
+		if child.metadata == nil {
+			child.metadata = map[string]string{}
+		}
+		child.metadata["close_reason"] = reason
+		s.CloseLog = append(s.CloseLog, childID)
 	}
 	return nil
 }

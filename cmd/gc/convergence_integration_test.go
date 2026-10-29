@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
@@ -1065,6 +1066,120 @@ metadata = { "gc.routed_to" = "pool/worker", "gc.execution_routed_to" = "pool/wo
 	}
 	if activated.Metadata["gc.execution_routed_to"] != "pool/worker" {
 		t.Fatalf("activated child gc.execution_routed_to = %q, want pool/worker", activated.Metadata["gc.execution_routed_to"])
+	}
+}
+
+// TestConvergenceStore_CloseOpenDescendants pins the adapter's subtree close
+// over a wisp root: every open descendant closes with the caller's
+// close_reason and gc.outcome=skipped, an already-closed descendant keeps its
+// own close_reason, an open bead nested under that closed descendant is still
+// reached, and the wisp root itself stays open. The walk must see closed
+// intermediates, which the adapter's Children (it drops closed beads) cannot.
+func TestConvergenceStore_CloseOpenDescendants(t *testing.T) {
+	store := beads.NewMemStore()
+	adapter := newConvergenceStoreAdapter(store, nil, false)
+
+	w, err := store.Create(beads.Bead{Title: "wisp", Type: "molecule", Status: "in_progress"})
+	if err != nil {
+		t.Fatalf("creating wisp root: %v", err)
+	}
+	a, err := store.Create(beads.Bead{Title: "A", Type: "task", ParentID: w.ID})
+	if err != nil {
+		t.Fatalf("creating A: %v", err)
+	}
+	b, err := store.Create(beads.Bead{Title: "B", Type: "task", ParentID: w.ID})
+	if err != nil {
+		t.Fatalf("creating B: %v", err)
+	}
+	if err := store.SetMetadata(b.ID, "close_reason", convergence.CloseReasonManualApprove); err != nil {
+		t.Fatalf("stamping B's close_reason: %v", err)
+	}
+	if err := store.SetMetadata(b.ID, beadmeta.OutcomeMetadataKey, "pass"); err != nil {
+		t.Fatalf("stamping B's outcome: %v", err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("closing B: %v", err)
+	}
+	b1, err := store.Create(beads.Bead{Title: "B1", Type: "task", ParentID: b.ID})
+	if err != nil {
+		t.Fatalf("creating B1: %v", err)
+	}
+	c, err := store.Create(beads.Bead{Title: "C", Type: "task", ParentID: w.ID, Needs: []string{a.ID}})
+	if err != nil {
+		t.Fatalf("creating C: %v", err)
+	}
+
+	// The adapter's Children drops closed beads, so the handler cannot use it
+	// to find open work under a closed intermediate. Pin that here, before
+	// the close makes A and C closed too.
+	kids, err := adapter.Children(w.ID)
+	if err != nil {
+		t.Fatalf("Children: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, kid := range kids {
+		seen[kid.ID] = true
+	}
+	if seen[b.ID] {
+		t.Error("adapter Children listed the closed B; the subtree walk must not rely on it")
+	}
+	if !seen[a.ID] || !seen[c.ID] {
+		t.Errorf("adapter Children = %v, want open children A and C", seen)
+	}
+
+	if err := adapter.CloseOpenDescendants(w.ID, convergence.CloseReasonManualSupersede); err != nil {
+		t.Fatalf("CloseOpenDescendants: %v", err)
+	}
+
+	for _, id := range []string{a.ID, b1.ID, c.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("reading %s: %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Errorf("bead %s status = %q, want closed", id, got.Status)
+		}
+		if got.Metadata["close_reason"] != convergence.CloseReasonManualSupersede {
+			t.Errorf("bead %s close_reason = %q, want %q", id, got.Metadata["close_reason"], convergence.CloseReasonManualSupersede)
+		}
+		if got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped {
+			t.Errorf("bead %s gc.outcome = %q, want %q", id, got.Metadata[beadmeta.OutcomeMetadataKey], beadmeta.OutcomeSkipped)
+		}
+	}
+
+	closedB, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("reading B: %v", err)
+	}
+	if closedB.Metadata["close_reason"] != convergence.CloseReasonManualApprove {
+		t.Errorf("closed B close_reason = %q, want its prior %q", closedB.Metadata["close_reason"], convergence.CloseReasonManualApprove)
+	}
+	if closedB.Metadata[beadmeta.OutcomeMetadataKey] != "pass" {
+		t.Errorf("closed B gc.outcome = %q, want its prior %q", closedB.Metadata[beadmeta.OutcomeMetadataKey], "pass")
+	}
+
+	root, err := store.Get(w.ID)
+	if err != nil {
+		t.Fatalf("reading wisp root: %v", err)
+	}
+	if root.Status == "closed" {
+		t.Error("wisp root must stay open; CloseOpenDescendants never closes it")
+	}
+
+	// A subtree with nothing open is a no-op.
+	before, err := store.Get(a.ID)
+	if err != nil {
+		t.Fatalf("reading A before second call: %v", err)
+	}
+	if err := adapter.CloseOpenDescendants(w.ID, convergence.CloseReasonManualSupersede); err != nil {
+		t.Fatalf("second CloseOpenDescendants: %v", err)
+	}
+	after, err := store.Get(a.ID)
+	if err != nil {
+		t.Fatalf("reading A after second call: %v", err)
+	}
+	if after.UpdatedAt != before.UpdatedAt || after.Revision != before.Revision {
+		t.Error("second CloseOpenDescendants changed an already-closed bead")
 	}
 }
 
