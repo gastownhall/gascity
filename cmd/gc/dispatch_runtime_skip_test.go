@@ -90,6 +90,24 @@ func (c *serveSkipCity) createStaleControl(t *testing.T, status string) beads.Be
 	return control
 }
 
+// createOrphanedControl creates an open scope-check whose root is missing, so
+// ProcessControl closes it as orphaned-workflow and reports it processed.
+func (c *serveSkipCity) createOrphanedControl(t *testing.T) beads.Bead {
+	t.Helper()
+	control, err := c.store.Create(beads.Bead{
+		Type: "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindScopeCheck,
+			beadmeta.RootBeadIDMetadataKey:   "ga-missing-root",
+			beadmeta.RootStoreRefMetadataKey: "city:test-city",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create orphaned control bead: %v", err)
+	}
+	return control
+}
+
 // stubQueue makes workflowServeList answer rows() on every call, failing the
 // test past serveSkipListCap, and returns the call counter.
 func stubQueue(t *testing.T, rows func() []hookBead) *int {
@@ -232,5 +250,44 @@ func TestRunWorkflowServeFollowBacksOffOnSkipOnlySweeps(t *testing.T) {
 	}
 	if !slices.Equal(waits, want) {
 		t.Fatalf("wait calls = %+v, want %+v", waits, want)
+	}
+}
+
+// TestDrainWorkflowServeWorkProcessesLiveControlBesideStaleRow proves a skip
+// does not hide real progress beside it, and that a pass holding only the
+// stale row after that progress ends through the bounded idle re-poll instead
+// of re-polling forever.
+func TestDrainWorkflowServeWorkProcessesLiveControlBesideStaleRow(t *testing.T) {
+	city := newServeSkipCity(t)
+	stale := city.createStaleControl(t, "closed")
+	live := city.createOrphanedControl(t)
+	calls := stubQueue(t, func() []hookBead {
+		rows := []hookBead{hookRow(stale)}
+		if b, err := city.store.Get(live.ID); err == nil && b.Status == "open" {
+			rows = append(rows, hookRow(live))
+		}
+		return rows
+	})
+
+	agent := config.Agent{Name: "control-dispatcher"}
+	result, err := drainWorkflowServeWork(agent, city.dir, city.dir, "bd ready", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("drainWorkflowServeWork: %v", err)
+	}
+	if got := city.dispatches[live.ID]; got != 1 {
+		t.Errorf("live control dispatched %d times, want 1", got)
+	}
+	if !result.processedAny {
+		t.Errorf("processedAny = false, want true after processing the live control")
+	}
+	if !wakeFileExists(t, city.dir) {
+		t.Errorf("dispatch wake file missing after processing the live control")
+	}
+	wantPasses := 2 + workflowServeIdlePollAttempts
+	if *calls != wantPasses {
+		t.Errorf("serve queue queried %d times, want %d (one processing pass, one skip-only pass, %d idle re-polls)", *calls, wantPasses, workflowServeIdlePollAttempts)
+	}
+	if got := city.dispatches[stale.ID]; got != wantPasses {
+		t.Errorf("stale control dispatched %d times, want %d", got, wantPasses)
 	}
 }
