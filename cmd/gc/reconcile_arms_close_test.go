@@ -676,6 +676,20 @@ func TestCloseEffectEdges(t *testing.T) {
 			t.Fatalf("settlement %+v, want the marker stamped", s)
 		}
 	})
+	// An unobservable namespace is never death: a probe that errors or times
+	// out must refuse the stranded stamp entirely, not list the bead.
+	for _, body := range []string{`exit 2`, `sleep 2`} {
+		t.Run("an unobservable detached probe refuses the stamp, "+map[string]string{`exit 2`: "error", `sleep 2`: "timeout"}[body], func(t *testing.T) {
+			bindDetachedProbeSocket(t, "gctest-c5c1")
+			installFakeTmux(t, body)
+			c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+			c.work(t, "in_progress", detachedClaim())
+			s := c.run(t, gone().tmux())
+			if b := c.row(t); s.Cause != causeStranded || b.Metadata[strandedEventEmittedKey] != "" || len(s.Facts.Events) != 0 {
+				t.Fatalf("settlement %+v marker %q, want refused stranded with no marker and no event", s, b.Metadata[strandedEventEmittedKey])
+			}
+		})
+	}
 	t.Run("an orphan whose served claim the release keeps does not close", func(t *testing.T) {
 		bindDetachedProbeSocket(t, "gctest-c5c1")
 		installFakeTmux(t, `printf 'handoff\n'`) // the claim's detached probe is alive

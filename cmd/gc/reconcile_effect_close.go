@@ -195,9 +195,11 @@ type strandedWork struct {
 // strandedProbe reads the stranded branch's work, only when it applies: L5
 // found work on a pool slot that is not killed and carries no marker. The
 // detached probes run concurrently after the read, each on its own bound
-// (detachedProbeDefaultTimeout) apart from the read's; a probe that times
-// out reads not alive, as legacy's does. One the Probe's own bound cut
-// short leaves the work unsearched, so this attempt refuses.
+// (detachedProbeDefaultTimeout) apart from the read's. A probe that errors
+// or times out leaves the work unsearched, so this attempt refuses — an
+// unobservable namespace is never death, and no stamp rests on a probe that
+// did not answer — as does one the Probe's own bound cut short. Only an
+// attested death (or work with no probe) counts toward the stamp.
 func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, error) {
 	c := v.It.Closing
 	if c.Kind != closePoolSlot || c.Killed || v.Fence.Work == nil || v.Fence.Work.Free ||
@@ -205,14 +207,17 @@ func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, 
 		return strandedWork{}, nil
 	}
 	work, err := collectSessionAssignedWorkInfo(seatWorkFor(r.legs, releaseScope(v.Row, v.World.Env.Cfg)), v.Row)
-	alive := make([]bool, len(work))
+	// statuses[i] is written only by that bead's probe goroutine (or left at
+	// the zero value by a bead with no probe), so the scan after wg.Wait needs
+	// no lock.
+	statuses := make([]detachedProbeStatus, len(work))
 	var wg sync.WaitGroup
 	for i, item := range work {
 		if spec := strings.TrimSpace(item.bead.Metadata[detachedProbeMetadataKey]); spec != "" {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				alive[i] = probeDetachedWork(context.WithoutCancel(ctx), spec).Status == detachedProbeAlive
+				statuses[i] = probeDetachedWork(context.WithoutCancel(ctx), spec).Status
 			}()
 		}
 	}
@@ -222,7 +227,12 @@ func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, 
 	}
 	out := strandedWork{searched: true}
 	for i, item := range work {
-		if !alive[i] {
+		switch statuses[i] {
+		case detachedProbeError, detachedProbeTimeout:
+			return strandedWork{}, nil
+		case detachedProbeAlive:
+			continue
+		default: // attested dead, or a bead with no probe
 			out.ids = append(out.ids, item.bead.ID)
 		}
 	}

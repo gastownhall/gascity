@@ -198,8 +198,10 @@ destructive:
 - Probe error or timeout: the namespace is unobservable, which is never
   evidence of death. Orphan release holds the work — over any number of
   consecutive evaluations, with no error-count strike release — logging the
-  hold rate-throttled per bead, while stranded diagnostics emit immediately
-  and preserve `gc.detached`.
+  hold rate-throttled per bead. The close-effect stranded branch refuses
+  entirely: no `session.stranded` stamp, and the unobserved bead is not
+  listed. The reconciler's standalone diagnostic still emits and preserves
+  `gc.detached`.
 
 Orphan release clears `gc.detached` in the same store update that reopens the
 work. If the release update fails, the detached guard remains on the work bead
