@@ -797,8 +797,9 @@ func TestSessionSubmitLaneFallbackResume(t *testing.T) {
 // A new message to a session waiting on a pending interaction is refused,
 // writing nothing, as the API's front door refuses it; a same-key retry of
 // an op that exists is answered from it past the prompt (request_id rule
-// 8); and a look that cannot reach the runtime accepts the message, with a
-// warning, as the lane looks again before it delivers.
+// 8); and a look that cannot answer (unreachable, another error, a panic)
+// refuses the message pending_check_unavailable, writing nothing, as the
+// API's front door refuses it (lanesubmit.CheckPending).
 func TestSessionSubmitLaneFallbackRefusesANewMessageWhileAPromptIsPending(t *testing.T) {
 	t.Run("a new message is refused", func(t *testing.T) {
 		c := newCLILaneCity(t)
@@ -821,28 +822,104 @@ func TestSessionSubmitLaneFallbackRefusesANewMessageWhileAPromptIsPending(t *tes
 			t.Fatalf("retry = %d, %q, %q; want the op replayed", code, stdout, stderr)
 		}
 	})
-	t.Run("an unavailable look accepts", func(t *testing.T) {
-		c := newCLILaneCity(t)
-		c.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
-		c.cmdSubmitCity(t, nil)
-		c.sp.PendingErrors[c.name] = fmt.Errorf("%w: socket gone", runtime.ErrRuntimeUnavailable)
-		code, stdout, stderr := c.cmdSubmit(session.SubmitIntentDefault, "k-p", false)
-		if code != 0 || stdout != "Queued follow-up for "+c.id+"\n" || !strings.Contains(stderr, "gc session submit: warning: accepting the message without a look for a pending interaction (") {
-			t.Fatalf("submit = %d, %q, %q; want accepted with the warning", code, stdout, stderr)
-		}
-		if op := c.only(t); op.ClientKey != "k-p" {
-			t.Fatalf("op = %+v", op)
-		}
+	for _, tc := range []struct {
+		name   string
+		look   func(string) (*runtime.PendingInteraction, error)
+		detail string
+	}{
+		{name: "an unavailable look refuses", look: func(string) (*runtime.PendingInteraction, error) {
+			return nil, fmt.Errorf("%w: socket gone", runtime.ErrRuntimeUnavailable)
+		}, detail: "socket gone"},
+		{name: "another look error refuses", look: func(string) (*runtime.PendingInteraction, error) {
+			return nil, errors.New("pending look broke")
+		}, detail: "pending look broke"},
+		{name: "a look that panics refuses", look: func(string) (*runtime.PendingInteraction, error) {
+			panic("pending look blew up")
+		}, detail: "the look panicked: pending look blew up"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCLILaneCity(t)
+			c.cmdSubmitCity(t, nil)
+			c.pendingLook(tc.look)
+			c.sp.Calls = nil
+			code, stdout, stderr := c.cmdSubmit(session.SubmitIntentDefault, "k-p", true)
+			c.wantPendingCheckRefusal(t, code, stdout, stderr, tc.detail)
+		})
+	}
+}
+
+// pendingLook makes look the runtime's answer to a look for a pending
+// interaction, through the provider gc session submit opens.
+func (c *cliLaneCity) pendingLook(look func(string) (*runtime.PendingInteraction, error)) {
+	sp := &pendingLookProvider{Fake: c.sp, look: look}
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return sp, nil
+	}
+}
+
+// wantPendingCheckRefusal fails unless a submit answered code, stdout and
+// stderr refused pending_check_unavailable under --json, naming detail and
+// saying to retry, with nothing written or delivered.
+func (c *cliLaneCity) wantPendingCheckRefusal(t *testing.T, code int, stdout, stderr, detail string) {
+	t.Helper()
+	if code != 1 || cliOpFailureCode(t, []byte(stdout)) != cliOpCodePendingCheckUnavailable ||
+		!strings.Contains(stderr, "gc session submit: could not check session "+c.id+" for a pending interaction (") ||
+		!strings.Contains(stderr, detail) || !strings.Contains(stderr, "nothing was written, retry (key k-p)") {
+		t.Fatalf("submit = %d, %q, %q; want refused %s naming %q", code, stdout, stderr, cliOpCodePendingCheckUnavailable, detail)
+	}
+	if ops := c.ops(t); len(ops) != 0 {
+		t.Fatalf("ops = %d, want none written", len(ops))
+	}
+	c.assertNothingDelivered(t)
+}
+
+// pendingLookProvider is a fake provider whose look for a pending
+// interaction is look.
+type pendingLookProvider struct {
+	*runtime.Fake
+	look func(name string) (*runtime.PendingInteraction, error)
+}
+
+func (p *pendingLookProvider) Pending(name string) (*runtime.PendingInteraction, error) {
+	return p.look(name)
+}
+
+// A look that does not answer is not waited on: gc session submit refuses
+// the message pending_check_unavailable once lanesubmit.PendingCheckTimeout
+// passes, writing nothing. Kills a fallback whose look accepts on a timeout,
+// and one that waits on the look unbounded.
+func TestSessionSubmitLaneFallbackRefusesALookThatDoesNotAnswer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits out lanesubmit.PendingCheckTimeout")
+	}
+	c := newCLILaneCity(t)
+	c.cmdSubmitCity(t, nil)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	c.pendingLook(func(string) (*runtime.PendingInteraction, error) {
+		<-release
+		return nil, nil
 	})
-	t.Run("another look error refuses", func(t *testing.T) {
-		c := newCLILaneCity(t)
-		c.cmdSubmitCity(t, nil)
-		c.sp.PendingErrors[c.name] = errors.New("pending look broke")
-		code, _, stderr := c.cmdSubmit(session.SubmitIntentDefault, "k-p", false)
-		if code != 1 || !strings.Contains(stderr, "pending look broke") || len(c.ops(t)) != 0 {
-			t.Fatalf("submit = %d, %q, ops %d; want refused, nothing written", code, stderr, len(c.ops(t)))
+	c.sp.Calls = nil
+	type answer struct {
+		code           int
+		stdout, stderr string
+	}
+	done := make(chan answer, 1)
+	start := time.Now()
+	go func() {
+		code, stdout, stderr := c.cmdSubmit(session.SubmitIntentDefault, "k-p", true)
+		done <- answer{code, stdout, stderr}
+	}()
+	select {
+	case got := <-done:
+		if waited := time.Since(start); waited < lanesubmit.PendingCheckTimeout {
+			t.Fatalf("refused after %v, before the %v bound", waited, lanesubmit.PendingCheckTimeout)
 		}
-	})
+		c.wantPendingCheckRefusal(t, got.code, got.stdout, got.stderr, "the look did not answer in time")
+	case <-time.After(30 * time.Second):
+		t.Fatal("gc session submit did not return; the look is unbounded")
+	}
 }
 
 // laneOpRereadFailStore fails every read of an op row it holds: the read of

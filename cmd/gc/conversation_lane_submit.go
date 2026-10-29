@@ -44,6 +44,10 @@ const (
 	// cliOpCodePendingInteraction refuses a new message to a session that
 	// waits on a pending interaction, as the API's 409 pending_interaction.
 	cliOpCodePendingInteraction = "pending_interaction"
+	// cliOpCodePendingCheckUnavailable refuses a new message to a session
+	// whose look for a pending interaction did not answer, as the API's 503
+	// pending_check_unavailable. Nothing was written; a rerun may succeed.
+	cliOpCodePendingCheckUnavailable = "pending_check_unavailable"
 	// cliOpCodeResumeRefused is the session's refusal of the message's
 	// resume.
 	cliOpCodeResumeRefused = "resume_refused"
@@ -135,18 +139,12 @@ func (s *sessionSubmitLane) provider() (runtime.Provider, error) {
 	return sp, nil
 }
 
-// pendingLook is one bounded look for a session's pending interaction.
-type pendingLook struct {
-	pending *runtime.PendingInteraction
-	err     error
-}
-
-// pending is the CLI's front door, the API's rejectPendingInteraction rule:
-// a new message to session id while it waits on a pending interaction is
-// refused (session.PendingInteractionError), writing nothing. A look that
-// cannot reach the runtime refuses nothing, with a warning, as the lane
-// looks again before it delivers, and neither does one that does not answer
-// within fenceProbeTimeout. Any other error is a refusal.
+// pending is the CLI's front door, the API's rejectPendingInteraction rule
+// and check (lanesubmit.CheckPending): a new message to session id while it
+// waits on a pending interaction is refused (session.PendingInteractionError),
+// writing nothing, and so is one whose look fails, does not answer within
+// lanesubmit.PendingCheckTimeout, or panics (*lanesubmit.PendingCheckError,
+// refused pending_check_unavailable).
 func (s *sessionSubmitLane) pending(ctx context.Context, id string) error {
 	sp, err := s.provider()
 	if err != nil {
@@ -156,26 +154,13 @@ func (s *sessionSubmitLane) pending(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	got, ok := boundedProbeCtx(ctx, func(ctx context.Context) pendingLook {
+	return lanesubmit.CheckPending(ctx, id, func(ctx context.Context) (*runtime.PendingInteraction, error) {
 		p, _, err := handle.PendingStatus(ctx)
 		if err != nil || p == nil {
-			return pendingLook{err: err}
+			return nil, err
 		}
-		return pendingLook{pending: &runtime.PendingInteraction{RequestID: p.RequestID, Kind: p.Kind, Prompt: p.Prompt, Options: p.Options, Metadata: p.Metadata}}
+		return &runtime.PendingInteraction{RequestID: p.RequestID, Kind: p.Kind, Prompt: p.Prompt, Options: p.Options, Metadata: p.Metadata}, nil
 	})
-	if !ok {
-		got.err = fmt.Errorf("%w: the look for a pending interaction did not answer in %s", runtime.ErrRuntimeUnavailable, fenceProbeTimeout)
-	}
-	switch {
-	case errors.Is(got.err, runtime.ErrRuntimeUnavailable):
-		s.warnf("accepting the message without a look for a pending interaction (%v); the lane looks again before it delivers", got.err)
-		return nil
-	case got.err != nil:
-		return got.err
-	case got.pending != nil:
-		return session.PendingInteractionError(got.pending)
-	}
-	return nil
 }
 
 // answer reports acc by its op's state, whoever wrote the op: an open legacy
@@ -276,6 +261,7 @@ func (s *sessionSubmitLane) refuseAccept(err error, key string) int {
 		read    *lanesubmit.ReadError
 		kind    *lanesubmit.KindError
 		resume  *lanesubmit.ResumeError
+		check   *lanesubmit.PendingCheckError
 		reuse   *opjournal.KeyReuseError
 	)
 	switch {
@@ -293,6 +279,8 @@ func (s *sessionSubmitLane) refuseAccept(err error, key string) int {
 		return s.refuse(cliOpCodeKeyMismatch, fmt.Sprintf("the key names a different request (op %s, a %s op); rerun with another --key", kind.Op.ID, kind.Op.Kind), kind.Op.ID, key)
 	case errors.As(err, &resume):
 		return s.refuseResume(resume, key)
+	case errors.As(err, &check):
+		return s.refuse(cliOpCodePendingCheckUnavailable, err.Error(), "", key)
 	case errors.Is(err, session.ErrPendingInteraction):
 		return s.refuse(cliOpCodePendingInteraction, err.Error(), "", key)
 	}

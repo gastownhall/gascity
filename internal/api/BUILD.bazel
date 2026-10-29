@@ -493,6 +493,7 @@ go_test(
         "session_model_phase0_spec_test.go",
         "session_ops_test.go",
         "session_ops_x12_test.go",
+        "session_pending_check_test.go",
         "session_provider_kind_test.go",
         "session_reassign_split_test.go",
         "session_resolution_live_query_test.go",

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
@@ -19,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/lanesubmit"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -833,8 +835,11 @@ func (s *Server) sessionTargetDeliverable(ctx context.Context, store beads.Store
 // provider could not see the prompt, the text's Enter would answer it. A
 // configured named session that has not been materialized yet has nothing
 // pending, and neither has a session that is not running: the worker handle
-// does not look at its runtime. A look that cannot reach the runtime refuses
-// nothing; the delivery looks again under the session lock.
+// does not look at its runtime. The look is lanesubmit.CheckPending, the
+// rule gc session submit's fallback shares: bounded at
+// lanesubmit.PendingCheckTimeout, and a look that fails, does not answer in
+// time, or panics refuses the text with a retryable 503
+// pending_check_unavailable (pendingCheckError).
 func (s *Server) rejectPendingInteraction(ctx context.Context, store beads.Store, identifier string) error {
 	id, err := s.resolveSessionTargetIDWithContext(ctx, store, identifier, apiSessionResolveOptions{})
 	if err != nil {
@@ -847,19 +852,34 @@ func (s *Server) rejectPendingInteraction(ctx context.Context, store beads.Store
 	if err != nil {
 		return humaSessionManagerError(err)
 	}
-	pending, _, err := handle.PendingStatus(ctx)
-	if errors.Is(err, runtime.ErrRuntimeUnavailable) {
-		log.Printf("gc api: accepting text for %s without a look for a pending interaction: %v", id, err)
-		return nil
-	}
-	if err != nil {
-		return humaSessionManagerError(err)
-	}
-	if pending != nil {
+	err = lanesubmit.CheckPending(ctx, id, func(ctx context.Context) (*runtime.PendingInteraction, error) {
+		pending, _, err := handle.PendingStatus(ctx)
+		if err != nil || pending == nil {
+			return nil, err
+		}
 		interaction := runtimePendingInteraction(pending)
-		return humaSessionManagerError(session.PendingInteractionError(&interaction))
+		return &interaction, nil
+	})
+	if err != nil {
+		return pendingCheckError(err)
 	}
 	return nil
+}
+
+// pendingCheckCode is the detail prefix of a 503 refusing text whose
+// session could not be checked for a pending interaction.
+const pendingCheckCode = "pending_check_unavailable"
+
+// pendingCheckError maps a refusal of lanesubmit.CheckPending onto the wire:
+// a look that did not answer (*lanesubmit.PendingCheckError) is a retryable
+// 503 pending_check_unavailable, and a pending interaction 409
+// pending_interaction.
+func pendingCheckError(err error) error {
+	var check *lanesubmit.PendingCheckError
+	if errors.As(err, &check) {
+		return apierr.ServiceUnavailable.Msg(pendingCheckCode + ": " + err.Error())
+	}
+	return humaSessionManagerError(err)
 }
 
 func (s *Server) resolveSessionIDMaterializingNamed(store beads.Store, identifier string) (string, error) {
