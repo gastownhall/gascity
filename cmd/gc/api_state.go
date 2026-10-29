@@ -3112,6 +3112,11 @@ func (cs *controllerState) TeardownPartialRig(ctx context.Context, m api.RigProv
 	return errs
 }
 
+// removeRigDirConfined is a RED stub: the confined removal is not implemented yet.
+func removeRigDirConfined(_, _ string) error {
+	return errors.New("removeRigDirConfined: not implemented")
+}
+
 // regenerateRoutesBestEffort rewrites every rig's routes.jsonl from the current
 // on-disk config. Used by the rollback to drop a removed rig's stale routes.
 func (cs *controllerState) regenerateRoutesBestEffort() error {

@@ -1042,6 +1042,7 @@ go_test(
         "api_state_rig_path_containment_test.go",
         "api_state_rig_path_symlink_test.go",
         "api_state_rig_rollback_test.go",
+        "api_state_rig_toctou_test.go",
         "api_state_rollout_test.go",
         "api_state_storage_routes_test.go",
         "api_state_test.go",

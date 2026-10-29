@@ -39,6 +39,9 @@ type Deps struct {
 	// Cfg is the city config the caller loaded for edit.
 	Cfg *config.City
 
+	// BeforeMkdir runs immediately before the rig directory is created. RED stub: not yet called.
+	BeforeMkdir func(rigPath string) error
+
 	// InitStore initializes the rig's bead store (cmd/gc initDirIfReady). It
 	// returns deferred=true when live init is punted to the controller/startup.
 	// Required.
