@@ -324,10 +324,16 @@ func loadOrBuildDrainManifest(store beads.Store, bead beads.Bead, parentConvoyID
 }
 
 var (
-	errDrainLimitExceeded      = errors.New("drain limit exceeded")
-	errDrainInvalidItemFormula = errors.New("invalid drain item formula")
-	errDrainUnresolvedMember   = errors.New("drain unresolved member")
+	errDrainLimitExceeded        = errors.New("drain limit exceeded")
+	errDrainInvalidItemFormula   = errors.New("invalid drain item formula")
+	errDrainUnresolvedMember     = errors.New("drain unresolved member")
+	errDrainWorkspaceUnavailable = errors.New("shared drain workspace unavailable")
 )
+
+// sharedWorkspaceUnavailableReason is the gc.failure_reason a drain closes
+// with when its SharedDrainWorkspace hook cannot provide a workspace for a
+// member it already owns exclusively.
+const sharedWorkspaceUnavailableReason = "shared_workspace_unavailable"
 
 type drainUnresolvedMemberError struct {
 	ControlID      string
@@ -635,6 +641,18 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 			}
 			return closeDrainReservationFailure(store, bead, manifest, err, opts)
 		}
+		member, err := ensureSharedDrainWorkspace(store, bead, member, opts)
+		if err != nil {
+			if errors.Is(err, errDrainWorkspaceUnavailable) {
+				return closeDrainHardFailure(store, bead, manifest, drainHardFailure{
+					Reason:  sharedWorkspaceUnavailableReason,
+					Subject: member.ID,
+					Detail:  err.Error(),
+				}, err, opts)
+			}
+			return ControlResult{}, err
+		}
+		members[i] = member
 		created, err := materializeDrainRow(store, bead, manifest, members, row, member, itemFormula, parentVars, opts)
 		if err != nil {
 			if errors.Is(err, errDrainInvalidItemFormula) {
@@ -661,6 +679,72 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 		return closeDrainWithManifest(store, bead.ID, manifest, "failed", beadmeta.OutcomeFail, "drain-failed", opts)
 	}
 	return closeDrainWithManifest(store, bead.ID, manifest, "succeeded", beadmeta.OutcomePass, "drain-succeeded", opts)
+}
+
+// ensureSharedDrainWorkspace provisions the workspace a shared drain's items
+// work in, for a member the drain has just reserved exclusively and that has
+// no work_dir yet. Shared-drain item formulas (the do-work-item shape) read
+// work_dir from their source anchor and fail closed when nothing created the
+// directory; the SharedDrainWorkspace hook is the writer the pack contract
+// assumes, invoked only when no earlier writer exists.
+//
+// It acts only when all of these hold: the hook is configured, the drain owns
+// the member (exclusive member access — read access never writes members, and
+// shared context is implied by the caller), the member is a resolvable bead
+// (an unresolved placeholder has no bead to record a workspace on), and the
+// member has no work_dir. An existing work_dir — a pack's own prepare step, an
+// operator, or this drain's earlier write before a crash — always wins and is
+// never overwritten; the hook is not even called for that member. A ("", nil)
+// hook answer means the control's scope has no workspace to provision: the
+// decision is traced and the member is returned unchanged. Only the bare
+// work_dir key is written, through the member's owning store (the same store
+// the reservation write used), so cross-store members are covered; the
+// gc.* ownership keys stay off members.
+//
+// A hook error is wrapped in errDrainWorkspaceUnavailable and closes the
+// drain hard (closeDrainHardFailure) — a plain error would quarantine the
+// control and quarantine never releases drain reservations. Any other error
+// (member store resolution, the member write itself) is returned plain, so
+// the dispatcher's error tiers retry it: the drain stays open and the row is
+// not materialized; the reservation is idempotent for its owner, so the next
+// pass resumes cleanly.
+func ensureSharedDrainWorkspace(store beads.Store, control, member beads.Bead, opts ProcessOptions) (beads.Bead, error) {
+	if opts.SharedDrainWorkspace == nil {
+		return member, nil
+	}
+	if drainMemberAccess(control) != beadmeta.DrainMemberAccessExclusive {
+		return member, nil
+	}
+	if convoycore.IsUnresolvedTrackedItem(member) {
+		return member, nil
+	}
+	if strings.TrimSpace(member.Metadata[beadmeta.LegacyWorkDirMetadataKey]) != "" {
+		return member, nil
+	}
+	path, err := opts.SharedDrainWorkspace(control)
+	if err != nil {
+		return member, fmt.Errorf("%w: %s: %w", errDrainWorkspaceUnavailable, control.ID, err)
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		opts.tracef("drain %s: scope provides no shared workspace for member %s", control.ID, member.ID)
+		return member, nil
+	}
+	memberStore, err := drainMemberOwningStore(store, member.ID, opts)
+	if err != nil {
+		return member, fmt.Errorf("%s: resolving drain member store for %s: %w", control.ID, member.ID, err)
+	}
+	if err := memberStore.SetMetadata(member.ID, beadmeta.LegacyWorkDirMetadataKey, path); err != nil {
+		return member, fmt.Errorf("%s: recording shared drain workspace on member %s: %w", control.ID, member.ID, err)
+	}
+	updated := member
+	updated.Metadata = make(map[string]string, len(member.Metadata)+1)
+	for key, value := range member.Metadata {
+		updated.Metadata[key] = value
+	}
+	updated.Metadata[beadmeta.LegacyWorkDirMetadataKey] = path
+	opts.tracef("drain %s: recorded shared workspace %q on member %s", control.ID, path, member.ID)
+	return updated, nil
 }
 
 func materializeDrainRow(store beads.Store, control beads.Bead, manifest drainManifest, members []beads.Bead, row *drainManifestRow, member beads.Bead, itemFormula string, parentVars map[string]string, opts ProcessOptions) (int, error) {
@@ -1945,12 +2029,27 @@ func closeDrainReservationFailure(store beads.Store, bead beads.Bead, manifest d
 	return result, nil
 }
 
-func closeDrainItemFormulaFailure(store beads.Store, bead beads.Bead, manifest drainManifest, err error, opts ProcessOptions) (ControlResult, error) {
-	const failureReason = "invalid_drain_item_formula"
-	if closeErr := closeOpenDrainItemRoots(store, &manifest, failureReason); closeErr != nil {
+// drainHardFailure names a terminal, non-retryable drain failure: the machine
+// reason recorded as gc.failure_reason, the subject it is about (a member, a
+// formula), and a free-form detail recorded as gc.controller_error when set.
+type drainHardFailure struct {
+	Reason  string
+	Subject string
+	Detail  string
+}
+
+// closeDrainHardFailure closes a drain on a terminal failure the dispatcher
+// must not retry: it closes any open item roots, marks incomplete rows
+// failed, records the manifest, releases every member reservation, and closes
+// the control failed/hard. A non-empty Detail is recorded as
+// gc.controller_error with class hard, the keys markControllerSpawnError
+// uses. err is the failure being closed out; it only enriches error text on
+// the way, never the close itself.
+func closeDrainHardFailure(store beads.Store, bead beads.Bead, manifest drainManifest, failure drainHardFailure, err error, opts ProcessOptions) (ControlResult, error) {
+	if closeErr := closeOpenDrainItemRoots(store, &manifest, failure.Reason); closeErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: closing partial drain item roots after %w: %w", bead.ID, err, closeErr)
 	}
-	markIncompleteDrainRowsFailed(&manifest, failureReason)
+	markIncompleteDrainRowsFailed(&manifest, failure.Reason)
 	data, marshalErr := json.Marshal(manifest)
 	if marshalErr != nil {
 		return ControlResult{}, marshalErr
@@ -1959,20 +2058,36 @@ func closeDrainItemFormulaFailure(store beads.Store, bead beads.Bead, manifest d
 		beadmeta.DrainStateMetadataKey:    beadmeta.DrainStateFailed,
 		beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
 		beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassHard,
-		beadmeta.FailureReasonMetadataKey: failureReason,
+		beadmeta.FailureReasonMetadataKey: failure.Reason,
 		drainManifestMetadataKey:          string(data),
 	}
-	if manifest.Formula != "" {
-		metadata[beadmeta.FailureSubjectMetadataKey] = manifest.Formula
+	if failure.Subject != "" {
+		metadata[beadmeta.FailureSubjectMetadataKey] = failure.Subject
+	}
+	// closeDrainControl clears the controller-error keys so a drain closing
+	// normally does not carry a stale spawn error forward; this close IS the
+	// error, so the clear runs first and a non-empty Detail is (re)recorded
+	// deliberately after it.
+	clearControllerSpawnErrorMetadata(metadata)
+	if failure.Detail != "" {
+		metadata[beadmeta.ControllerErrorMetadataKey] = failure.Detail
+		metadata[beadmeta.ControllerErrorClassMetadataKey] = beadmeta.FailureClassHard
 	}
 	if releaseErr := releaseDrainReservations(store, bead.ID, manifest, opts); releaseErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: releasing reservations after %w: %w", bead.ID, err, releaseErr)
 	}
-	result, closeErr := closeDrainControl(store, bead.ID, metadata, "drain-failed", opts)
+	result, closeErr := closeScopedControl(store, bead.ID, metadata, "drain-failed", opts)
 	if closeErr != nil {
-		return ControlResult{}, fmt.Errorf("%s: closing invalid-item-formula drain after %w: %w", bead.ID, err, closeErr)
+		return ControlResult{}, fmt.Errorf("%s: closing %s drain after %w: %w", bead.ID, failure.Reason, err, closeErr)
 	}
 	return result, nil
+}
+
+func closeDrainItemFormulaFailure(store beads.Store, bead beads.Bead, manifest drainManifest, err error, opts ProcessOptions) (ControlResult, error) {
+	return closeDrainHardFailure(store, bead, manifest, drainHardFailure{
+		Reason:  "invalid_drain_item_formula",
+		Subject: manifest.Formula,
+	}, err, opts)
 }
 
 func markIncompleteDrainRowsFailed(manifest *drainManifest, failureReason string) {

@@ -1261,6 +1261,326 @@ func TestProcessDrainPropagatesSourceMemberWorkDirToItemWorkflow(t *testing.T) {
 // authority, while gc.work_dir is an observability mirror. When a member
 // carries both and they disagree, the stamped item steps must carry the
 // creator's record, not the mirror.
+// seedSharedExclusiveDrain returns the seed workflow reconfigured as a shared
+// drain with exclusive member access — the shape every same-session batch
+// drain uses — plus its two convoy members.
+func seedSharedExclusiveDrain(t *testing.T) (*beads.MemStore, beads.Bead, []beads.Bead) {
+	t.Helper()
+	store, drain := seedDrainWorkflow(t)
+	if err := store.SetMetadataBatch(drain.ID, map[string]string{
+		"gc.drain_context":       "shared",
+		"gc.drain_member_access": "exclusive",
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(shared exclusive drain): %v", err)
+	}
+	root := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
+	members, err := convoycore.Members(store, root.Metadata["gc.input_convoy_id"], false)
+	if err != nil {
+		t.Fatalf("convoycore.Members: %v", err)
+	}
+	return store, mustGetBead(t, store, drain.ID), members
+}
+
+// assertDrainItemCarriesWorkDir fails when the item root or its work step does
+// not carry want in both work_dir metadata keys.
+func assertDrainItemCarriesWorkDir(t *testing.T, store beads.Store, itemRootID, want string) {
+	t.Helper()
+	itemRoot := mustGetBead(t, store, itemRootID)
+	for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+		if got := itemRoot.Metadata[key]; got != want {
+			t.Fatalf("item root %s = %q, want workspace %q", key, got, want)
+		}
+	}
+	workStep := mustFindDrainItemWorkStep(t, store, itemRootID)
+	for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+		if got := workStep.Metadata[key]; got != want {
+			t.Fatalf("item work step %s = %q, want workspace %q", key, got, want)
+		}
+	}
+}
+
+func TestProcessSharedExclusiveDrainProvisionsWorkspaceForFirstMember(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain, members := seedSharedExclusiveDrain(t)
+	workspace := filepath.Join(t.TempDir(), "shared-workspace")
+
+	result, err := ProcessControl(store, drain, ProcessOptions{
+		FormulaSearchPaths:   []string{dir},
+		SharedDrainWorkspace: func(beads.Bead) (string, error) { return workspace, nil },
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(shared first): %v", err)
+	}
+	if result.Action != "drain-shared-advanced" {
+		t.Fatalf("Action = %q, want drain-shared-advanced", result.Action)
+	}
+	firstMember := mustGetBead(t, store, members[0].ID)
+	if got := firstMember.Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != workspace {
+		t.Fatalf("first member work_dir = %q, want %q", got, workspace)
+	}
+	if got, ok := firstMember.Metadata[beadmeta.WorkDirMetadataKey]; ok && got != "" {
+		t.Fatalf("first member gc.work_dir = %q, want unset; only the bare creator key is written", got)
+	}
+	manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+	assertDrainItemCarriesWorkDir(t, store, manifest.Rows[0].ItemRootID, workspace)
+}
+
+func TestSharedDrainWorkspaceProvisionedOncePerMember(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain, members := seedSharedExclusiveDrain(t)
+	workspace := filepath.Join(t.TempDir(), "shared-workspace")
+	hookCalls := 0
+	opts := ProcessOptions{
+		FormulaSearchPaths: []string{dir},
+		SharedDrainWorkspace: func(beads.Bead) (string, error) {
+			hookCalls++
+			return workspace, nil
+		},
+	}
+
+	if _, err := ProcessControl(store, mustGetBead(t, store, drain.ID), opts); err != nil {
+		t.Fatalf("ProcessControl(shared first): %v", err)
+	}
+	if hookCalls != 1 {
+		t.Fatalf("hook calls after first pass = %d, want 1 (once per reserved member)", hookCalls)
+	}
+	manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+	if err := updateMetadataAndClose(store, manifest.Rows[0].ItemRootID, map[string]string{"gc.outcome": "pass"}); err != nil {
+		t.Fatalf("close first root pass: %v", err)
+	}
+
+	result, err := ProcessControl(store, mustGetBead(t, store, drain.ID), opts)
+	if err != nil {
+		t.Fatalf("ProcessControl(shared second): %v", err)
+	}
+	if result.Action != "drain-shared-advanced" {
+		t.Fatalf("Action = %q, want drain-shared-advanced", result.Action)
+	}
+	if hookCalls != 2 {
+		t.Fatalf("hook calls after second pass = %d, want 2 (once per reserved member)", hookCalls)
+	}
+	secondMember := mustGetBead(t, store, members[1].ID)
+	if got := secondMember.Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != workspace {
+		t.Fatalf("second member work_dir = %q, want the same %q", got, workspace)
+	}
+	manifest = mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+	assertDrainItemCarriesWorkDir(t, store, manifest.Rows[1].ItemRootID, workspace)
+}
+
+func TestSharedDrainWorkspaceKeepsMemberExistingWorkDir(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain, members := seedSharedExclusiveDrain(t)
+	existing := filepath.Join(t.TempDir(), "pack-prepared-workspace")
+	if err := store.SetMetadata(members[1].ID, beadmeta.LegacyWorkDirMetadataKey, existing); err != nil {
+		t.Fatalf("SetMetadata(member 1 existing work dir): %v", err)
+	}
+	hookCalls := 0
+
+	if _, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{
+		FormulaSearchPaths: []string{dir},
+		SharedDrainWorkspace: func(beads.Bead) (string, error) {
+			hookCalls++
+			return filepath.Join(t.TempDir(), "provisioned"), nil
+		},
+	}); err != nil {
+		t.Fatalf("ProcessControl(shared first): %v", err)
+	}
+	manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+	if err := updateMetadataAndClose(store, manifest.Rows[0].ItemRootID, map[string]string{"gc.outcome": "pass"}); err != nil {
+		t.Fatalf("close first root pass: %v", err)
+	}
+
+	if _, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{
+		FormulaSearchPaths: []string{dir},
+		SharedDrainWorkspace: func(beads.Bead) (string, error) {
+			hookCalls++
+			return filepath.Join(t.TempDir(), "provisioned"), nil
+		},
+	}); err != nil {
+		t.Fatalf("ProcessControl(shared second): %v", err)
+	}
+	if hookCalls != 1 {
+		t.Fatalf("hook calls = %d, want 1: a member that already has work_dir is never provisioned", hookCalls)
+	}
+	secondMember := mustGetBead(t, store, members[1].ID)
+	if got := secondMember.Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != existing {
+		t.Fatalf("second member work_dir = %q, want unchanged %q", got, existing)
+	}
+	manifest = mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+	assertDrainItemCarriesWorkDir(t, store, manifest.Rows[1].ItemRootID, existing)
+}
+
+func TestSharedDrainWorkspaceHookNeverCalledWithoutExclusiveSharedProvisioning(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+
+	countingHook := func(counter *int) func(beads.Bead) (string, error) {
+		return func(beads.Bead) (string, error) {
+			*counter++
+			return filepath.Join(t.TempDir(), "workspace"), nil
+		}
+	}
+
+	t.Run("read member access", func(t *testing.T) {
+		store, drain, members := seedSharedExclusiveDrain(t)
+		if err := store.SetMetadata(drain.ID, beadmeta.DrainMemberAccessMetadataKey, "read"); err != nil {
+			t.Fatalf("SetMetadata(read): %v", err)
+		}
+		hookCalls := 0
+		if _, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{
+			FormulaSearchPaths:   []string{dir},
+			SharedDrainWorkspace: countingHook(&hookCalls),
+		}); err != nil {
+			t.Fatalf("ProcessControl(read shared drain): %v", err)
+		}
+		if hookCalls != 0 {
+			t.Fatalf("hook calls = %d, want 0: read access never owns its members", hookCalls)
+		}
+		for _, member := range members {
+			if got := mustGetBead(t, store, member.ID).Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != "" {
+				t.Fatalf("member %s work_dir = %q, want untouched", member.ID, got)
+			}
+		}
+	})
+
+	t.Run("separate context", func(t *testing.T) {
+		store, drain, members := seedSharedExclusiveDrain(t)
+		if err := store.SetMetadata(drain.ID, beadmeta.DrainContextMetadataKey, "separate"); err != nil {
+			t.Fatalf("SetMetadata(separate): %v", err)
+		}
+		hookCalls := 0
+		if _, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{
+			FormulaSearchPaths:   []string{dir},
+			SharedDrainWorkspace: countingHook(&hookCalls),
+		}); err != nil {
+			t.Fatalf("ProcessControl(separate drain): %v", err)
+		}
+		if hookCalls != 0 {
+			t.Fatalf("hook calls = %d, want 0: a separate drain provisions nothing", hookCalls)
+		}
+		for _, member := range members {
+			if got := mustGetBead(t, store, member.ID).Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != "" {
+				t.Fatalf("member %s work_dir = %q, want untouched", member.ID, got)
+			}
+		}
+	})
+
+	t.Run("nil hook", func(t *testing.T) {
+		store, drain, _ := seedSharedExclusiveDrain(t)
+		result, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+		if err != nil {
+			t.Fatalf("ProcessControl(nil hook): %v", err)
+		}
+		if result.Action != "drain-shared-advanced" {
+			t.Fatalf("Action = %q, want drain-shared-advanced: a nil hook must not change the drain", result.Action)
+		}
+	})
+}
+
+func TestSharedDrainWorkspaceHookErrorClosesDrainHard(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain, members := seedSharedExclusiveDrain(t)
+	hookErr := errors.New("worktrees root is inside the rig checkout")
+
+	result, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{
+		FormulaSearchPaths: []string{dir},
+		SharedDrainWorkspace: func(beads.Bead) (string, error) {
+			return "", hookErr
+		},
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(workspace error): %v", err)
+	}
+	if result.Action != "drain-failed" {
+		t.Fatalf("Action = %q, want drain-failed", result.Action)
+	}
+	closed := mustGetBead(t, store, drain.ID)
+	if closed.Status != "closed" || closed.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+		t.Fatalf("drain = status %q outcome %q, want closed/fail", closed.Status, closed.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	if got := closed.Metadata[beadmeta.FailureClassMetadataKey]; got != beadmeta.FailureClassHard {
+		t.Fatalf("gc.failure_class = %q, want %q", got, beadmeta.FailureClassHard)
+	}
+	if got := closed.Metadata[beadmeta.FailureReasonMetadataKey]; got != "shared_workspace_unavailable" {
+		t.Fatalf("gc.failure_reason = %q, want shared_workspace_unavailable", got)
+	}
+	if got := closed.Metadata[beadmeta.FailureSubjectMetadataKey]; got != members[0].ID {
+		t.Fatalf("gc.failure_subject = %q, want %q", got, members[0].ID)
+	}
+	if got := closed.Metadata[beadmeta.ControllerErrorMetadataKey]; !strings.Contains(got, hookErr.Error()) {
+		t.Fatalf("gc.controller_error = %q, want it to contain the hook error %q", got, hookErr.Error())
+	}
+	if got := closed.Metadata[beadmeta.ControllerErrorClassMetadataKey]; got != beadmeta.FailureClassHard {
+		t.Fatalf("gc.controller_error_class = %q, want %q", got, beadmeta.FailureClassHard)
+	}
+	manifest := mustDrainManifest(t, closed)
+	for i, row := range manifest.Rows {
+		if row.ItemRootID != "" {
+			t.Fatalf("row %d item root = %q, want none: the drain failed before materialization", i, row.ItemRootID)
+		}
+	}
+	for _, member := range members {
+		if got := strings.TrimSpace(mustGetBead(t, store, member.ID).Metadata[beadmeta.ExclusiveDrainReservationMetadataKey]); got != "" {
+			t.Fatalf("member %s reservation = %q, want released", member.ID, got)
+		}
+	}
+}
+
+// memberWorkDirWriteFailingStore fails the one SetMetadata write the shared
+// workspace provisioner makes on the named member: the bare work_dir key.
+type memberWorkDirWriteFailingStore struct {
+	beads.Store
+	memberID string
+}
+
+func (s *memberWorkDirWriteFailingStore) SetMetadata(beadID, key, value string) error {
+	if beadID == s.memberID && key == beadmeta.LegacyWorkDirMetadataKey {
+		return errors.New("injected member write failure")
+	}
+	return s.Store.SetMetadata(beadID, key, value)
+}
+
+func TestSharedDrainWorkspaceMemberWriteFailureLeavesDrainOpen(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	memStore, drain, members := seedSharedExclusiveDrain(t)
+	store := &memberWorkDirWriteFailingStore{Store: memStore, memberID: members[0].ID}
+
+	_, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{
+		FormulaSearchPaths:   []string{dir},
+		SharedDrainWorkspace: func(beads.Bead) (string, error) { return filepath.Join(t.TempDir(), "shared-workspace"), nil },
+	})
+	if err == nil {
+		t.Fatal("ProcessControl(member write failure) = nil error, want the wrapped write error")
+	}
+	if !strings.Contains(err.Error(), "recording shared drain workspace on member "+members[0].ID) {
+		t.Fatalf("error = %v, want the member write failure named with member %s", err, members[0].ID)
+	}
+	if !strings.Contains(err.Error(), "injected member write failure") {
+		t.Fatalf("error = %v, want it to wrap the store failure", err)
+	}
+	reloaded := mustGetBead(t, store, drain.ID)
+	if reloaded.Status != "open" {
+		t.Fatalf("drain status = %q, want open: a store write failure retries next pass", reloaded.Status)
+	}
+	manifest := mustDrainManifest(t, reloaded)
+	for i, row := range manifest.Rows {
+		if row.ItemRootID != "" {
+			t.Fatalf("row %d item root = %q, want none: the row was not materialized", i, row.ItemRootID)
+		}
+	}
+}
+
 func TestProcessDrainStampsLegacyWorkDirOverMirror(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()
