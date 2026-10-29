@@ -1371,7 +1371,10 @@ func IsGraphWorkflowAttachment(store beads.Store, rootID string) bool {
 	if store == nil || rootID == "" {
 		return false
 	}
-	b, err := store.Get(rootID)
+	// The graph store answers whether rootID is a graph.v2 root: a v1 poured
+	// root (work class) lives in the work store, and missing it here is the
+	// right answer, "no".
+	b, err := beads.FederatedGet(store, rootID)
 	if err != nil {
 		return false
 	}

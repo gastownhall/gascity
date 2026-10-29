@@ -69,6 +69,18 @@ var reviewedMarkers = map[string]reviewedMarker{
 		"federated", 1,
 		"one leg of the stepless-root holder walk (S3a): the graph store, then every work leg; a holder lives in one",
 	},
+	"cmd/gc/api_state.go liveCloseOwner": {
+		"federated", 1,
+		"first-owner close probe (S3a R4): the prefix route and the binding the residence probe proved holds a relic id",
+	},
+	"cmd/gc/wisp_step_inject.go stepResolution.activeMoleculeIn": {
+		"federated", 1,
+		"one leg of the step reminder's molecule union (S3a): graph roots in the graph store, v1 poured molecules on the work legs",
+	},
+	"internal/sling/sling.go IsGraphWorkflowAttachment": {
+		"federated", 1,
+		"graph.v2 root test against the graph store: a v1 poured root lives in the work store, and the miss is the answer (not graph)",
+	},
 	"internal/sling/sling_attachment.go getFromStores": {
 		"federated", 1,
 		"first-owner attachment probe (S3a): graph store or, for a v1 poured molecule, the work store",

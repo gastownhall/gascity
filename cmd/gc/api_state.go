@@ -1243,7 +1243,13 @@ func liveCloseOwner(stores []beads.Store, id string, relic beads.Store) (beads.S
 	var openStore beads.Store
 	var open beads.Bead
 	for _, store := range stores {
-		b, err := beads.HandlesFor(store).Live.Get(id)
+		// A first-owner probe over the prefix route and the binding the
+		// residence probe proved holds the id: a relic's row lives in one.
+		var b beads.Bead
+		err := beads.FederatedRead(func() (err error) {
+			b, err = beads.HandlesFor(store).Live.Get(id)
+			return err
+		})
 		switch {
 		case errors.Is(err, beads.ErrNotFound):
 		case err != nil || b.Status == "closed":
