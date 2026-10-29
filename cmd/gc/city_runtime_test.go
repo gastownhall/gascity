@@ -2338,6 +2338,73 @@ func TestOrphanedOrderTrackingSweepSeesBeadsWrittenBehindTheCache(t *testing.T) 
 	}
 }
 
+// TestOrderTrackingSweepsCloseOldestFirstWithinBudget pins WHICH tracking
+// beads a budgeted sweep closes: the oldest (CreatedAt ascending, ties by ID),
+// whatever order the backing stores them in, so newer beads cannot starve an
+// old jam.
+func TestOrderTrackingSweepsCloseOldestFirstWithinBudget(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	tracking := func(id string, age time.Duration) beads.Bead {
+		return beads.Bead{
+			ID:        id,
+			Title:     "order:stale",
+			Status:    "open",
+			Labels:    []string{"order-run:stale", labelOrderTracking},
+			CreatedAt: base.Add(age),
+		}
+	}
+	// Stored scrambled; gc-a and gc-b share a CreatedAt.
+	seed := func() []beads.Bead {
+		return []beads.Bead{
+			tracking("gc-e", 4*time.Minute),
+			tracking("gc-b", time.Minute),
+			tracking("gc-d", 3*time.Minute),
+			tracking("gc-a", time.Minute),
+			tracking("gc-f", 2*time.Minute),
+			tracking("gc-c", 0),
+		}
+	}
+	oldestFirst := []string{"gc-c", "gc-a", "gc-b", "gc-f", "gc-d", "gc-e"}
+	if len(oldestFirst) <= orderTrackingSweepCloseBudget {
+		t.Fatalf("fixture has %d beads, need more than the close budget %d", len(oldestFirst), orderTrackingSweepCloseBudget)
+	}
+	assertClosedOldest := func(t *testing.T, store beads.Store) {
+		t.Helper()
+		for i, id := range oldestFirst {
+			got, err := store.Get(id)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", id, err)
+			}
+			wantClosed := i < orderTrackingSweepCloseBudget
+			if (got.Status == "closed") != wantClosed {
+				t.Errorf("%s (oldest-first #%d) status = %s, want closed=%v", id, i, got.Status, wantClosed)
+			}
+		}
+	}
+
+	t.Run("stale watchdog", func(t *testing.T) {
+		store := beads.NewMemStoreFrom(len(oldestFirst), seed(), nil)
+		cr := &CityRuntime{
+			cityName:            "test-city",
+			cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+			standaloneCityStore: store,
+			stdout:              io.Discard,
+			stderr:              io.Discard,
+			logPrefix:           "gc test",
+		}
+		cr.runOrderTrackingSweepWatchdog(cr.cfg, time.Now().Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
+		assertClosedOldest(t, store)
+	})
+
+	t.Run("orphan sweep", func(t *testing.T) {
+		store := beads.NewMemStoreFrom(len(oldestFirst), seed(), nil)
+		if _, err := sweepOrphanedOrderTrackingLimit(store, orderTrackingSweepCloseBudget); err != nil {
+			t.Fatalf("sweepOrphanedOrderTrackingLimit(): %v", err)
+		}
+		assertClosedOldest(t, store)
+	})
+}
+
 func TestOrderTrackingSweepWatchdogUsesCloseBudget(t *testing.T) {
 	store := beads.NewMemStore()
 	ids := make([]string, 0, orderTrackingSweepCloseBudget+1)

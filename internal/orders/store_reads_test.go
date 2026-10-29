@@ -178,6 +178,9 @@ func assertSweepQueryShape(t *testing.T, name string, queries []beads.ListQuery)
 		if q.Label != "order-tracking" || q.IncludeClosed || q.Status != "" || q.Limit != 0 || q.TierMode != beads.TierBoth {
 			t.Fatalf("%s query[%d] = %+v, want Label=order-tracking, IncludeClosed=false, Status=\"\", Limit=0, TierMode=TierBoth", name, i, q)
 		}
+		if q.Sort != beads.SortCreatedAsc {
+			t.Fatalf("%s query[%d].Sort = %q, want SortCreatedAsc (the caller's close budget must drain the oldest jam)", name, i, q.Sort)
+		}
 	}
 }
 
@@ -522,6 +525,93 @@ func TestOrphanedOpenRunsBypassesCache(t *testing.T) {
 	if runsContain(runs, marker.ID) {
 		t.Fatalf("OrphanedOpenRuns() = %v; included trigger-env-failure marker %s", runs, marker.ID)
 	}
+}
+
+// TestSweepReadsOldestFirst: both sweep readers return tracking beads
+// oldest-first (CreatedAt ascending, ties by ID ascending), independent of the
+// backing's storage order, so a budgeted close drains the oldest jam first.
+func TestSweepReadsOldestFirst(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	tracking := func(id string, age time.Duration) beads.Bead {
+		return beads.Bead{
+			ID:        id,
+			Title:     "order:digest",
+			Status:    "open",
+			Labels:    []string{"order-run:digest", "order-tracking"},
+			CreatedAt: base.Add(age),
+		}
+	}
+	// Stored scrambled; gc-a and gc-b share a CreatedAt.
+	seed := []beads.Bead{
+		tracking("gc-e", 4*time.Minute),
+		tracking("gc-b", time.Minute),
+		tracking("gc-d", 3*time.Minute),
+		tracking("gc-a", time.Minute),
+		tracking("gc-f", 2*time.Minute),
+		tracking("gc-c", 0),
+	}
+	want := []string{"gc-c", "gc-a", "gc-b", "gc-f", "gc-d", "gc-e"}
+	st := ordersStoreOver(beads.NewMemStoreFrom(len(seed), seed, nil))
+
+	stale, err := st.StaleOpenRuns(time.Now())
+	if err != nil {
+		t.Fatalf("StaleOpenRuns(): %v", err)
+	}
+	if got := runIDs(stale); !reflect.DeepEqual(got, want) {
+		t.Errorf("StaleOpenRuns() IDs = %v, want oldest-first %v", got, want)
+	}
+	orphaned, err := st.OrphanedOpenRuns()
+	if err != nil {
+		t.Fatalf("OrphanedOpenRuns(): %v", err)
+	}
+	if got := runIDs(orphaned); !reflect.DeepEqual(got, want) {
+		t.Errorf("OrphanedOpenRuns() IDs = %v, want oldest-first %v", got, want)
+	}
+}
+
+// TestSweepReadsKeepInProgressAndExcludeClosed guards the sweep readers' status
+// semantics: an in_progress tracking bead is still swept (a Status:"open" filter
+// would strand it gating its order) and a closed one is not.
+func TestSweepReadsKeepInProgressAndExcludeClosed(t *testing.T) {
+	mem := beads.NewMemStore()
+	mk := func(status string) beads.Bead {
+		b, err := mem.Create(beads.Bead{Title: "order:digest", Labels: []string{"order-run:digest", "order-tracking"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status != "open" {
+			if err := mem.Update(b.ID, beads.UpdateOpts{Status: &status}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return b
+	}
+	openBead, inProgress, closedBead := mk("open"), mk("in_progress"), mk("closed")
+	st := ordersStoreOver(mem)
+
+	stale, err := st.StaleOpenRuns(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("StaleOpenRuns(): %v", err)
+	}
+	orphaned, err := st.OrphanedOpenRuns()
+	if err != nil {
+		t.Fatalf("OrphanedOpenRuns(): %v", err)
+	}
+	want := []string{openBead.ID, inProgress.ID}
+	if got := runIDs(stale); !reflect.DeepEqual(got, want) {
+		t.Errorf("StaleOpenRuns() IDs = %v, want %v (closed %s excluded)", got, want, closedBead.ID)
+	}
+	if got := runIDs(orphaned); !reflect.DeepEqual(got, want) {
+		t.Errorf("OrphanedOpenRuns() IDs = %v, want %v (closed %s excluded)", got, want, closedBead.ID)
+	}
+}
+
+func runIDs(runs []OrderRun) []string {
+	ids := make([]string, 0, len(runs))
+	for _, r := range runs {
+		ids = append(ids, r.ID)
+	}
+	return ids
 }
 
 func beadsContain(list []beads.Bead, id string) bool {
