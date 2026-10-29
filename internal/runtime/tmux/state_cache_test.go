@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -1163,5 +1165,51 @@ func TestStateCacheSessionReadsMissForUnknownSession(t *testing.T) {
 	attached, ok := cache.SessionAttached("known")
 	if !ok || !attached {
 		t.Errorf("SessionAttached(known) = %t, %t, want true, true", attached, ok)
+	}
+}
+
+// gcDispatcherSnapshot is a running session whose pane runs one process,
+// command with args, as its pane command and sole process.
+func gcDispatcherSnapshot(session, command, args string) runtimeStateSnapshot {
+	return runtimeStateSnapshot{
+		Sessions: map[string]sessionRuntimeState{
+			session: {
+				Running: true,
+				Panes:   []paneRuntimeState{{Command: command, PID: "201"}},
+			},
+		},
+		Processes: newProcessSnapshot([]processRuntimeState{{
+			PID:     "201",
+			PPID:    "1",
+			Command: command,
+			Args:    args,
+		}}),
+		ProcessesAvailable: true,
+	}
+}
+
+// #7551: a control-dispatcher started via `exec "$GC_BIN" convoy control ...`
+// runs gc under its executable's on-disk name (a Nix wrapProgram target is
+// `.gc-wrapped`) and must still satisfy the core pack's process_names = ["gc"].
+// The running test binary plays the gc binary, as GC_BIN = os.Executable()
+// does in production; the literal Nix name is pinned in proctable.
+func TestStateCache_ProcessAliveMatchesWrappedGCExecutable(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	self := filepath.Base(exe)
+	if self == "gc" {
+		t.Fatalf("test executable is named %q; the wrapped-name case is vacuous", self)
+	}
+	const session = "core__control-dispatcher-gc-wisp-9ragnq7"
+	args := exe + " convoy control --serve --follow ntrecv/core.control-dispatcher"
+	cache := NewStateCache(&mockFetcher{state: gcDispatcherSnapshot(session, self, args)}, 2*time.Second)
+
+	if !cache.ProcessAlive(session, []string{"gc"}) {
+		t.Fatalf("ProcessAlive(dispatcher running %s, [gc]) = false, want true: a live gc dispatcher under a renamed/wrapped executable is reported runtime-missing", self)
+	}
+	if !processMatchesNamesForTest(self, args, []string{"gc"}) {
+		t.Fatalf("uncached matcher missed the gc executable %s", self)
 	}
 }
