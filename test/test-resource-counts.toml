@@ -646,6 +646,12 @@ resource = "net_listen"
 calls = 1
 
 [[count]]
+path = "cmd/gc/detached_probe_tmux_integration_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
 path = "cmd/gc/dolt_data_dir_lock_linux_test.go"
 resource = "subprocess"
 calls = 1
