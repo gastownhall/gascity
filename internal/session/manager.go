@@ -2410,6 +2410,14 @@ const MetadataKeyUsageClosePending = "usage_close_pending"
 // interval a pending usage close accounts; see UsageClosePatch.
 const MetadataKeyUsageClosedAt = "usage_closed_at"
 
+// MetadataKeyUsageClosedAwakeStartedAt is the awake_started_at of the interval
+// a pending usage close ended, kept by the row's reopen; see UsageReopenPatch.
+const MetadataKeyUsageClosedAwakeStartedAt = "usage_closed_awake_started_at"
+
+// MetadataKeyUsageClosedSessionKey is the session_key of the interval a pending
+// usage close ended, kept by the row's reopen; see UsageReopenPatch.
+const MetadataKeyUsageClosedSessionKey = "usage_closed_session_key"
+
 // PersistInvocationUsageCursor stores the invocation-usage telemetry cursor
 // on an existing session. Unlike PersistSessionKey it overwrites any
 // existing value — the cursor advances with every recorded invocation.

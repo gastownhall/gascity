@@ -346,12 +346,14 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "close",
 			patch: ClosePatch(now, "orphaned"),
 			want: MetadataPatch{
-				"state":               "orphaned",
-				"close_reason":        "session orphaned: configured agent removed",
-				"closed_at":           now.Format(time.RFC3339),
-				"synced_at":           now.Format(time.RFC3339),
-				"usage_close_pending": "true",
-				"usage_closed_at":     now.Format(time.RFC3339Nano),
+				"state":                         "orphaned",
+				"close_reason":                  "session orphaned: configured agent removed",
+				"closed_at":                     now.Format(time.RFC3339),
+				"synced_at":                     now.Format(time.RFC3339),
+				"usage_close_pending":           "true",
+				"usage_closed_at":               now.Format(time.RFC3339Nano),
+				"usage_closed_awake_started_at": "",
+				"usage_closed_session_key":      "",
 			},
 		},
 		{
@@ -958,9 +960,69 @@ func TestClosePatchStampsUsageCloseMarker(t *testing.T) {
 		}
 	}
 	failed := ClosePatch(now, string(StateFailedCreate))
-	for _, key := range []string{"usage_close_pending", "usage_closed_at"} {
+	for _, key := range []string{"usage_close_pending", "usage_closed_at", "usage_closed_awake_started_at", "usage_closed_session_key"} {
 		if v, ok := failed[key]; ok {
 			t.Errorf("ClosePatch(failed-create) writes %s=%q, want the key absent", key, v)
 		}
+	}
+}
+
+// TestUsageClosedIntervalSurvivesTheReopen pins the interval a pending usage
+// close names across its row's reopen: the reopen keeps the closed interval's
+// awake_started_at and session_key once, the interval view reads them over a
+// newer start's, and the row's next close drops them, since that close ended
+// the row's current interval.
+func TestUsageClosedIntervalSurvivesTheReopen(t *testing.T) {
+	closeAt := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+	closed := map[string]string{"awake_started_at": "2026-09-24T09:50:00Z", "session_key": "key-1", "state": "drained"}
+	if got := UsageReopenPatch(closed); got != nil {
+		t.Fatalf("UsageReopenPatch with no pending close = %v, want nothing kept", got)
+	}
+	for k, v := range ClosePatch(closeAt, "drained") {
+		closed[k] = v
+	}
+	kept := UsageReopenPatch(closed)
+	want := MetadataPatch{"usage_closed_awake_started_at": "2026-09-24T09:50:00Z", "usage_closed_session_key": "key-1"}
+	if !reflect.DeepEqual(kept, want) {
+		t.Fatalf("UsageReopenPatch = %v, want %v", kept, want)
+	}
+
+	// The reopened row starts a newer interval under a fresh key.
+	reopened := map[string]string{}
+	for k, v := range closed {
+		reopened[k] = v
+	}
+	for k, v := range kept {
+		reopened[k] = v
+	}
+	reopened["awake_started_at"] = "2026-09-24T10:05:00.123456789Z"
+	reopened["session_key"] = "key-2"
+	if got := UsageReopenPatch(reopened); got != nil {
+		t.Fatalf("UsageReopenPatch over kept values = %v, want the first reopen's kept", got)
+	}
+	interval := UsageClosedIntervalMetadata(reopened)
+	if interval["awake_started_at"] != "2026-09-24T09:50:00Z" || interval["session_key"] != "key-1" {
+		t.Fatalf("interval view start/key = %q/%q, want the closed interval's 2026-09-24T09:50:00Z/key-1", interval["awake_started_at"], interval["session_key"])
+	}
+	if reopened["awake_started_at"] != "2026-09-24T10:05:00.123456789Z" || reopened["session_key"] != "key-2" {
+		t.Fatal("UsageClosedIntervalMetadata modified the row's own metadata")
+	}
+	if end := UsageIntervalEnd(interval, time.Date(2026, 9, 24, 9, 50, 0, 0, time.UTC), closeAt.Add(time.Hour)); !end.Equal(closeAt) {
+		t.Fatalf("closed interval ends at %s, want the close at %s", end, closeAt)
+	}
+
+	for k, v := range ClosePatch(closeAt.Add(30*time.Minute), "drained") {
+		reopened[k] = v
+	}
+	if interval := UsageClosedIntervalMetadata(reopened); interval["awake_started_at"] != "2026-09-24T10:05:00.123456789Z" || interval["session_key"] != "key-2" {
+		t.Fatalf("after a second close the interval view start/key = %q/%q, want the row's own", interval["awake_started_at"], interval["session_key"])
+	}
+	for k, v := range UsageCloseClearPatch() {
+		if v != "" {
+			t.Fatalf("UsageCloseClearPatch sets %s=%q, want it cleared", k, v)
+		}
+	}
+	if len(UsageCloseClearPatch()) != 4 {
+		t.Fatalf("UsageCloseClearPatch = %v, want the marker and the kept start and key", UsageCloseClearPatch())
 	}
 }

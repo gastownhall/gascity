@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/usage"
 )
 
@@ -1357,10 +1358,11 @@ func TestEmitDueComputeFactsSettlesReopenedNamedSessionInterval(t *testing.T) {
 
 // TestEmitDueComputeFactsClearsCloseMarkerWithNothingToAccount covers marked
 // rows the usage lane must not bill: no awake interval, an interval already
-// committed, an open row awake on a newer interval than the close ended, and an
-// open row still live on the closed interval's start. Each records no fact and
-// has its markers cleared. A row the lane settled is then listed no more and
-// records nothing on a later pass.
+// committed, an open row awake on a newer interval than the close ended with no
+// start kept by a reopen (a close rolled back to asleep keeps its marker, and
+// its later wake replaces the start), and an open row still live on the closed
+// interval's start. Each records no fact and has its markers cleared. A row the
+// lane settled is then listed no more and records nothing on a later pass.
 func TestEmitDueComputeFactsClearsCloseMarkerWithNothingToAccount(t *testing.T) {
 	t1 := time.Now().UTC().Truncate(time.Second)
 	t0 := t1.Add(-10 * time.Minute)
@@ -1372,7 +1374,7 @@ func TestEmitDueComputeFactsClearsCloseMarkerWithNothingToAccount(t *testing.T) 
 	}{
 		{name: "no awake interval", closed: true, edit: func(m map[string]string) { delete(m, "awake_started_at") }},
 		{name: "interval already committed", closed: true, edit: func(m map[string]string) { m[usageComputeEmittedAtKey] = start }},
-		{name: "open row awake on a newer interval", edit: func(m map[string]string) {
+		{name: "open row awake on a newer interval, no start kept", edit: func(m map[string]string) {
 			m["awake_started_at"] = t1.Add(time.Minute).Format(time.RFC3339)
 		}},
 		{name: "open row live on the closed interval", edit: func(map[string]string) {}},
@@ -1425,10 +1427,7 @@ func TestEmitDueComputeFactsClearsCloseMarkerWithNothingToAccount(t *testing.T) 
 		drainAckClosedCodexSession(t, env, t0, workDir)
 		cr, sinkPath := newClosedUsageRuntime(t, env.store, codexRoot)
 		cr.emitDueComputeFacts(context.Background(), nil, false)
-		listed, err := env.store.List(beads.ListQuery{
-			Type: session.BeadType, Status: "closed", IncludeClosed: true,
-			Metadata: map[string]string{session.MetadataKeyUsageClosePending: "true"},
-		})
+		listed, err := env.store.List(closedUsageListQuery())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1519,6 +1518,12 @@ func TestEmitDueComputeFactsGivesUpUnsettledClosedIntervalSweep(t *testing.T) {
 	})
 }
 
+// isClosedUsageList reports whether q is the usage lane's List of the rows
+// whose usage close is pending (closedUsageListQuery).
+func isClosedUsageList(q beads.ListQuery) bool {
+	return q.Metadata[session.MetadataKeyUsageClosePending] == "true"
+}
+
 // closedListCountingStore counts the closed-session Lists the usage lane
 // issues.
 type closedListCountingStore struct {
@@ -1527,7 +1532,7 @@ type closedListCountingStore struct {
 }
 
 func (s *closedListCountingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	if q.Status == "closed" {
+	if isClosedUsageList(q) {
 		s.closedLists++
 	}
 	return s.Store.List(q)
@@ -1583,7 +1588,7 @@ type closedListRecordingStore struct {
 
 func (s *closedListRecordingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 	got, err := s.Store.List(q)
-	if q.Status == "closed" {
+	if isClosedUsageList(q) {
 		s.queries = append(s.queries, q)
 		s.rows = append(s.rows, len(got))
 	}
@@ -1692,4 +1697,250 @@ func TestEmitDueComputeFactsBoundsClosedIntervalScan(t *testing.T) {
 			t.Fatalf("swept=%q pending=%q, want the interval settled", got.Metadata[usageModelSweptAtKey], got.Metadata[session.MetadataKeyUsageClosePending])
 		}
 	})
+}
+
+// TestEmitDueComputeFactsClosedListPushesItsLimit pins the closed List's cost
+// on the default sessions store: priced as NativeDoltStore sends it
+// (beads.NativeListPlan), the List the lane issues is one keyed backing
+// request that carries closedUsageListLimit, oldest first. A typed or
+// status-filtered List carries no limit there, so every marked row would be
+// read on every pass and cut to the page in Go.
+func TestEmitDueComputeFactsClosedListPushesItsLimit(t *testing.T) {
+	mem := beads.NewMemStore()
+	b, err := mem.Create(beads.Bead{
+		Type: session.BeadType, Title: "s", Labels: []string{session.LabelSession},
+		Metadata: map[string]string(session.UsageClosePatch(time.Now().UTC())),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.Close(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	store := &closedListRecordingStore{Store: mem}
+	cr, _ := newClosedUsageRuntime(t, store, t.TempDir())
+	cr.emitDueComputeFacts(context.Background(), nil, false)
+
+	if len(store.queries) != 1 || store.rows[0] != 1 {
+		t.Fatalf("closed Lists = %+v returning %v, want one List finding the marked row", store.queries, store.rows)
+	}
+	plan := beads.NativeListPlan(store.queries[0])
+	if len(plan) != 1 {
+		t.Fatalf("native plan = %d requests, want 1", len(plan))
+	}
+	req := plan[0]
+	if req.Limit == nil || *req.Limit != closedUsageListLimit {
+		limit := "unset"
+		if req.Limit != nil {
+			limit = fmt.Sprint(*req.Limit)
+		}
+		t.Fatalf("native request limit = %s, want %d pushed to the backing", limit, closedUsageListLimit)
+	}
+	if !beads.NativeListRequestKeyed(req) || req.SortBy != "created" || !req.Reverse {
+		t.Fatalf("native request = %+v, want a keyed request sorted created ascending", req)
+	}
+}
+
+// TestEmitDueComputeFactsSettlesClosedIntervalAfterTheRowStartsAgain is the
+// regression for a closed interval whose row a reopen starts again before the
+// usage lane runs, as v2 can (its start commits in the session reconciler, the
+// lane in controller maintenance): the start stamps a newer awake_started_at
+// and the fresh wake a newer session_key. The lane must account the interval
+// the reopen kept on the close marker, ending at the close, sweep the closed
+// conversation's rollout rather than the newer one, and leave the row's newer
+// interval unaccounted. It meets the row in the open snapshot, or in the
+// closed List when the snapshot predates the reopen.
+func TestEmitDueComputeFactsSettlesClosedIntervalAfterTheRowStartsAgain(t *testing.T) {
+	const newerKey = "019e3e8e-3591-7532-a1ef-8b9e882bea30"
+	for _, fromList := range []bool{false, true} {
+		name := "from the open snapshot"
+		if fromList {
+			name = "from the closed List"
+		}
+		t.Run(name, func(t *testing.T) {
+			env := newReconcilerTestEnv(t)
+			t1 := time.Now().UTC().Truncate(time.Second)
+			env.clk.Time = t1
+			t0, t2 := t1.Add(-10*time.Minute), t1.Add(2*time.Minute)
+			workDir, codexRoot := t.TempDir(), t.TempDir()
+			writeCodexRolloutForSweepAt(t, codexRoot, t0, workDir, codexSweepSessionKey, [][3]int{{150, 100, 50}})
+			writeCodexRolloutForSweepAt(t, codexRoot, t2, workDir, newerKey, [][3]int{{300, 200, 100}, {600, 200, 100}})
+			id := drainAckClosedCodexSession(t, env, t0, workDir)
+			closed, err := env.store.Get(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := env.store.Reopen(id); err != nil {
+				t.Fatal(err)
+			}
+			if err := env.store.SetMetadataBatch(id, reopenNamedSessionBatch(closed, "stopped", t1.Add(time.Minute))); err != nil {
+				t.Fatal(err)
+			}
+			start := session.PreWakePatch(session.PreWakePatchInput{Generation: 2, InstanceToken: "tok-2", ContinuationEpoch: 2, Now: t2, FreshWake: true})
+			maps.Copy(start, session.CommitStartedPatch(session.CommitStartedPatchInput{
+				CoreHash: "h", ConfirmState: true, ClearPendingCreateClaim: true, StartsAwakeInterval: true, Now: t2,
+			}))
+			start["session_key"] = newerKey
+			if err := env.store.SetMetadataBatch(id, start); err != nil {
+				t.Fatal(err)
+			}
+
+			cr, sinkPath := newClosedUsageRuntime(t, env.store, codexRoot)
+			cr.usageNow = func() time.Time { return t2.Add(time.Minute) }
+			var open []session.Info
+			if !fromList {
+				open = append(open, env.sessionInfo(id))
+			}
+			cr.emitDueComputeFacts(context.Background(), open, false)
+
+			if got := rawSinkFactCount(t, sinkPath, usage.KindCompute); got != 1 {
+				t.Fatalf("compute facts recorded = %d, want 1 for the interval the close ended", got)
+			}
+			facts, _, err := usage.ReadFacts(sinkPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range facts {
+				if f.Kind == usage.KindCompute && (f.WallSeconds != 600 || f.UpstreamReqID != id+":"+t0.Format(time.RFC3339)) {
+					t.Fatalf("compute fact = %+v, want the interval started %s, WallSeconds 600 (ending at the close)", f, t0.Format(time.RFC3339))
+				}
+			}
+			if got := rawSinkModelFactCount(t, sinkPath); got != 1 {
+				t.Fatalf("model facts = %d, want the closed conversation's one turn and none of the newer one's", got)
+			}
+			got, err := env.store.Get(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{
+				session.MetadataKeyUsageClosePending, session.MetadataKeyUsageClosedAt,
+				session.MetadataKeyUsageClosedAwakeStartedAt, session.MetadataKeyUsageClosedSessionKey,
+			} {
+				if v := got.Metadata[key]; v != "" {
+					t.Fatalf("%s = %q after settling, want cleared", key, v)
+				}
+			}
+			if emitted, swept := got.Metadata[usageComputeEmittedAtKey], got.Metadata[usageModelSweptAtKey]; emitted != "" || swept != "" {
+				t.Fatalf("usage_compute_emitted_at=%q usage_model_swept_at=%q, want both unset: the row's newer interval is unaccounted", emitted, swept)
+			}
+		})
+	}
+}
+
+// historyListCountingStore counts the Lists other than the usage lane's
+// marked-row List: the session-history reads a transcript lookup can make.
+type historyListCountingStore struct {
+	beads.Store
+	historyLists int
+}
+
+func (s *historyListCountingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if !isClosedUsageList(q) {
+		s.historyLists++
+	}
+	return s.Store.List(q)
+}
+
+// writeClaudeTranscriptForSweep writes the claude transcript of sessionKey in
+// workDir under root, one assistant turn per message id.
+func writeClaudeTranscriptForSweep(t *testing.T, root, workDir, sessionKey string, messageIDs ...string) {
+	t.Helper()
+	dir := filepath.Join(root, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var body []byte
+	for i, msg := range messageIDs {
+		entry, err := json.Marshal(map[string]any{
+			"type": "assistant",
+			"uuid": fmt.Sprintf("u%d", i),
+			"message": map[string]any{
+				"id": msg, "role": "assistant", "model": "claude-opus-4-7",
+				"usage": map[string]any{"input_tokens": 100, "output_tokens": 50},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		body = append(append(body, entry...), '\n')
+	}
+	if err := os.WriteFile(filepath.Join(dir, sessionKey+".jsonl"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestEmitDueComputeFactsSettlesClosedClaudeIntervalByKey pins the closed
+// lane's claude transcript lookup: it resolves by the interval's session_key
+// alone and never lists the session history the manager's lookup falls back
+// to on a keyed miss, a read that grows with every session the work dir ever
+// held and would repeat on each retry of each marked row. A keyed transcript
+// is swept; a keyed miss stays pending for a retry; a keyless row settles at
+// once with its compute fact, since nothing names its transcript.
+func TestEmitDueComputeFactsSettlesClosedClaudeIntervalByKey(t *testing.T) {
+	t1 := time.Now().UTC().Truncate(time.Second)
+	t0 := t1.Add(-10 * time.Minute)
+	for _, c := range []struct {
+		name       string
+		key        string
+		transcript bool
+		models     int
+		settled    bool
+	}{
+		{name: "keyed, transcript on disk", key: "claude-key-1", transcript: true, models: 2, settled: true},
+		{name: "keyed, transcript missing", key: "claude-key-1"},
+		{name: "keyless", settled: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			workDir, root := t.TempDir(), t.TempDir()
+			mem := beads.NewMemStore()
+			for range 3 {
+				old, err := mem.Create(beads.Bead{
+					Type: session.BeadType, Title: "old", Labels: []string{session.LabelSession},
+					Metadata: map[string]string{"provider": "claude", "work_dir": workDir},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := mem.Close(old.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			meta := map[string]string{
+				"state": "active", "session_name": "claude-1", "awake_started_at": t0.Format(time.RFC3339),
+				"work_dir": workDir, "provider": "claude", "builtin_ancestor": "claude", "session_key": c.key,
+			}
+			maps.Copy(meta, session.ClosePatch(t1, "dead-runtime"))
+			b, err := mem.Create(beads.Bead{Type: session.BeadType, Title: "s", Labels: []string{session.LabelSession}, Metadata: meta})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := mem.Close(b.ID); err != nil {
+				t.Fatal(err)
+			}
+			if c.transcript {
+				writeClaudeTranscriptForSweep(t, root, workDir, c.key, "msg-1", "msg-2")
+			}
+			store := &historyListCountingStore{Store: mem}
+			cr, sinkPath := newClosedUsageRuntime(t, store, root)
+			cr.usageNow = func() time.Time { return t1.Add(time.Minute) }
+			cr.emitDueComputeFacts(context.Background(), nil, false)
+
+			if store.historyLists != 0 {
+				t.Fatalf("settling issued %d session-history Lists, want none", store.historyLists)
+			}
+			if got := rawSinkFactCount(t, sinkPath, usage.KindCompute); got != 1 {
+				t.Fatalf("compute facts = %d, want 1", got)
+			}
+			if got := rawSinkModelFactCount(t, sinkPath); got != c.models {
+				t.Fatalf("model facts = %d, want %d", got, c.models)
+			}
+			got, err := mem.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pending := got.Metadata[session.MetadataKeyUsageClosePending]; (pending == "") != c.settled {
+				t.Fatalf("usage_close_pending = %q, want settled=%t", pending, c.settled)
+			}
+		})
+	}
 }

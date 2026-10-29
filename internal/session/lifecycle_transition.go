@@ -721,11 +721,63 @@ func ClosePatch(now time.Time, stateCode string) MetadataPatch {
 // the usage lane has not accounted. usage_close_pending is the equality the
 // lane lists closed rows by; usage_closed_at is the interval's end, kept apart
 // from closed_at because a named-session reopen clears closed_at before the
-// lane may have run. The lane clears both once the interval is settled.
+// lane may have run. It drops the start and key an earlier close's reopen kept
+// (UsageReopenPatch): this close ended the row's current interval. The lane
+// clears every key once the interval is settled (UsageCloseClearPatch).
 func UsageClosePatch(now time.Time) MetadataPatch {
 	return MetadataPatch{
-		MetadataKeyUsageClosePending: "true",
-		MetadataKeyUsageClosedAt:     now.UTC().Format(time.RFC3339Nano),
+		MetadataKeyUsageClosePending:         "true",
+		MetadataKeyUsageClosedAt:             now.UTC().Format(time.RFC3339Nano),
+		MetadataKeyUsageClosedAwakeStartedAt: "",
+		MetadataKeyUsageClosedSessionKey:     "",
+	}
+}
+
+// UsageReopenPatch keeps the interval a pending usage close ended identifiable
+// across the reopen of its closed row, from closedMeta, the row's metadata.
+// A closed row never starts and never changes its session_key, but the reopen
+// lets it: its next start stamps a new awake_started_at, a fresh wake clears
+// the key, and both can land before the usage lane settles the closed
+// interval. The patch copies both onto the close marker, once per close: a
+// reopen of a row whose kept values are already set (its start failed and it
+// closed again as a failed create, which leaves the marker) keeps the first.
+// It is empty when no usage close is pending or the row has no interval.
+func UsageReopenPatch(closedMeta map[string]string) MetadataPatch {
+	start := strings.TrimSpace(closedMeta["awake_started_at"])
+	if closedMeta[MetadataKeyUsageClosePending] != "true" || start == "" ||
+		strings.TrimSpace(closedMeta[MetadataKeyUsageClosedAwakeStartedAt]) != "" {
+		return nil
+	}
+	return MetadataPatch{
+		MetadataKeyUsageClosedAwakeStartedAt: start,
+		MetadataKeyUsageClosedSessionKey:     closedMeta["session_key"],
+	}
+}
+
+// UsageClosedIntervalMetadata returns meta as of the awake interval its
+// pending usage close ended: the awake_started_at and session_key a reopen
+// kept (UsageReopenPatch) stand in for the row's current ones, so that
+// interval is accounted the same whatever the row did after the reopen. It
+// returns meta itself when the reopen kept nothing.
+func UsageClosedIntervalMetadata(meta map[string]string) map[string]string {
+	start := strings.TrimSpace(meta[MetadataKeyUsageClosedAwakeStartedAt])
+	if start == "" {
+		return meta
+	}
+	interval := maps.Clone(meta)
+	interval["awake_started_at"] = start
+	interval["session_key"] = meta[MetadataKeyUsageClosedSessionKey]
+	return interval
+}
+
+// UsageCloseClearPatch clears a settled usage close: the marker and the
+// interval start and key a reopen kept.
+func UsageCloseClearPatch() MetadataPatch {
+	return MetadataPatch{
+		MetadataKeyUsageClosePending:         "",
+		MetadataKeyUsageClosedAt:             "",
+		MetadataKeyUsageClosedAwakeStartedAt: "",
+		MetadataKeyUsageClosedSessionKey:     "",
 	}
 }
 

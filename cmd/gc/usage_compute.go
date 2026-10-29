@@ -376,20 +376,12 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		return
 	}
 	cr.nextClosedUsageListAt.Store(now.Add(liveModelSweepMinInterval).UnixNano())
-	closed, err := store.List(beads.ListQuery{
-		Type:          session.BeadType,
-		Status:        "closed",
-		IncludeClosed: true,
-		TierMode:      beads.TierBoth,
-		Metadata:      map[string]string{session.MetadataKeyUsageClosePending: "true"},
-		Limit:         closedUsageListLimit,
-		Sort:          beads.SortCreatedAsc,
-	})
+	marked, err := store.List(closedUsageListQuery())
 	if err != nil {
 		logf("usage: listing closed sessions with unsettled usage failed: %v", err)
 		return
 	}
-	for _, b := range closed {
+	for _, b := range marked {
 		if ctx.Err() != nil {
 			return
 		}
@@ -397,20 +389,43 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 	}
 }
 
+// closedUsageListQuery lists the session rows whose usage close is pending,
+// the closedUsageListLimit oldest first. Its every predicate (the session
+// label and the marker equality, over all statuses and both tiers) is one a
+// store pushes to its backing, so the limit rides down with them: on
+// NativeDoltStore a typed or status-filtered List reads every marked row and
+// cuts the page in Go (nativeListLimitPushdown). The marked rows a reopen left
+// open come back too, and settleClosedInterval settles them as the open
+// snapshot does.
+func closedUsageListQuery() beads.ListQuery {
+	return beads.ListQuery{
+		Label:         session.LabelSession,
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+		Metadata:      map[string]string{session.MetadataKeyUsageClosePending: "true"},
+		Limit:         closedUsageListLimit,
+		Sort:          beads.SortCreatedAsc,
+	}
+}
+
 // settleClosedInterval accounts the awake interval a session close marked
 // (session.UsageClosePatch): a close straight from a live state never passes
-// through an open terminal state, so the terminal branch never sees it. It
-// sweeps the interval's model usage and records its compute fact, ending at
-// usage_closed_at, then commits the interval and clears the close markers in
-// one write once the sweep has settled, or at the first attempt at or after
-// usage_closed_at + closedIntervalSweepGiveUp. Attempts run at most once per
+// through an open terminal state, so the terminal branch never sees it. The
+// interval is the row's as session.UsageClosedIntervalMetadata reads it, so a
+// row a reopen has since started again still settles the interval its close
+// ended. It sweeps the interval's model usage and records its compute fact,
+// ending at usage_closed_at, then clears the close markers in one write once
+// the sweep has settled, or at the first attempt at or after usage_closed_at +
+// closedIntervalSweepGiveUp; the same write commits the interval while it is
+// still the row's current one. Attempts run at most once per
 // liveModelSweepMinInterval per session; a sink failure keeps the markers.
 //
 // A marked row with nothing to account only has its markers cleared: one with
-// no awake interval, one whose interval is already committed, an open row awake
-// on a newer interval than the close ended (that interval's start is gone, so
-// its usage is lost and logged), and an open row still live on the closed
-// interval's start, which the live and terminal branches go on accounting.
+// no awake interval, one whose interval is already committed, one awake on a
+// newer interval than the close ended with no start kept by a reopen (the
+// closed interval's start is gone, so its usage is lost and logged), and an
+// open row still live on the closed interval's start, which the live and
+// terminal branches go on accounting.
 func (cr *CityRuntime) settleClosedInterval(
 	ctx context.Context,
 	sink usage.Sink,
@@ -421,70 +436,55 @@ func (cr *CityRuntime) settleClosedInterval(
 	logf func(string, ...any),
 	modelSweepFactory func() *worker.Factory,
 ) {
-	awakeStart := strings.TrimSpace(b.Metadata["awake_started_at"])
+	interval := session.UsageClosedIntervalMetadata(b.Metadata)
+	awakeStart := strings.TrimSpace(interval["awake_started_at"])
 	startedAt, startErr := time.Parse(time.RFC3339, awakeStart)
 	if startErr != nil || strings.TrimSpace(b.Metadata[usageComputeEmittedAtKey]) == awakeStart {
 		clearUsageCloseMarkers(store, b.ID, logf)
 		return
 	}
-	if b.Status != "closed" {
-		closedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(b.Metadata[session.MetadataKeyUsageClosedAt]))
-		if err == nil && startedAt.After(closedAt) {
-			logf("usage: session %s woke on a new interval before its closed interval was settled; that interval's usage is lost", b.ID)
-			clearUsageCloseMarkers(store, b.ID, logf)
-			return
-		}
-		if isLiveModelSweepState(b.Metadata["state"]) {
-			clearUsageCloseMarkers(store, b.ID, logf)
-			return
-		}
+	closedAt, closedErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(b.Metadata[session.MetadataKeyUsageClosedAt]))
+	if closedErr == nil && startedAt.After(closedAt) {
+		cr.usageOutcomef("usage: session %s woke on a new interval before its closed interval was settled; that interval's usage is lost", b.ID)
+		clearUsageCloseMarkers(store, b.ID, logf)
+		return
+	}
+	// current: the row has not started a newer interval since the close.
+	current := awakeStart == strings.TrimSpace(b.Metadata["awake_started_at"])
+	if current && b.Status != "closed" && isLiveModelSweepState(b.Metadata["state"]) {
+		clearUsageCloseMarkers(store, b.ID, logf)
+		return
 	}
 	// One attempt per liveModelSweepMinInterval per session; the first is never
 	// floored, whatever the live lane's memo for the interval says.
-	memo := cr.liveSweepMemoFor(b.ID, awakeStart, strings.TrimSpace(b.Metadata["session_key"]))
+	memo := cr.liveSweepMemoFor(b.ID, awakeStart, strings.TrimSpace(interval["session_key"]))
 	if memo.settleAttempted && now.Before(memo.nextSweepAt) {
 		return
 	}
 	memo.settleAttempted = true
 	memo.nextSweepAt = now.Add(liveModelSweepMinInterval)
 	cr.storeLiveSweepMemo(b.ID, memo)
-	closedAt, closedErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(b.Metadata[session.MetadataKeyUsageClosedAt]))
 	giveUp := closedErr != nil || !now.Before(closedAt.Add(closedIntervalSweepGiveUp))
-	sweepSettled, swept := true, false
-	if factory := modelSweepFactory(); factory != nil &&
-		strings.TrimSpace(b.Metadata[usageModelSweptAtKey]) != awakeStart {
-		// The live lane's memo already resolved this interval's transcript:
-		// read it from there rather than repeating discovery.
-		var (
-			settled bool
-			serr    error
-		)
-		if memo.path != "" {
-			_, settled, serr = factory.SweepSessionModelUsageAtPath(ctx, b.ID, b.Metadata, memo.path, now)
-		} else {
-			_, settled, serr = factory.SweepSessionModelUsage(ctx, b.ID, b.Metadata, now)
-		}
-		if serr != nil {
-			logf("usage: model-usage sweep for closed session %s failed; will retry: %v", b.ID, serr)
-		}
-		sweepSettled, swept = settled, settled
-	}
-	if !emitComputeFactForBead(ctx, sink, store, b, runtimeKind, cr.cityName, now, logf, false) {
+	sweepSettled, swept := cr.sweepClosedInterval(ctx, b, interval, memo.path, now, logf, modelSweepFactory)
+	closed := b
+	closed.Metadata = interval
+	if !emitComputeFactForBead(ctx, sink, store, closed, runtimeKind, cr.cityName, now, logf, false) {
 		return
 	}
 	if !sweepSettled {
 		if !giveUp {
 			return
 		}
-		logf("usage: model-usage sweep for closed session %s did not settle within %s of its close; committing its compute fact without it", b.ID, closedIntervalSweepGiveUp)
+		cr.usageOutcomef("usage: model-usage sweep for closed session %s did not settle within %s of its close; committing its compute fact without it", b.ID, closedIntervalSweepGiveUp)
 	}
-	patch := map[string]string{
-		usageComputeEmittedAtKey:             awakeStart,
-		session.MetadataKeyUsageClosePending: "",
-		session.MetadataKeyUsageClosedAt:     "",
-	}
-	if swept {
-		patch[usageModelSweptAtKey] = awakeStart
+	patch := map[string]string(session.UsageCloseClearPatch())
+	// The interval markers name the row's current interval, so a row started
+	// again since the close keeps its own.
+	if current {
+		patch[usageComputeEmittedAtKey] = awakeStart
+		if swept {
+			patch[usageModelSweptAtKey] = awakeStart
+		}
 	}
 	if err := store.SetMetadataBatch(b.ID, patch); err != nil {
 		logf("usage: settling closed session %s failed; will retry (deduped by idempotency key): %v", b.ID, err)
@@ -493,15 +493,54 @@ func (cr *CityRuntime) settleClosedInterval(
 	cr.liveSweepMemos.Delete(b.ID)
 }
 
+// sweepClosedInterval runs the model-usage sweep of interval, the interval a
+// close of b ended, and reports whether its sweep is settled and whether this
+// attempt settled it. memoPath is the transcript the live lane's memo resolved
+// for the interval, read rather than repeating discovery. Without a worker
+// factory, or with the interval's sweep already settled, there is nothing to
+// sweep.
+func (cr *CityRuntime) sweepClosedInterval(
+	ctx context.Context,
+	b beads.Bead,
+	interval map[string]string,
+	memoPath string,
+	now time.Time,
+	logf func(string, ...any),
+	modelSweepFactory func() *worker.Factory,
+) (settled, swept bool) {
+	factory := modelSweepFactory()
+	if factory == nil || strings.TrimSpace(b.Metadata[usageModelSweptAtKey]) == strings.TrimSpace(interval["awake_started_at"]) {
+		return true, false
+	}
+	var err error
+	if memoPath != "" {
+		_, settled, err = factory.SweepSessionModelUsageAtPath(ctx, b.ID, interval, memoPath, now)
+	} else {
+		_, settled, err = factory.SweepClosedIntervalModelUsage(ctx, b.ID, interval, now)
+	}
+	if err != nil {
+		logf("usage: model-usage sweep for closed session %s failed; will retry: %v", b.ID, err)
+	}
+	return settled, settled
+}
+
 // clearUsageCloseMarkers drops a row's usage close markers without accounting
 // an interval.
 func clearUsageCloseMarkers(store beads.Store, id string, logf func(string, ...any)) {
-	if err := store.SetMetadataBatch(id, map[string]string{
-		session.MetadataKeyUsageClosePending: "",
-		session.MetadataKeyUsageClosedAt:     "",
-	}); err != nil {
+	if err := store.SetMetadataBatch(id, session.UsageCloseClearPatch()); err != nil {
 		logf("usage: clearing the usage close marker of session %s failed; will retry: %v", id, err)
 	}
+}
+
+// usageOutcomef reports a closed interval's one-time settle outcome, an
+// interval lost or committed without its model usage, on the controller's
+// stderr. It bypasses the pass's one-line throttle: an earlier failure in the
+// same pass must not drop the only record of an accounting loss.
+func (cr *CityRuntime) usageOutcomef(format string, args ...any) {
+	if cr.stderr == nil {
+		return
+	}
+	fmt.Fprintf(cr.stderr, format+"\n", args...) //nolint:errcheck // best-effort stderr
 }
 
 // usageClock is the usage lane's clock: usageNow when set, else time.Now.
