@@ -225,6 +225,13 @@ type ReleaseOpts struct {
 	// released, and the outcome is Refused with those claims Kept. A seat's
 	// own drain-ack uses it: it must finish such work before it acks.
 	RefuseStarted bool
+	// HandOver, on the orphan path, is offered each claim the release would
+	// reopen once every other guard has passed (but not one whose detached
+	// work just read dead: releaseOrphanClaim), and returns why the claim
+	// stays assigned instead, or "" to release it. The dead-assignee sweep
+	// hands a closed seat row's claims to the seat's live successor
+	// (seatHandover).
+	HandOver func(seatWorkHit) string
 }
 
 // ReleaseOutcome is what a release did with each claim.
@@ -320,18 +327,8 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 			continue
 		}
 		if p.pool {
-			assignee := strings.TrimSpace(c.bead.Assignee)
-			if !liveWorkAssignmentStillReleasable(c.store, c.bead.ID, c.bead.Status, assignee) {
-				keep(c, keptMoved)
-				continue
-			}
-			allowed, clearDetached := detachedProbeAllowsOrphanRelease(c.bead)
-			if !allowed {
-				keep(c, keptDetachedAlive)
-				continue
-			}
-			if !releaseOrphanedPoolAssignment(c.store, c.bead, clearDetached) {
-				keep(c, keptMoved)
+			if why := releaseOrphanClaim(c, opts.HandOver); why != "" {
+				keep(c, why)
 				continue
 			}
 		} else if err := workAssignmentForStore(beads.WorkStore{Store: c.store}).ReleaseWorkBead(c.bead, fallback); err != nil {
@@ -342,6 +339,32 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 		out.Released = append(out.Released, c)
 	}
 	return out
+}
+
+// releaseOrphanClaim is the orphan path's write for one claim: it returns ""
+// once the claim is reopened, else why it stays assigned. A live re-read must
+// still show the snapshot's assignment and a detached probe must not read
+// alive; then handOver, when set, may keep the claim instead.
+func releaseOrphanClaim(c seatWorkHit, handOver func(seatWorkHit) string) string {
+	if !liveWorkAssignmentStillReleasable(c.store, c.bead.ID, c.bead.Status, strings.TrimSpace(c.bead.Assignee)) {
+		return keptMoved
+	}
+	allowed, clearDetached := detachedProbeAllowsOrphanRelease(c.bead)
+	if !allowed {
+		return keptDetachedAlive
+	}
+	// A hand-over writes only the assignee, so a claim whose detached work
+	// the probe found dead is reopened instead: the release clears
+	// gc.detached in the same write (health-patrol.md).
+	if handOver != nil && !clearDetached {
+		if why := handOver(c); why != "" {
+			return why
+		}
+	}
+	if !releaseOrphanedPoolAssignment(c.store, c.bead, clearDetached) {
+		return keptMoved
+	}
+	return ""
 }
 
 // releaseRoute is the lane a released claim is demanded and claimed through,

@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // seatHandoverCity is a pool-capable "worker" template backing the configured
@@ -254,9 +255,11 @@ func mergeSeatMeta(base, overrides map[string]string) map[string]string {
 }
 
 // TestReleaseOrphanedPoolAssignments_ReleasesClaimWithoutUniqueSeatSuccessor
-// (AC-4): the hand-over needs exactly one open, non-archived row of the
-// predecessor's template on its seat that reaches the work's store. Anything
-// else releases the bead as at base; there is no tie-break.
+// (AC-4): the hand-over needs exactly one open, non-archived, non-draining row
+// of the predecessor's template on its seat that reaches the work's store.
+// Anything else releases the bead as at base; there is no tie-break. A
+// draining row's hook refuses to adopt the claim, so it would hold the bead
+// for the whole drain.
 func TestReleaseOrphanedPoolAssignments_ReleasesClaimWithoutUniqueSeatSuccessor(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -265,6 +268,7 @@ func TestReleaseOrphanedPoolAssignments_ReleasesClaimWithoutUniqueSeatSuccessor(
 		{name: "no row on the seat"},
 		{name: "two rows on the seat", rows: []map[string]string{seatRowMeta("awake", nil), seatRowMeta("asleep", nil)}},
 		{name: "only an archived row", rows: []map[string]string{seatRowMeta("archived", nil)}},
+		{name: "only a draining row", rows: []map[string]string{seatRowMeta(string(session.StateDraining), nil)}},
 		{name: "only a row of another template", rows: []map[string]string{seatRowMeta("awake", map[string]string{"template": "other"})}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -382,10 +386,10 @@ func (s sessionGetErrorStore) Get(id string) (beads.Bead, error) {
 
 // TestReleaseOrphanedPoolAssignments_SeatHandOverKeepsClaimWhenItCannotWrite
 // (AC-5): when the hand-over cannot be made safely — the bead's assignee moved
-// after the snapshot, the store cannot write conditionally, or the
-// predecessor's row cannot be read — the pass neither reassigns the bead over
-// the newer state nor releases it, and logs a line naming the bead (or, for the
-// read error, the identity).
+// after the snapshot, or the predecessor's row cannot be read — the pass
+// neither reassigns the bead over the newer state nor releases it, and logs a
+// line naming the bead (or, for the read error, the identity) and no
+// hand-over.
 func TestReleaseOrphanedPoolAssignments_SeatHandOverKeepsClaimWhenItCannotWrite(t *testing.T) {
 	t.Run("assignee changed since the snapshot", func(t *testing.T) {
 		store := beads.NewMemStore()
@@ -399,26 +403,14 @@ func TestReleaseOrphanedPoolAssignments_SeatHandOverKeepsClaimWhenItCannotWrite(
 
 		logs := sweepSeatWorkLogged(t, store, store, []beads.Bead{successor}, snapshot)
 		assertSeatWorkKept(t, store, snapshot.ID, newer)
-		if !strings.Contains(logs, snapshot.ID) {
-			t.Fatalf("log does not name bead %s:\n%s", snapshot.ID, logs)
+		if got := linesNaming(logs, snapshot.ID, keptMoved); got != 1 {
+			t.Fatalf("log keeps bead %s as %s on %d lines, want 1:\n%s", snapshot.ID, keptMoved, got, logs)
 		}
-	})
-
-	t.Run("store cannot write conditionally", func(t *testing.T) {
-		store := beads.NewMemStore()
-		pred := createClosedSeatPredecessor(t, store, nil)
-		work := createInProgressWorkClaimedBy(t, store, pred)
-		successor := createSeatSessionRow(t, store, "successor", seatRowMeta("awake", nil))
-		store.DisableConditionalWrites = true
-
-		logs := sweepSeatWorkLogged(t, store, store, []beads.Bead{successor}, work)
-		assertSeatWorkKept(t, store, work.ID, pred.ID)
-		if got := linesNaming(logs, work.ID); got != 1 {
-			t.Fatalf("log names bead %s on %d lines, want 1:\n%s", work.ID, got, logs)
-		}
+		assertNoHandOverLogged(t, logs)
 	})
 
 	t.Run("predecessor row unreadable", func(t *testing.T) {
+		resetSeatRowReadErrorsForTest(t)
 		store := beads.NewMemStore()
 		pred := createClosedSeatPredecessor(t, store, nil)
 		work := createInProgressWorkClaimedBy(t, store, pred)
@@ -429,7 +421,28 @@ func TestReleaseOrphanedPoolAssignments_SeatHandOverKeepsClaimWhenItCannotWrite(
 		if got := linesNaming(logs, pred.ID); got != 1 {
 			t.Fatalf("log names identity %s on %d lines, want 1:\n%s", pred.ID, got, logs)
 		}
+		assertNoHandOverLogged(t, logs)
 	})
+}
+
+// resetSeatRowReadErrorsForTest starts t, and ends it, with no unreadable
+// seat row counted.
+func resetSeatRowReadErrorsForTest(t *testing.T) {
+	t.Helper()
+	reset := func() {
+		seatRowReadErrors.Lock()
+		defer seatRowReadErrors.Unlock()
+		seatRowReadErrors.byAssignee = make(map[string]int)
+	}
+	reset()
+	t.Cleanup(reset)
+}
+
+func assertNoHandOverLogged(t *testing.T, logs string) {
+	t.Helper()
+	if strings.Contains(logs, "handed") {
+		t.Fatalf("logged a hand-over, want none:\n%s", logs)
+	}
 }
 
 // sweepSeatWorkLogged runs one sweep over work with sessionStore as the
@@ -454,11 +467,15 @@ func sweepSeatWorkLogged(t *testing.T, store, sessionStore beads.Store, openRows
 	return buf.String()
 }
 
-// linesNaming counts the log lines that mention id.
-func linesNaming(logs, id string) int {
+// linesNaming counts the log lines that mention every one of parts.
+func linesNaming(logs string, parts ...string) int {
 	n := 0
 	for _, line := range strings.Split(logs, "\n") {
-		if strings.Contains(line, id) {
+		all := true
+		for _, part := range parts {
+			all = all && strings.Contains(line, part)
+		}
+		if all {
 			n++
 		}
 	}
@@ -622,4 +639,374 @@ func TestReleaseOrphanedPoolAssignments_ReleasesHandedClaimWhenSuccessorCloses(t
 
 	released := sweepSeatWork(store, cfg, nil, []beads.Bead{handed})
 	assertSeatWorkReleased(t, store, handed, released)
+}
+
+// TestReleaseOrphanedPoolAssignments_SeatHandOverRunsPastTheVerbsGuards: the
+// hand-over is the release verb's alternative to reopening a claim, so it is
+// offered only the claims the verb would release. A claim no lane serves (an
+// expanded workflow root routed only by its run_target, NEW-5) and one whose
+// detached work reads alive stay on the closed row, as the verb keeps them;
+// one whose detached work reads dead is reopened, with gc.detached cleared in
+// the release write (health-patrol.md).
+func TestReleaseOrphanedPoolAssignments_SeatHandOverRunsPastTheVerbsGuards(t *testing.T) {
+	t.Run("unserved route", func(t *testing.T) {
+		store := beads.NewMemStore()
+		cfg := seatHandoverCity()
+		pred := createClosedSeatPredecessor(t, store, nil)
+		root, err := store.Create(beads.Bead{Title: "expanded root", Type: "task", Assignee: pred.ID, Metadata: map[string]string{
+			beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
+			beadmeta.RunTargetMetadataKey:        "worker",
+			beadmeta.WorkflowExpandedMetadataKey: "true",
+		}})
+		if err != nil {
+			t.Fatalf("create root: %v", err)
+		}
+		if err := store.Update(root.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+			t.Fatalf("set root in_progress: %v", err)
+		}
+		root = getSeatBead(t, store, root.ID)
+		if _, served := releaseRoute(cfg, root, "", laneDirect); served {
+			t.Fatalf("control: the expanded root's run_target is served")
+		}
+		successor := createSeatSessionRow(t, store, "successor", seatRowMeta("awake", nil))
+
+		if released := sweepSeatWork(store, cfg, []beads.Bead{successor}, []beads.Bead{root}); len(released) != 0 {
+			t.Fatalf("released = %v, want none", released)
+		}
+		assertSeatWorkKept(t, store, root.ID, pred.ID)
+	})
+
+	for _, tc := range []struct {
+		name     string
+		tmux     string
+		released bool
+	}{
+		{name: "detached work alive", tmux: "exit 0"},
+		{name: "detached work dead", tmux: "exit 1", released: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			installFakeTmux(t, tc.tmux)
+			resetDetachedProbeErrorCountsForTest()
+			store := beads.NewMemStore()
+			pred := createClosedSeatPredecessor(t, store, nil)
+			work := createInProgressWorkClaimedBy(t, store, pred)
+			if err := store.SetMetadata(work.ID, detachedProbeMetadataKey, "tmux:gascity:bake"); err != nil {
+				t.Fatalf("stamp detached work: %v", err)
+			}
+			work = getSeatBead(t, store, work.ID)
+			successor := createSeatSessionRow(t, store, "successor", seatRowMeta("awake", nil))
+
+			released := sweepSeatWork(store, seatHandoverCity(), []beads.Bead{successor}, []beads.Bead{work})
+			if !tc.released {
+				if len(released) != 0 {
+					t.Fatalf("released = %v, want none", released)
+				}
+				assertSeatWorkKept(t, store, work.ID, pred.ID)
+				return
+			}
+			assertSeatWorkReleased(t, store, work, released)
+			if got := getSeatBead(t, store, work.ID).Metadata[detachedProbeMetadataKey]; got != "" {
+				t.Fatalf("gc.detached = %q, want it cleared by the release", got)
+			}
+		})
+	}
+}
+
+// TestSeatHandOverCountsOnlyALandedWrite: the hand-over's write is fenced on
+// the snapshot, and only a write that landed is a hand-over. A claim that
+// moved on after the snapshot is kept as moved, with nothing counted as
+// handed over; the control, a current claim, is handed over and counted.
+func TestSeatHandOverCountsOnlyALandedWrite(t *testing.T) {
+	store := beads.NewMemStore()
+	pred := createClosedSeatPredecessor(t, store, nil)
+	snapshot := createInProgressWorkClaimedBy(t, store, pred)
+	current := createInProgressWorkClaimedBy(t, store, pred)
+	successor := createSeatSessionRow(t, store, "successor", seatRowMeta("awake", nil))
+	const newer = "gc-newer-claim"
+	if err := store.Update(snapshot.ID, beads.UpdateOpts{Assignee: stringPtr(newer)}); err != nil {
+		t.Fatalf("land the newer claim: %v", err)
+	}
+	seats := newSeatHandover("", seatHandoverCity(), store, store, sessionInfosFromBeads([]beads.Bead{successor}), false)
+
+	if why := seats.handOver(seatWorkHit{store: store, bead: snapshot}, ""); why != keptMoved {
+		t.Fatalf("hand-over of a moved claim kept it for %q, want %q", why, keptMoved)
+	}
+	if seats.handedOver != 0 {
+		t.Fatalf("handedOver = %d after a fenced-off write, want 0", seats.handedOver)
+	}
+	assertSeatWorkKept(t, store, snapshot.ID, newer)
+
+	if why := seats.handOver(seatWorkHit{store: store, bead: current}, ""); !strings.HasPrefix(why, "handed to seat") {
+		t.Fatalf("hand-over of a current claim kept it for %q, want it handed over", why)
+	}
+	if seats.handedOver != 1 {
+		t.Fatalf("handedOver = %d after one landed write, want 1", seats.handedOver)
+	}
+	assertSeatWorkKept(t, store, current.ID, successor.ID)
+}
+
+// TestReleaseOrphanedPoolAssignments_ReleasesClaimWhenHandOverCannotBeFenced:
+// on a store that cannot fence the hand-over's write, the sweep releases the
+// claim as it did before the hand-over, through the release's own fence
+// (ReleaseIfCurrent), rather than pinning it on the closed row every sweep.
+func TestReleaseOrphanedPoolAssignments_ReleasesClaimWhenHandOverCannotBeFenced(t *testing.T) {
+	store := beads.NewMemStore()
+	pred := createClosedSeatPredecessor(t, store, nil)
+	work := createInProgressWorkClaimedBy(t, store, pred)
+	successor := createSeatSessionRow(t, store, "successor", seatRowMeta("awake", nil))
+	store.DisableConditionalWrites = true
+
+	released := sweepSeatWork(store, seatHandoverCity(), []beads.Bead{successor}, []beads.Bead{work})
+	assertSeatWorkReleased(t, store, work, released)
+}
+
+// TestReleaseOrphanedPoolAssignments_BoundsKeepsOfUnreadableSeatRow: a closed
+// row the hand-over cannot read keeps its claims for fewer than
+// seatRowReadErrorThreshold consecutive sweeps, as the detached probe bounds
+// its errors, and the sweep that reaches the threshold releases them as
+// before. A sweep that reads the row restarts the count.
+func TestReleaseOrphanedPoolAssignments_BoundsKeepsOfUnreadableSeatRow(t *testing.T) {
+	resetSeatRowReadErrorsForTest(t)
+	store := beads.NewMemStore()
+	cfg := seatHandoverCity()
+	pred := createClosedSeatPredecessor(t, store, nil)
+	kept := createInProgressWorkClaimedBy(t, store, pred)
+	readable := createInProgressWorkClaimedBy(t, store, pred)
+	unreadable := beads.SessionStore{Store: sessionGetErrorStore{Store: store, failID: pred.ID}}
+	sweep := func(sessions beads.SessionStore, work beads.Bead) []releasedPoolAssignment {
+		return releaseOrphanedPoolAssignments(store, sessions, cfg, "", nil, []beads.Bead{work}, nil, nil, nil, nil, nil, nil)
+	}
+
+	for i := 1; i < seatRowReadErrorThreshold; i++ {
+		if released := sweep(unreadable, kept); len(released) != 0 {
+			t.Fatalf("unreadable sweep %d released %v, want the claim kept", i, released)
+		}
+		assertSeatWorkKept(t, store, kept.ID, pred.ID)
+	}
+	// The row reads; with no successor on the seat, that claim is released.
+	assertSeatWorkReleased(t, store, readable, sweep(beads.SessionStore{Store: store}, readable))
+	for i := 1; i < seatRowReadErrorThreshold; i++ {
+		if released := sweep(unreadable, kept); len(released) != 0 {
+			t.Fatalf("unreadable sweep %d after a read released %v, want the claim kept", i, released)
+		}
+	}
+	assertSeatWorkReleased(t, store, kept, sweep(unreadable, kept))
+}
+
+// relocatedRefusingSessionStore answers Get for a gcg- ID as a proxied work
+// store on a split city does: with the relocated class's refusal, which
+// proves the store holds no such row but does not wrap ErrNotFound.
+type relocatedRefusingSessionStore struct{ beads.Store }
+
+func (s relocatedRefusingSessionStore) Get(id string) (beads.Bead, error) {
+	if strings.HasPrefix(id, "gcg-") {
+		return beads.Bead{}, beads.RelocatedClassRefusal("get "+id, []beads.RelocatedClass{{Class: "graph", IDPrefix: "gcg"}})
+	}
+	return s.Store.Get(id)
+}
+
+// TestReleaseOrphanedPoolAssignments_ReleasesClaimOfRowInRelocatedClass: a
+// graph-run session row lives in the graph binding, not the sessions store,
+// and a sessions store that refuses its ID as a relocated class's proves it
+// holds no such row. The closed run's step is released as before, not kept
+// as unreadable.
+func TestReleaseOrphanedPoolAssignments_ReleasesClaimOfRowInRelocatedClass(t *testing.T) {
+	resetSeatRowReadErrorsForTest(t)
+	cityStore := beads.NewMemStore()
+	graph := seatRigMemStore("gcg")
+	run := createSeatSessionRow(t, graph, "graph run", map[string]string{"template": "worker", "session_name": "worker-run", "state": "asleep"})
+	if err := graph.Close(run.ID); err != nil {
+		t.Fatalf("close run session: %v", err)
+	}
+	step := createInProgressWorkClaimedBy(t, graph, run)
+
+	released := releaseOrphanedPoolAssignments(
+		cityStore,
+		beads.SessionStore{Store: relocatedRefusingSessionStore{cityStore}},
+		seatHandoverCity(),
+		"",
+		nil,
+		[]beads.Bead{step},
+		[]beads.Store{graph},
+		nil, nil, nil, nil, nil,
+	)
+	assertSeatWorkReleased(t, graph, step, released)
+}
+
+// TestReleaseOrphanedPoolAssignments_HandsOverEverySeatKind: a claim moves
+// through each seat identity a closed row and its successor can hold, not
+// only configured_named_identity: the named identity retirement records, a
+// stable namepool alias, and the configured-named fallback of rows missing
+// their identity metadata.
+func TestReleaseOrphanedPoolAssignments_HandsOverEverySeatKind(t *testing.T) {
+	poolRow := map[string]string{
+		namedSessionMetadataKey:      "",
+		namedSessionIdentityMetadata: "",
+		poolManagedMetadataKey:       "true",
+	}
+	for _, tc := range []struct {
+		name      string
+		namepool  []string
+		pred      map[string]string
+		successor map[string]string
+	}{{
+		name: "retired named identity",
+		pred: map[string]string{namedSessionIdentityMetadata: "", "retired_named_identity": "reviewer", "session_name": ""},
+	}, {
+		name:      "stable namepool alias",
+		namepool:  []string{"fenwick"},
+		pred:      mergeSeatMeta(poolRow, map[string]string{"session_name": "worker-gc-pred", "alias": "fenwick", "pool_slot": "1"}),
+		successor: mergeSeatMeta(poolRow, map[string]string{"session_name": "worker-gc-next", "alias": "fenwick", "pool_slot": "1"}),
+	}, {
+		name:      "configured-named fallback",
+		pred:      map[string]string{namedSessionIdentityMetadata: ""},
+		successor: map[string]string{namedSessionIdentityMetadata: ""},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			cfg := seatHandoverCity()
+			cfg.Agents[0].NamepoolNames = tc.namepool
+			pred := createClosedSeatPredecessor(t, store, tc.pred)
+			work := createInProgressWorkClaimedBy(t, store, pred)
+			successor := createSeatSessionRow(t, store, "successor", seatRowMeta("awake", tc.successor))
+
+			if released := sweepSeatWork(store, cfg, []beads.Bead{successor}, []beads.Bead{work}); len(released) != 0 {
+				t.Fatalf("released = %v, want the claim handed to successor %s", released, successor.ID)
+			}
+			assertSeatWorkKept(t, store, work.ID, successor.ID)
+		})
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_SeatHandOverSkipsIdentityReleasedRows: an
+// open row whose identity is released (no continuity, no alias, no session
+// name) no longer holds the seat, so it is no successor: the claim goes to
+// the seat's one other row.
+func TestReleaseOrphanedPoolAssignments_SeatHandOverSkipsIdentityReleasedRows(t *testing.T) {
+	store := beads.NewMemStore()
+	pred := createClosedSeatPredecessor(t, store, nil)
+	work := createInProgressWorkClaimedBy(t, store, pred)
+	releasedRow := createSeatSessionRow(t, store, "released", seatRowMeta("asleep", map[string]string{
+		"session_name":        "",
+		"continuity_eligible": "false",
+	}))
+	if !session.LifecycleIdentityReleasedInfo(sessionInfosFromBeads([]beads.Bead{releasedRow})[0]) {
+		t.Fatalf("control: row %s does not read as identity-released", releasedRow.ID)
+	}
+	successor := createSeatSessionRow(t, store, "successor", seatRowMeta("awake", nil))
+
+	if released := sweepSeatWork(store, seatHandoverCity(), []beads.Bead{releasedRow, successor}, []beads.Bead{work}); len(released) != 0 {
+		t.Fatalf("released = %v, want the claim handed to successor %s", released, successor.ID)
+	}
+	assertSeatWorkKept(t, store, work.ID, successor.ID)
+}
+
+// TestReleaseOrphanedPoolAssignments_SeatHandOverClearsPredecessorCurrentClaim:
+// the closed row stops naming the bead it hands over, as duplicate repair's
+// does, so its stale current_claim_bead_id cannot let `gc hook current` name
+// the successor's bead.
+func TestReleaseOrphanedPoolAssignments_SeatHandOverClearsPredecessorCurrentClaim(t *testing.T) {
+	store := beads.NewMemStore()
+	pred := createSeatSessionRow(t, store, "predecessor", seatRowMeta("asleep", nil))
+	work := createInProgressWorkClaimedBy(t, store, pred)
+	if err := store.SetMetadata(pred.ID, beadmeta.CurrentClaimBeadIDMetadataKey, work.ID); err != nil {
+		t.Fatalf("stamp current claim: %v", err)
+	}
+	if err := store.Close(pred.ID); err != nil {
+		t.Fatalf("close predecessor %s: %v", pred.ID, err)
+	}
+	successor := createSeatSessionRow(t, store, "successor", seatRowMeta("awake", nil))
+
+	if released := sweepSeatWork(store, seatHandoverCity(), []beads.Bead{successor}, []beads.Bead{work}); len(released) != 0 {
+		t.Fatalf("released = %v, want the claim handed to successor %s", released, successor.ID)
+	}
+	assertSeatWorkKept(t, store, work.ID, successor.ID)
+	if got := getSeatBead(t, store, pred.ID).Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]; got != "" {
+		t.Fatalf("closed row %s still names %q as its current claim", pred.ID, got)
+	}
+}
+
+// currentClaimWriteErrorStore fails the write of one session row's
+// current_claim_bead_id, as a session store that cannot be written right now
+// does.
+type currentClaimWriteErrorStore struct {
+	beads.Store
+	failID string
+}
+
+func (s currentClaimWriteErrorStore) SetMetadata(id, key, value string) error {
+	if id == s.failID && key == beadmeta.CurrentClaimBeadIDMetadataKey {
+		return errors.New("session store unavailable")
+	}
+	return s.Store.SetMetadata(id, key, value)
+}
+
+// TestSeatHandOverKeepsClaimWhenPredecessorCurrentClaimCannotBeCleared: the
+// closed row must stop naming the bead before it moves. When that clear
+// fails, the claim stays on the closed row and nothing is counted as handed
+// over: once the bead moved, the successor's ID would keep every later sweep
+// off it, and nothing would clear the stale stamp. The next sweep retries
+// the clear and the move together.
+func TestSeatHandOverKeepsClaimWhenPredecessorCurrentClaimCannotBeCleared(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := seatHandoverCity()
+	pred := createSeatSessionRow(t, store, "predecessor", seatRowMeta("asleep", nil))
+	work := createInProgressWorkClaimedBy(t, store, pred)
+	if err := store.SetMetadata(pred.ID, beadmeta.CurrentClaimBeadIDMetadataKey, work.ID); err != nil {
+		t.Fatalf("stamp current claim: %v", err)
+	}
+	if err := store.Close(pred.ID); err != nil {
+		t.Fatalf("close predecessor %s: %v", pred.ID, err)
+	}
+	successor := createSeatSessionRow(t, store, "successor", seatRowMeta("awake", nil))
+	unwritable := currentClaimWriteErrorStore{Store: store, failID: pred.ID}
+	seats := newSeatHandover("", cfg, store, unwritable, sessionInfosFromBeads([]beads.Bead{successor}), false)
+
+	if why := seats.handOver(seatWorkHit{store: store, bead: work}, ""); !strings.Contains(why, "clearing current claim on closed session "+pred.ID) {
+		t.Fatalf("hand-over kept the claim for %q, want the failed clear of %s", why, pred.ID)
+	}
+	if seats.handedOver != 0 {
+		t.Fatalf("handedOver = %d after a failed clear, want 0", seats.handedOver)
+	}
+	assertSeatWorkKept(t, store, work.ID, pred.ID)
+	if got := getSeatBead(t, store, pred.ID).Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]; got != work.ID {
+		t.Fatalf("closed row %s names %q as its current claim, want %q", pred.ID, got, work.ID)
+	}
+
+	if released := sweepSeatWork(store, cfg, []beads.Bead{successor}, []beads.Bead{work}); len(released) != 0 {
+		t.Fatalf("released = %v, want the claim handed to successor %s once the clear lands", released, successor.ID)
+	}
+	assertSeatWorkKept(t, store, work.ID, successor.ID)
+	if got := getSeatBead(t, store, pred.ID).Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]; got != "" {
+		t.Fatalf("closed row %s still names %q as its current claim", pred.ID, got)
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_ReleasesClaimOfRowTheSessionFrontDoorRefuses:
+// a closed row carrying the session label under another bead type is no row
+// the session front door accepts, so its current claim can never be cleared
+// through it. It is no seat predecessor: its claim is released as at base,
+// not kept on it every sweep.
+func TestReleaseOrphanedPoolAssignments_ReleasesClaimOfRowTheSessionFrontDoorRefuses(t *testing.T) {
+	store := beads.NewMemStore()
+	pred, err := store.Create(beads.Bead{
+		Title:    "mistyped predecessor",
+		Type:     "task",
+		Labels:   []string{sessionBeadLabel},
+		Metadata: seatRowMeta("asleep", nil),
+	})
+	if err != nil {
+		t.Fatalf("create predecessor: %v", err)
+	}
+	if session.IsSessionBeadOrRepairable(pred) {
+		t.Fatalf("control: row %s reads as a session bead to the session front door", pred.ID)
+	}
+	if err := store.Close(pred.ID); err != nil {
+		t.Fatalf("close predecessor %s: %v", pred.ID, err)
+	}
+	work := createInProgressWorkClaimedBy(t, store, pred)
+	successor := createSeatSessionRow(t, store, "successor", seatRowMeta("awake", nil))
+
+	released := sweepSeatWork(store, seatHandoverCity(), []beads.Bead{successor}, []beads.Bead{work})
+	assertSeatWorkReleased(t, store, work, released)
 }

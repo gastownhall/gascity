@@ -258,9 +258,12 @@ func releaseOrphanedPoolAssignments(
 	// The live gc:session listing inside liveOpenSessionAssignmentExists carries
 	// no assignee filter — it lists every session bead in the store and compares
 	// identities in Go — so its answer depends only on (store, assignee), and it
-	// cannot change while this sweep runs: the sweep writes WORK beads, never
-	// session beads. Memoize it per store so the cost is O(distinct assignees)
-	// live round-trips instead of O(assigned work beads).
+	// cannot change while this sweep runs: the sweep writes WORK beads, and its
+	// one session-bead write, the seat hand-over's clear of a closed row's
+	// current_claim_bead_id, changes no identity the listing compares. A
+	// session-bead write that did would have to drop this memo. Memoize it per
+	// store so the cost is O(distinct assignees) live round-trips instead of
+	// O(assigned work beads).
 	//
 	// MEASURED on gc-management 2026-09-05 (ga-451jnv): 68-69 assigned work beads
 	// across 18 distinct assignees re-issued this listing once per bead per store,
@@ -401,14 +404,13 @@ func releaseOrphanedPoolAssignments(
 			}
 			continue
 		}
-		// A claim held under a closed seat row's bead ID moves to that seat's
-		// live successor instead of reopening (pool_orphan_seat_handover.go).
-		if assignee != "" && seats.handOver(ownerStore, wb, assignee, workStoreRef) {
-			continue
-		}
 		// The verb's route guard is the one this sweep's pre-filter lacks:
-		// an expanded workflow root's run_target is no lane (NEW-5).
-		if out := releaseListed([]seatWorkHit{{store: ownerStore, bead: wb}}, releaseOrphan, releaseSeat{}, cfg, ReleaseOpts{}); len(out.Released) == 0 {
+		// an expanded workflow root's run_target is no lane (NEW-5). Past
+		// its guards, a claim held under a closed seat row's bead ID moves to
+		// that seat's live successor instead of reopening
+		// (pool_orphan_seat_handover.go).
+		opts := ReleaseOpts{HandOver: seats.offer(workStoreRef)}
+		if out := releaseListed([]seatWorkHit{{store: ownerStore, bead: wb}}, releaseOrphan, releaseSeat{}, cfg, opts); len(out.Released) == 0 {
 			keepLog.log(wb.ID, assignee, out.Why[wb.ID])
 			continue
 		}
