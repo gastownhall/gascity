@@ -1799,7 +1799,40 @@ func activateAttachCandidate(store beads.Store, rootID string, idMapping map[str
 	return nil
 }
 
-// markFailedReporting is markFailed with the first metadata-write error
+// stampFailed writes the failure stamp — molecule_failed=true and a
+// cleared instantiation fence — to every id in order, retrying each
+// refused write once after every other id has been stamped. A mint that
+// fails on its root's own activation stamps the root first, and that
+// write hits the same transient fault on the same row; deferring the
+// retry behind the other rows gives the fault the whole loop to clear.
+// The stamp is idempotent, so the retry also completes a batch a
+// key-by-key store half-applied. It returns one error per id whose
+// second write also failed.
+func stampFailed(store beads.Store, ids []string) []error {
+	var refused []string
+	for _, id := range ids {
+		if err := setFailedStamp(store, id); err != nil {
+			refused = append(refused, id)
+		}
+	}
+	var errs []error
+	for _, id := range refused {
+		if err := setFailedStamp(store, id); err != nil {
+			errs = append(errs, fmt.Errorf("marking %s molecule_failed: %w", id, err))
+		}
+	}
+	return errs
+}
+
+// setFailedStamp writes the failure-stamp batch for one bead.
+func setFailedStamp(store beads.Store, id string) error {
+	return store.SetMetadataBatch(id, map[string]string{
+		beadmeta.MoleculeFailedMetadataKey: "true",
+		InstantiatingMetadataKey:           "",
+	})
+}
+
+// markFailedReporting is markFailed with every metadata-write error
 // surfaced instead of swallowed: the fence loser path must know when its
 // candidate was NOT neutralized, because an unmarked candidate could
 // otherwise be selected by idempotency recovery.
@@ -1817,15 +1850,11 @@ func markFailedReporting(store beads.Store, ids []string) error {
 }
 
 // markFailed sets beadmeta.MoleculeFailedMetadataKey on all created beads.
-// Best-effort: errors are silently ignored since we're already in an
-// error path.
+// Best-effort: each refused write is retried once after the rest (see
+// stampFailed); errors that survive the retry are dropped since we're
+// already in an error path.
 func markFailed(store beads.Store, ids []string) {
-	for _, id := range ids {
-		_ = store.SetMetadataBatch(id, map[string]string{
-			beadmeta.MoleculeFailedMetadataKey: "true",
-			InstantiatingMetadataKey:           "",
-		})
-	}
+	_ = stampFailed(store, ids)
 }
 
 func logicalRecipeStepID(step formula.RecipeStep) (string, bool) {

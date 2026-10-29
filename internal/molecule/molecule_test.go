@@ -3,6 +3,7 @@ package molecule
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -2364,6 +2365,264 @@ func TestInstantiateDepFailure(t *testing.T) {
 			t.Errorf("bead %s not marked as molecule_failed", b.ID)
 		}
 	}
+}
+
+// stampFailStore refuses SetMetadataBatch on the configured ids a
+// configured number of attempts (negative = every attempt) and records
+// every SetMetadataBatch target in call order — the failure-stamp sites in
+// molecule.go are the store's only callers, so the log is exactly the
+// stamp sequence. A refused call can also mimic a key-by-key store that
+// half-applies the batch before failing.
+type stampFailStore struct {
+	beads.Store
+	refusals map[string]int
+	faults   map[string]error // refusal fault by id, cached so tests can errors.Is it
+	partial  bool             // on refusal, apply molecule_failed before failing
+	calls    []string
+}
+
+func (s *stampFailStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.calls = append(s.calls, id)
+	if left, ok := s.refusals[id]; ok && left != 0 {
+		if left > 0 {
+			s.refusals[id] = left - 1
+		}
+		fault := s.faults[id]
+		if fault == nil {
+			fault = fmt.Errorf("injected stamp conflict on %s", id)
+			if s.faults == nil {
+				s.faults = map[string]error{}
+			}
+			s.faults[id] = fault
+		}
+		if s.partial {
+			_ = s.Store.SetMetadataBatch(id, map[string]string{beadmeta.MoleculeFailedMetadataKey: "true"})
+		}
+		return fault
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// rootActivationFailStore models the correlated fault of #6235: the root's
+// own activation update — the write that clears gc.instantiating — fails
+// once, and the same row then refuses its failure stamp a configured
+// number of attempts. skipActivations moves the activation fault to a
+// later bead. Embedding the beads.Store interface promotes no graph-apply
+// capability, so Instantiate takes the fenced sequential path without
+// touching the process-wide graph-apply flag.
+type rootActivationFailStore struct {
+	*stampFailStore
+	activationErr   error
+	activationFired bool
+	faultedID       string
+	refuseStamps    int
+	skipActivations int
+}
+
+// newRootActivationFailStore returns a store whose root refuses both its
+// activation and one failure-stamp attempt.
+func newRootActivationFailStore() *rootActivationFailStore {
+	return &rootActivationFailStore{
+		stampFailStore: &stampFailStore{Store: beads.NewMemStore(), refusals: map[string]int{}},
+		activationErr:  fmt.Errorf("injected activation conflict"),
+		refuseStamps:   1,
+	}
+}
+
+func (s *rootActivationFailStore) Update(id string, opts beads.UpdateOpts) error {
+	if v, clears := opts.Metadata[InstantiatingMetadataKey]; clears && v == "" {
+		if s.skipActivations > 0 {
+			s.skipActivations--
+		} else if !s.activationFired {
+			s.activationFired = true
+			s.faultedID = id
+			s.refusals[id] = s.refuseStamps
+			return s.activationErr
+		}
+	}
+	return s.stampFailStore.Update(id, opts)
+}
+
+// twoStepGraphWorkflowRecipe is the minimal fenced graph workflow: root
+// "wf" (gc.kind=workflow) and body "wf.body", parent-child.
+func twoStepGraphWorkflowRecipe() *formula.Recipe {
+	return &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+			{ID: "wf.body", Title: "Body", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.body", DependsOnID: "wf", Type: "parent-child"},
+		},
+	}
+}
+
+// openBeadsByID lists the store's open beads with their full metadata.
+func openBeadsByID(t *testing.T, store beads.Store) map[string]beads.Bead {
+	t.Helper()
+	all, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	open := make(map[string]beads.Bead, len(all))
+	for _, b := range all {
+		full, err := store.Get(b.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", b.ID, err)
+		}
+		open[full.ID] = full
+	}
+	return open
+}
+
+// requireStampedAndUnfenced fails the test unless every bead carries the
+// failure stamp and a cleared instantiation fence.
+func requireStampedAndUnfenced(t *testing.T, open map[string]beads.Bead) {
+	t.Helper()
+	for _, b := range open {
+		if b.Metadata[beadmeta.MoleculeFailedMetadataKey] != "true" {
+			t.Errorf("bead %s molecule_failed = %q, want true", b.ID, b.Metadata[beadmeta.MoleculeFailedMetadataKey])
+		}
+		if b.Metadata[InstantiatingMetadataKey] != "" {
+			t.Errorf("bead %s %s = %q, want cleared", b.ID, InstantiatingMetadataKey, b.Metadata[InstantiatingMetadataKey])
+		}
+	}
+}
+
+// TestInstantiateFailureStampsTheRootWhoseActivationFailed is the #6235
+// repro: a transient fault on the mint's hottest row refuses both the
+// root's activation and its failure stamp. The stamp must reach the root —
+// retried once after the body — or the root stays fenced and unmarked,
+// invisible to dispatch and recovery.
+func TestInstantiateFailureStampsTheRootWhoseActivationFailed(t *testing.T) {
+	store := newRootActivationFailStore() // the root's stamp is refused once
+
+	_, err := Instantiate(context.Background(), store, twoStepGraphWorkflowRecipe(), Options{})
+	if err == nil {
+		t.Fatal("Instantiate succeeded; want the injected activation failure")
+	}
+	if !store.activationFired {
+		t.Fatal("the injected activation fault never fired; the mint took another path")
+	}
+	if got, want := err.Error(), fmt.Sprintf("activating graph step %q: %v", "wf", store.activationErr); got != want {
+		t.Fatalf("Instantiate error = %q, want %q", got, want)
+	}
+	if !errors.Is(err, store.activationErr) {
+		t.Fatal("Instantiate error does not wrap the activation fault")
+	}
+
+	open := openBeadsByID(t, store)
+	if len(open) != 2 {
+		t.Fatalf("open beads = %d, want 2", len(open))
+	}
+	var rootID, bodyID string
+	for _, b := range open {
+		if b.Metadata[beadmeta.KindMetadataKey] == "workflow" {
+			rootID = b.ID
+		} else {
+			bodyID = b.ID
+		}
+	}
+	if rootID == "" || bodyID == "" {
+		t.Fatalf("root/body not identified: rootID=%q bodyID=%q", rootID, bodyID)
+	}
+	if store.faultedID != rootID {
+		t.Fatalf("activation fault fired on %q, want the root %q", store.faultedID, rootID)
+	}
+	requireStampedAndUnfenced(t, open)
+	if got, want := strings.Join(store.calls, ","), strings.Join([]string{rootID, bodyID, rootID}, ","); got != want {
+		t.Errorf("stamp calls = [%s], want [%s] (root refused, body stamped, root retried)", got, want)
+	}
+}
+
+// A single-step graph workflow still retries: pass 2 runs even when pass 1
+// landed nothing.
+func TestInstantiateFailureRetriesSingleStepRootStamp(t *testing.T) {
+	store := newRootActivationFailStore()
+	recipe := &formula.Recipe{
+		Name:  "wf",
+		Steps: []formula.RecipeStep{{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}}},
+	}
+
+	_, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err == nil {
+		t.Fatal("Instantiate succeeded; want the injected activation failure")
+	}
+	if !store.activationFired {
+		t.Fatal("the injected activation fault never fired; the mint took another path")
+	}
+
+	rootID := store.faultedID
+	if got, want := strings.Join(store.calls, ","), strings.Join([]string{rootID, rootID}, ","); got != want {
+		t.Errorf("stamp calls = [%s], want [%s] (refused root, retried)", got, want)
+	}
+	root, err := store.Get(rootID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", rootID, err)
+	}
+	if root.Metadata[beadmeta.MoleculeFailedMetadataKey] != "true" || root.Metadata[InstantiatingMetadataKey] != "" {
+		t.Errorf("root %s molecule_failed=%q %s=%q; want the single bead stamped and un-fenced",
+			rootID, root.Metadata[beadmeta.MoleculeFailedMetadataKey], InstantiatingMetadataKey, root.Metadata[InstantiatingMetadataKey])
+	}
+}
+
+// A key-by-key store can half-apply a refused batch; the retry completes it.
+func TestInstantiateFailureCompletesAPartiallyAppliedStamp(t *testing.T) {
+	store := newRootActivationFailStore()
+	store.partial = true // the refused first stamp applies molecule_failed only
+
+	_, err := Instantiate(context.Background(), store, twoStepGraphWorkflowRecipe(), Options{})
+	if err == nil {
+		t.Fatal("Instantiate succeeded; want the injected activation failure")
+	}
+	if !store.activationFired {
+		t.Fatal("the injected activation fault never fired; the mint took another path")
+	}
+	// every stamp landed on its second attempt, so the cause is unchanged
+	if got, want := err.Error(), fmt.Sprintf("activating graph step %q: %v", "wf", store.activationErr); got != want {
+		t.Fatalf("Instantiate error = %q, want %q", got, want)
+	}
+
+	rootID := store.faultedID
+	root, err := store.Get(rootID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", rootID, err)
+	}
+	if root.Metadata[beadmeta.MoleculeFailedMetadataKey] != "true" || root.Metadata[InstantiatingMetadataKey] != "" {
+		t.Errorf("root %s molecule_failed=%q %s=%q; want the re-sent batch to complete both keys",
+			rootID, root.Metadata[beadmeta.MoleculeFailedMetadataKey], InstantiatingMetadataKey, root.Metadata[InstantiatingMetadataKey])
+	}
+}
+
+// The correlated fault can hit a later bead instead of the root.
+func TestInstantiateFailureRetriesStampOfLaterActivatedBead(t *testing.T) {
+	store := newRootActivationFailStore()
+	store.skipActivations = 1 // the root activates; the body's activation fails
+
+	_, err := Instantiate(context.Background(), store, twoStepGraphWorkflowRecipe(), Options{})
+	if err == nil {
+		t.Fatal("Instantiate succeeded; want the injected activation failure")
+	}
+	if !store.activationFired {
+		t.Fatal("the injected activation fault never fired; the mint took another path")
+	}
+	if got, want := err.Error(), fmt.Sprintf("activating graph step %q: %v", "wf.body", store.activationErr); got != want {
+		t.Fatalf("Instantiate error = %q, want %q", got, want)
+	}
+
+	open := openBeadsByID(t, store)
+	var rootID string
+	for _, b := range open {
+		if b.Metadata[beadmeta.KindMetadataKey] == "workflow" {
+			rootID = b.ID
+		}
+	}
+	bodyID := store.faultedID
+	if got, want := strings.Join(store.calls, ","), strings.Join([]string{rootID, bodyID, bodyID}, ","); got != want {
+		t.Errorf("stamp calls = [%s], want [%s] (root stamped, body refused then retried)", got, want)
+	}
+	requireStampedAndUnfenced(t, open)
 }
 
 func TestCookOnRequiresParentID(t *testing.T) {
