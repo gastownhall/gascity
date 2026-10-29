@@ -246,7 +246,9 @@ import is in flight (`infra.rig.<rig>.importing` beside the binding) boot and
 every gc command refuse; re-run the import to finish it. If a rig store is
 gone for good after its import wrote its marker, `gc storage migrate
 --from-rigs --rig <rig> --abandon-rig-store --fleet-stopped` proves the binding
-holds every row the manifest records and then records the clear complete. Rig
+holds every row the manifest records and then records the clear complete. It
+refuses while the rig store is still reachable, while an import is in flight,
+and while the binding holds rows of that rig its manifest does not record. Rig
 records name the store they speak for: a new store under a reused rig name is
 not taken for the old one.
 

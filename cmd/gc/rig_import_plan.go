@@ -668,3 +668,13 @@ func rigPlanIDs(rows []beads.Bead) []string {
 	}
 	return out
 }
+
+// censusEdges renders a row's dependency edges as set members, so two rows'
+// edges compare without regard to the order a store lists them in.
+func censusEdges(deps []beads.Dep) []string {
+	edges := make([]string, 0, len(deps))
+	for _, dep := range deps {
+		edges = append(edges, fmt.Sprintf("%s (%s)", dep.DependsOnID, dep.Type))
+	}
+	return edges
+}

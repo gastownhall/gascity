@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -1394,23 +1393,4 @@ func writeBeadsEnvGTRoot(fs fsys.FS, rigPath, cityPath string) error {
 		return fmt.Errorf("creating .beads dir: %w", err)
 	}
 	return fs.WriteFile(envPath, []byte(content), 0o644)
-}
-
-// rigStoreListsEmpty reports whether the rig's store holds no row at all,
-// closed and both tiers included. A store that cannot be opened, listed or
-// closed is not proven empty.
-func rigStoreListsEmpty(cityPath string, r config.Rig) bool {
-	// A scope with no store on disk at all holds no row, and opening it
-	// would only create (or start a server for) the store being asked about.
-	root := resolveStoreScopeRoot(cityPath, r.Path)
-	if !fileExists(filepath.Join(root, ".beads")) && !fileExists(filepath.Join(root, ".gc", "beads.json")) {
-		return true
-	}
-	store, err := openStorageScopeStore(r.Path, cityPath)
-	if err != nil {
-		return false
-	}
-	rows, listErr := store.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
-	closeErr := closeBeadStoreHandle(store)
-	return listErr == nil && closeErr == nil && len(rows) == 0
 }

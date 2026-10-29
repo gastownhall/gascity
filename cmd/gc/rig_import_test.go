@@ -596,7 +596,7 @@ func TestRigImportResumesAfterACrashAtEveryStep(t *testing.T) {
 				if code := doStorageStatus(f.request, &stdout, &stderr); code == 0 || !strings.Contains(stdout.String(), "retained") {
 					t.Errorf("status exits 0 over a pending rig clear: %s", stdout.String())
 				}
-				if err := rigBootRefusal(f.request.CityPath, f.cfg, f.target); err == nil || !strings.Contains(err.Error(), rigImportInstruction("packs")) {
+				if err := rigBootRefusal(f.request.CityPath, f.target); err == nil || !strings.Contains(err.Error(), rigImportInstruction("packs")) {
 					t.Errorf("boot does not refuse a pending rig clear naming the command: %v", err)
 				}
 			}
@@ -625,7 +625,7 @@ func TestRigImportResumesAfterACrashAtEveryStep(t *testing.T) {
 			if !f.relicFree("packs") {
 				t.Error("a resumed import does not read as relic-free")
 			}
-			if err := rigBootRefusal(f.request.CityPath, f.cfg, f.target); err != nil {
+			if err := rigBootRefusal(f.request.CityPath, f.target); err != nil {
 				t.Errorf("boot refuses a finished import: %v", err)
 			}
 		})

@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -248,30 +249,34 @@ func reportRigCensus(stdout io.Writer, rows []rigCensusRow) int {
 	return exit
 }
 
-// rigBootRefusal is the boot gate's per-rig check, file reads only: a rig
-// whose cleared note is pending holds twins (a row in the rig and its copy in
-// the binding) and refuses, naming the command that finishes the clear. An
-// unreadable note refuses as a pending one would.
-func rigBootRefusal(cityPath string, cfg *config.City, target infraBindingTarget) error {
-	if cfg == nil {
-		return nil
-	}
+// rigBootRefusal is the boot gate's per-rig check, file reads only. It reads
+// the records on disk, not the configured rigs, so a rig removed from config
+// after a crash still holds boot:
+//
+//   - an import in flight (infra.rig.<rig>.importing beside the binding):
+//     the binding may hold rows without their edges;
+//   - a pending cleared note (.gc/storage-infra-cleared.rig.<rig>.json): a
+//     row may be held by both the rig store and the binding.
+//
+// An unreadable note refuses as a pending one would.
+func rigBootRefusal(cityPath string, target infraBindingTarget) error {
 	var reasons []string
-	for _, rig := range cfg.Rigs {
-		if !rigNameIsFileSafe(rig.Name) {
-			continue
-		}
-		loc := newRigImportLocation(target, cityPath, rig.Name)
-		if fileExists(loc.InFlightPath()) {
-			reasons = append(reasons, fmt.Sprintf("rig %s's import is in flight (%s): the binding may hold its rows without their edges, so a blocked step would read as ready. Stop the city and finish it with `%s`", rig.Name, loc.InFlightPath(), rigImportInstruction(rig.Name)))
-			continue
-		}
-		note, present, err := readInfraClearedNoteAt(loc.NotePath())
+	inFlight, _ := filepath.Glob(filepath.Join(target.Root, rigGraphInFlightName("*")))
+	sort.Strings(inFlight)
+	for _, path := range inFlight {
+		rig := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(path), "infra.rig."), ".importing")
+		reasons = append(reasons, fmt.Sprintf("rig %s's import is in flight (%s): the binding may hold its rows without their edges, so a blocked step would read as ready. Stop the city and finish it with `%s`", rig, path, rigImportInstruction(rig)))
+	}
+	notes, _ := filepath.Glob(rigGraphClearedNotePath(cityPath, "*"))
+	sort.Strings(notes)
+	for _, path := range notes {
+		rig := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(path), "storage-infra-cleared.rig."), ".json")
+		note, present, err := readInfraClearedNoteAt(path)
 		switch {
 		case err != nil:
-			reasons = append(reasons, fmt.Sprintf("rig %s's cleared note cannot be read (%v); it holds as a pending one would. Finish the import with `%s`", rig.Name, err, rigImportInstruction(rig.Name)))
+			reasons = append(reasons, fmt.Sprintf("rig %s's cleared note cannot be read (%v); it holds as a pending one would. Finish the import with `%s`", rig, err, rigImportInstruction(rig)))
 		case present && !note.Complete:
-			reasons = append(reasons, fmt.Sprintf("rig %s's import was interrupted during its clear: %d bead(s) may be held by both the rig store and the city binding, and a reader that reaches the rig first is served the frozen copy. Stop the city and finish it with `%s`", rig.Name, len(note.Pending), rigImportInstruction(rig.Name)))
+			reasons = append(reasons, fmt.Sprintf("rig %s's import was interrupted during its clear: %d bead(s) may be held by both the rig store and the city binding, and a reader that reaches the rig first is served the frozen copy. Stop the city and finish it with `%s`", rig, len(note.Pending), rigImportInstruction(rig)))
 		}
 	}
 	if len(reasons) == 0 {
@@ -343,4 +348,23 @@ func emitRigResidue(rec events.Recorder, stderr io.Writer, logPrefix string, tar
 		sort.Strings(unchecked)
 		fmt.Fprintf(stderr, "%s: storage: suspended rig(s) %s were not censused at boot; `gc storage status` reports them\n", logPrefix, strings.Join(unchecked, ", ")) //nolint:errcheck // best-effort stderr
 	}
+}
+
+// rigStoreListsEmpty reports whether the rig's store holds no row at all,
+// closed and both tiers included. A store that cannot be opened, listed or
+// closed is not proven empty.
+func rigStoreListsEmpty(cityPath string, r config.Rig) bool {
+	// A scope with no store on disk at all holds no row, and opening it
+	// would only create (or start a server for) the store being asked about.
+	root := resolveStoreScopeRoot(cityPath, r.Path)
+	if !fileExists(filepath.Join(root, ".beads")) && !fileExists(filepath.Join(root, ".gc", "beads.json")) {
+		return true
+	}
+	store, err := openStorageScopeStore(r.Path, cityPath)
+	if err != nil {
+		return false
+	}
+	rows, listErr := store.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	closeErr := closeBeadStoreHandle(store)
+	return listErr == nil && closeErr == nil && len(rows) == 0
 }

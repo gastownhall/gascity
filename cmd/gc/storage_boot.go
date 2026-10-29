@@ -425,7 +425,7 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	// (rig_import_census.go); a rig merely awaiting import serves, its relic
 	// legs keeping it readable, and the controller's boot census names it.
 	if target.Root != "" {
-		if err := rigBootRefusal(cityPath, cfg, target); err != nil {
+		if err := rigBootRefusal(cityPath, target); err != nil {
 			return nil, fmt.Errorf("%s: %w", logPrefix, err)
 		}
 	}

@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -457,8 +458,22 @@ func importRig(env rigImportEnv, rig config.Rig) (result rigImportResult) {
 	} else {
 		closeBinding()
 	}
-	if err := os.Remove(loc.InFlightPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fail(fmt.Errorf("removing rig %s's in-flight record: %w", rig.Name, err))
+	// From the marker until the clear completes, the rig and the binding
+	// may both hold a row (twins). The cleared note goes pending before the
+	// in-flight record comes off, so boot keeps refusing across the handover.
+	if fileExists(loc.InFlightPath()) {
+		if cur, present, err := readInfraClearedNoteAt(loc.NotePath()); err != nil {
+			return fail(err)
+		} else if !present || cur.Complete {
+			note = infraClearedNote{Binding: env.Target.Binding, Database: env.Target.Database, Backup: loc.BackupPath()}
+			if err := writeInfraClearedNoteAt(loc.NotePath(), note); err != nil {
+				return fail(err)
+			}
+			resuming = true
+		}
+		if err := os.Remove(loc.InFlightPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fail(fmt.Errorf("removing rig %s's in-flight record: %w", rig.Name, err))
+		}
 	}
 
 	reread, _, err := loc.readManifest()
@@ -598,19 +613,80 @@ var rigImportOtherCities = func(cityPath string) ([]string, error) {
 	return paths, nil
 }
 
-// rigImportScopeDoltTarget resolves the Dolt database a scope's store lives
-// in; ok=false for a scope with no authoritative Dolt target (a file store).
-var rigImportScopeDoltTarget = func(cityPath, scopeRoot string) (string, bool) {
-	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
-	if err != nil || !ok || strings.TrimSpace(target.Database) == "" {
-		return "", false
-	}
-	endpoint := target.Socket
-	if endpoint == "" {
-		endpoint = target.Host + ":" + target.Port
-	}
-	return endpoint + "/" + target.Database, true
+// rigDoltIdentity is the Dolt database a scope's store lives in.
+type rigDoltIdentity struct {
+	// Database is the database name; empty for a scope with no
+	// authoritative Dolt target (a file store).
+	Database string
+	// Endpoint is the normalized server address (loopback spellings fold to
+	// one; a host name resolves to its sorted addresses) or the socket path.
+	Endpoint string
+	// Unresolved reports that the endpoint could not be resolved, so the
+	// identity names a database without saying where it lives.
+	Unresolved bool
+	Err        error
 }
+
+// rigImportScopeDoltTarget resolves the Dolt database a scope's store lives
+// in.
+var rigImportScopeDoltTarget = func(cityPath, scopeRoot string) rigDoltIdentity {
+	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
+	if err != nil {
+		return rigDoltIdentity{Unresolved: true, Err: err}
+	}
+	if !ok || strings.TrimSpace(target.Database) == "" {
+		return rigDoltIdentity{}
+	}
+	id := rigDoltIdentity{Database: strings.TrimSpace(target.Database)}
+	if socket := strings.TrimSpace(target.Socket); socket != "" {
+		id.Endpoint = "unix:" + filepath.Clean(socket)
+		return id
+	}
+	host, herr := normalizeDoltHost(target.Host)
+	if herr != nil {
+		id.Unresolved, id.Err = true, herr
+		return id
+	}
+	id.Endpoint = host + ":" + strings.TrimSpace(target.Port)
+	return id
+}
+
+// normalizeDoltHost folds the loopback spellings (localhost, 127.0.0.1, ::1,
+// empty) to one and resolves any other host name to its sorted addresses,
+// so two spellings of one server compare equal.
+func normalizeDoltHost(host string) (string, error) {
+	host = strings.Trim(strings.TrimSpace(strings.ToLower(host)), "[]")
+	switch host {
+	case "", "localhost", "127.0.0.1", "::1":
+		return "loopback", nil
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() {
+			return "loopback", nil
+		}
+		return ip.String(), nil
+	}
+	addrs, err := rigImportLookupHost(host)
+	if err == nil && len(addrs) == 0 {
+		err = errors.New("no addresses")
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolving Dolt host %q: %w", host, err)
+	}
+	norm := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		if ip := net.ParseIP(a); ip != nil && ip.IsLoopback() {
+			norm = append(norm, "loopback")
+			continue
+		}
+		norm = append(norm, a)
+	}
+	sort.Strings(norm)
+	return strings.Join(norm, ","), nil
+}
+
+// rigImportLookupHost resolves a host name; a test seam.
+var rigImportLookupHost = net.LookupHost
 
 // rigImportSharedStoreRefusal refuses a rig whose store another registered
 // city also uses: the same scope root, or the same Dolt database. A shared
@@ -623,7 +699,7 @@ func rigImportSharedStoreRefusal(env rigImportEnv, rig config.Rig) error {
 		return fmt.Errorf("rig %s: reading the city registry to rule out a shared rig store: %w; nothing was written", rig.Name, err)
 	}
 	selfRoot := rigStoreRoot(env.CityPath, rig)
-	selfDB, selfHasDB := rigImportScopeDoltTarget(env.CityPath, selfRoot)
+	self := rigImportScopeDoltTarget(env.CityPath, selfRoot)
 	for _, otherPath := range others {
 		cfg, err := loadCityConfigWithoutBuiltinPackRefresh(otherPath, io.Discard)
 		if err == nil && cfg == nil {
@@ -640,10 +716,25 @@ func rigImportSharedStoreRefusal(env rigImportEnv, rig config.Rig) error {
 			if samePath(root, selfRoot) {
 				return fmt.Errorf("rig %s's store %s is also city %s's rig %s: a shared rig store holds rows another city owns, and is refused until the single-writer attestation exists; nothing was written", rig.Name, selfRoot, otherPath, other.Name)
 			}
-			if selfHasDB {
-				if db, ok := rigImportScopeDoltTarget(otherPath, root); ok && db == selfDB {
-					return fmt.Errorf("rig %s's Dolt database %s is also city %s's rig %s: a shared rig store holds rows another city owns, and is refused until the single-writer attestation exists; nothing was written", rig.Name, selfDB, otherPath, other.Name)
+			if self.Database == "" {
+				continue
+			}
+			theirs := rigImportScopeDoltTarget(otherPath, root)
+			if theirs.Database == "" && !theirs.Unresolved {
+				continue
+			}
+			switch {
+			case self.Unresolved || theirs.Unresolved:
+				if theirs.Database != "" && theirs.Database != self.Database {
+					continue
 				}
+				why := theirs.Err
+				if self.Unresolved {
+					why = self.Err
+				}
+				return fmt.Errorf("rig %s's Dolt database %q may also be city %s's rig %s, and the endpoints cannot be compared (%w): start that city's Dolt server (or this rig's) so they can be, or unregister that city if it is gone; nothing was written", rig.Name, self.Database, otherPath, other.Name, why)
+			case theirs.Database == self.Database && theirs.Endpoint == self.Endpoint:
+				return fmt.Errorf("rig %s's Dolt database %s at %s is also city %s's rig %s: a shared rig store holds rows another city owns, and is refused until the single-writer attestation exists; nothing was written", rig.Name, self.Database, self.Endpoint, otherPath, other.Name)
 			}
 		}
 	}
@@ -992,7 +1083,7 @@ func rigImportClear(env rigImportEnv, loc rigImportLocation, rigStore beads.Stor
 		}
 		return 0, nil
 	}
-	if err := rigImportReprove(env, loc, rigStore, toClear); err != nil {
+	if err := rigImportReprove(env, loc, rigStore, snap, toClear); err != nil {
 		return 0, err
 	}
 	previous, _, err := readInfraRetainedBackupAt(loc.BackupPath())
@@ -1107,7 +1198,7 @@ func rigImportClear(env rigImportEnv, loc rigImportLocation, rigStore beads.Stor
 // writer changed it since) and that the binding holds it: the same (id,
 // created_at), under this rig's import stamp. A row that fails either is
 // named and nothing is removed.
-func rigImportReprove(env rigImportEnv, loc rigImportLocation, rigStore beads.Store, toClear []beads.Bead) error {
+func rigImportReprove(env rigImportEnv, loc rigImportLocation, rigStore beads.Store, snap rigSnapshot, toClear []beads.Bead) error {
 	fresh, err := rigStore.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
 	if err != nil {
 		return fmt.Errorf("re-reading rig %s before the clear: %w", loc.Rig, err)
@@ -1129,7 +1220,11 @@ func rigImportReprove(env rigImportEnv, loc rigImportLocation, rigStore beads.St
 	if err != nil {
 		return fmt.Errorf("reading the binding to prove rig %s's copies before the clear: %w", loc.Rig, err)
 	}
-	var moved, unproven []string
+	clearing := make(map[string]bool, len(toClear))
+	for _, b := range toClear {
+		clearing[b.ID] = true
+	}
+	var moved, unproven, differs []string
 	for _, b := range toClear {
 		f, ok := now[b.ID]
 		if ok && (beadCopyDifference(b, f) != "" || (b.Revision != 0 && f.Revision != 0 && b.Revision != f.Revision)) {
@@ -1139,6 +1234,37 @@ func rigImportReprove(env rigImportEnv, loc rigImportLocation, rigStore beads.St
 		h, ok := held[b.ID]
 		if !ok || h.Metadata[infraMigrationStampKey] != rigImportStamp(loc.Rig) || !rigSameCreated(b, h) {
 			unproven = append(unproven, b.ID)
+			continue
+		}
+		// The binding copy must still be the row the import wrote for this
+		// rig row, field for field, with every edge among the cleared rows.
+		want := rigImportRow(b, loc.Rig, nil)
+		if recorded, ok := h.Metadata[beadmeta.MigratedCrossEdgesMetadataKey]; ok {
+			want.Metadata[beadmeta.MigratedCrossEdgesMetadataKey] = recorded
+		}
+		if diff := beadCopyDifference(want, h); diff != "" {
+			differs = append(differs, fmt.Sprintf("%s (%s)", b.ID, diff))
+			continue
+		}
+		var wantEdges []string
+		for _, d := range snap.down[b.ID] {
+			if clearing[d.DependsOnID] {
+				wantEdges = append(wantEdges, d.DependsOnID+" ("+d.Type+")")
+			}
+		}
+		if len(wantEdges) == 0 {
+			continue
+		}
+		deps, err := binding.DepList(b.ID, "down")
+		if err != nil {
+			return fmt.Errorf("reading the binding's edges of %s before the clear: %w", b.ID, err)
+		}
+		got := setOf(censusEdges(deps))
+		for _, e := range wantEdges {
+			if !got[e] {
+				differs = append(differs, fmt.Sprintf("%s (the binding lacks its edge to %s)", b.ID, e))
+				break
+			}
 		}
 	}
 	var reasons []string
@@ -1148,7 +1274,11 @@ func rigImportReprove(env rigImportEnv, loc rigImportLocation, rigStore beads.St
 	}
 	if len(unproven) > 0 {
 		sort.Strings(unproven)
-		reasons = append(reasons, fmt.Sprintf("the binding does not hold %d row(s) the clear would remove from rig %s as this import's copy of the same bead, so the rig row may be the only copy: %s. Nothing was removed; restore the binding rows (or re-import them) before clearing", len(unproven), loc.Rig, infraStrandedIDList(unproven)))
+		reasons = append(reasons, fmt.Sprintf("the binding does not hold %d row(s) the clear would remove from rig %s as this import's copy of the same bead, so the rig row may be the only copy: %s. Nothing was removed; restore the binding database from its backup, then re-run `%s`", len(unproven), loc.Rig, infraStrandedIDList(unproven), rigImportInstruction(loc.Rig)))
+	}
+	if len(differs) > 0 {
+		sort.Strings(differs)
+		reasons = append(reasons, fmt.Sprintf("%d binding cop(ies) no longer match the rig rows the clear would remove from rig %s: %s. Nothing was removed; reconcile each row (the rig row and its binding copy), then re-run `%s`", len(differs), loc.Rig, infraStrandedIDList(differs), rigImportInstruction(loc.Rig)))
 	}
 	if len(reasons) > 0 {
 		return &rigImportPrepareRefusal{msg: strings.Join(reasons, "; ")}
@@ -1561,15 +1691,44 @@ func doStorageAbandonRigStore(ctx context.Context, request storageOperatorReques
 		fmt.Fprintf(stderr, "%s: rig %s has no import marker and manifest (%v): its import never proved the binding holds its rows, so the rig store cannot be abandoned. Restore the rig store and run `%s`\n", logPrefix, rigName, err, rigImportInstruction(rigName)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if rig, declared := rigImportRigNamed(request.Cfg, rigName); declared && strings.TrimSpace(rig.Path) != "" {
+		if store, err := rigImportStoreOpener(request.CityPath, rig); err == nil {
+			_, listErr := store.List(beads.ListQuery{Limit: 1, IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+			_ = closeBeadStoreHandle(store)
+			if listErr == nil {
+				fmt.Fprintf(stderr, "%s: rig %s's store is reachable, so it is not gone: finish the import with `%s` instead\n", logPrefix, rigName, rigImportInstruction(rigName)) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+		}
+	}
+	if fileExists(loc.InFlightPath()) {
+		fmt.Fprintf(stderr, "%s: rig %s has an import in flight (%s): the binding may hold rows without their edges, which only the import can finish or undo. Restore the rig store and run `%s`\n", logPrefix, rigName, loc.InFlightPath(), rigImportInstruction(rigName)) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	binding, err := openInfraBindingReadOnly(target)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: opening the binding: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	held, err := beads.GetMany(binding, sortedMapKeys(manifest.IDs))
+	var stamped []beads.Bead
+	if err == nil {
+		stamped, err = binding.List(beads.ListQuery{Metadata: map[string]string{infraMigrationStampKey: rigImportStamp(rigName)}, IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	}
 	_ = closeBeadStoreHandle(binding)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: reading the binding: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	var unrecorded []string
+	for _, b := range stamped {
+		if !manifest.IDs[b.ID] && !manifest.Gates[b.ID] {
+			unrecorded = append(unrecorded, b.ID)
+		}
+	}
+	if len(unrecorded) > 0 {
+		sort.Strings(unrecorded)
+		fmt.Fprintf(stderr, "%s: the binding holds %d row(s) stamped as rig %s's import that its manifest does not record (an interrupted incremental import): %s. Only the import can prove or undo them; restore the rig store and run `%s`\n", logPrefix, len(unrecorded), rigName, infraStrandedIDList(unrecorded), rigImportInstruction(rigName)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	var missing []string
@@ -1588,7 +1747,19 @@ func doStorageAbandonRigStore(ctx context.Context, request storageOperatorReques
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	_ = os.Remove(loc.InFlightPath())
 	fmt.Fprintf(stdout, "rig %s: store abandoned; the binding holds all %d row(s) its import recorded, and the clear is recorded complete\n", rigName, manifest.Len()) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// rigImportRigNamed returns the configured rig named name.
+func rigImportRigNamed(cfg *config.City, name string) (config.Rig, bool) {
+	if cfg == nil {
+		return config.Rig{}, false
+	}
+	for _, r := range cfg.Rigs {
+		if r.Name == name {
+			return r, true
+		}
+	}
+	return config.Rig{}, false
 }

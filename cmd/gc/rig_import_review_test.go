@@ -335,7 +335,9 @@ func TestReviewSharedRigStoreRefuses(t *testing.T) {
 		}
 		f.otherCities = []string{other}
 		prev := rigImportScopeDoltTarget
-		rigImportScopeDoltTarget = func(string, string) (string, bool) { return "127.0.0.1:3399/packs", true }
+		rigImportScopeDoltTarget = func(string, string) rigDoltIdentity {
+			return rigDoltIdentity{Database: "packs", Endpoint: "loopback:3399"}
+		}
 		t.Cleanup(func() { rigImportScopeDoltTarget = prev })
 		if code, _, stderr := f.importRigs(); code == 0 || !strings.Contains(stderr, "Dolt database") {
 			t.Fatalf("a rig on another city's Dolt database was imported: %d %s", code, stderr)
@@ -419,9 +421,10 @@ func TestReviewAbandonRigStore(t *testing.T) {
 	f.seed("packs", []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil), graphRow("gp-b", "gp-a", "closed", nil)}, nil)
 	crashOnceAt(t, "pending")
 	_, _, _ = f.importRigs()
-	if err := rigBootRefusal(f.request.CityPath, f.cfg, f.target); err == nil {
+	if err := rigBootRefusal(f.request.CityPath, f.target); err == nil {
 		t.Fatal("precondition: boot does not refuse the pending clear")
 	}
+	f.open["packs"] = func() (beads.Store, error) { return beads.NewMemStore(), errors.New("the rig volume is gone") }
 	binding, err := openInfraDestination(f.target)
 	if err != nil {
 		t.Fatal(err)
@@ -447,7 +450,7 @@ func TestReviewAbandonRigStore(t *testing.T) {
 	if code := doStorageAbandonRigStore(context.Background(), f.request, "packs", &stdout, &stderr); code != 0 {
 		t.Fatalf("abandon = %d: %s", code, stderr.String())
 	}
-	if err := rigBootRefusal(f.request.CityPath, f.cfg, f.target); err != nil {
+	if err := rigBootRefusal(f.request.CityPath, f.target); err != nil {
 		t.Errorf("boot still refuses after the abandon: %v", err)
 	}
 }
@@ -525,5 +528,223 @@ func TestReviewImportThroughTheProductionOpenPath(t *testing.T) {
 	}
 	if _, err := f.binding().Get("gp-a"); err != nil {
 		t.Errorf("the binding does not hold gp-a: %v", err)
+	}
+}
+
+// Re-review MUST: --abandon-rig-store never serves a half copy. After an
+// incremental import crashed between its rows and its edges, abandon refuses
+// (the in-flight record, and binding rows the manifest does not record), and
+// it refuses a rig store that is still reachable.
+func TestReviewAbandonRefusesAHalfCopyAndAReachableStore(t *testing.T) {
+	f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
+	f.seed("packs", []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil)}, nil)
+	if code, o, e := f.importRigs(); code != 0 {
+		t.Fatalf("first import = %d: %s %s", code, o, e)
+	}
+	f.seed("packs", []beads.Bead{graphRow("gp-x", "gp-x", "open", nil), graphRow("gp-y", "gp-x", "open", nil)},
+		[]beads.Dep{{IssueID: "gp-y", DependsOnID: "gp-x", Type: "blocks"}})
+	crashOnceAt(t, "rows")
+	_, _, _ = f.importRigs()
+
+	var stdout, stderr bytes.Buffer
+	if code := doStorageAbandonRigStore(context.Background(), f.request, "packs", &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "reachable") {
+		t.Fatalf("abandon of a reachable rig store = %d %s", code, stderr.String())
+	}
+	f.open["packs"] = func() (beads.Store, error) { return beads.NewMemStore(), errors.New("the rig volume is gone") }
+	stderr.Reset()
+	if code := doStorageAbandonRigStore(context.Background(), f.request, "packs", &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "in flight") {
+		t.Fatalf("abandon over an import in flight = %d %s", code, stderr.String())
+	}
+	_ = os.Remove(f.loc("packs").InFlightPath())
+	stderr.Reset()
+	if code := doStorageAbandonRigStore(context.Background(), f.request, "packs", &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "gp-x") {
+		t.Fatalf("abandon over binding rows the manifest does not record = %d %s", code, stderr.String())
+	}
+}
+
+// Re-review should-fix: boot reads the records on disk, so a rig removed
+// from config after a crash still holds it.
+func TestReviewBootRefusesAnInFlightImportOfARigNoLongerConfigured(t *testing.T) {
+	f := twoStepRig(t)
+	crashOnceAt(t, "rows")
+	_, _, _ = f.importRigs()
+	f.cfg.Rigs = nil
+	if err := rigBootRefusal(f.request.CityPath, f.target); err == nil || !strings.Contains(err.Error(), "rig packs") {
+		t.Fatalf("boot served a half copy of a rig dropped from config: %v", err)
+	}
+}
+
+// Re-review should-fix: Dolt endpoints are compared normalized, never by
+// database name alone, and an endpoint that cannot be resolved with a
+// matching name refuses with a remedy.
+func TestReviewSharedDoltIdentityIsNormalized(t *testing.T) {
+	for _, h := range []string{"localhost", "127.0.0.1", "::1", "[::1]", ""} {
+		if got, err := normalizeDoltHost(h); err != nil || got != "loopback" {
+			t.Errorf("normalizeDoltHost(%q) = %q %v, want loopback", h, got, err)
+		}
+	}
+	prevLookup := rigImportLookupHost
+	rigImportLookupHost = func(host string) ([]string, error) {
+		if host == "dolt.internal" {
+			return []string{"10.0.0.5"}, nil
+		}
+		return nil, errors.New("no such host")
+	}
+	t.Cleanup(func() { rigImportLookupHost = prevLookup })
+	if got, _ := normalizeDoltHost("dolt.internal"); got != "10.0.0.5" {
+		t.Errorf("a host name does not resolve to its address: %q", got)
+	}
+	run := func(t *testing.T, self, theirs rigDoltIdentity) (int, string) {
+		t.Helper()
+		f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
+		f.seed("packs", []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil)}, nil)
+		other := t.TempDir()
+		toml := fmt.Sprintf("[workspace]\nname = \"other\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"theirs\"\npath = %q\n", filepath.Join(other, "elsewhere"))
+		if err := os.WriteFile(filepath.Join(other, "city.toml"), []byte(toml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		f.otherCities = []string{other}
+		prev := rigImportScopeDoltTarget
+		rigImportScopeDoltTarget = func(cityPath, _ string) rigDoltIdentity {
+			if cityPath == other {
+				return theirs
+			}
+			return self
+		}
+		t.Cleanup(func() { rigImportScopeDoltTarget = prev })
+		code, _, stderr := f.importRigs()
+		return code, stderr
+	}
+	t.Run("same name, different endpoints: imports", func(t *testing.T) {
+		if code, stderr := run(t, rigDoltIdentity{Database: "gp", Endpoint: "loopback:3307"}, rigDoltIdentity{Database: "gp", Endpoint: "loopback:3407"}); code != 0 {
+			t.Errorf("two databases that share only a name were refused: %s", stderr)
+		}
+	})
+	t.Run("same name and endpoint: refuses", func(t *testing.T) {
+		if code, stderr := run(t, rigDoltIdentity{Database: "gp", Endpoint: "loopback:3307"}, rigDoltIdentity{Database: "gp", Endpoint: "loopback:3307"}); code == 0 || !strings.Contains(stderr, "Dolt database gp") {
+			t.Errorf("a shared Dolt database was imported: %s", stderr)
+		}
+	})
+	t.Run("their endpoint unresolved, same name: refuses with a remedy", func(t *testing.T) {
+		if code, stderr := run(t, rigDoltIdentity{Database: "gp", Endpoint: "loopback:3307"}, rigDoltIdentity{Database: "gp", Unresolved: true, Err: errors.New("server down")}); code == 0 || !strings.Contains(stderr, "unregister") {
+			t.Errorf("an unresolved endpoint with the same name was not refused with a remedy: %s", stderr)
+		}
+	})
+	t.Run("their endpoint unresolved, other name: imports", func(t *testing.T) {
+		if code, stderr := run(t, rigDoltIdentity{Database: "gp", Endpoint: "loopback:3307"}, rigDoltIdentity{Database: "ga", Unresolved: true, Err: errors.New("server down")}); code != 0 {
+			t.Errorf("an unrelated unresolved database was refused: %s", stderr)
+		}
+	})
+}
+
+// Re-review M8: a binding copy changed between the copy and the clear stops
+// the import. Verify compares fields, and so does the clear-time re-check.
+func TestReviewCorruptedBindingCopyStopsTheImport(t *testing.T) {
+	for _, step := range []string{"rows", "reserved"} {
+		t.Run(step, func(t *testing.T) {
+			f := twoStepRig(t)
+			prev := rigImportCrashPoint
+			rigImportCrashPoint = func(s string) error {
+				if s != step {
+					return nil
+				}
+				binding, err := openInfraDestination(f.target)
+				if err != nil {
+					return err
+				}
+				defer closeBeadStoreHandle(binding) //nolint:errcheck
+				title := "corrupted"
+				return binding.Update("gp-a", beads.UpdateOpts{Title: &title})
+			}
+			t.Cleanup(func() { rigImportCrashPoint = prev })
+			code, _, stderr := f.importRigs()
+			if code == 0 || !strings.Contains(stderr, "gp-a") {
+				t.Fatalf("a corrupted binding copy did not stop the import at %s: %d %s", step, code, stderr)
+			}
+			if _, err := f.rig("packs").Get("gp-a"); err != nil {
+				t.Errorf("the rig row was removed despite a corrupted binding copy: %v", err)
+			}
+		})
+	}
+	t.Run("a missing edge at clear time", func(t *testing.T) {
+		f := twoStepRig(t)
+		prev := rigImportCrashPoint
+		rigImportCrashPoint = func(s string) error {
+			if s != "reserved" {
+				return nil
+			}
+			binding, err := openInfraDestination(f.target)
+			if err != nil {
+				return err
+			}
+			defer closeBeadStoreHandle(binding) //nolint:errcheck
+			return binding.DepRemove("gp-b", "gp-a")
+		}
+		t.Cleanup(func() { rigImportCrashPoint = prev })
+		if code, _, stderr := f.importRigs(); code == 0 || !strings.Contains(stderr, "lacks its edge") {
+			t.Fatalf("a binding copy missing its edge did not stop the clear: %d %s", code, stderr)
+		}
+	})
+}
+
+// Re-review M12: a marker whose rig still holds rows its import carried is
+// not "imported", even with a complete cleared note.
+func TestReviewMarkerWithCarriedRowsLeftIsRetained(t *testing.T) {
+	f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
+	f.seed("packs", []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil)}, nil)
+	crashOnceAt(t, "pending")
+	_, _, _ = f.importRigs()
+	loc := f.loc("packs")
+	if err := writeInfraClearedNoteAt(loc.NotePath(), infraClearedNote{Complete: true}); err != nil {
+		t.Fatal(err)
+	}
+	rows := censusRigs(f.request.CityPath, f.cfg, f.target, false)
+	if len(rows) != 1 || rows[0].State != rigCensusRetained || f.relicFree("packs") && rows[0].State == rigCensusImported {
+		t.Fatalf("census = %+v, want retained", rows)
+	}
+}
+
+// Re-review M15: two rigs on one database are refused by name.
+func TestReviewTwoRigsOnOneDatabaseRefuse(t *testing.T) {
+	f := newRigImportFixture(t, config.Rig{Name: "one", Prefix: "ga"}, config.Rig{Name: "two", Prefix: "gb"})
+	shared := beads.NewMemStoreFrom(0, []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil)}, nil)
+	f.fixed["one"], f.fixed["two"] = shared, shared
+	code, _, stderr := f.importRigs()
+	if code == 0 || !strings.Contains(stderr, "rig one: REFUSED") || !strings.Contains(stderr, "rig two: REFUSED") || !strings.Contains(stderr, "one database") {
+		t.Fatalf("two rigs on one database were not refused: %d %s", code, stderr)
+	}
+	if n := len(rigTestList(t, f.binding())); n != 0 {
+		t.Errorf("the refused import wrote %d binding row(s)", n)
+	}
+}
+
+// Re-review should-fix: openPhysicalScopeStore (through openStorageScopeStore)
+// reads rows of every class, past the split-strict work view, so its callers
+// are pinned: only the rig importer's opener and its census's emptiness check.
+func TestReviewPhysicalScopeOpenerCallersArePinned(t *testing.T) {
+	want := map[string]int{"rig_import.go": 1, "rig_import_census.go": 1}
+	got := map[string]int{}
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := strings.Count(string(data), "openStorageScopeStore(") + strings.Count(string(data), "openPhysicalScopeStore(")
+		if file == "cmd_storage.go" {
+			n -= strings.Count(string(data), "func openPhysicalScopeStore(")
+		}
+		if n > 0 {
+			got[file] = n
+		}
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("physical scope opener callers = %v, want %v; a new caller reads infrastructure rows from a rig ledger and needs review", got, want)
 	}
 }
