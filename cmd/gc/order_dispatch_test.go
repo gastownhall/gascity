@@ -11206,3 +11206,50 @@ func TestMergeOrderExecEnvExplicitAndUnrelatedKeysSurvive(t *testing.T) {
 		t.Fatalf("merged env kept the dispatcher's session identity: %v", merged)
 	}
 }
+
+func TestOrderExecEnvKeepsCuratedEnvWhileScrubbingSeatIdentity(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("FOO", "bar")
+	t.Setenv("GC_SESSION_ID", "gc-seat-123")
+	t.Setenv("GC_ALIAS", "some-seat")
+	t.Setenv("GC_AGENT", "some-seat")
+
+	cityDir := t.TempDir()
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+	a := orders.Order{Name: "jsonl-export", Trigger: "cooldown", Interval: "15m", Exec: "true"}
+
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError() error = %v", err)
+	}
+
+	out, err := shellExecRunner(context.Background(), `env`, cityDir, envSlice)
+	if err != nil {
+		t.Fatalf("shellExecRunner() error = %v, output = %q", err, out)
+	}
+	got := map[string]string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		if key, value, ok := strings.Cut(line, "="); ok {
+			got[key] = value
+		}
+	}
+	if got["GC_SESSION_ID"] != "" || got["GC_ALIAS"] != "" || got["GC_AGENT"] != "" {
+		t.Fatalf("order exec inherited the dispatcher's seat identity: GC_SESSION_ID=%q GC_ALIAS=%q GC_AGENT=%q",
+			got["GC_SESSION_ID"], got["GC_ALIAS"], got["GC_AGENT"])
+	}
+	if got["FOO"] != "bar" {
+		t.Fatalf("unrelated FOO lost from order environment: got %q", got["FOO"])
+	}
+	if got["PATH"] == "" || got["HOME"] == "" {
+		t.Fatalf("unrelated PATH/HOME lost from order environment: PATH=%q HOME=%q", got["PATH"], got["HOME"])
+	}
+	if got["BEADS_ACTOR"] != "order:jsonl-export" {
+		t.Fatalf("BEADS_ACTOR = %q, want the curated order:jsonl-export", got["BEADS_ACTOR"])
+	}
+	if got["GC_STORE_ROOT"] != cityDir {
+		t.Fatalf("GC_STORE_ROOT = %q, want the curated city dir %q", got["GC_STORE_ROOT"], cityDir)
+	}
+	if rigValue, defined := got["GC_RIG"]; !defined || rigValue != "" {
+		t.Fatalf("GC_RIG = %q (defined=%t), want the curated empty value for a city-scope order", rigValue, defined)
+	}
+}
