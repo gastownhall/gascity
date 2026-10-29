@@ -105,3 +105,45 @@ func TestGetAgentNeverResolvesAKindOrEmptyTarget(t *testing.T) {
 		}
 	}
 }
+
+// A session whose registered name really is a kind name still resolves to
+// exactly its own pane — both when `agent get` answers directly and through
+// the list scan after a not-found answer.
+func TestGetAgentResolvesASessionNamedLikeAKindToItsOwnPane(t *testing.T) {
+	// Direct answer: a registered "opencode" is an agent like any other.
+	direct := "#!/bin/sh\n" +
+		"case \"$*\" in\n" +
+		"  *'agent get'*)\n" +
+		"    echo '{\"result\":{\"agent\":{\"agent\":\"opencode\",\"name\":\"opencode\",\"pane_id\":\"w5:p1\",\"agent_status\":\"idle\"}}}'\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	c := &client{session: "gc-test", bin: writeFakeHerdr(t, direct)}
+	a, ok, err := c.getAgent(context.Background(), "opencode")
+	if err != nil || !ok || a.PaneID != "w5:p1" {
+		t.Fatalf("getAgent(opencode) direct = (%+v, %v, %v); want pane w5:p1", a, ok, err)
+	}
+
+	// List fallback after a not-found answer: the unnamed opencode pane listed
+	// ahead of the registered one must not shadow it.
+	list := `{"result":{"agents":[` +
+		`{"agent":"opencode","pane_id":"w3:p1","agent_status":"working"},` +
+		`{"agent":"opencode","name":"alpha","pane_id":"w1:p1","agent_status":"working"},` +
+		`{"agent":"opencode","name":"beta","pane_id":"w2:p1","agent_status":"working"},` +
+		`{"agent":"opencode","name":"opencode","pane_id":"w5:p1","agent_status":"idle"}]}}`
+	fallback := "#!/bin/sh\n" +
+		"case \"$*\" in\n" +
+		"  *'agent get'*)\n" +
+		"    echo '{\"error\":{\"code\":\"agent_not_found\",\"message\":\"agent not found\"}}'\n" +
+		"    ;;\n" +
+		"  *'agent list'*)\n" +
+		"    echo '" + list + "'\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	c = &client{session: "gc-test", bin: writeFakeHerdr(t, fallback)}
+	a, ok, err = c.getAgent(context.Background(), "opencode")
+	if err != nil || !ok || a.PaneID != "w5:p1" {
+		t.Fatalf("getAgent(opencode) fallback = (%+v, %v, %v); want pane w5:p1 — the registered name must win over the unnamed pane of the same kind", a, ok, err)
+	}
+}
