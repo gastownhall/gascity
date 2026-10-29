@@ -126,6 +126,20 @@ schema = 1
     hash = "sha256:5a83996226e3154f29fc1bca13ff0e8b37a1a02cee8f71fb70bddcdcea2e6895"
     description = "Require Gastown polecats to continue claiming formula step beads until final drain."
 
+  [[pack.release]]
+    version = "0.1.11"
+    ref = "release/gastown-0.1.11"
+    commit = "66c672b5ed00af143158b4eac960523c56b977ee"
+    hash = "sha256:6df9aaf72e8e720785d7842a48d34197618796738596affff073a8e8af492d42"
+    description = "Maintenance release for Gas City 1.5.x, cut from 0.1.10: the refinery and deacon stop leaking patrol wisps and drain instead of stalling on a failed patrol-wisp operation, the deacon dolt-health step tells a missing or bd-owned Dolt from an outage, the deacon no longer re-enters its loop from inside a turn, the mayor reports a failed dispatch instead of doing the work itself, warrants and digests are filed with bd flags that exist, and polecats close their claimed terminal step before acknowledging drain."
+
+  [[pack.release]]
+    version = "0.1.12"
+    ref = "release/gastown-0.1.11"
+    commit = "cb6a612882b8402569c495c90ab75bb257a51bdc"
+    hash = "sha256:9d45214f8e4d997ff84b9daf0e92917141fddda03be132d28382f7ea0c6252d4"
+    description = "Maintenance release for Gas City 1.5.x, cut from 0.1.11: every shipped gastown bead command goes through gc bd (backport of 9b4df3e), so split-store cities reach graph steps from the polecat and witness prompts, the polecat-work and witness-patrol formulas, the review check scripts (which now read molecules through a federated gc ready union) and the churn watcher; the refinery duplicate-bug check filters with --title-contains, a flag that exists."
+
 [[pack]]
   name = "cass"
   description = "Coding Agent Session Search prompt fragments and skill overlays for Gas City."

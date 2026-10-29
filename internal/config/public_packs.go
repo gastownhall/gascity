@@ -8,7 +8,7 @@ const (
 
 	// PublicGastownPackVersion pins fresh init output to the registry release
 	// content commit from gastownhall/gascity-packs main.
-	PublicGastownPackVersion = "sha:fb4d1fa0b203446858f73bec1273cc8a53edea79"
+	PublicGastownPackVersion = "sha:cb6a612882b8402569c495c90ab75bb257a51bdc"
 
 	// PublicGascityPackSource is the concrete durable source for the
 	// gascity planning/implementation skills pack.
