@@ -61,9 +61,17 @@ var reviewedMarkers = map[string]reviewedMarker{
 		"federated", 1,
 		"one leg of bdCursorAcrossStores (S3a): order-run records live in the orders binding and, as v1 poured roots, on the work legs",
 	},
-	"cmd/gc/wisp_gc.go enumerateWispGCRootsWith": {
+	"cmd/gc/wisp_gc.go closedWispGCEntries": {
 		"federated", 1,
-		"one leg of the wisp GC root union (S3a): graph roots in the graph store, v1 poured molecule roots on each work leg",
+		"the graph leg of the wisp GC root union (S3a): v1 poured molecule roots live on the work legs",
+	},
+	"cmd/gc/wisp_gc.go openWispGCRootCandidates": {
+		"federated", 1,
+		"the graph leg of the wisp GC root union (S3a): v1 poured molecule roots live on the work legs",
+	},
+	"cmd/gc/wisp_gc.go enumerateWorkClassMoleculeRoots": {
+		"federated", 1,
+		"the work leg of the wisp GC root union (S3a): graph molecule roots live in the graph store",
 	},
 	"cmd/gc/wisp_gc.go storeHoldsLiveAttachmentSource": {
 		"federated", 1,
@@ -77,7 +85,7 @@ var reviewedMarkers = map[string]reviewedMarker{
 		"federated", 1,
 		"one leg of the step reminder's molecule union (S3a): graph roots in the graph store, v1 poured molecules on the work legs",
 	},
-	"internal/sling/sling.go IsGraphWorkflowAttachment": {
+	"internal/sling/sling.go graphWorkflowAttachmentInGraphStore": {
 		"federated", 1,
 		"graph.v2 root test against the graph store: a v1 poured root lives in the work store, and the miss is the answer (not graph)",
 	},

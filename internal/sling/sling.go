@@ -1371,10 +1371,7 @@ func IsGraphWorkflowAttachment(store beads.Store, rootID string) bool {
 	if store == nil || rootID == "" {
 		return false
 	}
-	// The graph store answers whether rootID is a graph.v2 root: a v1 poured
-	// root (work class) lives in the work store, and missing it here is the
-	// right answer, "no".
-	b, err := beads.FederatedGet(store, rootID)
+	b, err := store.Get(rootID)
 	if err != nil {
 		return false
 	}
@@ -1776,4 +1773,16 @@ type BeadCheckResult struct {
 // BeadCheckOptions configures pre-flight bead state checks for a route.
 type BeadCheckOptions struct {
 	NoConvoy bool
+}
+
+// graphWorkflowAttachmentInGraphStore is IsGraphWorkflowAttachment asked of
+// the graph store for a root a recipe just poured: a v1 poured root (work
+// class) lives in the work store, and missing it there is the right answer
+// ("not graph.v2").
+func graphWorkflowAttachmentInGraphStore(graphStore beads.Store, rootID string) (graph bool) {
+	_ = beads.FederatedRead(func() error {
+		graph = IsGraphWorkflowAttachment(graphStore, rootID)
+		return nil
+	})
+	return graph
 }
