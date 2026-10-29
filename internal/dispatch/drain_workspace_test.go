@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 )
 
@@ -348,4 +349,27 @@ func TestProcessDrainSharedWorkspaceMemberWriteErrorKeepsDrainOpen(t *testing.T)
 	}
 	manifest := mustDrainManifest(t, mustGetBead(t, mem, drain.ID))
 	assertItemWorkDir(t, mem, manifest.Rows[0].ItemRootID, hook.path)
+}
+
+func TestStampDrainItemRecipePrefersLegacyWorkDir(t *testing.T) {
+	recipe := &formula.Recipe{Steps: []formula.RecipeStep{
+		{ID: "drain-item", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}},
+		{ID: "drain-item.work"},
+	}}
+	control := beads.Bead{ID: "gc-drain", Metadata: map[string]string{"gc.drain_member_access": "exclusive"}}
+	member := beads.Bead{ID: "gc-member", Metadata: map[string]string{
+		beadmeta.LegacyWorkDirMetadataKey: "/work/creator",
+		beadmeta.WorkDirMetadataKey:       "/work/mirror",
+	}}
+	row := &drainManifestRow{Index: 0, MemberID: member.ID}
+
+	stampDrainItemRecipe(recipe, control, beads.Bead{ID: "gc-unit"}, member, 1, row, "drain-item", nil)
+
+	for _, step := range recipe.Steps {
+		for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+			if got := step.Metadata[key]; got != "/work/creator" {
+				t.Fatalf("step %s %s = %q, want the creator's work_dir %q", step.ID, key, got, "/work/creator")
+			}
+		}
+	}
 }
