@@ -152,13 +152,15 @@ func applyV2DefaultBootFallback(w *controllerWiring, cityPath, cityName string, 
 	return refusal
 }
 
-// fallBackToLegacy demotes an unused v2 wiring to legacy: no planner, and a
-// legacy wake on the same channels. Only valid before the socket or a city
+// fallBackToLegacy demotes an unused v2 wiring to legacy: no planner, and its
+// wake routing to the legacy channels. Only valid before the socket or a city
 // runtime has seen the wiring.
 func (w *controllerWiring) fallBackToLegacy() {
 	w.mode = reconcilerLegacy
 	w.reason = reconcilerFallbackLegacy
 	w.v2 = nil
-	w.wake = newLegacyWake(w.pokeCh, w.controlDispatcherCh)
+	// The wake newControllerWiringLoggingTo built, made legacy in place: the
+	// same channels, no planner to route to.
 	w.wake.mode = reconcilerLegacy
+	w.wake.planner, w.wake.waitDepClosed, w.wake.wakeReads = nil, nil, nil
 }
