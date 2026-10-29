@@ -900,10 +900,19 @@ func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHol
 // assignedReadyTierCommand is the assigned-ready read for one identity: the
 // pre-assigned tier, and the tier a graph step assigned to this worker arrives
 // on. It is one of the four ready reads the federation swap covers.
+//
+// The read excludes beadmeta.DispatchHoldLabels before its --limit=1: bd's
+// Ready() ignores hold labels, so without the flags a held OPEN assignment
+// would be the one-row page, `exit 0` ahead of the routed pool-demand tier,
+// and the hook would strip the row and drain while routed work sat unqueried
+// (#8010). Filtering before the limit also lets a second, unheld assignment
+// be served instead of being shadowed by a held head. The human label is not
+// a dispatch hold and is never excluded here: assigned work is owned work.
 func assignedReadyTierCommand(shellVar string, topo QueryTopology) string {
 	reader := readyReaderCommand(topo.FederatedReady)
 	return `r=$(` + reader + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) +
-		` --assignee="$` + shellVar + `" --json --limit=1)` +
+		` --assignee="$` + shellVar + `"` + excludeLabelArgs(beadmeta.DispatchHoldLabels) +
+		` --json --limit=1)` +
 		workQueryReadFailure(reader) + `; `
 }
 
@@ -1198,6 +1207,10 @@ func (a *Agent) effectiveQuery(kind queryKind, topo QueryTopology) string {
 //
 // State priority: in_progress+assigned (crash recovery) >
 // ready+assigned (pre-assigned) > ready+unassigned+routed_to (pool).
+// The assigned-ready reader skips rows parked on a canonical dispatch hold
+// (beadmeta.DispatchHoldLabels, never the human label) before its limit, so a
+// held assignment is neither served nor able to mask the routed tier behind
+// it (#8010).
 // Executable formula roots can be epic-typed; the bead storage policy decides
 // whether those roots are history-backed, no-history, or ephemeral for the
 // configured bd compatibility mode. Molecule containers are not routable
