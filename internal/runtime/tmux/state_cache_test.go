@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -1163,5 +1165,51 @@ func TestStateCacheSessionReadsMissForUnknownSession(t *testing.T) {
 	attached, ok := cache.SessionAttached("known")
 	if !ok || !attached {
 		t.Errorf("SessionAttached(known) = %t, %t, want true, true", attached, ok)
+	}
+}
+
+// TestStateCache_ProcessAliveMatchesWrappedGCExecutable reproduces #7551: a
+// live control-dispatcher started via `exec "$GC_BIN" convoy control ...`
+// must satisfy the core pack's process_names = ["gc"] even when GC_BIN
+// (os.Executable) is not named gc, as under Nix wrapProgram. The running
+// test binary plays the supervisor's gc binary, just as GC_BIN does in
+// production.
+func TestStateCache_ProcessAliveMatchesWrappedGCExecutable(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable() = %v, want the running test binary's path", err)
+	}
+	self := filepath.Base(exe)
+	if self == "gc" {
+		t.Fatalf("running executable is named %q; the alias under test is a no-op here", self)
+	}
+	const session = "core__control-dispatcher-gc-wisp-9ragnq7"
+	f := &mockFetcher{
+		state: runtimeStateSnapshot{
+			Sessions: map[string]sessionRuntimeState{
+				session: {
+					Running: true,
+					Panes: []paneRuntimeState{{
+						Command: self,
+						PID:     "201",
+					}},
+				},
+			},
+			Processes: newProcessSnapshot([]processRuntimeState{{
+				PID:     "201",
+				PPID:    "1",
+				Command: self,
+				Args:    exe + " convoy control --serve --follow ntrecv/core.control-dispatcher",
+			}}),
+			ProcessesAvailable: true,
+		},
+	}
+	cache := NewStateCache(f, 2*time.Second)
+
+	if !cache.ProcessAlive(session, []string{"gc"}) {
+		t.Fatalf("ProcessAlive(dispatcher running %q, [gc]) = false, want true: a live gc dispatcher under a renamed/wrapped executable is reported runtime-missing", self)
+	}
+	if !processMatchesNamesForTest(self, exe+" convoy control --serve --follow ntrecv/core.control-dispatcher", []string{"gc"}) {
+		t.Error("uncached matcher missed the running executable's name")
 	}
 }
