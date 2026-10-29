@@ -2517,7 +2517,20 @@ func closeCompletedConvoyAcross(store, childStore beads.Store, convoy beads.Bead
 	if !convoyStillAutocloses(convoy) {
 		return false, nil
 	}
-	children, err := listConvoyChildren(store, convoy.ID, true)
+	across := childStore != nil && !sameBeadStore(childStore, store)
+	var children []beads.Bead
+	var err error
+	if across {
+		// The convoy's own leg of a two-store child union: a legacy child
+		// that lives in childStore is counted below.
+		err = beads.FederatedRead(func() error {
+			var listErr error
+			children, listErr = listConvoyChildren(store, convoy.ID, true)
+			return listErr
+		})
+	} else {
+		children, err = listConvoyChildren(store, convoy.ID, true)
+	}
 	if err != nil {
 		return false, fmt.Errorf("children of %s: %w", convoy.ID, err)
 	}
@@ -2528,8 +2541,15 @@ func closeCompletedConvoyAcross(store, childStore beads.Store, convoy beads.Bead
 	}
 	// The second store is read only once every child here is terminal: on
 	// the common path (an open sibling) it costs nothing.
-	if childStore != nil && !sameBeadStore(childStore, store) {
-		elsewhere, err := childStore.List(beads.ListQuery{ParentID: convoy.ID, IncludeClosed: true, Sort: beads.SortCreatedAsc})
+	if across {
+		var elsewhere []beads.Bead
+		// The second leg of the union: children that live in the convoy's
+		// own store were counted above.
+		err := beads.FederatedRead(func() error {
+			var listErr error
+			elsewhere, listErr = childStore.List(beads.ListQuery{ParentID: convoy.ID, IncludeClosed: true, Sort: beads.SortCreatedAsc})
+			return listErr
+		})
 		if err != nil {
 			return false, fmt.Errorf("children of %s: %w", convoy.ID, err)
 		}

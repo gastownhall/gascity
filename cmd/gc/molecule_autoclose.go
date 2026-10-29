@@ -185,14 +185,16 @@ func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Reco
 // answer (a store that failed to answer is not proof the bead is elsewhere).
 // When first and second are the same store it is read once.
 func autocloseLocate(id string, first, second beads.Store) (beads.Bead, beads.Store, error) {
-	b, err := first.Get(id)
+	// A two-store residence probe: a miss on the first store is covered by
+	// the second.
+	b, err := beads.FederatedGet(first, id)
 	if err == nil {
 		return b, first, nil
 	}
 	if !errors.Is(err, beads.ErrNotFound) || second == nil || sameBeadStore(first, second) {
 		return beads.Bead{}, first, err
 	}
-	b, err = second.Get(id)
+	b, err = beads.FederatedGet(second, id)
 	if err != nil {
 		return beads.Bead{}, second, err
 	}
