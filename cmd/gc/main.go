@@ -1767,7 +1767,7 @@ func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverr
 var openStoreFactoryForCity = beads.OpenStoreAtForCity
 
 func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityScoped(storePath, cityPath, cfg, modeOverride, haveMode, authoritative, longLived, false, nativeOverride)
+	return openWorkStoreResultAtForCityScoped(storePath, cityPath, cfg, modeOverride, haveMode, authoritative, longLived, false, nativeOverride)
 }
 
 // openOneShotStoreAtForCityWithConfig is openStoreAtForCityWithConfig for a
@@ -1785,11 +1785,25 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 // Nothing enforces that cfg is fresh; the one-shot entry points
 // (openCityStoreAtWithConfig, oneShotRigStoreOpener) are the only callers.
 func openOneShotStoreAtForCityWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
-	result, err := openStoreResultAtForCityScoped(storePath, cityPath, cfg, gate.ModeUnset, false, false, false, true, nil)
+	result, err := openWorkStoreResultAtForCityScoped(storePath, cityPath, cfg, gate.ModeUnset, false, false, false, true, nil)
 	if err != nil {
 		return nil, err
 	}
 	return result.Store, nil
+}
+
+// openWorkStoreResultAtForCityScoped opens a scope store through the shared
+// open body. A one-shot scope store is a WORK store (the city or a rig
+// ledger); under the split-strict test gate it is handed out as the gate's
+// work view (split_strict_seam.go), and unchanged otherwise. A long-lived open
+// is the controller's: it wraps the store in its cache and hands out views at
+// its own accessors, so it gets the raw store here.
+func openWorkStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived, oneShotConfig bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
+	result, err := openStoreResultAtForCityScoped(storePath, cityPath, cfg, modeOverride, haveMode, authoritative, longLived, oneShotConfig, nativeOverride)
+	if err == nil && !longLived {
+		result.Store = splitStrictWorkView(result.Store)
+	}
+	return result, err
 }
 
 // openStoreResultAtForCityScoped is the shared open body. oneShotConfig

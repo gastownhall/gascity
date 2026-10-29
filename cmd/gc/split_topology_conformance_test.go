@@ -1141,6 +1141,20 @@ func assertClassRoutedClaimIsReleasable(t *testing.T, e splitEnv) {
 			// A configured "worker" lane the released step routes to.
 			legs := workLegsFromCensus(e.cityPath, servingRigsCity(e.cfg, "worker"), cityWorkLeg{store: e.work}, e.rigStores)
 			unclaimWorkAssignedToRetiredSessionBead(legs, tt.leading, sessionBead, "", io.Discard)
+			if tt.leading == e.work {
+				// This row hands the session bead's store in as the WORK store,
+				// a shape no production caller has any more (gc session close
+				// passes its sessions-class store), so clearing the claim
+				// back-channel reads the session id through the work leaf. The
+				// strict leaf records that; the release below is what this row
+				// asserts, so the read is claimed here.
+				workLeaf, _, _ := unwrapBeadPolicyStore(e.work)
+				for _, v := range splittest.TakeSplitViolations(workLeaf) {
+					if v.ID != sessionBead.ID {
+						t.Errorf("unexpected split violation on the work leaf: %s", v)
+					}
+				}
+			}
 			released, err := e.class.Get(step.ID)
 			if err != nil {
 				t.Fatalf("reading the claimed graph step back from the binding: %v", err)

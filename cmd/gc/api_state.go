@@ -910,7 +910,9 @@ func (cs *controllerState) completionReconcileInputs(plane storePlane) (events.P
 	cs.mu.RLock()
 	stores := []beads.Store{
 		resolveGraphStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv),
-		cs.cityBeadStore,
+		// The city leg is a work leg (the split-strict gate's work view;
+		// identity in production).
+		splitStrictWorkView(cs.cityBeadStore),
 	}
 	// A suspended rig is not swept: it runs nothing, and a bd read restarts
 	// its retired proxy and Dolt.
@@ -927,7 +929,7 @@ func (cs *controllerState) completionReconcileInputs(plane storePlane) (events.P
 		if splitRigGraphRelicFree(cs.storageRoutes, name) {
 			continue
 		}
-		rigStores[name] = store
+		rigStores[name] = splitStrictWorkView(store)
 	}
 	cs.mu.RUnlock()
 
@@ -1102,6 +1104,9 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 		}
 	}
 	wake.OnBeadEvent(evt, snapshot)
+	// The reads after the cache application (autoclose) see the event's
+	// stores as the split-strict test gate's views (identity in production).
+	stores, relic = splitStrictEventStores(id, stores, relic)
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
 		if evt.Actor == cacheLocalActor {
 			owner := stores[0]
@@ -1245,7 +1250,13 @@ func liveCloseOwner(stores []beads.Store, id string, relic beads.Store) (beads.S
 	var openStore beads.Store
 	var open beads.Bead
 	for _, store := range stores {
-		b, err := beads.HandlesFor(store).Live.Get(id)
+		// A first-owner probe over the prefix route and the binding the
+		// residence probe proved holds the id: a relic's row lives in one.
+		var b beads.Bead
+		err := beads.FederatedRead(func() (err error) {
+			b, err = beads.HandlesFor(store).Live.Get(id)
+			return err
+		})
 		switch {
 		case errors.Is(err, beads.ErrNotFound):
 		case err != nil || b.Status == "closed":
@@ -2157,7 +2168,7 @@ func (cs *controllerState) SessionProvider() runtime.Provider {
 func (cs *controllerState) BeadStore(rig string) beads.Store {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return cs.beadStores[rig]
+	return splitStrictWorkView(cs.beadStores[rig])
 }
 
 // BeadStores returns all rig names and their stores, including the HQ city store.
@@ -2174,7 +2185,7 @@ func (cs *controllerState) BeadStores() map[string]beads.Store {
 	for k, v := range cs.beadStores {
 		m[k] = v
 	}
-	return m
+	return splitStrictWorkViews(m)
 }
 
 // MailProvider returns the city-level mail provider.
@@ -2324,7 +2335,7 @@ func (cs *controllerState) RawConfig() *config.City {
 func (cs *controllerState) CityBeadStore() beads.Store {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return cs.cityBeadStore
+	return splitStrictWorkView(cs.cityBeadStore)
 }
 
 // ScopedStoreLike implements api.State. See the interface doc comment for

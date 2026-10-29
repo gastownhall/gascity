@@ -1,5 +1,6 @@
 load("@bazel_lib//lib:copy_to_bin.bzl", "copy_to_bin")
 load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
 
 go_library(
     name = "api",
@@ -287,6 +288,7 @@ go_test(
         "bead_close_reason_test.go",
         "bead_reopen_lease_test.go",
         "beads_ready_cross_store_test.go",
+        "blocked_request_wait_test.go",
         "blocking_test.go",
         "blocking_validation_test.go",
         "branch_resolver_test.go",
@@ -517,6 +519,7 @@ go_test(
         "session_transcript_acp_test.go",
         "session_transport_test.go",
         "session_turn_test.go",
+        "split_strict_gate_test.go",
         "sse_cancel_test.go",
         "state_class_accessors_test.go",
         "status_graph_ready_test.go",
@@ -631,6 +634,28 @@ go_test(
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
     ],
+)
+
+# The split-strict projection gate (internal/beads/splittest/projection.go):
+# api_test with GC_TEST_SPLIT_STRICT=1, so every fakeState work accessor hands
+# out a view of the city store that hides infrastructure rows and every class
+# accessor one that hides work rows. Non-blocking for now: manual, so //...
+# skips it, and bazel.yml's evidence-only split-strict lane runs it. TestMain
+# fails the run on a violation site testdata/split_strict_baseline.tsv does not
+# list (the ratchet), and on a failing test testdata/split_strict_known_failures.list
+# does not list; it reports the two apart. It becomes required before new
+# cities default to split.
+go_variant_test(
+    name = "api_split_strict_test",
+    size = "large",
+    # -test.v: the gate reads the test binary's own RUN/PAUSE/CONT/PASS/FAIL
+    # lines to time each test (the per-test hang watchdog) and to tell new
+    # failing tests from the known ones.
+    args = ["-test.v"],
+    env = {"GC_TEST_SPLIT_STRICT": "1"},
+    shard_count = 6,
+    tags = ["manual"],
+    test = ":api_test",
 )
 
 exports_files([

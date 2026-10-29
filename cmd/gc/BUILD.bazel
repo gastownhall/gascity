@@ -652,6 +652,7 @@ go_library(
         "sling_dashboard_link.go",
         "sling_remote.go",
         "soft_reload.go",
+        "split_strict_seam.go",
         "stage1_plan.go",
         "start_output.go",
         "startup_kickoff.go",
@@ -2124,6 +2125,7 @@ go_test(
         "split_store_cascade_test.go",
         "split_store_closeread_test.go",
         "split_store_work_legs_test.go",
+        "split_strict_gate_test.go",
         "split_topology_conformance_test.go",
         "split_topology_env_test.go",
         "sql_open_guard_test.go",
@@ -2506,6 +2508,28 @@ go_test(
         ],
         "//conditions:default": [],
     }),
+)
+
+# The split-strict projection gate (internal/beads/splittest/projection.go):
+# gc_test with GC_TEST_SPLIT_STRICT=1, which installs splitStrictSeam
+# (split_strict_seam.go), so a city that relocates nothing looks split to the
+# code under test. Non-blocking for now: manual, so //... skips it, and
+# bazel.yml's evidence-only split-strict lane runs it. TestMain fails the run
+# on a violation site testdata/split_strict_baseline.tsv does not list (the
+# ratchet), and on a failing test testdata/split_strict_known_failures.list does
+# not list; it reports the two apart. It becomes required before new cities
+# default to split.
+go_variant_test(
+    name = "gc_split_strict_test",
+    size = "large",
+    # -test.v: the gate reads the test binary's own RUN/PAUSE/CONT/PASS/FAIL
+    # lines to time each test (the per-test hang watchdog) and to tell new
+    # failing tests from the known ones.
+    args = ["-test.v"],
+    env = {"GC_TEST_SPLIT_STRICT": "1"},
+    shard_count = 24,
+    tags = ["manual"],
+    test = ":gc_test",
 )
 
 # The tagged product-metrics contracts (`make test-productmetrics-testhook`):

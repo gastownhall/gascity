@@ -168,7 +168,13 @@ func newSplitEnvWith(t *testing.T, split bool, opts splitEnvOptions) splitEnv {
 			BDCompatibility: config.BeadsBDCompatibility105,
 		},
 	}
-	work := wrapStoreWithBeadPolicies(splittest.NewWorkStore(t, config.EffectiveHQPrefix(cfg)), cfg)
+	// The single-store topology is a city that relocates nothing: its work
+	// ledger holds every class, so its leaf polices none.
+	workLeaf := splittest.NewSingleStore(t, config.EffectiveHQPrefix(cfg))
+	if split {
+		workLeaf = splittest.NewWorkStore(t, config.EffectiveHQPrefix(cfg))
+	}
+	work := wrapStoreWithBeadPolicies(workLeaf, cfg)
 	e := splitEnv{cityPath: cityPath, cfg: cfg, work: work, store: work, split: split}
 	if split {
 		// Config and routes state the same relocation. The config half is what
@@ -360,7 +366,10 @@ func (e *splitEnv) attachRigLeg(t *testing.T, rigPath string) {
 	}}
 	e.cfg.Rigs = []config.Rig{{Name: splitEnvRigName, Path: rigPath}}
 	e.cfg.Providers = map[string]config.ProviderSpec{"mock": {Command: "true"}}
-	rigLeaf := splittest.NewWorkStore(t, e.cfg.Rigs[0].EffectivePrefix())
+	rigLeaf := splittest.NewSingleStore(t, e.cfg.Rigs[0].EffectivePrefix())
+	if e.split {
+		rigLeaf = splittest.NewWorkStore(t, e.cfg.Rigs[0].EffectivePrefix())
+	}
 	e.rig = wrapStoreWithBeadPolicies(rigLeaf, e.cfg)
 	e.rigStores = map[string]beads.Store{splitEnvRigName: e.rig}
 	e.rigName = splitEnvRigName

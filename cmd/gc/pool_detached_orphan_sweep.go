@@ -279,7 +279,14 @@ func (idx detachedOrphanRouteIndex) backfill(other detachedOrphanRouteIndex) {
 // per-ID entry still resolves such an orphan exactly.
 func buildDetachedOrphanRouteIndex(store beads.Store) (detachedOrphanRouteIndex, error) {
 	idx := detachedOrphanRouteIndex{byID: map[string]string{}, byName: map[string]string{}}
-	all, listErr := session.ListAllSessionBeads(store, beads.ListQuery{IncludeClosed: true})
+	// Relic leg (S4 debt) when store is a work leg rather than the sessions
+	// store: a scope store holds session beads only as pre-split rows.
+	var all []beads.Bead
+	listErr := beads.RelicRead(func() error {
+		var err error
+		all, err = session.ListAllSessionBeads(store, beads.ListQuery{IncludeClosed: true})
+		return err
+	})
 	// Hard errors return nil rows; surface them to the caller.
 	partial := beads.IsPartialResult(listErr)
 	if listErr != nil && !partial {

@@ -447,7 +447,11 @@ func workflowEventBeadFromSubject(state State, subjectID string) (beads.Bead, bo
 		if info.store == nil {
 			continue
 		}
-		bead, err := info.store.Get(subjectID)
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// A residence probe over every workflowStores leg; only the owner hits.
+		bead, err := beads.RelicGet(info.store, subjectID)
 		if err == nil {
 			matches = append(matches, bead)
 		}
@@ -492,7 +496,17 @@ func workflowEventRoot(state State, bead beads.Bead) (workflowStoreInfo, beads.B
 		if info.store == nil || workflowRigLegRetired(state, info) {
 			continue
 		}
-		root, ok := workflowRootInStore(info.store, rootID)
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// A residence probe over every workflowStores leg; only the owner
+		// hits. (The root_store_ref hint above names one store and is not.)
+		var root beads.Bead
+		var ok bool
+		_ = beads.RelicRead(func() error {
+			root, ok = workflowRootInStore(info.store, rootID)
+			return nil
+		})
 		if ok {
 			matches = append(matches, workflowRootMatch{info: info, root: root})
 		}

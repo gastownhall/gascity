@@ -289,7 +289,14 @@ func (idx executorRouteIdentityIndex) backfill(other executorRouteIdentityIndex)
 // legitimate identity and this check's Fix() deletes state.
 func buildExecutorRouteIdentityIndex(store beads.Store) (executorRouteIdentityIndex, error) {
 	idx := make(executorRouteIdentityIndex)
-	all, listErr := sessionFrontDoor(store).ListAll(session.ListAllOptions{IncludeClosed: true})
+	// Relic leg (S4 debt) for a scope store unioned beside the sessions
+	// store: it holds session beads only as pre-split rows.
+	var all []session.Info
+	listErr := beads.RelicRead(func() error {
+		var err error
+		all, err = sessionFrontDoor(store).ListAll(session.ListAllOptions{IncludeClosed: true})
+		return err
+	})
 	if listErr != nil && !beads.IsPartialResult(listErr) {
 		return nil, fmt.Errorf("listing session beads: %w", listErr)
 	}

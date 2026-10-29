@@ -1,5 +1,7 @@
 package api
 
+import "github.com/gastownhall/gascity/internal/beads"
+
 // isGraphConvoyID checks if the bead is a formula-compiled graph convoy
 // (workflow) by looking for the gc.kind=workflow marker. It consults the
 // dedicated graph store first (graph-first) so a relocated graph convoy id is
@@ -7,7 +9,9 @@ package api
 // default city the graph store equals the work store, so this leg is byte-identical.
 func isGraphConvoyID(s *Server, id string) bool {
 	if graphStore := s.state.GraphBeadStore().Store; graphStore != nil && graphStore != s.state.CityBeadStore() {
-		if b, err := graphStore.Get(id); err == nil {
+		// Graph-first leg: a plain (work) convoy id misses here and the rig
+		// legs below answer it.
+		if b, err := beads.FederatedGet(graphStore, id); err == nil {
 			return isGraphConvoyBead(b)
 		}
 	}
