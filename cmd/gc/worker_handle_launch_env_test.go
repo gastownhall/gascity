@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/execenv"
@@ -409,5 +411,123 @@ L_PROV_AGENT = "provider"
 	}
 	if value, ok := env["GC_CONTROLLER_TOKEN"]; !ok || value != "" {
 		t.Errorf("start env[GC_CONTROLLER_TOKEN] = %q (present %v), want present and empty", value, ok)
+	}
+}
+
+func (c *resumeLaunchEnvCity) startCalls() int {
+	n := 0
+	for _, call := range c.sp.Calls {
+		if call.Method == "Start" {
+			n++
+		}
+	}
+	return n
+}
+
+// AC-7: a launch env that cannot be built fails the resume before anything
+// starts or mints, while the handle and its non-start reads keep working.
+func TestResumeLaunchEnvFailureRefusesStartOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		city   string
+		setup  func(t *testing.T, c *resumeLaunchEnvCity)
+		target func(c *resumeLaunchEnvCity) (template, agentName string)
+		cause  func(t *testing.T, err error)
+	}{
+		{
+			name: "unregistered beads backend",
+			city: `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "helper"
+provider = "stub"
+
+[providers.stub]
+command = "/bin/echo"
+`,
+			setup: func(t *testing.T, c *resumeLaunchEnvCity) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Join(c.cityDir, ".beads"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("GC_BEADS", "")
+				config := "issue_prefix: demo\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"
+				if err := os.WriteFile(filepath.Join(c.cityDir, ".beads", "config.yaml"), []byte(config), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(c.cityDir, ".beads", "metadata.json"), []byte(`{"database":"beads","backend":"mysql"}`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			cause: func(t *testing.T, err error) {
+				t.Helper()
+				if !errors.Is(err, contract.ErrUnknownBackend) {
+					t.Errorf("resume error = %v, want it to wrap ErrUnknownBackend", err)
+				}
+			},
+		},
+		{
+			name: "undeclared upstream",
+			city: `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "helper"
+provider = "stub"
+
+[providers.stub]
+command = "/bin/echo"
+`,
+			setup: func(t *testing.T, c *resumeLaunchEnvCity) {
+				t.Helper()
+				c.cfg.Agents[0].Upstream = "undeclared"
+			},
+			cause: func(t *testing.T, err error) {
+				t.Helper()
+				if !strings.Contains(err.Error(), `upstream "undeclared"`) {
+					t.Errorf("resume error = %v, want it to name the undeclared upstream", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newResumeLaunchEnvCity(t, tc.city)
+			info := c.stoppedSession(t, "helper", "helper", "", t.TempDir())
+			tc.setup(t, c)
+			before, err := c.store.Get(info.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			handle := c.handle(t, info.ID)
+			if _, err := handle.State(context.Background()); err != nil {
+				t.Fatalf("State on a session whose launch env cannot be built: %v", err)
+			}
+			c.sp.Calls = nil
+			_, err = handle.Message(context.Background(), testActorIn(t, session.ActorOperator, c.cityDir), worker.MessageRequest{Text: "hello"})
+			if err == nil {
+				t.Fatal("Message resumed a session whose launch env cannot be built")
+			}
+			if !strings.Contains(err.Error(), info.ID) {
+				t.Errorf("resume error = %v, want it to name session %s", err, info.ID)
+			}
+			tc.cause(t, err)
+			if n := c.startCalls(); n != 0 {
+				t.Errorf("Provider.Start called %d times, want none", n)
+			}
+			after, err := c.store.Get(info.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{"generation", "instance_token"} {
+				if after.Metadata[key] != before.Metadata[key] {
+					t.Errorf("row %s = %q, want the unchanged %q", key, after.Metadata[key], before.Metadata[key])
+				}
+			}
+		})
 	}
 }

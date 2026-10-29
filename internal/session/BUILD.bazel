@@ -148,6 +148,7 @@ go_test(
         "input_fence_test.go",
         "kill_fence_test.go",
         "kill_fenced_test.go",
+        "launch_env_resolver_test.go",
         "lifecycle_actor_test.go",
         "lifecycle_exits_test.go",
         "lifecycle_holder_token_test.go",
