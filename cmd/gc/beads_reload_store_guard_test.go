@@ -463,7 +463,7 @@ func TestCityRuntimeSameRevisionReloadDoesNotAdoptCityStoreChange(t *testing.T) 
 				Stdout: &stdout,
 				Stderr: &stderr,
 			})
-			cs, _ := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+			cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 			cr.setControllerState(cs)
 			cr.sessionDrains = newDrainTracker()
 			before := cs.CityBeadStore()
@@ -522,7 +522,7 @@ func TestCityRuntimeReloadKeepsOldConfigWhenCityMetadataLost(t *testing.T) {
 	if !cr.bootCityStore.Recorded || cr.bootCityStore.Database != "gci" {
 		t.Fatalf("runtime recorded city store %+v, want the booted gci binding", cr.bootCityStore)
 	}
-	cs, _ := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 	cr.sessionDrains = newDrainTracker()

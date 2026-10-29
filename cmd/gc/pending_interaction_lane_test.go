@@ -244,7 +244,7 @@ func startRuntimeWithBlockingRebuild(t *testing.T) (*CityRuntime, *controllerSta
 	if err != nil {
 		t.Fatalf("building the city runtime: %v", err)
 	}
-	cs, _ := newControllerState(context.Background(), cfg, sp, log, "test-city", cityPath)
+	cs := newControllerState(context.Background(), cfg, sp, log, "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 

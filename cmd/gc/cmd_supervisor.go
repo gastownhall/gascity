@@ -2466,9 +2466,8 @@ func startOneCity(
 	// Wire API state.
 	var cs *controllerState
 	if err := runPostPrepareStep("opening_controller_state", func() error {
-		var stateErr error
-		cs, stateErr = newControllerStateWithRoutes(cityCtx, cityRuntime.storageRoutes, cfg, sp, eventProv, cityName, path)
-		return stateErr
+		cs = newControllerStateWithRoutes(cityCtx, cityRuntime.storageRoutes, cfg, sp, eventProv, cityName, path)
+		return nil
 	}); err != nil {
 		// The runtime is already built, and it holds this city's storage
 		// binding, its trace file and its workspace services. Abandoning it

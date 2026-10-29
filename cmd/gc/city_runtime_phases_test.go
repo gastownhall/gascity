@@ -336,7 +336,7 @@ func newPhaseFixtureRuntime(t *testing.T, withReload, withLane bool) (*CityRunti
 	// graceful stop budget on it.
 	t.Cleanup(func() { _ = sp.Stop("worker") })
 	cr.od = nil
-	cs, _ := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = store
 	cr.setControllerState(cs)
 	cr.sessionDrains = newDrainTracker()

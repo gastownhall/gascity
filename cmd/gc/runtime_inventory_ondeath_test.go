@@ -1288,7 +1288,7 @@ func TestCityRuntimePublishesPoolDeathHandlersAtStartAndReload(t *testing.T) {
 		Stdout:            io.Discard,
 		Stderr:            io.Discard,
 	})
-	cs, _ := newControllerState(context.Background(), initialCfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerState(context.Background(), initialCfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 	if _, ok := cr.publishedPoolDeathHandlers()["seed-1"]; !ok {

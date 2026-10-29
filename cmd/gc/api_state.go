@@ -226,7 +226,8 @@ type controllerState struct {
 	rolloutDriftSig string
 	// rolloutLogf, when non-nil, receives noteRolloutDrift's transition lines
 	// (tests capture it); nil falls back to os.Stderr via rolloutWarnf.
-	rolloutLogf func(format string, args ...any)
+	rolloutLogf     func(format string, args ...any)
+	armingReadiness map[string]error
 }
 
 var controllerStateInitRigDirIfReady = initDirIfReady
@@ -270,7 +271,7 @@ func newControllerState(
 	sp runtime.Provider,
 	ep events.Provider,
 	cityName, cityPath string,
-) (*controllerState, error) {
+) *controllerState {
 	return newControllerStateWithRoutes(ctx, nil, cfg, sp, ep, cityName, cityPath)
 }
 
@@ -292,7 +293,7 @@ func newControllerStateWithRoutes(
 	sp runtime.Provider,
 	ep events.Provider,
 	cityName, cityPath string,
-) (*controllerState, error) {
+) *controllerState {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -379,11 +380,9 @@ func newControllerStateWithRoutes(
 		cs.extmsgSvc = newCityExtMsgServices(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
 	}
 	cs.preflightConditionalWrites()
+	cs.recordArmingReadiness()
 	cs.storeMetadataSignature = storeMetadataSignature(cityPath, cfg)
-	if err := cs.assertConditionalWritesBootReady(); err != nil {
-		return cs, err
-	}
-	return cs, nil
+	return cs
 }
 
 // wrapWithCachingStore wraps store in an in-memory read cache. When

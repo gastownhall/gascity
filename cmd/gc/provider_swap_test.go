@@ -218,7 +218,7 @@ func newSwapReloadFixture(t *testing.T, tomlPath string, oldSP runtime.Provider,
 		Stderr: io.Discard,
 	})
 	f.store = &swapListStore{MemStore: beads.NewMemStore()}
-	cs, _ := newControllerState(context.Background(), cfg, oldSP, events.NewFake(), "test-city", cityPath)
+	cs := newControllerState(context.Background(), cfg, oldSP, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = f.store
 	f.cr.setControllerState(cs)
 	f.cr.sessionDrains = newDrainTracker()

@@ -1574,11 +1574,7 @@ func runController(
 	// session-bead sync and rig-scoped wake decisions. This also puts the
 	// binding's CachingStore into the routes, so it runs before the routes are
 	// published below.
-	cs, err := newControllerStateWithRoutes(ctx, cr.storageRoutes, cfg, sp, eventProv, cityName, cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
+	cs := newControllerStateWithRoutes(ctx, cr.storageRoutes, cfg, sp, eventProv, cityName, cityPath)
 
 	// This process is the city's controller — the lock above says so — so its
 	// opened binding is the residency answer the assigned-work spine reads.

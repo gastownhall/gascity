@@ -76,7 +76,7 @@ func TestReloadProviderSwapKeepsAutoComposition(t *testing.T) {
 		Stdout: io.Discard,
 		Stderr: io.Discard,
 	})
-	cs, _ := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 	cr.sessionDrains = newDrainTracker()
@@ -160,7 +160,7 @@ func TestReloadRebuildsProviderWhenACPCompositionChanges(t *testing.T) {
 				Stdout: io.Discard,
 				Stderr: io.Discard,
 			})
-			cs, _ := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+			cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 			cs.cityBeadStore = beads.NewMemStore()
 			cr.setControllerState(cs)
 			cr.sessionDrains = newDrainTracker()

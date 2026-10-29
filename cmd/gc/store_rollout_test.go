@@ -205,7 +205,7 @@ func TestOpenRigStoreThreadsConditionalWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cs, _ := newControllerState(context.Background(), cfg, nil, nil, "t", cityDir)
+	cs := newControllerState(context.Background(), cfg, nil, nil, "t", cityDir)
 
 	rigPath := filepath.Join(cityDir, "rigs", "r1")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {

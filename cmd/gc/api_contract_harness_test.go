@@ -175,7 +175,7 @@ func newContractHarness(t *testing.T) *contractHarness {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cs, _ := newControllerStateWithRoutes(ctx, cr.storageRoutes, cfg, sp, rec, contractCityName, cityPath)
+	cs := newControllerStateWithRoutes(ctx, cr.storageRoutes, cfg, sp, rec, contractCityName, cityPath)
 	cs.ct = cr.crashTrack()
 	wireControllerWakeSignals(cs, wiring.wake)
 	cs.configDirty = wiring.configDirty

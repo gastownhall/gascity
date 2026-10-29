@@ -51,7 +51,7 @@ func TestCityRuntimeRunReturnsWhenStartupGivesUpWithOrdersLaneRunning(t *testing
 		t.Fatalf("building the city runtime: %v", runtimeErr)
 	}
 	cr.od = &recordingOrderDispatcher{}
-	cs, _ := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 
@@ -105,7 +105,7 @@ func TestOrdersLaneDispatchesDuringColdStartReconcile(t *testing.T) {
 	}
 	od := &recordingOrderDispatcher{}
 	cr.od = od
-	cs, _ := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 

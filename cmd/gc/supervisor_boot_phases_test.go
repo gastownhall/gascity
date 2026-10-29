@@ -57,9 +57,6 @@ name = "phase-city"
 [orders]
 skip = ["beads-health", "cross-rig-deps", "gate-sweep", "jsonl-export", "reaper", "order-tracking-sweep", "orphan-sweep", "prune-branches", "spawn-storm-detect", "wisp-compact"]
 
-[beads]
-conditional_writes = "require"
-
 [session]
 provider = "fake"
 
@@ -70,7 +67,8 @@ shutdown_timeout = "100ms"
 		t.Fatal(err)
 	}
 
-	t.Setenv("GC_BEADS", "file")
+	script := writeSpyScript(t, filepath.Join(t.TempDir(), "ops.log"))
+	t.Setenv("GC_BEADS", "exec:"+script)
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
 	clock := &fakeBootStepClock{step: 2 * time.Second, base: time.Now()}

@@ -60,7 +60,7 @@ func newPublicationTestRuntime(t *testing.T, cityPath string, sp runtime.Provide
 		Stdout: stdout,
 		Stderr: stderr,
 	})
-	cs, _ := newControllerState(context.Background(), initialCfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerState(context.Background(), initialCfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 	return cr, cs, initialCfg
@@ -103,7 +103,7 @@ func TestCityRuntimePublishAcceptedConfigUpdatesBothSnapshots(t *testing.T) {
 	writeCityRuntimeConfig(t, filepath.Join(cityPath, "city.toml"), "fake")
 	currentCfg, revision := loadCityRuntimeControllerConfig(t, cityPath)
 	currentProvider := runtime.NewFake()
-	cs, _ := newControllerState(context.Background(), currentCfg, currentProvider, events.NewFake(), "test-city", cityPath)
+	cs := newControllerState(context.Background(), currentCfg, currentProvider, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr := &CityRuntime{cfg: currentCfg, sp: currentProvider, dops: newDrainOps(currentProvider), cs: cs}
 

@@ -2155,8 +2155,9 @@ shutdown_timeout = "100ms"
 		t.Fatal(err)
 	}
 
-	t.Setenv("GC_BEADS", "file")
-	t.Setenv("GC_BEADS_CONDITIONAL_WRITES", "require")
+	logFile := filepath.Join(t.TempDir(), "ops.log")
+	script := writeSpyScript(t, logFile)
+	t.Setenv("GC_BEADS", "exec:"+script)
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())

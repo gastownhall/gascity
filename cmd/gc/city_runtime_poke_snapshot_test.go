@@ -336,7 +336,7 @@ func TestRunLoopPatrolOverDebouncingPokeSeesOutOfProcessCreate(t *testing.T) {
 		Stderr:    io.Discard,
 	})
 	cr.od = &recordingOrderDispatcher{}
-	cs, _ := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = primeTestCache(t, backing)
 	cr.setControllerState(cs)
 	ctx, cancel := context.WithCancel(context.Background())

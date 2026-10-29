@@ -58,8 +58,7 @@ func newCachedSplitControllerState(ctx context.Context, t *testing.T, routes *st
 	t.Cleanup(func() { beadCloseAutocloseDispatch = prevDispatch })
 	ep := events.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	cs, _ := newControllerStateWithRoutes(ctx, routes, cfg, nil, ep, "test-city", t.TempDir())
-	return cs, ep
+	return newControllerStateWithRoutes(ctx, routes, cfg, nil, ep, "test-city", t.TempDir()), ep
 }
 
 // bindingCacheOf returns the CachingStore the controller serves the sessions

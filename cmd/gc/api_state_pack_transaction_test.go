@@ -21,7 +21,7 @@ func newPackTransactionControllerState(t *testing.T) (*controllerState, string) 
 	cityPath := t.TempDir()
 	writeCityRuntimeConfig(t, filepath.Join(cityPath, "city.toml"), "fake")
 	cfg, _ := loadCityRuntimeControllerConfig(t, cityPath)
-	cs, _ := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityPath)
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cs.pokeCh = make(chan struct{}, 1)
 	return cs, cityPath
@@ -161,7 +161,7 @@ func TestCityRuntimeReloadDefersWhilePackConfigWriteInFlight(t *testing.T) {
 		Stdout: io.Discard,
 		Stderr: io.Discard,
 	})
-	cs, _ := newControllerState(context.Background(), initialCfg, provider, events.NewFake(), "test-city", cityPath)
+	cs := newControllerState(context.Background(), initialCfg, provider, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 	previousLifecycle := cityRuntimeStartBeadsLifecycle

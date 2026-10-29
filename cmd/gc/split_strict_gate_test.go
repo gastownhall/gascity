@@ -178,7 +178,7 @@ func TestSplitStrictControllerSharesOneProjection(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	cs, _ := newControllerState(ctx, cfg, runtime.NewFake(), events.NewFake(), "test-city", t.TempDir())
+	cs := newControllerState(ctx, cfg, runtime.NewFake(), events.NewFake(), "test-city", t.TempDir())
 	if cs.cityBeadStore == nil {
 		t.Fatal("no city store")
 	}

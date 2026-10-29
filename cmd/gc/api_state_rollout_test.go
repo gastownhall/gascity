@@ -41,7 +41,7 @@ func TestNewControllerStateLatchesRolloutFlags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cs, _ := newControllerState(context.Background(), cfg, nil, nil, "t", dir)
+	cs := newControllerState(context.Background(), cfg, nil, nil, "t", dir)
 	if got := cs.RolloutFlags().BeadsConditionalWrites(); got != rollout.Require {
 		t.Errorf("boot RolloutFlags beads = %q, want require", got)
 	}
@@ -64,7 +64,7 @@ func TestNewControllerStateLatchesNativeTransport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cs, _ := newControllerState(context.Background(), cfg, nil, nil, "t", dir)
+	cs := newControllerState(context.Background(), cfg, nil, nil, "t", dir)
 	if cs.nativeTransport != beads.NativeTransportOff {
 		t.Errorf("boot nativeTransport = %q, want off", cs.nativeTransport)
 	}
@@ -100,7 +100,7 @@ func TestControllerStateNativeTransportDoesNotFlipOnReload(t *testing.T) {
 	}
 	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
 
-	cs, _ := newControllerState(context.Background(), cityOf("off"), runtime.NewFake(), events.NewFake(), "c", t.TempDir())
+	cs := newControllerState(context.Background(), cityOf("off"), runtime.NewFake(), events.NewFake(), "c", t.TempDir())
 	if cs.nativeTransport != beads.NativeTransportOff {
 		t.Fatalf("boot latch = %q, want off", cs.nativeTransport)
 	}
@@ -131,7 +131,7 @@ func TestControllerStateBootResolveErrorZeroFlags(t *testing.T) {
 	// to cover the defensive boot behavior for a value arriving through a
 	// non-Parse path.
 	cfg := &config.City{Beads: config.BeadsConfig{ConditionalWrites: "requre"}}
-	cs, _ := newControllerState(context.Background(), cfg, nil, nil, "t", dir)
+	cs := newControllerState(context.Background(), cfg, nil, nil, "t", dir)
 	if got := cs.RolloutFlags().BeadsConditionalWrites(); got != rollout.ModeUnset {
 		t.Errorf("boot RolloutFlags after resolve error = %q, want ModeUnset (zero Flags)", got)
 	}
@@ -331,7 +331,7 @@ func TestControllerStateRolloutDriftThroughReloadSeams(t *testing.T) {
 		}
 	}
 
-	cs, _ := newControllerState(context.Background(), cityOf("require"), runtime.NewFake(), events.NewFake(), "c", t.TempDir())
+	cs := newControllerState(context.Background(), cityOf("require"), runtime.NewFake(), events.NewFake(), "c", t.TempDir())
 	if got := cs.RolloutFlags().BeadsConditionalWrites(); got != rollout.Require {
 		t.Fatalf("boot latch = %q, want require", got)
 	}

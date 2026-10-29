@@ -265,7 +265,7 @@ func newV2RunFixture(t *testing.T, daemon string, setup func(f *v2RunFixture)) *
 		Stdout:    io.Discard,
 		Stderr:    f.stderr,
 	}))
-	cs, _ := newControllerState(context.Background(), cfg, f.sp, events.NewFake(), "test-city", f.cityPath)
+	cs := newControllerState(context.Background(), cfg, f.sp, events.NewFake(), "test-city", f.cityPath)
 	cs.cityBeadStore = primeTestCache(t, f.store)
 	wireControllerWakeSignals(cs, f.cr.wakeOf())
 	cs.configDirty = f.cr.configDirty

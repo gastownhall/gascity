@@ -42,7 +42,7 @@ func readTierControllerState(t *testing.T) (*controllerState, beads.Store) {
 	stubControllerCityStore(t, work)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	cs, _ := newControllerStateWithRoutes(ctx, splitEnvRoutes(binding), cfg, runtime.NewFake(), nil, "tier-city", t.TempDir())
+	cs := newControllerStateWithRoutes(ctx, splitEnvRoutes(binding), cfg, runtime.NewFake(), nil, "tier-city", t.TempDir())
 	// Writes go through the controller's own handle (the CachingStore over the
 	// binding), as the controller's writes do, so the cache holds them.
 	return cs, cs.GraphBeadStore().Store
