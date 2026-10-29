@@ -2082,6 +2082,90 @@ func TestE1LazyMissingTreeMatchesEagerFlagOwnership(t *testing.T) {
 	}
 }
 
+// TestPackLeafScopeAfterLeafNeverSilentlyRetargets pins gc dolt status
+// --city <other-city> run from inside city A: the leaf's city is captured when
+// the tree is built, so a scope flag that only appears after the leaf must
+// either name that same city or be refused, never ignored while the command
+// runs against the ambient city.
+func TestPackLeafScopeAfterLeafNeverSilentlyRetargets(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_RIG", "")
+
+	cityA := setupPackExitCity(t)
+	cityB := setupPackExitCity(t)
+	writeE1ArgEchoCommand(t, cityA, "city-a-hello", "hello")
+	writeE1ArgEchoCommand(t, cityB, "city-b-hello", "hello")
+	targetRig := "target-rig"
+	targetRigDir := filepath.Join(t.TempDir(), targetRig)
+	if err := os.MkdirAll(targetRigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	registerRigBindingForResolution(t, os.Getenv("GC_HOME"), cityB, "city-b", targetRig, targetRigDir)
+
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(cityA); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+	t.Setenv("GC_CITY_PATH", cityA)
+
+	refused := []struct {
+		name string
+		args []string
+	}{
+		{name: "other city separate", args: []string{"backstage", "hello", "--city", cityB, "payload"}},
+		{name: "other city equals", args: []string{"backstage", "hello", "--city=" + cityB}},
+		{name: "other city after payload", args: []string{"backstage", "hello", "payload", "--city", cityB}},
+		{name: "rig of other city", args: []string{"backstage", "hello", "--rig=" + targetRig}},
+		{name: "empty city", args: []string{"backstage", "hello", "--city="}},
+		{name: "same city then other city", args: []string{"backstage", "hello", "--city", cityA, "--city", cityB}},
+	}
+	for _, test := range refused {
+		t.Run("refuses "+test.name, func(t *testing.T) {
+			results := make(map[string]packCommandProcessResult, 2)
+			for _, scenario := range []string{"eager", "lazy"} {
+				var stdout, stderr bytes.Buffer
+				results[scenario] = packCommandProcessResult{
+					exitCode: runPackCommandScenario(t, scenario, test.args, &stdout, &stderr),
+					stdout:   stdout.String(),
+					stderr:   stderr.String(),
+				}
+			}
+			eager, lazy := results["eager"], results["lazy"]
+			if lazy != eager {
+				t.Fatalf("lazy dispatch differs from eager\neager: %+v\nlazy:  %+v", eager, lazy)
+			}
+			if eager.exitCode == 0 || eager.stdout != "" {
+				t.Fatalf("dispatch = %+v, want non-zero exit and no pack output (pack must not run against the ambient city)", eager)
+			}
+			for _, want := range []string{"not supported after", "--city", "cd"} {
+				if !strings.Contains(eager.stderr, want) {
+					t.Fatalf("stderr = %q, want it to contain %q", eager.stderr, want)
+				}
+			}
+		})
+	}
+
+	t.Run("same city runs", func(t *testing.T) {
+		args := []string{"backstage", "hello", "--city", cityA, "payload"}
+		want := "city-a-hello args:<--city><" + cityA + "><payload>\n"
+		for _, scenario := range []string{"eager", "lazy"} {
+			var stdout, stderr bytes.Buffer
+			code := runPackCommandScenario(t, scenario, args, &stdout, &stderr)
+			if code != 0 || stdout.String() != want || stderr.String() != "" {
+				t.Fatalf("%s dispatch = exit %d stdout=%q stderr=%q, want exit 0 stdout=%q stderr empty", scenario, code, stdout.String(), stderr.String(), want)
+			}
+		}
+	})
+}
+
 func TestE1EagerLazyControlDifferentialMatrix(t *testing.T) {
 	t.Setenv("OTEL_SDK_DISABLED", "true")
 	cityA, cityB, _ := setupE1PreLeafHelpFixture(t)
