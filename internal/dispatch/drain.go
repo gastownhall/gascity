@@ -1645,9 +1645,14 @@ func stampDrainItemRecipe(recipe *formula.Recipe, control, unit, member beads.Be
 	if metadata := graphv2.RuntimeVarsMetadata(vars); metadata != "" {
 		root.Metadata[graphv2.RuntimeVarsMetadataKey] = metadata
 	}
-	workDir := strings.TrimSpace(member.Metadata[beadmeta.WorkDirMetadataKey])
+	// The bare work_dir key is the worktree creator's record and the only
+	// launch authority (resolveTaskBeadWorkDir, resolveDrainSourceWorkDir);
+	// gc.work_dir is an observability mirror. Read the creator's record first,
+	// so a member that carries a stale mirror does not stamp it into the item
+	// steps' launch keys.
+	workDir := strings.TrimSpace(member.Metadata[beadmeta.LegacyWorkDirMetadataKey])
 	if workDir == "" {
-		workDir = strings.TrimSpace(member.Metadata[beadmeta.LegacyWorkDirMetadataKey])
+		workDir = strings.TrimSpace(member.Metadata[beadmeta.WorkDirMetadataKey])
 	}
 	if workDir != "" {
 		for i := range recipe.Steps {

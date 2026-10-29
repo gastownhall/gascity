@@ -1255,6 +1255,59 @@ func TestProcessDrainPropagatesSourceMemberWorkDirToItemWorkflow(t *testing.T) {
 	}
 }
 
+// TestProcessDrainStampsLegacyWorkDirOverMirror pins the same precedence the
+// launch resolvers use (resolveTaskBeadWorkDir, resolveDrainSourceWorkDir): a
+// member's bare work_dir is the worktree CREATOR's record and the launch
+// authority, while gc.work_dir is an observability mirror. When a member
+// carries both and they disagree, the stamped item steps must carry the
+// creator's record, not the mirror.
+func TestProcessDrainStampsLegacyWorkDirOverMirror(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+	root := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
+	members, err := convoycore.Members(store, root.Metadata["gc.input_convoy_id"], false)
+	if err != nil {
+		t.Fatalf("convoycore.Members: %v", err)
+	}
+	creatorWorkDir := filepath.Join(t.TempDir(), "creator-worktree")
+	mirrorWorkDir := filepath.Join(t.TempDir(), "mirror-workdir")
+	if err := store.SetMetadata(members[0].ID, beadmeta.LegacyWorkDirMetadataKey, creatorWorkDir); err != nil {
+		t.Fatalf("SetMetadata(source legacy work dir): %v", err)
+	}
+	if err := store.SetMetadata(members[0].ID, beadmeta.WorkDirMetadataKey, mirrorWorkDir); err != nil {
+		t.Fatalf("SetMetadata(source work dir mirror): %v", err)
+	}
+
+	if _, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}}); err != nil {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+	var itemRootID string
+	for _, row := range manifest.Rows {
+		if row.MemberID == members[0].ID {
+			itemRootID = row.ItemRootID
+			break
+		}
+	}
+	if itemRootID == "" {
+		t.Fatalf("manifest rows = %+v, want item root for source member %s", manifest.Rows, members[0].ID)
+	}
+	itemRoot := mustGetBead(t, store, itemRootID)
+	for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+		if got := itemRoot.Metadata[key]; got != creatorWorkDir {
+			t.Fatalf("item root %s = %q, want creator work dir %q", key, got, creatorWorkDir)
+		}
+	}
+	workStep := mustFindDrainItemWorkStep(t, store, itemRootID)
+	for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+		if got := workStep.Metadata[key]; got != creatorWorkDir {
+			t.Fatalf("item work step %s = %q, want creator work dir %q", key, got, creatorWorkDir)
+		}
+	}
+}
+
 func TestProcessDrainAppliesItemFormulaDefaultsToRootMetadata(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()
