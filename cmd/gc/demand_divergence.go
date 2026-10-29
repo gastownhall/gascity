@@ -14,7 +14,9 @@ package main
 //     cannot be changed by it, and is byte-identical whether it runs or not.
 //   - It reads the trigger bead by id SOLELY to classify. That id is demand
 //     bookkeeping, never an assignment: nothing on the claim path may consult it
-//     to decide what to claim, and nothing here feeds back into that path.
+//     to decide what to claim, and nothing here feeds back into that path. The
+//     id comes off the seat's own session row (gc.trigger_bead_id), never its
+//     shell: no session env carries a trigger id (gastownhall/gascity#5738).
 //   - It is scoped to seats the controller spawned on demand evidence
 //     (GC_SPAWN_ORIGIN=demand, presence only). A named session or a manual hook
 //     draining empty is not evidence about anything.
@@ -58,7 +60,7 @@ func recordDemandClaimDivergence(reason, dir string, opts hookClaimOptions, ops 
 	if sessionID == "" {
 		return
 	}
-	triggerID := hookClaimEnvValue(opts.Env, "GC_TRIGGER_WORK_BEAD_ID")
+	triggerID := demandSessionTrigger(sessionID, ops)
 	status, classification := classifyDemandTrigger(triggerID, dir, opts, ops)
 	payload, err := json.Marshal(events.SessionDemandClaimDivergencePayload{
 		SessionID:            sessionID,
@@ -89,6 +91,20 @@ func recordDemandClaimDivergence(reason, dir string, opts hookClaimOptions, ops 
 		// seat could not see it.
 		fmt.Fprintf(stderr, "gc hook --claim: demand/claim divergence: %s is still claimable but this seat's query did not serve it\n", triggerID) //nolint:errcheck
 	}
+}
+
+// demandSessionTrigger is the trigger stamp on sessionID's row, or "" when
+// the row cannot be read. An unread stamp classifies as unknown, the same as
+// a row with no stamp, so a failed read never manufactures a verdict.
+func demandSessionTrigger(sessionID string, ops hookClaimOps) string {
+	if ops.ReadSessionTrigger == nil {
+		return ""
+	}
+	triggerID, err := ops.ReadSessionTrigger(sessionID)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(triggerID)
 }
 
 // classifyDemandTrigger reads the trigger row and reports (status, verdict).
@@ -182,9 +198,13 @@ func demandDivergenceOpsForBead(bead beads.Bead, err error) hookClaimOps {
 
 // demandDivergenceOpsForBlockedBead is demandDivergenceOpsForBead with the
 // live-dep blockedness settlement stubbed too, so a test can drive a confirmed
-// blocker or a failed dependency read.
+// blocker or a failed dependency read. The session row reads as stamped with
+// bead's id.
 func demandDivergenceOpsForBlockedBead(bead beads.Bead, readErr error, blocked bool, confirmErr error) hookClaimOps {
 	return hookClaimOps{
+		ReadSessionTrigger: func(string) (string, error) {
+			return bead.ID, nil
+		},
 		ReadWorkMeta: func(context.Context, string, []string, string, string) (beads.Bead, error) {
 			return bead, readErr
 		},

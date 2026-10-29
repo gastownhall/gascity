@@ -411,6 +411,25 @@ func sessionWorkStartedVia(front sessionFrontGetter, sessionID string) (string, 
 	return info.WorkStartedRaw, nil
 }
 
+// hookSessionTriggerBead is the production ReadSessionTrigger seam: the
+// session row's gc.trigger_bead_id stamp, read through the routed front door.
+func hookSessionTriggerBead(sessionID string) (string, error) {
+	return sessionTriggerBeadVia(sessionCurrentClaimFrontDoor, sessionID)
+}
+
+// sessionTriggerBeadVia is hookSessionTriggerBead through front.
+func sessionTriggerBeadVia(front sessionFrontGetter, sessionID string) (string, error) {
+	sessFront, err := front()
+	if err != nil {
+		return "", err
+	}
+	info, err := sessFront.Get(strings.TrimSpace(sessionID))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(info.TriggerBeadID), nil
+}
+
 // hookClaimStoreRefForDir is the production StoreRef seam: the work leg at
 // dir, as the work cells key a claim residing in it ("city" or
 // "rig:<name>"), or "" when the city or its config cannot be read or dir is

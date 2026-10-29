@@ -357,6 +357,10 @@ type hookClaimOps struct {
 	// ReadWorkStarted reads the session row's raw work_started cell: the
 	// drain-ack fence's input.
 	ReadWorkStarted hookReadWorkStartedFunc
+	// ReadSessionTrigger reads the session row's gc.trigger_bead_id stamp: the
+	// row the controller counted when it spawned the seat, read only by the
+	// demand/claim divergence diagnostics after the drain result is written.
+	ReadSessionTrigger hookReadSessionTriggerFunc
 	// StoreRef names the work leg at dir as the work cells key a claim that
 	// resides in it (claimStoreRef), or "" when it is not knowable. A claim
 	// the class route took resides in the binding instead: the cells' key for
@@ -407,6 +411,7 @@ type (
 	hookRecordWorkStartedFunc        func(sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error)
 	hookForgetWorkStartedFunc        func(sessionID string, key hookStartedKey) error
 	hookReadWorkStartedFunc          func(sessionID string) (string, error)
+	hookReadSessionTriggerFunc       func(sessionID string) (string, error)
 	// hookWorkflowStoreFunc (ctx, dir, env, beadID, actor) opens the store
 	// that holds beadID's workflow, writing as actor.
 	hookWorkflowStoreFunc func(ctx context.Context, dir string, env []string, beadID, actor string) beads.Store
@@ -710,6 +715,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.ReadWorkStarted == nil {
 		ops.ReadWorkStarted = hookSessionWorkStarted
+	}
+	if ops.ReadSessionTrigger == nil {
+		ops.ReadSessionTrigger = hookSessionTriggerBead
 	}
 	if ops.StoreRef == nil {
 		ops.StoreRef = hookClaimStoreRefForDir
