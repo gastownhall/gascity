@@ -659,6 +659,108 @@ func TestMolDoWorkCloseStepNeverReadsGCBeadID(t *testing.T) {
 	}
 }
 
+// molDoWorkDrainBlock returns the drain step's bash block.
+func molDoWorkDrainBlock(t *testing.T) string {
+	t.Helper()
+	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "drain")
+	const open = "```bash\n"
+	at := strings.Index(step, open)
+	if at < 0 {
+		t.Fatal("drain step has no bash block")
+	}
+	body := step[at+len(open):]
+	end := strings.Index(body, "```")
+	if end < 0 {
+		t.Fatal("drain bash block is unterminated")
+	}
+	return body[:end]
+}
+
+// TestMolDoWorkDrainNeverFallsBackToTriggerBeadID pins the #5738 shell side of
+// the drain block: a foreign GC_TRIGGER_BEAD_ID left in the env (a pre-upgrade
+// shell, or the retired export) names a bead from another run, so the drain
+// must resolve its root only from the current claim or a dispatch-provided
+// GC_BEAD_ID, and fail closed otherwise — never consult the trigger id.
+func TestMolDoWorkDrainNeverFallsBackToTriggerBeadID(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not installed")
+	}
+	block := molDoWorkDrainBlock(t)
+	scriptPath := filepath.Join(t.TempDir(), "drain.sh")
+	if err := os.WriteFile(scriptPath, []byte(block), 0o644); err != nil {
+		t.Fatalf("write drain block: %v", err)
+	}
+
+	// No current claim and no GC_BEAD_ID: fail closed with the
+	// missing-startup-bead message, touching no bead at all.
+	emptyHook := `case "$*" in
+"hook current --id-only") echo "gc hook current: session has no current claim" >&2; exit 1 ;;
+*) echo "unexpected gc command: $*" >&2; exit 64 ;;
+esac
+`
+	binDir, logPath := fakeGCBin(t, emptyHook)
+	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+		t.Fatalf("create gc log: %v", err)
+	}
+	out, runErr := runPackScript(t, scriptPath, binDir, closeStepEnvKeys, []string{"GC_TRIGGER_BEAD_ID=ga-foreign"})
+	logged := readGcLog(t, logPath)
+	if runErr == nil {
+		t.Fatalf("drain block exited 0 with no resolvable bead\noutput:\n%s\ngc calls:\n%s", out, logged)
+	}
+	if !strings.Contains(out, "no startup bead id to fall back on") {
+		t.Fatalf("diagnostic does not name the missing startup bead:\n%s", out)
+	}
+	if strings.Contains(logged, "ga-foreign") {
+		t.Fatalf("drain consulted the foreign trigger bead:\ngc calls:\n%s", logged)
+	}
+	for _, shape := range []string{"bd show", "bd update", "runtime drain-ack"} {
+		if strings.Contains(logged, shape) {
+			t.Fatalf("drain ran %s with no resolvable bead\ngc calls:\n%s", shape, logged)
+		}
+	}
+
+	// With a current claim rooted at R the drain still closes R's single
+	// ready drain step and acknowledges the runtime.
+	claimHook := `case "$*" in
+"hook current --id-only") printf '%s\n' 'ga-step' ;;
+"bd show "*" --json") printf '%s\n' '[{"id":"ga-step","status":"in_progress","assignee":"gcg-session-me","metadata":{"gc.step_ref":"mol-do-work.do-work","gc.root_bead_id":"R"}}]' ;;
+"ready --json"*) printf '%s\n' '[{"id":"ga-drain"}]' ;;
+"bd update "*) exit 0 ;;
+"runtime drain-ack") exit 0 ;;
+*) echo "unexpected gc command: $*" >&2; exit 64 ;;
+esac
+`
+	binDir, logPath = fakeGCBin(t, claimHook)
+	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+		t.Fatalf("create gc log: %v", err)
+	}
+	out, runErr = runPackScript(t, scriptPath, binDir, closeStepEnvKeys, []string{"GC_TRIGGER_BEAD_ID=ga-foreign"})
+	logged = readGcLog(t, logPath)
+	if runErr != nil {
+		t.Fatalf("drain block failed with a current claim rooted at R: %v\noutput:\n%s\ngc calls:\n%s", runErr, out, logged)
+	}
+	for _, want := range []string{
+		"gc bd update ga-drain --set-metadata gc.outcome=pass --status=closed",
+		"gc runtime drain-ack",
+	} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("gc calls missing %q\ngc calls:\n%s", want, logged)
+		}
+	}
+	if strings.Contains(logged, "ga-foreign") {
+		t.Fatalf("drain consulted the foreign trigger bead with a live claim:\ngc calls:\n%s", logged)
+	}
+}
+
+func readGcLog(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	return string(data)
+}
+
 // graphBeadVars are the shell variables core formulas use for workflow
 // infrastructure beads: the claimed formula step, the drain continuation and
 // the workflow root. Every one carries gc.root_bead_id, so on a city that
