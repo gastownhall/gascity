@@ -2837,6 +2837,61 @@ func TestStampFaultsKeepTheirTypeOutOfInstantiationErrors(t *testing.T) {
 	}
 }
 
+// A fragment mint that fails names the beads it could not stamp too —
+// fragment beads are never fenced, but an unmarked one is still invisible
+// to the molecule_failed consumers.
+func TestInstantiateFragmentFailureNamesTheBeadsItCouldNotMark(t *testing.T) {
+	base := beads.NewMemStore()
+	root, err := base.Create(beads.Bead{Title: "Workflow root", Type: "task", Metadata: map[string]string{"gc.kind": "workflow"}})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	depErr := fmt.Errorf("injected dep failure")
+	store := &depFailStampStore{
+		stampFailStore: &stampFailStore{
+			Store:            base,
+			refusals:         map[string]int{},
+			refuseCreated:    2, // the second fragment bead's stamp is refused on every attempt
+			refuseCreatedCnt: -1,
+		},
+		depErr: depErr,
+	}
+	recipe := &formula.FragmentRecipe{
+		Steps: []formula.RecipeStep{
+			{ID: "frag.scope", Title: "Scope", Type: "task"},
+			{ID: "frag.work", Title: "Work", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "frag.work", DependsOnID: "frag.scope", Type: "parent-child"},
+		},
+	}
+
+	_, err = InstantiateFragment(context.Background(), store, recipe, FragmentOptions{RootID: root.ID})
+	if err == nil {
+		t.Fatal("InstantiateFragment succeeded; want the injected dep failure")
+	}
+	if !errors.Is(err, depErr) {
+		t.Fatalf("InstantiateFragment error = %q, want it to wrap %v", err, depErr)
+	}
+
+	scopeID, workID := store.created[0], store.created[1]
+	stampFault := store.faults[workID]
+	if stampFault == nil {
+		t.Fatal("the work bead's stamp was never refused")
+	}
+	wantSuffix := fmt.Sprintf(" (failure stamp not confirmed: marking %s molecule_failed: %v)", workID, stampFault)
+	if !strings.HasSuffix(err.Error(), wantSuffix) {
+		t.Errorf("InstantiateFragment error = %q, want it to end with %q", err.Error(), wantSuffix)
+	}
+	scope, err := base.Get(scopeID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", scopeID, err)
+	}
+	if scope.Metadata[beadmeta.MoleculeFailedMetadataKey] != "true" {
+		t.Errorf("scope bead %s molecule_failed = %q, want true", scope.ID, scope.Metadata[beadmeta.MoleculeFailedMetadataKey])
+	}
+}
+
 func TestCookOnRequiresParentID(t *testing.T) {
 	store := beads.NewMemStore()
 	_, err := CookOn(context.Background(), store, "x", nil, Options{})
