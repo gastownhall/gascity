@@ -328,6 +328,9 @@ var (
 	errDrainLimitExceeded      = errors.New("drain limit exceeded")
 	errDrainInvalidItemFormula = errors.New("invalid drain item formula")
 	errDrainUnresolvedMember   = errors.New("drain unresolved member")
+	// errDrainWorkspaceUnavailable marks a shared drain whose workspace hook
+	// refused to provision; the drain fails hard and releases its members.
+	errDrainWorkspaceUnavailable = errors.New("shared drain workspace unavailable")
 )
 
 type drainUnresolvedMemberError struct {
@@ -638,6 +641,13 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 		}
 		member, err := ensureSharedDrainWorkspace(store, bead, member, opts)
 		if err != nil {
+			if errors.Is(err, errDrainWorkspaceUnavailable) {
+				return closeDrainHardFailure(store, bead, manifest, drainHardFailure{
+					Reason:  "shared_workspace_unavailable",
+					Subject: member.ID,
+					Detail:  err.Error(),
+				}, err, opts)
+			}
 			return ControlResult{}, err
 		}
 		members[i] = member
@@ -690,7 +700,7 @@ func ensureSharedDrainWorkspace(store beads.Store, control, member beads.Bead, o
 	}
 	workDir, err := opts.SharedDrainWorkspace(control)
 	if err != nil {
-		return member, fmt.Errorf("%s: provisioning shared drain workspace for member %s: %w", control.ID, member.ID, err)
+		return member, fmt.Errorf("%w: %s: provisioning shared drain workspace for member %s: %w", errDrainWorkspaceUnavailable, control.ID, member.ID, err)
 	}
 	if workDir == "" {
 		opts.tracef("drain-shared-workspace control=%s member=%s no workspace for this scope", control.ID, member.ID)
@@ -1988,11 +1998,31 @@ func closeDrainReservationFailure(store beads.Store, bead beads.Bead, manifest d
 }
 
 func closeDrainItemFormulaFailure(store beads.Store, bead beads.Bead, manifest drainManifest, err error, opts ProcessOptions) (ControlResult, error) {
-	const failureReason = "invalid_drain_item_formula"
-	if closeErr := closeOpenDrainItemRoots(store, &manifest, failureReason); closeErr != nil {
+	return closeDrainHardFailure(store, bead, manifest, drainHardFailure{
+		Reason:  "invalid_drain_item_formula",
+		Subject: manifest.Formula,
+	}, err, opts)
+}
+
+// drainHardFailure names why a drain failed hard. A non-empty Subject is
+// recorded as gc.failure_subject; a non-empty Detail as a hard
+// gc.controller_error.
+type drainHardFailure struct {
+	Reason  string
+	Subject string
+	Detail  string
+}
+
+// closeDrainHardFailure terminally fails a drain: it closes open item roots,
+// marks incomplete rows failed, records the manifest and a hard failure,
+// releases the drain's member reservations, and closes the control. Like
+// closeDrainControl it clears stale controller-error state, then records the
+// failure's Detail in its place.
+func closeDrainHardFailure(store beads.Store, bead beads.Bead, manifest drainManifest, failure drainHardFailure, err error, opts ProcessOptions) (ControlResult, error) {
+	if closeErr := closeOpenDrainItemRoots(store, &manifest, failure.Reason); closeErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: closing partial drain item roots after %w: %w", bead.ID, err, closeErr)
 	}
-	markIncompleteDrainRowsFailed(&manifest, failureReason)
+	markIncompleteDrainRowsFailed(&manifest, failure.Reason)
 	data, marshalErr := json.Marshal(manifest)
 	if marshalErr != nil {
 		return ControlResult{}, marshalErr
@@ -2001,18 +2031,23 @@ func closeDrainItemFormulaFailure(store beads.Store, bead beads.Bead, manifest d
 		beadmeta.DrainStateMetadataKey:    beadmeta.DrainStateFailed,
 		beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
 		beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassHard,
-		beadmeta.FailureReasonMetadataKey: failureReason,
+		beadmeta.FailureReasonMetadataKey: failure.Reason,
 		drainManifestMetadataKey:          string(data),
 	}
-	if manifest.Formula != "" {
-		metadata[beadmeta.FailureSubjectMetadataKey] = manifest.Formula
+	if failure.Subject != "" {
+		metadata[beadmeta.FailureSubjectMetadataKey] = failure.Subject
+	}
+	clearControllerSpawnErrorMetadata(metadata)
+	if failure.Detail != "" {
+		metadata[beadmeta.ControllerErrorMetadataKey] = failure.Detail
+		metadata[beadmeta.ControllerErrorClassMetadataKey] = beadmeta.FailureClassHard
 	}
 	if releaseErr := releaseDrainReservations(store, bead.ID, manifest, opts); releaseErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: releasing reservations after %w: %w", bead.ID, err, releaseErr)
 	}
-	result, closeErr := closeDrainControl(store, bead.ID, metadata, "drain-failed", opts)
+	result, closeErr := closeScopedControl(store, bead.ID, metadata, "drain-failed", opts)
 	if closeErr != nil {
-		return ControlResult{}, fmt.Errorf("%s: closing invalid-item-formula drain after %w: %w", bead.ID, err, closeErr)
+		return ControlResult{}, fmt.Errorf("%s: closing %s drain after %w: %w", bead.ID, failure.Reason, err, closeErr)
 	}
 	return result, nil
 }

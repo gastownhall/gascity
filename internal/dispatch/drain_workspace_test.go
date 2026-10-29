@@ -1,7 +1,9 @@
 package dispatch
 
 import (
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -250,4 +252,100 @@ func TestProcessDrainWorkspaceHookSkippedOutsideSharedExclusive(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestProcessDrainSharedWorkspaceFailureClosesHardAndReleases(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain, members := seedSharedExclusiveDrain(t)
+	hook := &recordingWorkspaceHook{err: errors.New("worktree root is inside the rig checkout")}
+
+	result, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}, SharedDrainWorkspace: hook.provision})
+	if err != nil {
+		t.Fatalf("ProcessControl(workspace failure): %v", err)
+	}
+	if result.Action != "drain-failed" {
+		t.Fatalf("Action = %q, want drain-failed", result.Action)
+	}
+	drain = mustGetBead(t, store, drain.ID)
+	if drain.Status != "closed" {
+		t.Fatalf("drain status = %q, want closed", drain.Status)
+	}
+	for key, want := range map[string]string{
+		"gc.outcome":         "fail",
+		"gc.failure_class":   "hard",
+		"gc.failure_reason":  "shared_workspace_unavailable",
+		"gc.failure_subject": members[0].ID,
+	} {
+		if got := drain.Metadata[key]; got != want {
+			t.Fatalf("drain %s = %q, want %q", key, got, want)
+		}
+	}
+	if got := drain.Metadata[beadmeta.ControllerErrorMetadataKey]; !strings.Contains(got, "worktree root is inside the rig checkout") {
+		t.Fatalf("gc.controller_error = %q, want the hook error", got)
+	}
+	if got := drain.Metadata[beadmeta.ControllerErrorClassMetadataKey]; got != beadmeta.FailureClassHard {
+		t.Fatalf("gc.controller_error_class = %q, want hard", got)
+	}
+	manifest := mustDrainManifest(t, drain)
+	for _, row := range manifest.Rows {
+		if row.ItemRootID != "" {
+			t.Fatalf("row = %+v, want no item root", row)
+		}
+		if row.Status != "failed" || row.Failure != "shared_workspace_unavailable" {
+			t.Fatalf("row = %+v, want failed shared_workspace_unavailable", row)
+		}
+	}
+	for _, member := range members {
+		after := mustGetBead(t, store, member.ID)
+		if got := strings.TrimSpace(after.Metadata[beadmeta.ExclusiveDrainReservationMetadataKey]); got != "" {
+			t.Fatalf("member %s reservation = %q, want released", member.ID, got)
+		}
+		if got := after.Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != "" {
+			t.Fatalf("member %s work_dir = %q, want unwritten", member.ID, got)
+		}
+	}
+}
+
+func TestProcessDrainSharedWorkspaceMemberWriteErrorKeepsDrainOpen(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	mem, drain, members := seedSharedExclusiveDrain(t)
+	writeErr := errors.New("store unavailable")
+	store := &failOnceMetadataKeyStore{Store: mem, key: beadmeta.LegacyWorkDirMetadataKey, err: writeErr}
+	hook := &recordingWorkspaceHook{path: t.TempDir()}
+
+	_, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}, SharedDrainWorkspace: hook.provision})
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("ProcessControl err = %v, want wrapped %v", err, writeErr)
+	}
+	if !strings.Contains(err.Error(), members[0].ID) {
+		t.Fatalf("ProcessControl err = %v, want it to name member %s", err, members[0].ID)
+	}
+	drain = mustGetBead(t, mem, drain.ID)
+	if drain.Status == "closed" {
+		t.Fatalf("drain closed with outcome %q, want it open for retry", drain.Metadata["gc.outcome"])
+	}
+	if raw := drain.Metadata[drainManifestMetadataKey]; raw != "" {
+		for _, row := range mustDrainManifest(t, drain).Rows {
+			if row.ItemRootID != "" {
+				t.Fatalf("row = %+v, want no item root", row)
+			}
+		}
+	}
+	if got := mustGetBead(t, mem, members[0].ID).Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != "" {
+		t.Fatalf("first member work_dir = %q, want unwritten", got)
+	}
+
+	result, err := ProcessControl(store, mustGetBead(t, mem, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}, SharedDrainWorkspace: hook.provision})
+	if err != nil {
+		t.Fatalf("ProcessControl(retry): %v", err)
+	}
+	if result.Action != "drain-shared-advanced" {
+		t.Fatalf("retry Action = %q, want drain-shared-advanced", result.Action)
+	}
+	manifest := mustDrainManifest(t, mustGetBead(t, mem, drain.ID))
+	assertItemWorkDir(t, mem, manifest.Rows[0].ItemRootID, hook.path)
 }
