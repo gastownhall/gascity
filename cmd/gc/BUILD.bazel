@@ -2163,6 +2163,7 @@ go_test(
         "supervisor_dashboard_test.go",
         "supervisor_handoff_test.go",
         "supervisor_init_retry_test.go",
+        "supervisor_lock_order_test.go",
         "supervisor_log_rotation_test.go",
         "supervisor_systemd_delegate_test.go",
         "suspension_state_linux_test.go",
