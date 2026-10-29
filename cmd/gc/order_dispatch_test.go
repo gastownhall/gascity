@@ -11199,3 +11199,53 @@ func TestMergeOrderExecEnvExplicitAndUnrelatedKeysSurvive(t *testing.T) {
 		}
 	}
 }
+
+func TestOrderExecEnvMergeDropsSeatIdentityKeepsCuratedValues(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("BEADS_ACTOR", "some-seat")
+
+	cityDir := t.TempDir()
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+	a := orders.Order{Name: "digest", Trigger: "cooldown", Interval: "1m", Exec: "true"}
+
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError() error = %v", err)
+	}
+
+	merged := mergeOrderExecEnv([]string{
+		"PATH=/usr/bin",
+		"HOME=/h",
+		"FOO=bar",
+		"GC_SESSION_ID=gc-seat-123",
+		"GC_ALIAS=some-seat",
+		"GC_AGENT=some-seat",
+		"BEADS_ACTOR=some-seat",
+	}, envSlice)
+
+	got := map[string][]string{}
+	for _, entry := range merged {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			got[key] = append(got[key], value)
+		}
+	}
+	for key, want := range map[string]string{
+		"PATH":          "/usr/bin",
+		"HOME":          "/h",
+		"FOO":           "bar",
+		"BEADS_ACTOR":   "order:digest",
+		"GC_STORE_ROOT": cityDir,
+		"GC_RIG":        "",
+	} {
+		if values := got[key]; len(values) != 1 || values[0] != want {
+			t.Errorf("%s = %q, want exactly [%q]", key, values, want)
+		}
+	}
+	for _, key := range []string{"GC_SESSION_ID", "GC_ALIAS", "GC_AGENT"} {
+		if values, present := got[key]; present {
+			t.Errorf("seat identity %s=%q reached the order env", key, values)
+		}
+	}
+}
