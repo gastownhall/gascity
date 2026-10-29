@@ -49,6 +49,11 @@ const liveModelSweepMinInterval = 30 * time.Second
 // resolves cannot keep the row listed forever.
 const closedIntervalSweepGiveUp = 15 * time.Minute
 
+// closedUsageListLimit caps the closed-session List one pass settles, oldest
+// first, so a backlog of rows marked while the controller was down drains over
+// passes instead of in one.
+const closedUsageListLimit = 64
+
 // isComputeTerminalState reports whether a session state marks the end of an
 // awake interval, at which a compute fact should be emitted. It covers every
 // non-running lifecycle endpoint the controller's open-bead scan can observe:
@@ -366,15 +371,20 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 	}
 	// Closed rows are listed off the boot pass, like the live lane: they
 	// settle from the first steady-state tick, ending at usage_closed_at.
-	if bootReconcile {
+	// The List is floored at once per liveModelSweepMinInterval whatever its
+	// outcome, which also bounds a failing store's retry rate.
+	if bootReconcile || now.UnixNano() < cr.nextClosedUsageListAt.Load() {
 		return
 	}
+	cr.nextClosedUsageListAt.Store(now.Add(liveModelSweepMinInterval).UnixNano())
 	closed, err := store.List(beads.ListQuery{
 		Type:          session.BeadType,
 		Status:        "closed",
 		IncludeClosed: true,
 		TierMode:      beads.TierBoth,
 		Metadata:      map[string]string{session.MetadataKeyUsageClosePending: "true"},
+		Limit:         closedUsageListLimit,
+		Sort:          beads.SortCreatedAsc,
 	})
 	if err != nil {
 		logf("usage: listing closed sessions with unsettled usage failed: %v", err)
@@ -444,7 +454,17 @@ func (cr *CityRuntime) settleClosedInterval(
 	sweepSettled, swept := true, false
 	if factory := modelSweepFactory(); factory != nil &&
 		strings.TrimSpace(b.Metadata[usageModelSweptAtKey]) != awakeStart {
-		_, settled, serr := factory.SweepSessionModelUsage(ctx, b.ID, b.Metadata, now)
+		// The live lane's memo already resolved this interval's transcript:
+		// read it from there rather than repeating discovery.
+		var (
+			settled bool
+			serr    error
+		)
+		if memo.path != "" {
+			_, settled, serr = factory.SweepSessionModelUsageAtPath(ctx, b.ID, b.Metadata, memo.path, now)
+		} else {
+			_, settled, serr = factory.SweepSessionModelUsage(ctx, b.ID, b.Metadata, now)
+		}
 		if serr != nil {
 			logf("usage: model-usage sweep for closed session %s failed; will retry: %v", b.ID, serr)
 		}
