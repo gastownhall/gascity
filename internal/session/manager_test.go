@@ -6200,3 +6200,31 @@ func TestCloseRidesALifecycleWrite(t *testing.T) {
 		t.Fatalf("status %s, want closed", b.Status)
 	}
 }
+
+// TestPersistInvocationUsageCursorOnClosedSession (issue #6672, AC-2): the
+// closed-interval settle sweeps a closed row's transcript and must advance
+// the invocation cursor on that closed bead, or the next sweep of the same
+// conversation re-reads the turns.
+func TestPersistInvocationUsageCursorOnClosedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := newTestManager(t, store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := mgr.CloseDetailed(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
+		t.Fatalf("CloseDetailed: %v", err)
+	}
+	if err := mgr.PersistInvocationUsageCursor(info.ID, "u-closed"); err != nil {
+		t.Fatalf("PersistInvocationUsageCursor on a closed session: %v", err)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := b.Metadata[MetadataKeyInvocationUsageCursor]; got != "u-closed" {
+		t.Fatalf("cursor metadata on the closed bead = %q, want u-closed", got)
+	}
+}

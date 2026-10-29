@@ -675,7 +675,7 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 		// only rollout, and a lone hit may have hidden a second same-cwd, in-window
 		// rollout that would make it ambiguous. Either way the result is
 		// non-definitive, so record nothing and leave the interval unsettled for a
-		// later, unclouded tick; the recently-closed sweep window bounds the retries.
+		// later, unclouded tick.
 		// The claude case is the same shape: a TranscriptPath store-read error is
 		// non-definitive, unlike its shared-workdir ambiguity refusal, which returns
 		// an empty path with a nil error and settles as a clean miss below.
@@ -688,8 +688,8 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 			// Clean, PERMANENT miss: the keyless codex workdir fallback found nothing
 			// (ambiguity / out-of-window / TZ), or the claude lookup REFUSED a shared
 			// workdir it cannot disambiguate. Neither is resolved by a retry, so settle
-			// so compute can commit and the recently-closed window is not re-swept
-			// every tick. (A keyed miss below stays transient, and so does a keyless
+			// so compute can commit and the interval is not re-swept on every tick.
+			// (A keyed miss below stays transient, and so does a keyless
 			// claude session that is unambiguous but whose transcript is merely not
 			// written yet: both may simply not be flushed.)
 			slog.Debug("model-usage sweep: keyless transcript miss is permanent; settling",
@@ -950,24 +950,22 @@ func sweepAgentName(meta map[string]string) string {
 }
 
 // sweepIntervalWindow derives the codex discovery date window from a terminal
-// session's awake interval: [awake_started_at, slept_at]. slept_at is refreshed
-// by both SleepPatch and AcknowledgeDrainPatch, so a drained session tightens
-// notAfter from now to its drain-ack time. When slept_at is missing or not after
-// the start (a terminal exit that does not refresh it, or a value carried over
-// from a prior awake interval), it falls back to now as the interval end, so
-// notAfter is always set and never reversed — FindCodexSessionFileByID requires
-// a non-zero notAfter and refuses a reversed range. The finder pads both ends by
-// a local day, so an off-by-seconds bound — including the tighter drain-ack
-// bound — cannot drop the rollout's day directory.
+// session's awake interval: [awake_started_at, the interval end]. The end is
+// session.UsageIntervalEnd, so a drained session tightens notAfter from now to
+// its drain-ack time, and a row a close ended straight from awake (issue #6672)
+// ends at its usage_closed_at anchor — the close survives the settle, so the
+// recently-closed sweep window is the real interval, not the pass time. When
+// slept_at and the anchor are both missing or not after the start (a terminal
+// exit that refreshes neither, or values carried over from a prior awake
+// interval), it falls back to now as the interval end, so notAfter is always
+// set and never reversed — FindCodexSessionFileByID requires a non-zero
+// notAfter and refuses a reversed range. The finder pads both ends by a local
+// day, so an off-by-seconds bound — including the tighter drain-ack bound —
+// cannot drop the rollout's day directory.
 func sweepIntervalWindow(meta map[string]string, now time.Time) (notBefore, notAfter time.Time) {
-	notAfter = now
 	if started, err := time.Parse(time.RFC3339, strings.TrimSpace(meta["awake_started_at"])); err == nil {
 		notBefore = started
 	}
-	if sleptRaw := strings.TrimSpace(meta["slept_at"]); sleptRaw != "" {
-		if slept, err := time.Parse(time.RFC3339, sleptRaw); err == nil && slept.After(notBefore) {
-			notAfter = slept
-		}
-	}
+	notAfter = sessionpkg.UsageIntervalEnd(meta, notBefore, now)
 	return notBefore, notAfter
 }

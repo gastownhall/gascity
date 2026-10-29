@@ -2413,14 +2413,17 @@ const MetadataKeyInvocationUsageCursor = "invocation_usage_cursor"
 // PersistInvocationUsageCursor stores the invocation-usage telemetry cursor
 // on an existing session. Unlike PersistSessionKey it overwrites any
 // existing value — the cursor advances with every recorded invocation.
-// Empty id or cursor is a no-op.
+// A closed row still takes the cursor: the closed-interval settle (issue
+// #6672) sweeps a closed session's trailing turns and must leave the cursor
+// advanced on that bead, or the next sweep of the same conversation re-reads
+// them. Empty id or cursor is a no-op.
 func (m *Manager) PersistInvocationUsageCursor(id, cursor string) error {
 	cursor = strings.TrimSpace(cursor)
 	if id == "" || cursor == "" {
 		return nil
 	}
 	return withSessionMutationLock(id, func() error {
-		if _, _, err := m.sessionBead(id); err != nil {
+		if _, _, err := m.loadSessionBead(id, true); err != nil {
 			return err
 		}
 		if err := m.store.SetMetadata(id, MetadataKeyInvocationUsageCursor, cursor); err != nil {
