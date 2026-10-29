@@ -113,3 +113,44 @@ func TestStartAcceptsStartupDialogsWithoutStartupTurn(t *testing.T) {
 		t.Fatalf("a session without a startup turn must not run the provisioning tail:\n%s", calls)
 	}
 }
+
+// A failed dialog step is best-effort: Start still succeeds and delivers the
+// first turn, warns exactly once, and never confirms an unconfirmed trust frame.
+func TestStartStartupDialogFailureIsNonFatal(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		states []string
+		want   string
+	}{
+		{"pane read fails", []string{"pane_read_fails"}, "pane not found"},
+		{"trust cursor stuck", []string{"trust_dialog", "trust_stuck"}, runtime.ErrWorkspaceTrustUnconfirmed.Error()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, state := newFakeHerdrProvider(t)
+			listenHerdrSocket(t, p)
+			for _, s := range tc.states {
+				setState(t, state, s)
+			}
+			warnings := captureStartupDialogWarnings(t)
+
+			cfg := runtime.Config{Command: "claude", ProcessNames: []string{"claude"}, Nudge: "do work"}
+			if err := p.Start(context.Background(), "gastown__worker", cfg); err != nil {
+				t.Fatalf("Start must not fail on a dialog-step error: %v", err)
+			}
+			calls := fakeCalls(t, state)
+			if !strings.Contains(calls, "agent wait") || !strings.Contains(calls, "agent prompt %5 do work") {
+				t.Fatalf("Start did not proceed to the idle wait and first turn:\n%s", calls)
+			}
+			if strings.Contains(calls, "pane send-keys %5 enter") {
+				t.Fatalf("enter was sent from an unconfirmed trust frame:\n%s", calls)
+			}
+			lines := strings.Split(strings.TrimRight(warnings.String(), "\n"), "\n")
+			if len(lines) != 1 || !strings.HasPrefix(lines[0], `warning: session "gastown__worker": `) {
+				t.Fatalf("want exactly one session warning line, got %q", warnings.String())
+			}
+			if !strings.Contains(lines[0], tc.want) {
+				t.Fatalf("warning %q does not carry the cause %q", lines[0], tc.want)
+			}
+		})
+	}
+}
