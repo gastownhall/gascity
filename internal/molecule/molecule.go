@@ -1284,24 +1284,20 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 		// Same residual-var guard as Instantiate — see #618.
 		if strings.Contains(b.Title, "{{") {
 			if residual := formula.CheckResidualVars(b.Title); len(residual) > 0 {
-				markFailed(store, createdIDs)
-				return nil, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
+				return nil, failInstantiation(store, createdIDs, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", ")))
 			}
 		}
 		// Same guard, extended to routing metadata — see #5060.
 		if err := validateResidualRoutingVars(step.ID, b.Metadata); err != nil {
-			markFailed(store, createdIDs)
-			return nil, err
+			return nil, failInstantiation(store, createdIDs, err)
 		}
 		if err := validateTimeoutMetadataVars(step.ID, b.Metadata); err != nil {
-			markFailed(store, createdIDs)
-			return nil, err
+			return nil, failInstantiation(store, createdIDs, err)
 		}
 
 		created, err := store.Create(b)
 		if err != nil {
-			markFailed(store, createdIDs)
-			return nil, fmt.Errorf("creating fragment bead for step %q: %w", step.ID, err)
+			return nil, failInstantiation(store, createdIDs, fmt.Errorf("creating fragment bead for step %q: %w", step.ID, err))
 		}
 		idMapping[step.ID] = created.ID
 		createdParentByStep[step.ID] = created.ParentID
@@ -1320,14 +1316,12 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 		if dep.Type == "parent-child" && createdParentByStep[dep.StepID] != toID {
 			parentID := toID
 			if err := store.Update(fromID, beads.UpdateOpts{ParentID: &parentID}); err != nil {
-				markFailed(store, createdIDs)
-				return nil, fmt.Errorf("setting fragment parent for dep %s->%s: %w", dep.StepID, dep.DependsOnID, err)
+				return nil, failInstantiation(store, createdIDs, fmt.Errorf("setting fragment parent for dep %s->%s: %w", dep.StepID, dep.DependsOnID, err))
 			}
 			createdParentByStep[dep.StepID] = toID
 		}
 		if err := store.DepAdd(fromID, toID, dep.Type); err != nil {
-			markFailed(store, createdIDs)
-			return nil, fmt.Errorf("wiring fragment dep %s->%s: %w", dep.StepID, dep.DependsOnID, err)
+			return nil, failInstantiation(store, createdIDs, fmt.Errorf("wiring fragment dep %s->%s: %w", dep.StepID, dep.DependsOnID, err))
 		}
 	}
 	for stepID, deps := range externalDepsByStep {
@@ -1343,8 +1337,7 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 				continue
 			}
 			if err := store.DepAdd(fromID, dep.DependsOnID, dep.Type); err != nil {
-				markFailed(store, createdIDs)
-				return nil, fmt.Errorf("wiring external fragment dep %s->%s: %w", stepID, dep.DependsOnID, err)
+				return nil, failInstantiation(store, createdIDs, fmt.Errorf("wiring external fragment dep %s->%s: %w", stepID, dep.DependsOnID, err))
 			}
 		}
 	}
@@ -1358,8 +1351,7 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 			continue
 		}
 		if err := store.Update(beadID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
-			markFailed(store, createdIDs)
-			return nil, fmt.Errorf("assigning fragment step %q: %w", stepID, err)
+			return nil, failInstantiation(store, createdIDs, fmt.Errorf("assigning fragment step %q: %w", stepID, err))
 		}
 	}
 
@@ -1796,13 +1788,6 @@ func activateAttachCandidate(store beads.Store, rootID string, idMapping map[str
 // unmarked candidate could otherwise be selected by idempotency recovery.
 func markFailedReporting(store beads.Store, ids []string) error {
 	return errors.Join(stampFailed(store, ids)...)
-}
-
-// markFailed stamps all created beads as failed via stampFailed.
-// Best-effort: beads it could not stamp are ignored since we're already in
-// an error path.
-func markFailed(store beads.Store, ids []string) {
-	_ = stampFailed(store, ids)
 }
 
 // failInstantiation stamps the created beads as failed and returns the mint's

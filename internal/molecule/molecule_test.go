@@ -4174,3 +4174,46 @@ func TestMarkFailedReportingRetriesOnceAndJoinsEveryFailure(t *testing.T) {
 		t.Fatalf("err = %v, want errors.Is both stamp faults", err)
 	}
 }
+
+// A fragment whose dep wiring fails names the created bead whose failure
+// stamp was refused on both attempts and still stamps the rest.
+func TestInstantiateFragmentFailureNamesTheBeadsItCouldNotMark(t *testing.T) {
+	base := beads.NewMemStore()
+	root, err := base.Create(beads.Bead{Title: "Workflow root", Type: "task", Metadata: map[string]string{"gc.kind": "workflow"}})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	store := newMintFaultStore(&errDepStore{Store: base})
+	store.stampRefusals[0] = stampAlways
+	recipe := &formula.FragmentRecipe{
+		Steps: []formula.RecipeStep{
+			{ID: "frag.b", Title: "B", Type: "task"},
+			{ID: "frag.a", Title: "A", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "frag.b", DependsOnID: "frag.a", Type: "blocks"},
+		},
+	}
+
+	_, err = InstantiateFragment(context.Background(), store, recipe, FragmentOptions{RootID: root.ID})
+	if len(store.created) != 2 {
+		t.Fatalf("created %d fragment beads, want 2 (err=%v)", len(store.created), err)
+	}
+	refused, other := store.created[0], store.created[1]
+	if got := store.refused[refused]; got != 2 {
+		t.Fatalf("stamp on %s refused %d times, want 2", refused, got)
+	}
+	assertStampCalls(t, store.stampCalls, refused, other, refused)
+	assertStampedAndUnfenced(t, store, other)
+	if err == nil {
+		t.Fatal("InstantiateFragment succeeded; want the dep wiring failure")
+	}
+	want := fmt.Sprintf("wiring fragment dep frag.b->frag.a: injected dep failure (failure stamp not confirmed: marking %s molecule_failed: %v on %s)",
+		refused, errInjectedStamp, refused)
+	if err.Error() != want {
+		t.Fatalf("err = %q, want %q", err.Error(), want)
+	}
+	if errors.Is(err, errInjectedStamp) {
+		t.Fatalf("err = %v wraps the stamp fault; the wiring error must keep the error's identity", err)
+	}
+}
