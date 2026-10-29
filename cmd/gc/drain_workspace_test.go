@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
@@ -181,5 +185,134 @@ func assertDirEmpty(t *testing.T, dir string) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("%s has %d entries, want none", dir, len(entries))
+	}
+}
+
+// TestControlDispatchSharedDrainProvisionsRigWorktree drives the real
+// dispatcher entry point over a rig-scoped shared exclusive drain and pins that
+// the reserved member and its expanded item work in the drain's managed rig
+// worktree.
+func TestControlDispatchSharedDrainProvisionsRigWorktree(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	repo, _ := testutil.InitGitRepo(t)
+	worktreesRoot := t.TempDir()
+	t.Setenv("GC_WORKTREES_DIR", worktreesRoot)
+	cityPath, cfg := sharedDrainWorkspaceCity(t, repo)
+	cfg.Agents = []config.Agent{
+		{Name: config.ControlDispatcherAgentName, Dir: "alpha"},
+		{Name: "worker", Dir: "alpha"},
+	}
+	formulaDir := t.TempDir()
+	itemFormula := `formula = "drain-item"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[[steps]]
+id = "work"
+title = "Work {{convoy_id}}"
+metadata = { "gc.run_target" = "worker" }
+`
+	if err := os.WriteFile(filepath.Join(formulaDir, "drain-item.formula.toml"), []byte(itemFormula), 0o644); err != nil {
+		t.Fatalf("write drain item formula: %v", err)
+	}
+	cfg.FormulaLayers.City = []string{formulaDir}
+	store := beads.NewMemStore()
+
+	convoy, err := store.Create(beads.Bead{
+		Title:    "input convoy",
+		Type:     "convoy",
+		Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"},
+	})
+	if err != nil {
+		t.Fatalf("create input convoy: %v", err)
+	}
+	var memberIDs []string
+	for _, title := range []string{"first", "second"} {
+		member, err := store.Create(beads.Bead{Title: title, Type: "task"})
+		if err != nil {
+			t.Fatalf("create member: %v", err)
+		}
+		if err := convoycore.TrackItem(store, convoy.ID, member.ID); err != nil {
+			t.Fatalf("track member: %v", err)
+		}
+		memberIDs = append(memberIDs, member.ID)
+	}
+	root, err := store.Create(beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey: beadmeta.KindWorkflow,
+			"gc.formula_contract":    "graph.v2",
+			"gc.input_convoy_id":     convoy.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+	drain, err := store.Create(beads.Bead{
+		Title: "drain",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:       "drain",
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+			"gc.drain_context":             "shared",
+			"gc.drain_formula":             "drain-item",
+			"gc.drain_member_access":       "exclusive",
+			"gc.drain_item_single_lane":    "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create drain control: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := runControlDispatcherWithStoreAndConfig(cityPath, repo, store, drain.ID, cfg, &stdout, &stderr); err != nil {
+		t.Fatalf("control dispatch: %v; stderr=%q", err, stderr.String())
+	}
+
+	want := filepath.Join(canonicalTestPath(filepath.Join(worktreesRoot, "alpha")), root.ID+"-"+drain.ID)
+	member := beadByID(t, store, memberIDs[0])
+	if got := member.Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != want {
+		t.Fatalf("member %s work_dir = %q, want the drain worktree %q; stderr=%q", member.ID, got, want, stderr.String())
+	}
+	if got := testutil.RunGit(t, want, "rev-parse", "--abbrev-ref", "HEAD"); got != "gc/drain/"+drain.ID {
+		t.Fatalf("drain worktree branch = %q, want gc/drain/%s", got, drain.ID)
+	}
+	raw := beadByID(t, store, drain.ID).Metadata[beadmeta.DrainManifestMetadataKey]
+	var manifest struct {
+		Rows []struct {
+			MemberID   string `json:"member_id"`
+			ItemRootID string `json:"item_root_id"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal([]byte(raw), &manifest); err != nil {
+		t.Fatalf("parse drain manifest %q: %v", raw, err)
+	}
+	if len(manifest.Rows) == 0 || manifest.Rows[0].ItemRootID == "" {
+		t.Fatalf("manifest = %s, want the first member's item materialized; drain metadata=%v stdout=%q stderr=%q", raw, beadByID(t, store, drain.ID).Metadata, stdout.String(), stderr.String())
+	}
+	itemRoot := beadByID(t, store, manifest.Rows[0].ItemRootID)
+	for _, key := range []string{beadmeta.LegacyWorkDirMetadataKey, beadmeta.WorkDirMetadataKey} {
+		if got := itemRoot.Metadata[key]; got != want {
+			t.Fatalf("item root %s %s = %q, want %q", itemRoot.ID, key, got, want)
+		}
+	}
+	all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("list beads: %v", err)
+	}
+	steps := 0
+	for _, step := range all {
+		if step.ID == itemRoot.ID || step.Metadata[beadmeta.RootBeadIDMetadataKey] != itemRoot.ID {
+			continue
+		}
+		steps++
+		if got := resolveDrainSourceWorkDir(cityPath, store, step); got != want {
+			t.Fatalf("resolveDrainSourceWorkDir(step %s) = %q, want %q", step.ID, got, want)
+		}
+	}
+	if steps == 0 {
+		t.Fatalf("item root %s has no materialized steps", itemRoot.ID)
 	}
 }

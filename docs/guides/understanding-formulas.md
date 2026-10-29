@@ -432,8 +432,9 @@ time, so exactly one survives. `gc formula show build-from-convoy` prints
 `implement` (the `context = "separate"` branch, where every unit gets its own
 git worktree and they all run in parallel); `--var drain_policy=same-session`
 prints `implement-same-session` instead (`context = "shared"`,
-`item.single_lane = true`, running units one at a time and skipping the rest
-after the first failure via `on_item_failure`). The surviving step's name flows
+`item.single_lane = true`, running units one at a time in one
+controller-provisioned git worktree and skipping the rest after the first
+failure via `on_item_failure`). The surviving step's name flows
 into `review`'s `needs` automatically.
 
 Second, the item formula is swappable — the real base points `separate` at

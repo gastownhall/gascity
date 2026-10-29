@@ -907,7 +907,7 @@ at runtime.
 | Key | Purpose |
 |---|---|
 | `formula` | Required. Item formula run per unit convoy; `{{templated}}` names are rejected in v0 |
-| `context` | `separate` (default — all item roots created in parallel) or `shared` (one single-lane item root at a time) |
+| `context` | `separate` (default — all item roots created in parallel) or `shared` (one single-lane item root at a time). A rig-scoped `shared` drain with `member_access = "exclusive"` gets one controller-provisioned git worktree per drain control, under `GC_WORKTREES_DIR` (default `<city>/.gc/worktrees`, outside the rig checkout), recorded as each reserved member's `work_dir` unless the member already has one. If the worktree cannot be provisioned, the drain closes failed with `gc.failure_reason = shared_workspace_unavailable` |
 | `member_access` | `read` (default) or `exclusive` (records a per-member `gc.exclusive_drain_reservation`; fails if another drain owns it) |
 | `max_units` | Cap on expansion: 1–100 in v0; default and hard cap 100. Exceeding the cap closes the drain failed with `gc.failure_reason = limit_exceeded` |
 | `on_item_failure` | `skip_remaining` or `continue`; defaults to `continue` for separate drains, `skip_remaining` for shared. A shared skip marks remaining items skipped with reason `previous_item_failed` |

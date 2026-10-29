@@ -44,7 +44,9 @@ also receive only `convoy_id`.
   `[steps.drain.item].single_lane = true` and are materialized one item at a
   time.
 - Drain setup and teardown syntax is not in v0. Formula authors can place
-  normal graph.v2 steps before and after a drain step.
+  normal graph.v2 steps before and after a drain step. The worktree the
+  controller provisions for a rig-scoped shared exclusive drain is
+  infrastructure, not setup syntax.
 - Scripted shredders are not in v0. The only v0 shredder is one-by-one.
 - Typed drain events, API/SSE drain projections, `gc trace` rendering, and
   cleanup of system-created convoys are follow-up work.

@@ -36,7 +36,7 @@ formulas.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `context` | string | Yes | — | `"separate"` creates one item convoy per member; `"shared"` materializes one single-lane item at a time with continuation affinity |
+| `context` | string | Yes | — | `"separate"` creates one item convoy per member; `"shared"` materializes one single-lane item at a time with continuation affinity, and with `member_access = "exclusive"` in a rig works every item in one controller-provisioned worktree |
 | `formula` | string | Yes | — | Name of the `graph.v2` formula to run for each item convoy |
 | `member_access` | string | No | — | `"read"` for read-only access; `"exclusive"` records a per-member reservation before materializing item work |
 | `max_units` | int | No | unlimited | Safety cap. Caps one drain expansion to prevent accidental runaway materialization (1–100 in v0) |
@@ -101,6 +101,16 @@ Shared drains materialize one single-lane item at a time with continuation
 affinity. This is useful when item work requires exclusive sequential access
 to a shared resource. Shared drains require `[steps.drain.item].single_lane = true`.
 Separate drains (`context = "separate"`) are the common case.
+
+A rig-scoped shared drain with `member_access = "exclusive"` also gets one
+git worktree for the whole drain. The controller creates it at
+`<GC_WORKTREES_DIR>/<rig>/<workflow root>-<drain id>` on the branch
+`gc/drain/<drain id>`, cut from the rig's HEAD, and records it as each
+reserved member's `work_dir`; a member that already has a `work_dir` keeps it.
+`GC_WORKTREES_DIR` defaults to `<city>/.gc/worktrees` and must lie outside
+the rig checkout. When the worktree cannot be provisioned, the drain closes
+failed with `gc.failure_reason = shared_workspace_unavailable` and the error
+in `gc.controller_error`.
 
 **Q: Can drain item formulas use drain themselves?**
 

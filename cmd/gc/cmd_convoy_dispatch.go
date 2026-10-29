@@ -290,6 +290,7 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 			opts.PrepareRecipe = func(recipe *formula.Recipe, source beads.Bead) error {
 				return decorateDrainItemRecipe(recipe, source, graphStore, workflowStoreRefForDir(storePath, cityPath, loadedCityName(cfg, cityPath), cfg), loadedCityName(cfg, cityPath), cityPath, cfg)
 			}
+			opts.SharedDrainWorkspace = sharedDrainWorkspaceProvisioner(cityPath, storePath, cfg)
 			// A drain is the one control kind that reads beads it did not
 			// create. Its control and item roots are graph class and run
 			// against graphStore above, but the convoy it expands over is
