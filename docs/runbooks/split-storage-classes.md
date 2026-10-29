@@ -623,29 +623,70 @@ agent runs:
 #   expect: converged: yes, stranded: 791, exit 1
 /opt/gascity/releases/<sha>/gc storage recover-stranded --from-work --purge-type message --dry-run
 #   expect: selected: 791, one title "context cycle",
-#   created 2026-08-12T17:54Z .. 2026-08-30T04:42Z, mc-wisp-jkl flagged as a reused id;
-#   note the digest
+#   created 2026-08-12T17:54Z .. 2026-08-30T04:42Z.
+#   Note the digest, and note any rows flagged as a reused id.
 ```
 
-In the window:
+The window. Stop the city with the deployed `gc`, then check that nothing
+can write the work store:
 
 ```
-gc stop                                  # with the deployed gc
-gc status                                # the controller is stopped
-gc session list                          # no session of this city is running
+gc stop
+gc unregister                     # the supervisor no longer holds the city
+gc status                         # the controller is stopped
+gc session list                   # no session of this city
+tmux ls                           # no tmux session of this city
 # no gc or bd process of this city is left (read-only check, e.g. ps)
-bd export --all -o /var/backups/mc-work-<time>.jsonl     # with MC's pinned bd
-# install the new gc, then with it:
+# no old gc on any agent's PATH (for example ~/go/bin/gc): replace or remove it
+```
+
+Export the work store with MC's pinned bd, and check the message rows:
+
+```
+BD=/opt/beads/releases/mc-enterprise-d4c35678ec5e/bd
+EXPORT=/var/backups/mc-work-$(date -u +%Y%m%dT%H%M%SZ).jsonl
+$BD export --all -o "$EXPORT"
+jq -r 'select(.issue_type == "message") | .id' "$EXPORT" | wc -l     # expect 791
+```
+
+Install the new `gc`. With it:
+
+```
 gc storage recover-stranded --from-work --purge-type message --dry-run
-#   the same 791 rows and the same digest as the rehearsal
+#   the same 791 rows, and the same digest as the rehearsal; stop if not
 gc storage recover-stranded --from-work --fleet-stopped --purge-type message \
   --confirm-purge --expect-count 791 --expect-digest <digest>
+#   note the backup path it prints
 gc storage status
 #   expect: converged: yes, stranded: 0, purged stranded: 791, exit 0
+gc storage recover-stranded --from-work --restore-purge <backup> --dry-run
+#   the rollback is ready: 791 to restore, no collision; nothing is written
+```
+
+Copy the backup and the ledger off the host before you start the city:
+
+```
+scp <backup> .gc/store/infra.purged-stranded.jsonl <backup-host>:<dir>/
 ```
 
 If `gc storage status` still reports retained or unrecorded rows, resolve
 them as described in the following sections before `gc start`.
+
+Rollback, with the city stopped:
+
+```
+gc storage recover-stranded --from-work --fleet-stopped --restore-purge <backup>
+```
+
+If the restore cannot run, use the raw bd fallback above with MC's pinned bd.
+First check that no id in the backup is now held by another row. This must
+print nothing:
+
+```
+jq -r '.entry.bead.id' <backup> | sort -u > /tmp/purged-ids
+$BD export --all | jq -r '.id' | sort -u > /tmp/work-ids
+comm -12 /tmp/purged-ids /tmp/work-ids
+```
 
 ### A reused id the binding still holds
 
