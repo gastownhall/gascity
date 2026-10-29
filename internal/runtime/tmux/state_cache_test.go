@@ -1213,3 +1213,14 @@ func TestStateCache_ProcessAliveMatchesWrappedGCExecutable(t *testing.T) {
 		t.Fatalf("uncached matcher missed the gc executable %s", self)
 	}
 }
+
+// The gc executable alias must not make an unrelated pane process read as a
+// live gc session.
+func TestStateCache_ProcessAliveRejectsOtherProcessForGCNames(t *testing.T) {
+	const session = "core__control-dispatcher-gc-wisp-9ragnq7"
+	cache := NewStateCache(&mockFetcher{state: gcDispatcherSnapshot(session, "sleep", "sleep 60")}, 2*time.Second)
+
+	if cache.ProcessAlive(session, []string{"gc"}) {
+		t.Fatal("ProcessAlive(pane running sleep, [gc]) = true, want false")
+	}
+}
