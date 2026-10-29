@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -36,12 +38,10 @@ func divergenceOptions(env ...string) hookClaimOptions {
 }
 
 // demandSpawnEnv is the env a seat the controller minted from counted demand
-// carries: the presence-only origin marker plus the trigger id the diagnostics
-// classify against.
-const demandSpawnTriggerID = "wb-1"
-
+// carries: the presence-only origin marker and no trigger id. The diagnostics
+// read the trigger off the session row (ReadSessionTrigger), never the shell.
 func demandSpawnEnv() []string {
-	return []string{"GC_SPAWN_ORIGIN=demand", "GC_TRIGGER_WORK_BEAD_ID=" + demandSpawnTriggerID}
+	return []string{"GC_SPAWN_ORIGIN=demand"}
 }
 
 // captureDivergence swaps the emitter seam and records what it was called with,
@@ -279,8 +279,8 @@ func TestNonDemandSpawnedSeatRecordsNoDivergence(t *testing.T) {
 	t.Cleanup(func() { demandDivergenceRecorder = prev })
 
 	var stderr bytes.Buffer
-	// Same trigger id, no spawn-origin marker.
-	opts := divergenceOptions("GC_TRIGGER_WORK_BEAD_ID=wb-1")
+	// Same stamped row, no spawn-origin marker.
+	opts := divergenceOptions()
 	stillThere := beads.Bead{
 		ID: "wb-1", Status: "open", Type: "task",
 		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
@@ -290,6 +290,105 @@ func TestNonDemandSpawnedSeatRecordsNoDivergence(t *testing.T) {
 
 	if len(rec.Events) != 0 {
 		t.Fatalf("events = %+v, want none for a seat not spawned from demand", rec.Events)
+	}
+}
+
+// Kills a classifier that takes the trigger id from the seat's shell: the env
+// carries none, or a stale one, and the event still names the row stamp read
+// through the session row (gastownhall/gascity#5738).
+func TestDivergenceClassifiesTheSessionRowStampNotTheEnv(t *testing.T) {
+	stillThere := beads.Bead{
+		ID: "wb-1", Status: "open", Type: "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
+	}
+	for _, c := range []struct {
+		name string
+		env  []string
+	}{
+		{"no trigger id in the env", demandSpawnEnv()},
+		{"stale trigger id in the env", append(demandSpawnEnv(), "GC_TRIGGER_WORK_BEAD_ID=wb-env")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rec := events.NewFake()
+			prev := demandDivergenceRecorder
+			demandDivergenceRecorder = func(io.Writer) events.Recorder { return rec }
+			t.Cleanup(func() { demandDivergenceRecorder = prev })
+
+			ops := demandDivergenceOpsForBlockedBead(stillThere, nil, false, nil)
+			ops.ReadWorkMeta = func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, error) {
+				if beadID != stillThere.ID {
+					return beads.Bead{}, fmt.Errorf("read %s: not the row stamp", beadID)
+				}
+				return stillThere, nil
+			}
+			var asked []string
+			ops.ReadSessionTrigger = func(sessionID string) (string, error) {
+				asked = append(asked, sessionID)
+				return stillThere.ID, nil
+			}
+
+			var stderr bytes.Buffer
+			recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", divergenceOptions(c.env...), ops, &stderr)
+
+			if len(asked) != 1 || asked[0] != "gcs-1" {
+				t.Fatalf("session trigger reads = %v, want one read of gcs-1", asked)
+			}
+			if len(rec.Events) != 1 {
+				t.Fatalf("events = %+v, want exactly 1", rec.Events)
+			}
+			var payload events.SessionDemandClaimDivergencePayload
+			if err := json.Unmarshal(rec.Events[0].Payload, &payload); err != nil {
+				t.Fatalf("decoding payload: %v", err)
+			}
+			if payload.TriggerBeadID != "wb-1" || rec.Events[0].Subject != "wb-1" {
+				t.Fatalf("payload trigger %q, subject %q; want the row stamp wb-1", payload.TriggerBeadID, rec.Events[0].Subject)
+			}
+			if payload.Classification != events.DemandClaimDivergence || payload.TriggerStatusAtDrain != "open" {
+				t.Fatalf("payload = %+v, want a divergence over the open row", payload)
+			}
+		})
+	}
+}
+
+// Kills a failed session-row read that invents a verdict or reaches into the
+// drain: the event carries no trigger and classifies unknown, and the drain's
+// stdout and exit code match a seat the diagnostics skip entirely.
+func TestDivergenceWithAnUnreadableSessionRowIsUnknownAndLeavesTheDrainAlone(t *testing.T) {
+	rec := events.NewFake()
+	prev := demandDivergenceRecorder
+	demandDivergenceRecorder = func(io.Writer) events.Recorder { return rec }
+	t.Cleanup(func() { demandDivergenceRecorder = prev })
+
+	stillThere := beads.Bead{
+		ID: "wb-1", Status: "open", Type: "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
+	}
+	ops := demandDivergenceOpsForBlockedBead(stillThere, nil, false, nil)
+	ops.DrainAck = func(io.Writer) error { return nil }
+	ops.ReadWorkStarted = noStartedClaims
+	ops.ReadSessionTrigger = func(string) (string, error) { return "", errors.New("session row read failed") }
+
+	var baseOut, baseErr bytes.Buffer
+	baseCode := writeHookClaimNoWork(divergenceOptions(), ops, false, "/rig", &baseOut, &baseErr)
+	if len(rec.Events) != 0 {
+		t.Fatalf("events = %+v, want none for the unmarked baseline", rec.Events)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := writeHookClaimNoWork(divergenceOptions(demandSpawnEnv()...), ops, false, "/rig", &stdout, &stderr)
+
+	if code != baseCode || stdout.String() != baseOut.String() {
+		t.Fatalf("drain = %d %q, want the unmarked seat's %d %q", code, stdout.String(), baseCode, baseOut.String())
+	}
+	if len(rec.Events) != 1 {
+		t.Fatalf("events = %+v, want exactly 1", rec.Events)
+	}
+	var payload events.SessionDemandClaimDivergencePayload
+	if err := json.Unmarshal(rec.Events[0].Payload, &payload); err != nil {
+		t.Fatalf("decoding payload: %v", err)
+	}
+	if payload.TriggerBeadID != "" || payload.TriggerStatusAtDrain != "" || payload.Classification != events.DemandClaimUnknown {
+		t.Fatalf("payload = %+v, want no trigger and an unknown verdict", payload)
 	}
 }
 
