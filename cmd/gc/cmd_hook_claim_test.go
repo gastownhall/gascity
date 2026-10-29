@@ -782,6 +782,7 @@ func TestHookClaimTiersUseCASLandingBeforeCanonicalReadback(t *testing.T) {
 				rec := &turnBoundClaimRecorder{}
 				ops := rec.ops(t, "")
 				ops.Claim = hookClaimWithBdStore
+				ops.StoreRef = func(string) string { return "rig:fixture" }
 				ops.Now = func() time.Time { return clock }
 				ops.InvokedAt, ops.ClaimWindow = invokedAt, window
 				opts := hookClaimOptions{Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"worker"}, Env: env, JSON: true}
@@ -836,12 +837,12 @@ type hookClaimLandingClassStore struct {
 }
 
 // Claim completes the controlled class-store mutation.
-func (s hookClaimLandingClassStore) Claim(id, assignee string) (beads.Bead, bool, error) {
+func (s *hookClaimLandingClassStore) Claim(id, assignee string) (beads.Bead, bool, error) {
 	return s.claim(id, assignee)
 }
 
 // Get returns the controlled canonical row.
-func (s hookClaimLandingClassStore) Get(id string) (beads.Bead, error) { return s.get(id) }
+func (s *hookClaimLandingClassStore) Get(id string) (beads.Bead, error) { return s.get(id) }
 
 func TestClassRoutedClaimCapturesLandingBeforeCanonicalReadback(t *testing.T) {
 	for _, outcome := range []string{"canonical owner", "failed readback", "conflict", "foreign projection", "foreign canonical owner"} {
@@ -850,7 +851,7 @@ func TestClassRoutedClaimCapturesLandingBeforeCanonicalReadback(t *testing.T) {
 			landing := clock.Add(7 * time.Second)
 			mutations, reads := 0, 0
 			readErr := errors.New("canonical verification unavailable")
-			store := hookClaimLandingClassStore{Store: beads.NewMemStore()}
+			store := &hookClaimLandingClassStore{Store: beads.NewMemStore()}
 			store.claim = func(id, assignee string) (beads.Bead, bool, error) {
 				mutations++
 				clock = landing
