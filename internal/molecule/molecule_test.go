@@ -2372,13 +2372,28 @@ func TestInstantiateDepFailure(t *testing.T) {
 // every SetMetadataBatch target in call order — the failure-stamp sites in
 // molecule.go are the store's only callers, so the log is exactly the
 // stamp sequence. A refused call can also mimic a key-by-key store that
-// half-applies the batch before failing.
+// half-applies the batch before failing, and the store can refuse the
+// stamps of the Nth bead created through it.
 type stampFailStore struct {
 	beads.Store
-	refusals map[string]int
-	faults   map[string]error // refusal fault by id, cached so tests can errors.Is it
-	partial  bool             // on refusal, apply molecule_failed before failing
-	calls    []string
+	refusals         map[string]int
+	faults           map[string]error // refusal fault by id, cached so tests can errors.Is it
+	partial          bool             // on refusal, apply molecule_failed before failing
+	refuseCreated    int              // 1-based create ordinal whose stamps are refused
+	refuseCreatedCnt int              // refusals for that bead
+	created          []string         // ids in create order
+	calls            []string
+}
+
+func (s *stampFailStore) Create(b beads.Bead) (beads.Bead, error) {
+	created, err := s.Store.Create(b)
+	if err == nil {
+		s.created = append(s.created, created.ID)
+		if len(s.created) == s.refuseCreated {
+			s.refusals[created.ID] = s.refuseCreatedCnt
+		}
+	}
+	return created, err
 }
 
 func (s *stampFailStore) SetMetadataBatch(id string, kvs map[string]string) error {
@@ -2420,12 +2435,13 @@ type rootActivationFailStore struct {
 }
 
 // newRootActivationFailStore returns a store whose root refuses both its
-// activation and one failure-stamp attempt.
-func newRootActivationFailStore() *rootActivationFailStore {
+// activation and refuseStamps failure-stamp attempts (negative = every
+// attempt).
+func newRootActivationFailStore(refuseStamps int) *rootActivationFailStore {
 	return &rootActivationFailStore{
 		stampFailStore: &stampFailStore{Store: beads.NewMemStore(), refusals: map[string]int{}},
 		activationErr:  fmt.Errorf("injected activation conflict"),
-		refuseStamps:   1,
+		refuseStamps:   refuseStamps,
 	}
 }
 
@@ -2496,7 +2512,7 @@ func requireStampedAndUnfenced(t *testing.T, open map[string]beads.Bead) {
 // retried once after the body — or the root stays fenced and unmarked,
 // invisible to dispatch and recovery.
 func TestInstantiateFailureStampsTheRootWhoseActivationFailed(t *testing.T) {
-	store := newRootActivationFailStore() // the root's stamp is refused once
+	store := newRootActivationFailStore(1) // the root's stamp is refused once
 
 	_, err := Instantiate(context.Background(), store, twoStepGraphWorkflowRecipe(), Options{})
 	if err == nil {
@@ -2539,7 +2555,7 @@ func TestInstantiateFailureStampsTheRootWhoseActivationFailed(t *testing.T) {
 // A single-step graph workflow still retries: pass 2 runs even when pass 1
 // landed nothing.
 func TestInstantiateFailureRetriesSingleStepRootStamp(t *testing.T) {
-	store := newRootActivationFailStore()
+	store := newRootActivationFailStore(1)
 	recipe := &formula.Recipe{
 		Name:  "wf",
 		Steps: []formula.RecipeStep{{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}}},
@@ -2569,7 +2585,7 @@ func TestInstantiateFailureRetriesSingleStepRootStamp(t *testing.T) {
 
 // A key-by-key store can half-apply a refused batch; the retry completes it.
 func TestInstantiateFailureCompletesAPartiallyAppliedStamp(t *testing.T) {
-	store := newRootActivationFailStore()
+	store := newRootActivationFailStore(1)
 	store.partial = true // the refused first stamp applies molecule_failed only
 
 	_, err := Instantiate(context.Background(), store, twoStepGraphWorkflowRecipe(), Options{})
@@ -2597,7 +2613,7 @@ func TestInstantiateFailureCompletesAPartiallyAppliedStamp(t *testing.T) {
 
 // The correlated fault can hit a later bead instead of the root.
 func TestInstantiateFailureRetriesStampOfLaterActivatedBead(t *testing.T) {
-	store := newRootActivationFailStore()
+	store := newRootActivationFailStore(1)
 	store.skipActivations = 1 // the root activates; the body's activation fails
 
 	_, err := Instantiate(context.Background(), store, twoStepGraphWorkflowRecipe(), Options{})
@@ -2623,6 +2639,107 @@ func TestInstantiateFailureRetriesStampOfLaterActivatedBead(t *testing.T) {
 		t.Errorf("stamp calls = [%s], want [%s] (root stamped, body refused then retried)", got, want)
 	}
 	requireStampedAndUnfenced(t, open)
+}
+
+// A stamp that stays refused must be named in the returned error: the
+// order's log is the only place that says which bead was left behind.
+func TestInstantiateFailureNamesTheBeadsItCouldNotMark(t *testing.T) {
+	store := newRootActivationFailStore(-1) // the root's stamp is refused on every attempt
+
+	_, err := Instantiate(context.Background(), store, twoStepGraphWorkflowRecipe(), Options{})
+	if err == nil {
+		t.Fatal("Instantiate succeeded; want the injected activation failure")
+	}
+	if !store.activationFired {
+		t.Fatal("the injected activation fault never fired; the mint took another path")
+	}
+	if !errors.Is(err, store.activationErr) {
+		t.Fatal("Instantiate error does not wrap the activation fault")
+	}
+
+	rootID := store.faultedID
+	stampFault := store.faults[rootID]
+	if stampFault == nil {
+		t.Fatal("the root's stamp was never refused")
+	}
+	wantSuffix := fmt.Sprintf(" (failure stamp not confirmed: marking %s molecule_failed: %v)", rootID, stampFault)
+	if !strings.HasSuffix(err.Error(), wantSuffix) {
+		t.Errorf("Instantiate error = %q, want it to end with %q", err.Error(), wantSuffix)
+	}
+	if errors.Is(err, stampFault) {
+		t.Error("Instantiate error carries the stamp fault's identity; want the cause's only")
+	}
+
+	open := openBeadsByID(t, store)
+	var bodyID string
+	for _, b := range open {
+		if b.Metadata[beadmeta.KindMetadataKey] != "workflow" {
+			bodyID = b.ID
+			if b.Metadata[beadmeta.MoleculeFailedMetadataKey] != "true" || b.Metadata[InstantiatingMetadataKey] != "" {
+				t.Errorf("body %s molecule_failed=%q %s=%q; want the body stamped and un-fenced",
+					b.ID, b.Metadata[beadmeta.MoleculeFailedMetadataKey], InstantiatingMetadataKey, b.Metadata[InstantiatingMetadataKey])
+			}
+		}
+	}
+	if got, want := strings.Join(store.calls, ","), strings.Join([]string{rootID, bodyID, rootID}, ","); got != want {
+		t.Errorf("stamp calls = [%s], want [%s] (root attempted exactly twice)", got, want)
+	}
+}
+
+// depFailStampStore fails DepAdd with a fixed fault and delegates stamping
+// to the wrapped stampFailStore.
+type depFailStampStore struct {
+	*stampFailStore
+	depErr error
+}
+
+func (s *depFailStampStore) DepAdd(_, _, _ string) error { return s.depErr }
+
+// A refused stamp is retried on the plain (unfenced) molecule path too,
+// and the site's cause is unchanged once every stamp lands.
+func TestInstantiateNonGraphFailureRetriesRefusedStamp(t *testing.T) {
+	base := beads.NewMemStore()
+	depErr := fmt.Errorf("injected dep failure")
+	store := &depFailStampStore{
+		stampFailStore: &stampFailStore{
+			Store:            base,
+			refusals:         map[string]int{},
+			refuseCreated:    1, // the root's stamp is refused once
+			refuseCreatedCnt: 1,
+		},
+		depErr: depErr,
+	}
+	recipe := &formula.Recipe{
+		Name: "dep-fail",
+		Steps: []formula.RecipeStep{
+			{ID: "dep-fail", Title: "Root", Type: "molecule", IsRoot: true},
+			{ID: "dep-fail.b", Title: "B", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "dep-fail.b", DependsOnID: "dep-fail", Type: "parent-child"},
+		},
+	}
+
+	_, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err == nil {
+		t.Fatal("Instantiate succeeded; want the injected dep failure")
+	}
+	if !errors.Is(err, depErr) {
+		t.Fatalf("Instantiate error = %q, want it to wrap %v", err, depErr)
+	}
+	if strings.Contains(err.Error(), "failure stamp not confirmed") {
+		t.Errorf("Instantiate error = %q; want the site's cause unchanged once every stamp lands", err)
+	}
+
+	open := openBeadsByID(t, store)
+	if len(open) != 2 {
+		t.Fatalf("open beads = %d, want 2", len(open))
+	}
+	requireStampedAndUnfenced(t, open)
+	rootID, bodyID := store.created[0], store.created[1]
+	if got, want := strings.Join(store.calls, ","), strings.Join([]string{rootID, bodyID, rootID}, ","); got != want {
+		t.Errorf("stamp calls = [%s], want [%s] (root refused, body stamped, root retried)", got, want)
+	}
 }
 
 func TestCookOnRequiresParentID(t *testing.T) {
