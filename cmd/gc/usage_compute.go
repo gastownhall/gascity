@@ -453,10 +453,13 @@ func (cr *CityRuntime) accountTerminalInterval(
 // closed row off the marked listing, and for an open marked row (a configured
 // named session the sync phase reopened before the reconciler re-wakes it)
 // off the open snapshot, where the settle takes precedence over the live and
-// terminal lanes. A row with nothing to account — no confirmed start, or an
-// already-recorded interval — has its markers cleared so the listing stops
-// returning it; otherwise the interval is accounted through the shared
-// terminal block, which clears the markers on commit.
+// terminal lanes. A row with nothing to account — no confirmed start, an
+// already-recorded interval, an open row re-woken on a newer interval (the
+// marked one is superseded and lost), or an open row still live on the
+// interval the close claims to have ended (a marker that raced a re-wake) —
+// has its markers cleared so the listing and the open filter stop returning
+// it; otherwise the interval is accounted through the shared terminal block,
+// which clears the markers on commit.
 func (cr *CityRuntime) settleClosedInterval(
 	ctx context.Context,
 	sink usage.Sink,
@@ -470,16 +473,50 @@ func (cr *CityRuntime) settleClosedInterval(
 	meta := b.Metadata
 	awakeStart := strings.TrimSpace(meta["awake_started_at"])
 	if awakeStart != "" && strings.TrimSpace(meta[usageComputeEmittedAtKey]) != awakeStart {
+		if anchorRaw := strings.TrimSpace(meta[session.MetadataKeyUsageClosedAt]); anchorRaw != "" {
+			if anchor, err := time.Parse(time.RFC3339Nano, anchorRaw); err == nil {
+				if started, serr := time.Parse(time.RFC3339, awakeStart); serr == nil {
+					if started.After(anchor) {
+						// The row re-woke on a NEWER interval than the one the
+						// close ended: the marked interval is superseded — its
+						// end is no longer measurable, so it is lost — and the
+						// live interval's own accounting (when it ends) is not
+						// this settle's to touch.
+						logf("usage: closed interval of session %s ended at %s is superseded by a newer interval; dropping the marker",
+							b.ID, anchorRaw)
+						cr.clearUsageCloseMarkers(store, b.ID, logf)
+						return
+					}
+					if b.Status == "open" && isLiveModelSweepState(meta["state"]) {
+						// The marker raced a row still awake on the very
+						// interval the close claims to have ended: the
+						// interval is live, not closed. Leave its accounting
+						// to the ordinary lanes when it really ends.
+						logf("usage: close marker of session %s raced an awake interval; dropping the marker",
+							b.ID)
+						cr.clearUsageCloseMarkers(store, b.ID, logf)
+						return
+					}
+				}
+			}
+		}
 		cr.accountTerminalInterval(ctx, sink, store, b, runtimeKind, now, logf, modelSweepFactory)
 		return
 	}
 	// Nothing to account. Clear the markers so the closed listing stops
 	// returning the row.
-	if err := store.SetMetadataBatch(b.ID, map[string]string{
+	cr.clearUsageCloseMarkers(store, b.ID, logf)
+}
+
+// clearUsageCloseMarkers clears a row's close-settle markers (issue #6672):
+// the closed interval is settled, or the row had nothing to account. The row
+// leaves both the marked closed listing and the open loop's marked candidacy.
+func (cr *CityRuntime) clearUsageCloseMarkers(store beads.Store, id string, logf func(string, ...any)) {
+	if err := store.SetMetadataBatch(id, map[string]string{
 		session.MetadataKeyUsageClosePending: "",
 		session.MetadataKeyUsageClosedAt:     "",
 	}); err != nil {
-		logf("usage: clearing close markers for session %s failed; will retry: %v", b.ID, err)
+		logf("usage: clearing close markers for session %s failed; will retry: %v", id, err)
 	}
 }
 

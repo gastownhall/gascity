@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -279,5 +283,222 @@ func TestReopenedSessionOldIntervalSettledBeforeRewake(t *testing.T) {
 	}
 	if v := got.Metadata[session.MetadataKeyUsageClosedAt]; v != "" {
 		t.Errorf("usage_closed_at = %q, want cleared before the re-wake", v)
+	}
+}
+
+// rawSinkComputeFactCount counts compute facts in the raw sink log, BEFORE
+// ReadFacts' idempotency-key dedup collapses re-records — the "a later pass
+// records nothing" assertions need the raw count.
+func rawSinkComputeFactCount(t *testing.T, path string) int {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("reading usage sink %s: %v", path, err)
+	}
+	n := 0
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var f usage.Fact
+		if err := json.Unmarshal([]byte(line), &f); err != nil {
+			t.Fatalf("malformed usage fact %q: %v", line, err)
+		}
+		if f.Kind == usage.KindCompute {
+			n++
+		}
+	}
+	return n
+}
+
+// TestSettledMarkedRowWithNothingToAccountClearsMarkers pins AC-5 of issue
+// #6672: a marked row the lane visits with nothing to account — no confirmed
+// awake interval, an interval already committed, an open row whose re-wake
+// replaced the marked interval, or an open row still live on the interval the
+// close claims to have ended — records no compute fact and clears the
+// markers so the listing and the open filter stop returning it.
+func TestSettledMarkedRowWithNothingToAccountClearsMarkers(t *testing.T) {
+	cityRoot := t.TempDir()
+	codexRoot := t.TempDir()
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	closedAt := start.Add(10 * time.Minute)
+	startRaw := start.Format(time.RFC3339Nano)
+	rewakeRaw := start.Add(20 * time.Minute).Format(time.RFC3339Nano)
+
+	cases := []struct {
+		name string
+		// open feeds the row as the tick does (the open snapshot); closed
+		// leaves it to the marked closed listing.
+		open         bool
+		state        string
+		awakeStartAt string
+		emittedAt    string
+		// wantEmitted is the usage_compute_emitted_at value the pass must
+		// leave on the row: unchanged where the interval's own accounting is
+		// not the settle's to touch.
+		wantEmitted string
+	}{
+		{
+			name:         "no awake interval",
+			state:        "drained",
+			awakeStartAt: "",
+			emittedAt:    "",
+		},
+		{
+			name:         "interval already committed",
+			state:        "drained",
+			awakeStartAt: startRaw,
+			emittedAt:    startRaw,
+			wantEmitted:  startRaw,
+		},
+		{
+			// The sync phase reopened the row and the reconciler already
+			// re-woke it on a newer interval: the marked interval is
+			// superseded and lost.
+			name:         "reopen re-woke a newer interval",
+			open:         true,
+			state:        "active",
+			awakeStartAt: rewakeRaw,
+			wantEmitted:  "",
+		},
+		{
+			// The close's marker raced a row that is still awake on the
+			// interval the close claims to have ended: the interval is live,
+			// not closed, and the ordinary lanes account it when it ends.
+			name:         "still live on the marked interval's start",
+			open:         true,
+			state:        "active",
+			awakeStartAt: startRaw,
+			wantEmitted:  "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := filepath.Join(cityRoot, t.Name())
+			sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
+			store := beads.NewMemStore()
+			meta := map[string]string{
+				"state":            tc.state,
+				"session_name":     "worker-1",
+				"provider":         "codex",
+				"builtin_ancestor": "codex",
+				"molecule_id":      "run-G",
+			}
+			if tc.awakeStartAt != "" {
+				meta["awake_started_at"] = tc.awakeStartAt
+			}
+			if tc.emittedAt != "" {
+				meta[usageComputeEmittedAtKey] = tc.emittedAt
+			}
+			b, err := store.Create(beads.Bead{
+				Type:     session.BeadType,
+				Status:   "open",
+				Title:    "codex worker",
+				Labels:   []string{session.LabelSession},
+				Metadata: meta,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.open {
+				if err := store.Close(b.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := store.SetMetadataBatch(b.ID, session.UsageClosePatch(closedAt)); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg := &config.City{Daemon: config.DaemonConfig{ObservePaths: []string{codexRoot}}}
+			cs := &controllerState{cityBeadStore: store, usageSink: usage.NewLocalSink(sinkPath), cityName: "demo", cityPath: cityPath}
+			cr := &CityRuntime{cs: cs, cfg: cfg, sp: nil, cityName: "demo", cityPath: cityPath, stderr: io.Discard}
+
+			var openInfos []session.Info
+			if tc.open {
+				snap, err := loadSessionBeadSnapshot(store)
+				if err != nil {
+					t.Fatal(err)
+				}
+				openInfos = snap.OpenInfos()
+			}
+			cr.emitDueComputeFacts(context.Background(), openInfos, false)
+
+			facts, _, err := usage.ReadFacts(sinkPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := kindCount(facts, usage.KindCompute); n != 0 {
+				t.Errorf("compute facts = %d, want 0 (nothing to account)", n)
+			}
+			got, err := store.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if v := got.Metadata[session.MetadataKeyUsageClosePending]; v != "" {
+				t.Errorf("usage_close_pending = %q, want cleared", v)
+			}
+			if v := got.Metadata[session.MetadataKeyUsageClosedAt]; v != "" {
+				t.Errorf("usage_closed_at = %q, want cleared", v)
+			}
+			if got := got.Metadata[usageComputeEmittedAtKey]; got != tc.wantEmitted {
+				t.Errorf("usage_compute_emitted_at = %q, want %q (the interval's own accounting untouched)", got, tc.wantEmitted)
+			}
+		})
+	}
+}
+
+// TestSettledRowIsNotRevisitedOnLaterPass pins AC-5 of issue #6672: a row the
+// lane has settled — its markers cleared — is listed no more on a later pass
+// and records nothing, so the settle is idempotent across passes.
+func TestSettledRowIsNotRevisitedOnLaterPass(t *testing.T) {
+	cityPath := t.TempDir()
+	codexRoot := t.TempDir()
+	sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
+	store := beads.NewMemStore()
+
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	closedAt := start.Add(10 * time.Minute)
+	startRaw := start.Format(time.RFC3339Nano)
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Status: "open",
+		Title:  "codex worker",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":            "drained",
+			"session_name":     "worker-1",
+			"awake_started_at": startRaw,
+			"provider":         "codex",
+			"builtin_ancestor": "codex",
+			"molecule_id":      "run-H",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadataBatch(b.ID, session.UsageClosePatch(closedAt)); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{Daemon: config.DaemonConfig{ObservePaths: []string{codexRoot}}}
+	cs := &controllerState{cityBeadStore: store, usageSink: usage.NewLocalSink(sinkPath), cityName: "demo", cityPath: cityPath}
+	cr := &CityRuntime{cs: cs, cfg: cfg, sp: nil, cityName: "demo", cityPath: cityPath, stderr: io.Discard}
+
+	cr.emitDueComputeFacts(context.Background(), nil, false)
+	if got := rawSinkComputeFactCount(t, sinkPath); got != 1 {
+		t.Fatalf("raw compute facts after the first pass = %d, want 1", got)
+	}
+	// The later pass: the markers are gone, so the listing returns the row no
+	// more and nothing is recorded for it again.
+	cr.emitDueComputeFacts(context.Background(), nil, false)
+	cr.emitDueComputeFacts(context.Background(), nil, false)
+	if got := rawSinkComputeFactCount(t, sinkPath); got != 1 {
+		t.Fatalf("raw compute facts after later passes = %d, want 1 (settled row records nothing)", got)
 	}
 }
