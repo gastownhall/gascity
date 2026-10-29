@@ -58,3 +58,36 @@ func TestStartAcceptsWorkspaceTrustDialogBeforeFirstTurn(t *testing.T) {
 		t.Fatalf("a confirmed dialog must not warn: %q", warnings.String())
 	}
 }
+
+// With acceptance disabled the dialog step issues nothing, so the herdr call
+// sequence is the one Start issued before the step existed.
+func TestStartSkipsStartupDialogsWhenNotEnabled(t *testing.T) {
+	off := false
+	for _, tc := range []struct {
+		name string
+		cfg  runtime.Config
+	}{
+		{"no hints", runtime.Config{Command: "claude", Nudge: "do work"}},
+		{"explicitly off", runtime.Config{Command: "claude", ProcessNames: []string{"claude"}, AcceptStartupDialogs: &off, Nudge: "do work"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if runtime.ShouldAcceptStartupDialogs(tc.cfg) {
+				t.Fatal("test setup: ShouldAcceptStartupDialogs(cfg) must be false")
+			}
+			p, state := newFakeHerdrProvider(t)
+			listenHerdrSocket(t, p)
+			setState(t, state, "trust_dialog")
+
+			if err := p.Start(context.Background(), "gastown__worker", tc.cfg); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			calls := fakeCalls(t, state)
+			if strings.Contains(calls, "pane read") || strings.Contains(calls, "pane send-keys") {
+				t.Fatalf("disabled dialog acceptance still touched the pane:\n%s", calls)
+			}
+			if !strings.Contains(calls, "agent prompt %5 do work") {
+				t.Fatalf("first turn was not delivered:\n%s", calls)
+			}
+		})
+	}
+}
