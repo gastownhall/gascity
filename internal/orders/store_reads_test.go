@@ -150,6 +150,28 @@ func TestRecentRunsAllOpenRunsUseLiveTier(t *testing.T) {
 		t.Fatalf("OpenRuns(): %v", err)
 	}
 	assertAllLive(t, "OpenRuns", spy.queries)
+
+	// The stale sweep clears the gate OpenRuns holds, so it must see the same
+	// Live set, not the cache snapshot.
+	spy.queries = nil
+	if _, err := st.StaleOpenRuns(time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("StaleOpenRuns(): %v", err)
+	}
+	assertAllLive(t, "StaleOpenRuns", spy.queries)
+	assertSweepQueryShape(t, "StaleOpenRuns", spy.queries)
+}
+
+// assertSweepQueryShape pins the sweep readers' query: every not-closed
+// tracking bead across both tiers, with no Status filter (an in_progress jam
+// must still be swept) and no backing limit (the caller post-filters before
+// applying its close budget).
+func assertSweepQueryShape(t *testing.T, name string, queries []beads.ListQuery) {
+	t.Helper()
+	for i, q := range queries {
+		if q.Label != "order-tracking" || q.IncludeClosed || q.Status != "" || q.Limit != 0 || q.TierMode != beads.TierBoth {
+			t.Fatalf("%s query[%d] = %+v, want Label=order-tracking, IncludeClosed=false, Status=\"\", Limit=0, TierMode=TierBoth", name, i, q)
+		}
+	}
 }
 
 func assertAllLive(t *testing.T, name string, queries []beads.ListQuery) {
@@ -432,4 +454,61 @@ func TestClosedRunsForRetentionBestEffortName(t *testing.T) {
 	if len(runs) != 2 {
 		t.Fatalf("ClosedRunsForRetention() returned %d runs, want 2 (including the unresolvable-name bead)", len(runs))
 	}
+}
+
+// primedCacheWithBackingOnlyTracking primes a CachingStore to its live snapshot
+// over an empty MemStore, then writes an open tracking bead straight to the
+// backing: the dispatcher's uncached-handle shape. The cache never absorbs it.
+func primedCacheWithBackingOnlyTracking(t *testing.T) (*beads.CachingStore, beads.Bead) {
+	t.Helper()
+	backing := beads.NewMemStore()
+	cache := beads.NewCachingStore(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	written, err := backing.Create(beads.Bead{Title: "order:digest", Labels: []string{"order-run:digest", "order-tracking"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached, err := cache.ListByLabel("order-tracking", 0)
+	if err != nil {
+		t.Fatalf("cache.ListByLabel: %v", err)
+	}
+	if beadsContain(cached, written.ID) {
+		t.Fatalf("cache.ListByLabel() listed backing-only bead %s; the fixture no longer serves the snapshot", written.ID)
+	}
+	return cache, written
+}
+
+// TestStaleOpenRunsBypassesCache: a tracking bead written behind a live cache
+// snapshot is visible to OpenRuns, so the stale sweep that clears OpenRuns'
+// gate must see it too (#5832).
+func TestStaleOpenRunsBypassesCache(t *testing.T) {
+	cache, written := primedCacheWithBackingOnlyTracking(t)
+
+	runs, err := ordersStoreOver(cache).StaleOpenRuns(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("StaleOpenRuns(): %v", err)
+	}
+	if !runsContain(runs, written.ID) {
+		t.Fatalf("StaleOpenRuns() = %v; missed backing-only bead %s (read the cache snapshot, not the Live tier)", runs, written.ID)
+	}
+}
+
+func beadsContain(list []beads.Bead, id string) bool {
+	for _, b := range list {
+		if b.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func runsContain(runs []OrderRun, id string) bool {
+	for _, r := range runs {
+		if r.ID == id {
+			return true
+		}
+	}
+	return false
 }

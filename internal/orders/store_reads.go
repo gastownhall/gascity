@@ -20,6 +20,8 @@ import (
 // Read tiers are declared per method and preserved from the ops they replace:
 //   - RecentRunsAll / OpenRuns (the dispatch cooldown/single-flight index) read
 //     the LIVE tier — cache-bypass is the duplicate-dispatch guarantee.
+//   - StaleOpenRuns (the sweep that clears that gate) reads the LIVE tier too,
+//     so it sees every tracking bead OpenRuns does.
 //   - LastRun / Cursor preserve the dispatcher's pre-existing bare-List tier so
 //     the migration is behavior-preserving.
 //   - Get / RunDetail are the by-id detail reads (bare Get).
@@ -134,19 +136,21 @@ func (s *Store) OpenRuns() ([]OrderRun, error) {
 	return decodeTrackingRuns(list), err
 }
 
-// StaleOpenRuns lists OPEN tracking beads whose CreatedAt is at or before cutoff,
-// decoded into OrderRun (both tiers — legacy issues and wisp — like the sweep's
-// ListByLabel). It is the typed read half of the stale-order-tracking sweep: the
-// caller applies any order-name filter (run.Scoped), close budget, and the
-// sweep-vocabulary metadata close. Names are resolved best-effort (Scoped is ""
-// for a tracking bead that carries neither an order-run label nor an order:
-// title), matching the sweep's "when no order filter is set, close every stale
-// tracking bead" behavior.
+// StaleOpenRuns lists not-closed tracking beads whose CreatedAt is at or before
+// cutoff, decoded into OrderRun across both tiers (legacy issues and wisp). It
+// reads the LIVE tier: the sweep clears the gate OpenRuns holds, so it must see
+// the same set rather than a cache snapshot that never absorbed the
+// dispatcher's uncached writes (#5832). It is the typed read half of the
+// stale-order-tracking sweep: the caller applies any order-name filter
+// (run.Scoped), close budget, and the sweep-vocabulary metadata close. Names are
+// resolved best-effort (Scoped is "" for a tracking bead that carries neither an
+// order-run label nor an order: title), matching the sweep's "when no order
+// filter is set, close every stale tracking bead" behavior.
 func (s *Store) StaleOpenRuns(cutoff time.Time) ([]OrderRun, error) {
 	if s.store.Store == nil {
 		return nil, nil
 	}
-	all, err := s.store.ListByLabel(labelOrderTracking, 0, beads.WithBothTiers)
+	all, err := s.sweepTrackingBeads()
 	if err != nil {
 		return nil, err
 	}
@@ -184,6 +188,17 @@ func (s *Store) OrphanedOpenRuns() ([]OrderRun, error) {
 		out = append(out, decodeRun(name, b))
 	}
 	return out, nil
+}
+
+// sweepTrackingBeads is the sweep readers' shared LIVE read: every not-closed
+// tracking bead across both tiers. It carries no Status filter (an in_progress
+// jam must still be swept) and no backing limit (callers post-filter before
+// applying their close budget).
+func (s *Store) sweepTrackingBeads() ([]beads.Bead, error) {
+	return beads.HandlesFor(s.store.Store).Live.List(beads.ListQuery{
+		Label:    labelOrderTracking,
+		TierMode: beads.TierBoth,
+	})
 }
 
 // ClosedRunsForRetention lists the CLOSED tracking beads across every order
