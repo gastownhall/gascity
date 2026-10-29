@@ -302,3 +302,24 @@ func TestAssignedReadyEmptyIdentitiesUnchanged(t *testing.T) {
 		t.Fatalf("assigned read ran with no identity variables; reader calls:\n%s", log)
 	}
 }
+
+// TestAssignedReadyServesHumanLabeledAssignmentAheadOfRoutedStep pins AC-3:
+// bd's native human label parks a bead for a person, but it is not a dispatch
+// hold, and an assignment already owned is owned work — so a human-labeled
+// assigned task is served ahead of the routed step on every topology, and the
+// dispatch-hold exclusion must never widen to it. A non-canonical hold:human
+// label is an ordinary label and is served too.
+func TestAssignedReadyServesHumanLabeledAssignmentAheadOfRoutedStep(t *testing.T) {
+	const identity = "sess-1"
+	for _, label := range []string{"human", "hold:human"} {
+		for topoName, topo := range assignedReadyHoldTopologies() {
+			t.Run(label+"/"+topoName, func(t *testing.T) {
+				humanRow := assignedReadyHoldAssignedRow("wk-human", identity, label, false)
+				out, log := assignedReadyHoldRunQuery(t, topo, map[string]string{"GC_SESSION_ID": identity}, identity, humanRow, humanRow)
+				if out != humanRow {
+					t.Fatalf("human-labeled assigned task was not served ahead of the routed step; got %q (reader calls:\n%s)", out, log)
+				}
+			})
+		}
+	}
+}

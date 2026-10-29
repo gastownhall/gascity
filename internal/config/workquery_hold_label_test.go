@@ -12,7 +12,9 @@ import (
 // shell-generator level: route-scoped, unassigned pool-demand queries (Tier
 // 3, and the reconciler's count-form) must exclude beads carrying a
 // beadmeta.DispatchHoldLabels value, while the assignee-scoped ephemeral
-// probe (Tier 1/2) stays hold-transparent.
+// probe (Tier 1/2) stays hold-transparent. The assigned-ready reader
+// excludes the dispatch holds too (#8010) — its flags are pinned
+// human-transparent below alongside the probes'.
 
 func TestBdReadyPoolDemandShellExcludesDispatchHoldLabels(t *testing.T) {
 	got := bdReadyPoolDemandShell("--limit 0", QueryTopology{})
@@ -110,6 +112,12 @@ func TestAssigneeScopedProbesStayHumanTransparent(t *testing.T) {
 	for name, got := range map[string]string{
 		"ephemeralAssignedReadyProbeScript":      ephemeralAssignedReadyProbeScript("cand", QueryTopology{}),
 		"ephemeralAssignedInProgressProbeScript": ephemeralAssignedInProgressProbeScript("cand", QueryTopology{}),
+		// The assigned-ready reader's dispatch-hold flags (#8010) are
+		// assignee-scoped work-serving, so they share the pin: the human label
+		// must never ride them.
+		"assignedReadyTierCommand/bd104":     assignedReadyTierCommand("cand", QueryTopology{}),
+		"assignedReadyTierCommand/bd105":     assignedReadyTierCommand("cand", singleStoreTopology()),
+		"assignedReadyTierCommand/federated": assignedReadyTierCommand("cand", federatedTopology()),
 	} {
 		if strings.Contains(got, `"human"`) {
 			t.Errorf("%s() = %q, assignee-scoped tier must stay human-transparent", name, got)
