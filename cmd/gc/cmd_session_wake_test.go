@@ -652,6 +652,10 @@ func TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart(t *testi
 	if err != nil {
 		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
 	}
+	// Session resolution and session-row writes go through the session-class
+	// store, as the CLI's own callers do (cliSessionStore): the fixture now
+	// matches the production path.
+	store = cliSessionStore(store, cfg, cityDir)
 	sessionID, err := resolveSessionIDMaterializingNamed(cityDir, cfg, store, "mayor")
 	if err != nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(mayor): %v", err)
