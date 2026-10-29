@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -533,6 +534,86 @@ func TestProbedEntryWithFailedHashUsesStableSentinel(t *testing.T) {
 	}
 }
 
+// TestCoreFingerprintDriftNamesTheMovedField moves one core field per case and
+// requires the drift diagnostics to name a field whenever the core fingerprint
+// moved. A field hashed into the core but missing from the breakdown would log
+// "no per-field diff" and hide the cause of a real restart.
+func TestCoreFingerprintDriftNamesTheMovedField(t *testing.T) {
+	base := Config{
+		Command:     "claude",
+		Upstream:    "anthropic",
+		OperatorEnv: map[string]string{"CLAUDE_CONFIG_DIR": "/a"},
+	}
+	cases := []struct {
+		name   string
+		want   string
+		mutate func(c *Config)
+	}{
+		{"operator_env_add_empty_value", "OperatorEnv", func(c *Config) { c.OperatorEnv = envWith(c.OperatorEnv, "NEW_KEY", "") }},
+		{"operator_env_add_value", "OperatorEnv", func(c *Config) { c.OperatorEnv = envWith(c.OperatorEnv, "NEW_KEY", "v") }},
+		{"operator_env_change_value", "OperatorEnv", func(c *Config) { c.OperatorEnv = envWith(c.OperatorEnv, "CLAUDE_CONFIG_DIR", "/b") }},
+		{"operator_env_value_to_empty", "OperatorEnv", func(c *Config) { c.OperatorEnv = envWith(c.OperatorEnv, "CLAUDE_CONFIG_DIR", "") }},
+		{"upstream_switch", "Upstream", func(c *Config) { c.Upstream = "bedrock" }},
+		{"upstream_removed", "Upstream", func(c *Config) { c.Upstream = "" }},
+		{"command_change_control", "Command", func(c *Config) { c.Command = "codex" }},
+	}
+	raw, err := json.Marshal(CoreFingerprintBreakdown(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			current := base
+			tc.mutate(&current)
+			if CoreFingerprint(base) == CoreFingerprint(current) {
+				t.Fatal("the mutation did not move the core fingerprint")
+			}
+			if got := CoreFingerprintDriftFieldsFromJSON(string(raw), current); !slices.Equal(got, []string{tc.want}) {
+				t.Fatalf("CoreFingerprintDriftFieldsFromJSON = %v, want [%s]", got, tc.want)
+			}
+			var out strings.Builder
+			LogCoreFingerprintDrift(&out, "worker", string(raw), current)
+			if !strings.Contains(out.String(), "drifted fields: "+tc.want+"\n") {
+				t.Fatalf("LogCoreFingerprintDrift = %q, want it to name %s", out.String(), tc.want)
+			}
+		})
+	}
+
+	switched := base
+	switched.Upstream = "bedrock"
+	var out strings.Builder
+	LogCoreFingerprintDrift(&out, "worker", string(raw), switched)
+	if !strings.Contains(out.String(), `Upstream: "bedrock"`) {
+		t.Fatalf("drift detail = %q, want the current upstream", out.String())
+	}
+
+	// Upstream unset leaves the core hash unchanged, so it must leave the
+	// breakdown without the field too: stored breakdowns stay byte-identical.
+	if _, ok := CoreFingerprintBreakdown(Config{Command: "claude"}).Fields["Upstream"]; ok {
+		t.Fatal("an empty Upstream must leave the breakdown without the field")
+	}
+}
+
+// TestCoreFingerprintDriftNamesEveryCoreField runs every field of the
+// partition's case table, which covers each field hashed into the core, and
+// requires the breakdown to name a drifted field for each.
+func TestCoreFingerprintDriftNamesEveryCoreField(t *testing.T) {
+	base := goldenFixtures()["comprehensive"]
+	stored := CoreFingerprintBreakdown(base)
+	for _, tc := range partitionHalfCases {
+		t.Run(tc.field, func(t *testing.T) {
+			current := base
+			tc.mutate(&current)
+			if CoreFingerprint(base) == CoreFingerprint(current) {
+				t.Fatal("the mutation did not move the core fingerprint")
+			}
+			if got := CoreFingerprintDriftFields(stored, current); len(got) == 0 {
+				t.Fatal("the core fingerprint moved but the breakdown names no drifted field")
+			}
+		})
+	}
+}
+
 func TestCoreFingerprintBreakdownConsistency(t *testing.T) {
 	cfgs := []Config{
 		{Command: "claude"},
@@ -543,6 +624,7 @@ func TestCoreFingerprintBreakdownConsistency(t *testing.T) {
 		{Command: "claude", SessionSetup: []string{"set -x"}},
 		{Command: "claude", OverlayDir: "/overlay"},
 		{Command: "claude", OperatorEnv: map[string]string{"CLAUDE_CONFIG_DIR": "/x"}},
+		{Command: "claude", Upstream: "bedrock"},
 	}
 	for i, a := range cfgs {
 		for j, b := range cfgs {

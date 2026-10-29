@@ -651,8 +651,14 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 			}
 		}),
 	}
-	// Conditional, as in the core hash, so a breakdown with no operator env
-	// stays byte-identical to one stored before this field existed.
+	// Upstream and OperatorEnv are conditional, as in the core hash, so a
+	// breakdown that sets neither stays byte-identical to one stored before
+	// these fields existed.
+	if cfg.Upstream != "" {
+		fields["Upstream"] = fieldHash(func(h hash.Hash) {
+			hashOptionalString(h, "upstream", cfg.Upstream)
+		})
+	}
 	if len(cfg.OperatorEnv) > 0 {
 		fields["OperatorEnv"] = fieldHash(func(h hash.Hash) {
 			hashSortedMap(h, cfg.OperatorEnv)
@@ -743,6 +749,8 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedJSON string, curren
 			}
 		case "PreStart":
 			fmt.Fprintf(w, "    PreStart: %v\n", current.PreStart) //nolint:errcheck // best-effort diag
+		case "Upstream":
+			fmt.Fprintf(w, "    Upstream: %q\n", current.Upstream) //nolint:errcheck // best-effort diag; a name, not the serving env
 		case "OperatorEnv":
 			fmt.Fprintf(w, "    OperatorEnv keys: %v\n", slices.Sorted(maps.Keys(current.OperatorEnv))) //nolint:errcheck // best-effort diag; values may be secrets
 		case "OverlayDir":
@@ -816,7 +824,7 @@ func parseStoredBreakdown(stored string) (fields map[string]string, copyEntries 
 
 // diffBreakdownFields returns the sorted list of field names where the
 // stored and current per-field hashes differ, a field only one side carries
-// (a conditional one such as OperatorEnv) included.
+// (a conditional one such as Upstream or OperatorEnv) included.
 func diffBreakdownFields(stored, current map[string]string) []string {
 	var diffs []string
 	for field, ch := range current {
