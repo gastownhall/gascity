@@ -282,6 +282,15 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		if b.Metadata == nil {
 			return
 		}
+		// A marked row settles first, whatever else the fresh bead shows: a
+		// close's pending interval outranks the live and terminal lanes, which
+		// either would mis-account it (a live read of a row whose interval
+		// really ended at the close) or skip it (a stopped/dormant reopen that
+		// no open-lane filter selects).
+		if strings.TrimSpace(b.Metadata[session.MetadataKeyUsageClosePending]) == "true" {
+			cr.settleClosedInterval(ctx, sink, store, b, runtimeKind, now, logf, modelSweepFactory)
+			return
+		}
 		state := b.Metadata["state"]
 		if isLiveModelSweepState(state) {
 			// Routed off the FRESH bead, so a session that woke since the snapshot
@@ -310,7 +319,12 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 			return
 		}
 		liveCandidate := liveLane && liveModelSweepCandidate(info)
-		if !computeFactGetCandidate(info) && !liveCandidate {
+		// A marked row joins the candidates whatever its state: a close's
+		// pending interval must settle even when the row sits open in a state
+		// neither open-lane filter selects (a stopped/dormant reopen, issue
+		// #6672's AC-4).
+		marked := strings.TrimSpace(info.UsageClosePending) == "true"
+		if !computeFactGetCandidate(info) && !liveCandidate && !marked {
 			continue
 		}
 		b, err := store.Get(info.ID)
@@ -435,11 +449,14 @@ func (cr *CityRuntime) accountTerminalInterval(
 // settleClosedInterval settles the awake interval a close ended straight from
 // an awake state (issue #6672) on a row the close marked with
 // usage_close_pending. Such a row never sits open in a compute-terminal
-// state, so the open-snapshot scan cannot account it; this lane does. A row
-// with nothing to account — no confirmed start, or an already-recorded
-// interval — has its markers cleared so the listing stops returning it;
-// otherwise the interval is accounted through the shared terminal block,
-// which clears the markers on commit.
+// state, so the open-snapshot scan cannot account it; this lane does — for a
+// closed row off the marked listing, and for an open marked row (a configured
+// named session the sync phase reopened before the reconciler re-wakes it)
+// off the open snapshot, where the settle takes precedence over the live and
+// terminal lanes. A row with nothing to account — no confirmed start, or an
+// already-recorded interval — has its markers cleared so the listing stops
+// returning it; otherwise the interval is accounted through the shared
+// terminal block, which clears the markers on commit.
 func (cr *CityRuntime) settleClosedInterval(
 	ctx context.Context,
 	sink usage.Sink,

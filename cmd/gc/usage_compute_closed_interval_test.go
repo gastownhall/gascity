@@ -175,3 +175,109 @@ func TestClosedSessionSettleSweepsTrailingTurnsAndAdvancesCursor(t *testing.T) {
 		t.Errorf("usage_close_pending = %q, want cleared", v)
 	}
 }
+
+// TestReopenedSessionOldIntervalSettledBeforeRewake pins AC-4 of issue #6672:
+// a configured named session closed straight from active (a dead-runtime
+// close) and reopened by the sync phase before the usage lane runs is an OPEN
+// row carrying the close markers, so neither the closed-row listing nor the
+// old open-lane filters find it. The same tick's usage pass must still settle
+// the old interval — one compute fact with end = usage_closed_at, markers
+// cleared before the reconciler re-wakes the session.
+func TestReopenedSessionOldIntervalSettledBeforeRewake(t *testing.T) {
+	cityPath := t.TempDir()
+	codexRoot := t.TempDir()
+	sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
+	store := beads.NewMemStore()
+
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	closedAt := start.Add(10 * time.Minute)
+	startRaw := start.Format(time.RFC3339Nano)
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Status: "open",
+		Title:  "codex named worker",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":            "active",
+			"session_name":     "worker-1",
+			"awake_started_at": startRaw,
+			"provider":         "codex",
+			"builtin_ancestor": "codex",
+			"molecule_id":      "run-F",
+			// No session_key: the settle sweep resolves a definitive miss, so
+			// the interval commits on this pass.
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	// The dead-runtime close's settle markers, exactly as ClosePatch stamps them.
+	if err := store.SetMetadataBatch(b.ID, session.UsageClosePatch(closedAt)); err != nil {
+		t.Fatal(err)
+	}
+	// The sync phase reopens the row for a fresh spawn before the usage lane
+	// runs: reopenNamedSessionBatch's write, a stopped row with a pending-create
+	// claim, closed_at cleared but the close markers and the old awake interval
+	// retained — the reconciler has not re-woken the session yet.
+	closed, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopenBatch := reopenNamedSessionBatch(closed, "stopped", closedAt.Add(time.Minute))
+	open := "open"
+	if err := store.Tx("test: reopen closed named session", func(tx beads.Tx) error {
+		return tx.Update(b.ID, beads.UpdateOpts{Status: &open, Metadata: reopenBatch})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{Daemon: config.DaemonConfig{ObservePaths: []string{codexRoot}}}
+	cs := &controllerState{cityBeadStore: store, usageSink: usage.NewLocalSink(sinkPath), cityName: "demo", cityPath: cityPath}
+	cr := &CityRuntime{cs: cs, cfg: cfg, sp: nil, cityName: "demo", cityPath: cityPath, stderr: io.Discard}
+
+	// The same legacy tick's usage pass, fed the open snapshot as the tick
+	// feeds it — the reopened row sits in it, marked.
+	snap, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cr.emitDueComputeFacts(context.Background(), snap.OpenInfos(), false)
+
+	facts, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var computes []usage.Fact
+	for _, f := range facts {
+		if f.Kind == usage.KindCompute {
+			computes = append(computes, f)
+		}
+	}
+	if len(computes) != 1 {
+		t.Fatalf("compute facts = %d, want 1 (the reopened row's old interval)", len(computes))
+	}
+	if got := computes[0].SessionID; got != b.ID {
+		t.Errorf("compute fact session = %q, want %q", got, b.ID)
+	}
+	// End = usage_closed_at, not the pass time: the interval ended at the
+	// close, ten minutes after its start.
+	if got := computes[0].WallSeconds; got != 600 {
+		t.Errorf("compute fact wall seconds = %v, want 600 (usage_closed_at − awake_started_at)", got)
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata[usageComputeEmittedAtKey] != startRaw {
+		t.Errorf("usage_compute_emitted_at = %q, want %q", got.Metadata[usageComputeEmittedAtKey], startRaw)
+	}
+	if v := got.Metadata[session.MetadataKeyUsageClosePending]; v != "" {
+		t.Errorf("usage_close_pending = %q, want cleared before the re-wake", v)
+	}
+	if v := got.Metadata[session.MetadataKeyUsageClosedAt]; v != "" {
+		t.Errorf("usage_closed_at = %q, want cleared before the re-wake", v)
+	}
+}
