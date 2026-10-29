@@ -981,6 +981,7 @@ go_test(
         "assigned_work_scope_test.go",
         "async_start_command_gate_test.go",
         "autoclose_fence_test.go",
+        "autoclose_parent_split_test.go",
         "autoclose_sweep_test.go",
         "backend_env_census_test.go",
         "bd_buildinfo_test.go",

@@ -323,7 +323,10 @@ func TestCacheChangeRecorderDedupIsPerCache(t *testing.T) {
 // the reconcile scan's synthetic close (mc-zndi7.43).
 func graphStepFixture(t *testing.T, store beads.Store) (step, convoy beads.Bead, payload json.RawMessage) {
 	t.Helper()
-	convoy, err := store.Create(beads.Bead{ID: "gcg-convoy", Type: "convoy"})
+	// A convoy is work class, so it carries a work-ledger id, never one the
+	// class binding mints: the fixture now matches the production path, where
+	// autoclose reads a binding step's work parent from the work store.
+	convoy, err := store.Create(beads.Bead{ID: "gc-convoy", Type: "convoy"})
 	if err != nil {
 		t.Fatal(err)
 	}

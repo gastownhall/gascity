@@ -1345,15 +1345,63 @@ func (cs *controllerState) beadCloseAutoclose(beadID string, store beads.Store, 
 	// co-residence with the closed bead. On a single-store city GraphBeadStore()
 	// returns the same store, so this is identity today.
 	graphStore := cs.GraphBeadStore()
+	// A closed class row's legacy parent can be work class (a convoy, a work
+	// bead a graph root was poured under), which lives on the work ledger, not
+	// beside the row; the work ledger answers first and the row's own store
+	// second (a parent that shares the row's ledger, such as a relic's
+	// migrated parent). A work store's own rows keep their parent beside them.
+	parentHome := cs.autocloseParentHome(store)
 	return func() bool {
 		for attempt := 1; ; attempt++ {
-			run := doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
+			run := doConvoyAutocloseWith(store, parentHome, rec, beadID, os.Stderr, os.Stderr)
 			run.merge(doWispAutocloseWith(store, beadID, os.Stderr, graphStore))
 			run.merge(doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore))
 			if !run.refused || attempt >= autocloseRefusalAttempts {
 				return run.finished()
 			}
 		}
+	}
+}
+
+// autocloseParentHome returns the work store a legacy parent id of a row in
+// store belongs to: the rig store whose prefix the id carries, else the city
+// work store, and nil for an id in a class namespace, which the binding
+// minted. It returns nil when store is itself a work store, whose rows keep
+// their parents beside them, so a single-store city reads exactly what it read
+// before.
+func (cs *controllerState) autocloseParentHome(store beads.Store) func(id string) beads.Store {
+	city := cs.CityBeadStore()
+	rigs := cs.BeadStores()
+	if store == nil || sameBeadStore(store, city) {
+		return nil
+	}
+	for _, rig := range rigs {
+		if sameBeadStore(store, rig) {
+			return nil
+		}
+	}
+	cs.mu.RLock()
+	prefixes := make(map[string]string)
+	if cs.cfg != nil {
+		for _, rig := range cs.cfg.Rigs {
+			if prefix := rig.EffectivePrefix(); prefix != "" {
+				prefixes[prefix+"-"] = rig.Name
+			}
+		}
+	}
+	cs.mu.RUnlock()
+	return func(id string) beads.Store {
+		if bdIDIsClassReserved(id) {
+			return nil
+		}
+		for prefix, name := range prefixes {
+			if strings.HasPrefix(id, prefix) {
+				if rig := rigs[name]; rig != nil {
+					return rig
+				}
+			}
+		}
+		return city
 	}
 }
 
