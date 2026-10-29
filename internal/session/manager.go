@@ -639,6 +639,7 @@ type Manager struct {
 	staleKeyDetectionWaiter StaleKeyDetectionWaiter
 	leaseTTL                time.Duration       // the runtime lease records' TTL (WithRuntimeLeaseTTL)
 	deferredSubmits         DeferredSubmitQueue // injected deferred-submit queue (WithDeferredSubmitQueue)
+	launchEnvResolver       LaunchEnvResolver   // rebuilds a resumed start's generated env (WithLaunchEnvResolver)
 }
 
 // PruneResult reports which sessions were pruned and which queued wait nudges
@@ -847,6 +848,21 @@ func WithTransportResolver(resolver func(template, provider string) string) Mana
 			return transportResolution{transport: resolver(template, provider)}
 		}
 	}
+}
+
+// LaunchEnvResolver returns the generated launch environment for a session
+// the Manager is about to start because its runtime is gone: the scope keys
+// its creator gave its first launch, rebuilt from current configuration.
+// metadata is a copy of the session bead's metadata. An error refuses the
+// start.
+type LaunchEnvResolver func(info Info, metadata map[string]string) (map[string]string, error)
+
+// WithLaunchEnvResolver lets the Manager rebuild the generated launch env
+// when a message, attach or start resumes a session whose runtime is gone.
+// The resolved env layers over the caller's hints, under the session's
+// persisted identity. A nil resolver starts with the hints alone.
+func WithLaunchEnvResolver(resolver LaunchEnvResolver) ManagerOption {
+	return func(m *Manager) { m.launchEnvResolver = resolver }
 }
 
 // WithTransportPolicyResolver lets the Manager infer transport from config and,
