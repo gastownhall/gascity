@@ -25,13 +25,12 @@ func newHookCurrentCmd(stdout, stderr io.Writer) *cobra.Command {
 The claim protocol stamps the claimed bead id onto the calling session's own
 bead, because the environment alone cannot reliably name it: $GC_BEAD_ID exists
 only in the controller's dispatch condition environment, never in a session
-shell, and $GC_TRIGGER_BEAD_ID — exported to demand-spawned pool seats as a
-pool-level spawn marker — is absent on other seats (e.g. a warm seat bound
-after start) and never decides what a session claims; the pool is pull. Named
-singleton sessions can carry a stale $GC_TRIGGER_BEAD_ID for their entire
-lifetime, pointing at a different bead than the one currently claimed, so it
-must never be consulted ahead of the claim. A formula step that must close
-the bead it is running reads the stamp back here:
+shell, and no session shell — pool seat or named singleton — receives a
+trigger bead id at all. A demand-spawned seat carries only $GC_SPAWN_ORIGIN,
+a presence marker, and the session row's trigger stamp is controller-side
+demand bookkeeping that never decides what a session claims; the pool is
+pull. A formula step that must close the bead it is running reads the stamp
+back here:
 
     BEAD_ID="${GC_BEAD_ID:-$(gc hook current --id-only)}"
 

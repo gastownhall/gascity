@@ -3119,10 +3119,10 @@ func emitExecutionStepStarted(rec events.Recorder, step beads.Bead, dir string, 
 //
 // It exists because a claimed step id is otherwise UNREACHABLE from the step's
 // own shell: GC_BEAD_ID is set only in the dispatch condition-script
-// environment (internal/convergence/condition.go), and GC_TRIGGER_BEAD_ID —
-// exported to demand-spawned pool seats as a pool-level spawn marker
-// (build_desired_state.go) — is absent on other seats and is a presence
-// signal, not a claim directive, so a formula step that must close the bead it
+// environment (internal/convergence/condition.go), and no trigger id reaches a
+// session shell — the demand-spawn marker is presence-only, and the session
+// row's trigger stamp is controller-side bookkeeping, not a claim directive
+// (gastownhall/gascity#5738) — so a formula step that must close the bead it
 // is running had no reliable way to name it and silently skipped its own close
 // — work that did nothing reported green. `gc hook current` reads this stamp
 // back and closes that gap.

@@ -576,8 +576,8 @@ esac
 }
 
 // TestStaleDBFormulaResolvesWorkBeadViaHookCurrentChain proves the formula
-// runs in a real pool shell, where neither GC_BEAD_ID nor GC_TRIGGER_BEAD_ID
-// is guaranteed: the bead-id chain must fall through to
+// runs in a real pool shell, where GC_BEAD_ID is never exported and no
+// trigger id reaches the shell: the bead-id chain must fall through to
 // `gc hook current --id-only`, the back-channel stamped by `gc hook --claim`.
 // Before this chain the formula required GC_BEAD_ID — an env var no session
 // shell has ever received — so even a correctly claiming dog aborted at the

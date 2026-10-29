@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **Session shells no longer receive a trigger bead id.** No session shell —
+  pool seat or named singleton — is exported `GC_TRIGGER_BEAD_ID`,
+  `GC_TRIGGER_WORK_BEAD_ID`, `GC_TRIGGER_BEAD_STORE_REF`, or
+  `GC_TRIGGER_WORK_STORE_REF` anymore: a copy frozen at exec kept pointing at
+  a bead the session never claimed, so a close chain that trusted it could
+  close someone else's work (#5738). A seat the controller spawned from
+  counted demand still carries `GC_SPAWN_ORIGIN=demand`, a presence-only
+  marker. A step that must name the bead it is running reads its own claim:
+  `BEAD_ID="${GC_BEAD_ID:-$(gc hook current --id-only)}"`; a template or
+  script that still consults a `$GC_TRIGGER_*` hint must switch to that
+  idiom before upgrading.
 - **Stop a split city whose storage check refuses before you deploy, and
   repair it with the new `gc`: `gc hook` now stops claiming there.** Before
   `gc hook` claims work for a session, it reads that session's drain state
