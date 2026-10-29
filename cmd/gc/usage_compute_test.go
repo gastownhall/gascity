@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1266,6 +1267,8 @@ func TestEmitDueComputeFactsSweepsClosedIntervalTrailingTurns(t *testing.T) {
 	writeCodexRolloutForSweepAt(t, codexRoot, t0, workDir, codexSweepSessionKey, [][3]int{{150, 100, 50}, {450, 200, 100}})
 	id := awakeCodexSession(t, env, t0, workDir)
 	cr, sinkPath := newClosedUsageRuntime(t, env.store, codexRoot)
+	cur := t1
+	cr.usageNow = func() time.Time { return cur }
 	cr.emitDueComputeFacts(context.Background(), []session.Info{env.sessionInfo(id)}, false)
 	if got := rawSinkModelFactCount(t, sinkPath); got != 2 {
 		t.Fatalf("live sweep model facts = %d, want 2", got)
@@ -1275,6 +1278,8 @@ func TestEmitDueComputeFactsSweepsClosedIntervalTrailingTurns(t *testing.T) {
 		{150, 100, 50}, {450, 200, 100}, {750, 300, 150}, {1050, 300, 150},
 	})
 	drainAckClose(t, env, id)
+	// Past the closed List's floor, which the live pass started.
+	cur = t1.Add(liveModelSweepMinInterval)
 	cr.emitDueComputeFacts(context.Background(), nil, false)
 
 	if got := rawSinkModelFactCount(t, sinkPath); got != 4 {
@@ -1566,4 +1571,125 @@ func TestEmitDueComputeFactsDefersClosedIntervalsPastBoot(t *testing.T) {
 			t.Fatalf("compute fact = %+v, want session %s with WallSeconds 600 (usage_closed_at - T0)", f, id)
 		}
 	}
+}
+
+// closedListRecordingStore records each closed-session List the usage lane
+// issues and the rows it returned.
+type closedListRecordingStore struct {
+	beads.Store
+	queries []beads.ListQuery
+	rows    []int
+}
+
+func (s *closedListRecordingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	got, err := s.Store.List(q)
+	if q.Status == "closed" {
+		s.queries = append(s.queries, q)
+		s.rows = append(s.rows, len(got))
+	}
+	return got, err
+}
+
+// TestEmitDueComputeFactsBoundsClosedIntervalScan pins the closed lane's cost
+// on a large backlog: the closed List runs at most once per
+// liveModelSweepMinInterval and returns at most 64 rows, oldest first, and a
+// row whose live memo already holds the interval's transcript is swept from
+// that path without discovery.
+func TestEmitDueComputeFactsBoundsClosedIntervalScan(t *testing.T) {
+	t1 := time.Now().UTC().Truncate(time.Second)
+
+	t.Run("the closed List is floored and capped, oldest first", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		var ids []string
+		for i := 0; i < 70; i++ {
+			b, err := mem.Create(beads.Bead{
+				Type: session.BeadType, Title: "s", Labels: []string{session.LabelSession},
+				Metadata: map[string]string(session.UsageClosePatch(t1)),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := mem.Close(b.ID); err != nil {
+				t.Fatal(err)
+			}
+			ids = append(ids, b.ID)
+		}
+		store := &closedListRecordingStore{Store: mem}
+		cr, _ := newClosedUsageRuntime(t, store, t.TempDir())
+		cur := t1
+		cr.usageNow = func() time.Time { return cur }
+		stillMarked := func() []string {
+			t.Helper()
+			var marked []string
+			for _, id := range ids {
+				b, err := mem.Get(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if b.Metadata[session.MetadataKeyUsageClosePending] == "true" {
+					marked = append(marked, id)
+				}
+			}
+			return marked
+		}
+
+		cr.emitDueComputeFacts(context.Background(), nil, false)
+		if len(store.queries) != 1 || store.queries[0].Limit != 64 || store.queries[0].Sort != beads.SortCreatedAsc || store.rows[0] != 64 {
+			t.Fatalf("first pass closed Lists = %+v returning %v, want one List of limit 64, created ascending, returning 64 rows", store.queries, store.rows)
+		}
+		if got, want := stillMarked(), ids[64:]; !slices.Equal(got, want) {
+			t.Fatalf("rows still marked after the first pass = %v, want the 6 newest %v", got, want)
+		}
+
+		cur = t1.Add(10 * time.Second)
+		cr.emitDueComputeFacts(context.Background(), nil, false)
+		if len(store.queries) != 1 {
+			t.Fatalf("closed Lists within liveModelSweepMinInterval = %d, want 1", len(store.queries))
+		}
+
+		cur = t1.Add(liveModelSweepMinInterval + time.Second)
+		cr.emitDueComputeFacts(context.Background(), nil, false)
+		if len(store.queries) != 2 {
+			t.Fatalf("closed Lists after liveModelSweepMinInterval = %d, want 2", len(store.queries))
+		}
+		if got := stillMarked(); len(got) != 0 {
+			t.Fatalf("rows still marked after the second List = %v, want none", got)
+		}
+	})
+
+	t.Run("a memo path skips discovery", func(t *testing.T) {
+		env := newReconcilerTestEnv(t)
+		env.clk.Time = t1
+		t0 := t1.Add(-10 * time.Minute)
+		// The memo's rollout sits under the observe path, which the extractor
+		// requires, but outside the day tree keyed discovery walks.
+		workDir, codexRoot := t.TempDir(), t.TempDir()
+		memoRoot := filepath.Join(codexRoot, "memo")
+		writeCodexRolloutForSweepAt(t, memoRoot, t0, workDir, codexSweepSessionKey, [][3]int{{150, 100, 50}})
+		var rollout string
+		if err := filepath.WalkDir(memoRoot, func(path string, d os.DirEntry, err error) error {
+			if err == nil && !d.IsDir() {
+				rollout = path
+			}
+			return err
+		}); err != nil || rollout == "" {
+			t.Fatalf("locating the rollout under %s: %q, %v", memoRoot, rollout, err)
+		}
+		id := drainAckClosedCodexSession(t, env, t0, workDir)
+		cr, sinkPath := newClosedUsageRuntime(t, env.store, codexRoot)
+		start := t0.Format(time.RFC3339)
+		cr.storeLiveSweepMemo(id, liveSweepMemo{awakeStart: start, sessionKey: codexSweepSessionKey, path: rollout})
+
+		cr.emitDueComputeFacts(context.Background(), nil, false)
+		if got := rawSinkModelFactCount(t, sinkPath); got != 1 {
+			t.Fatalf("model facts = %d, want 1 swept from the memo's path, which discovery does not find", got)
+		}
+		got, err := env.store.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Metadata[usageModelSweptAtKey] != start || got.Metadata[session.MetadataKeyUsageClosePending] != "" {
+			t.Fatalf("swept=%q pending=%q, want the interval settled", got.Metadata[usageModelSweptAtKey], got.Metadata[session.MetadataKeyUsageClosePending])
+		}
+	})
 }

@@ -285,6 +285,9 @@ type CityRuntime struct {
 	// process-lifetime cache is what keeps a per-tick live lane from repeating
 	// bounded discovery and transcript reads for every awake session.
 	liveSweepMemos sync.Map // session bead id -> liveSweepMemo
+	// nextClosedUsageListAt floors the usage lane's closed-session List at once
+	// per liveModelSweepMinInterval (UnixNano; zero lists on the first pass).
+	nextClosedUsageListAt atomic.Int64
 	// usageNow is the usage lane's clock; nil reads time.Now. Tests set it to
 	// drive the lane's retry floors and deadlines.
 	usageNow func() time.Time
