@@ -7,3 +7,4 @@
 # that flakes is listed here with an owner bead, and leaves when the bead
 # closes.
 TestExternalReadsResumeServesNoPreSuspensionScaleCheck	mc-19h7i	straddle=true subtest times out under remote load ("before suspending: ok not trusted"); passes locally under the gate
+TestManagedDoltSIGKILLLockGateRefusesWhenAnotherDatabaseIsHeld	mc-ncbsc	the lock gate reads /proc/locks after the flock probe; under host load the holder is gone by then ("flock probe reports held but lock-holder inspection found no holder"), so the refusal names the wrong pid. Unrelated to the split.

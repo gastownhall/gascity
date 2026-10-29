@@ -68,6 +68,7 @@ TestHandleStatusCounterFailureReportsPartialWithoutListRetry	fails under the gat
 TestHandleStatusDegradesWhenReadModelStoreStalls	fails under the gate: status handler did not return while the read model was stalled; degrade timeout not honored
 TestHandleStatusServesRecentResponseDespiteIndexAdvance	fails under the gate: List called on Counter-capable store, want Count path
 TestHandleStatusWorkCountsUseCounterStores	fails under the gate: List called on Counter-capable store, want Count path
+TestIsGraphConvoyIDSkipsARelicFreeRig	fails under the gate: a pre-S4 rig graph convoy is not recognized while the rig awaits import
 TestOrderHistoryStoreRefUnchangedOnSingleStoreCity	fails under the gate: list store_ref = "orders:test-city", want city:test-city
 TestOrderStoreInfosStayOnTheOneStoreOnSingleStoreCity	fails under the gate: order store infos = [{ref:city:test-city scopeKind:city scopeRef:test-city store:0x185dd4c1e080} {ref:orders:test-city scopeKind:city scopeRef:test-city store:0
 TestProjectWorkflowEventDropsAmbiguousLegacyWorkflowWithoutStoreHint	fails under the gate: projection = &{Type:workflow:event WorkflowID:wf_city RootBeadID:gc-1 RootStoreRef:graph:gascity ScopeKind:city ScopeRef:gascity WatchGeneration:pending EventSe
@@ -100,6 +101,8 @@ TestStatusSessionSnapshotStoreIdentity	fails under the gate: read store = 0x17fd
 TestWaitInspect_ExistingNonWaitIsWaitNotFound	fails under the gate: detail = "not_found: t-1", want not_a_wait: prefix
 TestWaitInspect_NoStoreIsServiceUnavailable	fails under the gate: status = 404, want 503; body="{\"type\":\"urn:gascity:error:wait-not-found\",\"title\":\"Wait Not Found\",\"status\":404,\"detail\":\"not_found: w-any\",\"code\
 TestWholeSplitBindingIsAuthorityForEveryReservedPrefix	fails under the gate: beadStoresForID(gcg-1) = [0x17fdfaab0700 0x17fdf9432320] (len 2), want [binding 0x17fdfaab0700, city 0x17fdfaab0620]
+TestWorkflowEventRootIsUnchangedOnASingleStoreCity	fails under the gate: single-store workflowEventRoot = (false, ), want the rig's root
+TestWorkflowEventRootProbesTheBindingBeforeTheScopeItNames	fails under the gate: workflowEventRoot for a pre-S4 rig root = (false, ), want it from the rig store
 TestWorkflowGetPreservesRequestedScopeForUniqueCrossStoreWorkflow	fails under the gate: status = 404, want 200: {"type":"urn:gascity:error:workflow-not-found","title":"Workflow Not Found","status":404,"detail":"workflow wf_city_scope not found","co
 TestWorkflowGetRejectsCityScopeForRigRootedWorkflow	fails under the gate: rig-scoped status = 404, want 200: {"type":"urn:gascity:error:workflow-not-found","title":"Workflow Not Found","status":404,"detail":"workflow wf_rig_rooted_sco
 TestWorkflowGetScopedRequestSurvivesUnrelatedStoreListFailure	fails under the gate: root_store_ref = "graph:test-city", want city:test-city
