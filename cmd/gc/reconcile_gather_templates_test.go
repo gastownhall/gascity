@@ -188,12 +188,10 @@ func TestTemplateResolverNamedMatchesLegacyWithoutRebind(t *testing.T) {
 				t.Fatalf("legacy cleared the trigger = %v, want %v", cleared, parked)
 			}
 			if parked {
-				if got.TP.Env["GC_TRIGGER_BEAD_ID"] != info.TriggerBeadID || want.TP.Env["GC_TRIGGER_BEAD_ID"] != "" {
-					t.Fatalf("trigger env: resolver %q, legacy %q; want the row's stamp and none", got.TP.Env["GC_TRIGGER_BEAD_ID"], want.TP.Env["GC_TRIGGER_BEAD_ID"])
+				if got.TP.Env["GC_SPAWN_ORIGIN"] != "demand" || want.TP.Env["GC_SPAWN_ORIGIN"] != "" {
+					t.Fatalf("demand marker: resolver %q, legacy %q; want the row's stamp marked and none", got.TP.Env["GC_SPAWN_ORIGIN"], want.TP.Env["GC_SPAWN_ORIGIN"])
 				}
-				for _, k := range []string{"GC_SPAWN_ORIGIN", "GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID"} {
-					delete(got.TP.Env, k)
-				}
+				delete(got.TP.Env, "GC_SPAWN_ORIGIN")
 			}
 			if !reflect.DeepEqual(got.TP, want.TP) {
 				t.Fatalf("resolver = %+v, want legacy's %+v", got.TP, want.TP)

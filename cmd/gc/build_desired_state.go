@@ -4593,11 +4593,14 @@ func setTemplateEnvIdentity(tp *TemplateParams, identity string) {
 }
 
 // resolveTemplateForSessionBeadInfo resolves the TemplateParams for a session bead
-// from its session.Info. It reads only session_name, the two trigger keys, and
-// pack — all verbatim raw mirrors on session.Info. Its callers hold the Info
-// directly (from the typed snapshot via FindInfoByID, or a single boundary
-// projection at the raw dependency-floor / pool-create seams); the former raw
-// resolveTemplateForSessionBead wrapper was retired in WI-5 W4.
+// from its session.Info. It reads only session_name, the trigger stamp, and
+// pack — all verbatim raw mirrors on session.Info. A stamped row gets only the
+// presence-only demand marker (sessionDemandSpawnEnv), never the trigger id: the
+// stamp is controller-side demand bookkeeping, not the bead the session claims.
+// Its callers hold the Info directly (from the typed snapshot via FindInfoByID,
+// or a single boundary projection at the raw dependency-floor / pool-create
+// seams); the former raw resolveTemplateForSessionBead wrapper was retired in
+// WI-5 W4.
 func resolveTemplateForSessionBeadInfo(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,
@@ -4611,23 +4614,11 @@ func resolveTemplateForSessionBeadInfo(
 	if err != nil {
 		return tp, err
 	}
-	if triggerID := strings.TrimSpace(info.TriggerBeadID); triggerID != "" {
+	if demand := sessionDemandSpawnEnv(info); demand != nil {
 		if tp.Env == nil {
 			tp.Env = make(map[string]string)
 		}
-		// A POOL-LEVEL marker, presence only: this seat exists because the
-		// controller counted demand. Nothing on the claim path may read the
-		// trigger id to decide what to claim — the pool is pull, and the
-		// controller does not choose the bead — but a seat that drains no_work
-		// is worth telling apart from one started for any other reason, which is
-		// what the divergence diagnostics key on (demand_divergence.go).
-		tp.Env["GC_SPAWN_ORIGIN"] = "demand"
-		tp.Env["GC_TRIGGER_BEAD_ID"] = triggerID
-		tp.Env["GC_TRIGGER_WORK_BEAD_ID"] = triggerID
-		if storeRef := strings.TrimSpace(info.TriggerBeadStoreRef); storeRef != "" {
-			tp.Env["GC_TRIGGER_BEAD_STORE_REF"] = storeRef
-			tp.Env["GC_TRIGGER_WORK_STORE_REF"] = storeRef
-		}
+		maps.Copy(tp.Env, demand)
 		if pack := strings.TrimSpace(info.Pack); pack != "" {
 			tp.Env["GC_PACKER_PACK"] = pack
 		}
