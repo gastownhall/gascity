@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **Session shells no longer receive a trigger bead id.** A session's
+  environment no longer carries `GC_TRIGGER_BEAD_ID`,
+  `GC_TRIGGER_WORK_BEAD_ID`, `GC_TRIGGER_BEAD_STORE_REF`, or
+  `GC_TRIGGER_WORK_STORE_REF` (#5738). The trigger id stays on the
+  session bead as controller bookkeeping. A script or prompt that read one of
+  these variables to name its own bead must use `gc hook current --id-only`
+  instead, for example `BEAD_ID="${GC_BEAD_ID:-$(gc hook current --id-only)}"`.
+  To tell whether a session was demand-spawned, check
+  `GC_SPAWN_ORIGIN=demand`, which names no bead.
 - **Stop a split city whose storage check refuses before you deploy, and
   repair it with the new `gc`: `gc hook` now stops claiming there.** Before
   `gc hook` claims work for a session, it reads that session's drain state
