@@ -102,7 +102,7 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 	}
 
 	// Step 10: create the rig directory when missing.
-	if err := createRigDirIfMissing(fs, rigPath, rigPathExists); err != nil {
+	if err := createRigDirIfMissing(fs, deps.BeforeMkdir, rigPath, rigPathExists); err != nil {
 		return config.Rig{}, result, err
 	}
 
@@ -557,10 +557,16 @@ func resolveGitDefaultBranch(deps Deps, req ProvisionRequest, rigPath string) (h
 }
 
 // createRigDirIfMissing creates the rig directory when the earlier stat (or a
-// clone) did not already materialize it.
-func createRigDirIfMissing(fs fsys.FS, rigPath string, rigPathExists bool) error {
+// clone) did not already materialize it. beforeMkdir (nil = skip) runs right
+// before the MkdirAll and may refuse the creation; see Deps.BeforeMkdir.
+func createRigDirIfMissing(fs fsys.FS, beforeMkdir func(rigPath string) error, rigPath string, rigPathExists bool) error {
 	if rigPathExists {
 		return nil
+	}
+	if beforeMkdir != nil {
+		if err := beforeMkdir(rigPath); err != nil {
+			return err
+		}
 	}
 	if err := fs.MkdirAll(rigPath, 0o755); err != nil {
 		return fmt.Errorf("creating %s: %w", rigPath, err)

@@ -39,7 +39,12 @@ type Deps struct {
 	// Cfg is the city config the caller loaded for edit.
 	Cfg *config.City
 
-	// BeforeMkdir runs immediately before the rig directory is created. RED stub: not yet called.
+	// BeforeMkdir, when non-nil, runs immediately before Provision creates an
+	// absent rig directory; a non-nil error aborts the add before anything is
+	// created. It is not called when the path already exists. The HTTP rig-create
+	// path wires city-root containment here so the check sits as close to the
+	// MkdirAll as the layering allows (narrowing the check-to-create window, not
+	// closing it); the local CLI leaves it nil and registers rigs anywhere.
 	BeforeMkdir func(rigPath string) error
 
 	// InitStore initializes the rig's bead store (cmd/gc initDirIfReady). It

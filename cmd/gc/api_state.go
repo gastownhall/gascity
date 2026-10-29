@@ -2721,6 +2721,15 @@ func (cs *controllerState) DeleteAgent(name string) error {
 // staying byte-identical. The error wraps configedit.ErrValidation so the async
 // failure mapper renders invalid_request and the sync mapper renders a 4xx rather
 // than a 500.
+//
+// Residual (accepted, same-user): this is a check-then-use guard, so the creation
+// paths keep a TOCTOU. Between this check and the later path-string
+// MkdirAll (rig.Provision) or git clone, an actor who can already write inside the
+// city root can swap an ancestor directory for a symlink out of it. The
+// re-checks right before MkdirAll (rig.Deps.BeforeMkdir) and right before the
+// clone narrow that window; they do not close it. Closing it needs an os.Root
+// backed fsys.FS and a post-clone containment re-verification. The destructive
+// path, TeardownPartialRig, is closed: its removal runs through an os.Root.
 // The two passes are separate functions so each can be pinned on its own: a
 // test that only ever calls assertRigPathWithinCity cannot tell which pass
 // rejected, so a pass could rot to a no-op without reddening anything (ga-qe7qm).
@@ -2905,6 +2914,12 @@ func (cs *controllerState) ProvisionRigFromGit(ctx context.Context, r config.Rig
 		// fence validated, defeating a DNS rebind between the fence and the fetch.
 		cloneOpts.ResolveOverrides = []string{resolveOverride}
 	}
+	// Re-assert containment immediately before the clone. This narrows the window
+	// between the CreateRig/ProvisionRigFromGit check and git's own path-based
+	// mkdir; it does not close it (see assertRigPathWithinCity).
+	if err := assertRigPathWithinCity(cs.cityPath, r.Path); err != nil {
+		return config.Rig{}, err
+	}
 	if err := rigCloneGit(ctx, gitURL, r.Path, cloneOpts); err != nil {
 		// Wrap with rig.ErrCloneFailed so the async failure mapper classifies it
 		// as clone_failed (distinct from provision_failed). git.Clone already
@@ -3084,10 +3099,12 @@ func (cs *controllerState) TeardownPartialRig(ctx context.Context, m api.RigProv
 		// Re-assert city-root containment before the RemoveAll. CreatedDir is read
 		// back from the durable idempotency record by the boot sweep and the
 		// re-clone pre-drop, so a poisoned record (or a future non-contained writer)
-		// must never be able to drive an RemoveAll outside the city root.
+		// must never be able to drive an RemoveAll outside the city root. The removal
+		// itself is confined to an os.Root at the city, so an ancestor swapped for a
+		// symlink after this check cannot redirect it either.
 		if err := assertRigPathWithinCity(cs.cityPath, m.CreatedDir); err != nil {
 			errs = errors.Join(errs, fmt.Errorf("refusing to remove rig dir: %w", err))
-		} else if err := os.RemoveAll(m.CreatedDir); err != nil {
+		} else if err := removeRigDirConfined(cs.cityPath, m.CreatedDir); err != nil {
 			errs = errors.Join(errs, fmt.Errorf("removing rig dir %s: %w", m.CreatedDir, err))
 		}
 	}
@@ -3112,9 +3129,34 @@ func (cs *controllerState) TeardownPartialRig(ctx context.Context, m api.RigProv
 	return errs
 }
 
-// removeRigDirConfined is a RED stub: the confined removal is not implemented yet.
-func removeRigDirConfined(_, _ string) error {
-	return errors.New("removeRigDirConfined: not implemented")
+// removeRigDirConfined removes createdDir through an os.Root anchored at the city
+// root, so no path component is re-resolved by the kernel outside the root: an
+// ancestor swapped for a symlink after assertRigPathWithinCity ran is refused
+// instead of followed. A missing target is a no-op (matching os.RemoveAll), and
+// the city root itself is never removable. Both paths are normalized first
+// because CreatedDir is stored symlink-resolved while cityPath may be the raw
+// linked path.
+func removeRigDirConfined(cityPath, createdDir string) error {
+	city := pathutil.NormalizePathForCompare(cityPath)
+	rel, err := filepath.Rel(city, pathutil.NormalizePathForCompare(createdDir))
+	if err != nil {
+		return fmt.Errorf("%w: rig path %s is not under the city root: %w", configedit.ErrValidation, createdDir, err)
+	}
+	if rel == "." {
+		return fmt.Errorf("%w: refusing to remove the city root %s", configedit.ErrValidation, city)
+	}
+	root, err := os.OpenRoot(city)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("opening city root %s: %w", city, err)
+	}
+	defer root.Close() //nolint:errcheck // read-only handle; nothing to flush
+	if err := root.RemoveAll(rel); err != nil {
+		return fmt.Errorf("removing %s under %s: %w", rel, city, err)
+	}
+	return nil
 }
 
 // regenerateRoutesBestEffort rewrites every rig's routes.jsonl from the current
@@ -3286,9 +3328,12 @@ func (cs *controllerState) provisionRigWrite(r config.Rig, depOnStep func(rig.Pr
 // unchanged.
 func (cs *controllerState) rigProvisionDeps(editCfg *config.City, r config.Rig, depOnStep func(rig.ProvisionStep)) rig.Deps {
 	return rig.Deps{
-		FS:           fsys.OSFS{},
-		CityPath:     cs.cityPath,
-		Cfg:          editCfg,
+		FS:       fsys.OSFS{},
+		CityPath: cs.cityPath,
+		Cfg:      editCfg,
+		// Re-assert containment right before the rig directory is created; narrows
+		// the check-to-MkdirAll window without closing it.
+		BeforeMkdir:  func(p string) error { return assertRigPathWithinCity(cs.cityPath, p) },
 		InitStore:    controllerStateInitRigDirIfReady,
 		InitAndHook:  initAndHookDir,
 		ComposePacks: ensureBundledRigImportsInstalled,
