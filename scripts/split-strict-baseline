@@ -241,8 +241,10 @@ def main(argv):
             str(len(caller_func_lines[key[5]])) if key[5] != "-" else "0",
             str(len(tests[key])), scope, verdict, note]))
     rows.sort(key=lambda r: r.encode("utf-8"))
+    # Read the header before opening for write: "w" truncates the file.
+    kept = header(baseline_path)
     with open(baseline_path, "w", encoding="utf-8") as f:
-        f.write(header(baseline_path) + "".join(r + "\n" for r in rows))
+        f.write(kept + "".join(r + "\n" for r in rows))
 
     entries = []
     for name in sorted(failed_all - set(flaky), key=lambda s: s.encode("utf-8")):
@@ -251,8 +253,10 @@ def main(argv):
             message = next((r.messages[name] for r in runs if name in r.messages), "no failure message in the log")
             reason = "fails under the gate: " + message.replace("\t", " ")[:160]
         entries.append("%s\t%s\n" % (name, reason))
+    # Read the header before opening for write: "w" truncates the file.
+    kept = header(known_path)
     with open(known_path, "w", encoding="utf-8") as f:
-        f.write(header(known_path) + "".join(entries))
+        f.write(kept + "".join(entries))
 
     sys.stderr.write("split-strict-baseline: %d key(s) (%d to triage) in %s; %d known failure(s) in %s; %d run(s) agreed\n"
                      % (len(rows), triage, baseline_path, len(entries), known_path, len(runs)))
