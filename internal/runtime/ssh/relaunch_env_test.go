@@ -59,7 +59,7 @@ func (b *envBox) respond(argv []string) ([]byte, int, error) {
 		b.staged = stagedTmuxBody(string(b.f.stdins[len(b.f.stdins)-1]))
 		return []byte(stagedDir + "\n"), 0, nil
 	case len(argv) > 0 && argv[0] == "tmux":
-		out, code := b.tmux(argv[1:])
+		out, code := b.tmux(argv[1:], false)
 		return []byte(out), code, nil
 	}
 	return nil, 0, nil
@@ -78,16 +78,20 @@ func stagedTmuxBody(script string) string {
 	return body
 }
 
-// tmux runs a tmux command sequence: ";" arguments separate commands, an
-// argument ending in an unescaped ";" ends its command, and a trailing "\;"
-// is a literal ";". The sequence stops at the first failing command.
-func (b *envBox) tmux(args []string) (string, int) {
+// tmux runs a tmux command sequence: ";" arguments separate commands. As
+// argv, an argument ending in an unescaped ";" also ends its command and a
+// trailing "\;" is a literal ";"; in a command file (fromFile) every argument
+// is quoted and taken literally. The sequence stops at the first failing
+// command.
+func (b *envBox) tmux(args []string, fromFile bool) (string, int) {
 	var cmds [][]string
 	var cur []string
 	for _, a := range args {
 		switch {
 		case a == ";":
 			cmds, cur = append(cmds, cur), nil
+		case fromFile:
+			cur = append(cur, a)
 		case strings.HasSuffix(a, `\;`):
 			cur = append(cur, a[:len(a)-2]+";")
 		case strings.HasSuffix(a, ";"):
@@ -172,7 +176,7 @@ func (b *envBox) one(c []string) (string, int) {
 		}
 		return "", 0
 	case "source-file":
-		return b.tmux(shellquote.Split(b.staged))
+		return b.tmux(shellquote.Split(b.staged), true)
 	case "respawn-pane":
 		b.respawned = true
 		b.respawnEnv = maps.Clone(b.global)
@@ -307,15 +311,18 @@ func TestProvider_RelaunchDeliversChangedSecretOutsideArgv(t *testing.T) {
 }
 
 // A value tmux would read as a command separator when passed as an argument
-// arrives intact.
+// arrives intact. Both keys are inert, so the update rides argv.
 func TestProvider_RelaunchDeliversValueEndingInSemicolon(t *testing.T) {
 	box := newEnvBox(nil)
 	box.warm(map[string]string{"GC_RIG": "r"})
-	if err := providerWith(box.f).Relaunch(context.Background(), "s", relaunchCfg(map[string]string{"GC_RIG": "r", "GC_HOOK": "a;b;"})); err != nil {
+	if err := providerWith(box.f).Relaunch(context.Background(), "s", relaunchCfg(map[string]string{"GC_RIG": "r", "GC_ALIAS": "a;b;"})); err != nil {
 		t.Fatalf("Relaunch: %v", err)
 	}
-	if got := box.respawnEnv["GC_HOOK"]; got != "a;b;" {
-		t.Errorf("respawned agent GC_HOOK = %q, want %q", got, "a;b;")
+	if firstCall(box.f, isStagingScript) != nil {
+		t.Fatal("an all-inert env must not stage a file; this test covers the argv path")
+	}
+	if got := box.respawnEnv["GC_ALIAS"]; got != "a;b;" {
+		t.Errorf("respawned agent GC_ALIAS = %q, want %q", got, "a;b;")
 	}
 }
 
