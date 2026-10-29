@@ -168,22 +168,27 @@ func (s *panicMetadataBatchStore) SetMetadataBatch(string, map[string]string) er
 	panic("metadata batch panic")
 }
 
-func TestSessionTriggerBeadEnv(t *testing.T) {
-	env := sessionTriggerBeadEnv(sessionpkg.Info{
+func TestSessionDemandSpawnEnv(t *testing.T) {
+	env := sessionDemandSpawnEnv(sessionpkg.Info{
 		TriggerBeadID:       "gp-59q",
 		TriggerBeadStoreRef: "rig:gascity-packs",
 	})
-	if got := env["GC_TRIGGER_BEAD_ID"]; got != "gp-59q" {
-		t.Fatalf("GC_TRIGGER_BEAD_ID = %q, want gp-59q", got)
+	if want := map[string]string{"GC_SPAWN_ORIGIN": "demand"}; !maps.Equal(env, want) {
+		t.Fatalf("stamped env = %v, want only %v", env, want)
 	}
-	if got := env["GC_TRIGGER_WORK_BEAD_ID"]; got != "gp-59q" {
-		t.Fatalf("GC_TRIGGER_WORK_BEAD_ID = %q, want gp-59q", got)
+	if env := sessionDemandSpawnEnv(sessionpkg.Info{TriggerBeadStoreRef: "rig:gascity-packs"}); env != nil {
+		t.Fatalf("unstamped env = %v, want nil", env)
 	}
-	if got := env["GC_TRIGGER_BEAD_STORE_REF"]; got != "rig:gascity-packs" {
-		t.Fatalf("GC_TRIGGER_BEAD_STORE_REF = %q, want rig:gascity-packs", got)
-	}
-	if got := env["GC_TRIGGER_WORK_STORE_REF"]; got != "rig:gascity-packs" {
-		t.Fatalf("GC_TRIGGER_WORK_STORE_REF = %q, want rig:gascity-packs", got)
+}
+
+// assertEnvNamesNoTriggerID fails for every GC_TRIGGER_* key in env: a
+// session shell never learns the trigger id (gastownhall/gascity#5738).
+func assertEnvNamesNoTriggerID(t *testing.T, label string, env map[string]string) {
+	t.Helper()
+	for key, value := range env {
+		if strings.HasPrefix(key, "GC_TRIGGER_") {
+			t.Errorf("%s: %s = %q, want no GC_TRIGGER_* key", label, key, value)
+		}
 	}
 }
 
@@ -9332,11 +9337,11 @@ func TestLegacyPostStartDeathClassifiesARefusedResume(t *testing.T) {
 // TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv is the
 // launch-layer assertion for gascity#4373. resolvePreservedConfiguredNamedSessionTemplate
 // clearing the stamp is not enough on its own: buildPreparedStartWithWorkDirResolver
-// re-derives GC_TRIGGER_BEAD_ID from candidate.info via sessionTriggerBeadEnv,
+// re-derives the demand marker from candidate.info via sessionDemandSpawnEnv,
 // so unless refreshConfiguredNamedStartCandidate folds the resolver's Info back
 // onto the candidate, the seat starting on the clearing tick still launches
-// aimed at the parked bead. Asserting on the resolved TemplateParams cannot
-// catch that; only prepared.cfg.Env can.
+// marked demand-spawned for the parked bead. Asserting on the resolved
+// TemplateParams cannot catch that; only prepared.cfg.Env can.
 func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -9378,11 +9383,9 @@ func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
-	if got := prepared.cfg.Env["GC_TRIGGER_BEAD_ID"]; got != "" {
-		t.Errorf("launched GC_TRIGGER_BEAD_ID = %q, want cleared for a parked target", got)
-	}
-	if got := prepared.cfg.Env["GC_TRIGGER_WORK_BEAD_ID"]; got != "" {
-		t.Errorf("launched GC_TRIGGER_WORK_BEAD_ID = %q, want cleared for a parked target", got)
+	assertEnvNamesNoTriggerID(t, "launch env for a parked target", prepared.cfg.Env)
+	if got, ok := prepared.cfg.Env["GC_SPAWN_ORIGIN"]; ok {
+		t.Errorf("launched GC_SPAWN_ORIGIN = %q, want unset once the stamp is cleared", got)
 	}
 	after, err := store.Get(session.ID)
 	if err != nil {
@@ -9390,5 +9393,60 @@ func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
 	}
 	if v := after.Metadata[beadmeta.TriggerBeadIDMetadataKey]; v != "" {
 		t.Errorf("durable trigger stamp = %q, want cleared", v)
+	}
+}
+
+// Kills a legacy named-session start that hands the shell the trigger id a
+// surviving stamp names: the launch env carries only the demand marker, and
+// the durable stamp stays (gastownhall/gascity#5738).
+func TestPrepareStartCandidateForCity_SurvivingNamedTriggerLaunchesWithOnlyTheDemandMarker(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	blocked := false
+	work, err := store.Create(beads.Bead{Title: "workable work", Status: "open", IsBlocked: &blocked})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "worker")
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":                        "worker",
+			"session_name":                    sessionName,
+			namedSessionMetadataKey:           "true",
+			namedSessionIdentityMetadata:      "worker",
+			namedSessionModeMetadata:          "on_demand",
+			beadmeta.TriggerBeadIDMetadataKey: work.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	prepared, err := prepareStartCandidateForCity(startCandidate{
+		info:  sessiontest.SeedBead(t, session),
+		tp:    TemplateParams{TemplateName: "worker", SessionName: sessionName},
+		order: 0,
+	}, ".", cfg.Workspace.Name, cfg, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, io.Discard, nil, dispatchOptionSources{})
+	if err != nil {
+		t.Fatalf("prepareStartCandidateForCity: %v", err)
+	}
+	assertEnvNamesNoTriggerID(t, "launch env for a workable target", prepared.cfg.Env)
+	if got := prepared.cfg.Env["GC_SPAWN_ORIGIN"]; got != demandSpawnOriginValue {
+		t.Errorf("launched GC_SPAWN_ORIGIN = %q, want %q while the stamp survives", got, demandSpawnOriginValue)
+	}
+	after, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session bead after prepare: %v", err)
+	}
+	if v := after.Metadata[beadmeta.TriggerBeadIDMetadataKey]; v != work.ID {
+		t.Errorf("durable trigger stamp = %q, want kept as %q", v, work.ID)
 	}
 }
