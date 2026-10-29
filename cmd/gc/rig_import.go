@@ -43,10 +43,12 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
@@ -632,7 +634,12 @@ type rigDoltIdentity struct {
 var rigImportScopeDoltTarget = func(cityPath, scopeRoot string) rigDoltIdentity {
 	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
 	if err != nil {
-		return rigDoltIdentity{Unresolved: true, Err: err}
+		// The endpoint could not be resolved (that city's Dolt is down, its
+		// runtime state is gone). The database name is still the scope's own
+		// pin in .beads/metadata.json: compare by it, and leave it empty,
+		// which refuses, only when that cannot be read either.
+		db, _, _ := contract.ReadDoltDatabase(fsys.OSFS{}, filepath.Join(scopeRoot, ".beads", "metadata.json"))
+		return rigDoltIdentity{Database: strings.TrimSpace(db), Unresolved: true, Err: err}
 	}
 	if !ok || strings.TrimSpace(target.Database) == "" {
 		return rigDoltIdentity{}
@@ -657,11 +664,13 @@ var rigImportScopeDoltTarget = func(cityPath, scopeRoot string) rigDoltIdentity 
 func normalizeDoltHost(host string) (string, error) {
 	host = strings.Trim(strings.TrimSpace(strings.ToLower(host)), "[]")
 	switch host {
-	case "", "localhost", "127.0.0.1", "::1":
+	case "", "localhost", "127.0.0.1", "::1", "0.0.0.0", "::":
+		// A wildcard listen address names this host too: a client
+		// configured with it reaches the server over loopback.
 		return "loopback", nil
 	}
 	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLoopback() {
+		if ip.IsLoopback() || ip.IsUnspecified() {
 			return "loopback", nil
 		}
 		return ip.String(), nil

@@ -578,7 +578,7 @@ func TestReviewBootRefusesAnInFlightImportOfARigNoLongerConfigured(t *testing.T)
 // database name alone, and an endpoint that cannot be resolved with a
 // matching name refuses with a remedy.
 func TestReviewSharedDoltIdentityIsNormalized(t *testing.T) {
-	for _, h := range []string{"localhost", "127.0.0.1", "::1", "[::1]", ""} {
+	for _, h := range []string{"localhost", "127.0.0.1", "::1", "[::1]", "", "0.0.0.0", "::"} {
 		if got, err := normalizeDoltHost(h); err != nil || got != "loopback" {
 			t.Errorf("normalizeDoltHost(%q) = %q %v, want loopback", h, got, err)
 		}
@@ -747,4 +747,64 @@ func TestReviewPhysicalScopeOpenerCallersArePinned(t *testing.T) {
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("physical scope opener callers = %v, want %v; a new caller reads infrastructure rows from a rig ledger and needs review", got, want)
 	}
+}
+
+// Approval follow-up: through the REAL resolver, another city whose Dolt
+// endpoint cannot be resolved (its runtime state is gone) is compared by the
+// database its rig pins in .beads/metadata.json: an unrelated name imports,
+// the same name refuses, and an unreadable pin refuses.
+func TestReviewUnresolvedDoltEndpointComparesByPinnedDatabase(t *testing.T) {
+	writeScope := func(t *testing.T, root, config, metadata string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(root, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, ".beads", "config.yaml"), []byte(config), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if metadata != "" {
+			if err := os.WriteFile(filepath.Join(root, ".beads", "metadata.json"), []byte(metadata), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	run := func(t *testing.T, theirMetadata string) (int, string) {
+		t.Helper()
+		f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
+		f.seed("packs", []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil)}, nil)
+		writeScope(t, f.rigPaths["packs"], "gc.endpoint_origin: explicit\ngc.endpoint_status: verified\ndolt.host: 127.0.0.1\ndolt.port: 3307\n", `{"backend":"dolt","dolt_mode":"server","dolt_database":"gp"}`)
+		if self := rigImportScopeDoltTarget(f.request.CityPath, rigStoreRoot(f.request.CityPath, f.cfg.Rigs[0])); self.Database != "gp" || self.Unresolved {
+			t.Fatalf("precondition: this rig's identity = %+v", self)
+		}
+		other := t.TempDir()
+		theirs := filepath.Join(other, "rigs", "theirs")
+		toml := fmt.Sprintf("[workspace]\nname = \"other\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"theirs\"\npath = %q\n", theirs)
+		if err := os.WriteFile(filepath.Join(other, "city.toml"), []byte(toml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// An inherited endpoint whose city runtime state is gone: the real
+		// resolver cannot say where the database lives.
+		writeScope(t, theirs, "gc.endpoint_origin: inherited_city\ngc.endpoint_status: verified\n", theirMetadata)
+		if id := rigImportScopeDoltTarget(other, theirs); !id.Unresolved {
+			t.Fatalf("precondition: their endpoint resolved: %+v", id)
+		}
+		f.otherCities = []string{other}
+		code, _, stderr := f.importRigs()
+		return code, stderr
+	}
+	t.Run("unrelated pinned name: imports", func(t *testing.T) {
+		if code, stderr := run(t, `{"backend":"dolt","dolt_mode":"server","dolt_database":"zz"}`); code != 0 {
+			t.Errorf("an unrelated database behind an unresolved endpoint refused the import: %s", stderr)
+		}
+	})
+	t.Run("same pinned name: refuses", func(t *testing.T) {
+		if code, stderr := run(t, `{"backend":"dolt","dolt_mode":"server","dolt_database":"gp"}`); code == 0 || !strings.Contains(stderr, "unregister") {
+			t.Errorf("the same database name behind an unresolved endpoint was imported: %s", stderr)
+		}
+	})
+	t.Run("unreadable pin: refuses", func(t *testing.T) {
+		if code, stderr := run(t, ""); code == 0 || !strings.Contains(stderr, "unregister") {
+			t.Errorf("an unresolved endpoint with no readable database pin was imported: %s", stderr)
+		}
+	})
 }
