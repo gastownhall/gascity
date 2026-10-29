@@ -1232,6 +1232,12 @@ func (a *Agent) effectiveQuery(kind queryKind, topo QueryTopology) string {
 //
 // State priority: in_progress+assigned (crash recovery) >
 // ready+assigned (pre-assigned) > ready+unassigned+routed_to (pool).
+// Mail is excluded from the jq-based ephemeral tiers before their one-row
+// truncation (#5815): a message bead is ephemeral and assigned to its
+// recipient, so serving it as a tier's only row exits the script before
+// later tiers run, and the hook's Go-side refusal of the row (#4419) then
+// reads as no_work while real work sits unqueried below. bd ready / gc ready
+// reads need no such clause — they already exclude message natively.
 // Executable formula roots can be epic-typed; the bead storage policy decides
 // whether those roots are history-backed, no-history, or ephemeral for the
 // configured bd compatibility mode. Molecule containers are not routable

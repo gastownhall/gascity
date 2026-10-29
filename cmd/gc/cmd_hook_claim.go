@@ -1502,6 +1502,11 @@ func hookClaimExistingAssignment(candidates []beads.Bead, opts hookClaimOptions)
 // ahead of any real routed work waiting in the same batch (#4419) -- not by
 // race, by construction, since this function runs before
 // claimFirstEligibleHookCandidate ever sees the routed candidates.
+//
+// The generated work query now withholds message rows at its jq tiers before
+// they can short-circuit a later tier (#5815), so this check is the backstop:
+// it still covers a custom work_query override, returned verbatim and never
+// rewritten, whose batch carries a message bead alongside real work.
 func hookClaimCandidateIsMessage(candidate beads.Bead) bool {
 	return strings.EqualFold(strings.TrimSpace(candidate.Type), "message")
 }
