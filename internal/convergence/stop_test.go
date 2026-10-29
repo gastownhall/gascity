@@ -349,3 +349,75 @@ func TestStopHandler_StoreErrorReadingActiveWisp_ReportsError(t *testing.T) {
 		t.Fatalf("StopHandler error = %q", got)
 	}
 }
+
+func TestStopHandler_ForceCloseClosesOpenWispDescendants(t *testing.T) {
+	// Active wisp with open and in-progress step descendants: stop must close
+	// every one of them, close the wisp root only after all of them, and
+	// terminate the loop.
+	handler, store, _ := setupActiveHandler(t, "in_progress", nil)
+	store.addBead("step-a", "open", "wisp-iter-2", "", nil)
+	store.addBead("step-b", "in_progress", "wisp-iter-2", "", nil)
+
+	result, err := handler.StopHandler(context.Background(), "root-1", "alice", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != ActionStopped {
+		t.Errorf("Action = %q, want %q", result.Action, ActionStopped)
+	}
+
+	for _, id := range []string{"step-a", "step-b"} {
+		info, err := store.GetBead(id)
+		if err != nil {
+			t.Fatalf("reading %s: %v", id, err)
+		}
+		if info.Status != "closed" {
+			t.Errorf("step %s status = %q, want closed", id, info.Status)
+		}
+		meta, err := store.GetMetadata(id)
+		if err != nil {
+			t.Fatalf("reading %s metadata: %v", id, err)
+		}
+		if meta["close_reason"] != CloseReasonManualSupersede {
+			t.Errorf("step %s close_reason = %q, want %q", id, meta["close_reason"], CloseReasonManualSupersede)
+		}
+	}
+
+	wisp, err := store.GetBead("wisp-iter-2")
+	if err != nil {
+		t.Fatalf("reading wisp: %v", err)
+	}
+	if wisp.Status != "closed" {
+		t.Errorf("wisp status = %q, want closed", wisp.Status)
+	}
+
+	// The wisp root closes only after every one of its descendants.
+	wispIdx := closeLogIndex(store.CloseLog, "wisp-iter-2")
+	if wispIdx < 0 {
+		t.Fatalf("CloseLog %v does not list the wisp root", store.CloseLog)
+	}
+	for _, step := range []string{"step-a", "step-b"} {
+		if idx := closeLogIndex(store.CloseLog, step); idx < 0 || idx > wispIdx {
+			t.Errorf("CloseLog %v: step %s (idx %d) must close before wisp-iter-2 (idx %d)",
+				store.CloseLog, step, idx, wispIdx)
+		}
+	}
+
+	meta, _ := store.GetMetadata("root-1")
+	if meta[FieldState] != StateTerminated {
+		t.Errorf("state = %q, want %q", meta[FieldState], StateTerminated)
+	}
+	if meta[FieldTerminalReason] != TerminalStopped {
+		t.Errorf("terminal_reason = %q, want %q", meta[FieldTerminalReason], TerminalStopped)
+	}
+}
+
+// closeLogIndex returns the index of id in the close log, or -1.
+func closeLogIndex(log []string, id string) int {
+	for i, entry := range log {
+		if entry == id {
+			return i
+		}
+	}
+	return -1
+}
