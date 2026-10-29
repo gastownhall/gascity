@@ -722,14 +722,19 @@ func (c *client) closePane(ctx context.Context, paneID string) error {
 	return err
 }
 
-// getAgent fetches one agent by target — an agent name or the pane id hosting
-// it: (info, true, nil) if present, (zero, false, nil) if herdr reports it
-// absent, (_, false, err) on failure. Verified live on herdr 0.7.3: `agent
-// get <target>` only resolves a pane id — passing an agent name returns
-// agent_not_found even though `agent list` lists that same agent under that
-// name — so a name-shaped target that `agent get` rejects as not-found falls
-// back to a listAgents scan, which does resolve by name.
+// getAgent fetches one agent by target — a registered agent name or the pane
+// id hosting it: (info, true, nil) if present, (zero, false, nil) if herdr
+// reports it absent, (_, false, err) on failure. It asks `agent get` first;
+// when that answers not-found it scans `agent list` for an agent registered
+// under target, which is how a name-shaped target is confirmed when `agent get`
+// does not resolve it. The scan matches registered names only: an agent kind
+// is shared by every pane running it, and a pane nobody named has no name, so
+// neither is ever an identity. An empty target names nothing and resolves
+// nothing.
 func (c *client) getAgent(ctx context.Context, target string) (agentInfo, bool, error) {
+	if target == "" {
+		return agentInfo{}, false, nil
+	}
 	res, err := c.run(ctx, "agent", "get", target)
 	if err == nil {
 		var wrap struct {
@@ -748,7 +753,7 @@ func (c *client) getAgent(ctx context.Context, target string) (agentInfo, bool, 
 		return agentInfo{}, false, fmt.Errorf("herdr agent get %q: list fallback: %w", target, lerr)
 	}
 	for _, a := range agents {
-		if a.Name == target {
+		if a.Name != "" && a.Name == target {
 			return a, true, nil
 		}
 	}
