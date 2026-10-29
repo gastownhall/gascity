@@ -276,11 +276,18 @@ func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...
 	return env.Result, nil
 }
 
-// agentInfo mirrors herdr's agent object. herdr 0.7.3 emits the name under
-// the JSON key "agent"; 0.9.1 moved it to "name" and reuses "agent" for the
-// agent kind ("claude", "codex"), which UnmarshalJSON resolves.
+// agentInfo mirrors herdr's agent object (AgentInfo in herdr's
+// src/api/schema/agents.rs). Name is the agent's registered name
+// (`agent start <name>`); herdr omits it for a pane whose agent it detected
+// or was told about but nobody registered. Kind is the effective agent
+// label — the kind herdr detected ("claude", "opencode") or a report-agent
+// hook's label; every pane running that kind shares it, so it is never an
+// identity.
 type agentInfo struct {
-	Name        string `json:"agent"`
+	Name string `json:"name"`
+	Kind string `json:"agent"`
+	// PaneID is the pane hosting the agent; with Name it is the other lookup
+	// key callers pass by hand.
 	PaneID      string `json:"pane_id"`
 	WorkspaceID string `json:"workspace_id"`
 	TabID       string `json:"tab_id"`
@@ -292,25 +299,6 @@ type agentInfo struct {
 	// Verified live on 0.7.3: it moves only while a client renders the pane;
 	// a headless server holds it at 0.
 	Revision uint64 `json:"revision"`
-}
-
-// UnmarshalJSON prefers "name" over "agent": on herdr 0.9.1 decoding "agent"
-// keyed every pane by its kind, so all Claude sessions collapsed into one
-// activity entry and none could ever read as idle for nudge delivery.
-func (a *agentInfo) UnmarshalJSON(b []byte) error {
-	type plain agentInfo
-	var v struct {
-		plain
-		Label string `json:"name"`
-	}
-	if err := json.Unmarshal(b, &v); err != nil {
-		return err
-	}
-	*a = agentInfo(v.plain)
-	if v.Label != "" {
-		a.Name = v.Label
-	}
-	return nil
 }
 
 // startupBootBudgetMS is the bound every wait that can land inside an agent's

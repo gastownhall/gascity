@@ -14,6 +14,12 @@ import (
 // rejects `agent prompt` / `agent wait` with rejection, recording every argv it
 // was called with to the returned trace path.
 //
+// The list serves herdr's real agent-object shape: "agent" is the detected
+// kind (the same label for every entry here), "name" the registered agent
+// name. "<name>=<pane>" registers an agent whose name and pane differ;
+// "=<pane>" is an unnamed entry — a pane herdr detected but nobody
+// registered, which is the case every consumer must survive.
+//
 // rejection is the text the fake emits for those verbs. A leading "!" means it
 // goes to stderr with a non-zero exit, which is how herdr reports a rejection
 // from the CLI; otherwise it is an envelope on stdout.
@@ -28,7 +34,11 @@ func registryFake(t *testing.T, registered []string, rejection string) (bin, tra
 		if n, p, ok := strings.Cut(entry, "="); ok {
 			name, pane = n, p
 		}
-		entries = append(entries, fmt.Sprintf(`{"agent":"%s","pane_id":"%s","agent_status":"working"}`, name, pane))
+		nameJSON := ""
+		if name != "" {
+			nameJSON = fmt.Sprintf(`,"name":"%s"`, name)
+		}
+		entries = append(entries, fmt.Sprintf(`{"agent":"opencode"%s,"pane_id":"%s","agent_status":"working"}`, nameJSON, pane))
 	}
 	list := `{"result":{"agents":[` + strings.Join(entries, ",") + `]}}`
 	if registered == nil {
