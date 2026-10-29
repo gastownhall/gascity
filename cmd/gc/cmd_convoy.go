@@ -2289,8 +2289,15 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 	// actually owns the bead — prefix-aware, across the city and every rig —
 	// so rig-store closes autoclose their convoys instead of silently
 	// no-op'ing (#3411).
+	//
+	// The hook passes no cross-store homes (convoyAutocloseHomes{}): bd runs
+	// it for the stores bd serves, which on a split city are the work ledgers,
+	// and resolving a parent's or a binding child's store here would open a
+	// second handle on the binding per close. The controller's reactive
+	// autoclose and its sweep (beadCloseAutoclose) cover binding rows and the
+	// cross-store convoy children on a split city.
 	if store, _, ok := autocloseOwningStore(beadID, cityPath); ok {
-		doConvoyAutocloseWith(store, nil, rec, beadID, stdout, stderr)
+		doConvoyAutocloseWith(store, convoyAutocloseHomes{}, rec, beadID, stdout, stderr)
 		return
 	}
 
@@ -2302,7 +2309,7 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 	if err != nil {
 		return
 	}
-	doConvoyAutocloseWith(store, nil, rec, beadID, stdout, stderr)
+	doConvoyAutocloseWith(store, convoyAutocloseHomes{}, rec, beadID, stdout, stderr)
 }
 
 // autocloseOwningStore resolves the store that owns beadID, and the store
@@ -2399,25 +2406,37 @@ func autocloseCityPathForStoreRoot(storeRoot string) string {
 	return cityForStoreDir(storeRoot)
 }
 
+// convoyAutocloseHomes tells doConvoyAutocloseWith where a split city keeps
+// what the closed bead's own store does not hold. The zero value is a store
+// that holds everything: the bd on_close hook path and a single-store city.
+type convoyAutocloseHomes struct {
+	// parent names the WORK store a legacy parent id belongs to; nil, or a
+	// nil answer, means the parent shares the closed bead's store.
+	parent func(id string) beads.Store
+	// ownFirst reads the parent from the closed bead's own store before its
+	// work home: a relic (a row migrated into the binding under its
+	// work-ledger id) keeps the parent it migrated with, and a work bead that
+	// reuses that parent's id must not answer for it.
+	ownFirst bool
+	// children is the class binding whose legacy children of a work convoy
+	// are counted too, or nil when the city relocates no class.
+	children beads.Store
+}
+
 // doConvoyAutocloseWith checks whether the closed bead's legacy parent or
 // tracks dependents are convoys with all children closed, and if so closes
 // them. All errors are swallowed — this is best-effort infrastructure called
 // from a bd hook script — but reported in the returned run, so the controller
 // can retry a run a read failure or a refused close left undecided.
 //
-// parentHome names the WORK store a legacy parent id belongs to; nil means the
-// parent shares the closed bead's store (the bd hook path, a single-store
-// city).
-//
 // A convoy is work class, so on a split city it stays on the work ledger while
 // a graph row parented under it (a graph root poured with a parent) lives in
-// the class binding. Read through the binding, the parent was never found and
-// the convoy never autoclosed. The parent is read from its work store first
-// and from the closed bead's own store second (a parent that shares the
-// child's ledger), and the convoy is decided and closed where it lives. Its
-// legacy children are counted in both stores, so a child still open in the
-// binding keeps a work-ledger convoy open.
-func doConvoyAutocloseWith(store beads.Store, parentHome func(id string) beads.Store, rec events.Recorder, beadID string, stdout, _ io.Writer) autocloseRun {
+// the class binding. The parent is read from its work home and from the closed
+// bead's own store (homes), and the convoy is decided and closed where it
+// lives. Its legacy children are counted in the binding too (homes.children),
+// so a child still open there keeps a work-ledger convoy open, whichever child
+// closed last.
+func doConvoyAutocloseWith(store beads.Store, homes convoyAutocloseHomes, rec events.Recorder, beadID string, stdout, _ io.Writer) autocloseRun {
 	var run autocloseRun
 	bead, err := store.Get(beadID)
 	if err != nil {
@@ -2428,20 +2447,20 @@ func doConvoyAutocloseWith(store beads.Store, parentHome func(id string) beads.S
 	seen := make(map[string]bool)
 	if bead.ParentID != "" {
 		home := store
-		if parentHome != nil {
-			if h := parentHome(bead.ParentID); h != nil {
+		if homes.parent != nil {
+			if h := homes.parent(bead.ParentID); h != nil {
 				home = h
 			}
 		}
-		parent, parentStore, err := autocloseLocate(bead.ParentID, home, store)
+		first, second := home, store
+		if homes.ownFirst {
+			first, second = store, home
+		}
+		parent, parentStore, err := autocloseLocate(bead.ParentID, first, second)
 		run.note(err)
 		if err == nil {
 			seen[parent.ID] = true
-			if sameBeadStore(parentStore, store) {
-				autocloseConvoyIfComplete(parentStore, rec, parent, stdout, &run)
-			} else {
-				autocloseConvoyIfCompleteAcross(parentStore, store, rec, parent, stdout, &run)
-			}
+			autocloseConvoyIfCompleteAcross(parentStore, convoyChildStore(parentStore, store, homes), rec, parent, stdout, &run)
 		}
 	}
 
@@ -2455,9 +2474,24 @@ func doConvoyAutocloseWith(store beads.Store, parentHome func(id string) beads.S
 			continue
 		}
 		seen[convoy.ID] = true
-		autocloseConvoyIfComplete(store, rec, convoy, stdout, &run)
+		autocloseConvoyIfCompleteAcross(store, convoyChildStore(store, store, homes), rec, convoy, stdout, &run)
 	}
 	return run
+}
+
+// convoyChildStore is the second store a convoy in convoyStore has legacy
+// children in: the closed bead's own store when the convoy lives elsewhere
+// (a class row closed under a work convoy), else the class binding. nil when
+// that is the convoy's own store.
+func convoyChildStore(convoyStore, rowStore beads.Store, homes convoyAutocloseHomes) beads.Store {
+	other := homes.children
+	if !sameBeadStore(convoyStore, rowStore) {
+		other = rowStore
+	}
+	if other == nil || sameBeadStore(other, convoyStore) {
+		return nil
+	}
+	return other
 }
 
 // convoyStillAutocloses is autoclose's premise about the convoy row itself.
@@ -2487,20 +2521,27 @@ func closeCompletedConvoyAcross(store, childStore beads.Store, convoy beads.Bead
 	if err != nil {
 		return false, fmt.Errorf("children of %s: %w", convoy.ID, err)
 	}
+	for _, ch := range children {
+		if !convoycore.IsTerminalStatus(ch.Status) {
+			return false, nil
+		}
+	}
+	// The second store is read only once every child here is terminal: on
+	// the common path (an open sibling) it costs nothing.
 	if childStore != nil && !sameBeadStore(childStore, store) {
 		elsewhere, err := childStore.List(beads.ListQuery{ParentID: convoy.ID, IncludeClosed: true, Sort: beads.SortCreatedAsc})
 		if err != nil {
 			return false, fmt.Errorf("children of %s: %w", convoy.ID, err)
 		}
+		for _, ch := range elsewhere {
+			if !convoycore.IsTerminalStatus(ch.Status) {
+				return false, nil
+			}
+		}
 		children = append(children, elsewhere...)
 	}
 	if len(children) == 0 {
 		return false, nil
-	}
-	for _, ch := range children {
-		if !convoycore.IsTerminalStatus(ch.Status) {
-			return false, nil
-		}
 	}
 	closed, err := autocloseCloseIfStill(store, convoy.ID, convoyAutocloseReason, convoyStillAutocloses, func() error {
 		return closeConvoyWithReason(store, convoy.ID, convoyAutocloseReason)
@@ -2511,12 +2552,9 @@ func closeCompletedConvoyAcross(store, childStore beads.Store, convoy beads.Bead
 	return closed, nil
 }
 
-func autocloseConvoyIfComplete(store beads.Store, rec events.Recorder, convoy beads.Bead, stdout io.Writer, run *autocloseRun) {
-	autocloseConvoyIfCompleteAcross(store, nil, rec, convoy, stdout, run)
-}
-
-// autocloseConvoyIfCompleteAcross is autocloseConvoyIfComplete counting the
-// convoy's legacy children in childStore too (closeCompletedConvoyAcross).
+// autocloseConvoyIfCompleteAcross closes convoy when it is complete, counting
+// its legacy children in childStore too (closeCompletedConvoyAcross; nil: in
+// store only), and announces the close.
 func autocloseConvoyIfCompleteAcross(store, childStore beads.Store, rec events.Recorder, convoy beads.Bead, stdout io.Writer, run *autocloseRun) {
 	closed, err := closeCompletedConvoyAcross(store, childStore, convoy)
 	run.note(err)
