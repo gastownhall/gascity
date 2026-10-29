@@ -1513,3 +1513,57 @@ func TestEmitDueComputeFactsGivesUpUnsettledClosedIntervalSweep(t *testing.T) {
 		}
 	})
 }
+
+// closedListCountingStore counts the closed-session Lists the usage lane
+// issues.
+type closedListCountingStore struct {
+	beads.Store
+	closedLists int
+}
+
+func (s *closedListCountingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Status == "closed" {
+		s.closedLists++
+	}
+	return s.Store.List(q)
+}
+
+// TestEmitDueComputeFactsDefersClosedIntervalsPastBoot pins the boot pass's
+// cost: rows closed while the controller was down are not listed on the
+// synchronous boot pass, and the first steady-state pass settles them with
+// the interval ending at usage_closed_at, not at the pass time.
+func TestEmitDueComputeFactsDefersClosedIntervalsPastBoot(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	t1 := time.Now().UTC().Truncate(time.Second)
+	env.clk.Time = t1
+	t0 := t1.Add(-10 * time.Minute)
+	workDir, codexRoot := t.TempDir(), t.TempDir()
+	writeCodexRolloutForSweepAt(t, codexRoot, t0, workDir, codexSweepSessionKey, [][3]int{{150, 100, 50}})
+	id := drainAckClosedCodexSession(t, env, t0, workDir)
+
+	store := &closedListCountingStore{Store: env.store}
+	cr, sinkPath := newClosedUsageRuntime(t, store, codexRoot)
+	cr.usageNow = func() time.Time { return t1.Add(time.Hour) }
+
+	cr.emitDueComputeFacts(context.Background(), nil, true)
+	if store.closedLists != 0 {
+		t.Fatalf("boot pass issued %d closed-session Lists, want none", store.closedLists)
+	}
+	if got := rawSinkFactCount(t, sinkPath, usage.KindCompute); got != 0 {
+		t.Fatalf("boot pass recorded %d compute facts, want none", got)
+	}
+
+	cr.emitDueComputeFacts(context.Background(), nil, false)
+	facts, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kindCount(facts, usage.KindCompute) != 1 {
+		t.Fatalf("steady pass compute facts = %d, want 1", kindCount(facts, usage.KindCompute))
+	}
+	for _, f := range facts {
+		if f.Kind == usage.KindCompute && (f.SessionID != id || f.WallSeconds != 600) {
+			t.Fatalf("compute fact = %+v, want session %s with WallSeconds 600 (usage_closed_at - T0)", f, id)
+		}
+	}
+}
