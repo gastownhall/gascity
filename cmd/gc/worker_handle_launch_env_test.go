@@ -222,3 +222,42 @@ func TestResumeByAttachOrStartRegeneratesRigScopedLaunchEnv(t *testing.T) {
 		})
 	}
 }
+
+// AC-3: rig scope comes from the configured agent and the city's rig config,
+// not from the recorded work_dir or the caller's environment.
+func TestResumeDerivesRigScopeFromConfiguredAgent(t *testing.T) {
+	callerRoot := t.TempDir()
+	caller := map[string]string{
+		"GC_RIG":              "caller-rig",
+		"GC_RIG_ROOT":         callerRoot,
+		"BEADS_DIR":           filepath.Join(callerRoot, ".beads"),
+		"GC_BEADS_SCOPE_ROOT": callerRoot,
+	}
+	for key, value := range caller {
+		t.Setenv(key, value)
+	}
+	c := newResumeLaunchEnvCity(t, rigPoolLaunchEnvCity)
+	workDir := t.TempDir()
+	info := c.stoppedSession(t, "myrig/worker", "myrig/worker-1", "", workDir)
+
+	env := c.resume(t, info, resumeByMessage).Env
+
+	for key, want := range map[string]string{
+		"GC_RIG":              "myrig",
+		"GC_RIG_ROOT":         c.rigRoot,
+		"BEADS_DIR":           filepath.Join(c.rigRoot, ".beads"),
+		"GC_BEADS_SCOPE_ROOT": c.rigRoot,
+		"GC_DIR":              workDir,
+	} {
+		if got := env[key]; got != want {
+			t.Errorf("start env[%s] = %q, want %q", key, got, want)
+		}
+	}
+	for key, value := range env {
+		for callerKey, callerValue := range caller {
+			if value == callerValue {
+				t.Errorf("start env[%s] = %q carries the caller's %s", key, value, callerKey)
+			}
+		}
+	}
+}
