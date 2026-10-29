@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -635,6 +636,11 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 			}
 			return closeDrainReservationFailure(store, bead, manifest, err, opts)
 		}
+		member, err := ensureSharedDrainWorkspace(store, bead, member, opts)
+		if err != nil {
+			return ControlResult{}, err
+		}
+		members[i] = member
 		created, err := materializeDrainRow(store, bead, manifest, members, row, member, itemFormula, parentVars, opts)
 		if err != nil {
 			if errors.Is(err, errDrainInvalidItemFormula) {
@@ -661,6 +667,36 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 		return closeDrainWithManifest(store, bead.ID, manifest, "failed", beadmeta.OutcomeFail, "drain-failed", opts)
 	}
 	return closeDrainWithManifest(store, bead.ID, manifest, "succeeded", beadmeta.OutcomePass, "drain-succeeded", opts)
+}
+
+// ensureSharedDrainWorkspace records the shared drain's workspace as the
+// reserved member's work_dir, so the item recipe stamped from that member and
+// the session launched for it both work in the one workspace the drain shares.
+// It returns the member as recorded.
+func ensureSharedDrainWorkspace(store beads.Store, control, member beads.Bead, opts ProcessOptions) (beads.Bead, error) {
+	if opts.SharedDrainWorkspace == nil || convoycore.IsUnresolvedTrackedItem(member) {
+		return member, nil
+	}
+	workDir, err := opts.SharedDrainWorkspace(control)
+	if err != nil {
+		return member, fmt.Errorf("%s: provisioning shared drain workspace for member %s: %w", control.ID, member.ID, err)
+	}
+	if workDir == "" {
+		opts.tracef("drain-shared-workspace control=%s member=%s no workspace for this scope", control.ID, member.ID)
+		return member, nil
+	}
+	memberStore, err := drainMemberOwningStore(store, member.ID, opts)
+	if err != nil {
+		return member, fmt.Errorf("%s: resolving drain member store for %s: %w", control.ID, member.ID, err)
+	}
+	if err := memberStore.SetMetadata(member.ID, beadmeta.LegacyWorkDirMetadataKey, workDir); err != nil {
+		return member, fmt.Errorf("%s: recording shared drain workspace on member %s: %w", control.ID, member.ID, err)
+	}
+	metadata := make(map[string]string, len(member.Metadata)+1)
+	maps.Copy(metadata, member.Metadata)
+	metadata[beadmeta.LegacyWorkDirMetadataKey] = workDir
+	member.Metadata = metadata
+	return member, nil
 }
 
 func materializeDrainRow(store beads.Store, control beads.Bead, manifest drainManifest, members []beads.Bead, row *drainManifestRow, member beads.Bead, itemFormula string, parentVars map[string]string, opts ProcessOptions) (int, error) {
