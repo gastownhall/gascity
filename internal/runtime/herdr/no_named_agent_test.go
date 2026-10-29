@@ -256,6 +256,23 @@ func TestTargetHasNoNamedAgentAsksTheRegistryNotTheErrorText(t *testing.T) {
 	}
 }
 
+// TestTargetHasNoNamedAgentIgnoresAKindOnlyName pins that an unnamed pane is
+// never the named agent a kind-only target asks about: every pane of a kind
+// shares the kind, so a gc session named after one must not borrow a
+// stranger's unnamed pane to refuse the fallback.
+func TestTargetHasNoNamedAgentIgnoresAKindOnlyName(t *testing.T) {
+	const agentless = `{"error":{"code":"agent_not_ready","message":"agent opencode is not an active named agent"},"id":"cli:agent:prompt"}`
+	bin, _ := registryFake(t, []string{"alpha=w1:p1", "beta=w2:p1", "=w1:p3"}, agentless)
+	c := &client{session: "gc-test", bin: bin}
+	err := c.agentPrompt(context.Background(), "opencode", "proceed")
+	if err == nil {
+		t.Fatal("fake herdr rejection produced no error")
+	}
+	if !c.targetHasNoNamedAgent(context.Background(), "opencode", err) {
+		t.Errorf("targetHasNoNamedAgent(%q) = false; an unnamed opencode pane is no named agent (err: %v)", "opencode", err)
+	}
+}
+
 // TestDeliverNudgeFallsBackWhenThePaneHasNoNamedAgent is the behavior the
 // decision buys, asserted through the verb a caller actually uses: a pane with no
 // named agent has no prompt machinery, so the nudge still lands via paste + Enter.

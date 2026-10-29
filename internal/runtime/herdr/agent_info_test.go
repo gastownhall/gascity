@@ -3,6 +3,9 @@ package herdr
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -87,4 +90,60 @@ func TestAgentInfoNamelessEntryDecodesUnnamed(t *testing.T) {
 	}
 	check(t, "socket agent.list", sockList[0], "alpha", "opencode", "w1:p1")
 	check(t, "socket agent.list", sockList[1], "", "claude", "w1:p3")
+}
+
+// Literal herdr agent-list entries: two registered sessions and an unnamed
+// pane, all running opencode.
+const (
+	unnamedOpencodeEntry = `{"agent":"opencode","pane_id":"w3:p1","agent_status":"working"}`
+	alphaEntry           = `{"agent":"opencode","name":"alpha","pane_id":"w1:p1","agent_status":"working"}`
+	betaEntry            = `{"agent":"opencode","name":"beta","pane_id":"w2:p1","agent_status":"working"}`
+)
+
+// lookupFake writes a fake herdr whose `agent get` answers with get, or with
+// herdr's not-found envelope when get is "", and whose `agent list` answers
+// with the literal entries. Every call's argv is appended to the returned
+// trace path.
+func lookupFake(t *testing.T, get string, entries ...string) (*client, string) {
+	t.Helper()
+	getAnswer := `{"error":{"code":"not_found","message":"no such agent"}}`
+	if get != "" {
+		getAnswer = `{"result":{"agent":` + get + `}}`
+	}
+	trace := filepath.Join(t.TempDir(), "calls")
+	script := "#!/bin/sh\n" +
+		"echo \"$*\" >> '" + trace + "'\n" +
+		"case \"$*\" in\n" +
+		"  *'agent get'*) echo '" + getAnswer + "' ;;\n" +
+		"  *'agent list'*) echo '{\"result\":{\"agents\":[" + strings.Join(entries, ",") + "]}}' ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	return &client{session: "gc-test", bin: writeFakeHerdr(t, script)}, trace
+}
+
+// A kind is shared by every pane running it, so a target that is only a kind
+// names no session: the not-found list scan must not hand back the unnamed
+// pane of that kind. An empty target names nothing at all and is not sent.
+func TestGetAgentNeverResolvesAKindOrEmptyTarget(t *testing.T) {
+	c, trace := lookupFake(t, "", unnamedOpencodeEntry, alphaEntry, betaEntry)
+	ctx := context.Background()
+
+	a, ok, err := c.getAgent(ctx, "")
+	if err != nil || ok || a.PaneID != "" {
+		t.Errorf("getAgent(\"\") = (%+v, %v, %v); want not-found with no pane", a, ok, err)
+	}
+	if calls, rerr := os.ReadFile(trace); rerr == nil && len(calls) > 0 {
+		t.Errorf("getAgent(\"\") called herdr: %s", calls)
+	}
+
+	a, ok, err = c.getAgent(ctx, "opencode")
+	if err != nil || ok || a.PaneID != "" {
+		t.Errorf("getAgent(%q) = (%+v, %v, %v); want not-found with no pane", "opencode", a, ok, err)
+	}
+	for _, tc := range []struct{ target, pane string }{{"alpha", "w1:p1"}, {"beta", "w2:p1"}} {
+		a, ok, err := c.getAgent(ctx, tc.target)
+		if err != nil || !ok || a.PaneID != tc.pane {
+			t.Errorf("getAgent(%q) = (%+v, %v, %v); want pane %q", tc.target, a, ok, err, tc.pane)
+		}
+	}
 }
