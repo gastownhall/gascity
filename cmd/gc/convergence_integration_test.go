@@ -1256,6 +1256,92 @@ func startRoutedConvergenceLoop(t *testing.T, cr *CityRuntime, store beads.Store
 	return created.BeadID, activeWisp()
 }
 
+func TestConvergenceStop_ClosesActiveWispSteps(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		gateMode            string
+		completedIterations int
+		wantReadyBeforeStop bool
+	}{
+		{"manual-gate/iteration-1", convergence.GateModeManual, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cr, store := setupConvergenceRuntime(t)
+			loopID, wispID := startRoutedConvergenceLoop(t, cr, store, tc.gateMode, tc.completedIterations)
+			steps, err := store.Children(wispID)
+			if err != nil {
+				t.Fatalf("Children(%s): %v", wispID, err)
+			}
+			if len(steps) == 0 {
+				t.Fatalf("wisp %s has no steps", wispID)
+			}
+			readyIDs := func() map[string]bool {
+				t.Helper()
+				ready, err := store.Ready(beads.ReadyQuery{Assignee: "worker"})
+				if err != nil {
+					t.Fatalf("Ready: %v", err)
+				}
+				ids := make(map[string]bool, len(ready))
+				for _, b := range ready {
+					ids[b.ID] = true
+				}
+				return ids
+			}
+			before := readyIDs()
+			for _, step := range steps {
+				if step.Assignee != "worker" || step.Metadata["gc.routed_to"] != "pool/worker" {
+					t.Fatalf("step %s assignee=%q gc.routed_to=%q, want worker and pool/worker",
+						step.ID, step.Assignee, step.Metadata["gc.routed_to"])
+				}
+				if before[step.ID] != tc.wantReadyBeforeStop {
+					t.Fatalf("step %s in Ready(worker) before stop = %v, want %v", step.ID, before[step.ID], tc.wantReadyBeforeStop)
+				}
+			}
+
+			if r := sendAndReceive(t, cr, convergenceRequest{Command: "stop", BeadID: loopID, User: "op"}); r.Error != "" {
+				t.Fatalf("stop: %s", r.Error)
+			}
+
+			after := readyIDs()
+			for _, step := range steps {
+				got, err := store.Get(step.ID)
+				if err != nil {
+					t.Fatalf("Get %s: %v", step.ID, err)
+				}
+				if got.Status != "closed" {
+					t.Errorf("step %s of the stopped loop is %q, want closed", got.ID, got.Status)
+				}
+				if got.Metadata["close_reason"] != convergence.CloseReasonManualSupersede {
+					t.Errorf("step %s close_reason = %q, want %q", got.ID, got.Metadata["close_reason"], convergence.CloseReasonManualSupersede)
+				}
+				if got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped {
+					t.Errorf("step %s gc.outcome = %q, want %q", got.ID, got.Metadata[beadmeta.OutcomeMetadataKey], beadmeta.OutcomeSkipped)
+				}
+				if after[got.ID] {
+					t.Errorf("step %s of the stopped loop is still in Ready(worker)", got.ID)
+				}
+			}
+			wisp, err := store.Get(wispID)
+			if err != nil {
+				t.Fatalf("Get wisp: %v", err)
+			}
+			if wisp.Status != "closed" {
+				t.Errorf("wisp %s status = %q, want closed", wispID, wisp.Status)
+			}
+			loop, err := store.Get(loopID)
+			if err != nil {
+				t.Fatalf("Get loop: %v", err)
+			}
+			if loop.Status != "closed" || loop.Metadata[convergence.FieldState] != convergence.StateTerminated ||
+				loop.Metadata[convergence.FieldTerminalReason] != convergence.TerminalStopped {
+				t.Errorf("loop status=%q state=%q terminal_reason=%q, want closed, %q, %q",
+					loop.Status, loop.Metadata[convergence.FieldState], loop.Metadata[convergence.FieldTerminalReason],
+					convergence.StateTerminated, convergence.TerminalStopped)
+			}
+		})
+	}
+}
+
 func TestConvergenceStop_PreservesClosedWispDescendants(t *testing.T) {
 	const priorReason = "step b finished before the stop"
 
