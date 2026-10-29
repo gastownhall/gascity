@@ -1824,15 +1824,21 @@ var supervisorServiceEnvKeys = map[string]bool{
 	"T3_HOME":                                  true,
 	"T3_WS_URL":                                true,
 	"T3CODE_HOME":                              true,
-	"HOME":                                     true,
-	"LANG":                                     true,
-	"LC_ALL":                                   true,
-	"LC_CTYPE":                                 true,
-	"LOGNAME":                                  true,
-	"SHELL":                                    true,
-	"USER":                                     true,
-	"XDG_CONFIG_HOME":                          true,
-	"XDG_STATE_HOME":                           true,
+	// The supervisor spawns the tmux servers its sessions live in, and
+	// TMUX_TMPDIR decides which socket namespace a server and every client
+	// resolve to. Without it the supervisor and the CLI probe different
+	// namespaces and a live session reads as unwatchable (#5526). TMPDIR is
+	// never consulted by tmux and stays out.
+	"TMUX_TMPDIR":     true,
+	"HOME":            true,
+	"LANG":            true,
+	"LC_ALL":          true,
+	"LC_CTYPE":        true,
+	"LOGNAME":         true,
+	"SHELL":           true,
+	"USER":            true,
+	"XDG_CONFIG_HOME": true,
+	"XDG_STATE_HOME":  true,
 }
 
 var supervisorServiceFixedEnvKeys = map[string]bool{
