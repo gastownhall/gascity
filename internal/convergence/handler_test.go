@@ -43,6 +43,10 @@ type fakeStore struct {
 	SetMetadataErrFunc func(key string) error
 
 	ActivatedWispIDs []string
+
+	// CloseLog records the ID of every bead CloseBead or CloseOpenDescendants
+	// closes, in order, so tests can verify close ordering.
+	CloseLog []string
 }
 
 func newFakeStore() *fakeStore {
@@ -134,6 +138,7 @@ func (s *fakeStore) CloseBead(id, reason string) error {
 		}
 		rec.metadata["close_reason"] = reason
 	}
+	s.CloseLog = append(s.CloseLog, id)
 	return nil
 }
 
@@ -165,6 +170,7 @@ func (s *fakeStore) closeOpenDescendantsLocked(rec *fakeBeadRecord, reason strin
 		child.info.Status = "closed"
 		child.info.ClosedAt = time.Now()
 		child.metadata["close_reason"] = reason
+		s.CloseLog = append(s.CloseLog, childID)
 	}
 	return nil
 }
