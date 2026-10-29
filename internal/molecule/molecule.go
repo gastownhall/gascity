@@ -1790,21 +1790,12 @@ func activateAttachCandidate(store beads.Store, rootID string, idMapping map[str
 	return nil
 }
 
-// markFailedReporting is markFailed with the first metadata-write error
-// surfaced instead of swallowed: the fence loser path must know when its
-// candidate was NOT neutralized, because an unmarked candidate could
-// otherwise be selected by idempotency recovery.
+// markFailedReporting stamps ids as failed via stampFailed and surfaces
+// every metadata-write error instead of swallowing them: the fence loser
+// path must know when its candidate was NOT neutralized, because an
+// unmarked candidate could otherwise be selected by idempotency recovery.
 func markFailedReporting(store beads.Store, ids []string) error {
-	var firstErr error
-	for _, id := range ids {
-		if err := store.SetMetadataBatch(id, map[string]string{
-			beadmeta.MoleculeFailedMetadataKey: "true",
-			InstantiatingMetadataKey:           "",
-		}); err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("marking %s molecule_failed: %w", id, err)
-		}
-	}
-	return firstErr
+	return errors.Join(stampFailed(store, ids)...)
 }
 
 // markFailed stamps all created beads as failed via stampFailed.

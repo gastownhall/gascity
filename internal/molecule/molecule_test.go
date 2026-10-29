@@ -3949,9 +3949,10 @@ type mintFaultStore struct {
 	activationIndex int // index into created; -1 disables the activation fault
 	activationFired bool
 
-	stampRefusals map[int]int // creation index -> refusals, or stampAlways
-	stampFault    error       // wrapped by every refusal; errInjectedStamp when nil
-	stampPartial  bool        // a refused stamp first writes molecule_failed alone
+	stampRefusals map[int]int   // creation index -> refusals, or stampAlways
+	stampFault    error         // wrapped by every refusal; errInjectedStamp when nil
+	stampFaults   map[int]error // per-creation-index override of stampFault
+	stampPartial  bool          // a refused stamp first writes molecule_failed alone
 	refused       map[string]int
 	stampCalls    []string
 }
@@ -4002,6 +4003,9 @@ func (s *mintFaultStore) SetMetadataBatch(id string, kvs map[string]string) erro
 			}
 		}
 		fault := s.stampFault
+		if f, ok := s.stampFaults[s.indexOf(id)]; ok {
+			fault = f
+		}
 		if fault == nil {
 			fault = errInjectedStamp
 		}
@@ -4134,5 +4138,39 @@ func TestInstantiateFailureNamesTheBeadsItCouldNotMark(t *testing.T) {
 				t.Fatalf("err = %q, want %q", err.Error(), want)
 			}
 		})
+	}
+}
+
+// markFailedReporting retries each refused stamp once after the rest and
+// reports every bead whose retry was refused too, not only the first.
+func TestMarkFailedReportingRetriesOnceAndJoinsEveryFailure(t *testing.T) {
+	errB2 := errors.New("b2 stamp conflict")
+	store := newMintFaultStore(beads.NewMemStore())
+	store.stampRefusals = map[int]int{0: 1, 1: stampAlways, 2: stampAlways}
+	store.stampFaults = map[int]error{1: errB2, 2: beads.ErrNotFound}
+	for _, title := range []string{"b1", "b2", "b3"} {
+		if _, err := store.Create(beads.Bead{Title: title, Type: "task", Metadata: map[string]string{InstantiatingMetadataKey: "true"}}); err != nil {
+			t.Fatalf("Create(%s): %v", title, err)
+		}
+	}
+	b1, b2, b3 := store.created[0], store.created[1], store.created[2]
+
+	err := markFailedReporting(store, store.created)
+
+	assertStampCalls(t, store.stampCalls, b1, b2, b3, b1, b2, b3)
+	assertStampedAndUnfenced(t, store, b1)
+	if err == nil {
+		t.Fatal("markFailedReporting = nil, want the b2 and b3 stamp failures")
+	}
+	if strings.Contains(err.Error(), "marking "+b1+" ") {
+		t.Fatalf("err = %q names %s, whose retried stamp landed", err.Error(), b1)
+	}
+	for _, id := range []string{b2, b3} {
+		if !strings.Contains(err.Error(), "marking "+id+" molecule_failed") {
+			t.Fatalf("err = %q, want it to name %s", err.Error(), id)
+		}
+	}
+	if !errors.Is(err, errB2) || !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("err = %v, want errors.Is both stamp faults", err)
 	}
 }
