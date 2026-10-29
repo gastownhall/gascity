@@ -242,6 +242,7 @@ func newStorageMigrateCmd(surface storageCommandSurface, stdout, stderr io.Write
 		fromWork     bool
 		fromBackup   bool
 		fleetStopped bool
+		forced       []string
 	)
 	cmd := &cobra.Command{
 		Use:          surface.Verb,
@@ -292,6 +293,11 @@ half is an explicit operator attestation.`,
 					surface.Namespace, surface.Verb, surface.Flag, storageFromBackupFlag)
 				return errExit
 			}
+			force, err := parseStorageForce(forced)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc %s %s: %v\n", surface.Namespace, surface.Verb, err) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
 			request, err := resolveStorageOperatorRequest()
 			if err != nil {
 				fmt.Fprintf(stderr, "gc %s %s: %v\n", surface.Namespace, surface.Verb, err) //nolint:errcheck // best-effort stderr
@@ -299,6 +305,7 @@ half is an explicit operator attestation.`,
 			}
 			request.FleetStopped = fleetStopped
 			request.FromBackup = fromBackup
+			request.Force = force
 			return exitForCode(doStorageMigrate(cmd.Context(), request, stdout, stderr))
 		},
 	}
@@ -308,6 +315,7 @@ half is an explicit operator attestation.`,
 		"re-copy a binding whose database is gone from the retained-source backup")
 	cmd.Flags().BoolVar(&fleetStopped, storageFleetStoppedFlag, false,
 		"attest that "+storageFleetStoppedAttestation)
+	addStorageForceFlag(cmd, &forced)
 	return cmd
 }
 
@@ -354,6 +362,8 @@ type storageOperatorRequest struct {
 	FleetStopped bool
 	// FromBackup selects the retained-source backup as the migration's source.
 	FromBackup bool
+	// Force carries the named hazards the operator attested (--force=).
+	Force storageForce
 }
 
 // resolveStorageOperatorRequest resolves the city and its configuration.
@@ -414,15 +424,36 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 		return 1
 	}
 
+	// The controller lock for the whole run, and the liveness checks under it
+	// (storage_verb_exclusion.go). The ping below is the advisory second check.
+	controllerLock, err := acquireStorageVerbExclusion(request, storageVerbScope{Splits: true})
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer controllerLock.Close() //nolint:errcheck // released last, after the guard
 	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
 		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city and is still writing to the work store. Stop it (%s) and run this again\n", logPrefix, pid, storageStopCommand) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	sharedAttested, err := sharedWorkStoreRefusal(request.CityPath, request.Force)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if sharedAttested && !request.FromBackup {
+		if err := sharedStoreForeignRowRefusal(request.CityPath, request.Cfg); err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 	if !request.FleetStopped {
 		fmt.Fprintf(stderr, "%s: pass --%s to attest that %s. This command proves the controller is stopped and cannot prove anything about the rest; a write that lands in the source after the copy is proven stays stranded there, and every later boot names it rather than losing it\n", //nolint:errcheck // best-effort stderr
 			logPrefix, storageFleetStoppedFlag, storageFleetStoppedAttestation)
 		return 1
 	}
+
+	recordStorageAttestation(request.CityPath, logPrefix, request.Force.hazards(), stderr)
 
 	guard, err := storebinding.AcquireMigrationGuard(ctx, cityMigrationGuardDirectory(request.CityPath), storageMigrationGeneration)
 	if err != nil {

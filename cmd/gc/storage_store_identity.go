@@ -158,6 +158,38 @@ func readWorkStoreIdentity(scopeRoot string) (workStoreIdentity, error) {
 	return id, nil
 }
 
+// resolveWorkStoreIdentity is readWorkStoreIdentity plus the endpoint, for
+// comparing stores across cities.
+func resolveWorkStoreIdentity(cityPath, scopeRoot string) (workStoreIdentity, error) {
+	id, err := readWorkStoreIdentity(scopeRoot)
+	if err != nil {
+		return id, err
+	}
+	if id.Database == "" {
+		return id, nil
+	}
+	target, ok, err := workStoreIdentityDoltTarget(cityPath, scopeRoot)
+	switch {
+	case err != nil:
+		id.EndpointErr = err
+	case !ok:
+	case strings.TrimSpace(target.Socket) != "":
+		id.Endpoint = "unix:" + filepath.Clean(strings.TrimSpace(target.Socket))
+	default:
+		host, herr := storeIdentityDoltHost(target.Host)
+		if herr != nil {
+			id.EndpointErr = herr
+			break
+		}
+		id.Endpoint = host + ":" + strings.TrimSpace(target.Port)
+	}
+	return id, nil
+}
+
+// workStoreIdentityDoltTarget resolves a scope's Dolt connection target; a
+// test seam.
+var workStoreIdentityDoltTarget = canonicalScopeDoltTarget
+
 func canonicalIdentityPath(p string) string {
 	if p == "" {
 		return ""

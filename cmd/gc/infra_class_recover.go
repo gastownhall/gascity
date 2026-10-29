@@ -186,6 +186,7 @@ func newStorageRecoverCmd(surface storageCommandSurface, stdout, stderr io.Write
 		carriedIDs   []string
 		replaceIDs   []string
 		dropIDs      []string
+		forced       []string
 	)
 	cmd := &cobra.Command{
 		Use:          surface.Verb,
@@ -239,12 +240,18 @@ every edge touching it, to infra.recover-choices.jsonl at the binding root.
 					surface.Namespace, surface.Verb, surface.Flag)
 				return errExit
 			}
+			force, err := parseStorageForce(forced)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc %s %s: %v\n", surface.Namespace, surface.Verb, err) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
 			request, err := resolveStorageOperatorRequest()
 			if err != nil {
 				fmt.Fprintf(stderr, "gc %s %s: %v\n", surface.Namespace, surface.Verb, err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			request.FleetStopped = fleetStopped
+			request.Force = force
 			return exitForCode(doStorageRecoverStranded(cmd.Context(), request, strandedRecoveryOptions{
 				DryRun: dryRun, DumpPath: dumpPath,
 				Move: setOf(moveIDs), RecordCarried: setOf(carriedIDs),
@@ -256,6 +263,7 @@ every edge touching it, to infra.recover-choices.jsonl at the binding root.
 		"recover the stranded infrastructure beads out of this city's work store")
 	cmd.Flags().BoolVar(&fleetStopped, storageFleetStoppedFlag, false,
 		"attest that "+storageFleetStoppedAttestation)
+	addStorageForceFlag(cmd, &forced)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"report the gap and write the dump without touching the binding or the manifest")
 	cmd.Flags().StringVar(&dumpPath, "dump", "",
@@ -795,6 +803,21 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		return 1
 	}
 
+	// A run that writes holds the controller lock throughout
+	// (storage_verb_exclusion.go); a dry run writes neither store.
+	if !opts.DryRun {
+		controllerLock, err := acquireStorageVerbExclusion(request, storageVerbScope{})
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		defer controllerLock.Close() //nolint:errcheck // released last, after the guard
+		if _, err := sharedWorkStoreRefusal(request.CityPath, request.Force); err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		recordStorageAttestation(request.CityPath, logPrefix, request.Force.hazards(), stderr)
+	}
 	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
 		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city and is still writing infrastructure beads to the work store; a repair proven against a moving source proves nothing. Stop it (gc stop) and run this again\n", logPrefix, pid) //nolint:errcheck // best-effort stderr
 		return 1

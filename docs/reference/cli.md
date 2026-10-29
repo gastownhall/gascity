@@ -5176,6 +5176,7 @@ gc storage migrate [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
+| `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
 | `--from-backup` | bool |  | re-copy a binding whose database is gone from the retained-source backup |
 | `--from-work` | bool |  | migrate the infrastructure classes out of this city's work store |
 
@@ -5260,6 +5261,7 @@ gc storage recover-stranded [flags]
 | `--dry-run` | bool |  | report the gap and write the dump without touching the binding or the manifest |
 | `--dump` | string |  | write every stranded bead and its source dep edges to this JSON file before any write |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
+| `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
 | `--from-work` | bool |  | recover the stranded infrastructure beads out of this city's work store |
 | `--move` | stringSlice |  | for a work-store row the manifest lists by id alone and the binding no longer holds: copy it into the binding as it is (required for a row that is not closed; a closed one is moved by default) (repeatable, comma-separated) |
 | `--record-carried` | stringSlice |  | for a work-store row the manifest lists by id alone and the binding no longer holds: record it as the bead the copy carried, so the clear deletes its work-store row (the backup keeps it); accepted for closed rows too (repeatable, comma-separated) |
