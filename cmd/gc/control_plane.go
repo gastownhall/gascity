@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -17,6 +18,8 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/connect"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -488,6 +491,92 @@ func noteWorkerSitePoke(stderr io.Writer, command string, err error) bool {
 	}
 	fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck // best-effort stderr
 	return true
+}
+
+// noteDeferredSessionStart reports on stderr how the start of session row,
+// deferred to the reconciler, will proceed after a poke that returned
+// pokeErr, and returns whether a controller answered the poke. A worker site
+// gets its notice; any other failure gets a warning naming the session and
+// how to bring the supervisor up and, for a row the reconciler rolls back
+// unless a controller starts it in time (rolledBackUnlessStarted), that limit.
+func noteDeferredSessionStart(stderr io.Writer, command string, row session.Info, pokeErr error) bool {
+	if pokeErr == nil {
+		return true
+	}
+	if noteWorkerSitePoke(stderr, command, pokeErr) {
+		return false
+	}
+	limit := ""
+	if rolledBackUnlessStarted(row) {
+		limit = ", and is rolled back if none has started it " + neverStartedRollbackLimit(row)
+	}
+	fmt.Fprintf(stderr, "%s: warning: poke failed: %v; session %s will start when the city's controller next reconciles%s (if the supervisor is stopped, run \"gc supervisor start\")\n", command, pokeErr, row.ID, limit) //nolint:errcheck // best-effort stderr
+	return false
+}
+
+// rolledBackUnlessStarted reports whether the reconciler rolls row back when
+// no controller starts it within pendingCreateNeverStartedTimeout: a pending
+// create with no recorded start, which pendingCreateNeverStartedLeaseExpiredAt
+// ages out from its create.
+func rolledBackUnlessStarted(row session.Info) bool {
+	return row.PendingCreateClaim && strings.TrimSpace(row.LastWokeAt) == ""
+}
+
+// neverStartedRollbackLimit names when the reconciler rolls back row, a
+// pending create no controller has started (rolledBackUnlessStarted): "by"
+// the deadline pendingCreateNeverStartedLeaseExpiredAt reads, its anchor plus
+// pendingCreateNeverStartedTimeout, in RFC 3339. An Info that records no
+// anchor is one this process built for a row it just created, whose stored
+// CreatedAt is the anchor, so the timeout is counted from its creation.
+func neverStartedRollbackLimit(row session.Info) string {
+	anchor := pendingCreateNeverStartedAnchor(row)
+	if anchor.IsZero() {
+		return fmt.Sprintf("within %s of its creation", pendingCreateNeverStartedTimeout)
+	}
+	return "by " + anchor.Add(pendingCreateNeverStartedTimeout).UTC().Format(time.RFC3339)
+}
+
+// noteNotAttachingUntilSupervisor tells the operator, on w, that the session
+// of row, whose start only a controller makes while none runs, is not
+// attached, and how to start and attach it.
+func noteNotAttachingUntilSupervisor(w io.Writer, row session.Info) {
+	limit := ""
+	if rolledBackUnlessStarted(row) {
+		limit = " " + neverStartedRollbackLimit(row) + ", or the reconciler rolls this session back"
+	}
+	fmt.Fprintf(w, "No controller answered; not attaching. Start the supervisor (\"gc supervisor start\")%s; then attach with \"gc session attach %s\" once \"gc session list\" shows the session running.\n", limit, row.ID) //nolint:errcheck // best-effort output
+}
+
+// pendingStartAwaitsSupervisor reports whether row is a start only a
+// controller makes, which none can make now: a start-pending row whose
+// runtime sp does not run, in a city whose session starts wait for the
+// supervisor (sessionStartAwaitsSupervisor). A command that would start that
+// runtime in this process refuses instead, as gc session new does: the
+// reconciler starts the session once the supervisor runs, from the provider
+// environment managed sessions get rather than this process's. Only a
+// start-pending row is read further, so only one costs a runtime probe and a
+// controller ping.
+func pendingStartAwaitsSupervisor(cityPath string, row session.Info, sp runtime.Provider) (bool, error) {
+	if session.State(strings.TrimSpace(row.MetadataState)) != session.StateStartPending || sp.IsRunning(row.SessionName) {
+		return false, nil
+	}
+	return sessionStartAwaitsSupervisor(cityPath)
+}
+
+// enqueueDeferredSessionStart asks the controller to reconcile session id
+// after its deferred create, and returns the poke result its start proceeds
+// under: nil when the probe poke taken before the create (probeErr) or this
+// enqueue reached a controller. A failed probe still enqueues, since a
+// controller may have come up since; a worker site has no controller to
+// enqueue to.
+func enqueueDeferredSessionStart(cityPath, id string, probeErr error) error {
+	if errors.Is(probeErr, errWorkerSiteNoController) {
+		return probeErr
+	}
+	if err := enqueueController(cityPath, reconcilekey.Session(id)); err != nil && probeErr != nil {
+		return err
+	}
+	return nil
 }
 
 // controllerWillReconcile reports whether a controller will act on a durable

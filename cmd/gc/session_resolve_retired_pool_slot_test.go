@@ -60,7 +60,7 @@ func TestResolveMaterializingNamed_RetiredPoolSlotsDoNotHoldConfiguredName(t *te
 		retired[b.ID] = true
 	}
 
-	id, err := resolveSessionIDMaterializingNamed(cityDir, cfg, store, "mayor")
+	id, err := resolveSessionIDMaterializingNamed(cityDir, cfg, store, "mayor", nil)
 	if err != nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(mayor) with two retired pool slots holding %q: %v", runtimeName, err)
 	}

@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -7441,5 +7442,63 @@ func TestManagedWakeRollbackErrorKeepsTheWakeOutcome(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "n-1") || !strings.Contains(err.Error(), nudgequeue.ErrQueueBusy.Error()) {
 		t.Fatalf("err = %q, want the rollback failure named", err)
+	}
+}
+
+// TestNudgeSessionStartOwnedByReconciler pins the production wiring of the
+// managed-wake seam: a registered city's nudges wait for its controller
+// whether or not the supervisor runs, an unregistered city's start the
+// session here, and a registry that cannot be parsed is warned about and
+// never read as "unregistered".
+func TestNudgeSessionStartOwnedByReconciler(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// setup prepares the registry and returns the city path.
+		setup    func(t *testing.T) string
+		want     bool
+		wantWarn bool
+	}{
+		{
+			name: "registered, supervisor down",
+			setup: func(t *testing.T) string {
+				cityDir := shortSocketTempDir(t, "gc-nudge-city-")
+				if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityDir, "nudge-city"); err != nil {
+					t.Fatal(err)
+				}
+				return cityDir
+			},
+			want: true,
+		},
+		{
+			name:  "unregistered",
+			setup: func(t *testing.T) string { return shortSocketTempDir(t, "gc-nudge-city-") },
+		},
+		{
+			name: "corrupt registry",
+			setup: func(t *testing.T) string {
+				writeCorruptSupervisorRegistryForTest(t)
+				return shortSocketTempDir(t, "gc-nudge-city-")
+			},
+			want:     true,
+			wantWarn: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetControlPlaneForTest(t)
+			t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+			t.Setenv("XDG_RUNTIME_DIR", shortSocketTempDir(t, "gc-run-"))
+			cityDir := tc.setup(t)
+			var warn bytes.Buffer
+			prev := nudgeWarningWriter
+			nudgeWarningWriter = &warn
+			t.Cleanup(func() { nudgeWarningWriter = prev })
+
+			if got := nudgeSessionStartOwnedByReconciler(cityDir); got != tc.want {
+				t.Fatalf("nudgeSessionStartOwnedByReconciler = %v, want %v", got, tc.want)
+			}
+			if gotWarn := strings.Contains(warn.String(), supervisor.RegistryPath()); gotWarn != tc.wantWarn {
+				t.Fatalf("warning = %q; names the registry = %v, want %v", warn.String(), gotWarn, tc.wantWarn)
+			}
+		})
 	}
 }

@@ -96,7 +96,7 @@ func TestPhase0SessionResolution_DoesNotImplicitlyMaterializeSingletonConfig(t *
 		}},
 	}
 
-	_, err := resolveSessionIDMaterializingNamed(t.TempDir(), cfg, store, "mayor")
+	_, err := resolveSessionIDMaterializingNamed(t.TempDir(), cfg, store, "mayor", nil)
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("resolveSessionIDMaterializingNamed(mayor) error = %v, want ErrSessionNotFound", err)
 	}
@@ -133,7 +133,7 @@ func TestPhase0SessionResolution_RigScopedBareNamedIdentityRequiresAmbientRig(t 
 		}},
 	}
 
-	_, err := resolveSessionIDMaterializingNamed(t.TempDir(), cfg, store, "witness")
+	_, err := resolveSessionIDMaterializingNamed(t.TempDir(), cfg, store, "witness", nil)
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("resolveSessionIDMaterializingNamed(witness) error = %v, want ErrSessionNotFound without ambient rig", err)
 	}
@@ -184,7 +184,7 @@ func TestPhase0CanonicalMetadata_NamedMaterializationWritesNamedOriginWithoutLeg
 		}},
 	}
 
-	id, err := resolveSessionIDMaterializingNamed(t.TempDir(), cfg, store, "mayor")
+	id, err := resolveSessionIDMaterializingNamed(t.TempDir(), cfg, store, "mayor", nil)
 	if err != nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(mayor): %v", err)
 	}

@@ -54,7 +54,7 @@ func resolveLiveProbeSessionID(cityPath string, cfg *config.City, store beads.St
 	if sessionID != "" {
 		return sessionID, nil
 	}
-	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, target)
+	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, target, nil)
 	if err == nil {
 		return id, nil
 	}

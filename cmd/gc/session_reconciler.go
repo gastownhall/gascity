@@ -1682,14 +1682,21 @@ func pendingCreateNeverStartedLeaseExpiredAt(i sessionpkg.Info, now time.Time) b
 	if strings.TrimSpace(i.LastWokeAt) != "" {
 		return false
 	}
-	anchor := i.CreatedAt
-	if started, ok := parseRFC3339Metadata(i.PendingCreateStartedAt); ok {
-		anchor = started
-	}
+	anchor := pendingCreateNeverStartedAnchor(i)
 	if anchor.IsZero() {
 		return true
 	}
 	return now.After(anchor.Add(pendingCreateNeverStartedTimeout))
+}
+
+// pendingCreateNeverStartedAnchor is the time a never-started pending
+// create's lease counts from: pending_create_started_at when it parses, else
+// the row's CreatedAt. It is zero for a row that records neither.
+func pendingCreateNeverStartedAnchor(i sessionpkg.Info) time.Time {
+	if started, ok := parseRFC3339Metadata(i.PendingCreateStartedAt); ok {
+		return started
+	}
+	return i.CreatedAt
 }
 
 // pendingCreateLeaseExpiredForRollbackInfo reports whether a pending-create

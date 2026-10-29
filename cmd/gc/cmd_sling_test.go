@@ -5134,6 +5134,45 @@ func TestSlingFormulaRepoDirUsesCanonicalRigRoot(t *testing.T) {
 	}
 }
 
+// TestSlingDirectSessionResolverReportsDeferredNamedStart: in a registered
+// city whose supervisor is down, the resolver gc sling binds a named-session
+// assignee through materializes that session's row for the reconciler to
+// start and reports the deferral, once, on sling's stderr.
+func TestSlingDirectSessionResolverReportsDeferredNamedStart(t *testing.T) {
+	cityDir := newSupervisorDownSessionCity(t)
+	registerCityWithSupervisorForTest(t, cityDir)
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	var deps slingDeps
+	populateSlingDepsCallbacks(&deps, &stderr)
+	id, ok, err := deps.DirectSessionResolver(store, "", cityDir, cfg, "mayor", "")
+	if err != nil || !ok {
+		t.Fatalf("DirectSessionResolver(mayor) = (%q, %v, %v), want a materialized session", id, ok, err)
+	}
+	b := onlySessionBead(t, cityDir)
+	if id != b.ID {
+		t.Fatalf("DirectSessionResolver(mayor) = %q, want %q", id, b.ID)
+	}
+	assertDeferredSessionBead(t, b)
+	errText := stderr.String()
+	if n := strings.Count(errText, "session materialize: warning: poke failed:"); n != 1 {
+		t.Fatalf("deferred-start warnings = %d, want 1; stderr=%s", n, errText)
+	}
+	for _, want := range []string{b.ID, "gc supervisor start", "rolled back if none has started it by " + neverStartedDeadlineForTest(t, b)} {
+		if !strings.Contains(errText, want) {
+			t.Fatalf("stderr = %q, want it to contain %q", errText, want)
+		}
+	}
+}
+
 func TestCLIDirectSessionResolverMaterializesNamedSessionAliasShadow(t *testing.T) {
 	t.Setenv("GC_SESSION", "fake")
 
