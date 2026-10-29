@@ -1509,6 +1509,9 @@ func runController(
 		fmt.Fprintf(stderr, "gc start: %v\n", wiringErr) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// The O6 safety net, before the socket below publishes the latch: a
+	// default v2 its own boot would refuse runs legacy, loudly.
+	_ = applyV2DefaultBootFallback(wiring, cityPath, loadedCityName(cfg, cityPath), cfg, stderr)
 
 	sockPath := controllerSocketPath(cityPath)
 	forceShutdown := &atomic.Bool{}

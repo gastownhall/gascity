@@ -110,3 +110,51 @@ func TestSupervisorCityStartHoldsTheLockThroughInitAndReleasesItOnFailure(t *tes
 	}
 	after.Close() //nolint:errcheck // test cleanup
 }
+
+// TestSupervisorV2DefaultFallbackProbesUnderTheLockAfterInit pins where the
+// supervisor runs the O6 probe: after init (the bead store is up, so the
+// probe can read it) and with the controller lock held, before the socket or
+// the runtime sees the latch.
+func TestSupervisorV2DefaultFallbackProbesUnderTheLockAfterInit(t *testing.T) {
+	cityDir, reg := newLockOrderCity(t)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"lock-city\"\n\n[storage.classes]"+strings.SplitN(remoteStageSplitSource, "[storage.classes]", 2)[1]), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prevEnv := reconcilerModeLookupEnv
+	t.Cleanup(func() { reconcilerModeLookupEnv = prevEnv })
+	reconcilerModeLookupEnv = envOf(nil)
+	// The session provider this start builds next refuses to construct, so
+	// the attempt ends right after the probe.
+	t.Setenv("GC_SESSION", "ssh:")
+
+	prepared := false
+	prevPrepare := supervisorPrepareCity
+	t.Cleanup(func() { supervisorPrepareCity = prevPrepare })
+	supervisorPrepareCity = func(string, string, *config.City, io.Writer, func(string)) error {
+		prepared = true
+		return nil
+	}
+	var probedAfterInit, probedUnderLock bool
+	prevProbe := v2DefaultBootProbe
+	t.Cleanup(func() { v2DefaultBootProbe = prevProbe })
+	v2DefaultBootProbe = func(cityPath, _ string, _ *config.City) error {
+		probedAfterInit = prepared
+		probe, err := acquireControllerLock(cityPath)
+		if err == nil {
+			probe.Close() //nolint:errcheck // probe only
+		}
+		probedUnderLock = errors.Is(err, errControllerAlreadyRunning)
+		return errors.New("enterprise-era session rows: 1 open row(s)")
+	}
+
+	cr := newCityRegistry()
+	var stdout, stderr bytes.Buffer
+	startOneCity(supervisor.CityEntry{Path: cityDir, Name: "lock-city"}, reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
+
+	if !probedAfterInit || !probedUnderLock {
+		t.Fatalf("probe after init=%v under lock=%v; stderr=%s", probedAfterInit, probedUnderLock, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "city 'lock-city': WARNING: session reconciler") || !strings.Contains(stderr.String(), "FALLING BACK TO LEGACY") {
+		t.Errorf("stderr %q does not carry the city's loud fallback warning", stderr.String())
+	}
+}

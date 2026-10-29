@@ -267,6 +267,15 @@ func (c *sessionReconcilerDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 		r.Status = doctor.StatusOK
 		r.Message = "session reconciler: " + res.String()
 	}
+	// The O6 safety net's finding: the last default-v2 boot fell back to
+	// legacy over a refusal (reconcile_boot_fallback.go).
+	if err == nil && res.Reason == reconcilerDefaultV2 && ctx != nil && ctx.CityPath != "" {
+		if rec, ok := readReconcilerV2FallbackRecord(ctx.CityPath); ok {
+			r.Status = doctor.StatusWarning
+			r.Message += fmt.Sprintf("; the last boot (%s) FELL BACK TO LEGACY because v2 would refuse it: %s", rec.At, rec.Refusal)
+			r.FixHint = `repair what the refusal names so the default v2 boots, or set session_reconciler = "legacy" to keep legacy`
+		}
+	}
 	if ignored := v2IgnoredSettings(c.cfg); mode == reconcilerV2 && len(ignored) > 0 {
 		r.Status = doctor.StatusWarning
 		r.Message += "; " + strings.Join(ignored, "; ")
