@@ -138,6 +138,45 @@ func TestProbeDetachedWork_UnobservableServerIsNeverDead(t *testing.T) {
 	}
 }
 
+// AC-2: a server answering at the canonical socket path decides the session by
+// its exact name, whatever TMPDIR holds: listed is alive, and a server that
+// lists only a longer name sharing its prefix, or nothing, is dead.
+func TestProbeDetachedWork_AnsweringServerDecidesByExactSessionName(t *testing.T) {
+	tests := []struct {
+		name     string
+		sessions []string
+		want     detachedProbeStatus
+	}{
+		{name: "server lists the session", sessions: []string{"soak-loop-2", "soak-loop"}, want: detachedProbeAlive},
+		{name: "server lists only a prefix match", sessions: []string{"soak-loop-2"}, want: detachedProbeDead},
+		{name: "server lists no sessions", want: detachedProbeDead},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			installFakeTmuxServer(t, "gascity", fakeTmuxListSessions(tt.sessions...))
+			argsPath := filepath.Join(t.TempDir(), "args")
+			t.Setenv("FAKE_TMUX_ARGS", argsPath)
+			t.Setenv("TMPDIR", t.TempDir())
+
+			got := probeDetachedWork(context.Background(), "tmux:gascity:soak-loop")
+			if got.Status != tt.want {
+				t.Fatalf("Status = %q, want %q (err=%v)", got.Status, tt.want, got.Err)
+			}
+			if got.Err != nil {
+				t.Fatalf("Err = %v, want nil", got.Err)
+			}
+			args, err := os.ReadFile(argsPath)
+			if err != nil {
+				t.Fatalf("read fake tmux args: %v", err)
+			}
+			want := strings.Join([]string{"-u", "-S", sessiontmux.SocketPath("gascity"), "list-sessions", "-F", "#{session_name}"}, "\n") + "\n"
+			if string(args) != want {
+				t.Fatalf("tmux args = %q, want %q", args, want)
+			}
+		})
+	}
+}
+
 func TestProbeDetachedWork_MalformedSpecIsError(t *testing.T) {
 	got := probeDetachedWorkWithTimeout(context.Background(), "tmux:gascity", time.Second)
 	if got.Status != detachedProbeError {

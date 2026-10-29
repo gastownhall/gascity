@@ -2479,6 +2479,11 @@ calls = 1
 tagged = true
 
 [[count]]
+path = "internal/runtime/tmux/session_probe_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
 path = "internal/runtime/tmux/socket_path_integration_test.go"
 resource = "subprocess"
 calls = 4
