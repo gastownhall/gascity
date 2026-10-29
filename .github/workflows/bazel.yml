@@ -676,6 +676,9 @@ jobs:
       # keeps the lane out of the required gate. A known flake
       # (testdata/split_strict_known_flaky.list, with its owner bead) is
       # reported without failing the TESTS verdict; Bazel retries stay off.
+      # Each shard caps a function's distinct lines over its own tests only,
+      # so the combined caps are checked here over every shard's log
+      # (scripts/split-strict-baseline --check-caps).
       - name: Split-strict verdicts
         if: always() && matrix.lane == 'split-strict' && steps.test.outcome != 'skipped'
         run: |
@@ -696,13 +699,22 @@ jobs:
               case "$t" in *": FAIL"*) tests_fail=$((tests_fail + 1)); echo "::error title=split-strict tests::$log: ${t#SPLIT-STRICT TESTS: }" ;; esac
             done
           done
+          caps_fail=0
+          for pair in cmd/gc:cmd/gc/gc_split_strict_test internal/api:internal/api/api_split_strict_test; do
+            [ -d "bazel-testlogs/${pair#*:}" ] || continue
+            if ! caps=$(scripts/split-strict-baseline --check-caps "${pair%%:*}" "bazel-testlogs/${pair#*:}" 2>&1); then
+              caps_fail=$((caps_fail + 1))
+              echo "::error title=split-strict combined line caps::${pair%%:*}: $(echo "$caps" | tr '\n' ' ')"
+            fi
+            echo "$caps"
+          done
           {
             echo "### split-strict"
-            echo "- ratchet: $([ "$ratchet_fail" -eq 0 ] && [ "$missing" -eq 0 ] && echo PASS || echo FAIL) ($ratchet_fail of $shards shard(s) failed)"
+            echo "- ratchet: $([ "$ratchet_fail" -eq 0 ] && [ "$missing" -eq 0 ] && [ "$caps_fail" -eq 0 ] && echo PASS || echo FAIL) ($ratchet_fail of $shards shard(s) failed; combined line caps failed in $caps_fail package(s))"
             echo "- tests: $([ "$tests_fail" -eq 0 ] && [ "$missing" -eq 0 ] && echo PASS || echo FAIL) ($tests_fail of $shards shard(s) with new failing tests)"
             echo "- shards without a report: $missing"
           } >> "$GITHUB_STEP_SUMMARY"
-          [ "$shards" -gt 0 ] && [ "$ratchet_fail" -eq 0 ] && [ "$tests_fail" -eq 0 ] && [ "$missing" -eq 0 ]
+          [ "$shards" -gt 0 ] && [ "$ratchet_fail" -eq 0 ] && [ "$caps_fail" -eq 0 ] && [ "$tests_fail" -eq 0 ] && [ "$missing" -eq 0 ]
 
       # The downward ratchet, nightly and on dispatch: a full run that no
       # longer reaches a baseline row (fixed or renamed), or in which a known

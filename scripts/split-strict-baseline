@@ -4,6 +4,7 @@
 Usage:
   scripts/split-strict-baseline <package-dir> <run> <run> [<run>...]
   scripts/split-strict-baseline --check <package-dir> <run> [<run>...]
+  scripts/split-strict-baseline --check-caps <package-dir> <run> [<run>...]
 
 <package-dir> is cmd/gc or internal/api. Each <run> is the bazel-testlogs tree
 (or a copy of it, e.g. the split-strict lane's bazel-split-strict-testlogs
@@ -15,8 +16,9 @@ Regenerate (default) rewrites, keeping each file's header comments:
 
   <package-dir>/testdata/split_strict_baseline.tsv
       one row per key seen in any run. A key the old baseline lists keeps its
-      verdict and note; a new key gets "triage", which fails the ratchet until
-      someone rules on it. A fixture row is bound to the tests that reached it
+      verdict and note; a key new on any of its six columns (a new caller
+      too) gets "triage", which fails the ratchet until someone rules on it.
+      A five-column match only adds a hint to the note. A fixture row is bound to the tests that reached it
       (its scope); every other verdict is scoped to any test ("*"). max_lines
       and max_caller_lines are the distinct lines of the key's function and of
       its caller across the runs.
@@ -30,8 +32,11 @@ never baked in as a known failure.
 
 --check is the downward ratchet (the nightly lane runs it). It changes
 nothing and exits 1 when a baseline row was not reached by any run (fixed, or
-renamed: drop it), when a known failure passed in every run (remove it), or
-when a known failure did not run at all.
+renamed: drop it), when a known failure passed in every run (remove it), when
+a known failure did not run at all, or when a baselined function (or caller)
+is reached at more distinct lines than its cap across all shards and runs:
+the gate checks the caps per shard only. The PR lane runs it on every
+shard's log too, as --check-caps: the line caps alone.
 
 Rows are sorted in byte order (LC_ALL=C). Review the result with git diff.
 """
@@ -144,8 +149,10 @@ def read_list(path, fields):
 def main(argv):
     args = argv[1:]
     check = False
-    if args and args[0] == "--check":
+    caps_only = False
+    if args and args[0] in ("--check", "--check-caps"):
         check = True
+        caps_only = args[0] == "--check-caps"
         args = args[1:]
     if len(args) < (2 if check else 3):
         sys.stderr.write(__doc__)
@@ -163,6 +170,8 @@ def main(argv):
 
     old = {}
     old5 = collections.defaultdict(set)
+    site_caps = collections.defaultdict(int)
+    caller_caps = collections.defaultdict(int)
     if os.path.exists(baseline_path):
         with open(baseline_path, encoding="utf-8") as f:
             for line in f:
@@ -172,6 +181,9 @@ def main(argv):
                 if len(cols) == 12:
                     old[tuple(cols[:6])] = (cols[10], cols[11])
                     old5[tuple(cols[:5])].add((cols[10], cols[11]))
+                    fn = (cols[0], cols[1])
+                    site_caps[fn] = max(site_caps[fn], int(cols[6] or 0))
+                    caller_caps[cols[5]] = max(caller_caps[cols[5]], int(cols[7] or 0))
     known = read_list(known_path, 2)
     flaky = read_list(flaky_path, 3)
 
@@ -198,18 +210,40 @@ def main(argv):
 
     if check:
         problems = []
-        for key in sorted(set(old) - set(lines)):
+        for key in [] if caps_only else sorted(set(old) - set(lines)):
             problems.append("UNREACHED baseline row (fixed or renamed; drop it): %s" % "\t".join(key))
-        for name in sorted(known):
+        for name in [] if caps_only else sorted(known):
             if name in passed_all:
                 problems.append("NOW PASSING known failure (remove it): %s" % name)
             elif name not in ran_any:
                 problems.append("NOT RUN known failure (renamed or deleted?): %s" % name)
-        for key in sorted(set(lines) - set(old)):
+        for key in [] if caps_only else sorted(set(lines) - set(old)):
             problems.append("NEW key not in the baseline: %s" % "\t".join(key))
+        # The gate caps lines per shard; a line reached only in another
+        # shard escapes it. Cap the union over every shard and run here,
+        # over the baselined keys, as the gate does.
+        seen_site = collections.defaultdict(set)
+        seen_caller = collections.defaultdict(set)
+        for key, ls in lines.items():
+            if key not in old:
+                continue
+            seen_site[(key[0], key[1])] |= ls
+            if key[5] != "-":
+                seen_caller[key[5]] |= caller_lines[key]
+        for fn in sorted(seen_site):
+            ls = seen_site[fn]
+            if len(ls) > site_caps[fn]:
+                problems.append("LINES %s %s: %d distinct line(s) (%s) across shards, cap %d"
+                                % (fn[0], fn[1], len(ls), ",".join(str(n) for n in sorted(ls)), site_caps[fn]))
+        for caller in sorted(seen_caller):
+            ls = seen_caller[caller]
+            if len(ls) > caller_caps[caller]:
+                problems.append("CALLER LINES %s: %d distinct line(s) (%s) across shards, cap %d"
+                                % (caller, len(ls), ",".join(str(n) for n in sorted(ls)), caller_caps[caller]))
         for line in problems:
             print(line)
-        print("split-strict downward ratchet for %s: %s (%d problem(s), %d run(s))" % (pkg, "FAIL" if problems else "PASS", len(problems), len(runs)))
+        what = "combined line caps" if caps_only else "downward ratchet"
+        print("split-strict %s for %s: %s (%d problem(s), %d run(s))" % (what, pkg, "FAIL" if problems else "PASS", len(problems), len(runs)))
         return 1 if problems else 0
 
     flaked = sorted((failed_any - failed_all) - set(flaky))
@@ -230,10 +264,13 @@ def main(argv):
     for key in lines:
         if key in old:
             verdict, note = old[key]
-        elif len(old5.get(key[:5], ())) == 1:
-            verdict, note = next(iter(old5[key[:5]]))
         else:
+            # A key new on all six columns is a new path (a new caller): it
+            # is never pre-adjudicated. A five-column match is only a hint.
             verdict, note = "triage", "unadjudicated"
+            hints = sorted(old5.get(key[:5], ()))
+            if hints:
+                note += "; same site via another caller was " + " | ".join("%s: %s" % h for h in hints)
             triage += 1
         scope = ",".join(sorted(tests[key])) if verdict == "fixture" else "*"
         rows.append("\t".join(list(key) + [
