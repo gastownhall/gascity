@@ -540,7 +540,10 @@ func sortInfraBackupEdges(edges []infraBackupEdge) {
 		if edges[i].IssueID != edges[j].IssueID {
 			return edges[i].IssueID < edges[j].IssueID
 		}
-		return edges[i].DependsOnID < edges[j].DependsOnID
+		if edges[i].DependsOnID != edges[j].DependsOnID {
+			return edges[i].DependsOnID < edges[j].DependsOnID
+		}
+		return edges[i].Type < edges[j].Type
 	})
 }
 

@@ -697,8 +697,12 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		}
 		// Split by why each id is stranded (infraStrandedAdvice): a held
 		// different bead and a presumed-reused row need a per-id choice, and
-		// only an absent row is told to copy it in.
-		fmt.Fprintf(stdout, "blocking invariant: %s\n", infraStrandedAdvice(gap.Stranded, gap.HeldDifferent, gap.PresumedReused)) //nolint:errcheck // best-effort stdout
+		// only an absent row is told to copy it in. While the purge ledger is
+		// unsettled, its own remedy above is the only one: recover-stranded
+		// refuses until then (infraPurgeUnsettledRefusal).
+		if purgeSettled {
+			fmt.Fprintf(stdout, "blocking invariant: %s\n", infraStrandedAdvice(gap.Stranded, gap.HeldDifferent, gap.PresumedReused)) //nolint:errcheck // best-effort stdout
+		}
 		return 1
 	}
 	if !purgeSettled {

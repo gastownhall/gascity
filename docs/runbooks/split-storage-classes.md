@@ -533,6 +533,10 @@ The purge never deletes:
 - a `message` row that the classifier puts in another class. If any selected
   row is in another class, the run refuses and writes nothing.
 
+It also refuses, dry run included, a work store that cannot list relations,
+such as bd's Postgres backend: the restore reads every edge back through that
+listing, so a purge there could not be undone.
+
 #### 1. Rehearse
 
 The dry run is read-only and safe on a running city:
@@ -545,8 +549,9 @@ It prints the count, a digest of the selection, the id range, the creation
 dates, the title histogram, the number of edges, and one line per row. Its
 last line is the confirmation the delete needs, for example
 `--fleet-stopped --confirm-purge --expect-count 791 --expect-digest 3f2a...`.
-The delete refuses when the selection it computes is not the one you
-reviewed.
+The delete needs both the count and the digest, and refuses when the
+selection it computes is not the one you reviewed. The count alone does not
+pin the selection: one stranded row leaving and another arriving keeps it.
 
 #### 2. Take a full export of the work store first
 
@@ -575,13 +580,24 @@ before the rows, because `bd delete --force` rewrites every mention of a
 deleted id in the text of rows still linked to it. The run is recorded in
 `infra.purged-stranded.jsonl`.
 
-If a run stops partway, `gc storage status` reports `purge: INTERRUPTED` and
-exits non-zero. Run the same purge again:
+If a run stops partway, `gc storage status` reports `purge: INTERRUPTED`,
+names only the purge's remedies, and exits non-zero. Until the run is
+finished, restored or closed, `gc storage recover-stranded` refuses to copy,
+and refuses its per-id answers too: the run may have removed the edges of
+rows a copy would carry, and its backup is their only copy. Rehearse the
+purge again with `--dry-run`, which refuses
+wherever the run would and prints what is left and the flags that finish it,
+then run the same purge again. It finishes the interrupted run over that
+run's own rows:
 
-- if rows are left, it resumes from the same backup;
-- if every row is already gone, it records them and exits 0;
-- if the selection has changed since the backup, it refuses. Restore the run,
-  or close it (below), and start again.
+- if rows of the run are left, it resumes from the same backup;
+- if every row of the run is already gone, it records them and exits 0;
+- a row stranded since the backup, or a new bead under an id the run deleted
+  (bd minted it again), is not part of the run: it is named and left in
+  place, and the next purge selects it;
+- it refuses when a row of the run changed since the backup, or is still in
+  the work store but no longer selected, for example because it was carried
+  into the binding. Restore the run, or close it (below), and start again.
 
 #### Restoring purged mail
 
@@ -591,14 +607,25 @@ gc storage recover-stranded --from-work --fleet-stopped --restore-purge <backup>
 
 This puts every row of the backup back into the work store as it was, with
 its id, creation time, tier, labels and metadata, and adds back the edges in
-both directions. It refuses, before writing anything, an id the work store
-now holds for a different row (bd minted it again), and an edge whose other
-end no longer exists. The rows are stranded again afterwards, and `gc storage
-status` names them. `--dry-run` shows what it would do. Running it again
-skips what is already back.
+both directions. It refuses, before writing anything:
 
-If the work store cannot import rows verbatim, the command says so. Restore
-with the city's own bd instead, from the city directory:
+- an id the work store now holds for a different row (bd minted it again).
+  The refusal names the id. While the run is interrupted, finish it by
+  running the purge again, which leaves the new row in place; otherwise move
+  the new row out of the work store first;
+- a row the binding now holds as the same bead. It was carried into the
+  binding after the purge, by an older build's `recover-stranded` or by hand,
+  so the binding serves it, and this command writes only the work store;
+- an edge whose other end no longer exists.
+
+While a purge run is interrupted, it restores only that run's backup. The rows
+are stranded again afterwards, and `gc storage status` names them. `--dry-run`
+shows what it would do, and refuses wherever the restore would. Running it
+again skips what is already back.
+
+If the work store cannot import rows verbatim, or cannot list relations, the
+command says so, in the dry run too. Restore with the city's own bd instead,
+from the city directory:
 
 ```
 jq -c '.entry.bead | del(.dependencies)' <backup> > /tmp/restore.jsonl
@@ -608,10 +635,15 @@ jq -r '(.entry.deps // [])[], (.entry.dependents // [])[] | [.issue_id, .depends
 ```
 
 First check that no id in the backup is now held by a different row:
-`bd import` overwrites an existing id. If the purge was interrupted, close
-the run after a raw restore with
+`bd import` overwrites an existing id. When the restore refused a row the
+binding holds as the same bead, leave that row out of the import (start the
+first `jq` with `select(.entry.bead.id != "<id>") |`), and add the backup's
+edges of that row to the binding's copy where it lacks them. If the
+purge was interrupted, close the run after a raw restore with
 `gc storage recover-stranded --from-work --fleet-stopped --purge-type message --abandon-purge`.
-That command refuses while any row of the run is still missing.
+That command refuses while any row of the run, or any of its edges between
+rows that are back, is still missing, or is back without the payload it
+carried.
 
 #### Example: maintainer-city
 
@@ -660,7 +692,9 @@ gc storage recover-stranded --from-work --fleet-stopped --purge-type message \
 gc storage status
 #   expect: converged: yes, stranded: 0, purged stranded: 791, exit 0
 gc storage recover-stranded --from-work --restore-purge <backup> --dry-run
-#   the rollback is ready: 791 to restore, no collision; nothing is written
+#   the rollback is ready: 791 to restore, no collision; nothing is written.
+#   If it says the work store cannot import verbatim, the rollback is the
+#   raw bd fallback.
 ```
 
 Copy the backup and the ledger off the host before you start the city:

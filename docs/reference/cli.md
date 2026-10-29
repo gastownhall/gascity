@@ -5257,12 +5257,15 @@ writes nothing; the delete needs --fleet-stopped and --confirm-purge. Every
 row, with its metadata, labels and edges, is first written to a timestamped
 infra.purged-stranded-&lt;time&gt;.jsonl at the binding root and proven from disk;
 the run is recorded in infra.purged-stranded.jsonl, and a run interrupted
-after the backup resumes from it (--abandon-purge closes one whose rows were
-put back by hand). The delete must also name what the dry run showed:
---expect-count &lt;n&gt;, and --expect-digest &lt;digest&gt;. A row the binding holds as
-the same bead is never deleted, and stranded rows of other types are left
-where they are. --restore-purge &lt;backup&gt; puts a purge's rows and edges back
-into the work store, where they are stranded again.
+after the backup resumes from it (--abandon-purge closes one whose rows and
+edges were put back by hand). The delete must also name what the dry run
+showed: --expect-count &lt;n&gt;, and --expect-digest &lt;digest&gt;. A row the binding
+holds as the same bead is never deleted, and stranded rows of other types are
+left where they are. --restore-purge &lt;backup&gt; puts a purge's rows and edges
+back into the work store, where they are stranded again. While a run is
+interrupted, --restore-purge restores only that run's backup, and the copy
+and the per-id answers above refuse until the run is finished, restored or
+closed.
 
 ```
 gc storage recover-stranded [flags]
@@ -5270,13 +5273,13 @@ gc storage recover-stranded [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--abandon-purge` | bool |  | with --purge-type: close an interrupted purge whose rows were all put back by hand (refused while any is missing) |
+| `--abandon-purge` | bool |  | with --purge-type: close an interrupted purge whose rows and edges were all put back by hand (refused while any is missing) |
 | `--confirm-purge` | bool |  | with --purge-type: confirm the delete (without it the run lists the rows and deletes nothing) |
 | `--drop-work-row` | stringSlice |  | for a work-store row whose id the binding holds for a different bead: back up and remove the work-store row, keeping the binding's (repeatable, comma-separated) |
 | `--dry-run` | bool |  | report the gap and write the dump without touching the binding or the manifest |
 | `--dump` | string |  | write every stranded bead and its source dep edges to this JSON file before any write |
-| `--expect-count` | int | `-1` | with --confirm-purge: the number of rows the dry run listed; the delete refuses when the selection differs (required) |
-| `--expect-digest` | string |  | with --confirm-purge: the selection digest the dry run printed; the delete refuses when the selection differs |
+| `--expect-count` | int | `-1` | with --confirm-purge: the number of rows the dry run listed; the delete refuses when the count differs (required) |
+| `--expect-digest` | string |  | with --confirm-purge: the selection digest the dry run printed; the delete refuses when the selection differs (required) |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--from-work` | bool |  | recover the stranded infrastructure beads out of this city's work store |
 | `--move` | stringSlice |  | for a work-store row the manifest lists by id alone and the binding no longer holds: copy it into the binding as it is (required for a row that is not closed; a closed one is moved by default) (repeatable, comma-separated) |

@@ -249,12 +249,15 @@ writes nothing; the delete needs --fleet-stopped and --confirm-purge. Every
 row, with its metadata, labels and edges, is first written to a timestamped
 infra.purged-stranded-<time>.jsonl at the binding root and proven from disk;
 the run is recorded in infra.purged-stranded.jsonl, and a run interrupted
-after the backup resumes from it (--abandon-purge closes one whose rows were
-put back by hand). The delete must also name what the dry run showed:
---expect-count <n>, and --expect-digest <digest>. A row the binding holds as
-the same bead is never deleted, and stranded rows of other types are left
-where they are. --restore-purge <backup> puts a purge's rows and edges back
-into the work store, where they are stranded again.`,
+after the backup resumes from it (--abandon-purge closes one whose rows and
+edges were put back by hand). The delete must also name what the dry run
+showed: --expect-count <n>, and --expect-digest <digest>. A row the binding
+holds as the same bead is never deleted, and stranded rows of other types are
+left where they are. --restore-purge <backup> puts a purge's rows and edges
+back into the work store, where they are stranded again. While a run is
+interrupted, --restore-purge restores only that run's backup, and the copy
+and the per-id answers above refuse until the run is finished, restored or
+closed.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !fromWork {
 				fmt.Fprintf(stderr, "gc %s %s: pass --%s. The source is stated explicitly rather than detected, exactly as the migration states it\n", //nolint:errcheck // best-effort stderr
@@ -311,11 +314,11 @@ into the work store, where they are stranded again.`,
 	cmd.Flags().BoolVar(&confirmPurge, strandedConfirmPurgeFlag, false,
 		"with --"+strandedPurgeTypeFlag+": confirm the delete (without it the run lists the rows and deletes nothing)")
 	cmd.Flags().IntVar(&expectCount, strandedExpectCountFlag, -1,
-		"with --"+strandedConfirmPurgeFlag+": the number of rows the dry run listed; the delete refuses when the selection differs (required)")
+		"with --"+strandedConfirmPurgeFlag+": the number of rows the dry run listed; the delete refuses when the count differs (required)")
 	cmd.Flags().StringVar(&expectDigest, strandedExpectDigestFlag, "",
-		"with --"+strandedConfirmPurgeFlag+": the selection digest the dry run printed; the delete refuses when the selection differs")
+		"with --"+strandedConfirmPurgeFlag+": the selection digest the dry run printed; the delete refuses when the selection differs (required)")
 	cmd.Flags().BoolVar(&abandonPurge, strandedAbandonPurgeFlag, false,
-		"with --"+strandedPurgeTypeFlag+": close an interrupted purge whose rows were all put back by hand (refused while any is missing)")
+		"with --"+strandedPurgeTypeFlag+": close an interrupted purge whose rows and edges were all put back by hand (refused while any is missing)")
 	cmd.Flags().StringVar(&restorePurge, strandedRestorePurgeFlag, "",
 		"put the rows of this purge backup (infra.purged-stranded-<time>.jsonl) back into the work store with their edges; they are stranded again afterwards")
 	cmd.Flags().StringSliceVar(&dropIDs, strandedDropWorkRowFlag, nil,
@@ -890,6 +893,12 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	if !recorded {
 		fmt.Fprintf(stderr, "%s: %s converged before %s was recorded, so nothing distinguishes a bead the copy never carried from one the binding's own GC has since collected. Recovering on that basis would import rows the binding deliberately deleted. Re-converge the binding to restore the check\n", //nolint:errcheck // best-effort stderr
 			logPrefix, target.Database, target.ManifestPath())
+		return 1
+	}
+	// The purge ledger, under the same lock: a purge run writes it holding the
+	// guard, and an interrupted one owns its rows until it is settled.
+	if refusal := infraPurgeUnsettledRefusal(target); refusal != "" {
+		fmt.Fprintf(stderr, "%s: %s\n", logPrefix, refusal) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
