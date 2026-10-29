@@ -11126,3 +11126,19 @@ func TestHasOpenWorkStrictIgnoresAForgedOrderRunLabel(t *testing.T) {
 		t.Fatalf("index summary %+v, want no run of digest", summary)
 	}
 }
+
+func TestShellExecRunnerDoesNotInheritSessionIdentity(t *testing.T) {
+	t.Setenv("GC_SESSION_ID", "gc-seat-123")
+	t.Setenv("GC_ALIAS", "some-seat")
+	t.Setenv("GC_AGENT", "some-seat")
+
+	out, err := shellExecRunner(context.Background(),
+		`printf 'sid=%s alias=%s agent=%s' "${GC_SESSION_ID:-unset}" "${GC_ALIAS:-unset}" "${GC_AGENT:-unset}"`,
+		t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("shellExecRunner() error = %v, output = %q", err, out)
+	}
+	if got, want := string(out), "sid=unset alias=unset agent=unset"; got != want {
+		t.Fatalf("order exec inherited the dispatcher's session identity: got %q, want %q", got, want)
+	}
+}
