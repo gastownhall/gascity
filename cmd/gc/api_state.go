@@ -1356,9 +1356,10 @@ func (cs *controllerState) beadCloseAutoclose(beadID string, store beads.Store, 
 	// co-residence with the closed bead. On a single-store city GraphBeadStore()
 	// returns the same store, so this is identity today.
 	graphStore := cs.GraphBeadStore()
+	homes := cs.convoyAutocloseHomes(store, graphStore.Store)
 	return func() bool {
 		for attempt := 1; ; attempt++ {
-			run := doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
+			run := doConvoyAutocloseWith(store, homes, rec, beadID, os.Stderr, os.Stderr)
 			run.merge(doWispAutocloseWith(store, beadID, os.Stderr, graphStore))
 			run.merge(doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore))
 			if !run.refused || attempt >= autocloseRefusalAttempts {
@@ -1366,6 +1367,67 @@ func (cs *controllerState) beadCloseAutoclose(beadID string, store beads.Store, 
 			}
 		}
 	}
+}
+
+// convoyAutocloseHomes is where the convoy autoclose of a row closed in store
+// finds what store does not hold on a split city:
+//
+//   - A closed class row's legacy parent can be work class (a convoy, a work
+//     bead a graph root was poured under), which lives on the work ledger, not
+//     beside the row. The row's own store is read first (doConvoyAutocloseWith),
+//     then this work home: the rig whose prefix the parent id carries, else the
+//     city.
+//   - A work convoy's legacy children can be graph rows in the class binding
+//     (graph), counted too once every work child is terminal.
+//
+// A work store's own rows keep their parent beside them, and a city that
+// relocates nothing has no binding, so a single-store city reads exactly what
+// it read before.
+func (cs *controllerState) convoyAutocloseHomes(store, graph beads.Store) convoyAutocloseHomes {
+	var homes convoyAutocloseHomes
+	cs.mu.RLock()
+	cityRaw := cs.cityBeadStore
+	cs.mu.RUnlock()
+	if graph != nil && !sameBeadStore(graph, cityRaw) && !sameBeadStore(graph, store) {
+		homes.children = graph
+	}
+	city := cs.CityBeadStore()
+	rigs := cs.BeadStores() // residency:allow — the controller's own work stores, compared against store and keyed by rig name for the prefix table below; no leg list is built
+	if store == nil || sameBeadStore(store, city) || sameBeadStore(store, cityRaw) {
+		return homes
+	}
+	for _, rig := range rigs {
+		if sameBeadStore(store, rig) {
+			return homes
+		}
+	}
+	type rigPrefix struct{ prefix, name string }
+	var prefixes []rigPrefix
+	cs.mu.RLock()
+	if cs.cfg != nil {
+		for _, rig := range cs.cfg.Rigs {
+			if prefix := rig.EffectivePrefix(); prefix != "" {
+				prefixes = append(prefixes, rigPrefix{prefix + "-", rig.Name})
+			}
+		}
+	}
+	cs.mu.RUnlock()
+	// Longest prefix first, so a rig whose prefix extends another's wins.
+	sort.SliceStable(prefixes, func(i, j int) bool { return len(prefixes[i].prefix) > len(prefixes[j].prefix) })
+	homes.parent = func(id string) beads.Store {
+		if bdIDIsClassReserved(id) { // residency:allow — a binding-minted parent id has no work-ledger home; the by-id read stays on the row's own store
+			return nil
+		}
+		for _, p := range prefixes {
+			if strings.HasPrefix(id, p.prefix) {
+				if rig := rigs[p.name]; rig != nil {
+					return rig
+				}
+			}
+		}
+		return city
+	}
+	return homes
 }
 
 // beadEventStores is beadEventStoresLocked plus the residence probe for a
