@@ -475,6 +475,9 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newExecutorIdentityResidueCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newCensusOwnerLivenessCheck(cfg, cityPath, storeFactory))
+			// Before the routed-to backfill: once a legacy expanded root carries
+			// gc.workflow_expanded, that check stops routing it.
+			registerCityStoreCheck(newWorkflowExpandedBackfillCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newRouteRecoveryQuarantineCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newHoldLabelRoutedToCheck(cfg, cityPath, storeFactory))
