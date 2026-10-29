@@ -1564,4 +1564,16 @@ func TestSplitStrictLaneRunsOnTheRoutingCode(t *testing.T) {
 			t.Errorf("a PR touching only %s runs the split-strict lane", f)
 		}
 	}
+	// Every file a baseline row names is code the gate judges: a PR changing
+	// it must run the lane, or a fix (or a new misroute) there goes unseen.
+	for _, baseline := range []string{"cmd/gc/testdata/split_strict_baseline.tsv", "internal/api/testdata/split_strict_baseline.tsv"} {
+		for _, line := range strings.Split(readFile(t, repoRoot(t), baseline), "\n") {
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			if f, _, _ := strings.Cut(line, "\t"); !touched(f) {
+				t.Errorf("%s names %s, but a PR touching it does not run the split-strict lane", baseline, f)
+			}
+		}
+	}
 }

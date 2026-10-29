@@ -41,9 +41,18 @@ are run; Bazel is the runner that enforces it.
 | Acceptance Tier A | `acceptance` (sharded) | `bazel test --config=acceptance //test/acceptance:acceptance_test` | `make test-acceptance` |
 | Integration-tagged packages outside `test/integration` | `integration-packages` (gating) | `bazel test --config=integration //test:integration_packages` | part of `make test-integration` |
 | `test/integration` | `integration` (evidence-only) | `bazel test --config=integration //test/integration:integration_test` | part of `make test-integration` |
-| Split-strict projection gate: violation-key ratchet (fixture rows bound to the tests that reach them) and known-failures check (every entry with a reason; flakes only in `split_strict_known_flaky.list` with an owner bead, never retried), reported apart; nightly downward ratchet fails on unreached rows and now-passing known failures (`GC_TEST_SPLIT_STRICT=1`; `internal/beads/splittest/projection.go`, `gate.go`) | `split-strict` (evidence-only, allowed to fail; mode remote: nightly, dispatch, PRs touching the store layer or routing code: cmd/gc, api, session, sling, molecule, orders, dispatch, readywork) | `bazel test //cmd/gc:gc_split_strict_test //internal/api:api_split_strict_test`; regenerate inputs from two or more full runs with `scripts/split-strict-baseline` (refuses inconsistent tests); check with `scripts/split-strict-baseline --check` | none |
+| Split-strict projection gate: violation-key ratchet (fixture rows bound to the tests that reach them) and known-failures check (every entry with a reason; flakes only in `split_strict_known_flaky.list` with an owner bead, never retried), reported apart; nightly downward ratchet fails on unreached rows and now-passing known failures (`GC_TEST_SPLIT_STRICT=1`; `internal/beads/splittest/projection.go`, `gate.go`) | `split-strict` (evidence-only, allowed to fail; mode remote: nightly, dispatch, PRs touching the store layer or routing code: cmd/gc, api, session, sling, molecule, orders, dispatch, readywork, executionevent, mail, nudgequeue, sourceworkflow; every file a baseline row names) | `bazel test //cmd/gc:gc_split_strict_test //internal/api:api_split_strict_test`; regenerate inputs from two or more full runs with `scripts/split-strict-baseline` (refuses inconsistent tests); check with `scripts/split-strict-baseline --check` | none |
 | Docs sync | `unit` | `bazel test //test/docsync:docsync_test` | `make check-docs` |
 | Coverage (push to main) | `coverage` | `bazel coverage //... --combined_report=lcov` | none |
+
+Split-strict ratchet limit: a key names the offending function and its
+nearest caller in the package under test, and its caps count that function's
+and that caller's distinct lines. A NEW production path one level further up
+(another function calling the same baselined caller at an already-counted
+line) is absorbed by a `*`-scoped row: it changes neither the key nor a cap.
+The misroute, known-violation and relic rows that are `*`-scoped go as S3c
+and S4 fix the paths; fixture rows are bound to their tests and do not have
+this gap.
 
 Narrow while iterating: `bazel test //internal/config:config_test`, or
 `bazel test //internal/beads/...` for a subtree;

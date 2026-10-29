@@ -237,7 +237,9 @@ jobs:
 
       # Whether a pull request touches the store layer or code whose store
       # routing the split-strict lane judges (cmd/gc, api, session, sling,
-      # molecule, orders, dispatch, readywork). A PR's file list comes from the API (this job has no
+      # molecule, orders, dispatch, readywork, executionevent, mail,
+      # nudgequeue, sourceworkflow). TestSplitStrictLaneRunsOnTheRoutingCode
+      # requires every file a baseline row names to be covered. A PR's file list comes from the API (this job has no
       # checkout); if it cannot be read the lane runs.
       - name: Split-strict paths
         id: splitpaths
@@ -254,7 +256,8 @@ jobs:
               case "$f" in
                 internal/beads/*|internal/storeref/*|internal/storebinding/*|internal/coordclass/*|internal/beadmeta/*|\
                 cmd/gc/*|internal/api/*|internal/session/*|internal/sling/*|internal/molecule/*|\
-                internal/orders/*|internal/dispatch/*|internal/readywork/*)
+                internal/orders/*|internal/dispatch/*|internal/readywork/*|\
+                internal/executionevent/*|internal/mail/*|internal/nudgequeue/*|internal/sourceworkflow/*)
                   touched=true ;;
               esac
             done <<<"$files"
