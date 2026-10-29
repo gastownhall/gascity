@@ -507,6 +507,7 @@ go_test(
         "session_response_wire_test.go",
         "session_running_state_test.go",
         "session_starting_error_test.go",
+        "session_startup_prompt_test.go",
         "session_stream_acp_test.go",
         "session_stream_capability_test.go",
         "session_structured_providers_test.go",

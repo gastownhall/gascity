@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -79,6 +80,10 @@ type fakeState struct {
 	// matching the real implementation's answer for the MemStore fakes most
 	// tests use.
 	scopedStoreFn func(ctx context.Context, existing beads.Store) (beads.Store, error)
+	// startupPromptFn backs ApplyStartupPrompt. Nil (the default) returns the
+	// hints unchanged — a state with no startup prompt to deliver — so tests that
+	// do not care about prompt delivery are unaffected.
+	startupPromptFn func(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error)
 }
 
 func newFakeState(t testing.TB) *fakeState {
@@ -244,6 +249,13 @@ func (f *fakeState) WebhookDispatcher() orderdispatch.Dispatcher { return f.webh
 func (f *fakeState) ExtMsgServices() *extmsg.Services         { return f.extmsgSvc }
 func (f *fakeState) AdapterRegistry() *extmsg.AdapterRegistry { return f.adapterReg }
 func (f *fakeState) MaintenanceLoop() MaintenanceProvider     { return f.maintenance }
+
+func (f *fakeState) ApplyStartupPrompt(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error) {
+	if f.startupPromptFn != nil {
+		return f.startupPromptFn(info, resolved, transport, hints)
+	}
+	return hints, nil
+}
 
 func (f *fakeState) RawConfig() *config.City {
 	if f.rawCfg != nil {
