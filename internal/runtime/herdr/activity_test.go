@@ -366,3 +366,19 @@ func TestActivityReconcileLoopPollsOnAnyEventKind(t *testing.T) {
 		})
 	}
 }
+
+// TestActivityIgnoresUnnamedPanes pins the registry contract for entries with
+// no registered name: an unnamed pane — an agent herdr detected but nobody
+// named — is nobody's session, so nothing is keyed by the detected kind and a
+// kind-named query reads as unknown (zero).
+func TestActivityIgnoresUnnamedPanes(t *testing.T) {
+	f, sock := newFakeHerdrServer(t)
+	f.setRawAgents(`[{"agent":"claude","name":"alpha","pane_id":"w1:p1","agent_status":"idle"},{"agent":"claude","pane_id":"w1:p3","agent_status":"working"}]`)
+	p := activityTestProvider(t, sock)
+	if got := lastActivity(t, p, "alpha"); got.IsZero() {
+		t.Fatal("named agent alpha did not seed")
+	}
+	if got := lastActivity(t, p, "claude"); !got.IsZero() {
+		t.Fatalf("the detected kind became an activity identity: GetLastActivity(claude) = %v", got)
+	}
+}

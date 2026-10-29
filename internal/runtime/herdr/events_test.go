@@ -28,6 +28,10 @@ type fakeHerdrServer struct {
 
 	mu     sync.Mutex
 	agents []agentInfo // what agent.list returns
+	// rawAgents, when set, is a literal herdr agent-list JSON array served
+	// verbatim: setAgents marshals gc's own struct, so it round-trips the
+	// tags and cannot catch a decode bug.
+	rawAgents string
 
 	// subscribes receives each events.subscribe call's decoded filter set.
 	subscribes chan []subscribeSub
@@ -95,6 +99,14 @@ func (f *fakeHerdrServer) setAgents(agents ...agentInfo) {
 	f.agents = append([]agentInfo(nil), agents...) // copy: callers keep mutating their slice
 }
 
+// setRawAgents serves a literal herdr agent-list array (the JSON the "agents"
+// key holds, without the envelope).
+func (f *fakeHerdrServer) setRawAgents(list string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rawAgents = list
+}
+
 func (f *fakeHerdrServer) serve(conn net.Conn) {
 	line, err := bufio.NewReader(conn).ReadBytes('\n')
 	if err != nil {
@@ -117,10 +129,15 @@ func (f *fakeHerdrServer) serve(conn net.Conn) {
 	case "agent.list":
 		f.mu.Lock()
 		agents := f.agents
+		raw := f.rawAgents
 		f.mu.Unlock()
-		resp := map[string]any{"id": req.ID, "result": map[string]any{"type": "agent_list", "agents": agents}}
-		b, _ := json.Marshal(resp)
-		_, _ = conn.Write(append(b, '\n'))
+		if raw != "" {
+			_, _ = conn.Write([]byte(`{"id":"` + req.ID + `","result":{"type":"agent_list","agents":` + raw + `}}` + "\n"))
+		} else {
+			resp := map[string]any{"id": req.ID, "result": map[string]any{"type": "agent_list", "agents": agents}}
+			b, _ := json.Marshal(resp)
+			_, _ = conn.Write(append(b, '\n'))
+		}
 		_ = conn.Close()
 	case "events.subscribe":
 		_, _ = conn.Write([]byte(`{"id":"` + req.ID + `","result":{"type":"subscription_started"}}` + "\n"))
@@ -598,5 +615,46 @@ func TestSessionEventStreamCtxCancelClosesChannel(t *testing.T) {
 		case <-deadline:
 			t.Fatal("channel not closed within 3s of ctx cancel")
 		}
+	}
+}
+
+// TestSessionEventsSkipUnnamedPanes pins the pane-map contract for registry
+// entries with no registered name: an unnamed pane — an agent herdr detected
+// but nobody named — is never subscribed for status changes and never enters
+// the pane map, so a frame from it surfaces unattributed rather than being
+// credited to the detected kind.
+func TestSessionEventsSkipUnnamedPanes(t *testing.T) {
+	f, sock := newFakeHerdrServer(t)
+	f.setRawAgents(`[{"agent":"claude","name":"alpha","pane_id":"w1:p1"},{"agent":"claude","pane_id":"w1:p3"}]`)
+	p := eventTestProvider(t, sock)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := p.SubscribeSessionEvents(ctx)
+	if err != nil {
+		t.Fatalf("SubscribeSessionEvents: %v", err)
+	}
+
+	subs := recvSubscribe(t, f, 2*time.Second)
+	statusPanes := map[string]bool{}
+	for _, s := range subs {
+		if s.Type == "pane.agent_status_changed" {
+			statusPanes[s.PaneID] = true
+		}
+	}
+	if !statusPanes["w1:p1"] {
+		t.Errorf("named pane w1:p1 not subscribed for status changes; got %v", statusPanes)
+	}
+	if statusPanes["w1:p3"] {
+		t.Errorf("unnamed pane w1:p3 subscribed for status changes; got %v", statusPanes)
+	}
+
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventResync {
+		t.Fatalf("first event = %v, want resync", ev.Kind)
+	}
+	stream := recvStream(t, f)
+	stream.push(t, `{"data":{"agent":"claude","agent_status":"idle","pane_id":"w1:p3","workspace_id":"w1"},"event":"pane.agent_status_changed"}`)
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventAgentIdle || ev.Session != "" || ev.Ref != "w1:p3" {
+		t.Errorf("unnamed pane frame => %+v; want agent_idle with empty session, ref w1:p3", ev)
 	}
 }
