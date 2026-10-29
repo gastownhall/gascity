@@ -194,6 +194,48 @@ func recvSubscribe(t *testing.T, f *fakeHerdrServer, timeout time.Duration) []su
 	panic("unreachable")
 }
 
+// TestSessionEventsSkipUnnamedPanes pins that the stream attributes panes by
+// registered name only: an unnamed pane is neither subscribed nor mapped to a
+// session, so a frame from it arrives unattributed instead of under its kind.
+func TestSessionEventsSkipUnnamedPanes(t *testing.T) {
+	f, sock := newFakeHerdrServer(t)
+	f.setAgentsJSON(
+		`{"agent":"claude","name":"alpha","pane_id":"w1:p1","agent_status":"working"}`,
+		`{"agent":"claude","pane_id":"w1:p3","agent_status":"working"}`,
+	)
+	p := eventTestProvider(t, sock)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := p.SubscribeSessionEvents(ctx)
+	if err != nil {
+		t.Fatalf("SubscribeSessionEvents: %v", err)
+	}
+
+	statusPanes := map[string]bool{}
+	for _, s := range recvSubscribe(t, f, 2*time.Second) {
+		if s.Type == "pane.agent_status_changed" {
+			statusPanes[s.PaneID] = true
+		}
+	}
+	if len(statusPanes) != 1 || !statusPanes["w1:p1"] {
+		t.Errorf("per-pane agent-status subs = %v; want only alpha's pane w1:p1", statusPanes)
+	}
+
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Kind != runtime.SessionEventResync {
+		t.Fatalf("first event = %v, want resync", ev.Kind)
+	}
+	stream := recvStream(t, f)
+	stream.push(t, `{"data":{"agent":"claude","agent_status":"idle","pane_id":"w1:p3","workspace_id":"w1"},"event":"pane.agent_status_changed"}`)
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Ref != "w1:p3" || ev.Session != "" {
+		t.Errorf("frame from the unnamed pane => %+v; want ref w1:p3 attributed to no session", ev)
+	}
+	stream.push(t, `{"data":{"agent":"claude","agent_status":"idle","pane_id":"w1:p1","workspace_id":"w1"},"event":"pane.agent_status_changed"}`)
+	if ev := recvEvent(t, ch, 2*time.Second); ev.Ref != "w1:p1" || ev.Session != "alpha" {
+		t.Errorf("frame from alpha's pane => %+v; want ref w1:p1 attributed to alpha", ev)
+	}
+}
+
 // TestSessionEventStreamStartupAndTranslation pins the core cycle: subscribe
 // with broadcast kinds + a per-pane agent-status filter for every known agent
 // pane, emit Resync first, then translate herdr frames — broadcast underscore

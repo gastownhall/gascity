@@ -366,3 +366,21 @@ func TestActivityReconcileLoopPollsOnAnyEventKind(t *testing.T) {
 		})
 	}
 }
+
+// An unnamed registry entry carries only its detected kind, which every pane
+// of that kind shares, so the tracker must not key it by anything: a session
+// named after the kind would otherwise read a stranger's activity as its own.
+func TestActivityIgnoresUnnamedPanes(t *testing.T) {
+	f, sock := newFakeHerdrServer(t)
+	f.setAgentsJSON(
+		`{"agent":"claude","name":"alpha","pane_id":"w1:p1","agent_status":"working","revision":1}`,
+		`{"agent":"claude","pane_id":"w1:p3","agent_status":"working","revision":1}`,
+	)
+	p := activityTestProvider(t, sock)
+	if got := lastActivity(t, p, "alpha"); got.IsZero() {
+		t.Fatal("alpha: want a seeded stamp, got zero")
+	}
+	if got := lastActivity(t, p, "claude"); !got.IsZero() {
+		t.Fatalf("an unnamed claude pane was tracked under its kind: GetLastActivity(%q) = %v; want zero", "claude", got)
+	}
+}
