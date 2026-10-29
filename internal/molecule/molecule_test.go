@@ -2892,6 +2892,66 @@ func TestInstantiateFragmentFailureNamesTheBeadsItCouldNotMark(t *testing.T) {
 	}
 }
 
+// When every stamp lands, a failing mint behaves exactly as before the
+// fix: the site's cause unchanged, one stamp per created bead.
+func TestInstantiateFailureStampsEachBeadOnceWhenStampsLand(t *testing.T) {
+	t.Run("create failure", func(t *testing.T) {
+		base := beads.NewMemStore()
+		store := &stampFailStore{Store: &errStore{Store: base, failOnCreate: 2}} // fail on second create
+		recipe := &formula.Recipe{
+			Name: "fail-test",
+			Steps: []formula.RecipeStep{
+				{ID: "fail-test", Title: "Root", Type: "molecule", IsRoot: true},
+				{ID: "fail-test.step", Title: "Step", Type: "task"},
+			},
+			Deps: []formula.RecipeDep{
+				{StepID: "fail-test.step", DependsOnID: "fail-test", Type: "parent-child"},
+			},
+		}
+
+		_, err := Instantiate(context.Background(), store, recipe, Options{})
+		if err == nil {
+			t.Fatal("Instantiate succeeded; want the injected create failure")
+		}
+		if got, want := err.Error(), `creating bead for step "fail-test.step": injected create failure`; got != want {
+			t.Fatalf("Instantiate error = %q, want %q", got, want)
+		}
+		if got, want := strings.Join(store.calls, ","), store.created[0]; got != want {
+			t.Errorf("stamp calls = [%s], want [%s] (exactly one stamp for the one created bead)", got, want)
+		}
+	})
+
+	t.Run("dep failure", func(t *testing.T) {
+		base := beads.NewMemStore()
+		depErr := fmt.Errorf("injected dep failure")
+		store := &depFailStampStore{stampFailStore: &stampFailStore{Store: base}, depErr: depErr}
+		recipe := &formula.Recipe{
+			Name: "dep-fail",
+			Steps: []formula.RecipeStep{
+				{ID: "dep-fail", Title: "Root", Type: "molecule", IsRoot: true},
+				{ID: "dep-fail.b", Title: "B", Type: "task"},
+				{ID: "dep-fail.a", Title: "A", Type: "task"},
+			},
+			Deps: []formula.RecipeDep{
+				{StepID: "dep-fail.b", DependsOnID: "dep-fail", Type: "parent-child"},
+				{StepID: "dep-fail.a", DependsOnID: "dep-fail", Type: "parent-child"},
+				{StepID: "dep-fail.b", DependsOnID: "dep-fail.a", Type: "blocks"},
+			},
+		}
+
+		_, err := Instantiate(context.Background(), store, recipe, Options{})
+		if err == nil {
+			t.Fatal("Instantiate succeeded; want the injected dep failure")
+		}
+		if got, want := err.Error(), "wiring dep dep-fail.b->dep-fail: injected dep failure"; got != want {
+			t.Fatalf("Instantiate error = %q, want %q", got, want)
+		}
+		if got, want := strings.Join(store.calls, ","), strings.Join(store.created, ","); got != want {
+			t.Errorf("stamp calls = [%s], want [%s] (exactly one stamp per created bead)", got, want)
+		}
+	})
+}
+
 func TestCookOnRequiresParentID(t *testing.T) {
 	store := beads.NewMemStore()
 	_, err := CookOn(context.Background(), store, "x", nil, Options{})
