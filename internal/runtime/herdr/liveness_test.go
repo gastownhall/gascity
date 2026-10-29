@@ -1,6 +1,7 @@
 package herdr
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -53,6 +54,59 @@ func TestLivenessFromAgentPresent(t *testing.T) {
 	terminal := livenessFromAgent(agentInfo{Name: "mayor", AgentStatus: "exited"}, true, nil)
 	if !terminal.Running || terminal.Alive {
 		t.Errorf("present exited agent: got %+v; want Running=true Alive=false", terminal)
+	}
+}
+
+// A session whose registered herdr name literally equals an agent kind must
+// resolve to exactly its own pane — both when `agent get` answers directly and
+// through the not-found list scan — so the fix that stops kind-named lookups
+// from hitting an unnamed pane of that kind cannot over-correct into missing
+// real registrations. IsRunning, ObserveLiveness and Stop all resolve through
+// getAgent, so a mis-resolution here is another session's pane reported as
+// this one's runtime.
+func TestGetAgentResolvesASessionNamedLikeAKindToItsOwnPane(t *testing.T) {
+	list := `{"result":{"agents":[` +
+		`{"agent":"opencode","pane_id":"w3:p1","agent_status":"idle"},` +
+		`{"agent":"opencode","name":"alpha","pane_id":"w1:p1","agent_status":"idle"},` +
+		`{"agent":"opencode","name":"beta","pane_id":"w2:p1","agent_status":"idle"},` +
+		`{"agent":"opencode","name":"opencode","pane_id":"w5:p1","agent_status":"idle"}]}}`
+
+	// `agent get` answers directly.
+	direct := "#!/bin/sh\n" +
+		"case \"$*\" in\n" +
+		"  *'agent get'*)\n" +
+		"    echo '{\"result\":{\"agent\":{\"agent\":\"opencode\",\"name\":\"opencode\",\"pane_id\":\"w5:p1\",\"agent_status\":\"idle\"}}}'\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	c := &client{session: "gc-test", bin: writeFakeHerdr(t, direct)}
+	a, ok, err := c.getAgent(context.Background(), "opencode")
+	if err != nil {
+		t.Fatalf("getAgent(\"opencode\"): %v", err)
+	}
+	if !ok || a.PaneID != "w5:p1" {
+		t.Errorf("getAgent(\"opencode\") = (%+v, %v); want the registered session's own pane w5:p1", a, ok)
+	}
+
+	// `agent get` answers not-found; the list scan, holding an unnamed
+	// opencode pane ahead of the genuine registration, must still find it.
+	fallback := "#!/bin/sh\n" +
+		"case \"$*\" in\n" +
+		"  *'agent get'*)\n" +
+		"    echo '{\"error\":{\"code\":\"agent_not_found\",\"message\":\"agent not found\"}}'\n" +
+		"    ;;\n" +
+		"  *'agent list'*)\n" +
+		"    echo '" + list + "'\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	c = &client{session: "gc-test", bin: writeFakeHerdr(t, fallback)}
+	a, ok, err = c.getAgent(context.Background(), "opencode")
+	if err != nil {
+		t.Fatalf("getAgent(\"opencode\") list scan: %v", err)
+	}
+	if !ok || a.PaneID != "w5:p1" {
+		t.Errorf("getAgent(\"opencode\") list scan = (%+v, %v); want pane w5:p1, not an unnamed pane of the same kind", a, ok)
 	}
 }
 
