@@ -166,9 +166,9 @@ func TestNativeListIDsAssigneeFanoutDeduplicatesDefaultOrder(t *testing.T) {
 	spy := nativeIDListFixture(rows, false, &sent)
 	list := spy.list
 	spy.list = func(ctx context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
-		copy := req
-		copy.Assignee = ""
-		return list(ctx, copy)
+		copiedReq := req
+		copiedReq.Assignee = ""
+		return list(ctx, copiedReq)
 	}
 	store := newNativeDoltStoreForTest(spy)
 	rows[0].Assignee, rows[1].Assignee = "worker-a", "worker-b"
