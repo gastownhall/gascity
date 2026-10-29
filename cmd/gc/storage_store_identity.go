@@ -14,7 +14,7 @@ package main
 //     migration of one copies, and then clears, rows the other owns.
 //
 // Both are answered by the same tuple: the work store's project id (L1
-// .beads/identity.toml, else L2 .beads/metadata.json), its database and
+// contract.ProjectIdentityPath, else L2 .beads/metadata.json), its database and
 // endpoint, and its scope path. The marker records it; boot compares it; the
 // storage verbs compare it against every other registered city.
 //
@@ -48,7 +48,7 @@ const workStoreIdentityLinePrefix = "work-store "
 
 // workStoreIdentity is the identity tuple of one scope's work store.
 type workStoreIdentity struct {
-	// ProjectID is the beads project id: L1 identity.toml, else L2 metadata.json.
+	// ProjectID is the beads project id: L1 (contract.ProjectIdentityPath), else L2 metadata.json.
 	ProjectID string
 	// Database is the Dolt database the scope pins, or empty.
 	Database string
