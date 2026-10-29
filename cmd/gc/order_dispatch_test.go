@@ -11162,3 +11162,40 @@ func TestShellExecRunnerScrubsSessionScopedEnv(t *testing.T) {
 		}
 	}
 }
+
+func TestMergeOrderExecEnvExplicitAndUnrelatedKeysSurvive(t *testing.T) {
+	environ := []string{
+		"PATH=/usr/bin",
+		"HOME=/h",
+		"FOO=bar",
+		"GC_SESSION_ID=gc-seat-123",
+		"GC_ALIAS=seat",
+		"BEADS_ACTOR=seat",
+	}
+	env := []string{"GC_ALIAS=reporter", "BEADS_ACTOR=order:x"}
+
+	merged := mergeOrderExecEnv(environ, env)
+
+	counts := map[string]int{}
+	for _, entry := range merged {
+		counts[entry]++
+		if key, _, _ := strings.Cut(entry, "="); key == "GC_SESSION_ID" {
+			t.Errorf("seat identity survived merge: %q in %v", entry, merged)
+		}
+	}
+	for _, want := range []string{"GC_ALIAS=reporter", "BEADS_ACTOR=order:x"} {
+		if counts[want] != 1 {
+			t.Errorf("%q appears %d times, want once: %v", want, counts[want], merged)
+		}
+	}
+	for _, unwanted := range []string{"GC_ALIAS=seat", "BEADS_ACTOR=seat"} {
+		if counts[unwanted] != 0 {
+			t.Errorf("inherited %q survived alongside the explicit value: %v", unwanted, merged)
+		}
+	}
+	for _, want := range []string{"PATH=/usr/bin", "HOME=/h", "FOO=bar"} {
+		if counts[want] != 1 {
+			t.Errorf("unrelated %q appears %d times, want once: %v", want, counts[want], merged)
+		}
+	}
+}
