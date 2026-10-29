@@ -1,13 +1,19 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // stubWorkflowServeIdlePolling pins the drain's idle re-poll knobs for the
@@ -100,5 +106,64 @@ func TestDrainWorkflowServeWorkSkipsNonOpenControlWithoutSpinning(t *testing.T) 
 				t.Errorf("dispatch wake file written for a skip-only drain (%s), want none", status)
 			}
 		})
+	}
+}
+
+// TestRunWorkflowServeFollowBacksOffOnSkipOnlySweeps is the AC-2 pin: a drain
+// whose queue holds only a skipped control bead must report neither processed
+// nor pending, so runWorkflowServeFollow grows its idle backoff (1s, 2s, 4s,
+// then capped at workflowServeMaxIdleSleep) instead of sitting at the 1s
+// floor (gastownhall/gascity#6024 impact 3).
+func TestRunWorkflowServeFollowBacksOffOnSkipOnlySweeps(t *testing.T) {
+	eventsDir := t.TempDir()
+	ep := newTestProvider(t, eventsDir)
+
+	prevProvider, prevWait := workflowServeOpenEventsProvider, workflowServeWaitForWake
+	t.Cleanup(func() {
+		workflowServeOpenEventsProvider = prevProvider
+		workflowServeWaitForWake = prevWait
+	})
+	// A skip-only drain must exit on its first pass; the re-poll knobs only
+	// matter to the processed path.
+	stubWorkflowServeIdlePolling(t, 0)
+
+	workflowServeOpenEventsProvider = func(io.Writer) (events.Provider, error) { return ep, nil }
+
+	type waitCall struct {
+		idleSweeps int
+		sleepDur   time.Duration
+	}
+	var waitCalls []waitCall
+	stopErr := fmt.Errorf("stop after sequence")
+	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int) (bool, error) {
+		waitCalls = append(waitCalls, waitCall{idleSweeps: idleSweeps, sleepDur: sleepDur})
+		if len(waitCalls) >= 4 {
+			return false, stopErr
+		}
+		return false, nil
+	}
+
+	stubWorkflowServeList(t, func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		return []hookBead{{ID: "gc-stale", Metadata: hookBeadMetadata{"gc.kind": "workflow-finalize"}}}, nil
+	})
+	prevServe := controlDispatcherServe
+	controlDispatcherServe = func(_, _ string, _ string, _, _ io.Writer, _ *executionEmitDeferral) error {
+		return errControlNotProcessed
+	}
+	t.Cleanup(func() { controlDispatcherServe = prevServe })
+
+	agent := config.Agent{Name: "control-dispatcher"}
+	err := runWorkflowServeFollow(agent, t.TempDir(), t.TempDir(), agent.EffectiveWorkQuery(), nil, io.Discard)
+	if !errors.Is(err, stopErr) {
+		t.Fatalf("runWorkflowServeFollow error = %v, want %v", err, stopErr)
+	}
+	want := []waitCall{
+		{idleSweeps: 0, sleepDur: 1 * time.Second},
+		{idleSweeps: 1, sleepDur: 2 * time.Second},
+		{idleSweeps: 2, sleepDur: 4 * time.Second},
+		{idleSweeps: 3, sleepDur: 5 * time.Second}, // capped at workflowServeMaxIdleSleep
+	}
+	if !slices.Equal(waitCalls, want) {
+		t.Fatalf("wait calls = %#v, want %#v: skip-only sweeps must grow the idle backoff", waitCalls, want)
 	}
 }
