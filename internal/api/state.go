@@ -305,6 +305,18 @@ type WakeStartRefuser interface {
 	WakeStartRefusal(info session.Info) (why string, certain bool)
 }
 
+// LaunchEnvResolverProvider is an optional State capability: the resolver
+// that rebuilds the generated launch env (rig or city scope, GC_BIN, the
+// backend projection, the upstream) of a session whose runtime is gone, from
+// cfg, the config snapshot of the worker factory it is wired into. A message,
+// attach or start through this API that starts such a session again then
+// launches it with that env, as the gc worker handles do (#8184). A State
+// without it, or a nil resolver, starts the session with its handle's env
+// alone. Optional for the same reason as WebhookDispatchProvider.
+type LaunchEnvResolverProvider interface {
+	LaunchEnvResolver(cfg *config.City) func(info session.Info, sessionKind string, metadata map[string]string) (map[string]string, error)
+}
+
 // WebhookDispatchProvider is optionally implemented by State to expose the live
 // order dispatcher the supervisor webhook receiver (E3) fires verified+matched
 // deliveries through. It is the H1/E0.5 dispatch seam: the dispatch machine lives

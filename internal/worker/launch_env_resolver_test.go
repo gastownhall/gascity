@@ -76,9 +76,9 @@ func TestFactoryResolveLaunchEnvFeedsReplacementStart(t *testing.T) {
 }
 
 // TestFactoryWithoutResolveLaunchEnvKeepsHintsEnv: a nil ResolveLaunchEnv
-// leaves the option unset, so the hints env alone starts the replacement —
-// the pre-#8184 behavior, preserved for factories that configure no
-// resolver (the API factory, session-logs factories).
+// leaves the option unset, so the hints env alone starts the replacement.
+// The session-logs factories configure no resolver, and neither does the API
+// factory of a State that provides none.
 func TestFactoryWithoutResolveLaunchEnvKeepsHintsEnv(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

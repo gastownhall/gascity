@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -225,6 +226,39 @@ func TestResumeByAttachOrStartRegeneratesRigScopedLaunchEnv(t *testing.T) {
 			assertResumedGeneratedLaunchEnv(t, c, start.Env, c.templateEnv(t, "myrig/worker", "myrig/worker-1"))
 		})
 	}
+}
+
+// The API half of AC-1: the controller hands the API the resolver the gc
+// worker handles carry, built from the config snapshot the API's worker
+// factory passes in, so an API resume of a rig pool session whose runtime is
+// gone regenerates the same launch env.
+func TestControllerStateLaunchEnvResolverRegeneratesRigScopedLaunchEnv(t *testing.T) {
+	c := newResumeLaunchEnvCity(t, rigPoolLaunchEnvCity)
+	stopped := c.stoppedSession(t, "myrig/worker", "myrig/worker-1", "", filepath.Join(c.cityDir, ".gc", "worktrees", "task"))
+	info, err := session.NewStore(beads.SessionStore{Store: c.store}).Get(stopped.ID)
+	if err != nil {
+		t.Fatalf("reading the stopped session: %v", err)
+	}
+	b, err := c.store.Get(stopped.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var state api.State = &controllerState{cityPath: c.cityDir}
+	provider, ok := state.(api.LaunchEnvResolverProvider)
+	if !ok {
+		t.Fatal("controllerState does not implement api.LaunchEnvResolverProvider")
+	}
+	resolve := provider.LaunchEnvResolver(c.cfg)
+	if resolve == nil {
+		t.Fatal("LaunchEnvResolver returned no resolver for a configured city")
+	}
+	env, err := resolve(info, "", b.Metadata)
+	if err != nil {
+		t.Fatalf("resolving the launch env: %v", err)
+	}
+
+	assertResumedGeneratedLaunchEnv(t, c, env, c.templateEnv(t, "myrig/worker", "myrig/worker-1"))
 }
 
 // AC-3: rig scope comes from the configured agent and the city's rig config,

@@ -147,6 +147,15 @@ func workerSessionRuntimeResolverWithConfig(cityPath string, cfg *config.City) w
 // gave its first launch: the agent's rig or city scope, GC_BIN, the backend
 // projection and the upstream, from current configuration. A session whose
 // provider does not come from an agent template gets none.
+//
+// It composes over the provider-process passthrough env, not the
+// passthroughEnv resolveTemplate uses: the resuming process can be an
+// operator's gc command, whose GC_* env must not reach the agent. A resumed
+// launch therefore gets neither the controller's GC_* sweep nor the
+// GC_SUPERVISOR_ENV opt-in keys. $VAR references in the workspace, provider,
+// agent and upstream env, upstream credentials included, expand from the
+// resuming process's environment: the controller's for an API resume, as at
+// create, and the operator's for a gc command.
 func workerLaunchEnvResolverWithConfig(cityPath string, cfg *config.City) func(session.Info, string, map[string]string) (map[string]string, error) {
 	if strings.TrimSpace(cityPath) == "" || cfg == nil {
 		return nil

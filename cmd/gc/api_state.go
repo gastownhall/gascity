@@ -2057,6 +2057,16 @@ func (cs *controllerState) Config() *config.City {
 	return cs.cfg
 }
 
+// LaunchEnvResolver is api.LaunchEnvResolverProvider over the resolver the
+// gc worker handles carry, so an API message, attach or start that resumes a
+// session whose runtime is gone regenerates its launch env as a gc resume
+// does (#8184).
+func (cs *controllerState) LaunchEnvResolver(cfg *config.City) func(session.Info, string, map[string]string) (map[string]string, error) {
+	return workerLaunchEnvResolverWithConfig(cs.CityPath(), cfg)
+}
+
+var _ api.LaunchEnvResolverProvider = (*controllerState)(nil)
+
 // RolloutFlags returns the boot-latched rollout-gate snapshot (api.RolloutFlagsProvider).
 // Lock-free: rolloutFlags is written once at construction and never reassigned;
 // reloads record drift via noteRolloutDrift rather than re-latching.
