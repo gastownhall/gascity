@@ -1213,3 +1213,35 @@ func TestStateCache_ProcessAliveMatchesWrappedGCExecutable(t *testing.T) {
 		t.Error("uncached matcher missed the running executable's name")
 	}
 }
+
+// TestStateCache_ProcessAliveRejectsOtherProcessForGCNames guards the gc
+// executable alias: a pane whose process tree runs neither gc nor the
+// running executable's name stays dead for process_names = ["gc"], before
+// and after the alias.
+func TestStateCache_ProcessAliveRejectsOtherProcessForGCNames(t *testing.T) {
+	f := &mockFetcher{
+		state: runtimeStateSnapshot{
+			Sessions: map[string]sessionRuntimeState{
+				"agent-1": {
+					Running: true,
+					Panes: []paneRuntimeState{{
+						Command: "sleep",
+						PID:     "201",
+					}},
+				},
+			},
+			Processes: newProcessSnapshot([]processRuntimeState{{
+				PID:     "201",
+				PPID:    "1",
+				Command: "sleep",
+				Args:    "sleep 60",
+			}}),
+			ProcessesAvailable: true,
+		},
+	}
+	cache := NewStateCache(f, 2*time.Second)
+
+	if cache.ProcessAlive("agent-1", []string{"gc"}) {
+		t.Fatal(`ProcessAlive(agent-1 running sleep, [gc]) = true, want false`)
+	}
+}
