@@ -787,13 +787,15 @@ func (v *view) DeleteBatch(ids []string) error {
 // store can hold a dependency on a row it does not have. A parent-child edge
 // that restates the bead's own ParentID passes, as in StrictStore.
 func (v *view) guardEdge(op, issueID, dependsOnID, depType string) error {
+	// The issue is always checked; only the parent of an edge that mirrors
+	// the issue's own ParentID (checked when that was written) is exempt.
+	if err := v.guardID(op, issueID); err != nil {
+		return err
+	}
 	if depType == "parent-child" {
 		if b, err := v.Store.Get(issueID); err == nil && b.ParentID == dependsOnID {
 			return nil
 		}
-	}
-	if err := v.guardID(op, issueID); err != nil {
-		return err
 	}
 	return v.guardID(op, dependsOnID)
 }
@@ -954,6 +956,15 @@ func (v *view) TransferIfCurrent(id, fromAssignee, toAssignee string) (bool, err
 
 // GraphApplyHandle forwards the front's graph apply, flagging a plan whose
 // class belongs to the other side and pinning the rows it creates to this view.
+//
+// Known gap: a plan's external references (a node's ParentID, an edge's
+// FromID/ToID) are NOT checked against the other side, unlike Create's. They
+// can carry one today: molecule's graph apply parents the steps to
+// opts.ParentID and edges them to opts.RootID and to step dependencies'
+// DependsOnID. Checking them needs the designed cross-store exemptions (the
+// attachment link, S3b's cross-store blockers) worked out first, and a
+// regenerated baseline; until then a plan wiring a row to the wrong side's
+// row passes the gate.
 func (v *view) GraphApplyHandle() (beads.GraphApplyStore, bool) {
 	applier, ok := beads.GraphApplyFor(v.Store)
 	if !ok {

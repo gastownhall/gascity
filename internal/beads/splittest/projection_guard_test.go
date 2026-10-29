@@ -229,3 +229,17 @@ func TestProjectionAllowsTheAttachmentParentOnly(t *testing.T) {
 		t.Fatalf("flags = %d, want 2 (only the refused parents)", sink.testOnlyCount())
 	}
 }
+
+// TestProjectionParentChildEdgeStillChecksItsIssue: the parent-child edge
+// that mirrors a row's own ParentID skips the parent's check, never the
+// row's: a session's parent edge through the work view is refused.
+func TestProjectionParentChildEdgeStillChecksItsIssue(t *testing.T) {
+	p, leaf, sink, task, _ := guardFixture(t)
+	child := sessionBead("child session")
+	child.ParentID = task.ID
+	child = seed(t, leaf, child)
+	wantNotHere(t, "a session's parent-child edge through the work view", p.WorkView().DepAdd(child.ID, task.ID, "parent-child"))
+	if sink.testOnlyCount() != 1 {
+		t.Fatalf("flags = %d, want 1", sink.testOnlyCount())
+	}
+}

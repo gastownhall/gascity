@@ -391,6 +391,10 @@ func finishGate(code int, run *gateRun, files GateFiles, out io.Writer) int {
 	}
 
 	ratchet := "PASS"
+	if failed {
+		// Sightings it could not read are keys it could not judge.
+		ratchet = "FAIL"
+	}
 	report := ""
 	baseline, err := readBaselineFile(files.Baseline)
 	var result RatchetResult
@@ -445,6 +449,12 @@ func finishGate(code int, run *gateRun, files GateFiles, out io.Writer) int {
 	if len(newFailing) > 0 || hung != "" {
 		tests = "FAIL"
 	}
+	if code != 0 && len(failing) == 0 {
+		// The binary failed outside every test (a panic in TestMain or an
+		// init, a crashed helper): nothing here says it was a known failure.
+		say("split-strict: exit %d with no failing test (the binary failed outside every test)", code)
+		tests = "FAIL"
+	}
 
 	fmt.Fprint(out, strings.Join(lines, "\n")) //nolint:errcheck // best-effort test log
 	if len(lines) > 0 {
@@ -471,10 +481,10 @@ func finishGate(code int, run *gateRun, files GateFiles, out io.Writer) int {
 	writeGateFile(run.dir, resultReportName, fmt.Sprintf("ratchet=%s\ntests=%s\nhung=%s\nnew_failing=%s\n", ratchet, tests, hung, strings.Join(newFailing, ",")), out)
 
 	if failed || ratchet == "FAIL" || tests == "FAIL" {
+		if code != 0 && len(failing) == 0 {
+			return code
+		}
 		return 1
-	}
-	if code != 0 && len(failing) == 0 {
-		return code
 	}
 	return 0
 }

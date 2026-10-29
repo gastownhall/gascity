@@ -333,3 +333,50 @@ func TestOffGoroutineSightingsAreChargedToTheSoleRunningTest(t *testing.T) {
 		t.Fatalf("with two tests running the sighting was charged to %q, want ?", got)
 	}
 }
+
+// TestGateFinishNeverPassesWhatItCouldNotJudge: an events file it cannot
+// read fails the ratchet verdict, and a non-zero exit with no failing test
+// (a panic or TestMain error outside any test) fails the tests verdict.
+func TestGateFinishNeverPassesWhatItCouldNotJudge(t *testing.T) {
+	t.Setenv(StrictEnv, "1")
+	t.Setenv(StrictReportEnv, "")
+	dir := t.TempDir()
+	baselinePath := filepath.Join(dir, "baseline.tsv")
+	knownPath := filepath.Join(dir, "known.list")
+	flakyPath := filepath.Join(dir, "flaky.list")
+	for _, p := range []string{baselinePath, knownPath, flakyPath} {
+		if err := os.WriteFile(p, []byte("# empty\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files := GateFiles{Baseline: baselinePath, KnownFailures: knownPath, KnownFlaky: flakyPath}
+	gateSink.reset()
+	t.Cleanup(gateSink.reset)
+
+	run := newTestGateRun(t)
+	close(run.done)
+	// A directory where an events file should be: opening works, reading
+	// does not (whoever runs the test).
+	if err := os.Mkdir(filepath.Join(run.dir, strings.Replace(eventsFilePattern, "*", "1", 1)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code := finishGate(0, run, files, &out); code == 0 {
+		t.Fatalf("an unreadable events file exited 0:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "SPLIT-STRICT RATCHET: FAIL") {
+		t.Fatalf("an unreadable events file did not fail the ratchet verdict:\n%s", out.String())
+	}
+
+	run = newTestGateRun(t)
+	close(run.done)
+	run.observe("=== RUN   TestOK")
+	run.observe("--- PASS: TestOK (0.00s)")
+	out.Reset()
+	if code := finishGate(2, run, files, &out); code == 0 {
+		t.Fatalf("exit 2 with no failing test exited 0:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "SPLIT-STRICT TESTS: FAIL") || !strings.Contains(out.String(), "exit 2 with no failing test") {
+		t.Fatalf("exit 2 with no failing test did not fail the tests verdict:\n%s", out.String())
+	}
+}
