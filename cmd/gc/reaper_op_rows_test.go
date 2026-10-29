@@ -4,10 +4,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
@@ -218,6 +220,66 @@ func TestReaperOpRowsScopesAreTheReapersScopesDoctorMayRead(t *testing.T) {
 	}
 	if got, want := reaperOpRowsScopeLabels(c.reaperScopes()), []string{"city", "rig:api"}; !slices.Equal(got, want) {
 		t.Fatalf("the check's scopes = %q, want %q", got, want)
+	}
+}
+
+// reaperOpRowCensusFromScript is the op-row census reaper.sh takes, in
+// database db.
+func reaperOpRowCensusFromScript(t *testing.T, db string) string {
+	t.Helper()
+	reaper := readBundledPackFileForTest(t, "core", "assets/scripts/reaper.sh")
+	m := regexp.MustCompile(`(?s)get_sql_count "op row" "(.*?)"; then`).FindStringSubmatch(reaper)
+	if m == nil {
+		t.Fatal(`reaper.sh no longer takes its op-row census with get_sql_count "op row"; update this test`)
+	}
+	census := strings.NewReplacer("\\`", "`", "$SCOPE_DB", db, "$OP_ROW_TYPE", reaperOpRowType).Replace(m[1])
+	if !strings.Contains(census, "op_row_census") || strings.Contains(census, "$") {
+		t.Fatalf("reaper.sh's op-row census reads %q", census)
+	}
+	return census
+}
+
+// TestReaperOpRowGuardProbesPassOnASplitCity: on a split city gc bd forwards
+// only vetted commands, and a refused probe would hold the purge and the
+// session prune back on every split city, op rows or none. The census as
+// reaper.sh builds it, both help reads and the setting read pass the
+// relocated-class read guard and every pinned bd inventory's judge.
+func TestReaperOpRowGuardProbesPassOnASplitCity(t *testing.T) {
+	probes := [][]string{
+		{"sql", "--csv", reaperOpRowCensusFromScript(t, "hq")},
+		{"purge", "--help"},
+		{"prune", "--help"},
+		{"config", "get", "--json", reaperRetainedTypesKey},
+	}
+	city := splitGuardTestCity()
+	for _, argv := range probes {
+		if msg, refused := bdSQLRelocatedClassRefusal(city, argv); refused {
+			t.Errorf("the reaper's gc bd %s is refused as a relocated-class read: %s", argv[0], msg)
+		}
+	}
+	for _, inv := range bdflags.Inventories() {
+		deps := splitTestDeps(nil, func(string) (beads.Bead, bdReadResult) { return beads.Bead{}, bdReadFailed })
+		pinned := inv
+		deps.inventory = func() (*bdflags.Inventory, error) { return pinned, nil }
+		for _, argv := range probes {
+			if g := bdClassFlipGuard(city, t.TempDir(), argv, deps); g.refusal != "" {
+				t.Errorf("%s: the reaper's gc bd %s %s is refused on a split city: %s", inv.Name, argv[0], argv[1], g.refusal)
+			}
+		}
+	}
+}
+
+// TestReaperOpRowCensusSQLIsTheReapers: doctor's census is reaper.sh's, read
+// in the scope's own database, so the two cannot disagree about which scopes
+// hold op rows.
+func TestReaperOpRowCensusSQLIsTheReapers(t *testing.T) {
+	normalize := func(sql string) string {
+		sql = regexp.MustCompile(`\s+`).ReplaceAllString(sql, " ")
+		return regexp.MustCompile(` ?([()]) ?`).ReplaceAllString(strings.TrimSpace(sql), "$1")
+	}
+	reaper := strings.ReplaceAll(reaperOpRowCensusFromScript(t, "hq"), "`hq`.", "")
+	if got, want := normalize(reaperOpRowCensusSQL), normalize(reaper); got != want {
+		t.Fatalf("doctor's census\n  %s\nis not reaper.sh's\n  %s", got, want)
 	}
 }
 

@@ -139,3 +139,47 @@ func TestReaperHoldsPurgeBackWhenItsOpRowCensusFails(t *testing.T) {
 		t.Fatalf("the failed census was not recorded as an anomaly:\n%s", gcLog)
 	}
 }
+
+// reaperOpRowCensusOn answers the op-row census of database db with n rows;
+// the census of every other database falls through to the fixture's zero.
+func reaperOpRowCensusOn(db, n string) string {
+	return "  *'`" + db + "`.wisps WHERE issue_type'*op_row_census*)\n" +
+		"    printf 'COUNT(*)\\n" + n + "\\n'\n" +
+		"    ;;\n"
+}
+
+// TestReaperHoldsPurgeBackOnEachScopeHoldingOpRows: the guard is taken per bd
+// scope, against that scope's own database. Only the scope whose census finds
+// an op row is held back (one row in one table counts 1, the census's
+// smallest positive answer); the scope beside it is purged as before, rig or
+// city.
+func TestReaperHoldsPurgeBackOnEachScopeHoldingOpRows(t *testing.T) {
+	const why = "purge skipped: holds op rows and its bd does not honor types.retained"
+	for _, tc := range []struct {
+		name, opDB, held, purged string
+	}{
+		{"a rig holds op rows", "rigdb", "rig:api", "city"},
+		{"the city holds op rows", "citydb", "city", "rig:api"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newScopeFixture(t, reaperOpRowCensusOn(tc.opDB, "1"))
+			f.env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api","hq":false}]}`
+			f.env["FAKE_SCOPE_DBS"] = "city=citydb rig:api=rigdb"
+			f.env["BD_PURGE_COUNT"] = "3"
+			f.runReaper(t)
+
+			bdLog := f.read(t, f.bdLog)
+			purge := " args=purge --wisps-plane --older-than 168h --json --force --limit 500"
+			if !strings.Contains(bdLog, "scope="+tc.purged+purge) {
+				t.Fatalf("%s holds no op row and must be purged:\n%s", tc.purged, bdLog)
+			}
+			if strings.Contains(bdLog, "scope="+tc.held+purge) {
+				t.Fatalf("%s holds an op row and must not be purged:\n%s", tc.held, bdLog)
+			}
+			outcome, ok := f.outcome(t)
+			if !ok || !outcome.hasScope(tc.held, why) || outcome.hasScope(tc.purged, why) {
+				t.Fatalf("outcome = %+v (declared %v), want only %s %q", outcome, ok, tc.held, why)
+			}
+		})
+	}
+}
