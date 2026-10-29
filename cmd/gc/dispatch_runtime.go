@@ -455,9 +455,6 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 				os.Getenv("GC_SESSION_ID"), os.Getenv("GC_TEMPLATE"), serveQuery, err)
 			return result, fmt.Errorf("querying control work for %s: %w", agentCfg.QualifiedName(), err)
 		}
-		if len(queue) > 0 {
-			idlePolls = 0
-		}
 		processedThisCycle := false
 		pendingCount := 0
 		skippedCount := 0
@@ -524,6 +521,10 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			processedThisCycle = true
 		}
 		if processedThisCycle {
+			// Only progress restarts the idle re-polls: a stale row that keeps
+			// the queue non-empty must not, or a skip-only pass after real
+			// progress would re-poll forever.
+			idlePolls = 0
 			// Signal workers to skip their poll sleep: new step beads may be ready.
 			writeDispatchWakeFile(cityPath)
 			continue

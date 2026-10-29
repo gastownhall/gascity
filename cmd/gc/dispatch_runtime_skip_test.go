@@ -90,6 +90,25 @@ func createNonOpenScopeCheck(t *testing.T, store beads.Store, status string) bea
 	return got
 }
 
+// createOrphanedScopeCheck seeds an open scope-check whose root the store does
+// not hold: ProcessControl closes it as orphaned-workflow and reports it
+// Processed.
+func createOrphanedScopeCheck(t *testing.T, store beads.Store) beads.Bead {
+	t.Helper()
+	b, err := store.Create(beads.Bead{
+		Type: "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindScopeCheck,
+			beadmeta.RootBeadIDMetadataKey:   "ga-missing-root",
+			beadmeta.RootStoreRefMetadataKey: "city:test-city",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create orphaned scope-check control: %v", err)
+	}
+	return b
+}
+
 func serveQueueRow(b beads.Bead) hookBead {
 	return hookBead{ID: b.ID, Metadata: hookBeadMetadata{beadmeta.KindMetadataKey: b.Metadata[beadmeta.KindMetadataKey]}}
 }
@@ -216,6 +235,71 @@ func TestRunWorkflowServeFollowBacksOffOnSkipOnlySweeps(t *testing.T) {
 	}
 	if !slices.Equal(waits, want) {
 		t.Fatalf("waits = %+v, want %+v", waits, want)
+	}
+}
+
+// TestDrainWorkflowServeWorkProcessesLiveControlBesideStaleRow is AC-3: a
+// processable control beside a persistent stale row is processed once, and
+// the skip-only passes after it take the bounded idle re-polls, not a spin.
+func TestDrainWorkflowServeWorkProcessesLiveControlBesideStaleRow(t *testing.T) {
+	cityDir, store := setUpServeSkipCity(t)
+	workflowServeIdlePollAttempts = 3
+	stale := createNonOpenScopeCheck(t, store, "closed")
+	live := createOrphanedScopeCheck(t, store)
+	lists := stubServeQueue(t, func() []hookBead {
+		rows := []hookBead{serveQueueRow(stale)}
+		if b, err := store.Get(live.ID); err == nil && b.Status == "open" {
+			rows = append(rows, serveQueueRow(b))
+		}
+		return rows
+	})
+	dispatches := countServeDispatches(t)
+
+	result := drainServeSkipCity(t, cityDir)
+
+	if !result.processedAny {
+		t.Error("processedAny = false, want true after processing the live control")
+	}
+	if got, err := store.Get(live.ID); err != nil || got.Status != "closed" {
+		t.Errorf("live control = (%+v, %v), want closed by its dispatch", got, err)
+	}
+	if !dispatchWakeFileExists(t, cityDir) {
+		t.Error("dispatch wake file not written after processing the live control")
+	}
+	if got := dispatches[live.ID]; got != 1 {
+		t.Errorf("live control dispatched %d times, want 1", got)
+	}
+	wantPasses := 2 + workflowServeIdlePollAttempts
+	if *lists != wantPasses {
+		t.Errorf("queue queried %d times, want %d (one processing pass, one skip-only pass, %d idle re-polls)", *lists, wantPasses, workflowServeIdlePollAttempts)
+	}
+	if got := dispatches[stale.ID]; got != wantPasses {
+		t.Errorf("stale control dispatched %d times, want %d", got, wantPasses)
+	}
+}
+
+// TestDrainWorkflowServeWorkKeepsIdleRepollsAfterProgress pins that an empty
+// queue after a processed pass still takes every idle re-poll, the
+// read-after-write allowance the skip-only exit shares.
+func TestDrainWorkflowServeWorkKeepsIdleRepollsAfterProgress(t *testing.T) {
+	cityDir, store := setUpServeSkipCity(t)
+	workflowServeIdlePollAttempts = 3
+	live := createOrphanedScopeCheck(t, store)
+	lists := stubServeQueue(t, func() []hookBead {
+		if b, err := store.Get(live.ID); err == nil && b.Status == "open" {
+			return []hookBead{serveQueueRow(b)}
+		}
+		return nil
+	})
+	countServeDispatches(t)
+
+	result := drainServeSkipCity(t, cityDir)
+
+	if !result.processedAny {
+		t.Error("processedAny = false, want true")
+	}
+	if want := 2 + workflowServeIdlePollAttempts; *lists != want {
+		t.Errorf("queue queried %d times, want %d", *lists, want)
 	}
 }
 
