@@ -59,9 +59,8 @@ const closedUsageListLimit = 64
 // non-running lifecycle endpoint the controller's open-bead scan can observe:
 // idle-sleep (asleep), controller drain (drained), retirement (archived),
 // operator suspend (suspended), and crash-loop quarantine (quarantined). A
-// session closed directly from active without first passing through one of
-// these open states is the known v0 scan limitation (see
-// engdocs/design/usage-facts-v0.md).
+// session closed directly from active never passes through one of these open
+// states; its close marker routes the interval to settleClosedInterval.
 func isComputeTerminalState(state string) bool {
 	switch session.State(strings.TrimSpace(state)) {
 	case session.StateAsleep, session.StateDrained, session.StateArchived,
