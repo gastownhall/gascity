@@ -20,8 +20,8 @@ import (
 // Read tiers are declared per method and preserved from the ops they replace:
 //   - RecentRunsAll / OpenRuns (the dispatch cooldown/single-flight index) read
 //     the LIVE tier — cache-bypass is the duplicate-dispatch guarantee.
-//   - StaleOpenRuns (the sweep that clears that gate) reads the LIVE tier too,
-//     so it sees every tracking bead OpenRuns does.
+//   - StaleOpenRuns / OrphanedOpenRuns (the sweeps that clear that gate) read
+//     the LIVE tier too, so they see every tracking bead OpenRuns does.
 //   - LastRun / Cursor preserve the dispatcher's pre-existing bare-List tier so
 //     the migration is behavior-preserving.
 //   - Get / RunDetail are the by-id detail reads (bare Get).
@@ -165,17 +165,18 @@ func (s *Store) StaleOpenRuns(cutoff time.Time) ([]OrderRun, error) {
 	return out, nil
 }
 
-// OrphanedOpenRuns lists every OPEN tracking bead EXCEPT pre-dispatch
+// OrphanedOpenRuns lists every not-closed tracking bead EXCEPT pre-dispatch
 // trigger-env-failure markers (which the open-work gate intentionally keeps open
-// until the normal stale sweep), decoded into OrderRun across both tiers. It is
-// the typed read half of the orphaned-order-tracking startup sweep; the caller
-// closes the returned runs via CloseRuns. Names are best-effort (the sweep closes
-// by ID and does not resolve names).
+// until the normal stale sweep), decoded into OrderRun across both tiers. Like
+// StaleOpenRuns it reads the LIVE tier, so it sees every tracking bead OpenRuns
+// does. It is the typed read half of the orphaned-order-tracking startup sweep;
+// the caller closes the returned runs via CloseRuns. Names are best-effort (the
+// sweep closes by ID and does not resolve names).
 func (s *Store) OrphanedOpenRuns() ([]OrderRun, error) {
 	if s.store.Store == nil {
 		return nil, nil
 	}
-	all, err := s.store.ListByLabel(labelOrderTracking, 0, beads.WithBothTiers)
+	all, err := s.sweepTrackingBeads()
 	if err != nil {
 		return nil, err
 	}
