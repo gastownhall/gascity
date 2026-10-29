@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +12,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
 
@@ -224,5 +228,154 @@ func TestSharedDrainWorkspaceProvisionerRequiresRootBeadID(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "gcg-drain-3") {
 		t.Fatalf("error = %v, want it to name the control", err)
+	}
+}
+
+// TestControlDispatchProvisionsSharedDrainWorkspace pins the wiring: a
+// shared exclusive drain dispatched from a rig's store through
+// runControlDispatcherWithStoreAndConfig provisions the managed worktree and
+// stamps it on the member, and the session reconciler's
+// resolveDrainSourceWorkDir — the launch-time reader the item prompts rely
+// on — resolves that same path for the materialized item work step.
+func TestControlDispatchProvisionsSharedDrainWorkspace(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	cityPath := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	t.Setenv("GC_WORKTREES_DIR", worktreesRoot)
+	repo := initSharedDrainTestRepo(t, filepath.Join(t.TempDir(), "alpha"))
+	formulaDir := t.TempDir()
+	formulaSrc := `formula = "drain-item"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[[steps]]
+id = "work"
+title = "Work {{convoy_id}}"
+`
+	if err := os.WriteFile(filepath.Join(formulaDir, "drain-item.formula.toml"), []byte(strings.TrimSpace(formulaSrc)+"\n"), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	cfg := &config.City{
+		Daemon:        config.DaemonConfig{FormulaV2: boolPtr(true)},
+		Workspace:     config.Workspace{Name: "test-city"},
+		Rigs:          []config.Rig{{Name: "alpha", Path: repo}},
+		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
+	}
+	// The drain decorates its item recipe through the rig-scoped control
+	// dispatcher (storeRef is "rig:alpha"), which config matches on Dir, so
+	// the dispatcher agent must carry the rig's name as its scope.
+	addTestControlDispatcherAgents(cfg, "alpha")
+	applyFeatureFlags(cfg)
+	t.Cleanup(func() { applyFeatureFlags(&config.City{}) })
+	store := beads.NewMemStore()
+	parent, err := store.Create(beads.Bead{Title: "parent", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("Create(parent): %v", err)
+	}
+	first, err := store.Create(beads.Bead{Title: "first", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(first): %v", err)
+	}
+	second, err := store.Create(beads.Bead{Title: "second", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(second): %v", err)
+	}
+	for _, member := range []string{first.ID, second.ID} {
+		if err := convoycore.TrackItem(store, parent.ID, member); err != nil {
+			t.Fatalf("TrackItem(%s): %v", member, err)
+		}
+	}
+	root, err := store.Create(beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			beadmeta.InputConvoyIDMetadataKey:   parent.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	drain, err := store.Create(beads.Bead{
+		Title: "drain",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:              "drain",
+			beadmeta.RootBeadIDMetadataKey:        root.ID,
+			beadmeta.DrainContextMetadataKey:      beadmeta.DrainContextShared,
+			beadmeta.DrainMemberAccessMetadataKey: beadmeta.DrainMemberAccessExclusive,
+			beadmeta.DrainFormulaMetadataKey:      "drain-item",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(drain): %v", err)
+	}
+
+	var stderr bytes.Buffer
+	if err := runControlDispatcherWithStoreAndConfig(cityPath, repo, store, drain.ID, cfg, io.Discard, &stderr); err != nil {
+		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v (stderr: %s)", err, stderr.String())
+	}
+
+	firstMember, err := store.Get(first.ID)
+	if err != nil {
+		t.Fatalf("Get(first member): %v", err)
+	}
+	workDir := strings.TrimSpace(firstMember.Metadata[beadmeta.LegacyWorkDirMetadataKey])
+	if workDir == "" {
+		t.Fatalf("first member work_dir is empty; stderr: %s", stderr.String())
+	}
+	if got := gitOutputForDrainWorkspace(t, workDir, "rev-parse", "--abbrev-ref", "HEAD"); got != "gc/drain/"+drain.ID {
+		t.Fatalf("provisioned worktree branch = %q, want gc/drain/%s", got, drain.ID)
+	}
+	if !strings.Contains(workDir, filepath.Join(worktreesRoot, "alpha")) {
+		t.Fatalf("work_dir = %q, want it under the configured worktrees root for rig alpha", workDir)
+	}
+
+	all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	// The drain stamps its identity on the item root (and on the unit
+	// convoy, which carries the same keys); the step beads hang off the
+	// item root through gc.root_bead_id, so locate the root — the bead
+	// with the drain item-root key — first.
+	var itemRoot *beads.Bead
+	for i := range all {
+		if all[i].Metadata[beadmeta.DrainControlIDMetadataKey] != drain.ID {
+			continue
+		}
+		if all[i].Metadata[beadmeta.DrainMemberIDMetadataKey] != first.ID {
+			continue
+		}
+		if all[i].Metadata[beadmeta.ItemRootKeyMetadataKey] == "" {
+			continue
+		}
+		itemRoot = &all[i]
+		break
+	}
+	if itemRoot == nil {
+		t.Fatalf("no item root found for drain %s over member %s; beads = %+v", drain.ID, first.ID, all)
+	}
+	var workStep *beads.Bead
+	for i := range all {
+		bead := all[i]
+		if bead.ID == itemRoot.ID {
+			continue
+		}
+		if bead.Metadata[beadmeta.RootBeadIDMetadataKey] != itemRoot.ID {
+			continue
+		}
+		if strings.HasPrefix(bead.Title, "Work ") {
+			workStep = &bead
+			break
+		}
+	}
+	if workStep == nil {
+		t.Fatalf("no item work step found for drain %s; beads = %+v", drain.ID, all)
+	}
+	if got := resolveDrainSourceWorkDir(cityPath, store, *workStep); got != workDir {
+		t.Fatalf("resolveDrainSourceWorkDir = %q, want the provisioned workspace %q", got, workDir)
 	}
 }

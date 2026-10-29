@@ -309,6 +309,10 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 			if graphStore != store {
 				opts.MemberStores = []beads.Store{store}
 			}
+			// A shared exclusive drain provisions one managed worktree per
+			// drain control in the dispatched rig, recorded as each member's
+			// work_dir, when no earlier writer created one (drain_workspace.go).
+			opts.SharedDrainWorkspace = sharedDrainWorkspaceProvisioner(cityPath, storePath, cfg)
 		case "retry-eval":
 			// A retry-eval validating a required artifact resolves the
 			// artifact worktree through the workflow's source bead or input
