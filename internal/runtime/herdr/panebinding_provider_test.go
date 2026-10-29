@@ -60,7 +60,13 @@ agent_get)
     printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"idle"}}}'
   fi ;;
 agent_list)
-  printf '%s' '{"result":{"agents":[]}}' ;;
+  if [ -e "$STATE/agents.json" ]; then
+    printf '%s' '{"result":{"agents":'
+    cat "$STATE/agents.json"
+    printf '%s' '}}'
+  else
+    printf '%s' '{"result":{"agents":[]}}'
+  fi ;;
 agent_start)
   if [ -e "$STATE/name_taken" ]; then
     # A concurrent Start won the name and its agent is live: herdr rejects the
@@ -508,5 +514,43 @@ func TestListRunningSkipsGonePanes(t *testing.T) {
 	got, err := p.ListRunning("gastown__")
 	if err != nil || len(got) != 0 {
 		t.Fatalf("ListRunning = %v, %v; want empty", got, err)
+	}
+}
+
+// An unnamed registry entry — an agent herdr detected but nobody named — is
+// not a session: ListRunning must not invent one keyed by the detected kind
+// (or by the empty name the entry decodes to), while named foreign/manual
+// agents still list under their registered names.
+func TestListRunningOmitsUnnamedRegistryEntries(t *testing.T) {
+	p, state := newFakeHerdrProvider(t)
+	setState(t, state, "busy")
+	for _, name := range []string{"alpha", "beta"} {
+		bindTestPane(t, p, name, bindModeShell)
+		if err := p.SetMeta(name, metaBoundName, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agents := `[
+  {"agent":"opencode","pane_id":"w1:p9","agent_status":"working"},
+  {"agent":"opencode","name":"manual-1","pane_id":"w1:p8","agent_status":"idle"}
+]`
+	if err := os.WriteFile(filepath.Join(state, "agents.json"), []byte(agents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.ListRunning("")
+	if err != nil {
+		t.Fatalf("ListRunning: %v", err)
+	}
+	want := map[string]bool{"alpha": true, "beta": true, "manual-1": true}
+	if len(got) != len(want) {
+		t.Fatalf("ListRunning = %v; want exactly %v", got, want)
+	}
+	for _, n := range got {
+		if !want[n] {
+			t.Fatalf("ListRunning = %v; unexpected %q", got, n)
+		}
+	}
+	if names, err := p.ListRunning("op"); err != nil || len(names) != 0 {
+		t.Fatalf("ListRunning(\"op\") = %v, %v; want empty", names, err)
 	}
 }
