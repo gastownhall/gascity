@@ -181,6 +181,11 @@ func runStrandedPurge(t *testing.T, city purgeCity, opts strandedPurgeOptions, s
 	return doStoragePurgeStranded(context.Background(), request, opts, stdout, stderr)
 }
 
+// confirmedPurge is the options of a confirmed purge of n reviewed rows.
+func confirmedPurge(n int) strandedPurgeOptions {
+	return strandedPurgeOptions{Type: "message", Confirm: true, ExpectCount: n}
+}
+
 func purgeWorkRows(t *testing.T, city purgeCity) []beads.Bead {
 	t.Helper()
 	rows, err := openPurgeWorkStore(t, city.workPath).List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
@@ -264,7 +269,7 @@ func TestPurgeStrandedMessagesDryRunListsTheMCShapeAndWritesNothing(t *testing.T
 func TestPurgeStrandedMessagesRequiresAnExplicitConfirmation(t *testing.T) {
 	city := newMCShapedPurgeCity(t)
 	var stdout, stderr bytes.Buffer
-	if code := runStrandedPurge(t, city, strandedPurgeOptions{Type: "message"}, &stdout, &stderr); code == 0 {
+	if code := runStrandedPurge(t, city, strandedPurgeOptions{Type: "message", ExpectCount: -1}, &stdout, &stderr); code == 0 {
 		t.Fatalf("an unconfirmed purge exited 0; stdout: %s", stdout.String())
 	}
 	if !strings.Contains(stderr.String(), "--confirm-purge") {
@@ -285,7 +290,7 @@ func TestPurgeStrandedMessagesRequiresTheFleetStoppedAttestation(t *testing.T) {
 	city := newMCShapedPurgeCity(t)
 	var stdout, stderr bytes.Buffer
 	request := storageOperatorRequest{CityPath: city.cityPath, Cfg: city.cfg}
-	if code := doStoragePurgeStranded(context.Background(), request, strandedPurgeOptions{Type: "message", Confirm: true}, &stdout, &stderr); code == 0 {
+	if code := doStoragePurgeStranded(context.Background(), request, confirmedPurge(791), &stdout, &stderr); code == 0 {
 		t.Fatalf("a purge without --fleet-stopped exited 0")
 	}
 	if !strings.Contains(stderr.String(), "--"+storageFleetStoppedFlag) {
@@ -302,7 +307,7 @@ func TestPurgeStrandedMessagesRefusesWhileTheControllerIsLive(t *testing.T) {
 	city := newMCShapedPurgeCity(t)
 	stubInfraControllerPing(t, 4242)
 	var stdout, stderr bytes.Buffer
-	if code := runStrandedPurge(t, city, strandedPurgeOptions{Type: "message", Confirm: true}, &stdout, &stderr); code == 0 {
+	if code := runStrandedPurge(t, city, confirmedPurge(791), &stdout, &stderr); code == 0 {
 		t.Fatalf("a purge with a live controller exited 0")
 	}
 	if !strings.Contains(stderr.String(), "4242") {
@@ -339,7 +344,7 @@ func TestPurgeStrandedMessagesBacksUpThenDeletesAndStatusConverges(t *testing.T)
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := runStrandedPurge(t, city, strandedPurgeOptions{Type: "message", Confirm: true}, &stdout, &stderr); code != 0 {
+	if code := runStrandedPurge(t, city, confirmedPurge(791), &stdout, &stderr); code != 0 {
 		t.Fatalf("purge exited %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
 
@@ -415,7 +420,7 @@ func TestPurgeStrandedMessagesBacksUpThenDeletesAndStatusConverges(t *testing.T)
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := runStrandedPurge(t, city, strandedPurgeOptions{Type: "message", Confirm: true}, &stdout, &stderr); code != 0 {
+	if code := runStrandedPurge(t, city, confirmedPurge(791), &stdout, &stderr); code != 0 {
 		t.Fatalf("a second purge exited %d, want 0; stderr: %s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "nothing to purge") {
@@ -438,7 +443,7 @@ func TestPurgeStrandedRefusesAStrandedRowOfTheTypeThatIsNotMessageClass(t *testi
 		{ID: "mc-wisp-graph", Title: "a wisp step typed message", Status: "open", Type: "message", Labels: []string{"gc:wisp"}, CreatedAt: at},
 	})
 	var stdout, stderr bytes.Buffer
-	if code := runStrandedPurge(t, city, strandedPurgeOptions{Type: "message", Confirm: true}, &stdout, &stderr); code == 0 {
+	if code := runStrandedPurge(t, city, confirmedPurge(2), &stdout, &stderr); code == 0 {
 		t.Fatalf("the purge exited 0 with a non-message-class row selected; stdout: %s", stdout.String())
 	}
 	if !strings.Contains(stderr.String(), "mc-wisp-graph") || !strings.Contains(stderr.String(), "graph") {
@@ -466,7 +471,7 @@ func TestPurgeStrandedLeavesOtherStrandedRowsAndNonStrandedMessages(t *testing.T
 		retained,
 	})
 	var stdout, stderr bytes.Buffer
-	if code := runStrandedPurge(t, city, strandedPurgeOptions{Type: "message", Confirm: true}, &stdout, &stderr); code != 0 {
+	if code := runStrandedPurge(t, city, confirmedPurge(1), &stdout, &stderr); code != 0 {
 		t.Fatalf("purge exited %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
 	rows := purgeWorkRows(t, city)
@@ -518,7 +523,7 @@ func TestPurgeStrandedResumesAfterACrashBetweenBackupAndDelete(t *testing.T) {
 	t.Cleanup(func() { infraPurgeAfterBackup = prev })
 
 	var stdout, stderr bytes.Buffer
-	if code := runStrandedPurge(t, city, strandedPurgeOptions{Type: "message", Confirm: true}, &stdout, &stderr); code == 0 {
+	if code := runStrandedPurge(t, city, confirmedPurge(791), &stdout, &stderr); code == 0 {
 		t.Fatalf("the crashed run exited 0")
 	}
 	files := purgeBackupFiles(t, city)
@@ -544,7 +549,7 @@ func TestPurgeStrandedResumesAfterACrashBetweenBackupAndDelete(t *testing.T) {
 	infraPurgeAfterBackup = prev
 	stdout.Reset()
 	stderr.Reset()
-	if code := runStrandedPurge(t, city, strandedPurgeOptions{Type: "message", Confirm: true}, &stdout, &stderr); code != 0 {
+	if code := runStrandedPurge(t, city, confirmedPurge(781), &stdout, &stderr); code != 0 {
 		t.Fatalf("the resumed run exited %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "resuming") {
@@ -600,5 +605,318 @@ func TestPurgeTypeFlagExcludesThePerIDChoices(t *testing.T) {
 		if !strings.Contains(stderr.String(), "--purge-type") {
 			t.Errorf("the refusal for %v does not name --purge-type: %s", extra, stderr.String())
 		}
+	}
+}
+
+// purgeDigestFrom reads the digest a dry run printed.
+func purgeDigestFrom(t *testing.T, out string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "digest:"); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	t.Fatalf("the dry run printed no digest:\n%s", out)
+	return ""
+}
+
+// TestPurgeStrandedDeleteIsTiedToTheReviewedDryRun: the delete needs
+// --expect-count, refuses a count or digest that is not the selection's,
+// and accepts the digest the dry run printed.
+func TestPurgeStrandedDeleteIsTiedToTheReviewedDryRun(t *testing.T) {
+	city := newMCShapedPurgeCity(t)
+	var stdout, stderr bytes.Buffer
+	if code := runStrandedPurge(t, city, strandedPurgeOptions{Type: "message", DryRun: true, ExpectCount: -1}, &stdout, &stderr); code != 0 {
+		t.Fatalf("dry run exited %d: %s", code, stderr.String())
+	}
+	digest := purgeDigestFrom(t, stdout.String())
+	if !strings.Contains(stdout.String(), fmt.Sprintf("--%s %d --%s %s", strandedExpectCountFlag, mcPurgeRows, strandedExpectDigestFlag, digest)) {
+		t.Errorf("the dry run does not print the confirmation to pass:\n%s", stdout.String())
+	}
+	for name, opts := range map[string]strandedPurgeOptions{
+		"no count":     {Type: "message", Confirm: true, ExpectCount: -1},
+		"wrong count":  {Type: "message", Confirm: true, ExpectCount: mcPurgeRows - 1},
+		"wrong digest": {Type: "message", Confirm: true, ExpectCount: mcPurgeRows, ExpectDigest: "0000000000000000"},
+	} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := runStrandedPurge(t, city, opts, &stdout, &stderr); code == 0 {
+			t.Errorf("%s: the purge exited 0", name)
+		}
+		if got := countPurgeRowsOfType(purgeWorkRows(t, city), "message"); got != mcPurgeRows {
+			t.Fatalf("%s: rows were deleted: %d left", name, got)
+		}
+		if files := purgeBackupFiles(t, city); len(files) != 0 {
+			t.Fatalf("%s: a backup was written: %v", name, files)
+		}
+	}
+	stdout.Reset()
+	stderr.Reset()
+	opts := confirmedPurge(mcPurgeRows)
+	opts.ExpectDigest = digest
+	if code := runStrandedPurge(t, city, opts, &stdout, &stderr); code != 0 {
+		t.Fatalf("the purge with the reviewed count and digest exited %d: %s", code, stderr.String())
+	}
+}
+
+// TestPurgeStrandedFinishesARunThatDiedAfterTheDelete: every row is gone but
+// the run died before recording it, so nothing is stranded and the ledger
+// says INTERRUPTED. Status refuses until the next run records the deleted
+// rows, which it does with nothing left to select.
+func TestPurgeStrandedFinishesARunThatDiedAfterTheDelete(t *testing.T) {
+	city := newMCShapedPurgeCity(t)
+	prev := infraPurgeAfterDeleteRecorded
+	infraPurgeAfterDeleteRecorded = func() error { return errors.New("simulated crash after the delete") }
+	t.Cleanup(func() { infraPurgeAfterDeleteRecorded = prev })
+	var stdout, stderr bytes.Buffer
+	if code := runStrandedPurge(t, city, confirmedPurge(mcPurgeRows), &stdout, &stderr); code == 0 {
+		t.Fatalf("the crashed run exited 0")
+	}
+	infraPurgeAfterDeleteRecorded = prev
+	if got := countPurgeRowsOfType(purgeWorkRows(t, city), "message"); got != 0 {
+		t.Fatalf("the crash point is after the delete, yet %d rows are left", got)
+	}
+	if got := strandedIDs(t, city.cityPath, city.target); len(got) != 0 {
+		t.Fatalf("stranded = %v, want none", got)
+	}
+	if code, out := runPurgeStatus(t, city); code == 0 || !strings.Contains(out, "purge: INTERRUPTED") {
+		t.Fatalf("status with zero stranded rows and an interrupted ledger exited %d:\n%s", code, out)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runStrandedPurge(t, city, strandedPurgeOptions{Type: "message", ExpectCount: -1}, &stdout, &stderr); code != 0 {
+		t.Fatalf("the finishing run exited %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "recorded 791 deleted row(s)") {
+		t.Errorf("the finishing run does not say it recorded the rows:\n%s", stdout.String())
+	}
+	code, out := runPurgeStatus(t, city)
+	if code != 0 || !strings.Contains(out, "converged: yes") || !strings.Contains(out, "purged stranded: 791 bead(s)") || strings.Contains(out, "INTERRUPTED") {
+		t.Errorf("status after the finishing run exited %d:\n%s", code, out)
+	}
+}
+
+// TestPurgeStrandedRefusesAResumeWhoseSelectionChanged: a row stranded after
+// the interrupted run's backup is not in it, so the run refuses rather than
+// writing a second backup and splitting the run's accounting.
+func TestPurgeStrandedRefusesAResumeWhoseSelectionChanged(t *testing.T) {
+	city := newMCShapedPurgeCity(t)
+	prev := infraPurgeAfterBackup
+	infraPurgeAfterBackup = func() error { return errors.New("simulated crash after the backup") }
+	var stdout, stderr bytes.Buffer
+	if code := runStrandedPurge(t, city, confirmedPurge(mcPurgeRows), &stdout, &stderr); code == 0 {
+		t.Fatalf("the crashed run exited 0")
+	}
+	infraPurgeAfterBackup = prev
+	late := mcAutoHandoffMail(t, 3)
+	late.ID = "mc-wisp-late"
+	editPurgeWorkStore(t, city.workPath, []beads.Bead{late})
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runStrandedPurge(t, city, confirmedPurge(mcPurgeRows+1), &stdout, &stderr); code == 0 {
+		t.Fatalf("a resume over a changed selection exited 0")
+	}
+	if !strings.Contains(stderr.String(), "mc-wisp-late") || !strings.Contains(stderr.String(), "--"+strandedAbandonPurgeFlag) {
+		t.Errorf("the refusal does not name the new row and the way out: %s", stderr.String())
+	}
+	if files := purgeBackupFiles(t, city); len(files) != 1 {
+		t.Errorf("backups = %v, want only the interrupted run's", files)
+	}
+	if got := countPurgeRowsOfType(purgeWorkRows(t, city), "message"); got != mcPurgeRows+1 {
+		t.Errorf("rows were deleted: %d left", got)
+	}
+}
+
+// TestPurgeStrandedAbandonClosesARunWhoseRowsAreBack: --abandon-purge refuses
+// while a row of the interrupted run is missing, and closes the run once all
+// are back.
+func TestPurgeStrandedAbandonClosesARunWhoseRowsAreBack(t *testing.T) {
+	city := newMCShapedPurgeCity(t)
+	prev := infraPurgeAfterBackup
+	infraPurgeAfterBackup = func() error { return errors.New("simulated crash after the backup") }
+	var stdout, stderr bytes.Buffer
+	if code := runStrandedPurge(t, city, confirmedPurge(mcPurgeRows), &stdout, &stderr); code == 0 {
+		t.Fatalf("the crashed run exited 0")
+	}
+	infraPurgeAfterBackup = prev
+
+	gone := mcAutoHandoffMail(t, 7)
+	if err := openPurgeWorkStore(t, city.workPath).Delete(gone.ID); err != nil {
+		t.Fatal(err)
+	}
+	abandon := strandedPurgeOptions{Type: "message", Abandon: true, ExpectCount: -1}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runStrandedPurge(t, city, abandon, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), gone.ID) {
+		t.Fatalf("abandon with a missing row exited %d: %s", code, stderr.String())
+	}
+	editPurgeWorkStore(t, city.workPath, []beads.Bead{gone})
+	stdout.Reset()
+	stderr.Reset()
+	if code := runStrandedPurge(t, city, abandon, &stdout, &stderr); code != 0 {
+		t.Fatalf("abandon with every row back exited %d: %s", code, stderr.String())
+	}
+	if _, out := runPurgeStatus(t, city); strings.Contains(out, "INTERRUPTED") || !strings.Contains(out, "stranded:    791") {
+		t.Errorf("status after abandon should show the rows stranded and no interrupted purge:\n%s", out)
+	}
+}
+
+// TestPurgeStrandedRefusesABackupThatDoesNotReadBack: the read-back compare is
+// what licenses the delete; a backup that lands different deletes nothing.
+func TestPurgeStrandedRefusesABackupThatDoesNotReadBack(t *testing.T) {
+	city := newMCShapedPurgeCity(t)
+	prev := infraMigrationRename
+	infraMigrationRename = func(from, to string) error {
+		if err := prev(from, to); err != nil {
+			return err
+		}
+		if !strings.HasPrefix(filepath.Base(to), infraPurgedStrandedBackupPrefix) {
+			return nil
+		}
+		raw, err := os.ReadFile(to)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(to, bytes.Replace(raw, []byte(mcPurgeTitle), []byte("context cycl3"), 1), 0o644)
+	}
+	t.Cleanup(func() { infraMigrationRename = prev })
+	var stdout, stderr bytes.Buffer
+	if code := runStrandedPurge(t, city, confirmedPurge(mcPurgeRows), &stdout, &stderr); code == 0 {
+		t.Fatalf("a purge whose backup read back different exited 0")
+	}
+	if !strings.Contains(stderr.String(), "proving the purge backup") {
+		t.Errorf("the refusal does not name the failed proof: %s", stderr.String())
+	}
+	if got := countPurgeRowsOfType(purgeWorkRows(t, city), "message"); got != mcPurgeRows {
+		t.Errorf("rows were deleted over an unproven backup: %d left", got)
+	}
+	if ledger, _ := readInfraPurgeLedger(city.target); len(ledger) != 0 {
+		t.Errorf("the ledger recorded a backup that was never proven: %+v", ledger)
+	}
+}
+
+// TestPurgeStrandedRunRereadsTheBindingBeforeWriting: a row the binding comes
+// to hold as the same bead after the selection is refused by the run's own
+// re-read, before any backup or ledger is written.
+func TestPurgeStrandedRunRereadsTheBindingBeforeWriting(t *testing.T) {
+	city := newMCShapedPurgeCity(t)
+	mail := mcAutoHandoffMail(t, 5)
+	prev := infraPurgeBeforeBindingGuard
+	infraPurgeBeforeBindingGuard = func() error {
+		binding, err := openInfraDestination(city.target)
+		if err != nil {
+			return err
+		}
+		defer closeBeadStoreHandle(binding) //nolint:errcheck // test
+		_, err = binding.(beads.ForeignIDCreator).CreateWithForeignID(mail)
+		return err
+	}
+	t.Cleanup(func() { infraPurgeBeforeBindingGuard = prev })
+	var stdout, stderr bytes.Buffer
+	if code := runStrandedPurge(t, city, confirmedPurge(mcPurgeRows), &stdout, &stderr); code == 0 {
+		t.Fatalf("the purge exited 0 over a row the binding holds as the same bead")
+	}
+	if !strings.Contains(stderr.String(), mail.ID) {
+		t.Errorf("the refusal does not name %s: %s", mail.ID, stderr.String())
+	}
+	if files := purgeBackupFiles(t, city); len(files) != 0 {
+		t.Errorf("a backup was written before the guard: %v", files)
+	}
+	if _, err := os.Stat(city.target.PurgeLedgerPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the ledger was written before the guard (stat err %v)", err)
+	}
+}
+
+// TestRestorePurgePutsTheRowsAndEdgesBack: --restore-purge refuses an id
+// minted again, then puts every row back exactly (created_at included) with
+// its outbound and inbound edges, and status shows the rows stranded again.
+func TestRestorePurgePutsTheRowsAndEdgesBack(t *testing.T) {
+	city := newMCShapedPurgeCity(t)
+	var workID string
+	for _, b := range purgeWorkRows(t, city) {
+		if b.Type == "task" {
+			workID = b.ID
+		}
+	}
+	work := openPurgeWorkStore(t, city.workPath)
+	if err := work.DepAdd("mc-wisp-0001", workID, "relates-to"); err != nil {
+		t.Fatal(err)
+	}
+	if err := work.DepAdd(workID, "mc-wisp-0002", "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runStrandedPurge(t, city, confirmedPurge(mcPurgeRows), &stdout, &stderr); code != 0 {
+		t.Fatalf("purge exited %d: %s", code, stderr.String())
+	}
+	backup := purgeBackupFiles(t, city)[0]
+	request := storageOperatorRequest{CityPath: city.cityPath, Cfg: city.cfg, FleetStopped: true}
+
+	// bd minted one id again since the purge.
+	again := mcAutoHandoffMail(t, 9)
+	again.CreatedAt = mustParseTime(t, "2026-10-01T00:00:00Z")
+	editPurgeWorkStore(t, city.workPath, []beads.Bead{again})
+	stdout.Reset()
+	stderr.Reset()
+	if code := doStorageRestorePurge(context.Background(), request, backup, false, &stdout, &stderr); code == 0 {
+		t.Fatalf("a restore over an id minted again exited 0")
+	}
+	if !strings.Contains(stderr.String(), again.ID) {
+		t.Errorf("the refusal does not name %s: %s", again.ID, stderr.String())
+	}
+	if got := countPurgeRowsOfType(purgeWorkRows(t, city), "message"); got != 1 {
+		t.Fatalf("the refused restore wrote rows: %d message rows", got)
+	}
+	if err := openPurgeWorkStore(t, city.workPath).Delete(again.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := doStorageRestorePurge(context.Background(), request, backup, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("restore exited %d: %s", code, stderr.String())
+	}
+	rows := purgeWorkRows(t, city)
+	if got := countPurgeRowsOfType(rows, "message"); got != mcPurgeRows {
+		t.Fatalf("%d message rows after the restore, want %d", got, mcPurgeRows)
+	}
+	for _, b := range rows {
+		if b.ID == mcReusedID && !sameCreatedSecond(b.CreatedAt, mcAutoHandoffMail(t, mcPurgeRows/2).CreatedAt) {
+			t.Errorf("%s came back created %s, not as backed up", mcReusedID, b.CreatedAt)
+		}
+	}
+	store := openPurgeWorkStore(t, city.workPath)
+	if deps, _ := store.DepList("mc-wisp-0001", "down"); len(deps) != 1 || deps[0].DependsOnID != workID {
+		t.Errorf("the outbound edge did not come back: %+v", deps)
+	}
+	if deps, _ := store.DepList(workID, "down"); len(deps) != 1 || deps[0].DependsOnID != "mc-wisp-0002" {
+		t.Errorf("the inbound edge did not come back: %+v", deps)
+	}
+	code, out := runPurgeStatus(t, city)
+	if code == 0 || !strings.Contains(out, "stranded:    791") || !strings.Contains(out, "purged stranded: 0 bead(s)") || !strings.Contains(out, "restored by --restore-purge: 791") {
+		t.Errorf("status after the restore exited %d:\n%s", code, out)
+	}
+	// A second restore finds everything back and changes nothing.
+	stdout.Reset()
+	stderr.Reset()
+	if code := doStorageRestorePurge(context.Background(), request, backup, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("a second restore exited %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "791 already back") {
+		t.Errorf("the second restore does not report the rows already back:\n%s", stdout.String())
+	}
+}
+
+// TestPurgeStatusNamesARemedyForAnUnreadableLedger.
+func TestPurgeStatusNamesARemedyForAnUnreadableLedger(t *testing.T) {
+	city := newConvergedPurgeCity(t)
+	if err := os.WriteFile(city.target.PurgeLedgerPath(), []byte("{not json\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out := runPurgeStatus(t, city)
+	if code == 0 || !strings.Contains(out, "UNREADABLE") || !strings.Contains(out, "blocking invariant") || !strings.Contains(out, "backups") {
+		t.Errorf("status over an unreadable ledger exited %d without a remedy:\n%s", code, out)
 	}
 }

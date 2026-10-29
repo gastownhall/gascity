@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,7 +89,8 @@ func TestPurgeStrandedMessagesOnARealBdWorkStore(t *testing.T) {
 	reused := parseCreatedBeadID(t, must("bd", "create", "--json", mcPurgeTitle, "--id", mcReusedID, "-t", "message", "--ephemeral"))
 	second := parseCreatedBeadID(t, must("bd", "create", "--json", mcPurgeTitle, "-t", "message", "--ephemeral"))
 	third := parseCreatedBeadID(t, must("bd", "create", "--json", mcPurgeTitle, "-t", "message", "--ephemeral"))
-	work := parseCreatedBeadID(t, must("bd", "create", "--json", "ordinary backlog work", "-t", "task"))
+	neighbourText := "the handoff in " + second + " explains this"
+	work := parseCreatedBeadID(t, must("bd", "create", "--json", "ordinary backlog work", "-t", "task", "-d", neighbourText))
 	must("bd", "dep", "add", work, second)
 	if got := strandedIDs(t, cityPath, target); len(got) != 3 {
 		t.Fatalf("stranded = %v, want the 3 messages", got)
@@ -105,7 +107,7 @@ func TestPurgeStrandedMessagesOnARealBdWorkStore(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := runStrandedPurge(t, city, strandedPurgeOptions{Type: "message", Confirm: true}, &stdout, &stderr); code != 0 {
+	if code := runStrandedPurge(t, city, confirmedPurge(3), &stdout, &stderr); code != 0 {
 		t.Fatalf("purge exited %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
 	files := purgeBackupFiles(t, city)
@@ -144,11 +146,48 @@ func TestPurgeStrandedMessagesOnARealBdWorkStore(t *testing.T) {
 	if deps, err := store.DepList(work, "down"); err != nil || len(deps) != 0 {
 		t.Errorf("the work bead keeps an edge into a purged row: %v (err %v)", deps, err)
 	}
+	// bd delete --force rewrites the text of rows still linked to a deleted
+	// one; the purge removes the links first, so the neighbour is untouched.
+	if neighbour, err := store.Get(work); err != nil || neighbour.Description != neighbourText {
+		t.Errorf("the purge rewrote the neighbour's text: %q, want %q (err %v)", neighbour.Description, neighbourText, err)
+	}
 	binding := openMigratedDestination(t, target)
 	if held, err := binding.Get(mcReusedID); err != nil || !sameCreatedSecond(held.CreatedAt, july) {
 		t.Errorf("the binding's July %s changed or went: %+v (err %v)", mcReusedID, held, err)
 	}
 	if code, out := runPurgeStatus(t, city); code != 0 || !strings.Contains(out, "converged: yes") {
 		t.Errorf("status exited %d:\n%s", code, out)
+	}
+
+	// The restore puts the rows back verbatim, with the inbound edge, and they
+	// are stranded again.
+	before := map[string]beads.Bead{}
+	for _, record := range records {
+		before[record.Entry.Bead.ID] = record.Entry.Bead
+	}
+	stdout.Reset()
+	stderr.Reset()
+	request := storageOperatorRequest{CityPath: cityPath, Cfg: cfg, FleetStopped: true}
+	if code := doStorageRestorePurge(context.Background(), request, files[0], false, &stdout, &stderr); code != 0 {
+		t.Fatalf("restore exited %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	for id, want := range before {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Errorf("%s did not come back: %v", id, err)
+			continue
+		}
+		if diff := restoredRowDifference(want, got); diff != "" {
+			t.Errorf("%s came back different: %s", id, diff)
+		}
+		if !got.Ephemeral {
+			t.Errorf("%s came back out of the wisp tier", id)
+		}
+	}
+	if deps, err := store.DepList(work, "down"); err != nil || len(deps) != 1 || deps[0].DependsOnID != second {
+		t.Errorf("the inbound edge from %s did not come back: %v (err %v)", work, deps, err)
+	}
+	if got := strandedIDs(t, cityPath, target); len(got) != 3 {
+		t.Errorf("stranded after the restore = %v, want the 3 messages", got)
 	}
 }

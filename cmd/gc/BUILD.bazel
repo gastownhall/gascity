@@ -418,6 +418,7 @@ go_library(
         "infra_class_clear.go",
         "infra_class_migrate.go",
         "infra_class_purge.go",
+        "infra_class_purge_restore.go",
         "infra_class_recover.go",
         "infra_class_recover_held.go",
         "infra_class_relower.go",

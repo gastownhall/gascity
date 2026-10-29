@@ -188,6 +188,10 @@ func newStorageRecoverCmd(surface storageCommandSurface, stdout, stderr io.Write
 		dropIDs      []string
 		purgeType    string
 		confirmPurge bool
+		expectCount  int
+		expectDigest string
+		abandonPurge bool
+		restorePurge string
 	)
 	cmd := &cobra.Command{
 		Use:          surface.Verb,
@@ -245,15 +249,23 @@ writes nothing; the delete needs --fleet-stopped and --confirm-purge. Every
 row, with its metadata, labels and edges, is first written to a timestamped
 infra.purged-stranded-<time>.jsonl at the binding root and proven from disk;
 the run is recorded in infra.purged-stranded.jsonl, and a run interrupted
-after the backup resumes from it. A row the binding holds as the same bead is
-never deleted, and stranded rows of other types are left where they are.`,
+after the backup resumes from it (--abandon-purge closes one whose rows were
+put back by hand). The delete must also name what the dry run showed:
+--expect-count <n>, and --expect-digest <digest>. A row the binding holds as
+the same bead is never deleted, and stranded rows of other types are left
+where they are. --restore-purge <backup> puts a purge's rows and edges back
+into the work store, where they are stranded again.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !fromWork {
 				fmt.Fprintf(stderr, "gc %s %s: pass --%s. The source is stated explicitly rather than detected, exactly as the migration states it\n", //nolint:errcheck // best-effort stderr
 					surface.Namespace, surface.Verb, surface.Flag)
 				return errExit
 			}
-			if err := validateStrandedPurgeFlags(purgeType, confirmPurge, map[string]bool{
+			purgeOpts := strandedPurgeOptions{
+				Type: purgeType, DryRun: dryRun, Confirm: confirmPurge,
+				ExpectCount: expectCount, ExpectDigest: expectDigest, Abandon: abandonPurge,
+			}
+			if err := validateStrandedPurgeFlags(purgeOpts, restorePurge, map[string]bool{
 				strandedMoveFlag: len(moveIDs) > 0, strandedRecordCarriedFlag: len(carriedIDs) > 0,
 				strandedReplaceBindingRowFlag: len(replaceIDs) > 0, strandedDropWorkRowFlag: len(dropIDs) > 0,
 				"dump": dumpPath != "",
@@ -267,10 +279,11 @@ never deleted, and stranded rows of other types are left where they are.`,
 				return errExit
 			}
 			request.FleetStopped = fleetStopped
+			if restorePurge != "" {
+				return exitForCode(doStorageRestorePurge(cmd.Context(), request, restorePurge, dryRun, stdout, stderr))
+			}
 			if purgeType != "" {
-				return exitForCode(doStoragePurgeStranded(cmd.Context(), request, strandedPurgeOptions{
-					Type: purgeType, DryRun: dryRun, Confirm: confirmPurge,
-				}, stdout, stderr))
+				return exitForCode(doStoragePurgeStranded(cmd.Context(), request, purgeOpts, stdout, stderr))
 			}
 			return exitForCode(doStorageRecoverStranded(cmd.Context(), request, strandedRecoveryOptions{
 				DryRun: dryRun, DumpPath: dumpPath,
@@ -297,6 +310,14 @@ never deleted, and stranded rows of other types are left where they are.`,
 		"instead of copying, back up and then DELETE every stranded work-store row of this type (only \"message\"): the rows the containment check calls stranded, each also message-class; --dry-run lists them")
 	cmd.Flags().BoolVar(&confirmPurge, strandedConfirmPurgeFlag, false,
 		"with --"+strandedPurgeTypeFlag+": confirm the delete (without it the run lists the rows and deletes nothing)")
+	cmd.Flags().IntVar(&expectCount, strandedExpectCountFlag, -1,
+		"with --"+strandedConfirmPurgeFlag+": the number of rows the dry run listed; the delete refuses when the selection differs (required)")
+	cmd.Flags().StringVar(&expectDigest, strandedExpectDigestFlag, "",
+		"with --"+strandedConfirmPurgeFlag+": the selection digest the dry run printed; the delete refuses when the selection differs")
+	cmd.Flags().BoolVar(&abandonPurge, strandedAbandonPurgeFlag, false,
+		"with --"+strandedPurgeTypeFlag+": close an interrupted purge whose rows were all put back by hand (refused while any is missing)")
+	cmd.Flags().StringVar(&restorePurge, strandedRestorePurgeFlag, "",
+		"put the rows of this purge backup (infra.purged-stranded-<time>.jsonl) back into the work store with their edges; they are stranded again afterwards")
 	cmd.Flags().StringSliceVar(&dropIDs, strandedDropWorkRowFlag, nil,
 		"for a work-store row whose id the binding holds for a different bead: back up and remove the work-store row, keeping the binding's (repeatable, comma-separated)")
 	return cmd

@@ -3,7 +3,8 @@ package main
 // The stranded-write purge: `gc storage recover-stranded --from-work
 // --purge-type message`. It backs up, then deletes, the stranded work-store
 // rows of one type, where recover-stranded's default copies them into the
-// binding.
+// binding. `--restore-purge <backup>` (infra_class_purge_restore.go) puts
+// them back.
 //
 // # Why a purge exists
 //
@@ -28,14 +29,19 @@ package main
 // generation) as the purge type's class. A type=message row the classifier
 // puts elsewhere — a wisp step typed message is graph — is not mail, and the
 // whole run refuses rather than purging it. Stranded rows of other types are
-// left exactly where they are and named: the purge does not decide for them,
-// and `gc storage status` keeps refusing until they are recovered.
+// left exactly where they are and named.
 //
 // A work-store row the binding holds as the same bead (the same id, created
 // in the same second) is never deleted. Such a row is not stranded, so it is
 // never selected; and refuseInfraPurgeOfBindingRows re-reads the binding for
-// every selected row immediately before the delete, so the property does not
-// rest on the selection alone.
+// every selected row before anything is written.
+//
+// # Tied to the reviewed list
+//
+// The dry run prints the selection's count and digest (infraPurgeDigest: the
+// sorted (id, created_at) pairs). The delete needs --confirm-purge and
+// --expect-count, and --expect-digest when given, and refuses when the
+// selection it computes is not the one the operator reviewed.
 //
 // # Back up, prove, then delete
 //
@@ -48,15 +54,25 @@ package main
 // (infra.purged-stranded.jsonl): "backed-up" before the delete, "purged"
 // after it.
 //
-// # Resume
+// The delete removes every backed-up edge first and only then the rows. The
+// order matters on bd: `bd delete --force` rewrites every mention of a
+// deleted id in the text of the rows still linked to it to "[deleted:<id>]",
+// and with the edges gone no surviving row is linked.
+//
+// # Interrupted runs
 //
 // A run that dies after the backup leaves the ledger's last record at
-// "backed-up". The next run recomputes the selection from live state (a
-// deleted row is simply no longer stranded), and when the pending backup
-// already holds every selected row exactly as the work store holds it, it
-// reuses that backup instead of writing another. Either way every deleted row
-// is in some proven backup first. Re-running after a completed purge selects
-// nothing and is a no-op.
+// "backed-up", and status refuses ("purge: INTERRUPTED"). The next run:
+//
+//   - records as purged every row of that run the work store no longer holds,
+//     so a run that died after the delete and before the record converges;
+//   - resumes from the same backup when the remaining selection is a subset of
+//     it, exactly as backed up;
+//   - refuses when the selection has changed, rather than writing a second
+//     backup with split accounting.
+//
+// --abandon-purge closes an interrupted run whose rows were all put back by
+// hand (the raw bd fallback); --restore-purge closes it itself.
 //
 // # Status
 //
@@ -64,8 +80,7 @@ package main
 // naming them and `gc storage status` reports converged once nothing else is
 // stranded. The manifest is NOT extended: its meaning is "the copy was proven
 // to deliver this bead", and a purged row was never delivered. Status reads
-// the ledger instead, reports how many rows were purged and where the backups
-// are, and refuses while the ledger shows an interrupted purge.
+// the ledger instead (reportInfraPurgeLedger).
 //
 // # Exclusion
 //
@@ -78,6 +93,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -98,6 +115,10 @@ import (
 const (
 	strandedPurgeTypeFlag    = "purge-type"
 	strandedConfirmPurgeFlag = "confirm-purge"
+	strandedExpectCountFlag  = "expect-count"
+	strandedExpectDigestFlag = "expect-digest"
+	strandedAbandonPurgeFlag = "abandon-purge"
+	strandedRestorePurgeFlag = "restore-purge"
 )
 
 // infraPurgeTypes maps each purgeable bead type to the class its rows must
@@ -117,10 +138,14 @@ const (
 	infraPurgeLedgerFormat          = "gc.infra.purged-stranded/v1"
 )
 
-// The ledger's two events for one run.
+// The ledger's events. One purge run writes backed-up then purged; abandoned
+// closes an interrupted run whose rows were put back by hand; restored records
+// rows --restore-purge put back.
 const (
-	infraPurgeEventBackedUp = "backed-up"
-	infraPurgeEventPurged   = "purged"
+	infraPurgeEventBackedUp  = "backed-up"
+	infraPurgeEventPurged    = "purged"
+	infraPurgeEventAbandoned = "abandoned"
+	infraPurgeEventRestored  = "restored"
 )
 
 // PurgeLedgerPath is where recover-stranded --purge-type records its runs.
@@ -136,6 +161,13 @@ type strandedPurgeOptions struct {
 	DryRun bool
 	// Confirm is the operator's explicit go-ahead to delete.
 	Confirm bool
+	// ExpectCount is the selection size the operator reviewed; negative means
+	// not given. The delete refuses without it.
+	ExpectCount int
+	// ExpectDigest, when set, is the selection digest the operator reviewed.
+	ExpectDigest string
+	// Abandon closes an interrupted run whose rows were all put back.
+	Abandon bool
 }
 
 // infraPurgeRowKey is one purged row's identity: an id names a bead only with
@@ -143,6 +175,10 @@ type strandedPurgeOptions struct {
 type infraPurgeRowKey struct {
 	ID        string    `json:"id"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+func (k infraPurgeRowKey) String() string {
+	return k.ID + "@" + k.CreatedAt.UTC().Format(time.RFC3339)
 }
 
 // infraPurgeLedgerRecord is one ledger line.
@@ -156,19 +192,41 @@ type infraPurgeLedgerRecord struct {
 	RecordedAt time.Time          `json:"recorded_at"`
 }
 
-// infraPurgeAfterBackup runs between the recorded backup and the delete. It
-// is a seam: a test makes it fail to stand in for a crash at that point.
-var infraPurgeAfterBackup = func() error { return nil }
+// Seams: a test makes one fail to stand in for a crash at that point, or
+// changes the binding just before the guard reads it.
+var (
+	infraPurgeAfterBackup         = func() error { return nil }
+	infraPurgeBeforeBindingGuard  = func() error { return nil }
+	infraPurgeAfterDeleteRecorded = func() error { return nil }
+)
 
-// validateStrandedPurgeFlags refuses --purge-type beside the per-id answers:
-// the purge selects by class, and mixing the two would make one run both
-// copy and delete.
-func validateStrandedPurgeFlags(purgeType string, confirm bool, perID map[string]bool) error {
-	if purgeType == "" {
-		if confirm {
-			return fmt.Errorf("--%s confirms a --%s run; pass --%s message", strandedConfirmPurgeFlag, strandedPurgeTypeFlag, strandedPurgeTypeFlag)
+// validateStrandedPurgeFlags refuses purge flags that do not belong together:
+// the purge selects by class, so it does not combine with the per-id answers,
+// and its confirmations mean nothing without it.
+func validateStrandedPurgeFlags(opts strandedPurgeOptions, restorePath string, perID map[string]bool) error {
+	if opts.Type != "" && restorePath != "" {
+		return fmt.Errorf("--%s and --%s are separate runs", strandedPurgeTypeFlag, strandedRestorePurgeFlag)
+	}
+	if opts.Type == "" {
+		var stray []string
+		if opts.Confirm {
+			stray = append(stray, "--"+strandedConfirmPurgeFlag)
 		}
-		return nil
+		if opts.ExpectCount >= 0 {
+			stray = append(stray, "--"+strandedExpectCountFlag)
+		}
+		if opts.ExpectDigest != "" {
+			stray = append(stray, "--"+strandedExpectDigestFlag)
+		}
+		if opts.Abandon {
+			stray = append(stray, "--"+strandedAbandonPurgeFlag)
+		}
+		if len(stray) > 0 {
+			return fmt.Errorf("%s belong to a --%s run; pass --%s message", strings.Join(stray, ", "), strandedPurgeTypeFlag, strandedPurgeTypeFlag)
+		}
+		if restorePath == "" {
+			return nil
+		}
 	}
 	var named []string
 	for flag, set := range perID {
@@ -178,9 +236,113 @@ func validateStrandedPurgeFlags(purgeType string, confirm bool, perID map[string
 	}
 	if len(named) > 0 {
 		sort.Strings(named)
-		return fmt.Errorf("--%s selects rows by class and does not combine with %s; run them separately", strandedPurgeTypeFlag, strings.Join(named, ", "))
+		flag := strandedPurgeTypeFlag
+		if restorePath != "" {
+			flag = strandedRestorePurgeFlag
+		}
+		return fmt.Errorf("--%s does not combine with %s; run them separately", flag, strings.Join(named, ", "))
 	}
 	return nil
+}
+
+// infraPurgeSession is what both the purge and the restore hold: the
+// resolved binding, its manifest, the open work store, and (for a writing
+// run) the migration guard.
+type infraPurgeSession struct {
+	target   infraBindingTarget
+	manifest infraCopyManifest
+	source   beads.Store
+	release  func()
+}
+
+func (s *infraPurgeSession) close() {
+	_ = closeBeadStoreHandle(s.source)
+	if s.release != nil {
+		s.release()
+	}
+}
+
+// openInfraPurgeSession runs the preflights recover-stranded runs, and for a
+// writing run takes its exclusion: a silent controller socket, the
+// --fleet-stopped attestation, and the migration guard.
+func openInfraPurgeSession(ctx context.Context, request storageOperatorRequest, write bool, logPrefix string, stdout, stderr io.Writer) (*infraPurgeSession, bool) {
+	target, ok, err := resolveInfraBindingTarget(request.CityPath, request.Cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return nil, false
+	}
+	if !ok {
+		reportUnresolvedInfraBinding(request, logPrefix, stdout, stderr)
+		return nil, false
+	}
+	if _, err := resolveCityStoragePlan(request.CityPath, request.Cfg); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return nil, false
+	}
+	state, err := readInfraConvergenceState(target)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return nil, false
+	}
+	if state != infraConvergenceMarked {
+		fmt.Fprintf(stderr, "%s: this city has not converged onto binding %q, so nothing here is a stranded write. Run:  %s\n", //nolint:errcheck // best-effort stderr
+			logPrefix, target.Binding, storageMigrationCommand)
+		return nil, false
+	}
+	if blocked, held := servedBindingNoteHold(request.CityPath, target.Binding, config.StorageProviderSQLiteBeads, target.Database); held {
+		blocked.Target = target
+		fmt.Fprintln(stderr, infraMigrationOperatorAdvice(blocked, logPrefix)) //nolint:errcheck // best-effort stderr
+		return nil, false
+	}
+	session := &infraPurgeSession{target: target}
+	if write {
+		if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
+			fmt.Fprintf(stderr, "%s: controller PID %d is live on this city and is still writing the work store. Stop it (gc stop) and run this again\n", logPrefix, pid) //nolint:errcheck // best-effort stderr
+			return nil, false
+		}
+		if !request.FleetStopped {
+			fmt.Fprintf(stderr, "%s: pass --%s to attest that %s. This run writes the work store, and a writer still running could write the rows it is judging\n", //nolint:errcheck // best-effort stderr
+				logPrefix, storageFleetStoppedFlag, storageFleetStoppedAttestation)
+			return nil, false
+		}
+		guard, err := storebinding.AcquireMigrationGuard(ctx, cityMigrationGuardDirectory(request.CityPath), storageMigrationGeneration)
+		if err != nil {
+			if errors.Is(err, storebinding.ErrMigrationGuardBusy) {
+				fmt.Fprintf(stderr, "%s: another storage migration or repair holds this city. Wait for it to finish, or resolve it, and run this again\n", logPrefix) //nolint:errcheck // best-effort stderr
+				return nil, false
+			}
+			fmt.Fprintf(stderr, "%s: taking the migration guard: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+			return nil, false
+		}
+		session.release = func() {
+			if releaseErr := guard.Release(); releaseErr != nil {
+				fmt.Fprintf(stderr, "%s: releasing the migration guard: %v\n", logPrefix, releaseErr) //nolint:errcheck // best-effort stderr
+			}
+		}
+	}
+	manifest, recorded, err := readInfraCopyManifestRecord(target)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		session.close()
+		return nil, false
+	}
+	if !recorded {
+		fmt.Fprintf(stderr, "%s: %s converged before %s was recorded, so nothing tells a stranded row from one the binding's own GC collected. Re-converge the binding to restore the check\n", //nolint:errcheck // best-effort stderr
+			logPrefix, target.Database, target.ManifestPath())
+		session.close()
+		return nil, false
+	}
+	session.manifest = manifest
+	source, err := openInfraMigrationSource(request.CityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: opening the work store: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		if session.release != nil {
+			session.release()
+		}
+		return nil, false
+	}
+	session.source = source
+	return session, true
 }
 
 // doStoragePurgeStranded is `gc storage recover-stranded --from-work
@@ -193,71 +355,30 @@ func doStoragePurgeStranded(ctx context.Context, request storageOperatorRequest,
 			logPrefix, strandedPurgeTypeFlag, opts.Type, storageRecoveryCommand)
 		return 1
 	}
-
-	target, ok, err := resolveInfraBindingTarget(request.CityPath, request.Cfg)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
+	session, ok := openInfraPurgeSession(ctx, request, !opts.DryRun, logPrefix, stdout, stderr)
 	if !ok {
-		reportUnresolvedInfraBinding(request, logPrefix, stdout, stderr)
 		return 1
 	}
-	if _, err := resolveCityStoragePlan(request.CityPath, request.Cfg); err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	state, err := readInfraConvergenceState(target)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if state != infraConvergenceMarked {
-		fmt.Fprintf(stderr, "%s: this city has not converged onto binding %q, so nothing here is a stranded write. Run:  %s\n", //nolint:errcheck // best-effort stderr
-			logPrefix, target.Binding, storageMigrationCommand)
-		return 1
-	}
+	defer session.close()
+	target, manifest, source := session.target, session.manifest, session.source
 
-	if blocked, held := servedBindingNoteHold(request.CityPath, target.Binding, config.StorageProviderSQLiteBeads, target.Database); held {
-		blocked.Target = target
-		fmt.Fprintln(stderr, infraMigrationOperatorAdvice(blocked, logPrefix)) //nolint:errcheck // best-effort stderr
+	ledger, err := readInfraPurgeLedger(target)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v. Nothing was written\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if !opts.DryRun {
-		if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
-			fmt.Fprintf(stderr, "%s: controller PID %d is live on this city and is still writing the work store. Stop it (gc stop) and run this again\n", logPrefix, pid) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		if !request.FleetStopped {
-			fmt.Fprintf(stderr, "%s: pass --%s to attest that %s. A purge deletes work-store rows, and a writer still running could write the rows it is judging\n", //nolint:errcheck // best-effort stderr
-				logPrefix, storageFleetStoppedFlag, storageFleetStoppedAttestation)
-			return 1
-		}
-		guard, err := storebinding.AcquireMigrationGuard(ctx, cityMigrationGuardDirectory(request.CityPath), storageMigrationGeneration)
+	pending, hasPending := infraPurgePendingRun(ledger)
+	var pendingGone []infraPurgeRowKey
+	if hasPending {
+		pendingGone, err = infraPurgeKeysGone(source, pending.Rows)
 		if err != nil {
-			if errors.Is(err, storebinding.ErrMigrationGuardBusy) {
-				fmt.Fprintf(stderr, "%s: another storage migration or repair holds this city. Wait for it to finish, or resolve it, and run this again\n", logPrefix) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			fmt.Fprintf(stderr, "%s: taking the migration guard: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "%s: reading the work store: %v. Nothing was written\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		defer func() {
-			if releaseErr := guard.Release(); releaseErr != nil {
-				fmt.Fprintf(stderr, "%s: releasing the migration guard: %v\n", logPrefix, releaseErr) //nolint:errcheck // best-effort stderr
-			}
-		}()
 	}
 
-	manifest, recorded, err := readInfraCopyManifestRecord(target)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if !recorded {
-		fmt.Fprintf(stderr, "%s: %s converged before %s was recorded, so nothing tells a stranded row from one the binding's own GC collected, and nothing here can say which rows are stranded. Re-converge the binding to restore the check\n", //nolint:errcheck // best-effort stderr
-			logPrefix, target.Database, target.ManifestPath())
-		return 1
+	if opts.Abandon {
+		return abandonInfraPurge(target, ledger, pending, hasPending, pendingGone, opts.DryRun, logPrefix, stdout, stderr)
 	}
 
 	// The selection, by the containment check itself.
@@ -266,12 +387,6 @@ func doStoragePurgeStranded(ctx context.Context, request storageOperatorRequest,
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	source, err := openInfraMigrationSource(request.CityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: opening the work store: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
 	all, err := source.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: listing work store: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -281,7 +396,6 @@ func doStoragePurgeStranded(ctx context.Context, request storageOperatorRequest,
 	for _, b := range all {
 		byID[b.ID] = b
 	}
-	heldDifferent := setOf(gap.HeldDifferent)
 	var selected, others []beads.Bead
 	var wrongClass, vanished []string
 	for _, id := range gap.Stranded {
@@ -326,39 +440,85 @@ func doStoragePurgeStranded(ctx context.Context, request storageOperatorRequest,
 		fmt.Fprintf(stdout, "not purged: %d stranded row(s) of other types stay where they are, and the boot keeps refusing over them until they are recovered with `%s`: %s\n", //nolint:errcheck // best-effort stdout
 			len(others), storageRecoveryCommand, beadIDList(others))
 	}
+	if hasPending {
+		fmt.Fprintf(stdout, "interrupted purge: run %s backed up %d row(s) to %s; %d of them are no longer in the work store\n", pending.Run, len(pending.Rows), pending.Backup, len(pendingGone)) //nolint:errcheck // best-effort stdout
+	}
+
 	if len(selected) == 0 {
+		if hasPending && !opts.DryRun {
+			return settleInfraPurgeWithNothingSelected(target, ledger, pending, pendingGone, logPrefix, stdout, stderr)
+		}
 		fmt.Fprintf(stdout, "nothing to purge: no stranded row of type %s\n", opts.Type) //nolint:errcheck // best-effort stdout
 		return 0
 	}
-	reportInfraPurgeSelection(stdout, opts.Type, class, selected, heldDifferent)
+	digest := infraPurgeDigest(infraPurgeKeys(selected))
+	reportInfraPurgeSelection(stdout, opts.Type, class, selected, setOf(gap.HeldDifferent), digest)
+
+	// Read every edge now, the dry run included, so the rehearsal pays the
+	// edge reads the window will and fails where the window would.
+	entries, err := infraPurgeBackupEntries(source, selected, all, manifest.Generation)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: reading the selected rows' edges for the backup: %v. Nothing was written\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	outbound, inbound := 0, 0
+	for _, entry := range entries {
+		outbound += len(entry.Deps)
+		inbound += len(entry.Dependents)
+	}
+	fmt.Fprintf(stdout, "  edges:   %d outbound, %d inbound (backed up and removed with the rows)\n", outbound, inbound) //nolint:errcheck // best-effort stdout
 
 	if opts.DryRun {
-		fmt.Fprintf(stdout, "dry-run: nothing was written. Run again with --%s --%s to back up and delete these %d row(s)\n", storageFleetStoppedFlag, strandedConfirmPurgeFlag, len(selected)) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "dry-run: nothing was written. To back up and delete exactly these %d row(s), run with:  --%s --%s --%s %d --%s %s\n", //nolint:errcheck // best-effort stdout
+			len(selected), storageFleetStoppedFlag, strandedConfirmPurgeFlag, strandedExpectCountFlag, len(selected), strandedExpectDigestFlag, digest)
 		return 0
 	}
-	if !opts.Confirm {
-		fmt.Fprintf(stderr, "%s: nothing was written. Deleting %d row(s) needs an explicit --%s; review the list above (or run with --dry-run) and run again with it\n", logPrefix, len(selected), strandedConfirmPurgeFlag) //nolint:errcheck // best-effort stderr
+	if !opts.Confirm || opts.ExpectCount < 0 {
+		fmt.Fprintf(stderr, "%s: nothing was written. Deleting %d row(s) needs --%s and --%s %d (and --%s %s), the selection reviewed above or in a dry run\n", //nolint:errcheck // best-effort stderr
+			logPrefix, len(selected), strandedConfirmPurgeFlag, strandedExpectCountFlag, len(selected), strandedExpectDigestFlag, digest)
+		return 1
+	}
+	if opts.ExpectCount != len(selected) {
+		fmt.Fprintf(stderr, "%s: --%s %d does not match the %d row(s) selected now; the selection changed since it was reviewed. Run --dry-run again. Nothing was written\n", //nolint:errcheck // best-effort stderr
+			logPrefix, strandedExpectCountFlag, opts.ExpectCount, len(selected))
+		return 1
+	}
+	if opts.ExpectDigest != "" && opts.ExpectDigest != digest {
+		fmt.Fprintf(stderr, "%s: --%s %s does not match the selection's digest %s; the selection changed since it was reviewed. Run --dry-run again. Nothing was written\n", //nolint:errcheck // best-effort stderr
+			logPrefix, strandedExpectDigestFlag, opts.ExpectDigest, digest)
 		return 1
 	}
 
-	entries, err := infraPurgeBackupEntries(source, selected, all)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: backing up the selected rows: %v. Nothing was written\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	ledger, err := readInfraPurgeLedger(target)
-	if err != nil {
+	// The binding re-read, before anything is written.
+	if err := infraPurgeBeforeBindingGuard(); err != nil {
 		fmt.Fprintf(stderr, "%s: %v. Nothing was written\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	pending, resumed, err := infraPurgeResumableBackup(ledger, entries)
+	binding, err := openInfraBindingReadOnly(target)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v. Nothing was written\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: opening binding %s: %v. Nothing was written\n", logPrefix, target.Database, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	guardErr := refuseInfraPurgeOfBindingRows(binding, selected)
+	_ = closeBeadStoreHandle(binding)
+	if guardErr != nil {
+		fmt.Fprintf(stderr, "%s: %v. Nothing was written\n", logPrefix, guardErr) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	keys := infraPurgeKeys(selected)
 	backupPath, run := pending.Backup, pending.Run
-	if resumed {
+	if hasPending {
+		covered, err := infraPurgeBackupCovers(pending.Backup, entries)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: the interrupted purge run %s: %v. Nothing was written\n", logPrefix, pending.Run, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if len(covered) > 0 {
+			fmt.Fprintf(stderr, "%s: the interrupted purge run %s backed up a different selection than this one (%s not in %s as the work store holds them now). Nothing was written. Finish or close that run first: restore it with --%s %s, or, if its rows were put back by hand, close it with --%s\n", //nolint:errcheck // best-effort stderr
+				logPrefix, pending.Run, infraStrandedIDList(covered), pending.Backup, strandedRestorePurgeFlag, pending.Backup, strandedAbandonPurgeFlag)
+			return 1
+		}
 		fmt.Fprintf(stdout, "resuming the purge run %s: its backup %s already holds every selected row as the work store holds it\n", run, backupPath) //nolint:errcheck // best-effort stdout
 	} else {
 		now := time.Now().UTC()
@@ -372,35 +532,20 @@ func doStoragePurgeStranded(ctx context.Context, request storageOperatorRequest,
 			fmt.Fprintf(stderr, "%s: %v. Nothing was deleted\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if err := appendInfraPurgeLedger(target, ledger, infraPurgeLedgerRecord{
+		pending = infraPurgeLedgerRecord{
 			Format: infraPurgeLedgerFormat, Event: infraPurgeEventBackedUp, Run: run, Type: opts.Type,
 			Backup: backupPath, Rows: keys, RecordedAt: now,
-		}); err != nil {
+		}
+		if err := appendInfraPurgeLedger(target, ledger, pending); err != nil {
 			fmt.Fprintf(stderr, "%s: %v. Nothing was deleted; the backup is %s\n", logPrefix, err, backupPath) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		ledger, err = readInfraPurgeLedger(target)
-		if err != nil {
-			fmt.Fprintf(stderr, "%s: %v. Nothing was deleted; the backup is %s\n", logPrefix, err, backupPath) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+		ledger = append(ledger, pending)
 	}
 	fmt.Fprintf(stdout, "backup: %s (%d row(s) with their edges, proven from disk)\n", backupPath, len(entries)) //nolint:errcheck // best-effort stdout
 
 	if err := infraPurgeAfterBackup(); err != nil {
 		fmt.Fprintf(stderr, "%s: %v. Nothing was deleted; run this again to resume from %s\n", logPrefix, err, backupPath) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
-	binding, err := openInfraBindingReadOnly(target)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: opening binding %s: %v. Nothing was deleted\n", logPrefix, target.Database, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	guardErr := refuseInfraPurgeOfBindingRows(binding, selected)
-	_ = closeBeadStoreHandle(binding)
-	if guardErr != nil {
-		fmt.Fprintf(stderr, "%s: %v. Nothing was deleted\n", logPrefix, guardErr) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -415,31 +560,110 @@ func doStoragePurgeStranded(ctx context.Context, request storageOperatorRequest,
 		fmt.Fprintf(stderr, "%s: %d row(s) are still in the work store after the delete: %s. Every row is in %s; run this again to finish\n", logPrefix, len(left), infraStrandedIDList(left), backupPath) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// A resumed run records every row its run backed up and the work store no
-	// longer holds, so rows an interrupted delete already took are counted.
-	purgedKeys := keys
-	if resumed {
-		purgedKeys, err = infraPurgeKeysGone(source, pending.Rows)
-		if err != nil {
-			fmt.Fprintf(stderr, "%s: re-reading the work store after the delete: %v. Every row is in %s; run this again to record the purge\n", logPrefix, err, backupPath) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+	if err := infraPurgeAfterDeleteRecorded(); err != nil {
+		fmt.Fprintf(stderr, "%s: %v. The rows are deleted and backed up in %s; run this again to record the purge\n", logPrefix, err, backupPath) //nolint:errcheck // best-effort stderr
+		return 1
 	}
-	if err := appendInfraPurgeLedger(target, ledger, infraPurgeLedgerRecord{
-		Format: infraPurgeLedgerFormat, Event: infraPurgeEventPurged, Run: run, Type: opts.Type,
-		Backup: backupPath, Rows: purgedKeys, RecordedAt: time.Now().UTC(),
-	}); err != nil {
+	// Every row of the run the work store no longer holds, so rows an
+	// interrupted delete already took are counted.
+	purgedKeys, err := infraPurgeKeysGone(source, pending.Rows)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: re-reading the work store after the delete: %v. Every row is in %s; run this again to record the purge\n", logPrefix, err, backupPath) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := recordInfraPurged(target, ledger, pending, purgedKeys); err != nil {
 		fmt.Fprintf(stderr, "%s: the %d row(s) were deleted and backed up in %s, but recording the purge failed: %v. Run this again to record it\n", logPrefix, len(selected), backupPath, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	fmt.Fprintf(stdout, "purged: %d stranded %s row(s) deleted from the work store; backup %s\nnext: gc storage status\n", len(selected), opts.Type, backupPath) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "purged: %d stranded %s row(s) deleted from the work store; backup %s\nnext: gc storage status\n", len(purgedKeys), opts.Type, backupPath) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
-// reportInfraPurgeSelection prints what the purge selected: the count, the id
-// range, the statuses, the creation dates, the title histogram, and one line
-// per row.
-func reportInfraPurgeSelection(w io.Writer, purgeType string, class coordclass.Class, rows []beads.Bead, heldDifferent map[string]bool) {
+// settleInfraPurgeWithNothingSelected finishes an interrupted run when
+// nothing is left to delete: the rows the work store no longer holds are
+// recorded as purged. A run whose rows are all still there, and none
+// stranded, was not a purge at all, and only the operator can close it.
+func settleInfraPurgeWithNothingSelected(target infraBindingTarget, ledger []infraPurgeLedgerRecord, pending infraPurgeLedgerRecord, gone []infraPurgeRowKey, logPrefix string, stdout, stderr io.Writer) int {
+	if len(gone) == 0 {
+		fmt.Fprintf(stderr, "%s: the interrupted purge run %s deleted none of its %d row(s), and none of them is stranded now. If they were put back on purpose, close the run with --%s\n", //nolint:errcheck // best-effort stderr
+			logPrefix, pending.Run, len(pending.Rows), strandedAbandonPurgeFlag)
+		return 1
+	}
+	if err := recordInfraPurged(target, ledger, pending, gone); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	fmt.Fprintf(stdout, "finished the interrupted purge run %s: recorded %d deleted row(s) (backup %s)\nnext: gc storage status\n", pending.Run, len(gone), pending.Backup) //nolint:errcheck // best-effort stdout
+	return 0
+}
+
+// abandonInfraPurge is --abandon-purge: it closes an interrupted run whose
+// rows are all back in the work store, put back by hand. It refuses while any
+// is missing, because closing the run then would lose the record of a delete.
+func abandonInfraPurge(target infraBindingTarget, ledger []infraPurgeLedgerRecord, pending infraPurgeLedgerRecord, hasPending bool, gone []infraPurgeRowKey, dryRun bool, logPrefix string, stdout, stderr io.Writer) int {
+	if !hasPending {
+		fmt.Fprintf(stderr, "%s: --%s closes an interrupted purge, and the ledger %s shows none\n", logPrefix, strandedAbandonPurgeFlag, target.PurgeLedgerPath()) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if len(gone) > 0 {
+		ids := make([]string, 0, len(gone))
+		for _, key := range gone {
+			ids = append(ids, key.ID)
+		}
+		fmt.Fprintf(stderr, "%s: --%s refused: %d row(s) of the interrupted run %s are not in the work store (%s). Put them back with --%s %s, or finish the purge by running it again without --%s\n", //nolint:errcheck // best-effort stderr
+			logPrefix, strandedAbandonPurgeFlag, len(gone), pending.Run, infraStrandedIDList(ids), strandedRestorePurgeFlag, pending.Backup, strandedAbandonPurgeFlag)
+		return 1
+	}
+	if dryRun {
+		fmt.Fprintf(stdout, "dry-run: would close the interrupted purge run %s; all %d of its row(s) are in the work store\n", pending.Run, len(pending.Rows)) //nolint:errcheck // best-effort stdout
+		return 0
+	}
+	record := pending
+	record.Event = infraPurgeEventAbandoned
+	record.RecordedAt = time.Now().UTC()
+	if err := appendInfraPurgeLedger(target, ledger, record); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	fmt.Fprintf(stdout, "closed the interrupted purge run %s: all %d of its row(s) are in the work store; its backup %s is kept\n", pending.Run, len(pending.Rows), pending.Backup) //nolint:errcheck // best-effort stdout
+	return 0
+}
+
+// recordInfraPurged appends the purged record for run.
+func recordInfraPurged(target infraBindingTarget, ledger []infraPurgeLedgerRecord, run infraPurgeLedgerRecord, rows []infraPurgeRowKey) error {
+	record := run
+	record.Event = infraPurgeEventPurged
+	record.Rows = rows
+	record.RecordedAt = time.Now().UTC()
+	return appendInfraPurgeLedger(target, ledger, record)
+}
+
+// infraPurgePendingRun returns the interrupted run: the ledger's last record,
+// when it is a backup no later record closed.
+func infraPurgePendingRun(ledger []infraPurgeLedgerRecord) (infraPurgeLedgerRecord, bool) {
+	if len(ledger) == 0 || ledger[len(ledger)-1].Event != infraPurgeEventBackedUp {
+		return infraPurgeLedgerRecord{}, false
+	}
+	return ledger[len(ledger)-1], true
+}
+
+// infraPurgeDigest is the selection's fingerprint: the first 16 hex digits of
+// the SHA-256 of its sorted (id, created_at second) pairs. The dry run prints
+// it and --expect-digest pins the delete to it.
+func infraPurgeDigest(keys []infraPurgeRowKey) string {
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		lines = append(lines, fmt.Sprintf("%s\t%d\n", key.ID, key.CreatedAt.Unix()))
+	}
+	sort.Strings(lines)
+	sum := sha256.Sum256([]byte(strings.Join(lines, "")))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// reportInfraPurgeSelection prints what the purge selected: the count, the
+// digest, the id range, the statuses, the creation dates, the title
+// histogram, and one line per row.
+func reportInfraPurgeSelection(w io.Writer, purgeType string, class coordclass.Class, rows []beads.Bead, heldDifferent map[string]bool, digest string) {
 	ids := make([]string, 0, len(rows))
 	statuses := map[string]int{}
 	titles := map[string]int{}
@@ -460,16 +684,17 @@ func reportInfraPurgeSelection(w io.Writer, purgeType string, class coordclass.C
 		}
 	}
 	sort.Strings(ids)
-	fmt.Fprintf(w, "selected: %d stranded work-store row(s) of type %s (class %s)\n", len(rows), purgeType, class) //nolint:errcheck // best-effort output
-	fmt.Fprintf(w, "  ids:     %s .. %s\n", ids[0], ids[len(ids)-1])                                               //nolint:errcheck // best-effort output
-	fmt.Fprintf(w, "  created: %s .. %s\n", first.UTC().Format(time.RFC3339), last.UTC().Format(time.RFC3339))     //nolint:errcheck // best-effort output
 	var parts []string
 	for _, status := range sortedMapKeys(statuses) {
 		parts = append(parts, fmt.Sprintf("%s %d", status, statuses[status]))
 	}
-	fmt.Fprintf(w, "  status:  %s\n", strings.Join(parts, ", "))                      //nolint:errcheck // best-effort output
-	fmt.Fprintf(w, "  tier:    wisp %d, issues %d\n", ephemeral, len(rows)-ephemeral) //nolint:errcheck // best-effort output
-	fmt.Fprintln(w, "  titles:")                                                      //nolint:errcheck // best-effort output
+	fmt.Fprintf(w, "selected: %d stranded work-store row(s) of type %s (class %s)\n", len(rows), purgeType, class) //nolint:errcheck // best-effort output
+	fmt.Fprintf(w, "  digest:  %s\n", digest)                                                                      //nolint:errcheck // best-effort output
+	fmt.Fprintf(w, "  ids:     %s .. %s\n", ids[0], ids[len(ids)-1])                                               //nolint:errcheck // best-effort output
+	fmt.Fprintf(w, "  created: %s .. %s\n", first.UTC().Format(time.RFC3339), last.UTC().Format(time.RFC3339))     //nolint:errcheck // best-effort output
+	fmt.Fprintf(w, "  status:  %s\n", strings.Join(parts, ", "))                                                   //nolint:errcheck // best-effort output
+	fmt.Fprintf(w, "  tier:    wisp %d, issues %d\n", ephemeral, len(rows)-ephemeral)                              //nolint:errcheck // best-effort output
+	fmt.Fprintln(w, "  titles:")                                                                                   //nolint:errcheck // best-effort output
 	byCount := sortedMapKeys(titles)
 	sort.SliceStable(byCount, func(i, j int) bool { return titles[byCount[i]] > titles[byCount[j]] })
 	for _, title := range byCount {
@@ -487,44 +712,28 @@ func reportInfraPurgeSelection(w io.Writer, purgeType string, class coordclass.C
 	}
 }
 
+// infraPurgeBatchChunk bounds the anchors of one batched edge read.
+const infraPurgeBatchChunk = 256
+
 // infraPurgeBackupEntries reads every selected row's edges: its own outbound
 // edges and every inbound edge from any work-store row, with payloads where
-// the store can report them. all is the work store's full listing, which
-// answers the inbound edges when the store cannot list relations and carries
-// them inline instead.
-func infraPurgeBackupEntries(source beads.Store, rows, all []beads.Bead) ([]infraBackupEntry, error) {
-	anchors := sourceAnchorIDs(rows)
-	reader, err := newSourceDepReader(source, rows[0].ID, anchors)
+// the store can report them. The class is recorded under gen, the manifest's
+// classifier generation, which is what selected the row.
+func infraPurgeBackupEntries(source beads.Store, rows, all []beads.Bead, gen coordclass.Generation) ([]infraBackupEntry, error) {
+	reader, err := newSourceDepReader(source, rows[0].ID, sourceAnchorIDs(rows))
 	if err != nil {
 		return nil, err
 	}
-	var inline map[string][]beads.Dep
-	if !reader.relationsOK {
-		if !reader.inlineWitnessed {
-			return nil, fmt.Errorf("the work store refuses relation listing (%w) and carries no inline dependency projection, so nothing can state the edges a backup must keep", reader.relationsErr)
-		}
-		inline = map[string][]beads.Dep{}
-		for _, b := range all {
-			for _, d := range b.Dependencies {
-				inline[d.DependsOnID] = append(inline[d.DependsOnID], d)
-			}
-		}
+	inbound, err := infraPurgeInboundEdges(source, reader, rows, all)
+	if err != nil {
+		return nil, err
 	}
 	entries := make([]infraBackupEntry, 0, len(rows))
 	for _, b := range rows {
-		entry := infraBackupEntry{Bead: b, Class: coordclass.Classify(b).String()}
+		entry := infraBackupEntry{Bead: b, Class: coordclass.ClassifyAt(b, gen).String()}
 		down, ok, err := reader.deps(b)
 		if !ok {
 			return nil, fmt.Errorf("the edges of %s cannot be read: %w", b.ID, err)
-		}
-		var up []beads.Dep
-		if reader.relationsOK {
-			up, err = source.DepList(b.ID, "up")
-			if err != nil {
-				return nil, fmt.Errorf("listing dependents of %s: %w", b.ID, err)
-			}
-		} else {
-			up = inline[b.ID]
 		}
 		for _, d := range down {
 			edge, err := infraPurgeBackupEdge(source, d)
@@ -533,7 +742,7 @@ func infraPurgeBackupEntries(source beads.Store, rows, all []beads.Bead) ([]infr
 			}
 			entry.Deps = append(entry.Deps, edge)
 		}
-		for _, d := range up {
+		for _, d := range inbound[b.ID] {
 			edge, err := infraPurgeBackupEdge(source, d)
 			if err != nil {
 				return nil, err
@@ -545,6 +754,72 @@ func infraPurgeBackupEntries(source beads.Store, rows, all []beads.Bead) ([]infr
 		entries = append(entries, entry)
 	}
 	return entries, nil
+}
+
+// infraPurgeInboundEdges returns, per selected row, every edge into it from
+// any work-store row. It reads them from the whole store's listing rather
+// than one dependents query per row: a hosted work store answers each query
+// with a bd process over the network, and a purge of hundreds of rows would
+// pay one round trip per row. A store that lists relations is asked for every
+// row's outbound edges in batches; a store that refuses relation listing
+// carries them inline on the listing itself, which the dep reader has
+// witnessed live. Only a store with neither falls back to a query per row.
+func infraPurgeInboundEdges(source beads.Store, reader *sourceDepReader, rows, all []beads.Bead) (map[string][]beads.Dep, error) {
+	selected := make(map[string]bool, len(rows))
+	for _, b := range rows {
+		selected[b.ID] = true
+	}
+	inbound := map[string][]beads.Dep{}
+	if !reader.relationsOK {
+		if !reader.inlineWitnessed {
+			return nil, fmt.Errorf("the work store refuses relation listing (%w) and carries no inline dependency projection, so nothing can state the edges a backup must keep", reader.relationsErr)
+		}
+		for _, b := range all {
+			for _, d := range b.Dependencies {
+				if selected[d.DependsOnID] {
+					inbound[d.DependsOnID] = append(inbound[d.DependsOnID], d)
+				}
+			}
+		}
+		return inbound, nil
+	}
+	if batch, ok := beads.DepListBatchFor(source); ok {
+		ids := make([]string, 0, len(all))
+		for _, b := range all {
+			ids = append(ids, b.ID)
+		}
+		supported := true
+		for start := 0; start < len(ids) && supported; start += infraPurgeBatchChunk {
+			end := min(start+infraPurgeBatchChunk, len(ids))
+			edges, err := batch.DepListBatch(ids[start:end])
+			if errors.Is(err, beads.ErrDepListBatchUnsupported) {
+				supported = false
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("reading the work store's edges in batches: %w", err)
+			}
+			for _, anchor := range ids[start:end] {
+				for _, d := range edges[anchor] {
+					if selected[d.DependsOnID] {
+						inbound[d.DependsOnID] = append(inbound[d.DependsOnID], d)
+					}
+				}
+			}
+		}
+		if supported {
+			return inbound, nil
+		}
+		inbound = map[string][]beads.Dep{}
+	}
+	for _, b := range rows {
+		up, err := source.DepList(b.ID, "up")
+		if err != nil {
+			return nil, fmt.Errorf("listing dependents of %s: %w", b.ID, err)
+		}
+		inbound[b.ID] = up
+	}
+	return inbound, nil
 }
 
 // infraPurgeBackupEdge records one edge, with its payload when the store can
@@ -567,40 +842,34 @@ func infraPurgeKeys(rows []beads.Bead) []infraPurgeRowKey {
 	return keys
 }
 
-// infraPurgeResumableBackup returns the ledger record of an interrupted run
-// when its backup already holds every entry exactly (the row and its edges as
-// the work store holds them now), so a resume deletes from the backup it
-// proved rather than writing a second one.
-func infraPurgeResumableBackup(ledger []infraPurgeLedgerRecord, entries []infraBackupEntry) (infraPurgeLedgerRecord, bool, error) {
-	if len(ledger) == 0 || ledger[len(ledger)-1].Event != infraPurgeEventBackedUp {
-		return infraPurgeLedgerRecord{}, false, nil
-	}
-	pending := ledger[len(ledger)-1]
-	records, err := readInfraPurgeBackup(pending.Backup)
-	if errors.Is(err, os.ErrNotExist) {
-		return infraPurgeLedgerRecord{}, false, nil
-	}
+// infraPurgeBackupCovers returns the ids of entries the backup at path does
+// not hold exactly (the row and its edges as the work store holds them now).
+// None means a resume may delete from that backup.
+func infraPurgeBackupCovers(path string, entries []infraBackupEntry) ([]string, error) {
+	records, err := readInfraPurgeBackup(path)
 	if err != nil {
-		return infraPurgeLedgerRecord{}, false, fmt.Errorf("the interrupted purge run %s: %w", pending.Run, err)
+		return nil, err
 	}
 	held := make(map[string][]byte, len(records))
 	for _, record := range records {
 		encoded, err := json.Marshal(record.Entry)
 		if err != nil {
-			return infraPurgeLedgerRecord{}, false, err
+			return nil, err
 		}
 		held[record.Entry.Bead.ID] = encoded
 	}
+	var missing []string
 	for _, entry := range entries {
 		encoded, err := json.Marshal(entry)
 		if err != nil {
-			return infraPurgeLedgerRecord{}, false, err
+			return nil, err
 		}
 		if !bytes.Equal(held[entry.Bead.ID], encoded) {
-			return infraPurgeLedgerRecord{}, false, nil
+			missing = append(missing, entry.Bead.ID)
 		}
 	}
-	return pending, true, nil
+	sort.Strings(missing)
+	return missing, nil
 }
 
 // infraPurgeKeysGone returns the keys the work store no longer holds as the
@@ -620,8 +889,8 @@ func infraPurgeKeysGone(source beads.Store, keys []infraPurgeRowKey) ([]infraPur
 	return gone, nil
 }
 
-// refuseInfraPurgeOfBindingRows is the last check before the delete: no row
-// the binding holds as the same bead (the same id, created in the same
+// refuseInfraPurgeOfBindingRows is the check before anything is written: no
+// row the binding holds as the same bead (the same id, created in the same
 // second) may be deleted, whatever selected it. A row the binding holds for a
 // different bead (a reused id) passes: deleting the work-store row leaves the
 // binding's bead alone.
@@ -643,24 +912,40 @@ func refuseInfraPurgeOfBindingRows(binding beads.Store, rows []beads.Bead) error
 	return nil
 }
 
-// deleteInfraPurgeRows deletes the backed-up rows from the work store: in one
-// batch where the store can (bd's --force and SQLite's batch both remove every
-// edge touching a deleted row), and otherwise row by row with the edges the
-// backup recorded.
+// deleteInfraPurgeRows deletes the backed-up rows from the work store. Every
+// recorded edge goes first: `bd delete --force` rewrites the text of every
+// row still linked to a deleted one, replacing each mention of the id with
+// "[deleted:<id>]", and a row with no links left is not rewritten. Then the
+// rows, in one batch where the store can and one by one otherwise.
 func deleteInfraPurgeRows(source beads.Store, entries []infraBackupEntry) error {
-	if deleter, ok := source.(beads.BatchDeleter); ok {
-		ids := make([]string, 0, len(entries))
-		for _, entry := range entries {
-			ids = append(ids, entry.Bead.ID)
+	seen := map[[2]string]bool{}
+	for _, entry := range entries {
+		for _, edges := range [][]infraBackupEdge{entry.Deps, entry.Dependents} {
+			for _, edge := range edges {
+				pair := [2]string{edge.IssueID, edge.DependsOnID}
+				if seen[pair] {
+					continue
+				}
+				seen[pair] = true
+				if err := source.DepRemove(edge.IssueID, edge.DependsOnID); err != nil && !errors.Is(err, beads.ErrNotFound) {
+					return fmt.Errorf("removing dep %s: %w", edge, err)
+				}
+			}
 		}
+	}
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		ids = append(ids, entry.Bead.ID)
+	}
+	if deleter, ok := source.(beads.BatchDeleter); ok {
 		err := deleter.DeleteBatch(ids)
 		if err == nil || !errors.Is(err, beads.ErrBatchDeleteUnsupported) {
 			return err
 		}
 	}
-	for _, entry := range entries {
-		if err := removeInfraRowWithEdges(source, entry); err != nil {
-			return fmt.Errorf("removing %s: %w", entry.Bead.ID, err)
+	for _, id := range ids {
+		if err := source.Delete(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
+			return fmt.Errorf("removing %s: %w", id, err)
 		}
 	}
 	return nil
@@ -830,31 +1115,63 @@ func appendInfraPurgeLedger(target infraBindingTarget, previous []infraPurgeLedg
 	return nil
 }
 
+// infraPurgeNetRows replays the ledger: a purged record adds its rows, a
+// restored record removes them. What is left is every row a purge deleted and
+// nothing has put back.
+func infraPurgeNetRows(ledger []infraPurgeLedgerRecord) map[infraPurgeRowKey]string {
+	net := map[infraPurgeRowKey]string{}
+	for _, record := range ledger {
+		for _, key := range record.Rows {
+			key.CreatedAt = key.CreatedAt.UTC().Truncate(time.Second)
+			switch record.Event {
+			case infraPurgeEventPurged:
+				net[key] = record.Backup
+			case infraPurgeEventRestored:
+				delete(net, key)
+			}
+		}
+	}
+	return net
+}
+
 // reportInfraPurgeLedger is `gc storage status`'s purge readout. It returns
-// false when the ledger shows an interrupted purge, which blocks.
+// false when the ledger blocks: an interrupted purge, or a ledger nothing can
+// read.
 func reportInfraPurgeLedger(target infraBindingTarget, stdout io.Writer) bool {
 	ledger, err := readInfraPurgeLedger(target)
 	if err != nil {
-		fmt.Fprintf(stdout, "  purge ledger: unreadable — %v\n", err) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "  purge ledger: UNREADABLE — %v\nblocking invariant: the ledger of `%s --%s` runs cannot be read, so nothing can say whether a purge is unfinished. Every purged row is in the infra.purged-stranded-*.jsonl backups beside it, which this does not touch. Restore the ledger from your snapshot, or move it aside once `%s --%s message --dry-run` shows nothing left to purge and no row of those backups is missing that should not be\n", //nolint:errcheck // best-effort stdout
+			err, storageRecoveryCommand, strandedPurgeTypeFlag, storageRecoveryCommand, strandedPurgeTypeFlag)
 		return false
 	}
 	if len(ledger) == 0 {
 		return true
 	}
-	purged := 0
-	var backups []string
+	net := infraPurgeNetRows(ledger)
+	backups := map[string]int{}
+	for _, backup := range net {
+		backups[backup]++
+	}
+	restored := 0
 	for _, record := range ledger {
-		if record.Event == infraPurgeEventPurged {
-			purged += len(record.Rows)
-			backups = append(backups, record.Backup)
+		if record.Event == infraPurgeEventRestored {
+			restored += len(record.Rows)
 		}
 	}
-	if purged > 0 {
-		fmt.Fprintf(stdout, "  purged stranded: %d bead(s) by --%s (backups: %s)\n", purged, strandedPurgeTypeFlag, strings.Join(backups, ", ")) //nolint:errcheck // best-effort stdout
+	if len(net) > 0 || restored > 0 {
+		fmt.Fprintf(stdout, "  purged stranded: %d bead(s) by --%s\n", len(net), strandedPurgeTypeFlag) //nolint:errcheck // best-effort stdout
+		for _, backup := range sortedMapKeys(backups) {
+			fmt.Fprintf(stdout, "    backup %s (%d row(s))\n", backup, backups[backup]) //nolint:errcheck // best-effort stdout
+		}
+		if restored > 0 {
+			fmt.Fprintf(stdout, "  restored by --%s: %d row(s)\n", strandedRestorePurgeFlag, restored) //nolint:errcheck // best-effort stdout
+		}
 	}
-	if last := ledger[len(ledger)-1]; last.Event == infraPurgeEventBackedUp {
-		fmt.Fprintf(stdout, "  purge: INTERRUPTED (run %s backed up %d row(s) to %s and did not finish the delete)\nblocking invariant: finish it with `%s --%s --%s %s --%s`\n", //nolint:errcheck // best-effort stdout
-			last.Run, len(last.Rows), last.Backup, storageRecoveryCommand, storageFleetStoppedFlag, strandedPurgeTypeFlag, last.Type, strandedConfirmPurgeFlag)
+	if last, pending := infraPurgePendingRun(ledger); pending {
+		fmt.Fprintf(stdout, "  purge: INTERRUPTED (run %s backed up %d row(s) to %s and did not record the delete)\nblocking invariant: finish it by running the purge again (`%s --%s --%s %s --%s --%s <n>`; a run with nothing left to delete records it), restore it with `%s --%s --%s %s`, or, if its rows were put back by hand, close it with --%s\n", //nolint:errcheck // best-effort stdout
+			last.Run, len(last.Rows), last.Backup,
+			storageRecoveryCommand, storageFleetStoppedFlag, strandedPurgeTypeFlag, last.Type, strandedConfirmPurgeFlag, strandedExpectCountFlag,
+			storageRecoveryCommand, storageFleetStoppedFlag, strandedRestorePurgeFlag, last.Backup, strandedAbandonPurgeFlag)
 		return false
 	}
 	return true
