@@ -1174,23 +1174,39 @@ func newClosedUsageRuntime(t *testing.T, store beads.Store, codexRoot string) (*
 	return &CityRuntime{cs: cs, cfg: cfg, sp: runtime.NewFake(), cityName: "demo", cityPath: cityPath, stderr: io.Discard}, sinkPath
 }
 
-// drainAckClosedCodexSession creates a keyed codex session awake since t0 in
-// env's store and closes it through the drain-ack finalize at env's clock, the
-// close that never passes through an open terminal state. It returns the
-// session bead id.
-func drainAckClosedCodexSession(t *testing.T, env *reconcilerTestEnv, t0 time.Time, workDir string) string {
+// awakeCodexSession creates a keyed codex session awake since t0 in env's
+// store and returns its bead id.
+func awakeCodexSession(t *testing.T, env *reconcilerTestEnv, t0 time.Time, workDir string) string {
 	t.Helper()
 	b := env.createSessionBead("worker", "worker")
 	meta := liveCodexSessionMeta(t0, workDir, codexSweepSessionKey)
 	delete(meta, "session_name")
 	env.setSessionMetadata(&b, meta)
-	env.setSessionMetadata(&b, session.DrainAckStopPendingPatch(env.clk.Now().UTC()))
-	res := finalizeDrainAckStoppedSession(env.cfg, env.store, testSeatWork(env.city, env.cfg, env.store, nil), env.sessionInfo(b.ID),
+	return b.ID
+}
+
+// drainAckClose closes session id through the drain-ack finalize at env's
+// clock, the close that never passes through an open terminal state.
+func drainAckClose(t *testing.T, env *reconcilerTestEnv, id string) {
+	t.Helper()
+	if err := env.store.SetMetadataBatch(id, session.DrainAckStopPendingPatch(env.clk.Now().UTC())); err != nil {
+		t.Fatal(err)
+	}
+	res := finalizeDrainAckStoppedSession(env.cfg, env.store, testSeatWork(env.city, env.cfg, env.store, nil), env.sessionInfo(id),
 		"worker", true, newFakeDrainOps(), env.dt, env.clk, events.Discard, io.Discard)
 	if !res.closed {
 		t.Fatalf("drain-ack finalize did not close the session: %+v", res)
 	}
-	return b.ID
+}
+
+// drainAckClosedCodexSession creates a keyed codex session awake since t0 and
+// closes it through the drain-ack finalize at env's clock. It returns the
+// session bead id.
+func drainAckClosedCodexSession(t *testing.T, env *reconcilerTestEnv, t0 time.Time, workDir string) string {
+	t.Helper()
+	id := awakeCodexSession(t, env, t0, workDir)
+	drainAckClose(t, env, id)
+	return id
 }
 
 // TestEmitDueComputeFactsSettlesDrainAckClosedInterval is the regression for a
@@ -1233,5 +1249,44 @@ func TestEmitDueComputeFactsSettlesDrainAckClosedInterval(t *testing.T) {
 		if v := got.Metadata[key]; v != "" {
 			t.Fatalf("%s = %q after settling, want cleared", key, v)
 		}
+	}
+}
+
+// TestEmitDueComputeFactsSweepsClosedIntervalTrailingTurns pins the closed
+// row's model-usage settle: turns the transcript gained after the last live
+// sweep (the drain-ack turn among them) each bill once, and the invocation
+// cursor on the now-closed bead advances past them.
+func TestEmitDueComputeFactsSweepsClosedIntervalTrailingTurns(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	t1 := time.Now().UTC().Truncate(time.Second)
+	env.clk.Time = t1
+	t0 := t1.Add(-10 * time.Minute)
+	workDir, codexRoot := t.TempDir(), t.TempDir()
+	writeCodexRolloutForSweepAt(t, codexRoot, t0, workDir, codexSweepSessionKey, [][3]int{{150, 100, 50}, {450, 200, 100}})
+	id := awakeCodexSession(t, env, t0, workDir)
+	cr, sinkPath := newClosedUsageRuntime(t, env.store, codexRoot)
+	cr.emitDueComputeFacts(context.Background(), []session.Info{env.sessionInfo(id)}, false)
+	if got := rawSinkModelFactCount(t, sinkPath); got != 2 {
+		t.Fatalf("live sweep model facts = %d, want 2", got)
+	}
+
+	writeCodexRolloutForSweepAt(t, codexRoot, t0, workDir, codexSweepSessionKey, [][3]int{
+		{150, 100, 50}, {450, 200, 100}, {750, 300, 150}, {1050, 300, 150},
+	})
+	drainAckClose(t, env, id)
+	cr.emitDueComputeFacts(context.Background(), nil, false)
+
+	if got := rawSinkModelFactCount(t, sinkPath); got != 4 {
+		t.Fatalf("model facts after settling = %d, want 4 (each trailing turn once)", got)
+	}
+	got, err := env.store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := got.Metadata[session.MetadataKeyInvocationUsageCursor]; v != "total:1050" {
+		t.Fatalf("invocation_usage_cursor on the closed bead = %q, want total:1050", v)
+	}
+	if v := got.Metadata[usageModelSweptAtKey]; v != t0.Format(time.RFC3339) {
+		t.Fatalf("usage_model_swept_at = %q, want %q", v, t0.Format(time.RFC3339))
 	}
 }

@@ -2409,6 +2409,8 @@ const MetadataKeyUsageClosedAt = "usage_closed_at"
 // PersistInvocationUsageCursor stores the invocation-usage telemetry cursor
 // on an existing session. Unlike PersistSessionKey it overwrites any
 // existing value — the cursor advances with every recorded invocation.
+// A closed session is accepted: the usage lane sweeps a closed row's last
+// interval, and its cursor must advance past the turns it billed.
 // Empty id or cursor is a no-op.
 func (m *Manager) PersistInvocationUsageCursor(id, cursor string) error {
 	cursor = strings.TrimSpace(cursor)
@@ -2416,7 +2418,7 @@ func (m *Manager) PersistInvocationUsageCursor(id, cursor string) error {
 		return nil
 	}
 	return withSessionMutationLock(id, func() error {
-		if _, _, err := m.sessionBead(id); err != nil {
+		if _, _, err := m.loadSessionBead(id, true); err != nil {
 			return err
 		}
 		if err := m.store.SetMetadata(id, MetadataKeyInvocationUsageCursor, cursor); err != nil {
