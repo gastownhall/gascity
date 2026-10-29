@@ -242,8 +242,14 @@ func cancelShellExecProcessGroup(cmd *exec.Cmd, pgid int) error {
 	return processgroup.TerminateCommand(cmd, pgid, shellExecSignalGrace, processgroup.Options{})
 }
 
+// mergeOrderExecEnv builds an exec order's environment from the dispatcher's
+// environ. It drops runtime store keys and secrets (mergeRuntimeEnv) and the
+// session-scoped identity of whichever seat started the dispatcher
+// (withoutSessionIdentityEnv), so the order acts for the city rather than for
+// that seat. Keys set explicitly in env (the curated controller env,
+// [order.env], and dispatch vars) replace any inherited value.
 func mergeOrderExecEnv(environ, env []string) []string {
-	out := mergeRuntimeEnv(environ, nil)
+	out := withoutSessionIdentityEnv(mergeRuntimeEnv(environ, nil))
 	for _, entry := range env {
 		key, _, ok := strings.Cut(entry, "=")
 		if ok {
