@@ -409,6 +409,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	}
 	cmd.Flags().StringVar(&fileFlag, "file", "", "path to a TOML file to use as city.toml")
 	cmd.Flags().StringVar(&fromFlag, "from", "", "path to an example city directory to copy")
+	cmd.Flags().BoolVar(&initAdoptStoreFlag, "adopt-store", false, "initialize even though the directory already holds a .gc/store binding (a previous city's infrastructure state); without it gc init refuses")
 	cmd.Flags().StringVar(&initRemoteStageFlag, "remote-stage", "", "with --from and --no-start: record this directory as a remote stage (a K8S pod or SSH host) of the controller city at this path; its infrastructure-class commands then refuse instead of creating a local binding")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "workspace name (default: target directory basename)")
 	cmd.Flags().StringVar(&providerFlag, "provider", "", "deprecated alias for --default-provider")
@@ -1207,6 +1208,10 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 	if alreadyInitialized {
 		return initAlreadyInitialized(stderr)
 	}
+	if err := initExistingStoreRefusal(fs, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if err := ensureCityScaffoldFS(fs, cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1373,6 +1378,10 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	tomlPath := filepath.Join(cityPath, citylayout.CityConfigFile)
 	if cityHasScaffoldFS(fs, cityPath) {
 		return initAlreadyInitialized(stderr)
+	}
+	if err := initExistingStoreRefusal(fs, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	if _, err := fs.Stat(tomlPath); err == nil {
 		if !canBootstrapExistingCity(wiz) {
@@ -1855,6 +1864,10 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 	}
 	if cityAlreadyInitializedFS(fs, cityPath) {
 		return initAlreadyInitialized(stderr)
+	}
+	if err := initExistingStoreRefusal(fs, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	// Refused before anything is copied, so a refusal leaves no destination
 	// behind and the corrected retry is not "already initialized".
@@ -2350,4 +2363,25 @@ func restoreLegacyWorkspaceIdentity(fs fsys.FS, cityTomlPath string, cfg *config
 		return fmt.Errorf("write %q: %w", cityTomlPath, err)
 	}
 	return nil
+}
+
+// initAdoptStoreFlag is gc init's --adopt-store.
+var initAdoptStoreFlag bool
+
+// initExistingStoreRefusal refuses to initialize a city over an existing
+// .gc/store (S5 §7.2, B15). That directory is a binding: some city's
+// sessions, mail, workflows, orders and nudges. A new city initialized over
+// it would boot against that state, so adopting it is an explicit choice.
+func initExistingStoreRefusal(fs fsys.FS, cityPath string) error {
+	if initAdoptStoreFlag {
+		return nil
+	}
+	store := filepath.Join(cityPath, ".gc", "store")
+	if _, err := fs.Stat(store); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("checking for an existing binding at %s: %w", store, err)
+	}
+	return fmt.Errorf("%s already exists: it holds a previous city's infrastructure state (sessions, mail, workflows), and a new city initialized over it would serve that state. Archive or remove it, or pass --adopt-store to initialize over it deliberately", store)
 }

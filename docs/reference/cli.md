@@ -2507,6 +2507,7 @@ gc init --template gascity --default-provider claude \
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--adopt-store` | bool |  | initialize even though the directory already holds a .gc/store binding (a previous city's infrastructure state); without it gc init refuses |
 | `--allow-supervisor-mismatch` | bool |  | register the city even when the running supervisor is a different gc installation than this binary |
 | `--beads-target` | string |  | beads target selector: local or external (or GC_BEADS_TARGET); give with --beads-transport. Default local. external requires --dolt-host, --dolt-port and --dolt-database (or GC_DOLT_HOST/GC_DOLT_PORT/GC_DOLT_DATABASE); bd resolves the project_id itself, so --dolt-project-id is not needed with a selector |
 | `--beads-transport` | string |  | beads transport selector: direct or proxied (or GC_BEADS_TRANSPORT); give with --beads-target. Default proxied: bd owns the Dolt process, any bd read restarts it, and gc stop stops it. direct is the escape hatch and is also bd-owned (bd init --server), not the legacy gc-managed server. Every init requires bd &gt;= 1.3.0, selector or not, including the legacy --dolt-host alias |

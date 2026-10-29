@@ -1604,6 +1604,7 @@ go_test(
         "infra_class_relower_test.go",
         "infra_copy_manifest_test.go",
         "init_bd_version_floor_doc_test.go",
+        "init_existing_store_test.go",
         "init_from_hosted_dolt_test.go",
         "init_hosted_dolt_selector_test.go",
         "init_hosted_dolt_test.go",
