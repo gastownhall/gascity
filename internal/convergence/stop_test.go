@@ -476,6 +476,83 @@ func TestStopHandler_ForceCloseKeepsClosedStepReasonAndReachesNestedSteps(t *tes
 	}
 }
 
+func TestStopHandler_ForceCloseDescendantErrorLeavesLoopActive(t *testing.T) {
+	// A store failure while closing a descendant must fail the whole stop
+	// before the wisp root closes or any terminal metadata is written, so
+	// re-running stop once the failure clears converges.
+	handler, store, emitter := setupActiveHandler(t, "in_progress", nil)
+	store.addBead("step-a", "open", "wisp-iter-2", "", nil)
+	store.addBead("step-b", "open", "wisp-iter-2", "", nil)
+
+	store.CloseDescendantErrFunc = func(id string) error {
+		if id == "step-b" {
+			return fmt.Errorf("store unavailable")
+		}
+		return nil
+	}
+
+	_, err := handler.StopHandler(context.Background(), "root-1", "alice", "")
+	if err == nil {
+		t.Fatal("expected error when a descendant close fails")
+	}
+	if !contains(err.Error(), "wisp-iter-2") {
+		t.Errorf("error %q must name the wisp", err.Error())
+	}
+
+	for _, id := range []string{"step-b", "wisp-iter-2"} {
+		info, err := store.GetBead(id)
+		if err != nil {
+			t.Fatalf("reading %s: %v", id, err)
+		}
+		if info.Status == "closed" {
+			t.Errorf("%s must stay open when a descendant close fails", id)
+		}
+	}
+	meta, _ := store.GetMetadata("root-1")
+	if meta[FieldState] != StateActive {
+		t.Errorf("state = %q, want %q (no terminal metadata on failure)", meta[FieldState], StateActive)
+	}
+	if meta[FieldTerminalReason] != "" {
+		t.Errorf("terminal_reason = %q, want empty on failure", meta[FieldTerminalReason])
+	}
+	root, err := store.GetBead("root-1")
+	if err != nil {
+		t.Fatalf("reading root: %v", err)
+	}
+	if root.Status == "closed" {
+		t.Error("loop bead must not close when a descendant close fails")
+	}
+	if _, ok := emitter.findEvent(EventTerminated); ok {
+		t.Error("no ConvergenceTerminated event may be emitted when a descendant close fails")
+	}
+
+	// Clearing the failure and re-running stop converges.
+	store.CloseDescendantErrFunc = nil
+	result, err := handler.StopHandler(context.Background(), "root-1", "alice", "")
+	if err != nil {
+		t.Fatalf("re-running stop: %v", err)
+	}
+	if result.Action != ActionStopped {
+		t.Errorf("Action = %q, want %q", result.Action, ActionStopped)
+	}
+	for _, id := range []string{"step-a", "step-b", "wisp-iter-2"} {
+		info, err := store.GetBead(id)
+		if err != nil {
+			t.Fatalf("reading %s: %v", id, err)
+		}
+		if info.Status != "closed" {
+			t.Errorf("step %s status = %q, want closed after re-run", id, info.Status)
+		}
+	}
+	meta, _ = store.GetMetadata("root-1")
+	if meta[FieldState] != StateTerminated {
+		t.Errorf("state = %q, want %q", meta[FieldState], StateTerminated)
+	}
+	if meta[FieldTerminalReason] != TerminalStopped {
+		t.Errorf("terminal_reason = %q, want %q", meta[FieldTerminalReason], TerminalStopped)
+	}
+}
+
 // closeLogIndex returns the index of id in the close log, or -1.
 func closeLogIndex(log []string, id string) int {
 	for i, entry := range log {
