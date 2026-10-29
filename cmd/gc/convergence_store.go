@@ -70,7 +70,9 @@ func (a *convergenceStoreAdapter) inScope(b beads.Bead) bool {
 }
 
 // list reads query from the placement store, keeps this scope's rows, and
-// unions the relic leg's rows behind them (first copy of an id wins).
+// unions the relic leg's rows behind them (first copy of an id wins). An id
+// the placement store holds for another scope still settles that id, as it
+// does in get: the relic's twin of it is not this scope's loop.
 func (a *convergenceStoreAdapter) list(query beads.ListQuery) ([]beads.Bead, error) {
 	rows, err := a.store.List(query)
 	if err != nil {
@@ -79,10 +81,10 @@ func (a *convergenceStoreAdapter) list(query beads.ListQuery) ([]beads.Bead, err
 	out := rows[:0]
 	seen := make(map[string]bool, len(rows))
 	for _, b := range rows {
+		seen[b.ID] = true
 		if !a.inScope(b) {
 			continue
 		}
-		seen[b.ID] = true
 		out = append(out, b)
 	}
 	if a.relic == nil {

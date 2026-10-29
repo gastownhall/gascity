@@ -162,6 +162,105 @@ func TestRigConvergenceKeepsAPreS4LoopRunningUntilImport(t *testing.T) {
 	}
 }
 
+// TestRigConvergenceFailsClosedOnAFailedRelicRead: a pre-S4 loop whose rig
+// store does not answer is a failure, not a missing loop. Every by-id call
+// returns the read's error and no pour writes anywhere. Read as a miss, the
+// idempotency check finds no iteration, and the pour lands in the binding
+// under a parent only the rig store holds or, once the rig store answers
+// again, pours a second copy of an iteration that store already holds.
+func TestRigConvergenceFailsClosedOnAFailedRelicRead(t *testing.T) {
+	f := newS4RigFixture(t, true)
+	relic := &relicGetFault{Store: f.rigs["ra"]}
+	f.rigs["ra"] = relic
+	ra := f.runtime().buildConvergenceScopes()["ra"]
+	if ra.adapter.relic != beads.Store(relic) {
+		t.Fatal("rig ra awaits import but its relic leg is not its own store")
+	}
+	legacy, err := relic.Create(beads.Bead{Title: "pre-S4 loop", Type: "convergence", Status: "in_progress"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertConvergencePours(t, ra, legacy, convergenceVaporFormula, 1, relic, "rig ra (relic)")
+	iter1 := "converge:" + legacy.ID + ":iter:1"
+	beforeBinding, beforeRig := countBeads(t, f.binding), countBeads(t, relic)
+
+	// One failed read, after which the rig store answers again.
+	relic.fails = 1
+	if id, err := ra.adapter.PourWisp(legacy.ID, convergenceVaporFormula, iter1, nil, ""); !errors.Is(err, errRelicDown) {
+		t.Errorf("re-pouring iteration 1 across one failed relic read = (%q, %v), want the read's error: the idempotency check must fail closed", id, err)
+	}
+
+	// A rig store that keeps failing.
+	relic.fails = -1
+	mustFail := func(call string, err error) {
+		t.Helper()
+		if !errors.Is(err, errRelicDown) || errors.Is(err, beads.ErrNotFound) {
+			t.Errorf("%s on a pre-S4 loop whose rig store does not answer = %v, want the read's error and no not-found", call, err)
+		}
+	}
+	_, err = ra.adapter.GetBead(legacy.ID)
+	mustFail("GetBead", err)
+	_, err = ra.adapter.storeHolding(legacy.ID)
+	mustFail("storeHolding", err)
+	_, err = ra.adapter.Children(legacy.ID)
+	mustFail("Children", err)
+	_, _, err = ra.adapter.FindByIdempotencyKey(iter1)
+	mustFail("FindByIdempotencyKey", err)
+	_, err = ra.adapter.PourWisp(legacy.ID, convergenceVaporFormula, "converge:"+legacy.ID+":iter:2", nil, "")
+	mustFail("PourWisp", err)
+	_, err = convergeAdapterReader{adapter: ra.adapter}.Children(legacy.ID)
+	mustFail("gc converge's Children", err)
+
+	relic.fails = 0
+	if after := countBeads(t, f.binding); after != beforeBinding {
+		t.Errorf("pours across failed relic reads wrote %d bead(s) to the binding", after-beforeBinding)
+	}
+	if after := countBeads(t, relic); after != beforeRig {
+		t.Errorf("pours across failed relic reads wrote %d bead(s) to the rig store", after-beforeRig)
+	}
+}
+
+// TestRigConvergenceNeverServesARelicTwinOfABindingRow: an id the shared
+// binding holds belongs to the binding's row, whether or not that row is this
+// scope's. A rig scope that rejects the row (an unstamped import copy, which
+// the city scope owns) must not fall through to its own store's twin of it,
+// or two scopes drive one loop.
+func TestRigConvergenceNeverServesARelicTwinOfABindingRow(t *testing.T) {
+	const twin = "ra-1"
+	binding := beads.NewMemStoreFrom(0, []beads.Bead{{ID: twin, Title: "unstamped binding copy", Type: "convergence", Status: "in_progress"}}, nil)
+	relic := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: twin, Title: "rig copy", Type: "convergence", Status: "in_progress"},
+		{ID: "ra-2", Title: "pre-S4 loop", Type: "convergence", Status: "in_progress"},
+	}, nil)
+	ra := newConvergenceStoreAdapter(binding, nil, true)
+	ra.scopeRef = rigGraphScope("ra").rootStoreRef("")
+	ra.relic = relic
+
+	if b, err := ra.GetBead(twin); !errors.Is(err, errGraphOutOfScope) {
+		t.Errorf("GetBead(%s) = (%+v, %v), want the binding row's out-of-scope refusal, not the rig store's twin", twin, b, err)
+	}
+	if err := ra.SetMetadata(twin, convergence.FieldState, convergence.StateActive); !errors.Is(err, errGraphOutOfScope) {
+		t.Errorf("SetMetadata(%s) = %v, want the out-of-scope refusal", twin, err)
+	}
+	if got := beadByID(t, relic, twin); got.Metadata[convergence.FieldState] != "" {
+		t.Errorf("a write on %s reached the rig store's twin (state %q)", twin, got.Metadata[convergence.FieldState])
+	}
+	listed, err := ra.listConvergence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := controlLegIDs(listed); len(ids) != 1 || ids[0] != "ra-2" {
+		t.Errorf("rig ra lists %v, want only its pre-S4 loop ra-2; the twin of a binding row is not its loop", ids)
+	}
+	// Control: the city scope owns the unstamped binding row, so exactly one
+	// scope drives it.
+	city := newConvergenceStoreAdapter(binding, nil, true)
+	city.scopeRef = cityGraphScope().rootStoreRef("s4-city")
+	if got, err := city.GetBead(twin); err != nil || got.ID != twin {
+		t.Errorf("the city scope reads the unstamped binding row %s as (%+v, %v), want that row", twin, got, err)
+	}
+}
+
 // TestSingleStoreConvergenceIsUnchanged is the single-store control: every rig
 // keeps its own store, relocated=false, no stamp, and a v1 poured formula
 // still pours.

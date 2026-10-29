@@ -667,11 +667,11 @@ the same lock, so the pairs of the last cook to take the lock are the
 ones that stay.
 
 On a city that serves the graph class from its own [storage] binding, most
-of --attach in CITY scope is NOT SUPPORTED YET and refuses rather than
-serving. A graft is graph class whatever the formula's version — every bead
-it creates carries gc.root_bead_id — so the sub-DAG belongs in the binding
-while the blocking dependency belongs beside the attach bead, and a split
-city cannot have both:
+of --attach is NOT SUPPORTED YET, in city and rig scope alike, and refuses
+rather than serving. A graft is graph class whatever the formula's version —
+every bead it creates carries gc.root_bead_id — so the sub-DAG belongs in
+the binding while the blocking dependency belongs beside the attach bead,
+and a split city cannot have both:
 
   * attach bead in the city's WORK ledger — refused. Writing the sub-DAG
     beside it strands graph-class beads in the work store, which gc storage
@@ -685,13 +685,19 @@ city cannot have both:
     would be cross-class. Same remedy: ga-2orlf.
   * attach bead in the BINDING, v1 formula — served. The sub-DAG and its
     blocking dependency are both written to the binding.
-  * RIG scope (--rig, GC_RIG, or a cwd inside a rig) — served, unchanged.
-    A relocation moves city-level stores only, so a rig's ledger holds both
-    ends of the graft and nothing it writes can be stranded.
+  * attach bead in a RIG's own store (RIG scope: --rig, GC_RIG, or a cwd
+    inside a rig) — refused for a work bead, for the city work ledger's
+    reason: every graph bead of every rig lives in the binding, so a rig's
+    own store holds only work. Launch the formula against the bead with
+    gc sling <target> <bead> --on <formula> instead. The one graft served
+    there is a v1 formula onto a graph bead of a tree created before the
+    rig's graph beads moved to the binding, which extends that tree where
+    it lives; a v2 formula is refused, because it starts a new workflow
+    root in the binding and its attach edge would cross stores.
 
 Single-store cities are unaffected: --attach behaves exactly as it always
-has. If an earlier cook already stranded beads in a split city's work
-store, copy them into the binding with
+has, in every scope. If an earlier cook already stranded beads in a split
+city's work store, copy them into the binding with
 ` + storageRecoveryInstruction() + `.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

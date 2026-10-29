@@ -257,6 +257,56 @@ func TestGraphResidenceNeverFallsBackOnAFailedBindingRead(t *testing.T) {
 	}
 }
 
+// relicGetFault is a rig store whose backing does not answer: its next fails
+// Gets fail with a non-not-found error, and every Get does while fails is
+// negative.
+type relicGetFault struct {
+	beads.Store
+	fails int
+}
+
+var errRelicDown = errors.New("transient: rig store connection refused")
+
+func (s *relicGetFault) Get(id string) (beads.Bead, error) {
+	if s.fails == 0 {
+		return s.Store.Get(id)
+	}
+	if s.fails > 0 {
+		s.fails--
+	}
+	return beads.Bead{}, errRelicDown
+}
+
+// TestGraphResidenceNeverReadsAFailedRelicReadAsAMiss is the relic-side twin
+// of the test above: a relic read that FAILED says nothing about absence
+// either. Joined with the binding's miss it would read as not found, and a
+// write on a pre-S4 tree would go to the binding instead of failing.
+func TestGraphResidenceNeverReadsAFailedRelicReadAsAMiss(t *testing.T) {
+	relic := &relicGetFault{Store: beads.NewMemStore(), fails: -1}
+	_, store, err := graphResidenceForTree(beads.NewMemStore(), relic, "ra-1", nil)
+	if !errors.Is(err, errRelicDown) || errors.Is(err, beads.ErrNotFound) || store != nil {
+		t.Fatalf("graphResidenceForTree over a failing relic = (store %T, err %v), want the relic's error, no not-found and no store", store, err)
+	}
+	// Control: a miss on both legs is still a not-found.
+	relic.fails = 0
+	if _, _, err := graphResidenceForTree(beads.NewMemStore(), relic, "ra-1", nil); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("a miss on both legs = %v, want a not-found", err)
+	}
+}
+
+// TestGraphResidenceAnswersAnOutOfScopeRowFromTheBinding: an id the shared
+// binding holds resolves to the binding's row even when that row belongs to
+// another scope, the twin rule control dispatch and the API follow. The relic
+// leg's copy of the id (an import's twin) is never served in its place.
+func TestGraphResidenceAnswersAnOutOfScopeRowFromTheBinding(t *testing.T) {
+	binding := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "ra-1", Title: "binding copy"}}, nil)
+	relic := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "ra-1", Title: "relic copy"}}, nil)
+	b, store, err := graphResidenceForTree(binding, relic, "ra-1", func(beads.Bead) bool { return false })
+	if !errors.Is(err, errGraphOutOfScope) || !errors.Is(err, beads.ErrNotFound) || store == relic {
+		t.Fatalf("out-of-scope binding row = (%q from %T, err %v), want the out-of-scope not-found and no relic answer", b.Title, store, err)
+	}
+}
+
 // writeS4FileCityTOML declares the file bead provider and the fixture's rigs,
 // so opening a scope store never starts a Dolt server.
 func writeS4FileCityTOML(t *testing.T, f s4RigFixture) {

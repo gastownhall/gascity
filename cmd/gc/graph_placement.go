@@ -134,26 +134,33 @@ func splitRigGraphRelicFree(routes *storageRoutes, rig string) bool {
 // accept, when non-nil, is the caller's scope check on a row the placement
 // store returned: the binding is shared by every scope, so a row of another
 // scope is NOT this scope's and reads as not found (errGraphOutOfScope, which
-// also matches beads.ErrNotFound). A relic store is the rig's own, so its rows
-// need no check.
+// also matches beads.ErrNotFound). That row is still the one the binding holds
+// for id, so the relic leg is not asked for a twin of it: an id the binding
+// holds resolves to the binding's row, as it does for control dispatch. A
+// relic store is the rig's own, so its rows need no check.
 //
-// An error is a read that failed, never absence: a placement read that failed
-// for any other reason is returned as is, and the relic leg is not asked. A
-// miss on both legs joins both errors, so errors.Is(err, beads.ErrNotFound)
-// still holds.
+// An error is a read that failed, never absence, on either leg: a placement
+// read that failed for any other reason is returned as is, and the relic leg
+// is not asked; a relic read that failed is returned without the placement's
+// not-found. Only a miss on both legs joins both errors, so errors.Is(err,
+// beads.ErrNotFound) still holds for it.
 func graphResidenceForTree(placement, relic beads.Store, id string, accept func(beads.Bead) bool) (beads.Bead, beads.Store, error) {
 	b, err := placement.Get(id)
 	if err == nil && accept != nil && !accept(b) {
-		b, err = beads.Bead{}, fmt.Errorf("%w: %s %w", beads.ErrNotFound, id, errGraphOutOfScope)
+		return beads.Bead{}, placement, fmt.Errorf("%w: %s %w", beads.ErrNotFound, id, errGraphOutOfScope)
 	}
 	if err == nil || relic == nil || relic == placement || !errors.Is(err, beads.ErrNotFound) {
 		return b, placement, err
 	}
 	rb, rerr := relic.Get(id)
-	if rerr != nil {
+	switch {
+	case rerr == nil:
+		return rb, relic, nil
+	case errors.Is(rerr, beads.ErrNotFound):
 		return beads.Bead{}, nil, errors.Join(err, rerr)
+	default:
+		return beads.Bead{}, nil, fmt.Errorf("reading %s from the scope's own store (its relic leg): %w", id, rerr)
 	}
-	return rb, relic, nil
 }
 
 // errGraphOutOfScope marks a row the shared binding holds for ANOTHER scope.
