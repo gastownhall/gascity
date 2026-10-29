@@ -22,13 +22,13 @@ func TestReproConvergeCreateTimeoutStillCreates(t *testing.T) {
 
 	// Attempt 1: the event loop is inside a tick and does not read the channel.
 	server, client := net.Pipe()
-	go func() { handleConvergeSocketCmd(server, payload, cr.convergenceReqCh); server.Close() }()
+	go func() { handleConvergeSocketCmd(server, payload, cr.convergenceReqCh); server.Close() }() //nolint:errcheck // test cleanup
 	start := time.Now()
 	line, err := bufio.NewReader(client).ReadString('\n')
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.Close()
+	client.Close() //nolint:errcheck // test cleanup
 	var first convergenceReply
 	_ = json.Unmarshal([]byte(line), &first)
 	t.Logf("attempt 1 reply after %s: error=%q", time.Since(start).Round(time.Second), first.Error)
