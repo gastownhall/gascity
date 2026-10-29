@@ -1108,6 +1108,30 @@ func TestLaunchKeysOnTheVerbSectionsTemplate(t *testing.T) {
 	}
 }
 
+// Kills a bound launch template that names a trigger id, stale or fresh, or
+// that marks an unstamped row as demand-spawned: boundTemplate strips every
+// GC_TRIGGER_* key and writes only the presence-only demand marker, exactly
+// when the bound row is stamped, keeping unrelated keys
+// (gastownhall/gascity#5738).
+func TestBoundTemplateCarriesOnlyTheDemandMarker(t *testing.T) {
+	stale := map[string]string{"GC_TRIGGER_BEAD_ID": "w-old", "GC_TRIGGER_WORK_BEAD_ID": "w-old", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}
+	for _, c := range []struct {
+		name, trigger string
+		want          map[string]string
+	}{
+		{"unstamped", "", map[string]string{"GC_KEEP": "1"}},
+		{"stamped", "w-new", map[string]string{"GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}},
+	} {
+		tp := boundTemplate(TemplateParams{TemplateName: "worker", Env: maps.Clone(stale)}, session.Info{TriggerBeadID: c.trigger})
+		if !maps.Equal(tp.Env, c.want) {
+			t.Errorf("%s: bound env = %v, want %v", c.name, tp.Env, c.want)
+		}
+	}
+	if tp := boundTemplate(TemplateParams{TemplateName: "worker"}, session.Info{TriggerBeadID: "w-new"}); !maps.Equal(tp.Env, map[string]string{"GC_SPAWN_ORIGIN": "demand"}) {
+		t.Errorf("stamped row over a nil env: bound env = %v, want only GC_SPAWN_ORIGIN=demand", tp.Env)
+	}
+}
+
 // Kills a launch env carrying the trigger the template was resolved under
 // after PreWake cleared or re-pointed it: the trigger env and the demand
 // origin follow the bound row (legacy binds, then resolves).
