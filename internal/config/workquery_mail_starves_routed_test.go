@@ -133,6 +133,33 @@ func TestEffectiveWorkQueryBD104ServesAssignedTaskBehindOlderMailWisp(t *testing
 	})
 }
 
+// TestEffectiveWorkQueryInProgressSkipsAssignedMailWisp pins AC-3: both
+// ephemeral in_progress probes (plain and graph-anchor-deferring) truncate to
+// their first row with no sort, so an in_progress message wisp — e.g. after
+// `bd update --claim` on mail shown by plain `gc hook` — held the crash-recovery
+// slot and shadowed a real in_progress task on both bd compatibility modes.
+func TestEffectiveWorkQueryInProgressSkipsAssignedMailWisp(t *testing.T) {
+	const (
+		mailRow = `{"id":"gcg-mail-wip","status":"in_progress","issue_type":"message","assignee":"hello-world/dog","ephemeral":true,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
+		taskRow = `{"id":"gcg-task-wip","status":"in_progress","issue_type":"task","assignee":"hello-world/dog","ephemeral":true,"created_at":"2026-08-31T10:05:00Z","metadata":{}}`
+	)
+	env := map[string]string{"GC_SESSION_NAME": "hello-world/dog"}
+
+	for name, topo := range map[string]QueryTopology{
+		"bd104": {},
+		"bd105": {Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := Agent{Name: "dog", Dir: "hello-world"}
+			out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(topo), env,
+				fakeBdStatusSnapshots("", mailRow+`,`+taskRow))
+			if strings.Contains(out, "gcg-mail-wip") || !strings.Contains(out, "gcg-task-wip") {
+				t.Fatalf("%s: in_progress tier let a mail wisp hold the crash-recovery slot: served %q, want gcg-task-wip and no message bead", name, out)
+			}
+		})
+	}
+}
+
 // TestEffectiveWorkQueryReadyReadsDoNotExcludeMessageType pins the fix's
 // boundary from the other side: mail is withheld at the jq ephemeral probes,
 // so NO generated `bd ready` / `gc ready` read may grow an
