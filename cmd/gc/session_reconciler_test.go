@@ -8240,16 +8240,54 @@ func TestResolvePreservedConfiguredNamedSessionTemplate_ClearsStaleTriggerStamp(
 	if err != nil {
 		t.Fatalf("resolve preserved named session: %v", err)
 	}
-	if got := preservedTP.Env["GC_TRIGGER_BEAD_ID"]; got != "" {
-		t.Errorf("GC_TRIGGER_BEAD_ID = %q, want cleared for a blocked target", got)
-	}
-	if got := preservedTP.Env["GC_TRIGGER_WORK_BEAD_ID"]; got != "" {
-		t.Errorf("GC_TRIGGER_WORK_BEAD_ID = %q, want cleared for a blocked target", got)
+	assertEnvNamesNoTriggerID(t, "resolved env for a blocked target", preservedTP.Env)
+	if got, ok := preservedTP.Env["GC_SPAWN_ORIGIN"]; ok {
+		t.Errorf("GC_SPAWN_ORIGIN = %q, want unset once the stamp is cleared", got)
 	}
 	// The returned Info carries the clear back to the caller's snapshot; a
 	// caller that keeps its pre-call Info re-injects the stamp downstream.
 	if preservedInfo.TriggerBeadID != "" {
 		t.Errorf("returned Info TriggerBeadID = %q, want cleared", preservedInfo.TriggerBeadID)
+	}
+}
+
+// Kills a preserved named-session template that names the trigger id a
+// surviving stamp carries: the resolved env holds only the demand marker,
+// and the stamp stays on the row (gastownhall/gascity#5738).
+func TestResolvePreservedConfiguredNamedSessionTemplate_SurvivingStampCarriesOnlyTheDemandMarker(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{
+		SessionSleep:  config.SessionSleepConfig{InteractiveResume: "60s"},
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	blocked := false
+	work, err := env.store.Create(beads.Bead{Title: "workable work", Status: "open", IsBlocked: &blocked})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:           "true",
+		namedSessionIdentityMetadata:      "worker",
+		namedSessionModeMetadata:          "on_demand",
+		beadmeta.TriggerBeadIDMetadataKey: work.ID,
+	})
+	sessionInfo := env.sessionInfo(session.ID)
+
+	preservedTP, preservedInfo, err := resolvePreservedConfiguredNamedSessionTemplate(".", env.cfg.Workspace.Name, env.cfg, env.sp, env.store, []sessionpkg.Info{sessionInfo}, sessionInfo, env.clk, io.Discard)
+	if err != nil {
+		t.Fatalf("resolve preserved named session: %v", err)
+	}
+	assertEnvNamesNoTriggerID(t, "resolved env for a workable target", preservedTP.Env)
+	if got := preservedTP.Env["GC_SPAWN_ORIGIN"]; got != demandSpawnOriginValue {
+		t.Errorf("GC_SPAWN_ORIGIN = %q, want %q while the stamp survives", got, demandSpawnOriginValue)
+	}
+	if preservedInfo.TriggerBeadID != work.ID {
+		t.Errorf("returned Info TriggerBeadID = %q, want kept as %q", preservedInfo.TriggerBeadID, work.ID)
 	}
 }
 

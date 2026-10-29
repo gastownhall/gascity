@@ -1133,16 +1133,18 @@ func TestBoundTemplateCarriesOnlyTheDemandMarker(t *testing.T) {
 }
 
 // Kills a launch env carrying the trigger the template was resolved under
-// after PreWake cleared or re-pointed it: the trigger env and the demand
-// origin follow the bound row (legacy binds, then resolves).
+// after PreWake cleared or re-pointed it, and a launch env that names a
+// trigger id at all: the demand origin follows the bound row (legacy binds,
+// then resolves), and no GC_TRIGGER_* key survives into the launch, stale or
+// fresh (gastownhall/gascity#5738).
 func TestLaunchTriggerEnvFollowsTheBoundRow(t *testing.T) {
 	stale := map[string]string{"GC_TRIGGER_BEAD_ID": "w-old", "GC_TRIGGER_WORK_BEAD_ID": "w-old", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}
 	for _, c := range []struct {
 		name, bind string
 		want       map[string]string
 	}{
-		{"cleared", "", map[string]string{"GC_TRIGGER_BEAD_ID": "", "GC_SPAWN_ORIGIN": "", "GC_KEEP": "1"}},
-		{"re-pointed", "w-new", map[string]string{"GC_TRIGGER_BEAD_ID": "w-new", "GC_TRIGGER_WORK_BEAD_ID": "w-new", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}},
+		{"cleared", "", map[string]string{"GC_SPAWN_ORIGIN": "", "GC_KEEP": "1"}},
+		{"re-pointed", "w-new", map[string]string{"GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}},
 	} {
 		k, leaf := launchKit(t, "asleep", "gc.trigger_bead_id", "w-old")
 		row := k.p.World.Census.Rows[k.it.Key]
@@ -1154,6 +1156,11 @@ func TestLaunchTriggerEnvFollowsTheBoundRow(t *testing.T) {
 		for key, want := range c.want {
 			if got := leaf.cfgs[0].Env[key]; got != want {
 				t.Errorf("%s: launch %s = %q, want %q", c.name, key, got, want)
+			}
+		}
+		for key, value := range leaf.cfgs[0].Env {
+			if strings.HasPrefix(key, "GC_TRIGGER_") {
+				t.Errorf("%s: launch %s = %q, want no GC_TRIGGER_* key", c.name, key, value)
 			}
 		}
 	}
