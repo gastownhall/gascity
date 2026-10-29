@@ -335,3 +335,39 @@ func TestDrainWorkflowServeWorkPendingWinsOverSkip(t *testing.T) {
 		t.Fatalf("drain result = %+v, want pendingAny only", result)
 	}
 }
+
+// TestRunControlDispatcherNotOpenSkipContract is AC-4: the one-shot CLI path
+// keeps returning nil silently for a non-open control, while the serve seam
+// reports the no-op as errControlNotProcessed and still closes its store.
+func TestRunControlDispatcherNotOpenSkipContract(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	oneShot := newCloseCountingStore(t, false)
+	closedOneShot := createNonOpenScopeCheck(t, oneShot, "closed")
+	var stdout, stderr bytes.Buffer
+	if err := runControlDispatcherWithStoreAndConfig(cityDir, cityDir, oneShot, closedOneShot.ID, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("one-shot dispatch of a closed control: err = %v, want nil (stderr=%q)", err, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("one-shot stdout = %q, want empty for a skipped control", stdout.String())
+	}
+
+	seam := newCloseCountingStore(t, false)
+	closedSeam := createNonOpenScopeCheck(t, seam, "closed")
+	prev := openControlStoreForDispatch
+	openControlStoreForDispatch = func(_, _ string, _ *config.City) (beads.Store, error) { return seam, nil }
+	t.Cleanup(func() { openControlStoreForDispatch = prev })
+	stdout.Reset()
+	stderr.Reset()
+	err := runControlDispatcherInStore(cityDir, cityDir, closedSeam.ID, &stdout, &stderr, nil)
+	if !errors.Is(err, errControlNotProcessed) {
+		t.Fatalf("serve seam dispatch of a closed control: err = %v, want errControlNotProcessed (stderr=%q)", err, stderr.String())
+	}
+	if got := seam.closes(); got != 1 {
+		t.Fatalf("scope store closed %d times, want 1", got)
+	}
+}

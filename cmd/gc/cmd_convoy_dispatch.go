@@ -165,7 +165,9 @@ var openControlStoreForDispatch = openControlStoreAtForCity
 
 // runControlDispatcherInStore dispatches one control bead for the serve drain.
 // When emits is non-nil, the execution-fact projection for a control that
-// created no steps is deferred to it; nil projects synchronously.
+// created no steps is deferred to it; nil projects synchronously. A nil return
+// means the control bead was processed; errControlNotProcessed means
+// ProcessControl made no change to it.
 func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, stderr io.Writer, emits *executionEmitDeferral) error {
 	if cityPath == "" {
 		var err error
