@@ -218,13 +218,15 @@ func liveModelSweepCandidate(info session.Info) bool {
 // accounted issues zero Gets. Best-effort: it never blocks or fails the reconcile
 // tick.
 //
-// bootReconcile disables the live lane. The terminal lane's cost is unchanged by
-// boot — it is gated by a persisted per-interval marker, so it fires once per
-// interval whenever the pass runs — but the live lane's transcript discovery and
-// reads are proportional to the awake fleet, and the boot pass covers the whole
-// fleet at once on the synchronous readiness path. Deferring the live lane to the
-// first steady-state tick costs one tick of billing latency and keeps startup off
-// the critical path (the same trade beadReconcileTick makes for the pool sweep).
+// bootReconcile disables the live lane and the closed-session List. The terminal
+// lane's cost is unchanged by boot — it is gated by a persisted per-interval
+// marker, so it fires once per interval whenever the pass runs — but the live
+// lane's transcript discovery and reads are proportional to the awake fleet, the
+// closed rows a down controller left marked are unbounded, and the boot pass
+// covers them all at once on the synchronous readiness path. Deferring both to
+// the first steady-state tick costs one tick of billing latency and keeps startup
+// off the critical path (the same trade beadReconcileTick makes for the pool
+// sweep); a closed row's interval still ends at its usage_closed_at.
 func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []session.Info, bootReconcile bool) {
 	if cr.cs == nil {
 		return
@@ -361,6 +363,11 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 			continue
 		}
 		processSessionBead(b)
+	}
+	// Closed rows are listed off the boot pass, like the live lane: they
+	// settle from the first steady-state tick, ending at usage_closed_at.
+	if bootReconcile {
+		return
 	}
 	closed, err := store.List(beads.ListQuery{
 		Type:          session.BeadType,
