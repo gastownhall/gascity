@@ -946,6 +946,11 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 	storesForGate, storeKeysForGate := cand.gateStores, cand.gateStoreKeys
 	scoped := cand.scoped
 
+	// The fallback is a deliberate union over the gate's legs: an order's run
+	// evidence is a tracking bead (orders class), a wisp or graph.v2 root
+	// (graph class) or, for a v1 poured formula, a work-class molecule root on
+	// the work leg gateStoresFor adds. Each leg is read by the run label, so a
+	// class leg's read may select nothing there that another leg holds.
 	baseLastRunFn := trackingIndex.lastRunFunc(storesForGate, storeKeysForGate,
 		orders.LastRunFuncWithEventFallback(orders.LastRunAcross(orderFrontDoorsForStores(storesForGate)), m.ep))
 	var lastRunErr error
