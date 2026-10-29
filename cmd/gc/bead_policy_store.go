@@ -735,3 +735,14 @@ func policyTierFromOpts(opts []beads.QueryOpt) beads.TierMode {
 	}
 	return tier
 }
+
+// ImportVerbatim implements beads.VerbatimImporter by forwarding to the
+// wrapped store, for the same reason DeleteBatch forwards: the embedded Store
+// interface does not promote optional capabilities.
+func (s *beadPolicyStore) ImportVerbatim(rows []beads.Bead) error {
+	importer, ok := s.Store.(beads.VerbatimImporter)
+	if !ok {
+		return beads.ErrVerbatimImportUnsupported
+	}
+	return importer.ImportVerbatim(rows)
+}
