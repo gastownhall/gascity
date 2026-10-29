@@ -20,7 +20,9 @@ import (
 // or CI / required without naming the need that failed, so a tool that
 // reads such a red from the failed jobs of its run (the adopt-pr gate's
 // infrastructure rerun does) would count a red probe in the same run as part
-// of it. Their triggers, runners and shared path filter are ci.yml's.
+// of it. Their runners and shared path filter are ci.yml's, and so are their
+// triggers but merge_group: no merge queue entry waits on a probe, and the
+// push to main runs them on the merged commit.
 
 const advisoryProbesWorkflowFile = "advisory-probes.yml"
 
@@ -149,10 +151,12 @@ func TestAdvisoryProbesRunOutsideTheRequiredCIWorkflow(t *testing.T) {
 }
 
 // TestAdvisoryProbesKeepCITriggersInTheirOwnConcurrencyGroup: the probes run
-// on exactly the events ci.yml runs on (pushes to main, pull requests, merge
-// groups and RC Gate's workflow_call), with ci.yml's read-only token, and
+// on the events ci.yml runs on (pushes to main, pull requests and RC Gate's
+// workflow_call) except merge_group, with ci.yml's read-only token, and
 // supersede like ci.yml does (a pull request's newer push cancels its older
-// run; push, merge-group and RC runs are never canceled in progress). The
+// run; push and RC runs are never canceled in progress). They never run in
+// the merge queue: no queue entry waits on a probe, and the push to main runs
+// them on the commit the queue merges. The
 // group's prefix is the workflow's own: concurrency groups are shared by
 // every workflow of the repository, so ci.yml's prefix would let a probe run
 // cancel or queue behind a CI run.
@@ -160,13 +164,21 @@ func TestAdvisoryProbesKeepCITriggersInTheirOwnConcurrencyGroup(t *testing.T) {
 	ci := readAdvisoryProbesDoc(t, "ci.yml")
 	probes := readAdvisoryProbesDoc(t, advisoryProbesWorkflowFile)
 
-	for _, event := range []string{"workflow_call", "push", "pull_request", "merge_group"} {
+	for _, event := range []string{"workflow_call", "push", "pull_request"} {
 		if _, ok := probes.On[event]; !ok {
 			t.Errorf("%s has no %s trigger", advisoryProbesWorkflowFile, event)
 		}
 	}
-	if got, want := withoutInputDescriptions(probes.On), withoutInputDescriptions(ci.On); !reflect.DeepEqual(got, want) {
-		t.Errorf("%s triggers = %v, want ci.yml's %v", advisoryProbesWorkflowFile, got, want)
+	if _, ok := probes.On["merge_group"]; ok {
+		t.Errorf("%s has a merge_group trigger; no queue entry waits on a probe, and the push to main runs them", advisoryProbesWorkflowFile)
+	}
+	if _, ok := ci.On["merge_group"]; !ok {
+		t.Errorf("ci.yml has no merge_group trigger; Check and CI / required must report on every queue entry")
+	}
+	ciOn := maps.Clone(withoutInputDescriptions(ci.On))
+	delete(ciOn, "merge_group")
+	if got := withoutInputDescriptions(probes.On); !reflect.DeepEqual(got, ciOn) {
+		t.Errorf("%s triggers = %v, want ci.yml's but merge_group %v", advisoryProbesWorkflowFile, got, ciOn)
 	}
 	if want := map[string]string{"contents": "read"}; !reflect.DeepEqual(probes.Permissions, want) || !reflect.DeepEqual(ci.Permissions, want) {
 		t.Errorf("permissions: %s %v, ci.yml %v; want both %v", advisoryProbesWorkflowFile, probes.Permissions, ci.Permissions, want)
@@ -248,8 +260,10 @@ func concurrencyGroups(t *testing.T, path string) []string {
 // TestAdvisoryProbesRouteOnCIPathFilters: one routing job decides, as
 // ci.yml's runner-policy and changes jobs did, which runners the probes use
 // and whether each runs: the same runner policy script, the same
-// paths-filter inputs, the probe's filter folded with ci.yml's exact shared
-// filter. The radar reports red; MCP mail stays continue-on-error, because
+// paths-filter action and token, the probe's filter folded with ci.yml's
+// exact shared filter. With no merge_group trigger the filter takes no
+// base or ref: ci.yml sets them from the merge_group payload only, and the
+// action's defaults serve every event the probes run on. The radar reports red; MCP mail stays continue-on-error, because
 // upstream mcp_agent_mail's API may drift.
 func TestAdvisoryProbesRouteOnCIPathFilters(t *testing.T) {
 	ci := readCriticalPathWorkflow(t, "ci.yml")
@@ -276,9 +290,12 @@ func TestAdvisoryProbesRouteOnCIPathFilters(t *testing.T) {
 	if filter.Uses != ciFilter.Uses {
 		t.Errorf("route filter uses %q, want ci.yml's %q", filter.Uses, ciFilter.Uses)
 	}
-	for _, input := range []string{"token", "base", "ref"} {
-		if filter.With[input] != ciFilter.With[input] {
-			t.Errorf("route filter with.%s = %q, want ci.yml's %q", input, filter.With[input], ciFilter.With[input])
+	if filter.With["token"] != ciFilter.With["token"] {
+		t.Errorf("route filter with.token = %q, want ci.yml's %q", filter.With["token"], ciFilter.With["token"])
+	}
+	for _, input := range []string{"base", "ref"} {
+		if v, ok := filter.With[input]; ok {
+			t.Errorf("route filter with.%s = %q; the probes have no merge_group run to diff", input, v)
 		}
 	}
 	filters := pathFilters(t, advisoryProbesWorkflowFile, filter.With["filters"])
