@@ -207,6 +207,13 @@ Orphan release clears `gc.detached` in the same store update that reopens the
 work. If the release update fails, the detached guard remains on the work bead
 for the next controller tick.
 
+The unobservable state is ordinary, not exotic: after `gc stop`,
+`kill-server`, or the last session's exit, tmux unlinks (or `gc` removes) the
+socket, so an absent socket after a deliberate shutdown also holds the claim.
+There is no escape hatch through killing the named tmux session — that server
+is already gone — so a held `gc.detached` clears only by an operator writing
+the metadata key's empty value.
+
 **Dependency-aware bounded parallel starts** (Phase 1b): The bead-driven
 session reconciler plans starts serially, groups them into dependency
 waves, runs each wave with bounded parallelism, then applies
