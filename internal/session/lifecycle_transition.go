@@ -729,6 +729,27 @@ func UsageClosePatch(now time.Time) MetadataPatch {
 	}
 }
 
+// UsageIntervalEnd returns where the awake interval that began at start ended,
+// for compute wall time and the model-usage sweep window. A usage close marker
+// later than start bounds the interval: slept_at wins when it falls inside
+// (start, usage_closed_at], since the session slept before the close. Without
+// one, slept_at ends the interval when it is after start (one carried over
+// from a prior interval is not), else now.
+func UsageIntervalEnd(meta map[string]string, start, now time.Time) time.Time {
+	slept, sleptErr := time.Parse(time.RFC3339, strings.TrimSpace(meta["slept_at"]))
+	sleptInside := sleptErr == nil && slept.After(start)
+	if closedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(meta[MetadataKeyUsageClosedAt])); err == nil && closedAt.After(start) {
+		if sleptInside && !slept.After(closedAt) {
+			return slept
+		}
+		return closedAt
+	}
+	if sleptInside {
+		return slept
+	}
+	return now
+}
+
 // CanonicalCloseReason maps a short session stateCode to a human-readable
 // close reason of at least 20 characters, suitable for use as
 // `bd close --reason` under validation.on-close=error.

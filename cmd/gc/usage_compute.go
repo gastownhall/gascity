@@ -88,8 +88,9 @@ func isLiveModelSweepState(state string) bool {
 // SessionID is stamped from bead.ID so compute facts carry the same session
 // bead join key as model facts.
 //
-// wall_seconds is measured from awake_started_at to slept_at when present (the
-// graceful-sleep end), else to now (best-effort for other terminal transitions).
+// wall_seconds is measured from awake_started_at to session.UsageIntervalEnd:
+// the close a usage close marker records, else slept_at when present (the
+// graceful-sleep end), else now (best-effort for other terminal transitions).
 //
 // RunID is resolved from the session bead's own run chain (workflow_id ||
 // molecule_id || gc.root_bead_id-or-self || bead id). Per-work-bead attribution
@@ -114,18 +115,14 @@ func emitComputeFactForBead(ctx context.Context, sink usage.Sink, store beads.St
 	if err != nil {
 		return false
 	}
-	// Prefer the recorded sleep time as the interval end, but only when it falls
-	// after this interval's start. slept_at is refreshed by both SleepPatch and
-	// AcknowledgeDrainPatch, so for a drained session the end is the drain-ack
-	// time rather than the reconcile tick's now — more accurate, and the After
-	// guard still rejects a slept_at carried over from a PRIOR awake interval
-	// (archive and quarantine exits still don't refresh it). Otherwise use now.
-	end := now
-	if sleptRaw := strings.TrimSpace(meta["slept_at"]); sleptRaw != "" {
-		if t, perr := time.Parse(time.RFC3339, sleptRaw); perr == nil && t.After(startedAt) {
-			end = t
-		}
-	}
+	// The interval ends at the session's close when a close marked it, else at
+	// the recorded sleep time when that falls after this interval's start.
+	// slept_at is refreshed by both SleepPatch and AcknowledgeDrainPatch, so for a
+	// drained session the end is the drain-ack time rather than the reconcile
+	// tick's now, and the After guard rejects a slept_at carried over from a PRIOR
+	// awake interval (archive and quarantine exits don't refresh it). Otherwise
+	// use now.
+	end := session.UsageIntervalEnd(meta, startedAt, now)
 	wall := end.Sub(startedAt).Seconds()
 	if wall < 0 {
 		wall = 0
@@ -351,6 +348,67 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		}
 		processSessionBead(b)
 	}
+	closed, err := store.List(beads.ListQuery{
+		Type:          session.BeadType,
+		Status:        "closed",
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+		Metadata:      map[string]string{session.MetadataKeyUsageClosePending: "true"},
+	})
+	if err != nil {
+		logf("usage: listing closed sessions with unsettled usage failed: %v", err)
+		return
+	}
+	for _, b := range closed {
+		if ctx.Err() != nil {
+			return
+		}
+		cr.settleClosedInterval(ctx, sink, store, b, runtimeKind, now, logf, modelSweepFactory)
+	}
+}
+
+// settleClosedInterval accounts the awake interval a session close marked
+// (session.UsageClosePatch): a close straight from a live state never passes
+// through an open terminal state, so the terminal branch never sees it. It
+// sweeps the interval's model usage and records its compute fact, ending at
+// usage_closed_at, then commits the interval and clears the close markers in
+// one write once the sweep has settled.
+func (cr *CityRuntime) settleClosedInterval(
+	ctx context.Context,
+	sink usage.Sink,
+	store beads.Store,
+	b beads.Bead,
+	runtimeKind string,
+	now time.Time,
+	logf func(string, ...any),
+	modelSweepFactory func() *worker.Factory,
+) {
+	awakeStart := strings.TrimSpace(b.Metadata["awake_started_at"])
+	sweepSettled, swept := true, false
+	if factory := modelSweepFactory(); factory != nil &&
+		strings.TrimSpace(b.Metadata[usageModelSweptAtKey]) != awakeStart {
+		_, settled, serr := factory.SweepSessionModelUsage(ctx, b.ID, b.Metadata, now)
+		if serr != nil {
+			logf("usage: model-usage sweep for closed session %s failed; will retry: %v", b.ID, serr)
+		}
+		sweepSettled, swept = settled, settled
+	}
+	if !emitComputeFactForBead(ctx, sink, store, b, runtimeKind, cr.cityName, now, logf, false) || !sweepSettled {
+		return
+	}
+	patch := map[string]string{
+		usageComputeEmittedAtKey:             awakeStart,
+		session.MetadataKeyUsageClosePending: "",
+		session.MetadataKeyUsageClosedAt:     "",
+	}
+	if swept {
+		patch[usageModelSweptAtKey] = awakeStart
+	}
+	if err := store.SetMetadataBatch(b.ID, patch); err != nil {
+		logf("usage: settling closed session %s failed; will retry (deduped by idempotency key): %v", b.ID, err)
+		return
+	}
+	cr.liveSweepMemos.Delete(b.ID)
 }
 
 // liveSweepMemo is one awake session's live model-usage sweep state, held for
