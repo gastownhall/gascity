@@ -34,7 +34,9 @@ const startDeferralHoldCeiling = 60 * time.Minute
 // never offered a start either, whether it was born after the snapshot was read
 // or the snapshot read lagged it, so it gets one pass of grace too. The memo is
 // process-local and in-memory by design: it holds no bead state, and a restart
-// forgets it, which restores the lease's ordinary rollback.
+// forgets it; until the next complete pass publishes, every never-started
+// create is unseen and gets first-pass grace, still bounded by
+// startDeferralHoldCeiling.
 //
 // A nil memo records and holds nothing. One memo serves one start population:
 // every completed run replaces its record, so only the main reconcile tick

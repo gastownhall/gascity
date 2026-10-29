@@ -1,5 +1,7 @@
 # Start-gate deferral memo release gate
 
+2026-10-28 — Superseded evidence: evaluated at `c6d39b24`; head since advanced and merged with main@`2e934b1a`; current verification is the PR CI run on the merged head.
+
 **Verdict:** **PASS**
 
 Scope: applies to the legacy session reconciler; v2's never-started expiry (allocator_decide.go) does not consult the memo — tracked separately.
@@ -108,17 +110,23 @@ Confirmed ancestry ids:ga-3gbrxuq,ga-b6pvoks,ga-vo2p9cm,ga-n2bzsx,ga-17zmyec,717
 - TestControlDispatcherTickLeavesTheMainTicksDeferralsAlone — PASS
 - TestPendingCreateLeaseAnchor — PASS
 - TestReapStaleSessionBeadsHonorsTheStartDeferralHold — PASS
-- TestStartDeferralMemoBeginPassTakesTheClock — PASS
+- TestStartDeferralMemoBeginPassTakesTheObservation — PASS
 - TestStartDeferralMemoCommitReplacesAndCanceledRunCommitsNothing — PASS
+- TestStartDeferralMemoDoesNotHoldACreateTheLastPassSawButDidNotOffer — added after the `c6d39b24` evaluation; verified by PR CI
 - TestStartDeferralMemoHoldPendingCreate — PASS
 - TestStartDeferralMemoHolds — PASS
+- TestStartDeferralMemoHoldsACreateBornBetweenSnapshotAndExecutor — added after the `c6d39b24` evaluation; verified by PR CI
+- TestStartDeferralMemoHoldsACreateTheSnapshotMissed — added after the `c6d39b24` evaluation; verified by PR CI
 - TestStartDeferralMemoRecordsOnlyStartGateDeferrals — PASS
+- TestStartDeferralMemoSeenIsTheNeverStartedCreatesOfTheSnapshot — added after the `c6d39b24` evaluation; verified by PR CI
+- TestStartDeferralMemoStartOptions — added after the `c6d39b24` evaluation; verified by PR CI
 - TestStartDeferralPassFinishReadsTheContext — PASS
 - TestStartDeferralPassNoteStartOutcome — PASS
 - TestStartGateDeferredFirstChanceHoldsARowBornAfterTheLastPass — PASS
 - TestStartGateDeferredHoldHasACeiling — PASS
 - TestStartGateDeferredHoldReleasesWhenTheSessionIsNoLongerDesired — PASS
 - TestStartGateDeferredHoldTraceDecision — PASS
+- TestStartGateDeferredPartialStorePassLeavesTheMemoAlone — added after the `c6d39b24` evaluation; verified by PR CI
 - TestStartGateDeferredPendingCreateSurvivesTheLeaseAndDrainsOnePerPass — PASS
 - TestStartGateDeferredPendingCreateWritesNothingWhileHeld — PASS
 - TestStartGateDeferredTraceReasonIsDistinct — PASS
