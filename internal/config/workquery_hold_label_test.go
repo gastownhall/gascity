@@ -110,8 +110,11 @@ func TestRouteScopedPoolDemandShellsExcludeHumanLabel(t *testing.T) {
 
 func TestAssigneeScopedProbesStayHumanTransparent(t *testing.T) {
 	for name, got := range map[string]string{
-		"ephemeralAssignedReadyProbeScript":      ephemeralAssignedReadyProbeScript("cand", QueryTopology{}),
-		"ephemeralAssignedInProgressProbeScript": ephemeralAssignedInProgressProbeScript("cand", QueryTopology{}),
+		"ephemeralAssignedReadyProbeScript":       ephemeralAssignedReadyProbeScript("cand", QueryTopology{}),
+		"ephemeralAssignedInProgressProbeScript":  ephemeralAssignedInProgressProbeScript("cand", QueryTopology{}),
+		"assignedReadyTierCommand/bd104":          assignedReadyTierCommand("cand", QueryTopology{}),
+		"assignedReadyTierCommand/bd105":          assignedReadyTierCommand("cand", QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}}),
+		"assignedReadyTierCommand/bd105federated": assignedReadyTierCommand("cand", QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}, FederatedReady: true}),
 	} {
 		if strings.Contains(got, `"human"`) {
 			t.Errorf("%s() = %q, assignee-scoped tier must stay human-transparent", name, got)
