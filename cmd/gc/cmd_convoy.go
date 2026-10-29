@@ -523,6 +523,17 @@ func (v convoyStoreView) isClassBinding() bool {
 	return v.role == convoyViewClassBinding
 }
 
+// classBindingStore is the store of the class-binding view among views, or nil
+// when they federate none: a city that relocates no class.
+func classBindingStore(views []convoyStoreView) beads.Store {
+	for _, view := range views {
+		if view.isClassBinding() {
+			return view.store
+		}
+	}
+	return nil
+}
+
 // scopePath is the directory whose SCOPE owns the view's rows.
 //
 // Every view but the class binding is itself a scope root, so this is usually
@@ -1935,6 +1946,11 @@ func doConvoyCheckAcrossStores(stores []convoyStoreView, rec events.Recorder, st
 // writing no JSON result, if any convoy or store went unchecked. A class
 // binding whose convoys cannot be listed fails the check before it closes
 // anything (collectConvoysForCheck).
+//
+// A convoy's legacy children are counted in the class binding too, when stores
+// federate one: on a split city a graph root poured under a work convoy lives
+// there, and the convoy is not complete while that root is open. The reactive
+// autoclose counts them the same way (doConvoyAutocloseWith).
 func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, unopened int, rec events.Recorder, jsonOut bool, stdout, stderr io.Writer) int {
 	convoys, unlisted, err := collectConvoysForCheck(stores, stderr)
 	if err != nil {
@@ -1942,9 +1958,10 @@ func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, unopened int, rec e
 		return 1
 	}
 
+	binding := classBindingStore(stores)
 	closed, failed := 0, 0
 	for _, item := range convoys {
-		ok, err := closeCompletedConvoy(item.store, item.bead)
+		ok, err := closeCompletedConvoyAcross(item.store, binding, item.bead)
 		switch {
 		case errors.Is(err, errAutocloseRefused), errors.Is(err, beads.ErrNotFound):
 			// The convoy changed or went away after the list; the next check decides it again.
@@ -2410,14 +2427,10 @@ func autocloseCityPathForStoreRoot(storeRoot string) string {
 // what the closed bead's own store does not hold. The zero value is a store
 // that holds everything: the bd on_close hook path and a single-store city.
 type convoyAutocloseHomes struct {
-	// parent names the WORK store a legacy parent id belongs to; nil, or a
-	// nil answer, means the parent shares the closed bead's store.
+	// parent names the WORK store a legacy parent id belongs to, read when
+	// the closed bead's own store does not hold the parent; nil, or a nil
+	// answer, means the parent shares the closed bead's store.
 	parent func(id string) beads.Store
-	// ownFirst reads the parent from the closed bead's own store before its
-	// work home: a relic (a row migrated into the binding under its
-	// work-ledger id) keeps the parent it migrated with, and a work bead that
-	// reuses that parent's id must not answer for it.
-	ownFirst bool
 	// children is the class binding whose legacy children of a work convoy
 	// are counted too, or nil when the city relocates no class.
 	children beads.Store
@@ -2431,11 +2444,16 @@ type convoyAutocloseHomes struct {
 //
 // A convoy is work class, so on a split city it stays on the work ledger while
 // a graph row parented under it (a graph root poured with a parent) lives in
-// the class binding. The parent is read from its work home and from the closed
-// bead's own store (homes), and the convoy is decided and closed where it
-// lives. Its legacy children are counted in the binding too (homes.children),
-// so a child still open there keeps a work-ledger convoy open, whichever child
-// closed last.
+// the class binding. The parent is read from the closed bead's own store first
+// and then from its work home (homes.parent), and the convoy is decided and
+// closed where it lives. The own store leads as every by-id read on a split
+// city reads the binding before the work ledger: a relic (a row migrated into
+// the binding under its work-ledger id) keeps the parent it migrated with, and
+// so does a row minted beside it since (a retry copies its predecessor's
+// parent), so a frozen pre-migration copy or a reused id on the work ledger
+// must not answer for that parent. The convoy's legacy children are counted in
+// the binding too (homes.children), so a child still open there keeps a
+// work-ledger convoy open, whichever child closed last.
 func doConvoyAutocloseWith(store beads.Store, homes convoyAutocloseHomes, rec events.Recorder, beadID string, stdout, _ io.Writer) autocloseRun {
 	var run autocloseRun
 	bead, err := store.Get(beadID)
@@ -2446,17 +2464,11 @@ func doConvoyAutocloseWith(store beads.Store, homes convoyAutocloseHomes, rec ev
 
 	seen := make(map[string]bool)
 	if bead.ParentID != "" {
-		home := store
+		var home beads.Store
 		if homes.parent != nil {
-			if h := homes.parent(bead.ParentID); h != nil {
-				home = h
-			}
+			home = homes.parent(bead.ParentID)
 		}
-		first, second := home, store
-		if homes.ownFirst {
-			first, second = store, home
-		}
-		parent, parentStore, err := autocloseLocate(bead.ParentID, first, second)
+		parent, parentStore, err := autocloseLocate(bead.ParentID, store, home)
 		run.note(err)
 		if err == nil {
 			seen[parent.ID] = true
@@ -2499,20 +2511,15 @@ func convoyStillAutocloses(convoy beads.Bead) bool {
 	return convoy.Type == "convoy" && !convoycore.IsTerminalStatus(convoy.Status) && !hasLabel(convoy.Labels, "owned")
 }
 
-// closeCompletedConvoy closes convoy when it still autocloses and every member
-// is terminal, for the reactive autoclose and gc convoy check alike. The row
-// it decided from may be stale (a cached row; a convoy labeled owned or
-// closed by an operator since), so the close goes through the autoclose fence,
-// which re-reads the convoy live first. It reports whether this call closed
-// it; a fenced close that lost its CAS returns errAutocloseRefused.
-func closeCompletedConvoy(store beads.Store, convoy beads.Bead) (bool, error) {
-	return closeCompletedConvoyAcross(store, nil, convoy)
-}
-
-// closeCompletedConvoyAcross is closeCompletedConvoy for a convoy in store
-// whose legacy children may also sit in childStore (nil: none elsewhere). A
-// child in either store that is not terminal keeps the convoy open; the close
-// happens in store, where the convoy lives.
+// closeCompletedConvoyAcross closes convoy, which lives in store, when it still
+// autocloses and every member is terminal, for the reactive autoclose and gc
+// convoy check alike. Its legacy children may also sit in childStore (nil, or
+// store itself: none elsewhere); a child in either store that is not terminal
+// keeps the convoy open. The row it decided from may be stale (a cached row; a
+// convoy labeled owned or closed by an operator since), so the close goes
+// through the autoclose fence, which re-reads the convoy live first. It
+// reports whether this call closed it; a fenced close that lost its CAS
+// returns errAutocloseRefused.
 func closeCompletedConvoyAcross(store, childStore beads.Store, convoy beads.Bead) (bool, error) {
 	if !convoyStillAutocloses(convoy) {
 		return false, nil
@@ -2544,10 +2551,18 @@ func closeCompletedConvoyAcross(store, childStore beads.Store, convoy beads.Bead
 	if across {
 		var elsewhere []beads.Bead
 		// The second leg of the union: children that live in the convoy's
-		// own store were counted above.
+		// own store were counted above. It states its tier, as every leg of
+		// a federation does (beads.FederatedReadTier): the class binding is
+		// the raw engine, with no policy layer to widen a TierIssues list,
+		// and an open ephemeral child it left out would close the convoy.
 		err := beads.FederatedRead(func() error {
 			var listErr error
-			elsewhere, listErr = childStore.List(beads.ListQuery{ParentID: convoy.ID, IncludeClosed: true, Sort: beads.SortCreatedAsc})
+			elsewhere, listErr = childStore.List(beads.ListQuery{
+				ParentID:      convoy.ID,
+				IncludeClosed: true,
+				Sort:          beads.SortCreatedAsc,
+				TierMode:      beads.FederatedReadTier,
+			})
 			return listErr
 		})
 		if err != nil {

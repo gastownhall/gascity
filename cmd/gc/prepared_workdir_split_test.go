@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -20,7 +21,8 @@ import (
 // (withTriggerBeadResolver); the work dir now reads through it.
 //
 // The v2 start effect (prepareRow, launchWorkDir) holds the same reader over
-// its read-only city work legs (legsTriggerResolver).
+// its read-only city work legs (legsTriggerResolver), and reads the trigger's
+// opt_* pins through it too.
 //
 // Both topologies; the single-store leg is the legacy control.
 
@@ -118,6 +120,27 @@ func TestPreparedStartResolvesARigDrainSourceWorkDir(t *testing.T) {
 		}
 		if v2.cfg.WorkDir != sourceDir {
 			t.Fatalf("v2 prepared work dir = %q, want the rig drain source's %q", v2.cfg.WorkDir, sourceDir)
+		}
+	})
+}
+
+// The v2 start effect launches a pool session with the opt_* pins of its
+// trigger in a rig store: prepareRow reads the trigger through the city work
+// legs (legsTriggerResolver). The sessions store it read before holds no rig
+// work on either topology, so this is a behavior change on single-store cities
+// with rigs too.
+func TestV2PrepareRowAppliesARigTriggersOptionPins(t *testing.T) {
+	forEachTopologyWithRig(t, func(t *testing.T, e splitEnv) {
+		trigger := newTriggerOptionBead(t, e.rig, "", map[string]string{"model": "sonnet"})
+		candidate := newTriggerSessionCandidate(t, e.sessionsStore(), trigger.ID, nil, "")
+		r := effectReads{legs: testWorkLegs(e.cityPath, e.cfg, e.work, e.rigStores).readOnly(), city: e.sessionsStore(), cityPath: e.cityPath}
+		w := &World{CityPath: e.cityPath, Env: &reconcileEnv{Cfg: e.cfg}}
+		prepared, err := prepareRow(r, w, candidate.info, candidate.tp, sessTranscriptUnknown)
+		if err != nil {
+			t.Fatalf("prepareRow: %v", err)
+		}
+		if !strings.Contains(prepared.cfg.Command, "--model claude-sonnet-4-6") {
+			t.Fatalf("v2 prepared command = %q, want the rig trigger %s's opt_model pin --model claude-sonnet-4-6", prepared.cfg.Command, trigger.ID)
 		}
 	})
 }
