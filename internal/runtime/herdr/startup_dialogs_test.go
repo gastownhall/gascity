@@ -91,3 +91,25 @@ func TestStartSkipsStartupDialogsWhenNotEnabled(t *testing.T) {
 		})
 	}
 }
+
+// AC-3: a session with no startup text and no session_setup still gets its
+// trust dialog answered — the step is outside the provisioning tail's gate,
+// because a session parked on a dialog would swallow any later out-of-band
+// nudge. No agent wait, no agent prompt.
+func TestStartAcceptsStartupDialogsWithoutStartupTurn(t *testing.T) {
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
+	setState(t, state, "trust_dialog")
+
+	cfg := runtime.Config{Command: "claude", ProcessNames: []string{"claude"}}
+	if err := p.Start(context.Background(), "gastown__witness", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	calls := fakeCalls(t, state)
+	if !strings.Contains(calls, "pane send-keys %5 enter") {
+		t.Fatalf("trust dialog was not answered for a session with no startup text:\n%s", calls)
+	}
+	if strings.Contains(calls, "agent wait") || strings.Contains(calls, "agent prompt") {
+		t.Fatalf("a session with no startup text must not wait or prompt:\n%s", calls)
+	}
+}
