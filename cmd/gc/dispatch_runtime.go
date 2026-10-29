@@ -455,34 +455,30 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 				os.Getenv("GC_SESSION_ID"), os.Getenv("GC_TEMPLATE"), serveQuery, err)
 			return result, fmt.Errorf("querying control work for %s: %w", agentCfg.QualifiedName(), err)
 		}
-		if len(queue) == 0 {
-			if result.processedAny && idlePolls < workflowServeIdlePollAttempts {
-				idlePolls++
-				workflowTracef("serve idle-retry agent=%s attempt=%d", agentCfg.QualifiedName(), idlePolls)
-				time.Sleep(workflowServeIdlePollInterval)
-				continue
-			}
-			workflowTracef("serve idle-exit agent=%s", agentCfg.QualifiedName())
-			return result, nil
-		}
-		idlePolls = 0
 		processedThisCycle := false
 		pendingCount := 0
+		skippedCount := 0
 		for _, candidate := range queue {
 			beadID := candidate.ID
 			kind := strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])
 			workflowTracef("serve process bead=%s kind=%s store=%s", beadID, kind, storePath)
-			// controlDispatcherServe currently returns nil both when it
-			// successfully advanced a control bead AND when ProcessControl
-			// chose to no-op (e.g., status != "open"). The caller cannot
-			// tell those apart without cross-referencing the store, so the
-			// trace line just below was previously identical in both
-			// cases. That masked a 20-minute stall on ga-ttn5z's retry
-			// control ga-fw2fm. The silent no-op now emits a separate
-			// `process-control ... skip reason=bead_not_open` line inside
-			// ProcessControl itself; see runtime.go.
+			// controlDispatcherServe returns nil when the dispatch advanced
+			// the control bead and errControlNotProcessed when ProcessControl
+			// made no change (a bead whose status is no longer open; see
+			// runtime.go for the skip trace line). The two must stay distinct:
+			// counted as progress, a no-op made one persistent non-open queue
+			// row re-query the store with no sleep and rewrite the dispatch
+			// wake file on every pass, pinning the --follow idle backoff at its
+			// floor (gastownhall/gascity#6024).
 			callsBefore, started := snapshotControlBdCalls(), time.Now()
 			if err := controlDispatcherServe(cityPath, storePath, beadID, io.Discard, stderr, emits); err != nil {
+				if errors.Is(err, errControlNotProcessed) {
+					skippedCount++
+					calls := snapshotControlBdCalls().since(callsBefore)
+					workflowTracef("serve skipped bead=%s kind=%s bd_reads=%d bd_writes=%d dur=%s",
+						beadID, kind, calls.reads, calls.writes, time.Since(started).Round(time.Millisecond))
+					continue
+				}
 				if errors.Is(err, dispatch.ErrControlPending) {
 					pendingCount++
 					// Same rule as the transient arm below: a pending bead
@@ -528,7 +524,11 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			processedThisCycle = true
 		}
 		if processedThisCycle {
-			// Signal workers to skip their poll sleep: new step beads may be ready.
+			// A processed pass restarts the bounded idle exit below — the
+			// re-poll exists to absorb read-after-write lag in the ready
+			// source after this drain wrote — and signals workers to skip
+			// their poll sleep: new step beads may be ready.
+			idlePolls = 0
 			writeDispatchWakeFile(cityPath)
 			continue
 		}
@@ -536,6 +536,22 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			workflowTracef("serve pending-queue agent=%s count=%d", agentCfg.QualifiedName(), pendingCount)
 			return result, nil
 		}
+		if skippedCount > 0 {
+			workflowTracef("serve skip-queue agent=%s count=%d", agentCfg.QualifiedName(), skippedCount)
+		}
+		// Empty queue or skips only: a pass that neither processed nor went
+		// pending ends through one bounded idle exit. The re-poll runs only
+		// after this drain processed something, so a persistent non-open row
+		// cannot keep the queue non-empty and defeat the bound; a skip-only
+		// drain that never processed exits immediately.
+		if result.processedAny && idlePolls < workflowServeIdlePollAttempts {
+			idlePolls++
+			workflowTracef("serve idle-retry agent=%s attempt=%d", agentCfg.QualifiedName(), idlePolls)
+			time.Sleep(workflowServeIdlePollInterval)
+			continue
+		}
+		workflowTracef("serve idle-exit agent=%s", agentCfg.QualifiedName())
+		return result, nil
 	}
 }
 

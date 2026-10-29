@@ -35,6 +35,18 @@ import (
 
 var dispatchControlSessionProvider = newSessionProvider
 
+// errControlNotProcessed reports that a control dispatch made no change:
+// ProcessControl answered with a nil error and Processed=false (the bead is no
+// longer open, a spawned fanout's finalize is still pending, a ralph check is
+// terminal). The serve drain must be able to tell such a no-op apart from an
+// advance, because counting it as progress made one persistent non-open queue
+// row re-query the store with no sleep, rewrite the dispatch wake file on
+// every pass, and pin the --follow idle backoff at its 1s floor
+// (gastownhall/gascity#6024). It is unexported and cmd-local: the one-shot
+// `gc convoy control <id>` path maps it back to nil so CLI output is
+// unchanged.
+var errControlNotProcessed = errors.New("control bead not processed")
+
 const maxControlQuarantineReasonMetadata = 512
 
 func sourceWorkflowCommandContext() (context.Context, context.CancelFunc) {
@@ -158,8 +170,11 @@ func runControlDispatcher(beadID string, stdout, stderr io.Writer) error {
 var openControlStoreForDispatch = openControlStoreAtForCity
 
 // runControlDispatcherInStore dispatches one control bead for the serve drain.
-// When emits is non-nil, the execution-fact projection for a control that
-// created no steps is deferred to it; nil projects synchronously.
+// It returns nil only when the dispatch advanced the control bead, and
+// errControlNotProcessed when ProcessControl made no change, so the drain can
+// tell a no-op apart from progress. When emits is non-nil, the execution-fact
+// projection for a control that created no steps is deferred to it; nil
+// projects synchronously.
 func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, stderr io.Writer, emits *executionEmitDeferral) error {
 	if cityPath == "" {
 		var err error
@@ -214,12 +229,21 @@ func runControlDispatcherWithStore(cityPath, storePath string, store beads.Store
 // scope comes from an unrouted store, and gating on it while writing elsewhere
 // re-runs a control kind the graph store had already finished.
 func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store beads.Store, beadID string, cfg *config.City, stdout, stderr io.Writer) error {
-	return runControlDispatcherDeferringEmits(cityPath, storePath, store, beadID, cfg, stdout, stderr, nil)
+	err := runControlDispatcherDeferringEmits(cityPath, storePath, store, beadID, cfg, stdout, stderr, nil)
+	// The one-shot CLI has no drain to inform about a no-op: `gc convoy
+	// control <id>` keeps its contract of nil and no output when ProcessControl
+	// changed nothing.
+	if errors.Is(err, errControlNotProcessed) {
+		return nil
+	}
+	return err
 }
 
 // runControlDispatcherDeferringEmits is runControlDispatcherWithStoreAndConfig
 // for the serve drain: a non-nil emits receives the execution-fact projection
-// of a control that created no steps instead of running it inline.
+// of a control that created no steps instead of running it inline. It returns
+// errControlNotProcessed when ProcessControl made no change, so the serve
+// drain can count the dispatch as neither processed nor pending.
 func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.Store, beadID string, cfg *config.City, stdout, stderr io.Writer, emits *executionEmitDeferral) error {
 	restoreTraceWarnings := useWorkflowTraceWarnings(stderr)
 	defer restoreTraceWarnings()
@@ -335,31 +359,37 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 	if err != nil {
 		return handleControlDispatchError(cityPath, storePath, graphStore, bead, beadID, err, stderr)
 	}
-	if result.Processed {
-		if rootID := controlRootID(bead.Metadata); rootID != "" {
-			switch {
-			case emits != nil && result.Created == 0:
-				// Nothing new to define: the serve drain projects this root
-				// once, after its last queued control (executionEmitDeferral).
-				emits.add(rootID, relicGraphLeg)
-			default:
-				if emits != nil {
-					emits.forget(rootID)
-				}
-				if err := emitExecutionFacts(cityPath, store, []executionEmitTarget{{rootID: rootID, graphStore: graphStore}}, stderr); err != nil {
-					fmt.Fprintf(stderr, "warning: control dispatch: projecting execution facts for %s: %v\n", rootID, err) //nolint:errcheck // successful control processing is preserved
-				}
+	if !result.Processed {
+		// A nil error with nothing processed is a no-op (see
+		// errControlNotProcessed). Only the nil-error ProcessControl branch can
+		// produce it: a quarantined error path returns nil through
+		// handleControlDispatchError above, and that quarantine close is a
+		// write the drain must keep counting as progress.
+		return errControlNotProcessed
+	}
+	if rootID := controlRootID(bead.Metadata); rootID != "" {
+		switch {
+		case emits != nil && result.Created == 0:
+			// Nothing new to define: the serve drain projects this root
+			// once, after its last queued control (executionEmitDeferral).
+			emits.add(rootID, relicGraphLeg)
+		default:
+			if emits != nil {
+				emits.forget(rootID)
+			}
+			if err := emitExecutionFacts(cityPath, store, []executionEmitTarget{{rootID: rootID, graphStore: graphStore}}, stderr); err != nil {
+				fmt.Fprintf(stderr, "warning: control dispatch: projecting execution facts for %s: %v\n", rootID, err) //nolint:errcheck // successful control processing is preserved
 			}
 		}
-		_, _ = fmt.Fprintf(stdout, "control dispatch: bead=%s action=%s", beadID, result.Action)
-		if result.Created > 0 {
-			_, _ = fmt.Fprintf(stdout, " created=%d", result.Created)
-		}
-		if result.Skipped > 0 {
-			_, _ = fmt.Fprintf(stdout, " skipped=%d", result.Skipped)
-		}
-		fmt.Fprintln(stdout) //nolint:errcheck
 	}
+	_, _ = fmt.Fprintf(stdout, "control dispatch: bead=%s action=%s", beadID, result.Action)
+	if result.Created > 0 {
+		_, _ = fmt.Fprintf(stdout, " created=%d", result.Created)
+	}
+	if result.Skipped > 0 {
+		_, _ = fmt.Fprintf(stdout, " skipped=%d", result.Skipped)
+	}
+	fmt.Fprintln(stdout) //nolint:errcheck
 	return nil
 }
 
