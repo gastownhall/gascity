@@ -26,7 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   these variables to name its own bead must use `gc hook current --id-only`
   instead, for example `BEAD_ID="${GC_BEAD_ID:-$(gc hook current --id-only)}"`.
   To tell whether a session was demand-spawned, check
-  `GC_SPAWN_ORIGIN=demand`, which names no bead.
+  `GC_SPAWN_ORIGIN=demand`, which names no bead. A session no longer
+  inherits these variables, or `GC_SPAWN_ORIGIN`, from the controller's own
+  environment either: a supervisor started from inside a session used to
+  pass that session's values on to the sessions it started.
 - **Stop a split city whose storage check refuses before you deploy, and
   repair it with the new `gc`: `gc hook` now stops claiming there.** Before
   `gc hook` claims work for a session, it reads that session's drain state

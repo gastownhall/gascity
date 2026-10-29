@@ -40,6 +40,10 @@ import (
 // seat it minted from counted demand (build_desired_state.go).
 const demandSpawnOriginValue = "demand"
 
+// demandTriggerUnreadable is the TriggerStatusAtDrain of a read that failed:
+// the seat's session row, or the trigger row its stamp names.
+const demandTriggerUnreadable = "unreadable"
+
 // hookRecordDemandClaimDivergence is the emitter seam, replaced in tests.
 var hookRecordDemandClaimDivergence = recordDemandClaimDivergence
 
@@ -60,8 +64,11 @@ func recordDemandClaimDivergence(reason, dir string, opts hookClaimOptions, ops 
 	if sessionID == "" {
 		return
 	}
-	triggerID := demandSessionTrigger(sessionID, ops)
-	status, classification := classifyDemandTrigger(triggerID, dir, opts, ops)
+	triggerID, readErr := demandSessionTrigger(sessionID, ops)
+	status, classification := demandTriggerUnreadable, events.DemandClaimUnknown
+	if readErr == nil {
+		status, classification = classifyDemandTrigger(triggerID, dir, opts, ops)
+	}
 	payload, err := json.Marshal(events.SessionDemandClaimDivergencePayload{
 		SessionID:            sessionID,
 		Template:             hookClaimEnvValue(opts.Env, "GC_TEMPLATE"),
@@ -93,18 +100,20 @@ func recordDemandClaimDivergence(reason, dir string, opts hookClaimOptions, ops 
 	}
 }
 
-// demandSessionTrigger is the trigger stamp on sessionID's row, or "" when
-// the row cannot be read. An unread stamp classifies as unknown, the same as
-// a row with no stamp, so a failed read never manufactures a verdict.
-func demandSessionTrigger(sessionID string, ops hookClaimOps) string {
+// demandSessionTrigger is the trigger stamp on sessionID's row: "" when the
+// row carries none, an error when it cannot be read. The caller records a
+// failed read as demandTriggerUnreadable and unknown, never as the "no stamp"
+// an empty id means, so a failed read neither manufactures a verdict nor
+// passes for an unstamped seat.
+func demandSessionTrigger(sessionID string, ops hookClaimOps) (string, error) {
 	if ops.ReadSessionTrigger == nil {
-		return ""
+		return "", nil
 	}
 	triggerID, err := ops.ReadSessionTrigger(sessionID)
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return strings.TrimSpace(triggerID)
+	return strings.TrimSpace(triggerID), nil
 }
 
 // classifyDemandTrigger reads the trigger row and reports (status, verdict).
@@ -123,7 +132,7 @@ func classifyDemandTrigger(triggerID, dir string, opts hookClaimOptions, ops hoo
 	defer cancel()
 	bead, err := ops.ReadWorkMeta(ctx, dir, opts.Env, triggerID, opts.Assignee)
 	if err != nil {
-		return "unreadable", events.DemandClaimUnknown
+		return demandTriggerUnreadable, events.DemandClaimUnknown
 	}
 	status = strings.ToLower(strings.TrimSpace(bead.Status))
 	// The invariant is about a row that is STILL claimable by a worker for this

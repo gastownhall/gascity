@@ -350,9 +350,10 @@ func TestDivergenceClassifiesTheSessionRowStampNotTheEnv(t *testing.T) {
 	}
 }
 
-// Kills a failed session-row read that invents a verdict or reaches into the
-// drain: the event carries no trigger and classifies unknown, and the drain's
-// stdout and exit code match a seat the diagnostics skip entirely.
+// Kills a failed session-row read that invents a verdict, passes for a row
+// with no stamp, or reaches into the drain: the event carries no trigger, an
+// "unreadable" status and an unknown verdict, and the drain's stdout and exit
+// code match a seat the diagnostics skip entirely.
 func TestDivergenceWithAnUnreadableSessionRowIsUnknownAndLeavesTheDrainAlone(t *testing.T) {
 	rec := events.NewFake()
 	prev := demandDivergenceRecorder
@@ -387,8 +388,8 @@ func TestDivergenceWithAnUnreadableSessionRowIsUnknownAndLeavesTheDrainAlone(t *
 	if err := json.Unmarshal(rec.Events[0].Payload, &payload); err != nil {
 		t.Fatalf("decoding payload: %v", err)
 	}
-	if payload.TriggerBeadID != "" || payload.TriggerStatusAtDrain != "" || payload.Classification != events.DemandClaimUnknown {
-		t.Fatalf("payload = %+v, want no trigger and an unknown verdict", payload)
+	if payload.TriggerBeadID != "" || payload.TriggerStatusAtDrain != "unreadable" || payload.Classification != events.DemandClaimUnknown {
+		t.Fatalf("payload = %+v, want no trigger, an unreadable status and an unknown verdict", payload)
 	}
 }
 

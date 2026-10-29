@@ -8240,10 +8240,8 @@ func TestResolvePreservedConfiguredNamedSessionTemplate_ClearsStaleTriggerStamp(
 	if err != nil {
 		t.Fatalf("resolve preserved named session: %v", err)
 	}
-	assertEnvNamesNoTriggerID(t, "resolved env for a blocked target", preservedTP.Env)
-	if got, ok := preservedTP.Env["GC_SPAWN_ORIGIN"]; ok {
-		t.Errorf("GC_SPAWN_ORIGIN = %q, want unset once the stamp is cleared", got)
-	}
+	assertEnvWithholdsTriggerIDs(t, "resolved env for a blocked target", preservedTP.Env)
+	assertEnvWithholds(t, "resolved env once the stamp is cleared", preservedTP.Env, "GC_SPAWN_ORIGIN")
 	// The returned Info carries the clear back to the caller's snapshot; a
 	// caller that keeps its pre-call Info re-injects the stamp downstream.
 	if preservedInfo.TriggerBeadID != "" {
@@ -8282,7 +8280,7 @@ func TestResolvePreservedConfiguredNamedSessionTemplate_SurvivingStampCarriesOnl
 	if err != nil {
 		t.Fatalf("resolve preserved named session: %v", err)
 	}
-	assertEnvNamesNoTriggerID(t, "resolved env for a workable target", preservedTP.Env)
+	assertEnvWithholdsTriggerIDs(t, "resolved env for a workable target", preservedTP.Env)
 	if got := preservedTP.Env["GC_SPAWN_ORIGIN"]; got != demandSpawnOriginValue {
 		t.Errorf("GC_SPAWN_ORIGIN = %q, want %q while the stamp survives", got, demandSpawnOriginValue)
 	}

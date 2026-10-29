@@ -191,7 +191,7 @@ func TestTemplateResolverNamedMatchesLegacyWithoutRebind(t *testing.T) {
 				if got.TP.Env["GC_SPAWN_ORIGIN"] != "demand" || want.TP.Env["GC_SPAWN_ORIGIN"] != "" {
 					t.Fatalf("demand marker: resolver %q, legacy %q; want the row's stamp marked and none", got.TP.Env["GC_SPAWN_ORIGIN"], want.TP.Env["GC_SPAWN_ORIGIN"])
 				}
-				delete(got.TP.Env, "GC_SPAWN_ORIGIN")
+				got.TP.Env["GC_SPAWN_ORIGIN"] = "" // withheld, as legacy's cleared stamp leaves it
 			}
 			if !reflect.DeepEqual(got.TP, want.TP) {
 				t.Fatalf("resolver = %+v, want legacy's %+v", got.TP, want.TP)

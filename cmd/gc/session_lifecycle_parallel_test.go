@@ -181,14 +181,39 @@ func TestSessionDemandSpawnEnv(t *testing.T) {
 	}
 }
 
-// assertEnvNamesNoTriggerID fails for every GC_TRIGGER_* key in env: a
-// session shell never learns the trigger id (gastownhall/gascity#5738).
-func assertEnvNamesNoTriggerID(t *testing.T, label string, env map[string]string) {
+// assertEnvWithholds fails unless env withholds each key: present and empty,
+// never absent. A session env is an overlay on the environment the session
+// already inherits, so an absent key lets the controller's own copy through.
+func assertEnvWithholds(t *testing.T, label string, env map[string]string, keys ...string) {
 	t.Helper()
-	for key, value := range env {
-		if strings.HasPrefix(key, "GC_TRIGGER_") {
-			t.Errorf("%s: %s = %q, want no GC_TRIGGER_* key", label, key, value)
+	for _, key := range keys {
+		if value, ok := env[key]; !ok || value != "" {
+			t.Errorf("%s: %s = (%q, present=%v), want withheld (present and empty)", label, key, value, ok)
 		}
+	}
+}
+
+// assertEnvWithholdsTriggerIDs fails unless env withholds every trigger id
+// key and gives no GC_TRIGGER_* key a value: a session shell never learns a
+// trigger id (gastownhall/gascity#5738).
+func assertEnvWithholdsTriggerIDs(t *testing.T, label string, env map[string]string) {
+	t.Helper()
+	assertEnvWithholds(t, label, env, "GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID", "GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF")
+	for key, value := range env {
+		if strings.HasPrefix(key, "GC_TRIGGER_") && value != "" {
+			t.Errorf("%s: %s = %q, want no GC_TRIGGER_* value", label, key, value)
+		}
+	}
+}
+
+// setControllerDemandSpawnEnv gives this process, the controller, the
+// demand-spawn keys of an agent pane it was started from, so a session env
+// that omits a key rather than withholding it inherits a foreign value.
+func setControllerDemandSpawnEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("GC_SPAWN_ORIGIN", demandSpawnOriginValue)
+	for _, key := range []string{"GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID", "GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"} {
+		t.Setenv(key, "ga-foreign")
 	}
 }
 
@@ -9343,6 +9368,9 @@ func TestLegacyPostStartDeathClassifiesARefusedResume(t *testing.T) {
 // marked demand-spawned for the parked bead. Asserting on the resolved
 // TemplateParams cannot catch that; only prepared.cfg.Env can.
 func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
+	// The controller carries a launching pane's demand-spawn keys too: the
+	// seat withholds them rather than inheriting that pane's marker.
+	setControllerDemandSpawnEnv(t)
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
@@ -9383,10 +9411,8 @@ func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
-	assertEnvNamesNoTriggerID(t, "launch env for a parked target", prepared.cfg.Env)
-	if got, ok := prepared.cfg.Env["GC_SPAWN_ORIGIN"]; ok {
-		t.Errorf("launched GC_SPAWN_ORIGIN = %q, want unset once the stamp is cleared", got)
-	}
+	assertEnvWithholdsTriggerIDs(t, "launch env for a parked target", prepared.cfg.Env)
+	assertEnvWithholds(t, "launch env once the stamp is cleared", prepared.cfg.Env, "GC_SPAWN_ORIGIN")
 	after, err := store.Get(session.ID)
 	if err != nil {
 		t.Fatalf("Get session bead after prepare: %v", err)
@@ -9397,9 +9423,11 @@ func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
 }
 
 // Kills a legacy named-session start that hands the shell the trigger id a
-// surviving stamp names: the launch env carries only the demand marker, and
-// the durable stamp stays (gastownhall/gascity#5738).
+// surviving stamp names, or the controller's own copy of one: the launch env
+// carries only the demand marker, and the durable stamp stays
+// (gastownhall/gascity#5738).
 func TestPrepareStartCandidateForCity_SurvivingNamedTriggerLaunchesWithOnlyTheDemandMarker(t *testing.T) {
+	setControllerDemandSpawnEnv(t)
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
@@ -9438,7 +9466,7 @@ func TestPrepareStartCandidateForCity_SurvivingNamedTriggerLaunchesWithOnlyTheDe
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
-	assertEnvNamesNoTriggerID(t, "launch env for a workable target", prepared.cfg.Env)
+	assertEnvWithholdsTriggerIDs(t, "launch env for a workable target", prepared.cfg.Env)
 	if got := prepared.cfg.Env["GC_SPAWN_ORIGIN"]; got != demandSpawnOriginValue {
 		t.Errorf("launched GC_SPAWN_ORIGIN = %q, want %q while the stamp survives", got, demandSpawnOriginValue)
 	}

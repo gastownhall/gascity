@@ -1730,7 +1730,9 @@ var controllerOnlyEnvKeys = func() map[string]bool {
 // "reaches every agent session" instead of requiring two separate,
 // independently-maintained allowlists to agree. controllerOnlyEnvKeys is
 // checked before either path and cannot be bypassed by an opt-in; those keys
-// come back pinned to the empty string rather than absent.
+// come back pinned to the empty string rather than absent. The demand-spawn
+// keys (processenv.DemandSpawnEnvKeys) are skipped the same way: the
+// controller's own copy describes some other session's spawn.
 func passthroughEnv() map[string]string {
 	m := providerProcessPassthroughEnv()
 	explicitKeys := supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV"))
@@ -1740,7 +1742,7 @@ func passthroughEnv() map[string]string {
 	}
 	for _, entry := range os.Environ() {
 		key, val, ok := strings.Cut(entry, "=")
-		if !ok || val == "" || controllerOnlyEnvKeys[key] {
+		if !ok || val == "" || controllerOnlyEnvKeys[key] || processenv.IsDemandSpawnEnv(key) {
 			continue
 		}
 		if !strings.HasPrefix(key, "GC_") && !explicit[key] {

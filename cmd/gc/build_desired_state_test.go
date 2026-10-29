@@ -4236,11 +4236,7 @@ func TestRealizePoolDesiredSessionsBindsTriggerBeadToFreshSession(t *testing.T) 
 		if got := tp.Env["GC_SPAWN_ORIGIN"]; got != "demand" {
 			t.Fatalf("GC_SPAWN_ORIGIN = %q, want demand", got)
 		}
-		for key, value := range tp.Env {
-			if strings.HasPrefix(key, "GC_TRIGGER_") {
-				t.Errorf("seat env %s = %q, want no GC_TRIGGER_* key", key, value)
-			}
-		}
+		assertEnvWithholdsTriggerIDs(t, "seat env", tp.Env)
 		if got := tp.Env["GC_PACKER_PACK"]; got != "packer" {
 			t.Fatalf("GC_PACKER_PACK = %q, want packer", got)
 		}
@@ -14678,44 +14674,53 @@ func TestBuildDesiredState_APICreatedAgentSessionBeadStaysDesired(t *testing.T) 
 // gastownhall/gascity#5738: a demand-spawned pool seat's shell must carry only
 // the presence-only GC_SPAWN_ORIGIN marker, never an id-shaped trigger hint a
 // ${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-…}} close chain could mistake for the
-// bead the seat actually claimed (the pool is pull).
+// bead the seat actually claimed (the pool is pull). That holds when the
+// controller's own environment carries a launching pane's GC_TRIGGER_* keys
+// too: the seat withholds them rather than inheriting a foreign id, and an
+// unstamped seat withholds the marker as well.
 func TestRealizePoolDesiredSessionsSeatShellCarriesNoTriggerBeadID(t *testing.T) {
-	store := beads.NewMemStore()
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test-city"},
-		Agents: []config.Agent{{
-			Name:              "worker",
-			StartCommand:      "true",
-			MinActiveSessions: intPtr(0),
-			MaxActiveSessions: intPtr(1),
-		}},
-	}
-	var stderr bytes.Buffer
-	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
-	bp.sessionBeads = &sessionBeadSnapshot{}
-	desired := map[string]TemplateParams{}
-
-	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
-		Template: "worker",
-		Requests: []SessionRequest{{
-			Template:     "worker",
-			Tier:         "new",
-			WorkBeadID:   "gp-a",
-			WorkStoreRef: "rig:gascity",
-		}},
-	}, desired, &stderr)
-
-	if len(desired) != 1 {
-		t.Fatalf("desired sessions = %d, want 1; stderr=%q", len(desired), stderr.String())
-	}
-	for _, tp := range desired {
-		if got := tp.Env["GC_SPAWN_ORIGIN"]; got != "demand" {
-			t.Errorf("GC_SPAWN_ORIGIN = %q, want demand", got)
-		}
-		for _, key := range []string{"GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID", "GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"} {
-			if got, ok := tp.Env[key]; ok {
-				t.Errorf("pool seat shell env %s = %q, want absent (foreign bead id reachable by a close chain)", key, got)
+	for _, c := range []struct {
+		name, workBeadID, wantOrigin string
+	}{
+		{"stamped", "gp-a", demandSpawnOriginValue},
+		{"unstamped", "", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			setControllerDemandSpawnEnv(t)
+			store := beads.NewMemStore()
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:              "worker",
+					StartCommand:      "true",
+					MinActiveSessions: intPtr(0),
+					MaxActiveSessions: intPtr(1),
+				}},
 			}
-		}
+			var stderr bytes.Buffer
+			bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+			bp.sessionBeads = &sessionBeadSnapshot{}
+			desired := map[string]TemplateParams{}
+
+			realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+				Template: "worker",
+				Requests: []SessionRequest{{
+					Template:     "worker",
+					Tier:         "new",
+					WorkBeadID:   c.workBeadID,
+					WorkStoreRef: "rig:gascity",
+				}},
+			}, desired, &stderr)
+
+			if len(desired) != 1 {
+				t.Fatalf("desired sessions = %d, want 1; stderr=%q", len(desired), stderr.String())
+			}
+			for _, tp := range desired {
+				assertEnvWithholdsTriggerIDs(t, "pool seat shell env", tp.Env)
+				if got, ok := tp.Env["GC_SPAWN_ORIGIN"]; !ok || got != c.wantOrigin {
+					t.Errorf("GC_SPAWN_ORIGIN = (%q, present=%v), want %q", got, ok, c.wantOrigin)
+				}
+			}
+		})
 	}
 }

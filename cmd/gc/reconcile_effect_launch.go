@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -264,26 +265,22 @@ func preWakeRefuses(d session.Disposition, reason string, now time.Time) bool {
 	return d.RefusesPreWake(now)
 }
 
-// triggerEnvKeys are the template env keys a row's trigger stamp may have
-// put in a launch env: the demand marker sessionDemandSpawnEnv writes, and
-// the trigger ids an older template still carries. boundTemplate strips
-// them all so none of them reaches a session shell (gastownhall/gascity#5738).
-var triggerEnvKeys = []string{"GC_SPAWN_ORIGIN", "GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID", "GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"}
-
 // boundTemplate is tp with its demand env derived from row, as legacy binds
 // and then resolves: the presence-only demand marker when the row is
-// stamped, none when it is not, and never a GC_TRIGGER_* key.
+// stamped, and every other demand-spawn key (processenv.DemandSpawnEnvKeys)
+// withheld, including a trigger id an older template still carries. It pins
+// them empty rather than deleting them: the launch env is an overlay on the
+// environment the session already inherits, so a deleted key would let the
+// controller's own copy through (gastownhall/gascity#5738).
 func boundTemplate(tp TemplateParams, row session.Info) TemplateParams {
 	env := maps.Clone(tp.Env)
-	for _, k := range triggerEnvKeys {
-		delete(env, k)
+	if env == nil {
+		env = make(map[string]string, len(processenv.DemandSpawnEnvKeys))
 	}
-	if demand := sessionDemandSpawnEnv(row); demand != nil {
-		if env == nil {
-			env = make(map[string]string, len(demand))
-		}
-		maps.Copy(env, demand)
+	for _, k := range processenv.DemandSpawnEnvKeys {
+		env[k] = ""
 	}
+	maps.Copy(env, sessionDemandSpawnEnv(row))
 	tp.Env = env
 	return tp
 }
