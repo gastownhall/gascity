@@ -2023,34 +2023,9 @@ func TestE1LazyMissingTreeMatchesEagerFlagOwnership(t *testing.T) {
 			want: "city-b-sync args:<--rig=" + targetRig + "><payload>\n",
 		},
 		{
-			name: "leaf city separate is child owned",
-			args: []string{"backstage", "hello", "--city", cityB, "payload"},
-			want: "city-a-hello args:<--city><" + cityB + "><payload>\n",
-		},
-		{
-			name: "leaf city equals is child owned",
-			args: []string{"backstage", "hello", "--city=" + cityB, "payload"},
-			want: "city-a-hello args:<--city=" + cityB + "><payload>\n",
-		},
-		{
-			name: "leaf empty scope is child owned",
-			args: []string{"backstage", "hello", "--city=", "--rig", "", "payload"},
-			want: "city-a-hello args:<--city=><--rig><><payload>\n",
-		},
-		{
-			name: "leaf repeated scopes are child owned",
+			name: "leaf repeated scopes ending on the bound city pass through",
 			args: []string{"backstage", "hello", "--city", cityB, "--city=" + cityA, "payload"},
 			want: "city-a-hello args:<--city><" + cityB + "><--city=" + cityA + "><payload>\n",
-		},
-		{
-			name: "leaf malformed help and rig are child owned",
-			args: []string{"backstage", "hello", "-h=maybe", "--rig=child-rig"},
-			want: "city-a-hello args:<-h=maybe><--rig=child-rig>\n",
-		},
-		{
-			name: "leaf valued help and city are child owned",
-			args: []string{"backstage", "hello", "--help=true", "--city", cityB},
-			want: "city-a-hello args:<--help=true><--city><" + cityB + ">\n",
 		},
 		{
 			name: "post terminator controls are child owned",
