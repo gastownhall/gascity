@@ -16,9 +16,13 @@ import (
 // for query, in the order it issues them, on a scope whose infra-type setting
 // is unset. The store unions their rows by id and ApplyListQuery then applies
 // the whole query exactly, so a plan only decides how many rows cross from the
-// backend, never which rows the caller receives: every predicate it pushes is
-// exact or a superset of the query's. The one exception is a Live "open", which
+// backend, never which rows the caller receives: the union of the requests
+// covers every matching row. The one exception is a Live "open", which
 // is pushed as bd's raw status (nativeListPushesRawOpen).
+//
+// Exact IDs are deduplicated and split into bounded IDFilter requests. A
+// backend that refuses IDFilter is read without it and filtered in Go. Limits
+// stay in Go for every IDs query, including unrepresentable ID strings.
 //
 // A plural Assignees set fans out into one request per distinct assignee, each
 // with that assignee pushed, however many there are: a keyed request reads one
@@ -34,7 +38,7 @@ import (
 // held at a single instant, but every row in it was true when it was read, and
 // the next hook's listing reads the moved row where it now lives. Hooks
 // tolerate that by design — they are re-run on every turn and converge — and a
-// caller that needs one instant's answer passes a singular Assignee.
+// caller that needs one instant's answer uses a plan with one request.
 //
 // It is a pure function of the query so a test can price a recorded List
 // without a server: each request costs one backend listing, and a request that
@@ -47,17 +51,51 @@ func NativeListPlan(query ListQuery) []issueops.ListRequest {
 // set pushes no type at all.
 func nativeListPlan(query ListQuery, pushableTypes map[string]bool) []issueops.ListRequest {
 	base := nativeListRequestFromListQuery(query, pushableTypes)
-	assignees := nativeListFanOutAssignees(query)
-	if len(assignees) == 0 {
-		return []issueops.ListRequest{base}
+	plan := []issueops.ListRequest{base}
+	if assignees := nativeListFanOutAssignees(query); len(assignees) > 0 {
+		plan = make([]issueops.ListRequest, 0, len(assignees))
+		for _, assignee := range assignees {
+			req := base
+			req.Assignee = assignee
+			plan = append(plan, req)
+		}
 	}
-	plan := make([]issueops.ListRequest, 0, len(assignees))
-	for _, assignee := range assignees {
-		req := base
-		req.Assignee = assignee
-		plan = append(plan, req)
+	filters := nativeListIDFilters(query.IDs)
+	if len(filters) == 0 {
+		return plan
 	}
-	return plan
+	out := make([]issueops.ListRequest, 0, len(plan)*len(filters))
+	for _, req := range plan {
+		for _, filter := range filters {
+			batch := req
+			batch.IDFilter = filter
+			out = append(out, batch)
+		}
+	}
+	return out
+}
+
+// nativeListIDFilters encodes exact IDs in bounded role requests. The role
+// trims whitespace and splits commas, so an ID that cannot round-trip keeps
+// the entire ID predicate in Go. Deduplication preserves the caller's order.
+func nativeListIDFilters(ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	unique := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" || strings.TrimSpace(id) != id || strings.Contains(id, ",") {
+			return nil
+		}
+		if !seen[id] {
+			seen[id] = true
+			unique = append(unique, id)
+		}
+	}
+	var filters []string
+	for start := 0; start < len(unique); start += nativeServerEdgeAnchorCap {
+		end := min(start+nativeServerEdgeAnchorCap, len(unique))
+		filters = append(filters, strings.Join(unique[start:end], ","))
+	}
+	return filters
 }
 
 // nativeListFanOutAssignees returns the distinct assignees a plan fans out
@@ -220,7 +258,8 @@ func nativeListTypeRefused(err error) bool {
 // returns every row of both tiers, closed rows included, and is the full walk
 // the list-request tripwire counts.
 func NativeListRequestKeyed(req issueops.ListRequest) bool {
-	return req.ParentID != "" ||
+	return req.IDFilter != "" ||
+		req.ParentID != "" ||
 		req.Assignee != "" ||
 		len(req.Labels) > 0 ||
 		len(req.MetadataFields) > 0 ||
