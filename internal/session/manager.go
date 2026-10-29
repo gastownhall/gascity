@@ -762,7 +762,9 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 
 // killExistingOrphans terminates any untracked runtime whose session ID and
 // city match the session about to start, then confirms each is dead. It returns
-// a non-nil error only when an orphan could not be confirmed dead, so callers
+// a non-nil error only when an orphan could not be confirmed dead, or when a
+// root the provider cannot list is parented by tmux — a live pane that must
+// not be reaped from under a provider this process cannot see — so callers
 // gating a Start can refuse rather than race a survivor for the same work. A
 // scan error is logged and treated as fail-closed (see FindRuntimesBySessionID):
 // the roots the scan did surface are still killed, and matching the started
@@ -778,7 +780,7 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(err))
 	}
 	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
-	var termErrs []error
+	var pending []runtime.LiveRuntime
 	for _, live := range found {
 		if live.IsTracked || live.SessionID != sessionID {
 			continue
@@ -795,6 +797,21 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 			log.Printf("session: leaving process-table root for %s pid=%d alone: city infrastructure (managed Dolt watchdog or bd proxy)", sessionID, live.PID)
 			continue
 		}
+		pending = append(pending, live)
+	}
+	// A root positively parented by tmux is a live pane. The provider listed
+	// nothing for this session while the process table holds a pane root that
+	// carries this session's identity and this city's path — the shape a
+	// TMUX_TMPDIR namespace split produces, where the runtime is alive under a
+	// server this process cannot reach. Killing it would reap a live pane the
+	// provider owns; refuse the whole sweep instead, terminating nothing.
+	for _, live := range pending {
+		if live.ParentIsProviderInfrastructure {
+			return fmt.Errorf("live runtime pid=%d ppid=%d for session %s is parented by tmux but not listed by the provider: %w", live.PID, live.PPID, sessionID, runtime.ErrRuntimeUnavailable)
+		}
+	}
+	var termErrs []error
+	for _, live := range pending {
 		if err := scanner.TerminateRuntime(live); err != nil {
 			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)
 			termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))

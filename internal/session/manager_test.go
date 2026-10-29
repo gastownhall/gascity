@@ -700,6 +700,75 @@ func TestStartRuntimeOnlyProceedsWhenOrphanConfirmedDead(t *testing.T) {
 	}
 }
 
+// armTmuxParentedOrphan makes killExistingOrphans surface a same-session
+// untracked root whose parent is positively tmux infrastructure: a live pane
+// the provider does not list — the shape a TMUX_TMPDIR namespace split
+// produces, where the runtime is alive but invisible to this provider.
+func armTmuxParentedOrphan(sp *orphanScanProvider) {
+	sp.results = []runtime.LiveRuntime{{PID: 4321, PPID: 777, IsTracked: false, ParentIsProviderInfrastructure: true}}
+}
+
+// TestStartRuntimeOnlyRefusesRespawnWhenOrphanParentedByTmux pins the
+// namespace-split refusal: a root parented by tmux is a live pane the
+// provider cannot list, so killing it would reap a live pane behind the
+// provider's back. The start must refuse without terminating anything and
+// without starting a replacement, with an error that names the runtime.
+func TestStartRuntimeOnlyRefusesRespawnWhenOrphanParentedByTmux(t *testing.T) {
+	mgr, sp, info := seedSuspendedResumeTarget(t)
+	armTmuxParentedOrphan(sp)
+
+	err := startRuntimeOnly(t, mgr, info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+	if err == nil {
+		t.Fatal("StartRuntimeOnly succeeded despite a tmux-parented orphan: it would reap a live pane")
+	}
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("StartRuntimeOnly error = %v, want runtime.ErrRuntimeUnavailable", err)
+	}
+	if !strings.Contains(err.Error(), "pid=4321") || !strings.Contains(err.Error(), "ppid=777") {
+		t.Fatalf("StartRuntimeOnly error = %v, want the live runtime named by pid and ppid", err)
+	}
+	if hasEventPrefix(sp.events, "terminate:") {
+		t.Fatalf("the tmux-parented orphan was terminated; events = %v", sp.events)
+	}
+	if hasEventPrefix(sp.events, "start:") {
+		t.Fatalf("a replacement was started despite the live pane; events = %v", sp.events)
+	}
+}
+
+// TestStartRefusesResumeWhenOrphanParentedByTmux is the Manager.Start
+// counterpart of the refusal.
+func TestStartRefusesResumeWhenOrphanParentedByTmux(t *testing.T) {
+	mgr, sp, info := seedSuspendedResumeTarget(t)
+	armTmuxParentedOrphan(sp)
+
+	err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+	if err == nil {
+		t.Fatal("Start succeeded despite a tmux-parented orphan: it would reap a live pane")
+	}
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("Start error = %v, want runtime.ErrRuntimeUnavailable", err)
+	}
+	if hasEventPrefix(sp.events, "terminate:") || hasEventPrefix(sp.events, "start:") {
+		t.Fatalf("the live pane was touched; events = %v", sp.events)
+	}
+}
+
+// TestStartRuntimeOnlyStillKillsReparentedOrphanWhenNoTmuxParentedRoot is the
+// guard: with no tmux-parented sibling, a reparented root (PPID 1) is still a
+// daemon that merely inherited the session ID, and the start still reaps it.
+func TestStartRuntimeOnlyStillKillsReparentedOrphanWhenNoTmuxParentedRoot(t *testing.T) {
+	mgr, sp, info := seedSuspendedResumeTarget(t)
+	sp.results = []runtime.LiveRuntime{{PID: 4321, PPID: 1, IsTracked: false}}
+
+	if err := startRuntimeOnly(t, mgr, info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+		t.Fatalf("StartRuntimeOnly: %v", err)
+	}
+	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
+	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+}
+
 // TestStartUnwindsACPRouteWhenOrphanNotConfirmedDead pins the route-unwinding
 // half of the fix: when the resume path reserved an ACP route before the
 // pre-start orphan gate, a refusal must call unroute() so the reservation is
