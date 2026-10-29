@@ -1371,11 +1371,15 @@ files in the same package, and terminates safely on cycles.
 This is intentionally not a universal hermeticity proof. Cross-package calls,
 method and interface dispatch, package-level callback indirection, and
 resources absent from the catalog remain manual-review boundaries. In
-particular, `TestPrepareWaitWakeState_ResolvesRigDependencyBeads` and
-`TestDoSessionWake_PokesManagedControllerAfterStateChange` have reviewed
-hermetic bodies but still run as Medium because `cmd/gc` owns a process-mutating
-`TestMain`. `TestDoSessionWait_RegistersReadyWaitForRigDependency` has the same
+particular, `TestPrepareWaitWakeState_ResolvesRigDependencyBeads` has a
+reviewed hermetic body but still runs as Medium because `cmd/gc` owns a
+process-mutating `TestMain`.
+`TestDoSessionWait_RegistersReadyWaitForRigDependency` has the same
 reviewed-hermetic guarantee for the wait-registration use case.
+`TestDoSessionWake_PokesManagedControllerAfterStateChange` has no reviewed row:
+wake target resolution can materialize a named session, whose worker factory
+carries the resumed-session launch-env resolver, and that resolver's backend
+projection reaches the managed-provider recovery wait and provider operations.
 `TestCmdSessionWait_AllowsRigDependencyBeads` remains the singular
 CLI/config/file-store split-store composition proof for wait, while
 `TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind` owns the real
@@ -1582,7 +1586,6 @@ all-source audit while staying outside untagged and Small debt.
 | --- | --- | --- | --- |
 | `cmd/gc` package `main` — TestDoMailInbox_RendersMessagesFromReader | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdMailInbox_NormalizesCanonicalManagedProviderEnvAndReadsInbox |
 | `cmd/gc` package `main` — TestDoSessionWait_RegistersReadyWaitForRigDependency | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdSessionWait_AllowsRigDependencyBeads |
-| `cmd/gc` package `main` — TestDoSessionWake_PokesManagedControllerAfterStateChange | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart |
 | `cmd/gc` package `main` — TestPrepareWaitWakeState_ResolvesRigDependencyBeads | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdSessionWait_AllowsRigDependencyBeads |
 <!-- END CHECKED TEST RESOURCE LEDGER -->
 
