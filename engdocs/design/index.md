@@ -36,6 +36,7 @@ lives in the [Architecture](../architecture/index.md) section.
 | `external-messaging-shared-threads` | Implemented | Transcript-backed shared-thread model with membership replay and speaker-only group routing |
 | `worker-conformance` | Proposed | Canonical WorkerCore/WorkerInference contract, transcript-first conformance, and migration toward `internal/worker` |
 | `two-minute-ci-blacksmith` | Proposed | Planner-driven Blacksmith CI architecture targeting two-minute required PR feedback |
+| `bazel-remote-repo-contents-cache` | Proposed | Bazel 9 remote repo contents cache on rbe-west through a gated main-push writer (lane analysis about halved); Skycache rejected (no OSS backend, unverifiable entries) |
 | `runtime-provider-packs` | Proposed | Runtime providers as pack-shipped executables speaking a versioned protocol (RPP); agent-provider specs as pack TOML; cloudflare-first PoC |
 | `structured-stream-format` | Accepted / Phase 1 partially implemented | Third session-stream/transcript format emitting typed, full-fidelity structured blocks (tool inputs, structured tool results, thinking, usage) so any consumer renders a rich UI without client-side enrichment |
 | `packv2/` | Historical / rollout ledger | PackV2 engineering design notes moved out of public docs; use user-facing guides and generated reference for current authoring guidance |

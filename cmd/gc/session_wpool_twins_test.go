@@ -322,7 +322,7 @@ func TestRecordDeferredNonExpandingPoolAliasConflictInfoFold(t *testing.T) {
 	}
 	cfgAgent := &config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	infoStore := beads.NewMemStoreFrom(1, []beads.Bead{seed()}, nil)
-	infoBP := &agentBuildParams{beadStore: infoStore}
+	infoBP := &agentBuildParams{beadStore: infoStore, decisionTime: time.Now().UTC()}
 
 	foldedInfo, err := recordDeferredNonExpandingPoolAliasConflictInfo(infoBP, cfgAgent, sessiontest.SeedBead(t, seed()))
 	if err != nil {
@@ -363,7 +363,7 @@ func TestRecordDeferredNonExpandingPoolAliasConflictInfoBackoff(t *testing.T) {
 	}
 	cfgAgent := &config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	infoStore := beads.NewMemStoreFrom(1, []beads.Bead{seed()}, nil)
-	infoBP := &agentBuildParams{beadStore: infoStore}
+	infoBP := &agentBuildParams{beadStore: infoStore, decisionTime: time.Now().UTC()}
 
 	foldedInfo, err := recordDeferredNonExpandingPoolAliasConflictInfo(infoBP, cfgAgent, sessiontest.SeedBead(t, seed()))
 	if err != nil {

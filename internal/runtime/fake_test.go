@@ -720,3 +720,29 @@ func TestFakeTerminateRuntime_BrokenError(t *testing.T) {
 		t.Error("OrphanedRuntimes entry removed despite error from broken fake")
 	}
 }
+
+func TestFakeIsAttachedWithErrorAgreesWithIsAttached(t *testing.T) {
+	boolFake, errFake := NewFake(), NewFake()
+	for _, f := range []*Fake{boolFake, errFake} {
+		f.SetAttached("attached", true)
+		f.SetAttachedSequence("scripted", true, false, true)
+	}
+	for _, name := range []string{"attached", "detached", "scripted", "scripted", "scripted", "scripted"} {
+		want := boolFake.IsAttached(name)
+		got, err := errFake.IsAttachedWithError(name)
+		if err != nil || got != want {
+			t.Errorf("IsAttachedWithError(%q) = (%v, %v), IsAttached = %v", name, got, err, want)
+		}
+	}
+
+	broken := NewFailFake()
+	broken.SetAttached("attached", true)
+	if got, err := broken.IsAttachedWithError("attached"); err != nil || got != broken.IsAttached("attached") {
+		t.Errorf("broken IsAttachedWithError = (%v, %v), want IsAttached's answer with nil error", got, err)
+	}
+
+	errFake.AttachedErrors["attached"] = ErrRuntimeUnavailable
+	if got, err := errFake.IsAttachedWithError("attached"); !errors.Is(err, ErrRuntimeUnavailable) || got {
+		t.Errorf("IsAttachedWithError with AttachedErrors = (%v, %v), want (false, ErrRuntimeUnavailable)", got, err)
+	}
+}

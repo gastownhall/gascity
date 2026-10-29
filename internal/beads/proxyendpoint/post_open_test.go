@@ -92,6 +92,25 @@ func TestReadPostOpenObservesTheStateAfterTheOpen(t *testing.T) {
 			},
 		},
 		{
+			name:  "a missing floored sentinel table floors at its replay floor",
+			after: proxyendpointtest.State{Head: "h", AbsentTables: map[string]bool{"bd_events_journal": true}},
+			want: PostOpenReport{
+				Head: "h", IgnoredCursorTable: true,
+				Reality: CursorReality{Limited: true, Floor: 21, Missing: "bd_events_journal"},
+			},
+		},
+		{
+			name: "the lowest floor of the absent floored tables and the column wins",
+			after: proxyendpointtest.State{
+				Head: "h", AbsentTables: map[string]bool{"events": true, "bd_events_seq": true},
+				AbsentColumns: map[string]bool{"leases.granted_node": true},
+			},
+			want: PostOpenReport{
+				Head: "h", IgnoredCursorTable: true,
+				Reality: CursorReality{Limited: true, Floor: IgnoredSentinelColumnFloor, Missing: "leases.granted_node"},
+			},
+		},
+		{
 			name:  "a vanished cursor table",
 			after: proxyendpointtest.State{Head: "h", AbsentTables: map[string]bool{"ignored_schema_migrations": true}},
 			want:  PostOpenReport{Head: "h"},
@@ -113,9 +132,9 @@ func TestReadPostOpenObservesTheStateAfterTheOpen(t *testing.T) {
 			// statement per question.
 			for _, statement := range pool.Statements() {
 				if !strings.Contains(statement, "DOLT_HASHOF('HEAD')") ||
-					strings.Count(statement, "information_schema.tables") != len(ignoredSentinelTables)+1 ||
+					strings.Count(statement, "information_schema.tables") != len(ignoredSentinelTables)+len(ignoredSentinelFlooredTables)+1 ||
 					strings.Count(statement, "information_schema.columns") != 1 {
-					t.Fatalf("statement %q does not carry HEAD, the cursor table, every sentinel table and the column", statement)
+					t.Fatalf("statement %q does not carry HEAD, the cursor table, every sentinel and floored sentinel table and the column", statement)
 				}
 			}
 		})

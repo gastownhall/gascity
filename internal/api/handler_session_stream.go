@@ -286,7 +286,7 @@ func (s *Server) emitStructuredFallbackSnapshot(w http.ResponseWriter, info sess
 		Provider:           info.Provider,
 		Format:             "structured",
 		SchemaVersion:      sessionStructuredSchemaVersion,
-		History:            structuredFallbackHistory(info.ID, info.SessionKey, string(worker.TailActivityIdle)),
+		History:            structuredFallbackHistory(info, string(worker.TailActivityIdle)),
 		StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
 	}
 	writeStructuredSSEUpdate(w, buildStructuredStreamUpdate(resumeToken, projection, includeThinking))
@@ -334,7 +334,7 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 			return false
 		}
 		currentActivity = historySnapshotActivity(snapshot)
-		rawMessages, ids := historySnapshotRawMessages(snapshot)
+		rawMessages, ids := historySnapshotRawMessages(settledHistorySnapshot(snapshot))
 		if len(rawMessages) > 0 {
 			var toSend []json.RawMessage
 			if lastSentID == "" {
@@ -493,7 +493,7 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 		if snapshot == nil {
 			return false
 		}
-		turns, ids := historySnapshotTurns(snapshot)
+		turns, ids := historySnapshotTurns(settledHistorySnapshot(snapshot))
 		if len(turns) > 0 {
 			var toSend []outputTurn
 			if lastSentID == "" {
@@ -633,7 +633,7 @@ func (s *Server) streamSessionTranscriptHistoryStructured(ctx context.Context, w
 			Provider:           info.Provider,
 			Format:             "structured",
 			SchemaVersion:      sessionStructuredSchemaVersion,
-			History:            structuredFallbackHistory(info.ID, info.SessionKey, string(worker.TailActivityInTurn)),
+			History:            structuredFallbackHistory(info, string(worker.TailActivityInTurn)),
 			StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
 		}
 		if update := buildStructuredStreamUpdate(currentResumeToken, projection, includeThinking); update != nil {
@@ -907,7 +907,7 @@ func (s *Server) streamSessionPeekStructured(ctx context.Context, w http.Respons
 			Provider:           info.Provider,
 			Format:             "structured",
 			SchemaVersion:      sessionStructuredSchemaVersion,
-			History:            structuredFallbackHistory(info.ID, info.SessionKey, string(worker.TailActivityInTurn)),
+			History:            structuredFallbackHistory(info, string(worker.TailActivityInTurn)),
 			StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
 		}
 		if update := buildStructuredStreamUpdate(currentResumeToken, projection, includeThinking); update != nil {
@@ -1050,7 +1050,7 @@ func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse
 			return false
 		}
 		currentActivity = historySnapshotActivity(snapshot)
-		rawMessages, ids := historySnapshotRawMessages(snapshot)
+		rawMessages, ids := historySnapshotRawMessages(settledHistorySnapshot(snapshot))
 		if len(rawMessages) > 0 {
 			var toSend []json.RawMessage
 			if lastSentID == "" {
@@ -1209,7 +1209,7 @@ func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Se
 		if snapshot == nil {
 			return false
 		}
-		turns, ids := historySnapshotTurns(snapshot)
+		turns, ids := historySnapshotTurns(settledHistorySnapshot(snapshot))
 		if len(turns) > 0 {
 			var toSend []outputTurn
 			if lastSentID == "" {
@@ -1353,7 +1353,7 @@ func (s *Server) streamSessionTranscriptLogStructuredHuma(ctx context.Context, s
 			Provider:           info.Provider,
 			Format:             "structured",
 			SchemaVersion:      sessionStructuredSchemaVersion,
-			History:            structuredFallbackHistory(info.ID, info.SessionKey, string(worker.TailActivityInTurn)),
+			History:            structuredFallbackHistory(info, string(worker.TailActivityInTurn)),
 			StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
 		}
 		if update := buildStructuredStreamUpdate(currentResumeToken, projection, includeThinking); update != nil {
@@ -1628,7 +1628,7 @@ func (s *Server) streamSessionPeekStructuredHuma(ctx context.Context, send Strin
 			Provider:           info.Provider,
 			Format:             "structured",
 			SchemaVersion:      sessionStructuredSchemaVersion,
-			History:            structuredFallbackHistory(info.ID, info.SessionKey, string(worker.TailActivityInTurn)),
+			History:            structuredFallbackHistory(info, string(worker.TailActivityInTurn)),
 			StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
 		}
 		if update := buildStructuredStreamUpdate(currentResumeToken, projection, includeThinking); update != nil {

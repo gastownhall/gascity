@@ -53,6 +53,16 @@ type Deps struct {
 	// ensureBundledRigImportsInstalled), preserving the "city.toml written last"
 	// atomicity invariant. Required.
 	ComposePacks func(cityPath string, imports []config.BoundImport) (pinned []config.BoundImport, commit func() error, err error)
+	// ResolveIncludeImports resolves a fresh add's explicit --include imports the
+	// way "gc import add" resolves an import (cmd/gc resolveRigIncludeImports):
+	// bundled sources keep their canonical pin, other version-less remote sources
+	// get gc import add's default version constraint (the constraint the city
+	// already holds for the source, else the newest release's), local paths and
+	// remote sources carrying "#ref" pass through, and the returned commit writes
+	// packs.lock for every bundled and ref-less remote include only AFTER the
+	// city.toml write. It may reach the network but must not mutate anything
+	// itself. nil = use ComposePacks (the API path never carries --include).
+	ResolveIncludeImports func(cityPath string, imports []config.BoundImport) (resolved []config.BoundImport, commit func() error, err error)
 	// WriteRoutes regenerates every rig's routes.jsonl (cmd/gc
 	// collectRigRoutes + writeAllRoutes). Required — it runs after the config
 	// write, so a nil here would panic past the topology rollback.
@@ -111,7 +121,9 @@ type Deps struct {
 }
 
 // ProvisionRequest is the caller's rig-add intent. It mirrors the current
-// doRigAddWithResult parameters minus the fs and the io.Writers.
+// doRigAddWithResult parameters minus the fs and the io.Writers. Includes holds
+// the --include tokens: a pack source or pack name, optionally
+// "<binding>=<source>" to choose the import binding.
 type ProvisionRequest struct {
 	Name           string
 	Path           string // resolved rig path; the caller does any CWD-relative resolution

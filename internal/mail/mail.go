@@ -64,11 +64,14 @@ type Message struct {
 
 // HandoffIntent is the domain-shaped request for handoff mail. It lets the
 // gc handoff command express a message in mail terms — sender, recipient,
-// subject, body — plus the two handoff-specific routing details that ordinary
+// subject, body — plus the handoff-specific routing details that ordinary
 // [Provider.Send] does not surface: an explicit thread ID (so a handoff thread
-// is stable and addressable) and extra labels (the auto-handoff / archive-after-
-// inject markers). The bead translation of these fields is confined to the
-// backend implementation; callers never construct a message bead themselves.
+// is stable and addressable), extra labels (the auto-handoff / archive-after-
+// inject markers), and an optional dedup key that suppresses the send only while an
+// unread archive-after-inject auto-handoff with the same key is pending for the
+// recipient; a handoff that was read but left open does not suppress. The bead
+// translation of these fields is confined to the backend implementation;
+// callers never construct a message bead themselves.
 type HandoffIntent struct {
 	From        string
 	To          string
@@ -76,6 +79,7 @@ type HandoffIntent struct {
 	Body        string
 	ThreadID    string
 	ExtraLabels []string
+	DedupKey    string
 }
 
 // ArchiveResult is one message's outcome in a batch [Provider.ArchiveMany] or

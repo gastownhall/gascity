@@ -20,13 +20,14 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/cobra"
@@ -109,7 +110,7 @@ func newConvoyPokeCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 				_, _ = fmt.Fprintf(stderr, "gc convoy poke: %v\n", err)
 				return errExit
 			}
-			if err := pokeControlDispatch(cityPath); err != nil {
+			if err := pokeControlDispatch(cityPath); err != nil && !noteWorkerSitePoke(stderr, "gc convoy poke", err) {
 				_, _ = fmt.Fprintf(stderr, "gc convoy poke: %v\n", err)
 				return errExit
 			}
@@ -119,7 +120,13 @@ func newConvoyPokeCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 	return cmd
 }
 
+// pokeControlDispatch asks the controller to run its control dispatcher now,
+// falling back to an ordinary poke. On a worker site it returns
+// errWorkerSiteNoController without trying either.
 func pokeControlDispatch(cityPath string) error {
+	if onWorkerSite(cityPath) {
+		return errWorkerSiteNoController
+	}
 	if _, err := sendControllerCommand(cityPath, "control-dispatcher"); err == nil {
 		return nil
 	}
@@ -150,7 +157,10 @@ func runControlDispatcher(beadID string, stdout, stderr io.Writer) error {
 // openControlStoreAtForCity.
 var openControlStoreForDispatch = openControlStoreAtForCity
 
-func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, stderr io.Writer) error {
+// runControlDispatcherInStore dispatches one control bead for the serve drain.
+// When emits is non-nil, the execution-fact projection for a control that
+// created no steps is deferred to it; nil projects synchronously.
+func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, stderr io.Writer, emits *executionEmitDeferral) error {
 	if cityPath == "" {
 		var err error
 		cityPath, err = resolveCity()
@@ -190,7 +200,7 @@ func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, std
 		}
 	}()
 
-	return runControlDispatcherWithStoreAndConfig(cityPath, storePath, store, beadID, cfg, stdout, stderr)
+	return runControlDispatcherDeferringEmits(cityPath, storePath, store, beadID, cfg, stdout, stderr, emits)
 }
 
 func runControlDispatcherWithStore(cityPath, storePath string, store beads.Store, beadID string, stdout, stderr io.Writer) error {
@@ -204,6 +214,13 @@ func runControlDispatcherWithStore(cityPath, storePath string, store beads.Store
 // scope comes from an unrouted store, and gating on it while writing elsewhere
 // re-runs a control kind the graph store had already finished.
 func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store beads.Store, beadID string, cfg *config.City, stdout, stderr io.Writer) error {
+	return runControlDispatcherDeferringEmits(cityPath, storePath, store, beadID, cfg, stdout, stderr, nil)
+}
+
+// runControlDispatcherDeferringEmits is runControlDispatcherWithStoreAndConfig
+// for the serve drain: a non-nil emits receives the execution-fact projection
+// of a control that created no steps instead of running it inline.
+func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.Store, beadID string, cfg *config.City, stdout, stderr io.Writer, emits *executionEmitDeferral) error {
 	restoreTraceWarnings := useWorkflowTraceWarnings(stderr)
 	defer restoreTraceWarnings()
 	var cfgLoadErr error
@@ -226,7 +243,7 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 	// a work bead, the synthetic drain-unit ones included, so it owns both the
 	// input convoy whose tracks edges the execution snapshot below reads and the
 	// unit convoys a drain mints alongside its members.
-	graphStore, bead, err := controlBeadLedger(cityPath, storePath, cfg, store, beadID)
+	graphStore, bead, relicGraphLeg, err := controlBeadLedger(cityPath, storePath, cfg, store, beadID)
 	if err != nil {
 		return err
 	}
@@ -302,16 +319,7 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			if graphStore != store {
 				opts.MemberStores = []beads.Store{store} // residency:allow route-gated work-leg tail for the retry lane's cross-store required-artifact source read; same shape as the drain arm above
 			}
-			sp, err := dispatchControlSessionProvider()
-			if err != nil {
-				return err
-			}
-			opts.RecycleSession = func(subject beads.Bead) error {
-				if strings.TrimSpace(subject.Assignee) == "" {
-					return fmt.Errorf("subject %s missing assignee for pooled retry recycle", subject.ID)
-				}
-				return workerKillSessionTargetWithConfig("", store, sp, cfg, subject.Assignee)
-			}
+			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, store, cfg)
 		case "retry", "ralph":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
 			// Same cross-store required-artifact source resolution as
@@ -319,16 +327,7 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			if graphStore != store {
 				opts.MemberStores = []beads.Store{store} // residency:allow route-gated work-leg tail for the retry lane's cross-store required-artifact source read; same shape as the drain arm above
 			}
-			sp, err := dispatchControlSessionProvider()
-			if err != nil {
-				return err
-			}
-			opts.RecycleSession = func(subject beads.Bead) error {
-				if strings.TrimSpace(subject.Assignee) == "" {
-					return fmt.Errorf("subject %s missing assignee for pooled retry recycle", subject.ID)
-				}
-				return workerKillSessionTargetWithConfig("", store, sp, cfg, subject.Assignee)
-			}
+			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, store, cfg)
 		}
 	}
 
@@ -337,16 +336,19 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 		return handleControlDispatchError(cityPath, storePath, graphStore, bead, beadID, err, stderr)
 	}
 	if result.Processed {
-		rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
-		if rootID != "" {
-			recorder := openCityRecorderAt(cityPath, stderr)
-			emitErr := executionevent.EmitCurrent(recorder, beads.GraphStore{Store: graphStore}, beads.WorkStore{Store: executionEmitStore(store, cityPath)}, rootID, "control-dispatch")
-			var closeErr error
-			if closer, ok := recorder.(io.Closer); ok {
-				closeErr = closer.Close()
-			}
-			if err := errors.Join(emitErr, closeErr); err != nil {
-				fmt.Fprintf(stderr, "warning: control dispatch: projecting execution facts for %s: %v\n", rootID, err) //nolint:errcheck // successful control processing is preserved
+		if rootID := controlRootID(bead.Metadata); rootID != "" {
+			switch {
+			case emits != nil && result.Created == 0:
+				// Nothing new to define: the serve drain projects this root
+				// once, after its last queued control (executionEmitDeferral).
+				emits.add(rootID, relicGraphLeg)
+			default:
+				if emits != nil {
+					emits.forget(rootID)
+				}
+				if err := emitExecutionFacts(cityPath, store, []executionEmitTarget{{rootID: rootID, graphStore: graphStore}}, stderr); err != nil {
+					fmt.Fprintf(stderr, "warning: control dispatch: projecting execution facts for %s: %v\n", rootID, err) //nolint:errcheck // successful control processing is preserved
+				}
 			}
 		}
 		_, _ = fmt.Fprintf(stdout, "control dispatch: bead=%s action=%s", beadID, result.Action)
@@ -361,6 +363,50 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 	return nil
 }
 
+// validateDispatchSessionProviderConfig checks, once when a control
+// dispatcher starts, that the city's session provider can be constructed, so a
+// broken [session] config fails the dispatcher at startup with a clear error
+// instead of surfacing only when a retry first recycles a session. It builds the
+// provider from config alone, without the session snapshot the recycle path
+// reads, so it costs no bd call.
+func validateDispatchSessionProviderConfig(cfg *config.City, cityPath string) error {
+	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+	sp, err := newSessionProviderFromContext(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("control dispatcher: session provider config is invalid (retry session recycling would fail): constructing session provider: %w", err)
+	}
+	if sp == nil {
+		return fmt.Errorf("control dispatcher: session provider config is invalid: no provider for %q", ctx.providerName)
+	}
+	return nil
+}
+
+// recycleDispatchSubjectSession returns the RecycleSession hook for a retry
+// lane control. Only a pooled transient retry recycles its subject's session,
+// so the session provider (two bd reads for its session snapshot) is built on
+// the first recycle rather than for every retry, ralph and retry-eval control
+// the dispatcher processes. A provider that cannot be built fails the recycle
+// that needs it, through ProcessControl's error return.
+func recycleDispatchSubjectSession(cityPath string, store beads.Store, cfg *config.City) func(beads.Bead) error {
+	var sp runtime.Provider
+	return func(subject beads.Bead) error {
+		if strings.TrimSpace(subject.Assignee) == "" {
+			return fmt.Errorf("subject %s missing assignee for pooled retry recycle", subject.ID)
+		}
+		if sp == nil {
+			provider, err := dispatchControlSessionProvider()
+			if err != nil {
+				return err
+			}
+			sp = provider
+		}
+		// The subject's session row is session class: on a split city it lives
+		// only in the binding, never in the scope work store this hook is
+		// built over (write-audit B5).
+		return workerKillSessionTargetWithConfig(cityPath, cliRelocatedSessionStore(store, cfg, cityPath), sp, cfg, subject.Assignee)
+	}
+}
+
 // handleControlDispatchError resolves a failed ProcessControl call into the
 // error the dispatcher should return. It is the Tier-B semantic-refusal budget
 // and quarantine path, split out of runControlDispatcherWithStoreAndConfig so
@@ -372,7 +418,13 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 // returns nil once the bead is quarantined and the (possibly quiet-wrapped)
 // cause when the bead should be retried.
 func handleControlDispatchError(cityPath, storePath string, graphStore beads.Store, bead beads.Bead, beadID string, cause error, stderr io.Writer) error {
+	if errors.Is(cause, dispatch.ErrControlDriftPending) {
+		return handleControlDriftRefusal(cityPath, storePath, graphStore, bead, beadID, cause, stderr)
+	}
 	if errors.Is(cause, dispatch.ErrControlPending) {
+		// Routine "not yet" — a retry waiting for its subject, a drain waiting
+		// for its members. It clears on its own and this is the hottest return
+		// in the control plane, so it stays a zero-write, zero-event path.
 		return cause
 	}
 	var stalled *dispatch.SemanticRetryState
@@ -418,7 +470,7 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 			settleFailure.RootBeadID, settleFailure.FinalizerBeadID, cause)
 	}
 	if stalled != nil {
-		emitControlStalled(cityPath, storePath, graphStore, bead, cause, *stalled, stderr)
+		emitControlStalled(cityPath, storePath, graphStore, bead, cause, *stalled, quarantineControlStall, stderr)
 		_, _ = fmt.Fprintf(stderr,
 			"control dispatch: stalled bead=%s attempts=%d first_seen=%s budget=%s reason=%v\n",
 			beadID, stalled.Attempts, stalled.FirstSeen.UTC().Format(time.RFC3339),
@@ -429,15 +481,89 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 	return nil
 }
 
+// handleControlDriftRefusal is the disposition for a control bead that
+// answered ErrControlDriftPending: it stays OPEN and retries unbounded,
+// because the refusal names a drift a human heals (`gc rig add`, restoring a
+// city name, a store coming back) and the open bead IS the handle the heal
+// completes through.
+//
+// Unbounded retry is the right disposition; unbounded SILENCE is not. Pending
+// bypasses the tier system, so before this it produced no budget, no event and
+// no bead a reconciler could find: a decommissioned rig left its workflow
+// reading as "in-flight" forever, distinguishable from healthy only by a
+// `bd show` nobody runs. That is the same answering-no shape whose three-day,
+// six-city stall is recorded on dispatch.ControllerErrorTier. So the pending
+// budget bounds the quiet, not the retrying: at expiry the bead escalates ONCE
+// on the control.stalled lane and then keeps going.
+//
+// A verbatim repeat is additionally marked quiet so a permanently-pending bead
+// stops resetting the serve loop's idle backoff, mirroring the Tier-B repeat
+// arm in handleControlDispatchError above.
+func handleControlDriftRefusal(cityPath, storePath string, graphStore beads.Store, bead beads.Bead, beadID string, cause error, stderr io.Writer) error {
+	if strings.TrimSpace(bead.Metadata[beadmeta.ControlPendingStalledMetadataKey]) == "true" &&
+		dispatch.PendingControlRefusalRecorded(bead, cause) {
+		// Past the horizon, repeating verbatim: the escalation already fired
+		// (the latch below makes it one-shot) and the count is documented
+		// diagnostics-only, so another record changes nothing observable while
+		// costing a store round-trip plus an event-log row — on every sweep,
+		// forever, because pending retry is deliberately unbounded and the
+		// motivating case is a rig nobody is coming back to re-add. Freeze the
+		// bookkeeping instead. A CHANGED refusal still falls through and
+		// records, so the reason on the bead stays honest, and everything
+		// before the escalation is untouched: the anchor and attempts must
+		// stay truthful right up to the point they decide something.
+		workflowTracef("control-pending-budget bead=%s frozen after escalation (verbatim repeat) err=%v", beadID, cause)
+		return dispatch.MarkQuietControllerRetry(cause)
+	}
+	pending, recordErr := dispatch.RecordPendingControlRetry(
+		graphStore, beadID, cause, workflowTraceNow().UTC(), semanticControlRetryBudget())
+	if recordErr != nil {
+		// Losing the budget write must not change the disposition: pending is
+		// still pending, and escalating on a failed bookkeeping write would
+		// close the bead the refusal exists to keep open.
+		workflowTracef("control-pending-budget bead=%s recording pending refusal failed err=%v", beadID, recordErr)
+		return cause
+	}
+	workflowTracef("control-pending-budget bead=%s attempts=%d first_seen=%s expired=%t repeat=%t err=%v",
+		beadID, pending.Attempts, pending.FirstSeen.UTC().Format(time.RFC3339), pending.Expired, pending.Repeat, cause)
+
+	if pending.Expired && strings.TrimSpace(bead.Metadata[beadmeta.ControlPendingStalledMetadataKey]) != "true" {
+		// Latch BEFORE emitting, matching the quarantine path above: a crash
+		// between the two drops one event, which the persisted
+		// gc.control_pending_* keys still explain, whereas emitting first would
+		// re-announce on every sweep if the latch write failed.
+		if latchErr := graphStore.SetMetadata(beadID, beadmeta.ControlPendingStalledMetadataKey, "true"); latchErr != nil {
+			workflowTracef("control-pending-budget bead=%s latching stalled escalation failed err=%v", beadID, latchErr)
+		} else {
+			emitControlStalled(cityPath, storePath, graphStore, bead, cause, pending, pendingControlStall, stderr)
+			_, _ = fmt.Fprintf(stderr,
+				"control dispatch: pending stalled bead=%s attempts=%d first_seen=%s budget=%s reason=%v\n",
+				beadID, pending.Attempts, pending.FirstSeen.UTC().Format(time.RFC3339),
+				semanticControlRetryBudget(), cause)
+		}
+	}
+	if pending.Repeat {
+		return dispatch.MarkQuietControllerRetry(cause)
+	}
+	return cause
+}
+
 // semanticControlRetryBudget returns how long the control dispatcher keeps
 // retrying a store refusal before quarantining the control bead.
+//
+// The same window now also bounds drift-pending SILENCE: a pending bead is
+// never quarantined, but once this budget elapses it escalates once on the
+// control.stalled lane and then goes on retrying. One knob, two horizons.
 //
 // GC_CONTROL_SEMANTIC_RETRY_BUDGET overrides the default as a Go duration. It
 // is an incident knob, not a tuning parameter: "0s" restores quarantine-on-
 // first-refusal (the pre-#5020 behavior) to clear a wedged fleet immediately,
 // and a negative value restores unbounded retry if a bad classification ever
-// starts quarantining healthy work. An unparseable value falls back to the
-// default rather than failing the dispatcher.
+// starts quarantining healthy work. A negative value therefore also disables
+// the pending escalation, restoring the unbounded silence the horizon exists
+// to close — acceptable for an incident knob, but it is the cost of reaching
+// for it. An unparseable value falls back to the default rather than failing
+// the dispatcher.
 func semanticControlRetryBudget() time.Duration {
 	raw := strings.TrimSpace(os.Getenv("GC_CONTROL_SEMANTIC_RETRY_BUDGET"))
 	if raw == "" {
@@ -450,11 +576,42 @@ func semanticControlRetryBudget() time.Duration {
 	return budget
 }
 
+// controlStallKind describes which disposition ran out of quiet, which is the
+// one thing an operator reading a control.stalled event needs that the bead id
+// alone does not carry.
+type controlStallKind struct {
+	// errorClass fills the payload's error_class. It names the tier for a
+	// quarantine and the disposition for a pending wait.
+	errorClass string
+	// retryNoun names what was counted, for the human-readable message.
+	retryNoun string
+	// ordersFailed reports whether the stall also kills the owning order. Only
+	// quarantine does: it CLOSED the control bead, so nothing will ever advance
+	// that order again. A pending stall must not emit order.failed — the bead
+	// is still open and the order still completes the moment the drift heals,
+	// so stamping it failed would make a healable wait read as terminal on the
+	// exact surface operators triage from.
+	ordersFailed bool
+}
+
+var (
+	quarantineControlStall = controlStallKind{
+		errorClass:   dispatch.TierSemantic.String(),
+		retryNoun:    "semantic retries",
+		ordersFailed: true,
+	}
+	pendingControlStall = controlStallKind{
+		errorClass: "pending",
+		retryNoun:  "pending sweeps",
+	}
+)
+
 // emitControlStalled publishes the control.stalled record for a control bead
-// whose semantic-refusal budget expired, plus order.failed when the workflow
-// root belongs to a scheduled order — so the existing order-health surfaces
-// light up instead of needing a new dashboard to notice a dead control plane.
-func emitControlStalled(cityPath, storePath string, store beads.Store, bead beads.Bead, cause error, state dispatch.SemanticRetryState, stderr io.Writer) {
+// whose budget expired, plus order.failed when the stall killed the order and
+// the workflow root belongs to a scheduled one — so the existing order-health
+// surfaces light up instead of needing a new dashboard to notice a dead control
+// plane.
+func emitControlStalled(cityPath, storePath string, store beads.Store, bead beads.Bead, cause error, state dispatch.SemanticRetryState, kind controlStallKind, stderr io.Writer) {
 	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	orderName := ""
 	if rootID != "" {
@@ -468,7 +625,7 @@ func emitControlStalled(cityPath, storePath string, store beads.Store, bead bead
 		Kind:       strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]),
 		RootBeadID: rootID,
 		StorePath:  storePath,
-		ErrorClass: dispatch.TierSemantic.String(),
+		ErrorClass: kind.errorClass,
 		FirstSeen:  state.FirstSeen.UTC().Format(time.RFC3339),
 		Attempts:   state.Attempts,
 		Error:      controlQuarantineReason(cause, "control_dispatch_error"),
@@ -480,12 +637,12 @@ func emitControlStalled(cityPath, storePath string, store beads.Store, bead bead
 		Type:    events.ControlStalled,
 		Actor:   "controller",
 		Subject: bead.ID,
-		Message: fmt.Sprintf("control bead %s stalled after %d semantic retries since %s: %s",
-			bead.ID, state.Attempts, payload.FirstSeen, payload.Error),
+		Message: fmt.Sprintf("control bead %s stalled after %d %s since %s: %s",
+			bead.ID, state.Attempts, kind.retryNoun, payload.FirstSeen, payload.Error),
 		Payload: events.ControlStalledPayloadJSON(payload),
 		RunID:   rootID,
 	})
-	if orderName != "" {
+	if orderName != "" && kind.ordersFailed {
 		rec.Record(events.Event{
 			Type:    events.OrderFailed,
 			Actor:   "controller",
@@ -728,7 +885,7 @@ func makeStoreRefResolver(cityPath string, cfg *config.City) func(string) (beads
 				// renamed mid-flight leaves in-flight workflows stamped with
 				// the old name, and restoring the name heals the finalize.
 				// Pending, not terminal.
-				return nil, fmt.Errorf("%w: city ref %q does not match this city %q (renamed mid-flight? finalizer retries until the name is restored)", dispatch.ErrControlPending, ref, cityName)
+				return nil, fmt.Errorf("%w: city ref %q does not match this city %q (renamed mid-flight? resolution retries until the name is restored)", dispatch.ErrControlDriftPending, ref, cityName)
 			}
 			return openStoreAtForCity(cityPath, cityPath)
 		case strings.HasPrefix(ref, "rig:"):
@@ -750,14 +907,18 @@ func makeStoreRefResolver(cityPath string, cfg *config.City) func(string) (beads
 			// quarantine catch-all, which terminally closes the finalizer AND
 			// settles the workflow root — stranding the domain parent open
 			// forever with no retry handle, even after the rig is re-added.
-			// Classify as pending instead: the finalizer stays open,
-			// gc.last_finalize_error records the reason, and the next sweep
-			// completes the finalize once the rig is restored via
-			// `gc rig add`. Fail loud, not terminal. Malformed refs (the
+			// Classify as pending instead: the control bead stays open, the
+			// reason is recorded on it, and the next sweep completes the work
+			// once the rig is restored via `gc rig add`. Fail loud, not
+			// terminal — the pending budget escalates once if the rig never
+			// comes back (handleControlDriftRefusal). Malformed refs (the
 			// default arm below) stay hard: no config change can ever make
 			// them resolve, and pending there would be unbounded retry of a
 			// permanent error.
-			return nil, fmt.Errorf("%w: rig %q not found in city config (removed from city.toml? finalizer retries until the rig is restored)", dispatch.ErrControlPending, name)
+			//
+			// This resolver also serves the retry/retry-eval/ralph
+			// required-artifact lane, so neither message names the finalizer.
+			return nil, fmt.Errorf("%w: rig %q not found in city config (removed from city.toml? resolution retries until the rig is restored)", dispatch.ErrControlDriftPending, name)
 		default:
 			return nil, fmt.Errorf("unsupported store ref scheme: %q", ref)
 		}
@@ -785,13 +946,19 @@ func makeSourceWorkflowLocker(ctx context.Context, cityPath string, cfg *config.
 // still executing. Routing the scan and the mutation to the same ledger is the
 // whole point.
 //
-// The hop is scope-guarded by controlGraphBinding, so rig scopes keep their own
-// stores; a relocated scope does not open the scope store at all, because that
-// would be a bd process this scan never reads.
+// The hop applies to the CITY scope only, so rig scopes keep their own stores;
+// a relocated city scope does not open its scope store at all, because that
+// would be a bd process this scan never reads. Rig scopes keep their own store
+// because on a split city that is where a rig's PRE-S4 workflow roots live (the
+// relic leg), while every rig root minted since is in the binding, which the
+// city entry already lists; listing the binding once per rig as well would scan
+// the same roots under several store refs.
 func makeSourceWorkflowStoresLister(cityPath string, cfg *config.City) func() ([]dispatch.SourceWorkflowStore, error) {
 	return makeSourceWorkflowStoresListerWithOpenStore(cityPath, cfg, func(dir string) (beads.Store, error) {
-		if binding, relocated := controlGraphBinding(cityPath, dir); relocated {
-			return binding, nil
+		if scopeIsCity(cityPath, dir) {
+			if binding, relocated := controlGraphBinding(cityPath, dir); relocated {
+				return binding, nil
+			}
 		}
 		return openStoreAtForCity(dir, cityPath)
 	})
@@ -809,15 +976,42 @@ func makeSourceWorkflowStoresListerWithOpenStore(cityPath string, cfg *config.Ci
 		}
 		loaded = true
 		views, skips, err := openSourceWorkflowStoresWith(cfg, cityPath, "", openStore)
-		if err != nil {
-			loadErr = err
-			return nil, err
-		}
+		// A non-empty skip set is the classification trigger, NOT the
+		// partial-vs-total split. openSourceWorkflowStoresWith reports the same
+		// unopenable configured store two different ways — as a nil error with
+		// skips when a sibling survived, and as the first open error when none
+		// did — and only the skip set is common to both. Keying on it first is
+		// what makes the two arms classify identically; keying on err first
+		// sent the total-failure arm out bare, onto the quarantine path this
+		// wrap exists to close, and neither lister fixture could see it because
+		// both inject a sibling that opens.
 		if len(skips) > 0 {
 			msg := formatSourceWorkflowStoreSkips(skips)
 			workflowTracef("source-workflow stores warning=%q", msg)
-			loadErr = errors.New(msg)
+			// Fail CLOSED — the doc comment above records why tolerating a skip
+			// here is destructive — but not TERMINALLY. A configured store that
+			// will not open is the path-shaped twin of the name-shaped drift the
+			// resolver arms above classify as pending (a rig whose directory is
+			// gone while its city.toml entry remains), and a bare error lands in
+			// the cmd-layer quarantine catch-all: no typed check and no
+			// transient needle matches this wrapper, so it classifies TierNone,
+			// closes the finalizer AND settles the root, stranding the domain
+			// parent exactly as the removed-rig landmine did. Pending keeps the
+			// finalizer open so the next sweep completes the finalize once the
+			// store returns. msg names every skipped store and its error, so the
+			// total-failure arm loses nothing by reporting skips instead of the
+			// first open error it also returns.
+			loadErr = fmt.Errorf("%w: %s", dispatch.ErrControlDriftPending, msg)
 			return nil, loadErr
+		}
+		if err != nil {
+			// Empty skips with an error means no candidate was ever opened:
+			// the "no source workflow stores available" config-shape error.
+			// It stays terminal on purpose — nothing was unopenable, there was
+			// nothing to open, and no store coming back can change that — so
+			// the drift wrap must not reach it.
+			loadErr = err
+			return nil, err
 		}
 		cityName := loadedCityName(cfg, cityPath)
 		stores = make([]dispatch.SourceWorkflowStore, 0, len(views))
@@ -846,29 +1040,42 @@ func sourceWorkflowLockScopeForStoreRef(cityPath string, cfg *config.City, defau
 }
 
 // controlScopeTakesGraphClass reports whether control dispatch for a scope
-// resolves its control beads through the graph class instead of staying on the
-// store the scope opened.
+// reads and writes its control beads through the graph-class placement
+// (graphPlacementForScope) instead of staying on the store the scope opened.
 //
-// Only the CITY scope does, and "instead of" is the whole content of the word
-// only. resolveClassStore holds a single city-level store per class, so there is
-// no per-rig graph binding, and `gc storage migrate` copies only the city work
-// store (openInfraMigrationSource) — a rig scope has no retained copy to be
-// misled by and no binding of its own to move to, so it keeps the store it
-// opened. That store is also the only place its WORK leg exists, which is the
-// load-bearing half: the dispatch reads a control bead's input convoy from it.
+// Under the S4 placement rule every scope does once the routes relocate the
+// graph class: a rig's new trees are born in the binding exactly like the
+// city's, so the binding is the rig dispatcher's PRIMARY ledger, and the rig's
+// own store is at most a relic leg behind it (controlGraphRelicLeg). The work
+// leg is unaffected: the dispatch keeps the scope store for the input convoy an
+// execution snapshot reads.
 //
-// It does NOT follow that the city binding never holds beads routed to a rig.
-// It does. A city-scoped molecule materializes graph-class control beads into
-// the city binding and then stamps gc.routed_to=<rig>/<agent>, so the binding
-// accumulates a rig dispatcher's queue while the rig's own ledger stays empty of
-// it — 148 such beads stranded on the live city before this was found, against 0
-// ever processed. Reading that as "a rig's beads are never in the binding" is
-// what let a dispatcher scan a structurally empty ledger for a month and report
-// idle rather than fail. A rig scope reaches those beads through
-// controlGraphExtraLeg, which is an ADDITIONAL leg precisely because this
-// predicate is false for it.
+// The one rig-scope exception is a REFUSING binding. On a city the one-shot
+// funnel refused, every infrastructure class resolves to refusedClassStore,
+// whose every read returns the standing refusal. Making that the primary leg
+// would turn a city-level storage misconfiguration into a hard error on every
+// rig dispatcher, and a scan error is fatal to the drain loop. cliByIDOwner
+// states the governing rule: a refused city still serves WORK from its work
+// ledger, so a rig keeps the store it opened, exactly as before S4. The CITY
+// scope keeps taking the class even then, so its reads surface the refusal as
+// they always have.
+//
+// On a city that relocates nothing the answer is true for the city scope and
+// false for every rig, and controlGraphBinding then reports no relocation, so
+// both stay on the store they opened.
 func controlScopeTakesGraphClass(cityPath, storePath string) bool {
-	return scopeIsCity(cityPath, storePath)
+	if scopeIsCity(cityPath, storePath) {
+		return true
+	}
+	binding, relocated := graphClassBinding(cliStorageRoutes(cityPath)) // residency:allow — S4 placement rule: asks only whether the graph class is relocated (and refused); resolves no bead
+	if !relocated || binding == nil {
+		return false
+	}
+	if _, refused := binding.(refusedClassStore); refused {
+		warnControlGraphLegRefused(cityPath)
+		return false
+	}
+	return true
 }
 
 // controlGraphBinding returns the store this scope's control beads live in when
@@ -876,8 +1083,8 @@ func controlScopeTakesGraphClass(cityPath, storePath string) bool {
 // whether that is the case at all.
 //
 // It is the question a shell-based readiness scan has to ask before running:
-// `bd ready` in the work directory enumerates the copies the migration retained
-// there, which no longer receive the workflow's mutations.
+// `bd ready` in the work directory enumerates only the scope's own store, which
+// on a split city holds none of the scope's new control beads.
 func controlGraphBinding(cityPath, storePath string) (beads.Store, bool) {
 	if !controlScopeTakesGraphClass(cityPath, storePath) {
 		return nil, false
@@ -892,63 +1099,34 @@ func controlGraphRelocated(cityPath, storePath string) bool {
 	return relocated
 }
 
-// controlGraphExtraLeg returns the city's graph binding when a scope must read
-// it IN ADDITION to the store it opened, and whether that is the case at all.
+// controlGraphRelicLeg reports whether a scope whose control beads are read
+// from the binding must ALSO read the store it opened, behind the binding.
 //
-// This is the complement of controlGraphBinding, not a second copy of it, and
-// the two together are the whole routing rule:
+// This is the relic leg of the S4 rule (graphRelicLegForScope). Before S4 a
+// rig's convergence loops and `cook --attach` grafts were written to the rig's
+// own store, and so were the control beads those trees dispatch. Those trees
+// keep dispatching where they are until the rig is imported, so a rig
+// dispatcher reads the binding first and its own store second. Once the rig is
+// proven relic-free (an import marker with a completed clear, or a clean
+// census) the leg retires and the rig store is not read at all.
 //
-//   - A CITY scope reads the binding INSTEAD of its own store. `gc storage
-//     migrate` copies the class out and RETAINS the source, so the work ledger's
-//     rows are frozen at cutover; unioning them back in would re-offer ids the
-//     binding has already finished and the drain loop would never return.
-//   - A RIG scope reads the binding AS WELL AS its own store. A rig is never a
-//     migration target, so it has no retained copies to be misled by — but the
-//     binding is CITY-keyed, and a city-scoped molecule materializes its control
-//     beads there and then routes them to a rig's dispatcher by name. Those beads
-//     are unreachable from the rig directory's own `bd`, which is how a
-//     dispatcher ends up scanning forever against a ledger that structurally
-//     cannot hold its queue.
+// The two legs hold disjoint ids: the binding mints its own namespace, and an
+// imported id exists in both stores only between an import's copy and its
+// clear, which boot refuses. The binding is asked first all the same, so a
+// twin resolves to the binding's row.
 //
-// The two ledgers hold disjoint ids today precisely because a rig is never a
-// migration target, so there is no live copy for the second leg to shadow.
-// Callers still take the scope store first; see controlReadyFallbackReady for
-// the scan side and controlBeadLedger for the dispatch side.
-//
-// A REFUSING binding is not a leg. On a city the one-shot funnel refused, every
-// infrastructure class resolves to refusedClassStore, whose every read returns
-// the standing refusal — so federating it would turn a city-level storage
-// misconfiguration into a hard scan error on EVERY rig dispatcher, and a scan
-// error is fatal to the drain loop, so all rig control dispatch would crash-loop
-// on a city that is otherwise still serving work. cliByIDOwner states the
-// governing rule for exactly this error: the standing refusal "is a verdict
-// about a CITY's storage configuration and says nothing about a bead, and a
-// refused city still serves WORK from its work ledger." A rig's own control
-// beads are that case, so the refusal establishes nothing about them and its
-// own store still answers. The
-// beads the skipped leg would have carried belong to a graph plane that is down
-// by this build's own verdict, already reported by the boot gate, and equally
-// unreachable to the CITY dispatcher.
-//
-// The identity gate the sibling surfaces apply (relocatedGraphLegFrom's
-// `binding == cityStore`, and storeref's own dedupeLegs, which folds a binding
-// that IS the caller's work store into one probed leg) is not restated here:
-// this arm runs only for a RIG scope, whose store is that rig's own bd/Dolt
-// handle and never the city's binding, and the scan-side caller holds no store
-// handle to compare against at all — it shells `bd` for its scope leg.
-func controlGraphExtraLeg(cityPath, storePath string) (beads.Store, bool) {
-	if controlScopeTakesGraphClass(cityPath, storePath) {
-		return nil, false
+// A city scope never has one. Its work ledger holds the copies `gc storage
+// migrate` retained, frozen at cutover; unioning them back would re-offer ids
+// the binding already finished and the drain loop would never return.
+func controlGraphRelicLeg(cityPath, storePath string) bool {
+	if scopeIsCity(cityPath, storePath) {
+		return false
 	}
-	binding, relocated := graphClassBinding(cliStorageRoutes(cityPath))
-	if !relocated || binding == nil {
-		return nil, false
+	if !controlGraphRelocated(cityPath, storePath) {
+		return false
 	}
-	if _, refused := binding.(refusedClassStore); refused {
-		warnControlGraphLegRefused(cityPath)
-		return nil, false
-	}
-	return binding, true
+	routes := cliStorageRoutes(cityPath)
+	return graphRelicLegForScope(routes, routes.rigGraphScopeForDir(cityPath, storePath))
 }
 
 // controlGraphLegRefusedOnce keeps the refusal notice to one line per process.
@@ -970,50 +1148,47 @@ func warnControlGraphLegRefused(cityPath string) {
 // makes act on ONE copy.
 //
 // This resolves the GRAPH leg only. The caller keeps its scope store as the WORK
-// leg, and that asymmetry is the point rather than an oversight: the binding is
-// city-keyed for the graph CLASS, and the work class is not relocated at all, so
-// a rig scope here lands on (rig work store, city graph binding) — structurally
-// the same shape as the city arm's (city work store, city graph binding), not a
-// new one. Measured on the live city: the stranded control beads and their
-// workflow root are `gcg-` and binding-resident, while the input convoy those
-// same beads name in gc.input_convoy_id is `ga-xz2hu`, absent from the binding
-// and present in the rig store. Re-entering the whole dispatch at the city scope
-// would fix the graph leg and break the work leg, which is what EmitCurrent reads
-// the convoy's tracks edges from.
+// leg: the binding is city-keyed for the graph CLASS, and the work class is not
+// relocated at all, so a rig scope here lands on (rig work store, city graph
+// binding) — the same shape as the city arm's (city work store, city graph
+// binding). The input convoy a control bead names in gc.input_convoy_id is a
+// work bead in the scope store, and EmitCurrent reads its tracks edges there.
 //
-// Residence rather than scope alone is what lets the readiness scan federate
-// safely: a federated scan hands the drain loop ids the scope store does not
-// hold, and resolving those against the scope store returns "bead not found",
-// which IsTransientControllerError does not match — drainWorkflowServeWork
-// returns it as fatal and the dispatcher session exits and crash-loops.
+// The placement store is asked FIRST (controlGraphStore). On a split city that
+// is the binding at every scope, which holds every tree minted since S4. A rig
+// scope that may still hold legacy trees then asks its own store as a relic
+// leg (controlGraphRelicLeg), so a pre-S4 rig tree keeps dispatching in place
+// until the rig is imported. Residence rather than scope alone is what keeps a
+// federated scan safe: the scan hands the drain loop ids from both legs, and
+// resolving one against the wrong leg returns "bead not found", which
+// IsTransientControllerError does not match, so the dispatcher session would
+// exit and crash-loop.
 //
-// The scope store's own class hop stays FIRST, so every id it holds resolves
-// exactly where it resolves today and the extra leg is consulted only for ids
-// that would otherwise be a hard not-found.
-func controlBeadLedger(cityPath, storePath string, cfg *config.City, scopeStore beads.Store, beadID string) (beads.Store, beads.Bead, error) {
+// The bool reports that the bead was found on the relic leg — the scope's own
+// store — rather than on the placement store.
+func controlBeadLedger(cityPath, storePath string, cfg *config.City, scopeStore beads.Store, beadID string) (beads.Store, beads.Bead, bool, error) {
 	primary := controlGraphStore(cityPath, storePath, cfg, scopeStore)
 	bead, err := primary.Get(beadID)
 	if err == nil {
-		return primary, bead, nil
+		return primary, bead, false, nil
 	}
-	extra, federated := controlGraphExtraLeg(cityPath, storePath)
-	if !federated || !errors.Is(err, beads.ErrNotFound) {
-		return nil, beads.Bead{}, fmt.Errorf("loading control bead %s from the %s for scope %q: %w",
+	relic := primary != scopeStore && controlGraphRelicLeg(cityPath, storePath)
+	if !relic || !errors.Is(err, beads.ErrNotFound) {
+		return nil, beads.Bead{}, false, fmt.Errorf("loading control bead %s from the %s for scope %q: %w",
 			beadID, controlStoreDescription(cityPath, storePath), storePath, err)
 	}
-	graphBead, graphErr := extra.Get(beadID)
-	if graphErr != nil {
+	scopeBead, scopeErr := scopeStore.Get(beadID)
+	if scopeErr != nil {
 		// BOTH legs are joined rather than one wrapped and one rendered, because
-		// the binding's error is the one that decides whether this dispatch is
-		// fatal. A binding that is briefly unreachable must reach
+		// either error may be the one that decides whether this dispatch is
+		// fatal. A leg that is briefly unreachable must reach
 		// IsTransientControllerError as a typed error and be retried; rendering
 		// it with %v leaves that classification to substring matching on the
-		// message, which is luck rather than a contract, and losing the coin
-		// flip exits the dispatcher session.
-		return nil, beads.Bead{}, fmt.Errorf("loading control bead %s for scope %q: not in the %s, and not in the city graph binding: %w",
-			beadID, storePath, controlStoreDescription(cityPath, storePath), errors.Join(err, graphErr))
+		// message, and losing that coin flip exits the dispatcher session.
+		return nil, beads.Bead{}, false, fmt.Errorf("loading control bead %s for scope %q: not in the %s, and not in the scope's own store: %w",
+			beadID, storePath, controlStoreDescription(cityPath, storePath), errors.Join(err, scopeErr))
 	}
-	return extra, graphBead, nil
+	return scopeStore, scopeBead, true, nil
 }
 
 // controlStoreDescription names the ledger a control-bead read actually went to,
@@ -1031,18 +1206,22 @@ func controlStoreDescription(cityPath, storePath string) string {
 //
 // Control beads are graph class: coordclass counts every gc.kind control bead,
 // and the molecule/step topology they mutate, as ClassGraph. The scope store
-// answers WHICH city or rig; for the city scope the graph class then answers
-// WHICH database inside it. Running control dispatch against the scope store on
-// a split city reads the copy the migration retained in the work ledger and
-// writes the results back there, where no graph-routed reader looks.
+// answers WHICH city or rig; the S4 placement rule (graphPlacementForScope)
+// then answers WHICH database, and on a split city that is the binding at every
+// scope.
 //
-// When the routes relocate nothing — every city with no [storage] section, and
-// every rig scope — this returns the exact store value it was handed, so those
-// callers dispatch against the very store they always did: same bd command
-// runner, same scope issue prefix, same instance for the optional-capability
-// assertion (DepListBatch) the scope-skip paths make against it.
+// When the routes relocate nothing — every city with no [storage] section —
+// this returns the exact store value it was handed, so those callers dispatch
+// against the very store they always did: same bd command runner, same scope
+// issue prefix, same instance for the optional-capability assertion
+// (DepListBatch) the scope-skip paths make against it. A rig scope on a
+// refused city does the same (controlScopeTakesGraphClass).
 func controlGraphStore(cityPath, storePath string, cfg *config.City, scopeStore beads.Store) beads.Store {
-	return scopeGraphStore(cityPath, storePath, cfg, scopeStore)
+	if !controlScopeTakesGraphClass(cityPath, storePath) {
+		return scopeStore
+	}
+	routes := cliStorageRoutes(cityPath)
+	return graphPlacementForScope(routes, cfg, cityPath, routes.rigGraphScopeForDir(cityPath, storePath), scopeStore)
 }
 
 // openControlStoreAtForCity resolves the control store for a city or rig SCOPE.
@@ -1095,7 +1274,12 @@ func findBeadScopeAcrossStores(cityPath, beadID string, warningWriter io.Writer)
 	if err != nil {
 		return nil, "", fmt.Errorf("opening city store: %w", err)
 	}
-	if _, err := cityStore.Get(beadID); err == nil {
+	// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+	// rows only as pre-split copies, so beads.RelicRead counts the read as
+	// debt; on the class binding the same read is legitimate.
+	// A scope probe (city, then rigs, then the graph binding below): a miss
+	// moves to the next scope.
+	if _, err := beads.RelicGet(cityStore, beadID); err == nil {
 		return cityStore, cityPath, nil
 	} else if !errors.Is(err, beads.ErrNotFound) {
 		return nil, "", fmt.Errorf("getting bead %q from %s: %w", beadID, cityPath, err)
@@ -1112,7 +1296,9 @@ func findBeadScopeAcrossStores(cityPath, beadID string, warningWriter io.Writer)
 		if err != nil {
 			return nil, "", fmt.Errorf("opening rig store %q: %w", rig.Name, err)
 		}
-		if _, err := store.Get(beadID); err != nil {
+		// Relic leg (S4 debt): a rig store holds graph control beads only as
+		// rows written before the split or by rig-scope writers S4 moves.
+		if _, err := beads.RelicGet(store, beadID); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
@@ -1155,7 +1341,8 @@ func findBeadScopeAcrossStores(cityPath, beadID string, warningWriter io.Writer)
 // the city's storage configuration and none about a particular bead, the graph
 // plane is already down by the boot gate's own verdict, and the bead is equally
 // unreachable to every scope — so this returns not-found and lets the caller
-// report it, exactly as controlGraphExtraLeg skips the same leg on the serve side.
+// report it, exactly as controlScopeTakesGraphClass keeps a rig dispatcher off the
+// refused binding on the serve side.
 func graphBindingResidentScope(cityPath string, cfg *config.City, beadID string) (beads.Store, string, error) {
 	binding, relocated := controlGraphBinding(cityPath, cityPath)
 	if !relocated || binding == nil {
@@ -1504,9 +1691,10 @@ func propagateDynamicScopeMetadata(step *formula.RecipeStep, source beads.Bead) 
 		step.Metadata = make(map[string]string)
 	}
 	if rootStoreRef := strings.TrimSpace(source.Metadata[beadmeta.RootStoreRefMetadataKey]); rootStoreRef != "" {
-		// Dynamically attached steps live in the source graph store. Overwrite a
-		// stale template value before routing so gc.routed_to and the store ref
-		// molecule.Attach persists cannot disagree.
+		// Dynamically attached steps carry their source's SCOPE (the ref is
+		// scope, never location; they are written to the store holding the
+		// source's tree). Overwrite a stale template value before routing so
+		// gc.routed_to and the scope molecule.Attach persists cannot disagree.
 		step.Metadata[beadmeta.RootStoreRefMetadataKey] = rootStoreRef
 	}
 	if scopeRef := strings.TrimSpace(source.Metadata[beadmeta.ScopeRefMetadataKey]); scopeRef != "" && step.Metadata[beadmeta.ScopeRefMetadataKey] == "" {
@@ -1714,7 +1902,17 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 	}
 	for _, info := range stores {
 		label := workflowDeleteStoreLabelForView(cfg, cityPath, info)
-		found, err := findWorkflowBeads(info.store, workflowID)
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// One view of the federated sweep (scope stores and the binding):
+		// each holds only its own rows of the workflow.
+		var found []beads.Bead
+		err := beads.RelicRead(func() error {
+			var findErr error
+			found, findErr = findWorkflowBeads(info.store, workflowID)
+			return findErr
+		})
 		if err != nil {
 			fmt.Fprintf(stderr, "gc workflow delete: %v\n", refusePartialSweep("scanning", label, err)) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1819,11 +2017,7 @@ func sweepOrder(matches []workflowStoreMatch) []workflowStoreMatch {
 func closeWorkflowMatches(matches []workflowStoreMatch) (int, error) {
 	closed := 0
 	for _, m := range sweepOrder(matches) {
-		ids := workflowBeadIDs(m.beads)
-		n, err := m.store.CloseAll(ids, map[string]string{
-			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
-			"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
-		})
+		n, err := closeOpenWorkflowBeads(m.store, m.beads)
 		closed += n
 		if err != nil {
 			return closed, refusePartialSweep("closing beads in", m.label, err)
@@ -1833,6 +2027,31 @@ func closeWorkflowMatches(matches []workflowStoreMatch) (int, error) {
 		return closed, err
 	}
 	return closed, nil
+}
+
+// closeOpenWorkflowBeads closes, as skipped, the matched beads that were still
+// open when the match was listed, and leaves the ones that had finished alone.
+//
+// A workflow match is listed with IncludeClosed, so it carries the steps that
+// finished with their own outcome. A store that batches the close without
+// reading each status first (bd, the native Dolt store) writes the skip
+// metadata onto every id it is handed, which would rewrite a passed step to
+// skipped. So the steps listed as finished never reach the batch, as in
+// molecule cleanup, and a match with nothing open sends no batch at all.
+//
+// The filter is only as current as the listing. On those stores a step that
+// finishes between the listing and the batch is still rewritten to skipped;
+// closing that window takes a close guarded by each row's status in the store
+// itself, which ga-srkwts tracks.
+func closeOpenWorkflowBeads(store beads.Store, matched []beads.Bead) (int, error) {
+	ids := openWorkflowBeadIDs(matched)
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	return store.CloseAll(ids, map[string]string{
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+		"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
+	})
 }
 
 // verifyWorkflowMatchesClosed re-reads every bead the sweep closed and refuses
@@ -2043,11 +2262,7 @@ func openSourceWorkflowStoreRef(cfg *config.City, cityPath, storeRef string) (co
 }
 
 func applySourceWorkflowMatchCleanup(match sourceWorkflowStoreMatch, deleteBeads bool, stderr io.Writer) (closed, deleted int, incomplete bool) {
-	ids := workflowBeadIDs(match.beads)
-	n, closeErr := match.store.CloseAll(ids, map[string]string{
-		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
-		"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
-	})
+	n, closeErr := closeOpenWorkflowBeads(match.store, match.beads)
 	closed += n
 	if closeErr != nil {
 		incomplete = true
@@ -2057,7 +2272,7 @@ func applySourceWorkflowMatchCleanup(match sourceWorkflowStoreMatch, deleteBeads
 	if !deleteBeads {
 		return closed, deleted, incomplete
 	}
-	count, errs := deleteSourceWorkflowMatchBeads(match, ids)
+	count, errs := deleteSourceWorkflowMatchBeads(match, workflowBeadIDs(match.beads))
 	deleted += count
 	for _, deleteErr := range errs {
 		incomplete = true
@@ -2385,6 +2600,7 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		// exists to end.
 		clearSourceWorkflowTwins(cfg, cityPath, write, target.sourceBeadID, stderr)
 		_, _ = fmt.Fprintf(stdout, "result=reopened source_bead_id=%s\n", sourceBeadID)
+		reopenTrackingConvoysForReopenedSource(target.storeView.store, currentSource.ID, stdout, stderr)
 		return nil
 	})
 	if runErr != nil {
@@ -2392,6 +2608,53 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		return 1
 	}
 	return resultCode
+}
+
+// reopenTrackingConvoysForReopenedSource is the mirror image of
+// autocloseConvoyIfComplete on the reopen side of ga-6045: closing a convoy
+// via autoclose only fires once every tracked child has reached a terminal
+// status, but nothing previously reversed that when a caller later reopened
+// one of those children through `gc workflow reopen-source`. A closed convoy
+// could then sit invisible to `gc convoy check` (its listing query excludes
+// closed convoys) for an entire second work cycle on a child it no longer
+// accurately describes as done.
+//
+// Only autoclosed convoys are reopened: status closed with close_reason
+// convoyAutocloseReason. Convoys closed by an operator, by land, or by
+// graphv2, tombstoned convoys, and owned convoys are left alone. A reopened
+// convoy has its close_reason cleared so a later reasonless close cannot be
+// mistaken for autoclose.
+//
+// This covers only the reopen-source path. It intentionally does not touch
+// `bd update --status open` or the REST `/bead/{id}/reopen` route, which can
+// reopen a tracked child the same way and remain exposed to the same staleness
+// (see gascity#6045 for the fuller discussion and the other two candidate
+// fixes this deliberately leaves out of scope).
+//
+// Best-effort by design: sourceID's own reopen has already succeeded and been
+// reported by the time this runs, so a lookup or convoy-update failure here is
+// surfaced as a warning rather than failing the overall command.
+func reopenTrackingConvoysForReopenedSource(store beads.Store, sourceID string, stdout, stderr io.Writer) {
+	convoys, err := convoycore.TrackingConvoysForItem(store, sourceID)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "warning: gc workflow reopen-source: listing tracking convoys for %s: %v\n", sourceID, err)
+		return
+	}
+	open := "open"
+	for _, convoy := range convoys {
+		if convoy.Type != "convoy" || convoy.Status != "closed" || hasLabel(convoy.Labels, "owned") ||
+			strings.TrimSpace(convoy.Metadata["close_reason"]) != convoyAutocloseReason {
+			continue
+		}
+		if err := store.Update(convoy.ID, beads.UpdateOpts{Status: &open}); err != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: gc workflow reopen-source: reopening tracking convoy %s: %v\n", convoy.ID, err)
+			continue
+		}
+		if err := store.SetMetadata(convoy.ID, "close_reason", ""); err != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: gc workflow reopen-source: clearing close_reason on convoy %s: %v\n", convoy.ID, err)
+		}
+		_, _ = fmt.Fprintf(stdout, "result=reopened_tracking_convoy convoy_id=%s source_bead_id=%s\n", convoy.ID, sourceID)
+	}
 }
 
 // findWorkflowBeads returns all beads belonging to a workflow resolved by
@@ -2488,6 +2751,13 @@ func assertWorkflowDeleteLeavesNothingStranded(store beads.Store, id string, als
 // see — an open descendant recorded outside the collected set — not a
 // replacement for the per-bead guard.
 func assertWorkflowDeleteSetLeavesNothingStranded(store beads.Store, ids []string) error {
+	return assertWorkflowDeleteSetLeavesNothingStrandedFor(store, ids, ids)
+}
+
+// assertWorkflowDeleteSetLeavesNothingStrandedFor is the set-level guard for a
+// delete of ids that asks only about check, a subset of ids the caller could
+// not already rule out as owners of gc.root_bead_id members.
+func assertWorkflowDeleteSetLeavesNothingStrandedFor(store beads.Store, ids, check []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -2497,7 +2767,7 @@ func assertWorkflowDeleteSetLeavesNothingStranded(store beads.Store, ids []strin
 	}
 	skip := workflowDeleteSkip(deleting)
 	reader := beads.HandlesFor(store).Live
-	for _, id := range ids {
+	for _, id := range check {
 		members, err := reader.List(beads.ListQuery{
 			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: id},
 			TierMode: beads.TierBoth,
@@ -2557,6 +2827,15 @@ func deleteWorkflowBeadsBatch(store beads.Store, ids []string) error {
 	}
 	if err := assertWorkflowDeleteSetLeavesNothingStranded(store, ids); err != nil {
 		return err
+	}
+	return deleteWorkflowBeadsBatchGuarded(store, ids)
+}
+
+// deleteWorkflowBeadsBatchGuarded is deleteWorkflowBeadsBatch for a caller
+// that already ran the set-level strand guard.
+func deleteWorkflowBeadsBatchGuarded(store beads.Store, ids []string) error {
+	if len(ids) == 0 {
+		return nil
 	}
 	if cd, ok := store.(beads.BatchDeleter); ok {
 		// A policy/capability wrapper advertises BatchDeleter to forward it, but
@@ -2721,19 +3000,34 @@ func ensureSelectedSourceStorePresent(cfg *config.City, cityPath, cityName, sour
 		return nil
 	}
 	present := slices.ContainsFunc(stores, func(info convoyStoreView) bool {
-		return info.store != nil &&
-			sourceworkflow.NormalizeSourceStoreRef(workflowStoreRefForDir(info.scopePath(cityPath), cityPath, cityName, cfg)) == selectedRef
+		return info.store != nil && sourceStoreRefSelectsDir(selectedRef, info.scopePath(cityPath), cityPath, cityName, cfg)
 	})
 	if present {
 		return nil
 	}
 	for _, skip := range skips {
-		skipRef := sourceworkflow.NormalizeSourceStoreRef(workflowStoreRefForDir(skip.path, cityPath, cityName, cfg))
-		if skipRef == selectedRef && skip.err != nil {
+		if skip.err != nil && sourceStoreRefSelectsDir(selectedRef, skip.path, cityPath, cityName, cfg) {
 			return fmt.Errorf("selected source workflow store %s is unavailable to scan: %w", selectedRef, skip.err)
 		}
 	}
 	return fmt.Errorf("selected source workflow store %s is unavailable to scan", selectedRef)
+}
+
+// sourceStoreRefSelectsDir reports whether selectedRef names the store rooted
+// at storeDir.
+//
+// It is not a string comparison because the two sides come from different
+// code. workflowStoreRefForDir always renders the city store as
+// "city:<name>", using the city directory's basename when the config has no
+// [workspace] name. A caller that builds the ref from city.toml alone has no
+// basename to fall back to and names the same store with a bare "city:", the
+// form openSourceWorkflowStoreRef, makeStoreRefResolver, and
+// sourceworkflow.LockScopeForStoreRef already accept. SameSourceStoreRef
+// canonicalizes the bare form to this city's name, so a ref naming a different
+// city is still a miss.
+func sourceStoreRefSelectsDir(selectedRef, storeDir, cityPath, cityName string, cfg *config.City) bool {
+	dirRef := workflowStoreRefForDir(storeDir, cityPath, cityName, cfg)
+	return dirRef != "" && sourceworkflow.SameSourceStoreRef(selectedRef, dirRef, cityName)
 }
 
 // sourceWorkflowMatchCollector walks the source-workflow graph across every
@@ -2807,14 +3101,23 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 	c.visited[visitKey] = struct{}{}
 	c.attemptedStores[index] = struct{}{}
 
-	roots, err := sourceworkflow.ListLiveRoots(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef)
+	// Relic leg (S4 debt): the walk's root probe reads every view (scope
+	// stores and the binding), and a scope store holds graph roots only as
+	// rows written before the split; beads.RelicRead counts it as debt. The
+	// child-source listing below is not covered: it is ratcheted as it is.
+	var roots []beads.Bead
+	err := beads.RelicRead(func() error {
+		var listErr error
+		roots, listErr = sourceworkflow.ListLiveRootsInCity(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
+		return listErr
+	})
 	if err != nil {
 		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing live source workflows", err)
 	}
 	if err := c.mergeRootMatches(info, roots); err != nil {
 		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow beads", err)
 	}
-	children, err := sourceWorkflowChildSources(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef)
+	children, err := sourceWorkflowChildSources(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
 	if err != nil {
 		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow children", err)
 	}
@@ -2874,10 +3177,7 @@ func (c *sourceWorkflowMatchCollector) recordScanFailure(index int, info convoyS
 	if info.isClassBinding() {
 		return refusePartialSweep(operation+" in", label, scanErr)
 	}
-	rootStoreRef := workflowStoreRefForDir(info.scopePath(c.cityPath), c.cityPath, c.cityName, c.cfg)
-	selectedStore := strings.TrimSpace(currentSourceStoreRef) != "" &&
-		sourceworkflow.NormalizeSourceStoreRef(rootStoreRef) == sourceworkflow.NormalizeSourceStoreRef(currentSourceStoreRef)
-	if selectedStore {
+	if sourceStoreRefSelectsDir(currentSourceStoreRef, info.scopePath(c.cityPath), c.cityPath, c.cityName, c.cfg) {
 		return wrapped
 	}
 	return nil
@@ -2964,10 +3264,19 @@ func assessZeroMatchSourceWorkflowScan(scans []sourceWorkflowStoreScan, sourceBe
 
 	blockingSet := make(map[string]struct{})
 	for _, view := range successfulViews {
-		roots, err := beads.HandlesFor(view.store).Live.List(beads.ListQuery{
-			Metadata: map[string]string{
-				beadmeta.FormulaVarPrefix + graphv2.LegacyIssueVar: sourceBeadID,
-			},
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// One view of the zero-match re-scan; each holds only its own roots.
+		var roots []beads.Bead
+		err := beads.RelicRead(func() error {
+			var listErr error
+			roots, listErr = beads.HandlesFor(view.store).Live.List(beads.ListQuery{
+				Metadata: map[string]string{
+					beadmeta.FormulaVarPrefix + graphv2.LegacyIssueVar: sourceBeadID,
+				},
+			})
+			return listErr
 		})
 		if err != nil {
 			return zeroMatchSourceWorkflowScan{
@@ -3012,16 +3321,17 @@ func mergeSourceWorkflowMatch(matches map[string]sourceWorkflowStoreMatch, next 
 	matches[next.label] = current
 }
 
-func sourceWorkflowChildSources(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef string) ([]beads.Bead, error) {
+func sourceWorkflowChildSources(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef, cityName string) ([]beads.Bead, error) {
 	sourceBeadID = strings.TrimSpace(sourceBeadID)
 	if store == nil || sourceBeadID == "" {
 		return nil, nil
 	}
-	candidates, err := store.List(beads.ListQuery{
+	candidates, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 		IncludeClosed: true,
 		Metadata: map[string]string{
 			beadmeta.SourceBeadIDMetadataKey: sourceBeadID,
 		},
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err
@@ -3031,7 +3341,7 @@ func sourceWorkflowChildSources(store beads.Store, sourceBeadID, sourceStoreRef,
 		if candidate.ID == "" || sourceworkflow.IsWorkflowRoot(candidate) {
 			continue
 		}
-		if !sourceworkflow.WorkflowMatchesSource(candidate, sourceBeadID, sourceStoreRef, rootStoreRef) {
+		if !sourceworkflow.WorkflowMatchesSourceInCity(candidate, sourceBeadID, sourceStoreRef, rootStoreRef, cityName) {
 			continue
 		}
 		children = append(children, candidate)
@@ -3118,8 +3428,7 @@ func unscannedSourceWorkflowStoreSkips(cfg *config.City, cityPath, selectedStore
 	unscanned := make([]sourceWorkflowStoreSkip, 0, len(skips))
 	selectedRecovered := false
 	for _, skip := range skips {
-		skipRef := sourceworkflow.NormalizeSourceStoreRef(workflowStoreRefForDir(skip.path, cityPath, cityName, cfg))
-		if skipRef == selectedStoreRef {
+		if sourceStoreRefSelectsDir(selectedStoreRef, skip.path, cityPath, cityName, cfg) {
 			selectedRecovered = true
 			continue
 		}
@@ -3439,12 +3748,16 @@ func findWorkflowBeads(store beads.Store, workflowID string) ([]beads.Bead, erro
 		return nil, fmt.Errorf("getting workflow root %s: %w", workflowID, err)
 	}
 	// Query on gc.workflow_id only; the predicate is applied in-memory via
-	// addRoot so we pick up graph.v2-only roots alongside legacy roots.
-	roots, err := store.List(beads.ListQuery{
+	// addRoot so we pick up graph.v2-only roots alongside legacy roots. The
+	// read spans both tiers: a root minted in a relocated binding's wisp tier
+	// is still the workflow's root.
+	reader := beads.HandlesFor(store).Live
+	roots, err := reader.List(beads.ListQuery{
 		Metadata: map[string]string{
 			beadmeta.WorkflowIDMetadataKey: workflowID,
 		},
 		IncludeClosed: true,
+		TierMode:      beads.FederatedReadTier,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing roots of workflow %s: %w", workflowID, err)
@@ -3453,9 +3766,10 @@ func findWorkflowBeads(store beads.Store, workflowID string) ([]beads.Bead, erro
 		addRoot(root)
 	}
 	for _, rootID := range rootIDs {
-		all, err := store.List(beads.ListQuery{
+		all, err := reader.List(beads.ListQuery{
 			Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
 			IncludeClosed: true,
+			TierMode:      beads.TierBoth,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("listing descendants of workflow %s: %w", rootID, err)
@@ -3471,9 +3785,10 @@ func findWorkflowBeadsFromRoot(store beads.Store, root beads.Bead) ([]beads.Bead
 	if store == nil || root.ID == "" {
 		return nil, nil
 	}
-	descendants, err := store.List(beads.ListQuery{
+	descendants, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
 		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing descendants of workflow %s: %w", root.ID, err)
@@ -3485,6 +3800,18 @@ func workflowBeadIDs(bb []beads.Bead) []string {
 	ids := make([]string, len(bb))
 	for i, b := range bb {
 		ids[i] = b.ID
+	}
+	return ids
+}
+
+// openWorkflowBeadIDs returns the ids of the beads that are not closed yet.
+func openWorkflowBeadIDs(bb []beads.Bead) []string {
+	ids := make([]string, 0, len(bb))
+	for _, b := range bb {
+		if b.Status == "closed" {
+			continue
+		}
+		ids = append(ids, b.ID)
 	}
 	return ids
 }

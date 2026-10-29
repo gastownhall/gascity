@@ -91,6 +91,8 @@ func TestSchemaCursorsMatchPinnedBeads(t *testing.T) {
 //     ignoredSource (a main-lane sentinel is one gc's probe never reads);
 //   - ignoredSource.sentinelTables equals gc's list, in ORDER (the library
 //     probes tables first and short-circuits on the first absent one);
+//   - ignoredSource.sentinelFlooredTables equals gc's floored list (tables,
+//     replay floors and order; beads v1.3.1);
 //   - ignoredSource.sentinelColumns is exactly the one column gc reads, with
 //     the same replay floor;
 //   - cursorRealityFloor's missing-table arm floors at gc's table floor.
@@ -100,7 +102,7 @@ func TestSchemaCursorsMatchPinnedBeads(t *testing.T) {
 //   - every migrationSource literal is read wherever it sits — by pointer, as
 //     an element of a slice, array or map of sources, or inside a function —
 //     not only `var x = migrationSource{…}`;
-//   - a sentinel field other than the two gc reads is an error, and
+//   - a sentinel field other than the three gc reads is an error, and
 //     migrationSource's field set is pinned, so a new sentinel KIND cannot
 //     arrive unread;
 //   - a reference to a sentinel field outside cursorRealityFloor (an init()
@@ -148,8 +150,10 @@ func TestIgnoredSentinelsMatchPinnedBeads(t *testing.T) {
 }
 
 // pinnedCursorRealityFloorDigest is cursorRealityFloorDigest at the pinned
-// beads (v1.3.0, internal/storage/schema/schema.go).
-const pinnedCursorRealityFloorDigest = "65993bb205e8911af8e696360952bd16c8d8388a5db7c23c427e63e97dc14533"
+// beads (v1.3.1, internal/storage/schema/schema.go: sentinel tables floor at 0
+// and short-circuit, then floored tables and columns clamp to the lowest
+// replayFloor of anything absent).
+const pinnedCursorRealityFloorDigest = "309a20318eea0f78e6e33fd76c9ca0dfe5fd0f3da6b48371cda7102648b4843d"
 
 // TestSentinelDriftPinSeesEveryDirection proves the pin above is structural by
 // feeding it the library shapes the old substring pin could not see, and one it
@@ -157,12 +161,18 @@ const pinnedCursorRealityFloorDigest = "65993bb205e8911af8e696360952bd16c8d8388a
 // same function the real pin runs.
 func TestSentinelDriftPinSeesEveryDirection(t *testing.T) {
 	const header = "package schema\n\ntype schemaSentinelColumn struct{ table, column string; replayFloor int }\n" +
-		"type migrationSource struct{ cursorTable string; sentinelTables []string; sentinelColumns []schemaSentinelColumn }\n"
+		"type schemaSentinelTable struct{ table string; replayFloor int }\n" +
+		"type migrationSource struct{ cursorTable string; sentinelTables []string; sentinelFlooredTables []schemaSentinelTable; sentinelColumns []schemaSentinelColumn }\n"
 	const pinned = `var (
 	mainSource    = migrationSource{cursorTable: "schema_migrations"}
 	ignoredSource = migrationSource{
 		cursorTable:     "ignored_schema_migrations",
 		sentinelTables:  []string{"wisps", "wisp_dependencies"},
+		sentinelFlooredTables: []schemaSentinelTable{
+			{table: "events", replayFloor: 18},
+			{table: "bd_events_journal", replayFloor: 21},
+			{table: "bd_events_seq", replayFloor: 21},
+		},
 		sentinelColumns: []schemaSentinelColumn{{table: "leases", column: "granted_node", replayFloor: 11}},
 	}
 )
@@ -214,6 +224,19 @@ var doltIgnorePatterns = []string{"wisps", "wisp_dependencies"}
 				"sibling.go": "package schema\n\nvar thirdSource = migrationSource{sentinelTables: []string{\"x\"}}\n",
 			},
 			want: "thirdSource",
+		},
+		{
+			name: "an ADDED floored sentinel table",
+			sources: map[string]string{"schema.go": header + strings.Replace(pinned,
+				`{table: "bd_events_seq", replayFloor: 21},`, `{table: "bd_events_seq", replayFloor: 21},
+			{table: "bd_events_cursor", replayFloor: 24},`, 1)},
+			want: "sentinelFlooredTables",
+		},
+		{
+			name: "a moved floored-table replay floor",
+			sources: map[string]string{"schema.go": header + strings.Replace(pinned,
+				`{table: "events", replayFloor: 18},`, `{table: "events", replayFloor: 17},`, 1)},
+			want: "sentinelFlooredTables",
 		},
 		{
 			name: "a moved replay floor",
@@ -341,13 +364,22 @@ type sentinelColumnDecl struct {
 	floor         int
 }
 
-// sentinelDecl is what one migrationSource literal declares about sentinels.
-type sentinelDecl struct {
-	tables  []string
-	columns []sentinelColumnDecl
+// sentinelFlooredTableDecl is one schemaSentinelTable literal.
+type sentinelFlooredTableDecl struct {
+	table string
+	floor int
 }
 
-func (d sentinelDecl) empty() bool { return len(d.tables) == 0 && len(d.columns) == 0 }
+// sentinelDecl is what one migrationSource literal declares about sentinels.
+type sentinelDecl struct {
+	tables        []string
+	flooredTables []sentinelFlooredTableDecl
+	columns       []sentinelColumnDecl
+}
+
+func (d sentinelDecl) empty() bool {
+	return len(d.tables) == 0 && len(d.flooredTables) == 0 && len(d.columns) == 0
+}
 
 // readGoSources reads every non-test Go file directly under dir.
 func readGoSources(t *testing.T, dir string) map[string][]byte {
@@ -379,11 +411,12 @@ func readGoSources(t *testing.T, dir string) map[string][]byte {
 // pr2 E-S5 / E-I3), so the pin refuses any addition until someone has re-read
 // what cursorRealityFloor does with it.
 var knownMigrationSourceFields = map[string]bool{
-	"files": true, "dir": true, "cursorTable": true, "sentinelTables": true, "sentinelColumns": true,
+	"files": true, "dir": true, "cursorTable": true,
+	"sentinelTables": true, "sentinelFlooredTables": true, "sentinelColumns": true,
 }
 
-// knownSentinelFields are the two sentinel kinds gc's probe reads.
-var knownSentinelFields = map[string]bool{"sentinelTables": true, "sentinelColumns": true}
+// knownSentinelFields are the three sentinel kinds gc's probe reads.
+var knownSentinelFields = map[string]bool{"sentinelTables": true, "sentinelFlooredTables": true, "sentinelColumns": true}
 
 // parsedSources is the pinned package, parsed once, in a stable file order.
 type parsedSources struct {
@@ -549,7 +582,7 @@ func migrationSourceFieldProblems(parsed parsedSources) []string {
 				for _, name := range field.Names {
 					if !knownMigrationSourceFields[name.Name] {
 						problems = append(problems, fmt.Sprintf("migrationSource gained field %s: a new field is how a "+
-							"new sentinel kind arrives, and gc's probe reads only sentinelTables and sentinelColumns; "+
+							"new sentinel kind arrives, and gc's probe reads only sentinelTables, sentinelFlooredTables and sentinelColumns; "+
 							"re-read cursorRealityFloor", name.Name))
 					}
 				}
@@ -667,6 +700,37 @@ func sentinelsOf(literal *ast.CompositeLit) (sentinelDecl, error) {
 				}
 				d.tables = append(d.tables, table)
 			}
+		case "sentinelFlooredTables":
+			list, ok := field.Value.(*ast.CompositeLit)
+			if !ok {
+				return d, errors.New("sentinelFlooredTables is not a literal")
+			}
+			for _, item := range list.Elts {
+				entry, ok := item.(*ast.CompositeLit)
+				if !ok {
+					return d, errors.New("a sentinelFlooredTables entry is not a literal")
+				}
+				var f sentinelFlooredTableDecl
+				for _, part := range entry.Elts {
+					kv, ok := part.(*ast.KeyValueExpr)
+					if !ok {
+						return d, errors.New("a positional schemaSentinelTable; this pin reads keyed fields only")
+					}
+					var err error
+					switch keyName(kv.Key) {
+					case "table":
+						f.table, err = stringLit(kv.Value)
+					case "replayFloor":
+						f.floor, err = intLit(kv.Value)
+					default:
+						err = fmt.Errorf("unknown schemaSentinelTable field %s", keyName(kv.Key))
+					}
+					if err != nil {
+						return d, fmt.Errorf("sentinelFlooredTables: %w", err)
+					}
+				}
+				d.flooredTables = append(d.flooredTables, f)
+			}
 		case "sentinelColumns":
 			list, ok := field.Value.(*ast.CompositeLit)
 			if !ok {
@@ -702,7 +766,7 @@ func sentinelsOf(literal *ast.CompositeLit) (sentinelDecl, error) {
 			}
 		default:
 			if name := keyName(field.Key); strings.Contains(strings.ToLower(name), "sentinel") {
-				return d, fmt.Errorf("unknown sentinel field %s: gc's probe reads only sentinelTables and sentinelColumns", name)
+				return d, fmt.Errorf("unknown sentinel field %s: gc's probe reads only sentinelTables, sentinelFlooredTables and sentinelColumns", name)
 			}
 		}
 	}
@@ -732,6 +796,13 @@ func sentinelDrift(declared map[string]sentinelDecl) []string {
 	}
 	if want := proxyendpoint.IgnoredSentinelTables(); !slices.Equal(ignored.tables, want) {
 		problems = append(problems, fmt.Sprintf("ignoredSource.sentinelTables is %q, gc probes %q (order matters: the library short-circuits on the first absent table)", ignored.tables, want))
+	}
+	var wantFloored []sentinelFlooredTableDecl
+	for _, floored := range proxyendpoint.IgnoredSentinelFlooredTables() {
+		wantFloored = append(wantFloored, sentinelFlooredTableDecl{table: floored.Table, floor: floored.Floor})
+	}
+	if !slices.Equal(ignored.flooredTables, wantFloored) {
+		problems = append(problems, fmt.Sprintf("ignoredSource.sentinelFlooredTables is %+v, gc probes %+v (tables, replay floors and order)", ignored.flooredTables, wantFloored))
 	}
 	want := []sentinelColumnDecl{{
 		table:  proxyendpoint.IgnoredSentinelColumnTable,

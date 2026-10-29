@@ -28,6 +28,10 @@ func stubDeps(t *testing.T, captured *map[string]config.Import) Deps {
 			return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 		},
 		DefaultConstraint: func(_ string) (string, error) { return "^1.4", nil },
+		ResolveRegistryRelease: func(_, _ string) (packman.RegistryRelease, bool, error, error) {
+			return packman.RegistryRelease{}, false, nil, nil
+		},
+		RegistryReleaseLabel: func(string, packman.LockedPack) string { return "" },
 		SyncLock: func(_ string, imports map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
 			if captured != nil {
 				*captured = imports
@@ -111,6 +115,42 @@ version = "^1.4"
 	}
 	if !errors.Is(err, ErrImportExists) {
 		t.Fatalf("err = %v, want ErrImportExists", err)
+	}
+}
+
+// TestAddImportReusesCityConstraintForImportedSource pins that a version-less
+// add of a source the city already imports under another name writes the
+// existing constraint rather than the newest release's, so the lock sync keeps
+// the shared pin instead of moving it.
+func TestAddImportReusesCityConstraintForImportedSource(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "city.toml"), "[workspace]\nname = \"demo\"\n")
+	writeFile(t, filepath.Join(dir, "pack.toml"), `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://github.com/example/tools.git"
+version = "^1.2"
+`)
+
+	var captured map[string]config.Import
+	res, err := AddImportWith(fsys.OSFS{}, dir, "https://github.com/example/tools.git", "kit", "", stubDeps(t, &captured))
+	if err != nil {
+		t.Fatalf("AddImportWith: %v", err)
+	}
+	if res.Version != "^1.2" {
+		t.Fatalf("Version = %q, want the city's ^1.2", res.Version)
+	}
+	if got := captured["pack:kit"].Version; got != "^1.2" {
+		t.Fatalf("synced pack:kit version = %q, want ^1.2", got)
+	}
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("Load(pack.toml): %v", err)
+	}
+	if got := cfg.Imports["kit"].Version; got != "^1.2" {
+		t.Fatalf("imports.kit.version = %q, want ^1.2", got)
 	}
 }
 

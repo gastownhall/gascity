@@ -12,8 +12,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/formulatest"
-	"github.com/gastownhall/gascity/internal/molecule"
 )
 
 // newSlingDashboardTestServer is newSlingTestServer plus a dashboard base
@@ -186,15 +184,10 @@ func TestSlingResponseDashboardURLRunDetailForGraphLaunch(t *testing.T) {
 	// TestSlingGraphV2RejectsLegacySourceWorkflowConflict: flip the shared
 	// FormulaV2 + graph-apply flags only after New() has run so
 	// syncFeatureFlags cannot stomp them back.
-	setFormulaV2 := formulatest.LockV2ForTest(t)
-	prevGraphApply := molecule.IsGraphApplyEnabled()
-	t.Cleanup(func() {
-		molecule.SetGraphApplyEnabled(prevGraphApply)
-	})
+	enableGraphV2 := lockGraphV2SlingFlagsForTest(t)
 
 	h, state := newSlingDashboardTestServer(t, "http://127.0.0.1:8372")
-	setFormulaV2(true)
-	molecule.SetGraphApplyEnabled(true)
+	enableGraphV2()
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
 	state.cfg.Agents = append(state.cfg.Agents,

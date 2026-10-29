@@ -770,6 +770,287 @@ func TestCmdMailSendFromControllerCreatesMessage(t *testing.T) {
 	}
 }
 
+// createMailIdentitySession creates a live session bead for identity/alias,
+// the shared fixture shape used by the #4070 --from authorization tests
+// below (mirrors TestCmdMailSendFromControllerCreatesMessage's recipient
+// setup, extracted since these tests need two: an impersonation target and
+// a caller's own identity).
+func createMailIdentitySession(t *testing.T, store beads.Store, identity, alias, sessionName string) {
+	t.Helper()
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			namedSessionIdentityMetadata: identity,
+			"alias":                      alias,
+			"session_name":               sessionName,
+		},
+	}); err != nil {
+		t.Fatalf("create session %q: %v", identity, err)
+	}
+}
+
+// TestCmdMailSendFromRejectsImpersonatingOtherLiveSession is the regression
+// for #4070: a live session (GC_ALIAS=worker) must not be able to send mail
+// --from a DIFFERENT live session's identity (mayor) just because mayor
+// happens to be live and resolvable -- the actual vulnerability, since mail
+// signed by a privileged coordinator role can carry trust decisions
+// downstream.
+func TestCmdMailSendFromRejectsImpersonatingOtherLiveSession(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	createMailIdentitySession(t, store, "test-city/mayor", "mayor", "mayor-session")
+	createMailIdentitySession(t, store, "test-city/worker", "worker", "worker-session")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"human/"}, false, false, "mayor", "", "forged advisory", "not really from mayor", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdMailSend(--from mayor, caller=worker) = 0, want non-zero (impersonation must be rejected); stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "mayor") {
+		t.Errorf("stderr = %q, want it to name the rejected identity", stderr.String())
+	}
+
+	storeAfter, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt after send: %v", err)
+	}
+	all, err := storeAfter.List(beads.ListQuery{Type: "message", Status: "open", TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("List messages: %v", err)
+	}
+	for _, b := range all {
+		if b.From == "mayor" {
+			t.Fatalf("a message with forged From=mayor was created: %#v", b)
+		}
+	}
+}
+
+// TestCmdMailSendFromAllowsSelfIdentity guards the fix's scope: a live
+// session sending --from its OWN identity (not impersonating anyone) must
+// still work -- the same-session self-send is the common, legitimate case.
+func TestCmdMailSendFromAllowsSelfIdentity(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_ALIAS", "mayor")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	createMailIdentitySession(t, store, "test-city/mayor", "mayor", "mayor-session")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"human/"}, false, false, "mayor", "", "self-sent status", "all clear", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdMailSend(--from mayor, caller=mayor) = %d, want 0 (self-send must be allowed); stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+}
+
+// TestCmdMailSendFromControllerRejectedForLiveAgentSession guards the
+// reserved "controller" bucket: it is a structured sender identity, so a
+// live agent session must not claim it. Scripted automation (e.g. the exec
+// order behind examples/bd/dolt/commands/compact/run.sh) runs with the
+// supervisor's environment, carries no session env vars, and keeps using
+// --from controller (TestCmdMailSendFromControllerCreatesMessage).
+func TestCmdMailSendFromControllerRejectedForLiveAgentSession(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	createMailIdentitySession(t, store, "test-city/worker", "worker", "worker-session")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"human/"}, false, false, "controller", "", "quarantine alert", "dolt compact quarantine", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdMailSend(--from controller, caller=worker) = 0, want nonzero (live agent must not claim controller); stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "does not match this session's own identity") {
+		t.Fatalf("stderr = %q, want own-identity rejection", stderr.String())
+	}
+}
+
+// TestCmdMailSendFromRejectsUnresolvableCallerIdentity guards the fail-closed
+// direction: a caller whose own live-session env vars are set but don't
+// resolve to any actual live session must not be able to use that as a
+// loophole to claim any --from identity.
+func TestCmdMailSendFromRejectsUnresolvableCallerIdentity(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_ALIAS", "ghost-session-that-does-not-exist")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	createMailIdentitySession(t, store, "test-city/mayor", "mayor", "mayor-session")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"human/"}, false, false, "mayor", "", "forged advisory", "not really from mayor", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdMailSend(--from mayor, caller=unresolvable) = 0, want non-zero (fail closed); stdout=%s", stdout.String())
+	}
+}
+
+// TestCmdMailSendFromRejectsOverriddenAliasWhenSessionIDResolves pins the
+// candidate order: GC_SESSION_ID is resolved before GC_ALIAS, so a live
+// session that overrides only GC_ALIAS=mayor is still itself and cannot
+// claim --from mayor. Clearing every identity var still reads as the
+// operator (TestCmdMailSendFromHumanAllowedForInteractiveHuman); this check
+// is a guard, not authentication.
+func TestCmdMailSendFromRejectsOverriddenAliasWhenSessionIDResolves(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_ALIAS", "mayor")
+	t.Setenv("GC_SESSION_ID", "worker-session")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	createMailIdentitySession(t, store, "test-city/mayor", "mayor", "mayor-session")
+	createMailIdentitySession(t, store, "test-city/worker", "worker", "worker-session")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"human/"}, false, false, "mayor", "", "forged advisory", "not really from mayor", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdMailSend(--from mayor, GC_SESSION_ID=worker-session, GC_ALIAS=mayor) = 0, want non-zero; stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "does not match this session's own identity") {
+		t.Fatalf("stderr = %q, want own-identity rejection", stderr.String())
+	}
+}
+
+// TestCmdMailSendFromHumanRejectedForLiveAgentSession closes the reserved
+// "human" bucket as a --from bypass: "human" is the operator's identity, so a
+// live agent session claiming it forges operator-authority mail just as
+// --from mayor forges coordinator mail (#4070).
+func TestCmdMailSendFromHumanRejectedForLiveAgentSession(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	createMailIdentitySession(t, store, "test-city/mayor", "mayor", "mayor-session")
+	createMailIdentitySession(t, store, "test-city/worker", "worker", "worker-session")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"mayor"}, false, false, "human", "", "forged directive", "not really from the operator", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdMailSend(--from human, caller=worker) = 0, want non-zero (operator impersonation must be rejected); stdout=%s", stdout.String())
+	}
+
+	storeAfter, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt after send: %v", err)
+	}
+	all, err := storeAfter.List(beads.ListQuery{Type: "message", Status: "open", TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("List messages: %v", err)
+	}
+	for _, b := range all {
+		if b.From == "human" {
+			t.Fatalf("a message with forged From=human was created: %#v", b)
+		}
+	}
+}
+
+// TestCmdMailSendFromEnvEmptyCallerIsExempt pins the documented
+// interactive-human exemption: a caller with GC_ALIAS/GC_SESSION_ID/GC_AGENT
+// all empty resolves its own identity as the reserved "human" bucket, so it
+// may claim any --from identity -- including a live session's (mayor). This
+// is by design, not an oversight: shell access to the city is already a
+// stronger trust boundary than mail-sender identity, and this is the plain
+// human operator's documented default sender. It is also the residual hole
+// in the #4070 guard (--from is a spoofing guard, not authentication, since
+// the caller controls those env vars), pinned here so the exemption cannot
+// be narrowed or widened by accident.
+func TestCmdMailSendFromEnvEmptyCallerIsExempt(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	createMailIdentitySession(t, store, "test-city/mayor", "mayor", "mayor-session")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"human/"}, false, false, "mayor", "", "operator advisory", "sent by a human operator", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdMailSend(--from mayor, caller=env-empty human) = %d, want 0 (interactive-human exemption); stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestCmdMailSendToControllerRecipientIsRejected(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_MAIL", "")
@@ -2016,10 +2297,10 @@ func TestMailReplyNotifySuccess(t *testing.T) {
 	mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
 
 	var nudged, nudgedMessageID string
-	nf := func(recipient, messageID string) error {
+	nf := func(recipient, messageID string) (string, error) {
 		nudged = recipient
 		nudgedMessageID = messageID
-		return nil
+		return "", nil
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -2043,8 +2324,8 @@ func TestMailReplyNotifyNudgeError(t *testing.T) {
 	mp := beadmail.New(store)
 	mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
 
-	nf := func(_, _ string) error {
-		return fmt.Errorf("session not found")
+	nf := func(_, _ string) (string, error) {
+		return "", fmt.Errorf("session not found")
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -2422,6 +2703,112 @@ func TestMailMarkReadSuccess(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Marked gc-1 as read") {
 		t.Errorf("stdout = %q, want confirmation", stdout.String())
 	}
+}
+
+// TestMailMarkReadList covers mark-read takes several ids, as
+// separate arguments or as one whitespace-separated argument (an unsplit
+// "$IDS"), which used to be looked up as a single id and mark nothing. A bad
+// id is reported and the rest are still marked.
+func TestMailMarkReadList(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	for _, body := range []string{"one", "two", "three"} {
+		if _, err := mp.Send("human", "mayor", "", body); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailMarkRead(mp, events.Discard, []string{"gc-1 gc-2", "gc-missing", "gc-3"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doMailMarkRead = %d, want 1 for the missing id; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc-missing") {
+		t.Errorf("stderr = %q, want the failing id named", stderr.String())
+	}
+	for _, id := range []string{"gc-1", "gc-2", "gc-3"} {
+		if !strings.Contains(stdout.String(), "Marked "+id+" as read") {
+			t.Errorf("stdout = %q, want %s confirmed", stdout.String(), id)
+		}
+	}
+	if _, unread, err := mp.Count("mayor"); err != nil || unread != 0 {
+		t.Fatalf("Count(mayor) unread = %d, err = %v; want 0 after marking all three", unread, err)
+	}
+}
+
+// TestMailMarkReadListJSON covers the --json result of mark-read: several ids
+// report ids and count with no id, a partial failure writes no JSON and names
+// the failing id, and a single id keeps its id/ids/count shape.
+func TestMailMarkReadListJSON(t *testing.T) {
+	newProvider := func(t *testing.T) mail.Provider {
+		t.Helper()
+		mp := beadmail.New(beads.NewMemStore())
+		for _, body := range []string{"one", "two"} {
+			if _, err := mp.Send("human", "mayor", "", body); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return mp
+	}
+	decode := func(t *testing.T, out string) map[string]any {
+		t.Helper()
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		if len(lines) != 1 {
+			t.Fatalf("stdout = %q, want one JSON line", out)
+		}
+		var got map[string]any
+		if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+			t.Fatalf("Unmarshal(%q): %v", lines[0], err)
+		}
+		return got
+	}
+
+	t.Run("several ids", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := doMailMarkReadJSON(newProvider(t), events.Discard, []string{"gc-1 gc-2"}, true, &stdout, &stderr); code != 0 {
+			t.Fatalf("doMailMarkReadJSON = %d, want 0; stderr: %s", code, stderr.String())
+		}
+		got := decode(t, stdout.String())
+		if id, ok := got["id"]; ok && id != "" {
+			t.Errorf("id = %v, want absent for several ids", id)
+		}
+		if ids, _ := got["ids"].([]any); len(ids) != 2 || ids[0] != "gc-1" || ids[1] != "gc-2" {
+			t.Errorf("ids = %v, want [gc-1 gc-2]", got["ids"])
+		}
+		if got["count"] != float64(2) {
+			t.Errorf("count = %v, want 2", got["count"])
+		}
+	})
+
+	t.Run("partial failure", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := doMailMarkReadJSON(newProvider(t), events.Discard, []string{"gc-1", "gc-missing"}, true, &stdout, &stderr); code != 1 {
+			t.Fatalf("doMailMarkReadJSON = %d, want 1; stderr: %s", code, stderr.String())
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("stdout = %q, want no JSON on a partial failure", stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "gc-missing") {
+			t.Errorf("stderr = %q, want the failing id named", stderr.String())
+		}
+	})
+
+	t.Run("single id", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := doMailMarkReadJSON(newProvider(t), events.Discard, []string{"gc-1"}, true, &stdout, &stderr); code != 0 {
+			t.Fatalf("doMailMarkReadJSON = %d, want 0; stderr: %s", code, stderr.String())
+		}
+		got := decode(t, stdout.String())
+		if got["id"] != "gc-1" {
+			t.Errorf("id = %v, want gc-1", got["id"])
+		}
+		if ids, _ := got["ids"].([]any); len(ids) != 1 || ids[0] != "gc-1" {
+			t.Errorf("ids = %v, want [gc-1]", got["ids"])
+		}
+		if got["count"] != float64(1) {
+			t.Errorf("count = %v, want 1", got["count"])
+		}
+	})
 }
 
 func TestMailMarkUnreadSuccess(t *testing.T) {
@@ -3272,10 +3659,10 @@ func TestMailSendNotifySuccess(t *testing.T) {
 	recipients := map[string]bool{"human": true, "mayor": true}
 
 	var nudged, nudgedMessageID string
-	nf := func(recipient, messageID string) error {
+	nf := func(recipient, messageID string) (string, error) {
 		nudged = recipient
 		nudgedMessageID = messageID
-		return nil
+		return "", nil
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -3294,13 +3681,43 @@ func TestMailSendNotifySuccess(t *testing.T) {
 	}
 }
 
+// TestMailSendReportsSentBeforeNudging pins that the sent confirmation is on
+// stdout before the recipient is nudged. escalate.sh relies on that order: a
+// send its timeout cuts off after this line counts as delivered, so printing
+// it only after the nudge would make a stalled wake look like a lost mail.
+func TestMailSendReportsSentBeforeNudging(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	recipients := map[string]bool{"human": true, "mayor": true}
+
+	var stdout, stderr bytes.Buffer
+	nudged := false
+	var stdoutAtNudge string
+	nf := func(_, _ string) (string, error) {
+		nudged = true
+		stdoutAtNudge = stdout.String()
+		return "", nil
+	}
+
+	code := doMailSend(mp, events.Discard, recipients, "human", []string{"mayor", "wake up"}, nf, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailSend = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !nudged {
+		t.Fatal("nudgeFn was not called")
+	}
+	if !strings.Contains(stdoutAtNudge, "Sent message gc-1 to mayor") {
+		t.Errorf("stdout when the nudge ran = %q, want the sent confirmation already printed", stdoutAtNudge)
+	}
+}
+
 func TestMailSendNotifyNudgeError(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
 	recipients := map[string]bool{"human": true, "mayor": true}
 
-	nf := func(_, _ string) error {
-		return fmt.Errorf("session not found")
+	nf := func(_, _ string) (string, error) {
+		return "", fmt.Errorf("session not found")
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -3324,9 +3741,9 @@ func TestMailSendNotifyToHuman(t *testing.T) {
 	recipients := map[string]bool{"human": true, "mayor": true}
 
 	nudgeCalled := false
-	nf := func(_, _ string) error {
+	nf := func(_, _ string) (string, error) {
 		nudgeCalled = true
-		return nil
+		return "", nil
 	}
 
 	var stdout bytes.Buffer
@@ -3775,13 +4192,16 @@ func TestMailCheckInjectLimitsMessageCount(t *testing.T) {
 	}
 
 	out := stdout.String()
-	for _, want := range []string{"4 unread message(s)", "gc-1 from sender-a", "gc-2 from sender-b", "gc-3 from sender-c", "Showing the first 3 message(s)"} {
+	// selectMailInjectWindow keeps the NEWEST arrivals within a priority tier
+	// (ga-18f84o): among 4 equal-priority (all priority-0) messages, the oldest
+	// (first/gc-1) is the one clamped out, not the newest.
+	for _, want := range []string{"4 unread message(s)", "gc-2 from sender-b", "gc-3 from sender-c", "gc-4 from sender-d", "Showing the 3 most recent message(s)"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout missing %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "gc-4") || strings.Contains(out, "fourth") {
-		t.Errorf("stdout should not include the fourth message:\n%s", out)
+	if strings.Contains(out, "gc-1") || strings.Contains(out, "first") {
+		t.Errorf("stdout should not include the first message:\n%s", out)
 	}
 }
 
@@ -4011,11 +4431,12 @@ func TestMailCheckInjectArchivesEphemeralAutoHandoffMessages(t *testing.T) {
 // That test pinned the bug: a priority-tagged restart handoff arriving BEHIND a
 // full window of ordinary mail was clamped out of the injection preview (never
 // surfaced, never archived). With the priority-sort-before-clamp patch (handoff
-// mail tagged priority:1 at the cmd_handoff send sites + sortMailByPriority run
-// before both the display and archive clamps), a priority:1 handoff now floats
-// into the window: it is injected AND archived, while a lower-priority ordinary
-// message is the one clamped out and left open. mail.Message.Priority is
-// otherwise unwritten, so ordinary all-priority-0 mail keeps arrival order.
+// mail tagged priority:1 at the cmd_handoff send sites + selectMailInjectWindow
+// run before both the display and archive clamps), a priority:1 handoff now
+// floats into the window: it is injected AND archived, while a lower-priority
+// ordinary message is the one clamped out and left open. Among the equal-
+// priority ordinary mail, selectMailInjectWindow keeps the NEWEST arrivals
+// (ga-18f84o) and evicts the oldest one, not "arrival order" as before.
 func TestMailCheckInjectFloatsPriorityAutoHandoffIntoWindow(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
@@ -4051,8 +4472,9 @@ func TestMailCheckInjectFloatsPriorityAutoHandoffIntoWindow(t *testing.T) {
 	}
 	// ...and is retired (mark-read+closed, retain-addressable) after injection.
 	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
-	// The lowest-ranked ordinary message is the one clamped out — still open.
-	clampedOut := ordinaryIDs[len(ordinaryIDs)-1]
+	// The oldest ordinary message is the one clamped out (selectMailInjectWindow
+	// keeps the newest arrivals within a priority tier) — still open.
+	clampedOut := ordinaryIDs[0]
 	b, err := store.Get(clampedOut)
 	if err != nil {
 		t.Fatalf("clamped-out ordinary mail should remain: %v", err)

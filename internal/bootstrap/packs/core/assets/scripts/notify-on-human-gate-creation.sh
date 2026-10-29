@@ -98,6 +98,7 @@ RIGS_JSON="$(gc rig list --json 2>/dev/null || true)"
 set_rig_args() {
     RIG_ARG1=""
     RIG_ARG2=""
+    RIG_SUSPENDED=""
     [ -n "$RIGS_JSON" ] || return 0
     _prefix="${1%%-*}"
     [ -n "$_prefix" ] && [ "$_prefix" != "$1" ] || return 0
@@ -107,6 +108,12 @@ set_rig_args() {
     if [ -n "$_rig" ]; then
         RIG_ARG1="--rig"
         RIG_ARG2="$_rig"
+    fi
+    # A suspended rig is left cold: any bd read restarts its retired proxy.
+    # RIG_SUSPENDED tells the caller to leave the bead until the rig resumes.
+    if [ -n "$_rig" ] && printf '%s' "$RIGS_JSON" \
+        | jq -e --arg r "$_rig" '(.rigs // [])[] | select(.name == $r and .suspended == true)' >/dev/null 2>&1; then
+        RIG_SUSPENDED=1
     fi
 }
 
@@ -148,6 +155,7 @@ while IFS= read -r gate_id; do
     fi
 
     set_rig_args "$gate_id"
+    [ -z "$RIG_SUSPENDED" ] || continue
     # Re-fetch authoritative gate details: the bead.created payload omits
     # await_type, so the event alone cannot tell a human gate from a timer/gh
     # gate. `gc bd show --json` returns an array; normalize to the first row.

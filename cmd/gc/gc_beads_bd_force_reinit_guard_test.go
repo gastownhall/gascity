@@ -1307,6 +1307,296 @@ esac
 	}
 }
 
+// TestGcBeadsBdInitVerifiedEmptyStoreInitializesWithoutForce pins the fix for
+// ga-h8haz6 / ga-k8l7y9: once op_init's post-lock revalidation confirms the
+// target database is genuinely empty (bd_runtime_store_holds_bd_tables
+// answers bdTablesAbsent, not merely "undetermined"), the fall-through init
+// must not run `bd init --force`. --force is bd's --reinit-local, and
+// --reinit-local runs a writable, 5-second-bounded countExistingIssues
+// preflight that migrates a cursor-0 database and can be cut mid-migration on
+// a loaded host -- the #5920 shared-store gate then refuses bd's own main
+// open on the resulting partial schema (a random vNN < v66). There is
+// nothing on a verified-empty store for --force to protect: bd's own
+// local-data guard is the only thing --force was getting past, and it is gc's
+// own pre-seeded metadata.json stub that trips that guard. Setting the stub
+// aside before a PLAIN bd init clears the guard without ever invoking the
+// destructive reinit preflight.
+//
+// Fails today: op_init still runs the fall-through `run_bd_init_pinned`
+// unconditionally with the force flag the classification set, so the
+// recorded invocation shows metadata.json still present ("metadata=yes") and
+// argv carrying --force, not the plain "init --quiet --server -p gc
+// --database hq" this test requires.
+func TestGcBeadsBdInitVerifiedEmptyStoreInitializesWithoutForce(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	materializeBuiltinPacksForTest(t, cityPath)
+	script := gcBeadsBdScriptPath(cityPath)
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
+
+	// The fake bd records, for every `init` invocation, whether
+	// .beads/metadata.json existed at that moment and the full argv it ran
+	// with, then flips readyMarker so the config-table probe backing
+	// bd_runtime_schema_ready starts succeeding -- standing in for a real bd
+	// init that actually created the schema.
+	stateFile := filepath.Join(t.TempDir(), "bd-init-state")
+	readyMarker := filepath.Join(t.TempDir(), "config-ready")
+	fakeBd := filepath.Join(binDir, "bd")
+	fakeBdScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+case "${1:-}" in
+  init)
+    if [ -f "$BEADS_DIR/metadata.json" ]; then
+      printf 'metadata=yes args=%%s\n' "$*" >> %q
+    else
+      printf 'metadata=no args=%%s\n' "$*" >> %q
+    fi
+    touch %q
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, stateFile, stateFile, readyMarker)
+	if err := os.WriteFile(fakeBd, []byte(fakeBdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The database is registered and genuinely empty throughout: zero bd
+	// tables, and no schema_migrations table ever -- not "stalled", not
+	// "settled", never created at all -- matching a store gc CREATE
+	// DATABASE'd a moment ago. Both op_init's classification read and its
+	// post-lock revalidation read see the same unchanging answer: there is
+	// no concurrent writer in this scenario, only the TOCTOU window itself.
+	fakeDolt := filepath.Join(binDir, "dolt")
+	fakeDoltScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+case "$query" in
+  *"'issues'"*)
+    printf 'cnt\n0\n'
+    exit 0
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    printf 'cnt\n0\n'
+    exit 0
+    ;;
+  *"schema_migrations"*)
+    printf 'cur\n0\n'
+    exit 0
+    ;;
+  *"FROM config"*)
+    if [ -f %q ]; then
+      printf 'cnt\n1\n'
+      exit 0
+    fi
+    echo "table not found: config" >&2
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, readyMarker)
+	if err := os.WriteFile(fakeDolt, []byte(fakeDoltScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := runGCBeadsBdCommand(t, sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
+		"GC_CITY_PATH="+cityPath,
+		"GC_DOLT_INIT_LOCK_DIR="+t.TempDir(),
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)...), script, "init", cityPath, "gc", "hq")
+	out := stdout + stderr
+	if err != nil {
+		t.Fatalf("init on a verified-empty store should succeed, got error %v:\n%s", err, out)
+	}
+
+	stateData, readErr := os.ReadFile(stateFile)
+	if readErr != nil {
+		t.Fatalf("read init state: %v", readErr)
+	}
+	gotState := string(stateData)
+	if !strings.Contains(gotState, "metadata=no") {
+		t.Fatalf("bd init ran with metadata.json still present; the stub must be set aside before a plain init on a verified-empty store:\n%s", gotState)
+	}
+	if !strings.Contains(gotState, "args=init --quiet --server -p gc --database hq") {
+		t.Fatalf("bd init did not run as a plain init with the expected flags:\n%s", gotState)
+	}
+	if strings.Contains(gotState, "--force") || strings.Contains(gotState, "--reinit-local") {
+		t.Fatalf("bd init ran with --force/--reinit-local against a verified-empty store; there is nothing there for --force to protect, and --reinit-local is what triggers bd's 5s writable countExistingIssues preflight (#5920):\n%s", gotState)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(cityPath, ".beads", "metadata.json.gc-init-stub")); statErr == nil {
+		t.Fatalf("metadata.json.gc-init-stub left behind after a successful plain init; it must be removed once bd init succeeds")
+	}
+}
+
+// TestGcBeadsBdInitRestoresMetadataStubWhenPlainInitFails pins the failure
+// side of the same fix: the helper that sets gc's pre-seeded metadata.json
+// stub aside before a plain bd init over a verified-empty store must restore
+// that stub if the plain init fails, rather than leaving the scope with no
+// metadata.json at all -- which would erase the only on-disk record of this
+// scope's topology (backend/dolt_mode/dolt_database) for every later probe in
+// this function and for any other process that reads this scope.
+//
+// Fails today for the same reason the success-path sibling does: op_init has
+// no stub-aside step at all, so the recorded bd init invocation shows
+// metadata.json still present and argv carrying --force, not the plain,
+// metadata-absent invocation this test requires.
+func TestGcBeadsBdInitRestoresMetadataStubWhenPlainInitFails(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	originalMetadata := []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`)
+	metadataPath := filepath.Join(cityPath, ".beads", "metadata.json")
+	if err := os.WriteFile(metadataPath, originalMetadata, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	materializeBuiltinPacksForTest(t, cityPath)
+	script := gcBeadsBdScriptPath(cityPath)
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
+
+	// Same metadata-presence/argv recording as the success-path sibling, but
+	// the plain init fails outright -- standing in for a real bd init that
+	// dies partway through (disk full, killed, a bug in bd itself). The
+	// helper under test must restore the stub on this path too, not only on
+	// success.
+	stateFile := filepath.Join(t.TempDir(), "bd-init-state")
+	fakeBd := filepath.Join(binDir, "bd")
+	fakeBdScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+case "${1:-}" in
+  init)
+    if [ -f "$BEADS_DIR/metadata.json" ]; then
+      printf 'metadata=yes args=%%s\n' "$*" >> %q
+    else
+      printf 'metadata=no args=%%s\n' "$*" >> %q
+    fi
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, stateFile, stateFile)
+	if err := os.WriteFile(fakeBd, []byte(fakeBdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Genuinely empty store, identical to the success-path sibling: this
+	// exercises the failure branch of the same over-verified-empty path, not
+	// a different classification.
+	fakeDolt := filepath.Join(binDir, "dolt")
+	fakeDoltScript := `#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+case "$query" in
+  *"'issues'"*)
+    printf 'cnt\n0\n'
+    exit 0
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    printf 'cnt\n0\n'
+    exit 0
+    ;;
+  *"schema_migrations"*)
+    printf 'cur\n0\n'
+    exit 0
+    ;;
+  *"FROM config"*)
+    echo "table not found: config" >&2
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(fakeDolt, []byte(fakeDoltScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := runGCBeadsBdCommand(t, sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
+		"GC_CITY_PATH="+cityPath,
+		"GC_DOLT_INIT_LOCK_DIR="+t.TempDir(),
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)...), script, "init", cityPath, "gc", "hq")
+	out := stdout + stderr
+	if err == nil {
+		t.Fatalf("init should fail when the plain bd init over a verified-empty store fails, but it succeeded:\n%s", out)
+	}
+	if !strings.Contains(out, "bd init failed for") {
+		t.Fatalf("failure does not name the bd init failure it hit:\n%s", out)
+	}
+
+	stateData, readErr := os.ReadFile(stateFile)
+	if readErr != nil {
+		t.Fatalf("read init state: %v", readErr)
+	}
+	gotState := string(stateData)
+	if !strings.Contains(gotState, "metadata=no") {
+		t.Fatalf("bd init ran with metadata.json still present; the stub must be set aside before a plain init even on the path that goes on to fail:\n%s", gotState)
+	}
+	if strings.Contains(gotState, "--force") || strings.Contains(gotState, "--reinit-local") {
+		t.Fatalf("bd init ran with --force/--reinit-local against a verified-empty store:\n%s", gotState)
+	}
+
+	restored, statErr := os.ReadFile(metadataPath)
+	if statErr != nil {
+		t.Fatalf("metadata.json missing after a failed plain init; the aside copy must be restored so the scope is not left without any metadata: %v", statErr)
+	}
+	if !bytes.Equal(restored, originalMetadata) {
+		t.Fatalf("restored metadata.json does not match the original byte-for-byte:\noriginal: %s\nrestored: %s", originalMetadata, restored)
+	}
+
+	if _, statErr := os.Stat(metadataPath + ".gc-init-stub"); statErr == nil {
+		t.Fatalf("metadata.json.gc-init-stub left behind after restoring; the aside copy must be removed once it is moved back")
+	}
+}
+
 // TestGcBeadsBdScriptDocumentsSchemaSettleTimeoutOverride pins the exit
 // contract's requirement that wait_for_bd_runtime_schema's wall-clock hard
 // cap has an env override, and that the override is documented in the

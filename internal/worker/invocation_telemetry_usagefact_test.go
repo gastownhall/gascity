@@ -49,7 +49,7 @@ func newUsageFactHandle(t *testing.T) (handle *SessionHandle, transcriptPath, si
 
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 	h, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},
@@ -67,7 +67,7 @@ func newUsageFactHandle(t *testing.T) (handle *SessionHandle, transcriptPath, si
 	if err != nil {
 		t.Fatalf("NewSessionHandle: %v", err)
 	}
-	if err := h.Start(context.Background()); err != nil {
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := manager.Get(h.sessionID)
@@ -92,7 +92,7 @@ func TestMessageEmitsModelUsageFactToSink(t *testing.T) {
 		usageEntry("u1", "claude-opus-4-7", 100, 50, 2000, 800),
 	})
 
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "hello"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
@@ -161,7 +161,7 @@ func TestMessageEmitsUnpricedModelFactForUnknownModel(t *testing.T) {
 		usageEntry("u1", "totally-unknown-model-xyz", 100, 50, 0, 0),
 	})
 
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "hello"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
@@ -212,9 +212,9 @@ func TestModelUsageFact(t *testing.T) {
 	}
 	// modelUsageFact resolves RunID from the run chain; StepID is intentionally
 	// left unset — model usage is attributed at run level, not per formula step.
-	bead := beads.Bead{ID: "b1", Metadata: map[string]string{"molecule_id": "mol-7"}}
+	bead := beads.Bead{ID: "b1", Metadata: map[string]string{"molecule_id": "mol-7", "gc.formula_name": "my-formula"}}
 
-	priced := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "myrig/polecat-1", "claude", 0.02, true, now)
+	priced := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "myrig/polecat-1", "claude", 0.02, true, now, bead.Metadata["gc.formula_name"])
 	if priced.Kind != usage.KindModel {
 		t.Fatalf("kind = %q", priced.Kind)
 	}
@@ -235,6 +235,9 @@ func TestModelUsageFact(t *testing.T) {
 	if priced.Worker != "myrig/polecat-1" || priced.Model != "claude-opus-4-7" || priced.Provider != "claude" {
 		t.Fatalf("identity wrong: %+v", priced)
 	}
+	if priced.FormulaName != "my-formula" {
+		t.Fatalf("FormulaName = %q, want my-formula (propagated from gc.formula_name metadata)", priced.FormulaName)
+	}
 	if priced.InputTokens != 100 || priced.OutputTokens != 50 || priced.CacheReadTokens != 10 || priced.CacheCreationTokens != 5 {
 		t.Fatalf("tokens wrong: %+v", priced)
 	}
@@ -254,7 +257,7 @@ func TestModelUsageFact(t *testing.T) {
 	}
 
 	// Unpriced collapses cost to zero regardless of the cost argument.
-	unp := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, false, now)
+	unp := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, false, now, "")
 	if !unp.Unpriced || unp.CostUSDEstimate != 0 {
 		t.Fatalf("unpriced fact must zero the cost and set the flag: %+v", unp)
 	}
@@ -276,7 +279,7 @@ func TestModelUsageFactPrefersEntryTimestampOverNow(t *testing.T) {
 	}
 	bead := beads.Bead{ID: "b1", Metadata: map[string]string{"molecule_id": "mol-7"}}
 
-	f := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now)
+	f := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now, "")
 	if f.At != entryTime.UnixMilli() {
 		t.Fatalf("At = %d, want the entry's own timestamp %d, not now (%d)", f.At, entryTime.UnixMilli(), now.UnixMilli())
 	}
@@ -285,7 +288,7 @@ func TestModelUsageFactPrefersEntryTimestampOverNow(t *testing.T) {
 	// extraction doesn't populate it) must fall back to now unchanged.
 	uNoTimestamp := u
 	uNoTimestamp.Timestamp = time.Time{}
-	fallback := modelUsageFact(uNoTimestamp, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now)
+	fallback := modelUsageFact(uNoTimestamp, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now, "")
 	if fallback.At != now.UnixMilli() {
 		t.Fatalf("At = %d, want now (%d) when Timestamp is zero", fallback.At, now.UnixMilli())
 	}
@@ -365,6 +368,7 @@ func TestFactorySweepSessionModelUsageClaude(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -386,7 +390,7 @@ func TestFactorySweepSessionModelUsageClaude(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Session: %v", err)
 	}
-	if err := h.Start(context.Background()); err != nil {
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := h.sessionID
@@ -535,6 +539,7 @@ func TestFactorySweepSessionModelUsageRecordsMetrics(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -556,7 +561,7 @@ func TestFactorySweepSessionModelUsageRecordsMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Session: %v", err)
 	}
-	if err := h.Start(context.Background()); err != nil {
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := h.sessionID
@@ -630,6 +635,7 @@ func TestFactorySweepSessionModelUsageRetriesAfterTransientSinkError(t *testing.
 	// Fail the first model-fact write, then recover.
 	flaky := &flakyModelSink{inner: usage.NewLocalSink(sinkPath), failModelWrites: 1}
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -651,7 +657,7 @@ func TestFactorySweepSessionModelUsageRetriesAfterTransientSinkError(t *testing.
 	if err != nil {
 		t.Fatalf("Session: %v", err)
 	}
-	if err := h.Start(context.Background()); err != nil {
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := h.sessionID
@@ -728,7 +734,7 @@ func TestMessageRecordsWrappedCodexModelFactViaLadder(t *testing.T) {
 	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 	h, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},
@@ -746,7 +752,7 @@ func TestMessageRecordsWrappedCodexModelFactViaLadder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSessionHandle: %v", err)
 	}
-	if err := h.Start(context.Background()); err != nil {
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := h.sessionID
@@ -773,7 +779,7 @@ func TestMessageRecordsWrappedCodexModelFactViaLadder(t *testing.T) {
 		codexWorkerTurnContext(),
 		codexWorkerTokenCount("2026-06-12T10:00:05.000Z", 15917, 15562, 10624, 355),
 	})
-	if _, err := h.Message(context.Background(), MessageRequest{Text: "hello"}); err != nil {
+	if _, err := h.Message(context.Background(), handleActor(t, h, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
@@ -784,7 +790,7 @@ func TestMessageRecordsWrappedCodexModelFactViaLadder(t *testing.T) {
 		codexWorkerTokenCount("2026-06-12T10:00:05.000Z", 15917, 15562, 10624, 355),
 		codexWorkerTokenCount("2026-06-12T10:00:10.000Z", 34114, 17888, 15232, 309),
 	})
-	if _, err := h.Nudge(context.Background(), NudgeRequest{Text: "still there?"}); err != nil {
+	if _, err := h.Nudge(context.Background(), handleActor(t, h, sessionpkg.ActorAgent), NudgeRequest{Text: "still there?"}); err != nil {
 		t.Fatalf("Nudge: %v", err)
 	}
 
@@ -986,6 +992,7 @@ func TestFactorySweepSessionModelUsageKeylessClaudeAmbiguousSettles(t *testing.T
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -1010,14 +1017,14 @@ func TestFactorySweepSessionModelUsageKeylessClaudeAmbiguousSettles(t *testing.T
 	if err != nil {
 		t.Fatalf("Session(one): %v", err)
 	}
-	if err := one.Start(context.Background()); err != nil {
+	if err := one.Start(context.Background(), handleActor(t, one, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start(one): %v", err)
 	}
 	// Clear any captured session_key so discovery is forced into workdir fallback.
 	if err := store.SetMetadata(one.sessionID, "session_key", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := one.Kill(context.Background()); err != nil {
+	if err := one.Kill(context.Background(), handleActor(t, one, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Kill(one): %v", err)
 	}
 
@@ -1032,7 +1039,7 @@ func TestFactorySweepSessionModelUsageKeylessClaudeAmbiguousSettles(t *testing.T
 	if err != nil {
 		t.Fatalf("Session(two): %v", err)
 	}
-	if err := two.Start(context.Background()); err != nil {
+	if err := two.Start(context.Background(), handleActor(t, two, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start(two): %v", err)
 	}
 	// Clear any captured session_key so discovery is forced into workdir fallback.
@@ -1077,6 +1084,7 @@ func TestDiscoverSweepTranscriptKeylessClaudeAmbiguousSettles(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -1101,13 +1109,13 @@ func TestDiscoverSweepTranscriptKeylessClaudeAmbiguousSettles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Session(one): %v", err)
 	}
-	if err := one.Start(context.Background()); err != nil {
+	if err := one.Start(context.Background(), handleActor(t, one, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start(one): %v", err)
 	}
 	if err := store.SetMetadata(one.sessionID, "session_key", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := one.Kill(context.Background()); err != nil {
+	if err := one.Kill(context.Background(), handleActor(t, one, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Kill(one): %v", err)
 	}
 
@@ -1122,7 +1130,7 @@ func TestDiscoverSweepTranscriptKeylessClaudeAmbiguousSettles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Session(two): %v", err)
 	}
-	if err := two.Start(context.Background()); err != nil {
+	if err := two.Start(context.Background(), handleActor(t, two, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start(two): %v", err)
 	}
 	if err := store.SetMetadata(two.sessionID, "session_key", ""); err != nil {
@@ -1179,6 +1187,7 @@ func TestFactorySweepSessionModelUsageKeylessClaudeTranscriptErrorRetries(t *tes
 	store := &listErrStore{Store: beads.NewMemStore()}
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -1199,7 +1208,7 @@ func TestFactorySweepSessionModelUsageKeylessClaudeTranscriptErrorRetries(t *tes
 	if err != nil {
 		t.Fatalf("Session: %v", err)
 	}
-	if err := h.Start(context.Background()); err != nil {
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if err := store.SetMetadata(h.sessionID, "session_key", ""); err != nil {
@@ -1251,6 +1260,7 @@ func TestFactorySweepSessionModelUsageKeylessClaudeAbsentTranscriptRetries(t *te
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -1272,7 +1282,7 @@ func TestFactorySweepSessionModelUsageKeylessClaudeAbsentTranscriptRetries(t *te
 	if err != nil {
 		t.Fatalf("Session: %v", err)
 	}
-	if err := h.Start(context.Background()); err != nil {
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if err := store.SetMetadata(h.sessionID, "session_key", ""); err != nil {
@@ -1533,6 +1543,7 @@ func TestFactorySweepRecoversBacklogBeyondFixedTailWindow(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -1554,7 +1565,7 @@ func TestFactorySweepRecoversBacklogBeyondFixedTailWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Session: %v", err)
 	}
-	if err := h.Start(context.Background()); err != nil {
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := h.sessionID
@@ -1641,6 +1652,7 @@ func TestFactorySweepWithoutCursorMatchesFixedTailWindow(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -1662,7 +1674,7 @@ func TestFactorySweepWithoutCursorMatchesFixedTailWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Session: %v", err)
 	}
-	if err := h.Start(context.Background()); err != nil {
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := h.sessionID

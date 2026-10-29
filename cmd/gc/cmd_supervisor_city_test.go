@@ -92,6 +92,39 @@ func TestEnsureNoStandaloneControllerLeavesHeldLockHostingUnknown(t *testing.T) 
 	}
 }
 
+// TestSupervisorRequiresCityGrants reads the supervisor's city grant
+// requirement from supervisor.toml the way the supervisor installs its auth
+// gates: a write-auth or read-auth verify key, or a required flag, gates the
+// per-city routes; a blank key, an unverified write plane and an unreadable
+// file do not. (#5262)
+func TestSupervisorRequiresCityGrants(t *testing.T) {
+	cases := []struct {
+		name string
+		toml string
+		want bool
+	}{
+		{name: "no-auth", toml: "[supervisor]\nport = 8372\n", want: false},
+		{name: "write-auth-verify-key", toml: "[supervisor]\nwrite_auth_verify_key = \"k1:AAAA\"\n", want: true},
+		{name: "write-auth-required", toml: "[supervisor]\nwrite_auth_required = true\n", want: true},
+		{name: "read-auth-verify-key", toml: "[supervisor]\nread_auth_verify_key = \"k1:AAAA\"\n", want: true},
+		{name: "read-auth-required", toml: "[supervisor]\nread_auth_required = true\n", want: true},
+		{name: "blank-verify-keys", toml: "[supervisor]\nwrite_auth_verify_key = \"  \"\nread_auth_verify_key = \"\"\n", want: false},
+		{name: "unverified-write-plane", toml: "[supervisor]\nbind = \"0.0.0.0\"\nallow_mutations = true\nwrite_auth_allow_unverified = true\n", want: false},
+		{name: "unreadable", toml: "[supervisor\nwrite_auth_required = true\n", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_HOME", t.TempDir())
+			if err := os.WriteFile(supervisor.ConfigPath(), []byte(tc.toml), 0o644); err != nil {
+				t.Fatalf("writing supervisor.toml: %v", err)
+			}
+			if got := supervisorRequiresCityGrants(); got != tc.want {
+				t.Fatalf("supervisorRequiresCityGrants() = %v, want %v for supervisor.toml:\n%s", got, tc.want, tc.toml)
+			}
+		})
+	}
+}
+
 func TestRegisterCityWithSupervisorDoesNotMislabelLegacyController(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")

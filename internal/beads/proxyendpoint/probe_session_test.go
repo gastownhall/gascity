@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -589,6 +591,16 @@ type fakeProbeConnector struct {
 	// here exists, which keeps a healthy fixture a zero value.
 	absentTables  map[string]bool
 	absentColumns map[string]bool
+	// likeDecoys are other columns the table carries whose names a SHOW
+	// COLUMNS ... LIKE for the keyed column also matches, keyed like
+	// absentColumns: the pattern's '_' matches any one character.
+	likeDecoys map[string][]string
+	// recasedColumns are columns the table carries only under a name that
+	// differs in case, keyed like absentColumns. Dolt's SHOW COLUMNS ... LIKE
+	// matches case-sensitively and so does not list them; likeFoldsCase is a
+	// server whose LIKE folds case, as MySQL's does.
+	recasedColumns map[string]string
+	likeFoldsCase  bool
 	// head is what DOLT_HASHOF('HEAD') answers on the main-lane existence
 	// statement; "" means the fixture default, fakeProbeHead.
 	head string
@@ -687,12 +699,30 @@ func (c *fakeProbeConn) QueryContext(_ context.Context, query string, args []dri
 		}
 		return &fakeProbeRows{value: exists, extra: []driver.Value{head}}, nil
 	}
-	if query == columnExistsQuery {
-		key := namedArg(args, 0) + "." + namedArg(args, 1)
-		if c.connector.absentColumns[key] {
-			return &fakeProbeRows{value: 0}, nil
+	if strings.HasPrefix(strings.ToUpper(query), "SHOW COLUMNS FROM ") {
+		// SHOW COLUMNS names its table in the statement and fails on an absent
+		// one, as MySQL and Dolt do; a session that issued it against an absent
+		// table would pin itself to its pre-statement catalog.
+		table, column := showColumnsTarget(query)
+		if c.connector.absentTables[table] {
+			return nil, errors.New("Error 1146 (42S02): table not found: " + table)
 		}
-		return &fakeProbeRows{value: 1}, nil
+		// The server lists every column the table carries that the LIKE
+		// pattern matches, and only those.
+		key := table + "." + column
+		carried := append([]string(nil), c.connector.likeDecoys[key]...)
+		if recased, ok := c.connector.recasedColumns[key]; ok {
+			carried = append(carried, recased)
+		} else if !c.connector.absentColumns[key] {
+			carried = append(carried, column)
+		}
+		var listed []string
+		for _, name := range carried {
+			if likeMatches(column, name, c.connector.likeFoldsCase) {
+				listed = append(listed, name)
+			}
+		}
+		return &fakeShowColumnsRows{fields: listed}, nil
 	}
 	value, ok := c.connector.cursors[query]
 	if !ok {
@@ -707,6 +737,67 @@ func namedArg(args []driver.NamedValue, n int) string {
 		return ""
 	}
 	return fmt.Sprint(args[n].Value)
+}
+
+// showColumnsTarget parses "SHOW COLUMNS FROM <table> LIKE '<column>'".
+func showColumnsTarget(query string) (table, column string) {
+	rest := strings.TrimSpace(query[len("SHOW COLUMNS FROM "):])
+	table, like, _ := strings.Cut(rest, " ")
+	table = strings.Trim(table, "`")
+	if _, pattern, ok := strings.Cut(like, "LIKE "); ok {
+		column = strings.Trim(strings.TrimSpace(pattern), "'")
+	}
+	return table, column
+}
+
+// likeMatches reports whether a LIKE pattern matches name: '_' is any one
+// character and '%' any run of them, compared case-sensitively as Dolt's SHOW
+// COLUMNS does unless foldCase.
+func likeMatches(pattern, name string, foldCase bool) bool {
+	var expr strings.Builder
+	if foldCase {
+		expr.WriteString("(?i)")
+	}
+	expr.WriteString("^")
+	for _, r := range pattern {
+		switch r {
+		case '_':
+			expr.WriteString(".")
+		case '%':
+			expr.WriteString(".*")
+		default:
+			expr.WriteString(regexp.QuoteMeta(string(r)))
+		}
+	}
+	expr.WriteString("$")
+	return regexp.MustCompile(expr.String()).MatchString(name)
+}
+
+// fakeShowColumnsRows is SHOW COLUMNS' result shape: one row per column, with
+// the column name in the first field.
+type fakeShowColumnsRows struct {
+	fields []string
+	next   int
+}
+
+func (r *fakeShowColumnsRows) Columns() []string {
+	return []string{"Field", "Type", "Null", "Key", "Default", "Extra"}
+}
+
+func (r *fakeShowColumnsRows) Close() error { return nil }
+
+func (r *fakeShowColumnsRows) Next(dest []driver.Value) error {
+	if r.next >= len(r.fields) {
+		return io.EOF
+	}
+	dest[0] = []byte(r.fields[r.next])
+	dest[1] = []byte("varchar(255)")
+	dest[2] = []byte("YES")
+	dest[3] = []byte("")
+	dest[4] = nil
+	dest[5] = []byte("")
+	r.next++
+	return nil
 }
 
 // fakeProbeHead is the HEAD hash the fixture answers when a test names none.

@@ -30,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -93,6 +94,9 @@ func (m controllerHostingMode) known() bool {
 type controllerIdentityReply struct {
 	PID         int                   `json:"pid"`
 	HostingMode controllerHostingMode `json:"hosting_mode"`
+	// SessionReconciler is the session reconciler the controller latched at
+	// boot ("legacy" or "v2"); empty from a controller that predates it.
+	SessionReconciler string `json:"session_reconciler,omitempty"`
 }
 
 type sessionCircuitResetRequest struct {
@@ -147,8 +151,7 @@ func startControllerSocket(
 	dirty *atomic.Bool,
 	reloadReqCh chan reloadRequest,
 	convergenceReqCh chan convergenceRequest,
-	pokeCh chan struct{},
-	controlDispatcherCh chan struct{},
+	wake *controllerWake,
 ) (net.Listener, error) {
 	if !hostingMode.known() {
 		return nil, fmt.Errorf("starting controller socket: invalid hosting mode %q", hostingMode)
@@ -169,7 +172,7 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+			go handleControllerConn(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, wake)
 		}
 	}()
 	return lis, nil
@@ -178,8 +181,16 @@ func startControllerSocket(
 // handleControllerConn reads from a connection and dispatches commands.
 // Supported commands: "stop" (shutdown), "stop-force" (shutdown without
 // interrupt grace), "ping" (legacy liveness check, returns numeric PID),
-// "identify" (typed process identity), and "converge:{json}" (convergence
-// commands routed to event loop).
+// "identify" (typed process identity and the latched session reconciler),
+// "converge:{json}" (convergence commands routed to event loop),
+// "reconciler-mode" (the session reconciler this controller latched, for
+// lane passes outside it), "v2-pass" (the v2 planner's last pass, for
+// doctor), "ledger-feed" (the journal feeds' status, for doctor),
+// "lane:<conversation>[:<row id>[,<row id>...]]" (a conversation-lane
+// doorbell naming the journal rows to refresh, replying ok, "ok, rows
+// waiting for a retry: <n>", no-host or refused <reason>; laneReplyPoked
+// reads the reply), and "lane-status" (the conversation-lane
+// host's status, for doctor).
 func handleControllerConn(
 	conn net.Conn,
 	cityPath string,
@@ -189,8 +200,7 @@ func handleControllerConn(
 	dirty *atomic.Bool,
 	reloadReqCh chan reloadRequest,
 	convergenceReqCh chan convergenceRequest,
-	pokeCh chan struct{},
-	controlDispatcherCh chan struct{},
+	wake *controllerWake,
 ) {
 	defer conn.Close()                                 //nolint:errcheck // best-effort cleanup
 	conn.SetDeadline(time.Now().Add(95 * time.Second)) //nolint:errcheck // symmetric read+write deadline; 5s margin over 30s enqueue + 60s reply
@@ -212,31 +222,24 @@ func handleControllerConn(
 		case line == "ping":
 			fmt.Fprintf(conn, "%d\n", os.Getpid()) //nolint:errcheck // best-effort
 		case line == controllerIdentityCommand:
-			writeJSONLine(conn, controllerIdentityReply{PID: os.Getpid(), HostingMode: hostingMode})
-		case line == "poke":
-			// Non-blocking send: triggers immediate reconciler tick for
-			// event-driven wake after sling assigns work.
-			select {
-			case pokeCh <- struct{}{}:
-			default: // poke already pending
-			}
+			writeJSONLine(conn, controllerIdentityReply{PID: os.Getpid(), HostingMode: hostingMode, SessionReconciler: wake.latchedModeName()})
+		case line == "poke" || strings.HasPrefix(line, pokeKeyedCommandPrefix):
+			// "poke" or "poke:<json key>" (see reconcile_enqueue.go): a
+			// non-blocking enqueue for event-driven wake, e.g. after sling
+			// assigns work or a session is drained. Key-less = allocator.
+			key, _ := parsePokeSocketCommand(line)
+			wake.Enqueue(wakeReasonSocket, key)
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case line == "reload":
 			if dirty != nil {
 				dirty.Store(true)
 			}
-			select {
-			case pokeCh <- struct{}{}:
-			default:
-			}
+			wake.WakeMaintenance()
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case strings.HasPrefix(line, "reload:"):
 			handleReloadSocketCmd(conn, line[len("reload:"):], reloadReqCh)
 		case line == "control-dispatcher":
-			select {
-			case controlDispatcherCh <- struct{}{}:
-			default:
-			}
+			wake.Enqueue(wakeReasonSocket, reconcilekey.ControlDispatch())
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case strings.HasPrefix(line, sessionCircuitResetCommandPrefix):
 			handleSessionCircuitResetSocketCmd(conn, cityPath, line[len(sessionCircuitResetCommandPrefix):])
@@ -244,20 +247,26 @@ func handleControllerConn(
 			handleConvergeSocketCmd(conn, line[len("converge:"):], convergenceReqCh)
 		case strings.HasPrefix(line, "trace-arm:"):
 			if handleTraceSocketCmd(conn, cityPath, "start", line[len("trace-arm:"):]) {
-				select {
-				case pokeCh <- struct{}{}:
-				default:
-				}
+				wake.Enqueue(wakeReasonTrace, reconcilekey.Allocator()) // key-less: trace applies city-wide
 			}
 		case strings.HasPrefix(line, "trace-stop:"):
 			if handleTraceSocketCmd(conn, cityPath, "stop", line[len("trace-stop:"):]) {
-				select {
-				case pokeCh <- struct{}{}:
-				default:
-				}
+				wake.Enqueue(wakeReasonTrace, reconcilekey.Allocator()) // key-less: trace applies city-wide
 			}
 		case line == "trace-status":
 			handleTraceStatusSocketCmd(conn, cityPath)
+		case line == reconcilerModeCommand:
+			if reply, ok := reconcilerModeReplyFor(wake); ok {
+				writeJSONLine(conn, reply)
+			}
+		case line == v2PassCommand:
+			writeJSONLine(conn, wake.v2PassStatus(time.Now()))
+		case line == ledgerFeedStatusCommand:
+			writeJSONLine(conn, ledgerFeedStatusFor(cityPath, time.Now()))
+		case strings.HasPrefix(line, laneSocketPrefix):
+			conn.Write([]byte(laneSocketReply(cityPath, line[len(laneSocketPrefix):]) + "\n")) //nolint:errcheck // best-effort reply
+		case line == laneStatusCommand:
+			writeJSONLine(conn, conversationLaneStatusFor(cityPath, time.Now()))
 		}
 	}
 }
@@ -611,10 +620,11 @@ func probeControllerIdentity(cityPath string) controllerIdentityReply {
 	return controllerIdentityReply{PID: controllerAlive(cityPath)}
 }
 
-// debounceDelay is the coalesce window for filesystem events. Multiple
+// defaultConfigDebounce is the coalesce window for filesystem events. Multiple
 // events within this window (vim atomic saves, git checkouts) produce a
-// single dirty signal. Tests may override this for faster response.
-var debounceDelay = 200 * time.Millisecond
+// single dirty signal. Callers pass a different window to watchConfigTargets
+// (tests use a short one); a zero window selects this default.
+const defaultConfigDebounce = 200 * time.Millisecond
 
 // watchConfigTargets starts an fsnotify watcher on the given config paths and
 // sets dirty to true after a debounce window. Config source directories are
@@ -771,7 +781,10 @@ func isConventionDiscoveryDirName(base string) bool {
 	return false
 }
 
-func watchConfigTargets(targets []config.WatchTarget, dirty *atomic.Bool, pokeCh chan struct{}, stderr io.Writer) func() {
+func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duration, dirty *atomic.Bool, wake *controllerWake, stderr io.Writer) func() {
+	if debounceDelay <= 0 {
+		debounceDelay = defaultConfigDebounce
+	}
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: config watcher: %v (reload on tick only)\n", err) //nolint:errcheck // best-effort stderr
@@ -781,12 +794,7 @@ func watchConfigTargets(targets []config.WatchTarget, dirty *atomic.Bool, pokeCh
 
 	markDirty := func() {
 		dirty.Store(true)
-		if pokeCh != nil {
-			select {
-			case pokeCh <- struct{}{}:
-			default:
-			}
-		}
+		wake.WakeMaintenance()
 	}
 
 	done := make(chan struct{})
@@ -1021,6 +1029,9 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 //  1. Send Interrupt (Ctrl-C) to all sessions
 //  2. Wait shutdown_timeout
 //  3. Stop (force-kill) any survivors
+//
+// It is the compatibility wrapper direct tests call; the stop paths call
+// gracefulStopAllWithForceSignal.
 func gracefulStopAll(
 	names []string,
 	sp runtime.Provider,
@@ -1030,11 +1041,18 @@ func gracefulStopAll(
 	store beads.SessionStore,
 	stdout, stderr io.Writer,
 ) {
-	gracefulStopAllWithForceSignal(names, sp, timeout, rec, cfg, store, stdout, stderr, nil)
+	gracefulStopAllWithForceSignal(names, nil, sp, timeout, rec, cfg, store, stdout, stderr, nil)
 }
 
+// gracefulStopAllWithForceSignal is gracefulStopAll that a force stop can cut
+// short. knownUnlisted holds names the caller's own per-name probe already found
+// running (or could not rule out) that the runtime inventory did not list.
+// They are read per name without probing them again before the interrupt; on
+// a remote runtime every probe is a round trip. Nil when the caller probed
+// nothing.
 func gracefulStopAllWithForceSignal(
 	names []string,
+	knownUnlisted map[string]bool,
 	sp runtime.Provider,
 	timeout time.Duration,
 	rec events.Recorder,
@@ -1053,6 +1071,12 @@ func gracefulStopAllWithForceSignal(
 	for _, target := range targets {
 		targetByName[target.name] = target
 	}
+	// A name the runtime inventory does not list but a per-name probe does not
+	// rule out is one the list cannot see (an exec pack whose list-running is
+	// unsupported answers an empty inventory). Read its liveness per name below:
+	// trusting the list would read it as exited at once, cut the grace window
+	// short and stop it outside the worker boundary as "exited gracefully".
+	unlisted := unlistedSessionSet(sp, names, knownUnlisted)
 
 	// Pass 1: interrupt all in a single bounded broadcast wave.
 	// This is intentionally flat: interrupts are a best-effort graceful hint,
@@ -1074,17 +1098,13 @@ func gracefulStopAllWithForceSignal(
 		if stopForceRequested(forceStopRequested) {
 			break
 		}
-		allExited := true
+		var allExited bool
 		if runningSet, ok := runningSessionSet(sp, names); ok {
-			allExited = len(runningSet) == 0
+			allExited = len(runningSet) == 0 && namesObservedExited(sp, setKeys(unlisted), deadline)
 		} else {
-			for _, name := range names {
-				running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
-				if err == nil && running {
-					allExited = false
-					break
-				}
-			}
+			// An unknown state is not an exit: keep waiting out the grace
+			// window rather than cutting it short on a failed observation.
+			allExited = namesObservedExited(sp, names, deadline)
 		}
 		if allExited {
 			break
@@ -1103,12 +1123,34 @@ func gracefulStopAllWithForceSignal(
 	// Pass 2: kill survivors.
 	var survivors []string
 	runningSet, listed := runningSessionSet(sp, names)
+	// Names the list cannot vouch for (all of them when it failed) are read
+	// per name, in one bounded parallel wave.
+	var toProbe []string
+	for _, name := range names {
+		if !listed || unlisted[name] {
+			toProbe = append(toProbe, name)
+		}
+	}
+	probed := probeNamesRunning(sp, toProbe, defaultMaxParallelInterrupts)
 	for _, name := range names {
 		running := false
-		if listed {
-			running = runningSet[name]
+		var observeErr error
+		if p, ok := probed[name]; ok {
+			running, observeErr = p.running, p.err
 		} else {
-			running, _ = workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
+			running = runningSet[name]
+		}
+		if observeErr != nil {
+			// The state is unknown, not exited: still stop it, but neither
+			// claim a graceful exit nor record a SessionStopped we cannot
+			// vouch for. A stopped city-stop session is still parked asleep.
+			if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
+				fmt.Fprintf(stderr, "stopping agent '%s' in unknown state: %v\n", name, err) //nolint:errcheck // best-effort stderr
+			} else if target, ok := targetByName[name]; ok && cityStopSessionMarked(store.Store, target.sessionID) {
+				markCityStopSessionAsAsleep(sessionFrontDoor(store.Store), target.sessionID, stderr)
+			}
+			fmt.Fprintf(stdout, "Agent '%s' state unknown (%v); stop requested\n", name, observeErr) //nolint:errcheck // best-effort stdout
+			continue
 		}
 		if !running {
 			if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
@@ -1152,6 +1194,140 @@ func stopForceRequested(forceStopRequested func() bool) bool {
 	return forceStopRequested != nil && forceStopRequested()
 }
 
+// stopProbeRunning is the per-name liveness read for a name the runtime
+// inventory did not list. It is the bare provider liveness observation, one
+// provider op on a remote runtime (the worker observation also reads
+// metadata, attachment and activity, several round trips each), and it
+// reports a failed probe as an error wherever the provider can tell one
+// (runtime.LivenessObserverWithError); elsewhere it is the bool IsRunning.
+func stopProbeRunning(sp runtime.Provider, name string) (bool, error) {
+	obs, err := runtime.ObserveLivenessWithError(sp, name, nil)
+	return obs.Running, err
+}
+
+// unlistedSessionSet returns the names that a complete runtime inventory does
+// not list but that a per-name probe reports running or cannot rule out,
+// together with known, the names the caller's own probe already found so
+// (they are not probed again). When the inventory is incomplete it returns
+// every name, unprobed: that listing vouches for none of them, and a later
+// one that answers blind would read them all as exited, so each later read
+// of them is per name. Nil when the inventory lists every name, or when the
+// provider attests its listing complete (runtime.ListRunningAttested): a
+// name an attested list does not show is gone, and probing it would only
+// add a round trip per name, or a timeout per name on a wedged server.
+func unlistedSessionSet(sp runtime.Provider, names []string, known map[string]bool) map[string]bool {
+	if runtime.ListRunningAttested(sp) {
+		return nil
+	}
+	runningSet, ok := runningSessionSet(sp, names)
+	if !ok {
+		return setOf(names)
+	}
+	var unlisted map[string]bool
+	add := func(name string) {
+		if unlisted == nil {
+			unlisted = make(map[string]bool)
+		}
+		unlisted[name] = true
+	}
+	var toProbe []string
+	for _, name := range names {
+		switch {
+		case known[name]:
+			add(name)
+		case !runningSet[name]:
+			toProbe = append(toProbe, name)
+		}
+	}
+	for name, p := range probeNamesRunning(sp, toProbe, defaultMaxParallelInterrupts) {
+		if p.err != nil || p.running {
+			add(name)
+		}
+	}
+	return unlisted
+}
+
+// namesObservedExited reports whether a per-name probe sees every name
+// exited. An unknown state is not an exit. It probes one name at a time and
+// stops at the first that is not exited: the grace-window poll asks this
+// every 500 ms, and while agents are still up one probe answers it. It
+// begins no probe once deadline (the end of the grace window) has passed,
+// and a walk cut short there is not an exit, so a backend that answers
+// slowly overruns the window by at most the one probe in flight.
+func namesObservedExited(sp runtime.Provider, names []string, deadline time.Time) bool {
+	for _, name := range names {
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		if running, err := stopProbeRunning(sp, name); err != nil || running {
+			return false
+		}
+	}
+	return true
+}
+
+// stopProbe is one stopProbeRunning answer.
+type stopProbe struct {
+	running bool
+	err     error
+}
+
+// probeNamesRunning reads stopProbeRunning for each name, at most parallel
+// at a time: on a remote runtime every probe is a round trip, and a stop that
+// probed one name at a time would outlast the caller's wait on a city of any
+// size. Every name is probed; a forced stop does not cut this short, because
+// a name left unprobed is a session left running past a stop that reports
+// success. The callers bound the cost with the width instead.
+func probeNamesRunning(sp runtime.Provider, names []string, parallel int) map[string]stopProbe {
+	if len(names) == 0 {
+		return nil
+	}
+	if parallel < 1 {
+		parallel = 1
+	}
+	results := make([]stopProbe, len(names))
+	sem := make(chan struct{}, parallel)
+	var wg sync.WaitGroup
+	for i, name := range names {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			running, err := stopProbeRunning(sp, name)
+			results[i] = stopProbe{running: running, err: err}
+		}()
+	}
+	wg.Wait()
+	out := make(map[string]stopProbe, len(names))
+	for i, name := range names {
+		out[name] = results[i]
+	}
+	return out
+}
+
+// storeSweepMaxParallelProbes is how many of the city's recorded sessions a
+// stop probes at once (storeRecordedRunningOutside, and the standalone stop's
+// check of rows left creating). It is wider than the interrupt wave
+// (defaultMaxParallelInterrupts): these probes only read, and on a runtime
+// whose backend hangs each one waits out the provider's whole op timeout (30 s
+// on an exec pack), so a narrow wave would add one op timeout per wave to
+// every stop, forced or not. At this width a city of up to this many recorded
+// rows pays about one op timeout.
+const storeSweepMaxParallelProbes = 64
+
+// setKeys returns the members of set.
+func setKeys(set map[string]bool) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 func runningSessionSet(sp runtime.Provider, names []string) (map[string]bool, bool) {
 	running, err := sp.ListRunning("")
 	if runtime.IsPartialListError(err) {
@@ -1185,6 +1361,7 @@ func runningSessionSet(sp runtime.Provider, names []string) (map[string]bool, bo
 func controllerLoop(
 	ctx context.Context,
 	interval time.Duration, // overrides cfg patrol interval when non-zero (used by tests)
+	configDebounce time.Duration, // overrides the config-watch coalesce window when non-zero (used by tests)
 	cfg *config.City,
 	cityName string,
 	tomlPath string,
@@ -1216,10 +1393,12 @@ func controllerLoop(
 		loopCfg = &cfgCopy
 	}
 	cr := &CityRuntime{
+		bootCityStore:       bootCityStoreFor(cityPath),
 		cityPath:            cityPath,
 		cityName:            cityName,
 		tomlPath:            tomlPath,
 		watchTargets:        watchTargets,
+		configDebounce:      configDebounce,
 		cfg:                 loopCfg,
 		sp:                  sp,
 		buildFn:             buildFn,
@@ -1231,7 +1410,6 @@ func controllerLoop(
 		rec:                 rec,
 		cs:                  cs,
 		poolSessions:        poolSessions,
-		poolDeathHandlers:   poolDeathHandlers,
 		suspendedNames:      suspendedNames,
 		pokeCh:              make(chan struct{}, 1),
 		controlDispatcherCh: make(chan struct{}, 1),
@@ -1239,6 +1417,8 @@ func controllerLoop(
 		stdout:              stdout,
 		stderr:              stderr,
 	}
+	cr.initWake(nil)
+	cr.publishPoolDeathHandlers(poolDeathHandlers)
 	cr.setControllerState(cs)
 	cr.run(ctx)
 }
@@ -1274,12 +1454,19 @@ func configReloadSummary(oldAgents, oldRigs, newAgents, newRigs int) string {
 	return strings.Join(parts, ", ")
 }
 
-// runController runs the persistent controller loop. It acquires a lock,
-// opens a control socket, runs the reconciliation loop, and on shutdown
+// runController runs the persistent controller loop. It holds the controller
+// lock, opens a control socket, runs the reconciliation loop, and on shutdown
 // stops all agents. Returns an exit code. initialWatchTargets is the set of
-// paths to watch for config changes (from initial provenance).
+// paths to watch for config changes (from initial provenance); configDebounce
+// is their coalesce window, zero selecting defaultConfigDebounce.
+//
+// heldLock is the controller lock when the caller already took it (gc start
+// --foreground does, before it starts the bead-store provider); the caller
+// keeps ownership and releases it after this returns. When heldLock is nil,
+// runController acquires the lock itself and releases it last.
 func runController(
 	cityPath string,
+	heldLock *os.File,
 	tomlPath string,
 	cfg *config.City,
 	configRev string,
@@ -1290,16 +1477,19 @@ func runController(
 	poolSessions map[string]time.Duration,
 	poolDeathHandlers map[string]poolDeathInfo,
 	initialWatchTargets []config.WatchTarget,
+	configDebounce time.Duration,
 	rec events.Recorder,
 	eventProv events.Provider,
 	stdout, stderr io.Writer,
 ) int {
-	lock, err := acquireControllerLock(cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+	if heldLock == nil {
+		lock, err := acquireControllerLock(cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		defer lock.Close() //nolint:errcheck // best-effort cleanup
 	}
-	defer lock.Close() //nolint:errcheck // best-effort cleanup
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1312,15 +1502,17 @@ func runController(
 		cancel()
 	}()
 
-	convergenceReqCh := make(chan convergenceRequest, 16)
-	reloadReqCh := make(chan reloadRequest)
-	pokeCh := make(chan struct{}, 1)
-	controlDispatcherCh := make(chan struct{}, 1)
-	configDirty := &atomic.Bool{}
+	// doStartStandalone already refused an inadmissible mode before any init;
+	// this latch is the one whose mode the runtime runs.
+	wiring, wiringErr := newControllerWiring(cfg, reconcilerModeLookupEnv, stderr)
+	if wiringErr != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", wiringErr) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	sockPath := controllerSocketPath(cityPath)
 	forceShutdown := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, forceShutdown, wiring.configDirty, wiring.reloadReqCh, wiring.convergenceReqCh, wiring.wake)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1350,14 +1542,15 @@ func runController(
 	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
 	telemetry.RecordControllerLifecycle(context.Background(), "started")
 	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout
+	warnBdInventoryAtControllerStart(cityPath, cfg, rec)
 
-	cr, err := newCityRuntime(CityRuntimeParams{
+	cr, err := newCityRuntime(wiring.runtimeParams(CityRuntimeParams{
 		CityPath:                cityPath,
 		CityName:                cityName,
 		TomlPath:                tomlPath,
 		WatchTargets:            initialWatchTargets,
 		ConfigRev:               configRev,
-		ConfigDirty:             configDirty,
+		ConfigDebounce:          configDebounce,
 		Cfg:                     cfg,
 		SP:                      sp,
 		Publication:             supervisor.PublicationConfig{},
@@ -1368,13 +1561,20 @@ func runController(
 		PoolSessions:            poolSessions,
 		PoolDeathHandlers:       poolDeathHandlers,
 		ForceStopShutdown:       forceShutdown,
-		ReloadReqCh:             reloadReqCh,
-		ConvergenceReqCh:        convergenceReqCh,
-		PokeCh:                  pokeCh,
-		ControlDispatcherCh:     controlDispatcherCh,
 		Stdout:                  stdout,
 		Stderr:                  stderr,
-	})
+	}))
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// Install controller-managed bead stores even when the HTTP API is
+	// disabled. Standalone runtime still needs cached city/rig stores for
+	// session-bead sync and rig-scoped wake decisions. This also puts the
+	// binding's CachingStore into the routes, so it runs before the routes are
+	// published below.
+	cs, err := newControllerStateWithRoutes(ctx, cr.storageRoutes, cfg, sp, eventProv, cityName, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1389,18 +1589,9 @@ func runController(
 	// statements below, so capturing the store here would capture a nil and the
 	// census would silently fall back to its leading (binding) store.
 	registerResidencyRoutes(cityPath, cr.storageRoutes, cr.cityBeadStore)
-
-	// Install controller-managed bead stores even when the HTTP API is
-	// disabled. Standalone runtime still needs cached city/rig stores for
-	// session-bead sync and rig-scoped wake decisions.
-	cs, err := newControllerStateWithRoutes(ctx, cr.storageRoutes, cfg, sp, eventProv, cityName, cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 	cs.ct = cr.crashTrack()
-	cs.pokeCh = pokeCh
-	cs.configDirty = configDirty
+	wireControllerWakeSignals(cs, wiring.wake)
+	cs.configDirty = wiring.configDirty
 	cs.services = cr.svc
 	cs.emergencyCh = make(chan emergency.Record, 64)
 	cr.setControllerState(cs)
@@ -1411,15 +1602,16 @@ func runController(
 	// Best-effort — a sweep failure must never block startup, and the lazy
 	// reclaim path still releases such claims when the configured identity
 	// reclaims its name.
-	if cs.cityBeadStore != nil {
-		if released, err := sessionpkg.ReleaseStaleConfiguredNameClaims(cs.cityBeadStore, cfg, cityName); err != nil {
-			fmt.Fprintf(stderr, "controller: stale name-claim sweep: %v\n", err) //nolint:errcheck // best-effort stderr
-		} else if released > 0 {
-			fmt.Fprintf(stderr, "controller: released %d stale configured name claim(s) at startup\n", released) //nolint:errcheck // best-effort stderr
-		}
+	if released, err := releaseStaleNameClaimsAtStartup(cs, cfg, cityName); err != nil {
+		fmt.Fprintf(stderr, "controller: stale name-claim sweep: %v\n", err) //nolint:errcheck // best-effort stderr
+	} else if released > 0 {
+		fmt.Fprintf(stderr, "controller: released %d stale configured name claim(s) at startup\n", released) //nolint:errcheck // best-effort stderr
 	}
 
 	cs.startBeadEventWatcher(ctx)
+	cs.startAutocloseSweep(ctx)
+	cs.startOpSweep(ctx)
+	cs.startConversationLaneHost(ctx, wiring.mode)
 	cs.startEmergencyEventRelay(ctx)
 	cs.startMaintenanceLoop(ctx)
 
@@ -1540,4 +1732,24 @@ func (r *singleCityStateResolver) CityState(name string) api.State {
 		return r.state
 	}
 	return nil
+}
+
+// releaseStaleNameClaimsAtStartup is the one-time startup sweep that releases
+// the runtime name claims closed configured named-session beads still hold
+// (ga-n2d Gap C), run by both the standalone controller and the supervisor.
+//
+// It sweeps the SESSIONS store. Session beads are session class, so on a split
+// city they live only in the class binding; the sweep used to read the work
+// store and was a silent no-op there, leaving only the lazy reclaim (write-audit
+// B8). On a single-store city the sessions store is the work store, so nothing
+// changes.
+func releaseStaleNameClaimsAtStartup(cs *controllerState, cfg *config.City, cityName string) (int, error) {
+	if cs == nil {
+		return 0, nil
+	}
+	store := cs.SessionsBeadStore().Store
+	if store == nil {
+		return 0, nil
+	}
+	return sessionpkg.ReleaseStaleConfiguredNameClaims(store, cfg, cityName)
 }

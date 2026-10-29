@@ -14,6 +14,7 @@ type managedDoltExistingReport struct {
 	DeletedInodes           bool
 	StatePort               int
 	Ready                   bool
+	ReadyInconclusive       bool
 	Reusable                bool
 	PortHolderPID           int
 	PortHolderOwned         bool
@@ -50,10 +51,16 @@ func assessExistingManagedDolt(cityPath, host, port, user string, timeout time.D
 	}
 	readyReport, err := waitForManagedDoltReady(cityPath, host, strconv.Itoa(report.StatePort), user, report.ManagedPID, timeout, true)
 	report.Ready = readyReport.Ready
+	report.ReadyInconclusive = readyReport.Inconclusive
 	if readyReport.DeletedInodes || processHasDeletedDataInodesWithin(report.ManagedPID, layout.DataDir, 300*time.Millisecond) {
 		report.DeletedInodes = true
 	}
 	if err == nil && report.Ready && !report.DeletedInodes {
+		report.Reusable = true
+	}
+	// A wait whose dials never left this host learned nothing about the
+	// server, so keep the live owned server instead of replacing it.
+	if report.ReadyInconclusive && !report.DeletedInodes {
 		report.Reusable = true
 	}
 	return report, nil
@@ -94,6 +101,7 @@ func managedDoltExistingFields(report managedDoltExistingReport) []string {
 		"deleted_inodes\t" + strconv.FormatBool(report.DeletedInodes),
 		"state_port\t" + strconv.Itoa(report.StatePort),
 		"ready\t" + strconv.FormatBool(report.Ready),
+		"ready_inconclusive\t" + strconv.FormatBool(report.ReadyInconclusive),
 		"reusable\t" + strconv.FormatBool(report.Reusable),
 		"port_holder_pid\t" + strconv.Itoa(report.PortHolderPID),
 		"port_holder_owned\t" + strconv.FormatBool(report.PortHolderOwned),

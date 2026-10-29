@@ -16,9 +16,14 @@ import (
 
 // LoadRequest scopes a Phase 1 transcript load.
 type LoadRequest struct {
-	Provider              string
-	TranscriptPath        string
-	GCSessionID           string
+	Provider       string
+	TranscriptPath string
+	GCSessionID    string
+	// LogicalConversationID is the conversation the snapshot belongs to: the
+	// session's session.Info.LogicalConversationID, or the caller's own
+	// HistoryRequest.LogicalID. Leave it empty only without a session bead:
+	// the fallback, GCSessionID, is shared by every conversation of the
+	// session, so the handle would stitch them together.
 	LogicalConversationID string
 	TailCompactions       int
 	BeforeEntryID         string
@@ -60,6 +65,17 @@ type SessionLogAdapter struct {
 	// activity memoizes derived tail activity across the per-request handles a
 	// Factory hands out. Nil (the zero adapter) derives on every call.
 	activity *DerivedActivityMemo
+	// statTranscript reads a transcript's on-disk identity. Nil uses os.Stat;
+	// tests replace it to land a write at the moment the generation is captured.
+	statTranscript func(path string) (os.FileInfo, error)
+}
+
+// statFile reads path's on-disk identity through the statTranscript seam.
+func (a SessionLogAdapter) statFile(path string) (os.FileInfo, error) {
+	if a.statTranscript != nil {
+		return a.statTranscript(path)
+	}
+	return os.Stat(path)
 }
 
 // DiscoverTranscript returns the best available transcript path for a worker.
@@ -95,6 +111,10 @@ func (a SessionLogAdapter) TailMeta(path string) (*sessionlog.TailMeta, error) {
 // full-file parser diagnostics override, and these readers set none, so clearing
 // it removes a false signal rather than a real one.
 func (a SessionLogAdapter) TailMetaForProvider(provider, path string) (*sessionlog.TailMeta, error) {
+	if sessionlog.IsACPCapturePath(path) {
+		// gc's own ACP capture: the format follows the file, not the provider.
+		return a.TailMeta(path)
+	}
 	if sessionlog.ProviderFamily(provider) == "kimi" {
 		return sessionlog.ExtractKimiTailMetaFromSearchPaths(a.SearchPaths, path)
 	}
@@ -137,6 +157,17 @@ func (a SessionLogAdapter) CodexTailUsage(path, cursorID string) ([]sessionlog.T
 	return sessionlog.ExtractCodexTailUsageFromSearchPaths(a.SearchPaths, path)
 }
 
+// OpenCodeTailUsage reads per-invocation token usage from a mirrored OpenCode
+// session export. Validation merges the OpenCode mirror root
+// (~/.local/share/gascity/opencode-transcripts) with the configured search
+// paths. cursorID is accepted for signature symmetry with TailUsage: the export
+// is a single JSON document parsed whole, so there is no window to grow and the
+// caller's cursor filter alone decides what is new.
+func (a SessionLogAdapter) OpenCodeTailUsage(path, cursorID string) ([]sessionlog.TailUsage, error) {
+	_ = cursorID
+	return sessionlog.ExtractOpenCodeTailUsageFromSearchPaths(a.SearchPaths, path)
+}
+
 // InvocationUsage reads per-invocation token usage from a discovered
 // transcript using the SAME extractor the prompt-op telemetry gate uses for
 // the provider's invocation-usage family (invocationUsageSpecs). It returns
@@ -154,7 +185,10 @@ func (a SessionLogAdapter) InvocationUsage(provider, path, cursorID string) ([]s
 // tail cannot be read from a trailing record. Whole-file-JSON mirror families
 // need the normalized history; everything else keeps the cheap tail path.
 func (a SessionLogAdapter) TailActivityForProvider(provider, path string) (TailActivity, error) {
-	if sessionlog.ProviderFamily(provider) == "kimi" {
+	if sessionlog.IsACPCapturePath(path) {
+		return a.TailActivity(path)
+	}
+	if family := sessionlog.ProviderFamily(provider); family == "kimi" || family == "codex" {
 		meta, err := a.TailMetaForProvider(provider, path)
 		return tailActivity(meta), err
 	}
@@ -292,6 +326,15 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 	if err != nil {
 		return nil, err
 	}
+	// Identify the transcript's generation before reading it. A write landing
+	// after this point leaves the content newer than its generation, which the
+	// next load corrects. Identifying it after the read would stamp stale
+	// content with the post-write generation, and SessionHandle would serve
+	// that snapshot until the transcript changes again.
+	info, err := a.statFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat transcript: %w", err)
+	}
 	fullSession, err := sessionlog.ReadProviderFileRaw(req.Provider, path, 0)
 	if err != nil {
 		return nil, err
@@ -305,35 +348,24 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		}
 	}
 
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, fmt.Errorf("stat transcript: %w", err)
-	}
-
-	entries := normalizeHistoryEntries(req.Provider, path, session.ID, session.Messages)
-	contextEntries := entries
+	// Detached (Codex) usage belongs to the full parsed transcript. Attach it
+	// before paging so every page shows its own turns' model and usage, and
+	// off-page invocations cannot land on unrelated assistants.
+	contextEntries := normalizeHistoryEntries(req.Provider, path, fullSession.ID, fullSession.Messages)
+	contextEntries = attachTailUsageToAssistantEntries(contextEntries, fullSession.DetachedUsage)
+	entries := contextEntries
 	if paged {
-		// Pair tool_result blocks whose tool_use is off the current page against
-		// the full session (already read above — no extra I/O), so paginated
-		// structured pages keep typed command/diff/read/task results instead of
-		// degrading to plain text at page boundaries.
-		contextEntries = normalizeHistoryEntries(req.Provider, path, fullSession.ID, fullSession.Messages)
+		entries = normalizeHistoryEntries(req.Provider, path, session.ID, session.Messages)
+		copyHistoryInvocationMetadata(entries, contextEntries)
 	}
+	// Pair tool_result blocks whose tool_use is off the current page against
+	// the full session (already read above — no extra I/O), so paginated
+	// structured pages keep typed command/diff/read/task results instead of
+	// degrading to plain text at page boundaries.
 	entries = attachStructuredToolDataWithContext(entries, contextEntries)
-	if beforeID == "" {
-		// Detached (Codex) usage is extracted from the file tail — the newest
-		// turns. It belongs only to a page that includes the tail. On an older
-		// "before" page the tail usages are for newer, off-page turns and would
-		// be mis-attributed onto earlier assistants, so skip attachment there;
-		// those older turns have no tail-extractable usage to show anyway.
-		entries, err = attachDetachedProviderUsage(req.Provider, path, entries)
-		if err != nil {
-			return nil, err
-		}
-	}
 	compactionCount, lastEntryID, pendingIDs := transcriptGlobalFacts(fullSession.Messages)
 
-	tailMeta, err := sessionlog.ExtractTailMeta(path)
+	tailMeta, err := historyTailMeta(req.Provider, path)
 	if err != nil {
 		return nil, err
 	}
@@ -380,7 +412,7 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		},
 		Continuity: continuity,
 		TailState: TailState{
-			Activity:              snapshotTailActivity(req.Provider, tailMeta, entries),
+			Activity:              historyTailActivity(req.Provider, path, tailMeta, entries),
 			LastEntryID:           lastEntryID,
 			OpenToolUseIDs:        openToolUseIDs,
 			PendingInteractionIDs: pendingIDs,
@@ -466,12 +498,21 @@ func normalizeEntry(provider, path, sessionID string, order int, entry *sessionl
 	if normalized.ID != entry.UUID {
 		normalized.Provenance.Derived = true
 	}
+	if entry.Partial {
+		normalized.Status = ResultStatusPartial
+	}
 	if !entry.Timestamp.IsZero() {
 		ts := entry.Timestamp.UTC()
 		normalized.Timestamp = &ts
 	}
 	normalized.Model, normalized.StopReason, normalized.Usage = historyEntryMetadata(entry)
 	normalized.SystemEvent = historySystemEventFromSessionLog(entry.SystemEvent)
+	if isProviderFailureReply(entry) {
+		// A provider writes its own failure as an assistant row; it is a
+		// system event, not a completion of the turn.
+		normalized.Kind = "system"
+		normalized.Actor = ActorSystem
+	}
 
 	blocks := normalizeBlocks(entry)
 	normalized.Blocks = blocks
@@ -482,6 +523,12 @@ func normalizeEntry(provider, path, sessionID string, order int, entry *sessionl
 		normalized.UserPrompt = parseHistoryUserPrompt(normalized.Text)
 	}
 	return normalized
+}
+
+// isProviderFailureReply reports whether entry is an assistant row the
+// transcript reader marked as a provider failure.
+func isProviderFailureReply(entry *sessionlog.Entry) bool {
+	return entry.Type == "assistant" && entry.SystemEvent != nil && entry.SystemEvent.Category == "provider_error"
 }
 
 func normalizedHistoryEntryID(entry *sessionlog.Entry, order int) string {
@@ -500,62 +547,60 @@ func historySystemEventFromSessionLog(event *sessionlog.SystemEvent) *HistorySys
 	}
 }
 
-func attachDetachedProviderUsage(provider, path string, entries []HistoryEntry) ([]HistoryEntry, error) {
-	family, supported := InvocationUsageFamily(provider)
-	if !supported || family != "codex" {
-		return entries, nil
+// copyHistoryInvocationMetadata copies model and usage attached to the full
+// transcript's entries onto the matching entries of a page.
+func copyHistoryInvocationMetadata(page, full []HistoryEntry) {
+	byID := make(map[string]*HistoryEntry, len(full))
+	for i := range full {
+		if full[i].Model != "" || full[i].Usage != nil {
+			byID[full[i].ID] = &full[i]
+		}
 	}
-	usages, err := sessionlog.ExtractCodexTailUsage(path)
-	if err != nil {
-		return nil, fmt.Errorf("extract codex tail usage: %w", err)
+	for i := range page {
+		if source, ok := byID[page[i].ID]; ok {
+			page[i].Model, page[i].Usage = source.Model, source.Usage
+		}
 	}
-	return attachTailUsageToAssistantEntries(entries, usages), nil
 }
 
+// attachTailUsageToAssistantEntries attaches each usage to the latest
+// assistant entry still lacking metadata that is newer than the previous
+// attachment and not newer than the usage. Usages and entries are both in
+// transcript order, so one forward pass suffices. A usage with no such entry
+// is dropped rather than landing on an earlier row of the turn.
 func attachTailUsageToAssistantEntries(entries []HistoryEntry, usages []sessionlog.TailUsage) []HistoryEntry {
 	if len(entries) == 0 || len(usages) == 0 {
 		return entries
 	}
-	nextStart := 0
+	next, candidate := 0, -1
 	for _, usage := range usages {
 		usageTime, ok := tailUsageTimestamp(usage)
 		if !ok {
 			continue
 		}
-		target := latestAssistantEntryBefore(entries, nextStart, usageTime)
-		if target < 0 {
-			target = latestAssistantEntryBefore(entries, 0, usageTime)
+		for ; next < len(entries); next++ {
+			entry := entries[next]
+			if entry.Timestamp != nil && entry.Timestamp.After(usageTime) {
+				break
+			}
+			if entry.Actor == ActorAssistant && entry.Timestamp != nil && (entry.Usage == nil || entry.Model == "") {
+				candidate = next
+			}
 		}
-		if target < 0 {
+		if candidate < 0 || entries[candidate].Timestamp.After(usageTime) {
 			continue
 		}
-		if entries[target].Model == "" {
-			entries[target].Model = usage.Model
+		target := &entries[candidate]
+		if target.Model == "" {
+			target.Model = usage.Model
 		}
-		if entries[target].Usage == nil {
-			entries[target].Usage = historyUsageFromTailUsage(usage)
-			enrichUsageContext(entries[target].Usage, entries[target].Model)
+		if target.Usage == nil {
+			target.Usage = historyUsageFromTailUsage(usage)
+			enrichUsageContext(target.Usage, target.Model)
 		}
-		nextStart = target + 1
+		candidate = -1
 	}
 	return entries
-}
-
-func latestAssistantEntryBefore(entries []HistoryEntry, start int, usageTime time.Time) int {
-	target := -1
-	for idx := start; idx < len(entries); idx++ {
-		entry := entries[idx]
-		if entry.Timestamp != nil && entry.Timestamp.After(usageTime) {
-			break
-		}
-		if entry.Actor != ActorAssistant || entry.Timestamp == nil {
-			continue
-		}
-		if entry.Usage == nil || entry.Model == "" {
-			target = idx
-		}
-	}
-	return target
 }
 
 func tailUsageTimestamp(usage sessionlog.TailUsage) (time.Time, bool) {
@@ -938,6 +983,16 @@ func snapshotTailActivity(provider string, meta *sessionlog.TailMeta, entries []
 	return tailActivity(meta)
 }
 
+// historyTailActivity resolves a loaded transcript's tail activity. A gc ACP
+// capture carries its own activity (prompt/response pairing, read by
+// sessionlog.ExtractTailMeta) whatever family the provider belongs to.
+func historyTailActivity(provider, path string, meta *sessionlog.TailMeta, entries []HistoryEntry) TailActivity {
+	if sessionlog.IsACPCapturePath(path) {
+		return tailActivity(meta)
+	}
+	return snapshotTailActivity(provider, meta, entries)
+}
+
 func wholeFileJSONActivity(entries []HistoryEntry) TailActivity {
 	for i := len(entries) - 1; i >= 0; i-- {
 		switch entries[i].Actor {
@@ -948,6 +1003,19 @@ func wholeFileJSONActivity(entries []HistoryEntry) TailActivity {
 		}
 	}
 	return TailActivityUnknown
+}
+
+// historyTailMeta reads the tail metadata LoadHistory reports. LoadHistory
+// reads whatever transcript path it is handed, with no search-root check, so
+// this calls the sessionlog parsers directly: TailMetaForProvider would fence
+// the path to the adapter's search roots. A gc-captured ACP transcript has its
+// own format whatever the provider family, so only a native Codex rollout uses
+// the Codex tail parser.
+func historyTailMeta(provider, path string) (*sessionlog.TailMeta, error) {
+	if sessionlog.ProviderFamily(provider) == "codex" && !sessionlog.IsACPCapturePath(path) {
+		return sessionlog.ExtractCodexTailMeta(path)
+	}
+	return sessionlog.ExtractTailMeta(path)
 }
 
 func tailActivity(meta *sessionlog.TailMeta) TailActivity {
@@ -966,11 +1034,18 @@ func tailActivity(meta *sessionlog.TailMeta) TailActivity {
 
 func historyDiagnostics(session sessionlog.SessionDiagnostics) []HistoryDiagnostic {
 	malformedTail := session.MalformedTail
-	if session.MalformedLineCount == 0 && !malformedTail {
+	if session.MalformedLineCount == 0 && !malformedTail && session.DroppedRecordCount == 0 {
 		return nil
 	}
 
 	var diagnostics []HistoryDiagnostic
+	if session.DroppedRecordCount > 0 {
+		diagnostics = append(diagnostics, HistoryDiagnostic{
+			Code:    "dropped_records",
+			Message: "transcript writer dropped records; normalized history has gaps",
+			Count:   session.DroppedRecordCount,
+		})
+	}
 	if malformedTail {
 		diagnostics = append(diagnostics, HistoryDiagnostic{
 			Code:    "malformed_tail",

@@ -3,12 +3,14 @@ package beads
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
@@ -25,6 +27,10 @@ const (
 	BeadsStoreNameExecStore = "ExecStore"
 	// BeadsStoreNameNativeDoltStore is the diagnostic store name for native Dolt stores.
 	BeadsStoreNameNativeDoltStore = "NativeDoltStore"
+	// BeadsStoreNameLibraryBackendStore is the diagnostic store name for a
+	// store the linked beads library opened through a backend it registered as
+	// an extension (contract.IsLibraryExtensionBackend), such as http.
+	BeadsStoreNameLibraryBackendStore = "LibraryBackendStore"
 
 	// BeadsGateProxiedProvider is the preflight gate recorded when a scope
 	// falls back to the bd CLI front door because its persisted dolt_mode is
@@ -41,8 +47,17 @@ const (
 	nativeForceFallbackEnv   = "GC_BEADS_FORCE_FALLBACK"
 	nativeForceFallbackGate  = "force_fallback"
 	nativeHooksGate          = "bd_hooks"
+	nativeHooksReason        = "bd hooks are installed and the native store would not run them; remove .beads/hooks/on_create,on_update,on_close once nothing depends on them firing for every write"
 	proxiedProviderGate      = BeadsGateProxiedProvider
 	nativeUnavailableMessage = "native_store_unavailable"
+
+	// nativeTransportOffGate is the preflight gate recorded when an open's
+	// NativeTransport is "off": the city set beads.native_transport = "off"
+	// (the per-city kill switch), or the caller pinned the bd store, as the
+	// control plane does on every open. It is distinct from the deprecated
+	// process-wide nativeForceFallbackGate even though both end in the same
+	// BdStore fallback, and it logs at Debug (see logNativeUnavailable).
+	nativeTransportOffGate = "native_transport_off"
 
 	// gcHookStampPrefix is the comment prefix gc embeds in every hook script
 	// it installs. Hooks bearing this stamp are gc's own event-forwarding
@@ -141,6 +156,121 @@ func (r ProxiedOpenReport) diagnostic(verdict ProxiedVerdict, detail string) *Pr
 	}
 }
 
+// NativeTransportMode selects whether a city's store opens may use the
+// native Dolt store at all. It is deliberately NOT gate.Mode: the
+// beads.native_transport grammar is two-valued (off|auto), never "require" —
+// see config.validateNativeTransport — so a distinct type keeps a caller from
+// passing a conditional-writes/guarded-release Mode here by a copy-paste
+// mistake and having it silently compile.
+type NativeTransportMode string
+
+const (
+	// NativeTransportUnset is the zero value: "nobody threaded a value."
+	// decideNativeTransport treats it exactly like NativeTransportAuto, so an
+	// unthreaded open path behaves exactly like today's default and can never
+	// newly refuse native.
+	NativeTransportUnset NativeTransportMode = ""
+	// NativeTransportAuto is the default: native when preflight-eligible. A
+	// library-extension scope (libraryExtensionBackend) skips preflight, and
+	// its failed native open is an error, not a BdStore fallback.
+	NativeTransportAuto NativeTransportMode = "auto"
+	// NativeTransportOff is the per-city kill switch: this city's stores
+	// never open natively, always BdStore (the bd CLI subprocess).
+	NativeTransportOff NativeTransportMode = "off"
+)
+
+// nativeTransportVerdict is decideNativeTransport's answer: whether a native
+// open may even be attempted, and if not, the diagnostic to report.
+type nativeTransportVerdict struct {
+	AllowNative bool
+	Gate        string
+	Reason      string
+}
+
+// decideNativeTransport is the ONE seam that decides whether a store open for
+// this city may attempt native storage at all, evaluated before preflight
+// runs. It implements only the off|auto switch. A remote backend the linked
+// beads library opens on its own is not decided here: under "auto" a scope
+// libraryExtensionBackend recognizes takes the library-extension arm in
+// OpenStoreAtForCity, which skips preflight and returns a failed open as an
+// error rather than a silent BdStore fallback. That arm runs after this
+// switch, so beads.native_transport="off" is its escape hatch.
+//
+// Precedence: the caller checks the deprecated process-wide
+// GC_BEADS_FORCE_FALLBACK alias (forceNativeFallback) BEFORE calling this
+// function, and that env wins over every city's value — this function only
+// ever sees and decides the per-city value.
+func decideNativeTransport(mode NativeTransportMode) nativeTransportVerdict {
+	if mode == NativeTransportOff {
+		return nativeTransportVerdict{
+			Gate:   nativeTransportOffGate,
+			Reason: fmt.Sprintf("beads.native_transport=%q", string(NativeTransportOff)),
+		}
+	}
+	return nativeTransportVerdict{AllowNative: true}
+}
+
+// metadataBackendRoute is decideMetadataBackend's answer: which path a store
+// open takes for the backend the scope's .beads/metadata.json names.
+type metadataBackendRoute int
+
+const (
+	// metadataBackendRoutePreflight runs the full native-store preflight
+	// (bd context, identity and schema probes). It is the route for a backend
+	// the native store serves, and for metadata that names no backend or
+	// cannot be read, whose diagnostics the preflight already owns.
+	metadataBackendRoutePreflight metadataBackendRoute = iota
+	// metadataBackendRouteBdStore falls back to the bd CLI store without a
+	// single probe: the backend is outside the native store's set, so no bd
+	// context or database answer could make the scope native-eligible.
+	metadataBackendRouteBdStore
+)
+
+// metadataBackendVerdict carries the route and, for the BdStore route, the
+// diagnostic to report.
+type metadataBackendVerdict struct {
+	Route  metadataBackendRoute
+	Gate   string
+	Reason string
+}
+
+// decideMetadataBackend decides, from .beads/metadata.json ALONE, whether a
+// native open is worth probing for. It runs before preflight and dials
+// nothing, so a scope whose backend the native store does not serve skips the
+// Dolt endpoint, identity and schema probes (seconds against a local Dolt
+// port that may not even be listening) and reaches the BdStore fallback
+// directly.
+//
+// The table is explicit on purpose, and the default arm is "the native store
+// does not serve this backend", not "every non-dolt backend is a bd backend":
+//
+//	metadata                         route
+//	unreadable / no backend named    preflight (it reports the missing/unread gate)
+//	backend in the native set        preflight (probes decide eligibility)
+//	any other backend                BdStore, gate metadata_backend, no probes
+//
+// A scope libraryExtensionBackend recognizes (a remote backend the linked
+// beads library registered and opens on its own, such as http, with no
+// storage fields) never reaches this table: OpenStoreAtForCity routes it to
+// the library-extension arm ahead of persistedDoltModeRefusal, and under
+// native_transport=off the transport gate has already sent it to BdStore.
+func decideMetadataBackend(scopeRoot string) metadataBackendVerdict {
+	metadataPath := filepath.Join(scopeRoot, ".beads", "metadata.json")
+	backend, named, err := contract.ReadMetadataBackend(fsys.OSFS{}, metadataPath)
+	switch {
+	case err != nil || !named:
+		return metadataBackendVerdict{Route: metadataBackendRoutePreflight}
+	case contract.NativeStoreServesBackend(backend):
+		return metadataBackendVerdict{Route: metadataBackendRoutePreflight}
+	default:
+		return metadataBackendVerdict{
+			Route:  metadataBackendRouteBdStore,
+			Gate:   string(contract.PreflightCheckMetadataBackend),
+			Reason: contract.UnsupportedMetadataBackendSummary(backend),
+		}
+	}
+}
+
 // StoreOpenOptions holds dependencies for opening a beads Store.
 type StoreOpenOptions struct {
 	ScopeRoot        string
@@ -175,6 +305,16 @@ type StoreOpenOptions struct {
 	// dropped.
 	LongLived bool
 
+	// NativeTransport is the resolved beads.native_transport mode for this
+	// city, consulted by decideNativeTransport before preflight runs. The
+	// zero value (NativeTransportUnset) behaves exactly like
+	// NativeTransportAuto, so an unthreaded open path can never newly refuse
+	// native. Threaded by VALUE, not read from a live config pointer, so a
+	// config change after this open cannot flip a store this call already
+	// returned — composition-root callers resolve it once (per the design's
+	// boot-latch convention) and pass the snapshot in.
+	NativeTransport NativeTransportMode
+
 	// ConditionalWrites is the resolved city-global beads.conditional_writes
 	// mode, stamped onto every store this open produces and latched for the
 	// store's lifetime — the factory is the ONE home of the mode (DESIGN
@@ -182,6 +322,12 @@ type StoreOpenOptions struct {
 	// (unset) maps to Off with a defaulted marker, so an unthreaded open path
 	// behaves exactly like today's default and can never raise enforcement.
 	ConditionalWrites gate.Mode
+
+	// ConditionalWritesDefaulted reports that ConditionalWrites is the
+	// builtin default rather than an operator's choice. A defaulted auto on a
+	// store that cannot carry the mode is treated as off: the open notes it
+	// at debug and fires no degrade. The stamp records it as defaulted.
+	ConditionalWritesDefaulted bool
 
 	// OnConditionalWritesDegraded receives the first (and only the first)
 	// capability degrade of each store this open produces — the composition
@@ -242,14 +388,26 @@ func ExecStoreDiagnostic() BeadsDiagnostic {
 	return BeadsDiagnostic{Store: storeNameExecStore}
 }
 
+// ProviderConsultsNativeTransport reports whether a store open for provider
+// reaches the beads.native_transport decision. The file store and exec
+// providers outside the bd contract open before it, so neither the city's
+// native_transport value nor GC_BEADS_FORCE_FALLBACK affects them.
+func ProviderConsultsNativeTransport(provider string) bool {
+	provider = strings.TrimSpace(provider)
+	if provider == "file" {
+		return false
+	}
+	return !strings.HasPrefix(provider, "exec:") || contract.ProviderUsesBDContract(provider)
+}
+
 // OpenStoreAtForCity opens the configured Store for a city or rig scope.
 func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenResult, error) {
 	provider := strings.TrimSpace(opts.Provider)
-	switch {
-	case provider == "file":
-		store, err := callStoreOpen("file store", opts.OpenFileStore)
-		return opts.stampedResult(StoreOpenResult{Store: store, Diagnostic: BeadsDiagnostic{Store: storeNameFileStore}}, err)
-	case strings.HasPrefix(provider, "exec:") && !contract.ProviderUsesBDContract(provider):
+	if !ProviderConsultsNativeTransport(provider) {
+		if provider == "file" {
+			store, err := callStoreOpen("file store", opts.OpenFileStore)
+			return opts.stampedResult(StoreOpenResult{Store: store, Diagnostic: BeadsDiagnostic{Store: storeNameFileStore}}, err)
+		}
 		store, err := callStoreOpen("exec store", opts.OpenExecStore)
 		return opts.stampedResult(StoreOpenResult{Store: store, Diagnostic: BeadsDiagnostic{Store: storeNameExecStore}}, err)
 	}
@@ -260,6 +418,18 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 			NativeStoreEligible: false,
 			PreflightGate:       nativeForceFallbackGate,
 			PreflightReason:     nativeForceFallbackEnv + "=1",
+		}
+		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
+		warnNativeForceFallbackDeprecatedOnce(opts.Logger)
+		return opts.openBdFallback(provider, diag)
+	}
+
+	if verdict := decideNativeTransport(opts.NativeTransport); !verdict.AllowNative {
+		diag := BeadsDiagnostic{
+			Store:               storeNameBdStore,
+			NativeStoreEligible: false,
+			PreflightGate:       verdict.Gate,
+			PreflightReason:     verdict.Reason,
 		}
 		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
 		return opts.openBdFallback(provider, diag)
@@ -274,6 +444,10 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 		}
 		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
 		return opts.openBdFallback(provider, diag)
+	}
+
+	if backend, ok := libraryExtensionBackend(opts.ScopeRoot); ok {
+		return opts.openLibraryExtensionStore(ctx, provider, backend)
 	}
 
 	// The persisted topology is checked before preflight runs. A proxied-server
@@ -299,6 +473,24 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 		return opts.openBdFallback(provider, diag)
 	}
 
+	// The metadata backend is decided before anything that probes: a backend
+	// the native store does not serve goes straight to BdStore, and the reason
+	// is logged once here rather than after a preflight that dials for nothing.
+	// It runs AFTER the persisted-topology check above, which reads files only:
+	// that check keys on contract.IsDoltBackend's wider spelling ("bd", any
+	// case), and a proxied-server scope so spelled must keep reaching the
+	// proxied arm rather than being routed to BdStore here.
+	if verdict := decideMetadataBackend(opts.ScopeRoot); verdict.Route == metadataBackendRouteBdStore {
+		diag := BeadsDiagnostic{
+			Store:               storeNameBdStore,
+			NativeStoreEligible: false,
+			PreflightGate:       verdict.Gate,
+			PreflightReason:     verdict.Reason,
+		}
+		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
+		return opts.openBdFallback(provider, diag)
+	}
+
 	result, err := opts.PreflightChecker.Check(opts.ScopeRoot)
 	if err != nil {
 		diag := BeadsDiagnostic{
@@ -321,7 +513,7 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 			Store:               storeNameBdStore,
 			NativeStoreEligible: false,
 			PreflightGate:       nativeHooksGate,
-			PreflightReason:     "bd hooks are installed; remove .beads/hooks/on_create,on_update,on_close after confirming controller cache events cover this deployment",
+			PreflightReason:     nativeHooksReason,
 		}
 		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
 		return opts.openBdFallback(provider, diag)
@@ -341,6 +533,83 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 		Store: native,
 		Diagnostic: BeadsDiagnostic{
 			Store:               storeNameNativeDoltStore,
+			NativeStoreEligible: true,
+		},
+	}, nil)
+}
+
+// libraryExtensionBackend reports the backend a scope's metadata names when
+// the linked beads library registered it as a self-sufficient extension
+// backend (contract.IsLibraryExtensionBackend) and the metadata carries no
+// storage fields — the workspace `bd connect <url> --convert-workspace`
+// leaves, whose target lives beside metadata.json. A scope that carries
+// storage_endpoint or storage_database is a complete storage binding whatever
+// it names, and keeps the preflight verdict and the bd front-door fallback.
+//
+// Only the scope's own metadata.json is read. A rig that inherits a
+// library-backend city's endpoint carries none of its own, so it is not
+// recognized here: it keeps the preflight verdict (which reports the missing
+// metadata) and the bd front door, although cmd/gc treats it as externally
+// bound.
+func libraryExtensionBackend(scopeRoot string) (string, bool) {
+	data, err := fsys.OSFS{}.ReadFile(filepath.Join(scopeRoot, ".beads", "metadata.json"))
+	if err != nil {
+		return "", false
+	}
+	var meta struct {
+		Backend         string          `json:"backend"`
+		StorageEndpoint json.RawMessage `json:"storage_endpoint"`
+		StorageDatabase json.RawMessage `json:"storage_database"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", false
+	}
+	if len(meta.StorageEndpoint) != 0 || len(meta.StorageDatabase) != 0 {
+		return "", false
+	}
+	backend := strings.TrimSpace(meta.Backend)
+	if !contract.IsLibraryExtensionBackend(backend) {
+		return "", false
+	}
+	return backend, true
+}
+
+// openLibraryExtensionStore is the library-extension arm. The Dolt preflight
+// is skipped whole: its bd-context fork and SQL ping describe a local Dolt
+// server this scope does not have, and cost seconds per open. The library's
+// own open dispatches to the registered backend, which reads the workspace and
+// its credentials itself. A failed open is returned rather than answered with
+// the bd front door, because nothing vetted that fallback for this scope and
+// the operator needs the backend's own reason. Executable bd hooks still route
+// to the bd front door exactly as they do for a Dolt scope.
+//
+// The open runs in a direct native open's env window, not the proxied lane's
+// hermetic one, and that is deliberate parity with the bd CLI door for the
+// same workspace. The caller's env decides the BEADS_ credential and Dolt
+// keys and BD_ALLOW_REMOTE_MIGRATE (gc sets it only for a city that opted in),
+// while the other BD_ switches (BD_EVENTS_JOURNAL, BD_IGNORE_SCHEMA_SKEW,
+// BD_SMART_GATE) reach the library as they reach bd. A backend that cannot
+// record a journal the env or workspace enables fails the open rather than
+// return a handle whose writes would go unrecorded.
+func (opts StoreOpenOptions) openLibraryExtensionStore(ctx context.Context, provider, backend string) (StoreOpenResult, error) {
+	if scopeHasExecutableBdHooks(opts.ScopeRoot) {
+		diag := BeadsDiagnostic{
+			Store:               storeNameBdStore,
+			NativeStoreEligible: false,
+			PreflightGate:       nativeHooksGate,
+			PreflightReason:     nativeHooksReason,
+		}
+		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
+		return opts.openBdFallback(provider, diag)
+	}
+	native, err := opts.openNativeStore(ctx)
+	if err != nil {
+		return StoreOpenResult{}, fmt.Errorf("opening beads backend %q for scope %s through the linked beads library: %w", backend, opts.ScopeRoot, err)
+	}
+	return opts.stampedResult(StoreOpenResult{
+		Store: native,
+		Diagnostic: BeadsDiagnostic{
+			Store:               BeadsStoreNameLibraryBackendStore,
 			NativeStoreEligible: true,
 		},
 	}, nil)
@@ -440,9 +709,9 @@ func (opts StoreOpenOptions) stampedResult(result StoreOpenResult, err error) (S
 	if err != nil || result.Store == nil {
 		return result, err
 	}
-	mode, defaulted := opts.ConditionalWrites, false
+	mode, defaulted, unthreaded := opts.ConditionalWrites, opts.ConditionalWritesDefaulted, false
 	if mode == gate.ModeUnset {
-		mode, defaulted = gate.Off, true
+		mode, defaulted, unthreaded = gate.Off, true, true
 	}
 	carrier, ok := result.Store.(conditionalWritesModeCarrier)
 	if !ok {
@@ -452,12 +721,33 @@ func (opts StoreOpenOptions) stampedResult(result StoreOpenResult, err error) (S
 	if !carrier.stampConditionalWritesMode(mode, defaulted) {
 		return opts.unstampableResult(result, mode, "store forwards the stamp into a backing that cannot carry it")
 	}
-	if defaulted && opts.Logger != nil {
+	if unthreaded && opts.Logger != nil {
 		opts.Logger.Debug("conditional_writes mode not threaded; defaulted to off",
 			slog.String("store", result.Diagnostic.Store),
 			slog.String("scope", opts.ScopeRoot))
 	}
 	return result, nil
+}
+
+// StampOpenedStore stamps the conditional-writes mode onto a store the factory
+// did not open, such as a relocated class binding's engine, by the factory's
+// own rules: ModeUnset defaults to off, and a store that cannot carry the mode
+// is refused under require and degraded loudly under auto, or quietly when
+// defaulted (StoreOpenOptions.ConditionalWritesDefaulted). kind names the
+// store in the diagnostic and log vocabulary.
+//
+// A store that already carries a mode is refused, whatever the new mode: the
+// stamp is latched for the store's lifetime (§6.3), and a second stamp is the
+// one way a caller could lower a require it did not set.
+func StampOpenedStore(store Store, kind string, mode gate.Mode, defaulted bool, onDegrade func(ConditionalWritesDegrade), logger *slog.Logger) error {
+	if carrier, ok := store.(conditionalWritesModeCarrier); ok {
+		if stamped, _ := carrier.conditionalWritesMode(); stamped != gate.ModeUnset {
+			return fmt.Errorf("stamping %s: conditional_writes mode is already %q and stays latched for the store's lifetime", kind, stamped)
+		}
+	}
+	opts := StoreOpenOptions{ConditionalWrites: mode, ConditionalWritesDefaulted: defaulted, OnConditionalWritesDegraded: onDegrade, Logger: logger}
+	_, err := opts.stampedResult(StoreOpenResult{Store: store, Diagnostic: BeadsDiagnostic{Store: kind}}, nil)
+	return err
 }
 
 // unstampableResult resolves an open whose store cannot carry the
@@ -466,15 +756,17 @@ func (opts StoreOpenOptions) stampedResult(result StoreOpenResult, err error) (S
 // OPEN refuses — a store that cannot enforce the fence must never be handed
 // to a caller whose config promises fencing; under auto the open succeeds but
 // degrades LOUDLY (warn log plus the degrade notification, fired directly —
-// there is no stamp to latch on, and an open happens once per store); off and
-// unset stay a debug note.
+// there is no stamp to latch on, and an open happens once per store); off,
+// unset and a defaulted auto (ConditionalWritesDefaulted) stay a debug note.
 func (opts StoreOpenOptions) unstampableResult(result StoreOpenResult, mode gate.Mode, reason string) (StoreOpenResult, error) {
-	switch mode {
-	case gate.Require:
-		return StoreOpenResult{}, fmt.Errorf("opening %s at %s: %w",
-			result.Diagnostic.Store, opts.ScopeRoot,
-			&ConditionalWritesRequiredError{StoreKind: result.Diagnostic.Store, Reason: reason})
-	case gate.Auto:
+	switch {
+	case mode == gate.Require:
+		refusal := &ConditionalWritesRequiredError{StoreKind: result.Diagnostic.Store, Reason: reason}
+		if opts.ScopeRoot == "" {
+			return StoreOpenResult{}, fmt.Errorf("opening %s: %w", result.Diagnostic.Store, refusal)
+		}
+		return StoreOpenResult{}, fmt.Errorf("opening %s at %s: %w", result.Diagnostic.Store, opts.ScopeRoot, refusal)
+	case mode == gate.Auto && !opts.ConditionalWritesDefaulted:
 		if opts.Logger != nil {
 			opts.Logger.Warn("conditional_writes degraded at open",
 				slog.String("store", result.Diagnostic.Store),
@@ -544,9 +836,13 @@ func diagnosticFromPreflight(result contract.PreflightResult) BeadsDiagnostic {
 
 // scopeHasExecutableBdHooks reports whether any of the standard bd hooks
 // (on_create, on_update, on_close) are executable and NOT installed by gc.
-// GC's own stamped forwarder hooks are exempt: the controller-cache event
-// path already covers bead events for gc's own writes, and bd-CLI operations
-// (e.g., agent writes via bd close) still fire those hooks for autoclose.
+// The native store writes in-process and never runs bd's hook scripts, so a
+// foreign hook would silently miss every write gc makes. GC's own stamped
+// forwarder hooks are exempt because installBeadHooks deletes them
+// (cmd/gc/hooks.go); nothing depends on them. Their removal means a write
+// that emits no gc event, such as an agent's `bd close`, now reaches the
+// controller only when a cache reconcile scan notices it: the controller's
+// cache events cover gc's own writes, not other writers'.
 func scopeHasExecutableBdHooks(scopeRoot string) bool {
 	for _, name := range []string{"on_create", "on_update", "on_close"} {
 		path := filepath.Join(scopeRoot, ".beads", "hooks", name)
@@ -580,9 +876,42 @@ func forceNativeFallback() bool {
 	return value == "1" || strings.EqualFold(value, "true")
 }
 
-func logNativeUnavailable(logger *slog.Logger, scope, gateName, reason string) {
+// ForceNativeFallbackActive reports whether the deprecated process-wide
+// GC_BEADS_FORCE_FALLBACK alias is set. OpenStoreAtForCity checks it itself;
+// composition roots call this where "off" must hold outside that open: a
+// [storage] binding served by a native-transport provider is refused, and a
+// bd store skips the GC_NATIVE_DOLTLITE_BEADS read optimization.
+func ForceNativeFallbackActive() bool {
+	return forceNativeFallback()
+}
+
+// nativeForceFallbackDeprecationWarnOnce ensures the GC_BEADS_FORCE_FALLBACK
+// deprecation warning is logged at most once per process, however many
+// stores it causes to fall back — a long-lived controller can open dozens of
+// rig stores under the env, and a warning per open would bury the one
+// actionable line (set beads.native_transport="off" instead) in noise.
+var nativeForceFallbackDeprecationWarnOnce sync.Once
+
+// warnNativeForceFallbackDeprecatedOnce logs the GC_BEADS_FORCE_FALLBACK
+// deprecation warning the first time any caller reaches it in this process.
+func warnNativeForceFallbackDeprecatedOnce(logger *slog.Logger) {
 	if logger == nil {
 		return
+	}
+	nativeForceFallbackDeprecationWarnOnce.Do(func() {
+		logger.Warn(nativeForceFallbackEnv+" is deprecated; set beads.native_transport = \"off\" in city.toml instead",
+			slog.String("env", nativeForceFallbackEnv))
+	})
+}
+
+func logNativeUnavailable(logger *slog.Logger, scope, gateName, reason string) {
+	if logger == nil {
+		// A rig-store caller that omits StoreOpenOptions.Logger (e.g.
+		// buildStores's shared legacy file store open) must not make a
+		// BdStore fallback invisible. slog.Default() is read here, at call
+		// time, rather than cached in a package var, so it reflects whatever
+		// default main has installed by the time this fires.
+		logger = slog.Default()
 	}
 	args := []any{
 		slog.String("gate", gateName),
@@ -601,6 +930,16 @@ func logNativeUnavailable(logger *slog.Logger, scope, gateName, reason string) {
 		// store-open, spamming WARN on routine commands like `gc session attach`.
 		// Log at DEBUG instead (still visible with -v); genuine backend
 		// disagreements remain surfaced by `gc doctor`'s preflight diagnostic.
+		logger.Debug(nativeUnavailableMessage, args...)
+		return
+	}
+	if gateName == nativeTransportOffGate {
+		// A chosen fallback, not a degraded store: the city turned native
+		// transport off (logged once at boot), or the caller pinned the bd
+		// store, as the control plane does on every open. It fires on every
+		// store open, so a WARN would read as a degraded store every few
+		// seconds and name a setting the city may never have set. gc doctor
+		// still reports the gate for a city that set "off".
 		logger.Debug(nativeUnavailableMessage, args...)
 		return
 	}

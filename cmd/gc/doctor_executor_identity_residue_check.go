@@ -190,13 +190,15 @@ func (c *executorIdentityResidueCheck) collect() (findings []executorIdentityRes
 	for _, sc := range scopes {
 		identities := sessionIdentities
 		// Union in a DISTINCT scope store's own session beads, so a rig that
-		// does hold session records still contributes them. Interface identity
-		// is the right test -- production stores are pointer-backed
-		// CachingStores -- and it keeps the default single-store city from
-		// scanning the same rows twice. The union is built into the scope's own
-		// index rather than into the shared one, so one scope's session beads
-		// can never leak into the next scope's verdict.
-		if sc.store != sessionStore {
+		// does hold session records still contributes them. The stores are
+		// compared by the engine they serve, which keeps the default
+		// single-store city from scanning the same rows twice: there the
+		// session store is the city store rebuilt with an emitter under its
+		// policy layer (withMainStoreEmission), a different value over the same
+		// engine. The union is built into the scope's own index rather than
+		// into the shared one, so one scope's session beads can never leak into
+		// the next scope's verdict.
+		if !sameStoreEngine(sc.store, sessionStore) {
 			scopeIdentities, idxErr := buildExecutorRouteIdentityIndex(sc.store)
 			if idxErr != nil {
 				skipped = append(skipped, fmt.Sprintf("%s skipped: listing session beads: %v", sc.label, idxErr))
@@ -287,7 +289,14 @@ func (idx executorRouteIdentityIndex) backfill(other executorRouteIdentityIndex)
 // legitimate identity and this check's Fix() deletes state.
 func buildExecutorRouteIdentityIndex(store beads.Store) (executorRouteIdentityIndex, error) {
 	idx := make(executorRouteIdentityIndex)
-	all, listErr := sessionFrontDoor(store).ListAll(session.ListAllOptions{IncludeClosed: true})
+	// Relic leg (S4 debt) for a scope store unioned beside the sessions
+	// store: it holds session beads only as pre-split rows.
+	var all []session.Info
+	listErr := beads.RelicRead(func() error {
+		var err error
+		all, err = sessionFrontDoor(store).ListAll(session.ListAllOptions{IncludeClosed: true})
+		return err
+	})
 	if listErr != nil && !beads.IsPartialResult(listErr) {
 		return nil, fmt.Errorf("listing session beads: %w", listErr)
 	}
@@ -418,4 +427,11 @@ func staleSessionNameStamp(cfg *config.City, bd beads.Bead, routeIdentities exec
 		return false
 	}
 	return !routeIdentities.legitimate(routedTo, sessionName)
+}
+
+// sameStoreEngine reports whether two stores serve the same bead engine, looking
+// through the layers gc wraps an engine in (storeEngine). Two stores with no
+// such layers compare as themselves.
+func sameStoreEngine(a, b beads.Store) bool {
+	return storeEngine(a) == storeEngine(b)
 }

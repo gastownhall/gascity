@@ -1,0 +1,36 @@
+# convoy-autoclose-backstop closes open, un-owned convoys whose members are
+# all terminal. A convoy normally closes when its last member's bead.closed
+# reaches the controller, and the controller's autoclose sweep re-runs that
+# autoclose for a close whose event was lost. This order covers what the sweep
+# cannot see: a close made before the controller's current run (a cache's
+# first census only seeds the sweep), which includes every convoy that leaked
+# before the sweep shipped; a close the sweep dropped past its pending cap;
+# and a store the controller does not cache. None of those is urgent, and each
+# run reads every open convoy and its members, so it runs hourly rather than
+# on the sweep's one-minute pass.
+#
+# The timeout is explicit because a full walk outlasts the 300s exec default:
+# one over 4,249 open convoys took about 614s. A run killed at the default
+# starts over from the lowest convoy ID the next time and never reaches the
+# rest. The interval stays longer than the timeout because the cooldown counts
+# from when a run starts, and an idempotent order dispatches even when its
+# single-flight gate times out, so a shorter interval could start a second
+# walk while the first is still running.
+#
+# The command scans every configured store except a suspended rig's, so this
+# runs once per city rather than once for every rig that imports the bundled
+# core pack. A convoy labeled `owned` is never auto-closed.
+#
+# With `[beads] conditional_writes = "require"`, gc refuses to use a store
+# that cannot compare-and-swap, whether at open or at a convoy's close, and
+# the check exits 1 each time. This order then fails every hour until the
+# setting or the store changes. That is by design: no retry fixes a
+# configuration.
+[order]
+description = "Reconcile completed convoys after missed close events"
+scope = "city"
+trigger = "cooldown"
+interval = "1h"
+timeout = "30m"
+exec = "gc convoy check"
+idempotent = true

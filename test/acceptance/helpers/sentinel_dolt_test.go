@@ -98,7 +98,7 @@ func TestSentinelDoltRecordsArgvAndParentThenExecs(t *testing.T) {
 				sentinel.TrapThisProcess(t)
 				name = "dolt"
 			}
-			cmd := exec.Command(name, "sql-server", "--config", "a b.yaml") //nolint:gosec // resolved shim
+			cmd := shimCommand(name, "sql-server", "--config", "a b.yaml")
 			if cmd.Path != sentinel.Path {
 				t.Fatalf("%q resolved to %q, want the sentinel %q", name, cmd.Path, sentinel.Path)
 			}

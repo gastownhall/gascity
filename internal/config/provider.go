@@ -187,7 +187,13 @@ type ProviderSpec struct {
 	// When empty, Command is used for both tmux and ACP transports.
 	ACPCommand string `toml:"acp_command,omitempty"`
 	// ACPArgs overrides Args when the session transport is ACP.
-	// When nil, Args is used for both tmux and ACP transports.
+	// When nil, Args is used for both tmux and ACP transports. When any layer
+	// sets acp_args, args and args_append reach only the CLI launch, except
+	// schema-managed flags such as a curated model, which become option
+	// defaults that both launches carry: when a layer more specific than the
+	// acp_args layer declares args that reach the CLI launch, the CLI
+	// transport is the default, and an explicit ACP session that still drops
+	// args prints a warning.
 	ACPArgs []string `toml:"acp_args,omitempty"`
 }
 
@@ -255,6 +261,16 @@ type ResolvedProvider struct {
 	TitleModel             string
 	ACPCommand             string
 	ACPArgs                []string
+	// ACPOmittedArgs holds the args that provider layers more specific than
+	// the most specific layer that sets acp_args contribute to Args, as the
+	// merge applies them: args replaces, args_append extends. The ACP launch
+	// takes its args from ACPArgs alone, so these tokens reach only the CLI
+	// launch; a non-empty value makes the CLI transport the provider default
+	// (ProviderSessionCreateTransport). Schema-managed flags are not among
+	// them: normalization lifts them into option defaults, which both
+	// launches carry. Nil when ACPArgs is nil, because the ACP launch then
+	// uses Args.
+	ACPOmittedArgs []string
 	// EffectiveDefaults is the fully-merged option default map.
 	// Computed from: schema Default -> provider OptionDefaults -> agent OptionDefaults.
 	// Used by ResolveDefaultArgs() to produce CLI flags and by the API to
@@ -329,6 +345,11 @@ func (rp *ResolvedProvider) DefaultSessionTransport() string {
 // provider-backed session without any template-level session override.
 func (rp *ResolvedProvider) ProviderSessionCreateTransport() string {
 	if rp == nil || !rp.SupportsACP {
+		return ""
+	}
+	if len(rp.ACPOmittedArgs) > 0 {
+		// The ACP launch would drop args a more specific layer declared;
+		// the CLI launch keeps them.
 		return ""
 	}
 	if transport := rp.DefaultSessionTransport(); transport != "" {

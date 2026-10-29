@@ -100,7 +100,7 @@ func runEventsReemitExecution(cmd *cobra.Command, runID string, apply bool, stdo
 	}
 	facts := projection.Events("execution-reemit")
 	if apply {
-		recorder, err := newFileEventsRecorder(filepath.Join(cityPath, ".gc", "events.jsonl"), cfg.Events, io.Discard)
+		recorder, err := openCityEventsLog(cityPath, io.Discard)
 		if err != nil {
 			return fmt.Errorf("opening event log: %w", err)
 		}

@@ -358,6 +358,138 @@ func TestGitHubPRBackfillCommandFiltersCleanResultsByDefault(t *testing.T) {
 	}
 }
 
+func TestGitHubPRBackfillAuthorFlagFailsClosedToAllowedAuthor(t *testing.T) {
+	cityPath := writeGitHubMonitorTestCity(t)
+	oldToken := resolveGitHubTokenForBackfill
+	oldClient := newGitHubPRBackfillClient
+	resolveGitHubTokenForBackfill = func(context.Context) (string, error) { return "token", nil }
+	newGitHubPRBackfillClient = func(string) githubPRLister {
+		return fakeGitHubPRLister{prs: []githubmonitor.PullRequest{
+			// Allowed author, actionable.
+			{Number: 1, Author: "alice", BaseRefName: "main", HeadSHA: "a1", MergeStateStatus: "DIRTY"},
+			// Different author, actionable — must be skipped by --author.
+			{Number: 2, Author: "bob", BaseRefName: "main", HeadSHA: "b2", MergeStateStatus: "DIRTY"},
+			// Unresolved author, actionable — must fail closed and be skipped.
+			{Number: 3, Author: "", BaseRefName: "main", HeadSHA: "c3", MergeStateStatus: "DIRTY"},
+		}}
+	}
+	t.Cleanup(func() {
+		resolveGitHubTokenForBackfill = oldToken
+		newGitHubPRBackfillClient = oldClient
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--city", cityPath, "github", "pr", "backfill", "--author", "alice", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	var payload struct {
+		ResultCount     int `json:"result_count"`
+		ActionableCount int `json:"actionable_count"`
+		Results         []githubmonitor.Result
+		OK              bool `json:"ok"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode stdout %q: %v", stdout.String(), err)
+	}
+	if !payload.OK {
+		t.Fatal("ok = false, want true")
+	}
+	if payload.ResultCount != 1 || payload.ActionableCount != 1 {
+		t.Fatalf("counts = results %d actionable %d, want 1/1 (only alice)", payload.ResultCount, payload.ActionableCount)
+	}
+	if payload.Results[0].Number != 1 || payload.Results[0].Author != "alice" {
+		t.Fatalf("result = %#v, want alice's PR #1 only", payload.Results[0])
+	}
+}
+
+func TestGitHubPRBackfillRejectsBlankAuthorFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		authors []string
+	}{
+		{name: "empty", authors: []string{""}},
+		{name: "whitespace", authors: []string{"  "}},
+		{name: "empty alongside valid", authors: []string{"alice", ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := writeGitHubMonitorTestCity(t)
+			oldToken := resolveGitHubTokenForBackfill
+			oldClient := newGitHubPRBackfillClient
+			oldStore := openGitHubPRRepairStore
+			resolveGitHubTokenForBackfill = func(context.Context) (string, error) {
+				t.Fatal("token resolved despite blank --author")
+				return "", nil
+			}
+			newGitHubPRBackfillClient = func(string) githubPRLister {
+				t.Fatal("GitHub client created despite blank --author")
+				return nil
+			}
+			openGitHubPRRepairStore = func(string, string) (beads.Store, error) {
+				t.Fatal("repair store opened despite blank --author")
+				return nil, nil
+			}
+			t.Cleanup(func() {
+				resolveGitHubTokenForBackfill = oldToken
+				newGitHubPRBackfillClient = oldClient
+				openGitHubPRRepairStore = oldStore
+			})
+
+			args := []string{"--city", cityPath, "github", "pr", "backfill", "--create-repair-beads"}
+			for _, login := range tc.authors {
+				args = append(args, "--author", login)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := run(args, &stdout, &stderr); code == 0 {
+				t.Fatalf("run code = 0, want non-zero; stdout = %q", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "--author must not be empty") {
+				t.Fatalf("stderr = %q, want --author must not be empty", stderr.String())
+			}
+		})
+	}
+}
+
+func TestGitHubPRBackfillAuthorFlagCreatesNoRepairBeadForOtherAuthors(t *testing.T) {
+	cityPath := writeGitHubMonitorTestCity(t)
+	store := beads.NewMemStore()
+	oldToken := resolveGitHubTokenForBackfill
+	oldClient := newGitHubPRBackfillClient
+	oldStore := openGitHubPRRepairStore
+	resolveGitHubTokenForBackfill = func(context.Context) (string, error) { return "token", nil }
+	newGitHubPRBackfillClient = func(string) githubPRLister {
+		return fakeGitHubPRLister{prs: []githubmonitor.PullRequest{
+			{Number: 1, Author: "alice", BaseRefName: "main", HeadSHA: "a1", MergeStateStatus: "DIRTY"},
+			{Number: 2, Author: "bob", BaseRefName: "main", HeadSHA: "b2", MergeStateStatus: "DIRTY"},
+			{Number: 3, Author: "", BaseRefName: "main", HeadSHA: "c3", MergeStateStatus: "DIRTY"},
+		}}
+	}
+	openGitHubPRRepairStore = func(string, string) (beads.Store, error) { return store, nil }
+	stubGitHubRepairWorkflowAttach(t)
+	t.Cleanup(func() {
+		resolveGitHubTokenForBackfill = oldToken
+		newGitHubPRBackfillClient = oldClient
+		openGitHubPRRepairStore = oldStore
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--city", cityPath, "github", "pr", "backfill", "--author", "alice", "--create-repair-beads", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+
+	created, err := store.ListByMetadata(map[string]string{"source": "github-pr-monitor"}, 0)
+	if err != nil {
+		t.Fatalf("ListByMetadata: %v", err)
+	}
+	if len(created) != 1 {
+		t.Fatalf("repair beads = %d, want 1 (only alice's PR)", len(created))
+	}
+	if got := created[0].Metadata["github.pr"]; got != "1" {
+		t.Fatalf("github.pr = %q, want 1", got)
+	}
+}
+
 func writeGitHubMonitorTestCity(t *testing.T) string {
 	t.Helper()
 	cityPath := t.TempDir()

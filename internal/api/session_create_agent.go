@@ -2,9 +2,11 @@ package api
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -16,6 +18,28 @@ type agentCreateContext struct {
 	WorkDir      string
 }
 
+// agentTemplateLaunchCommand returns the command a deferred agent-session
+// create persists as its template baseline. It shares the controller's
+// template composition (config.BuildProviderTemplateLaunchCommand), so the
+// async-start drift check does not mistake it for config drift (#7453).
+// Explicit per-session options stay out of it; they live in
+// template_overrides. An option default the provider cannot render is omitted
+// and logged rather than failing the create, as the controller does.
+func (s *Server) agentTemplateLaunchCommand(agentCfg config.Agent, resolved *config.ResolvedProvider, transport string) (string, error) {
+	cfg := s.state.Config()
+	if cfg == nil {
+		return "", fmt.Errorf("no city config loaded")
+	}
+	launch, err := config.BuildProviderTemplateLaunchCommand(s.state.CityPath(), resolved, transport, config.ResolveInstallHooks(&agentCfg, &cfg.Workspace), cfg.Providers)
+	if err != nil {
+		return "", err
+	}
+	for _, pin := range resolved.UnhonoredOptionPins() {
+		log.Printf("api: session create: %s", config.FormatUnhonoredOptionPin(agentCfg.QualifiedName(), resolved.Name, pin))
+	}
+	return launch.Command, nil
+}
+
 func agentSessionCreateMetadata(metadata map[string]string, identity string) map[string]string {
 	if metadata == nil {
 		metadata = make(map[string]string)
@@ -23,6 +47,33 @@ func agentSessionCreateMetadata(metadata map[string]string, identity string) map
 	metadata["agent_name"] = identity
 	metadata["session_origin"] = "ephemeral"
 	return metadata
+}
+
+// demandOnlySingletonCreateRefusal returns the message refusing an agent
+// session create for a demand-only singleton agent, or "" when the create may
+// proceed. The reconciler treats such a bead as pool capacity and never starts
+// it on request, so accepting the create would return 202 for a session that
+// sits start-pending forever (#6858).
+func demandOnlySingletonCreateRefusal(cfg *config.City, agentCfg config.Agent) string {
+	if !session.IsDemandOnlySingletonTemplate(cfg, &agentCfg) {
+		return ""
+	}
+	return "cannot create a session: " + session.DemandOnlySingletonExplanation(agentCfg.QualifiedName())
+}
+
+// demandOnlySingletonWakeRefusal returns the message refusing an explicit wake
+// of info, or "" when the wake may proceed. The wake is recorded first (holds
+// and quarantine are cleared, as `gc session wake` does), but a demand-only
+// singleton's pool session that is not running will not start from it: the
+// reconciler starts it only from pool demand (#6858, SESSION-RECON-019). The
+// classification is shared with `gc session wake`
+// (session.DemandOnlySingletonWakeRefused).
+func demandOnlySingletonWakeRefusal(cfg *config.City, info session.Info) string {
+	agentCfg, ok := findAgentByQualifiedTemplate(cfg, info.Template)
+	if !ok || !session.DemandOnlySingletonWakeRefused(cfg, &agentCfg, info) {
+		return ""
+	}
+	return "wake recorded for session " + info.ID + ", but it will not start: " + session.DemandOnlySingletonExplanation(agentCfg.QualifiedName())
 }
 
 func (s *Server) resolveAgentCreateContext(template, alias string) (agentCreateContext, error) {

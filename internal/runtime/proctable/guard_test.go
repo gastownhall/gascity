@@ -28,8 +28,7 @@ func TestIsScanRoot_RefusesLiveProcUnderTest(t *testing.T) {
 // genuinely needs the scanner injects a fake procfs root, which disables the
 // live-/proc refusal and confines the scan to the fake tree.
 func TestSetScanRootForTesting_InjectsFakeRoot(t *testing.T) {
-	restore := SetScanRootForTesting(t.TempDir())
-	defer restore()
+	SetScanRootForTesting(t, t.TempDir())
 
 	got, err := ScanBySessionID("")
 	if err != nil {

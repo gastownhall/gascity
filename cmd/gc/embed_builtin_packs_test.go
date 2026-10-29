@@ -130,20 +130,15 @@ func bundledPackDirForTest(t testing.TB, packName string) string {
 
 func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 	doltSystemNeedle := "information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe"
-	maintenanceScratchNeedle := "benchdb|testdb_*|beads_pt*|beads_vr*|beads_test_bench_*|doctest_*|doctortest_*"
-	maintenanceTempNeedle := "beads_t[0-9a-f]"
 	for _, tt := range []struct {
 		pack     string
 		rel      string
 		needle   string
 		minCount int
 	}{
-		{"core", "assets/scripts/jsonl-export.sh", doltSystemNeedle, 1},
-		{"core", "assets/scripts/jsonl-export.sh", maintenanceScratchNeedle, 1},
-		{"core", "assets/scripts/jsonl-export.sh", maintenanceTempNeedle, 1},
-		{"core", "assets/scripts/reaper.sh", doltSystemNeedle, 1},
-		{"core", "assets/scripts/reaper.sh", maintenanceScratchNeedle, 1},
-		{"core", "assets/scripts/reaper.sh", maintenanceTempNeedle, 1},
+		// The core reaper and jsonl-export no longer enumerate server
+		// databases: they visit bound bead scopes through `gc bd`, so neither
+		// the probe database nor test scratch databases can reach them.
 		{"core", "assets/scripts/reaper.sh", "expires_at", 1},
 		{"dolt", "commands/list/run.sh", doltSystemNeedle, 1},
 		{"dolt", "commands/cleanup/run.sh", doltSystemNeedle, 1},
@@ -193,7 +188,7 @@ func TestBuiltinDoltDoctorAllowsAtMinimumVersionWhenProbeSucceeds(t *testing.T) 
 		name string
 		body string
 	}{
-		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 2.1.0\\n'\n"},
+		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 2.6.0\\n'\n"},
 		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
 		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
 	} {
@@ -209,7 +204,7 @@ func TestBuiltinDoltDoctorAllowsAtMinimumVersionWhenProbeSucceeds(t *testing.T) 
 	if err != nil {
 		t.Fatalf("check-dolt unexpectedly rejected Dolt probe at minimum: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "dolt available (dolt version 2.1.0)") {
+	if !strings.Contains(string(out), "dolt available (dolt version 2.6.0)") {
 		t.Fatalf("check-dolt output = %s, want successful version probe", out)
 	}
 }
@@ -229,7 +224,7 @@ func TestBuiltinDoltDoctorBoundsVersionProbe(t *testing.T) {
 			name: "gtimeout",
 			body: "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$TIMEOUT_CAPTURE\"\nif [ \"$1\" = \"--kill-after=2\" ]; then\n  shift\nfi\nshift\nexec \"$@\"\n",
 		},
-		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 2.1.10\\n'\n"},
+		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 2.6.10\\n'\n"},
 		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
 		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
 	} {

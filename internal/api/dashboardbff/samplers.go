@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 )
 
 // The three Health-view samplers (supervisor-status, dolt-noms trend, per-rig
@@ -88,9 +90,11 @@ type statusBodyParsed struct {
 	StoreHealth *struct {
 		SizeBytes *int64 `json:"size_bytes"`
 	} `json:"store_health"`
+	Suspended  bool `json:"suspended"`
 	RigDetails []struct {
-		Name string `json:"name"`
-		Path string `json:"path"`
+		Name      string `json:"name"`
+		Path      string `json:"path"`
+		Suspended bool   `json:"suspended"`
 	} `json:"rig_details"`
 }
 
@@ -270,6 +274,12 @@ func (cs *citySampler) refresh(ctx context.Context) {
 		}
 		rigs := make([]rigStoreHealth, 0, len(parsed.RigDetails))
 		for _, rd := range parsed.RigDetails {
+			if parsed.Suspended || rd.Suspended {
+				// Suspension is the operator asking for the rig to be left
+				// cold, and bd ping would restart its proxy and Dolt.
+				rigs = append(rigs, suspendedRigHealth(rd.Name, rd.Path))
+				continue
+			}
 			rigs = append(rigs, cs.mgr.probeRig(ctx, rd.Name, rd.Path))
 		}
 		newRigs = rigs
@@ -432,13 +442,22 @@ func (m *samplerManager) probeRig(ctx context.Context, rigName, rigPath string) 
 		}
 	}
 
+	mode, modeSafe := readDoltMode(beadsPath)
+	if modeSafe && mode == "proxied-server" && rigProxyIdleRetired(rigPath) {
+		// The proxy retired on its idle timeout. That is healthy, and bd ping
+		// would only restart it for another idle period.
+		return rigStoreHealth{
+			Rig: rigName, BeadsPath: beadsPath, Rollup: "ok", Reachable: true,
+			Problems: []rigStoreCheck{}, Note: rigIdleNote,
+		}
+	}
+
 	var doltEndpoint *string
 	// A proxied-server store owns transport selection inside Beads. In
 	// particular, proxied-local may leave a stale dolt-server.port artifact
 	// behind; never infer proxy health by dialing that port. Direct/server
 	// stores retain the legacy endpoint and TCP probe for parity.
 	port := 0
-	mode, modeSafe := readDoltMode(beadsPath)
 	if modeSafe && mode != "proxied-server" {
 		port = readDoltServerPort(beadsPath)
 	}
@@ -500,6 +519,36 @@ func (m *samplerManager) probeRig(ctx context.Context, rigName, rigPath string) 
 		// sanitized" contract.
 		Problems: problems, Note: sanitizeTerminalOutput(note),
 	}
+}
+
+// rigIdleNote and rigSuspendedNote explain a rig the sampler did not ping.
+const (
+	rigIdleNote      = "idle: the proxy retired after its idle timeout; not pinged, the next bd command restarts it"
+	rigSuspendedNote = "suspended: not pinged, a ping would restart the store"
+)
+
+// suspendedRigHealth is the report for a rig the sampler leaves cold.
+func suspendedRigHealth(rigName, rigPath string) rigStoreHealth {
+	return rigStoreHealth{
+		Rig: rigName, BeadsPath: filepath.Join(rigPath, ".beads"), Rollup: "ok", Reachable: true,
+		Problems: []rigStoreCheck{}, Note: rigSuspendedNote,
+	}
+}
+
+// rigProxyIdleRetired reports whether a proxied rig's proxy is not running and
+// its sidecar names a finite idle timeout, so the proxy retired itself. It
+// reads the proxy record, the process table and the sidecar; nothing is
+// dialed. A variable so tests can model a retired rig.
+var rigProxyIdleRetired = func(rigPath string) bool {
+	sidecar, err := proxyendpoint.ReadSidecar(filepath.Join(rigPath, ".beads"))
+	if err != nil || !sidecar.Present || sidecar.IdlePolicy().Kind != proxyendpoint.IdleFinite {
+		return false
+	}
+	root, err := proxyendpoint.ProviderRoot(rigPath)
+	if err != nil {
+		return false
+	}
+	return !proxyendpoint.Inspect(root, proxyendpoint.DefaultProcessTable()).Verdict.Live()
 }
 
 func pingExecutionFailureCheck(err error) rigStoreCheck {
@@ -664,13 +713,22 @@ func readDoltMode(beadsPath string) (string, bool) {
 	// for an unmarked legacy direct store.
 	configRaw, configErr := os.ReadFile(filepath.Join(beadsPath, "config.yaml"))
 	if configErr == nil {
+		// gc writes the flat `dolt.mode:` key; bd >= 1.3.1 writes it nested
+		// (`dolt:` / `  mode:`). bd reads either, the flat one first.
 		var config struct {
 			DoltMode string `yaml:"dolt.mode"`
+			Dolt     struct {
+				Mode string `yaml:"mode"`
+			} `yaml:"dolt"`
 		}
 		if err := yaml.Unmarshal(configRaw, &config); err != nil {
 			return "", false
 		}
-		if mode := strings.ToLower(strings.TrimSpace(config.DoltMode)); mode != "" {
+		mode := strings.ToLower(strings.TrimSpace(config.DoltMode))
+		if mode == "" {
+			mode = strings.ToLower(strings.TrimSpace(config.Dolt.Mode))
+		}
+		if mode != "" {
 			return recognizedDoltMode(mode)
 		}
 	} else if !os.IsNotExist(configErr) {

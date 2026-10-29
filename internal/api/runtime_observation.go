@@ -59,12 +59,22 @@ func (h providerSessionResponseHandle) State(context.Context) (worker.State, err
 		SessionName: h.sessionName,
 		Provider:    h.providerName,
 	}
-	if h.provider == nil || !h.provider.IsRunning(h.sessionName) {
+	if !sessionRuntimeRunning(h.provider, h.sessionName) {
 		state.Phase = worker.PhaseStopped
 		return state, nil
 	}
 	state.Phase = worker.PhaseReady
 	return state, nil
+}
+
+// sessionRuntimeRunning is the runtime probe behind a session response's
+// running field: whether the provider holds a live runtime for sessionName.
+// Every session response reads running through it, so GET /session/{id} and
+// GET /sessions cannot disagree by construction; on tmux it is served from the
+// provider's shared fleet snapshot, not a per-session fork.
+func sessionRuntimeRunning(sp runtime.Provider, sessionName string) bool {
+	sessionName = strings.TrimSpace(sessionName)
+	return sp != nil && sessionName != "" && sp.IsRunning(sessionName)
 }
 
 func (h providerSessionResponseHandle) Peek(_ context.Context, lines int) (string, error) {

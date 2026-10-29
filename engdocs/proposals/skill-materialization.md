@@ -292,10 +292,16 @@ Each materialized symlink produces one entry in the agent's
 cfg.FingerprintExtra["skills:"+skillName] = runtime.HashPathContent(source)
 ```
 
-`FingerprintExtra` participates in `CoreFingerprint`
-(`internal/runtime/fingerprint.go:132-136`) with a `"fp"` prefix sentinel,
-ensuring the skill content hash contributes to the fingerprint without
-colliding with `Env` keys.
+The `FingerprintExtra` change policy
+(`runtime.FingerprintExtraChangePolicy`) supersedes goal 3's drain.
+`skills:*` keys are NextStart: the core and provision fingerprints hash
+only the Restart keys (under a `"fp"` prefix sentinel, so they cannot
+collide with `Env` keys). A skill edit, or a skill added or removed while
+another remains, reaches the agent at its next start's materialization
+without draining it. The one skill change that still drains is the
+stage-2 boundary. The materialize-skills `PreStart` entry, a Restart
+input, exists only while the agent has a skill, so a non-scope-root agent
+drains once when its first skill is added or its last removed.
 
 **Why not `CopyEntry`.** Every runtime's staging loop iterates
 `cfg.CopyFiles` and unconditionally stages each entry: `subprocess` and
@@ -309,8 +315,8 @@ would cause each runtime to stage/copy the skill content into the
 workdir by its own mechanism, shadowing or duplicating the symlinks the
 materializer placed. There is no "probed means don't stage" flag;
 `Probed` only controls whether the fingerprint entry hashes by content
-vs. path. `FingerprintExtra` is the single right carrier for "hashes
-contribute to the fingerprint but delivery happens out-of-band."
+vs. path. `FingerprintExtra` is the single right carrier for "a hash
+the change policy classifies, delivered out-of-band."
 
 **When `FingerprintExtra["skills:*"]` is populated.** The rule:
 populate skill fingerprint entries for an agent if and only if skill
@@ -330,10 +336,12 @@ This rule ensures no spurious drain-restart cycles on remote-runtime
 agents that can't consume the skills anyway. A unit test asserts the
 policy.
 
-**Diagnostic reporting.** `CoreFingerprintBreakdown` already exposes
-`FingerprintExtra` under the `FPExtra` key. Extending its drift log to
-surface per-skill key changes (`skills:<name>`) is a small follow-up,
-tracked here but not required for the hotfix.
+**Diagnostic reporting.** `CoreFingerprintBreakdown` hashes every
+`FingerprintExtra` key under the `FPExtra` key, so stored breakdowns stay
+comparable across versions. It is read only once the core fingerprint has
+already found a drift, so a skill change alone never reaches it. When it
+does report `FPExtra`, the drift detail line lists only the Restart keys,
+the ones that can have caused the drift.
 
 ### Cleanup: ownership-by-target-prefix
 
@@ -699,6 +707,3 @@ That is not part of this release.
    in `engdocs/design/packv2/doc-pack-v2.md:59`.
 7. **Per-pool PreStart caching.** Optional perf improvement if pool
    scale-up invocation cost becomes noticeable.
-8. **`CoreFingerprintBreakdown` per-skill drift log.** Small ergonomic
-   follow-up — surface `skills:<name>` keys individually in drift
-   diagnostics rather than collapsed under `FPExtra`.

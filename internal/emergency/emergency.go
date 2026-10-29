@@ -184,7 +184,9 @@ func RecordAcked(recorder events.Recorder, rec Record) error {
 // RecordSignaledToCityLog mirrors rec to the city-local events.jsonl file.
 func RecordSignaledToCityLog(cityPath string, rec Record, stderr io.Writer) error {
 	eventPath := citylayout.RuntimePath(cityPath, "events.jsonl")
-	provider, err := events.NewFileRecorder(eventPath, stderr)
+	// A secondary writer: it never rotates (the default) and skips the startup
+	// sweep, which belongs to the city's long-lived rotation owner.
+	provider, err := events.NewFileRecorder(eventPath, stderr, events.WithoutStartupSweep())
 	if err != nil {
 		return fmt.Errorf("opening events.jsonl: %w", err)
 	}

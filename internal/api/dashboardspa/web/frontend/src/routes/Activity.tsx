@@ -1,6 +1,6 @@
 import type { DeployList, DeployRecord, GitCommit, GitCommitList } from 'gas-city-dashboard-shared';
 import type { ReactNode } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router';
 import { api, formatApiError } from '../api/client';
 import { getActiveCity } from '../api/cityBase';
 import { useAttentionModel } from '../attention/context';

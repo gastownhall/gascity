@@ -9,14 +9,24 @@ const ManagedDoltScopeWatchdogVerb = "__gc-managed-dolt-scope-watchdog"
 // beads dependency tree, and pinned equal by a test).
 const BDProxyChildVerb = "db-proxy-child"
 
+// NudgePollerVerb and NudgePollerSubverb are argv[1:3] of gc's detached nudge
+// poller (nudgepoller.CommandArgs; duplicated here and pinned equal by a test).
+const (
+	NudgePollerVerb    = "nudge"
+	NudgePollerSubverb = "poll"
+)
+
 // IsCityInfrastructureArgv reports whether argv is a long-lived city
 // infrastructure process that can inherit an agent session's environment but
-// is never that session's runtime: gc's managed Dolt scope watchdog or bd's
-// db-proxy-child. Both are spawned Setpgid/Setsid, reparent to init once their
-// spawner exits, and supervise a Dolt server the whole city depends on, so
-// terminating one as a session orphan takes the city's store down with it.
+// is never that session's runtime: gc's managed Dolt scope watchdog, bd's
+// db-proxy-child, or gc's detached nudge poller (`gc nudge poll`). The first
+// two are spawned Setpgid/Setsid, reparent to init once their spawner exits,
+// and supervise a Dolt server the whole city depends on, so terminating one as
+// a session orphan takes the city's store down with it. The poller is spawned
+// Setpgid from a session's shell, outlives its spawner by design, and exits on
+// its own once its target session is gone.
 //
-// argv[0] is deliberately ignored: both are re-execs of whatever the operator's
+// argv[0] is deliberately ignored: all are re-execs of whatever the operator's
 // binary is called on disk.
 func IsCityInfrastructureArgv(argv []string) bool {
 	if len(argv) < 2 {
@@ -25,6 +35,8 @@ func IsCityInfrastructureArgv(argv []string) bool {
 	switch argv[1] {
 	case ManagedDoltScopeWatchdogVerb, BDProxyChildVerb:
 		return true
+	case NudgePollerVerb:
+		return len(argv) > 2 && argv[2] == NudgePollerSubverb
 	}
 	return false
 }

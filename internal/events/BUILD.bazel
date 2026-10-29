@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "events",
     srcs = [
+        "authorship.go",
         "backend_payloads.go",
         "control_payloads.go",
         "events.go",
@@ -10,6 +11,7 @@ go_library(
         "fake.go",
         "inode_unix.go",
         "inode_windows.go",
+        "mirror.go",
         "multiplexer.go",
         "order_payloads.go",
         "payload.go",
@@ -17,26 +19,45 @@ go_library(
         "query.go",
         "reader.go",
         "reader_context.go",
+        "reader_each.go",
+        "reader_history_tail.go",
+        "reader_since.go",
         "recorder.go",
+        "rename_linux.go",
+        "rename_other.go",
         "rollout_payloads.go",
         "rotation.go",
         "rotation_archive.go",
         "rotation_payload.go",
+        "stream_cursor.go",
         "supervisor_payloads.go",
         "watch_backfill.go",
+        "work_payloads.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/events",
     visibility = ["//:__subpackages__"],
+    deps = select({
+        "@rules_go//go/platform:android": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:linux": [
+            "@org_golang_x_sys//unix",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 go_test(
     name = "events_test",
     srcs = [
+        "authorship_test.go",
         "backend_payloads_test.go",
         "conformance_test.go",
         "control_payloads_test.go",
         "events_test.go",
         "latest_archived_match_test.go",
+        "mirror_test.go",
+        "multiplexer_membership_test.go",
         "multiplexer_test.go",
         "order_payloads_test.go",
         "payload_test.go",
@@ -45,7 +66,13 @@ go_test(
         "reader_archive_filter_test.go",
         "reader_beforeseq_test.go",
         "reader_context_test.go",
+        "reader_history_tail_test.go",
+        "reader_since_bounded_test.go",
+        "reader_types_test.go",
         "recorder_batch_test.go",
+        "recorder_handle_test.go",
+        "recorder_readonly_test.go",
+        "recorder_rotation_race_test.go",
         "recorder_shortwrite_unix_test.go",
         "rotation_archive_test.go",
         "rotation_auto_test.go",
@@ -54,14 +81,18 @@ go_test(
         "rotation_superseded_test.go",
         "rotation_test.go",
         "rotation_watcher_test.go",
+        "stream_cursor_test.go",
         "testenv_import_test.go",
         "type_naming_test.go",
         "watch_backfill_test.go",
     ],
+    # The authorship test parses events.go.
+    data = ["events.go"],
     embed = [":events"],
     deps = [
         "//internal/events/eventstest",
         "//internal/testenv",
+        "//internal/testutil",
     ],
 )
 
@@ -73,6 +104,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

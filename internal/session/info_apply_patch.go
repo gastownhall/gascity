@@ -32,9 +32,8 @@ func (info Info) ApplyPatch(patch MetadataPatch) Info {
 		// A key infoFromPersistedBead projects folds through its shared codec
 		// setter — the SAME closure the projection runs — so the fold is a
 		// re-projection of that one key by construction. Keys the projection
-		// does not read (e.g. env.*, wake_requested_at) miss the index and carry
-		// no Info field, keeping ApplyPatch byte-identical to a full
-		// re-projection.
+		// does not read (e.g. env.*) miss the index and carry no Info field,
+		// keeping ApplyPatch byte-identical to a full re-projection.
 		if spec, ok := infoKeyIndex[key]; ok {
 			spec.set(&info, v)
 		}

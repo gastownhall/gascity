@@ -40,7 +40,7 @@ const (
 // have since grown an execgrace layer this snapshot predates. Before either
 // delegates here, this runner must regain: execgrace.NewMonitor budgets under
 // [session] setup_max_timeout (this version has a single fixed deadline),
-// execgrace.Apply cooperative process-group interrupt so shell rollback traps
+// execgrace.Apply cooperative process-group SIGTERM so shell rollback traps
 // run before SIGKILL (see adapter.go's note on stranded staged state), and
 // context.Cause in the failure wrap so the reported error names which budget
 // fired. Provider-specific behavior is also not covered here: tmux's

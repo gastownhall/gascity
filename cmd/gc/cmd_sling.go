@@ -7,7 +7,6 @@ import (
 	"io"
 	"maps"
 	"math/rand"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,11 +22,14 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
+	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
@@ -123,7 +125,7 @@ Examples:
 			if owned && noConvoy {
 				return argError("gc sling: --owned requires a convoy (cannot use with --no-convoy)")
 			}
-			if merge != "" && merge != "direct" && merge != "mr" && merge != "local" {
+			if merge != "" && !beadmeta.IsKnownMergeStrategy(merge) {
 				return argError("gc sling: --merge must be direct, mr, or local")
 			}
 			if (strings.TrimSpace(scopeKind) == "") != (strings.TrimSpace(scopeRef) == "") {
@@ -709,7 +711,12 @@ func cliDirectSessionResolver(store beads.Store, cityName, cityPath string, cfg 
 	if !ok {
 		return "", false, nil
 	}
-	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, spec.Identity)
+	// A named session bead is session class. The caller's store is whatever
+	// scope the sling or drain runs in (a rig work store, for a rig scope), so
+	// on a split city resolve and materialize through the sessions binding
+	// instead: through the scope store the canonical bead is invisible and a
+	// duplicate is minted where nothing reads it (write-audit B6).
+	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, cliRelocatedSessionStore(store, cfg, cityPath), spec.Identity)
 	if err != nil {
 		return "", false, err
 	}
@@ -760,14 +767,20 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 			return err
 		}
 	}
-	if r.deps.Store == nil {
+	// The core names the store that holds the bead when it is not the work
+	// store (a --formula wisp root lives in the graph binding, #6054).
+	store := req.Store
+	if store == nil {
+		store = r.deps.Store
+	}
+	if store == nil {
 		return fmt.Errorf("built-in sling routing requires a store")
 	}
 	routedTo := req.Target
 	if r.deps.Cfg != nil {
 		routedTo = agentutil.NormalizePoolRouteTarget(r.deps.Cfg, req.Target)
 	}
-	if err := r.deps.Store.SetMetadata(req.BeadID, beadmeta.RoutedToMetadataKey, routedTo); err != nil {
+	if err := store.SetMetadata(req.BeadID, beadmeta.RoutedToMetadataKey, routedTo); err != nil {
 		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
 	}
 	return nil
@@ -953,7 +966,7 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, stderr
 		return dryRunSingle(opts, deps, querier, stdout, stderr)
 	}
 	if result.NudgeAgent != nil {
-		doSlingNudge(result.NudgeAgent, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, stdout, stderr)
+		doSlingNudge(result.NudgeAgent, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, result.BeadID, stdout, stderr)
 	}
 	return 0
 }
@@ -970,30 +983,8 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 		fmt.Fprintln(stderr, newErr) //nolint:errcheck
 		return 1
 	}
-	_ = context.Background() // ctx available for future intent API use
-
-	// For formula/on-formula batch, delegate to the old DoSlingBatch
-	// which handles per-child formula attachment internally.
-	// ExpandConvoy is for plain bead routing of convoy children.
-	var result sling.SlingResult
-	var err error
-	if opts.IsFormula || opts.OnFormula != "" || (!opts.NoFormula && opts.Target.EffectiveDefaultSlingFormula() != "") {
-		// Formula paths need per-child wisp attachment -- use legacy API.
-		result, err = sling.DoSlingBatch(opts, deps, querier)
-	} else {
-		result, err = sl.ExpandConvoy(context.Background(), opts.BeadOrFormula, opts.Target, sling.RouteOpts{
-			Merge:      opts.Merge,
-			NoConvoy:   opts.NoConvoy,
-			Owned:      opts.Owned,
-			Reassign:   opts.Reassign,
-			Nudge:      opts.Nudge,
-			Force:      opts.Force,
-			SkipPoke:   opts.SkipPoke,
-			DryRun:     opts.DryRun,
-			InlineText: opts.InlineText,
-			NoFormula:  opts.NoFormula,
-		}, querier)
-	}
+	// The same entry point POST /sling uses, so the two cannot drift.
+	result, err := sl.Dispatch(context.Background(), opts, querier)
 	// Print warnings before error check so they're visible on failure.
 	printSlingWarnings(result, stderr)
 	// Always print results when we have children (partial failures
@@ -1026,7 +1017,7 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 		// so printing it verbatim duplicates every child line. Summarize
 		// instead when we have per-child detail.
 		if len(result.Children) > 0 {
-			fmt.Fprintf(stderr, "%d/%d children failed\n", result.Failed, result.Failed+result.Routed+result.IdempotentCt) //nolint:errcheck
+			fmt.Fprintf(stderr, "%d/%d children failed\n", result.Failed, result.Failed+result.Routed+result.IdempotentCt+result.NotOpenCt) //nolint:errcheck
 		} else {
 			fmt.Fprintln(stderr, err) //nolint:errcheck
 		}
@@ -1059,7 +1050,7 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 		return dryRunSingle(opts, deps, querier, humanStdout, stderr)
 	}
 	if result.NudgeAgent != nil {
-		doSlingNudge(result.NudgeAgent, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, humanStdout, stderr)
+		doSlingNudge(result.NudgeAgent, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, result.BeadID, humanStdout, stderr)
 	}
 	// Success only (never dry-run or error): surface a dashboard deep link
 	// when one resolves. Resolution failure degrades silently to no link.
@@ -1198,16 +1189,23 @@ func printSourceWorkflowConflict(stderr io.Writer, conflictErr *sourceworkflow.C
 	if conflictErr == nil {
 		return
 	}
+	printSourceWorkflowConflictLines(stderr, conflictErr.SourceBeadID, conflictErr.WorkflowIDs,
+		sourceWorkflowCleanupCommand(conflictErr.SourceBeadID, storeRef))
+}
+
+// printSourceWorkflowConflictLines prints what gc sling shows for a source
+// workflow conflict: the blocking workflows, then the cleanup command.
+func printSourceWorkflowConflictLines(stderr io.Writer, sourceBeadID string, workflowIDs []string, cleanup string) {
 	_, _ = fmt.Fprintf(
 		stderr,
 		"gc sling: source bead %s already has live workflow(s): %s\n",
-		conflictErr.SourceBeadID,
-		strings.Join(conflictErr.WorkflowIDs, ","),
+		sourceBeadID,
+		strings.Join(workflowIDs, ","),
 	)
 	_, _ = fmt.Fprintf(
 		stderr,
 		"gc sling: use --force to override, or %s to clean up\n",
-		sourceWorkflowCleanupCommand(conflictErr.SourceBeadID, storeRef),
+		cleanup,
 	)
 }
 
@@ -1542,8 +1540,11 @@ func checkBeadState(q BeadQuerier, beadID string, a config.Agent) beadCheckResul
 // For multi-session configs, nudges the first running instance. If the target is not
 // running, pokes the controller to trigger an immediate reconciler tick
 // so WakeWork can wake the session without waiting for the next patrol.
+// When [ops] authoritative lists message, the target's session is looked up
+// in the city's store first (slingNudgeCityStore), where session rows live,
+// and the notice routes by the CLI's lane rules (deliverSlingNudge).
 func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
-	sp runtime.Provider, store beads.Store, stdout, stderr io.Writer,
+	sp runtime.Provider, store beads.Store, beadID string, stdout, stderr io.Writer,
 ) {
 	st := cfg.Workspace.SessionTemplate
 
@@ -1551,6 +1552,12 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 		fmt.Fprintf(stderr, "warning: cannot nudge %q: agent is suspended — bead routed but not nudged\n", a.QualifiedName()) //nolint:errcheck // best-effort
 		return
 	}
+	city, err := slingNudgeCityStore(cityPath, cfg, store)
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: bead routed but nudge failed: %v\n", cliLaneRefusal(fmt.Errorf("opening the city store: %w", err))) //nolint:errcheck // best-effort
+		return
+	}
+	defer city.close()
 
 	if a.SupportsInstanceExpansion() {
 		sp0 := scaleParamsFor(a)
@@ -1569,37 +1576,115 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 				}
 				member := resolvePoolNudgeMember(cfg, a, ref.qualifiedInstance)
 				target := buildSlingNudgeTarget(member, cityName, cityPath, cfg, sessStore, ref.sessionName)
-				deliverSlingNudge(target, sp, rawStore, cityPath, stdout, stderr)
+				deliverSlingNudge(target, sp, rawStore, city.store, cityPath, beadID, stdout, stderr)
 				return true
 			}
 			return false
 		}
+		if city.opened != nil && tryNudgeStore(city.opened) {
+			return
+		}
 		if tryNudgeStore(store) {
 			return
 		}
-		if cityPath != "" {
-			if _, statErr := os.Stat(filepath.Join(cityPath, "city.toml")); statErr == nil {
-				if cityStore, err := slingOpenCityStore(cityPath); err == nil && cityStore != nil && tryNudgeStore(cityStore) {
+		if city.store == nil {
+			if cityStore, err := openSlingCityStore(cityPath); err == nil && cityStore != nil {
+				defer closeBeadStoreHandle(cityStore) //nolint:errcheck // best-effort
+				if tryNudgeStore(cityStore) {
 					return
 				}
 			}
 		}
 		// No running config session — poke controller for immediate wake.
+		// Key-less (allocator): the wake is template demand, not a session.
 		if err := pokeController(cityPath); err != nil {
-			fmt.Fprintf(stderr, "No running sessions for %q; poke failed: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort
+			if !noteWorkerSitePoke(stderr, "gc sling", err) {
+				fmt.Fprintf(stderr, "No running sessions for %q; poke failed: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort
+			}
 		} else {
 			fmt.Fprintf(stdout, "No running sessions for %q — poked controller for wake\n", a.QualifiedName()) //nolint:errcheck // best-effort
 		}
 		return
 	}
 
-	// Fixed agent: nudge directly. Session lookups route to the session
-	// coordination-class store; deliverSlingNudge keeps the nudge enqueue on the
-	// plain store. Identity today.
+	// Fixed agent: nudge directly.
+	slingFixedNudge(a, cityName, cityPath, cfg, sp, store, city, beadID, stdout, stderr)
+}
+
+// slingCityStore is the city's store a sling nudge routes its lane notice
+// over (routeCLILaneNotice): store is nil when [ops] authoritative does not
+// list message, or on a worker site; opened is the store this sling opened
+// for it, nil when cityPath names no city on disk, whose bead store is then
+// the city's.
+type slingCityStore struct {
+	store  beads.Store
+	opened beads.Store
+}
+
+// close closes the store this sling opened, if any.
+func (c slingCityStore) close() {
+	if c.opened != nil {
+		closeBeadStoreHandle(c.opened) //nolint:errcheck // best-effort
+	}
+}
+
+// slingNudgeCityStore opens the city's store for a sling nudge under lane
+// authority (slingCityStore). A city store that does not open is the error.
+func slingNudgeCityStore(cityPath string, cfg *config.City, store beads.Store) (slingCityStore, error) {
+	if !cliLaneExecutesMessage(cfg) || onWorkerSite(cityPath) {
+		return slingCityStore{}, nil
+	}
+	opened, err := openSlingCityStore(cityPath)
+	switch {
+	case err != nil:
+		return slingCityStore{}, err
+	case opened == nil:
+		return slingCityStore{store: store}, nil
+	}
+	return slingCityStore{store: opened, opened: opened}, nil
+}
+
+// slingFixedNudge nudges fixed agent a (deliverSlingNudge). Under lane
+// authority its target resolves in the city's store first, where session
+// rows live, not in a rig bead's store (#2579); a target the city store
+// holds no row for resolves in store, the bead's, as it does with the lane
+// off. deliverSlingNudge keeps the nudge enqueue on the store the target
+// resolved in.
+func slingFixedNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
+	sp runtime.Provider, store beads.Store, city slingCityStore, beadID string, stdout, stderr io.Writer,
+) {
+	if city.opened != nil {
+		if target := slingFixedNudgeTarget(a, cityName, cityPath, cfg, city.opened); target.sessionID != "" {
+			deliverSlingNudge(target, sp, city.opened, city.store, cityPath, beadID, stdout, stderr)
+			return
+		}
+	}
+	deliverSlingNudge(slingFixedNudgeTarget(a, cityName, cityPath, cfg, store), sp, store, city.store, cityPath, beadID, stdout, stderr)
+}
+
+// slingFixedNudgeTarget is fixed agent a's nudge target resolved in store.
+// Session lookups route to the session coordination-class store (identity
+// today).
+func slingFixedNudgeTarget(a *config.Agent, cityName, cityPath string, cfg *config.City, store beads.Store) nudgeTarget {
 	sessStore := cliSessionStore(store, cfg, cityPath)
-	sn := lookupSessionNameOrLegacy(sessStore, cityName, a.QualifiedName(), st)
-	target := buildSlingNudgeTarget(*a, cityName, cityPath, cfg, sessStore, sn)
-	deliverSlingNudge(target, sp, store, cityPath, stdout, stderr)
+	sn := lookupSessionNameOrLegacy(sessStore, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
+	return buildSlingNudgeTarget(*a, cityName, cityPath, cfg, sessStore, sn)
+}
+
+// openSlingCityStore opens the store of the city at cityPath, where session
+// rows live. It returns no store and no error when cityPath names no city
+// (no city.toml).
+func openSlingCityStore(cityPath string) (beads.Store, error) {
+	if cityPath == "" {
+		return nil, nil
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return slingOpenCityStore(cityPath)
 }
 
 // resolvePoolNudgeMember resolves the config identity to nudge for a live pool
@@ -1624,8 +1709,12 @@ func resolvePoolNudgeMember(cfg *config.City, pool *config.Agent, qualifiedInsta
 // pokeController sends a "poke" command to the controller socket to
 // trigger an immediate reconciler tick. If the per-city controller
 // socket doesn't exist (supervisor model), falls back to sending
-// "reload" to the supervisor socket.
+// "reload" to the supervisor socket. On a worker site it returns
+// errWorkerSiteNoController without trying either.
 func pokeController(cityPath string) error {
+	if onWorkerSite(cityPath) {
+		return errWorkerSiteNoController
+	}
 	_, err := sendControllerCommand(cityPath, "poke")
 	if err == nil {
 		return nil
@@ -1636,8 +1725,12 @@ func pokeController(cityPath string) error {
 
 // reloadControllerConfig asks the controller to reload config immediately.
 // If the per-city controller socket doesn't exist (supervisor model), falls
-// back to sending "reload" to the supervisor socket.
+// back to sending "reload" to the supervisor socket. On a worker site it
+// returns errWorkerSiteNoController without trying either.
 func reloadControllerConfig(cityPath string) error {
+	if onWorkerSite(cityPath) {
+		return errWorkerSiteNoController
+	}
 	_, err := sendControllerCommand(cityPath, "reload")
 	if err == nil {
 		return nil
@@ -1652,9 +1745,12 @@ func reloadControllerConfig(cityPath string) error {
 // commands like `gc sling` after the workflow has already been created. It
 // must not wait for the full supervisor reconcile to finish, or the caller can
 // block for minutes even though the wake was already queued.
+//
+// It dials through dialGCSocket, so on a worker site it returns
+// errWorkerSiteNoController (wrapped) without dialing.
 func pokeSupervisor() error {
 	sockPath := supervisorSocketPath()
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	conn, err := dialGCSocket(sockPath, 2*time.Second)
 	if err != nil {
 		return fmt.Errorf("connecting to supervisor: %w", err)
 	}
@@ -1678,8 +1774,51 @@ func buildSlingNudgeTarget(agent config.Agent, cityName, cityPath string, cfg *c
 	})
 }
 
-func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Store, cityPath string, stdout, stderr io.Writer) {
-	const msg = "Work slung. Check your hook."
+// slingNoticePrincipal is the principal of a sling notice on the
+// conversation lane; its label is sling.
+const slingNoticePrincipal = "gc:sling"
+
+// slingNudgeText is the notice gc sling --nudge sends.
+const slingNudgeText = "Work slung. Check your hook."
+
+// deliverSlingNudge nudges a running target, or queues the nudge for an asleep
+// one and pokes the controller to wake it. On a worker site it queues nothing,
+// since the box's nudge queue is a local file the remote controller never
+// reads, and records the session's wake instead (requestWorkerSiteNudgeWake);
+// its notice says whether it recorded one. When [ops] authoritative lists
+// message, the nudge routes by the CLI's lane rules over city, the city's
+// store (routeCLILaneNotice): a session a lane serves gets one lane notice
+// from gc:sling per sling, under a minted key with the bead as its causation,
+// which the controller's lane host delivers, waking the session if needed. A
+// notice the lane refuses is warned of, and neither delivered nor queued; a
+// session with no row, or one no lane serves, takes the legacy path below,
+// over store.
+func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store, city beads.Store, cityPath, beadID string, stdout, stderr io.Writer) {
+	const msg = slingNudgeText
+	prod, err := routeCLILaneNotice(cliLaneNoticeRoute{
+		target: target, city: city, sp: sp,
+		req: cliLaneNotice(slingNoticePrincipal, beadID, msg, opjournal.WakeIfNeeded),
+	})
+	switch {
+	case !prod.handled:
+	case err != nil:
+		fmt.Fprintf(stderr, "warning: bead routed but nudge failed: %v\n", err) //nolint:errcheck // best-effort
+		return
+	default:
+		fmt.Fprintf(stdout, "Queued nudge for %s in the conversation lane\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort
+		return
+	}
+	if onWorkerSite(target.cityPath) {
+		outcome, err := requestWorkerSiteNudgeWake(target, store)
+		fmt.Fprintf(stderr, "gc sling: %s\n", workerSiteNudgeNotice(outcome)) //nolint:errcheck // best-effort
+		switch {
+		case err != nil:
+			fmt.Fprintf(stderr, "warning: bead routed but wake failed: %v\n", err) //nolint:errcheck // best-effort
+		case outcome == session.WakeRecorded:
+			fmt.Fprintf(stdout, "Session %q is asleep — recorded a wake for the remote controller\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort
+		}
+		return
+	}
 	// Session observation/handle and the last-nudge-delivered stamp route to the
 	// session coordination-class store (derived from the target's cfg+cityPath); the
 	// queued-nudge enqueue below stays on the passed store (nudges class). Identity
@@ -1692,7 +1831,7 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 	if running {
 		handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
 		if err == nil {
-			result, nudgeErr := handle.Nudge(context.Background(), worker.NudgeRequest{
+			result, nudgeErr := handle.Nudge(context.Background(), sessionActor(session.ActorAgent, target.cityPath), worker.NudgeRequest{
 				Text:     msg,
 				Delivery: worker.NudgeDeliveryWaitIdle,
 				Source:   "sling",
@@ -1720,7 +1859,9 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 		maybeStartNudgePoller(target)
 	} else {
 		maybeStartNudgePoller(target)
-		if err := pokeController(cityPath); err != nil {
+		// The asleep target session is known by ID, runtime name, or both;
+		// with neither it degrades to the allocator key.
+		if err := enqueueController(cityPath, reconcilekey.SessionRef(target.sessionID, target.sessionName)); err != nil {
 			fmt.Fprintf(stderr, "Session %q is asleep; poke failed: %v\n", target.agent.QualifiedName(), err) //nolint:errcheck // best-effort
 		} else {
 			fmt.Fprintf(stdout, "Session %q is asleep — poked controller for wake\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort
@@ -1844,7 +1985,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 					return rc
 				}
 				preCheckConclusive = conclusive
-				blockingLabel, blockingID = sling.FindBlockingMolecule(querier, opts.BeadOrFormula, deps.Store)
+				blockingLabel, blockingID = deps.FindBlockingMolecule(querier, opts.BeadOrFormula)
 			}
 			w("Default formula:")
 			w("  Formula: " + defaultFormula)
@@ -2078,7 +2219,7 @@ func printBeadInfo(w func(string), q BeadQuerier, beadID string) {
 // children" pass even when a live convoy-first workflow from the same
 // formula would have blocked the real launch.
 func dryRunReportBlockingMolecule(opts slingOpts, deps slingDeps, querier BeadQuerier, formulaName string, stderr io.Writer) (int, bool) {
-	if label, id := sling.FindBlockingMolecule(querier, opts.BeadOrFormula, deps.Store); label != "" {
+	if label, id := deps.FindBlockingMolecule(querier, opts.BeadOrFormula); label != "" {
 		fmt.Fprintf(stderr, "gc sling: bead %s already has attached %s %s\n", opts.BeadOrFormula, label, id) //nolint:errcheck // best-effort stderr
 		return 1, true
 	}
@@ -2225,10 +2366,54 @@ func resolveInlineBeadAction(cfg *config.City, beadOrFormula string, dryRun bool
 			return false, false, nil
 		}
 	}
+	// A reserved coordination-class prefix ("gcg-", "gcm-", "gcs-", "gco-",
+	// "gcn-", "gcnq-" for the nudge queue) is minted only by a relocated class binding — workflow steps,
+	// mail, sessions, orders, nudges — and is never prose someone meant as a
+	// bead title. Falling through to store.Create() here would mint a task bead
+	// whose TITLE is the id string, silently fabricating a duplicate of whatever
+	// the caller meant to route with no error and no warning (westlands
+	// cr-ahjgr: five `gc sling <target> gcg--…` calls, five duplicate beads).
+	// Refuse loudly instead, the way multi-line inline text does above.
+	//
+	// This sits AFTER the store probe deliberately. A reserved prefix is only an
+	// ADVISORY on work stores (config.ReservedPrefixWarnings warns;
+	// config.ValidateRigs does not reject), so a work store can legitimately
+	// hold an id inside the class namespace — and when the probe above found it
+	// there, it is routed, exactly as before. Only an id that no reachable store
+	// holds reaches this refusal.
+	if prefix, ok := reservedClassPrefixForID(beadOrFormula); ok && isBeadIDCandidate(beadOrFormula) {
+		return false, false, fmt.Errorf("%q is in the reserved %q coordination-class namespace, which only a relocated class binding mints (workflow steps, mail, sessions, orders, nudges) — refusing to create a bead titled %q; gc sling routes work-ledger beads, and a coordination bead is driven by its own machinery rather than slung by hand", beadOrFormula, prefix+"-", beadOrFormula)
+	}
 	if dryRun {
 		return false, true, nil
 	}
 	return true, false, nil
+}
+
+// reservedClassPrefixForID returns the reserved coordination-class id prefix
+// whose namespace holds id (e.g. "gcg" for "gcg--9223372036854775645"), and
+// whether any does. It checks the full namespace union — mint and auxiliary
+// prefixes (e.g. "gcnq") — not just the per-class mint prefix.
+//
+// Membership is storeref.IDInNamespace — the same predicate
+// storeref.ClassCandidates gates the by-id class route on — so this answers for
+// exactly the id set a class binding could own. Re-deriving the prefix with the
+// sling.BeadPrefix heuristic instead would answer the question a second time and
+// disagree: that heuristic only recovers "gcg" from a numeric or hash-shaped
+// suffix, so a descriptive id in the same namespace would slip past.
+//
+// Both grep-half hits are marked here rather than baselined: this answers a
+// create-or-refuse question about a TITLE, resolves no store, owns no leg and
+// routes nothing, so it is not the fan-out the ratchet exists to catch — and the
+// baseline is shrink-only by design, which makes the line marker the route for a
+// reviewed new site, the way cmd/gc/api_state.go marks its configured-prefix scan.
+func reservedClassPrefixForID(id string) (string, bool) {
+	for _, prefix := range config.AllReservedClassPrefixes() { // residency:allow — reads the reserved-prefix namespace union to name a refusal; it enumerates no store and resolves no owner
+		if storeref.IDInNamespace(id, prefix) { // residency:allow — the resolver's own predicate, reused verbatim so this cannot disagree with the class route
+			return prefix, true
+		}
+	}
+	return "", false
 }
 
 // isBeadIDCandidate reports whether s has the shape of a potential bead ID:

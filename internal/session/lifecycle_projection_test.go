@@ -395,6 +395,20 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 			wantReconciledState: StateAsleep,
 		},
 		{
+			name: "dead active runtime with killed reason preserves resume identity",
+			input: LifecycleInput{
+				Status:            "open",
+				StoredState:       "active",
+				SessionKey:        "provider-conversation",
+				StartedConfigHash: "config",
+				SleepReason:       string(SleepReasonKilled),
+				Runtime:           RuntimeFacts{Observed: true, Alive: false},
+				Now:               now,
+			},
+			wantRuntime:         RuntimeProjectionMissing,
+			wantReconciledState: StateAsleep,
+		},
+		{
 			name: "fresh creating state stays creating after restart",
 			input: LifecycleInput{
 				Status:             "open",
@@ -1033,19 +1047,10 @@ func TestLifecycleHighRiskWritersStayOnPatchHelpers(t *testing.T) {
 		forbidden []string
 	}{
 		{
-			file: "internal/session/manager.go",
-			required: []string{
-				`ArchivePatch(time.Now().UTC(), reason, false)`,
-			},
-			forbidden: []string{
-				`"archived_at":  time.Now().UTC().Format(time.RFC3339),`,
-			},
-		},
-		{
 			file: "cmd/gc/session_reconcile.go",
 			required: []string{
-				`sessionpkg.ClearExpiredHoldPatch(info.SleepReason)`,
-				`sessionpkg.ClearExpiredQuarantinePatch(info.SleepReason)`,
+				`sessionpkg.ClearExpiredHoldPatch(reason)`,
+				`sessionpkg.ClearExpiredQuarantinePatch(reason)`,
 			},
 			forbidden: []string{
 				`batch := map[string]string{"held_until": ""}`,
@@ -1095,4 +1100,27 @@ func lifecycleRepoRoot(t *testing.T) string {
 		file = filepath.Join(root, "internal", "session", "lifecycle_projection_test.go")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+}
+
+func TestPreserveConversationOnRuntimeLoss(t *testing.T) {
+	tests := []struct {
+		name string
+		info Info
+		want bool
+	}{
+		{"manual started", Info{SessionOrigin: "manual", SessionKey: "native", StartedConfigHash: "config"}, true},
+		{"legacy manual started", Info{ManualSessionMetadata: "true", SessionKey: "native", StartedConfigHash: "config"}, true},
+		{"manual never started", Info{SessionOrigin: "manual", SessionKey: "allocated"}, false},
+		{"manual missing key", Info{SessionOrigin: "manual", StartedConfigHash: "config"}, false},
+		{"pool started", Info{SessionOrigin: "pool", SessionKey: "native", StartedConfigHash: "config"}, false},
+		{"named always", Info{ConfiguredNamedSession: true, ConfiguredNamedMode: "always"}, true},
+		{"named on demand", Info{ConfiguredNamedSession: true, ConfiguredNamedMode: "on-demand", SessionKey: "native", StartedConfigHash: "config"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := PreserveConversationOnRuntimeLoss(tt.info); got != tt.want {
+				t.Fatalf("preserve = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }

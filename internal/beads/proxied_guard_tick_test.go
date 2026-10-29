@@ -86,7 +86,7 @@ func newGuardFixture(t *testing.T) *guardFixture {
 		t.Fatal("Admit returned an unadmitted pin")
 	}
 
-	storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}}
+	storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: "prx", HonorExplicitIDs: true}}
 	native := newNativeDoltStoreForTest(storage,
 		WithProxiedReadOnly(),
 		// The reconnect hook is what a re-pin actually runs, and it runs on the
@@ -537,7 +537,7 @@ func (f *guardFixture) installRecovery() {
 		if err != nil {
 			return nil, Pin{}, err
 		}
-		leaf := newNativeDoltStoreForTest(&nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}})
+		leaf := newNativeDoltStoreForTest(&nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: "prx", HonorExplicitIDs: true}})
 		leaf.idPrefix = "prx"
 		return leaf, pin, nil
 	}
@@ -1079,7 +1079,7 @@ func TestCloseStoreDuringAGuardRecoveryClosesTheRecoveredLeaf(t *testing.T) {
 	}
 	entered, release := make(chan struct{}), make(chan struct{})
 	storage := &closeSignalStorage{
-		nativeDoltMemStorage: &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}},
+		nativeDoltMemStorage: &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: "prx", HonorExplicitIDs: true}},
 		closed:               make(chan struct{}),
 	}
 	f.recover = func(ctx context.Context) (*NativeDoltStore, Pin, error) {

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -336,8 +337,8 @@ func TestCustomTypesCheck_TableDrift(t *testing.T) {
 	runBD("init", "--non-interactive", "-p", "tst", "--skip-hooks", "--skip-agents")
 	runBD("config", "set", "types.custom", strings.Join(RequiredCustomTypes, ","))
 
-	// Locate the embedded dolt DB directory the same way production code
-	// does (internal/beads.(*BdStore).embeddedDoltDir), rather than
+	// Locate the embedded dolt DB directory from metadata.json's
+	// dolt_database (bd's own layout: .beads/embeddeddolt/<db>), rather than
 	// hand-deriving the sanitized database name from the prefix.
 	metadataPath := filepath.Join(dir, ".beads", "metadata.json")
 	dbName, ok, err := contract.ReadDoltDatabase(fsys.OSFS{}, metadataPath)
@@ -837,6 +838,7 @@ func TestCustomTypesCheck_RequiredTypesComplete(t *testing.T) {
 		"agent": true, "role": true, "rig": true,
 		"session": true, "spec": true, "convergence": true,
 		"step": true, "startup-health-episode": true,
+		"op": true,
 	}
 	for _, typ := range RequiredCustomTypes {
 		if !expected[typ] {
@@ -846,5 +848,16 @@ func TestCustomTypesCheck_RequiredTypesComplete(t *testing.T) {
 	}
 	for typ := range expected {
 		t.Errorf("missing required type: %q", typ)
+	}
+}
+
+// doctor's list is the beads vocabulary, held as a copy: editing it must not
+// reach the native store's list pushdown, which reads the beads list.
+func TestRequiredCustomTypesIsACopyOfTheBeadsVocabulary(t *testing.T) {
+	if !slices.Equal(RequiredCustomTypes, beads.RequiredCustomTypes) {
+		t.Fatalf("RequiredCustomTypes = %v, want beads.RequiredCustomTypes %v", RequiredCustomTypes, beads.RequiredCustomTypes)
+	}
+	if len(RequiredCustomTypes) > 0 && &RequiredCustomTypes[0] == &beads.RequiredCustomTypes[0] {
+		t.Fatal("RequiredCustomTypes aliases beads.RequiredCustomTypes")
 	}
 }
