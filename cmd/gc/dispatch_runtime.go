@@ -455,34 +455,30 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 				os.Getenv("GC_SESSION_ID"), os.Getenv("GC_TEMPLATE"), serveQuery, err)
 			return result, fmt.Errorf("querying control work for %s: %w", agentCfg.QualifiedName(), err)
 		}
-		if len(queue) == 0 {
-			if result.processedAny && idlePolls < workflowServeIdlePollAttempts {
-				idlePolls++
-				workflowTracef("serve idle-retry agent=%s attempt=%d", agentCfg.QualifiedName(), idlePolls)
-				time.Sleep(workflowServeIdlePollInterval)
-				continue
-			}
-			workflowTracef("serve idle-exit agent=%s", agentCfg.QualifiedName())
-			return result, nil
+		if len(queue) > 0 {
+			idlePolls = 0
 		}
-		idlePolls = 0
 		processedThisCycle := false
 		pendingCount := 0
+		skippedCount := 0
 		for _, candidate := range queue {
 			beadID := candidate.ID
 			kind := strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])
 			workflowTracef("serve process bead=%s kind=%s store=%s", beadID, kind, storePath)
-			// controlDispatcherServe currently returns nil both when it
-			// successfully advanced a control bead AND when ProcessControl
-			// chose to no-op (e.g., status != "open"). The caller cannot
-			// tell those apart without cross-referencing the store, so the
-			// trace line just below was previously identical in both
-			// cases. That masked a 20-minute stall on ga-ttn5z's retry
-			// control ga-fw2fm. The silent no-op now emits a separate
-			// `process-control ... skip reason=bead_not_open` line inside
-			// ProcessControl itself; see runtime.go.
+			// controlDispatcherServe returns nil only when the control bead
+			// advanced. A dispatch ProcessControl made no change to (status
+			// not open, a spawned fanout waiting on its finalize) arrives as
+			// errControlNotProcessed: a skip, which is neither progress nor
+			// pending, so it writes no wake file and does not hold the
+			// --follow backoff at its floor.
 			callsBefore, started := snapshotControlBdCalls(), time.Now()
 			if err := controlDispatcherServe(cityPath, storePath, beadID, io.Discard, stderr, emits); err != nil {
+				if errors.Is(err, errControlNotProcessed) {
+					skippedCount++
+					calls := snapshotControlBdCalls().since(callsBefore)
+					workflowTracef("serve skipped bead=%s kind=%s bd_reads=%d bd_writes=%d dur=%s", beadID, kind, calls.reads, calls.writes, time.Since(started).Round(time.Millisecond))
+					continue
+				}
 				if errors.Is(err, dispatch.ErrControlPending) {
 					pendingCount++
 					// Same rule as the transient arm below: a pending bead
@@ -536,6 +532,19 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			workflowTracef("serve pending-queue agent=%s count=%d", agentCfg.QualifiedName(), pendingCount)
 			return result, nil
 		}
+		// Nothing advanced and nothing is pending: the queue was empty or
+		// held only skips. Either way this is the idle path.
+		if skippedCount > 0 {
+			workflowTracef("serve skip-queue agent=%s count=%d", agentCfg.QualifiedName(), skippedCount)
+		}
+		if result.processedAny && idlePolls < workflowServeIdlePollAttempts {
+			idlePolls++
+			workflowTracef("serve idle-retry agent=%s attempt=%d", agentCfg.QualifiedName(), idlePolls)
+			time.Sleep(workflowServeIdlePollInterval)
+			continue
+		}
+		workflowTracef("serve idle-exit agent=%s", agentCfg.QualifiedName())
+		return result, nil
 	}
 }
 

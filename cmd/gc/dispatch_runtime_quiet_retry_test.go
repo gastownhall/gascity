@@ -67,6 +67,15 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 			wantPendingAny:  true,
 			wantSweepGrowth: false,
 		},
+		{
+			// A no-op dispatch (the bead is no longer open, a spawned fanout
+			// waiting on its finalize) advanced nothing and waits on nothing.
+			name:            "not-processed skip neither processes nor pends",
+			serveErr:        errControlNotProcessed,
+			wantPendingAny:  false,
+			wantProcessed:   false,
+			wantSweepGrowth: true,
+		},
 	}
 
 	for _, tt := range tests {

@@ -151,6 +151,12 @@ func runControlDispatcher(beadID string, stdout, stderr io.Writer) error {
 	return runControlDispatcherWithStore(cityPath, storePath, store, beadID, stdout, stderr)
 }
 
+// errControlNotProcessed is what the serve-drain dispatch returns when
+// ProcessControl made no change: a nil error with Processed false, such as a
+// control bead that is no longer open. The drain counts it as a skip, neither
+// progress nor pending; the one-shot path translates it back to nil.
+var errControlNotProcessed = errors.New("control bead not processed")
+
 // openControlStoreForDispatch is the test seam for the scope-store open in
 // runControlDispatcherInStore, following the package's var-seam idiom (cf.
 // controlDispatcherServe, dispatch_runtime.go). Production always uses
@@ -213,13 +219,21 @@ func runControlDispatcherWithStore(cityPath, storePath string, store beads.Store
 // above resolve a SCOPE and hand it over; a bead value resolved alongside that
 // scope comes from an unrouted store, and gating on it while writing elsewhere
 // re-runs a control kind the graph store had already finished.
+//
+// A control ProcessControl made no change to returns nil here, as a processed
+// one does: the one-shot command reports only failures.
 func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store beads.Store, beadID string, cfg *config.City, stdout, stderr io.Writer) error {
-	return runControlDispatcherDeferringEmits(cityPath, storePath, store, beadID, cfg, stdout, stderr, nil)
+	err := runControlDispatcherDeferringEmits(cityPath, storePath, store, beadID, cfg, stdout, stderr, nil)
+	if errors.Is(err, errControlNotProcessed) {
+		return nil
+	}
+	return err
 }
 
 // runControlDispatcherDeferringEmits is runControlDispatcherWithStoreAndConfig
 // for the serve drain: a non-nil emits receives the execution-fact projection
-// of a control that created no steps instead of running it inline.
+// of a control that created no steps instead of running it inline. It returns
+// errControlNotProcessed when ProcessControl made no change.
 func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.Store, beadID string, cfg *config.City, stdout, stderr io.Writer, emits *executionEmitDeferral) error {
 	restoreTraceWarnings := useWorkflowTraceWarnings(stderr)
 	defer restoreTraceWarnings()
@@ -335,31 +349,32 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 	if err != nil {
 		return handleControlDispatchError(cityPath, storePath, graphStore, bead, beadID, err, stderr)
 	}
-	if result.Processed {
-		if rootID := controlRootID(bead.Metadata); rootID != "" {
-			switch {
-			case emits != nil && result.Created == 0:
-				// Nothing new to define: the serve drain projects this root
-				// once, after its last queued control (executionEmitDeferral).
-				emits.add(rootID, relicGraphLeg)
-			default:
-				if emits != nil {
-					emits.forget(rootID)
-				}
-				if err := emitExecutionFacts(cityPath, store, []executionEmitTarget{{rootID: rootID, graphStore: graphStore}}, stderr); err != nil {
-					fmt.Fprintf(stderr, "warning: control dispatch: projecting execution facts for %s: %v\n", rootID, err) //nolint:errcheck // successful control processing is preserved
-				}
+	if !result.Processed {
+		return errControlNotProcessed
+	}
+	if rootID := controlRootID(bead.Metadata); rootID != "" {
+		switch {
+		case emits != nil && result.Created == 0:
+			// Nothing new to define: the serve drain projects this root
+			// once, after its last queued control (executionEmitDeferral).
+			emits.add(rootID, relicGraphLeg)
+		default:
+			if emits != nil {
+				emits.forget(rootID)
+			}
+			if err := emitExecutionFacts(cityPath, store, []executionEmitTarget{{rootID: rootID, graphStore: graphStore}}, stderr); err != nil {
+				fmt.Fprintf(stderr, "warning: control dispatch: projecting execution facts for %s: %v\n", rootID, err) //nolint:errcheck // successful control processing is preserved
 			}
 		}
-		_, _ = fmt.Fprintf(stdout, "control dispatch: bead=%s action=%s", beadID, result.Action)
-		if result.Created > 0 {
-			_, _ = fmt.Fprintf(stdout, " created=%d", result.Created)
-		}
-		if result.Skipped > 0 {
-			_, _ = fmt.Fprintf(stdout, " skipped=%d", result.Skipped)
-		}
-		fmt.Fprintln(stdout) //nolint:errcheck
 	}
+	_, _ = fmt.Fprintf(stdout, "control dispatch: bead=%s action=%s", beadID, result.Action)
+	if result.Created > 0 {
+		_, _ = fmt.Fprintf(stdout, " created=%d", result.Created)
+	}
+	if result.Skipped > 0 {
+		_, _ = fmt.Fprintf(stdout, " skipped=%d", result.Skipped)
+	}
+	fmt.Fprintln(stdout) //nolint:errcheck
 	return nil
 }
 
