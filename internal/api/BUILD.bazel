@@ -243,6 +243,7 @@ go_library(
         "//internal/runtime",
         "//internal/searchpath",
         "//internal/session",
+        "//internal/session/lanesubmit",
         "//internal/sessionlog",
         "//internal/sling",
         "//internal/sourceworkflow",

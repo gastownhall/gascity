@@ -439,9 +439,14 @@ adopts it.
   before it proposed the op had the lane send nothing, and answers from
   itself: `in_flight` until the op sweeper closes it at its `finish_by`,
   then that close.
-- `/submit` and `/messages` (message listed): a lane message op under the
+- `/submit` and `/messages` (message listed): accepted by
+  `lanesubmit.Accept` (`internal/session/lanesubmit`), the one acceptance
+  `gc session submit`'s local fallback shares; change an acceptance rule
+  there, never in a projection. The API keeps its answers
+  (`answerLaneMessage`), its events and its poke, and maps `Accept`'s typed
+  refusals onto the wire (`laneAcceptError`). A lane message op under the
   operator, keyed by the Idempotency-Key or a minted one, with
-  `LaneMessageOpPolicy` (default and follow_up at the boundary,
+  `lanesubmit.Policy` (default and follow_up at the boundary,
   interrupt_now as a deliver-now unit, which never hard-restarts), proposed
   after a configured named session's row is materialized. `resume: true`
   consumes the session's operator hold once the op is proposed, and
@@ -505,7 +510,8 @@ adopts it.
   op's `created_at` stands); a resume refused there leaves the op open, as
   an earlier answer may have accepted it. An open legacy op is 409
   `in_flight`. A legacy op the key names from before the flip answers only
-  the request it recorded (`sameLegacyMessage`). The `Idempotency-Key`
+  the request it recorded (its digest in the legacy shape,
+  `lanesubmit.LegacyPolicy`). The `Idempotency-Key`
   LRU keeps no answer of a request the lane accepts
   (`withMessageIdempotency`, which reads `laneExecutes` once per request
   and hands that reading to `acceptMessageOp`), so a same-key retry
@@ -515,7 +521,8 @@ adopts it.
   refuse it 422 or replay the first 202 without running its resume. The
   op answers a same-key retry whatever the session waits on: only a
   request no op under its key answers is refused 409 `pending_interaction`,
-  writing nothing (`checkNewLaneMessage`), so a retry of a message that
+  writing nothing (`Accept`'s front-door step, the API's
+  `rejectPendingInteraction`), so a retry of a message that
   raised an approval is not told to answer it before sending text its 202
   already accepted (request_id rule 8). The
   LRU still holds the key while the request runs (a concurrent same-key
