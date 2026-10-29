@@ -67,6 +67,16 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 			wantPendingAny:  true,
 			wantSweepGrowth: false,
 		},
+		{
+			// A ProcessControl no-op (non-open bead, pending fanout finalize)
+			// crosses the seam as the skip sentinel: neither processed nor
+			// pending, so the sweep lets the backoff grow (issue #6024).
+			name:     "not-processed skip does not pin the backoff",
+			serveErr: errControlNotProcessed,
+			// wantProcessed defaults to false: a skip is not progress.
+			wantPendingAny:  false,
+			wantSweepGrowth: true,
+		},
 	}
 
 	for _, tt := range tests {

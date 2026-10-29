@@ -1415,6 +1415,8 @@ go_test(
         "dispatch_runtime_quiet_retry_test.go",
         "dispatch_runtime_skip_backoff_test.go",
         "dispatch_runtime_skip_contract_test.go",
+        "dispatch_runtime_skip_edges_test.go",
+        "dispatch_runtime_skip_quarantine_test.go",
         "dispatch_runtime_skip_stale_row_test.go",
         "dispatch_runtime_skip_test.go",
         "dispatch_runtime_wake_test.go",
