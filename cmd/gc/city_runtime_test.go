@@ -2202,6 +2202,28 @@ func TestCityRuntimeRunStartupOrderDispatchPanicIsRecovered(t *testing.T) {
 	}
 }
 
+// staleWatchdogPasses are the two reads a stale watchdog pass can make: a fresh
+// runtime's first pass reads every not-closed status, and a pass between
+// not-closed passes reads only open and in_progress, as most production passes
+// do.
+var staleWatchdogPasses = []struct {
+	name string
+	read staleTrackingRead
+}{
+	{name: "first pass", read: staleTrackingReadNotClosed},
+	{name: "30 s pass", read: staleTrackingReadOpenInProgress},
+}
+
+// runStaleWatchdogPass runs cr's stale watchdog pass at now, making read. For
+// staleTrackingReadOpenInProgress it first records a not-closed pass that
+// completed one watchdog interval before now.
+func runStaleWatchdogPass(cr *CityRuntime, read staleTrackingRead, now time.Time) {
+	if read == staleTrackingReadOpenInProgress {
+		cr.scheduleOrderSweepWatchdogNotClosed(now.Add(-orderTrackingSweepWatchdogInterval), true)
+	}
+	cr.runOrderTrackingSweepWatchdog(cr.cfg, now)
+}
+
 func TestOrderTrackingSweepWatchdogClosesAllStaleTracking(t *testing.T) {
 	// #2168: the watchdog must clear stale tracking beads for EVERY order, not
 	// just order-tracking-sweep's own. The old narrow scope only swept the
@@ -2209,45 +2231,51 @@ func TestOrderTrackingSweepWatchdogClosesAllStaleTracking(t *testing.T) {
 	// to then clean the rest — a single-point-of-failure that jammed every
 	// order when slow reconciler cycles kept that one order from firing. The
 	// staleAfter cutoff still protects in-flight dispatches regardless of order.
-	store := beads.NewMemStore()
-	sweepTracking, err := store.Create(beads.Bead{
-		Title:  "order:" + orderTrackingSweepOrder,
-		Labels: []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
-	})
-	if err != nil {
-		t.Fatalf("Create(sweep): %v", err)
-	}
-	mergeTracking, err := store.Create(beads.Bead{
-		Title:  "order:pr-merge-queue",
-		Labels: []string{"order-run:pr-merge-queue", labelOrderTracking},
-	})
-	if err != nil {
-		t.Fatalf("Create(merge): %v", err)
-	}
+	// Both reads must clear the jam: the 30 s one is what recovers it in
+	// minutes rather than at the next not-closed pass.
+	for _, pass := range staleWatchdogPasses {
+		t.Run(pass.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			sweepTracking, err := store.Create(beads.Bead{
+				Title:  "order:" + orderTrackingSweepOrder,
+				Labels: []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
+			})
+			if err != nil {
+				t.Fatalf("Create(sweep): %v", err)
+			}
+			mergeTracking, err := store.Create(beads.Bead{
+				Title:  "order:pr-merge-queue",
+				Labels: []string{"order-run:pr-merge-queue", labelOrderTracking},
+			})
+			if err != nil {
+				t.Fatalf("Create(merge): %v", err)
+			}
 
-	cr := &CityRuntime{
-		cityName:            "test-city",
-		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
-		standaloneCityStore: store,
-		stdout:              io.Discard,
-		stderr:              io.Discard,
-		logPrefix:           "gc test",
-	}
-	cr.runOrderTrackingSweepWatchdog(cr.cfg, time.Now().Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
+			cr := &CityRuntime{
+				cityName:            "test-city",
+				cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+				standaloneCityStore: store,
+				stdout:              io.Discard,
+				stderr:              io.Discard,
+				logPrefix:           "gc test",
+			}
+			runStaleWatchdogPass(cr, pass.read, time.Now().Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
 
-	gotSweep, err := store.Get(sweepTracking.ID)
-	if err != nil {
-		t.Fatalf("Get(sweep): %v", err)
-	}
-	if gotSweep.Status != "closed" {
-		t.Fatalf("sweep tracking status = %s, want closed", gotSweep.Status)
-	}
-	gotMerge, err := store.Get(mergeTracking.ID)
-	if err != nil {
-		t.Fatalf("Get(merge): %v", err)
-	}
-	if gotMerge.Status != "closed" {
-		t.Fatalf("merge tracking status = %s, want closed (watchdog now sweeps all orders, not just order-tracking-sweep)", gotMerge.Status)
+			gotSweep, err := store.Get(sweepTracking.ID)
+			if err != nil {
+				t.Fatalf("Get(sweep): %v", err)
+			}
+			if gotSweep.Status != "closed" {
+				t.Fatalf("sweep tracking status = %s, want closed", gotSweep.Status)
+			}
+			gotMerge, err := store.Get(mergeTracking.ID)
+			if err != nil {
+				t.Fatalf("Get(merge): %v", err)
+			}
+			if gotMerge.Status != "closed" {
+				t.Fatalf("merge tracking status = %s, want closed (watchdog now sweeps all orders, not just order-tracking-sweep)", gotMerge.Status)
+			}
+		})
 	}
 }
 
@@ -2290,29 +2318,37 @@ func createBehindTheCache(t *testing.T, store beads.Store, backing *beads.MemSto
 }
 
 // TestOrderTrackingSweepWatchdogSeesBeadsWrittenBehindTheCache runs the stale
-// watchdog over the production store stack: a stale tracking bead the cache
-// never absorbed must still be closed (#5832).
+// watchdog over the production store stack: stale tracking beads the cache
+// never absorbed, one open and one in_progress, must still be closed by either
+// read a pass makes (#5832).
 func TestOrderTrackingSweepWatchdogSeesBeadsWrittenBehindTheCache(t *testing.T) {
-	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
-	store, backing := policyWrappedPrimedCache(t, cfg)
-	stale := createBehindTheCache(t, store, backing, "nudge-on-route")
+	for _, pass := range staleWatchdogPasses {
+		t.Run(pass.name, func(t *testing.T) {
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+			store, backing := policyWrappedPrimedCache(t, cfg)
+			open := createBehindTheCache(t, store, backing, "nudge-on-route")
+			claimed := createBehindTheCache(t, store, backing, "digest")
+			inProgress := "in_progress"
+			if err := backing.Update(claimed.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+				t.Fatalf("Update(%s, in_progress): %v", claimed.ID, err)
+			}
 
-	cr := &CityRuntime{
-		cityName:            "test-city",
-		cfg:                 cfg,
-		standaloneCityStore: store,
-		stdout:              io.Discard,
-		stderr:              io.Discard,
-		logPrefix:           "gc test",
-	}
-	cr.runOrderTrackingSweepWatchdog(cfg, time.Now().Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
+			cr := &CityRuntime{
+				cityName:            "test-city",
+				cfg:                 cfg,
+				standaloneCityStore: store,
+				stdout:              io.Discard,
+				stderr:              io.Discard,
+				logPrefix:           "gc test",
+			}
+			runStaleWatchdogPass(cr, pass.read, time.Now().Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
 
-	got, err := backing.Get(stale.ID)
-	if err != nil {
-		t.Fatalf("Get(stale): %v", err)
-	}
-	if got.Status != "closed" {
-		t.Fatalf("stale tracking status = %s, want closed: the watchdog read a cache snapshot that never contained this bead", got.Status)
+			for _, stale := range []beads.Bead{open, claimed} {
+				if got := statusOf(t, backing, stale.ID); got != "closed" {
+					t.Errorf("stale tracking %s (%s) status = %s, want closed: the watchdog read a cache snapshot that never contained this bead", stale.ID, stale.Title, got)
+				}
+			}
+		})
 	}
 }
 
@@ -2382,19 +2418,21 @@ func TestOrderTrackingSweepsCloseOldestFirstWithinBudget(t *testing.T) {
 		}
 	}
 
-	t.Run("stale watchdog", func(t *testing.T) {
-		store := beads.NewMemStoreFrom(len(oldestFirst), seed(), nil)
-		cr := &CityRuntime{
-			cityName:            "test-city",
-			cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
-			standaloneCityStore: store,
-			stdout:              io.Discard,
-			stderr:              io.Discard,
-			logPrefix:           "gc test",
-		}
-		cr.runOrderTrackingSweepWatchdog(cr.cfg, time.Now().Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
-		assertClosedOldest(t, store)
-	})
+	for _, pass := range staleWatchdogPasses {
+		t.Run("stale watchdog/"+pass.name, func(t *testing.T) {
+			store := beads.NewMemStoreFrom(len(oldestFirst), seed(), nil)
+			cr := &CityRuntime{
+				cityName:            "test-city",
+				cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+				standaloneCityStore: store,
+				stdout:              io.Discard,
+				stderr:              io.Discard,
+				logPrefix:           "gc test",
+			}
+			runStaleWatchdogPass(cr, pass.read, time.Now().Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
+			assertClosedOldest(t, store)
+		})
+	}
 
 	t.Run("orphan sweep", func(t *testing.T) {
 		store := beads.NewMemStoreFrom(len(oldestFirst), seed(), nil)
@@ -2403,6 +2441,348 @@ func TestOrderTrackingSweepsCloseOldestFirstWithinBudget(t *testing.T) {
 		}
 		assertClosedOldest(t, store)
 	})
+}
+
+// TestOnDemandSweepReleasesAnOrderItsParkedTrackingBeadHolds: a tracking bead
+// parked by hand (blocked here) holds its order, because the strict open-work
+// gate counts every not-closed tracking bead. A 30 s watchdog pass between its
+// not-closed passes reads only open and in_progress beads, so it leaves the
+// parked one. The on-demand sweep (gc order sweep-tracking, which the core
+// order-tracking-sweep order runs every minute) reads every not-closed status,
+// so it closes the bead once it is stale and the order dispatches again with no
+// restart.
+func TestOnDemandSweepReleasesAnOrderItsParkedTrackingBeadHolds(t *testing.T) {
+	const order = "parked-order"
+	store := beads.NewMemStore()
+	parked, err := store.Create(beads.Bead{
+		Title:  "order:" + order,
+		Labels: []string{"order-run:" + order, labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(tracking): %v", err)
+	}
+	blocked := "blocked"
+	if err := store.Update(parked.ID, beads.UpdateOpts{Status: &blocked}); err != nil {
+		t.Fatalf("Update(%s, blocked): %v", parked.ID, err)
+	}
+
+	runs := 0
+	execRun := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		runs++
+		return nil, nil
+	}
+	dispatcher := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:     order,
+		Trigger:  "cooldown",
+		Interval: "1s",
+		Exec:     "scripts/run.sh",
+	}}, store, nil, execRun, nil)
+	cityPath := t.TempDir()
+	dispatch := func(now time.Time) {
+		dispatcher.dispatch(context.Background(), cityPath, now)
+		dispatcher.drain(context.Background())
+	}
+
+	// Past both the watchdog's and the on-demand sweep's stale cutoffs.
+	now := parked.CreatedAt.Add(time.Hour)
+	dispatch(now)
+	if runs != 0 {
+		t.Fatalf("order ran %d time(s) while its parked tracking bead held the gate, want 0", runs)
+	}
+
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 cfg,
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	runStaleWatchdogPass(cr, staleTrackingReadOpenInProgress, now)
+	if got := statusOf(t, store, parked.ID); got != blocked {
+		t.Fatalf("parked tracking status after the watchdog = %q, want %q: the 30 s read must stay bounded to open and in_progress", got, blocked)
+	}
+
+	result, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{store}, nil, now, defaultOrderTrackingSweepStaleAfter, nil, false)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingAcrossStores(): %v", err)
+	}
+	if result.trackingClosed != 1 || statusOf(t, store, parked.ID) != "closed" {
+		t.Fatalf("on-demand sweep closed %d tracking bead(s) and left %s %q, want the parked bead closed", result.trackingClosed, parked.ID, statusOf(t, store, parked.ID))
+	}
+
+	dispatch(now.Add(time.Minute))
+	if runs != 1 {
+		t.Fatalf("order ran %d time(s) after the on-demand sweep closed its parked tracking bead, want 1", runs)
+	}
+}
+
+// TestOrderTrackingSweepWatchdogReleasesTheSweepOrdersOwnParkedTrackingBead: a
+// tracking bead of order-tracking-sweep itself, parked by hand (deferred here),
+// holds that order's strict gate, so the on-demand sweep the order runs never
+// fires to release it. The controller watchdog releases it with no restart.
+// Its 30 s passes read only open and in_progress beads and leave it, even past
+// their stale cutoff. The pass orderTrackingSweepWatchdogNotClosedInterval
+// after its last not-closed read reads every not-closed status and closes it,
+// and the order then dispatches again.
+func TestOrderTrackingSweepWatchdogReleasesTheSweepOrdersOwnParkedTrackingBead(t *testing.T) {
+	store := beads.NewMemStore()
+	parked, err := store.Create(beads.Bead{
+		Title:  "order:" + orderTrackingSweepOrder,
+		Labels: []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(tracking): %v", err)
+	}
+	deferred := "deferred"
+	if err := store.Update(parked.ID, beads.UpdateOpts{Status: &deferred}); err != nil {
+		t.Fatalf("Update(%s, deferred): %v", parked.ID, err)
+	}
+
+	runs := 0
+	execRun := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		runs++
+		return nil, nil
+	}
+	dispatcher := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:     orderTrackingSweepOrder,
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     "gc order sweep-tracking --stale-after 10m --quiet --confirm",
+	}}, store, nil, execRun, nil)
+	cityPath := t.TempDir()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 cfg,
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	// One orders pass: the watchdog, then dispatch, as the orders lane runs them.
+	pass := func(now time.Time) {
+		cr.runOrderTrackingSweepWatchdog(cfg, now)
+		dispatcher.dispatch(context.Background(), cityPath, now)
+		dispatcher.drain(context.Background())
+	}
+
+	// The first pass reads every not-closed status, before the bead is stale.
+	start := parked.CreatedAt
+	notClosedAt := start.Add(orderTrackingSweepWatchdogNotClosedInterval)
+	for now := start; now.Before(notClosedAt); now = now.Add(orderTrackingSweepWatchdogInterval) {
+		pass(now)
+		if got := statusOf(t, store, parked.ID); got != deferred {
+			t.Fatalf("parked tracking status after the pass at +%s = %q, want %q: a 30 s pass must read only open and in_progress", now.Sub(start), got, deferred)
+		}
+	}
+	if runs != 0 {
+		t.Fatalf("%s ran %d time(s) while its own parked tracking bead held its gate, want 0", orderTrackingSweepOrder, runs)
+	}
+
+	pass(notClosedAt)
+	if got := statusOf(t, store, parked.ID); got != "closed" {
+		t.Fatalf("parked tracking status after the pass at +%s = %q, want closed: the watchdog's not-closed pass must release it with no restart", notClosedAt.Sub(start), got)
+	}
+	if runs != 1 {
+		t.Fatalf("%s ran %d time(s) after the watchdog closed its parked tracking bead, want 1", orderTrackingSweepOrder, runs)
+	}
+}
+
+// TestOrderTrackingSweepWatchdogFirstPassReleasesAParkedRigTrackingBead: the
+// watchdog's first pass after a start reads every not-closed status in every
+// store it sweeps, so a restart releases a stale tracking bead parked by hand
+// in a rig store, which the boot orphan sweep never reads.
+func TestOrderTrackingSweepWatchdogFirstPassReleasesAParkedRigTrackingBead(t *testing.T) {
+	const scoped = "digest:rig:frontend"
+	rigStore := beads.NewMemStore()
+	parked, err := rigStore.Create(beads.Bead{
+		Title:  "order:" + scoped,
+		Labels: []string{"order-run:" + scoped, labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(rig tracking): %v", err)
+	}
+	blocked := "blocked"
+	if err := rigStore.Update(parked.ID, beads.UpdateOpts{Status: &blocked}); err != nil {
+		t.Fatalf("Update(%s, blocked): %v", parked.ID, err)
+	}
+
+	cityPath := t.TempDir()
+	cr := &CityRuntime{
+		cityPath:            cityPath,
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}, Rigs: []config.Rig{{Name: "frontend", Path: filepath.Join(cityPath, "frontend")}}},
+		standaloneCityStore: beads.NewMemStore(),
+		standaloneRigStores: map[string]beads.Store{"frontend": rigStore},
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingSweepWatchdog(cr.cfg, parked.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
+	if got := statusOf(t, rigStore, parked.ID); got != "closed" {
+		t.Fatalf("parked rig tracking status after the watchdog's first pass = %q, want closed: the first pass after a start must read every not-closed status", got)
+	}
+}
+
+// notClosedListStore counts the stale sweeps' not-closed reads, the
+// order-tracking Lists that name no status, and fails them while failing is
+// set. Every other read is the MemStore's.
+type notClosedListStore struct {
+	*beads.MemStore
+	failing        bool
+	notClosedReads int
+}
+
+func (s *notClosedListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == labelOrderTracking && query.Status == "" {
+		s.notClosedReads++
+		if s.failing {
+			return nil, errors.New("not-closed order-tracking list unavailable")
+		}
+	}
+	return s.MemStore.List(query)
+}
+
+// TestOrderTrackingSweepWatchdogRetriesAnIncompleteNotClosedPass: a
+// not-closed pass that does not reach a store must not use up the slot that
+// releases a tracking bead parked by hand there. The first pass after a start
+// misses the rig store holding one, in each way a pass can miss a store, and
+// the next pass, one watchdog interval later, reads every not-closed status
+// again and closes the parked bead.
+func TestOrderTrackingSweepWatchdogRetriesAnIncompleteNotClosedPass(t *testing.T) {
+	cases := []struct {
+		name string
+		// miss makes the first pass miss rigStore. It returns the rig stores
+		// the runtime holds, and heal, which lets the next pass reach rigStore.
+		miss func(t *testing.T, cityStore, rigStore *beads.MemStore) (rigStores map[string]beads.Store, heal func())
+	}{
+		{
+			name: "its not-closed list fails",
+			miss: func(_ *testing.T, _, rigStore *beads.MemStore) (map[string]beads.Store, func()) {
+				failing := &notClosedListStore{MemStore: rigStore, failing: true}
+				return map[string]beads.Store{"frontend": failing}, func() { failing.failing = false }
+			},
+		},
+		{
+			name: "it does not open",
+			miss: func(t *testing.T, _, rigStore *beads.MemStore) (map[string]beads.Store, func()) {
+				opens := false
+				prev := newCityRuntimeOpenSweepStore
+				newCityRuntimeOpenSweepStore = func(scopeRoot, _ string) (beads.Store, error) {
+					if !opens {
+						return nil, fmt.Errorf("opening %s: store not ready", scopeRoot)
+					}
+					return rigStore, nil
+				}
+				t.Cleanup(func() { newCityRuntimeOpenSweepStore = prev })
+				return map[string]beads.Store{}, func() { opens = true }
+			},
+		},
+		{
+			name: "the close budget runs out before it",
+			miss: func(t *testing.T, cityStore, rigStore *beads.MemStore) (map[string]beads.Store, func()) {
+				for i := range orderTrackingSweepCloseBudget {
+					if _, err := cityStore.Create(beads.Bead{
+						Title:  fmt.Sprintf("order:jam-%d", i),
+						Labels: []string{fmt.Sprintf("order-run:jam-%d", i), labelOrderTracking},
+					}); err != nil {
+						t.Fatalf("Create(jam-%d): %v", i, err)
+					}
+				}
+				return map[string]beads.Store{"frontend": rigStore}, func() {}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const scoped = "digest:rig:frontend"
+			cityStore := beads.NewMemStore()
+			rigStore := beads.NewMemStore()
+			parked, err := rigStore.Create(beads.Bead{
+				Title:  "order:" + scoped,
+				Labels: []string{"order-run:" + scoped, labelOrderTracking},
+			})
+			if err != nil {
+				t.Fatalf("Create(rig tracking): %v", err)
+			}
+			blocked := "blocked"
+			if err := rigStore.Update(parked.ID, beads.UpdateOpts{Status: &blocked}); err != nil {
+				t.Fatalf("Update(%s, blocked): %v", parked.ID, err)
+			}
+			rigStores, heal := tc.miss(t, cityStore, rigStore)
+
+			cityPath := t.TempDir()
+			cr := &CityRuntime{
+				cityPath:            cityPath,
+				cityName:            "test-city",
+				cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}, Rigs: []config.Rig{{Name: "frontend", Path: filepath.Join(cityPath, "frontend")}}},
+				standaloneCityStore: cityStore,
+				standaloneRigStores: rigStores,
+				stdout:              io.Discard,
+				stderr:              io.Discard,
+				logPrefix:           "gc test",
+			}
+			now := parked.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Second)
+			cr.runOrderTrackingSweepWatchdog(cr.cfg, now)
+			if got := statusOf(t, rigStore, parked.ID); got != blocked {
+				t.Fatalf("parked rig tracking status after the first pass = %q, want %q: the first pass must miss the rig store", got, blocked)
+			}
+
+			heal()
+			cr.runOrderTrackingSweepWatchdog(cr.cfg, now.Add(orderTrackingSweepWatchdogInterval))
+			if got := statusOf(t, rigStore, parked.ID); got != "closed" {
+				t.Fatalf("parked rig tracking status after the next pass = %q, want closed: an incomplete not-closed pass must be retried on the next pass, not %s later", got, orderTrackingSweepWatchdogNotClosedInterval)
+			}
+		})
+	}
+}
+
+// TestOrderTrackingSweepWatchdogBacksOffAFailingNotClosedPass pins when the
+// stale watchdog retries a not-closed read that keeps failing: on the next
+// pass, then after a wait that doubles with each failure in a row, up to
+// orderTrackingSweepWatchdogNotClosedInterval, so a broken store does not make
+// every pass decode closed history. A pass that completes waits the whole
+// interval and resets the backoff.
+func TestOrderTrackingSweepWatchdogBacksOffAFailingNotClosedPass(t *testing.T) {
+	store := &notClosedListStore{MemStore: beads.NewMemStore()}
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	// The store fails every not-closed read except in [answersFrom, failsAgainAt).
+	start := time.Now()
+	answersFrom := start.Add(26 * time.Minute)
+	failsAgainAt := start.Add(45 * time.Minute)
+	var reads []time.Duration
+	for now := start; !now.After(start.Add(46 * time.Minute)); now = now.Add(orderTrackingSweepWatchdogInterval) {
+		store.failing = now.Before(answersFrom) || !now.Before(failsAgainAt)
+		before := store.notClosedReads
+		cr.runOrderTrackingSweepWatchdog(cr.cfg, now)
+		if store.notClosedReads != before {
+			reads = append(reads, now.Sub(start))
+		}
+	}
+	want := []time.Duration{
+		0,                               // the first pass: fails
+		30 * time.Second,                // the next pass: fails
+		90 * time.Second,                // 1m later: fails
+		3*time.Minute + 30*time.Second,  // 2m later: fails
+		7*time.Minute + 30*time.Second,  // 4m later: fails
+		15*time.Minute + 30*time.Second, // 8m later: fails
+		25*time.Minute + 30*time.Second, // 10m later, the cap: fails
+		35*time.Minute + 30*time.Second, // 10m later: completes
+		45*time.Minute + 30*time.Second, // the whole interval later: fails
+		46 * time.Minute,                // reset: the next pass
+	}
+	if !slices.Equal(reads, want) {
+		t.Fatalf("not-closed reads at %v after start, want %v", reads, want)
+	}
 }
 
 func TestOrderTrackingSweepWatchdogUsesCloseBudget(t *testing.T) {

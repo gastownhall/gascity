@@ -158,25 +158,41 @@ func TestRecentRunsAllOpenRunsUseLiveTier(t *testing.T) {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
 	assertAllLive(t, "StaleOpenRuns", spy.queries)
-	assertSweepQueryShape(t, "StaleOpenRuns", spy.queries)
+	// One query per status the strict gate counts and every backing selects
+	// exactly (an in_progress jam must still be swept); open first, because a
+	// claim moves a bead from open to in_progress.
+	assertSweepQueryShape(t, "StaleOpenRuns", spy.queries, "open", "in_progress")
+
+	spy.queries = nil
+	if _, err := st.StaleNotClosedRuns(time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("StaleNotClosedRuns(): %v", err)
+	}
+	assertAllLive(t, "StaleNotClosedRuns", spy.queries)
+	// One query for every not-closed status: the whole set the strict gate
+	// counts, a hand-parked one included.
+	assertSweepQueryShape(t, "StaleNotClosedRuns", spy.queries, "")
 
 	spy.queries = nil
 	if _, err := st.OrphanedOpenRuns(); err != nil {
 		t.Fatalf("OrphanedOpenRuns(): %v", err)
 	}
 	assertAllLive(t, "OrphanedOpenRuns", spy.queries)
-	assertSweepQueryShape(t, "OrphanedOpenRuns", spy.queries)
+	// One query for every not-closed status, a hand-parked one included.
+	assertSweepQueryShape(t, "OrphanedOpenRuns", spy.queries, "")
 }
 
-// assertSweepQueryShape pins the sweep readers' query: every not-closed
-// tracking bead across both tiers, with no Status filter (an in_progress jam
-// must still be swept) and no backing limit (the caller post-filters before
-// applying its close budget).
-func assertSweepQueryShape(t *testing.T, name string, queries []beads.ListQuery) {
+// assertSweepQueryShape pins a sweep reader's queries: one per status in
+// statuses, in that order ("" is every not-closed status), each for the
+// tracking beads across both tiers with no backing limit (the caller
+// post-filters before applying its close budget).
+func assertSweepQueryShape(t *testing.T, name string, queries []beads.ListQuery, statuses ...string) {
 	t.Helper()
+	if len(queries) != len(statuses) {
+		t.Fatalf("%s issued %d queries %+v, want one per status %q", name, len(queries), queries, statuses)
+	}
 	for i, q := range queries {
-		if q.Label != "order-tracking" || q.IncludeClosed || q.Status != "" || q.Limit != 0 || q.TierMode != beads.TierBoth {
-			t.Fatalf("%s query[%d] = %+v, want Label=order-tracking, IncludeClosed=false, Status=\"\", Limit=0, TierMode=TierBoth", name, i, q)
+		if q.Label != "order-tracking" || q.IncludeClosed || q.Status != statuses[i] || q.Limit != 0 || q.TierMode != beads.TierBoth {
+			t.Fatalf("%s query[%d] = %+v, want Label=order-tracking, IncludeClosed=false, Status=%q, Limit=0, TierMode=TierBoth", name, i, q, statuses[i])
 		}
 		if q.Sort != beads.SortCreatedAsc {
 			t.Fatalf("%s query[%d].Sort = %q, want SortCreatedAsc (the caller's close budget must drain the oldest jam)", name, i, q.Sort)
@@ -419,6 +435,50 @@ func TestStaleOpenRunsCutoff(t *testing.T) {
 	}
 }
 
+// TestStaleNotClosedRunsListsEveryNotClosedStatusAtOrBeforeCutoff proves the
+// on-demand sweep's read: every tracking bead the strict open-work gate counts
+// that is at or before the cutoff, oldest-first. That includes one parked by
+// hand, which the watchdog's StaleOpenRuns does not read, and a pre-dispatch
+// trigger-env-failure marker, which is the stale sweep's to close (the orphan
+// sweep skips it).
+func TestStaleNotClosedRunsListsEveryNotClosedStatusAtOrBeforeCutoff(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	tracking := func(id, status string, age time.Duration, extra ...string) beads.Bead {
+		return beads.Bead{
+			ID:        id,
+			Title:     "order:digest",
+			Status:    status,
+			Labels:    append([]string{"order-run:digest", "order-tracking"}, extra...),
+			CreatedAt: base.Add(age),
+		}
+	}
+	seed := []beads.Bead{
+		tracking("gc-marker", "open", 3*time.Minute, "trigger-env-failed"),
+		tracking("gc-parked", "blocked", 2*time.Minute),
+		tracking("gc-fresh", "open", 10*time.Minute),
+		tracking("gc-claimed", "in_progress", time.Minute),
+		tracking("gc-closed", "closed", 4*time.Minute),
+		tracking("gc-open", "open", 0),
+	}
+	st := ordersStoreOver(beads.NewMemStoreFrom(len(seed), seed, nil))
+	cutoff := base.Add(5 * time.Minute)
+
+	stale, err := st.StaleNotClosedRuns(cutoff)
+	if err != nil {
+		t.Fatalf("StaleNotClosedRuns(): %v", err)
+	}
+	if got, want := runIDs(stale), []string{"gc-open", "gc-claimed", "gc-parked", "gc-marker"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("StaleNotClosedRuns() IDs = %v, want every not-closed bead at or before the cutoff, oldest-first %v", got, want)
+	}
+	bounded, err := st.StaleOpenRuns(cutoff)
+	if err != nil {
+		t.Fatalf("StaleOpenRuns(): %v", err)
+	}
+	if got, want := runIDs(bounded), []string{"gc-open", "gc-claimed", "gc-marker"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("StaleOpenRuns() IDs = %v, want %v (the parked bead is the not-closed read's alone)", got, want)
+	}
+}
+
 // TestOrphanedOpenRunsExcludesTriggerEnvFailed proves the pre-dispatch
 // trigger-env-failure markers are excluded from the orphaned sweep read.
 func TestOrphanedOpenRunsExcludesTriggerEnvFailed(t *testing.T) {
@@ -505,6 +565,20 @@ func TestStaleOpenRunsBypassesCache(t *testing.T) {
 	}
 }
 
+// TestStaleNotClosedRunsBypassesCache is the same proof for the on-demand
+// sweep's read (#5832).
+func TestStaleNotClosedRunsBypassesCache(t *testing.T) {
+	cache, written := primedCacheWithBackingOnlyTracking(t)
+
+	runs, err := ordersStoreOver(cache).StaleNotClosedRuns(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("StaleNotClosedRuns(): %v", err)
+	}
+	if !runsContain(runs, written.ID) {
+		t.Fatalf("StaleNotClosedRuns() = %v; missed backing-only bead %s (read the cache snapshot, not the Live tier)", runs, written.ID)
+	}
+}
+
 // TestOrphanedOpenRunsBypassesCache: the startup orphan sweep must see a
 // tracking bead the cache never absorbed, and still skip a trigger-env-failure
 // marker written the same way (#5832).
@@ -527,28 +601,30 @@ func TestOrphanedOpenRunsBypassesCache(t *testing.T) {
 	}
 }
 
-// TestSweepReadsOldestFirst: both sweep readers return tracking beads
+// TestSweepReadsOldestFirst: the sweep readers return tracking beads
 // oldest-first (CreatedAt ascending, ties by ID ascending), independent of the
-// backing's storage order, so a budgeted close drains the oldest jam first.
+// backing's storage order and of which status read found each one, so a
+// budgeted close drains the oldest jam first.
 func TestSweepReadsOldestFirst(t *testing.T) {
 	base := time.Now().Add(-time.Hour)
-	tracking := func(id string, age time.Duration) beads.Bead {
+	tracking := func(id, status string, age time.Duration) beads.Bead {
 		return beads.Bead{
 			ID:        id,
 			Title:     "order:digest",
-			Status:    "open",
+			Status:    status,
 			Labels:    []string{"order-run:digest", "order-tracking"},
 			CreatedAt: base.Add(age),
 		}
 	}
-	// Stored scrambled; gc-a and gc-b share a CreatedAt.
+	// Stored scrambled, open and in_progress interleaved by age; gc-a and gc-b
+	// share a CreatedAt.
 	seed := []beads.Bead{
-		tracking("gc-e", 4*time.Minute),
-		tracking("gc-b", time.Minute),
-		tracking("gc-d", 3*time.Minute),
-		tracking("gc-a", time.Minute),
-		tracking("gc-f", 2*time.Minute),
-		tracking("gc-c", 0),
+		tracking("gc-e", "open", 4*time.Minute),
+		tracking("gc-b", "open", time.Minute),
+		tracking("gc-d", "in_progress", 3*time.Minute),
+		tracking("gc-a", "in_progress", time.Minute),
+		tracking("gc-f", "open", 2*time.Minute),
+		tracking("gc-c", "open", 0),
 	}
 	want := []string{"gc-c", "gc-a", "gc-b", "gc-f", "gc-d", "gc-e"}
 	st := ordersStoreOver(beads.NewMemStoreFrom(len(seed), seed, nil))
@@ -559,6 +635,13 @@ func TestSweepReadsOldestFirst(t *testing.T) {
 	}
 	if got := runIDs(stale); !reflect.DeepEqual(got, want) {
 		t.Errorf("StaleOpenRuns() IDs = %v, want oldest-first %v", got, want)
+	}
+	notClosed, err := st.StaleNotClosedRuns(time.Now())
+	if err != nil {
+		t.Fatalf("StaleNotClosedRuns(): %v", err)
+	}
+	if got := runIDs(notClosed); !reflect.DeepEqual(got, want) {
+		t.Errorf("StaleNotClosedRuns() IDs = %v, want oldest-first %v", got, want)
 	}
 	orphaned, err := st.OrphanedOpenRuns()
 	if err != nil {
@@ -593,6 +676,10 @@ func TestSweepReadsKeepInProgressAndExcludeClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
+	notClosed, err := st.StaleNotClosedRuns(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("StaleNotClosedRuns(): %v", err)
+	}
 	orphaned, err := st.OrphanedOpenRuns()
 	if err != nil {
 		t.Fatalf("OrphanedOpenRuns(): %v", err)
@@ -601,8 +688,55 @@ func TestSweepReadsKeepInProgressAndExcludeClosed(t *testing.T) {
 	if got := runIDs(stale); !reflect.DeepEqual(got, want) {
 		t.Errorf("StaleOpenRuns() IDs = %v, want %v (closed %s excluded)", got, want, closedBead.ID)
 	}
+	if got := runIDs(notClosed); !reflect.DeepEqual(got, want) {
+		t.Errorf("StaleNotClosedRuns() IDs = %v, want %v (closed %s excluded)", got, want, closedBead.ID)
+	}
 	if got := runIDs(orphaned); !reflect.DeepEqual(got, want) {
 		t.Errorf("OrphanedOpenRuns() IDs = %v, want %v (closed %s excluded)", got, want, closedBead.ID)
+	}
+}
+
+// claimAfterFirstReadStore claims a tracking bead the moment its first list
+// read returns, as another process can between two of a reader's queries.
+type claimAfterFirstReadStore struct {
+	beads.Store
+	claim string
+	reads int
+}
+
+func (s *claimAfterFirstReadStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	list, err := s.Store.List(q)
+	if err != nil {
+		return nil, err
+	}
+	s.reads++
+	if s.reads == 1 {
+		inProgress := "in_progress"
+		if err := s.Update(s.claim, beads.UpdateOpts{Status: &inProgress}); err != nil {
+			return nil, err
+		}
+	}
+	return list, nil
+}
+
+// TestStaleOpenRunsListsABeadClaimedBetweenItsReadsOnce: a claim moves a
+// tracking bead forward, from open to in_progress, so the stale sweep reads open
+// first. A bead claimed between its two reads is then read by both and listed
+// once, where reading in_progress first would miss it until the next tick.
+func TestStaleOpenRunsListsABeadClaimedBetweenItsReadsOnce(t *testing.T) {
+	mem := beads.NewMemStore()
+	b, err := mem.Create(beads.Bead{Title: "order:digest", Labels: []string{"order-run:digest", "order-tracking"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := ordersStoreOver(&claimAfterFirstReadStore{Store: mem, claim: b.ID})
+
+	runs, err := st.StaleOpenRuns(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("StaleOpenRuns(): %v", err)
+	}
+	if got, want := runIDs(runs), []string{b.ID}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("StaleOpenRuns() IDs = %v, want %v exactly once", got, want)
 	}
 }
 
