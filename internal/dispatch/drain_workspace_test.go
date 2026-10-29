@@ -208,3 +208,46 @@ func TestProcessDrainSharedReusesWorkspaceAndKeepsExistingWorkDir(t *testing.T) 
 		}
 	})
 }
+
+func TestProcessDrainWorkspaceHookSkippedOutsideSharedExclusive(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		metadata map[string]string
+		nilHook  bool
+	}{
+		{name: "shared read access", metadata: map[string]string{"gc.drain_member_access": "read"}},
+		{name: "separate context", metadata: map[string]string{"gc.drain_context": "separate"}},
+		{name: "nil hook", nilHook: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			formulatest.EnableV2ForTest(t)
+			dir := t.TempDir()
+			writeDrainItemFormula(t, dir)
+			store, drain, members := seedSharedExclusiveDrain(t)
+			if len(tc.metadata) > 0 {
+				if err := store.SetMetadataBatch(drain.ID, tc.metadata); err != nil {
+					t.Fatalf("SetMetadataBatch(%s): %v", tc.name, err)
+				}
+				drain = mustGetBead(t, store, drain.ID)
+			}
+			hook := &recordingWorkspaceHook{path: t.TempDir()}
+			opts := ProcessOptions{FormulaSearchPaths: []string{dir}}
+			if !tc.nilHook {
+				opts.SharedDrainWorkspace = hook.provision
+			}
+
+			if _, err := ProcessControl(store, drain, opts); err != nil {
+				t.Fatalf("ProcessControl(%s): %v", tc.name, err)
+			}
+			if len(hook.calls) != 0 {
+				t.Fatalf("hook calls = %v, want none", hook.calls)
+			}
+			for _, member := range members {
+				after := mustGetBead(t, store, member.ID)
+				if got := after.Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != "" {
+					t.Fatalf("member %s work_dir = %q, want unwritten", member.ID, got)
+				}
+			}
+		})
+	}
+}
