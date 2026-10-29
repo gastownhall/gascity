@@ -99,7 +99,7 @@ var reviewedMarkers = map[string]reviewedMarker{
 	},
 
 	// Relic legs: graph rows read from city and rig scope stores (S4).
-	"internal/api/huma_handlers_convoys.go (*Server).humaDeleteWorkflow":       {"relic", 1, "workflowStores root probe in workflow teardown"},
+	"internal/api/huma_handlers_convoys.go (*Server).humaDeleteWorkflow":       {"relic", 3, "workflowStores root probe, metadata sweep and descendant sweep in workflow teardown"},
 	"cmd/gc/cmd_convoy_dispatch.go findBeadScopeAcrossStores":                  {"relic", 2, "control-bead scope probe over the city and rig ledgers before the binding"},
 	"cmd/gc/cmd_convoy_dispatch.go cmdWorkflowDelete":                          {"relic", 1, "workflow delete sweeps the retained scope-store copies beside the binding"},
 	"cmd/gc/cmd_convoy_dispatch.go (*sourceWorkflowMatchCollector).scanStore":  {"relic", 1, "the source-workflow walk's root probe over scope stores and the binding (child sources are ratcheted, not marked)"},
@@ -107,7 +107,7 @@ var reviewedMarkers = map[string]reviewedMarker{
 	"internal/api/convoy_event_stream.go workflowEventBeadFromSubject":         {"relic", 1, "workflowStores residence probe (graph, city, rigs)"},
 	"internal/api/convoy_event_stream.go workflowEventRoot":                    {"relic", 1, "workflowStores root scan (graph, city, rigs)"},
 	"internal/api/handler_convoy_dispatch.go (*Server).buildWorkflowSnapshot":  {"relic", 2, "workflowStores root probe and metadata sweep"},
-	"internal/api/huma_handlers_convoys.go (*Server).humaHandleWorkflowDelete": {"relic", 2, "workflowStores root probe and metadata sweep"},
+	"internal/api/huma_handlers_convoys.go (*Server).humaHandleWorkflowDelete": {"relic", 3, "workflowStores root probe, metadata sweep and descendant sweep"},
 	"internal/api/huma_handlers_runs.go (*Server).cancelRun":                   {"relic", 1, "workflowStores root scan for a run"},
 	"internal/api/orders_feed.go buildWorkflowRunProjections":                  {"relic", 1, "workflowStores closed-root list"},
 	"internal/api/orders_feed.go buildWorkflowRunProjectionsRootOnly":          {"relic", 1, "workflowStores closed-root list (root-only projection)"},

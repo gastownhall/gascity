@@ -113,6 +113,9 @@ type gateRun struct {
 	failed  map[string]bool
 	hungMu  sync.Mutex
 	hung    string
+	// finishOnce and finishCode make finishGate run once per run.
+	finishOnce sync.Once
+	finishCode int
 }
 
 var (
@@ -287,7 +290,7 @@ func (g *gateRun) watch(limit time.Duration) {
 			buf := make([]byte, 8<<20)
 			n := runtime.Stack(buf, true)
 			fmt.Fprintf(os.Stderr, "SPLIT-STRICT HUNG TEST: %s ran longer than %s under the gate; goroutines:\n%s\n", hung, limit, buf[:n]) //nolint:errcheck // best-effort test log
-			code := finishGate(1, g, gateFilesForHang, os.Stderr)
+			code := finishGate(1, false, g, gateFilesForHang, os.Stderr)
 			runHangCleanup()
 			os.Exit(code)
 		}
@@ -325,10 +328,29 @@ var gateFilesForHang GateFiles
 // before GateStart.
 func SetGateFiles(files GateFiles) { gateFilesForHang = files }
 
+// GateChecksBase is the code a TestMain hands the checks it runs around the
+// tests (leak guards, the no-city and session-key guards) in place of m.Run's
+// code: 0 under the gate, so each check answers only for itself, and code
+// unchanged otherwise. A check raises a 0 to 1 but leaves a non-zero code
+// alone, so over a known test failure's code its own failure would not show.
+func GateChecksBase(code int) int {
+	if GateEnabled() {
+		return 0
+	}
+	return code
+}
+
 // GateMain finishes a test binary's run under the gate and returns the exit
-// code the binary should use; it returns code unchanged when the gate is off
-// or in a re-executed helper process. See finishGate for what it reports.
-func GateMain(code int, files GateFiles, out io.Writer) int {
+// code the binary should use. tests is m.Run's code and checks the code the
+// checks around it returned when handed GateChecksBase(tests). Off the gate,
+// and in a re-executed helper process, it returns what the checks would have
+// returned over tests: tests when non-zero, else checks. See finishGate for
+// what it reports.
+func GateMain(tests, checks int, files GateFiles, out io.Writer) int {
+	code := tests
+	if code == 0 {
+		code = checks
+	}
 	if !GateEnabled() {
 		return code
 	}
@@ -338,7 +360,7 @@ func GateMain(code int, files GateFiles, out io.Writer) int {
 	if run == nil {
 		return code
 	}
-	return finishGate(code, run, files, out)
+	return finishGate(tests, checks != 0, run, files, out)
 }
 
 // finishGate restores stdout, aggregates every process's sightings, writes the
@@ -348,12 +370,26 @@ func GateMain(code int, files GateFiles, out io.Writer) int {
 //	SPLIT-STRICT RATCHET: PASS|FAIL  — every violation key is a known,
 //	    adjudicated baseline row (no new key, no triage row, no function past
 //	    its line cap);
-//	SPLIT-STRICT TESTS: PASS|FAIL    — every failing test is a known one.
+//	SPLIT-STRICT TESTS: PASS|FAIL    — every failing test is a known one,
+//	    and every check TestMain runs around the tests passed.
 //
-// The binary's exit code is non-zero when either fails, when a test hung, or
-// when the run failed without a failing test the gate could see (a TestMain
-// check), so a run whose only failures are the known ones passes.
-func finishGate(code int, run *gateRun, files GateFiles, out io.Writer) int {
+// code is m.Run's; checksFailed reports a failed check (GateMain). The
+// binary's exit code is non-zero when either verdict fails, when a test hung,
+// when a check failed, or when the run failed without a failing test the gate
+// could see, so a run whose only failures are the known ones passes.
+//
+// It finishes a run once: when a hung test ends while the watchdog dumps
+// stacks, the watchdog and GateMain both call it, and the later call waits
+// for the first and returns its code.
+func finishGate(code int, checksFailed bool, run *gateRun, files GateFiles, out io.Writer) int {
+	run.finishOnce.Do(func() {
+		run.finishCode = finishRun(code, checksFailed, run, files, out)
+	})
+	return run.finishCode
+}
+
+// finishRun is finishGate's one run.
+func finishRun(code int, checksFailed bool, run *gateRun, files GateFiles, out io.Writer) int {
 	close(run.stop)
 	if run.pipeW != nil {
 		os.Stdout = run.stdout
@@ -416,10 +452,6 @@ func finishGate(code int, run *gateRun, files GateFiles, out io.Writer) int {
 	}
 
 	tests := "PASS"
-	run.mu.Lock()
-	failing := sortedKeys(run.failed)
-	ran := run.ran
-	run.mu.Unlock()
 	known, err := readKnownFailures(files.KnownFailures)
 	if err != nil {
 		say("split-strict: %v", err)
@@ -430,29 +462,21 @@ func finishGate(code int, run *gateRun, files GateFiles, out io.Writer) int {
 		say("split-strict: %v", err)
 		tests = "FAIL"
 	}
-	var newFailing, fixed, flaked []string
-	for _, name := range failing {
-		switch {
-		case known[name] != "":
-		case flaky[name] != "":
-			flaked = append(flaked, name)
-		default:
-			newFailing = append(newFailing, name)
-		}
-	}
-	for name := range known {
-		if ran[name] && !run.failed[name] {
-			fixed = append(fixed, name)
-		}
-	}
-	sort.Strings(fixed)
-	if len(newFailing) > 0 || hung != "" {
+	sorted := run.sortFailing(known, flaky)
+	failing := sorted.failing
+	if len(sorted.newFailing) > 0 || len(sorted.untriaged) > 0 || hung != "" {
 		tests = "FAIL"
 	}
 	if code != 0 && len(failing) == 0 {
 		// The binary failed outside every test (a panic in TestMain or an
 		// init, a crashed helper): nothing here says it was a known failure.
 		say("split-strict: exit %d with no failing test (the binary failed outside every test)", code)
+		tests = "FAIL"
+	}
+	if checksFailed {
+		// A leak guard, the no-city guard or the session-key guard failed;
+		// its report is above. Known test failures do not excuse it.
+		say("split-strict: a check TestMain runs around the tests failed (its report is above)")
 		tests = "FAIL"
 	}
 
@@ -463,22 +487,14 @@ func finishGate(code int, run *gateRun, files GateFiles, out io.Writer) int {
 	fmt.Fprint(out, report)                                                                                                         //nolint:errcheck // best-effort test log
 	fmt.Fprintf(out, "SPLIT-STRICT RATCHET: %s (%d key(s) observed, %d new, %d triage, %d past their line cap, %d out of scope)\n", //nolint:errcheck // best-effort test log
 		ratchet, len(observed), len(result.New), len(result.Triage), len(result.LineCap), len(result.OutOfScope))
-	fmt.Fprintf(out, "SPLIT-STRICT TESTS: %s (%d failing, %d not in %s%s)\n", tests, len(failing), len(newFailing), files.KnownFailures, hungNote(hung)) //nolint:errcheck // best-effort test log
-	for _, name := range newFailing {
-		fmt.Fprintf(out, "  NEW FAILING %s\n", name) //nolint:errcheck // best-effort test log
-	}
-	for _, name := range flaked {
-		fmt.Fprintf(out, "  KNOWN FLAKY %s failed (%s)\n", name, flaky[name]) //nolint:errcheck // best-effort test log
-	}
-	for _, name := range fixed {
-		fmt.Fprintf(out, "  NOW PASSING %s (remove it from %s)\n", name, files.KnownFailures) //nolint:errcheck // best-effort test log
-	}
+	fmt.Fprintf(out, "SPLIT-STRICT TESTS: %s (%d failing, %d not in %s%s%s%s)\n", tests, len(failing), len(sorted.newFailing), files.KnownFailures, untriagedNote(len(sorted.untriaged)), hungNote(hung), checksNote(checksFailed)) //nolint:errcheck // best-effort test log
+	sorted.report(out, files.KnownFailures, flaky)
 	// The tables also go to the log, which every runner keeps (a remote run
 	// does not bring test.outputs back): scripts/split-strict-baseline reads
 	// them from either place.
 	fmt.Fprintf(out, "%s\n%s%s\n", logTableBegin+observedReportName, FormatSiteTable(observed), logTableEnd) //nolint:errcheck // best-effort test log
 	fmt.Fprintf(out, "%s\n%s%s\n", logTableBegin+relicReportName, FormatSiteTable(relics), logTableEnd)      //nolint:errcheck // best-effort test log
-	writeGateFile(run.dir, resultReportName, fmt.Sprintf("ratchet=%s\ntests=%s\nhung=%s\nnew_failing=%s\n", ratchet, tests, hung, strings.Join(newFailing, ",")), out)
+	writeGateFile(run.dir, resultReportName, fmt.Sprintf("ratchet=%s\ntests=%s\nhung=%s\nnew_failing=%s\n", ratchet, tests, hung, strings.Join(sorted.newFailing, ",")), out)
 
 	if failed || ratchet == "FAIL" || tests == "FAIL" {
 		if code != 0 && len(failing) == 0 {
@@ -489,11 +505,78 @@ func finishGate(code int, run *gateRun, files GateFiles, out io.Writer) int {
 	return 0
 }
 
+// failingTests are a run's failing top-level tests sorted against the
+// package's known failures and known flakes.
+type failingTests struct {
+	failing    []string // every failing test
+	newFailing []string // listed nowhere
+	untriaged  []string // known failures listed with an UNTRIAGED reason
+	flaked     []string // known flakes
+	fixed      []string // known failures that ran and passed
+}
+
+// sortFailing sorts the run's failing tests against known and flaky.
+func (g *gateRun) sortFailing(known, flaky map[string]string) failingTests {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	sorted := failingTests{failing: sortedKeys(g.failed)}
+	for _, name := range sorted.failing {
+		switch {
+		case known[name] != "":
+			if Untriaged(known[name]) {
+				sorted.untriaged = append(sorted.untriaged, name)
+			}
+		case flaky[name] != "":
+			sorted.flaked = append(sorted.flaked, name)
+		default:
+			sorted.newFailing = append(sorted.newFailing, name)
+		}
+	}
+	for name := range known {
+		if g.ran[name] && !g.failed[name] {
+			sorted.fixed = append(sorted.fixed, name)
+		}
+	}
+	sort.Strings(sorted.fixed)
+	return sorted
+}
+
+// report prints one line per failing test that is not a plain known
+// failure, and per known failure that now passes.
+func (f failingTests) report(out io.Writer, knownFailures string, flaky map[string]string) {
+	for _, name := range f.newFailing {
+		fmt.Fprintf(out, "  NEW FAILING %s\n", name) //nolint:errcheck // best-effort test log
+	}
+	for _, name := range f.untriaged {
+		fmt.Fprintf(out, "  UNTRIAGED %s: %s lists it without a ruling; replace its reason with why it fails under the gate\n", name, knownFailures) //nolint:errcheck // best-effort test log
+	}
+	for _, name := range f.flaked {
+		fmt.Fprintf(out, "  KNOWN FLAKY %s failed (%s)\n", name, flaky[name]) //nolint:errcheck // best-effort test log
+	}
+	for _, name := range f.fixed {
+		fmt.Fprintf(out, "  NOW PASSING %s (remove it from %s)\n", name, knownFailures) //nolint:errcheck // best-effort test log
+	}
+}
+
 func hungNote(hung string) string {
 	if hung == "" {
 		return ""
 	}
 	return "; HUNG: " + hung
+}
+
+func untriagedNote(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; %d listed UNTRIAGED", n)
+}
+
+func checksNote(failed bool) string {
+	if !failed {
+		return ""
+	}
+	return "; a TestMain check failed"
 }
 
 func dedupeSightings(all []sighting) []sighting {
@@ -562,6 +645,18 @@ func readKnownFlaky(path string) (map[string]string, error) {
 // needs a reason, so the list can only shrink by someone reading it.
 func ParseKnownFailures(r io.Reader) (map[string]string, error) {
 	return parseTestList(r, "known failures", 2)
+}
+
+// UntriagedReason opens the reason scripts/split-strict-baseline writes for a
+// test it adds to a known-failures list: the test's first logged message, not
+// yet a ruling. A failing test listed with it fails the TESTS verdict until
+// someone replaces the reason with why the test fails under the gate (a gate
+// artifact, a misroute and its owner bead, a known violation).
+const UntriagedReason = "UNTRIAGED:"
+
+// Untriaged reports a known-failures reason that is not yet a ruling.
+func Untriaged(reason string) bool {
+	return strings.HasPrefix(strings.TrimSpace(reason), UntriagedReason)
 }
 
 // ParseKnownFlaky reads a known-flaky list: test, tab, the owner bead that

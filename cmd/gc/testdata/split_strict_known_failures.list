@@ -2,6 +2,9 @@
 # Format: <test>\t<reason>. A reason is required. Regenerate with
 # scripts/split-strict-baseline (two or more full runs; a test that failed in
 # some runs but not all is refused unless it is in split_strict_known_flaky.list).
+# A test new to the list gets an "UNTRIAGED: <first log line>" reason, which
+# fails the gate's TESTS verdict and TestSplitStrictGateInputsParse until it is
+# replaced with why the test fails under the gate.
 # The nightly downward ratchet (--check) fails on an entry that now passes.
 TestAnEarlierMigrationsReclassifiedRowsKeepTheFenceOpen	fails under the gate: drain fence fails closed = false, want true (probe error: loading session "gcg-session-904dc4b6bb": getting bead "gcg-session-904dc4b6bb": bead not found)
 TestAnUnknownClassNameStaysOnTheWorkLedger	fails under the gate: unknown class resolved to 0x6315ef68e20, want the work store 0x6315cefe540

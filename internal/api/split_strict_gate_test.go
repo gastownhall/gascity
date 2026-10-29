@@ -59,8 +59,14 @@ func TestSplitStrictGateInputsParse(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer k.Close() //nolint:errcheck // read-only
-	if _, err := splittest.ParseKnownFailures(k); err != nil {
+	known, err := splittest.ParseKnownFailures(k)
+	if err != nil {
 		t.Fatalf("%s: %v", splitStrictFiles.KnownFailures, err)
+	}
+	for name, reason := range known {
+		if splittest.Untriaged(reason) {
+			t.Errorf("%s: %s is untriaged; replace its reason with why it fails under the gate", splitStrictFiles.KnownFailures, name)
+		}
 	}
 	fl, err := os.Open(splitStrictFiles.KnownFlaky)
 	if err != nil {

@@ -135,3 +135,54 @@ func TestSplitStrictBaselineNewKeyIsAlwaysTriage(t *testing.T) {
 		t.Errorf("regeneration dropped the header:\n%s", data)
 	}
 }
+
+// TestSplitStrictBaselineNewKnownFailureIsUntriaged: regeneration keeps a
+// known failure's reason and lists a test new to the list as UNTRIAGED with
+// its first logged message, which the gate fails on until someone rules. The
+// message is the one its own test logged, across parallel tests' interleaved
+// output (=== CONT, === NAME).
+func TestSplitStrictBaselineNewKnownFailureIsUntriaged(t *testing.T) {
+	root, pkg := splitStrictPkg(t)
+	known := filepath.Join(root, pkg, "testdata", "split_strict_known_failures.list")
+	if err := os.WriteFile(known, []byte("# header\nTestOld\tfixture shape\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	log := "=== RUN   TestOld\n" +
+		"    a_test.go:3: old failure\n" +
+		"--- FAIL: TestOld (0.00s)\n" +
+		"=== RUN   TestNew\n" +
+		"=== PAUSE TestNew\n" +
+		"=== RUN   TestOther\n" +
+		"=== PAUSE TestOther\n" +
+		"=== CONT  TestNew\n" +
+		"=== CONT  TestOther\n" +
+		"=== NAME  TestNew\n" +
+		"    a_test.go:9: want 1, got 0\n" +
+		"=== NAME  TestOther\n" +
+		"    a_test.go:12: other test's log line\n" +
+		"--- FAIL: TestNew (0.00s)\n" +
+		"--- PASS: TestOther (0.00s)\n" +
+		"SPLIT-STRICT TABLE BEGIN split-strict-observed.tsv\n" +
+		"# file\tfunc\top\tview\tclass\tcaller\tlines\tcaller_lines\ttests\tevents\ttest_names\tsample_via\n" +
+		"SPLIT-STRICT TABLE END\n"
+	for _, run := range []string{"r1", "r2"} {
+		path := filepath.Join(root, run, "shard_1_of_1", "test.log")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(log), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := runSplitStrictBaseline(t, root, pkg, "r1", "r2"); err != nil {
+		t.Fatalf("regeneration failed: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(known)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "# header\nTestNew\tUNTRIAGED: want 1, got 0\nTestOld\tfixture shape\n"
+	if string(data) != want {
+		t.Fatalf("known failures after regeneration:\n%s\nwant:\n%s", data, want)
+	}
+}

@@ -243,3 +243,110 @@ func TestProjectionParentChildEdgeStillChecksItsIssue(t *testing.T) {
 		t.Fatalf("flags = %d, want 1", sink.testOnlyCount())
 	}
 }
+
+// writeFront is a MemStore front with the optional writes a MemStore lacks
+// (batch delete, edge payloads, the atomic terminal write, graph apply), so
+// the view's guards on them can run.
+type writeFront struct{ *beads.MemStore }
+
+func (f *writeFront) DeleteBatch(ids []string) error {
+	for _, id := range ids {
+		if err := f.Delete(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *writeFront) DepAddWithMetadata(issueID, dependsOnID, depType, _ string) error {
+	return f.DepAdd(issueID, dependsOnID, depType)
+}
+
+func (f *writeFront) CloseWithMetadataIfMatch(id string, rev int64, metadata map[string]string) (beads.Bead, error) {
+	if err := f.SetMetadataBatch(id, metadata); err != nil {
+		return beads.Bead{}, err
+	}
+	if err := f.CloseIfMatch(id, rev); err != nil {
+		return beads.Bead{}, err
+	}
+	return f.Get(id)
+}
+
+func (f *writeFront) ApplyGraphPlan(_ context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
+	ids := make(map[string]string, len(plan.Nodes))
+	for _, node := range plan.Nodes {
+		created, err := f.Create(beads.Bead{Title: node.Title, Type: node.Type, Labels: node.Labels, Metadata: node.Metadata})
+		if err != nil {
+			return nil, err
+		}
+		ids[node.Key] = created.ID
+	}
+	return &beads.GraphApplyResult{IDs: ids}, nil
+}
+
+// TestProjectionGuardsTheRemainingWrites: Reopen, CloseAll, DeleteBatch,
+// DepAddWithMetadata, SetMetadataBatch, DeleteIfMatch and
+// CloseWithMetadataIfMatch refuse a row of the other side and leave it
+// unwritten, and graph apply flags a plan of the other side's class and pins
+// the rows it creates to the view that wrote them.
+func TestProjectionGuardsTheRemainingWrites(t *testing.T) {
+	leaf := beads.NewMemStore()
+	front := &writeFront{MemStore: leaf}
+	sink := newViolationSink()
+	p := projectionOf(front, sink)
+	task := seed(t, leaf, beads.Bead{Title: "task"})
+	open := seed(t, leaf, sessionBead("open"))
+	closed := seed(t, leaf, sessionBead("closed"))
+	if err := leaf.Close(closed.ID); err != nil {
+		t.Fatal(err)
+	}
+	work := p.WorkViewOf(front)
+
+	wantNotHere(t, "Reopen of a session", work.Reopen(closed.ID))
+	if n, err := work.CloseAll([]string{open.ID, task.ID}, nil); err != nil || n != 1 {
+		t.Fatalf("CloseAll over a session and a task = %d, %v; want the task closed alone", n, err)
+	}
+	wantNotHere(t, "DeleteBatch of a session", work.(beads.BatchDeleter).DeleteBatch([]string{open.ID}))
+	wantNotHere(t, "DepAddWithMetadata to a session", work.(beads.DepMetadataWriter).DepAddWithMetadata(task.ID, open.ID, "blocks", "{}"))
+	wantNotHere(t, "SetMetadataBatch of a session", work.SetMetadataBatch(open.ID, map[string]string{"k": "v"}))
+	writer, ok := beads.ConditionalWriterFor(work)
+	if !ok {
+		t.Fatal("conditional writes were stripped")
+	}
+	wantNotHere(t, "DeleteIfMatch of a session", writer.DeleteIfMatch(open.ID, 1))
+	closer, ok := beads.AtomicConditionalCloserFor(work)
+	if !ok {
+		t.Fatal("the atomic terminal write was stripped")
+	}
+	_, err := closer.CloseWithMetadataIfMatch(open.ID, 1, map[string]string{"k": "v"})
+	wantNotHere(t, "CloseWithMetadataIfMatch of a session", err)
+	if got, err := leaf.Get(open.ID); err != nil || got.Status != "open" || got.Metadata["k"] != "" {
+		t.Fatalf("the refused writes changed the open session: %+v, %v", got, err)
+	}
+	if got, err := leaf.Get(closed.ID); err != nil || got.Status != "closed" {
+		t.Fatalf("the refused Reopen changed the closed session: %+v, %v", got, err)
+	}
+
+	applier, ok := beads.GraphApplyFor(work)
+	if !ok {
+		t.Fatal("graph apply was stripped")
+	}
+	result, err := applier.ApplyGraphPlan(context.Background(), &beads.GraphApplyPlan{Nodes: []beads.GraphApplyNode{
+		{Key: "root", Title: "wisp", Metadata: map[string]string{"gc.kind": "wisp"}},
+	}})
+	if err != nil {
+		t.Fatalf("graph apply of a wisp through the work view: %v", err)
+	}
+	root := result.IDs["root"]
+	if _, err := work.Get(root); err != nil {
+		t.Fatalf("the work view lost the wisp its graph apply wrote: %v", err)
+	}
+	if _, err := p.ClassViewOf(front).Get(root); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("the class view sees a wisp the work view's graph apply wrote: %v", err)
+	}
+	// One flag per refused write (seven, CloseAll's session included), the
+	// misrouted graph apply, and the class view's miss of the pinned wisp.
+	if got := sink.testOnlyCount(); got != 9 {
+		t.Fatalf("flags = %d, want 9", got)
+	}
+}

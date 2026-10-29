@@ -230,6 +230,40 @@ func TestProjectionListsHideWrongClassRowsAndFlagOnlySelectiveQueries(t *testing
 	}
 }
 
+// TestProjectionAppliesAdvisoryPredicatesBeforeFlagging: ListQuery.ParentIDs
+// and ReadyQuery.MetadataEquals and Unassigned are advisory, so a store may
+// ignore them and answer a superset the caller re-filters (MemStore does). A
+// hidden row they exclude was never selected: the view hides it without
+// charging the caller, and charges only the hidden rows they select.
+func TestProjectionAppliesAdvisoryPredicatesBeforeFlagging(t *testing.T) {
+	p, leaf, sink := newTestProjection(t)
+	parent := seed(t, leaf, beads.Bead{Title: "task"})
+	seed(t, leaf, sessionBead("unrelated"))
+	child := sessionBead("child")
+	child.ParentID = parent.ID
+	seed(t, leaf, child)
+	work := p.WorkView()
+
+	if _, err := work.List(beads.ListQuery{ParentIDs: []string{parent.ID}, AllowScan: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := sink.testOnlyCount(); got != 1 {
+		t.Fatalf("a ParentIDs list flagged %d hidden row(s), want 1: the session under the parent, not the unrelated one", got)
+	}
+
+	step := map[string]string{"gc.root_bead_id": "gcg-root"}
+	tagged := map[string]string{"gc.root_bead_id": "gcg-root", "k": "v"}
+	seed(t, leaf, beads.Bead{Title: "tagged step", Metadata: tagged})
+	seed(t, leaf, beads.Bead{Title: "assigned tagged step", Assignee: "worker", Metadata: tagged})
+	seed(t, leaf, beads.Bead{Title: "other step", Metadata: step})
+	if _, err := work.Ready(beads.ReadyQuery{MetadataEquals: map[string]string{"k": "v"}, Unassigned: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := sink.testOnlyCount(); got != 2 {
+		t.Fatalf("flags after a MetadataEquals+Unassigned ready read = %d, want 2: only the unassigned tagged step is selected", got)
+	}
+}
+
 // TestProjectionLimitAppliesAfterTheFilter: a limited list must not let
 // hidden rows eat its budget (a split city's store never holds them).
 func TestProjectionLimitAppliesAfterTheFilter(t *testing.T) {
@@ -244,6 +278,63 @@ func TestProjectionLimitAppliesAfterTheFilter(t *testing.T) {
 	ready, err := p.WorkView().Ready(beads.ReadyQuery{Limit: 1})
 	if err != nil || len(ready) != 1 || ready[0].ID != task.ID {
 		t.Fatalf("Ready(limit 1) through the work view = %+v, %v; want the task", ready, err)
+	}
+}
+
+// partialFront answers lists with their rows AND a partial-result error, as
+// CachingStore.List does when its backing read fails on an include-closed
+// list (caching_store_reads.go). Callers that honor beads.IsPartialResult use
+// those rows, so a view must filter them as it filters a complete answer.
+type partialFront struct{ beads.Store }
+
+func (f *partialFront) Backing() beads.Store { return f.Store }
+
+func (f *partialFront) List(q beads.ListQuery) ([]beads.Bead, error) {
+	rows, err := f.Store.List(q)
+	return rows, partialResult(err)
+}
+
+func (f *partialFront) ListOpen(status ...string) ([]beads.Bead, error) {
+	rows, err := f.Store.ListOpen(status...)
+	return rows, partialResult(err)
+}
+
+func partialResult(err error) error {
+	if err != nil {
+		return err
+	}
+	return &beads.PartialResultError{Op: "test list", Err: errors.New("one tier did not answer")}
+}
+
+// TestProjectionFiltersAPartialResultAndKeepsItsError: rows that come with a
+// partial-result error are filtered and flagged like a complete answer, the
+// hidden row does not eat the limit, and the error passes through unchanged.
+func TestProjectionFiltersAPartialResultAndKeepsItsError(t *testing.T) {
+	leaf := beads.NewMemStore()
+	front := &partialFront{Store: leaf}
+	sink := newViolationSink()
+	p := projectionOf(front, sink)
+	tagged := map[string]string{"k": "v"}
+	seed(t, leaf, beads.Bead{Title: "s", Type: "session", Labels: []string{"gc:session"}, Metadata: tagged})
+	task := seed(t, leaf, beads.Bead{Title: "task", Metadata: tagged})
+	work := p.WorkViewOf(front)
+
+	got, err := work.List(beads.ListQuery{Metadata: tagged, Limit: 1})
+	if !beads.IsPartialResult(err) {
+		t.Fatalf("partial List error = %v, want the front's partial-result error unchanged", err)
+	}
+	if len(got) != 1 || got[0].ID != task.ID {
+		t.Fatalf("partial List(limit 1) through the work view = %+v; want the task only (the hidden session must not eat the limit)", got)
+	}
+	if n := sink.testOnlyCount(); n != 1 {
+		t.Fatalf("the session a partial List selected was flagged %d times, want 1", n)
+	}
+	open, err := work.ListOpen()
+	if !beads.IsPartialResult(err) || len(open) != 1 || open[0].ID != task.ID {
+		t.Fatalf("partial ListOpen through the work view = %+v, %v; want the task and the partial-result error", open, err)
+	}
+	if n := sink.testOnlyCount(); n != 1 {
+		t.Fatalf("flags after a broad partial scan = %d, want still 1 (a broad scan only filters)", n)
 	}
 }
 

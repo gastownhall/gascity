@@ -2,6 +2,9 @@
 # Format: <test>\t<reason>. A reason is required. Regenerate with
 # scripts/split-strict-baseline (two or more full runs; a test that failed in
 # some runs but not all is refused unless it is in split_strict_known_flaky.list).
+# A test new to the list gets an "UNTRIAGED: <first log line>" reason, which
+# fails the gate's TESTS verdict and TestSplitStrictGateInputsParse until it is
+# replaced with why the test fails under the gate.
 # The nightly downward ratchet (--check) fails on an entry that now passes.
 TestAPIBeadCloseResolvesTheOwningScopeAsTheCommitRepo	fails under the gate: rig-resident bead resolves to "/data/tmp/TestAPIBeadCloseResolvesTheOwningScopeAsTheCommitRepo3237372320/001", want the rig checkout "/data/tmp/TestAPIBeadClose
 TestAPIBeadWriteStoreErrorEnqueuesNothing	fails under the gate: close on a failing store: status 200, want 500 carrying "write refused"; body: {"status":"closed"}

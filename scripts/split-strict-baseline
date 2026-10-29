@@ -24,7 +24,10 @@ Regenerate (default) rewrites, keeping each file's header comments:
       its caller across the runs.
   <package-dir>/testdata/split_strict_known_failures.list
       every top-level test that failed in EVERY run, with the reason kept from
-      the old list or taken from the test's first failure message.
+      the old list. A test new to the list gets "UNTRIAGED: " and its first
+      logged message, which is not a ruling: it fails the gate's TESTS verdict
+      (and the package's TestSplitStrictGateInputsParse) until someone
+      replaces it with why the test fails under the gate.
 
 It needs at least two runs, and refuses (exit 1) when a test failed in some
 runs but not all and is not in split_strict_known_flaky.list: a flake is
@@ -55,8 +58,14 @@ TABLE_END = "SPLIT-STRICT TABLE END"
 TABLES = (OBSERVED, "split-strict-relics.tsv")
 FAIL = re.compile(r"^--- FAIL: (Test[^\s/]+) \(")
 PASS = re.compile(r"^--- (?:PASS|SKIP): (Test[^\s/]+) \(")
-RUN = re.compile(r"^=== RUN\s+(Test[^\s/]+)$")
+# The top-level test the following lines belong to: one that starts (RUN),
+# resumes (CONT) or names itself before output interleaved with another
+# parallel test's (NAME). A subtest's line names its top-level test; a bare
+# NAME is output no test owns.
+CURRENT = re.compile(r"^=== (?:RUN|CONT|NAME)\s*(Test[^\s/]*)?")
 MESSAGE = re.compile(r"^\s+\S+_test\.go:\d+: (.+)$")
+# The reason a test new to a known-failures list gets (splittest.UntriagedReason).
+UNTRIAGED = "UNTRIAGED:"
 
 
 def header(path):
@@ -100,7 +109,7 @@ class Run:
             self.tables.extend(tables_in_log(text))
             current = None
             for line in text.splitlines():
-                m = RUN.match(line)
+                m = CURRENT.match(line)
                 if m:
                     current = m.group(1)
                     continue
@@ -284,19 +293,22 @@ def main(argv):
         f.write(kept + "".join(r + "\n" for r in rows))
 
     entries = []
+    untriaged = 0
     for name in sorted(failed_all - set(flaky), key=lambda s: s.encode("utf-8")):
         reason = known.get(name, [""])[0]
         if not reason:
             message = next((r.messages[name] for r in runs if name in r.messages), "no failure message in the log")
-            reason = "fails under the gate: " + message.replace("\t", " ")[:160]
+            reason = UNTRIAGED + " " + message.replace("\t", " ")[:160]
+        if reason.startswith(UNTRIAGED):
+            untriaged += 1
         entries.append("%s\t%s\n" % (name, reason))
     # Read the header before opening for write: "w" truncates the file.
     kept = header(known_path)
     with open(known_path, "w", encoding="utf-8") as f:
         f.write(kept + "".join(entries))
 
-    sys.stderr.write("split-strict-baseline: %d key(s) (%d to triage) in %s; %d known failure(s) in %s; %d run(s) agreed\n"
-                     % (len(rows), triage, baseline_path, len(entries), known_path, len(runs)))
+    sys.stderr.write("split-strict-baseline: %d key(s) (%d to triage) in %s; %d known failure(s) (%d untriaged) in %s; %d run(s) agreed\n"
+                     % (len(rows), triage, baseline_path, len(entries), untriaged, known_path, len(runs)))
     return 0
 
 

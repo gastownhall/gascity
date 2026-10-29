@@ -212,7 +212,7 @@ func TestGateFinishReportsRatchetAndTestsSeparately(t *testing.T) {
 		run.observe(line)
 	}
 	var out bytes.Buffer
-	if code := finishGate(1, run, files, &out); code != 0 {
+	if code := finishGate(1, false, run, files, &out); code != 0 {
 		t.Fatalf("a run whose only failure is known exited %d:\n%s", code, out.String())
 	}
 	for _, want := range []string{"SPLIT-STRICT RATCHET: PASS", "SPLIT-STRICT TESTS: PASS", "KNOWN FLAKY TestFlaky failed (mc-19h7i: timing under load)"} {
@@ -227,7 +227,7 @@ func TestGateFinishReportsRatchetAndTestsSeparately(t *testing.T) {
 	run.observe("--- FAIL: TestNew (0.00s)")
 	gateSink.record(SplitViolation{View: "work", Op: "get", Class: "graph", ID: "gcg-1", Site: Site{File: "internal/api/new.go", Line: 3, Func: "api.fresh"}, Test: "TestNew"})
 	out.Reset()
-	if code := finishGate(0, run, files, &out); code != 1 {
+	if code := finishGate(0, false, run, files, &out); code != 1 {
 		t.Fatalf("a run with a new key and a new failing test exited %d", code)
 	}
 	for _, want := range []string{"SPLIT-STRICT RATCHET: FAIL", "SPLIT-STRICT TESTS: FAIL", "NEW FAILING TestNew"} {
@@ -254,11 +254,78 @@ func TestGateFinishReportsRatchetAndTestsSeparately(t *testing.T) {
 	close(run.done)
 	gateSink.record(SplitViolation{View: "work", Op: "get", Class: "sessions", ID: "gcs-1", Site: Site{File: "cmd/gc/fix.go", Line: 3, Func: "gc.fix"}, Pkg: Site{File: "cmd/gc/caller.go", Line: 9, Func: "gc.fixCaller"}, Test: "TestElsewhere"})
 	out.Reset()
-	if code := finishGate(0, run, files, &out); code != 1 {
+	if code := finishGate(0, false, run, files, &out); code != 1 {
 		t.Fatalf("a run reaching a fixture row out of its scope exited %d:\n%s", code, out.String())
 	}
 	if !strings.Contains(out.String(), "SPLIT-STRICT RATCHET: FAIL (1 key(s) observed, 0 new, 0 triage, 0 past their line cap, 1 out of scope)") {
 		t.Fatalf("the summary does not count the out-of-scope fixture row:\n%s", out.String())
+	}
+}
+
+// TestGateFinishFailsAnUntriagedKnownFailure: regeneration lists a test that
+// newly fails under the gate with an UNTRIAGED reason (its first logged
+// message), which is not a ruling. Its failure fails the TESTS verdict until
+// someone replaces the reason with why the test fails; a ruled entry passes.
+func TestGateFinishFailsAnUntriagedKnownFailure(t *testing.T) {
+	t.Setenv(StrictEnv, "1")
+	t.Setenv(StrictReportEnv, "")
+	if !Untriaged("UNTRIAGED: want 1, got 0") || Untriaged("fails under the gate: want 1, got 0") {
+		t.Fatal("Untriaged does not tell a placeholder from a ruling")
+	}
+	dir := t.TempDir()
+	files := GateFiles{Baseline: filepath.Join(dir, "baseline.tsv"), KnownFailures: filepath.Join(dir, "known.list")}
+	if err := os.WriteFile(files.Baseline, []byte("# empty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(files.KnownFailures, []byte("TestRuled\tfixture shape\nTestNew\tUNTRIAGED: want 1, got 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gateSink.reset()
+	t.Cleanup(gateSink.reset)
+	finish := func(failing string) (int, string) {
+		run := newTestGateRun(t)
+		close(run.done)
+		run.observe("=== RUN   " + failing)
+		run.observe("--- FAIL: " + failing + " (0.00s)")
+		var out bytes.Buffer
+		code := finishGate(1, false, run, files, &out)
+		return code, out.String()
+	}
+	if code, out := finish("TestRuled"); code != 0 || !strings.Contains(out, "SPLIT-STRICT TESTS: PASS") {
+		t.Fatalf("a ruled known failure = exit %d:\n%s", code, out)
+	}
+	code, out := finish("TestNew")
+	if code == 0 || !strings.Contains(out, "SPLIT-STRICT TESTS: FAIL") || !strings.Contains(out, "1 listed UNTRIAGED") || !strings.Contains(out, "UNTRIAGED TestNew") {
+		t.Fatalf("an untriaged known failure = exit %d; want the TESTS verdict to fail and name it:\n%s", code, out)
+	}
+}
+
+// TestGateFinishRunsOncePerRun: the watchdog's hang path and GateMain both
+// finish the run when a hung test ends while the watchdog dumps stacks. The
+// later call must not finish it again (close its stop channel twice, which
+// panics, or print a second report); it gets the first call's code.
+func TestGateFinishRunsOncePerRun(t *testing.T) {
+	t.Setenv(StrictEnv, "1")
+	t.Setenv(StrictReportEnv, "")
+	dir := t.TempDir()
+	files := GateFiles{Baseline: filepath.Join(dir, "baseline.tsv"), KnownFailures: filepath.Join(dir, "known.list")}
+	for _, p := range []string{files.Baseline, files.KnownFailures} {
+		if err := os.WriteFile(p, []byte("# empty\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gateSink.reset()
+	t.Cleanup(gateSink.reset)
+	run := newTestGateRun(t)
+	close(run.done)
+	run.observe("=== RUN   TestNew")
+	run.observe("--- FAIL: TestNew (0.00s)")
+	var first, second bytes.Buffer
+	if code := finishGate(1, false, run, files, &first); code != 1 {
+		t.Fatalf("first finish = %d, want 1 (a new failing test):\n%s", code, first.String())
+	}
+	if code := finishGate(0, false, run, files, &second); code != 1 || second.Len() != 0 {
+		t.Fatalf("second finish = %d with output %q; want the first finish's 1 and no second report", code, second.String())
 	}
 }
 
@@ -279,7 +346,7 @@ func TestGateFinishFoldsInHelperProcessEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if code := finishGate(0, run, GateFiles{Baseline: baselinePath, KnownFailures: knownPath}, &out); code != 1 || !strings.Contains(out.String(), "NEW cmd/gc/x.go:4 gc.x") {
+	if code := finishGate(0, false, run, GateFiles{Baseline: baselinePath, KnownFailures: knownPath}, &out); code != 1 || !strings.Contains(out.String(), "NEW cmd/gc/x.go:4 gc.x") {
 		t.Fatalf("a helper process's key was not ratcheted (code %d):\n%s", code, out.String())
 	}
 }
@@ -287,8 +354,71 @@ func TestGateFinishFoldsInHelperProcessEvents(t *testing.T) {
 func TestGateMainIsANoOpWhenTheGateIsOff(t *testing.T) {
 	t.Setenv(StrictEnv, "")
 	var out bytes.Buffer
-	if code := GateMain(7, GateFiles{Baseline: "/nonexistent"}, &out); code != 7 || out.Len() != 0 {
+	if code := GateMain(7, 7, GateFiles{Baseline: "/nonexistent"}, &out); code != 7 || out.Len() != 0 {
 		t.Fatalf("GateMain off = %d, %q", code, out.String())
+	}
+	// Off the gate the checks ran over the tests' own code, so their answer
+	// is the exit code, as without the gate.
+	if code := GateMain(0, 1, GateFiles{Baseline: "/nonexistent"}, &out); code != 1 || out.Len() != 0 {
+		t.Fatalf("GateMain off with a failed check = %d, %q; want 1", code, out.String())
+	}
+	if got := GateChecksBase(3); got != 3 {
+		t.Fatalf("GateChecksBase off = %d, want the tests' code 3", got)
+	}
+}
+
+// TestGateMainFailsTestsOnAFailedCheckBesideKnownFailures: a check TestMain
+// runs around the tests (a leak guard, the no-city or session-key guard)
+// raises a 0 to 1 but leaves a non-zero code alone, so over a known failure's
+// 1 its own failure would not show. Under the gate the checks run over
+// GateChecksBase's 0, and GateMain takes their code apart from the tests':
+// a failed check fails the TESTS verdict and the exit code even when every
+// failing test is a known one.
+func TestGateMainFailsTestsOnAFailedCheckBesideKnownFailures(t *testing.T) {
+	t.Setenv(StrictEnv, "1")
+	t.Setenv(StrictReportEnv, "")
+	if got := GateChecksBase(1); got != 0 {
+		t.Fatalf("GateChecksBase under the gate = %d, want 0 so each check answers for itself", got)
+	}
+	dir := t.TempDir()
+	files := GateFiles{Baseline: filepath.Join(dir, "baseline.tsv"), KnownFailures: filepath.Join(dir, "known.list")}
+	if err := os.WriteFile(files.Baseline, []byte("# empty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(files.KnownFailures, []byte("TestKnown\tfixture shape\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gateSink.reset()
+	t.Cleanup(gateSink.reset)
+	gateRunMu.Lock()
+	saved := activeRun
+	gateRunMu.Unlock()
+	t.Cleanup(func() {
+		gateRunMu.Lock()
+		activeRun = saved
+		gateRunMu.Unlock()
+	})
+	finish := func(checks int) (int, string) {
+		run := newTestGateRun(t)
+		close(run.done)
+		run.observe("=== RUN   TestKnown")
+		run.observe("--- FAIL: TestKnown (0.00s)")
+		gateRunMu.Lock()
+		activeRun = run
+		gateRunMu.Unlock()
+		var out bytes.Buffer
+		code := GateMain(1, checks, files, &out)
+		return code, out.String()
+	}
+	if code, out := finish(0); code != 0 || !strings.Contains(out, "SPLIT-STRICT TESTS: PASS") {
+		t.Fatalf("a known failure with every check passing = exit %d:\n%s", code, out)
+	}
+	code, out := finish(1)
+	if code == 0 {
+		t.Fatalf("a known failure beside a failed check exited 0:\n%s", out)
+	}
+	if !strings.Contains(out, "SPLIT-STRICT TESTS: FAIL") || !strings.Contains(out, "a TestMain check failed") {
+		t.Fatalf("a failed check did not fail the tests verdict:\n%s", out)
 	}
 }
 
@@ -361,7 +491,7 @@ func TestGateFinishNeverPassesWhatItCouldNotJudge(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if code := finishGate(0, run, files, &out); code == 0 {
+	if code := finishGate(0, false, run, files, &out); code == 0 {
 		t.Fatalf("an unreadable events file exited 0:\n%s", out.String())
 	}
 	if !strings.Contains(out.String(), "SPLIT-STRICT RATCHET: FAIL") {
@@ -373,7 +503,7 @@ func TestGateFinishNeverPassesWhatItCouldNotJudge(t *testing.T) {
 	run.observe("=== RUN   TestOK")
 	run.observe("--- PASS: TestOK (0.00s)")
 	out.Reset()
-	if code := finishGate(2, run, files, &out); code == 0 {
+	if code := finishGate(2, false, run, files, &out); code == 0 {
 		t.Fatalf("exit 2 with no failing test exited 0:\n%s", out.String())
 	}
 	if !strings.Contains(out.String(), "SPLIT-STRICT TESTS: FAIL") || !strings.Contains(out.String(), "exit 2 with no failing test") {

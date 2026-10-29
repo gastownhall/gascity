@@ -567,28 +567,39 @@ func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
 			rootIDs = append(rootIDs, root.ID)
 			addBead(root)
 		}
-		// Relic leg (S4 debt): a scope store holds graph roots only as rows
-		// written before the split; beads.RelicGet counts it as debt.
+		// Relic leg (S4 debt): a scope store holds graph roots and their
+		// steps only as rows written before the split; beads.RelicGet and
+		// beads.RelicRead count each read as debt, as humaHandleWorkflowDelete
+		// does.
 		if root, err := beads.RelicGet(info.store, workflowID); err == nil {
 			addRoot(root)
 		}
-		if roots, err := info.store.List(beads.ListQuery{
-			Metadata: map[string]string{
-				beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
-				beadmeta.WorkflowIDMetadataKey: workflowID,
-			},
-			IncludeClosed: true,
+		var roots []beads.Bead
+		if err := beads.RelicRead(func() error {
+			var listErr error
+			roots, listErr = info.store.List(beads.ListQuery{
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
+					beadmeta.WorkflowIDMetadataKey: workflowID,
+				},
+				IncludeClosed: true,
+			})
+			return listErr
 		}); err == nil {
 			for _, root := range roots {
 				addRoot(root)
 			}
 		}
 		for _, rootID := range rootIDs {
-			all, err := info.store.List(beads.ListQuery{
-				Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
-				IncludeClosed: true,
-			})
-			if err != nil {
+			var all []beads.Bead
+			if err := beads.RelicRead(func() error {
+				var listErr error
+				all, listErr = info.store.List(beads.ListQuery{
+					Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
+					IncludeClosed: true,
+				})
+				return listErr
+			}); err != nil {
 				continue
 			}
 			for _, b := range all {
@@ -749,11 +760,15 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 			pa.record("store "+info.scopeRef+" list roots", err)
 		}
 		for _, rootID := range rootIDs {
-			all, err := info.store.List(beads.ListQuery{
-				Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
-				IncludeClosed: true,
-			})
-			if err != nil {
+			var all []beads.Bead
+			if err := beads.RelicRead(func() error {
+				var listErr error
+				all, listErr = info.store.List(beads.ListQuery{
+					Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
+					IncludeClosed: true,
+				})
+				return listErr
+			}); err != nil {
 				pa.record("store "+info.scopeRef+" list descendants", err)
 				continue
 			}

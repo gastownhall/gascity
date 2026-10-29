@@ -347,7 +347,10 @@ func TestMain(m *testing.M) {
 	// children above keep the real installer: their scripts run follow-on
 	// commands that need the installed imports.
 	configureInitRemoteImportsForTests()
-	doltGuard := newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
+	// The tests run innermost, under every check below; splitStrictTestingM,
+	// outermost, reads their code apart from the checks' code.
+	tests := &splitStrictTestsM{m: m}
+	doltGuard := newDoltLeakGuardedTestingM(tests, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
 	testProcessTeardown = func() {
 		doltGuard.cleanupTemporaryPaths()
 		reapManagedDoltTestProcesses()
@@ -362,10 +365,10 @@ func TestMain(m *testing.M) {
 	// -L test-city have exit-empty off and outlive their sessions forever).
 	testRunner = newTmuxLeakGuardedTestingM(testRunner, tmuxSocketRoot)
 	testRunner = noCityGuardTestingM{m: testRunner}
-	testRunner = splitStrictTestingM{m: testRunner}
 	if tmuxSocketCleanupRoot != "" {
 		testRunner = cleanupTestingM{m: testRunner, paths: []string{tmuxSocketCleanupRoot}}
 	}
+	testRunner = splitStrictTestingM{checks: testRunner, tests: tests}
 	testscript.Main(testRunner, map[string]func(){
 		"gc": testscriptGC,
 		"bd": bdTestCmd,

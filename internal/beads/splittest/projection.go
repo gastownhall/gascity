@@ -33,10 +33,12 @@ import (
 //
 //   - a by-id read (Get, DepList, GetExactBatch) of a wrong-class row;
 //   - a list read whose query SELECTED the hidden row: by id, parent, type,
-//     label, metadata or assignee. A broad scan (ListOpen, an unfiltered
-//     Ready, a status-only List) also hides rows but is not flagged: it was
-//     not looking for them, it merely filters what it finds. A list with a
-//     Limit is filtered BEFORE the limit, as a split city's store would be;
+//     label, metadata or assignee. An advisory predicate a store may ignore
+//     (ListQuery.ParentIDs, ReadyQuery.MetadataEquals) selects only the rows
+//     it matches. A broad scan (ListOpen, an unfiltered Ready, a status-only
+//     List) also hides rows but is not flagged: it was not looking for them,
+//     it merely filters what it finds. A list with a Limit is filtered BEFORE
+//     the limit, as a split city's store would be;
 //   - a write (Update, Close, SetMetadata, DepAdd, a conditional, CAS or
 //     guarded-batch write, ...) that touches a wrong-class row, which then
 //     fails with ErrNotFound as it would on a split city;
@@ -407,10 +409,13 @@ func (v *view) flag(op string, b beads.Bead, read bool) {
 	v.p.sink.record(violation)
 }
 
-// filter drops the rows this view cannot see, flagging them when the query
-// selected them.
-func (v *view) filter(op string, selective bool, rows []beads.Bead, err error) ([]beads.Bead, error) {
-	if err != nil || len(rows) == 0 {
+// filter drops the rows this view cannot see, flagging the hidden rows the
+// query selected (selects; nil for a broad scan, which selects none). Rows
+// that come with an error are filtered the same way (a partial result,
+// beads.PartialResultError, is rows callers use), and the error passes
+// through unchanged.
+func (v *view) filter(op string, selects func(beads.Bead) bool, rows []beads.Bead, err error) ([]beads.Bead, error) {
+	if len(rows) == 0 {
 		return rows, err
 	}
 	out := make([]beads.Bead, 0, len(rows))
@@ -419,11 +424,11 @@ func (v *view) filter(op string, selective bool, rows []beads.Bead, err error) (
 			out = append(out, b)
 			continue
 		}
-		if selective {
+		if selects != nil && selects(b) {
 			v.flag(op, b, true)
 		}
 	}
-	return out, nil
+	return out, err
 }
 
 // notHere is the error a split city's store returns for a row it does not hold.
@@ -465,7 +470,7 @@ func (v *view) List(q beads.ListQuery) ([]beads.Bead, error) {
 	limit := q.Limit
 	q.Limit = 0
 	rows, err := v.Store.List(q)
-	rows, err = v.filter("list", listQuerySelective(q), rows, err)
+	rows, err = v.filter("list", listSelects(q), rows, err)
 	return limitRows(rows, limit), err
 }
 
@@ -482,14 +487,14 @@ func (v *view) CachedList(q beads.ListQuery) ([]beads.Bead, bool) {
 	if !hit {
 		return nil, false
 	}
-	rows, _ = v.filter("list", listQuerySelective(q), rows, nil)
+	rows, _ = v.filter("list", listSelects(q), rows, nil)
 	return limitRows(rows, limit), true
 }
 
 // ListOpen is a broad scan: it hides wrong-class rows without flagging.
 func (v *view) ListOpen(status ...string) ([]beads.Bead, error) {
 	rows, err := v.Store.ListOpen(status...)
-	return v.filter("list-open", false, rows, err)
+	return v.filter("list-open", nil, rows, err)
 }
 
 // Ready hides wrong-class rows, flagging them when the query selected them. A
@@ -497,7 +502,7 @@ func (v *view) ListOpen(status ...string) ([]beads.Bead, error) {
 func (v *view) Ready(q ...beads.ReadyQuery) ([]beads.Bead, error) {
 	unlimited, limit := unlimitedReady(q)
 	rows, err := v.Store.Ready(unlimited...)
-	rows, err = v.filter("ready", readyQuerySelective(q), rows, err)
+	rows, err = v.filter("ready", readySelects(q), rows, err)
 	return limitRows(rows, limit), err
 }
 
@@ -511,7 +516,7 @@ func (v *view) ReadyContext(ctx context.Context, q ...beads.ReadyQuery) ([]beads
 	} else {
 		rows, err = v.Store.Ready(unlimited...)
 	}
-	rows, err = v.filter("ready", readyQuerySelective(q), rows, err)
+	rows, err = v.filter("ready", readySelects(q), rows, err)
 	return limitRows(rows, limit), err
 }
 
@@ -531,7 +536,7 @@ func unlimitedReady(q []beads.ReadyQuery) ([]beads.ReadyQuery, int) {
 // them, so every hidden child is flagged.
 func (v *view) Children(parentID string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
 	rows, err := v.Store.Children(parentID, opts...)
-	return v.filter("children", true, rows, err)
+	return v.filter("children", selectsAll, rows, err)
 }
 
 // ChildrenOfAny is Children over several parents, through the front's batched
@@ -542,27 +547,27 @@ func (v *view) ChildrenOfAny(parentIDs []string, opts ...beads.QueryOpt) ([]bead
 		return beads.ChildrenOfAnyPerParent(v, parentIDs, opts...)
 	}
 	rows, err := batch.ChildrenOfAny(parentIDs, opts...)
-	return v.filter("children", true, rows, err)
+	return v.filter("children", selectsAll, rows, err)
 }
 
 // ListByLabel hides and flags wrong-class rows.
 func (v *view) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
 	rows, err := v.Store.ListByLabel(label, 0, opts...)
-	rows, err = v.filter("list-by-label", true, rows, err)
+	rows, err = v.filter("list-by-label", selectsAll, rows, err)
 	return limitRows(rows, limit), err
 }
 
 // ListByAssignee hides and flags wrong-class rows.
 func (v *view) ListByAssignee(assignee, status string, limit int) ([]beads.Bead, error) {
 	rows, err := v.Store.ListByAssignee(assignee, status, 0)
-	rows, err = v.filter("list-by-assignee", true, rows, err)
+	rows, err = v.filter("list-by-assignee", selectsAll, rows, err)
 	return limitRows(rows, limit), err
 }
 
 // ListByMetadata hides and flags wrong-class rows.
 func (v *view) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
 	rows, err := v.Store.ListByMetadata(filters, 0, opts...)
-	rows, err = v.filter("list-by-metadata", true, rows, err)
+	rows, err = v.filter("list-by-metadata", selectsAll, rows, err)
 	return limitRows(rows, limit), err
 }
 
@@ -1344,21 +1349,69 @@ func (v *view) CloseStore() error {
 	return nil
 }
 
-// listQuerySelective reports a list query that picks rows by something a
-// class owns: ids, a parent, a type, a label, metadata or an assignee. A query
+// selectsAll is the row predicate of a read that selected every row it
+// returned: by parent, label, assignee or metadata.
+func selectsAll(beads.Bead) bool { return true }
+
+// listSelects returns the predicate a hidden row must satisfy for a list query
+// to have selected it, or nil for a broad scan. A query that picks rows by
+// something a class owns (ids, a parent, a type, a label, metadata or an
+// assignee) selected the rows the store returned, except that ParentIDs is
+// advisory (beads.ListQuery): a store that ignores it answers a superset the
+// caller re-filters, so a row counts only when its parent is listed. A query
 // constrained only by status, time, limit or tier is a broad scan.
-func listQuerySelective(q beads.ListQuery) bool {
-	return len(q.IDs) > 0 || q.ParentID != "" || len(q.ParentIDs) > 0 || q.Type != "" ||
-		q.Label != "" || len(q.Metadata) > 0 || q.Assignee != "" || len(q.Assignees) > 0
+func listSelects(q beads.ListQuery) func(beads.Bead) bool {
+	if len(q.IDs) == 0 && q.ParentID == "" && len(q.ParentIDs) == 0 && q.Type == "" &&
+		q.Label == "" && len(q.Metadata) == 0 && q.Assignee == "" && len(q.Assignees) == 0 {
+		return nil
+	}
+	if len(q.ParentIDs) == 0 {
+		return selectsAll
+	}
+	parents := make(map[string]bool, len(q.ParentIDs))
+	for _, id := range q.ParentIDs {
+		parents[id] = true
+	}
+	return func(b beads.Bead) bool { return parents[b.ParentID] }
 }
 
-// readyQuerySelective reports a ready query that picks rows by assignee or
-// metadata; an unfiltered ready scan is broad.
-func readyQuerySelective(qs []beads.ReadyQuery) bool {
+// readySelects returns the predicate a hidden row must satisfy for a ready
+// query to have selected it, or nil for an unfiltered ready scan (broad). A
+// query picks rows by assignee or metadata; MetadataEquals and Unassigned are
+// advisory (beads.ReadyQuery), so a store may answer a superset, and a row
+// counts only when it satisfies every predicate the query carries.
+func readySelects(qs []beads.ReadyQuery) func(beads.Bead) bool {
+	var selective []beads.ReadyQuery
 	for _, q := range qs {
 		if q.Assignee != "" || len(q.MetadataEquals) > 0 {
-			return true
+			selective = append(selective, q)
 		}
 	}
-	return false
+	if len(selective) == 0 {
+		return nil
+	}
+	return func(b beads.Bead) bool {
+		for _, q := range selective {
+			if readyQueryMatches(q, b) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// readyQueryMatches applies a ready query's row predicates to b.
+func readyQueryMatches(q beads.ReadyQuery, b beads.Bead) bool {
+	if q.Assignee != "" && b.Assignee != q.Assignee {
+		return false
+	}
+	if q.Unassigned && b.Assignee != "" {
+		return false
+	}
+	for key, value := range q.MetadataEquals {
+		if got, ok := b.Metadata[key]; !ok || got != value {
+			return false
+		}
+	}
+	return true
 }

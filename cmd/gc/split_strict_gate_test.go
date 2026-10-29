@@ -68,9 +68,27 @@ func (splitStrictGate) classView(store beads.Store) beads.Store {
 	return splittest.ProjectionOf(store).ClassViewOf(store)
 }
 
+// splitStrictTestsM runs the package's tests under every TestMain check and
+// keeps m.Run's code. It hands the checks splittest.GateChecksBase's answer,
+// which under the gate is 0, so each check reports only its own failure.
+type splitStrictTestsM struct {
+	m    testscript.TestingM
+	code int
+}
+
+func (t *splitStrictTestsM) Run() int {
+	t.code = t.m.Run()
+	return splittest.GateChecksBase(t.code)
+}
+
 // splitStrictTestingM starts the gate before the package's tests and reports
-// it after (a no-op without GC_TEST_SPLIT_STRICT=1).
-type splitStrictTestingM struct{ m testscript.TestingM }
+// it after (a no-op without GC_TEST_SPLIT_STRICT=1). checks is the TestMain
+// chain around tests (the leak, no-city and session-key guards); the gate
+// fails its TESTS verdict when one of them failed, whatever the tests did.
+type splitStrictTestingM struct {
+	checks testscript.TestingM
+	tests  *splitStrictTestsM
+}
 
 func (m splitStrictTestingM) Run() int {
 	// A hung test exits the binary from the watchdog; run TestMain's
@@ -82,7 +100,8 @@ func (m splitStrictTestingM) Run() int {
 		}
 	})
 	splittest.GateStart()
-	return splittest.GateMain(m.m.Run(), splitStrictFiles, os.Stderr)
+	checks := m.checks.Run()
+	return splittest.GateMain(m.tests.code, checks, splitStrictFiles, os.Stderr)
 }
 
 func TestSplitStrictGateInputsParse(t *testing.T) {
@@ -105,8 +124,14 @@ func TestSplitStrictGateInputsParse(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer k.Close() //nolint:errcheck // read-only
-	if _, err := splittest.ParseKnownFailures(k); err != nil {
+	known, err := splittest.ParseKnownFailures(k)
+	if err != nil {
 		t.Fatalf("%s: %v", splitStrictFiles.KnownFailures, err)
+	}
+	for name, reason := range known {
+		if splittest.Untriaged(reason) {
+			t.Errorf("%s: %s is untriaged; replace its reason with why it fails under the gate", splitStrictFiles.KnownFailures, name)
+		}
 	}
 	fl, err := os.Open(splitStrictFiles.KnownFlaky)
 	if err != nil {
