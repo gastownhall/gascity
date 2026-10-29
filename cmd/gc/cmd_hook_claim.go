@@ -75,6 +75,8 @@ const (
 
 var hookClaimMutationTimeout = 10 * time.Second
 
+const hookClaimReadbackTimeout = 10 * time.Second
+
 // hookClaimWindowDefault bounds how long after a `gc hook --claim` invocation
 // began a claim mutation may still run. Past it, the turn that invoked the
 // command is assumed gone and the claim would be born into nothing.
@@ -804,17 +806,39 @@ func (ops *hookClaimOps) claimWindowOrDefault() time.Duration {
 	return resolveHookClaimWindow()
 }
 
+// hookClaimLanding carries the tier's clock to the shared store classifier.
+// It belongs to one synchronous claim call and is never persisted on the bead.
+type hookClaimLanding struct {
+	now func() time.Time
+	at  time.Time
+}
+
+type hookClaimLandingKey struct{}
+
+// claimWithLanding records CAS completion before the store's canonical read.
+// An injected Claim that does not use hookClaimThroughStore keeps the existing
+// return-time fallback; production work and class stores both record the CAS.
+func (ops *hookClaimOps) claimWithLanding(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, time.Time, error) {
+	landing := &hookClaimLanding{now: ops.nowOrWallClock}
+	ctx = context.WithValue(ctx, hookClaimLandingKey{}, landing)
+	claimed, ok, err := ops.Claim(ctx, dir, env, beadID, assignee)
+	if landing.at.IsZero() {
+		landing.at = ops.nowOrWallClock()
+	}
+	return claimed, ok, landing.at, err
+}
+
 // claimLandingWindowSpent reports whether a claim CAS landed too late to hand to
 // the invoking turn: past the claim window PLUS the reserved claim budget. The
 // window fences when a claim may START (claimWindowSpent); a claim started
 // inside it owns a separate, full mutation budget (claimMutationContext), so
 // only a CAS that overran that reserved budget is a straddle.
 //
-// landedAt is the instant the claim CAS returned, stamped by the tier that ran
-// it, and the landing age is taken there rather than now. The question is
-// whether the CAS landed after the invoking turn could have received it; the
-// store reads a tier makes after the CAS (the post-CAS workflow stop gate, the
-// adoption re-stamp) are not the claim landing, and on a slow store they would
+// landedAt is the instant the claim CAS returned, stamped with the tier's clock
+// before canonical readback. The landing age is taken there rather than now:
+// the question is whether the CAS landed after the invoking turn could have
+// received it. Store reads after the CAS (canonical readback, the post-CAS
+// workflow stop gate, the adoption re-stamp) are not the claim landing, and on a slow store they would
 // otherwise turn a claim that landed in time into a straddle unwind.
 func (ops *hookClaimOps) claimLandingWindowSpent(landedAt time.Time) bool {
 	return ops.claimLandingAge(landedAt) > ops.claimWindowOrDefault()+hookClaimMutationTimeout
@@ -925,10 +949,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		if hookClaimWorkflowStop(ctx, candidate, claimActor, opts, ops, dir, stderr) {
 			continue
 		}
-		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
-		// The straddle fence asks when the CAS landed; stamp it before the
-		// re-stamp and the workflow re-check below spend any more store time.
-		landedAt := ops.nowOrWallClock()
+		claimed, ok, landedAt, err := ops.claimWithLanding(ctx, dir, opts.Env, candidate.ID, claimActor)
 		if err != nil {
 			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err) || hookClaimBeadIsAWisp(err)) {
 				// The read federated and the write did not: the assigned tier
@@ -1103,10 +1124,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		if hookClaimWorkflowStop(ctx, candidate, opts.Assignee, opts, ops, dir, stderr) {
 			continue
 		}
-		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
-		// The straddle fence asks when the CAS landed; stamp it before the
-		// workflow re-check below spends any more store time.
-		landedAt := ops.nowOrWallClock()
+		claimed, ok, landedAt, err := ops.claimWithLanding(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
 		if err != nil {
 			if ok {
 				// The atomic mutation committed, but its canonical readback failed.
@@ -2391,9 +2409,27 @@ func hookSkipDoneWorkflowWithBdStore(ctx context.Context, dir string, env []stri
 
 func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
 	store := hookClaimBdStoreContext(ctx, dir, env, assignee)
-	return hookClaimThroughStore(beadID, assignee,
-		func() (beads.Bead, bool, error) { return store.Claim(beadID) },
-		store.Get)
+	committed := false
+	return hookClaimThroughStore(ctx, beadID, assignee,
+		func() (beads.Bead, bool, error) {
+			claimed, ok, err := store.Claim(beadID)
+			committed = ok && err == nil
+			return claimed, ok, err
+		},
+		func(id string) (beads.Bead, error) {
+			if !committed {
+				// Conflict diagnostics keep the original mutation budget.
+				return store.Get(id)
+			}
+			// A committed CAS can consume the mutation deadline. Verify its
+			// canonical owner with a separate bounded read, in the same store
+			// and actor environment, without replaying the mutation. The shared
+			// classifier still returns ok=true on a failed committed read so
+			// the claim tiers stop rather than report idle or claim more work.
+			readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hookClaimReadbackTimeout)
+			defer cancel()
+			return hookClaimBdStoreContext(readCtx, dir, env, assignee).Get(id)
+		})
 }
 
 // hookClaimReclaimWithBdStore attempts a scoped stale-lease reclaim (ga-7rj87d
@@ -2421,8 +2457,15 @@ func hookClaimReclaimWithBdStore(ctx context.Context, dir string, env []string, 
 // assignee implicitly (BEADS_ACTOR in the subprocess env) while the class
 // binding's takes it explicitly, so the caller binds them and this function
 // never has to know which shape it is holding.
-func hookClaimThroughStore(beadID, assignee string, claim func() (beads.Bead, bool, error), get func(string) (beads.Bead, error)) (beads.Bead, bool, error) {
+func hookClaimThroughStore(ctx context.Context, beadID, assignee string, claim func() (beads.Bead, bool, error), get func(string) (beads.Bead, error)) (beads.Bead, bool, error) {
 	claimed, ok, err := claim()
+	if ok && err == nil {
+		// Record the successful mutation before ownership checks or canonical
+		// readback can spend more time. Both store paths use the tier's clock.
+		if landing, present := ctx.Value(hookClaimLandingKey{}).(*hookClaimLanding); present {
+			landing.at = landing.now()
+		}
+	}
 	if err != nil {
 		return beads.Bead{}, false, err
 	}

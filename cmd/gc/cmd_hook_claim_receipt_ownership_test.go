@@ -134,7 +134,7 @@ func TestHookClaimThroughStoreRefusesForeignOwnershipOnEitherRead(t *testing.T) 
 		{"canonical readback names another seat", "worker-1", "other-seat"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			claimed, ok, err := hookClaimThroughStore("work-1", "worker-1",
+			claimed, ok, err := hookClaimThroughStore(context.Background(), "work-1", "worker-1",
 				func() (beads.Bead, bool, error) {
 					return beads.Bead{ID: "work-1", Status: "in_progress", Assignee: tc.mutated}, true, nil
 				},
