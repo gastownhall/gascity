@@ -700,6 +700,59 @@ func TestStartRuntimeOnlyProceedsWhenOrphanConfirmedDead(t *testing.T) {
 	}
 }
 
+// AC-7: an untracked root carrying this session's identity and city whose
+// parent is tmux is a live runtime the provider does not list (a tmux server
+// on a socket it cannot reach), not an orphan: the start refuses with
+// ErrRuntimeUnavailable naming the pid, terminating nothing, not even a
+// reparented sibling, and starting nothing.
+func TestStartRefusesTmuxParentedUntrackedRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		start func(mgr *Manager, info Info) error
+	}{
+		{"Start", func(mgr *Manager, info Info) error {
+			return mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+		}},
+		{"StartRuntimeOnly", func(mgr *Manager, info Info) error {
+			return startRuntimeOnly(t, mgr, info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, sp, info := seedSuspendedResumeTarget(t)
+			sp.results = []runtime.LiveRuntime{
+				{PID: 1235, PPID: 1},
+				{PID: 1234, PPID: 4200, ParentIsProviderInfrastructure: true},
+			}
+
+			err := tc.start(mgr, info)
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("%s error = %v, want it to wrap runtime.ErrRuntimeUnavailable", tc.name, err)
+			}
+			if !strings.Contains(err.Error(), "pid=1234") {
+				t.Fatalf("%s error = %v, want it to name pid=1234", tc.name, err)
+			}
+			if hasEventPrefix(sp.events, "terminate:") || hasEventPrefix(sp.events, "start:") {
+				t.Fatalf("events = %v, want no terminate and no start", sp.events)
+			}
+		})
+	}
+}
+
+// AC-7: a reparented root (PPID 1) with no tmux-parented sibling is an orphan:
+// it is terminated and the start proceeds.
+func TestStartRuntimeOnlyTerminatesReparentedRootWithoutTmuxSibling(t *testing.T) {
+	mgr, sp, info := seedSuspendedResumeTarget(t)
+	sp.results = []runtime.LiveRuntime{{PID: 1234, PPID: 1}}
+
+	if err := startRuntimeOnly(t, mgr, info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+		t.Fatalf("StartRuntimeOnly: %v", err)
+	}
+	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
+	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+}
+
 // TestStartUnwindsACPRouteWhenOrphanNotConfirmedDead pins the route-unwinding
 // half of the fix: when the resume path reserved an ACP route before the
 // pre-start orphan gate, a refusal must call unroute() so the reservation is
