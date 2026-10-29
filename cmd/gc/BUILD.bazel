@@ -1749,6 +1749,7 @@ go_test(
         "prepared_start_input_fence_test.go",
         "prepared_start_oversized_prompt_test.go",
         "prepared_start_priming_test.go",
+        "prepared_workdir_split_test.go",
         "prime_inbox_test.go",
         "prime_mail_step_overlap_test.go",
         "prime_manual_provider_session_test.go",

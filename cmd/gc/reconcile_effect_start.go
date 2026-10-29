@@ -105,7 +105,7 @@ func transcriptOf(r effectReads, w *World, row session.Info, tp TemplateParams) 
 // launchWorkDir is the work dir prepare launches row in: the task's, the
 // row's, the template's.
 func launchWorkDir(r effectReads, w *World, row session.Info, tp TemplateParams) string {
-	if dir := resolvePreparedTaskWorkDir(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w)); dir != "" {
+	if dir := resolvePreparedTaskWorkDir(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w), nil); dir != "" {
 		return dir
 	}
 	if dir := preparedStartSessionWorkDir(row); dir != "" {
