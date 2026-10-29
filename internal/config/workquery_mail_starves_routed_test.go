@@ -160,6 +160,70 @@ func TestEffectiveWorkQueryInProgressSkipsAssignedMailWisp(t *testing.T) {
 	}
 }
 
+// TestEffectiveWorkQueryMailOnlyStoreYieldsEmptyFrontier pins AC-4: mail is
+// delivered by nudge and inbox, never claimed through the work hook (#4419),
+// so a store whose only claimable-looking row is a message bead must leave
+// the frontier empty — not hand the hook a row it is certain to refuse, which
+// reads as no_work with candidates present.
+func TestEffectiveWorkQueryMailOnlyStoreYieldsEmptyFrontier(t *testing.T) {
+	a := singleSessionConfigAgent()
+	env := map[string]string{
+		"GC_SESSION_ID":   "gcg-session-5815",
+		"GC_SESSION_NAME": "gascity--run-operator",
+	}
+	mail := `{"id":"gcg-mail-1","status":"open","issue_type":"message","assignee":"gcg-session-5815","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
+
+	// runShellWithFakeBd fails the test on a non-zero exit, so reaching the
+	// assertion is itself the exit-0 half of the contract.
+	out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), env,
+		fakeBdStatusSnapshots(mail, ""))
+	if got := strings.TrimSpace(out); got != "[]" {
+		t.Fatalf("mail-only store must yield an empty frontier, got %q", got)
+	}
+}
+
+// TestEffectiveWorkQuerySkipsMailAddressedToAliasIdentity: the identity loop
+// probes GC_SESSION_ID, GC_SESSION_NAME and GC_ALIAS, so a message addressed to
+// the seat's third identity must be skipped for every $id it matches, not just
+// the first two.
+func TestEffectiveWorkQuerySkipsMailAddressedToAliasIdentity(t *testing.T) {
+	a := singleSessionConfigAgent()
+	env := map[string]string{
+		// GC_ALIAS is this seat's QualifiedName — a distinct third identity.
+		"GC_SESSION_ID":   "gcg-session-5815",
+		"GC_SESSION_NAME": "gascity--run-operator",
+		"GC_ALIAS":        a.QualifiedName(),
+	}
+	mail := `{"id":"gcg-mail-alias","status":"open","issue_type":"message","assignee":"` + a.QualifiedName() + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
+	routed := `{"id":"gcg-routed-wisp","status":"open","issue_type":"task","assignee":"","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:05:00Z","metadata":{"gc.routed_to":"` + a.QualifiedName() + `"}}`
+
+	out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), env,
+		fakeBdStatusSnapshots(mail+`,`+routed, ""))
+	if strings.Contains(out, "gcg-mail-alias") || !strings.Contains(out, "gcg-routed-wisp") {
+		t.Fatalf("mail to the alias identity starved routed work: served %q, want gcg-routed-wisp and no message bead", out)
+	}
+}
+
+// TestEffectiveWorkQueryLegacyControlSkipsMailAddressedToCandidateIdentity:
+// the legacy control-dispatcher loop probes each identity's workflow-control
+// candidate too, so a message addressed to that candidate identity must not
+// exit the query ahead of the dispatcher's own routed work.
+func TestEffectiveWorkQueryLegacyControlSkipsMailAddressedToCandidateIdentity(t *testing.T) {
+	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
+	env := map[string]string{
+		"GC_SESSION_NAME": "gascity--control-dispatcher",
+		"GC_ALIAS":        "gascity/control-dispatcher",
+	}
+	mail := `{"id":"gcg-mail-legacy","status":"open","issue_type":"message","assignee":"gascity/workflow-control","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
+	routed := `{"id":"gcg-dispatch-wisp","status":"open","issue_type":"task","assignee":"","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:05:00Z","metadata":{"gc.routed_to":"gascity/control-dispatcher"}}`
+
+	out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), env,
+		fakeBdStatusSnapshots(mail+`,`+routed, ""))
+	if strings.Contains(out, "gcg-mail-legacy") || !strings.Contains(out, "gcg-dispatch-wisp") {
+		t.Fatalf("mail to the legacy candidate identity starved dispatcher work: served %q, want gcg-dispatch-wisp and no message bead", out)
+	}
+}
+
 // TestEffectiveWorkQueryReadyReadsDoNotExcludeMessageType pins the fix's
 // boundary from the other side: mail is withheld at the jq ephemeral probes,
 // so NO generated `bd ready` / `gc ready` read may grow an
