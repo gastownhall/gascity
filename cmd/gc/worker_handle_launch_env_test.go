@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -334,5 +335,79 @@ command = "/bin/echo"
 	}
 	if got := ordinaryEnv["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"]; got != wantOrdinary {
 		t.Errorf("ordinary GC_CONTROL_DISPATCHER_TRACE_DEFAULT = %q, want resolveTemplate's %q", got, wantOrdinary)
+	}
+}
+
+// AC-6: the resumed env layers baseline < workspace < provider < agent <
+// generated < upstream < pinned overlays, and the persisted identity wins.
+func TestResumeLaunchEnvLayerPrecedence(t *testing.T) {
+	t.Setenv("LANG", "caller-lang")
+	t.Setenv("GC_CONTROLLER_TOKEN", "caller-token")
+	c := newResumeLaunchEnvCity(t, `[workspace]
+name = "test-city"
+
+[workspace.env]
+LANG = "workspace"
+L_WS_PROV = "workspace"
+GC_CONTROLLER_TOKEN = "workspace-token"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "myrig"
+path = "{{RIG_ROOT}}"
+
+[upstreams.serving.env]
+L_AGENT_UP = "upstream"
+GT_ROOT = "upstream-root"
+`+execenv.UsageMetricsDisableEnv+` = "upstream-metrics"
+
+[[agent]]
+name = "worker"
+dir = "myrig"
+provider = "stub"
+upstream = "serving"
+max_active_sessions = 3
+
+[agent.env]
+L_PROV_AGENT = "agent"
+L_AGENT_UP = "agent"
+GC_RIG = "agent-rig"
+GC_SESSION_ID = "agent-forged"
+GC_SESSION_NAME = "agent-forged"
+GC_ALIAS = "agent-forged"
+GC_TEMPLATE = "agent-forged"
+
+[providers.stub]
+command = "/bin/echo"
+
+[providers.stub.env]
+L_WS_PROV = "provider"
+L_PROV_AGENT = "provider"
+`)
+	info := c.stoppedSession(t, "myrig/worker", "myrig/worker-1", "probe-alias", t.TempDir())
+
+	env := c.resume(t, info, resumeByMessage).Env
+
+	for key, want := range map[string]string{
+		"LANG":                         "workspace",
+		"L_WS_PROV":                    "provider",
+		"L_PROV_AGENT":                 "agent",
+		"GC_RIG":                       "myrig",
+		"L_AGENT_UP":                   "upstream",
+		"GT_ROOT":                      "upstream-root",
+		execenv.UsageMetricsDisableEnv: execenv.UsageMetricsDisableValue,
+		"GC_SESSION_ID":                info.ID,
+		"GC_SESSION_NAME":              info.SessionName,
+		"GC_ALIAS":                     "probe-alias",
+		"GC_TEMPLATE":                  "myrig/worker",
+	} {
+		if got := env[key]; got != want {
+			t.Errorf("start env[%s] = %q, want %q", key, got, want)
+		}
+	}
+	if value, ok := env["GC_CONTROLLER_TOKEN"]; !ok || value != "" {
+		t.Errorf("start env[GC_CONTROLLER_TOKEN] = %q (present %v), want present and empty", value, ok)
 	}
 }
