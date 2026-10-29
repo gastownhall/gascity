@@ -331,3 +331,51 @@ func TestRunControlDispatcherNotOpenSkipContract(t *testing.T) {
 		t.Errorf("scope store closed %d times, want 1 (the seam owns the store it opened)", got)
 	}
 }
+
+// TestDrainWorkflowServeWorkCountsQuarantineAsProgress is the AC-5 guard: a
+// ProcessControl error that handleControlDispatchError quarantines closes the
+// control bead and returns nil, so the dispatch must still count as processed
+// — the quarantine close IS the write, and the skip arm must not swallow it.
+// An unsupported control kind classifies TierNone and is quarantined on first
+// refusal.
+func TestDrainWorkflowServeWorkCountsQuarantineAsProgress(t *testing.T) {
+	cityDir, store := setUpControlReadyFileStoreCity(t)
+	noBDOnPathForTest(t)
+	ensureDispatchWakeDir(t, cityDir)
+
+	control := createRoutedControl(t, store, "kind-with-no-handler")
+
+	stubWorkflowServeIdlePolling(t, 0)
+	serveCalls := 0
+	stubWorkflowServeList(t, func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		// Offer the bead only while it is open; the dispatch below closes it.
+		current, getErr := store.Get(control.ID)
+		if getErr == nil && current.Status == "open" {
+			return []hookBead{{ID: control.ID, Metadata: hookBeadMetadata{beadmeta.KindMetadataKey: "kind-with-no-handler"}}}, nil
+		}
+		return nil, nil
+	})
+	prevServe := controlDispatcherServe
+	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer, emits *executionEmitDeferral) error {
+		serveCalls++
+		return prevServe(cityPath, storePath, beadID, stdout, stderr, emits)
+	}
+	t.Cleanup(func() { controlDispatcherServe = prevServe })
+
+	result, err := drainWorkflowServeWork(freshnessControlAgent(), cityDir, cityDir, workflowServeControlReadyQuery(freshnessControlAgent()), nil, io.Discard)
+	if err != nil {
+		t.Fatalf("drainWorkflowServeWork: %v", err)
+	}
+	if serveCalls != 1 {
+		t.Errorf("control dispatched %d times, want 1 (a quarantine close is terminal for the bead)", serveCalls)
+	}
+	if !result.processedAny {
+		t.Errorf("processedAny = false for a quarantined control, want true: the quarantine close counts as progress")
+	}
+	if current, getErr := store.Get(control.ID); getErr != nil || current.Status != "closed" {
+		t.Errorf("control status = %q (err %v), want closed by quarantine", current.Status, getErr)
+	}
+	if _, statErr := os.Stat(dispatchWakeFile(cityDir)); statErr != nil {
+		t.Errorf("dispatch wake file missing after processing a quarantined control: %v", statErr)
+	}
+}
