@@ -673,8 +673,15 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 // reserved member's work_dir, so the item recipe stamped from that member and
 // the session launched for it both work in the one workspace the drain shares.
 // It returns the member as recorded.
+//
+// A member that already has a work_dir keeps it: a pack step that prepared its
+// own workspace, an operator, or this drain's own write before a crash put it
+// there, and the hook is not called for that member.
 func ensureSharedDrainWorkspace(store beads.Store, control, member beads.Bead, opts ProcessOptions) (beads.Bead, error) {
 	if opts.SharedDrainWorkspace == nil || convoycore.IsUnresolvedTrackedItem(member) {
+		return member, nil
+	}
+	if strings.TrimSpace(member.Metadata[beadmeta.LegacyWorkDirMetadataKey]) != "" {
 		return member, nil
 	}
 	workDir, err := opts.SharedDrainWorkspace(control)
