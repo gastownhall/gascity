@@ -25,10 +25,17 @@ func registryFake(t *testing.T, registered []string, rejection string) (bin, tra
 		// "<name>=<pane>" registers an agent whose name and pane differ, which is
 		// how the name branch of the lookup gets exercised: delivery passes a
 		// pane id to the predicate, waitForIdleOutcome passes an agent name.
+		// "=<pane>" is a pane herdr detected an agent in but nobody named.
 		if n, p, ok := strings.Cut(entry, "="); ok {
 			name, pane = n, p
 		}
-		entries = append(entries, fmt.Sprintf(`{"agent":"%s","pane_id":"%s","agent_status":"working"}`, name, pane))
+		// herdr's shape: the registered name under "name" (omitted when there is
+		// none), the detected kind under "agent".
+		named := ""
+		if name != "" {
+			named = fmt.Sprintf(`"name":"%s",`, name)
+		}
+		entries = append(entries, fmt.Sprintf(`{"agent":"opencode",%s"pane_id":"%s","agent_status":"working"}`, named, pane))
 	}
 	list := `{"result":{"agents":[` + strings.Join(entries, ",") + `]}}`
 	if registered == nil {

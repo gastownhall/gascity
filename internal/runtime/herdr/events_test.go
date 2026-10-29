@@ -28,6 +28,10 @@ type fakeHerdrServer struct {
 
 	mu     sync.Mutex
 	agents []agentInfo // what agent.list returns
+	// rawAgents, when set, replaces agents with literal herdr JSON entries.
+	// agents round-trips gc's own struct tags, so only rawAgents can catch a
+	// decode that reads the wrong herdr key.
+	rawAgents []json.RawMessage
 
 	// subscribes receives each events.subscribe call's decoded filter set.
 	subscribes chan []subscribeSub
@@ -93,6 +97,18 @@ func (f *fakeHerdrServer) setAgents(agents ...agentInfo) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.agents = append([]agentInfo(nil), agents...) // copy: callers keep mutating their slice
+	f.rawAgents = nil
+}
+
+// setRawAgents makes agent.list answer with entries verbatim, as herdr emits
+// them.
+func (f *fakeHerdrServer) setRawAgents(entries ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rawAgents = make([]json.RawMessage, 0, len(entries))
+	for _, e := range entries {
+		f.rawAgents = append(f.rawAgents, json.RawMessage(e))
+	}
 }
 
 func (f *fakeHerdrServer) serve(conn net.Conn) {
@@ -116,7 +132,10 @@ func (f *fakeHerdrServer) serve(conn net.Conn) {
 	switch req.Method {
 	case "agent.list":
 		f.mu.Lock()
-		agents := f.agents
+		var agents any = f.agents
+		if f.rawAgents != nil {
+			agents = f.rawAgents
+		}
 		f.mu.Unlock()
 		resp := map[string]any{"id": req.ID, "result": map[string]any{"type": "agent_list", "agents": agents}}
 		b, _ := json.Marshal(resp)
