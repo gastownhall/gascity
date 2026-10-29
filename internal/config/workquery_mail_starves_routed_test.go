@@ -119,3 +119,14 @@ func TestEffectiveWorkQueryInProgressSkipsAssignedMailWisp(t *testing.T) {
 		})
 	}
 }
+
+// AC-4: a seat whose only open wisp is mail has an empty frontier.
+func TestEffectiveWorkQueryMailOnlyStoreYieldsEmptyFrontier(t *testing.T) {
+	requireJQ(t)
+	a := singleSessionConfigAgent()
+	mail := `{"id":"gcg-mail-1","status":"open","issue_type":"message","assignee":"` + mailTestSessionID + `","ephemeral":true,"dependency_count":0,"created_at":"2026-08-31T10:00:00Z","metadata":{}}`
+	out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), mailTestEnv(), fakeBdEphemeralStore(mail))
+	if strings.TrimSpace(out) != "[]" {
+		t.Fatalf("mail-only store: work query printed %q, want an empty frontier []", out)
+	}
+}
