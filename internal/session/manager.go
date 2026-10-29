@@ -307,6 +307,10 @@ type Info struct {
 	// terminal session whose current interval is already accounted BEFORE issuing a
 	// per-session store Get.
 	UsageComputeEmittedAt string // usage_compute_emitted_at (raw)
+	// UsageClosePending is the RAW usage_close_pending metadata: "true" while a
+	// close's awake interval awaits the compute-usage lane. A reopened row keeps
+	// it, so the lane settles that interval from the open snapshot too.
+	UsageClosePending string // usage_close_pending (raw)
 	// StateReason is the RAW state_reason metadata. The pool sweep's
 	// post-create-protection window matches state_reason == "creation_complete".
 	StateReason string // state_reason (raw)

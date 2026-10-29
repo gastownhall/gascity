@@ -338,12 +338,19 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 			return
 		}
 		liveCandidate := liveLane && liveModelSweepCandidate(info)
-		if !computeFactGetCandidate(info) && !liveCandidate {
+		if info.UsageClosePending != "true" && !computeFactGetCandidate(info) && !liveCandidate {
 			continue
 		}
 		b, err := store.Get(info.ID)
 		if err != nil {
 			logf("usage: loading session %s for usage facts failed: %v", info.ID, err)
+			continue
+		}
+		// A reopened row still holding a close marker settles the closed
+		// interval first: its live and terminal branches would read the
+		// reopened state, not the interval the close ended.
+		if b.Metadata[session.MetadataKeyUsageClosePending] == "true" {
+			cr.settleClosedInterval(ctx, sink, store, b, runtimeKind, now, logf, modelSweepFactory)
 			continue
 		}
 		processSessionBead(b)
