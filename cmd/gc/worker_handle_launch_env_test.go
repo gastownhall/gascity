@@ -261,3 +261,37 @@ func TestResumeDerivesRigScopeFromConfiguredAgent(t *testing.T) {
 		}
 	}
 }
+
+// AC-4: a city-scoped session clears stale rig scope with present-empty
+// values and scopes beads to the city.
+func TestResumeCityScopedSessionClearsRigScope(t *testing.T) {
+	t.Setenv("GC_RIG", "stale-rig")
+	t.Setenv("GC_RIG_ROOT", "/stale/rig")
+	t.Setenv("BEADS_DIR", "/stale/rig/.beads")
+	c := newResumeLaunchEnvCity(t, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "helper"
+provider = "stub"
+
+[providers.stub]
+command = "/bin/echo"
+`)
+	info := c.stoppedSession(t, "helper", "helper", "helper-alias", t.TempDir())
+
+	env := c.resume(t, info, resumeByMessage).Env
+
+	for _, key := range []string{"GC_RIG", "GC_RIG_ROOT", "BEADS_DIR"} {
+		value, ok := env[key]
+		if !ok || value != "" {
+			t.Errorf("start env[%s] = %q (present %v), want present and empty", key, value, ok)
+		}
+	}
+	if got := env["GC_BEADS_SCOPE_ROOT"]; got != c.cityDir {
+		t.Errorf("start env[GC_BEADS_SCOPE_ROOT] = %q, want the city path %q", got, c.cityDir)
+	}
+}
