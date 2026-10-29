@@ -3,6 +3,7 @@ package molecule
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -3922,5 +3923,164 @@ func TestInstantiateFragmentRefusesASessionStep(t *testing.T) {
 	all, _ := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
 	if err == nil || !strings.Contains(err.Error(), "session row") || len(all) != 1 {
 		t.Fatalf("InstantiateFragment = %v, beads %d; want refused with only the root", err, len(all))
+	}
+}
+
+// errInjectedActivation and errInjectedStamp are the faults mintFaultStore
+// injects into a mint's activation and failure-stamp writes.
+var (
+	errInjectedActivation = errors.New("injected activation conflict")
+	errInjectedStamp      = errors.New("injected stamp conflict")
+)
+
+// stampAlways refuses every failure-stamp attempt on a bead.
+const stampAlways = -1
+
+// mintFaultStore injects the correlated faults a failed mint meets on its
+// hottest rows. It fails the first activation Update (the one clearing the
+// instantiation fence) of the bead created at activationIndex, refuses
+// SetMetadataBatch per creation index, and logs every SetMetadataBatch target
+// in order. Embedding the interface promotes no graph-apply capability, so
+// Instantiate takes the fenced sequential path.
+type mintFaultStore struct {
+	beads.Store
+	created []string
+
+	activationIndex int // index into created; -1 disables the activation fault
+	activationFired bool
+
+	stampRefusals map[int]int // creation index -> refusals, or stampAlways
+	stampPartial  bool        // a refused stamp first writes molecule_failed alone
+	refused       map[string]int
+	stampCalls    []string
+}
+
+func newMintFaultStore(inner beads.Store) *mintFaultStore {
+	return &mintFaultStore{
+		Store:           inner,
+		activationIndex: -1,
+		stampRefusals:   map[int]int{},
+		refused:         map[string]int{},
+	}
+}
+
+func (s *mintFaultStore) Create(b beads.Bead) (beads.Bead, error) {
+	created, err := s.Store.Create(b)
+	if err == nil {
+		s.created = append(s.created, created.ID)
+	}
+	return created, err
+}
+
+func (s *mintFaultStore) indexOf(id string) int {
+	for i, createdID := range s.created {
+		if createdID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func (s *mintFaultStore) Update(id string, opts beads.UpdateOpts) error {
+	if !s.activationFired && s.activationIndex >= 0 && s.indexOf(id) == s.activationIndex {
+		if v, ok := opts.Metadata[InstantiatingMetadataKey]; ok && v == "" {
+			s.activationFired = true
+			return fmt.Errorf("%w on %s", errInjectedActivation, id)
+		}
+	}
+	return s.Store.Update(id, opts)
+}
+
+func (s *mintFaultStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.stampCalls = append(s.stampCalls, id)
+	if limit, ok := s.stampRefusals[s.indexOf(id)]; ok && (limit == stampAlways || s.refused[id] < limit) {
+		s.refused[id]++
+		if s.stampPartial {
+			if err := s.Store.SetMetadataBatch(id, map[string]string{beadmeta.MoleculeFailedMetadataKey: kvs[beadmeta.MoleculeFailedMetadataKey]}); err != nil {
+				return err
+			}
+		}
+		return fmt.Errorf("%w on %s", errInjectedStamp, id)
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// twoStepGraphWorkflow is a fenced graph workflow: root "wf" and its child
+// "wf.body".
+func twoStepGraphWorkflow() *formula.Recipe {
+	return &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+			{ID: "wf.body", Title: "Body", Type: "task", Metadata: map[string]string{"gc.kind": "scope"}},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.body", DependsOnID: "wf", Type: "parent-child"},
+		},
+	}
+}
+
+func assertStampedAndUnfenced(t *testing.T, store beads.Store, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if b.Metadata[beadmeta.MoleculeFailedMetadataKey] != "true" || b.Metadata[InstantiatingMetadataKey] != "" {
+			t.Errorf("bead %s: molecule_failed=%q %s=%q; want stamped and un-fenced",
+				id, b.Metadata[beadmeta.MoleculeFailedMetadataKey], InstantiatingMetadataKey, b.Metadata[InstantiatingMetadataKey])
+		}
+	}
+}
+
+func assertStampCalls(t *testing.T, got []string, want ...string) {
+	t.Helper()
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("stamp calls = %v, want %v", got, want)
+	}
+}
+
+// A mint that fails on its root's activation stamps the root even when the
+// root's first stamp meets the same transient fault: the refused stamp is
+// retried after every other bead.
+func TestInstantiateFailureStampsTheRootWhoseActivationFailed(t *testing.T) {
+	cases := []struct {
+		name    string
+		recipe  *formula.Recipe
+		partial bool
+	}{
+		{name: "two-step", recipe: twoStepGraphWorkflow()},
+		{name: "partial first stamp", recipe: twoStepGraphWorkflow(), partial: true},
+		{name: "root only", recipe: &formula.Recipe{
+			Name:  "wf",
+			Steps: []formula.RecipeStep{{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}}},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newMintFaultStore(beads.NewMemStore())
+			store.activationIndex = 0
+			store.stampRefusals[0] = 1
+			store.stampPartial = tc.partial
+
+			_, err := Instantiate(context.Background(), store, tc.recipe, Options{})
+			if !store.activationFired {
+				t.Fatalf("root activation fault never fired (err=%v); the mint took another path", err)
+			}
+			root := store.created[0]
+			if got := store.refused[root]; got != 1 {
+				t.Fatalf("root stamp refused %d times, want 1", got)
+			}
+			if !errors.Is(err, errInjectedActivation) {
+				t.Fatalf("err = %v, want the activation fault", err)
+			}
+			if want := fmt.Sprintf(`activating graph step "wf": %v on %s`, errInjectedActivation, root); err.Error() != want {
+				t.Fatalf("err = %q, want %q", err.Error(), want)
+			}
+			want := append(append([]string{}, store.created...), root)
+			assertStampCalls(t, store.stampCalls, want...)
+			assertStampedAndUnfenced(t, store, store.created...)
+		})
 	}
 }

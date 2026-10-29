@@ -1816,16 +1816,37 @@ func markFailedReporting(store beads.Store, ids []string) error {
 	return firstErr
 }
 
-// markFailed sets beadmeta.MoleculeFailedMetadataKey on all created beads.
-// Best-effort: errors are silently ignored since we're already in an
-// error path.
+// markFailed stamps all created beads as failed via stampFailed.
+// Best-effort: beads it could not stamp are ignored since we're already in
+// an error path.
 func markFailed(store beads.Store, ids []string) {
-	for _, id := range ids {
-		_ = store.SetMetadataBatch(id, map[string]string{
-			beadmeta.MoleculeFailedMetadataKey: "true",
-			InstantiatingMetadataKey:           "",
-		})
+	_ = stampFailed(store, ids)
+}
+
+// stampFailed sets beadmeta.MoleculeFailedMetadataKey and clears the
+// instantiation fence on every id. A bead whose stamp is refused is retried
+// once, after every other bead has been stamped, so a transient fault on the
+// row that just failed the mint has the whole loop to clear. The batch is
+// idempotent, so the retry also completes a batch a key-by-key store
+// half-applied. It returns one error per bead whose retry was refused too.
+func stampFailed(store beads.Store, ids []string) []error {
+	stamp := map[string]string{
+		beadmeta.MoleculeFailedMetadataKey: "true",
+		InstantiatingMetadataKey:           "",
 	}
+	var refused []string
+	for _, id := range ids {
+		if err := store.SetMetadataBatch(id, stamp); err != nil {
+			refused = append(refused, id)
+		}
+	}
+	var errs []error
+	for _, id := range refused {
+		if err := store.SetMetadataBatch(id, stamp); err != nil {
+			errs = append(errs, fmt.Errorf("marking %s molecule_failed: %w", id, err))
+		}
+	}
+	return errs
 }
 
 func logicalRecipeStepID(step formula.RecipeStep) (string, bool) {
