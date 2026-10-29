@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -289,5 +290,55 @@ func TestDrainWorkflowServeWorkProcessesLiveControlBesideStaleRow(t *testing.T) 
 	}
 	if got := city.dispatches[stale.ID]; got != wantPasses {
 		t.Errorf("stale control dispatched %d times, want %d", got, wantPasses)
+	}
+}
+
+// TestRunControlDispatcherNotOpenSkipContract pins both sides of the
+// not-processed sentinel on one control bead that is no longer open: the
+// one-shot `gc convoy control <id>` path reports success and prints nothing,
+// as it always has, while the serve seam reports errControlNotProcessed and
+// still closes the scope store it opened.
+func TestRunControlDispatcherNotOpenSkipContract(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	fake := newCloseCountingStore(t, false)
+	control, err := fake.Create(beads.Bead{
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindScopeCheck},
+	})
+	if err != nil {
+		t.Fatalf("create control bead: %v", err)
+	}
+	if err := fake.Close(control.ID); err != nil {
+		t.Fatalf("close control bead: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := runControlDispatcherWithStoreAndConfig(cityDir, cityDir, fake, control.ID, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("one-shot dispatch of a closed control: err = %v, want nil (stderr=%q)", err, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("one-shot dispatch of a closed control wrote stdout %q, want nothing", stdout.String())
+	}
+
+	prev := openControlStoreForDispatch
+	openControlStoreForDispatch = func(_, _ string, _ *config.City) (beads.Store, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { openControlStoreForDispatch = prev })
+
+	stdout.Reset()
+	err = runControlDispatcherInStore(cityDir, cityDir, control.ID, &stdout, &stderr, nil)
+	if !errors.Is(err, errControlNotProcessed) {
+		t.Fatalf("serve seam dispatch of a closed control: err = %v, want errControlNotProcessed (stderr=%q)", err, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("serve seam dispatch of a closed control wrote stdout %q, want nothing", stdout.String())
+	}
+	if got := fake.closes(); got != 1 {
+		t.Fatalf("scope store closed %d times, want 1", got)
 	}
 }
