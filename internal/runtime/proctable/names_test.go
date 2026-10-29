@@ -105,6 +105,31 @@ func TestProcessNameSetGCExecutableAlias(t *testing.T) {
 	}
 }
 
+// Only the name "gc" gains the gc executable alias; other names keep exactly
+// their trimmed selves plus the existing kimi-code alias.
+func TestProcessNameSetLeavesOtherNamesUnaliased(t *testing.T) {
+	const self = ".gc-wrapped"
+	for _, tc := range []struct {
+		names []string
+		want  []string
+	}{
+		{[]string{"claude"}, []string{"claude"}},
+		{[]string{"node", " claude "}, []string{"node", "claude"}},
+		{[]string{"kimi"}, []string{"kimi", "kimi-code"}},
+	} {
+		set := processNameSet(tc.names, self)
+		if got := setNames(set); !reflect.DeepEqual(got, sortedNames(tc.want)) {
+			t.Errorf("processNameSet(%q, %q) = %v, want %v", tc.names, self, got, sortedNames(tc.want))
+		}
+		if ProcessMatchesNameSet(self, "/nix/store/x-gascity-1.5.0/bin/"+self, set) {
+			t.Errorf("processNameSet(%q) matched the gc executable %s", tc.names, self)
+		}
+	}
+	if _, ok := ProcessNameSet([]string{"claude"})[selfExecutableName()]; ok {
+		t.Errorf("ProcessNameSet([claude]) contains the running executable %q", selfExecutableName())
+	}
+}
+
 func setNames(set map[string]struct{}) []string {
 	names := make([]string, 0, len(set))
 	for name := range set {
