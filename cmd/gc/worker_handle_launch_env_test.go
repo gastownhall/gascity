@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -293,5 +294,45 @@ command = "/bin/echo"
 	}
 	if got := env["GC_BEADS_SCOPE_ROOT"]; got != c.cityDir {
 		t.Errorf("start env[GC_BEADS_SCOPE_ROOT] = %q, want the city path %q", got, c.cityDir)
+	}
+}
+
+// AC-5: a resumed control-dispatcher keeps its per-dispatcher trace path; an
+// ordinary session gets the value resolveTemplate gives it.
+func TestResumeKeepsPerDispatcherTracePath(t *testing.T) {
+	c := newResumeLaunchEnvCity(t, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "`+config.ControlDispatcherAgentName+`"
+provider = "stub"
+
+[[agent]]
+name = "helper"
+provider = "stub"
+
+[providers.stub]
+command = "/bin/echo"
+`)
+	dispatcher := c.stoppedSession(t, config.ControlDispatcherAgentName, config.ControlDispatcherAgentName, "", t.TempDir())
+	ordinary := c.stoppedSession(t, "helper", "helper", "", t.TempDir())
+
+	dispatcherEnv := c.resume(t, dispatcher, resumeByMessage).Env
+	ordinaryEnv := c.resume(t, ordinary, resumeByMessage).Env
+
+	wantDispatcher := citylayout.ControlDispatcherTraceDefaultPathForRuntimeDirAndName(
+		c.cityDir, cityRuntimeEnvMapForCity(c.cityDir)["GC_CITY_RUNTIME_DIR"], config.ControlDispatcherAgentName)
+	if got := dispatcherEnv["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"]; got != wantDispatcher {
+		t.Errorf("dispatcher GC_CONTROL_DISPATCHER_TRACE_DEFAULT = %q, want %q", got, wantDispatcher)
+	}
+	wantOrdinary := c.templateEnv(t, "helper", "helper")["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"]
+	if wantOrdinary == "" {
+		t.Fatal("resolveTemplate gives the ordinary session no GC_CONTROL_DISPATCHER_TRACE_DEFAULT")
+	}
+	if got := ordinaryEnv["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"]; got != wantOrdinary {
+		t.Errorf("ordinary GC_CONTROL_DISPATCHER_TRACE_DEFAULT = %q, want resolveTemplate's %q", got, wantOrdinary)
 	}
 }
