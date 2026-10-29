@@ -38,7 +38,7 @@ func TestAgentSliceWrapsNewSessionWithCommand(t *testing.T) {
 	}
 	args := exec.calls[0]
 	got := args[len(args)-1]
-	want := "systemd-run --user --scope --slice=gascity-agents.slice --collect --quiet -- sh -c 'exec env GT_ROLE=crew claude'"
+	want := "systemd-run --user --scope --slice=gascity-agents.slice --collect --quiet --expand-environment=no -- sh -c 'exec env GT_ROLE=crew claude'"
 	if got != want {
 		t.Fatalf("pane command = %q, want %q", got, want)
 	}
@@ -59,7 +59,7 @@ func TestAgentSliceWrapsNewSessionWithCommandAndEnv(t *testing.T) {
 	got := args[len(args)-1]
 	// The env -u prefix must end up INSIDE the scope wrapper so the unset
 	// still applies to the agent process.
-	want := "systemd-run --user --scope --slice=gascity-agents.slice --collect --quiet -- sh -c 'env -u LC_ALL claude'"
+	want := "systemd-run --user --scope --slice=gascity-agents.slice --collect --quiet --expand-environment=no -- sh -c 'env -u LC_ALL claude'"
 	if got != want {
 		t.Fatalf("pane command = %q, want %q", got, want)
 	}
@@ -74,7 +74,7 @@ func TestAgentSliceWrapsRespawnPane(t *testing.T) {
 	t.Setenv(AgentSliceEnv, "gascity-agents.slice")
 	tm, exec := newSliceTestTmux(t)
 
-	want := "systemd-run --user --scope --slice=gascity-agents.slice --collect --quiet -- sh -c 'claude --resume'"
+	want := "systemd-run --user --scope --slice=gascity-agents.slice --collect --quiet --expand-environment=no -- sh -c 'claude --resume'"
 	if err := tm.RespawnPaneWithWorkDir("%0", "/work", "claude --resume"); err != nil {
 		t.Fatalf("RespawnPaneWithWorkDir: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestAgentSliceQuotesEmbeddedSingleQuotes(t *testing.T) {
 	}
 	args := exec.calls[0]
 	got := args[len(args)-1]
-	want := `systemd-run --user --scope --slice=gascity-agents.slice --collect --quiet -- sh -c 'claude --msg '\''hi there'\'''`
+	want := `systemd-run --user --scope --slice=gascity-agents.slice --collect --quiet --expand-environment=no -- sh -c 'claude --msg '\''hi there'\'''`
 	if got != want {
 		t.Fatalf("pane command = %q, want %q", got, want)
 	}

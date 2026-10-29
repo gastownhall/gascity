@@ -19,7 +19,15 @@ import (
 // user slice (e.g. "gascity-agents.slice"), makes the tmux provider wrap
 // every pane's initial command in a transient systemd user scope:
 //
-//	systemd-run --user --scope --slice=<slice> --collect --quiet -- sh -c '<command>'
+//	systemd-run --user --scope --slice=<slice> --collect --quiet --expand-environment=no -- sh -c '<command>'
+//
+// --expand-environment=no is load-bearing. systemd-run (v254+) expands
+// ${VAR} in its command arguments by default, the way ExecStart= does, and
+// the command it receives is the pane's shell script: a long prompt's
+// `__gc_prompt="${__gc_prompt%.}"` came out as `__gc_prompt=""`, so every
+// session started through a prompt file launched with an empty first
+// message. A systemd too old for the flag fails the probe below and runs
+// unwrapped, which is the safe direction.
 //
 // Rationale: systemd-enabled tmux builds (stock Ubuntu) move every pane into
 // a transient tmux-spawn-*.scope under the default user slice, so agent
@@ -69,7 +77,7 @@ func probeAgentSliceSupport(slice string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), agentSliceProbeTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "systemd-run",
-		"--user", "--scope", "--slice="+slice, "--collect", "--quiet", "--", "true")
+		"--user", "--scope", "--slice="+slice, "--collect", "--quiet", "--expand-environment=no", "--", "true")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
@@ -101,7 +109,7 @@ func (w *agentSliceWrapper) wrap(slice, command string) string {
 	}
 	return shellquote.Join([]string{
 		"systemd-run", "--user", "--scope", "--slice=" + slice,
-		"--collect", "--quiet", "--", "sh", "-c", command,
+		"--collect", "--quiet", "--expand-environment=no", "--", "sh", "-c", command,
 	})
 }
 

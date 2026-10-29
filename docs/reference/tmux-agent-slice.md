@@ -7,8 +7,13 @@ Setting the `GC_AGENT_SLICE` environment variable to a systemd user slice
 every pane's initial command in a transient systemd user scope:
 
 ```
-systemd-run --user --scope --slice=<slice> --collect --quiet -- sh -c '<command>'
+systemd-run --user --scope --slice=<slice> --collect --quiet --expand-environment=no -- sh -c '<command>'
 ```
+
+`--expand-environment=no` matters: systemd-run (v254+) otherwise expands
+`${VAR}` in its command arguments the way `ExecStart=` does, and the command
+it receives is the pane's shell script, so `${...}` references in it would be
+emptied before the shell ever ran.
 
 Default-off: when the variable is unset or empty, pane commands run
 unwrapped exactly as before.
@@ -44,9 +49,10 @@ agents collectively.
 ## Probe and fallback
 
 Before its first wrapped spawn, each tmux provider instance probes
-`systemd-run --user --scope --slice=<slice> --collect --quiet -- true`
+`systemd-run --user --scope --slice=<slice> --collect --quiet --expand-environment=no -- true`
 (bounded at 5 seconds). If the probe fails — no `systemd-run` binary, no
-reachable user manager, or an invalid slice — that instance logs one
+reachable user manager, an invalid slice, or a systemd too old for
+`--expand-environment` — that instance logs one
 warning and every pane command it spawns runs unwrapped:
 
 ```
