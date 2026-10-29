@@ -220,13 +220,16 @@ func liveModelSweepCandidate(info session.Info) bool {
 // a listing filtered by that marker, not closed history. Best-effort: it never
 // blocks or fails the reconcile tick.
 //
-// bootReconcile disables the live lane. The terminal lane's cost is unchanged by
-// boot — it is gated by a persisted per-interval marker, so it fires once per
-// interval whenever the pass runs — but the live lane's transcript discovery and
-// reads are proportional to the awake fleet, and the boot pass covers the whole
-// fleet at once on the synchronous readiness path. Deferring the live lane to the
-// first steady-state tick costs one tick of billing latency and keeps startup off
-// the critical path (the same trade beadReconcileTick makes for the pool sweep).
+// bootReconcile disables the live lane and the marked closed listing. The
+// terminal lane's cost is unchanged by boot — it is gated by a persisted
+// per-interval marker, so it fires once per interval whenever the pass runs —
+// and a marked open row settles on boot through the open loop it already
+// feeds, but the live lane's transcript discovery and reads are proportional
+// to the awake fleet, and the closed listing is one more store round trip
+// the boot pass covers on the synchronous readiness path. Deferring both to
+// the first steady-state tick costs one tick of billing latency and keeps
+// startup off the critical path (the same trade beadReconcileTick makes for
+// the pool sweep).
 func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []session.Info, bootReconcile bool) {
 	if cr.cs == nil {
 		return
@@ -346,7 +349,12 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 	// never holds it and the open lanes above cannot account its interval.
 	// The listing is filtered by the equality marker, so its cost follows
 	// UNSETTLED marked rows only — never closed history — and is capped at
-	// 64 rows oldest-first per pass.
+	// 64 rows oldest-first per pass. The boot pass issues no listing: rows
+	// marked while the controller was down are settled by the first
+	// steady-state pass, keeping startup's synchronous path off the store.
+	if bootReconcile {
+		return
+	}
 	rows, err := store.List(beads.ListQuery{
 		Type:          session.BeadType,
 		Status:        "closed",

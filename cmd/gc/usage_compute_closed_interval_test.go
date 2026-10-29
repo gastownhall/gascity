@@ -708,3 +708,94 @@ func TestClosedIntervalSinkFailureKeepsMarkers(t *testing.T) {
 		t.Error("usage_closed_at cleared, want kept (a failed record never clears the markers)")
 	}
 }
+
+// TestBootPassIssuesNoClosedListAndSteadyPassSettlesAtCloseTime pins AC-7 of
+// issue #6672: closed rows marked while the controller was down are not
+// hunted by the boot reconcile pass — it issues no closed-session List — and
+// the first steady-state pass settles them with end = usage_closed_at, not
+// the pass time.
+func TestBootPassIssuesNoClosedListAndSteadyPassSettlesAtCloseTime(t *testing.T) {
+	cityPath := t.TempDir()
+	codexRoot := t.TempDir()
+	sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
+	backing := beads.NewMemStore()
+	store := &listCountingStore{Store: backing}
+
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	closedAt := start.Add(10 * time.Minute)
+	startRaw := start.Format(time.RFC3339Nano)
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Status: "open",
+		Title:  "codex worker",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":            "drained",
+			"session_name":     "worker-1",
+			"awake_started_at": startRaw,
+			"provider":         "codex",
+			"builtin_ancestor": "codex",
+			"molecule_id":      "run-L",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadataBatch(b.ID, session.UsageClosePatch(closedAt)); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{Daemon: config.DaemonConfig{ObservePaths: []string{codexRoot}}}
+	cs := &controllerState{cityBeadStore: store, usageSink: usage.NewLocalSink(sinkPath), cityName: "demo", cityPath: cityPath}
+	cr := &CityRuntime{cs: cs, cfg: cfg, sp: nil, cityName: "demo", cityPath: cityPath, stderr: io.Discard}
+
+	// The boot reconcile pass: the marked closed row is left for the first
+	// steady-state tick, and no closed-session List is issued.
+	cr.emitDueComputeFacts(context.Background(), nil, true)
+	if got := store.lists; got != 0 {
+		t.Errorf("closed-session Lists on the boot pass = %d, want 0", got)
+	}
+	if got := rawSinkComputeFactCount(t, sinkPath); got != 0 {
+		t.Fatalf("raw compute facts after the boot pass = %d, want 0 (the boot pass settles nothing)", got)
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := got.Metadata[session.MetadataKeyUsageClosePending]; v != "true" {
+		t.Errorf("usage_close_pending after the boot pass = %q, want kept", v)
+	}
+
+	// The first steady-state pass settles the interval, anchored at the close
+	// time — not at the pass time, which sits months past the fixture.
+	cr.emitDueComputeFacts(context.Background(), nil, false)
+	if got := store.lists; got != 1 {
+		t.Errorf("closed-session Lists on the steady pass = %d, want 1", got)
+	}
+	facts, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var computes []usage.Fact
+	for _, f := range facts {
+		if f.Kind == usage.KindCompute {
+			computes = append(computes, f)
+		}
+	}
+	if len(computes) != 1 {
+		t.Fatalf("compute facts after the steady pass = %d, want 1", len(computes))
+	}
+	if got := computes[0].WallSeconds; got != 600 {
+		t.Errorf("compute fact wall seconds = %v, want 600 (end = usage_closed_at, not the pass time)", got)
+	}
+	got, err = store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := got.Metadata[session.MetadataKeyUsageClosePending]; v != "" {
+		t.Errorf("usage_close_pending = %q, want cleared", v)
+	}
+}
