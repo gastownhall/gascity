@@ -368,8 +368,9 @@ this:
   keyed on its number, never share a queue entry's group.
 - **Advisory probes run beside, never inside, the required workflows.**
   `advisory-probes.yml` (the contract radar against beads main HEAD, MCP
-  mail conformance) runs on `ci.yml`'s events, `merge_group` included, but
-  none of its checks is required, so the queue never waits on it. It is not
+  mail conformance) runs on `ci.yml`'s events except `merge_group`: none of
+  its checks is required, so no queue entry waits on it, and the push to
+  `main` runs it on the commit the queue merges. It is not
   part of `ci.yml`, so a red probe never shares a run with `Check` and
   `CI / required`: every `ci.yml` job feeds `CI / required`
   (`scripts/ci_required_coverage_test.go`).
