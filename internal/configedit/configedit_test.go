@@ -1436,6 +1436,35 @@ func TestCreateAgentSchema2RejectsRigScopeConventionAgentBeforeWrite(t *testing.
 	}
 }
 
+func TestCreateAgentLegacyRejectsPooledAgentWithSharedWorkDir(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	poolMax := 3
+	err := ed.CreateAgent(config.Agent{Name: "coder", Provider: "claude", MaxActiveSessions: &poolMax})
+	if !errors.Is(err, configedit.ErrValidation) {
+		t.Fatalf("CreateAgent error = %v, want ErrValidation for a pool whose work_dir does not vary per instance", err)
+	}
+}
+
+func TestCreateAgentLegacyAcceptsPooledAgentWithPerInstanceWorkDir(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	poolMax := 3
+	err := ed.CreateAgent(config.Agent{
+		Name:              "coder",
+		Provider:          "claude",
+		WorkDir:           ".gc/worktrees/{{.AgentBase}}",
+		MaxActiveSessions: &poolMax,
+	})
+	if err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+}
+
 func TestCreateAgentLegacyNoPackAppendsInline(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, "[workspace]\n")

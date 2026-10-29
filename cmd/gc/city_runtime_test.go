@@ -5836,6 +5836,68 @@ install_agent_hooks = ["codex"]
 	}
 }
 
+func TestCityRuntimeReloadRejectsPooledAgentWithSharedWorkDir(t *testing.T) {
+	oldStrict := strictMode
+	strictMode = false
+	t.Cleanup(func() { strictMode = oldStrict })
+
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	var stderr bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		LogPrefix: "gc reload",
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: &stderr,
+	})
+	oldCfg := cr.cfg
+
+	if err := os.WriteFile(tomlPath, []byte(`[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[session]
+provider = "fake"
+
+[[agent]]
+name = "coder"
+max_active_sessions = 3
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+
+	if reply.Outcome != reloadOutcomeFailed {
+		t.Fatalf("reply.Outcome = %q, want %q for a pool whose work_dir does not vary per instance", reply.Outcome, reloadOutcomeFailed)
+	}
+	if !strings.Contains(reply.Error, "work_dir") {
+		t.Fatalf("reply.Error = %q, want the pool work_dir isolation failure", reply.Error)
+	}
+	if cr.cfg != oldCfg {
+		t.Fatal("cfg changed after pool work_dir isolation reload failure")
+	}
+}
+
 func TestCityRuntimeFailActiveReloadRepliesAndClears(t *testing.T) {
 	doneCh := make(chan reloadControlReply, 1)
 	cr := &CityRuntime{

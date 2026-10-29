@@ -348,6 +348,32 @@ func TestHandleConfigValidate_Valid(t *testing.T) {
 	}
 }
 
+func TestHandleConfigValidate_PooledAgentSharedWorkDir(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cfg.Agents = append(fs.cfg.Agents, config.Agent{Name: "coder", Provider: "test-agent", MaxActiveSessions: intPtr(3)})
+	h := newTestCityHandler(t, fs)
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/config/validate"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
+	if resp["valid"] != false {
+		t.Fatalf("valid = %v, want false for a pool whose work_dir does not vary per instance; body = %s", resp["valid"], w.Body.String())
+	}
+	errs, _ := resp["errors"].([]any)
+	if len(errs) == 0 {
+		t.Fatalf("errors empty, want one naming the coder agent")
+	}
+	if msg, _ := errs[0].(string); !strings.Contains(msg, "coder") {
+		t.Errorf("errors[0] = %v, want one naming the coder agent", errs[0])
+	}
+}
+
 func TestHandleConfigValidate_WithWarnings(t *testing.T) {
 	fs := newFakeState(t)
 	// Agent references a nonexistent provider — should produce a warning.

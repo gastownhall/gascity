@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -355,5 +356,22 @@ func TestPrepareCityForSupervisorPrunesLegacyScripts(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(rigPath, "scripts")); !os.IsNotExist(err) {
 		t.Fatalf("rig scripts/ should be pruned by supervisor start path, err=%v", err)
+	}
+}
+
+func TestPrepareCityForSupervisorRejectsPooledAgentWithSharedWorkDir(t *testing.T) {
+	cityPath := t.TempDir()
+	t.Setenv("GC_BEADS", "exec:"+writeSpyScript(t, filepath.Join(t.TempDir(), "beads.log")))
+
+	poolMax := 3
+	cfg := config.DefaultCity("bright-lights")
+	cfg.Agents = []config.Agent{{Name: "coder", MaxActiveSessions: &poolMax}}
+
+	err := prepareCityForSupervisor(cityPath, "bright-lights", &cfg, io.Discard, nil)
+	if err == nil {
+		t.Fatal("prepareCityForSupervisor error = nil, want rejection of a pool whose work_dir does not vary per instance")
+	}
+	if !strings.Contains(err.Error(), "work_dir") {
+		t.Fatalf("prepareCityForSupervisor error = %q, want the pool work_dir isolation failure", err)
 	}
 }

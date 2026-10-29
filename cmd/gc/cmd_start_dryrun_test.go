@@ -254,6 +254,53 @@ name = "frontend"
 	}
 }
 
+// The start path refuses a pool whose work_dir does not vary per instance: two
+// concurrent sessions would share one checkout. The gate runs before anything
+// starts, so a dry run reports it too.
+func TestStartRejectsPooledAgentWithSharedWorkDir(t *testing.T) {
+	cityPath := t.TempDir()
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
+	t.Chdir(t.TempDir())
+	for _, dir := range []string{
+		filepath.Join(cityPath, citylayout.RuntimeRoot), filepath.Join(cityPath, "agents", "coder"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, body := range map[string]string{
+		filepath.Join(cityPath, "city.toml"): "[workspace]\nname = \"pool-gate\"\n\n[beads]\nprovider = \"file\"\n\n" +
+			"[providers.claude]\nbase = \"builtin:claude\"\ncommand = \"echo\"\nprompt_mode = \"none\"\n",
+		filepath.Join(cityPath, ".gc", "site.toml"):              "workspace_name = \"pool-gate\"\n",
+		filepath.Join(cityPath, "pack.toml"):                     "[pack]\nname = \"pool-gate\"\nschema = 2\n",
+		filepath.Join(cityPath, "agents", "coder", "agent.toml"): "provider = \"claude\"\nscope = \"city\"\nmax_active_sessions = 3\n",
+		filepath.Join(cityPath, "agents", "coder", "prompt.md"):  "You are the coder.\n",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldBuild := buildSessionProviderByName
+	oldDry := dryRunMode
+	t.Cleanup(func() {
+		buildSessionProviderByName = oldBuild
+		dryRunMode = oldDry
+	})
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return runtime.NewFake(), nil
+	}
+	dryRunMode = true
+
+	var stdout, stderr bytes.Buffer
+	if code := doStartStandalone([]string{cityPath}, false, &stdout, &stderr); code == 0 {
+		t.Fatalf("doStartStandalone exit = 0, want a refusal\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "work_dir does not vary per instance") {
+		t.Errorf("stderr = %q, want the pool work_dir isolation failure", stderr.String())
+	}
+}
+
 func describeTreeChanges(before, after map[string]string) string {
 	var lines []string
 	for path, was := range before {

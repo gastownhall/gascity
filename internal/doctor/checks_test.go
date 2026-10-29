@@ -215,6 +215,39 @@ func TestConfigValidCheck_BadAgent(t *testing.T) {
 	}
 }
 
+func TestConfigValidCheck_PooledAgentSharedWorkDir(t *testing.T) {
+	poolMax := 3
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents:    []config.Agent{{Name: "coder", MaxActiveSessions: &poolMax}},
+	}
+	c := NewConfigValidCheck(cfg)
+	r := c.Run(&CheckContext{CityPath: t.TempDir()})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error for a pool whose work_dir does not vary per instance; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "coder") {
+		t.Errorf("message %q does not name the offending agent", r.Message)
+	}
+}
+
+func TestConfigValidCheck_PooledAgentPerInstanceWorkDir(t *testing.T) {
+	poolMax := 3
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents: []config.Agent{{
+			Name:              "coder",
+			WorkDir:           ".gc/worktrees/{{.AgentBase}}",
+			MaxActiveSessions: &poolMax,
+		}},
+	}
+	c := NewConfigValidCheck(cfg)
+	r := c.Run(&CheckContext{CityPath: t.TempDir()})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+}
+
 func TestConfigValidCheck_BadRig(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
