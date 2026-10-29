@@ -264,23 +264,25 @@ func preWakeRefuses(d session.Disposition, reason string, now time.Time) bool {
 	return d.RefusesPreWake(now)
 }
 
-// triggerEnvKeys are the template env keys a row's trigger stamps
-// (resolveTemplateForSessionBeadInfo, sessionTriggerBeadEnv).
+// triggerEnvKeys are the template env keys a row's trigger stamp owns: the
+// presence marker sessionDemandSpawnEnv derives, plus the retired id- and
+// store-ref-shaped exports, scrubbed so a stale or user-supplied copy of
+// either can never reach a launch env (gastownhall/gascity#5738).
 var triggerEnvKeys = []string{"GC_SPAWN_ORIGIN", "GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID", "GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"}
 
-// boundTemplate is tp with its trigger env derived from row, as legacy binds
-// and then resolves: none when the row has no trigger.
+// boundTemplate is tp with its demand-spawn env derived from row, as legacy
+// binds and then resolves: the presence marker exactly when the row carries a
+// trigger stamp, and no id-shaped trigger key ever.
 func boundTemplate(tp TemplateParams, row session.Info) TemplateParams {
 	env := maps.Clone(tp.Env)
 	for _, k := range triggerEnvKeys {
 		delete(env, k)
 	}
-	if trigger := sessionTriggerBeadEnv(row); trigger != nil {
+	if spawn := sessionDemandSpawnEnv(row); len(spawn) > 0 {
 		if env == nil {
-			env = make(map[string]string, len(trigger)+1)
+			env = make(map[string]string, len(spawn))
 		}
-		env["GC_SPAWN_ORIGIN"] = "demand"
-		maps.Copy(env, trigger)
+		maps.Copy(env, spawn)
 	}
 	tp.Env = env
 	return tp

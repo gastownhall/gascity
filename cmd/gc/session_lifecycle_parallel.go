@@ -1642,29 +1642,6 @@ func samePreparedWorkDirPath(a, b string) bool {
 	return samePath(a, b)
 }
 
-// sessionTriggerBeadEnv reads the trigger-bead identity off the typed twin
-// (Info.TriggerBeadID / Info.TriggerBeadStoreRef, verbatim raw mirrors) instead of
-// the raw bead metadata. The trigger key IS mutated on the start-prep path —
-// refreshConfiguredNamedStartCandidate runs bindNamedSessionTriggerBead, which
-// clears a stamp whose target is no longer workable (gascity#4373) — so
-// coherence here depends on that refresh folding its returned Info onto
-// candidate.info, not on the key being immutable.
-func sessionTriggerBeadEnv(info sessionpkg.Info) map[string]string {
-	triggerBeadID := strings.TrimSpace(info.TriggerBeadID)
-	if triggerBeadID == "" {
-		return nil
-	}
-	env := map[string]string{
-		"GC_TRIGGER_BEAD_ID":      triggerBeadID,
-		"GC_TRIGGER_WORK_BEAD_ID": triggerBeadID,
-	}
-	if storeRef := strings.TrimSpace(info.TriggerBeadStoreRef); storeRef != "" {
-		env["GC_TRIGGER_BEAD_STORE_REF"] = storeRef
-		env["GC_TRIGGER_WORK_STORE_REF"] = storeRef
-	}
-	return env
-}
-
 // sessionDemandSpawnEnv is the demand marker a launch env derives from a
 // session row: GC_SPAWN_ORIGIN=demand, presence only, exactly when the row
 // carries a trigger stamp. It never returns the stamp's bead id or store ref:
@@ -1675,6 +1652,12 @@ func sessionTriggerBeadEnv(info sessionpkg.Info) map[string]string {
 // ${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-…}} close chain can mistake for the
 // bead the session actually claimed (gastownhall/gascity#5738). A seat that
 // must name its own bead reads the claim back-channel, `gc hook current`.
+//
+// The stamp IS mutated on the start-prep path — refreshConfiguredNamedStartCandidate
+// runs bindNamedSessionTriggerBead, which clears a stamp whose target is no
+// longer workable (gascity#4373) — so coherence here depends on that refresh
+// folding its returned Info onto candidate.info, not on the key being
+// immutable.
 func sessionDemandSpawnEnv(info sessionpkg.Info) map[string]string {
 	if strings.TrimSpace(info.TriggerBeadID) == "" {
 		return nil

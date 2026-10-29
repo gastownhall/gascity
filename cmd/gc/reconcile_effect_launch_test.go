@@ -1109,16 +1109,17 @@ func TestLaunchKeysOnTheVerbSectionsTemplate(t *testing.T) {
 }
 
 // Kills a launch env carrying the trigger the template was resolved under
-// after PreWake cleared or re-pointed it: the trigger env and the demand
-// origin follow the bound row (legacy binds, then resolves).
+// after PreWake cleared or re-pointed it: no id-shaped trigger key survives
+// into a launch env (a stale or user-supplied copy of the retired exports
+// must not either), the demand origin follows the bound row (legacy binds,
+// then resolves), and unrelated keys are kept.
 func TestLaunchTriggerEnvFollowsTheBoundRow(t *testing.T) {
-	stale := map[string]string{"GC_TRIGGER_BEAD_ID": "w-old", "GC_TRIGGER_WORK_BEAD_ID": "w-old", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}
+	stale := map[string]string{"GC_TRIGGER_BEAD_ID": "w-old", "GC_TRIGGER_WORK_BEAD_ID": "w-old", "GC_TRIGGER_BEAD_STORE_REF": "s-old", "GC_TRIGGER_WORK_STORE_REF": "s-old", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}
 	for _, c := range []struct {
-		name, bind string
-		want       map[string]string
+		name, bind, wantSpawn string
 	}{
-		{"cleared", "", map[string]string{"GC_TRIGGER_BEAD_ID": "", "GC_SPAWN_ORIGIN": "", "GC_KEEP": "1"}},
-		{"re-pointed", "w-new", map[string]string{"GC_TRIGGER_BEAD_ID": "w-new", "GC_TRIGGER_WORK_BEAD_ID": "w-new", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}},
+		{"cleared", "", ""},
+		{"re-pointed", "w-new", "demand"},
 	} {
 		k, leaf := launchKit(t, "asleep", "gc.trigger_bead_id", "w-old")
 		row := k.p.World.Census.Rows[k.it.Key]
@@ -1127,10 +1128,16 @@ func TestLaunchTriggerEnvFollowsTheBoundRow(t *testing.T) {
 		if s := k.runKind(); s.Outcome != settledLanded || len(leaf.cfgs) != 1 {
 			t.Fatalf("%s: settlement %+v, want one launch", c.name, s)
 		}
-		for key, want := range c.want {
-			if got := leaf.cfgs[0].Env[key]; got != want {
-				t.Errorf("%s: launch %s = %q, want %q", c.name, key, got, want)
+		for _, key := range []string{"GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID", "GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"} {
+			if got, ok := leaf.cfgs[0].Env[key]; ok {
+				t.Errorf("%s: launch %s = %q, want absent (no session shell receives a controller-chosen bead id)", c.name, key, got)
 			}
+		}
+		if got := leaf.cfgs[0].Env["GC_SPAWN_ORIGIN"]; got != c.wantSpawn {
+			t.Errorf("%s: launch GC_SPAWN_ORIGIN = %q, want %q", c.name, got, c.wantSpawn)
+		}
+		if got := leaf.cfgs[0].Env["GC_KEEP"]; got != "1" {
+			t.Errorf("%s: launch GC_KEEP = %q, want the unrelated key kept", c.name, got)
 		}
 	}
 }
