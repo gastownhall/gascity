@@ -2134,6 +2134,11 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "internal/config/workquery_ondeath_reclaim_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/configedit/configedit_test.go"
 resource = "fixed_sleep"
 calls = 1
