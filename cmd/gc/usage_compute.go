@@ -355,6 +355,18 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 	if bootReconcile {
 		return
 	}
+	// The listing is floored at liveModelSweepMinInterval (issue #6672's
+	// AC-8): one query per window, whatever it returned. Marked rows are
+	// persistent state, so a floored pass loses nothing but latency.
+	cr.closedUsageListMu.Lock()
+	due := !now.Before(cr.nextClosedUsageListAt)
+	if due {
+		cr.nextClosedUsageListAt = now.Add(liveModelSweepMinInterval)
+	}
+	cr.closedUsageListMu.Unlock()
+	if !due {
+		return
+	}
 	rows, err := store.List(beads.ListQuery{
 		Type:          session.BeadType,
 		Status:        "closed",

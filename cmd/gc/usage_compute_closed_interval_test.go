@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -797,5 +798,240 @@ func TestBootPassIssuesNoClosedListAndSteadyPassSettlesAtCloseTime(t *testing.T)
 	}
 	if v := got.Metadata[session.MetadataKeyUsageClosePending]; v != "" {
 		t.Errorf("usage_close_pending = %q, want cleared", v)
+	}
+}
+
+// newMarkedClosedCodexRow creates a closed codex session row marked for
+// settle, the shared fixture of the AC-8 listing tests.
+func newMarkedClosedCodexRow(t *testing.T, store beads.Store, name, startRaw string, closedAt time.Time) {
+	t.Helper()
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Status: "open",
+		Title:  "codex worker " + name,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":            "drained",
+			"session_name":     name,
+			"awake_started_at": startRaw,
+			// Keyed with no rollout on disk: the keyed miss stays transient, so
+			// the row keeps its markers after a settle attempt.
+			"session_key":      codexSweepSessionKey,
+			"provider":         "codex",
+			"builtin_ancestor": "codex",
+			"molecule_id":      "run-" + name,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadataBatch(b.ID, session.UsageClosePatch(closedAt)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestClosedListIssuedAtMostOncePerInterval pins AC-8 of issue #6672: the
+// marked closed-row listing is issued at most once per
+// liveModelSweepMinInterval across consecutive non-boot passes — whatever the
+// listing returned.
+func TestClosedListIssuedAtMostOncePerInterval(t *testing.T) {
+	cityPath := t.TempDir()
+	codexRoot := t.TempDir()
+	sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
+	backing := beads.NewMemStore()
+	store := &listCountingStore{Store: backing}
+
+	now := time.Now().UTC()
+	startRaw := now.Add(-30 * time.Minute).Format(time.RFC3339Nano)
+	newMarkedClosedCodexRow(t, store, "worker-1", startRaw, now.Add(-5*time.Minute))
+	newMarkedClosedCodexRow(t, store, "worker-2", startRaw, now.Add(-5*time.Minute))
+
+	cfg := &config.City{Daemon: config.DaemonConfig{ObservePaths: []string{codexRoot}}}
+	cs := &controllerState{cityBeadStore: store, usageSink: usage.NewLocalSink(sinkPath), cityName: "demo", cityPath: cityPath}
+	cr := &CityRuntime{cs: cs, cfg: cfg, sp: nil, cityName: "demo", cityPath: cityPath, stderr: io.Discard}
+
+	cr.emitDueComputeFacts(context.Background(), nil, false)
+	if got := store.lists; got != 1 {
+		t.Fatalf("closed-session Lists after the first pass = %d, want 1", got)
+	}
+	if got := rawSinkComputeFactCount(t, sinkPath); got != 2 {
+		t.Fatalf("raw compute facts after the first pass = %d, want 2 (one attempt per row)", got)
+	}
+	// Consecutive passes inside the floor: the listing is not repeated.
+	cr.emitDueComputeFacts(context.Background(), nil, false)
+	cr.emitDueComputeFacts(context.Background(), nil, false)
+	if got := store.lists; got != 1 {
+		t.Fatalf("closed-session Lists after three passes inside one interval = %d, want 1 (at most one listing per 30s)", got)
+	}
+	if got := rawSinkComputeFactCount(t, sinkPath); got != 2 {
+		t.Fatalf("raw compute facts after three passes = %d, want 2 (floored passes make no attempt)", got)
+	}
+}
+
+// TestClosedListCapsAt64OldestFirst pins AC-8 of issue #6672: with more than
+// 64 marked closed rows, one pass returns at most 64, oldest first, leaving
+// the newest for later passes.
+func TestClosedListCapsAt64OldestFirst(t *testing.T) {
+	cityPath := t.TempDir()
+	codexRoot := t.TempDir()
+	sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
+	store := beads.NewMemStore()
+
+	now := time.Now().UTC()
+	start := now.Add(-30 * time.Minute)
+	closedAt := now.Add(-20 * time.Minute)
+	startRaw := start.Format(time.RFC3339Nano)
+	ids := make([]string, 0, 70)
+	for i := 0; i < 70; i++ {
+		// Keyless rows: the sweep settles a definitive miss, so a pass that
+		// lists a row commits it.
+		b, err := store.Create(beads.Bead{
+			Type:   session.BeadType,
+			Status: "open",
+			Title:  "codex worker",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"state":            "drained",
+				"session_name":     fmt.Sprintf("worker-%02d", i),
+				"awake_started_at": startRaw,
+				"provider":         "codex",
+				"builtin_ancestor": "codex",
+				"molecule_id":      fmt.Sprintf("run-%02d", i),
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(b.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SetMetadataBatch(b.ID, session.UsageClosePatch(closedAt)); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, b.ID)
+	}
+
+	cfg := &config.City{Daemon: config.DaemonConfig{ObservePaths: []string{codexRoot}}}
+	cs := &controllerState{cityBeadStore: store, usageSink: usage.NewLocalSink(sinkPath), cityName: "demo", cityPath: cityPath}
+	cr := &CityRuntime{cs: cs, cfg: cfg, sp: nil, cityName: "demo", cityPath: cityPath, stderr: io.Discard}
+
+	cr.emitDueComputeFacts(context.Background(), nil, false)
+	if got := rawSinkComputeFactCount(t, sinkPath); got != 64 {
+		t.Fatalf("raw compute facts after one pass = %d, want 64 (the listing is capped)", got)
+	}
+	settled, marked := 0, 0
+	for i, id := range ids {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v := got.Metadata[session.MetadataKeyUsageClosePending]; v == "true" {
+			marked++
+			if i < 64 {
+				t.Errorf("row %d (older) still marked, want the oldest 64 settled first", i)
+			}
+		} else {
+			settled++
+			if i >= 64 {
+				t.Errorf("row %d (newer) settled, want the listing to return the oldest 64 only", i)
+			}
+		}
+	}
+	if settled != 64 || marked != 6 {
+		t.Fatalf("settled = %d, still marked = %d, want 64/6", settled, marked)
+	}
+}
+
+// TestClosedSettleUsesMemoPathWithoutDiscovery pins AC-8 of issue #6672: when
+// the live memo already holds this interval's transcript path, the closed-row
+// settle reads that path directly and issues no discovery — here the
+// session's own keyed rollout is absent (a keyed discovery would miss and
+// leave the interval unsettled), and only the memo's path can yield the
+// trailing model facts.
+func TestClosedSettleUsesMemoPathWithoutDiscovery(t *testing.T) {
+	cityPath := t.TempDir()
+	codexRoot := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
+	store := beads.NewMemStore()
+
+	// A rollout for a DIFFERENT session key than the row's: only the memo's
+	// path can reach it.
+	otherKey := "019e3e8e-3591-7532-a1ef-8b9e882bea99"
+	writeCodexRolloutForSweepAt(t, codexRoot, time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC), workDir, otherKey,
+		[][3]int{{150, 100, 50}})
+	otherPath := filepath.Join(codexRoot, "2026", "06", "15",
+		"rollout-2026-06-15T10-00-00-"+otherKey+".jsonl")
+	if _, err := os.Stat(otherPath); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	closedAt := start.Add(10 * time.Minute)
+	startRaw := start.Format(time.RFC3339Nano)
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Status: "open",
+		Title:  "codex worker",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":            "drained",
+			"session_name":     "worker-1",
+			"awake_started_at": startRaw,
+			"session_key":      codexSweepSessionKey,
+			"work_dir":         workDir,
+			"provider":         "codex",
+			"builtin_ancestor": "codex",
+			"molecule_id":      "run-M",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadataBatch(b.ID, session.UsageClosePatch(closedAt)); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{Daemon: config.DaemonConfig{ObservePaths: []string{codexRoot}}}
+	cs := &controllerState{cityBeadStore: store, usageSink: usage.NewLocalSink(sinkPath), cityName: "demo", cityPath: cityPath}
+	cr := &CityRuntime{cs: cs, cfg: cfg, sp: nil, cityName: "demo", cityPath: cityPath, stderr: io.Discard}
+	// The live memo holds this interval's resolved path — exactly as a live
+	// sweep of the same epoch and conversation would have left it.
+	cr.storeLiveSweepMemo(b.ID, liveSweepMemo{
+		awakeStart: startRaw,
+		sessionKey: codexSweepSessionKey,
+		path:       otherPath,
+	})
+
+	cr.emitDueComputeFacts(context.Background(), nil, false)
+
+	facts, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := kindCount(facts, usage.KindModel); got != 1 {
+		t.Fatalf("model facts = %d, want 1 (swept at the memo's path, without discovery): %+v", got, facts)
+	}
+	var computes int
+	for _, f := range facts {
+		if f.Kind == usage.KindCompute {
+			computes++
+		}
+	}
+	if computes != 1 {
+		t.Fatalf("compute facts = %d, want 1 (the sweep settled at the memo's path)", computes)
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := got.Metadata[session.MetadataKeyUsageClosePending]; v != "" {
+		t.Errorf("usage_close_pending = %q, want cleared (the sweep settled)", v)
 	}
 }

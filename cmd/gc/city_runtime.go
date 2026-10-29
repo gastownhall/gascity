@@ -286,6 +286,14 @@ type CityRuntime struct {
 	// bounded discovery and transcript reads for every awake session.
 	liveSweepMemos sync.Map // session bead id -> liveSweepMemo
 
+	// nextClosedUsageListAt floors the usage lane's marked closed-row listing
+	// (issue #6672): one listing per liveModelSweepMinInterval whatever the
+	// listing returned, so a reconcile tick spinning faster than that never
+	// repeats the query. Marked rows are persistent; a floored pass loses
+	// nothing but latency.
+	nextClosedUsageListAt time.Time
+	closedUsageListMu     sync.Mutex
+
 	// transcriptMetaEnabled is set only by the machine-wide supervisor after it
 	// has armed the event-correlation sidecar gate. One asynchronous snapshot pass
 	// is permitted for this supervisor lifetime; a restart deliberately rebuilds
