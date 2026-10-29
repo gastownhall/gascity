@@ -3,15 +3,19 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // These tests pin issue #6024: a control bead ProcessControl no-ops on (status
@@ -165,6 +169,53 @@ func TestDrainWorkflowServeWorkSkipsNonOpenControlWithoutSpinning(t *testing.T) 
 				t.Error("dispatch wake file written for a drain that only skipped a non-open control")
 			}
 		})
+	}
+}
+
+// TestRunWorkflowServeFollowBacksOffOnSkipOnlySweeps is AC-2: sweeps that only
+// skip a stale row let the --follow idle backoff grow to its cap.
+func TestRunWorkflowServeFollowBacksOffOnSkipOnlySweeps(t *testing.T) {
+	cityDir, store := setUpServeSkipCity(t)
+	stale := createNonOpenScopeCheck(t, store, "closed")
+	stubServeQueue(t, func() []hookBead { return []hookBead{serveQueueRow(stale)} })
+	countServeDispatches(t)
+
+	ep := newTestProvider(t, t.TempDir())
+	prevProvider := workflowServeOpenEventsProvider
+	prevWait := workflowServeWaitForWake
+	t.Cleanup(func() {
+		workflowServeOpenEventsProvider = prevProvider
+		workflowServeWaitForWake = prevWait
+	})
+	workflowServeOpenEventsProvider = func(io.Writer) (events.Provider, error) { return ep, nil }
+
+	type waitCall struct {
+		idleSweeps int
+		sleepDur   time.Duration
+	}
+	var waits []waitCall
+	stopErr := fmt.Errorf("stop after four sweeps")
+	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int) (bool, error) {
+		waits = append(waits, waitCall{idleSweeps: idleSweeps, sleepDur: sleepDur})
+		if len(waits) == 4 {
+			return false, stopErr
+		}
+		return false, nil
+	}
+
+	agent := freshnessControlAgent()
+	err := runWorkflowServeFollow(agent, cityDir, cityDir, workflowServeControlReadyQuery(agent), nil, io.Discard)
+	if !errors.Is(err, stopErr) {
+		t.Fatalf("runWorkflowServeFollow error = %v, want %v", err, stopErr)
+	}
+	want := []waitCall{
+		{idleSweeps: 0, sleepDur: 1 * time.Second},
+		{idleSweeps: 1, sleepDur: 2 * time.Second},
+		{idleSweeps: 2, sleepDur: 4 * time.Second},
+		{idleSweeps: 3, sleepDur: 5 * time.Second},
+	}
+	if !slices.Equal(waits, want) {
+		t.Fatalf("waits = %+v, want %+v", waits, want)
 	}
 }
 
