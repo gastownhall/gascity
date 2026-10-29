@@ -2542,7 +2542,7 @@ printf '%s\n' "$*" >> "$GC_CALL_LOG"
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
-Agent: polecat
+Agent: rig/polecat
   source: pack
 EOF
       exit 0
@@ -2614,6 +2614,173 @@ exit 1
 	log := string(logData)
 	if strings.Contains(log, "bd release-if-current ga-unresolvable-orphan ") {
 		t.Fatalf("unresolvable double-dash assignee was reset:\n%s", log)
+	}
+}
+
+// TestOrphanSweepSelfProbeShieldsConfiguredIdentitiesNotEphemerals pins the
+// ga-gunr6d ruling: when a work bead's only session candidate is its own
+// session-name-shaped assignee and the liveness self-probe cannot resolve it,
+// the assignee is shielded (UNVERIFIABLE) when it reconstructs from a
+// configured agent -- a pool seat or a plain named agent, in either separator
+// encoding -- and RESET when it does not, because a one-shot ephemeral dies
+// once and nothing reclaims its exact name. The separator alone decides
+// nothing: a dead "--" rig-scope ephemeral must reset (ga-375do3) and a
+// "__" city-scope plain named agent must be shielded.
+func TestOrphanSweepSelfProbeShieldsConfiguredIdentitiesNotEphemerals(t *testing.T) {
+	tests := []struct {
+		name     string
+		workID   string
+		assignee string
+		shielded bool
+	}{
+		{
+			name:     "rig scope plain named agent",
+			workID:   "ga-rig-named-self-probe",
+			assignee: "rig--polecat",
+			shielded: true,
+		},
+		{
+			name:     "city scope plain named agent",
+			workID:   "ga-city-named-self-probe",
+			assignee: "pack-author__witness",
+			shielded: true,
+		},
+		{
+			name:     "rig scope numbered named agent",
+			workID:   "ga-rig-named-slot-self-probe",
+			assignee: "rig--polecat-2",
+			shielded: true,
+		},
+		{
+			name:     "rig scope pool seat",
+			workID:   "ga-rig-seat-self-probe",
+			assignee: "rig--polecat-pool",
+			shielded: true,
+		},
+		{
+			name:     "dead rig scope ephemeral",
+			workID:   "ga-rig-ephemeral-self-probe",
+			assignee: "rig--polecat-gc-dead1",
+			shielded: false,
+		},
+		{
+			name:     "dead city scope ephemeral",
+			workID:   "ga-city-ephemeral-self-probe",
+			assignee: "pack-author__witness-gc-dead1",
+			shielded: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+			// The session list carries an unrelated keepalive row, so the
+			// assignee is absent from the snapshot and the sweep drops through
+			// to the self-probe. `bd show <assignee>` is left unhandled so it
+			// exits non-zero, exactly as the real binary does when handed a
+			// session name instead of a bead id. A reset mails its escalation
+			// summary, so `mail` is answered.
+			writeExecutable(t, filepath.Join(binDir, "gc"), fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> "$GC_CALL_LOG"
+`+orphanSweepGateStubArm+`case "$1" in
+  mail)
+    exit 0
+    ;;
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: rig/polecat
+  source: pack
+Agent: pack-author.witness
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":%q,"status":"in_progress","assignee":%q}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = %q ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":%q,"status":"in_progress","assignee":%q}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`, tt.workID, tt.assignee, tt.workID, tt.workID, tt.assignee))
+
+			env := map[string]string{
+				"GC_CITY":      cityDir,
+				"GC_CITY_PATH": cityDir,
+				"GC_CALL_LOG":  gcLog,
+				"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+
+			script := coreScriptPath("orphan-sweep.sh")
+			cmd := exec.Command(script)
+			cmd.Env = mergeTestEnv(env)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+			}
+
+			logData, err := os.ReadFile(gcLog)
+			if err != nil {
+				t.Fatalf("ReadFile(gc log): %v", err)
+			}
+			log := string(logData)
+			if !strings.Contains(log, "bd show "+tt.assignee+" --json") {
+				t.Fatalf("session-name self-probe was never attempted:\n%s", log)
+			}
+			released := strings.Contains(log, "bd release-if-current "+tt.workID+" ")
+			if tt.shielded {
+				if !strings.Contains(string(out), "orphan-sweep: reset 0 orphaned beads, skipped 1 unverifiable") {
+					t.Fatalf("configured identity %q was not treated as unverifiable:\n%s", tt.assignee, out)
+				}
+				if released {
+					t.Fatalf("configured identity %q lost its claim on %s:\n%s", tt.assignee, tt.workID, log)
+				}
+				return
+			}
+			if !released {
+				t.Fatalf("dead ephemeral %q kept its claim on %s:\n%s\n%s", tt.assignee, tt.workID, out, log)
+			}
+			if strings.Contains(string(out), "skipped 1 unverifiable") {
+				t.Fatalf("dead ephemeral %q was counted as unverifiable:\n%s", tt.assignee, out)
+			}
+		})
 	}
 }
 
