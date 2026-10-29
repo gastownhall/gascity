@@ -636,6 +636,38 @@ func TestDoSlingChecksEveryFederatedLegOfACityScopedTarget(t *testing.T) {
 	}
 }
 
+// TestDoSlingProbeSkipsSuspendedRigLeg pins that the probe answers as a hook
+// poll would: a rig the runtime state has suspended is not queried, so its
+// leg neither runs nor can rescue an empty city leg.
+func TestDoSlingProbeSkipsSuspendedRigLeg(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityPath := t.TempDir()
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityPath, "riga", &suspended); err != nil {
+		t.Fatalf("suspending riga: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "riga", Path: t.TempDir()}},
+	}
+	ran := filepath.Join(t.TempDir(), "rig-leg-ran")
+	// The rig leg lists the bead and leaves a marker; the city leg lists nothing.
+	workQuery := `if [ "$GC_RIG" = riga ]; then touch ` + shellquote.Quote(ran) + `; printf '[{"id":"BL-42"}]'; else printf '[]'; fi`
+	a := config.Agent{Name: "worker", Scope: "city", MaxActiveSessions: intPtr(1), WorkQuery: workQuery}
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.CityPath = cityPath
+	deps.Store = seededStore("BL-42")
+
+	code := doSling(testOpts(a, "BL-42"), deps, nil, stdout, stderr)
+
+	if _, err := os.Stat(ran); err == nil {
+		t.Errorf("the suspended rig's leg ran, want it skipped")
+	}
+	if code != 1 || !strings.Contains(stderr.String(), "bead BL-42 was routed to worker, but worker's work_query returns no work") {
+		t.Errorf("doSling returned %d, want 1 with the proven-strand message; stderr: %s", code, stderr.String())
+	}
+}
+
 // TestProbeWorkQueryStoresReplacesUnprovenNoWorkWithLegErrors pins the probe's
 // one departure from the hook's leg selection: a failed leg turns an empty
 // answer into an error, and only an empty answer.

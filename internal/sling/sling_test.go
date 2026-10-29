@@ -1339,6 +1339,10 @@ func TestDoSlingToleratesWorkQueryMissForBeadThatIsNotUnclaimedReadyWork(t *test
 			seed: []beads.Bead{bead(func(b *beads.Bead) { b.Labels = []string{beadmeta.HoldExternalLabel} })},
 		},
 		{
+			name: "held with a padded, mixed-case label",
+			seed: []beads.Bead{bead(func(b *beads.Bead) { b.Labels = []string{" Hold:External "} })},
+		},
+		{
 			name: "claimed while the probe ran",
 			seed: []beads.Bead{bead(nil)},
 			duringProbe: func(t *testing.T, store *beads.MemStore) {
