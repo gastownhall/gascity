@@ -552,6 +552,19 @@ func KeepQuarantineReason(patch MetadataPatch, d Disposition, reason string, now
 	return patch
 }
 
+// DropReleasedHoldReason clears patch's sleep_reason=user-hold when the row's
+// disposition d no longer carries the operator's suspend (Disposition.KeepsSlot):
+// a sleep decided on an older read, such as a user-hold drain completing after
+// `gc session wake` consumed the hold, must not label a row nobody holds
+// (gastownhall/gascity#8411). The reason is cleared, as ClearExpiredHoldPatch
+// does. It returns patch, edited in place.
+func DropReleasedHoldReason(patch MetadataPatch, d Disposition) MetadataPatch {
+	if SleepReason(strings.TrimSpace(patch["sleep_reason"])) == SleepReasonUserHold && !d.KeepsSlot() {
+		patch["sleep_reason"] = ""
+	}
+	return patch
+}
+
 // AcknowledgeDrainPatch records an agent-acknowledged drain. Drained is a
 // compatibility state distinct from ordinary asleep: demand alone does not
 // reselect it, but explicit attach or work can. Like SleepPatch, it stamps
