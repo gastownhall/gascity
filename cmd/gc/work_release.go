@@ -243,6 +243,13 @@ type ReleaseOpts struct {
 	// released, and the outcome is Refused with those claims Kept. A seat's
 	// own drain-ack uses it: it must finish such work before it acks.
 	RefuseStarted bool
+	// HandOver, on the orphan path, is offered each claim the release would
+	// reopen once every other guard has passed (but not one whose detached
+	// work just read dead: releaseServed), and returns why the claim
+	// stays assigned instead, or "" to release it. The dead-assignee sweep
+	// hands a closed seat row's claims to the seat's live successor
+	// (seatHandover).
+	HandOver func(seatWorkHit) string
 }
 
 // ReleaseOutcome is what a release did with each claim.
@@ -350,7 +357,7 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 			out.Why[c.bead.ID] = failedBudget
 			continue
 		}
-		switch kept, err := releaseServed(c, workAssignmentForStore(beads.WorkStore{Store: c.store}), p, fallback); {
+		switch kept, err := releaseServed(c, workAssignmentForStore(beads.WorkStore{Store: c.store}), p, fallback, opts.HandOver); {
 		case kept != "":
 			keep(c, kept)
 		case err != nil:
@@ -371,8 +378,9 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 // its probe attests the runtime dead. Every release clears the claim's
 // gc.detached in its one write: a probe left on the reopened bead would ride
 // into the claim's next assignment, where once its socket is gone it holds
-// the work for good.
-func releaseServed(c seatWorkHit, wa workAssignment, p releasePolicy, fallback string) (string, error) {
+// the work for good. On the orphan path, once those guards have passed,
+// handOver, when set, may keep the claim instead (ReleaseOpts.HandOver).
+func releaseServed(c seatWorkHit, wa workAssignment, p releasePolicy, fallback string, handOver func(seatWorkHit) string) (string, error) {
 	if p.pool && !liveWorkAssignmentStillReleasable(c.store, c.bead.ID, c.bead.Status, strings.TrimSpace(c.bead.Assignee)) {
 		return keptMoved, nil
 	}
@@ -383,6 +391,14 @@ func releaseServed(c seatWorkHit, wa workAssignment, p releasePolicy, fallback s
 	}
 	clearDetached := strings.TrimSpace(c.bead.Metadata[detachedProbeMetadataKey]) != ""
 	if p.pool {
+		// A hand-over writes only the assignee, so a claim whose detached work
+		// the probe found dead is reopened instead: the release clears
+		// gc.detached in the same write (health-patrol.md).
+		if handOver != nil && !clearDetached {
+			if why := handOver(c); why != "" {
+				return why, nil
+			}
+		}
 		if !releaseOrphanedPoolAssignment(c.store, c.bead, clearDetached) {
 			return keptMoved, nil
 		}
