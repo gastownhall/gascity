@@ -1439,3 +1439,77 @@ func TestEmitDueComputeFactsClearsCloseMarkerWithNothingToAccount(t *testing.T) 
 		}
 	})
 }
+
+// TestEmitDueComputeFactsGivesUpUnsettledClosedIntervalSweep pins the closed
+// row's retry bound: a keyed codex miss leaves the sweep unsettled, so each
+// attempt records the compute fact without committing it, at most once per
+// liveModelSweepMinInterval, until the first attempt at or after
+// usage_closed_at + 15m commits the compute marker and clears the markers. A
+// sink failure never clears them.
+func TestEmitDueComputeFactsGivesUpUnsettledClosedIntervalSweep(t *testing.T) {
+	t1 := time.Now().UTC().Truncate(time.Second)
+	t0 := t1.Add(-10 * time.Minute)
+	start := t0.Format(time.RFC3339)
+	closedRow := func(t *testing.T) (*reconcilerTestEnv, string, *CityRuntime, string, *time.Time) {
+		env := newReconcilerTestEnv(t)
+		env.clk.Time = t1
+		workDir, codexRoot := t.TempDir(), t.TempDir()
+		id := drainAckClosedCodexSession(t, env, t0, workDir)
+		cr, sinkPath := newClosedUsageRuntime(t, env.store, codexRoot)
+		cur := t1
+		cr.usageNow = func() time.Time { return cur }
+		return env, id, cr, sinkPath, &cur
+	}
+	markers := func(t *testing.T, store beads.Store, id string) (pending, emitted, swept string) {
+		t.Helper()
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got.Metadata[session.MetadataKeyUsageClosePending], got.Metadata[usageComputeEmittedAtKey], got.Metadata[usageModelSweptAtKey]
+	}
+
+	t.Run("unsettled attempts are floored, then give up at the deadline", func(t *testing.T) {
+		env, id, cr, sinkPath, cur := closedRow(t)
+		for _, step := range []struct {
+			at       time.Duration
+			attempts int
+			settled  bool
+		}{
+			{at: time.Second, attempts: 1},
+			{at: 11 * time.Second, attempts: 1},
+			{at: 32 * time.Second, attempts: 2},
+			{at: 15*time.Minute - time.Second, attempts: 3},
+			{at: 15*time.Minute + 10*time.Second, attempts: 3},
+			{at: 15*time.Minute + 30*time.Second, attempts: 4, settled: true},
+			{at: 20 * time.Minute, attempts: 4, settled: true},
+		} {
+			*cur = t1.Add(step.at)
+			cr.emitDueComputeFacts(context.Background(), nil, false)
+			if got := rawSinkFactCount(t, sinkPath, usage.KindCompute); got != step.attempts {
+				t.Fatalf("at close+%s: compute records = %d, want %d", step.at, got, step.attempts)
+			}
+			pending, emitted, swept := markers(t, env.store, id)
+			if !step.settled && (pending != "true" || emitted != "") {
+				t.Fatalf("at close+%s: pending=%q emitted=%q, want the interval kept uncommitted", step.at, pending, emitted)
+			}
+			if step.settled && (pending != "" || emitted != start || swept != "") {
+				t.Fatalf("at close+%s: pending=%q emitted=%q swept=%q, want the compute marker committed, the markers cleared and no sweep marker", step.at, pending, emitted, swept)
+			}
+		}
+	})
+
+	t.Run("a sink failure keeps the markers past the deadline", func(t *testing.T) {
+		env, id, cr, _, cur := closedRow(t)
+		sink := &erroringSink{}
+		cr.cs.usageSink = sink
+		*cur = t1.Add(20 * time.Minute)
+		cr.emitDueComputeFacts(context.Background(), nil, false)
+		if sink.calls == 0 {
+			t.Fatal("the closed interval was never recorded")
+		}
+		if pending, emitted, _ := markers(t, env.store, id); pending != "true" || emitted != "" {
+			t.Fatalf("pending=%q emitted=%q after a sink failure, want the interval kept", pending, emitted)
+		}
+	})
+}
