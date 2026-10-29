@@ -91,3 +91,25 @@ func TestStartSkipsStartupDialogsWhenNotEnabled(t *testing.T) {
 		})
 	}
 }
+
+// A session with no startup text and no session_setup skips the provisioning
+// tail, but its trust dialog must still be answered: otherwise a later nudge
+// lands on the live dialog.
+func TestStartAcceptsStartupDialogsWithoutStartupTurn(t *testing.T) {
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
+	setState(t, state, "trust_dialog")
+	captureStartupDialogWarnings(t)
+
+	cfg := runtime.Config{Command: "claude", ProcessNames: []string{"claude"}}
+	if err := p.Start(context.Background(), "gastown__worker", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	calls := fakeCalls(t, state)
+	if !strings.Contains(calls, "pane send-keys %5 enter") {
+		t.Fatalf("trust dialog was not confirmed for a session without a startup turn:\n%s", calls)
+	}
+	if strings.Contains(calls, "agent wait") || strings.Contains(calls, "agent prompt") {
+		t.Fatalf("a session without a startup turn must not run the provisioning tail:\n%s", calls)
+	}
+}
