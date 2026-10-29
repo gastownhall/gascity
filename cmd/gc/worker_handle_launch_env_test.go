@@ -192,3 +192,33 @@ func TestResumeByMessageRegeneratesRigScopedLaunchEnv(t *testing.T) {
 	}
 	assertResumedGeneratedLaunchEnv(t, c, start.Env, want)
 }
+
+var (
+	resumeByAttach resumeLaunchEnvVia = func(ctx context.Context, h worker.Handle, by session.Actor) error {
+		return h.Attach(ctx, by)
+	}
+	resumeByStart resumeLaunchEnvVia = func(ctx context.Context, h worker.Handle, by session.Actor) error {
+		return h.Start(ctx, by)
+	}
+)
+
+// AC-2: Attach and Start resume the stopped runtime with the same generated
+// launch env a message does.
+func TestResumeByAttachOrStartRegeneratesRigScopedLaunchEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		via  resumeLaunchEnvVia
+	}{
+		{"attach", resumeByAttach},
+		{"start", resumeByStart},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newResumeLaunchEnvCity(t, rigPoolLaunchEnvCity)
+			info := c.stoppedSession(t, "myrig/worker", "myrig/worker-1", "", filepath.Join(c.cityDir, ".gc", "worktrees", "task"))
+
+			start := c.resume(t, info, tc.via)
+
+			assertResumedGeneratedLaunchEnv(t, c, start.Env, c.templateEnv(t, "myrig/worker", "myrig/worker-1"))
+		})
+	}
+}
