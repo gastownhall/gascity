@@ -557,7 +557,14 @@ func enumerateWispGCRootsWith(store beads.Store, selectors []wispGCRootSelector,
 		for _, sel := range selectors {
 			q := sel.query
 			q.Status = status
-			items, err := store.List(q)
+			// One leg of the wisp GC root union: the graph store holds the
+			// graph roots and each work leg its v1 poured molecule roots
+			// (enumerateWorkClassMoleculeRoots), so each misses the other's.
+			var items []beads.Bead
+			err := beads.FederatedRead(func() (err error) {
+				items, err = store.List(q)
+				return err
+			})
 			if err != nil {
 				return nil, fmt.Errorf("listing %s %s roots: %w", status, sel.label, err)
 			}
@@ -1374,10 +1381,16 @@ func sourceIsLiveIn(store beads.Store, root beads.Bead, src string) bool {
 // CLOSED on a query error.
 func storeHoldsLiveAttachmentSource(store beads.Store, rootID string) bool {
 	for _, key := range []string{beadmeta.MoleculeIDMetadataKey, "workflow_id"} {
-		holders, err := store.List(beads.ListQuery{
-			Metadata:      map[string]string{key: rootID},
-			IncludeClosed: true,
-			TierMode:      beads.TierBoth,
+		// One leg of the holder walk (the graph store, then every work leg):
+		// a holder lives in exactly one of them.
+		var holders []beads.Bead
+		err := beads.FederatedRead(func() (err error) {
+			holders, err = store.List(beads.ListQuery{
+				Metadata:      map[string]string{key: rootID},
+				IncludeClosed: true,
+				TierMode:      beads.TierBoth,
+			})
+			return err
 		})
 		if err != nil {
 			log.Printf("wisp gc: cannot resolve %s holders for stepless root %s (%v); leaving it open", key, rootID, err)

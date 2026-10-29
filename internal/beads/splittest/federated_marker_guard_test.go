@@ -57,6 +57,22 @@ var reviewedMarkers = map[string]reviewedMarker{
 		"federated", 1,
 		"graph-first probe of a convoy id; a plain (work) convoy misses there and the rig legs answer it",
 	},
+	"cmd/gc/cmd_order.go bdCursor": {
+		"federated", 1,
+		"one leg of bdCursorAcrossStores (S3a): order-run records live in the orders binding and, as v1 poured roots, on the work legs",
+	},
+	"cmd/gc/wisp_gc.go enumerateWispGCRootsWith": {
+		"federated", 1,
+		"one leg of the wisp GC root union (S3a): graph roots in the graph store, v1 poured molecule roots on each work leg",
+	},
+	"cmd/gc/wisp_gc.go storeHoldsLiveAttachmentSource": {
+		"federated", 1,
+		"one leg of the stepless-root holder walk (S3a): the graph store, then every work leg; a holder lives in one",
+	},
+	"internal/sling/sling_attachment.go getFromStores": {
+		"federated", 1,
+		"first-owner attachment probe (S3a): graph store or, for a v1 poured molecule, the work store",
+	},
 	"internal/api/huma_handlers_beads.go (*Server).humaHandleBeadList": {
 		"federated", 1,
 		"/beads fan-out leg: work legs and the class binding each list only their own rows",
