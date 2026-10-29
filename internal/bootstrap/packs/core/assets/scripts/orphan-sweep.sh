@@ -340,24 +340,23 @@ session_bead_candidates() {
     printf '%s\n' "$assignee" | grep -Eo '[[:alnum:]]+-wisp-[[:alnum:]][[:alnum:]-]*$' || true
 }
 
-# A pool seat's runtime name comes from CONFIG, not from a session:
-# poolRuntimeSessionName is SanitizeQualifiedNameForSession("<agent>[-<slot>]")
-# plus the "-pool" suffix (cmd/gc/session_name_lookup.go). That sanitizer
-# encodes "/" as "--" (rig-scope) and "." as "__" (pack-qualified city-scope),
-# so reconstructing seat names from $AGENTS recognizes both encodings without
-# guessing from the separator alone — an ephemeral session name carries a
-# per-session token ("...-gc-<token>") and never reconstructs this way, so it
-# still resets when it goes missing.
-assignee_is_configured_pool_seat() {
+# A configured agent's runtime name comes from CONFIG, not from a session:
+# SanitizeQualifiedNameForSession("<agent>[-<slot>]"), plus a "-pool" suffix
+# for pool seats (poolRuntimeSessionName, cmd/gc/session_name_lookup.go). That
+# sanitizer encodes "/" as "--" (rig-scope) and "." as "__" (pack-qualified
+# city-scope), so reconstructing the names from $AGENTS recognizes every
+# encoding without guessing from the separator alone. An ephemeral session
+# name carries a per-session token ("...-gc-<token>") and never reconstructs
+# this way, so it still resets when it goes missing.
+assignee_is_configured_identity() {
     local name="$1"
-    case "$name" in
-        *-pool) ;;
-        *) return 1 ;;
-    esac
     [ -n "$AGENTS" ] || return 1
 
     local seat="${name%-pool}"
-    local slotless="${seat%-[0-9]*}"
+    local slotless="$seat"
+    if [[ "$seat" =~ ^(.+)-[0-9]+$ ]]; then
+        slotless="${BASH_REMATCH[1]}"
+    fi
     local cfg_agent sanitized
     while IFS= read -r cfg_agent; do
         [ -z "$cfg_agent" ] && continue
@@ -377,14 +376,12 @@ session_probe_failure_is_unverifiable() {
     [ "$session_id" != "$assignee" ] && return 0
     [[ "$session_id" == mc-* ]] && return 0
     # A session-name-shaped self-probe (e.g. "beads--deployer-pool") has
-    # nothing else resolvable to ask about -- bead ids never contain a
-    # double dash, so this shape means the probe could not be performed,
-    # not that the candidate resolved and came back dead.
-    [[ "$session_id" == *--* ]] && return 0
-    # Same reasoning for a city-scope pool seat, whose name encodes "." as
-    # "__" and so carries no double dash. Recognizing only the double-dash
-    # form released live city-scope seats mid-work (ga-dei7xx).
-    assignee_is_configured_pool_seat "$session_id" && return 0
+    # nothing else resolvable to ask about -- bead ids never match a
+    # configured agent's runtime name -- so for a configured identity the
+    # probe could not be performed, not that the candidate resolved and came
+    # back dead. Shielding is keyed on config, never on the name's shape: a
+    # "--" or "__" alone also appears in ephemeral names (ga-gunr6d).
+    assignee_is_configured_identity "$session_id" && return 0
     return 1
 }
 
