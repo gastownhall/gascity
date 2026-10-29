@@ -2511,6 +2511,21 @@ type BeadGraphResponse struct {
 // BeadGraphResponseMembership Rule that decided which beads are in Beads: the root, everything carrying gc.root_bead_id == root, plus the root's convoy members when the root is a convoy, and then the transitive parent-child closure taken over all of those — a convoy member brings its own subtree. Both storage tiers are in scope, so a wisp molecule (whose beads are all ephemeral) returns its members rather than reading as empty. Never dependency reachability, which drops dependency-isolated members such as gc.kind=spec sidecars.
 type BeadGraphResponseMembership string
 
+// BeadRecoveryReleaseFailedPayload defines model for BeadRecoveryReleaseFailedPayload.
+type BeadRecoveryReleaseFailedPayload struct {
+	// Agent Qualified name of the pool agent whose hook reported the failure.
+	Agent string `json:"agent"`
+
+	// BeadId ID of the work bead the recovery hook could not release (also the envelope Subject).
+	BeadId string `json:"bead_id"`
+
+	// Error bd's error text for the failed write.
+	Error string `json:"error"`
+
+	// Hook The recovery hook that reported it: on_death or on_boot.
+	Hook string `json:"hook"`
+}
+
 // BeadUpdateBody defines model for BeadUpdateBody.
 type BeadUpdateBody struct {
 	// Assignee Assigned agent.
@@ -7936,6 +7951,22 @@ type TypedEventStreamEnvelopeBeadDeleted struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeBeadRecoveryReleaseFailed defines model for TypedEventStreamEnvelopeBeadRecoveryReleaseFailed.
+type TypedEventStreamEnvelopeBeadRecoveryReleaseFailed struct {
+	Actor            string                           `json:"actor"`
+	DependsOnStepIds *[]string                        `json:"depends_on_step_ids,omitempty"`
+	Message          *string                          `json:"message,omitempty"`
+	Payload          BeadRecoveryReleaseFailedPayload `json:"payload"`
+	RunId            *string                          `json:"run_id,omitempty"`
+	Seq              int64                            `json:"seq"`
+	SessionId        *string                          `json:"session_id,omitempty"`
+	StepId           *string                          `json:"step_id,omitempty"`
+	Subject          *string                          `json:"subject,omitempty"`
+	Ts               time.Time                        `json:"ts"`
+	Type             string                           `json:"type"`
+	Workflow         *WorkflowEventProjection         `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeBeadUpdated defines model for TypedEventStreamEnvelopeBeadUpdated.
 type TypedEventStreamEnvelopeBeadUpdated struct {
 	Actor            string                   `json:"actor"`
@@ -10062,6 +10093,23 @@ type TypedTaggedEventStreamEnvelopeBeadDeleted struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeBeadRecoveryReleaseFailed defines model for TypedTaggedEventStreamEnvelopeBeadRecoveryReleaseFailed.
+type TypedTaggedEventStreamEnvelopeBeadRecoveryReleaseFailed struct {
+	Actor            string                           `json:"actor"`
+	City             string                           `json:"city"`
+	DependsOnStepIds *[]string                        `json:"depends_on_step_ids,omitempty"`
+	Message          *string                          `json:"message,omitempty"`
+	Payload          BeadRecoveryReleaseFailedPayload `json:"payload"`
+	RunId            *string                          `json:"run_id,omitempty"`
+	Seq              int64                            `json:"seq"`
+	SessionId        *string                          `json:"session_id,omitempty"`
+	StepId           *string                          `json:"step_id,omitempty"`
+	Subject          *string                          `json:"subject,omitempty"`
+	Ts               time.Time                        `json:"ts"`
+	Type             string                           `json:"type"`
+	Workflow         *WorkflowEventProjection         `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeBeadUpdated defines model for TypedTaggedEventStreamEnvelopeBeadUpdated.
@@ -14190,6 +14238,32 @@ func (t *EventPayload) MergeBeadEventPayload(v BeadEventPayload) error {
 	return err
 }
 
+// AsBeadRecoveryReleaseFailedPayload returns the union data inside the EventPayload as a BeadRecoveryReleaseFailedPayload
+func (t EventPayload) AsBeadRecoveryReleaseFailedPayload() (BeadRecoveryReleaseFailedPayload, error) {
+	var body BeadRecoveryReleaseFailedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromBeadRecoveryReleaseFailedPayload overwrites any union data inside the EventPayload as the provided BeadRecoveryReleaseFailedPayload
+func (t *EventPayload) FromBeadRecoveryReleaseFailedPayload(v BeadRecoveryReleaseFailedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeBeadRecoveryReleaseFailedPayload performs a merge with any union data inside the EventPayload, using the provided BeadRecoveryReleaseFailedPayload
+func (t *EventPayload) MergeBeadRecoveryReleaseFailedPayload(v BeadRecoveryReleaseFailedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsBeadWorktreeReapSkippedPayload returns the union data inside the EventPayload as a BeadWorktreeReapSkippedPayload
 func (t EventPayload) AsBeadWorktreeReapSkippedPayload() (BeadWorktreeReapSkippedPayload, error) {
 	var body BeadWorktreeReapSkippedPayload
@@ -17993,6 +18067,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadDeleted(v Ty
 	return err
 }
 
+// AsTypedEventStreamEnvelopeBeadRecoveryReleaseFailed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadRecoveryReleaseFailed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadRecoveryReleaseFailed() (TypedEventStreamEnvelopeBeadRecoveryReleaseFailed, error) {
+	var body TypedEventStreamEnvelopeBeadRecoveryReleaseFailed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeBeadRecoveryReleaseFailed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeBeadRecoveryReleaseFailed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadRecoveryReleaseFailed(v TypedEventStreamEnvelopeBeadRecoveryReleaseFailed) error {
+	v.Type = "bead.recovery_release_failed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeBeadRecoveryReleaseFailed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadRecoveryReleaseFailed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadRecoveryReleaseFailed(v TypedEventStreamEnvelopeBeadRecoveryReleaseFailed) error {
+	v.Type = "bead.recovery_release_failed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeBeadUpdated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadUpdated
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadUpdated() (TypedEventStreamEnvelopeBeadUpdated, error) {
 	var body TypedEventStreamEnvelopeBeadUpdated
@@ -21419,6 +21521,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeBeadDeadAssigneeReopened()
 	case "bead.deleted":
 		return t.AsTypedEventStreamEnvelopeBeadDeleted()
+	case "bead.recovery_release_failed":
+		return t.AsTypedEventStreamEnvelopeBeadRecoveryReleaseFailed()
 	case "bead.updated":
 		return t.AsTypedEventStreamEnvelopeBeadUpdated()
 	case "bead.worktree.reap_skipped":
@@ -21972,6 +22076,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadD
 // MergeTypedTaggedEventStreamEnvelopeBeadDeleted performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadDeleted
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadDeleted(v TypedTaggedEventStreamEnvelopeBeadDeleted) error {
 	v.Type = "bead.deleted"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeBeadRecoveryReleaseFailed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBeadRecoveryReleaseFailed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBeadRecoveryReleaseFailed() (TypedTaggedEventStreamEnvelopeBeadRecoveryReleaseFailed, error) {
+	var body TypedTaggedEventStreamEnvelopeBeadRecoveryReleaseFailed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeBeadRecoveryReleaseFailed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeBeadRecoveryReleaseFailed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadRecoveryReleaseFailed(v TypedTaggedEventStreamEnvelopeBeadRecoveryReleaseFailed) error {
+	v.Type = "bead.recovery_release_failed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeBeadRecoveryReleaseFailed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadRecoveryReleaseFailed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadRecoveryReleaseFailed(v TypedTaggedEventStreamEnvelopeBeadRecoveryReleaseFailed) error {
+	v.Type = "bead.recovery_release_failed"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -25408,6 +25540,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened()
 	case "bead.deleted":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadDeleted()
+	case "bead.recovery_release_failed":
+		return t.AsTypedTaggedEventStreamEnvelopeBeadRecoveryReleaseFailed()
 	case "bead.updated":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadUpdated()
 	case "bead.worktree.reap_skipped":

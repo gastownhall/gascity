@@ -92,7 +92,7 @@ func TestAuthorshipKeepsTheRecordedDecisions(t *testing.T) {
 			ExecutionStepCompleted, ExecutionStepStalled,
 			RequestResultCityCreate, RequestResultCityUnregister, RequestResultSessionCreate,
 			RequestResultSessionMessage, RequestResultSessionSubmit, RequestResultRigCreate,
-			BeadDeadAssigneeReopened, BeadWorktreeReaped, BeadWorktreeReapSkipped,
+			BeadDeadAssigneeReopened, BeadRecoveryReleaseFailed, BeadWorktreeReaped, BeadWorktreeReapSkipped,
 			ControllerStarted, ControllerStopped,
 			SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest, SupervisorFSPressureSkippedTick,
 			CitySuspended, CityResumed, CityCreated, CityUnregisterRequested,

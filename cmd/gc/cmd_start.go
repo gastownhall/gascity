@@ -146,6 +146,7 @@ type poolDeathInfo struct {
 	Command string            // on_death shell command pre-expanded for the instance
 	Dir     string            // working directory for bd commands
 	Env     map[string]string // canonical runtime env for the agent scope
+	Agent   string            // qualified agent identity of the pool instance
 }
 
 // computePoolDeathHandlers builds a map from session name to death handler
@@ -174,7 +175,7 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 			cmd = expandAgentCommandTemplate(cityPath, cityName, &instance, cfg.Rigs, "on_death", cmd, stderr)
 			dir := agentCommandDir(cityPath, &a, cfg.Rigs)
 			sn := startupSessionName(cityName, qualifiedInstance, st)
-			handlers[sn] = poolDeathInfo{Command: cmd, Dir: dir, Env: agentEnv}
+			handlers[sn] = poolDeathInfo{Command: cmd, Dir: dir, Env: agentEnv, Agent: qualifiedInstance}
 		}
 	}
 	return handlers
@@ -1054,7 +1055,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// Enforce restrictive permissions on .gc/ and its subdirectories.
 	enforceGCPermissions(cityPath, stderr)
 
-	runPoolOnBoot(cfg, cityPath, shellRunHook, stderr)
+	runPoolOnBoot(cfg, cityPath, shellRunHook, stderr, recorder)
 
 	var oneShotStore beads.Store
 	if store, err := openCityStoreAt(cityPath); err == nil {

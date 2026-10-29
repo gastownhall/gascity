@@ -667,6 +667,34 @@ func BeadDeadAssigneeReopenedPayloadJSON(beadID, deadAssignee, routedTo string) 
 	return b
 }
 
+// BeadRecoveryReleaseFailedPayload is the typed payload for
+// bead.recovery_release_failed events. Emitted when the default pool
+// on_death/on_boot recovery hook could not release or reopen a work bead that
+// was assigned to a dead session. The hook itself exits 0 on such a failure,
+// so this payload is the machine contract for the otherwise log-only
+// gc-recovery diagnostic.
+type BeadRecoveryReleaseFailedPayload struct {
+	BeadID string `json:"bead_id" doc:"ID of the work bead the recovery hook could not release (also the envelope Subject)."`
+	Agent  string `json:"agent" doc:"Qualified name of the pool agent whose hook reported the failure."`
+	Hook   string `json:"hook" doc:"The recovery hook that reported it: on_death or on_boot."`
+	Error  string `json:"error" doc:"bd's error text for the failed write."`
+}
+
+// IsEventPayload marks BeadRecoveryReleaseFailedPayload as an events.Payload variant.
+func (BeadRecoveryReleaseFailedPayload) IsEventPayload() {}
+
+// BeadRecoveryReleaseFailedPayloadJSON builds the JSON wire form for attachment
+// to an events.Event.Payload field.
+func BeadRecoveryReleaseFailedPayloadJSON(beadID, agent, hook, errText string) json.RawMessage {
+	b, _ := json.Marshal(BeadRecoveryReleaseFailedPayload{
+		BeadID: beadID,
+		Agent:  agent,
+		Hook:   hook,
+		Error:  errText,
+	})
+	return b
+}
+
 // SessionUnknownStatePayload carries the machine-readable context for a
 // session.unknown_state event: a session bead whose metadata state the
 // reconciler does not recognize and therefore skips (forward-compatible
@@ -891,6 +919,7 @@ func init() {
 	events.RegisterPayload(events.BeadClosed, BeadEventPayload{})
 	events.RegisterPayload(events.BeadDeleted, BeadEventPayload{})
 	events.RegisterPayload(events.BeadDeadAssigneeReopened, BeadDeadAssigneeReopenedPayload{})
+	events.RegisterPayload(events.BeadRecoveryReleaseFailed, BeadRecoveryReleaseFailedPayload{})
 
 	// session.* / convoy.* / controller.* / city.* / order.* /
 	// provider.* — these events carry no structured payload today;

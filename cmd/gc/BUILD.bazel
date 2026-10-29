@@ -2053,6 +2053,7 @@ go_test(
         "reconcile_stop_request_test.go",
         "reconcile_tick_test.go",
         "reconcile_wake_test.go",
+        "recovery_release_failed_event_test.go",
         "refresh_desired_state_class_routing_test.go",
         "relaunch_forwarding_test.go",
         "relic_census_boot_test.go",

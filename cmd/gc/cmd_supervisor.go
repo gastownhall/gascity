@@ -2591,7 +2591,7 @@ func startOneCity(
 
 	// Run pool on_boot hooks (same as runController does).
 	if err := runPostPrepareStep("running_pool_on_boot", func() error {
-		runPoolOnBoot(cfg, path, shellRunHook, stderr)
+		runPoolOnBoot(cfg, path, shellRunHook, stderr, rec)
 		return nil
 	}); err != nil {
 		// Same as the controller-state branch above: the runtime is built,

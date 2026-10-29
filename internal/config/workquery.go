@@ -1522,6 +1522,21 @@ func (a *Agent) EffectiveScaleCheck() string {
 // mislabeled or spammed into the recovery log.
 const RecoveryHookMarker = "gc-recovery:"
 
+// RecoveryFailure is one failed release the default recovery hooks reported on
+// stdout behind RecoveryHookMarker.
+type RecoveryFailure struct {
+	Hook   string // "on_death" or "on_boot"
+	BeadID string
+	Error  string // bd's error text; continuation lines are joined with "\n"
+}
+
+// ParseRecoveryFailures reads the failure lines the default on_death/on_boot
+// hooks print and returns one RecoveryFailure per marked line. Lines that do
+// not match the hooks' format are skipped.
+func ParseRecoveryFailures(_ string) []RecoveryFailure {
+	return nil // RED skeleton: parsing lands in the GREEN step.
+}
+
 // EffectiveOnDeath returns the on_death command for this agent.
 // If OnDeath is set, returns it. Otherwise returns the default recovery hook
 // that unclaims in-progress work assigned to this concrete agent identity.

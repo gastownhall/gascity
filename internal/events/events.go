@@ -162,17 +162,23 @@ const (
 	// otherwise-silent repair into an observable signal (mirrors the
 	// bead.claim_rejected shape).
 	BeadDeadAssigneeReopened = "bead.dead_assignee_reopened"
-	MailSent                 = "mail.sent"
-	MailRead                 = "mail.read"
-	MailArchived             = "mail.archived"
-	MailMarkedRead           = "mail.marked_read"
-	MailMarkedUnread         = "mail.marked_unread"
-	MailReplied              = "mail.replied"
-	MailDeleted              = "mail.deleted"
-	SessionDraining          = "session.draining"
-	SessionUndrained         = "session.undrained"
-	SessionQuarantined       = "session.quarantined"
-	SessionIdleKilled        = "session.idle_killed"
+	// BeadRecoveryReleaseFailed fires when the default pool on_death/on_boot
+	// recovery hook could not release or reopen a bead it found assigned to a
+	// dead session. The hook exits 0 even then, so this event (carrying the
+	// bead, the agent, the hook and bd's error text) is the machine-readable
+	// form of the gc-recovery diagnostic that was otherwise log-only.
+	BeadRecoveryReleaseFailed = "bead.recovery_release_failed"
+	MailSent                  = "mail.sent"
+	MailRead                  = "mail.read"
+	MailArchived              = "mail.archived"
+	MailMarkedRead            = "mail.marked_read"
+	MailMarkedUnread          = "mail.marked_unread"
+	MailReplied               = "mail.replied"
+	MailDeleted               = "mail.deleted"
+	SessionDraining           = "session.draining"
+	SessionUndrained          = "session.undrained"
+	SessionQuarantined        = "session.quarantined"
+	SessionIdleKilled         = "session.idle_killed"
 	// SessionMaxAgeKilled fires when the controller preemptively restarts a
 	// long-running session because its wall-clock age exceeded the agent's
 	// max_session_age threshold. Motivating case: provider SDKs that cache
@@ -731,7 +737,7 @@ var KnownEventTypes = []string{
 	BeadClaimFailed, BeadClaimLoopHeld,
 	AgentClaimsStalled, AgentClaimsResumed,
 	HookClaimReclaimedStale,
-	BeadDeadAssigneeReopened,
+	BeadDeadAssigneeReopened, BeadRecoveryReleaseFailed,
 	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
 	ExecutionClaimWindowExpired,
 	ExecutionStepStalled,

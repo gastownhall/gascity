@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -297,7 +298,7 @@ func (cr *CityRuntime) poolDeathHook() poolDeathHookRunner {
 
 // runPoolDeathHook runs one name's on_death hook and reports it on stderr
 // the way the tick always has.
-func runPoolDeathHook(run poolDeathHookRunner, stderr io.Writer, name string, info poolDeathInfo) error {
+func runPoolDeathHook(run poolDeathHookRunner, stderr io.Writer, _ events.Recorder, name string, info poolDeathInfo) error {
 	out, err := run(info.Command, info.Dir, info.Env)
 	if err != nil {
 		fmt.Fprintf(stderr, "on_death %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
@@ -419,7 +420,7 @@ func (cr *CityRuntime) executeDeathEdge(ctx context.Context, lane *runtimeInvent
 		return false
 	}
 	outcome := onDeathOutcomeFired
-	hookErr := runPoolDeathHook(cr.poolDeathHook(), cr.stderr, e.name, e.info)
+	hookErr := runPoolDeathHook(cr.poolDeathHook(), cr.stderr, cr.rec, e.name, e.info)
 	if hookErr != nil {
 		outcome = onDeathOutcomeHookFailed
 	}

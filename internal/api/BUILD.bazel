@@ -334,6 +334,7 @@ go_test(
         "event_payloads_1a_wiring_test.go",
         "event_payloads_coverage_test.go",
         "event_payloads_overhead_test.go",
+        "event_payloads_recovery_test.go",
         "event_payloads_test.go",
         "event_stream_delivery_test.go",
         "fake_state_test.go",

@@ -1333,7 +1333,7 @@ func (cr *CityRuntime) reconcilePoolDeaths(prevPoolRunning *map[string]bool) {
 	if *prevPoolRunning != nil {
 		for sn, info := range handlers {
 			if (*prevPoolRunning)[sn] && !currentSet[sn] {
-				_ = runPoolDeathHook(cr.poolDeathHook(), cr.stderr, sn, info) // reported on stderr
+				_ = runPoolDeathHook(cr.poolDeathHook(), cr.stderr, cr.rec, sn, info) // reported on stderr
 			}
 		}
 	}

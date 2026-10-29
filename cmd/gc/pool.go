@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -482,8 +483,8 @@ type poolOnBootHook struct {
 // the no-recovery variants exist to bound (ga-cdmx6x). Template expansion also
 // reports malformed commands to the shared stderr. So the impure half stays on
 // one goroutine, and only the subprocesses fan out.
-func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, stderr io.Writer) {
-	runPoolOnBootHooks(planPoolOnBootHooks(cfg, cityPath, stderr), runner, stderr)
+func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, stderr io.Writer, rec events.Recorder) {
+	runPoolOnBootHooks(planPoolOnBootHooks(cfg, cityPath, stderr), runner, stderr, rec)
 }
 
 // planPoolOnBootHooks resolves every eligible pool agent's on_boot command,
@@ -523,7 +524,7 @@ func planPoolOnBootHooks(cfg *config.City, cityPath string, stderr io.Writer) []
 // Each hook's log lines are buffered and written in a single call, so an
 // agent's failure and its recovery diagnostic stay together instead of
 // interleaving with another agent's.
-func runPoolOnBootHooks(hooks []poolOnBootHook, runner ScaleCheckRunner, stderr io.Writer) {
+func runPoolOnBootHooks(hooks []poolOnBootHook, runner ScaleCheckRunner, stderr io.Writer, _ events.Recorder) {
 	if len(hooks) == 0 {
 		return
 	}
