@@ -412,6 +412,70 @@ func TestStopHandler_ForceCloseClosesOpenWispDescendants(t *testing.T) {
 	}
 }
 
+func TestStopHandler_ForceCloseKeepsClosedStepReasonAndReachesNestedSteps(t *testing.T) {
+	// A descendant that was already closed keeps its own close_reason, and
+	// open work nested under that closed descendant is still force-closed.
+	handler, store, _ := setupActiveHandler(t, "in_progress", nil)
+	store.addBead("step-a", "open", "wisp-iter-2", "", nil)
+	store.addBead("step-c", "closed", "wisp-iter-2", "", map[string]string{
+		"close_reason": CloseReasonManualApprove,
+	})
+	store.addBead("step-c1", "open", "step-c", "", nil)
+
+	_, err := handler.StopHandler(context.Background(), "root-1", "alice", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, id := range []string{"step-a", "step-c1"} {
+		info, err := store.GetBead(id)
+		if err != nil {
+			t.Fatalf("reading %s: %v", id, err)
+		}
+		if info.Status != "closed" {
+			t.Errorf("step %s status = %q, want closed", id, info.Status)
+		}
+		meta, err := store.GetMetadata(id)
+		if err != nil {
+			t.Fatalf("reading %s metadata: %v", id, err)
+		}
+		if meta["close_reason"] != CloseReasonManualSupersede {
+			t.Errorf("step %s close_reason = %q, want %q", id, meta["close_reason"], CloseReasonManualSupersede)
+		}
+	}
+
+	meta, err := store.GetMetadata("step-c")
+	if err != nil {
+		t.Fatalf("reading step-c metadata: %v", err)
+	}
+	if meta["close_reason"] != CloseReasonManualApprove {
+		t.Errorf("already-closed step-c close_reason = %q, want its prior %q",
+			meta["close_reason"], CloseReasonManualApprove)
+	}
+
+	wispIdx := closeLogIndex(store.CloseLog, "wisp-iter-2")
+	if wispIdx < 0 {
+		t.Fatalf("CloseLog %v does not list the wisp root", store.CloseLog)
+	}
+	for _, step := range []string{"step-a", "step-c1"} {
+		if idx := closeLogIndex(store.CloseLog, step); idx < 0 || idx > wispIdx {
+			t.Errorf("CloseLog %v: step %s (idx %d) must close before wisp-iter-2 (idx %d)",
+				store.CloseLog, step, idx, wispIdx)
+		}
+	}
+	if closeLogIndex(store.CloseLog, "step-c") != -1 {
+		t.Errorf("CloseLog %v lists the already-closed step-c; it must be left untouched", store.CloseLog)
+	}
+
+	rootMeta, _ := store.GetMetadata("root-1")
+	if rootMeta[FieldState] != StateTerminated {
+		t.Errorf("state = %q, want %q", rootMeta[FieldState], StateTerminated)
+	}
+	if rootMeta[FieldTerminalReason] != TerminalStopped {
+		t.Errorf("terminal_reason = %q, want %q", rootMeta[FieldTerminalReason], TerminalStopped)
+	}
+}
+
 // closeLogIndex returns the index of id in the close log, or -1.
 func closeLogIndex(log []string, id string) int {
 	for i, entry := range log {
