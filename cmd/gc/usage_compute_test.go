@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1347,4 +1348,94 @@ func TestEmitDueComputeFactsSettlesReopenedNamedSessionInterval(t *testing.T) {
 	if v := got.Metadata[usageComputeEmittedAtKey]; v != t0.Format(time.RFC3339) {
 		t.Fatalf("usage_compute_emitted_at = %q, want %q", v, t0.Format(time.RFC3339))
 	}
+}
+
+// TestEmitDueComputeFactsClearsCloseMarkerWithNothingToAccount covers marked
+// rows the usage lane must not bill: no awake interval, an interval already
+// committed, an open row awake on a newer interval than the close ended, and an
+// open row still live on the closed interval's start. Each records no fact and
+// has its markers cleared. A row the lane settled is then listed no more and
+// records nothing on a later pass.
+func TestEmitDueComputeFactsClearsCloseMarkerWithNothingToAccount(t *testing.T) {
+	t1 := time.Now().UTC().Truncate(time.Second)
+	t0 := t1.Add(-10 * time.Minute)
+	start := t0.Format(time.RFC3339)
+	for _, c := range []struct {
+		name   string
+		closed bool
+		edit   func(meta map[string]string)
+	}{
+		{name: "no awake interval", closed: true, edit: func(m map[string]string) { delete(m, "awake_started_at") }},
+		{name: "interval already committed", closed: true, edit: func(m map[string]string) { m[usageComputeEmittedAtKey] = start }},
+		{name: "open row awake on a newer interval", edit: func(m map[string]string) {
+			m["awake_started_at"] = t1.Add(time.Minute).Format(time.RFC3339)
+		}},
+		{name: "open row live on the closed interval", edit: func(map[string]string) {}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			workDir, codexRoot := t.TempDir(), t.TempDir()
+			store := beads.NewMemStore()
+			meta := liveCodexSessionMeta(t0, workDir, codexSweepSessionKey)
+			maps.Copy(meta, session.UsageClosePatch(t1))
+			c.edit(meta)
+			b, err := store.Create(beads.Bead{Type: session.BeadType, Title: "s", Labels: []string{session.LabelSession}, Metadata: meta})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var open []session.Info
+			if c.closed {
+				if err := store.Close(b.ID); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				info, err := sessionFrontDoor(store).Get(b.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				open = append(open, info)
+			}
+			cr, sinkPath := newClosedUsageRuntime(t, store, codexRoot)
+			cr.emitDueComputeFacts(context.Background(), open, false)
+
+			if n := rawSinkFactCount(t, sinkPath, usage.KindCompute) + rawSinkModelFactCount(t, sinkPath); n != 0 {
+				t.Fatalf("recorded %d facts, want none: the row has nothing to account", n)
+			}
+			got, err := store.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{session.MetadataKeyUsageClosePending, session.MetadataKeyUsageClosedAt} {
+				if v := got.Metadata[key]; v != "" {
+					t.Fatalf("%s = %q, want cleared", key, v)
+				}
+			}
+		})
+	}
+
+	t.Run("a settled row is listed no more", func(t *testing.T) {
+		env := newReconcilerTestEnv(t)
+		env.clk.Time = t1
+		workDir, codexRoot := t.TempDir(), t.TempDir()
+		writeCodexRolloutForSweepAt(t, codexRoot, t0, workDir, codexSweepSessionKey, [][3]int{{150, 100, 50}})
+		drainAckClosedCodexSession(t, env, t0, workDir)
+		cr, sinkPath := newClosedUsageRuntime(t, env.store, codexRoot)
+		cr.emitDueComputeFacts(context.Background(), nil, false)
+		listed, err := env.store.List(beads.ListQuery{
+			Type: session.BeadType, Status: "closed", IncludeClosed: true,
+			Metadata: map[string]string{session.MetadataKeyUsageClosePending: "true"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(listed) != 0 {
+			t.Fatalf("settled row still listed as pending: %+v", listed)
+		}
+		cr.emitDueComputeFacts(context.Background(), nil, false)
+		if got := rawSinkFactCount(t, sinkPath, usage.KindCompute); got != 1 {
+			t.Fatalf("compute facts after a second pass = %d, want 1", got)
+		}
+		if got := rawSinkModelFactCount(t, sinkPath); got != 1 {
+			t.Fatalf("model facts after a second pass = %d, want 1", got)
+		}
+	})
 }

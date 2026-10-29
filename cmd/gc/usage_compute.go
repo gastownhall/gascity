@@ -380,6 +380,12 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 // sweeps the interval's model usage and records its compute fact, ending at
 // usage_closed_at, then commits the interval and clears the close markers in
 // one write once the sweep has settled.
+//
+// A marked row with nothing to account only has its markers cleared: one with
+// no awake interval, one whose interval is already committed, an open row awake
+// on a newer interval than the close ended (that interval's start is gone, so
+// its usage is lost and logged), and an open row still live on the closed
+// interval's start, which the live and terminal branches go on accounting.
 func (cr *CityRuntime) settleClosedInterval(
 	ctx context.Context,
 	sink usage.Sink,
@@ -391,6 +397,23 @@ func (cr *CityRuntime) settleClosedInterval(
 	modelSweepFactory func() *worker.Factory,
 ) {
 	awakeStart := strings.TrimSpace(b.Metadata["awake_started_at"])
+	startedAt, startErr := time.Parse(time.RFC3339, awakeStart)
+	if startErr != nil || strings.TrimSpace(b.Metadata[usageComputeEmittedAtKey]) == awakeStart {
+		clearUsageCloseMarkers(store, b.ID, logf)
+		return
+	}
+	if b.Status != "closed" {
+		closedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(b.Metadata[session.MetadataKeyUsageClosedAt]))
+		if err == nil && startedAt.After(closedAt) {
+			logf("usage: session %s woke on a new interval before its closed interval was settled; that interval's usage is lost", b.ID)
+			clearUsageCloseMarkers(store, b.ID, logf)
+			return
+		}
+		if isLiveModelSweepState(b.Metadata["state"]) {
+			clearUsageCloseMarkers(store, b.ID, logf)
+			return
+		}
+	}
 	sweepSettled, swept := true, false
 	if factory := modelSweepFactory(); factory != nil &&
 		strings.TrimSpace(b.Metadata[usageModelSweptAtKey]) != awakeStart {
@@ -416,6 +439,17 @@ func (cr *CityRuntime) settleClosedInterval(
 		return
 	}
 	cr.liveSweepMemos.Delete(b.ID)
+}
+
+// clearUsageCloseMarkers drops a row's usage close markers without accounting
+// an interval.
+func clearUsageCloseMarkers(store beads.Store, id string, logf func(string, ...any)) {
+	if err := store.SetMetadataBatch(id, map[string]string{
+		session.MetadataKeyUsageClosePending: "",
+		session.MetadataKeyUsageClosedAt:     "",
+	}); err != nil {
+		logf("usage: clearing the usage close marker of session %s failed; will retry: %v", id, err)
+	}
 }
 
 // liveSweepMemo is one awake session's live model-usage sweep state, held for
