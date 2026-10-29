@@ -235,8 +235,9 @@ jobs:
           echo "rrc=$rrc" >> "$GITHUB_OUTPUT"
           echo "Remote repo contents cache: **$rrc**" >> "$GITHUB_STEP_SUMMARY"
 
-      # Whether a pull request touches the bead-storage paths the split-strict
-      # lane guards. A PR's file list comes from the API (this job has no
+      # Whether a pull request touches the store layer or code whose store
+      # routing the split-strict lane judges (cmd/gc, api, session, sling,
+      # molecule, orders, dispatch, readywork). A PR's file list comes from the API (this job has no
       # checkout); if it cannot be read the lane runs.
       - name: Split-strict paths
         id: splitpaths
@@ -252,8 +253,8 @@ jobs:
             while IFS= read -r f; do
               case "$f" in
                 internal/beads/*|internal/storeref/*|internal/storebinding/*|internal/coordclass/*|internal/beadmeta/*|\
-                cmd/gc/class_store*|cmd/gc/*storage*|cmd/gc/cli_*store*|cmd/gc/split_strict*|cmd/gc/testdata/split_strict*|\
-                internal/api/residency*|internal/api/testdata/split_strict*|internal/api/fake_state_test.go)
+                cmd/gc/*|internal/api/*|internal/session/*|internal/sling/*|internal/molecule/*|\
+                internal/orders/*|internal/dispatch/*|internal/readywork/*)
                   touched=true ;;
               esac
             done <<<"$files"

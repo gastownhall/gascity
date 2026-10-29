@@ -1509,3 +1509,59 @@ func TestForkRepositoryCINeverReadsRBECache(t *testing.T) {
 		}
 	}
 }
+
+// splitStrictPathPatterns is the case pattern list the Split-strict paths
+// step matches a PR's files against.
+func splitStrictPathPatterns(t *testing.T) []string {
+	t.Helper()
+	run := multiLaneRBEStep(t, readMultiLaneWorkflow(t), "splitpaths").Run
+	m := regexp.MustCompile(`(?s)case "\$f" in\s*(.*?)\)\s*\n\s*touched=true`).FindStringSubmatch(run)
+	if m == nil {
+		t.Fatalf("the splitpaths step has no case pattern list:\n%s", run)
+	}
+	var out []string
+	for _, p := range strings.Split(strings.ReplaceAll(m[1], "\\\n", ""), "|") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// caseGlobMatch is a shell case glob match: "*" matches any run of
+// characters, slashes included.
+func caseGlobMatch(pattern, name string) bool {
+	re := "^" + strings.ReplaceAll(regexp.QuoteMeta(pattern), `\*`, ".*") + "$"
+	return regexp.MustCompile(re).MatchString(name)
+}
+
+// TestSplitStrictLaneRunsOnTheRoutingCode: the split-strict lane runs on PRs
+// touching any code whose store routing it judges (cmd/gc, the session,
+// sling, molecule, orders, dispatch, readywork and api packages, the store
+// layer), and not on unrelated changes.
+func TestSplitStrictLaneRunsOnTheRoutingCode(t *testing.T) {
+	patterns := splitStrictPathPatterns(t)
+	touched := func(f string) bool {
+		for _, p := range patterns {
+			if caseGlobMatch(p, f) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, f := range []string{
+		"cmd/gc/cmd_sling.go", "cmd/gc/testdata/split_strict_baseline.tsv",
+		"internal/session/manager.go", "internal/sling/sling_core.go", "internal/molecule/molecule.go",
+		"internal/orders/store_reads.go", "internal/dispatch/dispatch.go", "internal/readywork/ready.go",
+		"internal/api/huma_handlers_beads.go", "internal/beads/memstore.go", "internal/storeref/resolve.go",
+	} {
+		if !touched(f) {
+			t.Errorf("a PR touching %s does not run the split-strict lane", f)
+		}
+	}
+	for _, f := range []string{"docs/reference/cli.md", "internal/runtime/tmux/tmux.go", ".github/workflows/ci.yml"} {
+		if touched(f) {
+			t.Errorf("a PR touching only %s runs the split-strict lane", f)
+		}
+	}
+}
