@@ -421,7 +421,10 @@ func (s *beadPolicyStore) ListByLabel(label string, limit int, opts ...beads.Que
 		Label:         label,
 		Limit:         limit,
 		IncludeClosed: beads.HasOpt(opts, beads.IncludeClosed),
-		TierMode:      policyTierFromOpts(opts),
+		// Newest-first like every unwrapped ListByLabel; SortDefault leaves a
+		// caching store's map order, so a limit would keep an arbitrary slice.
+		Sort:     beads.SortCreatedDesc,
+		TierMode: policyTierFromOpts(opts),
 	})
 }
 

@@ -218,7 +218,13 @@ type CityRuntime struct {
 	// critical section, before the generation and config are read.
 	inOrderPassConfig func(*ordersLane)
 
-	orderSweepWatchdogLast             time.Time
+	orderSweepWatchdogLast time.Time
+	// orderSweepWatchdogNotClosedDue is when the stale watchdog next reads
+	// every not-closed tracking bead; the zero value is due on the next pass.
+	// orderSweepWatchdogNotClosedBackoff is the wait an incomplete not-closed
+	// pass set before that read, zero after a pass that completed.
+	orderSweepWatchdogNotClosedDue     time.Time
+	orderSweepWatchdogNotClosedBackoff time.Duration
 	orderTrackingRetentionWatchdogLast time.Time
 	nudgeMailSweepWatchdogLast         time.Time
 	wispIndexMigrationApplied          bool
@@ -2157,9 +2163,13 @@ func orderSetChangeSummary(oldOrders, newOrders []orders.Order) string {
 	return strings.Join(parts, "; ")
 }
 
-// runOrderTrackingSweepWatchdog closes stale open order-tracking beads, at most
-// once every orderTrackingSweepWatchdogInterval. The orders lane runs it with
-// its pass's config snapshot.
+// runOrderTrackingSweepWatchdog closes stale open and in_progress
+// order-tracking beads, at most once every orderTrackingSweepWatchdogInterval,
+// and every stale not-closed one, a tracking bead parked by hand included, on
+// its first pass and then once every
+// orderTrackingSweepWatchdogNotClosedInterval, sooner after a not-closed pass
+// that did not complete. The orders lane runs it with its pass's config
+// snapshot.
 func (cr *CityRuntime) runOrderTrackingSweepWatchdog(cfg *config.City, now time.Time) {
 	if !cr.orderSweepWatchdogLast.IsZero() && now.Sub(cr.orderSweepWatchdogLast) < clock.Backstop(orderTrackingSweepWatchdogInterval) {
 		return
@@ -2184,8 +2194,41 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(cfg *config.City, now time.
 	// recovers the jam without depending on any single order being scheduled.
 	// Closed-history retention is intentionally left to the maintenance exec
 	// order or the gc order sweep-tracking CLI; the watchdog only recovers
-	// stale open tracking beads.
-	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, nil, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget)
+	// stale tracking beads that are not closed.
+	//
+	// Most passes read only the open and in_progress ones: every 30 s, a
+	// not-closed read would have a native Dolt store decode the whole retained
+	// closed history. A tracking bead parked by hand (blocked, deferred, ...)
+	// is in neither status yet still holds its order's strict gate, so the
+	// first pass, and then one pass every
+	// orderTrackingSweepWatchdogNotClosedInterval, reads every not-closed
+	// status, in every store the watchdog sweeps. Leaving the parked bead to
+	// the other sweeps that read it would bring back the single point of
+	// failure above. The on-demand sweep (gc order sweep-tracking) runs only
+	// when the core order-tracking-sweep order fires, and a parked tracking
+	// bead of that order's own holds its gate. The boot orphan sweep runs once
+	// per start and reads only the city work store and the orders binding.
+	//
+	// The next not-closed read is therefore scheduled after this one runs, and
+	// a pass that does not complete does not use up the interval: a parked
+	// bead it never reached would hold its order for another whole interval,
+	// and a store still failing its dolt cold start (#753) makes the first
+	// pass the likeliest to miss one. A pass completes when every store
+	// opened, every read and close succeeded, and it closed fewer beads than
+	// the close budget: a pass that spends the budget stops before the beads,
+	// and the stores, it has not reached. An incomplete pass is retried on the
+	// next pass, and each further incomplete pass in a row doubles that wait
+	// up to the interval, so a store that keeps failing does not make the
+	// others decode their closed history on every pass.
+	read := staleTrackingReadOpenInProgress
+	if !now.Before(cr.orderSweepWatchdogNotClosedDue) {
+		read = staleTrackingReadNotClosed
+	}
+	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, nil, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget, read)
+	if read == staleTrackingReadNotClosed {
+		complete := storeErr == nil && sweepErr == nil && result.trackingClosed < orderTrackingSweepCloseBudget
+		cr.scheduleOrderSweepWatchdogNotClosed(now, complete)
+	}
 	if err := errors.Join(storeErr, sweepErr); err != nil {
 		if cr.stderr != nil {
 			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -2195,6 +2238,27 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(cfg *config.City, now time.
 	if n > 0 && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog closed %d stale tracking bead(s)\n", cr.logPrefix, n) //nolint:errcheck // best-effort stderr
 	}
+}
+
+// scheduleOrderSweepWatchdogNotClosed sets when the stale watchdog next reads
+// every not-closed tracking bead, after a not-closed pass at now. After a pass
+// that completed it is orderTrackingSweepWatchdogNotClosedInterval away. After
+// one that did not it is orderTrackingSweepWatchdogInterval away, the next
+// pass, and each further incomplete pass in a row doubles that wait up to the
+// interval.
+func (cr *CityRuntime) scheduleOrderSweepWatchdogNotClosed(now time.Time, complete bool) {
+	interval := clock.Backstop(orderTrackingSweepWatchdogNotClosedInterval)
+	if complete {
+		cr.orderSweepWatchdogNotClosedBackoff = 0
+		cr.orderSweepWatchdogNotClosedDue = now.Add(interval)
+		return
+	}
+	backoff := clock.Backstop(orderTrackingSweepWatchdogInterval)
+	if cr.orderSweepWatchdogNotClosedBackoff > 0 {
+		backoff = min(2*cr.orderSweepWatchdogNotClosedBackoff, interval)
+	}
+	cr.orderSweepWatchdogNotClosedBackoff = backoff
+	cr.orderSweepWatchdogNotClosedDue = now.Add(backoff)
 }
 
 // bulkDeleteMaxAge returns the maximum backup age allowed for bulk bead
