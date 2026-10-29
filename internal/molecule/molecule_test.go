@@ -3950,6 +3950,7 @@ type mintFaultStore struct {
 	activationFired bool
 
 	stampRefusals map[int]int // creation index -> refusals, or stampAlways
+	stampFault    error       // wrapped by every refusal; errInjectedStamp when nil
 	stampPartial  bool        // a refused stamp first writes molecule_failed alone
 	refused       map[string]int
 	stampCalls    []string
@@ -4000,7 +4001,11 @@ func (s *mintFaultStore) SetMetadataBatch(id string, kvs map[string]string) erro
 				return err
 			}
 		}
-		return fmt.Errorf("%w on %s", errInjectedStamp, id)
+		fault := s.stampFault
+		if fault == nil {
+			fault = errInjectedStamp
+		}
+		return fmt.Errorf("%w on %s", fault, id)
 	}
 	return s.Store.SetMetadataBatch(id, kvs)
 }
@@ -4081,6 +4086,53 @@ func TestInstantiateFailureStampsTheRootWhoseActivationFailed(t *testing.T) {
 			want := append(append([]string{}, store.created...), root)
 			assertStampCalls(t, store.stampCalls, want...)
 			assertStampedAndUnfenced(t, store, store.created...)
+		})
+	}
+}
+
+// A mint whose root stamp is refused on both attempts still stamps the body,
+// and its error names the root it could not confirm without letting the stamp
+// fault take over the error's typed identity.
+func TestInstantiateFailureNamesTheBeadsItCouldNotMark(t *testing.T) {
+	cases := []struct {
+		name  string
+		fault error
+	}{
+		{name: "stamp conflict", fault: errInjectedStamp},
+		{name: "not found", fault: beads.ErrNotFound},
+		{name: "deadline", fault: context.DeadlineExceeded},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newMintFaultStore(beads.NewMemStore())
+			store.activationIndex = 0
+			store.stampRefusals[0] = stampAlways
+			store.stampFault = tc.fault
+
+			_, err := Instantiate(context.Background(), store, twoStepGraphWorkflow(), Options{})
+			if !store.activationFired {
+				t.Fatalf("root activation fault never fired (err=%v); the mint took another path", err)
+			}
+			root, body := store.created[0], store.created[1]
+			if got := store.refused[root]; got != 2 {
+				t.Fatalf("root stamp refused %d times, want 2", got)
+			}
+			assertStampCalls(t, store.stampCalls, root, body, root)
+			assertStampedAndUnfenced(t, store, body)
+			if !errors.Is(err, errInjectedActivation) {
+				t.Fatalf("err = %v, want it to wrap the activation fault", err)
+			}
+			if errors.Is(err, tc.fault) {
+				t.Fatalf("err = %v wraps the stamp fault; the mint cause must keep the error's identity", err)
+			}
+			suffix := fmt.Sprintf("(failure stamp not confirmed: marking %s molecule_failed: %v on %s)", root, tc.fault, root)
+			if !strings.HasSuffix(err.Error(), suffix) {
+				t.Fatalf("err = %q, want suffix %q", err.Error(), suffix)
+			}
+			want := fmt.Sprintf(`activating graph step "wf": %v on %s %s`, errInjectedActivation, root, suffix)
+			if err.Error() != want {
+				t.Fatalf("err = %q, want %q", err.Error(), want)
+			}
 		})
 	}
 }

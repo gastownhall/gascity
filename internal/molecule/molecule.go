@@ -1053,25 +1053,21 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 		// as agent-readable templates resolved at claim time.
 		if strings.Contains(b.Title, "{{") {
 			if residual := formula.CheckResidualVars(b.Title); len(residual) > 0 {
-				markFailed(store, createdIDs)
-				return nil, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
+				return nil, failInstantiation(store, createdIDs, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", ")))
 			}
 		}
 		// Same guard, extended to routing metadata — see #5060.
 		if err := validateResidualRoutingVars(step.ID, b.Metadata); err != nil {
-			markFailed(store, createdIDs)
-			return nil, err
+			return nil, failInstantiation(store, createdIDs, err)
 		}
 		if err := validateTimeoutMetadataVars(step.ID, b.Metadata); err != nil {
-			markFailed(store, createdIDs)
-			return nil, err
+			return nil, failInstantiation(store, createdIDs, err)
 		}
 
 		created, err := store.Create(b)
 		if err != nil {
 			// Best-effort cleanup: mark already-created beads as failed.
-			markFailed(store, createdIDs)
-			return nil, fmt.Errorf("creating bead for step %q: %w", step.ID, err)
+			return nil, failInstantiation(store, createdIDs, fmt.Errorf("creating bead for step %q: %w", step.ID, err))
 		}
 
 		idMapping[step.ID] = created.ID
@@ -1094,14 +1090,12 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			if dep.Type == "parent-child" && createdParentByStep[dep.StepID] != toID {
 				parentID := toID
 				if err := store.Update(fromID, beads.UpdateOpts{ParentID: &parentID}); err != nil {
-					markFailed(store, createdIDs)
-					return nil, fmt.Errorf("setting parent for dep %s->%s: %w", dep.StepID, dep.DependsOnID, err)
+					return nil, failInstantiation(store, createdIDs, fmt.Errorf("setting parent for dep %s->%s: %w", dep.StepID, dep.DependsOnID, err))
 				}
 				createdParentByStep[dep.StepID] = toID
 			}
 			if err := store.DepAdd(fromID, toID, dep.Type); err != nil {
-				markFailed(store, createdIDs)
-				return nil, fmt.Errorf("wiring dep %s->%s: %w", dep.StepID, dep.DependsOnID, err)
+				return nil, failInstantiation(store, createdIDs, fmt.Errorf("wiring dep %s->%s: %w", dep.StepID, dep.DependsOnID, err))
 			}
 		}
 	}
@@ -1118,8 +1112,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 				continue
 			}
 			if err := store.DepAdd(fromID, dep.DependsOnID, dep.Type); err != nil {
-				markFailed(store, createdIDs)
-				return nil, fmt.Errorf("wiring external dep %s->%s: %w", stepID, dep.DependsOnID, err)
+				return nil, failInstantiation(store, createdIDs, fmt.Errorf("wiring external dep %s->%s: %w", stepID, dep.DependsOnID, err))
 			}
 		}
 	}
@@ -1134,8 +1127,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 				continue
 			}
 			if err := store.Update(beadID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
-				markFailed(store, createdIDs)
-				return nil, fmt.Errorf("assigning graph step %q: %w", stepID, err)
+				return nil, failInstantiation(store, createdIDs, fmt.Errorf("assigning graph step %q: %w", stepID, err))
 			}
 		}
 	}
@@ -1147,8 +1139,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 				continue
 			}
 			if err := activateFencedGraphWorkflowBead(store, beadID); err != nil {
-				markFailed(store, createdIDs)
-				return nil, fmt.Errorf("activating graph step %q: %w", step.ID, err)
+				return nil, failInstantiation(store, createdIDs, fmt.Errorf("activating graph step %q: %w", step.ID, err))
 			}
 		}
 	}
@@ -1821,6 +1812,22 @@ func markFailedReporting(store beads.Store, ids []string) error {
 // an error path.
 func markFailed(store beads.Store, ids []string) {
 	_ = stampFailed(store, ids)
+}
+
+// failInstantiation stamps the created beads as failed and returns the mint's
+// cause. When every stamp landed it returns cause itself; otherwise it appends
+// the beads whose stamp it could not confirm. The stamp faults are text only,
+// so errors.Is and errors.As answer for the mint failure alone.
+func failInstantiation(store beads.Store, ids []string, cause error) error {
+	errs := stampFailed(store, ids)
+	if len(errs) == 0 {
+		return cause
+	}
+	msgs := make([]string, len(errs))
+	for i, err := range errs {
+		msgs[i] = err.Error()
+	}
+	return fmt.Errorf("%w (failure stamp not confirmed: %s)", cause, strings.Join(msgs, "; "))
 }
 
 // stampFailed sets beadmeta.MoleculeFailedMetadataKey and clears the
