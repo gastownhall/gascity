@@ -2398,6 +2398,19 @@ func TestInitCityInPodSkipsDolt(t *testing.T) {
 			t.Errorf("gc init should run with %s; got cmd=%v", flag, gcInitCmd)
 		}
 	}
+
+	// The pod is a remote stage of the controller's city (S5-A): it must
+	// never run storage genesis, and its infra-class commands refuse loudly
+	// instead of serving a pod-local empty binding.
+	staged := false
+	for i, arg := range gcInitCmd {
+		if arg == "--remote-stage" && i+1 < len(gcInitCmd) && gcInitCmd[i+1] == "/city" {
+			staged = true
+		}
+	}
+	if !staged {
+		t.Errorf("gc init should run with --remote-stage /city; got cmd=%v", gcInitCmd)
+	}
 }
 
 type cleanupCaptureOps struct {

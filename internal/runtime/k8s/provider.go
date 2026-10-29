@@ -927,10 +927,12 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity string) er
 		return err
 	}
 	// Run gc init --from with GC_DOLT=skip so gc init does not attempt to
-	// start a local Dolt server. Pod sessions consume the projected GC_DOLT_*
+	// start a local Dolt server. --remote-stage records the pod as a stage of
+	// the controller's city: a split city's infrastructure classes refuse
+	// there instead of creating a pod-local empty binding (S5-A). Pod sessions consume the projected GC_DOLT_*
 	// connection target through env; they do not rewrite canonical .beads files.
 	_, err := ops.execInPod(ctx, podName, "agent",
-		[]string{"env", "GC_DOLT=skip", "gc", "init", "--from", "/tmp/city-src", "/workspace", "--no-start", "--skip-provider-readiness"}, nil)
+		[]string{"env", "GC_DOLT=skip", "gc", "init", "--from", "/tmp/city-src", "/workspace", "--no-start", "--skip-provider-readiness", "--remote-stage", ctrlCity}, nil)
 	if err != nil {
 		return err
 	}

@@ -371,6 +371,10 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 			if jsonOut {
 				out = io.Discard
 			}
+			if err := initRemoteStageRefusal(fromFlag, noStart); err != nil {
+				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+				return err
+			}
 			mode := "default"
 			hostedEndpoint := resolveHostedDoltInitOptions(hostedDoltInitFlagValues{
 				Host:      doltHostFlag,
@@ -405,6 +409,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	}
 	cmd.Flags().StringVar(&fileFlag, "file", "", "path to a TOML file to use as city.toml")
 	cmd.Flags().StringVar(&fromFlag, "from", "", "path to an example city directory to copy")
+	cmd.Flags().StringVar(&initRemoteStageFlag, "remote-stage", "", "with --from and --no-start: record this directory as a remote stage (a K8S pod or SSH host) of the controller city at this path; its infrastructure-class commands then refuse instead of creating a local binding")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "workspace name (default: target directory basename)")
 	cmd.Flags().StringVar(&providerFlag, "provider", "", "deprecated alias for --default-provider")
 	cmd.Flags().StringVar(&defaultProviderFlag, "default-provider", "", "default readiness-aware provider to select from --providers")
@@ -1870,6 +1875,13 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 	cfg, cityName, cityPrefix, persistSiteIdentity, rigSiteBindings, err := rewriteCopiedInitFromIdentity(fs, cityPath, nameOverride)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	// A remote stage is recorded before anything else runs in it, so no
+	// later step (nor a one-shot gc racing this init) can reach storage
+	// genesis there.
+	if err := recordInitRemoteStage(srcDir, cityPath, cityName); err != nil {
+		fmt.Fprintf(stderr, "gc init: recording the remote stage: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if persistSiteIdentity {

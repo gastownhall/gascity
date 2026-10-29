@@ -1,0 +1,166 @@
+package main
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
+)
+
+const remoteStageSplitSource = `[workspace]
+name = "template"
+provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
+
+[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+
+[storage.bindings.infra]
+provider = "sqlite-beads"
+path = ".gc/store"
+`
+
+// newRemoteStageSource is a controller city directory with a split
+// [storage], as initCityInPod copies it into a pod.
+func newRemoteStageSource(t *testing.T) string {
+	t.Helper()
+	src := filepath.Join(t.TempDir(), "controller-city")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "city.toml"), []byte(remoteStageSplitSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "pack.toml"), []byte("[pack]\nname = \"template\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeScopeProjectID(t, src, "prj-controller")
+	return src
+}
+
+func setInitRemoteStage(t *testing.T, controller string) {
+	t.Helper()
+	prev := initRemoteStageFlag
+	t.Cleanup(func() { initRemoteStageFlag = prev })
+	initRemoteStageFlag = controller
+}
+
+// TestRemoteStagePodInitThenInfraCommandRefusesAndCreatesNoBinding is the
+// pod simulation of S5 §10.7: `gc init --from … --remote-stage` into a temp
+// dir, then an infrastructure-class write. It must refuse, naming the
+// controller's city, and must not create a pod-local .gc/store (genesis)
+// that the pod would then serve mail, nudges and sessions from.
+func TestRemoteStagePodInitThenInfraCommandRefusesAndCreatesNoBinding(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	src := newRemoteStageSource(t)
+	pod := filepath.Join(t.TempDir(), "workspace")
+	setInitRemoteStage(t, "/city")
+
+	var stdout, stderr bytes.Buffer
+	if code := doInitFromDirWithOptionsInternal(src, pod, "", &stdout, &stderr, true, true, hostedDoltInitOptions{}); code != 0 {
+		t.Fatalf("gc init --from --remote-stage = %d; stderr=%s", code, stderr.String())
+	}
+	stage, ok, err := readRemoteStage(pod)
+	if err != nil || !ok {
+		t.Fatalf("the pod has no remote-stage record: ok=%v err=%v", ok, err)
+	}
+	if stage.ControllerPath != "/city" || stage.WorkStore == "" {
+		t.Errorf("remote-stage record = %+v, want the controller path and its work-store identity", stage)
+	}
+
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(pod, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("loading the staged config: %v", err)
+	}
+	var gateErr bytes.Buffer
+	routes, err := storageBootGate(pod, cfg, "gc mail send", nil, &gateErr)
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("an infrastructure-class command on a remote stage was served")
+	}
+	if !strings.Contains(err.Error(), "remote stage of city") || !strings.Contains(err.Error(), "/city") {
+		t.Errorf("refusal %q does not say this is a remote stage of the controller's city", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(pod, ".gc", "store")); !os.IsNotExist(statErr) {
+		t.Fatalf("the remote stage created its own binding (.gc/store): %v", statErr)
+	}
+}
+
+// TestRemoteStageLeavesWorkOnTheWorkStore: the refusal is for the
+// infrastructure classes only. Work ids still resolve to the work store.
+func TestRemoteStageLeavesWorkOnTheWorkStore(t *testing.T) {
+	city := t.TempDir()
+	if err := writeRemoteStage(city, remoteStage{ControllerCity: "ctl", ControllerPath: "/city"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := infraSplitConfig(filepath.Join(city, ".gc", "store"))
+	_, err := storageBootGate(city, cfg, "gc bd", nil, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("remote stage served the split")
+	}
+	routes := refusingStorageRoutes("infra", err)
+	if got := resolveClassStore(routes, nil, cfg, city, config.BeadClassWork, nil); got != nil {
+		t.Errorf("work resolved to %T on a remote stage, want the work store", got)
+	}
+}
+
+// TestRemoteStageWithoutASplitIsUntouched: an unsplit city keeps every
+// class on its work store, so a remote stage of it has nothing to refuse.
+func TestRemoteStageWithoutASplitIsUntouched(t *testing.T) {
+	city := t.TempDir()
+	if err := writeRemoteStage(city, remoteStage{ControllerCity: "ctl", ControllerPath: "/city"}); err != nil {
+		t.Fatal(err)
+	}
+	routes, err := storageBootGate(city, &config.City{}, "gc bd", nil, &bytes.Buffer{})
+	if err != nil || routes != nil {
+		t.Fatalf("an unsplit remote stage = (%v, %v), want the identity path", routes, err)
+	}
+}
+
+// TestRemoteStageUnreadableRecordRefuses: a record that exists and cannot be
+// read is still evidence this is a stage, so it refuses as one.
+func TestRemoteStageUnreadableRecordRefuses(t *testing.T) {
+	city := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(city, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(remoteStagePath(city), []byte("not = [toml"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := remoteStageStorageRefusal(city); err == nil {
+		t.Fatal("an unreadable remote-stage record was taken as absent")
+	}
+}
+
+// TestInitRemoteStageRequiresFromAndNoStart: a remote stage is never a city
+// that starts, and only --from stages one.
+func TestInitRemoteStageRequiresFromAndNoStart(t *testing.T) {
+	for _, args := range [][]string{
+		{"--remote-stage", "/city", "--no-start", t.TempDir()},
+		{"--remote-stage", "/city", "--from", t.TempDir(), t.TempDir()},
+	} {
+		var stdout, stderr bytes.Buffer
+		cmd := newInitCmd(&stdout, &stderr)
+		cmd.SetArgs(args)
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		if err := cmd.Execute(); err == nil {
+			t.Errorf("gc init %v succeeded", args)
+		}
+		if !strings.Contains(stderr.String(), "--remote-stage") {
+			t.Errorf("gc init %v: stderr %q does not name --remote-stage", args, stderr.String())
+		}
+	}
+}

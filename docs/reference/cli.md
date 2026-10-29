@@ -2524,6 +2524,7 @@ gc init --template gascity --default-provider claude \
 | `--no-start` | bool |  | initialize files and imports without registering or starting the city |
 | `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
 | `--providers` | stringArray |  | readiness-aware providers to write to city.toml (repeatable or comma-separated) |
+| `--remote-stage` | string |  | with --from and --no-start: record this directory as a remote stage (a K8S pod or SSH host) of the controller city at this path; its infrastructure-class commands then refuse instead of creating a local binding |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
 | `--template` | string |  | non-interactive template to write: minimal, gastown, gascity, custom, or empty |
 | `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
