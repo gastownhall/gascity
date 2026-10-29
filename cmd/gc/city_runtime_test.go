@@ -2251,6 +2251,73 @@ func TestOrderTrackingSweepWatchdogClosesAllStaleTracking(t *testing.T) {
 	}
 }
 
+// TestOrderTrackingSweepWatchdogSeesBeadsWrittenBehindTheCache is the
+// regression test for the stale-sweep half of #5832, and it is deliberately
+// built on the PRODUCTION store stack rather than a bare MemStore.
+//
+// That distinction is the whole point. Every other watchdog test here hands
+// CityRuntime a raw beads.NewMemStore(), so every read is authoritative and the
+// suite stayed green while the sweep was blind over the real stack. The real
+// controller store is a beadPolicyStore wrapping a CachingStore, and
+// order-tracking beads are created and closed through the DISPATCHER's own
+// uncached handle — so the cache never observes them. A non-Live sweep read
+// therefore returns zero rows forever, the watchdog prints nothing (it only
+// speaks when it closes >0), and the stale tracking bead keeps its order gated
+// behind the open-work gate that reads Live and does see it.
+//
+// The test reproduces exactly that: prime the cache while the store is EMPTY,
+// then write the stale tracking bead straight to the backing. Revert the sweep
+// reader to a non-Live label read and this fails.
+func TestOrderTrackingSweepWatchdogSeesBeadsWrittenBehindTheCache(t *testing.T) {
+	backing := beads.NewMemStore()
+	cached := beads.NewCachingStoreForTest(backing, nil)
+	if err := cached.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime(): %v", err)
+	}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	store := wrapStoreWithBeadPolicies(cached, cfg)
+
+	// Written AFTER the prime and straight to the backing — the dispatcher's
+	// uncached-handle shape.
+	stale, err := backing.Create(beads.Bead{
+		Title:  "order:nudge-on-route",
+		Labels: []string{"order-run:nudge-on-route", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(stale): %v", err)
+	}
+
+	// Vacuity guard: the wrapped non-Live label read is snapshot-served and
+	// must miss the bead, or the test would pass with the old reader too.
+	snapshot, err := store.ListByLabel(labelOrderTracking, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel(snapshot): %v", err)
+	}
+	for _, b := range snapshot {
+		if b.ID == stale.ID {
+			t.Fatalf("vacuity violated: wrapped ListByLabel already lists %s; the cache absorbed the backing write", stale.ID)
+		}
+	}
+
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 cfg,
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingSweepWatchdog(cfg, time.Now().Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
+
+	got, err := backing.Get(stale.ID)
+	if err != nil {
+		t.Fatalf("Get(stale): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("stale tracking status = %s, want closed — the watchdog read a cached snapshot that never contained this bead (#5832)", got.Status)
+	}
+}
+
 func TestOrderTrackingSweepWatchdogUsesCloseBudget(t *testing.T) {
 	store := beads.NewMemStore()
 	ids := make([]string, 0, orderTrackingSweepCloseBudget+1)
