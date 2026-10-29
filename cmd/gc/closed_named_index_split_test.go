@@ -96,10 +96,19 @@ func TestDoctorDemandSweepReadsClosedNamedSessionsFromTheSessionsStore(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
+			// The split leg spies on the work store's closed-session listings.
+			// The single-store leg hands the sweep the store itself: there the
+			// one store is the sessions store, and the collected-work check
+			// below proves the index read it (a spy wrapper would also hide
+			// the store from the split-strict gate's projection).
 			spy := &sessionListSpy{Store: work}
+			city := work
+			if split {
+				city = spy
+			}
 			c := newV2DemandMigrationsCheck(cfg, cityPath, func(path string) (beads.Store, error) {
 				if path == cityPath {
-					return spy, nil
+					return city, nil
 				}
 				return openCityStoreAt(path)
 			})
@@ -115,12 +124,8 @@ func TestDoctorDemandSweepReadsClosedNamedSessionsFromTheSessionsStore(t *testin
 			if !collected {
 				t.Fatalf("the sweep did not collect %s, ready work assigned to the closed named session's runtime name %q", filed.ID, runtimeName)
 			}
-			got := spy.sessionLists()
-			switch {
-			case split && got != 0:
+			if got := spy.sessionLists(); split && got != 0 {
 				t.Fatalf("the sweep listed closed session beads in the city work store %d time(s); on a split city they live in the binding", got)
-			case !split && got == 0:
-				t.Fatal("the sweep never listed closed session beads in the one store; the closed named-session index was not read")
 			}
 		})
 	}
