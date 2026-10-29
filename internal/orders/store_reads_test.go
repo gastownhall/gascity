@@ -2,7 +2,9 @@ package orders
 
 import (
 	"context"
+	"fmt"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -160,6 +162,7 @@ func TestRecentRunsAllOpenRunsUseLiveTier(t *testing.T) {
 	}
 	assertAllLive(t, "StaleOpenRuns", spy.queries)
 	assertSweepQueryShape(t, "StaleOpenRuns", spy.queries)
+	assertOldestFirst(t, "StaleOpenRuns", spy.queries)
 
 	// OrphanedOpenRuns feeds the startup sweep, which cleans up after a
 	// controller that died holding tracking beads — a cache primed by the very
@@ -170,6 +173,21 @@ func TestRecentRunsAllOpenRunsUseLiveTier(t *testing.T) {
 	}
 	assertAllLive(t, "OrphanedOpenRuns", spy.queries)
 	assertSweepQueryShape(t, "OrphanedOpenRuns", spy.queries)
+	assertOldestFirst(t, "OrphanedOpenRuns", spy.queries)
+}
+
+// assertOldestFirst pins the close-budget ordering: every sweep list query must
+// carry SortCreatedAsc so the caller's budget drains the oldest jam first.
+func assertOldestFirst(t *testing.T, name string, queries []beads.ListQuery) {
+	t.Helper()
+	if len(queries) == 0 {
+		t.Fatalf("%s issued no List query", name)
+	}
+	for i, q := range queries {
+		if q.Sort != beads.SortCreatedAsc {
+			t.Fatalf("%s query[%d].Sort = %q, want SortCreatedAsc (budgeted closes must drain oldest-first)", name, i, q.Sort)
+		}
+	}
 }
 
 func assertAllLive(t *testing.T, name string, queries []beads.ListQuery) {
@@ -570,6 +588,66 @@ func TestStaleOpenRunsKeepsInProgressAndExcludesClosed(t *testing.T) {
 	}
 	if got[closedBead.ID] {
 		t.Errorf("closed tracking bead %s must not be swept", closedBead.ID)
+	}
+}
+
+// defaultOrderReversingStore simulates a backing whose SortDefault list order
+// is not creation order. Production's backings are like that: the caching
+// snapshot serves Go map order, and bd/sqlite/doltlite list newest-first by
+// default. A sweep reader that relies on the backing's default order starves
+// the oldest jam behind newer beads once a close budget cuts the list, so this
+// store makes any such reliance fail deterministically.
+type defaultOrderReversingStore struct {
+	beads.Store
+}
+
+func (s *defaultOrderReversingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	items, err := s.Store.List(query)
+	if err == nil && query.Sort == beads.SortDefault {
+		slices.Reverse(items)
+	}
+	return items, err
+}
+
+// TestSweepReadsOldestFirst proves both sweep readers return tracking beads
+// oldest-first (CreatedAt ascending) even over a backing whose default list
+// order is the opposite, so the caller's close budget drains the oldest jam.
+func TestSweepReadsOldestFirst(t *testing.T) {
+	store := &defaultOrderReversingStore{Store: beads.NewMemStore()}
+	created := make([]beads.Bead, 0, 6)
+	for i := range 6 {
+		b, err := store.Create(beads.Bead{
+			Title:  fmt.Sprintf("order:jam-%d", i),
+			Labels: []string{fmt.Sprintf("order-run:jam-%d", i), labelOrderTracking},
+		})
+		if err != nil {
+			t.Fatalf("Create(jam-%d): %v", i, err)
+		}
+		created = append(created, b)
+	}
+
+	stale, err := ordersStoreOver(store).StaleOpenRuns(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("StaleOpenRuns(): %v", err)
+	}
+	assertRunIDOrder(t, "StaleOpenRuns", created, stale)
+
+	orphaned, err := ordersStoreOver(store).OrphanedOpenRuns()
+	if err != nil {
+		t.Fatalf("OrphanedOpenRuns(): %v", err)
+	}
+	assertRunIDOrder(t, "OrphanedOpenRuns", created, orphaned)
+}
+
+func assertRunIDOrder(t *testing.T, name string, created []beads.Bead, runs []OrderRun) {
+	t.Helper()
+	if len(runs) != len(created) {
+		t.Fatalf("%s returned %d runs, want %d", name, len(runs), len(created))
+	}
+	for i, r := range runs {
+		if r.ID != created[i].ID {
+			t.Errorf("%s[%d] = %s, want %s (oldest-first: CreatedAt ascending)", name, i, r.ID, created[i].ID)
+		}
 	}
 }
 

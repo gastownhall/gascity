@@ -2397,6 +2397,95 @@ func TestOrderTrackingSweepWatchdogUsesCloseBudget(t *testing.T) {
 	}
 }
 
+// defaultOrderReversingStore simulates a backing whose SortDefault list order
+// is not creation order (the production backings are like that: the caching
+// snapshot serves Go map order, and bd/sqlite/doltlite list newest-first). A
+// sweep that relies on the backing's default order lets the close budget cut
+// the WRONG rows, so this store makes any such reliance fail deterministically.
+type defaultOrderReversingStore struct {
+	beads.Store
+}
+
+func (s *defaultOrderReversingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	items, err := s.Store.List(query)
+	if err == nil && query.Sort == beads.SortDefault {
+		slices.Reverse(items)
+	}
+	return items, err
+}
+
+// seedStaleTrackingJam creates orderTrackingSweepCloseBudget+2 open tracking
+// beads and returns them in creation order (oldest first). All are stale by
+// the watchdog cutoff the callers use.
+func seedStaleTrackingJam(t *testing.T, store beads.Store) []beads.Bead {
+	t.Helper()
+	created := make([]beads.Bead, 0, orderTrackingSweepCloseBudget+2)
+	for i := range orderTrackingSweepCloseBudget + 2 {
+		b, err := store.Create(beads.Bead{
+			Title:  fmt.Sprintf("order:jam-%d", i),
+			Labels: []string{fmt.Sprintf("order-run:jam-%d", i), labelOrderTracking},
+		})
+		if err != nil {
+			t.Fatalf("Create(jam-%d): %v", i, err)
+		}
+		created = append(created, b)
+	}
+	return created
+}
+
+// assertOldestClosed asserts the close budget drained exactly the four oldest
+// beads of created (creation order) and left the rest open.
+func assertOldestClosed(t *testing.T, store beads.Store, created []beads.Bead) {
+	t.Helper()
+	for i, b := range created {
+		got, err := store.Get(b.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", b.ID, err)
+		}
+		wantClosed := i < orderTrackingSweepCloseBudget
+		if wantClosed && got.Status != "closed" {
+			t.Errorf("jam-%d (%s) status = %s, want closed (one of the %d oldest the budget must drain first)", i, b.ID, got.Status, orderTrackingSweepCloseBudget)
+		}
+		if !wantClosed && got.Status != "open" {
+			t.Errorf("jam-%d (%s) status = %s, want open (newer than the budget)", i, b.ID, got.Status)
+		}
+	}
+}
+
+// TestOrderTrackingSweepWatchdogBudgetClosesOldestFirst pins WHICH beads the
+// watchdog's close budget drains: the oldest jam first, not an arbitrary
+// slice of it. Over a backing whose default list order is reversed, a reader
+// without an explicit sort closes the four NEWEST and starves the oldest jam.
+func TestOrderTrackingSweepWatchdogBudgetClosesOldestFirst(t *testing.T) {
+	store := &defaultOrderReversingStore{Store: beads.NewMemStore()}
+	created := seedStaleTrackingJam(t, store)
+
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingSweepWatchdog(cr.cfg, time.Now().Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
+
+	assertOldestClosed(t, store, created)
+}
+
+// TestOrphanedOrderTrackingSweepBudgetClosesOldestFirst is the same which-four
+// pin for the orphaned sweep's budget.
+func TestOrphanedOrderTrackingSweepBudgetClosesOldestFirst(t *testing.T) {
+	store := &defaultOrderReversingStore{Store: beads.NewMemStore()}
+	created := seedStaleTrackingJam(t, store)
+
+	if _, err := sweepOrphanedOrderTrackingLimit(store, orderTrackingSweepCloseBudget); err != nil {
+		t.Fatalf("sweepOrphanedOrderTrackingLimit(): %v", err)
+	}
+
+	assertOldestClosed(t, store, created)
+}
+
 func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testing.T) {
 	store := beads.NewMemStore()
 	sweepTracking, err := store.Create(beads.Bead{
