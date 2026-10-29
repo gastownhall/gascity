@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
@@ -352,27 +353,7 @@ func kindCount(facts []usage.Fact, kind usage.Kind) int {
 // silently pass even if a tick re-recorded work the cursor should have skipped.
 func rawSinkModelFactCount(t *testing.T, path string) int {
 	t.Helper()
-	body, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return 0
-	}
-	if err != nil {
-		t.Fatalf("reading usage sink %s: %v", path, err)
-	}
-	n := 0
-	for _, line := range strings.Split(string(body), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var f usage.Fact
-		if err := json.Unmarshal([]byte(line), &f); err != nil {
-			t.Fatalf("malformed usage fact %q: %v", line, err)
-		}
-		if f.Kind == usage.KindModel {
-			n++
-		}
-	}
-	return n
+	return rawSinkFactCount(t, path, usage.KindModel)
 }
 
 // liveSweepStart anchors a live fixture just behind the wall clock. A live
@@ -1149,6 +1130,108 @@ func TestIsComputeTerminalState(t *testing.T) {
 	for _, s := range []string{"active", "awake", "creating", "draining", "closed", ""} {
 		if isComputeTerminalState(s) {
 			t.Errorf("%q should not be terminal", s)
+		}
+	}
+}
+
+// rawSinkFactCount counts the facts of kind APPENDED to the sink file, without
+// usage.ReadFacts's IdempotencyKey dedup, so an "exactly once" assertion sees a
+// replayed record.
+func rawSinkFactCount(t *testing.T, path string, kind usage.Kind) int {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("reading usage sink %s: %v", path, err)
+	}
+	n := 0
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var f usage.Fact
+		if err := json.Unmarshal([]byte(line), &f); err != nil {
+			t.Fatalf("malformed usage fact %q: %v", line, err)
+		}
+		if f.Kind == kind {
+			n++
+		}
+	}
+	return n
+}
+
+// newClosedUsageRuntime wires a CityRuntime whose usage lane reads store,
+// records to a real sink, and searches codexRoot for transcripts. It returns the
+// runtime and the sink path.
+func newClosedUsageRuntime(t *testing.T, store beads.Store, codexRoot string) (*CityRuntime, string) {
+	t.Helper()
+	cityPath := t.TempDir()
+	sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
+	cfg := &config.City{Daemon: config.DaemonConfig{ObservePaths: []string{codexRoot}}}
+	cs := &controllerState{cityBeadStore: store, usageSink: usage.NewLocalSink(sinkPath), cityName: "demo", cityPath: cityPath}
+	return &CityRuntime{cs: cs, cfg: cfg, sp: runtime.NewFake(), cityName: "demo", cityPath: cityPath, stderr: io.Discard}, sinkPath
+}
+
+// drainAckClosedCodexSession creates a keyed codex session awake since t0 in
+// env's store and closes it through the drain-ack finalize at env's clock, the
+// close that never passes through an open terminal state. It returns the
+// session bead id.
+func drainAckClosedCodexSession(t *testing.T, env *reconcilerTestEnv, t0 time.Time, workDir string) string {
+	t.Helper()
+	b := env.createSessionBead("worker", "worker")
+	meta := liveCodexSessionMeta(t0, workDir, codexSweepSessionKey)
+	delete(meta, "session_name")
+	env.setSessionMetadata(&b, meta)
+	env.setSessionMetadata(&b, session.DrainAckStopPendingPatch(env.clk.Now().UTC()))
+	res := finalizeDrainAckStoppedSession(env.cfg, env.store, testSeatWork(env.city, env.cfg, env.store, nil), env.sessionInfo(b.ID),
+		"worker", true, newFakeDrainOps(), env.dt, env.clk, events.Discard, io.Discard)
+	if !res.closed {
+		t.Fatalf("drain-ack finalize did not close the session: %+v", res)
+	}
+	return b.ID
+}
+
+// TestEmitDueComputeFactsSettlesDrainAckClosedInterval is the regression for a
+// session closed straight from active by the drain-ack finalize: it never sat in
+// an open terminal state, so the open-bead scan never saw its interval end and
+// its compute fact was lost. The next steady-state pass must account it once,
+// ending at the close.
+func TestEmitDueComputeFactsSettlesDrainAckClosedInterval(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	t1 := time.Now().UTC().Truncate(time.Second)
+	env.clk.Time = t1
+	t0 := t1.Add(-10 * time.Minute)
+	workDir, codexRoot := t.TempDir(), t.TempDir()
+	writeCodexRolloutForSweepAt(t, codexRoot, t0, workDir, codexSweepSessionKey, [][3]int{{150, 100, 50}})
+	id := drainAckClosedCodexSession(t, env, t0, workDir)
+
+	cr, sinkPath := newClosedUsageRuntime(t, env.store, codexRoot)
+	cr.emitDueComputeFacts(context.Background(), nil, false)
+
+	if got := rawSinkFactCount(t, sinkPath, usage.KindCompute); got != 1 {
+		t.Fatalf("compute facts recorded = %d, want exactly 1 for the closed interval", got)
+	}
+	facts, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range facts {
+		if f.Kind == usage.KindCompute && (f.SessionID != id || f.WallSeconds != 600) {
+			t.Fatalf("compute fact = %+v, want session %s with WallSeconds 600 (T1 - T0)", f, id)
+		}
+	}
+	got, err := env.store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := got.Metadata[usageComputeEmittedAtKey]; v != t0.Format(time.RFC3339) {
+		t.Fatalf("usage_compute_emitted_at = %q, want %q", v, t0.Format(time.RFC3339))
+	}
+	for _, key := range []string{session.MetadataKeyUsageClosePending, session.MetadataKeyUsageClosedAt} {
+		if v := got.Metadata[key]; v != "" {
+			t.Fatalf("%s = %q after settling, want cleared", key, v)
 		}
 	}
 }
