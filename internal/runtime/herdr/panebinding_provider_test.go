@@ -149,6 +149,27 @@ tab_list)
   fi ;;
 tab_create)
   printf '%s' '{"result":{"tab":{"tab_id":"t1"},"root_pane":{"pane_id":"%5"}}}' ;;
+pane_read)
+  # Startup-dialog screens (startup_dialogs_test.go): the trust dialog holds
+  # until an enter lands; trust_stuck pins the cursor on "No, exit" and
+  # ignores movement keys. pane read is a raw verb, so frames print verbatim.
+  if [ -e "$STATE/pane_read_fails" ]; then
+    echo '{"error":{"code":"pane_not_found","message":"pane not found"}}' >&2
+    exit 1
+  elif [ -e "$STATE/trust_dialog" ] && [ ! -e "$STATE/trusted" ]; then
+    if [ -e "$STATE/trust_stuck" ]; then
+      printf '%s\n' 'Quick safety check: Is this a project you created or one you trust?' '' '  1. Yes, I trust this folder' '❯ 2. No, exit'
+    else
+      printf '%s\n' 'Quick safety check: Is this a project you created or one you trust?' '' '❯ 1. Yes, I trust this folder' '  2. No, exit'
+    fi
+  elif [ -e "$STATE/trust_dialog" ]; then
+    printf '%s\n' '❯ '
+  fi ;;
+pane_send-keys)
+  case " $* " in
+    *" enter "*) if [ -e "$STATE/trust_dialog" ]; then : > "$STATE/trusted"; fi ;;
+  esac
+  exit 0 ;;
 *)
   exit 0 ;;
 esac

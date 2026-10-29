@@ -89,8 +89,8 @@ func (p *Provider) TeardownServer() error { return p.c.stopServer() }
 
 // Start ensures the shared server is up, prepares the session's working
 // directory (overlay/CopyFiles staging + pre_start), spawns the agent into its
-// placed workspace/tab, runs session_setup, and delivers the startup nudge
-// once the agent reaches idle.
+// placed workspace/tab, accepts its startup dialogs, runs session_setup, and
+// delivers the startup nudge once the agent reaches idle.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if err := p.ConfigureServer(); err != nil {
 		return fmt.Errorf("herdr: configure server: %w", err)
@@ -240,6 +240,16 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	// and raw/bare-shell sessions never register one (see panebinding.go).
 	if err := p.bindPlacement(name, info, mode); err != nil {
 		return fmt.Errorf("herdr: persist pane binding for %q: %w", name, err)
+	}
+	// Accept startup dialogs (workspace trust, bypass permissions), mirroring
+	// tmux's doStartSession Step 3. It runs before the idle wait, because an
+	// agent parked on a dialog never reports idle, and outside the provisioning
+	// tail's guard, because a session with no first turn still has to get past
+	// its dialog before a later nudge reaches it. An adopted holder is skipped:
+	// its winning Start already answered its dialogs, and re-running the matcher
+	// on a working agent could answer an in-session dialog.
+	if !adopted && info.PaneID != "" && runtime.ShouldAcceptStartupDialogs(cfg) {
+		p.acceptStartupDialogs(ctx, name, info.PaneID, workDir)
 	}
 	// Post-launch steps mirror tmux's doStartSession ordering: wait for
 	// readiness, run session_setup (Step 5.5), then deliver the startup nudge
@@ -899,11 +909,16 @@ func (p *Provider) SendKeys(name string, keys ...string) error {
 	if err != nil || pid == "" {
 		return nil
 	}
+	return p.c.sendKeys(ctx, pid, translateKeys(keys)...)
+}
+
+// translateKeys maps tmux-style key names to herdr's (see translateKey).
+func translateKeys(keys []string) []string {
 	hk := make([]string, len(keys))
 	for i, k := range keys {
 		hk[i] = translateKey(k)
 	}
-	return p.c.sendKeys(ctx, pid, hk...)
+	return hk
 }
 
 // Capabilities reports which optional provider features this backend supports.
