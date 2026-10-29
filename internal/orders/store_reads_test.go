@@ -159,6 +159,13 @@ func TestRecentRunsAllOpenRunsUseLiveTier(t *testing.T) {
 	}
 	assertAllLive(t, "StaleOpenRuns", spy.queries)
 	assertSweepQueryShape(t, "StaleOpenRuns", spy.queries)
+
+	spy.queries = nil
+	if _, err := st.OrphanedOpenRuns(); err != nil {
+		t.Fatalf("OrphanedOpenRuns(): %v", err)
+	}
+	assertAllLive(t, "OrphanedOpenRuns", spy.queries)
+	assertSweepQueryShape(t, "OrphanedOpenRuns", spy.queries)
 }
 
 // assertSweepQueryShape pins the sweep readers' query: every not-closed
@@ -492,6 +499,28 @@ func TestStaleOpenRunsBypassesCache(t *testing.T) {
 	}
 	if !runsContain(runs, written.ID) {
 		t.Fatalf("StaleOpenRuns() = %v; missed backing-only bead %s (read the cache snapshot, not the Live tier)", runs, written.ID)
+	}
+}
+
+// TestOrphanedOpenRunsBypassesCache: the startup orphan sweep must see a
+// tracking bead the cache never absorbed, and still skip a trigger-env-failure
+// marker written the same way (#5832).
+func TestOrphanedOpenRunsBypassesCache(t *testing.T) {
+	cache, written := primedCacheWithBackingOnlyTracking(t)
+	marker, err := cache.Backing().Create(beads.Bead{Title: "order:digest", Labels: []string{"order-run:digest", "order-tracking", "trigger-env-failed"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runs, err := ordersStoreOver(cache).OrphanedOpenRuns()
+	if err != nil {
+		t.Fatalf("OrphanedOpenRuns(): %v", err)
+	}
+	if !runsContain(runs, written.ID) {
+		t.Fatalf("OrphanedOpenRuns() = %v; missed backing-only bead %s (read the cache snapshot, not the Live tier)", runs, written.ID)
+	}
+	if runsContain(runs, marker.ID) {
+		t.Fatalf("OrphanedOpenRuns() = %v; included trigger-env-failure marker %s", runs, marker.ID)
 	}
 }
 
