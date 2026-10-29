@@ -12,9 +12,11 @@ package main
 //
 //   - It runs AFTER the drain result is written. The drain is not waiting on it,
 //     cannot be changed by it, and is byte-identical whether it runs or not.
-//   - It reads the trigger bead by id SOLELY to classify. That id is demand
-//     bookkeeping, never an assignment: nothing on the claim path may consult it
-//     to decide what to claim, and nothing here feeds back into that path.
+//   - It reads the trigger bead by id SOLELY to classify, and it reads that id
+//     from the live session row (hookClaimOps.ReadSessionTrigger), never from
+//     the env. The id is demand bookkeeping, never an assignment: nothing on
+//     the claim path may consult it to decide what to claim, and nothing here
+//     feeds back into that path.
 //   - It is scoped to seats the controller spawned on demand evidence
 //     (GC_SPAWN_ORIGIN=demand, presence only). A named session or a manual hook
 //     draining empty is not evidence about anything.
@@ -58,7 +60,17 @@ func recordDemandClaimDivergence(reason, dir string, opts hookClaimOptions, ops 
 	if sessionID == "" {
 		return
 	}
-	triggerID := hookClaimEnvValue(opts.Env, "GC_TRIGGER_WORK_BEAD_ID")
+	// The trigger id comes from the LIVE session row, the only faithful copy:
+	// the stamp keeps moving while any env copy is frozen at exec, and a seat
+	// upgraded mid-life can still carry the retired GC_TRIGGER_WORK_BEAD_ID as
+	// a stale leftover. A nil seam or a failed row read means an empty trigger,
+	// which classifies unknown below — never a guessed divergence.
+	triggerID := ""
+	if read := ops.ReadSessionTrigger; read != nil {
+		if id, err := read(sessionID); err == nil {
+			triggerID = strings.TrimSpace(id)
+		}
+	}
 	status, classification := classifyDemandTrigger(triggerID, dir, opts, ops)
 	payload, err := json.Marshal(events.SessionDemandClaimDivergencePayload{
 		SessionID:            sessionID,
@@ -176,8 +188,8 @@ func classifyDemandTriggerBlockedness(triggerID, dir string, opts hookClaimOptio
 // driven directly in tests without constructing a whole claim. The blockedness
 // settlement answers "not blocked", the shape a row with no unmet plain `blocks`
 // edge produces; demandDivergenceOpsForBlockedBead drives the other answers.
-func demandDivergenceOpsForBead(bead beads.Bead, err error) hookClaimOps {
-	return demandDivergenceOpsForBlockedBead(bead, err, false, nil)
+func demandDivergenceOpsForBead(bead beads.Bead) hookClaimOps {
+	return demandDivergenceOpsForBlockedBead(bead, nil, false, nil)
 }
 
 // demandDivergenceOpsForBlockedBead is demandDivergenceOpsForBead with the

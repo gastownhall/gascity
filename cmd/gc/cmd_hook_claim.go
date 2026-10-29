@@ -283,6 +283,14 @@ type hookClaimOps struct {
 	// ReadWorkMeta is the post-stamp authoritative readback used only to
 	// establish the durable lifecycle-start emission point.
 	ReadWorkMeta func(context.Context, string, []string, string, string) (beads.Bead, error)
+	// ReadSessionTrigger returns the trigger-bead id stamped on the session
+	// row named by sessionID — the controller's demand evidence for the seat,
+	// read live from the row rather than from the launch env, whose copy is
+	// frozen at exec while the stamp keeps moving. Diagnostics-only: the
+	// demand/claim divergence classifier is its only caller, strictly after
+	// the drain. An error means the row is unreadable; the classifier reports
+	// unknown rather than guessing.
+	ReadSessionTrigger func(sessionID string) (string, error)
 	// ConfirmBlocked re-derives whether a bead is really blocked, from its live
 	// dependencies rather than bd's denormalized is_blocked projection (which
 	// production reads do not carry). Diagnostics-only: the demand/claim
@@ -710,6 +718,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.ReadWorkStarted == nil {
 		ops.ReadWorkStarted = hookSessionWorkStarted
+	}
+	if ops.ReadSessionTrigger == nil {
+		ops.ReadSessionTrigger = hookSessionTriggerBead
 	}
 	if ops.StoreRef == nil {
 		ops.StoreRef = hookClaimStoreRefForDir
