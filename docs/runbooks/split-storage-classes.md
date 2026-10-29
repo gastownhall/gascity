@@ -526,33 +526,126 @@ weeks of unread auto-handoff mail, purge them instead of recovering them.
 calls stranded whose type is `message`. It selects rows by that check, never
 by manifest id, because bd reuses short wisp ids.
 
+The purge never deletes:
+
+- a row the binding holds as the same bead (the same id and creation time);
+- a stranded row of another type, which you must still recover;
+- a `message` row that the classifier puts in another class. If any selected
+  row is in another class, the run refuses and writes nothing.
+
+#### 1. Rehearse
+
+The dry run is read-only and safe on a running city:
+
 ```
-# rehearse (read-only, safe on a running city):
 gc storage recover-stranded --from-work --purge-type message --dry-run
-# with the city stopped:
-gc storage recover-stranded --from-work --fleet-stopped --purge-type message --confirm-purge
+```
+
+It prints the count, a digest of the selection, the id range, the creation
+dates, the title histogram, the number of edges, and one line per row. Its
+last line is the confirmation the delete needs, for example
+`--fleet-stopped --confirm-purge --expect-count 791 --expect-digest 3f2a...`.
+The delete refuses when the selection it computes is not the one you
+reviewed.
+
+#### 2. Take a full export of the work store first
+
+The purge writes its own backup, but take an independent one with the bd the
+city pins, from the city directory, with the city stopped:
+
+```
+bd export --all -o /var/backups/<city>-work-$(date -u +%Y%m%dT%H%M%SZ).jsonl
+```
+
+`--all` includes the wisp tier and the infrastructure rows. Check the line
+count before you go on.
+
+#### 3. Purge, with the city stopped
+
+```
+gc storage recover-stranded --from-work --fleet-stopped --purge-type message \
+  --confirm-purge --expect-count <n> --expect-digest <digest>
 gc storage status        # converged, and it names the purge and its backup
 ```
 
-The dry run prints the count, the id range, the creation dates, the title
-histogram and one line per row. Without `--confirm-purge` the command prints
-the same list and deletes nothing.
-
 Every row is first written to `infra.purged-stranded-<time>.jsonl` at the
 binding root, with its metadata, labels and every edge touching it. The file
-is synced and read back before anything is deleted. The run is recorded in
-`infra.purged-stranded.jsonl`. If a run stops after the backup, `gc storage
-status` reports the purge as `INTERRUPTED`, and running the same command
-again resumes from the same backup.
+is synced and read back before anything is deleted. The edges are removed
+before the rows, because `bd delete --force` rewrites every mention of a
+deleted id in the text of rows still linked to it. The run is recorded in
+`infra.purged-stranded.jsonl`.
 
-The purge never deletes:
+If a run stops partway, `gc storage status` reports `purge: INTERRUPTED` and
+exits non-zero. Run the same purge again:
 
-- a row the binding holds as the same bead;
-- a stranded row of another type, which you must still recover;
-- a `message` row that the classifier puts in another class.
+- if rows are left, it resumes from the same backup;
+- if every row is already gone, it records them and exits 0;
+- if the selection has changed since the backup, it refuses. Restore the run,
+  or close it (below), and start again.
 
-If any selected row is in another class, the run refuses and writes nothing.
-To restore the purged mail, import each record's `.entry.bead` from the backup.
+#### Restoring purged mail
+
+```
+gc storage recover-stranded --from-work --fleet-stopped --restore-purge <backup>
+```
+
+This puts every row of the backup back into the work store as it was, with
+its id, creation time, tier, labels and metadata, and adds back the edges in
+both directions. It refuses, before writing anything, an id the work store
+now holds for a different row (bd minted it again), and an edge whose other
+end no longer exists. The rows are stranded again afterwards, and `gc storage
+status` names them. `--dry-run` shows what it would do. Running it again
+skips what is already back.
+
+If the work store cannot import rows verbatim, the command says so. Restore
+with the city's own bd instead, from the city directory:
+
+```
+jq -c '.entry.bead | del(.dependencies)' <backup> > /tmp/restore.jsonl
+bd import /tmp/restore.jsonl
+jq -r '(.entry.deps // [])[], (.entry.dependents // [])[] | [.issue_id, .depends_on_id, .type] | @tsv' <backup> \
+  | sort -u | while IFS=$'\t' read -r from to type; do bd dep add "$from" "$to" --type "$type"; done
+```
+
+First check that no id in the backup is now held by a different row:
+`bd import` overwrites an existing id. If the purge was interrupted, close
+the run after a raw restore with
+`gc storage recover-stranded --from-work --fleet-stopped --purge-type message --abandon-purge`.
+That command refuses while any row of the run is still missing.
+
+#### Example: maintainer-city
+
+Read-only rehearsal, with the fleet running and the new `gc` at a path no
+agent runs:
+
+```
+/opt/gascity/releases/<sha>/gc storage status
+#   expect: converged: yes, stranded: 791, exit 1
+/opt/gascity/releases/<sha>/gc storage recover-stranded --from-work --purge-type message --dry-run
+#   expect: selected: 791, one title "context cycle",
+#   created 2026-08-12T17:54Z .. 2026-08-30T04:42Z, mc-wisp-jkl flagged as a reused id;
+#   note the digest
+```
+
+In the window:
+
+```
+gc stop                                  # with the deployed gc
+gc status                                # the controller is stopped
+gc session list                          # no session of this city is running
+# no gc or bd process of this city is left (read-only check, e.g. ps)
+bd export --all -o /var/backups/mc-work-<time>.jsonl     # with MC's pinned bd
+# install the new gc, then with it:
+gc storage recover-stranded --from-work --purge-type message --dry-run
+#   the same 791 rows and the same digest as the rehearsal
+gc storage recover-stranded --from-work --fleet-stopped --purge-type message \
+  --confirm-purge --expect-count 791 --expect-digest <digest>
+gc storage status
+#   expect: converged: yes, stranded: 0, purged stranded: 791, exit 0
+```
+
+If `gc storage status` still reports retained or unrecorded rows, resolve
+them as described in the following sections before `gc start`.
 
 ### A reused id the binding still holds
 
