@@ -19,6 +19,21 @@ import (
 // session-backed worker without exposing SessionSpec mutation to callers.
 type SessionRuntimeResolver func(info sessionpkg.Info, sessionKind string, metadata map[string]string) (*ResolvedRuntime, error)
 
+// LaunchEnvResolver regenerates the generated agent launch env (rig scope,
+// backend projection, GC_BIN, upstream serving env) for an existing
+// session-backed worker whose runtime a resume start must launch. It takes
+// the same arguments as SessionRuntimeResolver so a caller resolves both
+// from one config view. Returning nil keeps the hints env; an error refuses
+// the start before anything is killed, minted or started.
+type LaunchEnvResolver func(info sessionpkg.Info, sessionKind string, metadata map[string]string) (map[string]string, error)
+
+// sessionKindFromMetadata reads a row's real_world_app_session_kind the way
+// every reader must (trimmed). sessionFromRecord and the launch-env adapter
+// share it so a resumed runtime and its handle agree on the session's kind.
+func sessionKindFromMetadata(metadata map[string]string) string {
+	return strings.TrimSpace(metadata["real_world_app_session_kind"])
+}
+
 // FactoryConfig constructs worker-owned session handles and catalogs without
 // leaking session.Manager setup into higher layers.
 type FactoryConfig struct {
@@ -33,6 +48,10 @@ type FactoryConfig struct {
 	UsageSink             usage.Sink
 	ResolveTransport      func(template, provider string) string
 	ResolveSessionRuntime SessionRuntimeResolver
+	// ResolveLaunchEnv regenerates the generated agent launch env when a
+	// resume start must launch a missing runtime. Nil keeps the hints env
+	// as the replacement's env (the pre-#8184 behavior).
+	ResolveLaunchEnv LaunchEnvResolver
 	// StaleKeyDetectionWaiter supplies the session lifecycle signal used before
 	// a keyed start is probed for stale resume-key failure. Nil preserves the
 	// session package production timer.
@@ -96,6 +115,11 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	}
 	if cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithTransportResolver(cfg.ResolveTransport))
+	}
+	if cfg.ResolveLaunchEnv != nil {
+		opts = append(opts, sessionpkg.WithLaunchEnvResolver(func(info sessionpkg.Info, metadata map[string]string) (map[string]string, error) {
+			return cfg.ResolveLaunchEnv(info, sessionKindFromMetadata(metadata), metadata)
+		}))
 	}
 	if cfg.RuntimeLeaseTTL > 0 {
 		opts = append(opts, sessionpkg.WithRuntimeLeaseTTL(cfg.RuntimeLeaseTTL))
@@ -262,7 +286,7 @@ func (f *Factory) sessionFromRecord(info sessionpkg.Info, pr sessionpkg.Persiste
 			ResumeCommand: info.ResumeCommand,
 		},
 	}
-	sessionKind := strings.TrimSpace(pr.Metadata["real_world_app_session_kind"])
+	sessionKind := sessionKindFromMetadata(pr.Metadata)
 	if profile := strings.TrimSpace(pr.Metadata["worker_profile"]); profile != "" {
 		spec.Profile = Profile(profile)
 	}

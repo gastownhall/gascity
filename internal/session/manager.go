@@ -635,6 +635,7 @@ type Manager struct {
 	sp                      runtime.Provider
 	cityPath                string
 	transportResolver       func(template, provider string) transportResolution
+	launchEnvResolver       LaunchEnvResolver
 	clk                     clock.Clock
 	staleKeyDetectionWaiter StaleKeyDetectionWaiter
 	leaseTTL                time.Duration       // the runtime lease records' TTL (WithRuntimeLeaseTTL)
@@ -845,6 +846,27 @@ func WithTransportResolver(resolver func(template, provider string) string) Mana
 				return transportResolution{}
 			}
 			return transportResolution{transport: resolver(template, provider)}
+		}
+	}
+}
+
+// LaunchEnvResolver regenerates a session's generated agent launch environment
+// (rig scope, backend projection, GC_BIN, upstream serving env) when a
+// resume is about to start a missing runtime. info is the persisted session
+// Info and metadata a clone of its row's metadata, so the resolver reads the
+// same row the start decided on. Returning an error refuses the start before
+// anything is killed, minted, or started; returning nil keeps the hints env.
+type LaunchEnvResolver func(info Info, metadata map[string]string) (map[string]string, error)
+
+// WithLaunchEnvResolver supplies the generator a resume start consults when
+// the session's runtime is gone, so a replacement launched by a message,
+// attach or start carries the generated layer the create path built (#8184).
+// A nil resolver preserves the previous behavior: the hints env alone starts
+// the replacement.
+func WithLaunchEnvResolver(resolver LaunchEnvResolver) ManagerOption {
+	return func(m *Manager) {
+		if resolver != nil {
+			m.launchEnvResolver = resolver
 		}
 	}
 }

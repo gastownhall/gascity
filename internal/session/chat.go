@@ -958,6 +958,24 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 		}
 	}()
 	if !converged {
+		// A replacement start regenerates the session's generated agent launch
+		// env (rig scope, backend projection, GC_BIN, upstream serving env)
+		// before anything is killed, minted or started: the create-time
+		// resolver built that layer once, and a runtime recreated here would
+		// otherwise lose it (#8184). An error refuses the start with nothing
+		// launched, so the row keeps its incarnation. startEnv layers the
+		// persisted identity keys over the merged result, so the record stays
+		// authoritative for identity.
+		if m.launchEnvResolver != nil {
+			launchEnv, err := m.launchEnvResolver(infoFromPersistedBead(b), maps.Clone(b.Metadata))
+			if err != nil {
+				if unroute != nil {
+					unroute()
+				}
+				return fmt.Errorf("session %s: building launch env: %w", id, err)
+			}
+			cfg.Env = mergeEnv(cfg.Env, launchEnv)
+		}
 		// Refuse to resume if a prior escaped process for this session could
 		// not be confirmed dead: a survivor would race this replacement for
 		// the same work bead (duplicate bd close). This is the

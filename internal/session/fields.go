@@ -436,7 +436,7 @@ var registry = slices.Concat([]Field{
 	// Usage compute attributes a row by its run chain (beadmeta's runIDChainKeys).
 	{Key: beadmeta.MoleculeIDMetadataKey, Class: ClassAdvisory, NoWriter: "no session-row writer: work beads carry it; usage compute reads a row's run chain", Readers: sites(legacy("cmd/gc/usage_compute.go", "emitComputeFactForBead"))},
 	// External clients' open-world family; gc itself writes only the project id.
-	{Key: "real_world_app_", Family: true, Class: ClassLaunchConfig, NoWriter: "external clients stamp real_world_app_* keys; the API exposes them, and the worker reads real_world_app_session_kind", Readers: sites(op("internal/worker/factory.go", "Factory.sessionFromRecord"))},
+	{Key: "real_world_app_", Family: true, Class: ClassLaunchConfig, NoWriter: "external clients stamp real_world_app_* keys; the API exposes them, and the worker reads real_world_app_session_kind", Readers: sites(op("internal/worker/factory.go", "sessionKindFromMetadata"))},
 	{Key: "mc_session_kind", Class: ClassAdvisory, NoWriter: "retired: legacy provider sessions carry it; nothing reads or writes it now"},
 	// The fixture-only family: a test that needs a key no production code
 	// writes spells test_*; the universe check fails a production write of one.
