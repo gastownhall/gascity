@@ -307,6 +307,11 @@ type Info struct {
 	// terminal session whose current interval is already accounted BEFORE issuing a
 	// per-session store Get.
 	UsageComputeEmittedAt string // usage_compute_emitted_at (raw)
+	// UsageClosePending is the RAW usage_close_pending metadata: "true" when
+	// the session's close stamped the closed-interval settle markers. The
+	// compute-usage lane treats a marked row as a settle candidate even while
+	// the row is still open (issue #6672: a close can race the row's reopen).
+	UsageClosePending string // usage_close_pending (raw)
 	// StateReason is the RAW state_reason metadata. The pool sweep's
 	// post-create-protection window matches state_reason == "creation_complete".
 	StateReason string // state_reason (raw)
@@ -1779,6 +1784,14 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 		terminal := retiredIdentifiersPatch(b)
 		terminal["pin_awake"] = ""
 		terminal = CellInto(id, b.Metadata, ActorController, DispEvent{Kind: EvRetire}, m.now(), terminal)
+		// The operator's close ends the same awake intervals a drain-ack close
+		// does; stamp the settle markers the usage lane reads. A failed-create
+		// never confirmed a start, so it has no interval to account.
+		if current != StateFailedCreate {
+			for k, v := range UsageClosePatch(m.now()) {
+				terminal[k] = v
+			}
+		}
 		// Past a kill fence: the operator's close ends the session a kill was
 		// tearing down, as it did before CommitClose.
 		res, err := NewStore(beads.SessionStore{Store: m.store}).CommitClose(Decide(infoFromPersistedBead(b), FactsOpClose), terminal, m.now(), CommitPastKillFence(), CommitAsOperator())

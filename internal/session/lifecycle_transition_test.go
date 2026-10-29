@@ -1,10 +1,14 @@
 package session
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
@@ -346,10 +350,12 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "close",
 			patch: ClosePatch(now, "orphaned"),
 			want: MetadataPatch{
-				"state":        "orphaned",
-				"close_reason": "session orphaned: configured agent removed",
-				"closed_at":    now.Format(time.RFC3339),
-				"synced_at":    now.Format(time.RFC3339),
+				"state":               "orphaned",
+				"close_reason":        "session orphaned: configured agent removed",
+				"closed_at":           now.Format(time.RFC3339),
+				"synced_at":           now.Format(time.RFC3339),
+				"usage_close_pending": "true",
+				"usage_closed_at":     now.Format(time.RFC3339Nano),
 			},
 		},
 		{
@@ -935,5 +941,74 @@ func TestClosePatchKeepsShortStateCode(t *testing.T) {
 	if trimmed := strings.TrimSpace(patch["close_reason"]); len(trimmed) < 20 {
 		t.Errorf("close_reason = %q (%d trimmed chars); want >=20 to satisfy validator",
 			patch["close_reason"], len(trimmed))
+	}
+}
+
+// TestClosePatchStampsUsageCloseMarkers (issue #6672, AC-3): every close a
+// controller or operator commits through ClosePatch — except a failed-create,
+// which never confirmed a start — must stamp the closed-interval settle
+// markers, so the usage lane can still account an awake interval that was
+// ended straight from active and never sat open in a terminal state.
+func TestClosePatchStampsUsageCloseMarkers(t *testing.T) {
+	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	for _, code := range []string{"gc_swept", "orphaned", "drained", "stale-session", "dead-runtime", "zombie-reaper"} {
+		patch := ClosePatch(now, code)
+		if got := patch[MetadataKeyUsageClosePending]; got != "true" {
+			t.Errorf("ClosePatch(%q): usage_close_pending = %q, want %q", code, got, "true")
+		}
+		if got := patch[MetadataKeyUsageClosedAt]; got != now.Format(time.RFC3339Nano) {
+			t.Errorf("ClosePatch(%q): usage_closed_at = %q, want %q", code, got, now.Format(time.RFC3339Nano))
+		}
+	}
+}
+
+// TestClosePatchFailedCreateOmitsUsageCloseMarkers pins the failed-create
+// exclusion: a close for a start that never confirmed an awake interval has
+// nothing to account, so the patch must carry NEITHER marker — the commit
+// then leaves any existing values untouched instead of stamping a pending
+// settle over a row that will never be swept.
+func TestClosePatchFailedCreateOmitsUsageCloseMarkers(t *testing.T) {
+	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	patch := ClosePatch(now, string(StateFailedCreate))
+	if _, ok := patch[MetadataKeyUsageClosePending]; ok {
+		t.Error("ClosePatch(failed-create) must not write usage_close_pending")
+	}
+	if _, ok := patch[MetadataKeyUsageClosedAt]; ok {
+		t.Error("ClosePatch(failed-create) must not write usage_closed_at")
+	}
+}
+
+// TestCloseDetailedStampsUsageCloseMarkers (issue #6672, AC-3): the operator
+// close path builds its own terminal patch (retired identifiers + retire
+// cell) instead of ClosePatch, so an operator-closed awake session needs the
+// same two markers merged into that patch for the usage lane to settle it.
+func TestCloseDetailedStampsUsageCloseMarkers(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := newTestManager(t, store, sp)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "helper", Title: "chat", Command: "claude", WorkDir: "/tmp",
+		Provider: "claude", Resume: ProviderResume{}, Hints: runtime.Config{},
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := mgr.CloseDetailed(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
+		t.Fatalf("CloseDetailed: %v", err)
+	}
+	closed, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status != "closed" {
+		t.Fatalf("status = %q, want closed", closed.Status)
+	}
+	if got := closed.Metadata[MetadataKeyUsageClosePending]; got != "true" {
+		t.Errorf("usage_close_pending = %q, want %q", got, "true")
+	}
+	closedAt := closed.Metadata[MetadataKeyUsageClosedAt]
+	if _, err := time.Parse(time.RFC3339, closedAt); err != nil {
+		t.Errorf("usage_closed_at = %q, not an RFC3339 time: %v", closedAt, err)
 	}
 }

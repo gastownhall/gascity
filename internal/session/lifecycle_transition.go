@@ -688,6 +688,30 @@ func ArchivePatch(now time.Time, reason string, continuityEligible bool) Metadat
 	}
 }
 
+// MetadataKeyUsageClosePending marks a session whose close ended an awake
+// interval the usage lane has not yet accounted. A drain-ack close (and any
+// other close from an active runtime) closes the bead straight from active,
+// so it never sits open in a compute-terminal state for the usage lane's
+// open-row pass to see; the marker lets the lane's closed-row List find it
+// and settle the interval.
+const MetadataKeyUsageClosePending = "usage_close_pending"
+
+// MetadataKeyUsageClosedAt records when the close that stamped
+// usage_close_pending happened, so the usage lane can anchor the settled
+// interval's end (UsageIntervalEnd) and bound its sweep give-up window.
+const MetadataKeyUsageClosedAt = "usage_closed_at"
+
+// UsageClosePatch stamps the closed-interval settle markers. ClosePatch (and
+// Manager.CloseDetailed) merge it into every terminal close except a
+// failed-create, which aborted before any confirmed start and has no awake
+// interval to account.
+func UsageClosePatch(now time.Time) MetadataPatch {
+	return MetadataPatch{
+		MetadataKeyUsageClosePending: "true",
+		MetadataKeyUsageClosedAt:     now.UTC().Format(time.RFC3339Nano),
+	}
+}
+
 // ClosePatch records terminal close metadata before the bead status is closed.
 //
 // state retains the canonical short stateCode (used by reconciler logic and
@@ -697,15 +721,24 @@ func ArchivePatch(now time.Time, reason string, continuityEligible bool) Metadat
 // Without the expansion, every short-code session-close call (gc_swept,
 // orphaned, drained, failed-create, ...) is silently rejected by the
 // validator, leaving close_reason/closed_at stamped on an OPEN bead and
-// triggering reconciler flap as the next tick clears them.
+// triggering reconciler flap as the next tick clears them. Every close except
+// a failed-create also stamps the usage settle markers (UsageClosePatch),
+// so the usage lane can account an awake interval ended straight from
+// active (issue #6672).
 func ClosePatch(now time.Time, stateCode string) MetadataPatch {
 	ts := now.UTC().Format(time.RFC3339)
-	return MetadataPatch{
+	patch := MetadataPatch{
 		"state":        stateCode,
 		"close_reason": CanonicalCloseReason(stateCode),
 		"closed_at":    ts,
 		"synced_at":    ts,
 	}
+	if stateCode != string(StateFailedCreate) {
+		for k, v := range UsageClosePatch(now) {
+			patch[k] = v
+		}
+	}
+	return patch
 }
 
 // CanonicalCloseReason maps a short session stateCode to a human-readable

@@ -518,6 +518,12 @@ var registry = slices.Concat([]Field{
 	same(ClassAdvisory, false, sites(legacy(srcBeads, "startupKickoffReopenMetadata")), "startup_kickoff_last_nudge_at"),
 	same(ClassAdvisory, false, sites(op("cmd/gc/cmd_nudge.go", "stampLastNudgeDeliveredAt")), MetadataLastNudgeDeliveredAt),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/usage_compute.go", "emitComputeFactForBead")), "usage_compute_emitted_at"),
+	// The closed-interval settle markers (issue #6672): stamped by every close
+	// except a failed-create (ClosePatch, and the operator's CloseDetailed),
+	// cleared by the usage lane's settle step once the closed interval's
+	// compute fact is accounted.
+	same(ClassAdvisory, false, sites(legacy(srcTransition, "ClosePatch"), op(srcManager, "Manager.CloseDetailed")),
+		MetadataKeyUsageClosePending, MetadataKeyUsageClosedAt),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/usage_compute.go", "CityRuntime.emitDueComputeFacts")), "usage_model_swept_at"),
 	same(ClassAdvisory, false, sites(op(srcManager, "Manager.PersistInvocationUsageCursor")), "invocation_usage_cursor"),
 	same(ClassAdvisory, false, sites(legacy(srcReconciler, "recordNamedSessionConfigDriftDeferredAt")), "config_drift_deferred_at", "config_drift_deferred_key"),
