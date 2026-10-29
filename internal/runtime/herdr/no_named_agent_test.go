@@ -257,6 +257,22 @@ func TestTargetHasNoNamedAgentAsksTheRegistryNotTheErrorText(t *testing.T) {
 	}
 }
 
+// A kind-only target names no registered agent, so after an agent-state
+// rejection the paste fallback must fire: an unnamed registry entry is an
+// agent herdr detected but nobody named, and the kind every such pane shares
+// is not its identity. Pins the consumer the delivery fallback turns on.
+func TestTargetHasNoNamedAgentIgnoresAKindOnlyName(t *testing.T) {
+	rejection := `{"error":{"code":"agent_not_ready","message":"agent w1:p3 is not an active named agent"},"id":"cli:agent:prompt"}`
+	bin, _ := registryFake(t, []string{"=w1:p3"}, rejection)
+	c := &client{session: "gc-test", bin: bin}
+
+	if err := c.agentPrompt(context.Background(), "w1:p3", "proceed"); err == nil {
+		t.Fatal("fake herdr rejection produced no error")
+	} else if !c.targetHasNoNamedAgent(context.Background(), "opencode", err) {
+		t.Error("targetHasNoNamedAgent(opencode) = false; a kind-only target must resolve no agent")
+	}
+}
+
 // TestDeliverNudgeFallsBackWhenThePaneHasNoNamedAgent is the behavior the
 // decision buys, asserted through the verb a caller actually uses: a pane with no
 // named agent has no prompt machinery, so the nudge still lands via paste + Enter.
