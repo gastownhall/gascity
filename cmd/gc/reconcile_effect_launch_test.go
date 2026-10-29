@@ -1108,17 +1108,53 @@ func TestLaunchKeysOnTheVerbSectionsTemplate(t *testing.T) {
 	}
 }
 
+// Kills a bound launch template that names a trigger id, stale or fresh, that
+// marks an unstamped row as demand-spawned, or that drops a key instead of
+// withholding it: boundTemplate pins every GC_TRIGGER_* key empty and writes
+// the presence-only demand marker exactly when the bound row is stamped,
+// keeping unrelated keys. Pinned, not deleted: the launch env is an overlay,
+// so a deleted key would let the controller's own copy through
+// (gastownhall/gascity#5738).
+func TestBoundTemplateCarriesOnlyTheDemandMarker(t *testing.T) {
+	stale := map[string]string{"GC_TRIGGER_BEAD_ID": "w-old", "GC_TRIGGER_WORK_BEAD_ID": "w-old", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}
+	withheld := func(extra map[string]string) map[string]string {
+		env := map[string]string{"GC_SPAWN_ORIGIN": "", "GC_TRIGGER_BEAD_ID": "", "GC_TRIGGER_WORK_BEAD_ID": "", "GC_TRIGGER_BEAD_STORE_REF": "", "GC_TRIGGER_WORK_STORE_REF": ""}
+		maps.Copy(env, extra)
+		return env
+	}
+	for _, c := range []struct {
+		name, trigger string
+		env, want     map[string]string
+	}{
+		{"unstamped", "", stale, withheld(map[string]string{"GC_KEEP": "1"})},
+		{"stamped", "w-new", stale, withheld(map[string]string{"GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"})},
+		{"stamped row over a nil env", "w-new", nil, withheld(map[string]string{"GC_SPAWN_ORIGIN": "demand"})},
+		{"unstamped row over a nil env", "", nil, withheld(nil)},
+	} {
+		tp := boundTemplate(TemplateParams{TemplateName: "worker", Env: maps.Clone(c.env)}, session.Info{TriggerBeadID: c.trigger})
+		if !maps.Equal(tp.Env, c.want) {
+			t.Errorf("%s: bound env = %v, want %v", c.name, tp.Env, c.want)
+		}
+	}
+	if stale["GC_TRIGGER_BEAD_ID"] != "w-old" {
+		t.Errorf("boundTemplate wrote through to the template's env: %v", stale)
+	}
+}
+
 // Kills a launch env carrying the trigger the template was resolved under
-// after PreWake cleared or re-pointed it: the trigger env and the demand
-// origin follow the bound row (legacy binds, then resolves).
+// after PreWake cleared or re-pointed it, and a launch env that names a
+// trigger id at all: the demand origin follows the bound row (legacy binds,
+// then resolves), and every GC_TRIGGER_* key reaches the launch withheld,
+// stale or fresh (gastownhall/gascity#5738). A want of "" is a withheld key:
+// present and empty.
 func TestLaunchTriggerEnvFollowsTheBoundRow(t *testing.T) {
 	stale := map[string]string{"GC_TRIGGER_BEAD_ID": "w-old", "GC_TRIGGER_WORK_BEAD_ID": "w-old", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}
 	for _, c := range []struct {
 		name, bind string
 		want       map[string]string
 	}{
-		{"cleared", "", map[string]string{"GC_TRIGGER_BEAD_ID": "", "GC_SPAWN_ORIGIN": "", "GC_KEEP": "1"}},
-		{"re-pointed", "w-new", map[string]string{"GC_TRIGGER_BEAD_ID": "w-new", "GC_TRIGGER_WORK_BEAD_ID": "w-new", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}},
+		{"cleared", "", map[string]string{"GC_SPAWN_ORIGIN": "", "GC_KEEP": "1"}},
+		{"re-pointed", "w-new", map[string]string{"GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}},
 	} {
 		k, leaf := launchKit(t, "asleep", "gc.trigger_bead_id", "w-old")
 		row := k.p.World.Census.Rows[k.it.Key]
@@ -1128,10 +1164,11 @@ func TestLaunchTriggerEnvFollowsTheBoundRow(t *testing.T) {
 			t.Fatalf("%s: settlement %+v, want one launch", c.name, s)
 		}
 		for key, want := range c.want {
-			if got := leaf.cfgs[0].Env[key]; got != want {
-				t.Errorf("%s: launch %s = %q, want %q", c.name, key, got, want)
+			if got, ok := leaf.cfgs[0].Env[key]; !ok || got != want {
+				t.Errorf("%s: launch %s = (%q, present=%v), want %q", c.name, key, got, ok, want)
 			}
 		}
+		assertEnvWithholdsTriggerIDs(t, c.name+": launch env", leaf.cfgs[0].Env)
 	}
 }
 

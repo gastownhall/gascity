@@ -360,6 +360,10 @@ type hookClaimOps struct {
 	// ReadWorkStarted reads the session row's raw work_started cell: the
 	// drain-ack fence's input.
 	ReadWorkStarted hookReadWorkStartedFunc
+	// ReadSessionTrigger reads the session row's gc.trigger_bead_id stamp: the
+	// row the controller counted when it spawned the seat, read only by the
+	// demand/claim divergence diagnostics after the drain result is written.
+	ReadSessionTrigger hookReadSessionTriggerFunc
 	// StoreRef names the work leg at dir as the work cells key a claim that
 	// resides in it (claimStoreRef), or "" when it is not knowable. A claim
 	// the class route took resides in the binding instead: the cells' key for
@@ -411,6 +415,7 @@ type (
 	hookRecordWorkStartedFunc        func(sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error)
 	hookForgetWorkStartedFunc        func(sessionID string, key hookStartedKey) error
 	hookReadWorkStartedFunc          func(sessionID string) (string, error)
+	hookReadSessionTriggerFunc       func(sessionID string) (string, error)
 	// hookWorkflowStoreFunc (ctx, dir, env, beadID, actor) opens the store
 	// that holds beadID's workflow, writing as actor.
 	hookWorkflowStoreFunc func(ctx context.Context, dir string, env []string, beadID, actor string) beads.Store
@@ -714,6 +719,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.ReadWorkStarted == nil {
 		ops.ReadWorkStarted = hookSessionWorkStarted
+	}
+	if ops.ReadSessionTrigger == nil {
+		ops.ReadSessionTrigger = hookSessionTriggerBead
 	}
 	if ops.StoreRef == nil {
 		ops.StoreRef = hookClaimStoreRefForDir
@@ -3112,13 +3120,12 @@ func emitExecutionStepStarted(rec events.Recorder, step beads.Bead, dir string, 
 //
 // It exists because a claimed step id is otherwise UNREACHABLE from the step's
 // own shell: GC_BEAD_ID is set only in the dispatch condition-script
-// environment (internal/convergence/condition.go), and GC_TRIGGER_BEAD_ID —
-// exported to demand-spawned pool seats as a pool-level spawn marker
-// (build_desired_state.go) — is absent on other seats and is a presence
-// signal, not a claim directive, so a formula step that must close the bead it
-// is running had no reliable way to name it and silently skipped its own close
-// — work that did nothing reported green. `gc hook current` reads this stamp
-// back and closes that gap.
+// environment (internal/convergence/condition.go), and no session shell
+// carries a trigger bead id — a demand-spawned session sees only the
+// GC_SPAWN_ORIGIN=demand presence marker (sessionDemandSpawnEnv) — so a formula
+// step that must close the bead it is running had no way to name it and
+// silently skipped its own close — work that did nothing reported green.
+// `gc hook current` reads this stamp back and closes that gap.
 //
 // Unlike the work-bead session back-reference this is stamped for CONTROL beads
 // too: that exclusion exists because a control step must stay session-free by

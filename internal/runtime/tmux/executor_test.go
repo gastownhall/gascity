@@ -1242,6 +1242,67 @@ func TestNewSessionWithCommandAndEnvMarksUnsetKeysRemovedFromSessionEnv(t *testi
 	}
 }
 
+// Every session env pins the demand-spawn keys (processenv.DemandSpawnEnvKeys)
+// empty, and that withholding has to survive into respawn-pane the way a
+// credential's does: a warm box an older gc provisioned holds its own
+// `-e GC_TRIGGER_BEAD_ID`, and a tmux server started from an agent's pane holds
+// that pane's ids in its global env (gastownhall/gascity#5738). A stamped
+// seat's GC_SPAWN_ORIGIN=demand is a value, not a withholding, so it is never
+// marked; an unstamped seat pins it empty and has it marked too.
+func TestDemandSpawnKeysMarkedRemovedOnCreateAndRespawn(t *testing.T) {
+	triggerKeys := []string{
+		"GC_TRIGGER_BEAD_ID",
+		"GC_TRIGGER_BEAD_STORE_REF",
+		"GC_TRIGGER_WORK_BEAD_ID",
+		"GC_TRIGGER_WORK_STORE_REF",
+	}
+	seats := []struct {
+		name   string
+		origin string // GC_SPAWN_ORIGIN in the launch env
+		marked []string
+	}{
+		{"stamped", "demand", triggerKeys},
+		{"unstamped", "", append([]string{"GC_SPAWN_ORIGIN"}, triggerKeys...)},
+	}
+	paths := []struct {
+		name string
+		run  func(*Tmux, map[string]string) error
+	}{
+		{"create", func(tm *Tmux, env map[string]string) error {
+			return tm.NewSessionWithCommandAndEnv("gc-test-demand-pin", "", "claude", env)
+		}},
+		{"respawn", func(tm *Tmux, env map[string]string) error {
+			return (&tmuxStartOps{tm: tm}).respawnAgent("gc-test-demand-pin", "/proj", "claude", env)
+		}},
+	}
+	for _, path := range paths {
+		for _, seat := range seats {
+			t.Run(path.name+"/"+seat.name, func(t *testing.T) {
+				exec := &fakeExecutor{out: "agent\t@1.%0"}
+				tm := NewTmux()
+				tm.exec = exec
+
+				env := map[string]string{"GC_CITY": "/tmp/city", "GC_SPAWN_ORIGIN": seat.origin}
+				for _, key := range triggerKeys {
+					env[key] = ""
+				}
+				if err := path.run(tm, env); err != nil {
+					t.Fatalf("%s: %v", path.name, err)
+				}
+				var marked []string
+				for _, call := range exec.calls {
+					if i := slices.Index(call, "set-environment"); i >= 0 && slices.Contains(call[i:], "-r") {
+						marked = append(marked, call[len(call)-1])
+					}
+				}
+				if !slices.Equal(marked, seat.marked) {
+					t.Errorf("keys marked removed from the session env = %v, want %v", marked, seat.marked)
+				}
+			})
+		}
+	}
+}
+
 // TestNewTmuxCommandBoundsPipeWait pins the WaitDelay on every real tmux
 // subprocess. The hang it bounds needs a stopped tmux server holding the
 // client's stdio (passed over SCM_RIGHTS), which the executor seam cannot

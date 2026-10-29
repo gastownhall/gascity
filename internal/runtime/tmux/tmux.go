@@ -776,16 +776,21 @@ func validateUnsetEnvKeys(env map[string]string) error {
 // SURVIVE into later processes, rather than only applying to the command tmux
 // execs first.
 //
-// That is controller-scope credentials plus the BEADS_ namespace. A selected
-// workspace can pin any current or future BEADS_ key empty to prevent ambient
-// state from redirecting it, and a warm respawn must retain that choice. The
-// other keys a session env pins empty — CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, the
-// CODEX_ pair — are nesting-detection flags, not authority: the `env -u` prefix
+// That is controller-scope credentials, the BEADS_ namespace, and the
+// demand-spawn keys. A selected workspace can pin any current or future BEADS_
+// key empty to prevent ambient state from redirecting it, and a warm respawn
+// must retain that choice. Any copy of a demand-spawn key pinned empty
+// (processenv.DemandSpawnEnvKeys) names some other spawn, and respawn-pane
+// would hand it to the relaunched agent: a warm box an older gc provisioned
+// holds its own `-e GC_TRIGGER_BEAD_ID`, and a tmux server started from an
+// agent's pane holds that pane's ids in its global env. The other keys a
+// session env pins empty — CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, the CODEX_
+// pair — are nesting-detection flags, not authority: the `env -u` prefix
 // already gives them the behavior they need on the launched command.
 func durableWithholdKeys(env map[string]string) []string {
 	var keys []string
 	for _, k := range sessionEnvUnsetKeys(env) {
-		if processenv.IsControllerOnlyEnv(k) || strings.HasPrefix(k, "BEADS_") {
+		if processenv.IsControllerOnlyEnv(k) || processenv.IsDemandSpawnEnv(k) || strings.HasPrefix(k, "BEADS_") {
 			keys = append(keys, k)
 		}
 	}
@@ -841,12 +846,14 @@ func (t *Tmux) markSessionEnvRemoved(session string, keys []string) error {
 // Requires tmux >= 3.2.
 //
 // Empty-valued keys are WITHHELD by the `env -u` command prefix, which covers
-// the command new-session execs. Controller-scope credentials additionally get
-// the durable session-environment marker, which covers every process started in
-// the session afterwards — above all respawn-pane. Both are required for those
-// keys and each was falsified against a real tmux 3.4: new-session starts the
-// command before any follow-up can land, so the marker alone leaves the CREATED
-// pane exposed; the prefix alone leaves the RESPAWNED pane exposed.
+// the command new-session execs. The keys durableWithholdKeys names
+// (controller-scope credentials, the BEADS_ namespace, the demand-spawn keys)
+// additionally get the durable session-environment marker, which covers every
+// process started in the session afterwards — above all respawn-pane. Both are
+// required for those keys and each was falsified against a real tmux 3.4:
+// new-session starts the command before any follow-up can land, so the marker
+// alone leaves the CREATED pane exposed; the prefix alone leaves the RESPAWNED
+// pane exposed.
 //
 // Non-empty values that are not argv-safe (see [runtime.ArgvSafeEnvKey]) never
 // reach the command line: the whole new-session command is staged through a
@@ -896,11 +903,11 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	}
 	t.markAgentPane(name, pane)
 	t.publishInputFence(name, pane, env)
-	// Carry the CREDENTIAL withholding into the session environment, so it
+	// Carry the durable withholding into the session environment, so it
 	// survives into every later process — above all respawn-pane, which the
 	// warm-box relaunch path uses and which takes no env argument at all. Fail
-	// closed: a session that silently kept a withheld credential is the defect
-	// this prevents.
+	// closed: a session that silently kept a withheld credential or trigger id
+	// is the defect this prevents.
 	if err := t.markSessionEnvRemoved(name, durableWithholdKeys(env)); err != nil {
 		return err
 	}

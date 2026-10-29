@@ -202,6 +202,44 @@ func TestResolvedSessionConfigForProviderPinsControllerTokenEmpty(t *testing.T) 
 	}
 }
 
+// A controller started from an agent's pane carries that pane's demand-spawn
+// keys. An API-created session is not demand-spawned and must not inherit
+// them: each is withheld (present and empty), never omitted, because an
+// omitted key is an inherited key (gastownhall/gascity#5738).
+func TestResolvedSessionConfigForProviderWithholdsInheritedDemandSpawnEnv(t *testing.T) {
+	keys := []string{"GC_SPAWN_ORIGIN", "GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID", "GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"}
+	for _, key := range keys {
+		t.Setenv(key, "ga-foreign")
+	}
+	cfg, err := resolvedSessionConfigForProvider(
+		"/tmp/test-city",
+		nil,
+		"worker",
+		"",
+		"myrig/worker",
+		"Worker",
+		"",
+		nil,
+		&config.ResolvedProvider{Name: "stub", Command: "/bin/echo"},
+		"",
+		"/tmp/workdir",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("resolvedSessionConfigForProvider: %v", err)
+	}
+	for name, env := range map[string]map[string]string{
+		"Runtime.SessionEnv": cfg.Runtime.SessionEnv,
+		"Runtime.Hints.Env":  cfg.Runtime.Hints.Env,
+	} {
+		for _, key := range keys {
+			if val, ok := env[key]; !ok || val != "" {
+				t.Errorf("%s[%s] = (%q, present=%v), want (\"\", true) so the session cannot inherit the controller's copy", name, key, val, ok)
+			}
+		}
+	}
+}
+
 func TestResolvedSessionConfigForProviderRejectsNilProvider(t *testing.T) {
 	if _, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",

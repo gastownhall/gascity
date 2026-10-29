@@ -1212,3 +1212,94 @@ func TestProvider_RelaunchRepinsControllerTokenInPreexistingWarmBox(t *testing.T
 		t.Fatalf("respawned pane in a pre-fix warm box received the controller token: %s", got)
 	}
 }
+
+// The demand-spawn twin of the two controller-token relaunch tests above: a
+// respawned agent must not see a trigger bead id (gastownhall/gascity#5738).
+// respawn-pane takes no env argument, and an id reaches it from two stores the
+// create path's one-shot `env -u` prefix never touches: the tmux SERVER's
+// global env, when the process that started the server held the ids (a
+// supervisor forked from an agent's pane), and the SESSION env of a warm box an
+// older gc provisioned with `-e GC_TRIGGER_BEAD_ID=<id>`. Only a key marked
+// removed in the session env stays out of the respawned pane. A stamped seat's
+// GC_SPAWN_ORIGIN=demand is a value rather than a withholding, and survives.
+func TestProvider_RelaunchWithholdsTriggerIDsFromRespawnedPane(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	// Each subtest's server forks from this process, so its global env carries
+	// these ids: the contaminated server.
+	t.Setenv("GC_TRIGGER_BEAD_ID", "ga-foreign")
+	t.Setenv("GC_TRIGGER_WORK_BEAD_ID", "ga-foreign-work")
+
+	// A stamped seat's launch env: every id pinned empty, the marker on top.
+	stamped := map[string]string{
+		"GC_SPAWN_ORIGIN":           "demand",
+		"GC_TRIGGER_BEAD_ID":        "",
+		"GC_TRIGGER_BEAD_STORE_REF": "",
+		"GC_TRIGGER_WORK_BEAD_ID":   "",
+		"GC_TRIGGER_WORK_STORE_REF": "",
+	}
+	const withheld = "origin=[demand] bead=[ABSENT] work=[ABSENT]"
+
+	cases := []struct {
+		name      string
+		provision func(p *Provider, name, workDir, command string) error
+		created   string            // what the provisioned pane sees
+		relaunch  map[string]string // cfg.Env on the relaunch
+	}{
+		{
+			// Relaunched WITHOUT Env, as in the token test: the create path's
+			// session-env marker has to carry the withholding on its own.
+			name: "box this gc created on a contaminated server",
+			provision: func(p *Provider, name, workDir, command string) error {
+				return p.Start(context.Background(), name, runtime.Config{Command: command, WorkDir: workDir, Env: stamped})
+			},
+			created: withheld,
+		},
+		{
+			// Provisioned the way the previous gc did: the seat's own ids as -e
+			// values in the session env, no marker. The relaunch carries the pin
+			// in cfg.Env, as the reconciler does.
+			name: "warm box an older gc provisioned with its trigger ids",
+			provision: func(p *Provider, name, workDir, command string) error {
+				return p.Tmux().NewSessionWithCommandAndEnv(name, workDir, command, map[string]string{
+					"GC_SPAWN_ORIGIN":         "demand",
+					"GC_TRIGGER_BEAD_ID":      "ga-stale",
+					"GC_TRIGGER_WORK_BEAD_ID": "ga-stale-work",
+				})
+			},
+			created:  "origin=[demand] bead=[ga-stale] work=[ga-stale-work]",
+			relaunch: stamped,
+		},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.SocketName = privateSocketName(fmt.Sprintf("dt%d", i))
+			p := NewProviderWithConfig(cfg)
+			name := fmt.Sprintf("gc-test-relaunch-trigger-%d", i)
+			_ = p.Stop(name)
+			defer func() { _ = p.Stop(name) }()
+
+			workDir := t.TempDir()
+			marker := filepath.Join(workDir, "marker")
+			agentCmd := func(tag string) string {
+				return fmt.Sprintf(`sh -c 'printf %%s "%s origin=[${GC_SPAWN_ORIGIN-ABSENT}] bead=[${GC_TRIGGER_BEAD_ID-ABSENT}] work=[${GC_TRIGGER_WORK_BEAD_ID-ABSENT}]" > %s; sleep 300'`, tag, marker)
+			}
+
+			if err := tc.provision(p, name, workDir, agentCmd("created")); err != nil {
+				t.Fatalf("provisioning: %v", err)
+			}
+			waitForMarker(t, marker, "created "+tc.created)
+
+			if err := p.Relaunch(context.Background(), name, runtime.Config{
+				Command: agentCmd("respawned"),
+				WorkDir: workDir,
+				Env:     tc.relaunch,
+			}); err != nil {
+				t.Fatalf("Relaunch: %v", err)
+			}
+			waitForMarker(t, marker, "respawned "+withheld)
+		})
+	}
+}

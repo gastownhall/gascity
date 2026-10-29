@@ -119,6 +119,9 @@ func (h *hookCity) claimOps() hookClaimOps {
 	ops.ReadWorkStarted = func(sessionID string) (string, error) {
 		return sessionWorkStartedVia(h.sessionFront, sessionID)
 	}
+	ops.ReadSessionTrigger = func(sessionID string) (string, error) {
+		return sessionTriggerBeadVia(h.sessionFront, sessionID)
+	}
 	ops.StoreRef = func(dir string) string {
 		return claimStoreRefAt(h.path, h.cfg, dir)
 	}
