@@ -1264,6 +1264,7 @@ func TestConvergenceStop_ClosesActiveWispSteps(t *testing.T) {
 		wantReadyBeforeStop bool
 	}{
 		{"manual-gate/iteration-1", convergence.GateModeManual, 0, false},
+		{"condition-gate/iteration-2", convergence.GateModeCondition, 1, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cr, store := setupConvergenceRuntime(t)
