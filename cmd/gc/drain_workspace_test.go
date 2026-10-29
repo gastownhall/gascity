@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -113,5 +114,72 @@ func TestSharedDrainWorkspaceProvisionerEnsuresManagedRigWorktree(t *testing.T) 
 	testutil.RunGit(t, path, "switch", "-c", "elsewhere")
 	if _, err := provision(control); err == nil {
 		t.Fatal("provision after branch switch succeeded, want a refusal")
+	}
+}
+
+func TestSharedDrainWorkspaceProvisionerSkipsAndRefuses(t *testing.T) {
+	t.Run("city scope", func(t *testing.T) {
+		repo, _ := testutil.InitGitRepo(t)
+		worktreesRoot := t.TempDir()
+		t.Setenv("GC_WORKTREES_DIR", worktreesRoot)
+		cityPath, cfg := sharedDrainWorkspaceCity(t, repo)
+
+		path, err := sharedDrainWorkspaceProvisioner(cityPath, cityPath, cfg)(sharedDrainControl("gc-root2", "gc-drain2"))
+		if err != nil || path != "" {
+			t.Fatalf("provision = (%q, %v), want (\"\", nil)", path, err)
+		}
+		assertDirEmpty(t, worktreesRoot)
+	})
+
+	t.Run("rig that is not a git repository", func(t *testing.T) {
+		rig := t.TempDir()
+		worktreesRoot := t.TempDir()
+		t.Setenv("GC_WORKTREES_DIR", worktreesRoot)
+		cityPath, cfg := sharedDrainWorkspaceCity(t, rig)
+
+		path, err := sharedDrainWorkspaceProvisioner(cityPath, rig, cfg)(sharedDrainControl("gc-root2", "gc-drain2"))
+		if err != nil || path != "" {
+			t.Fatalf("provision = (%q, %v), want (\"\", nil)", path, err)
+		}
+		assertDirEmpty(t, worktreesRoot)
+	})
+
+	t.Run("worktrees root inside the rig checkout", func(t *testing.T) {
+		repo, _ := testutil.InitGitRepo(t)
+		worktreesRoot := filepath.Join(repo, ".worktrees")
+		t.Setenv("GC_WORKTREES_DIR", worktreesRoot)
+		cityPath, cfg := sharedDrainWorkspaceCity(t, repo)
+
+		_, err := sharedDrainWorkspaceProvisioner(cityPath, repo, cfg)(sharedDrainControl("gc-root2", "gc-drain2"))
+		if err == nil {
+			t.Fatal("provision succeeded, want a refusal for a root inside the rig checkout")
+		}
+		for _, want := range []string{worktreesRoot, "GC_WORKTREES_DIR"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %q, want it to name %q", err, want)
+			}
+		}
+	})
+
+	t.Run("control without a workflow root", func(t *testing.T) {
+		repo, _ := testutil.InitGitRepo(t)
+		t.Setenv("GC_WORKTREES_DIR", t.TempDir())
+		cityPath, cfg := sharedDrainWorkspaceCity(t, repo)
+
+		_, err := sharedDrainWorkspaceProvisioner(cityPath, repo, cfg)(beads.Bead{ID: "gc-drain1"})
+		if err == nil || !strings.Contains(err.Error(), "gc-drain1") {
+			t.Fatalf("provision err = %v, want an error naming the control", err)
+		}
+	})
+}
+
+func assertDirEmpty(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", dir, err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("%s has %d entries, want none", dir, len(entries))
 	}
 }
