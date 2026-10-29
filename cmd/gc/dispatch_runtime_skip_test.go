@@ -342,3 +342,42 @@ func TestRunControlDispatcherNotOpenSkipContract(t *testing.T) {
 		t.Fatalf("scope store closed %d times, want 1", got)
 	}
 }
+
+// TestDrainWorkflowServeWorkCountsQuarantineAsProgress guards the other nil
+// return from the serve seam: handleControlDispatchError quarantining a
+// control is a write, so the drain must keep counting it as processed.
+func TestDrainWorkflowServeWorkCountsQuarantineAsProgress(t *testing.T) {
+	city := newServeSkipCity(t)
+	control, err := city.store.Create(beads.Bead{
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.KindMetadataKey: "not-a-control-kind"},
+	})
+	if err != nil {
+		t.Fatalf("create control bead: %v", err)
+	}
+	stubQueue(t, func() []hookBead {
+		if b, err := city.store.Get(control.ID); err == nil && b.Status == "open" {
+			return []hookBead{hookRow(control)}
+		}
+		return nil
+	})
+
+	agent := config.Agent{Name: "control-dispatcher"}
+	result, err := drainWorkflowServeWork(agent, city.dir, city.dir, "bd ready", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("drainWorkflowServeWork: %v", err)
+	}
+	quarantined, err := city.store.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control bead: %v", err)
+	}
+	if quarantined.Status != "closed" || quarantined.Metadata[beadmeta.ControlQuarantinedMetadataKey] != "true" {
+		t.Fatalf("control bead status=%q quarantined=%q, want a closed quarantined bead", quarantined.Status, quarantined.Metadata[beadmeta.ControlQuarantinedMetadataKey])
+	}
+	if !result.processedAny {
+		t.Errorf("processedAny = false, want true: a quarantine close is progress")
+	}
+	if !wakeFileExists(t, city.dir) {
+		t.Errorf("dispatch wake file missing after quarantining a control bead")
+	}
+}
