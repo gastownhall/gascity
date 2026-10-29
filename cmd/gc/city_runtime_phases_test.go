@@ -446,6 +446,7 @@ func TestCityRuntimeTickPhasesMatchLegacyTickRecordsAndStoreOps(t *testing.T) {
 				"SetMetadataBatch gc-1 core_hash_breakdown,started_config_hash,started_launch_hash,started_provision_hash",
 				"List status=open type=session label= metadata= include_closed=false live=false",
 				"List status=open type= label=gc:session metadata= include_closed=false live=false",
+				"List status=closed type=session label= metadata=usage_close_pending include_closed=true live=false",
 				"List status=open type= label=session:gc-1 metadata= include_closed=false live=false",
 				"List status= type= label=gc:wait metadata= include_closed=false live=false",
 				"Get gc-1",
@@ -536,6 +537,7 @@ func TestCityRuntimeTickPhasesMatchLegacyTickRecordsAndStoreOps(t *testing.T) {
 				"List status=open type= label=gc:session metadata= include_closed=false live=false",
 				"List status= type= label=gc:extmsg-binding metadata= include_closed=false live=false",
 				"List status= type= label=gc:extmsg-group-participant metadata= include_closed=false live=false",
+				"List status=closed type=session label= metadata=usage_close_pending include_closed=true live=false",
 				"List status=open type= label=session:gc-1 metadata= include_closed=false live=false",
 				"List status= type= label=gc:wait metadata= include_closed=false live=false",
 				"Get gc-1",
@@ -854,6 +856,7 @@ func TestCityRuntimeTickV2RunsMaintenancePhasesOnly(t *testing.T) {
 		"List status= type= label=gc:extmsg-binding metadata= include_closed=false live=false",
 		"List status= type= label=gc:extmsg-group-participant metadata= include_closed=false live=false",
 		"Get gc-1",
+		"List status=closed type=session label= metadata=usage_close_pending include_closed=true live=false",
 	})
 	if writes := storeWrites(store.recorded()); len(writes) != 0 {
 		t.Errorf("the v2 tick phases wrote to the store: %v", writes)
