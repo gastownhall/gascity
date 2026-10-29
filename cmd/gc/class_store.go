@@ -424,32 +424,9 @@ func cookOnClassRouted(ctx context.Context, workStore, graphStore beads.Store, f
 }
 
 // recipeCoordClass returns the coordination class of the beads that
-// instantiating recipe produces.
-//
-// molecule.Instantiate materializes a recipe as one atomic plan, so the plan is
-// classified wholesale exactly as coordclass.ClassifyGraphPlan does: a single
-// graph-marked node makes the whole molecule graph class, which keeps its
-// intra-plan edges inside one store. Steps a RootOnly recipe never creates are
-// skipped, matching the instantiate loop's own `if recipe.RootOnly && i > 0`
-// break.
+// instantiating recipe produces (molecule.RecipeClass, shared with sling).
 func recipeCoordClass(recipe *formula.Recipe) coordclass.Class {
-	if recipe == nil {
-		return coordclass.ClassWork
-	}
-	for i, step := range recipe.Steps {
-		if recipe.RootOnly && i > 0 {
-			break
-		}
-		stepType := step.Type
-		if stepType == "" {
-			stepType = "task"
-		}
-		bead := beads.Bead{Type: stepType, Labels: step.Labels, Metadata: step.Metadata}
-		if coordclass.Classify(bead) == coordclass.ClassGraph {
-			return coordclass.ClassGraph
-		}
-	}
-	return coordclass.ClassWork
+	return molecule.RecipeClass(recipe)
 }
 
 // graphClassBinding returns the store these routes serve the graph class from,
@@ -536,7 +513,7 @@ type queryTopologyWorkProbe struct{ beads.Store }
 func newCityMailProvider(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) mail.Provider {
 	msgStore := resolveMailMessagesStore(routes, workStore, cfg, cityPath, rec)
 	sessStore := resolveSessionStore(routes, workStore, cfg, cityPath, rec)
-	return newMailProviderWithSessionStore(msgStore, sessStore)
+	return withMailNoticeWithdrawal(newMailProviderWithSessionStore(msgStore, sessStore), sessStore, cfg, nil)
 }
 
 // newCityExtMsgServices builds the controller's external-messaging services as

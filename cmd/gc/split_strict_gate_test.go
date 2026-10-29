@@ -177,3 +177,41 @@ func TestSplitStrictControllerSharesOneProjection(t *testing.T) {
 		t.Fatalf("a legitimate session create and read added %d violation key(s)", after-before)
 	}
 }
+
+// taggedSeam wraps a store in a tagged view, so a test can see which view
+// the seam handed out.
+type taggedSeam struct{}
+
+type taggedView struct {
+	beads.Store
+	class bool
+}
+
+func (taggedSeam) workView(store beads.Store) beads.Store { return &taggedView{Store: store} }
+func (taggedSeam) classView(store beads.Store) beads.Store {
+	return &taggedView{Store: store, class: true}
+}
+
+// TestSplitStrictEventStoresViewTheResidentStoreAsTheClassSide: a relic id
+// routes to the work view of its prefix route, but the binding the residence
+// probe proved holds it is a class store; it is viewed as one, and the relic
+// handed back is that same view, so owner comparisons still match.
+func TestSplitStrictEventStoresViewTheResidentStoreAsTheClassSide(t *testing.T) {
+	saved := splitStrictSeam
+	splitStrictSeam = taggedSeam{}
+	t.Cleanup(func() { splitStrictSeam = saved })
+	route, binding := beads.NewMemStore(), beads.NewMemStore()
+	stores, relic := splitStrictEventStores("gc-1", []beads.Store{route, binding}, binding)
+	if v, ok := stores[0].(*taggedView); !ok || v.class || v.Store != route {
+		t.Fatalf("route store viewed as %#v, want its work view", stores[0])
+	}
+	if v, ok := stores[1].(*taggedView); !ok || !v.class || v.Store != binding {
+		t.Fatalf("resident binding viewed as %#v, want its class view", stores[1])
+	}
+	if !sameBeadStore(relic, stores[1]) {
+		t.Fatal("the relic handed back is not the view in the store list")
+	}
+	if _, relic := splitStrictEventStores("gc-1", []beads.Store{route}, nil); relic != nil {
+		t.Fatalf("no relic in, relic out = %#v", relic)
+	}
+}

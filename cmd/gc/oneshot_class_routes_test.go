@@ -615,6 +615,33 @@ func TestFormulaCookMetaStampLandsOnTheGraphResidentRoot(t *testing.T) {
 	}
 }
 
+// TestFormulaCookAttachMetaStampLandsOnTheBindingResidentSubDAGRoot is the
+// --attach twin of TestFormulaCookMetaStampLandsOnTheGraphResidentRoot, on the
+// one graft a split city serves: a v1 formula onto a binding-owned bead.
+// molecule.Attach materializes the sub-DAG through the store that holds the
+// attach bead, so the --meta stamp must go through that same store — addressed
+// at the scope store it fails the cook after the graft already exists (#7309).
+func TestFormulaCookAttachMetaStampLandsOnTheBindingResidentSubDAGRoot(t *testing.T) {
+	cityDir := oneShotCookCity(t)
+	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	seedCLIStorageRoutes(t, cityDir, messagingSplitRoutes(graph))
+
+	source, err := graph.Create(beads.Bead{Title: "class-resident attach target", Type: "task"})
+	if err != nil {
+		t.Fatalf("create the class-resident attach bead: %v", err)
+	}
+
+	res := cookFormula(t, "legacy-work", "--attach", source.ID, "--meta", "gc.trace=abc123")
+
+	root, err := graph.Get(res.RootID)
+	if err != nil {
+		t.Fatalf("attached sub-DAG root %s is not resident in the graph binding: %v", res.RootID, err)
+	}
+	if got := root.Metadata["gc.trace"]; got != "abc123" {
+		t.Errorf("sub-DAG root %s: gc.trace = %q, want %q — the --meta stamp went to a store that never held the root", res.RootID, got, "abc123")
+	}
+}
+
 // TestFormulaCookAttachIsIdempotent drives the `existing != nil` early return,
 // the one attach path that returns without instantiating. A convoy target gives
 // the invocation a stable input-convoy id and therefore a stable graph root key,
@@ -902,5 +929,45 @@ func TestRecipeCoordClassRederivesTheVerdictFromTheClassifier(t *testing.T) {
 				t.Fatalf("moleculeClassStore picked the wrong store for a %v recipe", tc.want)
 			}
 		})
+	}
+}
+
+// TestFormulaCookAttachStampsMetaOnTheRoot asserts the documented --meta
+// contract ("set root bead metadata after cook") holds on the --attach arms as
+// it does on a standalone cook, for both formula compilers (issue #7309).
+func TestFormulaCookAttachStampsMetaOnTheRoot(t *testing.T) {
+	cityDir := oneShotCookCity(t)
+	resetCLIStorageRoutes(t)
+	seedCLIStorageRoutes(t, cityDir, nil)
+	work, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("open work store: %v", err)
+	}
+	want := map[string]string{
+		"work_dir":         "/tmp/cook-repro-worktree",
+		"review_work_bead": "fixture-bead",
+		"base_sha":         "base-abc",
+		"head_sha":         "head-def",
+	}
+	var metaArgs []string
+	for k, v := range want {
+		metaArgs = append(metaArgs, "--meta", k+"="+v)
+	}
+
+	for _, formulaName := range []string{"legacy-work", "graph-work"} {
+		source, err := work.Create(beads.Bead{Title: "attach target " + formulaName, Type: "task"})
+		if err != nil {
+			t.Fatalf("create attach bead: %v", err)
+		}
+		res := cookFormula(t, formulaName, append([]string{"--attach", source.ID}, metaArgs...)...)
+		root, err := work.Get(res.RootID)
+		if err != nil {
+			t.Fatalf("%s: get attached root %s: %v", formulaName, res.RootID, err)
+		}
+		for k, v := range want {
+			if got := root.Metadata[k]; got != v {
+				t.Errorf("%s --attach: root %s metadata %s = %q, want %q", formulaName, res.RootID, k, got, v)
+			}
+		}
 	}
 }

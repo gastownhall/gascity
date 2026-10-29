@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "callsite.go",
         "gate.go",
+        "native_work_store.go",
         "pinned_id_fence.go",
         "projection.go",
         "ratchet.go",

@@ -1062,6 +1062,56 @@ func TestStorageMigrateRefusesRigResidueByName(t *testing.T) {
 		"a migrator that refused must record no convergence")
 }
 
+// TestStorageMigrateClearsAConvergedCityDespiteRigResidue covers the re-run
+// the upgrade order ends with: a converged city whose work store still holds
+// retained copies, beside a rig scope holding pre-split infrastructure rows.
+// The re-run copies nothing, so the census that guards a copy does not run:
+// the clear proceeds, `gc storage status` exits 0, and the rig row is
+// untouched. Refused, as it was, the city kept the retained copies boot
+// refuses over, and every seat's drain fence stayed closed on them.
+func TestStorageMigrateClearsAConvergedCityDespiteRigResidue(t *testing.T) {
+	rigPath := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
+	request := storageTestRequest(t, cfg)
+	source := stubStrandedRecoverySource(t)
+	stubInfraControllerPing(t, 0)
+	carried := mustCreateInfraBead(t, source, beads.Bead{Title: "a delivered mail", Type: "message"})
+	var log bytes.Buffer
+	if got := migrateInfraClassesRetainingSource(t, request.CityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("cutover = %s, want converged: %s", got.Outcome, log.String())
+	}
+
+	cfg.Rigs = []config.Rig{{Name: "packs", Prefix: "gp", Path: rigPath}}
+	rig := beads.NewMemStore()
+	rig.IDPrefix = "gp"
+	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a pre-split workflow step", Type: "task", Metadata: beads.StringMap{"gc.root_bead_id": "gp-root", "gc.kind": "task"}})
+	stubStorageScopeStore(t, rigPath, func() beads.Store { return rig })
+	if err := censusRigInfraResidue(request.CityPath, cfg); err == nil || !strings.Contains(err.Error(), stray.ID) {
+		t.Fatalf("precondition: the census = %v, want a refusal naming %s", err, stray.ID)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doStorageStatus(request, &stdout, &stderr); code == 0 {
+		t.Fatalf("precondition: status exits 0 with the retained copy %s in the work store: %s", carried.ID, stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := doStorageMigrate(context.Background(), request, &stdout, &stderr); code != 0 {
+		t.Fatalf("the clear-only re-run = %d, want 0: %s %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := source.Get(carried.ID); err == nil {
+		t.Errorf("the re-run left the retained copy %s", carried.ID)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := doStorageStatus(request, &stdout, &stderr); code != 0 {
+		t.Errorf("status after the clear = %d, want 0: %s %s", code, stdout.String(), stderr.String())
+	}
+	if _, err := rig.Get(stray.ID); err != nil {
+		t.Errorf("the re-run touched the rig row %s: %v", stray.ID, err)
+	}
+}
+
 // TestStorageMigrateAcceptsRigSharingTheCityStore covers a rig whose binding
 // is the city's own work store (a unified city whose rig .beads carries a copy
 // of the city's remote binding, or resolves to the same database). Its rows

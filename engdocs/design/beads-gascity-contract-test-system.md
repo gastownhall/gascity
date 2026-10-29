@@ -205,7 +205,9 @@ and the diff anchor only moves on a *real* wire change.
   anchor instead — `BD_CURRENT_VERSION` (`v1.1.0-rc.1`, a release-candidate with
   **no** release tarball) built from beads source at the SHA-pinned
   `BD_CURRENT_REF` by the `contract-acceptance-current` job, with
-  `contract-radar-bd-head` as the non-required radar. So the three `deps.env`
+  `contract-radar-bd-head` as the non-required radar (since ga-ylpbsy.55 in
+  its own workflow, `advisory-probes.yml`, so a red radar never shares a run
+  with the required checks). So the three `deps.env`
   bd anchors map onto the matrix as: `BD_PREV_VERSION` = the min-supported floor
   cell (tarball), `BD_VERSION` = the installable default the floor tracks
   (tarball), and `BD_CURRENT_VERSION`/`BD_CURRENT_REF` = the source-built `current`

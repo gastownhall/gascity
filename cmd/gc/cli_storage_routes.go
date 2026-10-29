@@ -67,9 +67,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -92,7 +94,20 @@ var cliStorageStderr io.Writer = os.Stderr
 type cliStorageRoutesEntry struct {
 	once   sync.Once
 	routes *storageRoutes
+	// unsettled marks an answer that must not be memoized for the process:
+	// the city's config failed to load, or the gate could not read what it
+	// needed, so the answer is about the moment, not the city. It is reused
+	// until expires and then resolved again.
+	unsettled bool
+	expires   time.Time
 }
+
+// cliStorageRoutesUnsettledTTL is how long an unsettled answer is reused. A
+// one-shot command reaches a class resolver many times within milliseconds;
+// without this, each would reload the config (and re-run the builtin
+// readiness retry) and repeat the refusal on stderr. A long-lived process sees
+// a fix within this window. A var so a test can make every call re-resolve.
+var cliStorageRoutesUnsettledTTL = 2 * time.Second
 
 var (
 	cliStorageRoutesMu     sync.Mutex
@@ -113,9 +128,64 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 	if cityPath == "" {
 		return nil
 	}
-	entry := cliStorageRoutesEntryFor(filepath.Clean(cityPath))
-	entry.once.Do(func() { entry.routes = resolveCLIStorageRoutes(cityPath) })
+	clean := filepath.Clean(cityPath)
+	resolve := func(entry *cliStorageRoutesEntry) {
+		entry.once.Do(func() {
+			entry.routes, entry.unsettled = resolveCLIStorageRoutes(cityPath)
+			if entry.unsettled {
+				entry.expires = time.Now().Add(cliStorageRoutesUnsettledTTL)
+			}
+		})
+	}
+	entry := cliStorageRoutesEntryFor(clean)
+	resolve(entry)
+	if entry.unsettled && !time.Now().Before(entry.expires) {
+		forgetCLIStorageRoutesEntry(clean, entry)
+		entry = cliStorageRoutesEntryFor(clean)
+		resolve(entry)
+	}
 	return entry.routes
+}
+
+// cliStorageRefusalsPrinted holds every refusal this process has already put
+// on stderr, so a re-resolution that reaches the same refusal does not repeat
+// it.
+var (
+	cliStorageRefusalsMu      sync.Mutex
+	cliStorageRefusalsPrinted map[string]bool
+)
+
+// printCLIStorageRefusal writes a refusal to cliStorageStderr once per
+// process (per distinct message).
+func printCLIStorageRefusal(refusal error) {
+	msg := refusal.Error()
+	cliStorageRefusalsMu.Lock()
+	if cliStorageRefusalsPrinted[msg] {
+		cliStorageRefusalsMu.Unlock()
+		return
+	}
+	if cliStorageRefusalsPrinted == nil {
+		cliStorageRefusalsPrinted = make(map[string]bool, 1)
+	}
+	cliStorageRefusalsPrinted[msg] = true
+	cliStorageRefusalsMu.Unlock()
+	fmt.Fprintln(cliStorageStderr, msg) //nolint:errcheck // best-effort stderr
+}
+
+// forgetCLIStorageRoutesEntry drops a memo slot whose unsettled answer has
+// expired — a refusal because city.toml did not load, or because the gate
+// could not read what it needed. The next
+// resolution for the city starts over and reads the config again, so a
+// long-lived process sees the operator's fix instead of the refusal it took
+// while the edit was half-finished. Only the slot this call resolved is
+// dropped: a racing close may already have detached it, and a newer slot is not
+// this call's to forget.
+func forgetCLIStorageRoutesEntry(cityPath string, entry *cliStorageRoutesEntry) {
+	cliStorageRoutesMu.Lock()
+	defer cliStorageRoutesMu.Unlock()
+	if cliStorageRoutesByCity[cityPath] == entry {
+		delete(cliStorageRoutesByCity, cityPath)
+	}
 }
 
 // prewarmCLIStorageRoutes resolves cityPath's routes in the background and
@@ -129,9 +199,10 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 //
 // It must follow a load that ran the builtin readiness pass
 // (ensureBuiltinPacksForConfigLoad), as loadCityConfig does: the routing read's
-// composition needs the builtin pack caches that pass prepares, and a
-// composition that fails reads as a city with no [storage], whose classes all
-// route to the work store.
+// composition needs the builtin pack caches that pass prepares. A composition
+// that fails is retried once after that pass and otherwise refuses every
+// relocatable class (resolveCLIStorageRoutes); it never routes them to the work
+// store.
 func prewarmCLIStorageRoutes(cityPath string) (wait func()) {
 	resolve := cliStorageRoutesPrewarm
 	done := make(chan struct{})
@@ -168,11 +239,22 @@ var cliStorageRoutesLoad = config.LoadOptions{SkipRevisionSnapshot: true}
 // keeps deleting the [storage] section from being a way past every hold the
 // gate has.
 //
-// A config that will not load is treated as a city with no [storage]. By the
-// time a class resolver runs, the command's own load has already failed and
-// reported it; a second complaint from here would be noise, and the alternative
-// — refusing every command on a city whose config cannot be read — takes a city
-// that is merely misconfigured and makes it unusable.
+// A config that will not load is REFUSED unless the city is provably
+// single-store, never silently read as a city with no [storage] (split-default
+// audit R1; see cli_storage_config_failure.go for the evidence rule). Which
+// store a class lives in is exactly what the unreadable file says, so falling
+// back to the work store guesses — and on a split city the guess is wrong in the
+// worst way: reads go silently empty, and writes (a `gc mail send`, a session
+// materialize) strand in the work ledger, where the next boot's containment
+// check refuses the whole city until a fleet-stopped recovery. The refusal
+// covers the relocatable classes only; work beads keep their path, so the
+// city's backlog stays readable while the operator fixes the file. Neither
+// answer is memoized (the second return value): the next resolution reads the
+// config again, so a long-lived process sees the fix.
+//
+// A city.toml that does not exist at all is a different answer: there is no
+// config to have failed, so the absent-section verdict applies, including the
+// served-binding note that holds a city which once served a split.
 //
 // The composition is read straight from config rather than through
 // loadCityConfigWithoutBuiltinPackRefresh, whose extras are wrong for a routing
@@ -180,18 +262,71 @@ var cliStorageRoutesLoad = config.LoadOptions{SkipRevisionSnapshot: true}
 // was handed, and this runs underneath call sites a command may reach with a
 // scope of its own. Reading where the classes live must not be able to change
 // what the command does.
-func resolveCLIStorageRoutes(cityPath string) *storageRoutes {
-	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), cliStorageRoutesLoad)
+func resolveCLIStorageRoutes(cityPath string) (routes *storageRoutes, unsettled bool) {
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, tomlPath, cliStorageRoutesLoad)
+	if err != nil && cityTOMLPresent(tomlPath) {
+		// One retry after the builtin readiness pass, before refusing: a caller
+		// that reached a class resolver without the load that prepares the
+		// builtin pack caches (see prewarmCLIStorageRoutes) must not be refused
+		// for a cache that was merely cold. Only the failure path pays for it.
+		if readyErr := cliStorageRoutesReadyBuiltins(fsys.OSFS{}, tomlPath, io.Discard); readyErr == nil {
+			cfg, _, err = config.LoadWithIncludesOptions(fsys.OSFS{}, tomlPath, cliStorageRoutesLoad)
+		}
+	}
 	if err != nil {
-		return nil
+		if !cityTOMLPresent(tomlPath) {
+			cfg = nil
+		} else {
+			refusal := cityConfigLoadRefusal(cityPath, err)
+			if refusal == nil {
+				// Provably single-store: the work store is where its classes
+				// live, so the identity answer is the right one. Still not
+				// memoized — the repaired config may add a [storage].
+				return nil, true
+			}
+			printCLIStorageRefusal(refusal)
+			return refusingStorageRoutes("", refusal), true
+		}
+	}
+	return resolveCLIStorageRoutesFor(cityPath, cfg)
+}
+
+// cliStorageRoutesReadyBuiltins is the builtin readiness pass the routing read
+// retries its config load after: a seam, so a test can stand in for a cold
+// cache being prepared.
+var cliStorageRoutesReadyBuiltins = ensureBuiltinPacksForConfigLoad
+
+// cityTOMLPresent reports whether the root config file exists. Only a provably
+// absent file counts as absent: a stat that fails any other way is a config
+// that did not load.
+func cityTOMLPresent(tomlPath string) bool {
+	_, err := os.Stat(tomlPath)
+	return !errors.Is(err, fs.ErrNotExist)
+}
+
+// resolveCLIStorageRoutesFor is resolveCLIStorageRoutes once the config has
+// loaded (cfg) or provably does not exist (nil cfg).
+//
+// unsettled is true for a refusal resting on a read the gate could not make
+// (isTransientStorageGateFault): it is not memoized, so the next resolution
+// tries again.
+func resolveCLIStorageRoutesFor(cityPath string, cfg *config.City) (routes *storageRoutes, unsettled bool) {
+	if cfg == nil {
+		routes, err := storageBootGate(cityPath, nil, cliStorageLogPrefix, nil, cliStorageStderr)
+		if err != nil {
+			printCLIStorageRefusal(err)
+			return refusingStorageRoutes("", err), isTransientStorageGateFault(err)
+		}
+		return routes, false
 	}
 	// The worker-site verdict comes first, so a binding the descriptor does not
 	// attach is never opened, and never created, in the box (DES-CN §4.4,
 	// invariant 6). It is a standing refusal: work ids still resolve to work.
 	if refusal := workerSiteStorageRefusal(cityPath, cfg.EffectiveStorage()); refusal != nil {
-		fmt.Fprintln(cliStorageStderr, refusal) //nolint:errcheck // best-effort stderr
+		printCLIStorageRefusal(refusal)
 		_, binding := storageSplitShapeOf(cfg.EffectiveStorage())
-		return refusingStorageRoutes(binding, refusal)
+		return refusingStorageRoutes(binding, refusal), false
 	}
 	routes, err := storageBootGate(cityPath, cfg, cliStorageLogPrefix, nil, cliStorageStderr)
 	if err == nil {
@@ -200,13 +335,13 @@ func resolveCLIStorageRoutes(cityPath string) *storageRoutes {
 		// a relocated class land in a store nothing observes; the controller
 		// resolves its routes through openStorageRoutes, never here, so its
 		// side stays exactly as it was. See class_store_emit.go.
-		return routes.withCLIEmission(cityPath)
+		return routes.withCLIEmission(cityPath), false
 	}
 	// Once, here, rather than at each call site: a command that discards the
 	// store error still has to leave the operator holding the remedy.
-	fmt.Fprintln(cliStorageStderr, err) //nolint:errcheck // best-effort stderr
+	printCLIStorageRefusal(err)
 	_, binding := storageSplitShapeOf(cfg.EffectiveStorage())
-	return refusingStorageRoutes(binding, err)
+	return refusingStorageRoutes(binding, err), isTransientStorageGateFault(err)
 }
 
 // cliStorageRoutesResolved reports whether this process has already entered
@@ -257,6 +392,9 @@ func closeCLIStorageRoutes() error {
 	cliStorageRoutesByCity = nil
 	cliStorageRoutesMu.Unlock()
 	resetCLIResidencyBindings()
+	cliStorageRefusalsMu.Lock()
+	cliStorageRefusalsPrinted = nil
+	cliStorageRefusalsMu.Unlock()
 
 	var errs []error
 	for _, entry := range entries {

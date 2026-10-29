@@ -45,6 +45,9 @@ type opsTestStore struct {
 	mu sync.Mutex
 	// createErr fails op-row creates, writing nothing.
 	createErr error
+	// failCreate, when set, fails each op-row create it reports true for,
+	// writing nothing.
+	failCreate func(beads.Bead) bool
 	// ambiguous commits an op-row create, then answers an error.
 	ambiguous bool
 	// panicAfterCreate commits the next op-row create, then panics (a crash
@@ -69,11 +72,14 @@ func (s *opsTestStore) Create(b beads.Bead) (beads.Bead, error) {
 		return s.MemStore.Create(b)
 	}
 	s.mu.Lock()
-	createErr, ambiguous, panicAfter, onCreate := s.createErr, s.ambiguous, s.panicAfterCreate, s.onOpCreate
+	createErr, failCreate, ambiguous, panicAfter, onCreate := s.createErr, s.failCreate, s.ambiguous, s.panicAfterCreate, s.onOpCreate
 	s.panicAfterCreate, s.onOpCreate = false, nil
 	s.mu.Unlock()
 	if createErr != nil {
 		return beads.Bead{}, createErr
+	}
+	if failCreate != nil && failCreate(b) {
+		return beads.Bead{}, errors.New("transport: create failed")
 	}
 	created, err := s.MemStore.Create(b)
 	if err != nil {
@@ -1735,6 +1741,64 @@ func TestSessionContentOpsDefaultAutoIsQuietOnAnIncapableStore(t *testing.T) {
 			}
 			if got := logs.logged(); !slices.Equal(got, []slog.Level{c.level}) {
 				t.Fatalf("degrade log levels = %v, want [%v]", got, c.level)
+			}
+		})
+	}
+}
+
+// The builtin auto default records only over a SQLite sessions store. A
+// store that can record ops but is not SQLite-backed (here a capable memory
+// store; in production a Dolt-served one) runs the request unrecorded and
+// quietly, as if the gate were off; an explicit auto records over it, and the
+// default records over a SQLite store.
+func TestSessionContentOpsDefaultAutoRecordsOnlyOnSQLite(t *testing.T) {
+	openSQLite := func(t *testing.T) beads.Store {
+		st, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gc"))
+		if err != nil {
+			t.Fatalf("OpenSQLiteStore: %v", err)
+		}
+		t.Cleanup(func() { _ = st.(interface{ CloseStore() error }).CloseStore() })
+		return st
+	}
+	for _, c := range []struct {
+		name   string
+		mode   string
+		sqlite bool
+		record bool
+	}{
+		{name: "default over a capable non-SQLite store", mode: "", record: false},
+		{name: "explicit auto over a capable non-SQLite store", mode: "auto", record: true},
+		{name: "default over SQLite", mode: "", sqlite: true, record: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newOpsEnv(t, c.mode)
+			if c.sqlite {
+				e.fs.cityBeadStore = openSQLite(t)
+				e.restart(t)
+			}
+			logs := &opsLogHandler{}
+			e.server(t).ops.content.Logger = slog.New(logs)
+			info := e.session(t, "Default")
+			rec := e.post(t, "/session/"+info.ID+"/submit", "", `{"message":"x"}`)
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+			}
+			acc := decodeAsyncAccepted(t, rec.Body)
+			if got := acc.Op != nil; got != c.record {
+				t.Fatalf("recorded = %v (op %+v), want %v", got, acc.Op, c.record)
+			}
+			waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
+			evs, _ := e.fs.eventProv.List(events.Filter{Type: events.OpsRecordingDegraded})
+			if len(evs) != 0 {
+				t.Fatalf("degrade events = %d, want 0", len(evs))
+			}
+			for _, level := range logs.logged() {
+				if level > slog.LevelDebug {
+					t.Fatalf("degrade log levels = %v, want debug at most", logs.logged())
+				}
+			}
+			if !c.record && !c.sqlite && e.store.creates.Load() != 0 {
+				t.Fatalf("the default wrote %d op rows over a non-SQLite store", e.store.creates.Load())
 			}
 		})
 	}

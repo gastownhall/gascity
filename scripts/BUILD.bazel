@@ -79,6 +79,7 @@ go_test(
         "acceptance_run_selection_test.go",
         "acceptance_shards_test.go",
         "add_testenv_import_test.go",
+        "advisory_probes_workflow_test.go",
         "bazel_bep_summary_workflow_test.go",
         "bazel_callers_permissions_test.go",
         "bazel_fork_cache_test.go",

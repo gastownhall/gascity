@@ -384,6 +384,17 @@ var bootstrapPolicy = Ledger{
 		{
 			PackageDir:      "scripts",
 			PackageName:     "scripts_test",
+			Owner:           "TestBazelLaneWorkerEnvStepStaleBase",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the bazel lane worker-env stale-base proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the git and bash subprocesses are confined to TestBazelLaneWorkerEnvStepStaleBase (ga-s9mdfm), which exists to run bazel.yml's lane worker-env preflight step itself against a scratch git origin whose main re-pins after the run chose its base (a stale base, a moved pin, a re-pinning PR, a lane that is not remote, no base-sha): the step is git plumbing feeding tools/rbe/worker-env-drift, so only real git and a real shell can prove a stale base fails a remote lane instead of skipping bazel green",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
 			Owner:           "TestBazelNightlyFreshDecision",
 			Resources:       []Resource{ResourceSubprocess},
 			OwnerBead:       "ga-cp3hwi",

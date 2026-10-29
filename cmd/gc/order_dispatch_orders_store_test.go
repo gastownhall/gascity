@@ -285,7 +285,7 @@ func TestOrderDispatchGateReadsTheBindingAloneOnASplitCity(t *testing.T) {
 		t.Fatalf("ordersStoreFor = %T(%p), want the binding %p; the tracking bead's own store is not in the gate's reach", got, got, binding)
 	}
 
-	storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, workStore, "city\x00"+cityPath, nil)
+	storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, workStore, "city\x00"+cityPath, nil, nil)
 	if !storeListContains(storesForGate, beads.Store(binding)) {
 		t.Fatalf("gate store list = %+v, missing the binding the tracking bead lives in; the marker the dispatch just wrote is invisible and the order re-fires every tick", storesForGate)
 	}
@@ -318,7 +318,7 @@ func TestOrderDispatchGateStaysOnTheOneStoreOnSingleStoreCity(t *testing.T) {
 		dispatchCtx:    dispatchCtx,
 		dispatchCancel: cancel,
 	}
-	storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, store, "city\x00"+cityPath, nil)
+	storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, store, "city\x00"+cityPath, nil, nil)
 	if len(storesForGate) != 1 || storesForGate[0] != beads.Store(store) {
 		t.Fatalf("gate store list = %+v, want exactly the one store the city has", storesForGate)
 	}

@@ -838,6 +838,7 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 		queryPrefix += ` GC_CONTROL_BARE_TARGET=` + shellquote.Quote(bare)
 	}
 	query := queryPrefix + ` sh -c '` +
+		ambientDoltConnectionQueryGuard() +
 		`set -e; ` +
 		`tmp=$(mktemp); seen="$tmp.seen"; err="$tmp.err"; : > "$seen"; trap "rm -f \"$tmp\" \"$seen\" \"$err\"" EXIT; ` +
 		`emit_ready() { r=$("$@" 2>"$err") || { status=$?; [ -n "$r" ] && printf "%s\n" "$r" >&2; cat "$err" >&2; return "$status"; }; [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; return 0; }; ` +
@@ -864,38 +865,60 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 
 // ambientDoltConnectionQueryPrefix returns a shell-prefix env fragment
 // (leading space + "KEY=value" pairs, or "") carrying the CURRENT process's
-// Dolt connection coordinates under both the GC_DOLT_* and BEADS_DOLT_SERVER_*
-// names bd recognizes.
+// Dolt connection coordinates under the private GC_AMBIENT_DOLT_* names.
 //
-// Without this, the ready-query subprocess env is built by stripping the
-// parent's inherited Dolt vars and re-projecting them from a freshly resolved
-// scope lookup (mergeRuntimeEnv + controllerWorkQueryEnv). That resolution
-// runs its own managed-runtime-availability probe and can transiently come
-// back without a port, silently dropping GC_DOLT_PORT/BEADS_DOLT_SERVER_PORT
-// from the subprocess env and causing `bd --sandbox` to resolve port 0
-// ("Dolt server unreachable at 127.0.0.1:0") — the recurring fleet-wide
-// graph.v2 wedge (gascity gc-74rxa). The running control-dispatcher process's
-// own environment already carries the connection coordinates it was spawned
-// with, so pass them through explicitly as a shell-prefix assignment (which
-// takes effect for the inner `sh -c` and its `bd` children regardless of what
-// the outer subprocess's cmd.Env resolved to) rather than depending on that
-// re-resolution succeeding on every poll.
+// The ready-query subprocess env is built by stripping the parent's inherited
+// Dolt vars and re-projecting them from a freshly resolved scope lookup
+// (mergeRuntimeEnv + controllerWorkQueryEnv). That resolution runs its own
+// managed-runtime-availability probe and can transiently come back without a
+// port, silently dropping GC_DOLT_PORT/BEADS_DOLT_SERVER_PORT from the
+// subprocess env and causing `bd --sandbox` to resolve port 0 ("Dolt server
+// unreachable at 127.0.0.1:0") — the recurring fleet-wide graph.v2 wedge
+// (gascity gc-74rxa). The running control-dispatcher process's own
+// environment already carries the connection coordinates it was spawned with,
+// so they travel through under private names and
+// ambientDoltConnectionQueryGuard re-asserts them under the GC_DOLT_* and
+// BEADS_DOLT_SERVER_* names bd recognizes — but only when the per-poll env
+// resolved no target itself, so a freshly resolved per-poll port (including
+// one a managed Dolt restart moved to) always wins over the spawn-time pair.
 func ambientDoltConnectionQueryPrefix() string {
 	host, port := ambientDoltHostPort()
 	var pairs []string
 	if host != "" {
-		quotedHost := shellquote.Quote(host)
-		pairs = append(pairs, `GC_DOLT_HOST=`+quotedHost, `BEADS_DOLT_SERVER_HOST=`+quotedHost)
+		pairs = append(pairs, `GC_AMBIENT_DOLT_HOST=`+shellquote.Quote(host))
 	}
 	if port != "" {
-		quotedPort := shellquote.Quote(port)
-		pairs = append(pairs, `GC_DOLT_PORT=`+quotedPort, `BEADS_DOLT_SERVER_PORT=`+quotedPort)
+		pairs = append(pairs, `GC_AMBIENT_DOLT_PORT=`+shellquote.Quote(port))
 	}
 	if len(pairs) == 0 {
 		workflowTracef("ambient dolt env unset; ready-query passthrough disabled")
 		return ""
 	}
 	return " " + strings.Join(pairs, " ")
+}
+
+// ambientDoltConnectionQueryGuard returns the POSIX sh fragment that promotes
+// the private GC_AMBIENT_DOLT_* pair into the public GC_DOLT_* and
+// BEADS_DOLT_SERVER_* names bd reads, but only when the per-poll env carries
+// no Dolt target of its own (no port under either name and no socket). It is
+// placed at the head of the ready query's `sh -c` script, ahead of its
+// `set -e`, and returns "" when the dispatcher process has no ambient pair,
+// leaving the passthrough disabled.
+func ambientDoltConnectionQueryGuard() string {
+	host, port := ambientDoltHostPort()
+	if host == "" && port == "" {
+		return ""
+	}
+	var guard strings.Builder
+	guard.WriteString(`if [ -z "${GC_DOLT_PORT:-}${BEADS_DOLT_SERVER_PORT:-}${BEADS_DOLT_SERVER_SOCKET:-}" ]; then `)
+	if host != "" {
+		guard.WriteString(`if [ -n "${GC_AMBIENT_DOLT_HOST:-}" ]; then export GC_DOLT_HOST="$GC_AMBIENT_DOLT_HOST" BEADS_DOLT_SERVER_HOST="$GC_AMBIENT_DOLT_HOST"; fi; `)
+	}
+	if port != "" {
+		guard.WriteString(`if [ -n "${GC_AMBIENT_DOLT_PORT:-}" ]; then export GC_DOLT_PORT="$GC_AMBIENT_DOLT_PORT" BEADS_DOLT_SERVER_PORT="$GC_AMBIENT_DOLT_PORT"; fi; `)
+	}
+	guard.WriteString(`fi; `)
+	return guard.String()
 }
 
 // ambientDoltHostPort resolves the ambient Dolt host and port as a matched

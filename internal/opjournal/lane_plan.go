@@ -143,8 +143,14 @@ func (rp *rulesPlan) waitOpDetail(op Op, r WaitReason, detail string, until time
 }
 
 // closeOp closes read, the op as read (its revision guards the write), from
-// cur, the op with any bookkeeping the rules record.
+// cur, the op with any bookkeeping the rules record. A stale close of an op
+// whose scope the incarnation has moved past, the scope rule's, records that
+// incarnation (FencedOff): an op closed so never ran, unlike one the
+// executor found nothing to do for.
 func (rp *rulesPlan) closeOp(read, cur Op, o Outcome) {
+	if o.Arm == ArmSkipped && o.Reason == ReasonStale && scopeCmp(read.Scope, rp.inc) < 0 {
+		o.Result = Result{Generation: rp.inc.gen, ContextEpoch: rp.inc.epoch}
+	}
 	rp.closes = append(rp.closes, ruleClose{cur: read, next: closedAt(cur, o, rp.by, rp.now)})
 }
 
@@ -520,6 +526,10 @@ type takePlan struct {
 	// unitBlocked are the open units (by message id) that wait on the
 	// probe's content block this pass.
 	unitBlocked map[string]bool
+	// controlLeft says a content-only pass (Caps.ContentOnly) left a
+	// takeable control op to a lane host that runs control: content waits
+	// behind it.
+	controlLeft bool
 }
 
 // takeSpec is the batch a Take writes.
@@ -592,7 +602,7 @@ func planTake(rp rulesPlan, probe Probe, conv ConversationView, now time.Time) (
 	var content *contentBatch
 	unitOpen := slices.ContainsFunc(rp.openUnits, func(id string) bool { return !tp.unitBlocked[id] })
 	held := false
-	if unitOpen {
+	if unitOpen || tp.controlLeft {
 		for _, e := range rp.content {
 			if e.candidate() {
 				tp.wait(e.op, WaitBlocked, "")
@@ -687,7 +697,8 @@ func (tp *takePlan) close(rp rulesPlan, e entry, o Outcome, now time.Time) {
 
 // planControl picks the first takeable control op (I10), closing a respond
 // the runtime cannot perform. Control takes one op, or one deliver-now unit
-// (planUnit), whose path it returns.
+// (planUnit), whose path it returns. Under Caps.ContentOnly it takes none:
+// each takeable control op waits not_live (controlLeft).
 func (tp *takePlan) planControl(rp rulesPlan, probe Probe, now time.Time) (*entry, nowPath) {
 	var picked *entry
 	var path nowPath
@@ -712,6 +723,11 @@ func (tp *takePlan) planControl(rp rulesPlan, probe Probe, now time.Time) (*entr
 			// Its occurrence ended (another answer, or a look that saw its
 			// prompt gone): whatever the runtime shows, it answers nothing.
 			tp.close(rp, e, Outcome{Arm: ArmSkipped, Reason: ReasonStale}, now)
+		case probe.Caps.ContentOnly:
+			// This host runs no control: the op waits for one that does,
+			// and content waits behind it (I10).
+			tp.wait(e.op, WaitNotLive, "")
+			tp.controlLeft = true
 		case !probe.Caps.Live:
 			tp.wait(e.op, WaitNotLive, "")
 		case !probe.Running:
@@ -846,6 +862,11 @@ func (tp *takePlan) planContent(rp rulesPlan, probe Probe, now time.Time) *conte
 	batch := tp.formBatch(items, mode, inBand, rp.baseSeq, caps, rp.groups)
 	if batch != nil {
 		tp.busy = false
+	}
+	// A busy boundary that names its deadline wakes the pass there; a
+	// deadline at or before now is stale, and the host's backoff finds it.
+	if tp.busy && boundary == TriNo && probe.BoundaryAt.After(now) {
+		tp.next = minTime(tp.next, probe.BoundaryAt)
 	}
 	return batch
 }

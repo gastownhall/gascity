@@ -60,13 +60,17 @@ func splitStrictWorkViews(stores map[string]beads.Store) map[string]beads.Store 
 // completion reconcile): an id in a reserved class namespace is the class
 // binding's, as the routes would place it on a split city, and every other id
 // the work side's. A relic id (a pre-split infrastructure row under the city
-// or a rig prefix) therefore routes to the work view, and its autoclose's read
-// of a binding-resident parent is charged to its call site. The cache
-// application keeps the raw stores; this is identity in production.
+// or a rig prefix) therefore routes to the work view, and its read of a
+// binding-resident row is charged to its call site, unless the residence
+// probe proved the binding (relic) holds it: that store is a class store and
+// gets the class view. The relic returned is the same view, so owner
+// comparisons (sameBeadStore) still match. The cache application keeps the
+// raw stores; this is identity in production.
+//
 // residency:allow — a test-gate projection of the caller's own routed stores (one view per store, same order); it plans and opens nothing and is identity in production.
-func splitStrictEventStores(id string, stores []beads.Store) []beads.Store {
+func splitStrictEventStores(id string, stores []beads.Store, relic beads.Store) ([]beads.Store, beads.Store) {
 	if splitStrictSeam == nil || len(stores) == 0 {
-		return stores
+		return stores, relic
 	}
 	classID := false
 	for _, class := range infraMigrationClasses {
@@ -76,13 +80,20 @@ func splitStrictEventStores(id string, stores []beads.Store) []beads.Store {
 			}
 		}
 	}
+	var relicView beads.Store
+	if relic != nil {
+		relicView = splitStrictClassView(relic)
+	}
 	out := make([]beads.Store, len(stores))
 	for i, store := range stores {
-		if classID {
+		switch {
+		case relic != nil && sameBeadStore(store, relic):
+			out[i] = relicView
+		case classID:
 			out[i] = splitStrictClassView(store)
-		} else {
+		default:
 			out[i] = splitStrictWorkView(store)
 		}
 	}
-	return out
+	return out, relicView
 }

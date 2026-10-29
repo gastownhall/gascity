@@ -786,7 +786,7 @@ func sessionHasProviderTerminalErrorInfo(info sessionpkg.Info) bool {
 // keyed transcript qualifies; everything else (no key, no work dir, provider we
 // cannot probe, transcript gone) returns false, and the wake failure resets
 // the conversation unless recordWakeFailure retains a committed manual one
-// (SESSION-LIFE-MANUAL-LOSS). searchPaths is sessionTranscriptSearchPaths.
+// (SESSION-LIFE-MANUAL-LOSS). searchPaths is launchTranscriptRoots.
 func wakeFailureKeepsConversation(info sessionpkg.Info, searchPaths []string) bool {
 	sessionKey := strings.TrimSpace(info.SessionKey)
 	workDir := strings.TrimSpace(info.WorkDir)
@@ -1554,7 +1554,11 @@ func topoOrderRows(rows []sessionpkg.ReconcileSession, deps map[string][]string)
 // knownSessionStates is the set of bead metadata "state" values that the
 // current reconciler understands. Beads with unrecognized states are skipped
 // during reconciliation to allow forward-compatible rollback from newer
-// versions that add states like "draining" or "archived".
+// versions that add states, and to leave this binary's own archived and
+// draining rows alone. This binary's own close codes are not listed: a row
+// that still carries one is an interrupted close, which the reconciler
+// finishes, or rolls back, before the skip (interruptedCloseGate,
+// finishInterruptedClose).
 var knownSessionStates = map[string]bool{
 	"active":                             true,
 	"asleep":                             true,

@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/poolplan"
+	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
@@ -625,7 +626,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 	// rewrites gc.routed_to on open ready work, so it uses its own cache; the
 	// scale-check and named-session probes read after those writes and share a
 	// second cache created below. See readyDemandCache.
-	assignedReadyCache := newTracedReadyDemandCache(pass, demandReadPointAssigned)
+	assignedReadyCache := newTracedReadyDemandCache(pass, demandReadPointAssigned).withCrossStoreGate(cityPath, cfg, store, rigStores, suspendedRigPaths)
 	if store != nil {
 		subPhaseStart = trace.demandNow()
 		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned, storePartial = collectAssignedWorkBeadsWithStores(cityPath, cfg, store, rigStores, suspendedRigPaths, sessionBeads, assignedReadyCache)
@@ -718,7 +719,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 		// pre-rewrite legacy routes and miss the canonical cold pool, because
 		// an explicit-handle CachingStore returns its memoized pre-write live
 		// snapshot as the authoritative demand read.
-		demandReadyCache := newTracedReadyDemandCache(pass, demandReadPointDemand)
+		demandReadyCache := newTracedReadyDemandCache(pass, demandReadPointDemand).withCrossStoreGate(cityPath, cfg, store, rigStores, suspendedRigPaths)
 		recordDemandSubPhase(trace, "demand_snapshot.collect_unassigned_routed", subPhaseStart, map[string]any{
 			"beads": len(unassignedRoutedBeads),
 		})
@@ -3015,6 +3016,54 @@ type readyDemandCache struct {
 	// serves (recordDemandStoreRead). A nil pass records nothing.
 	pass  *demandPassTrace
 	point string
+	// gateLegs are a split city's ready legs, set by withCrossStoreGate. When
+	// set, every ready snapshot is passed through the same cross-store rule
+	// `gc ready` applies (gate), so the demand the controller counts and the
+	// work a seat is served agree row for row. Nil on a city with no class
+	// binding, whose snapshots are the stores' own answer.
+	gateLegs []readywork.Leg
+	// gate is that rule over gateLegs for this cache's one read point. It
+	// keeps every blocker verdict, judged row and absent-blocker listing it
+	// reads, so a blocker is read once per read point rather than once per
+	// gated snapshot (a store's live and cached snapshots are both gated).
+	gate *readywork.LegGate
+}
+
+// withCrossStoreGate arms the cache with the city's ready legs when the city
+// is split (crossStoreGateLegs), and returns it. A city that relocates nothing
+// (or one whose topology cannot be planned, which its readers report
+// themselves) is left ungated. Only a pass that may read remotely arms it:
+// the v2 gather serves snapshots the external-reads lane already gated
+// (gatherDemand).
+func (c *readyDemandCache) withCrossStoreGate(cityPath string, cfg *config.City, cityStore beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool) *readyDemandCache {
+	if c == nil {
+		return c
+	}
+	return c.withGateLegs(crossStoreGateLegs(cityPath, cfg, cityStore, rigStores, suspendedRigPaths))
+}
+
+// withGateLegs arms the cache with legs, a split city's gate legs, and returns
+// it; nil legs leave it ungated.
+func (c *readyDemandCache) withGateLegs(legs []readywork.Leg) *readyDemandCache {
+	if c == nil || legs == nil {
+		return c
+	}
+	c.gateLegs = legs
+	c.gate = readywork.NewLegGate(legs, beads.ReadyQuery{TierMode: beads.TierBoth})
+	return c
+}
+
+// gateSnapshot applies the cross-store rule to one store's ready snapshot,
+// waiting at most crossStoreGateDeadline (gateReadyRows). A store that is not
+// one of the legs is left as read. A gate that cannot be evaluated in time
+// keeps the ungated rows and reports a partial result: demand must never be
+// under-counted from a read hiccup (see readyDemandCache).
+func (c *readyDemandCache) gateSnapshot(store beads.Store, rows []beads.Bead, err error) ([]beads.Bead, error) {
+	if c == nil || len(c.gateLegs) == 0 {
+		return rows, err
+	}
+	gated, gateErr := gateReadyRows(c.gate, crossStoreGateLeg(c.gateLegs, store), rows, err, crossStoreGateDeadline)
+	return gated, joinGateErr(err, gateErr)
 }
 
 type readyDemandEntry struct {
@@ -3081,6 +3130,7 @@ func (c *readyDemandCache) liveSnapshot(store beads.Store, leg string) ([]beads.
 		start := c.pass.now()
 		e.rows, e.err = c.demandReads().ReadyAll(store)
 		c.pass.read(demandStoreRead{point: c.point, leg: leg, op: "ready", tier: demandReadTierLive}, start, len(e.rows), e.err)
+		e.rows, e.err = c.gateSnapshot(store, e.rows, e.err)
 	})
 	return e.rows, e.err
 }
@@ -3094,6 +3144,7 @@ func (c *readyDemandCache) cachedSnapshot(store beads.Store, leg string) ([]bead
 		start := c.pass.now()
 		e.rows, e.err = c.demandReads().CachedReady(store)
 		c.pass.read(demandStoreRead{point: c.point, leg: leg, op: "ready", tier: demandReadTierCached}, start, len(e.rows), e.err)
+		e.rows, e.err = c.gateSnapshot(store, e.rows, e.err)
 	})
 	return e.rows, e.err
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
@@ -215,18 +216,13 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	var rawRunning int
 	agentDetails := make([]StatusAgentDetail, 0, len(cfg.Agents))
 	suspendedRigs := make(map[string]bool, len(cfg.Rigs))
-	// cacheColdRigs mirrors the controller's per-rig cache refresh gate
-	// (rigStoreBackgroundRefresh): a rig suspended by EFFECTIVE state gets no
-	// cache at all, and status does not read its store (statusWorkCounts). It is deliberately not
-	// the same set as suspendedRigs, which grows below to include rigs merely
-	// inferred suspended because every one of their agents is — those keep a
-	// refreshing cache and must still be asked for ready work.
-	cacheColdRigs := make(map[string]bool, len(cfg.Rigs))
-	for _, r := range cfg.Rigs {
-		if suspensionstate.EffectiveRigSuspended(citySt, r.Name, r.EffectiveSuspendedOnStart()) {
-			suspendedRigs[r.Name] = true
-			cacheColdRigs[r.Name] = true
-		}
+	// cacheColdRigs is deliberately not the same set as suspendedRigs, which
+	// grows below to include rigs merely inferred suspended because every one
+	// of their agents is — those keep a refreshing cache and must still be
+	// asked for ready work.
+	cacheColdRigs := cacheColdRigNames(cfg, citySt)
+	for name := range cacheColdRigs {
+		suspendedRigs[name] = true
 	}
 	perRigAgentTotals := make(map[string]int, len(cfg.Rigs))
 	perRigAgentsSuspended := make(map[string]int, len(cfg.Rigs))
@@ -554,6 +550,64 @@ type statusSessionInfo struct {
 	state       session.State
 }
 
+// cacheColdRigNames returns the rigs suspended by effective state. It mirrors
+// the controller's per-rig cache refresh gate (rigStoreBackgroundRefresh): such
+// a rig gets no cache at all, so any read of its store goes to bd and restarts
+// the rig's retired proxy and Dolt. gc leaves a suspended scope untouched, so
+// neither status (statusWorkCounts) nor the active-bead lookup reads these
+// stores. The map is never nil.
+func cacheColdRigNames(cfg *config.City, st suspensionstate.State) map[string]bool {
+	cold := make(map[string]bool)
+	if cfg == nil {
+		return cold
+	}
+	for _, r := range cfg.Rigs {
+		if suspensionstate.EffectiveRigSuspended(st, r.Name, r.EffectiveSuspendedOnStart()) {
+			cold[r.Name] = true
+		}
+	}
+	return cold
+}
+
+// loadCacheColdRigs reads the runtime suspension state and returns
+// cacheColdRigNames for the current config. An unreadable state file is
+// treated as no runtime overrides, so the config's startup defaults still
+// decide, as they do for the controller. It is logged once, naming the file,
+// until it reads again or fails differently (suspensionStateFaultChanged).
+// Without a city path there is no state file to read.
+func (s *Server) loadCacheColdRigs() map[string]bool {
+	cfg := s.state.Config()
+	cityPath := s.state.CityPath()
+	if cityPath == "" {
+		return cacheColdRigNames(cfg, suspensionstate.State{})
+	}
+	st, err := suspensionstate.Load(fsys.OSFS{}, cityPath)
+	if newFault := s.suspensionStateFaultChanged(err); err != nil {
+		if newFault {
+			log.Printf("api: reading suspension state %s: %v; applying the config's suspension defaults", citylayout.SuspensionStateFile(cityPath), err)
+		}
+		st = suspensionstate.State{}
+	}
+	return cacheColdRigNames(cfg, st)
+}
+
+// suspensionStateFaultChanged records err, nil once the state file reads
+// again, as the current suspension-state read fault and reports whether it
+// differs from the one recorded before. Every active-bead lookup loads the
+// file, once per row of a list, so a persistent fault is logged once rather
+// than on every row of every poll.
+func (s *Server) suspensionStateFaultChanged(err error) bool {
+	fault := ""
+	if err != nil {
+		fault = err.Error()
+	}
+	s.suspensionStateFaultMu.Lock()
+	defer s.suspensionStateFaultMu.Unlock()
+	changed := fault != s.suspensionStateFault
+	s.suspensionStateFault = fault
+	return changed
+}
+
 // citySessionSnapshot reads the session snapshot (statusSessionSnapshot)
 // unless the city is suspended, and returns the city's suspension state with
 // whether it is in effect. A suspended city's snapshot is empty and reads no
@@ -703,13 +757,15 @@ type statusWorkResult struct {
 // when its cache is clean (#1896). Stores are queried concurrently; results
 // aggregate in deterministic city/rig order.
 //
-// NOT identical to GET /beads/ready on a split city: that handler grew a
-// relocated-graph-store leg (huma_handlers_beads.go) and this one has none, so
-// on a city with [beads.classes.graph] relocated the status ready count omits
-// graph-class ready work while /beads/ready includes it. Left divergent
-// deliberately rather than fixed here: this read is cache-only and error-lenient
-// by design (see cacheColdRigs below), which is the opposite of the graph leg's
-// fail-loud contract, so wiring one in is its own slice, not a rider.
+// On a split city the graph binding is one more READY leg, as it is for GET
+// /beads/ready (huma_handlers_beads.go): without it the status Ready count
+// omitted every graph-class ready step that /beads/ready served (read-audit
+// R12). It is read the way every other leg here is — cache-only through the
+// binding's CachingStore, error-lenient (a failure is a partial error, not a
+// failed status) — and its stored open/in-progress rows are not added, because
+// a city that relocates nothing never counted those either: its counts come
+// from the work stores. A city whose graph class is not relocated has no such
+// leg, so its counts are unchanged.
 //
 // Rigs in cacheColdRigs (suspended rigs) are not asked at all. Their store
 // runs no cache, so every read would go to bd, and a bd read restarts a
@@ -750,6 +806,10 @@ func (s *Server) statusWorkCounts(ctx context.Context, cacheColdRigs map[string]
 			includeStored: true,
 			includeReady:  rigName != cityName,
 		})
+	}
+
+	if graph := s.state.GraphBeadStore().Store; graph != nil && !slices.ContainsFunc(queries, func(q workQuery) bool { return q.store == graph }) {
+		queries = append(queries, workQuery{label: "graph", store: graph, includeReady: true})
 	}
 
 	results := make([]statusWorkResult, len(queries))

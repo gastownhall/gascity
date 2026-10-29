@@ -1,11 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 
@@ -154,6 +156,20 @@ type stepResolution struct {
 	work  activeStepReader
 	graph activeStepReader
 	logf  func(format string, args ...any)
+	// molecules are the readers a molecule root and its steps are looked up
+	// in, in order: the graph store, then — when the two are distinct stores —
+	// the work store, because a v1 POURED molecule is work class and lives on
+	// the work ledger. activeStep sets it; nil means the graph store alone.
+	molecules []activeStepReader
+}
+
+// moleculeReaders returns the readers a molecule root and its steps may live
+// in (see stepResolution.molecules).
+func (r stepResolution) moleculeReaders() []activeStepReader {
+	if len(r.molecules) > 0 {
+		return r.molecules
+	}
+	return []activeStepReader{r.graph}
 }
 
 // activeStep is resolveActiveWispStep over r. oneStore says whether the work
@@ -161,6 +177,10 @@ type stepResolution struct {
 // in-progress question; it is decided by the caller, which holds the stores
 // themselves rather than readers over them.
 func (r stepResolution) activeStep(oneStore bool, assignees []string) (*beads.Bead, error) {
+	r.molecules = []activeStepReader{r.graph}
+	if !oneStore && r.work != nil {
+		r.molecules = append(r.molecules, r.work)
+	}
 	// One store holding both classes answers every "what is in progress for
 	// these identities" question below from one listing; split classes ask
 	// each store their own.
@@ -175,9 +195,10 @@ func (r stepResolution) activeStep(oneStore bool, assignees []string) (*beads.Be
 
 	var molecule *beads.Bead
 	var err error
+	molReader := r.graph
 	if claimed != nil {
 		molecule = claimed.activeMolecule(r.logf)
-	} else if molecule, err = r.activeMolecule(assignees); err != nil {
+	} else if molecule, molReader, err = r.activeMoleculeIn(assignees); err != nil {
 		return nil, err
 	}
 	if molecule == nil {
@@ -187,16 +208,17 @@ func (r stepResolution) activeStep(oneStore bool, assignees []string) (*beads.Be
 		// legacy description fallback. Best-effort: a resolution error or no
 		// bridge drops to legacy.
 		var root *beads.Bead
+		var rootReader activeStepReader
 		if claimed != nil {
-			root = r.firstMoleculeRootFrom(claimed.newest(claimedBridgeSample))
+			root, rootReader = r.firstMoleculeRootIn(claimed.newest(claimedBridgeSample))
 			if root == nil {
-				root = r.rootViaRoutedBridge(assignees)
+				root, rootReader = r.rootViaRoutedBridgeIn(assignees)
 			}
 		} else {
-			root = r.rootViaBridge(assignees)
+			root, rootReader = r.rootViaBridgeIn(assignees)
 		}
 		if root != nil {
-			step, stepErr := r.inProgressStepChild(root.ID)
+			step, stepErr := r.inProgressStepChildIn(rootReader, root.ID)
 			if stepErr != nil {
 				r.logf("wisp step inject: error resolving in-progress step for bridged molecule %s: %v", root.ID, stepErr)
 				return nil, nil
@@ -204,7 +226,7 @@ func (r stepResolution) activeStep(oneStore bool, assignees []string) (*beads.Be
 			if step != nil {
 				return step, nil
 			}
-			return r.entryStepChild(root.ID)
+			return r.entryStepChildIn(rootReader, root.ID)
 		}
 		// No molecule bridge; fall back to legacy: any in-progress bead with a description.
 		if claimed != nil {
@@ -214,7 +236,7 @@ func (r stepResolution) activeStep(oneStore bool, assignees []string) (*beads.Be
 	}
 
 	// Prefer the in-progress step child (the agent is mid-step).
-	step, err := r.inProgressStepChild(molecule.ID)
+	step, err := r.inProgressStepChildIn(molReader, molecule.ID)
 	if err != nil {
 		r.logf("wisp step inject: error resolving in-progress step children for molecule %s: %v", molecule.ID, err)
 		return nil, nil
@@ -225,7 +247,7 @@ func (r stepResolution) activeStep(oneStore bool, assignees []string) (*beads.Be
 
 	// Fall back to the entry step: first open step child.
 	r.logf("wisp step inject: no in-progress step for molecule %s; resolving entry step", molecule.ID)
-	return r.entryStepChild(molecule.ID)
+	return r.entryStepChildIn(molReader, molecule.ID)
 }
 
 // Sample sizes of the step-reminder resolution: each question looks at the
@@ -309,23 +331,49 @@ func sameStoreHandle(a, b beads.Store) bool {
 // order, newest first, so which five are compared does not depend on the
 // store's default listing order. Returns nil, nil when none is found.
 func (r stepResolution) activeMolecule(assignees []string) (*beads.Bead, error) {
+	b, _, err := r.activeMoleculeIn(assignees)
+	return b, err
+}
+
+// activeMoleculeIn is activeMolecule across every molecule reader, returning
+// the reader that holds the molecule it picked. The sample per type is the
+// newest activeMoleculeSample roots across the readers.
+func (r stepResolution) activeMoleculeIn(assignees []string) (*beads.Bead, activeStepReader, error) {
+	readers := r.moleculeReaders()
 	for _, molType := range activeMoleculeTypes {
-		results, err := r.graph.List(beads.ListQuery{
-			Status:    "in_progress",
-			Type:      molType,
-			Assignees: assignees,
-			TierMode:  beads.TierBoth,
-			Limit:     activeMoleculeSample,
-			Sort:      beads.SortCreatedDesc,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("listing in-progress %s beads: %w", molType, err)
+		var sample []beads.Bead
+		owner := map[string]activeStepReader{}
+		for _, reader := range readers {
+			results, err := reader.List(beads.ListQuery{
+				Status:    "in_progress",
+				Type:      molType,
+				Assignees: assignees,
+				TierMode:  beads.TierBoth,
+				Limit:     activeMoleculeSample,
+				Sort:      beads.SortCreatedDesc,
+			})
+			if err != nil {
+				return nil, nil, fmt.Errorf("listing in-progress %s beads: %w", molType, err)
+			}
+			for _, b := range results {
+				if _, dup := owner[b.ID]; dup {
+					continue
+				}
+				owner[b.ID] = reader
+				sample = append(sample, b)
+			}
 		}
-		if best := mostRecentlyUpdatedMolecule(results, molType, r.logf); best != nil {
-			return best, nil
+		if len(readers) > 1 {
+			sort.SliceStable(sample, func(i, j int) bool { return sample[i].CreatedAt.After(sample[j].CreatedAt) })
+			if len(sample) > activeMoleculeSample {
+				sample = sample[:activeMoleculeSample]
+			}
+		}
+		if best := mostRecentlyUpdatedMolecule(sample, molType, r.logf); best != nil {
+			return best, owner[best.ID], nil
 		}
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 // mostRecentlyUpdatedMolecule returns the most recently updated of the sampled
@@ -369,6 +417,12 @@ func mostRecentlyUpdatedMolecule(results []beads.Bead, molType string, logf func
 // The ten candidates are the newest claimed work, cut in created order so the
 // sample does not depend on the store's default listing order.
 func (r stepResolution) rootViaBridge(assignees []string) *beads.Bead {
+	root, _ := r.rootViaBridgeIn(assignees)
+	return root
+}
+
+// rootViaBridgeIn is rootViaBridge returning the reader that holds the root.
+func (r stepResolution) rootViaBridgeIn(assignees []string) (*beads.Bead, activeStepReader) {
 	results, err := r.work.List(beads.ListQuery{
 		Status:    "in_progress",
 		Assignees: assignees,
@@ -377,11 +431,11 @@ func (r stepResolution) rootViaBridge(assignees []string) *beads.Bead {
 		Sort:      beads.SortCreatedDesc,
 	})
 	if err == nil {
-		if root := r.firstMoleculeRootFrom(results); root != nil {
-			return root
+		if root, reader := r.firstMoleculeRootIn(results); root != nil {
+			return root, reader
 		}
 	}
-	return r.rootViaRoutedBridge(assignees)
+	return r.rootViaRoutedBridgeIn(assignees)
 }
 
 // rootViaRoutedBridge finds the molecule root reachable from a source work
@@ -403,6 +457,13 @@ func (r stepResolution) rootViaBridge(assignees []string) *beads.Bead {
 //
 // Returns nil when no routed bridge bead is found for any identity.
 func (r stepResolution) rootViaRoutedBridge(assignees []string) *beads.Bead {
+	root, _ := r.rootViaRoutedBridgeIn(assignees)
+	return root
+}
+
+// rootViaRoutedBridgeIn is rootViaRoutedBridge returning the reader that holds
+// the root.
+func (r stepResolution) rootViaRoutedBridgeIn(assignees []string) (*beads.Bead, activeStepReader) {
 	type routedCandidates struct {
 		rows []beads.Bead
 		err  error
@@ -427,36 +488,47 @@ func (r stepResolution) rootViaRoutedBridge(assignees []string) *beads.Bead {
 		if candidates.err != nil {
 			continue
 		}
-		if root := r.firstMoleculeRootFrom(candidates.rows); root != nil {
-			return root
+		if root, reader := r.firstMoleculeRootIn(candidates.rows); root != nil {
+			return root, reader
 		}
 	}
-	return nil
+	return nil, nil
 }
 
-// firstMoleculeRootFrom returns the molecule root reachable via molecule_id
-// from the first candidate bead that carries one. Returns nil when no
+// firstMoleculeRootIn returns the molecule root reachable via molecule_id from
+// the first candidate bead that carries one, read across every molecule reader
+// (graph first, then work), and the reader that holds it. Returns nil when no
 // candidate carries a resolvable molecule_id.
-func (r stepResolution) firstMoleculeRootFrom(candidates []beads.Bead) *beads.Bead {
+func (r stepResolution) firstMoleculeRootIn(candidates []beads.Bead) (*beads.Bead, activeStepReader) {
 	for i := range candidates {
 		rootID := strings.TrimSpace(candidates[i].Metadata[beadmeta.MoleculeIDMetadataKey])
 		if rootID == "" {
 			continue
 		}
-		root, err := r.graph.Get(rootID)
-		if err != nil {
-			r.logf("wisp step inject: molecule_id %q on bead %s did not resolve: %v", rootID, candidates[i].ID, err)
-			continue
+		var lastErr error
+		for _, reader := range r.moleculeReaders() {
+			root, err := reader.Get(rootID)
+			if err == nil {
+				return &root, reader
+			}
+			lastErr = err
+			if !errors.Is(err, beads.ErrNotFound) {
+				break
+			}
 		}
-		return &root
+		r.logf("wisp step inject: molecule_id %q on bead %s did not resolve: %v", rootID, candidates[i].ID, lastErr)
 	}
-	return nil
+	return nil, nil
 }
 
-// inProgressStepChild returns the in-progress type=step child of moleculeID.
-// When multiple are found, the most recently updated one is returned.
-func (r stepResolution) inProgressStepChild(moleculeID string) (*beads.Bead, error) {
-	results, err := r.graph.List(beads.ListQuery{
+// inProgressStepChildIn returns the in-progress type=step child of
+// moleculeID, read from reader, the store that holds the molecule. When
+// multiple are found, the most recently updated one is returned.
+func (r stepResolution) inProgressStepChildIn(reader activeStepReader, moleculeID string) (*beads.Bead, error) {
+	if reader == nil {
+		reader = r.graph
+	}
+	results, err := reader.List(beads.ListQuery{
 		Status:   "in_progress",
 		Type:     "step",
 		ParentID: moleculeID,
@@ -485,11 +557,15 @@ func (r stepResolution) inProgressStepChild(moleculeID string) (*beads.Bead, err
 	return &best, nil
 }
 
-// entryStepChild returns the first open type=step child of moleculeID.
-// This is the deterministic fallback when no step is in-progress: the formula's
-// entry position — where execution should (re)start.
-func (r stepResolution) entryStepChild(moleculeID string) (*beads.Bead, error) {
-	results, err := r.graph.List(beads.ListQuery{
+// entryStepChildIn returns the first open type=step child of moleculeID, read
+// from reader, the store that holds the molecule. This is the deterministic
+// fallback when no step is in-progress: the formula's entry position — where
+// execution should (re)start.
+func (r stepResolution) entryStepChildIn(reader activeStepReader, moleculeID string) (*beads.Bead, error) {
+	if reader == nil {
+		reader = r.graph
+	}
+	results, err := reader.List(beads.ListQuery{
 		Status:   "open",
 		Type:     "step",
 		ParentID: moleculeID,
