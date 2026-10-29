@@ -29,10 +29,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/convergence"
-	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/materialize"
-	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -333,60 +330,37 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		sessionBeadID = qualifiedName
 	}
 
-	// Step 8: Build agent environment.
-	agentEnv := map[string]string{
-		"GC_SESSION_NAME":     sessName,
-		"GC_SESSION_ID":       sessionBeadID,
-		"GC_TEMPLATE":         templateNameFor(cfgAgent, qualifiedName),
-		"GC_SESSION_ORIGIN":   "ephemeral",
-		"GC_AGENT":            sessName,
-		"GC_ALIAS":            qualifiedName,
-		"GC_DIR":              workDir,
-		"GC_BEADS_SCOPE_ROOT": p.cityPath,
-		// Explicit empty values matter here. tmux session creation uses `env -u`
-		// only for keys present with empty strings, which prevents stale rig
-		// scope from leaking out of the tmux server's inherited environment.
-		"GC_RIG":      "",
-		"GC_RIG_ROOT": "",
-		"BEADS_DIR":   "",
-		// GT_ROOT stays city-scoped by default. bd formula discovery falls back
-		// to $GT_ROOT/.beads/formulas when agents run outside the city/rig repo
-		// roots (for example under .gc/agents/... or .gc/worktrees/...).
-		// Rig-scoped agents override the rig-specific keys below.
-		"GT_ROOT": p.cityPath,
+	// Step 8: Build agent environment: the session identity keys plus the
+	// generated scope layer the worker's launch-env resolver also rebuilds.
+	var upstreams map[string]config.UpstreamSpec
+	if p.city != nil {
+		upstreams = p.city.Upstreams
 	}
-	for key, value := range cityRuntimeEnvMapForCity(p.cityPath) {
-		agentEnv[key] = value
+	launchEnvIn := agentLaunchEnvInput{
+		CityPath:      p.cityPath,
+		Rigs:          p.rigs,
+		Workspace:     p.workspace,
+		Upstreams:     upstreams,
+		Agent:         cfgAgent,
+		Resolved:      resolved,
+		QualifiedName: qualifiedName,
+		WorkDir:       workDir,
+		Rig:           rigName,
+		RigRoot:       rigRoot,
 	}
-	// Override the city-uniform GC_CONTROL_DISPATCHER_TRACE_DEFAULT with a
-	// per-dispatcher path so each control-dispatcher writes to its own
-	// trace file (closes #1650). Goes in agentEnv (last in mergeEnv) so it
-	// wins over both passthroughEnv and the uniform city default seeded by
-	// cityRuntimeEnvMapForCity above.
-	if cfgAgent.Name == config.ControlDispatcherAgentName {
-		agentEnv["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"] = citylayout.ControlDispatcherTraceDefaultPathForRuntimeDirAndName(
-			p.cityPath,
-			agentEnv["GC_CITY_RUNTIME_DIR"],
-			qualifiedName,
-		)
-	}
-	agentEnv["GC_BEADS"] = rawBeadsProviderForScope(rigRoot, p.cityPath)
-	if exe, err := os.Executable(); err == nil && exe != "" {
-		agentEnv["GC_BIN"] = exe
-	}
-	sessionBackendEnv, err := sessionBackendEnvWithError(p.cityPath, rigRoot, p.rigs)
+	scopeEnv, err := agentScopeLaunchEnv(launchEnvIn)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: building session backend env: %w", qualifiedName, err)
 	}
-	for key, value := range sessionBackendEnv {
-		agentEnv[key] = value
+	agentEnv := map[string]string{
+		"GC_SESSION_NAME":   sessName,
+		"GC_SESSION_ID":     sessionBeadID,
+		"GC_TEMPLATE":       templateNameFor(cfgAgent, qualifiedName),
+		"GC_SESSION_ORIGIN": "ephemeral",
+		"GC_AGENT":          sessName,
+		"GC_ALIAS":          qualifiedName,
 	}
-	if rigName != "" {
-		agentEnv["GC_RIG"] = rigName
-		agentEnv["GC_RIG_ROOT"] = rigRoot
-		agentEnv["BEADS_DIR"] = filepath.Join(rigRoot, ".beads")
-		agentEnv["GC_BEADS_SCOPE_ROOT"] = rigRoot
-	}
+	maps.Copy(agentEnv, scopeEnv)
 
 	// configDir is the directory agent config-relative paths (pre-start
 	// scripts, session setup templates, and {{.ConfigDir}} in prompts)
@@ -521,93 +495,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 
-	// Step 10: Merge environment layers. Workspace.Env sits between
-	// passthrough and provider so a per-provider/agent/patch entry can
-	// still override a workspace-wide default.
-	var workspaceEnv map[string]string
-	if p.workspace != nil {
-		workspaceEnv = p.workspace.Env
-	}
-	env := mergeEnv(passthroughEnv(), expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
-	processenv.PrependGCBinDirToPATH(env, env["GC_BIN"])
-	env = convergence.ScrubTokenEnv(env)
-
-	// OperatorEnv carries only the operator-authored layers (workspace,
-	// resolved provider, agent) — excluding passthrough and the generated
-	// agentEnv plumbing — so a resolved config env change fingerprints as
-	// Launch-tier identity instead of a no-op.
-	operatorEnv := mergeEnv(expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env))
-	operatorEnv = convergence.ScrubTokenEnv(operatorEnv)
-
-	// Step 10b: Upstream axis (Phase C). Inject the selected upstream's serving
-	// env LAST so it is authoritative for the model-serving keys, and after
-	// ScrubTokenEnv so its credential refs survive — which is exactly why the
-	// controller-only re-pin below has to come after this block. The env-ref
-	// values ($VAR)
-	// resolve from the controller environment via expandEnvMap; the resolved
-	// credentials are NOT fingerprinted (the Config.Env allow-list excludes
-	// them), only the selected NAME — carried to runtime.Config.Upstream
-	// (launch-half) so switching upstream relaunches the agent in the warm box.
-	if upstreamName := cfgAgent.Upstream; upstreamName != "" {
-		var upstreams map[string]config.UpstreamSpec
-		if p.city != nil {
-			upstreams = p.city.Upstreams
-		}
-		spec, ok := upstreams[upstreamName]
-		if !ok {
-			return TemplateParams{}, fmt.Errorf("agent %q selects upstream %q which is not declared in [upstreams]", qualifiedName, upstreamName)
-		}
-		// Render the abstract serving fields onto the agent's HARNESS env-var
-		// names (the resolved provider's upstream_env binding), so one upstream is
-		// portable across harnesses. An abstract field with no matching binding is
-		// a hard error — never a silent no-op (config-surface §4). $VAR refs in the
-		// values resolve from the controller environment.
-		if spec.HasAbstractServing() {
-			var binding config.UpstreamEnvBinding
-			if resolved != nil {
-				binding = resolved.UpstreamEnv
-			}
-			// Per field, the target env-var name is the upstream's override if set
-			// (for gateway harnesses), else the harness binding, else a hard error.
-			for _, r := range []struct{ value, override, bound, field string }{
-				{spec.BaseURL, spec.BaseURLEnv, binding.BaseURL, "base_url"},
-				{spec.APIKey, spec.APIKeyEnv, binding.APIKey, "api_key"},
-				{spec.AuthToken, spec.AuthTokenEnv, binding.AuthToken, "auth_token"},
-			} {
-				if r.value == "" {
-					continue
-				}
-				envName := r.override
-				if envName == "" {
-					envName = r.bound
-				}
-				if envName == "" {
-					return TemplateParams{}, fmt.Errorf("agent %q upstream %q sets %s, but its harness %q declares no upstream_env.%s binding (set %s_env on the upstream, or upstream_env.%s on the harness)", qualifiedName, upstreamName, r.field, resolvedProviderName(resolved), r.field, r.field, r.field)
-				}
-				env[envName] = processenv.ExpandSessionEnvValue(r.value)
-			}
-		}
-		// Raw env is the harness-specific escape hatch, merged LAST (wins over the
-		// abstract render and ambient/agent env for the keys it sets).
-		for k, v := range expandEnvMap(spec.Env) {
-			env[k] = v
-		}
-	}
-	// Managed agents are Gas City-owned recursive execution environments. Set
-	// the GC-only opt-out after configurable layers so child gc commands cannot
-	// re-enable product metrics; Beads telemetry remains independent.
-	env[execenv.UsageMetricsDisableEnv] = execenv.UsageMetricsDisableValue
-
-	// Same placement, same reason, for the controller-only keys: every layer
-	// above is config-authored, so a literal [workspace.env] GC_CONTROLLER_TOKEN
-	// — or an upstream whose api_key_env names it — would otherwise overwrite the
-	// empty value passthroughEnv() pinned, and the upstream block writes after
-	// the ScrubTokenEnv call. Re-pinning after the last writer makes the merge
-	// order irrelevant. Empty, not deleted: the session inherits an environment
-	// that already carries the controller's value, so only an explicit empty
-	// assignment overrides it.
-	for key, val := range processenv.ControllerOnlyEnvOverlay() {
-		env[key] = val
+	// Step 10: Merge environment layers, the selected upstream (Phase C) and
+	// the pins no config layer may override.
+	env, operatorEnv, err := composeAgentLaunchEnv(passthroughEnv(), agentEnv, launchEnvIn)
+	if err != nil {
+		return TemplateParams{}, err
 	}
 
 	// Step 11: Expand session setup templates. configDir was resolved ahead
