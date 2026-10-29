@@ -435,3 +435,85 @@ func assertPasted(t *testing.T, trace string, want bool) {
 		t.Errorf("paste fallback ran = %v, want %v; verbs seen:\n%s", pasted, want, b)
 	}
 }
+
+// agentGetNotFound is herdr's answer to `agent get` for a target it holds no
+// registered agent under.
+const agentGetNotFound = `{"error":{"code":"not_found","message":"no such agent"}}`
+
+// lookupFake writes a fake herdr that answers `agent get` with getReply and
+// `agent list` with the literal herdr entries, recording every verb it was
+// called with (one line each) to the returned trace path.
+func lookupFake(t *testing.T, getReply string, entries ...string) (bin, trace string) {
+	t.Helper()
+	trace = filepath.Join(t.TempDir(), "verbs")
+	list := `{"result":{"agents":[` + strings.Join(entries, ",") + `]}}`
+	script := "#!/bin/sh\n" +
+		"echo \"$*\" >> " + trace + "\n" +
+		"case \"$*\" in\n" +
+		"  *'agent get'*) echo '" + getReply + "' ;;\n" +
+		"  *'agent list'*) echo '" + list + "' ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	return writeFakeHerdr(t, script), trace
+}
+
+// Two registered opencode sessions and a pane herdr detected opencode in but
+// nobody named, in herdr's shape. The unnamed pane is listed first, so a scan
+// that matches it on anything but a registered name finds it before anything
+// else.
+const (
+	unnamedOpencodePane = `{"agent":"opencode","pane_id":"w3:p1","agent_status":"working"}`
+	namedOpencodeBeta   = `{"agent":"opencode","name":"beta","pane_id":"w2:p1","agent_status":"working"}`
+)
+
+// TestGetAgentNeverResolvesAKindOrEmptyTarget pins that a lookup matches a
+// registered name only. "opencode" is the kind every pane here runs and no
+// session's name, so it resolves nothing; it must not hand back the unnamed
+// pane, whose session IsRunning, ObserveLiveness and Stop would then act on.
+// The empty target names nothing, so it resolves nothing without asking herdr.
+func TestGetAgentNeverResolvesAKindOrEmptyTarget(t *testing.T) {
+	bin, trace := lookupFake(t, agentGetNotFound, unnamedOpencodePane, namedOpencodeAlpha, namedOpencodeBeta)
+	c := &client{session: "gc-test", bin: bin}
+	ctx := context.Background()
+
+	for target, wantPane := range map[string]string{"alpha": "w1:p1", "beta": "w2:p1"} {
+		a, ok, err := c.getAgent(ctx, target)
+		if err != nil || !ok || a.PaneID != wantPane {
+			t.Errorf("getAgent(%q) = (%+v, %v, %v); want pane %q", target, a, ok, err, wantPane)
+		}
+	}
+
+	a, ok, err := c.getAgent(ctx, "opencode")
+	if err != nil || ok || a.PaneID != "" {
+		t.Errorf("getAgent(kind %q) = (%+v, %v, %v); want not found with no pane", "opencode", a, ok, err)
+	}
+
+	if err := os.Remove(trace); err != nil {
+		t.Fatalf("resetting trace: %v", err)
+	}
+	a, ok, err = c.getAgent(ctx, "")
+	if err != nil || ok || a.PaneID != "" {
+		t.Errorf("getAgent(\"\") = (%+v, %v, %v); want not found with no pane", a, ok, err)
+	}
+	if verbs, err := os.ReadFile(trace); err == nil {
+		t.Errorf("getAgent(\"\") called herdr; want no call, got:\n%s", verbs)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("reading trace: %v", err)
+	}
+}
+
+// TestTargetHasNoNamedAgentIgnoresAKindOnlyName pins the paste fallback's
+// registry question against a kind: a gc session named like a kind has no
+// registered agent here just because a pane nobody named runs that kind.
+func TestTargetHasNoNamedAgentIgnoresAKindOnlyName(t *testing.T) {
+	const agentless = `{"error":{"code":"agent_not_ready","message":"agent opencode is not an active named agent"},"id":"cli:agent:prompt"}`
+	bin, _ := registryFake(t, []string{"alpha=w1:p1", "beta=w2:p1", "=w1:p3"}, agentless)
+	c := &client{session: "gc-test", bin: bin}
+	err := c.agentPrompt(context.Background(), "opencode", "proceed")
+	if err == nil {
+		t.Fatal("fake herdr rejection produced no error")
+	}
+	if !c.targetHasNoNamedAgent(context.Background(), "opencode", err) {
+		t.Errorf("targetHasNoNamedAgent(%q) = false; the only opencode pane without a registered name must not count as one (err: %v)", "opencode", err)
+	}
+}
