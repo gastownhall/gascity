@@ -229,8 +229,8 @@ func frontOf(store beads.Store) beads.Store {
 // viewFor returns the memoized view of one side over front.
 func (p *Projection) viewFor(front beads.Store, side projectionSide) beads.Store {
 	front = frontOf(front)
-	comparable := front != nil && reflect.TypeOf(front).Comparable()
-	if comparable {
+	keyable := front != nil && reflect.TypeOf(front).Comparable()
+	if keyable {
 		p.mu.Lock()
 		if v, ok := p.views[viewKey{front: front, side: side}]; ok {
 			p.mu.Unlock()
@@ -239,7 +239,7 @@ func (p *Projection) viewFor(front beads.Store, side projectionSide) beads.Store
 		p.mu.Unlock()
 	}
 	v := newProjectionView(p, front, side)
-	if comparable {
+	if keyable {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		if existing, ok := p.views[viewKey{front: front, side: side}]; ok {
