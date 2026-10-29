@@ -31,7 +31,8 @@ package main
 // After the Propose the producer rings the controller's lane host
 // (lane:<conversation>:<op id>) once, best effort; the lane host delivers
 // every notice. gc session submit's local fallback is not a producer here:
-// it keeps #8399's behavior.
+// it accepts the operator's message as the API does
+// (conversation_lane_submit.go).
 
 import (
 	"errors"

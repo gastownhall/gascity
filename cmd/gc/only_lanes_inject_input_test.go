@@ -102,6 +102,7 @@ var laneInjectAllowlist = map[string]laneInjectEntry{
 	"internal/api/handler_session_interaction.go:Server.handleSessionRespond": {laneInjectTestSurface, "legacy handler served only through Server.ServeHTTP in tests"},
 	"internal/api/handler_session_interaction.go:Server.handleSessionStop":    {laneInjectTestSurface, "legacy handler served only through Server.ServeHTTP in tests"},
 	// Unlisted: they run only while their kind is not listed.
+	"cmd_session.go:cmdSessionSubmit":                                          {laneInjectUnlisted, "gc session submit's local fallback delivers through handle.Message (M6) while message is unlisted; with message listed it accepts the message as the API does (lanesubmit.Accept)"},
 	"internal/api/huma_handlers_runs.go:Server.interruptRunHolders":            {laneInjectUnlisted, "run cancel interrupts its holders through the session layer (I-e); with interrupt listed it proposes lane ops"},
 	"internal/api/session_control_ops.go:Server.executeStop":                   {laneInjectUnlisted, "POST /stop runs its interrupt inline (I-d); with interrupt listed it proposes a lane op"},
 	"internal/api/session_control_ops.go:Server.respondSession":                {laneInjectUnlisted, "POST /respond answers through the session layer (R-a); with respond listed it proposes a lane op"},
@@ -111,7 +112,6 @@ var laneInjectAllowlist = map[string]laneInjectEntry{
 	"cmd_nudge.go:deliverSessionNudgeLegacy":      {laneInjectFallback, "gc session nudge to a target with no session row, or a protocol-mode session no lane serves (excused at OJ-21)"},
 	"cmd_nudge.go:deliverMailNotifyLegacy":        {laneInjectFallback, "mail --notify (M7): with message listed, only for a session with no row in the city's sessions store, or one no lane serves (protocol mode)"},
 	"cmd_nudge.go:tryDeliverQueuedNudgesByPoller": {laneInjectFallback, "the legacy queue's poller (M12): with message listed it delivers only what the fallback producers queue for a session no lane serves or a notice the op store refuses, and items queued before the flip"},
-	"cmd_session.go:cmdSessionSubmit":             {laneInjectFallback, "gc session submit's local fallback delivers through handle.Message (M6)"},
 	"cmd_sling.go:deliverSlingNudge":              {laneInjectFallback, "sling --nudge (M8): with message listed, only for a session with no row in the city's sessions store, or one no lane serves (protocol mode)"},
 	"drain_reminder.go:nudgeDrainReminder":        {laneInjectFallback, "the drain reminder the gate holds, or for a session no lane serves; legacy reconciler only (excused at OJ-21)"},
 	"nudge_backstop.go:runNudgeBackstop":          {laneInjectFallback, "planner notice for a session no lane serves (protocol mode; excused at OJ-21)"},
@@ -122,7 +122,7 @@ var laneInjectAllowlist = map[string]laneInjectEntry{
 // laneInjectFallbackPin is how many fallback entries laneInjectAllowlist
 // holds. Each producer slice that moves a surface onto the lane moves its
 // entries to unlisted and lowers the pin; it never rises.
-const laneInjectFallbackPin = 9
+const laneInjectFallbackPin = 8
 
 // laneInjectSite is one place a scanned file types input: its site name and
 // position, and what it does.

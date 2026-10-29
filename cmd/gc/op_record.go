@@ -22,17 +22,19 @@ package main
 // API, which records the op as legacy:api, or proposes it as a lane op when
 // its lane host executes message; a fallback after a lost answer proposes
 // that op id locally, so it replays a closed op and reports an open one as
-// accepted rather than delivering again. In a city that lists message it
-// does so over any sessions store, the content gate's builtin default,
-// which records only on SQLite, notwithstanding (newCLIOp). A queued
-// delivery closes its op succeeded{via: legacy.queued} at enqueue (§8.5).
-// The delivered text is the legacy path's in every mode (I11).
+// accepted rather than delivering again. That is submit's path only while
+// the CLI's config does not list message: in a city that lists it, submit
+// accepts the message as the API does (conversation_lane_submit.go), and
+// records nothing here. A queued delivery closes its op succeeded{via:
+// legacy.queued} at enqueue (§8.5). The delivered text is the legacy path's
+// in every mode (I11).
 //
 // Output (DES-O0API §8.3): stdout stays the command's own; JSON results gain
 // op_id, key and replayed when an op backs the run. The key, minted when --key
 // is absent, is printed only in JSON and on failures, never on a successful
-// plain-text run, except submit's report that the API accepted the message,
-// which names the key a rerun reports its outcome under. A replayed success
+// plain-text run, except submit's report, on its legacy path, that the API
+// accepted the message, which names the key a rerun reports its outcome
+// under. A replayed success
 // prints the command's success output rebuilt from the op, so what only the
 // first run saw is absent from its JSON (close's and wake's
 // wait_nudges_withdrawn, suspend's mode), and names the op on stderr, with any
@@ -234,13 +236,15 @@ type cliOpRequest struct {
 	// whose answer was lost.
 	acceptsAPIOp bool
 	// lanePolicy, when set, is the policy the API proposes the request under
-	// as a lane op when its lane host executes message
-	// (api.LaneMessageOpPolicy). A lane op under the key is then the API's
-	// op: start admits again under this policy, so the op answers the
-	// request only when the request's digest under it is the op's, and an
-	// open one counts as the API's acceptance as an open legacy:api op does.
-	// In a city that lists message the gate's builtin default does not keep
-	// the op store closed to the request (newCLIOp).
+	// as a lane op when its lane host executes message (lanesubmit.Policy).
+	// A lane op under the key is then the API's op: start admits again under
+	// this policy, so the op answers the request only when the request's
+	// digest under it is the op's, and an open one counts as the API's
+	// acceptance as an open legacy:api op does. gc session submit sets it on
+	// its legacy path, which runs only while the CLI's config does not list
+	// message: a lane op under its key is then one an API whose lane host
+	// still executes message wrote (W2, a rollback before the controller
+	// restarts). OJ-21 removes it with the legacy path.
 	lanePolicy *opjournal.Policy
 	asJSON     bool
 	stdout     io.Writer
@@ -301,18 +305,12 @@ type cliOp struct {
 func newCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) *cliOp {
 	op := &cliOp{req: req, sessStore: sessStore}
 	mode, builtinAuto := op.mode(cfg)
-	// The builtin default records only on a SQLite sessions store. It does
-	// not govern the API's lane op, which the API proposes over any store: a
-	// request that answers from that op (lanePolicy) in a city that lists
-	// message opens the store whatever its backend, so its fallback finds the
-	// op under the key it sent, or claims the key before it delivers.
-	defaultOnly := builtinAuto && (req.lanePolicy == nil || !cliLaneExecutesMessage(cfg))
 	op.rec = &legacyop.Recorder{
 		Mode:     mode,
 		Executor: legacyop.ExecutorCLI,
 		Open: func() (*opjournal.Store, error) {
 			if op.opened == nil && op.openErr == nil {
-				op.opened, op.openErr = cliOpenOpStoreUnder(defaultOnly, op.sessStore)
+				op.opened, op.openErr = cliOpenOpStoreUnder(builtinAuto, op.sessStore)
 			}
 			return op.opened, op.openErr
 		},
@@ -329,9 +327,8 @@ func newCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) *cliOp 
 		// without a warning, as if the gate were off: a warning there would
 		// print on every recorded command of a default city. A run that
 		// asked for a --key still warns, as it does not get the dedup it
-		// asked for, and so does one that answers from the API's lane op
-		// (defaultOnly false), which cannot find that op.
-		QuietCannotRecord: defaultOnly && req.key == "",
+		// asked for.
+		QuietCannotRecord: builtinAuto && req.key == "",
 		CrashPoints:       opsFailpointState.hook(legacyop.SurfaceCLI),
 	}
 	return op

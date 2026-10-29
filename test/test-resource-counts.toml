@@ -641,6 +641,11 @@ resource = "slow_process_gate"
 calls = 2
 
 [[count]]
+path = "cmd/gc/conversation_lane_submit_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
 path = "cmd/gc/dolt_data_dir_lock_linux_test.go"
 resource = "subprocess"
 calls = 1
