@@ -421,7 +421,12 @@ func (s *beadPolicyStore) ListByLabel(label string, limit int, opts ...beads.Que
 		Label:         label,
 		Limit:         limit,
 		IncludeClosed: beads.HasOpt(opts, beads.IncludeClosed),
-		TierMode:      policyTierFromOpts(opts),
+		// Both wrapped implementations (BdStore, CachingStore) sort newest-first
+		// in their own ListByLabel; omitting the sort left SortDefault, whose
+		// order is store-defined (Go map order over the caching snapshot) — so
+		// any budgeted consumer got an arbitrary slice (#5832).
+		Sort:     beads.SortCreatedDesc,
+		TierMode: policyTierFromOpts(opts),
 	})
 }
 

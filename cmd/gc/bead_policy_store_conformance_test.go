@@ -108,6 +108,9 @@ func TestBeadPolicyStoreReadHelperTierConformance(t *testing.T) {
 				if q.Label != "scope" || q.Limit != 7 || q.TierMode != beads.TierBoth {
 					return fmt.Errorf("query = %#v, want label scope, limit 7, and TierBoth", q)
 				}
+				if q.Sort != beads.SortCreatedDesc {
+					return fmt.Errorf("query = %#v, want SortCreatedDesc — both wrapped implementations sort newest-first and SortDefault is store-defined (map order over the caching snapshot)", q)
+				}
 				return nil
 			},
 		},
@@ -293,5 +296,55 @@ func TestBeadPolicyStoreContextReadyIsPolicyAware(t *testing.T) {
 	}
 	if len(backing.readyQueries) != 1 || backing.readyQueries[0].TierMode != beads.TierBoth {
 		t.Fatalf("ReadyContext queries = %#v, want one TierBoth query", backing.readyQueries)
+	}
+}
+
+// TestBeadPolicyListByLabelSortsNewestFirst pins the wrapper's ListByLabel
+// ordering behavior over the production read stack: a primed CachingStore
+// serves the label list from its snapshot, whose unsorted iteration is Go map
+// order, so the wrapper must forward an explicit created-desc sort like both
+// wrapped implementations (CachingStore, BdStore) do natively. Budgeted
+// consumers cut the returned list, and an arbitrary order closes an arbitrary
+// slice (#5832).
+func TestBeadPolicyListByLabelSortsNewestFirst(t *testing.T) {
+	backing := beads.NewMemStore()
+	cached := beads.NewCachingStoreForTest(backing, nil)
+	if err := cached.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime(): %v", err)
+	}
+	store := wrapStoreWithBeadPolicies(cached, &config.City{})
+
+	var created []beads.Bead
+	for i := range 3 {
+		b, err := store.Create(beads.Bead{
+			Title:  fmt.Sprintf("run-%d", i),
+			Labels: []string{"scope"},
+		})
+		if err != nil {
+			t.Fatalf("Create(run-%d): %v", i, err)
+		}
+		created = append(created, b)
+	}
+
+	all, err := store.ListByLabel("scope", 0)
+	if err != nil {
+		t.Fatalf("ListByLabel(scope, 0): %v", err)
+	}
+	if len(all) != len(created) {
+		t.Fatalf("ListByLabel(scope, 0) returned %d beads, want %d", len(all), len(created))
+	}
+	for i, b := range all {
+		want := created[len(created)-1-i].ID // newest first
+		if b.ID != want {
+			t.Errorf("all[%d] = %s, want %s (newest-first: CreatedAt descending)", i, b.ID, want)
+		}
+	}
+
+	one, err := store.ListByLabel("scope", 1)
+	if err != nil {
+		t.Fatalf("ListByLabel(scope, 1): %v", err)
+	}
+	if len(one) != 1 || one[0].ID != created[len(created)-1].ID {
+		t.Errorf("ListByLabel(scope, 1) = %v, want only the newest bead %s", beadIDs(one), created[len(created)-1].ID)
 	}
 }
