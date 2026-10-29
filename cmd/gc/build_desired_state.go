@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/poolplan"
+	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
@@ -504,6 +505,31 @@ func buildDesiredStateWithSessionBeads(
 	)
 }
 
+// buildDesiredStatePreview is buildDesiredState for gc start --dry-run: it
+// resolves the agents that would start without a store and without the
+// side effects a real build performs on each agent's work dir (overlay
+// staging, hook installation, work dir creation, Claude settings projection,
+// skill snapshots). The result is for display only.
+func buildDesiredStatePreview(
+	cityName, cityPath string,
+	beaconTime time.Time,
+	cfg *config.City,
+	sp runtime.Provider,
+	stderr io.Writer,
+) DesiredStateResult {
+	return buildDesiredStateWithSessionBeadsAtOpts(
+		cityName, cityPath, beaconTime, time.Now(), cfg, sp, nil, nil, nil, nil, stderr,
+		desiredStateOptions{readOnly: true},
+	)
+}
+
+// desiredStateOptions adjusts one desired-state build.
+type desiredStateOptions struct {
+	// readOnly resolves every agent with read-only build params
+	// (agentBuildParams.readOnly): the build writes nothing.
+	readOnly bool
+}
+
 func buildDesiredStateWithSessionBeadsAt(
 	cityName, cityPath string,
 	beaconTime, poolDecisionTime time.Time,
@@ -515,12 +541,31 @@ func buildDesiredStateWithSessionBeadsAt(
 	trace *sessionReconcilerTraceCycle,
 	stderr io.Writer,
 ) DesiredStateResult {
+	return buildDesiredStateWithSessionBeadsAtOpts(
+		cityName, cityPath, beaconTime, poolDecisionTime, cfg, sp, store, rigStores, sessionBeads, trace, stderr,
+		desiredStateOptions{},
+	)
+}
+
+func buildDesiredStateWithSessionBeadsAtOpts(
+	cityName, cityPath string,
+	beaconTime, poolDecisionTime time.Time,
+	cfg *config.City,
+	sp runtime.Provider,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	sessionBeads *sessionBeadSnapshot,
+	trace *sessionReconcilerTraceCycle,
+	stderr io.Writer,
+	opts desiredStateOptions,
+) DesiredStateResult {
 	citySt, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	if effectiveCitySuspended(cfg, citySt) {
 		return DesiredStateResult{}
 	}
 
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
+	bp.readOnly = opts.readOnly
 	bp.decisionTime = poolDecisionTime.UTC()
 	bp.sessionBeads = sessionBeads
 	bp.sessionSnapshotCompletenessKnown = true
@@ -581,7 +626,7 @@ func buildDesiredStateWithSessionBeadsAt(
 	// rewrites gc.routed_to on open ready work, so it uses its own cache; the
 	// scale-check and named-session probes read after those writes and share a
 	// second cache created below. See readyDemandCache.
-	assignedReadyCache := newTracedReadyDemandCache(pass, demandReadPointAssigned)
+	assignedReadyCache := newTracedReadyDemandCache(pass, demandReadPointAssigned).withCrossStoreGate(cityPath, cfg, store, rigStores, suspendedRigPaths)
 	if store != nil {
 		subPhaseStart = trace.demandNow()
 		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned, storePartial = collectAssignedWorkBeadsWithStores(cityPath, cfg, store, rigStores, suspendedRigPaths, sessionBeads, assignedReadyCache)
@@ -674,7 +719,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		// pre-rewrite legacy routes and miss the canonical cold pool, because
 		// an explicit-handle CachingStore returns its memoized pre-write live
 		// snapshot as the authoritative demand read.
-		demandReadyCache := newTracedReadyDemandCache(pass, demandReadPointDemand)
+		demandReadyCache := newTracedReadyDemandCache(pass, demandReadPointDemand).withCrossStoreGate(cityPath, cfg, store, rigStores, suspendedRigPaths)
 		recordDemandSubPhase(trace, "demand_snapshot.collect_unassigned_routed", subPhaseStart, map[string]any{
 			"beads": len(unassignedRoutedBeads),
 		})
@@ -1916,7 +1961,11 @@ func collectAssignedWorkBeadsWithStores(
 	// suppress the Ready probe for a same-ID assignee in another store.
 	skipReadyAssignees := readyCapturedAssigneeSet(result, resultStoreRefs, readyAssigned)
 	expandSkipAssigneesWithSessionIdentities(skipReadyAssignees, sessionBeads)
-	assignees := readyAssignedWorkAssignees(cfg, cityStore, sessionBeads, skipReadyAssignees, pass, point, reads)
+	closedNamedStore := cityStore
+	if cache != nil && cache.sessions.Store != nil {
+		closedNamedStore = cache.sessions.Store
+	}
+	assignees := readyAssignedWorkAssignees(cfg, closedNamedStore, sessionBeads, skipReadyAssignees, pass, point, reads)
 	if len(skipReadyAssignees) > 0 && len(assignees) == 0 {
 		return result, resultStores, resultStoreRefs, readyAssigned, partial
 	}
@@ -2041,7 +2090,10 @@ func expandSkipAssigneesWithSessionIdentities(skip map[string]struct{}, sessionB
 	}
 }
 
-func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}, pass *demandPassTrace, point string, reads demandReads) []string {
+// sessionsStore is the session-class store the closed named-session index is
+// built from (collectAssignedWorkBeadsWithStores: the pass's leading store,
+// or the one its cache names).
+func readyAssignedWorkAssignees(cfg *config.City, sessionsStore beads.Store, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}, pass *demandPassTrace, point string, reads demandReads) []string {
 	seen := make(map[string]struct{})
 	var result []string
 	add := func(value string) {
@@ -2091,8 +2143,8 @@ func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, session
 			// partial read keeps the rows it did get.
 			start := pass.now()
 			var idxErr error
-			closedIdx, idxErr = demandReadsOrLegacy(reads).ClosedNamedIndex(cityStore)
-			pass.read(demandStoreRead{point: point, leg: pass.storeLabel(cityStore, "city"), op: "closed_named_index", tier: demandReadTierCached}, start, -1, idxErr)
+			closedIdx, idxErr = demandReadsOrLegacy(reads).ClosedNamedIndex(sessionsStore)
+			pass.read(demandStoreRead{point: point, leg: pass.storeLabel(sessionsStore, "city"), op: "closed_named_index", tier: demandReadTierCached}, start, -1, idxErr)
 		}
 		for i := range cfg.NamedSessions {
 			if cfg.NamedSessions[i].Mode != "on_demand" {
@@ -2971,6 +3023,71 @@ type readyDemandCache struct {
 	// serves (recordDemandStoreRead). A nil pass records nothing.
 	pass  *demandPassTrace
 	point string
+	// gateLegs are a split city's ready legs, set by withCrossStoreGate. When
+	// set, every ready snapshot is passed through the same cross-store rule
+	// `gc ready` applies (gate), so the demand the controller counts and the
+	// work a seat is served agree row for row. Nil on a city with no class
+	// binding, whose snapshots are the stores' own answer.
+	gateLegs []readywork.Leg
+	// gate is that rule over gateLegs for this cache's one read point. It
+	// keeps every blocker verdict, judged row and absent-blocker listing it
+	// reads, so a blocker is read once per read point rather than once per
+	// gated snapshot (a store's live and cached snapshots are both gated).
+	gate *readywork.LegGate
+	// sessions is the session-class store the closed named-session index is
+	// built from, set by withSessionsStore for a pass led by a WORK store
+	// (gc doctor's demand-migration sweep). Unset, the pass's leading store
+	// answers: every controller and gc start pass leads with the sessions
+	// store already.
+	sessions beads.SessionStore
+}
+
+// withSessionsStore names the session-class store the closed named-session
+// index reads, for a pass whose leading store is not it, and returns the
+// cache.
+func (c *readyDemandCache) withSessionsStore(sessions beads.SessionStore) *readyDemandCache {
+	if c == nil {
+		return c
+	}
+	c.sessions = sessions
+	return c
+}
+
+// withCrossStoreGate arms the cache with the city's ready legs when the city
+// is split (crossStoreGateLegs), and returns it. A city that relocates nothing
+// (or one whose topology cannot be planned, which its readers report
+// themselves) is left ungated. Only a pass that may read remotely arms it:
+// the v2 gather serves snapshots the external-reads lane already gated
+// (gatherDemand).
+func (c *readyDemandCache) withCrossStoreGate(cityPath string, cfg *config.City, cityStore beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool) *readyDemandCache {
+	if c == nil {
+		return c
+	}
+	return c.withGateLegs(crossStoreGateLegs(cityPath, cfg, cityStore, rigStores, suspendedRigPaths))
+}
+
+// withGateLegs arms the cache with legs, a split city's gate legs, and returns
+// it; nil legs leave it ungated.
+func (c *readyDemandCache) withGateLegs(legs []readywork.Leg) *readyDemandCache {
+	if c == nil || legs == nil {
+		return c
+	}
+	c.gateLegs = legs
+	c.gate = readywork.NewLegGate(legs, beads.ReadyQuery{TierMode: beads.TierBoth})
+	return c
+}
+
+// gateSnapshot applies the cross-store rule to one store's ready snapshot,
+// waiting at most crossStoreGateDeadline (gateReadyRows). A store that is not
+// one of the legs is left as read. A gate that cannot be evaluated in time
+// keeps the ungated rows and reports a partial result: demand must never be
+// under-counted from a read hiccup (see readyDemandCache).
+func (c *readyDemandCache) gateSnapshot(store beads.Store, rows []beads.Bead, err error) ([]beads.Bead, error) {
+	if c == nil || len(c.gateLegs) == 0 {
+		return rows, err
+	}
+	gated, gateErr := gateReadyRows(c.gate, crossStoreGateLeg(c.gateLegs, store), rows, err, crossStoreGateDeadline)
+	return gated, joinGateErr(err, gateErr)
 }
 
 type readyDemandEntry struct {
@@ -3037,6 +3154,7 @@ func (c *readyDemandCache) liveSnapshot(store beads.Store, leg string) ([]beads.
 		start := c.pass.now()
 		e.rows, e.err = c.demandReads().ReadyAll(store)
 		c.pass.read(demandStoreRead{point: c.point, leg: leg, op: "ready", tier: demandReadTierLive}, start, len(e.rows), e.err)
+		e.rows, e.err = c.gateSnapshot(store, e.rows, e.err)
 	})
 	return e.rows, e.err
 }
@@ -3050,6 +3168,7 @@ func (c *readyDemandCache) cachedSnapshot(store beads.Store, leg string) ([]bead
 		start := c.pass.now()
 		e.rows, e.err = c.demandReads().CachedReady(store)
 		c.pass.read(demandStoreRead{point: c.point, leg: leg, op: "ready", tier: demandReadTierCached}, start, len(e.rows), e.err)
+		e.rows, e.err = c.gateSnapshot(store, e.rows, e.err)
 	})
 	return e.rows, e.err
 }
@@ -7289,7 +7408,11 @@ func resolveTemplatePrepared(bp *agentBuildParams, cfgAgent *config.Agent, quali
 	if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedName); err != nil {
 		return TemplateParams{}, err
 	}
-	prepareTemplateResolution(bp, cfgAgent, qualifiedName, bp.stderr)
+	if !bp.readOnly {
+		// A read-only resolution stages nothing; resolveTemplate keeps it a
+		// pure read too.
+		prepareTemplateResolution(bp, cfgAgent, qualifiedName, bp.stderr)
+	}
 	return resolveTemplate(bp, cfgAgent, qualifiedName, fpExtra)
 }
 
@@ -7346,7 +7469,7 @@ func validateAgentSessionTransport(
 // whose resolved provider is not Claude but which opt in explicitly via
 // install_agent_hooks = ["claude"] still flow through hooks.Install here.
 func installAgentSideEffects(bp *agentBuildParams, cfgAgent *config.Agent, tp TemplateParams, stderr io.Writer) {
-	if bp != nil && bp.planOnly {
+	if bp != nil && (bp.planOnly || bp.readOnly) {
 		return
 	}
 	// Install provider hooks (idempotent filesystem side effect). Route

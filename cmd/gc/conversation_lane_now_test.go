@@ -484,7 +484,7 @@ func TestLaneHostJournalsTheTurnADeliverNowDelivers(t *testing.T) {
 	l.f.propose(t, st, l.f.nowMsg())
 	ready := new(atomic.Bool)
 	ready.Store(true)
-	l.hh.h.newExec = func(laneExecDeps, session.Info) opjournal.Executor {
+	l.hh.h.newExec = func(laneExecDeps, laneRow) opjournal.Executor {
 		return laneReadyExec{clk: l.f.clk, ready: ready}
 	}
 	l.hh.start()
@@ -542,7 +542,7 @@ func TestLaneHostKeepsTheDeliverNowTurnPastTheReplacedEnd(t *testing.T) {
 	st := l.f.laneStore(t)
 	ready, replaced := new(atomic.Bool), new(atomic.Bool)
 	ready.Store(true)
-	l.hh.h.newExec = func(laneExecDeps, session.Info) opjournal.Executor {
+	l.hh.h.newExec = func(laneExecDeps, laneRow) opjournal.Executor {
 		return laneReplaceExec{laneReadyExec: laneReadyExec{clk: l.f.clk, ready: ready}, replaced: replaced}
 	}
 	l.hh.start()

@@ -238,6 +238,12 @@ func planRigMutation(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBr
 		if err := config.ValidateRigs(nextCfg.Rigs, config.EffectiveHQPrefix(nextCfg)); err != nil {
 			return rigMutationPlan{}, err
 		}
+		// A reserved prefix on a split city is refused HERE, before anything is
+		// written: once it is in city.toml every CLI process refuses the city
+		// and every hook claim fails closed (split-default R10).
+		if err := config.ReservedPrefixSplitRefusalForEdit(deps.FS, filepath.Join(deps.CityPath, "city.toml"), nextCfg); err != nil {
+			return rigMutationPlan{}, err
+		}
 	}
 
 	return rigMutationPlan{

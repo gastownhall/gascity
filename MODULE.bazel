@@ -35,7 +35,7 @@ bazel_dep(name = "rules_python", version = "1.7.0")
 # need neither npm nor network), and tsc/vite/vitest run as Bazel actions.
 bazel_dep(name = "aspect_rules_js", version = "3.5.1")
 bazel_dep(name = "aspect_rules_ts", version = "3.10.1")
-bazel_dep(name = "rules_nodejs", version = "6.7.6")
+bazel_dep(name = "rules_nodejs", version = "6.7.7")
 bazel_dep(name = "bazel_lib", version = "3.7.2")
 
 # Hermetic C/C++ toolchain. rules_go builds the Go stdlib and every cgo
@@ -204,7 +204,7 @@ register_toolchains("@llvm_toolchain//:all")
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(
     name = "go_sdk",
-    version = "1.26.10",
+    version = "1.27.3",
 )
 use_repo(go_sdk, "go_sdk")
 
@@ -360,8 +360,8 @@ go_deps.module(
 # pins. go-cmp is the one gofumpt requirement gc's go.mod lacks.
 go_deps.module(
     path = "mvdan.cc/gofumpt",
-    sum = "h1:zsEMWL8SVKGHNztrx6uZrXdp7AX8r421Vvp23sz7ik4=",
-    version = "v0.9.2",
+    sum = "h1:1Lbudkz2kpM9Cjz2pL4M19u7q+GaEhCTNf7N9mfpcho=",
+    version = "v0.12.0",
 )
 go_deps.module(
     indirect = True,
@@ -412,9 +412,9 @@ use_repo(go_deps, "cc_mvdan_gofumpt", "cc_mvdan_unparam", "co_honnef_go_tools", 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_archive(
-    name = "bd_bin_v1_3_1",
-    urls = ["https://github.com/gastownhall/beads/releases/download/v1.3.1/beads_1.3.1_linux_amd64.tar.gz"],
-    sha256 = "3219443a9734b89b93fb16ee8d65844759fa1b3cd3cf139c606b7353cfb0715c",
+    name = "bd_bin_v1_3_2",
+    urls = ["https://github.com/gastownhall/beads/releases/download/v1.3.2/beads_1.3.2_linux_amd64.tar.gz"],
+    sha256 = "c6ea3281f6ff82628351b2d0967c9eb85862c8a0ec0ebc24e63e645c8b02462e",
     build_file_content = """
 exports_files(["bd"])
 """,
@@ -432,9 +432,9 @@ exports_files(["bd"])
 )
 
 http_archive(
-    name = "dolt_bin_v2_2_0",
-    urls = ["https://github.com/dolthub/dolt/releases/download/v2.2.0/dolt-linux-amd64.tar.gz"],
-    sha256 = "1f7ad8c2622995789420a3fb0f2d16b4aa7430000a825dd91d5938f36480cbf6",
+    name = "dolt_bin_v2_6_0",
+    urls = ["https://github.com/dolthub/dolt/releases/download/v2.6.0/dolt-linux-amd64.tar.gz"],
+    sha256 = "a8d4c2e2e94b85fd3592cb80748044f846ccfd03d25a536ed1f754baf7da6401",
     build_file_content = """
 exports_files(["dolt-linux-amd64/bin/dolt"])
 """,
@@ -480,10 +480,11 @@ openapi_base_spec(
 # lanes no network, so packages come only from committed, integrity-pinned
 # lockfiles fetched here.
 #
-# Node.js 22, sha256-checked by rules_nodejs; it satisfies every workspace's
-# engines (dashboard >=22.13.0, contrib/openclaw-bridge >=22.22.3).
+# Node.js 24, sha256-checked by rules_nodejs; it satisfies every workspace's
+# engines (dashboard >=22.13.0, contrib/openclaw-bridge >=24.22.1 <25, which
+# openclaw 2026.10.8 requires).
 node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
-node.toolchain(node_version = "22.23.2")
+node.toolchain(node_version = "24.22.1")
 
 # One npm_translate_lock per npm workspace, named npm_<area>, each with:
 #   * package-lock.json kept as the source of truth for local `npm ci`;
@@ -510,7 +511,7 @@ npm.npm_translate_lock(
     ],
     pnpm_lock = "//internal/api/dashboardspa/web:pnpm-lock.yaml",
     # pnpm's default public-hoist-pattern (*types*) and npm's flat tree both
-    # make @types/react visible to react-router-dom's typings; rules_js
+    # make @types/react visible to react-router's typings; rules_js
     # hoists nothing unless asked.
     public_hoist_packages = {
         "@types/node": ["internal/api/dashboardspa/web"],

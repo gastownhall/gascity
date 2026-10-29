@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -86,17 +87,25 @@ func cancelRunAgainstFakeBd(t *testing.T, members int) runCancelBdCalls {
 	}})
 	itemSteps := seedChain(item.ID)
 
+	// A two-tier List reads both tiers from two goroutines at once, so the
+	// runner can be entered concurrently.
+	var callsMu sync.Mutex
 	var calls runCancelBdCalls
+	count := func(n *int) {
+		callsMu.Lock()
+		*n++
+		callsMu.Unlock()
+	}
 	runner := func(dir, name string, args ...string) ([]byte, error) {
-		calls.total++
+		count(&calls.total)
 		joined := strings.Join(args, " ")
 		switch {
 		case args[0] == "list" && slices.Contains(args, "--parent"),
 			args[0] == "query" && strings.Contains(joined, "parent="),
 			args[0] == "dep" && slices.Contains(args, "--type=parent-child"):
-			calls.children++
+			count(&calls.children)
 		case args[0] == "dep" && args[1] == "list" && !slices.Contains(args, "--direction=up"):
-			calls.deps++
+			count(&calls.deps)
 		case args[0] == "show":
 			allClosed := true
 			for _, id := range args[1:] {
@@ -108,7 +117,7 @@ func cancelRunAgainstFakeBd(t *testing.T, members int) runCancelBdCalls {
 				}
 			}
 			if allClosed {
-				calls.refresh++
+				count(&calls.refresh)
 			}
 		}
 		return fake.Run(dir, name, args...)
@@ -160,6 +169,8 @@ func cancelRunAgainstFakeBd(t *testing.T, members int) runCancelBdCalls {
 	if got, _ := fake.Bead(teardownAttempt.ID); got.Status == "closed" {
 		t.Errorf("the teardown attempt %s was closed: the subtree walk lost the wisp teardown step", teardownAttempt.ID)
 	}
+	callsMu.Lock()
+	defer callsMu.Unlock()
 	return calls
 }
 

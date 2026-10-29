@@ -435,6 +435,38 @@ func TestConvoyAutocloseBackstopOrder(t *testing.T) {
 	}
 }
 
+// TestOrphanSweepOrderTimeoutBelowInterval pins an explicit orphan-sweep
+// timeout strictly shorter than its interval. The cooldown counts from a
+// run's start, so a timeout at or above the interval (the 300s exec default
+// equals the 5m interval) would let a timed-out sweep be followed at once by
+// the next. The timeout must still leave room after the script's 120s
+// foreign-identity gate budget.
+func TestOrphanSweepOrderTimeoutBelowInterval(t *testing.T) {
+	const file = "orphan-sweep.toml"
+	o := readOrder(t, file)
+	if err := orders.Validate(o); err != nil {
+		t.Fatalf("%s failed validation: %v", file, err)
+	}
+	if o.Trigger != "cooldown" {
+		t.Errorf("trigger = %q, want %q", o.Trigger, "cooldown")
+	}
+	if o.Timeout == "" {
+		t.Fatal("timeout is unset, so the order runs under the 300s exec default")
+	}
+	interval, err := time.ParseDuration(o.Interval)
+	if err != nil {
+		t.Fatalf("interval %q is not a valid duration: %v", o.Interval, err)
+	}
+	timeout := o.TimeoutOrDefault()
+	if timeout >= interval {
+		t.Errorf("timeout %s is not shorter than interval %s, so a timed-out sweep is followed at once by the next", timeout, interval)
+	}
+	const gateBudget = 120 * time.Second
+	if timeout <= gateBudget {
+		t.Errorf("timeout %s leaves no room after the %s gate budget for the reset work", timeout, gateBudget)
+	}
+}
+
 // The core reaper and jsonl-export orders read through `gc bd sql`, which an
 // http-served store refuses. Until they move onto served verbs they declare
 // every backend but http, so gc reports them inapplicable on an http scope and

@@ -243,6 +243,25 @@ func freshStartCommandFromMetadata(metadata map[string]string, fallback string) 
 	return fallback
 }
 
+// startFailure labels a failed provider Start: "resuming session" when cmd
+// carries a resume shape (the bead's resume flag and key, a generated resume
+// flag with any key, or the bead's expanded resume_command), otherwise
+// "starting session". The shape tests are the exact no-op strips that
+// retryFreshStartAfterStaleKey relies on.
+func startFailure(cmd string, meta map[string]string, err error) error {
+	resumeFlag := meta["resume_flag"]
+	sessionKey := meta["session_key"]
+	resumed := stripResumeFlag(cmd, resumeFlag, sessionKey) != cmd ||
+		stripResumeFlagArg(cmd, resumeFlag, meta["resume_style"]) != cmd
+	if rc := meta["resume_command"]; !resumed && rc != "" && sessionKey != "" {
+		resumed = cmd == strings.ReplaceAll(rc, "{{.SessionKey}}", sessionKey)
+	}
+	if resumed {
+		return fmt.Errorf("resuming session: %w", err)
+	}
+	return fmt.Errorf("starting session: %w", err)
+}
+
 func (m *Manager) clearStaleResumeMetadata(id string, b *beads.Bead) error {
 	if err := m.store.SetMetadata(id, "session_key", ""); err != nil {
 		return fmt.Errorf("clearing stale resume metadata session_key: %w", err)
@@ -979,7 +998,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 					if unroute != nil {
 						unroute()
 					}
-					return fmt.Errorf("resuming session: %w", err)
+					return startFailure(resumeCommand, b.Metadata, err)
 				}
 				started = retried
 			case errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName):
@@ -998,7 +1017,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 				if unroute != nil {
 					unroute()
 				}
-				return fmt.Errorf("resuming session: %w", err)
+				return startFailure(resumeCommand, b.Metadata, err)
 			}
 		} else {
 			started = true
@@ -1233,7 +1252,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 				if unroute != nil {
 					unroute()
 				}
-				return fmt.Errorf("resuming session: %w", err)
+				return startFailure(resumeCommand, b.Metadata, err)
 			}
 			started = retried
 		case errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName):
@@ -1242,7 +1261,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 			if unroute != nil {
 				unroute()
 			}
-			return fmt.Errorf("resuming session: %w", err)
+			return startFailure(resumeCommand, b.Metadata, err)
 		}
 	} else {
 		started = true
@@ -1458,7 +1477,8 @@ func (m *Manager) pendingInteractionLocked(sessName string) error {
 
 // PendingInteractionError returns an error wrapping ErrPendingInteraction that
 // names the pending request, so callers can tell the operator what must be
-// answered (with Respond) before text can be delivered.
+// answered before text can be delivered: a permission prompt is answered with
+// Respond, a question in the terminal.
 func PendingInteractionError(pending *runtime.PendingInteraction) error {
 	what := strings.TrimSpace(pending.Kind)
 	if what == "" {
@@ -1469,6 +1489,11 @@ func PendingInteractionError(pending *runtime.PendingInteraction) error {
 	}
 	if pending.RequestID != "" {
 		what += " (request " + pending.RequestID + ")"
+	}
+	if strings.TrimSpace(pending.Kind) == "question" {
+		// A question dialog offers no response verbs: only a person answers
+		// it, in the terminal.
+		return fmt.Errorf("%w: %s is waiting for an answer in the terminal (gc session attach <session>); text sent now would select one of its options", ErrPendingInteraction, what)
 	}
 	return fmt.Errorf("%w: %s is waiting for an answer; respond to it (approve or deny) before sending text", ErrPendingInteraction, what)
 }
@@ -1557,6 +1582,9 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 		if err != nil || !live.Running || !live.Alive { // a dead agent's pane takes nothing (mc-wdjni)
 			delivered = false
 			return runtime.LivenessFenceMiss(ctx, sessName, live, err)
+		}
+		if err := m.pendingInteractionLocked(sessName); err != nil {
+			return err
 		}
 		if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
 			return err

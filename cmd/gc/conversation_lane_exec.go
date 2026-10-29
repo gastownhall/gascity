@@ -77,8 +77,10 @@ type laneExecDeps struct {
 // the pass's view came from, so Probe and Deliver act on the incarnation
 // that view names.
 type conversationLaneExec struct {
-	deps   laneExecDeps
-	info   session.Info
+	deps laneExecDeps
+	info session.Info
+	// stop is the row's stop request, read with info.
+	stop   session.StopRequest
 	target nudgeTarget
 	// budget bounds one probe's runtime calls; laneProbeBudget in
 	// production.
@@ -158,9 +160,9 @@ func (e *conversationLaneExec) note(stage string, err error) {
 	}
 }
 
-// newConversationLaneExec returns the live executor for info's conversation.
-func newConversationLaneExec(deps laneExecDeps, info session.Info) *conversationLaneExec {
-	e := &conversationLaneExec{deps: deps, info: info, target: resolveNudgeTargetFromSessionInfo(deps.cityPath, deps.cfg, info), budget: laneProbeBudget}
+// newConversationLaneExec returns the live executor for row's conversation.
+func newConversationLaneExec(deps laneExecDeps, row laneRow) *conversationLaneExec {
+	e := &conversationLaneExec{deps: deps, info: row.info, stop: row.stop, target: resolveNudgeTargetFromSessionInfo(deps.cityPath, deps.cfg, row.info), budget: laneProbeBudget}
 	e.observe = func(t nudgeTarget) (worker.LiveObservation, error) {
 		switch {
 		case e.info.ID != "":
@@ -281,6 +283,7 @@ func (e *conversationLaneExec) probe(ctx context.Context, conv opjournal.Convers
 		return opjournal.Probe{}, fmt.Errorf("probing session %s: %w", e.info.ID, err)
 	}
 	p.Running, p.ContentBlock, p.Pending, p.Boundary = look.running, look.block, look.pending, look.boundary
+	p.BoundaryAt = look.boundaryAt
 	if look.block != "" && look.drainNoticeBlock == "" {
 		p.ContentAdmit = []opjournal.ContentClass{laneDrainNoticeClass}
 	}
@@ -297,11 +300,12 @@ type laneLook struct {
 	running bool
 	// block is why content may not start, drainNoticeBlock why the drain
 	// reminder's notice (laneDrainNoticeClass) may not: the one content a
-	// draining row admits (session.GateContentDrainNotice).
+	// draining or stop-requested row admits (session.GateContentDrainNotice).
 	block            string
 	drainNoticeBlock string
 	pending          string
 	boundary         opjournal.Tri
+	boundaryAt       time.Time
 	handle           worker.Handle
 	turn             laneTurnLook
 	// noResponses is PendingStatus's answer that the session takes no
@@ -309,24 +313,25 @@ type laneLook struct {
 	noResponses bool
 }
 
-// look observes the runtime, gates content on the row (session.ContentGate,
-// for any content and for the drain reminder's notice) and on the live
-// incarnation, and, for a running runtime of the incarnation the row names,
-// resolves its handle once and reads the pending interaction through it,
-// and, when some content may reach it, the session's turns (with withTurns)
-// and the boundary. The boundary is the quiescence rule for a keystroke-mode
-// runtime, and for a protocol-mode one its turns: never the quiescence rule.
-// The content gate does not hold control (DES-O1 I7, §10.5): a draining or
-// held session blocked on a prompt still has it read, so a respond can
-// answer it. A running live runtime of another incarnation reads
-// lanePendingUnknown: nothing looked, so a respond waits rather than take
-// the prompt for gone.
+// look observes the runtime, gates content on the row and its stop request
+// (session.ContentGate, for any content and for the drain reminder's
+// notice) and on the live incarnation, and, for a running runtime of the
+// incarnation the row names, resolves its handle once and reads the pending
+// interaction through it, and, when some content may reach it, the
+// session's turns (with withTurns) and the boundary. The boundary is the
+// quiescence rule for a keystroke-mode runtime, and for a protocol-mode one
+// its turns: never the quiescence rule. Neither the content gate nor the
+// stop request holds control (DES-O1 I7, §10.5): a draining, held or
+// stop-requested session blocked on a prompt still has it read, so a
+// respond can answer it. A running live runtime of another incarnation
+// reads lanePendingUnknown: nothing looked, so a respond waits rather than
+// take the prompt for gone.
 //
-// A draining row admits the drain notice, so its look reads the boundary
-// whatever its open ops are: the probe does not see them, and a pass with
-// only prompts open pays the reads that its content_block wait does not
-// use. A pass runs only for a row with open ops, so an idle draining row
-// pays nothing.
+// A draining or stop-requested row admits the drain notice, so its look
+// reads the boundary whatever its open ops are: the probe does not see
+// them, and a pass with only prompts open pays the reads that its
+// content_block wait does not use. A pass runs only for a row with open
+// ops, so an idle draining or stop-requested row pays nothing.
 func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, withTurns bool) (laneLook, error) {
 	obs, err := e.observe(e.target)
 	if err != nil {
@@ -334,8 +339,8 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 	}
 	l := laneLook{running: obs.Running && obs.Alive, turn: laneTurnLook{live: opjournal.TriUnknown}}
 	now := e.deps.clk.Now()
-	l.block = session.ContentGate(e.info, l.running, now, session.GateContentAny)
-	l.drainNoticeBlock = session.ContentGate(e.info, l.running, now, session.GateContentDrainNotice)
+	l.block = session.ContentGate(e.info, e.stop, l.running, now, session.GateContentAny)
+	l.drainNoticeBlock = session.ContentGate(e.info, e.stop, l.running, now, session.GateContentDrainNotice)
 	matches := false
 	if l.running {
 		if matches, err = e.matches(e.target, obs); err != nil {
@@ -378,8 +383,26 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 	l.boundary = opjournal.TriNo
 	if e.idle(e.target, obs) {
 		l.boundary = opjournal.TriYes
+	} else {
+		l.boundaryAt = e.quiescenceDeadline(obs)
 	}
 	return l, nil
+}
+
+// quiescenceDeadline is the instant a keystroke runtime that e.idle found
+// busy turns idle by itself: its last activity plus the quiescence window.
+// It is zero where that is not the only thing keeping the boundary closed or
+// is not known: an ACP session, no known activity, and a deadline at or
+// before now (the window has run out, so something else keeps it closed).
+func (e *conversationLaneExec) quiescenceDeadline(obs worker.LiveObservation) time.Time {
+	if e.target.sessionTransport() == "acp" || obs.LastActivity == nil || obs.LastActivity.IsZero() {
+		return time.Time{}
+	}
+	at := obs.LastActivity.Add(defaultNudgePollQuiescence)
+	if !at.After(e.now()) {
+		return time.Time{}
+	}
+	return at
 }
 
 // caps are the runtime's capabilities for conv. Content is live for a

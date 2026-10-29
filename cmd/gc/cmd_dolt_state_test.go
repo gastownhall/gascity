@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -1479,9 +1481,8 @@ func TestDoltStateProbeManagedCmdReportsDeletedOwnedHolder(t *testing.T) {
 	if err := os.MkdirAll(layout.DataDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(data dir): %v", err)
 	}
-	port := reserveRandomTCPPort(t)
 	deletedPath := filepath.Join(layout.DataDir, "held.db")
-	proc := startOpenFileAndTCPListenerProcess(t, deletedPath, port, layout.DataDir)
+	proc, port := startOpenFileAndTCPListenerProcess(t, deletedPath, layout.DataDir)
 	defer func() {
 		_ = proc.Process.Kill()
 		_, _ = proc.Process.Wait()
@@ -1785,9 +1786,8 @@ esac
 `)
 	t.Setenv("INVOCATION_FILE", invocationFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	port := reserveRandomTCPPort(t)
 	deletedPath := filepath.Join(layout.DataDir, "held.db")
-	proc := startOpenFileAndTCPListenerProcess(t, deletedPath, port, "")
+	proc, port := startOpenFileAndTCPListenerProcess(t, deletedPath, "")
 	defer func() {
 		_ = proc.Process.Kill()
 		_, _ = proc.Process.Wait()
@@ -2114,60 +2114,120 @@ while True:
 	}
 }
 
-func startOpenFileAndTCPListenerProcess(t *testing.T, path string, port int, dir string) *exec.Cmd {
+// startOpenFileAndTCPListenerProcess starts a python3 child that holds path
+// open and listens on a loopback TCP port, and returns the child and that
+// port. The child binds port 0 and reports the port it got. A port reserved by
+// bind-and-close beforehand can be taken by a concurrent test action before
+// the child binds it, since remote test actions share one loopback port
+// space, and the child then dies with EADDRINUSE (ga-bd8cn1x).
+func startOpenFileAndTCPListenerProcess(t *testing.T, path string, dir string) (*exec.Cmd, int) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	proc, port, err := startOpenFileAndTCPListener(path, dir, filepath.Join(t.TempDir(), "listener.stderr"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	readyPath := filepath.Join(t.TempDir(), "ready")
+	return proc, port
+}
+
+// startOpenFileAndTCPListener starts the child for
+// startOpenFileAndTCPListenerProcess with its stderr in stderrPath. The child
+// prints its port on stdout once it listens. A child that exits first closes
+// stdout, which ends the wait at once, and the error carries its exit status
+// and stderr.
+func startOpenFileAndTCPListener(path, dir, stderrPath string) (*exec.Cmd, int, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, 0, err
+	}
+	stderrFile, err := os.Create(stderrPath)
+	if err != nil {
+		return nil, 0, fmt.Errorf("create open-file listener stderr: %w", err)
+	}
+	defer stderrFile.Close() //nolint:errcheck // the child writes through its own descriptor
+	portR, portW, err := os.Pipe()
+	if err != nil {
+		return nil, 0, fmt.Errorf("create open-file listener port pipe: %w", err)
+	}
+	defer portR.Close() //nolint:errcheck // read end of the port pipe
 	proc := exec.Command("python3", "-c", `
-import os
 import signal
 import socket
 import sys
 import time
 path = sys.argv[1]
-port = int(sys.argv[2])
-ready_path = sys.argv[3]
 f = open(path, "a+")
 f.write("held")
 f.flush()
 sock = socket.socket()
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-sock.bind(("127.0.0.1", port))
+sock.bind(("127.0.0.1", 0))
 sock.listen(5)
-with open(ready_path, "w") as f_ready:
-    f_ready.write("ready\n")
+print(sock.getsockname()[1], flush=True)
 def _stop(*_args):
     raise SystemExit(0)
 signal.signal(signal.SIGTERM, _stop)
 signal.signal(signal.SIGINT, _stop)
 while True:
     time.sleep(1)
-`, path, strconv.Itoa(port), readyPath)
+`, path)
+	proc.Stdout = portW
+	proc.Stderr = stderrFile
 	if strings.TrimSpace(dir) != "" {
 		proc.Dir = dir
 	}
-	if err := proc.Start(); err != nil {
-		t.Fatalf("start open-file listener process: %v", err)
+	err = proc.Start()
+	_ = portW.Close()
+	if err != nil {
+		return nil, 0, fmt.Errorf("start open-file listener process: %w", err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
-			if _, readyErr := os.Stat(readyPath); readyErr == nil {
-				conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
-				if err == nil {
-					_ = conn.Close()
-					return proc
-				}
-			}
+	type portLine struct {
+		text string
+		err  error
+	}
+	lines := make(chan portLine, 1)
+	go func() {
+		text, err := bufio.NewReader(portR).ReadString('\n')
+		lines <- portLine{text: text, err: err}
+	}()
+	var readyErr error
+	select {
+	case line := <-lines:
+		if line.err != nil {
+			readyErr = fmt.Errorf("child closed stdout before printing its port: %w", line.err)
+		} else if port, err := strconv.Atoi(strings.TrimSpace(line.text)); err != nil {
+			readyErr = fmt.Errorf("parse port line %q: %w", line.text, err)
+		} else {
+			return proc, port, nil
 		}
-		time.Sleep(25 * time.Millisecond)
+	case <-time.After(5 * time.Second):
+		readyErr = errors.New("child printed no port within 5s")
 	}
 	_ = proc.Process.Kill()
-	_ = proc.Wait()
-	t.Fatalf("open file listener %s on %d did not become ready", path, port)
-	return nil
+	waitErr := proc.Wait()
+	stderr, err := os.ReadFile(stderrPath)
+	if err != nil {
+		stderr = []byte(err.Error())
+	}
+	return nil, 0, fmt.Errorf("open file listener %s did not become ready: %w (child exit: %w); child stderr:\n%s", path, readyErr, waitErr, stderr)
+}
+
+// TestStartOpenFileAndTCPListenerReportsChildStderrWhenChildExits pins the
+// fixture's failure report: a child that dies before it listens ends the wait
+// at once, and the error carries its exit status and stderr (ga-bd8cn1x).
+func TestStartOpenFileAndTCPListenerReportsChildStderrWhenChildExits(t *testing.T) {
+	// A directory cannot be opened for append, so the child exits with a
+	// traceback before it binds.
+	path := t.TempDir()
+	proc, _, err := startOpenFileAndTCPListener(path, "", filepath.Join(t.TempDir(), "listener.stderr"))
+	if err == nil {
+		_ = proc.Process.Kill()
+		_ = proc.Wait()
+		t.Fatal("startOpenFileAndTCPListener succeeded, want the child's open failure")
+	}
+	for _, want := range []string{"closed stdout before printing its port", "exit status 1", "IsADirectoryError"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not mention %q:\n%v", want, err)
+		}
+	}
 }
 
 func processHoldsDeletedPath(pid int, targetPath string) bool {
@@ -2777,9 +2837,8 @@ esac
 	t.Setenv("INVOCATION_FILE", invocationFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	port := reserveRandomTCPPort(t)
 	deletedPath := filepath.Join(layout.DataDir, "held.db")
-	proc := startOpenFileAndTCPListenerProcess(t, deletedPath, port, "")
+	proc, port := startOpenFileAndTCPListenerProcess(t, deletedPath, "")
 	t.Cleanup(func() {
 		_ = proc.Process.Kill()
 		_, _ = proc.Process.Wait()

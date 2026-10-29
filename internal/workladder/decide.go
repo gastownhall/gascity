@@ -14,7 +14,10 @@ import (
 // it; settle a pending release; then, only with the gate open, the runtime
 // alive and the seat quiet, act on the due entries, earliest first: at most
 // one Nudge per pass, and none within Base of the seat's last (WL3). An entry
-// whose live read could not tell (obs.Hold) waits, kept as it is.
+// whose live read could not tell (obs.Hold) waits, kept as it is, and so
+// does an entry whose last nudge's delivery is unsettled (a NoticeMark),
+// which also holds the seat's nudge slot (WN1). A mark ends with its episode:
+// a new generation, a rung rise and a progress reset clear it.
 func Decide(prev Record, obs Observation, p Policy) Decision {
 	p = p.withDefaults()
 	now := obs.Now
@@ -43,10 +46,10 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 			e = ne
 		default:
 			if newGen {
-				e.Attempts, e.Paused, e.Since, e.Unreleased, e.Refused = 0, 0, now, false, 0
+				e.Attempts, e.Paused, e.Since, e.Unreleased, e.Refused, e.Notice = 0, 0, now, false, 0, NoticeMark{}
 			}
 			if init > e.Rung {
-				e.Rung, e.Attempts, e.Paused, e.Since, e.Escalated, e.Unreleased, e.Refused = init, 0, 0, now, false, false, 0
+				e.Rung, e.Attempts, e.Paused, e.Since, e.Escalated, e.Unreleased, e.Refused, e.Notice = init, 0, 0, now, false, false, 0, NoticeMark{}
 				if init == RungStarted {
 					e.Seed = src
 				}
@@ -85,8 +88,8 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 	degraded := obs.Provider.Degraded
 	order := make([]int, 0, len(d.Next.Entries))
 	for i, e := range d.Next.Entries {
-		if obs.Hold[e.Key] || (d.Next.Release != nil && d.Next.Release.Key == e.Key) {
-			continue // a read that could not tell, or being released
+		if obs.Hold[e.Key] || (d.Next.Release != nil && d.Next.Release.Key == e.Key) || !e.Notice.IsZero() {
+			continue // a read that could not tell, being released, or its last nudge's delivery not yet settled
 		}
 		if !p.dueAt(e, degraded).After(now) {
 			order = append(order, i)
@@ -95,8 +98,9 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 	slices.SortStableFunc(order, func(a, b int) int {
 		return p.dueAt(d.Next.Entries[a], degraded).Compare(p.dueAt(d.Next.Entries[b], degraded))
 	})
-	// The seat's nudge slot: one per pass, and none within Base of its last.
-	nudged := !d.Next.LastNudge.IsZero() && now.Sub(d.Next.LastNudge) < p.Base
+	// The seat's nudge slot: one per pass, none within Base of its last, and
+	// none while a nudge's delivery is unsettled (a notice mark, WN1).
+	nudged := anyMarked(d.Next) || (!d.Next.LastNudge.IsZero() && now.Sub(d.Next.LastNudge) < p.Base)
 	for _, i := range order {
 		e := &d.Next.Entries[i]
 		nudge := func(paused bool) {
@@ -193,14 +197,14 @@ func (p Policy) progressReset(e Entry, obs Observation) Entry {
 		obs.LastActivity.Before(e.Last.Add(p.ProgressReset)) {
 		return e
 	}
-	e.Attempts, e.Paused, e.Unreleased, e.Refused, e.Since = 0, 0, false, 0, minTime(obs.LastActivity, obs.Now)
+	e.Attempts, e.Paused, e.Unreleased, e.Refused, e.Since, e.Notice = 0, 0, false, 0, minTime(obs.LastActivity, obs.Now), NoticeMark{}
 	return e
 }
 
 // clampEntry pulls e's times from a clock that ran ahead back to now, so a
 // skewed stamp cannot hold the entry back by its skew.
 func clampEntry(e Entry, now time.Time) Entry {
-	e.Since, e.Last, e.RecycleAt = minTime(e.Since, now), minTime(e.Last, now), minTime(e.RecycleAt, now)
+	e.Since, e.Last, e.RecycleAt, e.Notice.At = minTime(e.Since, now), minTime(e.Last, now), minTime(e.RecycleAt, now), minTime(e.Notice.At, now)
 	return e
 }
 
@@ -259,11 +263,16 @@ func sameRecord(a, b Record) bool {
 		y := b.Entries[i]
 		if x.Key != y.Key || x.Kind != y.Kind || x.Rung != y.Rung || x.Attempts != y.Attempts || x.Paused != y.Paused ||
 			x.Recycles != y.Recycles || x.Escalated != y.Escalated || x.Seed != y.Seed || x.Unreleased != y.Unreleased ||
-			x.Refused != y.Refused || !x.Since.Equal(y.Since) || !x.Last.Equal(y.Last) || !x.Next.Equal(y.Next) || !x.RecycleAt.Equal(y.RecycleAt) {
+			x.Refused != y.Refused || !sameMark(x.Notice, y.Notice) || !x.Since.Equal(y.Since) || !x.Last.Equal(y.Last) || !x.Next.Equal(y.Next) || !x.RecycleAt.Equal(y.RecycleAt) {
 			return false
 		}
 	}
 	return true
+}
+
+// sameMark reports whether a and b store the same notice mark.
+func sameMark(a, b NoticeMark) bool {
+	return a.Op == b.Op && a.Paused == b.Paused && a.At.Equal(b.At)
 }
 
 // outstanding is ws deduplicated by key (the first wins) in key order.
@@ -335,7 +344,9 @@ func ReleaseUnfinished(r Record, key ClaimKey, gen int64, now time.Time) (Record
 
 // ReleaseFoundStarted is r after the release of key at gen found, on its
 // live read, that the claim was handed to a turn of the seat (by src): the
-// release cleared, and the entry started, with a fresh count.
+// release cleared, and the entry started, with a fresh count. As a rung rise
+// does, the new episode drops the old one's notice mark and refusals: the
+// caller proposes no notice for that mark and withdraws one it proposed.
 func ReleaseFoundStarted(r Record, key ClaimKey, gen int64, src StartSource, now time.Time) (Record, bool) {
 	r, ok := ClearRelease(r, key, gen)
 	if !ok {
@@ -344,35 +355,43 @@ func ReleaseFoundStarted(r Record, key ClaimKey, gen int64, src StartSource, now
 	r.Entries = slices.Clone(r.Entries)
 	if i := slices.IndexFunc(r.Entries, func(e Entry) bool { return e.Key == key }); i >= 0 && r.Entries[i].Rung < RungStarted {
 		e := &r.Entries[i]
-		e.Rung, e.Attempts, e.Paused, e.Since, e.Escalated, e.Unreleased, e.Seed = RungStarted, 0, 0, now, false, false, src
+		e.Rung, e.Attempts, e.Paused, e.Since, e.Escalated, e.Unreleased, e.Refused, e.Notice, e.Seed = RungStarted, 0, 0, now, false, false, 0, NoticeMark{}, src
 	}
 	return r, true
 }
 
-// refusedAlertAt is how many nudges in a row a seat refuses before the one
-// nudge_refused alert.
-const refusedAlertAt = 3
+// refusedAlertAt is how many nudges in a row a seat refuses before its first
+// nudge_refused alert, and refusedRealertEvery how many more it refuses
+// before each repeat while the refusals go on (refusalAlerts). Refused
+// nudges are paced at PausedCap or slower, so the repeat comes about every
+// Cap at the default policy: hourly, the ladder's own steady pace.
+const (
+	refusedAlertAt      = 3
+	refusedRealertEvery = int(DefaultCap / DefaultPausedCap)
+)
+
+// refusalAlerts reports whether refused, a seat's refusals in a row, is a
+// count that raises the nudge_refused alert: the refusedAlertAt-th, then
+// every refusedRealertEvery-th after it, so a seat that keeps refusing is
+// re-alerted, never silenced after one alert.
+func refusalAlerts(refused int) bool {
+	return refused >= refusedAlertAt && (refused-refusedAlertAt)%refusedRealertEvery == 0
+}
 
 // NudgeRefused is r after the seat could not take the nudge of attempt
 // about key that landed at now (a permission prompt, the runtime
 // unavailable): the attempt is re-counted as paused, so it moves nothing
 // toward escalation, and the entry backs off to PausedCap until a nudge is
-// taken. alert is true exactly when the refusals reach refusedAlertAt: the
-// caller raises one nudge_refused alert. ok is false when r no longer holds
-// that attempt.
+// taken. alert is true when the refusals reach a count refusalAlerts names:
+// the caller raises a nudge_refused alert. ok is false when r no longer
+// holds that attempt.
 func NudgeRefused(r Record, key ClaimKey, attempt int, now time.Time) (out Record, alert, ok bool) {
 	i := slices.IndexFunc(r.Entries, func(e Entry) bool { return e.Key == key })
 	if i < 0 || !r.Entries[i].Last.Equal(now) || r.Entries[i].Attempts != attempt {
 		return r, false, false
 	}
 	r.Entries = slices.Clone(r.Entries)
-	e := &r.Entries[i]
-	if e.Attempts > 0 {
-		e.Attempts--
-	}
-	e.Paused++
-	e.Refused++
-	return r, e.Refused == refusedAlertAt, true
+	return r, recountPaused(&r.Entries[i], true), true
 }
 
 // NudgeTaken is r after the seat took a nudge about key: its refusals end.

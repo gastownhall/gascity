@@ -64,10 +64,9 @@ args = ["notes-mcp"]
 	if err != nil {
 		t.Fatalf("ReadFile(.gitignore): %v", err)
 	}
-	for _, want := range managedMCPGitignoreEntries {
-		if !strings.Contains(string(gitignore), want) {
-			t.Fatalf(".gitignore missing %q:\n%s", want, string(gitignore))
-		}
+	// gc ignores the file it projected, and only that file.
+	if !strings.Contains(string(gitignore), "\n/.gemini/settings.json\n") || strings.Contains(string(gitignore), ".mcp.json") {
+		t.Fatalf(".gitignore = %q, want only the projected /.gemini/settings.json", string(gitignore))
 	}
 }
 
@@ -230,11 +229,11 @@ args = ["beta-notes"]
 	// Simulate alpha invoking stage-2 pre-start: resolve alpha's workdir
 	// and projection, then validate against other claimants.
 	alphaWorkdir := filepath.Join(cityPath, ".gc", "worktrees", "alpha")
-	_, alphaProj, err := resolveAgentMCPProjection(cityPath, cfg, &cfg.Agents[0], "alpha", alphaWorkdir, "gemini")
+	alpha, err := resolveAgentMCPProjection(cityPath, cfg, &cfg.Agents[0], "alpha", alphaWorkdir, "gemini", false)
 	if err != nil {
 		t.Fatalf("resolveAgentMCPProjection(alpha): %v", err)
 	}
-	if err := validateStage2TargetClaimants(cityPath, cfg, &cfg.Agents[0], alphaProj, stubLookPath); err != nil {
+	if err := validateStage2TargetClaimants(cityPath, cfg, &cfg.Agents[0], alpha.Projection, stubLookPath); err != nil {
 		t.Fatalf("validateStage2TargetClaimants must allow disjoint-workdir peers, got: %v", err)
 	}
 }
@@ -276,11 +275,11 @@ args = ["deputy-notes"]
 	}
 
 	sharedWorkdir := filepath.Join(cityPath, shared)
-	_, mayorProj, err := resolveAgentMCPProjection(cityPath, cfg, &cfg.Agents[0], "mayor", sharedWorkdir, "gemini")
+	mayor, err := resolveAgentMCPProjection(cityPath, cfg, &cfg.Agents[0], "mayor", sharedWorkdir, "gemini", false)
 	if err != nil {
 		t.Fatalf("resolveAgentMCPProjection(mayor): %v", err)
 	}
-	if err := validateStage2TargetClaimants(cityPath, cfg, &cfg.Agents[0], mayorProj, stubLookPath); err != nil {
+	if err := validateStage2TargetClaimants(cityPath, cfg, &cfg.Agents[0], mayor.Projection, stubLookPath); err != nil {
 		t.Fatalf("mixed-provider peers in same workdir must not conflict, got: %v", err)
 	}
 }
@@ -319,11 +318,11 @@ args = ["beta-notes"]
 	}
 
 	alphaWorkdir := filepath.Join(cityPath, shared)
-	_, alphaProj, err := resolveAgentMCPProjection(cityPath, cfg, &cfg.Agents[0], "alpha", alphaWorkdir, "gemini")
+	alpha, err := resolveAgentMCPProjection(cityPath, cfg, &cfg.Agents[0], "alpha", alphaWorkdir, "gemini", false)
 	if err != nil {
 		t.Fatalf("resolveAgentMCPProjection(alpha): %v", err)
 	}
-	err = validateStage2TargetClaimants(cityPath, cfg, &cfg.Agents[0], alphaProj, stubLookPath)
+	err = validateStage2TargetClaimants(cityPath, cfg, &cfg.Agents[0], alpha.Projection, stubLookPath)
 	if err == nil {
 		t.Fatal("expected conflict for two agents with same workdir and divergent MCP, got nil")
 	}
@@ -400,12 +399,14 @@ url = "http://localhost:3100/mcp/kb"
 		Implicit:     true,
 	}
 
-	catalog, projection, err := resolveAgentMCPProjection(
+	mcp, err := resolveAgentMCPProjection(
 		cityPath, cfg, implicit,
 		"control-dispatcher",
 		filepath.Join(cityPath, ".gc", "control-dispatcher"),
 		"", // empty providerKind matches the bug scenario
+		false,
 	)
+	catalog, projection := mcp.Catalog, mcp.Projection
 	if err != nil {
 		t.Fatalf("resolveAgentMCPProjection(implicit) returned error: %v", err)
 	}
@@ -438,12 +439,14 @@ url = "http://localhost:3100/mcp/kb"
 		Implicit:     true,
 	}
 
-	catalog, projection, err := resolveAgentMCPProjection(
+	mcp, err := resolveAgentMCPProjection(
 		cityPath, cfg, implicit,
 		config.ControlDispatcherAgentName,
 		filepath.Join(cityPath, ".gc", "control-dispatcher"),
 		"claude",
+		false,
 	)
+	catalog, projection := mcp.Catalog, mcp.Projection
 	if err != nil {
 		t.Fatalf("resolveAgentMCPProjection(implicit with providerKind): %v", err)
 	}

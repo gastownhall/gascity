@@ -43,10 +43,11 @@ func writeDotenv(t *testing.T, content string) string {
 // TestConditionalWritesGraduation proves the graduation forcing function on
 // SYNTHETIC deps.env fixtures: DORMANT when the version anchor is absent (today's
 // real state, beads#4682 untagged — see TestBeadsVersionAnchorPending), ARMED with
-// a concrete version when it lands. When armed, the gate has graduated and S4-T4
-// must flip the Default Off->Auto (FlipDueBy); this test is the seam that arms
-// that work — it exercises the reader on both states without depending on the real
-// (still pending) deps.env.
+// a concrete version when it lands. The Default is already Auto (mc-dpo2b, ahead
+// of the anchor): a store that cannot fence under that builtin default runs as
+// off, quietly, so the default does not wait on bd. The anchor still marks when
+// every supported bd can fence. This test exercises the reader on both states
+// without depending on the real (still pending) deps.env.
 func TestConditionalWritesGraduation(t *testing.T) {
 	t.Parallel()
 	anchor := beadsConditionalWritesSpec().VersionAnchor
@@ -77,8 +78,9 @@ func TestConditionalWritesGraduation(t *testing.T) {
 
 // TestConditionalWritesGraduationRealDepsEnv binds the forcing function to the
 // REAL repo-root deps.env, not a fixture. Today the anchor is absent (dormant):
-// bd's --if-revision support is untagged, so BD_VERSION cannot satisfy the gate
-// and Default stays Off. The moment someone lands the anchor in deps.env this
+// bd's --if-revision support is untagged, so BD_VERSION cannot satisfy the gate,
+// and a bd store runs the builtin Auto default as off. The moment someone lands
+// the anchor in deps.env this
 // test starts validating it: it must be a well-formed version tag, and
 // BD_PREV_VERSION (the minimum-supported bd) must also satisfy it — a fleet
 // where the previous binary predates conditional writes cannot graduate,
@@ -101,7 +103,8 @@ func TestConditionalWritesGraduationRealDepsEnv(t *testing.T) {
 	}
 	if !present {
 		// Dormant, today's real state. Nothing more to check: graduation has
-		// not been declared, so Default Off is correct and S4-T4 stays parked.
+		// not been declared, so a bd store keeps running the Auto default as
+		// off.
 		return
 	}
 	// Armed for real. The declared floor must be a concrete version tag, and

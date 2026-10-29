@@ -92,7 +92,7 @@ type SessionMessageSucceededPayload struct {
 	RequestID          string          `json:"request_id" doc:"Correlation ID from the 202 response."`
 	SessionID          string          `json:"session_id" doc:"Session ID that received the message."`
 	Queued             bool            `json:"queued" doc:"True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h."`
-	WillStart          *bool           `json:"will_start,omitempty" doc:"Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now."`
+	WillStart          *bool           `json:"will_start,omitempty" doc:"Present when the message was queued because the session is not running or is held: whether the controller will start it to deliver the message. False means it will not; will_not_start_reason says why, with the remedy. When the conversation lane delivers messages it is read as the request's settle window ends, and resume: true does not start a session the controller will not start."`
 	WillNotStartReason string          `json:"will_not_start_reason,omitempty" doc:"Why the controller will not start the session for a queued message, with the remedy."`
 	Op                 *ConversationOp `json:"op,omitempty" doc:"The operation the request was recorded as, when it was; on a replay of a finished request the will_start fields are absent."`
 }
@@ -105,8 +105,8 @@ type SessionSubmitSucceededPayload struct {
 	RequestID          string                  `json:"request_id" doc:"Correlation ID from the 202 response."`
 	SessionID          string                  `json:"session_id" doc:"Session ID that received the submission."`
 	Queued             bool                    `json:"queued" doc:"Whether the message was queued for later delivery."`
-	Intent             string                  `json:"intent" doc:"Resolved submit intent (default, follow_up, interrupt_now)."`
-	WillStart          *bool                   `json:"will_start,omitempty" doc:"Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now."`
+	Intent             string                  `json:"intent" doc:"Resolved submit intent (default, follow_up, interrupt_now). When the conversation lane delivers messages a follow_up resolves to default: the lane delivers both at the session's boundary."`
+	WillStart          *bool                   `json:"will_start,omitempty" doc:"Present when the message was queued because the session is not running or is held: whether the controller will start it to deliver the message. False means it will not; will_not_start_reason says why, with the remedy. When the conversation lane delivers messages it is read as the request's settle window ends, and resume: true does not start a session the controller will not start."`
 	WillNotStartReason string                  `json:"will_not_start_reason,omitempty" doc:"Why the controller will not start the session for a queued message, with the remedy."`
 	Interrupt          *SessionSubmitInterrupt `json:"interrupt,omitempty" doc:"What an interrupt_now did about the running turn, on a runtime that reports turns. Absent when no turn fence ran."`
 	Op                 *ConversationOp         `json:"op,omitempty" doc:"The operation the request was recorded as, when it was; on a replay of a finished request the will_start and interrupt fields are absent."`
@@ -291,6 +291,8 @@ func (CityLifecyclePayload) IsEventPayload() {}
 // (BeadCreated, BeadUpdated, BeadClosed, BeadDeleted). The payload carries a
 // full snapshot of the bead as of the event; it is emitted by bd hooks and the
 // beads CachingStore for local writes and reconcile-detected external changes.
+// A bead.deleted may carry only the bead id, when its emitter held no snapshot
+// of the deleted row.
 type BeadEventPayload struct {
 	Bead beads.Bead `json:"bead"`
 }

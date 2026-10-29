@@ -9,7 +9,12 @@ import (
 )
 
 // ManagedMin is the minimum Dolt version required for managed bd/Dolt operation.
-const ManagedMin = "2.1.0"
+//
+// 2.6.0 is the first Dolt release built with a Go toolchain that distrusts the
+// compromised eMudhra CA intermediates, and the Dolt that CI, the contrib/k8s
+// images and the rbe-west workers run, so a managed city gets the dolt_merge()
+// semantics gc is tested against (2.6.0's merge walks the full commit graph).
+const ManagedMin = "2.6.0"
 
 var (
 	// ErrPreRelease reports a Dolt version that is not a final release.

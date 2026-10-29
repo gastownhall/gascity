@@ -194,7 +194,7 @@ func TestSessionControlOpsConcurrentSameKeyStopIsBusy(t *testing.T) {
 
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { firstDone <- e.post(t, "/session/"+info.ID+"/stop", "stop-1", "") }()
-	<-blocking.entered
+	requireProviderEntered(t, blocking.entered, firstDone)
 
 	e.rebuild(t)
 	busy := e.post(t, "/session/"+info.ID+"/stop", "stop-1", "")
@@ -1752,7 +1752,7 @@ func TestSessionControlOpsConcurrentRespondsAnswerOnlyTheirInteraction(t *testin
 
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { firstDone <- e.post(t, "/session/"+info.ID+"/respond", "click-1", `{"action":"approve"}`) }()
-	<-blocking.entered
+	requireProviderEntered(t, blocking.entered, firstDone)
 	recorded := make(chan struct{})
 	e.store.set(func(s *opsTestStore) { s.onOpCreate = func() { close(recorded) } })
 	secondDone := make(chan *httptest.ResponseRecorder, 1)
@@ -2059,6 +2059,50 @@ func TestSessionControlOpsRequireNamedStopRefusesAnInvalidKey(t *testing.T) {
 	}
 	if n := len(e.opRows(t)); n != 0 {
 		t.Fatalf("op rows = %d, want 0", n)
+	}
+}
+
+// A /reset Idempotency-Key in an in-session restart request's key namespace
+// (handoff:, request-restart:) is invalid: gc handoff and gc runtime
+// request-restart keep their keys there for the same restart{fresh} request,
+// so a reset key that spells one would name that request's op under the
+// operator principal and replay it, resetting nothing. require refuses it 422
+// invalid_idempotency_key with no effect; auto resets unrecorded, beside the
+// op the key spells.
+func TestSessionResetRefusesARestartRequestsKeyNamespace(t *testing.T) {
+	for _, key := range []string{legacyop.KeyNamespaceHandoff + "k1", legacyop.KeyNamespaceRequestRestart + "k1"} {
+		for _, mode := range []string{"require", "auto"} {
+			t.Run(key+"/"+mode, func(t *testing.T) {
+				e := newControlOpsEnv(t, "off", mode)
+				info := e.session(t, "Reserved key")
+				spelled := e.seedSyncOp(t, info.ID, opjournal.KindRestart, key, opjournal.Scope{}, resetSessionPolicy, "", legacyop.ExecutorCLI, time.Now())
+				done := opjournal.Outcome{Arm: opjournal.ArmSucceeded, Result: opjournal.Result{Via: legacyop.ViaLegacy}}
+				if _, err := e.opStore(t).Close(spelled.ID, done, string(legacyop.ExecutorCLI)); err != nil {
+					t.Fatal(err)
+				}
+				before := metadataOf(t, e.store, info.ID)
+				rec := e.post(t, "/session/"+info.ID+"/reset", key, "")
+				if mode == "require" {
+					if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "invalid_idempotency_key") {
+						t.Fatalf("status %d: %s, want 422 invalid_idempotency_key", rec.Code, rec.Body.String())
+					}
+					if after := metadataOf(t, e.store, info.ID); !maps.Equal(before, after) {
+						t.Fatalf("the refused reset changed the session row: %v -> %v", before, after)
+					}
+				} else {
+					wantStatus(t, "reset", rec, http.StatusOK)
+					if a := decodeCommandAnswer(t, rec); a.Replayed || a.Op != nil || a.IdempotencyKey != "" {
+						t.Fatalf("answer = %+v, want the reset run unrecorded", a)
+					}
+					if md := metadataOf(t, e.store, info.ID); md["restart_requested"] != "true" || md["continuation_reset_pending"] != "true" {
+						t.Fatalf("session row = %v, want the fresh restart requested", md)
+					}
+				}
+				if n := len(e.opRows(t)); n != 1 {
+					t.Fatalf("op rows = %d, want only the op the key spells", n)
+				}
+			})
+		}
 	}
 }
 
@@ -2403,6 +2447,58 @@ func TestSessionControlOpsAdoptedKillOfAMovedSessionTouchesNothing(t *testing.T)
 			if got := e.fs.sp.CountCalls("Stop", info.SessionName); got != stops {
 				t.Fatalf("Stop calls = %d, want %d: the refused kill stopped the runtime", got, stops)
 			}
+		})
+	}
+}
+
+// An op a crash left open before its legacy effect ran (X12's K1: the row is
+// durable, nothing answered, nothing acted) is adopted by a same-key retry in
+// a new API process, and the adopted retry runs the legacy command: the
+// session is suspended, woken or reset, not only the op closed succeeded at
+// attempt 1.
+func TestSessionControlOpsAdoptedLifecycleCommandReExecutes(t *testing.T) {
+	for _, tc := range []struct {
+		path      string
+		kind      opjournal.Kind
+		policy    opjournal.Policy
+		suspended bool
+		acted     func(t *testing.T, stops int, md map[string]string)
+	}{
+		{"/suspend", opjournal.KindSuspend, opjournal.Policy{}, false, func(t *testing.T, stops int, md map[string]string) {
+			if md["state"] != "suspended" || stops != 1 {
+				t.Fatalf("state %q, %d Stop calls; want suspended by one Stop", md["state"], stops)
+			}
+		}},
+		{"/wake", opjournal.KindWake, opjournal.Policy{}, true, func(t *testing.T, _ int, md map[string]string) {
+			if md["state"] == "suspended" || md["wake_request"] != "explicit" || md["wake_requested_at"] == "" {
+				t.Fatalf("state %q wake_request %q at %q; want the explicit wake recorded", md["state"], md["wake_request"], md["wake_requested_at"])
+			}
+		}},
+		{"/reset", opjournal.KindRestart, resetSessionPolicy, false, func(t *testing.T, _ int, md map[string]string) {
+			if md["restart_requested"] != "true" || md["continuation_reset_pending"] != "true" {
+				t.Fatalf("restart_requested %q continuation_reset_pending %q; want the fresh restart requested", md["restart_requested"], md["continuation_reset_pending"])
+			}
+		}},
+	} {
+		t.Run(strings.TrimPrefix(tc.path, "/"), func(t *testing.T) {
+			e := newControlOpsEnv(t, "off", "auto")
+			info := e.session(t, "Adopted "+tc.path)
+			if tc.suspended {
+				wantStatus(t, "fixture suspend", e.post(t, "/session/"+info.ID+"/suspend", "", ""), http.StatusOK)
+			}
+			stops := e.fs.sp.CountCalls("Stop", info.SessionName)
+			op := e.seedSyncOp(t, info.ID, tc.kind, "k-1", opjournal.Scope{}, tc.policy, "", legacyop.ExecutorAPI, time.Now())
+			e.restart(t)
+			rec := e.post(t, "/session/"+info.ID+tc.path, "k-1", "")
+			wantStatus(t, "adopting retry", rec, http.StatusOK)
+			if a := decodeCommandAnswer(t, rec); a.Replayed {
+				t.Fatalf("adopting retry answered a replay: %+v", a)
+			}
+			got, err := e.opStore(t).Get(op.ID)
+			if err != nil || got.Status != opjournal.StatusClosed || got.Attempt != 1 || got.Outcome.Arm != opjournal.ArmSucceeded {
+				t.Fatalf("adopted op = %+v, %v; want closed succeeded at attempt 1", got, err)
+			}
+			tc.acted(t, e.fs.sp.CountCalls("Stop", info.SessionName)-stops, metadataOf(t, e.store, info.ID))
 		})
 	}
 }

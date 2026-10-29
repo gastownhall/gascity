@@ -294,6 +294,37 @@ func TestDesiredRowLaunchRefresh(t *testing.T) {
 	}
 }
 
+// Kills a key minted under a running provider process (gastownhall/gascity
+// #5439): a keyless row whose state may hold a live process ("", active,
+// awake, creating, draining) gets no key, so the id its SessionStart hook
+// reports is not dropped by the set-once capture; a row with none still gets
+// one.
+func TestDesiredRowIdentitySkipsKeyMintOnLiveRow(t *testing.T) {
+	cfg := identityCity()
+	tp := TemplateParams{TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2, ResolvedProvider: &config.ResolvedProvider{SessionIDFlag: "--session-id"}}
+	raw := rowRefreshKeys{"continuation_epoch": "1", "session_id_flag": "--session-id"}
+	for _, tc := range []struct {
+		state string
+		mint  bool
+	}{
+		{"", false},
+		{"active", false},
+		{"awake", false},
+		{"creating", false},
+		{"draining", false},
+		{"asleep", true}, // a row with no process is minted, as at base
+		{"start-pending", true},
+		{"suspended", true},
+		{"drained", true},
+		{"quarantined", true},
+	} {
+		seat := session.Info{Template: "worker", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "2", AgentName: "worker-2", Type: session.BeadType, MetadataState: tc.state}
+		if id := desiredRowIdentity(cfg, tp, seat, raw); id.NeedsKey != tc.mint {
+			t.Errorf("a keyless row in state %q: NeedsKey %v, want %v", tc.state, id.NeedsKey, tc.mint)
+		}
+	}
+}
+
 // Kills a session key alone left unproposed (the C7d-2 review's H11): a
 // row converged but for the key its provider takes gets the verb, which
 // mints it; with the key, nothing.

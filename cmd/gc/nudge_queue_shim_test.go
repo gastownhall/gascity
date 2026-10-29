@@ -1282,7 +1282,7 @@ func TestNudgeQueueShimMovedWaitReminderAnswersBothShadowReaders(t *testing.T) {
 			if err != nil || !queued {
 				t.Errorf("%s: %s reads the reminder queued-or-resolved = %v, %v; want true", stage, r.name, queued, err)
 			}
-			next, err := nextWaitDeliveryAttempt(r.reader, closedWait)
+			next, err := nextWaitDeliveryAttempt(sessionFrontDoor(f.store), r.reader, closedWait)
 			if err != nil || next != wantNext {
 				t.Errorf("%s: %s next delivery attempt = %q, %v; want %q", stage, r.name, next, err, wantNext)
 			}

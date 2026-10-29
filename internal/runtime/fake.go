@@ -63,7 +63,10 @@ type Fake struct {
 	DialogErrors            map[string]error
 	ResetTurnErrors         map[string]error
 	InterruptBoundaryErrors map[string]error
-	ClearInputErrors        map[string]error
+	// InterruptErrors fail Interrupt and InterruptFenced per session name,
+	// after the call is recorded.
+	InterruptErrors  map[string]error
+	ClearInputErrors map[string]error
 	// BackgroundWorkStopErrors configures Fake.StopBackgroundWork errors per
 	// session name; an absent entry stops successfully.
 	BackgroundWorkStopErrors map[string]error
@@ -208,6 +211,7 @@ func NewFake() *Fake {
 		DialogErrors:            make(map[string]error),
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
+		InterruptErrors:         make(map[string]error),
 		ClearInputErrors:        make(map[string]error),
 		RemoveMetaErrors:        make(map[string]map[string]error),
 		GetMetaErrors:           make(map[string]map[string]error),
@@ -241,6 +245,7 @@ func NewFailFake() *Fake {
 		DialogErrors:            make(map[string]error),
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
+		InterruptErrors:         make(map[string]error),
 		ClearInputErrors:        make(map[string]error),
 		RemoveMetaErrors:        make(map[string]map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
@@ -319,7 +324,7 @@ func (f *Fake) Interrupt(name string) error {
 	if f.broken {
 		return fmt.Errorf("session unavailable")
 	}
-	return nil
+	return f.InterruptErrors[name]
 }
 
 // DismissKnownDialogs records the call and returns the configured result.
@@ -1144,5 +1149,5 @@ func (f *Fake) InterruptFenced(_ context.Context, name string, fence InputFence)
 	if f.broken {
 		return fmt.Errorf("session unavailable")
 	}
-	return nil
+	return f.InterruptErrors[name]
 }

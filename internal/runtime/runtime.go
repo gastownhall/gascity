@@ -33,9 +33,10 @@ var ErrSessionInitializing = errors.New("session is initializing")
 var ErrInteractionUnsupported = errors.New("session interaction is unsupported")
 
 // ErrPendingInteraction reports that a session is showing a blocking
-// interaction (for example a tool permission prompt) that must be answered
-// before any text is delivered to it. Typing into such a prompt can select
-// one of its options, so providers refuse the delivery instead.
+// interaction (a tool permission prompt or an AskUserQuestion question
+// dialog) that must be answered before any text is delivered to it. Typing
+// into such a prompt can select one of its options, so providers refuse the
+// delivery instead.
 var ErrPendingInteraction = errors.New("session has a pending interaction")
 
 // ErrInputClearSkipped reports that a runtime left a session's input box
@@ -660,6 +661,11 @@ type InteractionProvider interface {
 // Implementations must treat timeout as a hard upper bound and return
 // promptly once it expires. Callers may launch WaitForIdle asynchronously and
 // rely on timeout-bounded completion for cleanup.
+//
+// A wait that times out without one reading that showed the session busy
+// (every read failed, or none was definitive) returns an error wrapping
+// [ErrWaitUnobserved] beside its own timeout error; a wait that saw the
+// session busy at least once returns the timeout alone.
 type IdleWaitProvider interface {
 	WaitForIdle(ctx context.Context, name string, timeout time.Duration) error
 }
@@ -708,6 +714,16 @@ type IdleSnapshotProvider interface {
 // message. It is not evidence of a running turn; callers fall back to the
 // signal they would use without a snapshot.
 var ErrIdleIndeterminate = errors.New("session idle state is indeterminate")
+
+// ErrWaitUnobserved reports that an idle or interrupt-boundary wait
+// ([IdleWaitProvider], [InterruptBoundaryWaitProvider]) reached its timeout
+// without one reading that showed the session busy: every read failed, or
+// none was definitive (a pane showing neither its prompt nor a busy
+// indicator, a rollout whose turn activity cannot be told). It is wrapped
+// beside the wait's own timeout error, never returned alone. Such a timeout is
+// no evidence that a turn still runs, so a caller deciding whether to restart
+// a session must not read it as one.
+var ErrWaitUnobserved = errors.New("wait observed no busy session")
 
 // TurnRunningProvider is an optional extension for runtimes that can tell, in
 // one look, whether a session's agent is running a turn now, read the way the
@@ -907,6 +923,10 @@ type InputClearProvider interface {
 // prompt into a session that still intends to finish the interrupted turn. A
 // session that was running no turn records nothing, and its boundary is
 // already reached.
+//
+// A wait that times out without one reading that showed a turn running
+// returns an error wrapping [ErrWaitUnobserved] beside its timeout error, as
+// [IdleWaitProvider] does.
 type InterruptBoundaryWaitProvider interface {
 	WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error
 }

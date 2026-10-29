@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { BrowserRouter } from 'react-router-dom';
+import { BrowserRouter } from 'react-router';
 import { CITY_NAME_RE } from 'gas-city-dashboard-shared';
 import type { CityInfo } from 'gas-city-dashboard-shared/gc-supervisor';
 import { App } from './App';
@@ -126,10 +126,7 @@ export function CityBootstrap() {
     // route tree mounts. Synchronous so the first paint's fetches are scoped.
     setActiveCity(parsed.cityName);
     return (
-      <BrowserRouter
-        basename={parsed.basename}
-        future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-      >
+      <BrowserRouter basename={parsed.basename}>
         <App />
       </BrowserRouter>
     );

@@ -94,6 +94,9 @@ func (m controllerHostingMode) known() bool {
 type controllerIdentityReply struct {
 	PID         int                   `json:"pid"`
 	HostingMode controllerHostingMode `json:"hosting_mode"`
+	// SessionReconciler is the session reconciler the controller latched at
+	// boot ("legacy" or "v2"); empty from a controller that predates it.
+	SessionReconciler string `json:"session_reconciler,omitempty"`
 }
 
 type sessionCircuitResetRequest struct {
@@ -178,9 +181,11 @@ func startControllerSocket(
 // handleControllerConn reads from a connection and dispatches commands.
 // Supported commands: "stop" (shutdown), "stop-force" (shutdown without
 // interrupt grace), "ping" (legacy liveness check, returns numeric PID),
-// "identify" (typed process identity), "converge:{json}" (convergence
-// commands routed to event loop), "v2-pass" (the v2 planner's last pass,
-// for doctor), "ledger-feed" (the journal feeds' status, for doctor),
+// "identify" (typed process identity and the latched session reconciler),
+// "converge:{json}" (convergence commands routed to event loop),
+// "reconciler-mode" (the session reconciler this controller latched, for
+// lane passes outside it), "v2-pass" (the v2 planner's last pass, for
+// doctor), "ledger-feed" (the journal feeds' status, for doctor),
 // "lane:<conversation>[:<row id>[,<row id>...]]" (a conversation-lane
 // doorbell naming the journal rows to refresh, replying ok, "ok, rows
 // waiting for a retry: <n>", no-host or refused <reason>; laneReplyPoked
@@ -217,7 +222,7 @@ func handleControllerConn(
 		case line == "ping":
 			fmt.Fprintf(conn, "%d\n", os.Getpid()) //nolint:errcheck // best-effort
 		case line == controllerIdentityCommand:
-			writeJSONLine(conn, controllerIdentityReply{PID: os.Getpid(), HostingMode: hostingMode})
+			writeJSONLine(conn, controllerIdentityReply{PID: os.Getpid(), HostingMode: hostingMode, SessionReconciler: wake.latchedModeName()})
 		case line == "poke" || strings.HasPrefix(line, pokeKeyedCommandPrefix):
 			// "poke" or "poke:<json key>" (see reconcile_enqueue.go): a
 			// non-blocking enqueue for event-driven wake, e.g. after sling
@@ -250,6 +255,10 @@ func handleControllerConn(
 			}
 		case line == "trace-status":
 			handleTraceStatusSocketCmd(conn, cityPath)
+		case line == reconcilerModeCommand:
+			if reply, ok := reconcilerModeReplyFor(wake); ok {
+				writeJSONLine(conn, reply)
+			}
 		case line == v2PassCommand:
 			writeJSONLine(conn, wake.v2PassStatus(time.Now()))
 		case line == ledgerFeedStatusCommand:
@@ -1533,6 +1542,7 @@ func runController(
 	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
 	telemetry.RecordControllerLifecycle(context.Background(), "started")
 	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout
+	warnBdInventoryAtControllerStart(cityPath, cfg, rec)
 
 	cr, err := newCityRuntime(wiring.runtimeParams(CityRuntimeParams{
 		CityPath:                cityPath,
@@ -1588,18 +1598,16 @@ func runController(
 	// Best-effort — a sweep failure must never block startup, and the lazy
 	// reclaim path still releases such claims when the configured identity
 	// reclaims its name.
-	if cs.cityBeadStore != nil {
-		if released, err := sessionpkg.ReleaseStaleConfiguredNameClaims(cs.cityBeadStore, cfg, cityName); err != nil {
-			fmt.Fprintf(stderr, "controller: stale name-claim sweep: %v\n", err) //nolint:errcheck // best-effort stderr
-		} else if released > 0 {
-			fmt.Fprintf(stderr, "controller: released %d stale configured name claim(s) at startup\n", released) //nolint:errcheck // best-effort stderr
-		}
+	if released, err := releaseStaleNameClaimsAtStartup(cs, cfg, cityName); err != nil {
+		fmt.Fprintf(stderr, "controller: stale name-claim sweep: %v\n", err) //nolint:errcheck // best-effort stderr
+	} else if released > 0 {
+		fmt.Fprintf(stderr, "controller: released %d stale configured name claim(s) at startup\n", released) //nolint:errcheck // best-effort stderr
 	}
 
 	cs.startBeadEventWatcher(ctx)
 	cs.startAutocloseSweep(ctx)
 	cs.startOpSweep(ctx)
-	cs.startConversationLaneHost(ctx)
+	cs.startConversationLaneHost(ctx, wiring.mode)
 	cs.startEmergencyEventRelay(ctx)
 	cs.startMaintenanceLoop(ctx)
 
@@ -1720,4 +1728,24 @@ func (r *singleCityStateResolver) CityState(name string) api.State {
 		return r.state
 	}
 	return nil
+}
+
+// releaseStaleNameClaimsAtStartup is the one-time startup sweep that releases
+// the runtime name claims closed configured named-session beads still hold
+// (ga-n2d Gap C), run by both the standalone controller and the supervisor.
+//
+// It sweeps the SESSIONS store. Session beads are session class, so on a split
+// city they live only in the class binding; the sweep used to read the work
+// store and was a silent no-op there, leaving only the lazy reclaim (write-audit
+// B8). On a single-store city the sessions store is the work store, so nothing
+// changes.
+func releaseStaleNameClaimsAtStartup(cs *controllerState, cfg *config.City, cityName string) (int, error) {
+	if cs == nil {
+		return 0, nil
+	}
+	store := cs.SessionsBeadStore().Store
+	if store == nil {
+		return 0, nil
+	}
+	return sessionpkg.ReleaseStaleConfiguredNameClaims(store, cfg, cityName)
 }

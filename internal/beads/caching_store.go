@@ -36,7 +36,10 @@ type CachingStore struct {
 	// eventPrefixes, when set, are the id namespaces whose bead events this
 	// cache applies, in place of idPrefix (WithEventIDPrefixes).
 	eventPrefixes []string
-	epoch         uint64 // names this instance in every CacheRevision it issues
+	// logicalReadTier, when set, answers a read left at the zero tier
+	// (TierIssues) across both tiers (WithLogicalReadTier).
+	logicalReadTier bool
+	epoch           uint64 // names this instance in every CacheRevision it issues
 	// reconcileGate, when set, is asked before each periodic reconcile; a
 	// false answer skips that cycle (WithReconcileGate).
 	reconcileGate func() bool

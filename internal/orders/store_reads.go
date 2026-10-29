@@ -407,7 +407,17 @@ func (s *Store) LastRun(name string) (time.Time, error) {
 	label := labelOrderRunPrefix + name
 	var latest time.Time
 	for _, store := range s.mixedLegStores() {
-		results, err := lastRunRecords(store, label, 1)
+		// One leg of a federation: an order's run evidence is a tracking bead
+		// (orders), a wisp or graph.v2 root (graph) or, for a v1 poured
+		// formula, a work-class root on the work leg the dispatcher's gate
+		// adds. Each leg is read by the run label; a miss on one is covered
+		// by the leg that holds the row.
+		var results []beads.Bead
+		err := beads.FederatedRead(func() error {
+			var readErr error
+			results, readErr = lastRunRecords(store, label, 1)
+			return readErr
+		})
 		if err != nil {
 			if len(results) == 0 {
 				return time.Time{}, err

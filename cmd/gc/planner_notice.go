@@ -3,7 +3,8 @@ package main
 // Planner notices as conversation-lane ops (DES-O1 §9, OJ-14).
 //
 // The controller's planner reminders (the claim, continuation and execution
-// backstops, the warm-bind claim nudge and the drain reminder) keep their pacing markers, but
+// backstops, the warm-bind claim nudge, the drain reminder and v2's work
+// ladder, work_ladder_notice.go) keep their pacing markers, but
 // when the controller's lane host executes message ops ([ops] authoritative
 // lists message) they stop typing into the runtime themselves: each reminder
 // becomes one message{notice, boundary, wake: live_only} op that the lane
@@ -43,8 +44,9 @@ package main
 // reaching the next incarnation.
 //
 // The drain reminder is a planner notice too, though its audience is a row
-// in state=draining, which the lane's content gate (I7, session.ContentGate)
-// holds all other content from: the gate admits the drain reminder's notice
+// in drain (state=draining, or v2's stop request at its generation), which
+// the lane's content gate (I7, session.ContentGate) holds all other content
+// from: the gate admits the drain reminder's notice
 // (session.GateContentDrainNotice, laneDrainNoticeClass) and nothing else. A
 // row the gate holds the notice from for another reason is nudged directly
 // (deliverDrainReminder).

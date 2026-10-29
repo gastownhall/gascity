@@ -820,6 +820,19 @@ func (s *emittingClassStore) DeleteBatch(ids []string) error {
 	return nil
 }
 
+// GetExactBatch forwards the engine's exact batch read (beads.ExactBatchGetter).
+// It exists for the reason DepListBatch does: a silent wrapper would send every
+// by-id verdict read (beads.GetMany) of a CLI-held binding one Get at a time.
+// An engine without one (SQLite) reports beads.ErrExactBatchGetUnsupported, and
+// the caller reads per id, as over a wrapper without the method.
+func (s *emittingClassStore) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	getter, ok := s.Store.(beads.ExactBatchGetter)
+	if !ok {
+		return nil, nil, beads.ErrExactBatchGetUnsupported
+	}
+	return getter.GetExactBatch(ids)
+}
+
 // DepListBatch forwards the batched dep-edge read.
 //
 // It emits nothing because it writes nothing — but it has to exist, because the
@@ -832,6 +845,27 @@ func (s *emittingClassStore) DepListBatch(ids []string) (map[string][]beads.Dep,
 		return nil, beads.ErrDepListBatchUnsupported
 	}
 	return batch.DepListBatch(ids)
+}
+
+// StrandsAbsentTargets answers for the wrapped engine
+// (beads.AbsentBlockedReader): true over SQLite, false over native Dolt, which
+// reads an absent target as external and strands nothing.
+func (s *emittingClassStore) StrandsAbsentTargets() bool {
+	_, ok := beads.ReadyBlockedByAbsentFor(s.Store)
+	return ok
+}
+
+// ReadyBlockedByAbsent forwards the absent-blocker listing
+// (beads.AbsentBlockedReader). It emits nothing because it writes nothing, and
+// it exists for the reason DepListBatch does: without it `gc ready` could not
+// see a graph row the SQLite binding strands behind a blocker held in the work
+// store, so that row would wait forever after its blocker closed.
+func (s *emittingClassStore) ReadyBlockedByAbsent(query beads.ReadyQuery) ([]beads.Bead, error) {
+	reader, ok := beads.ReadyBlockedByAbsentFor(s.Store)
+	if !ok {
+		return nil, nil
+	}
+	return reader.ReadyBlockedByAbsent(query)
 }
 
 // ReadyOrdered forwards a bounded ordered ready read (beads.OrderedReadyReader).

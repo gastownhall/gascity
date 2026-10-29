@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/bazeltest"
+	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
 )
 
 func TestSessionScriptStartProjectsManagedPayloadPortToPodAlias(t *testing.T) {
@@ -34,6 +35,51 @@ func TestSessionScriptStartProjectsManagedPayloadPortToPodAlias(t *testing.T) {
 	}
 	if got := result.manifestEnv["BEADS_DOLT_SERVER_PORT"]; got != podManagedDoltPort {
 		t.Fatalf("manifest BEADS_DOLT_SERVER_PORT = %q, want %q", got, podManagedDoltPort)
+	}
+}
+
+// TestSessionScriptStartProjectsWithheldManagedPortToPodAlias pins the exec
+// adapter's half of the gastownhall/gascity#1656 withhold: a session payload
+// whose managed-local port gc withheld carries no host or port, only
+// GC_DOLT_MANAGED_LOCAL=1, and must reach the in-cluster managed service like
+// the port-only payload does, without the controller-side marker.
+func TestSessionScriptStartProjectsWithheldManagedPortToPodAlias(t *testing.T) {
+	result := runSessionScriptStart(t, sessionScriptStartOptions{
+		PayloadEnv: runtimetest.WithheldManagedDoltEnv(),
+	})
+	if result.err != nil {
+		t.Fatalf("gc-session-k8s start error = %v\noutput:\n%s", result.err, result.output)
+	}
+	for key, want := range map[string]string{
+		"GC_DOLT_HOST":           podManagedDoltHost,
+		"GC_DOLT_PORT":           podManagedDoltPort,
+		"BEADS_DOLT_SERVER_HOST": podManagedDoltHost,
+		"BEADS_DOLT_SERVER_PORT": podManagedDoltPort,
+	} {
+		if got := result.manifestEnv[key]; got != want {
+			t.Fatalf("manifest %s = %q, want %q", key, got, want)
+		}
+	}
+	if got, ok := result.manifestEnv["GC_DOLT_MANAGED_LOCAL"]; ok {
+		t.Fatalf("manifest GC_DOLT_MANAGED_LOCAL = %q; the pod's target is the in-cluster service, not a controller-local server", got)
+	}
+}
+
+// TestSessionScriptStartOmitsDoltEnvForEmptyPayloadPortWithoutMarker guards the
+// other side of the marker: a payload whose Dolt keys are present but empty and
+// carry no GC_DOLT_MANAGED_LOCAL (a scope without Dolt, or a failed resolution)
+// must still omit pod Dolt env.
+func TestSessionScriptStartOmitsDoltEnvForEmptyPayloadPortWithoutMarker(t *testing.T) {
+	payload := runtimetest.WithheldManagedDoltEnv()
+	payload["GC_DOLT_MANAGED_LOCAL"] = ""
+	result := runSessionScriptStart(t, sessionScriptStartOptions{PayloadEnv: payload})
+	if result.err != nil {
+		t.Fatalf("gc-session-k8s start error = %v\noutput:\n%s", result.err, result.output)
+	}
+	for _, key := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT"} {
+		if got, ok := result.manifestEnv[key]; ok {
+			t.Fatalf("manifest projected %s = %q for a payload without a Dolt target: %#v", key, got, result.manifestEnv)
+		}
 	}
 }
 

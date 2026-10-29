@@ -188,7 +188,7 @@ func TestBuiltinDoltDoctorAllowsAtMinimumVersionWhenProbeSucceeds(t *testing.T) 
 		name string
 		body string
 	}{
-		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 2.1.0\\n'\n"},
+		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 2.6.0\\n'\n"},
 		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
 		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
 	} {
@@ -204,7 +204,7 @@ func TestBuiltinDoltDoctorAllowsAtMinimumVersionWhenProbeSucceeds(t *testing.T) 
 	if err != nil {
 		t.Fatalf("check-dolt unexpectedly rejected Dolt probe at minimum: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "dolt available (dolt version 2.1.0)") {
+	if !strings.Contains(string(out), "dolt available (dolt version 2.6.0)") {
 		t.Fatalf("check-dolt output = %s, want successful version probe", out)
 	}
 }
@@ -224,7 +224,7 @@ func TestBuiltinDoltDoctorBoundsVersionProbe(t *testing.T) {
 			name: "gtimeout",
 			body: "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$TIMEOUT_CAPTURE\"\nif [ \"$1\" = \"--kill-after=2\" ]; then\n  shift\nfi\nshift\nexec \"$@\"\n",
 		},
-		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 2.1.10\\n'\n"},
+		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 2.6.10\\n'\n"},
 		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
 		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
 	} {

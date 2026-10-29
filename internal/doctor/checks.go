@@ -30,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -1787,14 +1788,15 @@ type WorktreeCheck struct {
 // Name returns the check identifier.
 func (c *WorktreeCheck) Name() string { return "worktrees" }
 
-// Run walks .gc/worktrees/ and verifies each .git pointer. Per-bead
+// Run walks the configured worktrees root (workdir.WorktreesRoot) and
+// verifies each .git pointer. Per-bead
 // worktrees at <rig>/worktrees/ are a separate population and are
 // covered by RigWorktreesCheck.
 func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	c.broken = nil
 
-	wtRoot := filepath.Join(ctx.CityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(ctx.CityPath)
 	rigEntries, err := os.ReadDir(wtRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1802,8 +1804,8 @@ func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 			// Name the directory. The bare "no worktrees directory"
 			// read as a claim about every worktree on the box, and was
 			// reported green against a rig whose own worktrees/ held
-			// tens of gigabytes. Sibling checks already say ".gc/".
-			r.Message = "no .gc/worktrees directory"
+			// tens of gigabytes.
+			r.Message = fmt.Sprintf("no worktrees directory at %s", wtRoot)
 			return r
 		}
 		r.Status = StatusError
@@ -1835,7 +1837,7 @@ func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 	if len(c.broken) == 0 {
 		r.Status = StatusOK
 		if total == 0 {
-			r.Message = "no agent worktrees under .gc/worktrees"
+			r.Message = fmt.Sprintf("no agent worktrees under %s", wtRoot)
 		} else {
 			r.Message = fmt.Sprintf("all %d worktree(s) valid", total)
 		}

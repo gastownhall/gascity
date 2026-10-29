@@ -1,8 +1,11 @@
 # cascade-nudge-on-blocker-close notifies dependents when a blocker bead
-# closes. Without it, the assignee of a blocked bead has no event-driven
-# signal that work can resume — they poll, get nudged by hand, or miss the
-# unblock. Idempotent; a given (blocker, dependent) pair is nudged at most
-# once. See assets/scripts/cascade-nudge-on-blocker-close.sh.
+# closes. Without it, the owner of a blocked bead has no event-driven signal
+# that work can resume — they poll, get nudged by hand, or miss the unblock.
+# Every open or deferred dependent is nudged: at its assignee when one holds
+# the bead, else at its gc.routed_to target (the graph.v2 claim shape leaves
+# the assignee empty until a session claims the step), resolving a pool base
+# to its active members. Idempotent; a given (blocker, dependent) pair is
+# nudged at most once. See assets/scripts/cascade-nudge-on-blocker-close.sh.
 #
 # Triggers on bead.closed — the event the close transition actually emits
 # (a closed bead only emits bead.updated on a later metadata edit), so this
@@ -13,7 +16,7 @@
 # Resolving dependents and nudging is mechanical (dep lookup + session
 # nudge). No LLM judgment needed, so the controller runs it via exec.
 [order]
-description = "Nudge dependents' assignees when a blocker bead closes"
+description = "Nudge dependents' assignees or routed targets when a blocker bead closes"
 trigger = "event"
 on = "bead.closed"
 exec = "$PACK_DIR/assets/scripts/cascade-nudge-on-blocker-close.sh"

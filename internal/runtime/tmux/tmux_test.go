@@ -4061,19 +4061,22 @@ func TestSelfCloseExcludedInPaneCallerSurvivesCleanup(t *testing.T) {
 // zsh dotfiles. How long that lasts depends on host load, $SHELL and $HOME, so
 // an assertion about pane_current_command taken a fixed delay after NewSession
 // races it (ga-kmwwcx). A non-login `sh` with $ENV unset runs no startup
-// files, and once the pane reports "sh" it stays "sh".
+// files, and once the pane reports that shell it stays there.
 func newPlainShellSession(t *testing.T, tm *Tmux, name string) {
 	t.Helper()
 	if err := tm.NewSessionWithCommand(name, "", "exec env -u ENV sh"); err != nil {
 		t.Fatalf("NewSessionWithCommand(%q): %v", name, err)
 	}
-	waitForPaneCommand(t, tm, name, "sh", 10*time.Second)
+	// The pane's sh is whatever POSIX shell the host ships, not always a
+	// process named sh: macOS /bin/sh re-executes bash 3.2 in POSIX mode, so
+	// tmux reports "bash" there, and a host can report its sh as "dash".
+	waitForPaneCommand(t, tm, name, 10*time.Second, "sh", "bash", "dash")
 }
 
-// waitForPaneCommand waits until session's first pane reports want as its
-// pane_current_command, failing the test if that does not happen within
+// waitForPaneCommand waits until session's first pane reports one of want as
+// its pane_current_command, failing the test if that does not happen within
 // timeout.
-func waitForPaneCommand(t *testing.T, tm *Tmux, session, want string, timeout time.Duration) {
+func waitForPaneCommand(t *testing.T, tm *Tmux, session string, timeout time.Duration, want ...string) {
 	t.Helper()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -4081,12 +4084,12 @@ func waitForPaneCommand(t *testing.T, tm *Tmux, session, want string, timeout ti
 	defer ticker.Stop()
 	for {
 		got, err := tm.GetPaneCommand(session)
-		if err == nil && got == want {
+		if err == nil && slices.Contains(want, got) {
 			return
 		}
 		select {
 		case <-timer.C:
-			t.Fatalf("pane of %q did not report %q within %s (last %q, err %v)", session, want, timeout, got, err)
+			t.Fatalf("pane of %q did not report one of %q within %s (last %q, err %v)", session, want, timeout, got, err)
 		case <-ticker.C:
 		}
 	}

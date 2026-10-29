@@ -194,6 +194,9 @@ type CityRuntime struct {
 	// clocks below; created on first use.
 	ordersLane     *ordersLane
 	ordersLaneOnce sync.Once
+	// workGCLane runs the wisp GC's work arm off the tick (wisp_gc_work_lane.go).
+	workGCLane     *workGCLane
+	workGCLaneOnce sync.Once
 
 	// inventoryLane lists runtimes at patrol cadence and publishes the
 	// observation cache (runtime_inventory_lane.go). run() creates it; it
@@ -497,7 +500,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 	mat := buildMaxSessionAgeTracker(p.Cfg, p.CityName, p.SP)
 	adt := buildAssignedWorkDeferTracker(p.Cfg, p.CityName, p.SP)
 
-	wg := newWispGCForConfig(p.Cfg)
+	wg := newWispGCForCity(p.Cfg, p.CityName)
 
 	managedDoltHealth := p.ManagedDoltHealth
 	if managedDoltHealth == nil {
@@ -849,6 +852,15 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		stopOrdersLane()
 		<-ordersLaneDone
 	}()
+	// The wisp GC's work arm reads work ledgers (bd on a hosted city, one
+	// subprocess per read), so it runs on its own lane; the tick only wakes it
+	// (wisp_gc_work_lane.go).
+	workGCLaneCtx, stopWorkGCLane := context.WithCancel(ctx)
+	workGCLaneDone := cr.startWorkGCLane(workGCLaneCtx)
+	defer func() {
+		stopWorkGCLane()
+		<-workGCLaneDone
+	}()
 
 	// Recover ready work whose canonical pool route was lost or never written
 	// (gc.run_target set, gc.routed_to empty) before session reconciliation, so a
@@ -1019,7 +1031,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// and the control-dispatcher arm selects on a nil channel.
 	controlDispatcherCh := cr.controlDispatcherSignal()
 	if cr.runsV2() && cr.cfg.Daemon.TickDebounceDuration() > 0 {
-		fmt.Fprintf(cr.stderr, "%s: warning: [daemon] tick_debounce is ignored under session_reconciler=v2; the planner paces its own passes\n", cr.logPrefix) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(cr.stderr, "%s: warning: [daemon] tick_debounce is ignored under the v2 session reconciler; the planner paces its own passes\n", cr.logPrefix) //nolint:errcheck // best-effort stderr
 	}
 
 	for {
@@ -1865,8 +1877,26 @@ func (cr *CityRuntime) tickReconcileExecutionCompletions(p *tickPass) bool {
 func (cr *CityRuntime) tickWispGC(p *tickPass) bool {
 	if graphStore := cr.graphBeadStore(); cr.wg != nil && graphStore.Store != nil && cr.wg.shouldRun(time.Now()) {
 		phaseStart := time.Now()
-		purged, gcErr := cr.wg.runGC(graphStore, cr.infraSessionLedger(), cr.mailBeadStore(), time.Now())
-		p.recordPhase(TraceSiteControllerTickPhase, "wisp_gc", phaseStart, map[string]any{"purged": purged})
+		// On a city that relocates the graph class, the attachment holders and
+		// the v1 poured molecule roots live on the work legs, not the binding
+		// the GC sweeps (wispGCLegs). A single-store city hands none: its
+		// graph-class store is its work store.
+		var legs wispGCLegs
+		if _, relocated := graphClassBinding(cr.storageRoutes); relocated { // residency:allow — asks only whether the graph class is relocated; the legs come from the census plan (workLegs)
+			legs = cr.workLegs()
+		}
+		purged, gcErr := cr.wg.runGC(legs, graphStore, cr.infraSessionLedger(), cr.mailBeadStore(), time.Now())
+		payload := map[string]any{"purged": purged}
+		if legs != nil {
+			// The work arm runs on its own lane; the tick only wakes it and
+			// records how stale its last pass is.
+			lane := cr.workGCLaneOf()
+			lane.wake()
+			if age, ran := lane.lastPassAge(time.Now()); ran {
+				payload["work_arm_last_pass_age_ms"] = age.Milliseconds()
+			}
+		}
+		p.recordPhase(TraceSiteControllerTickPhase, "wisp_gc", phaseStart, payload)
 		if gcErr != nil {
 			for _, line := range strings.Split(gcErr.Error(), "\n") {
 				if line == "" {
@@ -2292,6 +2322,13 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(cfg *config.City, now time.Time
 	if nudgeStore.Store == nil || mailStore.Store == nil {
 		return
 	}
+	// Run the nudge queue's maintenance first: it pays the shadow debts other
+	// payers left (a crash, a failing store), so a legacy-dispatcher city
+	// converges with only the controller running. The supervisor dispatcher
+	// runs the same maintenance every pass.
+	if _, err := openNudgeQueue(cr.cityPath, nudgeStore).Queue.Maintain(context.Background(), now); err != nil && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: nudge queue maintenance: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+	}
 	// Load nudge state to protect live nudge IDs. A missing state file is not an
 	// error (LoadState returns empty state), so any error here is a real
 	// read/parse failure: fail closed and skip this sweep rather than sweeping
@@ -2690,6 +2727,23 @@ func (cr *CityRuntime) reloadConfigTraced(
 			Warnings: warnings,
 		}
 	}
+	// Nor is a reload that gives a split city a reserved HQ or rig prefix
+	// (R10): the booted binding mints in that namespace, so the new ids would
+	// collide with it. Refused whole, like a changed [storage].
+	if refusal := config.ReservedPrefixSplitRefusal(nextCfg); refusal != nil {
+		err := fmt.Errorf("config reload: %w (keeping old config; until city.toml is fixed, every gc CLI and hook process reading it refuses this city's coordination classes)", refusal)
+		fmt.Fprintf(cr.stderr, "%s: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
+		if trace != nil {
+			trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+		}
+		return reloadControlReply{
+			Outcome:  reloadOutcomeFailed,
+			Error:    err.Error(),
+			Revision: result.Revision,
+			Warnings: warnings,
+		}
+	}
 	nextSp := cr.sp
 	nextDops := cr.dops
 	providerChanged := false
@@ -2911,7 +2965,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	cr.mat = buildMaxSessionAgeTracker(nextCfg, cr.cityName, nextSp)
 	cr.adt = buildAssignedWorkDeferTracker(nextCfg, cr.cityName, nextSp)
 
-	cr.wg = newWispGCForConfig(nextCfg)
+	cr.wg = newWispGCForCity(nextCfg, cr.cityName)
 
 	// The new config was published above (publishRuntimeConfig), BEFORE
 	// this stage. The stage bumps the order-set generation under the lane's
@@ -3011,6 +3065,19 @@ func (cr *CityRuntime) reloadConfigTraced(
 		appendWarning(fmt.Sprintf("skill collision; skipping materialization: %v", err))
 	} else {
 		_ = runStage1SkillMaterialization(cr.cityPath, nextCfg, cr.stderr)
+	}
+
+	// Stage-1 MCP projection runs here for the same reason: it otherwise
+	// runs only when a city starts, so an MCP server added or changed by a
+	// live reload changed the agents' fingerprints (draining them) while
+	// their scope-root config kept the old servers, and an agent stage 1
+	// had skipped never got its config once fixed. It runs before this
+	// tick's reconcile restarts drifted sessions, so they start against the
+	// new config. A failure (a target conflict, a write error) leaves the
+	// targets it did not reach as they were and warns; it does not refuse
+	// the reload.
+	if err := runStage1MCPProjection(cr.cityPath, nextCfg, exec.LookPath, cr.stderr); err != nil {
+		appendWarning(fmt.Sprintf("MCP projection: %v", err))
 	}
 
 	message := fmt.Sprintf("Config reloaded: %s (rev %s)",
@@ -4440,7 +4507,7 @@ func (cr *CityRuntime) cityBeadStore() beads.Store {
 	}
 	cr.serviceStateMu.RLock()
 	defer cr.serviceStateMu.RUnlock()
-	return cr.standaloneCityStore
+	return splitStrictWorkView(cr.standaloneCityStore)
 }
 
 func (cr *CityRuntime) rigBeadStores() map[string]beads.Store {
@@ -4451,7 +4518,7 @@ func (cr *CityRuntime) rigBeadStores() map[string]beads.Store {
 	}
 	cr.serviceStateMu.RLock()
 	defer cr.serviceStateMu.RUnlock()
-	return cr.standaloneRigStores
+	return splitStrictWorkViews(cr.standaloneRigStores)
 }
 
 // setStandaloneStores publishes the standalone store handles under the lock

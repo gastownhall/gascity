@@ -168,6 +168,14 @@ type intent struct {
 	// the row's name: Occupied (another row's) or S7's StaleSelf. The
 	// effect rolls back only while its fresh read still finds one (F1).
 	Occupant bool
+	// Workless marks an A10 rollback decided on a work read that found no
+	// in-progress work assigned to the row's session (#2081): the effect
+	// reads that work again, live (rollbackNeeds), and once that read finds
+	// none either takes a live incarnation of the row's own session that its
+	// fresh read finds as it takes any other StaleSelf or NewerSelf runtime,
+	// since none of that session's work is in flight there. The zero value
+	// holds over one.
+	Workless bool
 	// Rests are the fresh facts the decision rests on, which only a fresh
 	// kind's arm records: its effect reads them and decides again on them.
 	Rests rests

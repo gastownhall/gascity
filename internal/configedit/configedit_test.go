@@ -3035,3 +3035,47 @@ gate = "cooldown"
 		t.Fatalf("city.toml missing canonical trigger after enabled-only update:\n%s", got)
 	}
 }
+
+// Split-default R10, at the point a reserved prefix is INTRODUCED: an edit
+// that gives a split city's rig a prefix in a reserved namespace is refused
+// before the write, including when [storage] lives in an include fragment.
+func TestUpdateRigRefusesAReservedPrefixOnASplitCity(t *testing.T) {
+	for _, fragment := range []bool{false, true} {
+		dir := t.TempDir()
+		storage := `
+[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+
+[storage.bindings.infra]
+provider = "sqlite-beads"
+`
+		body := "[workspace]\nname = \"my-city\"\n"
+		if fragment {
+			body = "include = [\"storage.toml\"]\n" + body
+			if err := os.WriteFile(filepath.Join(dir, "storage.toml"), []byte(storage), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			body += storage
+		}
+		body += "\n[[rigs]]\nname = \"alpha\"\npath = \"/tmp/alpha\"\nprefix = \"al\"\n"
+		path := writeTOML(t, dir, body)
+		ed := configedit.NewEditor(fsys.OSFS{}, path)
+		before, _ := os.ReadFile(path)
+		err := ed.UpdateRig("alpha", configedit.RigUpdate{Prefix: "gcg-alpha"})
+		if err == nil || !strings.Contains(err.Error(), "reserved") {
+			t.Errorf("fragment=%v: UpdateRig to gcg-alpha = %v, want the reserved-prefix refusal", fragment, err)
+		}
+		if after, _ := os.ReadFile(path); string(after) != string(before) {
+			t.Errorf("fragment=%v: the refused edit rewrote city.toml", fragment)
+		}
+		if err := ed.UpdateRig("alpha", configedit.RigUpdate{Prefix: "alp"}); err != nil {
+			t.Errorf("fragment=%v: a non-reserved prefix was refused: %v", fragment, err)
+		}
+	}
+}

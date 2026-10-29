@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
@@ -306,7 +308,7 @@ func TestSessionNudgeOpRefusedBehindAPendingPrompt(t *testing.T) {
 // nudge before any effect.
 func TestSessionNudgeOpOffAndRequire(t *testing.T) {
 	t.Run("off", func(t *testing.T) {
-		c := newContentOpCity(t, "")
+		c := newContentOpCity(t, "off")
 		code, stdout, stderr := c.nudge(nudgeDeliveryImmediate, "", true)
 		if code != 0 || stderr != "" {
 			t.Fatalf("nudge = %d, stderr %q; want 0 and nothing on stderr", code, stderr)
@@ -370,7 +372,7 @@ func deliveredTextIsUnchangedByTheGate(t *testing.T, provider string) {
 		}
 		return r
 	}
-	off := runAll("")
+	off := runAll("off")
 	if len(off.calls)+len(off.queued) != 3 {
 		t.Fatalf("off deliveries = %+v, queued = %v; want 3 between them", off.calls, off.queued)
 	}
@@ -507,15 +509,18 @@ func submitOpCity(t *testing.T, mode string, srv *httptest.Server) (*cliOpHarnes
 	}
 	h := newCLIOpHarness(t, env)
 	c := newCLIOpCity(t, h, nil)
-	oldAlive, oldClient := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
-	apiRouteControllerAliveHook = func(string) int { return 0 }
+	oldIdentity, oldClient, oldGrants := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook
+	apiRouteControllerIdentityHook = func(string) controllerIdentityReply { return controllerIdentityReply{} }
 	apiRouteSupervisorClientHook = func(string) *api.Client {
 		if srv == nil {
 			return nil
 		}
 		return api.NewCityScopedClient(srv.URL, filepath.Base(c.dir))
 	}
-	t.Cleanup(func() { apiRouteControllerAliveHook, apiRouteSupervisorClientHook = oldAlive, oldClient })
+	apiRouteSupervisorGrantsHook = func() bool { return false }
+	t.Cleanup(func() {
+		apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook = oldIdentity, oldClient, oldGrants
+	})
 	return h, c
 }
 
@@ -752,6 +757,192 @@ func TestSessionSubmitFallbackDedupe(t *testing.T) {
 	})
 }
 
+// proposeAsAPILane proposes the submit as the API's acceptMessageLane does
+// when its lane host executes message, on the op store h opens, and closes
+// it with outcome, as the lane host would, when one is given.
+func proposeAsAPILane(t *testing.T, h *cliOpHarness, conv, key, text string, intent session.SubmitIntent, outcome *opjournal.Outcome) opjournal.Op {
+	t.Helper()
+	st, err := opjournal.NewStore(beads.SessionStore{Store: h.opStore}, &clock.Fake{Time: cliOpT0}, opjournal.WithIDPrefix("gc"))
+	if err != nil {
+		t.Fatalf("opening op store: %v", err)
+	}
+	op, created, err := st.Propose(opjournal.Request{
+		Conversation: conv, Kind: opjournal.KindMessage, Executor: opjournal.ExecutorLane, ClientKey: key,
+		Producer: opjournal.Producer{Principal: legacyop.PrincipalOperator, Actor: opjournal.ActorOperator},
+		Payload:  text, Policy: api.LaneMessageOpPolicy(intent),
+	})
+	if err != nil || !created {
+		t.Fatalf("proposing the API's lane op: created=%t err=%v", created, err)
+	}
+	if outcome == nil {
+		return op
+	}
+	closed, err := st.Close(op.ID, *outcome, "lane:ctl")
+	if err != nil {
+		t.Fatalf("closing the API's lane op: %v", err)
+	}
+	return closed
+}
+
+// When the API's lane host executes message, the API proposes the submit as
+// a lane op under its LaneMessageOpPolicy, which records follow_up and
+// interrupt_now differently from the CLI's own op. A fallback after a lost
+// answer still finds it under the key, for every intent: open, it reports the
+// API accepted the message; closed, it replays the outcome; either way it
+// delivers nothing. Another message under the key is still refused.
+func TestSessionSubmitFallbackAnswersFromTheAPIsLaneOp(t *testing.T) {
+	const text = testSubmitText
+	for _, intent := range []session.SubmitIntent{session.SubmitIntentDefault, session.SubmitIntentFollowUp, session.SubmitIntentInterruptNow} {
+		t.Run("open "+string(intent)+": reports the API's lane op", func(t *testing.T) {
+			var h *cliOpHarness
+			var c *cliOpCity
+			var sent string
+			var laneOp opjournal.Op
+			srv := lostAnswerServer(t, func(key string) {
+				sent = key
+				laneOp = proposeAsAPILane(t, h, c.bead.ID, key, text, intent, nil)
+			})
+			h, c = submitOpCity(t, "auto", srv)
+			var stdout, stderr bytes.Buffer
+			if code := cmdSessionSubmit([]string{c.bead.ID, text}, intent, "", false, &stdout, &stderr); code != 0 {
+				t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
+			}
+			if n := submitDeliveries(c.sp); n != 0 {
+				t.Fatalf("deliveries = %d, want none: the API's lane host delivers it", n)
+			}
+			if !strings.Contains(stdout.String(), "Accepted by the controller") || !strings.Contains(stdout.String(), laneOp.ID) || !strings.Contains(stdout.String(), "--key "+sent) {
+				t.Fatalf("stdout = %q, want the lane op %s and the key %s", stdout.String(), laneOp.ID, sent)
+			}
+			if ops := cliOpRows(t, h.opStore); len(ops) != 1 || ops[0].Executor != opjournal.ExecutorLane || ops[0].Status == opjournal.StatusClosed {
+				t.Fatalf("ops = %+v, want only the API's open lane op", ops)
+			}
+		})
+		t.Run("closed "+string(intent)+": replays the outcome", func(t *testing.T) {
+			var h *cliOpHarness
+			var c *cliOpCity
+			srv := lostAnswerServer(t, func(key string) {
+				proposeAsAPILane(t, h, c.bead.ID, key, text, intent, &opjournal.Outcome{Arm: opjournal.ArmSucceeded})
+			})
+			h, c = submitOpCity(t, "auto", srv)
+			var stdout, stderr bytes.Buffer
+			if code := cmdSessionSubmit([]string{c.bead.ID, text}, intent, "k-lane-"+string(intent), true, &stdout, &stderr); code != 0 {
+				t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
+			}
+			if n := submitDeliveries(c.sp); n != 0 {
+				t.Fatalf("deliveries = %d, want none: the lane host delivered it", n)
+			}
+			if got := cliOpJSON(t, stdout.Bytes()); got["replayed"] != true || got["queued"] != false || !strings.Contains(stderr.String(), "replayed op") {
+				t.Fatalf("JSON = %v, stderr = %q; want the replayed outcome", got, stderr.String())
+			}
+			if ops := cliOpRows(t, h.opStore); len(ops) != 1 || ops[0].Executor != opjournal.ExecutorLane {
+				t.Fatalf("ops = %+v, want only the API's lane op", ops)
+			}
+		})
+	}
+	t.Run("another message under the lane op's key is refused", func(t *testing.T) {
+		h, c := submitOpCity(t, "auto", nil)
+		proposeAsAPILane(t, h, c.bead.ID, "k-other", "another message", session.SubmitIntentFollowUp, nil)
+		var stdout, stderr bytes.Buffer
+		if code := cmdSessionSubmit([]string{c.bead.ID, text}, session.SubmitIntentFollowUp, "k-other", false, &stdout, &stderr); code != 1 {
+			t.Fatalf("submit = %d, want 1; stderr=%s", code, stderr.String())
+		}
+		if n := submitDeliveries(c.sp); n != 0 || !strings.Contains(stderr.String(), "different request") {
+			t.Fatalf("deliveries = %d, stderr = %q; want none and the key refused", n, stderr.String())
+		}
+	})
+}
+
+// gc session submit sends resume: true, and the API consumes the session's
+// operator hold only once it has proposed the lane op, so a request that
+// died between the two leaves the op open behind the hold. A fallback that
+// finds that op open consumes the hold itself, recording the session's wake,
+// before it reports the API's acceptance; a resume the session refuses (its
+// drain is stopping it) is reported, exit 1, the op left open. A suspend
+// stamped after the op's proposal is one the operator placed while the
+// message waits: it stands, and the fallback still reports the acceptance.
+// Kills a fallback that reports the message accepted over a hold nothing
+// consumed, and one that consumes a suspend placed after the op.
+func TestSessionSubmitFallbackResumesTheHoldOfAnOpenLaneOp(t *testing.T) {
+	const text = testSubmitText
+	for _, tc := range []struct {
+		name     string
+		draining bool
+		// suspended is when the operator suspended the session; the API
+		// proposed the op at cliOpT0.
+		suspended time.Time
+	}{
+		{name: "consumes the hold", suspended: cliOpT0.Add(-time.Minute)},
+		{name: "a refused resume exits 1", draining: true, suspended: cliOpT0.Add(-time.Minute)},
+		{name: "a suspend after the op stands", suspended: cliOpT0.Add(time.Minute)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var h *cliOpHarness
+			var c *cliOpCity
+			var laneOp opjournal.Op
+			srv := lostAnswerServer(t, func(key string) {
+				laneOp = proposeAsAPILane(t, h, c.bead.ID, key, text, session.SubmitIntentDefault, nil)
+			})
+			h, c = submitOpCity(t, "auto", srv)
+			if _, err := sessionFrontDoor(c.reload(t)).OperatorSuspend(c.bead.ID, tc.suspended); err != nil {
+				t.Fatalf("suspending the session: %v", err)
+			}
+			if tc.draining {
+				if err := c.reload(t).SetMetadataBatch(c.bead.ID, map[string]string{"state": string(session.StateDraining)}); err != nil {
+					t.Fatalf("draining the session: %v", err)
+				}
+			}
+			var stdout, stderr bytes.Buffer
+			code := cmdSessionSubmit([]string{c.bead.ID, text}, session.SubmitIntentDefault, "", false, &stdout, &stderr)
+			if n := submitDeliveries(c.sp); n != 0 {
+				t.Fatalf("deliveries = %d, want none: the API's lane host delivers it", n)
+			}
+			if ops := cliOpRows(t, h.opStore); len(ops) != 1 || ops[0].Executor != opjournal.ExecutorLane || ops[0].Status == opjournal.StatusClosed {
+				t.Fatalf("ops = %+v, want only the API's open lane op", ops)
+			}
+			meta := c.row(t).Metadata
+			if tc.draining {
+				if code != 1 || !strings.Contains(stderr.String(), "resuming "+c.bead.ID+" for op "+laneOp.ID) || meta["state"] != string(session.StateDraining) {
+					t.Fatalf("submit = %d, stderr = %q, row state %q; want exit 1 naming the refused resume, the row left draining", code, stderr.String(), meta["state"])
+				}
+				return
+			}
+			if code != 0 || !strings.Contains(stdout.String(), "Accepted by the controller") || !strings.Contains(stdout.String(), laneOp.ID) {
+				t.Fatalf("submit = %d, stdout = %q, stderr = %q; want the lane op %s accepted", code, stdout.String(), stderr.String(), laneOp.ID)
+			}
+			if tc.suspended.After(laneOp.CreatedAt) {
+				if meta["state"] != string(session.StateSuspended) || meta["sleep_intent"] != string(session.SleepReasonUserHold) || meta["wake_request"] != "" {
+					t.Fatalf("session row = %v; want the later suspend standing, no wake", meta)
+				}
+				return
+			}
+			if meta["state"] != string(session.StateAsleep) || meta["wake_request"] != string(session.WakeCauseExplicit) {
+				t.Fatalf("session row = %v; want the hold consumed and its wake recorded", meta)
+			}
+		})
+	}
+}
+
+// The content gate's builtin default (no [ops] gate, no GC_OPS_CONTENT)
+// records nothing on a sessions store that is not SQLite-backed, as this
+// city's is not: with message unlisted, a fallback after a lost answer opens
+// no op store and records nothing. A city that lists message accepts through
+// lanesubmit.Accept instead
+// (TestSessionSubmitLaneFallbackClaimsTheKeyUnderTheBuiltinDefault).
+func TestSessionSubmitFallbackUnderTheBuiltinDefaultRecordsNothingWhenMessageIsUnlisted(t *testing.T) {
+	const text = testSubmitText
+	t.Run("message unlisted: the default stands", func(t *testing.T) {
+		srv := lostAnswerServer(t, func(string) {})
+		h, c := submitOpCity(t, "", srv)
+		var stdout, stderr bytes.Buffer
+		if code := cmdSessionSubmit([]string{c.bead.ID, text}, session.SubmitIntentDefault, "", false, &stdout, &stderr); code != 0 {
+			t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
+		}
+		if n := submitDeliveries(c.sp); n != 1 || h.opens != 0 || strings.Contains(stderr.String(), "op journal") {
+			t.Fatalf("deliveries = %d, op store opens = %d, stderr = %q; want one delivery, no open and no op journal warning", n, h.opens, stderr.String())
+		}
+	})
+}
+
 // Through the API the CLI sends its key as the Idempotency-Key and reports
 // the op the API recorded; with the gate off and no --key it sends none.
 func TestSessionSubmitThroughTheAPISendsTheKey(t *testing.T) {
@@ -798,7 +989,7 @@ func TestSessionSubmitThroughTheAPISendsTheKey(t *testing.T) {
 	t.Run("off sends no key", func(t *testing.T) {
 		var got string
 		srv := serve(t, &got)
-		h, c := submitOpCity(t, "", srv)
+		h, c := submitOpCity(t, "off", srv)
 		var stdout, stderr bytes.Buffer
 		if code := cmdSessionSubmit([]string{c.bead.ID, "hi"}, session.SubmitIntentDefault, "", false, &stdout, &stderr); code != 1 {
 			t.Fatalf("submit = %d, want the test server's refusal; stderr=%s", code, stderr.String())
@@ -1028,6 +1219,7 @@ func TestCLIMessageOpResult(t *testing.T) {
 		{name: "runtime session not found", err: fmt.Errorf("nudging: %w", runtime.ErrSessionNotFound), arm: opjournal.ArmFailed, reason: opjournal.ReasonSessionGone},
 		{name: "provider unavailable", err: runtime.ErrRuntimeUnavailable, arm: opjournal.ArmFailed, reason: opjournal.ReasonProviderUnavailable},
 		{name: "timeout", err: context.DeadlineExceeded, arm: opjournal.ArmFailed, reason: opjournal.ReasonDeadlineInFlight},
+		{name: "nudge queue busy", err: fmt.Errorf("gc session nudge: %w", nudgequeue.ErrQueueBusy), arm: opjournal.ArmFailed, reason: opjournal.RefusedReasonPrefix + "nudge_queue_busy"},
 		{name: "other", err: errors.New("boom"), arm: opjournal.ArmFailed, reason: opjournal.ReasonOther},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1065,7 +1257,10 @@ func TestMailReplyJSONNamesTheNotifyOp(t *testing.T) {
 }
 
 // A submit the API records and runs live (not a replay) reports the API's op
-// and the key under --json, with no replayed field.
+// and the key under --json, with no replayed field. A supervisor-hosted city
+// reaches that API even when its city.toml names an [api] port nothing serves:
+// supervisor mode ignores the port, and a local delivery could not reach the
+// supervisor's process-owned runtime (#5262).
 func TestSessionSubmitThroughTheAPIReportsTheLiveOp(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -1096,21 +1291,49 @@ func TestSessionSubmitThroughTheAPIReportsTheLiveOp(t *testing.T) {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	h, c := submitOpCity(t, "auto", srv)
-	var stdout, stderr bytes.Buffer
-	if code := cmdSessionSubmit([]string{c.bead.ID, "hi"}, session.SubmitIntentDefault, "k-live", true, &stdout, &stderr); code != 0 {
-		t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
-	}
-	contentOpValidate(t, "schemas/session/submit/result.schema.json", stdout.String())
-	got := cliOpJSON(t, stdout.Bytes())
-	if got["op_id"] != "gc-op-live" || got["key"] != "k-live" || got["outcome"] != "submitted" {
-		t.Fatalf("JSON = %v, want the API's live op gc-op-live under k-live", got)
-	}
-	if _, ok := got["replayed"]; ok || strings.Contains(stderr.String(), "replayed") {
-		t.Fatalf("JSON = %v, stderr = %q; want no replay", got, stderr.String())
-	}
-	if n := submitDeliveries(c.sp) + len(cliOpRows(t, h.opStore)); n != 0 {
-		t.Fatalf("local deliveries and op rows = %d, want none: the API ran it", n)
+	for _, tc := range []struct {
+		name string
+		host func(t *testing.T, c *cliOpCity)
+	}{
+		{name: "controller down"},
+		{name: "supervisor-hosted city with a dead [api] port", host: func(t *testing.T, c *cliOpCity) {
+			apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
+				return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
+			}
+			// Port 1 is privileged and unassigned, so loopback refuses it.
+			f, err := os.OpenFile(filepath.Join(c.dir, "city.toml"), os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatalf("opening city.toml: %v", err)
+			}
+			if _, err := f.WriteString("\n[api]\nport = 1\n"); err != nil {
+				t.Fatalf("appending [api] to city.toml: %v", err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatalf("closing city.toml: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, c := submitOpCity(t, "auto", srv)
+			if tc.host != nil {
+				tc.host(t, c)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := cmdSessionSubmit([]string{c.bead.ID, testSubmitText}, session.SubmitIntentDefault, "k-live", true, &stdout, &stderr); code != 0 {
+				t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
+			}
+			contentOpValidate(t, "schemas/session/submit/result.schema.json", stdout.String())
+			got := cliOpJSON(t, stdout.Bytes())
+			if got["op_id"] != "gc-op-live" || got["key"] != "k-live" || got["outcome"] != "submitted" {
+				t.Fatalf("JSON = %v, want the API's live op gc-op-live under k-live", got)
+			}
+			if _, ok := got["replayed"]; ok || strings.Contains(stderr.String(), "replayed") {
+				t.Fatalf("JSON = %v, stderr = %q; want no replay", got, stderr.String())
+			}
+			if n := submitDeliveries(c.sp) + len(cliOpRows(t, h.opStore)); n != 0 {
+				t.Fatalf("local deliveries and op rows = %d, want none: the API ran it", n)
+			}
+		})
 	}
 }
 
@@ -1257,5 +1480,26 @@ func TestSessionSubmitThroughTheAPIUnrecordedKeyWarns(t *testing.T) {
 		if got := strings.Contains(stderr.String(), "warning: --key not recorded"); got != tc.warn {
 			t.Fatalf("submit key %q stderr = %q, want the unrecorded --key warning = %v", tc.key, stderr.String(), tc.warn)
 		}
+	}
+}
+
+// A broadcast notify under the builtin default over a store that cannot
+// record ops prints no op-journal warning, for any recipient.
+func TestMailBroadcastNotifyDefaultAutoIsQuietOnAnIncapableStore(t *testing.T) {
+	c := newContentOpCity(t, "")
+	c.h.opStore = cliOpIncapableStore{c.h.opStore}
+	var warn bytes.Buffer
+	nudgeWarningWriter = &warn
+	mp := beadmail.New(beads.NewMemStore())
+	nf := func(_, messageID string) (string, error) {
+		return sendMailNotifyWithOp(c.target, c.store, c.fake, "human", messageID)
+	}
+	recipients := map[string]bool{"human": true, "a": true, "b": true, "c": true}
+	var stdout, stderr bytes.Buffer
+	if code := doMailSendAllJSON(mp, events.Discard, recipients, "human", []string{"hello"}, nf, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("send --all = %d; stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(warn.String()+stderr.String(), "op journal") {
+		t.Fatalf("warnings = %q, stderr = %q; want no op-journal warning under the builtin default", warn.String(), stderr.String())
 	}
 }

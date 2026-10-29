@@ -217,13 +217,14 @@ func TestLaneExecRespondStaleWhenThePromptChanged(t *testing.T) {
 }
 
 // TestLaneExecRespondAnswersBehindAContentGate proves the content gate does
-// not hold control (DES-O1 I7, §10.5): a draining or restart-pending session
-// blocked on a prompt gets its answer, as the legacy respond path gives it,
+// not hold control (DES-O1 I7, §10.5): a draining, restart-pending or
+// stop-requested session blocked on a prompt gets its answer, as the legacy respond path gives it,
 // while content still waits on the gate.
 func TestLaneExecRespondAnswersBehindAContentGate(t *testing.T) {
 	for _, gate := range []laneFixtureOpt{
 		func(meta map[string]string) { meta["restart_requested"] = "true" },
 		func(meta map[string]string) { meta["state"] = "draining" },
+		laneStopRequestedAt(1),
 	} {
 		f := newLaneFixture(t, gate)
 		st := f.laneStore(t)
@@ -503,9 +504,9 @@ func TestLaneExecRespondRestartDoesNotReplayTheAnswer(t *testing.T) {
 func TestLaneExecRespondHoldsTheSessionMutationLock(t *testing.T) {
 	f := newLaneFixture(t)
 	st := f.laneStore(t)
-	v, info := f.view(t)
+	v, row := f.view(t)
 	call := f.respondCall(t, st, v)
-	e := newConversationLaneExec(f.deps(st), info)
+	e := newConversationLaneExec(f.deps(st), row)
 	f.prompt("tmux-abc")
 	if _, err := e.Probe(context.Background(), v); err != nil {
 		t.Fatal(err)
@@ -513,7 +514,7 @@ func TestLaneExecRespondHoldsTheSessionMutationLock(t *testing.T) {
 	held, release := make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- session.WithSessionMutationLock(info.ID, func() error {
+		done <- session.WithSessionMutationLock(row.info.ID, func() error {
 			close(held)
 			<-release
 			return nil

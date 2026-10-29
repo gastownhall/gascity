@@ -1661,6 +1661,7 @@ export const zReadinessResponse = z.object({
 
 export const zReadyBeadBlocker = z.object({
     id: z.string(),
+    reason: z.string().optional(),
     status: z.string()
 });
 

@@ -53,6 +53,15 @@ func (f Flags) OriginOf(key string) Origin {
 	}
 }
 
+// BuiltinAuto reports whether the mode gate Key resolves to auto only
+// because auto is its builtin default: neither config nor env set it. A
+// surface that degrades past a store unable to support the gate at all may
+// stay quiet under it, as the gate was never asked for; an explicit auto,
+// from config or env, stays loud. False for an unknown or non-mode key.
+func (f Flags) BuiltinAuto(key string) bool {
+	return f.ValueOf(key) == string(Auto) && f.OriginOf(key) == OriginBuiltin
+}
+
 // ValueOf returns the resolved value of a registered gate Key in its canonical
 // string spelling ("" for an unknown key). For doctor/status rendering only —
 // production reads use the typed accessors (BeadsConditionalWrites/FormulaV2).

@@ -502,9 +502,11 @@ func seedQueuedWaitNudge(t *testing.T, fs *fakeState, wait beads.Bead, agentName
 		t.Fatalf("set wait nudge_id: %v", err)
 	}
 	if _, err := fs.cityBeadStore.Create(beads.Bead{
-		Type:   "nudge",
-		Title:  "nudge:" + nudgeID,
-		Labels: []string{"nudge:" + nudgeID},
+		Type:  "nudge",
+		Title: "nudge:" + nudgeID,
+		// gc:nudge is what every real shadow bead carries (cmd/gc
+		// nudge_beads.go), and what makes it nudges-class rather than work.
+		Labels: []string{"gc:nudge", "nudge:" + nudgeID},
 		Metadata: map[string]string{
 			"nudge_id": nudgeID,
 			"state":    "queued",
@@ -569,7 +571,7 @@ func createSessionCloseWaitOverflowWithQueuedNudges(t *testing.T, fs *fakeState,
 		if _, err := fs.cityBeadStore.Create(beads.Bead{
 			Type:   "nudge",
 			Title:  "nudge:" + nudgeID,
-			Labels: []string{"nudge:" + nudgeID},
+			Labels: []string{"gc:nudge", "nudge:" + nudgeID},
 			Metadata: map[string]string{
 				"nudge_id": nudgeID,
 				"state":    "queued",
@@ -832,6 +834,85 @@ func TestHandleSessionListFilterByState(t *testing.T) {
 	}
 	if resp.Total != 1 {
 		t.Errorf("got total %d, want 1 (only active)", resp.Total)
+	}
+}
+
+// TestHandleSessionListStateFilterListsClosedSessions pins the state filter of
+// both session list routes against closed sessions: the default and the
+// open-state filters list open sessions only, while "closed", "all" and a list
+// naming closed include the closed ones, reported as state "closed". The read
+// model used to fetch open rows only, so a closed-inclusive filter matched
+// nothing.
+func TestHandleSessionListStateFilterListsClosedSessions(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	open := createTestSession(t, fs.cityBeadStore, fs.sp, "Still Open")
+	closed := createTestSession(t, fs.cityBeadStore, fs.sp, "Closed Now")
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), closed.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	routes := []struct {
+		name  string
+		serve func(query string) *httptest.ResponseRecorder
+	}{
+		{name: "city", serve: func(query string) *httptest.ResponseRecorder {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(fs, "/sessions"+query), nil))
+			return rec
+		}},
+		{name: "legacy", serve: func(query string) *httptest.ResponseRecorder {
+			rec := httptest.NewRecorder()
+			srv.legacySessionHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v0/sessions"+query, nil))
+			return rec
+		}},
+	}
+	cases := []struct {
+		name  string
+		query string
+		want  []string
+	}{
+		{name: "default", query: "", want: []string{open.ID}},
+		{name: "active", query: "?state=active", want: []string{open.ID}},
+		{name: "closed", query: "?state=closed", want: []string{closed.ID}},
+		{name: "all", query: "?state=all", want: []string{open.ID, closed.ID}},
+		{name: "active_or_closed", query: "?state=active,closed", want: []string{open.ID, closed.ID}},
+	}
+	for _, route := range routes {
+		for _, tc := range cases {
+			t.Run(route.name+"/"+tc.name, func(t *testing.T) {
+				rec := route.serve(tc.query)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+				}
+				var resp struct {
+					Items []sessionResponse `json:"items"`
+					Total int               `json:"total"`
+				}
+				if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+					t.Fatalf("decode: %v", err)
+				}
+				got := make(map[string]string, len(resp.Items))
+				for _, item := range resp.Items {
+					got[item.ID] = item.State
+				}
+				if len(got) != len(tc.want) || resp.Total != len(tc.want) {
+					t.Fatalf("listed %v (total %d), want exactly %v", got, resp.Total, tc.want)
+				}
+				for _, id := range tc.want {
+					state, ok := got[id]
+					if !ok {
+						t.Fatalf("listed %v, missing %s", got, id)
+					}
+					if id == closed.ID && state != "closed" {
+						t.Fatalf("closed session %s state = %q, want %q", id, state, "closed")
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -8884,4 +8965,56 @@ func TestHumaSessionCloseRefusedWriteStillFails(t *testing.T) {
 		t.Fatalf("close status = %d, want %d; body: %s", w.Code, http.StatusInternalServerError, w.Body.String())
 	}
 	requireSessionStatus(t, store.Store, info.ID, "open")
+}
+
+// TestHandleSessionListActiveBeadSkipsSuspendedRig: the session list fills
+// active_bead without reading a suspended rig's store, whose every read goes
+// to bd and restarts the rig's retired proxy and Dolt (#8162).
+func TestHandleSessionListActiveBeadSkipsSuspendedRig(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Rigs = append(fs.cfg.Rigs,
+		config.Rig{Name: "alpha", Path: "/tmp/alpha"},
+		config.Rig{Name: "beta", Path: "/tmp/beta"},
+	)
+	alpha := &listCountingStore{Store: &beads.MemStore{IDPrefix: "alpha"}}
+	beta := &listCountingStore{Store: &beads.MemStore{IDPrefix: "beta"}}
+	fs.stores["alpha"] = alpha
+	fs.stores["beta"] = beta
+	suspendAlphaAtRuntime(t, fs)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "My Session")
+	addActiveWork(t, alpha.Store, info.ID)
+	betaWork := addActiveWork(t, beta.Store, info.ID)
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp struct {
+		Items []sessionResponse `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if alpha.listCalls != 0 {
+		t.Errorf("suspended rig alpha List calls = %d, want 0", alpha.listCalls)
+	}
+	var found bool
+	for _, item := range resp.Items {
+		if item.ID != info.ID {
+			continue
+		}
+		found = true
+		if item.ActiveBead != betaWork {
+			t.Errorf("active_bead = %q, want beta's %q", item.ActiveBead, betaWork)
+		}
+	}
+	if !found {
+		t.Fatalf("session %s not listed in %+v", info.ID, resp.Items)
+	}
 }

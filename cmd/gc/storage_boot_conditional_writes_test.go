@@ -32,7 +32,7 @@ func TestOpenStorageRoutesStampsBindingWithResolvedMode(t *testing.T) {
 		stamped gate.Mode
 		fenced  bool
 	}{
-		{mode: "", stamped: gate.Off, fenced: false},
+		{mode: "", stamped: gate.Auto, fenced: true}, // unset means auto (mc-dpo2b)
 		{mode: "off", stamped: gate.Off, fenced: false},
 		{mode: "auto", stamped: gate.Auto, fenced: true},
 		{mode: "require", stamped: gate.Require, fenced: true},
@@ -85,7 +85,7 @@ func TestOpenStorageRoutesStampsBindingWithResolvedMode(t *testing.T) {
 func TestPreflightProbesRelocatedClassStores(t *testing.T) {
 	incapable := beads.NewMemStore()
 	incapable.DisableConditionalWrites = true
-	if err := beads.StampOpenedStore(incapable, "MemStore", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(incapable, "MemStore", gate.Require, false, nil, nil); err != nil {
 		t.Fatalf("StampOpenedStore: %v", err)
 	}
 	routes := &storageRoutes{stores: map[coordclass.Class]beads.Store{}, binding: "infra"}
@@ -368,7 +368,7 @@ func TestConditionalWritesStatusReportsTheBindingEngine(t *testing.T) {
 		t.Fatalf("reopening the legacy layout: %v", err)
 	}
 	t.Cleanup(func() { _ = legacy.(interface{ CloseStore() error }).CloseStore() })
-	if err := beads.StampOpenedStore(legacy, "sqlite-graph", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(legacy, "sqlite-graph", gate.Require, false, nil, nil); err != nil {
 		t.Fatalf("StampOpenedStore: %v", err)
 	}
 

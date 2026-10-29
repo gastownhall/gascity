@@ -1835,7 +1835,7 @@ func TestNextWaitDeliveryAttempt_IncrementsAfterTerminalNudge(t *testing.T) {
 				t.Fatalf("close nudge bead: %v", err)
 			}
 
-			next, err := nextWaitDeliveryAttempt(nudgeFrontDoor(beads.NudgesStore{Store: store}), sessionpkg.WaitInfoFromBead(wait))
+			next, err := nextWaitDeliveryAttempt(sessionFrontDoor(store), nudgeFrontDoor(beads.NudgesStore{Store: store}), sessionpkg.WaitInfoFromBead(wait))
 			if err != nil {
 				t.Fatalf("nextWaitDeliveryAttempt: %v", err)
 			}
