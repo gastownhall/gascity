@@ -212,3 +212,93 @@ func TestAssignedReadyScriptsExcludeDispatchHolds(t *testing.T) {
 		}
 	}
 }
+
+// TestAssignedReadyFiltersHoldsBeforeReaderLimit pins AC-2: a hold:mayor task
+// sorting ahead of an unheld one must not cost the unheld assignment its
+// serve. The fake answers the flagged read with the unheld row and the
+// unflagged read with the held row first, so the pass proves the exclusion
+// rides the reader, before the --limit=1 truncation — a fix that read the held
+// head and filtered after would still serve nothing but the held row.
+func TestAssignedReadyFiltersHoldsBeforeReaderLimit(t *testing.T) {
+	const identity = "sess-1"
+	heldHead := assignedReadyHoldAssignedRowObj("wk-held", identity, beadmeta.HoldMayorLabel, false)
+	unheld := assignedReadyHoldAssignedRow("wk-unheld", identity, "", false)
+	unfiltered := `[` + heldHead + `,` + assignedReadyHoldAssignedRowObj("wk-unheld", identity, "", false) + `]`
+	for topoName, topo := range assignedReadyHoldTopologies() {
+		t.Run(topoName, func(t *testing.T) {
+			out, log := assignedReadyHoldRunQuery(t, topo, map[string]string{"GC_SESSION_ID": identity}, identity, unheld, unfiltered)
+			if out != unheld {
+				t.Fatalf("held head shadowed the unheld assigned task; got %q (reader calls:\n%s)", out, log)
+			}
+			if strings.Contains(log, "gc.routed_to") {
+				t.Fatalf("routed tier was reached although an unheld assigned task was served; reader calls:\n%s", log)
+			}
+		})
+	}
+}
+
+// TestLegacyControlAssignedReadyHeldOnlyFallsThrough pins the same exclusion
+// on the legacy control-dispatcher identity loop, which shares
+// assignedReadyTierCommand: a held assignment under both the $cand identity and
+// its workflow-control alias yields an empty tier instead of exiting on the
+// held row.
+func TestLegacyControlAssignedReadyHeldOnlyFallsThrough(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; the work-query shell requires it")
+	}
+	for topoName, topo := range assignedReadyHoldTopologies() {
+		t.Run(topoName, func(t *testing.T) {
+			tool := "bd"
+			if topo.FederatedReady {
+				tool = "gc"
+			}
+			heldScript := `#!/bin/sh
+echo "` + tool + ` $*" >> "$ASSIGNED_READY_HOLD_LOG"
+args="$*"
+rows=""
+case "$1" in
+  ready)
+    case "$args" in
+      *"--assignee=gascity--control-dispatcher"*) rows='` + assignedReadyHoldAssignedRow("wk-cd-held", "gascity--control-dispatcher", beadmeta.HoldExternalLabel, false) + `' ;;
+      *"--assignee=gascity--workflow-control"*) rows='` + assignedReadyHoldAssignedRow("wk-wc-held", "gascity--workflow-control", beadmeta.HoldMayorLabel, false) + `' ;;
+      *) rows='[]' ;;
+    esac
+    case "$args" in
+      *"--exclude-label"*) rows='[]' ;;
+    esac ;;
+  *) printf '[]'; exit 0 ;;
+esac
+printf '%s' "$rows"
+`
+			logPath := filepath.Join(t.TempDir(), "reader.log")
+			gcScript, bdScript := fakeGCReadyFails, heldScript
+			if topo.FederatedReady {
+				gcScript, bdScript = heldScript, fakeBDEmpty
+			}
+			res := runGeneratedQueryWithBD(t, legacyControlAssignedReadyWorkQueryScript(topo)+`printf "[]"`, map[string]string{
+				"ASSIGNED_READY_HOLD_LOG": logPath,
+				"GC_SESSION_NAME":         "gascity--control-dispatcher",
+			}, gcScript, bdScript)
+			if res.exit != 0 {
+				t.Fatalf("assigned-ready script exited %d: stderr=%s", res.exit, res.stderr)
+			}
+			if got := strings.TrimSpace(res.stdout); got != "[]" {
+				t.Fatalf("held legacy-control assignment was served instead of falling through; got %q", got)
+			}
+		})
+	}
+}
+
+// TestAssignedReadyEmptyIdentitiesUnchanged is the reconciler context control:
+// with no identity variables set, the assigned tiers are skipped entirely and
+// only the routed tier fires, byte-identical to the pre-fix query for the same
+// fixture — the exclusion changes nothing when no assigned read runs.
+func TestAssignedReadyEmptyIdentitiesUnchanged(t *testing.T) {
+	out, log := assignedReadyHoldRunQuery(t, singleStoreTopology(), map[string]string{}, "sess-1", `[]`, `[]`)
+	if out != assignedReadyHoldRoutedRow() {
+		t.Fatalf("empty-identity query output changed; got %q (reader calls:\n%s)", out, log)
+	}
+	if strings.Contains(log, "--assignee=") {
+		t.Fatalf("assigned read ran with no identity variables; reader calls:\n%s", log)
+	}
+}
