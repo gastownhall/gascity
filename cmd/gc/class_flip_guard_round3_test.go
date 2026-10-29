@@ -125,7 +125,8 @@ func TestGcBdSplitAcceptsHiddenFlags(t *testing.T) {
 func TestGcBdSplitShouldFixes(t *testing.T) {
 	runGuardCases(t, []guardCase{
 		{"config set types.custom", []string{"config", "set", "types.custom", "convoy,molecule"}, beads.Bead{}, bdReadFound, false, "", false},
-		{"config set routing", []string{"config", "set", "routing.mode", "x"}, beads.Bead{}, bdReadFound, true, "only types.custom, types.infra", false},
+		{"config set types.retained", []string{"config", "set", "types.retained", "op"}, beads.Bead{}, bdReadFound, false, "", false},
+		{"config set routing", []string{"config", "set", "routing.mode", "x"}, beads.Bead{}, bdReadFound, true, "only types.custom, types.infra, types.retained", false},
 		{"config set storage-class", []string{"config", "set", "storage-class.task", "ephemeral"}, beads.Bead{}, bdReadFound, true, "only types.custom", false},
 		{"create --id in a reserved namespace", []string{"create", "--title", "x", "--id", "gcg-abc", "--force"}, beads.Bead{}, bdReadNotFound, true, "reserved namespace", false},
 		{"unknown bd build", []string{"show", "demo-1"}, guardTask, bdReadFound, false, "", false},

@@ -78,16 +78,16 @@ func (l *externalReadsLane) workLadder(ctx context.Context, env externalReadsEnv
 // legacyBackstops is the rollback: the claim, continuation and execution
 // backstops, in legacy order, over one live read of the raw session rows
 // whose markers they pace by. Their state restarts from scratch when the
-// ladder hands back (a marker for another token is a new assignment), and a
+// ladder hands back (a marker for another token is a new assignment), a
 // release the ladder left pending is dropped, so the hook hands its claim
-// out again.
+// out again, and a notice it left open is withdrawn (standDownLadder).
 func (l *externalReadsLane) legacyBackstops(ctx context.Context, env externalReadsEnv, s *allocSummary) {
 	raw, err := loadSessionBeads(env.CityStore)
 	if err != nil {
 		fmt.Fprintf(l.stderr, "external reads: loading sessions for the nudges: %v\n", err) //nolint:errcheck // best-effort stderr
 		return
 	}
-	l.clearLadderReleases(env.CityStore, raw)
+	l.standDownLadder(env, raw)
 	now, sessStore := l.now(), beads.SessionStore{Store: env.CityStore}
 	claim := slices.Concat(s.AssignedWork, s.ReadyRouted)
 	refs := make([]string, len(claim))

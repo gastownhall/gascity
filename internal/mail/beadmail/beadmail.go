@@ -50,6 +50,9 @@ type Provider struct {
 	// sender is the calling session, already resolved by the command; see
 	// PinSender.
 	sender *session.Info
+	// onConsumed, when set, is told each message a read, mark-read or
+	// archive consumed; see OnConsumed.
+	onConsumed func(id string)
 }
 
 type sessionInfoCache struct {
@@ -337,6 +340,27 @@ func (p *Provider) PinSender(info session.Info) {
 	p.sender = &pinned
 }
 
+// OnConsumed registers fn to be told the id of each message a call consumed:
+// a successful Read, MarkRead, Archive (Delete, ArchiveMany and DeleteMany
+// included), ArchiveMatching, or archive of an injected auto-handoff
+// (ArchiveInjectedAutoHandoffs, ArchiveInjectedAutoHandoffsFromInbox). An
+// Archive of a message already archived or already gone
+// (mail.ErrAlreadyArchived) reports it again, as a repeated Read does, and so
+// does an Archive, ArchiveMatching or auto-handoff archive that loses the
+// message to a removal between its read and its close. fn
+// runs after the write, on the caller's goroutine, and cannot fail the call.
+// Register it before the provider is shared; a later call replaces it.
+func (p *Provider) OnConsumed(fn func(id string)) {
+	p.onConsumed = fn
+}
+
+// consumed reports id to the OnConsumed hook, if any.
+func (p *Provider) consumed(id string) {
+	if p.onConsumed != nil {
+		p.onConsumed(id)
+	}
+}
+
 // pinnedSenderFor returns the pinned sender when from names it.
 func (p *Provider) pinnedSenderFor(from string) (session.Info, bool) {
 	if p.sender == nil || from == "" {
@@ -445,6 +469,7 @@ func (p *Provider) Read(id string) (mail.Message, error) {
 			return mail.Message{}, fmt.Errorf("beadmail read: marking as read: %w", err)
 		}
 	}
+	p.consumed(id)
 	msg := beadToMessage(b)
 	msg.Read = true
 	return msg, nil
@@ -459,10 +484,14 @@ func (p *Provider) MarkRead(id string) error {
 	if isRemovedMessageBead(b) {
 		return beadmailError("mark-read", beads.ErrNotFound)
 	}
-	return p.store.Update(id, beads.UpdateOpts{
+	if err := p.store.Update(id, beads.UpdateOpts{
 		Labels:   []string{"read"},
 		Metadata: map[string]string{"mail.read": "true"},
-	})
+	}); err != nil {
+		return err
+	}
+	p.consumed(id)
+	return nil
 }
 
 // MarkUnread marks a message as unread (removes "read" label).
@@ -502,6 +531,10 @@ func (p *Provider) Archive(id string) error {
 	b, err := beads.HandlesFor(p.store).Live.Get(id)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
+			// Gone already (purged after an earlier archive, say): consumed
+			// all the same, so a hook whose work failed after that archive
+			// gets another chance.
+			p.consumed(id)
 			return mail.ErrAlreadyArchived
 		}
 		return fmt.Errorf("beadmail archive: %w", err)
@@ -510,14 +543,20 @@ func (p *Provider) Archive(id string) error {
 		return fmt.Errorf("beadmail archive: bead %s is not a message", id)
 	}
 	if b.Status == "closed" {
+		// Consumed already, and again: a hook whose work failed after the
+		// first archive gets another chance, as a repeated Read gives it.
+		p.consumed(id)
 		return mail.ErrAlreadyArchived
 	}
 	if err := p.closeArchived(id, hasLabel(b.Labels, "read")); err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
+			// Removed under the archive: consumed all the same.
+			p.consumed(id)
 			return mail.ErrAlreadyArchived
 		}
 		return fmt.Errorf("beadmail archive: %w", err)
 	}
+	p.consumed(id)
 	return nil
 }
 
@@ -601,10 +640,13 @@ func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail
 		if err := p.closeArchived(id, candidates[i].Read); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				results[i].Err = mail.ErrAlreadyArchived
+				p.consumed(id)
 				continue
 			}
 			results[i].Err = fmt.Errorf("beadmail archive: %w", err)
+			continue
 		}
+		p.consumed(id)
 	}
 	return candidates, results, nil
 }
@@ -693,12 +735,17 @@ func (p *Provider) archiveInjectedAutoHandoffs(ids []string, mayLabel func() boo
 			mail.ReadMetadataKey: "true",
 			"close_reason":       RetentionSweepCloseReason,
 		}); err != nil {
-			if !errors.Is(err, beads.ErrNotFound) {
+			if errors.Is(err, beads.ErrNotFound) {
+				// Removed under the archive: consumed all the same, as
+				// Archive reports it.
+				p.consumed(id)
+			} else {
 				errs = append(errs, fmt.Errorf("archiving %s: %w", id, err))
 			}
 			continue
 		}
 		closed = append(closed, id)
+		p.consumed(id)
 	}
 	for _, id := range closed {
 		if mayLabel != nil && !mayLabel() {

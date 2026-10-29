@@ -370,6 +370,7 @@ var stateWriters = map[string]string{
 	"internal/session/chat.go:Manager.confirmLiveSessionState":                "Manager: CLI/API start confirms active",
 	"internal/session/disposition.go:dispositionMeta":                         "read model, not a write",
 	"internal/session/resume_user_hold.go:consumeUserHoldLife":                "patch builder (operator resume consumes a user hold)",
+	"internal/session/resume.go:resumeHeldLife":                               "patch builder (operator resume that starts nothing: a suspended row goes asleep)",
 	"internal/session/lifecycle_exits.go:RateLimitQuarantinePatch":            "patch builder",
 	"internal/session/lifecycle_transition.go:AcknowledgeDrainPatch":          "patch builder",
 	"internal/session/lifecycle_transition.go:ArchivePatch":                   "patch builder",

@@ -34,7 +34,6 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sdnotify"
-	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/transcriptmeta"
@@ -2495,10 +2494,7 @@ func startOneCity(
 	// restart (ga-n2d Gap C). Best-effort, mirrors runController — a sweep
 	// failure must never block city startup.
 	_ = runPostPrepareStep("releasing_stale_name_claims", func() error {
-		if cs.cityBeadStore == nil {
-			return nil
-		}
-		if released, err := sessionpkg.ReleaseStaleConfiguredNameClaims(cs.cityBeadStore, cfg, cityName); err != nil {
+		if released, err := releaseStaleNameClaimsAtStartup(cs, cfg, cityName); err != nil {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': stale name-claim sweep: %v\n", cityName, err) //nolint:errcheck
 		} else if released > 0 {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': released %d stale configured name claim(s) at startup\n", cityName, released) //nolint:errcheck

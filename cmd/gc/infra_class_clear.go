@@ -57,10 +57,15 @@ package main
 //     copy that will never close;
 //   - every other cross edge is kept, re-added after the delete when the
 //     backend's delete cascaded it. A kept blocking edge then names an id the
-//     work store cannot resolve, which every Ready implementation reads as a
-//     blocker that never clears — the same answer the frozen copy gave, and
-//     the cross-class membership edge (ga-2orlf) is what lifts it. A backend
-//     that refuses the re-add is reported by edge; the edge is in the backup.
+//     work store does not hold, and the backends do NOT agree on what that
+//     means: SQLite and the in-memory stores read it as a blocker that never
+//     clears, while bd/Dolt (beads v1.3.2) classifies a cross-prefix target as
+//     external and serves the dependent as ready at once. Neither store's own
+//     answer is the rule, so gc's ready computation enforces it over both
+//     (internal/readywork crossstore.go): the dependent waits until the blocker
+//     is closed in the binding that holds it, and a blocker no store holds
+//     keeps it waiting. A backend that refuses the re-add is reported by edge;
+//     the edge is in the backup.
 //
 // # Resumability
 //

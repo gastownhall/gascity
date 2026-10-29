@@ -1112,7 +1112,7 @@ export type ConversationOpResult = {
      */
     coalesced_into?: string;
     /**
-     * Context epoch the operation ran in.
+     * Context epoch the operation ran in, or, for one skipped{stale} unrun, the epoch that fenced it off.
      */
     context_epoch?: number;
     /**
@@ -1120,7 +1120,7 @@ export type ConversationOpResult = {
      */
     delivery?: ConversationOpDelivery;
     /**
-     * Session generation the operation ran in.
+     * Session generation the operation ran in, or, for one skipped{stale} unrun because its session moved on, the generation that fenced it off.
      */
     generation?: number;
     /**
@@ -3231,6 +3231,7 @@ export type ReadyBead = {
 
 export type ReadyBeadBlocker = {
     id: string;
+    reason?: string;
     status: string;
 };
 
@@ -3929,7 +3930,7 @@ export type SessionMessageInputBody = {
      */
     message: string;
     /**
-     * Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.
+     * Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will. When the conversation lane delivers messages (message listed in [ops] authoritative) it starts nothing here: it consumes an operator's hold placed before the message and records the session's wake, and the controller starts the session as it does for any queued message, or the result's will_start says why it will not; resending the request under the idempotency_key of its 202 consumes such a hold too.
      */
     resume?: boolean;
 };
@@ -3956,7 +3957,7 @@ export type SessionMessageSucceededPayload = {
      */
     will_not_start_reason?: string;
     /**
-     * Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.
+     * Present when the message was queued because the session is not running or is held: whether the controller will start it to deliver the message. False means it will not; will_not_start_reason says why, with the remedy. When the conversation lane delivers messages it is read as the request's settle window ends, and resume: true does not start a session the controller will not start.
      */
     will_start?: boolean;
 };
@@ -5250,7 +5251,7 @@ export type SessionStructuredUserPrompt = {
 
 export type SessionSubmitInputBody = {
     /**
-     * Submit intent; empty defaults to "default".
+     * Submit intent; empty defaults to "default". When the conversation lane delivers messages (message listed in [ops] authoritative), follow_up is the default request: the lane delivers both at the session's boundary, so under one Idempotency-Key either answers from the other's operation, and the result says default.
      */
     intent?: SubmitIntent;
     /**
@@ -5258,7 +5259,7 @@ export type SessionSubmitInputBody = {
      */
     message: string;
     /**
-     * Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.
+     * Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will. When the conversation lane delivers messages (message listed in [ops] authoritative) it starts nothing here: it consumes an operator's hold placed before the message and records the session's wake, and the controller starts the session as it does for any queued message, or the result's will_start says why it will not; resending the request under the idempotency_key of its 202 consumes such a hold too.
      */
     resume?: boolean;
 };
@@ -5280,7 +5281,7 @@ export type SessionSubmitInterrupt = {
 
 export type SessionSubmitSucceededPayload = {
     /**
-     * Resolved submit intent (default, follow_up, interrupt_now).
+     * Resolved submit intent (default, follow_up, interrupt_now). When the conversation lane delivers messages a follow_up resolves to default: the lane delivers both at the session's boundary.
      */
     intent: string;
     /**
@@ -5308,7 +5309,7 @@ export type SessionSubmitSucceededPayload = {
      */
     will_not_start_reason?: string;
     /**
-     * Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.
+     * Present when the message was queued because the session is not running or is held: whether the controller will start it to deliver the message. False means it will not; will_not_start_reason says why, with the remedy. When the conversation lane delivers messages it is read as the request's settle window ends, and resume: true does not start a session the controller will not start.
      */
     will_start?: boolean;
 };

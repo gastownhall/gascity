@@ -143,8 +143,14 @@ func (rp *rulesPlan) waitOpDetail(op Op, r WaitReason, detail string, until time
 }
 
 // closeOp closes read, the op as read (its revision guards the write), from
-// cur, the op with any bookkeeping the rules record.
+// cur, the op with any bookkeeping the rules record. A stale close of an op
+// whose scope the incarnation has moved past, the scope rule's, records that
+// incarnation (FencedOff): an op closed so never ran, unlike one the
+// executor found nothing to do for.
 func (rp *rulesPlan) closeOp(read, cur Op, o Outcome) {
+	if o.Arm == ArmSkipped && o.Reason == ReasonStale && scopeCmp(read.Scope, rp.inc) < 0 {
+		o.Result = Result{Generation: rp.inc.gen, ContextEpoch: rp.inc.epoch}
+	}
 	rp.closes = append(rp.closes, ruleClose{cur: read, next: closedAt(cur, o, rp.by, rp.now)})
 }
 

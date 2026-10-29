@@ -16,6 +16,7 @@ import (
 // reports corrupt entries and returning partial-result errors when backing
 // history cannot be fully read.
 func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
+	query = c.listTier(query)
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
@@ -113,6 +114,7 @@ func liveListQuery(query ListQuery) ListQuery {
 // queries are unsupported because Count must match List cardinality, including
 // List's post-sort limit cap.
 func (c *CachingStore) Count(ctx context.Context, query ListQuery, excludeTypes ...string) (int, error) {
+	query = c.listTier(query)
 	if !query.HasFilter() && !query.AllowScan {
 		return 0, fmt.Errorf("counting beads: %w", ErrQueryRequiresScan)
 	}
@@ -216,6 +218,7 @@ func (c *CachingStore) cachedCountContext(ctx context.Context, query ListQuery, 
 // that already fall back to the backing store (List/Count/Ready), where a
 // refresh-and-serve is invisible to callers.
 func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
+	query = c.listTier(query)
 	if query.IncludesClosed() {
 		return nil, false
 	}
@@ -232,6 +235,7 @@ func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
 // performs backing-store I/O. The stamp fences only this process's cache
 // projection; it does not certify durable-store lineage or event delivery.
 func (c *CachingStore) ObservedList(query ListQuery) ([]Bead, CacheObservation, bool) {
+	query = c.listTier(query)
 	if query.Validate() != nil ||
 		(!query.HasFilter() && !query.AllowScan) ||
 		query.Live ||
@@ -968,12 +972,12 @@ func rowRefreshChange(held bool, cached Bead, cachedDeps []Dep, found bool, inst
 // Ready returns open beads whose blocking deps are all closed.
 func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if !readyQueryFromArgs(query).IsZero() {
-		return c.backing.Ready(query...)
+		return c.backing.Ready(c.readyArgsTier(query)...)
 	}
-	if rows, ok := c.readyFromCache(ReadyQuery{}); ok {
+	if rows, ok := c.readyFromCache(c.readyTier(ReadyQuery{})); ok {
 		return rows, nil
 	}
-	return c.backing.Ready(query...)
+	return c.backing.Ready(c.readyArgsTier(query)...)
 }
 
 // ReadyPreferCache answers any ready query (tier, assignee, limit) from the
@@ -988,6 +992,7 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 // arguments has always meant "authoritative" to its existing callers; the
 // native Ready endpoint opts in explicitly.
 func (c *CachingStore) ReadyPreferCache(query ReadyQuery) ([]Bead, error) {
+	query = c.readyTier(query)
 	if rows, ok := c.readyFromCache(query); ok {
 		return rows, nil
 	}
@@ -1074,7 +1079,7 @@ func (c *CachingStore) ReadyContext(ctx context.Context, query ...ReadyQuery) ([
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	rows, err := c.cachedReadyCompleteOnly(ctx, readyQueryFromArgs(query))
+	rows, err := c.cachedReadyCompleteOnly(ctx, c.readyTier(readyQueryFromArgs(query)))
 	if err != nil {
 		return rows, err
 	}
@@ -1109,7 +1114,7 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
 		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
-		if IsReadyCandidate(b, now) {
+		if IsReadyCandidateForTier(b, now, c.readTier(TierIssues)) {
 			if c.readyProjectionUnknownLocked(b.ID) {
 				return nil, false
 			}

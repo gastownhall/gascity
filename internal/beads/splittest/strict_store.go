@@ -169,6 +169,7 @@ var (
 	_ beads.AtomicTxStore                    = (*StrictStore)(nil)
 	_ beads.ParentProjectionWaiter           = (*StrictStore)(nil)
 	_ beads.DepMetadataReader                = (*StrictStore)(nil)
+	_ beads.AbsentBlockedReader              = (*StrictStore)(nil)
 	_ storeref.HasIDPrefix                   = (*StrictStore)(nil)
 )
 
@@ -585,6 +586,27 @@ func (s *StrictStore) DepListBatch(ids []string) (map[string][]beads.Dep, error)
 		result[id] = deps
 	}
 	return result, nil
+}
+
+// StrandsAbsentTargets answers for the leaf (beads.AbsentBlockedReader): a
+// bd-semantics leaf strands nothing, and a reader must re-judge its rows.
+func (s *StrictStore) StrandsAbsentTargets() bool {
+	_, ok := beads.ReadyBlockedByAbsentFor(s.Store)
+	return ok
+}
+
+// ReadyBlockedByAbsent forwards the leaf's absent-blocker listing
+// (beads.AbsentBlockedReader). A federated ready reader finds the beads a
+// SQLite or in-memory leaf strands behind a blocker held in another store
+// through it, so stripping it would make the kit hide exactly the split-store
+// stranding it exists to expose. A leaf without the listing (a bd-semantics
+// leaf, which never strands such a bead) reports none.
+func (s *StrictStore) ReadyBlockedByAbsent(query beads.ReadyQuery) ([]beads.Bead, error) {
+	reader, ok := beads.ReadyBlockedByAbsentFor(s.Store)
+	if !ok {
+		return nil, nil
+	}
+	return reader.ReadyBlockedByAbsent(query)
 }
 
 // DepMetadata forwards the leaf's edge-payload read. Wrapping changes nothing

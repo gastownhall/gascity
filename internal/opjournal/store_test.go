@@ -58,7 +58,8 @@ func assertOnlyKeyedLists(t *testing.T, rec *beadstest.OpRecordingStore) {
 		laneScanKeyed := q.Label == LabelOp && len(q.Metadata) == 2 && q.Metadata[keyExecutor] == string(ExecutorLane) && q.Metadata[keyStatus] != ""
 		openLaneKeyed := q.Label == "" && len(q.Metadata) == 2 && q.Metadata[keyOpen] != "" && q.Metadata[keyExecutor] == string(ExecutorLane)
 		interruptsKeyed := strings.HasPrefix(q.Label, labelOpConvPrefix) && len(q.Metadata) == 1 && q.Metadata[keyKind] == string(KindInterrupt) && q.Limit > 0
-		if !openKeyed && !legacyKeyed && !laneScanKeyed && !openLaneKeyed && !interruptsKeyed {
+		causationKeyed := q.Label == LabelOp && len(q.Metadata) == 2 && q.Metadata[keyCausation] != "" && q.Metadata[keyExecutor] == string(ExecutorLane)
+		if !openKeyed && !legacyKeyed && !laneScanKeyed && !openLaneKeyed && !interruptsKeyed && !causationKeyed {
 			t.Errorf("unkeyed list %+v from %v", q, op.Caller)
 		}
 		for _, req := range beads.NativeListPlan(op.Query) {
@@ -1550,6 +1551,79 @@ func TestAdopt(t *testing.T) {
 		}
 		if got, _ := h.store.Get(op.ID); got.Attempt != 1 {
 			t.Fatalf("attempt %d after one adoption", got.Attempt)
+		}
+	})
+}
+
+// SetCausation names, on an open legacy:api op at the attempt its adopter
+// holds, what answers the op: one revision CAS that writes the causation and
+// nothing else, outside the request digest. A causation is set once: the
+// same one again writes nothing, and another is refused. A closed op, any
+// other executor, an attempt another adopter moved past and a causation the
+// journal refuses are refused, nothing written.
+func TestSetCausation(t *testing.T) {
+	t.Run("names once", func(t *testing.T) {
+		h := newHarness(t)
+		op := h.propose(t, legacyReq(ExecutorLegacyAPI, "k"))
+		adopted, err := h.store.Adopt(op.ID, 0, "legacy:api", t0.Add(30*time.Minute))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := h.store.SetCausation(op.ID, 1, "req-1#1", "api")
+		if err != nil {
+			t.Fatal(err)
+		}
+		stored, err := h.store.Get(op.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Causation != "req-1#1" || stored.Causation != "req-1#1" || stored.Status != StatusSubmitted ||
+			stored.Attempt != 1 || !stored.FinishBy.Equal(adopted.FinishBy) || len(stored.Transitions) != len(adopted.Transitions) ||
+			stored.PayloadDigest != op.PayloadDigest || RequestDigest(stored) != op.PayloadDigest {
+			t.Fatalf("named op = %+v, want the adopted op %+v with causation req-1#1, its digest unchanged", stored, adopted)
+		}
+		rev := h.revision(t, op.ID)
+		if again, err := h.store.SetCausation(op.ID, 1, "req-1#1", "api"); err != nil || again.Causation != "req-1#1" || h.revision(t, op.ID) != rev {
+			t.Fatalf("the same causation again = %+v, %v; want the op as stored, nothing written", again, err)
+		}
+		if _, err := h.store.SetCausation(op.ID, 1, "req-1#2", "api"); !errors.Is(err, ErrIllegalTransition) || h.revision(t, op.ID) != rev {
+			t.Fatalf("another causation = %v, want ErrIllegalTransition, nothing written", err)
+		}
+	})
+	t.Run("refusals", func(t *testing.T) {
+		h := newHarness(t)
+		closedOp := h.propose(t, legacyReq(ExecutorLegacyAPI, "closed"))
+		if _, err := h.store.Close(closedOp.ID, Outcome{Arm: ArmSucceeded}, "legacy:api"); err != nil {
+			t.Fatal(err)
+		}
+		lane := h.propose(t, legacyReq(ExecutorLane, "lane"))
+		cli := h.propose(t, legacyReq(ExecutorLegacyCLI, "cli"))
+		bare := h.propose(t, legacyReq(ExecutorLegacy, "bare"))
+		api := h.propose(t, legacyReq(ExecutorLegacyAPI, "api"))
+		for _, c := range []struct {
+			name, id  string
+			attempt   int
+			causation string
+			by        string
+			want      error
+		}{
+			{"closed", closedOp.ID, 0, "req-1#1", "api", ErrAlreadyTerminal},
+			{"lane", lane.ID, 0, "req-1#1", "api", ErrIllegalTransition},
+			{"legacy:cli", cli.ID, 0, "req-1#1", "api", ErrIllegalTransition},
+			{"bare legacy", bare.ID, 0, "req-1#1", "api", ErrIllegalTransition},
+			{"an attempt another adopter moved past", api.ID, 1, "req-1#1", "api", ErrAttemptMoved},
+			{"no causation", api.ID, 0, "", "api", ErrInvalidRequest},
+			{"a causation with surrounding space", api.ID, 0, " req-1#1", "api", ErrInvalidRequest},
+			{"a causation an update stores as a number", api.ID, 0, "42", "api", ErrInvalidRequest},
+			{"no writer", api.ID, 0, "req-1#1", "", ErrInvalidRequest},
+		} {
+			rev := h.revision(t, c.id)
+			if _, err := h.store.SetCausation(c.id, c.attempt, c.causation, c.by); !errors.Is(err, c.want) {
+				t.Errorf("%s: SetCausation = %v, want %v", c.name, err, c.want)
+			}
+			if h.revision(t, c.id) != rev {
+				t.Errorf("%s: a refused SetCausation wrote the row", c.name)
+			}
 		}
 	})
 }

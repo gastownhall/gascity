@@ -137,9 +137,15 @@ const (
 	CrossStoreGateOwnerMetadataKey = "gc.cross_store_gate_owner"
 	// CrossStoreGateStateMetadataKey records a cross-store gate's state:
 	// "unresolved" (open; no store holds its blocker), "released" (closed by
-	// the controller; reopened if its blocker opens again) or "overridden"
+	// the controller; reopened if its blocker opens again), "retired" (closed
+	// by the controller because its drain control finished) or "overridden"
 	// (closed by an operator; final).
 	CrossStoreGateStateMetadataKey = "gc.cross_store_gate_state"
+	// CrossStoreGateRetiredFromMetadataKey records, on a retired cross-store
+	// gate, the state it was retired from: "open" (the release pass never
+	// released it) or "released". A drain control that is reopened hands the
+	// gate back accordingly.
+	CrossStoreGateRetiredFromMetadataKey = "gc.cross_store_gate_retired_from"
 	// CrossStoreGateUnresolvedAtMetadataKey is when a cross-store gate was
 	// first found unresolved (RFC3339): the persisted anchor its control.stalled
 	// event reports as first_seen.
@@ -181,13 +187,12 @@ const (
 	DrainParentConvoyIDMetadataKey       = "gc.drain_parent_convoy_id"
 	DrainStateMetadataKey                = "gc.drain_state"
 	DrainUnitKeyMetadataKey              = "gc.drain_unit_key"
-	// DrainUnprojectedBlockersMetadataKey records, on a drain item root, the
-	// out-of-convoy blockers of its source member that the item workflow could
-	// not depend on because they live in another class store. The item workflow
-	// runs without those constraints: a dependency row can only reference an id
-	// its own store resolves, and writing one anyway removes the dependent from
-	// Ready forever. Only OPEN blockers are recorded — a terminal one constrains
-	// nothing, so omitting its edge loses no meaning. Comma-separated bead ids.
+	// DrainUnprojectedBlockersMetadataKey is what drains written by older
+	// builds left on an item root whose source member had an open out-of-convoy
+	// blocker in another class store: the item workflow ran without that
+	// constraint. Drains no longer write it — they hold the item behind a
+	// cross-store gate instead (internal/dispatch cross_store_gate.go) — and it
+	// is kept so the roots that carry it still read. Comma-separated bead ids.
 	DrainUnprojectedBlockersMetadataKey  = "gc.drain_unprojected_blockers"
 	DurationMsMetadataKey                = "gc.duration_ms"
 	DynamicFragmentMetadataKey           = "gc.dynamic_fragment"
@@ -561,6 +566,7 @@ var KnownMetadataKeys = []string{
 	CoordinatorOutcomeProducerDispositionMetadataKey,
 	CrossStoreBlockerMetadataKey,
 	CrossStoreGateOwnerMetadataKey,
+	CrossStoreGateRetiredFromMetadataKey,
 	CrossStoreGateStateMetadataKey,
 	CrossStoreGateUnresolvedAtMetadataKey,
 	CurrentRunIDMetadataKey,

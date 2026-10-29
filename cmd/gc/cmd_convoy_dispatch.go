@@ -400,7 +400,10 @@ func recycleDispatchSubjectSession(cityPath string, store beads.Store, cfg *conf
 			}
 			sp = provider
 		}
-		return workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, subject.Assignee)
+		// The subject's session row is session class: on a split city it lives
+		// only in the binding, never in the scope work store this hook is
+		// built over (write-audit B5).
+		return workerKillSessionTargetWithConfig(cityPath, cliRelocatedSessionStore(store, cfg, cityPath), sp, cfg, subject.Assignee)
 	}
 }
 

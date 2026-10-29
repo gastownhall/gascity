@@ -442,6 +442,45 @@ func (s *Store) Adopt(id string, expectAttempt int, by string, finishBy time.Tim
 	})
 }
 
+// SetCausation sets the causation of op id, an open legacy:api op at attempt
+// expectAttempt (the attempt its adopter holds), to causation: one revision
+// CAS that writes the causation and nothing else, outside the request
+// digest. An adopter that hands the op's effect to another op names what
+// answers it before that op exists (the API's lane /respond names the
+// interaction occurrence whose lane op answers OJ-4's adopted respond), so a
+// reader follows the op there while it stays open, and after the sweeper
+// closes it. A causation is set once: the same one again writes nothing, and
+// another is ErrIllegalTransition. It refuses a closed op
+// (ErrAlreadyTerminal), any op whose executor is not legacy:api
+// (ErrIllegalTransition), an attempt other than expectAttempt
+// (ErrAttemptMoved: another adopter took the op) and a causation, or a by,
+// the journal cannot store (ErrInvalidRequest).
+func (s *Store) SetCausation(id string, expectAttempt int, causation, by string) (Op, error) {
+	if err := validateText("set causation by", by, maxPrincipalLen); err != nil {
+		return Op{}, err
+	}
+	if err := errors.Join(validateText("causation", causation, maxFreeTextLen), validateUpdateText("causation", causation)); err != nil {
+		return Op{}, err
+	}
+	return s.mutate(id, by, func(cur Op, _ Spec) (Op, bool, error) {
+		switch {
+		case cur.Status == StatusClosed:
+			return Op{}, false, fmt.Errorf("%w: op %s closed %s{%s}", ErrAlreadyTerminal, id, cur.Outcome.Arm, cur.Outcome.Reason)
+		case cur.Executor != ExecutorLegacyAPI:
+			return Op{}, false, fmt.Errorf("%w: op %s has executor %s; only a %s op's causation is set", ErrIllegalTransition, id, cur.Executor, ExecutorLegacyAPI)
+		case cur.Attempt != expectAttempt:
+			return Op{}, false, fmt.Errorf("%w: op %s is at attempt %d, expected %d", ErrAttemptMoved, id, cur.Attempt, expectAttempt)
+		case cur.Causation == causation:
+			return cur, false, nil
+		case cur.Causation != "":
+			return Op{}, false, fmt.Errorf("%w: op %s names causation %q already, not %q", ErrIllegalTransition, id, cur.Causation, causation)
+		}
+		next := cur
+		next.Causation = causation
+		return next, true, nil
+	})
+}
+
 // CloseKnown closes op, as read at op.Revision, with outcome in one
 // UpdateIfMatch at that revision, saving Close's read on the common path. When
 // the row has moved (*beads.PreconditionFailedError) it falls back to Close,

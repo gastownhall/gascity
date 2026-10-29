@@ -16,6 +16,8 @@ go_test(
         "maintenance_scripts_test.go",
         "operational_awareness_test.go",
         "precompact_hook_test.go",
+        "reaper_op_rows_guard_dolt_integration_test.go",
+        "reaper_op_rows_guard_test.go",
         "testenv_import_test.go",
         "tmux_theme_script_test.go",
     ],

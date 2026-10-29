@@ -308,10 +308,16 @@ func (n *cliLaneNudge) replay(op opjournal.Op) (code int, done bool) {
 	return n.writeDelivered(op.ID, true), true
 }
 
-// pass runs one inline pass over the conversation (DES-O1 §7.6): the live
-// executor under the CLI's lease, one Pass and no loop.
+// pass runs one inline pass over the conversation (cliLaneInlinePass).
 func (n *cliLaneNudge) pass(ctx context.Context) (opjournal.PassResult, error) {
-	lane, err := opjournal.NewLane(n.st, cliLaneHostName, cliOpClock)
+	return cliLaneInlinePass(ctx, n.target, n.sessions, n.sp, n.st, n.warnf)
+}
+
+// cliLaneInlinePass runs one inline pass over target's conversation (DES-O1
+// §7.6): the live executor under the CLI's lease, content-only, one Pass and
+// no loop. warnf takes the pass's warnings.
+func cliLaneInlinePass(ctx context.Context, target nudgeTarget, sessions beads.Store, sp runtime.Provider, st *opjournal.Store, warnf func(string, ...any)) (opjournal.PassResult, error) {
+	lane, err := opjournal.NewLane(st, cliLaneHostName, cliOpClock)
 	if err != nil {
 		return opjournal.PassResult{}, err
 	}
@@ -320,20 +326,20 @@ func (n *cliLaneNudge) pass(ctx context.Context) (opjournal.PassResult, error) {
 	// controller latched, asked right before the row read so the answer is
 	// as fresh as the row: a request it holds back waits for the
 	// controller's lane host, which reads by the same mode.
-	reading, modeErr := controllerStopReading(n.target.cityPath, cliReconcilerModeLeg)
-	view, row, _, err := readConversationLaneView(sessionFrontDoor(n.sessions), n.target.sessionID, reading)
+	reading, modeErr := controllerStopReading(target.cityPath, cliReconcilerModeLeg)
+	view, row, _, err := readConversationLaneView(sessionFrontDoor(sessions), target.sessionID, reading)
 	if err != nil {
-		return opjournal.PassResult{}, fmt.Errorf("reading conversation %s: %w", n.target.sessionID, err)
+		return opjournal.PassResult{}, fmt.Errorf("reading conversation %s: %w", target.sessionID, err)
 	}
 	if note := unknownModeStopNote(row, modeErr); note != "" {
-		n.warnf("%s", note)
+		warnf("%s", note)
 	}
 	live := newConversationLaneExec(laneExecDeps{
-		cityPath: n.target.cityPath,
-		cfg:      n.target.cfg,
-		sessions: n.sessions,
-		sp:       n.sp,
-		lane:     n.st,
+		cityPath: target.cityPath,
+		cfg:      target.cfg,
+		sessions: sessions,
+		sp:       sp,
+		lane:     st,
 		clk:      cliOpClock,
 	}, row)
 	exec := &cliLaneExec{conversationLaneExec: live, ownsInput: live.target.sessionTransport() != "acp"}
@@ -454,7 +460,8 @@ func (n *cliLaneNudge) json(queued bool, id string, replayed bool) sessionNudgeJ
 
 // cliLaneQueuedNote says why the pass left op waiting, from its wait in
 // res; none in queue mode, which runs no pass, and none for a wait it does
-// not name.
+// not name. A pending interaction is worded for both kinds: the pass's probe
+// carries a request id and no kind.
 func cliLaneQueuedNote(op opjournal.Op, res opjournal.PassResult) string {
 	for _, w := range res.Waits {
 		if w.ID != op.ID {
@@ -464,7 +471,7 @@ func cliLaneQueuedNote(op opjournal.Op, res opjournal.PassResult) string {
 		case opjournal.WaitBusy, opjournal.WaitBoundaryUnknown:
 			return " (the session is mid-turn; the controller delivers it at the next idle boundary)"
 		case opjournal.WaitPendingInteraction:
-			return " (the session is waiting on a permission prompt; the controller delivers it after the prompt is answered)"
+			return " (the session is waiting on a permission prompt or a question; the controller delivers it after that is answered)"
 		case opjournal.WaitNotRunning, opjournal.WaitDormant, opjournal.WaitNoSession:
 			if op.Policy.Message.Wake == opjournal.WakeLiveOnly {
 				return " (the session is not running; the nudge is delivered the next time it runs)"

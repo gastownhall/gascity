@@ -22,9 +22,9 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/gastownhall/gascity/internal/bdflags"
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -741,11 +741,13 @@ func bdBindingDependents(cityPath string, ids []string) (map[string][]string, er
 				out[id] = append(out[id], d.IssueID)
 			}
 		}
-		gates, err := bdOpenCrossStoreGatesNaming(binding.Store, id)
+		gates, err := dispatch.OpenCrossStoreGatesNaming(binding.Store, id)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("listing the binding's open gates waiting on %s: %w", id, err)
 		}
-		out[id] = append(out[id], gates...)
+		for _, gate := range gates {
+			out[id] = append(out[id], gate.ID)
+		}
 	}
 	return out, nil
 }
@@ -784,37 +786,6 @@ func bdGuardRead(cityPath string, cfg *config.City, target execStoreTarget, args
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("bd %s: %w: %s", strings.Join(args, " "), err, bdTruncateUTF8(strings.TrimSpace(stderr.String()), 400))
-	}
-	return out, nil
-}
-
-// bdCrossStoreGateLabel labels an S3b cross-store drain gate
-// (dispatch.CrossStoreGateLabel in #8360).
-const bdCrossStoreGateLabel = "gc:cross-store-gate"
-
-// bdOpenCrossStoreGatesNaming returns the ids of the open cross-store gates
-// in store that wait on blockerID. It is the same query as #8360's
-// dispatch.OpenCrossStoreGatesNaming (label, open status, the
-// gc.cross_store_blocker metadata, live, both tiers).
-// TODO(#8360): call dispatch.OpenCrossStoreGatesNaming once #8360 is on main.
-func bdOpenCrossStoreGatesNaming(store beads.Store, blockerID string) ([]string, error) {
-	blockerID = strings.TrimSpace(blockerID)
-	if store == nil || blockerID == "" {
-		return nil, nil
-	}
-	gates, err := store.List(beads.ListQuery{
-		Label:    bdCrossStoreGateLabel,
-		Status:   "open",
-		Metadata: map[string]string{beadmeta.CrossStoreBlockerMetadataKey: blockerID},
-		Live:     true,
-		TierMode: beads.TierBoth,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("listing the binding's open gates waiting on %s: %w", blockerID, err)
-	}
-	out := make([]string, 0, len(gates))
-	for _, g := range gates {
-		out = append(out, g.ID)
 	}
 	return out, nil
 }

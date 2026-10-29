@@ -1099,6 +1099,11 @@ resource = "http_test_server"
 calls = 2
 
 [[count]]
+path = "cmd/gc/reaper_op_rows_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "cmd/gc/reconcile_effect_recycle_tmux_integration_test.go"
 resource = "subprocess"
 calls = 1
@@ -3098,6 +3103,18 @@ tagged = true
 path = "test/conversationlane/harness_test.go"
 resource = "subprocess"
 calls = 2
+tagged = true
+
+[[count]]
+path = "test/conversationlane/ladder_lane_test.go"
+resource = "fixed_sleep"
+calls = 4
+tagged = true
+
+[[count]]
+path = "test/conversationlane/ladder_lane_test.go"
+resource = "subprocess"
+calls = 1
 tagged = true
 
 [[count]]

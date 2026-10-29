@@ -320,8 +320,11 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		// SQLite, or unable to record ops), the check reads at most one op
 		// row, and scans for expired legacy ops only once that read finds
 		// one; during a store outage it reports the outage too, beside the
-		// preflight's line.
-		registerCityStoreCheck(newOpsRecordingDoctorCheck(cityPath, cfg, opts.RolloutFlags, opts.RolloutResolveErr))
+		// preflight's line. It also counts op rows (one bd read per bd scope
+		// the store gate lets doctor read) and, on a scope holding any, reads
+		// the purge and prune help and the types.retained setting, as the
+		// core reaper does before it purges.
+		registerCityStoreCheck(newOpsRecordingDoctorCheck(cityPath, cfg, opts.RolloutFlags, opts.RolloutResolveErr, storeGate.Skipped))
 		registerCityStoreCheck(newConversationLanesDoctorCheck(cityPath, cfg))
 		register(doctor.NewConfigRefsCheck(cfg, cityPath))
 		register(doctor.NewStaleLocalPackDirCheck(cfg.Packs, cfg.Imports, cfg.DefaultRigImports, cityPath, cfg.Rigs...))
@@ -477,6 +480,8 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newCensusOwnerLivenessCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newRouteRecoveryQuarantineCheck(cfg, cityPath, storeFactory))
+			registerCityStoreCheck(newCrossStoreGatesCheck(cfg, cityPath, storeFactory))
+			registerCityStoreCheck(newDanglingBlockingEdgesCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newHoldLabelRoutedToCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newPoolIdleRoutedWorkCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newV2DemandMigrationsCheck(cfg, cityPath, storeFactory))

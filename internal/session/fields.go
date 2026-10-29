@@ -389,7 +389,7 @@ var registry = slices.Concat([]Field{
 		op("cmd/gc/hook_session_claim.go", "recordWorkStarted"), op("cmd/gc/hook_session_claim.go", "forgetWorkStarted"))},
 	{Key: WorkLadderKey, Class: ClassWork, NewKey: true, CASOnly: true, Writers: sites(
 		v2("cmd/gc/work_ladder_lane.go", "ladderPass.commit"), v2("cmd/gc/work_ladder_lane.go", "ladderPass.settle"),
-		v2("cmd/gc/work_ladder_lane.go", "ladderPass.release"), v2("cmd/gc/work_ladder_lane.go", "externalReadsLane.clearLadderReleases"))},
+		v2("cmd/gc/work_ladder_lane.go", "ladderPass.release"), v2("cmd/gc/work_ladder_lane.go", "externalReadsLane.standDownLadder"))},
 
 	// The conversation cells (DES-O1 D21): an operator's content intent the
 	// conversation lane reads, live, at each pass, and the planner's reminders

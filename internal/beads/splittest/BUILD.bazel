@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "splittest",
     srcs = [
+        "native_work_store.go",
         "pinned_id_fence.go",
         "semantics.go",
         "split_stores.go",
