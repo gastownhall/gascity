@@ -47,6 +47,11 @@ type fakeStore struct {
 	// CloseLog records the ID of every bead CloseBead or CloseOpenDescendants
 	// closes, in order, so tests can verify close ordering.
 	CloseLog []string
+
+	// CloseDescendantErrFunc, when non-nil, is consulted before each
+	// descendant close in CloseOpenDescendants; a non-nil return fails that
+	// close and stops the walk.
+	CloseDescendantErrFunc func(id string) error
 }
 
 func newFakeStore() *fakeStore {
@@ -166,6 +171,11 @@ func (s *fakeStore) closeOpenDescendantsLocked(rec *fakeBeadRecord, reason strin
 		}
 		if child.info.Status == "closed" {
 			continue
+		}
+		if s.CloseDescendantErrFunc != nil {
+			if err := s.CloseDescendantErrFunc(childID); err != nil {
+				return err
+			}
 		}
 		child.info.Status = "closed"
 		child.info.ClosedAt = time.Now()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -410,5 +411,57 @@ func TestStopHandler_ForceCloseClosesOpenWispDescendants(t *testing.T) {
 	root, _ := store.GetBead("root-1")
 	if root.Status != "closed" {
 		t.Errorf("root status = %q, want closed", root.Status)
+	}
+}
+
+func TestStopHandler_ForceCloseDescendantErrorLeavesLoopActive(t *testing.T) {
+	handler, store, emitter := setupActiveHandler(t, "in_progress", nil)
+	store.addBead("step-a", "open", "wisp-iter-2", "", nil)
+	store.addBead("step-b", "open", "wisp-iter-2", "", nil)
+	store.CloseDescendantErrFunc = func(id string) error {
+		if id == "step-b" {
+			return fmt.Errorf("store unavailable closing %s", id)
+		}
+		return nil
+	}
+
+	_, err := handler.StopHandler(context.Background(), "root-1", "alice", "")
+	if err == nil {
+		t.Fatal("StopHandler succeeded; want the descendant close error")
+	}
+	if !strings.Contains(err.Error(), "wisp-iter-2") {
+		t.Errorf("error %q does not name the wisp", err)
+	}
+	for _, id := range []string{"step-b", "wisp-iter-2", "root-1"} {
+		info, _ := store.GetBead(id)
+		if info.Status == "closed" {
+			t.Errorf("%s closed after a failed descendant close", id)
+		}
+	}
+	meta, _ := store.GetMetadata("root-1")
+	if meta[FieldState] != StateActive {
+		t.Errorf("state = %q, want %q", meta[FieldState], StateActive)
+	}
+	if meta[FieldTerminalReason] != "" {
+		t.Errorf("terminal_reason = %q, want empty", meta[FieldTerminalReason])
+	}
+	if _, ok := emitter.findEvent(EventTerminated); ok {
+		t.Error("ConvergenceTerminated emitted after a failed descendant close")
+	}
+
+	store.CloseDescendantErrFunc = nil
+	if _, err := handler.StopHandler(context.Background(), "root-1", "alice", ""); err != nil {
+		t.Fatalf("second StopHandler: %v", err)
+	}
+	for _, id := range []string{"step-a", "step-b", "wisp-iter-2", "root-1"} {
+		info, _ := store.GetBead(id)
+		if info.Status != "closed" {
+			t.Errorf("after retry %s status = %q, want closed", id, info.Status)
+		}
+	}
+	meta, _ = store.GetMetadata("root-1")
+	if meta[FieldState] != StateTerminated || meta[FieldTerminalReason] != TerminalStopped {
+		t.Errorf("after retry state=%q terminal_reason=%q, want %q and %q",
+			meta[FieldState], meta[FieldTerminalReason], StateTerminated, TerminalStopped)
 	}
 }
