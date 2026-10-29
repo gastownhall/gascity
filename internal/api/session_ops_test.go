@@ -45,6 +45,9 @@ type opsTestStore struct {
 	mu sync.Mutex
 	// createErr fails op-row creates, writing nothing.
 	createErr error
+	// failCreate, when set, fails each op-row create it reports true for,
+	// writing nothing.
+	failCreate func(beads.Bead) bool
 	// ambiguous commits an op-row create, then answers an error.
 	ambiguous bool
 	// panicAfterCreate commits the next op-row create, then panics (a crash
@@ -69,11 +72,14 @@ func (s *opsTestStore) Create(b beads.Bead) (beads.Bead, error) {
 		return s.MemStore.Create(b)
 	}
 	s.mu.Lock()
-	createErr, ambiguous, panicAfter, onCreate := s.createErr, s.ambiguous, s.panicAfterCreate, s.onOpCreate
+	createErr, failCreate, ambiguous, panicAfter, onCreate := s.createErr, s.failCreate, s.ambiguous, s.panicAfterCreate, s.onOpCreate
 	s.panicAfterCreate, s.onOpCreate = false, nil
 	s.mu.Unlock()
 	if createErr != nil {
 		return beads.Bead{}, createErr
+	}
+	if failCreate != nil && failCreate(b) {
+		return beads.Bead{}, errors.New("transport: create failed")
 	}
 	created, err := s.MemStore.Create(b)
 	if err != nil {

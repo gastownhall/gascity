@@ -5,13 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -153,7 +156,7 @@ func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.S
 	retired := make([]session.Info, 0)
 	now := time.Now().UTC()
 	for _, info := range all {
-		if info.Closed || !session.IsNamedSessionInfo(info) || session.NamedSessionIdentityInfo(info) != spec.Identity || session.NamedSessionInfoContinuityEligible(info) {
+		if !continuityIneligibleNamedSession(info, spec.Identity) {
 			continue
 		}
 		if session.LifecycleIdentityReleasedInfo(info) {
@@ -175,23 +178,183 @@ func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.S
 	return retired, nil
 }
 
+// continuityIneligibleNamedSession reports whether info is an open row of the
+// named-session identity that can no longer carry the identity's continuity:
+// one the identity's next materialization retires, or one already retired.
+func continuityIneligibleNamedSession(info session.Info, identity string) bool {
+	return !info.Closed && session.IsNamedSessionInfo(info) && session.NamedSessionIdentityInfo(info) == identity && !session.NamedSessionInfoContinuityEligible(info)
+}
+
+// reassignContinuityIneligibleNamedSessionState hands what the retired rows
+// hold to replacementID once the replacement exists, reading every work store
+// live (reassignOpenWorkAssignedToSession).
 func (s *Server) reassignContinuityIneligibleNamedSessionState(ctx context.Context, store beads.Store, retired []session.Info, replacementID string) error {
-	if store == nil || strings.TrimSpace(replacementID) == "" {
+	return s.handOffRetiredNamedSessionState(ctx, store, retired, replacementID, reassignOpenWorkAssignedToSession)
+}
+
+// handOffRetiredNamedSessionState moves what each retired row still holds to
+// replacementID: its open work in every store that can hold it
+// (retiredSessionWorkStores), through moveWork, its waits, and its
+// external-message bindings and participants. Every step runs whatever an
+// earlier one did, and the failures are joined. A store that cannot be read (a
+// rig store that failed to open answers every read with an error until the
+// controller reopens its stores) must not keep the binding's graph steps, the
+// waits or the bindings on an id no session answers to; what that store holds
+// moves on a later materializing resolve of the identity
+// (handOffReleasedNamedSessionPredecessors).
+func (s *Server) handOffRetiredNamedSessionState(ctx context.Context, store beads.Store, retired []session.Info, replacementID string, moveWork func(store beads.Store, oldID, newID string) error) error {
+	if store == nil || strings.TrimSpace(replacementID) == "" || len(retired) == 0 {
 		return nil
 	}
 	now := time.Now().UTC()
+	workStores := s.retiredSessionWorkStores(store)
+	var errs []error
 	for _, info := range retired {
-		if err := reassignOpenWorkAssignedToSession(store, info.ID, replacementID); err != nil {
-			return err
+		for _, workStore := range workStores {
+			if err := moveWork(workStore, info.ID, replacementID); err != nil {
+				errs = append(errs, err)
+			}
 		}
 		if err := session.NewStore(beads.SessionStore{Store: store}).ReassignWaits(info.ID, replacementID); err != nil {
-			return fmt.Errorf("reassign waits from retired session %s to %s: %w", info.ID, replacementID, err)
+			errs = append(errs, fmt.Errorf("reassign waits from retired session %s to %s: %w", info.ID, replacementID, err))
 		}
 		if err := extmsg.ReassignSessionBindings(ctx, store, info.ID, replacementID, now); err != nil {
-			return fmt.Errorf("reassign external message bindings from retired session %s to %s: %w", info.ID, replacementID, err)
+			errs = append(errs, fmt.Errorf("reassign external message bindings from retired session %s to %s: %w", info.ID, replacementID, err))
 		}
 		if err := extmsg.ReassignSessionParticipants(ctx, store, info.ID, replacementID); err != nil {
-			return fmt.Errorf("reassign external message participants from retired session %s to %s: %w", info.ID, replacementID, err)
+			errs = append(errs, fmt.Errorf("reassign external message participants from retired session %s to %s: %w", info.ID, replacementID, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// handOffReleasedNamedSessionPredecessors re-runs the hand-off for the
+// retired rows of the identity whose canonical session is canonicalID. The
+// hand-off that replaced a row runs once, right after the replacement is
+// created, and nothing else runs it again: the controller reassigns a retired
+// row's work only when it repairs a duplicate continuity-eligible row, and
+// named-session work is not pool-routed, so the orphan lane passes it by.
+// Without this, work a store could not answer for then, or that a suspended
+// rig held, would stay on the retired id for good.
+//
+// It runs on every materializing resolve that finds the canonical session, so
+// its cost is bounded by what the retired rows still hold: one read lists the
+// identity's rows (the exact-metadata read the canonical lookup makes), an
+// identity with no retired row stops there, the waits and external-message
+// reads are cached label reads, and a work store is read live only where a
+// cached read shows a retired row still holds work in it
+// (reassignHeldOpenWorkAssignedToSession). A failure is logged and does not
+// fail the resolve, whose answer does not depend on it; the next materializing
+// resolve tries again.
+func (s *Server) handOffReleasedNamedSessionPredecessors(ctx context.Context, store beads.Store, spec apiNamedSessionSpec, canonicalID string) {
+	retired, err := releasedNamedSessionPredecessors(store, spec.Identity, canonicalID)
+	if err == nil {
+		err = s.handOffRetiredNamedSessionState(ctx, store, retired, canonicalID, reassignHeldOpenWorkAssignedToSession)
+	}
+	if err != nil {
+		log.Printf("gc api: handing what the retired rows of named session %q hold to %s: %v", spec.Identity, canonicalID, err)
+	}
+}
+
+// releasedNamedSessionPredecessors lists the identity's retired rows other
+// than canonicalID: open rows that lost continuity and released their
+// identifiers.
+func releasedNamedSessionPredecessors(store beads.Store, identity, canonicalID string) ([]session.Info, error) {
+	all, err := session.ExactMetadataSessionCandidatesInfo(store, false, map[string]string{
+		session.NamedSessionIdentityMetadata: identity,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing named session candidates: %w", err)
+	}
+	var retired []session.Info
+	for _, info := range all {
+		if info.ID != canonicalID && continuityIneligibleNamedSession(info, identity) && session.LifecycleIdentityReleasedInfo(info) {
+			retired = append(retired, info)
+		}
+	}
+	return retired, nil
+}
+
+// retiredSessionWorkStores lists, once each, every store that can hold work
+// assigned to a session.
+//
+// On a city that relocates nothing it is the sessions store alone — the one
+// store this sweep always read, exactly as before, rigs or no rigs.
+//
+// On a split city the sessions store is the class binding, which holds graph
+// steps but no task: listing work there alone moved the retired session's graph
+// steps to its successor and left every task in the city and rig work stores
+// assigned to an id no session answers to (write-audit B7). Named-session work
+// is not pool-routed, so the orphan lane never rescues it. So a split city
+// sweeps the city work store, the store of every rig not suspended by effective
+// state, the graph store and the sessions store. A rig suspended by effective
+// state (cacheColdRigNames) is left untouched, as status and the active-bead
+// lookup leave it: it has no cache, and any read of its store restarts its
+// retired proxy and Dolt. A store it shares with a rig that is not suspended,
+// as in legacy shared-file mode, is swept through that rig. Its work moves on
+// the first materializing resolve of the identity after it resumes
+// (handOffReleasedNamedSessionPredecessors).
+//
+// residency:allow — a write sweep over every store that can hold work assigned
+// to one session id, not a residency answer: each store is listed by assignee,
+// so a store that holds nothing for the id costs one query and changes nothing.
+func (s *Server) retiredSessionWorkStores(sessions beads.Store) []beads.Store {
+	if relocatedGraphStore(s.state) == nil {
+		return []beads.Store{sessions} // residency:allow — a city that relocates nothing sweeps the one sessions store it always swept
+	}
+	var out []beads.Store
+	add := func(store beads.Store) {
+		if store == nil || slices.Contains(out, store) {
+			return
+		}
+		out = append(out, store)
+	}
+	add(s.state.CityBeadStore())
+	cold := s.loadCacheColdRigs()
+	stores := s.state.BeadStores() // residency:allow — the reassign sweep above: every store that can hold the retired session's work
+	// Cold names drop before add dedupes the stores, so a store a cold rig
+	// shares stays reachable through a rig that is not.
+	for _, rigName := range slices.Sorted(maps.Keys(stores)) {
+		if !cold[rigName] {
+			add(stores[rigName])
+		}
+	}
+	add(s.state.GraphBeadStore().Store)
+	add(sessions)
+	return out
+}
+
+// retiredSessionWorkStatuses are the statuses of the work a retired session
+// hands to its successor.
+var retiredSessionWorkStatuses = []string{"open", "in_progress"}
+
+// reassignHeldOpenWorkAssignedToSession is reassignOpenWorkAssignedToSession
+// for a store that most likely holds nothing for oldID any more. It asks
+// first through the cache (a CachingStore, as every store the controller
+// serves is, answers from memory) and reads live and writes only when that
+// read shows work still assigned to oldID that the live read would move. Work
+// a cache has not seen yet is missed this time and found by a later pass.
+//
+// Parked work (bd's blocked, deferred and the rest) reads as "open" through a
+// cache but keeps bd's status in SourceStatus, and the live "open" read, bd's
+// raw open, leaves it out (nativeListPushesRawOpen), so it stays assigned. It
+// does not count as held: a retired row holding only parked work would
+// otherwise pay the live read on every pass and move nothing.
+func reassignHeldOpenWorkAssignedToSession(store beads.Store, oldID, newID string) error {
+	if store == nil || strings.TrimSpace(oldID) == "" || strings.TrimSpace(newID) == "" {
+		return nil
+	}
+	for _, status := range retiredSessionWorkStatuses {
+		work, err := store.List(beads.ListQuery{Assignee: oldID, Status: status, TierMode: beads.TierBoth})
+		if err != nil {
+			return fmt.Errorf("looking up work held by retired session %s: %w", oldID, err)
+		}
+		held := func(item beads.Bead) bool {
+			parked := item.SourceStatus != "" && item.SourceStatus != status
+			return !parked && !session.IsSessionBeadOrRepairable(item)
+		}
+		if slices.ContainsFunc(work, held) {
+			return reassignOpenWorkAssignedToSession(store, oldID, newID)
 		}
 	}
 	return nil
@@ -201,7 +364,7 @@ func reassignOpenWorkAssignedToSession(store beads.Store, oldID, newID string) e
 	if store == nil || strings.TrimSpace(oldID) == "" || strings.TrimSpace(newID) == "" {
 		return nil
 	}
-	for _, status := range []string{"open", "in_progress"} {
+	for _, status := range retiredSessionWorkStatuses {
 		work, err := store.List(beads.ListQuery{Assignee: oldID, Status: status, Live: true, TierMode: beads.TierBoth})
 		if err != nil {
 			return fmt.Errorf("listing work assigned to retired session %s: %w", oldID, err)
@@ -231,6 +394,9 @@ func (s *Server) resolveConfiguredNamedSessionIDWithContext(ctx context.Context,
 		return "", true, fmt.Errorf("looking up configured named session: %w", err)
 	}
 	if lookup.HasCanonical {
+		if opts.materialize {
+			s.handOffReleasedNamedSessionPredecessors(ctx, store, spec, lookup.Canonical.ID)
+		}
 		return lookup.Canonical.ID, true, nil
 	}
 	if lookup.HasConflict {
@@ -278,6 +444,7 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 	if bead, ok, err := s.findCanonicalNamedSession(store, spec); err != nil {
 		return "", err
 	} else if ok {
+		s.handOffReleasedNamedSessionPredecessors(ctx, store, spec, bead.ID)
 		return bead.ID, nil
 	}
 	retired, err := s.retireContinuityIneligibleNamedSessionIdentifiers(store, spec)
@@ -379,12 +546,11 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 		return createErr
 	})
 	if err == nil {
-		if err := s.reassignContinuityIneligibleNamedSessionState(ctx, store, retired, info.ID); err != nil {
-			return "", err
-		}
+		s.handOffToReplacement(ctx, store, spec, retired, info.ID)
 		// The retired rows just handed their work, waits and bindings to
-		// the replacement; their keys ride along so a keyed reconciler
-		// revisits them too. Legacy: one poke.
+		// the replacement, all of it but what a failed step left; their keys
+		// ride along so a keyed reconciler revisits them too. Legacy: one
+		// poke.
 		keys := []reconcilekey.Key{reconcilekey.Session(info.ID)}
 		for _, r := range retired {
 			if strings.TrimSpace(r.ID) != "" && r.ID != info.ID {
@@ -395,12 +561,24 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 		return info.ID, nil
 	}
 	if bead, ok, lookupErr := s.findCanonicalNamedSession(store, spec); lookupErr == nil && ok {
-		if err := s.reassignContinuityIneligibleNamedSessionState(ctx, store, retired, bead.ID); err != nil {
-			return "", err
-		}
+		s.handOffToReplacement(ctx, store, spec, retired, bead.ID)
 		return bead.ID, nil
 	}
 	return "", err
+}
+
+// handOffToReplacement hands what the retired rows hold to replacementID, a
+// session that exists. The resolve answers the replacement whether or not
+// every step lands: by now it is created and started, and failing the request
+// would report that side effect as a failure (a wake answering 500, a message
+// dropped as resolve_failed) to a caller whose next request finds it
+// canonical. A step that failed is logged, as the canonical branch's re-run
+// logs it, and what it left on a retired row moves on a later materializing
+// resolve of the identity (handOffReleasedNamedSessionPredecessors).
+func (s *Server) handOffToReplacement(ctx context.Context, store beads.Store, spec apiNamedSessionSpec, retired []session.Info, replacementID string) {
+	if err := s.reassignContinuityIneligibleNamedSessionState(ctx, store, retired, replacementID); err != nil {
+		log.Printf("gc api: handing what the retired rows of named session %q hold to its replacement %s: %v", spec.Identity, replacementID, err)
+	}
 }
 
 func (s *Server) materializeNamedSession(store beads.Store, spec apiNamedSessionSpec) (string, error) {
@@ -830,8 +1008,12 @@ func deferralFor(outcome session.WakeRequestOutcome, err error) deferral {
 // for system-driven messages that should respect wait-idle behavior when the
 // runtime supports it. It never starts a session in the controller's process:
 // one that is not running gets the nudge queued and the start left to the
-// controller (CONTRACT v5.9 D8 7(e)).
+// controller (CONTRACT v5.9 D8 7(e)). When the city's lane host executes
+// message, it proposes a lane notice instead (proposeExtmsgNotice).
 func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads.Store, id, message string) error {
+	if s.laneExecutes(opjournal.KindMessage) {
+		return s.proposeExtmsgNotice(id, message)
+	}
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return err

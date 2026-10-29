@@ -15,6 +15,9 @@ import (
 // like bd: a bead array for show, an empty array for list, and an exit code
 // of 3 for the id "demo-missing".
 const singleExecFakeBd = `#!/bin/sh
+# The split-city allowlist asks which bd build will run; answered unlogged so
+# the call count stays the passthrough's own.
+case "$1" in version) echo 'bd version 1.3.2 (test)'; exit 0 ;; esac
 printf '%s\n' "$*" >> "${BD_CALL_LOG}"
 case " $* " in
   *" demo-missing "*) echo 'no issue found' >&2; echo 'not-found-stdout'; exit 3 ;;

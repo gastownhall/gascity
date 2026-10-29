@@ -22,7 +22,7 @@ none requires per-city configuration.
 | `prune-branches` | cooldown | Clean stale `gc/*` branches from all rigs |
 | `wisp-compact` | cooldown | TTL-based cleanup of expired ephemeral beads (wisps) |
 | **`nudge-on-route`** | **event `bead.updated`** | **Nudge the target session when a bead is routed to it** |
-| **`cascade-nudge-on-blocker-close`** | **event `bead.closed`** | **Nudge dependents' assignees when a blocker bead closes** |
+| **`cascade-nudge-on-blocker-close`** | **event `bead.closed`** | **Nudge dependents' assignees or routed targets when a blocker bead closes** |
 | **`notify-on-human-gate-creation`** | **event `bead.created`** | **Mail + nudge the addressee when a human gate bead is created** |
 | **`renudge-stale-human-gates`** | **cooldown 5m** | **Re-mail + re-nudge the addressee of a human gate left open past a staleness threshold** |
 
@@ -89,17 +89,36 @@ absorbs. For each closed bead it resolves dependents via:
 gc bd dep list <blocker> --direction=up --type=blocks --json
 ```
 
-and nudges the `assignee` of every dependent whose status is `open` or
-`deferred`:
+and nudges every dependent whose status is `open` or `deferred` — at its
+`assignee` when one holds the bead:
 
 ```
 gc session nudge <assignee> "blocker <blocker> closed — your dependent <dep> may be unblocked"
 ```
 
+An unassigned dependent carrying `metadata.gc.routed_to` — the graph.v2
+claim shape, where the assignee stays empty until a session claims the step
+— is nudged at that target instead:
+
+```
+gc session nudge <member> "blocker <blocker> closed — routed dependent <dep> may be ready to claim"
+```
+
+`routed_to` may be a pool base: sling collapses a multi-session slot to the
+pool base (`NormalizePoolRouteTarget`), which is the members' `template`,
+not a name `gc session nudge` can resolve. The order enumerates the pool's
+active members via `gc session list --template <routed_to>` and nudges each,
+falling back to a direct `gc session nudge <routed_to>` when the target has
+no members (a single-session agent or an explicit slot) — the same
+resolution `nudge-on-route` applies at route time. A dependent with both an
+assignee and a route is nudged at its assignee only: a claimed bead belongs
+to its session.
+
 **Cross-rig.** A `prefix -> rig` lookup built from `gc rig list` scopes the
-dependency lookup and the nudge to the rig that owns each bead, so cross-rig
-blocker chains within a city resolve correctly. Cross-city cascade is out of
-scope.
+dependency lookup and the assignee nudge to the rig that owns each bead, so
+cross-rig blocker chains within a city resolve correctly. The routed nudge
+runs in default scope: `gc.routed_to` is city-qualified and may name a rig
+other than the dependent bead's. Cross-city cascade is out of scope.
 
 **Idempotence.** A `(blocker, dependent)` pair is nudged at most once.
 

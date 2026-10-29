@@ -206,14 +206,14 @@ func armDrainVoidCancel(r *rowFacts) (intent, bool) {
 // assigned work, claimed or ready, or in-progress work the allocation does
 // not count awake because it is blocked, which legacy still counts.
 func workKeepsNoWakeRow(r *rowFacts) bool {
-	if r.entry.AssignedWork != nil {
-		return true
-	}
-	var cfg *config.City
-	if r.w.Env != nil {
-		cfg = r.w.Env.Cfg
-	}
-	ids := sessionAssignmentIdentifiersForConfigInfo(r.row.Info, cfg)
+	return r.entry.AssignedWork != nil || r.inProgressWorkAssigned(releaseScope(r.row.Info, worldCfg(r.w)))
+}
+
+// inProgressWorkAssigned reports in-progress work the pass's demand read
+// assigns to any of scope's identities of the row's session, blocked work
+// included.
+func (r *rowFacts) inProgressWorkAssigned(scope workScope) bool {
+	ids := scope.scopeIDs()
 	for _, w := range r.w.Demand.AssignedWork {
 		if w.Status == "in_progress" && slices.Contains(ids, strings.TrimSpace(w.Assignee)) {
 			return true

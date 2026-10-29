@@ -1231,7 +1231,7 @@ func TestSessionVerbOpRequireReportsTheStoreBeforeTheKey(t *testing.T) {
 			if r.code != 1 {
 				t.Fatalf("%s = %d, want 1; stderr=%s", tc.name, r.code, r.stderr)
 			}
-			if got := cliOpFailureCode(t, []byte(r.stdout)); got != cliOpCodeUnavailable {
+			if got := tc.failureCode(t, r); got != cliOpCodeUnavailable {
 				t.Fatalf("failure code = %q, want %s", got, cliOpCodeUnavailable)
 			}
 		})

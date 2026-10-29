@@ -26,6 +26,7 @@ var (
 		"GuardedBatcherHandle":          "reports a capability from immutable layout fields; the batcher it returns guards every call",
 		"IDPrefix":                      "returns an immutable field",
 		"StoreHealthPath":               "returns an immutable field",
+		"StrandsAbsentTargets":          "reports a constant capability",
 	}
 )
 

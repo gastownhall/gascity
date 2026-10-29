@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -155,21 +156,47 @@ func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Reco
 		if bead.Type != "step" || bead.ParentID == "" {
 			return run
 		}
-		parent, err := graphStore.Get(bead.ParentID)
+		// A parent shares its child's ledger, so the closed bead's own store
+		// answers first. That is where a v1 POURED molecule lives: its beads
+		// are work class and stay on the work ledger even on a split city.
+		parent, parentStore, err := autocloseLocate(bead.ParentID, store, graphStore)
 		if err != nil {
 			run.note(err)
 			return run
 		}
-		autocloseMoleculeIfComplete(graphStore, rec, parent, stdout, &run)
+		autocloseMoleculeIfComplete(parentStore, rec, parent, stdout, &run)
 		return run
 	}
-	root, err := graphStore.Get(rootID)
+	// gc.root_bead_id names a graph-class root, so the graph store answers
+	// first; the closed bead's own store is the fallback for a root that
+	// shares its ledger (a single-store city, or a rig-scope graph root).
+	root, rootStore, err := autocloseLocate(rootID, graphStore, store)
 	if err != nil {
 		run.note(err)
 		return run
 	}
-	autocloseMoleculeIfComplete(graphStore, rec, root, stdout, &run)
+	autocloseMoleculeIfComplete(rootStore, rec, root, stdout, &run)
 	return run
+}
+
+// autocloseLocate reads id from the first of two stores that holds it and
+// returns that store, so the subtree walk and the close run where the root
+// lives. Only a not-found passes the lookup on; any other read error is the
+// answer (a store that failed to answer is not proof the bead is elsewhere).
+// When first and second are the same store it is read once.
+func autocloseLocate(id string, first, second beads.Store) (beads.Bead, beads.Store, error) {
+	b, err := first.Get(id)
+	if err == nil {
+		return b, first, nil
+	}
+	if !errors.Is(err, beads.ErrNotFound) || second == nil || sameBeadStore(first, second) {
+		return beads.Bead{}, first, err
+	}
+	b, err = second.Get(id)
+	if err != nil {
+		return beads.Bead{}, second, err
+	}
+	return b, second, nil
 }
 
 func autocloseMoleculeIfComplete(store beads.Store, rec events.Recorder, mol beads.Bead, stdout io.Writer, run *autocloseRun) {

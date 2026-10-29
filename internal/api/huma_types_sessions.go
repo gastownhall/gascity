@@ -204,8 +204,8 @@ type SessionSubmitInput struct {
 	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
 	Body           struct {
 		Message string               `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to submit."`
-		Intent  session.SubmitIntent `json:"intent,omitempty" enum:"default,follow_up,interrupt_now" doc:"Submit intent; empty defaults to \"default\"."`
-		Resume  bool                 `json:"resume,omitempty" doc:"Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will."`
+		Intent  session.SubmitIntent `json:"intent,omitempty" enum:"default,follow_up,interrupt_now" doc:"Submit intent; empty defaults to \"default\". When the conversation lane delivers messages (message listed in [ops] authoritative), follow_up is the default request: the lane delivers both at the session's boundary, so under one Idempotency-Key either answers from the other's operation, and the result says default."`
+		Resume  bool                 `json:"resume,omitempty" doc:"Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will. When the conversation lane delivers messages (message listed in [ops] authoritative) it starts nothing here: it consumes an operator's hold placed before the message and records the session's wake, and the controller starts the session as it does for any queued message, or the result's will_start says why it will not; resending the request under the idempotency_key of its 202 consumes such a hold too."`
 	}
 }
 
@@ -223,7 +223,7 @@ type SessionMessageInput struct {
 	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
 	Body           struct {
 		Message string `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to send."`
-		Resume  bool   `json:"resume,omitempty" doc:"Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will."`
+		Resume  bool   `json:"resume,omitempty" doc:"Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will. When the conversation lane delivers messages (message listed in [ops] authoritative) it starts nothing here: it consumes an operator's hold placed before the message and records the session's wake, and the controller starts the session as it does for any queued message, or the result's will_start says why it will not; resending the request under the idempotency_key of its 202 consumes such a hold too."`
 	}
 }
 

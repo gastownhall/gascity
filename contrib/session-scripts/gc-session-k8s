@@ -129,14 +129,18 @@ case "$op" in
     env_json=$(echo "$config" | jq -c '.env // {}')
     payload_dolt_host=$(echo "$env_json" | jq -r ".GC_DOLT_HOST // empty")
     payload_dolt_port=$(echo "$env_json" | jq -r ".GC_DOLT_PORT // empty")
+    payload_dolt_managed_local=$(echo "$env_json" | jq -r ".GC_DOLT_MANAGED_LOCAL // empty")
     emit_dolt_env=false
     dolt_host=""
     dolt_port=""
     # The session payload is the only authority for pod Dolt targeting.
     # A port-only payload means "managed-local on the controller" and must be
-    # adapted to the in-cluster managed service alias. Missing payload host/port
-    # means omit pod Dolt env entirely; do not synthesize from ambient process
-    # env or deprecated GC_K8S_DOLT_* compatibility inputs.
+    # adapted to the in-cluster managed service alias. So must a payload with
+    # GC_DOLT_MANAGED_LOCAL=1 and no port: the controller withheld the port so
+    # host-local bd follows the scope's .beads/dolt-server.port mirror, which a
+    # pod cannot read. Otherwise a missing payload host/port means omit pod
+    # Dolt env entirely; do not synthesize from ambient process env or
+    # deprecated GC_K8S_DOLT_* compatibility inputs.
     if [ -n "$payload_dolt_host" ] && [ -z "$payload_dolt_port" ]; then
       echo "start: session payload requires GC_DOLT_PORT when GC_DOLT_HOST is set" >&2
       exit 1
@@ -145,7 +149,7 @@ case "$op" in
       emit_dolt_env=true
       dolt_host="$payload_dolt_host"
       dolt_port="$payload_dolt_port"
-    elif [ -z "$payload_dolt_host" ] && [ -n "$payload_dolt_port" ]; then
+    elif [ -z "$payload_dolt_host" ] && { [ -n "$payload_dolt_port" ] || [ "$payload_dolt_managed_local" = "1" ]; }; then
       emit_dolt_env=true
       dolt_host="$DEFAULT_DOLT_HOST"
       dolt_port="$DEFAULT_DOLT_PORT"
@@ -282,7 +286,7 @@ case "$op" in
     env_array=$(echo "$env_json" | jq       --argjson dolt_env "$dolt_env_json"       --arg mcp_mail_url "http://${MCP_MAIL_HOST}:${MCP_MAIL_PORT}"       --arg mcp_mail_project "$mail_project"       --arg tmux_session "$TMUX_SESSION"       --arg pod_dir "$pod_work_dir" '
       del(.BEADS_DOLT_SERVER_HOST, .BEADS_DOLT_SERVER_PORT,
           .GC_BEADS, .GC_SESSION, .GC_EVENTS,
-          .GC_DOLT_HOST, .GC_DOLT_PORT,
+          .GC_DOLT_HOST, .GC_DOLT_PORT, .GC_DOLT_MANAGED_LOCAL,
           .GC_K8S_DOLT_HOST, .GC_K8S_DOLT_PORT,
           .GC_MAIL, .GC_MCP_MAIL_URL, .GC_MCP_MAIL_PROJECT)
       | .GC_CITY = "/workspace" | .GC_DIR = $pod_dir

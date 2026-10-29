@@ -153,6 +153,9 @@ func deepCopyResolvedProvider(r ResolvedProvider) ResolvedProvider {
 	if r.Chain != nil {
 		dup.Chain = append([]HopIdentity(nil), r.Chain...)
 	}
+	if r.ACPOmittedArgs != nil {
+		dup.ACPOmittedArgs = append([]string(nil), r.ACPOmittedArgs...)
+	}
 	dup.Provenance = r.Provenance.clone()
 	if r.Env != nil {
 		dup.Env = make(map[string]string, len(r.Env))

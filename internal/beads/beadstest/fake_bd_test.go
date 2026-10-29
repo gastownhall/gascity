@@ -77,3 +77,44 @@ func TestFakeBdUpdateEnforcesItsPreconditions(t *testing.T) {
 		t.Fatalf("after the swap: status = %q (%v), want closed", got.Status, err)
 	}
 }
+
+// TestFakeBdCreateKeepsParentAndEphemeral pins the fake's create flags:
+// --parent records the parent (and fails for an unknown one, as bd does), and
+// --ephemeral keeps the row off `bd list` while `bd show` still answers it.
+func TestFakeBdCreateKeepsParentAndEphemeral(t *testing.T) {
+	fb := NewFakeBd()
+	store := fb.NewBdStore()
+	parent, err := store.Create(beads.Bead{Title: "parent", Type: "molecule"})
+	if err != nil {
+		t.Fatalf("Create(parent): %v", err)
+	}
+	child, err := store.Create(beads.Bead{Title: "child", Type: "step", ParentID: parent.ID})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	if got, err := fb.Bead(child.ID); err != nil || got.ParentID != parent.ID {
+		t.Fatalf("child's parent = %q (err %v), want %q", got.ParentID, err, parent.ID)
+	}
+	if _, err := store.Create(beads.Bead{Title: "orphan", Type: "step", ParentID: "no-such-bead"}); err == nil {
+		t.Fatal("a create naming an unknown --parent succeeded; bd fails it")
+	}
+	eph, err := store.Create(beads.Bead{Title: "wisp", Type: "step", Ephemeral: true})
+	if err != nil {
+		t.Fatalf("Create(ephemeral): %v", err)
+	}
+	if got, err := fb.Bead(eph.ID); err != nil || !got.Ephemeral {
+		t.Fatalf("ephemeral create stored Ephemeral=%v (err %v)", got.Ephemeral, err)
+	}
+	listed, err := store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierIssues})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, b := range listed {
+		if b.ID == eph.ID {
+			t.Fatal("bd list returned an ephemeral bead")
+		}
+	}
+	if _, err := store.Get(eph.ID); err != nil {
+		t.Fatalf("bd show did not answer the ephemeral bead: %v", err)
+	}
+}

@@ -21,6 +21,7 @@ package main
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -51,6 +52,11 @@ type WorkLegs struct {
 	plan storeref.ResolvedPlan
 	topo storeref.Topology // the residency topology plan was built from, for by-id reads
 	err  error             // no leg set: a refused city
+	// suspended names the declared, open rigs left out of rigs because they
+	// are suspended (servingRigStores).
+	suspended []string
+	// cityName is the name a "city:<name>" store ref of this city carries.
+	cityName string
 }
 
 // errNoWorkStore: a WorkLegs minted without a city work store, which answers
@@ -68,7 +74,12 @@ func workLegsFromCensus(cityPath string, cfg *config.City, work cityWorkLeg, rig
 	if work.store == nil {
 		return l
 	}
-	l.rigs = servingRigStores(cfg, rigs, buildSuspendedRigPathsForCity(cfg, cityPath))
+	if cfg != nil {
+		l.cityName = loadedCityName(cfg, cityPath)
+	}
+	suspendedPaths := buildSuspendedRigPathsForCity(cfg, cityPath)
+	l.rigs = servingRigStores(cfg, rigs, suspendedPaths)
+	l.suspended = suspendedOpenRigs(cfg, rigs, suspendedPaths)
 	l.topo = residencyTopologyForCity(cityPath, cfg, work.store, l.rigs)
 	l.plan, l.err = storeref.Plan(storeref.AssignedWork{}, l.topo)
 	return l
@@ -76,8 +87,60 @@ func workLegsFromCensus(cityPath string, cfg *config.City, work cityWorkLeg, rig
 
 // workLegs is the controller's leg set for one tick, over the store it
 // registers as the city's work leg (registerResidencyRoutes).
+//
+// It reads the published config snapshot rather than cr.cfg, so the wisp GC's
+// work-arm lane, which runs off the tick, can take its legs from here too.
 func (cr *CityRuntime) workLegs() WorkLegs {
-	return workLegsFromCensus(cr.cityPath, cr.cfg, cityWorkLegOf(cr.cityWorkStore()), cr.rigBeadStores()) // residency:allow — the census frame; workLegsFromCensus plans the legs (storeref.Plan)
+	return workLegsFromCensus(cr.cityPath, cr.serviceConfigSnapshot(), cityWorkLegOf(cr.cityWorkStore()), cr.rigBeadStores()) // residency:allow — the census frame; workLegsFromCensus plans the legs (storeref.Plan)
+}
+
+// suspendedRigs names the open rigs this leg set leaves out because they are
+// suspended.
+func (l WorkLegs) suspendedRigs() []string { return l.suspended }
+
+// storeForRef resolves a source store-ref ("city:<name>", "rig:<name>", a
+// class binding ref) to the leg it names: the city work store for a city or
+// binding ref, the rig's store for a serving rig. A suspended rig reports
+// suspended=true (it is not a leg, and is not read); any other ref, ok=false.
+func (l WorkLegs) storeForRef(ref string) (beads.Store, bool, bool) {
+	ref = strings.TrimSpace(ref)
+	rig, ok := storeref.ScopeRigContext(ref)
+	if !ok {
+		return nil, false, false
+	}
+	if rig == "" {
+		// Only THIS city's ref names the city work store; a class binding
+		// ref ("class:<token>") is city-scoped too, and fails this check.
+		if l.cityName == "" || ref != "city:"+l.cityName {
+			return nil, false, false
+		}
+		return l.work, false, l.work != nil
+	}
+	for _, name := range l.suspended {
+		if name == rig {
+			return nil, true, true
+		}
+	}
+	store, ok := l.rigs[rig]
+	return store, false, ok && store != nil
+}
+
+// suspendedOpenRigs names the declared rigs with an open store that are
+// suspended: the complement of servingRigStores among the open rigs.
+func suspendedOpenRigs(cfg *config.City, rigs map[string]beads.Store, suspendedRigPaths map[string]bool) []string {
+	if cfg == nil || len(rigs) == 0 || len(suspendedRigPaths) == 0 {
+		return nil
+	}
+	var out []string
+	for _, rig := range cfg.Rigs {
+		if !suspendedRigPaths[filepath.Clean(rig.Path)] {
+			continue
+		}
+		if store, ok := rigs[rig.Name]; ok && store != nil {
+			out = append(out, rig.Name)
+		}
+	}
+	return out
 }
 
 // unusable is why l answers nothing: no leg set, or the zero WorkLegs,
@@ -107,11 +170,16 @@ func (cr *CityRuntime) strandedClaimAlerter() *strandedClaimAlerts {
 
 // each visits every leg's store in plan order.
 func (l WorkLegs) each(visit func(beads.Store)) {
+	l.eachLeg(func(_ string, store beads.Store) { visit(store) })
+}
+
+// eachLeg visits every leg's store ref and store in plan order.
+func (l WorkLegs) eachLeg(visit func(ref string, store beads.Store)) {
 	if l.unusable() != nil {
 		return
 	}
 	storeref.EachLeg(l.plan, func(leg storeref.Leg, _ storeref.Role, _ storeref.ErrPolicy) { // residency:allow — enumerates the plan's own legs
-		visit(leg.Store)
+		visit(string(leg.Ref), leg.Store)
 	})
 }
 

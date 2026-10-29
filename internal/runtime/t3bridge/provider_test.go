@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
 	"github.com/gorilla/websocket"
 )
 
@@ -740,6 +741,36 @@ func TestBuildThreadEnv_MirrorsDoltEndpointForNonDoltliteSessions(t *testing.T) 
 	for _, key := range []string{"GC_STARTUP_ENVELOPE", "BEADS_DOLT_SHARED_SERVER", "NOT_GC"} {
 		if _, ok := env[key]; ok {
 			t.Fatalf("%s should not persist into non-DoltLite thread env", key)
+		}
+	}
+}
+
+// TestBuildThreadEnv_ForwardsSharedServerOptOutForWithheldDoltPort pins the
+// thread half of the gastownhall/gascity#1656 withhold. With the managed port
+// withheld, nothing in the thread env outranks a HOME-level
+// dolt.shared-server: true any more, so the thread's bd would read and write
+// the host-wide shared server instead of the managed one the scope's
+// .beads/dolt-server.port mirror tracks. The session env's shared-server
+// opt-out must therefore reach the thread, and no port may be rebuilt from it.
+func TestBuildThreadEnv_ForwardsSharedServerOptOutForWithheldDoltPort(t *testing.T) {
+	sessionEnv := runtimetest.WithheldManagedDoltEnv()
+	sessionEnv["GC_BEADS_BACKEND"] = "dolt"
+	sessionEnv["GC_SESSION_NAME"] = "gc--worker"
+
+	env := buildThreadEnv(sessionEnv)
+
+	for key, want := range map[string]string{
+		"BEADS_DOLT_SHARED_SERVER": "0",
+		"BD_DOLT_SHARED_SERVER":    "false",
+		"GC_DOLT_MANAGED_LOCAL":    "1",
+	} {
+		if got := env[key]; got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+	for _, key := range []string{"GC_DOLT_PORT", "BEADS_DOLT_PORT", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_MODE"} {
+		if got, ok := env[key]; ok {
+			t.Fatalf("%s = %q rebuilt for a withheld port; the thread's bd must follow the scope's port mirror", key, got)
 		}
 	}
 }

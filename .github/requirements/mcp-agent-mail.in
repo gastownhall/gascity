@@ -70,13 +70,16 @@ idna>=3.15
 # Header Injection) in litellm < 1.84.0. CVE-2026-84377 (MEDIUM) affects
 # litellm < 1.88.6 and each line from 1.89 through 1.96 before its patch
 # release (1.89.7, 1.90.7, 1.91.5, 1.92.2, 1.93.2, 1.94.3, 1.95.1, 1.96.2).
-# A bare floor cannot express that, so any litellm move must land on a
-# patched release. Drop once mcp-agent-mail's transitive constraint carries
+# The eMudhra intermediate-CA compromise
+# (https://emudhra.we-have-a-problem.com/) is fixed per line in 1.103.8,
+# 1.104.6, 1.105.4 and 1.106.3, so the floor is 1.106.3.
+# A bare floor cannot express per-line patches, so any litellm move must land
+# on a patched release. Drop once mcp-agent-mail's transitive constraint carries
 # the patched version itself. Before dropping it, move this note next to the
 # litellm lock-pin row in TestMCPMailImagePinsPatchedPythonDependencies
 # (scripts/container_tool_security_test.go). That exact pin, not this
 # floor, is what makes a re-lock onto an unpatched 1.90-1.96 release fail.
-litellm>=1.89.7
+litellm>=1.106.3
 
 # Security floor: CVE-2026-49852 (HIGH, HS256/HS384/HS512 verify accepts an
 # empty/nil HMAC key — cross-language sibling of CVE-2026-45363) in joserfc
@@ -93,6 +96,11 @@ joserfc>=1.6.8
 # floor at 1.30.0 to clear all four. Drop once fastmcp-slim's transitive
 # constraint carries the patched version itself.
 mcp>=1.30.0
+
+# Security floor: CVE-2026-114605 (HIGH, excessive CPU in
+# dns.name.from_wire_parser) in dnspython < 2.9.0. dnspython arrives via
+# email-validator; drop once its constraint carries the patched release.
+dnspython>=2.9.0
 
 # Ceiling: filelock 4.x can truncate the mail SQLite database at shutdown.
 # mcp-agent-mail's emergency fd cleanup (storage.cleanup_leaked_lockfile_fds)

@@ -4850,22 +4850,21 @@ var defaultBranchCharset = regexp.MustCompile(`^[A-Za-z0-9._/@+=-]+$`)
 
 // ReservedPrefixWarnings returns advisory warnings for any effective HQ or rig
 // work-store prefix that shadows a reserved coordination-class id-prefix
-// (gcg/gcm/gcs/gco/gcn). The relocated SQLite class stores that mint these
-// prefixes are an identity seam on a default city, so such a prefix is allowed
-// today (see ValidateRigs) and only becomes ambiguous once the multi-backend
-// fork activates per-class routing. Callers should surface these as non-fatal
-// operator warnings so an existing city or rig that already uses one keeps
-// starting and reloading while it still has time to rename. The hqPrefix must
-// already be site-bound resolved (e.g. via EffectiveHQPrefix).
+// (gcg/gcm/gcs/gco/gcn). On a city that relocates no coordination class the
+// SQLite class stores that mint these prefixes do not exist, so such a prefix
+// is allowed (see ValidateRigs) and callers surface these as non-fatal operator
+// warnings. A SPLIT city is refused instead: see ReservedPrefixSplitRefusal.
+// The hqPrefix must already be site-bound resolved (e.g. via
+// EffectiveHQPrefix).
 func ReservedPrefixWarnings(rigs []Rig, hqPrefix string) []string {
 	var warnings []string
-	if IsReservedClassPrefix(hqPrefix) {
-		warnings = append(warnings, fmt.Sprintf("HQ prefix %q is a reserved coordination-class id-prefix (%s); it is allowed today because class-store relocation is inert, but rename it before per-class stores activate or class ids will be ambiguous", strings.ToLower(strings.TrimSpace(hqPrefix)), reservedClassPrefixListText()))
+	if _, ok := ReservedPrefixCollision(hqPrefix); ok {
+		warnings = append(warnings, fmt.Sprintf("HQ prefix %q is, or starts with, a reserved coordination-class id-prefix (%s); it is allowed only while this city relocates no coordination class: a split city ([storage]) refuses it, because its binding mints ids in that namespace. Set an explicit non-reserved prefix before splitting", strings.ToLower(strings.TrimSpace(hqPrefix)), reservedClassPrefixListText()))
 	}
 	for _, r := range rigs {
 		prefix := strings.ToLower(r.EffectivePrefix())
-		if IsReservedClassPrefix(prefix) {
-			warnings = append(warnings, fmt.Sprintf("rig %q prefix %q is a reserved coordination-class id-prefix (%s); it is allowed today because class-store relocation is inert, but rename it before per-class stores activate or class ids will be ambiguous", r.Name, prefix, reservedClassPrefixListText()))
+		if _, ok := ReservedPrefixCollision(prefix); ok {
+			warnings = append(warnings, fmt.Sprintf("rig %q prefix %q is, or starts with, a reserved coordination-class id-prefix (%s); it is allowed only while this city relocates no coordination class: a split city ([storage]) refuses it, because its binding mints ids in that namespace. Set an explicit non-reserved prefix before splitting", r.Name, prefix, reservedClassPrefixListText()))
 		}
 	}
 	return warnings

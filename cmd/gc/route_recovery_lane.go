@@ -45,17 +45,15 @@ package main
 // The obvious one is an EVENT-LESS loss: nothing ever named the bead, so the
 // delta lane cannot know it exists and only a scan finds it.
 //
-// The second is DELIVERED-BUT-OFF-PLANE, and it is a product of the operator
-// invariant rather than of any failure. The journal names a bead, the event
-// arrives, the lane accepts it as a candidate — and the bead lives on a leg the
-// runtime plane refuses to read (the work ledger, a rig). The tick resolves
-// nothing for it and it waits for the convergence lane exactly as an event-less
-// loss does. Nothing is broken; the two just have different causes and different
-// remedies, and only one of them is a routing question. The delta report counts
-// them as `dropped` so a rising count is visible instead of silent. The counter
-// is a superset by construction: a candidate claimed or closed since its event
-// also fails to resolve, also waits for the backstop, and telling those apart
-// would mean reading the leg this plane exists to refuse.
+// The second is DELIVERED-BUT-OFF-PLANE. The journal names a bead whose route
+// was lost, but the bead lives on a work leg (the ledger, a rig) the runtime
+// plane refuses to read: a work bead `gc sling` routed there (#6019), which
+// pool demand and `gc ready` count and serve. The tick resolves nothing for it.
+// It used to wait for the hourly convergence scan (read-audit R11); now the
+// tick hands it to the off-tick poller (ledgerPending), which repairs it on its
+// next poll with one batched read of exactly those ids per work leg. The tick
+// itself still never reads the ledger. The delta report counts these as
+// `dropped` (unresolved on the tick) and `deferred` (handed off-tick).
 //
 // # Two things the old scanner could not say
 //
@@ -82,6 +80,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -116,6 +115,10 @@ const (
 	// SAME bead's route. A route that has to be restored again and again is not
 	// a lost route, it is a lane clearing it; re-stamping forever hides that.
 	routeRecoveryFlapLimit = 3
+
+	// routeRecoveryOffPlaneSample bounds how many off-plane infrastructure ids
+	// one report names.
+	routeRecoveryOffPlaneSample = 5
 
 	// routeRecoveryCandidateCap bounds the pending candidate set. Overflow is
 	// treated exactly like a cursor gap — the delta feed can no longer claim to
@@ -166,27 +169,31 @@ type routeRecoveryReport struct {
 	// zero legs converged nothing, which must not read as "nothing to converge".
 	legs int
 	// offPlaneRouted counts OPEN, UNASSIGNED, pool-routed beads this pass found
-	// on a leg the RUNTIME plane refuses — the work ledger and the rigs.
+	// on a work leg of a city that HAS a class binding — the legs the runtime
+	// plane's collection (collectOpenUnassignedRoutedWork, binding-only) does
+	// not read. A city with no binding has no such leg: its work store is the
+	// runtime plane's store, so it counts nothing (#7410).
 	//
-	// It is the visibility half of the tick's routed-demand narrowing. The
-	// controller's demand read is binding-only (routedWorkStoreCandidates, per
-	// the operator ruling that routed work lives only in the graph store), so a
-	// routed bead sitting on a work leg is demanded by nothing and spawns no
-	// seat. That is a MIGRATION defect rather than a demand bug — the remedy is
-	// `gc storage migrate`, not a wider tick — but a defect nobody can see is
-	// indistinguishable from an empty set, which is exactly the assumption the
-	// narrowing rests on. This lane already reads every leg's open corpus on its
-	// own cadence, so the count costs nothing and makes the assumption checkable.
+	// It is the visibility half of that narrowing, and it is a count, not an
+	// alarm, because most of it is not a defect: a WORK-class bead `gc sling`
+	// routed into the ledger is counted by pool demand and served by `gc ready`
+	// (#6019, #7054). The alarm is offPlaneInfra.
 	offPlaneRouted int
+	// offPlaneInfra counts the offPlaneRouted beads that classify as an
+	// infrastructure class (graph, sessions, ...): rows that belong in the
+	// binding but sit in a work store, which only the migration could have
+	// left there (a rig store is never migrated). No runtime reader looks for
+	// them, so they are reported by id (offPlaneSample).
+	offPlaneInfra  int
+	offPlaneSample []string
 
-	// dropped counts named candidates this plane could not resolve. On the
-	// runtime plane it is the DELIVERED-BUT-OFF-PLANE class (§ lane header): the
-	// journal named a bead, the event arrived, and the bead lives on a leg this
-	// plane refuses — so it waits for the convergence lane. It is a superset, not
-	// a diagnosis: a candidate that was claimed or closed since the event also
-	// fails to resolve, and also waits. Both are bounded by the backstop cadence,
-	// which is why one counter serves.
-	dropped  int
+	// dropped counts named candidates the runtime plane could not resolve on
+	// the tick: a bead on a work leg (§ lane header), or one claimed or closed
+	// since its event. On a city with a binding the work-leg ones are also
+	// counted in deferred and repaired off-tick.
+	dropped int
+	// deferred counts the dropped candidates handed to the off-tick poller.
+	deferred int
 	duration time.Duration
 	partial  bool
 	err      error
@@ -204,6 +211,12 @@ func (r routeRecoveryReport) fields() map[string]any {
 	}
 	if r.offPlaneRouted > 0 {
 		out["off_plane_routed"] = r.offPlaneRouted
+	}
+	if r.offPlaneInfra > 0 {
+		out["off_plane_infra"] = r.offPlaneInfra
+	}
+	if r.deferred > 0 {
+		out["deferred"] = r.deferred
 	}
 	if r.dropped > 0 {
 		// Named, delivered, and not resolvable on this plane — the convergence
@@ -251,6 +264,11 @@ type routeRecoveryLane struct {
 	// since the cursor whose snapshot carried a recoverable route.
 	pending map[string]struct{}
 
+	// ledgerPending holds the named candidates the tick could not resolve in
+	// the binding — work beads on a work leg — for the off-tick poller to
+	// repair (ledgerCandidatePass).
+	ledgerPending map[string]struct{}
+
 	// forced records that the event feed cannot be trusted for the next pass —
 	// it never started, it restarted, its cursor regressed, or pending
 	// overflowed — with the reason the trace should carry.
@@ -275,6 +293,7 @@ type routeRecoveryLane struct {
 func newRouteRecoveryLane() *routeRecoveryLane {
 	return &routeRecoveryLane{
 		pending:                    map[string]struct{}{},
+		ledgerPending:              map[string]struct{}{},
 		consecutiveRecheckFailures: map[string]int{},
 		restores:                   map[string]int{},
 		interval:                   routeRecoveryBackstopInterval,
@@ -488,6 +507,12 @@ func watchJournalForDeltaLanes(ctx context.Context, prov events.Provider, onGap 
 // separately-scheduled convergence scan is not, which is the only reason it may
 // still consult the ledger at all — and it does so off the tick, on its own
 // cadence, never inline.
+//
+// A candidate the journal NAMED whose row the binding does not hold is a work
+// bead (`gc sling` stamps routes on work beads that live in the ledger, #6019).
+// The tick does not chase it onto the ledger; it defers it to the off-tick
+// poller, which repairs it with one batched read of exactly those ids per work
+// leg (ledgerCandidatePass) — within one poll, not one backstop interval.
 type storePlane int
 
 const (
@@ -503,10 +528,16 @@ const (
 type planeLeg struct {
 	label string
 	store beads.Store
-	// binding reports whether this leg is a relocated class binding — the only
-	// legs the RUNTIME plane reads. The convergence lane uses it to say which of
-	// the legs it scanned are ones the tick cannot see.
+	// binding reports whether this leg is a relocated class binding — the
+	// legs the RUNTIME plane's collection reads. The convergence lane uses it to
+	// say which of the legs it scanned are ones that collection cannot see.
 	binding bool
+	// planHasBinding reports whether the plan this leg came from has a class
+	// binding at all. A city that relocates nothing has none, and there the
+	// work store IS the runtime plane's store, so no leg of it is off-plane
+	// (#7410: every single-store city used to be told to run `gc storage
+	// migrate` once an hour).
+	planHasBinding bool
 }
 
 // planeLegLabel spells a plan leg the way the pre-lane log line did:
@@ -567,9 +598,10 @@ func walkPlaneLegs(plan storeref.ResolvedPlan, plane storePlane, visit func(plan
 			return false, nil
 		}
 		return false, visit(planeLeg{
-			label:   planeLegLabel(leg.Ref),
-			store:   leg.Store,
-			binding: storeref.IsClassRef(string(leg.Ref)),
+			label:          planeLegLabel(leg.Ref),
+			store:          leg.Store,
+			binding:        storeref.IsClassRef(string(leg.Ref)),
+			planHasBinding: plan.TouchesBinding(),
 		})
 	})
 	return result.Partial, walkErr
@@ -607,12 +639,112 @@ func (l *routeRecoveryLane) deltaPass(plan storeref.ResolvedPlan, candidates []s
 	}
 	var errs []error
 	resolved := make(map[string]struct{}, len(candidates))
-	partial, walkErr := walkPlaneLegs(plan, runtimePlane, func(leg planeLeg) error {
+	repairOn := func(leg planeLeg, ids []string) error {
 		report.legs++
-		rows, reads, err := liveOpenCandidates(leg.store, candidates)
+		rows, reads, err := liveOpenCandidates(leg.store, ids)
 		report.legReads += reads
 		if err != nil {
-			return fmt.Errorf("re-reading %d route candidate(s): %w", len(candidates), err)
+			return fmt.Errorf("re-reading %d route candidate(s): %w", len(ids), err)
+		}
+		for _, row := range rows {
+			if _, done := resolved[row.ID]; done {
+				continue
+			}
+			resolved[row.ID] = struct{}{}
+			outcome := l.restoreRoute(leg.store, row, false)
+			report.legReads += outcome.writes
+			switch {
+			case outcome.restored:
+				report.restored++
+			case outcome.flapping:
+				report.flapping = append(report.flapping, row.ID)
+			}
+			if outcome.quarantined {
+				report.quarantined++
+			}
+			if outcome.err != nil {
+				errs = append(errs, outcome.err)
+			}
+		}
+		return nil
+	}
+	partial, walkErr := walkPlaneLegs(plan, runtimePlane, func(leg planeLeg) error {
+		return repairOn(leg, candidates)
+	})
+	// A candidate the binding does not hold may be a work bead on a work leg
+	// (#6019). The tick never reads the ledger (the operator invariant above);
+	// it hands the id to the off-tick poller, which repairs it within one poll
+	// instead of one backstop interval (read-audit R11).
+	if plan.TouchesBinding() {
+		if leftover := unresolvedCandidates(candidates, resolved); len(leftover) > 0 {
+			report.deferred = l.deferToLedger(leftover)
+		}
+	}
+	report.dropped = len(candidates) - len(resolved)
+	report.partial = partial
+	report.err = errors.Join(append(errs, walkErr)...)
+	sort.Strings(report.flapping)
+	return report
+}
+
+// deferToLedger queues ids for the off-tick ledger pass and reports how many it
+// queued. Past routeRecoveryCandidateCap the queue is dropped and the backstop
+// forced, exactly as the delta feed's own overflow is.
+func (l *routeRecoveryLane) deferToLedger(ids []string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.ledgerPending)+len(ids) > routeRecoveryCandidateCap {
+		l.ledgerPending = map[string]struct{}{}
+		l.forced = true
+		l.forcedReason = backstopReasonCursorGap
+		return 0
+	}
+	for _, id := range ids {
+		l.ledgerPending[id] = struct{}{}
+	}
+	return len(ids)
+}
+
+// takeLedgerPending drains the off-tick ledger queue.
+func (l *routeRecoveryLane) takeLedgerPending() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.ledgerPending) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(l.ledgerPending))
+	for id := range l.ledgerPending {
+		out = append(out, id)
+	}
+	l.ledgerPending = map[string]struct{}{}
+	sort.Strings(out)
+	return out
+}
+
+// ledgerCandidatePass repairs named candidates on the WORK legs only, off the
+// tick: one batched live re-read of exactly those ids per work leg, never an
+// open-corpus scan. It runs on the convergence poller's goroutine, so the
+// tick's zero-ledger invariant is untouched (read-audit R11).
+func (l *routeRecoveryLane) ledgerCandidatePass(plan storeref.ResolvedPlan, candidates []string) routeRecoveryReport {
+	report := routeRecoveryReport{lane: "ledger-delta", candidates: len(candidates)}
+	if len(candidates) == 0 {
+		return report
+	}
+	var errs []error
+	resolved := make(map[string]struct{}, len(candidates))
+	partial, walkErr := walkPlaneLegs(plan, reconcilePlane, func(leg planeLeg) error {
+		if leg.binding {
+			return nil
+		}
+		pending := unresolvedCandidates(candidates, resolved)
+		if len(pending) == 0 {
+			return nil
+		}
+		report.legs++
+		rows, reads, err := liveOpenCandidates(leg.store, pending)
+		report.legReads += reads
+		if err != nil {
+			return fmt.Errorf("re-reading %d deferred route candidate(s): %w", len(pending), err)
 		}
 		for _, row := range rows {
 			resolved[row.ID] = struct{}{}
@@ -640,6 +772,17 @@ func (l *routeRecoveryLane) deltaPass(plan storeref.ResolvedPlan, candidates []s
 	return report
 }
 
+// unresolvedCandidates returns the candidates not in resolved, in order.
+func unresolvedCandidates(candidates []string, resolved map[string]struct{}) []string {
+	var out []string
+	for _, id := range candidates {
+		if _, ok := resolved[id]; !ok {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 // backstopPass is the authoritative convergence scan: today's full live open
 // read of every work leg, with the per-candidate Get fan-out replaced by one
 // batched IN-list re-verify per leg.
@@ -661,6 +804,12 @@ func (l *routeRecoveryLane) backstopPassOnPlane(plan storeref.ResolvedPlan, reas
 		report.quarantined += legReport.quarantined
 		report.legReads += legReport.legReads
 		report.offPlaneRouted += legReport.offPlaneRouted
+		report.offPlaneInfra += legReport.offPlaneInfra
+		for _, id := range legReport.offPlaneSample {
+			if len(report.offPlaneSample) < routeRecoveryOffPlaneSample {
+				report.offPlaneSample = append(report.offPlaneSample, id)
+			}
+		}
 		report.flapping = append(report.flapping, legReport.flapping...)
 		return legReport.err
 	})
@@ -707,11 +856,18 @@ func (l *routeRecoveryLane) backstopLeg(leg planeLeg) routeRecoveryReport {
 	}
 	var ids []string
 	for _, b := range items {
-		if !leg.binding && b.Status == "open" && strings.TrimSpace(b.Assignee) == "" &&
+		if leg.planHasBinding && !leg.binding && b.Status == "open" && strings.TrimSpace(b.Assignee) == "" &&
 			strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" {
-			// Already routed, on a leg the tick's demand read refuses: nothing
-			// will ever spawn a seat for it. See routeRecoveryReport.offPlaneRouted.
+			// Already routed, on a work leg the runtime plane's collection does
+			// not read. See routeRecoveryReport.offPlaneRouted. Only a city with
+			// a binding has such a leg.
 			report.offPlaneRouted++
+			if coordclass.Classify(b).IsInfrastructure() {
+				report.offPlaneInfra++
+				if len(report.offPlaneSample) < routeRecoveryOffPlaneSample {
+					report.offPlaneSample = append(report.offPlaneSample, b.ID)
+				}
+			}
 		}
 		// Belt-and-braces with the Status:"open" query so the guarantee holds
 		// regardless of store-level filtering semantics: an assigned bead is

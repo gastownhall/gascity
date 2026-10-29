@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -74,13 +76,19 @@ func listOpenBeadsBothTiers(t *testing.T, store beads.Store) []beads.Bead {
 	return all
 }
 
+// handoffForTest runs gc handoff in text mode with no --key, --hook-format
+// or --force.
+func handoffForTest(args []string, target string, auto bool, stdout, stderr io.Writer) int {
+	return cmdHandoff(handoffRun{args: args, target: target, auto: auto, stdout: stdout, jsonOut: stdout, stderr: stderr})
+}
+
 func TestHandoffSuccess(t *testing.T) {
 	store := beads.NewMemStore()
 	rec := events.NewFake()
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
 
-	code := doHandoff(store, store, rec, dops, nil, "mayor", "mayor",
+	code := doHandoff(store, store, rec, dops, testRowFirstRestart("gc handoff", "mayor", dops, &stderr), "mayor", "mayor",
 		[]string{"HANDOFF: context full"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
@@ -510,7 +518,7 @@ func (errWriter) Write([]byte) (int, error) {
 
 func TestCmdHandoffAutoRejectsTarget(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := cmdHandoffWithForce([]string{"context cycle"}, "mayor", true, "", false, &stdout, &stderr); code == 0 {
+	if code := handoffForTest([]string{"context cycle"}, "mayor", true, &stdout, &stderr); code == 0 {
 		t.Fatal("cmdHandoff returned 0 for --auto with --target")
 	}
 	if !strings.Contains(stderr.String(), "--auto cannot be used with --target") {
@@ -556,15 +564,25 @@ func TestDoHandoff_Regression744_NamedSessionSkipsRestart(t *testing.T) {
 	dops.restartRequested["mayor"] = true
 
 	persistCalled := false
-	outcome := doHandoffWithOutcome(store, store, rec, dops, func() error {
+	restart := testRowFirstRestart("gc handoff", "mayor", dops, &stderr)
+	restart.record = func(string) error {
 		persistCalled = true
 		return nil
-	}, "mayor", "mayor", []string{"HANDOFF: context full"}, &stdout, &stderr)
+	}
+	checkCalled := false
+	restart.check = func(string) error {
+		checkCalled = true
+		return session.ErrStaleRestartRequest
+	}
+	outcome := doHandoffWithOutcome(store, store, rec, dops, restart, "mayor", "mayor", []string{"HANDOFF: context full"}, &stdout, &stderr)
 	if outcome.code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", outcome.code, stderr.String())
 	}
 	if outcome.restartRequested {
 		t.Fatal("restartRequested = true, want false for on-demand named session")
+	}
+	if checkCalled {
+		t.Error("the restart fence was checked for a session the controller does not restart")
 	}
 
 	mailFound := false
@@ -629,7 +647,7 @@ func TestDoHandoff_NamedSessionClearRestartFailureReturnsError(t *testing.T) {
 		t.Fatalf("set configured_named_mode: %v", err)
 	}
 
-	outcome := doHandoffWithOutcome(store, store, rec, dops, nil, "mayor", "mayor",
+	outcome := doHandoffWithOutcome(store, store, rec, dops, testRowFirstRestart("gc handoff", "mayor", dops, &stderr), "mayor", "mayor",
 		[]string{"HANDOFF: context full"}, &stdout, &stderr)
 	if outcome.code != 1 {
 		t.Fatalf("code = %d, want 1", outcome.code)
@@ -669,10 +687,12 @@ func TestDoHandoff_NamedAlwaysSessionRequestsRestart(t *testing.T) {
 	}
 
 	persistCalled := false
-	outcome := doHandoffWithOutcome(store, store, rec, dops, func() error {
+	restart := testRowFirstRestart("gc handoff", "mayor", dops, &stderr)
+	restart.record = func(string) error {
 		persistCalled = true
 		return nil
-	}, "mayor", "mayor", []string{"HANDOFF: context full"}, &stdout, &stderr)
+	}
+	outcome := doHandoffWithOutcome(store, store, rec, dops, restart, "mayor", "mayor", []string{"HANDOFF: context full"}, &stdout, &stderr)
 	if outcome.code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", outcome.code, stderr.String())
 	}
@@ -693,19 +713,25 @@ func TestDoHandoff_NamedAlwaysSessionRequestsRestart(t *testing.T) {
 	}
 }
 
-// TestDoHandoff_PinnedAlwaysSessionRequiresPersistRestart covers Fix 1: a
-// pinned named session (pin_awake == "true") is kill-protected by the
-// reconciler unless an explicit controller reset is persisted, so
-// persistRestart is mandatory rather than best-effort for pinned sessions.
-// When it is unavailable or fails, doHandoffWithOutcome must report failure
-// and must not promise a restart it cannot guarantee.
-func TestDoHandoff_PinnedAlwaysSessionRequiresPersistRestart(t *testing.T) {
+// TestDoHandoff_RowWriteFailureRecordsNothing pins SG-3's contract for a
+// restartable handoff, pinned or not: the row write is the request, so when it
+// is unavailable or fails the handoff exits 1, sets no runtime hint, records
+// no session.draining and promises no restart.
+func TestDoHandoff_RowWriteFailureRecordsNothing(t *testing.T) {
 	for _, tc := range []struct {
-		name           string
-		persistRestart func() error
+		name   string
+		pinned bool
+		check  func(string) error
+		record func(string) error
 	}{
-		{name: "nil persistRestart"},
-		{name: "persistRestart error", persistRestart: func() error { return errors.New("worker boundary unavailable") }},
+		{name: "no session store"},
+		{name: "row write error", record: func(string) error { return errors.New("worker boundary unavailable") }},
+		{name: "pinned, row write error", pinned: true, record: func(string) error { return errors.New("worker boundary unavailable") }},
+		{
+			name:   "check cannot decide, row write error",
+			check:  func(string) error { return errors.New("worker boundary unavailable") },
+			record: func(string) error { return errors.New("worker boundary unavailable") },
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := beads.NewMemStore()
@@ -720,37 +746,209 @@ func TestDoHandoff_PinnedAlwaysSessionRequiresPersistRestart(t *testing.T) {
 			if err != nil {
 				t.Fatalf("seeding session bead: %v", err)
 			}
-			if err := store.SetMetadata(b.ID, "session_name", "mayor"); err != nil {
-				t.Fatalf("set session_name: %v", err)
+			meta := map[string]string{
+				"session_name":             "mayor",
+				"configured_named_session": "true",
+				"configured_named_mode":    "always",
 			}
-			if err := store.SetMetadata(b.ID, "configured_named_session", "true"); err != nil {
-				t.Fatalf("set configured_named_session: %v", err)
+			if tc.pinned {
+				meta["pin_awake"] = "true"
 			}
-			if err := store.SetMetadata(b.ID, "configured_named_mode", "always"); err != nil {
-				t.Fatalf("set configured_named_mode: %v", err)
+			if err := store.SetMetadataBatch(b.ID, meta); err != nil {
+				t.Fatalf("seed metadata: %v", err)
 			}
-			if err := store.SetMetadata(b.ID, "pin_awake", "true"); err != nil {
-				t.Fatalf("set pin_awake: %v", err)
-			}
+			restart := testRowFirstRestart("gc handoff", "mayor", dops, &stderr)
+			restart.check = tc.check
+			restart.record = tc.record
 
-			outcome := doHandoffWithOutcome(store, store, rec, dops, tc.persistRestart, "mayor", "mayor",
+			outcome := doHandoffWithOutcome(store, store, rec, dops, restart, "mayor", "mayor",
 				[]string{"HANDOFF: context full"}, &stdout, &stderr)
 			if outcome.code != 1 {
 				t.Fatalf("code = %d, want 1; stderr: %s", outcome.code, stderr.String())
 			}
 			if outcome.restartRequested {
-				t.Fatal("restartRequested = true, want false when persistRestart is unavailable for a pinned session")
+				t.Fatal("restartRequested = true, want false when the row write fails")
+			}
+			if dops.restartRequested["mayor"] {
+				t.Error("runtime restart hint set although the row write failed")
 			}
 			if strings.Contains(stdout.String(), "requesting restart") {
-				t.Errorf("stdout = %q, must not promise a restart when persistRestart is unavailable for a pinned session", stdout.String())
+				t.Errorf("stdout = %q, must not promise a restart the row does not record", stdout.String())
 			}
-			if len(rec.Events) != 1 {
-				t.Fatalf("got %d events, want 1 (mail only, no SessionDraining); events=%v", len(rec.Events), rec.Events)
+			if !strings.Contains(stderr.String(), "restart not recorded") {
+				t.Errorf("stderr = %q, want the not-recorded diagnostic", stderr.String())
 			}
-			if rec.Events[0].Type != events.MailSent {
-				t.Fatalf("event[0].Type = %q, want %q", rec.Events[0].Type, events.MailSent)
+			if len(rec.Events) != 1 || rec.Events[0].Type != events.MailSent {
+				t.Fatalf("events = %v, want the mail only (no SessionDraining)", rec.Events)
 			}
 		})
+	}
+}
+
+// TestDoHandoff_NoInstanceTokenRefusesBeforeTheMail pins the SG-3 deviation
+// "no token: refuse before the mail": a restartable handoff that names no
+// incarnation exits 1 before it sends the mail, so a retry with the token
+// does not deliver the handoff twice. Nothing is written anywhere.
+func TestDoHandoff_NoInstanceTokenRefusesBeforeTheMail(t *testing.T) {
+	for _, token := range []string{"", " \t"} {
+		t.Run(fmt.Sprintf("token %q", token), func(t *testing.T) {
+			store := beads.NewMemStore()
+			rec := events.NewFake()
+			dops := newFakeDrainOps()
+			var stdout, stderr bytes.Buffer
+			restart := testRowFirstRestart("gc handoff", "mayor", dops, &stderr)
+			restart.token = token
+			recorded := false
+			restart.record = func(string) error { recorded = true; return nil }
+
+			outcome := doHandoffWithOutcome(store, store, rec, dops, restart, "mayor", "mayor",
+				[]string{"HANDOFF: context full"}, &stdout, &stderr)
+			if outcome.code != 1 || outcome.restartRequested {
+				t.Fatalf("outcome = %+v, want exit 1 with no restart; stderr: %s", outcome, stderr.String())
+			}
+			if msgs := listOpenMessagesBothTiers(t, store); len(msgs) != 0 {
+				t.Fatalf("messages = %d, want no mail sent before the token check", len(msgs))
+			}
+			if recorded || dops.restartRequested["mayor"] || len(rec.Events) != 0 {
+				t.Fatalf("recorded %t, hint %t, events %v; want nothing", recorded, dops.restartRequested["mayor"], rec.Events)
+			}
+			if !strings.Contains(stderr.String(), "gc handoff: restart not recorded: GC_INSTANCE_TOKEN is not set") {
+				t.Fatalf("stderr = %q, want the no-token diagnostic", stderr.String())
+			}
+		})
+	}
+}
+
+// TestDoHandoff_RefusedIncarnationSendsNoMail pins that a restartable self
+// handoff whose fence check refuses the caller's incarnation, the row being
+// closed or it and its live runtime naming another incarnation, exits 1
+// before the mail: the handoff address names the session, so the mail of a
+// process left over from an earlier incarnation would reach its successor,
+// once per retry. Nothing is written anywhere.
+func TestDoHandoff_RefusedIncarnationSendsNoMail(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		refusal    error
+		wantStderr string
+	}{
+		{"another incarnation", session.ErrStaleRestartRequest, "gc handoff: restart not recorded: this process does not run in session mayor's current incarnation"},
+		{"another incarnation, wrapped", fmt.Errorf("deciding: %w", session.ErrStaleRestartRequest), "gc handoff: restart not recorded: this process does not run in session mayor's current incarnation"},
+		{"closed row", session.ErrSessionClosed, "gc handoff: restart not recorded: " + session.ErrSessionClosed.Error()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			rec := events.NewFake()
+			dops := newFakeDrainOps()
+			var stdout, stderr bytes.Buffer
+			restart := testRowFirstRestart("gc handoff", "mayor", dops, &stderr)
+			checked := ""
+			restart.check = func(token string) error { checked = token; return tc.refusal }
+			recorded := false
+			restart.record = func(string) error { recorded = true; return nil }
+
+			outcome := doHandoffWithOutcome(store, store, rec, dops, restart, "mayor", "mayor",
+				[]string{"HANDOFF: context full"}, &stdout, &stderr)
+			if outcome.code != 1 || outcome.restartRequested {
+				t.Fatalf("outcome = %+v, want exit 1 with no restart; stderr: %s", outcome, stderr.String())
+			}
+			if checked != testRestartToken {
+				t.Fatalf("check saw token %q, want the caller's", checked)
+			}
+			if msgs := listOpenMessagesBothTiers(t, store); len(msgs) != 0 {
+				t.Fatalf("messages = %d, want no mail sent for a refused incarnation", len(msgs))
+			}
+			if recorded || dops.restartRequested["mayor"] || len(rec.Events) != 0 {
+				t.Fatalf("recorded %t, hint %t, events %v; want nothing", recorded, dops.restartRequested["mayor"], rec.Events)
+			}
+			if !strings.HasPrefix(stderr.String(), tc.wantStderr) || strings.Contains(stderr.String(), "sent mail") {
+				t.Fatalf("stderr = %q, want prefix %q and no mail", stderr.String(), tc.wantStderr)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want nothing", stdout.String())
+			}
+		})
+	}
+}
+
+// TestDoHandoff_RequireRefusalSendsNoMail pins the handoff's pre-mail check
+// of the write itself: under require, a session store that cannot fence
+// refuses the fenced write, so the check refuses before the mail and the
+// handoff exits 1 having sent nothing and recorded nothing.
+func TestDoHandoff_RequireRefusalSendsNoMail(t *testing.T) {
+	rowStore := beads.NewMemStore()
+	if err := beads.StampOpenedStore(rowStore, "MemStore", gate.Require, false, nil, nil); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	row, err := rowStore.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+		"session_name": "mayor", "state": "awake", "instance_token": testRestartToken,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rowStore.DisableConditionalWrites = true
+	mgr := session.NewManagerWithOptions(rowStore, runtime.NewFake(), session.WithCityPath(t.TempDir()))
+
+	store := beads.NewMemStore()
+	rec := events.NewFake()
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	restart := testRowFirstRestart("gc handoff", "mayor", dops, &stderr)
+	var checkErr error
+	restart.check = func(token string) error {
+		checkErr = mgr.CheckFreshRestartFenced(row.ID, token, nil)
+		return checkErr
+	}
+	restart.record = func(token string) error { return mgr.RequestFreshRestartFenced(row.ID, token, nil) }
+
+	outcome := doHandoffWithOutcome(store, store, rec, dops, restart, "mayor", "mayor",
+		[]string{"HANDOFF: context full"}, &stdout, &stderr)
+	if !beads.IsConditionalWritesRequired(checkErr) {
+		t.Fatalf("check err = %v, want the require refusal", checkErr)
+	}
+	if outcome.code != 1 || outcome.restartRequested {
+		t.Fatalf("outcome = %+v, want exit 1 with no restart; stderr: %s", outcome, stderr.String())
+	}
+	if msgs := listOpenMessagesBothTiers(t, store); len(msgs) != 0 {
+		t.Fatalf("messages = %d, want no mail sent when the write is refused", len(msgs))
+	}
+	if want := "gc handoff: restart not recorded: " + checkErr.Error() + "\n"; stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+	if dops.restartRequested["mayor"] || len(rec.Events) != 0 || stdout.Len() != 0 {
+		t.Fatalf("hint %t, events %v, stdout %q; want nothing", dops.restartRequested["mayor"], rec.Events, stdout.String())
+	}
+	got, err := rowStore.Get(row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["restart_requested"] != "" || got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("row = %v, want nothing recorded", got.Metadata)
+	}
+}
+
+// TestDoHandoff_UndecidedCheckLeavesTheWriteTheAuthority pins that a fence
+// check that cannot decide (a failed read) refuses nothing before the mail:
+// the fenced write after it decides, and here it records the request.
+func TestDoHandoff_UndecidedCheckLeavesTheWriteTheAuthority(t *testing.T) {
+	store := beads.NewMemStore()
+	rec := events.NewFake()
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	restart := testRowFirstRestart("gc handoff", "mayor", dops, &stderr)
+	restart.check = func(string) error { return errors.New("store read timed out") }
+	recorded := false
+	restart.record = func(string) error { recorded = true; return nil }
+
+	outcome := doHandoffWithOutcome(store, store, rec, dops, restart, "mayor", "mayor",
+		[]string{"HANDOFF: context full"}, &stdout, &stderr)
+	if outcome.code != 0 || !outcome.restartRequested {
+		t.Fatalf("outcome = %+v, want exit 0 with the restart recorded; stderr: %s", outcome, stderr.String())
+	}
+	if !recorded {
+		t.Fatal("the fenced write was not made after an undecided check")
+	}
+	if msgs := listOpenMessagesBothTiers(t, store); len(msgs) != 1 {
+		t.Fatalf("messages = %d, want the handoff mail", len(msgs))
 	}
 }
 
@@ -760,7 +958,7 @@ func TestHandoffWithMessage(t *testing.T) {
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
 
-	code := doHandoff(store, store, rec, dops, nil, "polecat-1", "gc-city-polecat-1",
+	code := doHandoff(store, store, rec, dops, testRowFirstRestart("gc handoff", "gc-city-polecat-1", dops, &stderr), "polecat-1", "gc-city-polecat-1",
 		[]string{"HANDOFF: PR review needed", "PR #42 is open, tests passing, needs review from refinery"},
 		&stdout, &stderr)
 	if code != 0 {
@@ -813,7 +1011,7 @@ func TestCmdHandoff_Regression744_NamedSessionReturnsWithoutBlocking(t *testing.
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- cmdHandoffWithForce([]string{"HANDOFF: context full"}, "", false, "", false, &stdout, &stderr)
+		done <- handoffForTest([]string{"HANDOFF: context full"}, "", false, &stdout, &stderr)
 	}()
 
 	select {
@@ -1121,7 +1319,7 @@ func TestHandoffMailWritesTheBindingOnAMigratedCity(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	// --auto: the send without the restart request, so the assertion is about
 	// the message bead and nothing else.
-	if code := cmdHandoffWithForce([]string{"context cycle"}, "", true, "", false, &stdout, &stderr); code != 0 {
+	if code := handoffForTest([]string{"context cycle"}, "", true, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc handoff --auto exited %d: %s", code, stderr.String())
 	}
 	match := handoffMailIDPattern.FindStringSubmatch(stdout.String())
@@ -1167,7 +1365,7 @@ func TestHandoffLocalArmMailLandsInTheBindingOnAMigratedCity(t *testing.T) {
 	seedNamedOnDemandSession(t, cityPath, cfg, "mayor")
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdHandoffWithForce([]string{"context cycle"}, "", false, "", false, &stdout, &stderr); code != 0 {
+	if code := handoffForTest([]string{"context cycle"}, "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc handoff exited %d: %s", code, stderr.String())
 	}
 	id := handoffMailIDFromOutput(t, stdout.String(), "sent mail ")
