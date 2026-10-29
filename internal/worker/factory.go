@@ -65,6 +65,12 @@ type FactoryConfig struct {
 	// DeferredSubmits is where the factory's manager queues a submit a
 	// session cannot take yet. Nil keeps the city's state.json queue.
 	DeferredSubmits sessionpkg.DeferredSubmitQueue
+	// ResolveLaunchEnv rebuilds the generated launch env of a session whose
+	// runtime is gone when a message, attach or start resumes it, from the
+	// same inputs ResolveSessionRuntime gets. Its error refuses only that
+	// start; handles and their reads never call it. Nil starts a resumed
+	// session with its handle's env alone.
+	ResolveLaunchEnv func(info sessionpkg.Info, sessionKind string, metadata map[string]string) (map[string]string, error)
 }
 
 // Factory centralizes worker-boundary object construction for callers such as
@@ -90,7 +96,7 @@ type Factory struct {
 // NewFactory constructs a Factory backed by a session.Manager configured for
 // the caller's city/runtime context.
 func NewFactory(cfg FactoryConfig) (*Factory, error) {
-	opts := make([]sessionpkg.ManagerOption, 0, 5)
+	opts := make([]sessionpkg.ManagerOption, 0, 6)
 	if cfg.CityPath != "" || cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithCityPath(cfg.CityPath))
 	}
@@ -105,6 +111,11 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	}
 	if cfg.DeferredSubmits != nil {
 		opts = append(opts, sessionpkg.WithDeferredSubmitQueue(cfg.DeferredSubmits))
+	}
+	if resolve := cfg.ResolveLaunchEnv; resolve != nil {
+		opts = append(opts, sessionpkg.WithLaunchEnvResolver(func(info sessionpkg.Info, metadata map[string]string) (map[string]string, error) {
+			return resolve(info, sessionKindFromMetadata(metadata), metadata)
+		}))
 	}
 	manager := sessionpkg.NewManagerWithOptions(cfg.Store, cfg.Provider, opts...)
 	return newFactory(manager, cfg)
@@ -262,7 +273,7 @@ func (f *Factory) sessionFromRecord(info sessionpkg.Info, pr sessionpkg.Persiste
 			ResumeCommand: info.ResumeCommand,
 		},
 	}
-	sessionKind := strings.TrimSpace(pr.Metadata["real_world_app_session_kind"])
+	sessionKind := sessionKindFromMetadata(pr.Metadata)
 	if profile := strings.TrimSpace(pr.Metadata["worker_profile"]); profile != "" {
 		spec.Profile = Profile(profile)
 	}
@@ -275,6 +286,12 @@ func (f *Factory) sessionFromRecord(info sessionpkg.Info, pr sessionpkg.Persiste
 		applyResolvedRuntimeToSessionSpec(&spec, resolved)
 	}
 	return f.Session(spec)
+}
+
+// sessionKindFromMetadata is the session kind an external client stamped on
+// a session bead, as the runtime and launch-env resolvers take it.
+func sessionKindFromMetadata(metadata map[string]string) string {
+	return strings.TrimSpace(metadata["real_world_app_session_kind"])
 }
 
 // HandleForTarget resolves a session target to a session-backed worker when

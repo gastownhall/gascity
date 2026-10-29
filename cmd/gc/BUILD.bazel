@@ -2223,6 +2223,7 @@ go_test(
         "work_record_gate_test.go",
         "work_release_test.go",
         "worker_boundary_import_test.go",
+        "worker_handle_launch_env_test.go",
         "worker_handle_test.go",
         "worker_site_test.go",
         "workflow_trace_rotation_test.go",
