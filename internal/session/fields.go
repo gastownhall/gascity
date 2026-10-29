@@ -520,6 +520,8 @@ var registry = slices.Concat([]Field{
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/usage_compute.go", "emitComputeFactForBead")), "usage_compute_emitted_at"),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/usage_compute.go", "CityRuntime.emitDueComputeFacts")), "usage_model_swept_at"),
 	same(ClassAdvisory, false, sites(op(srcManager, "Manager.PersistInvocationUsageCursor")), "invocation_usage_cursor"),
+	same(ClassAdvisory, false, sites(legacy(srcTransition, "ClosePatch"), op(srcManager, "Manager.CloseDetailed")),
+		MetadataKeyUsageClosePending, MetadataKeyUsageClosedAt),
 	same(ClassAdvisory, false, sites(legacy(srcReconciler, "recordNamedSessionConfigDriftDeferredAt")), "config_drift_deferred_at", "config_drift_deferred_key"),
 	same(ClassAdvisory, false, sites(legacy(srcReconciler, "recordSessionAttachedConfigDriftDeferral")), "attached_config_drift_deferred_at",
 		"attached_config_drift_deferred_key"),

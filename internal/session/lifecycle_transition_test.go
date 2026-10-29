@@ -346,10 +346,12 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "close",
 			patch: ClosePatch(now, "orphaned"),
 			want: MetadataPatch{
-				"state":        "orphaned",
-				"close_reason": "session orphaned: configured agent removed",
-				"closed_at":    now.Format(time.RFC3339),
-				"synced_at":    now.Format(time.RFC3339),
+				"state":               "orphaned",
+				"close_reason":        "session orphaned: configured agent removed",
+				"closed_at":           now.Format(time.RFC3339),
+				"synced_at":           now.Format(time.RFC3339),
+				"usage_close_pending": "true",
+				"usage_closed_at":     now.Format(time.RFC3339Nano),
 			},
 		},
 		{
@@ -935,5 +937,30 @@ func TestClosePatchKeepsShortStateCode(t *testing.T) {
 	if trimmed := strings.TrimSpace(patch["close_reason"]); len(trimmed) < 20 {
 		t.Errorf("close_reason = %q (%d trimmed chars); want >=20 to satisfy validator",
 			patch["close_reason"], len(trimmed))
+	}
+}
+
+// TestClosePatchStampsUsageCloseMarker pins the close-time usage marker: every
+// close that ends a confirmed awake interval leaves usage_close_pending=true and
+// usage_closed_at at the close time, so the usage lane can account an interval
+// whose row left the open set in the same commit (#6672). A failed create never
+// confirmed a start, so its close writes neither key and leaves any prior value
+// untouched.
+func TestClosePatchStampsUsageCloseMarker(t *testing.T) {
+	now := time.Date(2026, 9, 24, 9, 57, 55, 123456789, time.UTC)
+	for _, code := range []string{"drained", "dead-runtime", "orphaned", "stranded-repair", "gc_swept", "duplicate"} {
+		patch := ClosePatch(now, code)
+		if got := patch["usage_close_pending"]; got != "true" {
+			t.Errorf("ClosePatch(%q) usage_close_pending = %q, want true", code, got)
+		}
+		if got := patch["usage_closed_at"]; got != now.Format(time.RFC3339Nano) {
+			t.Errorf("ClosePatch(%q) usage_closed_at = %q, want %q", code, got, now.Format(time.RFC3339Nano))
+		}
+	}
+	failed := ClosePatch(now, string(StateFailedCreate))
+	for _, key := range []string{"usage_close_pending", "usage_closed_at"} {
+		if v, ok := failed[key]; ok {
+			t.Errorf("ClosePatch(failed-create) writes %s=%q, want the key absent", key, v)
+		}
 	}
 }

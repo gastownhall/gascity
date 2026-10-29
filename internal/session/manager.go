@@ -1778,6 +1778,7 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 		// named session's identifiers, on the incarnation this close stopped.
 		terminal := retiredIdentifiersPatch(b)
 		terminal["pin_awake"] = ""
+		maps.Copy(terminal, UsageClosePatch(m.now()))
 		terminal = CellInto(id, b.Metadata, ActorController, DispEvent{Kind: EvRetire}, m.now(), terminal)
 		// Past a kill fence: the operator's close ends the session a kill was
 		// tearing down, as it did before CommitClose.
@@ -2396,6 +2397,14 @@ func (m *Manager) PersistSessionKey(id, sessionKey string) error {
 // across prompt operations: handles are rebuilt per gc process, so the
 // dedup cursor must live on the session bead, not in memory.
 const MetadataKeyInvocationUsageCursor = "invocation_usage_cursor"
+
+// MetadataKeyUsageClosePending marks a session row closed while it may still
+// hold an unaccounted awake interval ("true"); see UsageClosePatch.
+const MetadataKeyUsageClosePending = "usage_close_pending"
+
+// MetadataKeyUsageClosedAt is the close time (RFC3339Nano) that ends the
+// interval a pending usage close accounts; see UsageClosePatch.
+const MetadataKeyUsageClosedAt = "usage_closed_at"
 
 // PersistInvocationUsageCursor stores the invocation-usage telemetry cursor
 // on an existing session. Unlike PersistSessionKey it overwrites any
