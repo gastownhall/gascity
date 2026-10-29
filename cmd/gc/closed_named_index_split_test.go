@@ -92,3 +92,53 @@ func TestDoctorDemandSweepReadsClosedNamedSessionsFromTheSessionsStore(t *testin
 		})
 	}
 }
+
+// The index the sweep names is the one the demand pass uses: an on_demand
+// named session whose closed bead is in the sessions store has its runtime
+// name probed, so ready work filed under that name is collected (#5231's
+// assignee form). Without the sessions store named, a split city's pass
+// builds the index from the work store and never probes the runtime name.
+func TestClosedNamedIndexFromTheSessionsStoreProbesTheRuntimeName(t *testing.T) {
+	forEachTopology(t, func(t *testing.T, e splitEnv) {
+		cfg := e.cfg
+		// A session template makes the runtime name differ from the identity,
+		// so only the index can name it.
+		cfg.Workspace.SessionTemplate = "{{.City}}-{{.Agent}}"
+		cfg.Agents = append(cfg.Agents, config.Agent{Name: "probe", StartCommand: "true"})
+		cfg.NamedSessions = append(cfg.NamedSessions, config.NamedSession{Template: "probe", Mode: "on_demand"})
+		identity := cfg.NamedSessions[len(cfg.NamedSessions)-1].QualifiedName()
+		runtimeName := config.NamedSessionRuntimeName(config.EffectiveCityName(cfg, ""), cfg.Workspace, identity)
+		if runtimeName == identity {
+			t.Fatalf("premise: runtime name %q equals the identity", runtimeName)
+		}
+		closed, err := e.sessionsStore().Create(beads.Bead{
+			Title: "probe", Type: session.BeadType, Labels: []string{session.LabelSession},
+			Metadata: map[string]string{session.NamedSessionIdentityMetadata: identity, "session_name": runtimeName, "state": "asleep"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := e.sessionsStore().Close(closed.ID); err != nil {
+			t.Fatal(err)
+		}
+		work, err := e.work.Create(beads.Bead{Title: "work for the named session", Type: "task", Assignee: runtimeName})
+		if err != nil {
+			t.Fatal(err)
+		}
+		collected := func(cache *readyDemandCache) bool {
+			got, _, _, _, _ := collectAssignedWorkBeadsWithStores(e.cityPath, cfg, e.work, nil, nil, nil, cache)
+			for _, b := range got {
+				if b.ID == work.ID {
+					return true
+				}
+			}
+			return false
+		}
+		if !collected(newReadyDemandCache().withSessionsStore(beads.SessionStore{Store: e.sessionsStore()})) {
+			t.Fatalf("ready work %s assigned to the runtime name %q was not collected with the sessions store named", work.ID, runtimeName)
+		}
+		if e.split && collected(newReadyDemandCache()) {
+			t.Fatalf("premise: a split city's work-led pass collected %s without the sessions store named", work.ID)
+		}
+	})
+}
