@@ -42,6 +42,11 @@ type initProviderTarget struct {
 
 func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOptions) int {
 	EnsureBuiltinRuntimeAssets(cityPath, os.Stderr) //nolint:errcheck // best-effort; needed before dependency and provider checks
+	// Mint before any check that can stop init so a retried init reuses the id.
+	if err := mintCityDoltDatabaseID(cityPath); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	// Record the selected provider owner before any dependency or readiness
 	// work. Either path can fail after the scaffold exists; a later gc start
 	// must therefore see the same pending topology rather than seed a legacy

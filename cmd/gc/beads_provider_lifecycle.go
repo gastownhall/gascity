@@ -886,8 +886,14 @@ func readDeferredManagedDoltDatabase(path, fallback string) string {
 	return fallback
 }
 
+// defaultScopeDoltDatabase is the database name a scope gets when its
+// metadata.json carries no stamp. A city minted an id at init gets
+// city_<id>; every other city scope keeps the legacy "hq".
 func defaultScopeDoltDatabase(cityPath, dir, prefix string) string {
 	if samePath(cityPath, dir) {
+		if id := readCityDoltDatabaseID(cityPath); id != "" {
+			return sanitizeDoltDatabaseName("city_" + id)
+		}
 		return "hq"
 	}
 	return sanitizeDoltDatabaseName(prefix)
