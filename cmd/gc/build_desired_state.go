@@ -1961,7 +1961,11 @@ func collectAssignedWorkBeadsWithStores(
 	// suppress the Ready probe for a same-ID assignee in another store.
 	skipReadyAssignees := readyCapturedAssigneeSet(result, resultStoreRefs, readyAssigned)
 	expandSkipAssigneesWithSessionIdentities(skipReadyAssignees, sessionBeads)
-	assignees := readyAssignedWorkAssignees(cfg, cityStore, sessionBeads, skipReadyAssignees, pass, point, reads)
+	closedNamedStore := cityStore
+	if cache != nil && cache.sessions.Store != nil {
+		closedNamedStore = cache.sessions.Store
+	}
+	assignees := readyAssignedWorkAssignees(cfg, closedNamedStore, sessionBeads, skipReadyAssignees, pass, point, reads)
 	if len(skipReadyAssignees) > 0 && len(assignees) == 0 {
 		return result, resultStores, resultStoreRefs, readyAssigned, partial
 	}
@@ -2086,7 +2090,10 @@ func expandSkipAssigneesWithSessionIdentities(skip map[string]struct{}, sessionB
 	}
 }
 
-func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}, pass *demandPassTrace, point string, reads demandReads) []string {
+// sessionsStore is the session-class store the closed named-session index is
+// built from (collectAssignedWorkBeadsWithStores: the pass's leading store,
+// or the one its cache names).
+func readyAssignedWorkAssignees(cfg *config.City, sessionsStore beads.Store, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}, pass *demandPassTrace, point string, reads demandReads) []string {
 	seen := make(map[string]struct{})
 	var result []string
 	add := func(value string) {
@@ -2136,8 +2143,8 @@ func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, session
 			// partial read keeps the rows it did get.
 			start := pass.now()
 			var idxErr error
-			closedIdx, idxErr = demandReadsOrLegacy(reads).ClosedNamedIndex(cityStore)
-			pass.read(demandStoreRead{point: point, leg: pass.storeLabel(cityStore, "city"), op: "closed_named_index", tier: demandReadTierCached}, start, -1, idxErr)
+			closedIdx, idxErr = demandReadsOrLegacy(reads).ClosedNamedIndex(sessionsStore)
+			pass.read(demandStoreRead{point: point, leg: pass.storeLabel(sessionsStore, "city"), op: "closed_named_index", tier: demandReadTierCached}, start, -1, idxErr)
 		}
 		for i := range cfg.NamedSessions {
 			if cfg.NamedSessions[i].Mode != "on_demand" {
@@ -3027,6 +3034,23 @@ type readyDemandCache struct {
 	// reads, so a blocker is read once per read point rather than once per
 	// gated snapshot (a store's live and cached snapshots are both gated).
 	gate *readywork.LegGate
+	// sessions is the session-class store the closed named-session index is
+	// built from, set by withSessionsStore for a pass led by a WORK store
+	// (gc doctor's demand-migration sweep). Unset, the pass's leading store
+	// answers: every controller and gc start pass leads with the sessions
+	// store already.
+	sessions beads.SessionStore
+}
+
+// withSessionsStore names the session-class store the closed named-session
+// index reads, for a pass whose leading store is not it, and returns the
+// cache.
+func (c *readyDemandCache) withSessionsStore(sessions beads.SessionStore) *readyDemandCache {
+	if c == nil {
+		return c
+	}
+	c.sessions = sessions
+	return c
 }
 
 // withCrossStoreGate arms the cache with the city's ready legs when the city

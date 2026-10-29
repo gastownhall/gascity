@@ -131,7 +131,8 @@ func (c *v2DemandMigrationsCheck) sweep(fix bool, stderr io.Writer) demandMigrat
 		}
 		rigs[rig.Name] = store
 	}
-	sessions, err := loadSessionBeadSnapshot(cliSessionStore(city, c.cfg, c.cityPath))
+	sessionsStore := cliSessionStore(city, c.cfg, c.cityPath)
+	sessions, err := loadSessionBeadSnapshot(sessionsStore)
 	if err != nil {
 		// canonicalizeLegacyBoundAssignedWork then refuses to run, counting 0.
 		s.problems = append(s.problems, fmt.Sprintf("session snapshot: %v", err))
@@ -149,7 +150,11 @@ func (c *v2DemandMigrationsCheck) sweep(fix bool, stderr io.Writer) demandMigrat
 		}
 		return out
 	}
-	assigned, assignedStores, assignedRefs, _, assignedPartial := collectAssignedWorkBeadsWithStores(c.cityPath, c.cfg, city, rigs, suspended, sessions, newReadyDemandCache())
+	// The sweep leads with the city WORK store, so it names the sessions store
+	// the closed named-session index reads: on a split city closed named
+	// sessions live only in the binding.
+	assigned, assignedStores, assignedRefs, _, assignedPartial := collectAssignedWorkBeadsWithStores(c.cityPath, c.cfg, city, rigs, suspended, sessions,
+		newReadyDemandCache().withSessionsStore(beads.SessionStore{Store: sessionsStore}))
 	if assignedPartial {
 		s.problems = append(s.problems, "assigned collection partial")
 	}

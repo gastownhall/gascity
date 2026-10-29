@@ -7607,6 +7607,10 @@ prompt_template = "prompts/probe.md"
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Session rows are seeded and read back through the session-class store,
+	// where gc prime's session-name lookup reads them (cliSessionName): the
+	// fixture now matches the production path.
+	store = cliSessionStore(store, nil, dir)
 	sessionBead, err := store.Create(beads.Bead{
 		Title: "probe",
 		Type:  sessionBeadType,
@@ -7646,6 +7650,7 @@ prompt_template = "prompts/probe.md"
 	if err != nil {
 		t.Fatal(err)
 	}
+	updatedStore = cliSessionStore(updatedStore, nil, dir)
 	updated, err := updatedStore.Get(sessionBead.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -7687,6 +7692,10 @@ prompt_template = "prompts/probe.md"
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Session rows are seeded and read back through the session-class store,
+	// where gc prime's session-name lookup reads them (cliSessionName): the
+	// fixture now matches the production path.
+	store = cliSessionStore(store, nil, dir)
 	sessionBead, err := store.Create(beads.Bead{
 		Title: "probe",
 		Type:  "session",
@@ -7726,6 +7735,7 @@ prompt_template = "prompts/probe.md"
 	if err != nil {
 		t.Fatal(err)
 	}
+	updatedStore = cliSessionStore(updatedStore, nil, dir)
 	updated, err := updatedStore.Get(sessionBead.ID)
 	if err != nil {
 		t.Fatal(err)
