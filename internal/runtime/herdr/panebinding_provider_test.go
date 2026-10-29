@@ -60,7 +60,12 @@ agent_get)
     printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"idle"}}}'
   fi ;;
 agent_list)
-  printf '%s' '{"result":{"agents":[]}}' ;;
+  # $STATE/agents.json, when present, is the registry verbatim in herdr's shape.
+  if [ -e "$STATE/agents.json" ]; then
+    cat "$STATE/agents.json"
+  else
+    printf '%s' '{"result":{"agents":[]}}'
+  fi ;;
 agent_start)
   if [ -e "$STATE/name_taken" ]; then
     # A concurrent Start won the name and its agent is live: herdr rejects the
@@ -494,6 +499,46 @@ func TestListRunningIncludesUnregisteredBoundSessions(t *testing.T) {
 		if !want[n] {
 			t.Fatalf("ListRunning = %v; unexpected %q", got, n)
 		}
+	}
+}
+
+// An unnamed registry entry is a pane herdr detected an agent in, not a
+// session: listing it would hand the adoption barrier a phantom named after
+// its kind, or after nothing. Bound sessions still list through their
+// bindings, and a foreign agent still lists under its registered name.
+func TestListRunningOmitsUnnamedRegistryEntries(t *testing.T) {
+	p, state := newFakeHerdrProvider(t)
+	setState(t, state, "busy")
+	for _, name := range []string{"alpha", "beta"} {
+		bindTestPane(t, p, name, bindModeShell)
+		if err := p.SetMeta(name, metaBoundName, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	registry := `{"result":{"agents":[` +
+		`{"agent":"opencode","pane_id":"w3:p1","agent_status":"working"},` +
+		`{"agent":"opencode","name":"manual-1","pane_id":"w4:p1","agent_status":"idle"}]}}`
+	if err := os.WriteFile(filepath.Join(state, "agents.json"), []byte(registry), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := p.ListRunning("")
+	if err != nil {
+		t.Fatalf("ListRunning: %v", err)
+	}
+	want := map[string]bool{"alpha": true, "beta": true, "manual-1": true}
+	if len(got) != len(want) {
+		t.Fatalf("ListRunning(\"\") = %q; want exactly alpha, beta and manual-1", got)
+	}
+	for _, n := range got {
+		if !want[n] {
+			t.Fatalf("ListRunning(\"\") = %q; unexpected %q", got, n)
+		}
+	}
+
+	got, err = p.ListRunning("op")
+	if err != nil || len(got) != 0 {
+		t.Fatalf("ListRunning(%q) = %q, %v; want empty", "op", got, err)
 	}
 }
 
