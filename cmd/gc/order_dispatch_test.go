@@ -11142,3 +11142,23 @@ func TestShellExecRunnerDoesNotInheritSessionIdentity(t *testing.T) {
 		t.Fatalf("order exec inherited the dispatcher's session identity: got %q, want %q", got, want)
 	}
 }
+
+// TestShellExecRunnerScrubsSessionScopedEnv drives the scrub from
+// managedDoltSessionScopedEnvKeys so a session-scoped key added to that list
+// later is covered for exec orders too.
+func TestShellExecRunnerScrubsSessionScopedEnv(t *testing.T) {
+	for _, key := range managedDoltSessionScopedEnvKeys {
+		t.Setenv(key, "leak-"+key)
+	}
+
+	out, err := shellExecRunner(context.Background(), "env", t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("shellExecRunner() error = %v, output = %q", err, out)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		key, _, ok := strings.Cut(line, "=")
+		if ok && containsString(managedDoltSessionScopedEnvKeys, key) {
+			t.Errorf("order exec env carries session-scoped %q", line)
+		}
+	}
+}
