@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -28,6 +29,10 @@ type fakeHerdrServer struct {
 
 	mu     sync.Mutex
 	agents []agentInfo // what agent.list returns
+	// agentsJSON, when set, replaces agents with literal herdr entries.
+	// Marshaling agents round-trips gc's own struct tags, so only literal
+	// herdr JSON can catch a decode bug.
+	agentsJSON []string
 
 	// subscribes receives each events.subscribe call's decoded filter set.
 	subscribes chan []subscribeSub
@@ -93,6 +98,14 @@ func (f *fakeHerdrServer) setAgents(agents ...agentInfo) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.agents = append([]agentInfo(nil), agents...) // copy: callers keep mutating their slice
+	f.agentsJSON = nil
+}
+
+// setAgentsJSON makes agent.list answer with these literal herdr agent entries.
+func (f *fakeHerdrServer) setAgentsJSON(entries ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.agentsJSON = append([]string(nil), entries...)
 }
 
 func (f *fakeHerdrServer) serve(conn net.Conn) {
@@ -116,10 +129,14 @@ func (f *fakeHerdrServer) serve(conn net.Conn) {
 	switch req.Method {
 	case "agent.list":
 		f.mu.Lock()
-		agents := f.agents
+		agents, raw := f.agents, f.agentsJSON
 		f.mu.Unlock()
 		resp := map[string]any{"id": req.ID, "result": map[string]any{"type": "agent_list", "agents": agents}}
 		b, _ := json.Marshal(resp)
+		if raw != nil {
+			id, _ := json.Marshal(req.ID)
+			b = []byte(`{"id":` + string(id) + `,"result":{"type":"agent_list","agents":[` + strings.Join(raw, ",") + `]}}`)
+		}
 		_, _ = conn.Write(append(b, '\n'))
 		_ = conn.Close()
 	case "events.subscribe":
