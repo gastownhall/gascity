@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -165,5 +166,117 @@ func TestRunWorkflowServeFollowBacksOffOnSkipOnlySweeps(t *testing.T) {
 	}
 	if !slices.Equal(waitCalls, want) {
 		t.Fatalf("wait calls = %#v, want %#v: skip-only sweeps must grow the idle backoff", waitCalls, want)
+	}
+}
+
+// TestDrainWorkflowServeWorkProcessesLiveControlBesideStaleRow is the AC-3 pin:
+// a pass that processes real work beside a persistent non-open row must wake
+// the workers, then end through the same bounded idle re-poll the empty queue
+// uses, so the stale row is dispatched exactly 2 + workflowServeIdlePollAttempts
+// times instead of spinning the drain forever (gastownhall/gascity#6024).
+func TestDrainWorkflowServeWorkProcessesLiveControlBesideStaleRow(t *testing.T) {
+	cityDir, store := setUpControlReadyFileStoreCity(t)
+	noBDOnPathForTest(t)
+	ensureDispatchWakeDir(t, cityDir)
+
+	// The stale row: a closed control the queue keeps offering.
+	stale := createRoutedControl(t, store, beadmeta.KindScopeCheck)
+	if err := store.Close(stale.ID); err != nil {
+		t.Fatalf("close stale control: %v", err)
+	}
+	// The live control: an orphaned scope-check (its root is missing), the
+	// cheapest bead that closes as processed on one dispatch.
+	live, err := store.Create(beads.Bead{
+		Type: "task",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:     freshnessControlTarget,
+			beadmeta.KindMetadataKey:         beadmeta.KindScopeCheck,
+			beadmeta.RootBeadIDMetadataKey:   "ga-missing-root",
+			beadmeta.RootStoreRefMetadataKey: "city:test-city",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create live control: %v", err)
+	}
+
+	stubWorkflowServeIdlePolling(t, 3) // the re-polls stay instant
+	listCalls := 0
+	stubWorkflowServeList(t, func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		listCalls++
+		queue := []hookBead{{ID: stale.ID, Metadata: hookBeadMetadata{beadmeta.KindMetadataKey: beadmeta.KindScopeCheck}}}
+		if current, getErr := store.Get(live.ID); getErr == nil && current.Status == "open" {
+			queue = append(queue, hookBead{ID: live.ID, Metadata: hookBeadMetadata{beadmeta.KindMetadataKey: beadmeta.KindScopeCheck}})
+		}
+		return queue, nil
+	})
+
+	// Count dispatches through the production seam, bounded so a regressed
+	// drain (which spins on the stale row) fails fast instead of hanging.
+	dispatches := map[string]int{}
+	dispatchCalls := 0
+	prevServe := controlDispatcherServe
+	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer, emits *executionEmitDeferral) error {
+		dispatches[beadID]++
+		dispatchCalls++
+		if dispatchCalls > 50 {
+			return fmt.Errorf("stub exceeded 50 dispatches: the drain is spinning")
+		}
+		return prevServe(cityPath, storePath, beadID, stdout, stderr, emits)
+	}
+	t.Cleanup(func() { controlDispatcherServe = prevServe })
+
+	result, err := drainWorkflowServeWork(freshnessControlAgent(), cityDir, cityDir, workflowServeControlReadyQuery(freshnessControlAgent()), nil, io.Discard)
+	if err != nil {
+		t.Fatalf("drainWorkflowServeWork: %v", err)
+	}
+	wantStaleDispatches := 2 + workflowServeIdlePollAttempts
+	if got := dispatches[live.ID]; got != 1 {
+		t.Errorf("live control dispatched %d times, want exactly 1", got)
+	}
+	if got := dispatches[stale.ID]; got != wantStaleDispatches {
+		t.Errorf("stale control dispatched %d times, want %d (initial pass + %d skip-only re-polls + exit query)", got, wantStaleDispatches, workflowServeIdlePollAttempts)
+	}
+	if listCalls != wantStaleDispatches {
+		t.Errorf("queue scanned %d times, want %d", listCalls, wantStaleDispatches)
+	}
+	if !result.processedAny {
+		t.Errorf("processedAny = false, want true: processing the live control must still count as progress")
+	}
+	if _, statErr := os.Stat(dispatchWakeFile(cityDir)); statErr != nil {
+		t.Errorf("dispatch wake file missing after a processed pass: %v", statErr)
+	}
+}
+
+// TestDrainWorkflowServeWorkSkipBesidePendingStillReportsPending: pending wins
+// over skips when one pass holds both — the drain must still answer pendingAny
+// so the --follow loop keeps sweeping at its floor instead of backing off past
+// real waiting work.
+func TestDrainWorkflowServeWorkSkipBesidePendingStillReportsPending(t *testing.T) {
+	clearGCEnv(t)
+	stubWorkflowServeIdlePolling(t, 0)
+	stubWorkflowServeList(t, func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		return []hookBead{
+			{ID: "gc-skip", Metadata: hookBeadMetadata{"gc.kind": "workflow-finalize"}},
+			{ID: "gc-pend", Metadata: hookBeadMetadata{"gc.kind": "retry-eval"}},
+		}, nil
+	})
+	prevServe := controlDispatcherServe
+	controlDispatcherServe = func(_, _, beadID string, _, _ io.Writer, _ *executionEmitDeferral) error {
+		if beadID == "gc-pend" {
+			return dispatch.ErrControlPending
+		}
+		return errControlNotProcessed
+	}
+	t.Cleanup(func() { controlDispatcherServe = prevServe })
+
+	result, err := drainWorkflowServeWork(config.Agent{Name: "control-dispatcher"}, t.TempDir(), t.TempDir(), "bd ready", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("drainWorkflowServeWork: %v", err)
+	}
+	if result.processedAny {
+		t.Errorf("processedAny = true for a skip+pending pass, want false")
+	}
+	if !result.pendingAny {
+		t.Errorf("pendingAny = false for a skip+pending pass, want true: pending must win over skips")
 	}
 }
