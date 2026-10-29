@@ -569,15 +569,20 @@ const timelineGoldenBaseline = "O7 baseline: legacy at 72115d84b4 (TL)"
 // every FingerprintExtra key.
 const timelineFingerprintV7 = "fix #8079 (mc-vg1pe): FingerprintVersion v7 moves the stored hash prefix only (owner ruling 2026-10-18; also mc-lmixa)"
 
+// timelineUsageCloseMarker admits the usage close marker in legacy's outcomes:
+// each section moved by the usage_close_pending and usage_closed_at keys
+// session.ClosePatch now writes beside closed_at on a close.
+const timelineUsageCloseMarker = "fix #6672 (ga-q8t65w): a close stamps the usage close marker the usage lane settles"
+
 // timelineRulingRefs are the rulings a later entry may name: the owner's
 // O-rulings (O7 itself admits no change), CONTRACT §12.2 rows in the form
 // "§12.2 row N" (timelineSection122), and a legacy behavior change a
 // reviewed, merged PR made on purpose, named with its bead as "fix #NNNN
-// (mc-xxxx)" (timelineMergedFix).
+// (mc-xxxx)" or "fix #NNNN (ga-xxxx)" (timelineMergedFix).
 var (
 	timelineRulingRefs = []string{"O1", "O2", "O3", "O4", "O5", "O6", "O8", "O9", "O10"}
 	timelineSection122 = regexp.MustCompile(`§12\.2 row \d+\b`)
-	timelineMergedFix  = regexp.MustCompile(`\bfix #[1-9]\d* \(mc-[a-z0-9]{4,}\)`)
+	timelineMergedFix  = regexp.MustCompile(`\bfix #[1-9]\d* \((?:mc|ga)-[a-z0-9]{4,}\)`)
 )
 
 // timelineGoldenRulings admit each fixture's golden section. A change to
@@ -620,15 +625,20 @@ var timelineGoldenRulings = []goldenRuling{
 	{"a waiter sleeps", timelineFingerprintV7, "45ab826dd96e"},
 	{"an idle on-demand named session sleeps", timelineGoldenBaseline, "2752bd8f4cc4"},
 	{"an unwanted row inside, then past, the wake grace", timelineGoldenBaseline, "c4d3c5eb08a0"},
+	{"an unwanted row inside, then past, the wake grace", timelineUsageCloseMarker, "0455d530d7e3"},
 	{"an unwanted row of a suspended agent", timelineGoldenBaseline, "90405aa55ba7"},
+	{"an unwanted row of a suspended agent", timelineUsageCloseMarker, "eb5570b335ec"},
 	{"an unwanted row woken by a clock ten minutes ahead", timelineGoldenBaseline, "27e15af2efe9"},
+	{"an unwanted row woken by a clock ten minutes ahead", timelineUsageCloseMarker, "8f49d98f7dea"},
 	{"an unwanted row woken by a clock two minutes ahead", timelineGoldenBaseline, "7863a5af3820"},
+	{"an unwanted row woken by a clock two minutes ahead", timelineUsageCloseMarker, "1bc92778c391"},
 	{"attach, then detach, then idle", timelineGoldenBaseline, "a8a76fb85cf8"},
 	{"drift deferrals through time", timelineGoldenBaseline, "b7bf2d092994"},
 	{"drift deferrals through time", timelineFingerprintV7, "0a780490c9ee"},
 	{"idle, then sleep, then the next pass", timelineGoldenBaseline, "df4154567a92"},
 	{"idle, then sleep, then the next pass", timelineFingerprintV7, "2cf94220b36f"},
 	{"kill a seat holding a dep-blocked claim", timelineGoldenBaseline, "44f501ec9412"},
+	{"kill a seat holding a dep-blocked claim", timelineUsageCloseMarker, "f4d524d6e82d"},
 	{"kill a seat holding a ready claim", timelineGoldenBaseline, "a6a3283ef592"},
 	{"kill a seat holding a ready claim", timelineFingerprintV7, "56f71e57af9a"},
 	{"suspend, then wake", timelineGoldenBaseline, "14a789f280e4"},
@@ -1161,11 +1171,11 @@ func idleTimeline() []timelineFixture {
 	// pass or more later (drain-stop-lag).
 	retired := map[string]string{
 		"row:gc-1:*drain": "drain-stop-lag", "row:gc-1:*a7": "§12.2#51 a7-lag",
-		"row:gc-1:closed_at": "drain-stop-lag",
+		"row:gc-1:closed_at": "drain-stop-lag", "row:gc-1:usage_closed_at": "drain-stop-lag",
 	}
 	retiring := map[string]string{
 		"provider:SetMeta s-gc-1": "drain-env-clears", "provider:RemoveMeta s-gc-1": "drain-env-clears", "provider:Stop s-gc-1": "drain-stop-lag", "runtime:s-gc-1": "drain-stop-lag",
-		"row:gc-1:status": "drain-stop-lag", "row:gc-1:state": "drain-stop-lag", "row:gc-1:close_reason": "drain-stop-lag",
+		"row:gc-1:status": "drain-stop-lag", "row:gc-1:state": "drain-stop-lag", "row:gc-1:close_reason": "drain-stop-lag", "row:gc-1:usage_close_pending": "drain-stop-lag",
 		`event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}`: "drain-stop-lag",
 	}
 	// An unwanted row woken a minute ago: legacy keeps it for the 5m wake
