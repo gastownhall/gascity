@@ -1169,6 +1169,170 @@ func TestConvergenceStore_CloseOpenDescendants(t *testing.T) {
 	}
 }
 
+const routedConvergenceFormula = `formula = "routed-flow"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Work"
+assignee = "worker"
+metadata = { "gc.routed_to" = "pool/worker", "gc.execution_routed_to" = "pool/worker" }
+`
+
+// closeRecordingStore records the IDs passed to Close and CloseAll, in call
+// order, so a test can check which beads were closed before which.
+type closeRecordingStore struct {
+	*beads.MemStore
+	closed []string
+}
+
+func (s *closeRecordingStore) Close(id string) error {
+	s.closed = append(s.closed, id)
+	return s.MemStore.Close(id)
+}
+
+func (s *closeRecordingStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	s.closed = append(s.closed, ids...)
+	return s.MemStore.CloseAll(ids, metadata)
+}
+
+// startRoutedConvergenceLoop installs the routed-flow formula (one step
+// assigned to worker and routed to pool/worker) into the HQ scope over store,
+// creates a loop for it, and closes the active wisp completedIterations times
+// so the loop advances to iteration completedIterations+1. It returns the
+// loop ID and its active wisp ID.
+func startRoutedConvergenceLoop(t *testing.T, cr *CityRuntime, store beads.Store, gateMode string, completedIterations int) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "routed-flow.toml"), []byte(routedConvergenceFormula), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cr.convScopes[""] = cr.newConvergenceScope("", store, cr.cityPath, []string{dir}, false)
+
+	params := map[string]string{"formula": "routed-flow", "target": "worker", "max_iterations": "5"}
+	if gateMode == convergence.GateModeCondition {
+		cond := filepath.Join(dir, "never-converged.sh")
+		if err := os.WriteFile(cond, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		params["gate_mode"] = gateMode
+		params["gate_condition"] = cond
+	}
+	reply := sendAndReceive(t, cr, convergenceRequest{Command: "create", Params: params})
+	if reply.Error != "" {
+		t.Fatalf("create: %s", reply.Error)
+	}
+	var created convergence.CreateResult
+	if err := json.Unmarshal(reply.Result, &created); err != nil {
+		t.Fatal(err)
+	}
+	if err := hqScope(t, cr).adapter.populateIndex(); err != nil {
+		t.Fatal(err)
+	}
+	activeWisp := func() string {
+		t.Helper()
+		loop, err := store.Get(created.BeadID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return loop.Metadata[convergence.FieldActiveWisp]
+	}
+	for i := 0; i < completedIterations; i++ {
+		wispID := activeWisp()
+		steps, err := store.Children(wispID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, step := range steps {
+			if err := store.Close(step.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := store.Close(wispID); err != nil {
+			t.Fatal(err)
+		}
+		cr.convergenceTick(context.Background())
+	}
+	return created.BeadID, activeWisp()
+}
+
+func TestConvergenceStop_PreservesClosedWispDescendants(t *testing.T) {
+	const priorReason = "step b finished before the stop"
+
+	cr, mem := setupConvergenceRuntime(t)
+	store := &closeRecordingStore{MemStore: mem}
+	loopID, wispID := startRoutedConvergenceLoop(t, cr, store, convergence.GateModeManual, 0)
+	steps, err := store.Children(wispID)
+	if err != nil || len(steps) != 1 {
+		t.Fatalf("Children(%s) = %d steps, err %v; want 1", wispID, len(steps), err)
+	}
+	work := steps[0]
+	stepB, err := store.Create(beads.Bead{Title: "step b", Type: "task", ParentID: wispID})
+	if err != nil {
+		t.Fatalf("creating step b: %v", err)
+	}
+	stepB1, err := store.Create(beads.Bead{Title: "step b1", Type: "task", ParentID: stepB.ID, Assignee: "worker"})
+	if err != nil {
+		t.Fatalf("creating step b1: %v", err)
+	}
+	if err := store.SetMetadata(stepB.ID, "close_reason", priorReason); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(stepB.ID, beadmeta.OutcomeMetadataKey, beadmeta.OutcomePass); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(stepB.ID); err != nil {
+		t.Fatal(err)
+	}
+	store.closed = nil
+
+	if r := sendAndReceive(t, cr, convergenceRequest{Command: "stop", BeadID: loopID, User: "op"}); r.Error != "" {
+		t.Fatalf("stop: %s", r.Error)
+	}
+
+	for _, id := range []string{work.ID, stepB1.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get %s: %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Errorf("descendant %s status = %q, want closed", id, got.Status)
+		}
+		if got.Metadata["close_reason"] != convergence.CloseReasonManualSupersede {
+			t.Errorf("descendant %s close_reason = %q, want %q", id, got.Metadata["close_reason"], convergence.CloseReasonManualSupersede)
+		}
+		if got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped {
+			t.Errorf("descendant %s gc.outcome = %q, want %q", id, got.Metadata[beadmeta.OutcomeMetadataKey], beadmeta.OutcomeSkipped)
+		}
+	}
+	gotB, err := store.Get(stepB.ID)
+	if err != nil {
+		t.Fatalf("Get step b: %v", err)
+	}
+	if gotB.Metadata["close_reason"] != priorReason || gotB.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Errorf("already-closed step b close_reason=%q gc.outcome=%q, want %q and %q",
+			gotB.Metadata["close_reason"], gotB.Metadata[beadmeta.OutcomeMetadataKey], priorReason, beadmeta.OutcomePass)
+	}
+
+	pos := make(map[string]int, len(store.closed))
+	for i, id := range store.closed {
+		pos[id] = i
+	}
+	wispAt, ok := pos[wispID]
+	if !ok {
+		t.Fatalf("wisp %s never closed; close calls %v", wispID, store.closed)
+	}
+	for _, id := range []string{work.ID, stepB1.ID} {
+		at, ok := pos[id]
+		if !ok || at > wispAt {
+			t.Errorf("close calls %v: descendant %s not closed before wisp %s", store.closed, id, wispID)
+		}
+	}
+	if _, ok := pos[stepB.ID]; ok {
+		t.Errorf("close calls %v include already-closed step b %s", store.closed, stepB.ID)
+	}
+}
+
 func TestConvergenceStoreRejectsGraphV2Wisp(t *testing.T) {
 	dir := t.TempDir()
 	formulaText := `formula = "graph-flow"
