@@ -138,6 +138,21 @@ func (a *convergenceStoreAdapter) CloseBead(id, reason string) error {
 	return nil
 }
 
+// CloseOpenDescendants closes the open members of id's molecule subtree, but
+// not id itself, through the molecule subtree primitive: closed intermediates
+// are walked, controller-owned rows are skipped, and each closed bead is
+// stamped gc.outcome=skipped with reason as its close_reason.
+func (a *convergenceStoreAdapter) CloseOpenDescendants(id, reason string) error {
+	_, err := molecule.CloseSubtreeWithMetadataExcept(a.store, id, map[string]string{
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+		"close_reason":              reason,
+	}, func(b beads.Bead) bool { return b.ID == id })
+	if err != nil {
+		return fmt.Errorf("closing open descendants of %q: %w", id, err)
+	}
+	return nil
+}
+
 func (a *convergenceStoreAdapter) DeleteBead(id string) error {
 	if err := a.store.Delete(id); err != nil {
 		return err

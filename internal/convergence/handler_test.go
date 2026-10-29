@@ -137,6 +137,38 @@ func (s *fakeStore) CloseBead(id, reason string) error {
 	return nil
 }
 
+func (s *fakeStore) CloseOpenDescendants(id, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.beads[id]
+	if !ok {
+		return fmt.Errorf("bead %q: %w", id, beads.ErrNotFound)
+	}
+	return s.closeOpenDescendantsLocked(rec, reason)
+}
+
+// closeOpenDescendantsLocked walks rec's children post-order, so an open
+// grandchild under a closed child is still reached, and closes every
+// non-closed descendant.
+func (s *fakeStore) closeOpenDescendantsLocked(rec *fakeBeadRecord, reason string) error {
+	for _, childID := range rec.children {
+		child, ok := s.beads[childID]
+		if !ok {
+			continue
+		}
+		if err := s.closeOpenDescendantsLocked(child, reason); err != nil {
+			return err
+		}
+		if child.info.Status == "closed" {
+			continue
+		}
+		child.info.Status = "closed"
+		child.info.ClosedAt = time.Now()
+		child.metadata["close_reason"] = reason
+	}
+	return nil
+}
+
 func (s *fakeStore) DeleteBead(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

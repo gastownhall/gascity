@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
@@ -1065,6 +1066,106 @@ metadata = { "gc.routed_to" = "pool/worker", "gc.execution_routed_to" = "pool/wo
 	}
 	if activated.Metadata["gc.execution_routed_to"] != "pool/worker" {
 		t.Fatalf("activated child gc.execution_routed_to = %q, want pool/worker", activated.Metadata["gc.execution_routed_to"])
+	}
+}
+
+func TestConvergenceStore_CloseOpenDescendants(t *testing.T) {
+	const reason = "convergence test: wisp descendants closed by stop"
+	const priorReason = "step b finished before the stop"
+
+	store := beads.NewMemStore()
+	adapter := newConvergenceStoreAdapter(store, nil, false)
+	mustCreate := func(b beads.Bead) beads.Bead {
+		t.Helper()
+		created, err := store.Create(b)
+		if err != nil {
+			t.Fatalf("creating %q: %v", b.Title, err)
+		}
+		return created
+	}
+	wisp := mustCreate(beads.Bead{Title: "wisp", Type: "molecule"})
+	stepA := mustCreate(beads.Bead{Title: "step a", Type: "task", ParentID: wisp.ID, Assignee: "worker"})
+	stepB := mustCreate(beads.Bead{Title: "step b", Type: "task", ParentID: wisp.ID})
+	stepB1 := mustCreate(beads.Bead{Title: "step b1", Type: "task", ParentID: stepB.ID, Assignee: "worker"})
+	stepC := mustCreate(beads.Bead{Title: "step c", Type: "task", ParentID: wisp.ID, Assignee: "worker"})
+	if err := store.DepAdd(stepC.ID, stepA.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	if err := store.SetMetadata(stepB.ID, "close_reason", priorReason); err != nil {
+		t.Fatalf("SetMetadata close_reason: %v", err)
+	}
+	if err := store.SetMetadata(stepB.ID, beadmeta.OutcomeMetadataKey, beadmeta.OutcomePass); err != nil {
+		t.Fatalf("SetMetadata outcome: %v", err)
+	}
+	if err := store.Close(stepB.ID); err != nil {
+		t.Fatalf("closing step b: %v", err)
+	}
+
+	// The adapter's Children hides closed beads, so a walk over it could
+	// never reach step b1 under the closed step b.
+	visible, err := adapter.Children(wisp.ID)
+	if err != nil {
+		t.Fatalf("Children: %v", err)
+	}
+	for _, child := range visible {
+		if child.ID == stepB.ID {
+			t.Fatalf("adapter.Children(%s) lists closed step %s", wisp.ID, stepB.ID)
+		}
+	}
+
+	if err := adapter.CloseOpenDescendants(wisp.ID, reason); err != nil {
+		t.Fatalf("CloseOpenDescendants: %v", err)
+	}
+	for _, id := range []string{stepA.ID, stepB1.ID, stepC.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get %s: %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Errorf("descendant %s status = %q, want closed", id, got.Status)
+		}
+		if got.Metadata["close_reason"] != reason {
+			t.Errorf("descendant %s close_reason = %q, want %q", id, got.Metadata["close_reason"], reason)
+		}
+		if got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped {
+			t.Errorf("descendant %s gc.outcome = %q, want %q", id, got.Metadata[beadmeta.OutcomeMetadataKey], beadmeta.OutcomeSkipped)
+		}
+	}
+	gotB, err := store.Get(stepB.ID)
+	if err != nil {
+		t.Fatalf("Get step b: %v", err)
+	}
+	if gotB.Metadata["close_reason"] != priorReason || gotB.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Errorf("already-closed step b close_reason=%q gc.outcome=%q, want %q and %q",
+			gotB.Metadata["close_reason"], gotB.Metadata[beadmeta.OutcomeMetadataKey], priorReason, beadmeta.OutcomePass)
+	}
+	gotWisp, err := store.Get(wisp.ID)
+	if err != nil {
+		t.Fatalf("Get wisp: %v", err)
+	}
+	if gotWisp.Status == "closed" {
+		t.Errorf("wisp root %s was closed; CloseOpenDescendants must leave it open", wisp.ID)
+	}
+
+	before := make(map[string]int64)
+	for _, id := range []string{wisp.ID, stepA.ID, stepB.ID, stepB1.ID, stepC.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get %s: %v", id, err)
+		}
+		before[id] = got.Revision
+	}
+	if err := adapter.CloseOpenDescendants(wisp.ID, reason); err != nil {
+		t.Fatalf("second CloseOpenDescendants: %v", err)
+	}
+	for id, rev := range before {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get %s: %v", id, err)
+		}
+		if got.Revision != rev {
+			t.Errorf("second CloseOpenDescendants changed %s (revision %d -> %d)", id, rev, got.Revision)
+		}
 	}
 }
 
