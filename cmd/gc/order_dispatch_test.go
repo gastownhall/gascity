@@ -11142,3 +11142,21 @@ func TestShellExecRunnerDoesNotInheritSessionIdentity(t *testing.T) {
 		t.Fatalf("order exec inherited the dispatcher's session identity: got %q, want %q", got, want)
 	}
 }
+
+func TestShellExecRunnerScrubsSessionScopedEnv(t *testing.T) {
+	for _, key := range managedDoltSessionScopedEnvKeys {
+		t.Setenv(key, "leak-"+key)
+	}
+
+	out, err := shellExecRunner(context.Background(), `env`, t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("shellExecRunner() error = %v, output = %q", err, out)
+	}
+	for _, key := range managedDoltSessionScopedEnvKeys {
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.HasPrefix(line, key+"=") {
+				t.Fatalf("order exec inherited session-scoped %s: %q in order environment", key, line)
+			}
+		}
+	}
+}
