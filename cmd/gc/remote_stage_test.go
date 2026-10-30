@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,8 +77,11 @@ func TestRemoteStagePodInitThenInfraCommandRefusesAndCreatesNoBinding(t *testing
 	if err != nil || !ok {
 		t.Fatalf("the pod has no remote-stage record: ok=%v err=%v", ok, err)
 	}
-	if stage.ControllerPath != "/city" || stage.WorkStore == "" {
-		t.Errorf("remote-stage record = %+v, want the controller path and its work-store identity", stage)
+	if stage.ControllerPath != "/city" || stage.ControllerCity != "template" {
+		t.Errorf("remote-stage record = %+v, want the controller's path and its city name (not the pod directory's)", stage)
+	}
+	if raw, _ := os.ReadFile(remoteStagePath(pod)); strings.Contains(string(raw), src) {
+		t.Errorf("the record names the staging copy %s: %s", src, raw)
 	}
 
 	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(pod, &bytes.Buffer{})
@@ -162,5 +166,70 @@ func TestInitRemoteStageRequiresFromAndNoStart(t *testing.T) {
 		if !strings.Contains(stderr.String(), "--remote-stage") {
 			t.Errorf("gc init %v: stderr %q does not name --remote-stage", args, stderr.String())
 		}
+	}
+}
+
+// TestRemoteStageMarkCommandMarksAnSSHHostsCity: an existing city directory
+// (an SSH host's) is marked with gc storage remote-stage mark, after which its
+// infrastructure classes refuse; unmark removes the record.
+func TestRemoteStageMarkCommandMarksAnSSHHostsCity(t *testing.T) {
+	city := t.TempDir()
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(remoteStageSplitSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", city)
+	t.Chdir(city)
+	run := func(args ...string) (string, error) {
+		var stdout, stderr bytes.Buffer
+		cmd := newStorageCmd(&stdout, &stderr)
+		cmd.SetArgs(args)
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		err := cmd.Execute()
+		return stdout.String() + stderr.String(), err
+	}
+	if out, err := run("remote-stage", "mark"); err == nil {
+		t.Fatalf("mark without --controller succeeded: %s", out)
+	}
+	if out, err := run("remote-stage", "mark", "--controller", "/srv/city"); err != nil {
+		t.Fatalf("mark: %v %s", err, out)
+	}
+	stage, ok, err := readRemoteStage(city)
+	if err != nil || !ok || stage.ControllerPath != "/srv/city" || stage.ControllerCity != "template" {
+		t.Fatalf("record = %+v ok=%v err=%v", stage, ok, err)
+	}
+	cfg := infraSplitConfig(filepath.Join(city, ".gc", "store"))
+	if _, err := storageBootGate(city, cfg, "gc mail send", nil, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "remote stage of city template") {
+		t.Fatalf("a marked SSH host's infra command = %v, want the remote-stage refusal", err)
+	}
+	if out, err := run("remote-stage", "unmark"); err != nil {
+		t.Fatalf("unmark: %v %s", err, out)
+	}
+	if _, ok, _ := readRemoteStage(city); ok {
+		t.Fatal("unmark left the record")
+	}
+}
+
+// TestStorageVerbsRefuseOnARemoteStage (mutant M33): a writing storage verb
+// on a remote stage refuses before it takes any lock or opens any store.
+func TestStorageVerbsRefuseOnARemoteStage(t *testing.T) {
+	request, _ := exclusionCity(t)
+	staged, _ := exclusionCity(t)
+	if code, stderr := migrateFor(t, staged); code != 0 {
+		t.Fatalf("migrating the city recover-stranded runs on = %d %s", code, stderr)
+	}
+	for _, city := range []string{request.CityPath, staged.CityPath} {
+		if err := writeRemoteStage(city, remoteStage{ControllerCity: "ctl", ControllerPath: "/city"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, stderr := migrateFor(t, request)
+	if code == 0 || !strings.Contains(stderr, "remote stage of city ctl") {
+		t.Fatalf("migrate on a remote stage = %d %q", code, stderr)
+	}
+	assertNoConvergenceMarker(t, mustResolveInfraTarget(t, request.CityPath, request.Cfg), "a remote stage migrates nothing")
+	var out, errOut bytes.Buffer
+	if code := doStorageRecoverStranded(context.Background(), staged, strandedRecoveryOptions{}, &out, &errOut); code == 0 || !strings.Contains(errOut.String(), "remote stage of city ctl") {
+		t.Fatalf("recover-stranded on a remote stage = %d %q", code, errOut.String())
 	}
 }

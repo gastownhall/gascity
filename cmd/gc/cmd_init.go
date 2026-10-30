@@ -1893,7 +1893,7 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 	// A remote stage is recorded before anything else runs in it, so no
 	// later step (nor a one-shot gc racing this init) can reach storage
 	// genesis there.
-	if err := recordInitRemoteStage(srcDir, cityPath, cityName); err != nil {
+	if err := recordInitRemoteStage(srcDir, cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc init: recording the remote stage: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

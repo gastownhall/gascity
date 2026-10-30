@@ -212,6 +212,7 @@ operator arranges rather than something a program can observe.`,
 		newStorageRecoverCmd(repair, stdout, stderr),
 		newStorageRepairSequenceCmd(surface, stdout, stderr),
 		newStorageVouchBdCmd(surface, stdout, stderr),
+		newStorageRemoteStageCmd(stdout, stderr),
 	)
 	return cmd
 }

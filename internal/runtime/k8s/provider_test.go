@@ -2399,17 +2399,12 @@ func TestInitCityInPodSkipsDolt(t *testing.T) {
 		}
 	}
 
-	// The pod is a remote stage of the controller's city (S5-A): it must
-	// never run storage genesis, and its infra-class commands refuse loudly
-	// instead of serving a pod-local empty binding.
-	staged := false
-	for i, arg := range gcInitCmd {
-		if arg == "--remote-stage" && i+1 < len(gcInitCmd) && gcInitCmd[i+1] == "/city" {
-			staged = true
+	// The pod's own gc never gets --remote-stage: an older pod image does
+	// not know the flag, and the record is written directly instead.
+	for _, arg := range gcInitCmd {
+		if arg == "--remote-stage" {
+			t.Errorf("gc init in the pod must not carry --remote-stage (old images refuse unknown flags); got cmd=%v", gcInitCmd)
 		}
-	}
-	if !staged {
-		t.Errorf("gc init should run with --remote-stage /city; got cmd=%v", gcInitCmd)
 	}
 }
 
@@ -2454,5 +2449,51 @@ func TestInitCityInPodRemovesPartialCopyAfterUploadFailure(t *testing.T) {
 	last := ops.calls[len(ops.calls)-1]
 	if last.method != "execInPod" || strings.Join(last.cmd, " ") != "rm -rf /tmp/city-src" {
 		t.Fatalf("last pod command = %v, want partial-copy cleanup", last.cmd)
+	}
+}
+
+// remoteStageWrite finds the direct remote-stage write among the fake's calls.
+func remoteStageWrite(fake *fakeK8sOps) (fakeCall, bool) {
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) == 3 && c.cmd[0] == "sh" && strings.Contains(c.cmd[2], remoteStageRecordPath) {
+			return c, true
+		}
+	}
+	return fakeCall{}, false
+}
+
+// TestStartRecordsTheRemoteStageInBothModes (S5-A): staged and prebaked pods
+// alike get .gc/remote-stage.toml, written by a direct exec that works with
+// any pod gc version, naming the controller's city and path.
+func TestStartRecordsTheRemoteStageInBothModes(t *testing.T) {
+	for _, prebaked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("prebaked=%v", prebaked), func(t *testing.T) {
+			fake := newFakeK8sOps()
+			p := newProviderWithOps(fake)
+			p.prebaked = prebaked
+			p.cityName = "bright-lights"
+			p.postStartSettle = 0
+			fake.setExecResult("gc-test-agent", []string{"tmux", "has-session", "-t", "main"}, "", nil)
+			cfg := runtime.Config{
+				Command: "claude",
+				WorkDir: "/city",
+				Env:     map[string]string{"GC_AGENT": "rig/polecat", "GC_CITY": "/city"},
+			}
+			if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			call, ok := remoteStageWrite(fake)
+			if !ok {
+				t.Fatalf("no remote-stage write among %d calls", len(fake.calls))
+			}
+			for _, want := range []string{`controller_city = "bright-lights"`, `controller_path = "/city"`, "staged_at = "} {
+				if !strings.Contains(call.stdin, want) {
+					t.Errorf("record %q lacks %q", call.stdin, want)
+				}
+			}
+			if strings.Contains(call.stdin, "/tmp/city-src") {
+				t.Errorf("record names the staging copy: %q", call.stdin)
+			}
+		})
 	}
 }

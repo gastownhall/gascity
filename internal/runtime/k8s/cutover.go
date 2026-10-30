@@ -26,10 +26,17 @@ var (
 
 // NewSeamBacked constructs a k8s provider served through the seams.
 func NewSeamBacked() (runtime.Provider, error) {
+	return NewSeamBackedForCity("")
+}
+
+// NewSeamBackedForCity is NewSeamBacked for a named city: the name goes into
+// each pod's remote-stage record.
+func NewSeamBackedForCity(cityName string) (runtime.Provider, error) {
 	raw, err := NewProvider()
 	if err != nil {
 		return nil, err
 	}
+	raw.cityName = cityName
 	rt, tp := raw.Seams()
 	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}, nil
 }

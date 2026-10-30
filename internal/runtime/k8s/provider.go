@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +46,7 @@ type Provider struct {
 	memLimit           string
 	serviceAccount     string              // pod service account name (GC_K8S_SERVICE_ACCOUNT)
 	prebaked           bool                // skip staging + init container for prebaked images
+	cityName           string              // the controller's city name, for the pod's remote-stage record
 	nodeSelector       map[string]string   // GC_K8S_NODE_SELECTOR (JSON)
 	tolerations        []corev1.Toleration // GC_K8S_TOLERATIONS (JSON)
 	affinity           *corev1.Affinity    // GC_K8S_AFFINITY (JSON)
@@ -250,7 +252,19 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 				fmt.Fprintf(p.stderr, "gc: warning: initCityInPod for %s: %v\n", podName, err) //nolint:errcheck
 			}
 		}
+	}
 
+	// Record the pod as a remote stage of the controller's city, staged and
+	// prebaked alike (S5-A): on a split city its infrastructure-class
+	// commands then refuse instead of creating a pod-local empty binding. A
+	// direct write, so it works whatever gc the pod image carries.
+	if ctrlCity != "" {
+		if err := writeRemoteStageInPod(ctx, p.ops, podName, p.cityName, ctrlCity); err != nil {
+			fmt.Fprintf(p.stderr, "gc: warning: recording the remote stage in %s: %v\n", podName, err) //nolint:errcheck
+		}
+	}
+
+	if !p.prebaked {
 		// Signal entrypoint to proceed.
 		if _, err := p.ops.execInPod(ctx, podName, "agent",
 			[]string{"touch", "/workspace/.gc-workspace-ready"}, nil); err != nil {
@@ -927,16 +941,35 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity string) er
 		return err
 	}
 	// Run gc init --from with GC_DOLT=skip so gc init does not attempt to
-	// start a local Dolt server. --remote-stage records the pod as a stage of
-	// the controller's city: a split city's infrastructure classes refuse
-	// there instead of creating a pod-local empty binding (S5-A). Pod sessions consume the projected GC_DOLT_*
+	// start a local Dolt server. Pod sessions consume the projected GC_DOLT_*
 	// connection target through env; they do not rewrite canonical .beads files.
 	_, err := ops.execInPod(ctx, podName, "agent",
-		[]string{"env", "GC_DOLT=skip", "gc", "init", "--from", "/tmp/city-src", "/workspace", "--no-start", "--skip-provider-readiness", "--remote-stage", ctrlCity}, nil)
+		[]string{"env", "GC_DOLT=skip", "gc", "init", "--from", "/tmp/city-src", "/workspace", "--no-start", "--skip-provider-readiness"}, nil)
 	if err != nil {
 		return err
 	}
 	return nil
+}
+
+// remoteStageRecordPath is where a pod's remote-stage record lives: gc reads
+// <city>/.gc/remote-stage.toml, and the pod's city root is /workspace in
+// both staged and prebaked pods.
+const remoteStageRecordPath = podWorkspaceRoot + "/.gc/remote-stage.toml"
+
+// remoteStageRecord renders the record cmd/gc's remote_stage.go reads.
+func remoteStageRecord(cityName, ctrlCity string, now time.Time) string {
+	if strings.TrimSpace(cityName) == "" {
+		cityName = filepath.Base(ctrlCity)
+	}
+	return fmt.Sprintf("controller_city = %q\ncontroller_path = %q\nstaged_at = %q\n", cityName, ctrlCity, now.UTC().Format(time.RFC3339))
+}
+
+// writeRemoteStageInPod writes the pod's remote-stage record with a plain
+// shell write (temp file, then rename), independent of the pod's gc version.
+func writeRemoteStageInPod(ctx context.Context, ops k8sOps, podName, cityName, ctrlCity string) error {
+	script := "mkdir -p " + podWorkspaceRoot + "/.gc && cat > " + remoteStageRecordPath + ".tmp && mv -f " + remoteStageRecordPath + ".tmp " + remoteStageRecordPath
+	_, err := ops.execInPod(ctx, podName, "agent", []string{"sh", "-c", script}, strings.NewReader(remoteStageRecord(cityName, ctrlCity, time.Now())))
+	return err
 }
 
 // initBeadsInPod ensures the pod workspace has usable .beads state. It keeps

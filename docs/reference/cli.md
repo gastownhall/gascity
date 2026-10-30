@@ -5124,6 +5124,7 @@ gc storage
 | [gc storage migrate](#gc-storage-migrate) | Migrate this city's infrastructure classes onto their configured binding |
 | [gc storage preflight](#gc-storage-preflight) | Report what the migration would refuse, without migrating (read-only) |
 | [gc storage recover-stranded](#gc-storage-recover-stranded) | Copy stranded infrastructure beads from the work store into the converged binding |
+| [gc storage remote-stage](#gc-storage-remote-stage) | Mark or unmark this directory as a remote stage of a controller's city |
 | [gc storage repair-sequence](#gc-storage-repair-sequence) | Inspect or raise a SQLite bead store's id-sequence floor |
 | [gc storage status](#gc-storage-status) | Report this city's storage-class layout (read-only) |
 | [gc storage vouch-bd](#gc-storage-vouch-bd) | Walk a scope's bd and, if it matches a pinned gc bd inventory, vouch for it |
@@ -5276,6 +5277,44 @@ gc storage recover-stranded [flags]
 | `--move` | stringSlice |  | for a work-store row the manifest lists by id alone and the binding no longer holds: copy it into the binding as it is (required for a row that is not closed; a closed one is moved by default) (repeatable, comma-separated) |
 | `--record-carried` | stringSlice |  | for a work-store row the manifest lists by id alone and the binding no longer holds: record it as the bead the copy carried, so the clear deletes its work-store row (the backup keeps it); accepted for closed rows too (repeatable, comma-separated) |
 | `--replace-binding-row` | stringSlice |  | for a work-store row whose id the binding holds for a different bead: back up and remove the binding's row, then copy the work-store row in under the id (repeatable, comma-separated) |
+
+## gc storage remote-stage
+
+A remote stage is a copy of a city on a host that runs sessions for a
+controller elsewhere (a K8S pod, an SSH host). On a remote stage of a split
+city every infrastructure class refuses, naming the controller's city, and no
+local binding is ever created. K8S pods are marked automatically; mark an SSH
+host's city directory with this command.
+
+```
+gc storage remote-stage
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc storage remote-stage mark](#gc-storage-remote-stage-mark) | Record this directory as a remote stage of the controller's city |
+| [gc storage remote-stage unmark](#gc-storage-remote-stage-unmark) | Remove this directory's remote-stage record |
+
+## gc storage remote-stage mark
+
+Record this directory as a remote stage of the controller's city
+
+```
+gc storage remote-stage mark [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--controller` | string |  | the controller's city path |
+| `--name` | string |  | the controller's city name (default: this city's workspace name) |
+
+## gc storage remote-stage unmark
+
+Remove this directory's remote-stage record
+
+```
+gc storage remote-stage unmark
+```
 
 ## gc storage repair-sequence
 
