@@ -8979,3 +8979,35 @@ func TestCityRuntimeReloadKeepsWispGCCadence(t *testing.T) {
 		t.Fatal("wisp GC due 10m after its last run after a wisp_ttl reload; want the 1h cadence kept")
 	}
 }
+
+// A reload that changes wisp_gc_interval counts the new interval from the
+// last real pass, and the rebuilt tracker takes the new config's interval
+// and retention TTLs.
+func TestCityRuntimeReloadWispGCIntervalCountsFromLastRun(t *testing.T) {
+	for _, tc := range []struct {
+		interval      string
+		want          time.Duration
+		notDue, dueAt time.Duration
+	}{
+		{interval: "15m", want: 15 * time.Minute, notDue: 10 * time.Minute, dueAt: 15 * time.Minute},
+		{interval: "2h", want: 2 * time.Hour, notDue: time.Hour, dueAt: 2 * time.Hour},
+	} {
+		t.Run(tc.interval, func(t *testing.T) {
+			cr, tomlPath := newWispGCReloadRuntime(t, "wisp_gc_interval = \"1h\"\nwisp_ttl = \"24h\"\n")
+			lastRun := time.Now()
+			prev := stampWispGCRun(t, cr, lastRun)
+
+			reloadWispGCRuntime(t, cr, tomlPath, "wisp_gc_interval = \""+tc.interval+"\"\nwisp_ttl = \"48h\"\n\n[mail]\nretention_ttl = \"72h\"\n")
+			m := rebuiltWispGC(t, cr, prev)
+			if m.interval != tc.want || m.ttl != 48*time.Hour || m.mailRetentionTTL != 72*time.Hour {
+				t.Fatalf("rebuilt tracker interval/ttl/mail = %v/%v/%v, want %v/48h/72h", m.interval, m.ttl, m.mailRetentionTTL, tc.want)
+			}
+			if m.shouldRun(lastRun.Add(tc.notDue)) {
+				t.Fatalf("wisp GC due %v after its last run on a reloaded %v interval", tc.notDue, tc.want)
+			}
+			if !m.shouldRun(lastRun.Add(tc.dueAt)) {
+				t.Fatalf("wisp GC not due %v after its last run on a reloaded %v interval", tc.dueAt, tc.want)
+			}
+		})
+	}
+}

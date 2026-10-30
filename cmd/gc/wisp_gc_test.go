@@ -3069,3 +3069,47 @@ func TestWispGC_ReapResolvesRootsLive(t *testing.T) {
 		t.Fatalf("reaped %d; a step of a root the store has reopened was deleted on the cache's word", reaped)
 	}
 }
+
+// carryWispGCState keeps the outgoing tracker's run clock on the rebuilt one
+// while every config-derived field comes from the rebuild.
+func TestWispGC_ReloadKeepsLastRunAndCursor(t *testing.T) {
+	lastRun := time.Now()
+	for _, tc := range []struct {
+		name          string
+		interval      time.Duration
+		notDue, dueAt time.Duration
+	}{
+		{name: "same interval", interval: time.Hour, notDue: 10 * time.Minute, dueAt: time.Hour},
+		{name: "shortened interval", interval: 15 * time.Minute, notDue: 10 * time.Minute, dueAt: 15 * time.Minute},
+		{name: "lengthened interval", interval: 2 * time.Hour, notDue: time.Hour, dueAt: 2 * time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prev := newWispGC(time.Hour, 24*time.Hour, 0).(*memoryWispGC)
+			prev.lastRun = lastRun
+			prev.cityName = "old-city"
+			next := newWispGC(tc.interval, 48*time.Hour, 72*time.Hour).(*memoryWispGC)
+			next.cityName = "test-city"
+
+			got, ok := carryWispGCState(prev, next).(*memoryWispGC)
+			if !ok || got != next {
+				t.Fatalf("carryWispGCState returned %v, want the rebuilt tracker", got)
+			}
+			if got.interval != tc.interval || got.ttl != 48*time.Hour || got.mailRetentionTTL != 72*time.Hour || got.cityName != "test-city" {
+				t.Fatalf("config fields = %v/%v/%v/%q, want the rebuilt tracker's %v/48h/72h/test-city",
+					got.interval, got.ttl, got.mailRetentionTTL, got.cityName, tc.interval)
+			}
+			if got.shouldRun(lastRun.Add(tc.notDue)) {
+				t.Fatalf("due %v after the carried last run on a %v interval", tc.notDue, tc.interval)
+			}
+			if !got.shouldRun(lastRun.Add(tc.dueAt)) {
+				t.Fatalf("not due %v after the carried last run on a %v interval", tc.dueAt, tc.interval)
+			}
+		})
+	}
+	t.Run("zero last run stays due", func(t *testing.T) {
+		got := carryWispGCState(newWispGC(time.Hour, 24*time.Hour, 0), newWispGC(time.Hour, 24*time.Hour, 0))
+		if !got.shouldRun(lastRun) {
+			t.Fatal("a tracker that never ran is not due after a carry; want the first-tick run kept")
+		}
+	})
+}
