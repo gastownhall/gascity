@@ -5,9 +5,11 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -21,15 +23,17 @@ import (
 // a direct time.After/time.Now().Add call.
 var rawHangDeadlinePattern = regexp.MustCompile(`time\.After\([0-9]|time\.Now\(\)\.Add\([0-9]|waitForNamedMode\([^)]*,\s*[0-9]`)
 
-// controllerTestExcludedHangDeadlineLines are the raw-literal sites in
-// controller_test.go that are correct as they stand, per
-// TESTING.md:1364-1371, and must NOT be migrated (ga-57b2dk). Line numbers
-// are 1-indexed.
-var controllerTestExcludedHangDeadlineLines = map[int]string{
-	421:  "input the test feeds a fake server to define the scenario, not a hang detector",
-	877:  "negative-assertion window (asserts no watcher poke arrives)",
-	927:  "negative-assertion window (asserts no watcher poke arrives, loop body)",
-	1456: "bounded best-effort probe with no assertion on either branch",
+// controllerTestExcludedHangDeadlineFuncs names the controller_test.go
+// functions whose one raw-literal site is correct as it stands, per
+// TESTING.md "Floors, ceilings, and inputs", and must NOT be migrated
+// (ga-57b2dk). Exclusions are keyed by enclosing function, not line number,
+// so an edit elsewhere in the file (such as an added import) cannot
+// invalidate them.
+var controllerTestExcludedHangDeadlineFuncs = map[string]string{
+	"TestSendControllerCommandWithTimeoutsTimesOutOnRead":           "input the test feeds a fake server to define the scenario, not a hang detector",
+	"TestWatchConfigDirs_CityRootDoesNotWatchUnrelatedNestedSubdir": "negative-assertion window (asserts no watcher poke arrives)",
+	"TestWatchConfigDirs_CityRootIgnoresRuntimeTraceWrites":         "negative-assertion window (asserts no watcher poke arrives, loop body)",
+	"TestResetSessionCircuitBreakerStateClearsRacingOpenPersist":    "bounded best-effort probe with no assertion on either branch",
 }
 
 func controllerTestPath(t *testing.T) string {
@@ -47,25 +51,73 @@ func controllerTestLines(t *testing.T) (path string, data []byte, lines []string
 	return path, data, strings.Split(string(data), "\n")
 }
 
-// rawHangDeadlineOffenders returns formatted offender strings for every line
-// in [from, to] that matches rawHangDeadlinePattern and is not one of
-// controllerTestExcludedHangDeadlineLines.
-func rawHangDeadlineOffenders(path string, lines []string, from, to int) []string {
-	var offenders []string
-	if from < 1 {
-		from = 1
+func parseControllerTest(t *testing.T, path string, data []byte) (*token.FileSet, *ast.File) {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, data, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
 	}
-	for i := from; i <= to && i <= len(lines); i++ {
-		line := lines[i-1]
-		if !rawHangDeadlinePattern.MatchString(line) {
-			continue
+	return fset, file
+}
+
+// rawHangDeadlineLines returns the 1-indexed lines in [from, to] that match
+// rawHangDeadlinePattern.
+func rawHangDeadlineLines(lines []string, from, to int) []int {
+	var matches []int
+	for i := max(from, 1); i <= to && i <= len(lines); i++ {
+		if rawHangDeadlinePattern.MatchString(lines[i-1]) {
+			matches = append(matches, i)
 		}
-		if _, excluded := controllerTestExcludedHangDeadlineLines[i]; excluded {
-			continue
+	}
+	return matches
+}
+
+// rawHangDeadlineOffenders returns formatted offender strings for every line
+// in [from, to] that matches rawHangDeadlinePattern and is not excluded.
+func rawHangDeadlineOffenders(path string, lines []string, from, to int, excluded map[int]bool) []string {
+	var offenders []string
+	for _, i := range rawHangDeadlineLines(lines, from, to) {
+		if !excluded[i] {
+			offenders = append(offenders, formatOffender(path, i, lines[i-1]))
 		}
-		offenders = append(offenders, formatOffender(path, i, line))
 	}
 	return offenders
+}
+
+// excludedHangDeadlineLines resolves each function named in excludedFuncs to
+// the line of its one raw-literal site, wherever edits have moved it. It also
+// returns, sorted, a problem for every exclusion that no longer pins exactly
+// one site: its function is gone, or holds no site (migrated) or several (one
+// was added beside it). Such an exclusion excludes nothing.
+func excludedHangDeadlineLines(fset *token.FileSet, file *ast.File, lines []string, excludedFuncs map[string]string) (excluded map[int]bool, problems []string) {
+	excluded = make(map[int]bool, len(excludedFuncs))
+	found := make(map[string]bool, len(excludedFuncs))
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		reason, listed := excludedFuncs[fn.Name.Name]
+		if !listed {
+			continue
+		}
+		found[fn.Name.Name] = true
+		sites := rawHangDeadlineLines(lines, fset.Position(fn.Pos()).Line, fset.Position(fn.End()).Line)
+		if len(sites) != 1 {
+			problems = append(problems, fmt.Sprintf("%s (%s): want exactly 1 raw hang deadline, found %d at lines %v",
+				fn.Name.Name, reason, len(sites), sites))
+			continue
+		}
+		excluded[sites[0]] = true
+	}
+	for name, reason := range excludedFuncs {
+		if !found[name] {
+			problems = append(problems, fmt.Sprintf("%s (%s): function not found", name, reason))
+		}
+	}
+	slices.Sort(problems)
+	return excluded, problems
 }
 
 // TestControllerTestHasNoUnmigratedRawHangDeadlines pins ga-57b2dk's primary
@@ -74,24 +126,24 @@ func rawHangDeadlineOffenders(path string, lines []string, from, to int) []strin
 // awaitClose/awaitCond, exactly as #4638 already did for the rest of the
 // package.
 func TestControllerTestHasNoUnmigratedRawHangDeadlines(t *testing.T) {
-	path, _, lines := controllerTestLines(t)
+	path, data, lines := controllerTestLines(t)
+	fset, file := parseControllerTest(t, path, data)
 
-	offenders := rawHangDeadlineOffenders(path, lines, 1, len(lines))
+	// Guard against the exclusion list silently going stale (an excluded site
+	// was migrated, or its function renamed, without updating this map) or
+	// loose (a second raw deadline was added beside an excluded one) by
+	// requiring every documented exclusion to pin exactly one site.
+	excluded, problems := excludedHangDeadlineLines(fset, file, lines, controllerTestExcludedHangDeadlineFuncs)
+	for _, problem := range problems {
+		t.Errorf("%s: hang-deadline exclusion %s; update controllerTestExcludedHangDeadlineFuncs if the site "+
+			"was migrated or its function renamed, or migrate any raw deadline added beside it", path, problem)
+	}
+
+	offenders := rawHangDeadlineOffenders(path, lines, 1, len(lines), excluded)
 	if len(offenders) > 0 {
 		t.Fatalf("controller_test.go has %d raw-literal hang deadline(s); replace with awaitClose "+
 			"(channel drain) or awaitCond (polled condition) per ga-57b2dk:\n  %s",
 			len(offenders), strings.Join(offenders, "\n  "))
-	}
-
-	// Guard against the exclusion list silently going stale (e.g. the code
-	// around an excluded line moved or was migrated without updating this
-	// map) by requiring every documented exclusion to still match.
-	for lineNo, reason := range controllerTestExcludedHangDeadlineLines {
-		if lineNo > len(lines) || !rawHangDeadlinePattern.MatchString(lines[lineNo-1]) {
-			t.Errorf("expected excluded raw hang deadline at %s:%d (%s) but it no longer matches; "+
-				"update controllerTestExcludedHangDeadlineLines if the code moved or was migrated",
-				path, lineNo, reason)
-		}
 	}
 }
 
@@ -101,12 +153,11 @@ func TestControllerTestHasNoUnmigratedRawHangDeadlines(t *testing.T) {
 // the exact same-function inconsistency #4638 left behind in four functions.
 func TestControllerTestNoFunctionMixesHangBudgetWithRawDeadline(t *testing.T) {
 	path, data, lines := controllerTestLines(t)
-
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, path, data, 0)
-	if err != nil {
-		t.Fatalf("parse %s: %v", path, err)
-	}
+	fset, file := parseControllerTest(t, path, data)
+	// Stale or loose exclusions are reported by
+	// TestControllerTestHasNoUnmigratedRawHangDeadlines; here an exclusion
+	// with a problem simply excludes nothing.
+	excluded, _ := excludedHangDeadlineLines(fset, file, lines, controllerTestExcludedHangDeadlineFuncs)
 
 	var violations []string
 	for _, decl := range file.Decls {
@@ -127,7 +178,7 @@ func TestControllerTestNoFunctionMixesHangBudgetWithRawDeadline(t *testing.T) {
 		if !usesHangBudget {
 			continue
 		}
-		if offenders := rawHangDeadlineOffenders(path, lines, start, end); len(offenders) > 0 {
+		if offenders := rawHangDeadlineOffenders(path, lines, start, end, excluded); len(offenders) > 0 {
 			violations = append(violations, fmt.Sprintf("%s: %s", fn.Name.Name, strings.Join(offenders, "; ")))
 		}
 	}
@@ -135,5 +186,60 @@ func TestControllerTestNoFunctionMixesHangBudgetWithRawDeadline(t *testing.T) {
 	if len(violations) > 0 {
 		t.Fatalf("functions mix hangBudget with a raw-literal hang deadline (ga-57b2dk):\n  %s",
 			strings.Join(violations, "\n  "))
+	}
+}
+
+// TestExcludedHangDeadlineLinesFollowFunctionNotLineNumber pins the
+// exclusion resolver's contract on a synthetic file: an exclusion follows its
+// function when an edit above it shifts every line, and an exclusion that no
+// longer pins exactly one site is reported and excludes nothing.
+func TestExcludedHangDeadlineLinesFollowFunctionNotLineNumber(t *testing.T) {
+	const body = `
+func TestKept() {
+	<-time.After(200 * time.Millisecond)
+}
+
+func TestMigrated() {}
+
+func TestLoose() {
+	<-time.After(250 * time.Millisecond)
+	<-time.After(250 * time.Millisecond)
+}
+`
+	excludedFuncs := map[string]string{
+		"TestKept":     "still holds its one raw site",
+		"TestMigrated": "its site was migrated",
+		"TestLoose":    "a second site was added beside it",
+		"TestRenamed":  "the function was renamed away",
+	}
+	for _, tc := range []struct{ name, header string }{
+		{"one import", "package p\n\nimport \"time\"\n"},
+		{"added import shifts every line", "package p\n\nimport (\n\t\"os\"\n\t\"time\"\n)\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := tc.header + body
+			lines := strings.Split(src, "\n")
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, "synthetic_test.go", src, 0)
+			if err != nil {
+				t.Fatalf("parse synthetic source: %v", err)
+			}
+
+			excluded, problems := excludedHangDeadlineLines(fset, file, lines, excludedFuncs)
+
+			keptLine := slices.Index(lines, "\t<-time.After(200 * time.Millisecond)") + 1
+			if want := map[int]bool{keptLine: true}; !maps.Equal(excluded, want) {
+				t.Errorf("excluded lines = %v, want only TestKept's site %v", excluded, want)
+			}
+			reported := strings.Join(problems, "\n")
+			for _, fn := range []string{"TestMigrated", "TestLoose", "TestRenamed"} {
+				if !strings.Contains(reported, fn) {
+					t.Errorf("problems %q do not report %s", problems, fn)
+				}
+			}
+			if len(problems) != 3 {
+				t.Errorf("problems = %q, want exactly 3 (TestKept resolves cleanly)", problems)
+			}
+		})
 	}
 }
