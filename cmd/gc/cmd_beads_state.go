@@ -112,7 +112,7 @@ func cmdBeadsState(rigFlag, stateFilter string, showIDs, jsonOut bool, stdout, s
 	// Every store the city reads, the same federation "gc beads list" uses:
 	// routed work usually lives in a rig store, so reading the city store alone
 	// would leave most routed-* verdicts unreachable.
-	views, code := openAllConvoyStoresAt(cityPath, stderr, "gc beads state")
+	views, code := openAllConvoyStoresAt(cityPath, stderr, "gc beads state") // residency:allow — the read-only fan-out gc beads list uses; decides no binding, namespace or leg order
 	if views == nil {
 		return code
 	}

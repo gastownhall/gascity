@@ -256,6 +256,7 @@ go_library(
         "schemas/worktree/verify/result.schema.json",
         "schemas/beads/city/migrate-proxied/result.schema.json",
         "schemas/agent/is-foreign/result.schema.json",
+        "schemas/beads/state/result.schema.json",
     ],
     importpath = "github.com/gastownhall/gascity",
     visibility = ["//visibility:public"],
