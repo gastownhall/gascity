@@ -146,6 +146,11 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want: "claude --session-id " + rotatedKey,
 		},
 		{
+			name:       "AC-2 present transcript resumes",
+			transcript: true,
+			want:       "claude --resume " + rotatedKey,
+		},
+		{
 			name: "creating with a stale creation_complete_at starts with the session id",
 			opts: rotatedKeyOptions{meta: map[string]string{"state": string(sessionpkg.StateCreating)}},
 			want: "claude --session-id " + rotatedKey,
