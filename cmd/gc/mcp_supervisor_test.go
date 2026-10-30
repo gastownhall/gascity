@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 )
 
 func writeMCPSource(t *testing.T, path string, body string) {
@@ -121,6 +122,56 @@ command = "uvx"
 	}
 	if !strings.Contains(err.Error(), "MCP target conflict") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	// Neither agent is implicit, so the conflict is not the agent-local
+	// shape and the error names no cause.
+	assertNoAgentLocalConflictCause(t, cityPath, cfg, err, filepath.Dir(agentLocal))
+}
+
+// A city template that expands {{.AgentName}} gives two explicit city-root
+// agents different payloads; with no agent-local directory, both gc start and
+// mcp-shared-target report the conflict without naming an mcp/ directory.
+func TestBuildStage1MCPTargetsTemplateConflictNamesNoAgentLocalCause(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMCPSource(t, filepath.Join(cityPath, "mcp", "notes.template.toml"), `
+name = "notes"
+command = "uvx"
+args = ["{{.AgentName}}"]
+`)
+
+	cfg := &config.City{
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+		Session:    config.SessionConfig{Provider: "tmux"},
+		Providers:  builtinProviderAliasesForTest("claude"),
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Provider: "claude"},
+			{Name: "deputy", Scope: "city", Provider: "claude"},
+		},
+	}
+
+	_, err := buildStage1MCPTargets(cityPath, cfg, stubLookPath, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "MCP target conflict") {
+		t.Fatalf("buildStage1MCPTargets err = %v, want MCP target conflict", err)
+	}
+	assertNoAgentLocalConflictCause(t, cityPath, cfg, err, filepath.Join(cityPath, "mcp"))
+}
+
+// assertNoAgentLocalConflictCause checks that a stage-1 conflict error and
+// the mcp-shared-target details report the conflict without an agent-local
+// cause sentence or the named mcp/ directory.
+func assertNoAgentLocalConflictCause(t *testing.T, cityPath string, cfg *config.City, startErr error, mcpDir string) {
+	t.Helper()
+	if strings.Contains(startErr.Error(), mcpDir) || strings.Contains(startErr.Error(), "agent-local") {
+		t.Fatalf("buildStage1MCPTargets err = %v, want no agent-local cause", startErr)
+	}
+	result := newMCPSharedTargetDoctorCheck(cityPath, cfg, stubLookPath).Run(&doctor.CheckContext{CityPath: cityPath})
+	if result.Status != doctor.StatusError {
+		t.Fatalf("mcp-shared-target = %v (%s), want error: gc start refuses this city (%v)", result.Status, result.Message, startErr)
+	}
+	for _, detail := range result.Details {
+		if strings.Contains(detail, mcpDir) || strings.Contains(detail, "agent-local") {
+			t.Fatalf("mcp-shared-target details = %#v, want no agent-local cause", result.Details)
+		}
 	}
 }
 
