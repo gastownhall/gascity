@@ -614,10 +614,14 @@ func TestConvergence_StartupReconcileMarksFailedScopeComplete(t *testing.T) {
 
 func TestConvergence_StartupReconcileRetriesFailedScopeOnTick(t *testing.T) {
 	cr, store := setupConvergenceRuntime(t)
-	hqScope(t, cr).store = convergenceListErrorStore{
+	failing := convergenceListErrorStore{
 		Store: store,
 		err:   errors.New("injected list failure"),
 	}
+	// The startup list goes through the scope's adapter (the S4 scope filter
+	// and relic leg live there), so the failure is injected under it.
+	hqScope(t, cr).store = failing
+	hqScope(t, cr).adapter.store = failing
 
 	b, err := store.Create(beads.Bead{Title: "active", Type: "convergence", Status: "in_progress"})
 	if err != nil {
@@ -646,6 +650,7 @@ func TestConvergence_StartupReconcileRetriesFailedScopeOnTick(t *testing.T) {
 	}
 
 	scope.store = store
+	scope.adapter.store = store
 	cr.convergenceTick(context.Background())
 
 	if scope.needsStartupReconcile {

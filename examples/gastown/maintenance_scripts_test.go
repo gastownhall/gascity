@@ -7073,6 +7073,8 @@ func writeMaintenanceBdStub(t *testing.T, path string) {
 //     (written by writeFreshBackupState) or BD_BACKUP_STATUS_JSON verbatim;
 //     BD_BACKUP_STATUS_FAIL makes it fail with that text.
 //   - close/update/delete succeed unless BD_CLOSE_FAIL is set.
+//   - `<verb> --help` prints a help line followed by BD_VERB_HELP_EXTRA.
+//   - `config get --json <key>` reports BD_TYPES_RETAINED as the value.
 //
 // maintenanceBdPurgeAndBackupVerbs answers `bd prune`, `bd purge` and `bd backup status`
 // the way maintenanceBdStubBody does, for test-specific bd doubles that
@@ -7107,7 +7109,14 @@ const maintenanceBdStubBody = `#!/bin/sh
 if [ -n "${BD_CALL_LOG:-}" ]; then
   printf 'pwd=%s beads=%s scope=%s args=%s\n' "$PWD" "${BEADS_DIR:-}" "${GC_FAKE_SCOPE:-}" "$*" >> "$BD_CALL_LOG"
 fi
+if [ "${2:-}" = "--help" ]; then
+  printf 'bd %s help\n%s\n' "$1" "${BD_VERB_HELP_EXTRA:-}"
+  exit 0
+fi
 case "$1" in
+  config)
+    printf '{"key":"%s","value":%s}\n' "${4:-}" "$(printf '%s' "${BD_TYPES_RETAINED:-}" | jq -Rs .)"
+    ;;
   prune)
     printf '{"pruned_count":%s}\n' "${BD_PRUNE_COUNT:-0}"
     ;;

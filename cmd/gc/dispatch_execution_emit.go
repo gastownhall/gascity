@@ -52,10 +52,11 @@ type executionEmitDeferral struct {
 // deferredExecutionEmit is one workflow root waiting for its projection.
 type deferredExecutionEmit struct {
 	rootID string
-	// federatedGraphLeg records that the root's controls were read from the
-	// city graph binding rather than the scope's own graph store (see
-	// controlBeadLedger), so the flush projects it against the same ledger.
-	federatedGraphLeg bool
+	// relicGraphLeg records that the root's controls were read from the
+	// scope's own store (the S4 relic leg) rather than the placement store
+	// (see controlBeadLedger), so the flush projects it against the same
+	// ledger.
+	relicGraphLeg bool
 }
 
 func newExecutionEmitDeferral(cityPath, storePath string, stderr io.Writer) *executionEmitDeferral {
@@ -64,13 +65,13 @@ func newExecutionEmitDeferral(cityPath, storePath string, stderr io.Writer) *exe
 
 // add records rootID for projection at the next flush. A root already pending
 // keeps its place.
-func (d *executionEmitDeferral) add(rootID string, federatedGraphLeg bool) {
+func (d *executionEmitDeferral) add(rootID string, relicGraphLeg bool) {
 	for _, p := range d.pending {
 		if p.rootID == rootID {
 			return
 		}
 	}
-	d.pending = append(d.pending, deferredExecutionEmit{rootID: rootID, federatedGraphLeg: federatedGraphLeg})
+	d.pending = append(d.pending, deferredExecutionEmit{rootID: rootID, relicGraphLeg: relicGraphLeg})
 }
 
 // forget drops rootID from the pending set because a synchronous projection
@@ -149,10 +150,10 @@ func (d *executionEmitDeferral) projectRoots(roots []deferredExecutionEmit) erro
 	targets := make([]executionEmitTarget, 0, len(roots))
 	for _, p := range roots {
 		graph := primary
-		if p.federatedGraphLeg {
-			if extra, ok := controlGraphExtraLeg(d.cityPath, d.storePath); ok {
-				graph = extra
-			}
+		if p.relicGraphLeg {
+			// The root's controls were read from the scope's own store (the
+			// relic leg), so its tree is there too.
+			graph = store
 		}
 		targets = append(targets, executionEmitTarget{rootID: p.rootID, graphStore: graph})
 	}

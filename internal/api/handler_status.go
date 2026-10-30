@@ -757,13 +757,15 @@ type statusWorkResult struct {
 // when its cache is clean (#1896). Stores are queried concurrently; results
 // aggregate in deterministic city/rig order.
 //
-// NOT identical to GET /beads/ready on a split city: that handler grew a
-// relocated-graph-store leg (huma_handlers_beads.go) and this one has none, so
-// on a city with [beads.classes.graph] relocated the status ready count omits
-// graph-class ready work while /beads/ready includes it. Left divergent
-// deliberately rather than fixed here: this read is cache-only and error-lenient
-// by design (see cacheColdRigs below), which is the opposite of the graph leg's
-// fail-loud contract, so wiring one in is its own slice, not a rider.
+// On a split city the graph binding is one more READY leg, as it is for GET
+// /beads/ready (huma_handlers_beads.go): without it the status Ready count
+// omitted every graph-class ready step that /beads/ready served (read-audit
+// R12). It is read the way every other leg here is — cache-only through the
+// binding's CachingStore, error-lenient (a failure is a partial error, not a
+// failed status) — and its stored open/in-progress rows are not added, because
+// a city that relocates nothing never counted those either: its counts come
+// from the work stores. A city whose graph class is not relocated has no such
+// leg, so its counts are unchanged.
 //
 // Rigs in cacheColdRigs (suspended rigs) are not asked at all. Their store
 // runs no cache, so every read would go to bd, and a bd read restarts a
@@ -804,6 +806,10 @@ func (s *Server) statusWorkCounts(ctx context.Context, cacheColdRigs map[string]
 			includeStored: true,
 			includeReady:  rigName != cityName,
 		})
+	}
+
+	if graph := s.state.GraphBeadStore().Store; graph != nil && !slices.ContainsFunc(queries, func(q workQuery) bool { return q.store == graph }) {
+		queries = append(queries, workQuery{label: "graph", store: graph, includeReady: true})
 	}
 
 	results := make([]statusWorkResult, len(queries))

@@ -170,6 +170,17 @@ var bootstrapPolicy = Ledger{
 			MigrationTarget: "P0.4c-tmux",
 			Expires:         "2026-10-31",
 		},
+		{
+			Scope:           ScopeBuildTargets,
+			Resource:        ResourceTestTarget,
+			ReportedCalls:   47,
+			ReportedFiles:   4,
+			OwnerBead:       "ga-4ag4p2.1",
+			Invariant:       "declared go-test invocation sites in tracked build-orchestration files (Makefile, CI workflow YAML) cannot grow without an explicit, reviewed baseline update",
+			ResourceOwner:   "each new test target's author declares it via a baseline bump with real ownership fields — same contract as every other resource dimension (ga-hpcma0)",
+			MigrationTarget: "n/a — preventive dimension, not paying down inherited debt",
+			Expires:         "2026-10-31",
+		},
 	},
 	Medium: []MediumOwner{
 		{

@@ -2536,10 +2536,11 @@ func (t *Tmux) writeHiddenAttached(ctx context.Context, client *hiddenAttachClie
 }
 
 // sendHiddenAttachedText types text, then Enter, through target's hidden
-// attach client, and reports whether target has one. Only Gemini sessions get
-// a hidden attach client (requiresHiddenAttachedInterrupt), so this path takes
-// no look for a permission prompt between the text and Enter; it must gain
-// NudgeSession's (#2892) before it serves a Claude session. Like
+// attach client, and reports whether target has one. Like NudgeSession (#2892)
+// it never types into a pending permission prompt or an open question dialog:
+// it looks at the pane before the text and again before Enter, and returns an
+// error wrapping runtime.ErrPendingInteraction (or errPromptLookFailed when the
+// pane cannot be read) with nothing further written. Like
 // sendHiddenAttachedKeys it reaches the client's active pane, not necessarily
 // the marked agent pane; inside a fenced operation each write first checks
 // that the active pane is the verified agent pane (paneGuard.checkLive).
@@ -2550,6 +2551,10 @@ func (t *Tmux) sendHiddenAttachedText(ctx context.Context, target, text string) 
 	}
 	if text == "" {
 		return true, nil
+	}
+	look := t.pendingPromptRecheck(target)
+	if err := look(target); err != nil {
+		return true, err
 	}
 	// A hidden attach client injects gc's own keystrokes just like NudgeSession,
 	// so record a poke here too (the residual NudgeNow gap): capture the
@@ -2563,6 +2568,9 @@ func (t *Tmux) sendHiddenAttachedText(ctx context.Context, target, text string) 
 	}
 	if t.cfg.DebounceMs > 0 {
 		time.Sleep(time.Duration(t.cfg.DebounceMs) * time.Millisecond)
+	}
+	if err := look(target); err != nil {
+		return true, err
 	}
 	if err := t.writeHiddenAttached(ctx, client, []byte{'\r'}, false); err != nil {
 		return true, err
@@ -5391,6 +5399,13 @@ func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
 	// option ("❯ 1. Yes") matches the ready-prompt prefix: text delivered now
 	// would answer the prompt instead of reaching the composer (#2892).
 	if parseApprovalPrompt(strings.Join(lines, "\n")) != nil {
+		return false
+	}
+
+	// An open AskUserQuestion dialog is no idle boundary either: its focused
+	// row ("❯ 1. …") matches the ready prefix, and the nudge's Enter would
+	// select that option.
+	if parseAskUserQuestion(lines) != nil {
 		return false
 	}
 
