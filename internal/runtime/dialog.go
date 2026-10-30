@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 var (
@@ -2019,22 +2021,41 @@ const (
 	creditBalanceStopIsPhrase = "credit balance is too low"
 	// creditBalanceStopPhrase is the TUI rendering; it drops the "is".
 	creditBalanceStopPhrase = "credit balance too low"
+	// creditBalanceAPISentence is the API's credit sentence with all
+	// whitespace removed, so a match survives the word wraps and mid-word
+	// hard wraps of a narrow pane.
+	creditBalanceAPISentence = "creditbalanceistoolowtoaccess"
+	// apiErrorClientPrefix anchors the API sentence to Claude Code's
+	// "API Error: 4xx" label, the form older builds and non-main paths
+	// render, so the sentence in ordinary output does not count.
+	apiErrorClientPrefix = "api error: 4"
+	// apiErrorContinuationLines bounds how many lines after an API error
+	// line still belong to that error's wrapped body.
+	apiErrorContinuationLines = 5
 )
 
 // containsCreditBalanceStop reports whether lower, already-lowercased pane or
-// error text, shows Claude Code's exhausted-credit stop as an error line: the
-// stop phrase as the line's whole body — alone, or followed only by the "·"
-// remedy separator that introduces the add-funds link (which a short pane may
-// clip anywhere, separator included).
+// error text, shows Claude Code's exhausted-credit stop as an error line:
+// either the stop phrase as the line's whole body — alone, or followed only
+// by the "·" remedy separator that introduces the add-funds link (which a
+// short pane may clip anywhere, separator included) — or the API's "credit
+// balance is too low to access" sentence inside an "API Error: 4xx" line,
+// joined with the indented continuation rows a narrow pane wraps it onto.
 //
-// The match is anchored to the error line because a terminal provider error
-// parks the session with no self-heal — it takes an explicit wake or an
-// operator — so a false hit on text that merely mentions the phrasing (a grep
-// hit, a chat quote) strands a healthy session, while a miss only degrades to
-// the ordinary crash-and-quarantine behavior.
+// The match is anchored to the error because a terminal provider error parks
+// the session with no self-heal — it takes an explicit wake or an operator —
+// so a false hit on text that merely mentions the phrasing (a grep hit, a
+// chat quote) strands a healthy session, while a miss only degrades to the
+// ordinary crash-and-quarantine behavior.
 func containsCreditBalanceStop(lower string) bool {
-	for _, line := range strings.Split(lower, "\n") {
-		if creditBalanceStopLine(paneErrorLineBody(line)) {
+	lines := strings.Split(lower, "\n")
+	for i, line := range lines {
+		body := paneErrorLineBody(line)
+		if creditBalanceStopLine(body) {
+			return true
+		}
+		if strings.HasPrefix(body, apiErrorClientPrefix) &&
+			apiErrorBlockContains(lines, i, creditBalanceAPISentence) {
 			return true
 		}
 	}
@@ -2067,6 +2088,36 @@ func paneErrorLineBody(line string) string {
 	body := strings.TrimSpace(line)
 	body = strings.TrimPrefix(body, "⎿")
 	return strings.TrimSpace(body)
+}
+
+// apiErrorBlockContains reports whether the API error line at index i,
+// joined with the wrapped continuation lines that follow it, contains needle
+// once all whitespace is dropped. The sentence sits deep in the error's JSON
+// body, so a pane narrower than the line wraps it onto indented rows —
+// possibly mid-word — and dropping the whitespace joins them back together.
+// The block ends at the first blank or unindented line and never runs past
+// apiErrorContinuationLines rows, so a later, unrelated line cannot complete
+// the match.
+func apiErrorBlockContains(lines []string, i int, needle string) bool {
+	block := lines[i]
+	for taken, j := 0, i+1; taken < apiErrorContinuationLines && j < len(lines); taken, j = taken+1, j+1 {
+		if !isIndentedNonBlank(lines[j]) {
+			break
+		}
+		block += lines[j]
+	}
+	return strings.Contains(strings.Join(strings.Fields(block), ""), needle)
+}
+
+// isIndentedNonBlank reports whether line is a wrapped row of an API error's
+// body: it carries content (it is not blank) and it is indented under the
+// error line it continues.
+func isIndentedNonBlank(line string) bool {
+	if strings.TrimSpace(line) == "" {
+		return false
+	}
+	indent, _ := utf8.DecodeRuneInString(line)
+	return unicode.IsSpace(indent)
 }
 
 // ProviderResumeRefusalReason classifies content, a startup death's error

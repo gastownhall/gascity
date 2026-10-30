@@ -1852,6 +1852,18 @@ func TestProviderTerminalErrorReasonCreditBalance(t *testing.T) {
 			"ok  	github.com/gastownhall/gascity/internal/runtime",
 			"Credit balance is too low",
 		}, "\n"), want: "quota_exceeded"},
+		// The API's credit sentence counts only inside an "API Error: 4xx"
+		// line, whole or wrapped onto the error's indented continuation rows.
+		{name: "api error on one line under the marker", content: `  ⎿  API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please add funds or switch to a different key."}}`, want: "quota_exceeded"},
+		{name: "api error wrapped between words", content: strings.Join([]string{
+			`  ⎿  API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"Your`,
+			"     credit balance is too low to access the Anthropic API. Please add funds or",
+			`     switch to a different key."}}`,
+		}, "\n"), want: "quota_exceeded"},
+		{name: "api error wrapped mid-word", content: strings.Join([]string{
+			`  ⎿  API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too lo`,
+			`     w to access the Anthropic API."}}`,
+		}, "\n"), want: "quota_exceeded"},
 		{name: "headless message under the marker", content: "  ⎿  Credit balance is too low", want: "quota_exceeded"},
 		{name: "startup death carrying the stop as its last pane output", content: strings.Join([]string{
 			`session died during startup: session "worker" exited after it started; last pane output:`,
@@ -1864,6 +1876,20 @@ func TestProviderTerminalErrorReasonCreditBalance(t *testing.T) {
 				t.Errorf("ProviderTerminalErrorReason(%q) = %q, want %q", tt.content, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestProviderTerminalErrorReasonCreditBalanceTooLow is the triage repro for
+// ga-ofhcqo: both the TUI stop and the API error line are terminal.
+func TestProviderTerminalErrorReasonCreditBalanceTooLow(t *testing.T) {
+	t.Parallel()
+	for _, content := range []string{
+		"  ⎿  Credit balance too low · Add funds: https://console.anthropic.com/settings/billing",
+		`  ⎿  API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}`,
+	} {
+		if got := ProviderTerminalErrorReason(content); got != "quota_exceeded" {
+			t.Errorf("ProviderTerminalErrorReason(%q) = %q, want %q", content, got, "quota_exceeded")
+		}
 	}
 }
 
