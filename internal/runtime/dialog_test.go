@@ -1741,6 +1741,10 @@ scrollback line unrelated to any modal
 scrollback line unrelated to any modal
 comment: and a third names Wait for limit to reset as the confirm arm`
 
+// claudeSpendLimitModal is Claude's spend-limit modal, a rate-limit screen
+// with a reset rather than a terminal error.
+const claudeSpendLimitModal = "What do you want to do?\nUsage credit balance: $573.37\n❯ Adjust monthly spend limit: $1503.19\n  Wait for limit to reset      Resets Jul 12 at 11pm (America/Los_Angeles)\nEnter to confirm · Esc to cancel"
+
 func TestContainsProviderRateLimitScreen(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1752,7 +1756,7 @@ func TestContainsProviderRateLimitScreen(t *testing.T) {
 		{name: "claude hit limit", content: "You've hit your limit, Pro plan", want: true},
 		{name: "claude rate limit options", content: "/rate-limit-options", want: true},
 		{name: "provider menu shape", content: "Rate limit reached\n1. Keep trying\n2. Stop", want: true},
-		{name: "claude spend limit modal", content: "What do you want to do?\nUsage credit balance: $573.37\n❯ Adjust monthly spend limit: $1503.19\n  Wait for limit to reset      Resets Jul 12 at 11pm (America/Los_Angeles)\nEnter to confirm · Esc to cancel", want: true},
+		{name: "claude spend limit modal", content: claudeSpendLimitModal, want: true},
 		{name: "spend limit words without reset option", content: "notes mention Adjust monthly spend limit and Usage credit balance while documenting billing", want: false},
 		{name: "spend limit tokens scattered across unrelated scrollback", content: spendLimitTokensScatteredScrollback, want: false},
 		{name: "generic crash output", content: "worker failed while parsing rate limit config", want: false},
@@ -2028,5 +2032,19 @@ func TestProviderTerminalErrorReasonCreditBalance(t *testing.T) {
 				t.Errorf("ProviderTerminalErrorReason(%q) = %q, want %q", tt.content, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestProviderTerminalErrorReasonSpendLimitModalIsNotTerminal pins that the
+// credit-balance arm leaves Claude's spend-limit modal ("Usage credit balance")
+// to the rate-limit classifier: callers check terminal first, so a terminal hit
+// would permanently steal a screen that resets on its own.
+func TestProviderTerminalErrorReasonSpendLimitModalIsNotTerminal(t *testing.T) {
+	t.Parallel()
+	if got := ProviderTerminalErrorReason(claudeSpendLimitModal); got != "" {
+		t.Errorf("ProviderTerminalErrorReason(spend-limit modal) = %q, want \"\"", got)
+	}
+	if !ContainsProviderRateLimitScreen(claudeSpendLimitModal) {
+		t.Error("ContainsProviderRateLimitScreen(spend-limit modal) = false, want true")
 	}
 }
