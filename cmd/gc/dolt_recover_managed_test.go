@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -106,8 +108,11 @@ func TestRecoverManagedDoltRefusesProviderOwnedScopesBeforeLifecycleOps(t *testi
 					calls = append(calls, "start")
 					return managedDoltStartReport{}, nil
 				},
-				publish:       func(string) error { calls = append(calls, "publish"); return nil },
-				failedCleanup: func(_ string, _ int, _ int, cause error) error { calls = append(calls, "failed-cleanup"); return cause },
+				publish: func(string) error { calls = append(calls, "publish"); return nil },
+				failedCleanup: func(_ string, _ managedDoltCleanupTarget, _ int, cause error) error {
+					calls = append(calls, "failed-cleanup")
+					return cause
+				},
 			}
 			_, err := recoverManagedDoltProcessWithOps(city, "127.0.0.1", "3307", "root", "warning", time.Second, ops)
 			if tc.wantBlocked {
@@ -439,8 +444,8 @@ func TestRecoverManagedDoltProcessWithOps(t *testing.T) {
 					gotOps = append(gotOps, "publish city="+cityPath)
 					return tt.publishErr
 				},
-				failedCleanup: func(cityPath string, pid, port int, cause error) error {
-					gotOps = append(gotOps, fmt.Sprintf("cleanup city=%s pid=%d port=%d cause=%v", cityPath, pid, port, cause))
+				failedCleanup: func(cityPath string, target managedDoltCleanupTarget, port int, cause error) error {
+					gotOps = append(gotOps, fmt.Sprintf("cleanup city=%s pid=%d port=%d cause=%v", cityPath, target.PID, port, cause))
 					if tt.cleanupErr != nil {
 						return tt.cleanupErr
 					}
@@ -475,7 +480,7 @@ func TestRecoverManagedDoltProcessWithOps(t *testing.T) {
 }
 
 func TestCleanupFailedManagedDoltRecovery_NilCause(t *testing.T) {
-	if err := cleanupFailedManagedDoltRecovery("/nonexistent", 0, 0, nil); err != nil {
+	if err := cleanupFailedManagedDoltRecovery("/nonexistent", managedDoltCleanupTarget{}, 0, nil); err != nil {
 		t.Errorf("cleanupFailedManagedDoltRecovery(nil cause) = %v, want nil", err)
 	}
 }
@@ -531,7 +536,7 @@ backend = "dolt"
 	}
 
 	cause := errors.New("preflight cleanup failed")
-	err = cleanupFailedManagedDoltRecovery(cityPath, 0, port, cause)
+	err = cleanupFailedManagedDoltRecovery(cityPath, managedDoltCleanupTarget{}, port, cause)
 	if !errors.Is(err, cause) {
 		t.Fatalf("cleanupFailedManagedDoltRecovery error = %v, want sentinel cause", err)
 	}
@@ -812,4 +817,141 @@ func TestRecoverManagedDolt_ProceedsWhenHealthCheckErrors(t *testing.T) {
 	if report.Ready {
 		t.Error("expected Ready=false when health check errors")
 	}
+}
+
+// TestRecoverManagedDoltProcessWithOps_CleanupCarriesProcessIdentity pins that
+// every failedCleanup call receives the start identity of the process whose PID
+// it carries, so the recovery-cleanup SIGKILL route can refuse a reused PID.
+// The pre-start failure cleans the OLD process (stop report identity); every
+// post-start failure cleans the replacement (start report identity); a start
+// that reports no PID leaves the old process and its identity in place.
+func TestRecoverManagedDoltProcessWithOps_CleanupCarriesProcessIdentity(t *testing.T) {
+	oldTarget := managedDoltCleanupTarget{PID: 111, StartTimeTicks: 1001, StartIdentity: "old-ident"}
+	newTarget := managedDoltCleanupTarget{PID: 222, StartTimeTicks: 2002, StartIdentity: "new-ident"}
+	stopReport := managedDoltStopReport{HadPID: true, PID: oldTarget.PID, StartTimeTicks: oldTarget.StartTimeTicks, StartIdentity: oldTarget.StartIdentity}
+	startReport := managedDoltStartReport{Ready: true, PID: newTarget.PID, Port: 4407, StartTimeTicks: newTarget.StartTimeTicks, StartIdentity: newTarget.StartIdentity}
+
+	tests := []struct {
+		name         string
+		preflightErr error
+		startReport  managedDoltStartReport
+		health       managedDoltSQLHealthReport
+		healthErr    error
+		publishErr   error
+		want         managedDoltCleanupTarget
+	}{
+		{name: "preflight failure cleans the old process", preflightErr: errors.New("preflight failed"), startReport: startReport, want: oldTarget},
+		{name: "health failure cleans the replacement", startReport: startReport, healthErr: errors.New("health failed"), want: newTarget},
+		{name: "read-only cleans the replacement", startReport: startReport, health: managedDoltSQLHealthReport{QueryReady: true, ReadOnly: "true"}, want: newTarget},
+		{name: "not query-ready cleans the replacement", startReport: startReport, health: managedDoltSQLHealthReport{ReadOnly: "false"}, want: newTarget},
+		{name: "publish failure cleans the replacement", startReport: startReport, health: managedDoltSQLHealthReport{QueryReady: true, ReadOnly: "false"}, publishErr: errors.New("publish failed"), want: newTarget},
+		{name: "start without a pid keeps the old identity", startReport: managedDoltStartReport{Ready: true, Port: 4407}, healthErr: errors.New("health failed"), want: oldTarget},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got []managedDoltCleanupTarget
+			ops := managedDoltRecoveryOps{
+				queryProbe:       func(string, string, string) error { return errors.New("query unavailable") },
+				healthCheck:      func(string, string, string) (managedDoltSQLHealthReport, error) { return tt.health, tt.healthErr },
+				stop:             func(string, string) (managedDoltStopReport, error) { return stopReport, nil },
+				preflightCleanup: func(string) error { return tt.preflightErr },
+				start: func(string, string, string, string, string, time.Duration) (managedDoltStartReport, error) {
+					return tt.startReport, nil
+				},
+				publish: func(string) error { return tt.publishErr },
+				failedCleanup: func(_ string, target managedDoltCleanupTarget, _ int, cause error) error {
+					got = append(got, target)
+					return cause
+				},
+			}
+			if _, err := recoverManagedDoltProcessWithOps(t.TempDir(), "127.0.0.1", "3306", "root", "warning", 2*time.Second, ops); err == nil {
+				t.Fatal("recover error = nil, want the injected failure")
+			}
+			if len(got) != 1 || got[0] != tt.want {
+				t.Fatalf("failedCleanup targets = %+v, want exactly [%+v]", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCleanupFailedManagedDoltRecoverySkipsReusedPID is the ga-4tsarc
+// regression: the recovery-cleanup route used to terminate by bare PID, so a
+// replacement that died and had its PID reused would have the stranger
+// SIGTERMed (and SIGKILLed). With the captured identity in hand the guarded
+// termination must be skipped and logged.
+func TestCleanupFailedManagedDoltRecoverySkipsReusedPID(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal semantics required")
+	}
+	victim := exec.Command("sleep", "60")
+	if err := victim.Start(); err != nil {
+		t.Fatalf("start victim: %v", err)
+	}
+	victimPID := victim.Process.Pid
+	t.Cleanup(func() {
+		_ = victim.Process.Kill()
+		_ = victim.Wait()
+	})
+
+	// Captured at start: ticks=1111. The live PID now re-reads as 2222, a
+	// different process incarnation.
+	oldTicks := managedDoltTestReadStartTimeTicks
+	managedDoltTestReadStartTimeTicks = func(int) uint64 { return 2222 }
+	t.Cleanup(func() { managedDoltTestReadStartTimeTicks = oldTicks })
+
+	oldLog := managedDoltCleanupLogf
+	var logged []string
+	managedDoltCleanupLogf = func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	t.Cleanup(func() { managedDoltCleanupLogf = oldLog })
+
+	cause := errors.New("replacement failed")
+	err := cleanupFailedManagedDoltRecovery(t.TempDir(), managedDoltCleanupTarget{PID: victimPID, StartTimeTicks: 1111}, 33124, cause)
+	if !errors.Is(err, cause) {
+		t.Fatalf("cleanup error = %v, want the original cause", err)
+	}
+
+	// Give any erroneous SIGTERM time to land before asserting survival.
+	time.Sleep(200 * time.Millisecond)
+	if !pidAlive(victimPID) {
+		t.Fatalf("recovery cleanup signaled reused PID %d; identity guard not enforced", victimPID)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "start identity changed (PID reused)") || !strings.Contains(logged[0], fmt.Sprint(victimPID)) {
+		t.Fatalf("expected one 'start identity changed (PID reused)' log naming pid %d, got %v", victimPID, logged)
+	}
+}
+
+// TestCleanupFailedManagedDoltRecoveryTerminatesMatchingProcess is the
+// happy-path companion: when the start identity still matches, the failed
+// replacement is terminated exactly as before.
+func TestCleanupFailedManagedDoltRecoveryTerminatesMatchingProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal semantics required")
+	}
+	child := exec.Command("sleep", "60")
+	if err := child.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	childPID := child.Process.Pid
+	go func() { _ = child.Wait() }()
+	t.Cleanup(func() { _ = child.Process.Kill() })
+
+	oldTicks := managedDoltTestReadStartTimeTicks
+	managedDoltTestReadStartTimeTicks = func(int) uint64 { return 5555 }
+	t.Cleanup(func() { managedDoltTestReadStartTimeTicks = oldTicks })
+
+	cause := errors.New("replacement failed")
+	err := cleanupFailedManagedDoltRecovery(t.TempDir(), managedDoltCleanupTarget{PID: childPID, StartTimeTicks: 5555}, 33125, cause)
+	if !errors.Is(err, cause) {
+		t.Fatalf("cleanup error = %v, want the original cause", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !pidAlive(childPID) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("recovery cleanup did not terminate matching PID %d; identity guard wrongly skipped it", childPID)
 }

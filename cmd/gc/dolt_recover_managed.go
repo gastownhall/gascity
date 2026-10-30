@@ -29,7 +29,7 @@ type managedDoltRecoveryOps struct {
 	preflightCleanup func(cityPath string) error
 	start            func(cityPath, host, port, user, logLevel string, timeout time.Duration) (managedDoltStartReport, error)
 	publish          func(cityPath string) error
-	failedCleanup    func(cityPath string, pid, port int, cause error) error
+	failedCleanup    func(cityPath string, target managedDoltCleanupTarget, port int, cause error) error
 }
 
 func defaultManagedDoltRecoveryOps() managedDoltRecoveryOps {
@@ -162,7 +162,7 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 	_ = stopErr
 
 	if err := ops.preflightCleanup(cityPath); err != nil {
-		return report, ops.failedCleanup(cityPath, report.PID, report.Port, err)
+		return report, ops.failedCleanup(cityPath, managedDoltCleanupTarget{PID: report.PID}, report.Port, err)
 	}
 
 	startReport, err := ops.start(cityPath, host, port, user, logLevel, timeout)
@@ -182,23 +182,33 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 
 	health, err := ops.healthCheck(host, strconv.Itoa(report.Port), user)
 	if err != nil {
-		return report, ops.failedCleanup(cityPath, report.PID, report.Port, err)
+		return report, ops.failedCleanup(cityPath, managedDoltCleanupTarget{PID: report.PID}, report.Port, err)
 	}
 	if health.ReadOnly == "true" {
 		report.Healthy = false
-		return report, ops.failedCleanup(cityPath, report.PID, report.Port, fmt.Errorf("dolt server on %s:%d is still read-only after recovery", managedDoltConnectHost(host), report.Port))
+		return report, ops.failedCleanup(cityPath, managedDoltCleanupTarget{PID: report.PID}, report.Port, fmt.Errorf("dolt server on %s:%d is still read-only after recovery", managedDoltConnectHost(host), report.Port))
 	}
 	report.Healthy = health.QueryReady
 	if !report.Healthy {
-		return report, ops.failedCleanup(cityPath, report.PID, report.Port, fmt.Errorf("dolt server on %s:%d is not query-ready after recovery", managedDoltConnectHost(host), report.Port))
+		return report, ops.failedCleanup(cityPath, managedDoltCleanupTarget{PID: report.PID}, report.Port, fmt.Errorf("dolt server on %s:%d is not query-ready after recovery", managedDoltConnectHost(host), report.Port))
 	}
 	if err := ops.publish(cityPath); err != nil {
-		return report, ops.failedCleanup(cityPath, report.PID, report.Port, fmt.Errorf("publish managed dolt runtime state: %w", err))
+		return report, ops.failedCleanup(cityPath, managedDoltCleanupTarget{PID: report.PID}, report.Port, fmt.Errorf("publish managed dolt runtime state: %w", err))
 	}
 	return report, nil
 }
 
-func cleanupFailedManagedDoltRecovery(cityPath string, pid, port int, cause error) error {
+// managedDoltCleanupTarget names the process a failed recovery cleans up: its
+// PID and the start identity captured when it was observed, so the termination
+// can tell the process it meant to stop from a stranger that reused the PID.
+type managedDoltCleanupTarget struct {
+	PID            int
+	StartTimeTicks uint64
+	StartIdentity  string
+}
+
+func cleanupFailedManagedDoltRecovery(cityPath string, target managedDoltCleanupTarget, port int, cause error) error {
+	pid := target.PID
 	if cause == nil {
 		return nil
 	}

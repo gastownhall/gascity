@@ -305,3 +305,44 @@ func TestManagedDoltProcessControllableGatesForcedStopByOwnership(t *testing.T) 
 		t.Fatalf("unrelated process pid %d (cwd %s) reported controllable; forced stop would SIGKILL a reused PID", unowned, unownedDir)
 	}
 }
+
+// TestStopManagedDoltReportCarriesStartIdentity pins that the stop report
+// records the stopped process's start identity, snapshotted when the target is
+// chosen: a read after the SIGTERM lands finds the process gone and yields
+// nothing, which would leave recovery's pre-start cleanup unguarded.
+func TestStopManagedDoltReportCarriesStartIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal semantics required")
+	}
+	city, _ := raceTestCity(t, "[workspace]\nname = \"stop-identity\"\n\n[daemon]\ndolt_stop_timeout = \"2s\"\n")
+	child := exec.Command("sleep", "60")
+	child.Dir = filepath.Join(city, ".beads", "dolt")
+	if err := child.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	pid := child.Process.Pid
+	go func() { _ = child.Wait() }()
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	if err := os.WriteFile(os.Getenv("GC_DOLT_PID_FILE"), []byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+
+	// Only a live process has a start identity: a snapshot taken after the
+	// SIGTERM (process gone) reads zero.
+	oldTicks := managedDoltTestReadStartTimeTicks
+	managedDoltTestReadStartTimeTicks = func(p int) uint64 {
+		if p == pid && syscall.Kill(p, 0) == nil {
+			return 4444
+		}
+		return 0
+	}
+	t.Cleanup(func() { managedDoltTestReadStartTimeTicks = oldTicks })
+
+	report, err := stopManagedDoltProcessWithOptions(city, "", false)
+	if err != nil {
+		t.Fatalf("stop error = %v, want nil", err)
+	}
+	if report.PID != pid || report.StartTimeTicks != 4444 {
+		t.Fatalf("stop report pid/ticks = %d/%d, want %d/4444 (identity must be snapshotted before the SIGTERM)", report.PID, report.StartTimeTicks, pid)
+	}
+}

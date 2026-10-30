@@ -1525,3 +1525,27 @@ func TestStartManagedDoltSQLServerDirectSpawnScrubsSessionIdentity(t *testing.T)
 		t.Errorf("dolt sql-server PATH = %q, want the parent's PATH carried through", env["PATH"])
 	}
 }
+
+// TestStartManagedDoltProcessWithOptions_ReportCarriesStartIdentity pins that
+// the start report hands the caller the start identity already captured for
+// the spawned process, so recovery cleanup can guard its termination without a
+// second /proc read.
+func TestStartManagedDoltProcessWithOptions_ReportCarriesStartIdentity(t *testing.T) {
+	cityPath := installStartManagedDoltLoopStubs(t, startManagedDoltLoopStubs{
+		startFn: func(cityPath, _, _ string, _ *os.File) (managedDoltStartedProcess, error) {
+			return managedDoltStartedProcess{CityPath: cityPath, PID: 4242, StartTimeTicks: 9999, StartIdentity: "ident-9999"}, nil
+		},
+		waitReadyFn: func(_, _, _, _ string, _ int, _ time.Duration, _ bool) (managedDoltWaitReadyReport, error) {
+			return managedDoltWaitReadyReport{Ready: true, PIDAlive: true}, nil
+		},
+		logSuffixFn:     func(string, int64) (string, error) { return "", nil },
+		portAvailableFn: func(string, int) bool { return true },
+	})
+	report, err := startManagedDoltProcessWithOptions(cityPath, "127.0.0.1", "17781", "root", "warning", -1, 2*time.Second, false)
+	if err != nil {
+		t.Fatalf("start error = %v, want nil", err)
+	}
+	if report.PID != 4242 || report.StartTimeTicks != 9999 || report.StartIdentity != "ident-9999" {
+		t.Fatalf("report pid/ticks/identity = %d/%d/%q, want 4242/9999/%q", report.PID, report.StartTimeTicks, report.StartIdentity, "ident-9999")
+	}
+}

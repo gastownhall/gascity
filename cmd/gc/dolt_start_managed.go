@@ -29,6 +29,10 @@ type managedDoltStartReport struct {
 	Port         int
 	AddressInUse bool
 	Attempts     int
+	// StartTimeTicks and StartIdentity are the spawned process's start
+	// identity, for callers that later signal PID.
+	StartTimeTicks uint64
+	StartIdentity  string
 }
 
 type managedDoltStartedProcess struct {

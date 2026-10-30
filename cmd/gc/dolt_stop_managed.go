@@ -21,6 +21,10 @@ type managedDoltStopReport struct {
 	// runtime cleanup before returning. Handoff callers expose this separately
 	// from the operation result so a failed stop cannot claim it was read-only.
 	Mutated bool
+	// StartTimeTicks and StartIdentity are the stopped process's start
+	// identity, snapshotted before it was signaled.
+	StartTimeTicks uint64
+	StartIdentity  string
 }
 
 func stopManagedDoltProcess(cityPath, port string) (managedDoltStopReport, error) {
