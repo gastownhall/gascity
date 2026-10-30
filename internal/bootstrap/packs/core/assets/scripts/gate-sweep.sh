@@ -34,6 +34,11 @@
 # Stores gc refuses — a scope whose beads provider is not bd (file- or
 # exec-backed), or a rig with no path binding on this site — cannot hold
 # bd gates; they are reported as skipped on stdout, not failed.
+#
+# A run that cannot list the rigs (jq missing, or `gc rig list` failing)
+# still sweeps the city store, then reports on stderr that the rig stores
+# were not checked and exits non-zero: the sweep never quietly narrows
+# back to the city store.
 set -euo pipefail
 
 # Trace bd invocations to $GC_BD_TRACE when set (no-op otherwise).
@@ -90,11 +95,22 @@ sweep_scope() {
 scope_select city
 sweep_scope
 
-RIG_NAMES="$(core_rig_names)"
-while IFS= read -r rig_name; do
-    [ -n "$rig_name" ] || continue
-    scope_select rig "$rig_name"
-    sweep_scope </dev/null
-done <<< "$RIG_NAMES"
+# The rig listing needs jq (core_rig_names parses `gc rig list --json`
+# with it); the city sweep above does not. Check it here, after the city
+# sweep, so a city without jq still gets its own gates evaluated.
+if ! command -v jq >/dev/null 2>&1; then
+    echo "gate-sweep: jq is required to list rig stores but not found in PATH; rig stores were not checked this run" >&2
+    exit 1
+fi
+if RIG_NAMES="$(core_rig_names)"; then
+    while IFS= read -r rig_name; do
+        [ -n "$rig_name" ] || continue
+        scope_select rig "$rig_name"
+        sweep_scope </dev/null
+    done <<< "$RIG_NAMES"
+else
+    echo "gate-sweep: gc rig list failed; rig stores were not checked this run" >&2
+    exit 1
+fi
 
 exit "$SWEEP_FAILED"

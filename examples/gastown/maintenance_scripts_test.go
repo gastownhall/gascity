@@ -11924,6 +11924,89 @@ exit 0
 	})
 }
 
+// TestGateSweepFailsLoudWhenRigsCannotBeListed verifies the sweep never
+// quietly narrows back to the city store: the city store is swept first,
+// and a rig listing that cannot happen (gc rig list failing, or jq —
+// which core_rig_names needs — missing) is reported on stderr and fails
+// the run.
+func TestGateSweepFailsLoudWhenRigsCannotBeListed(t *testing.T) {
+	loggingBd := `#!/bin/sh
+printf '%s %s\n' "$GC_FAKE_SCOPE" "$*" >> "$BD_LOG"
+exit 0
+`
+
+	t.Run("gc rig list fails", func(t *testing.T) {
+		binDir, bdLog, env := gateSweepEnv(t)
+		writeExecutable(t, filepath.Join(binDir, "bd"), loggingBd)
+		env["FAKE_RIG_LIST_FAIL"] = "1"
+
+		cmd := scriptCmd("", coreScriptPath("gate-sweep.sh"), env)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err == nil {
+			t.Fatalf("expected gate-sweep to exit non-zero when the rig list cannot be read:\n%s", stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "rig stores were not checked") {
+			t.Errorf("expected stderr to say the rig stores were not checked; stderr:\n%s", stderr.String())
+		}
+		log, err := os.ReadFile(bdLog)
+		if err != nil {
+			t.Fatalf("ReadFile(bd log): %v", err)
+		}
+		for _, want := range []string{
+			"city gate check --type=timer --escalate",
+			"city gate check --type=gh --escalate",
+		} {
+			if !strings.Contains(string(log), want) {
+				t.Errorf("the city store must still be swept; missing %q in bd log:\n%s", want, log)
+			}
+		}
+	})
+
+	t.Run("jq missing from PATH", func(t *testing.T) {
+		binDir := t.TempDir()
+		bdLog := filepath.Join(t.TempDir(), "bd.log")
+		cityDir := t.TempDir()
+		// PATH holds only the gc and bd doubles plus the tools the sweep
+		// itself needs — no jq, which core_rig_names requires.
+		writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
+		writeExecutable(t, filepath.Join(binDir, "bd"), loggingBd)
+		for _, tool := range []string{"bash", "cat", "date", "dirname", "head", "mktemp", "rm", "sed"} {
+			linkTestPathTool(t, binDir, tool)
+		}
+		env := map[string]string{
+			"BD_LOG":       bdLog,
+			"GC_CITY":      cityDir,
+			"GC_CITY_PATH": cityDir,
+			"PATH":         binDir,
+		}
+
+		cmd := scriptCmd("", coreScriptPath("gate-sweep.sh"), env)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err == nil {
+			t.Fatalf("expected gate-sweep to exit non-zero without jq:\n%s", stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "jq") {
+			t.Errorf("expected stderr to name jq; stderr:\n%s", stderr.String())
+		}
+		log, err := os.ReadFile(bdLog)
+		if err != nil {
+			t.Fatalf("ReadFile(bd log): %v", err)
+		}
+		for _, want := range []string{
+			"city gate check --type=timer --escalate",
+			"city gate check --type=gh --escalate",
+		} {
+			if !strings.Contains(string(log), want) {
+				t.Errorf("the city store needs no jq and must still be swept; missing %q in bd log:\n%s", want, log)
+			}
+		}
+	})
+}
+
 // hermeticGitEnv builds a git invocation env that strips any pre-existing
 // GIT_* control variables from the parent environment before applying the
 // overrides — same approach as mergeTestEnv. This avoids duplicate keys
