@@ -49,9 +49,10 @@ type fakeBdLedger struct {
 	// bd/Postgres work store answers exactly this (ga-7i7ts), which is why the
 	// completeness verdict cannot be built on DepListBatch.
 	depListRefusal string
-	// closedReadRefusal, when set, is how a `bd list` or `bd query` that asks
-	// for closed rows fails while the active-set reads keep answering: the
-	// work-outcome veto's blocker read breaking on its own.
+	// closedReadRefusal, when set, is how the work-outcome veto's blocker read
+	// fails while the active-set reads keep answering: a `bd list` or `bd query`
+	// that asks for closed rows, and the batched `bd show --json -- <ids>` that
+	// BdStore.blockerStatuses resolves its blockers with.
 	closedReadRefusal string
 	// truncateDeps drops these ids' inline edges while leaving their
 	// dependency_count intact, modeling a bd whose list JSON is short.
@@ -76,6 +77,8 @@ func (f *fakeBdLedger) run(_, name string, args ...string) ([]byte, error) {
 		return []byte("bd version 1.1.0\n"), nil
 	case all && f.closedReadRefusal != "" && (args[0] == "list" || args[0] == "query"):
 		return nil, errors.New(f.closedReadRefusal)
+	case isBlockerLookup(append([]string{name}, args...)) && f.closedReadRefusal != "":
+		return nil, errors.New(f.closedReadRefusal)
 	case args[0] == "list":
 		return f.renderRows(func(r bdLedgerRow) bool { return !r.ephemeral && (all || !r.closed) && !r.offscope })
 	case args[0] == "query":
@@ -92,7 +95,14 @@ func (f *fakeBdLedger) run(_, name string, args ...string) ([]byte, error) {
 		// So every row a Get refresh installs arrives with IsBlocked nil, no
 		// matter how healthy bd is. That is the whole mechanism behind
 		// ga-cfhgr: renderRows never emits the key either.
-		return f.renderRows(func(r bdLedgerRow) bool { return r.id == args[len(args)-1] })
+		//
+		// It answers every id named after `--` (the batched blocker lookup
+		// passes several) and omits an id bd does not hold, as bd does.
+		ids := args[1:]
+		if i := slices.Index(args, "--"); i >= 0 {
+			ids = args[i+1:]
+		}
+		return f.renderRows(func(r bdLedgerRow) bool { return slices.Contains(ids, r.id) })
 	case args[0] == "update":
 		return f.applyUpdate(args[2:])
 	case args[0] == "close":
@@ -735,61 +745,60 @@ func TestCachedReadyOverBdBackingHonorsAnEvictedBlockersWorkOutcome(t *testing.T
 			}
 			stage.assertStillAnswers("after a healthy reconcile")
 
-			// The cost: the reconcile spends the one closed read the backing's
-			// own Ready spends, a `bd list --all` and its wisp-tier `bd query`.
-			reads := closedInclusiveReads(ledger.calls[before:reconciled])
-			if !closedReadsAreOneListAndOneQuery(reads) {
-				t.Fatalf("the reconcile spent closed reads %v, want one `bd list --all` and one `bd query --all`", reads)
+			// The cost: the reconcile spends the one blocker lookup the backing's
+			// own Ready spends, a single batched `bd show`, and no closed-history
+			// scan (ga-ntr7gn: that scan is what made gc ready slow).
+			spent := ledger.calls[before:reconciled]
+			if reads := closedInclusiveReads(spent); len(reads) != 0 {
+				t.Fatalf("the reconcile spent closed-history reads %v, want none", reads)
+			}
+			if lookups := blockerLookups(spent); len(lookups) != 1 {
+				t.Fatalf("the reconcile spent blocker lookups %v, want one batched `bd show`", lookups)
 			}
 		})
 	}
 }
 
-// closedReadsAreOneListAndOneQuery reports whether reads are the closed-row
-// budget of one two-tier read: a `bd list --all` and a wisp-tier `bd query
-// --all`, in either order: BdStore.listTierPair issues them concurrently.
-func closedReadsAreOneListAndOneQuery(reads [][]string) bool {
-	var lists, queries int
-	for _, read := range reads {
-		switch read[1] {
-		case "list":
-			lists++
-		case "query":
-			queries++
-		}
-	}
-	return len(reads) == 2 && lists == 1 && queries == 1
+// isBlockerLookup reports whether call is BdStore.blockerStatuses's batched
+// `bd show --json -- <ids>`: the only bd show that names its ids after "--".
+func isBlockerLookup(call []string) bool {
+	return len(call) > 1 && call[1] == "show" && slices.Contains(call, "--")
 }
 
-// TestClosedReadsAreOneListAndOneQueryInEitherOrder pins the cost invariant
-// the cached-ready reconcile test asserts. BdStore.listTierPair runs its two
-// tier reads concurrently and the fake ledger records them under a mutex, so
-// both recorded orders are valid and neither may be a failure. The calls are
-// scripted rather than scheduled, so no case depends on goroutine timing.
-func TestClosedReadsAreOneListAndOneQueryInEitherOrder(t *testing.T) {
+// blockerLookups returns the calls that are batched blocker lookups.
+func blockerLookups(calls [][]string) [][]string {
+	var found [][]string
+	for _, call := range calls {
+		if isBlockerLookup(call) {
+			found = append(found, call)
+		}
+	}
+	return found
+}
+
+// TestBlockerLookupsPicksOnlyTheBatchedShow pins the cost invariant the
+// cached-ready reconcile test asserts: a Get-style `bd show` of one id and the
+// closed-history reads are not blocker lookups, so the budget counts only the
+// batched call.
+func TestBlockerLookupsPicksOnlyTheBatchedShow(t *testing.T) {
+	batched := []string{"bd", "show", "--json", "--", "bd-1", "bd-2"}
+	get := []string{"bd", "show", "--json", "bd-1"}
 	list := []string{"bd", "list", "--json", "--status=closed", "--all", "--limit=0"}
-	query := []string{"bd", "query", "--json", "ephemeral=true AND status=closed", "--all", "--limit=0"}
 	cases := []struct {
 		name  string
-		reads [][]string
-		want  bool
+		calls [][]string
+		want  int
 	}{
-		{"list then query", [][]string{list, query}, true},
-		{"query then list", [][]string{query, list}, true},
-		{"no reads", nil, false},
-		{"list only", [][]string{list}, false},
-		{"query only", [][]string{query}, false},
-		{"duplicate list", [][]string{list, list}, false},
-		{"duplicate query", [][]string{query, query}, false},
-		{"extra list", [][]string{list, query, list}, false},
-		{"extra query", [][]string{query, list, query}, false},
-		{"extra unrelated closed read", [][]string{list, query, {"bd", "show", "--all", "bd-1"}}, false},
-		{"unrelated read in place of query", [][]string{list, {"bd", "show", "--all", "bd-1"}}, false},
+		{"no calls", nil, 0},
+		{"batched show", [][]string{batched}, 1},
+		{"get is not a lookup", [][]string{get}, 0},
+		{"list is not a lookup", [][]string{list}, 0},
+		{"two batched shows", [][]string{batched, get, batched}, 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := closedReadsAreOneListAndOneQuery(tc.reads); got != tc.want {
-				t.Errorf("closedReadsAreOneListAndOneQuery(%v) = %v, want %v", tc.reads, got, tc.want)
+			if got := len(blockerLookups(tc.calls)); got != tc.want {
+				t.Errorf("blockerLookups(%v) = %d calls, want %d", tc.calls, got, tc.want)
 			}
 		})
 	}
