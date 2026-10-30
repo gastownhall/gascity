@@ -638,11 +638,11 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 // for the standalone stop, which runs only once no controller serves the city.
 // A starter holds the runtime name's flock from before it records creating
 // until it commits the start, so a free flock means the process that wrote the
-// row died mid-start (a controller crash). An operator's or the idle
-// auto-suspend's stop still refuses a creating row, and the sweep's own
-// latitude writes no row state, so this pass is what both reports the row the
-// dead start left and leaves it as it is, for the reconciler to resolve on the
-// next start.
+// row died mid-start (a controller crash). The row is left as it is, its
+// in-flight marker with it, for the reconciler to relaunch on the next start:
+// the stop sweep's suspend, which tears a listed creating row's runtime down
+// too, writes nothing to it either. This pass also stops one the runtime does
+// not list, and reports a row the stop could not stop or check.
 //
 // A name whose flock is held is a start in flight, whether or not its runtime
 // is up yet: it is reported and returned in inFlight, for the caller to keep

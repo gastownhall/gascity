@@ -329,37 +329,53 @@ func (p *shutdownWaitProvider) ListRunning(prefix string) ([]string, error) {
 // for the runtime to come up, then returns the pre-start snapshot, so only a
 // forced shutdown's SECOND ListRunning (the late relist) sees the runtime.
 //
-// holdStartAfterRunning, when nonzero, additionally keeps the provider's Start
-// open that long after the runtime is up: the async start commits its
-// creating -> active transition only after Start returns, so the late relist
-// then always reaches the row while it still reads creating instead of racing
-// the commit.
+// With a readRow, its Start runs to its end through a canceled context, as a
+// provider's Start that is launching the runtime does, and rowAtStop reports
+// the row as the runtime's first stop found it.
 type lateAsyncStartListProvider struct {
 	*gatedStartProvider
-	listCalls             int
-	holdStartAfterRunning time.Duration
+	listCalls int
+	readRow   func() map[string]string
+	stopSeen  bool
+	stopRow   map[string]string
 }
 
-func newLateAsyncStartListProvider(holdStartAfterRunning time.Duration) *lateAsyncStartListProvider {
+func newLateAsyncStartListProvider(readRow func() map[string]string) *lateAsyncStartListProvider {
 	return &lateAsyncStartListProvider{
-		gatedStartProvider:    newGatedStartProvider(),
-		holdStartAfterRunning: holdStartAfterRunning,
+		gatedStartProvider: newGatedStartProvider(),
+		readRow:            readRow,
 	}
 }
 
 func (p *lateAsyncStartListProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
-	if err := p.gatedStartProvider.Start(ctx, name, cfg); err != nil {
-		return err
+	if p.readRow != nil {
+		ctx = context.WithoutCancel(ctx)
 	}
-	if p.holdStartAfterRunning <= 0 {
-		return nil
+	return p.gatedStartProvider.Start(ctx, name, cfg)
+}
+
+func (p *lateAsyncStartListProvider) Stop(name string) error {
+	if p.readRow != nil && name == "worker" {
+		p.mu.Lock()
+		first := !p.stopSeen
+		p.stopSeen = true
+		p.mu.Unlock()
+		if first {
+			row := p.readRow()
+			p.mu.Lock()
+			p.stopRow = row
+			p.mu.Unlock()
+		}
 	}
-	select {
-	case <-time.After(p.holdStartAfterRunning):
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return p.gatedStartProvider.Stop(name)
+}
+
+// rowAtStop is the row as the runtime's first stop found it, and whether the
+// runtime was stopped at all.
+func (p *lateAsyncStartListProvider) rowAtStop() (map[string]string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.stopRow, p.stopSeen
 }
 
 func (p *lateAsyncStartListProvider) ListRunning(prefix string) ([]string, error) {
@@ -2921,36 +2937,54 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *test
 	}
 }
 
+// lateAsyncStartShutdown is what forceShutdownLateAsyncStart leaves for its
+// test to read.
+type lateAsyncStartShutdown struct {
+	sp     *lateAsyncStartListProvider
+	cr     *CityRuntime
+	cfg    *config.City
+	store  beads.Store
+	rowID  string
+	city   string
+	stderr *syncBuffer
+}
+
 // forceShutdownLateAsyncStart runs a forced controller shutdown over an async
-// start whose runtime comes up after the first stop snapshot (a forced
-// shutdown abandons its async-start wait and re-lists), and returns the
-// provider and the shutdown's captured stderr, so a failure can print what the
-// stop actually said. holdStartAfterRunning keeps the start's creating ->
-// active commit from landing before the late relist (see
-// lateAsyncStartListProvider).
-func forceShutdownLateAsyncStart(t *testing.T, holdStartAfterRunning time.Duration) (*lateAsyncStartListProvider, *syncBuffer) {
+// start of a row seeded with meta, whose runtime comes up after the first stop
+// snapshot (a forced shutdown abandons its async-start wait and re-lists), and
+// returns what it left, the shutdown's captured stderr with it, so a failure
+// can print what the stop actually said.
+//
+// With cancelFirst, the start's context is canceled before the shutdown runs,
+// as the supervisor cancels a city's context before its shutdown
+// (stopManagedCity), and the provider records the row its stop finds
+// (lateAsyncStartListProvider's readRow).
+func forceShutdownLateAsyncStart(t *testing.T, meta map[string]string, cancelFirst bool) lateAsyncStartShutdown {
 	t.Helper()
 	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 26, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
-		ID:     "gc-worker",
-		Title:  "worker",
-		Type:   sessionBeadType,
-		Labels: []string{sessionBeadLabel},
-		Metadata: creatingMeta(map[string]string{
-			"session_name":         "worker",
-			"template":             "worker",
-			"generation":           "1",
-			"continuation_epoch":   "1",
-			"instance_token":       "tok-worker",
-			"pending_create_claim": "true",
-		}),
+		ID:       "gc-worker",
+		Title:    "worker",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: meta,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sp := newLateAsyncStartListProvider(holdStartAfterRunning)
+	var readRow func() map[string]string
+	if cancelFirst {
+		readRow = func() map[string]string {
+			b, err := store.Get(session.ID)
+			if err != nil {
+				return map[string]string{"read_error": err.Error()}
+			}
+			return maps.Clone(b.Metadata)
+		}
+	}
+	sp := newLateAsyncStartListProvider(readRow)
 	cfg := &config.City{
 		Daemon: config.DaemonConfig{ShutdownTimeout: "500ms"},
 		Agents: []config.Agent{{Name: "worker"}},
@@ -2969,9 +3003,11 @@ func forceShutdownLateAsyncStart(t *testing.T, holdStartAfterRunning time.Durati
 		stdout:              ioDiscard{},
 		stderr:              stderr,
 	}
+	startCtx, cancelStart := context.WithCancel(context.Background())
+	t.Cleanup(cancelStart)
 	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
 	if got := executePlannedStartsTraced(
-		context.Background(),
+		startCtx,
 		[]startCandidate{{info: sessiontest.SeedBead(t, session), tp: tp}},
 		cfg,
 		map[string]TemplateParams{"worker": tp},
@@ -2993,38 +3029,70 @@ func forceShutdownLateAsyncStart(t *testing.T, holdStartAfterRunning time.Durati
 	}
 	sp.waitForStarts(t, 1)
 
+	if cancelFirst {
+		cancelStart()
+	}
 	cr.shutdown()
-	return sp, stderr
+	return lateAsyncStartShutdown{sp: sp, cr: cr, cfg: cfg, store: store, rowID: session.ID, city: testCity, stderr: stderr}
 }
 
 func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
-	sp, stderr := forceShutdownLateAsyncStart(t, 0)
+	run := forceShutdownLateAsyncStart(t, creatingMeta(map[string]string{
+		"session_name":         "worker",
+		"template":             "worker",
+		"generation":           "1",
+		"continuation_epoch":   "1",
+		"instance_token":       "tok-worker",
+		"pending_create_claim": "true",
+	}), false)
 
-	if sp.IsRunning("worker") {
-		t.Fatalf("force shutdown missed late async-started runtime; stderr:\n%s", stderr)
+	if run.sp.IsRunning("worker") {
+		t.Fatalf("force shutdown missed late async-started runtime; stderr:\n%s", run.stderr)
 	}
-	if sp.listCalls < 2 {
-		t.Fatalf("ListRunning calls = %d, want a second snapshot for force async-start cleanup", sp.listCalls)
+	if run.sp.listCalls < 2 {
+		t.Fatalf("ListRunning calls = %d, want a second snapshot for force async-start cleanup", run.sp.listCalls)
 	}
 }
 
-// The commit-late variant of the race above, made deterministic: the
-// provider's Start stays open past the runtime coming up, so the late relist
-// always stops the session while its row still reads creating (the
-// creating -> active commit cannot have landed). That is the forced-stop gap
-// ga-fqdzdy found: Suspend refused the creating row before any teardown, so
-// the stop errored and the live runtime survived the shutdown.
-func TestCityRuntimeForceShutdownRelistsLateAsyncStartCommittedLate(t *testing.T) {
-	sp, stderr := forceShutdownLateAsyncStart(t, 200*time.Millisecond)
+// ga-fqdzdy in the stop's own order: the supervisor cancels the city's context
+// before its shutdown runs, so a start whose provider Start launched the
+// runtime never commits, and the forced shutdown's late relist reaches that
+// runtime while its row still reads creating. Suspend refused that row before
+// any teardown, so the stop errored and the live runtime survived it. The stop
+// writes nothing to the row: the start leaves it creating with its in-flight
+// marker, which the next start's stuck-creating reap keeps for the reconciler
+// to relaunch (TestSweepStopOfAnAbandonedStartKeepsItForTheNextStart).
+func TestCityRuntimeForceShutdownStopsALateStartItCanceled(t *testing.T) {
+	run := forceShutdownLateAsyncStart(t, map[string]string{
+		"session_name":       "worker",
+		"template":           "worker",
+		"session_origin":     "manual",
+		"state":              "asleep",
+		"generation":         "1",
+		"continuation_epoch": "1",
+		"instance_token":     "tok-worker",
+	}, true)
 
-	if sp.IsRunning("worker") {
-		t.Fatalf("force shutdown missed a late async-started runtime whose row still read creating; stderr:\n%s", stderr)
+	if run.sp.IsRunning("worker") {
+		t.Fatalf("force shutdown missed the late started runtime; stderr:\n%s", run.stderr)
 	}
-	if msg := stderr.String(); strings.Contains(msg, "illegal transition") {
+	if msg := run.stderr.String(); strings.Contains(msg, "illegal transition") {
 		t.Fatalf("force shutdown hit an illegal transition stopping a still-creating row; stderr:\n%s", msg)
 	}
-	if sp.listCalls < 2 {
-		t.Fatalf("ListRunning calls = %d, want a second snapshot for force async-start cleanup", sp.listCalls)
+	row, stopped := run.sp.rowAtStop()
+	if !stopped || row["state"] != "creating" || row["last_woke_at"] == "" {
+		t.Fatalf("row as the late relist's stop found it = %v (stopped %v), want creating with its start's last_woke_at; stderr:\n%s", row, stopped, run.stderr)
+	}
+	if !run.cr.asyncStarts.wait(hangBudget) {
+		t.Fatal("the canceled start did not settle")
+	}
+	if settled := mustGetBead(t, run.store, run.rowID).Metadata; !maps.Equal(settled, row) {
+		t.Fatalf("row after the canceled start settled = %v, want it as the stop found it %v", settled, row)
+	}
+	reapClk := &clock.Fake{Time: time.Now().UTC().Add(2 * time.Minute)}
+	var log bytes.Buffer
+	if n := reapStaleSessionBeads(run.city, run.store, testSeatWork(run.city, run.cfg, run.store, nil), run.sp, newDrainTracker(), nil, reapClk, &log); n != 0 {
+		t.Fatalf("the next start's reap closed %d row(s) the stop left creating: %s", n, log.String())
 	}
 }
 

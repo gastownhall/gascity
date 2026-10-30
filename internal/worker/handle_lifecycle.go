@@ -171,9 +171,12 @@ func (h *SessionHandle) Stop(ctx context.Context, by sessionpkg.Actor) (err erro
 // it: it additionally tears down a DRAINING seat instead of rejecting it with an
 // illegal transition, because rejecting those made every restart skip them and
 // leave them alive holding their pool slot names (ga-rxhu2), and a CREATING
-// seat whose async start brought the runtime up but has not yet committed
-// creating -> active, because rejecting that made a forced stop's late re-list
-// error out and leave the live runtime running past the shutdown (ga-fqdzdy).
+// seat whose start brought the runtime up but has not committed it active,
+// because rejecting that made the stop error out and leave the live runtime
+// running past the shutdown (ga-fqdzdy). Neither writes the row: a creating
+// row keeps its in-flight marker for the next start to read. `gc rig restart`
+// sweeps a rig through this stop while the controller runs, so there the
+// teardown can land under a start still in flight (SESSION-START-026).
 //
 // Kept as a separate method rather than a flag on Stop so the latitude cannot
 // reach a targeted operator path by accident — that is exactly how it leaked

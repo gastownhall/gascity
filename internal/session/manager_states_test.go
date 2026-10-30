@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -210,19 +211,17 @@ func TestConformance_SuspendForShutdownPropagatesDrainingTeardownFailure(t *test
 	}
 }
 
-// ga-fqdzdy: a forced city stop abandons its async-start wait and re-lists, so
-// the shutdown sweep can reach an async start whose provider Start already
-// brought the runtime up while its row still reads creating (the creating ->
-// active commit lands only after Start returns). Rejecting that row made the
-// stop fail and the live runtime survive the shutdown, so the sweep tears the
-// runtime down like it does a draining seat — and, unlike draining, clears
-// last_woke_at first: PreWakePatch stamped it and CommitStartedPatch never
-// clears it, so a stamp left set over a stopped runtime would let a commit
-// landing after the sweep classify the deliberate stop as a rapid crash.
+// ga-fqdzdy: the shutdown sweep can reach a live runtime whose row still reads
+// creating (only the start's commit moves the row to active, and the city stop
+// cancels its starts first). Rejecting that row made the stop fail and the
+// live runtime survive the shutdown, so the sweep tears the runtime down like
+// it does a draining seat.
 //
-// The early return still writes NO lifecycle state: the row belongs to the
-// in-flight start, whose commit (creating -> active) or rollback
-// (failed-create) keeps owning it.
+// Like draining, it writes nothing, last_woke_at included: a start the stop
+// canceled never commits, so the next start settles the row the sweep leaves
+// and reads its marker. Its stuck-creating reap keeps a claimless row for the
+// relaunch (TestSweepStopOfAnAbandonedStartKeepsItForTheNextStart), and a
+// pending create, like this one, keeps its started-create lease.
 func TestConformance_SweepSuspendCreatingTearsDownRuntimeWithoutRewritingState(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -252,6 +251,10 @@ func TestConformance_SweepSuspendCreatingTearsDownRuntimeWithoutRewritingState(t
 			t.Fatalf("seeding %s: %v", k, err)
 		}
 	}
+	before, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
 
 	if err := m.Suspend(context.Background(), testActor(m, ActorSweep), id, false); err != nil {
 		t.Fatalf("sweep Suspend(creating) = %v, want nil (the runtime would survive the city stop)", err)
@@ -266,21 +269,11 @@ func TestConformance_SweepSuspendCreatingTearsDownRuntimeWithoutRewritingState(t
 	if err != nil {
 		t.Fatalf("get bead: %v", err)
 	}
-	if got := State(after.Metadata["state"]); got != StateCreating {
-		t.Errorf("state = %q, want %q — the in-flight start's commit/rollback owns the row", got, StateCreating)
+	if got, want := after.Metadata["last_woke_at"], seed["last_woke_at"]; got != want {
+		t.Errorf("last_woke_at = %q, want %q kept: it marks a start that has not committed, which the next start settles", got, want)
 	}
-	if got := after.Metadata["last_woke_at"]; got != "" {
-		t.Errorf("last_woke_at = %q, want empty: a commit landing after this teardown must not read it as a fresh wake", got)
-	}
-	for _, k := range []string{"pending_create_claim", "pending_create_started_at", "instance_token", "generation"} {
-		if got, want := after.Metadata[k], seed[k]; got != want {
-			t.Errorf("%s = %q, want %q — no lifecycle metadata may move under the sweep", k, got, want)
-		}
-	}
-	for _, k := range []string{"suspended_at", "sleep_reason"} {
-		if got := after.Metadata[k]; got != "" {
-			t.Errorf("%s = %q, want empty: this path performs no suspension", k, got)
-		}
+	if !maps.Equal(after.Metadata, before.Metadata) {
+		t.Errorf("metadata = %v, want it unchanged %v: the row is its start's, and the sweep writes nothing to it", after.Metadata, before.Metadata)
 	}
 }
 
@@ -333,9 +326,8 @@ func TestConformance_OperatorSuspendStillRejectsCreating(t *testing.T) {
 	}
 }
 
-// The same teardown-failure contract as draining above, plus the stamp: a
-// failed teardown restores the stamp the sweep cleared, so the row a creating
-// start still owns reads exactly as it did.
+// The same teardown-failure contract as draining above: a failed teardown is
+// the stop's error, never a refusal of the row, and the row reads as it did.
 func TestConformance_SweepSuspendCreatingPropagatesTeardownFailure(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -360,6 +352,10 @@ func TestConformance_SweepSuspendCreatingPropagatesTeardownFailure(t *testing.T)
 		}
 	}
 	sp.StopErrors = map[string]error{sessName: errors.New("provider refused the stop")}
+	before, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
 
 	err = m.Suspend(context.Background(), testActor(m, ActorSweep), id, false)
 	if err == nil {
@@ -375,11 +371,11 @@ func TestConformance_SweepSuspendCreatingPropagatesTeardownFailure(t *testing.T)
 	if err != nil {
 		t.Fatalf("get bead: %v", err)
 	}
-	if got := State(after.Metadata["state"]); got != StateCreating {
-		t.Errorf("state = %q, want %q", got, StateCreating)
-	}
 	if got := after.Metadata["last_woke_at"]; got != seededStamp {
-		t.Errorf("last_woke_at = %q, want the seeded %q restored after the failed stop", got, seededStamp)
+		t.Errorf("last_woke_at = %q, want the seeded %q", got, seededStamp)
+	}
+	if !maps.Equal(after.Metadata, before.Metadata) {
+		t.Errorf("metadata = %v, want it unchanged %v after the failed stop", after.Metadata, before.Metadata)
 	}
 }
 
@@ -531,38 +527,5 @@ func TestCanonicalLifecycleState(t *testing.T) {
 				t.Errorf("canonicalLifecycleState(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
-	}
-}
-
-// ga-fqdzdy: a forced city stop re-lists sessions and can reach an async start
-// whose runtime is up while its row still reads creating. The shutdown sweep
-// must tear that runtime down (writing no state) instead of refusing with an
-// illegal transition, or the runtime survives the stop.
-func TestReproSweepSuspendCreatingTearsDownRuntime(t *testing.T) {
-	store := beads.NewMemStore()
-	sp := runtime.NewFake()
-	m := newTestManager(t, store, sp)
-
-	id := createTestSession(t, m, "worker")
-	b, err := store.Get(id)
-	if err != nil {
-		t.Fatalf("get bead: %v", err)
-	}
-	sessName := b.Metadata["session_name"]
-	if err := sp.Start(context.Background(), sessName, runtime.Config{}); err != nil {
-		t.Fatalf("seeding runtime: %v", err)
-	}
-	if err := store.SetMetadata(id, "state", string(StateCreating)); err != nil {
-		t.Fatalf("set state creating: %v", err)
-	}
-
-	if err := m.Suspend(context.Background(), testActor(m, ActorSweep), id, false); err != nil {
-		t.Fatalf("sweep Suspend(creating) = %v, want nil (the runtime would survive the city stop)", err)
-	}
-	if sp.IsRunning(sessName) {
-		t.Errorf("runtime session %q still running after sweep Suspend(creating)", sessName)
-	}
-	if got := getState(t, m, id); got != StateCreating {
-		t.Errorf("state = %q, want %q: the async start's commit/rollback owns the row", got, StateCreating)
 	}
 }
