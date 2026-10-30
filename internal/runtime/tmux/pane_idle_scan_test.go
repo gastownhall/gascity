@@ -59,3 +59,34 @@ func TestPaneShowsIdlePromptMenuCursorRowIsNotIdle(t *testing.T) {
 		t.Errorf("PaneShowsIdlePrompt(%q, %q) = true, want false: a numbered menu's cursor row is not a ready prompt", codexTrustMenuLines, "› ")
 	}
 }
+
+// Codex echoes past user turns with its prompt glyph, so a dialog drawn below
+// transcript is not the only prefix line on screen. The bottom-most prompt line
+// is the live one; an echoed turn above the menu is history, not a composer.
+// Kills: a scan that skips the menu row and keeps looking for any other prompt
+// line.
+func TestPaneShowsIdlePromptMenuBelowEchoedTurnIsNotIdle(t *testing.T) {
+	tests := []struct {
+		name  string
+		lines []string
+	}{
+		{"folder trust below echoed turn", append([]string{"› Commit the staged API change", ""}, codexTrustMenuLines...)},
+		{"model switch below echoed turn", []string{
+			"› fix the flaky test",
+			"",
+			"  Approaching rate limits",
+			"  Switch to gpt-5.4-mini for lower credit usage?",
+			"› 1. Switch to gpt-5.4-mini",
+			"  2. Keep current model",
+			"  3. Keep current model (never show again)",
+			"  Press enter to confirm or esc to go back",
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if PaneShowsIdlePrompt(tt.lines, "› ") {
+				t.Errorf("PaneShowsIdlePrompt(%q, %q) = true, want false: the bottom-most prompt line is a menu cursor row", tt.lines, "› ")
+			}
+		})
+	}
+}

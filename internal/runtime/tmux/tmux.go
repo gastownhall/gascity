@@ -5210,19 +5210,17 @@ func promptLineRest(line, readyPromptPrefix string) (rest string, ok bool) {
 }
 
 // paneShowsReadyPrompt reports whether captured pane lines show a ready prompt
-// for promptPrefix: a line matching the prefix that is not the cursor row of a
-// numbered menu. A menu's selected option can carry the same glyph as the
-// composer ("› 1. Trust and continue"), but it is a pending choice: keys typed
-// into it are menu input and Enter picks the highlighted option. The dialog
-// layer's prompt-indicator scan rejects such rows the same way
-// (runtime.isNumberedMenuRow).
+// for promptPrefix. Only the bottom-most line matching the prefix decides:
+// agents echo past user turns with the same glyph, so earlier prompt lines are
+// transcript. That line is not ready when it is the cursor row of a numbered
+// menu: the selected option can carry the composer's glyph ("› 1. Trust and
+// continue"), but it is a pending choice, where typed keys are menu input and
+// Enter picks the highlighted option. The dialog layer's prompt-indicator scan
+// rejects such rows the same way (runtime.isNumberedMenuRow).
 func paneShowsReadyPrompt(lines []string, promptPrefix string) bool {
-	for i, line := range lines {
-		if !matchesPromptPrefix(line, promptPrefix) {
-			continue
-		}
-		if !isMenuCursorRow(lines, i, promptPrefix) {
-			return true
+	for i := len(lines) - 1; i >= 0; i-- {
+		if matchesPromptPrefix(lines[i], promptPrefix) {
+			return !isMenuCursorRow(lines, i, promptPrefix)
 		}
 	}
 	return false
