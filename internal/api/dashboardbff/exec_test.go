@@ -118,3 +118,20 @@ func TestCleanEnvPath(t *testing.T) {
 		})
 	}
 }
+
+// TestCleanEnvPathAdminOverride pins the operator escape hatch: a set
+// ADMIN_PATH is passed through verbatim, with nothing added, on every
+// platform — the deterministic expansion applies only when it is unset.
+func TestCleanEnvPathAdminOverride(t *testing.T) {
+	t.Parallel()
+	const admin = "/x/bin:/y/bin"
+	for _, goos := range []string{"darwin", "linux"} {
+		if got := cleanEnvPath(admin, t.TempDir(), goos); got != admin {
+			t.Errorf("cleanEnvPath(%q, home, %q) = %q, want %q verbatim", admin, goos, got, admin)
+		}
+	}
+	// An unset HOME must not turn the override into an expansion either.
+	if got := cleanEnvPath(admin, "", "darwin"); got != admin {
+		t.Errorf("cleanEnvPath(%q, \"\", \"darwin\") = %q, want %q verbatim", admin, got, admin)
+	}
+}
