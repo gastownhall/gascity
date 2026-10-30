@@ -3196,6 +3196,63 @@ func TestTryDeliverQueuedNudgesByPollerDeliversBusySession(t *testing.T) {
 	}
 }
 
+// TestTryDeliverQueuedNudgesByPollerSendsStarvedNudgeToQuietSessionByDefault
+// guards the quiet-session side of the starvation bypass (ga-atd7r2): a
+// session idle past the quiescence window opens the gate outright, and a
+// 10-minute-old due item — old enough to starve — still delivers on the
+// default path (Nudge, never NudgeNow). The bypass must change busy-session
+// behavior only.
+func TestTryDeliverQueuedNudgesByPollerSendsStarvedNudgeToQuietSessionByDefault(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", time.Now().Add(-10*time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	quietSince := time.Now().Add(-2 * time.Hour)
+	fake.Activity = map[string]time.Time{info.SessionName: quietSince}
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &quietSince}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, time.Hour, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if !delivered {
+		t.Fatal("delivered = false, want true")
+	}
+	if got := fake.CountCalls("Nudge", info.SessionName); got != 1 {
+		t.Fatalf("Nudge calls = %d, want 1", got)
+	}
+	if got := fake.CountCalls("NudgeNow", info.SessionName); got != 0 {
+		t.Fatalf("NudgeNow calls = %d, want 0: an open gate is the default path", got)
+	}
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 0/0/0", len(pending), len(inFlight), len(dead))
+	}
+}
+
 // TestTryDeliverQueuedNudgesByPollerAcksDeliveredUnobservedInsteadOfRetrying
 // guards ga-civwyz: when the provider reports
 // tmux.ErrNudgeSubmitDeliveredUnobserved (submit Enter delivered, composer
