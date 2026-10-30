@@ -305,27 +305,55 @@ func stampResolvedProviderSessionMetadata(meta map[string]string, resolved *conf
 	}
 }
 
+// resolvedProviderSwitched reports whether resolved reflects an actual
+// provider switch away from the stored "provider" value — i.e. resolution
+// clearly succeeded and named a different provider than what's on the bead.
+// This is the signal that distinguishes "resolution produced a legitimately
+// empty projection field because the new provider has no wrapped ancestor"
+// (switched == true: trust the new, possibly-empty value) from "resolution
+// failed or is a no-op re-resolve of the same provider" (switched == false:
+// never clobber a stored value with empty).
+func resolvedProviderSwitched(existing map[string]string, resolved *config.ResolvedProvider) bool {
+	if resolved == nil {
+		return false
+	}
+	name := strings.TrimSpace(resolved.Name)
+	return name != "" && existing["provider"] != name
+}
+
 // queueChangedResolvedProviderSessionMetadata queues the resolved-provider
 // projection fields (provider, provider_kind, builtin_ancestor) whenever the
 // freshly resolved value differs from what is stored, mirroring the command
 // refresh so a provider switch in agent.toml is reflected on the session bead
 // (gc-rhp36). It is diff-gated (no write when unchanged, honoring the
 // write-if-changed reconcile contract) and never clobbers a stored value with
-// an empty resolved one — a transient resolution failure must not wipe good
-// metadata.
+// an empty resolved one UNLESS the provider itself just switched (gc-8539):
+// a switch to a builtin-named provider (BuiltinAncestor == Name) legitimately
+// resolves provider_kind/builtin_ancestor to empty, and that empty value must
+// overwrite stale metadata from the old provider rather than being treated as
+// a transient resolution failure.
 func queueChangedResolvedProviderSessionMetadata(existing map[string]string, queue func(string, string), resolved *config.ResolvedProvider) {
 	if queue == nil || resolved == nil {
 		return
 	}
 	name := strings.TrimSpace(resolved.Name)
+	switched := resolvedProviderSwitched(existing, resolved)
 	if name != "" && existing["provider"] != name {
 		queue("provider", name)
 	}
-	if family := resolvedProviderFamilyMetadata(resolved); family != "" && existing["provider_kind"] != family {
-		queue("provider_kind", family)
+	if family := resolvedProviderFamilyMetadata(resolved); family != "" {
+		if existing["provider_kind"] != family {
+			queue("provider_kind", family)
+		}
+	} else if switched && existing["provider_kind"] != "" {
+		queue("provider_kind", "")
 	}
-	if ancestor := strings.TrimSpace(resolved.BuiltinAncestor); ancestor != "" && ancestor != name && existing["builtin_ancestor"] != ancestor {
-		queue("builtin_ancestor", ancestor)
+	if ancestor := strings.TrimSpace(resolved.BuiltinAncestor); ancestor != "" && ancestor != name {
+		if existing["builtin_ancestor"] != ancestor {
+			queue("builtin_ancestor", ancestor)
+		}
+	} else if switched && existing["builtin_ancestor"] != "" {
+		queue("builtin_ancestor", "")
 	}
 }
 
@@ -2363,14 +2391,32 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 		if tp.ResolvedProvider != nil {
 			queueChangedResolvedProviderSessionMetadata(b.Metadata, queueMeta, tp.ResolvedProvider)
-			if tp.ResolvedProvider.ResumeFlag != "" && b.Metadata["resume_flag"] != tp.ResolvedProvider.ResumeFlag {
-				queueMeta("resume_flag", tp.ResolvedProvider.ResumeFlag)
+			// providerSwitched: see resolvedProviderSwitched doc. A genuine
+			// provider switch (gc-8539) must let a legitimately-empty
+			// resolved value overwrite stale resume/session-id metadata
+			// from the OLD provider, rather than falling through to the
+			// stored value as if resolution had merely failed.
+			providerSwitched := resolvedProviderSwitched(b.Metadata, tp.ResolvedProvider)
+			if tp.ResolvedProvider.ResumeFlag != "" {
+				if b.Metadata["resume_flag"] != tp.ResolvedProvider.ResumeFlag {
+					queueMeta("resume_flag", tp.ResolvedProvider.ResumeFlag)
+				}
+			} else if providerSwitched && b.Metadata["resume_flag"] != "" {
+				queueMeta("resume_flag", "")
 			}
-			if tp.ResolvedProvider.ResumeStyle != "" && b.Metadata["resume_style"] != tp.ResolvedProvider.ResumeStyle {
-				queueMeta("resume_style", tp.ResolvedProvider.ResumeStyle)
+			if tp.ResolvedProvider.ResumeStyle != "" {
+				if b.Metadata["resume_style"] != tp.ResolvedProvider.ResumeStyle {
+					queueMeta("resume_style", tp.ResolvedProvider.ResumeStyle)
+				}
+			} else if providerSwitched && b.Metadata["resume_style"] != "" {
+				queueMeta("resume_style", "")
 			}
-			if tp.ResolvedProvider.ResumeCommand != "" && b.Metadata["resume_command"] != tp.ResolvedProvider.ResumeCommand {
-				queueMeta("resume_command", tp.ResolvedProvider.ResumeCommand)
+			if tp.ResolvedProvider.ResumeCommand != "" {
+				if b.Metadata["resume_command"] != tp.ResolvedProvider.ResumeCommand {
+					queueMeta("resume_command", tp.ResolvedProvider.ResumeCommand)
+				}
+			} else if providerSwitched && b.Metadata["resume_command"] != "" {
+				queueMeta("resume_command", "")
 			}
 			// session_id_flag is a peer projection field of resume_flag: the
 			// reactive startup-death strip (stripSessionIDFlag via
@@ -2379,8 +2425,12 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			// but no session_id_flag would replay a rejected first-start
 			// `--session-id <key>` command. Project it diff-gated so upgraded
 			// beads gain the flag in the same tick the key is backfilled.
-			if tp.ResolvedProvider.SessionIDFlag != "" && b.Metadata["session_id_flag"] != tp.ResolvedProvider.SessionIDFlag {
-				queueMeta("session_id_flag", tp.ResolvedProvider.SessionIDFlag)
+			if tp.ResolvedProvider.SessionIDFlag != "" {
+				if b.Metadata["session_id_flag"] != tp.ResolvedProvider.SessionIDFlag {
+					queueMeta("session_id_flag", tp.ResolvedProvider.SessionIDFlag)
+				}
+			} else if providerSwitched && b.Metadata["session_id_flag"] != "" {
+				queueMeta("session_id_flag", "")
 			}
 		}
 

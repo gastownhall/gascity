@@ -224,10 +224,26 @@ func refreshLaunchKeys(m session.MetadataPatch, tp TemplateParams, raw rowRefres
 	diff("command", tp.Command)
 	if p := tp.ResolvedProvider; p != nil {
 		queueChangedResolvedProviderSessionMetadata(raw, func(k, v string) { m[k] = v }, p)
+		// providerSwitched (gc-8539): see resolvedProviderSwitched doc. A
+		// genuine provider switch must let a legitimately-empty resolved
+		// value (e.g. switching TO a builtin-named provider) overwrite
+		// stale resume/session-id metadata from the OLD provider, instead
+		// of diff's default clobber-guard treating empty as a failed
+		// resolution and keeping the stale stored value.
+		providerSwitched := resolvedProviderSwitched(raw, p)
+		clobberClear := func(k, v string) {
+			if v == "" && providerSwitched && raw[k] != "" {
+				m[k] = ""
+			}
+		}
 		diff("resume_flag", p.ResumeFlag)
+		clobberClear("resume_flag", p.ResumeFlag)
 		diff("resume_style", p.ResumeStyle)
+		clobberClear("resume_style", p.ResumeStyle)
 		diff("resume_command", p.ResumeCommand)
+		clobberClear("resume_command", p.ResumeCommand)
 		diff("session_id_flag", p.SessionIDFlag)
+		clobberClear("session_id_flag", p.SessionIDFlag)
 	}
 	if raw["close_reason"] != "" || raw["closed_at"] != "" {
 		m["close_reason"], m["closed_at"] = "", ""
