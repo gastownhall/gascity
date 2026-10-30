@@ -5228,14 +5228,31 @@ func paneShowsReadyPrompt(lines []string, promptPrefix string) bool {
 
 // isMenuCursorRow reports whether lines[i], a line matching promptPrefix, is
 // the selected row of a numbered menu: the text after the prompt glyph is an
-// option label ("1. Trust and continue").
+// option label N ("1. Trust and continue") and the nearest non-blank line above
+// or below is option N-1 or N+1 ("  2. Quit"). Requiring the adjacent option
+// keeps a composer draft that merely starts with "1. " a prompt.
 func isMenuCursorRow(lines []string, i int, promptPrefix string) bool {
 	rest, ok := promptLineRest(lines[i], promptPrefix)
 	if !ok {
 		return false
 	}
-	_, ok = menuOptionNumber(rest)
-	return ok
+	n, ok := menuOptionNumber(rest)
+	if !ok {
+		return false
+	}
+	for _, step := range []int{-1, 1} {
+		for j := i + step; j >= 0 && j < len(lines); j += step {
+			neighbor := stripLeadingBoxBorder(strings.ReplaceAll(strings.TrimSpace(lines[j]), "\u00a0", " "))
+			if neighbor == "" {
+				continue
+			}
+			if m, ok := menuOptionNumber(neighbor); ok && (m == n-1 || m == n+1) {
+				return true
+			}
+			break
+		}
+	}
+	return false
 }
 
 // menuOptionNumber parses a numbered option label at the start of s: a run of
