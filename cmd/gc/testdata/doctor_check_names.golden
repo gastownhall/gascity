@@ -12,6 +12,7 @@ v2-workspace-name
 v2-prompt-template-suffix
 provider-catalog
 provider-catalog-local-readiness
+provider-args-append
 expanded-config-load
 implicit-import-cache
 deprecated-attachment-fields
