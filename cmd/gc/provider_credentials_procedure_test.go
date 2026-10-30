@@ -123,6 +123,10 @@ func TestSupervisorInstallAppliesTheSecretsFileCredential(t *testing.T) {
 // shell had — the old value, or nothing.
 func TestSupervisorStartDoesNotApplyTheSecretsFileCredential(t *testing.T) {
 	newSupervisorApplyTestEnv(t)
+	// A harness that overrides HOME (Bazel, CI sandboxes) trips the bare-start
+	// HOME guard before the child is ever built. The test's GC_HOME is a
+	// throwaway, which is exactly the isolated run that guard admits.
+	t.Setenv(supervisorIsolatedHomeEnv, "1")
 
 	oldAlive := supervisorAliveHook
 	supervisorAliveHook = func() int { return 4242 }
