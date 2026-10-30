@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
-	"unsafe"
 
 	gcruntime "github.com/gastownhall/gascity/internal/runtime"
 	"golang.org/x/sys/windows"
@@ -137,7 +136,7 @@ func verifyRunMapDirNotWritableByOthers(dir string) error {
 		if ace.Mask&rights == 0 {
 			continue
 		}
-		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart)).String()
+		sid := runMapAceSID(ace).String()
 		if sid == runMapDirOwnerRightsSID || runMapTrustedPrincipal(sid, userSID) {
 			continue
 		}

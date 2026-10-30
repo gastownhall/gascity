@@ -106,6 +106,7 @@ go_library(
         "cmd_hook_claim.go",
         "cmd_hook_claim_runmap_default_other.go",
         "cmd_hook_claim_runmap_default_windows.go",
+        "cmd_hook_claim_runmap_dir_ace_windows.go",
         "cmd_hook_claim_runmap_dir_other.go",
         "cmd_hook_claim_runmap_dir_windows.go",
         "cmd_hook_claim_runmap_other.go",
