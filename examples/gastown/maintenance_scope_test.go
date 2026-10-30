@@ -810,8 +810,12 @@ func TestReaperTypeSafeSessionPruneDeletesThroughBd(t *testing.T) {
 	if strings.Contains(f.read(t, f.doltLog), "DELETE FROM") {
 		t.Fatalf("type-safe session prune sent SQL DML:\n%s", f.read(t, f.doltLog))
 	}
-	if !strings.Contains(f.read(t, f.gcLog), "sessions-pruned:2") {
-		t.Fatalf("summary did not count the deleted sessions:\n%s", f.read(t, f.gcLog))
+	gcLog := f.read(t, f.gcLog)
+	if !strings.Contains(gcLog, "sessions-pruned:2") {
+		t.Fatalf("summary did not count the deleted sessions:\n%s", gcLog)
+	}
+	if strings.Contains(gcLog, "ESCALATION") {
+		t.Fatalf("a counted batch delete must not be escalated:\n%s", gcLog)
 	}
 }
 
