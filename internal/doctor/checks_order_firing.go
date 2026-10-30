@@ -604,7 +604,9 @@ func (c *OrderFiringCurrentCheck) latestOrderFiredAt(evts []events.Event, order 
 
 // latestOrderFiredAtUsing is latestOrderFiredAt against a caller-supplied
 // order-run resolver, so the classification loop can read prefetched results
-// instead of issuing each store round-trip inline.
+// instead of issuing each store round-trip inline. It trusts the event log
+// alone exactly while eventEvidenceSuffices — the classifier's overdue line —
+// says the log's answer settles the order.
 func (c *OrderFiringCurrentCheck) latestOrderFiredAtUsing(lastRun OrderFiringCurrentLastRunFunc, evts []events.Event, order orders.Order, expected, patrol time.Duration, now time.Time) (time.Time, error) {
 	latest := latestOrderFiredAt(evts, order.ScopedName())
 	if lastRun == nil {
@@ -623,11 +625,13 @@ func (c *OrderFiringCurrentCheck) latestOrderFiredAtUsing(lastRun OrderFiringCur
 }
 
 // eventEvidenceSuffices reports whether the event log alone answers "is this
-// order current". Anything else needs the authoritative order-run lookup: the
-// event log can lag, and a stale event must not be reported as a real outage
-// without confirmation.
-func eventEvidenceSuffices(latest time.Time, expected, _ time.Duration, now time.Time) bool {
-	return !latest.IsZero() && now.Sub(latest) < expected+expected/2
+// order current": it shares the classifier's overdue line
+// (orderFiringOverdueAfter), so evidence suffices exactly for the ages
+// classifyOrderFiring calls OK. Anything else needs the authoritative
+// order-run lookup: the event log can lag, and a stale event must not be
+// reported as a real outage without confirmation.
+func eventEvidenceSuffices(latest time.Time, expected, patrol time.Duration, now time.Time) bool {
+	return !latest.IsZero() && now.Sub(latest) < orderFiringOverdueAfter(expected, patrol)
 }
 
 // pendingLastRunOrders returns the monitored orders the event log cannot

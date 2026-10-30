@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -883,6 +884,87 @@ func TestOrderFiringCurrent_NeverFiredSubMinuteCooldown_StaysBlocking(t *testing
 	}
 	if details := strings.Join(result.Details, "\n"); !strings.Contains(details, "fast-cooldown: never fired since controller start 45s ago") {
 		t.Fatalf("details = %v, want the raw-interval never-fired line", result.Details)
+	}
+}
+
+// eventEvidenceSuffices shares the classifier's overdue line, so the event
+// log's answer is trusted exactly for the ages classifyOrderFiring calls OK:
+// neither the prefetch pass nor the inline path can skip the authoritative
+// order-run lookup for an order the classifier would flag.
+func TestEventEvidenceSufficesMatchesOverdueLine(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+
+	t.Run("suffices exactly while the classifier says OK", func(t *testing.T) {
+		for _, tc := range []struct {
+			expected time.Duration
+			patrol   time.Duration
+		}{
+			{time.Minute, 30 * time.Second},
+			{30 * time.Second, 15 * time.Second},
+			{4 * time.Hour, 30 * time.Second},
+		} {
+			line := orderFiringOverdueAfter(tc.expected, tc.patrol)
+			for _, offset := range []time.Duration{-time.Second, 0, time.Second} {
+				age := line + offset
+				latest := now.Add(-age)
+				suffices := eventEvidenceSuffices(latest, tc.expected, tc.patrol, now)
+				order := orders.Order{Name: "paced-order", Trigger: "cooldown"}
+				status, _, _ := classifyOrderFiring(order, now, tc.expected, tc.patrol, latest, now.Add(-24*time.Hour))
+				if wantOK := status == StatusOK; suffices != wantOK {
+					t.Fatalf("expected=%s patrol=%s age=%s: eventEvidenceSuffices=%v while classify=%v; evidence must suffice exactly when the classifier says OK", tc.expected, tc.patrol, age, suffices, status)
+				}
+			}
+		}
+		if eventEvidenceSuffices(time.Time{}, time.Minute, 30*time.Second, now) {
+			t.Fatal("eventEvidenceSuffices(zero latest) = true; a missing firing never suffices")
+		}
+	})
+
+	// The run-level half: for a 1m cooldown with the default 30s patrol
+	// (overdue line 2m15s), an order.fired event 2m old answers the check on
+	// its own — the order-run lookup is consulted neither by the prefetch
+	// pass nor inline — while one 2m15s old does trigger the lookup.
+	for _, tt := range []struct {
+		name       string
+		eventAge   time.Duration
+		wantCalls  int32
+		want       CheckStatus
+		wantDetail string
+	}{
+		{"event inside the line skips the lookup", 2 * time.Minute, 0, StatusOK, ""},
+		{"event at the line consults the lookup", 135 * time.Second, 1, StatusWarning, "(overdue)"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath, cfg := orderFiringTestCity(t)
+			writeOrderFiringTestOrder(t, cityPath, "paced-cooldown", "cooldown", "1m")
+			writeOrderFiringTestEvents(t, cityPath,
+				events.Event{Type: events.ControllerStarted, Ts: now.Add(-1 * time.Hour)},
+				events.Event{Type: events.OrderFired, Subject: "paced-cooldown", Ts: now.Add(-tt.eventAge)},
+			)
+
+			var calls int32
+			check := NewOrderFiringCurrentCheck(cfg, cityPath,
+				WithOrderFiringCurrentLastRunFunc(func(orders.Order) (time.Time, error) {
+					atomic.AddInt32(&calls, 1)
+					// No order-run bead: the event log is the only history.
+					return time.Time{}, nil
+				}))
+			check.clock = func() time.Time { return now }
+			result := check.Run(&CheckContext{CityPath: cityPath})
+
+			if got := atomic.LoadInt32(&calls); got < tt.wantCalls {
+				t.Fatalf("order-run lookups = %d, want at least %d; details = %v", got, tt.wantCalls, result.Details)
+			}
+			if got := atomic.LoadInt32(&calls); got > tt.wantCalls {
+				t.Fatalf("order-run lookups = %d, want exactly %d; details = %v", got, tt.wantCalls, result.Details)
+			}
+			if result.Status != tt.want {
+				t.Fatalf("status = %v, want %v; msg = %s; details = %v", result.Status, tt.want, result.Message, result.Details)
+			}
+			if tt.wantDetail != "" && !strings.Contains(strings.Join(result.Details, "\n"), tt.wantDetail) {
+				t.Fatalf("details = %v, want %q in the order's row", result.Details, tt.wantDetail)
+			}
+		})
 	}
 }
 
