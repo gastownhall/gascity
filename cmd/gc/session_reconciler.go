@@ -3358,7 +3358,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// runtime. A recovered ack with no tracked drain is cleared.
 					if alive && reconcilerOwnedAck && heldWorkDrainReason(ackReason) &&
 						liveClaimVetoApplies(cityPath, cfg, infoByID[id], suspState) {
-						if held, workID, _ := sessionHoldsAssignedWork(sw, infoByID[id]); held {
+						held, workID, err := sessionHoldsAssignedWork(sw, infoByID[id])
+						if err != nil {
+							fmt.Fprintf(stderr, "session reconciler: keeping %s from a %s drain: reading its assigned work: %v\n", name, ackReason, err) //nolint:errcheck
+						}
+						if held {
 							if !cancelSessionDrainIfInfo(infoByID[id], sp, dt, heldWorkDrainReason) {
 								_ = clearReconcilerDrainAckMetadata(sp, name)
 							}
@@ -5149,7 +5153,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// intents and eligibility as the live-claim veto below apply.
 			if heldWorkDrainReason(reason) && (intent == "" || intent == "idle-stop-pending") &&
 				liveClaimVetoApplies(cityPath, cfg, info, suspState) {
-				if held, workID, _ := sessionHoldsAssignedWork(sw, info); held {
+				held, workID, err := sessionHoldsAssignedWork(sw, info)
+				if err != nil {
+					fmt.Fprintf(stderr, "session reconciler: keeping %s from a %s drain: reading its assigned work: %v\n", name, reason, err) //nolint:errcheck
+				}
+				if held {
 					cancelSessionDrainIfInfo(info, sp, dt, heldWorkDrainReason)
 					clearCompletedIdleProbe(target.info.ID, dt)
 					if intent == "idle-stop-pending" {

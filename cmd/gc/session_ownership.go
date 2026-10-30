@@ -138,10 +138,15 @@ func claimedWorkStillHeldBy(work beads.Bead, sessionID string) bool {
 
 // sessionHoldsAssignedWork reports the first open or in-progress work bead
 // assigned to info's ReleaseScope on sw's legs, blocked work included: work the
-// seat holds but has no wake reason to run yet.
+// seat holds but has no wake reason to run yet. It fails closed: a leg that
+// could not be read, with no confirmed hit elsewhere, reports held with the
+// read error.
 func sessionHoldsAssignedWork(sw *SeatWork, info sessionpkg.Info) (held bool, beadID string, err error) {
 	b, ok, err := sw.first(seatWorkQuery{scope: releaseScope(info, sw.Legs().cfg), statuses: seatWorkStatuses})
-	return ok, b.ID, err
+	if !ok && err != nil {
+		return true, "", err
+	}
+	return ok, b.ID, nil
 }
 
 // heldWorkDrainReason reports whether reason is a timer drain that a seat
