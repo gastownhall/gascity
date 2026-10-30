@@ -11840,6 +11840,62 @@ esac`,
 	}
 }
 
+// TestGateSweepFailsLoudWhenRigsCannotBeListed verifies that a sweep that
+// cannot list the rigs still sweeps the city store, says on stderr that the
+// rig stores were not checked, and fails the run instead of quietly
+// narrowing to the city store.
+func TestGateSweepFailsLoudWhenRigsCannotBeListed(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		setup  func(t *testing.T, binDir string, env map[string]string)
+		reason string
+	}{
+		{
+			name: "gc rig list fails",
+			setup: func(_ *testing.T, _ string, env map[string]string) {
+				env["FAKE_RIG_LIST_FAIL"] = "1"
+			},
+			reason: "gc rig list",
+		},
+		{
+			name: "jq is not installed",
+			setup: func(t *testing.T, binDir string, env map[string]string) {
+				for _, tool := range []string{"bash", "cat", "date", "dirname", "head", "mktemp", "rm", "sed"} {
+					target, err := exec.LookPath(tool)
+					if err != nil {
+						t.Fatalf("LookPath(%s): %v", tool, err)
+					}
+					if err := os.Symlink(target, filepath.Join(binDir, tool)); err != nil {
+						t.Fatalf("Symlink(%s): %v", tool, err)
+					}
+				}
+				env["PATH"] = binDir
+			},
+			reason: "jq",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir, bdLog, env := gateSweepEnv(t)
+			writeGateSweepScopeBd(t, binDir, "")
+			env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api"}]}`
+			tc.setup(t, binDir, env)
+
+			var stdout, stderr bytes.Buffer
+			cmd := scriptCmd("", coreScriptPath("gate-sweep.sh"), env)
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err == nil {
+				t.Fatalf("gate-sweep exited 0 though it could not list the rigs\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+			}
+			report := gateSweepReport(stderr.String(), "rig stores were not checked")
+			if len(report) == 0 || !strings.Contains(report[0], tc.reason) {
+				t.Errorf("stderr does not say the rig stores were not checked because of %s:\n%s", tc.reason, stderr.String())
+			}
+			requireGateSweepChecked(t, readGateSweepLog(t, bdLog), "city")
+		})
+	}
+}
+
 // TestGateSweepToleratesRigGhGateBdFailures verifies the gh-gate tolerance
 // holds per store: a rig's failing gh check neither fails the run nor stops
 // the next rig's sweep.
