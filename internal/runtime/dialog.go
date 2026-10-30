@@ -2065,8 +2065,8 @@ func containsCreditBalanceStop(lower string) bool {
 	lines := strings.Split(lower, "\n")
 	for i, line := range lines {
 		body := creditErrorBody(line)
-		if strings.HasPrefix(body, creditBalanceStopPhrase) ||
-			strings.HasPrefix(body, creditBalanceStopHeadlessPhrase) {
+		if isCreditBalanceStopLine(body, creditBalanceStopPhrase) ||
+			isCreditBalanceStopLine(body, creditBalanceStopHeadlessPhrase) {
 			return true
 		}
 		if strings.HasPrefix(body, apiClientErrorPrefix) &&
@@ -2075,6 +2075,19 @@ func containsCreditBalanceStop(lower string) bool {
 		}
 	}
 	return false
+}
+
+// isCreditBalanceStopLine reports whether an error body is the stop phrase on
+// its own or followed only by Claude Code's " · " remedy separator (whatever
+// the remedy text, billing host, or clipping after it). Prose that wraps the
+// phrase to the start of a line continues with words and does not match.
+func isCreditBalanceStopLine(body, phrase string) bool {
+	rest, ok := strings.CutPrefix(body, phrase)
+	if !ok {
+		return false
+	}
+	rest = strings.TrimSpace(rest)
+	return rest == "" || strings.HasPrefix(rest, "·")
 }
 
 // apiErrorBlock joins an API error line (lines[0]) with its wrapped

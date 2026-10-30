@@ -1988,6 +1988,38 @@ func TestProviderTerminalErrorReasonCreditBalance(t *testing.T) {
 			"",
 			"> ",
 		}, "\n"), want: "quota_exceeded"},
+		{name: "grep hit on the tui stop", content: "internal/runtime/x.go:12:  // Credit balance too low · Add funds", want: ""},
+		{name: "grep hit on the headless stop", content: "docs/x.md:3:Credit balance is too low", want: ""},
+		{name: "mid-line prose with the headless phrase", content: "The run stopped: credit balance is too low on that key.", want: ""},
+		{name: "mid-line prose with the tui phrase", content: "I saw Credit balance too low earlier", want: ""},
+		{name: "wrapped prose starting a line with the tui phrase", content: strings.Join([]string{
+			"The alert went out because the",
+			"credit balance too low warning fired",
+		}, "\n"), want: ""},
+		{name: "wrapped prose starting a line with the headless phrase", content: strings.Join([]string{
+			"I doubt the",
+			"credit balance is too low to matter here",
+		}, "\n"), want: ""},
+		{name: "api sentence in prose", content: "The docs say: Your credit balance is too low to access the Anthropic API.", want: ""},
+		{name: "api sentence on an unindented line after an api error", content: strings.Join([]string{
+			"  ⎿  API Error: 400 bad request",
+			"Your credit balance is too low to access the Anthropic API.",
+		}, "\n"), want: ""},
+		{name: "api sentence after a blank line following an api error", content: strings.Join([]string{
+			"  ⎿  API Error: 400 bad request",
+			"",
+			"     Your credit balance is too low to access the Anthropic API.",
+		}, "\n"), want: ""},
+		{name: "api sentence past the continuation bound", content: strings.Join([]string{
+			"  ⎿  API Error: 400 bad request",
+			"     one",
+			"     two",
+			"     three",
+			"     four",
+			"     five",
+			"     Your credit balance is too low to access the Anthropic API.",
+		}, "\n"), want: ""},
+		{name: "api sentence under a 5xx api error", content: "  ⎿  API Error: 529 Your credit balance is too low to access the Anthropic API.", want: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
