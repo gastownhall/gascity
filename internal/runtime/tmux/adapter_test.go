@@ -1016,6 +1016,51 @@ func TestProvider_RecyclesDeadPaneWithoutProcessNames(t *testing.T) {
 	}
 }
 
+// A session whose agent has exited stays listed (remain-on-exit) with an empty
+// #{pane_pid} on tmux 3.8. Resolving its input pane and nudging it must not
+// fail with "no panes found" in a populated pane list.
+func TestProvider_NudgeResolvesDeadPane(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = testSocketName
+	// A dead pane never looks idle, so Nudge's best-effort idle wait would run
+	// its whole default window before sending.
+	cfg.NudgeIdleTimeout = time.Second
+	p := NewProviderWithConfig(cfg)
+	name := "gc-test-dead-pane-nudge"
+	_ = p.Stop(name)
+	defer func() { _ = p.Stop(name) }()
+
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command: "sleep 0.1",
+		WorkDir: t.TempDir(),
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	waitForValue(t, "session state", "dead", func() string {
+		has, err := p.Tmux().HasSession(name)
+		if err != nil {
+			t.Fatalf("HasSession: %v", err)
+		}
+		if has && !p.IsRunning(name) {
+			return "dead"
+		}
+		return "alive"
+	})
+
+	target, err := p.Tmux().agentInputTarget(name)
+	if err != nil || target == "" {
+		t.Fatalf("agentInputTarget = (%q, %v), want the dead agent pane", target, err)
+	}
+	if err := p.Nudge(name, runtime.TextContent("hello")); err != nil {
+		t.Fatalf("Nudge to a dead agent pane: %v", err)
+	}
+}
+
 func TestProviderObserveLivenessKeepsZombieShellVisible(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
