@@ -30,6 +30,8 @@ go_library(
         "name_claim_sweep.go",
         "named_config.go",
         "names.go",
+        "orphan_gate_other.go",
+        "orphan_gate_windows.go",
         "overlay.go",
         "pending_create_lease.go",
         "persisted_response.go",

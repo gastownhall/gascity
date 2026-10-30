@@ -494,10 +494,13 @@ func TestCreateLeavesAnInfrastructureRootAloneAndStarts(t *testing.T) {
 
 // TestCreateRefusesStartWhenAnOrphanCannotBeClassified is the regression test
 // for a root whose command line could not be read passing the infrastructure
-// fence as "not infrastructure". It must be neither terminated nor passed
-// over: the start is refused, as for an orphan that could not be confirmed
-// dead.
+// fence as "not infrastructure". Where orphan scan errors refuse the start
+// (Windows), it must be neither terminated nor passed over: the start is
+// refused, as for an orphan that could not be confirmed dead.
 func TestCreateRefusesStartWhenAnOrphanCannotBeClassified(t *testing.T) {
+	if !orphanScanErrorsRefuseStart {
+		t.Skip("orphan scan errors refuse the start only on Windows")
+	}
 	setRootIsCityInfrastructure(t, func(runtime.LiveRuntime) (bool, error) {
 		return false, errors.New("command line unreadable")
 	})
@@ -516,6 +519,88 @@ func TestCreateRefusesStartWhenAnOrphanCannotBeClassified(t *testing.T) {
 		if strings.HasPrefix(e, "terminate:") || strings.HasPrefix(e, "start:") {
 			t.Fatalf("events = %v; a root that could not be classified must be neither terminated nor started beside", sp.events)
 		}
+	}
+}
+
+// TestCreateLeavesAnUnclassifiableRootRunningAndStarts is the same root where
+// orphan scan errors do not refuse the start: the classification failure is
+// logged, the root is left running rather than terminated on a command line
+// nobody read, and the replacement starts.
+func TestCreateLeavesAnUnclassifiableRootRunningAndStarts(t *testing.T) {
+	if orphanScanErrorsRefuseStart {
+		t.Skip("orphan scan errors refuse the start on this platform")
+	}
+	setRootIsCityInfrastructure(t, func(runtime.LiveRuntime) (bool, error) {
+		return false, errors.New("command line unreadable")
+	})
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{
+		Fake:    runtime.NewFake(),
+		results: []runtime.LiveRuntime{{PID: 1234, StartIdentity: "7"}},
+	}
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	want := []string{"find:" + info.ID, "start:" + info.ID}
+	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+}
+
+// TestCreateStartsAfterAPartialOrphanScan pins a scan that returned a root and
+// an error, where orphan scan errors do not refuse the start: the root the scan
+// did surface is terminated, the error is logged, and the replacement starts.
+func TestCreateStartsAfterAPartialOrphanScan(t *testing.T) {
+	if orphanScanErrorsRefuseStart {
+		t.Skip("orphan scan errors refuse the start on this platform")
+	}
+	setRootIsCityInfrastructure(t, func(runtime.LiveRuntime) (bool, error) { return false, nil })
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{
+		Fake:    runtime.NewFake(),
+		findErr: errors.New("partial scan failed"),
+		results: []runtime.LiveRuntime{{PID: 1234, StartIdentity: "7"}},
+	}
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	want := append(orphanGateEvents(info.ID), "start:"+info.ID)
+	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+}
+
+// TestCreateRefusesStartAfterAPartialOrphanScan is the same scan where orphan
+// scan errors refuse the start (Windows): the root it did surface is still
+// terminated, but the start is refused on the scan error.
+func TestCreateRefusesStartAfterAPartialOrphanScan(t *testing.T) {
+	if !orphanScanErrorsRefuseStart {
+		t.Skip("orphan scan errors refuse the start only on Windows")
+	}
+	setRootIsCityInfrastructure(t, func(runtime.LiveRuntime) (bool, error) { return false, nil })
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{
+		Fake:    runtime.NewFake(),
+		findErr: errors.New("partial scan failed"),
+		results: []runtime.LiveRuntime{{PID: 1234, StartIdentity: "7"}},
+	}
+	mgr := NewManagerWithOptions(store, sp)
+
+	_, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err == nil || !strings.Contains(err.Error(), "partial scan failed") {
+		t.Fatalf("Create error = %v, want a refusal carrying the scan error", err)
+	}
+	if !slices.Equal(sp.terminatedPIDs, []int{1234}) {
+		t.Fatalf("terminated PIDs %v, want [1234]: the root a partial scan surfaced is still terminated; events = %v", sp.terminatedPIDs, sp.events)
+	}
+	if hasEventPrefix(sp.events, "start:") {
+		t.Fatalf("Start was attempted after a partial scan; events = %v", sp.events)
 	}
 }
 

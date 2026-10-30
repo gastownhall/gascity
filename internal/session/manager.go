@@ -721,12 +721,12 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 // a non-nil error when an orphan could not be confirmed dead, so callers gating
 // a Start can refuse rather than race a survivor for the same work.
 //
-// A scan error is also fatal to the gate, and joined with any termination
-// failures rather than logged. The roots the scan did surface are still killed
-// first — a partial result is worth acting on — but an incomplete scan cannot
-// establish the one fact this gate exists to establish. Logging it and
-// returning nil said "failing closed" while doing the opposite: every guarded
-// Start proceeded on a scan that never ran.
+// The roots a failed scan did surface are still killed: a partial result is
+// worth acting on. Where orphanScanErrorsRefuseStart is set (Windows), the scan
+// error is then fatal to the gate too, joined with any termination failures
+// rather than logged, because an incomplete scan cannot establish the one fact
+// this gate exists to establish. Elsewhere it is only logged, as
+// ProcessTableScanner allows.
 //
 // On Windows the gate also refuses while a session a more elevated gc started
 // in this city could still be running, since the scan here cannot read it, and
@@ -773,6 +773,10 @@ const maxOrphanPasses = 3
 // terminates each, reporting how many it terminated.
 func (m *Manager) killOrphanPass(scanner runtime.ProcessTableScanner, sessionID, cityPath string) (int, error) {
 	found, scanErr := scanner.FindRuntimesBySessionID(sessionID)
+	if scanErr != nil && !orphanScanErrorsRefuseStart {
+		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %v", sessionID, scanErr)
+		scanErr = nil
+	}
 	var termErrs []error
 	terminated := 0
 	for _, live := range found {
@@ -787,12 +791,16 @@ func (m *Manager) killOrphanPass(scanner runtime.ProcessTableScanner, sessionID,
 		// db-proxy-child started from this session's shell. Terminating it
 		// signals its process group and takes the city's Dolt server down
 		// (#6316), so a same-session restart must never reach it. A root that
-		// cannot be classified is neither spared nor terminated, and the start
-		// is refused: the survivor may be this session's runtime.
+		// cannot be classified is left running rather than terminated on a
+		// command line nobody read; where orphanScanErrorsRefuseStart is set
+		// the start is then refused, since the survivor may be this session's
+		// runtime.
 		infrastructure, err := rootIsCityInfrastructure(live)
 		if err != nil {
 			log.Printf("session: leaving process-table root for %s pid=%d running: %v", sessionID, live.PID, err)
-			termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))
+			if orphanScanErrorsRefuseStart {
+				termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))
+			}
 			continue
 		}
 		if infrastructure {
