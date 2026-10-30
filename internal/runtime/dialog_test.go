@@ -1926,3 +1926,58 @@ func TestContainsFeedbackSurveyModal(t *testing.T) {
 		})
 	}
 }
+
+// TestProviderTerminalErrorReasonCreditBalance pins the exhausted-credit arm:
+// Claude Code's credit stop, shown as its own error line, is a terminal
+// quota_exceeded error, while text that only quotes the phrasing is not.
+// Multi-line fixtures are joined from quoted strings so viewing this file in a
+// pane never renders a matching stop line itself.
+func TestProviderTerminalErrorReasonCreditBalance(t *testing.T) {
+	t.Parallel()
+	const tuiStop = "  ⎿  Credit balance too low · Add funds: https://platform.claude.com/settings/billing"
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{name: "tui stop after a tool call", content: strings.Join([]string{
+			"⏺ Bash(make test)",
+			tuiStop,
+			"",
+			"╭──────────────────────────────╮",
+			"│ >                            │",
+			"╰──────────────────────────────╯",
+			"  ? for shortcuts",
+		}, "\n"), want: "quota_exceeded"},
+		{name: "tui stop alone", content: tuiStop, want: "quota_exceeded"},
+		{name: "tui stop with ascii marker padding", content: "  ⎿  Credit balance too low · Add funds: https://platform.claude.com/settings/billing", want: "quota_exceeded"},
+		{name: "tui stop without marker", content: "Credit balance too low · Add funds: https://platform.claude.com/settings/billing", want: "quota_exceeded"},
+		{name: "tui stop with url clipped", content: "  ⎿  Credit balance too low · Add fu", want: "quota_exceeded"},
+		{name: "tui stop clipped at separator", content: "  ⎿  Credit balance too low ·", want: "quota_exceeded"},
+		{name: "tui stop upper case", content: "  ⎿  CREDIT BALANCE TOO LOW · ADD FUNDS", want: "quota_exceeded"},
+		{name: "headless stop alone", content: "Credit balance is too low", want: "quota_exceeded"},
+		{name: "headless stop after output", content: strings.Join([]string{
+			"Reading files...",
+			"Credit balance is too low",
+		}, "\n"), want: "quota_exceeded"},
+		{name: "headless stop under marker", content: "  ⎿  Credit balance is too low", want: "quota_exceeded"},
+		{name: "startup death error", content: strings.Join([]string{
+			`session died during startup: session "worker"; last pane output:`,
+			"⎿  Credit balance too low · Add funds: https://platform.claude.com/settings/billing",
+		}, "\n"), want: "quota_exceeded"},
+		{name: "startup death error with diagnostic", content: strings.Join([]string{
+			`session died during startup: session "worker"; diagnostic written to /tmp/city/.gc/crash/worker.log; last pane output:`,
+			"⎿  Credit balance too low · Add funds: https://platform.claude.com/settings/billing",
+			"",
+			"> ",
+		}, "\n"), want: "quota_exceeded"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ProviderTerminalErrorReason(tt.content); got != tt.want {
+				t.Errorf("ProviderTerminalErrorReason(%q) = %q, want %q", tt.content, got, tt.want)
+			}
+		})
+	}
+}
