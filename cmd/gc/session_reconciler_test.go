@@ -15341,3 +15341,57 @@ func TestReconcileSessionBeads_LaunchOnlyDriftRelaunchesRigScopedNamedSession(t 
 		t.Errorf("started_config_hash = %q, want rebaselined %q", got, want)
 	}
 }
+
+// An asleep named session of a generic scope="rig" agent whose config drifted
+// gets the asleep named-session drift repair in place, without waking, as a
+// city-scoped named session does.
+func TestReconcileSessionBeads_AsleepGenericRigNamedSessionDriftRepair(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "rig-0", Path: t.TempDir()}},
+		Agents: []config.Agent{{
+			Name:         "smith",
+			Scope:        "rig",
+			StartCommand: "new-cmd",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "smith", Dir: "rig-0", Mode: "on_demand"}},
+	}
+	const identity = "rig-0/smith"
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, identity)
+	oldRuntime := runtime.Config{Command: "old-cmd"}
+	session := env.createSessionBead(sessionName, identity)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: identity,
+		namedSessionModeMetadata:     "on_demand",
+		"session_key":                "old-provider-conversation",
+		"started_config_hash":        runtime.CoreFingerprint(oldRuntime),
+		"started_live_hash":          runtime.LiveFingerprint(oldRuntime),
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open (repair in place on the same bead)", got.Status)
+	}
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q started during asleep config-drift repair; want no wake", sessionName)
+	}
+	if got.Metadata["state"] != "asleep" {
+		t.Fatalf("state = %q, want asleep after non-live drift repair", got.Metadata["state"])
+	}
+	if got.Metadata["started_config_hash"] != "" {
+		t.Fatalf("started_config_hash = %q, want cleared so next wake uses fresh config; stderr=%s", got.Metadata["started_config_hash"], env.stderr.String())
+	}
+	if got.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want true for unified restart handoff", got.Metadata["continuation_reset_pending"])
+	}
+	if got.Metadata["session_key"] == "old-provider-conversation" {
+		t.Fatalf("session_key still points at old provider conversation after config-drift repair")
+	}
+}

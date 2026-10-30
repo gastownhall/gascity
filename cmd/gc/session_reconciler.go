@@ -4273,7 +4273,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 			storedHash := infoByID[id].StartedConfigHash
 			if template != "" && storedHash != "" {
-				if cfgAgent := findAgentByTemplate(cfg, template); cfgAgent != nil {
+				if cfgAgent := findSessionAgentByTemplate(cfg, template); cfgAgent != nil {
 					agentCfg := sessionCoreConfigForHashInfo(tp, infoByID[id])
 					currentHash := runtime.CoreFingerprint(agentCfg)
 					if storedHash != currentHash {
