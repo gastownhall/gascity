@@ -1,0 +1,18 @@
+● Bash(grep -n "Esc to cancel" notes.txt)
+  ⎿  12:Enter to select · ↑/↓ to navigate · Esc to cancel
+     13:Ready to submit your answers?
+     14:❯ 1. Submit answers
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+Ready to submit your answers?
+❯ 1. Submit answers
+  2. Cancel
+
+● The footer text is quoted above; this seat is working, not on a menu.
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  agent | main | Opus 5 | ctx: 40% | 5h █░░░▎░░░░░ 12% | 7d ▎░░░░░░░░░ 6%                /rc
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

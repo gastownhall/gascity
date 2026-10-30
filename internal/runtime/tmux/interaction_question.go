@@ -65,6 +65,12 @@ import (
 // existed.
 
 var (
+	askUserQuestionCursorRe   = regexp.MustCompile(`^❯\s+(.+)$`)
+	askUserQuestionReviewTail = []*regexp.Regexp{
+		regexp.MustCompile(`^(?:❯\s+)?2\.\s*Cancel$`),
+		regexp.MustCompile(`^(?:❯\s+)?1\.\s*Submit answers$`),
+		regexp.MustCompile(`^Ready to submit your answers\?$`),
+	}
 	// askUserQuestionFooterRe matches the select footer on its trimmed row, or
 	// on the single-spaced join of the rows a narrow pane wrapped it across.
 	askUserQuestionFooterRe = regexp.MustCompile(`^Enter to select\b.*\bEsc to cancel$`)
@@ -82,6 +88,7 @@ var (
 )
 
 const (
+	askUserQuestionTailSpan = 2
 	// askUserQuestionFooterWrapRows is how many rows from the pane's bottom
 	// the select footer may span: its own row plus the adjacent rows a
 	// narrow pane wraps it onto, joined to match askUserQuestionFooterRe.
@@ -116,9 +123,138 @@ type parsedQuestion struct {
 	Collapsed     bool
 }
 
+// parseAskUserQuestion returns the open AskUserQuestion dialog the pane lines
+// show, or nil when they show none.
+func parseAskUserQuestion(lines []string) *parsedQuestion {
+	footer := askUserQuestionFooter(lines)
+	if footer < 0 {
+		footer = askUserQuestionReviewEnd(lines)
+	}
+	if footer < 0 {
+		return nil
+	}
+
+	header := -1
+	for i := footer - 1; i >= 0 && footer-i <= questionDialogMaxRows; i-- {
+		if askUserQuestionHeaderRe.MatchString(lines[i]) {
+			header = i
+			break
+		}
+	}
+	if header < 0 {
+		return nil
+	}
+
+	q := &parsedQuestion{Header: strings.TrimSpace(askUserQuestionHeaderRe.FindStringSubmatch(lines[header])[1])}
+	var question []string
+	var continuations [][]string
+	focused := false
+	for _, line := range lines[header+1 : footer] {
+		trimmed := strings.TrimSpace(line)
+		if m := askUserQuestionOptionRe.FindStringSubmatch(trimmed); m != nil {
+			label := strings.TrimSpace(m[3])
+			if q.FreeNumber > 0 && label == "Chat about this" {
+				q.ChatNumber, _ = strconv.Atoi(m[2])
+			}
+			q.Choices = append(q.Choices, label)
+			continuations = append(continuations, nil)
+			number, _ := strconv.Atoi(m[2])
+			q.Numbers = append(q.Numbers, number)
+			if m[1] != "" {
+				focused = true
+				q.Focused = label
+				q.FocusedNumber = number
+			}
+			continue
+		}
+		if len(q.Choices) > 0 {
+			if m := askUserQuestionCursorRe.FindStringSubmatch(trimmed); m != nil {
+				focused = true
+				q.Focused = strings.TrimSpace(m[1])
+				q.FocusedNumber = 0
+				continue
+			}
+		}
+		if strings.HasPrefix(trimmed, "──") && len(q.Choices) > 0 {
+			last := len(q.Choices) - 1
+			q.FreeNumber = q.Numbers[last]
+			if q.Choices[last] != "Type something." {
+				q.Draft = strings.Join(append([]string{q.Choices[last]}, continuations[last]...), "\n")
+			}
+			q.Choices[last] = "Type something."
+		}
+		if len(q.Choices) > 0 && q.FreeNumber == 0 && trimmed != "" && !strings.HasPrefix(trimmed, "──") {
+			last := len(continuations) - 1
+			continuations[last] = append(continuations[last], trimmed)
+		}
+		if len(q.Choices) == 0 && trimmed != "" {
+			question = append(question, strings.TrimSpace(strings.TrimPrefix(trimmed, "│")))
+		}
+	}
+	if !focused {
+		return nil
+	}
+	q.Question = strings.Join(question, " ")
+	return q
+}
+
+// askUserQuestionFooter walks up from the bottom to the select footer,
+// allowing only the dialog's own trailing rows below it, and returns its row,
+// or -1.
+func askUserQuestionFooter(lines []string) int {
+	seen := 0
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" {
+			continue
+		}
+		if askUserQuestionFooterRe.MatchString(trimmed) {
+			return i
+		}
+		seen++
+		if seen >= askUserQuestionTailSpan || strings.HasPrefix(trimmed, "❯") || strings.HasPrefix(trimmed, ">") {
+			return -1
+		}
+	}
+	return -1
+}
+
+// askUserQuestionReviewEnd returns the row just below a review screen whose
+// fixed rows end the pane, or -1. Like the select footer, they may carry the
+// dialog's own trailing row (a named session's rule, "──── name ─"), but no
+// more: an answered review stays in scrollback above the agent's output or
+// the composer.
+func askUserQuestionReviewEnd(lines []string) int {
+	end, matched, seen := -1, 0, 0
+	for i := len(lines) - 1; i >= 0 && matched < len(askUserQuestionReviewTail); i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" {
+			continue
+		}
+		if askUserQuestionReviewTail[matched].MatchString(trimmed) {
+			if end < 0 {
+				end = i + 1
+			}
+			matched++
+			continue
+		}
+		seen++
+		if matched > 0 || seen >= askUserQuestionTailSpan || strings.HasPrefix(trimmed, "❯") || strings.HasPrefix(trimmed, ">") {
+			return -1
+		}
+	}
+	if matched < len(askUserQuestionReviewTail) {
+		return -1
+	}
+	return end
+}
+
 // parseQuestionDialog returns the open AskUserQuestion dialog the pane lines
 // show — its question page or its review page — or nil when they show none.
 func parseQuestionDialog(lines []string) *parsedQuestion {
+	if q := parseAskUserQuestion(lines); q != nil {
+		return q
+	}
 	if q := parseQuestionPage(lines); q != nil {
 		return q
 	}
@@ -266,8 +402,10 @@ func parseReviewPage(lines []string) *parsedQuestion {
 			return nil
 		}
 		q.Choices = append(q.Choices, labels[k])
+		q.Numbers = append(q.Numbers, k+1)
 		if m[1] != "" {
 			q.Focused = labels[k]
+			q.FocusedNumber = k + 1
 		}
 	}
 	// The menu alone could be quoted history at the pane's bottom; the page
