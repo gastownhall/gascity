@@ -12479,7 +12479,10 @@ fi
 // foreign-identity gate (orphanSweepGateStubArm). ORPHAN_SWEEP_GATE_EXIT makes
 // it answer "unknown" with that exit code instead, and ORPHAN_SWEEP_GATE_ABSENT
 // models a binary without the verb (exit 1, no JSON). ORPHAN_SWEEP_MAIL_EXIT
-// is the exit code of `mail send`.
+// is the exit code of `mail send`. ORPHAN_SWEEP_SHOW_FAIL_IDS is a
+// newline-separated list of ids whose `bd show` exits 1 before any row lookup,
+// so even a listed work bead can fail its re-read. ORPHAN_SWEEP_RELEASE_OUTPUT
+// and ORPHAN_SWEEP_RELEASE_EXIT steer `bd release-if-current`.
 const orphanSweepSharedRigFakeGC = `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 if [ "$1" = "agent" ] && [ -n "${ORPHAN_SWEEP_GATE_ABSENT:-}" ]; then
@@ -12530,6 +12533,9 @@ EOF
       exit 0
     fi
     if [ "$2" = "show" ] && [ "$4" = "--json" ]; then
+      if [ -n "${ORPHAN_SWEEP_SHOW_FAIL_IDS:-}" ] && printf '%s\n' "$ORPHAN_SWEEP_SHOW_FAIL_IDS" | grep -Fxq -- "$3"; then
+        exit 1
+      fi
       row=$(printf '%s\n%s\n%s\n' "${ORPHAN_SWEEP_HQ_BEADS_JSON:-[]}" "${ORPHAN_SWEEP_SHARED_BEADS_JSON:-[]}" "${ORPHAN_SWEEP_SESSION_BEADS_JSON:-[]}" | jq -c --arg id "$3" '.[] | select(.id == $id)' | head -n 1)
       if [ -n "$row" ]; then
         printf '[%s]\n' "$row"
@@ -12538,8 +12544,8 @@ EOF
       exit 1
     fi
     if [ "$2" = "release-if-current" ]; then
-      printf 'released\n'
-      exit 0
+      printf '%s\n' "${ORPHAN_SWEEP_RELEASE_OUTPUT:-released}"
+      exit "${ORPHAN_SWEEP_RELEASE_EXIT:-0}"
     fi
     if [ "$2" = "update" ]; then
       exit 0
@@ -12962,6 +12968,77 @@ func TestOrphanSweepKeepsClaimWithUnreadableLegacySessionHint(t *testing.T) {
 	}
 	if !strings.Contains(run.log, "bd show gc-legacy9 --json") {
 		t.Fatalf("the legacy session hint was never probed:\n%s", run.log)
+	}
+}
+
+// TestOrphanSweepDeclaresLocalSkipsAsPartialScopes makes a local skip loud:
+// a claim left in place because its work bead could not be re-read, its
+// holder could not be verified dead, or its conditional release failed used
+// to produce no order_outcome declaration, and an exit-0 run's output is
+// logged nowhere (gastownhall/gascity#4543). Each skip must be declared
+// through the order_outcome.sh contract as one scope naming the bead and why,
+// with the run's outcome partial.
+func TestOrphanSweepDeclaresLocalSkipsAsPartialScopes(t *testing.T) {
+	tests := []struct {
+		name        string
+		sessionID   string
+		extraMeta   map[string]string
+		extraEnv    map[string]string
+		wantReasons []string
+	}{
+		{
+			name:        "holder unverifiable",
+			sessionID:   "gc-d34d1",
+			extraMeta:   map[string]string{"gc.session_bead_id": "gc-legacy9"},
+			wantReasons: []string{"gc-legacy9"},
+		},
+		{
+			name:      "work bead re-read fails",
+			sessionID: "gc-d34d2",
+			extraEnv:  map[string]string{"ORPHAN_SWEEP_SHOW_FAIL_IDS": "ga-skip"},
+		},
+		{
+			name:      "conditional release fails",
+			sessionID: "gc-d34d3",
+			extraEnv:  map[string]string{"ORPHAN_SWEEP_RELEASE_EXIT": "1"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := hookClaim("ga-skip", tt.sessionID, "gastown__polecat-"+tt.sessionID, tt.extraMeta)
+			run := runOrphanSweepGateFixture(t,
+				[]orphanSweepGateRow{row},
+				nil,
+				[]orphanSweepGateRow{{ID: tt.sessionID, Status: "closed", IssueType: "session"}},
+				nil, tt.extraEnv)
+			if run.err != nil {
+				t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+			}
+			outcome, ok := run.outcome(t)
+			if !ok {
+				t.Fatalf("no outcome declaration written for a local skip:\n%s", run.context())
+			}
+			if outcome.Outcome != "partial" {
+				t.Fatalf("outcome = %q, want partial:\n%s", outcome.Outcome, run.context())
+			}
+			if len(outcome.Scopes) != 1 {
+				t.Fatalf("outcome scopes = %+v, want exactly one for the skipped bead", outcome.Scopes)
+			}
+			scope := outcome.Scopes[0]
+			if scope.Scope != row.ID {
+				t.Fatalf("scope label = %q, want the bead id %q", scope.Scope, row.ID)
+			}
+			if strings.TrimSpace(scope.Reason) == "" {
+				t.Fatalf("scope reason is empty")
+			}
+			// The reason names the assignee and the check that failed; for
+			// an unverifiable holder it also names the unreadable candidate.
+			for _, want := range append([]string{tt.sessionID}, tt.wantReasons...) {
+				if !strings.Contains(scope.Reason, want) {
+					t.Fatalf("scope reason %q does not name %q", scope.Reason, want)
+				}
+			}
+		})
 	}
 }
 

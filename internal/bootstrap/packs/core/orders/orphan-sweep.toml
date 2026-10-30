@@ -13,6 +13,10 @@
 # timeout; where timeout(1) exists, an ask still running at the deadline is
 # abandoned); claimants it did not get to or did not hear back from are kept,
 # named, and retried on a later run.
+# A local claim kept because its bead could not be re-read, its holder could
+# not be verified dead, or its conditional release failed is kept and
+# declared the same way: the run's outcome is partial, one scope per kept
+# bead naming why.
 #
 # The timeout is explicit and shorter than the interval because the cooldown
 # counts from a run's start, so a timeout at or above the interval (the 300s

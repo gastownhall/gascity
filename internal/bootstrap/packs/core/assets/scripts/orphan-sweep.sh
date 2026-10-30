@@ -724,6 +724,7 @@ while IFS=$'\t' read -r bead_id assignee; do
         recheck_status=$?
         if [ "$recheck_status" != "2" ]; then
             UNVERIFIABLE=$((UNVERIFIABLE + 1))
+            order_outcome_scope_skipped "$bead_id" "bead $bead_id could not be re-read as still in_progress under assignee $assignee"
         fi
         continue
     fi
@@ -733,6 +734,7 @@ while IFS=$'\t' read -r bead_id assignee; do
         session_status=$?
         if [ "$session_status" = "2" ]; then
             UNVERIFIABLE=$((UNVERIFIABLE + 1))
+            order_outcome_scope_skipped "$bead_id" "holder $assignee is not verifiably dead; could not read session record(s): ${SESSION_PROBE_UNREADABLE:-none}"
             continue
         fi
     fi
@@ -742,6 +744,7 @@ while IFS=$'\t' read -r bead_id assignee; do
         reset_status=$?
         if [ "$reset_status" != "2" ]; then
             UNVERIFIABLE=$((UNVERIFIABLE + 1))
+            order_outcome_scope_skipped "$bead_id" "conditional release of bead $bead_id under assignee $assignee failed"
         fi
     fi
 done < <([ -z "$UNRECOGNIZED_ROWS" ] || printf '%s\n' "$UNRECOGNIZED_ROWS")
@@ -774,6 +777,15 @@ if [ "$PROTECTED" -gt 0 ]; then
         PROTECTED_DETAIL="$PROTECTED_DETAIL
 orphan-sweep: foreign-identity gate budget of ${GATE_BUDGET_SECONDS}s exhausted; $GATE_BUDGET_SKIPPED identities not asked this pass"
     fi
+fi
+
+# A local claim kept in place because it could not be re-read, its holder
+# could not be verified dead, or its conditional release failed is declared
+# too: the sweep exits 0 on these skips, and an exit-0 run's output is logged
+# nowhere (gastownhall/gascity#4543). The scopes recorded above name each bead
+# and why; the run is partial, because the sweep's other work ran.
+if [ "$UNVERIFIABLE" -gt 0 ]; then
+    order_outcome_set partial "left $UNVERIFIABLE claim(s) in place: the holder could not be verified dead, the bead could not be re-read, or the conditional release failed; each scope names the bead and why"
 fi
 
 if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ] || [ "$PROTECTED" -gt 0 ]; then
@@ -809,10 +821,11 @@ misidentified live session -- inspect via gc bd show <id> --json." \
     fi
 fi
 
-# Declare protected claims as a partial outcome: the controller logs an exit-0
-# run's output nowhere, but turns this declaration into a typed order.skipped
-# event naming each protected identity (order_outcome.sh). A no-op when nothing
-# was protected or when run by hand without GC_ORDER_OUTCOME_FILE.
+# Declare protected claims and local skips as a partial outcome: the
+# controller logs an exit-0 run's output nowhere, but turns this declaration
+# into a typed order.skipped event naming each protected identity and each
+# skipped bead (order_outcome.sh). A no-op when nothing was protected or
+# skipped, or when run by hand without GC_ORDER_OUTCOME_FILE.
 order_outcome_write
 
 # Loud-fail: the summary has been printed above, so a non-zero exit now
