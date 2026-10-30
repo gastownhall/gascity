@@ -156,7 +156,6 @@ func (e journalRecoveryEnv) run(t *testing.T, harness string, extraEnv ...string
 }
 
 func TestRunWithTimeoutCapturedOutputDoesNotWaitForWatchdogSleep(t *testing.T) {
-
 	root := repoRootForLint(t)
 	scriptBytes, err := os.ReadFile(filepath.Join(root, "examples", "bd", "assets", "scripts", "gc-beads-bd.sh"))
 	if err != nil {

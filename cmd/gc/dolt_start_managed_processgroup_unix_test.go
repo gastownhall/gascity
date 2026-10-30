@@ -7,7 +7,6 @@ package main
 // refuses a bare PID outright -- and managed dolt is gated off there.
 import (
 	"fmt"
-	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
 
 // TestTerminateManagedDoltStartedProcessSkipsReusedPIDBeforeSIGKILL is the

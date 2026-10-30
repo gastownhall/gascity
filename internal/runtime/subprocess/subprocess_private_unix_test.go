@@ -11,8 +11,6 @@ package subprocess
 import (
 	"context"
 	"errors"
-	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/testutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +19,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func requirePrivateSocketDirectory(t *testing.T, path string) {
@@ -46,6 +47,7 @@ func requirePrivateSocketDirectory(t *testing.T, path string) {
 		t.Fatalf("%q uid = %d, want %d", path, got, want)
 	}
 }
+
 func ensurePrivateFallbackRootForTest(t *testing.T) string {
 	t.Helper()
 	root := privateFallbackRoot(os.Geteuid())
@@ -55,6 +57,7 @@ func ensurePrivateFallbackRootForTest(t *testing.T) string {
 	requirePrivateSocketDirectory(t, root)
 	return root
 }
+
 func TestFallbackKeepsBindableLegacyTempPathPastConservativeLimit(t *testing.T) {
 	root := shortTempDir(t)
 	longDir := filepath.Join(root, strings.Repeat("p", socketPathLimit+32))
@@ -106,6 +109,7 @@ func TestFallbackKeepsBindableLegacyTempPathPastConservativeLimit(t *testing.T) 
 		t.Fatalf("cross-provider Stop on native-addressable legacy fallback: %v", err)
 	}
 }
+
 func TestLegacySocketRemainsVisibleWhenPrivateFallbackIsMissing(t *testing.T) {
 	root := shortTempDir(t)
 	longTemp := filepath.Join(root, strings.Repeat("t", nativeSocketPathLimit+32))
@@ -179,6 +183,7 @@ func TestLegacySocketRemainsVisibleWhenPrivateFallbackIsMissing(t *testing.T) {
 		}
 	}
 }
+
 func TestOverlongTempDirUsesPrivateFallbackAcrossProviders(t *testing.T) {
 	root := shortTempDir(t)
 	longTemp := filepath.Join(root, strings.Repeat("t", nativeSocketPathLimit+32))
@@ -241,6 +246,7 @@ func TestOverlongTempDirUsesPrivateFallbackAcrossProviders(t *testing.T) {
 		t.Fatalf("caller-owned directory after Stop: info=%v err=%v", info, err)
 	}
 }
+
 func TestPrivateFallbackRejectsHostilePrecreation(t *testing.T) {
 	root := shortTempDir(t)
 	longTemp := filepath.Join(root, strings.Repeat("t", nativeSocketPathLimit+32))
@@ -338,6 +344,7 @@ func TestPrivateFallbackRejectsHostilePrecreation(t *testing.T) {
 		}
 	})
 }
+
 func TestStopKillsProcessGroupDescendants(t *testing.T) {
 	dir := t.TempDir()
 	childPIDPath := filepath.Join(dir, "child.pid")
@@ -380,6 +387,7 @@ func TestStopKillsProcessGroupDescendants(t *testing.T) {
 	}
 	t.Fatalf("child process %d still alive after Stop killed the parent session", childPID)
 }
+
 func TestStopBySocket_PreservesCanonicalErrorWhenLegacyPathIsTooLong(t *testing.T) {
 	longDir := filepath.Join(t.TempDir(), strings.Repeat("p", 120))
 	p := NewProviderWithDir(longDir)

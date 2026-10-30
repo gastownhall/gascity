@@ -4,11 +4,11 @@ package pidutil
 
 import (
 	"errors"
+	"os/exec"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/windows"
-	"os/exec"
 )
 
 // startLongLivedChild starts a child that outlives the test and returns its

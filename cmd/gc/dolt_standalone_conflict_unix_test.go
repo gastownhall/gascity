@@ -7,7 +7,6 @@ package main
 // the remaining cases in dolt_standalone_conflict_test.go need neither and
 // run everywhere.
 import (
-	"github.com/gastownhall/gascity/internal/config"
 	"io"
 	"os"
 	"os/exec"
@@ -17,6 +16,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 func startStandaloneBdDoltLikeProcess(t *testing.T, dataDir string) *exec.Cmd {
@@ -55,6 +56,7 @@ func startStandaloneBdDoltLikeProcess(t *testing.T, dataDir string) *exec.Cmd {
 	t.Fatalf("fake dolt sql-server did not become inspectable; pid=%d args=%q", cmd.Process.Pid, args)
 	return cmd
 }
+
 func TestDetectStandaloneBdDoltLiveDoltForDifferentDataDirDoesNotConflict(t *testing.T) {
 	cityPath := t.TempDir()
 	otherCityPath := t.TempDir()
@@ -101,6 +103,7 @@ func TestStartBeadsLifecycleRefusesLiveStandaloneBdDolt(t *testing.T) {
 		t.Fatalf("startBeadsLifecycle err should not hardcode retry command: %v", err)
 	}
 }
+
 func TestInitDirIfReadyDetectsStandaloneBdDoltAtProviderConvergence(t *testing.T) {
 	cityPath := t.TempDir()
 	writeManagedBdCityFixture(t, cityPath)

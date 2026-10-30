@@ -60,6 +60,7 @@ wait
 
 	waitForProviderTestPIDExit(t, pid, "provider op")
 }
+
 func TestRunProviderOpWithEnvContextParentCancellationKillsProcessGroup(t *testing.T) {
 	dir := t.TempDir()
 	childPIDFile := filepath.Join(dir, "child.pid")
@@ -92,6 +93,7 @@ wait
 	}
 	waitForProviderTestPIDExit(t, pid, "provider op with parent context")
 }
+
 func TestRunProviderProbeKillsProcessGroupOnTimeout(t *testing.T) {
 	cancelCh := useCancelableProviderLifecycleContext(t)
 
@@ -135,6 +137,7 @@ wait
 
 	waitForProviderTestPIDExit(t, pid, "provider probe")
 }
+
 func waitForProviderTestPIDExit(t *testing.T, pid int, label string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -146,6 +149,7 @@ func waitForProviderTestPIDExit(t *testing.T, pid int, label string) {
 	}
 	t.Fatalf("provider child pid %d survived %s cancellation", pid, label)
 }
+
 func TestGcBeadsBdStartDoesNotReplaceLiveLockFileInode(t *testing.T) {
 	skipSlowCmdGCTest(t, "starts the real gc-beads-bd lifecycle script; run make test-cmd-gc-process for full coverage")
 	if _, err := exec.LookPath("flock"); err != nil {

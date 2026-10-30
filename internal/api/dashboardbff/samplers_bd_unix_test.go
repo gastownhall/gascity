@@ -14,12 +14,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
-
-	"reflect"
 )
 
 func TestExecBdPingUsesProviderNeutralArgsAndIsolatesSocket(t *testing.T) {
@@ -75,6 +74,7 @@ func TestExecBdPingUsesProviderNeutralArgsAndIsolatesSocket(t *testing.T) {
 		t.Fatalf("ping output = %q", res.stdout)
 	}
 }
+
 func TestProbeRigExecutionFailuresFailClosedAndDoNotMutateStore(t *testing.T) {
 	tests := []struct {
 		name string
@@ -219,6 +219,7 @@ func TestProbeRigExecutionFailuresFailClosedAndDoNotMutateStore(t *testing.T) {
 		})
 	}
 }
+
 func TestProbeRigReportsPingFailureAsDown(t *testing.T) {
 	rig, bin := newProbeRigFixture(t)
 	writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"status\":\"error\",\"error\":\"proxy unavailable\"}'\nexit 1\n")
@@ -234,6 +235,7 @@ func TestProbeRigReportsPingFailureAsDown(t *testing.T) {
 		t.Fatalf("probeRig DoltConnected = %v, want non-nil false", rep.DoltConnected)
 	}
 }
+
 func TestProbeRigReportsPingErrorEnvelopeAsDown(t *testing.T) {
 	rig, bin := newProbeRigFixture(t)
 	writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"error\":\"proxy unavailable\",\"schema_version\":1}'\nexit 1\n")
@@ -319,6 +321,7 @@ func TestProbeRigReportsDoltConnectedFromPing(t *testing.T) {
 		t.Fatalf("probeRig() = %+v, want a clean ok report", rep)
 	}
 }
+
 func TestProbeRigPingHealthOmitsLegacyIssueCount(t *testing.T) {
 	rig, bin := newProbeRigFixture(t)
 	writeFakeBd(t, bin, "#!/bin/sh\nprintf '%s' '{\"status\":\"ok\"}'\n")
@@ -367,6 +370,7 @@ func TestProbeRigSkipsUnconfiguredStore(t *testing.T) {
 		t.Fatalf("ReadDir(.beads) = %v, %v; want an untouched empty store dir", entries, err)
 	}
 }
+
 func TestProbeRigProxiedModeIgnoresStalePortArtifact(t *testing.T) {
 	rig, bin := newProbeRigFixture(t)
 	if err := os.WriteFile(filepath.Join(rig, ".beads", "metadata.json"), []byte(`{"dolt_mode":"proxied-server"}`), 0o644); err != nil {
@@ -385,6 +389,7 @@ func TestProbeRigProxiedModeIgnoresStalePortArtifact(t *testing.T) {
 		t.Fatalf("proxied stale-port report = %+v, want ping-backed healthy status", rep)
 	}
 }
+
 func TestProbeRigConfigMarkerIgnoresStalePortArtifact(t *testing.T) {
 	rig, bin := newProbeRigFixture(t)
 	if err := os.WriteFile(filepath.Join(rig, ".beads", "config.yaml"), []byte("dolt.mode: proxied-server\n"), 0o644); err != nil {
@@ -399,6 +404,7 @@ func TestProbeRigConfigMarkerIgnoresStalePortArtifact(t *testing.T) {
 		t.Fatalf("config-marker report = %+v, want ping-backed healthy status without endpoint", rep)
 	}
 }
+
 func TestProbeRigMalformedMetadataFailsClosedOnStalePort(t *testing.T) {
 	rig, bin := newProbeRigFixture(t)
 	if err := os.WriteFile(filepath.Join(rig, ".beads", "metadata.json"), []byte("{not-json"), 0o644); err != nil {
@@ -416,6 +422,7 @@ func TestProbeRigMalformedMetadataFailsClosedOnStalePort(t *testing.T) {
 		t.Fatalf("malformed metadata report = %+v, want ping-backed healthy status", rep)
 	}
 }
+
 func TestProbeRigUnsafeModeMarkersIgnoreStalePortArtifact(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -449,6 +456,7 @@ func TestProbeRigUnsafeModeMarkersIgnoreStalePortArtifact(t *testing.T) {
 		})
 	}
 }
+
 func TestProbeRigOnlyPersistedServerModeAuthorizesTCPProbe(t *testing.T) {
 	tests := []struct {
 		name         string

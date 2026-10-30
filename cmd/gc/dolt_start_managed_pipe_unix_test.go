@@ -40,6 +40,7 @@ func TestManagedDoltTestParentDoneClosesOnPipeEOF(t *testing.T) {
 		t.Fatal("parent pipe EOF did not close done channel")
 	}
 }
+
 func TestManagedDoltWatchdogParentPipeEOFHonorsDisarm(t *testing.T) {
 	withManagedDoltTestMode(t, false)
 	t.Setenv(managedDoltTestModeEnv, "1")

@@ -18,11 +18,15 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const formulaManagedManifestName = ".gc-managed-formulas.json"
-const formulaManagedLockName = ".gc-managed-formulas.lock"
+const (
+	formulaManagedManifestName = ".gc-managed-formulas.json"
+	formulaManagedLockName     = ".gc-managed-formulas.lock"
+)
 
-const formulaResolutionLockWait = 10 * time.Second
-const formulaResolutionLockPoll = 25 * time.Millisecond
+const (
+	formulaResolutionLockWait = 10 * time.Second
+	formulaResolutionLockPoll = 25 * time.Millisecond
+)
 
 var formulaSymlink = os.Symlink
 

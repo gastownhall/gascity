@@ -19,8 +19,10 @@ var cityStoreQuiesceTimeout = 30 * time.Second
 // returned quiesce timeout.
 var cityStoreDeferredProviderStopTimeout = 10 * time.Minute
 
-var controllerStateAfterStoreSwapForTest func()
-var cityStoreDeferredProviderStopDoneForTest func()
+var (
+	controllerStateAfterStoreSwapForTest     func()
+	cityStoreDeferredProviderStopDoneForTest func()
+)
 
 func afterControllerStateStoreSwapForTest() {
 	if controllerStateAfterStoreSwapForTest != nil {

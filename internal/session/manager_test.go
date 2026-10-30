@@ -654,6 +654,7 @@ func TestCreateRefusesWhileOrphansKeepSurfacing(t *testing.T) {
 		t.Fatalf("Start was attempted while orphans kept surfacing; events = %v", sp.events)
 	}
 }
+
 func TestCreateSkipsTrackedRuntimeBeforeStart(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := &orphanScanProvider{

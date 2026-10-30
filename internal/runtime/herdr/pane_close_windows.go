@@ -15,9 +15,11 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
-var killPaneRuntime = proctable.KillRuntime
-var scanPaneSessionRuntimes = proctable.ScanBySessionID
-var rootIsCityInfrastructure = proctable.RootIsCityInfrastructure
+var (
+	killPaneRuntime          = proctable.KillRuntime
+	scanPaneSessionRuntimes  = proctable.ScanBySessionID
+	rootIsCityInfrastructure = proctable.RootIsCityInfrastructure
+)
 
 func (p *Provider) closeSessionPane(ctx context.Context, name, paneID string) error {
 	var errs []error

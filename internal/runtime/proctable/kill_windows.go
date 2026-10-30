@@ -615,8 +615,10 @@ func terminateHeldProcess(handle windows.Handle, pid int, reapGrace time.Duratio
 	return fmt.Errorf("proctable: PID %d was still running %s after TerminateProcess (not confirmed dead)", pid, reapGrace)
 }
 
-var terminateProcess = windows.TerminateProcess
-var waitForProcessHandleFn = waitForProcessHandle
+var (
+	terminateProcess       = windows.TerminateProcess
+	waitForProcessHandleFn = waitForProcessHandle
+)
 
 func processHandleExited(handle windows.Handle) bool {
 	return waitForProcessHandleFn(handle, 0)

@@ -6,19 +6,19 @@ package main
 // mechanisms: the sentinel is placed in its own process group with Setpgid,
 // and the refusal under test is 'do not signal my own group'.
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
-	"bytes"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 	"github.com/gastownhall/gascity/internal/supervisor"
-	"slices"
 )
 
 func startWorkspaceServiceSentinel(t *testing.T, gcHome, cityPath, serviceName string) workspaceServiceSentinel {
@@ -62,6 +62,7 @@ func startWorkspaceServiceSentinel(t *testing.T, gcHome, cityPath, serviceName s
 	}
 	return workspaceServiceSentinel{pgid: pgid}
 }
+
 func TestInstallSupervisorSystemdWarmRefreshStopsWorkspaceServicesBeforeStart(t *testing.T) {
 	processgrouptest.RequireRealProcessSignals(t)
 
@@ -185,6 +186,7 @@ func TestInstallSupervisorSystemdWarmRefreshStopsWorkspaceServicesBeforeStart(t 
 		t.Fatalf("workspace-service cleanup: %v", err)
 	}
 }
+
 func TestInstallSupervisorSystemdWarmRefreshLeavesUnregisteredWorkspaceServices(t *testing.T) {
 	if goruntime.GOOS != "linux" {
 		t.Skip("systemd path only applies on linux")
@@ -260,6 +262,7 @@ func TestInstallSupervisorSystemdWarmRefreshLeavesUnregisteredWorkspaceServices(
 		t.Fatalf("unregistered workspace-service pgid %d was stopped by warm-refresh cleanup", unregistered.pgid)
 	}
 }
+
 func TestTerminateProcessGroupRefusesCurrentProcessGroup(t *testing.T) {
 	if err := terminateProcessGroup(syscall.Getpgrp(), time.Millisecond); err == nil {
 		t.Fatal("terminateProcessGroup current process group error = nil, want refusal")

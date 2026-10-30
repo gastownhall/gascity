@@ -2,12 +2,13 @@ package main
 
 import (
 	"fmt"
-	"github.com/gastownhall/gascity/internal/platform/filelock"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 
 const (
