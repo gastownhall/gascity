@@ -30,6 +30,10 @@
 # A timer check that fails in one store is reported on stderr naming the
 # store; that store's gh check is skipped, the remaining stores are still
 # swept, and the run exits non-zero at the end.
+#
+# Stores gc refuses — a scope whose beads provider is not bd (file- or
+# exec-backed), or a rig with no path binding on this site — cannot hold
+# bd gates; they are reported as skipped on stdout, not failed.
 set -euo pipefail
 
 # Trace bd invocations to $GC_BD_TRACE when set (no-op otherwise).
@@ -57,9 +61,25 @@ trap 'rm -f "$SWEEP_ERR_FILE"' EXIT
 SWEEP_FAILED=0
 sweep_scope() {
     local rc=0
+    local err
     scope_bd gate check --type=timer --escalate 2>"$SWEEP_ERR_FILE" || rc=$?
-    cat "$SWEEP_ERR_FILE" >&2
+    err="$(cat "$SWEEP_ERR_FILE")"
+    printf '%s' "$err" >&2
     if [ "$rc" -ne 0 ]; then
+        # gc refuses to point bd at two store shapes that cannot hold bd
+        # gates: a scope whose beads provider is not bd, and a rig with no
+        # path binding on this site. Skips, not failures — failing every
+        # 30s for a permanent config shape would only leave a streak.
+        case "$err" in
+            *"only supported for bd-backed beads providers"*)
+                echo "gate-sweep: $SCOPE_LABEL is not a bd bead store; no gates to check there"
+                return 0
+                ;;
+            *"is declared but has no path binding"*)
+                echo "gate-sweep: $SCOPE_LABEL has no path binding on this site; no gates to check there"
+                return 0
+                ;;
+        esac
         echo "gate-sweep: timer gate check failed in $SCOPE_LABEL (exit $rc)" >&2
         SWEEP_FAILED=1
         return 0

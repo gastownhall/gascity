@@ -11796,6 +11796,134 @@ exit 0
 	})
 }
 
+// TestGateSweepSkipsRigStoresGcWillNotScope verifies that stores gc
+// refuses to point bd at — a scope whose beads provider is not bd, or a
+// rig with no path binding on this site — are skipped with a stdout
+// notice rather than failed: they cannot hold bd gates, and failing the
+// order every 30s for a permanent config shape would only leave a
+// failure streak.
+func TestGateSweepSkipsRigStoresGcWillNotScope(t *testing.T) {
+	rigs := `{"rigs":[{"name":"api","hq":false},{"name":"web","hq":false}]}`
+
+	t.Run("rig gc refuses as not bd-backed", func(t *testing.T) {
+		binDir, bdLog, env := gateSweepEnv(t)
+		writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s %s\n' "$GC_FAKE_SCOPE" "$*" >> "$BD_LOG"
+exit 0
+`)
+		env["FAKE_RIG_LIST_JSON"] = rigs
+		env["FAKE_NOT_BD_SCOPES"] = "rig:api"
+
+		cmd := scriptCmd("", coreScriptPath("gate-sweep.sh"), env)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("a store gc refuses is a skip, not a failure; got %v\nstderr:\n%s", err, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "rig:api is not a bd bead store") {
+			t.Errorf("expected a stdout notice naming rig:api; stdout:\n%s", stdout.String())
+		}
+		log, err := os.ReadFile(bdLog)
+		if err != nil {
+			t.Fatalf("ReadFile(bd log): %v", err)
+		}
+		if strings.Contains(string(log), "rig:api") {
+			t.Errorf("gc refused rig:api before bd ran, so no bd call is expected for it:\n%s", log)
+		}
+		for _, want := range []string{
+			"city gate check --type=timer --escalate",
+			"city gate check --type=gh --escalate",
+			"rig:web gate check --type=timer --escalate",
+			"rig:web gate check --type=gh --escalate",
+		} {
+			if !strings.Contains(string(log), want) {
+				t.Errorf("missing %q in bd log:\n%s", want, log)
+			}
+		}
+	})
+
+	t.Run("rig with no path binding", func(t *testing.T) {
+		binDir, bdLog, env := gateSweepEnv(t)
+		// The production gc prints this refusal (cmd/gc/cmd_bd.go); the
+		// double raises it from bd's side because the classification reads
+		// the timer check's captured stderr either way.
+		writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$GC_FAKE_SCOPE" in
+  rig:api)
+    echo 'gc bd: rig api is declared but has no path binding on this site' >&2
+    exit 1
+    ;;
+esac
+printf '%s %s\n' "$GC_FAKE_SCOPE" "$*" >> "$BD_LOG"
+exit 0
+`)
+		env["FAKE_RIG_LIST_JSON"] = rigs
+
+		cmd := scriptCmd("", coreScriptPath("gate-sweep.sh"), env)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("an unbound rig is a skip, not a failure; got %v\nstderr:\n%s", err, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "rig:api has no path binding") {
+			t.Errorf("expected a stdout notice naming rig:api; stdout:\n%s", stdout.String())
+		}
+		log, err := os.ReadFile(bdLog)
+		if err != nil {
+			t.Fatalf("ReadFile(bd log): %v", err)
+		}
+		if strings.Contains(string(log), "rig:api") {
+			t.Errorf("no bd call is expected for an unbound rig beyond the refused one:\n%s", log)
+		}
+		for _, want := range []string{
+			"rig:web gate check --type=timer --escalate",
+			"rig:web gate check --type=gh --escalate",
+		} {
+			if !strings.Contains(string(log), want) {
+				t.Errorf("missing %q in bd log:\n%s", want, log)
+			}
+		}
+	})
+
+	t.Run("city whose provider is not bd", func(t *testing.T) {
+		binDir, bdLog, env := gateSweepEnv(t)
+		writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s %s\n' "$GC_FAKE_SCOPE" "$*" >> "$BD_LOG"
+exit 0
+`)
+		env["FAKE_RIG_LIST_JSON"] = rigs
+		env["FAKE_NOT_BD_SCOPES"] = "city"
+
+		cmd := scriptCmd("", coreScriptPath("gate-sweep.sh"), env)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("a non-bd city is a skip, not a failure; got %v\nstderr:\n%s", err, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "city is not a bd bead store") {
+			t.Errorf("expected a stdout notice naming the city; stdout:\n%s", stdout.String())
+		}
+		log, err := os.ReadFile(bdLog)
+		if err != nil {
+			t.Fatalf("ReadFile(bd log): %v", err)
+		}
+		if strings.Contains(string(log), "city") {
+			t.Errorf("gc refused the city before bd ran, so no bd call is expected for it:\n%s", log)
+		}
+		for _, want := range []string{
+			"rig:api gate check --type=timer --escalate",
+			"rig:web gate check --type=gh --escalate",
+		} {
+			if !strings.Contains(string(log), want) {
+				t.Errorf("missing %q in bd log:\n%s", want, log)
+			}
+		}
+	})
+}
+
 // hermeticGitEnv builds a git invocation env that strips any pre-existing
 // GIT_* control variables from the parent environment before applying the
 // overrides — same approach as mergeTestEnv. This avoids duplicate keys
