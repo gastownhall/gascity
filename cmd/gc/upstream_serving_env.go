@@ -8,9 +8,10 @@ type upstreamServingField struct {
 	// Field is the abstract field name: "base_url", "api_key" or
 	// "auth_token". It appears in operator-facing errors and reports.
 	Field string
-	// Value is what the spec sets for that field, before expansion. Empty
-	// means the upstream does not set this field at all.
-	Value string
+	// Set reports whether the upstream sets this field at all. The value
+	// itself is deliberately not carried: it is usually a credential, and the
+	// reporting side needs only the name it lands on.
+	Set bool
 	// EnvName is the env var the value renders onto, or "" when neither the
 	// upstream nor the harness names one — which session start treats as a
 	// hard error rather than a silent no-op.
@@ -29,13 +30,14 @@ type upstreamServingField struct {
 // disagreeing is the report saying a rotation lands where it does not, so
 // both callers read it from here.
 //
-// Fields the upstream leaves empty are returned with an empty Value; callers
-// skip them, since an unset abstract field renders nothing.
+// Fields the upstream leaves empty are returned with Set false; callers skip
+// them, since an unset abstract field renders nothing. The fields are in the
+// order base_url, api_key, auth_token, matching upstreamServingValues.
 func upstreamServingFields(spec config.UpstreamSpec, binding config.UpstreamEnvBinding) []upstreamServingField {
 	out := []upstreamServingField{
-		{Field: "base_url", Value: spec.BaseURL, EnvName: spec.BaseURLEnv},
-		{Field: "api_key", Value: spec.APIKey, EnvName: spec.APIKeyEnv},
-		{Field: "auth_token", Value: spec.AuthToken, EnvName: spec.AuthTokenEnv},
+		{Field: "base_url", Set: spec.BaseURL != "", EnvName: spec.BaseURLEnv},
+		{Field: "api_key", Set: spec.APIKey != "", EnvName: spec.APIKeyEnv},
+		{Field: "auth_token", Set: spec.AuthToken != "", EnvName: spec.AuthTokenEnv},
 	}
 	bound := []string{binding.BaseURL, binding.APIKey, binding.AuthToken}
 	for i := range out {
@@ -44,4 +46,10 @@ func upstreamServingFields(spec config.UpstreamSpec, binding config.UpstreamEnvB
 		}
 	}
 	return out
+}
+
+// upstreamServingValues returns the upstream's raw serving values in the same
+// order as upstreamServingFields. Only session start reads them.
+func upstreamServingValues(spec config.UpstreamSpec) [3]string {
+	return [3]string{spec.BaseURL, spec.APIKey, spec.AuthToken}
 }
