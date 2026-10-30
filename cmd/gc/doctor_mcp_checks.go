@@ -26,6 +26,9 @@ type mcpTargetConflict struct {
 	Provider string
 	Target   string
 	Agents   []string
+	// Cause names the agent-local mcp/ directory behind the conflict when
+	// it is an implicit agent against one that defines its own servers.
+	Cause string
 }
 
 func newMCPConfigDoctorCheck(cityPath string, cfg *config.City, lookPath config.LookPathFunc) *mcpConfigDoctorCheck {
@@ -75,12 +78,16 @@ func (c *mcpSharedTargetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckRe
 	}
 	details := make([]string, 0, len(conflicts))
 	for _, conflict := range conflicts {
-		details = append(details, fmt.Sprintf(
+		detail := fmt.Sprintf(
 			"%s (%s): %s",
 			conflict.Target,
 			conflict.Provider,
 			strings.Join(conflict.Agents, ", "),
-		))
+		)
+		if conflict.Cause != "" {
+			detail += "; " + conflict.Cause
+		}
+		details = append(details, detail)
 	}
 	return &doctor.CheckResult{
 		Name:    c.Name(),
@@ -110,7 +117,7 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 	}
 
 	type targetState struct {
-		hashes map[string][]string
+		hashes map[string][]*config.Agent
 	}
 
 	targets := make(map[string]*targetState)
@@ -138,11 +145,11 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 		key := view.Projection.Provider + "|" + filepath.Clean(view.Projection.Target)
 		state := targets[key]
 		if state == nil {
-			state = &targetState{hashes: make(map[string][]string)}
+			state = &targetState{hashes: make(map[string][]*config.Agent)}
 			targets[key] = state
 		}
 		hash := view.Projection.Hash()
-		state.hashes[hash] = append(state.hashes[hash], agent.QualifiedName())
+		state.hashes[hash] = append(state.hashes[hash], agent)
 	}
 
 	sort.Strings(issues)
@@ -153,16 +160,30 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 			continue
 		}
 		parts := strings.SplitN(key, "|", 2)
+		hashes := make([]string, 0, len(state.hashes))
+		for hash := range state.hashes {
+			hashes = append(hashes, hash)
+		}
+		sort.Strings(hashes)
 		agents := make([]string, 0, 4)
-		for _, members := range state.hashes {
-			sort.Strings(members)
-			agents = append(agents, members...)
+		cause := ""
+		for i, hash := range hashes {
+			for _, member := range state.hashes[hash] {
+				agents = append(agents, member.QualifiedName())
+			}
+			for _, other := range hashes[i+1:] {
+				if cause != "" {
+					break
+				}
+				cause = mcpAgentLocalConflictCauseAmong(state.hashes[hash], state.hashes[other])
+			}
 		}
 		sort.Strings(agents)
 		conflicts = append(conflicts, mcpTargetConflict{
 			Provider: parts[0],
 			Target:   parts[1],
 			Agents:   agents,
+			Cause:    cause,
 		})
 	}
 	sort.Slice(conflicts, func(i, j int) bool {

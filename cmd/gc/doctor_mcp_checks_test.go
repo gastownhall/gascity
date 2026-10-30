@@ -241,3 +241,61 @@ func TestMCPSharedTargetDoctorCheckAgreesWithStage1Gate(t *testing.T) {
 		})
 	}
 }
+
+// A city-scoped agent with its own mcp/ catalog conflicts with the implicit
+// agent gc injects for its provider at the city root, so gc start refuses the
+// city; mcp-shared-target reports it and names the agent-local directory.
+func TestMCPSharedTargetDoctorCheckReportsImplicitAgentLocalConflict(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	writeProjectedMCPCity(t, cityDir, `
+[workspace]
+provider = "claude"
+
+[beads]
+provider = "file"
+
+[session]
+provider = "tmux"
+
+[providers.claude]
+command = "echo"
+prompt_mode = "none"
+`, `
+name = "mayor"
+provider = "claude"
+scope = "city"
+`)
+	writeCatalogFile(t, cityDir, "agents/mayor/mcp/notes.toml", `
+name = "notes"
+command = "uvx"
+`)
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	var implicit *config.Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Implicit && cfg.Agents[i].Provider == "claude" {
+			implicit = &cfg.Agents[i]
+		}
+	}
+	if implicit == nil {
+		t.Fatalf("loadCityConfig injected no implicit claude agent: %+v", cfg.Agents)
+	}
+
+	result := newMCPSharedTargetDoctorCheck(cityDir, cfg, stubLookPath).Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true})
+	if result.Status != doctor.StatusError {
+		t.Fatalf("status = %v (%q), want error: gc start rejects this city with an MCP target conflict", result.Status, result.Message)
+	}
+	target := filepath.Join(cityDir, ".mcp.json")
+	mcpDir := filepath.Join(cityDir, "agents", "mayor", "mcp")
+	for _, detail := range result.Details {
+		if strings.Contains(detail, target) && strings.Contains(detail, "mayor") &&
+			strings.Contains(detail, mcpAgentLabel(implicit)) && strings.Contains(detail, mcpDir) {
+			return
+		}
+	}
+	t.Fatalf("details = %#v, want one naming %s, mayor, %s and %s", result.Details, target, mcpAgentLabel(implicit), mcpDir)
+}
