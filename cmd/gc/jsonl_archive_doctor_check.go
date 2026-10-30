@@ -163,6 +163,22 @@ func (c *jsonlArchiveDoctorCheck) archiveOriginURL(archiveRepo string) (string, 
 	return strings.TrimSpace(string(out)), nil
 }
 
+// archivePushURLs returns every push URL configured for origin. Locality is
+// judged from these rather than the fetch URL because the export pushes.
+func (c *jsonlArchiveDoctorCheck) archivePushURLs(archiveRepo string) ([]string, error) {
+	out, err := c.git(archiveRepo, "remote", "get-url", "--push", "--all", "origin")
+	if err != nil {
+		return nil, err
+	}
+	var urls []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			urls = append(urls, line)
+		}
+	}
+	return urls, nil
+}
+
 func archiveRemoteIsOffBox(remote string) bool {
 	remote = strings.TrimSpace(remote)
 	if remote == "" || strings.HasPrefix(strings.ToLower(remote), "file://") || filepath.IsAbs(remote) {
@@ -243,7 +259,22 @@ func (c *jsonlArchiveDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 		return r
 	}
 
-	if !archiveRemoteIsOffBox(originURL) {
+	pushURLs, err := c.archivePushURLs(archiveRepo)
+	if err != nil {
+		r.Status = doctor.StatusError
+		r.Message = fmt.Sprintf("querying archive push URLs: %v", err)
+		r.FixHint = fmt.Sprintf(`run "git -C %s remote -v" to diagnose`, archiveRepo)
+		return r
+	}
+
+	localPush := false
+	for _, pushURL := range pushURLs {
+		if !archiveRemoteIsOffBox(pushURL) {
+			localPush = true
+			break
+		}
+	}
+	if localPush {
 		r.Status = doctor.StatusWarning
 		r.Message = "local-path origin configured — commits stay on this host, off-box backup disabled"
 		r.FixHint = fmt.Sprintf(`replace origin with an off-box remote using "git -C %s remote set-url origin <url>"`, archiveRepo)

@@ -714,7 +714,7 @@ ESCALATION
     # in tests to keep failure-path coverage fast.
     push_succeeded=false
     for push_attempt in 1 2 3; do
-        if push_err=$(git push origin "HEAD:$ARCHIVE_BRANCH" -q 2>&1 >/dev/null); then
+        if push_err=$(git push origin "HEAD:refs/heads/$ARCHIVE_BRANCH" -q 2>&1 >/dev/null); then
             push_succeeded=true
             if [ "$push_attempt" -gt 1 ]; then
                 echo "jsonl-export: push succeeded on retry attempt $push_attempt" >&2
