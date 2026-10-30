@@ -1,6 +1,11 @@
 package tmux
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+)
 
 // PaneShowsIdlePrompt is the scan both local tmux (snapshotPaneIdleWithPrefix)
 // and remote tmux-in-box runtimes apply to a captured pane, so a busy
@@ -179,6 +184,66 @@ func TestMenuCursorRowIsNotAReadyPrompt(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := PaneShowsIdlePrompt(tt.lines, tt.prefix); got != tt.want {
 				t.Errorf("PaneShowsIdlePrompt(%q, %q) = %v, want %v", tt.lines, tt.prefix, got, tt.want)
+			}
+		})
+	}
+}
+
+// The ready wait applies the same composer rule as idle detection: a pane
+// parked on a numbered menu never shows the composer, so the wait runs to its
+// deadline and returns the timeout error (the startup nudge would otherwise
+// be typed into the menu), while a composer — even below a stale menu frame
+// or an echoed numbered turn — is ready at once.
+func TestWaitForRuntimeReadyMenuCursorRowIsNotReady(t *testing.T) {
+	tests := []struct {
+		name   string
+		lines  []string
+		prefix string
+		ready  bool
+	}{
+		{"folder-trust menu", []string{
+			"  Trust this folder? Codex can read, edit, and run files here.",
+			"",
+			"› 1. Trust and continue",
+			"  2. Quit",
+			"",
+			"  enter continue · esc quit",
+		}, "› ", false},
+		{"model-switch modal below an echoed turn", []string{
+			"› fix the flaky test",
+			"",
+			"  Approaching rate limits",
+			"  Switch to gpt-5.4-mini for lower credit usage?",
+			"› 1. Switch to gpt-5.4-mini",
+			"  2. Keep current model",
+			"  Press enter to confirm or esc to go back",
+		}, "› ", false},
+		{"bare composer", []string{"› "}, "› ", true},
+		{"numbered draft alone", []string{"› 1. fix the flake"}, "› ", true},
+		{"echoed numbered turn above a bare composer", []string{
+			"› 1. first",
+			"  2. second",
+			"",
+			"› ",
+		}, "› ", true},
+		{"stale menu frame above a live composer", []string{
+			"› 1. Trust and continue",
+			"  2. Quit",
+			"",
+			"› ",
+		}, "› ", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tm := scriptedTmux(scriptedCapture{out: strings.Join(tt.lines, "\n")})
+			err := tm.WaitForRuntimeReady(context.Background(), "w",
+				&RuntimeConfig{Tmux: &RuntimeTmuxConfig{ReadyPromptPrefix: tt.prefix}},
+				300*time.Millisecond)
+			if got := err == nil; got != tt.ready {
+				t.Fatalf("WaitForRuntimeReady err = %v, want ready=%v", err, tt.ready)
+			}
+			if !tt.ready && !strings.Contains(err.Error(), "timeout waiting for runtime prompt") {
+				t.Fatalf("WaitForRuntimeReady err = %v, want the runtime-prompt timeout", err)
 			}
 		})
 	}

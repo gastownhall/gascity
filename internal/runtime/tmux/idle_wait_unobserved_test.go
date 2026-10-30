@@ -96,6 +96,20 @@ func TestWaitForIdleBusyReadingIsObserved(t *testing.T) {
 	}
 }
 
+// A pane parked on a numbered menu (the session-limit chooser) is not idle:
+// the chooser's cursor row carries the prompt glyph, but it is a pending
+// choice, so the wait times out having read the pane every tick.
+func TestWaitForIdleMenuIsNotIdle(t *testing.T) {
+	tm := scriptedTmux(scriptedCapture{out: sessionLimitChooserPane})
+	err := tm.WaitForIdle(context.Background(), "w", 500*time.Millisecond)
+	if !errors.Is(err, ErrIdleTimeout) {
+		t.Fatalf("WaitForIdle = %v, want ErrIdleTimeout", err)
+	}
+	if !errors.Is(err, runtime.ErrWaitUnobserved) {
+		t.Fatalf("WaitForIdle = %v, want it to wrap ErrWaitUnobserved: the menu is a pending choice, not work", err)
+	}
+}
+
 // A rollout that cannot be read, or whose turn activity cannot be told, never
 // showed a running turn.
 func TestCodexInterruptBoundaryUnreadableRolloutIsUnobserved(t *testing.T) {
