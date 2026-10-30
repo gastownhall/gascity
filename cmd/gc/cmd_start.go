@@ -468,7 +468,7 @@ Use "gc supervisor run" for foreground operation.`,
 	cmd.Flags().MarkHidden("file")      //nolint:errcheck // flag always exists
 	cmd.Flags().MarkHidden("no-strict") //nolint:errcheck // flag always exists
 	cmd.Flags().BoolVarP(&dryRunMode, "dry-run", "n", false,
-		"preview what agents would start without starting them")
+		"preview the agents that would start and the MCP config, skill links, and .gitignore entries gc would write, without starting or writing them")
 	cmd.Flags().BoolVar(&noAutoRestartMode, "no-auto-restart", false,
 		"detect supervisor binary drift but do not auto-restart; exits non-zero on drift")
 	cmd.Flags().BoolVar(&allowSupervisorMismatch, allowSupervisorMismatchFlag, false,
@@ -623,6 +623,7 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 	if code := registerCityWithSupervisorNamed(cityPath, nameOverride, startStdout, stderr, "gc start", true); code != 0 {
 		return code
 	}
+	warnStage1MCPSkips(cityPath, exec.LookPath, stderr)
 	if jsonOut {
 		cityName := nameOverride
 		if entry, registered, err := registeredCityEntry(cityPath); err == nil && registered {
@@ -804,8 +805,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// start (including --dry-run) starts no bead store and opens no event log.
 	// runController latches again (newControllerWiring) for the mode it runs.
 	// The two cannot disagree: both read only cfg, which nothing below
-	// rewrites, and reconcilerModeLookupEnv's GC_SESSION, which no gc code
-	// sets.
+	// rewrites, and reconcilerModeLookupEnv's GC_SESSION and
+	// GC_BEADS_CONDITIONAL_WRITES, which no gc code sets.
 	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -816,7 +817,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// than run legacy session work under a v2 latch. Production never reaches
 	// it (A6, F11); --dry-run reconciles nothing.
 	if mode == reconcilerV2 && !controllerMode && !dryRunMode {
-		fmt.Fprintln(stderr, "gc start: session_reconciler = \"v2\" has no one-shot reconcile; run the controller (gc start --foreground) or remove the key") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "gc start: the v2 session reconciler has no one-shot reconcile; run the controller (gc start --foreground) or set session_reconciler = \"legacy\"") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -827,8 +828,13 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// Reserved coordination-class prefixes are a non-fatal advisory until
-	// per-class stores activate; warn but do not block startup.
+	// Reserved coordination-class prefixes refuse a split city (its binding
+	// mints in that namespace, R10) and stay a non-fatal advisory for a city
+	// that relocates nothing.
+	if err := config.ReservedPrefixSplitRefusal(cfg); err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	for _, w := range config.ReservedPrefixWarnings(cfg.Rigs, config.EffectiveHQPrefix(cfg)) {
 		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
@@ -845,7 +851,11 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		return 1
 	}
 
-	ensureInitArtifacts(cityPath, stderr, "gc start")
+	// --dry-run installs no hooks or overlays; stage-1 skills and MCP report
+	// a plan instead of writing (below).
+	if !dryRunMode {
+		ensureInitArtifacts(cityPath, stderr, "gc start")
+	}
 
 	// Resolve rig paths and run the full bead store lifecycle:
 	// probe → init+hooks(city) → init+hooks(rigs) → routes.
@@ -871,53 +881,21 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	}
 
 	// Warm-up doctor scan. Fail-open: startup continues regardless of check,
-	// mail, or runner failures.
-	warmupCityPath := cityPath
-	if absCityPath, pathErr := filepath.Abs(warmupCityPath); pathErr == nil {
-		warmupCityPath = absCityPath
-	}
-	skipRigDoltChecks := gcDoltSkip()
-	// While this start holds the controller lock no other controller runs;
-	// probing the flock would only find this start's own lock.
-	warmupControllerRunning := controllerLock == nil && doctor.IsControllerRunning(warmupCityPath)
-	warmupChecks := buildDoctorChecks(warmupCityPath, cfg, nil, buildDoctorChecksOpts{
-		Stderr:               io.Discard,
-		ControllerRunning:    warmupControllerRunning,
-		SkipCityDoltCheck:    skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(warmupCityPath, warmupCityPath) && !workspaceNeedsCityDoltCheck(warmupCityPath, cfg)),
-		SkipManagedDoltCheck: managedDoltOpsCheckSkip(warmupCityPath, cfg, nil),
-		SkipRigDoltChecks:    skipRigDoltChecks,
-		SkipStorePreflight:   true,
-	})
-	warmupOpts := warmup.WarmupOpts{
-		Checks: warmupChecks,
-		Mailer: defaultMailProvider(cityPath),
-		Stderr: stderr,
-	}
-	_, _ = warmup.RunWarmupChecks(context.Background(), warmupCityPath, cfg, warmupOpts)
-
-	// Materialize formula symlinks before agent startup.
-	// System formulas/orders now arrive via the core bootstrap pack.
-	if len(cfg.FormulaLayers.City) > 0 {
-		if err := ResolveFormulas(cityPath, cfg.FormulaLayers.City); err != nil {
-			fmt.Fprintf(stderr, "gc start: city formulas: %v\n", err) //nolint:errcheck // best-effort stderr
-		}
-	}
-	for _, r := range cfg.Rigs {
-		layers, ok := cfg.FormulaLayers.Rigs[r.Name]
-		if !ok || len(layers) == 0 {
-			layers = cfg.FormulaLayers.City
-		}
-		if len(layers) > 0 {
-			if err := ResolveFormulas(r.Path, layers); err != nil {
-				fmt.Fprintf(stderr, "gc start: rig %q formulas: %v\n", r.Name, err) //nolint:errcheck // best-effort stderr
-			}
-		}
+	// mail, or runner failures. --dry-run skips it: a failing check sends
+	// mail.
+	if !dryRunMode {
+		runStartWarmup(cityPath, cfg, controllerLock, stderr)
 	}
 
-	// Prune legacy top-level scripts/ symlinks left by pre-PackV2 runtimes.
-	pruneLegacyConfiguredScripts(cityPath, cfg, func(scope string, err error) {
-		fmt.Fprintf(stderr, "gc start: pruning legacy %s scripts: %v\n", scope, err) //nolint:errcheck // best-effort stderr
-	})
+	// Materialize formula symlinks before agent startup, and prune legacy
+	// top-level scripts/ symlinks left by pre-PackV2 runtimes. --dry-run
+	// writes neither.
+	if !dryRunMode {
+		resolveStartFormulas(cityPath, cfg, stderr)
+		pruneLegacyConfiguredScripts(cityPath, cfg, func(scope string, err error) {
+			fmt.Fprintf(stderr, "gc start: pruning legacy %s scripts: %v\n", scope, err) //nolint:errcheck // best-effort stderr
+		})
+	}
 
 	// Validate agents.
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
@@ -941,15 +919,29 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// at its scope root before sessions spawn. Non-fatal: per-agent
 	// errors are logged inline by runStage1SkillMaterialization
 	// itself; it never returns a non-nil error to its caller.
-	_ = runStage1SkillMaterialization(cityPath, cfg, stderr)
-
+	//
 	// Stage-1 MCP projection is a hard gate because it mutates the provider's
 	// active runtime config surface. Conflicting shared targets or projection
 	// write failures must block startup before sessions launch against stale or
 	// ambiguous MCP state.
-	if err := runStage1MCPProjection(cityPath, cfg, exec.LookPath, stderr); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+	//
+	// --dry-run writes neither: it reports what both passes would change,
+	// and fails where the MCP gate would.
+	var stage1Plan []string
+	if dryRunMode {
+		stage1Plan = planStage1SkillMaterialization(cityPath, cfg, stderr)
+		mcpPlan, err := planStage1MCPProjection(cityPath, cfg, exec.LookPath, stderr)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		stage1Plan = append(stage1Plan, mcpPlan...)
+	} else {
+		_ = runStage1SkillMaterialization(cityPath, cfg, stderr)
+		if err := runStage1MCPProjection(cityPath, cfg, exec.LookPath, stderr); err != nil {
+			fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	// Validate install_agent_hooks (workspace + all agents).
@@ -991,10 +983,16 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	recorder := events.Discard
 	var eventProv events.Provider // nil when events disabled or FileRecorder fails
-	fr, frErr := openStandaloneCityEventsRecorder(cityPath, cfg.Events, controllerLock != nil, stderr)
-	if frErr == nil {
-		recorder = fr
-		eventProv = fr
+	if !dryRunMode {
+		fr, frErr := openStandaloneCityEventsRecorder(cityPath, cfg.Events, controllerLock != nil, stderr)
+		if frErr == nil {
+			recorder = fr
+			eventProv = fr
+			// Closed before the controller lock is released: Close lets the
+			// [events.mirror] copier catch up, so the mirror gets this run's
+			// last events, controller.stopped included.
+			defer fr.Close() //nolint:errcheck // best-effort at exit
+		}
 	}
 
 	// Pre-check container images once (fail fast before N serial starts).
@@ -1003,10 +1001,11 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		return 1
 	}
 
-	// --dry-run: build agents and print preview without starting.
+	// --dry-run: resolve the agents that would start, without the per-agent
+	// work-dir side effects of a real build, and print the preview.
 	if dryRunMode {
-		agents := buildAgents(cfg, sp, nil)
-		printDryRunPreview(agents.State, cfg, cityName, stdout)
+		agents := buildDesiredStatePreview(cityName, cityPath, beaconTime, cfg, sp, stderr)
+		printDryRunPreview(agents.State, cfg, cityName, stage1Plan, stdout)
 		return 0
 	}
 
@@ -1200,38 +1199,105 @@ func loadStartCityConfig(cityPath string) (*config.City, *config.Provenance, err
 	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
 }
 
+// runStartWarmup runs the warm-up doctor scan of a standalone start. It is
+// fail-open: the start continues regardless of check, mail, or runner
+// failures. controllerLock is the lock this start holds, or nil.
+func runStartWarmup(cityPath string, cfg *config.City, controllerLock *os.File, stderr io.Writer) {
+	warmupCityPath := cityPath
+	if absCityPath, pathErr := filepath.Abs(warmupCityPath); pathErr == nil {
+		warmupCityPath = absCityPath
+	}
+	skipRigDoltChecks := gcDoltSkip()
+	// While this start holds the controller lock no other controller runs;
+	// probing the flock would only find this start's own lock.
+	warmupControllerRunning := controllerLock == nil && doctor.IsControllerRunning(warmupCityPath)
+	warmupChecks := buildDoctorChecks(warmupCityPath, cfg, nil, buildDoctorChecksOpts{
+		Stderr:               io.Discard,
+		ControllerRunning:    warmupControllerRunning,
+		SkipCityDoltCheck:    skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(warmupCityPath, warmupCityPath) && !workspaceNeedsCityDoltCheck(warmupCityPath, cfg)),
+		SkipManagedDoltCheck: managedDoltOpsCheckSkip(warmupCityPath, cfg, nil),
+		SkipRigDoltChecks:    skipRigDoltChecks,
+		SkipStorePreflight:   true,
+		Warmup:               true,
+	})
+	warmupOpts := warmup.WarmupOpts{
+		Checks: warmupChecks,
+		Mailer: defaultMailProvider(cityPath),
+		Stderr: stderr,
+	}
+	_, _ = warmup.RunWarmupChecks(context.Background(), warmupCityPath, cfg, warmupOpts)
+}
+
+// resolveStartFormulas materializes the formula symlinks of the city and each
+// rig before agent startup. System formulas/orders arrive via the core
+// bootstrap pack. Rigs without formula layers of their own get the city's.
+func resolveStartFormulas(cityPath string, cfg *config.City, stderr io.Writer) {
+	if len(cfg.FormulaLayers.City) > 0 {
+		if err := ResolveFormulas(cityPath, cfg.FormulaLayers.City); err != nil {
+			fmt.Fprintf(stderr, "gc start: city formulas: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+	}
+	for _, r := range cfg.Rigs {
+		layers, ok := cfg.FormulaLayers.Rigs[r.Name]
+		if !ok || len(layers) == 0 {
+			layers = cfg.FormulaLayers.City
+		}
+		if len(layers) > 0 {
+			if err := ResolveFormulas(r.Path, layers); err != nil {
+				fmt.Fprintf(stderr, "gc start: rig %q formulas: %v\n", r.Name, err) //nolint:errcheck // best-effort stderr
+			}
+		}
+	}
+}
+
 // printDryRunPreview prints what agents would be started without starting them.
-func printDryRunPreview(desiredState map[string]TemplateParams, cfg *config.City, cityName string, stdout io.Writer) {
+// stage1Plan lists what the stage-1 skill and MCP passes would change in the
+// city and its rigs; the preview prints it instead of applying it.
+func printDryRunPreview(desiredState map[string]TemplateParams, cfg *config.City, cityName string, stage1Plan []string, stdout io.Writer) {
 	fmt.Fprintf(stdout, "Dry-run: %d agent(s) would start in city %q\n\n", len(desiredState), cityName) //nolint:errcheck // best-effort stdout
 
 	if len(desiredState) == 0 {
 		fmt.Fprintln(stdout, "  (no agents to start)") //nolint:errcheck // best-effort stdout
-		return
-	}
+		fmt.Fprintln(stdout)                           //nolint:errcheck // best-effort stdout
+	} else {
+		sortedNames := make([]string, 0, len(desiredState))
+		for sn := range desiredState {
+			sortedNames = append(sortedNames, sn)
+		}
+		sort.Strings(sortedNames)
+		for _, sn := range sortedNames {
+			tp := desiredState[sn]
+			fmt.Fprintf(stdout, "  %-30s  session=%s\n", tp.DisplayName(), sn) //nolint:errcheck // best-effort stdout
+		}
 
-	sortedNames := make([]string, 0, len(desiredState))
-	for sn := range desiredState {
-		sortedNames = append(sortedNames, sn)
-	}
-	sort.Strings(sortedNames)
-	for _, sn := range sortedNames {
-		tp := desiredState[sn]
-		fmt.Fprintf(stdout, "  %-30s  session=%s\n", tp.DisplayName(), sn) //nolint:errcheck // best-effort stdout
-	}
-
-	// Summary by suspension.
-	var suspended int
-	for _, a := range cfg.Agents {
-		if a.Suspended {
-			suspended++
+		// Summary by suspension.
+		var suspended int
+		for _, a := range cfg.Agents {
+			if a.Suspended {
+				suspended++
+			}
+		}
+		fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
+		if suspended > 0 {
+			fmt.Fprintf(stdout, "  %d agent(s) suspended (not shown above)\n", suspended) //nolint:errcheck // best-effort stdout
 		}
 	}
-	fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
-	if suspended > 0 {
-		fmt.Fprintf(stdout, "  %d agent(s) suspended (not shown above)\n", suspended) //nolint:errcheck // best-effort stdout
+	if len(stage1Plan) > 0 {
+		fmt.Fprintln(stdout, "Would change in the city and its rigs:") //nolint:errcheck // best-effort stdout
+		for _, line := range stage1Plan {
+			fmt.Fprintf(stdout, "  %s\n", line) //nolint:errcheck // best-effort stdout
+		}
+		fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
 	}
-	fmt.Fprintln(stdout, "No side effects executed (--dry-run).") //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, dryRunFooter) //nolint:errcheck // best-effort stdout
 }
+
+// dryRunFooter ends a dry run's preview. The preview writes none of the files
+// it reports, but it still starts the bead store (initializing a rig store
+// that is not yet initialized) to read pool demand, fills the pack cache to
+// load the config, and creates the city's runtime directories under .gc/
+// (ensureCityScaffold) when they are missing.
+const dryRunFooter = "No agents started (--dry-run). Only gc's own state may have been written: the bead store, the pack cache, and .gc/ runtime directories."
 
 // settingsArgs returns "--settings <path>" to append to a Claude command
 // if settings.json exists for this city. Uses the absolute city-root path so

@@ -605,8 +605,10 @@ type ConditionalWriterHandleProvider interface {
 // globally — mirroring GraphApplyFor. It does NOT unwrap the class_store.go
 // typed wrappers (WorkStore, GraphStore, …): those embed the Store interface, so
 // optional capabilities are not promoted through them and a direct assertion on
-// the wrapper fails. A caller holding a typed class wrapper must pass its
-// unwrapped .Store field to this helper, exactly as with GraphApplyFor.
+// the wrapper fails. A caller holding a typed class wrapper reaches the
+// capability with beads.As[ConditionalWriter], which sees through it; passing
+// the unwrapped .Store field here is the older unwrap the storeclass lint
+// baselines.
 func ConditionalWriterFor(store Store) (ConditionalWriter, bool) {
 	if store == nil {
 		return nil, false

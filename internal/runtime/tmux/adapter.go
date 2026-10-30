@@ -1469,6 +1469,10 @@ type tmuxStartOps struct {
 	// and RunLive drive an already-warm box and must leave it standing on
 	// failure (see Provider.Relaunch), so they set this false.
 	freshStart bool
+	// monitorClock is the time source of runSetupCommand's activity-aware
+	// budget. Nil means the real clock; tests inject a fake so the idle
+	// window is decided by what the command printed, not by host speed.
+	monitorClock execgrace.Clock
 }
 
 // newTmuxStartOps builds the startup adapter for one session, deriving the
@@ -1788,7 +1792,7 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 	if o.setupMaxTimeout > 0 {
 		idle, grace = timeout, setupCancelGrace
 	}
-	mon := execgrace.NewMonitor(ctx, idle, o.setupMaxTimeout)
+	mon := execgrace.NewMonitorWithClock(ctx, idle, o.setupMaxTimeout, o.monitorClock)
 	defer mon.Stop()
 	runCtx := mon.Context()
 	if !mon.Enabled() {
@@ -1923,9 +1927,12 @@ func startupReadyProbeTimeout(cfg runtime.Config) time.Duration {
 	return timeout
 }
 
-func ignoreDeadlineIfSessionAlive(ops startOps, name string, err error) error {
+// ignoreDeadlineIfSessionAlive treats a deadline that passed during stage as
+// success when the session is alive and running. Otherwise it returns err
+// labeled with stage, or the dead-session error.
+func ignoreDeadlineIfSessionAlive(ops startOps, name, stage string, err error) error {
 	if !errors.Is(err, context.DeadlineExceeded) {
-		return err
+		return fmt.Errorf("%s: %w", stage, err)
 	}
 	alive, hasErr := ops.hasSession(name)
 	if hasErr != nil {
@@ -1937,7 +1944,7 @@ func ignoreDeadlineIfSessionAlive(ops startOps, name string, err error) error {
 	if alive {
 		return startupDeadSessionError(ops, name)
 	}
-	return err
+	return fmt.Errorf("%s: %w", stage, err)
 }
 
 func startupDeadSessionError(ops startOps, name string) error {
@@ -2001,7 +2008,7 @@ func failIfSessionDiedDuringStartupProbe(ops startOps, name string) error {
 // session_setup, session_setup_script, and pre_start commands.
 func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.Config, setupTimeout time.Duration) error {
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("tmux start for %q: %w", name, err)
 	}
 
 	// Step 0: Run pre-start commands (directory/worktree preparation).
@@ -2009,7 +2016,7 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 		return fmt.Errorf("running pre_start: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("running pre_start: %w", err)
 	}
 
 	// Step 1: Ensure fresh session (zombie detection).
@@ -2025,7 +2032,7 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 		_ = ops.disableMouseAndActivity(name)
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("creating session: %w", err)
 	}
 
 	// Apply the lifecycle gating and (for a managed, non-one-shot session) run
@@ -2068,7 +2075,7 @@ func finishLaunch(ctx context.Context, ops startOps, name string, cfg runtime.Co
 // box is left in place so the caller can retry or reprovision.
 func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runtime.Config, setupTimeout time.Duration) error {
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("relaunch for %q: %w", name, err)
 	}
 
 	alive, err := ops.hasSession(name)
@@ -2087,7 +2094,7 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 		return fmt.Errorf("relaunch: running pre_start: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("relaunch: running pre_start: %w", err)
 	}
 
 	fullCommand, promptFile, err := buildLaunchCommand(name, cfg)
@@ -2098,7 +2105,7 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 		return cleanupPromptFileOnError(promptFile, fmt.Errorf("relaunch: respawning agent in session %q: %w", name, err))
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("relaunch: respawning agent in session %q: %w", name, err)
 	}
 
 	return finishLaunch(ctx, ops, name, cfg, setupTimeout)
@@ -2120,7 +2127,7 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	if len(cfg.ProcessNames) > 0 {
 		_ = ops.waitForCommand(ctx, name, 30*time.Second) // best-effort, non-fatal
 		if err := ctx.Err(); err != nil {
-			return err
+			return fmt.Errorf("waiting for agent command: %w", err)
 		}
 	}
 
@@ -2132,7 +2139,7 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 		// the post-readiness pass below, which reports it if it persists.
 		_ = ops.acceptStartupDialogs(ctx, name)
 		if err := ctx.Err(); err != nil {
-			return err
+			return fmt.Errorf("accepting startup dialogs: %w", err)
 		}
 	}
 
@@ -2149,7 +2156,7 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 			}
 		}
 		if err := ctx.Err(); err != nil {
-			return ignoreDeadlineIfSessionAlive(ops, name, err)
+			return ignoreDeadlineIfSessionAlive(ops, name, "waiting for readiness", err)
 		}
 	}
 
@@ -2164,7 +2171,7 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 			_, _ = fmt.Fprintf(startupDialogWarningOut, "warning: session %q: %v\n", name, err)
 		}
 		if err := ctx.Err(); err != nil {
-			return ignoreDeadlineIfSessionAlive(ops, name, err)
+			return ignoreDeadlineIfSessionAlive(ops, name, "accepting startup dialogs after readiness", err)
 		}
 	}
 
@@ -2182,13 +2189,13 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 
 	// Step 5.5: Run session setup commands and script.
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("verifying session: %w", err)
 	}
 	runSessionSetup(ctx, ops, name, cfg, os.Stderr, setupTimeout)
 
 	// Step 6: Send nudge text if configured.
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("running session_setup: %w", err)
 	}
 	if cfg.Nudge != "" {
 		if err := sendStartupNudgeWithRetry(ctx,
@@ -2237,7 +2244,7 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 
 	// Step 6.5: Run session_live commands (idempotent, re-applicable).
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("sending startup nudge: %w", err)
 	}
 	runSessionLive(ctx, ops, name, cfg, os.Stderr, setupTimeout)
 

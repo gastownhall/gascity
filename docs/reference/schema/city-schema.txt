@@ -247,11 +247,11 @@
         },
         "idle_timeout": {
           "type": "string",
-          "description": "IdleTimeout is the maximum time an agent session can be inactive before\nthe controller kills and restarts it. Duration string (e.g., \"15m\", \"1h\").\nEmpty (default) disables idle checking."
+          "description": "IdleTimeout is the maximum time an agent session can be inactive before\nthe controller kills and restarts it. Duration string (e.g., \"15m\", \"1h\").\nEmpty (default) disables idle checking. Not applied to a [[named_session]]\nwith mode = \"always\": the controller keeps that session running."
         },
         "max_session_age": {
           "type": "string",
-          "description": "MaxSessionAge is the maximum wall-clock lifetime of a single runtime\nsession before the controller preemptively restarts it. Duration string\n(e.g., \"5h\"). Empty (default) disables preemptive restarts. The restart\nis idle-gated: sessions with a pending interaction or an in-progress\nassigned work bead are left alone until they settle.\n\nMotivation: provider SDKs that cache credentials at session start (e.g.,\nClaude Code via Bedrock) can wedge when the underlying token expires if\nthe SDK doesn't re-chain providers. Cycling long-running sessions before\nthe token-expiry window prevents that failure mode without requiring\nupstream provider fixes."
+          "description": "MaxSessionAge is the maximum wall-clock lifetime of a single runtime\nsession before the controller preemptively restarts it. Duration string\n(e.g., \"5h\"). Empty (default) disables preemptive restarts. The restart\nis idle-gated: sessions with a pending interaction or an in-progress\nassigned work bead are left alone until they settle. Not applied to a\n[[named_session]] with mode = \"always\".\n\nMotivation: provider SDKs that cache credentials at session start (e.g.,\nClaude Code via Bedrock) can wedge when the underlying token expires if\nthe SDK doesn't re-chain providers. Cycling long-running sessions before\nthe token-expiry window prevents that failure mode without requiring\nupstream provider fixes."
         },
         "max_session_age_jitter": {
           "type": "string",
@@ -1088,7 +1088,8 @@
             "auto",
             "require"
           ],
-          "description": "ConditionalWrites selects the bead-write discipline: \"off\" (legacy,\nbyte-identical), \"auto\" (compare-and-swap where the store is capable,\nloud degrade otherwise), or \"require\" (CAS or a typed refusal). Empty\ndefaults to \"off\". Any other value fails config load."
+          "description": "ConditionalWrites selects the bead-write discipline: \"off\" (legacy,\nbyte-identical), \"auto\" (compare-and-swap where the store is capable,\nloud degrade otherwise), or \"require\" (CAS or a typed refusal). Empty\ndefaults to \"auto\", except that a store that cannot fence (an exec\nstore, or a bd without --if-revision) runs as \"off\" without a warning.\nGC_BEADS_CONDITIONAL_WRITES overrides it. Any other value fails config\nload.",
+          "default": "auto"
         },
         "guarded_release": {
           "type": "string",
@@ -1410,7 +1411,7 @@
         },
         "session_circuit_breaker": {
           "type": "boolean",
-          "description": "SessionCircuitBreaker enables the named-session respawn circuit breaker.\nWhen enabled, the controller suppresses no-progress named-session respawns\nafter the configured restart threshold is exceeded."
+          "description": "SessionCircuitBreaker enables the named-session respawn circuit breaker.\nWhen enabled, the controller suppresses no-progress named-session respawns\nafter the configured restart threshold is exceeded. Legacy only:\ndeprecated and ignored under the v2 reconciler, whose work ladder\nreplaces it."
         },
         "session_circuit_breaker_max_restarts": {
           "type": "integer",
@@ -1447,7 +1448,7 @@
         },
         "wisp_ttl": {
           "type": "string",
-          "description": "WispTTL is how long a closed wisp (an ephemeral v1 formula-run bead) survives\nbefore being purged. Duration string (e.g., \"24h\", \"7d\"). Wisp GC is disabled\nunless both WispGCInterval and WispTTL are set."
+          "description": "WispTTL is how long a closed wisp (an ephemeral v1 formula-run bead) survives\nbefore being purged. Go duration string (e.g., \"24h\", or \"168h\" for seven\ndays). Day units are not accepted: a value such as \"7d\" does not parse, so\n`gc start --foreground` refuses it and otherwise wisp GC stays disabled.\nWisp GC is disabled unless both WispGCInterval and WispTTL are set."
         },
         "drift_drain_timeout": {
           "type": "string",
@@ -1489,8 +1490,7 @@
             "auto",
             "require"
           ],
-          "description": "SessionReconciler selects the controller's session reconciler. \"legacy\"\n(default) runs the tick reconciler. \"v2\" is reserved for the keyed\nreconciler and is refused in this build: a controller configured with it\ndoes not start. The gc-enterprise values \"off\", \"auto\" and \"require\" are\ndeprecated aliases for \"legacy\". Boot-latched: a change applies at the next\ncontroller restart. Leave it unset.",
-          "default": "legacy"
+          "description": "SessionReconciler selects the controller's session reconciler. Unset\n(default) runs the keyed \"v2\" reconciler when the city can run it, and\nfalls back to \"legacy\", the tick reconciler, with a warning naming why\nwhen it cannot: a feature v2 does not support yet (agent depends_on or\nmax_session_age, [chat_sessions] idle_timeout, a session provider other\nthan tmux, acp or subprocess), conditional writes turned off, or a\nsessions or graph class store that is not on a sqlite-beads binding.\n\"v2\" runs v2 or refuses to start: a controller configured with it and\nsuch a feature does not start. \"legacy\" always runs the tick reconciler.\nThe gc-enterprise values \"off\", \"auto\" and \"require\" are deprecated\naliases for \"legacy\". Boot-latched: a change applies at the next\ncontroller restart."
         },
         "work_ladder": {
           "type": "string",
@@ -1498,7 +1498,7 @@
             "on",
             "off"
           ],
-          "description": "WorkLadder selects how the v2 reconciler paces outstanding work on pool\nseats. \"on\" (default) runs the work-progress ladder: nudges back off from\n3 to 60 minutes and never stop, a started claim is recycled at most once\nand then escalated, and an unstarted claim is released after its third\nunanswered nudge. \"off\" runs the three backstops it replaced (idle-claim,\ncontinuation, execution) instead: the rollback. Read on every pass, so a\nconfig reload applies. Legacy ignores it.",
+          "description": "WorkLadder selects how the v2 reconciler paces outstanding work on pool\nseats. \"on\" (default) runs the work-progress ladder: nudges back off from\n3 to 60 minutes and never stop, a started claim is recycled at most once\nand then escalated, and an unstarted claim is released after its third\nunanswered nudge (a nudge the seat could not take, such as one held at\na permission prompt, does not count). \"off\" runs the three backstops it\nreplaced (idle-claim, continuation, execution) instead: the rollback.\nRead on every pass, so a config reload applies. Legacy ignores it.",
           "default": "on"
         },
         "auto_restart_on_drift": {
@@ -1655,11 +1655,36 @@
         "rotation": {
           "$ref": "#/$defs/EventsRotationConfig",
           "description": "Rotation configures file-backed JSONL rotation. Defaults are applied\nby EventsRotationConfig helper methods when this table is absent."
+        },
+        "mirror": {
+          "$ref": "#/$defs/EventsMirrorConfig",
+          "description": "Mirror configures an optional second copy of the city's event log,\nwritten outside .gc so a log shipper can read it. Absent or with an\nempty path, nothing is mirrored."
         }
       },
       "additionalProperties": false,
       "type": "object",
       "description": "EventsConfig holds events provider settings."
+    },
+    "EventsMirrorConfig": {
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path is the absolute path of the mirror file, outside the city's .gc\ndirectory. Its directory must already exist and be writable only by\nthe city's user: gc creates only the file and never creates or changes\nthe directory. gc writes only a regular file there: it does not follow\na symbolic link at the path. Empty disables the mirror. Read when the\ncontroller opens the city's event log: a change takes effect at the\nnext controller start."
+        },
+        "mode": {
+          "type": "string",
+          "description": "Mode is the octal permission of the mirror file as a quoted string,\nfor example \"0640\"; an unquoted TOML integer (0o640) is a type error\nthat stops the config from loading. gc creates the file with it and\nsets it on every open. Defaults to \"0640\". The file's group follows\nthe directory's: give the directory the shipper's group with the\nsetgid bit (mode 2750) so the file inherits it.",
+          "default": "0640"
+        },
+        "max_size_bytes": {
+          "type": "integer",
+          "description": "MaxSizeBytes is the size at which the mirror is renamed to \u003cpath\u003e.1\n(replacing the previous one) and a new file is started, so it stays\nunder about twice this on disk. 0 turns gc's mirror rotation off for an\nexternal logrotate, which may rename the file away or copytruncate it.\nDefaults to 104857600 (100 MiB).",
+          "default": 104857600
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "EventsMirrorConfig configures the events mirror: a JSONL file outside the city's .gc directory that receives a copy of every line of .gc/events.jsonl, for a log shipper that may not enter .gc (which gc keeps at 0700)."
     },
     "EventsRotationConfig": {
       "properties": {
@@ -2128,8 +2153,8 @@
             "auto",
             "require"
           ],
-          "description": "Records message deliveries (session submit and messages, nudge, mail\nnotify) as message ops. \"off\" is the shipped default for all three\ngates. \"auto\" records where the store can and degrades loudly where it\ncannot. \"require\" refuses a request it cannot record before any effect.\nExperimental: each mode takes effect as each request surface gains op\nrecording. A change takes effect at the next process start.",
-          "default": "off"
+          "description": "Records message deliveries (session submit and messages, nudge, mail\nnotify) as message ops. \"auto\" is the default for all three gates.\nLeft unset, it records only over a SQLite sessions store and runs\nunrecorded, quietly, over any other (a Dolt-served one included). Set\nto \"auto\", it records where the store can and warns where it cannot; a\nstore served through bd can record once that bd supports --if-revision,\nwhich no released bd does yet. \"off\" records nothing. \"require\" (opt-in) refuses a request it\ncannot record before any effect. A change takes effect at the next\nprocess start. With message listed in authoritative, a surface that\nproposes lane message ops (the API's submit and messages, a provider\nsession create's initial message, extmsg member notices, gc session\nnudge, gc session submit, planner notices) is not governed by this\ngate.",
+          "default": "auto"
         },
         "control": {
           "type": "string",
@@ -2138,8 +2163,8 @@
             "auto",
             "require"
           ],
-          "description": "Records interrupt (stop) and respond requests as ops. \"off\" is the\nshipped default. \"auto\" records where the store can and degrades loudly\nwhere it cannot. \"require\" refuses a request it cannot record before any\neffect. Experimental: each mode takes effect as each request surface\ngains op recording. A change takes effect at the next process start.",
-          "default": "off"
+          "description": "Records interrupt (stop) and respond requests as ops. \"auto\" is the\ndefault. Left unset, it records only over a SQLite sessions store and\nruns unrecorded, quietly, over any other (a Dolt-served one included).\nSet to \"auto\", it records where the store can and warns where it\ncannot; a store served through bd can record once that bd supports\n--if-revision, which no released bd does yet. \"off\" records nothing. \"require\" (opt-in)\nrefuses a request it cannot record before any effect. A change takes\neffect at the next process start. A kind [ops] authoritative lists is\na lane op instead, which this gate does not govern.",
+          "default": "auto"
         },
         "lifecycle": {
           "type": "string",
@@ -2148,18 +2173,20 @@
             "auto",
             "require"
           ],
-          "description": "Records wake, suspend, reset (restart), kill and close requests as ops.\n\"off\" is the shipped default. \"auto\" records where the store can and\ndegrades loudly where it cannot. \"require\" refuses a request it cannot\nrecord before any effect. Experimental: each mode takes effect as each\nrequest surface gains op recording. A change takes effect at the next\nprocess start.",
-          "default": "off"
+          "description": "Records wake, suspend, reset (restart), kill and close requests as ops.\n\"auto\" is the default. Left unset, it records only over a SQLite\nsessions store and runs unrecorded, quietly, over any other (a\nDolt-served one included). Set to \"auto\", it records where the store\ncan and warns where it cannot; a store served through bd can record\nonce that bd supports --if-revision, which no released bd does yet.\n\"off\" records nothing.\n\"require\" (opt-in) refuses a request it cannot record before any\neffect. A change takes effect at the next process start.",
+          "default": "auto"
         },
         "authoritative": {
           "items": {
             "type": "string",
             "enum": [
-              "message"
+              "message",
+              "interrupt",
+              "respond"
             ]
           },
           "type": "array",
-          "description": "Authoritative lists the op kinds the conversation lane executes instead\nof their legacy path. The default is empty, and message is not on by\ndefault anywhere yet. This build accepts message only. Experimental:\nlisting message switches on the producers that write lane ops, whose\nmessages the lane host then delivers: the API's POST\n/v0/city/{cityName}/session/{id}/ops (a T3 Code environment or an\noperator proposing a message) and, for sessions a lane host can type\ninto (a keystroke-mode runtime, or one a box host serves), the\ncontroller's planner notices (drain reminders, the nudge backstop) and\ngc session nudge. gc session nudge delivers inline what its delivery\nmode allows now, where it can type into the session: wait-idle only at\nan idle boundary; immediate there too, or into a running turn when the\nruntime can steer it, else at the next boundary. It leaves the rest to\nthe controller's lane host, and the content gate no longer governs it.\nThe API's submit and messages, gc session submit, mail --notify, sling\n--nudge and wait nudges keep their legacy delivery in this build. Under\nsession_reconciler = \"v2\", do not list message yet (gc doctor warns).\nThe city's controller, standalone or supervisor-hosted, runs the lane\nhost that delivers lane ops, and gc doctor reports a listed kind as an\nerror when no lane host serves the city. A keystroke-mode runtime (tmux)\ntakes a boundary delivery at an idle boundary, a protocol-mode runtime\n(t3bridge) at its turn boundary.\nA listed kind needs a sessions store with guarded batches. A change\ntakes effect at the controller's next start; gc session nudge reads it\nat once."
+          "description": "Authoritative lists the op kinds the conversation lane executes instead\nof their legacy path. The default is empty, and message is not on by\ndefault anywhere yet. This build accepts message, interrupt and respond.\nExperimental: listing message switches on the producers that write lane\nops, whose messages the lane host then delivers: the API's POST\n/v0/city/{cityName}/session/{id}/ops (a T3 Code environment or an\noperator proposing a message) and, for sessions a lane host can type\ninto (a keystroke-mode runtime, or one a box host serves), the\ncontroller's planner notices (the work ladder's nudges, drain reminders,\nthe nudge backstop) and\ngc session nudge. gc session nudge delivers inline what its delivery\nmode allows now, where it can type into the session: wait-idle only at\nan idle boundary; immediate there too, or into a running turn when the\nruntime can steer it, else at the next boundary. It leaves the rest to\nthe controller's lane host, and the content gate no longer governs it.\nThe API's POST .../session/{id}/submit and .../messages propose lane\nmessage ops too (interrupt_now as a deliver-now unit, which never\nrestarts the session), answer 202 once the op is committed, and emit\nthe request's result after a 5 s settle window (queued while the op\nstill waits); their resume: true, once the message's op is proposed,\nconsumes an operator's hold on the session and records its wake. A\nprovider session create (POST /v0/city/{cityName}/sessions, kind\nprovider) proposes its initial message as a lane op as well; an agent\ncreate's initial message rides its first start's prompt and is no lane\nop. A message over 16 KiB, the op journal's inline payload limit, is\nrefused 422 payload_too_large, a provider create's before the session\nis created. extmsg member notices are lane notices, their inbound text\ncut to fit that limit. mail --notify, sling --nudge and the hook-claim\ncontinuation propose one lane notice per event (a mail, a sling, a\nclaim), each under a minted key, to a session a lane host can type\ninto; the session's row is read in the city's sessions store, and a\nrow that cannot be read refuses the notice, which is then neither\ndelivered nor queued. A session with no row, or one no lane serves,\nkeeps their legacy delivery. A mail notice is withdrawn, best effort,\nwhen gc mail or the API reads, marks read, archives or deletes its\nmessage, or SessionStart archives a handoff; a message consumed any\nother way can leave its notice open. A ready wait's nudge is a lane\nnotice from gc:wait to a session a lane host can type into, and its\noutcome finalizes the wait; for a session no lane serves, or a note the\nop store refuses, it keeps its legacy delivery. gc session submit sends\nthe API its key whatever the content gate says; when the API call\nfails, it accepts the message as the API does, for every session the\nAPI accepts. It delivers inline only at an idle boundary of a\nkeystroke-mode runtime, and never an interrupt_now, so a submit to a\nprotocol-mode session waits for the controller.\nListing interrupt switches the API's POST\n/v0/city/{cityName}/session/{id}/stop and run cancel onto the lane:\neach proposes interrupt ops the controller's lane host runs, and\nanswers from their outcomes. A stop still running after 45 s answers\n409 in_flight, naming the op; run cancel lists a holder whose interrupt\nis still running then, or failed, in its interrupt_failures. The ops\nroute proposes interrupt ops too, and the control gate no longer\ngoverns them. gc stop's graceful interrupt wave is lifecycle and keeps\nits path.\ngc session nudge's inline pass never runs an interrupt, a respond or a\ndeliver-now unit: it leaves them, and content queued behind them, to\nthe controller's lane host. Listing respond switches the API's POST\n/v0/city/{cityName}/session/{id}/respond onto the lane: it proposes a\nrespond op keyed by the interaction occurrence it answers, which the\nlane host runs at most once, and answers from its outcome (202 with\nthe op still open after 20 s).\nThe city's controller, standalone or supervisor-hosted, runs the lane\nhost that delivers lane ops, and gc doctor reports a listed kind as an\nerror when no lane host serves the city. A keystroke-mode runtime (tmux)\ntakes a boundary delivery at an idle boundary, a protocol-mode runtime\n(t3bridge) at its turn boundary. A message the ops route proposes with\nwhen now, or the legacy interrupt, runs as one deliver-now unit: the\nlane host interrupts the session's running turn, then delivers the\nmessage at the boundary the interrupt leaves.\nA listed kind needs a sessions store with guarded batches. A change\ntakes effect at the controller's next start; gc session nudge and gc\nsession submit read it at once."
         }
       },
       "additionalProperties": false,
@@ -2701,7 +2728,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "ACPArgs overrides Args when the session transport is ACP.\nWhen nil, Args is used for both tmux and ACP transports."
+          "description": "ACPArgs overrides Args when the session transport is ACP.\nWhen nil, Args is used for both tmux and ACP transports. When any layer\nsets acp_args, args and args_append reach only the CLI launch, except\nschema-managed flags such as a curated model, which become option\ndefaults that both launches carry: when a layer more specific than the\nacp_args layer declares args that reach the CLI launch, the CLI\ntransport is the default, and an explicit ACP session that still drops\nargs prints a warning."
         }
       },
       "additionalProperties": false,
@@ -3024,11 +3051,11 @@
         },
         "progress_stall_timeout": {
           "type": "string",
-          "description": "ProgressStallTimeout, when set, enables progress-aware session recycling:\na desired, alive, claim-less session on a healthy provider whose last\nprovider-reported activity is older than this duration is restarted fresh.\nSuch a session has likely parked (e.g. its turn ended on a provider auth\nerror) and will not self-recover. Set this above the longest legitimate\nalive-idle period for the city; values below 5m are clamped to 5m.\nDuration string (e.g. \"30m\"). Unset/zero disables it."
+          "description": "ProgressStallTimeout, when set, enables progress-aware session recycling:\na desired, alive, claim-less session on a healthy provider whose last\nprovider-reported activity is older than this duration is restarted fresh.\nSuch a session has likely parked (e.g. its turn ended on a provider auth\nerror) and will not self-recover. Set this above the longest legitimate\nalive-idle period for the city; values below 5m are clamped to 5m.\nDuration string (e.g. \"30m\"). Unset/zero disables it. Legacy only:\ndeprecated and ignored under the v2 reconciler, whose work ladder\nreplaces it."
         },
         "claim_holder_stall_timeout": {
           "type": "string",
-          "description": "ClaimHolderStallTimeout, when set, enables progress-aware recycling of a\ndesired, alive session that holds in-progress work but has stopped making\nprogress. Because recycling a claim-holder interrupts work, set this above\nthe longest legitimate quiet period. Values below 5m are clamped to 5m.\nDuration string (e.g. \"20m\"). Unset/zero disables it."
+          "description": "ClaimHolderStallTimeout, when set, enables progress-aware recycling of a\ndesired, alive session that holds in-progress work but has stopped making\nprogress. Because recycling a claim-holder interrupts work, set this above\nthe longest legitimate quiet period. Values below 5m are clamped to 5m.\nDuration string (e.g. \"20m\"). Unset/zero disables it. Legacy only:\ndeprecated and ignored under the v2 reconciler, whose work ladder\nreplaces it."
         },
         "socket": {
           "type": "string",

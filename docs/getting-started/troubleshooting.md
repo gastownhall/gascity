@@ -217,7 +217,7 @@ check.
 
 | Tool | Min version | macOS | Linux |
 |------|-------------|-------|-------|
-| dolt | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
+| dolt | 2.6.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
 | bd | 1.3.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
 | flock | -- | `brew install flock` | `apt install util-linux` |
 
@@ -249,11 +249,12 @@ durable versioned storage and is recommended for real work.
 
 ## Dolt Version Too Old
 
-Gas City requires a final Dolt 2.1.0 or newer. Older and pre-release builds
-are below the managed bd/Dolt compatibility floor; releases before 1.86.2 can
-also miss the upstream GC/writer deadlock fix in dolthub/dolt commit
-`ccf7bde206`, which can hang `dolt_backup sync` under heavy write load. Check
-your version:
+Gas City requires a final Dolt 2.6.0 or newer. Older and pre-release builds
+are below the managed bd/Dolt compatibility floor: 2.6.0 is the first Dolt
+built with a Go toolchain that distrusts the compromised eMudhra CA
+intermediates. Releases before 1.86.2 can also miss the upstream GC/writer
+deadlock fix in dolthub/dolt commit `ccf7bde206`, which can hang
+`dolt_backup sync` under heavy write load. Check your version:
 
 ```bash
 dolt version
@@ -442,6 +443,117 @@ Existing Cursor sessions keep the command fingerprint they were created with.
 The supervisor reconciler restarts sessions automatically after the fingerprint
 changes. Drain the pool first when you need a controlled handoff rather than
 waiting for the next automatic restart.
+
+## Gas City Leaves a Project's Own MCP Config Alone
+
+gc writes the MCP servers from your city's catalog into each provider's
+project config: `.mcp.json`, `.codex/config.toml`, `.gemini/settings.json`,
+`.cursor/mcp.json`, `opencode.json`, or `mimocode.json`, at the city root,
+each rig root, and agent work dirs. When one of those files already holds MCP
+servers the catalog does not define, or defines a server differently, such as
+a team's `.mcp.json` committed to a rig's repository, gc does not take it
+over, since that would replace the team's servers. It leaves the file as it
+is and warns:
+
+```text
+gc: warning: agent "frontend/coder" starts without gc's MCP server "notes": not adopting /src/frontend/.mcp.json: gc does not manage it yet, and adopting it would drop MCP server "team-db"; to let gc manage it, define the servers you still need in gc's MCP catalog (an mcp/ directory) and remove those entries from the file
+```
+
+The agents that read that file keep the team's servers and start without
+gc's. To see where this applies:
+
+- `gc doctor` lists every such file under `mcp-adoption`.
+- `gc start --dry-run` shows a file at the city root or a rig root as
+  `leave ... as it is`, and warns about a file in an agent's own work dir.
+- `gc mcp list --agent <name>`, or `--session <id>` for a pool or worktree
+  session, says "Not delivered" for an agent that reads one.
+- The supervisor log shows the warning when the city starts, and when gc
+  next resolves an agent whose own work dir holds such a file, such as a
+  session's checkout of a repository that commits its own `.mcp.json`. It
+  shows it once per agent, and again if the file's content changes or the
+  file comes back after gc saw it gone.
+
+gc also leaves alone a file it cannot read or parse, a symlinked one, and
+one that is not a regular file (a named pipe, a device) or is larger than
+4 MiB, which it does not read at all.
+
+To give those agents gc's servers too, define the file's servers you still
+need in an `mcp/` catalog that reaches every agent reading the file, one
+`<name>.toml` per server, and remove the file's own entries:
+
+- A file at the city root or a rig root is shared by every agent of that
+  provider there, including the one gc adds for each declared provider.
+  Use the city's `mcp/`, or for a rig root, a pack the rig imports.
+- A file in one agent's own work dir can also take the agent's own
+  `agents/<name>/mcp/`.
+
+gc adopts the file the next time it projects there: at the next city start
+for the city and rig roots, and at the agent's next session start for its
+own work dir. Editing the file does not restart anything. On
+adoption, gc saves the original under `.gc/mcp-adopted/` and writes every
+server from the catalog.
+
+If the repository tracks the file, think twice before letting gc adopt it.
+gc's version can hold secrets expanded from `env` or `headers`, and it shows
+up as a change to the tracked file; `.gitignore` does not hide changes to
+tracked files. gc does not ask before it adopts a tracked file that holds
+no servers of its own, such as a committed `opencode.json` or
+`.gemini/settings.json` with only settings. It notes the adoption on stderr,
+adds gc's servers to the file, keeps its other settings, and rewrites its
+formatting (comments in a `.codex/config.toml` are lost).
+
+gc starts Claude with project MCP servers pre-approved, so the servers in a
+`.mcp.json` gc leaves alone run in its Claude agents without a trust prompt,
+as they do in a city with no MCP catalog. Review a repository's MCP config
+before you add it as a rig.
+
+`gc doctor` also reports files an earlier gc took over while they held
+servers the catalog does not define. Their definitions are in the snapshot
+it names under `.gc/mcp-adopted/`. To hand such a file back, stop the city
+(`gc stop`), restore the file from the snapshot, and delete the marker gc
+keeps for it, `.gc/mcp-managed/<provider>.json` at the same root; gc then
+leaves it alone. Deleting the snapshots clears the report.
+
+## An Agent Starts Without an MCP Server
+
+The supervisor log (`gc supervisor logs`) shows a warning like this one when
+the city starts or reloads its config; `gc start --dry-run` prints it too.
+`gc start` and `gc reload` print it as well, but they work it out on your
+shell's `PATH`, which can differ from the supervisor's. If they disagree, for
+example about a provider that is not installed, the supervisor log is right:
+
+```text
+gc: warning: city "my-city": agents "cursor" (the implicit agent for provider "cursor"), "editor" start without MCP server "search" (http, from import "search"): gc projects only stdio MCP servers for the "cursor" harness
+```
+
+An implicit agent is one gc adds for every provider the city declares, so
+work can be slung to that provider without defining an agent; the warning
+names its provider because you never wrote it.
+
+MCP servers from the city's `mcp/` directory, a rig pack, or an import apply
+to every agent in that scope. When an agent's provider cannot receive one of
+them, Gas City leaves that server out of the agent's MCP config and starts the
+agent without it. Every other agent starts as usual.
+
+| Provider family | Receives |
+|---|---|
+| `claude`, `codex`, `gemini`, `opencode`, `mimocode` | stdio and HTTP servers |
+| `cursor` | stdio servers only |
+| any other provider, such as `copilot` | no MCP servers |
+
+Agents whose sessions use ACP receive every server through the protocol
+itself, whatever their provider family.
+
+`gc mcp list --agent <name>` lists the skipped servers under **Not
+projected**. `gc doctor`, `gc config show --validate`, and `gc import add`
+report the same warning, so you can see it before the city starts.
+
+If the agent does not need the server, nothing needs to change. If it does,
+switch the agent to a provider that can receive it.
+
+A server in an agent's own `agents/<name>/mcp/` directory is meant for that
+agent alone. If the agent's provider cannot receive it, that agent does not
+start, and the warning says `cannot start`; the rest of the city still starts.
 
 ## `gc version` Prints Unexpected Output
 
@@ -710,7 +822,10 @@ store (the city and every rig) with `bd export` into a text-diffable JSONL
 snapshot inside a local git repository (the "JSONL archive"): one issue per
 line, with its labels, dependencies and comments. The archive serves as a
 disaster-recovery backup: a snapshot from any commit restores with
-`gc bd import <file>`.
+`gc bd import <file>`. On a split-store city, a snapshot that holds
+infrastructure rows (from before the split) is refused. Re-run it with
+`gc bd import <file> --skip-infra` to import only the work rows, because the
+class binding already holds the live infrastructure state.
 
 `jsonl-export` (every 15 minutes) and `reaper` (every 30 minutes) ship in
 the core pack, so they are active in every city by default — including
@@ -729,6 +844,17 @@ skip = ["jsonl-export", "reaper"]
 Cities that had skipped the old formula orders (`mol-dog-jsonl`,
 `mol-dog-reaper`) stay opted out; the renamed orders honor the legacy
 skip entries.
+
+On a bead store that holds op rows (beads of type `op`, which ops recording
+writes), `reaper` does not run its wisp purge or its session prune. Both
+delete closed no-history beads, and bd deletes an op row without a tombstone
+unless it keeps that type. The reaper runs both again once the store's bd
+honors `types.retained` (its `bd purge --help` and `bd prune --help` name the
+setting) and the store's database names `op` there. Every writer of the store
+must run such a bd first; then set it with
+`gc bd config set types.retained op` (add `--rig <name>` for a rig store).
+Until then each run records the skipped step in its `order.skipped` event, and
+`gc doctor`'s `ops-recording` check warns about the store.
 
 ### Local-only vs push mode
 
@@ -751,12 +877,21 @@ that an operator reading the log file can always find the current mode.
 ### Archive object maintenance
 
 Every snapshot commit creates loose Git objects, including in local-only
-mode. The exporter checks the archive before each export and after each new
-commit. It runs a foreground, low-priority `git gc` when either of these
-defaults is reached:
+mode. Each run exports and commits first, pushes in push mode, and only then
+checks the archive. When either of these defaults is reached it runs a
+foreground, low-priority `git repack --geometric=2`:
 
 - `GC_JSONL_GC_LOOSE_OBJECTS=2000`
 - `GC_JSONL_GC_LOOSE_KB=262144` (256 MiB)
+
+A geometric repack packs the loose backlog into a new pack and merges only the
+small packs beside it. A large existing pack is left alone until the smaller
+packs beside it grow large enough for the geometric progression to merge it;
+only `mode=geometric-keep-largest` (below) leaves it out outright. So a run
+usually writes only the new pack where a full `git gc` rewrote the whole
+archive. The same pass runs when a run has nothing new to export, so a
+backlog left by an earlier failure is packed on the next run. It needs Git 2.32
+or newer; on an older Git the pass fails with a message that says so.
 
 Packing is deliberately single-threaded and uses
 `GC_JSONL_GC_WINDOW_MEMORY=256m` (a positive byte count, without leading
@@ -764,24 +899,44 @@ zeros, with an optional `k`, `m`, or `g` suffix in either case) to avoid
 competing with the Dolt server and worker sessions for memory. These values
 can be lowered for small hosts.
 
-Packing writes a new copy of the archive's objects before it deletes the old
-ones. It starts only when the archive's filesystem can hold that copy and
-still keep `GC_JSONL_GC_MIN_FREE_KB=512000` (500 MiB) free; otherwise the
-order fails with a message giving the free space. The check counts loose
-objects at their full size, though snapshots usually pack to a small fraction
-of it: one archive's 9.01 GiB of loose objects packed to 67.40 MiB. So an
-archive with a large backlog of loose objects can be refused on every run
-even when packing it would fit. To recover, pack it once by hand with the
-command the failure message prints (or the lower-memory one below), free disk
-space, or set `GC_JSONL_GC_MIN_FREE_KB=0` to disable the check. If `df`
-cannot report the free space, packing goes ahead with a warning.
+Each pass that packs prints one line to stderr:
+
+```text
+jsonl-export: archive maintenance: mode=geometric wall=12s loose_before=2410 loose_after=0 packs_before=3 packs_after=2 pack_kb_after=41200
+```
+
+A failed pass prints the fields it has plus `status=failed`. Watch
+`packs_after` and `pack_kb_after` over time: a pack count that keeps growing,
+or a pack size that keeps climbing, means the large pack has not been
+rewritten for a long while. Geometric packing postpones that full rewrite; it
+does not remove it, so the archive's total size still grows with every
+snapshot until you rewrite it by hand.
+
+Packing writes a new pack before it deletes the old objects. It starts only
+when the archive's filesystem can hold that pack and still keep
+`GC_JSONL_GC_MIN_FREE_KB=512000` (500 MiB) free:
+
+| Free space | What the run does |
+|---|---|
+| Room to rewrite everything | Packs normally (`mode=geometric`). |
+| Room only to rewrite everything except the largest pack | Prints a notice and keeps the largest pack as it is (`mode=geometric-keep-largest`). |
+| Room for neither | Refuses, after the export, and names the setting below. |
+
+The check counts loose objects at their full size, though snapshots usually
+pack to a small fraction of it: one archive's 9.01 GiB of loose objects packed
+to 67.40 MiB. So an archive with a large backlog can be refused even when
+packing it would fit. To recover, pack it once by hand with the command the
+failure message prints, free disk space, or set `GC_JSONL_GC_MIN_FREE_KB=0` to
+disable the check. If `df` cannot report the free space, packing goes ahead
+with a warning.
 
 An invalid setting fails the order before it exports anything. A refused
-free-space check or a failed `git gc` fails the order visibly, and later runs
-export no new snapshots until packing succeeds. Snapshots already committed
-still reach `origin`: a run packs only after its push, and a run that finds
-the archive cannot be packed pushes any waiting snapshot before it stops. A
-spike halt sends its alert, or saves it for retry, before it packs.
+free-space check or a failed repack still fails the order visibly (exit 1, no
+completion event), but only after the run has committed its snapshot and, in
+push mode, pushed it. A spike halt sends its alert, or saves it for retry,
+before it packs. A pass that cannot finish therefore never blocks the next
+export: the next run commits and pushes its snapshot, then tries to pack
+again.
 
 To inspect the archive without changing it:
 
@@ -793,7 +948,15 @@ git -C "$ARCHIVE" count-objects -vH
 git -C "$ARCHIVE" fsck --connectivity-only
 ```
 
-To pack it once by hand with less memory:
+To pack the backlog once by hand with less memory:
+
+```bash
+git -C "$ARCHIVE" -c pack.windowMemory=64m -c pack.threads=1 repack -d -l -q --geometric=2
+```
+
+To rewrite the whole archive into one pack (the full rewrite that geometric
+packing postpones), run `git gc`. It writes the archive's full size again, so
+check the free space first:
 
 ```bash
 git -C "$ARCHIVE" -c pack.windowMemory=64m -c pack.threads=1 gc
@@ -976,7 +1139,12 @@ rm -f .gc/incidents/*.state
 A pack that overrides `escalate.sh` receives `--incident-key KEY
 --fingerprint F` on an alert and `--resolve-incident KEY` on a clean run. The
 override must accept or ignore those flags and must send nothing for
-`--resolve-incident`; an override that rejects them loses the alert.
+`--resolve-incident`. An override written before incident keys, which rejects
+the flags as a usage error (exit 2, or an error that names the flag), still
+alerts: the order sends the alert again without the flags, so it is mailed on
+every run instead of deduplicated. The order's output then names the override
+as one that predates incident keys; run the order by hand to see it, for
+example `gc order run reaper`.
 
 ## WSL (Windows Subsystem for Linux)
 
@@ -987,7 +1155,7 @@ terminal emulator.
 
 ## Build From Source Fails
 
-Building from source requires `make` and Go 1.26.4 or newer:
+Building from source requires `make` and Go 1.27.3 or newer:
 
 ```bash
 make --version

@@ -34,7 +34,6 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sdnotify"
-	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/transcriptmeta"
@@ -2311,7 +2310,9 @@ func startOneCity(
 
 	// Latch the session reconciler before any init: a refused city must not
 	// start its bead store or open its event log.
-	wiring, wiringErr := newControllerWiring(cfg, reconcilerModeLookupEnv, stderr)
+	var reconcilerBoot strings.Builder
+	wiring, wiringErr := newControllerWiringLoggingTo(cfg, reconcilerModeLookupEnv, stderr, &reconcilerBoot)
+	logSupervisorReconcilerBoot(stderr, path, cityName, reconcilerBoot.String())
 	if wiringErr != nil {
 		emitPendingCityCreateFailure(cr, path, cityName, "session_reconciler_refused", wiringErr, stderr)
 		recordInitFailure(cityName, wiringErr.Error())
@@ -2449,6 +2450,13 @@ func startOneCity(
 		}))
 		return runtimeErr
 	}); err != nil {
+		// The recorder is this city's rotation owner: left open, its
+		// [events.mirror] copier would hold the mirror lock for the life of
+		// the supervisor, and every retry's copier would wait on it.
+		cityCancel()
+		if fr != nil {
+			fr.Close() //nolint:errcheck
+		}
 		emitPendingCityCreateFailure(cr, path, cityName, "city_runtime_failed", err, stderr)
 		recordInitFailure(cityName, fmt.Sprintf("city runtime: %v", err))
 		return
@@ -2486,10 +2494,7 @@ func startOneCity(
 	// restart (ga-n2d Gap C). Best-effort, mirrors runController — a sweep
 	// failure must never block city startup.
 	_ = runPostPrepareStep("releasing_stale_name_claims", func() error {
-		if cs.cityBeadStore == nil {
-			return nil
-		}
-		if released, err := sessionpkg.ReleaseStaleConfiguredNameClaims(cs.cityBeadStore, cfg, cityName); err != nil {
+		if released, err := releaseStaleNameClaimsAtStartup(cs, cfg, cityName); err != nil {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': stale name-claim sweep: %v\n", cityName, err) //nolint:errcheck
 		} else if released > 0 {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': released %d stale configured name claim(s) at startup\n", cityName, released) //nolint:errcheck
@@ -2501,7 +2506,7 @@ func startOneCity(
 		cs.startBeadEventWatcher(cityCtx)
 		cs.startAutocloseSweep(cityCtx)
 		cs.startOpSweep(cityCtx)
-		cs.startConversationLaneHost(cityCtx)
+		cs.startConversationLaneHost(cityCtx, wiring.mode)
 		cs.startMaintenanceLoop(cityCtx)
 		return nil
 	})
@@ -2539,6 +2544,9 @@ func startOneCity(
 	// where an early panic deletes a non-existent entry, leaving a
 	// zombie after the post-launch insertion.
 	alreadyRunning := publishManagedCity(cr, path, mc)
+	if !alreadyRunning {
+		forgetSupervisorReconcilerBoot(path)
+	}
 	if alreadyRunning {
 		cr.BatchUpdate(func(
 			_ map[string]*managedCity,
@@ -2706,8 +2714,8 @@ func startOneCity(
 				if err := shutdownBeadsProvider(p); err != nil {
 					fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", n, err) //nolint:errcheck
 				}
-				// Close the file recorder (only on panic — normal exit
-				// leaves it for the external caller via mc.closer).
+				// Close the file recorder. A normal exit leaves it to the
+				// stop that removed the city (mc.closer), unless none did.
 				if cityFr != nil {
 					cityFr.Close() //nolint:errcheck
 				}
@@ -2741,6 +2749,7 @@ func startOneCity(
 			} else {
 				// Normal exit (context canceled) — reset panic counter
 				// and remove from map in a single critical section.
+				removed := false
 				cr.BatchUpdate(func(
 					cities map[string]*managedCity,
 					_ map[string]cityInitProgress,
@@ -2748,8 +2757,17 @@ func startOneCity(
 					panicHistory map[string]*panicRecord,
 				) {
 					delete(panicHistory, p)
-					deleteManagedCityIfCurrent(cities, p, mc)
+					removed = deleteManagedCityIfCurrent(cities, p, mc)
 				})
+				// A stop removes the city from the map before it cancels
+				// it, then closes the recorder via mc.closer. A city canceled
+				// in place (its controller socket's stop) removed itself
+				// just now, so no stop will: close the recorder here, outside
+				// the registry lock, or its [events.mirror] copier holds the
+				// mirror lock for the life of the supervisor.
+				if removed && cityFr != nil {
+					cityFr.Close() //nolint:errcheck
+				}
 			}
 			// Signal completion last — ensures all cleanup is done before
 			// waiters (shutdown/unregister paths) proceed.
@@ -2780,6 +2798,7 @@ func startOneCity(
 	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
 	telemetry.RecordControllerLifecycle(context.Background(), "started")
 	fmt.Fprintf(stdout, "Launching city '%s' (%s)\n", cityName, path) //nolint:errcheck
+	warnBdInventoryAtControllerStart(path, cfg, rec)
 }
 
 func emitPendingCityCreateResult(cr *cityRegistry, path, cityName string, stderr io.Writer) {

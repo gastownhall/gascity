@@ -206,14 +206,14 @@ func armDrainVoidCancel(r *rowFacts) (intent, bool) {
 // assigned work, claimed or ready, or in-progress work the allocation does
 // not count awake because it is blocked, which legacy still counts.
 func workKeepsNoWakeRow(r *rowFacts) bool {
-	if r.entry.AssignedWork != nil {
-		return true
-	}
-	var cfg *config.City
-	if r.w.Env != nil {
-		cfg = r.w.Env.Cfg
-	}
-	ids := sessionAssignmentIdentifiersForConfigInfo(r.row.Info, cfg)
+	return r.entry.AssignedWork != nil || r.inProgressWorkAssigned(releaseScope(r.row.Info, worldCfg(r.w)))
+}
+
+// inProgressWorkAssigned reports in-progress work the pass's demand read
+// assigns to any of scope's identities of the row's session, blocked work
+// included.
+func (r *rowFacts) inProgressWorkAssigned(scope workScope) bool {
+	ids := scope.scopeIDs()
 	for _, w := range r.w.Demand.AssignedWork {
 		if w.Status == "in_progress" && slices.Contains(ids, strings.TrimSpace(w.Assignee)) {
 			return true
@@ -395,7 +395,8 @@ func idleProof(w *World, info session.Info, reason string) (allowed, probe bool)
 // passes SESS-621's gate and writes the idle latch, the row's sleep policy
 // fingerprint (D2). A requested row is signaled (armSignal); an acked one
 // is A11's, and a signaled one A4's. A woken row's leftover
-// idle-stop-pending mark is cleared (SESS-616).
+// idle-stop-pending mark is cleared (SESS-616), and so is one on a row kept
+// running for its work (workKept).
 func armDrainBegin(r *rowFacts) (intent, bool) {
 	if req, ok := activeStop(r.row); ok {
 		if req.Phase != stopRequested {
@@ -417,9 +418,7 @@ func armDrainBegin(r *rowFacts) (intent, bool) {
 		return r.idleRespawnBegin(basis)
 	}
 	if e.Desired == desireWake && session.DispositionOfInfo(info).IdleStop {
-		// The idle stop's end is the disposition's IdleStopEnd cell.
-		class := session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvIdleStopEnd}, r.w.Now)
-		return intent{Kind: intentRowHeal, Reason: decideIdleStopClear, Basis: basis, Patch: session.MetadataPatch{}, Class: class}, true
+		return r.idleStopClear(basis), true
 	}
 	reason := drainReasonOf(r)
 	allowed, _ := idleProof(r.w, info, reason)
@@ -427,7 +426,7 @@ func armDrainBegin(r *rowFacts) (intent, bool) {
 	case reason == "":
 		return intent{}, false
 	case e.Desired == desireDrain && e.OpenWork != nil:
-		return intent{Reason: decideDrainWorkKept}, true
+		return r.workKept(basis), true
 	case reason == reasonNoWake && workKeepsNoWakeRow(r):
 		// A Sleep row (a live quarantined one) with assigned work, claimed or
 		// not: legacy's assigned-work lens cancels its begin in the same tick
@@ -453,6 +452,26 @@ func armDrainBegin(r *rowFacts) (intent, bool) {
 		patch["sleep_policy_fingerprint"] = r.w.SleepPolicies[info.ID].Fingerprint
 	}
 	return intent{Kind: kind, Reason: decideDrainBegin + reason, Basis: basis, Patch: patch}, true
+}
+
+// workKept is the hold of a drained row kept running for its open work
+// (SESS-074), or, while the row carries a leftover idle-stop-pending mark
+// (only legacy writes one), that mark's clear first (SESS-616's, as for a
+// woken row): no drain of a kept row runs, so its idle stop never ends, and
+// the mark would hold the work ladder's gate (the content gate's
+// stop_pending) on the very work that keeps the row, with no signal.
+func (r *rowFacts) workKept(basis rowBasis) intent {
+	if session.DispositionOfInfo(r.row.Info).IdleStop {
+		return r.idleStopClear(basis)
+	}
+	return intent{Reason: decideDrainWorkKept}
+}
+
+// idleStopClear is the heal that clears row's leftover idle-stop-pending
+// mark: the disposition's IdleStopEnd cell (SESS-616).
+func (r *rowFacts) idleStopClear(basis rowBasis) intent {
+	class := session.CellInfo(r.row.Info, session.ActorController, session.DispEvent{Kind: session.EvIdleStopEnd}, r.w.Now)
+	return intent{Kind: intentRowHeal, Reason: decideIdleStopClear, Basis: basis, Patch: session.MetadataPatch{}, Class: class}
 }
 
 // respawnEligible is v5 D2's idle-respawn eligibility (SESS-614; legacy's

@@ -146,11 +146,19 @@ type syncOpFields struct {
 }
 
 // syncAnswer is a session command's answer: the session it acted on and its
-// op fields. The Idempotency-Key LRU caches it.
+// op fields. The Idempotency-Key LRU caches it unless it is provisional.
 type syncAnswer struct {
 	ID string
 	syncOpFields
+	// provisional says the command stopped awaiting its op while the op was
+	// still open (a lane /respond past laneRespondAnswerBound): the answer is
+	// not the op's outcome, so a same-key retry must read the op again.
+	provisional bool
 }
+
+// final reports whether a is the command's outcome, which the
+// Idempotency-Key LRU may keep: it is not provisional.
+func (a syncAnswer) final() bool { return !a.provisional }
 
 // okWithID is the OKWithIDResponse of answer a.
 func (a syncAnswer) okWithID() *OKWithIDResponse {
@@ -380,6 +388,10 @@ func replayedSyncError(op opjournal.Op, mapErr func(error) error) error {
 			return replayed(sentinel)
 		}
 		switch {
+		case op.Kind == opjournal.KindRespond && why == refusedKeyReuse:
+			// The lane closed it: another answer to the occurrence it
+			// answers was recorded first, and the first answer wins.
+			return proposeError(&opjournal.KeyReuseError{Existing: op})
 		case op.Kind == opjournal.KindKill && why == refusedTargetMoved:
 			return apierr.SessionConflict.Msg(fmt.Sprintf("%s: replayed op %s: session %s had moved past generation %d, which the kill was recorded for, so nothing was killed; resend with a new Idempotency-Key to kill the new run", refusedTargetMoved, op.ID, op.Conversation, op.Scope.Generation))
 		case op.Kind == opjournal.KindWake && why == refusedWillNotStart:
@@ -532,7 +544,9 @@ func humaStopError(err error) error {
 
 // stopSession stops target's turn, recorded as an interrupt op under
 // ops.control, and returns the answer. key is the Idempotency-Key header and
-// named the turn the request names, "" for none.
+// named the turn the request names, "" for none. When the city's lane host
+// executes interrupt, the stop is a lane op instead (stopSessionLane), and
+// ops.control does not govern it.
 func (s *Server) stopSession(ctx context.Context, target, key, named string) (syncAnswer, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
@@ -541,6 +555,9 @@ func (s *Server) stopSession(ctx context.Context, target, key, named string) (sy
 	id, err := s.resolveSessionIDWithConfig(store.Store, target)
 	if err != nil {
 		return syncAnswer{}, humaResolveError(err)
+	}
+	if s.laneExecutes(opjournal.KindInterrupt) {
+		return s.stopSessionLane(ctx, store.Store, id, key, named)
 	}
 	// A key that already names a stop (its own op, or the row a stop of a
 	// turn's target key left under it) makes this request its retry.
@@ -854,18 +871,43 @@ func (s *Server) executeStop(store beads.Store, id string, plan stopPlan, minted
 
 // --- /respond ---
 
-// respondOpPayload is a respond op's payload, canonical JSON of the response
-// (DES-O0API §3.1); empty metadata is absent.
+// respondOpPayload is a legacy /respond op's payload, JSON of the response
+// (DES-O0API §3.1): text is always present, empty metadata is absent. It is
+// not opjournal.EncodeRespondPayload's lane form, so rows a previous build
+// recorded keep their request digest and a same-key retry replays them.
 type respondOpPayload struct {
 	Action   string            `json:"action"`
 	Text     string            `json:"text"`
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
+// encodeRespondOpPayload is resp as a legacy /respond op's payload
+// (respondOpPayload).
+func encodeRespondOpPayload(resp runtime.InteractionResponse) (string, error) {
+	raw, err := json.Marshal(respondOpPayload{Action: resp.Action, Text: resp.Text, Metadata: resp.Metadata})
+	if err != nil {
+		return "", apierr.Internal.Msg("encoding the respond op payload: " + err.Error())
+	}
+	return string(raw), nil
+}
+
+// respondOpPolicy is a legacy /respond's policy: at_least_once, the guarantee
+// it has always been recorded with. Nothing acts on it for a legacy op; it
+// keeps the request digest of rows a previous build recorded.
+var respondOpPolicy = opjournal.Policy{Guarantee: opjournal.GuaranteeAtLeastOnce}
+
 // respondSession answers target's pending interaction with resp, recorded as
 // a respond op under ops.control, and returns the answer. key is the
-// Idempotency-Key header.
-func (s *Server) respondSession(target, key string, resp runtime.InteractionResponse) (syncAnswer, error) {
+// Idempotency-Key header. When the city's lane host executes respond, the
+// answer is a lane op instead (respondSessionLane), awaited at most until
+// ctx ends, and ops.control does not govern it. Otherwise a key the lane
+// path wrote or answered a respond under answers from that lane op in every
+// ops.control mode (replayLaneRespond), so a rollback never runs a respond
+// again for it. A key in respond:, where a lane respond op is keyed by the
+// raising it answers (opjournal.IsRespondKey), records nothing here
+// (legacyop.ErrReservedKey): auto answers unrecorded and require refuses it,
+// so no op of OJ-4's takes the id of the lane op answering that raising.
+func (s *Server) respondSession(ctx context.Context, target, key string, resp runtime.InteractionResponse) (syncAnswer, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return syncAnswer{}, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -875,7 +917,13 @@ func (s *Server) respondSession(target, key string, resp runtime.InteractionResp
 		return syncAnswer{}, humaResolveError(err)
 	}
 	mgr := s.sessionManager(store.Store)
-	req := syncOpRequest{kind: opjournal.KindRespond, conv: id, key: key}
+	if s.laneExecutes(opjournal.KindRespond) {
+		return s.respondSessionLane(ctx, mgr, store.Store, id, key, resp)
+	}
+	if answer, answered, err := s.replayLaneRespond(ctx, store, id, key, resp); answered {
+		return answer, err
+	}
+	req := syncOpRequest{kind: opjournal.KindRespond, conv: id, key: key, policy: respondOpPolicy}
 	if recordingMode(s.ops.control.Mode) {
 		if req, err = s.respondOpRequest(mgr, store.Store, req, resp); err != nil {
 			return syncAnswer{}, err
@@ -889,8 +937,9 @@ func (s *Server) respondSession(target, key string, resp runtime.InteractionResp
 			// click that read the same prompt pending, answers nothing
 			// (skipped{stale}) rather than the prompt pending now. A runtime
 			// that derives request IDs from content (tmux) gives an identical
-			// prompt raised again the same ID, so that one is answered, until
-			// OJ-16 keys respond ops by the interaction occurrence.
+			// prompt raised again the same ID, so that one is answered: this
+			// shadow op names the request id, not the interaction occurrence
+			// a lane respond is keyed by (opjournal.RespondKey).
 			run.RequestID = adm.Op.Scope.Interaction
 		}
 		err := mgr.Respond(id, run)
@@ -905,8 +954,9 @@ func (s *Server) respondSession(target, key string, resp runtime.InteractionResp
 	return syncAnswer{ID: id, syncOpFields: fields}, nil
 }
 
-// respondOpRequest completes a recorded /respond's op request: the canonical
-// payload and the session(generation) scope with the interaction it answers.
+// respondOpRequest completes a recorded /respond's op request: the payload
+// (respondOpPayload) and the session(generation) scope with the interaction
+// it answers.
 // The interaction is the request's request_id, else, under a client key that
 // already names a respond of that interaction, that respond's scope, else
 // the pending interaction read now; the respond then answers that
@@ -915,15 +965,11 @@ func (s *Server) respondSession(target, key string, resp runtime.InteractionResp
 // door with the answer the legacy respond gives (no_pending, or
 // unsupported), nothing sent.
 func (s *Server) respondOpRequest(mgr *session.Manager, store beads.Store, req syncOpRequest, resp runtime.InteractionResponse) (syncOpRequest, error) {
-	payload := respondOpPayload{Action: resp.Action, Text: resp.Text}
-	if len(resp.Metadata) > 0 {
-		payload.Metadata = resp.Metadata
-	}
-	raw, err := json.Marshal(payload)
+	payload, err := encodeRespondOpPayload(resp)
 	if err != nil {
-		return req, apierr.Internal.Msg("encoding the respond op payload: " + err.Error())
+		return req, err
 	}
-	req.payload = string(raw)
+	req.payload = payload
 	scope, why, whyErr := sessionOpScope(store, req.conv)
 	if why != "" {
 		req.unrecordable, req.unrecordableErr = why, whyErr

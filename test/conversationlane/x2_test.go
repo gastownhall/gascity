@@ -78,7 +78,19 @@ func runX2Host(t *testing.T, arm storeArm, stage string, g opjournal.Guarantee) 
 	var id string
 	switch g {
 	case opjournal.GuaranteeAtLeastOnce:
+		// The nudge's own op write rings the lane host before the CLI
+		// reads the op back to report it, so a host that is up serves
+		// the op at once and, on Dolt, can close it before that read
+		// lands. Hold the session busy until the nudge returns: the
+		// host waits for the boundary and delivers after.
+		if killed != nil {
+			c.setActivityMode(activityLastNudge)
+			c.setActivity(time.Now().Add(time.Hour))
+		}
 		r := c.nudge("queue", key, payload)
+		if killed != nil {
+			c.setActivityMode(activityNone)
+		}
 		if r.code() != 0 || r.stdout != "Queued nudge for "+sessionName+" in the conversation lane\n" {
 			t.Fatalf("nudge = %d, %q; stderr %s", r.code(), r.stdout, r.stderr)
 		}

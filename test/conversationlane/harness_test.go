@@ -4,7 +4,9 @@ package conversationlane_test
 
 // The harness the conversation-lane evidence runs on: a city with one named
 // session on a file-backed fake exec runtime, its sessions class bound to
-// SQLite or to an embedded-Dolt beads workspace, the controller run as
+// SQLite, to an embedded-Dolt beads workspace or to the bd-dolt arm's (a
+// workspace bd provisioned on a dolt sql-server, served natively; X12's
+// load, harness_bddolt_test.go), the controller run as
 // `gc start --foreground` by the test-hooks gc, and the evidence read back
 // from the city's own store and the fake's delivery log.
 
@@ -17,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,6 +44,10 @@ type storeArm string
 const (
 	armSQLite storeArm = "sqlite"
 	armDolt   storeArm = "dolt"
+	// armBdDolt is a beads workspace bd provisioned on a dolt sql-server the
+	// city does not own, served natively over SQL: a direct-server city's
+	// store, not the default topology's BdStore (harness_bddolt_test.go).
+	armBdDolt storeArm = "bd-dolt"
 )
 
 // Activity modes of the fake runtime (fakeruntime's activity-mode file).
@@ -84,10 +91,36 @@ func parallelCity(t *testing.T) {
 	t.Cleanup(func() { <-cityParallel })
 }
 
+// cityOptions shapes a city beyond the lane evidence's default. The zero
+// value is the X2, X6 and X8 city.
+type cityOptions struct {
+	// legacyOps omits [ops] authoritative, so message requests take their
+	// O0 (legacy) paths.
+	legacyOps bool
+	// opsMode, when set, is written as [ops] content, control and
+	// lifecycle ("off", "auto" or "require").
+	opsMode string
+	// apiPort, when > 0, serves the controller's API on 127.0.0.1:<port>.
+	apiPort int
+	// onDemand names extra on_demand named sessions of the worker template.
+	onDemand []string
+	// opTypeMissing provisions a Dolt arm's workspace without the op bead
+	// type, so the op journal cannot propose.
+	opTypeMissing bool
+	// realCadences runs controllers without GC_TEST_BACKSTOP_SPEEDUP.
+	realCadences bool
+	// pool runs the city's sessions on real tmux, under a socket root of
+	// the city's own, so the v2 reconciler and its work ladder run (v2
+	// refuses the exec runtime), and adds a pool of one seat that writes
+	// what is typed into it to a file (ladder_lane_test.go).
+	pool bool
+}
+
 // laneCity is one isolated city.
 type laneCity struct {
 	t     *testing.T
 	arm   storeArm
+	opts  cityOptions
 	root  string
 	dir   string
 	state string
@@ -102,6 +135,12 @@ type laneCity struct {
 	// read once the controller started it.
 	conv  string
 	token string
+	// doltServer is the bd-dolt arm's dolt sql-server, stopped after the
+	// city's controllers.
+	doltServer *doltServer
+	// tmuxRoot is a pool city's TMUX_TMPDIR: its tmux servers' sockets
+	// live there and nowhere else, so the cleanup kills only those.
+	tmuxRoot string
 	// mu guards logs, procs, conv and token.
 	mu sync.Mutex
 	// doltMu serializes the test's own store handles on the Dolt arm:
@@ -117,9 +156,16 @@ type ctlProc struct {
 	done      chan struct{}
 	log       string
 	failpoint string
+	// fpEnv is the variable failpoint was set as.
+	fpEnv string
 }
 
 func newLaneCity(t *testing.T, arm storeArm, activity string) *laneCity {
+	t.Helper()
+	return newLaneCityWith(t, arm, activity, cityOptions{})
+}
+
+func newLaneCityWith(t *testing.T, arm storeArm, activity string, opts cityOptions) *laneCity {
 	t.Helper()
 	gcBin := bazeltest.DataPath(t, gcBinEnv)
 	fake := bazeltest.DataPath(t, fakeRuntimeEnv)
@@ -127,19 +173,25 @@ func newLaneCity(t *testing.T, arm storeArm, activity string) *laneCity {
 	if err != nil {
 		t.Fatalf("creating the city root: %v", err)
 	}
-	c := &laneCity{t: t, arm: arm, root: root, dir: filepath.Join(root, "c"), state: filepath.Join(root, "rt"), gc: gcBin}
+	c := &laneCity{t: t, arm: arm, opts: opts, root: root, dir: filepath.Join(root, "c"), state: filepath.Join(root, "rt"), gc: gcBin}
 	for _, d := range []string{filepath.Join(c.dir, ".gc"), c.state, filepath.Join(root, "home"), filepath.Join(root, "run")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatalf("creating %s: %v", d, err)
 		}
 	}
 	t.Cleanup(c.cleanup)
+	if opts.pool {
+		c.preparePool()
+	}
 	wrapper := filepath.Join(c.dir, ".gc", "fake-runtime.sh")
 	c.writeFile(wrapper, fmt.Sprintf("#!/bin/sh\nexec %q --state %q \"$@\"\n", fake, c.state), 0o755)
 	c.setActivityMode(activity)
 	c.writeFile(filepath.Join(c.dir, "city.toml"), c.cityTOML(wrapper), 0o644)
-	if arm == armDolt {
+	switch arm {
+	case armDolt:
 		c.provisionWorkspace()
+	case armBdDolt:
+		c.provisionServedWorkspace()
 	}
 	c.env = []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -151,17 +203,40 @@ func newLaneCity(t *testing.T, arm storeArm, activity string) *laneCity {
 		"GC_DOLT=skip",
 		"DO_NOT_TRACK=1",
 	}
+	if c.tmuxRoot != "" {
+		c.env = append(c.env, "TMUX_TMPDIR="+c.tmuxRoot)
+	}
 	return c
 }
 
 // cityTOML is the city's whole configuration: no supervisor, the file
 // work store, the fake runtime, message on the lane, the five
 // infrastructure classes on one binding, and one always-on named session
-// with no prompt and no work.
+// with no prompt and no work. The city's options change the [ops] table,
+// add an [api] table and add on_demand named sessions.
 func (c *laneCity) cityTOML(wrapper string) string {
 	binding := "provider = \"sqlite-beads\"\npath = \".gc/lanes\"\n"
-	if c.arm == armDolt {
+	if c.arm == armDolt || c.arm == armBdDolt {
 		binding = "provider = \"beads-workspace\"\nconfig_ref = \"lanes\"\n"
+	}
+	ops := "[ops]\nauthoritative = [\"message\"]\n"
+	if c.opts.legacyOps {
+		ops = ""
+		if m := c.opts.opsMode; m != "" {
+			ops = fmt.Sprintf("[ops]\ncontent = %q\ncontrol = %q\nlifecycle = %q\n", m, m, m)
+		}
+	}
+	if c.opts.apiPort > 0 {
+		ops += fmt.Sprintf("\n[api]\nport = %d\nbind = \"127.0.0.1\"\n", c.opts.apiPort)
+	}
+	provider := "exec:" + wrapper
+	var extra strings.Builder
+	if c.opts.pool {
+		provider = "tmux"
+		extra.WriteString(c.poolTOML())
+	}
+	for _, name := range c.opts.onDemand {
+		fmt.Fprintf(&extra, "\n[[named_session]]\nname = %q\ntemplate = %q\nmode = \"on_demand\"\n", name, sessionName)
 	}
 	return fmt.Sprintf(`[workspace]
 name = %q
@@ -170,11 +245,9 @@ name = %q
 provider = "file"
 
 [session]
-provider = "exec:%s"
+provider = %q
 
-[ops]
-authoritative = ["message"]
-
+%s
 [storage.classes]
 work = "work"
 graph = "lanes"
@@ -192,16 +265,30 @@ start_command = "sleep 100000"
 [[named_session]]
 template = %q
 mode = "always"
-`, filepath.Base(c.root), wrapper, binding, sessionName, sessionName)
+%s`, filepath.Base(c.root), provider, ops, binding, sessionName, sessionName, extra.String())
 }
 
-// workspaceRoot is the Dolt arm's beads workspace (beadsworkspace's
+// workspaceRoot is the Dolt arms' beads workspace (beadsworkspace's
 // <city>/.gc/storage/<config_ref>).
 func (c *laneCity) workspaceRoot() string { return filepath.Join(c.dir, ".gc", "storage", "lanes") }
 
+// bindingDir is where the sessions binding's data sits on disk: the SQLite
+// binding, the embedded workspace's .beads, or the bd-dolt arm's server
+// data dir (that arm's workspace holds only bd's configuration).
+func (c *laneCity) bindingDir() string {
+	switch c.arm {
+	case armDolt:
+		return filepath.Join(c.workspaceRoot(), ".beads")
+	case armBdDolt:
+		return c.doltServer.dataDir
+	default:
+		return filepath.Join(c.dir, ".gc", "lanes")
+	}
+}
+
 // provisionWorkspace gives the Dolt arm's workspace the configuration a
 // serving workspace needs: the embedded backend, the binding's id prefix and
-// the coordination bead types the library's own set does not carry.
+// its bead types (customTypes).
 func (c *laneCity) provisionWorkspace() {
 	c.t.Helper()
 	root := c.workspaceRoot()
@@ -215,8 +302,11 @@ func (c *laneCity) provisionWorkspace() {
 	if err := storage.SetConfig(ctx, "issue_prefix", laneIDPrefix); err != nil {
 		c.t.Fatalf("configuring the workspace id prefix: %v", err)
 	}
-	types := `["session","convoy","wisp","wait","op","message","molecule","order","nudge","gate","event","step"]`
-	if err := storage.SetConfig(ctx, "types.custom", types); err != nil {
+	encoded, err := json.Marshal(c.customTypes())
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	if err := storage.SetConfig(ctx, "types.custom", string(encoded)); err != nil {
 		c.t.Fatalf("configuring the workspace bead types: %v", err)
 	}
 }
@@ -259,6 +349,10 @@ func (c *laneCity) cleanup() {
 			<-p.done
 		}
 	}
+	if c.doltServer != nil {
+		c.doltServer.stop()
+	}
+	c.killTmuxServers()
 	if c.t.Failed() {
 		c.dumpLogs()
 	}
@@ -269,7 +363,11 @@ func (c *laneCity) cleanup() {
 // case.
 func (c *laneCity) dumpLogs() {
 	logs, _ := filepath.Glob(filepath.Join(c.root, "ctl-*.log"))
-	for _, l := range append(logs, filepath.Join(c.state, "deliveries.jsonl")) {
+	logs = append(logs, filepath.Join(c.state, "deliveries.jsonl"))
+	if c.doltServer != nil {
+		logs = append(logs, c.doltServer.log)
+	}
+	for _, l := range logs {
 		data, _ := os.ReadFile(l)
 		if len(data) > 64<<10 {
 			data = data[len(data)-64<<10:]
@@ -306,6 +404,12 @@ func (c *laneCity) startController(failpoint string) *ctlProc {
 // launchController starts a controller and waits for it to come up, without
 // failing the test, so a goroutine may restart one.
 func (c *laneCity) launchController(failpoint string) (*ctlProc, error) {
+	return c.launchControllerWith(failpointEnv, failpoint)
+}
+
+// launchControllerWith is launchController with the failpoint set as the
+// variable fpEnv. A city with an API port is up once its API answers too.
+func (c *laneCity) launchControllerWith(fpEnv, failpoint string) (*ctlProc, error) {
 	c.mu.Lock()
 	c.logs++
 	log := filepath.Join(c.root, fmt.Sprintf("ctl-%d.log", c.logs))
@@ -316,16 +420,19 @@ func (c *laneCity) launchController(failpoint string) (*ctlProc, error) {
 	}
 	cmd := exec.Command(c.gc, "start", "--foreground", c.dir)
 	cmd.Dir = c.dir
-	cmd.Env = append(append([]string(nil), c.env...), "GC_TEST_BACKSTOP_SPEEDUP="+backstopSpeedup)
+	cmd.Env = append([]string(nil), c.env...)
+	if !c.opts.realCadences {
+		cmd.Env = append(cmd.Env, "GC_TEST_BACKSTOP_SPEEDUP="+backstopSpeedup)
+	}
 	if failpoint != "" {
-		cmd.Env = append(cmd.Env, failpointEnv+"="+failpoint)
+		cmd.Env = append(cmd.Env, fpEnv+"="+failpoint)
 	}
 	cmd.Stdout, cmd.Stderr = f, f
 	if err := cmd.Start(); err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("gc start --foreground: %w", err)
 	}
-	p := &ctlProc{cmd: cmd, done: make(chan struct{}), log: log, failpoint: failpoint}
+	p := &ctlProc{cmd: cmd, done: make(chan struct{}), log: log, failpoint: failpoint, fpEnv: fpEnv}
 	go func() {
 		_ = cmd.Wait()
 		_ = f.Close()
@@ -350,7 +457,7 @@ func (c *laneCity) launchController(failpoint string) (*ctlProc, error) {
 		if pinged && box {
 			active, readErr = c.sessionActive()
 		}
-		if active {
+		if active && c.apiUp() {
 			return p, nil
 		}
 		if time.Now().After(deadline) {
@@ -381,18 +488,25 @@ func (c *laneCity) waitKilledBySignal(p *ctlProc, timeout time.Duration) {
 	case <-time.After(timeout):
 		c.t.Fatalf("the controller did not die at %s within %s:\n%s", p.failpoint, timeout, readFile(p.log))
 	}
-	assertKilledByFailpoint(c.t, p.cmd.ProcessState, readFile(p.log), p.failpoint)
+	assertKilledByFailpointOf(c.t, p.fpEnv, p.cmd.ProcessState, readFile(p.log), p.failpoint)
 }
 
 // assertKilledByFailpoint fails unless state ended by SIGKILL and output
-// carries the armed line for failpoint.
+// carries the armed line for the lane failpoint.
 func assertKilledByFailpoint(t *testing.T, state *os.ProcessState, output, failpoint string) {
+	t.Helper()
+	assertKilledByFailpointOf(t, failpointEnv, state, output, failpoint)
+}
+
+// assertKilledByFailpointOf fails unless state ended by SIGKILL and output
+// carries the armed line for failpoint, set as the variable env.
+func assertKilledByFailpointOf(t *testing.T, env string, state *os.ProcessState, output, failpoint string) {
 	t.Helper()
 	ws, ok := state.Sys().(syscall.WaitStatus)
 	if !ok || !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
 		t.Fatalf("the process ended %v, want SIGKILL at %s:\n%s", state, failpoint, output)
 	}
-	want := fmt.Sprintf("%s=%q: %s", failpointEnv, failpoint, testHookActive)
+	want := fmt.Sprintf("%s=%q: %s", env, failpoint, testHookActive)
 	if !strings.Contains(output, want) {
 		t.Fatalf("output lacks %q: the failpoint was not armed:\n%s", want, output)
 	}
@@ -469,7 +583,25 @@ func (c *laneCity) ring(id string) {
 	_, _ = c.socket("lane:" + c.conv + ":" + id)
 }
 
+// apiUp reports whether the city's API answers its health check; a city
+// without an API port has none to wait for.
+func (c *laneCity) apiUp() bool {
+	if c.opts.apiPort <= 0 {
+		return true
+	}
+	client := http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", c.opts.apiPort))
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
 func (c *laneCity) boxUp() bool {
+	if c.opts.pool {
+		return true // no fake runtime: the session's row says it is up
+	}
 	_, err := os.Stat(filepath.Join(c.state, "box."+sessionName))
 	return err == nil
 }
@@ -484,7 +616,7 @@ func (c *laneCity) withStore(fn func(raw beads.Store, st *opjournal.Store) error
 	var raw beads.Store
 	var closeFn func() error
 	switch c.arm {
-	case armDolt:
+	case armDolt, armBdDolt:
 		s, err := beads.OpenNativeDoltStoreAt(context.Background(), c.workspaceRoot(), nil)
 		if err != nil {
 			return fmt.Errorf("opening the workspace: %w", err)

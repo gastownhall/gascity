@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -62,12 +63,31 @@ type FencedKillHandle interface {
 	KillRuntimeGone(context.Context) (bool, error)
 }
 
+// FencedResetHandle exposes a fresh-restart request made from inside the
+// session, recorded only while the session row still records the caller's
+// incarnation (SG-3). A handle bound to a session bead implements it; a bare
+// runtime handle has no row to record the request on.
+type FencedResetHandle interface {
+	// ResetFenced records the restart request when the row's instance token
+	// is instanceToken (session.Manager.RequestFreshRestartFenced). casOnly
+	// reports whether the city records only by compare-and-swap (a v2 city);
+	// nil allows the checked write.
+	ResetFenced(ctx context.Context, instanceToken string, casOnly func() bool) error
+	// CheckResetFenced is ResetFenced's decision taken now, with nothing
+	// written (session.Manager.CheckFreshRestartFenced).
+	CheckResetFenced(ctx context.Context, instanceToken string, casOnly func() bool) error
+}
+
 // MessagingHandle exposes live input delivery operations.
 type MessagingHandle interface {
 	// Message and Nudge may start or resume the session as the Actor may
 	// (CONTRACT v5.9 D8).
 	Message(context.Context, sessionpkg.Actor, MessageRequest) (MessageResult, error)
 	Interrupt(context.Context, InterruptRequest) error
+	// InterruptAs is Interrupt for by, reporting what the interrupt did
+	// beyond its error; by may restart the runtime (InterruptRequest's
+	// OnFailure restart). Interrupt is InterruptAs with no actor.
+	InterruptAs(context.Context, sessionpkg.Actor, InterruptRequest) (InterruptResult, error)
 	Nudge(context.Context, sessionpkg.Actor, NudgeRequest) (NudgeResult, error)
 }
 
@@ -222,11 +242,15 @@ type InterruptRequest struct {
 	// predecessor's transcript. On a transcript source every key goes under
 	// the fence, after the turn check; a protocol source's runtime takes no
 	// input fence on its turn interrupt, so a fenced one is refused with
-	// runtime.ErrInputFenceUnsupported, nothing sent.
+	// runtime.ErrInputFenceUnsupported, nothing sent, unless AllowUnfenced.
 	Fence runtime.InputFence `json:"-"`
 	// Turn, when set, scopes the interrupt to the turn it names, a TurnID an
 	// earlier CurrentTurn read reported (X11 §5.2, SESSION-RUNTIME-023).
-	// Empty interrupts whatever runs (session scope). A turn-scoped
+	// Empty interrupts whatever runs (session scope): on a SessionHandle a
+	// row the stop finds closed, gone or not a session when it loads it
+	// under the session mutation lock is then an error wrapping
+	// runtime.ErrSessionNotFound, and one that will not load an error
+	// wrapping ErrInterruptNotSent, nothing sent either way. A turn-scoped
 	// interrupt is refused, with nothing sent, unless the session's turn
 	// capabilities record starts, fence at least checked and see ends at
 	// least inferred: runtime.ErrTurnIdentityUnsupported, or
@@ -236,7 +260,9 @@ type InterruptRequest struct {
 	// session row, or one closed by the time the stop or the interrupt holds
 	// the session mutation lock, is an error wrapping
 	// runtime.ErrSessionNotFound, nothing sent; a row that will not load is
-	// runtime.ErrRuntimeUnavailable, nothing sent. It returns nil only once
+	// runtime.ErrRuntimeUnavailable, nothing sent; either, when the stop or
+	// the interrupt loaded the row under the lock, also wraps
+	// session.ErrStopNotSent. It returns nil only once
 	// a read of the session's turns shows the turn no longer current (or
 	// the session gone) within 15 s of the check; a
 	// *runtime.TurnNotCurrentError when the turn was not current, or the
@@ -245,10 +271,108 @@ type InterruptRequest struct {
 	// to end, which wraps no other sentinel (the last failure is in its text
 	// only), so "sent" is never misread as unknown; and an error wrapping
 	// runtime.ErrRuntimeUnavailable when it is unknown whether anything was
-	// sent, or when the turn could not be checked before ctx ended or its
-	// idle state could not be read (nothing sent then). ctx bounds the wait
-	// for the session mutation lock and the check before the keys.
+	// sent, which then wraps session.ErrInterruptOutcomeUnknown too, or when
+	// the turn could not be checked before ctx ended or its idle state could
+	// not be read (nothing sent then). ctx bounds the wait for the session
+	// mutation lock and the check before the keys.
 	Turn string `json:"turn,omitempty"`
+	// OnFailure is what the interrupt does when it was sent and its turn was
+	// not seen to end. Empty and InterruptOnFailureFail return that error
+	// (one wrapping runtime.ErrTurnNotEnded). InterruptOnFailureRestart
+	// stops the runtime and starts it again in its place, inline, under the
+	// runtime lease taken before anything is sent (DES-O1 §10.1, O1), and
+	// then returns nil with InterruptResult.Restarted; only InterruptAs
+	// takes it, with an actor that may start the runtime, else it is
+	// refused, nothing sent, with an error wrapping session.ErrNoActor. A
+	// restart whose start fails once the runtime stopped is an error
+	// wrapping session.ErrRestartNotStarted, and one withheld (the caller's
+	// ctx ended, a check refused the follow-up interrupt, or nothing showed
+	// the interrupted turn still running: no read of it answered) an error
+	// wrapping session.ErrInterruptOutcomeUnknown, as
+	// session.StopTurnOptions.Restart documents. A restart applies to a
+	// keystroke runtime on a SessionHandle, whatever its turn source: a
+	// turn-scoped interrupt on a protocol turn source whose runtime
+	// interrupts by keystroke (ACP) interrupts the turn by protocol first
+	// and restarts only once it is not seen to end
+	// (session.Manager.InterruptTurn). A protocol runtime's stop may leave
+	// it running, so its not-ended error is returned as with fail, and a
+	// RuntimeHandle, which has no session row to restart from, refuses it,
+	// nothing sent, with ErrInterruptRestartUnsupported.
+	OnFailure InterruptOnFailure `json:"on_failure,omitempty"`
+	// ForReplacement says a message replaces the interrupted turn
+	// (deliver-now's interrupt step, X11 D11): once the turn settled, the
+	// session is prepared for it as interrupt_now prepares it (Gemini's
+	// reset of the interrupted turn, and on a keystroke runtime the input
+	// box cleared for the message). It is refused, nothing sent, with an
+	// error wrapping session.ErrTurnInterruptUnsupported, where the
+	// session's turn is replaced otherwise or not at all
+	// (TurnCapabilities.Replace restart or none), which is always so on a
+	// RuntimeHandle. A preparation that fails is an error wrapping
+	// session.ErrReplacementNotPrepared: the interrupt was sent and its
+	// turn settled.
+	ForReplacement bool `json:"for_replacement,omitempty"`
+	// AllowUnfenced lets a fenced request (Fence) go out without its fence
+	// where it cannot carry it, instead of being refused with
+	// runtime.ErrInputFenceUnsupported: a protocol source's turn interrupt,
+	// whose runtime reads no input fence, and a runtime that cannot fence
+	// the session. The result then reports Unfenced.
+	AllowUnfenced bool `json:"allow_unfenced,omitempty"`
+}
+
+// InterruptOnFailure is what an interrupt does when its turn is not seen to
+// end (InterruptRequest.OnFailure).
+type InterruptOnFailure string
+
+// The interrupt failure policies, an interrupt op's on_failure.
+const (
+	// InterruptOnFailureFail returns the not-ended error.
+	InterruptOnFailureFail InterruptOnFailure = "fail"
+	// InterruptOnFailureRestart restarts the runtime inline.
+	InterruptOnFailureRestart InterruptOnFailure = "restart"
+)
+
+// ErrInterruptRestartUnsupported refuses an interrupt whose OnFailure is
+// restart on a handle that cannot restart the runtime: nothing is sent.
+var ErrInterruptRestartUnsupported = errors.New("worker: the handle cannot restart the runtime after a failed interrupt")
+
+// ErrInterruptNotSent reports an interrupt that failed before anything was
+// sent: its policy's preparation (the restart's start command, the
+// replacement's or the turn's plan, the session's input fencing) could not
+// be read, or a session-scoped stop's load of the session row under the
+// session mutation lock failed (session.ErrStopNotSent), and the caller may
+// retry it as it is; or the request was refused (an unknown OnFailure, a
+// restart with no actor that may start the runtime, an invalid fence).
+var ErrInterruptNotSent = errors.New("worker: the interrupt failed before anything was sent")
+
+// InterruptResult reports what one interrupt did beyond its error.
+type InterruptResult struct {
+	// Restarted says the interrupt was sent, its turn was not seen to end,
+	// and OnFailure restart replaced the runtime.
+	Restarted bool
+	// Unfenced says a fenced request (InterruptRequest.Fence) went without
+	// its fence, as AllowUnfenced permits where the fence cannot be carried.
+	Unfenced bool
+}
+
+// validate checks req's policy for by (nil for none) before anything is sent: a known
+// OnFailure, an actor for a restart, and a valid fence when one is set. A
+// refusal wraps ErrInterruptNotSent.
+func (req InterruptRequest) validate(by *sessionpkg.Actor) error {
+	switch req.OnFailure {
+	case "", InterruptOnFailureFail:
+	case InterruptOnFailureRestart:
+		if by == nil || by.Kind == 0 {
+			return fmt.Errorf("interrupt on_failure restart: %w: %w", ErrInterruptNotSent, sessionpkg.ErrNoActor)
+		}
+	default:
+		return fmt.Errorf("interrupt on_failure %q is not fail or restart: %w", req.OnFailure, ErrInterruptNotSent)
+	}
+	if !req.Fence.IsZero() {
+		if err := req.Fence.Validate(); err != nil {
+			return fmt.Errorf("interrupt fence: %w: %w", ErrInterruptNotSent, err)
+		}
+	}
+	return nil
 }
 
 // NudgeDelivery controls how a nudge should be delivered.
@@ -469,6 +593,13 @@ type InteractionResponse struct {
 	Action    string            `json:"action"`
 	Text      string            `json:"text,omitempty"`
 	Metadata  map[string]string `json:"metadata,omitempty"`
+	// Fence, when set, confines the answer to the incarnation it names
+	// (see runtime.InputFence): a runtime that cannot fence answers to the
+	// session (runtime.ResponseFencingFor reports none) refuses with
+	// runtime.ErrInputFenceUnsupported before sending anything, and a miss
+	// is a *runtime.FenceMismatchError. A caller that may answer unfenced
+	// checks the runtime's response fencing first and sends no fence.
+	Fence runtime.InputFence `json:"-"`
 }
 
 // SessionSpec describes the concrete session materialized by a session-backed

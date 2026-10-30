@@ -11,6 +11,7 @@ on:
       - ".github/requirements/mcp-agent-mail.overrides.txt"
       - ".github/requirements/mcp-agent-mail.txt"
       - ".github/scripts/install-*.sh"
+      - ".github/scripts/mcp-mail-filelock-exit-regression.py"
       - ".github/workflows/container-scan.yml"
       - "contrib/beads-scripts/gc-beads-br"
       - "contrib/events-scripts/gc-events-k8s"
@@ -35,6 +36,7 @@ on:
       - ".github/requirements/mcp-agent-mail.overrides.txt"
       - ".github/requirements/mcp-agent-mail.txt"
       - ".github/scripts/install-*.sh"
+      - ".github/scripts/mcp-mail-filelock-exit-regression.py"
       - ".github/workflows/container-scan.yml"
       - "contrib/beads-scripts/gc-beads-br"
       - "contrib/events-scripts/gc-events-k8s"
@@ -190,6 +192,7 @@ jobs:
           cp -f "$bin_dir/br" br
 
       - name: Build local images
+        id: build-images
         run: |
           set -euo pipefail
           . ./deps.env
@@ -275,6 +278,20 @@ jobs:
             fi
           done
           exit "$overall_rc"
+
+      - name: Check MCP mail image database survives filelock exit
+        # filelock 4.x truncated the mail database at exit by writing through a
+        # lock fd that mcp-agent-mail's emergency cleanup had closed and SQLite
+        # reused (review of #8307). Run the reproduction against the image's own
+        # filelock and mcp-agent-mail so a re-lock onto an affected release fails.
+        if: ${{ !cancelled() && steps.build-images.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --entrypoint python3 \
+            -v "${GITHUB_WORKSPACE}/.github/scripts/mcp-mail-filelock-exit-regression.py:/tmp/mcp-mail-filelock-exit-regression.py:ro" \
+            "gc-mcp-mail:${IMAGE_TAG}" \
+            /tmp/mcp-mail-filelock-exit-regression.py
 
       - name: Upload base image SARIF
         if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}

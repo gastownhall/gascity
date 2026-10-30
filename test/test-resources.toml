@@ -179,6 +179,17 @@ resource_owner = "each owning test confines tmux processes and sockets to its is
 migration_target = "P0.4c-tmux"
 expires = "2026-10-31"
 
+[[debt]]
+scope = "build_targets"
+resource = "test_target"
+reported_calls = 47
+reported_files = 4
+owner_bead = "ga-4ag4p2.1"
+invariant = "declared go-test invocation sites in tracked build-orchestration files (Makefile, CI workflow YAML) cannot grow without an explicit, reviewed baseline update"
+resource_owner = "each new test target's author declares it via a baseline bump with real ownership fields — same contract as every other resource dimension (ga-hpcma0)"
+migration_target = "n/a — preventive dimension, not paying down inherited debt"
+expires = "2026-10-31"
+
 # Exact Medium owners are keyed by source directory, package clause, and
 # top-level Go test identity. Only matching resources lexically inside that
 # declaration leave the Small-debt census; helper bodies and sibling tests do
@@ -395,6 +406,17 @@ expires = "2026-10-31"
 [[medium]]
 package_dir = "scripts"
 package_name = "scripts_test"
+owner = "TestBazelLaneWorkerEnvStepStaleBase"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the bazel lane worker-env stale-base proof is a checked Medium subprocess owner"
+resource_owner = "the git and bash subprocesses are confined to TestBazelLaneWorkerEnvStepStaleBase (ga-s9mdfm), which exists to run bazel.yml's lane worker-env preflight step itself against a scratch git origin whose main re-pins after the run chose its base (a stale base, a moved pin, a re-pinning PR, a lane that is not remote, no base-sha): the step is git plumbing feeding tools/rbe/worker-env-drift, so only real git and a real shell can prove a stale base fails a remote lane instead of skipping bazel green"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
 owner = "TestBazelNightlyFreshDecision"
 resources = ["subprocess"]
 owner_bead = "ga-cp3hwi"
@@ -467,6 +489,17 @@ owner_bead = "ga-cp3hwi"
 invariant = "Make/provider and suite-contract proof is a checked Medium owner"
 resource_owner = "the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation"
 migration_target = "P0.1"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "tools/nogo/nolinttest"
+package_name = "nolinttest_test"
+owner = "TestNolintNeverSuppressesStoreclass"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the storeclass nolint-suppression proof is a checked Medium subprocess owner"
+resource_owner = "the nogo subprocess per case is confined to TestNolintNeverSuppressesStoreclass, which exists to run the Bazel-built nogo binary over a fixture under every nolint spelling and placement: nolint handling lives in rules_go's patched nogo driver, not in the storeclass analyzer, so only a real nogo run can prove that no directive suppresses a storeclass finding"
+migration_target = "P0.4b"
 expires = "2026-10-31"
 
 # A reviewed-hermetic-body row is narrower than a Small test declaration. It

@@ -34,18 +34,22 @@ const (
 	ClassLease                                    // the cross-process runtime lease (L1)
 	ClassAdvisory                                 // diagnostics and pacing stamps
 	ClassWork                                     // the work cells: agent-owned work_started, controller-owned work_ladder
+	ClassConversation                             // the conversation cells: content_hold, which the conversation lane and the planner's reminders read (DES-O1 D21)
 )
 
 // classInPremise is whether a fence compares a class's keys. Baseline keys are
 // compared by the drift arms, assignment identity only by an effect that reads
 // L5, the lease by its own CAS, and advisory keys never. The work cells never
 // either: each owner writes its own by CAS, so a v2 effect that loses its CAS
-// to one re-reads and re-decides rather than refusing on premise.
+// to one re-reads and re-decides rather than refusing on premise. The
+// conversation cells never either: the conversation lane reads them live on
+// each pass, the planner's reminders on each tick only to hold their own
+// delivery and terminal action, and no lifecycle decision reads them.
 var classInPremise = map[FieldClass]bool{
 	ClassIncarnation: true, ClassLifecycle: true, ClassOperatorIntent: true, ClassRequest: true,
 	ClassStopRequest: true, ClassCounter: true, ClassMarker: true,
 	ClassBaseline: false, ClassAssignmentIdentity: false, ClassLaunchConfig: false, ClassLease: false, ClassAdvisory: false,
-	ClassWork: false,
+	ClassWork: false, ClassConversation: false,
 }
 
 // Mode is who runs a site. ModeOperator is the CLI, the API, the worker
@@ -201,6 +205,9 @@ var (
 	// started, which clears the stop request as PreWake does
 	// (restartStopRequestClears); opConsumeHold's consume does too.
 	opRestartConfirm = op("internal/session/chat.go", "Manager.confirmLiveSessionState")
+	// opContentGateRead is the content gate's reader of the controller half
+	// (V2-18); it runs under either controller.
+	opContentGateRead = op("internal/session/stop_request_keys.go", "ReadStopRequest")
 	// opEncode is the disposition class's one encoder (R7).
 	opEncode     = op("internal/session/disposition.go", "Disposition.Encode")
 	legacyCreate = legacy(srcBeads, "syncCreateMetadata")
@@ -339,14 +346,14 @@ var registry = slices.Concat([]Field{
 	// Requests (D7 for the wake request).
 	{Key: "wake_request", Class: ClassRequest, Writers: sites(op(srcWaitStore, "Store.wakeSessionFromBead")), Readers: sites(legacy("internal/session/lifecycle_projection.go", "projectWakeCauses"), v2("internal/session/lifecycle_projection.go", "projectWakeCauses")), Clears: sites(legacyPreWake, v2PreWake, v2AwakeHeal, v2SatisfiedWake, v2AdoptCommit)},
 	{Key: "wake_requested_at", Class: ClassRequest, Writers: sites(op(srcWaitStore, "Store.wakeSessionFromBead")), Readers: sites(legacy(srcReconciler, "explicitWakePendingInfo"), v2(srcReconciler, "explicitWakePendingInfo"), v2SatisfiedWake), Clears: sites(legacyPreWake, v2PreWake, v2AwakeHeal, v2SatisfiedWake, v2AdoptCommit)},
-	{Key: "restart_requested", Class: ClassRequest, Writers: sites(op(srcManager, "Manager.RequestFreshRestart")), Readers: sites(legacy(srcReconciler, "reconcileSessionBeadsTracedWithNamedDemand"), v2("cmd/gc/reconcile_arms_lifecycle.go", "armRestartRequested")), Clears: sites(legacy(srcTransition, "RestartRequestPatch"), legacy(srcReconciler, "finalizeDrainAckStoppedSession"), v2("cmd/gc/reconcile_arms_lifecycle.go", "restartHandoff"), v2("cmd/gc/reconcile_arms_lifecycle.go", "armRestartRequested"), Site{Mode: ModeV2, File: "cmd/gc/reconcile_finalize.go"}.pending("mc-029ln", "D4's finalizePatch always clears it"))},
-	{Key: "continuation_reset_pending", Class: ClassRequest, Writers: sites(v2(srcHeals, "asleepHealPatch"), op(srcManager, "Manager.RequestFreshRestart"), opUnmint), Readers: sites(legacy("cmd/gc/session_wake.go", "pendingContinuationResetNeedsFreshStart"), v2PreWake), Clears: sites(legacyCommit, v2PreWake, opMint)},
+	{Key: "restart_requested", Class: ClassRequest, Writers: sites(op(srcManager, "Manager.RequestFreshRestart"), op("internal/session/restart_request.go", "Manager.RequestFreshRestartFenced")), Readers: sites(legacy(srcReconciler, "reconcileSessionBeadsTracedWithNamedDemand"), v2("cmd/gc/reconcile_arms_lifecycle.go", "armRestartRequested")), Clears: sites(legacy(srcTransition, "RestartRequestPatch"), legacy(srcReconciler, "finalizeDrainAckStoppedSession"), v2("cmd/gc/reconcile_arms_lifecycle.go", "restartHandoff"), v2("cmd/gc/reconcile_arms_lifecycle.go", "armRestartRequested"), Site{Mode: ModeV2, File: "cmd/gc/reconcile_finalize.go"}.pending("mc-029ln", "D4's finalizePatch always clears it"))},
+	{Key: "continuation_reset_pending", Class: ClassRequest, Writers: sites(v2(srcHeals, "asleepHealPatch"), op(srcManager, "Manager.RequestFreshRestart"), op("internal/session/restart_request.go", "Manager.RequestFreshRestartFenced"), opUnmint), Readers: sites(legacy("cmd/gc/session_wake.go", "pendingContinuationResetNeedsFreshStart"), v2PreWake), Clears: sites(legacyCommit, v2PreWake, opMint)},
 
 	// The stop request: the controller half, then the CLI's ack (E3), which
 	// writes only in a v2 city.
-	{Key: DrainIntentReasonKey, Class: ClassStopRequest, NewKey: true, Writers: sites(v2(srcStopKeys, "stopBeginPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopCancelPatch"), opRestartConfirm, opConsumeHold)},
+	{Key: DrainIntentReasonKey, Class: ClassStopRequest, NewKey: true, Writers: sites(v2(srcStopKeys, "stopBeginPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys"), opContentGateRead), Clears: sites(v2(srcStopKeys, "stopCancelPatch"), opRestartConfirm, opConsumeHold)},
 	{Key: DrainIntentAtKey, Class: ClassStopRequest, NewKey: true, Writers: sites(v2(srcStopKeys, "stopBeginPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopCancelPatch"), opRestartConfirm, opConsumeHold)},
-	{Key: DrainIntentIncarnationKey, Class: ClassStopRequest, NewKey: true, Writers: sites(v2(srcStopKeys, "stopBeginPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopCancelPatch"), opRestartConfirm, opConsumeHold)},
+	{Key: DrainIntentIncarnationKey, Class: ClassStopRequest, NewKey: true, Writers: sites(v2(srcStopKeys, "stopBeginPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys"), opContentGateRead), Clears: sites(v2(srcStopKeys, "stopCancelPatch"), opRestartConfirm, opConsumeHold)},
 	{Key: DrainAckIncarnationKey, Class: ClassStopRequest, NewKey: true, Writers: sites(op("cmd/gc/cmd_runtime_drain.go", "drainAckRowPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopVoidResiduePatch"), v2(srcStopKeys, "stopAckVoidPatch"), opRestartConfirm, opConsumeHold)},
 	{Key: DrainAckAtKey, Class: ClassStopRequest, NewKey: true, Writers: sites(op("cmd/gc/cmd_runtime_drain.go", "drainAckRowPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopVoidResiduePatch"), v2(srcStopKeys, "stopAckVoidPatch"), opRestartConfirm, opConsumeHold)},
 	// The operator's drain (`gc runtime drain` in a v2 city, PAR-FLOORACK):
@@ -382,7 +389,20 @@ var registry = slices.Concat([]Field{
 		op("cmd/gc/hook_session_claim.go", "recordWorkStarted"), op("cmd/gc/hook_session_claim.go", "forgetWorkStarted"))},
 	{Key: WorkLadderKey, Class: ClassWork, NewKey: true, CASOnly: true, Writers: sites(
 		v2("cmd/gc/work_ladder_lane.go", "ladderPass.commit"), v2("cmd/gc/work_ladder_lane.go", "ladderPass.settle"),
-		v2("cmd/gc/work_ladder_lane.go", "ladderPass.release"), v2("cmd/gc/work_ladder_lane.go", "externalReadsLane.clearLadderReleases"))},
+		v2("cmd/gc/work_ladder_lane.go", "ladderPass.release"), v2("cmd/gc/work_ladder_lane.go", "externalReadsLane.standDownLadder"))},
+
+	// The conversation cells (DES-O1 D21): an operator's content intent the
+	// conversation lane reads, live, at each pass, and the planner's reminders
+	// hold on (SESSION-RUNTIME-027).
+	{
+		Key: ContentHoldKey, Class: ClassConversation, NewKey: true,
+		Writers: sites(op("internal/session/content_hold.go", "Store.SetContentHold"), op("internal/session/content_hold.go", "Store.ContentHoldItem")),
+		Readers: sites(op("cmd/gc/conversation_lane_view.go", "conversationLaneView"),
+			legacy("cmd/gc/nudge_backstop.go", "backstopContentHeld"), v2("cmd/gc/nudge_backstop.go", "backstopContentHeld"),
+			v2("cmd/gc/work_ladder_lane.go", "ladderGate"),
+			legacy("cmd/gc/drain_reminder.go", "drainReminderContentHeld")),
+		Clears: sites(op("internal/session/content_hold.go", "Store.ClearContentHold")),
+	},
 	{Key: ResetCommittedAtKey, Class: ClassMarker, Writers: sites(legacy(srcTransition, "RestartRequestPatch"))},
 	{Key: "drain_finalize", Class: ClassMarker, Writers: sites(legacy("cmd/gc/session_pool_drain_deadline.go", "retirePoolSlotAtDrainDeadline"))},
 	{Key: "startup_dialog_verified", Class: ClassMarker, Writers: sites(op("internal/session/chat.go", "Manager.markStartupDialogsVerifiedLocked"))},

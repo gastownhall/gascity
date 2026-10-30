@@ -70,7 +70,7 @@ func (w *headLimitedWriter) String() string { return string(w.buf) }
 func newBdCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bd [bd-args...]",
-		Short: "Run bd in the correct rig directory",
+		Short: "Run a bd command in the correct rig directory",
 		Long: `Run a bd command routed to the correct rig directory.
 
 When beads belong to a rig (not the city root), bd must run from the
@@ -126,8 +126,8 @@ conditionally resets an in-progress assignment only when the bead still has
 that assignee.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
-from wedging the wrapper after printing command output. If you need
-auto-export behavior, invoke bd directly.`,
+from wedging the wrapper after printing command output. To write a JSONL
+snapshot, run "gc bd export".`,
 		Example: `  gc bd --rig my-project list
   gc bd --rig my-project create "New task"
   gc bd show my-project-abc          # auto-detects rig from bead prefix
@@ -340,7 +340,10 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 // are provenance, not rig-qualified routes. Both bd metadata spellings are
 // examined so --metadata cannot bypass the --set-metadata guard. Inputs this
 // preflight cannot interpret exactly are refused before bd can mutate state.
-func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, bool) {
+//
+// An `@file` body is read — relative to scopeRoot, the directory bd runs in —
+// and validated like an inline one; a file that cannot be read is refused.
+func bdRigQualifiedMetadataRefusal(cfg *config.City, scopeRoot string, bdArgs []string) (string, bool) {
 	verb, args := bdflags.SplitGlobalFlags(bdArgs)
 	// bd registers `new` as an alias for `create` (bd create --help: "Aliases:
 	// create, new"), so the alias has to reach the same admission check AND the
@@ -412,8 +415,15 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 		}
 
 		metadataJSON := strings.TrimSpace(value)
-		if strings.HasPrefix(metadataJSON, "@") {
-			return fmt.Sprintf("gc bd: refusing --metadata %q: @file input cannot be validated before write\n", value), true
+		if path, isFile := strings.CutPrefix(metadataJSON, "@"); isFile {
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(scopeRoot, path)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return fmt.Sprintf("gc bd: refusing --metadata %q: @file input could not be read to validate it before write: %v\n", value, err), true
+			}
+			metadataJSON = string(data)
 		}
 		var metadata map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
@@ -479,14 +489,14 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if msg, refused := bdRigQualifiedMetadataRefusal(cfg, bdArgs); refused {
-		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 
 	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs, cityName != "", stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if msg, refused := bdRigQualifiedMetadataRefusal(cfg, target.ScopeRoot, bdArgs); refused {
+		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -554,6 +564,71 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		}
 		return doBdReleaseIfCurrent(cityPath, cfg, target, id, expectedAssignee, stdout, stderr)
 	}
+
+	// The class-must-not-flip guard (class_flip_guard.go). On a split city the
+	// work store holds work beads only, and bd would write whatever it is told:
+	// `update --add-label wisp`, `label add <id> gc:session`, `update --type
+	// message`, or an `import` of an archive taken before the split each turn
+	// work-store rows into infrastructure-class rows in place, and one such row
+	// makes every later routed gc command refuse until the fleet is stopped. It
+	// runs after the by-id door, which has already served or refused every
+	// binding resident, so what reaches it is the work scope's. A single-store
+	// city holds every class in its one store and the guard passes everything
+	// through unchanged.
+	var classGuardStore beads.Store
+	classGuard := bdClassFlipGuard(cfg, target.ScopeRoot, bdArgs, bdClassGuardDeps{
+		stdin: os.Stdin,
+		inventory: func() (*bdflags.Inventory, error) {
+			return bdSplitInventoryResolver(cityPath, cfg, target)
+		},
+		held: func(ids []string) (map[string]bool, error) {
+			return bdHeldByBinding(cityPath, ids)
+		},
+		bindingDependents: func(ids []string) (map[string][]string, error) {
+			return bdBindingDependents(cityPath, ids)
+		},
+		endpoints: func(ids []string) map[string]bdReadResult {
+			return bdReadEdgeEndpoints(cityPath, cfg, target.ScopeRoot, ids)
+		},
+		templates: func() ([]beads.Bead, error) {
+			if classGuardStore == nil {
+				classGuardStore = bdWriteGuardStore(target.ScopeRoot, cityPath, cfg)
+			}
+			return classGuardStore.List(beads.ListQuery{Label: "template", IncludeClosed: true, AllowScan: true})
+		},
+		bdRead: func(args ...string) ([]byte, error) {
+			return bdGuardRead(cityPath, cfg, target, args)
+		},
+		read: func(id string) (beads.Bead, bdReadResult) {
+			if classGuardStore == nil {
+				classGuardStore = bdWriteGuardStore(target.ScopeRoot, cityPath, cfg)
+			}
+			bead, err := classGuardStore.Get(id)
+			switch {
+			case err == nil:
+				return bead, bdReadFound
+			case errors.Is(err, beads.ErrIDCollision):
+				// bd resolved the id to a different bead: never a not-found.
+				return beads.Bead{}, bdReadCollision
+			case errors.Is(err, beads.ErrNotFound):
+				return beads.Bead{}, bdReadNotFound
+			default:
+				return beads.Bead{}, bdReadFailed
+			}
+		},
+	})
+	if classGuard.refusal != "" {
+		fmt.Fprintf(stderr, "%s\n", classGuard.refusal) //nolint:errcheck // best-effort stderr
+		recordBdSplitRefusal(cityPath, target.ScopeRoot, bdArgs, classGuard)
+		return 1
+	}
+	if classGuard.cleanup != nil {
+		defer classGuard.cleanup()
+	}
+	if classGuard.notice != "" {
+		fmt.Fprint(stderr, classGuard.notice) //nolint:errcheck // best-effort stderr
+	}
+	bdArgs = classGuard.args
 
 	// Disclose which store answers a read-only passthrough, so a zero-row
 	// result is distinguishable from a true empty (gastownhall/gascity#5170).
@@ -688,6 +763,11 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	cmd := exec.Command(bdPath, bdArgs...)
 	cmd.Dir = target.ScopeRoot
 	cmd.Stdin = os.Stdin
+	if classGuard.stdin != nil {
+		// The guard read stdin to judge it (import -, batch); bd gets what
+		// it read.
+		cmd.Stdin = classGuard.stdin
+	}
 	cmd.Stdout = stdout
 	// Tee stderr through a bounded head buffer alongside the operator's
 	// pipe so we can scan it post-exec for bd's silent-fallback-to-on-disk
@@ -820,7 +900,7 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 
 	// The flag sets are the complete value-consuming and boolean (no-value)
 	// flags for this subcommand, in both long and short form, sourced from
-	// `bd <sub> --help` (bd 1.3.1, 2026-09-29). Unknown flags not in either set
+	// `bd <sub> --help` (bd 1.3.2, 2026-10-24). Unknown flags not in either set
 	// make the scan ambiguous.
 	ids, ambiguous = bdScanPositionalIDs(args[1:], bdSubcmdValueFlags(sub), bdSubcmdBoolFlags(sub), nil)
 	if ambiguous {

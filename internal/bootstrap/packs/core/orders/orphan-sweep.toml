@@ -9,12 +9,19 @@
 # another city's agent on a shared rig store) is never reset; each run that
 # keeps one names it and declares a partial outcome (order.skipped).
 # The gate is asked at most once per identity per run, within
-# GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS (default 120, under the 300s exec order
+# GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS (default 120, under the order's 4m
 # timeout; where timeout(1) exists, an ask still running at the deadline is
 # abandoned); claimants it did not get to or did not hear back from are kept,
 # named, and retried on a later run.
+#
+# The timeout is explicit and shorter than the interval because the cooldown
+# counts from a run's start, so a timeout at or above the interval (the 300s
+# exec default is equal to it) would let a timed-out sweep be followed at once
+# by the next. 4m leaves at most two minutes after the gate budget, less the
+# claim collection that precedes it, and a minute of rest before the next run.
 [order]
 description = "Reset beads assigned to dead agents back to the work pool"
 trigger = "cooldown"
 interval = "5m"
+timeout = "4m"
 exec = "$PACK_DIR/assets/scripts/orphan-sweep.sh"

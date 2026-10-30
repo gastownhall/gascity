@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
@@ -240,6 +241,19 @@ type State interface {
 	// Handlers treat nil as "feature disabled" and respond with a typed
 	// 503 so the CLI can print a useful message.
 	MaintenanceLoop() MaintenanceProvider
+
+	// ApplyStartupPrompt returns hints with the startup prompt of the session
+	// described by info delivered for a launch that resumes it: the prompt rides
+	// the post-start nudge and the launch env carries the delivered marker, so
+	// the SessionStart hook adds context without repeating a prompt the provider
+	// cannot inline in full. resolved and transport are the provider and
+	// transport the caller resolved for the launch. Prompt rendering and the
+	// delivery policy live in the controller, not the API, so the hints a worker
+	// factory resumes with cannot drift from the ones the reconciler launches
+	// with. Hints are returned unchanged for a session that is closed, has no
+	// prompt, or runs on a runtime that cannot carry a nudge. A non-nil error
+	// means the prompt cannot be delivered and the launch must not proceed.
+	ApplyStartupPrompt(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error)
 }
 
 // AgentUpdate holds optional fields for a partial agent update. Pointer fields
@@ -328,6 +342,15 @@ type WebhookDispatchProvider interface {
 // Resolve-from-Config() fallback at Server construction (see newServer).
 type RolloutFlagsProvider interface {
 	RolloutFlags() rollout.Flags
+}
+
+// OpsCrashPointsProvider is an optional State capability: the crash-point
+// hook (legacyop.Recorder.CrashPoints) every op recorder of the State's
+// Servers carries. cmd/gc's controllerState answers its GC_OPS_FAILPOINT
+// hook, nil unless a test-hooks gc armed one. A State without it gives its
+// recorders none.
+type OpsCrashPointsProvider interface {
+	OpsCrashPoints() legacyop.CrashPointFunc
 }
 
 // AgentVisibilityWaiter is an optional capability for states whose Config()

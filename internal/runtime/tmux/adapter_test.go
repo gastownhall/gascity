@@ -182,6 +182,7 @@ func TestProviderStopUnattendedSessionRealNamedTmuxBoundary(t *testing.T) {
 	if !processAlive(secondPanePID) {
 		t.Fatalf("stubborn second-pane process %s is not alive before certified stop", secondPanePID)
 	}
+	stubbornTarget := mustSnapshotTarget(t, mustProcessSnapshot(t), mustPID(t, secondPanePID))
 	// A second provider instance owns the real hidden PTY. It is therefore
 	// untracked by p, exactly like a human client from the certifier's point of
 	// view; p must observe it without closing or detaching it.
@@ -245,9 +246,12 @@ func TestProviderStopUnattendedSessionRealNamedTmuxBoundary(t *testing.T) {
 	if has, err := p.tm.HasSession(name); err != nil || has {
 		t.Fatalf("certified stop left session present: has=%v err=%v", has, err)
 	}
-	if processAlive(secondPanePID) {
-		t.Fatalf("certified stop left stubborn second-pane process %s alive", secondPanePID)
-	}
+	// The stop returns once it has sent SIGKILL, before the stubborn process
+	// has exited and before tmux, its parent, has reaped it; kill(0) reads both
+	// states as alive. Wait for its start identity to go instead. It ignores HUP
+	// and TERM, so a stop that never sent the KILL still leaves it running past
+	// the deadline.
+	waitForProcessTargetsGone(t, []processTarget{stubbornTarget}, testutil.ExecRaceTimeout)
 
 	if err := p.TeardownServer(); err != nil {
 		t.Fatalf("tear down exact named tmux server: %v", err)
@@ -1009,6 +1013,51 @@ func TestProvider_RecyclesDeadPaneWithoutProcessNames(t *testing.T) {
 	}
 	if !p.IsRunning(name) {
 		t.Fatal("session should be running after dead-pane recycle")
+	}
+}
+
+// A session whose agent has exited stays listed (remain-on-exit) with an empty
+// #{pane_pid} on tmux 3.8. Resolving its input pane and nudging it must not
+// fail with "no panes found" in a populated pane list.
+func TestProvider_NudgeResolvesDeadPane(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = testSocketName
+	// A dead pane never looks idle, so Nudge's best-effort idle wait would run
+	// its whole default window before sending.
+	cfg.NudgeIdleTimeout = time.Second
+	p := NewProviderWithConfig(cfg)
+	name := "gc-test-dead-pane-nudge"
+	_ = p.Stop(name)
+	defer func() { _ = p.Stop(name) }()
+
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command: "sleep 0.1",
+		WorkDir: t.TempDir(),
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	waitForValue(t, "session state", "dead", func() string {
+		has, err := p.Tmux().HasSession(name)
+		if err != nil {
+			t.Fatalf("HasSession: %v", err)
+		}
+		if has && !p.IsRunning(name) {
+			return "dead"
+		}
+		return "alive"
+	})
+
+	target, err := p.Tmux().agentInputTarget(name)
+	if err != nil || target == "" {
+		t.Fatalf("agentInputTarget = (%q, %v), want the dead agent pane", target, err)
+	}
+	if err := p.Nudge(name, runtime.TextContent("hello")); err != nil {
+		t.Fatalf("Nudge to a dead agent pane: %v", err)
 	}
 }
 

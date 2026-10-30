@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"fmt"
+	"log"
 	"maps"
 	"math"
 	"slices"
@@ -21,6 +22,21 @@ type MemStore struct {
 	beads []Bead
 	deps  []Dep
 	seq   int
+
+	// lastCreatedAt is the newest creation stamp this store has issued or
+	// loaded; nextCreatedAtLocked stamps every create strictly after it.
+	lastCreatedAt time.Time
+	// farAheadCreatedAt is the newest stamp seen more than maxCreatedAtLead
+	// ahead of the clock (a record from the future), which lastCreatedAt
+	// does not follow.
+	farAheadCreatedAt time.Time
+	// now is the wall clock creation stamps read; nil reads memStoreWallClock.
+	// Tests freeze it to model a clock too coarse to tell creates apart.
+	now func() time.Time
+	// warnf reports a creation stamp too far ahead of the clock; nil is
+	// log.Printf. warnedCreatedAtLead keeps it to once per store.
+	warnf               func(format string, args ...any)
+	warnedCreatedAtLead bool
 
 	// storageOnly marks a MemStore serving as another store's storage (the
 	// native store's test double): it reports no session writes, which the
@@ -60,6 +76,13 @@ type MemStore struct {
 	// TestMemStoreHonorExplicitIDsMatchesSQLiteStore.
 	HonorExplicitIDs bool
 
+	// mintPrefixFor, when set, picks the prefix a store-minted id takes for
+	// each bead ("" falls back to IDPrefix). One physical store then mints the
+	// way a split city's stores do together: infrastructure beads under the
+	// class binding's prefix, work beads under the work prefix. Guarded by mu;
+	// set it with SetMintPrefixFunc.
+	mintPrefixFor func(Bead) string
+
 	// localStrings holds clone-local key-value data set via SetLocalString,
 	// keyed by bead ID then key. Deliberately excluded from
 	// restoreFrom/snapshot so FileStore's disk persistence never touches it.
@@ -80,7 +103,9 @@ func NewMemStoreFrom(seq int, existing []Bead, deps []Dep) *MemStore {
 	copy(b, existing)
 	d := make([]Dep, len(deps))
 	copy(d, deps)
-	return &MemStore{seq: seq, beads: b, deps: d}
+	m := &MemStore{seq: seq, beads: b, deps: d}
+	m.seedCreatedAtLocked(b)
+	return m
 }
 
 // restoreFrom replaces the in-memory state with the given snapshot.
@@ -91,6 +116,7 @@ func (m *MemStore) restoreFrom(seq int, beads []Bead, deps []Dep) {
 	m.seq = seq
 	m.beads = beads
 	m.deps = deps
+	m.seedCreatedAtLocked(beads)
 }
 
 // snapshot returns the current sequence counter, a deep copy of all beads, and
@@ -148,7 +174,7 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 		}
 		b.ID = explicit
 	} else {
-		b.ID = m.mintIDLocked()
+		b.ID = m.mintIDLocked(m.mintPrefixLocked(b))
 	}
 	// Set directly rather than through setBeadStatus: create is not a status
 	// transition over an existing bead, so a caller-supplied
@@ -157,7 +183,7 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 	if b.Type == "" {
 		b.Type = "task"
 	}
-	b.CreatedAt = time.Now().Round(0)
+	b.CreatedAt = m.nextCreatedAtLocked()
 	b.UpdatedAt = b.CreatedAt
 	b.Revision = 1   // first version; every subsequent mutation bumps it
 	b.ClaimFence = 0 // no ownership history yet; the first claim bumps it to 1
@@ -183,15 +209,39 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 	return cloneBead(stored), nil
 }
 
-// mintIDLocked returns a store-generated ID that is free in this store,
-// advancing past any suffix already taken. SQLiteStore's mintUniqueIDTx does the
-// same re-check on every auto-minted id, because a sequence that lags the rows
+// SetMintPrefixFunc installs fn as the per-bead mint prefix: a store-minted id
+// takes the prefix fn returns for the bead being created, and IDPrefix when fn
+// returns "" (or fn is nil, which removes the hook). Pinned ids are untouched.
+// It takes the store's lock, so it is safe on a store other goroutines are
+// already using; the split-strict test gate installs it that way to mint
+// infrastructure beads under the class binding's prefix.
+func (m *MemStore) SetMintPrefixFunc(fn func(Bead) string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.mintPrefixFor = fn
+}
+
+// mintPrefixLocked returns the prefix the mint hook picks for b, or "" for the
+// store's own. The caller must hold m.mu.
+func (m *MemStore) mintPrefixLocked(b Bead) string {
+	if m.mintPrefixFor == nil {
+		return ""
+	}
+	return m.mintPrefixFor(b)
+}
+
+// mintIDLocked returns a store-generated ID under prefix ("" for IDPrefix)
+// that is free in this store, advancing past any suffix already taken.
+// SQLiteStore's mintUniqueIDTx does the same re-check on every auto-minted id,
+// because a sequence that lags the rows
 // actually present — a store seeded by NewMemStoreFrom, or one that honored a
 // pinned id — would otherwise re-issue an id that is already there, and MemStore
 // is slice-backed, so a duplicate aliases rather than conflicts. The caller must
 // hold m.mu.
-func (m *MemStore) mintIDLocked() string {
-	prefix := m.IDPrefix
+func (m *MemStore) mintIDLocked(prefix string) string {
+	if prefix == "" {
+		prefix = m.IDPrefix
+	}
 	if prefix == "" {
 		prefix = "gc"
 	}
@@ -298,7 +348,7 @@ func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
 	if oldStatus != "closed" && m.beads[i].Status == "closed" {
 		recordCloseReason(&m.beads[i])
 	}
-	m.beads[i].UpdatedAt = time.Now()
+	m.beads[i].UpdatedAt = m.updatedAtLocked(i)
 	m.beads[i].Revision++
 	if isOwnershipTransition(oldStatus, oldAssignee, opts) {
 		m.beads[i].ClaimFence++
@@ -332,7 +382,7 @@ func (m *MemStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 		}
 		setBeadStatus(&m.beads[i], "open")
 		m.beads[i].Assignee = ""
-		m.beads[i].UpdatedAt = time.Now()
+		m.beads[i].UpdatedAt = m.updatedAtLocked(i)
 		m.beads[i].Revision++
 		m.beads[i].ClaimFence++ // clearing an owner is an ownership transition
 		return true, nil
@@ -352,7 +402,7 @@ func (m *MemStore) Close(id string) error {
 			}
 			setBeadStatus(&m.beads[i], "closed")
 			recordCloseReason(&m.beads[i])
-			m.beads[i].UpdatedAt = time.Now()
+			m.beads[i].UpdatedAt = m.updatedAtLocked(i)
 			m.beads[i].Revision++
 			return nil
 		}
@@ -373,7 +423,7 @@ func (m *MemStore) Reopen(id string) error {
 			wasClosed := m.beads[i].Status == "closed"
 			setBeadStatus(&m.beads[i], "open")
 			dropCloseReasonMetadata(&m.beads[i])
-			m.beads[i].UpdatedAt = time.Now()
+			m.beads[i].UpdatedAt = m.updatedAtLocked(i)
 			m.beads[i].Revision++
 			if wasClosed {
 				forgetCloseReason(&m.beads[i])
@@ -403,7 +453,7 @@ func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, erro
 		}
 		m.noteSession(m.beads[i], metadata)
 		setBeadStatus(&m.beads[i], "closed")
-		m.beads[i].UpdatedAt = time.Now()
+		m.beads[i].UpdatedAt = m.updatedAtLocked(i)
 		m.beads[i].Revision++
 		if m.beads[i].Metadata == nil {
 			m.beads[i].Metadata = make(map[string]string, len(metadata))
@@ -614,7 +664,7 @@ func (m *MemStore) SetMetadata(id, key, value string) error {
 				m.beads[i].Metadata = make(map[string]string)
 			}
 			m.beads[i].Metadata[key] = value
-			m.beads[i].UpdatedAt = time.Now()
+			m.beads[i].UpdatedAt = m.updatedAtLocked(i)
 			m.beads[i].Revision++
 			return nil
 		}
@@ -638,7 +688,7 @@ func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
 			for k, v := range kvs {
 				m.beads[i].Metadata[k] = v
 			}
-			m.beads[i].UpdatedAt = time.Now()
+			m.beads[i].UpdatedAt = m.updatedAtLocked(i)
 			m.beads[i].Revision++
 			return nil
 		}
@@ -806,4 +856,92 @@ func (m *MemStore) noteSession(b Bead, kvs map[string]string) {
 	if !m.storageOnly {
 		noteSessionKeys(b, kvs)
 	}
+}
+
+// maxCreatedAtLead bounds how far ahead of the clock a creation stamp may run
+// to stay after the newest stamp.
+const maxCreatedAtLead = time.Minute
+
+// memStoreWallClock is the clock a MemStore without its own now reads.
+var memStoreWallClock = time.Now
+
+// clockLocked reads the store's wall clock, without a monotonic reading.
+func (m *MemStore) clockLocked() time.Time {
+	clock := memStoreWallClock
+	if m.now != nil {
+		clock = m.now
+	}
+	return clock().Round(0)
+}
+
+// nextCreatedAtLocked returns the creation stamp for a new bead: the wall
+// clock, or one nanosecond past the newest stamp when the clock has not moved
+// past it. Readers order beads by (CreatedAt, ID) and take that as creation
+// order, but a wall clock ties for creates in one tick (macOS reads
+// microseconds) and neither minted ids (gc-10 < gc-9) nor pinned ids sort by
+// creation, so the stamps themselves must be strictly increasing.
+//
+// A stamp runs ahead of the clock by less than maxCreatedAtLead. Within a
+// tick that is one nanosecond per create; a newest stamp further ahead is not
+// a tie but a record from the future (a corrupt or foreign bead, or a clock
+// that stepped back by more than the lead). Following it would push every
+// later create into the future with it, where purge cutoffs, grace periods
+// and ages read it wrong, so creates take the clock instead, sorting before
+// that record, and the store warns once. The caller holds m.mu.
+func (m *MemStore) nextCreatedAtLocked() time.Time {
+	now := m.clockLocked()
+	if m.lastCreatedAt.Sub(now) >= maxCreatedAtLead {
+		m.noteFarAheadLocked(m.lastCreatedAt)
+		m.lastCreatedAt = time.Time{}
+	}
+	stamp := now
+	if !now.After(m.lastCreatedAt) {
+		stamp = m.lastCreatedAt.Add(time.Nanosecond)
+	}
+	m.lastCreatedAt = stamp
+	if lead := m.farAheadCreatedAt.Sub(now); lead >= maxCreatedAtLead && !m.warnedCreatedAtLead {
+		m.warnedCreatedAtLead = true
+		warnf := m.warnf
+		if warnf == nil {
+			warnf = log.Printf
+		}
+		warnf("beads: a bead's creation stamp %s is %s ahead of the clock (more than %s); new beads take the clock and sort before it",
+			m.farAheadCreatedAt.Format(time.RFC3339Nano), lead, maxCreatedAtLead)
+	}
+	return stamp
+}
+
+// seedCreatedAtLocked raises lastCreatedAt to the newest of beads' stamps, so
+// a store loaded from (or reloaded to) persisted beads stamps its next create
+// after all of them, including ones another process wrote in the same tick.
+// A stamp maxCreatedAtLead or more ahead of the clock is noted, not followed
+// (see nextCreatedAtLocked). The caller holds m.mu, or owns m.
+func (m *MemStore) seedCreatedAtLocked(beads []Bead) {
+	now := m.clockLocked()
+	for _, b := range beads {
+		if b.CreatedAt.Sub(now) >= maxCreatedAtLead {
+			m.noteFarAheadLocked(b.CreatedAt)
+			continue
+		}
+		if b.CreatedAt.After(m.lastCreatedAt) {
+			m.lastCreatedAt = b.CreatedAt
+		}
+	}
+}
+
+func (m *MemStore) noteFarAheadLocked(stamp time.Time) {
+	if stamp.After(m.farAheadCreatedAt) {
+		m.farAheadCreatedAt = stamp
+	}
+}
+
+// updatedAtLocked returns the stamp for an update of the bead at index i: the
+// wall clock, but never before the bead's own CreatedAt, which a same-tick
+// burst can hold a few nanoseconds ahead of the clock. The caller holds m.mu.
+func (m *MemStore) updatedAtLocked(i int) time.Time {
+	now := m.clockLocked()
+	if created := m.beads[i].CreatedAt; now.Before(created) {
+		return created
+	}
+	return now
 }

@@ -85,8 +85,8 @@ func x2Exec(t *testing.T, f *laneFixture, st *opjournal.Store, sp runtime.Provid
 	t.Helper()
 	deps := f.deps(st)
 	deps.sp = sp
-	_, info := f.view(t)
-	e := newConversationLaneExec(deps, info)
+	_, row := f.view(t)
+	e := newConversationLaneExec(deps, row)
 	if host == cliLaneHostName {
 		return &cliLaneExec{conversationLaneExec: e, ownsInput: true}
 	}

@@ -916,40 +916,7 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.Store, skipControlID str
 		}
 		all = loaded
 	}
-	pending := make(map[string]beads.Bead)
-	for _, member := range s.members {
-		if member.ID == skipControlID || member.Status != "open" {
-			continue
-		}
-		if member.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindSpec {
-			continue
-		}
-		switch member.Metadata[beadmeta.ScopeRoleMetadataKey] {
-		case "body", "teardown":
-			continue
-		}
-		pending[member.ID] = member
-	}
-	for _, member := range s.members {
-		switch strings.TrimSpace(member.Metadata[beadmeta.KindMetadataKey]) {
-		case "retry", "ralph":
-		default:
-			continue
-		}
-		switch member.Metadata[beadmeta.ScopeRoleMetadataKey] {
-		case "body", "teardown":
-			continue
-		}
-		for _, candidate := range all {
-			if candidate.Status != "open" {
-				continue
-			}
-			if !isLogicalDescendant(member, candidate) {
-				continue
-			}
-			pending[candidate.ID] = candidate
-		}
-	}
+	pending := scopeUnsettledMembers(s.members, all, skipControlID, func(b beads.Bead) bool { return b.Status == "open" })
 
 	skipped := 0
 	// Termination: nothing is ever added to pending below, and every round that
@@ -1002,6 +969,56 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.Store, skipControlID str
 	}
 
 	return skipped, nil
+}
+
+// scopeUnsettledMembers collects the scope beads that count as unsettled:
+// the scope's members except spec, body and teardown roles, plus the
+// logical descendants of nested retry/ralph members (a spawned attempt's own
+// membership is its control's, so the descendants are visited through the
+// root membership). skipControlID is exempt; the caller that drives the
+// selection owns its own close.
+//
+// unsettled is the status test, and the two live callers must not drift:
+// a scope abort passes "open" — those are the members it skips — while a
+// ralph iteration drain gate passes "not closed": the iteration-boundary
+// defect it exists for is a claimed sibling whose abort path neither skipped
+// nor closed (gastownhall/gascity#2519).
+func scopeUnsettledMembers(members, all []beads.Bead, skipControlID string, unsettled func(beads.Bead) bool) map[string]beads.Bead {
+	pending := make(map[string]beads.Bead)
+	for _, member := range members {
+		if member.ID == skipControlID || !unsettled(member) {
+			continue
+		}
+		if member.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindSpec {
+			continue
+		}
+		switch member.Metadata[beadmeta.ScopeRoleMetadataKey] {
+		case "body", "teardown":
+			continue
+		}
+		pending[member.ID] = member
+	}
+	for _, member := range members {
+		switch strings.TrimSpace(member.Metadata[beadmeta.KindMetadataKey]) {
+		case "retry", "ralph":
+		default:
+			continue
+		}
+		switch member.Metadata[beadmeta.ScopeRoleMetadataKey] {
+		case "body", "teardown":
+			continue
+		}
+		for _, candidate := range all {
+			if !unsettled(candidate) {
+				continue
+			}
+			if !isLogicalDescendant(member, candidate) {
+				continue
+			}
+			pending[candidate.ID] = candidate
+		}
+	}
+	return pending
 }
 
 // describeStuckScopeMembers renders the members that are still pending after a

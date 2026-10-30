@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router';
 import { GC_EVENT_PREFIX } from 'gas-city-dashboard-shared';
 import { formatApiError } from '../api/client';
 import { getActiveCity } from '../api/cityBase';

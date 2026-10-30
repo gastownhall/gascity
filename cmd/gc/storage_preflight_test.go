@@ -268,30 +268,53 @@ func TestPreflightSaysSoWhenNoControllerIsLive(t *testing.T) {
 // repaired by any command this binary carries — the operator has to move rows
 // by hand. Finding that out inside a stopped-city window is the worst possible
 // time, and it is exactly what this verb exists to move earlier.
-func TestPreflightBlocksOnRigResidueByName(t *testing.T) {
+func TestPreflightReportsRigHistoryWithoutBlocking(t *testing.T) {
+	rigPath := t.TempDir()
+	request, cfg, _ := preflightReadyCity(t, 1)
+	cfg.Rigs = []config.Rig{{Name: "alpha", Prefix: "ga", Path: rigPath, Suspended: true}}
+
+	rig := beads.NewMemStore()
+	rig.IDPrefix = "ga"
+	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a closed session in a suspended rig", Type: "session"})
+	if err := rig.Close(stray.ID); err != nil {
+		t.Fatal(err)
+	}
+	mustCreateInfraBead(t, rig, beads.Bead{Title: "ordinary rig work", Type: "task"})
+	stubStorageScopeStore(t, rigPath, func() beads.Store { return rig })
+
+	var stdout, stderr bytes.Buffer
+	if code := doStoragePreflight(request, &stdout, &stderr); code != 0 {
+		t.Fatalf("preflight blocked over closed history in a suspended rig: %q", stdout.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "rig alpha") || !strings.Contains(out, "would import 1 bead(s) (0 open, 1 closed)") || !strings.Contains(out, "gc storage migrate --from-rigs --rig alpha --fleet-stopped") {
+		t.Errorf("preflight does not report the rig's importable rows and the command: %q", out)
+	}
+}
+
+// TestPreflightBlocksOnAnUncodableRigEdgeByName: what the rig import refuses,
+// preflight blocks on, naming both beads and the fix.
+func TestPreflightBlocksOnAnUncodableRigEdgeByName(t *testing.T) {
 	rigPath := t.TempDir()
 	request, cfg, _ := preflightReadyCity(t, 1)
 	cfg.Rigs = []config.Rig{{Name: "alpha", Prefix: "ga", Path: rigPath}}
 
 	rig := beads.NewMemStore()
-	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a session in a rig", Type: "session"})
-	mustCreateInfraBead(t, rig, beads.Bead{Title: "ordinary rig work", Type: "task"})
-	prev := openStorageScopeStore
-	openStorageScopeStore = func(storePath, cityPath string) (beads.Store, error) {
-		if storePath == rigPath {
-			return rig, nil
-		}
-		return prev(storePath, cityPath)
+	rig.IDPrefix = "ga"
+	member := mustCreateInfraBead(t, rig, beads.Bead{Title: "an open drained step", Type: "task", Metadata: beads.StringMap{"gc.kind": "task", "gc.root_bead_id": "ga-root"}})
+	convoy := mustCreateInfraBead(t, rig, beads.Bead{Title: "an open work convoy", Type: "task"})
+	if err := rig.DepAdd(convoy.ID, member.ID, "tracks"); err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { openStorageScopeStore = prev })
+	stubStorageScopeStore(t, rigPath, func() beads.Store { return rig })
 
 	var stdout, stderr bytes.Buffer
 	if code := doStoragePreflight(request, &stdout, &stderr); code == 0 {
-		t.Fatal("preflight cleared a city whose migration would refuse by name")
+		t.Fatalf("preflight cleared a rig whose import would refuse: %q", stdout.String())
 	}
-	out := stdout.String() + stderr.String()
-	if !strings.Contains(out, stray.ID) || !strings.Contains(out, "rig alpha") {
-		t.Errorf("preflight blocks without naming the bead and its rig, so it says a migration would fail without saying what to move: %q", out)
+	out := stdout.String()
+	if !strings.Contains(out, member.ID) || !strings.Contains(out, convoy.ID) || !strings.Contains(out, "membership edge") || !strings.Contains(out, "rig alpha") {
+		t.Errorf("preflight blocks without naming both beads and the fix: %q", out)
 	}
 }
 
@@ -534,16 +557,16 @@ func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 	})
 }
 
-// TestPreflightCensusesRigScopesEvenOnAConvergedCity pins the one ordering that
-// matters, against the one city that hides it.
+// TestPreflightNamesRigResidueOnAConvergedCityWithoutBlocking pins what the
+// census means on a city that already converged.
 //
-// A converged city's migration is a no-op, so preflight reports it and returns
-// early. But the rig census runs BEFORE the marker is read — in the migration it
-// runs before the migration body is entered at all — and a converged city can
-// still accumulate an infrastructure bead in a rig scope afterwards. Reading the
-// marker first would clear that city while `gc storage migrate` refuses it by
-// name, which is the exact divergence this verb exists to prevent.
-func TestPreflightCensusesRigScopesEvenOnAConvergedCity(t *testing.T) {
+// The migration's re-run there copies nothing: it re-checks containment and
+// clears the retained copies, so it does not census rig scopes
+// (doStorageMigrate), and a rig row is as unreachable after it as before.
+// Blocking here would tell the operator that a migration refuses when it does
+// not, over the one step that ends the retained copies boot refuses over. The
+// rows are still named, as a note.
+func TestPreflightNamesRigResidueOnAConvergedCityWithoutBlocking(t *testing.T) {
 	rigPath := t.TempDir()
 	request, cfg, _ := preflightReadyCity(t, 2)
 
@@ -556,6 +579,7 @@ func TestPreflightCensusesRigScopesEvenOnAConvergedCity(t *testing.T) {
 	// exist: the migration would have refused it otherwise.
 	cfg.Rigs = []config.Rig{{Name: "alpha", Prefix: "ga", Path: rigPath}}
 	rig := beads.NewMemStore()
+	rig.IDPrefix = "ga"
 	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a session written after the cutover", Type: "session"})
 	prev := openStorageScopeStore
 	openStorageScopeStore = func(storePath, cityPath string) (beads.Store, error) {
@@ -567,11 +591,15 @@ func TestPreflightCensusesRigScopesEvenOnAConvergedCity(t *testing.T) {
 	t.Cleanup(func() { openStorageScopeStore = prev })
 
 	var stdout, stderr bytes.Buffer
-	if code := doStoragePreflight(request, &stdout, &stderr); code == 0 {
-		t.Fatalf("preflight cleared a converged city holding infrastructure residue in a rig scope, which the migration refuses by name: %q", stdout.String())
+	if code := doStoragePreflight(request, &stdout, &stderr); code != 0 {
+		t.Fatalf("preflight refused a converged city over rig residue the migration does not stop for: %q", stdout.String())
 	}
-	if out := stdout.String() + stderr.String(); !strings.Contains(out, stray.ID) {
-		t.Errorf("preflight blocks without naming the stray bead: %q", out)
+	out := stdout.String()
+	if !strings.Contains(out, stray.ID) || !strings.Contains(out, preflightNoteTag) {
+		t.Errorf("preflight does not name the stray bead in a note: %q", out)
+	}
+	if strings.Contains(out, preflightBlockTag) {
+		t.Errorf("preflight reports a block on a converged city: %q", out)
 	}
 }
 

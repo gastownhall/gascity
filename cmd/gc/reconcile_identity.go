@@ -83,6 +83,17 @@ func ownRuntime(v identityVerdict, row session.Info, rt runtimeIdentity) bool {
 	return v == identityStaleSelf && ok && epoch == generation
 }
 
+// liveIncarnation reports rt, read under row's name, as another incarnation
+// of row's own session (#2081): the row's session ID under another token, at
+// an epoch below the row's generation (StaleSelf) or above it (NewerSelf). A
+// pending create holds over it while the session has work in flight, which
+// its rollback would stop.
+func liveIncarnation(row session.Info, rt runtimeIdentity) bool {
+	v := compareIdentity(row, rt)
+	epoch, generation, ok := identityEpochs(row, rt)
+	return v == identityNewerSelf || v == identityStaleSelf && ok && epoch < generation
+}
+
 // adoptableIdentity is named AdoptLive's rule (v5 O2, LL5; the C4c1 review
 // ruling): a clean read with no session ID, which is Ownerless or the
 // legacy-adopted shape (a token and no GC_SESSION_ID, Unknown to every row

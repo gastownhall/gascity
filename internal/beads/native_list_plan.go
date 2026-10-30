@@ -218,9 +218,11 @@ func nativeListTypeRefused(err error) bool {
 // NativeListRequestKeyed reports whether req carries a predicate that narrows
 // the backend's candidate set below the whole ledger. A request without one
 // returns every row of both tiers, closed rows included, and is the full walk
-// the list-request tripwire counts.
+// the list-request tripwire counts. An IDFilter is one: the exact batch read
+// (GetExactBatch) narrows its listing to the ids it reads.
 func NativeListRequestKeyed(req issueops.ListRequest) bool {
-	return req.ParentID != "" ||
+	return req.IDFilter != "" ||
+		req.ParentID != "" ||
 		req.Assignee != "" ||
 		len(req.Labels) > 0 ||
 		len(req.MetadataFields) > 0 ||
@@ -233,7 +235,8 @@ func NativeListRequestKeyed(req issueops.ListRequest) bool {
 type ListRequestStats struct {
 	// Lists is the number of List calls the store served.
 	Lists int64
-	// Requests is the number of backend listing requests those calls issued.
+	// Requests is the number of backend listing requests the store issued: its
+	// List calls' and its exact batch reads' (GetExactBatch).
 	Requests int64
 	// Unkeyed is the number of requests that carried no narrowing predicate
 	// and therefore read the whole ledger.

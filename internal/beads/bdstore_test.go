@@ -4565,10 +4565,13 @@ func TestBdStoreCreateOmitsEphemeralFlagByDefault(t *testing.T) {
 }
 
 func TestBdStoreListWispsUsesBdListWithClientTierFilter(t *testing.T) {
+	var callsMu sync.Mutex
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		gotCmd := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
 		calls = append(calls, gotCmd)
+		callsMu.Unlock()
 		if strings.HasPrefix(gotCmd, "bd query ") {
 			return []byte(`[
 				{"id":"bd-w","title":"wisp","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:02Z","ephemeral":true,"labels":["order-tracking"]}
@@ -4606,10 +4609,13 @@ func TestBdStoreListWispsUsesBdListWithClientTierFilter(t *testing.T) {
 }
 
 func TestBdStoreListWispsRequestsUnlimitedResultsByDefault(t *testing.T) {
+	var callsMu sync.Mutex
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		gotCmd := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
 		calls = append(calls, gotCmd)
+		callsMu.Unlock()
 		var b strings.Builder
 		b.WriteByte('[')
 		for i := 0; i < 55; i++ {
@@ -4636,10 +4642,13 @@ func TestBdStoreListWispsRequestsUnlimitedResultsByDefault(t *testing.T) {
 }
 
 func TestBdStoreListWispsAppliesMetadataBeforeClientLimit(t *testing.T) {
+	var callsMu sync.Mutex
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		gotCmd := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
 		calls = append(calls, gotCmd)
+		callsMu.Unlock()
 		if !strings.Contains(gotCmd, "--limit 0") {
 			return []byte(`[{"id":"bd-new","title":"wrong first page","status":"closed","issue_type":"task","created_at":"2026-05-03T00:00:00Z","ephemeral":true,"labels":["order-run:o"],"metadata":{"phase":"skip"}}]`), nil
 		}
@@ -4696,10 +4705,13 @@ func TestBdStoreListWispsReturnsPartialRowsWithErrorOnCorruptEntries(t *testing.
 }
 
 func TestBdStoreListBothTiersUnionsBdListAndEphemeralQuery(t *testing.T) {
+	var callsMu sync.Mutex
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		full := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
 		calls = append(calls, full)
+		callsMu.Unlock()
 		if strings.Contains(full, "--include-ephemeral") {
 			t.Fatalf("bd list command = %q, --include-ephemeral is only valid for bd ready", full)
 		}
@@ -4733,10 +4745,13 @@ func TestBdStoreListBothTiersUnionsBdListAndEphemeralQuery(t *testing.T) {
 
 func TestBdStoreListBothTiersAppliesCreatedBeforeBeforeMergedLimit(t *testing.T) {
 	before := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+	var callsMu sync.Mutex
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		full := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
 		calls = append(calls, full)
+		callsMu.Unlock()
 		if strings.Contains(full, "--include-ephemeral") {
 			t.Fatalf("bd list command = %q, --include-ephemeral is only valid for bd ready", full)
 		}
@@ -4776,10 +4791,13 @@ func TestBdStoreListBothTiersAppliesCreatedBeforeBeforeMergedLimit(t *testing.T)
 }
 
 func TestBdStoreListBothTiersMessageUnionsEphemeralQueryWithoutTierFiltering(t *testing.T) {
+	var callsMu sync.Mutex
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		full := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
 		calls = append(calls, full)
+		callsMu.Unlock()
 		if strings.HasPrefix(full, "bd query ") {
 			return []byte(`[]`), nil
 		}
@@ -5087,10 +5105,13 @@ func TestBdStoreListBothTiersAssigneesMultipleFansOutTheListLegOnly(t *testing.T
 }
 
 func TestBdStoreListWispsAssigneesSingleUsesAssigneeClause(t *testing.T) {
+	var callsMu sync.Mutex
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		gotCmd := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
 		calls = append(calls, gotCmd)
+		callsMu.Unlock()
 		return []byte(`[{"id":"bd-wisp-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:00Z","ephemeral":true}]`), nil
 	}
 	s := beads.NewBdStore("/city", runner)
@@ -5111,11 +5132,16 @@ func TestBdStoreListWispsAssigneesSingleUsesAssigneeClause(t *testing.T) {
 // TierWisps carve-out on listViaBDList's fan-out: the runner refuses every
 // --assignee flag, so a wisps-tier bd list leg that fanned out fails here.
 func TestBdStoreListWispsAssigneesMultipleFallsBackToClientFilter(t *testing.T) {
-	var gotCmd string
+	var callsMu sync.Mutex
+	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
-		gotCmd = name + " " + strings.Join(args, " ")
+		gotCmd := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
+		calls = append(calls, gotCmd)
+		callsMu.Unlock()
 		if strings.Contains(gotCmd, "--assignee=") {
-			t.Fatalf("cmd = %q, multi-route Assignees must not emit one --assignee", gotCmd)
+			t.Errorf("cmd = %q, multi-route Assignees must not emit one --assignee", gotCmd)
+			return nil, fmt.Errorf("unexpected --assignee read: %s", gotCmd)
 		}
 		if strings.Contains(gotCmd, "--limit 1") {
 			return []byte(`[{"id":"bd-wisp-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:00Z","ephemeral":true}]`), nil
@@ -5137,8 +5163,16 @@ func TestBdStoreListWispsAssigneesMultipleFallsBackToClientFilter(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(gotCmd, "--limit 0") {
-		t.Fatalf("cmd = %q, want unlimited server query before multi-Assignees client filtering", gotCmd)
+	callsMu.Lock()
+	gotCalls := append([]string(nil), calls...)
+	callsMu.Unlock()
+	if len(gotCalls) == 0 {
+		t.Fatal("runner never called")
+	}
+	for _, c := range gotCalls {
+		if !strings.Contains(c, "--limit 0") {
+			t.Fatalf("cmd = %q, want unlimited server query before multi-Assignees client filtering", c)
+		}
 	}
 	if len(got) != 1 || got[0].ID != "bd-wisp-b" {
 		t.Fatalf("got = %+v, want first matching wisp after client filter", got)
@@ -5173,10 +5207,13 @@ func firstCommandWithPrefix(calls []string, prefix string) string {
 }
 
 func TestBdStoreListBothTiersReturnsWholeReadError(t *testing.T) {
+	var callsMu sync.Mutex
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		full := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
 		calls = append(calls, full)
+		callsMu.Unlock()
 		if strings.Contains(full, "--include-ephemeral") {
 			t.Fatalf("bd list command = %q, --include-ephemeral is only valid for bd ready", full)
 		}
@@ -5212,10 +5249,13 @@ func TestBdStoreListWispAwareTiersTolerateAdaptersWithoutBdQuery(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			var callsMu sync.Mutex
 			var calls []string
 			runner := func(_, name string, args ...string) ([]byte, error) {
 				full := name + " " + strings.Join(args, " ")
+				callsMu.Lock()
 				calls = append(calls, full)
+				callsMu.Unlock()
 				if strings.HasPrefix(full, "bd query ") {
 					return nil, fmt.Errorf("bd: unknown subcommand \"query\"")
 				}
@@ -5271,10 +5311,13 @@ func TestBdStoreListWispsQuotesNonBareQueryValues(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			var callsMu sync.Mutex
 			var calls []string
 			runner := func(_, name string, args ...string) ([]byte, error) {
 				gotCmd := name + " " + strings.Join(args, " ")
+				callsMu.Lock()
 				calls = append(calls, gotCmd)
+				callsMu.Unlock()
 				return []byte(`[
 					{"id":"bd-match-assignee","title":"message","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","created_at":"2026-05-01T00:00:00Z","ephemeral":true},
 					{"id":"bd-match-label","title":"label","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","ephemeral":true,"labels":["order tracking"]},

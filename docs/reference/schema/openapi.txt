@@ -2705,7 +2705,7 @@
             "type": "string"
           },
           "context_epoch": {
-            "description": "Context epoch the operation ran in.",
+            "description": "Context epoch the operation ran in, or, for one skipped{stale} unrun, the epoch that fenced it off.",
             "format": "int64",
             "type": "integer"
           },
@@ -2714,7 +2714,7 @@
             "description": "The conversation lane's delivery record."
           },
           "generation": {
-            "description": "Session generation the operation ran in.",
+            "description": "Session generation the operation ran in, or, for one skipped{stale} unrun because its session moved on, the generation that fenced it off.",
             "format": "int64",
             "type": "integer"
           },
@@ -3231,7 +3231,6 @@
               "urn:gascity:error:wait-not-found",
               "urn:gascity:error:wake-will-not-start",
               "urn:gascity:error:webhook-rejected",
-              "urn:gascity:error:when-not-supported",
               "urn:gascity:error:workflow-not-found"
             ],
             "format": "uri",
@@ -3290,7 +3289,6 @@
               "urn:gascity:error:wait-not-found",
               "urn:gascity:error:wake-will-not-start",
               "urn:gascity:error:webhook-rejected",
-              "urn:gascity:error:when-not-supported",
               "urn:gascity:error:workflow-not-found"
             ]
           }
@@ -3513,6 +3511,9 @@
           },
           {
             "$ref": "#/components/schemas/StorageBindingOutcomePayload"
+          },
+          {
+            "$ref": "#/components/schemas/StorageRigPayload"
           },
           {
             "$ref": "#/components/schemas/StoreDiskCriticalPayload"
@@ -7763,6 +7764,9 @@
           "id": {
             "type": "string"
           },
+          "reason": {
+            "type": "string"
+          },
           "status": {
             "type": "string"
           }
@@ -9048,7 +9052,7 @@
             "type": "string"
           },
           "resume": {
-            "description": "Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.",
+            "description": "Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will. When the conversation lane delivers messages (message listed in [ops] authoritative) it starts nothing here: it consumes an operator's hold placed before the message and records the session's wake, and the controller starts the session as it does for any queued message, or the result's will_start says why it will not; resending the request under the idempotency_key of its 202 consumes such a hold too.",
             "type": "boolean"
           }
         },
@@ -9081,7 +9085,7 @@
             "type": "string"
           },
           "will_start": {
-            "description": "Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.",
+            "description": "Present when the message was queued because the session is not running or is held: whether the controller will start it to deliver the message. False means it will not; will_not_start_reason says why, with the remedy. When the conversation lane delivers messages it is read as the request's settle window ends, and resume: true does not start a session the controller will not start.",
             "type": "boolean"
           }
         },
@@ -12383,7 +12387,7 @@
         "properties": {
           "intent": {
             "$ref": "#/components/schemas/SubmitIntent",
-            "description": "Submit intent; empty defaults to \"default\".",
+            "description": "Submit intent; empty defaults to \"default\". When the conversation lane delivers messages (message listed in [ops] authoritative), follow_up is the default request: the lane delivers both at the session's boundary, so under one Idempotency-Key either answers from the other's operation, and the result says default.",
             "enum": [
               "default",
               "follow_up",
@@ -12397,7 +12401,7 @@
             "type": "string"
           },
           "resume": {
-            "description": "Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.",
+            "description": "Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will. When the conversation lane delivers messages (message listed in [ops] authoritative) it starts nothing here: it consumes an operator's hold placed before the message and records the session's wake, and the controller starts the session as it does for any queued message, or the result's will_start says why it will not; resending the request under the idempotency_key of its 202 consumes such a hold too.",
             "type": "boolean"
           }
         },
@@ -12438,7 +12442,7 @@
         "additionalProperties": false,
         "properties": {
           "intent": {
-            "description": "Resolved submit intent (default, follow_up, interrupt_now).",
+            "description": "Resolved submit intent (default, follow_up, interrupt_now). When the conversation lane delivers messages a follow_up resolves to default: the lane delivers both at the session's boundary.",
             "type": "string"
           },
           "interrupt": {
@@ -12466,7 +12470,7 @@
             "type": "string"
           },
           "will_start": {
-            "description": "Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.",
+            "description": "Present when the message was queued because the session is not running or is held: whether the controller will start it to deliver the message. False means it will not; will_not_start_reason says why, with the remedy. When the conversation lane delivers messages it is read as the request's settle window ends, and resume: true does not start a session the controller will not start.",
             "type": "boolean"
           }
         },
@@ -13891,6 +13895,42 @@
         ],
         "type": "object"
       },
+      "StorageRigPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "beads": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "binding": {
+            "type": "string"
+          },
+          "cleared": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "gates": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "rig": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "rig",
+          "binding",
+          "outcome",
+          "beads"
+        ],
+        "type": "object"
+      },
       "StoreDiskCriticalPayload": {
         "additionalProperties": false,
         "properties": {
@@ -14511,6 +14551,8 @@
             "storage.binding.not_configured": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingNotConfigured",
             "storage.binding.uncheckable": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingUncheckable",
             "storage.binding.unconverged": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingUnconverged",
+            "storage.rig_import": "#/components/schemas/TypedEventStreamEnvelopeStorageRigImport",
+            "storage.rig_residue": "#/components/schemas/TypedEventStreamEnvelopeStorageRigResidue",
             "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
             "supervisor.request": "#/components/schemas/TypedEventStreamEnvelopeSupervisorRequest",
             "supervisor.shutdown_requested": "#/components/schemas/TypedEventStreamEnvelopeSupervisorShutdownRequested",
@@ -14846,6 +14888,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingUnconverged"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeStorageRigImport"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeStorageRigResidue"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
@@ -16479,7 +16527,9 @@
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
                 "storage.binding.uncheckable",
-                "storage.binding.not_configured"
+                "storage.binding.not_configured",
+                "storage.rig_import",
+                "storage.rig_residue"
               ]
             },
             "type": "string"
@@ -21115,6 +21165,120 @@
         "title": "TypedEventStreamEnvelope storage.binding.unconverged",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeStorageRigImport": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StorageRigPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "storage.rig_import",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope storage.rig_import",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeStorageRigResidue": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StorageRigPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "storage.rig_residue",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope storage.rig_residue",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick": {
         "additionalProperties": false,
         "properties": {
@@ -22023,6 +22187,8 @@
             "storage.binding.not_configured": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured",
             "storage.binding.uncheckable": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingUncheckable",
             "storage.binding.unconverged": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingUnconverged",
+            "storage.rig_import": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageRigImport",
+            "storage.rig_residue": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageRigResidue",
             "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
             "supervisor.request": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorRequest",
             "supervisor.shutdown_requested": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested",
@@ -22358,6 +22524,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingUnconverged"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageRigImport"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageRigResidue"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
@@ -24094,7 +24266,9 @@
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
                 "storage.binding.uncheckable",
-                "storage.binding.not_configured"
+                "storage.binding.not_configured",
+                "storage.rig_import",
+                "storage.rig_residue"
               ]
             },
             "type": "string"
@@ -29053,6 +29227,128 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope storage.binding.unconverged",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeStorageRigImport": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StorageRigPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "storage.rig_import",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope storage.rig_import",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeStorageRigResidue": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StorageRigPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "storage.rig_residue",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope storage.rig_residue",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick": {
@@ -51266,7 +51562,7 @@
         "summary": "List a session's open operations"
       },
       "post": {
-        "description": "Writes a conversation-lane operation, create-if-absent under its id, which derives from the session, the principal and the client key. 201 when this request wrote it, 200 with the stored operation when the same request was proposed before. Only kinds the city's running conversation lane host executes are accepted: those [ops] authoritative listed when the controller started. Any other, or any kind while no lane host runs, is refused 409 kind-not-enabled. A message whose policy.message.when this build's lane does not deliver (now, interrupt) is refused 409 when-not-supported. A client key that already names a different request from the same principal is refused 409 key-reuse, naming the existing op_id. A refused request writes nothing and materializes no named session. Watch op.changed and fact.recorded on the city event stream from the returned cursor; after reconnecting, read a non-terminal operation again with GET .../ops/{op}, whose row is authoritative.",
+        "description": "Writes a conversation-lane operation, create-if-absent under its id, which derives from the session, the principal and the client key. 201 when this request wrote it, 200 with the stored operation when the same request was proposed before. Only kinds the city's running conversation lane host executes are accepted: those [ops] authoritative listed when the controller started. Any other, or any kind while no lane host runs, is refused 409 kind-not-enabled. A client key that already names a different request from the same principal is refused 409 key-reuse, naming the existing op_id. A refused request writes nothing and materializes no named session. Watch op.changed and fact.recorded on the city event stream from the returned cursor; after reconnecting, read a non-terminal operation again with GET .../ops/{op}, whose row is authoritative.",
         "operationId": "propose-session-op",
         "parameters": [
           {

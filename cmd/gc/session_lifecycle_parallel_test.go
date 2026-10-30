@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"maps"
 	"os"
 	"path/filepath"
@@ -27,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
@@ -53,6 +55,47 @@ func (s *failingMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]s
 // for any write routed through store.Tx(...).
 func (s *failingMetadataBatchStore) Tx(_ string, fn func(beads.Tx) error) error {
 	return fn(s)
+}
+
+// failingFencedMetadataStore is failingMetadataBatchStore on the conditional
+// path: stamped auto (startCommitWriteArms), it fails the fenced metadata
+// write too, so the injected failure fires on whichever arm a write takes.
+type failingFencedMetadataStore struct{ *failingMetadataBatchStore }
+
+func (s failingFencedMetadataStore) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	if s.failBatch && len(opts.Metadata) > 0 {
+		return errors.New("fenced batch failed")
+	}
+	return s.MemStore.UpdateIfMatch(id, expectedRevision, opts)
+}
+
+// Tx hands fn the wrapper, as failingMetadataBatchStore.Tx does.
+func (s failingFencedMetadataStore) Tx(_ string, fn func(beads.Tx) error) error { return fn(s) }
+
+// startCommitWriteArms are the two arms a session metadata write takes over a
+// store whose metadata batches fail: the unconditional batch (conditional
+// writes off), and the fenced write (auto over a store that fences, which
+// the default reaches since mc-dpo2b). Each builds the store; arm, called
+// once the rows are seeded, selects the arm.
+func startCommitWriteArms() map[string]func() (store beads.Store, arm func(*testing.T)) {
+	return map[string]func() (beads.Store, func(*testing.T)){
+		"unconditional": func() (beads.Store, func(*testing.T)) {
+			return &failingMetadataBatchStore{MemStore: beads.NewMemStore(), failBatch: true}, func(*testing.T) {}
+		},
+		"conditional": func() (beads.Store, func(*testing.T)) {
+			inner := &failingMetadataBatchStore{MemStore: beads.NewMemStore(), failBatch: true}
+			store := failingFencedMetadataStore{inner}
+			return store, func(t *testing.T) {
+				t.Helper()
+				if err := beads.StampOpenedStore(inner.MemStore, "MemStore", gate.Auto, false, nil, nil); err != nil {
+					t.Fatalf("stamp: %v", err)
+				}
+				if w, _, err := beads.ResolveConditionalWriter(store); w == nil || err != nil {
+					t.Fatalf("the conditional arm is not active: writer %T, err %v", w, err)
+				}
+			}
+		},
+	}
 }
 
 type failNthMetadataBatchStore struct {
@@ -1700,6 +1743,67 @@ func TestPrepareStartCandidate_DoesNotAppendCLIResumeFlagForACP(t *testing.T) {
 
 	if prepared.cfg.Command != "opencode acp" {
 		t.Fatalf("prepared.cfg.Command = %q, want ACP command without CLI resume flag", prepared.cfg.Command)
+	}
+}
+
+// TestPrepareStartCandidate_RecordedACPTransportKeepsACPLaunch covers a
+// session recorded on ACP whose template now resolves the CLI transport: the
+// prepared start keeps the template's ACP launch, its core hash matches the
+// drift hash, and one notice names the session and "gc session close".
+func TestPrepareStartCandidate_RecordedACPTransportKeepsACPLaunch(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"template":            "worker",
+			"session_name":        "worker",
+			"session_key":         "opencode-provider-session",
+			"started_config_hash": "previous-start",
+			"transport":           "acp",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := sessiontest.SeedBead(t, session)
+	tp := cliTemplateWithACPLaunch()
+
+	var logs bytes.Buffer
+	prevOutput, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prevOutput)
+		log.SetFlags(prevFlags)
+	})
+
+	prepared, err := prepareStartCandidate(startCandidate{info: info, tp: tp, order: 0},
+		&config.City{}, store, &clock.Fake{Time: time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+
+	if prepared.cfg.Command != "opencode acp" {
+		t.Errorf("prepared.cfg.Command = %q, want the ACP launch %q without a CLI resume flag", prepared.cfg.Command, "opencode acp")
+	}
+	if want := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(tp, info)); prepared.coreHash != want {
+		t.Errorf("prepared.coreHash = %q, want the drift hash %q", prepared.coreHash, want)
+	}
+	var notices []string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "recorded ACP transport") {
+			notices = append(notices, line)
+		}
+	}
+	if len(notices) != 1 {
+		t.Fatalf("notices = %q, want exactly one", notices)
+	}
+	for _, want := range []string{`session "worker"`, `template "worker"`, `gc session close worker`} {
+		if !strings.Contains(notices[0], want) {
+			t.Errorf("notice %q missing %q", notices[0], want)
+		}
 	}
 }
 
@@ -4755,8 +4859,18 @@ func TestCommitStartResult_RollbackPendingErrorClearsInFlightLeaseWhenCloseFails
 // same SetMetadataBatch as the state/state_reason/creation_complete_at
 // transition so the sweep never observes a transient state without either
 // the claim or the marker.
+//
+// Both write arms keep the contract (startCommitWriteArms).
 func TestCommitStartResult_AtomicBatchFailureLeavesClaimIntact(t *testing.T) {
-	store := &failingMetadataBatchStore{MemStore: beads.NewMemStore(), failBatch: true}
+	for name, newStore := range startCommitWriteArms() {
+		t.Run(name, func(t *testing.T) {
+			testCommitStartResultAtomicBatchFailureLeavesClaimIntact(t, newStore)
+		})
+	}
+}
+
+func testCommitStartResultAtomicBatchFailureLeavesClaimIntact(t *testing.T, newStore func() (beads.Store, func(*testing.T))) {
+	store, arm := newStore()
 	bead, err := store.Create(beads.Bead{
 		Title:  "helper",
 		Type:   sessionBeadType,
@@ -4772,6 +4886,7 @@ func TestCommitStartResult_AtomicBatchFailureLeavesClaimIntact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	arm(t)
 	result := startResult{
 		prepared: preparedStart{
 			candidate: startCandidate{
@@ -4816,7 +4931,8 @@ func TestCommitStartResult_AtomicBatchFailureLeavesClaimIntact(t *testing.T) {
 // observe a wake whose metadata commit then fails (the reconciler reports
 // failure and retries, so the "fact" the event announced never landed).
 // When the atomic start batch fails no session.woke is emitted; on success
-// exactly one is. Regression test for ga-kmoj9c.
+// exactly one is, on both write arms (startCommitWriteArms). Regression test
+// for ga-kmoj9c.
 func TestCommitStartResult_SessionWokeEmittedOnlyAfterDurableCommit(t *testing.T) {
 	successResult := func(session *beads.Bead) startResult {
 		return startResult{
@@ -4844,29 +4960,11 @@ func TestCommitStartResult_SessionWokeEmittedOnlyAfterDurableCommit(t *testing.T
 	}
 	clk := &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)}
 
-	t.Run("metadata batch failure suppresses the event", func(t *testing.T) {
-		store := &failingMetadataBatchStore{MemStore: beads.NewMemStore(), failBatch: true}
-		session, err := store.Create(beads.Bead{
-			Title:    "helper",
-			Type:     sessionBeadType,
-			Labels:   []string{sessionBeadLabel},
-			Metadata: sessionMeta(),
+	for name, newStore := range startCommitWriteArms() {
+		t.Run("metadata batch failure suppresses the event/"+name, func(t *testing.T) {
+			testCommitStartResultBatchFailureSuppressesSessionWoke(t, newStore, successResult, sessionMeta(), clk)
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		rec := events.NewFake()
-		if commitStartResult(successResult(&session), sessionFrontDoor(store), clk, rec, 0, ioDiscard{}, ioDiscard{}) {
-			t.Fatal("commitStartResult returned true, want false when metadata batch fails")
-		}
-		woke, err := rec.List(events.Filter{Type: events.SessionWoke})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(woke) != 0 {
-			t.Fatalf("session.woke events = %d, want 0 when the durable commit failed", len(woke))
-		}
-	})
+	}
 
 	t.Run("successful commit emits exactly one event", func(t *testing.T) {
 		store := beads.NewMemStore()
@@ -4891,6 +4989,31 @@ func TestCommitStartResult_SessionWokeEmittedOnlyAfterDurableCommit(t *testing.T
 			t.Fatalf("session.woke events = %d, want exactly 1 after the durable commit", len(woke))
 		}
 	})
+}
+
+func testCommitStartResultBatchFailureSuppressesSessionWoke(t *testing.T, newStore func() (beads.Store, func(*testing.T)), successResult func(*beads.Bead) startResult, meta map[string]string, clk *clock.Fake) {
+	store, arm := newStore()
+	session, err := store.Create(beads.Bead{
+		Title:    "helper",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: meta,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	arm(t)
+	rec := events.NewFake()
+	if commitStartResult(successResult(&session), sessionFrontDoor(store), clk, rec, 0, ioDiscard{}, ioDiscard{}) {
+		t.Fatal("commitStartResult returned true, want false when metadata batch fails")
+	}
+	woke, err := rec.List(events.Filter{Type: events.SessionWoke})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(woke) != 0 {
+		t.Fatalf("session.woke events = %d, want 0 when the durable commit failed", len(woke))
+	}
 }
 
 func TestRefreshConfiguredNamedStartCandidateAddsCurrentSkillFingerprint(t *testing.T) {
@@ -7963,7 +8086,6 @@ func TestPrepareStartCandidateUsesBuiltinAncestorForGCProviderEnv(t *testing.T) 
 		Alias:       "mayor",
 		ResolvedProvider: &config.ResolvedProvider{
 			Name:            "claude-max",
-			Kind:            "claude",
 			BuiltinAncestor: "claude",
 		},
 		TemplateName: "mayor",
@@ -8771,21 +8893,24 @@ func TestBuildPreparedStartKeepsAnAllocatedKey(t *testing.T) {
 // agent moves to a new config dir its old conversation, still under an
 // observed root, reads gone and the start runs fresh instead of a resume the
 // provider will refuse; the old dir named, or none, it resumes. An ambient
-// CLAUDE_CONFIG_DIR (passthrough, not the operator's) is not read.
+// CLAUDE_CONFIG_DIR (passthrough, not the operator's) is searched beside the
+// observed roots, never instead of them (#6677).
 func TestBuildPreparedStartProbesTheLaunchConfigDir(t *testing.T) {
 	workDir := t.TempDir()
 	root := observedTranscript(t, workDir) // k-1's transcript, under an observed root
 	moved := t.TempDir()
 	for _, c := range []struct {
-		name     string
-		operator map[string]string
-		ambient  map[string]string
-		resumed  bool
+		name       string
+		operator   map[string]string
+		ambient    map[string]string
+		unobserved bool // no [daemon] observe_paths covers root
+		resumed    bool
 	}{
-		{"no config dir named: the observed roots", nil, nil, true},
-		{"the old config dir named", map[string]string{"CLAUDE_CONFIG_DIR": filepath.Dir(root)}, nil, true},
-		{"moved to a new config dir", map[string]string{"CLAUDE_CONFIG_DIR": moved}, nil, false},
-		{"an ambient config dir only", nil, map[string]string{"CLAUDE_CONFIG_DIR": moved}, true},
+		{"no config dir named: the observed roots", nil, nil, false, true},
+		{"the old config dir named", map[string]string{"CLAUDE_CONFIG_DIR": filepath.Dir(root)}, nil, false, true},
+		{"moved to a new config dir", map[string]string{"CLAUDE_CONFIG_DIR": moved}, nil, false, false},
+		{"an ambient config dir only", nil, map[string]string{"CLAUDE_CONFIG_DIR": moved}, false, true},
+		{"a passed-through config dir holding the transcript", nil, map[string]string{"CLAUDE_CONFIG_DIR": filepath.Dir(root)}, true, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			store := beads.NewMemStore()
@@ -8797,7 +8922,9 @@ func TestBuildPreparedStartProbesTheLaunchConfigDir(t *testing.T) {
 				t.Fatal(err)
 			}
 			cfg := &config.City{}
-			cfg.Daemon.ObservePaths = []string{root}
+			if !c.unobserved {
+				cfg.Daemon.ObservePaths = []string{root}
+			}
 			env := maps.Clone(c.ambient)
 			if env == nil {
 				env = map[string]string{}
@@ -8815,15 +8942,21 @@ func TestBuildPreparedStartProbesTheLaunchConfigDir(t *testing.T) {
 			if resumed := got.Metadata["session_key"] == "k-1" && strings.Contains(prepared.cfg.Command, "--resume k-1"); resumed != c.resumed {
 				t.Fatalf("stored key %q, command %q; want resumed=%v", got.Metadata["session_key"], prepared.cfg.Command, c.resumed)
 			}
+			if c.resumed && (got.Metadata["started_config_hash"] != "h-1" || got.Metadata["continuation_reset_pending"] != "") {
+				t.Fatalf("metadata %v; want no stale-key clear (started_config_hash h-1, no continuation reset)", got.Metadata)
+			}
 		})
 	}
 }
 
 // Kills launchTranscriptRoots pinning a value the probe cannot resolve as the
 // provider does: only an absolute CLAUDE_CONFIG_DIR pins it; a relative or ~
-// one, or none, falls back to the city roots.
+// one, or none, falls back to the city roots. An absolute one the launch is
+// only handed (tp.Env) adds its projects after the city roots, never instead
+// of them (#6677); gc's own environment is not read.
 func TestLaunchTranscriptRoots(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", "")
 	observed := &config.City{}
 	observed.Daemon.ObservePaths = []string{"/observed"}
@@ -8840,6 +8973,35 @@ func TestLaunchTranscriptRoots(t *testing.T) {
 		if got := launchTranscriptRoots(observed, TemplateParams{OperatorEnv: map[string]string{"CLAUDE_CONFIG_DIR": c.dir}}); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("CLAUDE_CONFIG_DIR %q: roots %v, want %v", c.dir, got, c.want)
 		}
+	}
+
+	t.Setenv("CLAUDE_CONFIG_DIR", "/ambient/a") // gc's own env: never read
+	dir := func(d string) map[string]string { return map[string]string{"CLAUDE_CONFIG_DIR": d} }
+	city := sessionTranscriptSearchPaths(observed)
+	for _, c := range []struct {
+		name     string
+		cfg      *config.City
+		env      map[string]string
+		operator map[string]string
+		want     []string
+	}{
+		{"an absolute passed-through dir", observed, dir("/cfg/claude-a"), nil, append(sessionTranscriptSearchPaths(observed), "/cfg/claude-a/projects")},
+		{"the default root's own dir", observed, dir(filepath.Join(home, ".claude")), nil, city},
+		{"no city", nil, dir("/cfg/claude-a"), nil, append(sessionTranscriptSearchPaths(nil), "/cfg/claude-a/projects")},
+		{"no passed-through dir", observed, map[string]string{}, nil, city},
+		{"the operator's absolute dir over a passed-through one", observed, dir("/cfg/claude-a"), dir("/cfg/claude-b"), []string{"/cfg/claude-b/projects"}},
+		{"a blank passed-through dir", observed, dir(""), nil, city},
+		{"a spaces-only passed-through dir", observed, dir("  "), nil, city},
+		{"a ~ passed-through dir", observed, dir("~/.claude-a"), nil, city}, // the provider resolves it, not the probe
+		{"a relative passed-through dir", observed, dir("cfg/claude-a"), nil, city},
+		{"the operator's ~ dir written over an ambient one", observed, dir("~/.claude-b"), dir("~/.claude-b"), city},
+	} {
+		if got := launchTranscriptRoots(c.cfg, TemplateParams{Env: c.env, OperatorEnv: c.operator}); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: roots %v, want %v", c.name, got, c.want)
+		}
+	}
+	if want := []string{"/observed"}; !reflect.DeepEqual(observed.Daemon.ObservePaths, want) {
+		t.Errorf("observe_paths after resolving = %v, want %v untouched", observed.Daemon.ObservePaths, want)
 	}
 }
 

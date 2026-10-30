@@ -524,12 +524,21 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 		}
 	}
 	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env)
+	// This resolver builds the launch hints for every API resume, so the startup
+	// prompt must be delivered through them: without a payload and the delivered
+	// marker, the SessionStart hook is the only carrier and the provider
+	// truncates a large prompt (ga-4k4zfk).
+	hints, err := s.state.ApplyStartupPrompt(info, resolved, transport,
+		sessionResumeHints(resolved, firstNonEmptyString(workDir, info.WorkDir), sessionEnv, mcpServers, sessionResumeInteractive(metadata)))
+	if err != nil {
+		return nil, err
+	}
 	runtimeCfg, err := worker.NormalizeResolvedRuntime(worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    firstNonEmptyString(info.WorkDir, workDir),
 		Provider:   firstNonEmptyString(info.Provider, resolved.Name),
 		SessionEnv: sessionEnv,
-		Hints:      sessionResumeHints(resolved, firstNonEmptyString(workDir, info.WorkDir), sessionEnv, mcpServers, sessionResumeInteractive(metadata)),
+		Hints:      hints,
 		Resume: session.ProviderResume{
 			ResumeFlag:    firstNonEmptyString(resolved.ResumeFlag, info.ResumeFlag),
 			ResumeStyle:   firstNonEmptyString(resolved.ResumeStyle, info.ResumeStyle),

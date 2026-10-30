@@ -36,7 +36,7 @@ type closeCase struct {
 func newCloseCase(t *testing.T, liveness rowLiveness, desired desire, meta ...string) *closeCase {
 	t.Helper()
 	store := beads.NewAtomicCloseMemStore()
-	if err := beads.StampOpenedStore(store, "MemStore", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(store, "MemStore", gate.Require, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	base := []string{"template", "worker", "session_name", "s-close", "generation", "3", "instance_token", "tok-3", "pool_managed", "true", "pool_slot", "1"}

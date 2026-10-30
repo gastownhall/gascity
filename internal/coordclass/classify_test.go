@@ -79,7 +79,33 @@ func TestClassifyGoldenTable(t *testing.T) {
 		// is why sessions ride the federating Router, not a query-shape adapter.
 		{"per-entity session label alone is NOT a session class signal", beads.Bead{Type: "task", Labels: []string{"session:gc-7"}}, ClassWork},
 
+		// A startup-health episode is the session class's quarantine state
+		// (session.SaveStartupHealthEpisode writes it through the sessions
+		// store). It carries no session label, so before its own arm it fell
+		// to the work default: on maintainer-city 35 episodes sat in the
+		// binding answering to work, and a migration left every city's
+		// episodes in the work store, silently resetting quarantine at cutover.
+		{"startup-health episode", beads.Bead{Type: "startup-health-episode", Metadata: map[string]string{"session_name": "worker-1"}}, ClassSessions},
+		{"startup-health episode with stray root_bead_id stays sessions", beads.Bead{Type: "startup-health-episode", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gc-9"}}, ClassSessions},
+		// A durable session wait written without gc:wait (session.IsWaitBead):
+		// a wait-typed bead whose session:<session_id> label names its own
+		// session_id. The per-entity label on any OTHER shape is still not a
+		// class signal (row above, and the two rows below).
+		{"typed wait by its own session label", beads.Bead{Type: "gate", Labels: []string{"session:s-1"}, Metadata: map[string]string{"session_id": "s-1"}}, ClassSessions},
+		{"legacy-typed wait by its own session label", beads.Bead{Type: "wait", Labels: []string{"session:s-1"}, Metadata: map[string]string{"session_id": "s-1"}}, ClassSessions},
+		{"gate naming another session stays work", beads.Bead{Type: "gate", Labels: []string{"session:s-2"}, Metadata: map[string]string{"session_id": "s-1"}}, ClassWork},
+		{"graph gate step with a session label stays graph", beads.Bead{Type: "gate", Labels: []string{"session:s-1"}, Metadata: map[string]string{"session_id": "s-1", beadmeta.RootBeadIDMetadataKey: "gc-9"}}, ClassGraph},
+
 		// ---- ORDERS (order-dispatch tracking) ----
+		// An order's run label alone (no order-tracking, no graph marker) is
+		// WORK: agents file real bugs, handoffs and tasks that inherit it from
+		// the patrol that found them (150 such beads in production single-store
+		// cities, e.g. or-l50geh, pl-vm0tw, tr-b6glw). Run records are matched
+		// by order-tracking; order-poured roots are graph (rows below).
+		{"order run label alone stays work", beads.Bead{Type: "task", Labels: []string{"order-run:rig/agent"}}, ClassWork},
+		{"patrol-filed bug with an inherited order-run label stays work", beads.Bead{Type: "bug", Labels: []string{"order-run:technical-health-patrol", "technical-health"}}, ClassWork},
+		{"order-poured workflow root stays graph", beads.Bead{Type: "molecule", Labels: []string{"order-run:rig/agent"}, Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}}, ClassGraph},
+		{"order-poured wisp root stays graph", beads.Bead{Type: "molecule", Labels: []string{"order-run:rig/agent"}, Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}}, ClassGraph},
 		{"order-tracking bead", beads.Bead{Type: "task", Labels: []string{"order-run:rig/agent", "order-tracking"}, NoHistory: true}, ClassOrders},
 
 		// ---- NUDGES (nudge-queue durability mirror + the durable queue itself) ----
@@ -138,6 +164,54 @@ func TestClassifyGoldenTable(t *testing.T) {
 				t.Errorf("Classify(%s) = %s, want %s", tc.name, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestClassifyAtLegacyDiffersOnlyInTheOwnedSessionArms pins the generation
+// boundary. A copy manifest written by an earlier build is re-read with
+// GenerationLegacy, so that generation must be today's classifier minus
+// exactly the two GenerationOwnedSessions arms: one more difference, and an
+// upgrade would strand (or hide) rows the earlier copy classified otherwise.
+func TestClassifyAtLegacyDiffersOnlyInTheOwnedSessionArms(t *testing.T) {
+	ownSessionWait := beads.Bead{Type: "gate", Labels: []string{"session:s-1"}, Metadata: map[string]string{"session_id": "s-1"}}
+	cases := []struct {
+		name   string
+		bead   beads.Bead
+		legacy Class
+	}{
+		// The two arms GenerationOwnedSessions added.
+		{"startup-health episode", beads.Bead{Type: "startup-health-episode", Metadata: map[string]string{"session_name": "worker-1"}}, ClassWork},
+		{"startup-health episode with stray root_bead_id", beads.Bead{Type: "startup-health-episode", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gc-9"}}, ClassGraph},
+		{"typed wait by its own session label", ownSessionWait, ClassWork},
+		{"legacy-typed wait by its own session label", beads.Bead{Type: "wait", Labels: []string{"session:s-1"}, Metadata: map[string]string{"session_id": "s-1"}}, ClassWork},
+		// Every other arm answers the same in both generations.
+		{"plain task", beads.Bead{Type: "task"}, ClassWork},
+		{"session bead", beads.Bead{Type: "session"}, ClassSessions},
+		{"wait with gc:wait", beads.Bead{Type: "gate", Labels: []string{"gc:wait", "session:s-1"}, Metadata: map[string]string{"session_id": "s-1"}}, ClassSessions},
+		{"episode carrying gc:wait", beads.Bead{Type: "startup-health-episode", Labels: []string{"gc:wait"}}, ClassSessions},
+		{"graph gate step with a session label", beads.Bead{Type: "gate", Labels: []string{"session:s-1"}, Metadata: map[string]string{"session_id": "s-1", beadmeta.RootBeadIDMetadataKey: "gc-9"}}, ClassGraph},
+		{"gate naming another session", beads.Bead{Type: "gate", Labels: []string{"session:s-2"}, Metadata: map[string]string{"session_id": "s-1"}}, ClassWork},
+		{"mail message", beads.Bead{Type: "message"}, ClassMessaging},
+		{"op row", beads.Bead{Type: "op", Labels: []string{"gc:op"}}, ClassSessions},
+		{"nudge queue bead", beads.Bead{Type: "chore", Labels: []string{"gc:nudge-queue"}}, ClassNudges},
+		{"order-tracking bead", beads.Bead{Type: "task", Labels: []string{"order-tracking"}}, ClassOrders},
+		{"wisp", beads.Bead{Type: "task", Labels: []string{"gc:wisp"}}, ClassGraph},
+		{"convergence root", beads.Bead{Type: "convergence"}, ClassGraph},
+		{"synthetic convoy", beads.Bead{Type: "convoy", Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"}}, ClassWork},
+		{"order run label alone", beads.Bead{Type: "task", Labels: []string{"order-run:rig/agent"}}, ClassWork},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ClassifyAt(tc.bead, GenerationLegacy); got != tc.legacy {
+				t.Errorf("ClassifyAt(%s, legacy) = %s, want %s", tc.name, got, tc.legacy)
+			}
+			if got, want := ClassifyAt(tc.bead, CurrentGeneration), Classify(tc.bead); got != want {
+				t.Errorf("ClassifyAt(%s, current) = %s, want Classify's %s", tc.name, got, want)
+			}
+		})
+	}
+	if got := ClassifyAt(ownSessionWait, CurrentGeneration+1); got != ClassSessions {
+		t.Errorf("a generation newer than this build's classified an own-session wait as %s, want the current generation's sessions", got)
 	}
 }
 

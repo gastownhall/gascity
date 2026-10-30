@@ -34,7 +34,7 @@ type PromptContext struct {
 	WorkDir                 string
 	IssuePrefix             string
 	Branch                  string
-	DefaultBranch           string // e.g. "main" — from git symbolic-ref origin/HEAD
+	DefaultBranch           string // e.g. "main" — from git symbolic-ref origin/HEAD; empty when the build's probe did not complete
 	WorkQuery               string // command to find available work (from Agent.EffectiveWorkQuery)
 	AssignedInProgressQuery string // command to find assigned in-progress work (from Agent.EffectiveAssignedInProgressQuery)
 	AssignedReadyQuery      string // command to find pre-assigned ready work (from Agent.EffectiveAssignedReadyQuery)
@@ -87,10 +87,18 @@ func resolveConfigDir(cityPath, sourceDir string) string {
 // SHA-256 of the rendered text (after text/template substitution); two
 // runs with the same Version but diverging SHAs reveal an unbumped
 // template edit.
+//
+// Err is non-nil when the declared template could not be used as written:
+// it could not be read (Text is empty) or it failed to parse or execute
+// (Text is the raw body). The stderr warning and fallback Text are produced
+// either way; Err only lets strict callers tell a fallback from a clean
+// render. Warnings that leave the main render intact (shared fragment load
+// failures, missing or failing inject fragments) do not set Err.
 type PromptRenderResult struct {
 	Text    string
 	Version string
 	SHA     string
+	Err     error
 }
 
 // renderPrompt reads a prompt template file and renders it with the given
@@ -103,7 +111,8 @@ type PromptRenderResult struct {
 // the output after rendering. Returns empty string if templatePath is empty.
 // A template path that cannot be read also returns empty, after a warning to
 // stderr. On parse or execute error, logs a warning to stderr and returns the
-// raw text (graceful fallback).
+// raw text (graceful fallback). Callers that must tell a fallback from a clean
+// render use renderPromptWithMeta(...).Err.
 func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx PromptContext, sessionTemplate string, stderr io.Writer, packDirs []string, injectFragments []string, store beads.Store) string {
 	return renderPromptWithMeta(fs, cityPath, cityName, templatePath, ctx, sessionTemplate, stderr, packDirs, injectFragments, store).Text
 }
@@ -127,7 +136,7 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 		} else {
 			fmt.Fprintf(stderr, "gc: prompt_template %q: %v\n", templatePath, err) //nolint:errcheck // best-effort stderr
 		}
-		return PromptRenderResult{}
+		return PromptRenderResult{Err: err}
 	}
 	raw := string(data)
 	fm, body := promptmeta.Parse(raw)
@@ -203,6 +212,7 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 			Text:    body,
 			Version: fm.Version,
 			SHA:     promptmeta.SHA(body),
+			Err:     err,
 		}
 	}
 
@@ -214,6 +224,7 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 			Text:    body,
 			Version: fm.Version,
 			SHA:     promptmeta.SHA(body),
+			Err:     err,
 		}
 	}
 
@@ -399,17 +410,24 @@ func defaultBranchFor(dir string) string {
 // rendering so polecats and the refinery target the rig's true mainline
 // even when origin/HEAD is unset on the local clone.
 func defaultBranchForRig(rigName string, rigs []config.Rig, dir string) string {
-	if rigName != "" {
-		for i := range rigs {
-			if rigs[i].Name == rigName {
-				if branch := rigs[i].EffectiveDefaultBranch(); branch != "" {
-					return branch
-				}
-				break
-			}
-		}
+	if branch := recordedDefaultBranch(rigName, rigs); branch != "" {
+		return branch
 	}
 	return defaultBranchFor(dir)
+}
+
+// recordedDefaultBranch returns the named rig's recorded DefaultBranch, or ""
+// when the rig is unnamed, unknown, or records none.
+func recordedDefaultBranch(rigName string, rigs []config.Rig) string {
+	if rigName == "" {
+		return ""
+	}
+	for i := range rigs {
+		if rigs[i].Name == rigName {
+			return rigs[i].EffectiveDefaultBranch()
+		}
+	}
+	return ""
 }
 
 // promptFuncMap returns template functions available in prompt templates.

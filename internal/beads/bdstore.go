@@ -28,6 +28,8 @@ const (
 
 // CommandRunner executes a command in the given directory and returns stdout bytes.
 // The dir argument sets the working directory; name and args specify the command.
+// A runner must be safe for concurrent use: a two-tier List calls it from two
+// goroutines at once (see listTierPair).
 type CommandRunner func(dir, name string, args ...string) ([]byte, error)
 
 var (
@@ -3128,13 +3130,35 @@ func bdServerQueryForAssignees(query ListQuery) (ListQuery, bool) {
 func (s *BdStore) listWispsTier(query ListQuery) ([]Bead, error) {
 	listQ := query
 	listQ.TierMode = TierWisps
-	listResult, listErr := s.listViaBDList(listQ)
-
 	ephemeralQ := query
 	ephemeralQ.TierMode = TierWisps
-	ephemeralResult, ephemeralErr := s.listEphemeral(ephemeralQ)
+	pair := s.listTierPair(listQ, ephemeralQ)
+	return mergeListTierResults(query, "bd list wisps tier", pair.list, pair.listErr, pair.ephemeral, pair.ephemeralErr)
+}
 
-	return mergeListTierResults(query, "bd list wisps tier", listResult, listErr, ephemeralResult, ephemeralErr)
+// tierPairResult is what listTierPair read from each tier.
+type tierPairResult struct {
+	list         []Bead
+	listErr      error
+	ephemeral    []Bead
+	ephemeralErr error
+}
+
+// listTierPair reads one two-tier List's two halves at once: listQ through
+// bd list and ephemeralQ through bd query. They are independent reads, each its
+// own bd subprocess, so read one after the other a two-tier List costs every
+// caller two bd round trips in series instead of one (ga-3js1ayv). Both halves
+// call the store's CommandRunner, so the two reads can run it concurrently.
+func (s *BdStore) listTierPair(listQ, ephemeralQ ListQuery) tierPairResult {
+	var r tierPairResult
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.ephemeral, r.ephemeralErr = s.listEphemeral(ephemeralQ)
+	}()
+	r.list, r.listErr = s.listViaBDList(listQ)
+	<-done
+	return r
 }
 
 // listEphemeral reads only ephemeral rows using `bd query "ephemeral=true AND
@@ -3343,13 +3367,10 @@ func isBareBdQueryValue(value string) bool {
 func (s *BdStore) listBothTiers(query ListQuery) ([]Bead, error) {
 	listQ := query
 	listQ.TierMode = TierBoth
-	listResult, listErr := s.listViaBDList(listQ)
-
 	ephemeralQ := query
 	ephemeralQ.TierMode = TierWisps
-	ephemeralResult, ephemeralErr := s.listEphemeral(ephemeralQ)
-
-	return mergeListTierResults(query, "bd list both tiers", listResult, listErr, ephemeralResult, ephemeralErr)
+	pair := s.listTierPair(listQ, ephemeralQ)
+	return mergeListTierResults(query, "bd list both tiers", pair.list, pair.listErr, pair.ephemeral, pair.ephemeralErr)
 }
 
 func mergeListTierResults(query ListQuery, op string, primary []Bead, primaryErr error, ephemeral []Bead, ephemeralErr error) ([]Bead, error) {
@@ -3721,10 +3742,20 @@ func (s *BdStore) DepList(id, direction string) ([]Dep, error) {
 // DepListBatch fetches "down" deps for multiple issue IDs in a single bd
 // subprocess call. Returns a map from issue ID to its deps.
 //
-// One id is read with DepList and returned as that anchor's entry: a one-id
-// `bd dep list <id> --json` prints the depended-on beads' rows, not the
-// dependency records a multi-id call prints, so parsing it as records would
-// key every edge under "" and report the anchor as edge-free.
+// The answer is bd's raw dependency records, for one anchor as for many, so an
+// edge whose target has no row in this database — a dangling edge, or one to
+// another store — is in it. bd picks its output shape by how many ids it is
+// handed: several print the records, but one prints the depended-on beads'
+// rows, a join that drops exactly those edges. A lone anchor is therefore
+// named twice, which bd answers with the records shape (bd itself suggests
+// `bd dep list <id> <id>` for the raw edges); a record that a repeated anchor
+// yields twice is kept once. An anchor's edges never depend on how many
+// anchors were asked about.
+//
+// Output that is not dependency records fails the read. bd before v1.3
+// answers a multi-id call with the rows instead when its batched read fails or
+// an anchor does not resolve; read as records those rows carry no anchor, and
+// filing their edges under "" would report every anchor as edge-free.
 //
 // A backend that does not implement the read at all — the bd/Postgres backend
 // answers `operation "IssueRelations" not supported by the postgres backend`
@@ -3738,14 +3769,11 @@ func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
+	anchors := ids
 	if len(ids) == 1 {
-		deps, err := s.DepList(ids[0], "down")
-		if err != nil {
-			return nil, err
-		}
-		return map[string][]Dep{ids[0]: deps}, nil
+		anchors = []string{ids[0], ids[0]}
 	}
-	args := append([]string{"dep", "list"}, ids...)
+	args := append([]string{"dep", "list"}, anchors...)
 	args = append(args, "--json")
 	out, err := s.runBDTransientRead(args...)
 	if err != nil {
@@ -3772,16 +3800,21 @@ func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 		return nil, fmt.Errorf("batch dep list: parsing JSON: %w", err)
 	}
 	result := make(map[string][]Dep, len(ids))
+	seen := make(map[Dep]bool, len(records))
 	for _, r := range records {
+		if r.IssueID == "" || r.DependsOnID == "" {
+			return nil, errors.New("batch dep list: bd printed a row that is not a dependency record (no issue_id or depends_on_id)")
+		}
 		depType := r.Type
 		if depType == "" {
 			depType = "blocks"
 		}
-		result[r.IssueID] = append(result[r.IssueID], Dep{
-			IssueID:     r.IssueID,
-			DependsOnID: r.DependsOnID,
-			Type:        depType,
-		})
+		dep := Dep{IssueID: r.IssueID, DependsOnID: r.DependsOnID, Type: depType}
+		if seen[dep] {
+			continue
+		}
+		seen[dep] = true
+		result[r.IssueID] = append(result[r.IssueID], dep)
 	}
 	return result, nil
 }

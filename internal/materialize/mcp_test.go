@@ -955,3 +955,45 @@ func mustFindAgent(t *testing.T, cfg *config.City, qualifiedName string) *config
 	t.Fatalf("missing agent %q in %#v", qualifiedName, cfg.Agents)
 	return nil
 }
+
+func TestMCPCatalogFilterNarrowsEveryIndex(t *testing.T) {
+	catalog, err := MergeMCPDirs([]MCPDirSource{
+		{Dir: writeFilterTestMCPDir(t, map[string]string{"notes": `command = "uvx"`, "search": `url = "https://example.test/mcp"`}), Label: "city", Origin: "city"},
+		{Dir: writeFilterTestMCPDir(t, map[string]string{"search": `url = "https://example.test/override"`}), Label: "import", Origin: "import:search"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("MergeMCPDirs: %v", err)
+	}
+	kept := catalog.Filter(func(server MCPServer) bool { return server.Transport == MCPTransportStdio })
+	if len(kept.Servers) != 1 || kept.Servers[0].Name != "notes" {
+		t.Fatalf("Servers = %+v, want notes only", kept.Servers)
+	}
+	if _, ok := kept.ByName["search"]; ok || len(kept.ByName) != 1 {
+		t.Fatalf("ByName = %+v, want notes only", kept.ByName)
+	}
+	if len(kept.ByLayer["import"]) != 0 || len(kept.ByLayer["city"]) != 1 {
+		t.Fatalf("ByLayer = %+v, want city:notes only", kept.ByLayer)
+	}
+	for _, name := range kept.RawOrder {
+		if name != "notes" {
+			t.Fatalf("RawOrder = %v, want notes only", kept.RawOrder)
+		}
+	}
+	if len(kept.Shadows) != len(catalog.Shadows) || len(kept.Shadows) != 1 {
+		t.Fatalf("Shadows = %+v, want the precedence record kept", kept.Shadows)
+	}
+	if len(catalog.Servers) != 2 {
+		t.Fatalf("Filter mutated the source catalog: %+v", catalog.Servers)
+	}
+}
+
+func writeFilterTestMCPDir(t *testing.T, servers map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, body := range servers {
+		if err := os.WriteFile(filepath.Join(dir, name+".toml"), []byte("name = \""+name+"\"\n"+body+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}

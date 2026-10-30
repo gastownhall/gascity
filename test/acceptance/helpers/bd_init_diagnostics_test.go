@@ -312,7 +312,14 @@ func TestBDInitWrapperFallsBackToTheWorkingDirectoryScope(t *testing.T) {
 	if len(sections) == 0 {
 		t.Fatalf("no diagnostics without BEADS_DIR:\n%s", res.stderr)
 	}
-	if want := filepath.Join(work, ".beads", "dolt", "server.log"); sections[0].Path != want {
+	// The wrapper's sh derives $PWD from getcwd, which returns the physical
+	// path. Resolve the expectation (never the input) so a symlinked temp
+	// root, such as macOS /var -> /private/var, names the same file.
+	physicalWork, err := filepath.EvalSymlinks(work)
+	if err != nil {
+		t.Fatalf("resolving %s: %v", work, err)
+	}
+	if want := filepath.Join(physicalWork, ".beads", "dolt", "server.log"); sections[0].Path != want {
 		t.Errorf("path = %q, want %q", sections[0].Path, want)
 	}
 }

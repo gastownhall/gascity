@@ -728,10 +728,11 @@ func TestRBEWorkerFetchRefusesSymlinks(t *testing.T) {
 // rbeWorkerFetchJobs: each workflow that runs rbe-worker code, and the jobs
 // that fetch it (one fetch step each).
 var rbeWorkerFetchJobs = map[string][]string{
-	rbeWorkerWorkflow:      {"await-drift", "report-drift", "worker"},
-	rbeForkPoolWorkflow:    {"await-drift", "report-drift", "worker"},
-	rbeWorkerEnvCanary:     {"measure", "report"},
-	bazelMultiLaneWorkflow: {"worker-host"},
+	rbeWorkerWorkflow:       {"await-drift", "report-drift", "worker"},
+	rbeForkPoolWorkflow:     {"await-drift", "report-drift", "worker"},
+	rbeWorkerLegacyWorkflow: {"worker"},
+	rbeWorkerEnvCanary:      {"measure", "report"},
+	bazelMultiLaneWorkflow:  {"worker-host"},
 }
 
 // TestRBEWorkerAlwaysPinned: the worker code is gastownhall/rbe-worker at

@@ -49,7 +49,12 @@ const ladderSeatName = "seat-a"
 // newLadderCity is a running, quiet pool seat at generation 7.
 func newLadderCity(t *testing.T) *ladderCity {
 	t.Helper()
-	sessions := beads.NewMemStore()
+	return newLadderCityOver(t, beads.NewMemStore())
+}
+
+// newLadderCityOver is newLadderCity with its session rows on sessions.
+func newLadderCityOver(t *testing.T, sessions *beads.MemStore) *ladderCity {
+	t.Helper()
 	stampedMemStore(t, sessions)
 	work := beads.NewMemStore()
 	m := map[string]string{
@@ -527,11 +532,15 @@ func TestWorkLadderPausesWhileTheProviderIsDegraded(t *testing.T) {
 
 // L7 (WL5). A held gate gets no nudge however long the seat is quiet: a
 // stop request at the row's generation, a kill in progress, an agent's
-// heartbeat hold, a wait hold, a start in flight.
+// heartbeat hold, a wait hold, a start in flight, an operator's content
+// hold on the conversation (SESSION-RUNTIME-027), an idle stop pending.
 func TestWorkLadderHoldsUnderAGate(t *testing.T) {
 	for name, meta := range map[string]func(now time.Time) map[string]string{
 		"draining": func(now time.Time) map[string]string {
 			return map[string]string{session.DrainIntentReasonKey: drainOrphaned, session.DrainIntentAtKey: now.Format(time.RFC3339), session.DrainIntentIncarnationKey: "7"}
+		},
+		"content held": func(now time.Time) map[string]string {
+			return map[string]string{session.ContentHoldKey: session.ContentHold{By: "operator", At: now}.String()}
 		},
 		"kill pending": func(now time.Time) map[string]string {
 			return map[string]string{"state": "asleep", "state_reason": session.KillPendingReason, "sleep_reason": "killed", "slept_at": now.Format(time.RFC3339)}
@@ -544,8 +553,9 @@ func TestWorkLadderHoldsUnderAGate(t *testing.T) {
 		"quarantined": func(now time.Time) map[string]string {
 			return map[string]string{"quarantined_until": now.Add(6 * time.Hour).Format(time.RFC3339)}
 		},
-		"starting":  func(time.Time) map[string]string { return map[string]string{"state": "creating"} },
-		"suspended": func(time.Time) map[string]string { return map[string]string{"sleep_intent": "user-hold"} },
+		"starting":          func(time.Time) map[string]string { return map[string]string{"state": "creating"} },
+		"suspended":         func(time.Time) map[string]string { return map[string]string{"sleep_intent": "user-hold"} },
+		"idle stop pending": func(time.Time) map[string]string { return map[string]string{"sleep_intent": "idle-stop-pending"} },
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := newLadderCity(t)
@@ -1350,8 +1360,9 @@ func TestWorkLadderRereadsTheHold(t *testing.T) {
 }
 
 // A seat stuck at a permission prompt refuses every nudge: it is retried no
-// more often than every 10 minutes, its count does not move, and one
-// nudge_refused alert is raised.
+// more often than every 10 minutes, its count does not move, and it is
+// alerted nudge_refused at the third refusal, then about hourly while the
+// refusals go on.
 func TestWorkLadderBacksOffARefusingSeat(t *testing.T) {
 	c := newLadderCity(t)
 	id := c.claim("waiting on a permission prompt")
@@ -1362,8 +1373,8 @@ func TestWorkLadderBacksOffARefusingSeat(t *testing.T) {
 	if calls > 6*6+2 {
 		t.Fatalf("%d delivery attempts in 6h", calls)
 	}
-	if got := escalations(c); fmt.Sprint(got) != fmt.Sprint([]string{workladder.AlertNudgeRefused}) {
-		t.Fatalf("escalations %v, want one nudge_refused", got)
+	if got, want := escalations(c), refusalAlertsUpTo(calls); len(want) < 4 || fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("escalations %v, want %d nudge_refused for %d refusals", got, len(want), calls)
 	}
 	if e := c.entry(id); e.Attempts != 0 || len(c.posted) != 0 {
 		t.Fatalf("entry %+v, recycles %+v: refusals moved it toward a recycle", e, c.posted)

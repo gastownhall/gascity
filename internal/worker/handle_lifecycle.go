@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // Start ensures the worker exists and its runtime is live.
@@ -113,6 +115,36 @@ func (h *SessionHandle) Reset(ctx context.Context) (err error) {
 	}
 	err = h.manager.RequestFreshRestart(id)
 	return err
+}
+
+// ResetFenced is Reset for a request made from inside the session: it records
+// the restart only while the session row still records the caller's
+// incarnation, instanceToken being the caller's GC_INSTANCE_TOKEN
+// (session.Manager.RequestFreshRestartFenced). casOnly reports whether the
+// city records only by compare-and-swap (a v2 city); nil allows the checked
+// write. instanceToken is never logged.
+func (h *SessionHandle) ResetFenced(ctx context.Context, instanceToken string, casOnly func() bool) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationReset)
+	defer func() { event.finish(err) }()
+
+	id := h.currentSessionID()
+	if id == "" {
+		err = fmt.Errorf("%w: reset requires an existing bead-backed session", ErrOperationUnsupported)
+		return err
+	}
+	err = h.manager.RequestFreshRestartFenced(id, instanceToken, casOnly)
+	return err
+}
+
+// CheckResetFenced reports ResetFenced's decision on a fresh read of the
+// session row, writing nothing (session.Manager.CheckFreshRestartFenced).
+// instanceToken is never logged.
+func (h *SessionHandle) CheckResetFenced(_ context.Context, instanceToken string, casOnly func() bool) error {
+	id := h.currentSessionID()
+	if id == "" {
+		return fmt.Errorf("%w: reset requires an existing bead-backed session", ErrOperationUnsupported)
+	}
+	return h.manager.CheckFreshRestartFenced(id, instanceToken, casOnly)
 }
 
 // Stop suspends the worker runtime while preserving conversation state.
@@ -383,37 +415,161 @@ func (h *SessionHandle) Message(ctx context.Context, by sessionpkg.Actor, req Me
 }
 
 // Interrupt soft-stops the in-flight worker turn: the one req.Turn names, or
-// with no Turn whatever runs.
-func (h *SessionHandle) Interrupt(ctx context.Context, req InterruptRequest) (err error) {
+// with no Turn whatever runs. It is InterruptAs with no actor.
+func (h *SessionHandle) Interrupt(ctx context.Context, req InterruptRequest) error {
+	_, err := h.interrupt(ctx, nil, req)
+	return err
+}
+
+// InterruptAs soft-stops the in-flight worker turn for by, as
+// InterruptRequest documents, and reports whether its OnFailure restart
+// replaced the runtime.
+func (h *SessionHandle) InterruptAs(ctx context.Context, by sessionpkg.Actor, req InterruptRequest) (InterruptResult, error) {
+	return h.interrupt(ctx, &by, req)
+}
+
+// interrupt is InterruptAs for by, nil for no actor.
+func (h *SessionHandle) interrupt(ctx context.Context, by *sessionpkg.Actor, req InterruptRequest) (result InterruptResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationInterrupt)
 	defer func() { event.finish(err) }()
 
+	if err = req.validate(by); err != nil {
+		return InterruptResult{}, err
+	}
 	if req.Turn != "" {
-		if !req.Fence.IsZero() {
-			if err = req.Fence.Validate(); err != nil {
-				return err
-			}
-		}
-		err = h.interruptTurn(ctx, req.Turn, req.Fence)
-		return err
+		return h.interruptTurn(ctx, by, req)
 	}
 	id := h.currentSessionID()
-	if !req.Fence.IsZero() {
-		if err = req.Fence.Validate(); err != nil {
-			return err
-		}
-		if id == "" {
-			err = h.noRowFenceMiss()
-			return err
-		}
-		err = h.manager.StopTurnFenced(ctx, id, req.Fence)
-		return err
-	}
 	if id == "" {
+		if !req.Fence.IsZero() {
+			err = h.noRowFenceMiss()
+		}
+		return InterruptResult{}, err
+	}
+	var unfenced bool
+	if req, unfenced, err = h.unfenceable(id, req); err != nil {
+		return InterruptResult{}, err
+	}
+	if unfenced {
+		ctx = runtime.WithInputFence(ctx, runtime.InputFence{})
+	}
+	opts, err := h.stopTurnOptions(ctx, by, id, req)
+	if err != nil {
+		return InterruptResult{}, err
+	}
+	result.Unfenced = unfenced
+	switch {
+	case opts.ForReplacement || opts.Restart != nil:
+		stopCtx := ctx
+		if !req.Fence.IsZero() {
+			stopCtx = runtime.WithInputFence(ctx, req.Fence)
+		}
+		var report sessionpkg.StopTurnReport
+		report, err = h.manager.StopTurnWith(stopCtx, id, opts)
+		result.Restarted = report.Restarted
+	case !req.Fence.IsZero():
+		err = h.manager.StopTurnFenced(ctx, id, req.Fence)
+	default:
+		if _, bounded := ctx.Deadline(); bounded {
+			// A caller with a deadline (the lane's effect budget) waits for
+			// the session mutation lock only until it.
+			err = h.manager.StopTurnIf(ctx, id, nil)
+		} else {
+			err = h.manager.StopTurn(id)
+		}
+	}
+	err = sessionStopResult(id, err)
+	return result, err
+}
+
+// sessionStopResult is err, from session id's session-scoped stop, in the
+// classes InterruptRequest.Turn documents for session scope. A stop that
+// failed before it sent anything for a cause it names no other sentinel for
+// (session.ErrStopNotSent) is runtime.ErrSessionNotFound when its row,
+// loaded under the session mutation lock, was gone, closed or not a session,
+// as a turn read has it (turnRowError), and ErrInterruptNotSent otherwise: a
+// row that would not load, or an actor refused a restart.
+func sessionStopResult(id string, err error) error {
+	switch {
+	case !errors.Is(err, sessionpkg.ErrStopNotSent):
+		return err
+	case TurnSessionGone(err):
+		return fmt.Errorf("interrupting session %s: %w: %w", id, runtime.ErrSessionNotFound, err)
+	}
+	return fmt.Errorf("interrupting session %s: %w: %w", id, ErrInterruptNotSent, err)
+}
+
+// unfenceable is req with its fence dropped, and true, when req allows it
+// (AllowUnfenced) and session id's runtime cannot fence the session; else
+// req as it is. A fencing that cannot be read is an error wrapping
+// ErrInterruptNotSent.
+func (h *SessionHandle) unfenceable(id string, req InterruptRequest) (InterruptRequest, bool, error) {
+	if req.Fence.IsZero() || !req.AllowUnfenced {
+		return req, false, nil
+	}
+	fencing, err := h.manager.InputFencing(id)
+	if err != nil {
+		return req, false, fmt.Errorf("interrupting session %s: reading its input fencing: %w: %w", id, ErrInterruptNotSent, err)
+	}
+	if fencing != runtime.InputFencingNone {
+		return req, false, nil
+	}
+	req.Fence = runtime.InputFence{}
+	return req, true, nil
+}
+
+// stopTurnOptions are the session stop's options for req's policy: a
+// replacement, refused where the session's turn is not replaced by an
+// interrupt (replacementRefusal), and a restart on failure
+// (restartOnFailure). A plain interrupt has none. What it cannot read is an
+// error wrapping ErrInterruptNotSent.
+func (h *SessionHandle) stopTurnOptions(ctx context.Context, by *sessionpkg.Actor, id string, req InterruptRequest) (sessionpkg.StopTurnOptions, error) {
+	var opts sessionpkg.StopTurnOptions
+	if req.ForReplacement {
+		plan, err := h.planTurnsWithin(ctx)
+		if err != nil {
+			return opts, fmt.Errorf("interrupting session %s for a replacement: %w: %w", id, ErrInterruptNotSent, err)
+		}
+		if err := replacementRefusal(plan.caps.Replace, plan.info.SessionName); err != nil {
+			return opts, err
+		}
+		opts.ForReplacement = true
+	}
+	restart, err := h.restartOnFailure(by, id, req.OnFailure)
+	if err != nil {
+		return opts, err
+	}
+	opts.Restart = restart
+	return opts, nil
+}
+
+// restartOnFailure is the session stop's or turn interrupt's restart for an
+// interrupt whose policy is onFailure: for InterruptOnFailureRestart, one by
+// by with session id's start command and hints; for any other policy, none
+// (nil). A start command it cannot read is an error wrapping
+// ErrInterruptNotSent.
+func (h *SessionHandle) restartOnFailure(by *sessionpkg.Actor, id string, onFailure InterruptOnFailure) (*sessionpkg.StopTurnRestart, error) {
+	if onFailure != InterruptOnFailureRestart {
+		return nil, nil
+	}
+	resume, err := h.startCommand(id)
+	if err != nil {
+		return nil, fmt.Errorf("interrupting session %s, restarting it on failure: %w: %w", id, ErrInterruptNotSent, err)
+	}
+	return &sessionpkg.StopTurnRestart{By: *by, ResumeCommand: resume, Hints: h.runtimeHints()}, nil
+}
+
+// replacementRefusal is why an interrupt for a replacement
+// (InterruptRequest.ForReplacement) cannot run on a session whose turn is
+// replaced as replace says, or nil: only an interrupt replaces it there
+// (interrupt or interrupt_reset). A restart replaces it otherwise, and none
+// cannot be replaced at all.
+func replacementRefusal(replace TurnReplace, session string) error {
+	switch replace {
+	case TurnReplaceInterrupt, TurnReplaceInterruptReset:
 		return nil
 	}
-	err = h.manager.StopTurn(id)
-	return err
+	return fmt.Errorf("interrupting %s for a replacement, which it takes as %q: %w", session, replace, sessionpkg.ErrTurnInterruptUnsupported)
 }
 
 // Nudge sends a best-effort redirect message to the worker.
@@ -618,20 +774,7 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if firstProviderSessionStart(info.State, pr.Metadata) &&
 		h.session.Resume.SessionIDFlag != "" &&
 		strings.TrimSpace(info.SessionKey) != "" {
-		command := strings.TrimSpace(info.Command)
-		if command == "" {
-			command = strings.TrimSpace(h.session.Command)
-		}
-		if command == "" {
-			command = strings.TrimSpace(info.Provider)
-		}
-		if command == "" {
-			command = strings.TrimSpace(h.session.Provider)
-		}
-		if command == "" {
-			return "", fmt.Errorf("%w: command is required for first start", ErrHandleConfig)
-		}
-		return command + " " + h.session.Resume.SessionIDFlag + " " + info.SessionKey, nil
+		return startCommandWithSessionID(info, h.session)
 	}
 	resumeInfo := info
 	if command := strings.TrimSpace(h.session.Command); command != "" {
@@ -649,7 +792,36 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if resumeCommand := strings.TrimSpace(h.session.Resume.ResumeCommand); resumeCommand != "" {
 		resumeInfo.ResumeCommand = resumeCommand
 	}
+	isClaude := strings.Contains(strings.ToLower(strings.TrimSpace(resumeInfo.Provider)), "claude")
+	probePaths := h.searchPaths
+	if len(probePaths) == 0 || !isClaude {
+		probePaths = DefaultSearchPaths()
+	}
+	if dir := strings.TrimSpace(h.session.Env["CLAUDE_CONFIG_DIR"]); isClaude && filepath.IsAbs(dir) {
+		probePaths = MergeSearchPaths(append(append([]string(nil), probePaths...), filepath.Join(dir, "projects")))
+	}
+	present, probeable := workertranscript.HasKeyedTranscript(probePaths, resumeInfo.Provider, resumeInfo.WorkDir, resumeInfo.SessionKey)
+	if probeable && !present && h.session.Resume.SessionIDFlag != "" {
+		return startCommandWithSessionID(resumeInfo, h.session)
+	}
 	return sessionpkg.BuildResumeCommand(resumeInfo), nil
+}
+
+func startCommandWithSessionID(info sessionpkg.Info, spec SessionSpec) (string, error) {
+	command := strings.TrimSpace(info.Command)
+	if command == "" {
+		command = strings.TrimSpace(spec.Command)
+	}
+	if command == "" {
+		command = strings.TrimSpace(info.Provider)
+	}
+	if command == "" {
+		command = strings.TrimSpace(spec.Provider)
+	}
+	if command == "" {
+		return "", fmt.Errorf("%w: command is required to start session", ErrHandleConfig)
+	}
+	return command + " " + spec.Resume.SessionIDFlag + " " + info.SessionKey, nil
 }
 
 func firstProviderSessionStart(state sessionpkg.State, metadata map[string]string) bool {

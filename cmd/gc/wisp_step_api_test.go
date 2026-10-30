@@ -548,6 +548,26 @@ func TestWispStepLookupIsBoundedWhileItsClientResolves(t *testing.T) {
 	}
 }
 
+// TestWispStepLookupTakesAnAnswerInHandOverAnExpiredBound pins that a caller
+// taking the answer after the bound has passed still gets the controller's
+// answer when it has already arrived: a hook that reads its SessionStart mail
+// before taking the step answer can find both ready, and a fallback there costs
+// an in-process read the controller already saved it.
+func TestWispStepLookupTakesAnAnswerInHandOverAnExpiredBound(t *testing.T) {
+	step := &api.ActiveWorkStep{ID: "gc-step", Title: "inspect the queue"}
+	for i := 0; i < 200; i++ {
+		answer := make(chan wispStepAnswer, 1)
+		answer <- wispStepAnswer{answered: true, step: step, route: "api"}
+		// Timer channels are synchronous: a zero-duration timer's channel is
+		// ready to receive from as soon as it is made.
+		lookup := &wispStepLookup{answer: answer, expired: time.NewTimer(0), cancel: func() {}}
+		got := lookup.take()
+		if !got.answered || got.route != "api" {
+			t.Fatalf("take %d = %+v, want the controller's answer already in hand over the expired bound", i, got)
+		}
+	}
+}
+
 // TestWispStepLookupNeedsAnIdentity pins that a hook with no identity asks
 // nothing: there is no reminder to look up for nobody.
 func TestWispStepLookupNeedsAnIdentity(t *testing.T) {
