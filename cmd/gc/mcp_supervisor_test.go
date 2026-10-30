@@ -124,6 +124,38 @@ command = "uvx"
 	}
 }
 
+// An agent-local mcp/ catalog conflicts with the implicit agent gc adds for
+// the same provider at the city root; the error names the directory and the
+// implicit agent, not only the two projection hashes.
+func TestBuildStage1MCPTargetsNamesAgentLocalCauseAgainstImplicitAgent(t *testing.T) {
+	cityPath := t.TempDir()
+	agentLocal := filepath.Join(cityPath, "agents", "mayor", "mcp", "notes.toml")
+	writeMCPSource(t, agentLocal, `
+name = "notes"
+command = "uvx"
+`)
+
+	implicit := config.Agent{Name: "claude", Provider: "claude", Implicit: true}
+	cfg := &config.City{
+		Session:   config.SessionConfig{Provider: "tmux"},
+		Providers: map[string]config.ProviderSpec{"claude": {Command: "echo", PromptMode: "none"}},
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Provider: "claude", MCPDir: filepath.Dir(agentLocal)},
+			implicit,
+		},
+	}
+
+	_, err := buildStage1MCPTargets(cityPath, cfg, stubLookPath, io.Discard)
+	if err == nil {
+		t.Fatal("expected MCP target conflict, got nil")
+	}
+	for _, want := range []string{"MCP target conflict at", filepath.Dir(agentLocal), mcpAgentLabel(&implicit)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want it to contain %q", err, want)
+		}
+	}
+}
+
 func TestRunStage1MCPProjectionPropagatesManagedDirReadErrors(t *testing.T) {
 	// Permission / corruption errors reading .gc/mcp-managed/ must
 	// surface rather than be silently treated as "nothing to do" —
