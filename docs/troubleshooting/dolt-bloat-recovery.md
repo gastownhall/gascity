@@ -62,7 +62,7 @@ cp -a .dolt .dolt.bak-$(date +%Y%m%d-%H%M%S)
 
 # 3. Run a full GC with archives disabled. This is the step that actually
 #    reclaims space. On a 120 GB store expect this to take tens of minutes.
-dolt gc --archive-level=0
+dolt gc --full --archive-level=0
 
 # 4. Restart the city and verify.
 cd <cityPath>
