@@ -11625,6 +11625,36 @@ esac
 	}
 }
 
+// TestGateSweepChecksTimerAndGhGatesInEveryRigStore verifies that the
+// sweep reaches each configured rig's bead store, not just the city store:
+// a timer or gh gate stored in a rig must be evaluated too.
+func TestGateSweepChecksTimerAndGhGatesInEveryRigStore(t *testing.T) {
+	binDir, bdLog, env := gateSweepEnv(t)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s %s\n' "$GC_FAKE_SCOPE" "$*" >> "$BD_LOG"
+exit 0
+`)
+	env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api","hq":false},{"name":"web","hq":false}]}`
+
+	runScript(t, coreScriptPath("gate-sweep.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	for _, scope := range []string{"city", "rig:api", "rig:web"} {
+		for _, check := range []string{
+			"gate check --type=timer --escalate",
+			"gate check --type=gh --escalate",
+		} {
+			if want := scope + " " + check; !strings.Contains(s, want) {
+				t.Errorf("missing %q in bd log:\n%s", want, s)
+			}
+		}
+	}
+}
+
 // hermeticGitEnv builds a git invocation env that strips any pre-existing
 // GIT_* control variables from the parent environment before applying the
 // overrides — same approach as mergeTestEnv. This avoids duplicate keys
