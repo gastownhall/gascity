@@ -1,9 +1,11 @@
 package ssh
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -80,7 +82,7 @@ func TestProvider_StartLaunchesTmuxSession(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	got := firstCall(f, isTmux("new-session"))
-	want := []string{"tmux", "new-session", "-d", "-s", "s", "-c", "/w", "-e", "GC_AGENT=1", "-e", "GC_RIG=2", "agent --serve"}
+	want := []string{"tmux", "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "s", "-c", "/w", "-e", "GC_AGENT=1", "-e", "GC_RIG=2", "agent --serve"}
 	if !slices.Equal(got, want) {
 		t.Errorf("new-session argv =\n  %v\nwant\n  %v", got, want)
 	}
@@ -281,7 +283,7 @@ func TestProvider_RelaunchRespawnsAgentInWarmSession(t *testing.T) {
 	}
 	got := firstCall(f, isTmux("respawn-pane"))
 	// respawn-pane has no -e, so env is NOT re-applied (provision-half).
-	want := []string{"tmux", "respawn-pane", "-k", "-t", "s", "-c", "/w", "agent --resumed"}
+	want := []string{"tmux", "respawn-pane", "-k", "-t", "=s:@1.%1", "-c", "/w", "agent --resumed"}
 	if !slices.Equal(got, want) {
 		t.Errorf("respawn-pane argv =\n  %v\nwant\n  %v", got, want)
 	}
@@ -364,18 +366,20 @@ func TestProvider_IsRunning(t *testing.T) {
 }
 
 func TestProvider_NudgeDrivesNamedTmuxTarget(t *testing.T) {
-	// The carrier target is the session name (one host, many sessions).
+	// The carrier targets the session's agent pane, resolved once for the
+	// operation and fenced to the session (one host, many sessions).
 	f := &fakeRunner{}
 	p := providerWith(f)
 	if err := p.Nudge("sess-7", runtime.TextContent("hi")); err != nil {
 		t.Fatalf("Nudge: %v", err)
 	}
 	want := [][]string{
-		{"tmux", "send-keys", "-t", "sess-7", "-l", "hi"},
-		{"tmux", "send-keys", "-t", "sess-7", "Enter"},
+		{"tmux", "list-panes", "-s", "-t", "=sess-7:", "-F", agentPaneRowFormat},
+		{"tmux", "send-keys", "-t", "=sess-7:@1.%1", "-l", "hi"},
+		{"tmux", "send-keys", "-t", "=sess-7:@1.%1", "Enter"},
 	}
-	if len(f.calls) != 2 {
-		t.Fatalf("calls = %v, want 2", f.calls)
+	if len(f.calls) != 3 {
+		t.Fatalf("calls = %v, want 3", f.calls)
 	}
 	for i := range want {
 		if !slices.Equal(f.calls[i], want[i]) {
@@ -459,7 +463,7 @@ func TestProvider_StartQuotesNameWorkdirEnvCommand(t *testing.T) {
 	}
 	got := firstCall(f, isTmux("new-session"))
 	want := []string{
-		"tmux", "new-session", "-d", "-s", "sess-one",
+		"tmux", "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "sess-one",
 		"-c", "/path with space",
 		"-e", "GC_ALIAS=hello world",
 		"-e", `GC_TEMPLATE=a'b"c`,
@@ -490,7 +494,7 @@ func TestProvider_StartQuotesStagedSecretEnv(t *testing.T) {
 	}
 	script := stdinFor(f, isStagingScript)
 	wantLine := tmuxCommandLine([]string{
-		"new-session", "-d", "-s", "sess-one",
+		"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "sess-one",
 		"-c", "/path with space",
 		"-e", "MSG=hello world",
 		"-e", "Q=a'b\"c$d#e;f\\g\nh",
@@ -519,30 +523,101 @@ func TestProvider_StartTransportFailureIsNotDuplicate(t *testing.T) {
 	}
 }
 
-func TestProvider_ProcessAliveBracketsPattern(t *testing.T) {
-	// The pgrep pattern brackets its first character so it cannot self-match
-	// the wrapping shell's own argv over ssh (the dash false-positive).
-	f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
-		if len(argv) >= 1 && argv[0] == "pgrep" {
-			return nil, 0, nil // found
+// isProcessAliveScript matches ProcessAlive's one remote call.
+func isProcessAliveScript(argv []string) bool {
+	return len(argv) == 3 && argv[0] == "sh" && argv[1] == "-c" && strings.Contains(argv[2], processSectionComm)
+}
+
+// processTable renders a processAliveScript answer: the session's panes
+// (comma-separated "pid" for an unmarked session, or "<mark> pid"), then
+// "pid ppid comm args..." rows split into the comm and args passes (comm is
+// the third field, args the rest, or the comm when there are no more).
+func processTable(panes string, rows ...string) string {
+	var comm, args strings.Builder
+	for _, row := range rows {
+		f := strings.Fields(row)
+		fmt.Fprintf(&comm, "%s %s %s\n", f[0], f[1], f[2])
+		a := strings.Join(f[3:], " ")
+		if a == "" {
+			a = f[2]
 		}
-		return nil, 1, nil
-	}}
-	p := providerWith(f)
-	if !p.ProcessAlive("s", []string{"claude"}) {
-		t.Error("ProcessAlive should be true when pgrep matches")
+		fmt.Fprintf(&args, "%s %s %s\n", f[0], f[1], a)
 	}
-	got := firstCall(f, func(a []string) bool { return len(a) >= 1 && a[0] == "pgrep" })
-	want := []string{"pgrep", "-f", "[c]laude"}
-	if !slices.Equal(got, want) {
-		t.Errorf("pgrep argv = %v, want %v (first char must be bracketed)", got, want)
+	var paneRows []string
+	for _, pane := range strings.Split(panes, ",") {
+		if pane != "" && !strings.Contains(pane, " ") {
+			pane = "pane " + pane
+		}
+		paneRows = append(paneRows, pane)
+	}
+	return strings.Join(paneRows, "\n") + "\n" + processSectionComm + "\n" + comm.String() + processSectionArgs + "\n" + args.String()
+}
+
+// ProcessAlive is scoped to the session's pane process trees. A box-wide
+// match read a dead session alive whenever another session on the box ran the
+// same CLI (mc-pnu61). Matching follows the local provider: command, argv[0],
+// or an interpreter's script, in a pane process or its descendants.
+func TestProvider_ProcessAliveScopedToSessionPaneTree(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		out   string
+		code  int
+		names []string
+		want  bool
+	}{
+		{"agent under the pane shell", processTable("100", "100 1 zsh", "101 100 claude", "200 1 tmux"), 0, []string{"claude"}, true},
+		{"agent deep in the tree", processTable("100", "100 1 zsh", "101 100 sh", "102 101 caffeinate", "103 102 claude"), 0, []string{"claude"}, true},
+		{"another session's agent only", processTable("100", "100 1 zsh", "300 1 zsh", "301 300 claude"), 0, []string{"claude"}, false},
+		{"node script by name", processTable("100", "100 1 zsh", "101 100 node node /usr/lib/gemini/bin/gemini --yolo"), 0, []string{"gemini"}, true},
+		// Claude sets argv[0] to its version: only comm names it.
+		{"comm only", processTable("100", "100 1 zsh", "101 100 claude 2.1.30 --resume"), 0, []string{"claude"}, true},
+		{"any of several panes", processTable("100,400", "100 1 zsh", "400 1 zsh", "401 400 codex"), 0, []string{"codex"}, true},
+		// A marked session is judged by its agent pane only: a human
+		// running the CLI in a split does not keep a dead agent alive.
+		{"marked: agent pane runs it", processTable("orphan 400,agent 100", "100 1 zsh", "101 100 codex", "400 1 zsh"), 0, []string{"codex"}, true},
+		{"marked: only a human split runs it", processTable("agent 100,orphan 400", "100 1 zsh", "400 1 zsh", "401 400 codex"), 0, []string{"codex"}, false},
+		{"marked: agent pane gone", processTable("orphan 400", "400 1 zsh", "401 400 codex"), 0, []string{"codex"}, false},
+		{"marked: two agent panes, either runs it", processTable("agent 100,agent 400", "100 1 zsh", "400 1 zsh", "401 400 codex"), 0, []string{"codex"}, true},
+		{"session missing", "", 3, []string{"claude"}, false},
+		{"no panes listed", processTable("", "300 1 zsh", "301 300 claude"), 0, []string{"claude"}, false},
+		{"process table unreadable", "pane 100\n" + processSectionComm + "\n" + processSectionArgs + "\n", 0, []string{"claude"}, true},
+		// ps failed (exit 1, "unknown option"): the script's status is ps's,
+		// but the session's panes exist, so it must not read dead (a dead
+		// read makes every session on the box a zombie, killed every pass).
+		{"ps fails", "pane 100\n" + processSectionComm + "\n" + processSectionArgs + "\n", 1, []string{"claude"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
+				if isProcessAliveScript(argv) {
+					return []byte(tc.out), tc.code, nil
+				}
+				return nil, 1, nil
+			}}
+			if got := providerWith(f).ProcessAlive("s", tc.names); got != tc.want {
+				t.Errorf("ProcessAlive = %v, want %v", got, tc.want)
+			}
+			if len(f.calls) != 1 {
+				t.Errorf("calls = %q, want one remote call", f.calls)
+			}
+		})
 	}
 }
 
-func TestProvider_ProcessAliveAbsentIsFalse(t *testing.T) {
-	f := &fakeRunner{code: 1} // pgrep finds nothing
-	if providerWith(f).ProcessAlive("s", []string{"ghost"}) {
-		t.Error("ProcessAlive should be false when pgrep matches nothing")
+// The remote call lists only this session's panes, exactly, and reads the
+// process table with POSIX ps (any remote OS).
+func TestProvider_ProcessAliveScriptTargetsSessionExactly(t *testing.T) {
+	script := processAliveScript("worker-1")
+	for _, want := range []string{
+		"tmux list-panes -s -t '=worker-1:' -F '" + runtime.TmuxAgentPaneMarkerFormat + " #{pane_pid}') || exit 3",
+		"ps -A -o pid= -o ppid= -o comm= | awk -v roots=",
+		"ps -A -o pid= -o ppid= -o args= | awk -v roots=",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script lacks %q:\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "pgrep") {
+		t.Errorf("script still runs a box-wide pgrep:\n%s", script)
 	}
 }
 
@@ -866,7 +941,7 @@ func TestProvider_StartSendsInitialNudgeWhenAlive(t *testing.T) {
 	if len(nudges) != 2 {
 		t.Fatalf("expected 2 send-keys (type + Enter) for the initial nudge, got %v", nudges)
 	}
-	if !slices.Equal(nudges[0], []string{"tmux", "send-keys", "-t", "s", "-l", "hello"}) {
+	if !slices.Equal(nudges[0], []string{"tmux", "send-keys", "-t", "=s:@1.%1", "-l", "hello"}) {
 		t.Errorf("initial nudge type = %v", nudges[0])
 	}
 }
@@ -875,7 +950,8 @@ func TestProvider_AttachArgsQuotesRemoteCommand(t *testing.T) {
 	// A session name with shell metacharacters must be confined to a single
 	// shell-quoted remote-command argument — no remote command injection.
 	args := attachArgs(Endpoint{User: "u", Host: "box"}, "x; rm -rf ~")
-	if last := args[len(args)-1]; last != `'tmux' 'attach' '-t' 'x; rm -rf ~'` {
+	// Attach rejects such a name (checkName); the quoting holds regardless.
+	if last := args[len(args)-1]; last != `'tmux' 'attach' '-t' '=x; rm -rf ~'` {
 		t.Errorf("remote command arg = %q, want it shell-quoted as one token", last)
 	}
 	if dest := args[len(args)-2]; dest != "u@box" {
@@ -916,6 +992,10 @@ func TestProvider_SetMetaKeepsSecretValueOutOfArgv(t *testing.T) {
 	if !strings.Contains(stdinFor(f, isStagingScript), secret) {
 		t.Error("secret value was not delivered on the staging script's stdin")
 	}
+	// The staged command names the session exactly, like the argv path.
+	if staged := stdinFor(f, isStagingScript); !strings.Contains(staged, "'set-environment' '-t' '=s'") {
+		t.Errorf("staged command does not target =s exactly: %q", staged)
+	}
 	if firstCall(f, func(argv []string) bool { return len(argv) == 3 && argv[0] == "rm" && argv[2] == stagedDir }) == nil {
 		t.Error("staged directory was not removed after SetMeta")
 	}
@@ -947,11 +1027,331 @@ func TestProvider_SetMetaInertValueStaysOnArgv(t *testing.T) {
 	if err := providerWith(f).SetMeta("s", "GC_SESSION_ID", "gc-1"); err != nil {
 		t.Fatalf("SetMeta: %v", err)
 	}
-	want := []string{"tmux", "set-environment", "-t", "s", "GC_SESSION_ID", "gc-1"}
+	want := []string{"tmux", "set-environment", "-t", "=s", "GC_SESSION_ID", "gc-1"}
 	if got := firstCall(f, isTmux("set-environment")); !slices.Equal(got, want) {
 		t.Errorf("set-environment argv = %v, want %v", got, want)
 	}
 	if firstCall(f, isStagingScript) != nil {
 		t.Error("an inert meta value must not stage a file on the box")
+	}
+}
+
+// tmux resolves a bare -t name by unique prefix: once "worker-1" has exited,
+// "-t worker-1" names a live "worker-10" on the same box. Every session-keyed
+// command must name its session exactly: "=name" for target-session commands,
+// "=name:" for target-window and target-pane ones (tmux still prefix-matches
+// "=name" there).
+func TestProvider_TargetsSessionsExactly(t *testing.T) {
+	const session, pane, agent = "=worker-1", "=worker-1:", "=worker-1:@1.%1"
+	cases := []struct {
+		name string
+		run  func(*Provider)
+		sub  string
+		want string
+	}{
+		{"IsRunning", func(p *Provider) { _ = p.IsRunning("worker-1") }, "has-session", session},
+		{"Stop", func(p *Provider) { _ = p.Stop("worker-1") }, "kill-session", session},
+		{"IsAttached", func(p *Provider) { _ = p.IsAttached("worker-1") }, "display-message", pane},
+		{"GetLastActivity", func(p *Provider) { _, _ = p.GetLastActivity("worker-1") }, "display-message", pane},
+		{"SetMeta", func(p *Provider) { _ = p.SetMeta("worker-1", "GC_SESSION_ID", "gc-1") }, "set-environment", session},
+		{"GetMeta", func(p *Provider) { _, _ = p.GetMeta("worker-1", "GC_K") }, "show-environment", session},
+		{"RemoveMeta", func(p *Provider) { _ = p.RemoveMeta("worker-1", "GC_K") }, "set-environment", session},
+		{"Relaunch", func(p *Provider) { _ = p.Relaunch(context.Background(), "worker-1", runtime.Config{Command: "agent"}) }, "respawn-pane", agent},
+		{"Nudge", func(p *Provider) { _ = p.Nudge("worker-1", runtime.TextContent("hi")) }, "send-keys", agent},
+		{"SendKeys", func(p *Provider) { _ = p.SendKeys("worker-1", "Enter") }, "send-keys", agent},
+		{"Interrupt", func(p *Provider) { _ = p.Interrupt("worker-1") }, "send-keys", agent},
+		{"Peek", func(p *Provider) { _, _ = p.Peek("worker-1", 5) }, "capture-pane", agent},
+		{"ClearScrollback", func(p *Provider) { _ = p.ClearScrollback("worker-1") }, "clear-history", agent},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRunner{}
+			tc.run(providerWith(f))
+			var targets []string
+			for _, c := range f.calls {
+				if len(c) < 2 || c[0] != "tmux" {
+					continue
+				}
+				if i := slices.Index(c, "-t"); i > 0 && i+1 < len(c) {
+					targets = append(targets, c[1]+" "+c[i+1])
+					if c[1] == tc.sub && c[i+1] != tc.want {
+						t.Errorf("%s -t %q, want %q; argv=%q", c[1], c[i+1], tc.want, c)
+					}
+				}
+			}
+			if !slices.Contains(targets, tc.sub+" "+tc.want) {
+				t.Errorf("no %s -t %s; targeted calls=%q", tc.sub, tc.want, targets)
+			}
+		})
+	}
+}
+
+// Attach names the session exactly too, shell-quoted so a remote login shell
+// (zsh expands a leading "=" as a command lookup) passes it to tmux intact.
+func TestProvider_AttachArgsTargetSessionExactly(t *testing.T) {
+	args := attachArgs(Endpoint{User: "u", Host: "box"}, "worker-1")
+	if last := args[len(args)-1]; last != `'tmux' 'attach' '-t' '=worker-1'` {
+		t.Errorf("remote command arg = %q, want an exact, quoted target", last)
+	}
+}
+
+// A name that is not a safe tmux target never reaches tmux. A bare target is a
+// prefix match and a glob ("worker-1*" names worker-10), and "." and ":" split
+// it into window and pane parts (mc-xm7mg). Verbs that return errors report
+// ErrInvalidSessionName; best-effort verbs do nothing.
+func TestProvider_InvalidNamesNeverReachTmux(t *testing.T) {
+	for _, name := range []string{"worker-1*", "worker-?", "worker-1:0", "worker.1", "", "x; rm -rf ~"} {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeRunner{}
+			p := providerWith(f)
+			ctx := context.Background()
+			for verb, err := range map[string]error{
+				"Start":    p.Start(ctx, name, runtime.Config{Command: "agent"}),
+				"Relaunch": p.Relaunch(ctx, name, runtime.Config{Command: "agent"}),
+				"Stop":     p.Stop(name),
+				"Attach":   p.Attach(name),
+			} {
+				if !errors.Is(err, ErrInvalidSessionName) {
+					t.Errorf("%s(%q) = %v, want ErrInvalidSessionName", verb, name, err)
+				}
+			}
+			if p.IsRunning(name) || p.IsAttached(name) || p.ProcessAlive(name, []string{"claude"}) {
+				t.Errorf("IsRunning/IsAttached/ProcessAlive(%q) reported true", name)
+			}
+			_ = p.Nudge(name, runtime.TextContent("hi"))
+			_ = p.SendKeys(name, "Enter")
+			_ = p.Interrupt(name)
+			_ = p.ClearScrollback(name)
+			_, _ = p.Peek(name, 5)
+			_ = p.SetMeta(name, "GC_SESSION_ID", "gc-1")
+			_, _ = p.GetMeta(name, "GC_SESSION_ID")
+			_ = p.RemoveMeta(name, "GC_SESSION_ID")
+			_, _ = p.GetLastActivity(name)
+			if len(f.calls) != 0 {
+				t.Errorf("remote calls for %q = %q, want none", name, f.calls)
+			}
+		})
+	}
+}
+
+// A degraded process read (ps failing on the box) is logged once per episode,
+// not on every tick, and a good read ends the episode.
+func TestProvider_ProcessAliveLogsDegradedOncePerEpisode(t *testing.T) {
+	var logged bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	degraded := "pane 100\n" + processSectionComm + "\n" + processSectionArgs + "\n"
+	healthy := processTable("100", "100 1 zsh", "101 100 claude")
+	out := degraded
+	f := &fakeRunner{respond: func([]string) ([]byte, int, error) { return []byte(out), 1, nil }}
+	p := providerWith(f)
+	for i := 0; i < 3; i++ {
+		if !p.ProcessAlive("s", []string{"claude"}) {
+			t.Fatal("degraded ProcessAlive = false, want true")
+		}
+	}
+	if n := strings.Count(logged.String(), "process snapshot degraded"); n != 1 {
+		t.Fatalf("degraded logs = %d, want 1:\n%s", n, logged.String())
+	}
+	out = healthy
+	_ = p.ProcessAlive("s", []string{"claude"})
+	out = degraded
+	_ = p.ProcessAlive("s", []string{"claude"})
+	if n := strings.Count(logged.String(), "process snapshot degraded"); n != 2 {
+		t.Fatalf("degraded logs after a new episode = %d, want 2", n)
+	}
+}
+
+// Start marks the pane new-session printed as the session's agent pane,
+// valued with the session's id, and only then flags the session as marked.
+func TestProvider_StartMarksAgentPane(t *testing.T) {
+	f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
+		switch {
+		case isTmux("has-session")(argv):
+			return nil, 1, nil
+		case isTmux("new-session")(argv):
+			return []byte("%7\n"), 0, nil
+		}
+		return nil, 0, nil
+	}}
+	if err := providerWith(f).Start(context.Background(), "s", runtime.Config{Command: "agent"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	mark := []string{"tmux", "set-option", "-p", "-F", "-t", "%7", runtime.TmuxAgentPaneOption, "#{session_id}"}
+	flag := []string{"tmux", "set-option", "-t", "=s:", runtime.TmuxAgentSessionOption, "1"}
+	created := slices.IndexFunc(f.calls, isTmux("new-session"))
+	marked := slices.IndexFunc(f.calls, func(c []string) bool { return slices.Equal(c, mark) })
+	flagged := slices.IndexFunc(f.calls, func(c []string) bool { return slices.Equal(c, flag) })
+	if created < 0 || marked <= created || flagged <= marked {
+		t.Fatalf("calls = %q, want new-session, then %q, then %q", f.calls, mark, flag)
+	}
+}
+
+// Relaunch and the driving verbs reach the session's agent pane, never its
+// active pane, and fail closed when the agent pane cannot be named: a human
+// killed it (the session lives on in their panes), or two panes claim it.
+func TestProvider_AgentPaneResolution(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		panes   string
+		want    string // respawn-pane / send-keys target; "" when nothing may be sent
+		wantErr error
+	}{
+		{"marked pane behind a human split", "orphan\t@1.%3\nagent\t@2.%5\norphan\t@2.%6", "=s:@2.%5", nil},
+		{"unmarked session takes the first pane", "pane\t@1.%3\npane\t@1.%4", "=s:@1.%3", nil},
+		{"agent pane killed", "orphan\t@1.%3\norphan\t@1.%4", "", runtime.ErrTmuxAgentPaneGone},
+		{"two agent panes", "agent\t@1.%3\nagent\t@2.%4", "", runtime.ErrTmuxAgentPaneAmbiguous},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRunner{panes: tc.panes}
+			p := providerWith(f)
+			err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent"})
+			_ = p.Nudge("s", runtime.TextContent("hi"))
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Errorf("Relaunch = %v, want %v", err, tc.wantErr)
+			}
+			if tc.wantErr == nil && err != nil {
+				t.Errorf("Relaunch = %v, want nil", err)
+			}
+			for _, c := range f.calls {
+				if len(c) < 2 || c[0] != "tmux" || (c[1] != "respawn-pane" && c[1] != "send-keys") {
+					continue
+				}
+				if i := slices.Index(c, "-t"); tc.want == "" || c[i+1] != tc.want {
+					t.Errorf("%s -t %q, want %q; argv=%q", c[1], c[i+1], tc.want, c)
+				}
+			}
+		})
+	}
+}
+
+// Relaunch marks a warm box from before the marker while it has only the
+// agent's pane, and leaves any other session alone.
+func TestProvider_RelaunchAdoptsLoneUnmarkedPane(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		panes    string
+		wantMark bool
+	}{
+		{"lone unmarked pane", "pane\t@1.%3", true},
+		{"two unmarked panes", "pane\t@1.%3\npane\t@1.%4", false},
+		{"already marked", "agent\t@1.%3", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRunner{panes: tc.panes}
+			if err := providerWith(f).Relaunch(context.Background(), "s", runtime.Config{Command: "agent"}); err != nil {
+				t.Fatalf("Relaunch: %v", err)
+			}
+			marked := slices.ContainsFunc(f.calls, func(c []string) bool {
+				return slices.Equal(c, []string{"tmux", "set-option", "-p", "-F", "-t", "%3", runtime.TmuxAgentPaneOption, "#{session_id}"})
+			})
+			if marked != tc.wantMark {
+				t.Errorf("marked = %v, want %v; calls=%q", marked, tc.wantMark, f.calls)
+			}
+		})
+	}
+}
+
+// An agent-pane lookup that names no pane fails closed: a missing session is
+// ErrSessionNotFound, and output with no pane row never falls back to the
+// session's active pane ("=s:").
+func TestProvider_AgentPaneLookupFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		out     string
+		code    int
+		wantErr error
+	}{
+		{"session missing", "", 1, runtime.ErrSessionNotFound},
+		{"no pane rows", "", 0, nil},
+		{"malformed row", "agent\tgarbage", 0, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRunner{rawPanes: true, respond: func(argv []string) ([]byte, int, error) {
+				if isAgentPaneLookup(argv) {
+					return []byte(tc.out), tc.code, nil
+				}
+				return nil, 0, nil
+			}}
+			p := providerWith(f)
+			_, err := p.agentPane(context.Background(), "s", false)
+			if err == nil || (tc.wantErr != nil && !errors.Is(err, tc.wantErr)) {
+				t.Errorf("agentPane = %v, want an error (%v)", err, tc.wantErr)
+			}
+			_ = p.Nudge("s", runtime.TextContent("hi"))
+			_ = p.SendKeys("s", "Enter")
+			_ = p.Interrupt("s")
+			_ = p.ClearScrollback("s")
+			if out, err := p.Peek("s", 5); out != "" || err != nil {
+				t.Errorf("Peek = (%q, %v), want (\"\", nil)", out, err)
+			}
+			for _, sub := range []string{"send-keys", "capture-pane", "clear-history"} {
+				if c := firstCall(f, isTmux(sub)); c != nil {
+					t.Errorf("%s ran after a failed lookup: %q", sub, c)
+				}
+			}
+		})
+	}
+}
+
+// A flagged (marked) session whose agent pane a human killed, leaving one
+// human pane: Relaunch must not adopt that pane as the agent's and respawn it
+// (killing the human's shell). It reports the agent pane gone and changes
+// nothing.
+func TestProvider_RelaunchRefusesLoneOrphanPane(t *testing.T) {
+	f := &fakeRunner{panes: "orphan\t@1.%3"}
+	err := providerWith(f).Relaunch(context.Background(), "s", runtime.Config{Command: "agent"})
+	if !errors.Is(err, runtime.ErrTmuxAgentPaneGone) {
+		t.Errorf("Relaunch = %v, want ErrTmuxAgentPaneGone", err)
+	}
+	for _, sub := range []string{"set-option", "respawn-pane"} {
+		if c := firstCall(f, isTmux(sub)); c != nil {
+			t.Errorf("%s ran on a lone orphan pane: %q", sub, c)
+		}
+	}
+}
+
+// A failed mark is logged and leaves the session unflagged: a flagged session
+// without a marked pane would read every pane "orphan" and refuse all input
+// until it is recreated.
+func TestProvider_FailedMarkIsLoggedAndUnflagged(t *testing.T) {
+	var logged bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
+		switch {
+		case isTmux("has-session")(argv):
+			return nil, 1, nil
+		case isTmux("new-session")(argv):
+			return []byte("%7\n"), 0, nil
+		case isTmux("set-option")(argv) && slices.Contains(argv, "-p"):
+			return nil, 1, nil // tmux too old, or refused
+		}
+		return nil, 0, nil
+	}}
+	if err := providerWith(f).Start(context.Background(), "s", runtime.Config{Command: "agent"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !strings.Contains(logged.String(), "marking agent pane") {
+		t.Errorf("log = %q, want the failed mark logged", logged.String())
+	}
+	for _, c := range f.calls {
+		if slices.Contains(c, runtime.TmuxAgentSessionOption) {
+			t.Errorf("session flagged after a failed mark: %q", c)
+		}
+	}
+}
+
+// Only Relaunch adopts a lone unmarked pane; the driving verbs read and never
+// write the marker.
+func TestProvider_DrivingVerbsDoNotMark(t *testing.T) {
+	f := &fakeRunner{panes: "pane\t@1.%3"}
+	p := providerWith(f)
+	_ = p.Nudge("s", runtime.TextContent("hi"))
+	_, _ = p.Peek("s", 5)
+	if c := firstCall(f, isTmux("set-option")); c != nil {
+		t.Errorf("a driving verb marked the pane: %q", c)
 	}
 }

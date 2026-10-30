@@ -1,0 +1,166 @@
+name: Advisory probes
+
+# Advisory live probes of upstream code that must never block a merge: the
+# contract radar (gc HEAD against beads main HEAD) and MCP mail conformance
+# (against the pinned mcp_agent_mail). No required check waits on them.
+#
+# They run in this workflow, not in ci.yml beside the required Check and
+# CI / required (ga-ylpbsy.55). GitHub reports a red Check or CI / required
+# without naming the need that failed, so a tool that reads such a red from
+# the failed jobs of its run (the adopt-pr gate's infrastructure rerun does)
+# would count a red probe in the same run as part of it. Every job of ci.yml
+# feeds CI / required (scripts/ci_required_coverage_test.go); an advisory job
+# belongs here.
+#
+# The runners and shared path filter are ci.yml's, and the triggers are
+# ci.yml's except merge_group (scripts/advisory_probes_workflow_test.go).
+# RC Gate calls this workflow beside ci.yml. The probes never run in the
+# merge queue: no queue entry waits on them, and the push to main runs
+# them on the commit the queue merges.
+on:
+  workflow_call:
+    inputs:
+      force_blacksmith:
+        description: Force the probe jobs onto Blacksmith runners.
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+
+permissions:
+  contents: read
+
+# ci.yml's key under this workflow's own prefix: concurrency groups are
+# shared by every workflow of the repository.
+concurrency:
+  group: advisory-probes-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # ci.yml's runner-policy and changes jobs in one: the runner policy, and
+  # whether each probe runs (its path filter, folded with ci.yml's shared
+  # filter so a cross-cutting change runs both).
+  route:
+    name: Route advisory probes
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    outputs:
+      runner_8vcpu: ${{ steps.policy.outputs.runner_8vcpu }}
+      runner_32vcpu: ${{ steps.policy.outputs.runner_32vcpu }}
+      mail: ${{ steps.filter.outputs.mail == 'true' || steps.filter.outputs.shared == 'true' }}
+      beads: ${{ steps.filter.outputs.beads == 'true' || steps.filter.outputs.shared == 'true' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Select runner backend
+        id: policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          FORCE_BLACKSMITH: ${{ inputs.force_blacksmith }}
+        run: |
+          python3 .github/workflows/scripts/runner_policy.py
+      # As in ci.yml, token: '' detects a pull request's changes with git
+      # instead of the pulls/files API on the repository's shared
+      # installation rate limit. ci.yml's merge_group base and ref are left
+      # out: the probes run on no merge group, and the action's defaults
+      # serve every event they run on.
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        id: filter
+        with:
+          token: ''
+          filters: |
+            mail:
+              - 'internal/mail/**'
+              - 'contrib/mail-scripts/**'
+              - '.github/requirements/mcp-agent-mail.in'
+              - '.github/requirements/mcp-agent-mail.overrides.txt'
+              - '.github/requirements/mcp-agent-mail.txt'
+            beads:
+              - 'go.mod'
+              - 'internal/beads/**'
+              - 'test/acceptance/beads_cli_contract_test.go'
+              - 'deps.env'
+              - '.github/scripts/install-bd-archive.sh'
+              - 'cmd/gc/init_provider_readiness.go'
+            # ci.yml's shared filter, path for path.
+            shared:
+              - 'go.mod'
+              - 'go.sum'
+              - 'Makefile'
+              - '.github/workflows/**'
+              - '.github/actions/setup-gascity-ubuntu/**'
+              - '.github/actions/go-mod-download/**'
+              - '.github/scripts/go-mod-download-retry.sh'
+              - '.github/scripts/go-mod-verify-cache.sh'
+              - '.github/scripts/install-dolt-archive.sh'
+              - '.github/scripts/install-bd-archive.sh'
+              - '.github/scripts/install-claude-native.sh'
+              - 'internal/beads/**'
+              - 'internal/events/**'
+              - 'internal/config/**'
+
+  # gc HEAD against beads main HEAD: an early warning that the next bd
+  # release breaks gc. A bd-main break must never block a gascity merge; the
+  # pinned bd contract cells gate in bazel.yml's unit lane.
+  contract-radar-bd-head:
+    name: Contract radar (gc HEAD x bd main HEAD)
+    needs: route
+    if: ${{ needs.route.outputs.beads == 'true' }}
+    runs-on: ${{ needs.route.outputs.runner_32vcpu }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
+      - name: Build bd from beads main HEAD
+        run: |
+          set -euo pipefail
+          src="${RUNNER_TEMP}/beads-src"
+          git clone --depth 1 --filter=blob:none https://github.com/gastownhall/beads "$src"
+          mkdir -p "${HOME}/.local/bin"
+          go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+      - name: Verify bd on PATH
+        run: bd version
+      - name: bd CLI contract (main HEAD)
+        run: make test-bd-cli-contract
+      - name: bd CLI contract HOME isolation (main HEAD)
+        run: make test-bd-cli-contract-home-isolation
+
+  # Runs when mail-related source paths or the mcp_agent_mail requirements
+  # (the lock this job installs) change.
+  mcp-mail:
+    name: MCP mail conformance
+    needs: route
+    if: needs.route.outputs.mail == 'true'
+    runs-on: ${{ needs.route.outputs.runner_8vcpu }}
+    continue-on-error: true  # upstream mcp_agent_mail API may drift
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq curl
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12.16'
+
+      - name: Install mcp_agent_mail
+        run: python -m pip install --no-deps --require-hashes -r .github/requirements/mcp-agent-mail.txt
+
+      - name: MCP mail conformance test
+        run: make test-mcp-mail

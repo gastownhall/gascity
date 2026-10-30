@@ -47,16 +47,21 @@ func (h *SessionHandle) PendingStatus(context.Context) (*PendingInteraction, boo
 	}, true, nil
 }
 
-// Respond resolves the current blocking interaction.
-func (h *SessionHandle) Respond(_ context.Context, req InteractionResponse) error {
+// Respond resolves the current blocking interaction, only in the
+// incarnation req.Fence names when it is set.
+func (h *SessionHandle) Respond(ctx context.Context, req InteractionResponse) error {
 	id := h.currentSessionID()
 	if id == "" {
 		return sessionpkg.ErrNoPendingInteraction
 	}
-	return h.manager.Respond(id, runtime.InteractionResponse{
+	response := runtime.InteractionResponse{
 		RequestID: req.RequestID,
 		Action:    req.Action,
 		Text:      req.Text,
 		Metadata:  cloneStringMap(req.Metadata),
-	})
+	}
+	if !req.Fence.IsZero() {
+		return h.manager.RespondFenced(ctx, id, req.Fence, response)
+	}
+	return h.manager.Respond(id, response)
 }

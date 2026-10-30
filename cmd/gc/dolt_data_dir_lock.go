@@ -169,7 +169,7 @@ func waitManagedDoltSIGKILLLockGateWithProcLocks(pid int, dataDir string, alive 
 				return fmt.Errorf("%s; could not measure lock ownership: %w", base, measureErr)
 			}
 			if len(blockerPIDs) == 0 {
-				return fmt.Errorf("%s; could not measure lock ownership: flock probe reports held but %s has no matching FLOCK row", base, procLocksPath)
+				return fmt.Errorf("%s; could not measure lock ownership: flock probe reports held but lock-holder inspection (%s) found no holder", base, procLocksPath)
 			}
 			otherPIDs := make([]int, 0, len(blockerPIDs))
 			for _, holderPID := range blockerPIDs {

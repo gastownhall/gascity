@@ -11,7 +11,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 
 	gcruntime "github.com/gastownhall/gascity/internal/runtime"
 )
@@ -69,6 +72,7 @@ type controlledRefreshFetcher struct {
 	mu        sync.Mutex
 	calls     int
 	state     runtimeStateSnapshot
+	err       error
 	blockCall int
 	entered   chan struct{}
 	release   chan struct{}
@@ -79,6 +83,7 @@ func (f *controlledRefreshFetcher) FetchState(ctx context.Context) (runtimeState
 	f.calls++
 	call := f.calls
 	state := f.state
+	err := f.err
 	f.mu.Unlock()
 
 	if call == f.blockCall {
@@ -89,13 +94,20 @@ func (f *controlledRefreshFetcher) FetchState(ctx context.Context) (runtimeState
 			return runtimeStateSnapshot{}, ctx.Err()
 		}
 	}
-	return state, nil
+	return state, err
 }
 
 func (f *controlledRefreshFetcher) getCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
+}
+
+func (f *controlledRefreshFetcher) setResult(state runtimeStateSnapshot, err error) {
+	f.mu.Lock()
+	f.state = state
+	f.err = err
+	f.mu.Unlock()
 }
 
 func TestStateCache_FreshCacheReturnsCorrectState(t *testing.T) {
@@ -477,6 +489,50 @@ func TestStateCache_DiscardRefreshAfterEvictSession(t *testing.T) {
 	}
 }
 
+func TestStateCache_CoalescesRefreshesWithinGeneration(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fetcher := &controlledRefreshFetcher{
+			state:     runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}},
+			blockCall: 2,
+			entered:   make(chan struct{}),
+			release:   make(chan struct{}),
+		}
+		cache := NewStateCache(fetcher, time.Hour)
+		if cache.IsRunning("agent-1") {
+			t.Fatal("primed liveness = true, want false")
+		}
+
+		fetcher.setResult(runtimeStateSnapshot{
+			Sessions: map[string]sessionRuntimeState{"agent-1": {Running: true}},
+		}, nil)
+		cache.Invalidate()
+
+		results := make(chan bool, 2)
+		go func() { results <- cache.IsRunning("agent-1") }()
+		synctest.Wait()
+		select {
+		case <-fetcher.entered:
+		default:
+			t.Fatal("first invalidated refresh did not enter")
+		}
+
+		go func() { results <- cache.IsRunning("agent-1") }()
+		synctest.Wait()
+		callsBeforeRelease := fetcher.getCalls()
+		close(fetcher.release)
+		synctest.Wait()
+
+		if callsBeforeRelease != 2 {
+			t.Fatalf("fetch calls before release = %d, want prime plus one coalesced generation refresh", callsBeforeRelease)
+		}
+		for range 2 {
+			if got := <-results; !got {
+				t.Fatal("coalesced IsRunning call = false, want live result")
+			}
+		}
+	})
+}
+
 // TestStateCache_EvictSessionDoesNotMutatePublishedSnapshot pins the
 // copy-on-write contract: a snapshot handed out by currentState is read
 // without the cache lock, so EvictSession must publish a new Sessions map
@@ -829,7 +885,7 @@ func TestParseDarwinProcessSnapshotPreservesCommWhenArgv0IsRewritten(t *testing.
 	if process.Args != "2.1.30 --print" {
 		t.Fatalf("Args = %q, want rewritten argv[0] args", process.Args)
 	}
-	if !snapshot.processMatchesNames("102", processNameSet([]string{"claude"})) {
+	if !snapshot.processMatchesNames("102", proctable.ProcessNameSet([]string{"claude"})) {
 		t.Fatal("processMatchesNames(102, claude) = false, want true from comm")
 	}
 }
@@ -857,7 +913,7 @@ func TestParseDarwinProcessSnapshotTraversesThroughEmptyArgsRows(t *testing.T) {
 	if process.Args != "" {
 		t.Fatalf("Args = %q, want empty args", process.Args)
 	}
-	if !snapshot.hasDescendantWithNames("101", processNameSet([]string{"claude"}), 0) {
+	if !snapshot.hasDescendantWithNames("101", proctable.ProcessNameSet([]string{"claude"}), 0) {
 		t.Fatal("hasDescendantWithNames(101, claude) = false, want traversal through empty-args row")
 	}
 }
@@ -995,7 +1051,7 @@ func TestProcessAliveWrappedPane(t *testing.T) {
 		{PID: "101", PPID: "100", Command: "claude", Args: "claude"},
 	})
 	pane := paneRuntimeState{Command: "systemd-run", PID: "100"}
-	if !pane.processAlive(processNameSet([]string{"claude"}), snapshot) {
+	if !pane.processAlive(proctable.ProcessNameSet([]string{"claude"}), snapshot) {
 		t.Fatal("processAlive = false for systemd-run pane with claude child, want true (descendant fallback)")
 	}
 }

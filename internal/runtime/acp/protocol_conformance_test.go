@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,6 +36,28 @@ type protocolSession struct {
 // the given scenario flags plus --log-dir, and registers cleanup.
 func startProtocolFake(t *testing.T, args ...string) *protocolSession {
 	t.Helper()
+	return startProtocolFakeEnv(t, nil, args...)
+}
+
+// startProtocolFakeEnv is startProtocolFake with env added to the session's
+// runtime.Config.
+func startProtocolFakeEnv(t *testing.T, env map[string]string, args ...string) *protocolSession {
+	t.Helper()
+	return startProtocolFakeWith(t, env, protocolWait, args...)
+}
+
+// startProtocolFakeWithCancelTimeout is startProtocolFake with the provider's
+// Interrupt settle bound (Config.CancelTimeout) set to cancelTimeout.
+func startProtocolFakeWithCancelTimeout(t *testing.T, cancelTimeout time.Duration, args ...string) *protocolSession {
+	t.Helper()
+	return startProtocolFakeWith(t, nil, cancelTimeout, args...)
+}
+
+// startProtocolFakeWith is startProtocolFake with env added to the session's
+// runtime.Config and the provider's Interrupt settle bound
+// (Config.CancelTimeout) set to cancelTimeout.
+func startProtocolFakeWith(t *testing.T, env map[string]string, cancelTimeout time.Duration, args ...string) *protocolSession {
+	t.Helper()
 	var fixture acpConformanceFixture
 	if err := prepareACPConformanceFixture(t, &fixture); err != nil {
 		t.Fatal(err)
@@ -44,6 +67,7 @@ func startProtocolFake(t *testing.T, args ...string) *protocolSession {
 		HandshakeTimeout:  protocolWait,
 		NudgeBusyTimeout:  protocolWait,
 		OutputBufferLines: 100,
+		CancelTimeout:     cancelTimeout,
 	})
 	name := fmt.Sprintf("gc-acp-proto-%d-%d", os.Getpid(), protocolCounter.Add(1))
 	command := "exec " + shellQuote(fixture.command) + " --log-dir " + shellQuote(logDir)
@@ -53,6 +77,7 @@ func startProtocolFake(t *testing.T, args ...string) *protocolSession {
 	if err := p.Start(context.Background(), name, runtime.Config{
 		Command: command,
 		WorkDir: t.TempDir(),
+		Env:     env,
 	}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -241,7 +266,10 @@ func TestACPProtocolExitDuringPromptDrains(t *testing.T) {
 }
 
 func TestACPProtocolSigintCancelAnswersInFlightPrompt(t *testing.T) {
-	s := startProtocolFake(t, "--sigint", "cancel", "--turn-delay", "1h")
+	// The fake ignores session/cancel, so Interrupt falls back to SIGINT once
+	// the settle bound passes.
+	s := startProtocolFakeWithCancelTimeout(t, 300*time.Millisecond,
+		"--on-cancel", "ignore", "--sigint", "cancel", "--turn-delay", "1h")
 	s.nudge(t, "long turn")
 	if !s.conn(t).isBusy() {
 		t.Fatal("prompt not in flight after Nudge")
@@ -271,7 +299,8 @@ func TestACPProtocolSigintCancelAnswersInFlightPrompt(t *testing.T) {
 const acpWireCancelled = "cancelled" //nolint:misspell // ACP wire value
 
 func TestACPProtocolSigintCancelStopReasonIsWireSpelling(t *testing.T) {
-	s := startProtocolFake(t, "--sigint", "cancel", "--turn-delay", "1h")
+	s := startProtocolFakeWithCancelTimeout(t, 300*time.Millisecond,
+		"--on-cancel", "ignore", "--sigint", "cancel", "--turn-delay", "1h")
 	sc := s.conn(t)
 	sc.mu.Lock()
 	sessID := sc.sessionID
@@ -309,19 +338,299 @@ func TestACPProtocolSigintCancelStopReasonIsWireSpelling(t *testing.T) {
 	}
 }
 
-func TestACPProtocolPermissionTimeoutRejects(t *testing.T) {
-	// gc on this base does not answer session/request_permission, so the
-	// fake's timeout path fires: $/cancel_request, then a rejected tool.
+// waitPermission waits until the fake's permission request is pending.
+func (s *protocolSession) waitPermission(t *testing.T) *runtime.PendingInteraction {
+	t.Helper()
+	deadline := time.NewTimer(protocolWait)
+	defer deadline.Stop()
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		pending, err := s.p.Pending(s.name)
+		if err != nil {
+			t.Fatalf("Pending: %v", err)
+		}
+		if pending != nil {
+			return pending
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("permission request never became pending")
+		case <-tick.C:
+		}
+	}
+}
+
+// assertPermissionReply checks that the fake received exactly one client
+// reply, echoing wantID, with the given RequestPermissionOutcome.
+func assertPermissionReply(t *testing.T, s *protocolSession, wantID any, wantOutcome map[string]any) {
+	t.Helper()
+	// A cancelled reply is written asynchronously and can land after the
+	// turn settles, so wait for the fake to log it.
+	deadline := time.NewTimer(protocolWait)
+	defer deadline.Stop()
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	replies := s.jsonlRecords(t, "responses.jsonl")
+	for len(replies) == 0 {
+		select {
+		case <-deadline.C:
+			t.Fatal("fake never logged a client reply")
+		case <-tick.C:
+		}
+		replies = s.jsonlRecords(t, "responses.jsonl")
+	}
+	if len(replies) != 1 {
+		t.Fatalf("responses.jsonl = %v, want one client reply", replies)
+	}
+	reply := replies[0]
+	if reply["id"] != wantID {
+		t.Fatalf("reply id = %#v, want %#v", reply["id"], wantID)
+	}
+	result, _ := reply["result"].(map[string]any)
+	got, _ := json.Marshal(result["outcome"])
+	want, _ := json.Marshal(wantOutcome)
+	if string(got) != string(want) {
+		t.Fatalf("reply outcome = %s, want %s (reply %v)", got, want, reply)
+	}
+}
+
+func TestACPProtocolPermissionApproveRoundTrip(t *testing.T) {
+	s := startProtocolFake(t, "--request-permission")
+	s.nudge(t, "needs approval")
+	pending := s.waitPermission(t)
+	assertRequestID(t, pending.RequestID, "1")
+	if pending.Kind != "approval" || pending.Prompt != "Run: touch marker" {
+		t.Fatalf("Pending = %#v, want an approval for the tool call", pending)
+	}
+	if !s.conn(t).isBusy() {
+		t.Fatal("turn not busy while the permission is outstanding")
+	}
+	if err := s.p.Respond(s.name, runtime.InteractionResponse{RequestID: pending.RequestID, Action: "approve"}); err != nil {
+		t.Fatalf("Respond: %v", err)
+	}
+	s.waitIdle(t)
+
+	out := s.peek(t)
+	if !strings.Contains(out, "permission granted: allow_once") || !strings.Contains(out, "echo: needs approval") {
+		t.Fatalf("Peek = %q, want granted tool output then the echo", out)
+	}
+	assertPermissionReply(t, s, 1.0, map[string]any{"outcome": "selected", "optionId": "allow_once"})
+}
+
+func TestACPProtocolPermissionDenyStringID(t *testing.T) {
+	s := startProtocolFake(t, "--request-permission", "--request-id-string")
+	s.nudge(t, "needs approval")
+	pending := s.waitPermission(t)
+	assertRequestID(t, pending.RequestID, `"perm-1"`)
+	if err := s.p.Respond(s.name, runtime.InteractionResponse{RequestID: pending.RequestID, Action: "deny"}); err != nil {
+		t.Fatalf("Respond: %v", err)
+	}
+	s.waitIdle(t)
+
+	if out := s.peek(t); !strings.Contains(out, "permission rejected: reject_once") {
+		t.Fatalf("Peek = %q, want rejected tool output", out)
+	}
+	assertPermissionReply(t, s, "perm-1", map[string]any{"outcome": "selected", "optionId": "reject_once"})
+}
+
+func TestACPProtocolPermissionCancelledOnInterrupt(t *testing.T) {
+	s := startProtocolFake(t, "--request-permission", "--sigint", "cancel")
+	s.nudge(t, "needs approval")
+	s.waitPermission(t)
+	if err := s.p.Interrupt(s.name); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+	if pending, err := s.p.Pending(s.name); err != nil || pending != nil {
+		t.Fatalf("Pending after Interrupt = %#v, %v; want nil, nil", pending, err)
+	}
+	s.waitIdle(t)
+
+	if out := s.peek(t); strings.Contains(out, "echo:") || strings.Contains(out, "permission granted") {
+		t.Fatalf("Peek = %q, want the cancelled turn to produce no echo or grant", out)
+	}
+	assertPermissionReply(t, s, 1.0, map[string]any{"outcome": "cancelled"}) //nolint:misspell // ACP wire spelling
+}
+
+func TestACPProtocolPermissionCancelledWhenAgentCancelsRequest(t *testing.T) {
+	// The fake gives up on the request, sends $/cancel_request, and finishes
+	// the turn; gc still answers the original request, cancelled. (That the
+	// answer comes from the $/cancel_request handler rather than from the turn
+	// ending is pinned by TestPermissionCancelRequestAnsweredCancelled.)
 	s := startProtocolFake(t, "--request-permission", "--permission-timeout", "50ms")
 	s.nudge(t, "needs approval")
 	s.waitIdle(t)
 
-	out := s.peek(t)
-	if !strings.Contains(out, "permission rejected") || !strings.Contains(out, "echo: needs approval") {
-		t.Fatalf("Peek = %q, want rejected tool output then the echo", out)
+	if pending, err := s.p.Pending(s.name); err != nil || pending != nil {
+		t.Fatalf("Pending after the turn = %#v, %v; want nil, nil", pending, err)
 	}
-	if got := s.jsonlRecords(t, "responses.jsonl"); len(got) != 0 {
-		t.Fatalf("responses.jsonl = %v, want no client replies", got)
+	if out := s.peek(t); !strings.Contains(out, "permission rejected: timeout") || !strings.Contains(out, "echo: needs approval") {
+		t.Fatalf("Peek = %q, want the timed-out tool output then the echo", out)
+	}
+	assertPermissionReply(t, s, 1.0, map[string]any{"outcome": "cancelled"}) //nolint:misspell // ACP wire spelling
+}
+
+func TestACPProtocolPermissionCancelledWhenTurnEnds(t *testing.T) {
+	// The fake stops waiting without $/cancel_request and ends the turn with
+	// the request still outstanding; gc answers it cancelled at turn end.
+	s := startProtocolFake(t, "--request-permission", "--permission-timeout", "50ms", "--permission-abandon")
+	s.nudge(t, "needs approval")
+	s.waitIdle(t)
+
+	if pending, err := s.p.Pending(s.name); err != nil || pending != nil {
+		t.Fatalf("Pending after the turn = %#v, %v; want nil, nil", pending, err)
+	}
+	if out := s.peek(t); !strings.Contains(out, "echo: needs approval") {
+		t.Fatalf("Peek = %q, want the turn to complete", out)
+	}
+	assertPermissionReply(t, s, 1.0, map[string]any{"outcome": "cancelled"}) //nolint:misspell // ACP wire spelling
+}
+
+func TestACPProtocolFSReadAnsweredMethodNotFound(t *testing.T) {
+	s := startProtocolFake(t, "--request-fs-read", "/etc/hostname")
+	s.nudge(t, "read it")
+	s.waitIdle(t)
+
+	if out := s.peek(t); !strings.Contains(out, "echo: read it") {
+		t.Fatalf("Peek = %q, want the turn to complete after the reply", out)
+	}
+	assertMethodNotFoundReplies(t, s, 1.0)
+}
+
+func TestACPProtocolStringIDRequestAnsweredMethodNotFound(t *testing.T) {
+	s := startProtocolFake(t, "--request-fs-read", "/etc/hostname", "--request-id-string")
+	s.nudge(t, "read it")
+	s.waitIdle(t)
+
+	if out := s.peek(t); !strings.Contains(out, "echo: read it") {
+		t.Fatalf("Peek = %q, want the turn to complete after the reply", out)
+	}
+	assertMethodNotFoundReplies(t, s, "fs-1")
+}
+
+func TestACPProtocolInitializeAdvertisesNoFSOrTerminal(t *testing.T) {
+	s := startProtocolFake(t)
+	raw, err := os.ReadFile(filepath.Join(s.logDir, "initialize.json"))
+	if err != nil {
+		t.Fatalf("initialize.json: %v", err)
+	}
+	var params struct {
+		ClientCapabilities json.RawMessage `json:"clientCapabilities"`
+	}
+	if err := json.Unmarshal(raw, &params); err != nil {
+		t.Fatalf("initialize.json decode: %v", err)
+	}
+	var caps any
+	if err := json.Unmarshal(params.ClientCapabilities, &caps); err != nil {
+		t.Fatalf("clientCapabilities decode %s: %v", params.ClientCapabilities, err)
+	}
+	got, _ := json.Marshal(caps)
+	const want = `{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false}`
+	if string(got) != want {
+		t.Fatalf("clientCapabilities = %s, want %s", got, want)
+	}
+}
+
+// assertMethodNotFoundReplies checks that the fake received exactly one
+// client reply, a -32601 error echoing wantID (a JSON number decodes as
+// float64, a string id stays a string).
+func assertMethodNotFoundReplies(t *testing.T, s *protocolSession, wantID any) {
+	t.Helper()
+	replies := s.jsonlRecords(t, "responses.jsonl")
+	if len(replies) != 1 {
+		t.Fatalf("responses.jsonl = %v, want one client reply", replies)
+	}
+	reply := replies[0]
+	if reply["id"] != wantID {
+		t.Fatalf("reply id = %#v, want %#v", reply["id"], wantID)
+	}
+	rpcErr, _ := reply["error"].(map[string]any)
+	if rpcErr == nil || rpcErr["code"] != float64(-32601) {
+		t.Fatalf("reply = %v, want error code -32601", reply)
+	}
+	if _, ok := reply["result"]; ok {
+		t.Fatalf("reply = %v, want no result", reply)
+	}
+}
+
+// lastTurn returns the session's last finished turn.
+func (s *protocolSession) lastTurn(t *testing.T) *turnRecord {
+	t.Helper()
+	current, last := s.conn(t).turns()
+	if current != nil {
+		t.Fatalf("turn %+v still running", current)
+	}
+	if last == nil {
+		t.Fatal("no finished turn recorded")
+	}
+	return last
+}
+
+func TestACPProtocolTurnCompletionPropagatesStopReason(t *testing.T) {
+	s := startProtocolFake(t, "--stop-reason", "max_tokens", "--usage", "12,34")
+	s.nudge(t, "count tokens")
+	if err := s.p.WaitForIdle(context.Background(), s.name, protocolWait); err != nil {
+		t.Fatalf("WaitForIdle: %v", err)
+	}
+
+	turn := s.lastTurn(t)
+	if turn.State != turnCompleted || turn.StopReason != "max_tokens" {
+		t.Fatalf("turn = %+v, want completed with stopReason max_tokens", turn)
+	}
+	want := turnUsage{InputTokens: 12, OutputTokens: 34, TotalTokens: 46}
+	if turn.Usage == nil || *turn.Usage != want {
+		t.Fatalf("usage = %+v, want %+v", turn.Usage, want)
+	}
+	if idle, err := s.p.SnapshotIdle(s.name); err != nil || !idle {
+		t.Fatalf("SnapshotIdle = (%v, %v), want (true, nil)", idle, err)
+	}
+}
+
+func TestACPProtocolTurnFailsOnPromptError(t *testing.T) {
+	s := startProtocolFake(t, "--prompt-error", "boom")
+	s.nudge(t, "fail please")
+	if err := s.p.WaitForIdle(context.Background(), s.name, protocolWait); err != nil {
+		t.Fatalf("WaitForIdle: %v", err)
+	}
+	if turn := s.lastTurn(t); turn.State != turnFailed || turn.Error != "boom" {
+		t.Fatalf("turn = %+v, want failed with the agent's error", turn)
+	}
+}
+
+func TestACPProtocolTurnFailsWhenAgentExits(t *testing.T) {
+	s := startProtocolFake(t, "--exit-during-prompt")
+	s.nudge(t, "die")
+	err := s.p.WaitForIdle(context.Background(), s.name, protocolWait)
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("WaitForIdle = %v, want ErrSessionNotFound when the agent exits mid-turn", err)
+	}
+	if turn := s.lastTurn(t); turn.State != turnFailed || turn.Error != turnFailureConnClosed {
+		t.Fatalf("turn = %+v, want failed %q", turn, turnFailureConnClosed)
+	}
+	if idle, err := s.p.SnapshotIdle(s.name); err == nil || idle {
+		t.Fatalf("SnapshotIdle = (%v, %v), want an error for an exited agent", idle, err)
+	}
+}
+
+func TestACPProtocolWaitForIdleBlocksUntilTurnEnds(t *testing.T) {
+	s := startProtocolFake(t, "--sigint", "cancel", "--turn-delay", "1h")
+	s.nudge(t, "long turn")
+	waitForPrompt(t, s)
+
+	if idle, err := s.p.SnapshotIdle(s.name); err != nil || idle {
+		t.Fatalf("SnapshotIdle = (%v, %v), want (false, nil) mid-turn", idle, err)
+	}
+	if err := s.p.WaitForIdle(context.Background(), s.name, 10*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("WaitForIdle mid-turn = %v, want context.DeadlineExceeded", err)
+	}
+	if err := s.p.Interrupt(s.name); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+	if err := s.p.WaitForIdle(context.Background(), s.name, protocolWait); err != nil {
+		t.Fatalf("WaitForIdle after cancel: %v", err)
+	}
+	if turn := s.lastTurn(t); turn.State != turnCompleted || turn.StopReason != acpStopReasonCancelled {
+		t.Fatalf("turn = %+v, want completed with stopReason %q", turn, acpStopReasonCancelled)
 	}
 }
 
@@ -343,5 +652,129 @@ func waitForPrompt(t *testing.T, s *protocolSession) {
 			t.Fatalf("fake never recorded a prompt; methods = %v", s.methods(t))
 		case <-tick.C:
 		}
+	}
+}
+
+// methodCount returns how many times the fake logged method.
+func (s *protocolSession) methodCount(t *testing.T, method string) int {
+	t.Helper()
+	n := 0
+	for _, m := range s.methods(t) {
+		if m == method {
+			n++
+		}
+	}
+	return n
+}
+
+func TestACPProtocolInterruptSettlesBySessionCancel(t *testing.T) {
+	s := startProtocolFake(t, "--on-cancel", "reply", "--cancel-latency", "200ms", "--turn-delay", "1h")
+	s.nudge(t, "long turn")
+	waitForPrompt(t, s)
+	start := time.Now()
+	if err := s.p.Interrupt(s.name); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+	elapsed := time.Since(start)
+	if elapsed < 200*time.Millisecond {
+		t.Fatalf("Interrupt returned after %v, want it to wait for the 200ms cancel latency", elapsed)
+	}
+	if elapsed >= protocolWait {
+		t.Fatalf("Interrupt took %v, want it settled within the %v bound", elapsed, protocolWait)
+	}
+	if s.conn(t).isBusy() {
+		t.Fatal("turn still busy after Interrupt returned")
+	}
+	if n := s.methodCount(t, methodSessionCancel); n != 1 {
+		t.Fatalf("methods.jsonl has %d session/cancel, want 1 (%v)", n, s.methods(t))
+	}
+	if signals := s.jsonlRecords(t, "signals.jsonl"); len(signals) != 0 {
+		t.Fatalf("signals.jsonl = %v, want no signal when session/cancel settles", signals)
+	}
+}
+
+func TestACPProtocolInterruptIdleSendsNothing(t *testing.T) {
+	s := startProtocolFake(t, "--sigint", "exit")
+	if err := s.p.Interrupt(s.name); err != nil {
+		t.Fatalf("Interrupt(idle): %v", err)
+	}
+	// The prompt round trip orders anything Interrupt wrote before it.
+	s.nudge(t, "still here")
+	s.waitIdle(t)
+	if !s.conn(t).alive() {
+		t.Fatal("fake exited: an idle Interrupt must not signal")
+	}
+	if n := s.methodCount(t, methodSessionCancel); n != 0 {
+		t.Fatalf("idle Interrupt sent %d session/cancel", n)
+	}
+	if signals := s.jsonlRecords(t, "signals.jsonl"); len(signals) != 0 {
+		t.Fatalf("signals.jsonl = %v, want none for an idle Interrupt", signals)
+	}
+}
+
+func TestACPProtocolInterruptNotSettledKeepsAgent(t *testing.T) {
+	prev := interruptSIGINTWait
+	interruptSIGINTWait = 100 * time.Millisecond
+	t.Cleanup(func() { interruptSIGINTWait = prev })
+	s := startProtocolFakeWithCancelTimeout(t, 100*time.Millisecond,
+		"--on-cancel", "ignore", "--sigint", "ignore", "--turn-delay", "1h")
+	s.nudge(t, "stubborn")
+	waitForPrompt(t, s)
+	err := s.p.Interrupt(s.name)
+	if !errors.Is(err, runtime.ErrInterruptNotSettled) {
+		t.Fatalf("Interrupt = %v, want runtime.ErrInterruptNotSettled", err)
+	}
+	if !s.conn(t).alive() {
+		t.Fatal("fake exited: Interrupt must never kill the agent")
+	}
+	deadline := time.NewTimer(protocolWait)
+	defer deadline.Stop()
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for len(s.jsonlRecords(t, "signals.jsonl")) < interruptSIGINTAttempts {
+		select {
+		case <-deadline.C:
+			t.Fatalf("signals.jsonl = %v, want %d SIGINT records", s.jsonlRecords(t, "signals.jsonl"), interruptSIGINTAttempts)
+		case <-tick.C:
+		}
+	}
+	for _, rec := range s.jsonlRecords(t, "signals.jsonl") {
+		if rec["signal"] != syscall.SIGINT.String() {
+			t.Fatalf("signals.jsonl record %v, want only SIGINT", rec)
+		}
+	}
+}
+
+// TestACPProtocolInterruptKeepsAgentThatExitsOnSIGINT is the spike
+// regression: an agent that exits on SIGINT keeps its conversation because
+// session/cancel settles the turn and no signal is sent.
+func TestACPProtocolInterruptKeepsAgentThatExitsOnSIGINT(t *testing.T) {
+	s := startProtocolFake(t, "--sigint", "exit", "--on-cancel", "reply", "--turn-delay", "1h")
+	sc := s.conn(t)
+	pid := sc.cmd.Process.Pid
+	s.nudge(t, "long turn")
+	waitForPrompt(t, s)
+	if err := s.p.Interrupt(s.name); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+	// --turn-delay would hold the next prompt too; answer it by cancel as
+	// well. What matters is that the same process receives it.
+	s.nudge(t, "next")
+	deadline := time.NewTimer(protocolWait)
+	defer deadline.Stop()
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for len(s.jsonlRecords(t, "prompts.jsonl")) < 2 {
+		select {
+		case <-deadline.C:
+			t.Fatalf("the agent never received the prompt after Interrupt; methods = %v", s.methods(t))
+		case <-tick.C:
+		}
+	}
+	if got := s.conn(t); got != sc || !sc.alive() || got.cmd.Process.Pid != pid {
+		t.Fatalf("agent pid %d replaced or exited after Interrupt", pid)
+	}
+	if signals := s.jsonlRecords(t, "signals.jsonl"); len(signals) != 0 {
+		t.Fatalf("signals.jsonl = %v, want none", signals)
 	}
 }

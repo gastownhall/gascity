@@ -396,7 +396,9 @@ type acpReaperBackend struct {
 func (a *acpReaperBackend) ListRunning(prefix string) ([]string, error) {
 	return a.w.ListRunning(prefix)
 }
-func (a *acpReaperBackend) ListRunningComplete() bool                { return a.w.ListRunningComplete() }
+
+func (a *acpReaperBackend) ListRunningComplete() bool { return a.w.ListRunningComplete() }
+
 func (a *acpReaperBackend) GetMeta(name, key string) (string, error) { return a.w.GetMeta(name, key) }
 func (a *acpReaperBackend) Stop(name string) error                   { return a.w.Stop(name) }
 func (a *acpReaperBackend) IsRunning(name string) bool               { return a.w.IsRunning(name) }
@@ -543,6 +545,7 @@ func (lr *laneReaperRun) reap(t *testing.T, st reaperState) (reaperEffects, *run
 }
 
 func runReapers(t *testing.T, st reaperState, w reaperEnv, inv *runtimeInventoryView) reaperEffects {
+	testCity := t.TempDir()
 	t.Helper()
 	rows := cloneReaperRows(st.rows)
 	var store beads.Store
@@ -561,9 +564,9 @@ func runReapers(t *testing.T, st reaperState, w reaperEnv, inv *runtimeInventory
 	log := w.callLog()
 	from := len(log.recorded())
 	log.setPhase("corpse")
-	cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, dt, w, inv, clock.Real{}, io.Discard)
+	cleanupDeadRuntimeSessionCorpses(testCity, store, testSeatWork(testCity, nil, store, nil), snapshot, dt, w, inv, clock.Real{}, io.Discard)
 	log.setPhase("closed")
-	reapRuntimesBoundToClosedBeads(store, snapshot, dt, w, inv, "", io.Discard)
+	reapRuntimesBoundToClosedBeads(store, snapshot, dt, w, inv, testCity, io.Discard)
 	log.setPhase("")
 
 	eff := reaperEffects{closes: map[string]string{}, calls: log.recorded()[from:], source: inventorySourceLive, closedSource: inventorySourceLive}
@@ -889,14 +892,16 @@ func reaperFixtures(boot time.Time) []reaperFixture {
 			},
 		},
 		{
-			name: "nil store still stops the corpse",
+			// R8a: the cleanup stops only while the stored row still carries
+			// the kill's facts; with no store there is no row to read.
+			name: "nil store stops nothing: no row to decide on",
 			state: func() reaperState {
 				st := reaperFixtureState([]beads.Bead{reaperRow("s1", "dead-worker", "active")},
 					map[string]reaperRuntime{"dead-worker": {incarnation: "d:1", dead: true}})
 				st.nilStore = true
 				return st
 			},
-			stops: []string{"dead-worker"}, closes: map[string]string{},
+			closes: map[string]string{},
 		},
 		{
 			name: "pre-boot reap when the server is absent",

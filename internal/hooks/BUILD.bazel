@@ -27,8 +27,14 @@ go_test(
         "hooks_family_test.go",
         "hooks_test.go",
         "overlay_provider_hook_path_shape_test.go",
+        "plugin_node_test.go",
         "preserve_test.go",
         "testenv_import_test.go",
+    ],
+    data = [
+        "opencode_plugin.test.mjs",
+        "//internal/bootstrap/packs/core:overlay/per-provider/mimocode/.mimocode/plugin/gascity.js",
+        "//internal/bootstrap/packs/core:overlay/per-provider/opencode/.opencode/plugins/gascity.js",
     ],
     embed = [":hooks"],
     deps = [
@@ -41,6 +47,12 @@ go_test(
     ],
 )
 
+filegroup(
+    name = "config_files",
+    srcs = glob(["config/**"]),
+    visibility = ["//visibility:public"],
+)
+
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(
@@ -49,6 +61,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

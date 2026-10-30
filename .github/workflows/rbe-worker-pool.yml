@@ -8,6 +8,10 @@
 # workers register with the OSS scheduler (dedicated rbe-oss-worker cert);
 # developer and agent builds use the default instance and never run here.
 name: rbe-worker-pool
+# The pool scalers count floor workers by this name (oss-pool-scaler.py
+# ROLE_TITLE): "(floor, idle 15m)". A dispatch without the input (CI
+# pre-warm, by hand) is named burst and keeps the default idle_minutes.
+run-name: ${{ format('rbe-worker-pool ({0}, idle {1}m)', inputs.role || 'burst', inputs.idle_minutes) }}
 
 on:
   workflow_dispatch:
@@ -20,6 +24,13 @@ on:
         description: Retire after this many minutes regardless (recycles the VM)
         default: "300"
         type: string
+      role:
+        description: floor (keeps a warm worker, the longer idle window) or burst; the run's name only, the worker never reads it
+        default: burst
+        type: choice
+        options:
+          - burst
+          - floor
 
 permissions:
   contents: read
@@ -27,9 +38,9 @@ permissions:
 jobs:
   worker:
     name: rbe pool worker (Blacksmith, OSS scheduler)
-    # Default branch only. (A Blacksmith sticky disk for a warm worker cache
-    # needs useblacksmith/stickydisk in this repo's allowed-actions list;
-    # blacksmith-worker.sh takes it via CACHE_DIR.)
+    # Default branch only. The worker's local CAS starts from the read-only
+    # warm set (RBE_WARM_URL below), never from a Blacksmith sticky disk: any
+    # job in this repository, the fork pool's included, could commit one.
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 330
@@ -38,17 +49,26 @@ jobs:
         with:
           # No GITHUB_TOKEN in .git/config: remote actions run on this runner (S11.3).
           persist-credentials: false
-      # worker-env (tools/rbe/worker-env-drift): provision and measure this
+      # The worker code: gastownhall/rbe-worker at .github/actions/rbe-worker/pin,
+      # fetched anonymously from its main and verified there. No secret in
+      # this step.
+      - name: Fetch the pinned rbe-worker
+        id: rbe-worker
+        uses: ./.github/actions/rbe-worker
+      # worker-env (rbe-worker's worker-env-drift): provision and measure this
       # host against the pin before serving. Drift fails this step, never the
       # worker: a drifted worker still registers (advertising what it
-      # measured) and serves the pool's actions that send no worker-env
-      # (beads). The upload is what await-drift reports from.
+      # measured) and serves only the pool's actions that send no
+      # worker-env. gascity's and beads' both send the pin, so it serves
+      # neither. The upload is what await-drift reports from.
       - name: Measure this host against the worker-env pin
         id: worker-env
         continue-on-error: true
         env:
           WORKER_MODE: measure
-        run: tools/rbe/blacksmith-worker.sh
+          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
+          RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
+        run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
       - name: Upload the worker-env drift
         if: steps.worker-env.outcome == 'failure'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -62,6 +82,8 @@ jobs:
           RBE_WORKER_TLS_CERT: ${{ secrets.RBE_WORKER_TLS_CERT }}
           RBE_WORKER_TLS_KEY: ${{ secrets.RBE_WORKER_TLS_KEY }}
           RBE_WEST_HOST: ${{ secrets.RBE_WEST_HOST }}
+          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
+          RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
           WORKER_MODE: pool
           POOL_IDLE_MINUTES: ${{ inputs.idle_minutes }}
           POOL_MAX_MINUTES: ${{ inputs.max_minutes }}
@@ -84,7 +106,16 @@ jobs:
           # the running pool runs, which keep their store until they retire.
           RBE_WIRE_ZSTD: ${{ vars.RBE_WIRE_ZSTD || '0' }}
           RBE_WIRE_ZSTD_READ_URL: ${{ vars.RBE_WIRE_ZSTD_READ_URL || '' }}
-        run: tools/rbe/blacksmith-worker.sh
+          # Warm set (infra README "Warm worker caches"): hot CAS blobs the core
+          # selects from trusted results and publishes read-only on R2; no pool
+          # VM can write it, and the worker re-hashes every blob before
+          # NativeLink loads it. Off until RBE_WARM_URL is set (an
+          # https://rbe-warm.ops.gascity.com URL); RBE_WARM_EVERY=N warms one
+          # run in N (the A/B canary). Rollback: unset RBE_WARM_URL; the next
+          # dispatch starts cold.
+          RBE_WARM_URL: ${{ vars.RBE_WARM_URL || '' }}
+          RBE_WARM_EVERY: ${{ vars.RBE_WARM_EVERY || '1' }}
+        run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
 
   # Beside the worker, which serves for hours: wait for its drift upload to
   # complete, so drift is reported while the worker still runs. GitHub-hosted,
@@ -103,11 +134,15 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+      - name: Fetch the pinned rbe-worker
+        id: rbe-worker
+        uses: ./.github/actions/rbe-worker
       - name: Wait for the worker's measurement
         id: await
         env:
           GH_TOKEN: ${{ github.token }}
-        run: tools/rbe/worker-env-drift await "rbe pool worker (Blacksmith, OSS scheduler)" "Upload the worker-env drift"
+          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
+        run: '"$RBE_WORKER_DIR/worker-env-drift" await "rbe pool worker (Blacksmith, OSS scheduler)" "Upload the worker-env drift"'
 
   # The pinned host's drift issue: opened with the manifest and pin to commit,
   # or updated with a new measurement. The farm caps the pools while it is
@@ -136,9 +171,14 @@ jobs:
         with:
           name: worker-env-drift
           path: ${{ runner.temp }}/worker-env-drift
+      - name: Fetch the pinned rbe-worker
+        if: steps.drift.outcome == 'success'
+        id: rbe-worker
+        uses: ./.github/actions/rbe-worker
       - name: Open or update the drift issue
         if: steps.drift.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: tools/rbe/worker-env-drift report "$RUNNER_TEMP/worker-env-drift"
+          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
+        run: '"$RBE_WORKER_DIR/worker-env-drift" report "$RUNNER_TEMP/worker-env-drift"'

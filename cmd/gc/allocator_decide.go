@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -27,10 +26,9 @@ import (
 // the canonical named rows, the partial causes, the awake set,
 // classification with its Keep conversions, and floors), and P3-5a2 steps
 // 4-8 and 14 (demand, pool desired, realization, named planning, the overlay
-// and bindings). P3-5b adds steps 15-17 (allocator_grants.go): the ledger
-// housekeeping, the bucket, start ranks, grants, create admission and the
-// diff. Unwired: P3-7 gathers the inputs, applies the ledger ops and
-// publishes the snapshot.
+// and bindings). Admission is not part of it: the planner admits the pass's
+// intents after the decide (CONTRACT v5 P4). Unwired: the planner gathers
+// the inputs.
 
 // errDecideNoClock refuses a pass without its one clock: a zero Now would
 // read every lease as expired and every fact as stale.
@@ -45,7 +43,6 @@ type allocInputs struct {
 	// Now is the pass's one clock (POOL-026, #35). It must be set.
 	Now       time.Time
 	Epoch     string
-	SelGen    uint64 // the generation this pass publishes; ledger entries carry it
 	Cfg       *config.City
 	ConfigRev string
 	EnvGen    uint64
@@ -61,8 +58,13 @@ type allocInputs struct {
 	// ScaleCheck is the external-reads lane's scale_check result at Now
 	// (externalReadsRecording.scaleCheck), nil when missing or stale (I5).
 	ScaleCheck *scaleCheckResult
-	Obs        *ObservationSnapshot
-	ObsMaxAge  time.Duration
+	// ScaleCheckStartedAt is when ScaleCheck's run started, and ClaimsSeen
+	// when the planner first saw each open work assignment (the pairing
+	// guard, claimHeldTemplates). A nil ClaimsSeen holds nothing.
+	ScaleCheckStartedAt time.Time
+	ClaimsSeen          map[workClaim]time.Time
+	Obs                 *ObservationSnapshot
+	ObsMaxAge           time.Duration
 	// Endpoints is each config-only endpoint key's breaker reading.
 	Endpoints map[endpointKey]endpointView
 	// ProviderHealth is I7 at Now; nil reads as no registry (fail open).
@@ -78,24 +80,15 @@ type allocInputs struct {
 	// provider binary): legacy realizes nothing for them.
 	TransportRefused map[string]string
 	ReadyWaits       map[string]bool // I10; nil until P4.3
-	// Ledger is a copy of the uncleared entries (intentLedger.View), and
-	// Reservations the planning reservations of its create entries.
-	Ledger       []ledgerEntry
-	Reservations []planReservation
-	// Backoff is the backoff table (backoffTable.Snapshot, read after the
-	// ledger). A create record live at Now refuses its plan identity
-	// (AM-N8); a work record live at Now refuses its bead's worktree
-	// evidence while its fingerprint matches (#34).
+	// InFlight is the in-flight map's view (inflightMap.view): its running
+	// and ambiguous creates stand in for their rows until the census shows
+	// them (inFlightStandIns).
+	InFlight inflightView
+	// Backoff is the backoff table (backoffTable.Snapshot). A create record
+	// live at Now refuses its plan identity (AM-N8); a work record live at
+	// Now refuses its bead's worktree evidence while its fingerprint matches
+	// (#34).
 	Backoff map[string]backoffRecord
-	// Prev is the last published snapshot, for the diff.
-	Prev *selectionSnapshot
-	// Bucket, FairSeed and EntrySeq are allocator state, carried from the
-	// last pass's decision: the token bucket, the fair-share rotation seed
-	// (C4.8) and the sequence ledger entry IDs and create tokens are minted
-	// from, unique within the epoch.
-	Bucket   bucketState
-	FairSeed uint64
-	EntrySeq uint64
 }
 
 // demandView is the demand collectors' output for one pass (P3 spec §4.3),
@@ -108,6 +101,7 @@ type demandView struct {
 	// A suspended city reads them too: legacy's suspend drain spares a row
 	// with open assigned work.
 	AssignedWork      []beads.Bead
+	AssignedStores    []beads.Store
 	AssignedStoreRefs []string
 	ReadyAssigned     map[storeScopedBeadKey]bool
 	StorePartial      bool
@@ -124,6 +118,10 @@ type demandView struct {
 	// environment generation.
 	RelocatedClaimRefs []string
 	WakeClaimRefs      []string
+	// ProbeStores are the stores of the demand targets' default scale-check
+	// probes (demandProbeStores): K1's lane reads them, and gather's
+	// lane-fed check reuses them rather than build the targets again.
+	ProbeStores []beads.Store
 }
 
 // endpointView is one endpoint's breaker as the pass reads it.
@@ -157,23 +155,6 @@ type allocDecision struct {
 	// Alerts are the pass's operator alerts: each configured named identity
 	// with more than one open row (C2.13). OBS1 surfaces them.
 	Alerts []string
-
-	// LedgerOps are the pass's ledger moves in order (clears, releases,
-	// reserves), Creates the admitted plans for the create executor, and
-	// Reservations the planning reservations of every create entry still
-	// uncleared, by entry ID: allocator state, fed back as
-	// allocInputs.Reservations. Bucket holds the grant debits and no
-	// release refund: P3-7 credits a refund only on a confirmed Release.
-	LedgerOps    []ledgerOp
-	Creates      []createPlan
-	Reservations []planReservation
-	Bucket       bucketState
-	FairSeed     uint64
-	EntrySeq     uint64
-	// Enqueue is the session keys whose entry changed against Prev (C2.10);
-	// NextWake when the allocator must pass again, 0 for the patrol backstop.
-	Enqueue  []rowKey
-	NextWake time.Duration
 }
 
 // decidePass is one decide's working state.
@@ -183,7 +164,6 @@ type decidePass struct {
 	snap *selectionSnapshot
 	obs  map[rowKey]rowObservation
 
-	sessionsLeg string
 	// none holds the rows the allocator does not manage, by reason (AM11,
 	// C2.11, C2.13).
 	none map[rowKey]string
@@ -204,16 +184,25 @@ type decidePass struct {
 	poolStates  []PoolDesiredState
 	poolDesired map[string]int
 	poolWork    []beads.Bead
-	// standIns are the templates of the pending-create rows uncleared
-	// creates stand in for in pool demand, by stand-in ID.
+	// inFlight are the planning reservations of the in-flight creates the
+	// census does not show yet (inFlightCreates), and standIns the templates
+	// of the pending-create rows the pool ones stand in for, by stand-in ID.
+	inFlight []planReservation
 	standIns map[string]string
 
+	// sessions is decidableSnapshot's: the pool retention and the planner
+	// read one snapshot.
+	sessions *sessionBeadSnapshot
 	bp       *agentBuildParams
 	desired  map[string]TemplateParams // membership only (classifyOverlaySession)
 	selected map[rowKey]*selection
 	plans    []allocPlan
 	trace    []allocTraceRecord
 	alerts   []string
+
+	// index is the realization index (allocator_index.go); nil realizes
+	// over the pass's own params, the index's oracle.
+	index *passIndex
 }
 
 // selection is a row the pass placed InDesired.
@@ -227,6 +216,8 @@ type selection struct {
 
 // decideAllocation is the allocator's whole decision for one pass. It is
 // pure: identical inputs give identical outputs.
+//
+//gc:pure
 func decideAllocation(in allocInputs) (allocDecision, error) {
 	if in.Now.IsZero() {
 		return allocDecision{}, errDecideNoClock
@@ -235,13 +226,12 @@ func decideAllocation(in allocInputs) (allocDecision, error) {
 		return allocDecision{}, errDecideNoCensus
 	}
 	p := newDecidePass(in)
+	p.inFlight = p.inFlightCreates()
 	p.prepare()
 	if !in.CitySuspended {
 		p.plan()
 	}
-	d := p.finish()
-	p.admit(&d)
-	return d, nil
+	return p.finish(), nil
 }
 
 func newDecidePass(in allocInputs) *decidePass {
@@ -261,12 +251,12 @@ func newDecidePass(in allocInputs) *decidePass {
 		},
 		none:     make(map[rowKey]string),
 		byID:     make(map[string]rowKey),
+		index:    newPassIndex(),
 		standIns: make(map[string]string),
 		desired:  make(map[string]TemplateParams),
 		selected: make(map[rowKey]*selection),
 	}
 	if c := p.in.Census; len(c.Legs) > 0 {
-		p.sessionsLeg = c.Legs[0].Ref
 		p.obs = observeCensus(in.Obs, c, in.Now, in.ObsMaxAge)
 	}
 	return p
@@ -288,7 +278,9 @@ func (p *decidePass) finish() allocDecision {
 		p.suspended()
 		return p.decision()
 	}
-	p.classify(p.awake())
+	decisions := p.awake()
+	p.classify(decisions)
+	p.honorWakes(decisions)
 	p.floors()
 	p.bindings()
 	return p.decision()
@@ -297,23 +289,24 @@ func (p *decidePass) finish() allocDecision {
 // classifyRows is step 2: every census row gets an entry, and the rows the
 // allocator does not manage are set aside with legacy's predicates. They
 // keep the slots and names legacy gives them (fail-closed): every one stays
-// in occupancy. A pending or stale create is a rollback candidate only when
-// its own runtime is absent, absent-unconfirmed or a name another row
-// holds. Unknown liveness keeps it managed, and so does a dead pane: legacy's
-// IsRunning reads a corpse as not running, but v2's start path recycles it.
+// in occupancy. A pending create (one holding pending_create_claim) is a
+// rollback candidate only past A10's never-started deadline, with no lease
+// predicate (v5 P4, SC A5), and only when its own runtime is absent,
+// absent-unconfirmed or a name another row holds. Unknown liveness keeps it managed, and so does
+// a dead pane: legacy's IsRunning reads a corpse as not running, but v2's
+// start path recycles it. A creating row with no claim is never one (v5 C3,
+// B5): it stays managed and reusable, as legacy's is, and A6 heals it.
 // Any other row whose name another bead's runtime holds is None (C11).
 func (p *decidePass) classifyRows() {
 	c := p.in.Census
-	var startupTimeout time.Duration
-	if p.in.Cfg != nil {
-		startupTimeout = p.cfg.Session.StartupTimeoutDuration()
-	}
-	clk := &clock.Fake{Time: p.in.Now}
 	keys := make([]rowKey, 0, len(c.Rows))
 	for k := range c.Rows {
 		keys = append(keys, k)
 	}
 	sortRowKeys(keys)
+	// An Info is kilobytes: size the row lists once.
+	p.occupancy = slices.Grow(p.occupancy, len(keys))
+	p.managed = slices.Grow(p.managed, len(keys))
 	for _, k := range keys {
 		row := c.Rows[k]
 		template := resolvedSessionTemplateInfo(row.Info, p.cfg)
@@ -321,7 +314,7 @@ func (p *decidePass) classifyRows() {
 			Key:      k,
 			Basis:    rowBasis{Incarnation: row.Incarnation, InstanceToken: row.InstanceToken},
 			Template: template,
-			Endpoint: endpointKeyForAgent(p.cfg, findAgentByTemplate(p.cfg, template), row.Info),
+			Endpoint: endpointKeyForAgent(p.cfg, p.agentByTemplate(template), row.Info),
 		}
 		o, observed := p.obs[k]
 		if observed {
@@ -335,21 +328,19 @@ func (p *decidePass) classifyRows() {
 		}
 		p.occupancy = append(p.occupancy, row.Info)
 		info := row.Info
-		notRunning := observed && (o.Liveness == livenessAbsent || o.Liveness == livenessAbsentUnconfirmed || o.Liveness == livenessOccupied)
+		notRunning := observed && (o.Liveness == livenessGone || o.Liveness == livenessOccupied)
 		// A guarded endpoint the pass has no view of holds (fail closed).
 		ep, viewed := p.in.Endpoints[e.Endpoint]
 		endpointHolds := e.Endpoint != "" && (!viewed || ep.HoldsPendingCreate)
 		switch {
-		case k.Leg != p.sessionsLeg:
+		case k.Leg != c.sessionsLeg():
 			p.none[k] = reasonCensusOnly
 		case row.UnknownState:
 			p.none[k] = reasonUnknownState
 		case isFailedCreateSessionInfo(info):
 			p.none[k] = reasonFailedCreate
-		case notRunning && info.PendingCreateClaim && pendingCreateLeaseExpiredForRollbackInfo(info, clk, startupTimeout) &&
+		case notRunning && pendingCreateNeverStartedExpiredAt(info, p.in.Now) && // A10's never-started deadline, no lease (v5 P4, SC A5)
 			!endpointHolds:
-			p.none[k] = reasonRollbackCandidate
-		case notRunning && !info.PendingCreateClaim && staleCreatingStateInfo(info, clk) && !pendingCreateStartInFlightInfo(info, clk, startupTimeout):
 			p.none[k] = reasonRollbackCandidate
 		case o.Liveness == livenessOccupied:
 			p.none[k] = reasonNameOccupied
@@ -417,6 +408,7 @@ func (p *decidePass) identityDuplicates() {
 }
 
 func (p *decidePass) selectDecidable() {
+	p.decidable = slices.Grow(p.decidable, len(p.managed))
 	for _, info := range p.managed {
 		if _, none := p.none[p.byID[info.ID]]; !none {
 			p.decidable = append(p.decidable, info)
@@ -484,6 +476,29 @@ func (p *decidePass) openAssignedWork(info session.Info) *assignedWorkView {
 // or its template retained), then an uncertain observation. In a suspended
 // city a pending create legacy still leases and a row with open assigned
 // work keep too.
+//
+// In a running city an undesired pending create keeps while legacy still
+// leases it (v5.9r as amended; SESS-065, SESS-596): legacy preserves such a
+// row before any drain or close (session_reconciler.go:2368), and its
+// MAINT-051 sweep skips a leased claim (city_runtime.go:3880), pool rows
+// included. A fresh create read between its two writes (the row, then its
+// session_name) is undesired for want of a name (staging J45), whether made
+// by `gc session new` or by the API (session_origin ephemeral). Only a row
+// holding pending_create_claim keeps, so the claim's lease bounds the keep:
+// the never-started deadline (S6), or a started create's in-flight and
+// attempt windows. A suspended agent ends it at once; a suspended rig does
+// not, as in legacy, whose lease reads only the agent. A lease anchor
+// (last_woke_at, pending_create_started_at) pendingCreateFutureSkew or more
+// in the future holds nothing, in a running or a suspended city, so a clock
+// stepped back cannot pin the row. Past its lease, A10 rolls the row back.
+// Legacy also leases rows that hold no claim; a running city does not keep
+// them. A claimless start-pending row has no deadline. A client's create
+// still starting its runtime (manualCreateStartInFlightAt) has one, its
+// CreatedAt plus the in-flight window, and legacy keeps it, so not keeping
+// it here is a gap (ga-j07r38). The suspended-city keep, failedCreateLeased
+// and occupantLeaseHolds honor it through pendingCreateSessionStillLeasedAt;
+// pendingCreateAnchorAhead does not read CreatedAt, so a CreatedAt ahead of
+// the clock lengthens that hold (ga-mmq1ft).
 func (p *decidePass) keepReason(e *selectionEntry, info session.Info) string {
 	if e.Desired != desireSleep && e.Desired != desireDrain {
 		return ""
@@ -494,13 +509,28 @@ func (p *decidePass) keepReason(e *selectionEntry, info session.Info) string {
 	case e.ObservationUncertain:
 		return reasonObservationUncertain
 	case !p.in.CitySuspended:
+		if e.Desired == desireDrain && info.PendingCreateClaim && !pendingCreateAnchorAhead(info, p.in.Now) && pendingCreateSessionStillLeasedAt(info, p.cfg, p.in.Now) {
+			return reasonPendingCreate
+		}
 		return ""
-	case pendingCreateSessionStillLeasedInfo(info, p.cfg, &clock.Fake{Time: p.in.Now}):
+	case !pendingCreateAnchorAhead(info, p.in.Now) && pendingCreateSessionStillLeasedAt(info, p.cfg, p.in.Now):
 		return reasonPendingCreate
 	case e.AssignedWork != nil:
 		return reasonAssignedWork
 	}
 	return ""
+}
+
+// pendingCreateAnchorAhead reports a pending create's lease anchor
+// (last_woke_at or pending_create_started_at) pendingCreateFutureSkew or more
+// past now: a clock stepped back, which must not extend the keep.
+func pendingCreateAnchorAhead(info session.Info, now time.Time) bool {
+	for _, raw := range []string{info.LastWokeAt, info.PendingCreateStartedAt} {
+		if at, ok := parseRFC3339Metadata(raw); ok && at.Sub(now) >= pendingCreateFutureSkew {
+			return true
+		}
+	}
+	return false
 }
 
 // awake is steps 10 and 11: the awake set keyed by bead ID over the
@@ -515,6 +545,9 @@ func (p *decidePass) awake() map[string]AwakeDecision {
 	}
 	input := newAwakeInputFromSnapshot(p.cfg, agentSuspended, infos, p.poolDesired, p.named.workReady,
 		p.named.routedDemand, nil, p.in.ReadyWaits, work, readyAssignedFlagsForBeads(p.in.Demand.ReadyAssigned, work, workRefs), p.in.Now)
+	if p.index != nil {
+		input.workIndex = newAwakeWorkIndex(input.WorkBeads)
+	}
 	for _, info := range infos {
 		o := p.obs[p.byID[info.ID]]
 		// Unknown liveness reads running, and an uncertain attach on a live
@@ -570,13 +603,22 @@ func (p *decidePass) configSleepSuppressed(info session.Info, o rowObservation, 
 			ref.DetachedAt = obs.LastActivity.UTC().Format(time.RFC3339Nano)
 		}
 	}
-	if !configWakeSuppressedInfo(ref, policy, nil, &clock.Fake{Time: p.in.Now}) {
+	if suppressed, _ := configWakeSuppressedAt(ref, policy, nil, p.in.Now); !suppressed {
 		return false
+	}
+	// An uncertain attach reads attached for the awake set (C2.9), and
+	// classify keeps the wake that rests on it. It must not outrank the policy
+	// as well: a ready wait relabels that wake to "wait-ready", which classify
+	// does not hold, so the row would wake on an attach no one read. Left
+	// suppressed, it sleeps, and keepReason keeps it. observeRow never sets
+	// Uncertain with Attached, so a known attach still overrides.
+	if o.Uncertain {
+		d.Attached = false
 	}
 	eval := awakeSetToWakeEvals(map[string]AwakeDecision{info.SessionNameMetadata: d},
 		[]AwakeSessionBead{{ID: info.ID, SessionName: info.SessionNameMetadata}})[info.ID]
 	template := normalizedSessionTemplateInfo(info, p.cfg)
-	return !wakeDemandOverridesSleepSuppression(d, eval, policy, p.poolDesired, template, info.SleepIntent != "")
+	return !wakeDemandOverridesSleepSuppression(d, eval, policy, p.poolDesired, template, explicitSleepIntentInfo(info), explicitWakePendingInfo(info))
 }
 
 // classify is step 12 (CONTRACT §2.2): InDesired ∧ ShouldWake is Wake,
@@ -616,11 +658,12 @@ func (p *decidePass) classify(decisions map[string]AwakeDecision) {
 			e.Desired, e.Reason = desireSleep, firstNonEmpty(d.Reason, reasonNoWake)
 		default:
 			e.Desired, e.Reason = desireDrain, firstNonEmpty(d.Reason, reasonNoWake)
-			e.DrainReason = drainOrphaned
+			e.DrainReason, e.OpenWork = drainOrphaned, p.openAssignedWork(info)
 			if p.agentSuspended(e.Template) {
 				e.DrainReason = drainSuspended
 			}
 		}
+		e.WakeHonored = p.honorsExplicitWake(info, e.Template)
 		if reason := p.keepReason(e, info); reason != "" {
 			e.Desired, e.Reason = desireKeep, reason
 		}
@@ -641,7 +684,7 @@ func (p *decidePass) floors() {
 		byTemplate[template] = append(byTemplate[template], k)
 	}
 	for template, keys := range byTemplate {
-		agent := findAgentByTemplate(p.cfg, template)
+		agent := p.agentByTemplate(template)
 		if agent == nil {
 			continue
 		}
@@ -671,7 +714,7 @@ func (p *decidePass) decision() allocDecision {
 	return allocDecision{
 		Snapshot:        p.snap,
 		Plans:           p.plans,
-		Planning:        slices.Clone(p.occupancy),
+		Planning:        slices.Clip(p.occupancy), // the pass is done with it
 		ReadyRouted:     p.merged.ReadyUnassignedRouted,
 		ReadyRoutedRefs: p.merged.ReadyUnassignedRoutedRefs,
 		Trace:           p.trace,
@@ -715,8 +758,73 @@ func (p *decidePass) retains(template string, info session.Info) bool {
 
 // agentSuspended reports a configured template whose agent or rig is
 // suspended: its undesired rows drain as suspended, not orphaned.
+// honorWakes is D7 rule 4 (CONTRACT v5.10n): a row with a pending explicit
+// wake AL1 honors (WakeHonored) is wanted, in or out of its template's
+// desired set, so it is never Sleep or Drain and no drain or close takes it.
+// It wakes within its template's max_active_sessions (underMaxActive); past
+// the max, or while a hold or quarantine
+// suppresses the wake, it is Keep and the wake waits. Rows are taken in key
+// order, so the bound is deterministic.
+func (p *decidePass) honorWakes(decisions map[string]AwakeDecision) {
+	var keys []rowKey
+	for k, e := range p.snap.Entries {
+		if e.WakeHonored && (e.Desired == desireSleep || e.Desired == desireDrain) {
+			keys = append(keys, k)
+		}
+	}
+	sortRowKeys(keys)
+	for _, k := range keys {
+		e := p.snap.Entries[k]
+		d := decisions[p.in.Census.Rows[k].Info.ID]
+		e.Desired, e.DrainReason, e.OpenWork = desireKeep, "", nil
+		e.Reason = firstNonEmpty(d.Reason, reasonExplicitWake)
+		if d.ShouldWake && p.underMaxActive(k, e.Template) {
+			e.Desired = desireWake
+		}
+	}
+}
+
+// underMaxActive reports room under template's max_active_sessions for row
+// k to wake: everything else of the template that runs or is about to
+// numbers fewer than the max. That is its other rows woken this pass, alive,
+// or of unknown liveness (the awake set reads unknown as running), the
+// creates this pass plans, and the creates in flight the census does not
+// show yet. No max (nil) is unlimited.
+func (p *decidePass) underMaxActive(k rowKey, template string) bool {
+	agent := p.agentByTemplate(template)
+	if agent == nil || agent.EffectiveMaxActiveSessions() == nil {
+		return true
+	}
+	active := 0
+	for other, e := range p.snap.Entries {
+		if other != k && e.Template == template && (e.Desired == desireWake || e.Liveness == livenessAlive || e.Liveness == livenessUnknown) {
+			active++
+		}
+	}
+	for _, plan := range p.plans {
+		if plan.Template == template {
+			active++
+		}
+	}
+	for _, r := range p.inFlight {
+		if r.Template == template {
+			active++
+		}
+	}
+	return active < *agent.EffectiveMaxActiveSessions()
+}
+
+// honorsExplicitWake is the awake set's explicit-wake desire
+// (compute_awake_set.go, ExplicitWake) for a request still pending
+// (explicitWakePendingInfo: not served by a sleep since), on a row that is
+// not dependency-only, of a configured agent that is not suspended.
+func (p *decidePass) honorsExplicitWake(info session.Info, template string) bool {
+	return explicitWakePendingInfo(info) && !info.DependencyOnly &&
+		p.agentByTemplate(template) != nil && !p.agentSuspended(template)
+}
+
 func (p *decidePass) agentSuspended(template string) bool {
-	agent := findAgentByTemplate(p.cfg, template)
+	agent := p.agentByTemplate(template)
 	return agent != nil && (agent.Suspended || agentInSuspendedRig(p.in.CityPath, agent, p.cfg.Rigs, p.in.SuspendedRigPaths))
 }
 
@@ -737,8 +845,8 @@ type runtimeNameState uint8
 
 const (
 	nameUnknown runtimeNameState = iota
-	// nameAbsent: listed No, or not listed by a fresh pass that can stand
-	// for absence (absent-unconfirmed).
+	// nameAbsent: not listed by a fresh pass that every backend listed
+	// completely and attested (readPresence's gone).
 	nameAbsent
 	// nameCorpse: listed, but its pane is not running. Legacy's IsRunning
 	// reads it as not running, so it frees a singleton's name.
@@ -754,34 +862,24 @@ type runtimeNameReading struct {
 	obs   RuntimeObservation
 }
 
-// readRuntimeName reads a runtime name from I3 by name, with P3-3's
-// presence rules (inventoryAbsence, listedObservation): a name a fresh pass
-// listed on an unprimed backend is present.
+// readRuntimeName reads a runtime name from I3 by name, in observeRow's
+// presence order (readPresence; POOL-052): a name a fresh pass listed on an
+// unprimed backend is present, and only a complete pass proves it absent.
 func readRuntimeName(snap *ObservationSnapshot, name string, now time.Time, maxAge time.Duration) runtimeNameReading {
 	name = strings.TrimSpace(name)
 	if name == "" || snap == nil {
 		return runtimeNameReading{state: nameUnknown}
 	}
-	listed, provable := inventoryAbsence(snap, now, maxAge)
-	r := runtimeNameReading{state: nameUnknown}
-	switch f := snap.Fact(name, FactListed, now, maxAge); {
-	case f.Value == ObsNo:
-		r.state = nameAbsent
-		return r
-	case f.Value == ObsYes:
-		r.obs, _ = snap.Observation(name, now, maxAge)
-	case listed[name]:
-		r.obs = listedObservation(snap, name, now, maxAge)
-	case provable:
-		r.state = nameAbsent
-		return r
-	default:
-		return r
-	}
+	listed, complete := inventoryAbsence(snap, now, maxAge)
+	obs, present, gone, _ := readPresence(snap, name, listed, complete, now, maxAge)
+	r := runtimeNameReading{state: nameUnknown, obs: obs}
 	switch {
-	case r.obs.Running.Value == ObsNo:
+	case gone:
+		r.state = nameAbsent
+	case !present:
+	case obs.Running.Value == ObsNo:
 		r.state = nameCorpse
-	case r.obs.ProcessAlive.Value == ObsNo:
+	case obs.ProcessAlive.Value == ObsNo:
 		r.state = nameZombie
 	default:
 		r.state = nameAlive

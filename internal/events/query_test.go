@@ -21,6 +21,26 @@ func TestMatchesFilter_Subject(t *testing.T) {
 	}
 }
 
+func TestMatchesFilter_Types(t *testing.T) {
+	e := Event{Type: BeadClosed, Actor: "actor-a"}
+
+	if !matchesFilter(e, Filter{Types: []string{BeadCreated, BeadClosed}}) {
+		t.Error("expected match when Types lists the event's type")
+	}
+	if matchesFilter(e, Filter{Types: []string{BeadCreated, BeadUpdated}}) {
+		t.Error("expected no match when Types omits the event's type")
+	}
+	if !matchesFilter(e, Filter{Types: []string{}}) {
+		t.Error("empty Types should match every type")
+	}
+	if matchesFilter(e, Filter{Type: BeadCreated, Types: []string{BeadClosed}}) {
+		t.Error("Type and Types must both hold")
+	}
+	if matchesFilter(e, Filter{Types: []string{BeadClosed}, Actor: "actor-b"}) {
+		t.Error("Types must combine with the other predicates")
+	}
+}
+
 func TestMatchesFilter_Until(t *testing.T) {
 	now := time.Now()
 	e := Event{Type: BeadCreated, Ts: now}

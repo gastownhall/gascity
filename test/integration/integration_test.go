@@ -39,6 +39,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -78,6 +79,11 @@ const (
 	integrationBDCommandTimeout      = 15 * time.Second
 	integrationSupervisorStopTimeout = 10 * time.Second
 	integrationSupervisorWaitDelay   = 10 * time.Second
+	// integrationSupervisorReadyTimeout bounds startIsolatedSupervisor's wait
+	// for the control socket. It matches gc's own supervisorReadyTimeout
+	// (cmd/gc/cmd_supervisor_lifecycle.go), the budget `gc supervisor start`
+	// gives the same readiness condition.
+	integrationSupervisorReadyTimeout = 15 * time.Second
 )
 
 const (
@@ -237,7 +243,7 @@ func TestMain(m *testing.M) {
 	} else if bazeltest.IsBazel() {
 		// Under bazel the pinned bd ships prebuilt in runfiles as a data dep
 		// (http_archive of the same release the go-test CI installs).
-		if bd := runfilesBinaryAt("bd_bin_v1_3_1", "bd"); bd != "" {
+		if bd := runfilesBinaryAt("bd_bin_v1_3_2", "bd"); bd != "" {
 			realBDBinary = bd
 		}
 	} else {
@@ -284,7 +290,7 @@ func TestMain(m *testing.M) {
 		if err := writeExecShim(doltBinary, override); err != nil {
 			panic("integration: writing dolt shim: " + err.Error())
 		}
-	} else if resolved := runfilesBinaryAt("dolt_bin_v2_2_0", "dolt-linux-amd64/bin/dolt"); resolved != "" {
+	} else if resolved := runfilesBinaryAt("dolt_bin_v2_6_0", "dolt-linux-amd64/bin/dolt"); resolved != "" {
 		// Prebuilt pinned dolt from runfiles (bazel http_archive data dep);
 		// preferred over PATH so remote workers without a system dolt run the
 		// dolt-backed shapes.
@@ -436,6 +442,37 @@ func TestIntegrationSupervisorStopHelperProcess(t *testing.T) {
 		return
 	}
 	select {}
+}
+
+// TestSupervisorStatusConfirmsPID pins the readiness predicate
+// startIsolatedSupervisor waits on: only the control socket answering with the
+// PID of the supervisor the test started counts. The service-manager and API
+// fallbacks of `gc supervisor status` report "running" before that supervisor
+// has bound its control socket (and the isolated env's systemctl shim makes the
+// service-manager fallback report it before the process has done anything),
+// while `gc init` probes only the socket, so trusting them let init race a
+// half-started supervisor and fail on its held lock (ga-96smfk.51-.57).
+func TestSupervisorStatusConfirmsPID(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		out  string
+		pid  int
+		want bool
+	}{
+		{name: "socket answered with our pid", out: "Supervisor is running (PID 4242)\n", pid: 4242, want: true},
+		{name: "socket answered with our pid plus ownership note", out: "Supervisor is running (PID 4242)\nWarning: running outside systemd unit x (unit is installed but inactive)\n", pid: 4242, want: true},
+		{name: "socket answered with another pid", out: "Supervisor is running (PID 42420)\n", pid: 4242, want: false},
+		{name: "service manager fallback", out: "Supervisor is running (pid unavailable: control socket unreachable; liveness confirmed via service_manager)\n", pid: 4242, want: false},
+		{name: "api fallback", out: "Supervisor is running (pid unavailable: control socket unreachable; liveness confirmed via api)\n", pid: 4242, want: false},
+		{name: "not running", out: "Supervisor is not running\n", pid: 4242, want: false},
+		{name: "no pid", out: "Supervisor is running (PID 4242)\n", pid: 0, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := supervisorStatusConfirmsPID(tc.out, tc.pid); got != tc.want {
+				t.Fatalf("supervisorStatusConfirmsPID(%q, %d) = %v, want %v", tc.out, tc.pid, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestStopIntegrationSupervisorWithTimeoutReturnsAfterDeadline(t *testing.T) {
@@ -619,7 +656,7 @@ func pinnedIntegrationBeadsModuleVersion() (string, error) {
 // go.mod to pin. TestBDVersionPins in scripts/bd_version_pin_test.go reads it
 // by name out of this file and asserts it matches go.mod — see
 // TestPinnedIntegrationBeadsModuleVersion for why it is a literal.
-const wantPinnedBeadsModuleVersion = "v1.3.1"
+const wantPinnedBeadsModuleVersion = "v1.3.2"
 
 func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	version, err := pinnedIntegrationBeadsModuleVersion()
@@ -635,9 +672,9 @@ func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	// on `push` — i.e. after merge, which is how v1.3.0-rc.2 sat stale here
 	// (tracker ga-rnwg5u). TestBDVersionPins in scripts/bd_version_pin_test.go
 	// reads wantPinnedBeadsModuleVersion by name out of this file and asserts it
-	// against go.mod's pin; `make test-ci-policy` runs it, and that target is on
-	// the PR-time preflight-static job, so drift now fails before merge. Keep
-	// the const name greppable if you move it.
+	// against go.mod's pin; //scripts:scripts_test runs it in the required
+	// PR-time Bazel lane, so drift now fails before merge. Keep the const name
+	// greppable if you move it.
 	if version != wantPinnedBeadsModuleVersion {
 		t.Errorf("pinnedIntegrationBeadsModuleVersion() = %q, want %q", version, wantPinnedBeadsModuleVersion)
 	}
@@ -1074,6 +1111,9 @@ func standaloneBDEnvForDir(dir string) []string {
 		"LC_ALL",
 		"TZ",
 		"DOLT_ROOT_PATH",
+		// Presence-only switch that stops dolt forking a detached
+		// `dolt send-metrics`; internal/testenv sets it for the test process.
+		"DOLT_DISABLE_EVENT_FLUSH",
 		integrationRealBDBinaryEnv,
 		integrationGCBinaryEnv,
 		integrationDoltBinaryEnv,
@@ -1599,6 +1639,22 @@ func newIsolatedToolEnv(t *testing.T, useDolt bool) []string {
 
 func newIsolatedCommandEnv(t *testing.T, useDolt bool) []string {
 	t.Helper()
+	return newIsolatedCommandEnvWithBD(t, useDolt, false)
+}
+
+// newIsolatedCommandEnvDirectBD is newIsolatedCommandEnv on a Dolt city whose gc
+// processes, the supervisor's included, find the pinned bd itself first on PATH
+// rather than the file-store shim. For a Dolt-backed city the shim only execs
+// that bd, after paying its own start (a 120 MB binary, ~35 ms of package init),
+// on every bd call: a latency guard measures gc and bd, not the harness
+// (ga-3js1ayv).
+func newIsolatedCommandEnvDirectBD(t *testing.T) []string {
+	t.Helper()
+	return newIsolatedCommandEnvWithBD(t, true, true)
+}
+
+func newIsolatedCommandEnvWithBD(t *testing.T, useDolt, directBD bool) []string {
+	t.Helper()
 
 	gcHome, _, env := newIsolatedEnvRoot(t, useDolt)
 
@@ -1611,6 +1667,14 @@ func newIsolatedCommandEnv(t *testing.T, useDolt bool) []string {
 		path := filepath.Join(shimDir, name)
 		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 			t.Fatalf("writing %s shim: %v", name, err)
+		}
+	}
+	if directBD {
+		if realBDBinary == "" {
+			t.Fatal("direct bd requested but no pinned bd is staged")
+		}
+		if err := os.Symlink(realBDBinary, filepath.Join(shimDir, "bd")); err != nil {
+			t.Fatalf("staging the pinned bd first on PATH: %v", err)
 		}
 	}
 	envMap := parseEnvList(env)
@@ -1800,6 +1864,13 @@ func ensureManagedDoltPortForTest(cityDir string) (string, bool) {
 	if cityDir == "" {
 		return "", false
 	}
+	// A proxied-server scope (the fresh-city default) never publishes a
+	// managed Dolt port: bd reaches the store through its own proxy, so there
+	// is nothing to wait for. Polling for one here cost every bdDolt call on
+	// such a city 30 s and returned no port anyway.
+	if scopeUsesProxiedServerForTest(cityDir) {
+		return "", false
+	}
 	startOut, startErr := runGCDoltWithEnv(commandEnvForDir(cityDir, true), "", "start", cityDir)
 	if startErr != nil && !isGCStartAlreadyRunning(startOut) {
 		return "", false
@@ -1812,6 +1883,22 @@ func ensureManagedDoltPortForTest(cityDir string) (string, bool) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return "", false
+}
+
+// scopeUsesProxiedServerForTest reports whether scopeRoot's bd metadata binds
+// it to beads' proxied-server path, the mode in which no managed Dolt port
+// file or runtime state is ever written.
+func scopeUsesProxiedServerForTest(scopeRoot string) bool {
+	metadata := filepath.Join(scopeRoot, ".beads", "metadata.json")
+	mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, metadata)
+	if err != nil || !ok {
+		return false
+	}
+	backend, _, err := contract.ReadMetadataBackend(fsys.OSFS{}, metadata)
+	if err != nil {
+		return false
+	}
+	return contract.IsProxiedDoltMode(backend, mode)
 }
 
 func managedDoltTransportRetryable(out string) bool {
@@ -2013,10 +2100,13 @@ func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) {
 		done <- cmd.Wait()
 	}()
 
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(integrationSupervisorReadyTimeout)
 	for time.Now().Before(deadline) {
+		// Ready means the control socket answers with this supervisor's PID:
+		// that is the only liveness signal `gc init`/`gc start` trust, and
+		// it is bound last in startup, after the lock and the API.
 		out, err := runCommand("", env, 2*time.Second, gcBinary, "supervisor", "status")
-		if err == nil && strings.Contains(out, "Supervisor is running") {
+		if err == nil && supervisorStatusConfirmsPID(out, cmd.Process.Pid) {
 			t.Cleanup(func() {
 				// --wait so runCommand blocks until the supervisor fully
 				// shut down, aligning with the cmd.Wait() synchronization below.
@@ -2047,6 +2137,24 @@ func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) {
 	t.Fatalf("isolated supervisor did not become ready:\n%s", string(logData))
 }
 
+// supervisorStatusConfirmsPID reports whether `gc supervisor status` output
+// shows the supervisor control socket answering with pid. The status command's
+// service-manager and API fallbacks ("pid unavailable: ...") do not count: they
+// can report a supervisor that holds the single-instance lock but has not yet
+// bound the socket, which `gc init` would then try, and fail, to start again.
+func supervisorStatusConfirmsPID(out string, pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	want := fmt.Sprintf("Supervisor is running (PID %d)", pid)
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == want {
+			return true
+		}
+	}
+	return false
+}
+
 func waitForIntegrationSupervisorDone(cmd *exec.Cmd, done <-chan error, timeout time.Duration) {
 	select {
 	case <-done:
@@ -2070,17 +2178,11 @@ func restartIsolatedSupervisor(t *testing.T, env []string) {
 	startIsolatedSupervisor(t, env, gcHome)
 }
 
+// reserveLoopbackPort returns a loopback port that, on Linux, no other
+// ReserveLoopbackPort caller in the network namespace is handed while this
+// test binary lives (testutil.ReserveLoopbackPort).
 func reserveLoopbackPort() (int, error) {
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	defer lis.Close() //nolint:errcheck
-	addr, ok := lis.Addr().(*net.TCPAddr)
-	if !ok {
-		return 0, fmt.Errorf("unexpected addr type %T", lis.Addr())
-	}
-	return addr.Port, nil
+	return testutil.ReserveLoopbackPort()
 }
 
 func TestIntegrationEnvForIsolatesHome(t *testing.T) {
@@ -2244,6 +2346,7 @@ func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
 	integrationToolBinDir = filepath.Join(t.TempDir(), "bin")
 
 	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("DOLT_DISABLE_EVENT_FLUSH", "1")
 	t.Setenv("BEADS_DIR", "/host/beads")
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_DOLT_HOST", "ambient-host")
@@ -2285,6 +2388,12 @@ func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
 	}
 	if got["XDG_RUNTIME_DIR"] != dir {
 		t.Fatalf("XDG_RUNTIME_DIR = %q, want %q", got["XDG_RUNTIME_DIR"], dir)
+	}
+	// internal/testenv sets this process-wide and the allowlist rebuilds the
+	// child env from scratch, so a standalone bd/dolt command forks a detached
+	// `dolt send-metrics` unless the allowlist carries it.
+	if got["DOLT_DISABLE_EVENT_FLUSH"] != "1" {
+		t.Fatalf("DOLT_DISABLE_EVENT_FLUSH = %q, want 1 carried into standalone bd env", got["DOLT_DISABLE_EVENT_FLUSH"])
 	}
 	for _, key := range []string{
 		"GC_DOLT",
@@ -2575,6 +2684,9 @@ func TestNewIsolatedToolEnvSeedsLocalDoltIdentity(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"metrics.disabled":"true"`) {
 		t.Fatalf("isolated dolt config leaves dolt usage metrics on (egress to eventsapi.dolthub.com): %s", string(data))
+	}
+	if !strings.Contains(string(data), `"versioncheck.disabled":"true"`) {
+		t.Fatalf("isolated dolt config leaves dolt's release version check on (a synchronous HTTPS fetch inside every `dolt version`): %s", string(data))
 	}
 }
 

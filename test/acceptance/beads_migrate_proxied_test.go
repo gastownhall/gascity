@@ -14,7 +14,7 @@
 //
 // Two real binaries are required and the test skips typed without either:
 //   - GC_ACCEPTANCE_BD_BIN — a bd >= 1.3.0 with proxied-server support
-//     (plus a real dolt on PATH), same as TestBeadsProxiedDefault.
+//     (plus a real dolt on PATH), same as the TestBeadsProxiedDefault* tests.
 //   - GC_ACCEPTANCE_LEGACY_GC_BIN — a gc built from a revision that still
 //     initialises the legacy GC-managed direct topology. The migration cannot
 //     be proved against a fixture the current binary writes: the point is that

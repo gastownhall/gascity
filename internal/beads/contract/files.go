@@ -235,27 +235,39 @@ func ReadAutoStartDisabled(fs fsys.FS, path string) (bool, error) {
 // value (e.g. "yes", "off", "foo") returns ok=false so callers fall back
 // to other gc-managed signals rather than mis-treating the scope as
 // canonical.
+//
+// err is reserved for a config.yaml that exists but cannot be read, which
+// may hide an explicit true, so callers can leave the JSONL alone on it. A
+// file that reads but does not parse is line-scanned for the key instead;
+// without a recognizable value it reports ok=false and a nil error.
 func ReadExportAuto(fs fsys.FS, path string) (value bool, ok bool, err error) {
 	doc, err := readConfigDoc(fs, path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, false, nil
 		}
-		if raw, scanOK := scanConfigLineValue(fs, path, "export.auto:"); scanOK {
-			if parsed, parseErr := strconv.ParseBool(raw); parseErr == nil {
-				return parsed, true, nil
-			}
-			return false, false, nil
+		if !isConfigParseError(err) {
+			return false, false, err
 		}
-		return false, false, err
-	}
-	if raw, present := configStringValue(mappingRoot(doc), "export.auto"); present {
-		if parsed, parseErr := strconv.ParseBool(raw); parseErr == nil {
-			return parsed, true, nil
+		data, readErr := fs.ReadFile(path)
+		if readErr != nil {
+			return false, false, readErr
 		}
-		return false, false, nil
+		value, ok = parseExportAuto(scanConfigLineValueFromData(data, "export.auto:"))
+		return value, ok, nil
 	}
-	return false, false, nil
+	value, ok = parseExportAuto(configStringValue(mappingRoot(doc), "export.auto"))
+	return value, ok, nil
+}
+
+// parseExportAuto applies ReadExportAuto's strict boolean parsing to a raw
+// export.auto value: only strconv.ParseBool literals count as present.
+func parseExportAuto(raw string, present bool) (value bool, ok bool) {
+	if !present {
+		return false, false
+	}
+	parsed, err := strconv.ParseBool(raw)
+	return parsed, err == nil
 }
 
 // ReadDoltConfig reads the Dolt-specific GC config object from config.yaml.
@@ -589,11 +601,16 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 	}
 	changed = setNestedBool(root, "dolt", "disable-event-flush", *doltConfig.DisableEventFlush) || changed
 	changed = deleteKeys(root, "dolt.disable-event-flush", "dolt.disable_event_flush") || changed
-	// Managed beads are Dolt-backed; issues.jsonl auto-export is redundant and
-	// triggers a re-import cycle that stalls bd writes for minutes on large
-	// datasets. BD_EXPORT_AUTO env-var suppression only covers gc's own calls,
-	// so bake it into the on-disk config too.
-	changed = setConfigBool(root, "export.auto", false) || changed
+	// Managed beads default to disabling issues.jsonl auto-export because a
+	// stale export can trigger bd's expensive import-on-write path. Preserve an
+	// explicitly configured true, however: some cities intentionally commit
+	// issues.jsonl for JSONL-based sharing. Absence and malformed values still
+	// converge to the safe managed default.
+	exportAuto := false
+	if raw, ok := configStringValue(root, "export.auto"); ok {
+		exportAuto, _ = strconv.ParseBool(raw)
+	}
+	changed = setConfigBool(root, "export.auto", exportAuto) || changed
 	// Managed scopes back up through mol-dog-backup; bd's PersistentPostRun
 	// auto-backup (the "backup_export" Dolt remote) is redundant and, when its
 	// remote state breaks, stuck-loops and saturates the commit path — the
@@ -665,6 +682,74 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 		return false, err
 	}
 	return true, fsys.WriteFileAtomic(fs, path, encoded, canonicalScopeFilePerm(fs, path))
+}
+
+// ScrubEmbeddedScopeConfig removes gc's own endpoint claims from config.yaml
+// for a scope whose metadata.json records embedded Dolt storage, and writes
+// nothing else.
+//
+// Such a scope is authoritative and not gc-managed (ga-p9iuv), and its
+// config.yaml is bd's git-tracked file. bd answers the scope's vocabulary from
+// the store, not from this file: the issue prefix from the config table, the
+// custom types from the custom_types table ahead of the config row, with YAML
+// only as the last fallback. So gc adds nothing here — no prefix (bd create
+// reads YAML issue-prefix ahead of the store's, so a stamped prefix would
+// override the store), no types.custom (never read while the store's table is
+// populated; missing types are registered in the store through
+// `bd config set`), and none of EnsureCanonicalConfig's endpoint, topology or
+// policy keys. A missing file stays missing.
+//
+// What it does remove, in both the flat and bd's nested spelling, are the
+// claims an earlier gc pass stamped and gc provably owns: the gc.endpoint_*
+// namespace, a dolt.mode that contradicts the embedded metadata, and the
+// dolt.host/port/socket/user mirror when gc's endpoint marker shows gc wrote
+// that block. Policy keys (dolt.auto-start, dolt.disable-event-flush,
+// export.auto, backup.enabled) and any prefix or types line are left exactly
+// as found: gc cannot tell a value it wrote from an operator's. A clean file
+// is therefore never rewritten.
+//
+// It returns the flat names of the claims it removed, in removal order, so the
+// caller can say what it took out of a file it does not own; nil means nothing
+// was written. A file that does not parse is left untouched rather than
+// repaired.
+func ScrubEmbeddedScopeConfig(fs fsys.FS, path string) ([]string, error) {
+	doc, err := readConfigDoc(fs, path)
+	if err != nil {
+		if isConfigParseError(err) || os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	root := mappingRoot(doc)
+	// The endpoint mirror is gc's only while gc's marker vouches for it, so
+	// read the marker before the claims (the marker among them) come off.
+	_, gcStampedEndpoint := configStringValue(root, "gc.endpoint_origin")
+	claims := []string{"gc.endpoint_origin", "gc.endpoint_status"}
+	if mode, ok := configStringValue(root, "dolt.mode"); ok && !strings.EqualFold(mode, "embedded") {
+		claims = append(claims, "dolt.mode")
+	}
+	if gcStampedEndpoint {
+		claims = append(claims, "dolt.host", "dolt.port", "dolt.socket", "dolt.user")
+	}
+	var removed []string
+	for _, key := range claims {
+		if deleteConfigKeys(root, key) {
+			removed = append(removed, key)
+		}
+	}
+	if len(removed) == 0 {
+		return nil, nil
+	}
+
+	encoded, err := marshalConfigDoc(doc)
+	if err != nil {
+		return nil, err
+	}
+	if err := fsys.WriteFileAtomic(fs, path, encoded, canonicalScopeFilePerm(fs, path)); err != nil {
+		return nil, err
+	}
+	return removed, nil
 }
 
 // EnsureCanonicalMetadata rewrites metadata.json into canonical GC-managed form.
@@ -757,9 +842,13 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 		}
 	}
 
+	exportAuto := false
+	if raw, ok := scanConfigLineValueFromData(data, "export.auto:"); ok {
+		exportAuto, _ = strconv.ParseBool(raw)
+	}
 	replacements := map[string]string{
 		"dolt.auto-start": "dolt.auto-start: false",
-		"export.auto":     "export.auto: false",
+		"export.auto":     "export.auto: " + strconv.FormatBool(exportAuto),
 		"backup.enabled":  "backup.enabled: false",
 	}
 	if prefix != "" {

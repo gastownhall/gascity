@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -43,7 +44,18 @@ const (
 	gatePoolSlotShaped  = "named-identity-pool-slot-shaped"
 )
 
-// standInPrefix marks the ID of an uncleared create's stand-in row.
+// Template causes of a custom scale_check: the template's own check failed;
+// the scale_check source has no fresh run of it (none yet, failed, timed out
+// or stale, or a result carried over a reload that lacks it); or its count
+// was cut by claims newer than its run (claimsAfterRun), which retains the
+// template's rows while the cut lasts.
+const (
+	causeScaleCheckPartial    = "pool-scale-check-partial"
+	causeScaleCheckUnread     = "scale-check-source-unread"
+	causeScaleCheckStaleClaim = "scale-check-stale-vs-claim"
+)
+
+// standInPrefix marks the ID of an in-flight create's stand-in row.
 const standInPrefix = "pending-create:"
 
 // plan is steps 4-8: demand, pool desired, the realization plan and the
@@ -68,12 +80,17 @@ func (p *decidePass) plan() {
 func (p *decidePass) demand() {
 	collected := p.in.Demand.Collected
 	collected.CustomCounts, collected.CustomPartials = nil, nil
+	claimed := p.claimsAfterRun()
 	if templates := p.in.Demand.CustomCheckTemplates; len(templates) > 0 {
 		collected.CustomCounts = make(map[string]int, len(templates))
 		for _, template := range templates {
 			var count int
 			if p.in.ScaleCheck != nil {
 				count = p.in.ScaleCheck.Counts[template]
+			}
+			if k := claimed[template]; k > 0 && count > 0 {
+				count = max(0, count-k)
+				p.markTemplate(template, true, causeScaleCheckStaleClaim)
 			}
 			collected.CustomCounts[template] = count
 			if p.in.ScaleCheck.partial(template) {
@@ -86,7 +103,9 @@ func (p *decidePass) demand() {
 	collected.UnassignedRouted = projected
 	p.merged = mergeCollectedDemand(p.cfg, collected)
 	for template := range p.merged.PoolScaleCheckPartial {
-		p.markTemplate(template, true, "pool-scale-check-partial")
+		for _, cause := range p.scaleCheckCauses(template) {
+			p.markTemplate(template, true, cause)
+		}
 	}
 	for template := range p.merged.PoolPartialRetention {
 		p.markTemplate(template, true, "pool-partial-retention")
@@ -101,6 +120,70 @@ func (p *decidePass) demand() {
 	p.named = computeNamedSessionDemandOn(p.in.CityName, p.in.CityPath, p.cfg, func() []string { return refs },
 		p.in.SuspendedRigPaths, p.in.Demand.NamedDefault, p.in.Demand.AssignedWork, p.in.Demand.AssignedStoreRefs,
 		p.in.Demand.ReadyAssigned, p.merged.ScaleCheckCounts, io.Discard)
+}
+
+// scaleCheckCauses are the causes of template's scale-check partial: an
+// unread run of a custom scale_check template, else its own probe's failure.
+func (p *decidePass) scaleCheckCauses(template string) []string {
+	if slices.Contains(p.in.Demand.CustomCheckTemplates, template) {
+		if _, counted := p.in.ScaleCheck.countOf(template); !counted {
+			return []string{causeScaleCheckUnread}
+		}
+	}
+	return []string{causeScaleCheckPartial}
+}
+
+// claimsAfterRun is the scale_check pairing guard: for each custom
+// scale_check template, how many of its open work assignments the planner
+// first saw no earlier than the start of the run its count is from. That
+// run may have counted each such bead as new unassigned demand while the
+// pass already counts the claim, so demand subtracts them from the count
+// (never below zero): it removes exactly the possible double counts, can
+// only under-create, and lets a real backlog through. A claim the check
+// never counted (work assigned at creation, or after a controller restart
+// every assignment, first seen at the first pass) is cut too, so the cut
+// template retains its rows: creates follow the cut count, but no row the
+// true count keeps is put to sleep or drained. A run that starts after the
+// claims counts them itself, and its publish wakes the planner. The
+// assigned work holds open and in-progress beads only
+// (collectAssignedWorkBeadsWithStores).
+// A claim is the template's that its work routes to, normalized as the pool
+// demand attributes it (computePoolDesiredStatesAt); unrouted work is the
+// claimant row's template's.
+func (p *decidePass) claimsAfterRun() map[string]int {
+	d := p.in.Demand
+	if p.in.ScaleCheck == nil || len(d.CustomCheckTemplates) == 0 || len(p.in.ClaimsSeen) == 0 {
+		return nil
+	}
+	var rowTemplate map[string]string
+	out := make(map[string]int)
+	for i, wb := range d.AssignedWork {
+		c, ok := workClaimOf(d, i)
+		if !ok {
+			continue
+		}
+		if seen, ok := p.in.ClaimsSeen[c]; !ok || seen.Before(p.in.ScaleCheckStartedAt) {
+			continue
+		}
+		owner := routedToOrLegacyWorkflowTarget(wb)
+		if owner == "" {
+			if rowTemplate == nil {
+				rowTemplate = make(map[string]string)
+				for _, info := range p.decidable {
+					template := normalizedSessionTemplateInfo(info, p.cfg)
+					for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
+						rowTemplate[id] = template
+					}
+				}
+			}
+			owner = rowTemplate[c.assignee]
+		}
+		owner = normalizeAgentTemplateIdentity(p.cfg, agentutil.NormalizePoolRouteTarget(p.cfg, owner))
+		if owner != "" && slices.Contains(d.CustomCheckTemplates, owner) {
+			out[owner]++
+		}
+	}
+	return out
 }
 
 // withoutSuppressedRoutes returns the default-probe counts and demand
@@ -147,12 +230,13 @@ func withoutSuppressedRoutes(c collectedDemand, projected []beads.Bead) (map[str
 // legacy still gives them min-fill and resume requests that consume caps).
 //
 // The rows demand counts are the decidable rows plus a stand-in for each
-// uncleared create whose row the census does not show yet (C5.13 row 1:
-// in-flight demand is census ∪ ledger).
+// in-flight create whose row the census does not show yet (C5.13 row 1:
+// in-flight demand is census ∪ the in-flight map).
 func (p *decidePass) computePoolDesired() {
-	rows := make([]session.Info, 0, len(p.decidable)+len(p.in.Reservations))
-	rows = append(rows, p.decidable...)
-	rows = append(rows, p.inFlightStandIns()...)
+	rows := p.decidable
+	if standIns := p.inFlightStandIns(); len(standIns) > 0 {
+		rows = append(slices.Clip(p.decidable), standIns...)
+	}
 	p.poolWork = filterAssignedWorkBeadsForPoolDemandAt(p.cfg, p.in.CityPath, p.in.Demand.RelocatedClaimRefs,
 		rows, p.in.Demand.AssignedWork, p.in.Demand.AssignedStoreRefs, p.in.Now.UTC())
 	poolCfg := p.cfg
@@ -168,7 +252,7 @@ func (p *decidePass) computePoolDesired() {
 	}
 	p.poolStates = computePoolDesiredStatesAt(poolCfg, p.poolWork, rows, p.merged.ScaleCheckCounts, p.merged.ScaleCheckDemand, p.in.Now, nil)
 	p.poolDesired = retainScaleCheckPartialPoolDesired(p.cfg, PoolDesiredCounts(p.poolStates),
-		newSessionBeadSnapshotFromInfos(p.decidable), p.merged.PoolPartialRetention)
+		p.decidableSnapshot(), p.merged.PoolPartialRetention)
 	if p.poolDesired == nil {
 		p.poolDesired = make(map[string]int)
 	}
@@ -176,43 +260,55 @@ func (p *decidePass) computePoolDesired() {
 	p.snap.PoolDesired = p.poolDesired
 }
 
-// inFlightStandIns returns a pending-create row for each uncleared pool
-// create the census does not show yet, matched by its entry's
-// marker: its row ID or instance token (C5.13; a create's Key.ID is its
-// marker's row ID). A reservation whose entry the ledger view lacks still
-// stands in: counting a create twice for one pass is safe, planning its
-// work again is not.
+// decidableSnapshot is the decidable rows' snapshot, built on first use.
+func (p *decidePass) decidableSnapshot() *sessionBeadSnapshot {
+	if p.sessions == nil {
+		p.sessions = newSessionBeadSnapshotFromInfos(p.decidable)
+	}
+	return p.sessions
+}
+
+// inFlightCreates is the planning reservation of each running or ambiguous
+// create in the in-flight view that the census does not show, keyed by its
+// token. Once a census row carries the token, or a named create's identity
+// has its open row, that row holds the slot, the name and the work instead.
+func (p *decidePass) inFlightCreates() []planReservation {
+	shown := inflightCensusOf(p.in.Census)
+	var out []planReservation
+	for _, e := range p.in.InFlight.Entries {
+		// A create the census already shows, by its token or, for a named
+		// one, by its identity's open row (a reopen keeps the row's own
+		// token), counts as that row, not again (#7807 review).
+		if e.Kind != inflightCreate || shown.Tokens[e.Token] || shown.Named[e.Identity] {
+			continue
+		}
+		r := planReservation{ID: e.Token, Template: e.Template, QualifiedInstance: e.QualifiedInstance, Slot: e.Slot, WorkBeadID: e.WorkBeadID}
+		if named, ok := strings.CutPrefix(e.Identity, "named:"); ok {
+			r = planReservation{ID: e.Token, Template: e.Template, NamedIdentity: named, SessionName: e.SessionName}
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// inFlightStandIns returns a pending-create row for each in-flight pool
+// create the census does not show yet, stamped now: it is in flight now.
 func (p *decidePass) inFlightStandIns() []session.Info {
-	entries := make(map[string]ledgerEntry)
-	for _, e := range p.in.Ledger {
-		entries[e.ID] = e
-	}
-	var lc ledgerCensus
-	if len(entries) > 0 {
-		lc = p.in.Census.Ledger(p.cfg)
-	}
+	at := p.in.Now.UTC()
 	var out []session.Info
-	for _, r := range p.in.Reservations {
+	for _, r := range p.inFlight {
 		if r.NamedIdentity != "" {
 			continue
 		}
-		if e, ok := entries[r.EntryID]; ok && e.markerVisible(lc) {
-			continue
-		}
-		at := r.ReservedAt
-		if at.IsZero() || at.After(p.in.Now) {
-			// An uncleared create is in flight now, whatever its stamp.
-			at = p.in.Now
-		}
 		info := session.Info{
-			ID:                     standInPrefix + r.EntryID,
+			ID:                     standInPrefix + r.ID,
 			Template:               r.Template,
 			AgentName:              r.QualifiedInstance,
 			SessionOrigin:          "ephemeral",
 			PoolManaged:            true,
 			MetadataState:          string(session.StateStartPending),
 			PendingCreateClaim:     true,
-			PendingCreateStartedAt: at.UTC().Format(time.RFC3339Nano),
+			PendingCreateStartedAt: at.Format(time.RFC3339Nano),
 			CreatedAt:              at,
 			TriggerBeadID:          r.WorkBeadID,
 		}
@@ -224,11 +320,11 @@ func (p *decidePass) inFlightStandIns() []session.Info {
 
 // newPlanParams builds the planner's plan-only build params from the census:
 // reuse selects among the decidable rows, and fresh slots avoid every census
-// row on every leg, the planning reservation of every uncleared create (C7.1
+// row on every leg, the planning reservation of every in-flight create (C7.1
 // tier 1), and every pool name a live create backoff from the fence refuses
 // (F3): the name or its identity lease was taken, so the next free slot is
 // planned instead, and the held name is traced (P-6). The planner runs
-// unbudgeted: P3-5b admits plans in fair-share order. Its own
+// unbudgeted: admission takes the plans in fair-share order. Its own
 // census-completeness gate is off (no bead store: storeless builds read as
 // complete): a partial non-sessions leg blocks no plan, and the create
 // effect's locked live re-census fails closed instead (C2.8, C7.2).
@@ -247,15 +343,15 @@ func (p *decidePass) newPlanParams() {
 		rigs:                           p.cfg.Rigs,
 		beaconTime:                     p.in.Now,
 		stderr:                         io.Discard,
-		sessionBeads:                   newSessionBeadSnapshotFromInfos(p.decidable),
-		sessionOccupancyInfos:          slices.Clone(p.occupancy),
+		sessionBeads:                   p.decidableSnapshot(),
+		sessionOccupancyInfos:          slices.Clip(p.occupancy), // reserve appends to a copy
 		assignedWorkBeads:              p.poolWork,
 		poolScaleCheckPartialTemplates: p.merged.PoolScaleCheckPartial,
 		providerHealthSnapshot:         health,
 		planOnly:                       true,
 		beadNames:                      make(map[string]string),
 	}
-	for _, r := range p.in.Reservations {
+	for _, r := range p.inFlight {
 		p.reserve(r)
 	}
 	// A fence backoff's key is createBackoffKey(createIdentity.key()),
@@ -274,7 +370,7 @@ func (p *decidePass) newPlanParams() {
 			if !ok || a.UsesCanonicalSingletonPoolIdentity() || existingPoolSlotWithConfigInfo(p.cfg, a, held) <= 0 {
 				continue
 			}
-			p.reserve(planReservation{EntryID: "backoff:" + template + ":" + instance, Template: template, QualifiedInstance: instance})
+			p.reserve(planReservation{ID: "backoff:" + template + ":" + instance, Template: template, QualifiedInstance: instance})
 			p.refuse(template, instance, rowKey{}, gateCreateRefused+createStageFence)
 		}
 	}
@@ -284,7 +380,7 @@ func (p *decidePass) newPlanParams() {
 // fresh slots against, as the row it will become.
 func (p *decidePass) reserve(r planReservation) {
 	info := session.Info{
-		ID:                 "reservation:" + r.EntryID,
+		ID:                 "reservation:" + r.ID,
 		Template:           r.Template,
 		AgentName:          r.QualifiedInstance,
 		PoolManaged:        r.NamedIdentity == "",
@@ -311,8 +407,9 @@ func (p *decidePass) reserve(r planReservation) {
 // A reused row is selected with its config ref and its binding candidate; a
 // fresh plan must pass the plan-time gates.
 func (p *decidePass) realizePools() {
+	p.indexRealization()
 	for _, state := range p.poolStates {
-		cfgAgent := findAgentByTemplate(p.cfg, state.Template)
+		cfgAgent := p.agentByTemplate(state.Template)
 		if cfgAgent == nil {
 			p.refuse(state.Template, "", rowKey{}, "no-agent")
 			continue
@@ -325,6 +422,7 @@ func (p *decidePass) realizePools() {
 			p.refuse(qualifiedName, "", rowKey{}, gateTransport)
 			continue
 		}
+		bp := p.realizeParams(cfgAgent, state.Requests)
 		used := make(map[string]bool)
 		usedSlots := make(map[int]bool)
 		for _, request := range state.Requests {
@@ -343,20 +441,21 @@ func (p *decidePass) realizePools() {
 				}
 				prefer = &candidate
 			}
-			p.realizeRequest(cfgAgent, qualifiedName, prefer, request, used, usedSlots)
+			p.realizeRequest(bp, cfgAgent, qualifiedName, prefer, request, used, usedSlots)
 		}
 		for _, request := range state.Requests {
 			if request.SessionBeadID == "" {
-				p.realizeRequest(cfgAgent, qualifiedName, nil, request, used, usedSlots)
+				p.realizeRequest(bp, cfgAgent, qualifiedName, nil, request, used, usedSlots)
 			}
 		}
 	}
 }
 
-// realizeRequest selects or plans one request. A refusal stalls the request,
-// as legacy's does (build_desired_state.go:5180).
-func (p *decidePass) realizeRequest(cfgAgent *config.Agent, qualifiedName string, prefer *session.Info, request SessionRequest, used map[string]bool, usedSlots map[int]bool) {
-	info, slot, plan, err := selectOrPlanPoolSessionBead(p.bp, cfgAgent, qualifiedName, prefer, request, p.in.Now, used, usedSlots)
+// realizeRequest selects or plans one request over bp, the agent's
+// realization params. A refusal stalls the request, as legacy's does
+// (build_desired_state.go:5180).
+func (p *decidePass) realizeRequest(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, prefer *session.Info, request SessionRequest, used map[string]bool, usedSlots map[int]bool) {
+	info, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, request, p.in.Now, used, usedSlots)
 	switch {
 	case err != nil:
 		p.refuse(qualifiedName, "", rowKey{}, planErrorCause(err))
@@ -413,6 +512,7 @@ func (p *decidePass) selectPoolRow(cfgAgent *config.Agent, info session.Info, sl
 		}
 		if patch := computePoolTriggerBindingPatch(info, request, workDir); len(patch) > 0 {
 			sel.binding = bindingOf(request, workDir)
+			sel.binding.Patch = patch
 		}
 	}
 	p.selected[k] = sel
@@ -507,10 +607,13 @@ func (p *decidePass) planIdentifiers(cfgAgent *config.Agent, template string, pl
 func (p *decidePass) planNamed() {
 	// Identity duplicates never stand for their identity: the canonical
 	// lookup takes the first claimant in census order.
-	candidates := make([]session.Info, 0, len(p.occupancy))
-	for _, info := range p.occupancy {
-		if k, ok := p.byID[info.ID]; !ok || p.none[k] != reasonIdentityDuplicate {
-			candidates = append(candidates, info)
+	candidates := p.occupancy
+	if slices.Contains(slices.Collect(maps.Values(p.none)), reasonIdentityDuplicate) {
+		candidates = make([]session.Info, 0, len(p.occupancy))
+		for _, info := range p.occupancy {
+			if k, ok := p.byID[info.ID]; !ok || p.none[k] != reasonIdentityDuplicate {
+				candidates = append(candidates, info)
+			}
 		}
 	}
 	for _, identity := range slices.Sorted(maps.Keys(p.named.specs)) {
@@ -545,7 +648,7 @@ func (p *decidePass) planNamed() {
 		}
 		p.plans = append(p.plans, ap)
 		p.reserve(planReservation{
-			EntryID: "plan:" + ap.identity(), Template: template,
+			ID: "plan:" + ap.identity(), Template: template,
 			NamedIdentity: identity, SessionName: spec.SessionName,
 		})
 		p.desired["plan:"+ap.identity()] = TemplateParams{
@@ -556,10 +659,12 @@ func (p *decidePass) planNamed() {
 }
 
 // namedGate returns why a named plan is refused, or "". It sets the plan's
-// AdoptLive from I3 by the AM-N6 table.
+// AdoptLive from I3 by the AM-N6 table, on the identity the lane read: an
+// alive runtime is adopted only by adoptableIdentity's rule, and any other
+// identity holds the name, as another session's dead one does.
 func (p *decidePass) namedGate(ap allocPlan, spec namedSessionSpec) string {
 	plan := ap.Named
-	for _, r := range p.in.Reservations {
+	for _, r := range p.inFlight {
 		if r.NamedIdentity == plan.Identity {
 			return gateInFlight
 		}
@@ -577,20 +682,30 @@ func (p *decidePass) namedGate(ap allocPlan, spec namedSessionSpec) string {
 		return gateEndpointShut
 	}
 	r := readRuntimeName(p.in.Obs, plan.SessionName, p.in.Now, p.in.ObsMaxAge)
+	// No row exists yet, so any session ID is Foreign (v5 O2).
+	rt := r.obs.Identity
 	switch r.state {
 	case nameUnknown:
 		return gateLivenessUnknown
-	case nameAbsent, nameCorpse, nameZombie:
+	case nameCorpse, nameZombie:
+		// A dead runtime of another session holds the name too: a create
+		// over it would read occupied and roll back, again each pass. The
+		// row stays down until the name frees (CONTRACT v5.10e, §12.2 #23).
+		if compareIdentity(session.Info{}, rt) == identityForeign {
+			return gateNameHeld + strings.TrimSpace(rt.SessionID)
+		}
+		return ""
+	case nameAbsent:
 		return ""
 	}
 	switch {
-	case r.obs.OwnerState == OwnerNone, r.obs.OwnerState == OwnerUnknown && r.obs.Incarnation == "":
+	case adoptableIdentity(rt):
 		plan.AdoptLive = true
 		return ""
-	case r.obs.OwnerState == OwnerUnknown:
-		return gateOwnerPending
+	case compareIdentity(session.Info{}, rt) == identityForeign:
+		return gateNameHeld + strings.TrimSpace(rt.SessionID)
 	}
-	return gateNameHeld + r.obs.Owner.SessionID
+	return gateOwnerPending
 }
 
 // selectNamedRow selects a configured named session's canonical row, when

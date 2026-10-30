@@ -59,9 +59,12 @@ func convoySweepFixture(t *testing.T) (cs *controllerState, backing *beads.MemSt
 }
 
 // TestAutocloseSweepRunsAutocloseForASilentClose is the missed-close probe
-// (mc-zndi7.55): a Live list absorbs an out-of-process close and the scan
-// evicts the closed row, so no bead.closed is ever emitted. The sweep sees the
-// row leave the census and runs autoclose, after one pass of grace.
+// (mc-zndi7.55): a Live list absorbs an out-of-process close, the cache
+// announces it once (gastownhall/gascity#6860) and the scan evicts the closed
+// row, but the bead.closed never reaches the event path: the fixture records
+// it without delivering it, as when the event log drops it
+// (CACHE-LAYERING-REVIEW F2). The sweep sees the row leave the census and runs
+// autoclose, after one pass of grace.
 func TestAutocloseSweepRunsAutocloseForASilentClose(t *testing.T) {
 	cs, backing, cached, notes, convoy, member := convoySweepFixture(t)
 
@@ -75,8 +78,8 @@ func TestAutocloseSweepRunsAutocloseForASilentClose(t *testing.T) {
 	}
 	cached.ReconcileNowForTest()
 	cached.ReconcileNowForTest()
-	if len(notes.ids) != 0 {
-		t.Fatalf("precondition: the cache notified bead.closed %v; the probe needs a silent close", notes.ids)
+	if len(notes.ids) != 1 || notes.ids[0] != member.ID {
+		t.Fatalf("precondition: the cache notified bead.closed %v, want [%s]; the probe needs one announced close the event path never receives", notes.ids, member.ID)
 	}
 
 	if got := cs.runAutocloseSweepPass(sweepTestClock(1)); got.Ran != 0 {
@@ -161,7 +164,8 @@ func (s *downGetStore) Get(id string) (beads.Bead, error) {
 }
 
 // TestAutocloseSweepRetriesAnUnconfirmedClose: a close deferred because the
-// row could not be read is retried until a read answers.
+// row could not be read is retried until a read answers, one sweep pass
+// interval later (divided here, as the test speedup divides it).
 func TestAutocloseSweepRetriesAnUnconfirmedClose(t *testing.T) {
 	backing := beads.NewMemStore()
 	convoy, err := backing.Create(beads.Bead{Title: "batch", Type: "convoy"})
@@ -178,7 +182,9 @@ func TestAutocloseSweepRetriesAnUnconfirmedClose(t *testing.T) {
 	store := &downGetStore{Store: backing}
 	store.down.Store(true)
 	cs := &controllerState{cityBeadStore: store, eventProv: events.NewFake()}
-	cs.autocloseSweepOf().deferID(member.ID, sweepTestClock(0))
+	sweep := cs.autocloseSweepOf()
+	sweep.interval, sweep.grace = autocloseSweepInterval/6, autocloseSweepGrace/6
+	sweep.deferID(member.ID, sweepTestClock(0))
 
 	if got := cs.runAutocloseSweepPass(sweepTestClock(0)); got.Retried != 1 {
 		t.Fatalf("pass while down = %+v, want one retry", got)
@@ -187,7 +193,7 @@ func TestAutocloseSweepRetriesAnUnconfirmedClose(t *testing.T) {
 	if got := cs.runAutocloseSweepPass(sweepTestClock(0)); got.Ran != 0 {
 		t.Fatalf("the retry ran before it was due: %+v", got)
 	}
-	if got := cs.runAutocloseSweepPass(sweepTestClock(1)); got.Ran != 1 {
+	if got := cs.runAutocloseSweepPass(sweepTestClock(0).Add(sweep.interval)); got.Ran != 1 {
 		t.Fatalf("pass after recovery = %+v, want one autoclose", got)
 	}
 	if got := statusOf(t, backing, convoy.ID); got != "closed" {
@@ -402,7 +408,7 @@ func (s *touchingStore) ConditionalWritesResolveTarget() beads.Store { return s.
 func refusalFixture(t *testing.T) (cs *controllerState, mem *beads.MemStore, backing *touchingStore, cached *beads.CachingStore, convoy, member beads.Bead) {
 	t.Helper()
 	mem = beads.NewMemStore()
-	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	convoy, _ = mem.Create(beads.Bead{Title: "batch", Type: "convoy"})
@@ -482,7 +488,8 @@ func (s *listDownStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 // TestAutocloseLeavesARunWithAFailedReadToTheSweep: a bead is marked handled
 // only once autoclose has finished its reads. A read error leaves it pending;
 // the sweep retries while the store is down and closes the convoy once it is
-// back.
+// back, one sweep pass interval (divided here, as the test speedup divides
+// it) after the failed retry.
 func TestAutocloseLeavesARunWithAFailedReadToTheSweep(t *testing.T) {
 	syncAutoclose(t)
 	mem := beads.NewMemStore()
@@ -494,11 +501,13 @@ func TestAutocloseLeavesARunWithAFailedReadToTheSweep(t *testing.T) {
 	store := &listDownStore{Store: mem}
 	store.down.Store(true)
 	cs := &controllerState{cityBeadStore: store, eventProv: events.NewFake()}
+	sweep := cs.autocloseSweepOf()
+	sweep.interval, sweep.grace = autocloseSweepInterval/6, autocloseSweepGrace/6
 	closed, _ := mem.Get(member.ID)
 	payload, _ := beads.EncodeBeadEventPayload(closed)
 
 	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: "bd-close", Subject: member.ID, Payload: payload})
-	if cs.autocloseSweepOf().hasRan(member.ID) || !cs.autocloseSweepOf().isPending(member.ID) {
+	if sweep.hasRan(member.ID) || !sweep.isPending(member.ID) {
 		t.Fatal("a run whose reads failed was marked handled")
 	}
 	now := time.Now().Add(time.Second)
@@ -506,7 +515,10 @@ func TestAutocloseLeavesARunWithAFailedReadToTheSweep(t *testing.T) {
 		t.Fatalf("sweep while down = %+v, want one retry", got)
 	}
 	store.down.Store(false)
-	if got := cs.runAutocloseSweepPass(now.Add(autocloseSweepInterval)); got.Ran != 1 {
+	if got := cs.runAutocloseSweepPass(now); got.Ran != 0 {
+		t.Fatalf("the retry ran before it was due: %+v", got)
+	}
+	if got := cs.runAutocloseSweepPass(now.Add(sweep.interval)); got.Ran != 1 {
 		t.Fatalf("sweep after recovery = %+v, want one autoclose", got)
 	}
 	if got := statusOf(t, mem, convoy.ID); got != "closed" {
@@ -585,6 +597,73 @@ func TestLiveReadOwnerReadsTheStoreThatHoldsTheRow(t *testing.T) {
 	}
 }
 
+// TestLiveCloseOwnerTakesTheRowThatReadsClosed: for an id a relic's binding
+// holds beside its prefix route, the confirming read takes the first store
+// whose row reads closed. An open row ahead of it does not refute the close; a
+// failed read leaves the close unconfirmed; a close no row confirms is
+// refuted. Without a relic it is liveReadOwner.
+func TestLiveCloseOwnerTakesTheRowThatReadsClosed(t *testing.T) {
+	const id = "hq-7"
+	store := func(t *testing.T, status string) *downGetStore {
+		t.Helper()
+		mem := beads.NewMemStore()
+		mem.HonorExplicitIDs = true
+		s := &downGetStore{Store: mem}
+		switch status {
+		case "missing":
+		case "unreadable":
+			s.down.Store(true)
+		default:
+			if _, err := mem.Create(beads.Bead{ID: id, Title: "row"}); err != nil {
+				t.Fatal(err)
+			}
+			if status == "closed" {
+				if err := mem.Close(id); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		return s
+	}
+	for _, tc := range []struct {
+		work, relic string
+		noRelic     bool
+		want        closeVerdict
+		wantOwner   string // "work" or "relic" when confirmed
+	}{
+		{work: "open", relic: "closed", want: closeConfirmed, wantOwner: "relic"},
+		{work: "missing", relic: "closed", want: closeConfirmed, wantOwner: "relic"},
+		{work: "closed", relic: "open", want: closeConfirmed, wantOwner: "work"},
+		{work: "closed", relic: "closed", want: closeConfirmed, wantOwner: "work"},
+		{work: "open", relic: "open", want: closeRefuted},
+		{work: "open", relic: "missing", want: closeRefuted},
+		{work: "missing", relic: "missing", want: closeRefuted},
+		{work: "unreadable", relic: "closed", want: closeUnconfirmed},
+		{work: "open", relic: "unreadable", want: closeUnconfirmed},
+		{work: "open", relic: "closed", noRelic: true, want: closeRefuted},
+	} {
+		name := fmt.Sprintf("work=%s/relic=%s/probed=%v", tc.work, tc.relic, !tc.noRelic)
+		t.Run(name, func(t *testing.T) {
+			work, relic := store(t, tc.work), store(t, tc.relic)
+			var probed beads.Store = relic
+			if tc.noRelic {
+				probed = nil
+			}
+			owner, live, err := liveCloseOwner([]beads.Store{work, relic}, id, probed)
+			if got := confirmInferredClose(live, err); got != tc.want {
+				t.Fatalf("verdict = %v (row %q, err %v), want %v", got, live.Status, err, tc.want)
+			}
+			if tc.want != closeConfirmed {
+				return
+			}
+			want := map[string]beads.Store{"work": work, "relic": relic}[tc.wantOwner]
+			if owner != want {
+				t.Fatalf("close owner = %p, want the %s store %p", owner, tc.wantOwner, want)
+			}
+		})
+	}
+}
+
 // TestAutocloseSweepSettle: a finished run marks the id handled; an
 // unfinished one, even after an earlier run finished, unmarks it and owes it
 // a check, so the sweep does not skip it as handled.
@@ -636,5 +715,221 @@ func TestAutocloseSweepLeavesASuspendedRigCold(t *testing.T) {
 	quiescent.Store(false)
 	if got := cs.runAutocloseSweepPass(sweepTestClock(4)); got.Ran != 1 {
 		t.Fatalf("after resume the sweep ran autoclose %d time(s), want 1", got.Ran)
+	}
+}
+
+// The grace and every re-defer are timed on the sweep's own pass interval, so
+// under the test speedup, which divides that interval, a departure and a
+// suspended rig's deferred close still come due on the next pass. Deferred by
+// the real minute, they would wait six sped-up passes, longer than the
+// shortened quiescence window the speedup exists for.
+func TestAutocloseSweepDefersByItsOwnPassInterval(t *testing.T) {
+	cs, backing, cached, _, convoy, member := convoySweepFixture(t)
+	sweep := cs.autocloseSweepOf()
+	// What clock.Backstop makes of them in a test-hooks gc at speedup 6.
+	sweep.interval, sweep.grace = autocloseSweepInterval/6, autocloseSweepGrace/6
+	pass := func(i int) time.Time { return sweepEpoch.Add(time.Duration(i) * sweep.interval) }
+
+	cs.runAutocloseSweepPass(pass(0))
+	if err := backing.Close(member.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cached.List(beads.ListQuery{Live: true, Status: "open"}); err != nil {
+		t.Fatal(err)
+	}
+	cached.ReconcileNowForTest()
+	cached.ReconcileNowForTest()
+	cs.runAutocloseSweepPass(pass(1))
+
+	cs.setSuspendedRigs(map[string]bool{"r": true})
+	for i := 2; i <= 3; i++ {
+		if got := cs.runAutocloseSweepPass(pass(i)); got.Retried != 1 || got.Ran != 0 {
+			t.Fatalf("pass %d = %+v, want the suspended rig's close due and deferred again on every pass", i, got)
+		}
+	}
+	cs.setSuspendedRigs(nil)
+	if got := cs.runAutocloseSweepPass(pass(4)); got.Ran != 1 {
+		t.Fatalf("the first pass after resume = %+v, want one autoclose", got)
+	}
+	if got := statusOf(t, backing, convoy.ID); got != "closed" {
+		t.Fatalf("convoy %s after the sweep, want closed", got)
+	}
+}
+
+// quiescingGetStore records the ids it is asked for and turns the city
+// quiescent on the first Get, as a suspend landing mid-pass would.
+type quiescingGetStore struct {
+	beads.Store
+	quiescent *atomic.Bool
+	mu        sync.Mutex
+	read      map[string]bool
+}
+
+func (s *quiescingGetStore) Get(id string) (beads.Bead, error) {
+	s.mu.Lock()
+	if s.read == nil {
+		s.read = map[string]bool{}
+	}
+	s.read[id] = true
+	s.mu.Unlock()
+	s.quiescent.Store(true)
+	return s.Store.Get(id)
+}
+
+// A sweep pass that began before the city went quiescent reads no further
+// store: the rows still due wait for resume instead of restarting the bd
+// pair the quiescent city just retired. No timer is involved: the pass is
+// driven directly, and the first live read is what makes the city quiescent.
+func TestAutocloseSweepStopsReadingWhenTheCityGoesQuiescentMidPass(t *testing.T) {
+	backing := beads.NewMemStore()
+	var ids []string
+	for i := 0; i < 3; i++ {
+		b, err := backing.Create(beads.Bead{Title: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := backing.Close(b.ID); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, b.ID)
+	}
+	quiescent := new(atomic.Bool)
+	store := &quiescingGetStore{Store: backing, quiescent: quiescent}
+	cs := &controllerState{cityBeadStore: store, eventProv: events.NewFake(), beadsQuiescent: quiescent}
+	for _, id := range ids {
+		cs.autocloseSweepOf().deferID(id, sweepTestClock(0))
+	}
+
+	got := cs.runAutocloseSweepPass(sweepTestClock(0))
+	store.mu.Lock()
+	read := 0
+	for _, id := range ids {
+		if store.read[id] {
+			read++
+		}
+	}
+	store.mu.Unlock()
+	if read != 1 {
+		t.Fatalf("the pass read %d of the %d due rows, want 1: it kept reading after the city went quiescent", read, len(ids))
+	}
+	if got.Retried != len(ids)-1 {
+		t.Fatalf("pass = %+v, want the %d rows after the flip deferred", got, len(ids)-1)
+	}
+	pending := 0
+	for _, id := range ids {
+		if cs.autocloseSweepOf().isPending(id) {
+			pending++
+		}
+	}
+	if pending != len(ids)-1 {
+		t.Fatalf("%d row(s) still owed a check, want %d", pending, len(ids)-1)
+	}
+}
+
+// A cache-inferred bead.closed that reaches applyInferredClose while the city
+// is quiescent makes no live read (which would restart the retired pair) and
+// is owed to the sweep instead.
+func TestInferredCloseDefersWhileTheCityIsQuiescent(t *testing.T) {
+	prev := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(fn func()) { fn() }
+	t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
+
+	quiescent := new(atomic.Bool)
+	quiescent.Store(true)
+	cs := &controllerState{
+		cityBeadStore:  panicGetStore{beads.NewMemStore()},
+		eventProv:      events.NewFake(),
+		pokeCh:         make(chan struct{}, 1),
+		beadsQuiescent: quiescent,
+	}
+	payload, err := beads.EncodeBeadEventPayload(beads.Bead{ID: "gc-1", Title: "task", Status: "closed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Subject: "gc-1", Actor: cacheReconcileActor, Payload: payload})
+
+	if !cs.autocloseSweepOf().isPending("gc-1") {
+		t.Fatal("the inferred close of gc-1 is not owed to the sweep; it would never be confirmed after resume")
+	}
+}
+
+// quiescentReadStore counts the reads it serves while the city is quiescent.
+type quiescentReadStore struct {
+	beads.Store
+	quiescent *atomic.Bool
+	reads     atomic.Int32
+}
+
+func (s *quiescentReadStore) Get(id string) (beads.Bead, error) {
+	if s.quiescent.Load() {
+		s.reads.Add(1)
+	}
+	return s.Store.Get(id)
+}
+
+// A graph step's close that lands on a quiescent city reads nothing, not even
+// the run root its completion fact names, whether the city went quiescent
+// before the event or before the dispatched run. After resume the sweep
+// confirms it, records the fact once, and closes the convoy, though an earlier
+// close of the same row left it marked handled.
+func TestQuiescentCloseReadsNothingAndConvergesAfterResume(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		actor string
+		// quiesceOnDispatch makes the city quiescent between the event and
+		// its dispatched run instead of before the event.
+		quiesceOnDispatch bool
+	}{
+		{name: "local close", actor: cacheLocalActor},
+		{name: "local close run after the city went quiescent", actor: cacheLocalActor, quiesceOnDispatch: true},
+		{name: "foreign close run after the city went quiescent", actor: "bd-close", quiesceOnDispatch: true},
+		{name: "scan close", actor: cacheReconcileActor},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			quiescent := new(atomic.Bool)
+			quiescent.Store(!tc.quiesceOnDispatch)
+			prev := beadCloseAutocloseDispatch
+			beadCloseAutocloseDispatch = func(fn func()) {
+				quiescent.Store(true)
+				fn()
+			}
+			t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
+
+			mem := beads.NewMemStore()
+			mem.HonorExplicitIDs = true
+			step, convoy, payload := graphStepFixture(t, mem)
+			if err := mem.Close(step.ID); err != nil {
+				t.Fatal(err)
+			}
+			store := &quiescentReadStore{Store: mem, quiescent: quiescent}
+			rec := events.NewFake()
+			cs := &controllerState{cityBeadStore: store, eventProv: rec, beadsQuiescent: quiescent}
+			// An earlier close of the row ran to the end, and no census saw
+			// the row reopen.
+			cs.autocloseSweepOf().noteRan(step.ID)
+
+			cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: tc.actor, Subject: step.ID, Payload: payload})
+
+			if got := store.reads.Load(); got != 0 {
+				t.Fatalf("%d store read(s) while the city was quiescent, want none", got)
+			}
+			if got := statusOf(t, mem, convoy.ID); got != "open" {
+				t.Fatalf("convoy %s while the city was quiescent, want open", got)
+			}
+			if cs.autocloseSweepOf().hasRan(step.ID) || !cs.autocloseSweepOf().isPending(step.ID) {
+				t.Fatal("the close is not owed to the sweep: the stale handled mark would make it skip the row")
+			}
+
+			quiescent.Store(false)
+			if got := cs.runAutocloseSweepPass(time.Now().Add(time.Second)); got.Ran != 1 {
+				t.Fatalf("after resume the sweep = %+v, want one confirmed close", got)
+			}
+			if got := statusOf(t, mem, convoy.ID); got != "closed" {
+				t.Fatalf("convoy %s after resume, want closed", got)
+			}
+			if got := completedFor(rec, step.ID); got != 1 {
+				t.Fatalf("completion facts = %d after resume, want 1", got)
+			}
+		})
 	}
 }

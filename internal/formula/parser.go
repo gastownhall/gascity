@@ -276,6 +276,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		Requires:    cloneRequirements(formula.Requires),
 		Type:        formula.Type,
 		Source:      formula.Source,
+		ContentHash: formula.ContentHash,
 		Phase:       formula.Phase,
 		Pour:        formula.Pour,
 		Vars:        make(map[string]*VarDef),

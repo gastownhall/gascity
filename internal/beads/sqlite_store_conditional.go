@@ -30,6 +30,7 @@ var (
 	_ conditionalWriteCapabilityProber      = (*SQLiteStore)(nil)
 	_ conditionalWriteStateInspector        = (*SQLiteStore)(nil)
 	_ conditionalWritesLiveness             = (*SQLiteStore)(nil)
+	_ conditionalLabelsGuard                = (*SQLiteStore)(nil)
 )
 
 // probeConditionalWriteCapability reports what the fenced verbs can do on this
@@ -65,10 +66,20 @@ func (s *SQLiteStore) inspectConditionalWriteState() (probe, latch, reason strin
 // so the seam does not mistake a closed engine for an incapable one.
 func (s *SQLiteStore) conditionalWritesStoreOpen() error { return s.ensureOpen() }
 
+// conditionalLabelsGuarded reports that UpdateIfMatch rewrites labels inside
+// the fenced transaction that bumps the revision (upsertBeadTx).
+func (s *SQLiteStore) conditionalLabelsGuarded() bool { return true }
+
 // UpdateIfMatch applies opts only when the stored revision matches.
 func (s *SQLiteStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
+	}
+	if len(opts.UnsetMetadata) > 0 {
+		// The same refusal every other ConditionalWriter gives
+		// (validateConditionalUpdateOpts), so a caller cannot come to rely on
+		// a guarded unset only one store would honor.
+		return &ConditionalUpdateFieldUnsupportedError{Field: "unset_metadata"}
 	}
 	if updateOptsEmpty(opts) {
 		return ErrEmptyConditionalUpdate
@@ -86,7 +97,10 @@ func (s *SQLiteStore) CloseIfMatch(id string, expectedRevision int64) error {
 		return err
 	}
 	return s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, b Bead) error {
-		b.Status = "closed"
+		if b.Status != "closed" {
+			setBeadStatus(&b, "closed")
+			recordCloseReason(&b)
+		}
 		b.UpdatedAt = time.Now()
 		return s.upsertBeadTx(ctx, tx, b)
 	})
@@ -165,7 +179,8 @@ func (s *SQLiteStore) DeleteIfMatch(id string, expectedRevision int64) error {
 
 // CompareAndSetMetadataKey swaps metadata[key] iff its current value equals
 // expected. A genuine mismatch is (false, nil) — the caller lost the race —
-// distinct from an error.
+// distinct from an error. A swap to the value the key already holds
+// (expected == next) still writes the row and mints a fresh revision.
 func (s *SQLiteStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
 	if err := s.ensureOpen(); err != nil {
 		return false, err
@@ -189,6 +204,7 @@ func (s *SQLiteStore) CompareAndSetMetadataKey(id, key, expected, next string) (
 			}
 			return err
 		}
+		noteSessionKeys(b, map[string]string{key: next})
 		if b.Metadata[key] != expected {
 			return tx.Commit() // genuine mismatch: caller lost, not an error
 		}
@@ -213,7 +229,10 @@ func (s *SQLiteStore) CompareAndSetMetadataKey(id, key, expected, next string) (
 }
 
 // conditionalWrite is the shared fenced read-check-write body: load the bead
-// inside the write transaction, compare its revision, apply, commit.
+// inside the write transaction, compare its revision, apply, commit. The fence
+// is the only check, so a fenced write that leaves the row as it is still
+// commits and mints a fresh revision, where the unfenced rewriteBead commits
+// nothing (see applySQLiteUpdateOpts).
 func (s *SQLiteStore) conditionalWrite(id string, expectedRevision int64, apply func(context.Context, *sql.Tx, Bead) error) error {
 	if !s.hasRevisionColumn {
 		return ErrConditionalWriteUnsupported

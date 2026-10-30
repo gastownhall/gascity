@@ -5,12 +5,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -79,6 +82,59 @@ func TestBeadsQuiescenceRetiresASuspendedCityOnceItHasDrained(t *testing.T) {
 	}
 	if cr.retiredScopes.done(cr.beadsScopeRoots()[1], time.Time{}) {
 		t.Fatal("a resumed scope is still recorded as retired")
+	}
+}
+
+// A quiescent city retires its pairs only once the controller's asynchronous
+// store work has finished. An autoclose run dispatched before the city went
+// quiescent is still issuing bd reads: retired under it, the pair would be
+// restarted by its next read and stay up until the next retire
+// (acceptance: TestProxiedSuspensionIsQuiescenceSuspendedCity, whose
+// shortened window caught a drained wisp's autoclose reads after the stop).
+func TestBeadsQuiescenceRetiresOnlyAfterInFlightStoreWorkFinishes(t *testing.T) {
+	cr, _, _, logPath := quiescenceRuntime(t, "")
+	t.Setenv("GC_SUSPENDED", "1")
+	cr.cs = &controllerState{beadsQuiescent: new(atomic.Bool)}
+
+	end := cr.cs.beginStoreWork()
+	for i := 0; i < 3; i++ {
+		if !cr.enterBeadsQuiescenceIfDue(context.Background()) {
+			t.Fatal("a suspended city with nothing running is not quiescent")
+		}
+	}
+	if ops := providerOpsLogged(t, logPath); ops != "" {
+		t.Fatalf("provider ops while an autoclose run was in flight = %q, want none", ops)
+	}
+
+	end()
+	cr.enterBeadsQuiescenceIfDue(context.Background())
+	if ops := providerOpsLogged(t, logPath); ops != "" {
+		t.Fatalf("provider ops on the first tick with no store work in flight = %q, want none yet", ops)
+	}
+	cr.enterBeadsQuiescenceIfDue(context.Background())
+	if ops := providerOpsLogged(t, logPath); ops != "stop" {
+		t.Fatalf("provider ops = %q, want one stop once the store work finished", ops)
+	}
+}
+
+// Store work is counted from dispatch, not from when its goroutine starts, so
+// a run queued just before the city goes quiescent holds the retire too.
+func TestTrackStoreWorkCountsFromDispatch(t *testing.T) {
+	cs := &controllerState{}
+	if cs.storeWorkInFlight() {
+		t.Fatal("store work in flight on a new controller state")
+	}
+	run := cs.trackStoreWork(func() {})
+	if !cs.storeWorkInFlight() {
+		t.Fatal("dispatched store work is not counted until it runs")
+	}
+	run()
+	if cs.storeWorkInFlight() {
+		t.Fatal("store work still counted after it finished")
+	}
+	var nilState *controllerState
+	if nilState.storeWorkInFlight() {
+		t.Fatal("a nil controller state reports store work in flight")
 	}
 }
 
@@ -410,5 +466,351 @@ func TestQuiescentCityTickStillTicksWorkspaceServices(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("a quiescent tick did not tick workspace services")
+	}
+}
+
+// A tick that read the rig as suspended must not stop the pair a resume has
+// since let a read start (ga-vnycm2.14): `gc rig resume` followed at once by
+// `gc bd --rig ... list` lands between the tick's state read and its liveness
+// check, and the read failed with "connection refused" when the tick stopped
+// the pair it had just started. The tick re-reads the state before it stops.
+func TestRetireSuspendedScopesSkipsARigResumedMidTick(t *testing.T) {
+	cr, _, rig, logPath := quiescenceRuntime(t, "")
+	t.Setenv("GC_SUSPENDED", "")
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cr.cityPath, "r1", &suspended); err != nil {
+		t.Fatal(err)
+	}
+	resumeDuringCheck := false
+	old := suspendedScopePair
+	t.Cleanup(func() { suspendedScopePair = old })
+	suspendedScopePair = func(root string) (bool, bool) {
+		if !samePath(root, rig) {
+			return false, false
+		}
+		if resumeDuringCheck {
+			// gc rig resume, then a read that starts the pair.
+			var stdout, stderr strings.Builder
+			if code := doRigResume(fsys.OSFS{}, cr.cityPath, "r1", &stdout, &stderr); code != 0 {
+				t.Fatalf("gc rig resume = %d: %s", code, stderr.String())
+			}
+		}
+		return true, true
+	}
+	p := &tickPass{ctx: context.Background(), sessionBeads: newSessionBeadSnapshotFromInfos(nil)}
+	cr.tickRetireSuspendedRigScopes(p) // drained once: settle
+	resumeDuringCheck = true
+	cr.tickRetireSuspendedRigScopes(p) // read suspended; resumed before the stop
+	if ops := providerOpsLogged(t, logPath); ops != "" {
+		t.Fatalf("provider ops = %q, want no stop for a rig resumed before the stop", ops)
+	}
+}
+
+// A resume that arrives while the controller is stopping a suspended rig's
+// pair waits for the stop to finish, so the read after `gc rig resume` never
+// races a `bd dolt stop` still tearing the pair down.
+func TestRigResumeWaitsForAnInFlightRetirement(t *testing.T) {
+	cr, _, rig, _ := quiescenceRuntime(t, "")
+	t.Setenv("GC_SUSPENDED", "")
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cr.cityPath, "r1", &suspended); err != nil {
+		t.Fatal(err)
+	}
+	old := suspendedScopePair
+	t.Cleanup(func() { suspendedScopePair = old })
+	suspendedScopePair = func(root string) (bool, bool) { return samePath(root, rig), samePath(root, rig) }
+
+	resumed := make(chan int, 1)
+	var resumedDuringStop atomic.Bool
+	oldStop := stopSuspendedScopeStore
+	t.Cleanup(func() { stopSuspendedScopeStore = oldStop })
+	stopSuspendedScopeStore = func(_ context.Context, _, root string, stillSuspended func() error) error {
+		if err := stillSuspended(); err != nil {
+			return err
+		}
+		if !samePath(root, rig) {
+			return nil
+		}
+		go func() {
+			var stdout, stderr strings.Builder
+			resumed <- doRigResume(fsys.OSFS{}, cr.cityPath, "r1", &stdout, &stderr)
+		}()
+		select {
+		case <-resumed:
+			resumedDuringStop.Store(true)
+		case <-time.After(300 * time.Millisecond):
+		}
+		return nil
+	}
+	p := &tickPass{ctx: context.Background(), sessionBeads: newSessionBeadSnapshotFromInfos(nil)}
+	cr.tickRetireSuspendedRigScopes(p) // settle
+	cr.tickRetireSuspendedRigScopes(p) // stop, with a resume racing it
+	if resumedDuringStop.Load() {
+		t.Fatal("gc rig resume completed while the controller was still stopping the rig's pair")
+	}
+	select {
+	case code := <-resumed:
+		if code != 0 {
+			t.Fatalf("gc rig resume = %d", code)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("gc rig resume did not complete after the stop finished")
+	}
+}
+
+// While the controller's stop of a suspended rig queues for the city's
+// lifecycle slot, the suspension fence stays free: a resume written meanwhile
+// lands at once instead of waiting out another holder's lifecycle op as well
+// as the stop, and the stop, once it has the slot, re-reads the state and
+// skips the resumed rig. The stop waits for the slot for as long as the test
+// holds it, so a resume held behind the stop shows as a hang instead of
+// landing when the stop's 30s slot deadline runs out.
+func TestRigResumeIsNotHeldBehindAStopQueuedForTheLifecycleSlot(t *testing.T) {
+	cr, _, rig, logPath := quiescenceRuntime(t, "")
+	t.Setenv("GC_SUSPENDED", "")
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cr.cityPath, "r1", &suspended); err != nil {
+		t.Fatal(err)
+	}
+	old := suspendedScopePair
+	t.Cleanup(func() { suspendedScopePair = old })
+	suspendedScopePair = func(root string) (bool, bool) { return samePath(root, rig), samePath(root, rig) }
+	p := &tickPass{ctx: context.Background(), sessionBeads: newSessionBeadSnapshotFromInfos(nil)}
+	cr.tickRetireSuspendedRigScopes(p) // settle
+
+	oldTimeout := providerOpTimeout
+	t.Cleanup(func() { providerOpTimeout = oldTimeout })
+	providerOpTimeout = func(string) time.Duration { return time.Hour }
+	queued := make(chan struct{})
+	oldStop := stopSuspendedScopeStore
+	t.Cleanup(func() { stopSuspendedScopeStore = oldStop })
+	stopSuspendedScopeStore = func(ctx context.Context, cityPath, root string, stillSuspended func() error) error {
+		if samePath(root, rig) {
+			close(queued)
+		}
+		return oldStop(ctx, cityPath, root, stillSuspended)
+	}
+	holdSlot, err := acquireProviderSemaphore(context.Background(), cr.cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var releaseOnce sync.Once
+	releaseSlot := func() { releaseOnce.Do(holdSlot) }
+	var running sync.WaitGroup
+	t.Cleanup(func() {
+		releaseSlot()
+		running.Wait()
+	})
+	ticked := make(chan struct{})
+	running.Go(func() {
+		defer close(ticked)
+		cr.tickRetireSuspendedRigScopes(p) // stop, queued behind the held slot
+	})
+	awaitClose(t, queued, "the settled tick's stop of the rig")
+	resumed := make(chan struct{})
+	var code int
+	var stderr strings.Builder
+	running.Go(func() {
+		defer close(resumed)
+		var stdout strings.Builder
+		code = doRigResume(fsys.OSFS{}, cr.cityPath, "r1", &stdout, &stderr)
+	})
+	awaitClose(t, resumed, "gc rig resume while the rig's stop queued for the lifecycle slot")
+	if code != 0 {
+		t.Fatalf("gc rig resume = %d: %s", code, stderr.String())
+	}
+	releaseSlot()
+	awaitClose(t, ticked, "the tick once the lifecycle slot was free")
+	if ops := providerOpsLogged(t, logPath); ops != "" {
+		t.Fatalf("provider ops = %q, want no stop for a rig resumed while its stop queued", ops)
+	}
+}
+
+// A stop that panics once its re-check holds the suspension fence releases
+// the fence on the way out: safeTick recovers the panic, the next settled tick
+// retries the stop instead of waiting on the fence while it holds the city's
+// lifecycle slot, and a resume lands at once. Garbage collection is off, so a
+// finalizer closing the fence's leaked file cannot stand in for the release.
+func TestRetireSuspendedScopesReleasesTheFenceWhenTheStopPanics(t *testing.T) {
+	cr, _, rig, logPath := quiescenceRuntime(t, "")
+	t.Setenv("GC_SUSPENDED", "")
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cr.cityPath, "r1", &suspended); err != nil {
+		t.Fatal(err)
+	}
+	gcPercent := debug.SetGCPercent(-1)
+	t.Cleanup(func() { debug.SetGCPercent(gcPercent) })
+	panicking := true
+	oldStop := stopSuspendedScopeStore
+	t.Cleanup(func() { stopSuspendedScopeStore = oldStop })
+	stopSuspendedScopeStore = func(ctx context.Context, cityPath, root string, stillSuspended func() error) error {
+		if !panicking || !samePath(root, rig) {
+			return oldStop(ctx, cityPath, root, stillSuspended)
+		}
+		return oldStop(ctx, cityPath, root, func() error {
+			if err := stillSuspended(); err != nil {
+				return err
+			}
+			panic("the stop panicked holding the suspension fence")
+		})
+	}
+	p := &tickPass{ctx: context.Background(), sessionBeads: newSessionBeadSnapshotFromInfos(nil)}
+	cr.tickRetireSuspendedRigScopes(p) // drained once: settle
+	if !cr.safeTick(func() { cr.tickRetireSuspendedRigScopes(p) }, "patrol") {
+		t.Fatal("the rig's stop did not panic holding the fence; the test needs it to")
+	}
+
+	panicking = false
+	ticked := make(chan struct{})
+	go func() {
+		defer close(ticked)
+		cr.tickRetireSuspendedRigScopes(p) // the panicked stop, retried
+	}()
+	awaitClose(t, ticked, "the settled tick after the rig's stop panicked")
+	if ops := providerOpsLogged(t, logPath); ops != "stop" {
+		t.Fatalf("provider ops = %q, want the panicked stop retried once", ops)
+	}
+	resumed := make(chan struct{})
+	var code int
+	var stderr strings.Builder
+	go func() {
+		defer close(resumed)
+		var stdout strings.Builder
+		code = doRigResume(fsys.OSFS{}, cr.cityPath, "r1", &stdout, &stderr)
+	}()
+	awaitClose(t, resumed, "gc rig resume after the rig's stop panicked")
+	if code != 0 {
+		t.Fatalf("gc rig resume = %d: %s", code, stderr.String())
+	}
+}
+
+// The city's half of TestRetireSuspendedScopesSkipsARigResumedMidTick: a
+// quiescence tick that read the city as suspended must not stop a pair after
+// gc resume has landed.
+func TestBeadsQuiescenceSkipsACityResumedMidTick(t *testing.T) {
+	cr, _, _, logPath := quiescenceRuntime(t, "")
+	t.Setenv("GC_SUSPENDED", "")
+	cr.cs = &controllerState{beadsQuiescent: new(atomic.Bool)}
+	on, off := true, false
+	if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, cr.cityPath, &on); err != nil {
+		t.Fatal(err)
+	}
+	resume := false
+	old := suspendedScopePair
+	t.Cleanup(func() { suspendedScopePair = old })
+	suspendedScopePair = func(string) (bool, bool) {
+		if resume {
+			resume = false
+			if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, cr.cityPath, &off); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return true, true
+	}
+	if !cr.enterBeadsQuiescenceIfDue(context.Background()) { // settle
+		t.Fatal("a suspended city with nothing running is not quiescent")
+	}
+	resume = true
+	cr.enterBeadsQuiescenceIfDue(context.Background()) // read suspended; resumed before the stop
+	if ops := providerOpsLogged(t, logPath); ops != "" {
+		t.Fatalf("provider ops = %q, want no stop for a city resumed before the stop", ops)
+	}
+}
+
+// A rig suspended in its own right that shares the city's proxy root is
+// retired with the city, but not once gc resume has brought the city back
+// mid-tick: the re-check weighs the shared root against the city it re-read,
+// and stopping the rig would stop the pair serving the resumed city.
+func TestBeadsQuiescenceSkipsASharedRootRigOnceTheCityResumesMidTick(t *testing.T) {
+	cr, _, rig, logPath := quiescenceRuntime(t, "")
+	t.Setenv("GC_SUSPENDED", "")
+	t.Setenv(proxyendpoint.RootPathEnv, filepath.Join(t.TempDir(), "proxy-root"))
+	if !proxyendpoint.SharesCityRoot(cr.cityPath, rig) {
+		t.Fatal("fixture: the rig does not share the city's proxy root")
+	}
+	cr.cs = &controllerState{beadsQuiescent: new(atomic.Bool)}
+	on, off := true, false
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cr.cityPath, "r1", &on); err != nil {
+		t.Fatal(err)
+	}
+	if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, cr.cityPath, &on); err != nil {
+		t.Fatal(err)
+	}
+	resume := false
+	old := suspendedScopePair
+	t.Cleanup(func() { suspendedScopePair = old })
+	suspendedScopePair = func(string) (bool, bool) {
+		if resume {
+			resume = false
+			if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, cr.cityPath, &off); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return true, true
+	}
+	if !cr.enterBeadsQuiescenceIfDue(context.Background()) { // settle
+		t.Fatal("a suspended city with nothing running is not quiescent")
+	}
+	resume = true
+	cr.enterBeadsQuiescenceIfDue(context.Background()) // read the city suspended; resumed before the stop
+	if ops := providerOpsLogged(t, logPath); ops != "" {
+		t.Fatalf("provider ops = %q, want no stop for a shared-root rig once the city resumed", ops)
+	}
+}
+
+// The rig path re-checks only rigs suspended in their own right: a rig resumed
+// mid-tick is not stopped because a city suspension landed in the same window.
+// That suspension is the city path's to act on, once the city has drained.
+func TestRetireSuspendedScopesSkipsARigResumedAsTheCitySuspends(t *testing.T) {
+	cr, _, rig, logPath := quiescenceRuntime(t, "")
+	t.Setenv("GC_SUSPENDED", "")
+	on, off := true, false
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cr.cityPath, "r1", &on); err != nil {
+		t.Fatal(err)
+	}
+	swap := false
+	old := suspendedScopePair
+	t.Cleanup(func() { suspendedScopePair = old })
+	suspendedScopePair = func(root string) (bool, bool) {
+		if !samePath(root, rig) {
+			return false, false
+		}
+		if swap {
+			swap = false
+			if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cr.cityPath, "r1", &off); err != nil {
+				t.Fatal(err)
+			}
+			if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, cr.cityPath, &on); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return true, true
+	}
+	p := &tickPass{ctx: context.Background(), sessionBeads: newSessionBeadSnapshotFromInfos(nil)}
+	cr.tickRetireSuspendedRigScopes(p) // drained once: settle
+	swap = true
+	cr.tickRetireSuspendedRigScopes(p) // read the rig suspended; rig resumed and city suspended before the stop
+	if ops := providerOpsLogged(t, logPath); ops != "" {
+		t.Fatalf("provider ops = %q, want no stop for a rig resumed before the stop", ops)
+	}
+}
+
+// A suspended scope with no proxy to observe is stopped once per suspension
+// episode: the stop is recorded under the episode it re-read, so the episode's
+// later settled ticks leave the scope alone.
+func TestRetireSuspendedRigScopeOncePerSuspensionEpisode(t *testing.T) {
+	cr, _, _, logPath := quiescenceRuntime(t, "")
+	t.Setenv("GC_SUSPENDED", "")
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cr.cityPath, "r1", &suspended); err != nil {
+		t.Fatal(err)
+	}
+	p := &tickPass{ctx: context.Background(), sessionBeads: newSessionBeadSnapshotFromInfos(nil)}
+	cr.tickRetireSuspendedRigScopes(p) // drained once: settle
+	cr.tickRetireSuspendedRigScopes(p) // stop
+	cr.tickRetireSuspendedRigScopes(p)
+	cr.tickRetireSuspendedRigScopes(p)
+	if ops := providerOpsLogged(t, logPath); ops != "stop" {
+		t.Fatalf("provider ops = %q, want exactly one stop for the episode", ops)
 	}
 }

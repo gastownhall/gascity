@@ -282,6 +282,43 @@ func TestStart_HandshakeTimeout(t *testing.T) {
 	}
 }
 
+// TestStart_ExpiredContextErrorNamesStage pins that a start whose context
+// had already expired names the ACP start, and that a handshake timeout keeps
+// its own handshake prefix.
+func TestStart_ExpiredContextErrorNamesStage(t *testing.T) {
+	t.Run("expired before start", func(t *testing.T) {
+		p := newTestProvider(t)
+		name := testName()
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+		err := p.Start(ctx, name, runtime.Config{Command: "sleep 300", WorkDir: t.TempDir()})
+		if err == nil {
+			t.Cleanup(func() { _ = p.Stop(name) })
+			t.Fatal("Start with an expired context succeeded")
+		}
+		if want := fmt.Sprintf("acp start for %q: ", name); !strings.HasPrefix(err.Error(), want) {
+			t.Errorf("err = %q, want prefix %q", err.Error(), want)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("errors.Is(%v, context.DeadlineExceeded) = false", err)
+		}
+	})
+	t.Run("handshake timeout", func(t *testing.T) {
+		p := newTestProvider(t)
+		name := testName()
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		err := p.Start(ctx, name, runtime.Config{Command: "sleep 300", WorkDir: t.TempDir()})
+		if err == nil {
+			t.Cleanup(func() { _ = p.Stop(name) })
+			t.Fatal("Start should fail when the handshake times out")
+		}
+		if want := fmt.Sprintf("acp handshake for %q: ", name); !strings.HasPrefix(err.Error(), want) {
+			t.Errorf("err = %q, want prefix %q", err.Error(), want)
+		}
+	})
+}
+
 func TestStart_RequiresCommand(t *testing.T) {
 	p := newTestProvider(t)
 	name := testName()
@@ -611,7 +648,7 @@ func TestBusyState_SetAndCleared(t *testing.T) {
 	}
 
 	// Simulate receiving a response that matches the active prompt.
-	sc.clearActivePrompt(42)
+	sc.abandonPrompt(42, errors.New("test abandon"))
 
 	if sc.isBusy() {
 		t.Error("should not be busy after clearing activePromptID")
@@ -631,7 +668,7 @@ func TestWaitIdleUnblocksPromptlyWhenBusyStateClears(t *testing.T) {
 	}()
 
 	time.Sleep(20 * time.Millisecond)
-	sc.clearActivePrompt(42)
+	sc.abandonPrompt(42, errors.New("test abandon"))
 
 	select {
 	case ok := <-done:
@@ -1159,17 +1196,6 @@ func TestStop_PreservesMetadataWhenSocketRejectsStop(t *testing.T) {
 	}
 }
 
-func TestPendingAndRespondUnsupported(t *testing.T) {
-	p := newTestProvider(t)
-
-	if _, err := p.Pending("any"); !errors.Is(err, runtime.ErrInteractionUnsupported) {
-		t.Fatalf("Pending error = %v, want ErrInteractionUnsupported", err)
-	}
-	if err := p.Respond("any", runtime.InteractionResponse{Action: "approve"}); !errors.Is(err, runtime.ErrInteractionUnsupported) {
-		t.Fatalf("Respond error = %v, want ErrInteractionUnsupported", err)
-	}
-}
-
 func TestHandshakeTimeout_RespectsConfig(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "acp")
 	p := NewProviderWithDir(dir, Config{
@@ -1218,7 +1244,7 @@ func TestReadLoopDeath_ClearsBusyState(t *testing.T) {
 	}
 
 	// Simulate readLoop exit (calls drainPending).
-	sc.drainPending()
+	sc.drainPending(nil)
 
 	if sc.isBusy() {
 		t.Error("should not be busy after drainPending")
@@ -1244,8 +1270,8 @@ func TestDrainPending_Idempotent(t *testing.T) {
 	sc.mu.Unlock()
 
 	// Call twice — should not panic on double-close.
-	sc.drainPending()
-	sc.drainPending() // second call should be a no-op
+	sc.drainPending(nil)
+	sc.drainPending(nil) // second call should be a no-op
 
 	if sc.isBusy() {
 		t.Error("should not be busy after double drain")
@@ -1370,5 +1396,22 @@ func TestNudge_NonPipeErrorSurfacesImmediately(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Nudge stalled on non-pipe error — origin gate should have bypassed sc.done wait")
+	}
+}
+
+// LL6, I24: acp is already fresh-only. A held name returns ErrSessionExists
+// with FreshOnly set, and the holder is neither replaced nor stopped. Kills a
+// recycle of a held name inside Start.
+func TestAcpSubprocessAlreadyFreshOnly(t *testing.T) {
+	p := NewProviderWithDir(shortTempDir(t), Config{})
+	holder := &sessionConn{done: make(chan struct{})}
+	p.conns["held"] = holder
+
+	err := p.Start(context.Background(), "held", runtime.Config{Command: "true", FreshOnly: true})
+	if !errors.Is(err, runtime.ErrSessionExists) {
+		t.Fatalf("Start = %v, want runtime.ErrSessionExists", err)
+	}
+	if p.conns["held"] != holder || !holder.alive() {
+		t.Fatal("Start replaced or stopped the runtime holding the name")
 	}
 }

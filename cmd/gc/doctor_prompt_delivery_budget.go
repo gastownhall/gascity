@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -91,6 +93,16 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 		if suppressStartupPromptForAgent(&a) {
 			continue
 		}
+		// A prompt_template path that does not stat is config-refs' finding
+		// (it reports the path as not found), and there is no prompt to
+		// measure, so reporting it here too would surface the same
+		// misconfiguration under two check names. A path that stats but
+		// cannot be read (a directory, a file without read permission) is
+		// not caught there; it renders below and is reported with the read
+		// error.
+		if _, err := os.Stat(promptTemplateSourcePath(c.cityPath, a.PromptTemplate)); err != nil {
+			continue
+		}
 
 		// ResolveProvider's error is intentionally discarded: cmd_prime.go's
 		// own per-agent loop never branches on it either, and every consumer
@@ -157,7 +169,7 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 		case delivery.OversizedFallback:
 			note(doctor.StatusWarning, fmt.Sprintf("%s: nudge-fallback: prompt exceeds the delivery budget for runtime %q; falls back to a post-start nudge (configured_mode=%s effective_mode=%s raw_bytes=%d raw_limit=%d argv_bytes=%d argv_limit=%d)", a.QualifiedName(), effProvider, configuredMode, delivery.EffectiveMode, delivery.RawBytes, maxPromptSuffixRawBytes, delivery.ArgvBytes, maxPromptSuffixQuotedBytes))
 		case renderErrs.Len() > 0:
-			note(doctor.StatusWarning, fmt.Sprintf("%s: render warning: prompt template %q failed to render and fell back to raw text", a.QualifiedName(), a.PromptTemplate))
+			note(doctor.StatusWarning, promptRenderWarningDetail(a.QualifiedName(), a.PromptTemplate, prompt != "", renderErrs.String()))
 		}
 	}
 
@@ -175,4 +187,18 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 	default:
 		return okCheck("prompt-delivery-budget", "all agent prompts clear their delivery budget")
 	}
+}
+
+// promptRenderWarningDetail describes the warnings renderPrompt wrote while
+// rendering an agent's prompt template. If the render produced text, the
+// detail says the template fell back to raw text, which is what renderPrompt
+// returns on a parse or execute error. If it produced none, no prompt is
+// shipped at all (for example, a template path that cannot be read), so the
+// detail carries renderPrompt's own messages, joined onto one line.
+func promptRenderWarningDetail(agent, templatePath string, rendered bool, renderErrs string) string {
+	if rendered {
+		return fmt.Sprintf("%s: render warning: prompt template %q failed to render and fell back to raw text", agent, templatePath)
+	}
+	msg := strings.ReplaceAll(strings.TrimSpace(renderErrs), "\n", "; ")
+	return fmt.Sprintf("%s: render warning: prompt template %q produced no prompt: %s", agent, templatePath, msg)
 }

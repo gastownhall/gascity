@@ -267,16 +267,30 @@ func TestCheckGomodReplaceGuardWiredIntoMakefile(t *testing.T) {
 	}
 }
 
-// TestCheckGomodReplaceGuardWiredIntoCI verifies that the guard is wired
-// into the preflight-static CI job so every PR is checked.
-func TestCheckGomodReplaceGuardWiredIntoCI(t *testing.T) {
+// TestRepoGuardsRunAsBazelTests verifies that each repository shell guard
+// is wired as an sh_test in scripts/BUILD.bazel, so the required Bazel lane
+// (`bazel test //...`) runs it on every PR.
+func TestRepoGuardsRunAsBazelTests(t *testing.T) {
 	repoRoot := repoRoot(t)
 
-	workflow, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", "ci.yml"))
+	build, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "BUILD.bazel"))
 	if err != nil {
-		t.Fatalf("read ci.yml: %v", err)
+		t.Fatalf("read scripts/BUILD.bazel: %v", err)
 	}
-	if !strings.Contains(string(workflow), "check-gomod-replace") {
-		t.Error("ci.yml preflight-static job is missing the check-gomod-replace step")
+	for target, script := range map[string]string{
+		"check_gomod_replace_test":             "check-gomod-replace.sh",
+		"check_core_boundary_test":             "check-core-boundary.sh",
+		"check_eventexport_isolation_test":     "check-eventexport-isolation.sh",
+		"check_native_dependency_surface_test": "check-native-dependency-surface.sh",
+	} {
+		_, rule, ok := strings.Cut(string(build), "sh_test(\n    name = \""+target+"\",\n")
+		if !ok {
+			t.Errorf("scripts/BUILD.bazel has no sh_test %q", target)
+			continue
+		}
+		rule, _, _ = strings.Cut(rule, "\n)\n")
+		if !strings.Contains(rule, `srcs = ["`+script+`"]`) {
+			t.Errorf("sh_test %q does not run %s:\n%s", target, script, rule)
+		}
 	}
 }

@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_test")
+load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
 
 # gazelle:build_tags integration
 
@@ -24,17 +25,13 @@ go_test(
     ],
     # bead_id_test.go reads ../agents/lib/bead-id.sh and ../agents/*.sh;
     # dolt_config_timeout_test.go parses dolt_config_test.go as a text
-    # fixture (it is not a source dep). //:repo_source_tree covers the
-    # former, the glob covers the latter.
+    # fixture (it is not a source dep). //test:agents covers the former,
+    # the glob covers the latter.
     data = glob(
         ["*.go"],
         exclude = ["BUILD.bazel"],
     ) + [
-        "//:repo_source_tree",
-    ],
-    tags = [
-        "external",
-        "requires-network",
+        "//test:agents",
     ],
     deps = [
         "//internal/testenv",
@@ -45,6 +42,7 @@ go_test(
     name = "integration_test",
     srcs = [
         "bdstore_batch_delete_test.go",
+        "bdstore_batch_reads_test.go",
         "bdstore_runner_isolation_test.go",
         "bdstore_test.go",
         "bead_id_helpers_test.go",
@@ -76,17 +74,19 @@ go_test(
         "gastown_shutdown_test.go",
         "gastown_sling_test.go",
         "gastown_witness_test.go",
+        "gc_bd_latency_test.go",
         "gc_live_contract_store_conflict_test.go",
         "gc_live_contract_test.go",
+        "gc_seat_hook_latency_test.go",
         "graph_dispatch_harness_test.go",
         "graph_dispatch_test.go",
         "helpers_test.go",
         "huma_binary_test.go",
         "integration_test.go",
         "mail_test.go",
+        "prompt_query_federation_test.go",
         "review_check_scripts_test.go",
         "review_formula_test.go",
-        "session_k8s_test.go",
         "skill_lifecycle_test.go",
         "start_drift_test.go",
         "supervisor_unit_guard_test.go",
@@ -100,13 +100,13 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
-        "//:repo_source_tree",
+        "//test:agents",
     ] + select({
         # Only the integration-tagged tests exec these. The untagged tests that
         # also build in the default configuration (bead_id_test.go,
         # dolt_config_timeout_test.go) read sources only, so `bazel test //...`
         # neither links nor stages them; the gc links are 207 MB each.
-        ":gotags_integration": [
+        "//:gotags_integration": [
             "//cmd/gc",
             "//cmd/gc:gc_drift_new",
             "//cmd/gc:gc_drift_old",
@@ -116,18 +116,16 @@ go_test(
             # and dolt for the dolt-backed integration shapes, same versions the
             # go-test CI installs via install-bd-archive.sh /
             # install-dolt-archive.sh.
-            "@bd_bin_v1_3_1//:bd",
-            "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
+            "@bd_bin_v1_3_2//:bd",
+            "@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt",
         ],
         "//conditions:default": [],
     }),
     shard_count = 14,
-    tags = [
-        "external",
-        "requires-network",
-    ],
     deps = [
+        "//internal/api/apicontract",
         "//internal/bazeltest",
+        "//internal/beadmeta",
         "//internal/beads",
         "//internal/beads/beadstest",
         "//internal/beads/contract",
@@ -140,8 +138,6 @@ go_test(
         "//internal/materialize",
         "//internal/pathutil",
         "//internal/runtime",
-        "//internal/runtime/exec",
-        "//internal/runtime/runtimetest",
         "//internal/supervisor",
         "//internal/testenv",
         "//internal/testfixtures/reviewworkflows",
@@ -152,11 +148,27 @@ go_test(
         "//test/toolhome",
         "@com_github_cenkalti_backoff_v4//:backoff",
         "@com_github_gastownhall_gascity_packs//:gascity-packs",
-        "@com_github_pb33f_libopenapi//:libopenapi",
-        "@com_github_pb33f_libopenapi_validator//:libopenapi-validator",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],
+)
+
+# bazel.yml's gating integration-smoke lane (GA-1, item 5 ga-spec.md
+# scripts/ga/*): the bdstore and REST smoke subset of integration_test
+# (scripts/test-integration-shard's bdstore_tests + rest_smoke_tests,
+# scripts/bazel_integration_smoke_test.go keeps this filter equal to that
+# list). A go_variant_test rather than a global --test_filter, so a future
+# union of this lane with integration-packages (one bazel invocation) does
+# not filter packages' tests away too: --test_filter is global, args is
+# per-target. No gotags: the wrapped test keeps its own select() over
+# //:gotags_integration, so the variant's compile and link actions are
+# byte-identical to integration_test's own.
+go_variant_test(
+    name = "integration_smoke_test",
+    args = ["-test.run=^(TestBdStoreConformance|TestBdStoreDeleteBatchOrphansExternalDependents|TestBdStoreMailWispInsert|TestPinnedBdStoreCommandRunnerReportsSilentFallback|TestPinnedBdStoreCommandRunnerUsesExactEnvironmentAndKeepsStdoutJSON|TestE2E_WorkspaceDefaults|TestE2E_Hook_WithWork|TestE2E_MultiAgent_PoolAndFixed|TestGastown_ControllerStartStop|TestGastown_PipelineHumanToWorker|TestGraphWorkflowSuccessPath|TestIntegrationEnvForIsolatesHome|TestIsolatedEnvRootsKeepGCOffTheRealHome|TestStandaloneBDEnvForDirIsolatesHome)$$"],
+    shard_count = 14,
+    tags = ["manual"],
+    test = ":integration_test",
 )
 
 # The shard placement guard (scripts/integration_shards_test.go) reads this
@@ -164,12 +176,6 @@ go_test(
 exports_files(
     ["BUILD.bazel"],
     visibility = ["//scripts:__pkg__"],
-)
-
-# The integration lane builds with --define=gotags=integration (bazel-test.yml).
-config_setting(
-    name = "gotags_integration",
-    define_values = {"gotags": "integration"},
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
@@ -180,6 +186,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

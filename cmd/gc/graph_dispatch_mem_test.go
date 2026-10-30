@@ -906,7 +906,7 @@ func TestRigGraphControlLaneMaterializeServeAndAdvanceEndToEnd(t *testing.T) {
 		}
 		return selected, nil
 	}
-	controlDispatcherServe = func(gotCityPath, storePath, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(gotCityPath, storePath, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		if canonicalTestPath(gotCityPath) != canonicalTestPath(cityPath) {
 			return fmt.Errorf("control city path = %q, want %q", gotCityPath, cityPath)
 		}

@@ -313,7 +313,7 @@ func TestComputeAwakeSetKeyedByIDKeepsRowsThatShareAName(t *testing.T) {
 	want := map[string]AwakeDecision{
 		"gc-live":    {ShouldWake: true, Reason: "assigned-work", HasAssignedWork: true, AssignedWorkBeadID: "w1", AssignedWorkClaimed: true},
 		"gc-stale-1": {Reason: "held"},
-		"gc-stale-2": {ShouldWake: true, Reason: "attached"},
+		"gc-stale-2": {ShouldWake: true, Reason: "attached", Attached: true},
 	}
 	if !reflect.DeepEqual(byID, want) {
 		t.Fatalf("bead-ID keying:\n got=%+v\nwant=%+v", byID, want)

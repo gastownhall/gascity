@@ -354,6 +354,20 @@ func requestedCityEndpointState(cfg *config.City, currentState contract.ConfigSt
 func planCityRigEndpointUpdates(cityPath string, rigs []config.Rig, currentCityState, targetCityState contract.ConfigState) ([]cityRigEndpointPlan, error) {
 	plans := make([]cityRigEndpointPlan, 0, len(rigs))
 	for i := range rigs {
+		// An embedded rig is outside the city endpoint altogether: it has no
+		// server to inherit, its recorded mode is authoritative (ga-p9iuv),
+		// and its .beads is bd's. Sweeping the city endpoint into its
+		// config.yaml would contradict the metadata.json beside it, and even
+		// a no-op plan would hand it to the port pass, which removes the
+		// mirror of every planned rig not inheriting a managed port. So it
+		// gets no plan.
+		embedded, err := scopeMetadataRecordsEmbeddedDolt(fsys.OSFS{}, rigs[i].Path)
+		if err != nil {
+			return nil, fmt.Errorf("classifying rig %q storage mode: %w", rigs[i].Name, err)
+		}
+		if embedded {
+			continue
+		}
 		current, err := resolveOwnerRigConfigState(cityPath, rigs[i], currentCityState)
 		if err != nil {
 			return nil, err

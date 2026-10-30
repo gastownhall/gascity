@@ -29,16 +29,16 @@ const (
 // runs them back to back: on the Mac Tier A runner it reached 14 minutes and
 // blew `make test-acceptance`'s 20-minute budget with M2-direct-local alone
 // taking 11 of them. Tier A is a smoke tier, so the matrix is not its job.
-// The Beads / topology acceptance workflow sets this and is where the shapes
-// actually run, under GC_REQUIRE_ACCEPTANCE_TOOLING so it cannot pass by
-// skipping them.
+// Bazel's acceptance lane sets this (test/acceptance/BUILD.bazel) and is
+// where the shapes actually run, under GC_REQUIRE_ACCEPTANCE_TOOLING so it
+// cannot pass by skipping them.
 func RequireTopologyMatrix(t *testing.T) {
 	t.Helper()
 	if requireSwitchOn(EnvTopologyMatrix) {
 		return
 	}
 	t.Skipf("the topology matrix stands up real Dolt servers per shape and does not fit the Tier A smoke budget; "+
-		"set %s=1 (the Beads / topology acceptance job does) to run it", EnvTopologyMatrix)
+		"set %s=1 (Bazel's acceptance lane does) to run it", EnvTopologyMatrix)
 }
 
 // requireSwitchOn reports whether a GC_REQUIRE_* switch is on. Unset, empty and
@@ -79,10 +79,10 @@ func MissingLegacyGC(t *testing.T, format string, args ...any) {
 // failure under EnvRequireTooling.
 //
 // The switch is the right one because the jobs that set it are the ones whose
-// rows are the evidence (the Beads / proxied-native acceptance job is
+// rows are the evidence (Bazel's acceptance lane, which sets it, is
 // required). An in-row t.Skip there let the job report success without
 // running the row, visible only in a step summary nobody gates on; a bd that
-// changed the behavior the row depends on must turn that job red, so somebody
+// changed the behavior the row depends on must turn that lane red, so somebody
 // decides what the row should now measure.
 func MissingPrecondition(t *testing.T, format string, args ...any) {
 	t.Helper()

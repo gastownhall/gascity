@@ -91,7 +91,7 @@ func computeAwakeSetPreRefactor(input AwakeInput) map[string]AwakeDecision {
 			}
 			if sn := resolveNamedSessionBeadNamePreRefactor(input.SessionBeads, ns); sn != "" {
 				bead := findBeadBySessionName(input.SessionBeads, sn)
-				if bead != nil && bead.Drained && reason == "named-demand" && input.NamedSessionRoutedDemand[ns.Identity] {
+				if bead != nil && reason == "named-demand" && input.NamedSessionRoutedDemand[ns.Identity] {
 					reason = "routed-demand"
 				}
 				drainedExempt := reason == "routed-demand"
@@ -282,6 +282,7 @@ func computeAwakeSetPreRefactor(input AwakeInput) map[string]AwakeDecision {
 		if input.AttachedSessions[name] && !bead.WaitHold {
 			decision.ShouldWake = true
 			decision.Reason = "attached"
+			decision.Attached = true
 		}
 
 		if input.PendingSessions[name] && !bead.WaitHold {

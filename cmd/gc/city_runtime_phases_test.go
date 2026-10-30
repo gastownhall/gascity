@@ -907,7 +907,7 @@ func TestLegacySessionEntryGuardBlocksAndCountsUnderV2(t *testing.T) {
 	enterEverySite := func(cr *CityRuntime) {
 		p := &tickPass{ctx: context.Background(), dirty: cr.configDirty, trigger: "patrol", prevPoolRunning: new(map[string]bool)}
 		cr.runTickPhases(p, legacyTickPhases)
-		cr.beadReconcileTick(context.Background(), DesiredStateResult{}, nil, nil, false)
+		cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), DesiredStateResult{}, nil, nil, false)
 		cr.controlDispatcherTick(context.Background())
 	}
 

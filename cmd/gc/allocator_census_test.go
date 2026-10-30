@@ -48,9 +48,9 @@ func censusLegs(stores ...any) []classStoreCandidate {
 	return legs
 }
 
-func readCensus(t *testing.T, now time.Time, cfg *config.City, legs []classStoreCandidate) *sessionCensus {
+func readCensus(t *testing.T, now time.Time, legs []classStoreCandidate) *sessionCensus {
 	t.Helper()
-	c, err := readSessionCensus(now, cfg, legs)
+	c, err := readSessionCensus(now, legs)
 	if err != nil {
 		t.Fatalf("census read: %v", err)
 	}
@@ -75,14 +75,14 @@ func censusLegNamed(t *testing.T, c *sessionCensus, ref string) censusLeg {
 func TestCensusSessionsBindingLeadsAndDuplicatesAreNone(t *testing.T) {
 	woke := censusNow.Add(-10 * time.Second).Format(time.RFC3339)
 	lease := map[string]string{"state": "creating", "pending_create_claim": "true", "last_woke_at": woke, "generation": "3"}
-	// The residue copy a migration left behind carries a live lease of its
-	// own; counting it too would count one start twice.
+	// The residue copy a migration left behind carries a claim of its own;
+	// counting it too would count one bring-up twice.
 	relic := map[string]string{"state": "start-pending", "pending_create_claim": "true", "last_woke_at": woke, "generation": "1"}
 	binding := censusStore(censusSession("gc-1", lease))
 	// The work-only row's ID sorts before the binding's: canonical order is
 	// leg first, then bead ID.
 	work := censusStore(censusSession("gc-1", relic), censusSession("gc-0", map[string]string{"state": "active"}))
-	c := readCensus(t, censusNow, &config.City{},
+	c := readCensus(t, censusNow,
 		censusLegs("class:sessions", binding, "city:mc", work))
 
 	canonical := c.Canonical()
@@ -96,39 +96,35 @@ func TestCensusSessionsBindingLeadsAndDuplicatesAreNone(t *testing.T) {
 		t.Fatalf("unfolded rows = %d, want 3 (the duplicate kept)", len(c.Rows))
 	}
 	dup := c.Rows[rowKey{"city:mc", "gc-1"}]
-	if dup.DuplicateOf != "class:sessions" || dup.StartLease || dup.PendingCreate {
+	if dup.DuplicateOf != "class:sessions" || dup.PendingCreate {
 		t.Fatalf("duplicate row = %+v, want DuplicateOf the binding and no in-flight facts", dup)
 	}
-	if !canonical[0].StartLease || canonical[0].Incarnation != 3 {
-		t.Fatalf("canonical gc-1 = %+v, want a start lease at incarnation 3", canonical[0])
+	if !canonical[0].PendingCreate || canonical[0].Incarnation != 3 {
+		t.Fatalf("canonical gc-1 = %+v, want a pending create at incarnation 3", canonical[0])
 	}
 }
 
 // Kills: a read error mistaken for an empty city (P-3). A hard error on the
 // sessions leg fails the pass; one on another leg keeps that leg's rows
-// (none) and leaves it out of the ledger's legs, so a missing row there
-// proves no close.
+// (none).
 func TestCensusSessionsLegErrorFailsPass(t *testing.T) {
 	down := errors.New("store down")
 	ok := censusStore(censusSession("gc-1", map[string]string{"state": "active"}))
 
-	if _, err := readSessionCensus(censusNow, &config.City{},
+	if _, err := readSessionCensus(censusNow,
 		censusLegs("class:sessions", censusErrStore{beads.NewMemStore(), down}, "rig:a", ok)); !errors.Is(err, down) {
 		t.Fatalf("sessions-leg failure: err = %v, want the leg's error", err)
 	}
-	if c, err := readSessionCensus(censusNow, &config.City{}, nil); err == nil {
+	if c, err := readSessionCensus(censusNow, nil); err == nil {
 		t.Fatalf("no legs: census %+v, want an error", c)
 	}
 
-	c := readCensus(t, censusNow, &config.City{}, censusLegs("class:sessions", ok, "rig:a", censusErrStore{beads.NewMemStore(), down}))
+	c := readCensus(t, censusNow, censusLegs("class:sessions", ok, "rig:a", censusErrStore{beads.NewMemStore(), down}))
 	if leg := censusLegNamed(t, c, "rig:a"); !errors.Is(leg.Err, down) {
 		t.Fatalf("rig leg = %+v, want the error", leg)
 	}
 	if c.Partial() {
 		t.Fatal("hard rig error: census partial, want only a partial read to retain")
-	}
-	if got := c.Ledger(&config.City{}).Legs; !got["class:sessions"] || got["rig:a"] {
-		t.Fatalf("ledger legs = %v, want only the sessions leg", got)
 	}
 }
 
@@ -145,13 +141,13 @@ func TestCensusPartialLegRetains(t *testing.T) {
 		{censusLegs("class:sessions", ok, "rig:a", partial), "rig:a"},
 		{censusLegs("class:sessions", partial, "rig:a", ok), "class:sessions"},
 	} {
-		c := readCensus(t, censusNow, &config.City{}, tc.legs)
-		if _, kept := c.Rows[rowKey{tc.partialLeg, "rg-1"}]; !kept || !c.Partial() || c.Ledger(&config.City{}).Legs[tc.partialLeg] {
-			t.Fatalf("partial %s read: row kept=%v partial=%v, want the row kept, the census partial, the leg out of the ledger's legs", tc.partialLeg, kept, c.Partial())
+		c := readCensus(t, censusNow, tc.legs)
+		if _, kept := c.Rows[rowKey{tc.partialLeg, "rg-1"}]; !kept || !c.Partial() {
+			t.Fatalf("partial %s read: row kept=%v partial=%v, want the row kept and the census partial", tc.partialLeg, kept, c.Partial())
 		}
 	}
 
-	d, err := decideAllocation(allocInputs{Now: censusNow, Census: readCensus(t, censusNow, &config.City{}, censusLegs("class:sessions", ok, "rig:a", partial))})
+	d, err := decideAllocation(allocInputs{Now: censusNow, Census: readCensus(t, censusNow, censusLegs("class:sessions", ok, "rig:a", partial))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +170,7 @@ func TestCensusReadsCacheOnEveryLeg(t *testing.T) {
 	if err := rig.SetMetadata("rg-1", "state", "creating"); err != nil {
 		t.Fatal(err)
 	}
-	c := readCensus(t, censusNow, &config.City{}, censusLegs("class:sessions", censusStore(), "rig:a", rig))
+	c := readCensus(t, censusNow, censusLegs("class:sessions", censusStore(), "rig:a", rig))
 	if got := c.Rows[rowKey{"rig:a", "rg-1"}].Info.MetadataState; got != "creating" {
 		t.Fatalf("rig row state = %q, want the cache's creating", got)
 	}
@@ -208,7 +204,7 @@ func TestCensusExactLegReadsDirtyRowsThroughCacheOverlay(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c := readCensus(t, censusNow, &config.City{}, censusLegs("class:sessions", cache))
+	c := readCensus(t, censusNow, censusLegs("class:sessions", cache))
 	if leg := c.Legs[0]; leg.Err != nil {
 		t.Fatalf("sessions leg = %+v, want read this pass", leg)
 	}
@@ -231,7 +227,7 @@ func TestCensusKeysRowsThatShareANameByBeadID(t *testing.T) {
 	for _, id := range []string{"gc-3", "gc-1", "gc-2"} {
 		rows = append(rows, censusSession(id, map[string]string{"session_name": "rig--worker-2-pool", "state": "creating"}))
 	}
-	c := readCensus(t, censusNow, &config.City{}, censusLegs("class:sessions", censusStore(rows...)))
+	c := readCensus(t, censusNow, censusLegs("class:sessions", censusStore(rows...)))
 	canonical := c.Canonical()
 	if len(canonical) != 3 || canonical[0].Key.ID != "gc-1" || canonical[2].Key.ID != "gc-3" {
 		t.Fatalf("canonical = %+v, want three rows by bead ID", canonical)
@@ -242,113 +238,82 @@ func TestCensusKeysRowsThatShareANameByBeadID(t *testing.T) {
 
 	// A row with no session_name is indexed under the runtime name it
 	// derives from its ID, which is the name the inventory lists.
-	c = readCensus(t, censusNow, &config.City{}, censusLegs("class:sessions", censusStore(censusSession("gc-7", map[string]string{"state": "asleep"}))))
+	c = readCensus(t, censusNow, censusLegs("class:sessions", censusStore(censusSession("gc-7", map[string]string{"state": "asleep"}))))
 	k := rowKey{"class:sessions", "gc-7"}
 	if name := c.Rows[k].Info.SessionName; name == "" || len(c.RowsNamed(name)) != 1 || c.RowsNamed(name)[0] != k {
 		t.Fatalf("derived name %q: RowsNamed = %v, want gc-7", name, c.RowsNamed(name))
 	}
 }
 
-// Kills (P3-4 obligation): a start lease counted from last_woke_at alone. A
-// row that woke recently but holds no claim and is not creating has no start
-// in flight (START-043); the never-started pending create is its own fact,
-// within its lease only.
-func TestCensusLedgerFactsStartLeaseNeedsClaimOrCreating(t *testing.T) {
+// Kills a lease creeping back into the census (v5 P4, SC A5): PendingCreate
+// is the claim on an uncommitted row, whatever last_woke_at or the row's age
+// say. A committed (active or awake) row that still holds the claim is no
+// bring-up; a reopened named row (stopped, with the claim) is one.
+func TestCensusPendingCreateIsTheClaim(t *testing.T) {
 	woke := censusNow.Add(-10 * time.Second).Format(time.RFC3339)
-	oldWoke := censusNow.Add(-5 * time.Minute).Format(time.RFC3339)
-	cases := []struct {
-		name                 string
-		meta                 map[string]string
-		created              time.Time
-		startLease, pendingC bool
+	old := censusNow.Add(-time.Hour)
+	cases := map[string]struct {
+		meta    map[string]string
+		pending bool
 	}{
-		{name: "active-recently-woke", meta: map[string]string{"state": "active", "last_woke_at": woke}},
-		{name: "creating-recently-woke", meta: map[string]string{"state": "creating", "last_woke_at": woke}, startLease: true},
-		{name: "claim-recently-woke", meta: map[string]string{"state": "active", "pending_create_claim": "true", "last_woke_at": woke}, startLease: true},
-		{name: "creating-lease-expired", meta: map[string]string{"state": "creating", "last_woke_at": oldWoke}},
-		{name: "claim-unparseable-woke", meta: map[string]string{"state": "creating", "pending_create_claim": "true", "last_woke_at": "soon"}},
-		{name: "never-started-fresh", meta: map[string]string{"state": "start-pending", "pending_create_claim": "true"}, created: censusNow.Add(-time.Minute), pendingC: true},
-		{name: "never-started-expired", meta: map[string]string{"state": "start-pending", "pending_create_claim": "true"}, created: censusNow.Add(-11 * time.Minute)},
-		{name: "claim-on-stopped-row", meta: map[string]string{"state": "stopped", "pending_create_claim": "true"}, created: censusNow.Add(-time.Minute)},
-		// Started: its claim's start is in flight, but it is no longer a
-		// never-started pending create.
-		{name: "claim-started-fresh", meta: map[string]string{"state": "start-pending", "pending_create_claim": "true", "last_woke_at": woke}, created: censusNow.Add(-time.Minute), startLease: true},
+		"creating-recently-woke": {meta: map[string]string{"state": "creating", "last_woke_at": woke}},
+		"active-recently-woke":   {meta: map[string]string{"state": "active", "last_woke_at": woke}},
+		"claim-recently-woke":    {meta: map[string]string{"state": "creating", "pending_create_claim": "true", "last_woke_at": woke}, pending: true},
+		"claim-an-hour-old":      {meta: map[string]string{"state": "start-pending", "pending_create_claim": "true"}, pending: true},
+		"claim-committed-active": {meta: map[string]string{"state": "active", "pending_create_claim": "true", "last_woke_at": woke}},
+		"claim-committed-awake":  {meta: map[string]string{"state": "awake", "pending_create_claim": "true"}},
+		"claim-reopened-stopped": {meta: map[string]string{"state": "stopped", "pending_create_claim": "true"}, pending: true},
 	}
 	var rows []beads.Bead
-	for _, tc := range cases {
-		b := censusSession(tc.name, tc.meta)
-		if !tc.created.IsZero() {
-			b.CreatedAt = tc.created
-		}
+	for name, tc := range cases {
+		b := censusSession(name, tc.meta)
+		b.CreatedAt = old
 		rows = append(rows, b)
 	}
-	c := readCensus(t, censusNow, &config.City{}, censusLegs("class:sessions", censusStore(rows...)))
-	for _, tc := range cases {
-		row := c.Rows[rowKey{"class:sessions", tc.name}]
-		if row.StartLease != tc.startLease || row.PendingCreate != tc.pendingC {
-			t.Errorf("%s: StartLease=%v PendingCreate=%v, want %v %v", tc.name, row.StartLease, row.PendingCreate, tc.startLease, tc.pendingC)
+	c := readCensus(t, censusNow, censusLegs("class:sessions", censusStore(rows...)))
+	for name, tc := range cases {
+		if got := c.Rows[rowKey{"class:sessions", name}].PendingCreate; got != tc.pending {
+			t.Errorf("%s: PendingCreate = %v, want %v", name, got, tc.pending)
 		}
-	}
-
-	// The lease follows the configured startup timeout, not the default.
-	slow := &config.City{Session: config.SessionConfig{StartupTimeout: "5m"}}
-	threeMin := censusSession("gc-slow", map[string]string{"state": "creating", "last_woke_at": censusNow.Add(-3 * time.Minute).Format(time.RFC3339)})
-	c = readCensus(t, censusNow, slow, censusLegs("class:sessions", censusStore(threeMin)))
-	if !c.Rows[rowKey{"class:sessions", "gc-slow"}].StartLease {
-		t.Error("startup_timeout 5m, woke 3m ago: no start lease, want one")
 	}
 }
 
-// Kills: a ledger view without endpoints, with a failed leg listed as read,
-// with a read start, or without a leg's duplicate copy. The adapter carries
-// every row on every leg with its config-only endpoint and only the legs read
-// without error (P3-4 obligations).
-func TestCensusLedgerViewCarriesEndpointsAndCleanLegs(t *testing.T) {
+// Kills: a bring-up projection without endpoints or tokens, out of key
+// order, without a leg's duplicate copy, or counting the duplicate's claim.
+func TestCensusBringUpCarriesEndpointsTokensAndClaims(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", Dir: "rig", Provider: "p1"}, {Name: "relay", Upstream: "broker"}}}
-	woke := censusNow.Add(-10 * time.Second).Format(time.RFC3339)
 	sessions := censusStore(
-		censusSession("gc-1", map[string]string{"state": "creating", "template": "rig/worker", "pending_create_claim": "true", "last_woke_at": woke, "generation": "4", "instance_token": "tok-1"}),
+		censusSession("gc-1", map[string]string{"state": "creating", "template": "rig/worker", "pending_create_claim": "true", "generation": "4", "instance_token": "tok-1"}),
 		censusSession("gc-2", map[string]string{"state": "active", "template": "relay"}),
 		censusSession("gc-3", map[string]string{"state": "active", "template": "gone", "provider": "rowp"}),
 		// No stored template: the endpoint comes from the template the
 		// agent_name resolves to, not the raw field.
 		censusSession("gc-4", map[string]string{"state": "active", "agent_name": "rig/worker"}),
 	)
-	work := censusStore(censusSession("gc-1", map[string]string{"state": "creating", "template": "rig/worker"}))
-	legs := censusLegs("class:sessions", sessions, "city:mc", work, "rig:a", censusErrStore{beads.NewMemStore(), errors.New("down")})
-	view := readCensus(t, censusNow, cfg, legs).Ledger(cfg)
-
-	want := map[rowKey]ledgerRow{
-		{"class:sessions", "gc-1"}: {Incarnation: 4, InstanceToken: "tok-1", Endpoint: "provider:p1", StartLease: true},
-		{"class:sessions", "gc-2"}: {Endpoint: "upstream:broker"},
-		{"class:sessions", "gc-3"}: {Endpoint: "provider:rowp"},
-		{"class:sessions", "gc-4"}: {Endpoint: "provider:p1"},
-		{"city:mc", "gc-1"}:        {Endpoint: "provider:p1"},
+	work := censusStore(censusSession("gc-1", map[string]string{"state": "creating", "template": "rig/worker", "pending_create_claim": "true", "instance_token": "tok-w"}))
+	got := readCensus(t, censusNow, censusLegs("class:sessions", sessions, "city:mc", work)).BringUp(cfg)
+	want := []bringUpRow{
+		{Key: rowKey{"city:mc", "gc-1"}, Token: "tok-w", Endpoint: "provider:p1"},
+		{Key: rowKey{"class:sessions", "gc-1"}, Token: "tok-1", Endpoint: "provider:p1", PendingCreate: true},
+		{Key: rowKey{"class:sessions", "gc-2"}, Endpoint: "upstream:broker"},
+		{Key: rowKey{"class:sessions", "gc-3"}, Endpoint: "provider:rowp"},
+		{Key: rowKey{"class:sessions", "gc-4"}, Endpoint: "provider:p1"},
 	}
-	if len(view.Rows) != len(want) {
-		t.Fatalf("ledger rows = %+v, want %d", view.Rows, len(want))
-	}
-	for k, row := range want {
-		if got := view.Rows[k]; got != row {
-			t.Errorf("%v: %+v, want %+v", k, got, row)
-		}
-	}
-	if !view.Legs["class:sessions"] || !view.Legs["city:mc"] || view.Legs["rig:a"] || view.ReadStarted != nil {
-		t.Fatalf("ledger legs = %v read starts = %v, want the two clean legs only and no read start", view.Legs, view.ReadStarted)
+	if !slices.Equal(got, want) {
+		t.Fatalf("BringUp = %+v\nwant %+v", got, want)
 	}
 }
 
 // Kills: an enterprise-only state read as known (a start of a row main does
 // not understand), and the drain-ack stop-pending state read as unknown (F9).
 func TestCensusUnknownStateRows(t *testing.T) {
-	cfg := &config.City{Agents: []config.Agent{{Name: "worker", Dir: "rig"}}}
 	rows := []beads.Bead{
 		censusSession("gc-1", map[string]string{"state": "draining", "template": "rig/worker"}),
 		censusSession("gc-2", map[string]string{"state": "gc_swept", "template": "rig/worker"}),
 		censusSession("gc-3", map[string]string{"state": "draining", "state_reason": session.DrainAckStopPendingReason, "template": "rig/worker"}),
 		censusSession("gc-4", map[string]string{"state": "asleep", "template": "rig/worker"}),
 	}
-	c := readCensus(t, censusNow, cfg, censusLegs("class:sessions", censusStore(rows...)))
+	c := readCensus(t, censusNow, censusLegs("class:sessions", censusStore(rows...)))
 	var unknown []string
 	for _, row := range c.Canonical() {
 		if row.UnknownState {

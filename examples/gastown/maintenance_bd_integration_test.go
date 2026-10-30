@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // These tests drive the shipped maintenance orders against REAL bd scopes of
@@ -83,6 +85,9 @@ func newBdTopologyCity(t *testing.T, bd string) *bdTopologyCity {
 			t.Fatal(err)
 		}
 	}
+	if err := testutil.SeedDoltGlobalConfig(home); err != nil {
+		t.Fatal(err)
+	}
 	for _, entry := range os.Environ() {
 		key := entry[:strings.IndexByte(entry, '=')]
 		if strings.HasPrefix(key, "BEADS_") || strings.HasPrefix(key, "BD_") || strings.HasPrefix(key, "GC_") ||
@@ -108,6 +113,12 @@ func newBdTopologyCity(t *testing.T, bd string) *bdTopologyCity {
 		"DOLT_ESCALATE_SCRIPT="+filepath.Join(c.binDir, "escalate.sh"),
 		"GC_CALL_LOG="+c.gcLog,
 	)
+	// Every HTTPS request a child makes goes to a normally unroutable proxy. A
+	// proxied scope's `bd init` probes `dolt version`, whose update check is a
+	// network call unless HOME's dolt config disables it; on a healthy network
+	// that call returns in 0.2 s and hides a missing config, so on most hosts
+	// the slow network is reproduced instead of waited for.
+	c.env = append(c.env, testutil.UnroutableHTTPSProxyEnv()...)
 	writeExecutable(t, filepath.Join(c.binDir, "escalate.sh"), "#!/bin/sh\nprintf 'ESCALATION %s\\n' \"$*\" >> \""+c.gcLog+"\"\n")
 	t.Cleanup(c.stopProcesses)
 	return c
@@ -167,7 +178,20 @@ func (c *bdTopologyCity) addScope(t *testing.T, name, db, prefix string, proxied
 		args = append(args, "--server", "--server-host", "127.0.0.1", "--server-port", strconv.Itoa(c.ensureServer(t)))
 	}
 	args = append(args, "-p", prefix, "--database", db, "--skip-hooks", "--skip-agents", dir)
-	c.bdIn(t, s, args...)
+	if proxied {
+		out, err := retryOnBdProxyStartTimeout(
+			func() (string, error) { return c.run(t, dir, c.scopeEnv(s), c.bd, args...) },
+			func() error {
+				c.signalScopeProcesses(s, syscall.SIGKILL)
+				return os.RemoveAll(filepath.Join(dir, ".beads"))
+			},
+		)
+		if err != nil {
+			t.Fatalf("bd %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
+		}
+	} else {
+		c.bdIn(t, s, args...)
+	}
 	c.scopes = append(c.scopes, s)
 	c.writeRouter(t)
 	return s
@@ -276,27 +300,144 @@ func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
-// stopProcesses kills the bd proxies and Dolt children this fixture's proxied
-// scopes started, found through their own pidfiles.
+// stopProcesses stops the bd proxies and Dolt children this fixture's proxied
+// scopes started, found through their own pidfiles, and waits for each to
+// exit. It runs before t.TempDir's removal (cleanups run last-in, first-out),
+// so no process may outlive it: a Dolt still shutting down writes into
+// .beads/dolt/.dolt/noms while the removal walks it, and the removal fails
+// with "directory not empty" (ga-urgs30).
 func (c *bdTopologyCity) stopProcesses() {
 	for _, s := range c.scopes {
-		if !s.proxied {
-			continue
-		}
-		for _, name := range []string{"proxy.pid", "proxy-child.pid"} {
-			data, err := os.ReadFile(filepath.Join(s.dir, ".beads", "dolt", name))
-			if err != nil {
-				continue
-			}
-			var rec struct {
-				PID int `json:"pid"`
-			}
-			if json.Unmarshal(data, &rec) != nil || rec.PID <= 1 {
-				continue
-			}
-			_ = syscall.Kill(rec.PID, syscall.SIGTERM)
+		if s.proxied {
+			c.signalScopeProcesses(s, syscall.SIGTERM)
 		}
 	}
+}
+
+// signalScopeProcesses signals the processes a proxied scope's pid records
+// name, its dolt backend (proxy-child.pid) and then the proxy (proxy.pid),
+// and waits for each to exit before the next: a proxy signaled first shuts
+// its backend down itself, which can take it many seconds. A process still
+// alive after scopeProcessExitWait is killed.
+func (c *bdTopologyCity) signalScopeProcesses(s bdTopologyScope, sig syscall.Signal) {
+	for _, name := range []string{"proxy-child.pid", "proxy.pid"} {
+		data, err := os.ReadFile(filepath.Join(s.dir, ".beads", "dolt", name))
+		if err != nil {
+			continue
+		}
+		var rec struct {
+			PID int `json:"pid"`
+		}
+		if json.Unmarshal(data, &rec) != nil || rec.PID <= 1 {
+			continue
+		}
+		if syscall.Kill(rec.PID, sig) != nil {
+			continue
+		}
+		if !waitProcessExit(rec.PID, scopeProcessExitWait) {
+			c.t.Logf("%s %d did not exit within %s of %s; killing it", name, rec.PID, scopeProcessExitWait, sig)
+			_ = syscall.Kill(rec.PID, syscall.SIGKILL)
+			_ = waitProcessExit(rec.PID, scopeProcessExitWait)
+		}
+	}
+}
+
+// scopeProcessExitWait bounds the wait for a signaled scope process to exit.
+const scopeProcessExitWait = 30 * time.Second
+
+// waitProcessExit polls until pid no longer exists, for at most bound, and
+// reports whether it exited. The processes are bd's daemons, not this test's
+// children, so there is no Wait to call; once their parent has exited they
+// are reaped by init, and kill(pid, 0) then fails.
+func waitProcessExit(pid int, bound time.Duration) bool {
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	deadline := time.Now().Add(bound)
+	for syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			return false
+		}
+		<-tick.C
+	}
+	return true
+}
+
+// bdProxyStartTimeout is how bd reports a proxied first start that missed its
+// fixed 15 s open deadline (beads internal/storage/dbproxy/proxy/endpoint.go).
+// Two host conditions cause it, neither a fault of the scope being created: the
+// backend Dolt port that bd picked by bind-and-close for .beads/dolt/config.yaml
+// was taken before dolt sql-server bound it (beads#7184 recovers from that, in
+// no release yet), or a disk stall held the backend's boot past the deadline.
+// The failed init leaves .beads behind with that port recorded, and bd init
+// then refuses the scope, so a retry has to start from a clean .beads.
+const bdProxyStartTimeout = "timeout waiting for proxy to become ready on its OS-assigned port"
+
+// retryOnBdProxyStartTimeout runs init once more, after reset, when the first
+// attempt failed with bdProxyStartTimeout. Any other failure is returned as is.
+func retryOnBdProxyStartTimeout(init func() (string, error), reset func() error) (string, error) {
+	out, err := init()
+	if err == nil || !strings.Contains(out, bdProxyStartTimeout) {
+		return out, err
+	}
+	if resetErr := reset(); resetErr != nil {
+		return out, fmt.Errorf("%w; resetting the scope for a retry: %w", err, resetErr)
+	}
+	return init()
+}
+
+func TestRetryOnBdProxyStartTimeoutRetriesOnlyKnownSignature(t *testing.T) {
+	timeoutOut := "Error: failed to open uow provider: uow: get proxy endpoint: " + bdProxyStartTimeout
+	errExit := fmt.Errorf("exit status 1")
+
+	t.Run("retries once from a reset scope", func(t *testing.T) {
+		var calls []string
+		out, err := retryOnBdProxyStartTimeout(
+			func() (string, error) {
+				calls = append(calls, "init")
+				if len(calls) == 1 {
+					return timeoutOut, errExit
+				}
+				return "ok", nil
+			},
+			func() error { calls = append(calls, "reset"); return nil },
+		)
+		if err != nil || out != "ok" {
+			t.Fatalf("got (%q, %v), want (ok, nil)", out, err)
+		}
+		if got := strings.Join(calls, ","); got != "init,reset,init" {
+			t.Fatalf("calls = %s, want init,reset,init", got)
+		}
+	})
+	t.Run("does not retry other failures", func(t *testing.T) {
+		calls := 0
+		_, err := retryOnBdProxyStartTimeout(
+			func() (string, error) { calls++; return "Error: database not found", errExit },
+			func() error { t.Fatal("reset called for an unrelated failure"); return nil },
+		)
+		if err == nil || calls != 1 {
+			t.Fatalf("err = %v after %d call(s), want the first failure after 1 call", err, calls)
+		}
+	})
+	t.Run("retries at most once", func(t *testing.T) {
+		calls := 0
+		out, err := retryOnBdProxyStartTimeout(
+			func() (string, error) { calls++; return timeoutOut, errExit },
+			func() error { return nil },
+		)
+		if err == nil || calls != 2 || !strings.Contains(out, bdProxyStartTimeout) {
+			t.Fatalf("got (%q, %v) after %d calls, want the second timeout after 2 calls", out, err, calls)
+		}
+	})
+	t.Run("a failed reset ends the attempt", func(t *testing.T) {
+		calls := 0
+		_, err := retryOnBdProxyStartTimeout(
+			func() (string, error) { calls++; return timeoutOut, errExit },
+			func() error { return fmt.Errorf("remove .beads: busy") },
+		)
+		if err == nil || calls != 1 || !strings.Contains(err.Error(), "remove .beads: busy") {
+			t.Fatalf("err = %v after %d call(s), want the reset error after 1 call", err, calls)
+		}
+	})
 }
 
 func (c *bdTopologyCity) sqlValue(t *testing.T, s bdTopologyScope, query string) string {
@@ -313,9 +454,11 @@ func (c *bdTopologyCity) bdSupportsPurgeWispsPlane(t *testing.T) bool {
 }
 
 // seedScope creates, in one scope: an old closed parent wisp with an old open
-// child (Step 1 closes the child), an old stale durable task (Step 5 closes it
-// in the city), an expired unassigned gc:nudge bead (Step 4 closes it in any
-// scope) and an old closed standalone wisp (Step 3 purges it).
+// child (Step 1 closes the child), three old open workflow wisp roots (Step 2
+// closes the one with no descendants and keeps the one with an open step and
+// the one with an in-progress child), an old stale durable task (Step 5 closes
+// it in the city), an expired unassigned gc:nudge bead (Step 4 closes it in
+// any scope) and an old closed standalone wisp (Step 3 purges it).
 func (c *bdTopologyCity) seedScope(t *testing.T, s bdTopologyScope) map[string]string {
 	t.Helper()
 	ids := map[string]string{}
@@ -337,17 +480,50 @@ func (c *bdTopologyCity) seedScope(t *testing.T, s bdTopologyScope) map[string]s
 	create("heldRoot", "-t", "molecule", "closed held root", "--ephemeral")
 	create("heldMid", "-t", "task", "stale mid over a young leaf", "--ephemeral", "--parent", ids["heldRoot"])
 	create("heldYoung", "-t", "task", "young leaf", "--ephemeral", "--parent", ids["heldMid"])
+	// Workflow roots: a step names its root in gc.root_bead_id, a child hangs
+	// off it by a parent-child dependency.
+	workflow := `{"gc.kind":"workflow"}`
+	create("wfStale", "-t", "molecule", "stale workflow root", "--ephemeral", "--metadata", workflow)
+	create("wfStepRoot", "-t", "molecule", "workflow root with an open step", "--ephemeral", "--metadata", workflow)
+	create("wfStep", "-t", "task", "open workflow step", "--ephemeral", "--metadata", fmt.Sprintf(`{"gc.root_bead_id":%q}`, ids["wfStepRoot"]))
+	create("wfBusyRoot", "-t", "molecule", "workflow root with an in-progress child", "--ephemeral", "--metadata", workflow)
+	create("wfBusy", "-t", "task", "in-progress workflow child", "--ephemeral", "--parent", ids["wfBusyRoot"])
+	c.bdIn(t, s, "update", ids["wfBusy"], "--status", "in_progress")
 	create("stale", "-t", "task", "-p", "3", "stale durable task")
 	create("nudge", "-t", "task", "expired nudge", "-l", "gc:nudge", "--metadata", `{"expires_at":"2020-01-01T00:00:00Z"}`)
 	c.bdIn(t, s, "close", ids["parent"], ids["purgeable"], ids["protected"], ids["chainRoot"], ids["heldRoot"], "--force", "--reason", "seed")
 	c.bdIn(t, s, "sql", fmt.Sprintf(
 		"UPDATE wisps SET created_at = DATE_SUB(NOW(), INTERVAL 48 HOUR), updated_at = DATE_SUB(NOW(), INTERVAL 48 HOUR), closed_at = IF(status = 'closed', DATE_SUB(NOW(), INTERVAL 400 HOUR), closed_at) WHERE id IN ('%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s')",
 		ids["parent"], ids["child"], ids["purgeable"], ids["protected"], ids["chainRoot"], ids["chainMid"], ids["chainLeaf"], ids["heldRoot"], ids["heldMid"]))
+	c.bdIn(t, s, "sql", fmt.Sprintf(
+		"UPDATE wisps SET created_at = DATE_SUB(NOW(), INTERVAL 48 HOUR), updated_at = DATE_SUB(NOW(), INTERVAL 48 HOUR) WHERE id IN ('%s', '%s', '%s', '%s', '%s')",
+		ids["wfStale"], ids["wfStepRoot"], ids["wfStep"], ids["wfBusyRoot"], ids["wfBusy"]))
 	c.bdIn(t, s, "sql", fmt.Sprintf("UPDATE issues SET updated_at = DATE_SUB(NOW(), INTERVAL 800 HOUR) WHERE id = '%s'", ids["stale"]))
 	if !s.proxied {
 		c.bdIn(t, s, "dolt", "commit", "-m", "seed maintenance fixture")
 	}
 	return ids
+}
+
+// seedSessionPruneCandidates adds two closed beads the reaper's session prune
+// selects with its default gm-* pattern, one in each table bd prune reads: a
+// durable issue and a no-history bead, which bd stores in the wisps table.
+// Both closed 100h ago: past a GC_REAPER_SESSION_PURGE_AGE of 48h, and inside
+// the 168h wisp purge age, so Step 3 leaves the no-history row to Step 6.
+func (c *bdTopologyCity) seedSessionPruneCandidates(t *testing.T, s bdTopologyScope) {
+	t.Helper()
+	c.bdIn(t, s, "create", "--silent", "--id", "gm-prd1", "--force", "-t", "task", "closed durable gm bead")
+	c.bdIn(t, s, "create", "--silent", "--id", "gm-pnh1", "--force", "--no-history", "-t", "task", "closed no-history gm bead")
+	c.bdIn(t, s, "close", "gm-prd1", "gm-pnh1", "--force", "--reason", "seed")
+	if got := c.sqlValue(t, s, "SELECT COUNT(*) FROM wisps WHERE id = 'gm-pnh1'"); got != "1" {
+		t.Fatalf("bd did not store the no-history bead in the wisps table (rows: %s)", got)
+	}
+	for _, table := range []string{"issues", "wisps"} {
+		c.bdIn(t, s, "sql", fmt.Sprintf("UPDATE %s SET closed_at = DATE_SUB(UTC_TIMESTAMP(), INTERVAL 100 HOUR) WHERE id IN ('gm-prd1', 'gm-pnh1')", table))
+	}
+	if !s.proxied {
+		c.bdIn(t, s, "dolt", "commit", "-m", "seed session prune candidates")
+	}
 }
 
 func (c *bdTopologyCity) status(t *testing.T, s bdTopologyScope, id string) string {
@@ -368,131 +544,161 @@ func (c *bdTopologyCity) runOrder(t *testing.T, script string, extra ...string) 
 	return out, string(data)
 }
 
-func TestMaintenanceOrdersOnRealBdTopologies(t *testing.T) {
+// The maintenance orders run against every supported bd topology. Each
+// topology is its own top-level test so rules_go's sharding can place them in
+// different shards (each brings up its own Dolt server and bd scopes, 15-25 s
+// on rbe-west); examples/gastown/heavy_tests.txt keeps them apart.
+
+func TestMaintenanceOrdersOnRealBdProxiedCityAndRigs(t *testing.T) {
+	checkMaintenanceOrdersOnRealBdTopology(t, true, []bool{true, true})
+}
+
+func TestMaintenanceOrdersOnRealBdDirectServerCityAndRig(t *testing.T) {
+	checkMaintenanceOrdersOnRealBdTopology(t, false, []bool{false})
+}
+
+func TestMaintenanceOrdersOnRealBdProxiedCityWithDirectServerRig(t *testing.T) {
+	checkMaintenanceOrdersOnRealBdTopology(t, true, []bool{false})
+}
+
+// checkMaintenanceOrdersOnRealBdTopology runs the reaper, jsonl-export and
+// backup orders against a city scope (proxied when cityProx) and one rig
+// scope per rigProx entry (proxied when true).
+func checkMaintenanceOrdersOnRealBdTopology(t *testing.T, cityProx bool, rigProx []bool) {
 	bd := requireRealBd(t)
-	topologies := []struct {
-		name     string
-		cityProx bool
-		rigProx  []bool
-	}{
-		{"proxied city and proxied rigs", true, []bool{true, true}},
-		{"direct-server city and rig", false, []bool{false}},
-		{"mixed: proxied city with a direct-server rig", true, []bool{false}},
+	c := newBdTopologyCity(t, bd)
+	city := c.addScope(t, "", "mcity", "mc", cityProx)
+	var rigs []bdTopologyScope
+	for i, prox := range rigProx {
+		rigs = append(rigs, c.addScope(t, fmt.Sprintf("rig%d", i+1), fmt.Sprintf("mrig%d", i+1), fmt.Sprintf("r%d", i+1), prox))
 	}
-	for _, topo := range topologies {
-		t.Run(topo.name, func(t *testing.T) {
-			c := newBdTopologyCity(t, bd)
-			city := c.addScope(t, "", "mcity", "mc", topo.cityProx)
-			var rigs []bdTopologyScope
-			for i, prox := range topo.rigProx {
-				rigs = append(rigs, c.addScope(t, fmt.Sprintf("rig%d", i+1), fmt.Sprintf("mrig%d", i+1), fmt.Sprintf("r%d", i+1), prox))
-			}
-			seeds := map[string]map[string]string{"": c.seedScope(t, city)}
-			for _, rig := range rigs {
-				seeds[rig.name] = c.seedScope(t, rig)
-			}
+	seeds := map[string]map[string]string{"": c.seedScope(t, city)}
+	for _, rig := range rigs {
+		seeds[rig.name] = c.seedScope(t, rig)
+	}
+	c.seedSessionPruneCandidates(t, city)
 
-			// Reaper.
-			out, outcome := c.runOrder(t, coreScriptPath("reaper.sh"))
-			for _, s := range append([]bdTopologyScope{city}, rigs...) {
-				ids := seeds[s.name]
-				if got := c.status(t, s, ids["child"]); got != "closed" {
-					t.Errorf("%s: stale child wisp %s = %s, want closed (Step 1)\n%s", s.dir, ids["child"], got, out)
-				}
-				for _, key := range []string{"chainMid", "chainLeaf"} {
-					if got := c.status(t, s, ids[key]); got != "closed" {
-						t.Errorf("%s: %s %s = %s, want closed (Step 1 closes an orphaned subtree leaf-first)", s.dir, key, ids[key], got)
-					}
-				}
-				for _, key := range []string{"heldMid", "heldYoung"} {
-					if got := c.status(t, s, ids[key]); got != "open" {
-						t.Errorf("%s: %s %s = %s, want open (a stale wisp over a young child is never closed)", s.dir, key, ids[key], got)
-					}
-				}
-				if got := c.status(t, s, ids["nudge"]); got != "closed" {
-					t.Errorf("%s: expired nudge %s = %s, want closed (Step 4)", s.dir, ids["nudge"], got)
-				}
-				wantStale := "open"
-				if s.name == "" {
-					wantStale = "closed"
-				}
-				if got := c.status(t, s, ids["stale"]); got != wantStale {
-					t.Errorf("%s: stale task %s = %s, want %s (Step 5 closes city issues only)", s.dir, ids["stale"], got, wantStale)
-				}
-				if c.bdSupportsPurgeWispsPlane(t) {
-					if got := c.status(t, s, ids["purgeable"]); got != "gone" {
-						t.Errorf("%s: old closed wisp %s = %s, want purged (Step 3)", s.dir, ids["purgeable"], got)
-					}
-					// bd purge keeps a closed wisp that a live wisp still
-					// depends on (parent-child here).
-					if got := c.status(t, s, ids["protected"]); got != "closed" {
-						t.Errorf("%s: closed parent %s of a live child = %s, want kept (Step 3 live-dependent protection)", s.dir, ids["protected"], got)
-					}
-					if got := c.status(t, s, ids["live"]); got != "open" {
-						t.Errorf("%s: young live child %s = %s, want open", s.dir, ids["live"], got)
-					}
-				}
-				if !s.proxied {
-					// Every mutation went through a bd verb that committed it.
-					if dirty := c.sqlValue(t, s, "SELECT COUNT(*) FROM dolt_status WHERE table_name NOT LIKE 'wisp%'"); dirty != "0" {
-						t.Errorf("%s: %s durable table(s) left uncommitted after the reaper", s.dir, dirty)
-					}
-				}
+	// Reaper. Each workflow-root census starts at its second root, so the
+	// start lookup and the wrapped page run through real bd too.
+	out, outcome := c.runOrder(t, coreScriptPath("reaper.sh"), "GC_REAPER_WORKFLOW_ROOT_CENSUS_START=1", "GC_REAPER_SESSION_PURGE_AGE=48h")
+	scopes := 1 + len(rigs)
+	if want := fmt.Sprintf("workflow_roots:%d, workflow_root_census:%d/%d,", scopes, 3*scopes, 3*scopes); !strings.Contains(out, want) {
+		t.Errorf("reaper summary does not report a complete workflow-root census (%s):\n%s", want, out)
+	}
+	// Step 6 counts the session prune's candidates through real bd before it
+	// checks the backup (#6284). The count finds the seeded candidates, so
+	// the backup gate decides; no backup has run yet, so it holds the prune.
+	if strings.Contains(out, "session prune: nothing to prune") ||
+		!(strings.Contains(outcome, "session prune skipped: no fresh backup") || strings.Contains(outcome, "session prune skipped: bd-backup-unsupported")) {
+		t.Errorf("reaper did not find the session prune's candidates through bd and hold the prune at its backup gate:\n%s\noutcome: %s", out, outcome)
+	}
+	for _, s := range append([]bdTopologyScope{city}, rigs...) {
+		ids := seeds[s.name]
+		if got := c.status(t, s, ids["child"]); got != "closed" {
+			t.Errorf("%s: stale child wisp %s = %s, want closed (Step 1)\n%s", s.dir, ids["child"], got, out)
+		}
+		if got := c.status(t, s, ids["wfStale"]); got != "closed" {
+			t.Errorf("%s: stale workflow root %s = %s, want closed (Step 2)", s.dir, ids["wfStale"], got)
+		} else if got := c.sqlValue(t, s, fmt.Sprintf(`SELECT JSON_UNQUOTE(JSON_EXTRACT(metadata, '$."gc.outcome"')) FROM wisps WHERE id = '%s'`, ids["wfStale"])); got != "skipped" {
+			t.Errorf("%s: closed workflow wisp root %s has gc.outcome %q, want skipped", s.dir, ids["wfStale"], got)
+		}
+		for _, key := range []string{"wfStepRoot", "wfBusyRoot"} {
+			if got := c.status(t, s, ids[key]); got != "open" {
+				t.Errorf("%s: %s %s = %s, want open (Step 2 keeps a workflow root with a live descendant)", s.dir, key, ids[key], got)
 			}
-			if !c.bdSupportsPurgeWispsPlane(t) && !strings.Contains(outcome, "bd-purge-unsupported") {
-				t.Errorf("bd without wisps-plane purge must be declared, outcome = %s", outcome)
+		}
+		for _, key := range []string{"chainMid", "chainLeaf"} {
+			if got := c.status(t, s, ids[key]); got != "closed" {
+				t.Errorf("%s: %s %s = %s, want closed (Step 1 closes an orphaned subtree leaf-first)", s.dir, key, ids[key], got)
 			}
-			if gcLog, _ := os.ReadFile(c.gcLog); strings.Contains(string(gcLog), "ESCALATION") {
-				for _, bad := range []string{"unreachable", "open child", "close failed"} {
-					if strings.Contains(string(gcLog), bad) {
-						t.Errorf("reaper escalated %q:\n%s", bad, gcLog)
-					}
-				}
+		}
+		for _, key := range []string{"heldMid", "heldYoung"} {
+			if got := c.status(t, s, ids[key]); got != "open" {
+				t.Errorf("%s: %s %s = %s, want open (a stale wisp over a young child is never closed)", s.dir, key, ids[key], got)
 			}
+		}
+		if got := c.status(t, s, ids["nudge"]); got != "closed" {
+			t.Errorf("%s: expired nudge %s = %s, want closed (Step 4)", s.dir, ids["nudge"], got)
+		}
+		wantStale := "open"
+		if s.name == "" {
+			wantStale = "closed"
+		}
+		if got := c.status(t, s, ids["stale"]); got != wantStale {
+			t.Errorf("%s: stale task %s = %s, want %s (Step 5 closes city issues only)", s.dir, ids["stale"], got, wantStale)
+		}
+		if c.bdSupportsPurgeWispsPlane(t) {
+			if got := c.status(t, s, ids["purgeable"]); got != "gone" {
+				t.Errorf("%s: old closed wisp %s = %s, want purged (Step 3)", s.dir, ids["purgeable"], got)
+			}
+			// bd purge keeps a closed wisp that a live wisp still
+			// depends on (parent-child here).
+			if got := c.status(t, s, ids["protected"]); got != "closed" {
+				t.Errorf("%s: closed parent %s of a live child = %s, want kept (Step 3 live-dependent protection)", s.dir, ids["protected"], got)
+			}
+			if got := c.status(t, s, ids["live"]); got != "open" {
+				t.Errorf("%s: young live child %s = %s, want open", s.dir, ids["live"], got)
+			}
+		}
+		if !s.proxied {
+			// Every mutation went through a bd verb that committed it.
+			if dirty := c.sqlValue(t, s, "SELECT COUNT(*) FROM dolt_status WHERE table_name NOT LIKE 'wisp%'"); dirty != "0" {
+				t.Errorf("%s: %s durable table(s) left uncommitted after the reaper", s.dir, dirty)
+			}
+		}
+	}
+	if !c.bdSupportsPurgeWispsPlane(t) && !strings.Contains(outcome, "bd-purge-unsupported") {
+		t.Errorf("bd without wisps-plane purge must be declared, outcome = %s", outcome)
+	}
+	if gcLog, _ := os.ReadFile(c.gcLog); strings.Contains(string(gcLog), "ESCALATION") {
+		for _, bad := range []string{"unreachable", "open child", "close failed", "census incomplete", "census stopped"} {
+			if strings.Contains(string(gcLog), bad) {
+				t.Errorf("reaper escalated %q:\n%s", bad, gcLog)
+			}
+		}
+	}
 
-			// JSONL export: one bd-export snapshot per scope database, which
-			// bd import can read back.
-			archive := filepath.Join(c.root, "archive")
-			if _, outcome := c.runOrder(t, coreScriptPath("jsonl-export.sh"), "GC_JSONL_ARCHIVE_REPO="+archive); strings.Contains(outcome, "unreachable") {
-				t.Errorf("jsonl-export could not reach a scope: %s", outcome)
-			}
-			for _, s := range append([]bdTopologyScope{city}, rigs...) {
-				snapshot := filepath.Join(archive, s.db, "issues.jsonl")
-				data, err := os.ReadFile(snapshot)
-				if err != nil {
-					t.Fatalf("snapshot for %s: %v", s.db, err)
-				}
-				if !strings.Contains(string(data), `"`+seeds[s.name]["stale"]+`"`) {
-					t.Errorf("%s snapshot is missing the durable task:\n%s", s.db, data)
-				}
-				if strings.Contains(string(data), seeds[s.name]["child"]) {
-					t.Errorf("%s snapshot archived a wisp:\n%s", s.db, data)
-				}
-				// bd prints the dry-run verdict on stderr.
-				if dry, err := c.run(t, s.dir, c.scopeEnv(s), bd, "import", "--dry-run", "--allow-stale", snapshot); err != nil || !strings.Contains(dry, "Would import") {
-					t.Errorf("bd import cannot read the %s snapshot: %v\n%s", s.db, err, dry)
-				}
-			}
+	// JSONL export: one bd-export snapshot per scope database, which
+	// bd import can read back.
+	archive := filepath.Join(c.root, "archive")
+	if _, outcome := c.runOrder(t, coreScriptPath("jsonl-export.sh"), "GC_JSONL_ARCHIVE_REPO="+archive); strings.Contains(outcome, "unreachable") {
+		t.Errorf("jsonl-export could not reach a scope: %s", outcome)
+	}
+	for _, s := range append([]bdTopologyScope{city}, rigs...) {
+		snapshot := filepath.Join(archive, s.db, "issues.jsonl")
+		data, err := os.ReadFile(snapshot)
+		if err != nil {
+			t.Fatalf("snapshot for %s: %v", s.db, err)
+		}
+		if !strings.Contains(string(data), `"`+seeds[s.name]["stale"]+`"`) {
+			t.Errorf("%s snapshot is missing the durable task:\n%s", s.db, data)
+		}
+		if strings.Contains(string(data), seeds[s.name]["child"]) {
+			t.Errorf("%s snapshot archived a wisp:\n%s", s.db, data)
+		}
+		// bd prints the dry-run verdict on stderr.
+		if dry, err := c.run(t, s.dir, c.scopeEnv(s), bd, "import", "--dry-run", "--allow-stale", snapshot); err != nil || !strings.Contains(dry, "Would import") {
+			t.Errorf("bd import cannot read the %s snapshot: %v\n%s", s.db, err, dry)
+		}
+	}
 
-			// Backup: every scope bd can back up is synced; a scope whose
-			// transport bd cannot back up yet is declared, not failed.
-			doltPack := filepath.Join(repoRootForExamples(t), "examples", "bd", "dolt")
-			backupOut, backupOutcome := c.runOrder(t, filepath.Join(doltPack, "assets", "scripts", "mol-dog-backup.sh"), "GC_PACK_DIR="+doltPack)
-			for _, s := range append([]bdTopologyScope{city}, rigs...) {
-				status, err := c.run(t, s.dir, c.scopeEnv(s), bd, "backup", "status", "--json")
-				unsupported := err != nil && strings.Contains(status, "proxy.backup.unsupported")
-				switch {
-				case unsupported:
-					if !strings.Contains(backupOutcome, "bd-backup-unsupported") {
-						t.Errorf("%s: unsupported proxied backup not declared: %s\n%s", s.dir, backupOutcome, backupOut)
-					}
-				case err != nil:
-					t.Errorf("%s: bd backup status failed: %v\n%s", s.dir, err, status)
-				case !strings.Contains(status, `"last_sync"`):
-					t.Errorf("%s: backup order did not sync the scope:\n%s\n%s", s.dir, status, backupOut)
-				}
+	// Backup: every scope bd can back up is synced; a scope whose
+	// transport bd cannot back up yet is declared, not failed.
+	doltPack := filepath.Join(repoRootForExamples(t), "examples", "bd", "dolt")
+	backupOut, backupOutcome := c.runOrder(t, filepath.Join(doltPack, "assets", "scripts", "mol-dog-backup.sh"), "GC_PACK_DIR="+doltPack)
+	for _, s := range append([]bdTopologyScope{city}, rigs...) {
+		status, err := c.run(t, s.dir, c.scopeEnv(s), bd, "backup", "status", "--json")
+		unsupported := err != nil && strings.Contains(status, "proxy.backup.unsupported")
+		switch {
+		case unsupported:
+			if !strings.Contains(backupOutcome, "bd-backup-unsupported") {
+				t.Errorf("%s: unsupported proxied backup not declared: %s\n%s", s.dir, backupOutcome, backupOut)
 			}
-		})
+		case err != nil:
+			t.Errorf("%s: bd backup status failed: %v\n%s", s.dir, err, status)
+		case !strings.Contains(status, `"last_sync"`):
+			t.Errorf("%s: backup order did not sync the scope:\n%s\n%s", s.dir, status, backupOut)
+		}
 	}
 }
 

@@ -1,0 +1,82 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "openapi-breaking_lib",
+    srcs = [
+        "gate.go",
+        "main.go",
+        "policy.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/cmd/openapi-breaking",
+    visibility = ["//visibility:private"],
+    deps = ["@com_github_burntsushi_toml//:toml"],
+)
+
+go_binary(
+    name = "openapi-breaking",
+    embed = [":openapi-breaking_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "openapi-breaking_test",
+    srcs = [
+        "committed_spec_test.go",
+        "gate_test.go",
+        "oasdiff_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(["testdata/**"]) + [
+        "//:go.mod",
+        "//internal/api:bazel_repo_srcs",
+        "@oasdiff_bin//:oasdiff",
+        "@openapi_base_spec//:openapi.json",
+        "@openapi_base_spec//:source.txt",
+    ],
+    embed = [":openapi-breaking_lib"],
+    # The pinned oasdiff (MODULE.bazel), required so the end-to-end proof
+    # never skips into a cached pass, and the gate's base spec
+    # (tools/bazel/rules/openapi_base_spec.bzl): TestCommittedSpecAgainstBase
+    # is the OpenAPI breaking-change gate.
+    env = {
+        "GC_OPENAPI_BREAKING_BASE_SOURCE": "$(rootpath @openapi_base_spec//:source.txt)",
+        "GC_OPENAPI_BREAKING_BASE_SPEC": "$(rootpath @openapi_base_spec//:openapi.json)",
+        "GC_REQUIRE_OASDIFF": "1",
+        "GC_TEST_OASDIFF_BIN": "$(rootpath @oasdiff_bin//:oasdiff)",
+    },
+    deps = [
+        "//internal/bazeltest",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

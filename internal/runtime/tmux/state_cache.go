@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
+
 	"github.com/gastownhall/gascity/internal/runtime"
 	"golang.org/x/sync/singleflight"
 )
@@ -51,6 +53,34 @@ const (
 	processSnapshotBackoffMax  = 2 * time.Minute
 )
 
+// Bounds for the hold the cache keeps on refreshes after one fails (#7170).
+//
+// A failed refresh leaves fetchedAt alone, so once the TTL lapses every reader
+// that does not overlap another one spawns tmux again: with the server unable
+// to answer, one spawn per reader per poll for as long as the outage lasts, on
+// a box that is usually already starved. After a failure the cache instead
+// holds TTL-expiry refreshes for a window that doubles with each consecutive
+// failure, from refreshBackoffBase up to the lower of refreshBackoffMax and
+// half of staleTTL, so no hold spans more than half the window a last-known-
+// good snapshot is trusted for, whatever staleTTL is configured to. The base is
+// fixed, not a multiple of the TTL: GC_TMUX_CACHE_TTL changes when the first
+// refresh fails, not how fast failures back off.
+//
+// A hold also ends no later than fetchedAt+staleTTL, when the snapshot it
+// answers from stops being trusted and IsRunning reads every session absent.
+// The server may answer again at any moment before that, and a hold that ran
+// past the cliff would keep a healthy session reading absent until it ended.
+// A hold opened with no listed snapshot to age out (none yet, or one made from
+// a no-server answer) has no cliff and is not cut short.
+//
+// The hold changes how often tmux is asked, never what an observation means:
+// held readers get the observation the failure left behind, which
+// classifyCacheObservation reads exactly as it read the failing read's.
+const (
+	refreshBackoffBase = 2 * time.Second
+	refreshBackoffMax  = 15 * time.Second
+)
+
 // StateFetcher abstracts tmux subprocess calls for testability.
 type StateFetcher interface {
 	// FetchState returns a runtime-state snapshot for live sessions.
@@ -77,6 +107,15 @@ type sessionRuntimeState struct {
 	// — the same value the per-session `list-windows -t <s>` read returns. Zero
 	// means the snapshot carries no activity for the session.
 	Activity int64
+	// ID is the session object's #{session_id} (for example "$3"). A session
+	// re-created under the same name gets a new one, but ids are unique only
+	// within one server's lifetime: a restarted server numbers from "$0" again.
+	// Empty when tmux reported no well-formed id.
+	ID string
+	// Created is the session object's #{session_created} (decimal unix
+	// seconds), which tells a reused ID apart. Empty when tmux reported no
+	// decimal value or the row predates the field.
+	Created string
 }
 
 type processRuntimeState struct {
@@ -107,7 +146,11 @@ type runtimeStateSnapshot struct {
 
 // StateCache caches tmux runtime state to avoid spawning N subprocess calls per
 // status check or reconciler pass. Concurrent callers are coalesced via
-// singleflight so at most one tmux/process snapshot refresh runs at a time.
+// singleflight per cache generation: at most one refresh runs at a time for a
+// given generation, and an invalidation opens a new generation, so a caller
+// that arrives after one never joins the flight it superseded.
+// After a refresh fails, further TTL-expiry refreshes are held off for a window
+// that grows with each consecutive failure (see refreshBackoff).
 type StateCache struct {
 	mu sync.RWMutex
 	// state is the published snapshot. It is copy-on-write: readers copy it
@@ -116,6 +159,9 @@ type StateCache struct {
 	// place. Writers replace a map wholesale under mu instead.
 	state     runtimeStateSnapshot
 	fetchedAt time.Time
+	// startedAt is when the fetch that produced state began, on the cache
+	// clock, so a fresh read can tell whether state postdates an effect.
+	startedAt time.Time
 	lastError error
 	dirty     bool // set by Invalidate(); cleared by a refresh no invalidation superseded
 	// generation advances on every Invalidate and EvictSession, so a refresh
@@ -138,6 +184,9 @@ type StateCache struct {
 	staleTTL         time.Duration
 	sf               singleflight.Group
 	fetcher          StateFetcher
+	// backoff holds TTL-expiry refreshes after a failed one. Guarded by mu; it
+	// has no lock of its own.
+	backoff refreshBackoff
 	// now is the cache clock. Nil selects time.Now; tests inject a fake.
 	now func() time.Time
 }
@@ -147,6 +196,7 @@ type StateCache struct {
 type cacheObservation struct {
 	state     runtimeStateSnapshot
 	fetchedAt time.Time
+	startedAt time.Time
 	// lastErr is the error of the most recent refresh attempt; nil after a
 	// success.
 	lastErr error
@@ -248,35 +298,55 @@ func (c *StateCache) observe() cacheObservation {
 // observeRefreshing reads the cache, refreshing it first unless it is a hit,
 // and reports whether it was one.
 func (c *StateCache) observeRefreshing() (cacheObservation, bool) {
-	obs := c.observation()
+	obs, generation := c.observationAtGeneration()
 
 	// Cache hit: fresh data, not invalidated.
 	if obs.primed() && !obs.dirty && c.clock().Sub(obs.fetchedAt) < c.ttl {
 		return obs, true
 	}
 
-	// Stale, empty, or dirty — trigger refresh.
-	// When dirty, forget any in-flight singleflight so we get a fresh fetch
-	// instead of coalescing with a pre-invalidation call.
-	if obs.dirty {
-		c.sf.Forget("refresh")
+	// A failed refresh holds off the next one: answer from the observation the
+	// cache already has rather than spawn tmux again. It is the observation the
+	// failing read returned, so it classifies exactly as that read's did.
+	if c.refreshHeld() {
+		return c.observation(), false
 	}
-	c.refresh()
+
+	// Stale, empty, or dirty — trigger a refresh. Calls from the same
+	// generation coalesce, while an invalidation advances the key so a
+	// fresh call never joins a pre-invalidation fetch.
+	c.refresh(generation)
 
 	// Read the (potentially updated) cache.
 	return c.observation(), false
 }
 
+// refreshHeld reports whether a failed refresh is holding off the next fetch,
+// counting the read it answers.
+func (c *StateCache) refreshHeld() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.backoff.held(c.clock(), c.generation)
+}
+
 func (c *StateCache) observation() cacheObservation {
+	obs, _ := c.observationAtGeneration()
+	return obs
+}
+
+// observationAtGeneration reads the cache together with the generation it was
+// read at, under one lock.
+func (c *StateCache) observationAtGeneration() (cacheObservation, uint64) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return cacheObservation{
 		state:            c.state,
 		fetchedAt:        c.fetchedAt,
+		startedAt:        c.startedAt,
 		lastErr:          c.lastError,
 		dirty:            c.dirty,
 		primedByNoServer: c.primedByNoServer,
-	}
+	}, c.generation
 }
 
 func (c *StateCache) clock() time.Time {
@@ -329,6 +399,64 @@ func classifyCacheObservation(obs cacheObservation, name string, now time.Time, 
 	return cacheAnswerUnknown
 }
 
+// presenceListingTimeout bounds a presence-only listing. A healthy one takes
+// tens of milliseconds; one slower than this proves nothing, and the caller
+// takes the full refresh with its own fetchTimeout, so a wedged server costs a
+// fresh read at most this much more than it did before the listing existed.
+const presenceListingTimeout = time.Second
+
+// absentSince reports whether a presence-only listing that started at or after
+// since proves name absent (v5 O1), so a fresh read of a name the server does
+// not hold costs one tmux call instead of a refresh. A refresh's
+// process-table scan only refines sessions its listing holds, so it can never
+// make an absent name present. absentSince proves nothing, and the caller takes
+// the full fresh read, for a name gc could not have created
+// (validateSessionName), when the published snapshot already started at or
+// after since, when the fetcher is not tmux's, when the cache clock has not
+// reached since (a listing would start before it), when the listing fails or
+// runs past presenceListingTimeout, or when it holds name. It never publishes:
+// the shared snapshot is untouched.
+func (c *StateCache) absentSince(name string, since time.Time) bool {
+	if validateSessionName(name) != nil {
+		return false
+	}
+	if obs := c.observation(); obs.lastErr == nil && obs.primed() && !obs.startedAt.Before(since) {
+		return false
+	}
+	fetcher, ok := c.fetcher.(*tmuxFetcher)
+	if !ok || c.clock().Before(since) {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), presenceListingTimeout)
+	defer cancel()
+	names, err := fetcher.listPresentSessions(ctx)
+	if err != nil {
+		return false
+	}
+	_, present := names[name]
+	return !present
+}
+
+// observeSince returns the published snapshot once a successful fetch that
+// started at or after since has produced it, refreshing when the published one
+// is older. It refreshes at most twice: a fetch already in flight before since
+// is joined rather than restarted, so the second refresh is the one that starts
+// after since. It never invalidates the cache. ok is false when no such fetch
+// succeeded; obs.lastErr then says why.
+func (c *StateCache) observeSince(since time.Time) (obs cacheObservation, ok bool) {
+	for attempt := 0; ; attempt++ {
+		var generation uint64
+		obs, generation = c.observationAtGeneration()
+		if obs.lastErr == nil && obs.primed() && !obs.startedAt.Before(since) {
+			return obs, true
+		}
+		if attempt == 2 {
+			return obs, false
+		}
+		c.refresh(generation)
+	}
+}
+
 // Invalidate marks the cache as dirty, forcing the next IsRunning call
 // to trigger a refresh. The session data and fetchedAt are preserved as
 // last-known-good until the refresh completes — even if the refresh fails.
@@ -363,15 +491,18 @@ func (c *StateCache) EvictSession(name string) {
 	c.mu.Unlock()
 }
 
-// refresh executes a single coalesced fetch. If the fetch fails, the
-// last-known-good cache is preserved and the error is logged.
-func (c *StateCache) refresh() {
-	_, _, _ = c.sf.Do("refresh", func() (interface{}, error) {
+// refresh executes a single fetch, coalesced with concurrent refreshes keyed
+// by the same cache generation. If the fetch fails, the last-known-good cache
+// is preserved and the error is logged.
+func (c *StateCache) refresh(generation uint64) {
+	key := "refresh:" + strconv.FormatUint(generation, 10)
+	_, _, _ = c.sf.Do(key, func() (interface{}, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 		defer cancel()
 
 		c.mu.RLock()
 		startGeneration := c.generation
+		began := c.backoff.epoch
 		c.mu.RUnlock()
 
 		start := c.clock()
@@ -379,7 +510,6 @@ func (c *StateCache) refresh() {
 		elapsed := c.clock().Sub(start)
 
 		if err != nil {
-			log.Printf("tmux state cache: refresh failed in %v: %v", elapsed, err)
 			c.mu.Lock()
 			c.lastError = err
 			// Two distinct failure regimes, keyed on whether the cache was ever
@@ -408,16 +538,41 @@ func (c *StateCache) refresh() {
 				// the server up) landed mid-fetch, as a successful refresh does.
 				c.dirty = c.generation != startGeneration
 			}
+			// Hold the next refresh off, so a box tmux cannot answer on is not
+			// asked again on every poll, but not past the cliff where a snapshot
+			// a server listed stops being trusted (see classifyCacheObservation):
+			// the server may answer again before it, and IsRunning reads every
+			// session absent from the cliff until the hold ends. A cache with no
+			// such snapshot has no cliff, so its cliff is left at the zero time.
+			// Logged once per hold, outside the lock: a failure that overlaps or
+			// predates the one that opened the hold belongs to the same outage
+			// and adds no line.
+			var cliff time.Time
+			if !c.fetchedAt.IsZero() && !c.primedByNoServer {
+				cliff = c.fetchedAt.Add(c.staleTTL)
+			}
+			window, suppressed, opened := c.backoff.failed(began, startGeneration, c.clock(), min(refreshBackoffMax, c.staleTTL/2), cliff)
 			c.mu.Unlock()
+			if opened {
+				log.Printf("tmux state cache: refresh failed in %v: %v (holding refreshes for %v; %d reads suppressed since the last attempt)", elapsed, err, window, suppressed)
+			}
 			return nil, err
 		}
 
 		verbose := os.Getenv("GC_LOG_TMUX_CACHE") == "true"
+		// Deferred before the lock so the recovery line is written after the lock
+		// is released, as the failure line is.
+		var recovered, suppressed int
+		defer func() {
+			if recovered > 0 {
+				log.Printf("tmux state cache: refresh recovered after %d failed attempts (%d reads suppressed since the last attempt)", recovered, suppressed)
+			}
+		}()
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if startGeneration < c.publishedGeneration {
-			// A dirty read forgot this flight and a newer fetch has already
-			// published; this observation is older than what readers see.
+			// A fetch keyed by a newer generation has already published;
+			// this observation is older than what readers see.
 			if verbose {
 				log.Printf("tmux state cache: discarded refresh from generation %d after %v (generation %d already published)", startGeneration, elapsed, c.publishedGeneration)
 			}
@@ -444,15 +599,18 @@ func (c *StateCache) refresh() {
 
 		c.state = state
 		c.fetchedAt = c.clock()
+		c.startedAt = start
 		c.lastError = nil
 		c.primedByNoServer = false
 		c.dirty = superseded
 		c.publishedGeneration = startGeneration
-		for name, generation := range c.evictedAt {
-			if generation <= startGeneration {
+		for name, evictedGeneration := range c.evictedAt {
+			if evictedGeneration <= startGeneration {
 				delete(c.evictedAt, name)
 			}
 		}
+		// The server answered: the next outage starts over at the shortest hold.
+		recovered, suppressed = c.backoff.succeeded()
 		return nil, nil
 	})
 }
@@ -480,6 +638,85 @@ func withoutEvictedSince(sessions map[string]sessionRuntimeState, evictedAt map[
 	return filtered
 }
 
+// refreshBackoff holds TTL-expiry refreshes after one fails: every consecutive
+// failure doubles the hold from refreshBackoffBase to a cap, and the first
+// success ends the streak. Its zero value holds nothing. The StateCache that
+// owns it guards every field with its own mu.
+//
+// A hold stops the cache spawning tmux, never what it answers. Readers get the
+// observation the failure left behind, with lastError set and fetchedAt
+// untouched, so the staleTTL cliff falls at the same instant it always did.
+// Nor does a hold outlive that cliff: failed cuts one that would cross it short
+// at the cliff. A failure at or after the cliff opens an ordinary hold, whose
+// cap bounds how long a recovery goes unseen once the snapshot is stale.
+type refreshBackoff struct {
+	// failures counts consecutive failed refreshes; zero means no hold.
+	failures int
+	// until is when the current hold ends.
+	until time.Time
+	// generation is the newest StateCache.generation the hold has accounted
+	// for: the newest a failed fetch started under, or one a permit was given
+	// for. An Invalidate or EvictSession beyond it is news no failed fetch saw.
+	generation uint64
+	// epoch advances each time a hold is opened or cleared. A fetch that began
+	// in an earlier epoch overlapped the failure that opened the hold, or
+	// predates a success, so its failure is not a further failure.
+	epoch uint64
+	// suppressed counts reads answered from the cache since the last attempt.
+	suppressed int
+}
+
+// held reports whether a read at now is answered without fetching, and counts
+// it. generation is the cache's current generation: a change newer than the
+// hold has accounted for permits this read, and only this one, to fetch.
+func (b *refreshBackoff) held(now time.Time, generation uint64) bool {
+	if b.failures == 0 || !now.Before(b.until) {
+		return false
+	}
+	if generation != b.generation {
+		b.generation = generation
+		return false
+	}
+	b.suppressed++
+	return true
+}
+
+// failed records a failed refresh by a fetch that began in epoch began, with
+// the cache at startGeneration, and opens the next hold from now. The hold
+// doubles from refreshBackoffBase, up to limit, and ends no later than cliff,
+// the instant the snapshot it answers from stops being trusted (the zero time
+// when there is none to age out). A failure at or after cliff is not cut short,
+// so one streak has at most one shortened hold. window is the hold as opened.
+// opened is false when the failure belongs to an outage already counted: window
+// and suppressed are then zero and nothing changes beyond the generation the
+// failed fetch saw. Otherwise suppressed is how many reads the previous hold
+// answered.
+func (b *refreshBackoff) failed(began, startGeneration uint64, now time.Time, limit time.Duration, cliff time.Time) (window time.Duration, suppressed int, opened bool) {
+	b.generation = max(b.generation, startGeneration)
+	if began != b.epoch {
+		return 0, 0, false
+	}
+	b.failures++
+	window = min(refreshBackoffBase<<min(b.failures-1, 8), limit)
+	if now.Before(cliff) {
+		window = min(window, cliff.Sub(now))
+	}
+	b.until = now.Add(window)
+	b.epoch++
+	suppressed, b.suppressed = b.suppressed, 0
+	return window, suppressed, true
+}
+
+// succeeded ends the streak and returns how many refreshes had failed in a row
+// and how many reads the last hold answered. A fetch still in flight began in
+// an earlier epoch, so it cannot reopen a hold once it fails.
+func (b *refreshBackoff) succeeded() (failures, suppressed int) {
+	failures, suppressed = b.failures, b.suppressed
+	b.failures, b.suppressed = 0, 0
+	b.epoch++
+	return failures, suppressed
+}
+
 // tmuxFetcher implements StateFetcher using a real Tmux instance.
 type tmuxFetcher struct {
 	tm *Tmux
@@ -487,6 +724,40 @@ type tmuxFetcher struct {
 	// fails. Its zero value attempts immediately, so a bare &tmuxFetcher{tm:
 	// tm} behaves exactly as it did before this gate existed.
 	snapshotGate processSnapshotGate
+	// snapshot takes the process-table snapshot; nil is fetchProcessSnapshot.
+	// Tests count it instead of scanning the OS.
+	snapshot func(ctx context.Context) (processSnapshot, error)
+}
+
+// presenceListingFormat lists one session name per pane, ended like
+// runtimeInventoryFormat so the executor's trim of tmux's output cannot cut a
+// name's own trailing characters.
+const presenceListingFormat = "#{session_name}\t" + runtimeInventoryEnd
+
+// listPresentSessions lists every session the server holds, from the same
+// list-panes source FetchState reads, without the process-table scan. A server
+// that answers with no sessions lists none; any other failure, or a line that
+// does not end with runtimeInventoryEnd, is an error.
+func (f *tmuxFetcher) listPresentSessions(ctx context.Context) (map[string]struct{}, error) {
+	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", presenceListingFormat)
+	if err != nil {
+		if errors.Is(err, ErrNoCurrentTarget) {
+			return map[string]struct{}{}, nil
+		}
+		return nil, err
+	}
+	names := make(map[string]struct{})
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" {
+			continue
+		}
+		name, end, ok := strings.Cut(line, "\t")
+		if !ok || end != runtimeInventoryEnd || name == "" {
+			return nil, fmt.Errorf("tmux presence listing: malformed line %q", line)
+		}
+		names[name] = struct{}{}
+	}
+	return names, nil
 }
 
 // processSnapshotGate decides whether the full-OS process scan may be attempted
@@ -545,7 +816,7 @@ func (g *processSnapshotGate) succeeded() bool {
 // still contribute no liveness — they represent exited processes, not
 // running ones.
 func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, error) {
-	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}\t#{session_attached}\t#{window_activity}")
+	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}\t#{session_attached}\t#{window_activity}\t#{session_id}\t#{session_created}")
 	if err != nil {
 		if errors.Is(err, ErrNoCurrentTarget) {
 			// The server ANSWERED and holds zero sessions. gc configures
@@ -589,7 +860,7 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 	}
 
 	for _, line := range strings.Split(out, "\n") {
-		parts := strings.SplitN(line, "\t", 6)
+		parts := strings.SplitN(line, "\t", 8)
 		if len(parts) < 2 || parts[0] == "" {
 			continue
 		}
@@ -615,6 +886,12 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 			if activity, convErr := strconv.ParseInt(strings.TrimSpace(parts[5]), 10, 64); convErr == nil && activity > session.Activity {
 				session.Activity = activity
 			}
+		}
+		if len(parts) > 6 && validSessionObjectID(strings.TrimSpace(parts[6])) {
+			session.ID = strings.TrimSpace(parts[6])
+		}
+		if len(parts) > 7 && decimalRe.MatchString(strings.TrimSpace(parts[7])) {
+			session.Created = strings.TrimSpace(parts[7])
 		}
 		if parts[1] == "1" {
 			// A dead pane contributes no liveness: Running stays as-is so a
@@ -644,7 +921,11 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 		state.ProcessesAvailable = false
 		return state, nil
 	}
-	processes, err := fetchProcessSnapshot(ctx)
+	snapshot := f.snapshot
+	if snapshot == nil {
+		snapshot = fetchProcessSnapshot
+	}
+	processes, err := snapshot(ctx)
 	if err != nil {
 		// Degrade, do NOT discard: tmux list-panes above already established
 		// session liveness. The process snapshot is a secondary refinement
@@ -671,7 +952,7 @@ func (s runtimeStateSnapshot) processAlive(sessionName string, processNames []st
 	if !ok || !session.Running {
 		return false
 	}
-	names := processNameSet(processNames)
+	names := proctable.ProcessNameSet(processNames)
 	if len(names) == 0 {
 		return false
 	}
@@ -704,69 +985,6 @@ func (p paneRuntimeState) processAlive(names map[string]struct{}, processes proc
 		return true
 	}
 	return processes.hasDescendantWithNames(p.PID, names, 0)
-}
-
-func processNameSet(names []string) map[string]struct{} {
-	set := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		if name = strings.TrimSpace(name); name != "" {
-			set[name] = struct{}{}
-			// The kimi entry point now sets COMM and argv[0] to kimi-code.
-			// Keep existing provider process_names valid for both CLIs.
-			if name == "kimi" {
-				set["kimi-code"] = struct{}{}
-			}
-		}
-	}
-	return set
-}
-
-func processMatchesNameSet(command, args string, names map[string]struct{}) bool {
-	if len(names) == 0 {
-		return false
-	}
-	command = filepath.Base(strings.TrimSpace(command))
-	if _, ok := names[command]; ok && command != "" {
-		return true
-	}
-	argv := strings.Fields(strings.TrimSpace(args))
-	if len(argv) == 0 {
-		return false
-	}
-	argv0 := filepath.Base(argv[0])
-	if _, ok := names[argv0]; ok {
-		return true
-	}
-	if _, isInterpreter := knownInterpreters[argv0]; !isInterpreter {
-		return false
-	}
-	for _, token := range argv[1:] {
-		token = strings.TrimSpace(token)
-		if token == "" || strings.HasPrefix(token, "-") {
-			continue
-		}
-		if _, isRunner := runnerSubcommands[token]; isRunner {
-			continue
-		}
-		base := filepath.Base(token)
-		if _, ok := names[base]; ok {
-			return true
-		}
-		baseNoExt := strings.TrimSuffix(base, filepath.Ext(base))
-		if _, ok := names[baseNoExt]; ok {
-			return true
-		}
-		break
-	}
-	return false
-}
-
-var knownInterpreters = map[string]struct{}{
-	"node": {}, "bun": {}, "npx": {}, "deno": {},
-}
-
-var runnerSubcommands = map[string]struct{}{
-	"run": {}, "exec": {}, "x": {},
 }
 
 const maxProcessDescendantDepth = 10
@@ -1006,7 +1224,7 @@ func (s processSnapshot) processMatchesNames(pid string, names map[string]struct
 	if !ok {
 		return false
 	}
-	return processMatchesNameSet(process.Command, process.Args, names)
+	return proctable.ProcessMatchesNameSet(process.Command, process.Args, names)
 }
 
 func (s processSnapshot) hasDescendantWithNames(pid string, names map[string]struct{}, depth int) bool {

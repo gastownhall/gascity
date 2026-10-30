@@ -15,6 +15,10 @@ BLACKSMITH_RUNNERS = {
     "runner_16vcpu": "blacksmith-16vcpu-ubuntu-2404",
     "runner_32vcpu": "blacksmith-32vcpu-ubuntu-2404",
     "runner_macos": "blacksmith-6vcpu-macos-15",
+    # Windows Server 2025 (Blacksmith public beta): the only Windows jobs are
+    # the credential-provider process-tree tests (rbe-west has no Windows
+    # workers).
+    "runner_windows": "blacksmith-4vcpu-windows-2025",
 }
 
 GITHUB_RUNNERS = {
@@ -23,6 +27,7 @@ GITHUB_RUNNERS = {
     "runner_16vcpu": "ubuntu-latest",
     "runner_32vcpu": "ubuntu-latest",
     "runner_macos": "macos-15",
+    "runner_windows": "windows-latest",
 }
 
 

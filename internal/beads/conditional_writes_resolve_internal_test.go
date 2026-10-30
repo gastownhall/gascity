@@ -351,11 +351,21 @@ func TestConditionalWritesRequiredErrorIdentity(t *testing.T) {
 	}
 }
 
+// valueKindStore is a non-pointer Store, so the type-name fallback is pinned
+// for value types as well as pointers.
+type valueKindStore struct{ Store }
+
 func TestConditionalStoreKindFallsBackToTypeName(t *testing.T) {
 	t.Parallel()
-	s := &stampedNoCASStore{Store: NewMemStore()}
-	if got := conditionalStoreKind(s); !strings.Contains(got, "stampedNoCASStore") {
-		t.Fatalf("conditionalStoreKind = %q, want the %%T fallback naming the concrete type", got)
+	for _, s := range []Store{
+		&stampedNoCASStore{Store: NewMemStore()},
+		valueKindStore{Store: NewMemStore()},
+	} {
+		// Exactly the %T spelling: cmd/gc's conditionalWritesEventStoreKind
+		// matches it verbatim for the build-tagged *beads.DoltliteReadStore.
+		if got, want := conditionalStoreKind(s), fmt.Sprintf("%T", s); got != want {
+			t.Fatalf("conditionalStoreKind = %q, want the %%T spelling %q", got, want)
+		}
 	}
 }
 
@@ -571,7 +581,7 @@ func sourcedOver(source Store) *modeSourcedWrapper {
 func TestResolveConditionalWriterReadsTheModeSourceAndReturnsTheWrapper(t *testing.T) {
 	t.Run("auto over a capable source resolves the wrapper", func(t *testing.T) {
 		engine := openSQLiteLayoutForTest(t, true, false)
-		if err := StampOpenedStore(engine, "SQLiteStore", gate.Auto, nil, nil); err != nil {
+		if err := StampOpenedStore(engine, "SQLiteStore", gate.Auto, false, nil, nil); err != nil {
 			t.Fatalf("StampOpenedStore: %v", err)
 		}
 		w := sourcedOver(engine)
@@ -605,7 +615,7 @@ func TestResolveConditionalWriterReadsTheModeSourceAndReturnsTheWrapper(t *testi
 
 	t.Run("require over an incapable source refuses with the source's reason", func(t *testing.T) {
 		engine := openSQLiteLayoutForTest(t, false, false)
-		if err := StampOpenedStore(engine, "SQLiteStore", gate.Require, nil, nil); err != nil {
+		if err := StampOpenedStore(engine, "SQLiteStore", gate.Require, false, nil, nil); err != nil {
 			t.Fatalf("StampOpenedStore: %v", err)
 		}
 		writer, diag, err := ResolveConditionalWriter(sourcedOver(engine))
@@ -656,7 +666,7 @@ func TestResolveConditionalWriterReadsTheModeSourceAndReturnsTheWrapper(t *testi
 		for _, mode := range []gate.Mode{gate.Auto, gate.Require} {
 			engine := openSQLiteLayoutForTest(t, true, false)
 			degrades := 0
-			if err := StampOpenedStore(engine, "SQLiteStore", mode, func(ConditionalWritesDegrade) { degrades++ }, nil); err != nil {
+			if err := StampOpenedStore(engine, "SQLiteStore", mode, false, func(ConditionalWritesDegrade) { degrades++ }, nil); err != nil {
 				t.Fatalf("StampOpenedStore: %v", err)
 			}
 			w := sourcedOver(engine)

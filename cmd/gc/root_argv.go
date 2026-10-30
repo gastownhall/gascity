@@ -34,9 +34,13 @@ func rootCommandOptionsForArgs(args []string) rootCommandOptions {
 // starts. Packs mount only as root-level bindings and a binding that names a
 // core command is skipped (addDiscoveredCommandsToRoot), so no pack can
 // contribute to any of these trees.
+//
+// ready is the reader every generated work query runs, six times per claim,
+// and once the controller answers it (GET /work/ready) the process's own
+// overhead is most of its cost; discovery was about 0.13 s of it.
 func rootCommandSkipsPackDiscovery(command string) bool {
 	switch command {
-	case "metrics", "bd", "git-credential", "dolt-state", "dolt-config", "bd-store-bridge", "hook", "nudge", "mail", "prime":
+	case "metrics", "bd", "git-credential", "dolt-state", "dolt-config", "bd-store-bridge", "hook", "nudge", "mail", "prime", "ready":
 		return true
 	default:
 		return false

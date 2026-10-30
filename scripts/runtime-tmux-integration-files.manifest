@@ -1,0 +1,25 @@
+# Test files in internal/runtime/tmux that compile only with -tags integration
+# (linux/amd64) and declare at least one test: the integration-only lane.
+# One _test.go basename per line, strictly ascending in byte order.
+# A new //go:build integration test file with tests needs one line here, in
+# sorted position; scripts/runtime_tmux_lane_test.go fails until it is added.
+adapter_test.go
+dialog_feedback_survey_integration_test.go
+dialog_model_switch_integration_test.go
+empty_server_liveness_integration_test.go
+exact_target_integration_test.go
+fence_integration_test.go
+hidden_attach_hook_test.go
+nudge_clear_before_paste_integration_test.go
+nudge_confirm_lag_integration_test.go
+nudge_poke_integration_test.go
+nudge_staged_draft_integration_test.go
+nudge_submit_confirm_integration_test.go
+nudge_submit_key_sequence_integration_test.go
+respond_fence_integration_test.go
+runtime_inventory_integration_test.go
+seam_conformance_test.go
+session_env_file_integration_test.go
+session_object_integration_test.go
+tmux_test.go
+wake_pane_integration_test.go

@@ -70,7 +70,7 @@ const (
 	TraceSiteOrderDispatch                  TraceSiteCode = "orders.dispatch"
 	TraceSiteRuntimeInventoryPass           TraceSiteCode = "runtime_inventory.pass"
 	TraceSiteRuntimeInventoryOnDeath        TraceSiteCode = "runtime_inventory.on_death"
-	TraceSiteReconcileQueue                 TraceSiteCode = "reconcile.queue"
+	TraceSiteReconcilePass                  TraceSiteCode = "reconcile.pass"
 	TraceSiteV2SessionDecision              TraceSiteCode = "reconcile.session.decision"
 	TraceSitePoolDemandCompute              TraceSiteCode = "pool_desired.compute"
 	TraceSiteSessionSnapshot                TraceSiteCode = "session_snapshot.load"
@@ -132,6 +132,7 @@ const (
 	TraceSiteReconcilerCircuitTrip               TraceSiteCode = "reconciler.session.circuit_trip"
 	TraceSiteReconcilerProviderHealthGate        TraceSiteCode = "reconciler.session.provider_health_gate"
 	TraceSiteReconcilerBeadReassignCycle         TraceSiteCode = "reconciler.session.bead_reassign_cycle"
+	TraceSiteReconcilerFinishInterruptedClose    TraceSiteCode = "reconciler.session.finish_interrupted_close"
 	TraceSiteLifecycleStartTerminalProviderError TraceSiteCode = "reconciler.start.terminal_provider_error"
 	TraceSiteLifecycleStartRateLimitHold         TraceSiteCode = "reconciler.start.rate_limit_hold"
 	TraceSiteLifecycleStartCapacityRefused       TraceSiteCode = "reconciler.start.capacity_refused"
@@ -198,6 +199,7 @@ const (
 	TraceReasonPendingCreateCommitFailed     TraceReasonCode = "pending_create_commit_failed"
 	TraceReasonPendingCreateHealed           TraceReasonCode = "pending_create_healed"
 	TraceReasonPendingCreateSuperseded       TraceReasonCode = "pending_create_superseded"
+	TraceReasonPendingCreateLiveIncarnation  TraceReasonCode = "pending_create_live_incarnation"
 	TraceReasonAssignedWork                  TraceReasonCode = "assigned_work"
 	TraceReasonFreshCycle                    TraceReasonCode = "fresh_cycle"
 	TraceReasonScaleCheck                    TraceReasonCode = "scale_check"
@@ -210,6 +212,8 @@ const (
 	TraceReasonAssignedWorkExhausted TraceReasonCode = "assigned_work_exhausted"
 	TraceReasonEndpointCapacityOpen  TraceReasonCode = "endpoint_capacity_open"
 	TraceReasonOnDeathHookPending    TraceReasonCode = "on_death_hook_pending"
+	TraceReasonPrepareBudgetSpent    TraceReasonCode = "prepare_budget_spent"
+	TraceReasonInterruptedClose      TraceReasonCode = "interrupted_close"
 )
 
 type TraceOutcomeCode string
@@ -255,6 +259,11 @@ const (
 	// current FingerprintVersion (older or future binary). No drain, no
 	// event.
 	TraceOutcomeRebaselinedVersionMismatch TraceOutcomeCode = "rebaselined_version_mismatch"
+	// TraceOutcomeRebaselinedPrePolicy marks a silent rebaseline of the
+	// config's hash as the v6 binary computed it, before the FingerprintExtra
+	// change policy (runtime.PrePolicy*): the config did not change. No
+	// drain, no event.
+	TraceOutcomeRebaselinedPrePolicy TraceOutcomeCode = "rebaselined_pre_policy"
 
 	TraceOutcomeKeptOpen            TraceOutcomeCode = "kept_open"
 	TraceOutcomeDeferred            TraceOutcomeCode = "deferred"
@@ -304,6 +313,9 @@ const (
 	// TraceOutcomeDeferredByOnDeathHook marks a start deferred before any
 	// write because the name's on_death hook is queued or running.
 	TraceOutcomeDeferredByOnDeathHook TraceOutcomeCode = "deferred_by_on_death_hook"
+	// TraceOutcomeDeferredByPrepareBudget marks a start deferred before any
+	// write because the planner call's cumulative prepare time spent its budget.
+	TraceOutcomeDeferredByPrepareBudget TraceOutcomeCode = "deferred_by_prepare_budget"
 	// TraceOutcomeSkippedPresent marks an on_death hook skipped because its
 	// name was listed again when the hook was due.
 	TraceOutcomeSkippedPresent TraceOutcomeCode = "skipped_present"

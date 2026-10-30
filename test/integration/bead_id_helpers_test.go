@@ -17,19 +17,19 @@ import (
 // move wholesale into the small unsharded go_test next to it, but this one
 // is a dependency of integration-tagged code too, so it stays reachable from
 // both go_test targets in this package.
-const beadIDERE = `[A-Za-z][A-Za-z0-9]*(-[A-Za-z0-9]+)+([.][A-Za-z0-9]+)*`
+const beadIDERE = `[A-Za-z][A-Za-z0-9]*(-[A-Za-z0-9]+)+([.][A-Za-z0-9]+)*` //nolint:unused // used by integration-tagged tests, which the untagged build of integration_test omits
 
-var beadIDTokenRE = regexp.MustCompile("^" + beadIDERE + "$")
+var beadIDTokenRE = regexp.MustCompile("^" + beadIDERE + "$") //nolint:unused // used by integration-tagged tests, which the untagged build of integration_test omits
 
 // isBeadIDToken reports whether s is, in its entirety, shaped like a bead ID.
-func isBeadIDToken(s string) bool {
+func isBeadIDToken(s string) bool { //nolint:unused // used by integration-tagged tests, which the untagged build of integration_test omits
 	return beadIDTokenRE.MatchString(s)
 }
 
 // parseBeadID extracts a bead ID from bd/gc output by shape, never by
 // scanning free text for the shape regex as a substring — preambles contain
 // shape-identical words such as "re-initializing".
-func parseBeadID(output string) (string, bool) {
+func parseBeadID(output string) (string, bool) { //nolint:unused // used by integration-tagged tests, which the untagged build of integration_test omits
 	for _, anchor := range []string{"Created bead:", "Created issue:", "Created convoy"} {
 		idx := strings.Index(output, anchor)
 		if idx < 0 {

@@ -17,11 +17,11 @@ import (
 	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
-// updateLedgerDoc regenerates the TESTING.md checked resource ledger block
-// from test/test-resources.toml when set. Run:
+// updateLedgerDoc regenerates test/test-resource-counts.toml and the TESTING.md
+// checked resource ledger block when set. Run, from the repository root:
 //
-//	go test ./internal/testpolicy/resourcecensus -run TestRepositoryLedgerMatchesCensusAndDocumentation -update
-var updateLedgerDoc = flag.Bool("update", false, "regenerate the TESTING.md checked resource ledger block from test/test-resources.toml")
+//	GC_TEST_REPO_ROOT="$PWD" bazel run //internal/testpolicy/resourcecensus:resourcecensus_test -- -test.run='^TestRepositoryLedgerMatchesCensusAndDocumentation$' -update
+var updateLedgerDoc = flag.Bool("update", false, "regenerate test/test-resource-counts.toml and the TESTING.md checked resource ledger block")
 
 func TestScanUsesImportIdentityAndParsedBuildConstraints(t *testing.T) {
 	t.Parallel()
@@ -1756,43 +1756,12 @@ func TestValidateAcceptsExactSourceRatchets(t *testing.T) {
 		{Path: "sample/a_test.go", Resource: ResourceSubprocess},
 		{Path: "sample/b_test.go", Resource: ResourceSubprocess},
 	}}
-	policy := validLedger(census)
+	policy := validLedger()
 	ledger := cloneLedger(policy)
 
 	if err := validateAgainstPolicy(policy, ledger, census); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-}
-
-func TestValidateRejectsDebtGrowthAndStaleHighBaselines(t *testing.T) {
-	t.Parallel()
-
-	census := Census{Occurrences: []Occurrence{
-		{Path: "sample/a_test.go", Resource: ResourceSubprocess},
-		{Path: "sample/b_test.go", Resource: ResourceSubprocess},
-	}}
-
-	t.Run("growth", func(t *testing.T) {
-		policy := validLedger(census)
-		row := findRow(t, policy.Debt, ScopeUntagged, ResourceSubprocess)
-		row.BaselineCalls = 1
-		row.BaselineFiles = 1
-		ledger := cloneLedger(policy)
-		err := validateAgainstPolicy(policy, ledger, census)
-		requireErrorContains(t, err,
-			"source resource census grew: scope=untagged resource=subprocess calls=2 (baseline 1), files=2 (baseline 1)")
-	})
-
-	t.Run("stale high", func(t *testing.T) {
-		policy := validLedger(census)
-		row := findRow(t, policy.Debt, ScopeUntagged, ResourceSubprocess)
-		row.BaselineCalls = 3
-		row.BaselineFiles = 3
-		ledger := cloneLedger(policy)
-		err := validateAgainstPolicy(policy, ledger, census)
-		requireErrorContains(t, err,
-			"source resource census baseline is stale: scope=untagged resource=subprocess calls=2 (baseline 3), files=2 (baseline 3); lower the checked baseline to bank the improvement")
-	})
 }
 
 func TestValidateAllowsHistoricalNeedleToDifferFromASTCensus(t *testing.T) {
@@ -1802,7 +1771,7 @@ func TestValidateAllowsHistoricalNeedleToDifferFromASTCensus(t *testing.T) {
 		{Path: "sample/a_test.go", Resource: ResourceSubprocess},
 		{Path: "sample/b_test.go", Resource: ResourceSubprocess},
 	}}
-	policy := validLedger(census)
+	policy := validLedger()
 	row := findRow(t, policy.Debt, ScopeUntagged, ResourceSubprocess)
 	row.ReportedCalls = 1
 	row.ReportedFiles = 1
@@ -1820,7 +1789,7 @@ func TestValidateAllowsNarrowerHistoricalCmdGCNeedle(t *testing.T) {
 		{Path: "cmd/gc/a_test.go", Resource: ResourceEnvironment},
 		{Path: "cmd/gc/b_test.go", Resource: ResourceEnvironment},
 	}}
-	policy := validLedger(census)
+	policy := validLedger()
 	row := findRow(t, policy.Debt, ScopeCmdGCUntagged, ResourceEnvironment)
 	row.ReportedCalls = 1
 	row.ReportedFiles = 1
@@ -1831,30 +1800,10 @@ func TestValidateAllowsNarrowerHistoricalCmdGCNeedle(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsCoordinatedCmdGCCensusAndManifestGrowth(t *testing.T) {
-	t.Parallel()
-
-	policy := validLedger(Census{})
-	ledger := cloneLedger(policy)
-	row := findRow(t, ledger.Debt, ScopeCmdGCUntagged, ResourceEnvironment)
-	row.BaselineCalls = 1
-	row.BaselineFiles = 1
-	census := Census{Occurrences: []Occurrence{{
-		Path:     "cmd/gc/new_test.go",
-		Resource: ResourceEnvironment,
-	}}}
-
-	err := validateAgainstPolicy(policy, ledger, census)
-	requireErrorContains(t, err, "baseline_calls = 1, bootstrap policy requires 0")
-	if strings.Contains(err.Error(), "source resource census") {
-		t.Fatalf("live census was compared before cmd/gc policy drift was rejected: %v", err)
-	}
-}
-
 func TestValidateRejectsBootstrapPolicyDriftBeforeLiveCensus(t *testing.T) {
 	t.Parallel()
 
-	policy := validLedger(Census{})
+	policy := validLedger()
 	policy.AuditBaseline[0].ReportedCalls = 11
 	policy.AuditBaseline[0].ReportedFiles = 3
 	policy.AuditBaseline[0].Invariant = "audit invariant"
@@ -1917,14 +1866,6 @@ func TestValidateRejectsBootstrapPolicyDriftBeforeLiveCensus(t *testing.T) {
 			},
 			want: `expires = "2027-01-01", bootstrap policy requires "2026-10-01"`,
 		},
-		{
-			name: "simultaneous census and manifest growth",
-			mutate: func(ledger *Ledger) {
-				ledger.Debt[0].BaselineCalls = 1
-				ledger.Debt[0].BaselineFiles = 1
-			},
-			want: "baseline_calls = 1, bootstrap policy requires 0",
-		},
 	}
 
 	grownCensus := Census{Occurrences: []Occurrence{{Path: "sample/new_test.go", Resource: ResourceSubprocess}}}
@@ -1968,8 +1909,8 @@ func TestBootstrapPolicyOwnsListenerHelperDebt(t *testing.T) {
 	t.Parallel()
 
 	audit := findRow(t, bootstrapPolicy.AuditBaseline, ScopeAll, ResourceListenerHelper)
-	if audit.BaselineCalls != 60 || audit.BaselineFiles != 24 || audit.ReportedCalls != 60 || audit.ReportedFiles != 24 {
-		t.Fatalf("all-source listener-helper baseline/reported = %d/%d, %d/%d; want 60/24, 60/24", audit.BaselineCalls, audit.BaselineFiles, audit.ReportedCalls, audit.ReportedFiles)
+	if audit.ReportedCalls != 60 || audit.ReportedFiles != 24 {
+		t.Fatalf("all-source listener-helper reported = %d/%d; want 60/24", audit.ReportedCalls, audit.ReportedFiles)
 	}
 	if audit.OwnerBead != "ga-cp3hwi" || audit.MigrationTarget != "P0.4c-listener-helper" {
 		t.Fatalf("all-source listener-helper owner = %q/%q, want ga-cp3hwi/P0.4c-listener-helper", audit.OwnerBead, audit.MigrationTarget)
@@ -1977,8 +1918,8 @@ func TestBootstrapPolicyOwnsListenerHelperDebt(t *testing.T) {
 
 	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
 		row := findRow(t, rows, ScopeUntagged, ResourceListenerHelper)
-		if row.BaselineCalls != 39 || row.BaselineFiles != 13 || row.ReportedCalls != 39 || row.ReportedFiles != 13 {
-			t.Fatalf("listener-helper baseline/reported = %d/%d, %d/%d; want 39/13, 39/13", row.BaselineCalls, row.BaselineFiles, row.ReportedCalls, row.ReportedFiles)
+		if row.ReportedCalls != 39 || row.ReportedFiles != 13 {
+			t.Fatalf("listener-helper reported = %d/%d; want 39/13", row.ReportedCalls, row.ReportedFiles)
 		}
 		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c-listener-helper" {
 			t.Fatalf("listener-helper owner = %q/%q, want ga-cp3hwi/P0.4c-listener-helper", row.OwnerBead, row.MigrationTarget)
@@ -1990,13 +1931,10 @@ func TestBootstrapPolicyOwnsNetListenDebtAndExactMediumOwners(t *testing.T) {
 	t.Parallel()
 
 	debt := findRow(t, bootstrapPolicy.Debt, ScopeUntagged, ResourceNetListen)
-	if debt.BaselineCalls != 97 || debt.BaselineFiles != 37 || debt.ReportedCalls != 92 || debt.ReportedFiles != 34 {
-		t.Fatalf("stream-listener source baseline/reported = %d/%d, %d/%d; want 97/37, 92/34", debt.BaselineCalls, debt.BaselineFiles, debt.ReportedCalls, debt.ReportedFiles)
+	if debt.ReportedCalls != 92 || debt.ReportedFiles != 34 {
+		t.Fatalf("stream-listener source reported = %d/%d; want 92/34", debt.ReportedCalls, debt.ReportedFiles)
 	}
 	smallDebt := findRow(t, bootstrapPolicy.SmallDebt, ScopeUntagged, ResourceNetListen)
-	if smallDebt.BaselineCalls != 95 || smallDebt.BaselineFiles != 36 {
-		t.Fatalf("stream-listener Small baseline = %d/%d, want 95/36", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
-	}
 	for _, row := range []*Baseline{debt, smallDebt} {
 		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c-listener" {
 			t.Fatalf("stream-listener owner = %q/%q, want ga-cp3hwi/P0.4c-listener", row.OwnerBead, row.MigrationTarget)
@@ -2029,9 +1967,6 @@ func TestBootstrapPolicyOwnsNetListenConfigDebt(t *testing.T) {
 
 	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
 		row := findRow(t, rows, ScopeUntagged, ResourceNetListenConfig)
-		if row.BaselineCalls != 1 || row.BaselineFiles != 1 {
-			t.Fatalf("net.ListenConfig listener baseline = %d/%d, want 1/1", row.BaselineCalls, row.BaselineFiles)
-		}
 		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c-listener" {
 			t.Fatalf("net.ListenConfig listener owner = %q/%q, want ga-cp3hwi/P0.4c-listener", row.OwnerBead, row.MigrationTarget)
 		}
@@ -2043,9 +1978,6 @@ func TestBootstrapPolicyOwnsNetListenPacketDebt(t *testing.T) {
 
 	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
 		row := findRow(t, rows, ScopeUntagged, ResourceNetListenPacket)
-		if row.BaselineCalls != 3 || row.BaselineFiles != 2 {
-			t.Fatalf("packet-listener baseline = %d/%d, want 3/2", row.BaselineCalls, row.BaselineFiles)
-		}
 		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c-listener" {
 			t.Fatalf("packet-listener owner = %q/%q, want ga-cp3hwi/P0.4c-listener", row.OwnerBead, row.MigrationTarget)
 		}
@@ -2057,9 +1989,6 @@ func TestBootstrapPolicyOwnsSyscallListenDebt(t *testing.T) {
 
 	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
 		row := findRow(t, rows, ScopeUntagged, ResourceSyscallListen)
-		if row.BaselineCalls != 1 || row.BaselineFiles != 1 {
-			t.Fatalf("syscall.Listen baseline = %d/%d, want 1/1", row.BaselineCalls, row.BaselineFiles)
-		}
 		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c" {
 			t.Fatalf("syscall.Listen owner = %q/%q, want ga-cp3hwi/P0.4c", row.OwnerBead, row.MigrationTarget)
 		}
@@ -2070,13 +1999,7 @@ func TestBootstrapPolicyOwnsTmuxDebtAndExactMediumSetup(t *testing.T) {
 	t.Parallel()
 
 	debt := findRow(t, bootstrapPolicy.Debt, ScopeUntagged, ResourceTmux)
-	if debt.BaselineCalls != 9 || debt.BaselineFiles != 4 {
-		t.Fatalf("tmux source baseline = %d/%d, want 9/4", debt.BaselineCalls, debt.BaselineFiles)
-	}
 	smallDebt := findRow(t, bootstrapPolicy.SmallDebt, ScopeUntagged, ResourceTmux)
-	if smallDebt.BaselineCalls != 3 || smallDebt.BaselineFiles != 2 {
-		t.Fatalf("tmux Small baseline = %d/%d, want 3/2", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
-	}
 	for _, row := range []*Baseline{debt, smallDebt} {
 		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c-tmux" {
 			t.Fatalf("tmux owner = %q/%q, want ga-cp3hwi/P0.4c-tmux", row.OwnerBead, row.MigrationTarget)
@@ -2158,14 +2081,14 @@ func TestValidateRequiresTheExactBootstrapRowSet(t *testing.T) {
 		{
 			name: "unexpected audit row",
 			mutate: func(ledger *Ledger) {
-				ledger.AuditBaseline = append(ledger.AuditBaseline, validAudit(ScopeUntagged, ResourceFixedSleep, 0, 0))
+				ledger.AuditBaseline = append(ledger.AuditBaseline, validAudit(ScopeUntagged, ResourceFixedSleep))
 			},
 			want: `unexpected audit baseline: scope=untagged resource=fixed_sleep`,
 		},
 		{
 			name: "unexpected debt row",
 			mutate: func(ledger *Ledger) {
-				ledger.Debt = append(ledger.Debt, validDebt(ScopeAll, ResourceFixedSleep, 0, 0))
+				ledger.Debt = append(ledger.Debt, validDebt(ScopeAll, ResourceFixedSleep))
 			},
 			want: `unexpected debt baseline: scope=all resource=fixed_sleep`,
 		},
@@ -2194,7 +2117,7 @@ func TestValidateRequiresTheExactBootstrapRowSet(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			policy := validLedger(Census{})
+			policy := validLedger()
 			ledger := cloneLedger(policy)
 			tt.mutate(&ledger)
 			err := validateAgainstPolicy(policy, ledger, Census{})
@@ -2218,8 +2141,8 @@ func TestParseLedgerRejectsUndeclaredClassificationFields(t *testing.T) {
 		data string
 		want string
 	}{
-		{"medium field", "version = 2\n[[medium]]\npackage_dir = 'sample'\nmystery = true\n", "unknown ledger field: medium.mystery"},
-		{"small debt field", "version = 2\n[[small_debt]]\nscope = 'untagged'\nintended_size = 'small'\n", "unknown ledger field: small_debt.intended_size"},
+		{"medium field", "version = 3\n[[medium]]\npackage_dir = 'sample'\nmystery = true\n", "unknown ledger field: medium.mystery"},
+		{"small debt field", "version = 3\n[[small_debt]]\nscope = 'untagged'\nintended_size = 'small'\n", "unknown ledger field: small_debt.intended_size"},
 		{"size field", "version = 1\n[[debt]]\nscope = 'untagged'\nintended_size = 'small'\n", "unknown ledger field: debt.intended_size"},
 	}
 	for _, tt := range tests {
@@ -2234,30 +2157,30 @@ func TestRenderMarkdownIsDeterministic(t *testing.T) {
 	t.Parallel()
 
 	ledger := Ledger{
-		Version: 2,
+		Version: 3,
 		AuditBaseline: []Baseline{
-			validAudit(ScopeAll, ResourceFixedSleep, 4, 2),
+			validAudit(ScopeAll, ResourceFixedSleep),
 		},
 		Debt: []Baseline{
-			validDebt(ScopeUntagged, ResourceSubprocess, 3, 2),
-			validDebt(ScopeCmdGCUntagged, ResourceCWD, 2, 1),
+			validDebt(ScopeUntagged, ResourceSubprocess),
+			validDebt(ScopeCmdGCUntagged, ResourceCWD),
 		},
 		Medium: []MediumOwner{
 			validMediumOwner("sample", "sample", "TestOwned", ResourceSubprocess),
 		},
 		SmallDebt: []Baseline{
-			validDebt(ScopeUntagged, ResourceFixedSleep, 1, 1),
+			validDebt(ScopeUntagged, ResourceFixedSleep),
 		},
 	}
 	got := RenderMarkdown(ledger)
 	want := `<!-- BEGIN CHECKED TEST RESOURCE LEDGER -->
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |
-| Audit baseline | all tracked test source | fixed_sleep: 4 calls / 2 files | P0.4 | source census only; does not classify tests; audit owner | P0.4a | 2026-10-01 |
+| Audit baseline | all tracked test source | fixed_sleep | P0.4 | source census only; does not classify tests; audit owner | P0.4a | 2026-10-01 |
 | Medium owner | ` + "`sample`" + ` package ` + "`sample`" + ` | TestOwned: subprocess | ga-test | exact runnable owner; lexical declaration | P0.4b | 2026-10-01 |
-| Small debt ratchet | all untagged test source | fixed_sleep: 1 calls / 1 files | P0.4 | existing debt cannot grow; owning test cleanup | D1/D2 | 2026-10-01 |
-| Source debt ratchet | ` + "`cmd/gc`" + ` untagged test source | cwd: 2 calls / 1 files | P0.4 | existing debt cannot grow; owning test cleanup | D5/D6 | 2026-10-01 |
-| Source debt ratchet | all untagged test source | subprocess: 3 calls / 2 files | P0.4 | existing debt cannot grow; owning test cleanup | D1/D2 | 2026-10-01 |
+| Small debt ratchet | all untagged test source | fixed_sleep | P0.4 | existing debt cannot grow; owning test cleanup | D1/D2 | 2026-10-01 |
+| Source debt ratchet | ` + "`cmd/gc`" + ` untagged test source | cwd | P0.4 | existing debt cannot grow; owning test cleanup | D5/D6 | 2026-10-01 |
+| Source debt ratchet | all untagged test source | subprocess | P0.4 | existing debt cannot grow; owning test cleanup | D1/D2 | 2026-10-01 |
 <!-- END CHECKED TEST RESOURCE LEDGER -->`
 	if got != want {
 		t.Fatalf("RenderMarkdown mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
@@ -2306,12 +2229,12 @@ func TestGeneratedLedgerBlockRoundTrips(t *testing.T) {
 	t.Parallel()
 
 	ledger := Ledger{
-		Version: 2,
+		Version: 3,
 		AuditBaseline: []Baseline{
-			validAudit(ScopeAll, ResourceFixedSleep, 4, 2),
+			validAudit(ScopeAll, ResourceFixedSleep),
 		},
 		Debt: []Baseline{
-			validDebt(ScopeUntagged, ResourceSubprocess, 3, 2),
+			validDebt(ScopeUntagged, ResourceSubprocess),
 		},
 	}
 	generated := RenderMarkdown(ledger)
@@ -2357,39 +2280,56 @@ func TestRepositoryLedgerMatchesCensusAndDocumentation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScanRepository: %v", err)
 	}
-	// Structure and counts only: the row dates are judged against today by
+	// Structure first, and even under -update: the policy rows, their owners
+	// and the Medium and reviewed-body rows must be sound before anything is
+	// written. The row dates are judged against today by
 	// internal/testpolicy/waiverexpiry, the one never-cached date check, so
 	// this test's verdict cannot go stale on the calendar.
 	if err := Validate(ledger, census); err != nil {
 		t.Fatalf("resource ledger drift:\n%v", err)
 	}
 
-	testingMDPath := filepath.Join(root, "TESTING.md")
-	doc, err := os.ReadFile(testingMDPath)
+	if *updateLedgerDoc {
+		if err := UpdateGenerated(root, ledger, census); err != nil {
+			t.Fatalf("update generated files: %v", err)
+		}
+	}
+
+	countsData, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(CountsPath)))
+	if err != nil {
+		t.Fatalf("read %s: %v\n%s", CountsPath, err, wantRegenerateLine)
+	}
+	if err := ValidateCounts(ledger, census, countsData); err != nil {
+		t.Fatalf("resource census drift:\n%v", err)
+	}
+	records, err := ParseCounts(countsData)
+	if err != nil {
+		t.Fatalf("ParseCounts: %v", err)
+	}
+	for _, row := range ledger.AuditBaseline {
+		got := DerivedCount(records, row.Scope, row.Resource)
+		t.Logf("audit scope=%s resource=%s calls=%d files=%d", row.Scope, row.Resource, got.Calls, got.Files)
+	}
+	for _, row := range ledger.Debt {
+		got := DerivedCount(records, row.Scope, row.Resource)
+		t.Logf("debt scope=%s resource=%s calls=%d files=%d", row.Scope, row.Resource, got.Calls, got.Files)
+	}
+	for _, row := range ledger.SmallDebt {
+		got := DerivedSmallCount(records, row.Scope, row.Resource)
+		t.Logf("small scope=%s resource=%s calls=%d files=%d", row.Scope, row.Resource, got.Calls, got.Files)
+	}
+
+	doc, err := os.ReadFile(filepath.Join(root, "TESTING.md"))
 	if err != nil {
 		t.Fatalf("read TESTING.md: %v", err)
 	}
 	want := RenderMarkdown(ledger)
-
-	if *updateLedgerDoc {
-		updated, err := ReplaceMarkdownBlock(string(doc), want)
-		if err != nil {
-			t.Fatalf("replace TESTING.md ledger block: %v", err)
-		}
-		if updated != string(doc) {
-			if err := os.WriteFile(testingMDPath, []byte(updated), 0o644); err != nil {
-				t.Fatalf("write TESTING.md: %v", err)
-			}
-			doc = []byte(updated)
-		}
-	}
-
 	got, err := CheckedMarkdownBlock(string(doc))
 	if err != nil {
 		t.Fatalf("checked TESTING.md block: %v\n--- wanted block ---\n%s", err, want)
 	}
 	if got != want {
-		t.Fatalf("TESTING.md resource ledger block is stale; run `go test ./internal/testpolicy/resourcecensus -run TestRepositoryLedgerMatchesCensusAndDocumentation -update` to regenerate it, then review the diff\n--- got ---\n%s\n--- want ---\n%s", got, want)
+		t.Fatalf("TESTING.md resource ledger block is stale; run `%s` to regenerate it, then review the diff\n--- got ---\n%s\n--- want ---\n%s", wantRegenerateCommand, got, want)
 	}
 }
 
@@ -2402,43 +2342,37 @@ func assertCount(t *testing.T, census Census, scope Scope, resource Resource, wa
 	}
 }
 
-func validLedger(census Census) Ledger {
-	allSubprocess := census.Count(ScopeAll, ResourceSubprocess)
-	allSleep := census.Count(ScopeAll, ResourceFixedSleep)
-	untaggedSubprocess := census.Count(ScopeUntagged, ResourceSubprocess)
-	untaggedSleep := census.Count(ScopeUntagged, ResourceFixedSleep)
-	cmdGCEnvironment := census.Count(ScopeCmdGCUntagged, ResourceEnvironment)
-	cmdGCCWD := census.Count(ScopeCmdGCUntagged, ResourceCWD)
-	cmdGCSlowProcessGate := census.Count(ScopeCmdGCUntagged, ResourceSlowProcessGate)
+// validLedger returns a structurally valid ledger. It stores no counts: the
+// per-file counts file owns them, and tests derive them from a census with
+// GenerateCounts.
+func validLedger() Ledger {
 	return Ledger{
-		Version: 2,
+		Version: 3,
 		AuditBaseline: []Baseline{
-			validAudit(ScopeAll, ResourceSubprocess, allSubprocess.Calls, allSubprocess.Files),
-			validAudit(ScopeAll, ResourceFixedSleep, allSleep.Calls, allSleep.Files),
+			validAudit(ScopeAll, ResourceSubprocess),
+			validAudit(ScopeAll, ResourceFixedSleep),
 		},
 		Debt: []Baseline{
-			validDebt(ScopeUntagged, ResourceSubprocess, untaggedSubprocess.Calls, untaggedSubprocess.Files),
-			validDebt(ScopeUntagged, ResourceFixedSleep, untaggedSleep.Calls, untaggedSleep.Files),
-			validDebt(ScopeCmdGCUntagged, ResourceEnvironment, cmdGCEnvironment.Calls, cmdGCEnvironment.Files),
-			validDebt(ScopeCmdGCUntagged, ResourceCWD, cmdGCCWD.Calls, cmdGCCWD.Files),
-			validDebt(ScopeCmdGCUntagged, ResourceSlowProcessGate, cmdGCSlowProcessGate.Calls, cmdGCSlowProcessGate.Files),
+			validDebt(ScopeUntagged, ResourceSubprocess),
+			validDebt(ScopeUntagged, ResourceFixedSleep),
+			validDebt(ScopeCmdGCUntagged, ResourceEnvironment),
+			validDebt(ScopeCmdGCUntagged, ResourceCWD),
+			validDebt(ScopeCmdGCUntagged, ResourceSlowProcessGate),
 		},
 		SmallDebt: []Baseline{
-			validDebt(ScopeUntagged, ResourceSubprocess, untaggedSubprocess.Calls, untaggedSubprocess.Files),
-			validDebt(ScopeUntagged, ResourceFixedSleep, untaggedSleep.Calls, untaggedSleep.Files),
-			validDebt(ScopeCmdGCUntagged, ResourceEnvironment, cmdGCEnvironment.Calls, cmdGCEnvironment.Files),
-			validDebt(ScopeCmdGCUntagged, ResourceCWD, cmdGCCWD.Calls, cmdGCCWD.Files),
-			validDebt(ScopeCmdGCUntagged, ResourceSlowProcessGate, cmdGCSlowProcessGate.Calls, cmdGCSlowProcessGate.Files),
+			validDebt(ScopeUntagged, ResourceSubprocess),
+			validDebt(ScopeUntagged, ResourceFixedSleep),
+			validDebt(ScopeCmdGCUntagged, ResourceEnvironment),
+			validDebt(ScopeCmdGCUntagged, ResourceCWD),
+			validDebt(ScopeCmdGCUntagged, ResourceSlowProcessGate),
 		},
 	}
 }
 
-func validAudit(scope Scope, resource Resource, calls, files int) Baseline {
+func validAudit(scope Scope, resource Resource) Baseline {
 	return Baseline{
 		Scope:           scope,
 		Resource:        resource,
-		BaselineCalls:   calls,
-		BaselineFiles:   files,
 		OwnerBead:       "P0.4",
 		Invariant:       "source census only; does not classify tests",
 		ResourceOwner:   "audit owner",
@@ -2447,7 +2381,7 @@ func validAudit(scope Scope, resource Resource, calls, files int) Baseline {
 	}
 }
 
-func validDebt(scope Scope, resource Resource, calls, files int) Baseline {
+func validDebt(scope Scope, resource Resource) Baseline {
 	migration := "D1/D2"
 	if scope == ScopeCmdGCUntagged {
 		migration = "D5/D6"
@@ -2455,8 +2389,6 @@ func validDebt(scope Scope, resource Resource, calls, files int) Baseline {
 	return Baseline{
 		Scope:           scope,
 		Resource:        resource,
-		BaselineCalls:   calls,
-		BaselineFiles:   files,
 		OwnerBead:       "P0.4",
 		Invariant:       "existing debt cannot grow",
 		ResourceOwner:   "owning test cleanup",

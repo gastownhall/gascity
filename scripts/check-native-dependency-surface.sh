@@ -1,5 +1,29 @@
 #!/usr/bin/env bash
+# check-native-dependency-surface.sh [--gc-binary PATH]
+#
+# Guards the native beads dependency surface: module-graph size and per-family
+# module counts (from go.sum, run from the repository root), and the gc binary
+# (no product-metrics testhook, size cap).
+#
+# Without --gc-binary the script builds the release-shaped binary itself
+# (`CGO_ENABLED=0 go build -trimpath ./cmd/gc`, what max_binary_bytes below is
+# measured against). The Bazel sh_test //scripts:check_native_dependency_surface_test
+# passes the hermetically built //cmd/gc instead (cgo, so a larger binary) and
+# sets its own GC_NATIVE_DEP_MAX_BINARY_BYTES.
 set -euo pipefail
+
+gc_binary=""
+case "${1:-}" in
+"") ;;
+--gc-binary)
+	[ -n "${2:-}" ] || { echo "usage: $0 [--gc-binary PATH]" >&2; exit 2; }
+	gc_binary="$2"
+	;;
+*)
+	echo "usage: $0 [--gc-binary PATH]" >&2
+	exit 2
+	;;
+esac
 
 # max_modules re-baselined 2026-09-01 for beads v1.3.0-rc.1: measured 727 before
 # and 737 after, with ten additions and no removals. Re-measured 2026-09-10 on
@@ -33,8 +57,18 @@ max_azure_modules="${GC_NATIVE_DEP_MAX_AZURE_MODULES:-9}"
 max_dolthub_modules="${GC_NATIVE_DEP_MAX_DOLTHUB_MODULES:-15}"
 max_google_api_modules="${GC_NATIVE_DEP_MAX_GOOGLE_API_MODULES:-1}"
 
-modules="$(go list -m all)"
-total_modules="$(printf '%s\n' "$modules" | sed '/^$/d' | wc -l | tr -d ' ')"
+# The module graph is read from go.sum rather than `go list -m all`, which
+# needs a module cache (and the network to fill it). go.sum holds a checksum
+# for every module in the build list (the go command refuses to load the
+# graph otherwise), so its distinct module paths plus the main module are an
+# upper bound that equals `go list -m all` on a tidy go.sum; a stale entry
+# can only over-count, failing loud until `go mod tidy`.
+if [ ! -s go.sum ]; then
+	echo "native dependency guard: go.sum not found in $(pwd); run from the repository root" >&2
+	exit 1
+fi
+modules="$(awk 'NF >= 3 {print $1 " "}' go.sum | sort -u)"
+total_modules="$(( $(printf '%s\n' "$modules" | sed '/^$/d' | wc -l | tr -d ' ') + 1 ))"
 if [ "$total_modules" -gt "$max_modules" ]; then
 	echo "native dependency guard: module graph has $total_modules modules; max is $max_modules" >&2
 	exit 1
@@ -76,16 +110,23 @@ fi
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT INT TERM HUP
-CGO_ENABLED=0 go build -trimpath -o "$tmpdir/gc" ./cmd/gc
+if [ -n "$gc_binary" ]; then
+	[ -x "$gc_binary" ] || { echo "native dependency guard: --gc-binary $gc_binary is not executable" >&2; exit 1; }
+	cp -f "$gc_binary" "$tmpdir/gc"
+else
+	CGO_ENABLED=0 go build -trimpath -o "$tmpdir/gc" ./cmd/gc
+fi
 
-go tool nm "$tmpdir/gc" > "$tmpdir/gc.nm"
+# Symbol names live in the binary itself (the ELF symbol table, and the
+# pclntab for every linked function), so a byte search finds any linked
+# testhook symbol without `go tool nm` and the Go toolchain it needs.
 for forbidden_symbol in \
 	"main.runProductMetricsTesthookChild" \
 	"main.newProductMetricsTesthookRecordHelpCommand" \
 	"internal/productmetrics.OpenTesthook" \
 	"internal/productmetrics.testhookLoopbackHost"
 do
-	if grep -Fq -- "$forbidden_symbol" "$tmpdir/gc.nm"; then
+	if LC_ALL=C grep -aFq -- "$forbidden_symbol" "$tmpdir/gc"; then
 		echo "native dependency guard: normal gc contains product-metrics testhook symbol $forbidden_symbol" >&2
 		exit 1
 	fi
@@ -115,7 +156,14 @@ if grep -Fq -- "__testhook-record-help" "$tmpdir/metrics-help.txt"; then
 fi
 
 binary_bytes="$(wc -c < "$tmpdir/gc" | tr -d ' ')"
-if [ "$binary_bytes" -gt "$max_binary_bytes" ]; then
+# Under `bazel coverage` (COVERAGE=1, COVERAGE_DIR set for every test) the
+# //cmd/gc this test receives is coverage-instrumented whenever the
+# instrumentation filter matches it (the nightly's `coverage //...` uses the
+# default "^//"), so its size says nothing about the shipped binary. Every
+# other check above still runs; only the size cap is skipped.
+if [ "${COVERAGE:-}" = "1" ] || [ -n "${COVERAGE_DIR:-}" ]; then
+	echo "native dependency guard: coverage build (COVERAGE_DIR set); skipping binary size cap ($binary_bytes bytes)"
+elif [ "$binary_bytes" -gt "$max_binary_bytes" ]; then
 	echo "native dependency guard: gc binary is $binary_bytes bytes; max is $max_binary_bytes" >&2
 	exit 1
 fi

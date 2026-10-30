@@ -115,8 +115,11 @@ func (c *v2RoutedToNamespaceCheck) Fix(_ *doctor.CheckContext) error {
 // collect scans every in-scope bead store for beads whose gc.routed_to names
 // a short form present in aliases. Callers must only call this with a
 // non-empty aliases map (both Run and Fix short-circuit before calling it
-// otherwise), since an empty aliases map would make every per-store route
-// query a no-op.
+// otherwise).
+//
+// Each store is listed once and matched in memory, so the number of store
+// reads does not grow with the number of routes; a store path shared by two
+// scopes is listed once and matched for each of them.
 func (c *v2RoutedToNamespaceCheck) collect(aliases map[string][]string) (findings []routedToDriftFinding, skipped []string) {
 	scopes := []struct{ label, path string }{{"city", c.cityPath}}
 	if c.cfg != nil {
@@ -128,69 +131,67 @@ func (c *v2RoutedToNamespaceCheck) collect(aliases map[string][]string) (finding
 			scopes = append(scopes, struct{ label, path string }{"rig " + rig.Name, rig.Path})
 		}
 	}
+	type listing struct {
+		store beads.Store
+		items []beads.Bead
+		err   error
+	}
+	listed := map[string]listing{}
 	for _, sc := range scopes {
 		if c.newStore == nil || strings.TrimSpace(sc.path) == "" {
 			continue
 		}
-		store, err := c.newStore(sc.path)
-		if err != nil {
-			skipped = append(skipped, fmt.Sprintf("%s skipped: opening bead store: %v", sc.label, err))
+		key := normalizePathForCompare(sc.path)
+		got, ok := listed[key]
+		if !ok {
+			store, err := c.newStore(sc.path)
+			if err != nil {
+				skipped = append(skipped, fmt.Sprintf("%s skipped: opening bead store: %v", sc.label, err))
+				continue
+			}
+			items, err := listRoutedToCandidates(store)
+			got = listing{store: store, items: items, err: err}
+			listed[key] = got
+		}
+		if got.err != nil {
+			skipped = append(skipped, fmt.Sprintf("%s skipped: listing beads: %v", sc.label, got.err))
 			continue
 		}
-		scopeFindings, err := c.collectStoreFindings(store, aliases, sc.label)
-		findings = append(findings, scopeFindings...)
-		if err != nil {
-			skipped = append(skipped, fmt.Sprintf("%s skipped: listing beads: %v", sc.label, err))
-		}
+		findings = append(findings, routedToDriftFindings(got.store, got.items, aliases, sc.label)...)
 	}
 	return findings, skipped
 }
 
-// collectStoreFindings queries store once per candidate short-form route
-// (a targeted metadata lookup, not a full-store scan) and returns every
-// distinct bead found carrying one of those short forms. It stops and
-// returns whatever it already found, plus the error, the first time a route
-// query fails — mirroring the targeted-query error handling the rest of this
-// check relies on, so a single flaky query does not silently drop the routes
-// that already succeeded.
-func (c *v2RoutedToNamespaceCheck) collectStoreFindings(store beads.Store, aliases map[string][]string, label string) ([]routedToDriftFinding, error) {
+// listRoutedToCandidates reads every non-closed bead in store, both tiers:
+// one listing, where a targeted read per route cost two bd forks per route
+// per store (the filtered issues list plus an unfilterable wisp query) and
+// grew with the city's bound routes.
+func listRoutedToCandidates(store beads.Store) ([]beads.Bead, error) {
+	return store.List(beads.ListQuery{AllowScan: true})
+}
+
+// routedToDriftFindings returns every distinct bead in items whose
+// gc.routed_to is exactly a short form in aliases — the same exact match the
+// store's metadata filter applies.
+func routedToDriftFindings(store beads.Store, items []beads.Bead, aliases map[string][]string, label string) []routedToDriftFinding {
 	var findings []routedToDriftFinding
 	seen := make(map[string]bool)
-	routes := make([]string, 0, len(aliases))
-	for route := range aliases {
-		routes = append(routes, route)
-	}
-	sort.Strings(routes)
-	for _, route := range routes {
-		items, err := store.List(beads.ListQuery{
-			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: route},
+	for _, bead := range items {
+		route := bead.Metadata[beadmeta.RoutedToMetadataKey]
+		canonicals, ok := aliases[route]
+		if !ok || seen[bead.ID] {
+			continue
+		}
+		seen[bead.ID] = true
+		findings = append(findings, routedToDriftFinding{
+			label:      label,
+			store:      store,
+			beadID:     bead.ID,
+			route:      route,
+			canonicals: canonicals,
 		})
-		if err != nil {
-			return findings, err
-		}
-		for _, bead := range items {
-			if seen[bead.ID] {
-				continue
-			}
-			seen[bead.ID] = true
-			route := strings.TrimSpace(bead.Metadata[beadmeta.RoutedToMetadataKey])
-			if route == "" {
-				continue
-			}
-			canonicals, ok := aliases[route]
-			if !ok {
-				continue
-			}
-			findings = append(findings, routedToDriftFinding{
-				label:      label,
-				store:      store,
-				beadID:     bead.ID,
-				route:      route,
-				canonicals: canonicals,
-			})
-		}
 	}
-	return findings, nil
+	return findings
 }
 
 func boundRoutedToAliases(cfg *config.City) map[string][]string {

@@ -4,14 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -20,30 +15,44 @@ import (
 // Test actions exec host tools through the client's PATH, and the host runs
 // the hermetic C toolchain and loads the shared libraries of every binary it
 // links (libstdc++, ICU), so the worker host is an input to every
-// result rbe-west caches. These tests pin the worker-env platform property
-// that puts the host into the action key:
+// result rbe-west caches. These tests pin gascity's half of the worker-env
+// platform property that puts the host into the action key:
 //
 //   - every build (CI trusted, rbe-fork and fork-cache runs alike) executes on
 //     //platforms:rbe_worker, whose worker-env is the sha256 of the committed
 //     manifest tools/rbe/worker-env.txt;
-//   - that manifest is what tools/rbe/worker-env prints on the pinned host,
-//     and names the Go and dolt the worker installs;
-//   - blacksmith-worker.sh measures its own host with tools/rbe/worker-env
-//     and advertises the sha256 of what it measured, which rbe-west's
-//     schedulers match exactly against the action's.
+//   - that manifest has the shape the worker's measurement prints, and names
+//     the Go of go.mod.
 //
-// A host change (new runner image, package or Go upgrade) therefore serves no
-// action until the manifest and pin move, and the new pin is a new key for
-// every action: no result from the old host is ever a hit for the new one.
+// The worker half (worker/worker-env, which measures a host, and
+// worker/blacksmith-worker.sh, which advertises the sha256 of what it
+// measured) lives in gastownhall/rbe-worker at .github/actions/rbe-worker/pin,
+// with its own tests. The contract between the two (the manifest's package
+// set is worker-env's measured list, its dolt line is the worker's
+// DOLT_VERSION, the .bazelrc test PATH is the one worker-env measures) is
+// rbe-worker's cmd/product-check. The worker-host job (bazel.yml) runs the
+// pinned commit's product-check against this checkout on every PR, and
+// measures a Blacksmith host against its manifest whenever the worker host
+// or the rbe-worker pin changes. rbe-worker's own CI also runs
+// product-check against gascity main, but only as information; it gates
+// nothing here.
+//
+// The manifest is the host's toolchain, not its image: arch, OS release, Go,
+// dolt, and the upstream releases of the libraries and tools actions reach,
+// cut to the components that carry ABI or behavior. A toolchain change (a
+// glibc minor, another arch, a tool's major) serves no action until the
+// manifest and pin move, and the new pin is a new key for every action. A
+// security patch of the same releases (the Blacksmith image's routine Ubuntu
+// updates) measures the same, so it neither re-keys nor strands the pool.
 
 const (
 	rbeWorkerPlatformBuild = "platforms/BUILD.bazel"
 	rbeWorkerPlatformLabel = "//platforms:rbe_worker"
 	rbeWorkerEnvManifest   = "tools/rbe/worker-env.txt"
-	rbeWorkerEnvScript     = "tools/rbe/worker-env"
 	rbeWorkerEnvProperty   = "worker-env"
-	// What the golden worker.json renderings advertise.
-	rbeWorkerEnvSample = "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+	// The PATH rbe-worker's worker/worker-env measures, and so the one CI's
+	// tests must run with (cmd/product-check checks rbe-worker's side).
+	rbeWorkerTestPath = "/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
 )
 
 var workerEnvPinRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -89,198 +98,65 @@ func TestRBEWorkerPlatformPinsWorkerEnv(t *testing.T) {
 	}
 }
 
-// workerToolset returns blacksmith-worker.sh's WORKER_TOOLSET packages.
-func workerToolset(t *testing.T, script string) []string {
-	t.Helper()
-	m := regexp.MustCompile(`(?s)\nWORKER_TOOLSET=\(([^)]*)\)\n`).FindStringSubmatch(script)
-	if m == nil {
-		t.Fatalf("%s: no WORKER_TOOLSET=(...)", rbeWorkerScript)
-	}
-	return strings.Fields(m[1])
-}
-
 // TestRBEWorkerEnvManifestNamesTheWorkerHost: the committed manifest is a
-// tools/rbe/worker-env rendering (sorted, one arch, dolt, go and os line,
-// every base and toolset package installed) of a host with the Go of go.mod
-// and the dolt blacksmith-worker.sh installs, so bumping either without a
-// new manifest and pin fails here rather than on the farm.
+// worker-env rendering (sorted; one arch, dolt, go, os and yq line; every
+// package at an upstream release, never a Debian revision) of a host with
+// the Go of go.mod, so bumping Go without a new manifest and pin fails here
+// rather than on the farm. Which packages it names, and the dolt it names,
+// are the pinned rbe-worker's (cmd/product-check).
 func TestRBEWorkerEnvManifestNamesTheWorkerHost(t *testing.T) {
 	root := repoRoot(t)
 	manifest := readFile(t, root, rbeWorkerEnvManifest)
-	script := readFile(t, root, rbeWorkerScript)
-	envScript := readFile(t, root, rbeWorkerEnvScript)
 	if !strings.HasSuffix(manifest, "\n") {
-		t.Fatalf("%s must end with a newline, as tools/rbe/worker-env prints it", rbeWorkerEnvManifest)
+		t.Fatalf("%s must end with a newline, as worker-env prints it", rbeWorkerEnvManifest)
 	}
 	lines := strings.Split(strings.TrimSuffix(manifest, "\n"), "\n")
 	if !slices.IsSorted(lines) {
-		t.Errorf("%s is not sorted (LC_ALL=C), as tools/rbe/worker-env prints it", rbeWorkerEnvManifest)
+		t.Errorf("%s is not sorted (LC_ALL=C), as worker-env prints it", rbeWorkerEnvManifest)
 	}
 	goVersion := regexp.MustCompile(`(?m)^go (\S+)$`).FindStringSubmatch(readFile(t, root, "go.mod"))
-	dolt := regexp.MustCompile(`(?m)^DOLT_VERSION=(\S+)$`).FindStringSubmatch(script)
-	if goVersion == nil || dolt == nil {
-		t.Fatalf("go.mod go line %v, %s DOLT_VERSION %v", goVersion, rbeWorkerScript, dolt)
+	if goVersion == nil {
+		t.Fatal("go.mod has no go line")
 	}
-	single := map[string]string{
-		"arch": "x86_64", // the workers' ISA platform property
-		"dolt": "dolt version " + dolt[1],
-		"go":   "go version go" + goVersion[1] + " linux/amd64",
+	single := map[string]*regexp.Regexp{
+		"arch": regexp.MustCompile(`^x86_64$`), // the workers' ISA platform property
+		"dolt": regexp.MustCompile(`^dolt version \d+\.\d+\.\d+$`),
+		"go":   regexp.MustCompile(`^go version go` + regexp.QuoteMeta(goVersion[1]) + ` linux/amd64$`),
+		"os":   regexp.MustCompile(`^ubuntu \d+\.\d+$`),
+		"tool": regexp.MustCompile(`^yq \d+$`),
 	}
-	base := regexp.MustCompile(`(?m)^base=\(([^)]*)\)$`).FindStringSubmatch(envScript)
-	if base == nil {
-		t.Fatalf("%s: no base=(...)", rbeWorkerEnvScript)
-	}
-	wantPkgs := append(strings.Fields(base[1]), workerToolset(t, script)...)
-	sort.Strings(wantPkgs)
-	wantPkgs = slices.Compact(wantPkgs)
-
+	pkg := regexp.MustCompile(`^[a-z0-9][a-z0-9.+-]* \d+(\.\d+)*$`)
 	seen := map[string]int{}
-	var pkgs []string
 	for _, line := range lines {
 		kind, value, _ := strings.Cut(line, " ")
 		seen[kind]++
-		switch kind {
-		case "arch", "dolt", "go":
-			if value != single[kind] {
-				t.Errorf("%s: %s %q, want %q", rbeWorkerEnvManifest, kind, value, single[kind])
+		if kind == "pkg" {
+			if !pkg.MatchString(value) {
+				t.Errorf("%s: package %q is not a name and its upstream release (a Debian revision in the pin re-keys every action on the next security update)",
+					rbeWorkerEnvManifest, value)
 			}
-		case "os":
-			if !regexp.MustCompile(`^ubuntu \d+\.\d+$`).MatchString(value) {
-				t.Errorf("%s: os %q", rbeWorkerEnvManifest, value)
-			}
-		case "pkg":
-			name, version, _ := strings.Cut(value, " ")
-			if version == "" || version == "missing" {
-				t.Errorf("%s: package %s is not installed on the pinned host", rbeWorkerEnvManifest, name)
-			}
-			pkgs = append(pkgs, name)
-		default:
+			continue
+		}
+		re, ok := single[kind]
+		if !ok {
 			t.Errorf("%s: unexpected line %q", rbeWorkerEnvManifest, line)
+			continue
+		}
+		if !re.MatchString(value) {
+			t.Errorf("%s: %s %q, want %s", rbeWorkerEnvManifest, kind, value, re)
 		}
 	}
-	for _, kind := range []string{"arch", "dolt", "go", "os"} {
+	for kind := range single {
 		if seen[kind] != 1 {
 			t.Errorf("%s has %d %s lines, want 1", rbeWorkerEnvManifest, seen[kind], kind)
 		}
 	}
-	if !slices.Equal(pkgs, wantPkgs) {
-		t.Errorf("%s packages:\n%v\nwant the worker-env base and WORKER_TOOLSET packages:\n%v", rbeWorkerEnvManifest, pkgs, wantPkgs)
+	if seen["pkg"] == 0 {
+		t.Errorf("%s names no package", rbeWorkerEnvManifest)
 	}
 }
 
-// TestRBEWorkerToolsetRunsTheHermeticToolchain: C/C++ and cgo actions build
-// with the hermetic LLVM toolchain and sysroot of MODULE.bazel, so the
-// toolset (and with it the worker-env manifest) carries what the host needs
-// to run that toolchain and the binaries it links, and no host compiler,
-// linker or ICU headers: a package no action uses would only re-key every
-// action when the runner image moves it.
-func TestRBEWorkerToolsetRunsTheHermeticToolchain(t *testing.T) {
-	toolset := workerToolset(t, readFile(t, repoRoot(t), rbeWorkerScript))
-	for _, want := range []string{
-		"libstdc++6", "libgcc-s1", "zlib1g", // clang, lld, llvm-*
-		"libxml2", "liblzma5", // lld
-		"libicu74", // Bazel-built binaries linking go-icu-regex
-		"xz-utils", // the toolchain's .tar.xz
-	} {
-		if !slices.Contains(toolset, want) {
-			t.Errorf("%s WORKER_TOOLSET lacks %s, which the hermetic toolchain or its binaries load", rbeWorkerScript, want)
-		}
-	}
-	for _, banned := range []string{"gcc", "g++", "clang", "lld", "libc6-dev", "libicu-dev", "build-essential"} {
-		if slices.Contains(toolset, banned) {
-			t.Errorf("%s WORKER_TOOLSET has %s; no action uses a host compiler, linker or ICU headers", rbeWorkerScript, banned)
-		}
-	}
-}
-
-// TestRBEWorkerEnvScript runs tools/rbe/worker-env against stub tools: one
-// sorted line per fact, packages deduplicated and reported per installed
-// architecture once, a removed or unknown package "missing", go asked with
-// GOTOOLCHAIN=local away from any go.mod, and a missing tool fatal.
-func TestRBEWorkerEnvScript(t *testing.T) {
-	root := repoRoot(t)
-	dir := t.TempDir()
-	stubs := filepath.Join(dir, "bin")
-	if err := os.MkdirAll(stubs, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for name, body := range map[string]string{
-		"uname": "echo x86_64\n",
-		"dolt":  "echo 'dolt version 9.9.9'\necho 'database storage format: NEW'\n",
-		"go": `[ "$GOTOOLCHAIN" = local ] || { echo "GOTOOLCHAIN=$GOTOOLCHAIN" >&2; exit 1; }
-[ "$(pwd)" = / ] || { echo "cwd $(pwd)" >&2; exit 1; }
-echo 'go version go1.99.1 linux/amd64'
-`,
-		"dpkg-query": `for p; do :; done
-case "$p" in
-libc6) printf 'installed 2.39-0ubuntu8\ninstalled 2.39-0ubuntu8\n' ;;
-libfoo) printf 'installed 1.2:i386-only\ninstalled 1.3\n' ;;
-tmux) printf 'deinstall 3.4-1\n' ;;
-nosuch) echo "dpkg-query: no packages found matching $p" >&2; exit 1 ;;
-*) printf 'installed 1.0-%s\n' "$p" ;;
-esac
-`,
-	} {
-		if err := os.WriteFile(filepath.Join(stubs, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	osRelease := filepath.Join(dir, "os-release")
-	if err := os.WriteFile(osRelease, []byte("NAME=\"Ubuntu\"\nID=ubuntu\nVERSION_ID=\"24.04\"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	run := func(path string, args ...string) (string, error) {
-		out, stderr, err := runRBEScript("", []string{"WORKER_ENV_PATH=" + path, "WORKER_ENV_OS_RELEASE=" + osRelease, "GOTOOLCHAIN=auto"},
-			filepath.Join(root, rbeWorkerEnvScript), args...)
-		if err != nil {
-			return out + stderr, err
-		}
-		return out, nil
-	}
-	path := stubs + string(os.PathListSeparator) + "/usr/bin" + string(os.PathListSeparator) + "/bin"
-	got, err := run(path, "tmux", "nosuch", "libfoo", "bash", "zlib1g-dev")
-	if err != nil {
-		t.Fatalf("worker-env: %v\n%s", err, got)
-	}
-	want := `arch x86_64
-dolt dolt version 9.9.9
-go go version go1.99.1 linux/amd64
-os ubuntu 24.04
-pkg bash 1.0-bash
-pkg coreutils 1.0-coreutils
-pkg diffutils 1.0-diffutils
-pkg findutils 1.0-findutils
-pkg grep 1.0-grep
-pkg libc6 2.39-0ubuntu8
-pkg libfoo 1.2:i386-only,1.3
-pkg nosuch missing
-pkg procps 1.0-procps
-pkg sed 1.0-sed
-pkg tar 1.0-tar
-pkg tmux missing
-pkg util-linux 1.0-util-linux
-pkg zlib1g-dev 1.0-zlib1g-dev
-`
-	if got != want {
-		t.Errorf("worker-env output:\n%s\nwant:\n%s", got, want)
-	}
-
-	// No dolt (or go) on the PATH: fatal, never a manifest without it.
-	noDolt := filepath.Join(dir, "nodolt")
-	if err := os.MkdirAll(noDolt, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"uname", "go", "dpkg-query"} {
-		if err := os.Symlink(filepath.Join(stubs, name), filepath.Join(noDolt, name)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if out, err := run(noDolt+string(os.PathListSeparator)+"/usr/bin"+string(os.PathListSeparator)+"/bin", "tmux"); err == nil {
-		t.Errorf("worker-env without dolt succeeded:\n%s", out)
-	}
-}
-
-// runRBEScript runs a tools/rbe script with bash in dir (the test's cwd if
+// runRBEScript runs a script with bash in dir (the test's cwd if
 // empty) and exactly env, and returns its stdout and stderr.
 func runRBEScript(dir string, env []string, script string, args ...string) (stdout, stderr string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -294,73 +170,6 @@ func runRBEScript(dir string, env []string, script string, args ...string) (stdo
 	return out.String(), errOut.String(), err
 }
 
-// TestRBEWorkerScriptAdvertisesWorkerEnv: blacksmith-worker.sh installs its
-// toolset, measures the host with tools/rbe/worker-env over that same
-// toolset, and advertises the sha256 of the measurement (never the pin)
-// before any worker.json is rendered.
-func TestRBEWorkerScriptAdvertisesWorkerEnv(t *testing.T) {
-	script := readFile(t, repoRoot(t), rbeWorkerScript)
-	at := 0
-	for _, want := range []string{
-		"\nWORKER_TOOLSET=(",
-		"apt-get install -y -qq \\\n\t\"${WORKER_TOOLSET[@]}\" >/dev/null\n",
-		"\tsudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf \"$RUNNER_TEMP/go.tgz\"\n",
-		"\tsudo cp -f \"$RUNNER_TEMP/dolt-linux-amd64/bin/dolt\" /usr/local/bin/dolt\n",
-		"\ntools/rbe/worker-env \"${WORKER_TOOLSET[@]}\" >\"$RUNNER_TEMP/worker-env.txt\"\n",
-		"WORKER_ENV=sha256:$(sha256sum <\"$RUNNER_TEMP/worker-env.txt\" | cut -d' ' -f1)\n",
-		"\nrender() {\n",
-		`--arg worker_env "$WORKER_ENV"`,
-		`"worker-env": { values: [$worker_env] }`,
-	} {
-		i := strings.Index(script[at:], want)
-		if i < 0 {
-			t.Fatalf("%s: %q missing or out of order", rbeWorkerScript, want)
-		}
-		at += i + len(want)
-	}
-	if n := strings.Count(script, "WORKER_ENV="); n != 1 {
-		t.Errorf("%s assigns WORKER_ENV %d times; the measurement is its only source", rbeWorkerScript, n)
-	}
-	if n := strings.Count(script, "apt-get install"); n != 2 {
-		t.Errorf("%s has %d apt-get installs, want the toolset's and the isolation phase's", rbeWorkerScript, n)
-	}
-	// The image's apt lists carry newer candidates than some installed
-	// packages (installing libc6-dev upgrades libc6), so an install after
-	// the measurement could move a measured package on a host that already
-	// advertised its hash. Every later install adds packages only.
-	measured := strings.Index(script, "\ntools/rbe/worker-env ")
-	for _, m := range regexp.MustCompile(`apt-get install[^\n]*`).FindAllStringIndex(script, -1) {
-		if m[0] > measured && !strings.Contains(script[m[0]:m[1]], " --no-upgrade") {
-			t.Errorf("%s: %q runs after the worker-env measurement without --no-upgrade", rbeWorkerScript, script[m[0]:m[1]])
-		}
-	}
-}
-
-// checkWorkerJSONAdvertises checks a rendered worker.json advertises
-// worker-env=want and nothing else of it.
-func checkWorkerJSONAdvertises(out []byte, want string) error {
-	var cfg struct {
-		Workers []struct {
-			Local struct {
-				PlatformProperties map[string]struct {
-					Values []string `json:"values"`
-				} `json:"platform_properties"`
-			} `json:"local"`
-		} `json:"workers"`
-	}
-	if err := json.Unmarshal(out, &cfg); err != nil {
-		return err
-	}
-	if len(cfg.Workers) != 1 {
-		return errors.New("want exactly one worker")
-	}
-	got := cfg.Workers[0].Local.PlatformProperties[rbeWorkerEnvProperty].Values
-	if !slices.Equal(got, []string{want}) {
-		return errors.New("worker-env values " + strings.Join(got, ",") + ", want " + want)
-	}
-	return nil
-}
-
 // platformFlag reports whether a .bazelrc option selects or alters the
 // execution or target platform, or adds exec properties: all key-affecting.
 func platformFlag(flag string) bool {
@@ -370,7 +179,7 @@ func platformFlag(flag string) bool {
 
 // TestBazelExecutesOnWorkerPlatform: .bazelrc selects //platforms:rbe_worker
 // unconditionally (a key-affecting flag under remote-exec or fork-cache, or
-// in a CI-written .bazelrc.local, would key those runs apart) and nothing
+// in a CI-written rc, would key those runs apart) and nothing
 // else touches platforms or exec properties, and the PATH CI's tests run
 // with is the one worker-env measures.
 func TestBazelExecutesOnWorkerPlatform(t *testing.T) {
@@ -396,36 +205,6 @@ func TestBazelExecutesOnWorkerPlatform(t *testing.T) {
 		t.Errorf(".bazelrc platform flags %q, want %q alone", platforms, want)
 	}
 
-	var config *bazelTestWorkflowStep
-	steps := bazelTestWorkflowSteps(t, root)
-	for i := range steps {
-		if steps[i].Name == bazelRCConfigStep {
-			config = &steps[i]
-		}
-	}
-	if config == nil {
-		t.Fatalf("%s has no %q step", bazelTestWorkflow, bazelRCConfigStep)
-	}
-	pem := "eA=="
-	for name, env := range map[string]map[string]string{
-		"trusted": {
-			"BAZEL_REMOTE_EXECUTOR": "grpcs://executor.invalid:443", "BAZEL_FORK_CACHE": "true",
-			"RBE_INSTANCE": "oss", "RBE_TLS_CERT": pem, "RBE_TLS_KEY": pem,
-		},
-		"fork": {"BAZEL_REMOTE_EXECUTOR": "", "BAZEL_FORK_CACHE": "true"},
-	} {
-		for _, line := range runBazelRCConfigStep(t, config.Run, env) {
-			for _, flag := range strings.Fields(line) {
-				if platformFlag(flag) {
-					t.Errorf("%s .bazelrc.local sets %q; platform flags are key-affecting and belong in .bazelrc", name, line)
-				}
-			}
-			// A CI-written test PATH (today's bazel-test.yml) wins over .bazelrc's.
-			if v, ok := strings.CutPrefix(line, "test --test_env=PATH="); ok && name == "trusted" {
-				testPath = v
-			}
-		}
-	}
 	// bazel.yml's lanes: setup-bazel's generated rc stays off platforms too
 	// (.bazelrc's build:ci lines are checked above with every other config).
 	for _, line := range strings.Split(readFile(t, root, ".github/actions/setup-bazel/write-bazelrc.sh"), "\n") {
@@ -435,8 +214,7 @@ func TestBazelExecutesOnWorkerPlatform(t *testing.T) {
 			}
 		}
 	}
-	m := regexp.MustCompile(`(?m)^PATH=\$\{WORKER_ENV_PATH:-([^}]*)\}$`).FindStringSubmatch(readFile(t, root, rbeWorkerEnvScript))
-	if m == nil || testPath == "" || m[1] != testPath {
-		t.Errorf("CI tests' PATH %q, worker-env measures %v: they must be the same", testPath, m)
+	if testPath != rbeWorkerTestPath {
+		t.Errorf("CI tests' PATH %q, worker-env measures %q: they must be the same", testPath, rbeWorkerTestPath)
 	}
 }

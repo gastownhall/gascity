@@ -174,13 +174,13 @@ func TestBuildEffectiveSuspendedRigNames_NilRuntimeMap(t *testing.T) {
 
 // TestLoadAndSaveSuspensionState_RoundTrip pins the wrapper-level
 // behavior so future refactors can't drop the suspensionstate
-// Save/Load calls or change the persisted location.
+// Load call or change the persisted location.
 func TestLoadAndSaveSuspensionState_RoundTrip(t *testing.T) {
 	cityDir := t.TempDir()
 	st := suspensionstate.State{
 		Rigs: map[string]suspensionstate.Override{"foo": {Suspended: boolPtrTest(true)}},
 	}
-	if err := saveSuspensionState(fsys.OSFS{}, cityDir, st); err != nil {
+	if err := suspensionstate.Save(fsys.OSFS{}, cityDir, st); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	got, err := loadSuspensionState(fsys.OSFS{}, cityDir)

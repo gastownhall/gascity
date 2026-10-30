@@ -166,7 +166,8 @@ func TestAdoptPRFormulaCompileAndRun(t *testing.T) {
 		}
 	}
 
-	// Verify the input convoy is clean.
+	// Verify the input convoy is clean once the teardown tail has run.
+	waitForWorkflowTeardown(t, cityDir, workflowID)
 	convoy := showBead(t, cityDir, convoyID)
 	if got := metaValue(convoy, "work_dir"); got != "" {
 		t.Errorf("input convoy work_dir not cleaned up: %q", got)
@@ -207,6 +208,7 @@ func TestPersonalWorkFormulaCompileAndRun(t *testing.T) {
 		}
 	}
 
+	waitForWorkflowTeardown(t, cityDir, workflowID)
 	convoy := showBead(t, cityDir, convoyID)
 	if got := metaValue(convoy, "work_dir"); got != "" {
 		t.Errorf("input convoy work_dir not cleaned up: %q", got)

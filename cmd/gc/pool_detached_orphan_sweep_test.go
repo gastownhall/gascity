@@ -238,6 +238,97 @@ func TestDetachedHandoffOrphanCandidateRefusesEveryKindedBead(t *testing.T) {
 	}
 }
 
+// A pack that parks finished work on a canonical dispatch hold clears the
+// assignee and gc.routed_to on purpose: the next actor is not the pool that
+// worked it. That leaves exactly the detached-orphan signature (open,
+// unassigned, unrouted, branch, session back-reference), so without a hold gate
+// the sweep re-stamps the old pool route behind the parker's back. Restoring a
+// route is a decision about what to DO with the bead, and DispatchHoldLabels
+// answers no to every such decision. Fails without the hold gate (restored=1).
+func TestSweepDetachedHandoffOrphans_SkipsHeldBead(t *testing.T) {
+	for _, hold := range append(append([]string(nil), beadmeta.DispatchHoldLabels...), "Hold:External") {
+		t.Run(hold, func(t *testing.T) {
+			store := beads.NewMemStore()
+			sessionBead, err := store.Create(beads.Bead{
+				Title:  "worker session",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name": "pack__worker-th-held",
+					"template":     "repo/pack.worker",
+				},
+			})
+			if err != nil {
+				t.Fatalf("create session bead: %v", err)
+			}
+			work, err := store.Create(beads.Bead{
+				Title:  "parked work",
+				Status: "open",
+				Labels: []string{hold},
+				Metadata: map[string]string{
+					beadmeta.WorkBranchMetadataKey:  "polecat/ga-held",
+					beadmeta.SessionIDMetadataKey:   sessionBead.ID,
+					beadmeta.SessionNameMetadataKey: sessionBead.Metadata["session_name"],
+				},
+			})
+			if err != nil {
+				t.Fatalf("create work bead: %v", err)
+			}
+
+			n, err := sweepDetachedHandoffOrphans(store)
+			if err != nil {
+				t.Fatalf("sweep: %v", err)
+			}
+			if n != 0 {
+				t.Fatalf("restored=%d, want 0 (a bead parked on %q must not be re-routed)", n, hold)
+			}
+			if got := mustRoutedTo(t, store, work.ID); got != "" {
+				t.Errorf("gc.routed_to=%q, want empty (the parker cleared it on purpose)", got)
+			}
+
+			// Lifting the hold makes it an ordinary detached orphan again: the
+			// gate defers recovery, it does not strand the bead.
+			if err := store.Update(work.ID, beads.UpdateOpts{RemoveLabels: []string{hold}}); err != nil {
+				t.Fatalf("lift hold: %v", err)
+			}
+			n, err = sweepDetachedHandoffOrphans(store)
+			if err != nil {
+				t.Fatalf("sweep after lifting hold: %v", err)
+			}
+			if n != 1 {
+				t.Fatalf("restored=%d after lifting the hold, want 1", n)
+			}
+			if got := mustRoutedTo(t, store, work.ID); got != "repo/pack.worker" {
+				t.Errorf("gc.routed_to=%q after lifting the hold, want repo/pack.worker", got)
+			}
+		})
+	}
+}
+
+// The hold gate reads the SDK's canonical hold set and nothing else. A pack's
+// own parking label is pack vocabulary the SDK cannot know, so a bead parked
+// only by such a label is still a candidate; a pack parks with a canonical hold
+// or a bd status (blocked/deferred, excluded by the Live candidate List).
+func TestDetachedHandoffOrphanCandidateHonorsOnlyCanonicalHolds(t *testing.T) {
+	base := func(labels ...string) beads.Bead {
+		return beads.Bead{ID: "H-1", Status: "open", Labels: labels, Metadata: map[string]string{
+			beadmeta.WorkBranchMetadataKey: "polecat/ga-h",
+			beadmeta.SessionIDMetadataKey:  "S-1",
+		}}
+	}
+	if !isDetachedHandoffOrphanCandidate(base()) {
+		t.Fatal("the unlabeled base bead is not a candidate; every assertion below would pass vacuously")
+	}
+	for _, hold := range beadmeta.DispatchHoldLabels {
+		if isDetachedHandoffOrphanCandidate(base("upstream-pr", hold)) {
+			t.Errorf("a bead carrying %q is a detached-orphan candidate; route restore would re-route parked work", hold)
+		}
+	}
+	if !isDetachedHandoffOrphanCandidate(base("deferred:w3-scope", "hold:someone-else")) {
+		t.Error("a bead with only non-canonical labels is not a candidate; the SDK must not grow pack label vocabulary")
+	}
+}
+
 // A bead with no branch set is not a completed-work bead and must be skipped.
 func TestSweepDetachedHandoffOrphans_SkipsNoBranch(t *testing.T) {
 	store := beads.NewMemStore()

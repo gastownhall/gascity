@@ -102,12 +102,14 @@ func TestReloadProviderSwapKeepsAutoComposition(t *testing.T) {
 }
 
 // A reload that flips whether the city needs the ACP auto composition
-// rebuilds the provider under the unchanged selection name, as a cold start
-// with the new config would; any other reload keeps it.
+// recomposes the provider under the unchanged selection name, as a cold start
+// with the new config would, and carries the unchanged base into it (CONTRACT
+// v5.7 P7); any other reload keeps the provider.
 // Kills: a rebuild condition that ignores the composition (the first and
 // last ACP agent wait for a controller restart), a composition check that
 // misses agents selecting session = "acp" on a non-ACP provider, a swap on
-// every reload, and a swap for an acp base, which never composes.
+// every reload, a swap for an acp base, which never composes, and a rebuilt
+// base the old base's runtimes are unreachable from.
 func TestReloadRebuildsProviderWhenACPCompositionChanges(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -190,13 +192,13 @@ func TestReloadRebuildsProviderWhenACPCompositionChanges(t *testing.T) {
 				t.Fatalf("session provider after the reload = %T, want auto composition %v", cr.sp, tc.wantAuto)
 			}
 			if !tc.wantAuto {
-				if cr.sp != rebuilt {
-					t.Fatalf("session provider after the reload = %p, want the bare provider rebuilt for %q (%p)", cr.sp, tc.provider, rebuilt)
+				if cr.sp != sp {
+					t.Fatalf("session provider after the reload = %p, want the carried bare base (%p)", cr.sp, sp)
 				}
 				return
 			}
-			if got := autoSP.RouteFor("worker").Provider; got != rebuilt {
-				t.Fatalf("default route after the reload = %p, want the provider rebuilt for %q (%p)", got, tc.provider, rebuilt)
+			if got := autoSP.RouteFor("worker").Provider; got != sp {
+				t.Fatalf("default route after the reload = %p, want the carried base (%p), not a rebuild (%p)", got, sp, rebuilt)
 			}
 			acpSession := agent.SessionNameFor("test-city", "reviewer", "")
 			if err := autoSP.Attach(acpSession); err == nil || !strings.Contains(err.Error(), "ACP transport") {
@@ -237,7 +239,7 @@ func TestResolveSessionTransportProviderSeedsOnlyFromLoadedSnapshot(t *testing.T
 		{name: "load error", snapshot: newSessionBeadSnapshotWithError(io.ErrUnexpectedEOF)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sp, err := resolveSessionTransportProvider(ctx, tc.snapshot)
+			sp, err := resolveSessionTransportProvider(ctx, tc.snapshot, sessionLegs{})
 			if err != nil {
 				t.Fatalf("resolveSessionTransportProvider: %v", err)
 			}

@@ -80,9 +80,10 @@ func procEnvValue(pid int, key string) (string, bool) {
 }
 
 // discoverTmuxProcessesWithSocketRootEnv walks /proc and returns tmux
-// processes whose TMUX_TMPDIR environment value satisfies matchRoot. Hosts
-// without /proc return nil — the socket-file pass still covers them.
-func discoverTmuxProcessesWithSocketRootEnv(matchRoot func(string) bool) []tmuxProcInfo {
+// processes whose TMUX_TMPDIR environment value satisfies matchRoot, which is
+// also handed the process's PID. Hosts without /proc return nil — the
+// socket-file pass still covers them.
+func discoverTmuxProcessesWithSocketRootEnv(matchRoot func(pid int, root string) bool) []tmuxProcInfo {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil
@@ -101,7 +102,7 @@ func discoverTmuxProcessesWithSocketRootEnv(matchRoot func(string) bool) []tmuxP
 			continue
 		}
 		root, ok := procEnvValue(pid, "TMUX_TMPDIR")
-		if !ok || !matchRoot(root) {
+		if !ok || !matchRoot(pid, root) {
 			continue
 		}
 		out = append(out, tmuxProcInfo{PID: pid, Argv: argv})
@@ -166,7 +167,9 @@ func reapTmuxLeakProcesses(procs []tmuxProcInfo) {
 // missing root is definitive proof the owning run ended — the server is
 // residue of the exact leak class this guard exists for (a crashed or
 // pre-guard run whose teardown removed the dir but never killed the server).
-// Roots that still exist — including this run's own — are never touched.
+// Roots that still exist — including this run's own — are never touched. The
+// root is judged where its run created it, in the server's own mount namespace
+// (socketRootGoneInOwnMountNamespace), never through this process's /tmp.
 func sweepStaleTmuxTestServers(label string, out io.Writer) {
 	sweepStaleTmuxServers(label, out, isTmuxTestSocketRoot)
 }
@@ -190,13 +193,12 @@ func isTmuxTestSocketRoot(root string) bool {
 // startup sweep owns, so a sibling suite's sweep cannot reap the fixture before
 // the sweep under test reports it.
 func sweepStaleTmuxServers(label string, out io.Writer, ownsRoot func(root string) bool) {
-	stale := discoverTmuxProcessesWithSocketRootEnv(func(root string) bool {
+	stale := discoverTmuxProcessesWithSocketRootEnv(func(pid int, root string) bool {
 		root = strings.TrimSpace(root)
 		if !ownsRoot(root) {
 			return false
 		}
-		_, err := os.Stat(root)
-		return os.IsNotExist(err)
+		return socketRootGoneInOwnMountNamespace(pid, root)
 	})
 	if len(stale) == 0 {
 		return
@@ -204,6 +206,31 @@ func sweepStaleTmuxServers(label string, out io.Writer, ownsRoot func(root strin
 	fmt.Fprintf(out, "cmd/gc tmux leak guard: %s sweep reaping %d stale test tmux server(s) whose socket root is gone\n", label, len(stale)) //nolint:errcheck
 	writeTmuxLeakReport(out, stale)
 	reapTmuxLeakProcesses(stale)
+}
+
+// socketRootGoneInOwnMountNamespace reports whether root, the TMUX_TMPDIR in
+// pid's environ, is missing from pid's own mount namespace. It resolves root
+// through /proc/<pid>/root rather than this process's filesystem: a tmux
+// server inside a Bazel linux-sandbox test sees a private /tmp (the sandbox's
+// _hermetic_tmp bind mount), so its live run's root is absent from every
+// unsandboxed process's /tmp, and judging it there reaps a live server
+// (ga-5hohvc). A root that cannot be observed — pid exited, read access to its
+// root is denied, or root is relative — is never reported gone.
+func socketRootGoneInOwnMountNamespace(pid int, root string) bool {
+	if !filepath.IsAbs(root) {
+		return false
+	}
+	procRoot := filepath.Join("/proc", strconv.Itoa(pid), "root")
+	if _, err := os.Stat(procRoot); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(procRoot, root)); !os.IsNotExist(err) {
+		return false
+	}
+	// An exit between the two observations also reads as a missing path, so
+	// the root counts as gone only while pid's own view is still observable.
+	_, err := os.Stat(procRoot)
+	return err == nil
 }
 
 func writeTmuxLeakReport(w io.Writer, leaked []tmuxProcInfo) {
@@ -234,7 +261,7 @@ func (g *tmuxLeakGuardedTestingM) Run() int {
 // discoverOwnedTmuxProcesses returns tmux processes attributed to this run
 // via environ TMUX_TMPDIR under (or equal to) the run's socket root.
 func (g *tmuxLeakGuardedTestingM) discoverOwnedTmuxProcesses() []tmuxProcInfo {
-	return discoverTmuxProcessesWithSocketRootEnv(func(root string) bool {
+	return discoverTmuxProcessesWithSocketRootEnv(func(_ int, root string) bool {
 		return pathutil.PathWithin(g.socketRoot, filepath.Clean(strings.TrimSpace(root)))
 	})
 }

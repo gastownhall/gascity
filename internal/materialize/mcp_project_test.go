@@ -2,6 +2,7 @@ package materialize
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -289,6 +290,9 @@ func TestApplyMCPProjectionCursorPreservesNonMCPSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// gc projected the stale server on an earlier pass: it manages the
+	// file, so it owns the MCP servers in it.
+	markMCPManaged(t, dir, MCPProviderCursor)
 	proj, err := BuildMCPProjection(MCPProviderCursor, dir, []MCPServer{
 		{
 			Name:      "alpha",
@@ -371,6 +375,9 @@ func TestApplyMCPProjectionGeminiPreservesNonMCPSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// gc projected the stale server on an earlier pass: it manages the
+	// file, so it owns the MCP servers in it.
+	markMCPManaged(t, dir, MCPProviderGemini)
 	proj, err := BuildMCPProjection(MCPProviderGemini, dir, []MCPServer{
 		{
 			Name:      "stdio",
@@ -447,6 +454,9 @@ command = "old"
 		t.Fatal(err)
 	}
 
+	// gc projected the stale server on an earlier pass: it manages the
+	// file, so it owns the MCP servers in it.
+	markMCPManaged(t, dir, MCPProviderCodex)
 	proj, err := BuildMCPProjection(MCPProviderCodex, dir, []MCPServer{
 		{
 			Name:      "stdio",
@@ -547,6 +557,9 @@ func TestApplyMCPProjectionOpenCodePreservesNonMCPConfig(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
+	// gc projected the stale server on an earlier pass: it manages the
+	// file, so it owns the MCP servers in it.
+	markMCPManaged(t, dir, MCPProviderOpenCode)
 	proj, err := BuildMCPProjection(MCPProviderOpenCode, dir, []MCPServer{
 		{
 			Name:      "alpha",
@@ -807,7 +820,10 @@ func TestApplyMCPProjectionFakeChmodsBeforeRename(t *testing.T) {
 func TestApplyMCPProjectionSnapshotsExistingContentBeforeFirstAdoption(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, ".mcp.json")
-	existing := []byte(`{"mcpServers":{"user-authored":{"command":"custom"}}}` + "\n")
+	// The hand-written file defines the server the catalog now projects,
+	// the same way, so adopting it drops nothing gc does not manage; the
+	// snapshot keeps the file as it was.
+	existing := []byte(`{"mcpServers":{"alpha":{"command":"uvx","args":[]}}}` + "\n")
 	if err := os.WriteFile(target, existing, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -875,7 +891,7 @@ func TestApplyMCPProjectionCursorAdoptsExistingFile(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	existing := []byte(`{"mcpServers":{"user-authored":{"command":"custom"}}}` + "\n")
+	existing := []byte(`{"theme":"dark","mcpServers":{"alpha":{"command":"uvx"}}}` + "\n")
 	if err := os.WriteFile(target, existing, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -995,12 +1011,18 @@ func TestApplyMCPProjectionRejectsSymlinkedTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildMCPProjection: %v", err)
 	}
+	// gc does not manage the target, so it leaves it alone: a refusal that
+	// names the symlink.
 	err = proj.Apply(fsys.OSFS{})
-	if err == nil {
-		t.Fatal("expected symlink rejection, got nil error")
+	var refused *MCPAdoptionRefusedError
+	if !errors.As(err, &refused) || refused.Symlink != target {
+		t.Fatalf("Apply error = %v, want a refusal naming the symlink", err)
 	}
-	if !strings.Contains(err.Error(), "symlinked path") {
-		t.Fatalf("unexpected error: %v", err)
+	// Once gc manages the target, a symlink there is an error.
+	markMCPManaged(t, dir, MCPProviderClaude)
+	err = proj.Apply(fsys.OSFS{})
+	if err == nil || !strings.Contains(err.Error(), "symlinked path") {
+		t.Fatalf("Apply on a managed symlinked target = %v, want the symlink error", err)
 	}
 	// Victim file content must be untouched.
 	got, err := os.ReadFile(victim)
@@ -1026,5 +1048,61 @@ func TestNormalizeMCPProjectionServerOrdering(t *testing.T) {
 	}
 	if !reflect.DeepEqual(names, []string{"a", "b"}) {
 		t.Fatalf("projection servers ordered = %v, want [a b]", names)
+	}
+}
+
+// markMCPManaged records that gc manages the provider's MCP target under dir,
+// as an earlier Apply would have.
+func markMCPManaged(t *testing.T, dir, provider string) {
+	t.Helper()
+	marker := filepath.Join(dir, ".gc", "mcp-managed", provider+".json")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte(`{"managed_by":"gc","provider":"`+provider+`"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMCPProjectionSupportsTransport(t *testing.T) {
+	type row struct {
+		stdio, http, sse bool
+	}
+	want := map[string]row{
+		MCPProviderClaude:   {stdio: true, http: true},
+		MCPProviderCodex:    {stdio: true, http: true},
+		MCPProviderGemini:   {stdio: true, http: true},
+		MCPProviderOpenCode: {stdio: true, http: true},
+		MCPProviderMimoCode: {stdio: true, http: true},
+		MCPProviderCursor:   {stdio: true},
+		"copilot":           {},
+		"":                  {},
+	}
+	for provider, w := range want {
+		got := row{
+			stdio: MCPProjectionSupportsTransport(provider, MCPTransportStdio),
+			http:  MCPProjectionSupportsTransport(provider, MCPTransportHTTP),
+			sse:   MCPProjectionSupportsTransport(provider, MCPTransportSSE),
+		}
+		if got != w {
+			t.Errorf("MCPProjectionSupportsTransport(%q) = %+v, want %+v", provider, got, w)
+		}
+	}
+}
+
+// Apply never writes a server the provider cannot express, even when a
+// caller skips the capability check.
+func TestApplyMCPProjectionRejectsTransportTheProviderCannotExpress(t *testing.T) {
+	dir := t.TempDir()
+	proj, err := BuildMCPProjection(MCPProviderClaude, dir, []MCPServer{{Name: "events", Transport: MCPTransportSSE, URL: "https://example.test/sse"}})
+	if err != nil {
+		t.Fatalf("BuildMCPProjection: %v", err)
+	}
+	err = proj.Apply(fsys.OSFS{})
+	if err == nil || !strings.Contains(err.Error(), `claude MCP projection does not support sse server "events"`) {
+		t.Fatalf("Apply() error = %v, want unsupported transport", err)
+	}
+	if _, statErr := os.Stat(proj.Target); !os.IsNotExist(statErr) {
+		t.Fatalf("target written despite the rejection, stat err = %v", statErr)
 	}
 }

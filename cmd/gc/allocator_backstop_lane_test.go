@@ -456,72 +456,77 @@ func writeSuspension(t *testing.T, cityPath, body string) {
 	}
 }
 
-// Kills: reads or repairs while the city is suspended (POOL-001: legacy's
-// demand pass returns before any of them), a suspended pass that drops or
-// replaces the last recording, and a lane that stays dark, or does not wake
-// the allocator, after resume. Each way of suspending: Workspace.Suspended,
-// the suspension file, GC_SUSPENDED=1.
-func TestExternalReadsSkipsWhileCitySuspendedAndWakesOnResume(t *testing.T) {
-	for _, tc := range []struct {
-		name            string
-		suspend, resume func(t *testing.T, cfg *config.City, cityPath string)
-	}{{
-		name:    "workspace suspended",
-		suspend: func(_ *testing.T, cfg *config.City, _ string) { cfg.Workspace.Suspended = true },
-		resume:  func(_ *testing.T, cfg *config.City, _ string) { cfg.Workspace.Suspended = false },
-	}, {
-		name: "suspension file",
-		suspend: func(t *testing.T, _ *config.City, cityPath string) {
-			writeSuspension(t, cityPath, `{"city":{"suspended":true}}`)
-		},
-		resume: func(t *testing.T, _ *config.City, cityPath string) { writeSuspension(t, cityPath, "") },
-	}, {
-		name:    "GC_SUSPENDED=1",
-		suspend: func(t *testing.T, _ *config.City, _ string) { t.Setenv("GC_SUSPENDED", "1") },
-		resume:  func(t *testing.T, _ *config.City, _ string) { t.Setenv("GC_SUSPENDED", "") },
-	}} {
+// suspendCases are the ways of suspending a city the lane reads, without the
+// GC_SUSPENDED escape hatch (no process env in new tests).
+var suspendCases = []struct {
+	name            string
+	suspend, resume func(t *testing.T, cfg *config.City, cityPath string)
+}{{
+	name:    "workspace suspended",
+	suspend: func(_ *testing.T, cfg *config.City, _ string) { cfg.Workspace.Suspended = true },
+	resume:  func(_ *testing.T, cfg *config.City, _ string) { cfg.Workspace.Suspended = false },
+}, {
+	name: "suspension file",
+	suspend: func(t *testing.T, _ *config.City, cityPath string) {
+		writeSuspension(t, cityPath, `{"city":{"suspended":true}}`)
+	},
+	resume: func(t *testing.T, _ *config.City, cityPath string) { writeSuspension(t, cityPath, "") },
+}}
+
+// Kills a suspended city's drains losing their reads (CONTRACT v5 R4): a
+// pass while the city is suspended still reads every lane-fed leg and
+// publishes, so the recording stays fresh.
+func TestK1ReadsWhileCitySuspended(t *testing.T) {
+	for _, tc := range suspendCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			cityPath := t.TempDir()
 			cfg := gaConfig()
 			f := newClobberedRunFixture()
 			cache, backing := newDemandCache(t, false, routedDemandBead("gc-r1"))
-			lane, wakes := newTestBackstopLane(externalReadsEnv{CityPath: cityPath, Cfg: cfg, CityStore: f.mem, RigStores: nil, ProbeStores: []beads.Store{cache}, Sessions: f.sessions})
-			t0 := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
-			if !passAndJoin(ctx, at(lane, t0)) {
-				t.Fatal("pass before suspending declined")
-			}
-			last := lane.recording()
-			if err := f.mem.SetMetadataBatch("ga-run", clobberedWorkDir()); err != nil {
-				t.Fatalf("re-clobber: %v", err)
-			}
-
-			// Each pass is past the repairs' minute, so only suspension
-			// stops them.
+			lane, _ := newTestBackstopLane(externalReadsEnv{CityPath: cityPath, Cfg: cfg, CityStore: f.mem, ProbeStores: []beads.Store{cache}, Sessions: f.sessions})
 			tc.suspend(t, cfg, cityPath)
 			backing.armed.Store(true)
-			if at(lane, t0.Add(2*externalReadsRepairInterval)).pass(ctx) {
-				t.Fatal("a pass ran while the city is suspended")
+			t0 := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+			if !passAndJoin(ctx, at(lane, t0)) {
+				t.Fatal("a pass declined while the city is suspended")
 			}
-			if lane.recording() != last || wakes.Load() != 1 {
-				t.Errorf("suspended pass: recording replaced=%t wakes=%d, want the last recording kept and no wake", lane.recording() != last, wakes.Load())
+			if got := backstopSeq(lane); got != 1 {
+				t.Errorf("suspended pass: seq %d, want 1: the pass publishes", got)
+			}
+			if ops := backing.readLog(); len(ops) == 0 {
+				t.Error("suspended pass read no lane-fed leg")
+			}
+			if leg, ok := recordedLeg(lane.recording(), cache); !ok || len(leg.RawOpen) != 1 {
+				t.Errorf("suspended pass recorded %+v (ok=%t), want the routed bead", leg, ok)
+			}
+		})
+	}
+}
+
+// Kills a write step running in a suspended city (POOL-001: legacy's demand
+// pass returns before its repairs), and a lane whose steps stay off after
+// resume. Each pass is past the repairs' minute, so only suspension stops
+// them.
+func TestK1StepsSkippedWhileCitySuspended(t *testing.T) {
+	for _, tc := range suspendCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			cityPath := t.TempDir()
+			cfg := gaConfig()
+			f := newClobberedRunFixture()
+			lane, _ := newTestBackstopLane(externalReadsEnv{CityPath: cityPath, Cfg: cfg, CityStore: f.mem, Sessions: f.sessions})
+			tc.suspend(t, cfg, cityPath)
+			t0 := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+			if !passAndJoin(ctx, at(lane, t0)) {
+				t.Fatal("a pass declined while the city is suspended")
 			}
 			if got := f.workDir(t); got != clobberPoolSlot {
 				t.Errorf("suspended pass repaired gc.work_dir = %q", got)
 			}
-			if ops := backing.readLog(); len(ops) > 0 {
-				t.Errorf("suspended pass read a leg: %q", ops)
-			}
-
 			tc.resume(t, cfg, cityPath)
-			if !passAndJoin(ctx, at(lane, t0.Add(4*externalReadsRepairInterval))) {
+			if !passAndJoin(ctx, at(lane, t0.Add(2*externalReadsRepairInterval))) {
 				t.Fatal("pass after resume declined")
-			}
-			if got := backstopSeq(lane); got != 2 {
-				t.Errorf("after resume: seq %d, want 2", got)
-			}
-			if got := wakes.Load(); got != 2 {
-				t.Errorf("after resume: wakes = %d, want 2: the stale sources turned fresh", got)
 			}
 			if got := f.workDir(t); got != clobberLiveWorkDir {
 				t.Errorf("after resume: gc.work_dir = %q, want %q", got, clobberLiveWorkDir)
@@ -568,27 +573,35 @@ func TestBackstopLaneNoPassOrRepairAfterShutdown(t *testing.T) {
 }
 
 // Kills: a declined pass counted toward the lane's pacing (R1). After a pass
-// skipped while the city was suspended, the resume's wake runs a pass at once
-// instead of waiting out a duty cycle the skipped pass never used.
+// declined because its env could not be built, the next wake runs a pass at
+// once instead of waiting out a duty cycle the declined pass never used.
 func TestBackstopLaneSkippedPassDoesNotPaceTheNextWake(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		lane, _ := newTestBackstopLane(externalReadsEnv{CityPath: t.TempDir(), Cfg: demandReadsTestConfig(), CityStore: beads.NewMemStore()})
+		env := externalReadsEnv{CityPath: t.TempDir(), Cfg: demandReadsTestConfig(), CityStore: beads.NewMemStore()}
+		var broken atomic.Bool
+		lane, _ := newTestBackstopLane(env)
+		lane.env = func() (externalReadsEnv, error) {
+			if broken.Load() {
+				return externalReadsEnv{}, errors.New("env unavailable")
+			}
+			return env, nil
+		}
 		startBackstopLaneInBubble(t, lane)
 		advanceBackstop(backstopTestInterval)
 		if got := backstopSeq(lane); got != 2 {
-			t.Fatalf("before suspending: %d passes, want 2", got)
+			t.Fatalf("before declining: %d passes, want 2", got)
 		}
-		t.Setenv("GC_SUSPENDED", "1")
+		broken.Store(true)
 		advanceBackstop(backstopTestInterval)
 		if got := backstopSeq(lane); got != 2 {
-			t.Fatalf("suspended: %d passes, want the backstop's pass skipped", got)
+			t.Fatalf("env unavailable: %d passes, want the backstop's pass declined", got)
 		}
 		advanceBackstop(externalReadsMinGap / 2)
-		t.Setenv("GC_SUSPENDED", "")
+		broken.Store(false)
 		lane.wake()
 		synctest.Wait()
 		if got := backstopSeq(lane); got != 3 {
-			t.Errorf("resume wake %v after a skipped pass: %d passes, want one at once", externalReadsMinGap/2, got)
+			t.Errorf("wake %v after a declined pass: %d passes, want one at once", externalReadsMinGap/2, got)
 		}
 	})
 }
@@ -804,9 +817,15 @@ func TestExternalReadsDropsLateScaleCheckOfOlderConfig(t *testing.T) {
 		newCfg := &config.City{Agents: []config.Agent{{Name: "w", ScaleCheck: "check-new"}}}
 		var cfg atomic.Pointer[config.City]
 		cfg.Store(oldCfg)
-		lane := newExternalReadsLane(backstopTestInterval, func() (externalReadsEnv, error) {
+		var lane *externalReadsLane
+		var oldPublished atomic.Bool
+		lane = newExternalReadsLane(backstopTestInterval, func() (externalReadsEnv, error) {
 			return externalReadsEnv{CityName: "city", Cfg: cfg.Load()}, nil
-		}, nil, func(fn func(), _ string) bool { fn(); return false }, nil, io.Discard)
+		}, func() {
+			if _, ok := lane.recording().source(sourceKey{kind: sourceScaleCheck, cfg: oldCfg}); ok {
+				oldPublished.Store(true)
+			}
+		}, func(fn func(), _ string) bool { fn(); return false }, nil, io.Discard)
 		lane.steps = nil
 		lane.queryEnv = func(string, *config.City, *config.Agent) (map[string]string, error) { return nil, nil }
 		lane.runner = func(command, _ string, _ map[string]string) (string, error) {
@@ -839,6 +858,9 @@ func TestExternalReadsDropsLateScaleCheckOfOlderConfig(t *testing.T) {
 		}
 		if r := lane.recording().scaleCheck(time.Now()); keys != 1 || r == nil || r.Counts["w"] != 2 {
 			t.Errorf("after the old run ended: %d scale_check sources, result %+v; want only the new config's count 2", keys, r)
+		}
+		if oldPublished.Load() {
+			t.Error("a recording published the old config's scale_check source")
 		}
 		lane.mu.Lock()
 		_, kept := lane.results[sourceKey{kind: sourceScaleCheck, cfg: oldCfg}]
@@ -875,35 +897,13 @@ func TestExternalReadsSourceFreshForThreePatrols(t *testing.T) {
 	}
 }
 
-// Kills: a pass that ignores the reload barrier's or the FS gate's hold, and
-// a held pass that never runs once released. A held pass declines; the
-// release wakes the lane, which runs at once.
-func TestExternalReadsPassHeldByGate(t *testing.T) {
+// Kills: steps run on the lane goroutine (a slow step stalls the reads), and
+// a second run of a step while one is in flight. With a step blocked, passes
+// keep publishing at the patrol, and the step does not start again though its
+// interval is up.
+func TestExternalReadsStepRunsOffTheReadPath(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		lane, _ := newTestBackstopLane(externalReadsEnv{Cfg: demandReadsTestConfig(), CityStore: beads.NewMemStore()})
-		lane.gate = newLaneGate(lane.wake)
-		lane.gate.hold("reload")
-		startBackstopLaneInBubble(t, lane)
-		if got := backstopSeq(lane); got != 0 {
-			t.Fatalf("held: %d passes, want none", got)
-		}
-		lane.gate.release("reload")
-		synctest.Wait()
-		if got := backstopSeq(lane); got != 1 {
-			t.Errorf("released: %d passes, want one at once", got)
-		}
-	})
-}
-
-// Kills: steps run on the lane goroutine (a slow step stalls the reads),
-// steps outside the gate (M6: waitIdle idle while a step writes), and a second
-// run of a step while one is in flight. With a step blocked, passes keep
-// publishing at the patrol, the step does not start again though its interval
-// is up, and waitIdle waits for it.
-func TestExternalReadsStepRunsOffTheReadPathInsideTheGate(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		lane, _ := newTestBackstopLane(externalReadsEnv{Cfg: demandReadsTestConfig(), CityStore: beads.NewMemStore()})
-		lane.gate = newLaneGate(lane.wake)
 		var runs atomic.Int64
 		release := make(chan struct{})
 		lane.steps = []*laneStep{{name: "slow", every: time.Second, run: func(context.Context, externalReadsEnv) {
@@ -915,24 +915,8 @@ func TestExternalReadsStepRunsOffTheReadPathInsideTheGate(t *testing.T) {
 		if seq, n := backstopSeq(lane), runs.Load(); seq != 4 || n != 1 {
 			t.Fatalf("with the step blocked: %d passes, %d step runs; want the patrol's 4 passes and one run", seq, n)
 		}
-		idle := make(chan error, 1)
-		go func() { idle <- lane.gate.waitIdle(context.Background()) }()
-		synctest.Wait()
-		select {
-		case <-idle:
-			t.Fatal("waitIdle reported idle while a step was running")
-		default:
-		}
 		close(release)
 		synctest.Wait()
-		select {
-		case err := <-idle:
-			if err != nil {
-				t.Fatalf("waitIdle = %v", err)
-			}
-		default:
-			t.Fatal("waitIdle still waiting after the step ended")
-		}
 	})
 }
 
@@ -1089,17 +1073,26 @@ func TestExternalReadsRestartKeepsReadsInFlightAndJoinWaits(t *testing.T) {
 
 // Kills: the lane's session-census source creeping back (B5, OPTION1
 // S4-1). The census reads the cache on every leg, so a lane over a non-exact
-// leg holding session rows reads only its demand and the scale_checks.
+// leg holding session rows reads only its demand and the scale_checks, and
+// the scale_checks only when the config has a custom one.
 func TestExternalReadsLaneHasNoSessionSource(t *testing.T) {
 	cache, _ := newDemandCache(t, false, backstopSessionBead(), routedDemandBead("gc-r1"))
-	env := externalReadsEnv{Cfg: demandReadsTestConfig(), CityStore: cache}
-	lane, _ := newTestBackstopLane(env)
-	var kinds []sourceKind
-	for _, src := range lane.sources(env) {
-		kinds = append(kinds, src.key.kind)
-	}
-	if want := []sourceKind{sourceDemand, sourceScaleCheck}; !slices.Equal(kinds, want) {
-		t.Fatalf("source kinds = %v, want %v", kinds, want)
+	for _, c := range []struct {
+		cfg  *config.City
+		want []sourceKind
+	}{
+		{scaleCheckLegCity(), []sourceKind{sourceDemand, sourceScaleCheck}},
+		{demandReadsTestConfig(), []sourceKind{sourceDemand}},
+	} {
+		env := externalReadsEnv{Cfg: c.cfg, CityStore: cache}
+		lane, _ := newTestBackstopLane(env)
+		var kinds []sourceKind
+		for _, src := range lane.sources(env) {
+			kinds = append(kinds, src.key.kind)
+		}
+		if !slices.Equal(kinds, c.want) {
+			t.Fatalf("source kinds = %v, want %v", kinds, c.want)
+		}
 	}
 }
 
@@ -1196,9 +1189,11 @@ type panickingListStore struct{ beads.Store }
 
 func (panickingListStore) List(beads.ListQuery) ([]beads.Bead, error) { panic("list exploded") }
 
-// Kills: an exact leg recorded, which would put live reads of the sessions
-// binding back on the lane. A pass over an exact leg records no demand and
-// never reads its backing; the same leg not exact is the control.
+// Kills: an exact leg recorded on a city that relocates nothing, which would
+// put live reads of the sessions binding back on the lane. A pass over an
+// exact leg records no demand and never reads its backing; the same leg not
+// exact is the control. (A split city records its exact gate legs' Ready,
+// gated: TestSplitCityV2DemandIsGatedOffThePass.)
 func TestBackstopLaneNeverRecordsExactLeg(t *testing.T) {
 	t0 := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 	for _, exact := range []bool{true, false} {

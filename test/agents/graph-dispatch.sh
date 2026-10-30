@@ -24,22 +24,41 @@ mkdir -p "$HARNESS_STATE_DIR"
 
 echo "graph-worker startup: GC_CITY=${GC_CITY:-} GC_CITY_PATH=${GC_CITY_PATH:-} GC_DOLT_PORT=${GC_DOLT_PORT:-} GC_AGENT=${GC_AGENT:-} GC_SESSION_NAME=${GC_SESSION_NAME:-} PWD=$(pwd)"
 
+TRACE_TIME_FORMAT='+%Y-%m-%dT%H:%M:%SZ'
+case "$(date -u +%N 2>/dev/null)" in
+    [0-9]*) TRACE_TIME_FORMAT='+%Y-%m-%dT%H:%M:%S.%3NZ' ;;
+esac
+
 trace() {
-    printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$TRACE_FILE"
+    printf '%s %s\n' "$(date -u "$TRACE_TIME_FORMAT")" "$*" >> "$TRACE_FILE"
 }
 
-if ! command -v timeout >/dev/null 2>&1; then
-    if command -v gtimeout >/dev/null 2>&1; then
-        timeout() {
-            gtimeout "$@"
-        }
+# bounded SECS CMD... runs CMD under a wall-clock limit, exiting 124 when it
+# overruns, as GNU timeout does. macOS has no timeout (Homebrew's coreutils
+# names it gtimeout), so it falls back to gtimeout, then python3, and runs CMD
+# unbounded only when none is installed (the same order as the dolt pack's
+# _bounded.sh). A top-level function, so the harness tests run the real one.
+bounded() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "$@"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c '
+import subprocess, sys
+proc = subprocess.Popen(sys.argv[2:])
+try:
+    sys.exit(proc.wait(timeout=float(sys.argv[1])))
+except subprocess.TimeoutExpired:
+    proc.kill()
+    proc.wait()
+    sys.exit(124)
+' "$@"
     else
-        timeout() {
-            shift
-            "$@"
-        }
+        shift
+        "$@"
     fi
-fi
+}
 
 current_port_file() {
     if [ -f "$GC_CITY/.beads/dolt-server.port" ]; then
@@ -109,7 +128,7 @@ close_with_result() {
     # error from a transient bd issue here (flaky socket, concurrent
     # modification, etc.) would kill the whole worker mid-loop and take
     # down the test session. Callers already tolerate unknown final
-    # outcomes (they read it back via show_outcome), so failing silently
+    # outcomes (they read it back via read_bead_state), so failing silently
     # is safer than failing loudly.
     if [ "$outcome" = "pass" ]; then
         if ! bd update "$bead_id" --set-metadata "gc.outcome=pass" --status closed 2>/dev/null; then
@@ -201,20 +220,24 @@ set_formula_verdict() {
     esac
 }
 
-show_status() {
-    timeout 10 bd show --json "$1" | json_payload | jq_bead '.status'
-}
-
-show_outcome() {
-    timeout 10 bd show --json "$1" | json_payload | jq_bead '.metadata["gc.outcome"]'
-}
-
-show_assignee() {
-    timeout 10 bd show --json "$1" | json_payload | jq_bead '.assignee'
+# read_bead_state reads one bead's status, gc.outcome and assignee with a
+# single bd call into BEAD_STATUS, BEAD_OUTCOME and BEAD_ASSIGNEE (all empty
+# when the read fails). The fields are joined with the ASCII unit separator,
+# which read does not collapse, so an empty outcome cannot shift the assignee.
+read_bead_state() {
+    local line=""
+    line=$(bounded 10 bd show --json "$1" 2>/dev/null | json_payload | jq -r '
+        (if type == "array" then .[0] else . end)
+        | [(.status // ""), ((.metadata // {})["gc.outcome"] // ""), (.assignee // "")]
+        | join("\u001f")' 2>/dev/null || true)
+    BEAD_STATUS=""
+    BEAD_OUTCOME=""
+    BEAD_ASSIGNEE=""
+    IFS=$'\x1f' read -r BEAD_STATUS BEAD_OUTCOME BEAD_ASSIGNEE <<< "$line" || true
 }
 
 refresh_bead_json() {
-    timeout 10 bd show --json "$1" 2>/dev/null
+    bounded 10 bd show --json "$1" 2>/dev/null
 }
 
 owned_status_ok() {
@@ -275,6 +298,24 @@ misses=0
 DISPATCH_WAKE_FILE="$GC_CITY/.gc/dispatch-wake"
 DISPATCH_WAKE_LAST_MTIME=""
 
+# gc hook resolves every work tier (assigned by name or session bead ID,
+# routed by template) but costs a gc process plus about a dozen bd calls, so a
+# hook poll takes about 2 s on rbe-west and every workflow hop waited on one.
+# Once this worker has claimed routed work it knows its route (gc.routed_to)
+# and, between hook polls, reads that queue directly with the routed tier's own
+# predicate (fetch_routed_queue). gc hook still runs on every dispatch wake and
+# at least every GC_GRAPH_HOOK_POLL_INTERVAL seconds of idling (finding work
+# restarts the interval), so work only the hook resolves is still found.
+LEARNED_ROUTE=""
+LAST_HOOK_POLL=""
+HOOK_POLL_INTERVAL="${GC_GRAPH_HOOK_POLL_INTERVAL:-5}"
+
+# The input convoy of the workflow root last seen. A root's
+# gc.input_convoy_id is fixed when the workflow is created, so consecutive
+# steps of one workflow do not re-read the root to find it.
+CACHED_ROOT_ID=""
+CACHED_TARGET_ID=""
+
 jq_bead() {
     local filter="$1"
     jq -r "if type == \"array\" then (.[0] | ($filter)) else ($filter) end // \"\""
@@ -290,9 +331,9 @@ is_currently_blocked() {
     local blocked_json=""
 
     if [ -n "$root_id" ]; then
-        blocked_json=$(timeout 10 bd blocked --json --parent "$root_id" 2>/dev/null || true)
+        blocked_json=$(bounded 10 bd blocked --json --parent "$root_id" 2>/dev/null || true)
     else
-        blocked_json=$(timeout 10 bd blocked --json 2>/dev/null || true)
+        blocked_json=$(bounded 10 bd blocked --json 2>/dev/null || true)
     fi
 
     printf '%s\n' "$blocked_json" | json_payload | jq -e --arg id "$bead_id" '
@@ -300,7 +341,35 @@ is_currently_blocked() {
     ' >/dev/null 2>&1
 }
 
+# hook_poll_due <woke> succeeds when this iteration must run gc hook: no route
+# learned yet, a dispatch wake, or HOOK_POLL_INTERVAL seconds since the last
+# hook poll.
+hook_poll_due() {
+    [ -n "$LEARNED_ROUTE" ] || return 0
+    [ "$1" != "true" ] || return 0
+    [ -n "$LAST_HOOK_POLL" ] || return 0
+    [ $((SECONDS - LAST_HOOK_POLL)) -ge "$HOOK_POLL_INTERVAL" ]
+}
+
+# fetch_routed_queue <route> prints the ready, unassigned, non-epic beads routed
+# to <route> that carry no hold:* dispatch label (the routed tier of the
+# default work query) and fails when there are none.
+fetch_routed_queue() {
+    local routed=""
+    routed=$(bounded 10 bd ready --metadata-field "gc.routed_to=$1" --unassigned --exclude-type=epic --json --limit=0 2>/dev/null) || return 1
+    routed=$(printf '%s\n' "$routed" | json_payload | jq -c '
+        [ (if type == "array" then .[]? else . end)
+          | select(([ (.labels // [])[] | select(startswith("hold:")) ] | length) == 0) ]
+        | select(length > 0)' 2>/dev/null) || return 1
+    [ -n "$routed" ] || return 1
+    printf '%s\n' "$routed"
+}
+
+# fetch_ready_queue <hook_due> prints this worker's candidate work. gc hook
+# runs only when hook_due is "true"; otherwise an empty queue prints nothing
+# and succeeds.
 fetch_ready_queue() {
+    local hook_due="${1:-true}"
     if [ -z "$ASSIGNEE" ]; then
         return 1
     fi
@@ -308,14 +377,20 @@ fetch_ready_queue() {
     # dispatcher. Read that assigned queue directly so empty polls do not spend
     # their budget in gc hook/native-store preflight. Keep the full hook path
     # available for tests that explicitly need generic routed work.
-    if ready=$(timeout 10 bd ready --assignee="$ASSIGNEE" --json --limit=0 2>/dev/null); then
+    if ready=$(bounded 10 bd ready --assignee="$ASSIGNEE" --json --limit=0 2>/dev/null); then
         if printf '%s\n' "$ready" | json_payload | jq -e 'if type == "array" then length > 0 else . != null end' >/dev/null 2>&1; then
             printf '%s\n' "$ready"
             return 0
         fi
     fi
+    if [ -n "$LEARNED_ROUTE" ] && fetch_routed_queue "$LEARNED_ROUTE"; then
+        return 0
+    fi
     if should_use_hook_fallback; then
-        timeout "$HOOK_TIMEOUT" gc hook 2>/dev/null
+        if [ "$hook_due" != "true" ]; then
+            return 0
+        fi
+        bounded "$HOOK_TIMEOUT" gc hook 2>/dev/null
         return $?
     fi
     return 1
@@ -330,7 +405,7 @@ fetch_in_progress_queue() {
     # (#6324), not the runtime GC_SESSION_NAME (<template>-<beadID>). Listing
     # by the session name never finds this session's own claim, so a pool
     # worker restarted mid-step skips its in_progress bead forever.
-    timeout 10 bd list --assignee "$BEADS_ACTOR" --status=in_progress --json 2>/dev/null
+    bounded 10 bd list --assignee "$BEADS_ACTOR" --status=in_progress --json 2>/dev/null
 }
 
 select_candidate_from_queue() {
@@ -369,8 +444,9 @@ select_candidate_from_queue() {
                 ;;
         esac
 
-        status_before=$(show_status "$bead_id" 2>/dev/null || true)
-        outcome_before=$(show_outcome "$bead_id" 2>/dev/null || true)
+        read_bead_state "$bead_id"
+        status_before="$BEAD_STATUS"
+        outcome_before="$BEAD_OUTCOME"
         if [ "$outcome_before" = "skipped" ]; then
             trace "skip-terminal bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before"
             continue
@@ -406,6 +482,11 @@ while true; do
         fi
     fi
 
+    hook_due="false"
+    if hook_poll_due "$dispatch_woke"; then
+        hook_due="true"
+    fi
+
     owned=""
     bead_json=""
     owns_bead="false"
@@ -420,7 +501,9 @@ while true; do
         trace "resume bead=$bead_id assignee=$ASSIGNEE"
     fi
 
-    if [ "$owns_bead" != "true" ]; then
+    # The pre-claim check below covers a found bead, so between hook polls an
+    # idle iteration skips this one.
+    if [ "$owns_bead" != "true" ] && [ "$hook_due" = "true" ]; then
         ack_drain_if_idle || true
     fi
 
@@ -428,10 +511,13 @@ while true; do
     ready_rc=0
     if [ -z "$bead_id" ]; then
         if [ -n "$ASSIGNEE" ]; then
-            if ready=$(fetch_ready_queue); then
+            if ready=$(fetch_ready_queue "$hook_due"); then
                 :
             else
                 ready_rc=$?
+            fi
+            if [ "$hook_due" = "true" ]; then
+                LAST_HOOK_POLL=$SECONDS
             fi
         fi
         bead_json=$(select_candidate_from_queue "$ready" || true)
@@ -450,12 +536,16 @@ while true; do
         continue
     fi
     misses=0
+    # Whichever tier found this bead, the queue was just read: idle fast polls
+    # after the step get a full interval before the next hook poll.
+    LAST_HOOK_POLL=$SECONDS
 
     is_claimable_work=$(printf '%s\n' "$bead_json" | jq -r '(.assignee // "" | length == 0) and ((((.metadata // {})["gc.routed_to"] // "" | length > 0) or ((.labels // []) | any(startswith("pool:")))))' 2>/dev/null || echo "false")
     claimed_here="false"
     if [ "$is_claimable_work" = "true" ] && [ "$owns_bead" != "true" ]; then
+        candidate_route=$(printf '%s\n' "$bead_json" | jq -r '(.metadata // {})["gc.routed_to"] // ""' 2>/dev/null || true)
         ack_drain_if_idle || true
-        if ! claimed=$(timeout 10 bd update "$bead_id" --claim --json 2>/dev/null); then
+        if ! claimed=$(bounded 10 bd update "$bead_id" --claim --json 2>/dev/null); then
             trace "claim-miss bead=$bead_id assignee=$ASSIGNEE"
             sleep 0.2
             continue
@@ -465,6 +555,10 @@ while true; do
         claimed_here="true"
         owns_bead="true"
         trace "claim bead=$bead_id assignee=$ASSIGNEE"
+        if [ -n "$candidate_route" ] && [ "$candidate_route" != "$LEARNED_ROUTE" ]; then
+            LEARNED_ROUTE="$candidate_route"
+            trace "learned-route route=$LEARNED_ROUTE"
+        fi
     fi
 
     ref=$(printf '%s\n' "$bead_json" | json_payload | jq_bead '.ref // .metadata["gc.step_ref"] // ""')
@@ -472,16 +566,22 @@ while true; do
     root_id=$(printf '%s\n' "$bead_json" | json_payload | jq_bead '.metadata["gc.root_bead_id"] // ""')
     target_id=""
     work_dir=""
-    if [ -n "$root_id" ]; then
-        if ! root_json=$(timeout 10 bd show --json "$root_id" 2>/dev/null); then
+    if [ -n "$root_id" ] && [ "$root_id" = "$CACHED_ROOT_ID" ]; then
+        target_id="$CACHED_TARGET_ID"
+    elif [ -n "$root_id" ]; then
+        if ! root_json=$(bounded 10 bd show --json "$root_id" 2>/dev/null); then
             trace "root-show-failed bead=$bead_id root=$root_id"
             sleep 1
             continue
         fi
         target_id=$(printf '%s\n' "$root_json" | json_payload | jq_bead '.metadata["gc.input_convoy_id"]')
+        if [ -n "$target_id" ]; then
+            CACHED_ROOT_ID="$root_id"
+            CACHED_TARGET_ID="$target_id"
+        fi
     fi
     if [ -n "$target_id" ]; then
-        if ! target_json=$(timeout 10 bd show --json "$target_id" 2>/dev/null); then
+        if ! target_json=$(bounded 10 bd show --json "$target_id" 2>/dev/null); then
             trace "target-show-failed bead=$bead_id target=$target_id"
             sleep 1
             continue
@@ -492,7 +592,7 @@ while true; do
     if is_currently_blocked "$bead_id" "$root_id"; then
         trace "skip-blocked bead=$bead_id ref=$ref assignee=$ASSIGNEE"
         if [ "$is_claimable_work" = "true" ]; then
-            if ! timeout 10 bd update "$bead_id" --assignee "" --status open >/dev/null 2>&1; then
+            if ! bounded 10 bd update "$bead_id" --assignee "" --status open >/dev/null 2>&1; then
                 trace "release-failed bead=$bead_id ref=$ref"
             else
                 trace "released bead=$bead_id ref=$ref"
@@ -578,7 +678,7 @@ while true; do
     # false positives. Teardown beads must still run after body failure.
     sibling_hard_fail="false"
     if [ "$kind" != "cleanup" ] && [ -n "$root_id" ]; then
-        if sibling_json=$(timeout 10 bd list --all --limit=0 --json 2>/dev/null); then
+        if sibling_json=$(bounded 10 bd list --all --limit=0 --json 2>/dev/null); then
             if printf '%s\n' "$sibling_json" | json_payload | jq -e \
                 --arg root "$root_id" --arg self "$bead_id" '
                     if type == "array" then
@@ -615,8 +715,9 @@ while true; do
                 trace "close-fail bead=$bead_id ref=$ref class=hard reason=preflight_failed"
                 close_with_result "$bead_id" "fail" "hard" "preflight_failed"
                 trace "close-returned bead=$bead_id"
-                status_after=$(show_status "$bead_id" 2>/dev/null || true)
-                outcome_after=$(show_outcome "$bead_id" 2>/dev/null || true)
+                read_bead_state "$bead_id"
+                status_after="$BEAD_STATUS"
+                outcome_after="$BEAD_OUTCOME"
                 trace "closed bead=$bead_id status=$status_after outcome=$outcome_after"
                 continue
             fi
@@ -651,8 +752,9 @@ while true; do
         trace "close-fail bead=$bead_id ref=$ref class=transient reason=$reason mode=once"
         close_with_result "$bead_id" "fail" "transient" "$reason"
         trace "close-returned bead=$bead_id"
-        status_after=$(show_status "$bead_id" 2>/dev/null || true)
-        outcome_after=$(show_outcome "$bead_id" 2>/dev/null || true)
+        read_bead_state "$bead_id"
+        status_after="$BEAD_STATUS"
+        outcome_after="$BEAD_OUTCOME"
         trace "closed bead=$bead_id status=$status_after outcome=$outcome_after"
         # Commit the one-shot budget only against a landed failure. If the close
         # was dropped the bead is still open, so leaving the marker unwritten
@@ -670,15 +772,17 @@ while true; do
         trace "close-fail bead=$bead_id ref=$ref class=transient reason=$reason mode=always"
         close_with_result "$bead_id" "fail" "transient" "$reason"
         trace "close-returned bead=$bead_id"
-        status_after=$(show_status "$bead_id" 2>/dev/null || true)
-        outcome_after=$(show_outcome "$bead_id" 2>/dev/null || true)
+        read_bead_state "$bead_id"
+        status_after="$BEAD_STATUS"
+        outcome_after="$BEAD_OUTCOME"
         trace "closed bead=$bead_id status=$status_after outcome=$outcome_after"
         continue
     fi
 
-    status_before=$(show_status "$bead_id" 2>/dev/null || true)
-    outcome_before=$(show_outcome "$bead_id" 2>/dev/null || true)
-    assignee_before=$(show_assignee "$bead_id" 2>/dev/null || true)
+    read_bead_state "$bead_id"
+    status_before="$BEAD_STATUS"
+    outcome_before="$BEAD_OUTCOME"
+    assignee_before="$BEAD_ASSIGNEE"
     if [ "$outcome_before" = "skipped" ]; then
         trace "skip-before-close bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before"
         sleep 0.2
@@ -702,7 +806,8 @@ while true; do
     close_with_result "$bead_id" "pass"
     trace "close-returned bead=$bead_id"
     trace_store
-    status_after=$(show_status "$bead_id" 2>/dev/null || true)
-    outcome_after=$(show_outcome "$bead_id" 2>/dev/null || true)
+    read_bead_state "$bead_id"
+    status_after="$BEAD_STATUS"
+    outcome_after="$BEAD_OUTCOME"
     trace "closed bead=$bead_id status=$status_after outcome=$outcome_after"
 done

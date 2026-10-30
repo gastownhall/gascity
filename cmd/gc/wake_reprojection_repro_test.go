@@ -148,7 +148,7 @@ func TestWokenFromSuspendedIsInvisibleToStrandedLane(t *testing.T) {
 	if isDrainedSessionInfo(woken) {
 		t.Fatal("precondition: the woken record is not drained")
 	}
-	if !isPoolSessionSlotFreeableInfo(woken) {
+	if !isPoolSessionSlotFreeableInfo(woken, time.Now()) {
 		t.Errorf("isPoolSessionSlotFreeableInfo = false for state=asleep sleep_reason=%q: "+
 			"the seat is admitted to neither the release lane nor the stranded-diagnostic lane, "+
 			"so emitSessionStrandedDiagnostic never runs and no session.stranded event is emitted",
@@ -160,7 +160,7 @@ func TestWokenFromSuspendedIsInvisibleToStrandedLane(t *testing.T) {
 	// than to pool policy.
 	slept := woken
 	slept.SleepReason = string(sessionpkg.SleepReasonIdle)
-	if !isPoolSessionSlotFreeableInfo(slept) {
+	if !isPoolSessionSlotFreeableInfo(slept, time.Now()) {
 		t.Fatal("control failed: an ordinarily-idle asleep pool seat must be freeable")
 	}
 }
@@ -223,7 +223,7 @@ func TestQuarantinedAsleepStaysUnfreeable(t *testing.T) {
 		SleepReason:   string(sessionpkg.SleepReasonQuarantine),
 		SleptAt:       "",
 	}
-	if isPoolSessionSlotFreeableInfo(i) {
+	if isPoolSessionSlotFreeableInfo(i, time.Now()) {
 		t.Fatalf("isPoolSessionSlotFreeableInfo = true for state=asleep sleep_reason=quarantine slept_at=%q, want false", i.SleptAt)
 	}
 }

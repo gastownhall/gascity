@@ -1,0 +1,6 @@
+{"timestamp":"2026-10-08T02:22:20.000Z","type":"session_meta","payload":{"id":"019a0000-0000-7000-8000-000000000000","timestamp":"2026-10-08T02:22:20.000Z","cwd":"/work/repo","originator":"codex_cli_rs","cli_version":"0.159.1","source":"cli","model_provider":"openai"}}
+{"timestamp":"2026-10-08T02:22:22.191Z","type":"event_msg","payload":{"type":"task_started","turn_id":"019a1111-0000-7000-8000-000000000001","started_at":1791426142,"model_context_window":258400,"collaboration_mode_kind":"default"}}
+{"timestamp":"2026-10-08T02:22:22.200Z","type":"turn_context","payload":{"turn_id":"019a1111-0000-7000-8000-000000000001","cwd":"/work/repo","current_date":"2026-10-08","timezone":"Etc/UTC","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"},"model":"codex-model","personality":"pragmatic"}}
+{"timestamp":"2026-10-08T02:22:22.210Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"prompt one"}]}}
+{"timestamp":"2026-10-08T02:22:27.400Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted>\nThe user interrupted the previous turn.\n</turn_aborted>"}]}}
+{"timestamp":"2026-10-08T02:22:27.401Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"019a1111-0000-7000-8000-000000000001","reason":"interrupted"}}

@@ -145,6 +145,7 @@ type Entry struct {
 // Catalog returns fresh entries from the checked runtime-provider ledger.
 func Catalog() []Entry {
 	autoConstructor := repoSymbol("internal/runtime/auto", "New")
+	guardConstructor := repoSymbol("internal/runtime/guard", "New")
 	return []Entry{
 		reusableBuiltin(
 			"fake", "exact:fake", repoSymbol("internal/runtime", "Fake"),
@@ -280,6 +281,21 @@ func Catalog() []Entry {
 				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
+		{
+			ID:           "runtime.worker-site.guard",
+			Roles:        []Role{RoleProductionProvider},
+			Port:         PortRuntimeProvider,
+			Constructors: []SymbolRef{guardConstructor},
+			Source: &SourceRef{
+				File:     "cmd/gc/providers.go",
+				Function: "resolveWorkerSpec",
+				Reason:   "a worker site's control-plane descriptor selects the guard, outside the runtime registry",
+			},
+			Claims: []ContractClaim{notApplicableRuntime(
+				guardConstructor,
+				"worker-site guard: it refuses every runtime operation, so the successful-provider contract is not applicable",
+			)},
+		},
 		{
 			ID:           "runtime.composition.auto",
 			Roles:        []Role{RoleProductionProvider},
@@ -691,7 +707,7 @@ func RenderMarkdown(entries []Entry) string {
 	var out strings.Builder
 	out.WriteString(MarkdownStart)
 	out.WriteString("\n")
-	out.WriteString("This table is rendered from `internal/testutil/providerledger` and checked by `go test ./internal/testutil/providerledger`; edit the Go ledger, then use the expected block printed on drift.\n\n")
+	out.WriteString("This table is rendered from `internal/testutil/providerledger` and checked by `bazel test //internal/testutil/providerledger:providerledger_test`; edit the Go ledger, then regenerate this block from the repository root with `GC_TEST_REPO_ROOT=\"$PWD\" bazel run //internal/testutil/providerledger:providerledger_test -- -test.run='^TestCatalogMatchesProductionWiringAndDocumentation$' -update` (or paste the expected block printed on drift).\n\n")
 	out.WriteString("| Provider path | Roles | Reusable type | Port | Constructor | Discovery | Contract | Status |\n")
 	out.WriteString("|---|---|---|---|---|---|---|---|\n")
 	for _, entry := range entries {

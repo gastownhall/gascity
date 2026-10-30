@@ -166,8 +166,8 @@ func TestSeamsSshObserve(t *testing.T) {
 		switch {
 		case isTmux("has-session")(argv):
 			return nil, 0, nil
-		case len(argv) > 0 && argv[0] == "pgrep":
-			return []byte("1234\n"), 0, nil
+		case isProcessAliveScript(argv):
+			return []byte(processTable("1234", "1234 1 claude")), 0, nil
 		case last == "#{session_attached}":
 			return []byte("1"), 0, nil // attached
 		case last == "#{session_activity}":
@@ -188,14 +188,14 @@ func TestSeamsSshObserve(t *testing.T) {
 		t.Fatalf("launch: %v", err)
 	}
 
-	// Observe folds all three reads: ProcessAlive from pgrep, Attached parsed
+	// Observe folds all three reads: ProcessAlive from the pane tree, Attached parsed
 	// from #{session_attached}=1, LastActivity parsed from #{session_activity}.
 	obs, err := att.Observe(ctx, []string{"claude"})
 	if err != nil {
 		t.Fatalf("Observe: %v", err)
 	}
 	if !obs.ProcessAlive {
-		t.Fatal("Observe ProcessAlive = false; want true (pgrep found it)")
+		t.Fatal("Observe ProcessAlive = false; want true (the pane runs claude)")
 	}
 	if !obs.Attached {
 		t.Fatal("Observe Attached = false; want true (#{session_attached}=1)")

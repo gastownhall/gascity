@@ -11,8 +11,12 @@
 // Scope: this package owns engine-touched bead-metadata KEY NAMES only. It
 // deliberately excludes (each a separate owner): gc.* event-type names
 // (internal/events.KnownEventTypes), telemetry metric names (internal/telemetry),
-// JSON schema-version contract strings (e.g. gc.dolt.cleanup.v1), and the
-// t3bridge UI thread-metadata namespace (internal/runtime/t3bridge). Pack- and
+// JSON schema-version contract strings (e.g. gc.dolt.cleanup.v1), the
+// t3bridge UI thread-metadata namespace (internal/runtime/t3bridge), and the
+// conversation operation journal's gc.op.* / gc.fact.* row namespace
+// (internal/opjournal, whose bead codec is the only reader and writer), and the
+// event-fact gc.ev.* and projector-checkpoint gc.evproj.* row namespaces
+// (internal/eventfact, likewise). Pack- and
 // prompt-private keys that no Go file reads stay open-world by design and are
 // intentionally NOT declared here (see KnownMetadataPrefixes for the dynamic
 // gc.var.<name> case).
@@ -123,14 +127,45 @@ const (
 	// CoordinatorOutcomeProducerDispositionMetadataKey holds the typed-close JSON
 	// envelope written by gc-outcome-close.
 	CoordinatorOutcomeProducerDispositionMetadataKey = "gc.coordinator_outcome.producer_disposition"
-	CurrentRunIDMetadataKey                          = "gc.current_run_id"
-	CwdMetadataKey                                   = "gc.cwd"
+	// CrossStoreBlockerMetadataKey names, on a cross-store gate, the blocker
+	// it mirrors: a bead held in another store that the gate's dependents must
+	// wait for (internal/dispatch cross_store_gate.go).
+	CrossStoreBlockerMetadataKey = "gc.cross_store_blocker"
+	// CrossStoreGateOwnerMetadataKey names, on a cross-store gate, the drain
+	// control that minted it. One gate serves every item of that drain waiting
+	// on the same blocker, and the gate is released once the control closes.
+	CrossStoreGateOwnerMetadataKey = "gc.cross_store_gate_owner"
+	// CrossStoreGateStateMetadataKey records a cross-store gate's state:
+	// "unresolved" (open; no store holds its blocker), "released" (closed by
+	// the controller; reopened if its blocker opens again), "retired" (closed
+	// by the controller because its drain control finished) or "overridden"
+	// (closed by an operator; final).
+	CrossStoreGateStateMetadataKey = "gc.cross_store_gate_state"
+	// CrossStoreGateRetiredFromMetadataKey records, on a retired cross-store
+	// gate, the state it was retired from: "open" (the release pass never
+	// released it) or "released". A drain control that is reopened hands the
+	// gate back accordingly.
+	CrossStoreGateRetiredFromMetadataKey = "gc.cross_store_gate_retired_from"
+	// CrossStoreGateUnresolvedAtMetadataKey is when a cross-store gate was
+	// first found unresolved (RFC3339): the persisted anchor its control.stalled
+	// event reports as first_seen.
+	CrossStoreGateUnresolvedAtMetadataKey = "gc.cross_store_gate_unresolved_at"
+	CurrentRunIDMetadataKey               = "gc.current_run_id"
+	CwdMetadataKey                        = "gc.cwd"
 	// AttachFencePendingMetadataKey marks a fenced attach's sub-DAG root
 	// between speculative (deferred, non-runnable) creation and the CAS-last
 	// epoch fence committing. Cleared on activation; a root still carrying it
 	// is a pre-fence candidate that idempotency recovery either activates
 	// (deterministically, when it is the surviving candidate) or neutralizes.
-	AttachFencePendingMetadataKey        = "gc.attach_fence_pending"
+	AttachFencePendingMetadataKey = "gc.attach_fence_pending"
+	// AttachRootIDMetadataKey is stamped on every non-root bead of a sub-DAG
+	// molecule.Attach creates, holding that sub-DAG's root ID. It is consumed
+	// by existingAttachIDMapping, which scopes idempotency recovery's step-ref
+	// match to one attachment so it never adopts a sibling attachment's bead
+	// under the same workflow root. It is deliberately not MoleculeIDMetadataKey:
+	// ResolveRunID ranks that key above RootBeadIDMetadataKey, so reusing it
+	// would re-root these beads' run chain at the sub-DAG.
+	AttachRootIDMetadataKey              = "gc.attach_root_id"
 	DeferredAssigneeMetadataKey          = "gc.deferred_assignee"
 	DeferredExecutionRoutedToMetadataKey = "gc.deferred_execution_routed_to"
 	DeferredRoutedToMetadataKey          = "gc.deferred_routed_to"
@@ -152,13 +187,12 @@ const (
 	DrainParentConvoyIDMetadataKey       = "gc.drain_parent_convoy_id"
 	DrainStateMetadataKey                = "gc.drain_state"
 	DrainUnitKeyMetadataKey              = "gc.drain_unit_key"
-	// DrainUnprojectedBlockersMetadataKey records, on a drain item root, the
-	// out-of-convoy blockers of its source member that the item workflow could
-	// not depend on because they live in another class store. The item workflow
-	// runs without those constraints: a dependency row can only reference an id
-	// its own store resolves, and writing one anyway removes the dependent from
-	// Ready forever. Only OPEN blockers are recorded — a terminal one constrains
-	// nothing, so omitting its edge loses no meaning. Comma-separated bead ids.
+	// DrainUnprojectedBlockersMetadataKey is what drains written by older
+	// builds left on an item root whose source member had an open out-of-convoy
+	// blocker in another class store: the item workflow ran without that
+	// constraint. Drains no longer write it — they hold the item behind a
+	// cross-store gate instead (internal/dispatch cross_store_gate.go) — and it
+	// is kept so the roots that carry it still read. Comma-separated bead ids.
 	DrainUnprojectedBlockersMetadataKey  = "gc.drain_unprojected_blockers"
 	DurationMsMetadataKey                = "gc.duration_ms"
 	DynamicFragmentMetadataKey           = "gc.dynamic_fragment"
@@ -198,6 +232,7 @@ const (
 	// (ga-wevcl). Live closes on stamped roots remain covered by the delta
 	// lane, which reacts to the close events themselves.
 	CompletionFactsConvergedMetadataKey = "gc.completion_facts_converged"
+	LabelRevisionMetadataKey            = "gc.label_rev" // label CAS bookkeeping; see beads.NativeDoltStore.updateLabelsIfMatch
 	LastFailureClassMetadataKey         = "gc.last_failure_class"
 	LastFinalizeErrorMetadataKey        = "gc.last_finalize_error"
 	LeaseOwnerMetadataKey               = "gc.lease_owner"
@@ -236,18 +271,32 @@ const (
 	RootBeadIDMetadataKey               = "gc.root_bead_id"
 	RootSettleFailedAtMetadataKey       = "gc.root_settle_failed_at"
 	RootSettleFailedMetadataKey         = "gc.root_settle_failed"
-	RootStoreRefMetadataKey             = "gc.root_store_ref"
-	RouteQuarantineMetadataKey          = "gc.route_recovery_quarantined"
-	RouteQuarantineReasonMetadataKey    = "gc.route_recovery_quarantine_reason"
-	RoutedToMetadataKey                 = "gc.routed_to"
-	RunTargetMetadataKey                = "gc.run_target"
-	RuntimeVarsMetadataKey              = "gc.graphv2_vars.v1"
-	ScopeKindMetadataKey                = "gc.scope_kind"
-	ScopeNameMetadataKey                = "gc.scope_name"
-	ScopeRefMetadataKey                 = "gc.scope_ref"
-	ScopeRoleMetadataKey                = "gc.scope_role"
-	SessionAffinityMetadataKey          = "gc.session_affinity"
-	SessionIDMetadataKey                = "gc.session_id"
+	// RootStoreRefMetadataKey records the SCOPE a graph tree runs in:
+	// city:<name> or rig:<name>. It is never a location. On a split city every
+	// graph bead lives in the city binding whatever its scope (the S4
+	// placement rule), so a reader that needs the bead finds it by residence
+	// (the binding probe first), and only takes the scope from this key.
+	RootStoreRefMetadataKey          = "gc.root_store_ref"
+	RouteQuarantineMetadataKey       = "gc.route_recovery_quarantined"
+	RouteQuarantineReasonMetadataKey = "gc.route_recovery_quarantine_reason"
+	RoutedToMetadataKey              = "gc.routed_to"
+	RunTargetMetadataKey             = "gc.run_target"
+	RuntimeVarsMetadataKey           = "gc.graphv2_vars.v1"
+	ScopeKindMetadataKey             = "gc.scope_kind"
+	ScopeNameMetadataKey             = "gc.scope_name"
+	ScopeRefMetadataKey              = "gc.scope_ref"
+	ScopeRoleMetadataKey             = "gc.scope_role"
+	SessionAffinityMetadataKey       = "gc.session_affinity"
+	SessionIDMetadataKey             = "gc.session_id"
+	// StrandedMetadataKey ("true"), StrandedSessionMetadataKey (the closed
+	// session's bead ID) and StrandedAssigneeMetadataKey (the claim's assignee
+	// when it was kept) mark a claim a close kept because no lane serves it
+	// (owner ruling O5, revised): stranded work, which session.stranded_claims
+	// reports while the claim is still assigned as it was kept. A release
+	// clears all three (SessionAffinityMetadataKeys).
+	StrandedMetadataKey         = "gc.stranded"
+	StrandedSessionMetadataKey  = "gc.stranded_session"
+	StrandedAssigneeMetadataKey = "gc.stranded_assignee"
 	// SessionIDCamelMetadataKey is the camelCase variant some bead writers stamp
 	// alongside the snake_case SessionIDMetadataKey; both are read when resolving a
 	// bead's session link.
@@ -304,7 +353,13 @@ const (
 	// copied into a binding with the name of the binding it came from, so a
 	// resumed attempt can tell a row it wrote from content the destination
 	// already owned.
-	InfraMigratedFromMetadataKey   = "gc.infra_migrated_from"
+	InfraMigratedFromMetadataKey = "gc.infra_migrated_from"
+	// MigratedCrossEdgesMetadataKey records, on a bead the rig importer moved
+	// into the city binding, the cross-boundary edges it did not copy: a JSON
+	// list of {dir, type, other, other_status_at_import, payload, action}. No
+	// cross-store edge is ever written, so this keeps the history readable;
+	// the rig's retained-source backup is authoritative for a reverse.
+	MigratedCrossEdgesMetadataKey  = "gc.migrated_cross_edges"
 	TriggerBeadStoreRefMetadataKey = "gc.trigger_bead_store_ref"
 	TruncatedMetadataKey           = "gc.truncated"
 	WorkBranchMetadataKey          = "gc.work_branch"
@@ -324,10 +379,11 @@ const (
 	// WorkflowExpandedMetadataKey marks a graph.v2 workflow root that was
 	// compiled with real child steps beyond the root itself. Its absence
 	// distinguishes a genuinely root-only (#2763-shape) molecule, whose root
-	// IS the unit of work and must remain claimable via the
-	// RunTargetMetadataKey fallback, from a fully-expanded root whose real
-	// children have all closed and is only waiting on workflow-finalize —
-	// see hookClaimMatchesRoute/hookClaimRoute (#5900).
+	// IS the unit of work and must remain claimable via its RoutedToMetadataKey
+	// or the legacy RunTargetMetadataKey fallback, from an expanded root, which
+	// is a latch closed by workflow-finalize and is never fresh worker demand
+	// through any route, an explicit RoutedToMetadataKey included — see
+	// workflowTopologyIsNonExecutable in cmd/gc (#5900).
 	WorkflowExpandedMetadataKey = "gc.workflow_expanded"
 )
 
@@ -519,9 +575,15 @@ var KnownMetadataKeys = []string{
 	ControllerRetryFirstSeenMetadataKey,
 	ControllerRetryCountMetadataKey,
 	CoordinatorOutcomeProducerDispositionMetadataKey,
+	CrossStoreBlockerMetadataKey,
+	CrossStoreGateOwnerMetadataKey,
+	CrossStoreGateRetiredFromMetadataKey,
+	CrossStoreGateStateMetadataKey,
+	CrossStoreGateUnresolvedAtMetadataKey,
 	CurrentRunIDMetadataKey,
 	CwdMetadataKey,
 	AttachFencePendingMetadataKey,
+	AttachRootIDMetadataKey,
 	DeferredAssigneeMetadataKey,
 	DeferredExecutionRoutedToMetadataKey,
 	DeferredRoutedToMetadataKey,
@@ -573,6 +635,7 @@ var KnownMetadataKeys = []string{
 	IterationMetadataKey,
 	ItemRootKeyMetadataKey,
 	KindMetadataKey,
+	LabelRevisionMetadataKey,
 	LastFailureClassMetadataKey,
 	LastFinalizeErrorMetadataKey,
 	LeaseOwnerMetadataKey,
@@ -623,6 +686,9 @@ var KnownMetadataKeys = []string{
 	ScopeRoleMetadataKey,
 	SessionAffinityMetadataKey,
 	SessionIDMetadataKey,
+	StrandedMetadataKey,
+	StrandedSessionMetadataKey,
+	StrandedAssigneeMetadataKey,
 	SessionIDCamelMetadataKey,
 	SessionNameMetadataKey,
 	SessionNameCamelMetadataKey,
@@ -644,6 +710,7 @@ var KnownMetadataKeys = []string{
 	TerminalMetadataKey,
 	TriggerBeadIDMetadataKey,
 	InfraMigratedFromMetadataKey,
+	MigratedCrossEdgesMetadataKey,
 	TriggerBeadStoreRefMetadataKey,
 	TruncatedMetadataKey,
 	WorkBranchMetadataKey,
@@ -689,4 +756,7 @@ var KnownMetadataPrefixes = []string{
 var SessionAffinityMetadataKeys = []string{
 	SessionAffinityMetadataKey,
 	ContinuationGroupMetadataKey,
+	StrandedMetadataKey,
+	StrandedSessionMetadataKey,
+	StrandedAssigneeMetadataKey,
 }

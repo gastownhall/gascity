@@ -84,6 +84,25 @@ func TestNewEnvSeedsDoltAuthorIdentity(t *testing.T) {
 	if !strings.Contains(string(body), `"metrics.disabled":"true"`) {
 		t.Errorf("seeded dolt config does not disable dolt usage metrics: %s", body)
 	}
+	// Without versioncheck.disabled `dolt version` fetches the latest release
+	// over HTTPS before it prints, and gc's and bd's version probes time out on
+	// a slow network.
+	if !strings.Contains(string(body), `"versioncheck.disabled":"true"`) {
+		t.Errorf("seeded dolt config does not disable dolt's release version check: %s", body)
+	}
+}
+
+// NewEnv hands a child only the variables it lists, so the process-wide
+// DOLT_DISABLE_EVENT_FLUSH that internal/testenv sets never reaches it. Without
+// its own entry every dolt a tier A, B or C test forks leaves a detached
+// `dolt send-metrics` behind, even though the seeded config sets
+// metrics.disabled.
+func TestNewEnvDisablesDoltEventFlush(t *testing.T) {
+	env := NewEnv("", t.TempDir(), t.TempDir())
+
+	if got := env.Get("DOLT_DISABLE_EVENT_FLUSH"); got != "1" {
+		t.Fatalf("NewEnv() DOLT_DISABLE_EVENT_FLUSH = %q, want %q", got, "1")
+	}
 }
 
 // With no seed from the caller — a bare `go test -tags acceptance_a`, which is
@@ -146,7 +165,7 @@ func unwritableHomeForTest(t *testing.T) string {
 // hostHomeWithBdSharedServer makes the test process look like a developer box
 // running a bd shared server: HOME holds ~/.beads/shared-server with a
 // database named like the acceptance city (the state that turned
-// TestBeadsProxiedDefault/doctor-green red on such a host). It returns that
+// TestBeadsProxiedDefaultInit/doctor-green red on such a host). It returns that
 // home.
 func hostHomeWithBdSharedServer(t *testing.T) string {
 	t.Helper()
@@ -175,6 +194,21 @@ func passwdHomeForTest(t *testing.T) string {
 		return ""
 	}
 	return strings.TrimSpace(lu.HomeDir)
+}
+
+// TestNewEnvForwardsGitTemplateDir pins the host-env allowlist entry for the
+// hermetic git template internal/testenv installs. NewEnv builds the child's
+// environment from an allowlist, so a gc or git the child runs makes repos
+// carrying maintenance.auto=false only if GIT_TEMPLATE_DIR is on it.
+func TestNewEnvForwardsGitTemplateDir(t *testing.T) {
+	template := filepath.Join(t.TempDir(), "gc-test-gittemplate")
+	t.Setenv("GIT_TEMPLATE_DIR", template)
+
+	env := NewEnv("", t.TempDir(), t.TempDir())
+
+	if got := env.Get("GIT_TEMPLATE_DIR"); got != template {
+		t.Fatalf("NewEnv() GIT_TEMPLATE_DIR = %q, want %q", got, template)
+	}
 }
 
 // The acceptance env must never hand gc the operator's home, in any mode: gc
@@ -269,4 +303,42 @@ func TestNewCityKeepsInheritedClaudeConfigDir(t *testing.T) {
 		t.Fatalf("NewEnv() CLAUDE_CONFIG_DIR = %q, want the inherited %q", got, inherited)
 	}
 	assertClaudeProjectTrustedForTest(t, filepath.Join(inherited, ".claude.json"), city.Dir, nil, nil)
+}
+
+// gc's exec orders and pack scripts run bare `gc` through PATH, so the env
+// built from BuildGC's override must resolve that gc to the binary under test.
+func TestVerifyPathGCAcceptsTheEnvBuiltFromBuildGC(t *testing.T) {
+	t.Setenv("GC_ACCEPTANCE_GC_BIN", writeFakeGC(t, filepath.Join(t.TempDir(), "gc-external")))
+
+	env := NewEnv(BuildGC(t.TempDir()), t.TempDir(), t.TempDir())
+
+	if err := VerifyPathGC(env); err != nil {
+		t.Fatalf("VerifyPathGC() = %v, want nil", err)
+	}
+}
+
+func TestVerifyPathGCRefusesAPathWhoseGCIsNotTheBinaryUnderTest(t *testing.T) {
+	unnamed := writeFakeGC(t, filepath.Join(t.TempDir(), "gc-external"))
+	underTest := writeFakeGC(t, filepath.Join(t.TempDir(), "gc"))
+	host := writeFakeGC(t, filepath.Join(t.TempDir(), "gc"))
+	for name, vars := range map[string]map[string]string{
+		// Exec orders exit 127: only the binary's own directory is on PATH,
+		// and the binary is not named gc.
+		"no gc on PATH": {"GC_ACCEPTANCE_GC_BIN": unnamed, "PATH": filepath.Dir(unnamed)},
+		// Exec orders test the host's gc while RunGC tests the binary.
+		"another gc first": {
+			"GC_ACCEPTANCE_GC_BIN": underTest,
+			"PATH":                 filepath.Dir(host) + string(os.PathListSeparator) + filepath.Dir(underTest),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := VerifyPathGC(&Env{vars: vars})
+			if err == nil {
+				t.Fatal("VerifyPathGC() = nil, want an error")
+			}
+			if !strings.Contains(err.Error(), vars["GC_ACCEPTANCE_GC_BIN"]) {
+				t.Fatalf("VerifyPathGC() = %v, want it to name the binary under test %s", err, vars["GC_ACCEPTANCE_GC_BIN"])
+			}
+		})
+	}
 }

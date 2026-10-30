@@ -30,6 +30,7 @@ class RunnerPolicyTests(unittest.TestCase):
         self.assertIn("every event", reason)
         self.assertEqual(runners["runner_32vcpu"], "blacksmith-32vcpu-ubuntu-2404")
         self.assertEqual(runners["runner_macos"], "blacksmith-6vcpu-macos-15")
+        self.assertEqual(runners["runner_windows"], "blacksmith-4vcpu-windows-2025")
 
     def test_push_uses_blacksmith(self) -> None:
         use_blacksmith, reason, runners = runner_policy.select_runners(
@@ -55,6 +56,7 @@ class RunnerPolicyTests(unittest.TestCase):
         self.assertIn("every event", reason)
         self.assertEqual(runners["runner_16vcpu"], "blacksmith-16vcpu-ubuntu-2404")
         self.assertEqual(runners["runner_macos"], "blacksmith-6vcpu-macos-15")
+        self.assertEqual(runners["runner_windows"], "blacksmith-4vcpu-windows-2025")
 
     def test_unlisted_pull_request_author_uses_blacksmith(self) -> None:
         use_blacksmith, reason, runners = runner_policy.select_runners(
@@ -67,6 +69,7 @@ class RunnerPolicyTests(unittest.TestCase):
         self.assertTrue(use_blacksmith)
         self.assertIn("every event", reason)
         self.assertEqual(runners["runner_macos"], "blacksmith-6vcpu-macos-15")
+        self.assertEqual(runners["runner_windows"], "blacksmith-4vcpu-windows-2025")
 
 
 if __name__ == "__main__":

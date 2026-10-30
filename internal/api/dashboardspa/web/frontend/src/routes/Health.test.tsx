@@ -1,5 +1,5 @@
 import { cleanup, render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { HealthPage } from './Health';
 import { invalidate } from '../api/cache';
@@ -563,10 +563,7 @@ function renderPage({ attention }: { attention?: HealthAttentionFacts } = {}) {
     attention === undefined ? {} : { health: attention },
   );
   return render(
-    <MemoryRouter
-      initialEntries={['/health']}
-      future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-    >
+    <MemoryRouter initialEntries={['/health']}>
       <AttentionProvider contributors={contributors}>
         <HealthPage />
       </AttentionProvider>
