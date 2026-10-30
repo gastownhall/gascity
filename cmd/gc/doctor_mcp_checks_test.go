@@ -299,3 +299,45 @@ command = "uvx"
 	}
 	t.Fatalf("details = %#v, want one naming %s, mayor, %s and %s", result.Details, target, mcpAgentLabel(implicit), mcpDir)
 }
+
+// Two agents sharing one non-root work_dir write the same stage-2 target, so
+// mcp-shared-target still reports diverging agent-local catalogs there.
+func TestMCPSharedTargetDoctorCheckReportsStage2WorkDirConflict(t *testing.T) {
+	cityPath := t.TempDir()
+	alphaMCP := filepath.Join(cityPath, "agents", "alpha", "mcp", "notes.toml")
+	betaMCP := filepath.Join(cityPath, "agents", "beta", "mcp", "notes.toml")
+	writeMCPSource(t, alphaMCP, `
+name = "notes"
+command = "uvx"
+args = ["alpha-notes"]
+`)
+	writeMCPSource(t, betaMCP, `
+name = "notes"
+command = "uvx"
+args = ["beta-notes"]
+`)
+
+	shared := ".gc/worktrees/shared"
+	cfg := &config.City{
+		Workspace: config.Workspace{Provider: "gemini"},
+		Providers: map[string]config.ProviderSpec{
+			"gemini": {Command: "echo", PromptMode: "none"},
+		},
+		Session: config.SessionConfig{Provider: "tmux"},
+		Agents: []config.Agent{
+			{Name: "alpha", Scope: "city", Provider: "gemini", WorkDir: shared, MaxActiveSessions: intPtr(2), MCPDir: filepath.Dir(alphaMCP)},
+			{Name: "beta", Scope: "city", Provider: "gemini", WorkDir: shared, MaxActiveSessions: intPtr(2), MCPDir: filepath.Dir(betaMCP)},
+		},
+	}
+
+	result := newMCPSharedTargetDoctorCheck(cityPath, cfg, stubLookPath).Run(&doctor.CheckContext{CityPath: cityPath})
+	if result.Status != doctor.StatusError {
+		t.Fatalf("mcp-shared-target = %v (%s), want error for the shared work_dir target", result.Status, result.Message)
+	}
+	for _, detail := range result.Details {
+		if strings.Contains(detail, filepath.Join(cityPath, shared)) && strings.Contains(detail, "alpha") && strings.Contains(detail, "beta") {
+			return
+		}
+	}
+	t.Fatalf("details = %#v, want the shared work_dir target naming alpha and beta", result.Details)
+}
