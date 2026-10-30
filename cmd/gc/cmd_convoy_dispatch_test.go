@@ -1361,6 +1361,107 @@ func TestRoutineControlPending_IsNotBudgetedOrEscalated(t *testing.T) {
 	}
 }
 
+// TestStopCanceledFinalizerStaysOpenForRetry pins the ga-5p9c6t disposition: a
+// drain or stop SIGTERMs the dispatcher's process tree children-first, so a bd
+// read in flight exits "context canceled" while the dispatcher is still alive
+// to handle the error. The store never answered, so the finalizer must stay
+// open for the next dispatcher — not be quarantined on the first refusal,
+// which also closes the workflow root as failed. The 0s budget makes a Tier B
+// mis-tiering quarantine on the first call, so this test separates Tier A
+// from Tier B.
+func TestStopCanceledFinalizerStaysOpenForRetry(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_CONTROL_SEMANTIC_RETRY_BUDGET", "0s")
+
+	causes := []struct {
+		name  string
+		cause error
+	}{
+		{
+			// The observed v1.4.1 incident: the typed chain is lost at the bd
+			// process boundary, so the error arrives as text only.
+			name:  "stop-canceled outcome read",
+			cause: errors.New("gcg-1: resolving workflow outcome: bd list both tiers: bd query: bd query (wisps): exit status 1: search count wisps: context canceled"),
+		},
+		{
+			// The finalize lock wait runs on a signal context, so it fails
+			// with a typed context.Canceled whose text names no needle.
+			name:  "typed lock wait cancellation",
+			cause: fmt.Errorf("%s: closing source bead chain: %w", "gcg-1", context.Canceled),
+		},
+	}
+	for _, tc := range causes {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			root, err := store.Create(beads.Bead{Title: "Workflow", Type: "task"})
+			if err != nil {
+				t.Fatalf("create workflow root: %v", err)
+			}
+			fin, err := store.Create(beads.Bead{
+				Title: "Finalize workflow",
+				Type:  "task",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:       beadmeta.KindWorkflowFinalize,
+					beadmeta.RootBeadIDMetadataKey: root.ID,
+				},
+			})
+			if err != nil {
+				t.Fatalf("create finalizer: %v", err)
+			}
+
+			var stderr bytes.Buffer
+			got := handleControlDispatchError(t.TempDir(), t.TempDir(), store, fin, fin.ID, tc.cause, &stderr)
+			if got == nil {
+				t.Fatal("handleControlDispatchError = nil, want the cause returned for retry")
+			}
+			if !dispatch.IsTransientControllerError(got) {
+				t.Fatalf("handleControlDispatchError = %v, want a transient controller error", got)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want silence: no quarantine, no budget write", stderr.String())
+			}
+
+			afterFin, err := store.Get(fin.ID)
+			if err != nil {
+				t.Fatalf("get finalizer: %v", err)
+			}
+			if afterFin.Status != "open" {
+				t.Fatalf("finalizer status = %q, want open", afterFin.Status)
+			}
+			if slices.Contains(afterFin.Labels, "gc:control-quarantined") {
+				t.Fatalf("finalizer labels = %v, want no gc:control-quarantined label", afterFin.Labels)
+			}
+			for _, key := range []string{
+				beadmeta.OutcomeMetadataKey,
+				beadmeta.FailureClassMetadataKey,
+				beadmeta.ControllerRetryFirstSeenMetadataKey,
+				beadmeta.ControllerRetryCountMetadataKey,
+			} {
+				if v := afterFin.Metadata[key]; v != "" {
+					t.Fatalf("finalizer %s = %q, want empty (no write while the store never answered)", key, v)
+				}
+			}
+
+			afterRoot, err := store.Get(root.ID)
+			if err != nil {
+				t.Fatalf("get workflow root: %v", err)
+			}
+			if afterRoot.Status != "open" {
+				t.Fatalf("workflow root status = %q, want open", afterRoot.Status)
+			}
+			for _, key := range []string{
+				beadmeta.OutcomeMetadataKey,
+				beadmeta.FailureClassMetadataKey,
+				beadmeta.FailureReasonMetadataKey,
+			} {
+				if v := afterRoot.Metadata[key]; v != "" {
+					t.Fatalf("workflow root %s = %q, want empty (the root must not settle behind a retried finalizer)", key, v)
+				}
+			}
+		})
+	}
+}
+
 // TestPendingControlRefusal_FirstRefusalIsNotQuiet keeps the quiet marking from
 // swallowing the first report of a new problem: the sweep that discovers a
 // pending refusal must still count as activity so the serve loop reacts to it.
