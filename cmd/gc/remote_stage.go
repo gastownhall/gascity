@@ -153,7 +153,7 @@ func recordInitRemoteStage(srcDir, cityPath, cityName string) error {
 		return nil
 	}
 	stage := remoteStage{ControllerCity: cityName, ControllerPath: controller}
-	if id := currentWorkStoreIdentity(srcDir); !id.empty() {
+	if id, err := currentWorkStoreIdentity(srcDir); err == nil && !id.empty() {
 		stage.WorkStore = id.String()
 	}
 	return writeRemoteStage(cityPath, stage)

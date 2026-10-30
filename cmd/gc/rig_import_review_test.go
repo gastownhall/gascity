@@ -321,11 +321,11 @@ func TestReviewSharedRigStoreRefuses(t *testing.T) {
 			t.Fatal(err)
 		}
 		f.otherCities = []string{other}
-		prev := rigImportScopeDoltTarget
-		rigImportScopeDoltTarget = func(string, string) rigDoltIdentity {
-			return rigDoltIdentity{Database: "packs", Endpoint: "loopback:3399"}
+		prev := storeDoltIdentityOf
+		storeDoltIdentityOf = func(string, string) storeDoltIdentity {
+			return storeDoltIdentity{Database: "packs", Endpoint: "loopback:3399"}
 		}
-		t.Cleanup(func() { rigImportScopeDoltTarget = prev })
+		t.Cleanup(func() { storeDoltIdentityOf = prev })
 		if code, _, stderr := f.importRigs(); code == 0 || !strings.Contains(stderr, "Dolt database") {
 			t.Fatalf("a rig on another city's Dolt database was imported: %d %s", code, stderr)
 		}
@@ -570,18 +570,18 @@ func TestReviewSharedDoltIdentityIsNormalized(t *testing.T) {
 			t.Errorf("normalizeDoltHost(%q) = %q %v, want loopback", h, got, err)
 		}
 	}
-	prevLookup := rigImportLookupHost
-	rigImportLookupHost = func(host string) ([]string, error) {
+	prevLookup := doltHostLookup
+	doltHostLookup = func(host string) ([]string, error) {
 		if host == "dolt.internal" {
 			return []string{"10.0.0.5"}, nil
 		}
 		return nil, errors.New("no such host")
 	}
-	t.Cleanup(func() { rigImportLookupHost = prevLookup })
+	t.Cleanup(func() { doltHostLookup = prevLookup })
 	if got, _ := normalizeDoltHost("dolt.internal"); got != "10.0.0.5" {
 		t.Errorf("a host name does not resolve to its address: %q", got)
 	}
-	run := func(t *testing.T, self, theirs rigDoltIdentity) (int, string) {
+	run := func(t *testing.T, self, theirs storeDoltIdentity) (int, string) {
 		t.Helper()
 		f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
 		f.seed("packs", []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil)}, nil)
@@ -591,34 +591,34 @@ func TestReviewSharedDoltIdentityIsNormalized(t *testing.T) {
 			t.Fatal(err)
 		}
 		f.otherCities = []string{other}
-		prev := rigImportScopeDoltTarget
-		rigImportScopeDoltTarget = func(cityPath, _ string) rigDoltIdentity {
+		prev := storeDoltIdentityOf
+		storeDoltIdentityOf = func(cityPath, _ string) storeDoltIdentity {
 			if cityPath == other {
 				return theirs
 			}
 			return self
 		}
-		t.Cleanup(func() { rigImportScopeDoltTarget = prev })
+		t.Cleanup(func() { storeDoltIdentityOf = prev })
 		code, _, stderr := f.importRigs()
 		return code, stderr
 	}
 	t.Run("same name, different endpoints: imports", func(t *testing.T) {
-		if code, stderr := run(t, rigDoltIdentity{Database: "gp", Endpoint: "loopback:3307"}, rigDoltIdentity{Database: "gp", Endpoint: "loopback:3407"}); code != 0 {
+		if code, stderr := run(t, storeDoltIdentity{Database: "gp", Endpoint: "loopback:3307"}, storeDoltIdentity{Database: "gp", Endpoint: "loopback:3407"}); code != 0 {
 			t.Errorf("two databases that share only a name were refused: %s", stderr)
 		}
 	})
 	t.Run("same name and endpoint: refuses", func(t *testing.T) {
-		if code, stderr := run(t, rigDoltIdentity{Database: "gp", Endpoint: "loopback:3307"}, rigDoltIdentity{Database: "gp", Endpoint: "loopback:3307"}); code == 0 || !strings.Contains(stderr, "Dolt database gp") {
+		if code, stderr := run(t, storeDoltIdentity{Database: "gp", Endpoint: "loopback:3307"}, storeDoltIdentity{Database: "gp", Endpoint: "loopback:3307"}); code == 0 || !strings.Contains(stderr, "Dolt database gp") {
 			t.Errorf("a shared Dolt database was imported: %s", stderr)
 		}
 	})
 	t.Run("their endpoint unresolved, same name: refuses with a remedy", func(t *testing.T) {
-		if code, stderr := run(t, rigDoltIdentity{Database: "gp", Endpoint: "loopback:3307"}, rigDoltIdentity{Database: "gp", Unresolved: true, Err: errors.New("server down")}); code == 0 || !strings.Contains(stderr, "unregister") {
+		if code, stderr := run(t, storeDoltIdentity{Database: "gp", Endpoint: "loopback:3307"}, storeDoltIdentity{Database: "gp", Unresolved: true, Err: errors.New("server down")}); code == 0 || !strings.Contains(stderr, "unregister") {
 			t.Errorf("an unresolved endpoint with the same name was not refused with a remedy: %s", stderr)
 		}
 	})
 	t.Run("their endpoint unresolved, other name: imports", func(t *testing.T) {
-		if code, stderr := run(t, rigDoltIdentity{Database: "gp", Endpoint: "loopback:3307"}, rigDoltIdentity{Database: "ga", Unresolved: true, Err: errors.New("server down")}); code != 0 {
+		if code, stderr := run(t, storeDoltIdentity{Database: "gp", Endpoint: "loopback:3307"}, storeDoltIdentity{Database: "ga", Unresolved: true, Err: errors.New("server down")}); code != 0 {
 			t.Errorf("an unrelated unresolved database was refused: %s", stderr)
 		}
 	})
@@ -782,7 +782,7 @@ func TestReviewUnresolvedDoltEndpointComparesByPinnedDatabase(t *testing.T) {
 		f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
 		f.seed("packs", []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil)}, nil)
 		writeScope(t, f.rigPaths["packs"], "gc.endpoint_origin: explicit\ngc.endpoint_status: verified\ndolt.host: 127.0.0.1\ndolt.port: 3307\n", `{"backend":"dolt","dolt_mode":"server","dolt_database":"gp"}`)
-		if self := rigImportScopeDoltTarget(f.request.CityPath, rigStoreRoot(f.request.CityPath, f.cfg.Rigs[0])); self.Database != "gp" || self.Unresolved {
+		if self := storeDoltIdentityOf(f.request.CityPath, rigStoreRoot(f.request.CityPath, f.cfg.Rigs[0])); self.Database != "gp" || self.Unresolved {
 			t.Fatalf("precondition: this rig's identity = %+v", self)
 		}
 		other := t.TempDir()
@@ -794,7 +794,7 @@ func TestReviewUnresolvedDoltEndpointComparesByPinnedDatabase(t *testing.T) {
 		// An inherited endpoint whose city runtime state is gone: the real
 		// resolver cannot say where the database lives.
 		writeScope(t, theirs, "gc.endpoint_origin: inherited_city\ngc.endpoint_status: verified\n", theirMetadata)
-		if id := rigImportScopeDoltTarget(other, theirs); !id.Unresolved {
+		if id := storeDoltIdentityOf(other, theirs); !id.Unresolved {
 			t.Fatalf("precondition: their endpoint resolved: %+v", id)
 		}
 		f.otherCities = []string{other}
@@ -823,7 +823,7 @@ func TestReviewUnresolvedDoltEndpointComparesByPinnedDatabase(t *testing.T) {
 		f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
 		f.seed("packs", []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil)}, nil)
 		writeScope(t, f.rigPaths["packs"], "gc.endpoint_origin: inherited_city\ngc.endpoint_status: verified\n", "")
-		if self := rigImportScopeDoltTarget(f.request.CityPath, rigStoreRoot(f.request.CityPath, f.cfg.Rigs[0])); !self.Unresolved || self.Database != "" {
+		if self := storeDoltIdentityOf(f.request.CityPath, rigStoreRoot(f.request.CityPath, f.cfg.Rigs[0])); !self.Unresolved || self.Database != "" {
 			t.Fatalf("precondition: this rig's identity = %+v, want unresolved with no database", self)
 		}
 		other := t.TempDir()
@@ -833,7 +833,7 @@ func TestReviewUnresolvedDoltEndpointComparesByPinnedDatabase(t *testing.T) {
 			t.Fatal(err)
 		}
 		writeScope(t, theirs, "gc.endpoint_origin: explicit\ngc.endpoint_status: verified\ndolt.host: 127.0.0.1\ndolt.port: 3307\n", `{"backend":"dolt","dolt_mode":"server","dolt_database":"gp"}`)
-		if id := rigImportScopeDoltTarget(other, theirs); id.Unresolved || id.Database != "gp" {
+		if id := storeDoltIdentityOf(other, theirs); id.Unresolved || id.Database != "gp" {
 			t.Fatalf("precondition: their identity = %+v, want database gp, resolved", id)
 		}
 		f.otherCities = []string{other}

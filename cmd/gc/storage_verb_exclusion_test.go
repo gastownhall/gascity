@@ -22,12 +22,23 @@ func stubSessionInventory(t *testing.T, names []string, complete bool, err error
 	storageVerbSessionInventory = func(*config.City, string) ([]string, bool, error) { return names, complete, err }
 }
 
-func stubOtherCities(t *testing.T, entries ...supervisor.CityEntry) {
+func stubOtherCities(t *testing.T, paths ...string) {
 	t.Helper()
-	prev := storageVerbOtherCities
-	t.Cleanup(func() { storageVerbOtherCities = prev })
-	storageVerbOtherCities = func(string) ([]supervisor.CityEntry, error) { return entries, nil }
+	prev := storeSharerCities
+	t.Cleanup(func() { storeSharerCities = prev })
+	storeSharerCities = func(string) ([]string, error) { return paths, nil }
 }
+
+// stubStoreIdentity gives every scope the same Dolt database at the same
+// endpoint, whatever its project id says.
+func stubStoreIdentity(t *testing.T, id storeDoltIdentity) {
+	t.Helper()
+	prev := storeDoltIdentityOf
+	t.Cleanup(func() { storeDoltIdentityOf = prev })
+	storeDoltIdentityOf = func(string, string) storeDoltIdentity { return id }
+}
+
+const sharedToken = "bd_shared@loopback:3307"
 
 // exclusionCity is a split city with one infrastructure bead to migrate, no
 // controller answering its ping, no session running and no other city.
@@ -201,11 +212,12 @@ func TestStorageMigrateBareForceRefuses(t *testing.T) {
 	}
 }
 
-// sharedStoreCities makes this city and another registered city share one
-// beads project, the shape of two cities on one database.
+// sharedStoreCities makes this city and another registered city use one Dolt
+// database at one endpoint. Their beads project ids DIFFER: the project id
+// does not decide, the resolved database and endpoint do.
 func sharedStoreCities(t *testing.T, request storageOperatorRequest) string {
 	t.Helper()
-	writeScopeProjectID(t, request.CityPath, "prj-shared")
+	writeScopeProjectID(t, request.CityPath, "prj-mine")
 	other := t.TempDir()
 	if err := os.WriteFile(filepath.Join(other, "city.toml"), []byte("[workspace]\nname = \"other-city\"\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -213,8 +225,9 @@ func sharedStoreCities(t *testing.T, request storageOperatorRequest) string {
 	if err := os.MkdirAll(filepath.Join(other, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeScopeProjectID(t, other, "prj-shared")
-	stubOtherCities(t, supervisor.CityEntry{Path: other, Name: "other-city"})
+	writeScopeProjectID(t, other, "prj-theirs")
+	stubOtherCities(t, other)
+	stubStoreIdentity(t, storeDoltIdentity{Database: "bd_shared", Endpoint: "loopback:3307"})
 	return other
 }
 
@@ -222,7 +235,8 @@ func TestStorageMigrateRefusesASharedStore(t *testing.T) {
 	request, _ := exclusionCity(t)
 	sharedStoreCities(t, request)
 	code, stderr := migrateFor(t, request)
-	if code == 0 || !strings.Contains(stderr, "other-city") || !strings.Contains(stderr, "--force=shared-store:prj-shared") {
+	other := storeSharerCitiesForTest(t)
+	if code == 0 || !strings.Contains(stderr, other) || !strings.Contains(stderr, "--force=shared-store:"+sharedToken) {
 		t.Fatalf("migration over a shared store = %d, stderr %q; want a refusal naming the other city and the attestation", code, stderr)
 	}
 	request.Force = storageForce{SharedStores: []string{"prj-wrong"}}
@@ -239,7 +253,7 @@ func TestStorageMigrateSharedStoreAttestationStillRefusesALiveCoTenant(t *testin
 		t.Fatal(err)
 	}
 	defer held.Close() //nolint:errcheck // test cleanup
-	request.Force = storageForce{SharedStores: []string{"prj-shared"}}
+	request.Force = storageForce{SharedStores: []string{sharedToken}}
 	code, stderr := migrateFor(t, request)
 	if code == 0 || !strings.Contains(stderr, "controller is live") {
 		t.Fatalf("attested migration with a live co-tenant = %d, stderr %q; want a refusal", code, stderr)
@@ -249,7 +263,7 @@ func TestStorageMigrateSharedStoreAttestationStillRefusesALiveCoTenant(t *testin
 func TestStorageMigrateSharedStoreAttestationRefusesForeignRowsAndCarriesUnattributed(t *testing.T) {
 	request, source := exclusionCity(t)
 	sharedStoreCities(t, request)
-	request.Force = storageForce{SharedStores: []string{"prj-shared"}}
+	request.Force = storageForce{SharedStores: []string{sharedToken}}
 	foreign := mustCreateInfraBead(t, source, beads.Bead{Title: "theirs", Type: "message", Metadata: map[string]string{beadmeta.RootStoreRefMetadataKey: "city:other-city"}})
 
 	code, stderr := migrateFor(t, request)
@@ -262,4 +276,13 @@ func TestStorageMigrateSharedStoreAttestationRefusesForeignRowsAndCarriesUnattri
 	if code, stderr := migrateFor(t, request); code != 0 {
 		t.Fatalf("attested migration of unattributed rows = %d: %s", code, stderr)
 	}
+}
+
+func storeSharerCitiesForTest(t *testing.T) string {
+	t.Helper()
+	paths, err := storeSharerCities("")
+	if err != nil || len(paths) != 1 {
+		t.Fatalf("stubbed registry = %v, %v", paths, err)
+	}
+	return paths[0]
 }

@@ -229,103 +229,10 @@ func cityRunsRemoteSessions(cfg *config.City) (string, bool) {
 	return name, false
 }
 
-// storageVerbOtherCities lists the other registered cities; a test seam.
-var storageVerbOtherCities = otherRegisteredCities
-
-// sharedWorkStore is another registered city's store this city's work store is.
-type sharedWorkStore struct {
-	OtherCity string
-	OtherPath string
-	Scope     string
-	Why       string
-	Undecided bool
-}
-
-// detectSharedWorkStore compares this city's work store with every store
-// (city and rigs) of every other registered city. An unreadable registry or
-// config refuses: the absence of a sharer must be shown, not assumed.
-func detectSharedWorkStore(cityPath string) (workStoreIdentity, []sharedWorkStore, error) {
-	self, err := resolveWorkStoreIdentity(cityPath, cityPath)
-	if err != nil {
-		return self, nil, fmt.Errorf("reading this city's work-store identity: %w", err)
-	}
-	others, err := storageVerbOtherCities(cityPath)
-	if err != nil {
-		return self, nil, fmt.Errorf("reading the city registry to rule out a shared work store: %w", err)
-	}
-	var shared []sharedWorkStore
-	for _, other := range others {
-		cfg, err := loadCityConfigWithoutBuiltinPackRefresh(other.Path, io.Discard)
-		if err == nil && cfg == nil {
-			err = errors.New("it loaded no configuration")
-		}
-		if err != nil {
-			return self, nil, fmt.Errorf("city %s is registered but its config cannot be read (%w), so it cannot be ruled out as sharing this work store; unregister it if it is gone", other.Path, err)
-		}
-		scopes := []struct{ label, root string }{{"city", other.Path}}
-		for _, rig := range cfg.Rigs {
-			if p := strings.TrimSpace(rig.Path); p != "" {
-				if !filepath.IsAbs(p) {
-					p = filepath.Join(other.Path, p)
-				}
-				scopes = append(scopes, struct{ label, root string }{"rig " + rig.Name, p})
-			}
-		}
-		for _, scope := range scopes {
-			theirs, err := resolveWorkStoreIdentity(other.Path, scope.root)
-			if err != nil {
-				return self, nil, fmt.Errorf("city %s's %s store identity cannot be read (%w), so it cannot be ruled out as sharing this work store", other.Path, scope.label, err)
-			}
-			verdict, why := compareWorkStores(self, theirs)
-			if verdict == workStoresDistinct {
-				continue
-			}
-			shared = append(shared, sharedWorkStore{OtherCity: other.EffectiveName(), OtherPath: other.Path, Scope: scope.label, Why: why, Undecided: verdict == workStoresUndecided})
-		}
-	}
-	return self, shared, nil
-}
-
-// sharedWorkStoreRefusal refuses a work store another registered city uses,
-// unless the operator attested that exact identity; even then, every other
-// city attached to it must be stopped.
+// sharedWorkStoreRefusal is the shared-store check for this city's work store
+// (storage_shared_store.go).
 func sharedWorkStoreRefusal(cityPath string, force storageForce) (attested bool, err error) {
-	self, shared, err := detectSharedWorkStore(cityPath)
-	if err != nil {
-		return false, err
-	}
-	if len(shared) == 0 {
-		return false, nil
-	}
-	token := self.Token()
-	if !force.attestsSharedStore(token) {
-		s := shared[0]
-		what := "is also"
-		if s.Undecided {
-			what = "may also be"
-		}
-		return false, fmt.Errorf("this city's work store (%s) %s city %s's %s store (%s): a shared store holds rows another city owns, and a migration copies and then clears rows. If this city is the single writer of what it migrates, attest it with --%s=%s:%s; rows another city's scope names still refuse, and every other city on the store must be stopped",
-			token, what, s.OtherCity, s.Scope, s.Why, storageForceFlag, storageHazardSharedStore, token)
-	}
-	seen := map[string]bool{}
-	for _, s := range shared {
-		if seen[s.OtherPath] {
-			continue
-		}
-		seen[s.OtherPath] = true
-		probe, err := acquireControllerLock(s.OtherPath)
-		if errors.Is(err, errControllerAlreadyRunning) {
-			return false, fmt.Errorf("city %s shares this work store and its controller is live; --%s=%s:%s does not lift that. Stop it (gc stop %s) and run this again", s.OtherCity, storageForceFlag, storageHazardSharedStore, token, s.OtherPath)
-		}
-		if err != nil {
-			return false, fmt.Errorf("probing city %s's controller lock: %w", s.OtherCity, err)
-		}
-		probe.Close() //nolint:errcheck // probe only
-		if _, registered, rerr := registeredCityEntry(s.OtherPath); rerr != nil || registered {
-			return false, fmt.Errorf("city %s shares this work store and is registered with the supervisor, which would restart it mid-migration; stop it (gc stop %s) and run this again", s.OtherCity, s.OtherPath)
-		}
-	}
-	return true, nil
+	return sharedStoreRefusal(cityPath, "this city's work store", cityPath, force)
 }
 
 // foreignCityRows returns the ids of rows whose scope names another city:

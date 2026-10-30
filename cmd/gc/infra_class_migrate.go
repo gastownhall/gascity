@@ -968,7 +968,11 @@ func recordInfraGenesis(cityPath string, target infraBindingTarget) error {
 	if err := writeInfraCopyManifest(target, nil); err != nil {
 		return err
 	}
-	return writeInfraMigratedMarker(target, currentWorkStoreIdentity(cityPath))
+	current, err := currentWorkStoreIdentity(cityPath)
+	if err != nil {
+		return err
+	}
+	return writeInfraMigratedMarker(target, current)
 }
 
 // infraGenesisOpenFailure explains a destination that would not open during
@@ -1363,7 +1367,11 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	if err := writeInfraCopyManifestRecord(target, proven, infraManifestRecordCreated(nil, rows, proven), generation); err != nil {
 		return fail(err)
 	}
-	if err := writeInfraMigratedMarker(target, currentWorkStoreIdentity(cityPath)); err != nil {
+	current, err := currentWorkStoreIdentity(cityPath)
+	if err != nil {
+		return fail(err)
+	}
+	if err := writeInfraMigratedMarker(target, current); err != nil {
 		return fail(err)
 	}
 	fmt.Fprintf(stderr, "%s: infrastructure classes migrated to %s (%d beads copied)\n", //nolint:errcheck // best-effort stderr
@@ -1512,7 +1520,13 @@ func confirmInfraConvergence(cityPath string, target infraBindingTarget, logPref
 	if err != nil {
 		return reportUncheckableConvergence(target, logPrefix, stderr, err)
 	}
-	current := currentWorkStoreIdentity(cityPath)
+	// An identity file that cannot be read says nothing about which work
+	// store this is: the binding is uncheckable (a standing refusal naming
+	// the file), never "a different work store".
+	current, err := currentWorkStoreIdentity(cityPath)
+	if err != nil {
+		return reportUncheckableConvergence(target, logPrefix, stderr, err)
+	}
 	if storeRecorded {
 		if why := workStoreIdentityMismatch(recordedStore, current); why != "" {
 			fmt.Fprintf(stderr, "%s: %s: %s\n", logPrefix, target.MarkerPath(), why) //nolint:errcheck // best-effort stderr
@@ -1522,9 +1536,11 @@ func confirmInfraConvergence(cityPath string, target infraBindingTarget, logPref
 	report := confirmInfraContainment(cityPath, target, logPrefix, stderr)
 	if report.Outcome == infraMigrationConverged && !storeRecorded && !current.empty() {
 		// A legacy marker, back-filled once by the first boot that proved
-		// containment against this work store. A failed write only leaves the
-		// marker legacy for the next boot to try again.
-		if err := backfillMarkerWorkStoreIdentity(target, current); err != nil {
+		// containment against this work store, under the migration guard so
+		// it cannot race a migration rewriting the marker. A guard someone
+		// else holds, or a failed write, only leaves the marker legacy for
+		// the next boot to try again.
+		if err := backfillMarkerWorkStoreIdentityGuarded(cityPath, target, current); err != nil {
 			fmt.Fprintf(stderr, "%s: recording the work-store identity in %s: %v\n", logPrefix, target.MarkerPath(), err) //nolint:errcheck // best-effort stderr
 		}
 	}

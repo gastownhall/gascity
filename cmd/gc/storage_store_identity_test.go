@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -153,43 +152,6 @@ func TestWorkStoreIdentityRoundTripsThroughTheMarkerLine(t *testing.T) {
 	}
 }
 
-func TestCompareWorkStores(t *testing.T) {
-	unresolved := errors.New("dolt down")
-	for _, tc := range []struct {
-		name string
-		a, b workStoreIdentity
-		want workStoreShare
-	}{
-		{"same path", workStoreIdentity{Path: "/p"}, workStoreIdentity{Path: "/p"}, workStoresShared},
-		{"same project", workStoreIdentity{ProjectID: "a", Path: "/1"}, workStoreIdentity{ProjectID: "a", Path: "/2"}, workStoresShared},
-		{"projects differ on one database name", workStoreIdentity{ProjectID: "a", Database: "hq"}, workStoreIdentity{ProjectID: "b", Database: "hq"}, workStoresDistinct},
-		{"same database and endpoint", workStoreIdentity{Database: "hq", Endpoint: "loopback:3307"}, workStoreIdentity{Database: "hq", Endpoint: "loopback:3307"}, workStoresShared},
-		{"same database, other server", workStoreIdentity{Database: "hq", Endpoint: "loopback:3307"}, workStoreIdentity{Database: "hq", Endpoint: "loopback:3308"}, workStoresDistinct},
-		{"same database, endpoint unknown", workStoreIdentity{Database: "hq", Endpoint: "loopback:3307"}, workStoreIdentity{Database: "hq", EndpointErr: unresolved}, workStoresUndecided},
-		{"different database", workStoreIdentity{Database: "hq"}, workStoreIdentity{Database: "other"}, workStoresDistinct},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got, _ := compareWorkStores(tc.a, tc.b); got != tc.want {
-				t.Fatalf("compare = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestStoreIdentityDoltHostFoldsLoopback(t *testing.T) {
-	for _, h := range []string{"", "localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0"} {
-		if got, err := storeIdentityDoltHost(h); err != nil || got != "loopback" {
-			t.Errorf("storeIdentityDoltHost(%q) = (%q, %v), want loopback", h, got, err)
-		}
-	}
-	prev := storeIdentityLookupHost
-	t.Cleanup(func() { storeIdentityLookupHost = prev })
-	storeIdentityLookupHost = func(string) ([]string, error) { return []string{"10.0.0.2", "10.0.0.1"}, nil }
-	if got, err := storeIdentityDoltHost("db.example"); err != nil || got != "10.0.0.1,10.0.0.2" {
-		t.Errorf("resolved host = (%q, %v), want sorted addresses", got, err)
-	}
-}
-
 func TestReadWorkStoreIdentityPrefersL1OverL2(t *testing.T) {
 	scope := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(scope, ".beads"), 0o755); err != nil {
@@ -206,5 +168,60 @@ func TestReadWorkStoreIdentityPrefersL1OverL2(t *testing.T) {
 	id, err = readWorkStoreIdentity(scope)
 	if err != nil || id.ProjectID != "l1" {
 		t.Fatalf("identity with L1 = (%+v, %v), want l1", id, err)
+	}
+}
+
+// TestUnreadableWorkStoreIdentityIsUncheckableNotAMismatch: an identity file
+// that is malformed or unreadable says nothing about which work store this
+// is. The binding is uncheckable (a standing refusal naming the file), never
+// "a different work store".
+func TestUnreadableWorkStoreIdentityIsUncheckableNotAMismatch(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		spoil func(t *testing.T, path string)
+	}{
+		{"malformed", func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte("[project\nid = "), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"unreadable", func(t *testing.T, path string) {
+			if os.Geteuid() == 0 {
+				t.Skip("root reads a mode-000 file")
+			}
+			if err := os.Chmod(path, 0); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			writeScopeProjectID(t, cityPath, "prj-original")
+			cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
+			stubInfraMigrationSource(t)
+			routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &bytes.Buffer{})
+			if err != nil {
+				t.Fatalf("genesis boot refused: %v", err)
+			}
+			_ = routes.close()
+
+			identityPath := contract.ProjectIdentityPath(cityPath)
+			tc.spoil(t, identityPath)
+			var stderr bytes.Buffer
+			report := checkInfraClassConvergence(cityPath, cfg, "gc start", &stderr)
+			if report.Outcome != infraMigrationUncheckable {
+				t.Fatalf("outcome = %s, want uncheckable; stderr=%s", report.Outcome, stderr.String())
+			}
+			if report.Fault == nil || !strings.Contains(report.Fault.Error(), identityPath) {
+				t.Errorf("fault %v does not name %s", report.Fault, identityPath)
+			}
+			if strings.Contains(stderr.String(), "different work store") {
+				t.Errorf("an unreadable identity was reported as a different work store: %s", stderr.String())
+			}
+			if _, err := storageBootGate(cityPath, cfg, "gc start", nil, &bytes.Buffer{}); err == nil {
+				t.Error("boot served a binding whose work-store identity could not be read")
+			}
+		})
 	}
 }
