@@ -586,6 +586,50 @@ func TestTimerRequestCancelsOnHeldPoolWork(t *testing.T) {
 	})
 }
 
+// TestDrainBeginStillBeginsWithoutHeldWork (ga-2ols7o AC-5). The held-work
+// keep's begin-side negative space: A20 still begins the timer drain when the
+// demand read's work is closed, unassigned, or assigned to the pool's route
+// name rather than the seat, when the operator has suspended the agent or
+// the agent is out of the config, and for a named row.
+func TestDrainBeginStillBeginsWithoutHeldWork(t *testing.T) {
+	sleep := func(e *selectionEntry) { e.Desired = desireSleep }
+	begins := func(it intent) bool {
+		return it.Kind == intentDrainBegin || it.Kind == intentDrainBeginFresh
+	}
+	for _, c := range []struct {
+		name  string
+		meta  []string
+		world []func(*World)
+	}{
+		{name: "no work"},
+		{name: "only unassigned work", world: []func(*World){func(w *World) {
+			w.Demand.AssignedWork = []beads.Bead{{ID: "gw-1", Title: "gw-1", Type: "task", Status: "open"}}
+		}}},
+		{name: "only closed work", world: []func(*World){func(w *World) {
+			w.Demand.AssignedWork = []beads.Bead{{ID: "gw-1", Title: "gw-1", Type: "task", Status: "closed", Assignee: "gc-1"}}
+		}}},
+		{name: "assigned only to the pool route name", world: []func(*World){func(w *World) {
+			w.Demand.AssignedWork = []beads.Bead{{ID: "gw-1", Title: "gw-1", Type: "task", Status: "open", Assignee: "worker"}}
+		}}},
+		{name: "operator suspended", world: []func(*World){func(w *World) {
+			heldOpenWork(w)
+			w.OperatorSuspend = map[rowKey]string{rowKeyOf("gc-1"): "agent"}
+		}}},
+		{name: "agent out of the config", world: []func(*World){func(w *World) {
+			w.Env = &reconcileEnv{Cfg: &config.City{Agents: []config.Agent{{Name: "other"}}}}
+			heldOpenWork(w)
+		}}},
+		{name: "named row", meta: []string{"configured_named_session", "true"}, world: []func(*World){heldOpenWork}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			it, _ := decidePoolDrain(t, c.meta, sleep, c.world...)
+			if !begins(it) {
+				t.Fatalf("%s: %+v, want the timer drain to begin", c.name, it)
+			}
+		})
+	}
+}
+
 // TestNoWakeRequestCancelsOnAssignedWork (C6a2 review 1b; DRAIN-046).
 // Kills a no-wake-reason request that stands once work is assigned to its
 // row, which C6b1's signal would then stop: work assigned after the begin
