@@ -296,3 +296,39 @@ command = "private-mcp"
 		})
 	}
 }
+
+func TestMCPConflictMessagesStayGenericForTemplateDivergence(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMCPSource(t, filepath.Join(cityPath, "mcp", "notes.template.toml"), `
+name = "notes"
+command = "uvx"
+args = ["{{.AgentName}}"]
+`)
+
+	cfg := &config.City{
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+		Session:    config.SessionConfig{Provider: "tmux"},
+		Providers:  builtinProviderAliasesForTest("claude"),
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Provider: "claude"},
+			{Name: "deputy", Scope: "city", Provider: "claude"},
+		},
+	}
+
+	_, err := buildStage1MCPTargets(cityPath, cfg, stubLookPath, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "MCP target conflict") {
+		t.Fatalf("buildStage1MCPTargets err = %v, want MCP target conflict", err)
+	}
+	if strings.Contains(err.Error(), "mcp/") || strings.Contains(err.Error(), "agent-local") {
+		t.Fatalf("template-only divergence must keep the generic message, got: %v", err)
+	}
+
+	result := newMCPSharedTargetDoctorCheck(cityPath, cfg, stubLookPath).Run(&doctor.CheckContext{CityPath: cityPath})
+	if result.Status != doctor.StatusError {
+		t.Fatalf("mcp-shared-target = %v (%q; %v), want error", result.Status, result.Message, result.Details)
+	}
+	joined := strings.Join(result.Details, "\n")
+	if strings.Contains(joined, "mcp/") || strings.Contains(joined, "agent-local") {
+		t.Fatalf("template-only divergence must keep the generic detail, got: %s", joined)
+	}
+}

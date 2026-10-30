@@ -122,6 +122,11 @@ command = "uvx"
 	if !strings.Contains(err.Error(), "MCP target conflict") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	// Two explicit agents are not the implicit-agent shape: the message
+	// must stay the generic one, naming no agent-local mcp/ cause.
+	if strings.Contains(err.Error(), "mcp/") || strings.Contains(err.Error(), "agent-local") {
+		t.Fatalf("conflict between two explicit agents must not name an agent-local cause: %v", err)
+	}
 }
 
 func TestRunStage1MCPProjectionPropagatesManagedDirReadErrors(t *testing.T) {
