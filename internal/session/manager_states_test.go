@@ -333,6 +333,56 @@ func TestConformance_OperatorSuspendStillRejectsCreating(t *testing.T) {
 	}
 }
 
+// The same teardown-failure contract as draining above, plus the stamp: a
+// failed teardown restores the stamp the sweep cleared, so the row a creating
+// start still owns reads exactly as it did.
+func TestConformance_SweepSuspendCreatingPropagatesTeardownFailure(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	m := newTestManager(t, store, sp)
+
+	id := createTestSession(t, m, "worker")
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	sessName := b.Metadata["session_name"]
+	if err := sp.Start(context.Background(), sessName, runtime.Config{}); err != nil {
+		t.Fatalf("seeding runtime: %v", err)
+	}
+	const seededStamp = "2026-10-30T12:00:01Z"
+	for k, v := range map[string]string{
+		"state":        string(StateCreating),
+		"last_woke_at": seededStamp,
+	} {
+		if err := store.SetMetadata(id, k, v); err != nil {
+			t.Fatalf("seeding %s: %v", k, err)
+		}
+	}
+	sp.StopErrors = map[string]error{sessName: errors.New("provider refused the stop")}
+
+	err = m.Suspend(context.Background(), testActor(m, ActorSweep), id, false)
+	if err == nil {
+		t.Fatal("sweep Suspend(creating) = nil despite a failed teardown; gc stop would report a live pane as stopped")
+	}
+	if !strings.Contains(err.Error(), "stopping runtime session") {
+		t.Errorf("err = %v, want it to name the runtime teardown failure, not refuse the row", err)
+	}
+	if errors.Is(err, ErrIllegalTransition) {
+		t.Errorf("err = %v, a teardown failure must not read as an illegal transition", err)
+	}
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	if got := State(after.Metadata["state"]); got != StateCreating {
+		t.Errorf("state = %q, want %q", got, StateCreating)
+	}
+	if got := after.Metadata["last_woke_at"]; got != seededStamp {
+		t.Errorf("last_woke_at = %q, want the seeded %q restored after the failed stop", got, seededStamp)
+	}
+}
+
 // The scope control for the pins above. The sweep's escape hatches stay
 // state-specific (draining, creating) and sweep-only, never a blanket "any
 // state suspends" that would hide a real illegal-transition bug elsewhere: an
