@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -160,7 +161,11 @@ func (b *cappedBuffer) markTruncated() {
 func (b *cappedBuffer) String() string { return b.buf.String() }
 
 // cleanEnv builds the minimal environment passed to every subprocess. No host
-// environment is inherited; PATH/HOME/LANG are assigned intentionally.
+// environment is inherited; PATH/HOME/LANG are assigned intentionally. PATH is
+// ADMIN_PATH when set, otherwise the deterministic searchpath order of
+// cleanEnvPath, recomputed per spawn so a user-managed dir created after
+// startup is found. That order is built from the raw HOME: the child's /tmp
+// HOME fallback never contributes search dirs.
 //
 // GITHUB_TOKEN is deliberately NOT forwarded: none of the dashboard's
 // credential-free probes (git log/diff, Beads connectivity, version probes)
@@ -171,12 +176,9 @@ func (b *cappedBuffer) String() string { return b.buf.String() }
 // repo cannot drive an out-of-band helper that inherits this environment.
 func cleanEnv() []string {
 	home := os.Getenv("HOME")
+	path := cleanEnvPath(os.Getenv("ADMIN_PATH"), home, runtime.GOOS)
 	if home == "" {
 		home = "/tmp"
-	}
-	path := os.Getenv("ADMIN_PATH")
-	if path == "" {
-		path = home + "/.local/bin:/usr/local/bin:/usr/bin:/bin"
 	}
 	return []string{
 		"PATH=" + path,

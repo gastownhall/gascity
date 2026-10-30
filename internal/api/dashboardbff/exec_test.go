@@ -1,8 +1,10 @@
 package dashboardbff
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -153,4 +155,57 @@ func envValue(env []string, key string) string {
 		}
 	}
 	return ""
+}
+
+// TestExecBdPingChildGetsDeterministicSearchPath pins #7979 end to end: the bd
+// child receives the searchpath default (existing user-managed dirs and the
+// host's package-manager dir, where Homebrew's dolt lives), not the
+// supervisor's own PATH.
+func TestExecBdPingChildGetsDeterministicSearchPath(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	goBin := filepath.Join(home, "go", "bin")
+	if err := os.MkdirAll(goBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	beadsPath := filepath.Join(root, ".beads")
+	if err := os.Mkdir(beadsPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pathFile := filepath.Join(root, "child-path")
+	script := "#!/bin/sh\nprintf '%s' \"$PATH\" > \"" + pathFile + "\"\nprintf '%s' '{\"status\":\"ok\"}'\n"
+	if err := os.WriteFile(filepath.Join(bin, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("ADMIN_PATH", "")
+	// exec.Command resolves bd on the parent PATH; the child must not see it.
+	t.Setenv("PATH", bin)
+
+	res, err := newExecRunner().execBdPing(context.Background(), beadsPath)
+	if err != nil {
+		t.Fatalf("execBdPing() error = %v", err)
+	}
+	if res.exitCode != 0 {
+		t.Fatalf("execBdPing() exit = %d stdout=%q stderr=%q", res.exitCode, res.stdout, res.stderr)
+	}
+	recorded, err := os.ReadFile(pathFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirs := filepath.SplitList(string(recorded))
+	requireContains(t, dirs, goBin)
+	if pm := map[string]string{
+		"darwin": "/opt/homebrew/bin",
+		"linux":  "/home/linuxbrew/.linuxbrew/bin",
+	}[runtime.GOOS]; pm != "" {
+		requireContains(t, dirs, pm)
+	}
+	if slices.Contains(dirs, bin) {
+		t.Errorf("child PATH %v inherits the supervisor PATH entry %q", dirs, bin)
+	}
 }
