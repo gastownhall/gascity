@@ -819,3 +819,74 @@ func TestOrderFiringCurrent_SubMinuteCooldownWithinPatrolTickIsOK(t *testing.T) 
 		t.Fatalf("details = %v, want one on-cadence detail line", result.Details)
 	}
 }
+
+// A fired order is overdue from 1.5x and stale from 3x its effective period,
+// expected interval + patrol interval. A non-positive patrol never shrinks the
+// period below the expected interval.
+func TestClassifyOrderFiringThresholdsIncludePatrolInterval(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	started := now.Add(-48 * time.Hour)
+	cooldown1m := orders.Order{Name: "fast-cooldown", Trigger: "cooldown", Interval: "1m"}
+	cronEveryMinute := orders.Order{Name: "fast-cron", Trigger: "cron", Schedule: "* * * * *"}
+	cronEvery4h := orders.Order{Name: "slow-cron", Trigger: "cron", Schedule: "0 */4 * * *"}
+
+	const (
+		ok      = "ok"
+		overdue = "overdue"
+		stale   = "stale"
+	)
+	tests := []struct {
+		name   string
+		order  orders.Order
+		patrol time.Duration
+		age    time.Duration
+		want   string
+	}{
+		{"1m cooldown just under overdue", cooldown1m, 30 * time.Second, 2*time.Minute + 14*time.Second, ok},
+		{"1m cooldown at overdue", cooldown1m, 30 * time.Second, 2*time.Minute + 15*time.Second, overdue},
+		{"1m cooldown just under stale", cooldown1m, 30 * time.Second, 4*time.Minute + 29*time.Second, overdue},
+		{"1m cooldown at stale", cooldown1m, 30 * time.Second, 4*time.Minute + 30*time.Second, stale},
+		{"every-minute cron just under overdue", cronEveryMinute, 30 * time.Second, 2*time.Minute + 14*time.Second, ok},
+		{"every-minute cron at overdue", cronEveryMinute, 30 * time.Second, 2*time.Minute + 15*time.Second, overdue},
+		{"every-minute cron just under stale", cronEveryMinute, 30 * time.Second, 4*time.Minute + 29*time.Second, overdue},
+		{"every-minute cron at stale", cronEveryMinute, 30 * time.Second, 4*time.Minute + 30*time.Second, stale},
+		{"4h cron just under overdue", cronEvery4h, 30 * time.Second, 6*time.Hour + 44*time.Second, ok},
+		{"4h cron at overdue", cronEvery4h, 30 * time.Second, 6*time.Hour + 45*time.Second, overdue},
+		{"4h cron just under stale", cronEvery4h, 30 * time.Second, 12*time.Hour + time.Minute + 29*time.Second, overdue},
+		{"4h cron at stale", cronEvery4h, 30 * time.Second, 12*time.Hour + time.Minute + 30*time.Second, stale},
+		{"zero patrol just under overdue", cooldown1m, 0, time.Minute + 29*time.Second, ok},
+		{"zero patrol at overdue", cooldown1m, 0, time.Minute + 30*time.Second, overdue},
+		{"zero patrol just under stale", cooldown1m, 0, 2*time.Minute + 59*time.Second, overdue},
+		{"zero patrol at stale", cooldown1m, 0, 3 * time.Minute, stale},
+		{"negative patrol just under overdue", cooldown1m, -5 * time.Second, time.Minute + 29*time.Second, ok},
+		{"negative patrol at overdue", cooldown1m, -5 * time.Second, time.Minute + 30*time.Second, overdue},
+		{"negative patrol just under stale", cooldown1m, -5 * time.Second, 2*time.Minute + 59*time.Second, overdue},
+		{"negative patrol at stale", cooldown1m, -5 * time.Second, 3 * time.Minute, stale},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			expected, err := expectedIntervalForOrder(tt.order, map[string]time.Duration{})
+			if err != nil {
+				t.Fatalf("expectedIntervalForOrder: %v", err)
+			}
+			status, severity, detail := classifyOrderFiring(tt.order, now, expected, tt.patrol, now.Add(-tt.age), started)
+			if severity != SeverityBlocking {
+				t.Fatalf("severity = %v, want blocking; detail = %q", severity, detail)
+			}
+			switch tt.want {
+			case ok:
+				if status != StatusOK || strings.Contains(detail, "(overdue)") || strings.Contains(detail, "stale") {
+					t.Fatalf("status = %v, detail = %q; want OK", status, detail)
+				}
+			case overdue:
+				if status != StatusWarning || !strings.HasSuffix(detail, "(overdue)") {
+					t.Fatalf("status = %v, detail = %q; want overdue warning", status, detail)
+				}
+			case stale:
+				if status != StatusError || !strings.HasSuffix(detail, "(CRITICAL: stale)") {
+					t.Fatalf("status = %v, detail = %q; want stale error", status, detail)
+				}
+			}
+		})
+	}
+}

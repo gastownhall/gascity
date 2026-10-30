@@ -734,15 +734,21 @@ func latestOrderFiredAt(evts []events.Event, subject string) time.Time {
 // orderFiringPeriod is how far apart a healthy order fires: its expected
 // interval plus one patrol interval, because the orders lane evaluates gates
 // only during passes that start up to one patrol interval after the previous
-// pass ended.
+// pass ended. A non-positive patrol interval lets passes run back to back, so
+// the period never drops below the expected interval.
 func orderFiringPeriod(expected, patrol time.Duration) time.Duration {
-	return expected + patrol
+	return expected + max(patrol, 0)
 }
 
 // orderFiringOverdueAfter is the age at which a fired order is overdue.
 func orderFiringOverdueAfter(expected, patrol time.Duration) time.Duration {
 	period := orderFiringPeriod(expected, patrol)
 	return period + period/2
+}
+
+// orderFiringStaleAfter is the age at which a fired order is stale.
+func orderFiringStaleAfter(expected, patrol time.Duration) time.Duration {
+	return 3 * orderFiringPeriod(expected, patrol)
 }
 
 func classifyOrderFiring(order orders.Order, now time.Time, expected, patrol time.Duration, lastFired, controllerStarted time.Time) (CheckStatus, CheckSeverity, string) {
@@ -767,7 +773,7 @@ func classifyOrderFiring(order orders.Order, now time.Time, expected, patrol tim
 
 	age := nonNegativeDuration(now.Sub(lastFired))
 	switch {
-	case age >= expected*3:
+	case age >= orderFiringStaleAfter(expected, patrol):
 		return StatusError, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (CRITICAL: stale)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
 	case age >= orderFiringOverdueAfter(expected, patrol):
 		return StatusWarning, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (overdue)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
