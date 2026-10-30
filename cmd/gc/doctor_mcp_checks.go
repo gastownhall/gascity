@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -27,7 +28,9 @@ type mcpTargetConflict struct {
 	Target   string
 	Agents   []string
 	// Cause names the agent-local mcp/ directory behind the conflict when
-	// it is an implicit agent against one that defines its own servers.
+	// an implicit agent and an agent with servers from its own mcp/
+	// directory project different payloads at their scope root
+	// (mcpAgentLocalConflictCause).
 	Cause string
 }
 
@@ -94,7 +97,7 @@ func (c *mcpSharedTargetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckRe
 		Status:  doctor.StatusError,
 		Message: summarizeMCPIssues(details),
 		Details: details,
-		FixHint: `make the effective MCP payload identical for every agent that shares a provider-native target, or split them onto different targets`,
+		FixHint: `make the effective MCP payload identical for every agent that shares a provider-native target (define shared servers in an mcp/ directory they all receive), or give them different work_dirs`,
 	}
 }
 
@@ -115,17 +118,14 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 	if cfg == nil || len(cfg.Agents) == 0 {
 		return mcpProjectionHealth{}
 	}
-
-	type targetState struct {
-		hashes map[string][]*config.Agent
-	}
-
-	targets := make(map[string]*targetState)
 	var (
-		issues []string
-		skips  mcpSkipGroups
+		// stage1 holds the claimants gc start compares at stage 1, empty
+		// catalogs included; writers holds the agents with servers to
+		// write, at stage 1 or stage 2.
+		stage1, writers mcpTargetClaims
+		issues          []string
+		skips           mcpSkipGroups
 	)
-
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
 		view, err := resolveConfiguredAgentMCPProjection(cityPath, cfg, agent, lookPath)
@@ -134,57 +134,56 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 			continue
 		}
 		skips.add(mcpAgentLabel(agent), view.Skipped)
-		// Stage-1 claimants are counted as gc start counts them, empty
-		// catalogs included; a stage-2 agent claims its work_dir target
-		// only with servers to write. An ACP session receives its
-		// servers in-band and writes no provider-native file, so it
-		// shares no target with anyone.
-		if !claimsStage1MCPTarget(view) && !claimsStage2MCPTarget(view) {
-			continue
-		}
+		// A stage-2 work_dir can be another agent's scope root, so writers
+		// are compared across deliveries. An empty stage-1 catalog is
+		// compared only with the other stage-1 claimants of its target, as
+		// gc start compares it. An ACP session receives its servers
+		// in-band and writes no provider-native file, so it shares no
+		// target with anyone.
 		key := view.Projection.Provider + "|" + filepath.Clean(view.Projection.Target)
-		state := targets[key]
-		if state == nil {
-			state = &targetState{hashes: make(map[string][]*config.Agent)}
-			targets[key] = state
+		if claimsStage1MCPTarget(view) {
+			stage1.add(key, view)
 		}
-		hash := view.Projection.Hash()
-		state.hashes[hash] = append(state.hashes[hash], agent)
+		if writesMCPTarget(view) {
+			writers.add(key, view)
+		}
 	}
-
 	sort.Strings(issues)
+	return mcpProjectionHealth{
+		issues:    issues,
+		skips:     skips.lines(),
+		conflicts: mcpTargetConflicts(cfg.Session.Provider, &stage1, &writers),
+	}
+}
 
-	conflicts := make([]mcpTargetConflict, 0, len(targets))
-	for key, state := range targets {
-		if len(state.hashes) < 2 {
-			continue
-		}
-		parts := strings.SplitN(key, "|", 2)
-		hashes := make([]string, 0, len(state.hashes))
-		for hash := range state.hashes {
-			hashes = append(hashes, hash)
-		}
-		sort.Strings(hashes)
-		agents := make([]string, 0, 4)
-		cause := ""
-		for i, hash := range hashes {
-			for _, member := range state.hashes[hash] {
-				agents = append(agents, member.QualifiedName())
+// mcpTargetConflicts returns every target whose claimants in one of sets
+// project different payloads, sorted by target and provider. A target that
+// conflicts in more than one set is reported once, naming the claimants of
+// each set it conflicts in and the first agent-local cause.
+func mcpTargetConflicts(sessionProvider string, sets ...*mcpTargetClaims) []mcpTargetConflict {
+	byKey := make(map[string]*mcpTargetConflict)
+	for _, set := range sets {
+		for key, claim := range set.byKey {
+			if len(claim.hashes) < 2 {
+				continue
 			}
-			for _, other := range hashes[i+1:] {
-				if cause != "" {
-					break
-				}
-				cause = mcpAgentLocalConflictCauseAmong(state.hashes[hash], state.hashes[other])
+			conflict := byKey[key]
+			if conflict == nil {
+				target := claim.first().Projection
+				conflict = &mcpTargetConflict{Provider: target.Provider, Target: filepath.Clean(target.Target)}
+				byKey[key] = conflict
+			}
+			conflict.Agents = append(conflict.Agents, claim.agents(claim.hashes...)...)
+			if conflict.Cause == "" {
+				conflict.Cause = claim.agentLocalCause(sessionProvider)
 			}
 		}
-		sort.Strings(agents)
-		conflicts = append(conflicts, mcpTargetConflict{
-			Provider: parts[0],
-			Target:   parts[1],
-			Agents:   agents,
-			Cause:    cause,
-		})
+	}
+	conflicts := make([]mcpTargetConflict, 0, len(byKey))
+	for _, conflict := range byKey {
+		slices.Sort(conflict.Agents)
+		conflict.Agents = slices.Compact(conflict.Agents)
+		conflicts = append(conflicts, *conflict)
 	}
 	sort.Slice(conflicts, func(i, j int) bool {
 		if conflicts[i].Target != conflicts[j].Target {
@@ -192,13 +191,14 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 		}
 		return conflicts[i].Provider < conflicts[j].Provider
 	})
-	return mcpProjectionHealth{issues: issues, skips: skips.lines(), conflicts: conflicts}
+	return conflicts
 }
 
-// claimsStage2MCPTarget reports whether a resolved view writes a stage-2
-// target: the provider-native file in a work_dir other than its scope root.
-func claimsStage2MCPTarget(view resolvedMCPProjection) bool {
-	return view.Delivery == "stage2" &&
+// writesMCPTarget reports whether a resolved view has servers to write to a
+// provider-native file: at stage 1 to its scope root, or at stage 2 to a
+// work_dir other than its scope root.
+func writesMCPTarget(view resolvedMCPProjection) bool {
+	return (view.Delivery == "stage1" || view.Delivery == "stage2") &&
 		len(view.Catalog.Servers) > 0 &&
 		strings.TrimSpace(view.Projection.Provider) != "" &&
 		strings.TrimSpace(view.Projection.Target) != ""

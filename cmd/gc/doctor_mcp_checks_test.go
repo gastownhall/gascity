@@ -341,3 +341,88 @@ args = ["beta-notes"]
 	}
 	t.Fatalf("details = %#v, want the shared work_dir target naming alpha and beta", result.Details)
 }
+
+// A city-scoped agent whose work_dir is a rig root writes that rig's
+// provider-native file at stage 2, where the rig's implicit agent claims it at
+// stage 1 with an empty catalog. gc start's stage-1 gate compares stage-1
+// claimants only, and the agent's stage-2 pre-start skips implicit peers, so
+// the city starts; mcp-shared-target agrees.
+func TestMCPSharedTargetDoctorCheckAgreesWithStartOnStage2WriterAtRigRoot(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMCPSource(t, filepath.Join(cityPath, "agents", "worker", "mcp", "notes.toml"), "name = \"notes\"\ncommand = \"uvx\"\n")
+	cfg := stage2WriterAtRigRoot(t, cityPath, "")
+
+	if _, err := buildStage1MCPTargets(cityPath, cfg, stubLookPath, io.Discard); err != nil {
+		t.Fatalf("buildStage1MCPTargets: %v, want the city to start", err)
+	}
+	worker, err := resolveConfiguredAgentMCPProjection(cityPath, cfg, &cfg.Agents[0], stubLookPath)
+	if err != nil {
+		t.Fatalf("resolving worker: %v", err)
+	}
+	if err := validateStage2TargetClaimants(cityPath, cfg, &cfg.Agents[0], worker.Projection, stubLookPath); err != nil {
+		t.Fatalf("validateStage2TargetClaimants: %v, want the worker's pre-start to pass", err)
+	}
+	result := newMCPSharedTargetDoctorCheck(cityPath, cfg, stubLookPath).Run(&doctor.CheckContext{CityPath: cityPath})
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("mcp-shared-target = %v (%s; %#v), want OK: gc start accepts this city", result.Status, result.Message, result.Details)
+	}
+}
+
+// When the rig's implicit agent has servers to write too, from the city's
+// mcp/, the worker's stage-2 payload at the rig root diverges from it, and
+// mcp-shared-target reports the shared file. The worker already has its own
+// work_dir, so the report names no agent-local cause and no work_dir remedy.
+func TestMCPSharedTargetDoctorCheckReportsStage2WriterDivergingAtRigRoot(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMCPSource(t, filepath.Join(cityPath, "mcp", "notes.toml"), "name = \"notes\"\ncommand = \"uvx\"\n")
+	writeMCPSource(t, filepath.Join(cityPath, "agents", "worker", "mcp", "private.toml"), "name = \"private\"\ncommand = \"private-mcp\"\n")
+	cfg := stage2WriterAtRigRoot(t, cityPath, filepath.Join(cityPath, "mcp"))
+
+	result := newMCPSharedTargetDoctorCheck(cityPath, cfg, stubLookPath).Run(&doctor.CheckContext{CityPath: cityPath})
+	if result.Status != doctor.StatusError || len(result.Details) != 1 {
+		t.Fatalf("mcp-shared-target = %v, details %#v, want one conflict", result.Status, result.Details)
+	}
+	detail := result.Details[0]
+	for _, want := range []string{filepath.Join(cityPath, "rigs", "myrig", ".mcp.json"), "myrig/claude", "worker"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("detail = %q, want it to contain %q", detail, want)
+		}
+	}
+	for _, unwanted := range []string{"agent-local", "work_dir"} {
+		if strings.Contains(detail, unwanted) {
+			t.Fatalf("detail = %q, want no %q: the worker already writes to its own work_dir", detail, unwanted)
+		}
+	}
+}
+
+// stage2WriterAtRigRoot returns a tmux city whose city-scoped "worker", with
+// its own mcp/ directory, has the root of rig "myrig" as its work_dir, beside
+// that rig's implicit claude agent. packMCPDir is the city's mcp/ directory,
+// or "". It fails t unless the worker writes the rig's .mcp.json at stage 2
+// where the implicit agent claims it at stage 1.
+func stage2WriterAtRigRoot(t *testing.T, cityPath, packMCPDir string) *config.City {
+	t.Helper()
+	rigPath := filepath.Join(cityPath, "rigs", "myrig")
+	cfg := &config.City{
+		PackMCPDir: packMCPDir,
+		Session:    config.SessionConfig{Provider: "tmux"},
+		Providers:  map[string]config.ProviderSpec{"claude": {Command: "echo", PromptMode: "none"}},
+		Rigs:       []config.Rig{{Name: "myrig", Path: rigPath}},
+		Agents: []config.Agent{
+			{Name: "worker", Scope: "city", Provider: "claude", WorkDir: "rigs/myrig", MCPDir: filepath.Join(cityPath, "agents", "worker", "mcp")},
+			{Name: "claude", Dir: "myrig", Provider: "claude", Implicit: true},
+		},
+	}
+	target := filepath.Join(rigPath, ".mcp.json")
+	for i, delivery := range []string{"stage2", "stage1"} {
+		agent := &cfg.Agents[i]
+		view, err := resolveConfiguredAgentMCPProjection(cityPath, cfg, agent, stubLookPath)
+		if err != nil {
+			t.Fatalf("resolving %s: %v", agent.QualifiedName(), err)
+		}
+		if view.Delivery != delivery || filepath.Clean(view.Projection.Target) != target {
+			t.Fatalf("%s delivers %q to %q, want %q to %q", agent.QualifiedName(), view.Delivery, view.Projection.Target, delivery, target)
+		}
+	}
+	return cfg
+}
