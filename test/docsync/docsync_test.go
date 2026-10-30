@@ -800,6 +800,8 @@ func TestNoKnownStaleDocReferences(t *testing.T) {
 		"session.Fake",
 		"agent.Fake",
 		"internal/dolt/",
+		// [maintenance.dolt] is observe-only: no GC, no backup (#7995).
+		"CALL DOLT_GC + backup snapshot",
 	}
 
 	var hits []string

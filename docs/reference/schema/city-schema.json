@@ -1638,13 +1638,13 @@
         },
         "gc_timeout": {
           "type": "string",
-          "description": "GCTimeout is the ceiling for CALL DOLT_GC() as a duration string.\nDefaults to 10m.",
+          "description": "GCTimeout is the intended ceiling for CALL DOLT_GC() as a duration\nstring. Defaults to 10m. It has no effect while the loop is\nobserve-only.",
           "default": "10m"
         }
       },
       "additionalProperties": false,
       "type": "object",
-      "description": "DoltMaintenance configures the periodic Dolt store maintenance loop."
+      "description": "DoltMaintenance configures the periodic Dolt store maintenance loop, which is observe-only for now: it takes no backup snapshot and runs no CALL DOLT_GC."
     },
     "EventsConfig": {
       "properties": {
@@ -2043,7 +2043,7 @@
       "properties": {
         "dolt": {
           "$ref": "#/$defs/DoltMaintenance",
-          "description": "Dolt configures the weekly Dolt store maintenance loop\n(CALL DOLT_GC + backup snapshot)."
+          "description": "Dolt configures the periodic Dolt store maintenance loop. The loop\nis observe-only for now: it takes no backup snapshot and runs no\nCALL DOLT_GC."
         }
       },
       "additionalProperties": false,
