@@ -21,7 +21,7 @@ go_library(
 go_test(
     name = "genshell_test",
     srcs = [
-        "genshell_concurrency_test.go",
+        "genshell_concurrency_windows_test.go",
         "genshell_env_test.go",
         "genshell_env_windows_test.go",
         "genshell_test.go",
