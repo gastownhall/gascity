@@ -409,14 +409,14 @@ DoltConfig holds optional dolt server overrides.
 
 ## DoltMaintenance
 
-DoltMaintenance configures the periodic Dolt store maintenance loop.
+DoltMaintenance configures the periodic Dolt store maintenance loop, which is observe-only: each cycle runs the disk-space pre-flight, records run history and events, and mails AlertTo on failure — it takes no backup snapshot and runs no CALL DOLT_GC, so a completed run does not mean the store was compacted.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `enabled` | boolean |  |  | Enabled toggles the maintenance loop. Defaults to false (opt-in). |
 | `interval` | string |  | `168h` | Interval is the cadence between maintenance runs as a duration string (e.g., "168h"). Defaults to 168h (weekly). |
 | `alert_to` | string |  |  | AlertTo is the agent identity to mail on failure (e.g., "gascity/mayor"). Empty disables alert mail. |
-| `gc_timeout` | string |  | `10m` | GCTimeout is the ceiling for CALL DOLT_GC() as a duration string. Defaults to 10m. |
+| `gc_timeout` | string |  | `10m` | GCTimeout is the intended ceiling for CALL DOLT_GC() as a duration string. Defaults to 10m. It has no effect while the loop is observe-only. |
 
 ## EventsConfig
 
@@ -571,7 +571,7 @@ MaintenanceConfig groups periodic store-maintenance subsections.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `dolt` | DoltMaintenance |  |  | Dolt configures the weekly Dolt store maintenance loop (CALL DOLT_GC + backup snapshot). |
+| `dolt` | DoltMaintenance |  |  | Dolt configures the weekly Dolt store maintenance loop, which is observe-only for now: no backup snapshot, no CALL DOLT_GC. |
 
 ## ModelPricing
 
