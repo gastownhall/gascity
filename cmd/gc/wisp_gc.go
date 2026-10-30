@@ -263,7 +263,8 @@ func newWispGCForCity(cfg *config.City, cityName string) wispGC {
 
 // carryWispGCState hands a tracker rebuilt by a config reload the progress of
 // the one it replaces: lastRun, so the cadence counts from the last real pass
-// under the new interval. Config-derived fields (interval, TTLs, cityName)
+// under the new interval, and sessionPurgeCursor, so the closed-session sweep
+// resumes where it stopped. Config-derived fields (interval, TTLs, cityName)
 // and notes stay on next. A nil next (GC disabled) stays nil; a nil prev
 // (GC newly enabled) leaves next due on its first tick, as at process start.
 func carryWispGCState(prev, next wispGC) wispGC {
@@ -273,6 +274,7 @@ func carryWispGCState(prev, next wispGC) wispGC {
 		return next
 	}
 	n.lastRun = p.lastRun
+	n.sessionPurgeCursor = p.sessionPurgeCursor
 	return next
 }
 
