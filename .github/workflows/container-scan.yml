@@ -141,6 +141,25 @@ jobs:
             --format table \
             contrib/k8s
 
+  # Dockerfile.mail upgrades OS packages of a digest-pinned base by name. A pending
+  # upgrade exists before a CVE is scored against it, so this reports a stale list
+  # on the weekly schedule instead of as a red Image vulnerabilities job on
+  # whichever pull request touches contrib/k8s next. It is not a pull request check.
+  mail-os-upgrade-drift:
+    name: Mail image OS upgrade list
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    needs: runner-policy
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Compare the --only-upgrade list with the pinned base's pending upgrades
+        run: .github/scripts/mcp-mail-os-upgrade-drift.sh
+
   image-vulnerabilities:
     name: Image vulnerabilities
     needs: runner-policy
