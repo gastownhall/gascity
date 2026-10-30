@@ -2,8 +2,9 @@
 
 `release-gates/*.md` files record a reviewer's/agent's sign-off on a deploy
 branch, one numbered criterion per row. This doc defines what the "Tests
-pass" criterion must contain. No prior doc in the repo defined this — see
-"Why this doc exists" below.
+pass" criterion must contain, and the `Base ref` field and criterion 6
+(clean merge) that CI re-verifies at merge time. No prior doc in the repo
+defined this — see "Why this doc exists" below.
 
 ## The rule
 
@@ -33,6 +34,44 @@ actual result) explicitly, or don't claim that criterion covers this path.
 The general principle behind the example: "tests pass" must mean "the
 gate's actual required checks passed," not "a command I chose passed."
 Don't let convenience substitute for coverage.
+
+## Base ref and criterion 6 (clean merge)
+
+Every record carries a `Base ref: <ref>@<40-hex sha>` line, for example
+``Base ref: `origin/main@<sha>` ``. **Base ref is a required field.** It pins
+the base the clean-merge claim was made against; a record without it fails CI.
+
+Criterion 6 (the row numbered `6`) must cite the literal invocation and what
+it reported:
+
+```
+| 6 | Branch diverges cleanly from main | **PASS** | `git merge-tree --write-tree origin/main <head-sha>` exited 0 and produced tree <40-hex tree>. |
+```
+
+`<head-sha>` is the reviewed commit's SHA, never `HEAD` or a branch name,
+which cannot be re-derived later. The tree hash is the first line of
+`git merge-tree --write-tree` output.
+
+**Criterion 6 is mechanically re-verified by CI at merge time.** On a pull
+request that adds or modifies `release-gates/*.md`, the `release-gate-freshness`
+job (`.github/workflows/ci.yml`, a member of `Check` and `CI / required`) runs
+`.github/workflows/scripts/release_gate_freshness.py`. For each changed record
+it re-runs the cited merge-tree with the base ref resolved to its **current**
+tip and fails when:
+
+- the `Base ref` field, the invocation, a commit SHA head or the tree hash is
+  missing;
+- the base ref no longer resolves, or the cited head is not in the PR's
+  history (the branch was rebased or amended after the gate ran);
+- the merge is no longer clean, or yields a different tree than recorded.
+
+The failure names the record and prints the old and new base tip and the old
+and new tree (or the conflicting files). The check is deliberately strict:
+the tree matches only while the base has not moved in a way that changes the
+merge, so a commit that lands on the base after the gate was run makes the
+record stale and the gate must be re-run. Only the PR's own records are
+checked; landed records are not swept. The re-run merges the cited head, not
+the PR's HEAD, because the PR's HEAD contains the record itself.
 
 ## Why this doc exists
 

@@ -332,7 +332,16 @@ const (
 	// CI / required, whose needs are unchanged. Reviewed delta: two jobs, two
 	// filters and two outputs removed; no new job, trigger, step command or
 	// permission.
-	expectedCIExecutionHash     = "8d71c559b60d2715b518faf498209843132276ed3e448929e1841f082136e6cf"
+	//
+	// Bumped again (ga-wnziq7.1, release-gate criterion 6 freshness): a new
+	// release-gate-freshness job runs release_gate_freshness.py on pull
+	// requests that add or modify release-gates/*.md, with a `changes`
+	// release_gates filter and output (not folded into `shared`). The job is
+	// in the needs of Check and CI / required and in both allow_skipped
+	// sets. Reviewed delta: one job, one filter, one output; the job reads
+	// the repository with contents: read, and no trigger, permission or
+	// secret is added.
+	expectedCIExecutionHash     = "2a8b4a62455463a1857bde99463c20f628db7da145963e12c5cee6df3ee8b697"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

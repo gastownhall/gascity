@@ -264,12 +264,16 @@ var mergeQueueEventExprs = map[string]string{
 	"bazel.yml jobs.worker-host.steps[default-branch].env.DEFAULT_BRANCH":                  "main",
 	"bazel.yml jobs.worker-host.steps[default-branch].env.BASE_SHA":                        mergeQueueBaseSHA, // merge_group.base_sha (fix 12)
 	// ci.yml
-	"ci.yml concurrency.group":                               "ci-merge_group-" + mergeQueueRef,
-	"ci.yml concurrency.cancel-in-progress":                  "false",
-	"ci.yml jobs.runner-policy.steps[policy].env.EVENT_NAME": "merge_group",
-	"ci.yml jobs.runner-policy.steps[policy].env.PR_AUTHOR":  "", // runner_policy.py ignores it
-	"ci.yml jobs.changes.steps[filter].with.base":            mergeQueueBaseSHA,
-	"ci.yml jobs.changes.steps[filter].with.ref":             mergeQueueHeadSHA,
+	"ci.yml concurrency.group":                                                                                         "ci-merge_group-" + mergeQueueRef,
+	"ci.yml concurrency.cancel-in-progress":                                                                            "false",
+	"ci.yml jobs.runner-policy.steps[policy].env.EVENT_NAME":                                                           "merge_group",
+	"ci.yml jobs.runner-policy.steps[policy].env.PR_AUTHOR":                                                            "", // runner_policy.py ignores it
+	"ci.yml jobs.changes.steps[filter].with.base":                                                                      mergeQueueBaseSHA,
+	"ci.yml jobs.changes.steps[filter].with.ref":                                                                       mergeQueueHeadSHA,
+	"ci.yml jobs.release-gate-freshness.if":                                                                            "false", // pull_request only; skipped in a merge group
+	"ci.yml jobs.release-gate-freshness.steps[Fetch the base ref tip].env.BASE_REF":                                    "",      // (job skipped)
+	"ci.yml jobs.release-gate-freshness.steps[Re-verify criterion 6 of the changed release-gate records].env.BASE_SHA": "",      // (job skipped)
+	"ci.yml jobs.release-gate-freshness.steps[Re-verify criterion 6 of the changed release-gate records].env.HEAD_SHA": "",      // (job skipped)
 	// codeql.yml: a merge group reports the required Analyze checks from
 	// the merge-group step alone, on the 2 vCPU runner
 	// (codeql_merge_group_test.go).

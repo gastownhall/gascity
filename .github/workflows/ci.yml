@@ -67,6 +67,10 @@ jobs:
       # break. Downstream consumers read these outputs unchanged.
       packs: ${{ steps.filter.outputs.packs == 'true' || steps.filter.outputs.shared == 'true' }}
       credential_provider: ${{ steps.filter.outputs.credential_provider == 'true' || steps.filter.outputs.shared == 'true' }}
+      # Release-gate records the change touches. Deliberately not folded with
+      # `shared`: the freshness check reads the PR's own records, so a
+      # cross-cutting change that touches none has nothing to check.
+      release_gates: ${{ steps.filter.outputs.release_gates }}
       # Raw cross-cutting signal and per-run coverage classification (metric).
       shared: ${{ steps.filter.outputs.shared }}
       suite_mode: ${{ steps.coverage.outputs.suite_mode }}
@@ -101,6 +105,8 @@ jobs:
               - 'internal/credentialprovider/**'
               - 'internal/testenv/**'
               - 'internal/testutil/**'
+            release_gates:
+              - 'release-gates/**'
             # Cross-cutting core paths. A change here is folded into every
             # gated output above, forcing a full union run. Beads is the
             # universal persistence substrate, events the universal observation
@@ -143,7 +149,10 @@ jobs:
   #     Windows process-tree tests run on a Blacksmith Windows runner;
   #   - pack-gate: live checks against the gascity-packs registry (the
   #     bundled pack's provenance pins and a registry smoke), not tests of
-  #     this tree.
+  #     this tree;
+  #   - release-gate-freshness: re-derives criterion 6 of each release-gate
+  #     record the PR adds or modifies against the live base ref, which needs
+  #     the PR's git history and a fetched base, not a hermetic sandbox.
   # Check and CI / required keep their names for branch protection and the
   # main ruleset; both fan in exactly those gating jobs, and every job here
   # feeds CI / required. The advisory live probes of upstream code (contract
@@ -218,6 +227,33 @@ jobs:
         env:
           GC_TEST_GASCITY_PACKS_REGISTRY: main
 
+  # Merge-time freshness of release-gate criterion 6 (ga-wnziq7.1). A record
+  # pins `Base ref: <ref>@<sha>` and the `git merge-tree --write-tree` tree it
+  # reported; this job re-runs that merge against the base ref's current tip
+  # and fails the PR when the base moved (tree differs), the merge is no
+  # longer clean, or the Base ref field is missing. It checks only the
+  # records in this PR's diff, never the landed ones.
+  release-gate-freshness:
+    name: Release gate freshness
+    needs:
+      - runner-policy
+      - changes
+    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.release_gates == 'true' }}
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: "0"
+      - name: Fetch the base ref tip
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: git fetch --no-tags origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+      - name: Re-verify criterion 6 of the changed release-gate records
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 .github/workflows/scripts/release_gate_freshness.py --base-sha "$BASE_SHA" --head-sha "$HEAD_SHA"
+
   # The main ruleset's required "Check". It fans in the same gating jobs as
   # CI / required (the Bazel lanes gate through bazel.yml's own required
   # checks).
@@ -230,6 +266,7 @@ jobs:
       - changes
       - credential-provider-windows
       - pack-gate
+      - release-gate-freshness
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
@@ -242,9 +279,10 @@ jobs:
           import os
           import sys
 
-          # credential-provider-windows and pack-gate are path-gated: a
-          # skipped result means the change does not touch their paths.
-          allow_skipped = {"credential-provider-windows", "pack-gate"}
+          # credential-provider-windows, pack-gate and release-gate-freshness
+          # are path-gated: a skipped result means the change does not touch
+          # their paths.
+          allow_skipped = {"credential-provider-windows", "pack-gate", "release-gate-freshness"}
           needs = json.loads(os.environ["NEEDS_JSON"])
           failed = {}
           for job, meta in sorted(needs.items()):
@@ -278,6 +316,7 @@ jobs:
       - check
       - credential-provider-windows
       - pack-gate
+      - release-gate-freshness
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
@@ -290,9 +329,10 @@ jobs:
           import os
           import sys
 
-          # credential-provider-windows and pack-gate are path-gated: a
-          # skipped result means the change does not touch their paths.
-          allow_skipped = {"credential-provider-windows", "pack-gate"}
+          # credential-provider-windows, pack-gate and release-gate-freshness
+          # are path-gated: a skipped result means the change does not touch
+          # their paths.
+          allow_skipped = {"credential-provider-windows", "pack-gate", "release-gate-freshness"}
           needs = json.loads(os.environ["NEEDS_JSON"])
           failed = {}
           for job, meta in sorted(needs.items()):

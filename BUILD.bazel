@@ -116,6 +116,16 @@ py_test(
     main = ".github/workflows/scripts/test_ci_suite_coverage.py",
 )
 
+py_test(
+    name = "release_gate_freshness_test",
+    srcs = [
+        ".github/workflows/scripts/release_gate_freshness.py",
+        ".github/workflows/scripts/test_release_gate_freshness.py",
+    ],
+    imports = [".github/workflows/scripts"],
+    main = ".github/workflows/scripts/test_release_gate_freshness.py",
+)
+
 go_library(
     name = "gascity",
     srcs = ["schemas_embed.go"],
