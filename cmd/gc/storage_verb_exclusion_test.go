@@ -304,3 +304,34 @@ func TestRemoteRuntimeIsReadFromTheCityNotTheShell(t *testing.T) {
 		t.Fatal("a remote GC_SESSION override was ignored")
 	}
 }
+
+// TestExecRuntimeCountsAsRemote is owner decision D4: an exec: session
+// runtime is remote unless its handshake declares locality=local, and none can
+// yet. An exec: city refuses the split without --force=remote-runtime.
+func TestExecRuntimeCountsAsRemote(t *testing.T) {
+	request, _ := exclusionCity(t)
+	t.Setenv("GC_SESSION", "")
+	request.Cfg.Session.Provider = "exec:/opt/gc/gc-session-k8s"
+	code, stderr := migrateFor(t, request)
+	if code == 0 || !strings.Contains(stderr, `"exec:/opt/gc/gc-session-k8s"`) || !strings.Contains(stderr, "--force=remote-runtime") {
+		t.Fatalf("migration on an exec: runtime = %d %q, want the remote-runtime refusal", code, stderr)
+	}
+	// The GC_SESSION override can only add remoteness.
+	t.Setenv("GC_SESSION", "exec:/opt/gc/anything")
+	if _, remote := cityRunsRemoteSessions(&config.City{}); !remote {
+		t.Error("an exec: GC_SESSION override was not remote")
+	}
+	t.Setenv("GC_SESSION", "")
+	// The one seam PAR-EXEC fills: a handshake declaring locality=local.
+	prev := execRuntimeDeclaresLocal
+	t.Cleanup(func() { execRuntimeDeclaresLocal = prev })
+	execRuntimeDeclaresLocal = func(string) bool { return true }
+	if _, remote := cityRunsRemoteSessions(request.Cfg); remote {
+		t.Error("an exec: runtime declaring locality=local still counted as remote")
+	}
+	request.Force = storageForce{RemoteRuntime: true}
+	execRuntimeDeclaresLocal = prev
+	if code, stderr := migrateFor(t, request); code != 0 {
+		t.Fatalf("attested migration on an exec: runtime = %d %s", code, stderr)
+	}
+}

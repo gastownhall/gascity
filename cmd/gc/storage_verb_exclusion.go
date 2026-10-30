@@ -213,7 +213,8 @@ var storageVerbSessionInventory = func(cfg *config.City, cityPath string) ([]str
 }
 
 // cityRunsRemoteSessions reports whether the city's session runtime runs its
-// sessions on other hosts: k8s, hybrid (whose remote leg is k8s) or ssh:.
+// sessions on other hosts: k8s, hybrid (whose remote leg is k8s), ssh:, or an
+// exec: runtime that does not declare itself local (sessionRuntimeIsRemote).
 //
 // The city's own [session] provider decides, not the operator's shell: a
 // GC_SESSION override in the shell running this command (a developer's
@@ -225,17 +226,38 @@ func cityRunsRemoteSessions(cfg *config.City) (string, bool) {
 	if cfg == nil {
 		return "", false
 	}
-	remote := func(name string) bool {
-		return name == "k8s" || name == "hybrid" || strings.HasPrefix(name, "ssh:")
-	}
 	configured := strings.TrimSpace(cfg.Session.Provider)
-	if remote(configured) {
+	if sessionRuntimeIsRemote(configured) {
 		return configured, true
 	}
-	if override := strings.TrimSpace(os.Getenv("GC_SESSION")); remote(override) {
+	if override := strings.TrimSpace(os.Getenv("GC_SESSION")); sessionRuntimeIsRemote(override) {
 		return override, true
 	}
 	return configured, false
+}
+
+// sessionRuntimeIsRemote reports whether a session-runtime selection name runs
+// sessions on another host. k8s, hybrid and ssh: always do. An exec: runtime
+// is remote unless its handshake declares locality=local (owner decision D4):
+// execRuntimeDeclaresLocal is where PAR-EXEC will consult that.
+func sessionRuntimeIsRemote(name string) bool {
+	switch {
+	case name == "k8s" || name == "hybrid" || strings.HasPrefix(name, "ssh:"):
+		return true
+	case strings.HasPrefix(name, "exec:"):
+		return !execRuntimeDeclaresLocal(strings.TrimPrefix(name, "exec:"))
+	}
+	return false
+}
+
+// execRuntimeDeclaresLocal reports whether an exec: session runtime's
+// handshake declares locality=local. The handshake carries no locality yet
+// (PAR-EXEC adds it), so no exec runtime is local today: every one counts as
+// remote. PAR-EXEC replaces this body with the handshake read; it is a
+// variable so tests can stand in a local one.
+var execRuntimeDeclaresLocal = func(script string) bool {
+	_ = script
+	return false
 }
 
 // sharedWorkStoreRefusal is the shared-store check for this city's work store
