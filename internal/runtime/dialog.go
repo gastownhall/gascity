@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 var (
@@ -2040,6 +2042,18 @@ const (
 	creditBalanceStopHeadlessPhrase = "credit balance is too low"
 )
 
+// The raw Anthropic API error for an exhausted credit balance, as Claude Code
+// renders it: an "API Error: 4xx" line whose JSON body carries the sentence
+// "Your credit balance is too low to access the Anthropic API". The sentence
+// starts about 90 columns in, so a narrow pane wraps it onto indented
+// continuation lines; it is matched with all whitespace removed so word and
+// mid-word wraps both join back up.
+const (
+	apiClientErrorPrefix      = "api error: 4"
+	apiCreditBalanceSentence  = "creditbalanceistoolowtoaccess"
+	apiErrorContinuationLines = 5
+)
+
 // containsCreditBalanceStop reports whether lowercased content shows Claude
 // Code's exhausted-credit stop as an error line of its own.
 //
@@ -2048,14 +2062,38 @@ const (
 // on a session that merely quoted the phrase and then crashed is worse than a
 // miss, which degrades to ordinary crash counting.
 func containsCreditBalanceStop(lower string) bool {
-	for _, line := range strings.Split(lower, "\n") {
+	lines := strings.Split(lower, "\n")
+	for i, line := range lines {
 		body := creditErrorBody(line)
 		if strings.HasPrefix(body, creditBalanceStopPhrase) ||
 			strings.HasPrefix(body, creditBalanceStopHeadlessPhrase) {
 			return true
 		}
+		if strings.HasPrefix(body, apiClientErrorPrefix) &&
+			strings.Contains(apiErrorBlock(lines[i:]), apiCreditBalanceSentence) {
+			return true
+		}
 	}
 	return false
+}
+
+// apiErrorBlock joins an API error line (lines[0]) with its wrapped
+// continuation: up to apiErrorContinuationLines following lines that are
+// non-blank and indented, stopping at the first that is not. All whitespace is
+// dropped so a wrap at any column, even mid-word, rejoins the sentence, while
+// the bound keeps a later, unrelated line from completing the match.
+func apiErrorBlock(lines []string) string {
+	block := []string{lines[0]}
+	for _, line := range lines[1:] {
+		if len(block) > apiErrorContinuationLines || strings.TrimSpace(line) == "" {
+			break
+		}
+		if r, _ := utf8.DecodeRuneInString(line); !unicode.IsSpace(r) {
+			break
+		}
+		block = append(block, line)
+	}
+	return strings.Join(strings.Fields(strings.Join(block, "\n")), "")
 }
 
 // creditErrorBody returns line with its indentation and Claude Code's leading

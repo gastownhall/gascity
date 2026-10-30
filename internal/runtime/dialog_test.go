@@ -1934,6 +1934,7 @@ func TestContainsFeedbackSurveyModal(t *testing.T) {
 // pane never renders a matching stop line itself.
 func TestProviderTerminalErrorReasonCreditBalance(t *testing.T) {
 	t.Parallel()
+	const apiCreditError = `API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`
 	const tuiStop = "  ⎿  Credit balance too low · Add funds: https://platform.claude.com/settings/billing"
 	tests := []struct {
 		name    string
@@ -1968,6 +1969,22 @@ func TestProviderTerminalErrorReasonCreditBalance(t *testing.T) {
 		{name: "startup death error with diagnostic", content: strings.Join([]string{
 			`session died during startup: session "worker"; diagnostic written to /tmp/city/.gc/crash/worker.log; last pane output:`,
 			"⎿  Credit balance too low · Add funds: https://platform.claude.com/settings/billing",
+			"",
+			"> ",
+		}, "\n"), want: "quota_exceeded"},
+		{name: "api error on one line under marker", content: "  ⎿  " + apiCreditError, want: "quota_exceeded"},
+		{name: "api error wrapped between words", content: strings.Join([]string{
+			"⏺ Bash(make test)",
+			`  ⎿  API Error: 400 {"type":"error","error":{"type":"invalid_request_error",`,
+			`     "message":"Your credit balance is too low to`,
+			`     access the Anthropic API. Please go to Plans & Billing to upgrade or`,
+			`     purchase credits."}}`,
+		}, "\n"), want: "quota_exceeded"},
+		{name: "api error wrapped mid-word", content: strings.Join([]string{
+			`  ⎿  API Error: 400 {"type":"error","error":{"type":"invalid_request_error",`,
+			`     "message":"Your credit balance is too lo`,
+			`     w to access the Anthropic API. Please go to Plans & Billing to upgrade `,
+			`     or purchase credits."}}`,
 			"",
 			"> ",
 		}, "\n"), want: "quota_exceeded"},
