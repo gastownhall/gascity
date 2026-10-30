@@ -4,6 +4,26 @@
 version = 1
 
 [[count]]
+path = ".github/workflows/ci.yml"
+resource = "test_target"
+calls = 2
+
+[[count]]
+path = ".github/workflows/fork-verify.yml"
+resource = "test_target"
+calls = 5
+
+[[count]]
+path = ".github/workflows/nightly.yml"
+resource = "test_target"
+calls = 2
+
+[[count]]
+path = "Makefile"
+resource = "test_target"
+calls = 38
+
+[[count]]
 path = "cmd/gc-write-mint/e2e_test.go"
 resource = "subprocess"
 calls = 1
@@ -1122,6 +1142,11 @@ calls = 2
 [[count]]
 path = "cmd/gc/rig_anywhere_test.go"
 resource = "cwd"
+calls = 2
+
+[[count]]
+path = "cmd/gc/rig_import_fixtures_test.go"
+resource = "subprocess"
 calls = 2
 
 [[count]]

@@ -696,6 +696,11 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		cr.setStandaloneStores(cityStore, buildStandaloneRigStores(cr.cfg, cr.cityPath, cr.stderr))
 	}
 
+	// One asynchronous rig containment census per controller boot (S4b,
+	// D4): rigs awaiting import, pending clears and rows written to a rig
+	// after its import are named once, here, and never in a CLI process.
+	cr.startRigResidueCensus(ctx)
+
 	// Record bead store health metric.
 	telemetry.RecordBeadStoreHealth(context.Background(), cr.cityName, cr.cityBeadStore() != nil)
 
@@ -2357,7 +2362,7 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(cfg *config.City, now time.Time
 }
 
 func (cr *CityRuntime) orderTrackingSweepStores(cfg *config.City) ([]beads.Store, []orderTrackingSweepTarget, func(), error) { //nolint:unparam // targets slice returned for callers that need sweep scope metadata; current call sites discard it
-	targets := orderTrackingSweepTargetsForConfig(cr.cityPath, cfg)
+	targets := withoutRelicFreeRigSweepTargets(cr.storageRoutes, orderTrackingSweepTargetsForConfig(cr.cityPath, cfg))
 	rigStores := cr.rigBeadStores()
 	var freshlyOpened []beads.Store
 	stores, err := orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {

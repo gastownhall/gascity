@@ -77,7 +77,9 @@ func attachGraftClassRefusal(cityPath, scopeRoot, attachBeadID string, scope, at
 	if attachStore != scope {
 		return nil
 	}
-	source, err := scope.Get(attachBeadID)
+	// Relic read (S4 debt) on a split city: the attach store is the scope
+	// store only when the bead lives in a pre-S4 rig tree (residence, S4a).
+	source, err := beads.RelicGet(scope, attachBeadID)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return nil

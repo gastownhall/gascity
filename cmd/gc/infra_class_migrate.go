@@ -2056,8 +2056,14 @@ func prepareInfraDestination(destination beads.Store) error {
 // city inside the window that the migration then refuses.
 func infraDestinationPopulatedRefusal(existing []beads.Bead) error {
 	for _, b := range existing {
-		if b.Metadata[infraMigrationStampKey] == "" {
+		switch stamp := b.Metadata[infraMigrationStampKey]; stamp {
+		case config.StorageWorkBinding:
+		case "":
 			return fmt.Errorf("binding already holds %d beads including %s, which this migration did not write: refusing to overwrite a populated destination", len(existing), b.ID)
+		default:
+			// Another copy wrote it — a rig import stamps rig:<rig> — and the
+			// binding may hold the only copy of that row.
+			return fmt.Errorf("binding already holds %d beads including %s, which another copy wrote (%s=%s), not this city migration: refusing to overwrite a populated destination", len(existing), b.ID, infraMigrationStampKey, stamp)
 		}
 	}
 	return nil

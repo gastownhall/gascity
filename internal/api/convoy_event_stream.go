@@ -443,7 +443,9 @@ func workflowEventBeadFromSubject(state State, subjectID string) (beads.Bead, bo
 	}
 
 	matches := make([]beads.Bead, 0, 2)
-	for _, info := range workflowStores(state) {
+	// Every rig leg, retired or not: the subject may be rig WORK, which a
+	// relic-free rig still holds (S4b retires its leg only for graph rows).
+	for _, info := range workflowStoresIncludingRetiredRigs(state) {
 		if info.store == nil {
 			continue
 		}

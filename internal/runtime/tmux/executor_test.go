@@ -985,12 +985,12 @@ func TestAgentInputTargetPrefersMarkerAndFailsClosed(t *testing.T) {
 		wantErr   error
 		wantCalls int
 	}{
-		{"marked pane behind a human claude", []string{"orphan\t@1.%1\tclaude\t111\nagent\t@2.%5\tsh\t222"}, "=w:@2.%5", nil, 1},
-		{"marked agent pane gone", []string{"orphan\t@1.%1\tclaude\t111\norphan\t@1.%2\tsh\t222"}, "", errAgentPaneGone, 1},
-		{"two marked agent panes", []string{"agent\t@1.%1\tclaude\t111\nagent\t@2.%5\tsh\t222"}, "", errAgentPaneAmbiguous, 1},
-		{"unmarked falls back to process names", []string{"pane\t@1.%1\tvim\t111\npane\t@1.%2\tclaude\t222", "GT_PROCESS_NAMES=claude"}, "=w:@1.%2", nil, 2},
-		{"unmarked single pane", []string{"pane\t@1.%1\tclaude\t111"}, "=w:@1.%1", nil, 1},
-		{"unmarked with no match takes the first pane", []string{"pane\t@1.%1\tvim\t111\npane\t@1.%2\tvim\t222", "GT_PROCESS_NAMES=claude"}, "=w:@1.%1", nil, 2},
+		{"marked pane behind a human claude", []string{"orphan\t@1.%1\tclaude\t111\tgc-eol\nagent\t@2.%5\tsh\t222\tgc-eol"}, "=w:@2.%5", nil, 1},
+		{"marked agent pane gone", []string{"orphan\t@1.%1\tclaude\t111\tgc-eol\norphan\t@1.%2\tsh\t222\tgc-eol"}, "", errAgentPaneGone, 1},
+		{"two marked agent panes", []string{"agent\t@1.%1\tclaude\t111\tgc-eol\nagent\t@2.%5\tsh\t222\tgc-eol"}, "", errAgentPaneAmbiguous, 1},
+		{"unmarked falls back to process names", []string{"pane\t@1.%1\tvim\t111\tgc-eol\npane\t@1.%2\tclaude\t222\tgc-eol", "GT_PROCESS_NAMES=claude"}, "=w:@1.%2", nil, 2},
+		{"unmarked single pane", []string{"pane\t@1.%1\tclaude\t111\tgc-eol"}, "=w:@1.%1", nil, 1},
+		{"unmarked with no match takes the first pane", []string{"pane\t@1.%1\tvim\t111\tgc-eol\npane\t@1.%2\tvim\t222\tgc-eol", "GT_PROCESS_NAMES=claude"}, "=w:@1.%1", nil, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			exec := &fakeExecutor{outs: tc.outs}
@@ -1002,6 +1002,90 @@ func TestAgentInputTargetPrefersMarkerAndFailsClosed(t *testing.T) {
 			}
 			if len(exec.calls) != tc.wantCalls {
 				t.Errorf("tmux calls = %q, want %d", exec.calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// deadPaneListExecutor answers list-panes the way a real tmux server does,
+// from the -F format it was actually sent, and then trims the output the way
+// realExecutor does (tmux 3.8 prints an empty #{pane_pid} for a dead pane that
+// remain-on-exit keeps, so a format ending in #{pane_pid} ends in a bare tab
+// that the trim eats).
+type deadPaneListExecutor struct {
+	panes []deadPaneRow
+}
+
+// deadPaneRow is one pane of deadPaneListExecutor's session; mark is the
+// marker column ("agent", "orphan" or "pane").
+type deadPaneRow struct{ mark, window, pane, cmd, pid string }
+
+func (e *deadPaneListExecutor) execute(args []string) (string, error) {
+	if tmuxSubcommand(args) != "list-panes" {
+		return "", nil
+	}
+	fields, ok := strings.CutPrefix(args[len(args)-1], agentPaneMarkerFormat+"\t")
+	if !ok {
+		return "", nil
+	}
+	lines := make([]string, len(e.panes))
+	for i, p := range e.panes {
+		lines[i] = p.mark + "\t" + strings.NewReplacer(
+			"#{window_id}", p.window, "#{pane_id}", p.pane,
+			"#{pane_current_command}", p.cmd, "#{pane_pid}", p.pid,
+		).Replace(fields)
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n")), nil
+}
+
+func (e *deadPaneListExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+// A dead agent pane that remain-on-exit keeps has an empty #{pane_pid} on
+// tmux 3.8. agentInputTarget must still resolve it, wherever it sits in the
+// list: the trailing empty field must not make the row look malformed, or a
+// nudge to a session whose agent has exited fails with "no panes found" in a
+// populated pane list.
+func TestAgentInputTargetResolvesDeadAgentPaneWithEmptyPID(t *testing.T) {
+	human := deadPaneRow{"orphan", "@1", "%1", "vim", "111"}
+	dead := deadPaneRow{"agent", "@1", "%2", "sleep", ""}
+	for _, tc := range []struct {
+		name  string
+		panes []deadPaneRow
+		want  string
+	}{
+		{"the only pane", []deadPaneRow{{"agent", "@1", "%1", "sleep", ""}}, "=w:@1.%1"},
+		{"dead agent pane listed last", []deadPaneRow{human, dead}, "=w:@1.%2"},
+		{"dead agent pane listed first", []deadPaneRow{dead, human}, "=w:@1.%2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := NewTmux()
+			tm.exec = &deadPaneListExecutor{panes: tc.panes}
+			got, err := tm.agentInputTarget("w")
+			if err != nil || got != tc.want {
+				t.Fatalf("agentInputTarget = (%q, %v), want (%q, nil)", got, err, tc.want)
+			}
+		})
+	}
+}
+
+// The end-of-row terminator is what proves a row was not truncated: a row
+// without it, or with an extra field before it, is still rejected rather than
+// guessed at.
+func TestAgentInputTargetRejectsMalformedRows(t *testing.T) {
+	for _, tc := range []struct{ name, out string }{
+		{"no terminator", "agent\t@1.%1\tsleep\t7"},
+		{"truncated before the pid", "agent\t@1.%1\tsleep"},
+		{"extra field before the terminator", "agent\t@1.%1\ta\tb\t7\tgc-eol"},
+		{"wrong terminator", "agent\t@1.%1\tsleep\t7\tgc-bol"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := NewTmux()
+			tm.exec = &fakeExecutor{outs: []string{tc.out}}
+			got, err := tm.agentInputTarget("w")
+			if err == nil || !strings.Contains(err.Error(), "no panes found") {
+				t.Fatalf("agentInputTarget = (%q, %v), want a \"no panes found\" error", got, err)
 			}
 		})
 	}

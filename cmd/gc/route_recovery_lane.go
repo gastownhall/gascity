@@ -72,6 +72,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -186,6 +187,9 @@ type routeRecoveryReport struct {
 	// them, so they are reported by id (offPlaneSample).
 	offPlaneInfra  int
 	offPlaneSample []string
+	// offPlaneRigs names the rigs whose own store holds offPlaneInfra rows:
+	// pre-S4 graph history `gc storage migrate --from-rigs` moves (S4b).
+	offPlaneRigs []string
 
 	// dropped counts named candidates the runtime plane could not resolve on
 	// the tick: a bead on a work leg (§ lane header), or one claimed or closed
@@ -810,6 +814,11 @@ func (l *routeRecoveryLane) backstopPassOnPlane(plan storeref.ResolvedPlan, reas
 				report.offPlaneSample = append(report.offPlaneSample, id)
 			}
 		}
+		for _, rig := range legReport.offPlaneRigs {
+			if !slices.Contains(report.offPlaneRigs, rig) {
+				report.offPlaneRigs = append(report.offPlaneRigs, rig)
+			}
+		}
 		report.flapping = append(report.flapping, legReport.flapping...)
 		return legReport.err
 	})
@@ -866,6 +875,9 @@ func (l *routeRecoveryLane) backstopLeg(leg planeLeg) routeRecoveryReport {
 				report.offPlaneInfra++
 				if len(report.offPlaneSample) < routeRecoveryOffPlaneSample {
 					report.offPlaneSample = append(report.offPlaneSample, b.ID)
+				}
+				if rig, ok := strings.CutPrefix(leg.label, "rig "); ok && rig != "" && !slices.Contains(report.offPlaneRigs, rig) {
+					report.offPlaneRigs = append(report.offPlaneRigs, rig)
 				}
 			}
 		}
