@@ -54,7 +54,7 @@ gc agent resume <name>                 # Resume a suspended agent
 ```
 gc runtime drain <name>                # Signal agent to wind down gracefully
 gc runtime undrain <name>              # Cancel drain
-gc runtime drain-check <name>          # Check if agent has been drained
+gc runtime drain-check <name>          # Check if agent is draining (exit 0 = yes, 1 = no, 3 = unknown)
 gc runtime drain-ack <name>            # Acknowledge drain (agent confirms exit)
 gc runtime request-restart             # Request graceful restart (reads GC_AGENT env)
 ```

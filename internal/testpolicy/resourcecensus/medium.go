@@ -35,7 +35,28 @@ type runnableKey struct {
 
 // SmallCount returns resource calls not owned by an exact Medium declaration.
 func (c Census) SmallCount(scope Scope, resource Resource, medium []MediumOwner) Count {
-	owned := make(map[runnableKey]map[Resource]struct{}, len(medium))
+	owned := mediumOwnership(medium)
+	files := map[string]struct{}{}
+	count := Count{}
+	for _, occurrence := range c.Occurrences {
+		if occurrence.Resource != resource || !scopeContains(scope, occurrence) {
+			continue
+		}
+		if owned.owns(occurrence) {
+			continue
+		}
+		count.Calls++
+		files[occurrence.Path] = struct{}{}
+	}
+	count.Files = len(files)
+	return count
+}
+
+// mediumOwners indexes the exact [[medium]] declarations by runnable owner.
+type mediumOwners map[runnableKey]map[Resource]struct{}
+
+func mediumOwnership(medium []MediumOwner) mediumOwners {
+	owned := make(mediumOwners, len(medium))
 	for _, row := range medium {
 		key := runnableKey{packageDir: row.PackageDir, packageName: row.PackageName, owner: row.Owner}
 		resources := owned[key]
@@ -47,24 +68,41 @@ func (c Census) SmallCount(scope Scope, resource Resource, medium []MediumOwner)
 			resources[declared] = struct{}{}
 		}
 	}
+	return owned
+}
 
-	files := map[string]struct{}{}
-	count := Count{}
-	for _, occurrence := range c.Occurrences {
-		if occurrence.Resource != resource || !scopeContains(scope, occurrence) {
-			continue
-		}
-		if occurrence.Runnable {
-			key := runnableKey{packageDir: occurrence.PackageDir, packageName: occurrence.PackageName, owner: occurrence.Owner}
-			if _, excluded := owned[key][resource]; excluded {
-				continue
-			}
-		}
-		count.Calls++
-		files[occurrence.Path] = struct{}{}
+// owns reports whether a runnable occurrence belongs to an exact Medium
+// declaration for its own resource.
+func (owned mediumOwners) owns(occurrence Occurrence) bool {
+	if !occurrence.Runnable {
+		return false
 	}
-	count.Files = len(files)
-	return count
+	key := runnableKey{packageDir: occurrence.PackageDir, packageName: occurrence.PackageName, owner: occurrence.Owner}
+	_, excluded := owned[key][occurrence.Resource]
+	return excluded
+}
+
+// validateMediumRowOrder requires [[medium]] rows sorted by (package_dir,
+// package_name, owner), so two branches adding rows merge as a plain text merge.
+func validateMediumRowOrder(rows []MediumOwner) []string {
+	for index := 1; index < len(rows); index++ {
+		previous := runnableKey{packageDir: rows[index-1].PackageDir, packageName: rows[index-1].PackageName, owner: rows[index-1].Owner}
+		current := runnableKey{packageDir: rows[index].PackageDir, packageName: rows[index].PackageName, owner: rows[index].Owner}
+		if runnableKeyLess(current, previous) {
+			return []string{fmt.Sprintf("medium rows are not sorted by (package_dir, package_name, owner): first out of order row is package_dir=%s package_name=%s owner=%s", current.packageDir, current.packageName, current.owner)}
+		}
+	}
+	return nil
+}
+
+func runnableKeyLess(left, right runnableKey) bool {
+	if left.packageDir != right.packageDir {
+		return left.packageDir < right.packageDir
+	}
+	if left.packageName != right.packageName {
+		return left.packageName < right.packageName
+	}
+	return left.owner < right.owner
 }
 
 func validateMediumOwners(rows []MediumOwner, census Census) error {
@@ -178,16 +216,4 @@ func equalResources(left, right []Resource) bool {
 		}
 	}
 	return true
-}
-
-func validateSmallBaseline(row Baseline, census Census, medium []MediumOwner) []string {
-	actual := census.SmallCount(row.Scope, row.Resource, medium)
-	switch {
-	case actual.Calls > row.BaselineCalls || actual.Files > row.BaselineFiles:
-		return []string{fmt.Sprintf("Small resource census grew: scope=%s resource=%s calls=%d (baseline %d), files=%d (baseline %d)", row.Scope, row.Resource, actual.Calls, row.BaselineCalls, actual.Files, row.BaselineFiles)}
-	case actual.Calls < row.BaselineCalls || actual.Files < row.BaselineFiles:
-		return []string{fmt.Sprintf("Small resource census baseline is stale: scope=%s resource=%s calls=%d (baseline %d), files=%d (baseline %d); lower the checked baseline to bank the improvement", row.Scope, row.Resource, actual.Calls, row.BaselineCalls, actual.Files, row.BaselineFiles)}
-	default:
-		return nil
-	}
 }

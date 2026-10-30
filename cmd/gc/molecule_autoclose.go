@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -112,16 +113,17 @@ func autocloseStoreRef(storeRoot, cityPath string) string {
 // nested steps) — identified by the gc.root_bead_id metadata that
 // molecule.Instantiate stamps onto every member — and falls back to a
 // type=="step" + direct-molecule-parent check for legacy beads that
-// predate the metadata convention. All errors are silently swallowed;
-// this is called from a bd hook script and must not fail loudly. See
-// gastownhall/gascity#1039.
+// predate the metadata convention. All errors are swallowed (this is
+// called from a bd hook script and must not fail loudly) but reported in
+// the returned run. See gastownhall/gascity#1039.
 // doMoleculeAutocloseWith reads the just-closed bead from store (the store that
 // owns it) and resolves/closes its molecule or graph-workflow root through the
 // graph-class store. A closed bead can be a work/source bead in a rig store
 // while the molecule root it belongs to lives in the graph store, so the
 // source-bead reverse scan and the root walk run on the graph store. It is a
 // required parameter for the reason given on doWispAutocloseWith.
-func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Recorder, beadID string, stdout io.Writer, graphClassStore beads.GraphStore) {
+func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Recorder, beadID string, stdout io.Writer, graphClassStore beads.GraphStore) autocloseRun {
+	var run autocloseRun
 	// Unwrapped for internal use; see doWispAutocloseWith.
 	graphStore := graphClassStore.Store
 	if graphStore == nil {
@@ -129,7 +131,8 @@ func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Reco
 	}
 	bead, err := store.Get(beadID)
 	if err != nil {
-		return
+		run.note(err)
+		return run
 	}
 
 	// Source-bead trigger: when a graph workflow's work bead
@@ -141,7 +144,7 @@ func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Reco
 	// orphans and is re-routed to a fresh worker indefinitely. Reverse-
 	// resolve any live workflow roots whose source bead is this bead and
 	// close them once their own subtree is terminal.
-	autocloseRootsForSourceBead(graphStore, storeRef, rec, beadID, stdout)
+	autocloseRootsForSourceBead(graphStore, storeRef, rec, beadID, stdout, &run)
 
 	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" {
@@ -151,30 +154,62 @@ func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Reco
 		// still auto-close, and so a user closing a "task" bead
 		// parented under a molecule does not trigger surprise close.
 		if bead.Type != "step" || bead.ParentID == "" {
-			return
+			return run
 		}
-		parent, err := graphStore.Get(bead.ParentID)
+		// A parent shares its child's ledger, so the closed bead's own store
+		// answers first. That is where a v1 POURED molecule lives: its beads
+		// are work class and stay on the work ledger even on a split city.
+		parent, parentStore, err := autocloseLocate(bead.ParentID, store, graphStore)
 		if err != nil {
-			return
+			run.note(err)
+			return run
 		}
-		autocloseMoleculeIfComplete(graphStore, rec, parent, stdout)
-		return
+		autocloseMoleculeIfComplete(parentStore, rec, parent, stdout, &run)
+		return run
 	}
-	root, err := graphStore.Get(rootID)
+	// gc.root_bead_id names a graph-class root, so the graph store answers
+	// first; the closed bead's own store is the fallback for a root that
+	// shares its ledger (a single-store city, or a rig-scope graph root).
+	root, rootStore, err := autocloseLocate(rootID, graphStore, store)
 	if err != nil {
-		return
+		run.note(err)
+		return run
 	}
-	autocloseMoleculeIfComplete(graphStore, rec, root, stdout)
+	autocloseMoleculeIfComplete(rootStore, rec, root, stdout, &run)
+	return run
 }
 
-func autocloseMoleculeIfComplete(store beads.Store, rec events.Recorder, mol beads.Bead, stdout io.Writer) {
+// autocloseLocate reads id from the first of two stores that holds it and
+// returns that store, so the subtree walk and the close run where the root
+// lives. Only a not-found passes the lookup on; any other read error is the
+// answer (a store that failed to answer is not proof the bead is elsewhere).
+// When first and second are the same store it is read once.
+func autocloseLocate(id string, first, second beads.Store) (beads.Bead, beads.Store, error) {
+	// A two-store residence probe: a miss on the first store is covered by
+	// the second.
+	b, err := beads.FederatedGet(first, id)
+	if err == nil {
+		return b, first, nil
+	}
+	if !errors.Is(err, beads.ErrNotFound) || second == nil || sameBeadStore(first, second) {
+		return beads.Bead{}, first, err
+	}
+	b, err = beads.FederatedGet(second, id)
+	if err != nil {
+		return beads.Bead{}, second, err
+	}
+	return b, second, nil
+}
+
+func autocloseMoleculeIfComplete(store beads.Store, rec events.Recorder, mol beads.Bead, stdout io.Writer, run *autocloseRun) {
 	if mol.Type != "molecule" {
 		return
 	}
 	if convoycore.IsTerminalStatus(mol.Status) {
 		return
 	}
-	terminal, descendants := subtreeTerminalExcludingRoot(store, mol.ID)
+	terminal, descendants, err := subtreeTerminalOrErr(store, mol.ID)
+	run.note(err)
 	if !terminal {
 		return
 	}
@@ -189,7 +224,7 @@ func autocloseMoleculeIfComplete(store beads.Store, rec events.Recorder, mol bea
 		// wisp seen there is genuinely complete.
 		return
 	}
-	announceClosedMolecule(store, rec, mol, moleculeAutocloseReason, stdout)
+	announceClosedMolecule(store, rec, mol, moleculeAutocloseReason, stdout, run)
 }
 
 // autocloseRootsForSourceBead closes any live graph-workflow roots whose
@@ -205,14 +240,17 @@ func autocloseMoleculeIfComplete(store beads.Store, rec events.Recorder, mol bea
 // can collide across stores, so a root in this store sourced from a same-ID
 // bead elsewhere (a different gc.source_store_ref) must not be closed here. An
 // empty storeRef falls back to matching on bead ID alone (single-store path).
-func autocloseRootsForSourceBead(store beads.Store, storeRef string, rec events.Recorder, sourceBeadID string, stdout io.Writer) {
+func autocloseRootsForSourceBead(store beads.Store, storeRef string, rec events.Recorder, sourceBeadID string, stdout io.Writer, run *autocloseRun) {
 	roots, err := sourceworkflow.ListLiveRoots(store, sourceBeadID, storeRef, storeRef)
 	if err != nil {
+		run.note(err)
 		return
 	}
 	for _, root := range roots {
-		if terminal, _ := subtreeTerminalExcludingRoot(store, root.ID); terminal {
-			if announceClosedMolecule(store, rec, root, moleculeSourceAutocloseReason, stdout) {
+		terminal, _, err := subtreeTerminalOrErr(store, root.ID)
+		run.note(err)
+		if terminal {
+			if announceClosedMolecule(store, rec, root, moleculeSourceAutocloseReason, stdout, run) {
 				_, _ = sourceworkflow.CloseSpecSidecarsForRoot(store, root.ID, sourceworkflow.WorkflowSpecSidecarClosedReason)
 			}
 		}
@@ -227,9 +265,16 @@ func autocloseRootsForSourceBead(store beads.Store, storeRef string, rec events.
 // evaluated by descendant terminality rather than direct children. A walk
 // error yields (false, 0) so the caller leaves the root open.
 func subtreeTerminalExcludingRoot(store beads.Store, rootID string) (terminal bool, descendants int) {
+	terminal, descendants, _ = subtreeTerminalOrErr(store, rootID)
+	return terminal, descendants
+}
+
+// subtreeTerminalOrErr is subtreeTerminalExcludingRoot that also returns the
+// walk error, for an autoclose run that reports what it could not read.
+func subtreeTerminalOrErr(store beads.Store, rootID string) (terminal bool, descendants int, err error) {
 	subtree, err := molecule.ListSubtree(store, rootID)
 	if err != nil {
-		return false, 0
+		return false, 0, err
 	}
 	for _, b := range subtree {
 		if b.ID == rootID {
@@ -240,21 +285,28 @@ func subtreeTerminalExcludingRoot(store beads.Store, rootID string) (terminal bo
 		}
 		descendants++
 		if !convoycore.IsTerminalStatus(b.Status) {
-			return false, descendants
+			return false, descendants, nil
 		}
 	}
-	return true, descendants
+	return true, descendants, nil
 }
 
 // announceClosedMolecule closes mol with the given close_reason, records a
 // BeadClosed event, and prints the auto-close announcement to stdout. Shared
-// by the step-terminal and source-bead-close triggers. Best-effort: a close
-// failure aborts silently without recording or announcing.
-func announceClosedMolecule(store beads.Store, rec events.Recorder, mol beads.Bead, reason string, stdout io.Writer) bool {
+// by the step-terminal and source-bead-close triggers. The close is fenced
+// (autocloseCloseIfStill). Best-effort: a refused or failed close aborts
+// silently without recording or announcing.
+func announceClosedMolecule(store beads.Store, rec events.Recorder, mol beads.Bead, reason string, stdout io.Writer, run *autocloseRun) bool {
 	// Capture the pre-close status before closeMoleculeWithReason transitions
 	// the root to closed — it is the from_status of the resolution record.
 	fromStatus := mol.Status
-	if err := closeMoleculeWithReason(store, mol.ID, reason); err != nil {
+	closed, err := autocloseCloseIfStill(store, mol.ID, reason, func(b beads.Bead) bool {
+		return !convoycore.IsTerminalStatus(b.Status)
+	}, func() error {
+		return closeMoleculeWithReason(store, mol.ID, reason)
+	})
+	run.note(err)
+	if err != nil || !closed {
 		return false
 	}
 

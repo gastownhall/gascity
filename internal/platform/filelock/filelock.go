@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"time"
 )
 
@@ -94,31 +93,6 @@ func AcquireAdvisoryFile(f *os.File, path string, opts Options) (*Lock, error) {
 // path.
 func AdvisoryLockPath(path string) string {
 	return path + ".lock"
-}
-
-// CheckAdvisoryFile reports whether [AcquireAdvisoryFile] could open the
-// sidecar for path. It takes no lock, so it neither waits for nor disturbs a
-// writer holding one. An existing sidecar is opened the way writers open it.
-// A missing one is not created, because a sidecar created by another user
-// could lock this path's writers out; a short-lived file created and removed
-// beside it shows whether a writer could create it.
-func CheckAdvisoryFile(path string) error {
-	lockPath := AdvisoryLockPath(path)
-	f, err := os.OpenFile(lockPath, os.O_RDWR, 0)
-	if err == nil {
-		return f.Close()
-	}
-	if !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("opening advisory lock file %q: %w", lockPath, pathErrorCause(err))
-	}
-	probe, err := os.CreateTemp(filepath.Dir(lockPath), "."+filepath.Base(lockPath)+".check-*")
-	if err != nil {
-		return fmt.Errorf("creating advisory lock file %q: %w", lockPath, pathErrorCause(err))
-	}
-	if err := errors.Join(probe.Close(), os.Remove(probe.Name())); err != nil {
-		return fmt.Errorf("removing the probe for advisory lock file %q: %w", lockPath, err)
-	}
-	return nil
 }
 
 // pathErrorCause drops the path an [fs.PathError] adds, which repeats the lock

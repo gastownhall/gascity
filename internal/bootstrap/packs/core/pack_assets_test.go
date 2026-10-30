@@ -124,10 +124,11 @@ func TestFindBareBDCommands(t *testing.T) {
 func TestCoreMaintenanceExecAssets(t *testing.T) {
 	required := []string{
 		"assets/scripts/_bd_trace.sh",
-		"assets/scripts/dolt-target.sh",
 		"assets/scripts/escalate.sh",
 		"assets/scripts/jsonl-export.sh",
+		"assets/scripts/order_outcome.sh",
 		"assets/scripts/reaper.sh",
+		"assets/scripts/scope_bd.sh",
 		"orders/jsonl-export.toml",
 		"orders/reaper.toml",
 	}
@@ -142,11 +143,76 @@ func TestCoreMaintenanceExecAssets(t *testing.T) {
 		"formulas/mol-dog-reaper.toml",
 		"orders/mol-dog-jsonl.toml",
 		"orders/mol-dog-reaper.toml",
+		// Retired with the move to bd verbs: the maintenance orders no
+		// longer resolve a Dolt port of their own.
+		"assets/scripts/dolt-target.sh",
 	}
 	for _, path := range retired {
 		if _, err := fs.Stat(PackFS, path); err == nil {
 			t.Fatalf("core pack must not carry retired Dog maintenance asset %s", path)
 		}
+	}
+}
+
+func TestReaperScriptUsesUTCTimestampForAgeGates(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "assets/scripts/reaper.sh")
+	if err != nil {
+		t.Fatalf("core pack missing reaper.sh: %v", err)
+	}
+	commentLine := regexp.MustCompile(`^[ \t]*#`)
+	localNow := regexp.MustCompile(`\bNOW[ \t]*\(`)
+	for i, line := range strings.Split(string(data), "\n") {
+		if commentLine.MatchString(line) {
+			continue
+		}
+		if localNow.MatchString(line) {
+			t.Errorf("reaper.sh:%d compares against server-local NOW() but bead timestamps are UTC; use UTC_TIMESTAMP(): %s", i+1, strings.TrimSpace(line))
+		}
+	}
+}
+
+func TestJSONLExportMaintainsArchiveObjectDatabase(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "assets/scripts/jsonl-export.sh")
+	if err != nil {
+		t.Fatalf("ReadFile(jsonl-export.sh): %v", err)
+	}
+	// A comment that names a setting or a call does not keep the contract.
+	commentLine := regexp.MustCompile(`^[ \t]*#`)
+	var code []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if !commentLine.MatchString(line) {
+			code = append(code, line)
+		}
+	}
+	body := strings.Join(code, "\n")
+
+	for _, want := range []string{
+		`GC_JSONL_GC_LOOSE_OBJECTS`,
+		`GC_JSONL_GC_LOOSE_KB`,
+		`GC_JSONL_GC_WINDOW_MEMORY`,
+		`GC_JSONL_GC_MIN_FREE_KB`,
+		`maintain_archive_repository()`,
+		`check_archive_gc_free_space`,
+		`count-objects -v`,
+		`pack.windowMemory=`,
+		`pack.threads=1`,
+		`--geometric=2`,
+		`maintenance.auto=false`,
+		`gc.auto=0`,
+		`nice -n 19`,
+		`ionice -t -c 3`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("jsonl-export.sh is missing archive-maintenance contract %q", want)
+		}
+	}
+	calls := regexp.MustCompile(`\bmaintain_archive_repository\b(?:[^(]|$)`)
+	if got := len(calls.FindAllString(body, -1)); got != 1 {
+		t.Fatalf("jsonl-export.sh invokes archive maintenance %d times, want one (a helper that every exit after the export calls)", got)
+	}
+	exits := regexp.MustCompile(`\bmaintain_archive_or_exit\b(?:[^(]|$)`)
+	if got := len(exits.FindAllString(body, -1)); got != 5 {
+		t.Fatalf("jsonl-export.sh runs archive maintenance at %d exits, want five (normal, HALT, pending push, failed DB, no changes)", got)
 	}
 }
 
@@ -233,4 +299,43 @@ func TestClaimProtocolFragmentIsEmbedded(t *testing.T) {
 			t.Errorf("embedded claim-protocol fragment missing %q", want)
 		}
 	}
+}
+
+// coreWorkerPrompts are the core pack prompts that tell a blocked worker how
+// to escalate.
+var coreWorkerPrompts = []string{
+	"assets/prompts/graph-worker.md",
+	"assets/prompts/pool-worker.template.md",
+}
+
+// promptSection returns the body of the "## <heading>" section of a Markdown
+// prompt, up to the next level-two heading.
+func promptSection(t *testing.T, body, heading string) string {
+	t.Helper()
+	marker := "\n## " + heading + "\n"
+	start := strings.Index(body, marker)
+	if start < 0 {
+		t.Fatalf("prompt has no %q section", "## "+heading)
+	}
+	section := body[start+len(marker):]
+	if end := strings.Index(section, "\n## "); end >= 0 {
+		section = section[:end+1]
+	}
+	return section
+}
+
+// singleBashBlock returns the contents of the only fenced bash block in a
+// prompt section.
+func singleBashBlock(t *testing.T, section string) string {
+	t.Helper()
+	const open, closing = "```bash\n", "\n```"
+	if n := strings.Count(section, open); n != 1 {
+		t.Fatalf("section has %d fenced bash blocks, want exactly 1:\n%s", n, section)
+	}
+	start := strings.Index(section, open) + len(open)
+	end := strings.Index(section[start:], closing)
+	if end < 0 {
+		t.Fatalf("section's bash block is not closed:\n%s", section)
+	}
+	return section[start:start+end] + "\n"
 }

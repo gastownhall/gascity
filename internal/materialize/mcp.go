@@ -118,6 +118,20 @@ func MCPIdentityForFilename(name string) (string, bool) {
 // extensions are ignored. Duplicate logical names within one directory are a
 // hard error.
 func LoadMCPDir(dir, label string, templateData map[string]string) ([]MCPServer, error) {
+	return loadMCPDir(dir, label, staticMCPTemplateData(templateData))
+}
+
+// mcpTemplateDataFunc supplies .template.toml expansion data on demand. Plain
+// .toml definitions never read it, so a caller whose data is costly to build
+// (the default-branch probe forks git) passes a memoized func and pays only
+// when a template file is actually expanded.
+type mcpTemplateDataFunc func() map[string]string
+
+func staticMCPTemplateData(templateData map[string]string) mcpTemplateDataFunc {
+	return func() map[string]string { return templateData }
+}
+
+func loadMCPDir(dir, label string, templateData mcpTemplateDataFunc) ([]MCPServer, error) {
 	if strings.TrimSpace(dir) == "" {
 		return nil, nil
 	}
@@ -164,12 +178,16 @@ func LoadMCPDir(dir, label string, templateData map[string]string) ([]MCPServer,
 // MergeMCPDirs loads and overlays MCP definitions from low to high precedence.
 // Later directories win on same-name collisions.
 func MergeMCPDirs(sources []MCPDirSource, templateData map[string]string) (MCPCatalog, error) {
+	return mergeMCPDirs(sources, staticMCPTemplateData(templateData))
+}
+
+func mergeMCPDirs(sources []MCPDirSource, templateData mcpTemplateDataFunc) (MCPCatalog, error) {
 	out := MCPCatalog{
 		ByName:  make(map[string]MCPServer),
 		ByLayer: make(map[string][]MCPServer),
 	}
 	for _, source := range sources {
-		servers, err := LoadMCPDir(source.Dir, source.Label, templateData)
+		servers, err := loadMCPDir(source.Dir, source.Label, templateData)
 		if err != nil {
 			return MCPCatalog{}, err
 		}
@@ -216,6 +234,33 @@ func MergeMCPDirs(sources []MCPDirSource, templateData map[string]string) (MCPCa
 	return out, nil
 }
 
+// Filter returns a copy of the catalog holding only the servers keep accepts.
+// Servers, ByName, ByLayer and RawOrder are narrowed to match. Shadows are
+// kept as they are: they record how precedence resolved, whether or not the
+// winner is kept.
+func (c MCPCatalog) Filter(keep func(MCPServer) bool) MCPCatalog {
+	out := MCPCatalog{
+		Servers: make([]MCPServer, 0, len(c.Servers)),
+		Shadows: append([]MCPShadow(nil), c.Shadows...),
+		ByName:  make(map[string]MCPServer, len(c.Servers)),
+		ByLayer: make(map[string][]MCPServer),
+	}
+	for _, server := range c.Servers {
+		if !keep(server) {
+			continue
+		}
+		out.Servers = append(out.Servers, server)
+		out.ByName[server.Name] = server
+		out.ByLayer[server.Layer] = append(out.ByLayer[server.Layer], server)
+	}
+	for _, name := range c.RawOrder {
+		if _, kept := out.ByName[name]; kept {
+			out.RawOrder = append(out.RawOrder, name)
+		}
+	}
+	return out
+}
+
 // NormalizeMCPServer returns the deterministic behavioral representation used
 // for equality and hashing.
 func NormalizeMCPServer(server MCPServer) NormalizedMCPServer {
@@ -244,7 +289,7 @@ func shadowOrigin(server MCPServer) string {
 	return server.Layer
 }
 
-func loadMCPFile(path, label string, templateData map[string]string) (MCPServer, error) {
+func loadMCPFile(path, label string, templateData mcpTemplateDataFunc) (MCPServer, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return MCPServer{}, fmt.Errorf("reading %s: %w", path, err)
@@ -252,7 +297,7 @@ func loadMCPFile(path, label string, templateData map[string]string) (MCPServer,
 
 	isTemplate := strings.HasSuffix(path, ".template.toml")
 	if isTemplate {
-		data, err = expandMCPTemplate(data, templateData)
+		data, err = expandMCPTemplate(data, templateData())
 		if err != nil {
 			return MCPServer{}, fmt.Errorf("expanding %s: %w", path, err)
 		}

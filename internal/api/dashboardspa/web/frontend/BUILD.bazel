@@ -1,0 +1,182 @@
+load("@aspect_rules_js//js:defs.bzl", "js_test")
+load("@npm_dashboard//:defs.bzl", "npm_link_all_packages")
+load("@npm_dashboard//internal/api/dashboardspa/web/frontend:typescript/package_json.bzl", tsc_bin = "bin")
+load("@npm_dashboard//internal/api/dashboardspa/web/frontend:vite/package_json.bzl", vite_bin = "bin")
+load("@npm_dashboard//internal/api/dashboardspa/web/frontend:vitest/package_json.bzl", vitest_bin = "bin")
+
+npm_link_all_packages(name = "node_modules")
+
+# What tsc resolves the app's dependencies' typings against: this package's
+# node_modules plus the @types packages hoisted to the workspace root.
+filegroup(
+    name = "typecheck_deps",
+    srcs = [
+        ":node_modules",
+        "//internal/api/dashboardspa/web:node_modules/@types/node",
+        "//internal/api/dashboardspa/web:node_modules/@types/react",
+        "//internal/api/dashboardspa/web:node_modules/@types/react-dom",
+    ],
+)
+
+# The app sources and the configs vite, tsc and vitest read from here.
+filegroup(
+    name = "app_srcs",
+    srcs = glob([
+        "public/**",
+        "src/**",
+    ]) + [
+        "index.html",
+        "package.json",
+        "postcss.config.js",
+        "tailwind.config.js",
+        "tsconfig.json",
+        "vite.config.ts",
+    ],
+)
+
+# `vite build`: the production SPA bundle the gc binary embeds
+# (//internal/api/dashboardspa:dist). The npm script's leading `tsc` is the
+# noEmit typecheck below, not part of the bundle.
+vite_bin.vite(
+    name = "build",
+    srcs = [
+        ":app_srcs",
+        ":node_modules",
+    ],
+    args = ["build"],
+    chdir = package_name(),
+    out_dirs = ["dist"],
+    visibility = ["//internal/api/dashboardspa:__pkg__"],
+)
+
+# `npm run typecheck`: tsc --noEmit over the app (src + vite.config.ts). The
+# shared workspace's half is //internal/api/dashboardspa/web/shared:shared_ts.
+tsc_bin.tsc_test(
+    name = "typecheck_test",
+    args = [
+        "--noEmit",
+        "-p",
+        "tsconfig.json",
+    ],
+    chdir = package_name(),
+    data = [
+        ":app_srcs",
+        ":typecheck_deps",
+    ],
+)
+
+# `npm run typecheck:test`: the test files and vitest config too.
+tsc_bin.tsc_test(
+    name = "typecheck_tests_test",
+    args = [
+        "--noEmit",
+        "-p",
+        "tsconfig.test.json",
+    ],
+    chdir = package_name(),
+    data = [
+        "tsconfig.test.json",
+        "vitest.config.ts",
+        ":app_srcs",
+        ":typecheck_deps",
+    ],
+)
+
+# `npm run typecheck:e2e`: the Playwright specs and config.
+tsc_bin.tsc_test(
+    name = "typecheck_e2e_test",
+    args = [
+        "--noEmit",
+        "-p",
+        "e2e/tsconfig.json",
+    ],
+    chdir = package_name(),
+    data = glob(["e2e/**"]) + [
+        "playwright.config.ts",
+        ":app_srcs",
+        ":typecheck_deps",
+    ],
+)
+
+# `npm test`: vitest run (jsdom) over src/**/*.test.{ts,tsx}.
+vitest_bin.vitest_test(
+    name = "vitest_test",
+    size = "medium",
+    args = ["run"],
+    chdir = package_name(),
+    data = [
+        "vitest.config.ts",
+        ":app_srcs",
+        ":node_modules",
+    ],
+)
+
+# `npm run test:e2e`: the Playwright render smoke (e2e/) in Chromium against
+# the seeded fakesupervisor, which serves this SPA bundle (embedded through
+# //internal/api/dashboardspa) and the testdata/dashport corpus. The browser
+# is Playwright's pinned chrome-headless-shell and its missing host libraries
+# a pinned Ubuntu package set (MODULE.bazel); nothing is downloaded at test
+# time. Reports and traces land in the test's undeclared outputs.
+js_test(
+    name = "playwright_test",
+    size = "large",
+    chdir = package_name(),
+    data = glob(["e2e/**"]) + [
+        "package.json",
+        "playwright.config.ts",
+        ":node_modules/@playwright/test",
+        "//test/dashport:corpus",
+        "//test/dashport/cmd/fakesupervisor",
+        "@chrome_headless_shell//:browsers",
+        "@chrome_headless_shell//:chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell",
+        "@chromium_runtime_noble_amd64//:sysroot",
+        "@chromium_runtime_noble_amd64//:usr/lib/x86_64-linux-gnu/libnss3.so",
+    ],
+    entry_point = "playwright-bazel.mjs",
+    env = {
+        "CHROME_HEADLESS_SHELL": "$(rlocationpath @chrome_headless_shell//:chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell)",
+        "CHROMIUM_RUNTIME_LIBNSS3": "$(rlocationpath @chromium_runtime_noble_amd64//:usr/lib/x86_64-linux-gnu/libnss3.so)",
+        "DASHPORT_CORPUS_FILES": "$(rlocationpaths //test/dashport:corpus)",
+        "FAKESUPERVISOR": "$(rlocationpath //test/dashport/cmd/fakesupervisor)",
+    },
+    # Native files from external repositories, used where they are.
+    no_copy_to_bin = [
+        "@chrome_headless_shell//:browsers",
+        "@chrome_headless_shell//:chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell",
+        "@chromium_runtime_noble_amd64//:sysroot",
+        "@chromium_runtime_noble_amd64//:usr/lib/x86_64-linux-gnu/libnss3.so",
+    ],
+)
+
+exports_files(["package.json"])
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

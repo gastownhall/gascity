@@ -11,6 +11,7 @@ go_library(
         "attach_other.go",
         "attach_windows.go",
         "capabilities.go",
+        "claude_text.go",
         "client.go",
         "endpoint_other.go",
         "endpoint_windows.go",
@@ -20,6 +21,7 @@ go_library(
         "launchspec_windows.go",
         "list_running_other.go",
         "list_running_windows.go",
+        "local_transcripts.go",
         "pane_close_other.go",
         "pane_close_windows.go",
         "pane_identity_other.go",
@@ -63,11 +65,13 @@ go_test(
         "activity_live_test.go",
         "activity_test.go",
         "agent_blocked_test.go",
+        "agent_info_test.go",
         "agent_name_taken_test.go",
         "agentname_test.go",
         "attach_live_windows_test.go",
         "attach_windows_test.go",
         "batchfile_windows_test.go",
+        "claude_text_test.go",
         "client_test.go",
         "conformance_test.go",
         "dial_bound_test.go",
@@ -142,6 +146,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

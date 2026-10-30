@@ -105,14 +105,6 @@ func acceptAndClose(ln net.Listener) {
 }
 
 // unsetEnv removes name for the rest of the test; t.Setenv restores it after.
-func unsetEnv(t *testing.T, name string) {
-	t.Helper()
-	t.Setenv(name, "")
-	if err := os.Unsetenv(name); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // herdrConfigDirProbe is one environment herdr 0.9.1 was probed under, and the
 // config directory it reported there.
 type herdrConfigDirProbe struct {

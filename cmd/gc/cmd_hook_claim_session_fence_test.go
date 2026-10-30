@@ -12,7 +12,9 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // writeFenceTestCity writes a minimal single-worker city and returns its dir.
@@ -27,6 +29,28 @@ name = "test-city"
 
 [[agent]]
 name = "worker"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return cityDir
+}
+
+func writeFenceTestRigCity(t *testing.T) string {
+	t.Helper()
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "aoa"
+path = "rigs/aoa"
+
+[[agent]]
+name = "worker"
+dir = "aoa"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -898,5 +922,121 @@ func TestHookCommandClaimGenuinelyUnmanagedRuntimeSkipsMissingRegistrationFence(
 	}
 	if result.Action != "drain" || result.Reason != hookClaimReasonNoWork {
 		t.Fatalf("result = %+v, want action=drain reason=no_work (probe returns no work)", result)
+	}
+}
+
+func TestHookCommandClaimSuspendedRigAcknowledgesDrainBeforeClaim(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := writeFenceTestRigCity(t)
+	sessionID := newFenceSessionBead(t, cityDir, session.StateActive, "active-token")
+	queryMarker := installFenceWorkQueryProbe(t)
+	setFenceClaimEnv(t, cityDir, sessionID, "active-token")
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityDir, "aoa", &suspended); err != nil {
+		t.Fatalf("SetRigSuspended: %v", err)
+	}
+
+	acked := false
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{
+		Claim: true, DrainAck: true, JSON: true,
+		DrainAckFn: func(io.Writer) error { acked = true; return nil },
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want acknowledged drain exit 0; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !acked {
+		t.Fatalf("drain-ack was not called; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("stdout is not a JSON drain result: %v\n%s", err, stdout.String())
+	}
+	if result.Action != "drain" || result.Reason != hookClaimReasonRigSuspended || !result.DrainAcknowledged {
+		t.Fatalf("result = %+v, want drain/rig_suspended/acknowledged", result)
+	}
+	if !strings.Contains(stderr.String(), `rig "aoa" is suspended`) {
+		t.Fatalf("stderr = %q, want suspended rig name", stderr.String())
+	}
+	if strings.Contains(stderr.String(), `agent "worker" is suspended`) {
+		t.Fatalf("stderr misidentified rig suspension as agent suspension: %s", stderr.String())
+	}
+	if _, err := os.Stat(queryMarker); !os.IsNotExist(err) {
+		t.Fatalf("work query ran before suspended-rig claim refusal; stat error = %v", err)
+	}
+}
+
+func TestHookCommandClaimSuspendedCityAcknowledgesDrainBeforeClaim(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := writeFenceTestCity(t)
+	sessionID := newFenceSessionBead(t, cityDir, session.StateActive, "active-token")
+	queryMarker := installFenceWorkQueryProbe(t)
+	setFenceClaimEnv(t, cityDir, sessionID, "active-token")
+	suspended := true
+	if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, cityDir, &suspended); err != nil {
+		t.Fatalf("SetCitySuspended: %v", err)
+	}
+
+	acked := false
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{
+		Claim: true, DrainAck: true, JSON: true,
+		DrainAckFn: func(io.Writer) error { acked = true; return nil },
+	}, &stdout, &stderr)
+	if code != 0 || !acked {
+		t.Fatalf("code = %d, acked = %t, want 0/true; stdout=%q stderr=%s", code, acked, stdout.String(), stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("stdout is not a JSON drain result: %v\n%s", err, stdout.String())
+	}
+	if result.Action != "drain" || result.Reason != hookClaimReasonCitySuspended || !result.DrainAcknowledged {
+		t.Fatalf("result = %+v, want drain/city_suspended/acknowledged", result)
+	}
+	if _, err := os.Stat(queryMarker); !os.IsNotExist(err) {
+		t.Fatalf("work query ran before suspended-city claim refusal; stat error = %v", err)
+	}
+}
+
+func TestHookCommandClaimSuspendedAgentAcknowledgesDrainBeforeClaim(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := writeFenceTestCity(t)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+suspended = true
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := newFenceSessionBead(t, cityDir, session.StateActive, "active-token")
+	queryMarker := installFenceWorkQueryProbe(t)
+	setFenceClaimEnv(t, cityDir, sessionID, "active-token")
+
+	acked := false
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{
+		Claim: true, DrainAck: true, JSON: true,
+		DrainAckFn: func(io.Writer) error { acked = true; return nil },
+	}, &stdout, &stderr)
+	if code != 0 || !acked {
+		t.Fatalf("code = %d, acked = %t, want 0/true; stdout=%q stderr=%s", code, acked, stdout.String(), stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("stdout is not a JSON drain result: %v\n%s", err, stdout.String())
+	}
+	if result.Action != "drain" || result.Reason != hookClaimReasonAgentSuspended || !result.DrainAcknowledged {
+		t.Fatalf("result = %+v, want drain/agent_suspended/acknowledged", result)
+	}
+	if _, err := os.Stat(queryMarker); !os.IsNotExist(err) {
+		t.Fatalf("work query ran before suspended-agent claim refusal; stat error = %v", err)
 	}
 }

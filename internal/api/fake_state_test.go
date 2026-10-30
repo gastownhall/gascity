@@ -13,14 +13,18 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/usage"
@@ -47,6 +51,9 @@ type fakeState struct {
 	sessionsBeadStore beads.Store // relocated sessions store; nil falls back to cityBeadStore (default backend)
 	graphBeadStore    beads.Store // relocated graph store; nil falls back to cityBeadStore (default backend)
 	ordersBeadStore   beads.Store // relocated orders store; nil falls back to cityBeadStore (default backend)
+	// nudgeQueue overrides NudgeQueue; nil is the city's state.json queue over
+	// the nudges store.
+	nudgeQueue NudgeQueue
 	// bindingRelics is the boot census a test wants replayed. Absent means
 	// uncensused, which means "assume relics" — see
 	// ClassBindingHasLegacyResidents.
@@ -62,7 +69,9 @@ type fakeState struct {
 	allOrders         []orders.Order
 	services          workspacesvc.Registry
 	webhookDispatcher orderdispatch.Dispatcher // backs WebhookDispatchProvider; nil disables webhook dispatch
-	pokeCount         int
+	pokeCount         int                      // Enqueue calls (each maps to one legacy Poke)
+	enqueueMu         sync.Mutex               // guards enqueued
+	enqueued          []reconcilekey.Key       // every key passed to Enqueue, in order
 	extmsgSvc         *extmsg.Services
 	adapterReg        *extmsg.AdapterRegistry
 	maintenance       MaintenanceProvider
@@ -81,7 +90,16 @@ type fakeState struct {
 func newFakeState(t testing.TB) *fakeState {
 	t.Helper()
 	store := beads.NewMemStore()
-	mp := beadmail.New(store)
+	// Mail is messaging-class: under GC_TEST_SPLIT_STRICT=1 it reads the city
+	// store through the gate's class view (identity otherwise).
+	mp := beadmail.New(splittest.GateClassView(store))
+	// Under GC_TEST_SPLIT_STRICT=1 the city store exists, as it does on
+	// every real city: without one the class accessors had no store and the
+	// fixture's rows could only be read through rig views.
+	var cityStore beads.Store
+	if splittest.GateEnabled() {
+		cityStore = store
+	}
 	return &fakeState{
 		cfg: &config.City{
 			Workspace: config.Workspace{Name: "test-city"},
@@ -98,13 +116,14 @@ func newFakeState(t testing.TB) *fakeState {
 				"test-agent": {DisplayName: "Test Agent"},
 			},
 		},
-		sp:           runtime.NewFake(),
-		stores:       map[string]beads.Store{"myrig": store},
-		cityMailProv: mp,
-		eventProv:    events.NewFake(),
-		cityName:     "test-city",
-		cityPath:     t.TempDir(),
-		startedAt:    time.Now(),
+		sp:            runtime.NewFake(),
+		stores:        map[string]beads.Store{"myrig": store},
+		cityBeadStore: cityStore,
+		cityMailProv:  mp,
+		eventProv:     events.NewFake(),
+		cityName:      "test-city",
+		cityPath:      beadstest.GuardedTempDir(t),
+		startedAt:     time.Now(),
 	}
 }
 
@@ -115,8 +134,21 @@ func (f *fakeState) SessionProvider() runtime.Provider {
 	}
 	return f.sp
 }
-func (f *fakeState) BeadStore(rig string) beads.Store    { return f.stores[rig] }
-func (f *fakeState) BeadStores() map[string]beads.Store  { return f.stores }
+
+// BeadStore and BeadStores hand out work stores: under GC_TEST_SPLIT_STRICT=1
+// each is the gate's work view of the physical store (split_strict_gate_test.go).
+func (f *fakeState) BeadStore(rig string) beads.Store { return splittest.GateWorkView(f.stores[rig]) }
+
+func (f *fakeState) BeadStores() map[string]beads.Store {
+	if !splittest.GateEnabled() {
+		return f.stores
+	}
+	out := make(map[string]beads.Store, len(f.stores))
+	for rig, store := range f.stores {
+		out[rig] = splittest.GateWorkView(store)
+	}
+	return out
+}
 func (f *fakeState) MailProvider(_ string) mail.Provider { return f.cityMailProv }
 func (f *fakeState) MailProviders() map[string]mail.Provider {
 	if f.cityMailProv == nil {
@@ -137,7 +169,8 @@ func (f *fakeState) Version() string                       { return "test" }
 func (f *fakeState) StartedAt() time.Time                  { return f.startedAt }
 func (f *fakeState) IsQuarantined(sessionName string) bool { return f.quarantined[sessionName] }
 func (f *fakeState) ClearCrashHistory(sessionName string)  { delete(f.quarantined, sessionName) }
-func (f *fakeState) CityBeadStore() beads.Store            { return f.cityBeadStore }
+func (f *fakeState) CityBeadStore() beads.Store            { return splittest.GateWorkView(f.cityBeadStore) }
+
 func (f *fakeState) ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error) {
 	if f.scopedStoreFn == nil {
 		return nil, nil
@@ -146,31 +179,39 @@ func (f *fakeState) ScopedStoreLike(ctx context.Context, existing beads.Store) (
 }
 
 func (f *fakeState) NudgesBeadStore() beads.NudgesStore {
-	if f.nudgesBeadStore != nil {
-		return beads.NudgesStore{Store: f.nudgesBeadStore}
+	return beads.NudgesStore{Store: f.classStore(f.nudgesBeadStore)}
+}
+
+func (f *fakeState) NudgeQueue() NudgeQueue {
+	if f.nudgeQueue != nil {
+		return f.nudgeQueue
 	}
-	return beads.NudgesStore{Store: f.cityBeadStore}
+	return nudgequeue.StateFileQueue{CityPath: f.cityPath, Shadows: f.NudgesBeadStore().Store}
 }
 
 func (f *fakeState) SessionsBeadStore() beads.SessionStore {
-	if f.sessionsBeadStore != nil {
-		return beads.SessionStore{Store: f.sessionsBeadStore}
-	}
-	return beads.SessionStore{Store: f.cityBeadStore}
+	return beads.SessionStore{Store: f.classStore(f.sessionsBeadStore)}
 }
 
 func (f *fakeState) GraphBeadStore() beads.GraphStore {
-	if f.graphBeadStore != nil {
-		return beads.GraphStore{Store: f.graphBeadStore}
-	}
-	return beads.GraphStore{Store: f.cityBeadStore}
+	return beads.GraphStore{Store: f.classStore(f.graphBeadStore)}
 }
 
 func (f *fakeState) OrdersBeadStore() beads.OrdersStore {
-	if f.ordersBeadStore != nil {
-		return beads.OrdersStore{Store: f.ordersBeadStore}
+	return beads.OrdersStore{Store: f.classStore(f.ordersBeadStore)}
+}
+
+// classStore resolves a coordination-class accessor: the relocated store a
+// test set, or the city store when it set none (the default backend keeps every
+// class there). A class left on the city store — unset, or set to the city
+// store itself — is the gate's class view of it under GC_TEST_SPLIT_STRICT=1,
+// and the city store unchanged otherwise. A store relocated to a different
+// physical store is already split and is handed out as is.
+func (f *fakeState) classStore(relocated beads.Store) beads.Store {
+	if relocated != nil && relocated != f.cityBeadStore {
+		return relocated
 	}
-	return beads.OrdersStore{Store: f.cityBeadStore}
+	return splittest.GateClassView(f.cityBeadStore)
 }
 
 // ClassBindingHasLegacyResidents replays whatever census a test recorded in
@@ -198,7 +239,32 @@ func (f *fakeState) OrdersAll() []orders.Order {
 	}
 	return f.autos
 }
-func (f *fakeState) Poke()                                  { f.pokeCount++ }
+
+func (f *fakeState) Enqueue(keys ...reconcilekey.Key) {
+	f.enqueueMu.Lock()
+	defer f.enqueueMu.Unlock()
+	f.pokeCount++
+	if len(keys) == 0 {
+		keys = []reconcilekey.Key{reconcilekey.Allocator()}
+	}
+	for _, k := range keys {
+		f.enqueued = append(f.enqueued, k.Normalize())
+	}
+}
+
+// enqueueCalls returns the number of Enqueue calls (legacy pokes) so far.
+func (f *fakeState) enqueueCalls() int {
+	f.enqueueMu.Lock()
+	defer f.enqueueMu.Unlock()
+	return f.pokeCount
+}
+
+// enqueuedKeys returns a copy of every key passed to Enqueue so far.
+func (f *fakeState) enqueuedKeys() []reconcilekey.Key {
+	f.enqueueMu.Lock()
+	defer f.enqueueMu.Unlock()
+	return append([]reconcilekey.Key(nil), f.enqueued...)
+}
 func (f *fakeState) ServiceRegistry() workspacesvc.Registry { return f.services }
 
 // WebhookDispatcher lets fakeState satisfy WebhookDispatchProvider so webhook
@@ -315,7 +381,7 @@ func (f *fakeMutatorState) SuspendRig(name string) error {
 		if a.Dir != name {
 			continue
 		}
-		expanded := expandAgent(a, f.cityName, tmpl, f.sp)
+		expanded := expandAgent(a, f.cityName, tmpl, f.sp, cfg.NamedSessions)
 		for _, ea := range expanded {
 			sessionName := agent.SessionNameFor(f.cityName, ea.qualifiedName, tmpl)
 			_ = f.sp.SetMeta(sessionName, "suspended", "true")
@@ -341,7 +407,7 @@ func (f *fakeMutatorState) ResumeRig(name string) error {
 		if a.Dir != name {
 			continue
 		}
-		expanded := expandAgent(a, f.cityName, tmpl, f.sp)
+		expanded := expandAgent(a, f.cityName, tmpl, f.sp, cfg.NamedSessions)
 		for _, ea := range expanded {
 			sessionName := agent.SessionNameFor(f.cityName, ea.qualifiedName, tmpl)
 			_ = f.sp.RemoveMeta(sessionName, "suspended")

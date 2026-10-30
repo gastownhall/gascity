@@ -49,7 +49,7 @@ func TestScanBySessionIDRefusesTheLiveTableWithoutTheOptIn(t *testing.T) {
 // Nothing confines the Windows scanner, so a test that set the root would be
 // reading, and handing the orphan sweep, the real host.
 func TestScanBySessionIDStaysRefusedWithAFakeProcfsRoot(t *testing.T) {
-	defer SetScanRootForTesting(t.TempDir())()
+	SetScanRootForTesting(t, t.TempDir())
 
 	if found, err := ScanBySessionID(""); err == nil {
 		t.Fatalf("ScanBySessionID read the live process table (%d roots) once a fake procfs root was set; that root confines nothing on Windows", len(found))
@@ -63,9 +63,12 @@ func TestScanBySessionIDStaysRefusedWithAFakeProcfsRoot(t *testing.T) {
 func TestEveryLiveHostReadStaysRefusedWithAFakeProcfsRoot(t *testing.T) {
 	mock := startArgvMock(t, ManagedDoltScopeWatchdogVerb)
 
-	restoreRoot := SetScanRootForTesting(t.TempDir())
-	identity, infrastructure := RootStartIdentity(mock.pid), IsCityInfrastructureRoot(mock.pid)
-	restoreRoot()
+	var identity string
+	var infrastructure bool
+	t.Run("fake root", func(t *testing.T) {
+		SetScanRootForTesting(t, t.TempDir())
+		identity, infrastructure = RootStartIdentity(mock.pid), IsCityInfrastructureRoot(mock.pid)
+	})
 	if identity != "" {
 		t.Errorf("RootStartIdentity read the live host once a fake procfs root was set (got %q)", identity)
 	}
@@ -131,7 +134,7 @@ func TestScanAllReportsEveryHelperRoot(t *testing.T) {
 	first := startHelper(t, uniqueSessionID(t, "all-first"), city)
 	second := startHelper(t, uniqueSessionID(t, "all-second"), city)
 
-	found, err := ScanAll()
+	found, err := ScanBySessionID("")
 	if err != nil {
 		t.Fatalf("ScanAll: %v", err)
 	}
@@ -195,7 +198,7 @@ func TestProcessTableToleratesProcessesItCannotOpen(t *testing.T) {
 	}
 
 	defer allowLiveWindowsScanForTesting()()
-	if _, err := ScanAll(); err != nil {
+	if _, err := ScanBySessionID(""); err != nil {
 		t.Fatalf("the scan failed although %d of %d processes were merely not openable: %v", unreadable, len(table.rows), err)
 	}
 }

@@ -73,9 +73,7 @@ func startupPromptSessionInfo() session.Info {
 // ResolveSessionRuntime), the only production source of the API's resume launch
 // hints: they must come from State, which owns prompt rendering and the delivery
 // policy, so a cold start carries the prompt and the delivered marker instead of
-// leaving the SessionStart hook as the sole carrier. The resolver builds a handle
-// for every single-session request, reads included, so it leaves the rendering
-// to the launch (LaunchHints) rather than paying for it per request.
+// leaving the SessionStart hook as the sole carrier.
 func TestResolveWorkerSessionRuntimeAsksStateToDeliverTheStartupPrompt(t *testing.T) {
 	fs, calls := startupPromptState(t)
 	srv := New(fs)
@@ -87,21 +85,8 @@ func TestResolveWorkerSessionRuntimeAsksStateToDeliverTheStartupPrompt(t *testin
 	if runtimeCfg == nil {
 		t.Fatal("resolveWorkerSessionRuntimeWithMetadata() = nil")
 	}
-	if len(*calls) != 0 {
-		t.Fatalf("resolving the runtime called State.ApplyStartupPrompt %d times, want 0 until a launch", len(*calls))
-	}
-	if runtimeCfg.Hints.Nudge != "" {
-		t.Errorf("resolved Hints.Nudge = %q, want the prompt left to the launch", runtimeCfg.Hints.Nudge)
-	}
-	if runtimeCfg.LaunchHints == nil {
-		t.Fatal("resolved runtime has no LaunchHints: a launch would carry no startup prompt")
-	}
-	launch, err := runtimeCfg.LaunchHints(runtimeCfg.Hints)
-	if err != nil {
-		t.Fatalf("LaunchHints: %v", err)
-	}
 	if len(*calls) != 1 {
-		t.Fatalf("State.ApplyStartupPrompt called %d times for one launch, want 1", len(*calls))
+		t.Fatalf("State.ApplyStartupPrompt called %d times, want 1", len(*calls))
 	}
 	call := (*calls)[0]
 	if call.info.Template != "worker" {
@@ -113,17 +98,17 @@ func TestResolveWorkerSessionRuntimeAsksStateToDeliverTheStartupPrompt(t *testin
 	if call.hints.WorkDir != "/tmp/workdir" || call.hints.ReadyPromptPrefix != "> " {
 		t.Errorf("State must receive the fully built hints, got WorkDir=%q ReadyPromptPrefix=%q", call.hints.WorkDir, call.hints.ReadyPromptPrefix)
 	}
-	if launch.Nudge != startupPromptSentinelNudge {
-		t.Errorf("launch Nudge = %q, want what State returned", launch.Nudge)
+	if runtimeCfg.Hints.Nudge != startupPromptSentinelNudge {
+		t.Errorf("Hints.Nudge = %q, want what State returned", runtimeCfg.Hints.Nudge)
 	}
-	if launch.Env[startupPromptSentinelMarker] != "1" {
-		t.Errorf("launch Env = %v, want the marker State returned", launch.Env)
+	if runtimeCfg.Hints.Env[startupPromptSentinelMarker] != "1" {
+		t.Errorf("Hints.Env = %v, want the marker State returned", runtimeCfg.Hints.Env)
 	}
 }
 
 // TestResolveWorkerSessionRuntimeSurfacesStartupPromptFailure pins that a
 // delivery failure (for example an oversized prompt on a runtime with no
-// fallback) fails the launch instead of launching a session that silently
+// fallback) fails the resolution instead of launching a session that silently
 // lacks its prompt.
 func TestResolveWorkerSessionRuntimeSurfacesStartupPromptFailure(t *testing.T) {
 	errDelivery := errors.New("startup prompt cannot be delivered")
@@ -134,13 +119,10 @@ func TestResolveWorkerSessionRuntimeSurfacesStartupPromptFailure(t *testing.T) {
 	srv := New(fs)
 
 	runtimeCfg, err := srv.resolveWorkerSessionRuntimeWithMetadata(startupPromptSessionInfo(), "", nil)
-	if err != nil {
-		t.Fatalf("resolveWorkerSessionRuntimeWithMetadata: %v", err)
+	if !errors.Is(err, errDelivery) {
+		t.Errorf("resolveWorkerSessionRuntimeWithMetadata error = %v, want errors.Is(%v)", err, errDelivery)
 	}
-	if runtimeCfg == nil || runtimeCfg.LaunchHints == nil {
-		t.Fatalf("resolved runtime %+v has no LaunchHints", runtimeCfg)
-	}
-	if _, err := runtimeCfg.LaunchHints(runtimeCfg.Hints); !errors.Is(err, errDelivery) {
-		t.Errorf("LaunchHints error = %v, want errors.Is(%v)", err, errDelivery)
+	if runtimeCfg != nil {
+		t.Errorf("resolveWorkerSessionRuntimeWithMetadata returned a runtime alongside the error: %+v", runtimeCfg)
 	}
 }

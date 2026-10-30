@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/gitcred"
+	"github.com/gastownhall/gascity/internal/remotesource"
 )
 
 func deriveImportName(source string) string {
@@ -27,12 +28,7 @@ func deriveImportName(source string) string {
 }
 
 func isRemoteImportSource(source string) bool {
-	return strings.HasPrefix(source, "git@") ||
-		strings.HasPrefix(source, "ssh://") ||
-		strings.HasPrefix(source, "https://") ||
-		strings.HasPrefix(source, "http://") ||
-		strings.HasPrefix(source, "file://") ||
-		strings.HasPrefix(source, "github.com/")
+	return remotesource.IsRemote(source)
 }
 
 func hasRepositoryRefInSource(source string) bool {
@@ -53,7 +49,7 @@ func hasRepositoryRefInSource(source string) bool {
 // resolve to a checkout missing it entirely (gastownhall/gascity#3659).
 func normalizeImportAddSource(fs fsys.FS, cityPath, source string) (string, bool, bool, error) {
 	if isRemoteImportSource(source) {
-		if err := rejectSourceUserinfo(source); err != nil {
+		if err := RejectSourceUserinfo(source); err != nil {
 			return "", false, false, err
 		}
 		return source, true, false, nil
@@ -77,7 +73,7 @@ func normalizeImportAddSource(fs fsys.FS, cityPath, source string) (string, bool
 	return source, false, false, nil
 }
 
-// rejectSourceUserinfo refuses a URL-scheme source that embeds credentials in
+// RejectSourceUserinfo refuses a URL-scheme source that embeds credentials in
 // the URL: such a token would leak into city.toml, packs.lock, the shared
 // cache's .git/config, the RepoCacheKey, and error output. For http(s)/file it
 // rejects any userinfo (user or user:password) — those forms carry no legitimate
@@ -86,7 +82,7 @@ func normalizeImportAddSource(fs fsys.FS, cityPath, source string) (string, bool
 // git@host:org/repo carry transport identity, not a secret, and stay legal. The
 // error never echoes the secret (it redacts via gitcred.RedactUserinfo) and is
 // returned as ErrInvalidSource by the caller (HTTP 400).
-func rejectSourceUserinfo(source string) error {
+func RejectSourceUserinfo(source string) error {
 	source = strings.TrimSpace(source)
 	isSSH := strings.HasPrefix(source, "ssh://")
 	if !strings.HasPrefix(source, "https://") &&

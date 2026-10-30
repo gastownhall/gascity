@@ -5,13 +5,20 @@ go_test(
     srcs = [
         "bind_key_script_test.go",
         "cycle_script_test.go",
+        "dolt_orphan_sweep_integration_test.go",
         "embedded_pack_test.go",
         "exampledir_test.go",
         "gastown_test.go",
         "main_test.go",
+        "maintenance_bd_integration_test.go",
+        "maintenance_installed_layout_test.go",
+        "maintenance_scope_test.go",
+        "maintenance_scripts_dolt_integration_test.go",
         "maintenance_scripts_test.go",
         "operational_awareness_test.go",
         "precompact_hook_test.go",
+        "reaper_op_rows_guard_dolt_integration_test.go",
+        "reaper_op_rows_guard_test.go",
         "testenv_import_test.go",
         "tmux_theme_script_test.go",
     ],
@@ -20,22 +27,46 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
-        "//:repo_source_tree",
+        "//examples:all_examples",
         "//examples/bd:pack_files",
         "//examples/bd/dolt:pack_files",
         "//internal/bootstrap/packs/core:pack_files",
-    ],
+    ] + select({
+        "//:gotags_integration": [
+            "@bd_bin_v1_3_2//:bd",
+            "@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt",
+        ],
+        "//conditions:default": [],
+    }),
+    # The integration build's tests run bd/dolt by name: GC_TEST_TOOL_PATHS puts
+    # the pinned binaries first on PATH (internal/testenv).
+    env = select({
+        "//:gotags_integration": {
+            "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_2//:bd) $(rootpath @dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt)",
+        },
+        "//conditions:default": {},
+    }),
+    # The integration build (//test:integration_packages): ~110 s of tests,
+    # the longest 15-25 s each. The guard
+    # scripts/integration_packages_shards_test.go keeps the tests in
+    # heavy_tests.txt apart.
+    shard_count = 5,
     deps = [
         "//internal/bazeltest",
         "//internal/builtinpacks",
+        "//internal/clock",
         "//internal/config",
+        "//internal/doltorphan",
         "//internal/packman",
         "//internal/testenv",
+        "//internal/testutil",
         "//test/dolttest",
         "@com_github_gastownhall_gascity_packs//:gascity-packs",
     ] + select({
         "@rules_go//go/platform:aix": [
+            "//examples/bd/dolt",
             "//internal/beads",
+            "//internal/bootstrap/packs/core",
             "//internal/extmsg",
             "//internal/formula",
             "//internal/fsys",
@@ -44,7 +75,9 @@ go_test(
             "@com_github_burntsushi_toml//:toml",
         ],
         "@rules_go//go/platform:android": [
+            "//examples/bd/dolt",
             "//internal/beads",
+            "//internal/bootstrap/packs/core",
             "//internal/extmsg",
             "//internal/formula",
             "//internal/fsys",
@@ -53,7 +86,9 @@ go_test(
             "@com_github_burntsushi_toml//:toml",
         ],
         "@rules_go//go/platform:darwin": [
+            "//examples/bd/dolt",
             "//internal/beads",
+            "//internal/bootstrap/packs/core",
             "//internal/extmsg",
             "//internal/formula",
             "//internal/fsys",
@@ -62,7 +97,9 @@ go_test(
             "@com_github_burntsushi_toml//:toml",
         ],
         "@rules_go//go/platform:dragonfly": [
+            "//examples/bd/dolt",
             "//internal/beads",
+            "//internal/bootstrap/packs/core",
             "//internal/extmsg",
             "//internal/formula",
             "//internal/fsys",
@@ -71,7 +108,9 @@ go_test(
             "@com_github_burntsushi_toml//:toml",
         ],
         "@rules_go//go/platform:freebsd": [
+            "//examples/bd/dolt",
             "//internal/beads",
+            "//internal/bootstrap/packs/core",
             "//internal/extmsg",
             "//internal/formula",
             "//internal/fsys",
@@ -80,7 +119,9 @@ go_test(
             "@com_github_burntsushi_toml//:toml",
         ],
         "@rules_go//go/platform:illumos": [
+            "//examples/bd/dolt",
             "//internal/beads",
+            "//internal/bootstrap/packs/core",
             "//internal/extmsg",
             "//internal/formula",
             "//internal/fsys",
@@ -89,7 +130,9 @@ go_test(
             "@com_github_burntsushi_toml//:toml",
         ],
         "@rules_go//go/platform:ios": [
+            "//examples/bd/dolt",
             "//internal/beads",
+            "//internal/bootstrap/packs/core",
             "//internal/extmsg",
             "//internal/formula",
             "//internal/fsys",
@@ -98,7 +141,9 @@ go_test(
             "@com_github_burntsushi_toml//:toml",
         ],
         "@rules_go//go/platform:linux": [
+            "//examples/bd/dolt",
             "//internal/beads",
+            "//internal/bootstrap/packs/core",
             "//internal/extmsg",
             "//internal/formula",
             "//internal/fsys",
@@ -107,7 +152,9 @@ go_test(
             "@com_github_burntsushi_toml//:toml",
         ],
         "@rules_go//go/platform:netbsd": [
+            "//examples/bd/dolt",
             "//internal/beads",
+            "//internal/bootstrap/packs/core",
             "//internal/extmsg",
             "//internal/formula",
             "//internal/fsys",
@@ -116,7 +163,9 @@ go_test(
             "@com_github_burntsushi_toml//:toml",
         ],
         "@rules_go//go/platform:openbsd": [
+            "//examples/bd/dolt",
             "//internal/beads",
+            "//internal/bootstrap/packs/core",
             "//internal/extmsg",
             "//internal/formula",
             "//internal/fsys",
@@ -125,7 +174,9 @@ go_test(
             "@com_github_burntsushi_toml//:toml",
         ],
         "@rules_go//go/platform:solaris": [
+            "//examples/bd/dolt",
             "//internal/beads",
+            "//internal/bootstrap/packs/core",
             "//internal/extmsg",
             "//internal/formula",
             "//internal/fsys",
@@ -141,6 +192,13 @@ exports_files(glob(
     ["**"],
     exclude = ["BUILD.bazel"],
 ))
+
+# The shard placement guard (scripts/integration_packages_shards_test.go)
+# reads gastown_test's srcs and shard_count.
+exports_files(
+    ["BUILD.bazel"],
+    visibility = ["//scripts:__pkg__"],
+)
 
 filegroup(
     name = "pack_files",
@@ -159,6 +217,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

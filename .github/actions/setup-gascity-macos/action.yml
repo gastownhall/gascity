@@ -26,7 +26,7 @@ inputs:
   claude-version:
     description: Claude Code version to install with the native binary installer
     required: false
-    default: "2.1.123"
+    default: "2.1.308"
   install-system-deps:
     description: Whether to run brew to install tmux, jq, and flock
     required: false
@@ -61,6 +61,11 @@ runs:
         go-version-file: ${{ inputs.go-version == '' && 'go.mod' || '' }}
         # Keep macOS parity deterministic across hosted and reused runners.
         cache: false
+
+    # Restores only go.sum-pinned module zips (never the build cache), so it
+    # keeps the determinism cache: false protects above, and retries the
+    # module proxy, which the go command never does.
+    - uses: ./.github/actions/go-mod-download
 
     - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
       with:

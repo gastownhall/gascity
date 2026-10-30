@@ -36,9 +36,32 @@ import (
 // is the store directory's single lock, owned by the sequence floor. Anything
 // else needing to serialize on this directory must coordinate through here.
 func persistSQLiteSequenceFloorAtLeast(floorPath string, requested int64) (persisted int64, returnErr error) {
+	returnErr = withSQLiteSequenceFloorLock(floorPath, func() error {
+		current, err := readSQLiteSequenceFloor(floorPath)
+		if err != nil {
+			return err
+		}
+		requested = sequenceMax(current, requested)
+		if err := writeSQLiteSequenceFloor(floorPath, requested); err != nil {
+			return err
+		}
+		persisted = requested
+		return nil
+	})
+	if returnErr != nil {
+		return 0, returnErr
+	}
+	return persisted, nil
+}
+
+// withSQLiteSequenceFloorLock runs fn while holding the store directory's
+// exclusive lock — the single lock that serializes every read-modify-write of
+// a sequence floor sidecar in that directory, across processes. Block
+// reservation, SetSequenceFloor and the operator repair all go through here.
+func withSQLiteSequenceFloorLock(floorPath string, fn func() error) (returnErr error) {
 	lock, lockLabel, err := filelock.OpenDirectoryLock(filepath.Dir(floorPath))
 	if err != nil {
-		return 0, fmt.Errorf("opening sequence-floor lock directory: %w", err)
+		return fmt.Errorf("opening sequence-floor lock directory: %w", err)
 	}
 	observeSQLiteSequenceFloorBoundary("sequence-floor-lock-open")
 	var heldLock *filelock.Lock
@@ -60,19 +83,8 @@ func persistSQLiteSequenceFloorAtLeast(floorPath string, requested int64) (persi
 	}()
 	heldLock, err = filelock.Acquire(lock, filelock.Options{Mode: filelock.Exclusive, Label: lockLabel})
 	if err != nil {
-		return 0, fmt.Errorf("locking SQLite sequence floor: %w", err)
+		return fmt.Errorf("locking SQLite sequence floor: %w", err)
 	}
 	observeSQLiteSequenceFloorBoundary("sequence-floor-lock-held")
-
-	current, err := readSQLiteSequenceFloor(floorPath)
-	if err != nil {
-		return 0, err
-	}
-	if current > requested {
-		requested = current
-	}
-	if err := writeSQLiteSequenceFloor(floorPath, requested); err != nil {
-		return 0, err
-	}
-	return requested, nil
+	return fn()
 }

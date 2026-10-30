@@ -34,10 +34,28 @@ var (
 )
 
 const (
-	fakeStartupGateTimeout         = 10 * time.Second
-	fakeStartupLaunchBound         = 5 * time.Second
-	fakeStartupPostControlOverhead = 2 * time.Second
-	fakeInteractionSignalBound     = 2 * time.Second
+	fakeStartupGateTimeout = 10 * time.Second
+	fakeStartupLaunchBound = 5 * time.Second
+
+	// fakeStartupPostControlOverhead bounds a real fake-worker subprocess's
+	// own OS-scheduling and file-I/O overhead between its control_observed
+	// and state_transition events. WC-BRINGUP-001 proves the worker fake
+	// surfaces a bounded startup outcome, not a fast one, so this is a hang
+	// detector, not a latency assertion — reuse this package's hangBudget
+	// (ga-e4bhca) rather than a bespoke deadline sized for an idle box. See
+	// TestPhase2StartupOutcomeBoundStaysAHangDetector for the guard and
+	// TESTING.md's "Test deadline rule" for why a sub-floor fixed value here
+	// is a CI reliability defect, not just tightness.
+	fakeStartupPostControlOverhead = hangBudget
+
+	// fakeInteractionSignalBound bounds a whole fake-worker run in
+	// runFakeInteraction, from exec to exit. Almost all of that is the
+	// subprocess's own start and teardown; the interaction signal itself
+	// typically takes a fraction of a millisecond. WC-INT-000 proves the
+	// worker surfaces the blocked interaction signal and state, not how
+	// fast, so this is a hang detector too — reuse hangBudget (ga-4pxoo4r).
+	// See TestPhase2InteractionSignalBoundStaysAHangDetector for the guard.
+	fakeInteractionSignalBound = hangBudget
 )
 
 func runFakeStartup(t *testing.T, profile ProfileID, outcome string, delay time.Duration) fakeStartupRun {
@@ -226,11 +244,12 @@ func runFakeInteraction(t *testing.T, profile ProfileID) fakeStartupRun {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("fake worker CLI: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 	}
+	elapsed := time.Since(start)
 	return fakeStartupRun{
 		StatePath: statePath,
 		EventPath: eventPath,
 		Events:    readWorkerFakeEvents(t, eventPath),
-		Elapsed:   time.Since(start),
+		Elapsed:   elapsed,
 	}
 }
 

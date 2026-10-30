@@ -19,10 +19,11 @@ func TestInstallSupervisorSystemdBinaryMismatchGuard(t *testing.T) {
 		existingBinary string
 		force          bool
 		wantCode       int
+		wantReplaced   bool
 	}{
 		{
 			name:           "refuses different existing binary without force",
-			existingBinary: "/opt/gascity/bin/gc",
+			existingBinary: "OTHER",
 			wantCode:       1,
 		},
 		{
@@ -32,9 +33,15 @@ func TestInstallSupervisorSystemdBinaryMismatchGuard(t *testing.T) {
 		},
 		{
 			name:           "allows different existing binary with force",
-			existingBinary: "/opt/gascity/bin/gc",
+			existingBinary: "OTHER",
 			force:          true,
 			wantCode:       0,
+		},
+		{
+			name:           "replaces missing existing binary without force",
+			existingBinary: "MISSING",
+			wantCode:       0,
+			wantReplaced:   true,
 		},
 		{
 			name:     "allows fresh install",
@@ -52,11 +59,9 @@ func TestInstallSupervisorSystemdBinaryMismatchGuard(t *testing.T) {
 			data := supervisorInstallGuardServiceData(gcHome, currentBinary)
 			unitPath := supervisorSystemdServicePath()
 			var original []byte
+			var existingBinary string
 			if tc.existingBinary != "" {
-				existingBinary := tc.existingBinary
-				if existingBinary == "CURRENT" {
-					existingBinary = currentBinary
-				}
+				existingBinary = supervisorInstallGuardExistingBinary(t, homeDir, currentBinary, tc.existingBinary)
 				original = []byte("[Unit]\nDescription=test\n\n[Service]\nExecStart=" + existingBinary + " supervisor run\n")
 				if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
 					t.Fatal(err)
@@ -97,7 +102,7 @@ func TestInstallSupervisorSystemdBinaryMismatchGuard(t *testing.T) {
 				if !bytes.Equal(got, original) {
 					t.Fatalf("refused install rewrote unit:\n got: %q\nwant: %q", got, original)
 				}
-				for _, want := range []string{"existing unit", "/opt/gascity/bin/gc", currentBinary, "--force"} {
+				for _, want := range []string{"existing unit", existingBinary, currentBinary, "--force"} {
 					if !strings.Contains(stderr.String(), want) {
 						t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 					}
@@ -105,6 +110,7 @@ func TestInstallSupervisorSystemdBinaryMismatchGuard(t *testing.T) {
 				return
 			}
 
+			assertSupervisorInstallReplacedMissingBinary(t, stdout.String(), existingBinary, tc.wantReplaced)
 			joined := strings.Join(calls, "\n")
 			if !strings.Contains(joined, "--user start "+supervisorSystemdServiceName()) {
 				t.Fatalf("systemctl calls = %v, want service start", calls)
@@ -126,10 +132,11 @@ func TestInstallSupervisorLaunchdBinaryMismatchGuard(t *testing.T) {
 		existingBinary string
 		force          bool
 		wantCode       int
+		wantReplaced   bool
 	}{
 		{
 			name:           "refuses different existing binary without force",
-			existingBinary: "/opt/gascity/bin/gc",
+			existingBinary: "OTHER",
 			wantCode:       1,
 		},
 		{
@@ -139,9 +146,15 @@ func TestInstallSupervisorLaunchdBinaryMismatchGuard(t *testing.T) {
 		},
 		{
 			name:           "allows different existing binary with force",
-			existingBinary: "/opt/gascity/bin/gc",
+			existingBinary: "OTHER",
 			force:          true,
 			wantCode:       0,
+		},
+		{
+			name:           "replaces missing existing binary without force",
+			existingBinary: "MISSING",
+			wantCode:       0,
+			wantReplaced:   true,
 		},
 		{
 			name:     "allows fresh install",
@@ -159,11 +172,9 @@ func TestInstallSupervisorLaunchdBinaryMismatchGuard(t *testing.T) {
 			data := supervisorInstallGuardServiceData(gcHome, currentBinary)
 			plistPath := supervisorLaunchdPlistPath()
 			var original []byte
+			var existingBinary string
 			if tc.existingBinary != "" {
-				existingBinary := tc.existingBinary
-				if existingBinary == "CURRENT" {
-					existingBinary = currentBinary
-				}
+				existingBinary = supervisorInstallGuardExistingBinary(t, homeDir, currentBinary, tc.existingBinary)
 				original = supervisorInstallGuardLaunchdPlist(existingBinary)
 				if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
 					t.Fatal(err)
@@ -199,7 +210,7 @@ func TestInstallSupervisorLaunchdBinaryMismatchGuard(t *testing.T) {
 				if !bytes.Equal(got, original) {
 					t.Fatalf("refused install rewrote plist:\n got: %q\nwant: %q", got, original)
 				}
-				for _, want := range []string{"existing plist", "/opt/gascity/bin/gc", currentBinary, "--force"} {
+				for _, want := range []string{"existing plist", existingBinary, currentBinary, "--force"} {
 					if !strings.Contains(stderr.String(), want) {
 						t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 					}
@@ -207,6 +218,7 @@ func TestInstallSupervisorLaunchdBinaryMismatchGuard(t *testing.T) {
 				return
 			}
 
+			assertSupervisorInstallReplacedMissingBinary(t, stdout.String(), existingBinary, tc.wantReplaced)
 			joined := strings.Join(calls, "\n")
 			if !strings.Contains(joined, "load "+plistPath) {
 				t.Fatalf("launchctl calls = %v, want plist load", calls)
@@ -324,6 +336,78 @@ func TestSupervisorInstallCommandRegistersForceFlag(t *testing.T) {
 	}
 	if !supervisorInstallForce {
 		t.Fatal("setting --force did not enable supervisorInstallForce")
+	}
+}
+
+func TestSupervisorInstallBinaryGuard(t *testing.T) {
+	dir := t.TempDir()
+	current := filepath.Join(dir, "current", "gc")
+	other := filepath.Join(dir, "other", "gc")
+	for _, p := range []string{current, other} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("gc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dangling := filepath.Join(dir, "dangling-gc")
+	if err := os.Symlink(filepath.Join(dir, "removed", "gc"), dangling); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		existing string
+		want     supervisorInstallBinaryGuardResult
+	}{
+		{name: "no existing binary", existing: "", want: supervisorInstallBinaryAllowed},
+		{name: "same binary", existing: current, want: supervisorInstallBinaryAllowed},
+		{name: "different present binary", existing: other, want: supervisorInstallBinaryDifferent},
+		{name: "missing binary", existing: filepath.Join(dir, "removed", "gc"), want: supervisorInstallBinaryMissing},
+		{name: "dangling symlink", existing: dangling, want: supervisorInstallBinaryMissing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := supervisorInstallBinaryGuard(tc.existing, current); got != tc.want {
+				t.Fatalf("supervisorInstallBinaryGuard(%q, %q) = %v, want %v", tc.existing, current, got, tc.want)
+			}
+		})
+	}
+}
+
+// supervisorInstallGuardExistingBinary resolves a table sentinel to the binary
+// path an existing service file should reference: the current binary, a
+// different binary present on disk, or a path that no longer exists.
+func supervisorInstallGuardExistingBinary(t *testing.T, homeDir, currentBinary, sentinel string) string {
+	t.Helper()
+	switch sentinel {
+	case "CURRENT":
+		return currentBinary
+	case "MISSING":
+		return filepath.Join(homeDir, "removed", "bin", "gc")
+	case "OTHER":
+		other := filepath.Join(homeDir, "other", "bin", "gc")
+		if err := os.MkdirAll(filepath.Dir(other), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(other, []byte("other gc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return other
+	default:
+		t.Fatalf("unknown existing-binary sentinel %q", sentinel)
+		return ""
+	}
+}
+
+func assertSupervisorInstallReplacedMissingBinary(t *testing.T, stdout, existingBinary string, want bool) {
+	t.Helper()
+	got := strings.Contains(stdout, "no longer exists")
+	if got != want {
+		t.Fatalf("stdout = %q, want missing-binary replacement notice = %v", stdout, want)
+	}
+	if want && !strings.Contains(stdout, existingBinary) {
+		t.Fatalf("stdout = %q, want it to name the missing binary %q", stdout, existingBinary)
 	}
 }
 

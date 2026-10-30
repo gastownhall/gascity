@@ -439,6 +439,7 @@ func TestExecConformance(t *testing.T) {
 		return p, func() { p.Close() } //nolint:errcheck // test cleanup
 	}
 	eventstest.RunProviderTests(t, factory)
+	eventstest.RunSinceOrderingTests(t, factory)
 }
 
 // statefulMockScript returns a shell script body that implements a real

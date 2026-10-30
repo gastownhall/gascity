@@ -3,105 +3,64 @@
 package beads
 
 import (
+	"errors"
 	"fmt"
 	"strings"
-	"time"
 )
 
-// RefreshIDs refreshes the named rows from the backing store and absorbs them
-// into the cache through the same close-reporting path as dirty cached reads.
+// refreshIDsFencedRetries bounds how often RefreshIDs re-reads a row whose
+// refresh a newer write, event or scan fenced.
+const refreshIDsFencedRetries = 3
+
+// RefreshIDs refreshes the named rows from the backing store through
+// RefreshRow, which installs each into the cache and announces what changed.
+// A row the backing no longer has is omitted. A row whose refresh stays fenced
+// by newer state returns the cached row, which that newer state wrote; a cache
+// that is not serving reads the backing directly.
 func (c *CachingStore) RefreshIDs(ids []string) ([]Bead, error) {
 	if c == nil || c.backing == nil {
 		return nil, fmt.Errorf("refreshing cache rows: backing store unavailable")
 	}
 	ids = compactRefreshIDs(ids)
-	if len(ids) == 0 {
-		return nil, nil
+	rows := make([]Bead, 0, len(ids))
+	for _, id := range ids {
+		row, found, err := c.refreshID(id)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			rows = append(rows, row)
+		}
 	}
-
-	startSeq, finishRead := c.beginSnapshotReadSeq()
-	defer finishRead()
-
-	suppressed := make(map[string]struct{})
-	fetched, err := c.fetchDirtyOverlay(ids, suppressed)
-	if err != nil {
-		return nil, err
-	}
-
-	rows := make([]Bead, 0, len(fetched))
-	notifications := make([]cacheNotification, 0)
-	changed := false
-
-	c.mu.Lock()
-	if c.state != cacheLive && c.state != cachePartial {
-		c.mu.Unlock()
-		for _, f := range fetched {
-			rows = append(rows, cloneBead(f.bead))
-		}
-		return rows, nil
-	}
-
-	now := time.Now()
-	for _, f := range fetched {
-		if c.deletedSeq[f.id] > startSeq {
-			continue
-		}
-		if c.beadSeq[f.id] > startSeq {
-			if current, ok := c.beads[f.id]; ok {
-				rows = append(rows, cloneBead(current))
-			}
-			continue
-		}
-		if c.readCloseFenceBlocksFreshLocked(f.id, f.bead, startSeq) {
-			if current, ok := c.beads[f.id]; ok {
-				rows = append(rows, cloneBead(current))
-			}
-			continue
-		}
-		opts := absorbOpts{
-			depsMode:   depsFromFields,
-			seqMode:    seqClearBeadSeqOnly,
-			clearDirty: true,
-		}
-		if f.depsFromBacking {
-			opts.depsMode = depsExplicit
-			opts.deps = f.deps
-		}
-		notification, notify, observedClose := c.closedAbsorbNotificationLocked(f.id, f.bead)
-		if notify {
-			notifications = append(notifications, notification)
-		}
-		c.absorbFreshLocked(f.id, f.bead, now, opts)
-		if observedClose {
-			c.fenceReportedCloseLocked(f.id)
-		}
-		rows = append(rows, cloneBead(f.bead))
-		changed = true
-	}
-	for id := range suppressed {
-		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
-			continue
-		}
-		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
-			continue
-		}
-		notification, notify, observedClose := c.closedEvictNotificationLocked(id)
-		if notify {
-			notifications = append(notifications, notification)
-		}
-		c.evictReadMissingLocked(id)
-		if observedClose {
-			c.fenceReportedCloseLocked(id)
-		}
-		changed = true
-	}
-	if changed {
-		c.markFreshLocked(time.Now())
-		c.updateStatsLocked()
-	}
-	c.mu.Unlock()
-	c.notifyChanges(notifications)
 	return rows, nil
+}
+
+func (c *CachingStore) refreshID(id string) (Bead, bool, error) {
+	for attempt := 1; ; attempt++ {
+		row, err := c.RefreshRow(id)
+		switch {
+		case err == nil:
+			return row, true, nil
+		case errors.Is(err, ErrNotFound):
+			return Bead{}, false, nil
+		case errors.Is(err, ErrCacheUnavailable):
+			row, err := c.backing.Get(id)
+			if errors.Is(err, ErrNotFound) {
+				return Bead{}, false, nil
+			}
+			return row, err == nil, err
+		case errors.Is(err, ErrRowRefreshFenced) && attempt >= refreshIDsFencedRetries:
+			row, err := c.Get(id)
+			if errors.Is(err, ErrNotFound) {
+				return Bead{}, false, nil
+			}
+			return row, err == nil, err
+		case errors.Is(err, ErrRowRefreshFenced):
+			continue
+		default:
+			return Bead{}, false, err
+		}
+	}
 }
 
 func compactRefreshIDs(ids []string) []string {

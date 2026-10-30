@@ -67,7 +67,10 @@ const (
 	cursorTableMain    = "schema_migrations"
 	cursorTableIgnored = "ignored_schema_migrations"
 	cursorExistsQuery  = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?"
-	columnExistsQuery  = "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?"
+	// sentinelColumnQuery lists the ignored lane's sentinel column, if its
+	// table carries it. The LIKE narrows the rows; the Field comparison is the
+	// exact one, because '_' is a LIKE wildcard.
+	sentinelColumnQuery = "SHOW COLUMNS FROM " + IgnoredSentinelColumnTable + " LIKE '" + IgnoredSentinelColumnName + "'"
 	// cursorExistsWithHeadQuery is cursorExistsQuery with the database's HEAD
 	// commit hash riding along as a second column. It is the FIRST statement of
 	// every probe session (the main lane's existence check), so the HEAD
@@ -94,7 +97,8 @@ const (
 // schema corroborates it, and when a sentinel is missing it clamps the cursor
 // down (beads v1.3.0 internal/storage/schema/schema.go, currentVersion ->
 // cursorRealityFloor, and ignoredSource's sentinelTables/sentinelColumns at
-// :290-311). beads documents both contradicted shapes as real in the field: a
+// :290-311; beads v1.3.1 adds sentinelFlooredTables). beads documents both
+// contradicted shapes as real in the field: a
 // historical ignored-v16 ordinal collision leaves `leases` present without the
 // column 0016 adds, and a database materialized out of band can be missing the
 // wisps tables altogether.
@@ -115,6 +119,31 @@ var ignoredSentinelTables = []string{"wisps", "wisp_dependencies"}
 // caller cannot edit the library's facts.
 func IgnoredSentinelTables() []string {
 	return append([]string(nil), ignoredSentinelTables...)
+}
+
+// IgnoredSentinelFlooredTable is one of the ignored lane's FLOORED sentinel
+// tables (beads v1.3.1 migrationSource.sentinelFlooredTables): a dolt_ignored
+// table a fresh clone can lack while its cursor reads at-latest. Unlike a
+// sentinel TABLE, its absence disbelieves the cursor only back to Floor, the
+// highest ignored version the table's absence still leaves believable.
+type IgnoredSentinelFlooredTable struct {
+	Table string
+	Floor int
+}
+
+// ignoredSentinelFlooredTables are in the library's probing order. events is
+// created by ignored/0019 and bd_events_journal/bd_events_seq by ignored/0022,
+// hence floors 18 and 21.
+var ignoredSentinelFlooredTables = []IgnoredSentinelFlooredTable{
+	{Table: "events", Floor: 18},
+	{Table: "bd_events_journal", Floor: 21},
+	{Table: "bd_events_seq", Floor: 21},
+}
+
+// IgnoredSentinelFlooredTables returns the ignored lane's floored sentinel
+// tables, copied so a caller cannot edit the library's facts.
+func IgnoredSentinelFlooredTables() []IgnoredSentinelFlooredTable {
+	return append([]IgnoredSentinelFlooredTable(nil), ignoredSentinelFlooredTables...)
 }
 
 const (
@@ -278,6 +307,17 @@ func (r CursorReality) EffectiveIgnored(raw int) int {
 		return r.Floor
 	}
 	return raw
+}
+
+// lowered applies one absent FLOORED sentinel (a floored table or the sentinel
+// column) the way the library's cursorRealityFloor does: the first absent one
+// sets the floor, and a later one replaces it only when its floor is strictly
+// lower, so Missing names the first sentinel that reached the lowest floor.
+func (r CursorReality) lowered(floor int, missing string) CursorReality {
+	if r.Limited && floor >= r.Floor {
+		return r
+	}
+	return CursorReality{Limited: true, Floor: floor, Missing: missing}
 }
 
 // String renders the clamp for a message, or "" when nothing was missing.
@@ -706,6 +746,25 @@ func readCursorsOver(ctx context.Context, connector driver.Connector) (CursorRep
 	if err := conn.PingContext(ctx); err != nil {
 		return report, err
 	}
+	return ReadCursorReportOverConn(ctx, conn)
+}
+
+// ReadCursorReportOverConn reads the database's real migration counters —
+// main lane, ignored lane, and the ignored lane's reality floor — over an
+// already-acquired, already-pinged *sql.Conn.
+//
+// It is readCursorsOver's body from "after the session is pinged" onward,
+// factored out so a caller that already holds a *sql.Conn through its own
+// connection-acquisition path (e.g. a pooled *sql.DB opened by
+// cmd/gc's managedDoltOpenDatabase family for the native-store preflight's
+// identity probe) can read the SAME cursors the proxied lane's admission gate
+// reads, without redialing or duplicating the cursor queries. It does not
+// ping or close conn; the caller owns both.
+func ReadCursorReportOverConn(ctx context.Context, conn *sql.Conn) (CursorReport, error) {
+	var (
+		report CursorReport
+		err    error
+	)
 	if report.Cursors.Main, report.Head, err = readMainCursorAndHead(ctx, conn); err != nil {
 		return report, err
 	}
@@ -774,10 +833,15 @@ func (c *oneSessionConnector) closeUntaken() {
 // it corroborates, over the SAME pinned connection as the cursor reads.
 //
 // The order is the library's: sentinel TABLES first, because they floor at zero
-// and short-circuit — no column probe could lower that answer — and the sentinel
-// COLUMN after. Both are point reads against information_schema, which always
-// succeed, so neither can poison the session's catalog snapshot the way a bare
-// SELECT against an absent table would.
+// and short-circuit — nothing after them could lower that answer — then the
+// FLOORED sentinel tables, then the sentinel COLUMN, the lowest floor of any
+// absent one winning. Every statement is one that cannot fail on an absent
+// object — information_schema.tables point reads, and SHOW COLUMNS only once its
+// table is known to exist (readSentinelColumnPresent) — so none can poison the
+// session's catalog snapshot the way a bare SELECT against an absent table
+// would, short of a concurrent DROP of that table between its existence read
+// and SHOW COLUMNS: that statement then fails, pinning the session as any failed
+// read does, and the error is returned rather than a reality.
 func readIgnoredReality(ctx context.Context, conn *sql.Conn) (CursorReality, error) {
 	for _, table := range ignoredSentinelTables {
 		exists, err := readExistsCount(ctx, conn, cursorExistsQuery, table)
@@ -788,19 +852,76 @@ func readIgnoredReality(ctx context.Context, conn *sql.Conn) (CursorReality, err
 			return CursorReality{Limited: true, Floor: IgnoredSentinelTableFloor, Missing: table}, nil
 		}
 	}
-	exists, err := readExistsCount(ctx, conn, columnExistsQuery, IgnoredSentinelColumnTable, IgnoredSentinelColumnName)
+	var reality CursorReality
+	for _, floored := range ignoredSentinelFlooredTables {
+		exists, err := readExistsCount(ctx, conn, cursorExistsQuery, floored.Table)
+		if err != nil {
+			return CursorReality{}, fmt.Errorf("probing ignored-lane sentinel floored table %s: %w", floored.Table, err)
+		}
+		if exists == 0 {
+			reality = reality.lowered(floored.Floor, floored.Table)
+		}
+	}
+	present, err := readSentinelColumnPresent(ctx, conn)
 	if err != nil {
 		return CursorReality{}, fmt.Errorf("probing ignored-lane sentinel column %s.%s: %w",
 			IgnoredSentinelColumnTable, IgnoredSentinelColumnName, err)
 	}
-	if exists == 0 {
-		return CursorReality{
-			Limited: true,
-			Floor:   IgnoredSentinelColumnFloor,
-			Missing: IgnoredSentinelColumnTable + "." + IgnoredSentinelColumnName,
-		}, nil
+	if !present {
+		reality = reality.lowered(IgnoredSentinelColumnFloor, IgnoredSentinelColumnTable+"."+IgnoredSentinelColumnName)
 	}
-	return CursorReality{}, nil
+	return reality, nil
+}
+
+// readSentinelColumnPresent reports whether the ignored lane's sentinel column
+// exists, over the session's pinned connection.
+//
+// It does not ask information_schema.columns, though that would answer in one
+// statement that cannot fail: Dolt does not push that view's predicate down, so
+// it materializes every column of every table on the server before filtering
+// — 360-410 ms per probe on a sql-server hosting ~28 databases, against ~10 ms
+// for SHOW COLUMNS (the linked library's own hasContentHashColumn avoids it for
+// the same reason). SHOW COLUMNS fails on an absent table, and a failing
+// statement pins a Dolt session to its pre-statement catalog, so the column's
+// table is first asked about with the same information_schema.tables point read
+// the sentinel tables use, and an absent table is an absent column.
+//
+// The LIKE pattern's '_' is a wildcard, so the Field comparison is the exact
+// one, and case-sensitive, as Dolt's LIKE already is and as the library's own
+// SHOW COLUMNS reads compare (hasContentHashColumn, and the sentinel probe
+// beads#7592 moves onto that shape). A column re-cased by hand, which no
+// migration produces, therefore reads as absent and floors the lane, where the
+// linked v1.3.1 sentinel probe — information_schema.columns, which folds case —
+// would believe it: that disagreement refuses an open, and never admits one.
+func readSentinelColumnPresent(ctx context.Context, conn *sql.Conn) (bool, error) {
+	tableExists, err := readExistsCount(ctx, conn, cursorExistsQuery, IgnoredSentinelColumnTable)
+	if err != nil || tableExists == 0 {
+		return false, err
+	}
+	rows, err := conn.QueryContext(ctx, sentinelColumnQuery)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close() //nolint:errcheck // read-only result set on the pinned connection
+	columns, err := rows.Columns()
+	if err != nil {
+		return false, err
+	}
+	cells := make([]sql.RawBytes, len(columns))
+	dest := make([]any, len(columns))
+	for i := range cells {
+		dest[i] = &cells[i]
+	}
+	present := false
+	for rows.Next() {
+		if err := rows.Scan(dest...); err != nil {
+			return false, err
+		}
+		if len(cells) > 0 && string(cells[0]) == IgnoredSentinelColumnName {
+			present = true
+		}
+	}
+	return present, rows.Err()
 }
 
 // readExistsCount runs one information_schema COUNT(*) and returns it.

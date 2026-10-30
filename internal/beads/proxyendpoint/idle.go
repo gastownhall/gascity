@@ -228,3 +228,17 @@ func idlePolicyFromDuration(d time.Duration, source IdleSource) IdlePolicy {
 	}
 	return IdlePolicy{Kind: IdleFinite, Timeout: d, Source: source}
 }
+
+// IdleMatches reports whether the sidecar carries the idle timeout d, in the
+// encoding bd persists: never (d <= 0) as a negative duration, a finite value
+// as itself. An absent sidecar or key matches nothing, because bd would
+// substitute its own default for it.
+func (s Sidecar) IdleMatches(d time.Duration) bool {
+	if !s.Present || s.IdleTimeout == nil {
+		return false
+	}
+	if d <= 0 {
+		return *s.IdleTimeout < 0
+	}
+	return *s.IdleTimeout == d
+}

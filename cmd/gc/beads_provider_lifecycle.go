@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -120,8 +119,8 @@ func clearCityDoltConfig(cityPath string) {
 // registered yet, returning true when it added the entry (so the caller knows to
 // clear it). It never overwrites an existing registration: in the controller
 // process the city dolt config is registered persistently at boot and on every
-// reload by startBeadsLifecycle, and a transient per-request provisioning window
-// must not delete or clobber it.
+// reload by startBeadsLifecycleResolvingCityDatabase, and a transient
+// per-request provisioning window must not delete or clobber it.
 func registerCityDoltConfigIfAbsent(cityPath string, cfg config.DoltConfig) (added bool) {
 	_, loaded := cityDoltConfigs.LoadOrStore(normalizePathForCompare(cityPath), cfg)
 	return !loaded
@@ -188,11 +187,27 @@ func isRetryableManagedDoltLifecycleError(err error) bool {
 //   health        — check provider health
 //   stop          — stop the backing service
 
-// startBeadsLifecycle runs the full bead store startup sequence:
-// start → init+hooks(city) → init+hooks(each rig) → regenerate routes.
-// Called by gc start and controller config reload. Rigs must have absolute
-// paths before calling (resolve relative paths first).
+// startBeadsLifecycle is the boot bead lifecycle, run by gc start and the
+// supervisor's city prepare: start → init+hooks(city) → init+hooks(each rig) →
+// regenerate routes, then it records the city's store binding for the runtime
+// built after it. Config reload must run startBeadsLifecycleForReload instead,
+// which holds the city to that record. Rigs must have absolute paths before
+// calling (resolve relative paths first).
 func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer) error {
+	if err := startBeadsLifecycleResolvingCityDatabase(cityPath, cfg, stderr, nil); err != nil {
+		return err
+	}
+	// The binding boot leaves behind is the one every reload must keep.
+	recordBootCityStore(cityPath)
+	return nil
+}
+
+// startBeadsLifecycleResolvingCityDatabase is the bead lifecycle boot and
+// reload share. A nil bootStore is boot: the city scope's Dolt database name
+// is read from metadata with a default-name fallback. Reload passes the
+// binding recorded at boot; city init and normalization hold the city's
+// metadata to it and take the database name from it, never the fallback.
+func startBeadsLifecycleResolvingCityDatabase(cityPath string, cfg *config.City, stderr io.Writer, bootStore *cityStoreRecord) error {
 	if err := ensureFreshRigProviderOwnership(cityPath, cfg); err != nil {
 		return err
 	}
@@ -257,6 +272,13 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	}
 	if cityProviderOwned {
 		if cityState.State == providerScopeReady {
+			// The provider script pins a ready scope out of bd's shared-server
+			// mode by reading this pin, so it has to be in place before the
+			// start op runs bd (a city initialized by a build that did not
+			// write it is repaired here).
+			if err := ensureGCOwnedProxiedScopeSharedServerOff(cityPath, cityPath); err != nil {
+				return err
+			}
 			if err := ensureBeadsProvider(cityPath); err != nil {
 				return fmt.Errorf("provider-owned bead store: %w", err)
 			}
@@ -271,11 +293,17 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	// identity that differs from the bead prefix. New managed bd stores still
 	// default to prefix-named databases, but older/imported metadata may carry
 	// a different dolt_database that gc-beads-bd should preserve.
-	if err := initAndHookDir(cityPath, cityPath, beadsPrefix); err != nil {
+	if err := initAndHookDirResolvingDatabase(cityPath, cityPath, beadsPrefix, bootStore); err != nil {
 		return fmt.Errorf("init city beads: %w", err)
 	}
+	suspended := suspendedBeadsScopes(cityPath, cfg)
 	for i := range cfg.Rigs {
 		if strings.TrimSpace(cfg.Rigs[i].Path) == "" {
+			continue
+		}
+		if suspended.Suspended(cfg.Rigs[i].Path) && providerOwnedScopeReady(cityPath, cfg.Rigs[i].Path) {
+			// A suspended rig whose store already exists is left cold: its
+			// readiness ping would restart its proxy and Dolt.
 			continue
 		}
 		prefix := cfg.Rigs[i].EffectivePrefix()
@@ -283,7 +311,7 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 			return fmt.Errorf("init rig %q beads: %w", cfg.Rigs[i].Name, err)
 		}
 	}
-	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg, stderr); err != nil {
+	if err := normalizeCanonicalBdScopeFilesResolvingCityDatabase(cityPath, cfg, bootStore, stderr); err != nil {
 		return err
 	}
 	// Regenerate routes for cross-rig routing.
@@ -594,14 +622,21 @@ func desiredScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.
 }
 
 // registerProviderOwnedScopeCustomTypes registers Gas City's bead vocabulary
-// with a scope bd has just created. bd init writes its own generic config,
-// whose types.custom is unset, and bd validates bead types on create and on
-// list — so without this every gc type (session, molecule, convoy, and the
-// rest) comes back "invalid issue type", which takes out `gc status`, the
-// session model, the startup-health scan and doctor's custom-types check on a
-// city that has just been initialized. `bd config set` is also what keeps bd's
-// normalized custom_types table in step, the same call
-// doctor.CustomTypesCheck.Fix makes.
+// with a provider-owned scope through the provider's own projection of it.
+func registerProviderOwnedScopeCustomTypes(cityPath, dir string) {
+	registerScopeCustomTypes(cityPath, dir, providerOwnedScopeCustomTypesEnv)
+}
+
+// registerScopeCustomTypes registers Gas City's bead vocabulary with a scope
+// whose config is bd's to write: a provider-owned scope bd has just created, or
+// an embedded one. bd init writes its own generic config, whose types.custom is
+// unset, and bd validates bead types on create and on list — so without this
+// every gc type (session, molecule, convoy, and the rest) comes back "invalid
+// issue type", which takes out `gc status`, the session model, the
+// startup-health scan and doctor's custom-types check on a city that has just
+// been initialized. `bd config set` is also what keeps bd's normalized
+// custom_types table in step, the same call doctor.CustomTypesCheck.Fix makes.
+// scopeEnv aims each bd call at dir's store.
 //
 // Nothing else in the scope's .beads is gc's to write: bd owns that config for
 // a scope whose Dolt topology it owns. The vocabulary goes in through bd's own
@@ -610,9 +645,9 @@ func desiredScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.
 // It lives here rather than in gc-beads-bd.sh on purpose: ga-5mym bans
 // `bd config set` from that script because it runs inside the provider op
 // timeout, where bd's auto-migrate can cost tens of seconds on a populated
-// store. This runs after the provider's init op on every start, outside that
-// budget; on a store that is already registered it costs two bd reads and no
-// write.
+// store. This runs once the scope is initialized, on every start and outside
+// that budget; on a store that is already registered it costs two bd reads and
+// no write.
 //
 // Existing registrations are merged, never narrowed: the value written is the
 // config row ∪ what `bd types --json` reports (the custom_types table bd's
@@ -630,9 +665,9 @@ func desiredScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.
 // `gc doctor --fix` hint instead of failing init: doctor's custom-types check
 // reports the same drift and --fix performs the same merge. Failing the whole
 // init over it would destroy a city that is otherwise complete.
-func registerProviderOwnedScopeCustomTypes(cityPath, dir string) {
+func registerScopeCustomTypes(cityPath, dir string, scopeEnv func(cityPath, dir string) (map[string]string, error)) {
 	const hint = "; run `gc doctor --fix`"
-	env, err := providerOwnedScopeCustomTypesEnv(cityPath, dir)
+	env, err := scopeEnv(cityPath, dir)
 	if err != nil {
 		log.Printf("gc: custom bead types not registered for %s: %v%s", dir, err, hint)
 		return
@@ -693,9 +728,43 @@ func providerOwnedScopeCustomTypesEnv(cityPath, dir string) (map[string]string, 
 	return env, nil
 }
 
+// embeddedScopeCustomTypesEnv builds registerScopeCustomTypes' env for a scope
+// whose metadata.json records embedded Dolt: doctor's custom-types store
+// projection, the one `gc doctor --fix` registers under, which aims bd at the
+// scope's own .beads with every server selector cleared, plus the workspace's
+// pinned BD_BIN and export suppression. The provider projection would hand bd
+// the city's server endpoint, which an embedded scope never serves from.
+func embeddedScopeCustomTypesEnv(cityPath, dir string) (map[string]string, error) {
+	base, err := doctor.CustomTypesStoreEnv(cityPath, dir)
+	if err != nil {
+		return nil, err
+	}
+	env := runtimeEnvEntriesToMap(base)
+	if err := applyWorkspacePinnedBdBinary(env, cityPath); err != nil {
+		return nil, err
+	}
+	applyExportSuppressionEnv(env)
+	return env, nil
+}
+
 //nolint:unparam // keep fs seam for future testable FS injection
 func ensureCanonicalScopeConfigState(fs fsys.FS, dir string, state contract.ConfigState) error {
 	beadsDir := filepath.Join(dir, ".beads")
+	embedded, err := scopeMetadataRecordsEmbeddedDolt(fs, dir)
+	if err != nil {
+		return err
+	}
+	if embedded {
+		// An embedded scope keeps its storage mode (ga-p9iuv) and its config.yaml
+		// stays bd's: gc only takes back endpoint claims an earlier pass stamped.
+		// No managed endpoint, topology or policy keys, no prefix or types line
+		// (bd keeps both in the store, where initAndHookDir registers gc's types
+		// through bd), and no removal of an issues.jsonl nothing gc replaces. Nor
+		// does this pass create or chmod .beads; only the metadata
+		// canonicalization beside it may tighten an existing .beads to the
+		// owner-only mode bd warns without, and git tracks no directory modes.
+		return scrubEmbeddedScopeEndpointClaims(fs, dir)
+	}
 	if err := ensureBeadsDir(fs, beadsDir); err != nil {
 		return err
 	}
@@ -711,7 +780,9 @@ func ensureCanonicalScopeConfigState(fs fsys.FS, dir string, state contract.Conf
 	if err != nil {
 		return err
 	}
-	if changed && state.EndpointOrigin != contract.EndpointOriginExplicit {
+	autoExport, autoExportSet, autoExportErr := contract.ReadExportAuto(fs, filepath.Join(beadsDir, "config.yaml"))
+	if changed && state.EndpointOrigin != contract.EndpointOriginExplicit &&
+		autoExportErr == nil && (!autoExportSet || !autoExport) {
 		// PR 1965 made export.auto:false canonical, but a pre-existing
 		// .beads/issues.jsonl from before this normalization still triggers
 		// bd's auto-import-on-write trap (sa-41j3kp) — bd sees the file,
@@ -719,16 +790,20 @@ func ensureCanonicalScopeConfigState(fs fsys.FS, dir string, state contract.Conf
 		// subprocess timeout while it re-imports the JSONL. The file is a
 		// stale export from when auto-export was on; with the canonical
 		// config now suppressing auto-export, nothing will refresh it. Explicit
-		// opt-out scopes keep JSONL as load-bearing state.
+		// opt-out scopes and scopes with export.auto:true keep JSONL as
+		// load-bearing state. A config that cannot be read back may hold that
+		// true, so the file is left for the store-open reaper to judge.
 		removeStaleBdExportJSONL(fs, beadsDir)
 	}
 	return nil
 }
 
-// removeStaleBdExportJSONL removes .beads/issues.jsonl if present. Called after
-// EnsureCanonicalConfig writes export.auto:false, since the file is a stale
-// export that bd's auto-import path would otherwise re-load on every write,
-// stalling bd create for the full subprocess timeout on large datasets.
+// removeStaleBdExportJSONL removes .beads/issues.jsonl if present. Called
+// after EnsureCanonicalConfig has canonicalized export.auto to false — that
+// is, for scopes where gc does not observe an explicit export.auto:true —
+// since the file is then a stale export that bd's auto-import path would
+// otherwise re-load on every write, stalling bd create for the full
+// subprocess timeout on large datasets.
 // Best-effort: any error is non-fatal because the env-var BD_EXPORT_AUTO=false
 // path (bdRuntimeEnv) is a second line of defense for gc-initiated calls.
 func removeStaleBdExportJSONL(fs fsys.FS, beadsDir string) {
@@ -737,6 +812,39 @@ func removeStaleBdExportJSONL(fs fsys.FS, beadsDir string) {
 		return
 	}
 	_ = fs.Remove(path)
+}
+
+// scopeMetadataRecordsEmbeddedDolt reports whether dir's metadata.json records
+// embedded Dolt storage under the explicit dolt backend — the same condition
+// under which ensureCanonicalScopeMetadata treats the recorded mode as
+// authoritative and preserves it.
+func scopeMetadataRecordsEmbeddedDolt(fs fsys.FS, dir string) (bool, error) {
+	path := scopeMetadataJSONPath(dir)
+	backend, ok, err := contract.ReadMetadataBackend(fs, path)
+	if err != nil || !ok || !strings.EqualFold(backend, "dolt") {
+		return false, err
+	}
+	mode, ok, err := contract.ReadDoltMode(fs, path)
+	if err != nil || !ok {
+		return false, err
+	}
+	return strings.EqualFold(mode, "embedded"), nil
+}
+
+// scrubEmbeddedScopeEndpointClaims takes back the endpoint claims an earlier gc
+// pass stamped into an embedded scope's config.yaml (see
+// contract.ScrubEmbeddedScopeConfig), and says which: the file is bd's and
+// git-tracked, so an edit gc makes to it must not be silent.
+func scrubEmbeddedScopeEndpointClaims(fs fsys.FS, dir string) error {
+	path := filepath.Join(dir, ".beads", "config.yaml")
+	removed, err := contract.ScrubEmbeddedScopeConfig(fs, path)
+	if err != nil {
+		return fmt.Errorf("removing gc endpoint claims from embedded scope config %s: %w", path, err)
+	}
+	if len(removed) > 0 {
+		log.Printf("gc: removed gc-stamped endpoint claims from embedded scope config %s: %s", path, strings.Join(removed, ", "))
+	}
+	return nil
 }
 
 func seedDeferredManagedBeads(cityPath, dir, prefix, doltDatabase string) {
@@ -848,6 +956,23 @@ func normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase s
 // wipe existing hooks. installBeadHooks only removes gc-stamped hooks and
 // is always safe to run regardless of event_hooks config.
 func initAndHookDir(cityPath, dir, prefix string) error {
+	return initAndHookDirResolvingDatabase(cityPath, dir, prefix, nil)
+}
+
+// initAndHookDirResolvingDatabase is initAndHookDir held, when bootStore is
+// non-nil, to the city store binding recorded at boot: the city's metadata
+// must still name that store before any init branch classifies or writes the
+// scope, and every branch that names the city's Dolt database takes the
+// booted one instead of a default-name fallback. Only the city scope passes a
+// record.
+func initAndHookDirResolvingDatabase(cityPath, dir, prefix string, bootStore *cityStoreRecord) error {
+	// The provider start op that runs before the city's init can take
+	// seconds, and each branch below acts on the metadata as it is now.
+	if bootStore != nil {
+		if err := checkReloadCityStore(cityPath, *bootStore); err != nil {
+			return err
+		}
+	}
 	if owned, err := scopeProviderOwned(cityPath, dir); err != nil {
 		return err
 	} else if owned {
@@ -855,8 +980,19 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		if !strings.HasPrefix(provider, "exec:") {
 			return fmt.Errorf("provider-owned scope %q requires an exec beads provider", dir)
 		}
+		// A ready scope's init op is the provider `start` (a bd ping), and the
+		// script pins bd's shared-server mode off from this pin: write it first
+		// so a scope initialized by a build that wrote none is never pinged
+		// unpinned. No-op for an unmaterialized scope; re-applied after init,
+		// which rewrites config.yaml.
+		if err := ensureGCOwnedProxiedScopeSharedServerOff(cityPath, dir); err != nil {
+			return err
+		}
 		pending, err := runProviderOwnedScopeInit(cityPath, dir, prefix, strings.TrimPrefix(provider, "exec:"))
 		if err != nil {
+			return err
+		}
+		if err := ensureGCOwnedProxiedScopeSharedServerOff(cityPath, dir); err != nil {
 			return err
 		}
 		registerProviderOwnedScopeCustomTypes(cityPath, dir)
@@ -879,7 +1015,43 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		}
 		return nil
 	}
-	doltDatabase := canonicalScopeDoltDatabase(cityPath, dir, prefix)
+	if embedded, err := scopeMetadataRecordsEmbeddedDolt(fsys.OSFS{}, dir); err != nil {
+		return err
+	} else if embedded && cityUsesBdStoreContract(cityPath) {
+		// An embedded scope's store already lives in .beads/embeddeddolt and
+		// stays authoritative (ga-p9iuv). The managed-Dolt init chain would
+		// register a database for it on the city's server and run a
+		// server-mode bd init over it (#6118), so only the normalization pass
+		// runs — it takes back endpoint claims an earlier gc stamped and is a
+		// no-op on a clean scope. gc's bead types go into the store through bd,
+		// whose write leaves config.yaml and every other tracked file alone.
+		doltDatabase := ""
+		if bootStore != nil {
+			db, err := reloadCityStoreDatabase(cityPath, *bootStore)
+			if err != nil {
+				return err
+			}
+			doltDatabase = db
+		}
+		if err := normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase); err != nil {
+			return err
+		}
+		registerScopeCustomTypes(cityPath, dir, embeddedScopeCustomTypesEnv)
+		if err := installBeadHooks(dir, cityPath); err != nil {
+			return fmt.Errorf("install hooks at %s: %w", dir, err)
+		}
+		return nil
+	}
+	var doltDatabase string
+	if bootStore != nil {
+		db, err := reloadCityStoreDatabase(cityPath, *bootStore)
+		if err != nil {
+			return err
+		}
+		doltDatabase = db
+	} else {
+		doltDatabase = canonicalScopeDoltDatabase(cityPath, dir, prefix)
+	}
 	if err := normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase); err != nil {
 		return err
 	}
@@ -887,6 +1059,9 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		return err
 	}
 	if err := normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase); err != nil {
+		return err
+	}
+	if err := ensureGCOwnedProxiedScopeSharedServerOff(cityPath, dir); err != nil {
 		return err
 	}
 	if cityUsesBdStoreContract(cityPath) && currentResolvableManagedDoltPort(cityPath) != "" {
@@ -998,7 +1173,9 @@ func scopeHasOwnConfigYAML(dir string) bool {
 // scopeHasCompleteStorageBinding recognizes the opaque workspace binding
 // before legacy metadata parsing. Only all three non-empty fields authorize
 // this dispatch; absent fields remain ordinary legacy metadata and partial
-// fields fail closed.
+// fields fail closed. A scope whose metadata names a backend the linked beads
+// library registered as an extension (contract.IsLibraryExtensionBackend) and
+// carries no storage fields is the same opaque binding by another shape.
 func scopeHasCompleteStorageBinding(path string) (bool, error) {
 	data, err := fsys.OSFS{}.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -1018,7 +1195,16 @@ func scopeHasCompleteStorageBinding(path string) (bool, error) {
 		return false, nil
 	}
 	if len(presence.StorageEndpoint) == 0 && len(presence.StorageDatabase) == 0 {
-		return false, nil
+		// A backend the linked beads library registered as an extension keeps
+		// its target beside metadata.json rather than in it, and is just as
+		// opaque to gc: the library opens it and bd reads its own credentials.
+		var named struct {
+			Backend string `json:"backend"`
+		}
+		if err := json.Unmarshal(data, &named); err != nil {
+			return false, fmt.Errorf("parse beads storage binding %s: %w", path, err)
+		}
+		return contract.IsLibraryExtensionBackend(strings.TrimSpace(named.Backend)), nil
 	}
 
 	var binding struct {
@@ -1194,11 +1380,12 @@ func runProviderOwnedScopeLifecycleOpContext(parent context.Context, cityPath, s
 // any wait for it and before the provider script runs. A non-nil error from it
 // is returned as-is and nothing is run.
 //
-// It exists for a verb aimed at a particular state that another holder of the
-// slot may change while this one queues: the proxied admission recover, whose
-// target generation the health loop's own recover of the same zombie may have
-// replaced with a healthy proxy by the time the slot is granted (round4
-// review F3).
+// It exists for a verb aimed at a particular state that may change while this
+// one queues: the proxied admission recover, whose target generation the
+// health loop's own recover of the same zombie may have replaced with a
+// healthy proxy by the time the slot is granted (round4 review F3), and the
+// controller's stop of a suspended scope, which a resume may have reached by
+// then (stopStillSuspendedScope).
 func runProviderOwnedScopeLifecycleOpGuarded(parent context.Context, cityPath, scopeRoot, op string, precondition func() error) error {
 	provider := beadsProvider(cityPath)
 	if !strings.HasPrefix(provider, "exec:") {
@@ -1283,6 +1470,11 @@ func runProviderOwnedScopesLifecycleOpReportingFailures(parent context.Context, 
 	for _, scopeRoot := range scopes {
 		owned, err := scopeProviderOwned(cityPath, scopeRoot)
 		if err == nil && !owned {
+			continue
+		}
+		if err == nil && op == "health" && beadsScopeIdleRetired(scopeRoot) {
+			// The proxy retired on its idle timeout. That is healthy, and a
+			// ping would only restart it for another idle period.
 			continue
 		}
 		if err == nil {
@@ -1374,6 +1566,9 @@ func runProviderOwnedScopeInit(cityPath, dir, prefix, script string) (bool, erro
 	}
 	env, err := providerLifecycleProcessEnvForScopeInitWithError(cityPath, dir, "exec:"+script)
 	if err != nil {
+		return false, err
+	}
+	if env, err = withProxiedInitIdleTimeout(env, cityPath, dir, "exec:"+script); err != nil {
 		return false, err
 	}
 	if entry.Intent.Target == "local" {
@@ -1720,7 +1915,22 @@ func ensureBeadsProvider(cityPath string) error {
 // idempotent on bd v1.3.0-rc.2, so a repeated gc stop is a clean no-op. It
 // must remain the LAST teardown step: bd restarts a proxied scope's proxy and
 // Dolt child on any read, so a reader that outlives this call undoes it.
+//
+// For that reason it first stops the city's nudge pollers, the long-lived
+// readers the city itself spawns (#6857), and then stops the store even if a
+// poller could not be stopped.
 func shutdownBeadsProvider(cityPath string) error {
+	pollersErr := stopCityNudgePollers(cityPath)
+	storeErr := stopBeadsProviderBackend(cityPath)
+	if pollersErr == nil {
+		return storeErr
+	}
+	return errors.Join(fmt.Errorf("stopping nudge pollers: %w", pollersErr), storeErr)
+}
+
+// stopBeadsProviderBackend stops the bead store's backing service. See
+// shutdownBeadsProvider, its only caller.
+func stopBeadsProviderBackend(cityPath string) error {
 	if owned, err := cityScopeProviderOwned(cityPath); err != nil {
 		return err
 	} else if owned {
@@ -1806,7 +2016,7 @@ func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, exe
 			args = append(args, doltDatabase)
 		}
 		script := strings.TrimPrefix(provider, "exec:")
-		if execProviderUsesCanonicalBdScopeFiles(provider) && (scopeInitUsesProxiedDoltMode(cityPath, dir)) {
+		if execProviderUsesCanonicalBdScopeFiles(provider) && scopeInitUsesProxiedDoltMode(cityPath, dir) {
 			// Callers may invoke initBeadsForDir directly without the
 			// initAndHookDir wrapper that normally supplies the canonical
 			// database name. Resolve the same fallback here so proxied and
@@ -1817,6 +2027,9 @@ func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, exe
 			}
 			baseEnv, err := providerLifecycleProcessEnvForScopeInitWithError(cityPath, dir, provider)
 			if err != nil {
+				return err
+			}
+			if baseEnv, err = withProxiedInitIdleTimeout(baseEnv, cityPath, dir, provider); err != nil {
 				return err
 			}
 			env := overlayEnvEntries(baseEnv, map[string]string{
@@ -1851,6 +2064,9 @@ func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, exe
 		if execProviderUsesCanonicalBdScopeFiles(provider) && !execProviderNeedsScopedDoltInit(provider) {
 			baseEnv, err := providerLifecycleProcessEnvForScopeInitWithError(cityPath, dir, provider)
 			if err != nil {
+				return err
+			}
+			if baseEnv, err = withProxiedInitIdleTimeout(baseEnv, cityPath, dir, provider); err != nil {
 				return err
 			}
 			overrides := map[string]string{
@@ -2009,12 +2225,20 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 	args := []string{"init", "-p", prefix, "--skip-hooks"}
 	if scopeInitUsesProxiedDoltMode(cityPath, dir) {
 		env["BEADS_DOLT_PROXIED_SERVER"] = "1"
-		// Idle-never is not an optimization, it is D3: without it bd retires
-		// the proxy and its Dolt child after 30s quiet and every later command
-		// pays a cold start. It also has to be passed for bd to write the
-		// client-info sidecar at all, which is what the lifecycle then reads
-		// to find the proxy root.
-		args = append(args[:1], "--proxied-server", "--proxied-server-idle-timeout", "0", "-p", prefix, "--skip-hooks")
+		// bd init under a user-level dolt.shared-server: true would root the
+		// new proxy in ~/.beads/shared-server and persist that choice into the
+		// scope's config.yaml. See applyProxiedSharedServerOptOut.
+		applyProxiedSharedServerOptOut(env)
+		// The idle timeout is always passed explicitly: left out, bd retires
+		// the proxy and its Dolt child after its own 30s default, and it is
+		// also what makes bd write the client-info sidecar the lifecycle reads
+		// to find the proxy root. The value is the configured one
+		// ([beads] proxied_idle_timeout, the rig override, or the env).
+		idle, err := resolveScopeProxiedIdleTimeout(cityPath, dir, os.Stderr)
+		if err != nil {
+			return err
+		}
+		args = append(args[:1], "--proxied-server", "--proxied-server-idle-timeout", idle.BdFlagValue(), "-p", prefix, "--skip-hooks")
 	} else {
 		args = append(args[:1], "--server", "-p", prefix, "--skip-hooks")
 	}
@@ -2060,7 +2284,7 @@ func finalizeCanonicalBdScopeInit(cityPath, dir, prefix, doltDatabase string) er
 	// that path can run direct SQL preflight and would either fail before the
 	// proxy is ready or accidentally create a second managed server.
 	if scopeInitUsesProxiedDoltMode(cityPath, dir) {
-		return nil
+		return ensureGCOwnedProxiedScopeSharedServerOff(cityPath, dir)
 	}
 	store, err := openStoreAtForCity(dir, cityPath)
 	if err != nil {
@@ -2310,8 +2534,9 @@ func waitForAllBeadsScopesReadyAfterRecovery(ctx context.Context, cityPath strin
 		return nil
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
+	suspended := suspendedBeadsScopes(cityPath, cfg)
 	for _, rig := range cfg.Rigs {
-		if strings.TrimSpace(rig.Path) == "" {
+		if strings.TrimSpace(rig.Path) == "" || suspended.Suspended(rig.Path) {
 			continue
 		}
 		if err := waitForBeadsScopeReadyAfterRecovery(ctx, resolveStoreScopeRoot(cityPath, rig.Path), cityPath, deadline); err != nil {
@@ -2527,7 +2752,7 @@ func validDoltRuntimeState(state doltRuntimeState, cityPath string) bool {
 	if !ok || !pidAlive(state.PID) {
 		return false
 	}
-	if !doltPortReachable(strconv.Itoa(state.Port)) {
+	if !managedDoltPortReachableOrHeldBy(strconv.Itoa(state.Port), state.PID) {
 		return false
 	}
 	return managedDoltRuntimeProcessOwned(state, layout)
@@ -2549,7 +2774,7 @@ func validDoltRuntimeStateIdentity(state doltRuntimeState, cityPath string) (man
 }
 
 func managedDoltRuntimeProcessOwned(state doltRuntimeState, layout managedDoltRuntimeLayout) bool {
-	holderPID := findPortHolderPID(strconv.Itoa(state.Port))
+	holderPID := findPortHolderPID(strconv.Itoa(state.Port), state.PID)
 	if holderPID > 0 && holderPID != state.PID {
 		return false
 	}
@@ -2576,12 +2801,7 @@ func doltPortReachable(port string) bool {
 	if strings.TrimSpace(port) == "" {
 		return false
 	}
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 250*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
+	return managedDoltTCPReachable("127.0.0.1", port)
 }
 
 // writeDoltPortFile writes the managed Dolt port into dir/.beads/dolt-server.port.
@@ -2936,6 +3156,15 @@ func preInitScopeDoltMode(cityPath, dir string) string {
 // suppress, or a stderr writer from the caller to show them). When omitted,
 // warning output is suppressed.
 func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...io.Writer) error {
+	return normalizeCanonicalBdScopeFilesResolvingCityDatabase(cityPath, cfg, nil, warns...)
+}
+
+// normalizeCanonicalBdScopeFilesResolvingCityDatabase is
+// normalizeCanonicalBdScopeFiles with the city's database name taken, when
+// bootStore is non-nil, from the binding recorded at boot (confirmed against
+// metadata at the point of use) instead of the default name a missing city
+// metadata.json would otherwise be stamped with.
+func normalizeCanonicalBdScopeFilesResolvingCityDatabase(cityPath string, cfg *config.City, bootStore *cityStoreRecord, warns ...io.Writer) error {
 	if cfg == nil {
 		return nil
 	}
@@ -2956,6 +3185,13 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 			return fmt.Errorf("classifying city backend: %w", err)
 		} else if !skipsManagedDolt {
 			doltDatabase := defaultScopeDoltDatabase(cityPath, cityPath, config.EffectiveHQPrefix(cfg))
+			if bootStore != nil {
+				db, err := reloadCityStoreDatabase(cityPath, *bootStore)
+				if err != nil {
+					return err
+				}
+				doltDatabase = db
+			}
 			if cityUsesDoltliteBeadsBackend(cityPath) {
 				if err := ensureCanonicalDoltliteScopeMetadataForInit(fsys.OSFS{}, cityPath, doltDatabase); err != nil {
 					return fmt.Errorf("canonicalizing city doltlite metadata: %w", err)
@@ -3087,6 +3323,21 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 			return err
 		}
 		if rigHasCompleteStorageBinding {
+			continue
+		}
+		embedded, err := scopeMetadataRecordsEmbeddedDolt(fsys.OSFS{}, rig.Path)
+		if err != nil {
+			return fmt.Errorf("classifying rig %q storage mode: %w", rig.Name, err)
+		}
+		if embedded {
+			// An embedded rig serves its own store (ga-p9iuv): it inherits no
+			// city endpoint and never reaches the managed server, so its
+			// .beads/dolt-server.port is not gc's to write or remove, and a
+			// desired endpoint resolved for it would only be a server claim
+			// on bd's config.yaml. The claims an earlier gc stamped come off.
+			if err := scrubEmbeddedScopeEndpointClaims(fsys.OSFS{}, rig.Path); err != nil {
+				return err
+			}
 			continue
 		}
 		rigState, err := syncDesiredRigDoltConfigState(cityPath, rig, cityState)
@@ -3482,6 +3733,22 @@ func providerLifecycleProcessEnvForScopeInitWithError(cityPath, scopeRoot, provi
 	return env, nil
 }
 
+// withProxiedInitIdleTimeout adds the idle timeout gc resolved for scopeRoot
+// to the env of a provider `init` op; the script's proxied init arms refuse to
+// run without it rather than fall back to an idle policy nobody configured.
+// Only init carries it: start, health, recover and stop never resolve the
+// value, so a bad one cannot fail them and they read no config for it.
+func withProxiedInitIdleTimeout(env []string, cityPath, scopeRoot, provider string) ([]string, error) {
+	if !providerUsesBdStoreContract(provider) {
+		return env, nil
+	}
+	idle, err := resolveScopeProxiedIdleTimeout(cityPath, scopeRoot, os.Stderr)
+	if err != nil {
+		return nil, err
+	}
+	return overlayEnvEntries(env, map[string]string{config.ProxiedIdleTimeoutEnv: idle.BdFlagValue()}), nil
+}
+
 func providerLifecycleIndependentScopeInitEnv(cityPath, scopeRoot string, env []string) []string {
 	cityPath = normalizePathForCompare(cityPath)
 	overrides := map[string]string{}
@@ -3540,6 +3807,8 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		}
 		if entry.Intent.Transport == "proxied" {
 			applyProxiedDoltEnv(envMap)
+			// A journaled, initializing scope is gc-owned by construction.
+			applyProxiedSharedServerOptOut(envMap)
 		}
 		return mergeRuntimeEnv(nil, envMap), nil
 	}
@@ -3711,13 +3980,15 @@ func applyPendingProviderExternalEndpoint(cityPath string, intent providerScopeI
 	if host == "" || port == "" {
 		// GC_DOLT_HOST/PORT and BEADS_DOLT_SERVER_SOCKET are the established
 		// explicit gc start retry inputs. A pending selector has no durable
-		// city endpoint, so they must win a retained legacy cache entry.
+		// city endpoint, so they must win a retained legacy cache entry. The
+		// socket is read through the native-open env guard: a concurrent
+		// scope's native open projects its own socket for the open's length.
 		explicitHost := strings.TrimSpace(os.Getenv(envDoltHost))
 		explicitPort := strings.TrimSpace(os.Getenv(envDoltPort))
 		if explicitHost != "" && explicitPort != "" {
 			host, port = explicitHost, explicitPort
 		} else {
-			socket = strings.TrimSpace(os.Getenv("BEADS_DOLT_SERVER_SOCKET"))
+			socket = strings.TrimSpace(ambientNativeDoltOpenEnv("BEADS_DOLT_SERVER_SOCKET"))
 		}
 	}
 	if socket == "" && (host == "" || port == "") {

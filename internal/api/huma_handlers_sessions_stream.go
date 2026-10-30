@@ -227,7 +227,7 @@ func (s *Server) emitStructuredFallbackSnapshotHuma(send StringIDSender, info se
 		Provider:           info.Provider,
 		Format:             "structured",
 		SchemaVersion:      sessionStructuredSchemaVersion,
-		History:            structuredFallbackHistory(info.ID, info.SessionKey, string(worker.TailActivityIdle)),
+		History:            structuredFallbackHistory(info, string(worker.TailActivityIdle)),
 		StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
 	}
 	if update := buildStructuredStreamUpdate(resumeToken, projection, includeThinking); update != nil {

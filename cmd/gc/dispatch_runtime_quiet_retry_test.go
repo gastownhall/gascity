@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 
@@ -20,6 +21,7 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 	clearGCEnv(t)
 
 	blocked := errors.New(`pl-pujtf: completing workflow head: updating bead "pl-pujtf": exit status 1: cannot close blocked issue: pl-pujtf is blocked by [pl-mmneh]`)
+	pending := fmt.Errorf("%w: rig %q not found in city config", dispatch.ErrControlPending, "ghostrig")
 
 	tests := []struct {
 		name            string
@@ -48,6 +50,23 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 			wantPendingAny:  true,
 			wantSweepGrowth: false,
 		},
+		{
+			// Pending took the same arm the semantic tier took before the quiet
+			// mark existed, and it can last far longer: it waits on config drift
+			// a human heals, so a removed rig holds the loop at its 1s floor for
+			// days while it re-runs a full dispatch — config load, store open,
+			// outcome read, source-chain preflight — to re-learn the same answer.
+			name:            "quiet pending repeat does not pin the backoff",
+			serveErr:        dispatch.MarkQuietControllerRetry(pending),
+			wantPendingAny:  false,
+			wantSweepGrowth: true,
+		},
+		{
+			name:            "first pending refusal still wakes the loop",
+			serveErr:        pending,
+			wantPendingAny:  true,
+			wantSweepGrowth: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -63,7 +82,7 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 				return []hookBead{{ID: "pl-mmneh", Metadata: hookBeadMetadata{"gc.kind": "workflow-finalize"}}}, nil
 			}
 			serveCalls := 0
-			controlDispatcherServe = func(_, _, _ string, _, _ io.Writer) error {
+			controlDispatcherServe = func(_, _, _ string, _, _ io.Writer, _ *executionEmitDeferral) error {
 				serveCalls++
 				return tt.serveErr
 			}

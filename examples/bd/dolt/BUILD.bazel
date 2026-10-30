@@ -89,6 +89,7 @@ go_library(
         "orders/mol-dog-stale-db.toml",
         "pack.toml",
         "assets/scripts/proxied_scope.sh",
+        "assets/scripts/_bounded.sh",
     ],
     importpath = "github.com/gastownhall/gascity/examples/bd/dolt",
     visibility = ["//visibility:public"],
@@ -98,16 +99,23 @@ go_test(
     name = "dolt_test",
     srcs = [
         "agent_workdir_test.go",
+        "backup_order_test.go",
         "cleanup_test.go",
         "compact_backup_remotes_test.go",
+        "compact_history_protection_real_dolt_test.go",
         "compact_history_protection_test.go",
         "compact_no_sync_test.go",
         "compact_notify_cadence_test.go",
+        "compact_real_dolt_callbound_test.go",
+        "compact_real_dolt_test.go",
+        "compact_rig_endpoint_real_dolt_test.go",
+        "compact_rig_endpoint_test.go",
         "doctor_test.go",
         "dog_exec_scripts_test.go",
         "dog_prompt_test.go",
         "health_order_test.go",
         "health_test.go",
+        "journal_recovery_runbook_test.go",
         "logs_test.go",
         "main_test.go",
         "packroot_test.go",
@@ -116,9 +124,12 @@ go_test(
         "pull_remote_selection_test.go",
         "pull_test.go",
         "recover_host_test.go",
+        "requires_backend_test.go",
+        "restart_fsync_stall_test.go",
         "restart_test.go",
         "runtime_bounded_test.go",
         "sql_test.go",
+        "stale_db_close_reason_real_bd_test.go",
         "stale_db_formula_test.go",
         "status_test.go",
         "sync_ffclassify_test.go",
@@ -130,59 +141,66 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
-        "//:repo_source_tree",
+        "//examples/bd:assets/scripts/dolt-fsync-stall.sh",
         "//internal/bootstrap/packs/core:pack_files",
-    ],
+    ] + select({
+        "//:gotags_integration": [
+            "@bd_bin_v1_3_2//:bd",
+            "@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt",
+        ],
+        "//conditions:default": [],
+    }),
+    # The integration build's tests run bd/dolt by name: GC_TEST_TOOL_PATHS puts
+    # the pinned binaries first on PATH (internal/testenv).
+    env = select({
+        "//:gotags_integration": {
+            "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_2//:bd) $(rootpath @dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt)",
+        },
+        "//conditions:default": {},
+    }),
+    shard_count = 6,
     deps = [
         "//internal/bazeltest",
         "//internal/config",
         "//internal/fsys",
+        "//internal/orders",
         "//internal/testenv",
+        "//internal/testutil",
         "//internal/workdir",
+        "//test/toolhome",
     ] + select({
         "@rules_go//go/platform:aix": [
             "//internal/formula",
-            "//internal/orders",
         ],
         "@rules_go//go/platform:android": [
             "//internal/formula",
-            "//internal/orders",
         ],
         "@rules_go//go/platform:darwin": [
             "//internal/formula",
-            "//internal/orders",
         ],
         "@rules_go//go/platform:dragonfly": [
             "//internal/formula",
-            "//internal/orders",
         ],
         "@rules_go//go/platform:freebsd": [
             "//internal/formula",
-            "//internal/orders",
         ],
         "@rules_go//go/platform:illumos": [
             "//internal/formula",
-            "//internal/orders",
         ],
         "@rules_go//go/platform:ios": [
             "//internal/formula",
-            "//internal/orders",
         ],
         "@rules_go//go/platform:linux": [
             "//internal/formula",
-            "//internal/orders",
         ],
         "@rules_go//go/platform:netbsd": [
             "//internal/formula",
-            "//internal/orders",
         ],
         "@rules_go//go/platform:openbsd": [
             "//internal/formula",
-            "//internal/orders",
         ],
         "@rules_go//go/platform:solaris": [
             "//internal/formula",
-            "//internal/orders",
         ],
         "//conditions:default": [],
     }),
@@ -211,6 +229,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

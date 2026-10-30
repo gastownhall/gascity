@@ -790,3 +790,83 @@ func TestLoadWithIncludes_CapturesRevisionSnapshotByDefault(t *testing.T) {
 		t.Fatal("LoadWithIncludes captured no revision snapshot; the default changed")
 	}
 }
+
+// editAfterReadFS simulates a config edit that lands while a load is in
+// flight: the file is rewritten on disk right after the editAfter-th read of
+// target (1-based) returns the original bytes.
+type editAfterReadFS struct {
+	fsys.OSFS
+	target    string
+	edited    []byte
+	editAfter int
+	reads     int
+}
+
+func (f *editAfterReadFS) ReadFile(name string) ([]byte, error) {
+	data, err := f.OSFS.ReadFile(name)
+	if err == nil && name == f.target {
+		f.reads++
+		if f.reads == f.editAfter {
+			if werr := os.WriteFile(name, f.edited, 0o644); werr != nil {
+				return nil, werr
+			}
+		}
+	}
+	return data, err
+}
+
+// Regression for ga-opn27h: a load that straddles an edit of a convention
+// agent file must never pair the pre-edit content with the post-edit
+// revision. If it does, the controller publishes (old config, new revision),
+// never sees a revision change, and loses the edit permanently. Every
+// interleaving point (the edit landing after each read the load makes of the
+// file) is exercised.
+func TestRevision_EditDuringLoadIsNotStampedWithNewRevision(t *testing.T) {
+	const original = "scope = \"city\"\n"
+	const edited = "scope = \"city\"\nsuspended = true\n"
+	// setup writes a fresh city whose helper agent is not suspended.
+	setup := func(t *testing.T) (dir, cityPath, agentPath string) {
+		dir = t.TempDir()
+		writeFile(t, dir, "city.toml", "[workspace]\nname = \"test\"\n")
+		writeFile(t, dir, "pack.toml", "[pack]\nname = \"test\"\nschema = 2\n")
+		writeFile(t, dir, "agents/helper/agent.toml", original)
+		return dir, filepath.Join(dir, "city.toml"), filepath.Join(dir, "agents", "helper", "agent.toml")
+	}
+	// Count the reads one load makes of the agent file.
+	_, cityPath, agentPath := setup(t)
+	counter := &editAfterReadFS{target: agentPath}
+	if _, _, err := LoadWithIncludes(counter, cityPath); err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if counter.reads == 0 {
+		t.Fatal("loader never read the convention agent file; test setup is wrong")
+	}
+
+	for k := 1; k <= counter.reads; k++ {
+		dir, cityPath, agentPath := setup(t)
+		racing := &editAfterReadFS{target: agentPath, edited: []byte(edited), editAfter: k}
+		cfg, prov, err := LoadWithIncludes(racing, cityPath)
+		if err != nil {
+			t.Fatalf("edit after read %d: LoadWithIncludes: %v", k, err)
+		}
+		loadedSuspended := false
+		found := false
+		for _, a := range cfg.Agents {
+			if a.Name == "helper" {
+				found, loadedSuspended = true, a.Suspended
+			}
+		}
+		if !found {
+			t.Fatalf("edit after read %d: helper agent not loaded", k)
+		}
+		loadedRev := Revision(fsys.OSFS{}, prov, cfg, dir)
+		freshCfg, freshProv, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+		if err != nil {
+			t.Fatalf("edit after read %d: reload: %v", k, err)
+		}
+		diskRev := Revision(fsys.OSFS{}, freshProv, freshCfg, dir)
+		if !loadedSuspended && loadedRev == diskRev {
+			t.Fatalf("edit after read %d of %d: load returned pre-edit agent content stamped with the post-edit revision; a reload would never be triggered", k, counter.reads)
+		}
+	}
+}

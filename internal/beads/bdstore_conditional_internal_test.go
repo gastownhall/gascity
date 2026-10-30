@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -637,6 +638,52 @@ func TestUpdateIfMatchSuccessAppliesFence(t *testing.T) {
 	}
 	if !argvContains(w.writeArgv, "update", "--json", "ga-1", "--title", "renamed", conditionalWriteFlag, "1") {
 		t.Fatalf("fenced update argv missing expected flags: %v", w.writeArgv)
+	}
+}
+
+// bdAntiStealHook refuses an assignee change without --force the way bd does
+// over another actor's live in_progress claim: exit 1, no precondition body.
+var bdAntiStealHook = func(w *scriptedBd, verb string, _ int64) ([]byte, error, bool) { //nolint:revive // scriptedBd.writeHook's shape
+	argv := w.writeArgv[len(w.writeArgv)-1]
+	if verb != "update" || !slices.Contains(argv, "--assignee") || slices.Contains(argv, "--force") {
+		return nil, nil, false
+	}
+	return []byte(`{"error":"1 of 1 issues failed to update","failed":[{"id":"ga-1","error":"cannot reassign ga-1: held by \"dead\" (in_progress); pass --force only if their claim is abandoned"}]}`),
+		errors.New("exit status 1"), true
+}
+
+// Kills a fenced release without --force: bd refuses to clear another actor's
+// live claim unless forced, so a release at the row's own revision (0 on a
+// legacy row included) failed outright and the dead claim stayed. A stale
+// revision is still refused under --force.
+func TestUpdateIfMatchAssigneeEditForcesTheTransfer(t *testing.T) {
+	for _, rev := range []int64{0, 7} {
+		w := &scriptedBd{id: "ga-1", revision: rev, status: "in_progress", writeHook: bdAntiStealHook}
+		s := NewBdStore("/city", w.runner)
+		empty, open := "", "open"
+		if err := s.UpdateIfMatch("ga-1", rev, UpdateOpts{Assignee: &empty, Status: &open}); err != nil {
+			t.Fatalf("release at revision %d: %v", rev, err)
+		}
+		if !argvContains(w.writeArgv, "update", "--assignee", "", "--force", conditionalWriteFlag, strconv.FormatInt(rev, 10)) {
+			t.Fatalf("release argv %v, want --force beside the fence", w.writeArgv)
+		}
+		if err := s.UpdateIfMatch("ga-1", rev, UpdateOpts{Assignee: &empty}); !IsPreconditionFailed(err) {
+			t.Fatalf("release at the stale revision %d: %v, want a precondition failure", rev, err)
+		}
+	}
+	title, empty, closed := "renamed", "", "closed"
+	for name, opts := range map[string]UpdateOpts{
+		"no assignee edit":             {Title: &title},
+		"an assignee edit that closes": {Assignee: &empty, Status: &closed},
+	} {
+		w := &scriptedBd{id: "ga-1", revision: 1}
+		s := NewBdStore("/city", w.runner)
+		if err := s.UpdateIfMatch("ga-1", 1, opts); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if argvContains(w.writeArgv, "--force") {
+			t.Fatalf("%s forced, which also waives bd's close policy: %v", name, w.writeArgv)
+		}
 	}
 }
 
@@ -1377,5 +1424,35 @@ func TestBdIssueDecodesNullRevisionAsZero(t *testing.T) {
 	}
 	if got := issue.toBead().Revision; got != 0 {
 		t.Fatalf("Bead.Revision = %d, want 0 for a null revision column", got)
+	}
+}
+
+// TestBdStoreStillRefusesLabels pins that bd-backed conditional writes keep
+// refusing labels, directly and through a CachingStore, before bd ever runs:
+// bd persists labels through writes --if-revision does not fence.
+func TestBdStoreStillRefusesLabels(t *testing.T) {
+	calls := 0
+	s := NewBdStore("/city", func(_, _ string, _ ...string) ([]byte, error) {
+		calls++
+		return nil, errors.New("bd must not run for a refused label update")
+	})
+	cache := NewCachingStoreForTest(s, nil)
+	for _, opts := range []UpdateOpts{
+		{Labels: []string{"added"}, Title: strptr("t")},
+		{RemoveLabels: []string{"removed"}, Title: strptr("t")},
+	} {
+		var unsupported *ConditionalUpdateFieldUnsupportedError
+		if err := s.UpdateIfMatch("ga-1", 1, opts); !errors.As(err, &unsupported) {
+			t.Errorf("BdStore.UpdateIfMatch(%+v) = %v, want *ConditionalUpdateFieldUnsupportedError", opts, err)
+		}
+		if _, err := s.UpdateIfAssignment("ga-1", "open", "", opts); !errors.As(err, &unsupported) {
+			t.Errorf("BdStore.UpdateIfAssignment(%+v) = %v, want *ConditionalUpdateFieldUnsupportedError", opts, err)
+		}
+		if err := cache.UpdateIfMatch("ga-1", 1, opts); !errors.As(err, &unsupported) {
+			t.Errorf("CachingStore/BdStore.UpdateIfMatch(%+v) = %v, want *ConditionalUpdateFieldUnsupportedError", opts, err)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("bd ran %d times for refused label updates, want 0", calls)
 	}
 }

@@ -34,8 +34,8 @@ var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "op
 
 const (
 	managedPiHookVersion       = 9
-	managedOpenCodeHookVersion = 6
-	managedMimoCodeHookVersion = 2
+	managedOpenCodeHookVersion = 8
+	managedMimoCodeHookVersion = 4
 	managedOmpHookVersion      = 2
 )
 
@@ -154,14 +154,11 @@ func InstallWithResolver(fs fsys.FS, cityDir, workDir string, providers []string
 	for _, p := range providers {
 		family := resolveFamily(resolve, p)
 		var err error
-		switch family {
-		case "claude":
+		if family == "claude" {
 			err = installClaude(fs, cityDir)
-		case "codex", "gemini", "antigravity", "kiro", "opencode", "mimocode", "copilot", "cursor", "pi", "omp", "kimi":
-			err = installOverlayManaged(fs, cityDir, workDir, family)
-		case "groq", "cerebras":
-			err = installOverlayManaged(fs, cityDir, workDir, "opencode")
-		default:
+		} else if overlayProvider, ok := workDirOverlayProvider(family); ok {
+			err = installOverlayManaged(fs, cityDir, workDir, overlayProvider)
+		} else {
 			return fmt.Errorf("unsupported hook provider %q", p)
 		}
 		if err != nil {
@@ -169,6 +166,46 @@ func InstallWithResolver(fs fsys.FS, cityDir, workDir string, providers []string
 		}
 	}
 	return nil
+}
+
+// workDirOverlayProvider maps a hook family to the embedded per-provider
+// overlay InstallWithResolver writes into the work dir for it. It reports
+// false for a family that writes nothing there (claude's settings are
+// city-level) and for an unsupported one.
+func workDirOverlayProvider(family string) (string, bool) {
+	switch family {
+	case "codex", "gemini", "antigravity", "kiro", "opencode", "mimocode", "copilot", "cursor", "pi", "omp", "kimi":
+		return family, true
+	case "groq", "cerebras":
+		return "opencode", true
+	default:
+		return "", false
+	}
+}
+
+// InstalledWorkDirPaths returns the work-dir-relative, slash-separated paths
+// InstallWithResolver writes for providers (".codex/hooks.json" for codex, for
+// example). A caller that stages the same provider overlay into the same work
+// dir uses it to leave exactly those paths to the installer, so every file
+// keeps one writer. Unsupported providers contribute nothing.
+func InstalledWorkDirPaths(providers []string, resolve FamilyResolver) map[string]bool {
+	out := make(map[string]bool)
+	for _, p := range providers {
+		overlayProvider, ok := workDirOverlayProvider(resolveFamily(resolve, p))
+		if !ok {
+			continue
+		}
+		base := path.Join("overlay", "per-provider", overlayProvider)
+		_ = iofs.WalkDir(core.PackFS, base, func(name string, d iofs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				// A missing overlay installs nothing; Install reports it.
+				return nil
+			}
+			out[strings.TrimPrefix(name, base+"/")] = true
+			return nil
+		})
+	}
+	return out
 }
 
 func installOverlayManaged(fs fsys.FS, cityDir, workDir, provider string) error {
@@ -377,7 +414,20 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
 		// The child's stdin must be closed or gc blocks on it (#5562).
-		!strings.Contains(content, "pending.child.stdin?.end();") {
+		!strings.Contains(content, "pending.child.stdin?.end();") ||
+		// Per-turn text must trail the stable system entries, not share
+		// system[0] with the prime, or the prompt-cache prefix ends at the
+		// prime on every turn (#5732).
+		!strings.Contains(content, "appendVolatileSystem") ||
+		// Consumptive queue draining must be scoped to a turn (#5552) and,
+		// because OpenCode instantiates one plugin per directory, the turn
+		// state must be keyed by session so a subagent's user message does
+		// not reopen the parent's turn.
+		!strings.Contains(content, "const turns = new Map()") ||
+		// A turn opens on a user-message id the session has not seen, not
+		// on a higher one: OpenCode's ids wrap and follow the wall clock, so
+		// an id-order gate stops opening turns (#6629).
+		!strings.Contains(content, "state.userMessageIDs.has(messageID)") {
 		return true
 	}
 	for _, marker := range []string{
@@ -405,14 +455,26 @@ func opencodeHookVersion(content string) int {
 }
 
 // mimocodeHookNeedsUpgrade reports whether an existing managed MiMo Code
-// plugin predates the current managed version. Files without the managed
-// header are user-authored and never upgraded.
+// plugin predates the current managed version or lacks a required marker.
+// Files without the managed header are user-authored and never upgraded.
 func mimocodeHookNeedsUpgrade(existing []byte) bool {
 	content := string(existing)
 	if !strings.Contains(content, "Gas City hooks for MiMo Code.") {
 		return false
 	}
-	return mimocodeHookVersion(content) < managedMimoCodeHookVersion
+	return mimocodeHookVersion(content) < managedMimoCodeHookVersion ||
+		// The child's stdin must be closed or gc blocks on it (#5562).
+		!strings.Contains(content, "pending.child.stdin?.end();") ||
+		// Per-turn text must trail the stable system entries, not share
+		// system[0] with the prime (#5732). A version-only check would keep
+		// a same-numbered plugin with a different body.
+		!strings.Contains(content, "appendVolatileSystem") ||
+		// Turn state must be keyed by session; the plugin instance is shared
+		// by every session in the directory (same shape as OpenCode).
+		!strings.Contains(content, "const turns = new Map()") ||
+		// A turn opens on an unseen user-message id, not a higher one
+		// (#6629, same shape as OpenCode).
+		!strings.Contains(content, "state.userMessageIDs.has(messageID)")
 }
 
 func mimocodeHookVersion(content string) int {
@@ -493,6 +555,14 @@ func installClaude(fs fsys.FS, cityDir string) error {
 		}
 	}
 	return writeManagedFile(fs, runtimeDst, data, forceOverwrite)
+}
+
+// ValidateClaudeSettings computes the Claude settings Install would project
+// to <cityDir>/.gc/settings.json and reports why it cannot, writing nothing:
+// a malformed or empty override fails exactly as Install would.
+func ValidateClaudeSettings(fs fsys.FS, cityDir string) error {
+	_, _, err := desiredClaudeSettings(fs, cityDir)
+	return err
 }
 
 type writeManagedFilePolicy int
@@ -1432,21 +1502,20 @@ func writeManagedFile(fs fsys.FS, dst string, data []byte, policy writeManagedFi
 	if err := fs.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("creating %s: %w", dir, err)
 	}
-	if err := fs.WriteFile(dst, data, 0o644); err != nil {
-		return fmt.Errorf("writing %s: %w", dst, err)
+	// Keep the existing mode (a user may have tightened it), adding only
+	// owner-read when force-overwriting an unreadable file so Claude can
+	// open it.
+	perm := os.FileMode(0o644)
+	if info, err := fs.Stat(dst); err == nil {
+		perm = info.Mode().Perm()
 	}
-
 	if policy == forceOverwrite && readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-		info, err := fs.Stat(dst)
-		if err != nil {
-			return fmt.Errorf("stat %s: %w", dst, err)
-		}
-		currentMode := info.Mode().Perm()
-		if currentMode&0o400 == 0 {
-			if err := fs.Chmod(dst, currentMode|0o400); err != nil {
-				return fmt.Errorf("chmod %s: %w", dst, err)
-			}
-		}
+		perm |= 0o400
+	}
+	// Replace via rename: these files are read as settings sources, and a
+	// truncate-then-write lets a concurrent reader see an empty file.
+	if err := fsys.WriteFileAtomic(fs, dst, data, perm); err != nil {
+		return fmt.Errorf("writing %s: %w", dst, err)
 	}
 	return nil
 }

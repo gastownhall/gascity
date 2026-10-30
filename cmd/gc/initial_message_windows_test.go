@@ -96,7 +96,7 @@ func TestExecutePreparedStartWave_ACPAgentDeadAfterStartupPromptDiesDuringStartu
 		cfg: runtime.Config{Command: "agent --acp", Nudge: "startup prompt"},
 	}
 
-	results := executePreparedStartWave(context.Background(), []preparedStart{item}, sp, nil, 10*time.Second,
+	results := executePreparedStartWaveForCity(context.Background(), []preparedStart{item}, t.TempDir(), sp, nil, nil, 10*time.Second, 1,
 		withStartStabilityWaiter(immediateStartStabilityWaiter))
 	if len(results) != 1 {
 		t.Fatalf("results = %d, want 1", len(results))

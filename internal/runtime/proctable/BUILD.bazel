@@ -12,6 +12,9 @@ go_library(
         "descendants_windows.go",
         "doc.go",
         "elevation_windows.go",
+        "environ_darwin.go",
+        "environ_linux.go",
+        "environ_stub.go",
         "errors.go",
         "guard.go",
         "guard_other.go",
@@ -29,6 +32,10 @@ go_library(
         "kill_stub.go",
         "kill_unix.go",
         "kill_windows.go",
+        "names.go",
+        "openfiles_darwin.go",
+        "openfiles_linux.go",
+        "openfiles_stub.go",
         "processname.go",
         "processname_other.go",
         "processname_windows.go",
@@ -38,30 +45,23 @@ go_library(
         "scan_darwin_command.go",
         "scan_linux.go",
         "scan_scope_other.go",
+        "scan_since_windows.go",
         "scan_stub.go",
         "scan_windows.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/proctable",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/pidutil",
         "//internal/runtime",
     ] + select({
-        "@rules_go//go/platform:android": [
-            "//internal/pidutil",
-        ],
         "@rules_go//go/platform:darwin": [
-            "//internal/pidutil",
             "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:ios": [
-            "//internal/pidutil",
             "@org_golang_x_sys//unix",
         ],
-        "@rules_go//go/platform:linux": [
-            "//internal/pidutil",
-        ],
         "@rules_go//go/platform:windows": [
-            "//internal/pidutil",
             "@org_golang_x_sys//windows",
         ],
         "//conditions:default": [],
@@ -75,6 +75,8 @@ go_test(
         "console_windows_test.go",
         "descendants_test.go",
         "descendants_windows_test.go",
+        "environ_darwin_test.go",
+        "environ_linux_test.go",
         "environment_windows_test.go",
         "guard_test.go",
         "identity_darwin_test.go",
@@ -83,24 +85,43 @@ go_test(
         "infrastructure_argv_windows_test.go",
         "kill_unix_test.go",
         "kill_windows_test.go",
+        "openfiles_darwin_test.go",
+        "openfiles_linux_test.go",
+        "proctable_test.go",
         "proctable_windows_test.go",
         "scan_darwin_command_test.go",
+        "scan_darwin_start_test.go",
         "scan_darwin_test.go",
         "scan_linux_test.go",
+        "scan_stub_test.go",
         "scan_windows_test.go",
         "supervisor_fork_orphan_repro_test.go",
+        "sweep_guards_test.go",
         "testenv_import_test.go",
     ],
     embed = [":proctable"],
     deps = [
         "//internal/beads/proxyendpoint",
+        "//internal/nudgepoller",
         "//internal/testenv",
     ] + select({
+        "@rules_go//go/platform:android": [
+            "//internal/pidutil",
+            "//internal/testutil",
+        ],
         "@rules_go//go/platform:darwin": [
+            "//internal/pidutil",
+            "//internal/runtime",
             "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:ios": [
+            "//internal/pidutil",
+            "//internal/runtime",
             "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:linux": [
+            "//internal/pidutil",
+            "//internal/testutil",
         ],
         "@rules_go//go/platform:windows": [
             "//internal/pidutil",
@@ -119,6 +140,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

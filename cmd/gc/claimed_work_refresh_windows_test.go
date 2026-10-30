@@ -512,15 +512,6 @@ func drainRefreshConfig() *config.City {
 	}
 }
 
-func containsBeadID(rows []beads.Bead, id string) bool {
-	for _, bead := range rows {
-		if bead.ID == id {
-			return true
-		}
-	}
-	return false
-}
-
 type failingClaimRefreshStore struct {
 	beads.Store
 	delay       time.Duration

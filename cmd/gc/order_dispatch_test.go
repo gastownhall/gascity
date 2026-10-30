@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
@@ -1848,6 +1849,7 @@ func TestOrderDispatchCachesLastRunBetweenDispatches(t *testing.T) {
 
 	if _, err := store.Create(beads.Bead{
 		Title:  "recent run",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:test-order"},
 	}); err != nil {
 		t.Fatal(err)
@@ -1890,6 +1892,7 @@ func TestOrderDispatchRefreshesCachedLastRunBeforeDueDispatch(t *testing.T) {
 
 	if _, err := store.Create(beads.Bead{
 		Title:     "recent run",
+		Type:      "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels:    []string{"order-run:test-order"},
 		CreatedAt: now.Add(-30 * time.Minute),
 	}); err != nil {
@@ -1916,6 +1919,7 @@ func TestOrderDispatchRefreshesCachedLastRunBeforeDueDispatch(t *testing.T) {
 	store.reset()
 	if _, err := store.Create(beads.Bead{
 		Title:     "manual run",
+		Type:      "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels:    []string{"order-run:test-order"},
 		CreatedAt: now.Add(20 * time.Minute),
 	}); err != nil {
@@ -2690,6 +2694,7 @@ func TestOrderDispatchExecCooldown(t *testing.T) {
 	// Seed a recent exec run.
 	_, err := store.Create(beads.Bead{
 		Title:  "order:wasteland-poll",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:wasteland-poll"},
 	})
 	if err != nil {
@@ -3491,6 +3496,182 @@ func TestOrderDispatchExecTimeout(t *testing.T) {
 	if !rec.hasType(events.OrderFailed) {
 		t.Error("missing order.failed event after timeout")
 	}
+}
+
+// A run its order timeout stopped used to fail with the runner's error alone:
+// "context deadline exceeded" from a runner that reports the deadline (the
+// production one does), "signal: killed" from one that reports the kill.
+// Neither says the order timed out, or after how long. The order.failed event
+// and the log now name the timeout, and keep the runner's own error.
+func TestOrderDispatchExecTimeoutFailureNamesTheTimeout(t *testing.T) {
+	const wantTimeout = "order timeout of 100ms exceeded"
+	tests := []struct {
+		name string
+		// runErr is what the runner returns once the timeout has stopped it.
+		runErr  func(ctx context.Context) error
+		wantMsg func(t *testing.T, msg string)
+	}{
+		{
+			name:   "runner returns the context error",
+			runErr: func(ctx context.Context) error { return ctx.Err() },
+			wantMsg: func(t *testing.T, msg string) {
+				if !strings.Contains(msg, wantTimeout) || !strings.Contains(msg, "context deadline exceeded") {
+					t.Fatalf("order.failed message = %q, want the timeout named and the runner's error kept", msg)
+				}
+			},
+		},
+		{
+			name:   "runner reports the kill signal",
+			runErr: func(context.Context) error { return errors.New("signal: killed") },
+			wantMsg: func(t *testing.T, msg string) {
+				if !strings.Contains(msg, wantTimeout) || !strings.Contains(msg, "signal: killed") {
+					t.Fatalf("order.failed message = %q, want the timeout named and the runner's error kept", msg)
+				}
+			},
+		},
+		{
+			name:   "runner returns the context cause",
+			runErr: context.Cause,
+			wantMsg: func(t *testing.T, msg string) {
+				if msg != wantTimeout {
+					t.Fatalf("order.failed message = %q, want exactly %q (named once)", msg, wantTimeout)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			var rec memRecorder
+			var stderr bytes.Buffer
+			m := &memoryOrderDispatcher{
+				aa: []orders.Order{{
+					Name:     "slow-exec",
+					Trigger:  "cooldown",
+					Interval: "1m",
+					Exec:     "scripts/slow.sh",
+					Timeout:  "100ms",
+				}},
+				storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+				execRun: func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+					<-ctx.Done()
+					return nil, tt.runErr(ctx)
+				},
+				rec:    &rec,
+				stderr: lockedStderr(&stderr),
+				cfg:    &config.City{},
+			}
+			m.dispatch(context.Background(), t.TempDir(), time.Now())
+			m.drain(context.Background())
+
+			tt.wantMsg(t, orderFailedMessage(t, &rec, "slow-exec"))
+			if !strings.Contains(stderr.String(), wantTimeout) {
+				t.Fatalf("dispatch log = %q, want the timeout named", stderr.String())
+			}
+		})
+	}
+}
+
+// Only the order's own timeout is reported as one: a run the controller
+// cancels (shutdown, config reload) keeps reporting the cancellation.
+func TestOrderDispatchExecCanceledFailureDoesNotClaimATimeout(t *testing.T) {
+	store := beads.NewMemStore()
+	var rec memRecorder
+	started := make(chan struct{})
+	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:     "long-exec",
+			Trigger:  "cooldown",
+			Interval: "1m",
+			Exec:     "scripts/long.sh",
+			Timeout:  "1h",
+		}},
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+			close(started)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+		rec:            &rec,
+		stderr:         lockedStderr(&bytes.Buffer{}),
+		cfg:            &config.City{},
+		dispatchCtx:    dispatchCtx,
+		dispatchCancel: dispatchCancel,
+	}
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	awaitClose(t, started, "exec runner start")
+	m.cancel()
+	m.drain(context.Background())
+
+	msg := orderFailedMessage(t, &rec, "long-exec")
+	if strings.Contains(msg, "order timeout") {
+		t.Fatalf("order.failed message = %q, a canceled run must not be reported as a timeout", msg)
+	}
+	if !strings.Contains(msg, context.Canceled.Error()) {
+		t.Fatalf("order.failed message = %q, want the cancellation reported", msg)
+	}
+}
+
+// stalledGraphApplyStore is a MemStore whose graph apply runs until the
+// caller's context ends, as a graph apply against a wedged server does.
+type stalledGraphApplyStore struct {
+	*beads.MemStore
+}
+
+func (s stalledGraphApplyStore) ApplyGraphPlan(ctx context.Context, _ *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) { //nolint:unparam // interface compliance; a stalled apply never produces a result
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// A formula order's timeout bounds the wisp it writes, and a wisp the timeout
+// stops fails the order with the timeout named, the same as an exec order.
+func TestOrderDispatchWispTimeoutFailureNamesTheTimeout(t *testing.T) {
+	prevGraphApply := molecule.IsGraphApplyEnabled()
+	molecule.SetGraphApplyEnabled(true)
+	t.Cleanup(func() { molecule.SetGraphApplyEnabled(prevGraphApply) })
+
+	store := stalledGraphApplyStore{MemStore: beads.NewMemStore()}
+	var rec memRecorder
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:         "slow-wisp",
+			Trigger:      "cooldown",
+			Interval:     "1m",
+			Formula:      "test-formula",
+			FormulaLayer: sharedTestFormulaDir,
+			Timeout:      "100ms",
+		}},
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		rec:     &rec,
+		stderr:  lockedStderr(&bytes.Buffer{}),
+		cfg:     &config.City{},
+	}
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	msg := orderFailedMessage(t, &rec, "slow-wisp")
+	if !strings.Contains(msg, "order timeout of 100ms exceeded") {
+		t.Fatalf("order.failed message = %q, want the order timeout named", msg)
+	}
+}
+
+// orderFailedMessage returns the message of the last order.failed event rec
+// holds for subject, failing the test when there is none.
+func orderFailedMessage(t *testing.T, rec *memRecorder, subject string) string {
+	t.Helper()
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	msg, found := "", false
+	for _, e := range rec.events {
+		if e.Type == events.OrderFailed && e.Subject == subject {
+			msg, found = e.Message, true
+		}
+	}
+	if !found {
+		t.Fatalf("no order.failed event for %s; events = %+v", subject, rec.events)
+	}
+	return msg
 }
 
 func TestShellExecRunnerDoesNotStartWhenContextCanceled(t *testing.T) {
@@ -6862,6 +7043,7 @@ func TestOrderDispatchRigCooldownIndependent(t *testing.T) {
 	// Seed a recent run for rig-A's order (scoped name).
 	_, err := store.Create(beads.Bead{
 		Title:  "order run",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:db-health:rig:rig-a"},
 	})
 	if err != nil {
@@ -7310,6 +7492,7 @@ pool = "worker"
 	}
 	if _, err := cityStore.Create(beads.Bead{
 		Title:  "legacy rig digest run",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:rig-digest:rig:frontend"},
 	}); err != nil {
 		t.Fatalf("Create(legacy city run): %v", err)
@@ -7396,7 +7579,7 @@ func TestOrderDispatchSkipsRigEventWhenLegacyCursorReadFails(t *testing.T) {
 	rigStore := beads.NewMemStore()
 	legacyStore := labelFailListStore{
 		Store:     beads.NewMemStore(),
-		failLabel: "order:release-watch:rig:frontend",
+		failLabel: "order-run:release-watch:rig:frontend",
 	}
 	eventLog := events.NewFake()
 	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
@@ -7626,6 +7809,7 @@ pool = "worker"
 	}
 	if _, err := store.Create(beads.Bead{
 		Title:  "existing work",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:file-order"},
 	}); err != nil {
 		t.Fatalf("Create(existing work): %v", err)
@@ -8095,6 +8279,7 @@ func TestOrderDispatchSkipsOpenWork(t *testing.T) {
 	// Seed an open wisp (non-tracking bead) for this order.
 	_, err := store.Create(beads.Bead{
 		Title:  "mol-do-work", // not "order:my-auto" → counts as real work
+		Type:   "molecule",    // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:my-auto"},
 	})
 	if err != nil {
@@ -9997,6 +10182,31 @@ func TestOrderDispatchConditionFalseStaysQuiet(t *testing.T) {
 	}
 }
 
+func TestOrderDispatchConditionFailureMentioningTimedOutStaysQuiet(t *testing.T) {
+	cityDir := t.TempDir()
+	store := beads.NewMemStore()
+	stderr := &bytes.Buffer{}
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:    "failed-check",
+			Trigger: "condition",
+			Check:   "echo 'connection timed out' >&2; exit 1",
+			Exec:    "true",
+		}},
+		storeFn: func(execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: successfulExec,
+		rec:     events.Discard,
+		stderr:  stderr,
+		cfg:     &config.City{},
+	}
+
+	m.dispatch(context.Background(), cityDir, time.Now())
+
+	if out := stderr.String(); strings.Contains(out, "raise check_timeout") {
+		t.Fatalf("ordinary stderr mentioning timed out must not log the timeout diagnostic:\n%s", out)
+	}
+}
+
 func assertNoDoltOrderEnv(t *testing.T, env map[string]string) {
 	t.Helper()
 	for _, key := range projectedDoltEnvKeys {
@@ -10899,4 +11109,33 @@ title = "Do work"
 		titles = append(titles, b.Title)
 	}
 	t.Fatalf("dispatchWisp created no step bead from a formula shipped by a non-own layer (the #4378 bug); titles=%v", titles)
+}
+
+// TestHasOpenWorkStrictIgnoresAForgedOrderRunLabel (architecture B v2,
+// mc-v8g4p): a plain task carrying an order's order-run label, even with an
+// open child, is no run of the order (orders.IsRunRecord) and holds no
+// single-flight, through the per-tick index and its live fallback alike; the
+// real molecule root of the same shape still does
+// (TestHasOpenWorkStrictBlocksOnWispWithOpenChildren).
+func TestHasOpenWorkStrictIgnoresAForgedOrderRunLabel(t *testing.T) {
+	store := beads.NewMemStore()
+	forged, err := store.Create(beads.Bead{Title: "forged", Type: "task", Labels: []string{"order-run:digest"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(beads.Bead{Title: "step", ParentID: forged.ID}); err != nil {
+		t.Fatal(err)
+	}
+	ad := &memoryOrderDispatcher{}
+	if has, err := ad.hasOpenWorkStrict(store, "digest"); err != nil || has {
+		t.Fatalf("hasOpenWorkStrict = %t (%v), want no open work from a plain task", has, err)
+	}
+	idx := newOrderDispatchTrackingIndex(io.Discard)
+	entries, err := idx.entriesForStore(store, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary := entries["digest"]; summary.openWorkTracking || len(summary.openRoots) != 0 {
+		t.Fatalf("index summary %+v, want no run of digest", summary)
+	}
 }

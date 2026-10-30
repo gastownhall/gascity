@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
@@ -118,7 +119,11 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 
 	// Pre-flight idempotency check.
 	if shouldCheckBeadState(opts) {
-		if resolveIdempotentShortCircuit(opts, a, deps, querier, &result) {
+		idempotent, err := resolveIdempotentShortCircuit(opts, a, deps, querier, &result)
+		if err != nil {
+			return result, err
+		}
+		if idempotent {
 			return result, nil
 		}
 	}
@@ -169,13 +174,22 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 // formula still attaches. If the molecule-attachment probe cannot complete, the
 // fail-closed idempotent state is preserved and the probe failure is surfaced
 // as a bead warning rather than silently flipping into a mutating attach path.
-func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDeps, querier BeadQuerier, result *SlingResult) bool {
+func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDeps, querier BeadQuerier, result *SlingResult) (bool, error) {
 	check := CheckBeadStateWithOptions(querier, opts.BeadOrFormula, a, deps, BeadCheckOptions{
 		NoConvoy: opts.NoConvoy,
 	})
 	if check.Idempotent {
 		decision, probeErr := onFormulaNeedsAttachment(opts, querier, deps)
 		switch {
+		case decision.Conflict != nil && decision.ConflictSourceUnassigned:
+			// An unassigned source keeps the attach path's burn-and-attach
+			// semantics: nobody is working the live attachment, so the new
+			// formula replaces it (reported in AutoBurned).
+			check.Idempotent = false
+		case decision.Conflict != nil:
+			// An assigned source: attaching would double up on work in
+			// progress, so the request fails instead of being dropped.
+			return false, decision.Conflict
 		case probeErr != nil:
 			// The attachment probe failed, so we cannot prove the routed bead
 			// lacks a live molecule. Preserve the fail-closed idempotent result
@@ -210,7 +224,7 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 	}
 	if !check.Idempotent {
 		result.BeadWarnings = append(result.BeadWarnings, check.Warnings...)
-		return false
+		return false, nil
 	}
 	result.Idempotent = true
 	result.DryRun = opts.DryRun
@@ -226,7 +240,7 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 	if opts.Nudge && !opts.DryRun {
 		result.NudgeAgent = &a
 	}
-	return true
+	return true, nil
 }
 
 // rigSuspended reports whether the named rig is marked suspended in config.
@@ -284,6 +298,38 @@ type attachmentDecision struct {
 	SkippedForClaim bool
 	// Assignee is the claiming identity when SkippedForClaim is true.
 	Assignee string
+	// Conflict is set when an explicit --on names a formula other than the
+	// one the bead's live attachment was poured from. The sling must not read
+	// as an idempotent no-op: an unassigned source (ConflictSourceUnassigned)
+	// falls through to the attach path, which burns the stale attachment and
+	// attaches the new formula; an assigned one fails with it.
+	Conflict                 *MoleculeAttachedError
+	ConflictSourceUnassigned bool
+}
+
+// conflictingOnFormulaAttachment reports a live attachment that an explicit
+// --on formula would collide with: one whose recorded formula differs from the
+// requested one. An attachment that records no formula, or a sling that only
+// implies its formula through default_sling_formula, never conflicts here. The
+// requested name is compared as the resolver reads it, without a file
+// extension, so the same formula spelled "<name>.toml" is the same request.
+//
+// Only a legacy molecule/wisp attachment conflicts here. A live graph.v2
+// workflow attachment keeps its own guard on the graph path (the
+// source-workflow lock and its ConflictError), unchanged.
+func conflictingOnFormulaAttachment(opts SlingOpts, live beads.Bead) *MoleculeAttachedError {
+	requested := formula.TrimFormulaExt(strings.TrimSpace(opts.OnFormula))
+	if requested == "" || IsWorkflowAttachment(live) {
+		return nil
+	}
+	attached := strings.TrimSpace(live.Metadata[beadmeta.FormulaNameMetadataKey])
+	if attached == "" {
+		attached = strings.TrimSpace(live.Ref)
+	}
+	if attached == "" || attached == requested {
+		return nil
+	}
+	return &MoleculeAttachedError{BeadID: opts.BeadOrFormula, Label: AttachmentLabel(live), AttachmentID: live.ID}
 }
 
 // onFormulaNeedsAttachment reports whether this is an --on sling whose target
@@ -308,12 +354,23 @@ func onFormulaNeedsAttachment(opts SlingOpts, querier BeadQuerier, deps SlingDep
 	if !usesFormulaBackedRoute(opts) {
 		return attachmentDecision{}, nil
 	}
-	hasMolecule, err := HasMoleculeChildren(querier, opts.BeadOrFormula, deps.Store)
+	live, err := findBlockingAttachment(querier, opts.BeadOrFormula, deps.attachmentScope())
+	if live != nil {
+		// Re-slinging the formula that is already attached is the idempotent
+		// retry. An explicit --on naming a DIFFERENT formula is a request the
+		// idempotent no-op would silently drop; report the live attachment
+		// instead, as the attach path does for an assigned source.
+		if conflict := conflictingOnFormulaAttachment(opts, live.Bead); conflict != nil {
+			unassigned := false
+			if src, ok := BeadFromGetters(opts.BeadOrFormula, querier, deps.Store); ok {
+				unassigned = strings.TrimSpace(src.Assignee) == ""
+			}
+			return attachmentDecision{Conflict: conflict, ConflictSourceUnassigned: unassigned}, nil
+		}
+		return attachmentDecision{}, nil
+	}
 	if err != nil {
 		return attachmentDecision{}, err
-	}
-	if hasMolecule {
-		return attachmentDecision{}, nil
 	}
 	// No molecule attached. Only override idempotency for an UNCLAIMED bead — the
 	// routed-raw footgun (gc.routed_to set, no assignee, no molecule). If a worker
@@ -332,7 +389,7 @@ func onFormulaNeedsAttachment(opts SlingOpts, querier BeadQuerier, deps SlingDep
 }
 
 func shouldValidateBuiltInRouteStoreReachable(opts SlingOpts, deps SlingDeps) bool {
-	return deps.Router != nil && !opts.IsFormula && !opts.DryRun
+	return deps.Router != nil && !opts.IsFormula
 }
 
 // shouldReopenForReassign reports whether the pre-flight reassign reopen should
@@ -402,8 +459,15 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	if err != nil {
 		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
 	}
-	if mResult.GraphWorkflow || IsGraphWorkflowAttachment(deps.Store, mResult.RootID) {
-		wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, "", a, method, deps)
+	// The root lives in the store that minted it: the graph store for a
+	// graph-class recipe, which on a city whose graph class is relocated to a
+	// [storage] binding is not the work store (#6054), and the work store for
+	// a v1 poured one (moleculeStoreFor). Every read and stamp of the root
+	// goes there.
+	rootStore := deps.moleculeStoreFor(recipe)
+	if mResult.GraphWorkflow || IsGraphWorkflowAttachment(rootStore, mResult.RootID) {
+		// A standalone --formula launch has no work bead, so no merge shape.
+		wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, "", "", "", a, method, deps)
 		wfResult.FormulaName = opts.BeadOrFormula
 		wfResult.Deprecations = append(wfResult.Deprecations, inv.Deprecations...)
 		return wfResult, wfErr
@@ -412,7 +476,7 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	if hint := rootOnlyVaporPourHint(opts.BeadOrFormula, recipe); hint != "" {
 		result.BeadWarnings = append(result.BeadWarnings, hint)
 	}
-	return finalize(opts, deps, mResult.RootID, method, result)
+	return finalizeInStore(opts, deps, rootStore, mResult.RootID, method, result)
 }
 
 // rootOnlyVaporPourHint returns a sling-time diagnostic when a formula compiled
@@ -499,7 +563,7 @@ func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 // bead: routed to the target, but still claimed by a third party with no
 // molecule to drive it (gm-2kyaqy). Identity matches the routing write
 // (agentutil.RoutedToIdentity), so a pool target compares against its pool
-// name and a claim by one of its own sessions ("<pool>-<id>") is not
+// name and a claim by one of its own sessions (assigneeIsOwnPoolSession) is not
 // undeliverable -- the same carve-out CheckBeadState already makes. Returns
 // false when the bead is unassigned, unreadable, or already held by the
 // target, since none of those strand the hand-off.
@@ -509,7 +573,7 @@ func undeliverableHandoffWarning(querier BeadQuerier, deps SlingDeps, beadID str
 		return "", false
 	}
 	target := agentutil.RoutedToIdentity(&a)
-	claimedByOwnPoolSession := agentutil.IsMultiSessionAgent(&a) && strings.HasPrefix(holder.Assignee, target+"-")
+	claimedByOwnPoolSession := agentutil.IsMultiSessionAgent(&a) && assigneeIsOwnPoolSession(holder.Assignee, target, querier, deps.Store)
 	if holder.Assignee == target || claimedByOwnPoolSession {
 		return "", false
 	}
@@ -555,7 +619,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 		}
 		var fellBackToPlainRoute bool
 		lockedResult, lockedErr := withGraphV2SourceWorkflowLock(context.Background(), deps, beadID, func() (SlingResult, error) {
-			if err := CheckNoMoleculeChildrenAllowLiveWorkflow(querier, beadID, deps.Store, &result); err != nil {
+			if err := checkNoMoleculeChildren(querier, beadID, deps.attachmentScope(), &result, true); err != nil {
 				var molErr *MoleculeAttachedError
 				if fallbackToPlainOnMoleculeConflict && errors.As(err, &molErr) {
 					// Mirrors the legacy branch's fallback below: the caller
@@ -603,7 +667,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			if err != nil {
 				return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 			}
-			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, "", a, method, deps)
+			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, "", beadID, SlingMergeStrategy(opts.Merge, beadID, deps, a), a, method, deps)
 			wfResult.FormulaName = formulaName
 			if wfErr != nil {
 				// Same store the snapshot was taken from and the replacement
@@ -644,7 +708,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 	// isGraph is always false here, so the former `isGraph && opts.Force`
 	// live-workflow allowance could never fire. Attachments are always checked
 	// with CheckNoMoleculeChildren on this path.
-	if err := CheckNoMoleculeChildren(querier, beadID, deps.Store, &result); err != nil {
+	if err := checkNoMoleculeChildren(querier, beadID, deps.attachmentScope(), &result, false); err != nil {
 		var molErr *MoleculeAttachedError
 		if fallbackToPlainOnMoleculeConflict && errors.As(err, &molErr) {
 			// The caller never asked for this formula attach -- it was only
@@ -677,8 +741,8 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 		}
 		wispRootID := mResult.RootID
-		if mResult.GraphWorkflow || IsGraphWorkflowAttachment(deps.Store, wispRootID) {
-			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, beadID, a, method, deps)
+		if mResult.GraphWorkflow || graphWorkflowAttachmentInGraphStore(deps.graphStore(), wispRootID) {
+			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, beadID, beadID, SlingMergeStrategy(opts.Merge, beadID, deps, a), a, method, deps)
 			wfResult.FormulaName = formulaName
 			return wfResult, wfErr
 		}
@@ -709,7 +773,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 		if err != nil {
 			return pendingSourceWorkflowLaunch{}, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 		}
-		return pendingGraphWorkflowLaunch(mResult.RootID, beadID, a, method, formulaName, deps), nil
+		return pendingGraphWorkflowLaunch(mResult.RootID, beadID, beadID, SlingMergeStrategy(opts.Merge, beadID, deps, a), a, method, formulaName, deps), nil
 	}
 	if !isGraph {
 		return run()
@@ -725,10 +789,24 @@ func slingPlainBead(opts SlingOpts, deps SlingDeps, beadID string, result SlingR
 // finalize executes the sling command, records telemetry, sets merge
 // metadata, creates auto-convoy, pokes the controller, and signals nudge.
 func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result SlingResult) (SlingResult, error) {
+	return finalizeInStore(opts, deps, deps.Store, beadID, method, result)
+}
+
+// finalizeInStore is finalize for a bead held by beadStore rather than by
+// deps.Store: the routing stamp and the merge-strategy stamp go to the store
+// that holds the bead. Auto-convoy bookkeeping stays in deps.Store, the work
+// store convoys live in.
+func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.Store, beadID, method string, result SlingResult) (SlingResult, error) {
 	a := opts.Target
 
 	// Execute routing -- prefer typed Router, fall back to shell Runner.
-	slingEnv := ResolveSlingEnv(a, deps, beadID)
+	var bead beads.Bead
+	if beadStore != nil && strings.TrimSpace(beadID) != "" {
+		if got, err := beadStore.Get(beadID); err == nil {
+			bead = got
+		}
+	}
+	slingEnv := ResolveSlingEnvForBead(a, deps, bead)
 	rigDir := SlingDirForBead(deps.Cfg, deps.CityPath, beadID)
 	if deps.Router != nil {
 		if err := validateBuiltInRouteStoreReachable(deps, beadID, a); err != nil {
@@ -741,6 +819,7 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 			WorkDir: rigDir,
 			Env:     slingEnv,
 			Force:   opts.Force,
+			Store:   beadStore,
 		}
 		if err := deps.Router.Route(context.Background(), req); err != nil {
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
@@ -762,11 +841,16 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 	}
 	telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, nil)
 
-	// Merge strategy metadata.
-	if opts.Merge != "" && deps.Store != nil {
-		if err := deps.Store.SetMetadata(beadID, beadmeta.MergeStrategyMetadataKey, opts.Merge); err != nil {
-			result.MetadataErrors = append(result.MetadataErrors,
-				fmt.Sprintf("setting merge strategy: %v", err))
+	// Merge strategy metadata. With no --merge flag this falls back to the
+	// rig's configured default, so a bare sling on a rig that delivers through
+	// a pull request records "mr" instead of leaving the bead unstamped for the
+	// refinery to read as "direct".
+	if beadStore != nil {
+		if strategy := SlingMergeStrategy(opts.Merge, beadID, deps, a); strategy != "" {
+			if err := beadStore.SetMetadata(beadID, beadmeta.MergeStrategyMetadataKey, strategy); err != nil {
+				result.MetadataErrors = append(result.MetadataErrors,
+					fmt.Sprintf("setting merge strategy: %v", err))
+			}
 		}
 	}
 
@@ -935,7 +1019,10 @@ func restampWorkBeadRouting(deps SlingDeps, beadID string, a config.Agent, resul
 }
 
 // doStartGraphWorkflow performs post-instantiation graph workflow setup.
-func doStartGraphWorkflow(rootID, sourceBeadID string, a config.Agent, method string, deps SlingDeps) (SlingResult, error) {
+// workBeadID is the bead a merge consumer will act on — empty for a standalone
+// `--formula` launch, which has nothing to merge — and mergeStrategy is the
+// already-resolved shape to record on it (see SlingMergeStrategy).
+func doStartGraphWorkflow(rootID, sourceBeadID, workBeadID, mergeStrategy string, a config.Agent, method string, deps SlingDeps) (SlingResult, error) {
 	var result SlingResult
 	result.Target = a.QualifiedName()
 	result.Method = method
@@ -965,6 +1052,20 @@ func doStartGraphWorkflow(rootID, sourceBeadID string, a config.Agent, method st
 			return result, fmt.Errorf("setting workflow_id on %s: %w", sourceBeadID, err)
 		}
 		restampWorkBeadRouting(deps, sourceBeadID, a, &result)
+	}
+	// Record the merge shape on the work bead, not the workflow root: the root
+	// is a control artifact and is never the thing that gets merged. Graph
+	// launches never pass through finalize(), so without this stamp a v2
+	// formula sling silently drops both --merge and the rig's configured
+	// default_merge_strategy, leaving the merge consumer to apply its own
+	// implicit default to work that does not match it. Advisory like
+	// finalize()'s stamp — the routing already happened, so a write failure is
+	// reported rather than fatal.
+	if mergeStrategy != "" && workBeadID != "" && deps.Store != nil {
+		if err := deps.Store.SetMetadata(workBeadID, beadmeta.MergeStrategyMetadataKey, mergeStrategy); err != nil {
+			result.MetadataErrors = append(result.MetadataErrors,
+				fmt.Sprintf("setting merge strategy: %v", err))
+		}
 	}
 	telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, nil)
 	if deps.Notify != nil {
@@ -1109,7 +1210,17 @@ func (c *sourceWorkflowRootCollector) scanStore(index int, info SourceWorkflowSt
 		c.bindingStore = info.Store
 		c.bindingRef = rootStoreRef
 	}
-	matches, err := sourceworkflow.ListLiveRoots(info.Store, c.sourceBeadID, c.sourceStoreRef, rootStoreRef)
+	// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+	// rows only as pre-split copies, so beads.RelicRead counts the read as
+	// debt; on the class binding the same read is legitimate.
+	// One leg of the source-workflow federation (graph binding, city, rigs):
+	// each leg lists only the roots it holds.
+	var matches []beads.Bead
+	err := beads.RelicRead(func() error {
+		var listErr error
+		matches, listErr = sourceworkflow.ListLiveRoots(info.Store, c.sourceBeadID, c.sourceStoreRef, rootStoreRef)
+		return listErr
+	})
 	if err != nil {
 		return c.recordScanFailure(index, info, err)
 	}
@@ -1306,12 +1417,12 @@ func (c *sourceWorkflowRootCollector) result() ([]sourceWorkflowRoot, error) {
 	return c.roots, nil
 }
 
-func pendingGraphWorkflowLaunch(rootID, sourceBeadID string, a config.Agent, method, formulaName string, deps SlingDeps) pendingSourceWorkflowLaunch {
+func pendingGraphWorkflowLaunch(rootID, sourceBeadID, workBeadID, mergeStrategy string, a config.Agent, method, formulaName string, deps SlingDeps) pendingSourceWorkflowLaunch {
 	return pendingSourceWorkflowLaunch{
 		workflowID: rootID,
 		storeRef:   strings.TrimSpace(deps.StoreRef),
 		finalize: func() (SlingResult, error) {
-			result, err := doStartGraphWorkflow(rootID, sourceBeadID, a, method, deps)
+			result, err := doStartGraphWorkflow(rootID, sourceBeadID, workBeadID, mergeStrategy, a, method, deps)
 			result.FormulaName = formulaName
 			return result, err
 		},
@@ -1652,8 +1763,8 @@ func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, chi
 		if err != nil {
 			return SlingResult{}, fmt.Errorf("instantiating %s %q on %s: %w", formulaLabel, formulaName, child.ID, err)
 		}
-		if mResult.GraphWorkflow || IsGraphWorkflowAttachment(deps.Store, mResult.RootID) {
-			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, child.ID, a, method, deps)
+		if mResult.GraphWorkflow || graphWorkflowAttachmentInGraphStore(deps.graphStore(), mResult.RootID) {
+			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, child.ID, child.ID, SlingMergeStrategy(opts.Merge, child.ID, deps, a), a, method, deps)
 			wfResult.FormulaName = formulaName
 			return wfResult, wfErr
 		}
@@ -1679,7 +1790,7 @@ func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, chi
 		if err != nil {
 			return pendingSourceWorkflowLaunch{}, fmt.Errorf("instantiating %s %q on %s: %w", formulaLabel, formulaName, child.ID, err)
 		}
-		return pendingGraphWorkflowLaunch(mResult.RootID, child.ID, a, method, formulaName, deps), nil
+		return pendingGraphWorkflowLaunch(mResult.RootID, child.ID, child.ID, SlingMergeStrategy(opts.Merge, child.ID, deps, a), a, method, formulaName, deps), nil
 	}
 	if !isGraph {
 		return run()
@@ -1878,11 +1989,19 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		return SlingResult{}, fmt.Errorf("listing children of %s: %w", b.ID, err)
 	}
 
-	var open, skipped []beads.Bead
+	// An owned child, controller-owned (a session row, a startup-health
+	// episode, a convergence root) or a coordination row (a mail message, a
+	// session wait, a queued nudge, an order's run record, an extmsg row), is
+	// never slung: each is refused on its own, before any attachment check or
+	// formula touches it (architecture B, the #7766 review).
+	var open, skipped, owned []beads.Bead
 	for _, c := range children {
-		if c.Status == "open" {
+		switch {
+		case coordclass.ControllerOwned(c), coordclass.CoordinationOwned(c):
+			owned = append(owned, c)
+		case c.Status == "open":
 			open = append(open, c)
-		} else {
+		default:
 			skipped = append(skipped, c)
 		}
 	}
@@ -1894,6 +2013,11 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 	// Cross-rig guard on container.
 	if !opts.Force && !opts.DryRun {
 		if err := CrossRigRouteError(b.ID, a, deps.Cfg); err != nil {
+			return SlingResult{}, err
+		}
+	}
+	if opts.DryRun && shouldValidateBuiltInRouteStoreReachable(opts, deps) {
+		if err := validateBuiltInRouteStoreReachable(deps, b.ID, a); err != nil {
 			return SlingResult{}, err
 		}
 	}
@@ -1909,6 +2033,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		batchResult.Total = len(children)
 		batchResult.Routed = len(open)
 		batchResult.Skipped = len(skipped)
+		batchResult.Failed = len(owned)
 		return batchResult, nil
 	}
 
@@ -1933,11 +2058,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		if err := validateBatchSlingFormulaRuntimeVars(context.Background(), useFormula, searchPaths, opts, open, a, deps); err != nil {
 			return SlingResult{}, fmt.Errorf("instantiating formula %q on %s %s: %w", useFormula, b.Type, b.ID, err)
 		}
-		checkAttachments := CheckBatchNoMoleculeChildren
-		if isGraph && opts.Force {
-			checkAttachments = CheckBatchNoMoleculeChildrenAllowLiveWorkflow
-		}
-		if err := checkAttachments(querier, open, deps.Store, &batchResult); err != nil {
+		if err := checkBatchNoMoleculeChildren(querier, open, deps.attachmentScope(), &batchResult, isGraph && opts.Force); err != nil {
 			return batchResult, fmt.Errorf("%w", err)
 		}
 	}
@@ -1953,12 +2074,20 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 
 	routed := 0
 	failed := 0
-	idempotent := 0
+	var skips batchSkips
 	// childErrors preserves typed child errors so errors.As at the top-level
 	// (cmdSling) can recover a *sourceworkflow.ConflictError emitted by any
 	// child and map it to exit code 3 + the cleanup hint. Stringifying into
 	// childResult.FailReason alone loses the type.
 	var childErrors []error
+	for _, child := range owned {
+		err := &OwnedChildError{BeadID: child.ID, Type: child.Type}
+		childResult := SlingChildResult{BeadID: child.ID}
+		childResult.fail(err)
+		batchResult.Children = append(batchResult.Children, childResult)
+		childErrors = append(childErrors, err)
+		failed++
+	}
 	for _, child := range open {
 		childResult := SlingChildResult{BeadID: child.ID}
 
@@ -1966,10 +2095,8 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 			check := CheckBeadStateWithOptions(querier, child.ID, a, deps, BeadCheckOptions{
 				NoConvoy: opts.NoConvoy,
 			})
-			if check.Idempotent {
-				childResult.Skipped = true
+			if skips.skip(check, &childResult) {
 				batchResult.Children = append(batchResult.Children, childResult)
-				idempotent++
 				continue
 			}
 			batchResult.BeadWarnings = append(batchResult.BeadWarnings, check.Warnings...)
@@ -1977,8 +2104,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 
 		if shouldValidateBuiltInRouteStoreReachable(opts, deps) {
 			if err := validateBuiltInRouteStoreReachable(deps, child.ID, a); err != nil {
-				childResult.Failed = true
-				childResult.FailReason = err.Error()
+				childResult.fail(err)
 				batchResult.Children = append(batchResult.Children, childResult)
 				childErrors = append(childErrors, err)
 				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
@@ -1994,8 +2120,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 			}
 			formulaResult, err := attachBatchFormula(context.Background(), opts, deps, child, a, useFormula, formulaLabel, batchMethod, isGraph)
 			if err != nil {
-				childResult.Failed = true
-				childResult.FailReason = err.Error()
+				childResult.fail(err)
 				batchResult.Children = append(batchResult.Children, childResult)
 				childErrors = append(childErrors, err)
 				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
@@ -2018,8 +2143,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		rigDir := SlingDirForBead(deps.Cfg, deps.CityPath, child.ID)
 		if deps.Router != nil {
 			if err := validateBuiltInRouteStoreReachable(deps, child.ID, a); err != nil {
-				childResult.Failed = true
-				childResult.FailReason = err.Error()
+				childResult.fail(err)
 				batchResult.Children = append(batchResult.Children, childResult)
 				childErrors = append(childErrors, err)
 				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
@@ -2034,8 +2158,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 				Force:   opts.Force,
 			}
 			if err := deps.Router.Route(context.Background(), req); err != nil {
-				childResult.Failed = true
-				childResult.FailReason = err.Error()
+				childResult.fail(err)
 				batchResult.Children = append(batchResult.Children, childResult)
 				childErrors = append(childErrors, err)
 				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
@@ -2052,8 +2175,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 				_, err = deps.Runner(rigDir, slingCmd, childEnv)
 			}
 			if err != nil {
-				childResult.Failed = true
-				childResult.FailReason = err.Error()
+				childResult.fail(err)
 				batchResult.Children = append(batchResult.Children, childResult)
 				childErrors = append(childErrors, err)
 				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
@@ -2079,8 +2201,9 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 
 	batchResult.Routed = routed
 	batchResult.Failed = failed
-	batchResult.Skipped = idempotent + len(skipped)
-	batchResult.IdempotentCt = idempotent
+	batchResult.Skipped = skips.idempotent + skips.notOpen + len(skipped)
+	batchResult.IdempotentCt = skips.idempotent
+	batchResult.NotOpenCt = skips.notOpen
 
 	if opts.Nudge && routed > 0 {
 		batchResult.NudgeAgent = &a
@@ -2096,6 +2219,46 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		return batchResult, errors.Join(joined...)
 	}
 	return batchResult, nil
+}
+
+// OwnedChildError refuses a container's owned child, controller-owned or a
+// coordination row: no sling routes, assigns or attaches a formula to one;
+// its owner writes it (architecture B).
+type OwnedChildError struct {
+	BeadID, Type string
+}
+
+func (e *OwnedChildError) Error() string {
+	return fmt.Sprintf("bead %s (type %q) is owned (a session row, a startup-health episode, a convergence root, or a coordination row: a mail message, a session wait, a queued nudge, an order's run record, an extmsg row): sling never routes one", e.BeadID, e.Type)
+}
+
+// batchSkips counts the open children DoSlingBatch skips on their fresh
+// pre-dispatch check.
+type batchSkips struct {
+	idempotent int
+	notOpen    int
+}
+
+// skip reports whether DoSlingBatch must skip a child given check, marking
+// childResult skipped and counting why. A child the batch listed as open can
+// leave that status while the loop dispatches earlier siblings: another actor
+// closes, tombstones, or claims it (#5927). The fresh read then sees the
+// change, and the child is skipped like the non-open children of the listing,
+// with its status recorded. That test runs before the idempotency one so a
+// child that is both is reported by its status. A bead the check could not
+// read (empty Status) stays dispatchable, as the check is best-effort.
+func (s *batchSkips) skip(check BeadCheckResult, childResult *SlingChildResult) bool {
+	switch {
+	case check.Status != "" && check.Status != "open":
+		childResult.Status = check.Status
+		s.notOpen++
+	case check.Idempotent:
+		s.idempotent++
+	default:
+		return false
+	}
+	childResult.Skipped = true
+	return true
 }
 
 func selectedStoreContainer(opts SlingOpts, deps SlingDeps) (beads.Bead, bool) {

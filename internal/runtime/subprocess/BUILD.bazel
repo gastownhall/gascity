@@ -4,6 +4,10 @@ go_library(
     name = "subprocess",
     srcs = [
         "cutover.go",
+        "fence.go",
+        "interrupt_signal_unix.go",
+        "interrupt_signal_windows.go",
+        "local_transcripts.go",
         "seams.go",
         "socketdir_unix.go",
         "socketdir_windows.go",
@@ -24,20 +28,26 @@ go_library(
 go_test(
     name = "subprocess_test",
     srcs = [
+        "fence_test.go",
         "meta_privacy_test.go",
         "refusal_windows_test.go",
+        "seam_conformance_test.go",
         "seams_test.go",
         "shellfixture_unix_test.go",
         "shellfixture_windows_test.go",
+        "socket_probe_test.go",
         "socketdir_unix_test.go",
         "subprocess_private_unix_test.go",
         "subprocess_test.go",
         "subprocess_windows_test.go",
+        "terminate_identity_test.go",
         "testenv_import_test.go",
     ],
     embed = [":subprocess"],
     deps = [
         "//internal/runtime",
+        "//internal/runtime/proctable",
+        "//internal/runtime/runtimetest",
         "//internal/testenv",
         "//internal/testutil",
     ] + select({
@@ -58,6 +68,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

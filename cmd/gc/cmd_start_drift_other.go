@@ -5,10 +5,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
 	"syscall"
 )
 
@@ -31,11 +27,8 @@ func printUnreadableSupervisorRestartError(stderr io.Writer, pid int, exeErr err
 // suffix because the on-disk path is what the auto-restart needs to
 // spawn — the new bytes already live at the un-suffixed path.
 func readSupervisorExePath(pid int) (string, error) {
-	target, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSuffix(target, " (deleted)"), nil
+	path, _, err := readSupervisorExeLink(pid)
+	return path, err
 }
 
 func platformDriftRestartKill(pid int) error {

@@ -30,25 +30,25 @@ func setProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr.Setpgid = true
 }
 
-// interruptProcessGroup sends os.Interrupt to the command's process group so a
+// terminateProcessGroup sends SIGTERM to the command's process group so a
 // foreground child receives it alongside the shell leader, reporting which
 // path delivered the signal. It preserves the os.ErrProcessDone signal the
 // caller special-cases: an already-exited target reports ErrProcessDone
 // rather than a spurious failure. If the group id cannot be resolved it falls
 // back to signaling the leader directly. The returned CancelOutcome is only
 // meaningful when the error is nil.
-func interruptProcessGroup(cmd *exec.Cmd) (CancelOutcome, error) {
+func terminateProcessGroup(cmd *exec.Cmd) (CancelOutcome, error) {
 	if cmd.Process == nil {
 		return CancelNotDelivered, os.ErrProcessDone
 	}
 	pgid, err := getpgid(cmd.Process.Pid)
 	if err != nil {
-		if sigErr := cmd.Process.Signal(os.Interrupt); sigErr != nil {
+		if sigErr := cmd.Process.Signal(syscall.SIGTERM); sigErr != nil {
 			return CancelNotDelivered, sigErr
 		}
 		return CancelLeaderSignaledOnly, nil
 	}
-	if killErr := killProcessGroup(-pgid, syscall.SIGINT); killErr != nil {
+	if killErr := killProcessGroup(-pgid, syscall.SIGTERM); killErr != nil {
 		if errors.Is(killErr, syscall.ESRCH) {
 			return CancelNotDelivered, os.ErrProcessDone
 		}

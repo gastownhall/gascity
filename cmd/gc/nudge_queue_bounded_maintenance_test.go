@@ -78,16 +78,30 @@ func TestRunNudgeQueueMaintenanceSweep_BoundedPassPreservesBacklogThenConverges(
 	}
 }
 
-// TestListQueuedNudgesForTarget_BoundedMaintenancePreservesBacklogOnStaleNow
+// steppingNudgeClock moves on by step at every read: a maintenance pass over
+// it spends step on each item it considers.
+type steppingNudgeClock struct {
+	now  time.Time
+	step time.Duration
+}
+
+func (c *steppingNudgeClock) Now() time.Time {
+	now := c.now
+	c.now = c.now.Add(c.step)
+	return now
+}
+
+// TestListQueuedNudgesForTarget_BoundedMaintenancePreservesBacklogPastItsBudget
 // guards ga-2kzci3 candidate 1 / NFR1: every mutating/listing queue call
 // site -- not just the foreground enqueue path and the supervisor sweep --
-// must bound its maintenance pass to nudgeEnqueueMaintenanceBudget relative
-// to its own now, instead of running it against noMaintenanceDeadline's
-// unconditional wall-clock+24h deadline. A stale now (whose now+budget has
-// already elapsed relative to the real clock) must leave the backlog
-// untouched rather than draining it, exactly as the enqueue path and the
-// supervisor sweep already do.
-func TestListQueuedNudgesForTarget_BoundedMaintenancePreservesBacklogOnStaleNow(t *testing.T) {
+// must bound its maintenance pass to nudgeEnqueueMaintenanceBudget instead of
+// running it against noMaintenanceDeadline's unconditional wall-clock+24h
+// deadline. The budget runs from the pass's start by the listing's clock, so a
+// pass whose clock passes the budget before it reaches an item leaves the
+// backlog untouched. A stale now does not spend it (ga-fsp5w9): now is only
+// the time items are judged at, so a listing that waited for the lock still
+// converges.
+func TestListQueuedNudgesForTarget_BoundedMaintenancePreservesBacklogPastItsBudget(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 
@@ -104,36 +118,32 @@ func TestListQueuedNudgesForTarget_BoundedMaintenancePreservesBacklogOnStaleNow(
 		t.Fatalf("seed queue state: %v", err)
 	}
 
-	// staleNow is far enough in the past that staleNow+nudgeEnqueueMaintenanceBudget
-	// (2s) is already behind the real wall clock: a bounded pass must bail
-	// before touching any item, not silently ignore how stale now actually
-	// is and drain the whole backlog like an unbounded (24h-deadline) pass
-	// would.
-	staleNow := base.Add(-10 * time.Second)
+	// Each read of the clock spends more than the whole budget, so the pass is
+	// past its budget when it reaches the first item: it must bail before
+	// touching any item, not drain the whole backlog like an unbounded
+	// (24h-deadline) pass would.
 	target := nudgeTarget{cityPath: dir, alias: "ghost-agent"}
-	if _, _, _, err := listQueuedNudgesForTarget(dir, target, staleNow); err != nil {
-		t.Fatalf("listQueuedNudgesForTarget(staleNow): %v", err)
+	spent := &steppingNudgeClock{now: base, step: nudgeEnqueueMaintenanceBudget + time.Second}
+	if _, _, _, err := listQueuedNudgesForTargetWithClock(dir, target, base, spent); err != nil {
+		t.Fatalf("listQueuedNudgesForTargetWithClock(spent budget): %v", err)
 	}
 	state, err := nudgequeue.LoadState(dir)
 	if err != nil {
 		t.Fatalf("LoadState after bounded pass: %v", err)
 	}
 	if len(state.Pending) != backlog {
-		t.Fatalf("pending after bounded listQueuedNudgesForTarget pass = %d, want %d (bounded pass must preserve the backlog, not drain it against noMaintenanceDeadline's unconditional 24h deadline)", len(state.Pending), backlog)
+		t.Fatalf("pending after a pass past its budget = %d, want %d (a bounded pass must preserve the backlog, not drain it against noMaintenanceDeadline's unconditional 24h deadline)", len(state.Pending), backlog)
 	}
 	if len(state.Dead) != 0 {
 		t.Fatalf("dead after bounded pass = %d, want 0", len(state.Dead))
 	}
 
-	// A fresh now gives the pass a deadline safely in the future, so it must
+	// A now staler than the budget, with the pass's own budget intact, must
 	// fully converge the preserved backlog. Pinned to a clock.Fake that never
-	// advances: real wall-clock time (via clock.Real) races this pass's own
-	// per-item file I/O for 5 items under -race, which can exceed the 2s
-	// budget and bail the pass early even though nothing here is actually
-	// slow relative to the fresh deadline itself.
-	freshNow := time.Now()
-	if _, _, _, err := listQueuedNudgesForTargetWithClock(dir, target, freshNow, &clock.Fake{Time: freshNow}); err != nil {
-		t.Fatalf("listQueuedNudgesForTargetWithClock(fresh now): %v", err)
+	// advances, so the pass's own work cannot spend its budget.
+	staleNow := base.Add(-10 * time.Second)
+	if _, _, _, err := listQueuedNudgesForTargetWithClock(dir, target, staleNow, &clock.Fake{Time: time.Now()}); err != nil {
+		t.Fatalf("listQueuedNudgesForTargetWithClock(stale now): %v", err)
 	}
 	state, err = nudgequeue.LoadState(dir)
 	if err != nil {

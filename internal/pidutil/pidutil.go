@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -50,6 +52,20 @@ func psTimeout() time.Duration {
 		return defaultPSTimeout
 	}
 	return parsed
+}
+
+// readProcStat reads a /proc/<pid>/stat file. It is a seam so tests can model a
+// process reaped between two probes, a window too narrow to hit on demand.
+var readProcStat = os.ReadFile
+
+// readPIDStat reads pid's /proc stat record through readProcStat. Windows never
+// consults /proc (see procfs_windows.go), so there it fails without touching
+// the filesystem.
+func readPIDStat(pid int) ([]byte, error) {
+	if runtime.GOOS == "windows" {
+		return readProcFile(pid, "stat")
+	}
+	return readProcStat(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
 }
 
 // Alive reports whether a PID exists and is not a zombie.
@@ -106,7 +122,7 @@ func StartTime(pid int) (string, error) {
 	if pid <= 0 {
 		return "", fmt.Errorf("pidutil: invalid PID %d", pid)
 	}
-	data, err := readProcFile(pid, "stat")
+	data, err := readPIDStat(pid)
 	if err != nil {
 		return platformStartTime(pid)
 	}
@@ -134,8 +150,9 @@ func StartTime(pid int) (string, error) {
 // non-empty startTime that no longer matches means the PID was recycled: the
 // original target is dead, so this returns false. When the current start time
 // cannot be read despite Alive reporting true (a transient race, or a host
-// where neither /proc nor ps can answer), it keeps the conservative Alive
-// answer rather than inventing a death.
+// where neither /proc nor ps can answer), it re-checks Alive: a live process
+// keeps the conservative answer rather than inventing a death, while one reaped
+// between the two probes reads as dead.
 func AliveWithStartTime(pid int, startTime string) bool {
 	if !Alive(pid) {
 		return false
@@ -145,7 +162,11 @@ func AliveWithStartTime(pid int, startTime string) bool {
 	}
 	current, err := StartTime(pid)
 	if err != nil {
-		return true
+		// Re-probe rather than answer true outright: a process reaped
+		// between the Alive check above and the identity read is gone, while
+		// a live one with an unreadable identity keeps the conservative
+		// answer.
+		return Alive(pid)
 	}
 	return current == startTime
 }

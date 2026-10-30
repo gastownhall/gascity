@@ -4,13 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	goruntime "runtime"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,10 +19,10 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/platform/filelock"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -923,6 +920,46 @@ func TestZombieSessionsCheck_Fix(t *testing.T) {
 	}
 }
 
+// A zombie whose tmux server dies between Fix's observation and its Stop is
+// gone, which is all Fix is for; a stop that failed to remove the session is
+// still reported, even when a missing-server answer is joined beside it.
+func TestZombieSessionsCheck_FixTreatsDownedServerAsFixedButReportsStopFailures(t *testing.T) {
+	stopFailed := errors.New("terminate zombie: permission denied")
+	for _, tc := range []struct {
+		name    string
+		stopErr error
+		wantErr error
+	}{
+		{name: "downed server", stopErr: fmt.Errorf("killing session zombie: %w", tmux.ErrNoServer)},
+		{name: "stop failure", stopErr: stopFailed, wantErr: stopFailed},
+		{name: "stop failure beside downed server", stopErr: errors.Join(stopFailed, tmux.ErrNoServer), wantErr: stopFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "zombie", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			sp.Zombies["zombie"] = true
+			sp.StopErrors["zombie"] = tc.stopErr
+
+			cfg := &config.City{
+				Agents: []config.Agent{{Name: "zombie", ProcessNames: []string{"claude"}}},
+			}
+			err := NewZombieSessionsCheck(cfg, "test", "", sp).Fix(&CheckContext{CityPath: t.TempDir()})
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("Fix() error = %v, want nil for a zombie already gone with its server", err)
+				}
+			} else if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Fix() error = %v, want it to report %v", err, tc.wantErr)
+			}
+			if n := sp.CountCalls("Stop", "zombie"); n != 1 {
+				t.Errorf("Stop(%q) called %d times, want 1", "zombie", n)
+			}
+		})
+	}
+}
+
 // TestZombieSessionsCheck_FixSkipsWhenControllerRunning is required by
 // ga-bq9vdi (GH#5742): ZombieSessionsCheck.Fix() kills sessions via the raw
 // runtime.Provider with neither fence engdocs/design/session-store-fences.md
@@ -1102,6 +1139,43 @@ func TestOrphanSessionsCheck_Fix(t *testing.T) {
 	}
 	if !sp.IsRunning("mayor") {
 		t.Error("legitimate session was killed by fix")
+	}
+}
+
+// An orphan whose tmux server dies between Fix's listing and its Stop is gone,
+// which is all Fix is for; a stop that failed to remove the session is still
+// reported, even when a missing-server answer is joined beside it.
+func TestOrphanSessionsCheck_FixTreatsDownedServerAsFixedButReportsStopFailures(t *testing.T) {
+	stopFailed := errors.New("terminate orphan: permission denied")
+	for _, tc := range []struct {
+		name    string
+		stopErr error
+		wantErr error
+	}{
+		{name: "downed server", stopErr: fmt.Errorf("killing session stale-worker: %w", tmux.ErrNoServer)},
+		{name: "stop failure", stopErr: stopFailed, wantErr: stopFailed},
+		{name: "stop failure beside downed server", stopErr: errors.Join(stopFailed, tmux.ErrNoServer), wantErr: stopFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "stale-worker", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			sp.StopErrors["stale-worker"] = tc.stopErr
+
+			cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
+			err := NewOrphanSessionsCheck(cfg, "test", "", sp).Fix(&CheckContext{CityPath: t.TempDir()})
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("Fix() error = %v, want nil for an orphan already gone with its server", err)
+				}
+			} else if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Fix() error = %v, want it to report %v", err, tc.wantErr)
+			}
+			if n := sp.CountCalls("Stop", "stale-worker"); n != 1 {
+				t.Errorf("Stop(%q) called %d times, want 1", "stale-worker", n)
+			}
+		})
 	}
 }
 
@@ -2595,153 +2669,6 @@ func TestEventsLogCheck_Missing(t *testing.T) {
 	}
 }
 
-// TestEventsLogCheckAgreesWithRecorderOnLockFile covers the lock file every
-// event writer opens beside the log, creating it if missing. Doctor must
-// warn exactly when a writer cannot record, without creating the lock file
-// itself and without mistaking a writer that holds it for a fault.
-func TestEventsLogCheckAgreesWithRecorderOnLockFile(t *testing.T) {
-	type city struct{ root, dir, log, lock string }
-	tests := []struct {
-		name          string
-		unixOnly      bool
-		permissions   bool
-		lockFileFirst bool
-		setup         func(t *testing.T, c city)
-		run           func(t *testing.T, c city) *CheckResult
-		wantWarning   bool
-	}{
-		{
-			name:        "unwritable directory before the lock file exists",
-			unixOnly:    true,
-			permissions: true,
-			setup:       func(t *testing.T, c city) { chmodForTest(t, c.dir, 0o555, 0o755) },
-			wantWarning: true,
-		},
-		{
-			name:          "read-only lock file",
-			permissions:   true,
-			lockFileFirst: true,
-			setup:         func(t *testing.T, c city) { chmodForTest(t, c.lock, 0o400, 0o600) },
-			wantWarning:   true,
-		},
-		{
-			name:          "unwritable directory after the lock file exists",
-			unixOnly:      true,
-			permissions:   true,
-			lockFileFirst: true,
-			setup:         func(t *testing.T, c city) { chmodForTest(t, c.dir, 0o555, 0o755) },
-		},
-		{
-			name:          "lock held by another writer",
-			lockFileFirst: true,
-			run: func(t *testing.T, c city) *CheckResult {
-				f, err := os.OpenFile(c.log, os.O_WRONLY|os.O_APPEND, 0)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer f.Close() //nolint:errcheck // test cleanup
-				lock, err := filelock.AcquireAdvisoryFile(f, c.log, filelock.Options{Mode: filelock.Exclusive, NonBlocking: true, Label: c.log})
-				if err != nil {
-					t.Fatalf("holding the writers' lock: %v", err)
-				}
-				defer lock.Release() //nolint:errcheck // test cleanup
-				done := make(chan *CheckResult, 1)
-				go func() { done <- (&EventsLogCheck{}).Run(&CheckContext{CityPath: c.root}) }()
-				select {
-				case r := <-done:
-					return r
-				case <-time.After(10 * time.Second):
-					t.Fatal("doctor waited for the writers' lock")
-					return nil
-				}
-			},
-		},
-		{
-			name: "no lock file yet",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.unixOnly && goruntime.GOOS == "windows" {
-				t.Skip("a read-only directory does not stop file creation on Windows")
-			}
-			if tt.permissions && os.Geteuid() == 0 {
-				t.Skip("running as root: permission bits do not deny access")
-			}
-			c := city{root: t.TempDir()}
-			c.dir = filepath.Join(c.root, ".gc")
-			c.log = filepath.Join(c.dir, "events.jsonl")
-			c.lock = c.log + ".lock"
-			rec, err := events.NewFileRecorder(c.log, io.Discard, events.WithoutStartupSweep())
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { rec.Close() }) //nolint:errcheck // test cleanup
-			if tt.lockFileFirst {
-				if err := rec.RecordAck(events.Event{Type: events.BeadCreated, Subject: "first"}); err != nil {
-					t.Fatalf("first RecordAck: %v", err)
-				}
-			}
-			if _, err := os.Stat(c.lock); tt.lockFileFirst != (err == nil) {
-				t.Fatalf("lock file present = %v before the check, want %v (stat: %v)", err == nil, tt.lockFileFirst, err)
-			}
-			if tt.setup != nil {
-				tt.setup(t, c)
-			}
-			before := dirNamesForTest(t, c.dir)
-
-			run := tt.run
-			if run == nil {
-				run = func(_ *testing.T, c city) *CheckResult {
-					return (&EventsLogCheck{}).Run(&CheckContext{CityPath: c.root})
-				}
-			}
-			r := run(t, c)
-
-			if after := dirNamesForTest(t, c.dir); !slices.Equal(after, before) {
-				t.Errorf("doctor changed %s: entries %q, want %q", c.dir, after, before)
-			}
-			appendErr := rec.RecordAck(events.Event{Type: events.BeadCreated, Subject: "test"})
-			if tt.wantWarning {
-				if appendErr == nil {
-					t.Fatal("the scenario did not stop the recorder")
-				}
-				if r.Status != StatusWarning || !strings.Contains(r.Message, "events.jsonl.lock") {
-					t.Errorf("doctor = %v %q, want a warning naming events.jsonl.lock; RecordAck: %v", r.Status, r.Message, appendErr)
-				}
-				return
-			}
-			if appendErr != nil {
-				t.Fatalf("RecordAck: %v", appendErr)
-			}
-			if r.Status != StatusOK {
-				t.Errorf("doctor = %v %q, want OK", r.Status, r.Message)
-			}
-		})
-	}
-}
-
-func chmodForTest(t *testing.T, path string, mode, restore os.FileMode) {
-	t.Helper()
-	if err := os.Chmod(path, mode); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.Chmod(path, restore) }) //nolint:errcheck // test cleanup
-}
-
-func dirNamesForTest(t *testing.T, dir string) []string {
-	t.Helper()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		names = append(names, e.Name())
-	}
-	return names
-}
-
 // --- ControllerCheck ---
 
 func TestControllerCheck_Running(t *testing.T) {
@@ -2973,6 +2900,24 @@ func TestWorktreeCheckAllValid(t *testing.T) {
 	r := c.Run(&CheckContext{CityPath: dir})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+}
+
+func TestWorktreeCheckUsesConfiguredWorktreesRoot(t *testing.T) {
+	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
+	configuredRoot := filepath.Join(t.TempDir(), "configured-worktrees")
+	t.Setenv("GC_WORKTREES_DIR", configuredRoot)
+	wtDir := filepath.Join(configuredRoot, "myrig", "agent1")
+	if err := os.MkdirAll(wtDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, ".git"), []byte("gitdir: /nonexistent/configured-target\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := (&WorktreeCheck{}).Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error from configured root; msg=%s", r.Status, r.Message)
 	}
 }
 
@@ -4289,24 +4234,24 @@ func TestCompareDoltVersion(t *testing.T) {
 
 func TestDoltVersionCheck_OK(t *testing.T) {
 	c := NewDoltVersionCheck()
-	c.versionOutput = func() (string, error) { return "dolt version 2.1.1\n", nil }
+	c.versionOutput = func() (string, error) { return "dolt version 2.6.1\n", nil }
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
 	}
-	if !strings.Contains(r.Message, "2.1.1") {
+	if !strings.Contains(r.Message, "2.6.1") {
 		t.Errorf("message = %q, want version in message", r.Message)
 	}
 }
 
 func TestDoltVersionCheck_OK_AtMinimum(t *testing.T) {
 	c := NewDoltVersionCheck()
-	c.versionOutput = func() (string, error) { return "dolt version 2.1.0\n", nil }
+	c.versionOutput = func() (string, error) { return "dolt version 2.6.0\n", nil }
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
 	}
-	if !strings.Contains(r.Message, "2.1.0") {
+	if !strings.Contains(r.Message, "2.6.0") {
 		t.Errorf("message = %q, want version in message", r.Message)
 	}
 }
@@ -4324,23 +4269,29 @@ func TestDoltVersionCheck_Error_BelowManagedConfigFloor(t *testing.T) {
 }
 
 func TestDoltVersionCheck_Error_BelowMinimum(t *testing.T) {
-	c := NewDoltVersionCheck()
-	c.versionOutput = func() (string, error) { return "dolt version 2.0.6\n", nil }
-	r := c.Run(&CheckContext{})
-	if r.Status != StatusError {
-		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
-	}
-	if !strings.Contains(r.Message, "below minimum") {
-		t.Errorf("message = %q, want below-minimum text", r.Message)
+	// 2.5.1 is the last release below the 2.6.0 floor, and 2.1.0 the
+	// previous floor: both final releases a managed city may still run.
+	for _, version := range []string{"2.5.1", "2.1.0", "2.0.6"} {
+		t.Run(version, func(t *testing.T) {
+			c := NewDoltVersionCheck()
+			c.versionOutput = func() (string, error) { return "dolt version " + version + "\n", nil }
+			r := c.Run(&CheckContext{})
+			if r.Status != StatusError {
+				t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+			}
+			if !strings.Contains(r.Message, "below minimum 2.6.0") || !strings.Contains(r.Message, version) {
+				t.Errorf("message = %q, want below-minimum text naming %s and 2.6.0", r.Message, version)
+			}
+		})
 	}
 }
 
 func TestDoltVersionCheck_Error_PreReleaseAtFloor(t *testing.T) {
 	cases := []string{
-		"dolt version 2.1.0-rc1\n",
-		"dolt version 2.1.0-rc1+build.5\n",
-		"dolt version 2.1.0-dev.0\n",
-		"dolt version 2.1.1-rc1\n",
+		"dolt version 2.6.0-rc1\n",
+		"dolt version 2.6.0-rc1+build.5\n",
+		"dolt version 2.6.0-dev.0\n",
+		"dolt version 2.6.1-rc1\n",
 	}
 	for _, version := range cases {
 		t.Run(strings.TrimSpace(version), func(t *testing.T) {
@@ -4350,7 +4301,7 @@ func TestDoltVersionCheck_Error_PreReleaseAtFloor(t *testing.T) {
 			if r.Status != StatusError {
 				t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
 			}
-			if !strings.Contains(r.Message, "pre-release") || !strings.Contains(r.Message, "2.1.0") {
+			if !strings.Contains(r.Message, "pre-release") || !strings.Contains(r.Message, "2.6.0") {
 				t.Errorf("message = %q, want pre-release and minimum version text", r.Message)
 			}
 		})
@@ -4519,5 +4470,99 @@ func TestDoltVersionCheck_CanFixFalse(t *testing.T) {
 	c := NewDoltVersionCheck()
 	if c.CanFix() {
 		t.Error("CanFix() = true, want false")
+	}
+}
+
+// nonDoltScopeMetadata is the metadata.json a non-Dolt scope carries: a
+// backend selection only (for a remote backend, `bd connect` pins the server in
+// a per-user sidecar). The name is deliberately not any real backend: the
+// dolt-server checks must decide "not Dolt" without knowing which engine it is.
+const nonDoltScopeMetadata = `{"database":"beads.db","backend":"example-non-dolt"}`
+
+func writeNonDoltScopeMetadata(t *testing.T, scopeRoot string) {
+	t.Helper()
+	writeScopeMetadata(t, scopeRoot, nonDoltScopeMetadata)
+}
+
+func writeScopeMetadata(t *testing.T, scopeRoot, metadata string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scopeRoot, ".beads", "metadata.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDoltServerChecks_EveryDoltSpellingKeepsTheDial pins the not-applicable
+// gate to contract.IsDoltBackend, the predicate the store factory and the
+// provider lifecycle route on. A proxied scope spelled "bd" or "Dolt" is still
+// served by Dolt, so both dolt-server checks must answer it exactly as they
+// answer the canonical "dolt" — never "not applicable", which would report OK
+// over an outage of the server that scope really uses.
+func TestDoltServerChecks_EveryDoltSpellingKeepsTheDial(t *testing.T) {
+	cityDir := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"bd\"\n")
+	rigDir := filepath.Join(cityDir, "rigs", "demo")
+	checks := []Check{
+		NewDoltServerCheck(cityDir, false),
+		NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false),
+	}
+	answers := func(backend string) []*CheckResult {
+		metadata := fmt.Sprintf(`{"database":"beads.db","backend":%q,"dolt_mode":"proxied-server"}`, backend)
+		writeScopeMetadata(t, cityDir, metadata)
+		writeScopeMetadata(t, rigDir, metadata)
+		results := make([]*CheckResult, 0, len(checks))
+		for _, check := range checks {
+			results = append(results, check.Run(&CheckContext{}))
+		}
+		return results
+	}
+
+	canonical := answers("dolt")
+	for _, spelling := range []string{"bd", "Dolt", "DOLT"} {
+		for i, got := range answers(spelling) {
+			want := canonical[i]
+			if strings.Contains(got.Message, "not applicable") {
+				t.Errorf("%s on backend %q answered %q; the factory routes that spelling to Dolt", got.Name, spelling, got.Message)
+				continue
+			}
+			if got.Status != want.Status || got.Message != want.Message {
+				t.Errorf("%s on backend %q = (%d, %q), want the canonical dolt answer (%d, %q)", got.Name, spelling, got.Status, got.Message, want.Status, want.Message)
+			}
+		}
+	}
+}
+
+// TestDoltServerCheck_NonDoltCityIsNotApplicable pins the MC shadow finding F3:
+// a city whose scope is bound to a non-Dolt backend has no Dolt server and no
+// dolt-state.json, so the dolt-server check must answer N/A rather than FAIL
+// with "read dolt runtime state".
+func TestDoltServerCheck_NonDoltCityIsNotApplicable(t *testing.T) {
+	dir := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"bd\"\n")
+	writeNonDoltScopeMetadata(t, dir)
+
+	r := NewDoltServerCheck(dir, false).Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK (not applicable); msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "not applicable") || !strings.Contains(r.Message, "example-non-dolt") {
+		t.Fatalf("message = %q, want a not-applicable answer naming the scope's backend", r.Message)
+	}
+}
+
+// TestRigDoltServerCheck_NonDoltRigIsNotApplicable is the rig twin: a rig
+// bound to the same non-Dolt backend has no Dolt endpoint to dial.
+func TestRigDoltServerCheck_NonDoltRigIsNotApplicable(t *testing.T) {
+	cityDir := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"bd\"\n")
+	writeNonDoltScopeMetadata(t, cityDir)
+	rigDir := filepath.Join(cityDir, "rigs", "demo")
+	writeNonDoltScopeMetadata(t, rigDir)
+
+	r := NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false).Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK (not applicable); msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "not applicable") {
+		t.Fatalf("message = %q, want a not-applicable answer", r.Message)
 	}
 }

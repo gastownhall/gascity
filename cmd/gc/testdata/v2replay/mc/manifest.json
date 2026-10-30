@@ -1,0 +1,12 @@
+{
+  "city": "maintainer-city",
+  "exported_at": "2026-10-07T08:00:00.000000+00:00",
+  "rows": {
+    "controller_trace.jsonl": 11,
+    "events.jsonl": 2,
+    "session_rows.jsonl": 5
+  },
+  "session_rows_source": "sqlite (mode=ro), current rows",
+  "since": "2026-10-05 00:00:00.000000",
+  "until": "2026-10-05 00:05:00.000000"
+}

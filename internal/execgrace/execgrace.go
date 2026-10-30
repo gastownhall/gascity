@@ -4,14 +4,20 @@
 // It generalizes two patterns that already exist piecemeal in the codebase:
 //
 //   - Graceful cancellation ([Apply]): the command runs in its own process
-//     group and context cancellation interrupts that group first, so shell
+//     group and context cancellation sends that group SIGTERM first, so shell
 //     rollback traps (and any foreground child blocking them) get a chance to
 //     run before cancellation escalates to a forced kill. Without this, Go's
 //     default [os/exec.CommandContext] cancel is Process.Kill — SIGKILL — which
 //     is untrappable: a setup script killed mid-flight can never restore state
-//     it staged aside (the worktree-setup data-loss class). This is the same
-//     protection [internal/runtime/exec]'s interruptThenKill introduced for
-//     adapter scripts, lifted to a reusable home.
+//     it staged aside (the worktree-setup data-loss class).
+//
+//     The cooperative signal is SIGTERM, not SIGINT. SIGINT is the keyboard
+//     interrupt and shells treat it specially: a non-interactive shell
+//     started as a background job inherits SIGINT ignored and cannot trap it
+//     at all, and bash can stop acting on signals entirely when SIGINT lands
+//     during a command substitution. SIGTERM has neither hazard, and it is
+//     the signal docker stop and Kubernetes use for the same TERM-then-KILL
+//     contract.
 //
 //   - Activity-aware deadlines ([Monitor]): a fixed wall-clock timeout cannot
 //     distinguish a hung command from a slow-but-healthy one. A Monitor cancels
@@ -53,7 +59,7 @@ const (
 	// or the target was already gone by the time it fired.
 	CancelNotDelivered CancelOutcome = iota
 
-	// CancelGroupSignaled means the process group was interrupted
+	// CancelGroupSignaled means the process group was sent SIGTERM
 	// successfully. The command (and any foreground child) received the
 	// signal; whether it then exits cooperatively or is later force-killed
 	// by os/exec's own WaitDelay escalation happens outside Apply, and does
@@ -61,10 +67,10 @@ const (
 	CancelGroupSignaled
 
 	// CancelLeaderSignaledOnly means the process group could not be
-	// resolved, so only the process leader was interrupted directly.
+	// resolved, so only the process leader was sent SIGTERM directly.
 	CancelLeaderSignaledOnly
 
-	// CancelForceKilled means the interrupt itself could not be delivered
+	// CancelForceKilled means the SIGTERM itself could not be delivered
 	// (group and leader signaling both failed) and Apply fell back to
 	// killing the process directly rather than leaving it to run out the
 	// WaitDelay clock.
@@ -115,9 +121,9 @@ func (r *CancelResult) record(outcome CancelOutcome) {
 //
 // It places the command in its own process group (POSIX; no-op on Windows),
 // replaces the default context-cancel behavior (SIGKILL) with
-// [InterruptThenKill], and raises cmd.WaitDelay to grace when grace is larger
+// [TerminateThenKill], and raises cmd.WaitDelay to grace when grace is larger
 // than the current value. WaitDelay bounds how long Wait allows the
-// interrupted process — its rollback traps included — and any grandchildren
+// terminated process — its rollback traps included — and any grandchildren
 // holding the I/O pipes before Go forcibly terminates them, so grace is
 // effectively the trap budget. A zero grace leaves WaitDelay untouched.
 //
@@ -127,23 +133,23 @@ func (r *CancelResult) record(outcome CancelOutcome) {
 func Apply(cmd *exec.Cmd, grace time.Duration) *CancelResult {
 	setProcessGroup(cmd)
 	result := new(CancelResult)
-	cmd.Cancel = InterruptThenKill(cmd, result)
+	cmd.Cancel = TerminateThenKill(cmd, result)
 	if grace > cmd.WaitDelay {
 		cmd.WaitDelay = grace
 	}
 	return result
 }
 
-// InterruptThenKill builds an [os/exec.Cmd.Cancel] that first interrupts the
-// command's process group so a cooperative command — and any foreground child
-// blocking its rollback trap — can roll back before cancellation becomes a
-// forced kill, recording in result whether and how cancellation was
-// delivered so the caller can let it win over the command's own exit status.
-// Platforms without process groups or os.Interrupt (such as Windows) fall
-// back to Kill.
-func InterruptThenKill(cmd *exec.Cmd, result *CancelResult) func() error {
+// TerminateThenKill builds an [os/exec.Cmd.Cancel] that first sends SIGTERM
+// to the command's process group so a cooperative command — and any
+// foreground child blocking its rollback trap — can roll back before
+// cancellation becomes a forced kill, recording in result whether and how
+// cancellation was delivered so the caller can let it win over the command's
+// own exit status. Platforms without process groups or a catchable
+// termination signal (such as Windows) fall back to Kill.
+func TerminateThenKill(cmd *exec.Cmd, result *CancelResult) func() error {
 	return func() error {
-		outcome, err := interruptProcessGroup(cmd)
+		outcome, err := terminateProcessGroup(cmd)
 		if err == nil {
 			result.record(outcome)
 			return nil
@@ -171,12 +177,13 @@ type Monitor struct {
 	ctx    context.Context
 	cancel context.CancelCauseFunc
 
-	idle time.Duration
-	last atomic.Int64 // UnixNano of the most recent output (or start)
+	clock Clock
+	idle  time.Duration
+	last  atomic.Int64 // UnixNano of the most recent output (or start)
 
 	mu        sync.Mutex
-	idleTimer *time.Timer
-	ceilTimer *time.Timer
+	idleTimer Timer
+	ceilTimer Timer
 	stopped   bool
 }
 
@@ -189,18 +196,51 @@ type Monitor struct {
 // Callers must arrange for [Monitor.Stop] to run once the command finishes
 // (typically via defer) to release the Monitor's timers.
 func NewMonitor(parent context.Context, idle, ceiling time.Duration) *Monitor {
-	m := &Monitor{idle: idle}
+	return NewMonitorWithClock(parent, idle, ceiling, nil)
+}
+
+// Clock is the time source a [Monitor] reads. The zero choice, nil, means the
+// real clock; tests inject their own to drive the idle window deterministically.
+type Clock interface {
+	// Now reports the current time.
+	Now() time.Time
+	// AfterFunc waits d on this clock, then calls f in its own goroutine, as
+	// [time.AfterFunc] does.
+	AfterFunc(d time.Duration, f func()) Timer
+}
+
+// Timer is the part of [time.Timer] a [Monitor] uses; a [*time.Timer]
+// satisfies it.
+type Timer interface {
+	Stop() bool
+	Reset(d time.Duration) bool
+}
+
+// realClock is the [Clock] over the [time] package.
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now() }
+
+func (realClock) AfterFunc(d time.Duration, f func()) Timer { return time.AfterFunc(d, f) }
+
+// NewMonitorWithClock is [NewMonitor] reading time from clk; a nil clk means
+// the real clock.
+func NewMonitorWithClock(parent context.Context, idle, ceiling time.Duration, clk Clock) *Monitor {
+	if clk == nil {
+		clk = realClock{}
+	}
+	m := &Monitor{clock: clk, idle: idle}
 	if idle <= 0 && ceiling <= 0 {
 		m.ctx = parent
 		return m
 	}
 	m.ctx, m.cancel = context.WithCancelCause(parent)
-	m.last.Store(time.Now().UnixNano())
+	m.last.Store(clk.Now().UnixNano())
 	if idle > 0 {
-		m.idleTimer = time.AfterFunc(idle, m.checkIdle)
+		m.idleTimer = clk.AfterFunc(idle, m.checkIdle)
 	}
 	if ceiling > 0 {
-		m.ceilTimer = time.AfterFunc(ceiling, func() { m.cancel(ErrCeiling) })
+		m.ceilTimer = clk.AfterFunc(ceiling, func() { m.cancel(ErrCeiling) })
 	}
 	return m
 }
@@ -255,7 +295,7 @@ func (m *Monitor) Stop() {
 // timer was armed re-arms it for the remainder; true silence cancels with
 // [ErrIdle].
 func (m *Monitor) checkIdle() {
-	since := time.Since(time.Unix(0, m.last.Load()))
+	since := m.clock.Now().Sub(time.Unix(0, m.last.Load()))
 	if since >= m.idle {
 		m.cancel(ErrIdle)
 		return
@@ -274,6 +314,6 @@ type activityWriter struct {
 }
 
 func (w *activityWriter) Write(p []byte) (int, error) {
-	w.m.last.Store(time.Now().UnixNano())
+	w.m.last.Store(w.m.clock.Now().UnixNano())
 	return w.inner.Write(p)
 }

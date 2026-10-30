@@ -42,7 +42,7 @@ func TestControllerLoopCancel(t *testing.T) {
 
 	var stdout, stderr lockedBuffer
 
-	controllerLoop(ctx, time.Hour, cfg, "test", "", nil, buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
+	controllerLoop(ctx, time.Hour, 0, cfg, "test", "", nil, buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
 
 	if got := reconcileCount.Load(); got != 1 {
 		t.Errorf("reconcile count = %d, want 1", got)
@@ -72,7 +72,7 @@ func TestControllerLoopTick(t *testing.T) {
 
 	var stdout, stderr lockedBuffer
 
-	controllerLoop(ctx, time.Millisecond, cfg, "test", "", nil, buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
+	controllerLoop(ctx, time.Millisecond, 0, cfg, "test", "", nil, buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
 
 	if got := reconcileCount.Load(); got != 2 {
 		t.Errorf("reconcile count = %d, want 2", got)
@@ -181,7 +181,7 @@ func TestControllerShutdown(t *testing.T) {
 	done := make(chan struct{})
 	var exitCode int
 	go func() {
-		exitCode = runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		exitCode = runController(dir, nil, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &stdout, &stderr)
 		close(done)
 	}()
 
@@ -234,7 +234,7 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, configDirty, nil, convergenceReqCh, newLegacyWake(pokeCh, controlDispatcherCh))
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
 	}
@@ -256,6 +256,11 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	}
 	if got, want := string(legacyPing), strconv.Itoa(os.Getpid()); got != want {
 		t.Fatalf("legacy ping response = %q, want numeric PID %q", got, want)
+	}
+	// The published mode crosses the real socket (V2-18): a legacy wake is
+	// read as a latched legacy.
+	if mode, known, err := queryControllerReconcilerMode(cityPath, time.Second); !known || mode != reconcilerLegacy || err != nil {
+		t.Fatalf("queryControllerReconcilerMode = %v, %v, %v; want legacy, known", mode, known, err)
 	}
 	identity := probeControllerIdentity(cityPath)
 	if identity.PID != os.Getpid() || identity.HostingMode != controllerHostingStandalone {
@@ -289,7 +294,7 @@ func TestHandleControllerConnIdentifiesSupervisorHosting(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, cityPath, controllerHostingSupervisor, func() {}, nil, nil, nil, nil, nil, nil)
+		handleControllerConn(server, cityPath, controllerHostingSupervisor, func() {}, nil, nil, nil, nil, nil)
 		close(done)
 	}()
 
@@ -434,6 +439,10 @@ func TestSendControllerCommandWithTimeoutsTimesOutOnRead(t *testing.T) {
 }
 
 // writeCityTOML is a test helper that writes a city.toml with the given agents.
+// testConfigDebounce is the short config-watch coalesce window tests inject
+// so a config write is noticed promptly.
+const testConfigDebounce = 5 * time.Millisecond
+
 func writeCityTOML(t *testing.T, dir string, cityName string, agentNames ...string) string {
 	t.Helper()
 	clearInheritedBeadsEnv(t)
@@ -473,10 +482,6 @@ func writeControllerNamedSessionCityTOML(t *testing.T, dir, cityName, mode, idle
 }
 
 func TestControllerReloadsConfig(t *testing.T) {
-	old := debounceDelay
-	debounceDelay = 5 * time.Millisecond
-	t.Cleanup(func() { debounceDelay = old })
-
 	dir := shortSocketTempDir(t, "gc-reload-")
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
@@ -514,7 +519,7 @@ func TestControllerReloadsConfig(t *testing.T) {
 
 	loopDone := make(chan struct{})
 	go func() {
-		controllerLoop(ctx, 20*time.Millisecond, cfg, "test", tomlPath, nil,
+		controllerLoop(ctx, 20*time.Millisecond, testConfigDebounce, cfg, "test", tomlPath, nil,
 			buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
 		close(loopDone)
 	}()
@@ -565,10 +570,6 @@ func TestControllerReloadsConfig(t *testing.T) {
 }
 
 func TestControllerReloadsConfigImmediatelyOnWatchEvent(t *testing.T) {
-	old := debounceDelay
-	debounceDelay = 5 * time.Millisecond
-	t.Cleanup(func() { debounceDelay = old })
-
 	dir := shortSocketTempDir(t, "gc-reload-poke-")
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
@@ -605,7 +606,7 @@ func TestControllerReloadsConfigImmediatelyOnWatchEvent(t *testing.T) {
 
 	loopDone := make(chan struct{})
 	go func() {
-		controllerLoop(ctx, 30*time.Second, cfg, "test", tomlPath, nil,
+		controllerLoop(ctx, 30*time.Second, testConfigDebounce, cfg, "test", tomlPath, nil,
 			buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
 		close(loopDone)
 	}()
@@ -745,10 +746,6 @@ func TestControllerReloadsConventionDiscoveredAgentOnWatchEvent(t *testing.T) {
 // than a full controllerLoop to keep the test fast and free of
 // bead-store dependencies.
 func TestWatchConfigDirs_DetectsFileChangeAndSetsDirty(t *testing.T) {
-	old := debounceDelay
-	debounceDelay = 5 * time.Millisecond
-	t.Cleanup(func() { debounceDelay = old })
-
 	dir := t.TempDir()
 	tomlPath := filepath.Join(dir, "city.toml")
 	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
@@ -758,7 +755,7 @@ func TestWatchConfigDirs_DetectsFileChangeAndSetsDirty(t *testing.T) {
 	var dirty atomic.Bool
 	pokeCh := make(chan struct{}, 1)
 	var stderr bytes.Buffer
-	cleanup := watchConfigTargets([]config.WatchTarget{{Path: dir, DiscoverConventions: true}}, &dirty, pokeCh, &stderr)
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: dir, DiscoverConventions: true}}, testConfigDebounce, &dirty, newLegacyWake(pokeCh, nil), &stderr)
 	defer cleanup()
 
 	// Rewrite city.toml — fsnotify watches the dir, so the write fires
@@ -814,10 +811,6 @@ func TestWatchConfigDirs_DetectsFileChangeAndSetsDirty(t *testing.T) {
 }
 
 func TestWatchConfigDirs_FileSeedStillWatchesFile(t *testing.T) {
-	old := debounceDelay
-	debounceDelay = 5 * time.Millisecond
-	t.Cleanup(func() { debounceDelay = old })
-
 	dir := t.TempDir()
 	tomlPath := filepath.Join(dir, "city.toml")
 	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
@@ -827,7 +820,7 @@ func TestWatchConfigDirs_FileSeedStillWatchesFile(t *testing.T) {
 	var dirty atomic.Bool
 	pokeCh := make(chan struct{}, 1)
 	var stderr bytes.Buffer
-	cleanup := watchConfigTargets([]config.WatchTarget{{Path: tomlPath}}, &dirty, pokeCh, &stderr)
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: tomlPath}}, testConfigDebounce, &dirty, newLegacyWake(pokeCh, nil), &stderr)
 	defer cleanup()
 
 	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test-v2\"\n"), 0o644); err != nil {
@@ -841,10 +834,6 @@ func TestWatchConfigDirs_FileSeedStillWatchesFile(t *testing.T) {
 }
 
 func TestWatchConfigDirs_CityRootDoesNotWatchUnrelatedNestedSubdir(t *testing.T) {
-	old := debounceDelay
-	debounceDelay = 5 * time.Millisecond
-	t.Cleanup(func() { debounceDelay = old })
-
 	dir := t.TempDir()
 	nestedDir := filepath.Join(dir, "rigs", "checkout")
 	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
@@ -858,7 +847,7 @@ func TestWatchConfigDirs_CityRootDoesNotWatchUnrelatedNestedSubdir(t *testing.T)
 	var dirty atomic.Bool
 	pokeCh := make(chan struct{}, 1)
 	var stderr bytes.Buffer
-	cleanup := watchConfigTargets([]config.WatchTarget{{Path: dir, DiscoverConventions: true}}, &dirty, pokeCh, &stderr)
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: dir, DiscoverConventions: true}}, testConfigDebounce, &dirty, newLegacyWake(pokeCh, nil), &stderr)
 	defer cleanup()
 
 	select {
@@ -883,10 +872,6 @@ func TestWatchConfigDirs_CityRootDoesNotWatchUnrelatedNestedSubdir(t *testing.T)
 }
 
 func TestWatchConfigDirs_CityRootIgnoresRuntimeTraceWrites(t *testing.T) {
-	old := debounceDelay
-	debounceDelay = 5 * time.Millisecond
-	t.Cleanup(func() { debounceDelay = old })
-
 	dir := t.TempDir()
 	traceDir := citylayout.RuntimeDataDir(dir)
 	if err := os.MkdirAll(traceDir, 0o755); err != nil {
@@ -908,7 +893,7 @@ func TestWatchConfigDirs_CityRootIgnoresRuntimeTraceWrites(t *testing.T) {
 	var dirty atomic.Bool
 	pokeCh := make(chan struct{}, 1)
 	var stderr bytes.Buffer
-	cleanup := watchConfigTargets([]config.WatchTarget{{Path: dir, DiscoverConventions: true}}, &dirty, pokeCh, &stderr)
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: dir, DiscoverConventions: true}}, testConfigDebounce, &dirty, newLegacyWake(pokeCh, nil), &stderr)
 	defer cleanup()
 
 	select {
@@ -944,10 +929,6 @@ func TestWatchConfigDirs_CityRootIgnoresRuntimeTraceWrites(t *testing.T) {
 }
 
 func TestWatchConfigDirs_SymlinkSeedDirWatchesNestedPreExistingDir(t *testing.T) {
-	old := debounceDelay
-	debounceDelay = 5 * time.Millisecond
-	t.Cleanup(func() { debounceDelay = old })
-
 	dir := t.TempDir()
 	targetDir := filepath.Join(dir, "agents-target")
 	nestedAgentDir := filepath.Join(targetDir, "sample-agent")
@@ -967,7 +948,7 @@ func TestWatchConfigDirs_SymlinkSeedDirWatchesNestedPreExistingDir(t *testing.T)
 	var dirty atomic.Bool
 	pokeCh := make(chan struct{}, 1)
 	var stderr bytes.Buffer
-	cleanup := watchConfigTargets([]config.WatchTarget{{Path: linkDir, Recursive: true}}, &dirty, pokeCh, &stderr)
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: linkDir, Recursive: true}}, testConfigDebounce, &dirty, newLegacyWake(pokeCh, nil), &stderr)
 	defer cleanup()
 
 	if err := os.WriteFile(promptPath, []byte("edited\n"), 0o644); err != nil {
@@ -981,10 +962,6 @@ func TestWatchConfigDirs_SymlinkSeedDirWatchesNestedPreExistingDir(t *testing.T)
 }
 
 func TestWatchConfigDirs_RecreatedRecursiveSubdirStillWatched(t *testing.T) {
-	old := debounceDelay
-	debounceDelay = 5 * time.Millisecond
-	t.Cleanup(func() { debounceDelay = old })
-
 	dir := t.TempDir()
 	agentsDir := filepath.Join(dir, "agents")
 	agentDir := filepath.Join(agentsDir, "sample-agent")
@@ -999,7 +976,7 @@ func TestWatchConfigDirs_RecreatedRecursiveSubdirStillWatched(t *testing.T) {
 	var dirty atomic.Bool
 	pokeCh := make(chan struct{}, 1)
 	var stderr bytes.Buffer
-	cleanup := watchConfigTargets([]config.WatchTarget{{Path: agentsDir, Recursive: true}}, &dirty, pokeCh, &stderr)
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: agentsDir, Recursive: true}}, testConfigDebounce, &dirty, newLegacyWake(pokeCh, nil), &stderr)
 	defer cleanup()
 
 	if err := os.RemoveAll(agentDir); err != nil {
@@ -1041,10 +1018,6 @@ func TestWatchConfigDirs_RecreatedRecursiveSubdirStillWatched(t *testing.T) {
 // to those nested files used to fire no event, silently breaking hot
 // reload. This test proves nested edits to pre-existing subtrees now fire.
 func TestWatchConfigDirs_Regression780_DetectsEditInPreExistingNestedSubdir(t *testing.T) {
-	old := debounceDelay
-	debounceDelay = 5 * time.Millisecond
-	t.Cleanup(func() { debounceDelay = old })
-
 	dir := t.TempDir()
 	// Pre-existing nested layout (mirrors pack v2 convention discovery):
 	// agents/<name>/prompt.template.md and agents/<name>/overlay/settings.json.
@@ -1068,7 +1041,7 @@ func TestWatchConfigDirs_Regression780_DetectsEditInPreExistingNestedSubdir(t *t
 	cleanup := watchConfigTargets([]config.WatchTarget{
 		{Path: dir, DiscoverConventions: true},
 		{Path: agentsDir, Recursive: true},
-	}, &dirty, pokeCh, &stderr)
+	}, testConfigDebounce, &dirty, newLegacyWake(pokeCh, nil), &stderr)
 	defer cleanup()
 
 	// Drain any startup poke.
@@ -1103,10 +1076,6 @@ func TestWatchConfigDirs_Regression780_DetectsEditInPreExistingNestedSubdir(t *t
 }
 
 func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
-	old := debounceDelay
-	debounceDelay = 5 * time.Millisecond
-	t.Cleanup(func() { debounceDelay = old })
-
 	dir := t.TempDir()
 	tomlPath := writeControllerNamedSessionCityTOML(t, dir, "test", "always", "")
 
@@ -1155,7 +1124,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 			namedSessionMetadataKey:      "true",
 			namedSessionIdentityMetadata: "mayor",
 			namedSessionModeMetadata:     "always",
-			"config_hash":                runtime.CoreFingerprint(seedCfg),
+			"test_config_hash":           runtime.CoreFingerprint(seedCfg),
 			"live_hash":                  runtime.LiveFingerprint(seedCfg),
 			"generation":                 "1",
 			"continuation_epoch":         "1",
@@ -1186,7 +1155,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		controllerLoop(ctx, 20*time.Millisecond, cfg, "test", tomlPath, config.WatchTargets(prov, cfg, dir),
+		controllerLoop(ctx, 20*time.Millisecond, testConfigDebounce, cfg, "test", tomlPath, config.WatchTargets(prov, cfg, dir),
 			buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
 		close(done)
 	}()
@@ -1281,7 +1250,7 @@ func TestHandleControllerConnControlDispatcher(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, cityPath, controllerHostingStandalone, func() {}, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+		handleControllerConn(server, cityPath, controllerHostingStandalone, func() {}, nil, nil, nil, convergenceReqCh, newLegacyWake(pokeCh, controlDispatcherCh))
 		close(done)
 	}()
 
@@ -1776,10 +1745,6 @@ func readSessionCircuitResetSocketReply(t *testing.T, conn net.Conn) sessionCirc
 
 func TestControllerReloadInvalidConfig(t *testing.T) {
 	skipSlowCmdGCTest(t, "starts real Dolt lifecycle")
-	old := debounceDelay
-	debounceDelay = 5 * time.Millisecond
-	t.Cleanup(func() { debounceDelay = old })
-
 	dir := shortSocketTempDir(t, "gc-reload-invalid-")
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 	disableManagedDoltRecoveryForTest(t)
@@ -1811,7 +1776,7 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		controllerLoop(ctx, 20*time.Millisecond, cfg, "test", tomlPath, nil,
+		controllerLoop(ctx, 20*time.Millisecond, testConfigDebounce, cfg, "test", tomlPath, nil,
 			buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
 		close(done)
 	}()
@@ -1842,10 +1807,6 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 
 func TestControllerReloadCityNameChange(t *testing.T) {
 	skipSlowCmdGCTest(t, "starts real Dolt lifecycle")
-	old := debounceDelay
-	debounceDelay = 5 * time.Millisecond
-	t.Cleanup(func() { debounceDelay = old })
-
 	dir := shortSocketTempDir(t, "gc-rename-")
 	cleanupManagedDoltTestCity(t, dir)
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
@@ -1874,7 +1835,7 @@ func TestControllerReloadCityNameChange(t *testing.T) {
 	defer cancel()
 	var stdout, stderr lockedBuffer
 
-	go controllerLoop(ctx, 20*time.Millisecond, cfg, "test", tomlPath, nil,
+	go controllerLoop(ctx, 20*time.Millisecond, testConfigDebounce, cfg, "test", tomlPath, nil,
 		buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
 
 	// Wait for initial reconcile.
@@ -1927,10 +1888,6 @@ func TestConfigReloadSummary(t *testing.T) {
 }
 
 func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
-	old := debounceDelay
-	debounceDelay = 10 * time.Second
-	t.Cleanup(func() { debounceDelay = old })
-
 	dir := shortSocketTempDir(t, "gc-reload-cmd-")
 	gcDir := filepath.Join(dir, ".gc")
 	if err := os.MkdirAll(gcDir, 0o755); err != nil {
@@ -1964,7 +1921,7 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 	var stdout, stderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		runController(dir, nil, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, 10*time.Second, events.Discard, nil, &stdout, &stderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -2034,7 +1991,10 @@ func containsAgentNames(got []string, want ...string) bool {
 	return true
 }
 
+// TestControllerPokeTriggersImmediate also pins that runController wires
+// the API controllerState's wake signals (see wireControllerWakeSignals).
 func TestControllerPokeTriggersImmediate(t *testing.T) {
+	wired := captureWiredControllerStates(t)
 	sp := runtime.NewFake()
 
 	var reconcileCount atomic.Int32
@@ -2062,7 +2022,7 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		runController(dir, nil, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &stdout, &stderr)
 		close(done)
 	}()
 
@@ -2085,6 +2045,10 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
+
+	// The socket comes up before the controller state is built.
+	awaitCond(t, func() bool { return len(wired()) > 0 }, "controller state wiring")
+	assertWakeSignalsWired(t, wired())
 
 	// Record count, then poke.
 	before := reconcileCount.Load()
@@ -2179,3 +2143,146 @@ func TestTryReloadConfig_IncludesBuiltinPackOrders(t *testing.T) {
 }
 
 func (osFS) Chmod(name string, mode os.FileMode) error { return os.Chmod(name, mode) }
+
+// TestRunControllerLatchesSessionReconciler pins the latch at the standalone
+// controller entry point. Without the developer override, v2 returns 1
+// synchronously, before the controller touches its socket path:
+// startControllerSocket removes whatever sits at that path, so a sentinel
+// there survives only if no socket opened. With the override (mctl), the
+// controller runs v2 and its runtime and API state share the wiring's routed
+// wake; over a store that fences, v2 boots its planner, and over the file
+// store, C0.7 refuses the boot after the wiring. All cases go through the one
+// runController call below.
+func TestRunControllerLatchesSessionReconciler(t *testing.T) {
+	type started struct {
+		dir            string
+		done           chan struct{}
+		code           *int
+		rec            *events.Fake
+		stdout, stderr *lockedBuffer
+	}
+	start := func(t *testing.T, prefix string, mutate func(*config.City), beforeRun func(dir string)) started {
+		t.Helper()
+		dir := shortSocketTempDir(t, prefix)
+		if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		tomlPath := writeCityTOML(t, dir, "test", "mayor")
+		if beforeRun != nil {
+			beforeRun(dir)
+		}
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test"},
+			Beads:     config.BeadsConfig{Provider: "file"},
+			Daemon:    config.DaemonConfig{ShutdownTimeout: "0s", SessionReconciler: "v2"},
+		}
+		if mutate != nil {
+			mutate(cfg)
+		}
+		buildFn := func(*config.City, runtime.Provider, beads.Store) DesiredStateResult { return DesiredStateResult{} }
+		s := started{dir: dir, done: make(chan struct{}), code: new(int), rec: events.NewFake(), stdout: &lockedBuffer{}, stderr: &lockedBuffer{}}
+		go func() {
+			*s.code = runController(dir, nil, tomlPath, cfg, "", buildFn, nil, runtime.NewFake(), nil, nil, nil, nil, 0, s.rec, nil, s.stdout, s.stderr)
+			close(s.done)
+		}()
+		return s
+	}
+
+	t.Run("refused", func(t *testing.T) {
+		var sockPath string
+		deferred := func(c *config.City) { c.ChatSessions.IdleTimeout = "30m" }
+		s := start(t, "gc-latch-", deferred, func(dir string) { // a feature v2 defers: the latch refuses
+			sockPath = controllerSocketPath(dir)
+			if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(sockPath, []byte("sentinel"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		})
+		select {
+		case <-s.done:
+		case <-time.After(hangBudget):
+			tryStopController(s.dir, &bytes.Buffer{})
+			awaitClose(t, s.done, "runController exit after stop")
+			t.Fatalf("runController with session_reconciler = v2 ran a controller; want a synchronous refusal\nstderr: %s", s.stderr.String())
+		}
+		if *s.code != 1 {
+			t.Fatalf("runController exit = %d, want 1\nstderr: %s", *s.code, s.stderr.String())
+		}
+		if !strings.Contains(s.stderr.String(), "is refused") {
+			t.Errorf("stderr = %q, want the v2 latch refusal", s.stderr.String())
+		}
+		if data, err := os.ReadFile(sockPath); err != nil || string(data) != "sentinel" {
+			t.Errorf("controller socket path was touched before the refusal (sentinel read = %q, %v)", data, err)
+		}
+		if len(s.rec.Events) != 0 {
+			t.Errorf("refused controller recorded events %+v, want none", s.rec.Events)
+		}
+	})
+
+	// awaitWired waits for the controller state's wiring, or for
+	// runController's exit. setControllerState runs before cr.run, the only
+	// path to the boot, so a wired runtime is wired whether or not it exited
+	// since.
+	awaitWired := func(t *testing.T, s started, wired func() []*CityRuntime) {
+		t.Helper()
+		awaitCond(t, func() bool {
+			select {
+			case <-s.done:
+				return true
+			default:
+				return len(wired()) > 0
+			}
+		}, "controller state wiring")
+		if len(wired()) == 0 {
+			t.Fatalf("runController exited %d before wiring its controller state:\n%s", *s.code, s.stderr.String())
+		}
+		assertV2WakeWired(t, wired())
+	}
+
+	t.Run("admitted", func(t *testing.T) {
+		admitV2(t)
+		// A store that fences (C0.7), opened for every scope.
+		store := fencingAtomicCloseStore(t)
+		restore := openStoreFactoryForCity
+		openStoreFactoryForCity = func(context.Context, beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+			return beads.StoreOpenResult{Store: store}, nil
+		}
+		t.Cleanup(func() { openStoreFactoryForCity = restore })
+		wired := captureWiredControllerStates(t)
+		s := start(t, "gc-latch-v2-", nil, nil)
+		t.Cleanup(func() {
+			tryStopController(s.dir, &bytes.Buffer{})
+			awaitClose(t, s.done, "controller to exit after stop")
+		})
+		awaitWired(t, s, wired)
+		select {
+		case <-wired()[0].v2.ready:
+		case <-s.done:
+			t.Fatalf("runController exited %d before its v2 planner booted:\n%s", *s.code, s.stderr.String())
+		case <-time.After(hangBudget):
+			t.Fatalf("v2 planner did not boot within the hang budget (%s):\n%s", hangBudget, s.stderr.String())
+		}
+	})
+
+	t.Run("capability refused", func(t *testing.T) {
+		admitV2(t)
+		wired := captureWiredControllerStates(t)
+		// The file store fences only with conditional writes on, and they
+		// default to auto (mc-dpo2b), so the refusal needs them off.
+		cwOff := func(c *config.City) { c.Beads.ConditionalWrites = "off" }
+		s := start(t, "gc-latch-c07-", cwOff, nil)
+		awaitWired(t, s, wired)
+		select {
+		case <-s.done:
+		case <-time.After(hangBudget):
+			tryStopController(s.dir, &bytes.Buffer{})
+			awaitClose(t, s.done, "runController exit after stop")
+			t.Fatalf("v2 over the file store ran a controller; want the C0.7 boot refusal\nstderr: %s", s.stderr.String())
+		}
+		if !strings.Contains(s.stderr.String(), "v2 refuses to boot without conditional writes (C0.7)") {
+			t.Errorf("stderr = %q, want the C0.7 boot refusal", s.stderr.String())
+		}
+	})
+}

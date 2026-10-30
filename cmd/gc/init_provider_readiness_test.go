@@ -108,20 +108,39 @@ func sortedPlatformFindingNames(actual map[string]missingDep) []string {
 	return names
 }
 
-// stubInitRemoteImports makes finalizeInit's remote-import install hermetic.
+// configureInitRemoteImportsForTests makes finalizeInit's remote-import
+// install a no-op for every test in this package. TestMain calls it, so a
+// test that runs a real init stays hermetic without opting in.
 //
-// A full init clones gascity-packs over the network: the nested bundled source
-// gascity/roles is not recognized as bundled, so it misses the synthetic cache
-// and takes the real clone path (ga-73eoo). That single clone is most of the
-// runtime of every test that runs a real init, and packman performs it while
-// holding the machine-wide repo-cache write lock — so one wedged remote stalls
-// the whole suite and the pre-push hook with it (ga-r0epd).
+// The default template's imports are all served from the binary's embedded
+// packs since ga-73eoo (gascity/roles is a bundled subpack of the gascity
+// pack; TestInstallInitRemoteImportsGascityTemplateNeedsNoNetwork pins that),
+// so a real install no longer clones. The no-op still keeps tests whose
+// subject is not the install from materializing the synthetic caches, and
+// from taking the machine-wide repo-cache write lock (ga-r0epd).
 //
-// Use this only in tests whose subject is something other than import
-// installation. Tests that assert on the install itself must stub
+// Tests whose subject is import installation must opt back in with
+// useRealInitRemoteImports, against a local file:// remote, or stub
 // ensureInitRemoteImportsInstalled directly with the behavior they mean to
-// exercise, the way TestFinalizeInitReportsRemoteImportInstallFailure does;
-// routing those through this helper would assert against a no-op.
+// exercise, the way TestFinalizeInitReportsRemoteImportInstallFailure does.
+func configureInitRemoteImportsForTests() {
+	ensureInitRemoteImportsInstalled = func(string) error { return nil }
+}
+
+// useRealInitRemoteImports opts a test back in to the production
+// remote-import installer for the rest of the test. Only use it with remotes
+// the test owns (file:// fixtures); a github.com source would clone over the
+// network.
+func useRealInitRemoteImports(t *testing.T) {
+	t.Helper()
+	prev := ensureInitRemoteImportsInstalled
+	t.Cleanup(func() { ensureInitRemoteImportsInstalled = prev })
+	ensureInitRemoteImportsInstalled = installInitRemoteImports
+}
+
+// stubInitRemoteImports makes finalizeInit's remote-import install a no-op for
+// the rest of the test. configureInitRemoteImportsForTests already does this
+// package-wide; the explicit call remains valid and documents intent.
 func stubInitRemoteImports(t *testing.T) {
 	t.Helper()
 	prev := ensureInitRemoteImportsInstalled
@@ -154,7 +173,7 @@ func stubInitDependencyChecks(t *testing.T) {
 func stubInitDoltAuthorIdentity(t *testing.T, values map[string]string) {
 	t.Helper()
 	old := initRunDoltConfigGet
-	initRunDoltConfigGet = func(key string) (string, error) {
+	initRunDoltConfigGet = func(_ context.Context, key string) (string, error) {
 		value := strings.TrimSpace(values[key])
 		if value == "" {
 			return "", errDoltConfigKeyMissing
@@ -431,6 +450,8 @@ func TestFinalizeInitChecksRemoteImportProvidersAfterInstall(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	disableBootstrapForTests(t)
 	stubInitDependencyChecks(t)
+	// The subject is the real install of a local file:// import.
+	useRealInitRemoteImports(t)
 
 	remote := initImportBarePackRepo(t, "remote-pack", "", strings.Join([]string{
 		"[pack]",
@@ -516,6 +537,7 @@ func TestFinalizeInitDoesNotWriteImplicitImportState(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	stubInitRemoteImports(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
@@ -805,13 +827,15 @@ func TestCheckHardDependenciesRequiresBd13ForPendingProviderScope(t *testing.T) 
 	}
 }
 
+// A ready city and a pending provider-owned rig share the 1.3.0 floor, so
+// bd 1.2.2 is refused either way, and the refusal names 1.3.0.
 func TestCheckHardDependenciesRequiresBd13ForPendingProviderRig(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
 		pendingRig     bool
 		wantFreshFloor bool
 	}{
-		{name: "ready city retains compatibility floor", wantFreshFloor: false},
+		{name: "ready city is refused at the 1.3.0 init floor", wantFreshFloor: true},
 		{name: "ready city with pending rig requires provider floor", pendingRig: true, wantFreshFloor: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1095,6 +1119,7 @@ func TestCmdInitSkipProviderReadinessAllowsBuiltinWithoutProbe(t *testing.T) {
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
 	disableBootstrapForTests(t)
+	stubInitRemoteImports(t)
 
 	if api.SupportsProviderReadiness("omp") {
 		t.Fatal("test assumption broken: \"omp\" now has a readiness probe, pick a different probe-less builtin")
@@ -1140,6 +1165,7 @@ func TestCmdInitNoStartSkipsSupervisorRegistration(t *testing.T) {
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
 	disableBootstrapForTests(t)
+	stubInitRemoteImports(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	calledRegister := false
@@ -1191,8 +1217,7 @@ func TestShellQuotePathForOSWindows(t *testing.T) {
 
 func TestInitRunVersionTimesOutHungVersionCommand(t *testing.T) {
 	oldCommandContext := initRunVersionCommandContext
-	oldTimeout := initRunVersionTimeout
-	initRunVersionTimeout = 50 * time.Millisecond
+	stubInitProbeBudgets(t, []time.Duration{50 * time.Millisecond, 50 * time.Millisecond})
 	initRunVersionCommandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestHelperProcessInitRunVersionHang", "--")
 		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
@@ -1200,7 +1225,6 @@ func TestInitRunVersionTimesOutHungVersionCommand(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		initRunVersionCommandContext = oldCommandContext
-		initRunVersionTimeout = oldTimeout
 	})
 
 	start := time.Now()
@@ -1211,8 +1235,192 @@ func TestInitRunVersionTimesOutHungVersionCommand(t *testing.T) {
 	if line != "" {
 		t.Fatalf("initRunVersion line = %q, want empty on timeout", line)
 	}
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+	if !errors.Is(err, errInitProbeTimedOut) {
+		t.Fatalf("initRunVersion error = %v, want errInitProbeTimedOut", err)
+	}
+	if !strings.Contains(err.Error(), "hung-binary version probe timed out after") {
+		t.Fatalf("initRunVersion error = %q, want probe name and attempt count", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("initRunVersion elapsed = %v, want timeout-bound execution", elapsed)
+	}
+}
+
+func stubInitProbeBudgets(t *testing.T, budgets []time.Duration) {
+	t.Helper()
+	oldBudgets := initProbeAttemptTimeouts
+	oldBackoff := initProbeRetryBackoff
+	initProbeAttemptTimeouts = budgets
+	initProbeRetryBackoff = 0
+	oldNotice := initProbeNotice
+	initProbeNotice = io.Discard
+	t.Cleanup(func() {
+		initProbeAttemptTimeouts = oldBudgets
+		initProbeRetryBackoff = oldBackoff
+		initProbeNotice = oldNotice
+	})
+}
+
+func TestRunInitProbeWithRetryPrintsNoticeOnEachSlowRetry(t *testing.T) {
+	stubInitProbeBudgets(t, []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, time.Second})
+	var notices bytes.Buffer
+	initProbeNotice = &notices
+
+	attempts := 0
+	err := runInitProbeWithRetry(context.Background(), "dolt identity", func(ctx context.Context) error {
+		attempts++
+		if attempts < 3 {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("runInitProbeWithRetry error = %v", err)
+	}
+	want := "dolt identity probe slow, retrying (attempt 2, 20ms)\n" +
+		"dolt identity probe slow, retrying (attempt 3, 1s)\n"
+	if notices.String() != want {
+		t.Fatalf("notices = %q, want %q", notices.String(), want)
+	}
+}
+
+func TestRunInitProbeWithRetryStopsAtParentDeadline(t *testing.T) {
+	stubInitProbeBudgets(t, []time.Duration{time.Hour, time.Hour, time.Hour})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	attempts := 0
+	err := runInitProbeWithRetry(ctx, "dolt identity", func(ctx context.Context) error {
+		attempts++
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	if !errors.Is(err, errInitProbeTimedOut) {
+		t.Fatalf("error = %v, want errInitProbeTimedOut", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (the overall deadline ends the probe)", attempts)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("elapsed = %v, want bounded by the parent deadline", elapsed)
+	}
+}
+
+// A hung dolt must not stall the identity preflight beyond the shared cap:
+// both keys together stay within initDoltIdentityProbeTotal.
+func TestCheckDoltAuthorIdentityCapsTotalProbeTime(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	stubInitDependencyChecks(t)
+	stubInitProbeBudgets(t, []time.Duration{time.Hour})
+	oldTotal := initDoltIdentityProbeTotal
+	initDoltIdentityProbeTotal = 150 * time.Millisecond
+	t.Cleanup(func() { initDoltIdentityProbeTotal = oldTotal })
+
+	old := initRunDoltConfigGet
+	initRunDoltConfigGet = func(ctx context.Context, _ string) (string, error) {
+		return "", runInitProbeWithRetry(ctx, "dolt identity", func(ctx context.Context) error {
+			<-ctx.Done()
+			return ctx.Err()
+		})
+	}
+	t.Cleanup(func() { initRunDoltConfigGet = old })
+
+	start := time.Now()
+	status := checkDoltAuthorIdentity(t.TempDir())
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("identity preflight took %v, want it capped near %v", elapsed, initDoltIdentityProbeTotal)
+	}
+	if len(status.probeErrors) != 2 {
+		t.Fatalf("probe errors = %#v, want both keys reported as timed out", status.probeErrors)
+	}
+}
+
+func TestRunInitProbeWithRetryRetriesOnlyTimedOutAttempts(t *testing.T) {
+	stubInitProbeBudgets(t, []time.Duration{20 * time.Millisecond, 20 * time.Millisecond, time.Second})
+
+	attempts := 0
+	err := runInitProbeWithRetry(context.Background(), "slow probe", func(ctx context.Context) error {
+		attempts++
+		if attempts < 3 {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("runInitProbeWithRetry error = %v, want success on third attempt", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts = %d, want 3", attempts)
+	}
+}
+
+func TestRunInitProbeWithRetryDoesNotRetryRealFailures(t *testing.T) {
+	stubInitProbeBudgets(t, []time.Duration{time.Second, time.Second})
+
+	attempts := 0
+	realErr := errors.New("exit status 2")
+	err := runInitProbeWithRetry(context.Background(), "broken probe", func(context.Context) error {
+		attempts++
+		return realErr
+	})
+	if !errors.Is(err, realErr) {
+		t.Fatalf("runInitProbeWithRetry error = %v, want the attempt's own error", err)
+	}
+	if errors.Is(err, errInitProbeTimedOut) {
+		t.Fatalf("runInitProbeWithRetry error = %v, must not be reported as a timeout", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (real failures are not retried)", attempts)
+	}
+}
+
+func TestInitRunDoltConfigGetRetriesSlowProbeOnLoadedHost(t *testing.T) {
+	stubInitProbeBudgets(t, []time.Duration{300 * time.Millisecond, 10 * time.Second})
+	binDir := t.TempDir()
+	marker := filepath.Join(binDir, "first-call-done")
+	doltPath := filepath.Join(binDir, "dolt")
+	script := "#!/bin/sh\n" +
+		"if [ ! -e " + shellQuotePOSIXPath(marker) + " ]; then\n" +
+		"  : > " + shellQuotePOSIXPath(marker) + "\n" +
+		"  exec sleep 30\n" +
+		"fi\n" +
+		"echo 'Test User'\n"
+	if err := os.WriteFile(doltPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	value, err := initRunDoltConfigGet(context.Background(), "user.name")
+	if err != nil {
+		t.Fatalf("initRunDoltConfigGet error = %v, want success after retry", err)
+	}
+	if value != "Test User" {
+		t.Fatalf("value = %q, want %q", value, "Test User")
+	}
+}
+
+func TestInitRunDoltConfigGetReportsTimeoutAfterAllAttempts(t *testing.T) {
+	stubInitProbeBudgets(t, []time.Duration{100 * time.Millisecond, 100 * time.Millisecond})
+	binDir := t.TempDir()
+	doltPath := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(doltPath, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := initRunDoltConfigGet(context.Background(), "user.name")
+	if !errors.Is(err, errInitProbeTimedOut) {
+		t.Fatalf("initRunDoltConfigGet error = %v, want errInitProbeTimedOut", err)
+	}
+	if errors.Is(err, errDoltConfigKeyMissing) {
+		t.Fatalf("initRunDoltConfigGet error = %v, timeout must not read as missing key", err)
+	}
+	if !strings.Contains(err.Error(), "dolt identity probe timed out after") {
+		t.Fatalf("initRunDoltConfigGet error = %q, want attempt detail", err)
 	}
 }
 
@@ -1366,38 +1574,65 @@ func TestCheckHardDependenciesAcceptsPythonFallbackForBdContract(t *testing.T) {
 	}
 }
 
-func TestCheckHardDependenciesRejectsBdBelowExplicitIDSupport(t *testing.T) {
-	t.Setenv("GC_BEADS", "bd")
-
-	oldLookPath := initLookPath
-	initLookPath = func(name string) (string, error) {
-		return "/usr/bin/" + name, nil
+// TestCheckHardDependenciesEnforcesTheBd130Floor pins the minimum supported bd.
+// bd 1.3.0 is the first tested release with the conditional-release flags
+// (--if-assignee/--if-status, beads#5008) that ReleaseIfCurrent now requires;
+// bd 1.2.2 re-released the 1.1.2 code, so a 1.2.x version number does not
+// imply the flags. Every older line is refused with the found and needed
+// versions; 1.3.0 itself passes.
+func TestCheckHardDependenciesEnforcesTheBd130Floor(t *testing.T) {
+	if bdMinVersion != "1.3.0" {
+		t.Fatalf("bdMinVersion = %q, want 1.3.0", bdMinVersion)
 	}
-	t.Cleanup(func() { initLookPath = oldLookPath })
+	for _, tc := range []struct {
+		bd     string
+		refuse bool
+	}{
+		{bd: "1.0.3", refuse: true},
+		{bd: "1.0.4", refuse: true},
+		{bd: "1.1.2", refuse: true},
+		{bd: "1.2.2", refuse: true},
+		{bd: "1.3.0", refuse: false},
+		{bd: "1.3.1", refuse: false},
+	} {
+		t.Run(tc.bd, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "bd")
 
-	oldRunVersion := initRunVersion
-	initRunVersion = func(binary string) (string, error) {
-		switch binary {
-		case "bd":
-			return "bd version 1.0.3", nil
-		case "dolt":
-			return "dolt version " + doltMinVersion, nil
-		case "flock", "tmux", "jq", "git", "pgrep", "lsof":
-			return binary + " version", nil
-		default:
-			return binary + " version " + doltMinVersion, nil
-		}
-	}
-	t.Cleanup(func() { initRunVersion = oldRunVersion })
+			oldLookPath := initLookPath
+			initLookPath = func(name string) (string, error) {
+				return "/usr/bin/" + name, nil
+			}
+			t.Cleanup(func() { initLookPath = oldLookPath })
 
-	missing := assertPlatformFindings(t, checkHardDependencies(t.TempDir()), managedDoltLifecycleDep)
-	if len(missing) != 1 {
-		t.Fatalf("missing deps = %#v, want only bd version rejection", missing)
-	}
-	for _, want := range []string{"bd", "1.0.3", "1.0.4"} {
-		if !strings.Contains(missing[0].name, want) {
-			t.Fatalf("missing dep = %#v, want %q", missing[0], want)
-		}
+			oldRunVersion := initRunVersion
+			initRunVersion = func(binary string) (string, error) {
+				switch binary {
+				case "bd":
+					return "bd version " + tc.bd, nil
+				case "dolt":
+					return "dolt version " + doltMinVersion, nil
+				case "flock", "tmux", "jq", "git", "pgrep", "lsof":
+					return binary + " version", nil
+				default:
+					return binary + " version " + doltMinVersion, nil
+				}
+			}
+			t.Cleanup(func() { initRunVersion = oldRunVersion })
+
+			missing := assertPlatformFindings(t, checkHardDependencies(t.TempDir()), managedDoltLifecycleDep)
+			if !tc.refuse {
+				if len(missing) != 0 {
+					t.Fatalf("missing deps = %#v, want bd %s accepted", missing, tc.bd)
+				}
+				return
+			}
+			if len(missing) != 1 {
+				t.Fatalf("missing deps = %#v, want only the bd version rejection", missing)
+			}
+			if want := "bd (found v" + tc.bd + ", need v1.3.0+)"; missing[0].name != want {
+				t.Fatalf("missing dep = %q, want %q", missing[0].name, want)
+			}
+		})
 	}
 }
 
@@ -1755,7 +1990,7 @@ func TestDoStartForegroundReportsHardDependenciesBeforeDoltIdentity(t *testing.T
 	t.Cleanup(func() { initRunVersion = oldRunVersion })
 
 	oldDoltConfigGet := initRunDoltConfigGet
-	initRunDoltConfigGet = func(string) (string, error) {
+	initRunDoltConfigGet = func(context.Context, string) (string, error) {
 		t.Fatal("Dolt identity should not be probed before hard dependency failures are reported")
 		return "", nil
 	}
@@ -1790,7 +2025,7 @@ func TestCheckDoltAuthorIdentitySkipsWhenGCDoltSkip(t *testing.T) {
 	stubInitDependencyChecks(t)
 
 	old := initRunDoltConfigGet
-	initRunDoltConfigGet = func(string) (string, error) {
+	initRunDoltConfigGet = func(context.Context, string) (string, error) {
 		t.Fatal("Dolt identity should not be probed when GC_DOLT=skip")
 		return "", nil
 	}
@@ -1838,7 +2073,7 @@ func TestCheckDoltAuthorIdentitySkipsWhenDoltMissing(t *testing.T) {
 	t.Cleanup(func() { initLookPath = oldLookPath })
 
 	old := initRunDoltConfigGet
-	initRunDoltConfigGet = func(string) (string, error) {
+	initRunDoltConfigGet = func(context.Context, string) (string, error) {
 		t.Fatal("Dolt identity should not be probed when dolt is not on PATH")
 		return "", nil
 	}
@@ -1879,7 +2114,7 @@ dolt_port = "3307"
 	}
 
 	old := initRunDoltConfigGet
-	initRunDoltConfigGet = func(string) (string, error) {
+	initRunDoltConfigGet = func(context.Context, string) (string, error) {
 		t.Fatal("rig-only external Dolt should not require local identity")
 		return "", nil
 	}
@@ -1909,7 +2144,7 @@ port = 3307
 	}
 
 	old := initRunDoltConfigGet
-	initRunDoltConfigGet = func(string) (string, error) {
+	initRunDoltConfigGet = func(context.Context, string) (string, error) {
 		t.Fatal("city external Dolt should not require local identity")
 		return "", nil
 	}
@@ -1946,7 +2181,7 @@ dolt.auto-start: false
 	writeOpaqueBindingScopeFixture(t, cityDir)
 
 	old := initRunDoltConfigGet
-	initRunDoltConfigGet = func(string) (string, error) {
+	initRunDoltConfigGet = func(context.Context, string) (string, error) {
 		t.Fatal("a city gc does not serve must not require a local Dolt identity")
 		return "", nil
 	}
@@ -2001,7 +2236,7 @@ func TestCheckDoltAuthorIdentityReportsProbeErrorsSeparately(t *testing.T) {
 	stubInitDependencyChecks(t)
 
 	old := initRunDoltConfigGet
-	initRunDoltConfigGet = func(key string) (string, error) {
+	initRunDoltConfigGet = func(_ context.Context, key string) (string, error) {
 		if key == "user.name" {
 			return "", fmt.Errorf("dolt config probe timed out after 2s")
 		}
@@ -2041,7 +2276,7 @@ func TestInitRunDoltConfigGetReportsExitStderrAsProbeError(t *testing.T) {
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	value, err := initRunDoltConfigGet("user.name")
+	value, err := initRunDoltConfigGet(context.Background(), "user.name")
 	if value != "" {
 		t.Fatalf("value = %q, want empty", value)
 	}
@@ -2064,7 +2299,7 @@ func TestInitRunDoltConfigGetTreatsSilentEmptyExitAsMissingKey(t *testing.T) {
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	value, err := initRunDoltConfigGet("user.name")
+	value, err := initRunDoltConfigGet(context.Background(), "user.name")
 	if value != "" {
 		t.Fatalf("value = %q, want empty", value)
 	}
@@ -2272,4 +2507,53 @@ func TestCmdInitResumePreservesPreparedExternalSelector(t *testing.T) {
 			t.Fatalf("conflicting selector invoked provider: %v", err)
 		}
 	})
+}
+
+// TestInstallInitRemoteImportsGascityTemplateNeedsNoNetwork is the ga-73eoo
+// regression test. A real install of the default (gascity) template's remote
+// imports — core, the gascity pack and its gascity/roles default rig import —
+// is served entirely from the binary's embedded packs. git is replaced by a
+// stub that fails every invocation, so the clone gascity/roles used to take
+// fails this test instead of reaching github.com.
+func TestInstallInitRemoteImportsGascityTemplateNeedsNoNetwork(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
+	stubInitDependencyChecks(t)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	if code := doInit(fsys.OSFS{}, cityPath, defaultWizardConfig(), "", &initStdout, &initStderr, false); code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	binDir := t.TempDir()
+	stub := "#!/bin/sh\necho \"git $*: the default template must install without git\" >&2\nexit 97\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := installInitRemoteImports(cityPath); err != nil {
+		t.Fatalf("installInitRemoteImports: %v", err)
+	}
+	lock, err := packman.ReadLockfile(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("reading packs.lock: %v", err)
+	}
+	roles, ok := lock.Packs[config.PublicGascityRolesPackSource]
+	if !ok {
+		t.Fatalf("packs.lock = %v, want the gascity/roles default rig import", lock.Packs)
+	}
+	if want := strings.TrimPrefix(config.PublicGascityPackVersion, "sha:"); roles.Commit != want {
+		t.Fatalf("roles locked at %q, want the gascity pin %q", roles.Commit, want)
+	}
+	cachePath, err := packman.RepoCachePath(config.PublicGascityRolesPackSource, roles.Commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(cachePath, "gascity", "roles", "pack.toml")); err != nil {
+		t.Fatalf("roles pack not materialized from embedded content: %v", err)
+	}
 }

@@ -76,29 +76,23 @@ func TestMain(m *testing.M) {
 		panic("worker-inference: " + err.Error())
 	}
 
-	doltCfgDir := filepath.Join(gcHome, ".dolt")
-	if err := os.MkdirAll(doltCfgDir, 0o755); err != nil {
-		panic("worker-inference: " + err.Error())
-	}
-	doltCfg := `{"user.name":"gc-test","user.email":"gc-test@test.local"}`
-	if err := os.WriteFile(filepath.Join(doltCfgDir, "config_global.json"), []byte(doltCfg), 0o644); err != nil {
-		panic("worker-inference: " + err.Error())
-	}
-
+	// NewEnv seeds the dolt identity (metrics off) under gcHome/.dolt. The
+	// live providers authenticate through the operator's home.
 	liveEnv = helpers.NewEnv(gcBinary, gcHome, runtimeDir).
+		WithHostHome().
 		Without("GC_SESSION").
 		Without("GC_BEADS").
 		Without("GC_DOLT").
 		With("DOLT_ROOT_PATH", gcHome)
 	if bdPath := helpers.FindBD(); bdPath != "" {
+		// gc forks bd with the real HOME; the wrapper re-homes it under the
+		// Env's tool home so the operator's ~/.beads never reaches bd.
 		bdShimDir := filepath.Join(tmpDir, "bd-bin")
-		if err := os.MkdirAll(bdShimDir, 0o755); err != nil {
-			panic("worker-inference: creating bd shim dir: " + err.Error())
-		}
-		if err := os.Symlink(bdPath, filepath.Join(bdShimDir, "bd")); err != nil {
+		wrappedBD, err := helpers.InstallBeadsTooling(liveEnv, bdShimDir, bdPath, "")
+		if err != nil {
 			panic("worker-inference: staging bd shim: " + err.Error())
 		}
-		liveEnv.With("BD_BIN", bdPath)
+		liveEnv.With("BD_BIN", wrappedBD)
 		liveEnv.With("PATH", bdShimDir+string(os.PathListSeparator)+liveEnv.Get("PATH"))
 	}
 	liveSetup = prepareProviderSetup(gcHome, liveEnv)

@@ -27,11 +27,12 @@ class RunnerPolicyTests(unittest.TestCase):
         )
 
         self.assertTrue(use_blacksmith)
-        self.assertIn("allowlist", reason)
+        self.assertIn("every event", reason)
         self.assertEqual(runners["runner_32vcpu"], "blacksmith-32vcpu-ubuntu-2404")
-        self.assertEqual(runners["runner_macos"], "blacksmith-12vcpu-macos-15")
+        self.assertEqual(runners["runner_macos"], "blacksmith-6vcpu-macos-15")
+        self.assertEqual(runners["runner_windows"], "blacksmith-4vcpu-windows-2025")
 
-    def test_push_uses_github_even_for_allowlisted_author(self) -> None:
+    def test_push_uses_blacksmith(self) -> None:
         use_blacksmith, reason, runners = runner_policy.select_runners(
             "push",
             "julianknutsen",
@@ -39,9 +40,9 @@ class RunnerPolicyTests(unittest.TestCase):
             force_blacksmith=False,
         )
 
-        self.assertFalse(use_blacksmith)
-        self.assertIn("approved pull requests", reason)
-        self.assertEqual(runners["runner_32vcpu"], "ubuntu-latest")
+        self.assertTrue(use_blacksmith)
+        self.assertIn("every event", reason)
+        self.assertEqual(runners["runner_32vcpu"], "blacksmith-32vcpu-ubuntu-2404")
 
     def test_forced_workflow_call_uses_blacksmith(self) -> None:
         use_blacksmith, reason, runners = runner_policy.select_runners(
@@ -52,11 +53,12 @@ class RunnerPolicyTests(unittest.TestCase):
         )
 
         self.assertTrue(use_blacksmith)
-        self.assertIn("forced", reason)
+        self.assertIn("every event", reason)
         self.assertEqual(runners["runner_16vcpu"], "blacksmith-16vcpu-ubuntu-2404")
-        self.assertEqual(runners["runner_macos"], "blacksmith-12vcpu-macos-15")
+        self.assertEqual(runners["runner_macos"], "blacksmith-6vcpu-macos-15")
+        self.assertEqual(runners["runner_windows"], "blacksmith-4vcpu-windows-2025")
 
-    def test_unlisted_pull_request_author_uses_github(self) -> None:
+    def test_unlisted_pull_request_author_uses_blacksmith(self) -> None:
         use_blacksmith, reason, runners = runner_policy.select_runners(
             "pull_request",
             "external-contributor",
@@ -64,9 +66,10 @@ class RunnerPolicyTests(unittest.TestCase):
             force_blacksmith=False,
         )
 
-        self.assertFalse(use_blacksmith)
-        self.assertIn("not on the Blacksmith allowlist", reason)
-        self.assertEqual(runners["runner_macos"], "macos-15")
+        self.assertTrue(use_blacksmith)
+        self.assertIn("every event", reason)
+        self.assertEqual(runners["runner_macos"], "blacksmith-6vcpu-macos-15")
+        self.assertEqual(runners["runner_windows"], "blacksmith-4vcpu-windows-2025")
 
 
 if __name__ == "__main__":

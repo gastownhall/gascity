@@ -139,8 +139,10 @@ agent_prompt)
     printf '%s' '{"error":{"code":"agent_prompt_stalled","message":"no state change observed after submission"}}'
   elif [ -e "$STATE/prompt_stalled" ]; then
     # No state change inside herdr's fixed 5000ms window: the submit CR never
-    # reached the TUI and the text sits unsubmitted in an idle input box.
-    printf '%s' '{"error":{"code":"agent_prompt_stalled","message":"no state change observed after submission"}}'
+    # reached the TUI and the text sits unsubmitted in an idle input box. Real
+    # herdr reports a failed verb on stderr with a non-zero exit.
+    printf '%s' '{"error":{"code":"agent_prompt_stalled","message":"no state change observed after submission"}}' >&2
+    exit 1
   elif [ -e "$STATE/prompt_stalled_echo" ]; then
     # A swallowed CR whose typed text stays on screen in the input box.
     printf '%s\n' "$4" >> "$STATE/screen"
@@ -149,7 +151,8 @@ agent_prompt)
     # The state-change gate passed (the CR landed) but no --until state was
     # observed before --timeout. herdr only reports this when --timeout
     # exceeds its 5000ms window; a shorter one masks the stall as a timeout.
-    printf '%s' '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}'
+    printf '%s' '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}' >&2
+    exit 1
   elif [ -e "$STATE/prompt_blocked" ]; then
     # The first turn opened a confirmation dialog. herdr matches only the
     # requested --until states, so this settles iff the caller asked for

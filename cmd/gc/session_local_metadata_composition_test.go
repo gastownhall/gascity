@@ -23,7 +23,7 @@ import (
 // orphan or lose its lease. It is not and does not: the two APIs write to
 // disjoint storage, so the collision is a no-op for production behavior.
 func TestReconcileSessionBeads_SetLocalStringDoesNotAffectPendingCreateLease(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	session := env.createSessionBead("s-gc-local", "worker")
 	env.setSessionMetadata(&session, map[string]string{
@@ -76,11 +76,11 @@ func TestReconcileSessionBeads_SetLocalStringDoesNotAffectPendingCreateLease(t *
 // write surfaces through Get/Bead.Metadata, the local write does not, and is only
 // visible through GetLocalString.
 func TestReconcileSessionBeads_SetMarkerAndSetLocalStringCoexistOnSameSessionBead(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	session := env.createSessionBead("s-gc-coexist", "worker")
 
 	infoStore := sessionpkg.NewStore(beads.SessionStore{Store: env.store})
-	if err := infoStore.SetMarker(session.ID, "throttle_marker", "queued"); err != nil {
+	if err := infoStore.SetMarker(session.ID, "test_throttle_marker", "queued"); err != nil {
 		t.Fatalf("SetMarker: %v", err)
 	}
 	if err := env.store.SetLocalString(session.ID, "synced_at", "2026-07-14T00:00:00Z"); err != nil {
@@ -91,8 +91,8 @@ func TestReconcileSessionBeads_SetMarkerAndSetLocalStringCoexistOnSameSessionBea
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Metadata["throttle_marker"] != "queued" {
-		t.Fatalf("durable throttle_marker = %q, want SetMarker's durable write intact", got.Metadata["throttle_marker"])
+	if got.Metadata["test_throttle_marker"] != "queued" {
+		t.Fatalf("durable throttle_marker = %q, want SetMarker's durable write intact", got.Metadata["test_throttle_marker"])
 	}
 	if _, ok := got.Metadata["synced_at"]; ok {
 		t.Fatalf("durable Metadata leaked the clone-local synced_at key: %+v", got.Metadata)

@@ -459,7 +459,7 @@ func validPublishedManagedDoltDataDirState(cityPath string, state doltRuntimeSta
 	if !pidAlive(state.PID) || !doltPortReachable(strconv.Itoa(state.Port)) {
 		return false
 	}
-	holderPID := findPortHolderPID(strconv.Itoa(state.Port))
+	holderPID := findPortHolderPID(strconv.Itoa(state.Port), state.PID)
 	if holderPID > 0 {
 		return holderPID == state.PID
 	}
@@ -529,7 +529,7 @@ func validDoltRuntimeStateForLayout(state doltRuntimeState, layout managedDoltRu
 	if !pidAlive(state.PID) || !doltPortReachable(strconv.Itoa(state.Port)) {
 		return false
 	}
-	holderPID := findPortHolderPID(strconv.Itoa(state.Port))
+	holderPID := findPortHolderPID(strconv.Itoa(state.Port), state.PID)
 	if holderPID > 0 && holderPID != state.PID {
 		return false
 	}
@@ -590,8 +590,11 @@ func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City) []ord
 	}}
 	if cfg != nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
+		// A suspended rig is left untouched: a bd read restarts its retired
+		// proxy, and nothing dispatches orders into it while it is suspended.
+		suspended := buildEffectiveSuspendedRigNames(cfg, loadSuspensionStateBestEffort(cityPath))
 		for _, rig := range cfg.Rigs {
-			if strings.TrimSpace(rig.Path) == "" {
+			if strings.TrimSpace(rig.Path) == "" || suspended[rig.Name] {
 				continue
 			}
 			targets = append(targets, orderTrackingSweepTarget{
@@ -618,7 +621,7 @@ func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City) []ord
 // wispClosed: 0 on a split city and exits 0 — the silent no-op this pairing
 // exists to make un-writable.
 func orderTrackingSweepStoresForConfigTargets(cityPath string, cfg *config.City, requiredTargets map[string][]string) ([]beads.Store, beads.Store, error) {
-	targets := orderTrackingSweepTargetsForConfig(cityPath, cfg)
+	targets := withoutRelicFreeRigSweepTargets(cliStorageRoutes(cityPath), orderTrackingSweepTargetsForConfig(cityPath, cfg))
 	if len(requiredTargets) > 0 {
 		filtered := targets[:0]
 		for _, target := range targets {
@@ -633,6 +636,22 @@ func orderTrackingSweepStoresForConfigTargets(cityPath string, cfg *config.City,
 	})
 	stores = appendOrdersSweepStore(stores, relocatedOrdersClassStore(cityPath, cfg))
 	return stores, orderWispSweepStore(cityPath, cfg), err
+}
+
+// withoutRelicFreeRigSweepTargets drops the rig targets a tracking sweep no
+// longer needs to read: on a split city a rig order's tracking beads are born
+// in the orders binding, and a rig store holds only pre-split history until
+// the rig is imported or proven clean (the S4 relic-free predicate). A city
+// that relocates nothing keeps every target.
+func withoutRelicFreeRigSweepTargets(routes *storageRoutes, targets []orderTrackingSweepTarget) []orderTrackingSweepTarget {
+	out := targets[:0:0]
+	for _, target := range targets {
+		if target.target.ScopeKind == "rig" && splitRigGraphRelicFree(routes, target.target.RigName) {
+			continue
+		}
+		out = append(out, target)
+	}
+	return out
 }
 
 // orderWispSweepStore returns the store that owns this city's order wisp roots

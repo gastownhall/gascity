@@ -178,7 +178,7 @@ func TestMigrateProxiedScopeNowRefusesASharedRootRigWhileTheCityIsDirect(t *test
 	})
 
 	scope := migrateProxiedScope{Label: "rig:spike", Name: "spike", Path: normalizePathForCompare(rig), Prefix: "sp"}
-	err = migrateProxiedScopeNow(city, scope, migrateProxiedClassification{})
+	_, err = migrateProxiedScopeNow(city, scope, migrateProxiedClassification{})
 	if err == nil {
 		t.Fatalf("migrateProxiedScopeNow migrated a rig onto the city's still-direct root")
 	}

@@ -638,3 +638,14 @@ func waitForProcessHandle(handle windows.Handle, timeout time.Duration) bool {
 	}
 	return state == windows.WAIT_OBJECT_0
 }
+
+// KillByPIDIdentity is KillByPID bound to the process a scan reported: it
+// terminates pid's tree only while pid's creation time still equals identity,
+// so a PID recycled since the scan is never terminated. An empty identity
+// falls back to KillByPID's own capture, as on Unix.
+func KillByPIDIdentity(pid int, identity string) error {
+	if identity == "" {
+		return KillByPID(pid)
+	}
+	return KillRuntime(runtime.LiveRuntime{PID: pid, StartIdentity: identity})
+}

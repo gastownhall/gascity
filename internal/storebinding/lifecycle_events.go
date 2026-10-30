@@ -28,6 +28,7 @@ import (
 	"reflect"
 	"sort"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
@@ -91,14 +92,16 @@ func (k ClassEventKind) String() string {
 type ClassOutcome uint8
 
 const (
-	// ClassOutcomeOK reports an operation that returned no error.
+	// ClassOutcomeOK reports an operation that returned no error, or one that
+	// delivered a partial result: its answer, beside the records it skipped.
 	ClassOutcomeOK ClassOutcome = iota + 1
 	// ClassOutcomeConflict reports a compare-and-swap that lost. A conflict is
 	// not a failure: the contract reports it as ok=false with a nil error, and
 	// collapsing the two would make every dashboard read a healthy race as an
 	// outage.
 	ClassOutcomeConflict
-	// ClassOutcomeFailed reports an operation that returned an error.
+	// ClassOutcomeFailed reports an operation that returned an error other than
+	// a partial result.
 	ClassOutcomeFailed
 	// ClassOutcomeHit reports a cache hit.
 	ClassOutcomeHit
@@ -282,4 +285,15 @@ func outcomeFor(err error) ClassOutcome {
 		return ClassOutcomeFailed
 	}
 	return ClassOutcomeOK
+}
+
+// partialOutcomeFor is outcomeFor for an operation that can succeed in part.
+// An error for which beads.IsPartialResult reports true travels beside the
+// answer the operation delivered, so it is an OK outcome; every other error
+// is a failure.
+func partialOutcomeFor(err error) ClassOutcome {
+	if beads.IsPartialResult(err) {
+		return ClassOutcomeOK
+	}
+	return outcomeFor(err)
 }

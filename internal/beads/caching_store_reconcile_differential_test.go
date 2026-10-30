@@ -51,8 +51,8 @@ type storeState struct {
 	dirty        map[string]struct{}
 	beadSeq      map[string]uint64
 	localBeadAt  map[string]time.Time
-	readCloseSeq map[string]uint64
 	deletedSeq   map[string]uint64
+	writeSeq     map[string]uint64
 	mutationSeq  uint64
 	backingIsBd  bool
 }
@@ -82,12 +82,37 @@ type mergeEndState struct {
 	dirty        map[string]struct{}
 	beadSeq      map[string]uint64
 	localBeadAt  map[string]time.Time
-	readCloseSeq map[string]uint64
 	deletedSeq   map[string]uint64
+	writeSeq     map[string]uint64
+	// writeAtIDs is the key set of writeAt, which must drop exactly when
+	// writeSeq does; its stamps are wall-clock values the merge never reads.
+	writeAtIDs map[string]struct{}
 	// readyLost is the set of rows whose is_blocked verdict the merge dropped
 	// without preserving, so readiness declines for them unless their own edges
 	// can reproduce it (ga-cfhgr).
-	readyLost      map[string]struct{}
+	readyLost map[string]struct{}
+	// retainedIDs is the key set of retainedAt: the orphan ids whose write
+	// fences the sweep retains. Its stamps are the pass clock.
+	retainedIDs map[string]struct{}
+	// announcedCloseIDs is the key set of announcedCloses: the evicted rows
+	// whose close the merge announced from a confirmed closed row. Its stamps
+	// are the pass clock.
+	announcedCloseIDs map[string]struct{}
+	// announcedPruneNext is announcedClosesPruneNext, the record size from
+	// which recording a close prunes the record again; the merge's prune sets
+	// it.
+	announcedPruneNext int
+	// announcedPrunedAt is announcedClosesPrunedAt, which the merge's prune
+	// dates with the pass clock.
+	announcedPrunedAt time.Time
+	// silentCloseIDs is the key set of silentCloses: the rows held closed
+	// that an install put there over no cached row without announcing the
+	// close. The merge's prune drops every mark of a row it does not hold
+	// closed.
+	silentCloseIDs map[string]struct{}
+	// fenceFloor rises only when a retention older than the window is
+	// pruned; no seeded state carries one, so it must stay put.
+	fenceFloor     uint64
 	state          cacheState
 	lastFreshAt    time.Time
 	mutationSeq    uint64
@@ -174,8 +199,8 @@ func cloneStoreState(st storeState) storeState {
 		dirty:        cloneDirty(st.dirty),
 		beadSeq:      cloneU64Map(st.beadSeq),
 		localBeadAt:  cloneTimeMap(st.localBeadAt),
-		readCloseSeq: cloneU64Map(st.readCloseSeq),
 		deletedSeq:   cloneU64Map(st.deletedSeq),
+		writeSeq:     cloneU64Map(st.writeSeq),
 		mutationSeq:  st.mutationSeq,
 		backingIsBd:  st.backingIsBd,
 	}
@@ -245,8 +270,9 @@ func newMergeHarnessStore(st storeState) (*CachingStore, *countingBacking) {
 		dirty:        cloneDirty(st.dirty),
 		beadSeq:      cloneU64Map(st.beadSeq),
 		localBeadAt:  cloneTimeMap(st.localBeadAt),
-		readCloseSeq: cloneU64Map(st.readCloseSeq),
 		deletedSeq:   cloneU64Map(st.deletedSeq),
+		writeSeq:     cloneU64Map(st.writeSeq),
+		writeAt:      writeAtFor(st.writeSeq),
 		mutationSeq:  st.mutationSeq,
 		state:        cacheLive,
 
@@ -274,11 +300,14 @@ func ensureMaps(c *CachingStore) {
 	if c.localBeadAt == nil {
 		c.localBeadAt = make(map[string]time.Time)
 	}
-	if c.readCloseSeq == nil {
-		c.readCloseSeq = make(map[string]uint64)
-	}
 	if c.deletedSeq == nil {
 		c.deletedSeq = make(map[string]uint64)
+	}
+	if c.writeSeq == nil {
+		c.writeSeq = make(map[string]uint64)
+	}
+	if c.writeAt == nil {
+		c.writeAt = make(map[string]time.Time)
 	}
 	// The generated states never seed ready-projection marks, so every mark in
 	// a captured end state was produced by the merge under test — which is what
@@ -299,9 +328,16 @@ func captureEndState(c *CachingStore) mergeEndState {
 		dirty:                cloneDirty(c.dirty),
 		beadSeq:              cloneU64Map(c.beadSeq),
 		localBeadAt:          cloneTimeMap(c.localBeadAt),
-		readCloseSeq:         cloneU64Map(c.readCloseSeq),
 		deletedSeq:           cloneU64Map(c.deletedSeq),
+		writeSeq:             cloneU64Map(c.writeSeq),
+		writeAtIDs:           keySet(c.writeAt),
 		readyLost:            cloneDirty(c.readyProjectionLost),
+		retainedIDs:          keySet(c.retainedAt),
+		announcedCloseIDs:    keySet(c.announcedCloses),
+		announcedPruneNext:   c.announcedClosesPruneNext,
+		announcedPrunedAt:    c.announcedClosesPrunedAt,
+		silentCloseIDs:       keySet(c.silentCloses),
+		fenceFloor:           c.fenceFloor,
 		state:                c.state,
 		lastFreshAt:          c.lastFreshAt,
 		mutationSeq:          c.mutationSeq,
@@ -333,7 +369,7 @@ type mergeImplResult struct {
 func runNewMerge(st storeState, in snapshotInputs) mergeImplResult {
 	c, counter := newMergeHarnessStore(st)
 	c.mu.Lock()
-	res := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, in.depMap, in.useFreshDeps, in.startSeq, in.now)
+	res := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, nil, in.depMap, in.useFreshDeps, false, in.startSeq, in.now)
 	c.mu.Unlock()
 	return mergeImplResult{end: captureEndState(c), notifications: res.notifications, backingCalls: counterCalls(counter)}
 }
@@ -576,6 +612,24 @@ func legacyBranchBMerge(
 // nil and empty maps/slices as unequal, which is what depsComplete-degradation
 // and entry-presence semantics require). time.Time values are exact copies of
 // injected inputs across all runs, so DeepEqual compares them soundly.
+// writeAtFor seeds a write stamp for every write revision, as
+// noteLocalMutationLocked always sets the two together.
+func writeAtFor(writeSeq map[string]uint64) map[string]time.Time {
+	out := make(map[string]time.Time, len(writeSeq))
+	for id := range writeSeq {
+		out[id] = time.Unix(1, 0)
+	}
+	return out
+}
+
+func keySet[V any](m map[string]V) map[string]struct{} {
+	out := make(map[string]struct{}, len(m))
+	for id := range m {
+		out[id] = struct{}{}
+	}
+	return out
+}
+
 func endStatesEqual(a, b mergeEndState) bool {
 	return reflect.DeepEqual(a, b)
 }

@@ -172,7 +172,8 @@ func TestLegacySocketRemainsVisibleWhenPrivateFallbackIsMissing(t *testing.T) {
 	if startCalls != 0 {
 		t.Fatalf("process start calls = %d, want 0", startCalls)
 	}
-	for _, want := range []string{"ping", "ping", "interrupt", "stop", "ping"} {
+	// Liveness probes only connect, so the owner sees just the two commands.
+	for _, want := range []string{"interrupt", "stop"} {
 		select {
 		case got := <-gotCommand:
 			if got != want {

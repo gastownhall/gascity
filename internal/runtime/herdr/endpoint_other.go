@@ -9,16 +9,23 @@ import (
 	"path/filepath"
 )
 
-// herdrConfigDir returns the directory herdr resolves its configuration, and
-// with it every session socket, under: os.UserConfigDir. On Linux and the other
-// XDG platforms that is a non-empty XDG_CONFIG_HOME, else $HOME/.config, which
-// matches what herdr was measured doing on Linux with XDG_CONFIG_HOME set and
-// unset (see socketPath). On darwin os.UserConfigDir is $HOME/Library/Application
-// Support, ignoring XDG_CONFIG_HOME, and whether herdr agrees there is
-// unverified (client_test.go).
+// herdrConfigDir is the base directory herdr's config directory sits under,
+// resolved by herdr's own non-Windows rule (src/config/io.rs config_dir and
+// platform_config_dir), which does not vary by OS: $XDG_CONFIG_HOME, else
+// $HOME/.config, else the temp dir; socketPath adds "herdr". os.UserConfigDir()
+// is not that rule: on macOS it ignores XDG_CONFIG_HOME and returns
+// $HOME/Library/Application Support, a directory herdr never uses (#5770).
+// herdr reads each variable with std::env::var, so a variable that is set
+// counts even when it is empty or relative; startServer refuses the relative
+// socket path that results.
 func herdrConfigDir() string {
-	configDir, _ := os.UserConfigDir()
-	return configDir
+	if dir, ok := os.LookupEnv("XDG_CONFIG_HOME"); ok {
+		return dir
+	}
+	if home, ok := os.LookupEnv("HOME"); ok {
+		return filepath.Join(home, ".config")
+	}
+	return os.TempDir()
 }
 
 // herdrJoin is filepath.Join, as socketPath has always joined herdr's paths on

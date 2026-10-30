@@ -803,3 +803,54 @@ func (s *residueClaimedOnGetSpyStore) SetMetadataBatch(id string, kvs map[string
 	s.writes++
 	return s.Store.SetMetadataBatch(id, kvs)
 }
+
+// On a single-store city the session store the check indexes is the city store
+// rebuilt with an emitter under its policy layer (withMainStoreEmission): a
+// different value over the same engine. The check must still treat the city
+// scope as the session store, and still flag and fix the residue there.
+func TestExecutorIdentityResidueCheckSingleStoreCityComparesStoresByEngine(t *testing.T) {
+	cityDir := t.TempDir()
+	writeOneShotCityTOML(t, cityDir, "")
+	captureCLIStorageStderr(t)
+	cfg := &config.City{}
+	engine, err := beads.OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("opening the city engine: %v", err)
+	}
+	stale, err := engine.Create(beads.Bead{Title: "stale stamp", Type: "task", Metadata: map[string]string{
+		"gc.routed_to":    "gascity/reviewer",
+		"gc.session_name": "gascity--builder",
+	}})
+	if err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	cityStore := wrapStoreWithBeadPolicies(engine, cfg) // what openCityStoreAt returns
+
+	sessionStore := cliSessionStore(cityStore, cfg, cityDir)
+	if sessionStore == cityStore {
+		t.Fatal("cliSessionStore returned the city store itself; the single-store emitter did not engage")
+	}
+	if !sameStoreEngine(cityStore, sessionStore) {
+		t.Fatalf("sameStoreEngine(%T, %T) = false, want true: both serve the one city engine", cityStore, sessionStore)
+	}
+	if sameStoreEngine(cityStore, wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg)) {
+		t.Fatal("sameStoreEngine reported a rig's distinct store as the city engine")
+	}
+
+	check := newExecutorIdentityResidueCheck(cfg, cityDir, func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return cityStore, nil
+	})
+	result := check.Run(&doctor.CheckContext{})
+	if result.Status != doctor.StatusWarning || !strings.Contains(strings.Join(result.Details, "\n"), stale.ID) {
+		t.Fatalf("Run = %v %v, want a warning naming %s", result.Status, result.Details, stale.ID)
+	}
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if result := check.Run(&doctor.CheckContext{}); result.Status != doctor.StatusOK {
+		t.Fatalf("Run after Fix = %v %v, want ok", result.Status, result.Details)
+	}
+}

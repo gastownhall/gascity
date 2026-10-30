@@ -79,7 +79,7 @@ func newTestPump(t *testing.T) (*sessionEventPump, chan struct{}, context.Cancel
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	pokeCh := make(chan struct{}, 1)
-	pump := newSessionEventPump(ctx, pokeCh, &bytes.Buffer{}, "test")
+	pump := newSessionEventPump(ctx, newLegacyWake(pokeCh, nil), &bytes.Buffer{}, "test")
 	return pump, pokeCh, cancel
 }
 
@@ -138,13 +138,42 @@ func TestSessionEventPumpNonImplementingProviderLogsFallback(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		pokeCh := make(chan struct{}, 1)
-		pump := newSessionEventPump(ctx, pokeCh, &stderr, "test")
+		pump := newSessionEventPump(ctx, newLegacyWake(pokeCh, nil), &stderr, "test")
 		pump.restart(runtime.NewFake()) // plain fake: no SessionEventProvider
 		if pump.streaming() {
 			t.Fatal("streaming() = true for a provider without an event stream")
 		}
 		if got := stderr.String(); !strings.Contains(got, "patrol polling") {
 			t.Fatalf("restart onto a non-implementing provider logged %q, want a patrol-polling fallback line", got)
+		}
+	})
+}
+
+// TestSessionEventPumpCompositeWithoutEventBackendLogsFallback pins that a
+// composite whose backends all lack events reads as the benign configuration
+// it is. Such a provider passes the runtime.SessionEventProvider assertion
+// (auto always implements the method) and then returns
+// runtime.ErrNoSessionEventSource, so without the sentinel branch an
+// ordinary tmux-only city logged the same "session-event subscribe:" line a
+// genuinely broken transport would -- which is the one place the typed
+// sentinel has to be legible.
+func TestSessionEventPumpCompositeWithoutEventBackendLogsFallback(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var stderr bytes.Buffer
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		pokeCh := make(chan struct{}, 1)
+		pump := newSessionEventPump(ctx, newLegacyWake(pokeCh, nil), &stderr, "test")
+		pump.restart(sessionauto.New(runtime.NewFake(), runtime.NewFake()))
+		if pump.streaming() {
+			t.Fatal("streaming() = true for a composite with no event-capable backend")
+		}
+		got := stderr.String()
+		if !strings.Contains(got, "does not support session events") {
+			t.Fatalf("restart logged %q, want the non-implementer fallback line", got)
+		}
+		if strings.Contains(got, "session-event subscribe:") {
+			t.Fatalf("restart logged %q, want no subscribe-failure line for a city that simply has no event backend", got)
 		}
 	})
 }
@@ -169,6 +198,34 @@ func TestSessionEventPumpDeliversThroughAutoProvider(t *testing.T) {
 			t.Fatal("streaming() = false after subscribing through an auto.Provider wrapping an event-capable backend")
 		}
 		fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "crew-1", Time: time.Now()})
+		waitPoke(t, pokeCh)
+	})
+}
+
+// TestSessionEventPumpDeliversThroughAutoProviderBothBackendsEvented covers
+// the merged two-stream path end to end. With one event-capable backend the
+// pump receives that backend's channel unchanged; with two,
+// runtime.SubscribeSessionEventSources interposes a merge goroutine and an
+// unbuffered channel, and nothing outside internal/runtime pinned that a
+// death still reaches the reconciler through that extra hop. No pair of
+// production backends publishes events on both sides today, so this is the
+// only coverage the hop has until a second one does -- which is exactly when
+// a regression here would first be observable.
+func TestSessionEventPumpDeliversThroughAutoProviderBothBackendsEvented(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		pump, pokeCh, cancel := newTestPump(t)
+		defer cancel()
+		def := &eventedFake{Fake: runtime.NewFake()}
+		acp := &eventedFake{Fake: runtime.NewFake()}
+		pump.restart(sessionauto.New(def, acp))
+		if !pump.streaming() {
+			t.Fatal("streaming() = false after subscribing through an auto.Provider whose backends both publish events")
+		}
+		// Each backend's death must poke on its own, or the merge is dropping
+		// one input rather than fanning both.
+		def.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "crew-default", Time: time.Now()})
+		waitPoke(t, pokeCh)
+		acp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "crew-acp", Time: time.Now()})
 		waitPoke(t, pokeCh)
 	})
 }
@@ -391,5 +448,36 @@ func TestSessionEventPumpParentCancelDeactivates(t *testing.T) {
 		pump.restart(fp)
 		cancel()
 		waitStreaming(t, pump, false)
+	})
+}
+
+// Kills: events not shortening the inventory lane's latency. Every forwarded
+// event (an attributed death now, a resync after its trailing delay) wakes
+// the lane; unattributed pane noise does not.
+func TestSessionEventPump_WakesInventoryOnAttributedDeath(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		pump, pokeCh, cancel := newTestPump(t)
+		defer cancel()
+		pump.resyncDelay = 300 * time.Millisecond
+		wakes := 0
+		pump.wakeInventory = func() { wakes++ }
+		fp := &eventedFake{Fake: runtime.NewFake()}
+		pump.restart(fp)
+
+		fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventExited, Ref: "%42", Time: time.Now()})
+		synctest.Wait()
+		if wakes != 0 {
+			t.Fatalf("an unattributed pane event woke the lane %d times", wakes)
+		}
+		fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "crew-1", Time: time.Now()})
+		waitPoke(t, pokeCh)
+		if wakes != 1 {
+			t.Fatalf("wakes after an attributed exit = %d, want 1", wakes)
+		}
+		fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventResync, Time: time.Now()})
+		waitPoke(t, pokeCh)
+		if wakes != 2 {
+			t.Fatalf("wakes after a resync = %d, want 2", wakes)
+		}
 	})
 }

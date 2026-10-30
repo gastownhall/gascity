@@ -24,7 +24,6 @@ func extractStoreState(c *CachingStore) storeState {
 		dirty:        cloneDirty(c.dirty),
 		beadSeq:      cloneU64Map(c.beadSeq),
 		localBeadAt:  cloneTimeMap(c.localBeadAt),
-		readCloseSeq: cloneU64Map(c.readCloseSeq),
 		deletedSeq:   cloneU64Map(c.deletedSeq),
 		mutationSeq:  c.mutationSeq,
 		backingIsBd:  isBd,
@@ -105,7 +104,7 @@ func TestReconcileMergeDifferential_TwoPass(t *testing.T) {
 					live := cloneSnapshotInputs(in1) // pass1's preserve mutates freshByID
 					c, _ := newMergeHarnessStore(st0)
 					c.mu.Lock()
-					c.mergeSnapshotLocked(live.freshByID, live.confirmedClosed, live.depMap, live.useFreshDeps, live.startSeq, live.now)
+					c.mergeSnapshotLocked(live.freshByID, live.confirmedClosed, nil, live.depMap, live.useFreshDeps, false, live.startSeq, live.now)
 					seqBefore := c.mutationSeq
 					opNow := in1.now
 					id := targetIDs[0]

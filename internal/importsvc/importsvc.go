@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -32,7 +33,9 @@ var (
 	// target scope (or is owned by a city.toml [imports] override). HTTP: 409.
 	ErrImportExists = errors.New("import already exists")
 	// ErrVersionResolveFailed means version/HEAD resolution for a git-backed
-	// source failed. HTTP: 502 (upstream git probe) or 400 depending on caller.
+	// source failed, including a registry-published pack whose constraint no
+	// release satisfies or whose fetched content does not match the release
+	// content hash. HTTP: 502 (upstream git probe) or 400 depending on caller.
 	ErrVersionResolveFailed = errors.New("import version resolution failed")
 	// ErrInstallFailed means the lock sync or lockfile write failed. HTTP: 500.
 	ErrInstallFailed = errors.New("import install failed")
@@ -58,6 +61,10 @@ type AddResult struct {
 	// GitBacked reports whether the resolved source is a git source (and thus
 	// has a lock entry); false for plain local path imports.
 	GitBacked bool
+	// RegistryRelease names the registry release the import was locked to
+	// (for example "main:gascity 0.1.6"); empty when the lock entry is not a
+	// registry release.
+	RegistryRelease string
 }
 
 // RemoveResult reports the binding RemoveImport deleted.
@@ -91,6 +98,27 @@ type Deps struct {
 	ResolveVersion    func(cityRoot, source, constraint string) (packman.ResolvedVersion, error)
 	DefaultConstraint func(version string) (string, error)
 	ResolveHeadCommit func(cityRoot, source string) (string, error)
+
+	// ResolveRegistryRelease and RegistryReleaseLabel mirror the packman
+	// registry seams: the newest release that defaults an add's constraint
+	// for a registry-published source, and the label of the release a lock
+	// entry names. Leave nil to use the packman defaults.
+	ResolveRegistryRelease func(source, constraint string) (release packman.RegistryRelease, ok bool, unavailable error, err error)
+	RegistryReleaseLabel   func(source string, locked packman.LockedPack) string
+}
+
+func (d Deps) resolveRegistryRelease() func(string, string) (packman.RegistryRelease, bool, error, error) {
+	if d.ResolveRegistryRelease != nil {
+		return d.ResolveRegistryRelease
+	}
+	return packman.ResolveRegistryRelease
+}
+
+func (d Deps) registryReleaseLabel() func(string, packman.LockedPack) string {
+	if d.RegistryReleaseLabel != nil {
+		return d.RegistryReleaseLabel
+	}
+	return packman.RegistryReleaseLabel
 }
 
 func (d Deps) syncLock() func(string, map[string]config.Import, packman.InstallMode) (*packman.Lockfile, error) {
@@ -137,6 +165,15 @@ func (d Deps) resolveHeadCommit() func(string, string) (string, error) {
 }
 
 func (d Deps) defaultImportVersionForSource(cityRoot, source string) (string, error) {
+	// A registry-published pack defaults to its newest release, never to a
+	// repository tag that may belong to no pack.
+	release, ok, _, err := d.resolveRegistryRelease()(source, "")
+	if err != nil {
+		return "", err
+	}
+	if ok {
+		return d.defaultConstraint()(release.Version)
+	}
 	resolved, err := d.resolveVersion()(cityRoot, source, "")
 	if err == nil {
 		return d.defaultConstraint()(resolved.Version)
@@ -149,6 +186,46 @@ func (d Deps) defaultImportVersionForSource(cityRoot, source string) (string, er
 		return "", err
 	}
 	return "sha:" + commit, nil
+}
+
+// cityImportConstraint returns the version constraint the city already holds
+// for source, so a version-less add joins the existing pin instead of moving
+// it (packs.lock has one entry per source, and packman merges every import's
+// constraint for it): the first non-empty version an existing import of the
+// same source declares, in synthetic-key order; else the default caret of the
+// packs.lock entry's version; else a "sha:" pin of the entry's commit when that
+// version is not semver. ok is false when the city neither declares nor locks
+// source.
+func cityImportConstraint(fs fsys.FS, cityRoot, source string) (string, bool, error) {
+	imports, err := CollectAllImports(fs, cityRoot)
+	if err != nil {
+		return "", false, err
+	}
+	var keys []string
+	for key, imp := range imports {
+		if imp.Source == source && imp.Version != "" {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) > 0 {
+		slices.Sort(keys)
+		return imports[keys[0]].Version, true, nil
+	}
+	lock, err := packman.ReadLockfile(fs, cityRoot)
+	if err != nil {
+		return "", false, err
+	}
+	locked, ok := lock.Packs[source]
+	if !ok {
+		return "", false, nil
+	}
+	if constraint, err := packman.DefaultConstraint(locked.Version); err == nil {
+		return constraint, true, nil
+	}
+	if locked.Commit == "" {
+		return "", false, nil
+	}
+	return "sha:" + locked.Commit, true, nil
 }
 
 // fenceSource applies the injected untrusted-source policy to source. It is the
@@ -164,14 +241,16 @@ func (d Deps) fenceSource(source string) error {
 
 // resolveImportVersion validates and resolves the version constraint for an add.
 // Git-backed sources reject a ref embedded in the URL and, when no constraint is
-// given, default to the resolved semver/HEAD; non-git path sources reject a
-// constraint outright. localHead marks a source promoted from a local git
-// worktree: absent an explicit constraint, it locks to the worktree's current
-// HEAD commit rather than the repo's latest semver tag, which may predate the
-// pack existing in the tree at all (gastownhall/gascity#3659). The returned
-// error already carries the transport-mapped sentinel (ErrInvalidSource or
-// ErrVersionResolveFailed).
-func (d Deps) resolveImportVersion(cityRoot, source, versionConstraint string, gitBacked, localHead bool) (string, error) {
+// given, default to the constraint the city already holds for the same source
+// (cityImportConstraint), else to the resolved semver/HEAD; non-git path
+// sources reject a constraint outright. localHead marks a source promoted from
+// a local git worktree: absent an explicit constraint, it locks to the
+// worktree's current HEAD commit rather than the repo's latest semver tag,
+// which may predate the pack existing in the tree at all
+// (gastownhall/gascity#3659). The returned error already carries the
+// transport-mapped sentinel (ErrInvalidSource, ErrVersionResolveFailed, or
+// ErrInstallFailed when the city's imports or packs.lock cannot be read).
+func (d Deps) resolveImportVersion(fs fsys.FS, cityRoot, source, versionConstraint string, gitBacked, localHead bool) (string, error) {
 	if !gitBacked {
 		if versionConstraint != "" {
 			return "", fmt.Errorf("%w: --version is only valid for git-backed imports", ErrInvalidSource)
@@ -191,11 +270,40 @@ func (d Deps) resolveImportVersion(cityRoot, source, versionConstraint string, g
 		}
 		return "sha:" + commit, nil
 	}
+	constraint, ok, err := cityImportConstraint(fs, cityRoot, source)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrInstallFailed, err)
+	}
+	if ok {
+		return constraint, nil
+	}
 	version, err := d.defaultImportVersionForSource(cityRoot, source)
 	if err != nil {
 		return "", fmt.Errorf("%w: %w", ErrVersionResolveFailed, err)
 	}
 	return version, nil
+}
+
+// ResolveRemoteDefaultVersion returns the version constraint AddImportWith
+// writes for a remote source added without --version: the constraint the city
+// at cityRoot already holds for the same source (a declared version, else the
+// packs.lock entry's), else the newest registry release's default constraint,
+// else the newest semver tag's, else a "sha:" pin of the remote HEAD. It
+// applies the same source checks an add does (the credential-in-URL refusal,
+// the injected SourcePolicy, and the embedded-ref refusal) so a caller that
+// persists the result (gc rig add --include) stays in step with gc import add.
+// Errors wrap ErrInvalidSource, ErrVersionResolveFailed, or ErrInstallFailed.
+func (d Deps) ResolveRemoteDefaultVersion(fs fsys.FS, cityRoot, source string) (string, error) {
+	if !isRemoteImportSource(source) {
+		return "", fmt.Errorf("%w: %q is not a remote import source", ErrInvalidSource, source)
+	}
+	if err := RejectSourceUserinfo(source); err != nil {
+		return "", fmt.Errorf("%w: %w", ErrInvalidSource, err)
+	}
+	if err := d.fenceSource(source); err != nil {
+		return "", err
+	}
+	return d.resolveImportVersion(fs, cityRoot, source, "", true, false)
 }
 
 // AddImport resolves source once and writes it as a durable [imports.<name>]
@@ -251,7 +359,7 @@ func AddImportWith(fs fsys.FS, cityPath, source, nameOverride, versionConstraint
 		}
 	}
 
-	version, err := deps.resolveImportVersion(cityPath, source, versionConstraint, gitBacked, localHead)
+	version, err := deps.resolveImportVersion(fs, cityPath, source, versionConstraint, gitBacked, localHead)
 	if err != nil {
 		return nil, err
 	}
@@ -267,6 +375,9 @@ func AddImportWith(fs fsys.FS, cityPath, source, nameOverride, versionConstraint
 	allImports[scope.syntheticKey(name)] = scope.imports[name]
 	lock, err := deps.syncLock()(cityPath, allImports, packman.InstallResolveIfNeeded)
 	if err != nil {
+		if errors.Is(err, packman.ErrRegistryRelease) {
+			return nil, fmt.Errorf("%w: %w", ErrVersionResolveFailed, err)
+		}
 		return nil, fmt.Errorf("%w: %w", ErrInstallFailed, err)
 	}
 	if err := scope.save(); err != nil {
@@ -275,12 +386,16 @@ func AddImportWith(fs fsys.FS, cityPath, source, nameOverride, versionConstraint
 	if err := deps.writeLockfile()(fs, cityPath, lock); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInstallFailed, err)
 	}
-	return &AddResult{
+	result := &AddResult{
 		Name:      name,
 		Source:    source,
 		Version:   version,
 		GitBacked: gitBacked,
-	}, nil
+	}
+	if locked, ok := lock.Packs[source]; ok && gitBacked {
+		result.RegistryRelease = deps.registryReleaseLabel()(source, locked)
+	}
+	return result, nil
 }
 
 // RemoveImport deletes the binding name from its owning scope (rig, root pack,

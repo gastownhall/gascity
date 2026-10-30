@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -144,7 +145,7 @@ func newEscalationEnv(t *testing.T) *escalationEnv {
 	// from inside `go test`, and it is also what lets a test assert the poke.
 	// (Tests using this env therefore must not call t.Parallel.)
 	prevPoke := drainAckAsyncStopPokeController
-	drainAckAsyncStopPokeController = func(string) error {
+	drainAckAsyncStopPokeController = func(string, reconcilekey.Key) error {
 		env.poke.record()
 		return nil
 	}
@@ -183,7 +184,7 @@ func (e *escalationEnv) finalize() {
 	e.t.Helper()
 	tracker := &asyncStartTracker{}
 	finalizeDrainAckStopPendingSessions(
-		e.cityPath, e.cfg, e.sp, beads.SessionStore{Store: e.store}, nil,
+		e.cityPath, e.cfg, e.sp, beads.SessionStore{Store: e.store}, testSeatWork(e.cityPath, e.cfg, beads.SessionStore{Store: e.store}, nil),
 		[]sessionpkg.Info{e.info()}, nil, newDrainTracker(), tracker,
 		e.clk, e.rec, e.out,
 	)
@@ -197,7 +198,7 @@ func (e *escalationEnv) finalizeOnTick() time.Duration {
 	tracker := &asyncStartTracker{}
 	start := time.Now()
 	finalizeDrainAckStopPendingSessions(
-		e.cityPath, e.cfg, e.sp, beads.SessionStore{Store: e.store}, nil,
+		e.cityPath, e.cfg, e.sp, beads.SessionStore{Store: e.store}, testSeatWork(e.cityPath, e.cfg, beads.SessionStore{Store: e.store}, nil),
 		[]sessionpkg.Info{e.info()}, nil, newDrainTracker(), tracker,
 		e.clk, e.rec, e.out,
 	)
@@ -445,7 +446,7 @@ func TestEscalationKillGateSeesAliasClaimedWork(t *testing.T) {
 		t.Fatalf("create work bead: %v", err)
 	}
 
-	has, err := sessionHasOpenAssignedWorkForEscalation(e.cityPath, e.cfg, e.store, nil, e.info())
+	has, err := sessionHasOpenAssignedWorkForEscalation(testSeatWork(e.cityPath, e.cfg, e.store, nil), e.info())
 	if err != nil {
 		t.Fatalf("escalation work probe: %v", err)
 	}
@@ -483,6 +484,39 @@ func TestEscalationHonorsTheTokenFence(t *testing.T) {
 	}
 	if e.terminateCalls() != 0 {
 		t.Error("force-terminated a live replacement holding the same name")
+	}
+}
+
+// An empty token that came with a read error is not "cannot verify, proceed":
+// neither the escalation gate nor the force-terminate re-check may pass it, and
+// the ordinary stop the tick falls back to is fenced the same way.
+func TestEscalationDefersOnUnverifiableToken(t *testing.T) {
+	e := newEscalationEnv(t)
+	e.sp.GetMetaErrors[e.name] = map[string]error{
+		"GC_INSTANCE_TOKEN": fmt.Errorf("show-environment timed out: %w", runtime.ErrRuntimeUnavailable),
+	}
+
+	e.finalize()
+
+	if n := len(e.escalations()); n != 0 {
+		t.Errorf("escalations = %d, want 0 — escalated on an unreadable instance token", n)
+	}
+	if e.terminateCalls() != 0 {
+		t.Error("force-terminated a seat whose instance token could not be read")
+	}
+	if n := e.sp.CountCalls("Stop", e.name); n != 0 {
+		t.Errorf("Stop calls = %d, want 0 — the ordinary stop passed an unreadable token", n)
+	}
+	if got := e.out.String(); !strings.Contains(got, "token_unverifiable") {
+		t.Errorf("stderr = %q, want token_unverifiable diagnostic", got)
+	}
+
+	// The re-check immediately before the destructive act holds on its own.
+	if got := terminateDrainAckRuntimeByProcessTable(e.cityPath, e.sp, e.bead.ID, e.name, "tok-a", 0, e.now, e.out); got != "token_unverifiable" {
+		t.Fatalf("force-terminate outcome = %q, want token_unverifiable", got)
+	}
+	if e.terminateCalls() != 0 {
+		t.Error("force-terminate re-check passed an unreadable instance token")
 	}
 }
 
@@ -742,8 +776,8 @@ func TestEscalationReportsNotHandledWhenTerminationCannotStart(t *testing.T) {
 	}
 
 	handled := escalateWedgedDrainAckStopPending(
-		e.cityPath, e.cfg, e.sp, e.store, nil, e.info(), e.name, nil,
-		tracker, e.clk, e.rec, e.out,
+		e.cityPath, e.cfg, e.sp, e.store, testSeatWork(e.cityPath, e.cfg, e.store, nil), e.info(), e.name, nil,
+		tracker, e.clk, e.rec, nil, e.out,
 	)
 	if handled {
 		t.Error("reported handled while a termination was already in flight; the caller would skip this row's ordinary stop entirely")
@@ -866,8 +900,9 @@ func TestEscalationRecoversAPanicInTheDetachedTermination(t *testing.T) {
 		t.Fatal("could not claim the termination slot")
 	}
 
+	d := drainAckStopPendingForTest(t, store, "sess-1", "worker", "")
 	queueDrainAckForcedTermination(
-		t.TempDir(), store, sp, &config.City{}, sessionpkg.Info{ID: "sess-1"}, "worker",
+		t.TempDir(), store, sp, &config.City{}, d.Info(), "worker",
 		"agent_acked_runtime_survived", 1, time.Now(), nil, 0, done, nil, &stderr,
 	)
 
@@ -949,8 +984,8 @@ func TestEscalationQuietHoldRefusesBeforeTheAssignedWorkFanOut(t *testing.T) {
 	probes := &callCounter{}
 
 	escalated := escalateWedgedDrainAckStopPending(
-		e.cityPath, e.cfg, e.sp, assignedWorkProbeStore{Store: e.store, probes: probes}, nil,
-		e.info(), e.name, nil, &asyncStartTracker{}, e.clk, e.rec, e.out,
+		e.cityPath, e.cfg, e.sp, assignedWorkProbeStore{Store: e.store, probes: probes}, testSeatWork(e.cityPath, e.cfg, assignedWorkProbeStore{Store: e.store, probes: probes}, nil),
+		e.info(), e.name, nil, &asyncStartTracker{}, e.clk, e.rec, nil, e.out,
 	)
 
 	if escalated {
@@ -976,8 +1011,8 @@ func TestEscalationHoldsWhenAnOperatorAttachesAfterTheOrdinaryStop(t *testing.T)
 	tracker := &asyncStartTracker{}
 
 	if !escalateWedgedDrainAckStopPending(
-		e.cityPath, e.cfg, e.sp, e.store, nil, e.info(), e.name, nil,
-		tracker, e.clk, e.rec, e.out,
+		e.cityPath, e.cfg, e.sp, e.store, testSeatWork(e.cityPath, e.cfg, e.store, nil), e.info(), e.name, nil,
+		tracker, e.clk, e.rec, nil, e.out,
 	) {
 		t.Fatal("the escalation was refused on the tick itself; the fixture does not reach the late hold")
 	}
@@ -994,5 +1029,90 @@ func TestEscalationHoldsWhenAnOperatorAttachesAfterTheOrdinaryStop(t *testing.T)
 	}
 	if !strings.Contains(evs[0].Message, "held_late") {
 		t.Errorf("outcome = %q, want held_late so the event stream distinguishes this from a failed kill", evs[0].Message)
+	}
+}
+
+// Invariant 5 — an attachment probe that cannot tell is not "detached". The
+// operator this hold protects is exactly the one a failing probe may hide, so
+// the force-terminate must not proceed on the error.
+func TestDrainAckEscalationQuietHoldHoldsOnAttachProbeError(t *testing.T) {
+	e := newEscalationEnv(t)
+	e.sp.AttachedErrors[e.name] = fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
+
+	if hold, held := drainAckEscalationQuietHold(e.sp, e.name, e.now); !held || hold != "attach_unknown" {
+		t.Fatalf("drainAckEscalationQuietHold = (%q, %v), want (attach_unknown, true)", hold, held)
+	}
+	e.finalize()
+
+	if n := len(e.escalations()); n != 0 {
+		t.Errorf("escalations = %d, want 0 — an attach probe error was read as detached", n)
+	}
+	if e.terminateCalls() != 0 {
+		t.Error("force-terminated a pane whose attachment could not be read")
+	}
+}
+
+// The escalation's kill gate reads the seat live, never the tick's read: work
+// claimed under a prior alias after the tick's read was loaded still keeps a
+// live agent from being force-terminated.
+func TestEscalationKillGateReadsTheSeatLiveNotTheTickRead(t *testing.T) {
+	e := newEscalationEnv(t)
+	e.setMeta(map[string]string{"alias": "nux", "alias_history": "morsov"})
+	sw := testSeatWork(e.cityPath, e.cfg, beads.SessionStore{Store: e.store}, nil)
+	// An earlier gate loads the tick's read: no work yet.
+	if has, err := sessionHasOpenAssignedWorkForReachableStore(sw, e.info()); has || err != nil {
+		t.Fatalf("tick read before the claim = %v, %v", has, err)
+	}
+	if _, err := e.store.Create(beads.Bead{Title: "claimed after the tick's read", Status: "in_progress", Assignee: "morsov"}); err != nil {
+		t.Fatal(err)
+	}
+
+	tracker := &asyncStartTracker{}
+	finalizeDrainAckStopPendingSessions(e.cityPath, e.cfg, e.sp, beads.SessionStore{Store: e.store}, sw,
+		[]sessionpkg.Info{e.info()}, nil, newDrainTracker(), tracker, e.clk, e.rec, e.out)
+	tracker.wait(10 * time.Second)
+
+	if e.terminateCalls() != 0 || len(e.escalations()) != 0 {
+		t.Fatalf("force-terminated (%d) or escalated (%d) over work claimed since the tick's read", e.terminateCalls(), len(e.escalations()))
+	}
+}
+
+// A legacy pool bead that still carries its transient slot alias claims work
+// under that alias: AssigneeIdentifier is alias-first, and that is the
+// BEADS_ACTOR its agent runs as. Wedged in drain-ack stop-pending while it
+// holds in_progress work under the alias, the escalation must not kill it:
+// RefuseScope keeps a transient slot seat's current alias (O4).
+func TestEscalationKeepsALegacySlotAliasOwnClaim(t *testing.T) {
+	for _, tc := range []struct {
+		name, assignee string
+		meta           map[string]string
+	}{
+		{"own claim under its current slot alias", "worker-1", map[string]string{"pool_slot": "1", "alias": "worker-1"}},
+		{"own claim under its bead-id actor (control)", "", map[string]string{"pool_slot": "1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEscalationEnv(t)
+			e.setMeta(tc.meta)
+			actor := sessionpkg.AssigneeIdentifier(e.info())
+			assignee := tc.assignee
+			if assignee == "" {
+				assignee = actor
+			}
+			if tc.assignee != "" && actor != tc.assignee {
+				t.Fatalf("fixture: the agent's actor is %q, want its slot alias %q", actor, tc.assignee)
+			}
+			b, err := e.store.Create(beads.Bead{Title: "the agent's own step", Type: "task", Assignee: assignee})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ip := "in_progress"
+			if err := e.store.Update(b.ID, beads.UpdateOpts{Status: &ip}); err != nil {
+				t.Fatal(err)
+			}
+			e.finalize()
+			if e.terminateCalls() != 0 || len(e.escalations()) != 0 {
+				t.Fatalf("force-terminated (%d) or escalated (%d) an agent holding its own claim under %q", e.terminateCalls(), len(e.escalations()), assignee)
+			}
+		})
 	}
 }

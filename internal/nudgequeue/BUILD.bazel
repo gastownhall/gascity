@@ -4,6 +4,7 @@ go_library(
     name = "nudgequeue",
     srcs = [
         "state.go",
+        "state_file_queue.go",
         "store.go",
         "waits.go",
     ],
@@ -12,7 +13,6 @@ go_library(
     deps = [
         "//internal/beads",
         "//internal/citylayout",
-        "//internal/clock",
         "//internal/fsys",
         "//internal/platform/filelock",
         "//internal/platform/localsocket",
@@ -22,6 +22,8 @@ go_library(
 go_test(
     name = "nudgequeue_test",
     srcs = [
+        "state_debt_test.go",
+        "state_file_queue_test.go",
         "state_test.go",
         "store_test.go",
         "testenv_import_test.go",
@@ -31,7 +33,6 @@ go_test(
     deps = [
         "//internal/beads",
         "//internal/beads/beadstest",
-        "//internal/clock",
         "//internal/platform/filelock",
         "//internal/testenv",
     ],
@@ -45,6 +46,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

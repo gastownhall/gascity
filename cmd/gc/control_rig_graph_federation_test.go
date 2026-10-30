@@ -16,11 +16,13 @@ import (
 
 // The rig arm of the control-class split.
 //
-// TestControlDispatchRigScopeStaysOnItsOwnStore pins the other half: a rig scope
-// keeps its own store, because `gc storage migrate` copies only the CITY work
-// store, so a rig has no frozen retained copies to be misled by. That reasoning
-// is sound and unchanged. What it did not cover is that a rig dispatcher's
-// control beads are not all rig-resident in the first place.
+// Under the S4 placement rule a rig dispatcher's PRIMARY graph ledger is the
+// city binding, like the city's: every tree minted since S4 is born there. Its
+// own store is a relic leg behind the binding while the rig may still hold
+// pre-S4 trees, and drops out once the rig is proven relic-free.
+//
+// The history below is why the binding was federated into rig scans at all,
+// before S4 made it primary.
 //
 // A workflow materializes its control beads into the ledger that owns the
 // graph class, and the class binding is CITY-keyed — one per city, regardless
@@ -38,9 +40,9 @@ import (
 // city — all 20 graph-class control beads carrying the rig's own id prefix were
 // absent from the rig store.
 //
-// The scope store stays the FIRST leg, so every id it holds resolves exactly
-// where it resolves today and the rig dispatchers already draining their own
-// ledgers are untouched.
+// Since S4 the binding is the FIRST leg and the rig store the second, so a twin
+// (an import's copy before its clear) resolves to the binding's row, as every
+// by-id read does.
 
 // rigFederationFixture stands up a split city with a rig scope, a fake `bd` on
 // PATH answering for the rig leg, and a memory-backed city graph binding.
@@ -52,7 +54,7 @@ import (
 // single leg that happened to hold both.
 //
 // GC_CITY is set because that is how a rig-scoped dispatcher actually finds its
-// city. tryControlReadyFromCacheOrFallback derives the city from the scope dir
+// city. tryControlReadyScan derives the city from the scope dir
 // via cityForStoreDir, which prefers the env over walking up the filesystem —
 // and it has to: rigs are routinely OUTSIDE the city tree (on the live city,
 // GC_DIR=/data/projects/beads under GC_CITY=/data/projects/maintainer-city), so
@@ -432,9 +434,12 @@ func TestControlBeadLedgerResolvesTheGraphLegWithoutMovingTheWorkLeg(t *testing.
 		t.Fatalf("premise failed: the binding also holds %s, so the leg-order assertion below is vacuous", local.ID)
 	}
 
-	gotStore, gotBead, err := controlBeadLedger(cityPath, rigPath, cfg, rigStore, resident.ID)
+	gotStore, gotBead, relicLeg, err := controlBeadLedger(cityPath, rigPath, cfg, rigStore, resident.ID)
 	if err != nil {
 		t.Fatalf("controlBeadLedger for a binding-resident id: %v", err)
+	}
+	if relicLeg {
+		t.Errorf("controlBeadLedger for a binding-resident id reported the relic leg, want the placement (binding) leg")
 	}
 	if gotBead.ID != resident.ID {
 		t.Errorf("resolved bead = %q, want %q", gotBead.ID, resident.ID)
@@ -454,32 +459,29 @@ func TestControlBeadLedgerResolvesTheGraphLegWithoutMovingTheWorkLeg(t *testing.
 		t.Errorf("the resolved graph leg wrote %s into the rig's own store, want the city graph binding", probe.ID)
 	}
 
-	gotStore, gotBead, err = controlBeadLedger(cityPath, rigPath, cfg, rigStore, local.ID)
+	gotStore, gotBead, relicLeg, err = controlBeadLedger(cityPath, rigPath, cfg, rigStore, local.ID)
 	if err != nil {
-		t.Fatalf("controlBeadLedger for a rig-resident id: %v", err)
+		t.Fatalf("controlBeadLedger for a rig-resident (pre-S4) id: %v", err)
+	}
+	if !relicLeg {
+		t.Errorf("controlBeadLedger for a rig-resident id did not report the relic leg")
 	}
 	if gotStore != beads.Store(rigStore) {
-		t.Errorf("graph leg for a rig-resident id = %T, want the rig's own store; the scope store must stay the first leg", gotStore)
+		t.Errorf("graph leg for a rig-resident id = %T, want the rig's own store; a pre-S4 rig tree keeps dispatching where it lives until the rig is imported", gotStore)
 	}
 	if gotBead.ID != local.ID {
 		t.Errorf("resolved bead = %q, want %q", gotBead.ID, local.ID)
 	}
 }
 
-// TestControlDispatchRigScopePrefersItsOwnStore pins leg ORDER.
-//
-// The scope store is the first leg. On the live city the two ledgers hold
-// disjoint ids so order cannot change an answer, but that disjointness is a
-// property of today's migration scope (rig stores are never migration targets),
-// not an invariant anything enforces. Pinning the order means a future migration
-// that does produce a co-resident id degrades to "the rig's own copy wins" —
-// exactly what a rig dispatcher does today — rather than silently flipping every
-// rig-scoped dispatch onto the binding.
-func TestControlDispatchRigScopePrefersItsOwnStore(t *testing.T) {
+// TestControlDispatchRigScopeDispatchesAPreS4TreeInPlace pins the relic leg: a
+// tree a rig minted in its own store before S4 keeps dispatching there, and
+// nothing about it is written to the binding.
+func TestControlDispatchRigScopeDispatchesAPreS4TreeInPlace(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rigs", "fixture")
 	rigStore := beads.NewMemStore()
-	binding := beads.NewMemStore()
+	binding := beads.NewMemStoreFrom(100, nil, nil)
 	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
 
 	root, err := rigStore.Create(beads.Bead{
@@ -500,127 +502,161 @@ func TestControlDispatchRigScopePrefersItsOwnStore(t *testing.T) {
 	if err := runControlDispatcherWithStoreAndConfig(cityPath, rigPath, rigStore, control.ID, cfg, &stdout, &stderr); err != nil {
 		t.Fatalf("rig-scoped dispatch of a rig-resident control bead: %v", err)
 	}
-	if got := beadByID(t, rigStore, control.ID); got.Status != "closed" {
+	got := beadByID(t, rigStore, control.ID)
+	if got.Status != "closed" {
 		t.Errorf("rig control bead status = %q, want closed in the rig's own store", got.Status)
+	}
+	if outcome := got.Metadata[beadmeta.OutcomeMetadataKey]; outcome != beadmeta.OutcomeCanceled {
+		t.Errorf("gc.outcome = %q, want %q; the dispatcher did not read the root from the same (rig) store", outcome, beadmeta.OutcomeCanceled)
 	}
 	empty, err := binding.List(beads.ListQuery{AllowScan: true})
 	if err != nil {
 		t.Fatalf("list city binding: %v", err)
 	}
 	if len(empty) != 0 {
-		t.Errorf("city binding holds %d bead(s) after a rig-resident dispatch, want 0; "+
-			"the graph leg took precedence over the rig's own store", len(empty))
+		t.Errorf("city binding holds %d bead(s) after dispatching a rig-resident tree, want 0; the tree must stay co-resident", len(empty))
 	}
 }
 
-// TestControlGraphExtraLegRoutingRule is the routing rule itself, stated once
+// TestControlBeadLedgerRigScopeAsksTheBindingFirst pins leg ORDER: an id both
+// legs hold resolves to the binding's row.
+func TestControlBeadLedgerRigScopeAsksTheBindingFirst(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "fixture")
+	rigStore := beads.NewMemStore()
+	binding := beads.NewMemStore()
+	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
+	inRig, err := rigStore.Create(beads.Bead{Title: "rig copy", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inBinding, err := binding.Create(beads.Bead{Title: "binding copy", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inRig.ID != inBinding.ID {
+		t.Fatalf("premise failed: the two stores minted %s and %s, want one shared id", inRig.ID, inBinding.ID)
+	}
+	_, got, relicLeg, err := controlBeadLedger(cityPath, rigPath, nil, rigStore, inRig.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relicLeg || got.Title != "binding copy" {
+		t.Errorf("controlBeadLedger resolved %q (relic=%v), want the binding's copy", got.Title, relicLeg)
+	}
+}
+
+// TestControlGraphRelicLegRoutingRule is the routing rule itself, stated once
 // for every scope shape, so the cache leg and the fallback leg cannot drift
 // apart the way control dispatch and convergence did.
-func TestControlGraphExtraLegRoutingRule(t *testing.T) {
+func TestControlGraphRelicLegRoutingRule(t *testing.T) {
 	binding := beads.NewMemStore()
 
-	t.Run("split rig scope gains the binding as a second leg", func(t *testing.T) {
+	t.Run("split rig scope reads the binding, with its own store as a relic leg", func(t *testing.T) {
 		cityPath := t.TempDir()
 		seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
-		got, federated := controlGraphExtraLeg(cityPath, filepath.Join(cityPath, "rigs", "ra"))
-		if !federated || !sameStorePtr(got, binding) {
-			t.Errorf("controlGraphExtraLeg for a split rig scope = (%v, %v), want the city binding; "+
-				"the control beads a city molecule routes to this rig are unreachable without it", got, federated)
+		rigPath := filepath.Join(cityPath, "rigs", "ra")
+		if got, relocated := controlGraphBinding(cityPath, rigPath); !relocated || !sameStorePtr(got, binding) {
+			t.Errorf("controlGraphBinding for a split rig scope = (%v, %v), want the city binding as the primary leg", got, relocated)
+		}
+		if !controlGraphRelicLeg(cityPath, rigPath) {
+			t.Error("controlGraphRelicLeg for a split rig scope not proven relic-free = false, want the rig store kept as a relic leg")
 		}
 	})
 
-	t.Run("split city scope takes no extra leg", func(t *testing.T) {
+	t.Run("split city scope takes no relic leg", func(t *testing.T) {
 		cityPath := t.TempDir()
 		seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
-		if got, federated := controlGraphExtraLeg(cityPath, cityPath); federated {
-			t.Errorf("controlGraphExtraLeg for a split city scope = (%v, true), want no extra leg; "+
-				"the city reads the binding INSTEAD of its store, and unioning in the retained copies re-offers finished ids", got)
+		if controlGraphRelicLeg(cityPath, cityPath) {
+			t.Error("controlGraphRelicLeg for a split city scope = true; the city reads the binding INSTEAD of its store, and unioning in the retained copies re-offers finished ids")
 		}
 	})
 
-	t.Run("single-store rig scope takes no extra leg", func(t *testing.T) {
+	t.Run("single-store rig scope takes neither", func(t *testing.T) {
 		cityPath := t.TempDir()
 		seedCLIStorageRoutes(t, cityPath, nil)
-		if got, federated := controlGraphExtraLeg(cityPath, filepath.Join(cityPath, "rigs", "ra")); federated {
-			t.Errorf("controlGraphExtraLeg on a city that relocates nothing = (%v, true), want no extra leg; "+
-				"this whole change must be invisible to a city with no [storage] section", got)
+		rigPath := filepath.Join(cityPath, "rigs", "ra")
+		if got, relocated := controlGraphBinding(cityPath, rigPath); relocated {
+			t.Errorf("controlGraphBinding on a city that relocates nothing = (%v, true), want the rig's own store only", got)
+		}
+		if controlGraphRelicLeg(cityPath, rigPath) {
+			t.Error("controlGraphRelicLeg on a city that relocates nothing = true; this change must be invisible to a city with no [storage] section")
 		}
 	})
 }
 
-// TestControlGraphExtraLegSkipsARefusingBinding keeps a storage refusal from
-// being converted into a per-tick failure of the whole readiness scan.
+// TestControlRigScopeStaysOnItsStoreWhenTheBindingRefuses keeps a storage
+// refusal from being converted into a per-tick failure of every rig dispatcher.
 //
 // A refusal is this build's standing verdict about the CITY, not a fault in any
-// one read: it says the [storage] shape is one this binary cannot resolve, and a
-// refused city still serves work from its work ledger. Federating that verdict
-// in as a second leg would make every leg-fails-loud path in
-// controlReadyFallbackReady return it, so a rig dispatcher that reads its own
-// ledger perfectly well would stop scanning at all — a strictly worse outcome
-// than the pre-federation behavior on the same city.
-func TestControlGraphExtraLegSkipsARefusingBinding(t *testing.T) {
+// one read, and a refused city still serves work from its work ledger. Making
+// the refusing binding a rig's primary leg would make every rig scan fail on a
+// verdict about the city instead of reading the ledger it can reach.
+func TestControlRigScopeStaysOnItsStoreWhenTheBindingRefuses(t *testing.T) {
 	refusal := errors.New("unsupported [storage] shape")
 
-	t.Run("a refusing binding is not federated", func(t *testing.T) {
+	t.Run("a refusing binding is not a rig's leg", func(t *testing.T) {
 		cityPath := t.TempDir()
 		seedCLIStorageRoutes(t, cityPath, refusingStorageRoutes("infra", refusal))
-		if got, federated := controlGraphExtraLeg(cityPath, filepath.Join(cityPath, "rigs", "ra")); federated {
-			t.Errorf("controlGraphExtraLeg on a refused city = (%v, true), want no extra leg; "+
-				"every readiness scan on this rig now fails on a verdict about the city instead of reading the ledger it can reach", got)
+		rigPath := filepath.Join(cityPath, "rigs", "ra")
+		if got, relocated := controlGraphBinding(cityPath, rigPath); relocated {
+			t.Errorf("controlGraphBinding on a refused city = (%v, true), want the rig's own store", got)
+		}
+		rig := beads.NewMemStore()
+		if got := controlGraphStore(cityPath, rigPath, nil, rig); !sameStorePtr(got, rig) {
+			t.Error("controlGraphStore on a refused city did not keep the rig's own store")
+		}
+		if controlGraphRelicLeg(cityPath, rigPath) {
+			t.Error("controlGraphRelicLeg on a refused city = true; the rig store is the primary there, not a relic leg")
 		}
 	})
 
-	// The control. It must fail DIFFERENTLY: same call, same scope shape, a
-	// binding that is merely relocated rather than refused. Without it the
-	// negative above would also pass if controlGraphExtraLeg had simply stopped
-	// federating anything.
-	t.Run("control: a resolvable binding on the same shape still federates", func(t *testing.T) {
+	// The control: same call, same scope shape, a binding that is merely
+	// relocated rather than refused.
+	t.Run("control: a resolvable binding on the same shape is the primary leg", func(t *testing.T) {
 		cityPath := t.TempDir()
 		binding := beads.NewMemStore()
 		seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
-		got, federated := controlGraphExtraLeg(cityPath, filepath.Join(cityPath, "rigs", "ra"))
-		if !federated || !sameStorePtr(got, binding) {
-			t.Errorf("controlGraphExtraLeg for a resolvable split rig scope = (%v, %v), want the binding; "+
-				"the refusal skip above is vacuous if nothing federates", got, federated)
+		got, relocated := controlGraphBinding(cityPath, filepath.Join(cityPath, "rigs", "ra"))
+		if !relocated || !sameStorePtr(got, binding) {
+			t.Errorf("controlGraphBinding for a resolvable split rig scope = (%v, %v), want the binding", got, relocated)
 		}
 	})
 }
 
-// TestControlReadyCacheSourcesRouteTheSameLegsAsTheFallback pins the two scan
+// TestControlReadyLegSourcesRouteTheSameLegsAsTheFallback pins the two scan
 // arms to one routing rule.
 //
-// The serve loop takes the CACHE arm first on every tick; the fallback runs only
-// when a leg is dirty, still priming, or the bd compatibility mode needs a tier
-// CachedReady cannot serve. So the cache arm is the production path, and the two
-// agreeing about WHICH ledgers hold this scope's queue is the whole safety
-// property: a queue drawn from a different set of stores than the dispatch
-// mutates is exactly the divergence this defect was.
+// The serve loop reads the in-process legs on every tick; the shell fallback
+// runs only when the legs cannot be opened. So the in-process arm is the
+// production path, and the two agreeing about WHICH ledgers hold this scope's
+// queue is the whole safety property: a queue drawn from a different set of
+// stores than the dispatch mutates is exactly the divergence this defect was.
 //
 // Asserted structurally — leg count and the binding's position — rather than by
-// comparing scan output, because the two arms legitimately return different bead
-// values (one snapshots, one reads live) and only their ROUTING has to match.
-func TestControlReadyCacheSourcesRouteTheSameLegsAsTheFallback(t *testing.T) {
-	t.Run("split rig scope snapshots its own store AND the binding", func(t *testing.T) {
+// comparing scan output, because only the two arms' ROUTING has to match.
+func TestControlReadyLegSourcesRouteTheSameLegsAsTheFallback(t *testing.T) {
+	t.Run("split rig scope reads the binding AND, as a relic leg, its own store", func(t *testing.T) {
 		cityPath, rigPath, binding := rigFederationFixture(t, `[]`)
 		seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
 
-		sources, owned, err := controlReadyCacheSources(rigPath, cityPath, nil)
+		sources, owned, err := controlReadyLegSources(rigPath, cityPath, nil)
 		if err != nil {
 			t.Fatalf("controlReadyCacheSources for a split rig scope: %v", err)
 		}
 		if len(sources) != 2 {
 			t.Fatalf("cache sources for a split rig scope = %d leg(s), want 2; "+
-				"the cached arm reads a narrower set than the fallback and the queue flips with cache freshness", len(sources))
+				"the in-process arm reads a narrower set than the fallback and the queue flips with which arm answers", len(sources))
 		}
-		if sameStorePtr(sources[0], binding) {
-			t.Errorf("cache leg[0] is the binding, want the scope's own store first; leg order decides which copy wins on a co-resident id")
+		if !sameStorePtr(sources[0], binding) {
+			t.Errorf("cache leg[0] = %T, want the city graph binding first (the S4 placement store); leg order decides which copy wins on a co-resident id", sources[0])
 		}
-		if !sameStorePtr(sources[1], binding) {
-			t.Errorf("cache leg[1] = %T, want the city graph binding; the beads a city molecule routed to this rig stay unread on the cached arm", sources[1])
+		if sameStorePtr(sources[1], binding) {
+			t.Errorf("cache leg[1] is the binding again, want the scope's own store as the relic leg")
 		}
 		// Only the scoped leg is owned; the process-shared binding must never be
-		// closed by the per-prime cleanup.
-		if len(owned) != 1 || !sameStorePtr(owned[0], sources[0]) {
+		// closed by the per-scan cleanup.
+		if len(owned) != 1 || !sameStorePtr(owned[0], sources[1]) {
 			t.Errorf("owned = %d leg(s), want exactly the scope's own store; the shared binding must not be in owned", len(owned))
 		}
 		for _, o := range owned {
@@ -630,11 +666,11 @@ func TestControlReadyCacheSourcesRouteTheSameLegsAsTheFallback(t *testing.T) {
 		}
 	})
 
-	t.Run("split city scope snapshots only the binding", func(t *testing.T) {
+	t.Run("split city scope reads only the binding", func(t *testing.T) {
 		cityPath, _, binding := rigFederationFixture(t, `[]`)
 		seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
 
-		sources, owned, err := controlReadyCacheSources(cityPath, cityPath, nil)
+		sources, owned, err := controlReadyLegSources(cityPath, cityPath, nil)
 		if err != nil {
 			t.Fatalf("controlReadyCacheSources for a split city scope: %v", err)
 		}
@@ -649,11 +685,11 @@ func TestControlReadyCacheSourcesRouteTheSameLegsAsTheFallback(t *testing.T) {
 		}
 	})
 
-	t.Run("single-store rig scope snapshots one store", func(t *testing.T) {
+	t.Run("single-store rig scope reads one store", func(t *testing.T) {
 		cityPath, rigPath, binding := rigFederationFixture(t, `[]`)
 		seedCLIStorageRoutes(t, cityPath, nil)
 
-		sources, owned, err := controlReadyCacheSources(rigPath, cityPath, nil)
+		sources, owned, err := controlReadyLegSources(rigPath, cityPath, nil)
 		if err != nil {
 			t.Fatalf("controlReadyCacheSources for a single-store rig scope: %v", err)
 		}
@@ -664,63 +700,63 @@ func TestControlReadyCacheSourcesRouteTheSameLegsAsTheFallback(t *testing.T) {
 		if sameStorePtr(sources[0], binding) {
 			t.Errorf("the single leg is the unrouted binding, want the scope's own store")
 		}
-		// The lone scoped leg is call-owned and must be closed after priming.
+		// The lone scoped leg is call-owned and must be closed after the read.
 		if len(owned) != 1 || !sameStorePtr(owned[0], sources[0]) {
 			t.Errorf("owned = %d leg(s), want exactly the scope's own store", len(owned))
 		}
 	})
 }
 
-// TestCachedControlReadyUnionRequiresEveryLeg pins all-or-nothing.
+// TestControlReadyLegsReadyRequiresEveryLeg pins all-or-nothing.
 //
 // A federated scope's queue is only complete if every leg answered. Returning
-// the warm legs' beads when one is cold would be indistinguishable from a
-// complete answer at the call site — the fallback would never run, and the scan
-// would silently report a short queue as the whole queue. That is the same
-// "exit 0, empty array, no work" shape as the defect this federation fixes, just
+// the answering legs' beads when one leg's read failed would be
+// indistinguishable from a complete answer at the call site, and the scan would
+// silently report a short queue as the whole queue. That is the same "exit 0,
+// empty array, no work" shape as the defect this federation fixes, just
 // intermittent, which is worse.
-func TestCachedControlReadyUnionRequiresEveryLeg(t *testing.T) {
-	newPrimed := func(t *testing.T, title string) (*beads.CachingStore, string) {
+func TestControlReadyLegsReadyRequiresEveryLeg(t *testing.T) {
+	dir := t.TempDir()
+	newLeg := func(t *testing.T, title string) (*closeCountingStore, string) {
 		t.Helper()
-		store := beads.NewMemStore()
-		bead, err := store.Create(beads.Bead{Title: title, Type: "task"})
+		leg := newCloseCountingStore(t, false)
+		bead, err := leg.Create(beads.Bead{Title: title, Type: "task"})
 		if err != nil {
 			t.Fatalf("seed %s: %v", title, err)
 		}
-		cache := beads.NewCachingStore(store, nil)
-		if err := cache.PrimeActive(); err != nil {
-			t.Fatalf("prime %s: %v", title, err)
+		return leg, bead.ID
+	}
+	failing := newCloseCountingStore(t, false)
+	failing.readyErr = errors.New("leg unavailable")
+
+	for _, order := range []string{"failing leg last", "failing leg first"} {
+		answering, _ := newLeg(t, "answering leg")
+		legs := []beads.Store{answering, failing}
+		if order == "failing leg first" {
+			legs = []beads.Store{failing, answering}
 		}
-		return cache, bead.ID
+		installControlReadyLegSourcesFn(t, func(string, string, *config.City) ([]beads.Store, []beads.Store, error) {
+			return legs, nil, nil
+		})
+		if got, opened, err := controlReadyLegsReady(dir, dir, nil); err == nil || got != nil || !opened {
+			t.Errorf("%s: controlReadyLegsReady = (%d bead(s), opened %t, err %v), want an error and no beads; "+
+				"a partial union reads as a complete queue", order, len(got), opened, err)
+		}
 	}
 
-	warm, warmID := newPrimed(t, "warm leg")
-	other, otherID := newPrimed(t, "second warm leg")
-	cold := beads.NewCachingStore(beads.NewMemStore(), nil)
-
-	// PREMISE: an unprimed cache really is cold, so the negative below is about
-	// the union's policy and not about a cache that happens to answer anyway.
-	if _, ok := cold.CachedReady(); ok {
-		t.Fatal("premise failed: an unprimed CachingStore answered CachedReady; this test cannot show a cold leg forces the fallback")
+	// The control: every leg answering unions, so the failure above is the
+	// failing leg and not the union refusing to merge at all.
+	first, firstID := newLeg(t, "first leg")
+	second, secondID := newLeg(t, "second leg")
+	installControlReadyLegSourcesFn(t, func(string, string, *config.City) ([]beads.Store, []beads.Store, error) {
+		return []beads.Store{first, second}, nil, nil
+	})
+	got, opened, err := controlReadyLegsReady(dir, dir, nil)
+	if err != nil || !opened {
+		t.Fatalf("controlReadyLegsReady with every leg answering = opened %t, err %v", opened, err)
 	}
-
-	if got, ok := cachedControlReadyUnion([]*beads.CachingStore{warm, cold}); ok {
-		t.Errorf("cachedControlReadyUnion with one cold leg = (%d bead(s), true), want a miss; "+
-			"a partial union reads as a complete queue and the fallback never runs", len(got))
-	}
-	if got, ok := cachedControlReadyUnion([]*beads.CachingStore{cold, warm}); ok {
-		t.Errorf("cachedControlReadyUnion with the cold leg FIRST = (%d bead(s), true), want a miss; "+
-			"leg order must not decide whether a short answer escapes", len(got))
-	}
-
-	// The control: every leg warm unions, so the miss above is the cold leg and
-	// not the union refusing to merge at all.
-	got, ok := cachedControlReadyUnion([]*beads.CachingStore{warm, other})
-	if !ok {
-		t.Fatal("cachedControlReadyUnion with every leg warm missed; the cached arm can never answer a federated scope and every tick pays the fallback")
-	}
-	if !containsID(got, warmID) || !containsID(got, otherID) {
-		t.Errorf("warm union = %v, want both %s and %s; one leg's beads were dropped", controlLegIDs(got), warmID, otherID)
+	if !containsID(got, firstID) || !containsID(got, secondID) {
+		t.Errorf("union = %v, want both %s and %s; one leg's beads were dropped", controlLegIDs(got), firstID, secondID)
 	}
 }
 
@@ -729,9 +765,10 @@ func TestCachedControlReadyUnionRequiresEveryLeg(t *testing.T) {
 //
 // The three fallback tests above call controlReadyFallbackReady directly, which
 // leaves the production path — nextWorkflowServeBeads ->
-// tryControlReadyFromCacheOrFallback -> the cache arm — unexercised for a
-// federated scope. This runs the real entry for both arms against one fixture,
-// so cache/fallback parity is pinned on OUTPUT and not only on routing.
+// tryControlReadyScan -> the per-leg Ready reads — unexercised for a
+// federated scope. This runs the real entry under both bd compatibility modes
+// against one fixture, so the federation is pinned on OUTPUT and not only on
+// routing.
 func TestControlReadyScanRigScopeFederatesTheBindingOnBothArms(t *testing.T) {
 	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName}
 	route := agentCfg.QualifiedName()
@@ -742,8 +779,8 @@ func TestControlReadyScanRigScopeFederatesTheBindingOnBothArms(t *testing.T) {
 		name  string
 		beads config.BeadsConfig
 	}{
-		{name: "cached arm", beads: config.BeadsConfig{}},
-		{name: "fallback arm", beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}},
+		{name: "bd-1.0.4 compatibility", beads: config.BeadsConfig{}},
+		{name: "bd-1.0.5 compatibility", beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cityPath, rigPath, binding := rigFederationFixture(t, rigResident)

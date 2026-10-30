@@ -125,7 +125,7 @@ func TestNativeDoltStoreSetMetadataBatchPreservesTypesAgainstRealDolt(t *testing
 }
 
 // TestNativeDoltStoreCASPreservesOtherMetadataTypesAgainstRealDolt covers the
-// compare-and-set write path: swapping one key must not retype its neighbours,
+// compare-and-set write path: swapping one key must not retype its neighbors,
 // and the compare itself must still match a stored non-string value by its
 // JSON text.
 func TestNativeDoltStoreCASPreservesOtherMetadataTypesAgainstRealDolt(t *testing.T) {
@@ -164,5 +164,48 @@ func TestNativeDoltStoreCASComparesAgainstStoredNonStringValue(t *testing.T) {
 	got := readRawMetadata(t, storage, b.ID)
 	if attempt, ok := got["attempt"].(string); !ok || attempt != "4" {
 		t.Errorf("attempt = %#v, want the swapped-in string %q", got["attempt"], "4")
+	}
+}
+
+// TestNativeDoltStoreCASMatchesWhatTheStoreReadsForANonStringValue is the
+// read-then-CAS loop over real storage: whatever a stored non-string value reads
+// as through Get is the expectation that swaps it. This backend normalizes what
+// it stores — its JSON column re-spells 1.50 as 1.5 and sorts object keys — so
+// here only null reads differently from its stored text; the role double in
+// TestCASMatchesAStoredNonStringValueByItsReadRendering pins the spellings a
+// backend that keeps the literal would report.
+func TestNativeDoltStoreCASMatchesWhatTheStoreReadsForANonStringValue(t *testing.T) {
+	store, storage := openRealNativeDoltStoreForMetadata(t, "metadata-cas-read-rendering")
+
+	for _, tc := range []struct {
+		name, stored string
+	}{
+		{name: "null", stored: `null`},
+		{name: "non-canonical number", stored: `1.50`},
+		{name: "unsorted object", stored: `{"b": 1.50, "a": 2}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := store.Create(Bead{Title: "real-dolt-metadata-cas-" + tc.name})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			seedRawMetadata(t, storage, b.ID, `{"attempt": `+tc.stored+`}`, "metadata-cas-read-rendering")
+			read, err := store.Get(b.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			expected, present := read.Metadata["attempt"]
+			if !present {
+				t.Fatalf("Get dropped the seeded key: %#v", read.Metadata)
+			}
+
+			ok, err := store.CompareAndSetMetadataKey(b.ID, "attempt", expected, "4")
+			if err != nil || !ok {
+				t.Fatalf("CAS(%q) over stored %s = (%v, %v), want (true, nil)", expected, tc.stored, ok, err)
+			}
+			if got := readRawMetadata(t, storage, b.ID)["attempt"]; got != "4" {
+				t.Errorf("attempt = %#v, want the swapped-in string %q", got, "4")
+			}
+		})
 	}
 }

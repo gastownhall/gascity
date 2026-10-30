@@ -11,7 +11,7 @@ import (
 // with an empty tracked set. Failing here refuses the first start of every
 // city, because nothing would ever bring the server up.
 func TestFindRuntimesBySessionIDTreatsAbsentServerAsNoTrackedSessions(t *testing.T) {
-	t.Cleanup(proctable.SetScanRootForTesting(t.TempDir()))
+	proctable.SetScanRootForTesting(t, t.TempDir())
 	p := NewProviderWithConfig(Config{SocketName: "x"})
 	p.tm.exec = &fakeExecutor{err: ErrNoServer}
 
@@ -25,7 +25,7 @@ func TestFindRuntimesBySessionIDTreatsAbsentServerAsNoTrackedSessions(t *testing
 }
 
 func TestFindRuntimesBySessionIDFailsClosedOnTmuxListError(t *testing.T) {
-	t.Cleanup(proctable.SetScanRootForTesting(t.TempDir()))
+	proctable.SetScanRootForTesting(t, t.TempDir())
 	sentinel := errors.New("tmux exploded")
 	p := NewProviderWithConfig(Config{SocketName: "x"})
 	p.tm.exec = &fakeExecutor{err: sentinel}

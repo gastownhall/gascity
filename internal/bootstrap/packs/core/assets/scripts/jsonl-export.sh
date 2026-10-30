@@ -1,16 +1,27 @@
 #!/usr/bin/env bash
-# jsonl-export — export Dolt databases to JSONL and push to git archive.
+# jsonl-export — export every bead scope to JSONL and push to a git archive.
 #
-# Core exec order. All operations are deterministic: dolt sql exports, jq
-# record-count comparisons against spike threshold, git add/commit/push. No
-# LLM judgment needed.
+# Core exec order. All operations are deterministic: `gc bd export` per scope
+# (the city and each rig, reached through `gc bd`, so bd picks the transport),
+# jq record-count comparisons against the spike threshold, git
+# add/commit/push. No LLM judgment needed.
+#
+# The archive holds bd's native export format, one issue per line with its
+# labels, dependencies and comments embedded, so a snapshot restores with
+# `gc bd import <file>`.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
-CITY="${GC_CITY:-.}"
+CITY="${GC_CITY_PATH:-${GC_CITY:-.}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-. "$SCRIPT_DIR/dolt-target.sh"
+# CITY_ABS is read by scope_bd.sh.
+# shellcheck disable=SC2034
+CITY_ABS="$(cd "$CITY" 2>/dev/null && pwd -P || printf '%s\n' "$CITY")"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scope_bd.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/order_outcome.sh"
 
 # jq is a hard dependency: count_jsonl_rows below relies on it, and a missing
 # jq would silently zero every record count and could mask spikes on a stale
@@ -42,12 +53,59 @@ ARCHIVE_REPO="${GC_JSONL_ARCHIVE_REPO:-$PACK_STATE_DIR/jsonl-archive}"
 # transition, so operators who missed the first line still see the current
 # configuration. Default one week.
 MODE_RELOG_INTERVAL_SECONDS="${GC_JSONL_MODE_RELOG_INTERVAL:-604800}"
+# Keep the local archive's Git object database bounded. Each export commit
+# creates loose objects even in local-only mode; without periodic packing a
+# busy city can exhaust the host filesystem long before Git's object count
+# alone reaches its built-in auto-gc trigger. Maintenance runs after the
+# export, never before it, and packs incrementally (git repack --geometric,
+# git 2.32 or newer): it merges only the loose objects and the small packs, so
+# the archive's large pack is left as it is.
+GC_LOOSE_OBJECT_LIMIT="${GC_JSONL_GC_LOOSE_OBJECTS:-2000}"
+GC_LOOSE_KB_LIMIT="${GC_JSONL_GC_LOOSE_KB:-262144}"
+GC_WINDOW_MEMORY="${GC_JSONL_GC_WINDOW_MEMORY:-256m}"
+# A repack writes new packs before it removes the old ones, so it only starts
+# when the archive's filesystem can hold the copy and still keep this many KiB
+# free (default 500 MiB, the managed Dolt floor). When it cannot hold a copy
+# of the whole archive, the repack leaves the largest pack out. 0 disables the
+# check.
+GC_MIN_FREE_KB="${GC_JSONL_GC_MIN_FREE_KB:-512000}"
 
 # Cached archive mode ("push" or "local-only"). Resolved once on the first
 # get_archive_mode call and reused thereafter so every push checkpoint in a
 # single run sees a consistent value even if an operator adds or removes the
 # origin remote mid-run.
 ARCHIVE_MODE=""
+
+require_non_negative_integer() {
+    local name="$1"
+    local value="$2"
+
+    case "$value" in
+        ''|*[!0-9]*)
+            echo "jsonl-export: $name must be a non-negative integer" >&2
+            exit 1
+            ;;
+    esac
+    # [ ] rejects a value beyond the 64-bit range with an error, which the
+    # later if tests of this setting would read as false.
+    if ! [ "$value" -ge 0 ] 2>/dev/null; then
+        echo "jsonl-export: $name must be at most 9223372036854775807" >&2
+        exit 1
+    fi
+}
+
+require_non_negative_integer GC_JSONL_GC_LOOSE_OBJECTS "$GC_LOOSE_OBJECT_LIMIT"
+require_non_negative_integer GC_JSONL_GC_LOOSE_KB "$GC_LOOSE_KB_LIMIT"
+require_non_negative_integer GC_JSONL_GC_MIN_FREE_KB "$GC_MIN_FREE_KB"
+# Git reads pack.windowMemory as a byte count with an optional unit suffix,
+# takes 0 to mean no limit and a leading 0 as octal; reject all of those now
+# rather than on the first packing run.
+case "${GC_WINDOW_MEMORY%[kKmMgG]}" in
+    ''|0*|*[!0-9]*)
+        echo "jsonl-export: GC_JSONL_GC_WINDOW_MEMORY must be a positive byte count, without leading zeros, with an optional k, m or g suffix in either case (e.g. 256m)" >&2
+        exit 1
+        ;;
+esac
 
 resolve_escalate_script() {
     local candidate
@@ -78,59 +136,69 @@ maintenance_done() {
     gc session nudge "$target" "MAINTENANCE_DONE: $summary" 2>/dev/null || true
 }
 
-# Count records in a `dolt sql -r json` payload. The output is `{"rows":[...]}`
-# on (typically) a single physical line, so `wc -l` measures formatting, not
-# records. Falls back to 0 on empty/missing/unparseable input; jq parse errors
-# are forwarded to stderr so a corrupt archive surfaces in operator logs
-# instead of being silently scored as zero rows.
+# Count issue records in an archived snapshot. Current snapshots are gc bd export
+# JSONL (one record per line; memory records carry "_type":"memory" and are
+# not issues). Snapshots written before the switch to gc bd export are a single
+# `dolt sql -r json` object ({"rows":[...]}, or {} when empty); they are still
+# read so the first run after the switch compares against the old baseline
+# instead of tripping the spike check. Falls back to 0 on empty/missing/
+# unparseable input; jq parse errors are forwarded to stderr so a corrupt
+# archive surfaces in operator logs instead of being silently scored as zero.
 count_jsonl_rows() {
-    jq -s -r 'if length == 0 then 0 else ((.[0].rows // []) | length) end' || echo "0"
+    jq -s -r '
+        if length == 0 then 0
+        elif length == 1 and (.[0] | type) == "object" and ((.[0] | has("rows")) or .[0] == {}) then
+            ((.[0].rows // []) | length)
+        else
+            map(select(type == "object" and ((._type // "issue") == "issue"))) | length
+        end' || echo "0"
 }
 
 push_retry_delay_seconds() {
-    awk -v seed="$RANDOM$$" -v min="$PUSH_RETRY_DELAY_MIN" -v span="$PUSH_RETRY_DELAY_SPAN" \
+    # LC_ALL=C so printf emits a dot, not a locale decimal separator: `sleep`
+    # rejects "3,97" with "invalid time interval" and the backoff below is then
+    # silently skipped. Matches the LC_ALL=C awk already used in
+    # truncate_push_stderr_for_state.
+    LC_ALL=C awk -v seed="$RANDOM$$" -v min="$PUSH_RETRY_DELAY_MIN" -v span="$PUSH_RETRY_DELAY_SPAN" \
         'BEGIN{srand(seed); printf "%.2f", min + rand() * span}'
 }
 
-# Scrub test-only rows and ephemeral system rows while preserving the JSON
-# export structure and legitimate rows in the same payload. The input is one
-# JSON object with a .rows array, not newline-delimited JSON, so row-level
-# filtering must happen inside jq.
-#
-# Mirrors the SQL SCRUB_FILTER built below so post-export validation matches
-# the pre-export filter — any system issue_type, system-task title pattern, or
-# scoped auto-convoy that slips past the SQL filter is still removed here.
-scrub_exported_issues() {
-    jq -c '
-        if (.rows? | type) == "array" then
-            .rows |= map(
-                select(
-                    ((.title // "") | test("^(Test Issue|test_)") | not) and
-                    (
+# select_archived_records filters a `gc bd export --all` stream down to what the
+# archive keeps. `--all` is used because plain `gc bd export` also drops role
+# beads and templates, which the archive has always carried. Always dropped:
+# wisps-plane rows (ephemeral, or no-history wisps stamped "wisp_plane"),
+# which never belonged to the durable issue archive. Memory records
+# ("_type":"memory") are always kept. With scrub=true, issue records are also
+# filtered by the archive's scrub rules: test pollution, system issue types
+# (message, event, wisp, agent), gc:/order: system titles and sling
+# auto-convoys. Every line must be a JSON object; anything else fails the
+# scope rather than scoring as zero rows.
+select_archived_records() {
+    local scrub="$1"
+    jq -c --arg scrub "$scrub" '
+        if type != "object" then error("gc bd export line is not a JSON object") else . end
+        | select(
+            ((._type // "issue") == "memory") or (
+                ((._type // "issue") == "issue")
+                and ((.ephemeral // false) | not)
+                and ((.wisp_plane // false) | not)
+                and (
+                    $scrub != "true" or (
+                        ((.title // "") | test("^(Test Issue|test_)") | not) and
                         (
-                            (.id // "") == "bd-1" or
-                            (.id // "") == "bd-abc12" or
-                            ((.id // "") | test("^(testdb_|beads_t)"))
-                        ) | not
-                    ) and
-                    ((.issue_type // "") | test("^(message|event|wisp|agent)$") | not) and
-                    ((.title // "") | test("^(gc:|order:)") | not) and
-                    ((((.issue_type // "") == "convoy") and ((.title // "") | test("^sling-"))) | not)
+                            (
+                                (.id // "") == "bd-1" or
+                                (.id // "") == "bd-abc12" or
+                                ((.id // "") | test("^(testdb_|beads_t)"))
+                            ) | not
+                        ) and
+                        ((.issue_type // "") | test("^(message|event|wisp|agent)$") | not) and
+                        ((.title // "") | test("^(gc:|order:)") | not) and
+                        ((((.issue_type // "") == "convoy") and ((.title // "") | test("^sling-"))) | not)
+                    )
                 )
             )
-        else
-            .
-        end
-    '
-}
-
-validate_exported_issues() {
-    jq -e -c '
-        if (type == "object") and ((.rows? // [] | type) == "array") then
-            .
-        else
-            error("issues export must be a JSON object with a rows array")
-        end
+        )
     '
 }
 
@@ -289,7 +357,7 @@ has_pending_archive_push() {
 }
 
 refresh_archive_remote_main() {
-    git fetch origin main -q 2>/dev/null
+    git -c maintenance.auto=false -c gc.auto=0 fetch origin main -q 2>/dev/null
 }
 
 archive_has_local_only_commits_from_tracking() {
@@ -492,10 +560,12 @@ retry_pending_spike_alert() {
     while IFS= read -r alert_json; do
         [ -n "$alert_json" ] || continue
         pending_alerts+=("$alert_json")
-    done < <(
+    # A here-string, not process substitution: bash 3.2 (macOS) rejects <(...)
+    # in POSIX mode (POSIXLY_CORRECT).
+    done <<< "$(
         printf '%s\n' "$state_json" \
             | jq -c '.pending_spike_alerts // {} | to_entries | sort_by(.key) | .[].value'
-    )
+    )"
     if [ "${#pending_alerts[@]}" -eq 0 ]; then
         return
     fi
@@ -610,7 +680,7 @@ ESCALATION
     # Successful git commands can emit benign stderr (e.g. "warning: redirecting
     # to https://...", credential-helper notes, protocol upgrade hints) which
     # would otherwise misclassify the run as a failure and falsely escalate.
-    if ! fetch_err=$(git fetch origin main -q 2>&1 >/dev/null); then
+    if ! fetch_err=$(git -c maintenance.auto=false -c gc.auto=0 fetch origin main -q 2>&1 >/dev/null); then
         if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
             record_archive_push_failure \
                 "jsonl-export: fetching origin/main failed" \
@@ -622,7 +692,7 @@ ESCALATION
 
     if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
         if ! git merge-base --is-ancestor refs/remotes/origin/main HEAD >/dev/null 2>&1; then
-            if ! rebase_err=$(git rebase refs/remotes/origin/main 2>&1 >/dev/null); then
+            if ! rebase_err=$(git -c maintenance.auto=false -c gc.auto=0 rebase refs/remotes/origin/main 2>&1 >/dev/null); then
                 git rebase --abort >/dev/null 2>&1 || true
                 record_archive_push_failure \
                     "jsonl-export: rebase onto origin/main failed during archive push recovery" \
@@ -657,10 +727,10 @@ ESCALATION
 
             # Refresh origin tracking before retry — a sibling rig may have
             # moved the ref while we slept.
-            if fetch_err=$(git fetch origin main -q 2>&1 >/dev/null); then
+            if fetch_err=$(git -c maintenance.auto=false -c gc.auto=0 fetch origin main -q 2>&1 >/dev/null); then
                 if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1 \
                     && ! git merge-base --is-ancestor refs/remotes/origin/main HEAD >/dev/null 2>&1; then
-                    if ! rebase_err=$(git rebase refs/remotes/origin/main 2>&1 >/dev/null); then
+                    if ! rebase_err=$(git -c maintenance.auto=false -c gc.auto=0 rebase refs/remotes/origin/main 2>&1 >/dev/null); then
                         git rebase --abort >/dev/null 2>&1 || true
                         record_archive_push_failure \
                             "jsonl-export: rebase onto origin/main failed during retry $push_attempt" \
@@ -693,23 +763,185 @@ commit_archive_snapshot() {
         GIT_AUTHOR_EMAIL="daemon@gastown.local" \
         GIT_COMMITTER_NAME="Gas Town Daemon" \
         GIT_COMMITTER_EMAIL="daemon@gastown.local" \
-        git commit -q -m "$message"; then
+        git -c maintenance.auto=false -c gc.auto=0 commit -q -m "$message"; then
         echo "jsonl-export: $context commit failed" >&2
         return 1
+    fi
+}
+
+# Git 2.55 and newer start a detached maintenance run after a commit, and
+# fetch and rebase run git's auto-maintenance too; the snapshot commit and the
+# archive's fetches and rebases turn that off for each call (above), so the
+# repack below is the only thing that packs the archive.
+run_archive_repack() {
+    local -a repack_command=(
+        git -C "$ARCHIVE_REPO"
+        -c "pack.windowMemory=$GC_WINDOW_MEMORY"
+        -c pack.threads=1
+        repack -d -l -q --geometric=2
+    )
+
+    if [ -n "$ARCHIVE_KEEP_PACK" ]; then
+        repack_command+=("--keep-pack=$ARCHIVE_KEEP_PACK")
+    fi
+    # Pack at the lowest CPU and I/O priority the host allows. With -t, ionice
+    # still runs git when it cannot set the I/O class; the probe leaves out an
+    # ionice that cannot start a command here at all.
+    if command -v nice >/dev/null 2>&1; then
+        repack_command=(nice -n 19 "${repack_command[@]}")
+    fi
+    if command -v ionice >/dev/null 2>&1 && ionice -t -c 3 true >/dev/null 2>&1; then
+        repack_command=(ionice -t -c 3 "${repack_command[@]}")
+    fi
+    "${repack_command[@]}"
+}
+
+# Pack to keep out of the repack ("pack-<id>.pack"), or empty to repack all.
+ARCHIVE_KEEP_PACK=""
+
+# Decides how much of the archive the repack may rewrite when it holds
+# archive_kb KiB of objects. Fails when even a repack that leaves out the
+# largest pack would leave less than GC_MIN_FREE_KB free; sets
+# ARCHIVE_KEEP_PACK when only that repack fits. Warns and passes when df
+# cannot report free space.
+check_archive_gc_free_space() {
+    local archive_kb="$1"
+    local free_kb
+    local largest_pack
+    local largest_kb
+    local rest_kb
+
+    ARCHIVE_KEEP_PACK=""
+    if [ "$GC_MIN_FREE_KB" -eq 0 ]; then
+        return 0
+    fi
+    free_kb=$(df -Pk "$ARCHIVE_REPO" 2>/dev/null | awk 'NR == 2 { print $4 }') || free_kb=""
+    case "$free_kb" in
+        ''|*[!0-9]*)
+            echo "jsonl-export: could not read free disk space for $ARCHIVE_REPO; packing without the free-space check" >&2
+            return 0
+            ;;
+    esac
+    if [ "$((free_kb - archive_kb))" -ge "$GC_MIN_FREE_KB" ]; then
+        return 0
+    fi
+    # shellcheck disable=SC2012  # pack names are pack-<hex>.pack
+    largest_pack=$(ls -S "$ARCHIVE_REPO"/.git/objects/pack/pack-*.pack 2>/dev/null | head -n 1) || largest_pack=""
+    rest_kb="$archive_kb"
+    if [ -n "$largest_pack" ]; then
+        largest_kb=$(( $(wc -c < "$largest_pack" | tr -d ' ') / 1024 ))
+        rest_kb=$((archive_kb - largest_kb))
+        if [ "$((free_kb - rest_kb))" -ge "$GC_MIN_FREE_KB" ]; then
+            ARCHIVE_KEEP_PACK=$(basename "$largest_pack")
+            echo "jsonl-export: ${free_kb} KiB free is short of a full repack of the ${archive_kb} KiB archive; repacking without its largest pack, ${ARCHIVE_KEEP_PACK}" >&2
+            return 0
+        fi
+    fi
+    echo "jsonl-export: not packing the archive object database: ${free_kb} KiB free, and repacking the ${archive_kb} KiB archive (${rest_kb} KiB without its largest pack) would leave less than GC_JSONL_GC_MIN_FREE_KB=${GC_MIN_FREE_KB} KiB; free disk space or set GC_JSONL_GC_MIN_FREE_KB=0 to disable this check" >&2
+    printf 'jsonl-export: the archive size counts loose objects at their full size, though they usually pack to a small fraction of it; to pack the archive once by hand, run: git -C %q -c pack.windowMemory=%s -c pack.threads=1 repack -d -l -q --geometric=2\n' "$ARCHIVE_REPO" "$GC_WINDOW_MEMORY" >&2
+    return 1
+}
+
+# Sets ARCHIVE_LOOSE_OBJECTS, ARCHIVE_LOOSE_KB, ARCHIVE_PACKS and
+# ARCHIVE_PACK_KB from git count-objects.
+read_archive_object_stats() {
+    local object_stats
+    local key
+    local value
+
+    ARCHIVE_LOOSE_OBJECTS=""
+    ARCHIVE_LOOSE_KB=""
+    ARCHIVE_PACKS=""
+    ARCHIVE_PACK_KB=""
+    object_stats=$(git -C "$ARCHIVE_REPO" count-objects -v) || {
+        echo "jsonl-export: reading archive object statistics failed" >&2
+        return 1
+    }
+    while IFS=': ' read -r key value; do
+        case "$key" in
+            count) ARCHIVE_LOOSE_OBJECTS="$value" ;;
+            size) ARCHIVE_LOOSE_KB="$value" ;;
+            packs) ARCHIVE_PACKS="$value" ;;
+            size-pack) ARCHIVE_PACK_KB="$value" ;;
+        esac
+    done <<< "$object_stats"
+
+    case "$ARCHIVE_LOOSE_OBJECTS:$ARCHIVE_LOOSE_KB:$ARCHIVE_PACKS:$ARCHIVE_PACK_KB" in
+        *[!0-9:]*)
+            echo "jsonl-export: archive object statistics were malformed" >&2
+            return 1
+            ;;
+        :*|*:|*::*)
+            echo "jsonl-export: archive object statistics were incomplete" >&2
+            return 1
+            ;;
+    esac
+}
+
+# Pack the archive once its loose objects reach either limit, and report what
+# the pass did. Callers treat a non-zero return as a failed run; call it in a
+# condition so the explicit returns below, not set -e, decide the outcome.
+maintain_archive_repository() {
+    local loose_objects
+    local loose_kb
+    local packs_before
+    local mode=geometric
+    local started
+    local wall
+
+    read_archive_object_stats || return 1
+    if [ "$ARCHIVE_LOOSE_OBJECTS" -lt "$GC_LOOSE_OBJECT_LIMIT" ] \
+        && [ "$ARCHIVE_LOOSE_KB" -lt "$GC_LOOSE_KB_LIMIT" ]; then
+        return 0
+    fi
+    loose_objects="$ARCHIVE_LOOSE_OBJECTS"
+    loose_kb="$ARCHIVE_LOOSE_KB"
+    packs_before="$ARCHIVE_PACKS"
+
+    check_archive_gc_free_space "$((ARCHIVE_PACK_KB + loose_kb))" || return 1
+    if [ -n "$ARCHIVE_KEEP_PACK" ]; then
+        mode=geometric-keep-largest
+    fi
+    echo "jsonl-export: packing archive object database (loose_objects=$loose_objects, loose_kb=$loose_kb)" >&2
+    started=$SECONDS
+    if ! run_archive_repack; then
+        echo "jsonl-export: archive maintenance: mode=$mode wall=$((SECONDS - started))s loose_before=$loose_objects packs_before=$packs_before status=failed" >&2
+        echo "jsonl-export: archive object database maintenance failed (repack --geometric needs git 2.32 or newer)" >&2
+        return 1
+    fi
+    wall=$((SECONDS - started))
+    read_archive_object_stats || return 1
+    echo "jsonl-export: archive maintenance: mode=$mode wall=${wall}s loose_before=$loose_objects loose_after=$ARCHIVE_LOOSE_OBJECTS packs_before=$packs_before packs_after=$ARCHIVE_PACKS pack_kb_after=$ARCHIVE_PACK_KB" >&2
+}
+
+# Maintenance runs after the export and its push, so a failed pass never holds
+# the snapshot back. Its failure still fails the run, with the summary the run
+# would have reported.
+maintain_archive_or_exit() {
+    local summary="$1"
+
+    if [ -d "$ARCHIVE_REPO/.git" ] && ! maintain_archive_repository; then
+        echo "jsonl-export: $summary; archive maintenance failed" >&2
+        exit 1
     fi
 }
 
 discard_failed_db_outputs() {
     local db="$1"
 
-    rm -rf "$ARCHIVE_REPO/$db"
-    rm -f "$ARCHIVE_REPO/$db.jsonl"
-
-    if git -C "$ARCHIVE_REPO" cat-file -e "HEAD:$db/issues.jsonl" 2>/dev/null; then
-        git -C "$ARCHIVE_REPO" restore --source=HEAD --worktree -- "$db" >/dev/null 2>&1 || true
+    # Put the scope's directory and flat mirror back exactly as HEAD has them
+    # (or remove them when HEAD never had them). Nothing committed is lost.
+    git -C "$ARCHIVE_REPO" reset -q -- "$db" "$db.jsonl" >/dev/null 2>&1 || true
+    if git -C "$ARCHIVE_REPO" cat-file -e "HEAD:$db" 2>/dev/null; then
+        git -C "$ARCHIVE_REPO" checkout -q HEAD -- "$db" >/dev/null 2>&1 || true
+        git -C "$ARCHIVE_REPO" clean -q -fd -- "$db" >/dev/null 2>&1 || true
+    else
+        rm -rf "${ARCHIVE_REPO:?}/$db"
     fi
     if git -C "$ARCHIVE_REPO" cat-file -e "HEAD:$db.jsonl" 2>/dev/null; then
-        git -C "$ARCHIVE_REPO" restore --source=HEAD --worktree -- "$db.jsonl" >/dev/null 2>&1 || true
+        git -C "$ARCHIVE_REPO" checkout -q HEAD -- "$db.jsonl" >/dev/null 2>&1 || true
+    else
+        rm -f "$ARCHIVE_REPO/$db.jsonl"
     fi
 }
 
@@ -742,6 +974,11 @@ if [ -z "${GC_JSONL_ARCHIVE_REPO:-}" ] && [ ! -d "$ARCHIVE_REPO/.git" ]; then
         ARCHIVE_REPO="$LEGACY_ARCHIVE_REPO"
     fi
 fi
+# Later steps cd into the archive and still address it by this path.
+case "$ARCHIVE_REPO" in
+    /*) ;;
+    *) ARCHIVE_REPO="$PWD/$ARCHIVE_REPO" ;;
+esac
 if [ ! -e "$STATE_FILE" ] && [ -e "$LEGACY_PACK_STATE_FILE" ]; then
     STATE_FILE="$LEGACY_PACK_STATE_FILE"
 elif [ ! -e "$STATE_FILE" ] && [ -e "$LEGACY_STATE_FILE" ]; then
@@ -753,66 +990,76 @@ mkdir -p "$(dirname "$STATE_FILE")"
 log_archive_mode_if_needed
 retry_pending_spike_alert
 
-is_user_database() {
-    case "$1" in
-        information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe|benchdb|testdb_*|beads_pt*|beads_vr*|beads_test_bench_*|doctest_*|doctortest_*)
-            return 1
-            ;;
-        beads_t*)
-            local suffix="${1#beads_t}"
-            if [[ "$suffix" =~ ^[0-9a-f]{8,}$ ]]; then
-                return 1
-            fi
-            return 0
-            ;;
-        *)
-            return 0
-            ;;
+# The first export in the bd format moves a scope's snapshot files from the
+# old `dolt sql -r json` layout ({"rows":[...]} issues.jsonl, the flat
+# <db>.jsonl mirror and the per-table comments/config/dependencies/labels/
+# metadata files) into <db>/legacy/ with `git mv`. History is kept and nothing
+# is deleted; normal archive retention ages the legacy copies out.
+LEGACY_TABLE_FILES="issues comments config dependencies labels metadata"
+
+archived_file_is_legacy_format() {
+    local path="$1"
+    local head
+
+    git -C "$ARCHIVE_REPO" cat-file -e "HEAD:$path" 2>/dev/null || return 1
+    head=$(git -C "$ARCHIVE_REPO" show "HEAD:$path" 2>/dev/null | head -c 16 | tr -d '[:space:]')
+    case "$head" in
+        '{"rows"'* | '{}') return 0 ;;
     esac
+    return 1
 }
 
-# Discover databases. Exclude Dolt/MySQL system schemas, Gas City's internal
-# health-probe database, and test-fixture scratch databases (benchdb,
-# testdb_*, lowercase beads_t[0-9a-f]{8,}, beads_pt*, beads_vr*,
-# beads_test_bench_*, doctest_*, doctortest_* — matching the Go cleanup
-# planner contract); the remaining databases are expected to be bead stores.
-DATABASES=$(
-    while IFS= read -r db; do
-        if is_user_database "$db"; then
-            printf '%s\n' "$db"
+move_legacy_snapshot_files() {
+    local db="$1"
+    local table
+    local moved=0
+
+    if ! archived_file_is_legacy_format "$db/issues.jsonl"; then
+        return 0
+    fi
+    mkdir -p "$ARCHIVE_REPO/$db/legacy"
+    for table in $LEGACY_TABLE_FILES; do
+        if git -C "$ARCHIVE_REPO" cat-file -e "HEAD:$db/$table.jsonl" 2>/dev/null; then
+            git -C "$ARCHIVE_REPO" mv -f "$db/$table.jsonl" "$db/legacy/$table.jsonl" || return 1
+            moved=1
         fi
-    done < <(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2)
-)
-if [ -z "$DATABASES" ]; then
-    if [ -d "$ARCHIVE_REPO/.git" ]; then
-        cd "$ARCHIVE_REPO"
-        if has_pending_archive_push || archive_has_local_only_commits; then
-            if should_attempt_push; then
-                PUSH_STATUS="ok"
-                if ! push_archive_main; then
-                    PUSH_STATUS="failed"
-                fi
-            else
-                PUSH_STATUS="skipped (local-only)"
-            fi
-            SUMMARY="jsonl — no user databases, push: $PUSH_STATUS"
-            maintenance_done "$SUMMARY"
-            echo "jsonl-export: $SUMMARY"
+    done
+    if archived_file_is_legacy_format "$db.jsonl"; then
+        git -C "$ARCHIVE_REPO" mv -f "$db.jsonl" "$db/legacy/$db.jsonl" || return 1
+        moved=1
+    fi
+    if [ "$moved" -eq 1 ]; then
+        echo "jsonl-export: moved the pre-bd-export snapshot of $db to $db/legacy/" >&2
+    fi
+}
+
+# Ensure archive repo exists. A first run initializes the repo beside its
+# final path and renames it into place, so the archive path never exists
+# without its .git: gc doctor's jsonl-archive check reports such a path as a
+# malformed archive, and a doctor run during a first export would fail on it.
+# A path that already exists without .git is initialized in place, as before.
+if [ ! -d "$ARCHIVE_REPO/.git" ]; then
+    if [ -e "$ARCHIVE_REPO" ]; then
+        git -C "$ARCHIVE_REPO" init -q 2>/dev/null || true
+    else
+        archive_parent=$(dirname "$ARCHIVE_REPO")
+        mkdir -p "$archive_parent"
+        archive_init=$(mktemp -d "$archive_parent/.jsonl-archive-init.XXXXXX") || archive_init=""
+        # Something may create the archive path between the check and the
+        # mv; POSIX mv then moves the staging repo inside it (macOS mv has no
+        # -T to refuse). Such a nested staging repo is removed, and the run
+        # falls back to the in-place init.
+        if [ -n "$archive_init" ] && git -C "$archive_init" init -q 2>/dev/null \
+            && [ ! -e "$ARCHIVE_REPO" ] && mv "$archive_init" "$ARCHIVE_REPO" \
+            && [ ! -e "$ARCHIVE_REPO/$(basename "$archive_init")" ]; then
+            :
+        else
+            [ -n "$archive_init" ] && rm -rf "${ARCHIVE_REPO:?}/$(basename "$archive_init")"
+            [ -n "$archive_init" ] && rm -rf "$archive_init"
+            mkdir -p "$ARCHIVE_REPO"
+            git -C "$ARCHIVE_REPO" init -q 2>/dev/null || true
         fi
     fi
-    exit 0
-fi
-
-# Ensure archive repo exists.
-if [ ! -d "$ARCHIVE_REPO/.git" ]; then
-    mkdir -p "$ARCHIVE_REPO"
-    git -C "$ARCHIVE_REPO" init -q 2>/dev/null || true
-fi
-
-# Build scrub filter for the issues table.
-SCRUB_FILTER=""
-if [ "$SCRUB" = "true" ]; then
-    SCRUB_FILTER="WHERE issue_type NOT IN ('message', 'event', 'wisp', 'agent') AND title NOT LIKE 'gc:%' AND title NOT LIKE 'order:%' AND NOT (issue_type = 'convoy' AND title LIKE 'sling-%')"
 fi
 
 TOTAL_EXPORTED=0
@@ -825,25 +1072,26 @@ HALT_DB=""
 HALT_PREV_COUNT=0
 HALT_CURRENT_COUNT=0
 HALT_DELTA=0
+SCOPE_SCRUB_WHERE=""
+if [ "$SCRUB" = "true" ]; then
+    SCOPE_SCRUB_WHERE="WHERE issue_type NOT IN ('message', 'event', 'wisp', 'agent') AND title NOT LIKE 'gc:%' AND title NOT LIKE 'order:%' AND NOT (issue_type = 'convoy' AND title LIKE 'sling-%')"
+fi
 
-valid_database_identifier() {
-    local name="$1"
-
-    case "$name" in
-        ''|-*|*[!A-Za-z0-9_-]*)
-            return 1
-            ;;
-    esac
-
-    return 0
+record_failed_db() {
+    FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
+    FAILED_DBS="${FAILED_DBS}$1
+"
 }
 
+# read_source_issue_count counts the scope's durable issues with the same
+# scrub rules, straight from the store, so a drop spike in the export can be
+# checked against the source of truth.
 read_source_issue_count() {
     local db="$1"
     local output
     local count
 
-    if ! output=$(dolt_sql -r csv -q "SELECT COUNT(*) AS row_count FROM \`$db\`.issues $SCRUB_FILTER" 2>/dev/null); then
+    if ! output=$(scope_sql_read csv "SELECT COUNT(*) AS row_count FROM \`$db\`.issues $SCOPE_SCRUB_WHERE" 2>/dev/null); then
         return 1
     fi
     count=$(printf '%s\n' "$output" | tail -n 1 | tr -d '\r')
@@ -864,7 +1112,7 @@ should_halt_for_jsonl_spike() {
     local source_drop
 
     # Growth spikes are still suspicious. Only drop spikes can be suppressed by
-    # checking the Dolt source-of-truth behind the passive JSONL export.
+    # checking the store behind the passive JSONL export.
     if [ "$current_count" -ge "$prev_count" ]; then
         return 0
     fi
@@ -888,105 +1136,107 @@ should_halt_for_jsonl_spike() {
     return 0
 }
 
-while IFS= read -r DB; do
-    [ -z "$DB" ] && continue
-    TOTAL_DBS=$((TOTAL_DBS + 1))
-    if ! valid_database_identifier "$DB"; then
-        FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
-        FAILED_DBS="${FAILED_DBS}$DB
-"
-        continue
-    fi
-    if ! has_wisps_table "$DB"; then
-        # Not a bd-managed bead store. Decrement the count we just
-        # bumped — schemaless DBs aren't part of the export universe
-        # and shouldn't appear in TOTAL_DBS or FAILED_DBS summaries.
-        # See dolt-target.sh:has_wisps_table and gastownhall/gascity#1816.
-        TOTAL_DBS=$((TOTAL_DBS - 1))
-        continue
-    fi
+# export_scope exports the current scope into <archive>/<db>/issues.jsonl
+# (plus the flat <db>.jsonl mirror). Returns 1 when the scope failed; its
+# outputs are then restored to HEAD.
+export_scope() {
+    local DB="$SCOPE_DB"
+    local db_dir="$ARCHIVE_REPO/$DB"
+    local raw_tmp
+    local out
+    local filtered_tmp
 
-    DB_DIR="$ARCHIVE_REPO/$DB"
-    mkdir -p "$DB_DIR"
-
-    # Step 1: Export issues table.
-    ISSUE_EXPORT_TMP=$(mktemp "$DB_DIR/issues.jsonl.tmp.XXXXXX")
-    if ! dolt_sql -r json -q "SELECT * FROM \`$DB\`.issues $SCRUB_FILTER" > "$ISSUE_EXPORT_TMP" 2>/dev/null; then
-        rm -f "$ISSUE_EXPORT_TMP"
+    if ! move_legacy_snapshot_files "$DB"; then
+        echo "jsonl-export: moving the legacy snapshot of $DB to $DB/legacy/ failed" >&2
         discard_failed_db_outputs "$DB"
-        FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
-        FAILED_DBS="${FAILED_DBS}$DB
-"
-        continue
+        return 1
     fi
-    if ! mv -f "$ISSUE_EXPORT_TMP" "$DB_DIR/issues.jsonl"; then
-        rm -f "$ISSUE_EXPORT_TMP"
+    mkdir -p "$db_dir"
+
+    # Step 1: gc bd export of the whole scope (read-only; one consistent snapshot).
+    raw_tmp=$(mktemp "$db_dir/export.jsonl.tmp.XXXXXX")
+    if ! out=$(scope_bd export --all -o "$raw_tmp" 2>&1); then
+        echo "jsonl-export: gc bd export failed for $SCOPE_LABEL ($DB): $out" >&2
+        rm -f "$raw_tmp"
         discard_failed_db_outputs "$DB"
-        FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
-        FAILED_DBS="${FAILED_DBS}$DB
-"
-        continue
+        return 1
     fi
 
-    # Export supplemental tables (best-effort).
-    for TABLE in comments config dependencies labels metadata; do
-        dolt_sql -r json -q "SELECT * FROM \`$DB\`.\`$TABLE\`" > "$DB_DIR/$TABLE.jsonl" 2>/dev/null || true
-    done
+    # Step 2: keep the archived records (see select_archived_records). A
+    # malformed export fails the scope so it cannot become the new baseline.
+    filtered_tmp=$(mktemp "$db_dir/issues.jsonl.tmp.XXXXXX")
+    if ! select_archived_records "$SCRUB" <"$raw_tmp" >"$filtered_tmp"; then
+        echo "jsonl-export: gc bd export for $SCOPE_LABEL ($DB) is not valid JSONL" >&2
+        rm -f "$raw_tmp" "$filtered_tmp"
+        discard_failed_db_outputs "$DB"
+        return 1
+    fi
+    rm -f "$raw_tmp"
+    mv -f "$filtered_tmp" "$db_dir/issues.jsonl"
 
-    # Step 2: Validate the exported JSON payload and optionally scrub it. Even
-    # when SCRUB=false we still fail the DB on malformed JSON so corrupt live
-    # exports cannot silently score as zero rows and become the new baseline.
-    TMPFILE=$(mktemp)
-    if [ "$SCRUB" = "true" ]; then
-        if ! scrub_exported_issues < "$DB_DIR/issues.jsonl" > "$TMPFILE"; then
-            rm -f "$TMPFILE"
-            discard_failed_db_outputs "$DB"
-            FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
-            FAILED_DBS="${FAILED_DBS}$DB
-"
+    # The flat <db>.jsonl mirrors the per-db snapshot for readers of the
+    # older flat layout.
+    if ! cp -f "$db_dir/issues.jsonl" "$ARCHIVE_REPO/$DB.jsonl" 2>/dev/null; then
+        discard_failed_db_outputs "$DB"
+        return 1
+    fi
+    return 0
+}
+
+# Every scope is visited through bd: the city first, then each rig.
+SCOPE_SPECS="city"
+if RIG_NAMES=$(core_rig_names); then
+    while IFS= read -r rig_name; do
+        [ -n "$rig_name" ] || continue
+        SCOPE_SPECS="$SCOPE_SPECS
+rig $rig_name"
+    done <<< "$RIG_NAMES"
+else
+    echo "jsonl-export: gc rig list failed; exporting the city scope only" >&2
+    order_outcome_scope_skipped "rigs" "rig list unavailable"
+fi
+trap order_outcome_write EXIT
+
+VISITED_DBS=""
+while IFS= read -r SCOPE_SPEC; do
+    [ -n "$SCOPE_SPEC" ] || continue
+    # shellcheck disable=SC2086 # "city" or "rig <name>"
+    scope_select $SCOPE_SPEC
+    if ! scope_resolve_db; then
+        if [ "$SCOPE_NOT_BD" -eq 1 ]; then
+            echo "jsonl-export: $SCOPE_LABEL is not a bd bead store; nothing to export there"
+            order_outcome_scope_skipped "$SCOPE_LABEL" "not a bd bead store"
             continue
         fi
-    elif ! validate_exported_issues < "$DB_DIR/issues.jsonl" > "$TMPFILE"; then
-        rm -f "$TMPFILE"
-        discard_failed_db_outputs "$DB"
-        FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
-        FAILED_DBS="${FAILED_DBS}$DB
-"
+        echo "jsonl-export: $SCOPE_LABEL unreachable through gc bd: $SCOPE_LAST_ERROR" >&2
+        TOTAL_DBS=$((TOTAL_DBS + 1))
+        record_failed_db "$SCOPE_LABEL"
+        order_outcome_scope_skipped "$SCOPE_LABEL" "bead store unreachable"
         continue
     fi
-    if [ ! -s "$TMPFILE" ]; then
-        echo "jsonl-export: issues export for $DB was empty" >&2
-        rm -f "$TMPFILE"
-        discard_failed_db_outputs "$DB"
-        FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
-        FAILED_DBS="${FAILED_DBS}$DB
+    case "
+$VISITED_DBS
+" in
+        *"
+$SCOPE_DB
+"*)
+            continue
+            ;;
+    esac
+    VISITED_DBS="${VISITED_DBS}${SCOPE_DB}
 "
-        continue
-    fi
-    if ! validate_exported_issues < "$TMPFILE" >/dev/null; then
-        rm -f "$TMPFILE"
-        discard_failed_db_outputs "$DB"
-        FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
-        FAILED_DBS="${FAILED_DBS}$DB
-"
-        continue
-    fi
-    mv -f "$TMPFILE" "$DB_DIR/issues.jsonl"
+    DB="$SCOPE_DB"
+    TOTAL_DBS=$((TOTAL_DBS + 1))
 
-    # Legacy flat file mirrors the scrubbed per-db export. Keep the two output
-    # shapes in sync so any downstream reader sees the same filtered payload.
-    if ! cp -f "$DB_DIR/issues.jsonl" "$ARCHIVE_REPO/$DB.jsonl" 2>/dev/null; then
-        discard_failed_db_outputs "$DB"
-        FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
-        FAILED_DBS="${FAILED_DBS}$DB
-"
+    if ! export_scope; then
+        record_failed_db "$DB"
+        order_outcome_scope_skipped "$SCOPE_LABEL" "export failed"
         continue
     fi
 
-    # Count records from the final persisted payload (post-scrub / post-
-    # validation) so commit messages and maintenance summaries reflect what was
-    # actually archived, not the pre-scrub raw export.
-    CURRENT_COUNT=$(count_jsonl_rows < "$DB_DIR/issues.jsonl")
+    # Count records from the final persisted payload (post-scrub) so commit
+    # messages and maintenance summaries reflect what was actually archived.
+    CURRENT_COUNT=$(count_jsonl_rows < "$ARCHIVE_REPO/$DB/issues.jsonl")
     TOTAL_EXPORTED=$((TOTAL_EXPORTED + CURRENT_COUNT))
 
     STAGE_PATHS+=("$DB" "$DB.jsonl")
@@ -1000,10 +1250,9 @@ while IFS= read -r DB; do
     # Skip the percentage check on the first run (no prior commit) and when
     # the previous count is below the absolute floor — a 1→2 swing is 100% but
     # meaningless on a tiny database. The PREV_COUNT > 0 guard also avoids the
-    # division-by-zero on line `DELTA=...` when the floor is set to 0 to
-    # disable the small-N skip.
+    # division by zero when the floor is set to 0 to disable the small-N skip.
     if [ "$PREV_COUNT" -gt 0 ] && [ "$PREV_COUNT" -ge "$MIN_PREV_FOR_SPIKE_CHECK" ]; then
-        FILTERED_COUNT=$(count_jsonl_rows < "$DB_DIR/issues.jsonl")
+        FILTERED_COUNT="$CURRENT_COUNT"
         DELTA=$(( (FILTERED_COUNT - PREV_COUNT) * 100 / PREV_COUNT ))
         if [ "$DELTA" -lt 0 ]; then
             DELTA=$(( -DELTA ))
@@ -1019,8 +1268,14 @@ while IFS= read -r DB; do
         fi
     fi
 done <<EOF
-$DATABASES
+$SCOPE_SPECS
 EOF
+
+if [ "$TOTAL_DBS" -eq 0 ]; then
+    order_outcome_set skipped "no bd bead store to export"
+elif [ "$FAILED_DB_COUNT" -ge "$TOTAL_DBS" ]; then
+    order_outcome_set skipped "no bead scope could be exported"
+fi
 
 cd "$ARCHIVE_REPO"
 if [ "${#STAGE_PATHS[@]}" -gt 0 ]; then
@@ -1034,7 +1289,7 @@ fi
 # On HALT we still commit the new export so PREV_COUNT advances on the next
 # run — otherwise the same spike re-fires every cooldown and floods the inbox
 # (#1547 root cause #3). Push is skipped, so the spike snapshot stays local
-# until a later successful non-HALT run pushes the archive forward.
+# until a later run pushes the archive forward.
 if [ "$HALTED" -eq 1 ]; then
     if ! git diff --cached --quiet 2>/dev/null; then
         EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT))
@@ -1052,7 +1307,11 @@ if [ "$HALTED" -eq 1 ]; then
     else
         echo "jsonl-export: spike alert delivery failed; will retry from state" >&2
     fi
-    maintenance_done "jsonl — HALTED on spike detection"
+    # Pack only after the alert is sent or saved for retry: the commit above
+    # already advanced the baseline, so this spike is never detected again.
+    SUMMARY="jsonl — HALTED on spike detection"
+    maintain_archive_or_exit "$SUMMARY"
+    maintenance_done "$SUMMARY"
     exit 0
 fi
 
@@ -1072,6 +1331,7 @@ if git diff --cached --quiet 2>/dev/null; then
         else
             SUMMARY="jsonl — no changes, push: $PUSH_STATUS"
         fi
+        maintain_archive_or_exit "$SUMMARY"
         maintenance_done "$SUMMARY"
         echo "jsonl-export: $SUMMARY"
         exit 0
@@ -1079,12 +1339,15 @@ if git diff --cached --quiet 2>/dev/null; then
     if [ -n "$FAILED_DBS" ]; then
         EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT))
         SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: skipped, failed: $(printf '%s' "$FAILED_DBS" | tr '\n' ' ')"
+        maintain_archive_or_exit "$SUMMARY"
         maintenance_done "$SUMMARY"
         echo "jsonl-export: $SUMMARY"
         exit 0
     fi
     # No changes.
-    maintenance_done "jsonl — no changes"
+    SUMMARY="jsonl — no changes"
+    maintain_archive_or_exit "$SUMMARY"
+    maintenance_done "$SUMMARY"
     exit 0
 fi
 
@@ -1111,5 +1374,7 @@ if [ -n "$FAILED_DBS" ]; then
     SUMMARY="$SUMMARY, failed: $(printf '%s' "$FAILED_DBS" | tr '\n' ' ')"
 fi
 
+# After the push, so a packing failure never holds back the new snapshot.
+maintain_archive_or_exit "$SUMMARY"
 maintenance_done "$SUMMARY"
 echo "jsonl-export: $SUMMARY"

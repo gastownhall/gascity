@@ -21,7 +21,7 @@ func platformKill(pid int, sig syscall.Signal) error {
 		return fmt.Errorf("refusing to terminate unsafe Windows PID %d", pid)
 	}
 	if sig != syscall.SIGKILL {
-		return fmt.Errorf("signal %v for PID %d is unsupported on Windows", sig, pid)
+		return fmt.Errorf("signal %v for PID %d: %w", sig, pid, errSignalUnsupported)
 	}
 	process, err := os.FindProcess(pid)
 	if err != nil {

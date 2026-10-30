@@ -4,3 +4,6 @@ trigger = "cooldown"
 interval = "30s"
 exec = "gc dolt health --json | gc dolt health-check"
 reserved_dispatch = true
+# Dolt-server work: never dispatched for a scope on another backend (http,
+# postgres, doltlite); gc reports it there as inapplicable, not failed.
+requires_backend = ["dolt"]

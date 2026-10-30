@@ -16,7 +16,9 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -136,6 +138,32 @@ func TestDoRigStatusJSON(t *testing.T) {
 	}
 	if agent := byName["frontend/worker-1"]; agent.QualifiedName != "frontend/worker-1" || !agent.Running || !agent.Draining || agent.Status != "draining" {
 		t.Fatalf("numbered agent = %+v, want running draining frontend/worker-1", agent)
+	}
+}
+
+func TestDoRigStatusJSONUsesRuntimeRigSuspension(t *testing.T) {
+	cityPath := t.TempDir()
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityPath, "frontend", &suspended); err != nil {
+		t.Fatalf("SetRigSuspended: %v", err)
+	}
+	rig := config.Rig{Name: "frontend", Path: "/tmp/frontend"}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigStatusWithStoreAndSnapshot(
+		runtime.NewFake(), newFakeDrainOps(), rig, nil,
+		cityPath, "city", "", &config.City{Rigs: []config.Rig{rig}}, nil,
+		newSessionBeadSnapshot(nil), true, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("doRigStatusWithStoreAndSnapshot --json = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var result RigStatusJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("invalid JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if !result.Rig.Suspended {
+		t.Fatal("rig suspended = false, want runtime suspension")
 	}
 }
 

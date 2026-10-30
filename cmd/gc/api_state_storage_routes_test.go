@@ -33,7 +33,7 @@ func messagingSplitRoutes(infra beads.Store) *storageRoutes {
 func stubControllerCityStore(t *testing.T, store beads.Store) {
 	t.Helper()
 	prev := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: store}, nil
 	}
 	t.Cleanup(func() { newControllerStateOpenCityStore = prev })

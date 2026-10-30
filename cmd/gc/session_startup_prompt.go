@@ -25,21 +25,26 @@ type startupPromptCity struct {
 // so the SessionStart hook adds context without repeating a prompt it cannot
 // inline past the provider's size cap. It applies the reconciler's promptDelivery
 // policy and returns hints unchanged when nothing can or needs to be delivered:
-// a closed session, a session with no agent config or prompt, and a runtime that
+// a closed session, a session with no agent config or prompt, a client's provider
+// chat (isClientProviderChat), and a runtime that
 // cannot be confirmed to carry a nudge (subprocess ignores cfg.Nudge, so marking
 // the launch delivered would suppress the hook and lose the prompt).
 //
-// Running sessions are NOT skipped. The worker resolvers run applyTo as the
-// handle's LaunchHints, for every operation that can start the runtime, and an
-// interrupting submit stops a running session and relaunches it with those
-// hints (Manager.interruptAndSubmitLocked), so the payload must be there even
-// when the handle is over a live runtime.
+// Running sessions are NOT skipped. The worker factory resolves these hints once
+// per handle, and an interrupting submit stops a running session and relaunches
+// it with the same hints (Manager.interruptAndSubmitLocked), so the payload must
+// already be there when a handle is built over a live runtime.
 func (c startupPromptCity) applyTo(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error) {
 	if info.Closed {
 		return hints, nil
 	}
 	agent := findAgentByTemplate(c.cfg, info.Template)
 	if agent == nil {
+		return hints, nil
+	}
+	// A client's provider chat gets no worker persona on any start path: the
+	// hook (primeHookClientChat) and the reconciler send it the beacon alone.
+	if isClientProviderChat(agent, info.SessionOrigin, info.Alias) {
 		return hints, nil
 	}
 	runtimeName := effectiveSessionProvider(agent.Session, c.cfg.Session.Provider)
@@ -85,6 +90,7 @@ func (c startupPromptCity) promptFor(a *config.Agent, info session.Info) string 
 		return ""
 	}
 	identity := primeSessionIdentity{
+		Alias: info.Alias,
 		Agent: firstNonEmptyGCString(info.AgentName, a.QualifiedName()),
 		Dir:   info.WorkDir,
 	}
@@ -93,5 +99,5 @@ func (c startupPromptCity) promptFor(a *config.Agent, info session.Info) string 
 		config.QueryTopology{Beads: c.cfg.Beads}, identity, c.stderr)
 	ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(a, &c.cfg.Workspace, c.cfg.Providers)
 	ctx.InstructionsFile = instructionsFileForAgent(a, &c.cfg.Workspace, c.cfg.Providers)
-	return renderAgentPromptTemplate(c.path, cityName, c.cfg, a, ctx, c.stderr)
+	return renderPrimeAgentPrompt(c.path, cityName, c.cfg, a, ctx, c.stderr).Text
 }

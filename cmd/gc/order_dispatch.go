@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/executionevent"
@@ -300,9 +301,10 @@ type orderSetSnapshot struct {
 //
 // inflightN + inflightDone together track dispatchOne goroutines so
 // drain can select on either completion or ctx.Done without spawning an
-// orphaned waiter goroutine. dispatch is only ever called from the tick
-// goroutine, so addInflight's check-and-create happens-before any
-// concurrent drain call on the same instance.
+// orphaned waiter goroutine. dispatch is only ever called under the
+// orders lane's passMu (orders_lane.go), and every drain of a lane-owned
+// instance runs under that lock too, so addInflight's check-and-create
+// happens-before any drain call on the same instance.
 //
 // dispatchCtx is the parent context for every dispatchOne goroutine. The
 // per-goroutine ctx is derived to cancel when EITHER the caller's tick
@@ -335,6 +337,22 @@ type memoryOrderDispatcher struct {
 	lastRunCache         map[string]time.Time
 	gateBackoffUntil     map[string]time.Time
 	openWorkSuppression  map[string]orderOpenWorkSuppression
+	// inapplicableReported holds the orders this controller boot has already
+	// reported as inapplicable, so each is announced once rather than on every
+	// tick or webhook delivery. Created on first use (inapplicableReports) and
+	// guarded by cacheMu. The set locks itself, so dispatchers share it:
+	// carryInapplicableReportsFrom hands it across dispatcher rebuilds, and the
+	// controller's webhook adapter hands every per-delivery dispatcher the same set.
+	inapplicableReported *inapplicableReportSet
+	// poursWork memoizes, per scoped order, whether its formula compiles to a
+	// WORK-class molecule (a v1 poured recipe), whose run evidence then lives
+	// in the order's target work store rather than the graph binding. Guarded
+	// by cacheMu; refreshed by every dispatch, which compiles the recipe anyway.
+	poursWork map[string]bool
+	// poursWorkFailedUntil holds, per scoped order, until when a failed
+	// compile is not retried for the gate (orderPoursWorkFailureTTL). Guarded
+	// by cacheMu.
+	poursWorkFailedUntil map[string]time.Time
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -684,6 +702,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	// store — so doing it for every order costs the tick nothing and gives the
 	// parallel pass its complete work list.
 	candidates := make([]*orderDispatchCandidate, 0, total)
+	// scopeBackends memoizes each scope's backend for this tick: resolving it
+	// reads the scope's metadata and, when that names none, city.toml.
+	scopeBackends := make(map[string]string)
 	for offset := 0; offset < total; offset++ {
 		idx := (start + offset) % total
 		a := m.aa[idx]
@@ -696,6 +717,20 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: resolving target for %s: %v", a.ScopedName(), err)
 			continue
+		}
+		// An order that requires a backend its scope does not use is never
+		// dispatched there, and never counted as a failure: it is reported
+		// once as inapplicable and skipped before any store is opened.
+		if a.RequiresBackend != nil {
+			backend, ok := scopeBackends[target.ScopeRoot]
+			if !ok {
+				backend = orderScopeBackendFn(cityPath, target.ScopeRoot)
+				scopeBackends[target.ScopeRoot] = backend
+			}
+			if !a.AppliesToBackend(backend) {
+				m.reportInapplicable(a, target, backend)
+				continue
+			}
 		}
 
 		storeKey := orderStoreTargetKey(target)
@@ -713,7 +748,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if !legacyOK {
 			continue
 		}
-		storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, store, storeKey, legacyStore)
+		storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, store, storeKey, legacyStore, func() bool { return m.orderPoursWork(ctx, a) })
 		scoped := a.ScopedName()
 		// NoWorkGate orders (pure probes/sweeps that track no beads) opt out of
 		// BOTH open-work gates entirely. The gates exist to suppress re-dispatch
@@ -927,6 +962,11 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 	storesForGate, storeKeysForGate := cand.gateStores, cand.gateStoreKeys
 	scoped := cand.scoped
 
+	// The fallback is a deliberate union over the gate's legs: an order's run
+	// evidence is a tracking bead (orders class), a wisp or graph.v2 root
+	// (graph class) or, for a v1 poured formula, a work-class molecule root on
+	// the work leg gateStoresFor adds. Each leg is read by the run label, so a
+	// class leg's read may select nothing there that another leg holds.
 	baseLastRunFn := trackingIndex.lastRunFunc(storesForGate, storeKeysForGate,
 		orders.LastRunFuncWithEventFallback(orders.LastRunAcross(orderFrontDoorsForStores(storesForGate)), m.ep))
 	var lastRunErr error
@@ -1003,7 +1043,7 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 		// distinctly (normal "condition false" is not logged) so a check
 		// outgrowing its budget is diagnosable instead of invisible
 		// (ga-ocypq2). Raise the order's check_timeout to fix.
-		if a.Trigger == "condition" && strings.Contains(result.Reason, orders.ConditionCheckTimedOutMarker) {
+		if a.Trigger == "condition" && result.TimedOut {
 			logDispatchError(m.stderr, "gc: order dispatch: %s %s — raise check_timeout if the check needs a slow store read", a.ScopedName(), result.Reason)
 		}
 		return false
@@ -1130,7 +1170,7 @@ func (m *memoryOrderDispatcher) cancel() {
 }
 
 // addInflight increments the in-flight count and lazily creates the done
-// signal. Called synchronously from dispatch on the tick goroutine.
+// signal. Called synchronously from dispatch, under the orders lane's passMu.
 func (m *memoryOrderDispatcher) addInflight() {
 	m.inflightMu.Lock()
 	m.inflightN++
@@ -1411,7 +1451,9 @@ func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeK
 	}
 	entries := make(map[string]orderTrackingSummary)
 	for _, b := range items {
-		if b.Status == "closed" {
+		// A plain bead carrying an order-run label is no run of the order
+		// (orders.IsRunRecord, mc-v8g4p): it holds no single-flight.
+		if b.Status == "closed" || !orders.IsRunRecord(b) {
 			continue
 		}
 		tracking := orders.IsTrackingBead(b)
@@ -1522,6 +1564,82 @@ func (m *memoryOrderDispatcher) carryLastRunCacheFrom(prev *memoryOrderDispatche
 			m.lastRunCache[key] = last
 		}
 	}
+}
+
+// inapplicableReportSet is the set of orders already reported as
+// inapplicable, keyed by scoped name and backend. Its zero value is ready to
+// use and it is safe for concurrent use, so dispatchers that each live for
+// less than a controller boot can share one.
+type inapplicableReportSet struct {
+	mu   sync.Mutex
+	seen map[string]struct{}
+}
+
+// claim marks key reported and reports whether this is its first report.
+func (r *inapplicableReportSet) claim(key string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, seen := r.seen[key]; seen {
+		return false
+	}
+	if r.seen == nil {
+		r.seen = make(map[string]struct{})
+	}
+	r.seen[key] = struct{}{}
+	return true
+}
+
+// inapplicableReports returns the dispatcher's report set, creating it on
+// first use.
+func (m *memoryOrderDispatcher) inapplicableReports() *inapplicableReportSet {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.inapplicableReported == nil {
+		m.inapplicableReported = &inapplicableReportSet{}
+	}
+	return m.inapplicableReported
+}
+
+// reportInapplicable records one order.inapplicable event for an order its
+// scope's backend rules out, the first time this controller boot sees that
+// order on that backend.
+func (m *memoryOrderDispatcher) reportInapplicable(a orders.Order, target execStoreTarget, backend string) {
+	scoped := a.ScopedName()
+	if !m.inapplicableReports().claim(scoped + "\x00" + backend) {
+		return
+	}
+
+	scope := "city"
+	if target.ScopeKind == "rig" && target.RigName != "" {
+		scope = "rig:" + target.RigName
+	}
+	m.rec.Record(events.Event{
+		Type:    events.OrderInapplicable,
+		Actor:   "controller",
+		Subject: scoped,
+		Message: fmt.Sprintf("%s: requires backend %s; %s scope uses %s, so it is not dispatched there",
+			orderInapplicableLabel(backend), strings.Join(a.RequiresBackend, " or "), scope, backend),
+		Payload: events.OrderInapplicablePayloadJSON(events.OrderInapplicablePayload{
+			OrderName:       scoped,
+			Scope:           scope,
+			Backend:         backend,
+			RequiresBackend: append([]string(nil), a.RequiresBackend...),
+		}),
+	})
+}
+
+// carryInapplicableReportsFrom hands this dispatcher the report set of a
+// previous one, so a reload or rescan does not announce again an order the
+// previous one already reported: the report is once per controller boot. Call
+// before this dispatcher reports anything; a set it already holds is replaced.
+func (m *memoryOrderDispatcher) carryInapplicableReportsFrom(prev *memoryOrderDispatcher) {
+	if m == nil || prev == nil {
+		return
+	}
+	reports := prev.inapplicableReports()
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	m.inapplicableReported = reports
 }
 
 // gateBackoffActive reports whether the named order is in a gate-timeout
@@ -1732,7 +1850,7 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	}
 
 	timeout := effectiveTimeout(a, m.maxTimeout)
-	childCtx, cancel := context.WithTimeout(ctx, timeout)
+	childCtx, cancel := withOrderTimeout(ctx, timeout)
 	defer cancel()
 
 	m.rec.Record(events.Event{
@@ -1917,6 +2035,9 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 	env, err := orderExecEnvWithError(cityPath, m.cfg, target, a, vars)
 	var output []byte
 	var execErrMsg string
+	// declared is the outcome file of a run that exited 0; its skipped/partial
+	// declaration (if any) is reported after order.completed.
+	var declared *orderOutcomeFile
 	if err != nil {
 		redactionEnv := append(os.Environ(), env...)
 		redacted := redactOrderEnvError(err, redactionEnv)
@@ -1924,10 +2045,25 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 		outcome = orders.RunOutcomeExecEnvFailed
 		logDispatchError(m.stderr, "gc: order exec %s env failed: %s", scoped, redacted)
 	} else {
+		outcomeFile, outcomeErr := newOrderOutcomeFile()
+		if outcomeErr != nil {
+			// The order still runs; it just has nowhere to declare a skip.
+			logDispatchError(m.stderr, "gc: order %s: %v", scoped, outcomeErr)
+		} else {
+			env = append(env, outcomeFile.envEntry())
+			defer func() {
+				if err := outcomeFile.remove(); err != nil {
+					logDispatchError(m.stderr, "gc: order %s: %v", scoped, err)
+				}
+			}()
+		}
 		output, err = m.execRun(ctx, a.Exec, target.ScopeRoot, env)
+		if err == nil {
+			declared = outcomeFile
+		}
 		if err != nil {
 			redactionEnv := append(os.Environ(), env...)
-			execErrMsg = execenv.RedactText(err.Error(), redactionEnv)
+			execErrMsg = execenv.RedactText(orderRunErrorText(ctx, err), redactionEnv)
 			outcome = orders.RunOutcomeExecFailed
 			logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, execErrMsg)
 			if len(output) > 0 {
@@ -1973,6 +2109,9 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 		Actor:   "controller",
 		Subject: scoped,
 	})
+	if declared != nil {
+		recordOrderOutcome(m.rec, m.stderr, scoped, declared)
+	}
 }
 
 // prepareOrderWispRecipe compiles an order's formula into a recipe and returns
@@ -2212,7 +2351,19 @@ func (m *memoryOrderDispatcher) ordersStoreKey() string {
 // untouched — runOrderTrackingSweepWatchdog still sweeps the city store and every
 // rig, so the residue is closed on its own cadence rather than gating forever.
 // The convergence lane does not narrow; only the latency lane does.
-func (m *memoryOrderDispatcher) gateStoresFor(cityPath string, store beads.Store, storeKey string, legacyStore beads.Store) ([]beads.Store, []string) {
+//
+// # A work-class order keeps its target work leg
+//
+// A v1 POURED order formula is the one recipe whose molecule is work class, so
+// the dispatch pours it into the order's target work store (dispatchWisp,
+// moleculeClassStore) and its root carries the order-run label and the event
+// cursor there. For such an order (poursWork) the target work store stays a
+// gate leg on a split city too: without it the open-work gate re-fires while
+// the run is still open, and the cooldown clock and the event cursor regress
+// once the tracking bead is gone (R17). Every other order keeps the binding
+// legs alone. poursWork is asked only when a binding exists, so a
+// single-store city never compiles a formula to build its gate; nil means no.
+func (m *memoryOrderDispatcher) gateStoresFor(cityPath string, store beads.Store, storeKey string, legacyStore beads.Store, poursWork func() bool) ([]beads.Store, []string) {
 	workStores := []beads.Store{store}
 	workKeys := []string{storeKey}
 	if legacyStore != nil {
@@ -2231,9 +2382,73 @@ func (m *memoryOrderDispatcher) gateStoresFor(cityPath string, store beads.Store
 		infraKeys = append(infraKeys, m.ordersStoreKey())
 	}
 	if len(infraStores) > 0 {
+		if poursWork != nil && store != nil && !storeListContains(infraStores, store) && poursWork() {
+			infraStores = append(infraStores, store)
+			infraKeys = append(infraKeys, storeKey)
+		}
 		return infraStores, infraKeys
 	}
 	return workStores, workKeys
+}
+
+// orderPoursWork reports whether a's formula compiles to a work-class molecule,
+// so its run evidence lands in the target work store (see gateStoresFor). The
+// answer is memoized per order; every dispatch refreshes it from the recipe it
+// actually poured (rememberOrderPoursWork), so an edited formula is picked up
+// by the next run. An exec order pours nothing into the work store.
+//
+// A formula that does not compile here answers TRUE and is not memoized: the
+// work leg then stays on the gate. Reading one store too many costs a read;
+// reading one too few would miss a previous run's evidence (after a restart
+// the memo is empty) and fire the order again.
+func (m *memoryOrderDispatcher) orderPoursWork(ctx context.Context, a orders.Order) bool {
+	if a.IsExec() || strings.TrimSpace(a.Formula) == "" {
+		return false
+	}
+	scoped := a.ScopedName()
+	now := time.Now()
+	m.cacheMu.Lock()
+	known, ok := m.poursWork[scoped]
+	failedUntil := m.poursWorkFailedUntil[scoped]
+	m.cacheMu.Unlock()
+	if ok {
+		return known
+	}
+	if now.Before(failedUntil) {
+		return true
+	}
+	recipe, err := orderGateCompile(ctx, a.Formula, orderFormulaSearchPaths(m.cfg, a), nil)
+	if err != nil {
+		// Remembered briefly, as "keep the work leg", so a broken formula is
+		// not recompiled every tick; never memoized as an answer.
+		m.cacheMu.Lock()
+		if m.poursWorkFailedUntil == nil {
+			m.poursWorkFailedUntil = make(map[string]time.Time)
+		}
+		m.poursWorkFailedUntil[scoped] = now.Add(orderPoursWorkFailureTTL)
+		m.cacheMu.Unlock()
+		return true
+	}
+	pours := recipeCoordClass(recipe) == coordclass.ClassWork
+	m.rememberOrderPoursWork(scoped, pours)
+	return pours
+}
+
+// orderGateCompile compiles an order's formula for the gate's class question.
+// Package var so tests can count compiles.
+var orderGateCompile = formula.CompileWithoutRuntimeVarValidation
+
+// orderPoursWorkFailureTTL is how long a formula that failed to compile for
+// the gate is not recompiled. The gate keeps the work leg meanwhile.
+var orderPoursWorkFailureTTL = 5 * time.Minute
+
+func (m *memoryOrderDispatcher) rememberOrderPoursWork(scoped string, pours bool) {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.poursWork == nil {
+		m.poursWork = make(map[string]bool)
+	}
+	m.poursWork[scoped] = pours
 }
 
 // storeListContains reports whether stores already holds this exact store, so a
@@ -2271,7 +2486,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Type:    events.OrderFailed,
 			Actor:   "controller",
 			Subject: scoped,
-			Message: err.Error(),
+			Message: orderRunErrorText(ctx, err),
 		})
 		m.orderFrontDoorFor(store).SetOutcome(trackingID, orders.RunOutcomeWispCanceled) //nolint:errcheck // best-effort
 		return
@@ -2304,7 +2519,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Type:    events.OrderFailed,
 			Actor:   "controller",
 			Subject: scoped,
-			Message: err.Error(),
+			Message: orderRunErrorText(ctx, err),
 		})
 		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
@@ -2345,26 +2560,16 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		}
 	}
 
-	// Everything from here on writes the molecule, which is graph class, so it
-	// goes to the graph store rather than the order-class store the tracking
-	// bead lives in. On a single-store city the two are the same value.
-	//
-	// KNOWN GAP, deliberately not closed here (ga-fk1a5). "Graph class" is true
-	// of a graph.v2 pour and a root-only wisp but NOT of a v1 POURED order
-	// formula, whose molecule container and assigned task steps are all
-	// ClassWork by coordclass.Classify — relocating those hides the assigned
-	// steps from `gc hook`, which reads the work scope. The CLI twin
-	// (doOrderRunWithJSON) gates this on moleculeClassStore and is correct.
-	// The dispatcher cannot simply follow, because this root is a TWO-CLASS
-	// object: it also carries the order:/seq: event-cursor labels, and
-	// orders.Store unions order-run evidence across the ORDERS and GRAPH legs
-	// only. Route the molecule by class and an event-triggered v1 poured order
-	// loses its cursor and re-fires; leave it and its steps stay unreachable.
-	// Closing it means persisting the cursor onto the orders-class tracking
-	// bead the way the exec arm already does (front.SetCursor at the exec
-	// branch above) — a production behavior change rather than wiring, so it is
-	// its own slice. TestOrderDispatchPouredV1MoleculeRelocatesWithTheGraphClass
-	// pins the current answer so that slice has a test to flip.
+	// The routing decoration resolves sessions and named targets, which live
+	// with the graph class, so it reads through the graph store. The molecule
+	// itself is poured below into the store its CLASS demands
+	// (moleculeClassStore, as `gc order run` does): a graph.v2 pour or a
+	// root-only wisp into the graph binding, a v1 POURED recipe — a molecule
+	// container plus plain assigned steps, all work class — into the order's
+	// target work store, where `gc hook` reads its steps (ga-fk1a5). Its root
+	// carries the order's run evidence there, which is why the order gate keeps
+	// that store as a leg for such an order (gateStoresFor). On a single-store
+	// city every one of these is the same store.
 	graphStore := m.graphStoreFor(store)
 
 	// Route before instantiation. A routing failure must not leave an
@@ -2388,13 +2593,15 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	// the created bead text instead of the caller's value (#4668).
 	stampOrderWispRuntimeVars(recipe, effectiveVars)
 
-	cookResult, err := molecule.Instantiate(ctx, graphStore, recipe, molecule.Options{Vars: effectiveVars})
+	moleculeStore := moleculeClassStore(recipe, store, graphStore)
+	m.rememberOrderPoursWork(scoped, recipeCoordClass(recipe) == coordclass.ClassWork)
+	cookResult, err := molecule.Instantiate(ctx, moleculeStore, recipe, molecule.Options{Vars: effectiveVars})
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
 			Actor:   "controller",
 			Subject: scoped,
-			Message: err.Error(),
+			Message: orderRunErrorText(ctx, err),
 		})
 		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
@@ -2426,7 +2633,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	if a.Pool != "" {
 		update.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: pool}
 	}
-	if err := graphStore.Update(rootID, update); err != nil {
+	if err := moleculeStore.Update(rootID, update); err != nil {
 		// Label failure is critical for duplicate-dispatch prevention.
 		// Log and emit an event so operators can investigate.
 		logDispatchError(m.stderr, "gc: order %s: failed to label wisp %s: %v", scoped, rootID, err)
@@ -3174,7 +3381,15 @@ func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Tim
 	// close (below) stays raw because it stamps sweep audit metadata that the
 	// domain object deliberately omits, and the wisp-subtree recovery is graph
 	// residual.
-	runs, err := orders.NewStore(beads.OrdersStore{Store: store}).StaleOpenRuns(cutoff)
+	// The sweep federates the scope stores, kept for tracking rows written
+	// before the orders class moved to its binding, with the binding itself:
+	// a scope leg reads relics.
+	var runs []orders.OrderRun
+	err := beads.RelicRead(func() error {
+		var listErr error
+		runs, listErr = orders.NewStore(beads.OrdersStore{Store: store}).StaleOpenRuns(cutoff)
+		return listErr
+	})
 	if err != nil {
 		return orderTrackingSweepResult{}, fmt.Errorf("listing order-tracking beads: %w", err)
 	}
@@ -3288,7 +3503,14 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 	if policy.retainLast < minClosedOrderTrackingRetained {
 		policy.retainLast = minClosedOrderTrackingRetained
 	}
-	runs, err := orders.NewStore(beads.OrdersStore{Store: store}).ClosedRunsForRetention()
+	// A scope leg of the retention sweep reads pre-cutover tracking relics;
+	// see sweepStaleOrderTrackingWithOptionsLimitMode.
+	var runs []orders.OrderRun
+	err := beads.RelicRead(func() error {
+		var listErr error
+		runs, listErr = orders.NewStore(beads.OrdersStore{Store: store}).ClosedRunsForRetention()
+		return listErr
+	})
 	if err != nil {
 		return 0, fmt.Errorf("listing closed order-tracking beads: %w", err)
 	}
@@ -3360,7 +3582,14 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 	if policy.retainLast < minClosedOrderTrackingRetained {
 		policy.retainLast = minClosedOrderTrackingRetained
 	}
-	runs, err := orders.NewStore(beads.OrdersStore{Store: store}).ClosedRunsForRetention()
+	// A scope leg of the retention sweep reads pre-cutover tracking relics;
+	// see sweepStaleOrderTrackingWithOptionsLimitMode.
+	var runs []orders.OrderRun
+	err := beads.RelicRead(func() error {
+		var listErr error
+		runs, listErr = orders.NewStore(beads.OrdersStore{Store: store}).ClosedRunsForRetention()
+		return listErr
+	})
 	if err != nil {
 		return 0, fmt.Errorf("listing closed order-tracking beads: %w", err)
 	}
@@ -3431,7 +3660,14 @@ func countClosedOrderTrackingRetentionEligible(stores []beads.Store, now time.Ti
 		if store == nil {
 			continue
 		}
-		runs, err := orders.NewStore(beads.OrdersStore{Store: store}).ClosedRunsForRetention()
+		// A scope leg reads pre-cutover tracking relics; see
+		// sweepStaleOrderTrackingWithOptionsLimitMode.
+		var runs []orders.OrderRun
+		err := beads.RelicRead(func() error {
+			var listErr error
+			runs, listErr = orders.NewStore(beads.OrdersStore{Store: store}).ClosedRunsForRetention()
+			return listErr
+		})
 		if err != nil {
 			errs = append(errs, fmt.Errorf("listing closed order-tracking %s: %w", orderTrackingSweepStoreLabel(store, i), err))
 			continue
@@ -3876,9 +4112,11 @@ func openSubtreeOlderThan(subtree []beads.Bead, cutoff time.Time) bool {
 // bounded retries. On startup the bead store's backing server may not be
 // query-ready yet (dolt cold-start race, #753). Errors are retried; the
 // total count of beads closed across attempts is returned. Retrying on
-// partial closes is safe because beads.Store.CloseAll skips already-closed
-// beads (see internal/beads/beads.go). The wrapper sleeps for up to
-// attempts*backoff in the worst case.
+// partial closes is safe because every attempt lists the open tracking beads
+// again, so the next attempt closes only what is still open (whether CloseAll
+// would stamp an already-closed bead is store-specific; see
+// internal/beads/beads.go). The wrapper sleeps for up to attempts*backoff in
+// the worst case.
 func sweepOrphanedOrderTrackingRetry(store beads.Store, attempts int, backoff time.Duration) (int, error) { //nolint:unparam // attempts is configurable for testability
 	return sweepOrphanedOrderTrackingRetryLimit(store, attempts, backoff, 0)
 }
@@ -3922,6 +4160,42 @@ func effectiveTimeout(a orders.Order, maxTimeout time.Duration) time.Duration {
 		return maxTimeout
 	}
 	return t
+}
+
+// orderTimeoutError is the cause an order run's deadline carries. It names the
+// run's effective timeout, so a run the timeout stopped can say it timed out
+// and after how long. It unwraps to context.DeadlineExceeded, so an errors.Is
+// check for a deadline still matches it.
+type orderTimeoutError struct {
+	timeout time.Duration
+}
+
+func (e orderTimeoutError) Error() string {
+	return fmt.Sprintf("order timeout of %s exceeded", e.timeout)
+}
+
+func (e orderTimeoutError) Unwrap() error {
+	return context.DeadlineExceeded
+}
+
+// withOrderTimeout bounds an order run by its effective timeout, with an
+// orderTimeoutError naming that timeout as the deadline's cause.
+func withOrderTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeoutCause(ctx, timeout, orderTimeoutError{timeout: timeout})
+}
+
+// orderRunErrorText returns the failure text for err, an error from work an
+// order run did under ctx. When the run's order timeout ended ctx, the timeout
+// leads the text: err alone reads "context deadline exceeded", or "signal:
+// killed" from a runner that reports the kill, and neither says the order timed
+// out. Any other end of ctx, such as a controller shutdown, leaves err's text
+// as it is.
+func orderRunErrorText(ctx context.Context, err error) string {
+	var timeout orderTimeoutError
+	if !errors.As(context.Cause(ctx), &timeout) || errors.Is(err, timeout) {
+		return err.Error()
+	}
+	return timeout.Error() + ": " + err.Error()
 }
 
 // rigExclusiveLayers returns the suffix of rigLayers that is not in

@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	// Embedded zoneinfo: named-zone results must not depend on the host's tzdata.
+	_ "time/tzdata"
+
 	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 

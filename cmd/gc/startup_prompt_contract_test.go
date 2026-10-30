@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -142,21 +143,7 @@ func cliWorkerResumeLaunch(t *testing.T, c contractCity, mode launchMode, _ stri
 	if resolved == nil {
 		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
 	}
-	// Every worker-handle build resolves, reads included, so the resolver leaves
-	// the prompt to the launch step a handle runs only when it starts the
-	// runtime.
-	if resolved.Hints.Nudge != "" || resolved.Hints.Env[startupPromptDeliveredEnv] != "" {
-		t.Errorf("resolved hints already carry the startup prompt (Nudge=%q marker=%q): it was rendered for a handle that may never launch",
-			abbreviate(resolved.Hints.Nudge), resolved.Hints.Env[startupPromptDeliveredEnv])
-	}
-	if resolved.LaunchHints == nil {
-		t.Fatal("resolved runtime has no LaunchHints: a launch would carry no startup prompt")
-	}
-	hints, err := resolved.LaunchHints(resolved.Hints)
-	if err != nil {
-		t.Fatalf("LaunchHints: %v", err)
-	}
-	return hints
+	return resolved.Hints
 }
 
 func apiWorkerResumeLaunch(t *testing.T, c contractCity, mode launchMode, _ string) runtime.Config {
@@ -332,25 +319,96 @@ func TestStartupPromptContractRuntimeThatCannotCarryANudgeIsLeftAlone(t *testing
 // the prompt is rendered for the session being launched. A CLI or API resolver
 // runs in an operator's shell or the controller, whose GC_* variables name some
 // other agent: gc prime reads them because it runs inside the session, a worker
-// resolver must not.
+// resolver must not. Like gc prime, the session's alias wins over its agent name.
 func TestStartupPromptContractRendersSessionIdentityNotCallerEnvironment(t *testing.T) {
 	t.Setenv("GC_ALIAS", "ambient/alias")
 	t.Setenv("GC_AGENT", "ambient/agent")
 	t.Setenv("GC_DIR", "/ambient/dir")
 	t.Setenv("GC_RIG", "ambient-rig")
 	city := newContractCity(t, "agent={{.AgentName}} dir={{.WorkDir}}")
-	info := city.sessionInfo(launchModes[1])
-	info.AgentName = "test-city/worker-7"
 
-	got, err := city.controllerState().ApplyStartupPrompt(info, city.resolved, "", runtime.Config{WorkDir: city.path})
-	if err != nil {
-		t.Fatalf("ApplyStartupPrompt: %v", err)
+	for _, tc := range []struct {
+		name      string
+		alias     string
+		wantAgent string
+	}{
+		{name: "agent name", wantAgent: "test-city/worker-7"},
+		{name: "alias wins over agent name", alias: "test-city/lead", wantAgent: "test-city/lead"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := city.sessionInfo(launchModes[1])
+			info.AgentName = "test-city/worker-7"
+			info.Alias = tc.alias
+
+			got, err := city.controllerState().ApplyStartupPrompt(info, city.resolved, "", runtime.Config{WorkDir: city.path})
+			if err != nil {
+				t.Fatalf("ApplyStartupPrompt: %v", err)
+			}
+			if want := "agent=" + tc.wantAgent + " dir=" + city.path; !strings.Contains(got.Nudge, want) {
+				t.Errorf("nudge = %q, want it to contain %q", abbreviate(got.Nudge), want)
+			}
+			if strings.Contains(got.Nudge, "ambient") {
+				t.Errorf("the prompt leaked the caller's environment: %q", abbreviate(got.Nudge))
+			}
+		})
 	}
-	if want := "agent=test-city/worker-7 dir=" + city.path; !strings.Contains(got.Nudge, want) {
-		t.Errorf("nudge = %q, want it to contain %q", abbreviate(got.Nudge), want)
-	}
-	if strings.Contains(got.Nudge, "ambient") {
-		t.Errorf("the prompt leaked the caller's environment: %q", abbreviate(got.Nudge))
+}
+
+// TestStartupPromptContractClientProviderChatGetsNoPersona pins that a client's
+// provider chat (a manual session of a provider's implicit agent) is resumed
+// with no worker persona and no delivered marker on the CLI and API paths, as
+// the SessionStart hook (primeHookClientChat) and the reconciler already treat
+// it: the persona tells the session to drain queue work, which ends the client's
+// conversation. A manual session aliased as the agent's queue identity is a
+// worker its operator created and keeps the prompt.
+func TestStartupPromptContractClientProviderChatGetsNoPersona(t *testing.T) {
+	city := newContractCity(t, contractPromptBody)
+	city.cfg.Agents[0].Implicit = true
+	queueIdentity := agentutil.RoutedToIdentity(&city.cfg.Agents[0])
+
+	for _, tc := range []struct {
+		name     string
+		alias    string
+		wantSent bool
+	}{
+		{name: "manual chat with an unrelated alias", alias: "my-chat", wantSent: false},
+		{name: "manual chat with no alias", wantSent: false},
+		{name: "manual session aliased as the queue identity", alias: queueIdentity, wantSent: true},
+	} {
+		info := city.sessionInfo(launchModes[1])
+		info.SessionOrigin = "manual"
+		info.Alias = tc.alias
+		for _, path := range []struct {
+			name  string
+			build func(t *testing.T) runtime.Config
+		}{
+			{name: "CLI worker resume", build: func(t *testing.T) runtime.Config {
+				resolved, err := resolvedWorkerRuntimeWithConfig(city.path, city.cfg, info, "")
+				if err != nil {
+					t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+				}
+				if resolved == nil {
+					t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
+				}
+				return resolved.Hints
+			}},
+			{name: "API worker resume", build: func(t *testing.T) runtime.Config {
+				got, err := city.controllerState().ApplyStartupPrompt(info, city.resolved, "", runtime.Config{WorkDir: city.path, Env: map[string]string{"KEEP": "me"}})
+				if err != nil {
+					t.Fatalf("ApplyStartupPrompt: %v", err)
+				}
+				return got
+			}},
+		} {
+			t.Run(tc.name+"/"+path.name, func(t *testing.T) {
+				cfg := path.build(t)
+				sent := strings.Contains(cfg.Nudge, contractPromptBody)
+				marked := cfg.Env[startupPromptDeliveredEnv] == "1"
+				if sent != tc.wantSent || marked != tc.wantSent {
+					t.Errorf("prompt delivered = %v, marker = %v, want both %v (Nudge=%q)", sent, marked, tc.wantSent, abbreviate(cfg.Nudge))
+				}
+			})
+		}
 	}
 }
 

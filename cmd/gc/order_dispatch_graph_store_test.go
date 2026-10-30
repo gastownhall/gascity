@@ -796,25 +796,17 @@ assignee = "worker"
 	return cityPath, cfg, a
 }
 
-// TestOrderDispatchPouredV1MoleculeRelocatesWithTheGraphClass pins a KNOWN GAP
-// rather than a desirable behavior — ga-fk1a5.
+// TestOrderDispatchPouredV1MoleculeStaysOnTheWorkStore is ga-fk1a5, flipped.
 //
-// dispatchWisp sends every order molecule to the graph binding. That is right
-// for a graph.v2 pour and a root-only wisp, but a v1 POURED order formula
-// compiles to a molecule container plus plain assigned task steps, and
-// coordclass.Classify calls all of them ClassWork. Relocated, the step assigned
-// to `worker` sits in a binding `gc hook` never scans, so the dispatch produces
-// work nobody can pick up. The CLI twin (doOrderRunWithJSON) is gated on
-// moleculeClassStore and is correct; the dispatcher is not, because this root is
-// a TWO-CLASS object: it also carries the order:/seq: event-cursor labels, and
-// orders.Store unions order-run evidence across the ORDERS and GRAPH legs only.
-// Routing by class alone would fix the steps and lose the cursor. Closing it
-// means moving the cursor onto the orders-class tracking bead first.
-//
-// When ga-fk1a5 lands, this test flips: the molecule moves to workStore and the
-// assertions become the ones its CLI twin already makes
-// (TestOrderRunPouredV1MoleculeStaysOnTheWorkStoreOnSplitCity).
-func TestOrderDispatchPouredV1MoleculeRelocatesWithTheGraphClass(t *testing.T) {
+// A v1 POURED order formula compiles to a molecule container plus plain
+// assigned task steps, and coordclass.Classify calls all of them ClassWork.
+// The dispatcher pours it into the order's target work store, as its CLI twin
+// (doOrderRunWithJSON, TestOrderRunPouredV1MoleculeStaysOnTheWorkStoreOnSplitCity)
+// does, so the step assigned to `worker` is where `gc hook` reads it. The order
+// gate keeps that store as a leg for such an order, so the run evidence the
+// root carries there still gates the next run
+// (order_dispatch_work_class_test.go).
+func TestOrderDispatchPouredV1MoleculeStaysOnTheWorkStore(t *testing.T) {
 	cityPath, cfg, a := newPouredOrderFixture(t)
 	workStore := beads.NewMemStore()
 	workStore.IDPrefix = "mc"
@@ -843,18 +835,17 @@ func TestOrderDispatchPouredV1MoleculeRelocatesWithTheGraphClass(t *testing.T) {
 		t.Fatalf("events = %+v, want completed without failure", rec.events)
 	}
 	assigned := false
-	for _, b := range allBeads(t, graphStore) {
+	for _, b := range allBeads(t, workStore) {
 		if b.Assignee == "worker" {
 			assigned = true
 		}
 	}
 	if !assigned {
-		t.Fatalf("no step assigned to `worker` in the graph binding; if it moved to the work store, ga-fk1a5 has landed — flip this test to the assertions its CLI twin makes")
+		t.Fatalf("no step assigned to `worker` in the work store, where `gc hook` reads it")
 	}
-	for _, b := range allBeads(t, workStore) {
+	for _, b := range allBeads(t, graphStore) {
 		if b.Assignee == "worker" {
-			t.Fatalf("a work-class order step reached the work store; ga-fk1a5 has landed — flip this test")
+			t.Fatalf("a work-class order step %s was materialized in the graph binding", b.ID)
 		}
 	}
-	t.Logf("KNOWN GAP (ga-fk1a5): a v1 poured order molecule is materialized in the graph binding, where `gc hook`'s work-scope query cannot see its assigned steps")
 }

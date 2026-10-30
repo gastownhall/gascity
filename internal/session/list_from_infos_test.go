@@ -44,7 +44,7 @@ func TestListFromInfosMatchesListFullFromBeads(t *testing.T) {
 		infos = append(infos, infoFromPersistedBead(b))
 	}
 
-	mgr := NewManagerWithOptions(beads.NewMemStore(), runtime.NewFake())
+	mgr := newTestManager(t, beads.NewMemStore(), runtime.NewFake())
 
 	// "active," is the empty-comma-member filter humaHandleCityPending uses
 	// (StateActive + StateNone): it must match the no-state fixture via the empty

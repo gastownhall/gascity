@@ -269,7 +269,7 @@ func TestQuiesceSwapGapDoesNotReportDrained(t *testing.T) {
 	}
 
 	previousOpen := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: beads.NewMemStore()}, nil
 	}
 	t.Cleanup(func() { newControllerStateOpenCityStore = previousOpen })

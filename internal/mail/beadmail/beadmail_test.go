@@ -1,6 +1,8 @@
 package beadmail
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -349,8 +351,11 @@ func TestCheckUsesSingleAssigneeMessageScanForSlashRecipient(t *testing.T) {
 			messageListCalls++
 			return []byte(`[{"id":"msg-w","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
 		case strings.Contains(cmd, "bd query --json"):
-			if strings.Contains(cmd, recipient) {
-				t.Fatalf("slash recipient leaked into supplemental wisp query: %s", cmd)
+			// A slash recipient is not a bare bd query token; it must reach
+			// the wisp query as a quoted predicate, not be dropped (which
+			// would read every open ephemeral message).
+			if strings.Contains(cmd, "type=message") && !strings.Contains(cmd, `assignee="`+recipient+`"`) {
+				t.Fatalf("supplemental wisp query = %s, want quoted assignee=%q predicate", cmd, recipient)
 			}
 			return []byte(`[]`), nil
 		}
@@ -1041,6 +1046,129 @@ func TestArchive(t *testing.T) {
 	}
 	if b.Description != "dismiss me" {
 		t.Errorf("bead body = %q, want \"dismiss me\"", b.Description)
+	}
+}
+
+// TestArchiveUnreadMarksReadFirst covers archiving an unread
+// message marks it read before closing it, so the dismissed message is not
+// left unread forever (the read-gated retention sweep never reclaims unread
+// mail). Both the by-id and the filtered archive paths do it.
+func TestArchiveUnreadMarksReadFirst(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	byID, err := p.Send("human", "mayor", "", "archive by id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Send("human", "mayor", "noise: filtered", "archive by filter"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.Archive(byID.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+	_, results, err := p.ArchiveMatching(ArchiveFilter{Recipients: []string{"mayor"}, SubjectPrefix: "noise:", Limit: 10})
+	if err != nil {
+		t.Fatalf("ArchiveMatching: %v", err)
+	}
+	if len(results) != 1 || results[0].Err != nil {
+		t.Fatalf("ArchiveMatching results = %+v, want one success", results)
+	}
+
+	for _, id := range []string{byID.ID, results[0].ID} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("store.Get(%s): %v", id, err)
+		}
+		if b.Status != "closed" {
+			t.Errorf("%s status = %q, want closed", id, b.Status)
+		}
+		if !hasLabel(b.Labels, "read") || b.Metadata[mail.ReadMetadataKey] != "true" {
+			t.Errorf("%s labels = %v, mail.read = %q; want read before archive", id, b.Labels, b.Metadata[mail.ReadMetadataKey])
+		}
+	}
+}
+
+// TestArchiveUnreadReadWriteFailureLeavesMessageOpen covers the mark-read
+// write archive makes before it closes an unread message: when that write
+// fails, Archive reports it and never closes the message, so it stays in the
+// inbox rather than being archived unread.
+func TestArchiveUnreadReadWriteFailureLeavesMessageOpen(t *testing.T) {
+	store := &writeCountingStore{readCountingStore: &readCountingStore{MemStore: beads.NewMemStore()}}
+	p := New(store)
+	m, err := p.Send("human", "mayor", "", "archive me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.updateErr = errors.New("read write refused")
+
+	if err := p.Archive(m.ID); err == nil || !strings.Contains(err.Error(), "read write refused") {
+		t.Fatalf("Archive = %v, want the read-write failure reported", err)
+	}
+	if store.closes != 0 {
+		t.Errorf("Close calls = %d, want 0 after the read write failed", store.closes)
+	}
+	b, err := store.MemStore.Get(m.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if b.Status != "open" {
+		t.Errorf("status after a failed read write = %q, want open", b.Status)
+	}
+}
+
+func TestArchiveRepairsOpenMessageMissingFromDirectLookup(t *testing.T) {
+	store := beads.NewMemStore()
+	cs := beads.NewCachingStoreForTest(store, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	sender := New(store)
+	sent, err := sender.Send("human", "worker", "", "dismiss me")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Plant a stale tombstone: the cache believes the bead is deleted while
+	// it is still open in the backing store.
+	stale, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.ApplyEvent("bead.deleted", payload)
+	if _, err := cs.Get(sent.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("precondition: cached Get error = %v, want ErrNotFound", err)
+	}
+
+	p := New(cs)
+	if err := p.Archive(sent.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+
+	b, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("bead status = %q, want closed", b.Status)
+	}
+	open, err := store.List(beads.ListQuery{Status: "open", Assignee: "worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 0 {
+		t.Errorf("open assigned beads = %v, want none", open)
+	}
+	inbox, err := p.Inbox("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inbox) != 0 {
+		t.Errorf("unread inbox = %v, want none", inbox)
 	}
 }
 
@@ -2431,7 +2559,7 @@ func TestCheckAutoHandoffsReturnsOnlyUnreadDeliveryMarkedMail(t *testing.T) {
 	if _, err := p.Send("human", "worker", "ordinary", "leave this for normal mail injection"); err != nil {
 		t.Fatalf("Send ordinary: %v", err)
 	}
-	missingArchiveMarker, err := p.SendHandoff(mail.HandoffIntent{
+	missingArchiveMarker, _, err := p.SendHandoff(mail.HandoffIntent{
 		From:        "worker",
 		To:          "worker",
 		Subject:     "not deliverable",
@@ -2441,7 +2569,7 @@ func TestCheckAutoHandoffsReturnsOnlyUnreadDeliveryMarkedMail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SendHandoff missing archive marker: %v", err)
 	}
-	auto, err := p.SendHandoff(mail.HandoffIntent{
+	auto, _, err := p.SendHandoff(mail.HandoffIntent{
 		From:        "worker",
 		To:          "worker",
 		Subject:     "context cycle",
@@ -2452,7 +2580,7 @@ func TestCheckAutoHandoffsReturnsOnlyUnreadDeliveryMarkedMail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SendHandoff auto: %v", err)
 	}
-	readAuto, err := p.SendHandoff(mail.HandoffIntent{
+	readAuto, _, err := p.SendHandoff(mail.HandoffIntent{
 		From:        "worker",
 		To:          "worker",
 		Subject:     "already delivered",

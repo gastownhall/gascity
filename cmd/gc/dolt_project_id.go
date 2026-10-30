@@ -111,7 +111,7 @@ func newEnsureProjectIDCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 func openProjectIdentityEventRecorder(cityPath string, stderr io.Writer) (events.Recorder, func()) {
-	rec, err := events.NewFileRecorder(filepath.Join(cityPath, ".gc", "events.jsonl"), io.Discard)
+	rec, err := openCityEventsLog(cityPath, io.Discard)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc dolt-state ensure-project-id: events recorder unavailable: %v\n", err) //nolint:errcheck
 		return events.Discard, func() {}

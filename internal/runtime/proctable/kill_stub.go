@@ -23,3 +23,9 @@ func KillRuntime(live runtime.LiveRuntime) error {
 
 // RescanAfterTermination is false here: nothing is ever terminated.
 const RescanAfterTermination = false
+
+// KillByPIDIdentity is unavailable on platforms without process signaling
+// support.
+func KillByPIDIdentity(pid int, _ string) error {
+	return KillByPID(pid)
+}
