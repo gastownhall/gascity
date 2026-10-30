@@ -392,6 +392,20 @@ func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
 	return findAgentByLegacyTemplate(cfg, template)
 }
 
+// findSessionAgentByTemplate resolves a session's template the way the
+// session itself was built: findAgentByTemplate's exact and migration
+// matches first, then config.FindAgent's rig-stamped copy of a generic
+// scope="rig" agent, which is how session.FindNamedSessionSpec backs each
+// rig's named session. That copy is not an element of cfg.Agents, so
+// callers only read it. The config-drift checks use this helper; other
+// callers keep findAgentByTemplate.
+func findSessionAgentByTemplate(cfg *config.City, template string) *config.Agent {
+	if a := findAgentByTemplate(cfg, template); a != nil {
+		return a
+	}
+	return config.FindAgent(cfg, strings.TrimSpace(template))
+}
+
 // findAgentByLegacyTemplate is findAgentByTemplate's migration fallbacks, for
 // a trimmed template no agent matches exactly: a legacy bound form resolves to
 // the unbound agent, then a legacy unbound form to the one bound agent it
