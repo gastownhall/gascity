@@ -798,3 +798,24 @@ func TestOrderFiringCurrent_InapplicableOrderIsReportedNotStale(t *testing.T) {
 		t.Fatalf("details = %v, want the order reported inapplicable", result.Details)
 	}
 }
+
+// The orders lane evaluates gates only on paced passes up to one patrol
+// interval apart, so with the default 30s patrol a 30s cooldown order fires
+// about every 60s. Last fired 60s ago is its normal cadence, not overdue.
+func TestOrderFiringCurrent_SubMinuteCooldownWithinPatrolTickIsOK(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "fast-cooldown", "cooldown", "30s")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-1 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "fast-cooldown", Ts: now.Add(-60 * time.Second)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if len(result.Details) != 1 || strings.Contains(result.Details[0], "(overdue)") || strings.Contains(result.Details[0], "stale") {
+		t.Fatalf("details = %v, want one on-cadence detail line", result.Details)
+	}
+}

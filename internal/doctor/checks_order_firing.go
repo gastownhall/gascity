@@ -160,6 +160,10 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 		return result
 	}
 
+	// The orders lane runs its passes on this pace, so a healthy order fires
+	// up to one patrol interval after it falls due.
+	patrol := c.cfg.Daemon.PatrolIntervalDuration()
+
 	cityPath := c.cityPath
 	if cityPath == "" && ctx != nil {
 		cityPath = ctx.CityPath
@@ -253,7 +257,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
-		status, severity, detail := classifyOrderFiring(order, now, expected, lastFired, startedAt)
+		status, severity, detail := classifyOrderFiring(order, now, expected, patrol, lastFired, startedAt)
 		worst = worseStatus(worst, status)
 		result.Details = append(result.Details, detail)
 		if status != StatusOK {
@@ -727,7 +731,21 @@ func latestOrderFiredAt(evts []events.Event, subject string) time.Time {
 	return latest
 }
 
-func classifyOrderFiring(order orders.Order, now time.Time, expected time.Duration, lastFired, controllerStarted time.Time) (CheckStatus, CheckSeverity, string) {
+// orderFiringPeriod is how far apart a healthy order fires: its expected
+// interval plus one patrol interval, because the orders lane evaluates gates
+// only during passes that start up to one patrol interval after the previous
+// pass ended.
+func orderFiringPeriod(expected, patrol time.Duration) time.Duration {
+	return expected + patrol
+}
+
+// orderFiringOverdueAfter is the age at which a fired order is overdue.
+func orderFiringOverdueAfter(expected, patrol time.Duration) time.Duration {
+	period := orderFiringPeriod(expected, patrol)
+	return period + period/2
+}
+
+func classifyOrderFiring(order orders.Order, now time.Time, expected, patrol time.Duration, lastFired, controllerStarted time.Time) (CheckStatus, CheckSeverity, string) {
 	name := orderDisplayName(order)
 	if lastFired.IsZero() {
 		if controllerStarted.IsZero() {
@@ -751,7 +769,7 @@ func classifyOrderFiring(order orders.Order, now time.Time, expected time.Durati
 	switch {
 	case age >= expected*3:
 		return StatusError, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (CRITICAL: stale)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
-	case age >= expected+expected/2:
+	case age >= orderFiringOverdueAfter(expected, patrol):
 		return StatusWarning, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (overdue)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
 	default:
 		return StatusOK, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
