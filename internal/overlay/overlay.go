@@ -2,6 +2,7 @@
 package overlay
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -359,8 +360,8 @@ func providerPreserveExisting(providerName string) preserveExistingFunc {
 // copyOrMergeFile copies src to dst, optionally merging JSON if merge is true
 // and dst already exists. When wrapBareHooks is true (Claude settings), bare
 // hook entries in the result are normalized into wrapped form, both when
-// merging and when creating the file fresh. Falls back to plain copy on any
-// merge error.
+// merging and when creating the file fresh. A merge result identical to dst
+// leaves the file untouched. Falls back to plain copy on any merge error.
 func copyOrMergeFile(src, dst string, merge, wrapBareHooks bool) error {
 	if !merge {
 		return copyFile(src, dst)
@@ -389,6 +390,11 @@ func copyOrMergeFile(src, dst string, merge, wrapBareHooks bool) error {
 	if err != nil {
 		// Merge failed — fall back to overwrite.
 		return copyFile(src, dst)
+	}
+	// A steady-state re-projection merges to the bytes already on disk; skip
+	// the write so a running session never sees a truncated file mid-rewrite.
+	if bytes.Equal(merged, dstData) {
+		return nil
 	}
 	// Ensure parent directory exists.
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {

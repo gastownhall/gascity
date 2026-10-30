@@ -25,7 +25,9 @@ const opsRecordingStaleAfter = 2 * opSweepInterval
 // ops gates that are on ([ops] content, control, lifecycle): it probes
 // opjournal.NewStore over the city's sessions-class store. With a gate on,
 // and with every gate off once that store holds an op row, it also warns
-// about expired legacy ops the controller's sweeper has left open.
+// about expired legacy ops the controller's sweeper has left open. Whatever
+// the gates, it warns about every bd scope holding op rows that the core
+// reaper does not purge or prune (reaper_op_rows.go).
 type opsRecordingDoctorCheck struct {
 	cfg        *config.City
 	flags      rollout.Flags
@@ -35,9 +37,15 @@ type opsRecordingDoctorCheck struct {
 	// sessions routes the city store to its sessions class.
 	sessions func(beads.Store) beads.Store
 	clk      clock.Clock
+	// reaperScopes lists the bd scopes the core reaper visits that doctor
+	// may read; nil checks none.
+	reaperScopes func() []reaperOpRowsScope
 }
 
-func newOpsRecordingDoctorCheck(cityPath string, cfg *config.City, flags rollout.Flags, resolveErr error) *opsRecordingDoctorCheck {
+// newOpsRecordingDoctorCheck builds the check. storeSkipped is the doctor
+// store gate's answer to whether doctor must not read a scope's store; the
+// reaper's op-row probe leaves such a scope out (nil skips none).
+func newOpsRecordingDoctorCheck(cityPath string, cfg *config.City, flags rollout.Flags, resolveErr error, storeSkipped func(scopeRoot string) bool) *opsRecordingDoctorCheck {
 	return &opsRecordingDoctorCheck{
 		cfg:        cfg,
 		flags:      flags,
@@ -45,6 +53,9 @@ func newOpsRecordingDoctorCheck(cityPath string, cfg *config.City, flags rollout
 		open:       func() (beads.Store, error) { return openCityStoreAtWithConfig(cityPath, cfg) },
 		sessions:   func(store beads.Store) beads.Store { return cliSessionStore(store, cfg, cityPath) },
 		clk:        clock.Real{},
+		reaperScopes: func() []reaperOpRowsScope {
+			return reaperOpRowsScopes(cityPath, cfg, storeSkipped)
+		},
 	}
 }
 
@@ -69,8 +80,19 @@ func (*opsRecordingDoctorCheck) Fix(_ *doctor.CheckContext) error { return nil }
 // (opjournal.HasSubmittedOps), and a Warning when that cannot be read. Then,
 // for either, a Warning for expired legacy ops left open or a scan for them
 // that stopped at its page cap: with every gate off the sweeper stops once a
-// pass leaves no work, so the ops it leaves are reported here.
+// pass leaves no work, so the ops it leaves are reported here. Last, a
+// Warning for every bd scope whose op rows hold the core reaper's purge and
+// prune back.
 func (c *opsRecordingDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+	r := c.runRecording()
+	if c.reaperScopes != nil {
+		addReaperOpRowsWarning(r, reaperOpRowsHeldScopes(c.reaperScopes()))
+	}
+	return r
+}
+
+// runRecording is Run without the reaper's op-row scopes.
+func (c *opsRecordingDoctorCheck) runRecording() *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name(), Status: doctor.StatusOK}
 	if c.resolveErr != nil {
 		r.Message = "ops recording not checked: the rollout gates did not resolve (see the rollout checks)"

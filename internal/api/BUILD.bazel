@@ -1,5 +1,6 @@
 load("@bazel_lib//lib:copy_to_bin.bzl", "copy_to_bin")
 load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
 
 go_library(
     name = "api",
@@ -147,6 +148,7 @@ go_library(
         "residency_topology.go",
         "response_cache.go",
         "rig_create_client.go",
+        "rig_graph_legs.go",
         "rig_name_lock.go",
         "rig_rollback.go",
         "rigidem.go",
@@ -159,6 +161,7 @@ go_library(
         "session_frame_types.go",
         "session_get_read.go",
         "session_kill.go",
+        "session_lane_ops.go",
         "session_manager.go",
         "session_ops.go",
         "session_resolution.go",
@@ -242,6 +245,7 @@ go_library(
         "//internal/runtime",
         "//internal/searchpath",
         "//internal/session",
+        "//internal/session/lanesubmit",
         "//internal/sessionlog",
         "//internal/sling",
         "//internal/sourceworkflow",
@@ -283,6 +287,8 @@ go_test(
         "bead_close_event_test.go",
         "bead_close_reason_test.go",
         "bead_reopen_lease_test.go",
+        "beads_ready_cross_store_test.go",
+        "blocked_request_wait_test.go",
         "blocking_test.go",
         "blocking_validation_test.go",
         "branch_resolver_test.go",
@@ -406,6 +412,7 @@ go_test(
         "handler_waits_partial_test.go",
         "handler_webhook_test.go",
         "hangbudget_test.go",
+        "huma_handlers_beads_class_flip_test.go",
         "huma_handlers_mail_telemetry_test.go",
         "huma_handlers_run_cancel_test.go",
         "huma_handlers_run_launch_test.go",
@@ -456,10 +463,14 @@ go_test(
         "response_cache_uint_test.go",
         "rig_create_async_test.go",
         "rig_create_client_test.go",
+        "rig_graph_legs_test.go",
+        "rig_relic_legs_s4b_test.go",
         "rig_rollback_test.go",
         "rigidem_class_pin_test.go",
         "rigidem_hardening_test.go",
         "rigidem_test.go",
+        "root_store_ref_residence_guard_test.go",
+        "run_cancel_gate_test.go",
         "run_cancel_read_your_writes_test.go",
         "run_detail_retired_sessions_test.go",
         "run_out_of_process_claim_test.go",
@@ -477,6 +488,9 @@ go_test(
         "session_frame_types_test.go",
         "session_get_read_test.go",
         "session_key_guard_test.go",
+        "session_lane_messages_test.go",
+        "session_lane_respond_test.go",
+        "session_lane_stop_test.go",
         "session_materialization_guard_test.go",
         "session_message_late_delivery_test.go",
         "session_model_phase0_interface_spec_test.go",
@@ -485,7 +499,9 @@ go_test(
         "session_model_phase0_spec_test.go",
         "session_ops_test.go",
         "session_ops_x12_test.go",
+        "session_pending_check_test.go",
         "session_provider_kind_test.go",
+        "session_reassign_split_test.go",
         "session_resolution_live_query_test.go",
         "session_resolution_path_alias_test.go",
         "session_resolution_precedence_test.go",
@@ -494,6 +510,7 @@ go_test(
         "session_response_wire_test.go",
         "session_running_state_test.go",
         "session_starting_error_test.go",
+        "session_startup_prompt_test.go",
         "session_stream_acp_test.go",
         "session_stream_capability_test.go",
         "session_structured_providers_test.go",
@@ -503,8 +520,10 @@ go_test(
         "session_transcript_acp_test.go",
         "session_transport_test.go",
         "session_turn_test.go",
+        "split_strict_gate_test.go",
         "sse_cancel_test.go",
         "state_class_accessors_test.go",
+        "status_graph_ready_test.go",
         "store_health_rows_measured_test.go",
         "store_health_test.go",
         "structured_leakage_test.go",
@@ -518,6 +537,7 @@ go_test(
         "test_helpers_test.go",
         "testenv_import_test.go",
         "title_generate_test.go",
+        "wait_nudges_test.go",
         "wake_serialization_conflict_test.go",
         "webhook_dedup_test.go",
         "webhook_ratelimit_test.go",
@@ -563,6 +583,7 @@ go_test(
         "//internal/convergence",
         "//internal/convoy",
         "//internal/coordclass",
+        "//internal/dispatch",
         "//internal/events",
         "//internal/extmsg",
         "//internal/formula",
@@ -614,6 +635,28 @@ go_test(
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
     ],
+)
+
+# The split-strict projection gate (internal/beads/splittest/projection.go):
+# api_test with GC_TEST_SPLIT_STRICT=1, so every fakeState work accessor hands
+# out a view of the city store that hides infrastructure rows and every class
+# accessor one that hides work rows. Non-blocking for now: manual, so //...
+# skips it, and bazel.yml's evidence-only split-strict lane runs it. TestMain
+# fails the run on a violation site testdata/split_strict_baseline.tsv does not
+# list (the ratchet), and on a failing test testdata/split_strict_known_failures.list
+# does not list; it reports the two apart. It becomes required before new
+# cities default to split.
+go_variant_test(
+    name = "api_split_strict_test",
+    size = "large",
+    # -test.v: the gate reads the test binary's own RUN/PAUSE/CONT/PASS/FAIL
+    # lines to time each test (the per-test hang watchdog) and to tell new
+    # failing tests from the known ones.
+    args = ["-test.v"],
+    env = {"GC_TEST_SPLIT_STRICT": "1"},
+    shard_count = 6,
+    tags = ["manual"],
+    test = ":api_test",
 )
 
 exports_files([

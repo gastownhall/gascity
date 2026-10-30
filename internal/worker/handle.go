@@ -63,6 +63,21 @@ type FencedKillHandle interface {
 	KillRuntimeGone(context.Context) (bool, error)
 }
 
+// FencedResetHandle exposes a fresh-restart request made from inside the
+// session, recorded only while the session row still records the caller's
+// incarnation (SG-3). A handle bound to a session bead implements it; a bare
+// runtime handle has no row to record the request on.
+type FencedResetHandle interface {
+	// ResetFenced records the restart request when the row's instance token
+	// is instanceToken (session.Manager.RequestFreshRestartFenced). casOnly
+	// reports whether the city records only by compare-and-swap (a v2 city);
+	// nil allows the checked write.
+	ResetFenced(ctx context.Context, instanceToken string, casOnly func() bool) error
+	// CheckResetFenced is ResetFenced's decision taken now, with nothing
+	// written (session.Manager.CheckFreshRestartFenced).
+	CheckResetFenced(ctx context.Context, instanceToken string, casOnly func() bool) error
+}
+
 // MessagingHandle exposes live input delivery operations.
 type MessagingHandle interface {
 	// Message and Nudge may start or resume the session as the Actor may

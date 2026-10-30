@@ -333,6 +333,9 @@ type conversationLaneHost struct {
 	rowRetries   map[string]time.Time
 	retryingRows bool
 	rowsGivenUp  int64
+	// passEnds holds, per conversation with a waiter, the channel the end
+	// of its next pass closes and its waiters (AwaitConversationOp).
+	passEnds map[string]*passEndWait
 	// noticeFailures tallies, per planner notice action (an attempt's
 	// proposal or a reminder's read, plannerNoticeTallyKey), its failures in
 	// a row; nil until the first. An entry is deleted when its action
@@ -868,6 +871,7 @@ func (h *conversationLaneHost) store() (*opjournal.Store, *opjournal.Conversatio
 func (h *conversationLaneHost) notePass(conv string, res opjournal.PassResult, err error) {
 	now := h.clk.Now()
 	h.mu.Lock()
+	h.passEndedLocked(conv)
 	h.passes++
 	h.lastPass = now
 	if len(res.Quarantined) > 0 {

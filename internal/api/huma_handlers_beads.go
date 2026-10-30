@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -176,7 +177,15 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 				query.SeekAfter = seek
 			}
 			pa.attempt()
-			list, err := leg.store.List(query)
+			// One leg of the /beads fan-out (work legs, then the class
+			// binding): each lists only its own rows, so a type or label the
+			// other legs own misses here by design.
+			var list []beads.Bead
+			err := beads.FederatedRead(func() error {
+				var listErr error
+				list, listErr = leg.store.List(query)
+				return listErr
+			})
 			if err != nil {
 				if leg.graph {
 					// The graph leg is the execution DAG, not a rig: any degraded
@@ -564,9 +573,14 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 
 	stores := s.state.BeadStores()
 	rigNames := sortedRigNames(stores)
-	var all []beads.Bead
 	var pa partialAggregator
-	seen := make(map[string]bool)
+	// Each leg's rows are kept by leg so a split city can pass them through the
+	// cross-store rule before they merge (below).
+	type readyLeg struct {
+		leg  readywork.Leg
+		rows []beads.Bead
+	}
+	var legs []readyLeg
 	federate := func(label string, store beads.Store) {
 		if store == nil {
 			return
@@ -584,16 +598,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 		} else {
 			pa.success()
 		}
-		for _, b := range ready {
-			if seen[b.ID] {
-				// An id is one bead: legacy file mode can alias the city and rig
-				// stores, and a migrated split city holds the same infrastructure
-				// row in both the work store and the binding.
-				continue
-			}
-			seen[b.ID] = true
-			all = append(all, b)
-		}
+		legs = append(legs, readyLeg{leg: readywork.Leg{Label: label, Store: store}, rows: ready})
 	}
 	// City-scope ready work (graph.v2 molecules in a single-HQ city, control
 	// beads) lives in the city store, so federate it explicitly first or HTTP
@@ -622,18 +627,50 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			return nil, graphPlaneUnavailable("ready", err, pa.messages()...)
 		}
 		pa.success()
-		for _, b := range ready {
+		legs = append(legs, readyLeg{leg: readywork.Leg{Label: "graph", Store: graph, ClassBinding: true, ReservedPrefixes: s.bindingReservedPrefixes(graph)}, rows: ready})
+	}
+	if pa.totalOutage() {
+		return nil, pa.outageError()
+	}
+	// On a split city every leg's rows pass through the same cross-store rule
+	// `gc ready` and pool demand apply (readywork.LegGate): a row a blocker
+	// held in another store still holds is not served, and a row a store
+	// strands behind a blocker that has closed elsewhere is. One gate judges
+	// every leg, so a blocker several legs' rows wait on is read once. A city
+	// with no binding keeps every store's own answer.
+	federated := make([]readywork.Leg, len(legs))
+	for i, l := range legs {
+		federated[i] = l.leg
+	}
+	if readywork.IsSplit(federated) {
+		gate := readywork.NewLegGate(federated, readyFederationQuery())
+		for i := range legs {
+			gated, err := gate.Gate(ctx, i, legs[i].rows)
+			if err != nil {
+				// A leg whose blockers could not be judged serves nothing: an
+				// ungated row may be one a blocker still holds. The response
+				// says it is short, as it does for a leg that failed to read.
+				pa.record(legs[i].leg.Label, fmt.Errorf("cross-store blockers: %w", err))
+				legs[i].rows = nil
+				continue
+			}
+			legs[i].rows = gated
+		}
+	}
+	var all []beads.Bead
+	seen := make(map[string]bool)
+	for _, l := range legs {
+		for _, b := range l.rows {
 			if seen[b.ID] {
+				// An id is one bead: legacy file mode can alias the city and rig
+				// stores, and a migrated split city holds the same infrastructure
+				// row in both the work store and the binding.
 				continue
 			}
 			seen[b.ID] = true
 			all = append(all, b)
 		}
 	}
-	if pa.totalOutage() {
-		return nil, pa.outageError()
-	}
-
 	if all == nil {
 		all = []beads.Bead{}
 	}
@@ -959,8 +996,14 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	}
 	// Before the assignee's normalization, which may materialize a named
 	// session: a refused write creates nothing.
-	if err := refuseGenericWrite(id, &current, afterUpdate(current, body), genericWrite{meta: body.Metadata, labels: body.Labels, removeLabels: body.RemoveLabels}); err != nil {
+	after := afterUpdate(current, body)
+	if err := refuseGenericWrite(id, &current, after, genericWrite{meta: body.Metadata, labels: body.Labels, removeLabels: body.RemoveLabels}); err != nil {
 		return nil, err
+	}
+	if beadUpdateMutation(body).TouchesClass() {
+		if err := s.refuseClassFlip(id, store, current, after); err != nil {
+			return nil, err
+		}
 	}
 	if body.Assignee != nil {
 		assignee, err := s.normalizeRawBeadAssignee(ctx, *body.Assignee)
@@ -1163,22 +1206,63 @@ type genericWrite struct {
 
 // afterUpdate is current with the update's type, label and metadata changes
 // applied: the row the update would leave, as far as whether it is owned.
+//
+// It is the update stated as a coordclass.Mutation, the shape the
+// class-must-not-flip guard (coordclass.CheckFlip) judges for every door.
 func afterUpdate(current beads.Bead, body beadUpdateBody) beads.Bead {
-	after := current
-	if body.Type != nil {
-		after.Type = *body.Type
+	return beadUpdateMutation(body).Apply(current)
+}
+
+// beadUpdateMutation is a generic update's type, label and metadata writes.
+func beadUpdateMutation(body beadUpdateBody) coordclass.Mutation {
+	return coordclass.Mutation{
+		Type:         body.Type,
+		AddLabels:    body.Labels,
+		RemoveLabels: body.RemoveLabels,
+		SetMetadata:  body.Metadata,
 	}
-	if len(body.Metadata) > 0 {
-		after.Metadata = maps.Clone(current.Metadata)
-		if after.Metadata == nil {
-			after.Metadata = make(map[string]string, len(body.Metadata))
+}
+
+// refuseClassFlip is the bead API's door onto the one class-must-not-flip
+// guard (coordclass.CheckFlip). On a split city a work store holds only work
+// beads and a class binding only its classes, so a write that changes a bead's
+// class in place — a work bead given gc.root_bead_id, a wisp label or gc:rt; a
+// graph step whose only graph marker is blanked — strands it in a store its
+// class is never read from. One stranded row makes every later routed gc
+// command refuse. It is refused here with 422 and nothing is written.
+//
+// A single-store city holds every class in its one store, so storeClassHolds
+// answers nil there and the guard is silent: no behavior change.
+func (s *Server) refuseClassFlip(id string, store beads.Store, before, after beads.Bead) error {
+	flip := coordclass.CheckFlip(before, after, s.storeClassHolds(store))
+	if flip == nil {
+		return nil
+	}
+	return apierr.ValidationFailed.With(fmt.Sprintf("bead %s: %s. %s", id, flip.Error(), flip.Guidance()),
+		&huma.ErrorDetail{Location: "body", Message: fmt.Sprintf("changes the bead's class from %s to %s", flip.Before, flip.After), Value: id})
+}
+
+// storeClassHolds returns the classes store holds on this city, or nil on a
+// single-store city (where the one store holds every class). A class binding
+// holds the classes it serves; a work store — the city's or a rig's — holds
+// work plus every class no binding serves.
+func (s *Server) storeClassHolds(store beads.Store) []coordclass.Class {
+	topo := s.residencyTopology()
+	if topo.IsSingleStore() {
+		return nil
+	}
+	for _, binding := range topo.Bindings {
+		if binding.Leg.Store == store { // residency:allow — identifies which binding the already-resolved owner store is, to read its classes; resolves no bead
+			return binding.Classes
 		}
-		maps.Copy(after.Metadata, body.Metadata)
 	}
-	labels := slices.Clone(current.Labels)
-	labels = append(labels, body.Labels...)
-	after.Labels = slices.DeleteFunc(labels, func(l string) bool { return slices.Contains(body.RemoveLabels, l) })
-	return after
+	holds := []coordclass.Class{coordclass.ClassWork}
+	for _, class := range coordclass.Classes() {
+		if _, served := topo.BindingFor(class); class.IsInfrastructure() && !served {
+			holds = append(holds, class)
+		}
+	}
+	return holds
 }
 
 // awaitBeadParentProjection waits, for at most

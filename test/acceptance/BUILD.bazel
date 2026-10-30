@@ -152,6 +152,7 @@ go_test(
         "agent_suspend_test.go",
         "beads_blocked_repair_test.go",
         "beads_cli_contract_home_isolation_test.go",
+        "beads_cli_contract_port_file_test.go",
         "beads_cli_contract_test.go",
         "beads_health_test.go",
         "beads_migrate_proxied_test.go",
@@ -180,6 +181,7 @@ go_test(
         "import_named_sessions_regression_test.go",
         "init_lifecycle_test.go",
         "integration_selfhost_ux_test.go",
+        "managed_session_dolt_port_move_test.go",
         "mcp_adoption_test.go",
         "mcp_capability_test.go",
         "migration_regression_test.go",
@@ -240,6 +242,7 @@ go_test(
         "//internal/testenv",
         "//internal/testutil",
         "//test/acceptance/helpers",
+        "//test/toolhome",
         "@com_github_burntsushi_toml//:toml",
         "@com_github_gastownhall_gascity_packs//:gascity-packs",
         "@com_github_go_sql_driver_mysql//:mysql",
@@ -264,7 +267,7 @@ exports_files(
 #   current  deps.env BD_CURRENT_REF; that commit is the v1.3.2 tag, whose
 #            release binary is @bd_bin_v1_3_2 (scripts/bd_contract_pins_test.go
 #            pins the correspondence)
-BD_CLI_CONTRACT_RUN = "-test.run=^(TestBdBasicCRUD|TestBdDependencies|TestBdDestructive|TestBdWorkflow|TestRunBDIsolatesHOMEFromSharedServerConfig)$$"
+BD_CLI_CONTRACT_RUN = "-test.run=^(TestBdBasicCRUD|TestBdDependencies|TestBdDestructive|TestBdWorkflow|TestRunBDIsolatesHOMEFromSharedServerConfig|TestBdReadsScopePortFileUnderWithheldSessionEnv)$$"
 
 go_variant_test(
     name = "bd_cli_contract_prev_test",

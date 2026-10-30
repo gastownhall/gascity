@@ -193,6 +193,9 @@ type CityRuntime struct {
 	// clocks below; created on first use.
 	ordersLane     *ordersLane
 	ordersLaneOnce sync.Once
+	// workGCLane runs the wisp GC's work arm off the tick (wisp_gc_work_lane.go).
+	workGCLane     *workGCLane
+	workGCLaneOnce sync.Once
 
 	// inventoryLane lists runtimes at patrol cadence and publishes the
 	// observation cache (runtime_inventory_lane.go). run() creates it; it
@@ -494,7 +497,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 	mat := buildMaxSessionAgeTracker(p.Cfg, p.CityName, p.SP)
 	adt := buildAssignedWorkDeferTracker(p.Cfg, p.CityName, p.SP)
 
-	wg := newWispGCForConfig(p.Cfg)
+	wg := newWispGCForCity(p.Cfg, p.CityName)
 
 	managedDoltHealth := p.ManagedDoltHealth
 	if managedDoltHealth == nil {
@@ -693,6 +696,11 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		cr.setStandaloneStores(cityStore, buildStandaloneRigStores(cr.cfg, cr.cityPath, cr.stderr))
 	}
 
+	// One asynchronous rig containment census per controller boot (S4b,
+	// D4): rigs awaiting import, pending clears and rows written to a rig
+	// after its import are named once, here, and never in a CLI process.
+	cr.startRigResidueCensus(ctx)
+
 	// Record bead store health metric.
 	telemetry.RecordBeadStoreHealth(context.Background(), cr.cityName, cr.cityBeadStore() != nil)
 
@@ -845,6 +853,15 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	defer func() {
 		stopOrdersLane()
 		<-ordersLaneDone
+	}()
+	// The wisp GC's work arm reads work ledgers (bd on a hosted city, one
+	// subprocess per read), so it runs on its own lane; the tick only wakes it
+	// (wisp_gc_work_lane.go).
+	workGCLaneCtx, stopWorkGCLane := context.WithCancel(ctx)
+	workGCLaneDone := cr.startWorkGCLane(workGCLaneCtx)
+	defer func() {
+		stopWorkGCLane()
+		<-workGCLaneDone
 	}()
 
 	// Recover ready work whose canonical pool route was lost or never written
@@ -1867,8 +1884,26 @@ func (cr *CityRuntime) tickReconcileExecutionCompletions(p *tickPass) bool {
 func (cr *CityRuntime) tickWispGC(p *tickPass) bool {
 	if graphStore := cr.graphBeadStore(); cr.wg != nil && graphStore.Store != nil && cr.wg.shouldRun(time.Now()) {
 		phaseStart := time.Now()
-		purged, gcErr := cr.wg.runGC(graphStore, cr.infraSessionLedger(), cr.mailBeadStore(), time.Now())
-		p.recordPhase(TraceSiteControllerTickPhase, "wisp_gc", phaseStart, map[string]any{"purged": purged})
+		// On a city that relocates the graph class, the attachment holders and
+		// the v1 poured molecule roots live on the work legs, not the binding
+		// the GC sweeps (wispGCLegs). A single-store city hands none: its
+		// graph-class store is its work store.
+		var legs wispGCLegs
+		if _, relocated := graphClassBinding(cr.storageRoutes); relocated { // residency:allow — asks only whether the graph class is relocated; the legs come from the census plan (workLegs)
+			legs = cr.workLegs()
+		}
+		purged, gcErr := cr.wg.runGC(legs, graphStore, cr.infraSessionLedger(), cr.mailBeadStore(), time.Now())
+		payload := map[string]any{"purged": purged}
+		if legs != nil {
+			// The work arm runs on its own lane; the tick only wakes it and
+			// records how stale its last pass is.
+			lane := cr.workGCLaneOf()
+			lane.wake()
+			if age, ran := lane.lastPassAge(time.Now()); ran {
+				payload["work_arm_last_pass_age_ms"] = age.Milliseconds()
+			}
+		}
+		p.recordPhase(TraceSiteControllerTickPhase, "wisp_gc", phaseStart, payload)
 		if gcErr != nil {
 			for _, line := range strings.Split(gcErr.Error(), "\n") {
 				if line == "" {
@@ -2327,7 +2362,7 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(cfg *config.City, now time.Time
 }
 
 func (cr *CityRuntime) orderTrackingSweepStores(cfg *config.City) ([]beads.Store, []orderTrackingSweepTarget, func(), error) { //nolint:unparam // targets slice returned for callers that need sweep scope metadata; current call sites discard it
-	targets := orderTrackingSweepTargetsForConfig(cr.cityPath, cfg)
+	targets := withoutRelicFreeRigSweepTargets(cr.storageRoutes, orderTrackingSweepTargetsForConfig(cr.cityPath, cfg))
 	rigStores := cr.rigBeadStores()
 	var freshlyOpened []beads.Store
 	stores, err := orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {
@@ -2699,6 +2734,23 @@ func (cr *CityRuntime) reloadConfigTraced(
 			Warnings: warnings,
 		}
 	}
+	// Nor is a reload that gives a split city a reserved HQ or rig prefix
+	// (R10): the booted binding mints in that namespace, so the new ids would
+	// collide with it. Refused whole, like a changed [storage].
+	if refusal := config.ReservedPrefixSplitRefusal(nextCfg); refusal != nil {
+		err := fmt.Errorf("config reload: %w (keeping old config; until city.toml is fixed, every gc CLI and hook process reading it refuses this city's coordination classes)", refusal)
+		fmt.Fprintf(cr.stderr, "%s: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
+		if trace != nil {
+			trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+		}
+		return reloadControlReply{
+			Outcome:  reloadOutcomeFailed,
+			Error:    err.Error(),
+			Revision: result.Revision,
+			Warnings: warnings,
+		}
+	}
 	nextSp := cr.sp
 	nextDops := cr.dops
 	providerChanged := false
@@ -2920,7 +2972,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	cr.mat = buildMaxSessionAgeTracker(nextCfg, cr.cityName, nextSp)
 	cr.adt = buildAssignedWorkDeferTracker(nextCfg, cr.cityName, nextSp)
 
-	cr.wg = newWispGCForConfig(nextCfg)
+	cr.wg = newWispGCForCity(nextCfg, cr.cityName)
 
 	// The new config was published above (publishRuntimeConfig), BEFORE
 	// this stage. The stage bumps the order-set generation under the lane's
@@ -4424,7 +4476,7 @@ func (cr *CityRuntime) cityBeadStore() beads.Store {
 	}
 	cr.serviceStateMu.RLock()
 	defer cr.serviceStateMu.RUnlock()
-	return cr.standaloneCityStore
+	return splitStrictWorkView(cr.standaloneCityStore)
 }
 
 func (cr *CityRuntime) rigBeadStores() map[string]beads.Store {
@@ -4435,7 +4487,7 @@ func (cr *CityRuntime) rigBeadStores() map[string]beads.Store {
 	}
 	cr.serviceStateMu.RLock()
 	defer cr.serviceStateMu.RUnlock()
-	return cr.standaloneRigStores
+	return splitStrictWorkViews(cr.standaloneRigStores)
 }
 
 // setStandaloneStores publishes the standalone store handles under the lock

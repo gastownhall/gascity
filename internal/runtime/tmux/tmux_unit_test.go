@@ -61,6 +61,18 @@ func TestCapturePaneProcessKillPlanBindsStableLivePaneToSnapshot(t *testing.T) {
 		}
 	})
 
+	t.Run("dead pane with an empty PID (tmux 3.8) is dead, not malformed", func(t *testing.T) {
+		for _, output := range []string{"\t1", "1"} {
+			state, err := parsePaneProcessState(output, "session")
+			if err != nil || !state.Dead {
+				t.Errorf("parsePaneProcessState(%q) = %+v, %v; want Dead", output, state, err)
+			}
+		}
+		if state, err := parsePaneProcessState("0", "session"); err == nil {
+			t.Errorf("parsePaneProcessState(%q) = %+v, nil; an empty PID on a live pane must stay an error", "0", state)
+		}
+	})
+
 	t.Run("pane API surfaces first observation disappearance", func(t *testing.T) {
 		for _, observationErr := range []error{ErrSessionNotFound, ErrNoServer} {
 			executor := &fakeExecutor{err: observationErr}

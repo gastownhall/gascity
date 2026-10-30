@@ -146,17 +146,25 @@ func TestTurnInterruptOnFailureRestart(t *testing.T) {
 func TestTurnInterruptRestartNeedsTheTurnSeenRunning(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
+		idle      error // the family's idle wait after the keys
 		boundary  error // the Codex family's boundary wait after the keys
 		restarted bool
 	}{
-		{"the family waits passed", nil, false},
-		{"the boundary wait could not answer", fmt.Errorf("reading the rollout: %w", runtime.ErrRuntimeUnavailable), false},
-		{"the boundary wait saw no boundary", errors.New("no turn_aborted marker yet"), true},
+		{"the family waits passed", nil, nil, false},
+		{"the boundary wait could not answer", nil, fmt.Errorf("reading the rollout: %w", runtime.ErrRuntimeUnavailable), false},
+		// tmux's real shape: ErrIdleTimeout wrapping ErrWaitUnobserved when
+		// no poll read the rollout recording a running turn (ga-pts3qe).
+		{"the boundary wait read nothing", nil, fmt.Errorf("%w: %w", errors.New("agent not idle before timeout"), runtime.ErrWaitUnobserved), false},
+		{"the idle wait read nothing", fmt.Errorf("%w: %w", errors.New("agent not idle before timeout"), runtime.ErrWaitUnobserved), nil, false},
+		{"the boundary wait saw no boundary", nil, errors.New("no turn_aborted marker yet"), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, fake, _, _, _ := codexSettleSession(t, func(path string, _ *manualTurnClock) {
 				appendTranscript(t, path, `{"timestamp":"2026-10-08T02:22:30.500Z","type":"event_msg","payload":{"type":"turn_abo`)
 			})
+			if tc.idle != nil {
+				fake.WaitForIdleErrors[s.info.SessionName] = tc.idle
+			}
 			if tc.boundary != nil {
 				fake.InterruptBoundaryErrors[s.info.SessionName] = tc.boundary
 			}

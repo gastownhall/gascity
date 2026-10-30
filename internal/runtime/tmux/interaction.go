@@ -688,11 +688,12 @@ func (d *approvalDedup) clear(session string) {
 // InteractionProvider implementation
 // ---------------------------------------------------------------------------
 
-// Pending checks the tmux pane for an active Claude Code approval prompt or
-// Codex approval overlay.
-// Returns nil with no error if no approval is pending.
+// Pending checks the tmux pane for an active Claude Code approval prompt,
+// Codex approval overlay or AskUserQuestion dialog (Kind "question", which
+// offers no options: it is answered in the terminal).
+// Returns nil with no error if nothing is pending.
 func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
-	approval, err := t.approvalInPane(name)
+	dialog, err := t.dialogInPane(name)
 	if err != nil {
 		// Pane might not exist (session not started yet or already stopped).
 		// Check for known "can't find" errors vs unexpected failures.
@@ -716,6 +717,16 @@ func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 		return nil, fmt.Errorf("capturing pane: %w", err)
 	}
 
+	if dialog.question != nil {
+		t.approvalDedup().clear(name)
+		return &runtime.PendingInteraction{
+			RequestID: dialog.question.requestID(),
+			Kind:      "question",
+			Prompt:    dialog.question.promptText(),
+			Metadata:  questionMetadata(dialog.question),
+		}, nil
+	}
+	approval := dialog.approval
 	if approval == nil {
 		t.approvalDedup().clear(name)
 		return nil, nil
@@ -776,10 +787,11 @@ func approvalOptionLabels(approval *parsedApproval) []string {
 }
 
 // checkNoApprovalPrompt returns an error wrapping runtime.ErrPendingInteraction
-// when the pane is showing a permission prompt. Text typed into the prompt
-// would be read as menu input — Enter picks the highlighted "Yes" and a digit
-// picks that option — so delivery paths call this before sending any text.
-// Capture failures are returned as-is for the caller to classify.
+// when the pane is showing a permission prompt or an AskUserQuestion dialog.
+// Text typed into either would be read as menu input — Enter picks the
+// highlighted option and a digit picks that option — so delivery paths call
+// this before sending any text. Capture failures are returned as-is for the
+// caller to classify.
 func (t *Tmux) checkNoApprovalPrompt(name string) error {
 	return t.checkNoApprovalPromptIn(name, name)
 }
@@ -787,10 +799,15 @@ func (t *Tmux) checkNoApprovalPrompt(name string) error {
 // checkNoApprovalPromptIn is checkNoApprovalPrompt for session name's
 // already-resolved agent pane target.
 func (t *Tmux) checkNoApprovalPromptIn(name, target string) error {
-	approval, err := t.approvalInPane(target)
+	dialog, err := t.dialogInPane(target)
 	if err != nil {
 		return err
 	}
+	if q := dialog.question; q != nil {
+		return fmt.Errorf("%w: session %q is waiting on a question dialog (%s, request %s); it is answered in the terminal (gc session attach %s), not by a message",
+			runtime.ErrPendingInteraction, name, q.promptText(), q.requestID(), name)
+	}
+	approval := dialog.approval
 	if approval == nil {
 		return nil
 	}
@@ -830,28 +847,55 @@ func (t *Tmux) cancelClaudeApproval(ctx context.Context, name string) (handled b
 	return true, nil
 }
 
-// approvalInPane returns the approval prompt target's agent pane shows, or
-// nil. A Codex overlay is read again from a capture that comes with the
+// questionMetadata is the metadata a pending question carries.
+func questionMetadata(q *parsedQuestion) map[string]string {
+	metadata := map[string]string{"source": "tmux", "header": q.Header}
+	if q.Focused != "" {
+		metadata["focused"] = q.Focused
+	}
+	return metadata
+}
+
+// paneDialog is the dialog a pane's input belongs to: at most one field is set.
+// A pane has one input owner, and a live question is the newer of the two, so
+// an approval above it is stale and is not reported.
+type paneDialog struct {
+	question *parsedQuestion
+	approval *parsedApproval
+}
+
+// dialogInPane reads target's agent pane once for the dialog that owns its
+// input. A Codex overlay is read again from a capture that comes with the
 // pane's geometry, which says where Codex wrapped its rows and whether the
 // capture reaches the overlay's top (parseCodexApprovalOverlay).
-func (t *Tmux) approvalInPane(target string) (*parsedApproval, error) {
+func (t *Tmux) dialogInPane(target string) (paneDialog, error) {
 	resolved, err := t.agentPaneTarget(target)
 	if err != nil {
-		return nil, err
+		return paneDialog{}, err
 	}
 	paneText, err := t.CapturePane(resolved, promptObservationLines)
 	if err != nil {
-		return nil, err
+		return paneDialog{}, err
+	}
+	if q := parseAskUserQuestion(strings.Split(strings.ReplaceAll(paneText, "\r", ""), "\n")); q != nil {
+		return paneDialog{question: q}, nil
 	}
 	approval := parseApprovalPrompt(paneText)
 	if approval == nil || !approval.Codex {
-		return approval, nil
+		return paneDialog{approval: approval}, nil
 	}
 	pane, err := t.capturePaneWithGeometry(resolved)
 	if err != nil {
-		return nil, err
+		return paneDialog{}, err
 	}
-	return parseApprovalCapture(pane), nil
+	return paneDialog{approval: parseApprovalCapture(pane)}, nil
+}
+
+// approvalInPane returns the approval prompt target's agent pane shows, or
+// nil: none while a question dialog owns the pane.
+func (t *Tmux) approvalInPane(target string) (*parsedApproval, error) {
+	dialog, err := t.dialogInPane(target)
+	return dialog.approval, err
 }
 
 // capturePaneWithGeometry captures target's screen and the last
@@ -924,10 +968,18 @@ func (t *Tmux) respond(ctx context.Context, name string, response runtime.Intera
 		return preVerify(err)
 	}
 	// Verify the expected approval is still present before sending keys.
-	current, err := t.approvalInPane(target)
+	dialog, err := t.dialogInPane(target)
 	if err != nil {
 		return preVerify(err)
 	}
+	// A question's numbered options are its own, not the fixed approval menu
+	// the keys below encode: refuse before any key, and before the "prompt
+	// already gone" path that would report the open dialog as answered.
+	if dialog.question != nil {
+		return fmt.Errorf("%w: session %q is showing a question dialog (%s); it is answered in the terminal (gc session attach %s)",
+			runtime.ErrInteractionActionUnavailable, name, dialog.question.promptText(), name)
+	}
+	current := dialog.approval
 	if current == nil {
 		t.approvalDedup().clear(name)
 		if response.RequestID != "" {

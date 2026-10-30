@@ -1180,6 +1180,10 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 	// --file creates a new city from a template; default to target dir name.
 	cityName := resolveCityName(nameOverride, "", cityPath)
 	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
+	if err := initReservedPrefixRefusal(fs, tomlSrc, cfg, cityName, cityPrefix); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	templatePack, err := decodeInitPackTemplate(data, cityName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1387,22 +1391,6 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		return 0
 	}
 
-	// Create directory structure.
-	logInitProgress(stdout, 1, "Creating runtime scaffold")
-	if err := ensureCityScaffoldFS(fs, cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := ensureInitConventionDirs(fs, cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	// Install Claude Code hooks (settings.json).
-	logInitProgress(stdout, 2, "Installing hooks (Claude Code)")
-	if code := installClaudeHooks(fs, cityPath, stderr); code != 0 {
-		return code
-	}
-
 	// Build the initial city shape before writing prompt scaffolds so init
 	// only creates convention-discoverable prompt files for the agents the
 	// chosen city template actually declares.
@@ -1430,11 +1418,37 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		cfg = config.DefaultCity(cityName)
 	}
 	applyBootstrapProfile(&cfg, wiz.bootstrapProfile)
+	initCityConfigHook(&cfg)
 	if err := wiz.hostedDolt.applySelectorToCityConfig(&cfg); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
+	// Today no wizard template declares [storage], so this cannot refuse; it
+	// is here for the day `gc init` writes a split (split-by-default), so the
+	// new city is never given a reserved prefix it would then be refused for.
+	// The city shape is built, and this runs, before the scaffold, so a
+	// refusal leaves nothing behind.
+	if err := initReservedPrefixRefusal(fs, "", &cfg, cityName, cityPrefix); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// Create directory structure.
+	logInitProgress(stdout, 1, "Creating runtime scaffold")
+	if err := ensureCityScaffoldFS(fs, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := ensureInitConventionDirs(fs, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	// Install Claude Code hooks (settings.json).
+	logInitProgress(stdout, 2, "Installing hooks (Claude Code)")
+	if code := installClaudeHooks(fs, cityPath, stderr); code != 0 {
+		return code
+	}
 
 	// Write prompt files only for the agents declared by the init template.
 	logInitProgress(stdout, 3, "Writing default prompts")
@@ -1837,6 +1851,12 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 	if cityAlreadyInitializedFS(fs, cityPath) {
 		return initAlreadyInitialized(stderr)
 	}
+	// Refused before anything is copied, so a refusal leaves no destination
+	// behind and the corrected retry is not "already initialized".
+	if err := initFromReservedPrefixRefusal(fs, srcToml, cityPath, nameOverride); err != nil {
+		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if err := fs.MkdirAll(cityPath, 0o755); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1969,6 +1989,48 @@ func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, std
 
 func doInitFromDirWithOptionsInternal(srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool, noStart bool, hosted hostedDoltInitOptions) int {
 	return doInitFromDirWithOptionsFSInternal(fsys.OSFS{}, srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, noStart, hosted)
+}
+
+// initFromReservedPrefixRefusal refuses `gc init --from` a split source when
+// the city it would create mints under a reserved class prefix (split-default
+// R10): its first boot, and every CLI process, would refuse it. It reads the
+// SOURCE and predicts the identity rewriteCopiedInitFromIdentity gives the
+// copy — the target name, the source's workspace prefix, the source's rigs —
+// for both the pack.toml and the legacy (no pack.toml) layout, so it can run
+// before anything is copied. A [storage] in a source include fragment counts:
+// fragments resolve against the source directory exactly as they will
+// against the copy.
+func initFromReservedPrefixRefusal(fs fsys.FS, srcToml, cityPath, nameOverride string) error {
+	data, err := fs.ReadFile(srcToml)
+	if err != nil {
+		return nil // the copy and its own parse report this
+	}
+	src, err := config.Parse(data)
+	if err != nil {
+		return nil
+	}
+	return initReservedPrefixRefusal(fs, srcToml, src, resolveCityName(nameOverride, "", cityPath), src.Workspace.Prefix)
+}
+
+// initCityConfigHook lets a test shape the city a plain `gc init` builds (a
+// split template does not exist yet). Production leaves it a no-op.
+var initCityConfigHook = func(*config.City) {}
+
+// initReservedPrefixRefusal is the R10 check every city-creating init path
+// shares (gc init, gc init --file, gc init --from): cfg is the config the new
+// city gets, tomlPath the file its include fragments resolve against ("" when
+// it has none), cityName and cityPrefix the identity init gives it. The
+// remedy it names is renaming the city or changing the source config — never
+// a file of the city being created, which does not exist yet.
+func initReservedPrefixRefusal(fs fsys.FS, tomlPath string, cfg *config.City, cityName, cityPrefix string) error {
+	if cfg == nil {
+		return nil
+	}
+	next := *cfg
+	next.Workspace.Name = cityName
+	next.ResolvedWorkspaceName = cityName
+	next.ResolvedWorkspacePrefix = strings.TrimSpace(cityPrefix)
+	return config.ReservedPrefixSplitRefusalForNewCity(fs, tomlPath, &next)
 }
 
 // rewriteCopiedInitFromIdentity rewrites the copied city.toml with the resolved

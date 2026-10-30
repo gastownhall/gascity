@@ -113,6 +113,10 @@ type storageRoutes struct {
 	// stores map, which holds what storage boot opened. The keys are the bare
 	// engines the census read.
 	relics map[beads.Store]bool
+	// rigMarkers locates the per-rig import records the S4 relic-free
+	// predicate reads (rigGraphRelicFree). Nil means unknown, and unknown keeps
+	// every rig's relic leg.
+	rigMarkers *rigGraphMarkers
 }
 
 // hasLegacyResidents reports the boot census's verdict for a binding store.
@@ -324,6 +328,13 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	if shape == storageSplitUnsupported {
 		return nil, fmt.Errorf("%s: [storage.classes] describe an arrangement this build cannot serve. %s", logPrefix, storageSupportedTopologyStatement)
 	}
+	// A split whose HQ or rig prefix is a reserved class prefix shares the
+	// binding's id namespace (split-default audit R10). Refused here, before a
+	// plan is resolved or a binding opened or created; a city that relocates
+	// nothing never reaches this line and keeps the advisory warning.
+	if err := config.ReservedPrefixSplitRefusal(cfg); err != nil {
+		return nil, fmt.Errorf("%s: %w", logPrefix, err)
+	}
 
 	// Resolved once, for both shapes: an unknown provider, a defined reserved
 	// binding, an unreferenced binding or an unusable Work pin is a refusal
@@ -404,7 +415,19 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 			advice = fmt.Sprintf("%s: binding %q cannot be served and the reason was not reported (%s)", logPrefix, target.Binding, report.Outcome)
 		}
 		recordStorageBindingOutcome(rec, report, advice)
+		if report.Transient {
+			return nil, storageGateTransientFault{err: errors.New(advice)}
+		}
 		return nil, errors.New(advice)
+	}
+	// A rig whose import was interrupted during its clear holds twins: the
+	// same bead in the rig store and in the binding. File reads only, per rig
+	// (rig_import_census.go); a rig merely awaiting import serves, its relic
+	// legs keeping it readable, and the controller's boot census names it.
+	if target.Root != "" {
+		if err := rigBootRefusal(cityPath, target); err != nil {
+			return nil, fmt.Errorf("%s: %w", logPrefix, err)
+		}
 	}
 	// The serving outcome is published before the binding opens, so a boot
 	// whose open then fails has already reported converged. That ordering
@@ -425,6 +448,23 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	// topology constructor.
 	censusBindingRelics(routes)
 	return routes, nil
+}
+
+// storageGateTransientFault marks a gate refusal that rests on a read that
+// failed (infraMigrationReport.Transient), not on a verdict about the city.
+// The refusal stands for this attempt — a check that could not run is not
+// permission to serve — but it is not memoized, and the drain fence does not
+// fail closed on it.
+type storageGateTransientFault struct{ err error }
+
+func (e storageGateTransientFault) Error() string { return e.err.Error() }
+func (e storageGateTransientFault) Unwrap() error { return e.err }
+
+// isTransientStorageGateFault reports whether err carries a transient gate
+// fault anywhere in its chain.
+func isTransientStorageGateFault(err error) bool {
+	var fault storageGateTransientFault
+	return errors.As(err, &fault)
 }
 
 // revertHoldingNote reports whether a city pointing its classes back at the
@@ -664,13 +704,13 @@ func checkBornSplitDiscipline(cityPath string, logPrefix string, stderr io.Write
 	source, err := openInfraMigrationSource(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: born-split check: opening the work store: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return infraMigrationReport{Outcome: infraMigrationUncheckable, Fault: fmt.Errorf("born-split check: opening the work store: %w", err)}
+		return infraMigrationReport{Outcome: infraMigrationUncheckable, Fault: fmt.Errorf("born-split check: opening the work store: %w", err), Transient: isTransientStoreFault(err)}
 	}
 	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
 	infra, err := readInfraSnapshot(source)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: born-split check: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return infraMigrationReport{Outcome: infraMigrationUncheckable, Fault: fmt.Errorf("born-split check: %w", err)}
+		return infraMigrationReport{Outcome: infraMigrationUncheckable, Fault: fmt.Errorf("born-split check: %w", err), Transient: isTransientStoreFault(err)}
 	}
 	if len(infra) == 0 {
 		return infraMigrationReport{Outcome: infraMigrationConverged}
@@ -806,6 +846,13 @@ func openStorageRoutes(plan *storebinding.StoragePlan, target infraBindingTarget
 	}
 	for _, class := range planned.AssignedClasses.Classes() {
 		routes.stores[class] = store
+	}
+	if target.Root != "" {
+		markers := &rigGraphMarkers{bindingRoot: target.Root, cityPath: cityPath}
+		if cfg != nil {
+			markers.rigs = append([]config.Rig(nil), cfg.Rigs...)
+		}
+		routes.rigMarkers = markers
 	}
 	return routes, nil
 }
