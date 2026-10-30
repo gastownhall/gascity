@@ -567,16 +567,22 @@ func TestExpandedWorkflowParkedRootFinalizesAfterChildCloses(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newHookWorkflowStopFixture(t)
-			root := f.create(beads.Bead{Title: "expanded workflow", Type: "molecule", Labels: tc.labels, DeferUntil: tc.deferUntil, IndefinitelyDeferred: tc.indefinite,
-				Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.workflow_expanded": "true", "gc.routed_to": "worker"}})
-			child := f.create(beads.Bead{Title: "live child", Type: "task", Assignee: "live-owner",
-				Metadata: map[string]string{"gc.root_bead_id": root.ID, "gc.routed_to": "worker"}})
+			root := f.create(beads.Bead{
+				Title: "expanded workflow", Type: "molecule", Labels: tc.labels, DeferUntil: tc.deferUntil, IndefinitelyDeferred: tc.indefinite,
+				Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.workflow_expanded": "true", "gc.routed_to": "worker"},
+			})
+			child := f.create(beads.Bead{
+				Title: "live child", Type: "task", Assignee: "live-owner",
+				Metadata: map[string]string{"gc.root_bead_id": root.ID, "gc.routed_to": "worker"},
+			})
 			liveStatus := "in_progress"
 			if err := f.store.Update(child.ID, beads.UpdateOpts{Status: &liveStatus}); err != nil {
 				t.Fatal(err)
 			}
-			finalizer := f.create(beads.Bead{Title: "finalize", Type: "task",
-				Metadata: map[string]string{"gc.kind": "workflow-finalize", "gc.root_bead_id": root.ID}})
+			finalizer := f.create(beads.Bead{
+				Title: "finalize", Type: "task",
+				Metadata: map[string]string{"gc.kind": "workflow-finalize", "gc.root_bead_id": root.ID},
+			})
 			for _, dep := range []beads.Dep{
 				{IssueID: finalizer.ID, DependsOnID: child.ID, Type: "blocks"},
 				{IssueID: root.ID, DependsOnID: finalizer.ID, Type: "tracks"},
@@ -642,7 +648,8 @@ func TestConcurrentWorkflowHookClaimsHaveOneStepOwner(t *testing.T) {
 		return got
 	}
 	root := create(beads.Bead{Title: "expanded root", Type: "molecule", Metadata: map[string]string{
-		"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.workflow_expanded": "true", "gc.routed_to": "worker"}})
+		"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.workflow_expanded": "true", "gc.routed_to": "worker",
+	}})
 	live := create(beads.Bead{Title: "live child", Type: "task", Assignee: "live-owner", Metadata: map[string]string{"gc.root_bead_id": root.ID, "gc.routed_to": "worker"}})
 	liveStatus := "in_progress"
 	if err := store.Update(live.ID, beads.UpdateOpts{Status: &liveStatus}); err != nil {
@@ -678,7 +685,7 @@ func TestConcurrentWorkflowHookClaimsHaveOneStepOwner(t *testing.T) {
 		go func() {
 			defer workers.Done()
 			// Reuse the hook fixture's no-op external notifications. Runner returns
-			// the shared snapshot; Claim, WorkflowStore and ReadWorkMeta use SQLite.
+			// the shared snapshot; claims, input checks and ancestry reads use SQLite.
 			// Release, ListContinuation and AssignContinuation remain fixture-backed;
 			// this scenario exercises the competing claims, not those paths.
 			ops := newHookWorkflowStopFixture(t).ops()
@@ -687,6 +694,9 @@ func TestConcurrentWorkflowHookClaimsHaveOneStepOwner(t *testing.T) {
 				return hookClaimThroughStore(id, assignee, func() (beads.Bead, bool, error) { return store.Claim(id, assignee) }, store.Get)
 			}
 			ops.WorkflowStore = func(context.Context, string, []string, string, string) beads.Store { return store }
+			ops.InputDone = func(_ context.Context, _ string, _ []string, candidate beads.Bead, identities []string) (string, bool, error) {
+				return workflowInputDone(store, candidate, identities)
+			}
 			ops.ReadWorkMeta = func(_ context.Context, _ string, _ []string, id, _ string) (beads.Bead, error) { return store.Get(id) }
 			var stdout, stderr bytes.Buffer
 			code := doHookClaim("query", dir, hookClaimOptions{Assignee: owner, IdentityCandidates: []string{owner}, RouteTargets: []string{"worker"}, JSON: true}, ops, &stdout, &stderr)

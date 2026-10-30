@@ -42,7 +42,7 @@ you don't know how to locate a formula, recipe, bead, mail, or Dolt
 state, the answer is a `gc` introspection command, not a
 filesystem search. If no command exists for what you need, file a bead.
 
-## Legacy molecules — check before you start working
+## Molecules — legacy assignments only
 
 These instructions apply to legacy molecule assignments, not graph.v2
 steps. When `gc bd show <id>` contains `molecule_id` and the work is not a
