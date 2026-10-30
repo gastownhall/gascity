@@ -4111,3 +4111,59 @@ func TestProcessDrainUnitConvoyRetireFailureKeepsDrainOpen(t *testing.T) {
 		t.Fatalf("retry wrote to unit convoy %s; a closed unit must be skipped without writing", manifest.Rows[0].UnitConvoyID)
 	}
 }
+
+// TestProcessDrainRecordedCloseRetiresUnitConvoys: a drain whose terminal
+// state and outcome are already recorded but which is still open — a close
+// that died between recording and closing — still retires its units from the
+// manifest persisted on the drain bead, and closes with the recorded outcome.
+func TestProcessDrainRecordedCloseRetiresUnitConvoys(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+
+	if _, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}}); err != nil {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+	for _, row := range manifest.Rows {
+		if err := updateMetadataAndClose(store, row.ItemRootID, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass}); err != nil {
+			t.Fatalf("close item root %s: %v", row.ItemRootID, err)
+		}
+	}
+	for i := range manifest.Rows {
+		manifest.Rows[i].Status = "succeeded"
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadataBatch(drain.ID, map[string]string{
+		beadmeta.DrainStateMetadataKey: beadmeta.DrainStateSucceeded,
+		beadmeta.OutcomeMetadataKey:    beadmeta.OutcomePass,
+		drainManifestMetadataKey:       string(data),
+	}); err != nil {
+		t.Fatalf("record terminal drain state: %v", err)
+	}
+
+	result, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(finish recorded close): %v", err)
+	}
+	if result.Action != "drain-succeeded" {
+		t.Fatalf("Action = %q, want drain-succeeded", result.Action)
+	}
+	drain = mustGetBead(t, store, drain.ID)
+	if drain.Status != "closed" || drain.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Fatalf("drain = status %q outcome %q, want closed pass", drain.Status, drain.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	for _, row := range manifest.Rows {
+		unit := mustGetBead(t, store, row.UnitConvoyID)
+		if unit.Status != "closed" {
+			t.Errorf("unit convoy %s status = %q, want closed from the persisted manifest", unit.ID, unit.Status)
+		}
+		if got := unit.Metadata[beadmeta.OutcomeMetadataKey]; got != beadmeta.OutcomePass {
+			t.Errorf("unit convoy %s outcome = %q, want pass", unit.ID, got)
+		}
+	}
+}
