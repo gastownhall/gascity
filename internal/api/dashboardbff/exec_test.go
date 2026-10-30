@@ -1,8 +1,10 @@
 package dashboardbff
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -133,5 +135,70 @@ func TestCleanEnvPathAdminOverride(t *testing.T) {
 	// An unset HOME must not turn the override into an expansion either.
 	if got := cleanEnvPath(admin, "", "darwin"); got != admin {
 		t.Errorf("cleanEnvPath(%q, \"\", \"darwin\") = %q, want %q verbatim", admin, got, admin)
+	}
+}
+
+// TestExecBdPingChildGetsDeterministicSearchPath pins #7979 end to end: the
+// environment bd receives must carry the deterministic searchpath order
+// (existing user-managed dirs such as $HOME/go/bin plus the platform's
+// package-manager dirs), so probes can find a Homebrew-installed dolt, and
+// must not inherit the supervisor's own PATH — the only place the directory
+// holding this fake bd exists.
+func TestExecBdPingChildGetsDeterministicSearchPath(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "go", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	beadsPath := filepath.Join(root, ".beads")
+	if err := os.Mkdir(beadsPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pathFile := filepath.Join(root, "child-path")
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nprintf '%s\\n' \"$PATH\" > \"" + pathFile + "\"\nprintf '%s' '{\"status\":\"ok\"}'\n"
+	if err := os.WriteFile(filepath.Join(bin, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("ADMIN_PATH", "")
+	// exec.Command resolves bd against the parent PATH before the runner
+	// applies its scrubbed child environment.
+	t.Setenv("PATH", bin)
+
+	res, err := newExecRunner().execBdPing(context.Background(), beadsPath)
+	if err != nil {
+		t.Fatalf("execBdPing() error = %v", err)
+	}
+	if res.exitCode != 0 {
+		t.Fatalf("execBdPing() exit = %d stdout=%q stderr=%q", res.exitCode, res.stdout, res.stderr)
+	}
+	recorded, err := os.ReadFile(pathFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirs := filepath.SplitList(strings.TrimSpace(string(recorded)))
+	contains := func(dir string) bool {
+		for _, d := range dirs {
+			if d == dir {
+				return true
+			}
+		}
+		return false
+	}
+	if want := filepath.Join(home, "go", "bin"); !contains(want) {
+		t.Errorf("bd child PATH = %q, want it to contain %q", recorded, want)
+	}
+	if want := map[string]string{
+		"darwin": "/opt/homebrew/bin",
+		"linux":  "/home/linuxbrew/.linuxbrew/bin",
+	}[runtime.GOOS]; want != "" && !contains(want) {
+		t.Errorf("bd child PATH = %q, want it to contain the %s package-manager dir %q", recorded, runtime.GOOS, want)
+	}
+	if contains(bin) {
+		t.Errorf("bd child PATH = %q, must not inherit the supervisor's own PATH entry %q", recorded, bin)
 	}
 }
