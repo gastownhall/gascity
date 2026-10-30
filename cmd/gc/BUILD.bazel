@@ -259,6 +259,7 @@ go_library(
         "cmd_worktree.go",
         "completion.go",
         "completions_lane.go",
+        "compute_awake_backoff.go",
         "compute_awake_bridge.go",
         "compute_awake_set.go",
         "config_hash.go",

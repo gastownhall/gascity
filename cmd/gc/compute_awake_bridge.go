@@ -197,9 +197,11 @@ func newAwakeInputFromSnapshot(
 			// not dispatch. Only meaningful for in_progress -- open work's
 			// blocker state is already folded into `ready` above.
 			blocked := wb.Status == "in_progress" && wb.IsBlocked != nil && *wb.IsBlocked
-			input.WorkBeads = append(input.WorkBeads, AwakeWorkBead{
+			awakeWB := AwakeWorkBead{
 				ID: wb.ID, Assignee: a, Status: wb.Status, Ready: ready, Blocked: blocked,
-			})
+			}
+			applyWakeBackoffMetadata(&awakeWB, wb.Metadata, wb.UpdatedAt)
+			input.WorkBeads = append(input.WorkBeads, awakeWB)
 		}
 	}
 

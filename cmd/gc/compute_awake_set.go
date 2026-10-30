@@ -149,6 +149,17 @@ type AwakeWorkBead struct {
 	// releases the session's scale slot, which can wake a different session
 	// as scaled:demand.
 	Blocked bool
+	// WakeBackoffUntil suppresses this bead's awake demand until the given
+	// time, mirroring AwakeSessionBead.QuarantinedUntil. Zero means no
+	// backoff is in effect. Set by agent judgment (bd update
+	// --set-metadata backoff_until=...) when a bead is externally blocked
+	// and re-verification found no state change; invalidated by the bridge
+	// the moment a genuine external update is observed. See ga-7fldxz.2.
+	WakeBackoffUntil time.Time
+	// WakeBackoffCount is the number of consecutive backoff cycles recorded
+	// on this bead. Carried through for observability; escalation-threshold
+	// judgment lives in the role prompt, not here.
+	WakeBackoffCount int
 }
 
 // AwakeDecision is the output for a single session.
@@ -377,12 +388,12 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 			continue
 		}
 		active := collectActiveBeads(input.SessionBeads, template, input.Now)
-		filled := countAssignedScaleSlotsIndexed(input.SessionBeads, input.WorkBeads, input.workIndex, input.NamedSessions, template)
+		filled := countAssignedScaleSlotsIndexed(input.SessionBeads, input.WorkBeads, input.workIndex, input.NamedSessions, template, input.Now)
 		for _, bead := range active {
 			if filled >= count {
 				break
 			}
-			if sessionHasAssignedWork(input.workIndex.candidates(input.WorkBeads, input.NamedSessions, bead), input.NamedSessions, bead) {
+			if sessionHasAssignedWork(input.workIndex.candidates(input.WorkBeads, input.NamedSessions, bead), input.NamedSessions, bead, input.Now) {
 				continue
 			}
 			desired[key(bead)] = "scaled:demand"
@@ -393,7 +404,7 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 			if filled >= count {
 				break
 			}
-			if sessionHasAssignedWork(input.workIndex.candidates(input.WorkBeads, input.NamedSessions, bead), input.NamedSessions, bead) {
+			if sessionHasAssignedWork(input.workIndex.candidates(input.WorkBeads, input.NamedSessions, bead), input.NamedSessions, bead, input.Now) {
 				continue
 			}
 			desired[key(bead)] = "scaled:creating"
@@ -468,7 +479,7 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 		)
 		for _, wb := range input.workIndex.candidates(input.WorkBeads, input.NamedSessions, bead) {
 			assignee := strings.TrimSpace(wb.Assignee)
-			if assignee == "" || !workBeadHasAwakeDemand(wb) {
+			if assignee == "" || !workBeadHasAwakeDemand(wb, input.Now) {
 				continue
 			}
 			if !sessionAssigneeMatches(input.NamedSessions, bead, assignee) {
@@ -705,13 +716,13 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 	return result
 }
 
-func countAssignedScaleSlots(beads []AwakeSessionBead, workBeads []AwakeWorkBead, named []AwakeNamedSession, template string) int {
-	return countAssignedScaleSlotsIndexed(beads, workBeads, nil, named, template)
+func countAssignedScaleSlots(beads []AwakeSessionBead, workBeads []AwakeWorkBead, named []AwakeNamedSession, template string, now time.Time) int {
+	return countAssignedScaleSlotsIndexed(beads, workBeads, nil, named, template, now)
 }
 
 // countAssignedScaleSlotsIndexed is countAssignedScaleSlots through index;
 // nil scans every work bead.
-func countAssignedScaleSlotsIndexed(beads []AwakeSessionBead, workBeads []AwakeWorkBead, index awakeWorkIndex, named []AwakeNamedSession, template string) int {
+func countAssignedScaleSlotsIndexed(beads []AwakeSessionBead, workBeads []AwakeWorkBead, index awakeWorkIndex, named []AwakeNamedSession, template string, now time.Time) int {
 	n := 0
 	for _, bead := range beads {
 		if bead.Template != template || bead.State == "closed" {
@@ -720,7 +731,7 @@ func countAssignedScaleSlotsIndexed(beads []AwakeSessionBead, workBeads []AwakeW
 		if bead.NamedIdentity != "" || bead.ConfiguredNamedSession || bead.ManualSession {
 			continue
 		}
-		if sessionHasAssignedWork(index.candidates(workBeads, named, bead), named, bead) {
+		if sessionHasAssignedWork(index.candidates(workBeads, named, bead), named, bead, now) {
 			n++
 		}
 	}
@@ -903,10 +914,10 @@ func collectActiveBeads(beads []AwakeSessionBead, template string, now time.Time
 	return result
 }
 
-func sessionHasAssignedWork(workBeads []AwakeWorkBead, named []AwakeNamedSession, bead AwakeSessionBead) bool {
+func sessionHasAssignedWork(workBeads []AwakeWorkBead, named []AwakeNamedSession, bead AwakeSessionBead, now time.Time) bool {
 	for _, wb := range workBeads {
 		assignee := strings.TrimSpace(wb.Assignee)
-		if assignee == "" || !workBeadHasAwakeDemand(wb) {
+		if assignee == "" || !workBeadHasAwakeDemand(wb, now) {
 			continue
 		}
 		if sessionAssigneeMatches(named, bead, assignee) {
@@ -925,15 +936,29 @@ func sessionHasClaimedInProgressWork(workBeads []AwakeWorkBead, named []AwakeNam
 	return false
 }
 
-func workBeadHasAwakeDemand(bead AwakeWorkBead) bool {
+// workBeadHasAwakeDemand reports whether a work bead currently contributes
+// awake demand: it must be in_progress and unblocked, or open and Ready, AND
+// must not be suppressed by an in-effect WakeBackoffUntil. The backoff check mirrors the QuarantinedUntil
+// suppression on AwakeSessionBead (see ComputeAwakeSet's "Quarantine
+// suppression" step) — same shape, applied to the work bead instead of the
+// session bead. See ga-7fldxz.2.
+func workBeadHasAwakeDemand(bead AwakeWorkBead, now time.Time) bool {
+	var ready bool
 	switch bead.Status {
 	case "in_progress":
-		return !bead.Blocked
+		ready = !bead.Blocked
 	case "open":
-		return bead.Ready
+		ready = bead.Ready
 	default:
+		ready = false
+	}
+	if !ready {
 		return false
 	}
+	if !bead.WakeBackoffUntil.IsZero() && now.Before(bead.WakeBackoffUntil) {
+		return false
+	}
+	return true
 }
 
 func sessionAssigneeMatches(named []AwakeNamedSession, bead AwakeSessionBead, assignee string) bool {
