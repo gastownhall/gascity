@@ -7718,3 +7718,30 @@ func TestTryDeliverQueuedNudgesByPollerDeliversStarvedNudgeWithoutTurnReading(t 
 	}
 	assertQueuedNudgeDrained(t, dir)
 }
+
+// A quiet session's item, however old, goes out through the default delivery
+// the open gate has always used: the starvation bypass is taken only while
+// the activity clock reads busy, so it costs no turn look and no immediate
+// send.
+func TestTryDeliverQueuedNudgesByPollerSendsStarvedNudgeToQuietSessionByDefault(t *testing.T) {
+	dir, fake, store, target, obs := busyQueuedNudgeFixture(t, time.Now().Add(-10*time.Minute))
+	quietSince := time.Now().Add(-2 * time.Hour)
+	fake.Activity = map[string]time.Time{target.sessionName: quietSince}
+	obs.LastActivity = &quietSince
+	sp := &turnLookProvider{Fake: fake}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, sp, time.Hour, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if !delivered {
+		t.Fatal("delivered = false, want true")
+	}
+	if now, nudge := fake.CountCalls("NudgeNow", target.sessionName), fake.CountCalls("Nudge", target.sessionName); now != 0 || nudge != 1 {
+		t.Fatalf("NudgeNow/Nudge calls = %d/%d, want 0/1", now, nudge)
+	}
+	if sp.looks != 0 {
+		t.Fatalf("TurnRunning looks = %d, want 0", sp.looks)
+	}
+	assertQueuedNudgeDrained(t, dir)
+}
