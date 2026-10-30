@@ -922,7 +922,7 @@ func TestRouteCLILaneNotice(t *testing.T) {
 				t.Fatalf("closing the row: %v", err)
 			}
 		}},
-		{name: "a protocol-mode session no lane serves keeps the legacy path", modify: func(_ *testing.T, c *cliLaneCity) {
+		{name: "a protocol-mode runtime with unrecorded turn starts keeps the legacy path", modify: func(_ *testing.T, c *cliLaneCity) {
 			c.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 		}},
 		{name: "no city store is refused", city: func(*cliLaneCity) beads.Store { return nil }, handled: true, refusal: "the city store did not open"},

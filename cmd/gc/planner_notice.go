@@ -503,12 +503,12 @@ func (h *conversationLaneHost) noticeStore() (*opjournal.Store, error) {
 // noticeNow is the host's clock, which its op store stamps ops with.
 func (h *conversationLaneHost) noticeNow() time.Time { return h.clk.Now() }
 
-// servesNotice reports whether a lane can type a notice into the session:
-// the host's live executor can (laneTypesLive, its caps' rule for a
-// keystroke-mode runtime), or the conversation's runtime row stamps another
-// host serving message for the row's generation (hostedElsewhere), whose
-// lane then delivers it. A protocol-mode session is nudged directly, as
-// before, even where this host's executor serves it from its turns.
+// servesNotice reports whether a lane can deliver a notice into the
+// session: the host's live executor serves its runtime (laneServesLive, its
+// caps' rule), or the conversation's runtime row stamps another host serving
+// message for the row's generation (hostedElsewhere), whose lane then
+// delivers it. A protocol-mode runtime whose turn starts are not recorded is
+// nudged directly.
 func (h *conversationLaneHost) servesNotice(st *opjournal.Store, sessName string, view opjournal.ConversationView) (bool, error) {
 	return laneServesSession(h.env.SessionProvider(), st, sessName, view)
 }
