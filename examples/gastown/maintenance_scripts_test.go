@@ -13099,6 +13099,32 @@ func TestOrphanSweepComposesGateAndLocalSkipOutcomes(t *testing.T) {
 	}
 }
 
+// TestOrphanSweepDeclaresNothingForBenignReleaseRace pins the quiet path: a
+// release-if-current that reports `skipped` (the bead was closed or
+// reassigned between listing and release) is a benign race, not a skip to
+// count or declare. A pass whose only non-reset is that race writes no
+// outcome declaration and exits 0.
+func TestOrphanSweepDeclaresNothingForBenignReleaseRace(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{hookClaim("ga-raced", "gc-d34d1", "gastown__polecat-gc-d34d1", nil)},
+		nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d1", Status: "closed", IssueType: "session"}},
+		nil,
+		map[string]string{"ORPHAN_SWEEP_RELEASE_OUTPUT": "skipped"})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if !run.released("ga-raced") {
+		t.Fatalf("the conditional release was never attempted:\n%s", run.context())
+	}
+	if strings.Contains(run.out, "orphan-sweep:") || strings.Contains(run.out, "unverifiable") {
+		t.Fatalf("a benign release race must not be summarized or counted:\n%s", run.out)
+	}
+	if _, ok := run.outcome(t); ok {
+		t.Fatalf("a benign release race must not declare an outcome:\n%s", run.context())
+	}
+}
+
 // TestOrphanSweepProtectsHQClaimsItCannotVouchFor applies the gate in HQ, this
 // city's own store, as the Go sweep does for every store: a claim under an
 // identity this city cannot vouch for (a person, a typo, a decommissioned
