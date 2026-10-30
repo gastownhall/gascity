@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -81,13 +82,15 @@ func TestBeadsState_JSONSchemaManifestIsServable(t *testing.T) {
 	}
 }
 
-// beadsStateSessionBead builds a session bead carrying a lifecycle state.
-func beadsStateSessionBead(lifecycleState string) beads.Bead {
-	meta := map[string]string{"session_name": "sess", "template": "rig/agent"}
-	if lifecycleState != "" {
-		meta["state"] = lifecycleState
+// beadsStateSessionInfo builds a session projection carrying a lifecycle state.
+func beadsStateSessionInfo(lifecycleState string) session.Info {
+	return session.Info{
+		ID:            "s-1",
+		SessionName:   "sess",
+		Template:      "rig/agent",
+		State:         session.State(lifecycleState),
+		MetadataState: lifecycleState,
 	}
-	return beads.Bead{ID: "s-1", Status: "open", Metadata: meta}
 }
 
 // TestBeadsStateSessionIsLiveUsesCapacityProjection pins the liveness predicate
@@ -95,29 +98,30 @@ func beadsStateSessionBead(lifecycleState string) beads.Bead {
 // four-value denylist (suspended/archived/quarantined/drained) that counted
 // failed-create, orphaned, closing and stopped sessions as LIVE, so a bead held
 // by a failed-create session reported in-progress instead of orphaned — the
-// anomaly this command exists to surface.
+// anomaly this command exists to surface. Quarantined is the one state where
+// liveness and capacity part ways: it holds a slot but works nothing.
 func TestBeadsStateSessionIsLiveUsesCapacityProjection(t *testing.T) {
-	live := []string{"active", "creating", "start-pending", "draining", "quarantined"}
-	dead := []string{"failed-create", "orphaned", "closing", "stopped", "archived", "asleep", "drained", "suspended"}
+	live := []string{"active", "creating", "start-pending", "draining"}
+	dead := []string{"quarantined", "failed-create", "orphaned", "closing", "stopped", "archived", "asleep", "drained", "suspended"}
 
 	for _, st := range live {
-		if !beadsStateSessionIsLive(beadsStateSessionBead(st)) {
+		if !beadsStateSessionIsLive(beadsStateSessionInfo(st)) {
 			t.Errorf("state %q: got not-live, want live (it still occupies a slot)", st)
 		}
 	}
 	for _, st := range dead {
-		if beadsStateSessionIsLive(beadsStateSessionBead(st)) {
+		if beadsStateSessionIsLive(beadsStateSessionInfo(st)) {
 			t.Errorf("state %q: got live, want not-live", st)
 		}
 	}
-	closed := beadsStateSessionBead("active")
-	closed.Status = "closed"
+	closed := beadsStateSessionInfo("active")
+	closed.Closed = true
 	if beadsStateSessionIsLive(closed) {
 		t.Error("closed session bead reported live")
 	}
 	// An unstamped bead is treated as live on purpose: a fabricated orphan is
 	// worse than a missed one.
-	if !beadsStateSessionIsLive(beadsStateSessionBead("")) {
+	if !beadsStateSessionIsLive(beadsStateSessionInfo("")) {
 		t.Error("session bead with no lifecycle state reported not-live; a missing stamp must not fabricate an orphan")
 	}
 }
@@ -140,7 +144,7 @@ func (errBeadsStateDark) Error() string { return "session leg is dark" }
 // routed-waiting, with exit 0 and an empty stderr — an anomaly detector
 // reporting calm precisely when it had gone blind.
 func TestBeadsStateLiveSetsPropagateStoreErrors(t *testing.T) {
-	live, liveRigs, err := buildBeadsStateLiveSets(beadsStateDarkStore{})
+	live, liveRigs, err := buildBeadsStateLiveSets(session.NewStore(beads.SessionStore{Store: beadsStateDarkStore{}}))
 	if err == nil {
 		t.Fatal("buildBeadsStateLiveSets returned nil error for a dark store; the failure must not be swallowed")
 	}
@@ -204,5 +208,78 @@ func TestBeadsStateAcceptsConfiguredButIdleRig(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := cmdBeadsState("idle-rig", "", false, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdBeadsState --rig idle-rig = %d, want 0 (a configured rig with no routed beads is a real answer)\nstderr=%s", code, stderr.String())
+	}
+}
+
+// TestBeadsStateQuarantinedSessionStallsItsRig: a rig whose only session is
+// quarantined has nothing working its routed beads, and a bead bound to that
+// session is not being worked either. Capacity accounting still counts the
+// slot, so this pins that liveness does not inherit that choice.
+func TestBeadsStateQuarantinedSessionStallsItsRig(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "worker session",
+		Type:   "session",
+		Labels: []string{"gc:session"},
+		Metadata: map[string]string{
+			"session_name": "rig-worker-1",
+			"template":     "rig/worker",
+			"state":        "quarantined",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	live, liveRigs, err := buildBeadsStateLiveSets(session.NewStore(beads.SessionStore{Store: store}))
+	if err != nil {
+		t.Fatalf("buildBeadsStateLiveSets: %v", err)
+	}
+	if live["rig-worker-1"] {
+		t.Error("quarantined session counted live; beads bound to it would read in-progress instead of orphaned")
+	}
+	if liveRigs["rig"] {
+		t.Error("rig with only a quarantined session counted live; routed-stalled-dispatch would be muted")
+	}
+}
+
+// TestBeadsStateReadsRigStores: routed work usually lives in a rig store, so a
+// report that reads the city store alone leaves most routed-* verdicts
+// unreachable. Every view is listed, and the blocked set is computed against
+// the store that holds each bead.
+func TestBeadsStateReadsRigStores(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	if _, err := cityStore.Create(beads.Bead{Title: "city task", Type: "task"}); err != nil {
+		t.Fatal(err)
+	}
+	blocker, err := rigStore.Create(beads.Bead{Title: "rig blocker", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockedBead, err := rigStore.Create(beads.Bead{Title: "rig blocked", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rigStore.DepAdd(blockedBead.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+
+	all, blocked, err := listBeadsStateAcrossStores([]convoyStoreView{
+		{path: "city", store: cityStore},
+		{path: "rig", store: rigStore},
+	})
+	if err != nil {
+		t.Fatalf("listBeadsStateAcrossStores: %v", err)
+	}
+	titles := make(map[string]bool, len(all))
+	for _, b := range all {
+		titles[b.Title] = true
+	}
+	for _, want := range []string{"city task", "rig blocker", "rig blocked"} {
+		if !titles[want] {
+			t.Errorf("bead %q missing from the report's input; got %v", want, titles)
+		}
+	}
+	if !blocked[blockedBead.ID] {
+		t.Errorf("rig bead %s blocked by an open rig dependency is not in the blocked set %v", blockedBead.ID, blocked)
 	}
 }

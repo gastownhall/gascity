@@ -23,7 +23,7 @@ API with transparent fallback to direct bd reads.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc beads: missing subcommand (city, health, list, metadata-cas, show)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, "gc beads: missing subcommand (city, health, list, metadata-cas, show, state)") //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stderr, "gc beads: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}

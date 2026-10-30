@@ -58,13 +58,20 @@ first match wins.
 ## What "live" means
 
 `live` and `liveRigs` are built in `cmd/gc/cmd_beads_state.go` from the open
-session beads, and a session counts as live when the canonical lifecycle
-projection says it still occupies a slot —
-`session.ProjectLifecycle(...).CountsAgainstCap`. That is the same predicate
-capacity accounting uses, so liveness here cannot drift from liveness there.
-It admits `active`, `creating`, `start-pending`, `draining` and `quarantined`,
-and excludes `failed-create`, `orphaned`, `closing`, `stopped`, `archived`,
-`asleep`, `drained` and `suspended`.
+session beads, read through the session-class store so a
+`[beads.classes.sessions]` relocation is honored. A session counts as live when
+the canonical lifecycle projection says it still occupies a slot —
+`session.ProjectLifecycle(...).CountsAgainstCap` — and is not quarantined.
+Capacity accounting uses the same predicate, so liveness here cannot drift
+from liveness there, with one deliberate exception: a quarantined session
+holds its slot but works nothing, so counting it live would hide the beads it
+was holding. Liveness admits `active`, `creating`, `start-pending` and
+`draining`, and excludes `quarantined`, `failed-create`, `orphaned`, `closing`,
+`stopped`, `archived`, `asleep`, `drained` and `suspended`.
+
+The beads being classified come from every store the city reads — the city
+store plus each rig store, merged the way `gc beads list` merges them — since
+routed work usually lives in a rig store.
 
 A session bead with no `state` stamped at all is treated as live on purpose.
 The projection cannot judge it, and for an anomaly detector a missed orphan is

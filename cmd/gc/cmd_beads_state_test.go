@@ -158,9 +158,16 @@ func TestBeadsState_IDsFlag(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("cmdBeadsState --state done --ids = %d; stderr=%s", code, stderr.String())
 	}
-	// File-store bead IDs start with "gc-"
-	if !strings.Contains(stdout.String(), "gc-") {
-		t.Errorf("--ids: expected bead ID in output, got:\n%s", stdout.String())
+	store, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	closed, err := store.List(beads.ListQuery{Status: "closed", IncludeClosed: true, AllowScan: true})
+	if err != nil || len(closed) != 1 {
+		t.Fatalf("closed beads = %v, err = %v; want exactly one", closed, err)
+	}
+	if !strings.Contains(stdout.String(), closed[0].ID) {
+		t.Errorf("--ids: expected bead ID %q in output, got:\n%s", closed[0].ID, stdout.String())
 	}
 }
 

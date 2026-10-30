@@ -89,15 +89,19 @@ func cmdBeadsState(rigFlag, stateFilter string, showIDs, jsonOut bool, stdout, s
 		fmt.Fprintf(stderr, "gc beads state: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// The warning writer is threaded through so config-load warnings reach the
+	// operator instead of being dropped
+	// (TestNonTestLoadCityConfigCallersPassWarningWriter).
+	cfg, err := loadCityConfig(cityPath, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc beads state: loading city config: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	// Validate --rig against the configured rigs rather than against "did any
 	// bead match". A rig with genuinely no routed beads is a real answer and
 	// must still exit 0; only a name the city does not know is an error.
 	if rigFlag != "" {
-		known, err := beadsStateKnownRigs(cityPath, stderr)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc beads state: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+		known := beadsStateKnownRigs(cfg)
 		if !known[rigFlag] {
 			fmt.Fprintf(stderr, "gc beads state: unknown --rig %q; configured rigs: %s\n", //nolint:errcheck // best-effort stderr
 				rigFlag, strings.Join(beadsStateSortedRigNames(known), ", "))
@@ -105,20 +109,27 @@ func cmdBeadsState(rigFlag, stateFilter string, showIDs, jsonOut bool, stdout, s
 		}
 	}
 
-	store, err := openCityStoreAt(cityPath)
+	// Every store the city reads, the same federation "gc beads list" uses:
+	// routed work usually lives in a rig store, so reading the city store alone
+	// would leave most routed-* verdicts unreachable.
+	views, code := openAllConvoyStoresAt(cityPath, stderr, "gc beads state")
+	if views == nil {
+		return code
+	}
+	views = convoyStoreViewsForRead(cityPath, views, stderr, "gc beads state")
+	allBeads, blocked, err := listBeadsStateAcrossStores(views)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc beads state: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	allBeads, err := store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	// Sessions are read through the session-class front door, so a
+	// [beads.classes.sessions] relocation is honored.
+	cityStore, err := openCityStoreAt(cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc beads state: listing beads: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc beads state: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
-	closedIDs := buildClosedSet(allBeads)
-	blocked := buildBlockedSet(store, allBeads, closedIDs)
 
 	now := time.Now()
 	ready := make(map[string]bool, len(allBeads))
@@ -128,7 +139,7 @@ func cmdBeadsState(rigFlag, stateFilter string, showIDs, jsonOut bool, stdout, s
 		}
 	}
 
-	live, liveRigs, err := buildBeadsStateLiveSets(store)
+	live, liveRigs, err := buildBeadsStateLiveSets(cliSessionFrontDoor(cityStore, cfg, cityPath))
 	if err != nil {
 		// No report at all is the right answer here. With an incomplete session
 		// view every bead bound to a session we cannot see classifies as
@@ -179,21 +190,15 @@ func isKnownBeadsState(name string) bool {
 }
 
 // beadsStateKnownRigs returns the set of rig names configured for the city, so
-// --rig can distinguish a misspelled rig from a rig that is merely idle. The
-// warning writer is threaded through so config-load warnings reach the operator
-// instead of being dropped (TestNonTestLoadCityConfigCallersPassWarningWriter).
-func beadsStateKnownRigs(cityPath string, warnings io.Writer) (map[string]bool, error) {
-	cfg, err := loadCityConfig(cityPath, warnings)
-	if err != nil {
-		return nil, fmt.Errorf("loading city config: %w", err)
-	}
+// --rig can distinguish a misspelled rig from a rig that is merely idle.
+func beadsStateKnownRigs(cfg *config.City) map[string]bool {
 	known := make(map[string]bool, len(cfg.Rigs))
 	for i := range cfg.Rigs {
 		if name := strings.TrimSpace(cfg.Rigs[i].Name); name != "" {
 			known[name] = true
 		}
 	}
-	return known, nil
+	return known
 }
 
 // beadsStateSortedRigNames returns the rig names in sorted order for stable diagnostics.
@@ -282,6 +287,49 @@ func (v beadStateView) Meta(key string) string {
 	return v.b.Metadata[key]
 }
 
+// beadsStateStoredRow is a listed bead together with the index of the store
+// view it came from, so the DepList fallback asks the bead's own store.
+type beadsStateStoredRow struct {
+	view int
+	bead beads.Bead
+}
+
+// listBeadsStateAcrossStores lists every bead, closed included, from every
+// view and merges them the way "gc beads list" does: rows a class binding
+// supersedes are dropped, and same-id rows from different stores are kept. It
+// also returns the blocked set, computed per store because dependency edges are
+// read from the store that holds the bead.
+func listBeadsStateAcrossStores(views []convoyStoreView) ([]beads.Bead, map[string]bool, error) {
+	rows := make([][]beadsStateStoredRow, len(views))
+	for i, view := range views {
+		list, err := view.store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+		if err != nil {
+			return nil, nil, fmt.Errorf("listing beads in %s: %w", view.path, err)
+		}
+		rows[i] = make([]beadsStateStoredRow, 0, len(list))
+		for _, b := range list {
+			rows[i] = append(rows[i], beadsStateStoredRow{view: i, bead: b})
+		}
+	}
+	merged, err := mergeConvoyViewRows(views, rows, func(r beadsStateStoredRow) string { return r.bead.ID })
+	if err != nil {
+		return nil, nil, err
+	}
+
+	all := make([]beads.Bead, 0, len(merged))
+	perView := make([][]beads.Bead, len(views))
+	for _, r := range merged {
+		all = append(all, r.bead)
+		perView[r.view] = append(perView[r.view], r.bead)
+	}
+	closedIDs := buildClosedSet(all)
+	blocked := make(map[string]bool)
+	for i, list := range perView {
+		markBlockedBeads(blocked, list, closedIDs, views[i].store.DepList)
+	}
+	return all, blocked, nil
+}
+
 // buildClosedSet returns the set of closed bead IDs, used by buildBlockedSet
 // to determine whether a blocking dependency has been resolved.
 func buildClosedSet(allBeads []beads.Bead) map[string]bool {
@@ -294,13 +342,12 @@ func buildClosedSet(allBeads []beads.Bead) map[string]bool {
 	return closed
 }
 
-// buildBlockedSet returns the set of bead IDs that are blocked by at least one
+// markBlockedBeads adds to blocked every bead in list that has at least one
 // open blocking dependency. It uses the IsBlocked projection when the store
-// provides it (bd/dolt), and falls back to DepList for stores that do not
-// (file store, in-memory store).
-func buildBlockedSet(store beads.Store, allBeads []beads.Bead, closedIDs map[string]bool) map[string]bool {
-	blocked := make(map[string]bool)
-	for _, b := range allBeads {
+// provides it (bd/dolt), and falls back to depList, the holding store's
+// DepList, for stores that do not (file store, in-memory store).
+func markBlockedBeads(blocked map[string]bool, list []beads.Bead, closedIDs map[string]bool, depList func(id, direction string) ([]beads.Dep, error)) {
+	for _, b := range list {
 		if b.Status == "closed" || b.Status == "deferred" || b.Status == "pinned" {
 			continue
 		}
@@ -311,8 +358,7 @@ func buildBlockedSet(store beads.Store, allBeads []beads.Bead, closedIDs map[str
 			}
 			continue
 		}
-		// Fall back to DepList for stores without the projection.
-		deps, err := store.DepList(b.ID, "down")
+		deps, err := depList(b.ID, "down")
 		if err != nil {
 			continue
 		}
@@ -323,7 +369,6 @@ func buildBlockedSet(store beads.Store, allBeads []beads.Bead, closedIDs map[str
 			}
 		}
 	}
-	return blocked
 }
 
 // beadsStateSessionIsLive reports whether a session bead still occupies a slot,
@@ -339,18 +384,25 @@ func buildBlockedSet(store beads.Store, allBeads []beads.Bead, closedIDs map[str
 // orphaned. CountsAgainstCap is the same predicate the capacity accounting
 // uses, so the two can no longer disagree.
 //
+// It is not a clean swap, though: a quarantined session still holds its slot
+// (so the controller does not replace it while it is held out of wake) but is
+// not working anything. Counting it live would hide exactly the bead the
+// orphaned verdict exists for, and would mute routed-stalled-dispatch for a rig
+// whose only sessions are quarantined, so it is excluded explicitly.
+//
 // A bead with no lifecycle state stamped at all is treated as live on purpose:
 // the projection cannot judge it, and for an anomaly detector a false negative
 // (a missed orphan) is much cheaper than a false positive (a fabricated one
 // that sends an operator reclaiming a healthy session).
-func beadsStateSessionIsLive(sb beads.Bead) bool {
-	if sb.Status == "closed" {
+func beadsStateSessionIsLive(info session.Info) bool {
+	if info.Closed {
 		return false
 	}
-	if strings.TrimSpace(sb.Metadata["state"]) == "" {
+	if strings.TrimSpace(info.MetadataState) == "" {
 		return true
 	}
-	return session.ProjectLifecycle(session.LifecycleInputFromMetadata(sb.Status, sb.Metadata)).CountsAgainstCap
+	projected := session.ProjectLifecycle(session.LifecycleInputFromInfo(info))
+	return projected.CountsAgainstCap && projected.BaseState != session.BaseStateQuarantined
 }
 
 // buildBeadsStateLiveSets returns:
@@ -368,21 +420,21 @@ func beadsStateSessionIsLive(sb beads.Bead) bool {
 // session missing from the union does not merely hide an anomaly, it invents
 // one, because beads pointing at the missing session classify as orphaned.
 // Callers surface the error rather than rendering fabricated anomalies.
-func buildBeadsStateLiveSets(store beads.Store) (live, liveRigs map[string]bool, err error) {
+func buildBeadsStateLiveSets(sessions *session.Store) (live, liveRigs map[string]bool, err error) {
 	live = make(map[string]bool)
 	liveRigs = make(map[string]bool)
-	sessionBeads, listErr := session.ListAllSessionBeads(store, beads.ListQuery{IncludeClosed: false})
+	infos, listErr := sessions.ListAll(session.ListAllOptions{})
 	if listErr != nil {
 		return nil, nil, listErr
 	}
-	for _, sb := range sessionBeads {
-		if !beadsStateSessionIsLive(sb) {
+	for _, info := range infos {
+		if !beadsStateSessionIsLive(info) {
 			continue
 		}
-		if sessName := sb.Metadata["session_name"]; sessName != "" {
-			live[sessName] = true
+		if info.SessionName != "" {
+			live[info.SessionName] = true
 		}
-		if tmpl := strings.TrimSpace(sb.Metadata["template"]); tmpl != "" {
+		if tmpl := strings.TrimSpace(info.Template); tmpl != "" {
 			if rig, _ := config.ParseQualifiedName(tmpl); rig != "" {
 				liveRigs[rig] = true
 			}
