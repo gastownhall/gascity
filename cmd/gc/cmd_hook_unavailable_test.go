@@ -130,6 +130,7 @@ func TestClassifyWorkQueryStoreUnavailable(t *testing.T) {
 		// one-byte "k") do not shift it.
 		{"marker only in the command text", fmt.Errorf("running work query %q: exit status 1: %s", "bd ready --json; exit 1 # connection refused", "unknown flag --bogus"), false},
 		{"timeout needle only in the command text", fmt.Errorf("running work query %q: exit status 1: %s", "bd ready --json; exit 1 # timed out after", "unknown flag --bogus"), false},
+		{"cancel text only in the command text", fmt.Errorf("running work query %q: exit status 1: %s", "bd ready --json; exit 1 # context canceled", "unknown flag --bogus"), false},
 		{"marker after an escaped quote in the command text", fmt.Errorf("running work query %q: exit status 1: %s", `bd ready --json --title "x" # dial tcp`, "unknown flag --bogus"), false},
 		{"breaker phrase only in the command text", fmt.Errorf("running work query %q: exit status 1: %s", "bd ready --json; exit 1 # server appears down, failing fast", "unknown flag --bogus"), false},
 		{"killed-query needle only in the command text", fmt.Errorf("running work query %q: exit status 1: %s", "bd ready --json; exit 1 # signal: killed", "unknown flag --bogus"), false},
@@ -143,6 +144,9 @@ func TestClassifyWorkQueryStoreUnavailable(t *testing.T) {
 		// arrive as text; a query that timed out never answered.
 		{"bd deadline text", errors.New("Error: failed to list ready issues: context deadline exceeded"), true},
 		{"bd timeout text", errors.New("Error: failed to list ready issues: timed out after 30s"), true},
+		// A stop cut the bd read short before it ever answered: the same
+		// no-answer answer a timeout gets.
+		{"bd canceled under a stop", errors.New(`running work query "bd ready --json": exit status 1: Error: failed to list ready issues: context canceled`), true},
 		{"killed work query", errors.New(`running work query "bd ready --json": signal: killed`), true},
 		// Read-phase failures strike once a query is under way, past every
 		// connect-time marker.
