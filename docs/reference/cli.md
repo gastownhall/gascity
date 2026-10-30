@@ -4561,8 +4561,9 @@ With --json the output is one JSON document that validates against
 the route a command takes decides which one it gets:
 
   - Local rendering (a supervisor-hosted city, a city with no reachable
-    API, or GC_NO_API set): filters, sessions and summary. Each row carries
-    agent_name and closed, and no liveness.
+    API, or GC_NO_API set for a local target; a remote target rejects
+    GC_NO_API): filters, sessions and summary. Each row carries closed, and
+    agent_name when the session has one, and no liveness.
   - API rendering (a remote target such as --city-url, a standalone
     controller's [api] port, or a supervisor serving a city that has no
     controller): _cache_age_s and sessions. Each row carries running, and no
