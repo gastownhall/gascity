@@ -11,9 +11,11 @@ import (
 )
 
 // TestCleanEnvPath pins the subprocess PATH default (#7979): with ADMIN_PATH
-// unset, the platform package-manager dirs follow the fixed system base, so a
-// Homebrew-installed dolt is found without displacing binaries that resolve
-// today. The goos argument covers every platform on any host.
+// unset, the child gets the searchpath order the installed supervisor service
+// PATH also uses. The user's own ~/.local/bin and ~/bin lead, the fixed system
+// base follows, and the platform package-manager dirs come after it, so a
+// Homebrew-installed dolt is found but never displaces a system binary of the
+// same name. The goos argument covers every platform on any host.
 func TestCleanEnvPath(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -31,6 +33,7 @@ func TestCleanEnvPath(t *testing.T) {
 			check: func(t *testing.T, home string, dirs []string) {
 				requireOrder(t, dirs,
 					filepath.Join(home, ".local", "bin"),
+					filepath.Join(home, "bin"),
 					"/usr/local/bin",
 					"/usr/bin",
 					"/bin",
@@ -45,6 +48,7 @@ func TestCleanEnvPath(t *testing.T) {
 			check: func(t *testing.T, home string, dirs []string) {
 				requireOrder(t, dirs,
 					filepath.Join(home, ".local", "bin"),
+					filepath.Join(home, "bin"),
 					"/usr/local/bin",
 					"/usr/bin",
 					"/bin",
@@ -65,8 +69,8 @@ func TestCleanEnvPath(t *testing.T) {
 					t.Errorf("PATH begins %q, want %q", got, cleanEnvBasePath)
 				}
 				for _, dir := range dirs {
-					if !filepath.IsAbs(dir) || dir == "/tmp" || strings.HasPrefix(dir, "/tmp/") {
-						t.Errorf("PATH %v contains %q; want only absolute non-/tmp dirs", dirs, dir)
+					if !filepath.IsAbs(dir) {
+						t.Errorf("PATH %v contains %q; want only absolute dirs", dirs, dir)
 					}
 				}
 				requireContains(t, dirs, "/opt/homebrew/bin")
@@ -155,6 +159,23 @@ func envValue(env []string, key string) string {
 		}
 	}
 	return ""
+}
+
+// TestCleanEnvUnsetHomeSearchesNoTmpDirs pins the unset-HOME contract: the
+// child's HOME falls back to /tmp, but its PATH is built from the raw, empty
+// HOME, so no dir under /tmp (which any local user can create) is searched.
+func TestCleanEnvUnsetHomeSearchesNoTmpDirs(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("ADMIN_PATH", "")
+	env := cleanEnv()
+	if got := envValue(env, "HOME"); got != "/tmp" {
+		t.Errorf("cleanEnv() HOME = %q, want /tmp", got)
+	}
+	for _, dir := range filepath.SplitList(envValue(env, "PATH")) {
+		if dir == "/tmp" || strings.HasPrefix(dir, "/tmp/") {
+			t.Errorf("cleanEnv() PATH contains %q; the /tmp HOME fallback must not add search dirs", dir)
+		}
+	}
 }
 
 // TestExecBdPingChildGetsDeterministicSearchPath pins #7979 end to end: the bd

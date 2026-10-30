@@ -57,7 +57,7 @@ gc [flags]
 | [gc login](#gc-login) | Log in to a hosted Gas City service |
 | [gc logout](#gc-logout) | Log out of a hosted Gas City service (revoke the session and forget the token) |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
-| [gc maintenance](#gc-maintenance) | Dolt store maintenance (gc + snapshot) |
+| [gc maintenance](#gc-maintenance) | Dolt store maintenance (observe-only: no gc or snapshot yet) |
 | [gc mcp](#gc-mcp) | Inspect projected MCP config |
 | [gc metrics](#gc-metrics) | Inspect or control Gas City command usage metrics |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
@@ -2851,10 +2851,14 @@ gc mail thread <id> [flags]
 
 ## gc maintenance
 
-Manage periodic Dolt store maintenance (see docs/adr/0002-dolt-store-maintenance-runbook.md).
+Manage periodic Dolt store maintenance (see engdocs/contributors/dolt-maintenance.md).
 
 The weekly loop runs inside the supervisor process when [maintenance.dolt] enabled=true
 in city.toml. 'status' shows loop state and recent runs; 'dolt-gc' triggers a manual run.
+
+The loop is observe-only for now: a run checks free disk space and records run history
+and events, but takes no backup snapshot and runs no CALL DOLT_GC, so a completed run
+does not mean the store was compacted.
 
 ```
 gc maintenance

@@ -20,11 +20,15 @@ import (
 func newMaintenanceCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "maintenance",
-		Short: "Dolt store maintenance (gc + snapshot)",
-		Long: `Manage periodic Dolt store maintenance (see docs/adr/0002-dolt-store-maintenance-runbook.md).
+		Short: "Dolt store maintenance (observe-only: no gc or snapshot yet)",
+		Long: `Manage periodic Dolt store maintenance (see engdocs/contributors/dolt-maintenance.md).
 
 The weekly loop runs inside the supervisor process when [maintenance.dolt] enabled=true
-in city.toml. 'status' shows loop state and recent runs; 'dolt-gc' triggers a manual run.`,
+in city.toml. 'status' shows loop state and recent runs; 'dolt-gc' triggers a manual run.
+
+The loop is observe-only for now: a run checks free disk space and records run history
+and events, but takes no backup snapshot and runs no CALL DOLT_GC, so a completed run
+does not mean the store was compacted.`,
 	}
 	cmd.AddCommand(newMaintenanceStatusCmd(stdout, stderr))
 	cmd.AddCommand(newMaintenanceDoltGCCmd(stdout, stderr))

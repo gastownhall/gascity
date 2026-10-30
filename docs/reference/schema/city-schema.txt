@@ -1634,7 +1634,7 @@
         },
         "alert_to": {
           "type": "string",
-          "description": "AlertTo is the agent identity to mail on failure (e.g.,\n\"gascity/mayor\"). Empty disables alert mail."
+          "description": "AlertTo is the agent identity to mail on failure (e.g.,\n\"gascity/mayor\"). Empty disables alert mail. It has no effect while\nthe loop is observe-only: an observe-only cycle cannot fail, so no\nalert mail is sent."
         },
         "gc_timeout": {
           "type": "string",
@@ -1644,7 +1644,7 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "description": "DoltMaintenance configures the periodic Dolt store maintenance loop, which is observe-only: each cycle runs the disk-space pre-flight, records run history and events, and mails AlertTo on failure — it takes no backup snapshot and runs no CALL DOLT_GC, so a completed run does not mean the store was compacted."
+      "description": "DoltMaintenance configures the periodic Dolt store maintenance loop, which is observe-only: each cycle runs the disk-space pre-flight and records run history and events — it takes no backup snapshot and runs no CALL DOLT_GC, so a completed run does not mean the store was compacted."
     },
     "EventsConfig": {
       "properties": {
