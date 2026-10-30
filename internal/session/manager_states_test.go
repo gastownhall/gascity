@@ -324,6 +324,40 @@ func TestConformance_NonSweepSuspendStillRejectsCreating(t *testing.T) {
 	}
 }
 
+// A sweep teardown of a creating row that FAILED is reported, not read as a
+// stopped seat, and puts back the wake stamp it cleared: the runtime is still
+// the start's live wake.
+func TestConformance_SweepSuspendCreatingPropagatesTeardownFailure(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	m := newTestManager(t, store, sp)
+
+	id := createTestSession(t, m, "worker")
+	sessName, seeded := seedCreatingWithLiveRuntime(t, m, sp, id)
+	sp.StopErrors = map[string]error{sessName: errors.New("provider refused the stop")}
+
+	err := m.Suspend(context.Background(), testActor(m, ActorSweep), id, false)
+	if err == nil {
+		t.Fatal("sweep Suspend(creating) = nil despite a failed teardown; gc stop would report a live pane as stopped")
+	}
+	if errors.Is(err, ErrIllegalTransition) {
+		t.Fatalf("err = %v, want the teardown failure, not an illegal transition", err)
+	}
+	if !strings.Contains(err.Error(), "stopping runtime session") {
+		t.Errorf("err = %v, want it to name the runtime teardown failure", err)
+	}
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	if got := State(after.Metadata["state"]); got != StateCreating {
+		t.Errorf("state = %q, want %q", got, StateCreating)
+	}
+	if got, want := after.Metadata["last_woke_at"], seeded["last_woke_at"]; got != want {
+		t.Errorf("last_woke_at = %q, want the seeded %q restored after the failed stop", got, want)
+	}
+}
+
 // The scope control for the pins above. The sweep's draining and creating
 // latitudes are state-specific and sweep-only, never a blanket "any state
 // suspends" that would hide a real illegal-transition bug elsewhere: an
