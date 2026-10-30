@@ -84,6 +84,7 @@ go_test(
         "beads_test.go",
         "binary_versions_test.go",
         "cached_read_exact_test.go",
+        "caching_store_availability_internal_test.go",
         "caching_store_batch_reads_test.go",
         "caching_store_batch_test.go",
         "caching_store_binding_test.go",
