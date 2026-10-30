@@ -117,9 +117,9 @@ func TestBuildDoctorChecks_SkipsStoreChecksWhenStoreUnreachable(t *testing.T) {
 	if !strings.Contains(res.Message, "doltlite") {
 		t.Fatalf("preflight message = %q, want doltlite residual note", res.Message)
 	}
-	// Twenty-one city checks plus three per active rig, two rigs active.
-	if !strings.Contains(res.Message, "skipped 29 store checks") {
-		t.Fatalf("preflight message = %q, want skip count 29", res.Message)
+	// Twenty-three city checks plus four per active rig, two rigs active.
+	if !strings.Contains(res.Message, "skipped 31 store checks") {
+		t.Fatalf("preflight message = %q, want skip count 31", res.Message)
 	}
 	if !strings.Contains(res.Message, "2 rigs") {
 		t.Fatalf("preflight message = %q, want rig count 2", res.Message)
@@ -338,7 +338,7 @@ func TestBeadStorePreflightSkipCount(t *testing.T) {
 		t.Fatalf("skip count 0 rigs = %d, want %d", got, doctorCityStoreCheckCount)
 	}
 	if got := beadStorePreflightSkipCount(2); got != doctorCityStoreCheckCount+2*doctorPerRigStoreCheckCount {
-		t.Fatalf("skip count 2 rigs = %d, want %d", got, doctorCityStoreCheckCount+6)
+		t.Fatalf("skip count 2 rigs = %d, want %d", got, doctorCityStoreCheckCount+2*doctorPerRigStoreCheckCount)
 	}
 	if len(doctorCityStoreDependentNames) != doctorCityStoreCheckCount {
 		t.Fatalf("city name list len %d != doctorCityStoreCheckCount %d", len(doctorCityStoreDependentNames), doctorCityStoreCheckCount)
