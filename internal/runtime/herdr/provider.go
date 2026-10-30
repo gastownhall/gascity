@@ -862,8 +862,9 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // gc names — herdr's registry stores the mapped herdrAgentName forms, and
 // never sees raw shell sessions at all); each bound candidate is verified
 // running before it is listed. Registry agents that don't correspond to any
-// bound gc session (foreign/manual agents) are appended under their own
-// names.
+// bound gc session (foreign/manual agents) are appended under their
+// registered names. A registry entry with no registered name is a pane herdr
+// detected an agent in, not a session, and is never listed.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	ctx := context.Background()
 	agents, err := p.c.listAgents(ctx)
@@ -884,6 +885,9 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 		}
 	}
 	for _, a := range agents {
+		if a.Name == "" {
+			continue
+		}
 		if !mapped[a.Name] && strings.HasPrefix(a.Name, prefix) && !seen[a.Name] {
 			seen[a.Name] = true
 			out = append(out, a.Name)
