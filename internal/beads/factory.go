@@ -85,6 +85,12 @@ type BeadsDiagnostic struct {
 	// byte-identically to what it serializes now. The proxied lane adds a
 	// field; it never repurposes one.
 	Proxied *ProxiedDiagnostic `json:"proxied,omitempty"`
+
+	// BdInflight is the number of bd subprocesses currently admitted by
+	// the city's subprocess admission semaphore (the gc_bd_inflight
+	// gauge). Computed at read time. Zero when no admission
+	// controller exists yet or no bd calls are in flight.
+	BdInflight int `json:"gc_bd_inflight,omitempty"`
 }
 
 // ProxiedEndpointStamp identifies the proxy generation an open was pinned to.
