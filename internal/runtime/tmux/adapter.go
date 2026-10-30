@@ -342,6 +342,13 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	found, scanErr := proctable.ScanBySessionID(id)
 	running, listErr := p.ListRunning("")
+	if runtime.IsRuntimeServerAbsent(listErr) {
+		// No tmux server means no session can be gc-tracked, so every scanned
+		// root is provably untracked. Treating this as a scan failure refused
+		// the first start of every city (and every start after the server
+		// exits), because nothing would ever start the server.
+		running, listErr = nil, nil
+	}
 	if listErr != nil {
 		// Fail CLOSED: without the live-session list we cannot prove which
 		// scanned roots are gc-tracked. Marking them all tracked (the previous
