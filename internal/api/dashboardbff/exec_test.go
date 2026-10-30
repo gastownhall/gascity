@@ -124,3 +124,33 @@ func requireOrder(t *testing.T, dirs []string, want ...string) {
 		prev = i
 	}
 }
+
+// TestCleanEnvPathAdminOverrideIsVerbatim pins the ADMIN_PATH contract: an
+// operator override is the whole PATH, with nothing added, on every platform.
+func TestCleanEnvPathAdminOverrideIsVerbatim(t *testing.T) {
+	const admin = "/x/bin:/y/bin"
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "go", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, goos := range []string{"darwin", "linux"} {
+		if got := cleanEnvPath(admin, home, goos); got != admin {
+			t.Errorf("cleanEnvPath(%q, home, %q) = %q, want %q", admin, goos, got, admin)
+		}
+	}
+	t.Setenv("ADMIN_PATH", admin)
+	t.Setenv("HOME", home)
+	if got := envValue(cleanEnv(), "PATH"); got != admin {
+		t.Errorf("cleanEnv() PATH = %q, want %q", got, admin)
+	}
+}
+
+// envValue returns the value of key in an os/exec style environment list.
+func envValue(env []string, key string) string {
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, key+"="); ok {
+			return v
+		}
+	}
+	return ""
+}
