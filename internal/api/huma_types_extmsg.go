@@ -163,6 +163,7 @@ type ExtMsgTranscriptListInput struct {
 	Provider             string `query:"provider" required:"false" doc:"Provider name."`
 	AccountID            string `query:"account_id" required:"false" doc:"Account ID."`
 	ConversationID       string `query:"conversation_id" required:"false" doc:"Conversation ID."`
+	ProviderMessageID    string `query:"provider_message_id" required:"false" doc:"Exact provider message ID within the conversation. Returns at most one persisted entry, including its adapter-asserted attribution; the sequence cursor still applies."`
 	ParentConversationID string `query:"parent_conversation_id" required:"false" doc:"Parent conversation ID."`
 	Kind                 string `query:"kind" required:"false" doc:"Conversation kind."`
 	AfterSequence        int64  `query:"after_sequence" required:"false" doc:"Return entries with sequence greater than this cursor (default 0)."`

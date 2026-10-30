@@ -90,6 +90,11 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 			}
 		}
 		message := *input.Body.Message
+		if result != nil && result.TranscriptEntry != nil {
+			// On redelivery the original persisted assertion wins, just as
+			// it does in transcript retrieval.
+			message.Attribution = result.TranscriptEntry.Attribution
+		}
 		s.runBackground(func(ctx context.Context) {
 			s.extmsgNotifyInboundMembers(ctx, message)
 		})
@@ -454,11 +459,12 @@ func (s *Server) humaHandleExtMsgTranscriptList(ctx context.Context, input *ExtM
 
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
 	entries, err := svc.Transcript.List(ctx, extmsg.ListTranscriptInput{
-		Caller:        caller,
-		Conversation:  ref,
-		AfterSequence: input.AfterSequence,
-		Limit:         input.Limit,
-		Order:         extmsg.TranscriptOrder(input.Order),
+		Caller:            caller,
+		Conversation:      ref,
+		AfterSequence:     input.AfterSequence,
+		ProviderMessageID: input.ProviderMessageID,
+		Limit:             input.Limit,
+		Order:             extmsg.TranscriptOrder(input.Order),
 	})
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())

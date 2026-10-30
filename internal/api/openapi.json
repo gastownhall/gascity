@@ -2920,6 +2920,13 @@
           },
           "Text": {
             "type": "string"
+          },
+          "attribution": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Original adapter-asserted attribution strings; trusted only as far as the submitting adapter.",
+            "type": "object"
           }
         },
         "required": [
@@ -4184,6 +4191,13 @@
               "array",
               "null"
             ]
+          },
+          "attribution": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Adapter-defined attribution strings, asserted by the adapter; not independently verified.",
+            "type": "object"
           },
           "conversation": {
             "$ref": "#/components/schemas/ConversationRef"
@@ -40698,6 +40712,16 @@
             "name": "conversation_id",
             "schema": {
               "description": "Conversation ID.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Exact provider message ID within the conversation. Returns at most one persisted entry, including its adapter-asserted attribution; the sequence cursor still applies.",
+            "explode": false,
+            "in": "query",
+            "name": "provider_message_id",
+            "schema": {
+              "description": "Exact provider message ID within the conversation. Returns at most one persisted entry, including its adapter-asserted attribution; the sequence cursor still applies.",
               "type": "string"
             }
           },
