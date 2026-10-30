@@ -24,7 +24,9 @@
 # city store, and suspended rigs are left out because any bd read restarts a
 # suspended rig's retired proxy and Dolt; their expired timers resolve on the
 # first sweep after resume. Listing the rigs costs one `gc rig list --json`
-# (parsed with jq) on every run, even in a city with no rigs.
+# (parsed with jq) on every run, even in a city with no rigs. A timer check
+# that fails in one store is reported on stderr naming the store; the other
+# stores are still swept and the run exits non-zero.
 set -euo pipefail
 
 # Trace bd invocations to $GC_BD_TRACE when set (no-op otherwise).
@@ -39,10 +41,21 @@ CITY_ABS="$(cd "$CITY" 2>/dev/null && pwd -P || printf '%s\n' "$CITY")"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/scope_bd.sh"
 
+FAILED=0
+
 # sweep_scope checks the timer and gh gates of the scope scope_select made
-# current.
+# current. bd reports per-gate errors and still exits 0, so a failing timer
+# check means the store itself failed: it is reported, the store's gh check is
+# skipped (it would fail the same way behind its `|| true`), and the run fails
+# after the remaining stores are swept.
 sweep_scope() {
-    scope_bd gate check --type=timer --escalate
+    local rc=0
+    scope_bd gate check --type=timer --escalate || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "gate-sweep: timer gate check failed in $SCOPE_LABEL (exit $rc)" >&2
+        FAILED=1
+        return 0
+    fi
     scope_bd gate check --type=gh --escalate || true
 }
 
@@ -56,3 +69,5 @@ while IFS= read -r rig_name; do
     # Nothing a sweep spawns may read the remaining rig names.
     sweep_scope </dev/null
 done <<<"$RIG_NAMES"
+
+exit "$FAILED"
