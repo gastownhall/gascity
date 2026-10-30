@@ -863,3 +863,125 @@ func TestReconcileSessionBeads_PoolSeatWorkReadErrorKeepsSeat(t *testing.T) {
 		})
 	}
 }
+
+// heldWorkControl is a seat the held-work keep does not cover. seat applies to
+// the seat whether or not it holds work; work rewrites the held work after
+// holdBlockedWork.
+type heldWorkControl struct {
+	name string
+	seat func(t *testing.T, f *ownershipFixture)
+	work func(t *testing.T, f *ownershipFixture)
+}
+
+func heldWorkControls() []heldWorkControl {
+	none := func(*testing.T, *ownershipFixture) {}
+	setWork := func(status, assignee string) func(t *testing.T, f *ownershipFixture) {
+		return func(t *testing.T, f *ownershipFixture) {
+			t.Helper()
+			if err := f.backing.Update(f.work.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+				t.Fatalf("rewrite work: %v", err)
+			}
+			f.reprime(t)
+		}
+	}
+	return []heldWorkControl{
+		{name: "work closed", seat: none, work: func(t *testing.T, f *ownershipFixture) {
+			if err := f.backing.Close(f.work.ID); err != nil {
+				t.Fatalf("Close(work): %v", err)
+			}
+			f.reprime(t)
+		}},
+		{name: "work unassigned", seat: none, work: setWork("open", "")},
+		{name: "work assigned only to the pool route name", seat: none, work: setWork("open", ownershipPoolTemplate)},
+		{name: "named session", work: none, seat: func(t *testing.T, f *ownershipFixture) {
+			f.env.setSessionMetadata(&f.session, map[string]string{namedSessionMetadataKey: "true"})
+			f.reprime(t)
+		}},
+		{name: "agent removed from config", work: none, seat: func(_ *testing.T, f *ownershipFixture) {
+			f.env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}
+		}},
+		{name: "agent suspended", work: none, seat: func(_ *testing.T, f *ownershipFixture) {
+			f.env.cfg.Agents[0].Suspended = true
+		}},
+	}
+}
+
+// heldWorkControlObservation runs timer over a seat under control, holding
+// blocked open work when held, and reports how the seat was stopped.
+func heldWorkControlObservation(t *testing.T, timer heldWorkTimerDrain, control heldWorkControl, held bool) string {
+	t.Helper()
+	f := newOwnershipFixture(t)
+	if held {
+		f.holdBlockedWork(t, "open")
+		control.work(t, f)
+	}
+	control.seat(t, f)
+	f.runTimer(t, timer, nil)
+	return f.drainObservation(t)
+}
+
+// The controls: a seat the held-work keep does not cover is stopped by each
+// timer exactly as the same seat holding nothing is.
+func TestReconcileSessionBeads_PoolSeatHoldingUncoveredWorkDrainsAsToday(t *testing.T) {
+	for _, timer := range heldWorkTimerDrains() {
+		for _, control := range heldWorkControls() {
+			t.Run(timer.name+"/"+control.name, func(t *testing.T) {
+				want := heldWorkControlObservation(t, timer, control, false)
+				if want == "" {
+					t.Fatalf("test premise: the seat holding nothing was kept from the %s timer", timer.name)
+				}
+				if got := heldWorkControlObservation(t, timer, control, true); got != want {
+					t.Fatalf("stop observation = %q, want %q as for the seat holding nothing", got, want)
+				}
+			})
+		}
+	}
+}
+
+// An explicit sleep intent other than idle-stop-pending still drains a seat
+// holding blocked work.
+func TestReconcileSessionBeads_PoolSeatHoldingWorkStillDrainsOnExplicitIntent(t *testing.T) {
+	f := newOwnershipFixture(t)
+	f.holdBlockedWork(t, "open")
+	f.env.setSessionMetadata(&f.session, map[string]string{
+		"held_until":   f.env.clk.Now().Add(100 * time.Hour).UTC().Format(time.RFC3339),
+		"sleep_intent": "user-hold",
+		"state":        "suspended",
+	})
+	f.reprime(t)
+	f.env.addDesired(ownershipWorkerName, ownershipPoolTemplate, false)
+	f.tick(t, map[string]int{}, nil)
+	if why := f.drainObservation(t); why != "drain:user-hold" {
+		t.Fatalf("stop observation = %q, want drain:user-hold; stdout:\n%s\nstderr:\n%s", why, f.env.stdout.String(), f.env.stderr.String())
+	}
+}
+
+// The configured idle_timeout ladder is not a timer drain the held-work keep
+// covers: it still stops a seat holding only blocked work.
+func TestReconcileSessionBeads_IdleTimeoutStillStopsSeatHoldingOnlyBlockedWork(t *testing.T) {
+	f := newOwnershipFixture(t)
+	f.holdBlockedWork(t, "open")
+	f.env.addDesired(ownershipWorkerName, ownershipPoolTemplate, false)
+	session, err := f.env.store.Get(f.session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	it := newFakeIdleTracker()
+	it.idle[ownershipWorkerName] = true
+	reconcileSessionBeadsAtPath(
+		context.Background(), f.env.city, []beads.Bead{session}, f.env.desiredState, configuredSessionNames(f.env.cfg, "", f.env.store),
+		f.env.cfg, f.env.sp, f.env.store, nil, nil, nil, nil, f.env.dt, map[string]int{ownershipPoolTemplate: 1}, false, nil, "",
+		it, f.env.clk, f.env.rec, 0, 0, &f.env.stdout, &f.env.stderr,
+		withAsyncDrainAckStopTracker(f.env.stops),
+	)
+	if f.env.sp.IsRunning(ownershipWorkerName) {
+		t.Fatalf("idle_timeout left the seat holding only blocked work %s running; stdout:\n%s\nstderr:\n%s", f.work.ID, f.env.stdout.String(), f.env.stderr.String())
+	}
+	b, err := f.backing.Get(f.session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if b.Metadata["sleep_reason"] != "idle-timeout" {
+		t.Fatalf("sleep_reason = %q, want idle-timeout", b.Metadata["sleep_reason"])
+	}
+}
