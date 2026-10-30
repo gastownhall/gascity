@@ -134,6 +134,7 @@ go_test(
         "go_test_observable_test.go",
         "go_test_run_script_test.go",
         "gomod_replace_guard_test.go",
+        "govulncheck_diagnostics_test.go",
         "harness_reap_test.go",
         "integration_packages_shards_test.go",
         "integration_shards_test.go",
