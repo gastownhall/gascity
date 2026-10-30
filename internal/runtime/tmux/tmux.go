@@ -5177,8 +5177,19 @@ func (t *Tmux) WaitForShellReady(session string, timeout time.Duration) error {
 // NBSP after its ❯ prompt character while the default ReadyPromptPrefix
 // uses a regular space. See https://github.com/steveyegge/gastown/issues/1387.
 func matchesPromptPrefix(line, readyPromptPrefix string) bool {
+	_, ok := promptLineRest(line, readyPromptPrefix)
+	return ok
+}
+
+// promptLineRest is matchesPromptPrefix with the matched text surfaced: it
+// applies the same normalization (NBSP → space, an optional leading │/┃ box
+// border stripped) and returns the line's text after the prefix — "" when the
+// line is the bare prefix. The ready and idle scans feed the rest to
+// isMenuCursorRow so a numbered menu's selected row does not read as the
+// composer.
+func promptLineRest(line, readyPromptPrefix string) (rest string, ok bool) {
 	if readyPromptPrefix == "" {
-		return false
+		return "", false
 	}
 	trimmed := strings.TrimSpace(line)
 	// Normalize NBSP (U+00A0) → regular space so that prompt matching
@@ -5191,11 +5202,14 @@ func matchesPromptPrefix(line, readyPromptPrefix string) bool {
 	// too so the prompt glyph after the border is detected — otherwise readiness
 	// and idle detection never match and queued prompt delivery is never released.
 	for _, cand := range []string{trimmed, stripLeadingBoxBorder(trimmed)} {
-		if strings.HasPrefix(cand, normalizedPrefix) || (prefix != "" && cand == prefix) {
-			return true
+		if rest, found := strings.CutPrefix(cand, normalizedPrefix); found {
+			return rest, true
+		}
+		if prefix != "" && cand == prefix {
+			return "", true
 		}
 	}
-	return false
+	return "", false
 }
 
 // stripLeadingBoxBorder removes a leading vertical box-drawing character
@@ -5209,6 +5223,78 @@ func stripLeadingBoxBorder(s string) string {
 		return strings.TrimLeft(string(r[1:]), " \t")
 	}
 	return s
+}
+
+// paneShowsReadyPrompt reports whether captured pane lines show the runtime's
+// live composer for promptPrefix: the bottom-most line matching the prefix,
+// the same composer paneShowsStagedDraft and paneShowsRunningTurn locate —
+// earlier prompt lines are echoed transcript. A bottom-most match that is a
+// numbered menu's cursor row (isMenuCursorRow) is a pending choice, not a
+// composer. With no matching line the pane shows no composer at all.
+func paneShowsReadyPrompt(lines []string, promptPrefix string) bool {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if _, ok := promptLineRest(lines[i], promptPrefix); ok {
+			return !isMenuCursorRow(lines, i, promptPrefix)
+		}
+	}
+	return false
+}
+
+// isMenuCursorRow reports whether the prompt-matching line at lines[i] is the
+// selected row of a numbered option menu — the pane-scan twin of the dialog
+// layer's isNumberedMenuRow rule (internal/runtime/dialog.go). Menus like
+// codex's folder-trust dialog draw the runtime's prompt glyph on the selected
+// row only ("› 1. Trust and continue" above "  2. Quit"), so the glyph alone
+// does not mean composer. The line's text after the prefix must start with an
+// option label "N. ", and the nearest non-blank line above or below must
+// start with option "N-1. " or "N+1. ": unselected option rows carry no
+// glyph, while a composer draft that merely starts with "1. " has no adjacent
+// option and still reads as a prompt. A known false negative stays: a
+// two-line numbered list typed into the composer ("› 1. foo" directly above
+// "  2. bar") reads as a menu.
+func isMenuCursorRow(lines []string, i int, promptPrefix string) bool {
+	rest, ok := promptLineRest(lines[i], promptPrefix)
+	if !ok {
+		return false
+	}
+	n, ok := menuOptionNumber(rest)
+	if !ok {
+		return false
+	}
+	for _, dir := range []int{-1, 1} {
+		for j := i + dir; j >= 0 && j < len(lines); j += dir {
+			normalized := strings.ReplaceAll(lines[j], "\u00a0", " ")
+			trimmed := strings.TrimSpace(normalized)
+			if trimmed == "" {
+				continue
+			}
+			if m, ok := menuOptionNumber(stripLeadingBoxBorder(trimmed)); ok && (m == n-1 || m == n+1) {
+				return true
+			}
+			break // only the nearest non-blank neighbor
+		}
+	}
+	return false
+}
+
+// menuOptionNumber reads a numbered option label at the start of s — a run of
+// ASCII digits followed by ". " ("2. Quit") — and returns its number. The
+// dialog layer's isNumberedMenuRow stops at the dot; requiring the space
+// keeps prose like "3.5k tokens" from reading as option 3, and a number
+// strconv cannot parse is not a label.
+func menuOptionNumber(s string) (int, bool) {
+	digits := 0
+	for digits < len(s) && s[digits] >= '0' && s[digits] <= '9' {
+		digits++
+	}
+	if digits == 0 || digits+2 > len(s) || s[digits] != '.' || s[digits+1] != ' ' {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s[:digits])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // WaitForRuntimeReady polls until the agent runtime's ready prompt appears in
@@ -5367,8 +5453,10 @@ func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, e
 // idle check does: a busy-indicator string anywhere in lines is the busy
 // reading, (false, nil); a ready prompt (PaneShowsIdlePrompt) is idle,
 // (true, nil); anything else returns [runtime.ErrIdleIndeterminate], since a
-// pane showing neither is not evidence of work. The tmux idle wait and its
-// exec twin both classify each capture through it.
+// pane showing neither is not evidence of work — a numbered menu is one such
+// pane: its cursor row carries the prompt glyph but is a pending choice, not
+// a composer. The tmux idle wait and its exec twin both classify each capture
+// through it.
 func ClassifyIdlePane(lines []string, promptPrefix string) (bool, error) {
 	if paneContainsBusyIndicator(lines) {
 		return false, nil
@@ -5383,14 +5471,15 @@ func ClassifyIdlePane(lines []string, promptPrefix string) (bool, error) {
 // whether captured pane lines show promptPrefix with no active-processing
 // indicator. It does not substitute a default for a blank promptPrefix;
 // callers resolve the prefix first (DefaultReadyPromptPrefix when the session
-// configures none).
+// configures none). The bottom-most prompt-prefixed line decides: earlier
+// prompt lines are echoed transcript, and a numbered menu's cursor row — the
+// selected option carrying the glyph — is a pending choice, not a composer
+// (isMenuCursorRow, the pane twin of the dialog layer's isNumberedMenuRow).
 //
 // Runtimes that run the agent in a tmux session inside a remote box capture
 // the pane over their own connection (PromptObservationLines lines) and apply
 // this same scan, so their idle boundary matches local tmux exactly.
 func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
-	prefix := strings.TrimSpace(promptPrefix)
-
 	// Check for active processing indicator in the status bar.
 	// Claude Code shows "esc to interrupt" while processing — if present,
 	// the agent is busy regardless of whether the prompt is visible.
@@ -5412,19 +5501,11 @@ func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
 		return false
 	}
 
-	// Scan captured lines for the prompt prefix.
-	// Claude Code renders a status bar below the prompt line,
-	// so the prompt may not be the last non-empty line.
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if matchesPromptPrefix(trimmed, promptPrefix) || (prefix != "" && trimmed == prefix) {
-			return true
-		}
-	}
-	return false
+	// The live composer is the bottom-most prompt-prefixed line — earlier
+	// prompt lines are echoed transcript — and a numbered menu's cursor row is
+	// a pending choice, not a composer: keys typed into it are menu input, and
+	// Enter picks the highlighted option instead of submitting the composer.
+	return paneShowsReadyPrompt(lines, promptPrefix)
 }
 
 // SnapshotIdle reports whether the named session is at an idle interactive

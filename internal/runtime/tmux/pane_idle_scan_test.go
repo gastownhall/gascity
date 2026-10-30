@@ -8,8 +8,9 @@ import "testing"
 // footer, and NBSP or a boxed prompt must still match.
 // Kills: a scan that ignores the busy indicator, stops at the last non-blank
 // line, applies a default for a blank prefix, drops the NBSP / box-border
-// normalization, or reads a transcript line ending in a gerund and "…" as
-// Claude's spinner row.
+// normalization, reads a transcript line ending in a gerund and "…" as
+// Claude's spinner row, or reads a numbered menu's cursor row as the live
+// composer.
 func TestPaneShowsIdlePrompt(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -30,6 +31,94 @@ func TestPaneShowsIdlePrompt(t *testing.T) {
 		{"no prompt", []string{"building...", "still going"}, DefaultReadyPromptPrefix, false},
 		{"empty pane", nil, DefaultReadyPromptPrefix, false},
 		{"blank prefix is not defaulted", []string{"❯ "}, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := PaneShowsIdlePrompt(tt.lines, tt.prefix); got != tt.want {
+				t.Errorf("PaneShowsIdlePrompt(%q, %q) = %v, want %v", tt.lines, tt.prefix, got, tt.want)
+			}
+		})
+	}
+}
+
+// A numbered menu whose selected row carries the prompt glyph (codex's
+// folder-trust dialog) is waiting for an answer, not an idle composer: a nudge
+// typed now lands in the dialog, and codex's leading Escape quits it.
+func TestPaneShowsIdlePromptMenuCursorRowIsNotIdle(t *testing.T) {
+	lines := []string{
+		"  Trust this folder? Codex can read, edit, and run files here.",
+		"",
+		"› 1. Trust and continue",
+		"  2. Quit",
+		"",
+		"  enter continue · esc quit",
+	}
+	if PaneShowsIdlePrompt(lines, "› ") {
+		t.Errorf("PaneShowsIdlePrompt(%q, %q) = true, want false: a numbered menu's cursor row is not a ready prompt", lines, "› ")
+	}
+}
+
+// A numbered menu drawn with the runtime's own prompt glyph on its selected
+// row is a pending choice, not a live composer — keys typed into it are menu
+// input, and Enter picks the highlighted option. The bottom-most prompt line
+// decides, so a menu below an echoed turn is still the menu and a composer
+// below stale numbered text is still the composer; a composer draft that
+// merely starts with "1. " has no adjacent option and still reads as a
+// prompt. The pane twin of the dialog layer's isNumberedMenuRow rule.
+func TestMenuCursorRowIsNotAReadyPrompt(t *testing.T) {
+	tests := []struct {
+		name   string
+		lines  []string
+		prefix string
+		want   bool
+	}{
+		// Menus: the cursor row is a pending choice, not a composer.
+		{"codex folder trust, cursor on first option", []string{
+			"  Trust this folder? Codex can read, edit, and run files here.",
+			"",
+			"› 1. Trust and continue",
+			"  2. Quit",
+			"",
+			"  enter continue · esc quit",
+		}, "› ", false},
+		{"codex folder trust, cursor on last option", []string{
+			"  Trust this folder? Codex can read, edit, and run files here.",
+			"",
+			"  1. Trust and continue",
+			"› 2. Quit",
+			"",
+			"  enter continue · esc quit",
+		}, "› ", false},
+		{"codex hook review, three options", []string{
+			"  Trust the new hooks in .codex/hooks?",
+			"",
+			"› 1. Review and continue",
+			"  2. Skip hooks for this session",
+			"  3. Quit",
+			"",
+			"  enter confirm · esc skip",
+		}, "› ", false},
+		{"claude session-limit chooser with NBSP glyph", []string{
+			"You've hit your session limit · resets 8:40am",
+			"❯\u00a01. Stop and wait for limit to reset",
+			"  2. Upgrade",
+		}, DefaultReadyPromptPrefix, false},
+		{"box-bordered menu", []string{
+			"╭──────────────────────────────╮",
+			"│ › 1. Trust and continue      │",
+			"│   2. Quit                    │",
+			"╰──────────────────────────────╯",
+		}, "› ", false},
+		{"two-digit option numbers", []string{
+			"   9. Reboot now",
+			"› 10. Reboot never",
+		}, "› ", false},
+		// Known false negative, pinned: a two-line numbered list typed into
+		// the composer, with no other prompt line on screen, reads as a menu.
+		{"composer draft directly above the next list row (known false negative)", []string{
+			"› 1. foo",
+			"  2. bar",
+		}, "› ", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
