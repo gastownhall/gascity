@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -55,10 +56,25 @@ func (s *ownershipFailingGetStore) Get(id string) (beads.Bead, error) {
 	return s.Store.Get(id)
 }
 
+// rawOpenPushdownStore is a bd-shaped store: a row whose recorded status
+// (SourceStatus) is a parked one reads as "open", except on a Live
+// Status:"open" List, which pushes the raw status down and leaves the row out
+// (beads' nativeListPushesRawOpen).
+type rawOpenPushdownStore struct{ beads.Store }
+
+func (s rawOpenPushdownStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	rows, err := s.Store.List(q)
+	if q.Live && q.Status == "open" {
+		rows = slices.DeleteFunc(rows, func(b beads.Bead) bool { return b.SourceStatus != "" && b.SourceStatus != "open" })
+	}
+	return rows, err
+}
+
 // ownershipFixture is one live pool worker behind a primed CachingStore. The
 // "out of process" writes the worker's `gc hook --claim` makes go straight to
 // the backing store, so the controller's cache (and the session snapshot handed
-// to the reconciler) stays stale — the Tier C first-run shape.
+// to the reconciler) stays stale — the Tier C first-run shape. The backing
+// lists open work by raw status, as bd does (rawOpenPushdownStore).
 type ownershipFixture struct {
 	env     *reconcilerTestEnv
 	backing *beads.MemStore
@@ -87,7 +103,7 @@ func newOwnershipFixture(t *testing.T) *ownershipFixture {
 	if err != nil {
 		t.Fatalf("Create(work): %v", err)
 	}
-	reads := &ownershipFailingGetStore{Store: backing}
+	reads := &ownershipFailingGetStore{Store: rawOpenPushdownStore{Store: backing}}
 	cache := beads.NewCachingStoreForTest(reads, nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
@@ -790,14 +806,17 @@ func (f *ownershipFixture) drainObservation(t *testing.T) string {
 }
 
 // A held seat's timer drain that began before the work was assigned, whether
-// or not the reconciler has set its GC_DRAIN_ACK, and its leftover
-// idle-stop-pending mark are canceled and cleared by the next tick. The ack
-// lives on the runtime, as the provider's drain ops keep it.
+// or not the reconciler has set its GC_DRAIN_ACK, an ack recovered with no
+// drain tracked (a controller restart), and a leftover idle-stop-pending mark
+// are canceled and cleared on the first tick, and the seat outlives the
+// drain's timeout. The ack lives on the runtime, as the provider's drain ops
+// keep it.
 func TestReconcileSessionBeads_PoolSeatHoldingWorkCancelsBegunTimerDrain(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		drainReason string
 		acked       bool
+		recovered   bool
 		idleStop    bool
 	}{
 		{name: "no-wake-reason drain", drainReason: "no-wake-reason"},
@@ -805,6 +824,8 @@ func TestReconcileSessionBeads_PoolSeatHoldingWorkCancelsBegunTimerDrain(t *test
 		{name: "idle drain", drainReason: "idle"},
 		{name: "acked idle drain", drainReason: "idle", acked: true},
 		{name: "acked idle drain with idle-stop-pending", drainReason: "idle", acked: true, idleStop: true},
+		{name: "recovered acked idle drain", drainReason: "idle", acked: true, recovered: true},
+		{name: "recovered acked idle drain with idle-stop-pending", drainReason: "idle", acked: true, recovered: true, idleStop: true},
 		{name: "idle-stop-pending only", idleStop: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -822,25 +843,63 @@ func TestReconcileSessionBeads_PoolSeatHoldingWorkCancelsBegunTimerDrain(t *test
 					}
 					ds.ackSet = true
 				}
+				if tc.recovered {
+					f.env.dt.remove(f.session.ID)
+				}
 			}
 			f.holdBlockedWork(t, "open")
 			dops := newDrainOps(f.env.sp)
-			f.tickWith(t, dops, map[string]int{}, nil)
-			f.env.clk.Advance(defaultDrainTimeout + time.Second)
-			f.tickWith(t, dops, map[string]int{}, nil)
-			if stopped, why := f.stopObservation(t); stopped {
-				t.Fatalf("pool seat holding assigned work %s was stopped (%s); stdout:\n%s\nstderr:\n%s", f.work.ID, why, f.env.stdout.String(), f.env.stderr.String())
-			}
-			if ds := f.env.dt.get(f.session.ID); ds != nil {
-				t.Fatalf("timer drain still tracked on a seat holding assigned work: %+v", ds)
-			}
-			if ack, _ := f.env.sp.GetMeta(ownershipWorkerName, "GC_DRAIN_ACK"); ack != "" {
-				t.Fatalf("GC_DRAIN_ACK = %q, want cleared by the cancel", ack)
-			}
-			if intent := f.sleepIntent(t); intent != "" {
-				t.Fatalf("sleep_intent = %q on a seat holding assigned work, want cleared", intent)
+			for tick := 1; tick <= 2; tick++ {
+				f.tickWith(t, dops, map[string]int{}, nil)
+				if stopped, why := f.stopObservation(t); stopped {
+					t.Fatalf("tick %d: pool seat holding assigned work %s was stopped (%s); stdout:\n%s\nstderr:\n%s", tick, f.work.ID, why, f.env.stdout.String(), f.env.stderr.String())
+				}
+				if ds := f.env.dt.get(f.session.ID); ds != nil {
+					t.Fatalf("tick %d: timer drain still tracked on a seat holding assigned work: %+v", tick, ds)
+				}
+				if ack, _ := f.env.sp.GetMeta(ownershipWorkerName, "GC_DRAIN_ACK"); ack != "" {
+					t.Fatalf("tick %d: GC_DRAIN_ACK = %q, want cleared by the first tick's cancel", tick, ack)
+				}
+				if intent := f.sleepIntent(t); intent != "" {
+					t.Fatalf("tick %d: sleep_intent = %q on a seat holding assigned work, want cleared by the first tick", tick, intent)
+				}
+				f.env.clk.Advance(defaultDrainTimeout + time.Second)
 			}
 		})
+	}
+}
+
+// The held-work keep's intents (heldWorkIntent), one predicate for every keep
+// site: no intent and the idle probe's idle-stop-pending leave a seat to the
+// keep; an operator's suspend, an agent's wait and an intent no cell writes
+// do not.
+func TestHeldWorkIntent(t *testing.T) {
+	for intent, want := range map[string]bool{
+		"": true, sleepIntentIdle: true, "user-hold": false, "wait-hold": false, "nap": false,
+	} {
+		if got := heldWorkIntent(sessionpkg.Info{SleepIntent: intent}); got != want {
+			t.Errorf("heldWorkIntent(sleep_intent %q) = %v, want %v", intent, got, want)
+		}
+	}
+}
+
+// The ack's held-work cancel keeps to the keep's intents: a reconciler-owned
+// timer-drain ack on a seat holding work under an agent's wait is not
+// canceled for the work, and the stop it acked proceeds.
+func TestReconcileSessionBeads_HeldWorkAckCancelSkipsAWaitIntent(t *testing.T) {
+	f := newOwnershipFixture(t)
+	f.env.addDesired(ownershipWorkerName, ownershipPoolTemplate, false)
+	f.env.setSessionMetadata(&f.session, map[string]string{"sleep_intent": "wait-hold", "wait_hold": "true"})
+	f.reprime(t)
+	ds := beginDrainForTest(t, f.env.store, f.env.dt, f.session.ID, "idle", f.env.clk.Now(), f.env.clk.Now().Add(time.Hour))
+	if err := setReconcilerDrainAckMetadata(f.env.sp, ownershipWorkerName, ds); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
+	ds.ackSet = true
+	f.holdBlockedWork(t, "open")
+	f.tickWith(t, newDrainOps(f.env.sp), map[string]int{}, nil)
+	if stopped, why := f.stopObservation(t); !stopped || why == "drain-ack-pending" {
+		t.Fatalf("stop observation = %v %q, want the acked stop under way; stdout:\n%s\nstderr:\n%s", stopped, why, f.env.stdout.String(), f.env.stderr.String())
 	}
 }
 
@@ -893,6 +952,13 @@ func heldWorkControls() []heldWorkControl {
 		}},
 		{name: "work unassigned", seat: none, work: setWork("open", "")},
 		{name: "work assigned only to the pool route name", seat: none, work: setWork("open", ownershipPoolTemplate)},
+		{name: "open work parked on a dispatch hold", seat: none, work: func(t *testing.T, f *ownershipFixture) {
+			if err := f.backing.Update(f.work.ID, beads.UpdateOpts{Labels: []string{beadmeta.HoldExternalLabel}}); err != nil {
+				t.Fatalf("park work on a hold: %v", err)
+			}
+			f.reprime(t)
+		}},
+		{name: "status-parked work", seat: none, work: func(t *testing.T, f *ownershipFixture) { f.statusParkWork(t) }},
 		{name: "named session", work: none, seat: func(t *testing.T, f *ownershipFixture) {
 			f.env.setSessionMetadata(&f.session, map[string]string{namedSessionMetadataKey: "true"})
 			f.reprime(t)
@@ -903,6 +969,33 @@ func heldWorkControls() []heldWorkControl {
 		{name: "agent suspended", work: none, seat: func(_ *testing.T, f *ownershipFixture) {
 			f.env.cfg.Agents[0].Suspended = true
 		}},
+	}
+}
+
+// statusParkWork replaces the seat's held work with work bd parked by status:
+// raw status blocked, which the cache folds into "open" and a Live open List
+// leaves out. It waits on the same running dependency, so no ready read wakes
+// the seat for it.
+func (f *ownershipFixture) statusParkWork(t *testing.T) {
+	t.Helper()
+	deps, err := f.backing.DepList(f.work.ID, "down")
+	if err != nil || len(deps) != 1 {
+		t.Fatalf("DepList(work) = %v, %v; want its one running dependency", deps, err)
+	}
+	unassigned := ""
+	if err := f.backing.Update(f.work.ID, beads.UpdateOpts{Assignee: &unassigned}); err != nil {
+		t.Fatalf("unassign work: %v", err)
+	}
+	parked, err := f.backing.Create(beads.Bead{Title: "parked-work", Type: "task", Assignee: f.session.ID, SourceStatus: "blocked"})
+	if err != nil {
+		t.Fatalf("Create(parked work): %v", err)
+	}
+	if err := f.backing.DepAdd(parked.ID, deps[0].DependsOnID, "blocks"); err != nil {
+		t.Fatalf("DepAdd(parked work): %v", err)
+	}
+	f.reprime(t)
+	if cached, err := f.env.store.Get(parked.ID); err != nil || cached.Status != "open" {
+		t.Fatalf("test premise: the cache reads the parked work %s as %q (%v), want folded into open", parked.ID, cached.Status, err)
 	}
 }
 

@@ -40,6 +40,7 @@ var (
 	errDemandRecordingStale   = errors.New("external-reads recording is stale")
 	errDemandRecordingUngated = errors.New("external-reads recording of this split-city leg's Ready was not gated")
 	errDemandLegUncached      = errors.New("leg has no cache to read")
+	errDemandReadPanicked     = errors.New("leg read panicked")
 )
 
 // demandReads answers the controller-demand reads for one pass. Results are
@@ -263,7 +264,9 @@ func (r *v2DemandReads) recorded(store beads.Store, shape string, pick func(legR
 	return pick(s.Leg)
 }
 
-// once runs a leg's read once per pass.
+// once runs a leg's read once per pass. A read that panics is memoized as a
+// failed read: the panic still reaches the reader that ran it, and every later
+// reader of the leg sees the failure, not an empty read.
 func (r *v2DemandReads) once(key demandLegRead, read func() ([]beads.Bead, error)) ([]beads.Bead, error) {
 	r.mu.Lock()
 	e := r.memo[key]
@@ -272,7 +275,10 @@ func (r *v2DemandReads) once(key demandLegRead, read func() ([]beads.Bead, error
 		r.memo[key] = e
 	}
 	r.mu.Unlock()
-	e.once.Do(func() { e.rows, e.err = read() })
+	e.once.Do(func() {
+		e.err = &beads.PartialResultError{Op: "v2 demand " + key.shape, Err: errDemandReadPanicked} // replaced unless read panics
+		e.rows, e.err = read()
+	})
 	return e.rows, e.err
 }
 

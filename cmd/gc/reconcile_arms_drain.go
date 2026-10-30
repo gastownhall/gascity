@@ -216,16 +216,9 @@ func workKeepsNoWakeRow(r *rowFacts) bool {
 // assigns to any of scope's identities of the row's session, blocked work
 // included.
 func (r *rowFacts) inProgressWorkAssigned(scope workScope) bool {
-	return r.workAssigned(scope, "in_progress")
-}
-
-// workAssigned reports work in one of statuses the pass's demand read
-// assigns to any of scope's identities of the row's session, blocked work
-// included.
-func (r *rowFacts) workAssigned(scope workScope, statuses ...string) bool {
 	ids := scope.scopeIDs()
 	for _, w := range r.w.Demand.AssignedWork {
-		if slices.Contains(statuses, w.Status) && slices.Contains(ids, strings.TrimSpace(w.Assignee)) {
+		if w.Status == "in_progress" && slices.Contains(ids, strings.TrimSpace(w.Assignee)) {
 			return true
 		}
 	}
@@ -233,19 +226,31 @@ func (r *rowFacts) workAssigned(scope workScope, statuses ...string) bool {
 }
 
 // seatHoldsWork is legacy's held-work keep (sessionHoldsAssignedWork) over
-// the pass's demand read: a pool seat the live-claim veto covers, with no
-// sleep intent but idle-stop-pending, holds open or in-progress work
-// assigned to its ReleaseScope, blocked work included. A partial demand read
-// fails closed.
+// the pass's held-work read (Demand.HeldWork, collectHeldWork): a seat the
+// keep covers (heldWorkSeat) holds work assigned to its ReleaseScope. A
+// held-work read that missed a leg fails closed for every seat, as legacy's
+// does: the missed leg may hold any seat's work.
 func (r *rowFacts) seatHoldsWork() bool {
-	cfg := worldCfg(r.w)
-	if intent := strings.TrimSpace(r.row.Info.SleepIntent); intent != "" && intent != sleepIntentIdle {
+	if !r.heldWorkSeat() {
 		return false
 	}
-	if !r.liveClaimVetoApplies(cfg) {
-		return false
+	if r.w.Demand.HeldWorkPartial {
+		return true
 	}
-	return r.w.Demand.StorePartial || r.workAssigned(releaseScope(r.row.Info, cfg), seatWorkStatuses...)
+	ids := releaseScope(r.row.Info, worldCfg(r.w)).scopeIDs()
+	for _, w := range r.w.Demand.HeldWork {
+		if slices.Contains(ids, strings.TrimSpace(w.Assignee)) {
+			return true
+		}
+	}
+	return false
+}
+
+// heldWorkSeat reports a seat the held-work keep covers: a pool seat the
+// live-claim veto covers, whose sleep intent leaves it to the keep
+// (heldWorkIntent).
+func (r *rowFacts) heldWorkSeat() bool {
+	return heldWorkIntent(r.row.Info) && r.liveClaimVetoApplies(worldCfg(r.w))
 }
 
 // liveClaimVetoApplies is liveClaimVetoApplies over the pass's suspension
@@ -264,12 +269,17 @@ func (r *rowFacts) liveClaimVetoApplies(cfg *config.City) bool {
 // armAck is A11 (v5 D5; C6c2): an ack of the row's generation, the agent's
 // or an operator's (activeStop's rule 4), makes the signal due at once, D2's
 // ack row with grace 0, whatever the drain's reason; A4's stop verb then
-// takes it. v2 reads no runtime env for acks: E3 writes them by CAS under
-// the row's own token (I18). The signal rests on the runtime, which its
-// effect reads fresh: an ack older than the runtime's creation came from a
-// runtime that Manager.ensureRunning has since replaced at the same
-// generation (C6a ruling 3, J27), so the effect voids the ack half instead
-// (v5.9g), and a drain the controller began goes on as requested. An ack
+// takes it. The held-work keep does not cancel it: an ack is the agent's or
+// an operator's decision, which legacy honors too (markDrainAckStopPending),
+// and the keep fences the controller's own timer drain at its begin (A20),
+// its request (A19) and its signal (armSignal's HeldWork), where legacy
+// cancels the controller's own ack. v2 reads no runtime env for acks: E3
+// writes them by CAS under the row's own token (I18). The signal rests on
+// the runtime, which its effect reads fresh: an ack older than the
+// runtime's creation came from a runtime that Manager.ensureRunning has
+// since replaced at the same generation (C6a ruling 3, J27), so the effect
+// voids the ack half instead (v5.9g), and a drain the controller began goes
+// on as requested. An ack
 // whose time is missing or unreadable is void at once (#7635 review
 // ruling): never stop a runtime that may have been replaced; the agent
 // can ack again.
@@ -356,9 +366,11 @@ func (r *rowFacts) ackPredatesRuntime(at time.Time) bool {
 // canceled or voided one no longer authorized, and a row it holds under
 // Keep, or one whose reason's row a later PR completes, holds here too.
 // An idle or no-wake-reason signal reads L3 and L4 fresh (C8.9), so it is
-// the fresh kind, and rests on the row's own live runtime. The effect
-// decides again on the fresh row, so a drain A19 voids or cancels since
-// the pass is never signaled (R16).
+// the fresh kind, and rests on the row's own live runtime; on a seat the
+// held-work keep covers it reads the seat's held work live too (HeldWork),
+// since A19's held-work cancel read the pass's. The effect decides again on
+// the fresh row, so a drain A19 voids or cancels since the pass is never
+// signaled (R16).
 func armSignal(r *rowFacts, req stopRequest) (intent, bool) {
 	hold := intent{Reason: decideStopActive}
 	p := drainPolicyOf(req.Reason)
@@ -374,7 +386,8 @@ func armSignal(r *rowFacts, req stopRequest) (intent, bool) {
 		return hold, true
 	}
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
-	return intent{Kind: kind, Reason: decideDrainSignal + req.Reason, Basis: basis, Patch: session.DrainAckStopPendingPatch(r.w.Now)}, true
+	held := (req.Reason == reasonNoWake || req.Reason == drainIdle) && r.heldWorkSeat()
+	return intent{Kind: kind, Reason: decideDrainSignal + req.Reason, Basis: basis, Patch: session.DrainAckStopPendingPatch(r.w.Now), HeldWork: held}, true
 }
 
 // signalWait is how long a requested drain waits for its signal: its grace
