@@ -507,3 +507,99 @@ func TestStepReminderNamesNoStepWhenItCannotListClaimedWork(t *testing.T) {
 		}
 	}
 }
+
+// assertWorkResidentStepReminder resolves the reminder on a split city whose work
+// store holds the molecule too: a v1 poured molecule is work class, so its root,
+// its steps and the edges between them live on the work ledger and the graph
+// store holds none of them. It fails unless the reminder names want.
+func assertWorkResidentStepReminder(t *testing.T, p *planBreakdown, want string) {
+	t.Helper()
+	rows := append(append([]beads.Bead{}, p.work...), p.graph...)
+	deps := append(append([]beads.Dep{}, p.workDeps...), p.graphDeps...)
+	work := beads.NewMemStoreFrom(1000, rows, deps)
+	graph := beads.NewMemStoreFrom(2000, nil, nil)
+	got, err := resolveActiveWispStep(work, graph, planIdentities)
+	if err != nil {
+		t.Fatalf("resolveActiveWispStep: %v", err)
+	}
+	if stepID(got) != want {
+		t.Errorf("the reminder names %s, want %s", describeStep(got), want)
+	}
+}
+
+// The entry step of a molecule on the work ledger is the first step whose
+// blockers are satisfied, read from the store that holds the molecule. The graph
+// store holds none of its edges, so an entry step read from it sees no edge at
+// all and names planClarify, the first open step in created order, as the
+// original report did. Each path reaches the molecule from a different bead.
+func TestStepReminderEntryStepOfAWorkResidentMoleculeIsTheFirstUnblockedStep(t *testing.T) {
+	paths := []struct {
+		name  string
+		reach func(t *testing.T, p *planBreakdown)
+	}{
+		{name: "routed bead before the claim", reach: func(t *testing.T, p *planBreakdown) {
+			p.row(t, planBlocker).Status = "closed"
+		}},
+		{name: "claimed content bead", reach: func(t *testing.T, p *planBreakdown) {
+			p.claim(t, planContent)
+		}},
+		{name: "molecule root claimed", reach: func(t *testing.T, p *planBreakdown) {
+			p.claim(t, planRoot)
+		}},
+	}
+	progress := []struct {
+		name   string
+		closed []string
+		want   string
+	}{
+		{name: "fresh molecule", want: planIntake},
+		{name: "intake closed", closed: []string{planIntake}, want: planImport},
+		{name: "intake and import closed", closed: []string{planIntake, planImport}, want: planClarify},
+	}
+	for _, path := range paths {
+		for _, stage := range progress {
+			t.Run(path.name+"/"+stage.name, func(t *testing.T) {
+				p := newPlanBreakdown()
+				path.reach(t, p)
+				for _, id := range stage.closed {
+					p.row(t, id).Status = "closed"
+				}
+				assertWorkResidentStepReminder(t, p, stage.want)
+			})
+		}
+	}
+}
+
+// bridgeClaimedListFaultStore fails the molecule_id bridge's question "what has
+// this session claimed", the untyped in-progress listing for its identities, the
+// way a store does while its database is unreachable. The typed listings that
+// look for a claimed molecule root answer, so the resolution reaches the bridge
+// before the failure; every other read, the routed-bead listing included, is
+// answered by the store under it.
+type bridgeClaimedListFaultStore struct{ beads.Store }
+
+func (s bridgeClaimedListFaultStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Status == "in_progress" && len(q.Assignees) > 0 && q.Type == "" {
+		return nil, errors.New("dolt: connection refused")
+	}
+	return s.Store.List(q)
+}
+
+// On a split city the work store is asked what the session has claimed after
+// the claimed-molecule listings have answered. The test above fails those
+// listings first, so in the split case it never reaches this question. When the
+// claimed-work listing fails here, the reminder cannot know the routed bead is
+// the assignment: it names nothing, not planIntake, though the routed bead is
+// one a claim could take now (its blocker is closed) and the reminder does name
+// planIntake while the listing answers.
+func TestStepReminderNamesNoStepWhenTheBridgeCannotListClaimedWork(t *testing.T) {
+	p := newPlanBreakdown()
+	p.row(t, planBlocker).Status = "closed"
+	assertStepReminder(t, p, planIntake)
+	work, graph := p.stores(true)
+	// The error is the caller's to log; what the reminder owes is no step.
+	got, _ := resolveActiveWispStep(&bridgeClaimedListFaultStore{Store: work}, graph, planIdentities)
+	if got != nil {
+		t.Errorf("the reminder names %s, want %s", describeStep(got), noReminder)
+	}
+}
