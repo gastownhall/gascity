@@ -752,6 +752,11 @@ func ClassifyControllerError(err error) ControllerErrorTier {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return TierAvailability
 	}
+	// The typed twin of the "context canceled" needle: a source-workflow lock
+	// wait cut short by the dispatcher's stop signal returns ctx.Err() itself.
+	if errors.Is(err, context.Canceled) {
+		return TierAvailability
+	}
 	if errors.Is(err, errTransientControllerBoundary) {
 		return TierAvailability
 	}
