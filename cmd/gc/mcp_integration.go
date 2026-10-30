@@ -290,6 +290,32 @@ func heldStage1MCPKey(cityPath string, cfg *config.City, agent *config.Agent, pa
 	return managedKey(kind, scopeRoot), true
 }
 
+// mcpAgentLocalConflictCause names the agent-local mcp/ directory behind a
+// shared-target conflict when one side is the implicit agent a declared
+// provider gets at the city root and the other carries its own agent-local
+// MCP catalog: the shape of a city-scoped agents/<name>/mcp/ diverging from
+// what gc projects for the same provider. Any other pairing — two explicit
+// agents, two implicit agents, or neither side with an MCPDir — is not that
+// shape and returns "".
+func mcpAgentLocalConflictCause(a, b *config.Agent) string {
+	if a == nil || b == nil {
+		return ""
+	}
+	local, implicit := a, b
+	if a.Implicit {
+		local, implicit = b, a
+	}
+	if local.Implicit || !implicit.Implicit || strings.TrimSpace(local.MCPDir) == "" {
+		return ""
+	}
+	return fmt.Sprintf(
+		"%s defines an agent-local MCP catalog at %s that diverges from %s — make the catalogs identical or split the targets",
+		mcpAgentLabel(local),
+		local.MCPDir,
+		mcpAgentLabel(implicit),
+	)
+}
+
 // collectStage1MCPTargets resolves every stage-1 agent's MCP target, and the
 // targets of the agents it skips. With pathOnly, agents' work dirs are
 // resolved without being created, for a plan that must write nothing.
@@ -298,6 +324,7 @@ func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.
 		return stage1MCPTargets{}, nil
 	}
 	byKey := make(map[string]mcpTargetSpec)
+	firstAgent := make(map[string]*config.Agent)
 	var (
 		skips mcpSkipGroups
 		held  []string
@@ -334,7 +361,7 @@ func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.
 		existing, ok := byKey[key]
 		if ok {
 			if existing.Projection.Hash() != view.Projection.Hash() {
-				return stage1MCPTargets{}, fmt.Errorf(
+				conflict := fmt.Errorf(
 					"MCP target conflict at %s (%s): %s projects %s but %s projects %s",
 					view.Projection.Target,
 					view.Projection.Provider,
@@ -343,6 +370,10 @@ func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.
 					agent.QualifiedName(),
 					view.Projection.Hash(),
 				)
+				if cause := mcpAgentLocalConflictCause(firstAgent[key], agent); cause != "" {
+					conflict = fmt.Errorf("%w; %s", conflict, cause)
+				}
+				return stage1MCPTargets{}, conflict
 			}
 			existing.Agents = append(existing.Agents, agent.QualifiedName())
 			sort.Strings(existing.Agents)
@@ -354,6 +385,7 @@ func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.
 			Projection: view.Projection,
 			Agents:     []string{agent.QualifiedName()},
 		}
+		firstAgent[key] = agent
 	}
 
 	cityName := loadedCityName(cfg, cityPath)

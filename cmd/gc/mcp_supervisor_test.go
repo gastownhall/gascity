@@ -497,3 +497,35 @@ url = "http://localhost:3100/mcp/kb"
 		t.Fatalf("target agents = %+v, want [claude]", got)
 	}
 }
+
+func TestBuildStage1MCPTargetsNamesAgentLocalCauseAgainstImplicitAgent(t *testing.T) {
+	cityPath := t.TempDir()
+	agentLocal := filepath.Join(cityPath, "agents", "mayor", "mcp", "notes.toml")
+	writeMCPSource(t, agentLocal, `
+name = "notes"
+command = "uvx"
+`)
+
+	cfg := &config.City{
+		Session:   config.SessionConfig{Provider: "tmux"},
+		Providers: builtinProviderAliasesForTest("claude"),
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Provider: "claude", MCPDir: filepath.Dir(agentLocal)},
+			{Name: "claude", Scope: "city", Provider: "claude", Implicit: true},
+		},
+	}
+
+	_, err := buildStage1MCPTargets(cityPath, cfg, stubLookPath, io.Discard)
+	if err == nil {
+		t.Fatal("expected MCP target conflict between the agent-local catalog and the implicit provider agent, got nil")
+	}
+	for _, want := range []string{
+		"MCP target conflict at",
+		filepath.Dir(agentLocal),
+		`(the implicit agent for provider "claude")`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("conflict error %q missing %q", err.Error(), want)
+		}
+	}
+}
