@@ -11680,6 +11680,24 @@ func TestGateSweepChecksTimerAndGhGatesInEveryRigStore(t *testing.T) {
 	requireGateSweepChecked(t, readGateSweepLog(t, bdLog), "city", "rig:api", "rig:web")
 }
 
+// TestGateSweepSkipsHQAndSuspendedRigs verifies that the hq pseudo-rig and
+// suspended rigs are not swept as rigs, while the other rigs still are.
+func TestGateSweepSkipsHQAndSuspendedRigs(t *testing.T) {
+	binDir, bdLog, env := gateSweepEnv(t)
+	writeGateSweepScopeBd(t, binDir, "")
+	env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"hq","hq":true},{"name":"old","suspended":true},{"name":"api"}]}`
+
+	runScript(t, coreScriptPath("gate-sweep.sh"), env)
+
+	log := readGateSweepLog(t, bdLog)
+	requireGateSweepChecked(t, log, "rig:api")
+	for _, skipped := range []string{"rig:hq ", "rig:old "} {
+		if strings.Contains(log, skipped) {
+			t.Errorf("gate-sweep swept %q; bd log:\n%s", strings.TrimSpace(skipped), log)
+		}
+	}
+}
+
 // TestGateSweepToleratesRigGhGateBdFailures verifies the gh-gate tolerance
 // holds per store: a rig's failing gh check neither fails the run nor stops
 // the next rig's sweep.
