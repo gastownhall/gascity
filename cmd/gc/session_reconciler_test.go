@@ -15082,3 +15082,296 @@ func TestSessionConfigDriftKey_GenericRigScopedTemplate(t *testing.T) {
 		t.Errorf("sessionConfigDriftKey = %q, want %q for a drifted city-scoped named session", got, cityStored+":"+cityCurrent)
 	}
 }
+
+// TestReconcileSessionBeads_NamedSessionDetectsOperatorEnvDrift covers the
+// alive config-drift gate for named sessions across agent shapes (city agent,
+// rig agent bound by dir, generic scope="rig" agent) and session states
+// (desired mode="always", preserved on-demand not woken this tick). The
+// generic agent's session runs the rig-stamped template "<rig>/<name>", which
+// the configured-agents-only lookup misses; drift must restart it in place
+// exactly as it does for a city-scoped named session.
+func TestReconcileSessionBeads_NamedSessionDetectsOperatorEnvDrift(t *testing.T) {
+	cases := []struct {
+		name     string
+		agent    config.Agent
+		named    config.NamedSession
+		identity string
+		desired  bool
+	}{
+		{
+			name:     "city agent/desired",
+			agent:    config.Agent{Name: "lead", StartCommand: "new-cmd", MaxActiveSessions: intPtr(1)},
+			named:    config.NamedSession{Template: "lead", Mode: "always"},
+			identity: "lead",
+			desired:  true,
+		},
+		{
+			name:     "city agent/preserved",
+			agent:    config.Agent{Name: "lead", StartCommand: "new-cmd", Env: map[string]string{"CUSTOM_DRIFT": "v2"}},
+			named:    config.NamedSession{Template: "lead", Mode: "on_demand"},
+			identity: "lead",
+		},
+		{
+			name:     "rig agent bound by dir/desired",
+			agent:    config.Agent{Name: "smith", Dir: "rig-0", StartCommand: "new-cmd", MaxActiveSessions: intPtr(1)},
+			named:    config.NamedSession{Template: "smith", Dir: "rig-0", Mode: "always"},
+			identity: "rig-0/smith",
+			desired:  true,
+		},
+		{
+			name:     "rig agent bound by dir/preserved",
+			agent:    config.Agent{Name: "smith", Dir: "rig-0", StartCommand: "new-cmd", Env: map[string]string{"CUSTOM_DRIFT": "v2"}},
+			named:    config.NamedSession{Template: "smith", Dir: "rig-0", Mode: "on_demand"},
+			identity: "rig-0/smith",
+		},
+		{
+			name:     "rig-scope agent/desired",
+			agent:    config.Agent{Name: "smith", Scope: "rig", StartCommand: "new-cmd", MaxActiveSessions: intPtr(1)},
+			named:    config.NamedSession{Template: "smith", Dir: "rig-0", Mode: "always"},
+			identity: "rig-0/smith",
+			desired:  true,
+		},
+		{
+			name:     "rig-scope agent/preserved",
+			agent:    config.Agent{Name: "smith", Scope: "rig", StartCommand: "new-cmd", Env: map[string]string{"CUSTOM_DRIFT": "v2"}},
+			named:    config.NamedSession{Template: "smith", Dir: "rig-0", Mode: "on_demand"},
+			identity: "rig-0/smith",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newReconcilerTestEnv(t)
+			env.cfg = &config.City{
+				Workspace:     config.Workspace{Name: "test-city"},
+				Rigs:          []config.Rig{{Name: "rig-0", Path: t.TempDir()}},
+				Agents:        []config.Agent{tc.agent},
+				NamedSessions: []config.NamedSession{tc.named},
+			}
+			sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, tc.identity)
+			mode := "always"
+			var tp TemplateParams
+			if tc.desired {
+				tp = TemplateParams{
+					TemplateName:            tc.identity,
+					InstanceName:            tc.identity,
+					Alias:                   tc.identity,
+					Command:                 "new-cmd",
+					ConfiguredNamedIdentity: tc.identity,
+					ConfiguredNamedMode:     "always",
+					OperatorEnv:             map[string]string{"CUSTOM_DRIFT": "v2"},
+				}
+				env.desiredState[sessionName] = tp
+			} else {
+				mode = "on_demand"
+			}
+
+			oldRuntime := runtime.Config{Command: "old-cmd", OperatorEnv: map[string]string{"CUSTOM_DRIFT": "v1"}}
+			if err := env.sp.Start(context.Background(), sessionName, oldRuntime); err != nil {
+				t.Fatalf("Start(old runtime): %v", err)
+			}
+			session := env.createSessionBead(sessionName, tc.identity)
+			env.markSessionActive(&session)
+			env.setSessionMetadata(&session, map[string]string{
+				namedSessionMetadataKey:      "true",
+				namedSessionIdentityMetadata: tc.identity,
+				namedSessionModeMetadata:     mode,
+				"session_key":                "old-provider-conversation",
+				"started_config_hash":        runtime.CoreFingerprint(oldRuntime),
+				"started_live_hash":          runtime.LiveFingerprint(oldRuntime),
+			})
+
+			env.reconcile([]beads.Bead{session})
+
+			if !strings.Contains(env.stderr.String(), "config-drift "+sessionName+":") {
+				t.Fatalf("no config-drift log line for %s; stderr=%s", sessionName, env.stderr.String())
+			}
+			all, err := env.store.ListByLabel(sessionBeadLabel, 0)
+			if err != nil {
+				t.Fatalf("ListByLabel(session): %v", err)
+			}
+			if len(all) != 1 || all[0].ID != session.ID {
+				t.Fatalf("session beads = %v, want the single original bead %s restarted in place", all, session.ID)
+			}
+			if got := all[0].Metadata["state"]; got != "active" {
+				t.Fatalf("state = %q, want active after same-tick config-drift restart", got)
+			}
+			if got := all[0].Metadata["started_config_hash"]; got == "" || got == runtime.CoreFingerprint(oldRuntime) {
+				t.Fatalf("started_config_hash = %q, want a fresh non-empty hash after restart", got)
+			}
+		})
+	}
+
+	// Guard: an unchanged config must not drift-restart the generic agent's
+	// named session across two ticks (start hash and drift hash agree for the
+	// synthesized agent).
+	t.Run("rig-scope agent/unchanged config guard", func(t *testing.T) {
+		env := newReconcilerTestEnv(t)
+		env.cfg = &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs:      []config.Rig{{Name: "rig-0", Path: t.TempDir()}},
+			Agents:    []config.Agent{{Name: "smith", Scope: "rig", StartCommand: "new-cmd", MaxActiveSessions: intPtr(1)}},
+			NamedSessions: []config.NamedSession{
+				{Template: "smith", Dir: "rig-0", Mode: "always"},
+			},
+		}
+		const identity = "rig-0/smith"
+		sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, identity)
+		tp := TemplateParams{
+			TemplateName:            identity,
+			InstanceName:            identity,
+			Alias:                   identity,
+			Command:                 "new-cmd",
+			ConfiguredNamedIdentity: identity,
+			ConfiguredNamedMode:     "always",
+			OperatorEnv:             map[string]string{"CUSTOM_DRIFT": "v2"},
+		}
+		env.desiredState[sessionName] = tp
+		if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "new-cmd"}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		session := env.createSessionBead(sessionName, identity)
+		env.markSessionActive(&session)
+		agentCfg := sessionCoreConfigForHashInfo(tp, env.sessionInfo(session.ID))
+		env.setSessionMetadata(&session, map[string]string{
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: identity,
+			namedSessionModeMetadata:     "always",
+			"session_key":                "warm-conversation",
+			"started_config_hash":        runtime.CoreFingerprint(agentCfg),
+			"started_live_hash":          runtime.LiveFingerprint(agentCfg),
+		})
+
+		env.reconcile([]beads.Bead{session})
+		env.reconcile([]beads.Bead{session})
+
+		if strings.Contains(env.stderr.String(), "config-drift "+sessionName+":") {
+			t.Fatalf("config-drift fired on an unchanged config; stderr=%s", env.stderr.String())
+		}
+		got, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", session.ID, err)
+		}
+		if got.Metadata["started_config_hash"] != runtime.CoreFingerprint(agentCfg) {
+			t.Fatalf("started_config_hash = %q, want the unchanged stamp %q", got.Metadata["started_config_hash"], runtime.CoreFingerprint(agentCfg))
+		}
+		if !env.sp.IsRunning(sessionName) {
+			t.Fatal("session was restarted on an unchanged config")
+		}
+	})
+
+	// An attached generic-agent session records its config-drift deferral
+	// under the <stored>:<current> key instead of restarting.
+	t.Run("rig-scope agent/attached defers under stored:current", func(t *testing.T) {
+		env := newReconcilerTestEnv(t)
+		env.cfg = &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs:      []config.Rig{{Name: "rig-0", Path: t.TempDir()}},
+			Agents:    []config.Agent{{Name: "smith", Scope: "rig", StartCommand: "new-cmd", MaxActiveSessions: intPtr(1)}},
+			NamedSessions: []config.NamedSession{
+				{Template: "smith", Dir: "rig-0", Mode: "always"},
+			},
+		}
+		const identity = "rig-0/smith"
+		sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, identity)
+		tp := TemplateParams{
+			TemplateName:            identity,
+			InstanceName:            identity,
+			Alias:                   identity,
+			Command:                 "new-cmd",
+			ConfiguredNamedIdentity: identity,
+			ConfiguredNamedMode:     "always",
+			OperatorEnv:             map[string]string{"CUSTOM_DRIFT": "v2"},
+		}
+		env.desiredState[sessionName] = tp
+		oldRuntime := runtime.Config{Command: "new-cmd", OperatorEnv: map[string]string{"CUSTOM_DRIFT": "v1"}}
+		if err := env.sp.Start(context.Background(), sessionName, oldRuntime); err != nil {
+			t.Fatalf("Start(old runtime): %v", err)
+		}
+		env.sp.SetAttached(sessionName, true)
+		session := env.createSessionBead(sessionName, identity)
+		env.markSessionActive(&session)
+		stored := runtime.CoreFingerprint(oldRuntime)
+		env.setSessionMetadata(&session, map[string]string{
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: identity,
+			namedSessionModeMetadata:     "always",
+			"session_key":                "old-provider-conversation",
+			"started_config_hash":        stored,
+			"started_live_hash":          runtime.LiveFingerprint(oldRuntime),
+		})
+		current := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(tp, env.sessionInfo(session.ID)))
+
+		env.reconcile([]beads.Bead{session})
+
+		if !env.sp.IsRunning(sessionName) {
+			t.Fatal("attached named session was stopped during config-drift; want deferred")
+		}
+		got, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", session.ID, err)
+		}
+		if key := got.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata]; key != stored+":"+current {
+			t.Fatalf("attached deferral key = %q, want %q", key, stored+":"+current)
+		}
+		if got.Metadata["started_config_hash"] != stored {
+			t.Fatalf("started_config_hash = %q, want preserved %q while deferred", got.Metadata["started_config_hash"], stored)
+		}
+	})
+}
+
+// A named session of a generic scope="rig" agent runs the rig-stamped copy
+// config.FindAgent synthesizes (template "<rig>/<name>"); its launch-only
+// drift must relaunch it like a city-scoped named session.
+func TestReconcileSessionBeads_LaunchOnlyDriftRelaunchesRigScopedNamedSession(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "rig-0", Path: t.TempDir()}},
+		Agents: []config.Agent{{
+			Name:              "smith",
+			Scope:             "rig",
+			StartCommand:      "new-cmd",
+			MaxActiveSessions: intPtr(1),
+		}},
+		NamedSessions: []config.NamedSession{{Template: "smith", Dir: "rig-0", Mode: "always"}},
+	}
+	const identity = "rig-0/smith"
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, identity)
+	env.desiredState[sessionName] = TemplateParams{
+		TemplateName:            identity,
+		InstanceName:            identity,
+		Alias:                   identity,
+		Command:                 "new-cmd",
+		ConfiguredNamedIdentity: identity,
+		ConfiguredNamedMode:     "always",
+	}
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "new-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	session := env.createSessionBead(sessionName, identity)
+	env.markSessionActive(&session)
+
+	agentCfg := sessionCoreConfigForHashInfo(env.desiredState[sessionName], env.sessionInfo(session.ID))
+	oldCfg := agentCfg
+	oldCfg.Command = "stale-" + agentCfg.Command
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: identity,
+		namedSessionModeMetadata:     "always",
+		"session_key":                "warm-conversation",
+		"started_config_hash":        runtime.CoreFingerprint(oldCfg),
+		"started_provision_hash":     runtime.ProvisionFingerprint(oldCfg),
+		"started_launch_hash":        runtime.LaunchFingerprint(oldCfg),
+		"started_live_hash":          runtime.LiveFingerprint(oldCfg),
+	})
+
+	if key := sessionConfigDriftKey(env.sessionInfo(session.ID), env.cfg, env.desiredState[sessionName]); key == "" {
+		t.Errorf("sessionConfigDriftKey = \"\", want stored:current drift key for rig-scoped named session %q", identity)
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	if got := env.sp.CountCalls("Relaunch", sessionName); got != 1 {
+		t.Fatalf("Relaunch calls = %d, want 1 (rig-scoped named launch-only drift must relaunch); stderr=%s", got, env.stderr.String())
+	}
+}
