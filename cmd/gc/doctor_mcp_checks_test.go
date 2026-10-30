@@ -1,9 +1,12 @@
 package main
 
 import (
+	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 )
 
@@ -139,5 +142,102 @@ url = "https://example.com/deputy"
 	}
 	if !strings.Contains(result.Details[0], "mayor") || !strings.Contains(result.Details[0], "deputy") {
 		t.Fatalf("details = %#v, want both agents named", result.Details)
+	}
+}
+
+// mcp-shared-target counts stage-1 claimants as the start gate does, so doctor
+// reports a stage-1 conflict exactly when gc start refuses the city.
+func TestMCPSharedTargetDoctorCheckAgreesWithStage1Gate(t *testing.T) {
+	claude := map[string]config.ProviderSpec{"claude": {Command: "echo", PromptMode: "none"}}
+	acp := true
+	acpProviders := builtinProviderAliasesForTest("claude")
+	acpProviders["relay"] = config.ProviderSpec{Base: ptrString("builtin:claude"), Command: "echo", PromptMode: "none", SupportsACP: &acp, ACPCommand: "echo"}
+	implicit := config.Agent{Name: "claude", Provider: "claude", Implicit: true}
+
+	tests := []struct {
+		name     string
+		sources  map[string]string
+		cfg      func(cityPath string) *config.City
+		conflict bool
+	}{
+		{
+			name:    "city catalog shared by implicit and explicit agents",
+			sources: map[string]string{"mcp/notes.toml": "name = \"notes\"\ncommand = \"uvx\"\n"},
+			cfg: func(cityPath string) *config.City {
+				return &config.City{
+					PackMCPDir: filepath.Join(cityPath, "mcp"),
+					Session:    config.SessionConfig{Provider: "tmux"},
+					Providers:  claude,
+					Agents:     []config.Agent{{Name: "mayor", Scope: "city", Provider: "claude"}, implicit},
+				}
+			},
+		},
+		{
+			name:    "agent-local catalog against the implicit agent",
+			sources: map[string]string{"agents/mayor/mcp/notes.toml": "name = \"notes\"\ncommand = \"uvx\"\n"},
+			cfg: func(cityPath string) *config.City {
+				return &config.City{
+					Session:   config.SessionConfig{Provider: "tmux"},
+					Providers: claude,
+					Agents: []config.Agent{
+						{Name: "mayor", Scope: "city", Provider: "claude", MCPDir: filepath.Join(cityPath, "agents", "mayor", "mcp")},
+						implicit,
+					},
+				}
+			},
+			conflict: true,
+		},
+		{
+			name:    "agent-local catalog against an explicit empty-catalog peer",
+			sources: map[string]string{"agents/mayor/mcp/notes.toml": "name = \"notes\"\ncommand = \"uvx\"\n"},
+			cfg: func(cityPath string) *config.City {
+				return &config.City{
+					Session:   config.SessionConfig{Provider: "tmux"},
+					Providers: builtinProviderAliasesForTest("claude"),
+					Agents: []config.Agent{
+						{Name: "mayor", Scope: "city", Provider: "claude", MCPDir: filepath.Join(cityPath, "agents", "mayor", "mcp")},
+						{Name: "deputy", Scope: "city", Provider: "claude"},
+					},
+				}
+			},
+			conflict: true,
+		},
+		{
+			name: "ACP session beside a stage-1 agent",
+			sources: map[string]string{
+				"mcp/notes.toml":                "name = \"notes\"\ncommand = \"uvx\"\n",
+				"agents/relay/mcp/private.toml": "name = \"private\"\ncommand = \"private-mcp\"\n",
+			},
+			cfg: func(cityPath string) *config.City {
+				return &config.City{
+					PackMCPDir: filepath.Join(cityPath, "mcp"),
+					Session:    config.SessionConfig{Provider: "tmux"},
+					Providers:  acpProviders,
+					Agents: []config.Agent{
+						{Name: "mayor", Scope: "city", Provider: "claude"},
+						{Name: "relay", Scope: "city", Provider: "relay", Session: "acp", MCPDir: filepath.Join(cityPath, "agents", "relay", "mcp")},
+					},
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			for rel, body := range tt.sources {
+				writeMCPSource(t, filepath.Join(cityPath, rel), body)
+			}
+			cfg := tt.cfg(cityPath)
+
+			_, startErr := buildStage1MCPTargets(cityPath, cfg, stubLookPath, io.Discard)
+			result := newMCPSharedTargetDoctorCheck(cityPath, cfg, stubLookPath).Run(&doctor.CheckContext{CityPath: cityPath})
+			if (startErr != nil) != tt.conflict {
+				t.Fatalf("buildStage1MCPTargets err = %v, want conflict %v", startErr, tt.conflict)
+			}
+			if (result.Status == doctor.StatusError) != tt.conflict {
+				t.Fatalf("mcp-shared-target = %v (%s; %v), want conflict %v to match gc start (err = %v)",
+					result.Status, result.Message, result.Details, tt.conflict, startErr)
+			}
+		})
 	}
 }

@@ -290,6 +290,14 @@ func heldStage1MCPKey(cityPath string, cfg *config.City, agent *config.Agent, pa
 	return managedKey(kind, scopeRoot), true
 }
 
+// claimsStage1MCPTarget reports whether a resolved view claims a stage-1
+// target, the provider-native file at its scope root: an agent with a
+// provider or servers claims it even when its catalog is empty, so every
+// claimant of one target must project the same payload.
+func claimsStage1MCPTarget(view resolvedMCPProjection) bool {
+	return view.Delivery == "stage1" && (view.Projection.Provider != "" || len(view.Catalog.Servers) > 0)
+}
+
 // collectStage1MCPTargets resolves every stage-1 agent's MCP target, and the
 // targets of the agents it skips. With pathOnly, agents' work dirs are
 // resolved without being created, for a plan that must write nothing.
@@ -325,10 +333,7 @@ func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.
 		// Shared-layer servers the provider cannot receive are already out
 		// of view.Projection; say which agents start without them.
 		skips.add(mcpAgentLabel(agent), view.Skipped)
-		if view.Delivery != "stage1" {
-			continue
-		}
-		if view.Projection.Provider == "" && len(view.Catalog.Servers) == 0 {
+		if !claimsStage1MCPTarget(view) {
 			continue
 		}
 		key := view.Projection.Provider + "|" + view.Projection.Target

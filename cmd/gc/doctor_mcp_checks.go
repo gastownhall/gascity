@@ -127,12 +127,12 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 			continue
 		}
 		skips.add(mcpAgentLabel(agent), view.Skipped)
-		// An ACP session receives its servers in-band and writes no
-		// provider-native file, so it shares no target with anyone.
-		if view.Delivery == "acp" {
-			continue
-		}
-		if len(view.Catalog.Servers) == 0 || strings.TrimSpace(view.Projection.Provider) == "" || strings.TrimSpace(view.Projection.Target) == "" {
+		// Stage-1 claimants are counted as gc start counts them, empty
+		// catalogs included; a stage-2 agent claims its work_dir target
+		// only with servers to write. An ACP session receives its
+		// servers in-band and writes no provider-native file, so it
+		// shares no target with anyone.
+		if !claimsStage1MCPTarget(view) && !claimsStage2MCPTarget(view) {
 			continue
 		}
 		key := view.Projection.Provider + "|" + filepath.Clean(view.Projection.Target)
@@ -172,6 +172,15 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 		return conflicts[i].Provider < conflicts[j].Provider
 	})
 	return mcpProjectionHealth{issues: issues, skips: skips.lines(), conflicts: conflicts}
+}
+
+// claimsStage2MCPTarget reports whether a resolved view writes a stage-2
+// target: the provider-native file in a work_dir other than its scope root.
+func claimsStage2MCPTarget(view resolvedMCPProjection) bool {
+	return view.Delivery == "stage2" &&
+		len(view.Catalog.Servers) > 0 &&
+		strings.TrimSpace(view.Projection.Provider) != "" &&
+		strings.TrimSpace(view.Projection.Target) != ""
 }
 
 func summarizeMCPIssues(items []string) string {
