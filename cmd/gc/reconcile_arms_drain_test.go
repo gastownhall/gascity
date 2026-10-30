@@ -766,3 +766,109 @@ func TestFloorAckOverATokenlessCorpseIsSignaled(t *testing.T) {
 		})
 	}
 }
+
+// heldSeat makes gc-1 a pool seat of the configured pool agent worker.
+var heldSeat = []string{"pool_managed", "true"}
+
+// poolSeatCity configures worker as a pool agent, which the held-work keep's
+// eligibility (liveClaimVetoApplies) reads.
+func poolSeatCity(w *World) {
+	w.Env = &reconcileEnv{Cfg: &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}}
+}
+
+// blockedOpenWork gives gc-1 open work the allocation does not count awake:
+// it is blocked.
+func blockedOpenWork(w *World) {
+	w.Demand.AssignedWork = []beads.Bead{{ID: "gw-1", Status: "open", Assignee: "gc-1"}}
+}
+
+// storePartial is a pass whose assigned-work read failed on a leg.
+func storePartial(w *World) { w.Demand.StorePartial = true }
+
+// TestWorkKeepsNoWakeRowUnchangedForBlockedOpen. Pins that the held-work
+// keep sits beside DRAIN-046's mirror rather than in it: blocked open work
+// does not make workKeepsNoWakeRow true; awake work and blocked in-progress
+// work still do.
+func TestWorkKeepsNoWakeRowUnchangedForBlockedOpen(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		entry *selectionEntry
+		world func(*World)
+		want  bool
+	}{
+		{"blocked open work", &selectionEntry{}, blockedOpenWork, false},
+		{"awake work", &selectionEntry{AssignedWork: &assignedWorkView{BeadID: "gw-1"}}, func(*World) {}, true},
+		{"blocked in-progress work", &selectionEntry{}, blockedClaim, true},
+	} {
+		w := &World{}
+		poolSeatCity(w)
+		c.world(w)
+		r := &rowFacts{w: w, k: rowKeyOf("gc-1"), row: censusRowOf(t, drainRow(heldSeat...)), found: true, entry: c.entry}
+		if got := workKeepsNoWakeRow(r); got != c.want {
+			t.Errorf("%s: workKeepsNoWakeRow = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestDrainBeginKeepsPoolSeatHoldingBlockedWork (AC-4). Kills a timer drain
+// (no-wake-reason, idle) begun on a pool seat holding assigned work it has no
+// wake reason to run yet, or over a partial assigned-work read: A20 keeps the
+// row, clearing a leftover idle-stop-pending mark first.
+func TestDrainBeginKeepsPoolSeatHoldingBlockedWork(t *testing.T) {
+	noWake := func(e *selectionEntry) { e.Desired = desireSleep }
+	idle := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }
+	for _, c := range []struct {
+		name  string
+		meta  []string
+		entry func(*selectionEntry)
+		work  func(*World)
+		clear bool
+	}{
+		{"no-wake-reason, blocked open", heldSeat, noWake, blockedOpenWork, false},
+		{"idle, blocked open", heldSeat, idle, blockedOpenWork, false},
+		{"idle, blocked in-progress", heldSeat, idle, blockedClaim, false},
+		{"no-wake-reason, partial read", heldSeat, noWake, storePartial, false},
+		{"idle, partial read", heldSeat, idle, storePartial, false},
+		{"idle-stop-pending, blocked open", slices.Concat(heldSeat, []string{"sleep_intent", sleepIntentIdle}), noWake, blockedOpenWork, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			it, _ := decideDrain(t, c.meta, c.entry, poolSeatCity, c.work)
+			if c.clear {
+				if w := it.folded(); it.Kind != intentRowHeal || it.Reason != decideIdleStopClear || len(w) != 1 || w["sleep_intent"] != "" {
+					t.Fatalf("%+v, want the sleep_intent clear alone", it)
+				}
+				return
+			}
+			if it.Kind != "" || it.Reason != decideDrainWorkKept {
+				t.Fatalf("%+v, want the row kept for its work", it)
+			}
+		})
+	}
+}
+
+// TestDrainVoidCancelCancelsRequestedTimerDrainOnHeldWork (AC-4). Kills a
+// requested timer drain that stands once a pool seat holds assigned work it
+// has no wake reason to run yet: A19 cancels it, as legacy's held-work keep
+// does.
+func TestDrainVoidCancelCancelsRequestedTimerDrainOnHeldWork(t *testing.T) {
+	noWake := func(e *selectionEntry) { e.Desired = desireSleep }
+	idle := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }
+	for _, c := range []struct {
+		name   string
+		reason string
+		entry  func(*selectionEntry)
+		work   func(*World)
+	}{
+		{"no-wake-reason, blocked open", reasonNoWake, noWake, blockedOpenWork},
+		{"idle, blocked open", drainIdle, idle, blockedOpenWork},
+		{"idle, blocked in-progress", drainIdle, idle, blockedClaim},
+		{"idle, partial read", drainIdle, idle, storePartial},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			it, _ := decideDrain(t, slices.Concat(heldSeat, intentAt(c.reason, "3")), c.entry, poolSeatCity, c.work)
+			if it.Kind != intentDrainCancel || it.Reason != decideDrainCancel+c.reason {
+				t.Fatalf("%+v, want the %s request canceled", it, c.reason)
+			}
+		})
+	}
+}
