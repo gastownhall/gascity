@@ -111,6 +111,16 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want: "claude --session-id " + key,
 		},
 		{
+			name: "AC-2 rotated key with its transcript present resumes exactly the base resume command",
+			spec: SessionSpec{Command: "claude", Provider: "claude", WorkDir: t.TempDir(), Resume: claudeResume},
+			patch: func(t *testing.T, f rotatedKeyFixture) {
+				writeKeyedTranscript(t, f.root, f.workDir, key)
+			},
+			want: sessionpkg.BuildResumeCommand(sessionpkg.Info{
+				Command: "claude", Provider: "claude", ResumeFlag: "--resume", ResumeStyle: "flag", SessionKey: key,
+			}),
+		},
+		{
 			name: "a creating row with a stale creation-complete marker also starts a new conversation",
 			spec: SessionSpec{Command: "claude", Provider: "claude", WorkDir: t.TempDir(), Resume: claudeResume},
 			patch: func(t *testing.T, f rotatedKeyFixture) {
