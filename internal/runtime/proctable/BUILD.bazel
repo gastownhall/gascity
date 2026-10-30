@@ -112,6 +112,7 @@ go_test(
         "supervisor_fork_orphan_repro_test.go",
         "sweep_guards_test.go",
         "testenv_import_test.go",
+        "testspawned_test.go",
     ],
     embed = [":proctable"],
     deps = [

@@ -2193,6 +2193,7 @@ go_test(
         "template_resolve_workdir_test.go",
         "template_resolve_workspace_env_test.go",
         "test_gc_binary_test.go",
+        "test_guard_spawned_test.go",
         "test_orphan_sweep_branches_test.go",
         "test_orphan_sweep_test.go",
         "test_password_leak_test.go",

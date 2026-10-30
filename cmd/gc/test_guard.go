@@ -25,3 +25,7 @@ func isTestBinary() bool {
 	return strings.HasSuffix(os.Args[0], ".test") ||
 		strings.Contains(os.Args[0], ".test")
 }
+
+// hostGuardedProcess reports whether host-protection guards must treat this
+// process as a test.
+func hostGuardedProcess() bool { return isTestBinary() }

@@ -41,3 +41,13 @@ func SetScanRootForTesting(t testing.TB, root string) {
 	scanRoot = root
 	t.Cleanup(func() { scanRoot = prev })
 }
+
+// TestSpawnedEnv is set by a test harness on every gc binary it execs.
+const TestSpawnedEnv = "GC_TEST_SPAWNED"
+
+// TestSpawned reports whether this process was exec'd by a test harness.
+func TestSpawned() bool { return false }
+
+// orphanScanGuard refuses the orphan sweep's live /proc scan in a
+// test-spawned binary.
+func orphanScanGuard(_ string) error { return nil }
