@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # scope_bd.sh — the bead-store front door for the core maintenance orders.
 #
-# Sourced by reaper.sh and jsonl-export.sh. Every bead scope (the city and each
-# rig) is reached only through `gc bd --city <city> [--rig <rig>] <verb>`; bd
-# picks the transport (proxied, direct server, embedded) for that scope. The
-# maintenance scripts therefore carry no Dolt ports, no SQL connections of
-# their own and no topology branches.
+# Sourced by reaper.sh, jsonl-export.sh and gate-sweep.sh. Every bead scope
+# (the city and each rig) is reached only through
+# `gc bd --city <city> [--rig <rig>] <verb>`; bd picks the transport (proxied,
+# direct server, embedded) for that scope. The maintenance scripts therefore
+# carry no Dolt ports, no SQL connections of their own and no topology
+# branches.
 #
 # Mutations go through gc bd verbs only (close, update, purge, prune, delete),
 # which own their commits in every bd mode. `gc bd sql` is used for read-only

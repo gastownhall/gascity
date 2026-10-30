@@ -11625,6 +11625,81 @@ esac
 	}
 }
 
+// writeGateSweepScopeBd installs a bd double that logs "<scope> <args>" to
+// BD_LOG, then runs failure (a shell snippet that may exit non-zero) and
+// otherwise exits 0.
+func writeGateSweepScopeBd(t *testing.T, binDir, failure string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "bd"), "#!/bin/sh\n"+
+		`printf '%s %s\n' "$GC_FAKE_SCOPE" "$*" >> "$BD_LOG"`+"\n"+
+		failure+"\nexit 0\n")
+}
+
+// readGateSweepLog returns the bd double's log, or "" when bd never ran.
+func readGateSweepLog(t *testing.T, bdLog string) string {
+	t.Helper()
+	data, err := os.ReadFile(bdLog)
+	if errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	return string(data)
+}
+
+// gateSweepChecks are the bd calls a sweep of one store issues.
+var gateSweepChecks = []string{
+	"gate check --type=timer --escalate",
+	"gate check --type=gh --escalate",
+}
+
+// requireGateSweepChecked fails unless the bd log shows both the timer and
+// the gh gate check against every scope.
+func requireGateSweepChecked(t *testing.T, log string, scopes ...string) {
+	t.Helper()
+	for _, scope := range scopes {
+		for _, check := range gateSweepChecks {
+			if want := scope + " " + check; !strings.Contains(log, want) {
+				t.Errorf("missing %q in bd log:\n%s", want, log)
+			}
+		}
+	}
+}
+
+// TestGateSweepChecksTimerAndGhGatesInEveryRigStore verifies that the
+// sweep reaches each configured rig's bead store, not just the city store:
+// a timer or gh gate stored in a rig must be evaluated too.
+func TestGateSweepChecksTimerAndGhGatesInEveryRigStore(t *testing.T) {
+	binDir, bdLog, env := gateSweepEnv(t)
+	writeGateSweepScopeBd(t, binDir, "")
+	env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api","hq":false},{"name":"web","hq":false}]}`
+
+	runScript(t, coreScriptPath("gate-sweep.sh"), env)
+
+	requireGateSweepChecked(t, readGateSweepLog(t, bdLog), "city", "rig:api", "rig:web")
+}
+
+// TestGateSweepToleratesRigGhGateBdFailures verifies the gh-gate tolerance
+// holds per store: a rig's failing gh check neither fails the run nor stops
+// the next rig's sweep.
+func TestGateSweepToleratesRigGhGateBdFailures(t *testing.T) {
+	binDir, bdLog, env := gateSweepEnv(t)
+	writeGateSweepScopeBd(t, binDir, `case "$GC_FAKE_SCOPE $*" in
+  "rig:api "*--type=gh*)
+    echo "bd: simulated gh-gate failure (e.g., missing gh auth)" >&2
+    exit 1
+    ;;
+esac`)
+	env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api"},{"name":"web"}]}`
+
+	out, err := runScriptResult(t, coreScriptPath("gate-sweep.sh"), env)
+	if err != nil {
+		t.Fatalf("gate-sweep should exit 0 when only a rig's gh-gate check fails; got %v\n%s", err, out)
+	}
+	requireGateSweepChecked(t, readGateSweepLog(t, bdLog), "city", "rig:web")
+}
+
 // hermeticGitEnv builds a git invocation env that strips any pre-existing
 // GIT_* control variables from the parent environment before applying the
 // overrides — same approach as mergeTestEnv. This avoids duplicate keys
