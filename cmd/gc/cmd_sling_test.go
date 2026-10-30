@@ -7784,6 +7784,155 @@ func TestDryRunClosedRoutedBeadStaysIdempotent(t *testing.T) {
 	})
 }
 
+// setSlingCaller sets the env identity chain that populateSlingDepsCallbacks
+// resolves the sling caller from: GC_ALIAS to alias, the lower-precedence
+// fallbacks cleared so the ambient environment cannot leak in.
+func setSlingCaller(t *testing.T, alias string) {
+	t.Helper()
+	t.Setenv("GC_ALIAS", alias)
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+}
+
+// routedBeadStore returns a store holding BL-42 with gc.routed_to set to routedTo.
+func routedBeadStore(routedTo string) beads.Store {
+	return beads.NewMemStoreFrom(0, []beads.Bead{{
+		ID:       "BL-42",
+		Title:    "Login page",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": routedTo},
+	}}, nil)
+}
+
+// TestDryRunRoutingConflict pins the dry-run preview for a bead whose
+// gc.routed_to names a third party: the preview renders a "Routing conflict:"
+// section instead of silently previewing an overwrite, while still exiting 0
+// and executing no side effects.
+func TestDryRunRoutingConflict(t *testing.T) {
+	setSlingCaller(t, "rig/reviewer")
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "deacon", MaxActiveSessions: intPtr(1)}
+	q := &fakeQuerier{bead: beads.Bead{
+		ID:       "BL-42",
+		Title:    "Login page",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "rig/polecat"},
+	}}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = routedBeadStore("rig/polecat")
+	opts := testOpts(a, "BL-42")
+	opts.DryRun = true
+	if code := doSling(opts, deps, q, stdout, stderr); code != 0 {
+		t.Fatalf("dry-run returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Routing conflict:") {
+		t.Errorf("stdout missing Routing conflict section: %s", out)
+	}
+	if !strings.Contains(out, "Without --force, sling would refuse to route (exit 1).") {
+		t.Errorf("stdout should describe the refusal: %s", out)
+	}
+	if !strings.Contains(out, "No side effects executed (--dry-run).") {
+		t.Errorf("stdout missing footer: %s", out)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+	}
+}
+
+// TestDryRunRoutedToCallerIsNotConflict pins that a route held by the caller's
+// own env identity previews without a conflict section.
+func TestDryRunRoutedToCallerIsNotConflict(t *testing.T) {
+	setSlingCaller(t, "rig/reviewer")
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "deacon", MaxActiveSessions: intPtr(1)}
+	q := &fakeQuerier{bead: beads.Bead{
+		ID:       "BL-42",
+		Title:    "Login page",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "rig/reviewer"},
+	}}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Store = routedBeadStore("rig/reviewer")
+	opts := testOpts(a, "BL-42")
+	opts.DryRun = true
+	if code := doSling(opts, deps, q, stdout, stderr); code != 0 {
+		t.Fatalf("dry-run returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if out := stdout.String(); strings.Contains(out, "Routing conflict:") {
+		t.Errorf("stdout has a Routing conflict section for the caller's own route: %s", out)
+	}
+}
+
+// TestDoSlingRefusesThirdPartyRoute pins the CLI exit contract: a route held
+// by a third party is refused (exit 1, "--force" hint) and left untouched.
+func TestDoSlingRefusesThirdPartyRoute(t *testing.T) {
+	setSlingCaller(t, "rig/reviewer")
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "deacon", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Store = routedBeadStore("rig/polecat")
+	if code := doSling(testOpts(a, "BL-42"), deps, nil, stdout, stderr); code != 1 {
+		t.Fatalf("doSling returned %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--force") {
+		t.Errorf("stderr = %q, want a --force hint", stderr.String())
+	}
+	assertStoreRoutedTo(t, deps.Store, "BL-42", "rig/polecat")
+}
+
+// TestDoSlingRefusesThirdPartyRouteWithoutCallerEnv pins fail-closed: with no
+// identity in the environment the caller matches no route.
+func TestDoSlingRefusesThirdPartyRouteWithoutCallerEnv(t *testing.T) {
+	setSlingCaller(t, "")
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "deacon", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Store = routedBeadStore("rig/polecat")
+	if code := doSling(testOpts(a, "BL-42"), deps, nil, stdout, stderr); code != 1 {
+		t.Fatalf("doSling returned %d, want 1; stderr: %s", code, stderr.String())
+	}
+	assertStoreRoutedTo(t, deps.Store, "BL-42", "rig/polecat")
+}
+
+// TestDoSlingAllowsRerouteOfCallersOwnRoute pins the self-directed re-route:
+// a caller whose env identity is the current gc.routed_to may sling the bead on
+// to another target without --force.
+func TestDoSlingAllowsRerouteOfCallersOwnRoute(t *testing.T) {
+	setSlingCaller(t, "rig/reviewer")
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "deacon", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Store = routedBeadStore("rig/reviewer")
+	if code := doSling(testOpts(a, "BL-42"), deps, nil, stdout, stderr); code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	assertStoreRoutedTo(t, deps.Store, "BL-42", "deacon")
+}
+
+// TestDoSlingForceOverridesThirdPartyRoute pins the --force escape hatch.
+func TestDoSlingForceOverridesThirdPartyRoute(t *testing.T) {
+	setSlingCaller(t, "")
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "deacon", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Store = routedBeadStore("rig/polecat")
+	opts := testOpts(a, "BL-42")
+	opts.Force = true
+	if code := doSling(opts, deps, nil, stdout, stderr); code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	assertStoreRoutedTo(t, deps.Store, "BL-42", "deacon")
+}
+
 // --- Cross-rig guard tests ---
 
 func TestRigPrefixForAgentCityWide(t *testing.T) {

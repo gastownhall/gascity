@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -232,5 +233,102 @@ func TestDoSlingDefaultFormulaFallsBackToPlainRouteWhenMoleculeAttachedGraphV2Fo
 	}
 	if convoys[0].Status != "closed" {
 		t.Errorf("synthetic input convoy %s status = %q, want closed (fallback must close it, not leak it)", convoys[0].ID, convoys[0].Status)
+	}
+}
+
+// routedConflictFixture builds a store holding BL-1 routed to routedTo and the
+// deps DoSling needs to sling it at a single-session agent.
+func routedConflictFixture(routedTo, caller string) (config.Agent, SlingDeps, *beads.MemStore, *fakeBeadRouter) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	a := config.Agent{Name: "deacon", MaxActiveSessions: intPtr(1)}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{
+		ID:       "BL-1",
+		Title:    "BL-1",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: routedTo},
+	}}, nil)
+	router := &fakeBeadRouter{}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Router = router
+	deps.Store = store
+	deps.CallerIdentity = caller
+	return a, deps, store, router
+}
+
+// TestDoSlingRefusesThirdPartyRoute pins the hard refusal: a bead whose
+// gc.routed_to names neither the target nor the caller is not re-routed
+// without --force, and the refusal happens before the router is called.
+func TestDoSlingRefusesThirdPartyRoute(t *testing.T) {
+	a, deps, store, router := routedConflictFixture("rig/polecat", "rig/reviewer")
+
+	_, err := DoSling(SlingOpts{Target: a, BeadOrFormula: "BL-1"}, deps, store)
+	if err == nil {
+		t.Fatal("expected DoSling to refuse a third-party gc.routed_to without --force")
+	}
+	if !strings.Contains(err.Error(), "--force") {
+		t.Errorf("error %q does not point at --force", err)
+	}
+	if len(router.routed) != 0 {
+		t.Fatalf("router called %d time(s), want 0: refusal must precede routing", len(router.routed))
+	}
+	got, getErr := store.Get("BL-1")
+	if getErr != nil {
+		t.Fatalf("store.Get: %v", getErr)
+	}
+	if got.Metadata[beadmeta.RoutedToMetadataKey] != "rig/polecat" {
+		t.Errorf("gc.routed_to = %q, want unchanged %q", got.Metadata[beadmeta.RoutedToMetadataKey], "rig/polecat")
+	}
+}
+
+// TestDoSlingRefusesConflictWithUnresolvedCaller pins the fail-closed rule: an
+// empty caller identity never matches a route, so it still hard-refuses.
+func TestDoSlingRefusesConflictWithUnresolvedCaller(t *testing.T) {
+	a, deps, store, router := routedConflictFixture("rig/polecat", "")
+
+	if _, err := DoSling(SlingOpts{Target: a, BeadOrFormula: "BL-1"}, deps, store); err == nil {
+		t.Fatal("expected DoSling to refuse when the caller identity is unresolved")
+	}
+	if len(router.routed) != 0 {
+		t.Fatalf("router called %d time(s), want 0", len(router.routed))
+	}
+}
+
+// TestDoSlingAllowsSelfDirectedReroute pins the fleet shape the refusal must
+// not break: a caller re-slinging a bead whose gc.routed_to still names the
+// caller itself (a reviewer handing work back to a builder).
+func TestDoSlingAllowsSelfDirectedReroute(t *testing.T) {
+	a, deps, store, router := routedConflictFixture("rig/reviewer", "rig/reviewer")
+
+	if _, err := DoSling(SlingOpts{Target: a, BeadOrFormula: "BL-1"}, deps, store); err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if len(router.routed) != 1 {
+		t.Fatalf("router called %d time(s), want 1", len(router.routed))
+	}
+}
+
+// TestDoSlingForceOverridesThirdPartyRoute pins the --force escape hatch.
+func TestDoSlingForceOverridesThirdPartyRoute(t *testing.T) {
+	a, deps, store, router := routedConflictFixture("rig/polecat", "")
+
+	if _, err := DoSling(SlingOpts{Target: a, BeadOrFormula: "BL-1", Force: true}, deps, store); err != nil {
+		t.Fatalf("DoSling with Force: %v", err)
+	}
+	if len(router.routed) != 1 {
+		t.Fatalf("router called %d time(s), want 1", len(router.routed))
+	}
+}
+
+// TestDoSlingDryRunNeverRefusesConflict pins that a dry run reports instead of
+// failing: the CLI renders the conflict in its preview.
+func TestDoSlingDryRunNeverRefusesConflict(t *testing.T) {
+	a, deps, store, router := routedConflictFixture("rig/polecat", "rig/reviewer")
+
+	if _, err := DoSling(SlingOpts{Target: a, BeadOrFormula: "BL-1", DryRun: true}, deps, store); err != nil {
+		t.Fatalf("DoSling dry run: %v", err)
+	}
+	if len(router.routed) != 0 {
+		t.Fatalf("dry run routed %d time(s), want 0", len(router.routed))
 	}
 }

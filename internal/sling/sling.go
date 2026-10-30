@@ -135,6 +135,10 @@ type SlingDeps struct {
 	SP       runtime.Provider
 	Runner   SlingRunner
 	Store    beads.Store
+	// CallerIdentity names who is slinging: a bead already routed to this
+	// identity may be re-routed without --force. Empty means unresolved and
+	// matches no route, so any routing conflict is refused.
+	CallerIdentity string
 	// GraphStore owns graph (workflow/v2) beads: the workflow molecule a sling
 	// materializes (root + steps + deps) and its graph-routing metadata. The
 	// source bead a workflow is launched from stays in Store (the work-class
@@ -1768,6 +1772,10 @@ type BeadCheckResult struct {
 	// it: DoSlingBatch skips a child it listed as open whose status here is no
 	// longer open (#5927), and single-bead sling ignores it.
 	Status string
+	// Conflict is non-nil when the bead's gc.routed_to names neither the sling
+	// target nor the caller (SlingDeps.CallerIdentity). DoSling refuses to
+	// route such a bead without --force; a dry run reports it instead.
+	Conflict error
 }
 
 // BeadCheckOptions configures pre-flight bead state checks for a route.
