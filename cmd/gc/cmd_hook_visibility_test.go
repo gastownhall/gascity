@@ -712,20 +712,28 @@ func TestConcurrentWorkflowHookClaimsHaveOneStepOwner(t *testing.T) {
 	winner := ""
 	for range 2 {
 		a := <-answers
-		if a.code != 0 {
-			t.Fatalf("hook = %d: %s", a.code, a.stderr)
-		}
 		var result hookClaimJSONResult
 		if err := json.Unmarshal([]byte(a.stdout), &result); err != nil {
-			t.Fatal(err)
+			t.Fatalf("hook = %d: invalid JSON %q: %v; stderr: %s", a.code, a.stdout, err, a.stderr)
 		}
-		if result.Action == "work" {
+		if result.SchemaVersion != "1" || !result.OK || result.Command != hookClaimCommandName || result.DrainAcknowledged {
+			t.Fatalf("unexpected hook result: %+v", result)
+		}
+		switch result.Action {
+		case "work":
+			if a.code != 0 || result.Reason != "claimed" || result.Route != "worker" {
+				t.Fatalf("work hook = %d: %+v; stderr: %s", a.code, result, a.stderr)
+			}
 			wins++
 			winner = result.Assignee
 			if result.BeadID != ready.ID {
 				t.Fatalf("claimed %s, want ready child %s", result.BeadID, ready.ID)
 			}
-		} else if result.Action != "drain" {
+		case "drain":
+			if a.code != 1 || result.Reason != hookClaimReasonNoWork || result.BeadID != "" || result.Assignee != "" || result.Route != "" {
+				t.Fatalf("unacknowledged drain hook = %d: %+v; stderr: %s", a.code, result, a.stderr)
+			}
+		default:
 			t.Fatalf("unexpected hook result: %+v", result)
 		}
 	}
