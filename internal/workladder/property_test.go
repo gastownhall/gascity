@@ -61,6 +61,12 @@ type sim struct {
 	activity time.Time // the seat's last activity: it works now and then
 	lastStep time.Duration
 	churn    int // 0: a calm seat that only gains work; 1: everything flips
+	// marks: the caller hands some nudges to an asynchronous delivery
+	// (W5's notice mark) and settles each a pass or more later, with a
+	// random fate.
+	marks bool
+	ops   int
+	seed  uint64
 }
 
 var simKeys = []ClaimKey{key("a"), key("b"), key("c")}
@@ -69,7 +75,7 @@ const maxStep = 20 * time.Minute
 
 func newSim(seed uint64) *sim {
 	s := &sim{
-		rng: rand.New(rand.NewPCG(seed, 0x6c6164646572)), now: t0, gen: 1,
+		seed: seed, rng: rand.New(rand.NewPCG(seed, 0x6c6164646572)), now: t0, gen: 1,
 		kinds: map[ClaimKey]Kind{}, agent: map[ClaimKey]bool{}, seeds: map[ClaimKey]StartSource{}, started: map[ClaimKey]bool{},
 	}
 	s.obs = Observation{StartedRead: true, Runtime: TriTrue, Quiet: Quiet{State: Quiescent}}
@@ -194,8 +200,22 @@ func TestLadderInvariants(t *testing.T) {
 	forEachSequence(t, runSequence)
 }
 
-func runSequence(seed uint64) error {
-	s := newSim(seed)
+func runSequence(seed uint64) error { return newSim(seed).run() }
+
+// settleMarks settles, before a pass, the marks the caller's delivery has an
+// outcome for: most of them, and every one older than the caller's bound.
+func (s *sim) settleMarks() {
+	for _, e := range s.rec.Entries {
+		if e.Notice.IsZero() || (s.chance(30) && s.now.Sub(e.Notice.At) < 5*time.Minute) {
+			continue
+		}
+		if r, _, ok := SettleNotice(s.rec, e.Notice.Op, NoticeFate(1+s.rng.IntN(4))); ok {
+			s.rec = r
+		}
+	}
+}
+
+func (s *sim) run() error {
 	var lastSeatNudge time.Time
 	lastNudge := map[ClaimKey]time.Time{}   // per entry life
 	lastTrigger := map[ClaimKey]time.Time{} // trigger recycles, per entry life
@@ -209,10 +229,13 @@ func runSequence(seed uint64) error {
 	lastCounted := map[ClaimKey]counted{}  // the entry's last counted nudge
 	unfinished := map[ClaimKey]time.Time{} // when the lane last reported a release kept
 	for i := range 90 {
+		o := s.step()
+		if s.marks {
+			s.settleMarks()
+		}
 		prev := s.rec
 		prevCopy := prev
 		prevCopy.Entries = slices.Clone(prev.Entries)
-		o := s.step()
 		d := Decide(prev, o, p)
 		fail := func(format string, a ...any) error {
 			return fmt.Errorf("step %d at %v: %s\nprev %s\nobs %+v\nnext %s\nacts %+v", i, o.Now.Sub(t0), fmt.Sprintf(format, a...), EncodeLadder(prevCopy), o, EncodeLadder(d.Next), d.Actions)
@@ -226,7 +249,7 @@ func runSequence(seed uint64) error {
 			return fail("WL7: prev mutated")
 		}
 		// Changed is exactly "the stored text differs".
-		if seed%97 == 0 && (len(prev.Entries) > 0 || prev.Release != nil || len(d.Next.Entries) > 0 || d.Next.Release != nil) &&
+		if s.seed%97 == 0 && (len(prev.Entries) > 0 || prev.Release != nil || len(d.Next.Entries) > 0 || d.Next.Release != nil) &&
 			d.Changed != (EncodeLadder(prev) != EncodeLadder(d.Next)) {
 			return fail("Changed=%v disagrees with the cell text", d.Changed)
 		}
@@ -318,6 +341,11 @@ func runSequence(seed uint64) error {
 		if nudges > 1 {
 			return fail("WL3: %d nudges in one pass", nudges)
 		}
+		// WN1: no nudge while an entry is marked (a mark whose episode ended
+		// is dropped with it, and the caller withdraws its delivery).
+		if nudges > 0 && anyMarked(d.Next) {
+			return fail("WN1: a nudge while a notice is pending")
+		}
 		if o.Provider.Degraded {
 			if d.Next.Release != nil && (prev.Release == nil || *d.Next.Release != *prev.Release) {
 				return fail("WL4: a release decided while degraded")
@@ -359,6 +387,13 @@ func runSequence(seed uint64) error {
 			s.rec = r
 		}
 		for _, a := range d.Actions {
+			if n, ok := a.(Nudge); ok && s.marks && s.chance(60) {
+				s.ops++
+				if r, ok := MarkNotice(s.rec, n.Key, NoticeMark{Op: fmt.Sprintf("op-%d", s.ops), At: o.Now, Paused: n.Paused}); ok {
+					s.rec = r
+				}
+				continue
+			}
 			if n, ok := a.(Nudge); ok && !n.Paused && s.event(10) { // only a counted nudge is refused (the lane's rule)
 				if r, _, ok := NudgeRefused(s.rec, n.Key, n.Attempt, o.Now); ok {
 					s.rec = r

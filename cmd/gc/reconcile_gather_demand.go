@@ -73,6 +73,15 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 	targets := buildDemandTargets(env.CityName, env.CityPath, env.Cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths,
 		env.OpenSessions, noProbeEnv, stderr)
 	cache := newReadyDemandCacheWithReads(reads)
+	gateLegs := crossStoreGateLegs(env.CityPath, env.Cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths)
+	if v2, ok := reads.(*v2DemandReads); ok {
+		// The v2 pass does no remote I/O (CONTRACT v5 R4), and judging a
+		// row's cross-store blockers reads other stores: the external-reads
+		// lane gates a split city's snapshots, and the pass serves them.
+		v2.gateLegs = gateLegs
+	} else {
+		cache = cache.withGateLegs(gateLegs)
+	}
 
 	v.AssignedWork, v.AssignedStores, v.AssignedStoreRefs, v.ReadyAssigned, v.StorePartial = collectAssignedWorkBeadsWithStores(
 		env.CityPath, env.Cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, env.Sessions, cache)

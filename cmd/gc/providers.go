@@ -954,7 +954,7 @@ func openCityMailProvider(stderr io.Writer, cmdName string) (mail.Provider, int)
 	}
 	msgStore := resolveMailMessagesStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 	sessStore := cliSessionStore(store, cfg, cityPath)
-	return newMailProviderWithSessionStore(msgStore, sessStore), 0
+	return withMailNoticeWithdrawal(newMailProviderWithSessionStore(msgStore, sessStore), sessStore, cfg, stderr), 0
 }
 
 // eventsProviderName returns the events provider name.

@@ -341,6 +341,9 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	if name == "" {
 		name = filepath.Base(rigPath)
 	}
+	// Captured before Provision writes anything: a rig already in the
+	// config is a re-add, and a re-add never gets a clean record.
+	existingRigs := configuredRigIdentities(cityPath, cfg)
 
 	deps := rig.Deps{
 		FS:           fs,
@@ -435,8 +438,74 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	} else if !provisioned.Deferred {
 		// An adopted store may predate migration 0059's fix (beads#7037).
 		rigAddRepairBlockedFlags(cityPath, reloaded, r.Name, stderr)
+		recordNewRigClean(cityPath, reloaded, r, adopt || existingRigs.holds(cityPath, r), stderr)
+	} else {
+		recordNewRigClean(cityPath, reloaded, r, adopt || existingRigs.holds(cityPath, r), stderr)
 	}
 	return r, 0
+}
+
+// configuredRigs is the rigs a city config declared before an add: names
+// and resolved scope roots.
+type configuredRigs struct {
+	names map[string]bool
+	roots map[string]bool
+}
+
+func configuredRigIdentities(cityPath string, cfg *config.City) configuredRigs {
+	out := configuredRigs{names: map[string]bool{}, roots: map[string]bool{}}
+	if cfg == nil {
+		return out
+	}
+	for _, r := range cfg.Rigs {
+		out.names[r.Name] = true
+		if strings.TrimSpace(r.Path) != "" {
+			out.roots[filepath.Clean(resolveStoreScopeRoot(cityPath, r.Path))] = true
+		}
+	}
+	return out
+}
+
+// holds reports whether r was already a rig of the city before the add.
+func (c configuredRigs) holds(cityPath string, r config.Rig) bool {
+	if c.names[r.Name] {
+		return true
+	}
+	return strings.TrimSpace(r.Path) != "" && c.roots[filepath.Clean(resolveStoreScopeRoot(cityPath, r.Path))]
+}
+
+// recordNewRigClean writes the S4 clean record for a rig `gc rig add` just
+// created on a split city: its store is new and holds no graph row, so its
+// readers need no relic leg (rigGraphRelicFree). notNew is true for an
+// adopted store or a re-add of a rig the config already declared: either may
+// hold pre-split history, so it stays awaiting import until `gc storage
+// migrate --from-rigs` censuses it. Even for a new rig the store must list
+// empty (a pre-existing .gc store at the path may hold rows), and any error
+// reading it writes nothing. A single-store city, or one whose binding has
+// not converged, writes nothing.
+func recordNewRigClean(cityPath string, cfg *config.City, r config.Rig, notNew bool, stderr io.Writer) {
+	if notNew || cfg == nil || !rigNameIsFileSafe(r.Name) || strings.TrimSpace(r.Path) == "" {
+		return
+	}
+	target, ok, err := resolveInfraBindingTarget(cityPath, cfg)
+	if err != nil || !ok {
+		return
+	}
+	// Only beside a converged binding: the records live at its root, and a
+	// city that has not cut over yet must not acquire files there.
+	if state, err := readInfraConvergenceState(target); err != nil || state != infraConvergenceMarked {
+		return
+	}
+	loc := newRigImportLocation(target, cityPath, r.Name)
+	if fileExists(loc.MarkerPath()) || fileExists(loc.CleanPath()) {
+		return
+	}
+	if !rigStoreListsEmpty(cityPath, r) {
+		return
+	}
+	if err := loc.writeRecord(loc.CleanPath(), fmt.Sprintf("rig %s created empty by gc rig add %s", r.Name, time.Now().UTC().Format(time.RFC3339)), rigStoreRoot(cityPath, r)); err != nil {
+		fmt.Fprintf(stderr, "gc rig add: warning: recording rig %s clean for the split store: %v (run `%s` to record it)\n", r.Name, err, rigImportInstruction(r.Name)) //nolint:errcheck // best-effort stderr
+	}
 }
 
 // The following one-line aliases keep cmd/gc test files compiling against the

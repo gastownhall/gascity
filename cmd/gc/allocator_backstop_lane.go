@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -34,7 +35,9 @@ import (
 // legacyDemandReads; when the config has an on_demand named session,
 // the city store's closed named-session index on any leg, since no cache
 // holds closed history; and, when the config has any, the custom
-// scale_check commands (I5).
+// scale_check commands (I5). On a split city it also judges every gate leg's
+// Ready through the cross-store gate, the exact legs' included, and records it
+// gated (demand_cross_store_gate.go): judging a row reads other stores.
 //
 // The source deadline bounds only how long a pass waits before it publishes;
 // it never decides whether a read counts. Each read stores its result when it
@@ -172,6 +175,34 @@ type legRecording struct {
 	RawOpenErr  error
 	ReadyAll    []beads.Bead
 	ReadyAllErr error
+	// ReadyGated says ReadyAll went through the split city's cross-store gate
+	// when it was read (gateReady). The v2 pass serves a gate leg's Ready only
+	// from such a recording. ReadyGateErr is the gate's own failure, which
+	// keeps ReadyAll ungated and partial; it is not a failed read of the leg.
+	ReadyGated   bool
+	ReadyGateErr error
+}
+
+// gateReady passes ReadyAll through the split city's cross-store gate when
+// the leg is one of its legs (own >= 0), and marks the recording gated. It
+// runs in the lane, off the pass: judging a row reads the other stores that
+// may hold its blockers (demand_cross_store_gate.go).
+func (r *legRecording) gateReady(gate *readywork.LegGate, own int) {
+	if gate == nil || own < 0 {
+		return
+	}
+	r.ReadyAll, r.ReadyGateErr = gateReadyRows(gate, own, r.ReadyAll, r.ReadyAllErr, crossStoreGateDeadline)
+	r.ReadyGated = true
+}
+
+// gatedReady is the Ready a gate leg's recording serves: its rows, and its
+// read's error with any gate failure joined. A recording the gate did not
+// judge serves nothing.
+func (r legRecording) gatedReady() ([]beads.Bead, error) {
+	if !r.ReadyGated {
+		return nil, &beads.PartialResultError{Op: "v2 demand ready", Err: errDemandRecordingUngated}
+	}
+	return r.ReadyAll, joinGateErr(r.ReadyAllErr, r.ReadyGateErr)
 }
 
 func (r *externalReadsRecording) source(key sourceKey) (sourceResult, bool) {
@@ -692,6 +723,12 @@ func (l *externalReadsLane) scaleCheckOf(key sourceKey, res sourceResult, ok boo
 // the custom scale_checks when the config has one, unless the city is
 // suspended: legacy's demand pass returns before them, and the decide reads
 // none while it is (POOL-001).
+//
+// On a split city every gate leg's ReadyAll is recorded gated: the lane-fed
+// legs' as they are read, and each exact leg's from a Ready-only source of its
+// own, since the pass reads an exact leg's other demand from its cache but
+// cannot judge its rows without reading other stores. One gate serves the
+// pass, so a blocker is read once however many legs it holds back.
 func (l *externalReadsLane) sources(env externalReadsEnv) []externalSource {
 	var out []externalSource
 	add := func(key sourceKey, read func() (sourcePayload, error)) {
@@ -699,11 +736,33 @@ func (l *externalReadsLane) sources(env externalReadsEnv) []externalSource {
 	}
 	demandLegs := externalReadLegs(env, l.stderr)
 	reads := legacyDemandReads{}
+	gateLegs := crossStoreGateLegs(env.CityPath, env.Cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths)
+	var gate *readywork.LegGate
+	if gateLegs != nil {
+		gate = readywork.NewLegGate(gateLegs, beads.ReadyQuery{TierMode: beads.TierBoth})
+	}
+	recorded := make(map[sourceKey]bool, len(demandLegs))
 	for _, leg := range demandLegs {
+		own := crossStoreGateLeg(gateLegs, leg.store)
+		recorded[keyOf(sourceDemand, leg.store)] = true
 		add(keyOf(sourceDemand, leg.store), func() (sourcePayload, error) {
 			var r legRecording
 			r.RawOpen, r.RawOpenErr = guardedRead(func() ([]beads.Bead, error) { return reads.RawOpen(leg.store) })
 			r.ReadyAll, r.ReadyAllErr = guardedRead(func() ([]beads.Bead, error) { return reads.ReadyAll(leg.store) })
+			r.gateReady(gate, own)
+			return sourcePayload{Leg: r}, nil
+		})
+	}
+	for own, leg := range gateLegs {
+		key := keyOf(sourceDemand, leg.Store)
+		if _, exact := demandLegCache(leg.Store); !exact || recorded[key] {
+			continue
+		}
+		recorded[key] = true
+		add(key, func() (sourcePayload, error) {
+			var r legRecording
+			r.ReadyAll, r.ReadyAllErr = guardedRead(func() ([]beads.Bead, error) { return reads.ReadyAll(leg.Store) })
+			r.gateReady(gate, own)
 			return sourcePayload{Leg: r}, nil
 		})
 	}

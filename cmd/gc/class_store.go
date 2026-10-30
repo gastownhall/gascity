@@ -297,7 +297,7 @@ func resolveClassStore(routes *storageRoutes, workStore beads.Store, cfg *config
 	if relocated {
 		return store
 	}
-	return workStore
+	return splitStrictClassView(workStore)
 }
 
 // coordclassFor maps a config class name to its coordination class. An
@@ -359,30 +359,12 @@ func resolveGraphStore(routes *storageRoutes, workStore beads.Store, cfg *config
 // scopeIsCity reports whether a scope store the caller opened at storePath is
 // the city's own store rather than a rig's.
 //
-// This is the predicate behind every graph-class routing decision, and it is
-// deliberately one function. Graph bindings are city-keyed: resolveClassStore
-// holds a single city-level store per class, so there is no per-rig binding to
-// route to, and `gc storage migrate` copies only the city work store. Any
-// coordination surface that answers "does this scope take the graph class?"
-// must answer it the same way, or two sibling surfaces end up reading different
-// databases for beads of one class.
+// It answers which scope a directory is, and nothing else. It no longer decides
+// where a graph-class bead lives: that is the S4 placement rule,
+// graphPlacementForScope (graph_placement.go), which puts every new graph root
+// in the binding at every scope on a split city.
 func scopeIsCity(cityPath, storePath string) bool {
 	return samePath(resolveStoreScopeRoot(cityPath, storePath), cityPath)
-}
-
-// scopeGraphStore routes a scope store to the city's graph-class binding when
-// the scope IS the city, and returns the store it was handed otherwise.
-//
-// Control beads and convergence roots are both ClassGraph and both live under a
-// city-keyed binding, so they share this one rule rather than each spelling it
-// out. When the routes relocate nothing — every city with no [storage] section,
-// and every rig scope — this returns the exact store value it was given, so
-// optional-capability type assertions the callers make against it keep working.
-func scopeGraphStore(cityPath, storePath string, cfg *config.City, scopeStore beads.Store) beads.Store {
-	if !scopeIsCity(cityPath, storePath) {
-		return scopeStore
-	}
-	return resolveGraphStore(cliStorageRoutes(cityPath), scopeStore, cfg, cityPath, nil)
 }
 
 // moleculeClassStore returns the store a compiled recipe's molecule must be
@@ -513,7 +495,7 @@ type queryTopologyWorkProbe struct{ beads.Store }
 func newCityMailProvider(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) mail.Provider {
 	msgStore := resolveMailMessagesStore(routes, workStore, cfg, cityPath, rec)
 	sessStore := resolveSessionStore(routes, workStore, cfg, cityPath, rec)
-	return newMailProviderWithSessionStore(msgStore, sessStore)
+	return withMailNoticeWithdrawal(newMailProviderWithSessionStore(msgStore, sessStore), sessStore, cfg, nil)
 }
 
 // newCityExtMsgServices builds the controller's external-messaging services as

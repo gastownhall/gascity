@@ -7286,9 +7286,16 @@ func resolveTaskBeadWorkDir(cityPath string, store beads.Store, bead beads.Bead)
 // creates that directory, so copied step metadata can still name the launcher
 // checkout. The source anchor is the durable post-prepare authority.
 func resolveDrainSourceWorkDir(cityPath string, store beads.Store, bead beads.Bead) string {
+	return resolveDrainSourceWorkDirWith(cityPath, store.Get, bead)
+}
+
+// resolveDrainSourceWorkDirWith is resolveDrainSourceWorkDir reading the root
+// and the drain member through get, which may span stores: the root is a graph
+// row and the member a work bead.
+func resolveDrainSourceWorkDirWith(cityPath string, get func(string) (beads.Bead, error), bead beads.Bead) string {
 	root := bead
 	if rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" && rootID != bead.ID {
-		resolvedRoot, err := store.Get(rootID)
+		resolvedRoot, err := get(rootID)
 		if err != nil {
 			return ""
 		}
@@ -7298,7 +7305,7 @@ func resolveDrainSourceWorkDir(cityPath string, store beads.Store, bead beads.Be
 	if memberID == "" {
 		return ""
 	}
-	source, err := store.Get(memberID)
+	source, err := get(memberID)
 	if err != nil {
 		return ""
 	}

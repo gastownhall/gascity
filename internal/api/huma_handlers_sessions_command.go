@@ -329,6 +329,9 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 	if body.Async {
 		return nil, apierr.InvalidRequest.Msg("async session creation is only supported for configured agent templates")
 	}
+	if err := s.checkInitialMessage(body.Message); err != nil {
+		return nil, err
+	}
 
 	workDir := s.state.CityPath()
 
@@ -399,7 +402,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 			return
 		}
 		if msg := strings.TrimSpace(body.Message); msg != "" {
-			if _, sendErr := s.submitMessageToSession(context.Background(), store.Store, info.ID, msg, session.SubmitIntentDefault, false); sendErr != nil {
+			if sendErr := s.deliverInitialMessage(context.Background(), store.Store, info.ID, msg); sendErr != nil {
 				if rollbackErr := s.rollbackCreatedSession(store, info.ID); rollbackErr != nil {
 					s.emitSessionCreateFailedFor(reqID, info.ID, "message_delivery_failed",
 						fmt.Sprintf("initial message delivery failed: %v (rollback failed: %v)", sendErr, rollbackErr))
@@ -763,10 +766,11 @@ func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubm
 	// Idempotency: accept (and deliver) at most once per Idempotency-Key. A
 	// replay returns the original 202 body — same request_id and event_cursor —
 	// without starting a second delivery. The target is folded into the scope
-	// because it lives in the URL, not the body.
+	// because it lives in the URL, not the body. Under lane authority the op
+	// under the key answers a retry instead (withMessageIdempotency).
 	accepted, err := s.withMessageIdempotency(sessionActionIdempotencyPath(input.ID, "submit"), input.IdempotencyKey, input.Body,
-		func() (asyncAcceptedBody, error) {
-			return s.acceptSessionSubmit(ctx, input)
+		func(lane bool) (asyncAcceptedBody, error) {
+			return s.acceptSessionSubmit(ctx, input, lane)
 		})
 	if err != nil {
 		return nil, err
@@ -775,16 +779,17 @@ func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubm
 }
 
 // acceptSessionSubmit validates the submit target, records the request as a
-// message op under the ops.content gate (session_ops.go), starts the
-// asynchronous delivery, and returns the 202 body.
-func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitInput) (asyncAcceptedBody, error) {
+// message op under the ops.content gate (session_ops.go), or proposes it as
+// a lane op when lane (acceptMessageOp), starts the asynchronous delivery,
+// and returns the 202 body.
+func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitInput, lane bool) (asyncAcceptedBody, error) {
 	intent := input.Body.Intent
 	if intent == "" {
 		intent = session.SubmitIntentDefault
 	}
 	req := &messageOpRequest{
 		target: input.ID, key: input.IdempotencyKey, text: input.Body.Message,
-		intent: intent, operation: RequestOperationSessionSubmit,
+		intent: intent, resume: input.Body.Resume, lane: lane, operation: RequestOperationSessionSubmit,
 	}
 	message, resume := input.Body.Message, input.Body.Resume
 	return s.acceptMessageOp(ctx, req, func(d messageDelivery) {
@@ -856,7 +861,9 @@ type messageDelivery struct {
 
 // acceptMessageOp is the acceptance /submit and /messages share: it
 // validates req's target, admits req as a message op under the ops.content
-// gate (session_ops.go), records the request's acceptance so its request_id
+// gate (session_ops.go), or, when the city's lane host executes message
+// (req.lane), proposes it as a lane op instead (acceptMessageLane), records
+// the request's acceptance so its request_id
 // resolves through GET /request/{requestId} (request_outcome.go), starts
 // deliver on its own goroutine and returns the 202 body. A replay is answered
 // with its body and starts nothing: its request_id is the one first accepted.
@@ -865,7 +872,7 @@ func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, del
 	if store.Store == nil {
 		return asyncAcceptedBody{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
-	conv, err := s.messageTargetConversation(ctx, store.Store, req.target)
+	conv, err := s.messageTargetConversation(ctx, store.Store, req)
 	if err != nil {
 		return asyncAcceptedBody{}, err
 	}
@@ -881,6 +888,9 @@ func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, del
 	eventCursor, err := s.currentCityEventCursor()
 	if err != nil {
 		return asyncAcceptedBody{}, apierr.Internal.Msg(err.Error())
+	}
+	if req.lane {
+		return s.acceptMessageLane(ctx, store.Store, req, ep, eventCursor)
 	}
 	adm, replay, err := s.admitMessageOp(ctx, store.Store, req, eventCursor)
 	if err != nil {
@@ -924,10 +934,14 @@ func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, del
 	return body, nil
 }
 
-// messageTargetConversation validates a /submit or /messages target: a
-// deliverable session with no pending interaction. It returns the target's
-// conversation, "" for a configured named session with no row yet.
-func (s *Server) messageTargetConversation(ctx context.Context, store beads.Store, target string) (string, error) {
+// messageTargetConversation validates req's target, a /submit or /messages
+// target: a deliverable session with no pending interaction. It returns the
+// target's conversation, "" for a configured named session with no row yet.
+// A request the lane accepts (req.lane) is checked for a pending
+// interaction only once no op under its key answers it
+// (acceptMessageLane).
+func (s *Server) messageTargetConversation(ctx context.Context, store beads.Store, req *messageOpRequest) (string, error) {
+	target := req.target
 	conv, err := s.sessionTargetDeliverable(ctx, store, target)
 	if errors.Is(err, session.ErrSessionNotFound) {
 		return "", apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", target))
@@ -938,6 +952,9 @@ func (s *Server) messageTargetConversation(ctx context.Context, store beads.Stor
 		// helper so they surface as 409 (matching /stop, /respond, and the
 		// synchronous message twin) instead of a 500 from humaStoreError.
 		return "", humaResolveError(err)
+	}
+	if req.lane {
+		return conv, nil
 	}
 	if err := s.rejectPendingInteraction(ctx, store, target); err != nil {
 		return "", err
@@ -977,8 +994,8 @@ func (s *Server) humaHandleSessionMessage(ctx context.Context, input *SessionMes
 	// Idempotency: accept (and deliver) at most once per Idempotency-Key; see
 	// humaHandleSessionSubmit.
 	accepted, err := s.withMessageIdempotency(sessionActionIdempotencyPath(input.ID, "messages"), input.IdempotencyKey, input.Body,
-		func() (asyncAcceptedBody, error) {
-			return s.acceptSessionMessage(ctx, input)
+		func(lane bool) (asyncAcceptedBody, error) {
+			return s.acceptSessionMessage(ctx, input, lane)
 		})
 	if err != nil {
 		return nil, err
@@ -987,12 +1004,13 @@ func (s *Server) humaHandleSessionMessage(ctx context.Context, input *SessionMes
 }
 
 // acceptSessionMessage validates the message target, records the request as
-// a message op under the ops.content gate (session_ops.go), starts the
-// asynchronous delivery, and returns the 202 body.
-func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessageInput) (asyncAcceptedBody, error) {
+// a message op under the ops.content gate (session_ops.go), or proposes it
+// as a lane op when lane (acceptMessageOp), starts the asynchronous
+// delivery, and returns the 202 body.
+func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessageInput, lane bool) (asyncAcceptedBody, error) {
 	req := &messageOpRequest{
 		target: input.ID, key: input.IdempotencyKey, text: input.Body.Message,
-		intent: session.SubmitIntentDefault, operation: RequestOperationSessionMessage,
+		intent: session.SubmitIntentDefault, resume: input.Body.Resume, lane: lane, operation: RequestOperationSessionMessage,
 	}
 	message, resume := input.Body.Message, input.Body.Resume
 	return s.acceptMessageOp(ctx, req, func(d messageDelivery) {
@@ -1263,22 +1281,24 @@ func (s *Server) resetSession(ctx context.Context, target, key string) (syncAnsw
 
 // humaHandleSessionRespond is the Huma-typed handler for POST /v0/session/{id}/respond.
 
-func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespondInput) (*SessionRespondOutput, error) {
+func (s *Server) humaHandleSessionRespond(ctx context.Context, input *SessionRespondInput) (*SessionRespondOutput, error) {
 	// Idempotency: deliver the interaction response at most once per
 	// Idempotency-Key. The cached value is the answer, so a replay rebuilds
 	// the identical body without a second Respond (which would fail with
 	// no_pending once the first one cleared the interaction). Under a
 	// recording ops.control gate the op row backs the cache across restarts.
-	answer, err := withIdempotency(s.idem, sessionActionIdempotencyPath(input.ID, "respond"), input.IdempotencyKey, input.Body,
+	// A lane respond's answer whose op is still open is not cached: a retry
+	// reads the op through the row under its key (respondSessionLane).
+	answer, err := withIdempotencyKeeping(s.idem, sessionActionIdempotencyPath(input.ID, "respond"), input.IdempotencyKey, input.Body,
 		func() (syncAnswer, error) {
 			// Huma validates Body.Action (minLength:1); no handler guard needed.
-			return s.respondSession(input.ID, input.IdempotencyKey, runtime.InteractionResponse{
+			return s.respondSession(ctx, input.ID, input.IdempotencyKey, runtime.InteractionResponse{
 				RequestID: input.Body.RequestID,
 				Action:    input.Body.Action,
 				Text:      input.Body.Text,
 				Metadata:  input.Body.Metadata,
 			})
-		})
+		}, syncAnswer.final)
 	if err != nil {
 		return nil, err
 	}

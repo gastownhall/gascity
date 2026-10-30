@@ -53,6 +53,13 @@ type detachedOrphanSweepResult struct {
 // 373s tick (ga-l7jdg). It reports what it found and what the answer cost, so a
 // pass that repaired nothing can be told from one that looked at nothing.
 func sweepDetachedHandoffOrphansWithRouteStore(store, routeStore beads.Store) (detachedOrphanSweepResult, error) {
+	return sweepDetachedHandoffOrphansOnLeg(store, routeStore, true)
+}
+
+// sweepDetachedHandoffOrphansOnLeg is sweepDetachedHandoffOrphansWithRouteStore
+// for one plan leg. ownSessions is false for a rig store proven relic-free
+// (S4b): it holds no session bead, so routes resolve from routeStore alone.
+func sweepDetachedHandoffOrphansOnLeg(store, routeStore beads.Store, ownSessions bool) (detachedOrphanSweepResult, error) {
 	var result detachedOrphanSweepResult
 	if store == nil {
 		return result, nil
@@ -93,7 +100,7 @@ func sweepDetachedHandoffOrphansWithRouteStore(store, routeStore beads.Store) (d
 		return result, nil
 	}
 
-	routeIndex, indexReads, indexErr := detachedOrphanRoutesFor(store, routeStore)
+	routeIndex, indexReads, indexErr := detachedOrphanRoutesForLeg(store, routeStore, ownSessions)
 	result.reads += indexReads
 	if indexErr != nil {
 		return result, indexErr
@@ -143,7 +150,7 @@ func sweepDetachedHandoffOrphansWithRouteStore(store, routeStore beads.Store) (d
 	return result, errors.Join(errs...)
 }
 
-// detachedOrphanRoutesFor builds the session route index one pass over one leg
+// detachedOrphanRoutesForLeg builds the session route index one pass over one leg
 // uses, from that leg's own session beads unioned with routeStore's.
 //
 // Both lanes resolve routes through here, so the tick's delta pass and the
@@ -153,7 +160,20 @@ func sweepDetachedHandoffOrphansWithRouteStore(store, routeStore beads.Store) (d
 //
 // It returns the store round trips it made. ListAllSessionBeads is a two-leg
 // union (by type, by label), so each store consulted costs two.
-func detachedOrphanRoutesFor(store, routeStore beads.Store) (detachedOrphanRouteIndex, int, error) {
+//
+// ownSessions false skips store's own session listing, for a rig store proven
+// relic-free (S4b): routes then resolve from routeStore alone.
+func detachedOrphanRoutesForLeg(store, routeStore beads.Store, ownSessions bool) (detachedOrphanRouteIndex, int, error) {
+	if !ownSessions {
+		if routeStore == nil {
+			return detachedOrphanRouteIndex{byID: map[string]string{}, byName: map[string]string{}}, 0, nil
+		}
+		index, err := buildDetachedOrphanRouteIndex(routeStore)
+		if err != nil {
+			return detachedOrphanRouteIndex{}, 2, fmt.Errorf("building cross-store session route index: %w", err)
+		}
+		return index, 2, nil
+	}
 	reads := 2
 	routeIndex, indexErr := buildDetachedOrphanRouteIndex(store)
 	if indexErr != nil {
@@ -279,7 +299,14 @@ func (idx detachedOrphanRouteIndex) backfill(other detachedOrphanRouteIndex) {
 // per-ID entry still resolves such an orphan exactly.
 func buildDetachedOrphanRouteIndex(store beads.Store) (detachedOrphanRouteIndex, error) {
 	idx := detachedOrphanRouteIndex{byID: map[string]string{}, byName: map[string]string{}}
-	all, listErr := session.ListAllSessionBeads(store, beads.ListQuery{IncludeClosed: true})
+	// Relic leg (S4 debt) when store is a work leg rather than the sessions
+	// store: a scope store holds session beads only as pre-split rows.
+	var all []beads.Bead
+	listErr := beads.RelicRead(func() error {
+		var err error
+		all, err = session.ListAllSessionBeads(store, beads.ListQuery{IncludeClosed: true})
+		return err
+	})
 	// Hard errors return nil rows; surface them to the caller.
 	partial := beads.IsPartialResult(listErr)
 	if listErr != nil && !partial {

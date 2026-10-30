@@ -20,6 +20,8 @@ func TestDecisionTable(t *testing.T) {
 	type row struct {
 		name string
 		e    Entry
+		// other is a second entry the seat holds, whose notice is pending.
+		other *Entry
 	}
 	ent := func(k Kind, r Rung, attempts int, mut func(*Entry)) Entry {
 		e := Entry{Key: key("x"), Kind: k, Rung: r, Since: t0, Attempts: attempts, Last: t0}
@@ -29,19 +31,24 @@ func TestDecisionTable(t *testing.T) {
 		return e
 	}
 	rows := []row{
-		{"trigger/assigned, attempts < 3", ent(KindTrigger, RungAssigned, 2, nil)},
-		{"trigger/assigned, attempts >= 3", ent(KindTrigger, RungAssigned, 3, nil)},
-		{"trigger/assigned, >= 3, recycled 10m ago", ent(KindTrigger, RungAssigned, 4, func(e *Entry) { e.RecycleAt = now.Add(-10 * time.Minute) })},
-		{"continuation/assigned, attempts < 6", ent(KindContinuation, RungAssigned, 5, nil)},
-		{"continuation/assigned, attempts >= 6", ent(KindContinuation, RungAssigned, 6, nil)},
-		{"continuation/assigned, >= 6, alerted", ent(KindContinuation, RungAssigned, 7, func(e *Entry) { e.Escalated = true })},
-		{"claim/claimed, attempts < 3", ent(KindClaim, RungClaimed, 2, nil)},
-		{"claim/claimed, attempts >= 3", ent(KindClaim, RungClaimed, 3, nil)},
-		{"claim/claimed, release did not finish", ent(KindClaim, RungClaimed, 3, func(e *Entry) { e.Unreleased = true })},
-		{"claim/started, attempts < 6", ent(KindClaim, RungStarted, 5, nil)},
-		{"claim/started, >= 6, recycles 0 < R", ent(KindClaim, RungStarted, 6, nil)},
-		{"claim/started, >= 6, recycles 1 = R", ent(KindClaim, RungStarted, 6, func(e *Entry) { e.Recycles = 1 })},
-		{"claim/escalated", ent(KindClaim, RungEscalated, 9, func(e *Entry) { e.Recycles, e.Escalated = 1, true })},
+		{"trigger/assigned, attempts < 3", ent(KindTrigger, RungAssigned, 2, nil), nil},
+		{"trigger/assigned, attempts >= 3", ent(KindTrigger, RungAssigned, 3, nil), nil},
+		{"trigger/assigned, >= 3, recycled 10m ago", ent(KindTrigger, RungAssigned, 4, func(e *Entry) { e.RecycleAt = now.Add(-10 * time.Minute) }), nil},
+		{"continuation/assigned, attempts < 6", ent(KindContinuation, RungAssigned, 5, nil), nil},
+		{"continuation/assigned, attempts >= 6", ent(KindContinuation, RungAssigned, 6, nil), nil},
+		{"continuation/assigned, >= 6, alerted", ent(KindContinuation, RungAssigned, 7, func(e *Entry) { e.Escalated = true }), nil},
+		{"claim/claimed, attempts < 3", ent(KindClaim, RungClaimed, 2, nil), nil},
+		{"claim/claimed, attempts >= 3", ent(KindClaim, RungClaimed, 3, nil), nil},
+		{"claim/claimed, release did not finish", ent(KindClaim, RungClaimed, 3, func(e *Entry) { e.Unreleased = true }), nil},
+		{"claim/started, attempts < 6", ent(KindClaim, RungStarted, 5, nil), nil},
+		{"claim/started, >= 6, recycles 0 < R", ent(KindClaim, RungStarted, 6, nil), nil},
+		{"claim/started, >= 6, recycles 1 = R", ent(KindClaim, RungStarted, 6, func(e *Entry) { e.Recycles = 1 }), nil},
+		{"claim/escalated", ent(KindClaim, RungEscalated, 9, func(e *Entry) { e.Recycles, e.Escalated = 1, true }), nil},
+		{"claim/started, attempts < 6, its notice pending", ent(KindClaim, RungStarted, 5, func(e *Entry) { e.Notice = NoticeMark{Op: "op", At: now} }), nil},
+		{"claim/claimed, attempts >= 3, its notice pending", ent(KindClaim, RungClaimed, 3, func(e *Entry) { e.Notice = NoticeMark{Op: "op", At: now} }), nil},
+		{"claim/started, attempts < 6, another's notice pending", ent(KindClaim, RungStarted, 5, nil), pendingOther(now)},
+		{"claim/claimed, attempts >= 3, another's notice pending", ent(KindClaim, RungClaimed, 3, nil), pendingOther(now)},
+		{"claim/started, >= 6, recycles 0 < R, another's notice pending", ent(KindClaim, RungStarted, 6, nil), pendingOther(now)},
 	}
 	type col struct {
 		name string
@@ -69,7 +76,12 @@ func TestDecisionTable(t *testing.T) {
 				o.Started[r.e.Key] = SrcAgent
 			}
 			c.mut(&o)
-			d := Decide(rec(1, r.e), o, p)
+			prev := rec(1, r.e)
+			if r.other != nil {
+				o.Outstanding = append(o.Outstanding, Work{Key: r.other.Key, Kind: r.other.Kind})
+				prev = rec(1, r.e, *r.other)
+			}
+			d := Decide(prev, o, p)
 			var acts []string
 			for _, a := range effects(d) {
 				acts = append(acts, render(a))
@@ -98,6 +110,12 @@ func TestDecisionTable(t *testing.T) {
 	if got != string(want) {
 		t.Fatalf("decision table drifted; review and regenerate with -update:\n%s", got)
 	}
+}
+
+// pendingOther is a trigger the table's seat also holds, its nudge's notice
+// pending.
+func pendingOther(now time.Time) *Entry {
+	return &Entry{Key: key("y"), Kind: KindTrigger, Rung: RungAssigned, Since: t0, Attempts: 1, Last: now, Notice: NoticeMark{Op: "op", At: now}}
 }
 
 func render(a Action) string {

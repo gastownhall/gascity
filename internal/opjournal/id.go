@@ -146,6 +146,12 @@ var pinnedIDRe = regexp.MustCompile(`^[^\s,"@#]+-[a-z][a-z0-9]{0,15}-[a-z2-7]{26
 // it.
 func IsPinnedID(id string) bool { return pinnedIDRe.MatchString(id) }
 
+// IsOpID reports whether id has the shape of an op id (<prefix>-op-<26
+// base32 characters>), as DeriveID mints them. A producer that stores
+// either an op id or another reference in one field (a wait's nudge_id)
+// tells them apart by it.
+func IsOpID(id string) bool { return validOpID(id) }
+
 // ValidateClientKey refuses a client key Propose would refuse: empty, longer
 // than 512 bytes, not UTF-8, with a control character, or with leading or
 // trailing space. Producers check a supplied key with it before proposing.

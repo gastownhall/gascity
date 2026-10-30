@@ -1234,7 +1234,7 @@ func TestDoSlingNudgePoolBeadDerivedSession(t *testing.T) {
 	startNudgePoller = func(_, _, _ string) error { return nil }
 	t.Cleanup(func() { startNudgePoller = prev })
 
-	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, stdout, stderr)
+	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, "", stdout, stderr)
 	if strings.Contains(stdout.String(), "No running sessions") || strings.Contains(stderr.String(), "poke failed") {
 		t.Fatalf("sling nudge missed live bead-derived pool session; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
@@ -1302,7 +1302,7 @@ func TestDoSlingNudgePoolUsesCityStoreForSessionBeads(t *testing.T) {
 	startNudgePoller = func(_, _, _ string) error { return nil }
 	t.Cleanup(func() { startNudgePoller = prevPoller })
 
-	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, stdout, stderr)
+	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, "", stdout, stderr)
 	if strings.Contains(stdout.String(), "No running sessions") || strings.Contains(stderr.String(), "poke failed") {
 		t.Fatalf("sling nudge missed live city-store pool session; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
@@ -1369,7 +1369,7 @@ func TestDoSlingNudgePoolMemberBindingQualifiedCityScope(t *testing.T) {
 	startNudgePoller = func(_, _, _ string) error { return nil }
 	t.Cleanup(func() { startNudgePoller = prev })
 
-	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, stdout, stderr)
+	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, "", stdout, stderr)
 	if strings.Contains(stderr.String(), "not found in config") {
 		t.Fatalf("doSlingNudge logged 'not found in config' for a binding-qualified pool instance (#4843); stderr=%q", stderr.String())
 	}

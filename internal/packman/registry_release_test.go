@@ -309,10 +309,10 @@ func TestSelectRegistryReleaseAgainstRealRegistry(t *testing.T) {
 		pack, constraint, version, commit string
 	}{
 		{"gascity", "0.1.6", "0.1.6", "3b3b89f2011e06d84459aa7bea1552382f13930a"},
-		{"gascity", ">=0.1.6", "0.1.6", "3b3b89f2011e06d84459aa7bea1552382f13930a"},
+		{"gascity", ">=0.1.6", "0.1.7", "5bf643ca55bd20f080994cc31414ee4596015a0c"},
 		{"gascity", "0.1.4", "0.1.4", "99464ed9240b1f6e6b7ab1d351f67016e1a973ff"},
-		{"gascity", "", "0.1.6", "3b3b89f2011e06d84459aa7bea1552382f13930a"},
-		{"gastown", "^0.1", "0.1.10", "33d3a430a67d1782ad364556cb566bdb01d0afe3"},
+		{"gascity", "", "0.1.7", "5bf643ca55bd20f080994cc31414ee4596015a0c"},
+		{"gastown", "^0.1", "0.1.12", "cb6a612882b8402569c495c90ab75bb257a51bdc"},
 		{"gstack", "0.1.1", "0.1.1", "390cac1a8a0478b6dfde603dae00a43ed9748d13"},
 		{"compound-engineering", "0.1.1", "0.1.1", "390cac1a8a0478b6dfde603dae00a43ed9748d13"},
 		{"bmad", ">=0.1.1", "0.1.1", "390cac1a8a0478b6dfde603dae00a43ed9748d13"},

@@ -167,6 +167,17 @@ func (s failingBlockerStore) Get(id string) (beads.Bead, error) {
 	return s.MemStore.Get(id)
 }
 
+// List fails the batched blocker read (an id list naming failGet) the same way
+// Get fails the single read: blockers are read in one batch per leg.
+func (s failingBlockerStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	for _, id := range q.IDs {
+		if id == s.failGet {
+			return nil, errors.New("blocker read refused")
+		}
+	}
+	return s.MemStore.List(q)
+}
+
 // TestInProgressEnrichmentFailureNamesTheRowAndBlocker pins fail-loud: a blocker
 // the serving leg cannot resolve fails the answer, naming the leg, the blocker
 // and the row, exactly as the per-row walk named them.
@@ -245,15 +256,21 @@ func rowIDs(rows []ReadyBead) []string {
 
 // TestUntilUnblockedServesTheLeadingClaimPastAnUnresolvableRow pins that a row
 // after the cut cannot fail the read. The crash-recovery tier serves the first
-// unblocked row of its window, so a row behind it whose blocker no leg can
-// resolve is a row the tier never serves: failing the whole read on it hid the
+// unblocked row of its window, so a row behind it whose blockers cannot be
+// read is a row the tier never serves: failing the whole read on it hid the
 // session's resumable claim and failed its hook. The plain read is the control:
 // it resolves every row it returns, and still fails.
+//
+// The row it cannot judge is one whose dependency listing fails. A row whose
+// blocker no leg holds (an absent cross-prefix target) is not such a row on a
+// single-store city: bd never blocks on it (IsExternalDepTarget), gc keeps bd's
+// semantics there, and an unresolvable blocker marks only its own row and never
+// fails the read — so that row is served too, by both reads.
 func TestUntilUnblockedServesTheLeadingClaimPastAnUnresolvableRow(t *testing.T) {
 	store := beads.NewMemStore()
 	leading := inProgressRow(t, store, "resumable claim", 0)
-	inProgressRow(t, store, "claim with a cross-store blocker", 1, crossStoreBlocker)
-	legs := []Leg{testLeg("city", store)}
+	broken := inProgressRow(t, store, "claim whose edges cannot be read", 1)
+	legs := []Leg{testLeg("city", failingDepListStore{MemStore: store, failDepList: broken.ID})}
 
 	rows, err := readUntilUnblocked(legs, 20)
 	if err != nil {
@@ -265,27 +282,40 @@ func TestUntilUnblockedServesTheLeadingClaimPastAnUnresolvableRow(t *testing.T) 
 	if _, err := Read(legs, inProgressWindow(20)); err == nil {
 		t.Fatal("the plain read answered past an unresolvable row; it resolves every row it returns and must fail loud")
 	}
+
+	// bd semantics on a single-store city: an absent cross-prefix blocker
+	// neither blocks nor fails the read.
+	plain := beads.NewMemStore()
+	elsewhere := inProgressRow(t, plain, "claim with a cross-store blocker", 0, crossStoreBlocker)
+	plainLegs := []Leg{testLeg("city", plain)}
+	if rows, err := Read(plainLegs, inProgressWindow(20)); err != nil || !slices.Equal(rowIDs(rows), []string{elsewhere.ID}) {
+		t.Fatalf("plain read with an absent %s blocker = %v, %v; want the row served (bd never blocks on it)", crossStoreBlocker, rowIDs(rows), err)
+	}
+	if rows, err := readUntilUnblocked(plainLegs, 20); err != nil || !slices.Equal(rowIDs(rows), []string{elsewhere.ID}) {
+		t.Fatalf("Read(--until-unblocked) with an absent %s blocker = %v, %v; want the row served as the cut", crossStoreBlocker, rowIDs(rows), err)
+	}
 }
 
 // TestUntilUnblockedFailsWhenARowAtOrAheadOfTheCutCannotBeResolved pins the
 // fail-loud half. The cut cannot be placed past a row whose blockers are
 // unknown, because that row may be the one to serve: answering without it would
 // hand the session fresh work while a claim it may be able to resume is
-// invisible. A gated row ahead of it does not change that.
+// invisible. A gated row ahead of it does not change that. The row it cannot
+// judge is one whose dependency listing fails (an absent cross-prefix blocker
+// is judged, by bd's rule: it never blocks).
 func TestUntilUnblockedFailsWhenARowAtOrAheadOfTheCutCannotBeResolved(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		ahead   int
 		rowsFor func(t *testing.T, store beads.Store) string
 	}{
-		{"leading row", 0, func(t *testing.T, store beads.Store) string {
-			bad := inProgressRow(t, store, "claim with a cross-store blocker", 0, crossStoreBlocker)
+		{"leading row", func(t *testing.T, store beads.Store) string {
+			bad := inProgressRow(t, store, "claim whose edges cannot be read", 0)
 			inProgressRow(t, store, "resumable claim", 1)
 			return bad.ID
 		}},
-		{"behind a gated row", 1, func(t *testing.T, store beads.Store) string {
+		{"behind a gated row", func(t *testing.T, store beads.Store) string {
 			inProgressRow(t, store, "gated claim", 0, openGate(t, store))
-			bad := inProgressRow(t, store, "claim with a cross-store blocker", 1, crossStoreBlocker)
+			bad := inProgressRow(t, store, "claim whose edges cannot be read", 1)
 			inProgressRow(t, store, "resumable claim", 2)
 			return bad.ID
 		}},
@@ -293,11 +323,11 @@ func TestUntilUnblockedFailsWhenARowAtOrAheadOfTheCutCannotBeResolved(t *testing
 		t.Run(tc.name, func(t *testing.T) {
 			store := beads.NewMemStore()
 			bad := tc.rowsFor(t, store)
-			rows, err := readUntilUnblocked([]Leg{testLeg("city", store)}, 20)
+			rows, err := readUntilUnblocked([]Leg{testLeg("city", failingDepListStore{MemStore: store, failDepList: bad})}, 20)
 			if err == nil {
-				t.Fatalf("Read(--until-unblocked) = %v, want a failure: row %s, which the cut cannot pass, has an unresolvable blocker", rowIDs(rows), bad)
+				t.Fatalf("Read(--until-unblocked) = %v, want a failure: row %s, which the cut cannot pass, cannot be judged", rowIDs(rows), bad)
 			}
-			want := fmt.Sprintf("city store: resolving blocker %q of %q", crossStoreBlocker, bad)
+			want := fmt.Sprintf("city store: listing dependencies of %q", bad)
 			if !strings.Contains(err.Error(), want) {
 				t.Fatalf("error = %v, want it to contain %q", err, want)
 			}
@@ -308,7 +338,7 @@ func TestUntilUnblockedFailsWhenARowAtOrAheadOfTheCutCannotBeResolved(t *testing
 // TestUntilUnblockedKeepsTheGatedRowsAheadOfTheCut pins the shape of the answer:
 // the gated rows ahead of the first unblocked row, each with its blockers, then
 // that row, whose blockers (closed ones) are carried too. Nothing past it is
-// returned, an unresolvable row included.
+// returned, a row with an absent cross-store blocker included.
 func TestUntilUnblockedKeepsTheGatedRowsAheadOfTheCut(t *testing.T) {
 	store := beads.NewMemStore()
 	gate := openGate(t, store)
@@ -503,5 +533,61 @@ func TestCutOfTheWholeWindowIsTheUntilUnblockedRead(t *testing.T) {
 	}
 	if len(got) != 3 {
 		t.Fatalf("ReadUntilUnblocked = %v, want the two gated claims and the first unblocked one", rowIDs(got))
+	}
+}
+
+// untilUnblockedAndWhole reads the window cut (ReadUntilUnblocked) and whole
+// (Read), and checks the cut is the whole answer's CutUntilUnblocked: the CLI
+// cuts the controller's whole window exactly so.
+func untilUnblockedAndWhole(t *testing.T, legs []Leg) []ReadyBead {
+	t.Helper()
+	cut, err := readUntilUnblocked(legs, 20)
+	if err != nil {
+		t.Fatalf("Read(--until-unblocked): %v", err)
+	}
+	whole, err := Read(legs, inProgressWindow(20))
+	if err != nil {
+		t.Fatalf("Read(whole window): %v", err)
+	}
+	if got, want := rowIDs(cut), rowIDs(CutUntilUnblocked(whole)); !slices.Equal(got, want) {
+		t.Fatalf("cut %v != CutUntilUnblocked(whole window) %v", got, want)
+	}
+	return cut
+}
+
+// TestUntilUnblockedAppliesTheCrossStoreRuleOnASplitCity pins that the
+// crash-recovery tier's cut read judges blockers by the split-city rule, as
+// the whole-window read does: a claim blocked by a bead no store holds, by an
+// open graph bead in the binding, or by an external: ref to it is gated, so
+// the tier never resumes it; the cut stops at the first clean claim, and moves
+// earlier once the graph bead closes.
+func TestUntilUnblockedAppliesTheCrossStoreRuleOnASplitCity(t *testing.T) {
+	work := beads.NewMemStore()
+	binding := sqliteBinding(t)
+	graphBlocker := mustCreate(t, binding, beads.Bead{Title: "graph blocker", Type: "task"})
+	unresolvable := inProgressRow(t, work, "blocked by a bead no store holds", 0, "gcg-zz404")
+	byGraph := inProgressRow(t, work, "blocked by an open graph bead", 1, graphBlocker.ID)
+	byExternal := inProgressRow(t, work, "blocked by an external: ref to it", 2, "external:"+graphBlocker.ID)
+	clean := inProgressRow(t, work, "clean claim", 3)
+	inProgressRow(t, work, "past the cut", 4, "gcg-zz405")
+	legs := splitLegs(work, binding)
+
+	cut := untilUnblockedAndWhole(t, legs)
+	if got, want := rowIDs(cut), []string{unresolvable.ID, byGraph.ID, byExternal.ID, clean.ID}; !slices.Equal(got, want) {
+		t.Fatalf("split cut = %v, want %v: every gated claim, then the first clean one", got, want)
+	}
+	for _, row := range cut[:3] {
+		if !hasOpenBlocker(row.BlockedBy) {
+			t.Fatalf("row %s is unblocked on a split city (blocked_by %+v); the tier would resume it", row.ID, row.BlockedBy)
+		}
+	}
+	if got := cut[0].BlockedBy; len(got) != 1 || got[0].Status != BlockerUnresolved {
+		t.Fatalf("unresolvable row blocked_by = %+v, want one %s blocker", got, BlockerUnresolved)
+	}
+
+	closeBead(t, binding, graphBlocker.ID)
+	cut = untilUnblockedAndWhole(t, legs)
+	if got, want := rowIDs(cut), []string{unresolvable.ID, byGraph.ID}; !slices.Equal(got, want) {
+		t.Fatalf("after the graph bead closed: split cut = %v, want %v", got, want)
 	}
 }

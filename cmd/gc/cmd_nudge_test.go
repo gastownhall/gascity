@@ -4054,7 +4054,7 @@ func TestDeliverSlingNudgeWaitIdleWrapsInSystemReminder(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	deliverSlingNudge(target, fake, store, dir, &stdout, &stderr)
+	deliverSlingNudge(target, fake, store, store, dir, "", &stdout, &stderr)
 
 	var nudgeNowCalls int
 	var delivered string
@@ -4105,7 +4105,7 @@ func TestDeliverSlingNudgeQueuesFencedReminderAndStartsPollerForAsleepSession(t 
 	t.Cleanup(func() { startNudgePoller = prev })
 
 	var stdout, stderr bytes.Buffer
-	deliverSlingNudge(target, fake, store, dir, &stdout, &stderr)
+	deliverSlingNudge(target, fake, store, store, dir, "", &stdout, &stderr)
 
 	pending, inFlight, dead, err := listQueuedNudges(dir, target.agent.QualifiedName(), time.Now())
 	if err != nil {
@@ -7377,7 +7377,7 @@ func TestNudgeOverACrashedAgentQueues(t *testing.T) {
 		dir, store, fake, target, info := crashed(t)
 		before := len(fake.Calls)
 		var stdout, stderr bytes.Buffer
-		deliverSlingNudge(target, fake, store.Store, dir, &stdout, &stderr)
+		deliverSlingNudge(target, fake, store.Store, store.Store, dir, "", &stdout, &stderr)
 		if typed(fake, info.SessionName, before) != 0 || queued(t, dir, target) != 1 || strings.Contains(stdout.String(), "Nudged") {
 			t.Fatalf("typed %d, queued %d, stdout %q; want none typed, one queued", typed(fake, info.SessionName, before), queued(t, dir, target), stdout.String())
 		}

@@ -102,9 +102,9 @@ var (
 	IdempotencyMismatch = Register(ProblemType{Code: "idempotency-mismatch", Status: http.StatusUnprocessableEntity, Title: "Idempotency Key Body Mismatch"})
 	// InvalidIdempotencyKey is an Idempotency-Key the operation journal
 	// cannot record under (empty after trimming, over 512 bytes, control
-	// characters, leading or trailing space, or a /reset key in a reserved
-	// namespace: legacyop.ErrReservedKey). Only an ops gate in require
-	// refuses it; auto runs such a request unrecorded.
+	// characters, leading or trailing space, or a /reset or /respond key in
+	// a reserved namespace: legacyop.ErrReservedKey). Only an ops gate in
+	// require refuses it; auto runs such a request unrecorded.
 	InvalidIdempotencyKey = Register(ProblemType{Code: "invalid-idempotency-key", Status: http.StatusUnprocessableEntity, Title: "Invalid Idempotency Key"})
 
 	// Operation journal (DES-O0API D12): refusals of an ops gate in require,

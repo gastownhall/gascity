@@ -658,7 +658,7 @@ func TestHookRequestBudgetOnAWorkerSite(t *testing.T) {
 		name: "hook --claim continuation nudge",
 		seed: func(*testing.T, hookBudgetFixture) {},
 		run: func(_ *testing.T, _ hookBudgetFixture, _, _ io.Writer) int {
-			hookContinuationNudgeEnqueue(hookBudgetIdentity)
+			hookContinuationNudgeEnqueue(hookBudgetIdentity, "", io.Discard)
 			return 0
 		},
 		dialsLocally:     true,

@@ -196,7 +196,7 @@ func TestTopologyAndProviderOwnershipMutationsFailPolicy(t *testing.T) {
 			mutate: func(t *testing.T, docs policyDocuments) {
 				changeStep := step(t, job(t, docs.ci, "changes"), 1)
 				filters := decodeYAMLMap(t, changeStep["with"].(map[string]any)["filters"].(string))
-				filters["beads"] = removeValue(t, filters["beads"], "internal/beads/**")
+				filters["packs"] = removeValue(t, filters["packs"], "examples/gastown/**")
 				changeStep["with"].(map[string]any)["filters"] = encodeYAML(t, filters)
 			},
 		},
@@ -459,13 +459,13 @@ func TestChangesFilterErrorsAreDeterministic(t *testing.T) {
 	docs := loadPolicyDocuments(t)
 	changeStep := step(t, job(t, docs.ci, "changes"), 1)
 	filters := decodeYAMLMap(t, changeStep["with"].(map[string]any)["filters"].(string))
-	filters["beads"] = removeValue(t, filters["beads"], "internal/beads/**")
-	filters["mail"] = removeValue(t, filters["mail"], "internal/mail/**")
+	filters["packs"] = removeValue(t, filters["packs"], "examples/gastown/**")
+	filters["credential_provider"] = removeValue(t, filters["credential_provider"], "internal/credentialprovider/**")
 	changeStep["with"].(map[string]any)["filters"] = encodeYAML(t, filters)
 
 	for attempt := 0; attempt < 100; attempt++ {
 		err := validateChangesJob(docs.ci)
-		if err == nil || !strings.Contains(err.Error(), `changes filter "beads"`) {
+		if err == nil || !strings.Contains(err.Error(), `changes filter "credential_provider"`) {
 			t.Fatalf("attempt %d error = %v, want lexicographically first broken filter", attempt, err)
 		}
 	}
