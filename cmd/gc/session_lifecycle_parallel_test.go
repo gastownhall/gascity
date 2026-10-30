@@ -324,27 +324,42 @@ func (p *shutdownWaitProvider) ListRunning(prefix string) ([]string, error) {
 	return p.Fake.ListRunning(prefix)
 }
 
+// lateAsyncStartListProvider holds an async start open across the shutdown's
+// first stop snapshot: its first ListRunning releases the gated start and waits
+// for the runtime to come up, then returns the pre-start snapshot, so only a
+// forced shutdown's SECOND ListRunning (the late relist) sees the runtime.
+//
+// holdStartAfterRunning, when nonzero, additionally keeps the provider's Start
+// open that long after the runtime is up: the async start commits its
+// creating -> active transition only after Start returns, so the late relist
+// then always reaches the row while it still reads creating instead of racing
+// the commit.
 type lateAsyncStartListProvider struct {
 	*gatedStartProvider
-	listCalls int
-	// startReturnDelay holds Start open after the runtime is up, the window
-	// a loaded machine opens between the runtime appearing and the async
-	// start committing its session bead, which reads creating until then.
-	startReturnDelay time.Duration
+	listCalls             int
+	holdStartAfterRunning time.Duration
 }
 
-func newLateAsyncStartListProvider() *lateAsyncStartListProvider {
+func newLateAsyncStartListProvider(holdStartAfterRunning time.Duration) *lateAsyncStartListProvider {
 	return &lateAsyncStartListProvider{
-		gatedStartProvider: newGatedStartProvider(),
+		gatedStartProvider:    newGatedStartProvider(),
+		holdStartAfterRunning: holdStartAfterRunning,
 	}
 }
 
 func (p *lateAsyncStartListProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
-	err := p.gatedStartProvider.Start(ctx, name, cfg)
-	if p.startReturnDelay > 0 {
-		time.Sleep(p.startReturnDelay)
+	if err := p.gatedStartProvider.Start(ctx, name, cfg); err != nil {
+		return err
 	}
-	return err
+	if p.holdStartAfterRunning <= 0 {
+		return nil
+	}
+	select {
+	case <-time.After(p.holdStartAfterRunning):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (p *lateAsyncStartListProvider) ListRunning(prefix string) ([]string, error) {
@@ -2906,19 +2921,14 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *test
 	}
 }
 
-func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
-	runForceShutdownRelistsLateAsyncStart(t, 0)
-}
-
-// TestCityRuntimeForceShutdownRelistsLateAsyncStartCommittedLate holds the
-// provider's Start open after the runtime is up, so the late relist reaches
-// the session while its bead still reads creating. The forced stop must still
-// stop that runtime.
-func TestCityRuntimeForceShutdownRelistsLateAsyncStartCommittedLate(t *testing.T) {
-	runForceShutdownRelistsLateAsyncStart(t, 200*time.Millisecond)
-}
-
-func runForceShutdownRelistsLateAsyncStart(t *testing.T, startReturnDelay time.Duration) {
+// forceShutdownLateAsyncStart runs a forced controller shutdown over an async
+// start whose runtime comes up after the first stop snapshot (a forced
+// shutdown abandons its async-start wait and re-lists), and returns the
+// provider and the shutdown's captured stderr, so a failure can print what the
+// stop actually said. holdStartAfterRunning keeps the start's creating ->
+// active commit from landing before the late relist (see
+// lateAsyncStartListProvider).
+func forceShutdownLateAsyncStart(t *testing.T, holdStartAfterRunning time.Duration) (*lateAsyncStartListProvider, *syncBuffer) {
 	t.Helper()
 	testCity := t.TempDir()
 	store := beads.NewMemStore()
@@ -2940,15 +2950,14 @@ func runForceShutdownRelistsLateAsyncStart(t *testing.T, startReturnDelay time.D
 	if err != nil {
 		t.Fatal(err)
 	}
-	sp := newLateAsyncStartListProvider()
-	sp.startReturnDelay = startReturnDelay
-	stderr := newSyncBuffer()
+	sp := newLateAsyncStartListProvider(holdStartAfterRunning)
 	cfg := &config.City{
 		Daemon: config.DaemonConfig{ShutdownTimeout: "500ms"},
 		Agents: []config.Agent{{Name: "worker"}},
 	}
 	forceStop := &atomic.Bool{}
 	forceStop.Store(true)
+	stderr := newSyncBuffer()
 	cr := &CityRuntime{
 		cfg:                 cfg,
 		sp:                  sp,
@@ -2974,7 +2983,7 @@ func runForceShutdownRelistsLateAsyncStart(t *testing.T, startReturnDelay time.D
 		events.Discard,
 		time.Minute,
 		ioDiscard{},
-		stderr,
+		ioDiscard{},
 		nil,
 		withAsyncStartExecution(),
 		withAsyncStartLimiter(cr.ensureAsyncStartLimiter()),
@@ -2985,12 +2994,37 @@ func runForceShutdownRelistsLateAsyncStart(t *testing.T, startReturnDelay time.D
 	sp.waitForStarts(t, 1)
 
 	cr.shutdown()
+	return sp, stderr
+}
+
+func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
+	sp, stderr := forceShutdownLateAsyncStart(t, 0)
 
 	if sp.IsRunning("worker") {
-		t.Fatalf("force shutdown missed late async-started runtime; stderr:\n%s", stderr.String())
+		t.Fatalf("force shutdown missed late async-started runtime; stderr:\n%s", stderr)
 	}
 	if sp.listCalls < 2 {
-		t.Fatalf("ListRunning calls = %d, want a second snapshot for force async-start cleanup; stderr:\n%s", sp.listCalls, stderr.String())
+		t.Fatalf("ListRunning calls = %d, want a second snapshot for force async-start cleanup", sp.listCalls)
+	}
+}
+
+// The commit-late variant of the race above, made deterministic: the
+// provider's Start stays open past the runtime coming up, so the late relist
+// always stops the session while its row still reads creating (the
+// creating -> active commit cannot have landed). That is the forced-stop gap
+// ga-fqdzdy found: Suspend refused the creating row before any teardown, so
+// the stop errored and the live runtime survived the shutdown.
+func TestCityRuntimeForceShutdownRelistsLateAsyncStartCommittedLate(t *testing.T) {
+	sp, stderr := forceShutdownLateAsyncStart(t, 200*time.Millisecond)
+
+	if sp.IsRunning("worker") {
+		t.Fatalf("force shutdown missed a late async-started runtime whose row still read creating; stderr:\n%s", stderr)
+	}
+	if msg := stderr.String(); strings.Contains(msg, "illegal transition") {
+		t.Fatalf("force shutdown hit an illegal transition stopping a still-creating row; stderr:\n%s", msg)
+	}
+	if sp.listCalls < 2 {
+		t.Fatalf("ListRunning calls = %d, want a second snapshot for force async-start cleanup", sp.listCalls)
 	}
 }
 

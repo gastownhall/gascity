@@ -557,11 +557,11 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 		graceTimeout = 0
 	}
 
-	// A start the controller died in leaves its row creating, a state the stop
-	// sweep's suspend refuses (it is the start's own), so its runtime would
-	// outlive the stop. With no controller left, stop those first.
-	// A start in flight is left to that start: keep it out of the sweep (whose
-	// stop would kill it under its starter) and in desired (so the orphan sweep
+	// A start the controller died in leaves its row creating. The sweep's
+	// suspend tears such a row's runtime down too (its sweep-only latitude),
+	// but this pass is what reports a row the stop could not verify, and what
+	// keeps a start still owned by a live starter out of the sweep (whose stop
+	// would kill it under its starter) and in desired (so the orphan sweep
 	// does not stop it either).
 	inFlight, creatingLeft := stopInterruptedStartsForStop(cityPath, sessionFrontDoor(sessStore), sp, unreachable, stdout, stderr)
 	if len(inFlight) > 0 {
@@ -638,9 +638,11 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 // for the standalone stop, which runs only once no controller serves the city.
 // A starter holds the runtime name's flock from before it records creating
 // until it commits the start, so a free flock means the process that wrote the
-// row died mid-start (a controller crash). The stop sweep's suspend refuses a
-// creating row, so without this its runtime outlives the stop. The row is left
-// as it is, for the reconciler to resolve on the next start.
+// row died mid-start (a controller crash). An operator's or the idle
+// auto-suspend's stop still refuses a creating row, and the sweep's own
+// latitude writes no row state, so this pass is what both reports the row the
+// dead start left and leaves it as it is, for the reconciler to resolve on the
+// next start.
 //
 // A name whose flock is held is a start in flight, whether or not its runtime
 // is up yet: it is reported and returned in inFlight, for the caller to keep

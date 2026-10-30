@@ -40,8 +40,9 @@ type LifecycleHandle interface {
 	Stop(context.Context, sessionpkg.Actor) error
 	// StopForShutdown is Stop with CITY-SHUTDOWN intent (an ActorSweep), for
 	// the `gc stop` / `gc restart` sweep only. It carries latitude on lifecycle
-	// states that have no live turn to suspend (notably draining), which a
-	// targeted operator Stop must keep rejecting.
+	// states that have no live turn to suspend (a draining row, and a creating
+	// row whose async start has not committed), which a targeted operator Stop
+	// must keep rejecting.
 	StopForShutdown(context.Context) error
 	// StopIdle is Stop for the chat idle auto-suspend: the operator's
 	// transition rules, no operator hold.
