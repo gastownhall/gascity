@@ -33,6 +33,11 @@ const (
 	// scopeAbortSkippedCloseReason: bd rejects close reasons shorter than 20
 	// characters.
 	drainPredecessorFailedCloseReason = "drain failed: a blocking predecessor closed with a failed outcome"
+	// drainUnitRetiredCloseReason is stamped as close_reason on a drain unit
+	// convoy retired by its drain control's terminal close. Same prose-not-token
+	// rule as drainPredecessorFailedCloseReason: bd rejects close reasons
+	// shorter than 20 characters.
+	drainUnitRetiredCloseReason = "drain unit retired: its drain control reached a terminal state"
 )
 
 type drainManifest struct {
@@ -1083,14 +1088,91 @@ func markRemainingSharedRowsSkipped(manifest *drainManifest, start int) {
 	}
 }
 
-// closeDrainControl is every terminal close of a drain control. A drain is
-// scope-check-exempt and reconciles its own enclosing scope, so the scope is
-// settled before the drain closes (closeScopedControl). A terminal drain
-// carries no controller error: a transient one recorded by an earlier pass
+// closeDrainControl is every terminal close of a drain control. It first
+// retires the unit convoys the drain minted for its manifest rows, then
+// settles the enclosing scope (closeScopedControl) and closes the drain.
+//
+// The unit retire is here because nothing else in the drain lifecycle closes a
+// unit: ensureDrainUnitConvoy mints it, drains never close source members,
+// `tracks` is not a blocking dependency type, and completeDrain only verifies
+// item roots. The closing manifest — the one in metadata — is the only copy
+// holding a unit minted earlier in the same pass; without one, the manifest
+// persisted on the drain bead serves the closes that re-derive no manifest
+// (finishRecordedDrainClose); a drain with neither (predecessor-failed,
+// validation closes) has no units to retire.
+//
+// Each unit resolves through drainUnitConvoyByKey, so the close lands on the
+// convoy's actual owning store, with an outcome mirroring its row's own
+// verdict (drainUnitRetiredOutcome). A unit already closed is skipped without
+// writing, so a retry after a partial retire is idempotent and the outcome
+// written first sticks; a unit no store holds is skipped with the same
+// tolerance closeOpenDrainItemRoots gives a vanished item root. Any other
+// error is returned before the scope settles and before any terminal
+// gc.drain_state is written: the still-open drain control is the only thing
+// that re-drives this close, and closed item-root outcomes are immutable, so
+// the next pass reaches the same terminal close and retries.
+//
+// A drain is scope-check-exempt and reconciles its own enclosing scope, so the
+// scope is settled before the drain closes. A terminal drain carries no
+// controller error: a transient one recorded by an earlier pass
 // (markControllerSpawnError) is cleared with the close.
 func closeDrainControl(store beads.Store, drainID string, metadata map[string]string, action string, opts ProcessOptions) (ControlResult, error) {
+	rawManifest := strings.TrimSpace(metadata[drainManifestMetadataKey])
+	if rawManifest == "" {
+		drain, err := store.Get(drainID)
+		if err != nil {
+			return ControlResult{}, fmt.Errorf("%s: loading drain to retire unit convoys: %w", drainID, err)
+		}
+		rawManifest = strings.TrimSpace(drain.Metadata[drainManifestMetadataKey])
+	}
+	if rawManifest != "" {
+		manifest, err := parseDrainManifest(rawManifest)
+		if err != nil {
+			return ControlResult{}, fmt.Errorf("%s: parsing drain manifest to retire unit convoys: %w", drainID, err)
+		}
+		for _, row := range manifest.Rows {
+			unitID := strings.TrimSpace(row.UnitConvoyID)
+			if unitID == "" || strings.TrimSpace(row.UnitKey) == "" {
+				// A manifest row always carries both; one without a unit key
+				// cannot be resolved to its convoy, and no unit minted by this
+				// drain matches it.
+				continue
+			}
+			unit, owner, found, err := drainUnitConvoyByKey(store, strings.TrimSpace(row.UnitKey), opts)
+			if err != nil {
+				return ControlResult{}, fmt.Errorf("%s: retiring drain unit convoy %s: %w", drainID, unitID, err)
+			}
+			if !found || unit.Status == "closed" {
+				continue
+			}
+			outcome := drainUnitRetiredOutcome(row.Status)
+			opts.tracef("process-control bead=%s kind=drain retire-unit unit=%s outcome=%s", drainID, unit.ID, outcome)
+			if err := updateMetadataAndClose(owner, unit.ID, map[string]string{
+				beadmeta.OutcomeMetadataKey: outcome,
+				"close_reason":              drainUnitRetiredCloseReason,
+			}); err != nil {
+				return ControlResult{}, fmt.Errorf("%s: retiring drain unit convoy %s: %w", drainID, unit.ID, err)
+			}
+		}
+	}
 	clearControllerSpawnErrorMetadata(metadata)
 	return closeScopedControl(store, drainID, metadata, action, opts)
+}
+
+// drainUnitRetiredOutcome maps one manifest row's verdict to the gc.outcome
+// its unit convoy is retired with. It mirrors the row's own resolved status —
+// never the item root's raw gc.outcome: a root closed `skipped` is already a
+// `failed` row (recordDrainRowOutcome), while shared skip_remaining rows that
+// never ran stay `skipped`.
+func drainUnitRetiredOutcome(status string) string {
+	switch status {
+	case "succeeded":
+		return beadmeta.OutcomePass
+	case "failed":
+		return beadmeta.OutcomeFail
+	default:
+		return beadmeta.OutcomeSkipped
+	}
 }
 
 // drainValidationClosedError reports a drain that failed validation while its

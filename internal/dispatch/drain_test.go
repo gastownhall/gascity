@@ -3802,3 +3802,50 @@ func TestProcessDrainReHoldsItsItemWhenAReleasedBlockerClosesBlocked(t *testing.
 		t.Fatalf("gates = %+v; want the one gate reopened as an ordinary open gate", gates)
 	}
 }
+
+// TestProcessDrainSeparateClosesUnitConvoysOnCompletion pins the drain-unit
+// leak fix: a drain that completes closes not just itself but every unit
+// convoy it minted, each with the outcome its row earned and a close reason
+// naming the drain's terminal close.
+func TestProcessDrainSeparateClosesUnitConvoysOnCompletion(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+
+	if _, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}}); err != nil {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+	for _, row := range manifest.Rows {
+		if err := updateMetadataAndClose(store, row.ItemRootID, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass}); err != nil {
+			t.Fatalf("close item root %s: %v", row.ItemRootID, err)
+		}
+	}
+	result, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(drain complete): %v", err)
+	}
+	if result.Action != "drain-succeeded" {
+		t.Fatalf("Action = %q, want drain-succeeded", result.Action)
+	}
+	drain = mustGetBead(t, store, drain.ID)
+	if drain.Status != "closed" || drain.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Fatalf("drain = status %q outcome %q, want closed pass", drain.Status, drain.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	for _, row := range manifest.Rows {
+		unit := mustGetBead(t, store, row.UnitConvoyID)
+		if unit.Status != "closed" {
+			t.Errorf("drain unit convoy %s status = %q after drain closed, want closed", unit.ID, unit.Status)
+		}
+		if got := unit.Metadata[beadmeta.OutcomeMetadataKey]; got != beadmeta.OutcomePass {
+			t.Errorf("drain unit convoy %s outcome = %q, want pass", unit.ID, got)
+		}
+		if got := unit.Metadata["close_reason"]; got != drainUnitRetiredCloseReason {
+			t.Errorf("drain unit convoy %s close_reason = %q, want %q", unit.ID, got, drainUnitRetiredCloseReason)
+		}
+	}
+	if len(drainUnitRetiredCloseReason) < 20 {
+		t.Fatalf("len(drainUnitRetiredCloseReason) = %d, want at least 20: bd rejects shorter close reasons", len(drainUnitRetiredCloseReason))
+	}
+}
