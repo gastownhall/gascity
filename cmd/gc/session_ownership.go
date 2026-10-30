@@ -136,6 +136,20 @@ func claimedWorkStillHeldBy(work beads.Bead, sessionID string) bool {
 	return true
 }
 
+// sessionHoldsAssignedWork reports the first open or in-progress work bead
+// assigned to info's ReleaseScope on sw's legs, blocked work included: work the
+// seat holds but has no wake reason to run yet.
+func sessionHoldsAssignedWork(sw *SeatWork, info sessionpkg.Info) (held bool, beadID string, err error) {
+	b, ok, err := sw.first(seatWorkQuery{scope: releaseScope(info, sw.Legs().cfg), statuses: seatWorkStatuses})
+	return ok, b.ID, err
+}
+
+// heldWorkDrainReason reports whether reason is a timer drain that a seat
+// holding assigned work is kept out of.
+func heldWorkDrainReason(reason string) bool {
+	return reason == "idle" || reason == "no-wake-reason"
+}
+
 // liveBeadRead reads one bead through the store's authoritative live handle,
 // bypassing a caching layer (liveReads): without the peel the read would
 // silently fall back to the cache, as CachingStore.Get serves the cache first.
