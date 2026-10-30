@@ -23,10 +23,12 @@ go_test(
         "filelock_test.go",
         "filelock_unix_test.go",
         "filelock_windows_test.go",
+        "testenv_import_test.go",
     ],
     embed = [":filelock"],
     deps = [
         "//internal/platform/livefile",
+        "//internal/testenv",
     ] + select({
         "@rules_go//go/platform:windows": [
             "@org_golang_x_sys//windows",

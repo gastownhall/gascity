@@ -20,8 +20,12 @@ go_library(
 
 go_test(
     name = "localsocket_test",
-    srcs = ["localsocket_test.go"],
+    srcs = [
+        "localsocket_test.go",
+        "testenv_import_test.go",
+    ],
     embed = [":localsocket"],
+    deps = ["//internal/testenv"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
