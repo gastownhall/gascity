@@ -3353,10 +3353,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 					}
 					// Held-work cancel lens for a reconciler-owned timer-drain ack
-					// (see the no-wake arm's held-work keep): a pool seat holding
-					// assigned work it has no wake reason to run yet keeps its
-					// runtime. A recovered ack with no tracked drain is cleared.
-					if alive && reconcilerOwnedAck && heldWorkDrainReason(ackReason) &&
+					// (see the no-wake arm's held-work keep), under the keep's
+					// intents and eligibility: a pool seat holding assigned work it
+					// has no wake reason to run yet keeps its runtime. A recovered
+					// ack with no tracked drain is cleared, and so is the
+					// idle-stop-pending mark, which this tick's no-wake arm, skipped
+					// here, would clear. An agent's own ack is the agent's decision
+					// (markDrainAckStopPending) and is not canceled.
+					if alive && reconcilerOwnedAck && heldWorkDrainReason(ackReason) && heldWorkIntent(infoByID[id]) &&
 						liveClaimVetoApplies(cityPath, cfg, infoByID[id], suspState) {
 						held, workID, err := sessionHoldsAssignedWork(sw, infoByID[id])
 						if err != nil {
@@ -3365,8 +3369,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						if held {
 							if !cancelSessionDrainIfInfo(infoByID[id], sp, dt, heldWorkDrainReason) {
 								_ = clearReconcilerDrainAckMetadata(sp, name)
+								telemetry.RecordDrainTransition(context.Background(), name, ackReason, "cancel")
 							}
 							_ = dops.clearDrain(name)
+							if sessionpkg.DispositionOfInfo(infoByID[id]).IdleStop {
+								tick.clearIdleStopPending(id, sessFront)
+							}
 							if trace != nil {
 								trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ackReason), TraceOutcomeCancelAssignedWork, tp.TemplateName, name, traceRecordPayload{
 									"held_work": workID,
@@ -5150,8 +5158,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// so the work is not stranded on a stopped seat: a timer drain begun
 			// before the work was assigned is canceled, with the reconciler's
 			// GC_DRAIN_ACK, and an idle-stop-pending mark is cleared. The same
-			// intents and eligibility as the live-claim veto below apply.
-			if heldWorkDrainReason(reason) && (intent == "" || intent == "idle-stop-pending") &&
+			// intents (heldWorkIntent) and eligibility as the live-claim veto
+			// below apply.
+			if heldWorkDrainReason(reason) && heldWorkIntent(info) &&
 				liveClaimVetoApplies(cityPath, cfg, info, suspState) {
 				held, workID, err := sessionHoldsAssignedWork(sw, info)
 				if err != nil {
