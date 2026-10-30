@@ -578,3 +578,207 @@ func TestSessionOwnsLiveClaim_StopsAtFoundBead(t *testing.T) {
 		}
 	})
 }
+
+// Held-work keep tests: a live pool seat that holds assigned work it has no
+// wake reason to run yet (an open step blocked on a dependency running
+// elsewhere, or a blocked in_progress step it never stamped as its claim) must
+// not be stopped by the reconciler's own timer drains: no-wake-reason,
+// idle-sleep, and config-suppressed sleep.
+
+// holdBlockedWork assigns the fixture's work bead to the seat's session bead ID
+// in status, blocked by a dependency running on another seat, with no claim
+// stamp. The writes go to the backing store and the cache is re-primed, as the
+// controller's next cache reconcile would.
+func (f *ownershipFixture) holdBlockedWork(t *testing.T, status string) {
+	t.Helper()
+	dep, err := f.backing.Create(beads.Bead{Title: "running-dep", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(dep): %v", err)
+	}
+	inProgress, other := "in_progress", "gc-other-session"
+	if err := f.backing.Update(dep.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &other}); err != nil {
+		t.Fatalf("Update(dep): %v", err)
+	}
+	if err := f.backing.DepAdd(f.work.ID, dep.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	holder := f.session.ID
+	if err := f.backing.Update(f.work.ID, beads.UpdateOpts{Status: &status, Assignee: &holder}); err != nil {
+		t.Fatalf("assign work: %v", err)
+	}
+	f.reprime(t)
+}
+
+func (f *ownershipFixture) reprime(t *testing.T) {
+	t.Helper()
+	if err := f.env.store.(*beads.CachingStore).Prime(context.Background()); err != nil {
+		t.Fatalf("re-Prime: %v", err)
+	}
+}
+
+// tick runs one reconcile pass over the seat as the cache now reads it.
+func (f *ownershipFixture) tick(t *testing.T, poolDesired map[string]int, trace *sessionReconcilerTraceCycle) {
+	t.Helper()
+	session, err := f.env.store.Get(f.session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	reconcileSessionBeadsTraced(
+		context.Background(), f.env.city, []beads.Bead{session}, f.env.desiredState, configuredSessionNames(f.env.cfg, "", f.env.store), f.env.cfg, f.env.sp,
+		f.env.store, f.dops, nil, nil, nil, f.env.dt, poolDesired, false, nil, "",
+		nil, f.env.clk, f.env.rec, 0, 0, &f.env.stdout, &f.env.stderr, trace,
+		f.env.startOptions...,
+	)
+}
+
+// sleepIntent is the seat's sleep_intent as stored.
+func (f *ownershipFixture) sleepIntent(t *testing.T) string {
+	t.Helper()
+	b, err := f.backing.Get(f.session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	return b.Metadata["sleep_intent"]
+}
+
+// heldWorkTimerDrain is one reconciler timer that drains a live, desired pool
+// seat with no wake reason. setup puts the fixture in the timer's state; the
+// timer fires on ticks run with poolDesired, and its drain carries reason.
+type heldWorkTimerDrain struct {
+	name        string
+	reason      string
+	poolDesired map[string]int
+	setup       func(t *testing.T, f *ownershipFixture)
+}
+
+func heldWorkTimerDrains() []heldWorkTimerDrain {
+	return []heldWorkTimerDrain{
+		{
+			name:        "no-wake-reason",
+			reason:      "no-wake-reason",
+			poolDesired: map[string]int{},
+			setup:       func(*testing.T, *ownershipFixture) {},
+		},
+		{
+			// ComputeAwakeSet's idle-sleep: pool demand would keep the seat
+			// awake, but it has been detached past its sleep_after_idle; the
+			// idle probe confirms.
+			name:        "idle-sleep",
+			reason:      "idle",
+			poolDesired: map[string]int{ownershipPoolTemplate: 1},
+			setup: func(t *testing.T, f *ownershipFixture) {
+				f.env.cfg.Agents[0].SleepAfterIdle = "1m"
+				f.env.sp.WaitForIdleErrors[ownershipWorkerName] = nil
+				f.detachedSince(t, 2*time.Minute)
+			},
+		},
+		{
+			// The workspace sleep policy suppresses the pool-demand wake of an
+			// interactive seat idle past its window; the idle probe confirms.
+			name:        "config-suppressed",
+			reason:      "idle",
+			poolDesired: map[string]int{ownershipPoolTemplate: 1},
+			setup: func(t *testing.T, f *ownershipFixture) {
+				f.env.cfg.SessionSleep = config.SessionSleepConfig{InteractiveResume: "60s"}
+				f.env.sp.SetActivity(ownershipWorkerName, f.env.clk.Now().Add(-2*time.Minute))
+				f.env.sp.WaitForIdleErrors[ownershipWorkerName] = nil
+				f.detachedSince(t, 2*time.Minute)
+			},
+		},
+	}
+}
+
+// detachedSince marks the seat woken and then detached ago, before now.
+func (f *ownershipFixture) detachedSince(t *testing.T, ago time.Duration) {
+	t.Helper()
+	now := f.env.clk.Now()
+	f.env.setSessionMetadata(&f.session, map[string]string{
+		"last_woke_at": now.Add(-2 * ago).UTC().Format(time.RFC3339),
+		"detached_at":  now.Add(-ago).UTC().Format(time.RFC3339),
+	})
+	f.reprime(t)
+}
+
+// runTimer sets timer up on the desired seat and runs the ticks that begin
+// its drain on a seat holding nothing: two, letting an idle probe the first
+// launched report before the second reads it.
+func (f *ownershipFixture) runTimer(t *testing.T, timer heldWorkTimerDrain, trace *sessionReconcilerTraceCycle) {
+	t.Helper()
+	timer.setup(t, f)
+	f.env.addDesired(ownershipWorkerName, ownershipPoolTemplate, false)
+	for range 2 {
+		f.tick(t, timer.poolDesired, trace)
+		if _, ok := f.env.dt.idleProbe(f.session.ID); ok {
+			waitForIdleProbeReady(t, f.env.dt, f.session.ID)
+		}
+	}
+}
+
+// keptOpenHeldWork reports whether trace recorded a kept_open drain decision
+// for reason naming workID as the held work.
+func keptOpenHeldWork(trace *sessionReconcilerTraceCycle, reason, workID string) bool {
+	for _, r := range trace.records {
+		if r.SiteCode == TraceSiteReconcilerDrainDecision && r.ReasonCode == TraceReasonCode(reason) &&
+			r.OutcomeCode == TraceOutcomeKeptOpen && r.Fields["held_work"] == workID {
+			return true
+		}
+	}
+	return false
+}
+
+// assertHeldSeatKept runs timer over a seat holding blocked work in status,
+// lets defaultDrainTimeout pass, and asserts the seat was kept.
+func assertHeldSeatKept(t *testing.T, timer heldWorkTimerDrain, status string) {
+	t.Helper()
+	f := newOwnershipFixture(t)
+	f.holdBlockedWork(t, status)
+	trace := idleTimeoutBackstopTrace(ownershipPoolTemplate)
+	f.runTimer(t, timer, trace)
+	f.env.clk.Advance(defaultDrainTimeout + time.Second)
+	f.tick(t, timer.poolDesired, trace)
+	if stopped, why := f.stopObservation(t); stopped {
+		t.Fatalf("pool seat holding assigned %s work %s was stopped (%s); stdout:\n%s\nstderr:\n%s", status, f.work.ID, why, f.env.stdout.String(), f.env.stderr.String())
+	}
+	if intent := f.sleepIntent(t); intent != "" {
+		t.Fatalf("sleep_intent = %q on a seat holding assigned work, want none", intent)
+	}
+	if !keptOpenHeldWork(trace, timer.reason, f.work.ID) {
+		t.Fatalf("no kept_open %s drain decision naming held work %s; records: %+v", timer.reason, f.work.ID, trace.records)
+	}
+}
+
+func TestReconcileSessionBeads_PoolSeatHoldingAssignedOpenWorkIsNotDrained(t *testing.T) {
+	for _, timer := range heldWorkTimerDrains() {
+		t.Run(timer.name, func(t *testing.T) {
+			assertHeldSeatKept(t, timer, "open")
+		})
+	}
+}
+
+// The in_progress variant carries no claim stamp, so the live-claim veto does
+// not arm, and it is driven by no-wake-reason only: a blocked in_progress bead
+// already exempts the seat from idle-sleep (holdsClaimedWork).
+func TestReconcileSessionBeads_PoolSeatHoldingInProgressWorkIsNotDrained(t *testing.T) {
+	assertHeldSeatKept(t, heldWorkTimerDrains()[0], "in_progress")
+}
+
+// The control: each timer drains a desired pool seat holding nothing, for its
+// own reason.
+func TestReconcileSessionBeads_PoolSeatWithoutWorkDrainsForTimer(t *testing.T) {
+	for _, timer := range heldWorkTimerDrains() {
+		t.Run(timer.name, func(t *testing.T) {
+			f := newOwnershipFixture(t)
+			f.runTimer(t, timer, nil)
+			if why := f.drainObservation(t); why != "drain:"+timer.reason {
+				t.Fatalf("stop observation = %q, want drain:%s; stdout:\n%s\nstderr:\n%s", why, timer.reason, f.env.stdout.String(), f.env.stderr.String())
+			}
+		})
+	}
+}
+
+// drainObservation is stopObservation's reason, "" when the seat is kept.
+func (f *ownershipFixture) drainObservation(t *testing.T) string {
+	t.Helper()
+	_, why := f.stopObservation(t)
+	return why
+}

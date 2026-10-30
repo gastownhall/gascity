@@ -5090,6 +5090,23 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			default:
 				reason = "no-wake-reason"
 			}
+			// Held-work keep (sessionHoldsAssignedWork) for the timer drains: a
+			// pool seat holding assigned work it has no wake reason to run yet
+			// (blocked open or in_progress work) is kept, before the idle probe,
+			// so the work is not stranded on a stopped seat. The same intents
+			// and eligibility as the live-claim veto below apply.
+			if heldWorkDrainReason(reason) && (intent == "" || intent == "idle-stop-pending") &&
+				liveClaimVetoApplies(cityPath, cfg, info, suspState) {
+				if held, workID, _ := sessionHoldsAssignedWork(sw, info); held {
+					if trace != nil {
+						trace.RecordDecision(TraceSiteReconcilerDrainDecision, TraceReasonCode(reason), TraceOutcomeKeptOpen, target.tp.TemplateName, name, traceRecordPayload{
+							"sleep_intent": intent,
+							"held_work":    workID,
+						})
+					}
+					continue
+				}
+			}
 			// Live-claim veto (sessionOwnsLiveClaim) for the demand-class
 			// reasons: the wake verdict comes from the tick snapshot, which can
 			// miss a claim the worker just made out of process. Checked before
