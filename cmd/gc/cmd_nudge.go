@@ -47,15 +47,21 @@ const (
 	defaultQueuedNudgeMaxAttempts   = 5
 	defaultQueuedNudgeDeadRetention = 1 * time.Hour
 
-	// queuedNudgeStarvedAfter is how long a due item a target may claim
-	// waits on a session whose activity clock never quiets before the
-	// poller stops waiting on that clock (ga-atd7r2): a session that stays
+	// queuedNudgeStarvedAfter is how long a queued item waits on a session
+	// whose activity clock never quiets before the delivery carrying it
+	// stops waiting on that clock (ga-atd7r2): a session that stays
 	// continuously busy — a repainting idle TUI, or back-to-back turns —
 	// otherwise starves its queue, because the quiescence gate never
 	// clears for it. It sits above the #5317 busy-skip fixture (1 minute),
 	// so a fresh busy deferral still reads as a quiet-session courtesy
 	// skip, not a starvation.
 	queuedNudgeStarvedAfter = 2 * time.Minute
+
+	// queuedNudgeTurnLookTimeout bounds the protocol turn read a starved
+	// queue takes before it goes (starvedQueuedNudgeDelivery): t3bridge
+	// answers it over the network, and the dispatcher runs on the
+	// controller's loop.
+	queuedNudgeTurnLookTimeout = 5 * time.Second
 
 	// nudgeEnqueueMaintenanceBudget bounds the wall-clock time the foreground
 	// `gc sling --nudge` enqueue path spends on best-effort nudge-queue
@@ -174,6 +180,11 @@ type nudgeTarget struct {
 	// instead of listing the city's sessions itself: the dispatcher's
 	// snapshot census, which only its skip probe uses.
 	fenceCensus func() (map[string]struct{}, bool)
+	// starvationCensus, when set, is the Leg-B census the starvation check
+	// (queuedNudgeStarvedForTarget) judges fences with instead of listing the
+	// city's sessions: the dispatcher's snapshot census, or the poll gate's
+	// cached one. No claim reads it.
+	starvationCensus func() (map[string]struct{}, bool)
 }
 
 type nudgeStatusJSON struct {
@@ -1198,7 +1209,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			time.Sleep(interval)
 			continue
 		}
-		delivered, pollErr := nudgePollDeliverQueued(target, store.Store, cliSessionStore(store.Store, target.cfg, target.cityPath), sp, quiescence, obs)
+		delivered, pollErr := nudgePollDeliverQueued(gate.starvationTarget(target, time.Now()), store.Store, cliSessionStore(store.Store, target.cfg, target.cityPath), sp, quiescence, obs)
 		if pollErr != nil {
 			fmt.Fprintf(stderr, "gc nudge poll: %v\n", pollErr) //nolint:errcheck
 		}
@@ -1215,10 +1226,10 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 // gate included: "not-delivered" means this target HAD work it could claim and
 // still got nothing this tick -- most commonly
 // tryDeliverQueuedNudgesByPoller's quiescence gate rejecting a continuously
-// busy session whose due items have not yet starved past
-// queuedNudgeStarvedAfter (a starved item is delivered without waiting on the
-// activity clock, immediately when the leaf's turn look says no turn runs). A
-// running session with nothing it may claim (nothing queued,
+// busy session whose next delivery has not yet starved past
+// queuedNudgeStarvedAfter (a starved delivery goes without waiting on the
+// activity clock once the leaf's turn look, where it takes one, says no turn
+// runs). A running session with nothing it may claim (nothing queued,
 // or only items fenced to a live sibling) is the dispatcher's separate
 // "not-matched" class and is deliberately not counted: the poll loop never
 // exits while the session runs, so counting it would turn this into a tick
@@ -1259,10 +1270,12 @@ const nudgePollSkipFlushInterval = 30 * time.Second
 
 // nudgePollGate is the poll loop's due-work gate (nudgePollTargetHasDueWork)
 // with a short census cache, so N sibling pollers do not each list the city's
-// sessions every tick. The cache is used only to skip a tick: when the gate
-// sees claimable work, including an adoption, the poller claims with a fresh
-// census (claimDueQueuedNudgeBatchForTarget), so an adoption decision is as
-// fresh as an uncached one.
+// sessions every tick. The cache only decides whether a tick tries: whether
+// the target has due work (hasDue), and whether a busy target's next delivery
+// has starved (starvationTarget). When the gate sees claimable work, including
+// an adoption, the poller claims with a fresh census
+// (claimDueQueuedNudgeBatchForTarget), so an adoption decision is as fresh as
+// an uncached one.
 type nudgePollGate struct {
 	census   map[string]struct{}
 	censusOK bool
@@ -1273,8 +1286,25 @@ func newNudgePollGate() *nudgePollGate { return &nudgePollGate{} }
 
 func (g *nudgePollGate) hasDue(target nudgeTarget, now time.Time) bool {
 	ct := target.claimTarget(target.cityPath)
-	fresh := ct.LiveFenceSessions
-	ct.LiveFenceSessions = func() (map[string]struct{}, bool) {
+	ct.LiveFenceSessions = g.cachedCensus(ct.LiveFenceSessions, now)
+	would, err := openNudgeQueue(target.cityPath, beads.NudgesStore{}).Probe.WouldClaimBatch(ct, now)
+	return err == nil && would
+}
+
+// starvationTarget is target as the poll loop's delivery pass takes it: its
+// starvation check judges with the gate's cached census
+// (nudgeTarget.starvationCensus), so a pass the quiescence gate holds back
+// lists the city's sessions no more often than the gate does.
+func (g *nudgePollGate) starvationTarget(target nudgeTarget, now time.Time) nudgeTarget {
+	target.starvationCensus = g.cachedCensus(target.claimTarget(target.cityPath).LiveFenceSessions, now)
+	return target
+}
+
+// cachedCensus is fresh, a census of the city's sessions, read through the
+// gate's cache: a census the gate read less than nudgePollCensusTTL before now
+// answers in its place, and a census it does read is cached.
+func (g *nudgePollGate) cachedCensus(fresh func() (map[string]struct{}, bool), now time.Time) func() (map[string]struct{}, bool) {
+	return func() (map[string]struct{}, bool) {
 		if g.censusOK && !g.censusAt.IsZero() && now.Sub(g.censusAt) < nudgePollCensusTTL {
 			return g.census, true
 		}
@@ -1282,8 +1312,6 @@ func (g *nudgePollGate) hasDue(target nudgeTarget, now time.Time) bool {
 		g.census, g.censusOK, g.censusAt = live, ok, now
 		return live, ok
 	}
-	would, err := openNudgeQueue(target.cityPath, beads.NudgesStore{}).Probe.WouldClaimBatch(ct, now)
-	return err == nil && would
 }
 
 // nudgePollSkips accumulates the poll loop's skip counts and flushes them at
@@ -2461,33 +2489,9 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 			return false, nil
 		}
 	}
-	// A continuously busy session starves the queue the quiescence gate
-	// holds back (ga-atd7r2): an idle TUI that keeps repainting, or a run of
-	// back-to-back turns, keeps LastActivity fresher than any quiescence
-	// window, so the gate never clears. Once a due claimable item has waited
-	// queuedNudgeStarvedAfter, the pass stops waiting on that clock. A leaf
-	// that takes a turn reading must first prove no turn is running — only
-	// (false, nil) is an idle reading (runtime.TurnRunningProvider) — and
-	// then delivers immediately, the idle question the default path would
-	// wait out already answered. A leaf with no turn reading (ACP, Fake,
-	// t3bridge, ...) bypasses on the default path: its Nudge runs no tmux
-	// idle wait, and holding it would leave the same starvation in place.
-	delivery := worker.NudgeDeliveryDefault
-	if !pollerSessionIdleEnough(target, sp, quiescence, obs) {
-		starved, err := queuedNudgeStarvedForTarget(target, time.Now())
-		if err != nil {
-			return false, err
-		}
-		if !starved {
-			return false, nil
-		}
-		if tr, ok := runtime.TurnRunningFor(sp, target.sessionName); ok {
-			running, lookErr := tr.TurnRunning(target.sessionName)
-			if lookErr != nil || running {
-				return false, nil
-			}
-			delivery = worker.NudgeDeliveryImmediate
-		}
+	gate, err := queuedNudgeGateFor(target, sp, quiescence, obs, time.Now())
+	if err != nil || !gate.open {
+		return false, err
 	}
 	items, err := claimDueQueuedNudgeBatchForTarget(target.cityPath, target, time.Now())
 	if err != nil || len(items) == 0 {
@@ -2583,6 +2587,15 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
 		return false, errors.Join(bookkeepErr, err, relErr)
 	}
+	delivery, admitted, err := gate.admit(target, sp, items)
+	if !admitted {
+		// The gate opened on a starved delivery this claim did not give the
+		// pass (that item withdrawn above, or the queue changed since the
+		// gate looked), or the turn, looked at again, runs or cannot be
+		// read: hand the delivery back unsent and uncharged.
+		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
+		return false, errors.Join(bookkeepErr, err, relErr)
+	}
 	result, err := handle.Nudge(context.Background(), sessionActor(session.ActorAgent, target.cityPath), worker.NudgeRequest{
 		Text:        msg,
 		Delivery:    delivery,
@@ -2664,29 +2677,143 @@ func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence
 	return waiter.WaitForIdle(ctx, target.sessionName, quiescence) == nil
 }
 
-// queuedNudgeStarvedForTarget reports, from a lock-free queue snapshot
-// (listQueuedNudgesForTargetSnapshot — same cost class as the dispatcher's
-// WouldClaimBatch probe: no flock, no store open, no write), whether target
-// holds a due item it may claim that has waited queuedNudgeStarvedAfter:
-// the queue a closed quiescence gate holds back is starving, not merely
-// waiting (ga-atd7r2). The claimable check takes the nil census, which is
-// strict — an item fenced to another still-live session never qualifies —
-// and the due check keeps the bypass from being re-taken on every tick
-// while an earlier deferral's deliver_after is still in the future.
+// queuedNudgeGate is the quiescence gate's answer for one delivery pass
+// (queuedNudgeGateFor).
+type queuedNudgeGate struct {
+	// open lets the pass claim.
+	open bool
+	// starvedAsOf is when the delivery the pass would make was judged
+	// starved, if that is what opened the gate; zero when the session was
+	// quiet.
+	starvedAsOf time.Time
+}
+
+// admit is the gate's answer, right before the send, for delivery, the items
+// the pass's claim gave it: whether they go, and how. A gate the session's
+// quiet opened sends any delivery on the default path. A gate a starvation
+// opened sends only a delivery that has starved itself, so a younger delivery
+// never goes on an older one's starvation, and looks at the leaf's turn again
+// first (starvedQueuedNudgeDelivery): its own look came before the claim and
+// its bookkeeping, and a turn that started since holds the delivery, as one
+// running then held the pass. A look that fails holds it too, and err says
+// why.
+func (g queuedNudgeGate) admit(target nudgeTarget, sp runtime.Provider, delivery []queuedNudge) (worker.NudgeDelivery, bool, error) {
+	if g.starvedAsOf.IsZero() {
+		return worker.NudgeDeliveryDefault, true, nil
+	}
+	if !queuedNudgeDeliveryStarved(delivery, g.starvedAsOf) {
+		return "", false, nil
+	}
+	how, hold, err := starvedQueuedNudgeDelivery(sp, target.sessionName)
+	if err != nil {
+		return "", false, fmt.Errorf("holding the claimed starved delivery for %s: %w", target.agentKey(), err)
+	}
+	return how, !hold, nil
+}
+
+// queuedNudgeGateFor is the quiescence gate of a delivery pass for target. A
+// session quiet for quiescence opens it. A continuously busy session starves
+// the queue a closed gate holds back (ga-atd7r2): an idle TUI that keeps
+// repainting, or a run of back-to-back turns, keeps LastActivity fresher than
+// any quiescence window, so the gate never clears. Once the delivery the pass
+// would make has starved as of now (queuedNudgeStarvedForTarget), the gate
+// stops waiting on that clock and asks the leaf's turn instead
+// (starvedQueuedNudgeDelivery): a turn running holds the pass before it
+// claims, and admit asks again before it sends.
+func queuedNudgeGateFor(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation, now time.Time) (queuedNudgeGate, error) {
+	if pollerSessionIdleEnough(target, sp, quiescence, obs) {
+		return queuedNudgeGate{open: true}, nil
+	}
+	starved, err := queuedNudgeStarvedForTarget(target, now)
+	if err != nil || !starved {
+		return queuedNudgeGate{}, err
+	}
+	_, hold, err := starvedQueuedNudgeDelivery(sp, target.sessionName)
+	if err != nil {
+		return queuedNudgeGate{}, fmt.Errorf("holding the starved queue for %s: %w", target.agentKey(), err)
+	}
+	return queuedNudgeGate{open: !hold, starvedAsOf: now}, nil
+}
+
+// queuedNudgeStarvedForTarget reports whether the delivery the next pass for
+// target would make has starved as of now (queuedNudgeDeliveryStarved): the
+// queue a closed quiescence gate holds back is starving, not merely waiting
+// (ga-atd7r2). That delivery is the first group (nextQueuedDeliveryGroup) of
+// the batch the pass's claim would take, read from the claim's own dry run on
+// a lock-free snapshot (the queue's Probe: no flock, no write). Its fences are
+// judged as the claim judges them, by the census the caller already holds
+// (starvationCensus: the dispatcher's snapshot census, the poll gate's cached
+// one) or else a live one (claimTarget), so a pass that holds a busy session
+// back lists no sessions of its own. An item a superseded session left
+// qualifies, as the claim would adopt it, and one a still-live sibling holds
+// never does; and an old item the claim would pass over, or send after a
+// younger delivery, opens nothing for that younger one.
+// A stale census costs at most a turn look and a claim handed back: the claim
+// reads a live census, and the gate admits only a starved delivery that claim
+// gave it (queuedNudgeGate.admit). The due check keeps the bypass from being
+// re-taken on every tick while an earlier deferral's deliver_after is still in
+// the future.
 func queuedNudgeStarvedForTarget(target nudgeTarget, now time.Time) (bool, error) {
-	pending, _, _, err := listQueuedNudgesForTargetSnapshot(target.cityPath, target, now)
+	if target.starvationCensus != nil {
+		target.fenceCensus = target.starvationCensus
+	}
+	batch, err := openNudgeQueue(target.cityPath, beads.NudgesStore{}).Probe.NextBatch(target.claimTarget(target.cityPath), now)
 	if err != nil {
 		return false, fmt.Errorf("reading queued nudges for %s: %w", target.agentKey(), err)
 	}
-	due := func(item queuedNudge) bool {
-		return item.DeliverAfter.IsZero() || !item.DeliverAfter.After(now)
-	}
-	for _, item := range pending {
-		if due(item) && queuedNudgeClaimableForTarget(target, item, nil) && now.Sub(item.CreatedAt) >= queuedNudgeStarvedAfter {
-			return true, nil
+	delivery, _ := nextQueuedDeliveryGroup(batch)
+	return queuedNudgeDeliveryStarved(delivery, now), nil
+}
+
+// queuedNudgeDeliveryStarved reports whether delivery, the items one delivery
+// sends, carries an item queued at least queuedNudgeStarvedAfter before now.
+// The rest of the delivery goes with it, at no further interruption to the
+// session.
+func queuedNudgeDeliveryStarved(delivery []queuedNudge, now time.Time) bool {
+	for _, item := range delivery {
+		if !item.CreatedAt.After(now.Add(-queuedNudgeStarvedAfter)) {
+			return true
 		}
 	}
-	return false, nil
+	return false
+}
+
+// starvedQueuedNudgeDelivery is how a starved queue goes to sp's session
+// name, one its activity clock calls busy (queuedNudgeStarvedForTarget),
+// decided by one look at the turn of the backend serving it
+// (runtime.ResolveBackend). hold reports that a turn runs. A look that fails
+// is never an idle reading: it holds too, and err says why.
+//
+//   - A leaf that reads its turn on the screen (runtime.TurnRunningProvider)
+//     and sees none delivers immediately: the idle question the default path
+//     would wait out is already answered.
+//   - A leaf that reports its turn by protocol (runtime.TurnFenceProvider:
+//     ACP, t3bridge) and has none in progress takes the default path. Sent
+//     into a running turn, ACP's nudge would hold the dispatch for its whole
+//     busy wait (nudge_busy_timeout), and t3bridge's would start a second
+//     turn.
+//   - A leaf with neither reading takes the default path unread, as the open
+//     gate would send it: holding it would leave the starvation in place.
+func starvedQueuedNudgeDelivery(sp runtime.Provider, name string) (delivery worker.NudgeDelivery, hold bool, err error) {
+	if tr, ok := runtime.TurnRunningFor(sp, name); ok {
+		running, err := tr.TurnRunning(name)
+		if err != nil {
+			return "", true, fmt.Errorf("reading the turn of %q: %w", name, err)
+		}
+		return worker.NudgeDeliveryImmediate, running, nil
+	}
+	leaf, _, _ := runtime.ResolveBackend(sp, name)
+	tf, ok := leaf.(runtime.TurnFenceProvider)
+	if !ok {
+		return worker.NudgeDeliveryDefault, false, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), queuedNudgeTurnLookTimeout)
+	defer cancel()
+	turn, err := tf.ObserveTurn(ctx, name)
+	if err != nil {
+		return "", true, fmt.Errorf("reading the turn of %q: %w", name, err)
+	}
+	return worker.NudgeDeliveryDefault, turn.Active(), nil
 }
 
 func pollerCanDeliverWithoutActivitySignal(target nudgeTarget, sp runtime.Provider) bool {
