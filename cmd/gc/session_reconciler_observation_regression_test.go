@@ -387,7 +387,7 @@ func TestAdvanceSessionDrains_LivenessUnavailableAfterVerifiedStopDefersCompleti
 	advanceSessionDrainsWithSessionsTraced(city, dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
-	}), map[string]wakeEvaluation{}, &config.City{}, clk, nil)
+	}), map[string]wakeEvaluation{}, &config.City{}, clk, nil, nil)
 
 	if got := dt.get(b.ID); got != ds {
 		t.Fatalf("drain tracker entry = %p, want retained %p", got, ds)

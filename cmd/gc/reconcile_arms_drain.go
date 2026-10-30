@@ -189,6 +189,12 @@ func armDrainVoidCancel(r *rowFacts) (intent, bool) {
 		// assigned-work cancel at its ack (DRAIN-046), which the begin's
 		// keep matches (C6a2 review 1b).
 		kind = intentDrainCancel
+	case (req.Reason == reasonNoWake || req.Reason == drainIdle) && r.seatHoldsWork():
+		// An eligible pool seat that was assigned work after its timer
+		// drain began (ga-2ols7o): the timer's premise — nothing for this
+		// seat to do — is gone, and stopping the seat would wedge work no
+		// sibling can serve. Mirrors the arm's keep on the begin side.
+		kind = intentDrainCancel
 	case p.authorized(r, req.Reason):
 		return intent{}, false
 	case p.lostCancels:
@@ -206,16 +212,39 @@ func armDrainVoidCancel(r *rowFacts) (intent, bool) {
 // assigned work, claimed or ready, or in-progress work the allocation does
 // not count awake because it is blocked, which legacy still counts.
 func workKeepsNoWakeRow(r *rowFacts) bool {
-	return r.entry.AssignedWork != nil || r.inProgressWorkAssigned(releaseScope(r.row.Info, worldCfg(r.w)))
+	return r.entry.AssignedWork != nil || r.workAssigned(releaseScope(r.row.Info, worldCfg(r.w)), "in_progress")
 }
 
-// inProgressWorkAssigned reports in-progress work the pass's demand read
-// assigns to any of scope's identities of the row's session, blocked work
+// seatHoldsWork is the held-work keep's row predicate (ga-2ols7o): the row
+// is an eligible pool seat — pool-managed, not a named session, its agent
+// in the world's config, no operator suspend cause (r.w.OperatorSuspend,
+// the pass's precomputed answer to liveClaimVetoApplies's suspension check,
+// read here without the env reach the pure pass may not make) — and the
+// pass's demand read assigns it work in any seat-work status, blocked or
+// not-ready work included: work the seat has no wake reason to run yet. A
+// partial demand read fails closed — the held-work keep never rests on a
+// store that could not answer.
+func (r *rowFacts) seatHoldsWork() bool {
+	cfg := worldCfg(r.w)
+	if cfg == nil || !isPoolManagedSessionInfo(r.row.Info) || isNamedSessionInfo(r.row.Info) {
+		return false
+	}
+	if sessionAgentConfigInfo(cfg, r.row.Info) == nil {
+		return false
+	}
+	if r.w.OperatorSuspend[r.k] != "" {
+		return false
+	}
+	return r.w.Demand.StorePartial || r.workAssigned(releaseScope(r.row.Info, cfg), seatWorkStatuses...)
+}
+
+// workAssigned reports work the pass's demand read assigns to any of scope's
+// identities of the row's session, in one of statuses, blocked work
 // included.
-func (r *rowFacts) inProgressWorkAssigned(scope workScope) bool {
+func (r *rowFacts) workAssigned(scope workScope, statuses ...string) bool {
 	ids := scope.scopeIDs()
 	for _, w := range r.w.Demand.AssignedWork {
-		if w.Status == "in_progress" && slices.Contains(ids, strings.TrimSpace(w.Assignee)) {
+		if slices.Contains(statuses, w.Status) && slices.Contains(ids, strings.TrimSpace(w.Assignee)) {
 			return true
 		}
 	}
@@ -433,6 +462,13 @@ func armDrainBegin(r *rowFacts) (intent, bool) {
 		// (DRAIN-046), so a session it keeps running is never drained (ruling
 		// at the C6a2 review: match legacy).
 		return intent{Reason: decideDrainWorkKept}, true
+	case (reason == reasonNoWake || reason == drainIdle) && r.seatHoldsWork():
+		// An eligible pool seat holding assigned work it has no wake reason
+		// to run yet — open but not ready, in progress and blocked — is kept
+		// from its own timer drains (ga-2ols7o): stopping the seat would
+		// wedge the work no sibling can serve. A leftover idle-stop-pending
+		// mark is cleared first (SESS-616), as for a row kept for its work.
+		return r.workKept(basis), true
 	case e.Desired == desireDrain && wakeGracePreservesUndesiredRow(info, r.w.Now) && r.w.OperatorSuspend[r.k] == "":
 		woke, _ := parseRFC3339Metadata(info.LastWokeAt)
 		r.after(requeueUntil(r.w.Now, woke.Add(wakeUndesiredGrace)))

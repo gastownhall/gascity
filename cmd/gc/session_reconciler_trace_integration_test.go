@@ -393,6 +393,7 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 		cfg,
 		clock.Real{},
 		cycle,
+		nil,
 	)
 
 	if err := cycle.End(TraceCompletionCompleted, traceRecordPayload{"phase": "start-drain"}); err != nil {

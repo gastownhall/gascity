@@ -1013,6 +1013,7 @@ func parityFixtures() []parityFixture {
 		return poolRow("gc-1", "worker", 1, "awake", append([]string{"instance_token", "tok-gc-1", "last_woke_at", at(-time.Minute)}, meta...)...)
 	}
 	assigned := []parityRow{{ID: "gw-1", Title: "gw-1", Type: "task", Status: "in_progress", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}}}
+	blocked := true
 	napping := func() *config.City {
 		cfg := workerCity(3)
 		cfg.Agents[0].SleepAfterIdle = "5m"
@@ -1375,6 +1376,19 @@ func parityFixtures() []parityFixture {
 		{
 			Name: "assigned work cancels an orphaned drain", Behaviors: []string{"DRAIN-046"},
 			Rows: []parityRow{awake()}, Work: assigned, Runtimes: []simRuntime{live}, Drains: map[string]string{"gc-1": "orphaned"}, Explain: explain(nil),
+		},
+		{
+			// ga-2ols7o: a live pool seat holding blocked work has no wake
+			// reason to run it yet. A timer drain requested over it — one an
+			// earlier pass began before the work was assigned — is canceled
+			// by both: legacy's held-work lens in the drain scan, v2's A19
+			// seat-holds-work extension; neither begins a new one.
+			Name: "a requested timer drain over a pool seat holding blocked work is canceled", Behaviors: []string{"DRAIN-046", "SESS-074"},
+			Rows:     []parityRow{awake("last_woke_at", at(-time.Hour))},
+			Work:     []parityRow{{ID: "gw-1", Title: "gw-1", Type: "task", Status: "in_progress", Assignee: "gc-1", IsBlocked: &blocked}},
+			Runtimes: []simRuntime{live},
+			Drains:   map[string]string{"gc-1": "idle"},
+			Explain:  explain(nil),
 		},
 		{
 			Name: "a pending interaction cancels a config-drift drain", Behaviors: []string{"DRAIN-045"},

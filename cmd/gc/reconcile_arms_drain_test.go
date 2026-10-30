@@ -496,6 +496,96 @@ func blockedClaim(w *World) {
 	w.Demand.AssignedWork = []beads.Bead{{ID: "gw-1", Status: "in_progress", Assignee: "gc-1"}, {ID: "gw-2", Status: "in_progress", Assignee: "gc-9"}}
 }
 
+// heldOpenWork gives gc-1 work that is assigned but gives no wake demand: an
+// open bead the demand read captured routed, which no one counts ready.
+func heldOpenWork(w *World) {
+	w.Demand.AssignedWork = []beads.Bead{{ID: "gw-1", Title: "gw-1", Type: "task", Status: "open", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}}}
+}
+
+// decidePoolDrain decides gc-1 as the held-work keep's shape: a pool-managed
+// row of a configured agent, with the world's env carrying the config
+// (ga-2ols7o).
+func decidePoolDrain(t *testing.T, meta []string, entry func(*selectionEntry), world ...func(*World)) (intent, time.Time) {
+	t.Helper()
+	w, a := rowWorld(t, poolRow("gc-1", "worker", 1, "active", meta...))
+	w.Obs, w.ObsMaxAge = observedOwn(w, "gc-1"), observeMaxAge
+	w.Env = &reconcileEnv{Cfg: workerCity(3)}
+	if entry != nil {
+		entry(a.Snapshot.Entries[rowKeyOf("gc-1")])
+	}
+	for _, f := range world {
+		f(w)
+	}
+	return decideRow(w, a, rowKeyOf("gc-1"))
+}
+
+// TestDrainBeginKeepsPoolSeatHoldingWork (ga-2ols7o). Kills a timer begin
+// over an eligible pool seat that holds work it has no wake reason to run
+// yet: A20 proposes no begin — the row is kept (decideDrainWorkKept), or a
+// leftover idle-stop-pending mark is cleared first when one is on the row.
+func TestDrainBeginKeepsPoolSeatHoldingWork(t *testing.T) {
+	sleep := func(e *selectionEntry) { e.Desired = desireSleep }
+	idleSleep := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }
+	kept := func(it intent) bool {
+		return it.Kind != intentDrainBeginFresh && it.Kind != intentDrainBegin &&
+			(it.Reason == decideDrainWorkKept || it.Reason == decideIdleStopClear)
+	}
+	for _, c := range []struct {
+		name  string
+		entry func(*selectionEntry)
+	}{
+		{name: "no-wake-reason", entry: sleep},
+		{name: "idle-sleep", entry: idleSleep},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			it, _ := decidePoolDrain(t, nil, c.entry, heldOpenWork)
+			if !kept(it) {
+				t.Fatalf("%s over a seat holding open not-ready work: %+v, want the row kept", c.name, it)
+			}
+		})
+	}
+	t.Run("idle-stop-pending mark cleared first", func(t *testing.T) {
+		it, _ := decidePoolDrain(t, []string{"sleep_intent", sleepIntentIdle}, sleep, heldOpenWork)
+		if !kept(it) {
+			t.Fatalf("idle timer over a seat holding open not-ready work: %+v, want kept and the mark cleared", it)
+		}
+	})
+	t.Run("partial demand read fails closed", func(t *testing.T) {
+		it, _ := decidePoolDrain(t, nil, sleep, func(w *World) {
+			w.Demand.StorePartial = true
+		})
+		if !kept(it) {
+			t.Fatalf("partial demand read over a pool seat: %+v, want the seat kept", it)
+		}
+	})
+}
+
+// TestTimerRequestCancelsOnHeldPoolWork (ga-2ols7o). Kills a requested timer
+// drain — one an earlier pass began before the work was assigned — that
+// stands over an eligible pool seat now holding work it cannot run yet: A19
+// cancels it, matching the legacy cancel. With the seat's agent out of the
+// config the request stands.
+func TestTimerRequestCancelsOnHeldPoolWork(t *testing.T) {
+	sleep := func(e *selectionEntry) { e.Desired = desireSleep }
+	for _, reason := range []string{reasonNoWake, drainIdle} {
+		t.Run(reason, func(t *testing.T) {
+			it, _ := decidePoolDrain(t, intentAt(reason, "1"), sleep, heldOpenWork)
+			if it.Kind != intentDrainCancel {
+				t.Fatalf("requested %s over a seat holding open not-ready work: %+v, want the request canceled", reason, it)
+			}
+		})
+	}
+	t.Run("agent out of the config keeps the request", func(t *testing.T) {
+		it, _ := decidePoolDrain(t, intentAt(drainIdle, "1"), sleep, func(w *World) {
+			w.Env = &reconcileEnv{Cfg: &config.City{Agents: []config.Agent{{Name: "other"}}}}
+			heldOpenWork(w)
+		})
+		if it.Kind == intentDrainCancel {
+			t.Fatalf("%+v: an unconfigured agent's row must keep its drain request", it)
+		}
+	})
+}
+
 // TestNoWakeRequestCancelsOnAssignedWork (C6a2 review 1b; DRAIN-046).
 // Kills a no-wake-reason request that stands once work is assigned to its
 // row, which C6b1's signal would then stop: work assigned after the begin

@@ -222,7 +222,7 @@ func TestDrainTimeoutOverAConsumedHoldIsRefused(t *testing.T) {
 		env.clk.Advance(2 * time.Minute) // past the drain's deadline
 		advanceSessionDrainsWithSessionsTraced(env.city, env.dt, env.sp, env.store, func(id string) (sessionpkg.Info, bool) {
 			return env.sessionInfo(id), id == snapshot.ID
-		}, map[string]wakeEvaluation{}, env.cfg, env.clk, nil)
+		}, map[string]wakeEvaluation{}, env.cfg, env.clk, nil, nil)
 		assertNotStopPending(t, env, snapshot.ID)
 		if env.dt.get(snapshot.ID) != nil {
 			t.Fatalf("agent %v: the void drain is still tracked", agent)
@@ -477,7 +477,7 @@ func TestUnreadableAckSourceDefers(t *testing.T) {
 				env.clk.Advance(2 * time.Minute) // past the drain's deadline
 				advanceSessionDrainsWithSessionsTraced(env.city, env.dt, env.sp, env.store, func(id string) (sessionpkg.Info, bool) {
 					return env.sessionInfo(id), id == snapshot.ID
-				}, map[string]wakeEvaluation{}, env.cfg, env.clk, nil)
+				}, map[string]wakeEvaluation{}, env.cfg, env.clk, nil, nil)
 			}
 			assertNotStopPending(t, env, snapshot.ID)
 			if env.dt.get(snapshot.ID) == nil {

@@ -120,7 +120,7 @@ func TestUserHoldDrainReleasedOnceTheHoldIsConsumed(t *testing.T) {
 		advanceSessionDrainsWithSessionsTraced(testCity, dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 			got, _ := store.Get(id)
 			return &got
-		}), map[string]wakeEvaluation{}, &config.City{}, &clock.Fake{Time: now}, nil)
+		}), map[string]wakeEvaluation{}, &config.City{}, &clock.Fake{Time: now}, nil, nil)
 		if stopped := sp.CountCalls("Stop", "s-held") > 0; stopped != wantStop || dt.get(b.ID) != nil {
 			t.Errorf("sleep_intent %q: stopped=%v tracked=%v, want stopped=%v and the drain done", intent, stopped, dt.get(b.ID) != nil, wantStop)
 		}

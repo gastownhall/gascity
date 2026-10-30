@@ -1368,6 +1368,7 @@ func TestAdvanceSessionDrainsWithSessions_UsesProvidedWakeEvaluations(t *testing
 		&config.City{},
 		&clock.Fake{Time: now},
 		nil,
+		nil,
 	)
 
 	if got := dt.get(bead.ID); got != nil {

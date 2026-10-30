@@ -201,6 +201,7 @@ func TestReconcileSessionBeads_IdleRespawnCancelsWhenActivityResumesBeforeAck(t 
 		&config.City{},
 		clk,
 		nil,
+		nil,
 	)
 
 	if ds := dt.get(info.ID); ds != nil {

@@ -5343,7 +5343,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		info, ok := infoByID[id]
 		return info, ok
 	}
-	advanceSessionDrainsWithSessionsTraced(cityPath, dt, sp, store, infoLookup, wakeEvals, cfg, clk, trace)
+	advanceSessionDrainsWithSessionsTraced(cityPath, dt, sp, store, infoLookup, wakeEvals, cfg, clk, trace, func(info sessionpkg.Info) bool {
+		if !liveClaimVetoApplies(cityPath, cfg, info, suspState) {
+			return false
+		}
+		held, _, err := sessionHoldsAssignedWork(sw, info)
+		return err != nil || held
+	})
 	clearMissingIdleProbes(dt, infoByID)
 	// Drain-skip lines print on transition (session_drain_skip_log.go); a
 	// session this pass saw without a skip is re-armed here.

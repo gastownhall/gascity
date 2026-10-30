@@ -747,6 +747,7 @@ func advanceSessionDrainsWithSessionsTraced(
 	cfg *config.City,
 	clk clock.Clock,
 	trace *sessionReconcilerTraceCycle,
+	heldWorkKeep func(sessions.Info) bool,
 ) {
 	// wakeEvals is required. The reconciler builds it from the coherent infoByID
 	// snapshot via ComputeAwakeSet -> awakeSetToWakeEvals; tests supply explicit
@@ -876,6 +877,28 @@ func advanceSessionDrainsWithSessionsTraced(
 				}
 				continue
 			}
+		}
+
+		// Held-work keep (ga-2ols7o): a timer drain — idle, no-wake-reason —
+		// of an eligible pool seat that holds work it has no wake reason to
+		// run yet does not stand. The assignment may postdate the begin, so
+		// the begin's premise (nothing for this seat to do) is gone, and the
+		// stop would wedge work no sibling can serve. The probe fails closed:
+		// a work leg that could not be read reports the seat held. v2's A19
+		// mirrors this lens on its stop requests.
+		if heldWorkDrainReason(ds.reason) && heldWorkKeep != nil && heldWorkKeep(info) {
+			dt.clearIdleProbe(id)
+			if ds.ackSet {
+				_ = clearReconcilerDrainAckMetadata(sp, name)
+			}
+			dt.remove(id)
+			telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "cancel")
+			if trace != nil {
+				trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), name, traceRecordPayload{
+					"held_work": true,
+				})
+			}
+			continue
 		}
 
 		// Cancellation check: if wake reasons reappeared, cancel the in-memory

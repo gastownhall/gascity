@@ -104,7 +104,7 @@ func armRollback(r *rowFacts) (intent, bool) {
 // refuses its token), and the rollback releases it to the session's next
 // incarnation.
 func (r *rowFacts) sessionWorking() bool {
-	return r.partial || r.w.Demand.StorePartial || r.inProgressWorkAssigned(refuseScope(r.row.Info, worldCfg(r.w)))
+	return r.partial || r.w.Demand.StorePartial || r.workAssigned(refuseScope(r.row.Info, worldCfg(r.w)), "in_progress")
 }
 
 // occupantCorpseInLease reports a pending create whose name another
