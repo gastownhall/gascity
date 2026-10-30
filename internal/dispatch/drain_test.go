@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -3997,5 +3998,116 @@ func TestDrainUnitRetiredOutcome(t *testing.T) {
 		if got := drainUnitRetiredOutcome(tc.status); got != tc.want {
 			t.Errorf("drainUnitRetiredOutcome(%q) = %q, want %q", tc.status, got, tc.want)
 		}
+	}
+}
+
+// recordWritesStore records the bead ids of every mutating call, so a test can
+// prove a retry wrote nothing to a bead it should have skipped.
+type recordWritesStore struct {
+	beads.Store
+	mu     sync.Mutex
+	writes []string
+}
+
+func (s *recordWritesStore) wrote(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Contains(s.writes, id)
+}
+
+func (s *recordWritesStore) record(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.writes = append(s.writes, id)
+}
+
+func (s *recordWritesStore) Update(id string, opts beads.UpdateOpts) error {
+	s.record(id)
+	return s.Store.Update(id, opts)
+}
+
+func (s *recordWritesStore) SetMetadata(id string, key, value string) error {
+	s.record(id)
+	return s.Store.SetMetadata(id, key, value)
+}
+
+func (s *recordWritesStore) SetMetadataBatch(id string, metadata map[string]string) error {
+	s.record(id)
+	return s.Store.SetMetadataBatch(id, metadata)
+}
+
+func (s *recordWritesStore) Close(id string) error {
+	s.record(id)
+	return s.Store.Close(id)
+}
+
+func (s *recordWritesStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	for _, id := range ids {
+		s.record(id)
+	}
+	return s.Store.CloseAll(ids, metadata)
+}
+
+// TestProcessDrainUnitConvoyRetireFailureKeepsDrainOpen: a unit close that
+// fails mid-retire errors naming the drain and the unit, and leaves the drain
+// open with no terminal state — the open control is the only thing that
+// re-drives the close. The next pass finishes the retire and writes nothing
+// to a unit that already closed.
+func TestProcessDrainUnitConvoyRetireFailureKeepsDrainOpen(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+
+	if _, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}}); err != nil {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+	for _, row := range manifest.Rows {
+		if err := updateMetadataAndClose(store, row.ItemRootID, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass}); err != nil {
+			t.Fatalf("close item root %s: %v", row.ItemRootID, err)
+		}
+	}
+
+	injected := errors.New("injected unit close failure")
+	failing := closeErrorStore{Store: store, failID: manifest.Rows[1].UnitConvoyID, err: injected}
+	_, err := ProcessControl(failing, mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if !errors.Is(err, injected) {
+		t.Fatalf("ProcessControl error = %v, want it wrapping %v", err, injected)
+	}
+	if msg := err.Error(); !strings.Contains(msg, drain.ID) || !strings.Contains(msg, manifest.Rows[1].UnitConvoyID) {
+		t.Fatalf("error %q must name the drain %s and the unit %s", msg, drain.ID, manifest.Rows[1].UnitConvoyID)
+	}
+	drainAfter := mustGetBead(t, store, drain.ID)
+	if drainAfter.Status != "open" {
+		t.Fatalf("drain status = %q after a failed unit retire, want open", drainAfter.Status)
+	}
+	state := drainAfter.Metadata[beadmeta.DrainStateMetadataKey]
+	if state == beadmeta.DrainStateSucceeded || state == beadmeta.DrainStateFailed {
+		t.Fatalf("gc.drain_state = %q after a failed unit retire, want no terminal state", state)
+	}
+	unit0 := mustGetBead(t, store, manifest.Rows[0].UnitConvoyID)
+	if unit0.Status != "closed" || unit0.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Fatalf("unit convoy = %s/%s, want closed pass", unit0.Status, unit0.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	unit1 := mustGetBead(t, store, manifest.Rows[1].UnitConvoyID)
+	if unit1.Status != "open" {
+		t.Fatalf("unit convoy status = %q after its failed close, want open", unit1.Status)
+	}
+
+	recorder := &recordWritesStore{Store: store}
+	result, err := ProcessControl(recorder, mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(retry over a healthy store): %v", err)
+	}
+	if result.Action != "drain-succeeded" {
+		t.Fatalf("Action = %q, want drain-succeeded", result.Action)
+	}
+	unit1 = mustGetBead(t, store, manifest.Rows[1].UnitConvoyID)
+	if unit1.Status != "closed" || unit1.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Fatalf("unit convoy = %s/%s after retry, want closed pass", unit1.Status, unit1.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	if recorder.wrote(manifest.Rows[0].UnitConvoyID) {
+		t.Fatalf("retry wrote to unit convoy %s; a closed unit must be skipped without writing", manifest.Rows[0].UnitConvoyID)
 	}
 }
