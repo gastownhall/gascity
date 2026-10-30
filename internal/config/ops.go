@@ -69,7 +69,8 @@ type OpsConfig struct {
 	// ops, whose messages the lane host then delivers: the API's POST
 	// /v0/city/{cityName}/session/{id}/ops (a T3 Code environment or an
 	// operator proposing a message) and, for sessions a lane host can type
-	// into (a keystroke-mode runtime, or one a box host serves), the
+	// into (a keystroke-mode runtime, a protocol-mode one whose runtime
+	// records its turn starts, such as t3bridge, or one a box host serves), the
 	// controller's planner notices (the work ladder's nudges, drain reminders,
 	// the nudge backstop) and
 	// gc session nudge. gc session nudge delivers inline what its delivery

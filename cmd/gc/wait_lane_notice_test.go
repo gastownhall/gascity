@@ -361,10 +361,11 @@ func TestWaitNudgeNoticeIsRecordedBeforeItIsProposed(t *testing.T) {
 	}
 }
 
-// A protocol-mode runtime (t3bridge) that no other host serves is one no
+// A protocol-mode runtime whose turn starts are not recorded and that no
+// other host serves is one no
 // lane can type into, so its ready wait keeps the queue item even while the
 // controller's host executes message.
-func TestWaitNudgeProtocolModeSessionKeepsTheQueue(t *testing.T) {
+func TestWaitNudgeUnservedProtocolSessionKeepsTheQueue(t *testing.T) {
 	f := newLaneFixture(t)
 	f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 	f.cfg.Ops.Authoritative = []string{"message"}

@@ -1394,6 +1394,7 @@ go_test(
         "conversation_lane_interrupt_test.go",
         "conversation_lane_now_test.go",
         "conversation_lane_produce_test.go",
+        "conversation_lane_protocol_test.go",
         "conversation_lane_respond_test.go",
         "conversation_lane_steer_test.go",
         "conversation_lane_submit_test.go",
