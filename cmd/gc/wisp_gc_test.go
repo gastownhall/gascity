@@ -602,6 +602,70 @@ func TestWispGC_ReloadKeepsLastRunAndCursor(t *testing.T) {
 			t.Fatalf("sessionPurgeCursor = %+v, want the carried boundary after %q", got.sessionPurgeCursor, cursor.ID)
 		}
 	})
+
+	t.Run("nil prev (GC newly enabled) is due on its first tick", func(t *testing.T) {
+		next := &memoryWispGC{interval: time.Hour, ttl: 24 * time.Hour}
+		got, ok := carryWispGCState(nil, next).(*memoryWispGC)
+		if !ok || got != next {
+			t.Fatalf("carryWispGCState(nil, next) = %T, want next unchanged", carryWispGCState(nil, next))
+		}
+		if !got.shouldRun(time.Now()) {
+			t.Fatal("newly enabled GC not due on its first tick, as at process start")
+		}
+	})
+
+	t.Run("nil next (GC disabled) stays an untyped nil", func(t *testing.T) {
+		prev := &memoryWispGC{interval: time.Hour, ttl: 24 * time.Hour, lastRun: lastRun}
+		if got := carryWispGCState(prev, nil); got != nil {
+			t.Fatalf("carryWispGCState(prev, nil) = %T, want an untyped nil the tick's nil guard skips", got)
+		}
+	})
+
+	t.Run("typed-nil trackers are returned without a panic", func(t *testing.T) {
+		prev := &memoryWispGC{interval: time.Hour, ttl: 24 * time.Hour, lastRun: lastRun}
+		next := &memoryWispGC{interval: time.Hour, ttl: 24 * time.Hour}
+		gotNext, ok := carryWispGCState(prev, (*memoryWispGC)(nil)).(*memoryWispGC)
+		if !ok || gotNext != nil {
+			t.Fatalf("carryWispGCState(prev, typed-nil) = %T, want the typed nil back", carryWispGCState(prev, (*memoryWispGC)(nil)))
+		}
+		gotPrev, ok := carryWispGCState((*memoryWispGC)(nil), next).(*memoryWispGC)
+		if !ok || gotPrev != next {
+			t.Fatalf("carryWispGCState(typed-nil, next) = %T, want next back", carryWispGCState((*memoryWispGC)(nil), next))
+		}
+		if gotPrev.lastRun != (time.Time{}) {
+			t.Fatalf("next.lastRun = %v, want the zero time; a typed-nil prev carries nothing", gotPrev.lastRun)
+		}
+	})
+
+	t.Run("another tracker implementation as prev leaves next unchanged", func(t *testing.T) {
+		next := &memoryWispGC{interval: time.Hour, ttl: 24 * time.Hour}
+		got, ok := carryWispGCState(stubWispGC{}, next).(*memoryWispGC)
+		if !ok || got != next {
+			t.Fatalf("carryWispGCState(stub, next) = %T, want next back", carryWispGCState(stubWispGC{}, next))
+		}
+		if !got.shouldRun(time.Now()) {
+			t.Fatal("next's clock moved; a prev the carry does not know carries nothing")
+		}
+	})
+
+	t.Run("zero lastRun prev (startup reload) is due at once", func(t *testing.T) {
+		prev := &memoryWispGC{interval: time.Hour, ttl: 24 * time.Hour}
+		next := &memoryWispGC{interval: time.Hour, ttl: 24 * time.Hour}
+		got := carryWispGCState(prev, next).(*memoryWispGC)
+		if !got.shouldRun(time.Now()) {
+			t.Fatal("startup reload left the GC not due; the boot first-tick run must stay")
+		}
+	})
+}
+
+// stubWispGC is a wispGC the carry does not know, so tests can pin that
+// trackers other than *memoryWispGC pass through untouched.
+type stubWispGC struct{}
+
+func (stubWispGC) shouldRun(time.Time) bool { return false }
+
+func (stubWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
+	return 0, nil
 }
 
 // A config reload between sweeps must not restart the closed-session sweep
