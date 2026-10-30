@@ -843,3 +843,23 @@ func TestReconcileSessionBeads_PoolSeatHoldingWorkCancelsBegunTimerDrain(t *test
 		})
 	}
 }
+
+// A seat whose assigned-work read fails, with no confirmed hit elsewhere, is
+// kept from each timer drain, and the error names the session and the drain.
+func TestReconcileSessionBeads_PoolSeatWorkReadErrorKeepsSeat(t *testing.T) {
+	for _, timer := range heldWorkTimerDrains() {
+		t.Run(timer.name, func(t *testing.T) {
+			f := newOwnershipFixture(t)
+			f.holdBlockedWork(t, "open")
+			f.reads.arm(f.work.ID)
+			f.runTimer(t, timer, nil)
+			if stopped, why := f.stopObservation(t); stopped {
+				t.Fatalf("pool seat whose work read failed was stopped (%s); stdout:\n%s\nstderr:\n%s", why, f.env.stdout.String(), f.env.stderr.String())
+			}
+			want := "keeping " + ownershipWorkerName + " from a " + timer.reason + " drain: reading its assigned work: "
+			if !strings.Contains(f.env.stderr.String(), want) {
+				t.Fatalf("stderr = %q, want it to contain %q", f.env.stderr.String(), want)
+			}
+		})
+	}
+}
