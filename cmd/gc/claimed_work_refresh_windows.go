@@ -59,6 +59,14 @@ type claimedWorkRefreshFlight struct {
 	err  error
 }
 
+// refreshDrainAckedOrExitedClaimedWorkForDemand re-reads the in-progress work
+// claimed by sessions that drain-acked or exited, so demand is computed from
+// current rows, and drops work the refresh finds closed, unassigned or missing.
+//
+// residency:allow — a caller's own snapshot, projected. Each bead is re-read
+// from the store it was collected from and kept or dropped together with that
+// store and ref; it opens no store, consults no binding, namespace or leg
+// order, and can only ever return a subsequence of the stores it was handed.
 func refreshDrainAckedOrExitedClaimedWorkForDemand(
 	cfg *config.City,
 	sp runtime.Provider,

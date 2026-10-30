@@ -10,6 +10,13 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+// refreshDrainAckedOrExitedClaimedWorkForDemand returns the assigned-work
+// snapshot unchanged. Only Windows refreshes the claimed work of drain-acked or
+// exited sessions before demand is computed.
+//
+// residency:allow — pass-through of the caller's own snapshot: it returns the
+// bead, store and store-ref slices it was handed, opens no store, and consults
+// no binding, namespace or leg order.
 func refreshDrainAckedOrExitedClaimedWorkForDemand(
 	_ *config.City,
 	_ runtime.Provider,
