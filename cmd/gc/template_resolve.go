@@ -581,14 +581,15 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			// (for gateway harnesses), else the harness binding, else a hard
 			// error. upstreamServingFields is the single statement of that
 			// precedence, shared with the reporting side.
-			for _, r := range upstreamServingFields(spec, binding) {
-				if r.Value == "" {
+			values := upstreamServingValues(spec)
+			for i, r := range upstreamServingFields(spec, binding) {
+				if !r.Set {
 					continue
 				}
 				if r.EnvName == "" {
 					return TemplateParams{}, fmt.Errorf("agent %q upstream %q sets %s, but its harness %q declares no upstream_env.%s binding (set %s_env on the upstream, or upstream_env.%s on the harness)", qualifiedName, upstreamName, r.Field, resolvedProviderName(resolved), r.Field, r.Field, r.Field)
 				}
-				env[r.EnvName] = processenv.ExpandSessionEnvValue(r.Value)
+				env[r.EnvName] = processenv.ExpandSessionEnvValue(values[i])
 			}
 		}
 		// Raw env is the harness-specific escape hatch, merged LAST (wins over the

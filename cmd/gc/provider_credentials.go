@@ -261,7 +261,7 @@ func upstreamSetsEnvKey(spec config.UpstreamSpec, key string, bindings []credent
 		}
 	}
 	for _, r := range upstreamServingFields(spec, binding) {
-		if r.Field == "base_url" || r.Value == "" {
+		if r.Field == "base_url" || !r.Set {
 			continue
 		}
 		if r.EnvName == key {
