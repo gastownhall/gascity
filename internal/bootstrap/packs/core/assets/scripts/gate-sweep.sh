@@ -20,10 +20,12 @@
 # Restore `gc bd gate check --type=bead --escalate` when beads adds it back.
 #
 # Every bead store is swept, not just the city's: the city store first,
-# then every rig `gc rig list --json` reports, each reached through
-# scope_bd.sh's `gc bd --city <city> --rig <rig>` front door (the same
-# route the reaper and jsonl-export orders use). Listing the rigs needs
-# jq; a city with no rigs pays only the rig-list call.
+# then every rig core_rig_names returns (it drops the hq pseudo-rig and
+# suspended rigs — any bd read would restart a suspended rig's retired
+# proxy and Dolt), each reached through scope_bd.sh's
+# `gc bd --city <city> --rig <rig>` front door (the same route the reaper
+# and jsonl-export orders use). Listing the rigs needs jq; a city with no
+# rigs pays only the rig-list call.
 set -euo pipefail
 
 # Trace bd invocations to $GC_BD_TRACE when set (no-op otherwise).
@@ -48,7 +50,7 @@ sweep_scope() {
 scope_select city
 sweep_scope
 
-RIG_NAMES="$(cd "$CITY_ABS" && gc rig list --json | jq -r '.rigs[]? | .name // empty')"
+RIG_NAMES="$(core_rig_names)"
 while IFS= read -r rig_name; do
     [ -n "$rig_name" ] || continue
     scope_select rig "$rig_name"
