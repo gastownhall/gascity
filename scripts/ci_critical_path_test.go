@@ -680,7 +680,7 @@ func TestLintAndVetRunAsNogoInBazel(t *testing.T) {
 // rbe-west cannot run, allowing only the path-gated ones to skip.
 func TestCheckAndCIRequiredFanInTheGatingJobs(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
-	gating := []string{"runner-policy", "changes", "credential-provider-windows", "pack-gate"}
+	gating := []string{"runner-policy", "changes", "credential-provider-windows", "pack-gate", "release-gate-freshness"}
 	for jobName, want := range map[string]struct {
 		name  string
 		needs []string
@@ -704,12 +704,12 @@ func TestCheckAndCIRequiredFanInTheGatingJobs(t *testing.T) {
 		}
 		var allowsPathGatedSkips bool
 		for _, step := range job.Steps {
-			if strings.Contains(step.Run, `allow_skipped = {"credential-provider-windows", "pack-gate"}`) {
+			if strings.Contains(step.Run, `allow_skipped = {"credential-provider-windows", "pack-gate", "release-gate-freshness"}`) {
 				allowsPathGatedSkips = true
 			}
 		}
 		if !allowsPathGatedSkips {
-			t.Errorf("ci.yml %s must allow exactly the path-gated credential-provider-windows and pack-gate to skip", jobName)
+			t.Errorf("ci.yml %s must allow exactly the path-gated credential-provider-windows, pack-gate and release-gate-freshness to skip", jobName)
 		}
 	}
 }
@@ -727,6 +727,7 @@ func TestCIWorkflowRunsNoBazelCoveredSuite(t *testing.T) {
 			"runner-policy", "changes", // routing
 			"credential-provider-windows", // no Windows workers
 			"pack-gate",                   // live registry and pin provenance
+			"release-gate-freshness",      // PR git history and live base ref
 			"check", "ci-required",        // required fan-ins
 		},
 		advisoryProbesWorkflowFile: {
@@ -839,6 +840,49 @@ func TestPackGateAddsOnlyParallelPackCoverage(t *testing.T) {
 	}
 	if !smokesLiveRegistry {
 		t.Error("pack-gate must retain the live registry/materialization smoke test")
+	}
+}
+
+// TestReleaseGateFreshnessJobIsPathGatedAndNeedsHistory: the job re-derives a
+// release-gate record's criterion 6 against the base ref's current tip, so it
+// needs the whole git history of the PR and runs only where a record can have
+// changed. On every other PR it is skipped outright (no runner, no noise), and
+// ci-required allows exactly that skip.
+func TestReleaseGateFreshnessJobIsPathGatedAndNeedsHistory(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "ci.yml")
+	job, ok := wf.Jobs["release-gate-freshness"]
+	if !ok {
+		t.Fatal("CI workflow has no release-gate-freshness job")
+	}
+	for _, need := range []string{"runner-policy", "changes"} {
+		if !slices.Contains(job.Needs, need) {
+			t.Errorf("release-gate-freshness needs = %v, want routing dependency %q", job.Needs, need)
+		}
+	}
+	for _, want := range []string{"needs.changes.outputs.release_gates == 'true'", "github.event_name == 'pull_request'"} {
+		if !strings.Contains(job.If, want) {
+			t.Errorf("release-gate-freshness if = %q, want it to contain %q", job.If, want)
+		}
+	}
+	if got := wf.Jobs["changes"].Outputs["release_gates"]; !strings.Contains(got, "steps.filter.outputs.release_gates") {
+		t.Errorf("changes output release_gates = %q, want it fed by the release_gates path filter", got)
+	}
+
+	var fullHistory, runsCheck bool
+	for _, step := range job.Steps {
+		if strings.Contains(step.Uses, "actions/checkout") && step.With["fetch-depth"] == "0" {
+			fullHistory = true
+		}
+		if strings.Contains(step.Run, "release_gate_freshness.py") &&
+			strings.Contains(step.Run, "--base-sha") && strings.Contains(step.Run, "--head-sha") {
+			runsCheck = true
+		}
+	}
+	if !fullHistory {
+		t.Error("release-gate-freshness must check out with fetch-depth: 0 so the record's cited head and the base tip resolve")
+	}
+	if !runsCheck {
+		t.Error("release-gate-freshness must run release_gate_freshness.py with --base-sha and --head-sha")
 	}
 }
 
