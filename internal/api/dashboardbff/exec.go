@@ -7,8 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/searchpath"
 )
 
 // Output caps and concurrency, mirroring the BFF's exec-core.ts contract.
@@ -157,8 +160,27 @@ func (b *cappedBuffer) markTruncated() {
 
 func (b *cappedBuffer) String() string { return b.buf.String() }
 
+// cleanEnvBasePath is the fixed system base of the subprocess search path.
+const cleanEnvBasePath = "/usr/local/bin:/usr/bin:/bin"
+
+// cleanEnvPath returns the PATH every dashboard subprocess searches: the
+// operator's ADMIN_PATH verbatim when set, otherwise the deterministic,
+// user-aware order searchpath.Expand builds over cleanEnvBasePath — home bin
+// dirs, the system base, user-managed toolchain dirs that exist, then the
+// platform's package-manager directories (Homebrew/MacPorts on darwin,
+// snap/linuxbrew on linux). The host's own PATH is never consulted, so a
+// binary reachable only through it stays invisible to probes (#7979).
+func cleanEnvPath(adminPath, home, goos string) string {
+	if adminPath != "" {
+		return adminPath
+	}
+	return searchpath.ExpandPath(home, goos, cleanEnvBasePath)
+}
+
 // cleanEnv builds the minimal environment passed to every subprocess. No host
-// environment is inherited; PATH/HOME/LANG are assigned intentionally.
+// environment is inherited; the PATH comes from cleanEnvPath (ADMIN_PATH or
+// the deterministic searchpath order, never the ambient PATH), and
+// HOME/LANG are assigned intentionally.
 //
 // GITHUB_TOKEN is deliberately NOT forwarded: none of the dashboard's
 // credential-free probes (git log/diff, Beads connectivity, version probes)
@@ -172,12 +194,8 @@ func cleanEnv() []string {
 	if home == "" {
 		home = "/tmp"
 	}
-	path := os.Getenv("ADMIN_PATH")
-	if path == "" {
-		path = home + "/.local/bin:/usr/local/bin:/usr/bin:/bin"
-	}
 	return []string{
-		"PATH=" + path,
+		"PATH=" + cleanEnvPath(os.Getenv("ADMIN_PATH"), os.Getenv("HOME"), runtime.GOOS),
 		"HOME=" + home,
 		"LANG=C.UTF-8",
 		"NO_COLOR=1",
