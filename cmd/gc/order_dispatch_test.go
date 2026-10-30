@@ -8260,6 +8260,72 @@ func TestOrderDispatchClosesTrackingBead(t *testing.T) {
 	t.Error("tracking bead not found")
 }
 
+// A failed exec order still closes its tracking bead, but the close_reason must
+// say it failed and why. Before, every close carried the success sentence, so a
+// failing order and a healthy one read the same in the dispatch history.
+func TestOrderDispatchFailedExecClosesTrackingBeadWithFailureReason(t *testing.T) {
+	tests := []struct {
+		name  string
+		order orders.Order
+		run   ExecRunner
+		// wantInReason are the fragments the close_reason must carry.
+		wantInReason []string
+	}{
+		{
+			name:  "non-zero exit names the status and the output tail",
+			order: orders.Order{Name: "exits-nonzero", Trigger: "cooldown", Interval: "1m", Exec: "scripts/fail.sh"},
+			run: func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+				return []byte("disk full\n"), errors.New("exit status 3")
+			},
+			wantInReason: []string{"failed", "exit status 3", "disk full"},
+		},
+		{
+			name:  "failure to start names the start error",
+			order: orders.Order{Name: "cannot-start", Trigger: "cooldown", Interval: "1m", Exec: "scripts/missing.sh"},
+			run: func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+				return nil, errors.New("fork/exec scripts/missing.sh: no such file or directory")
+			},
+			wantInReason: []string{"failed", "no such file or directory"},
+		},
+		{
+			name:  "timeout names the timeout",
+			order: orders.Order{Name: "times-out", Trigger: "cooldown", Interval: "1m", Exec: "scripts/slow.sh", Timeout: "100ms"},
+			run: func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+			wantInReason: []string{"failed", "order timeout of 100ms exceeded"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := strictCloseReasonStore{Store: beads.NewMemStore()}
+			ad := buildOrderDispatcherFromListExec([]orders.Order{tt.order}, store, nil, tt.run, &memRecorder{})
+
+			ad.dispatch(context.Background(), t.TempDir(), time.Now())
+			ad.drain(context.Background())
+
+			all := trackingBeads(t, store, "order-run:"+tt.order.Name)
+			if len(all) != 1 {
+				t.Fatalf("tracking beads = %d, want 1", len(all))
+			}
+			got := all[0]
+			if got.Status != "closed" {
+				t.Errorf("tracking bead status = %q, want closed", got.Status)
+			}
+			reason := got.Metadata["close_reason"]
+			if reason == completedOrderTrackingCloseReason {
+				t.Errorf("close_reason = %q, the success sentence, for a failed order", reason)
+			}
+			for _, want := range tt.wantInReason {
+				if !strings.Contains(reason, want) {
+					t.Errorf("close_reason = %q, want it to contain %q", reason, want)
+				}
+			}
+		})
+	}
+}
+
 func TestOrderDispatchSkipsOpenWork(t *testing.T) {
 	store := beads.NewMemStore()
 

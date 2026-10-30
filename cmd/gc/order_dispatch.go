@@ -80,6 +80,11 @@ const (
 
 	completedOrderTrackingCloseReason = "order dispatch completed: tracking bead lifecycle finished"
 
+	// failedOrderTrackingCloseReasonPrefix leads the close_reason of an exec
+	// order whose run did not succeed, ahead of the failure itself. The prefix
+	// alone is over bd's 20-character on-close minimum.
+	failedOrderTrackingCloseReasonPrefix = "order dispatch failed: "
+
 	// orderTrackingHistoryIndexLimit bounds the per-tick cooldown-history
 	// index read (RecentRunsAll). Since created-order sorts push their limit
 	// to the backing search, this is the number of rows fetched AND hydrated
@@ -1808,12 +1813,15 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	// Defer order matters: doneInflight runs last, after Close makes the
 	// tracking bead outcome observable to a waiting drain.
 	defer m.doneInflight()
+	// failure is the exec run's failure text ("" on success); the deferred close
+	// stamps it into the tracking bead's close_reason.
+	var failure string
 	defer func() {
 		// The tracking bead was born in the orders store, so its close has to
 		// address that store: closing through the target scope on a split city
 		// finds nothing, and the marker that suppresses re-dispatch stays open
 		// forever.
-		if err := closeOrderTrackingBead(ctx, m.ordersStoreFor(store), trackingID); err != nil {
+		if err := closeOrderTrackingBeadWithReason(ctx, m.ordersStoreFor(store), trackingID, orderTrackingCloseReason(failure)); err != nil {
 			logDispatchError(m.stderr, "gc: order %s: closing tracking bead %s: %v", a.ScopedName(), trackingID, err)
 		}
 	}()
@@ -1824,6 +1832,7 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	// vars. The tracking bead was already created by the caller and is closed by
 	// the deferred close above.
 	if err := orders.ValidateRequiredParams(a, vars); err != nil {
+		failure = err.Error()
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
 			Actor:   "controller",
@@ -1856,15 +1865,29 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 		if execOverlay == nil {
 			execOverlay = vars
 		}
-		m.dispatchExec(childCtx, front, target, a, cityPath, trackingID, execOverlay)
+		failure = m.dispatchExec(childCtx, front, target, a, cityPath, trackingID, execOverlay)
 	} else {
 		m.dispatchWisp(childCtx, store, target, a, cityPath, trackingID, vars)
 	}
 }
 
 func closeOrderTrackingBead(ctx context.Context, store beads.Store, trackingID string) error {
-	_, err := orders.NewStore(beads.OrdersStore{Store: store}).CloseRuns(ctx, []string{trackingID}, completedOrderTrackingCloseReason)
+	return closeOrderTrackingBeadWithReason(ctx, store, trackingID, completedOrderTrackingCloseReason)
+}
+
+func closeOrderTrackingBeadWithReason(ctx context.Context, store beads.Store, trackingID, reason string) error {
+	_, err := orders.NewStore(beads.OrdersStore{Store: store}).CloseRuns(ctx, []string{trackingID}, reason)
 	return err
+}
+
+// orderTrackingCloseReason is the close_reason for a dispatched order's
+// tracking bead: the completion sentence when failure is empty, otherwise a
+// sentence that says the run failed and carries the failure.
+func orderTrackingCloseReason(failure string) string {
+	if failure == "" {
+		return completedOrderTrackingCloseReason
+	}
+	return failedOrderTrackingCloseReasonPrefix + failure
 }
 
 // closeAndVerifyOrderTrackingBeads survives the WI-3 orders migration ONLY for
@@ -1973,8 +1996,9 @@ func openOrderTrackingIDs(store beads.Store, ids []string) ([]string, error) {
 	return openIDs, nil
 }
 
-// dispatchExec runs an exec order's shell command.
-func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars map[string]string) {
+// dispatchExec runs an exec order's shell command. It returns the failure text
+// when the command did not run or did not succeed, and "" otherwise.
+func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars map[string]string) string {
 	scoped := a.ScopedName()
 	outcome := orders.RunOutcomeExec
 	var headSeq uint64
@@ -1995,7 +2019,7 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 				Subject: scoped,
 				Message: errMsg,
 			})
-			return
+			return errMsg
 		}
 		hasEventCursor = true
 		// Event-triggered exec orders persist the cursor before the command
@@ -2012,7 +2036,7 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 				Subject: scoped,
 				Message: fmt.Sprintf("exec tracking bead %s event cursor label failed for seq=%d: %v", trackingID, headSeq, err),
 			})
-			return
+			return fmt.Sprintf("event cursor label failed for seq=%d: %v", headSeq, err)
 		}
 	}
 
@@ -2074,7 +2098,9 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 			Subject: scoped,
 			Message: msg,
 		})
-		return
+		// The run's own outcome stands: a command that exited 0 is not failed
+		// by a bookkeeping label that did not stick.
+		return execErrMsg
 	}
 	if execErrMsg != "" {
 		if hasEventCursor {
@@ -2086,7 +2112,7 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 			Subject: scoped,
 			Message: execErrMsg,
 		})
-		return
+		return execErrMsg
 	}
 	m.rec.Record(events.Event{
 		Type:    events.OrderCompleted,
@@ -2096,6 +2122,7 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 	if declared != nil {
 		recordOrderOutcome(m.rec, m.stderr, scoped, declared)
 	}
+	return ""
 }
 
 // prepareOrderWispRecipe compiles an order's formula into a recipe and returns
