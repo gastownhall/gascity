@@ -141,11 +141,15 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// depend on it. Its own behavior is pinned by
 		// TestDegradedProjectionSendsReadyToTheLiveBdVerdict.
 		"readyProjectionDegraded": true,
-		// availabilityGate is about BACKING-STORE REACHABILITY, not durable
-		// cache content: it is an injected collaborator, never written by
-		// mergeSnapshotLocked, and the merge end state does not depend on it.
-		// Its own behavior is pinned by the caching_store_availability suite.
-		"availabilityGate": true,
+		// The store-availability gate. All three are about BACKING-STORE
+		// REACHABILITY, not durable cache content: availabilityGate is an
+		// injected collaborator, unavailableSkipLogged dedupes one problem entry
+		// per outage episode, and degradedReads is a monotonic counter of reads
+		// served from last-good. None is written by mergeSnapshotLocked and the
+		// merge end state does not depend on any of them; their behavior is
+		// pinned by the caching_store_availability suite.
+		"availabilityGate": true, "unavailableSkipLogged": true,
+		"degradedReads": true,
 		// unannouncedCloses is an announcement queue, not cache state: it holds
 		// closes that absorbs installed without emitting bead.closed, and
 		// runReconciliation drains it after the seam returns. The seam queues
@@ -189,6 +193,9 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"SyncFailures": true, "ProblemCount": true, "LastProblemAt": true,
 		"LastProblem": true, "State": true, "StaggerOffsetMs": true,
 		"CurrentReconcileInterval": true, "LatencyP95Ms": true, "CadenceDriver": true,
+		// DegradedReads mirrors the gate counter above — an outage observable,
+		// not durable cache content the merge oracle compares.
+		"DegradedReads":     true,
 		"ReconcileRequests": true, // counts RequestReconcile calls, not merge outcome
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CacheStats{}), comparedStats, excludedStats)
