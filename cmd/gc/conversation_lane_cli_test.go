@@ -47,7 +47,7 @@ func newCLILaneCity(t *testing.T, opts ...laneFixtureOpt) *cliLaneCity {
 func newCLILaneCityOver(t *testing.T, store beads.Store, opts ...laneFixtureOpt) *cliLaneCity {
 	t.Helper()
 	f := newLaneFixtureOver(t, store, opts...)
-	f.cfg.Ops.Authoritative = []string{string(opjournal.KindMessage)}
+	f.cfg.Ops.Authoritative = config.OpsKinds(string(opjournal.KindMessage))
 	c := &cliLaneCity{laneFixture: f, env: map[string]string{}, ringReply: "ok"}
 	oldClock, oldLookup, oldRing, oldOpen := cliOpClock, cliOpLookupEnv, cliLaneRing, openNudgeWorkStore
 	t.Cleanup(func() {
@@ -188,7 +188,7 @@ func TestSessionNudgeListEmptyKeepsOJ5Path(t *testing.T) {
 	for _, gate := range []string{"off", "auto"} {
 		t.Run("gate="+gate, func(t *testing.T) {
 			c := newCLILaneCity(t)
-			c.cfg.Ops.Authoritative = nil
+			c.cfg.Ops.Authoritative = config.OpsKinds()
 			c.target = resolveNudgeTargetFromSessionInfo(c.dir, c.cfg, c.targetInfo(t))
 			c.env["GC_OPS_CONTENT"] = gate
 			code, stdout, stderr := c.nudge(nudgeDeliveryImmediate, "", false, cliLaneTestMessage)
@@ -528,9 +528,9 @@ func TestSessionNudgeLaneRefusesBeforeResolving(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			req := sessionNudgeOpRequest(tc.payload, nudgeDeliveryWaitIdle, tc.key, true, &stdout, &stderr)
 			before := len(c.ops(t))
-			err := cliLaneNudgePreflight(c.dir, c.cfg, store, req)
-			if !errors.Is(err, errMessageOpRefused) {
-				t.Fatalf("preflight = %v, want refused", err)
+			lane, err := cliLaneNudgePreflight(c.dir, c.cfg, store, req)
+			if !lane || !errors.Is(err, errMessageOpRefused) {
+				t.Fatalf("preflight = %v, %v; want the lane's refusal", lane, err)
 			}
 			if got := cliOpFailureCode(t, stdout.Bytes()); got != tc.code {
 				t.Fatalf("failure code %q, want %q", got, tc.code)
@@ -547,14 +547,35 @@ func TestSessionNudgeLaneRefusesBeforeResolving(t *testing.T) {
 		c := newCLILaneCity(t)
 		var out bytes.Buffer
 		req := sessionNudgeOpRequest(strings.Repeat("x", opjournal.MaxInlinePayload), nudgeDeliveryWaitIdle, "k-ok", false, &out, &out)
-		if err := cliLaneNudgePreflight(c.dir, c.cfg, beads.NudgesStore{Store: c.store}, req); err != nil || out.Len() != 0 {
-			t.Fatalf("preflight = %v, output %q", err, out.String())
+		if lane, err := cliLaneNudgePreflight(c.dir, c.cfg, beads.NudgesStore{Store: c.store}, req); !lane || err != nil || out.Len() != 0 {
+			t.Fatalf("preflight = %v, %v, output %q", lane, err, out.String())
+		}
+	})
+	t.Run("a nudge the lane does not take passes to OJ-5's preflight", func(t *testing.T) {
+		for name, cfg := range map[string]*config.City{
+			"nil config":                    nil,
+			"message not listed":            {Ops: config.OpsConfig{Authoritative: config.OpsKinds("interrupt")}},
+			"unset over a non-SQLite store": {},
+		} {
+			c := newCLILaneCity(t)
+			var out bytes.Buffer
+			req := sessionNudgeOpRequest("hi", nudgeDeliveryWaitIdle, "", false, &out, &out)
+			if lane, err := cliLaneNudgePreflight(c.dir, cfg, beads.NudgesStore{Store: c.store}, req); lane || err != nil || out.Len() != 0 {
+				t.Fatalf("%s: preflight = %v, %v, output %q; want no lane and nothing reported", name, lane, err, out.String())
+			}
+		}
+		c := newCLILaneCity(t)
+		var out bytes.Buffer
+		req := sessionNudgeOpRequest("hi", nudgeDeliveryWaitIdle, "", false, &out, &out)
+		if lane, err := cliLaneNudgePreflight(c.dir, &config.City{}, beads.NudgesStore{}, req); lane || err != nil || out.Len() != 0 {
+			t.Fatalf("unset with no store: preflight = %v, %v, output %q; want the legacy path, not a refusal", lane, err, out.String())
 		}
 	})
 	t.Run("cliLaneExecutesMessage reads [ops] authoritative", func(t *testing.T) {
 		cfg := &config.City{}
-		cfg.Ops.Authoritative = []string{"message"}
-		if !cliLaneExecutesMessage(cfg) || cliLaneExecutesMessage(&config.City{}) || cliLaneExecutesMessage(nil) {
+		cfg.Ops.Authoritative = config.OpsKinds("message")
+		c := newCLILaneCity(t)
+		if !cliLaneExecutesMessage(cfg, c.store) || cliLaneExecutesMessage(&config.City{}, c.store) || cliLaneExecutesMessage(nil, c.store) {
 			t.Fatal("cliLaneExecutesMessage does not read [ops] authoritative")
 		}
 	})

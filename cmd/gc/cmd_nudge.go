@@ -334,6 +334,12 @@ func newNudgeStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Show queued and dead-letter nudges for a session",
 		Long: `Show queued and dead-letter nudges for a session.
 
+Lists the legacy nudge queue's items and the session's conversation-lane
+operations (messages and notices the controller's lane host delivers) in one
+view: a lane operation's ID is its op ID, pending until the lane takes it, in
+flight while it is delivered, and dead for an hour after it closes failed or
+skipped.
+
 Defaults to $GC_ALIAS or $GC_SESSION_ID when run inside a session.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -353,7 +359,7 @@ func newNudgeDrainCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    "drain [session]",
 		Short:  "Deliver queued nudges for a session",
-		Long:   "Deliver queued nudges for a session. Used by runtime hooks.",
+		Long:   "Deliver queued nudges for a session. Used by runtime hooks with --inject; the plain form is deprecated and is removed with legacy delivery.",
 		Args:   cobra.MaximumNArgs(1),
 		Hidden: true,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -405,6 +411,10 @@ rather than disappearing silently. Find IDs with "gc nudge status".
 Dropping an in-flight nudge dead-letters it even if it was already
 injected into the session but not yet acked.
 
+A conversation-lane operation's ID cancels the operation as the operator:
+one the lane has not taken is dropped, and one being delivered reports
+cancel_requested, the lane's outcome saying whether the cancel won.
+
 This only accepts explicit nudge IDs; it does not do bulk or age-based
 selection.`,
 		Args: cobra.MinimumNArgs(1),
@@ -438,11 +448,16 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 		return 1
 	}
 
-	pending, inFlight, dead, err := listQueuedNudgesForTarget(target.cityPath, target, time.Now())
+	now := time.Now()
+	pending, inFlight, dead, err := listQueuedNudgesForTarget(target.cityPath, target, now)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc nudge status: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	lanePending, laneInFlight, laneDead := laneNudgeStatusItems(target, now, stderr)
+	pending = append(pending, lanePending...)
+	inFlight = append(inFlight, laneInFlight...)
+	dead = append(dead, laneDead...)
 
 	// City-wide (not agent-scoped) skip-reason totals from the supervisor
 	// dispatch tick, read directly off the persisted queue state — a raw
@@ -592,6 +607,11 @@ func doNudgeDrop(cityPath string, ids []string, jsonOutput bool, stdout, stderr 
 		fmt.Fprintf(stderr, "gc nudge drop: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	laneResults, err := dropLaneNudges(cityPath, ids, statuses)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc nudge drop: %v\n", err) //nolint:errcheck
+		return 1
+	}
 
 	var droppable []string
 	for _, id := range ids {
@@ -625,6 +645,20 @@ func doNudgeDrop(cityPath string, ids []string, jsonOutput bool, stdout, stderr 
 	exit := 0
 	results := make([]nudgeDropResult, 0, len(ids))
 	for _, id := range ids {
+		if res, lane := laneResults[id]; lane {
+			results = append(results, res)
+			switch {
+			case !res.OK:
+				exit = 1
+				fmt.Fprintf(stderr, "gc nudge drop %s: %s\n", id, res.Error) //nolint:errcheck
+			case jsonOutput:
+			case res.Outcome == "cancel_requested":
+				fmt.Fprintf(stdout, "Cancel requested for nudge %s (it is being delivered)\n", id) //nolint:errcheck
+			default:
+				fmt.Fprintf(stdout, "Dropped nudge %s\n", id) //nolint:errcheck
+			}
+			continue
+		}
 		switch statuses[id] {
 		case nudgeDropStatusDroppable:
 			if !dropped[id] {
@@ -663,6 +697,10 @@ func doNudgeDrop(cityPath string, ids []string, jsonOutput bool, stdout, stderr 
 	return exit
 }
 
+// nudgeDrainPlainDeprecation is the warning gc nudge drain without --inject
+// prints: only the hook's --inject form outlives legacy delivery.
+const nudgeDrainPlainDeprecation = "gc nudge drain: warning: drain without --inject is deprecated and is removed with legacy delivery in the next release; the conversation lane host and the prompt hook (gc nudge drain --inject) deliver queued messages"
+
 // classifyQueuedNudgeIDs reports, for each of the given IDs, whether it is
 // currently droppable (pending or in-flight), already dead-lettered, or not
 // found in the queue at all. The lookup runs the same maintenance every other
@@ -696,6 +734,9 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	// non-inject form is the human-facing one and is untouched (#5304).
 	if inject && len(args) == 0 && !hookHasManagedIdentity() {
 		return 0
+	}
+	if !inject {
+		fmt.Fprintln(stderr, nudgeDrainPlainDeprecation) //nolint:errcheck // best-effort stderr
 	}
 	// On every prompt, emit a live clock (operator-local + UTC + epoch) and
 	// the agent's active formula step (if any) as UserPromptSubmit hook context.

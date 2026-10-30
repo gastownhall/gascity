@@ -1662,8 +1662,8 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 }
 
 // slingCityStore is the city's store a sling nudge routes its lane notice
-// over (routeCLILaneNotice): store is nil when [ops] authoritative does not
-// list message, or on a worker site; opened is the store this sling opened
+// over (routeCLILaneNotice): store is nil when the lane does not execute
+// message (slingNudgeCityStore), or on a worker site; opened is the store this sling opened
 // for it, nil when cityPath names no city on disk, whose bead store is then
 // the city's.
 type slingCityStore struct {
@@ -1679,17 +1679,31 @@ func (c slingCityStore) close() {
 }
 
 // slingNudgeCityStore opens the city's store for a sling nudge under lane
-// authority (slingCityStore). A city store that does not open is the error.
+// authority (slingCityStore): [ops] authoritative lists message, or, unset,
+// the city's sessions-class store is one the default runs the lane over
+// (cliLaneExecutesMessage), which it opens the store to tell. A city store
+// that does not open is the error while message is listed; with the list
+// unset the nudge keeps its legacy path, since the default cannot be decided.
 func slingNudgeCityStore(cityPath string, cfg *config.City, store beads.Store) (slingCityStore, error) {
-	if !cliLaneExecutesMessage(cfg) || onWorkerSite(cityPath) {
+	if cliLaneMessageOff(cfg) || onWorkerSite(cityPath) {
 		return slingCityStore{}, nil
 	}
+	listed := cliLaneMessageListed(cfg)
 	opened, err := openSlingCityStore(cityPath)
 	switch {
-	case err != nil:
+	case err != nil && listed:
 		return slingCityStore{}, err
+	case err != nil:
+		return slingCityStore{}, nil
 	case opened == nil:
+		if !listed && !cliLaneExecutesMessage(cfg, cliSessionStore(store, cfg, cityPath)) {
+			return slingCityStore{}, nil
+		}
 		return slingCityStore{store: store}, nil
+	}
+	if !listed && !cliLaneExecutesMessage(cfg, cliSessionStore(opened, cfg, cityPath)) {
+		closeBeadStoreHandle(opened) //nolint:errcheck // best-effort
+		return slingCityStore{}, nil
 	}
 	return slingCityStore{store: opened, opened: opened}, nil
 }

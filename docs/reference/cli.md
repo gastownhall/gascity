@@ -3028,6 +3028,10 @@ rather than disappearing silently. Find IDs with "gc nudge status".
 Dropping an in-flight nudge dead-letters it even if it was already
 injected into the session but not yet acked.
 
+A conversation-lane operation's ID cancels the operation as the operator:
+one the lane has not taken is dropped, and one being delivered reports
+cancel_requested, the lane's outcome saying whether the cancel won.
+
 This only accepts explicit nudge IDs; it does not do bulk or age-based
 selection.
 
@@ -3042,6 +3046,12 @@ gc nudge drop <id>... [flags]
 ## gc nudge status
 
 Show queued and dead-letter nudges for a session.
+
+Lists the legacy nudge queue's items and the session's conversation-lane
+operations (messages and notices the controller's lane host delivers) in one
+view: a lane operation's ID is its op ID, pending until the lane takes it, in
+flight while it is delivered, and dead for an hour after it closes failed or
+skipped.
 
 Defaults to $GC_ALIAS or $GC_SESSION_ID when run inside a session.
 
