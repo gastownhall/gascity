@@ -131,6 +131,14 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want: "claude --resume " + key,
 		},
 		{
+			name: "AC-4 a provider the probe cannot read resumes",
+			spec: SessionSpec{
+				Command: "legacy-provider", Provider: "legacy-provider", WorkDir: t.TempDir(),
+				Resume: sessionpkg.ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"},
+			},
+			want: "legacy-provider --resume " + key,
+		},
+		{
 			name: "a creating row with a stale creation-complete marker also starts a new conversation",
 			spec: SessionSpec{Command: "claude", Provider: "claude", WorkDir: t.TempDir(), Resume: claudeResume},
 			patch: func(t *testing.T, f rotatedKeyFixture) {
