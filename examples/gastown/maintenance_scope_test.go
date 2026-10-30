@@ -850,6 +850,57 @@ func TestReaperTypeSafeSessionPruneCountsSingleIDBatch(t *testing.T) {
 	}
 }
 
+// A zero-exit delete reply with neither deleted_count nor a non-empty string
+// deleted is not a counted deletion: the reaper records an anomaly and stops
+// after that one call. A batch reply counting zero stops without an anomaly.
+func TestReaperTypeSafeSessionPruneRejectsUncountedDeleteReply(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		reply     string
+		wantAnoms bool
+	}{
+		{name: "empty object", reply: `{}`, wantAnoms: true},
+		{name: "empty deleted string", reply: `{"deleted":""}`, wantAnoms: true},
+		{name: "not json", reply: `not json`, wantAnoms: true},
+		{name: "zero count batch", reply: `{"deleted":["gc-session-1"],"deleted_count":0}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The selection returns a row twice so a reply wrongly counted as a
+			// deletion would loop into a second delete call.
+			stateFile := filepath.Join(t.TempDir(), "batches")
+			f := newScopeFixture(t, `
+  *"issue_type='session'"*"LIMIT 500"*)
+    n=0
+    [ -f "`+stateFile+`" ] && n=$(cat "`+stateFile+`")
+    printf '%s' $((n + 1)) > "`+stateFile+`"
+    if [ "$n" -lt 2 ]; then
+      printf 'id\ngc-session-1\n'
+    else
+      printf 'id\n'
+    fi
+    ;;`)
+			f.env["GC_REAPER_SESSION_BEAD_PATTERN"] = ""
+			f.env["BD_DELETE_JSON"] = tc.reply
+			f.runReaper(t)
+
+			bdLog := f.read(t, f.bdLog)
+			if got := strings.Count(bdLog, "args=delete --force --json --from-file "); got != 1 {
+				t.Fatalf("delete calls = %d, want 1:\n%s", got, bdLog)
+			}
+			gcLog := f.read(t, f.gcLog)
+			if failed := strings.Contains(gcLog, "type-safe session prune failed after 0 deletions"); failed != tc.wantAnoms {
+				t.Fatalf("prune failure recorded = %v, want %v:\n%s", failed, tc.wantAnoms, gcLog)
+			}
+			if escalated := strings.Contains(gcLog, "ESCALATION: Reaper anomalies detected"); escalated != tc.wantAnoms {
+				t.Fatalf("escalated = %v, want %v:\n%s", escalated, tc.wantAnoms, gcLog)
+			}
+			if !strings.Contains(gcLog, "sessions-pruned:0") {
+				t.Fatalf("summary counted an uncounted delete reply:\n%s", gcLog)
+			}
+		})
+	}
+}
+
 func TestReaperWritesNoOutcomeWithoutControllerFile(t *testing.T) {
 	f := newScopeFixture(t, "")
 	delete(f.env, "GC_ORDER_OUTCOME_FILE")
