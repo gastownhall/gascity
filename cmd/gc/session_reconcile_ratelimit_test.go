@@ -4,6 +4,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -414,6 +415,63 @@ func TestCheckStability_TerminalErrorScreen_MarksTerminalNotCrash(t *testing.T) 
 	}
 	// Edge-triggered: last_woke_at cleared so the terminal classification isn't
 	// re-evaluated (and can't accrue a wake failure) on the next tick.
+	if got := session.Metadata["last_woke_at"]; got != "" {
+		t.Errorf("last_woke_at = %q, want cleared after terminal classification", got)
+	}
+}
+
+// TestCheckStability_CreditBalanceStop_MarksTerminalNotCrash pins that a
+// session which died inside the stability window on Claude Code's exhausted
+// credit stop is parked as a terminal provider error (quota_exceeded) rather
+// than counted as a crash and quarantined: no start can succeed until someone
+// adds credit or changes the key.
+func TestCheckStability_CreditBalanceStop_MarksTerminalNotCrash(t *testing.T) {
+	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+	dt := newDrainTracker()
+
+	session := makeBead("b1", map[string]string{
+		"last_woke_at":  now.Add(-10 * time.Second).Format(time.RFC3339),
+		"wake_attempts": "3", // a real crash would push us to 4
+	})
+
+	pane := strings.Join([]string{
+		"⏺ Bash(make test)",
+		"  ⎿ \u00a0Credit balance too low · Add funds: https://platform.claude.com/settings/billing",
+		"",
+		"╭──────────────────────────────────────────────╮",
+		"│ >                                            │",
+		"╰──────────────────────────────────────────────╯",
+		"  ? for shortcuts",
+	}, "\n")
+	peek := func(_ int) (string, error) {
+		return pane, nil
+	}
+
+	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), t.TempDir(), clk, peek, nil, nil)
+	syncBeadFromStore(&session, store)
+	if !stab {
+		t.Fatal("checkStability should return true when it records a terminal provider error")
+	}
+	if got := session.Metadata["wake_attempts"]; got != "3" {
+		t.Errorf("wake_attempts = %q, want 3; an exhausted credit balance must not count as a crash", got)
+	}
+	if got := session.Metadata["state"]; got != "asleep" {
+		t.Errorf("state = %q, want asleep", got)
+	}
+	if got := session.Metadata["sleep_reason"]; got != string(sessionpkg.SleepReasonProviderTerminalError) {
+		t.Errorf("sleep_reason = %q, want %q", got, string(sessionpkg.SleepReasonProviderTerminalError))
+	}
+	if got := session.Metadata[sessionProviderTerminalErrorMetadataKey]; got != "quota_exceeded" {
+		t.Errorf("%s = %q, want quota_exceeded", sessionProviderTerminalErrorMetadataKey, got)
+	}
+	if got := session.Metadata[sessionHealthStateMetadataKey]; got != "unhealthy" {
+		t.Errorf("%s = %q, want unhealthy", sessionHealthStateMetadataKey, got)
+	}
+	if got := session.Metadata[sessionDrainableMetadataKey]; got != boolMetadata(true) {
+		t.Errorf("%s = %q, want %q", sessionDrainableMetadataKey, got, boolMetadata(true))
+	}
 	if got := session.Metadata["last_woke_at"]; got != "" {
 		t.Errorf("last_woke_at = %q, want cleared after terminal classification", got)
 	}
