@@ -3096,6 +3096,28 @@ func TestBdStoreReadyResolvesMixedBlockerBatchAcrossBothTiers(t *testing.T) {
 	}
 }
 
+// The step-pass rule (beads.ReadinessWorkOutcome) holds for a blocker found in
+// the wisp tier exactly as for one bd show returns: a graph.v2 step that closed
+// with gc.outcome=pass advanced the workflow whatever gc.work_outcome its worker
+// recorded, so its dependent stays ready. Reading the raw gc.work_outcome on the
+// wisp tier alone would veto a dependent that the same step releases when it
+// lives in the issues table.
+func TestBdStoreReadyKeepsDependentWhenEphemeralBlockerStepPassedDespiteWorkOutcomeBlocked(t *testing.T) {
+	wispRow := []byte(`[{"id":"bd-blocker","title":"wisp blocker","status":"closed","issue_type":"task","created_at":"2025-01-15T10:00:00Z","metadata":{"gc.step_ref":"review","gc.outcome":"pass","gc.work_outcome":"blocked"}}]`)
+	query := func([]string) ([]byte, error) { return wispRow, nil }
+	runner, calls := blockerLookupRunner(blockedReadyRows(t, "bd-dependent", "bd-blocker"), blockerShowMiss, query)
+	got, err := beads.NewBdStore("/city", runner).Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "bd-dependent" {
+		t.Fatalf("Ready() = %+v, want [bd-dependent]: a wisp-tier blocker whose step passed must satisfy the dependency whatever its gc.work_outcome", got)
+	}
+	if len(calls.query) != 1 {
+		t.Fatalf("wisp-tier fallback ran %d times, want once: %v", len(calls.query), calls.query)
+	}
+}
+
 // Blocker IDs come from dependency rows that agents can write, and reach bd as
 // positional arguments. One that begins with "-" would be parsed as a flag and
 // fail the whole lookup (and with it every gc ready whose candidates include
