@@ -113,12 +113,12 @@ func computeAwakeSetPreRefactor(input AwakeInput) map[string]AwakeDecision {
 			continue
 		}
 		active := collectActiveBeads(input.SessionBeads, template, input.Now)
-		filled := countAssignedScaleSlots(input.SessionBeads, input.WorkBeads, input.NamedSessions, template)
+		filled := countAssignedScaleSlots(input.SessionBeads, input.WorkBeads, input.NamedSessions, template, input.Now)
 		for _, bead := range active {
 			if filled >= count {
 				break
 			}
-			if sessionHasAssignedWork(input.WorkBeads, input.NamedSessions, bead) {
+			if sessionHasAssignedWork(input.WorkBeads, input.NamedSessions, bead, input.Now) {
 				continue
 			}
 			desired[bead.SessionName] = "scaled:demand"
@@ -129,7 +129,7 @@ func computeAwakeSetPreRefactor(input AwakeInput) map[string]AwakeDecision {
 			if filled >= count {
 				break
 			}
-			if sessionHasAssignedWork(input.WorkBeads, input.NamedSessions, bead) {
+			if sessionHasAssignedWork(input.WorkBeads, input.NamedSessions, bead, input.Now) {
 				continue
 			}
 			desired[bead.SessionName] = "scaled:creating"
@@ -186,7 +186,7 @@ func computeAwakeSetPreRefactor(input AwakeInput) map[string]AwakeDecision {
 		)
 		for _, wb := range input.WorkBeads {
 			assignee := strings.TrimSpace(wb.Assignee)
-			if assignee == "" || !workBeadHasAwakeDemand(wb) {
+			if assignee == "" || !workBeadHasAwakeDemand(wb, input.Now) {
 				continue
 			}
 			if !sessionAssigneeMatches(input.NamedSessions, bead, assignee) {
