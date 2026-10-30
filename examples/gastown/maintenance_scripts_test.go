@@ -13561,3 +13561,46 @@ func TestOrphanSweepDeclaresLocalSkipsAsPartialScopes(t *testing.T) {
 		})
 	}
 }
+
+// TestOrphanSweepComposesGateAndLocalSkipOutcomes keeps one declaration when
+// the foreign-identity gate protects a claim and a local claim is left in
+// place in the same pass: the gate's scope and reason stand, the local claim
+// adds its own scope, and the overall reason counts both.
+func TestOrphanSweepComposesGateAndLocalSkipOutcomes(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{
+			inProgress("ga-foreign", "project/dalinar"),
+			hookClaim("ga-hook-legacy", "gc-d34d1", "gastown__polecat-gc-d34d1", map[string]string{"gc.session_bead_id": "gc-legacy9"}),
+		},
+		nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d1", Status: "closed", IssueType: "session"}},
+		[]string{"project/dalinar"}, nil)
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if run.released("ga-foreign") || run.released("ga-hook-legacy") {
+		t.Fatalf("a protected or unverifiable claim was released\n%s", run.context())
+	}
+	outcome, ok := run.outcome(t)
+	if !ok || outcome.Outcome != "partial" {
+		t.Fatalf("outcome = %+v (written %v), want partial\n%s", outcome, ok, run.context())
+	}
+	scopes := map[string]string{}
+	for _, scope := range outcome.Scopes {
+		scopes[scope.Scope] = scope.Reason
+	}
+	if len(outcome.Scopes) != 2 || len(scopes) != 2 {
+		t.Fatalf("outcome scopes = %+v, want one for project/dalinar and one for ga-hook-legacy", outcome.Scopes)
+	}
+	if got, want := scopes["project/dalinar"], "1 claim(s) kept: ga-foreign (absent_from_roster)"; got != want {
+		t.Fatalf("gate scope reason = %q, want %q", got, want)
+	}
+	if got := scopes["ga-hook-legacy"]; !strings.Contains(got, "gc-d34d1") || !strings.Contains(got, "gc-legacy9") {
+		t.Fatalf("local scope reason = %q, want it to name the holder gc-d34d1 and the unreadable gc-legacy9", got)
+	}
+	for _, want := range []string{"protected 1 claim(s)", "left 1 local claim(s)"} {
+		if !strings.Contains(outcome.Reason, want) {
+			t.Fatalf("outcome reason %q, want it to contain %q", outcome.Reason, want)
+		}
+	}
+}
