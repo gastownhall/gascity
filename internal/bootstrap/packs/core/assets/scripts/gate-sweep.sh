@@ -23,13 +23,24 @@
 # each rig store core_rig_names (scope_bd.sh) lists. The hq pseudo-rig is the
 # city store, and suspended rigs are left out because any bd read restarts a
 # suspended rig's retired proxy and Dolt; their expired timers resolve on the
-# first sweep after resume. Listing the rigs costs one `gc rig list --json`
-# (parsed with jq) on every run, even in a city with no rigs. A timer check
-# that fails in one store is reported on stderr naming the store; the other
-# stores are still swept and the run exits non-zero. A store gc will not
-# scope for bd is skipped with a notice and does not fail the run. A run that
-# cannot list the rigs (gc rig list fails, or jq is missing) fails after the
-# city store is swept.
+# first sweep after resume. Stores served by one Dolt server database (a rig
+# bound to the city store) are swept once, by the first of them; bd names no
+# database for an embedded store, which is always swept. A timer check that
+# fails in one store is reported on stderr naming the store; that store's gh
+# gates and the other stores are still checked, and the run exits non-zero
+# with a last stderr line naming every failed store. A store gc will not scope
+# for bd is skipped with a notice and does not fail the run. A run that cannot
+# list the rigs (gc rig list fails, or jq is missing) fails after the city
+# store is swept.
+#
+# Cost: one `gc rig list --json` (parsed with jq) on every run, even in a city
+# with no rigs, plus three `gc bd` calls per swept store (the database probe,
+# then the timer and the gh check). On the local fallback route the listing
+# probes each rig's running status, which this script does not use. On its 30s
+# cooldown the order touches every non-suspended store more often than a
+# proxied scope's idle timeout, against the backstop invariant in
+# engdocs/design/beads-proxied-local-default.md; activity-gated backstops are
+# Pillar 3 of engdocs/design/idle-controller-call-rate.md.
 set -euo pipefail
 
 # Trace bd invocations to $GC_BD_TRACE when set (no-op otherwise).
@@ -44,37 +55,56 @@ CITY_ABS="$(cd "$CITY" 2>/dev/null && pwd -P || printf '%s\n' "$CITY")"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/scope_bd.sh"
 
-FAILED=0
-ERR_FILE=$(mktemp)
-trap 'rm -f "$ERR_FILE"' EXIT
+FAILED_SCOPES=""
+SWEPT_DBS=" "
 
 # sweep_scope checks the timer and gh gates of the scope scope_select made
-# current. A store gc will not point bd at (a non-bd beads provider, or a rig
-# with no path binding on this site) holds no bd gates, so it is named as
-# skipped rather than failed. bd reports per-gate errors and still exits 0, so
-# any other failing timer check means the store itself failed: it is reported,
-# the store's gh check is skipped (it would fail the same way behind its
-# `|| true`), and the run fails after the remaining stores are swept.
+# current. It first asks bd which database backs the scope, and a database
+# already swept this run is not swept again: bd escalates an escalated gh gate
+# on every check, so a second pass would send each escalation twice. A store
+# gc will not point bd at (a non-bd beads provider, or a rig with no path
+# binding on this site) holds no bd gates, so it is named as skipped rather
+# than failed. Any other failed probe leaves the database unknown (bd serves
+# `sql` against a Dolt server, not an embedded store, and the store may be
+# unreachable), and the store is swept anyway: its gate checks say whether bd
+# can reach it. bd exits non-zero when a single gate could not be checked or
+# closed, after it has applied the others, so a failed timer check is recorded
+# and the store's gh gates are still checked.
 sweep_scope() {
     local rc=0
-    scope_bd gate check --type=timer --escalate 2>"$ERR_FILE" || rc=$?
-    cat "$ERR_FILE" >&2
-    if [ "$rc" -ne 0 ]; then
-        case "$(cat "$ERR_FILE")" in
-            *"only supported for bd-backed beads providers"*)
-                echo "gate-sweep: $SCOPE_LABEL is not a bd bead store; no gates to check there"
-                return 0
-                ;;
+    if scope_resolve_db; then
+        case "$SWEPT_DBS" in
+            *" $SCOPE_DB "*) return 0 ;;
+        esac
+        SWEPT_DBS="$SWEPT_DBS$SCOPE_DB "
+    elif [ "$SCOPE_NOT_BD" -eq 1 ]; then
+        echo "gate-sweep: $SCOPE_LABEL is not a bd bead store; no gates to check there"
+        return 0
+    else
+        case "$SCOPE_LAST_ERROR" in
             *"is declared but has no path binding"*)
                 echo "gate-sweep: $SCOPE_LABEL has no path binding on this site; no gates to check there"
                 return 0
                 ;;
         esac
+    fi
+    scope_bd gate check --type=timer --escalate || rc=$?
+    if [ "$rc" -ne 0 ]; then
         echo "gate-sweep: timer gate check failed in $SCOPE_LABEL (exit $rc)" >&2
-        FAILED=1
-        return 0
+        FAILED_SCOPES="$FAILED_SCOPES $SCOPE_LABEL"
     fi
     scope_bd gate check --type=gh --escalate || true
+}
+
+# finish ends the run with status $1, or 1 when a timer check failed. The
+# controller keeps only the tail of a failing run's output, so the failed
+# stores are named again on the last stderr line.
+finish() {
+    if [ -n "$FAILED_SCOPES" ]; then
+        echo "gate-sweep: timer gate check failed in:$FAILED_SCOPES" >&2
+        exit 1
+    fi
+    exit "$1"
 }
 
 scope_select city
@@ -84,11 +114,11 @@ sweep_scope
 # that cannot list the rigs fails rather than quietly narrowing to the city.
 if ! command -v jq >/dev/null 2>&1; then
     echo "gate-sweep: jq is required to list rig stores but not found in PATH; rig stores were not checked this run" >&2
-    exit 1
+    finish 1
 fi
 if ! RIG_NAMES=$(core_rig_names); then
     echo "gate-sweep: gc rig list failed; rig stores were not checked this run" >&2
-    exit 1
+    finish 1
 fi
 while IFS= read -r rig_name; do
     [ -n "$rig_name" ] || continue
@@ -97,4 +127,4 @@ while IFS= read -r rig_name; do
     sweep_scope </dev/null
 done <<<"$RIG_NAMES"
 
-exit "$FAILED"
+finish 0

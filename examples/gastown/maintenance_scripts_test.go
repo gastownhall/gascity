@@ -7212,9 +7212,13 @@ const maintenanceBdAppliedIDsJSON = `    if [ -n "${BD_CLOSE_FAIL:-}" ]; then
 //   - serves `export --all -o FILE` from the same store, converting the
 //     stub's issues rows into bd export JSONL (one record per line);
 //   - refuses scopes listed in FAKE_NOT_BD_SCOPES the way gc refuses a
-//     non-bd beads provider;
+//     non-bd beads provider, and rigs listed in FAKE_UNBOUND_SCOPES
+//     ("rig:api") the way gc refuses a rig with no path binding;
 //   - fails for scopes listed in FAKE_UNREACHABLE_SCOPES or in the
 //     unreachable-scopes file next to the stub (writeUnreachableScopesStub);
+//   - refuses `sql` for scopes listed in FAKE_SQL_UNSUPPORTED_SCOPES the way
+//     bd does for an embedded store (or an HTTP workspace), which still
+//     serves its other verbs;
 //   - hands every other verb to the `bd` test double on PATH (a default one
 //     is installed next to gc unless the test brings its own), exporting the
 //     scope as GC_FAKE_SCOPE.
@@ -7282,6 +7286,12 @@ if [ "${1:-}" = "bd" ]; then
       exit 1
       ;;
   esac
+  case " ${FAKE_UNBOUND_SCOPES:-} " in
+    *" $fake_scope "*)
+      printf 'gc bd: rig "%s" is declared but has no path binding — run ` + "`gc rig add <dir> --name %s`" + ` to bind it before scoping bd commands\n' "${fake_scope#rig:}" "${fake_scope#rig:}" >&2
+      exit 1
+      ;;
+  esac
   fake_unreachable="${FAKE_UNREACHABLE_SCOPES:-}"
   if [ -f "$(dirname "$0")/unreachable-scopes" ]; then
     fake_unreachable="$fake_unreachable $(cat "$(dirname "$0")/unreachable-scopes")"
@@ -7306,6 +7316,12 @@ if [ "${1:-}" = "bd" ]; then
   done
   case "${1:-}" in
     sql)
+      case " ${FAKE_SQL_UNSUPPORTED_SCOPES:-} " in
+        *" $fake_scope "*)
+          echo "Error: 'bd sql' is not yet supported in embedded mode" >&2
+          exit 1
+          ;;
+      esac
       fake_format=csv
       if [ "${2:-}" = "--json" ]; then
         fake_format=json
@@ -11498,17 +11514,20 @@ func TestJsonlExportArchiveMaintenanceReportsTelemetry(t *testing.T) {
 }
 
 // gateSweepEnv constructs the env for a gate-sweep.sh invocation with a
-// PATH-shimmed bd stub that logs every call to BD_LOG.
+// PATH-shimmed bd stub that logs every call to BD_LOG. Every store the tests
+// list has its own database, as in a city whose rigs keep their own stores;
+// a test of shared databases sets FAKE_SCOPE_DBS itself.
 func gateSweepEnv(t *testing.T) (binDir, bdLog string, env map[string]string) {
 	t.Helper()
 	binDir = t.TempDir()
 	bdLog = filepath.Join(t.TempDir(), "bd.log")
 	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
 	env = map[string]string{
-		"BD_LOG":       bdLog,
-		"GC_CITY":      t.TempDir(),
-		"GC_CITY_PATH": t.TempDir(),
-		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BD_LOG":         bdLog,
+		"FAKE_SCOPE_DBS": "city=citydb rig:api=apidb rig:web=webdb rig:hq=hqdb rig:old=olddb",
+		"GC_CITY":        t.TempDir(),
+		"GC_CITY_PATH":   t.TempDir(),
+		"PATH":           binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 	return binDir, bdLog, env
 }
@@ -11710,33 +11729,38 @@ func gateSweepReport(out, scope string) []string {
 	return lines
 }
 
+// gateSweepLastLine returns the last non-empty line of out.
+func gateSweepLastLine(out string) string {
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	return lines[len(lines)-1]
+}
+
 // TestGateSweepKeepsSweepingAfterATimerFailure verifies that a failing timer
-// check in one store is reported on stderr naming the store, skips that
-// store's gh check, leaves the other stores swept, and fails the run.
+// check in one store is reported on stderr naming the store and fails the
+// run, while that store's gh gates and the other stores are still checked.
+// bd exits non-zero when a single gate could not be checked or closed, after
+// it has applied the others, so a failed timer check must not hide the
+// store's gh gates. The last stderr line names every failed store: the
+// controller keeps only the tail of a failing run's output.
 func TestGateSweepKeepsSweepingAfterATimerFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		failure string
 		env     map[string]string
-		failed  string
+		failed  []string
 		swept   []string
 	}{
 		{
-			name: "bd fails a rig timer check",
+			name: "bd could not check one gate in a rig store",
 			failure: `case "$GC_FAKE_SCOPE $*" in
   "rig:api "*--type=timer*)
-    echo "bd: simulated timer-gate failure" >&2
+    echo "✗ api-xwi: error checking - no timeout set" >&2
+    echo "Error: 1 gate(s) could not be checked or closed" >&2
     exit 1
     ;;
 esac`,
-			failed: "rig:api",
-			swept:  []string{"city", "rig:web"},
-		},
-		{
-			name:   "gc cannot reach a rig store",
-			env:    map[string]string{"FAKE_UNREACHABLE_SCOPES": "rig:api"},
-			failed: "rig:api",
-			swept:  []string{"city", "rig:web"},
+			failed: []string{"rig:api"},
+			swept:  []string{"city", "rig:api", "rig:web"},
 		},
 		{
 			name: "bd fails the city timer check",
@@ -11746,8 +11770,37 @@ esac`,
     exit 1
     ;;
 esac`,
-			failed: "city",
-			swept:  []string{"rig:api", "rig:web"},
+			failed: []string{"city"},
+			swept:  []string{"city", "rig:api", "rig:web"},
+		},
+		{
+			name: "timer checks fail in two stores",
+			failure: `case "$GC_FAKE_SCOPE $*" in
+  "city "*--type=timer*|"rig:web "*--type=timer*)
+    echo "bd: simulated timer-gate failure" >&2
+    exit 1
+    ;;
+esac`,
+			failed: []string{"city", "rig:web"},
+			swept:  []string{"city", "rig:api", "rig:web"},
+		},
+		{
+			name:   "gc cannot reach a rig store",
+			env:    map[string]string{"FAKE_UNREACHABLE_SCOPES": "rig:api"},
+			failed: []string{"rig:api"},
+			swept:  []string{"city", "rig:web"},
+		},
+		{
+			name: "the rig list fails after a city timer failure",
+			failure: `case "$GC_FAKE_SCOPE $*" in
+  "city "*--type=timer*)
+    echo "bd: simulated timer-gate failure" >&2
+    exit 1
+    ;;
+esac`,
+			env:    map[string]string{"FAKE_RIG_LIST_FAIL": "1"},
+			failed: []string{"city"},
+			swept:  []string{"city"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -11763,28 +11816,119 @@ esac`,
 			cmd.Stdout = &stdout
 			cmd.Stderr = &stderr
 			if err := cmd.Run(); err == nil {
-				t.Fatalf("gate-sweep exited 0 after the %s timer check failed\nstdout:\n%s\nstderr:\n%s", tc.failed, stdout.String(), stderr.String())
+				t.Fatalf("gate-sweep exited 0 after the timer check failed in %v\nstdout:\n%s\nstderr:\n%s", tc.failed, stdout.String(), stderr.String())
 			}
-			if len(gateSweepReport(stderr.String(), tc.failed)) == 0 {
-				t.Errorf("stderr does not report the failing store %s:\n%s", tc.failed, stderr.String())
+			for _, failed := range tc.failed {
+				if len(gateSweepReport(stderr.String(), failed)) == 0 {
+					t.Errorf("stderr does not report the failing store %s:\n%s", failed, stderr.String())
+				}
 			}
+			if got, want := gateSweepLastLine(stderr.String()), "gate-sweep: timer gate check failed in: "+strings.Join(tc.failed, " "); got != want {
+				t.Errorf("last stderr line = %q, want %q\nstderr:\n%s", got, want, stderr.String())
+			}
+			requireGateSweepChecked(t, readGateSweepLog(t, bdLog), tc.swept...)
+		})
+	}
+}
+
+// gateSweepCheckCount returns how many gate checks of kind ("timer" or "gh")
+// the bd log records, across every store.
+func gateSweepCheckCount(log, kind string) int {
+	return strings.Count(log, "gate check --type="+kind+" --escalate")
+}
+
+// TestGateSweepSweepsASharedDatabaseOnce verifies that stores served by one
+// database (a rig bound to the city store, or two rigs on one database) are
+// swept once a run: bd escalates an escalated gh gate on every check, so a
+// second pass would send each escalation twice.
+func TestGateSweepSweepsASharedDatabaseOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		dbs      string
+		swept    []string
+		notSwept string
+	}{
+		{
+			name:     "rig bound to the city store",
+			dbs:      "city=citydb rig:api=citydb rig:web=webdb",
+			swept:    []string{"city", "rig:web"},
+			notSwept: "rig:api",
+		},
+		{
+			name:     "two rigs on one database",
+			dbs:      "city=citydb rig:api=shared rig:web=shared",
+			swept:    []string{"city", "rig:api"},
+			notSwept: "rig:web",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir, bdLog, env := gateSweepEnv(t)
+			writeGateSweepScopeBd(t, binDir, "")
+			env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api"},{"name":"web"}]}`
+			env["FAKE_SCOPE_DBS"] = tc.dbs
+
+			runScript(t, coreScriptPath("gate-sweep.sh"), env)
+
 			log := readGateSweepLog(t, bdLog)
 			requireGateSweepChecked(t, log, tc.swept...)
-			if bad := tc.failed + " gate check --type=gh"; strings.Contains(log, bad) {
-				t.Errorf("gh check ran in %s after its timer check failed; bd log:\n%s", tc.failed, log)
+			if strings.Contains(log, tc.notSwept+" gate check") {
+				t.Errorf("%s shares a database already swept this run but was swept again; bd log:\n%s", tc.notSwept, log)
+			}
+			for _, kind := range []string{"timer", "gh"} {
+				if got := gateSweepCheckCount(log, kind); got != len(tc.swept) {
+					t.Errorf("%d %s gate checks, want one per database (%d); bd log:\n%s", got, kind, len(tc.swept), log)
+				}
 			}
 		})
 	}
 }
 
+// TestGateSweepSweepsStoresWhoseDatabaseCannotBeProbed verifies that a store
+// bd will not name a database for (an embedded store or an HTTP workspace,
+// where bd serves gate checks but not `sql`) is still swept: the database
+// probe only finds shared databases, and it must never keep a store's gates
+// unchecked.
+func TestGateSweepSweepsStoresWhoseDatabaseCannotBeProbed(t *testing.T) {
+	binDir, bdLog, env := gateSweepEnv(t)
+	writeGateSweepScopeBd(t, binDir, "")
+	env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api"},{"name":"web"}]}`
+	env["FAKE_SQL_UNSUPPORTED_SCOPES"] = "city rig:api"
+
+	runScript(t, coreScriptPath("gate-sweep.sh"), env)
+
+	requireGateSweepChecked(t, readGateSweepLog(t, bdLog), "city", "rig:api", "rig:web")
+}
+
+// gcGateCheckCalls returns the `gc bd ... gate check` calls GC_CALL_LOG
+// recorded against scope ("city" or "rig:<name>"), whether or not gc let
+// them reach bd.
+func gcGateCheckCalls(t *testing.T, gcLog, scope string) []string {
+	t.Helper()
+	data, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	rig, onRig := strings.CutPrefix(scope, "rig:")
+	var calls []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "bd ") || !strings.Contains(line, " gate check ") {
+			continue
+		}
+		if (onRig && strings.Contains(line, " --rig "+rig+" gate check ")) ||
+			(!onRig && !strings.Contains(line, " --rig ")) {
+			calls = append(calls, line)
+		}
+	}
+	return calls
+}
+
 // TestGateSweepSkipsStoresGcWillNotScope verifies that a store gc refuses to
 // point bd at (a non-bd beads provider, or a rig with no path binding on this
-// site) holds no bd gates: it is named as skipped on stdout, its gh check is
-// not run, the other stores are swept, and the run exits 0.
+// site) holds no bd gates: it is named as skipped on stdout, no gate check is
+// issued against it, the other stores are swept, and the run exits 0.
 func TestGateSweepSkipsStoresGcWillNotScope(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		failure string
 		env     map[string]string
 		skipped string
 		swept   []string
@@ -11796,13 +11940,8 @@ func TestGateSweepSkipsStoresGcWillNotScope(t *testing.T) {
 			swept:   []string{"city", "rig:web"},
 		},
 		{
-			name: "rig has no path binding",
-			failure: `case "$GC_FAKE_SCOPE $*" in
-  "rig:api "*--type=timer*)
-    echo 'gc bd: rig "api" is declared but has no path binding on this site' >&2
-    exit 1
-    ;;
-esac`,
+			name:    "rig has no path binding",
+			env:     map[string]string{"FAKE_UNBOUND_SCOPES": "rig:api"},
 			skipped: "rig:api",
 			swept:   []string{"city", "rig:web"},
 		},
@@ -11815,7 +11954,9 @@ esac`,
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			binDir, bdLog, env := gateSweepEnv(t)
-			writeGateSweepScopeBd(t, binDir, tc.failure)
+			writeGateSweepScopeBd(t, binDir, "")
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+			env["GC_CALL_LOG"] = gcLog
 			env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api"},{"name":"web"}]}`
 			for k, v := range tc.env {
 				env[k] = v
@@ -11831,10 +11972,12 @@ esac`,
 			if len(gateSweepReport(stdout.String(), tc.skipped)) == 0 {
 				t.Errorf("stdout does not name the skipped store %s:\n%s", tc.skipped, stdout.String())
 			}
-			log := readGateSweepLog(t, bdLog)
-			requireGateSweepChecked(t, log, tc.swept...)
-			if bad := tc.skipped + " gate check --type=gh"; strings.Contains(log, bad) {
-				t.Errorf("gh check ran in %s, which gc will not scope; bd log:\n%s", tc.skipped, log)
+			requireGateSweepChecked(t, readGateSweepLog(t, bdLog), tc.swept...)
+			if calls := gcGateCheckCalls(t, gcLog, tc.skipped); len(calls) != 0 {
+				t.Errorf("gate checks issued against %s, which gc will not scope:\n%s", tc.skipped, strings.Join(calls, "\n"))
+			}
+			if calls := gcGateCheckCalls(t, gcLog, tc.swept[0]); len(calls) == 0 {
+				t.Errorf("gc call log records no gate check against %s, so it cannot show %s was skipped", tc.swept[0], tc.skipped)
 			}
 		})
 	}
@@ -11860,7 +12003,7 @@ func TestGateSweepFailsLoudWhenRigsCannotBeListed(t *testing.T) {
 		{
 			name: "jq is not installed",
 			setup: func(t *testing.T, binDir string, env map[string]string) {
-				for _, tool := range []string{"bash", "cat", "date", "dirname", "head", "mktemp", "rm", "sed"} {
+				for _, tool := range []string{"bash", "cat", "date", "dirname", "head", "mktemp", "rm", "sed", "tail", "tr"} {
 					target, err := exec.LookPath(tool)
 					if err != nil {
 						t.Fatalf("LookPath(%s): %v", tool, err)
@@ -11898,7 +12041,7 @@ func TestGateSweepFailsLoudWhenRigsCannotBeListed(t *testing.T) {
 
 // TestGateSweepToleratesRigGhGateBdFailures verifies the gh-gate tolerance
 // holds per store: a rig's failing gh check neither fails the run nor stops
-// the next rig's sweep.
+// the next rig's sweep, and that rig's timer gates are still checked.
 func TestGateSweepToleratesRigGhGateBdFailures(t *testing.T) {
 	binDir, bdLog, env := gateSweepEnv(t)
 	writeGateSweepScopeBd(t, binDir, `case "$GC_FAKE_SCOPE $*" in
@@ -11913,7 +12056,7 @@ esac`)
 	if err != nil {
 		t.Fatalf("gate-sweep should exit 0 when only a rig's gh-gate check fails; got %v\n%s", err, out)
 	}
-	requireGateSweepChecked(t, readGateSweepLog(t, bdLog), "city", "rig:web")
+	requireGateSweepChecked(t, readGateSweepLog(t, bdLog), "city", "rig:api", "rig:web")
 }
 
 // hermeticGitEnv builds a git invocation env that strips any pre-existing
