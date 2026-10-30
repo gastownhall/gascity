@@ -157,7 +157,7 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 		}
 
 		if row.ItemRootID == "" {
-			projection, err := drainProjectedBlockerIDs(store, member.ID, manifest, opts)
+			projection, err := drainProjectedBlockerIDs(store, bead, member.ID, manifest, opts)
 			if err != nil {
 				return ControlResult{}, fmt.Errorf("%s: listing source dependencies for member %s: %w", bead.ID, member.ID, err)
 			}
@@ -685,7 +685,7 @@ func materializeDrainRow(store beads.Store, control beads.Bead, manifest drainMa
 		unit = reloaded
 	}
 	if row.ItemRootID == "" {
-		projection, err := drainProjectedBlockerIDs(store, member.ID, manifest, opts)
+		projection, err := drainProjectedBlockerIDs(store, control, member.ID, manifest, opts)
 		if err != nil {
 			return 0, fmt.Errorf("%s: listing source dependencies for member %s: %w", control.ID, member.ID, err)
 		}
@@ -730,7 +730,7 @@ func ensureDrainDependencyProjection(store beads.Store, control beads.Bead, mani
 }
 
 func ensureDrainRowDependencyProjection(store beads.Store, control beads.Bead, manifest drainManifest, memberID, rootID string, opts ProcessOptions) error {
-	projection, err := drainProjectedBlockerIDs(store, memberID, manifest, opts)
+	projection, err := drainProjectedBlockerIDs(store, control, memberID, manifest, opts)
 	if err != nil {
 		return fmt.Errorf("%s: listing source dependencies for member %s: %w", control.ID, memberID, err)
 	}
@@ -741,9 +741,6 @@ func ensureDrainRowDependencyProjection(store beads.Store, control beads.Bead, m
 		if err := ensureDrainWorkflowBlocksOn(store, rootID, blockerID); err != nil {
 			return fmt.Errorf("%s: wiring item workflow %s for member %s to blocker %s: %w", control.ID, rootID, memberID, blockerID, err)
 		}
-	}
-	if err := recordUnprojectableDrainBlockers(store, control, memberID, rootID, projection.Unprojectable, opts); err != nil {
-		return fmt.Errorf("%s: recording unprojectable blockers for member %s: %w", control.ID, memberID, err)
 	}
 	if err := repairDrainWorkflowSourceMemberDeps(store, manifest, memberID, rootID); err != nil {
 		return fmt.Errorf("%s: repairing source-member dependencies on item workflow %s for member %s: %w", control.ID, rootID, memberID, err)
@@ -780,15 +777,15 @@ func drainManifestMemberIDs(manifest drainManifest) map[string]bool {
 // ready-blocking dependencies onto its item workflow.
 type drainBlockerProjection struct {
 	// BlockerIDs are the ids the item workflow's beads can actually depend on:
-	// either another manifest row's item root, or an out-of-manifest blocker the
-	// item workflow's own store can resolve.
+	// another manifest row's item root, an out-of-manifest blocker the item
+	// workflow's own store can resolve, or the cross-store gate that stands in
+	// for one it cannot (cross_store_gate.go).
 	BlockerIDs []string
 
-	// Unprojectable are out-of-manifest blockers that are still open and that the
-	// item workflow's own store cannot resolve, so the constraint they express
-	// cannot be written down at all. Sorted, and recorded on the item root by
-	// ensureDrainRowDependencyProjection.
-	Unprojectable []string
+	// Gated are the out-of-manifest blockers, held in another store and still
+	// holding their dependents (open, or closed blocked), that the item waits
+	// for through a cross-store gate rather than an edge. Sorted.
+	Gated []string
 }
 
 // drainBlockerResidence classifies one out-of-manifest blocker for projection.
@@ -805,14 +802,24 @@ const (
 	drainBlockerProjectable
 
 	// drainBlockerSatisfied: the blocker is not co-resident, but it is already
-	// terminal, so it constrains nothing. Omitting the edge loses no meaning —
-	// on a single-store city the edge exists and the readiness reader ignores it
-	// for exactly the same reason.
+	// closed — and not closed blocked (beads.DependencySatisfied) — so it
+	// constrains nothing. Omitting the edge loses no meaning — on a single-store
+	// city the edge exists and the readiness reader ignores it for exactly the
+	// same reason.
 	drainBlockerSatisfied
 
-	// drainBlockerUnprojectable: the blocker is not co-resident and is still an
-	// open constraint. Omitting the edge does lose meaning, so it is recorded.
+	// drainBlockerUnprojectable: the blocker is not co-resident and the drain
+	// found it still holding its dependents: OPEN, or closed blocked, which
+	// readiness and the release pass veto alike. No edge can name it, so the
+	// item waits behind a cross-store gate instead.
 	drainBlockerUnprojectable
+
+	// drainBlockerUnresolved: the blocker is not co-resident and the drain's
+	// own residency frame does not find it at all. That frame is narrower than
+	// the release pass's (it does not read every serving rig), so "not found
+	// here" is not "open": the item still waits behind a gate, but a gate the
+	// release pass already released is left released.
+	drainBlockerUnresolved
 )
 
 // classifyDrainBlocker decides whether an out-of-manifest blocker can be
@@ -824,9 +831,12 @@ const (
 // readiness reader LEFT JOINs the blocker row, so an absent target yields a NULL
 // status that is never 'closed', and the dependent bead drops out of Ready
 // permanently. Closing the real blocker in its own store cannot release it,
-// because the store holding the edge can never see that row. So the choice is
-// not between a strict edge and a loose one, it is between omitting the edge and
-// wedging the workflow forever.
+// because the store holding the edge can never see that row (and bd/Dolt, the
+// other way round, reads a cross-prefix target as external and never blocks on
+// it). So no edge may name a blocker the item's store does not hold: an open
+// one — or one closed blocked — is mirrored by a cross-store gate in the item's
+// own store, which the controller releases when the blocker closes
+// (cross_store_gate.go), and a closed one constrains nothing.
 //
 // Single-store callers skip the check entirely: there is one store, so every id
 // it resolves is co-resident and the probe would be pure overhead.
@@ -854,17 +864,25 @@ func classifyDrainBlocker(store beads.Store, blockerID string, opts ProcessOptio
 		return drainBlockerUnclassified, err
 	}
 	if !found {
-		// Resolvable nowhere: the source member's own edge already dangles.
-		// Report it rather than copying the dangle into another store.
-		return drainBlockerUnprojectable, nil
+		// Not resolvable from here: a dangling edge, or a blocker in a store
+		// this frame does not read (another rig). The release pass, which reads
+		// every serving store, decides.
+		return drainBlockerUnresolved, nil
 	}
-	if convoycore.IsTerminalStatus(owner.Bead.Status) {
+	// Judged by the rule the release pass releases a gate by (blockerReleased)
+	// and readiness releases an edge by, so a blocker closed blocked holds the
+	// item whether it closed before the drain expanded or after. The frame reads
+	// two stores, and the item's own store, asked first, does not hold the
+	// blocker: the copy resolved here is the only one the frame can judge. A copy
+	// in a store outside it (another rig) is the release pass's to judge, which
+	// reads every copy of a gated blocker.
+	if beads.DependencySatisfied(owner.Bead.Status, beads.ReadinessWorkOutcome(owner.Bead.Metadata)) {
 		return drainBlockerSatisfied, nil
 	}
 	return drainBlockerUnprojectable, nil
 }
 
-func drainProjectedBlockerIDs(store beads.Store, memberID string, manifest drainManifest, opts ProcessOptions) (drainBlockerProjection, error) {
+func drainProjectedBlockerIDs(store beads.Store, control beads.Bead, memberID string, manifest drainManifest, opts ProcessOptions) (drainBlockerProjection, error) {
 	rootByMember := drainRootByMember(manifest)
 	manifestMembers := drainManifestMemberIDs(manifest)
 	// A member work bead's dependency edges are co-resident with it and may live
@@ -886,6 +904,17 @@ func drainProjectedBlockerIDs(store beads.Store, memberID string, manifest drain
 			continue
 		}
 		dependsOnID := strings.TrimSpace(dep.DependsOnID)
+		if len(opts.MemberStores) > 0 {
+			// A split city judges what an edge names (owner decision):
+			// "external:<id>" is the bead <id>, and an external capability
+			// names no bead and never blocks, as in bd. A single-store city
+			// projects the edge as written, which bd answers as it always has.
+			target, capability := beads.ExternalBlockerTarget(dependsOnID)
+			if capability {
+				continue
+			}
+			dependsOnID = target
+		}
 		if dependsOnID == "" || dependsOnID == memberID {
 			continue
 		}
@@ -921,45 +950,30 @@ func drainProjectedBlockerIDs(store beads.Store, memberID string, manifest drain
 		case drainBlockerProjectable:
 			projection.BlockerIDs = append(projection.BlockerIDs, blockerID)
 		case drainBlockerSatisfied:
-			opts.tracef("drain: member %s blocker %s is already terminal and lives outside the item workflow's store; not projecting an edge that would constrain nothing", memberID, blockerID)
-		case drainBlockerUnprojectable:
-			projection.Unprojectable = append(projection.Unprojectable, blockerID)
+			opts.tracef("drain: member %s blocker %s is already closed and lives outside the item workflow's store; not projecting an edge that would constrain nothing", memberID, blockerID)
+		case drainBlockerUnprojectable, drainBlockerUnresolved:
+			// The item waits for the blocker through a gate in its own store,
+			// never through an edge naming an id that store cannot hold
+			// (cross_store_gate.go). "" means no gate holds the item: the
+			// release pass released it and this pass did not find the blocker
+			// holding (open, or closed blocked), or an operator overrode it.
+			gateID, err := ensureCrossStoreGate(store, control, blockerID, residence == drainBlockerUnprojectable)
+			if err != nil {
+				return drainBlockerProjection{}, fmt.Errorf("gating member %s on blocker %s: %w", memberID, blockerID, err)
+			}
+			if gateID == "" || seen[gateID] {
+				continue
+			}
+			seen[gateID] = true
+			opts.tracef("drain %s: member %s is blocked by %s, held in another store; its item waits behind cross-store gate %s", control.ID, memberID, blockerID, gateID)
+			projection.BlockerIDs = append(projection.BlockerIDs, gateID)
+			projection.Gated = append(projection.Gated, blockerID)
 		default:
 			return drainBlockerProjection{}, fmt.Errorf("classifying blocker %s for member %s: unclassified residence %d", blockerID, memberID, residence)
 		}
 	}
-	slices.Sort(projection.Unprojectable)
+	slices.Sort(projection.Gated)
 	return projection, nil
-}
-
-// recordUnprojectableDrainBlockers stamps the blockers a drain could not express
-// onto the item root, so an item workflow that runs without a constraint its
-// source member had says so on its own bead instead of only in a log line.
-//
-// It is a durable record rather than a failure on purpose. Refusing the drain
-// would turn the commonest backlog shape — a member with any out-of-convoy
-// `blocks` edge — into a hard control failure on split cities, which is the
-// terminal state this routing exists to remove; and writing the edge anyway
-// wedges the item workflow permanently (see classifyDrainBlocker). Recording is
-// the only option that neither loses the information nor stalls the work.
-func recordUnprojectableDrainBlockers(store beads.Store, control beads.Bead, memberID, rootID string, blockerIDs []string, opts ProcessOptions) error {
-	if len(blockerIDs) == 0 {
-		return nil
-	}
-	value := strings.Join(blockerIDs, ",")
-	root, err := store.Get(rootID)
-	if err != nil {
-		return fmt.Errorf("loading item root %s: %w", rootID, err)
-	}
-	if root.Metadata[beadmeta.DrainUnprojectedBlockersMetadataKey] == value {
-		return nil
-	}
-	opts.tracef("drain %s: member %s is blocked by %s, which the item workflow's store cannot resolve; item root %s runs without that constraint (recorded as %s)",
-		control.ID, memberID, value, rootID, beadmeta.DrainUnprojectedBlockersMetadataKey)
-	if err := store.SetMetadata(rootID, beadmeta.DrainUnprojectedBlockersMetadataKey, value); err != nil {
-		return fmt.Errorf("recording unprojectable blockers on item root %s: %w", rootID, err)
-	}
-	return nil
 }
 
 func ensureDrainWorkflowBlocksOn(store beads.Store, rootID, blockerID string) error {

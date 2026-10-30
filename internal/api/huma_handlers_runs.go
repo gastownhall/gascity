@@ -356,7 +356,7 @@ func (s *Server) forgetRunProjectionMiss(ctx context.Context, runID string) {
 
 // runCanceledCloseReason is the close_reason stamped on beads wound down by a run
 // cancel, distinguishing an operator cancel from a skip-directive teardown.
-const runCanceledCloseReason = "run canceled via POST /runs/{id}/cancel"
+const runCanceledCloseReason = sourceworkflow.RunCanceledCloseReason
 
 // humaHandleRunCancel is the Huma-typed handler for
 // POST /v0/city/{cityName}/runs/{run_id}/cancel. Its first write marks the run
@@ -489,7 +489,17 @@ func (s *Server) cancelRun(runID string, interrupt func(holders []string)) (canc
 		if info.store == nil {
 			continue
 		}
-		roots, err := findWorkflowRoots(info.store, runID)
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// One leg of the workflowStores federation (graph, city, rigs): the
+		// root probes miss on every leg but the one that owns the run.
+		var roots []beads.Bead
+		err := beads.RelicRead(func() error {
+			var findErr error
+			roots, findErr = findWorkflowRoots(info.store, runID)
+			return findErr
+		})
 		if err != nil {
 			return res, err
 		}

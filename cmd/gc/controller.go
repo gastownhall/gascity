@@ -1598,12 +1598,10 @@ func runController(
 	// Best-effort — a sweep failure must never block startup, and the lazy
 	// reclaim path still releases such claims when the configured identity
 	// reclaims its name.
-	if cs.cityBeadStore != nil {
-		if released, err := sessionpkg.ReleaseStaleConfiguredNameClaims(cs.cityBeadStore, cfg, cityName); err != nil {
-			fmt.Fprintf(stderr, "controller: stale name-claim sweep: %v\n", err) //nolint:errcheck // best-effort stderr
-		} else if released > 0 {
-			fmt.Fprintf(stderr, "controller: released %d stale configured name claim(s) at startup\n", released) //nolint:errcheck // best-effort stderr
-		}
+	if released, err := releaseStaleNameClaimsAtStartup(cs, cfg, cityName); err != nil {
+		fmt.Fprintf(stderr, "controller: stale name-claim sweep: %v\n", err) //nolint:errcheck // best-effort stderr
+	} else if released > 0 {
+		fmt.Fprintf(stderr, "controller: released %d stale configured name claim(s) at startup\n", released) //nolint:errcheck // best-effort stderr
 	}
 
 	cs.startBeadEventWatcher(ctx)
@@ -1730,4 +1728,24 @@ func (r *singleCityStateResolver) CityState(name string) api.State {
 		return r.state
 	}
 	return nil
+}
+
+// releaseStaleNameClaimsAtStartup is the one-time startup sweep that releases
+// the runtime name claims closed configured named-session beads still hold
+// (ga-n2d Gap C), run by both the standalone controller and the supervisor.
+//
+// It sweeps the SESSIONS store. Session beads are session class, so on a split
+// city they live only in the class binding; the sweep used to read the work
+// store and was a silent no-op there, leaving only the lazy reclaim (write-audit
+// B8). On a single-store city the sessions store is the work store, so nothing
+// changes.
+func releaseStaleNameClaimsAtStartup(cs *controllerState, cfg *config.City, cityName string) (int, error) {
+	if cs == nil {
+		return 0, nil
+	}
+	store := cs.SessionsBeadStore().Store
+	if store == nil {
+		return 0, nil
+	}
+	return sessionpkg.ReleaseStaleConfiguredNameClaims(store, cfg, cityName)
 }

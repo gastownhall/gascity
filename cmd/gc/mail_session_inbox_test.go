@@ -22,10 +22,26 @@ import (
 // the session's routes, a closed predecessor's routes (here the holder of the
 // earlier alias "old-sky"), and never a live session's (here the holder of
 // "older-sky").
+//
+// With message listed in [ops] authoritative the city's mail provider carries
+// the lane notice withdrawal (withMailNoticeWithdrawal), and every self-read
+// still answers from the session inbox.
 func TestSelfReadsAgreeOnTheSessionInbox(t *testing.T) {
+	for name, authoritative := range map[string][]string{"message unlisted": nil, "message listed": {"message"}} {
+		t.Run(name, func(t *testing.T) {
+			cfg := &config.City{}
+			cfg.Ops.Authoritative = authoritative
+			selfReadsAgreeOnTheSessionInbox(t, func(p mail.Provider, store beads.Store) mail.Provider {
+				return withMailNoticeWithdrawal(p, store, cfg, io.Discard)
+			})
+		})
+	}
+}
+
+func selfReadsAgreeOnTheSessionInbox(t *testing.T, wrap func(mail.Provider, beads.Store) mail.Provider) {
 	clearGCEnv(t)
 	store := beads.NewMemStore()
-	mp := beadmail.New(store)
+	mp := wrap(beadmail.New(store), store)
 	createSession := func(metadata map[string]string, closed bool) string {
 		t.Helper()
 		b, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: metadata})

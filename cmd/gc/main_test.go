@@ -347,7 +347,10 @@ func TestMain(m *testing.M) {
 	// children above keep the real installer: their scripts run follow-on
 	// commands that need the installed imports.
 	configureInitRemoteImportsForTests()
-	doltGuard := newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
+	// The tests run innermost, under every check below; splitStrictTestingM,
+	// outermost, reads their code apart from the checks' code.
+	tests := &splitStrictTestsM{m: m}
+	doltGuard := newDoltLeakGuardedTestingM(tests, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
 	testProcessTeardown = func() {
 		doltGuard.cleanupTemporaryPaths()
 		reapManagedDoltTestProcesses()
@@ -365,6 +368,7 @@ func TestMain(m *testing.M) {
 	if tmuxSocketCleanupRoot != "" {
 		testRunner = cleanupTestingM{m: testRunner, paths: []string{tmuxSocketCleanupRoot}}
 	}
+	testRunner = splitStrictTestingM{checks: testRunner, tests: tests}
 	testscript.Main(testRunner, map[string]func(){
 		"gc": testscriptGC,
 		"bd": bdTestCmd,
@@ -7607,6 +7611,10 @@ prompt_template = "prompts/probe.md"
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Session rows are seeded and read back through the session-class store,
+	// where gc prime's session-name lookup reads them (cliSessionName): the
+	// fixture now matches the production path.
+	store = cliSessionStore(store, nil, dir)
 	sessionBead, err := store.Create(beads.Bead{
 		Title: "probe",
 		Type:  sessionBeadType,
@@ -7646,6 +7654,7 @@ prompt_template = "prompts/probe.md"
 	if err != nil {
 		t.Fatal(err)
 	}
+	updatedStore = cliSessionStore(updatedStore, nil, dir)
 	updated, err := updatedStore.Get(sessionBead.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -7687,6 +7696,10 @@ prompt_template = "prompts/probe.md"
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Session rows are seeded and read back through the session-class store,
+	// where gc prime's session-name lookup reads them (cliSessionName): the
+	// fixture now matches the production path.
+	store = cliSessionStore(store, nil, dir)
 	sessionBead, err := store.Create(beads.Bead{
 		Title: "probe",
 		Type:  "session",
@@ -7726,6 +7739,7 @@ prompt_template = "prompts/probe.md"
 	if err != nil {
 		t.Fatal(err)
 	}
+	updatedStore = cliSessionStore(updatedStore, nil, dir)
 	updated, err := updatedStore.Get(sessionBead.ID)
 	if err != nil {
 		t.Fatal(err)

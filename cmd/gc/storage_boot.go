@@ -113,6 +113,10 @@ type storageRoutes struct {
 	// stores map, which holds what storage boot opened. The keys are the bare
 	// engines the census read.
 	relics map[beads.Store]bool
+	// rigMarkers locates the per-rig import records the S4 relic-free
+	// predicate reads (rigGraphRelicFree). Nil means unknown, and unknown keeps
+	// every rig's relic leg.
+	rigMarkers *rigGraphMarkers
 }
 
 // hasLegacyResidents reports the boot census's verdict for a binding store.
@@ -415,6 +419,15 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 			return nil, storageGateTransientFault{err: errors.New(advice)}
 		}
 		return nil, errors.New(advice)
+	}
+	// A rig whose import was interrupted during its clear holds twins: the
+	// same bead in the rig store and in the binding. File reads only, per rig
+	// (rig_import_census.go); a rig merely awaiting import serves, its relic
+	// legs keeping it readable, and the controller's boot census names it.
+	if target.Root != "" {
+		if err := rigBootRefusal(cityPath, target); err != nil {
+			return nil, fmt.Errorf("%s: %w", logPrefix, err)
+		}
 	}
 	// The serving outcome is published before the binding opens, so a boot
 	// whose open then fails has already reported converged. That ordering
@@ -833,6 +846,13 @@ func openStorageRoutes(plan *storebinding.StoragePlan, target infraBindingTarget
 	}
 	for _, class := range planned.AssignedClasses.Classes() {
 		routes.stores[class] = store
+	}
+	if target.Root != "" {
+		markers := &rigGraphMarkers{bindingRoot: target.Root, cityPath: cityPath}
+		if cfg != nil {
+			markers.rigs = append([]config.Rig(nil), cfg.Rigs...)
+		}
+		routes.rigMarkers = markers
 	}
 	return routes, nil
 }

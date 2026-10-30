@@ -2,6 +2,9 @@
 /.github/CODEOWNERS @gastownhall/gascity-admin
 /.github/workflows/ @gastownhall/gascity-admin
 /.github/actions/ @gastownhall/gascity-admin
+# The scripts those workflows and actions run, the storeclass gate's
+# go-mod-download among them, before anything trusted is built.
+/.github/scripts/ @gastownhall/gascity-admin
 # Run on rbe-worker-legacy.yml's worker VM before the step that holds the
 # worker certificate.
 /tools/rbe/worker-env-grace @gastownhall/gascity-admin
@@ -16,6 +19,21 @@
 /go.sum @gastownhall/gascity-admin
 /Dockerfile* @gastownhall/gascity-admin
 /scripts/ @gastownhall/gascity-admin
+# The storeclass lint: its analyzer, baseline, ceiling, allowlist, sealed
+# lists and generator. Raising raw-store debt, or weakening what the lint
+# sees, is a coordinator decision (tools/nogo/analyzers/storeclass).
+/tools/nogo/analyzers/storeclass/ @gastownhall/gascity-admin
+# What makes nogo run it: the analyzer set, the nogo target, and the rules_go
+# patches that make nolint unable to suppress storeclass and feed it the
+# baseline. MODULE.bazel's rules_go override and go_sdk.nogo registration, and
+# config.json's _base and storeclass scopes, are guarded by the storeclass
+# growth gate instead (cmd/storeclass-baseline wirings): owning those files
+# whole would put every dependency bump and every other analyzer's settings
+# behind an admin review.
+/tools/nogo/analyzers.bzl @gastownhall/gascity-admin
+/tools/nogo/BUILD.bazel @gastownhall/gascity-admin
+/third_party/patches/rules_go_nogo_golangci_nolint.patch @gastownhall/gascity-admin
+/third_party/patches/rules_go_nogo_main_repo_data.patch @gastownhall/gascity-admin
 /contrib/k8s/ @gastownhall/gascity-admin
 /internal/buildimage/ @gastownhall/gascity-admin
 /internal/api/dashboardspa/web/package.json @gastownhall/gascity-admin

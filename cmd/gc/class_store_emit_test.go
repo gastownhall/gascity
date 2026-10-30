@@ -1435,7 +1435,7 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 	t.Run("control dispatcher graph store", func(t *testing.T) {
 		cityPath, cfg := fencedMigratedOneShotCLICity(t, "require")
 		captureCLIStorageStderr(t)
-		graph := scopeGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
+		graph := controlGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
 
 		writer, _, err := beads.ResolveConditionalWriter(graph)
 		if _, emitting := writer.(*emittingClassStore); err != nil || !emitting {
@@ -1482,7 +1482,7 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 	t.Run("fenced molecule attach through the dispatcher's graph store", func(t *testing.T) {
 		cityPath, cfg := fencedMigratedOneShotCLICity(t, "auto")
 		captureCLIStorageStderr(t)
-		graph := scopeGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
+		graph := controlGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
 
 		root, err := graph.Create(beads.Bead{Title: "workflow", Type: "task", Status: "open", Metadata: map[string]string{
 			beadmeta.KindMetadataKey: "workflow", "gc.formula_contract": "graph.v2",
@@ -1742,12 +1742,22 @@ func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
 		reflect.TypeOf(&beads.NativeDoltStore{}): {
 			"AdvanceSequenceFloor", "AtomicConditionalCloserHandle", "CachedReadExact",
 			"ConditionalWritesModeSource", "CreateWithStorage", "DepAddWithMetadata",
-			"HasResidentOutside", "NamespaceCensusHandle", "ReadyContext",
+			"HasResidentOutside", "NamespaceCensusHandle",
+			// ReadyBlockedByAbsent over native Dolt reports no rows, and
+			// StrandsAbsentTargets answers false, so ReadyBlockedByAbsentFor
+			// finds no listing, as over the bare engine: bd never strands a
+			// dependent behind an absent blocker (it reads it as external).
+			"ReadyBlockedByAbsent", "ReadyContext",
 			"SequenceFloor", "SetSequenceFloor", "StoreHealthPath",
+			"StrandsAbsentTargets",
 		},
 		reflect.TypeOf(&beads.SQLiteStore{}): {
 			"ConditionalWritesModeSource", "Count", "DepListBatch",
 			"EventsJournalActive", "NamespaceCensusHandle", "ReadEventsJournalPage",
+			// GetExactBatch over a SQLite binding reports
+			// beads.ErrExactBatchGetUnsupported, and the caller reads per id:
+			// the path it takes when the wrapper lacks the method.
+			"GetExactBatch",
 			// ReadyOrdered over a SQLite binding delegates to beads.ReadyOrdered,
 			// which reads a store without the capability whole and reports
 			// ordered=false: the path a caller takes when the wrapper lacks it.

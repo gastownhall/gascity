@@ -2514,7 +2514,8 @@ func TestSessionHandleStartResolvedUsesProvidedRuntime(t *testing.T) {
 }
 
 func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *testing.T) {
-	handle, _, sp, _ := newTestSessionHandle(t, SessionSpec{
+	searchBase := t.TempDir()
+	handle, _, sp, manager := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileClaudeTmuxCLI,
 		Template: "probe",
 		Title:    "Probe",
@@ -2541,6 +2542,18 @@ func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *tes
 	}
 	if strings.Contains(firstCommand, "--resume") {
 		t.Fatalf("first start command = %q, want no --resume", firstCommand)
+	}
+	info, err := manager.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", handle.sessionID, err)
+	}
+	handle.searchPaths = []string{searchBase}
+	transcriptDir := filepath.Join(searchBase, sessionlog.ProjectSlug(info.WorkDir))
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(transcriptDir, info.SessionKey+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
 	}
 
 	if err := handle.Stop(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {

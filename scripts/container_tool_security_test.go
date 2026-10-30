@@ -101,6 +101,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		goModPinnedArg{"GRPC_VERSION", "google.golang.org/grpc", "v1.83.2"},
 		goModPinnedArg{"THRIFT_VERSION", "github.com/apache/thrift", "v0.24.0"},
 		goModPinnedArg{"XNET_VERSION", "golang.org/x/net", "v0.60.0"},
+		goModPinnedArg{"JOSE_VERSION", "github.com/go-jose/go-jose/v4", "v4.1.6"},
 	)
 	for _, want := range []string{
 		"ARG BD_VERSION=" + bdVersion,
@@ -116,6 +117,8 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} "`,
 		`go get "golang.org/x/net@v${XNET_VERSION}"`,
 		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/net v${XNET_VERSION} "`,
+		`go get "github.com/go-jose/go-jose/v4@v${JOSE_VERSION}"`,
+		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/go-jose/go-jose/v4 v${JOSE_VERSION} "`,
 		`CGO_ENABLED=1 go build`,
 		`-tags="gms_pure_go"`,
 		`-X main.Version=${bd_version}`,
@@ -162,9 +165,10 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"mcp>=1.30.0",
 		"urllib3>=2.8.0",
 		"fsspec>=2026.6.0",
-		"litellm>=1.89.7",
+		"litellm>=1.106.3",
 		"filelock>=3.29.0,<4",
 		"opentelemetry-api>=1.45.1",
+		"dnspython>=2.9.0",
 	} {
 		if !strings.Contains(input, want) {
 			t.Errorf("mcp-agent-mail input requirements missing security floor %q", want)
@@ -175,6 +179,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"cryptography>=50.0.0",
 		"pyjwt>=2.15.0",
 		"fastmcp>=3.4.10",
+		"authlib>=1.9.1",
 	} {
 		if !strings.Contains(overrides, want) {
 			t.Errorf("mcp-agent-mail overrides missing security floor %q", want)
@@ -192,11 +197,13 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"pyjwt==2.15.1 \\",
 		"urllib3==2.8.0 \\",
 		"fsspec==2026.6.0 \\",
-		"litellm==1.89.7 \\",
+		"litellm==1.106.3 \\",
 		"fastmcp==3.4.10 \\",
 		"fastmcp-slim==3.4.10 \\",
 		"filelock==3.29.0 \\",
 		"opentelemetry-api==1.45.1 \\",
+		"authlib==1.9.1 \\",
+		"dnspython==2.9.0 \\",
 		// Lock-only CVE bumps: no input floor, so this pin is their only guard.
 		"bleach==6.4.0 \\",
 		"h2==4.4.1 \\",
@@ -450,6 +457,7 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		goModPinnedArg{"XMOD_VERSION", "golang.org/x/mod", "v0.41.0"},
 		goModPinnedArg{"THRIFT_VERSION", "github.com/apache/thrift", "v0.24.0"},
 		goModPinnedArg{"COMPRESS_VERSION", "github.com/klauspost/compress", "v1.18.7"},
+		goModPinnedArg{"JOSE_VERSION", "github.com/go-jose/go-jose/v4", "v4.1.6"},
 	)
 
 	// gh needs x/text, x/net and x/mod. Its pinned source selects x/crypto v0.53.0, below
@@ -470,6 +478,8 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		"golang.org/x/text":             "XTEXT_VERSION",
 		"github.com/apache/thrift":      "THRIFT_VERSION",
 		"github.com/klauspost/compress": "COMPRESS_VERSION",
+		// Dolt's pinned source selects go-jose/v4 4.1.4 (CVE-2026-116587).
+		"github.com/go-jose/go-jose/v4": "JOSE_VERSION",
 	}
 	// Each `go get` is looked for inside its own stanza. gh and Dolt share the x/text
 	// override verbatim, so a file-wide search lets one stand in for the other and a

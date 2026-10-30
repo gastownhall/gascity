@@ -317,6 +317,11 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		writeError(w, http.StatusBadRequest, "invalid", "async session creation is only supported for configured agent templates")
 		return
 	}
+	if err := s.checkInitialMessage(body.Message); err != nil {
+		s.idem.unreserve(idemKey)
+		writeHumaStatusError(w, err)
+		return
+	}
 
 	workDir := s.state.CityPath()
 
@@ -411,7 +416,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 
 	// Deliver initial message if provided.
 	if msg := strings.TrimSpace(body.Message); msg != "" {
-		if _, sendErr := s.submitMessageToSession(r.Context(), store.Store, info.ID, msg, session.SubmitIntentDefault, false); sendErr != nil {
+		if sendErr := s.deliverInitialMessage(r.Context(), store.Store, info.ID, msg); sendErr != nil {
 			log.Printf("session %s: initial message delivery failed: %v", info.ID, sendErr)
 			rollbackErr := s.rollbackCreatedSession(store, info.ID)
 			s.idem.unreserve(idemKey)
