@@ -812,11 +812,14 @@ func nonNegativeDuration(d time.Duration) time.Duration {
 	return d
 }
 
+// formatOrderFiringDuration prints durations under two minutes as whole
+// seconds, so a sub-minute order's cadence stays visible, and longer ones as
+// whole minutes or hours.
 func formatOrderFiringDuration(d time.Duration) string {
-	d = d.Round(time.Minute)
-	if d == 0 {
-		return "0s"
+	if seconds := d.Round(time.Second); seconds < 2*time.Minute {
+		return fmt.Sprintf("%ds", int(seconds/time.Second))
 	}
+	d = d.Round(time.Minute)
 	if d%time.Hour == 0 {
 		return fmt.Sprintf("%dh", int(d/time.Hour))
 	}

@@ -816,8 +816,8 @@ func TestOrderFiringCurrent_SubMinuteCooldownWithinPatrolTickIsOK(t *testing.T) 
 	if result.Status != StatusOK {
 		t.Fatalf("status = %v, want OK; msg = %s; details = %v", result.Status, result.Message, result.Details)
 	}
-	if len(result.Details) != 1 || strings.Contains(result.Details[0], "(overdue)") || strings.Contains(result.Details[0], "stale") {
-		t.Fatalf("details = %v, want one on-cadence detail line", result.Details)
+	if want := []string{"fast-cooldown: last fired 60s ago, expected every 30s"}; strings.Join(result.Details, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("details = %q, want %q", result.Details, want)
 	}
 }
 
@@ -982,5 +982,30 @@ func TestEventEvidenceSufficesMatchesOverdueLine(t *testing.T) {
 				t.Fatalf("status = %v, want %v; msg = %s; details = %v", result.Status, tt.wantStatus, result.Message, result.Details)
 			}
 		})
+	}
+}
+
+// Durations under two minutes print as whole seconds, so a sub-minute order's
+// detail line shows its real cadence; longer ones keep whole minutes or hours.
+func TestFormatOrderFiringDuration(t *testing.T) {
+	for _, tt := range []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "0s"},
+		{30 * time.Second, "30s"},
+		{60 * time.Second, "60s"},
+		{75 * time.Second, "75s"},
+		{119 * time.Second, "119s"},
+		{time.Minute + 59*time.Second + 400*time.Millisecond, "119s"},
+		{time.Minute + 59*time.Second + 600*time.Millisecond, "2m"},
+		{2 * time.Minute, "2m"},
+		{2*time.Minute + 29*time.Second, "2m"},
+		{90 * time.Minute, "90m"},
+		{4 * time.Hour, "4h"},
+	} {
+		if got := formatOrderFiringDuration(tt.d); got != tt.want {
+			t.Errorf("formatOrderFiringDuration(%s) = %q, want %q", tt.d, got, tt.want)
+		}
 	}
 }
