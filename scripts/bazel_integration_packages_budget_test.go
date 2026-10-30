@@ -41,6 +41,7 @@ var integrationPackagesShards = map[string]int{
 	"//internal/beads/exec:exec_test":                            1,
 	"//internal/beads:beads_test":                                11,
 	"//internal/credentialprovider:credentialprovider_test":      1,
+	"//internal/doctor:doctor_test":                              1,
 	"//internal/orders:orders_test":                              1,
 	"//internal/processgroup:processgroup_test":                  1,
 	"//internal/runtime/acp:acp_test":                            1,
@@ -232,7 +233,7 @@ func TestIntegrationPackagesFitsTheJobsBudget(t *testing.T) {
 // first scheduling wave. Farm owner maintainer-city-c3's before/after found
 // no lane gain and a farm guard regression (OSS queue-wait p95 8.9s->22.9s),
 // so #7795 was reverted and the lane is back to running in two waves under
-// the inherited --jobs=64. 85 test actions (aquery-verified, see
+// the inherited --jobs=64. 87 test actions (aquery-verified, see
 // integrationPackagesShards above) is accepted as a known, pinned exception
 // so the budget check still catches further growth. If the count grows
 // above this pin, that is this lane asking for a bigger second-wave tail,
@@ -242,10 +243,16 @@ func TestIntegrationPackagesFitsTheJobsBudget(t *testing.T) {
 // 2026-10-24 for //test/conversationlane's split: its one 395-450 s action,
 // the lane's last from #8147 on, became six that run side by side (the
 // longest about 200 s), so its five new actions shorten the lane's tail.
-// Raised to 86 on 2026-10-31 for //cmd/gc-osc7501:gc-osc7501_test (the
-// OSC 7501 companion against a scratch tmux, about 4 s), which runs inside
-// the second wave without lengthening its tail.
-const integrationPackagesTwoWaveExceptionPinned = 86
+// Raised from 85 to 86 on 2026-10-31 for //cmd/gc-osc7501:gc-osc7501_test
+// (the OSC 7501 companion against a scratch tmux, about 4 s), which runs
+// inside the second wave without lengthening its tail. Raised from 86 to
+// 87 on 2026-10-30 for gascity#8504's fix: its new
+// //internal/doctor:doctor_test regression test gates on
+// processgrouptest.RequireRealProcessSignals, joining the lane as a single
+// new one-shard action (the test needs real process signals to confirm a
+// wedged pack script is actually killed, not just abandoned). Both land
+// together, so the pin reflects both new one-shard actions.
+const integrationPackagesTwoWaveExceptionPinned = 87
 
 // checkIntegrationPackagesJobsBudget reports whether total (the lane's test
 // action count) is acceptable against effective (its --jobs). total may
