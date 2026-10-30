@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 )
 
@@ -192,5 +193,106 @@ command = "npx"
 		if !strings.Contains(joined, want) {
 			t.Fatalf("details %q missing %q", joined, want)
 		}
+	}
+}
+
+func TestMCPSharedTargetDoctorCheckAgreesWithStage1Gate(t *testing.T) {
+	// mcp-shared-target must flag a stage-1 conflict exactly when the start
+	// gate rejects the city: each row asserts the two verdicts match.
+	rows := []struct {
+		name string
+		cfg  func(t *testing.T, cityPath string) *config.City
+	}{
+		{
+			name: "shared city catalog keeps implicit and explicit agents OK",
+			cfg: func(t *testing.T, cityPath string) *config.City {
+				writeMCPSource(t, filepath.Join(cityPath, "mcp", "kb.toml"), `
+name = "kb"
+command = "uvx"
+`)
+				return &config.City{
+					PackMCPDir: filepath.Join(cityPath, "mcp"),
+					Session:    config.SessionConfig{Provider: "tmux"},
+					Providers:  builtinProviderAliasesForTest("claude"),
+					Agents: []config.Agent{
+						{Name: "mayor", Scope: "city", Provider: "claude"},
+						{Name: "claude", Scope: "city", Provider: "claude", Implicit: true},
+					},
+				}
+			},
+		},
+		{
+			name: "agent-local catalog against implicit agent fails both",
+			cfg: func(t *testing.T, cityPath string) *config.City {
+				agentLocal := filepath.Join(cityPath, "agents", "mayor", "mcp", "notes.toml")
+				writeMCPSource(t, agentLocal, `
+name = "notes"
+command = "uvx"
+`)
+				return &config.City{
+					Session:   config.SessionConfig{Provider: "tmux"},
+					Providers: builtinProviderAliasesForTest("claude"),
+					Agents: []config.Agent{
+						{Name: "mayor", Scope: "city", Provider: "claude", MCPDir: filepath.Dir(agentLocal)},
+						{Name: "claude", Scope: "city", Provider: "claude", Implicit: true},
+					},
+				}
+			},
+		},
+		{
+			name: "agent-local catalog against empty-catalog peer fails both",
+			cfg: func(t *testing.T, cityPath string) *config.City {
+				agentLocal := filepath.Join(cityPath, "agents", "mayor", "mcp", "notes.toml")
+				writeMCPSource(t, agentLocal, `
+name = "notes"
+command = "uvx"
+`)
+				return &config.City{
+					Session:   config.SessionConfig{Provider: "tmux"},
+					Providers: builtinProviderAliasesForTest("claude"),
+					Agents: []config.Agent{
+						{Name: "mayor", Scope: "city", Provider: "claude", MCPDir: filepath.Dir(agentLocal)},
+						{Name: "deputy", Scope: "city", Provider: "claude"},
+					},
+				}
+			},
+		},
+		{
+			name: "acp session shares no target with a stage-1 agent",
+			cfg: func(t *testing.T, cityPath string) *config.City {
+				writeMCPSource(t, filepath.Join(cityPath, "mcp", "notes.toml"), `
+name = "notes"
+command = "uvx"
+`)
+				writeMCPSource(t, filepath.Join(cityPath, "agents", "relay", "mcp", "private.toml"), `
+name = "private"
+command = "private-mcp"
+`)
+				acp := true
+				providers := builtinProviderAliasesForTest("claude")
+				providers["relay"] = config.ProviderSpec{Base: ptrString("builtin:claude"), Command: "echo", PromptMode: "none", SupportsACP: &acp, ACPCommand: "echo"}
+				return &config.City{
+					PackMCPDir: filepath.Join(cityPath, "mcp"),
+					Session:    config.SessionConfig{Provider: "tmux"},
+					Providers:  providers,
+					Agents: []config.Agent{
+						{Name: "mayor", Scope: "city", Provider: "claude"},
+						{Name: "relay", Scope: "city", Provider: "relay", Session: "acp", MCPDir: filepath.Join(cityPath, "agents", "relay", "mcp")},
+					},
+				}
+			},
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			cfg := row.cfg(t, cityPath)
+			_, gateErr := buildStage1MCPTargets(cityPath, cfg, stubLookPath, io.Discard)
+			result := newMCPSharedTargetDoctorCheck(cityPath, cfg, stubLookPath).Run(&doctor.CheckContext{CityPath: cityPath})
+			if gateRejected := gateErr != nil; gateRejected != (result.Status == doctor.StatusError) {
+				t.Fatalf("start gate rejected = %v (%v), doctor status = %v (%q; %v); the two must agree",
+					gateRejected, gateErr, result.Status, result.Message, result.Details)
+			}
+		})
 	}
 }
