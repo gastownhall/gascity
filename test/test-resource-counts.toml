@@ -556,6 +556,12 @@ resource = "net_listen"
 calls = 2
 
 [[count]]
+path = "cmd/gc/cmd_supervisor_proc_readers_integration_linux_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
 path = "cmd/gc/cmd_supervisor_processgroup_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -3242,6 +3248,18 @@ tagged = true
 path = "test/integration/dolt_persistence_test.go"
 resource = "subprocess"
 calls = 7
+tagged = true
+
+[[count]]
+path = "test/integration/drift_sysprocattr_linux_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/integration/drift_sysprocattr_linux_test.go"
+resource = "subprocess"
+calls = 2
 tagged = true
 
 [[count]]

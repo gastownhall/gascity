@@ -1339,6 +1339,8 @@ go_test(
         "cmd_supervisor_lifecycle_actor_test.go",
         "cmd_supervisor_portcollision_test.go",
         "cmd_supervisor_prefork_warning_test.go",
+        "cmd_supervisor_proc_readers_integration_linux_test.go",
+        "cmd_supervisor_proc_readers_test.go",
         "cmd_supervisor_processgroup_test.go",
         "cmd_supervisor_runtime_test.go",
         "cmd_supervisor_sdnotify_test.go",

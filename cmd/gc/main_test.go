@@ -245,6 +245,7 @@ func exitTestProcess(code int) {
 }
 
 func TestMain(m *testing.M) {
+	maybeRunSupervisorProcReaderSelfCheck()
 	maybeRunHostedBeadsCredentialProvider()
 	maybeRunProductMetricsDirectChildEnvSpy()
 	maybeRunFakeDoltSQLServer()

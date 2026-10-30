@@ -134,6 +134,8 @@ cmd_gc_integration_tests=(
   TestBlockedRepairOnRealBdRestoresOverBlockedWork
   TestCapstoneIntegrationRealMinter
   TestControllerDiscoversAddedCronOrderWithoutRestart
+  TestDiscoverLeakedSupervisorProcsExcludesCaller
+  TestDiscoverLeakedSupervisorProcsIncludesLiveChild
   TestGcBdBurnAndWispGCJudgesReadRealBd
   TestGcBdBurnJudgeCoversAProxiedServerCascade
   TestGcBdMolWispRootOnlyMintsOneWorkBead
@@ -144,6 +146,11 @@ cmd_gc_integration_tests=(
   TestPhase2RealTransportResultStillFailsWhenGenuinelyBroken
   TestPhase2RealTransportResultToleratesASlowButCorrectStart
   TestPhase2WorkerCoreRealTransportProof
+  TestReadLeakedSupervisorProcFiltersCommandLine
+  TestReadLeakedSupervisorProcPreservesKernelIdentity
+  TestReadLeakedSupervisorProcRejectsExitedChild
+  TestReadLeakedSupervisorProcReportsCWDState
+  TestReadLeakedSupervisorProcReportsGCHomeState
   TestRigAddIncludeResolvesScopedRegistryPackName
   TestStartRecyclePinsThePeeksObjectOnRealTmux
   TestStartRecycleQuarantinesARateLimitCorpseOnRealTmux
