@@ -815,6 +815,37 @@ func TestReaperTypeSafeSessionPruneDeletesThroughBd(t *testing.T) {
 	}
 }
 
+// A one-id --from-file batch takes bd's single-id delete path, whose --json
+// reply is {"deleted":"<id>",...} with no deleted_count. The reaper must
+// count that batch as one deletion, not escalate it as a failed prune.
+func TestReaperTypeSafeSessionPruneCountsSingleIDBatch(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "batches")
+	f := newScopeFixture(t, `
+  *"issue_type='session'"*"LIMIT 500"*)
+    n=0
+    [ -f "`+stateFile+`" ] && n=$(cat "`+stateFile+`")
+    if [ "$n" = "0" ]; then
+      printf '1' > "`+stateFile+`"
+      printf 'id\ngc-session-1\n'
+    else
+      printf 'id\n'
+    fi
+    ;;`)
+	f.env["GC_REAPER_SESSION_BEAD_PATTERN"] = ""
+	f.runReaper(t)
+
+	if !strings.Contains(f.read(t, f.bdLog), "args=delete --force --json --from-file ") {
+		t.Fatalf("type-safe session prune did not delete through bd:\n%s", f.read(t, f.bdLog))
+	}
+	gcLog := f.read(t, f.gcLog)
+	if strings.Contains(gcLog, "type-safe session prune failed") || strings.Contains(gcLog, "ESCALATION") {
+		t.Fatalf("a successful one-id delete was escalated as a failed prune:\n%s", gcLog)
+	}
+	if !strings.Contains(gcLog, "sessions-pruned:1") {
+		t.Fatalf("summary did not count the one deleted session:\n%s", gcLog)
+	}
+}
+
 func TestReaperWritesNoOutcomeWithoutControllerFile(t *testing.T) {
 	f := newScopeFixture(t, "")
 	delete(f.env, "GC_ORDER_OUTCOME_FILE")
