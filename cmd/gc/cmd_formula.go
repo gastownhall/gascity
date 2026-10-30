@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/spf13/cobra"
+
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -21,7 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
-	"github.com/spf13/cobra"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 func newFormulaCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -1198,8 +1200,9 @@ func emitFormulaCookExecutionFacts(graphStore, workStore beads.Store, cityPath s
 	}
 }
 
-func emitAttachedFormulaCookExecutionFacts(store beads.Store, cfg *config.City, cityPath, workflowRootID string, stderr io.Writer) {
-	if err := executionevent.EmitCurrent(openCityRecorderAt(cityPath, stderr), beads.GraphStore{Store: resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)}, beads.WorkStore{Store: store}, workflowRootID, "formula-cook"); err != nil {
+func emitAttachedFormulaCookExecutionFacts(store beads.Store, _ *config.City, cityPath, workflowRootID string, stderr io.Writer) {
+	stores := cliStores(cityPath, storeref.Leg{Store: store})
+	if err := executionevent.EmitCurrent(openCityRecorderAt(cityPath, stderr), stores.Graph(storeref.WorkRef), stores.Work(), workflowRootID, "formula-cook"); err != nil {
 		fmt.Fprintf(stderr, "warning: gc formula cook: projecting execution facts for %s: %v\n", workflowRootID, err) //nolint:errcheck // successful attach is preserved
 	}
 }

@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -256,11 +257,16 @@ func (s *seededState) ScopedStoreLike(context.Context, beads.Store) (beads.Store
 	return nil, nil
 }
 
+// classStores mints the seeded city's handles: a single-store topology, so
 // NudgesBeadStore, SessionsBeadStore, GraphBeadStore and OrdersBeadStore all
-// collapse to the city store on a seeded single-store city, exactly as they do
-// on a default (non-relocated) controller city.
+// wrap the city store, exactly as they do on a default (non-relocated)
+// controller city.
+func (s *seededState) classStores() storeref.Stores {
+	return storeref.NewStores(storeref.Topology{Work: storeref.Leg{Store: s.cityStore}}, storeref.StoresOptions{})
+}
+
 func (s *seededState) NudgesBeadStore() beads.NudgesStore {
-	return beads.NudgesStore{Store: s.cityStore}
+	return s.classStores().Nudges()
 }
 
 // NudgeQueue is the city's state.json queue over the seeded city store.
@@ -269,15 +275,15 @@ func (s *seededState) NudgeQueue() NudgeQueue {
 }
 
 func (s *seededState) SessionsBeadStore() beads.SessionStore {
-	return beads.SessionStore{Store: s.cityStore}
+	return s.classStores().Sessions()
 }
 
 func (s *seededState) GraphBeadStore() beads.GraphStore {
-	return beads.GraphStore{Store: s.cityStore}
+	return s.classStores().Graph(storeref.WorkRef)
 }
 
 func (s *seededState) OrdersBeadStore() beads.OrdersStore {
-	return beads.OrdersStore{Store: s.cityStore}
+	return s.classStores().Orders(storeref.WorkRef)
 }
 
 // ClassBindingHasLegacyResidents answers true for everything: a seeded city

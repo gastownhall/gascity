@@ -89,11 +89,9 @@ func (cr *CityRuntime) newPlannerHost() plannerHost {
 				return readStartupHealthEpisodes(cr.v2SessionsStore())
 			},
 			Suspension: func() suspensionstate.State { return loadSuspensionStateBestEffort(cr.cityPath) },
-			Nudges: func() beads.NudgesStore {
-				return beads.NudgesStore{Store: resolveNudgesStore(cr.storageRoutes, cr.cityBeadStore(), cr.serviceConfigSnapshot(), cr.cityPath, cr.rec)}
-			},
-			WorkStore: cr.cityBeadStore,
-			Capacity:  func() *endpointCapacityGuard { return guard },
+			Nudges:     cr.nudgesBeadStore,
+			WorkStore:  cr.cityBeadStore,
+			Capacity:   func() *endpointCapacityGuard { return guard },
 			Templates: func(env *reconcileEnv, now time.Time) templateResolver {
 				return newTemplateResolver(newAgentBuildParams(cr.cityName, cr.cityPath, env.Cfg, env.SP, now.UTC(), cr.v2SessionsStore(), cr.stderr))
 			},
