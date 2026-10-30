@@ -13475,3 +13475,28 @@ func TestOrphanSweepKeepsUnresolvableStampedSessionNameUnverifiable(t *testing.T
 		t.Fatalf("output does not count the claim as unverifiable:\n%s", run.out)
 	}
 }
+
+// TestOrphanSweepKeepsClaimWithUnreadableLegacySessionHint pins the
+// fail-closed direction: a terminal session read under the claim's canonical
+// gc.session_id does not stand in for a legacy holder hint that cannot be
+// read. Every candidate must be readable before the claim is released.
+func TestOrphanSweepKeepsClaimWithUnreadableLegacySessionHint(t *testing.T) {
+	for _, key := range []string{"gc.session_bead_id", "session_id"} {
+		t.Run(key, func(t *testing.T) {
+			run := runOrphanSweepGateFixture(t,
+				[]orphanSweepGateRow{hookClaim("ga-hook-legacy", "gc-d34d1", "gastown__polecat-gc-d34d1", map[string]string{key: "gc-legacy9"})},
+				nil,
+				[]orphanSweepGateRow{{ID: "gc-d34d1", Status: "closed", IssueType: "session"}},
+				nil, nil)
+			if run.err != nil {
+				t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+			}
+			if run.released("ga-hook-legacy") {
+				t.Fatalf("claim with an unreadable %s hint was released\n%s", key, run.context())
+			}
+			if !strings.Contains(run.out, "orphan-sweep: reset 0 orphaned beads, skipped 1 unverifiable") {
+				t.Fatalf("output does not count the claim as unverifiable:\n%s", run.out)
+			}
+		})
+	}
+}
