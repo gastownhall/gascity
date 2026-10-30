@@ -2763,6 +2763,11 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "scripts/container_tool_security_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "scripts/docker_session_protocol_test.go"
 resource = "subprocess"
 calls = 1
