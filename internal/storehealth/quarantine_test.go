@@ -4,6 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -29,13 +32,53 @@ func TestQuarantineDirNameDeterministic(t *testing.T) {
 	}
 }
 
+// TestQuarantineDirNameInjective asserts scopes that sanitize to the same
+// prefix — they differ only in punctuation — still get distinct names, so
+// two stores never share one sequence namespace.
+func TestQuarantineDirNameInjective(t *testing.T) {
+	scopes := []string{
+		"/city/rigs/gc-management",
+		"/city/rigs/gc/management",
+		"/city/rigs/gc management",
+		"/city/rigs/gc_management",
+	}
+	seen := map[string]string{}
+	for _, s := range scopes {
+		name := QuarantineDirName(s, 0)
+		if prev, ok := seen[name]; ok {
+			t.Fatalf("scopes %q and %q collided on %q", prev, s, name)
+		}
+		seen[name] = s
+	}
+}
+
+// TestQuarantineDirNameBounded asserts a deep scope root still produces a
+// name os.Mkdir accepts, and that an empty scope falls back to a stable
+// token rather than a bare "-0".
+func TestQuarantineDirNameBounded(t *testing.T) {
+	deep := "/" + strings.Repeat("segment/", 64) + "leaf"
+	name := QuarantineDirName(deep, 0)
+	if len(name) > 255 {
+		t.Fatalf("name is %d bytes, exceeds NAME_MAX", len(name))
+	}
+	if err := os.Mkdir(filepath.Join(t.TempDir(), name), 0o755); err != nil {
+		t.Fatalf("mkdir deep-scope name: %v", err)
+	}
+	if got := QuarantineDirName("   ", 0); !strings.HasPrefix(got, "scope.") {
+		t.Fatalf("empty scope fallback = %q, want scope.<digest>-0", got)
+	}
+}
+
 // TestNextQuarantineSeqMonotonic asserts the seq is max(existing)+1, derived
 // from directory entries, and starts at 0 on an empty/missing root.
 func TestNextQuarantineSeqMonotonic(t *testing.T) {
 	root := t.TempDir()
 	const scope = "/city/rigs/hq"
 
-	if got := NextQuarantineSeq(root, scope); got != 0 {
+	if got := mustNextSeq(t, filepath.Join(root, "missing"), scope); got != 0 {
+		t.Fatalf("first seq on missing root = %d, want 0", got)
+	}
+	if got := mustNextSeq(t, root, scope); got != 0 {
 		t.Fatalf("first seq on empty root = %d, want 0", got)
 	}
 
@@ -45,12 +88,12 @@ func TestNextQuarantineSeqMonotonic(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := NextQuarantineSeq(root, scope); got != 3 {
+	if got := mustNextSeq(t, root, scope); got != 3 {
 		t.Fatalf("seq after 0,1,2 = %d, want 3", got)
 	}
 
 	// A different scope under the same root is independent.
-	if got := NextQuarantineSeq(root, "/city/rigs/vr"); got != 0 {
+	if got := mustNextSeq(t, root, "/city/rigs/vr"); got != 0 {
 		t.Fatalf("independent scope seq = %d, want 0", got)
 	}
 
@@ -59,8 +102,23 @@ func TestNextQuarantineSeqMonotonic(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(root, QuarantineDirName(scope, 1))); err != nil {
 		t.Fatal(err)
 	}
-	if got := NextQuarantineSeq(root, scope); got != 3 {
+	if got := mustNextSeq(t, root, scope); got != 3 {
 		t.Fatalf("seq after deleting middle entry = %d, want 3 (monotonic)", got)
+	}
+}
+
+// TestNextQuarantineSeqUnreadableRoot asserts a root that exists but cannot
+// be listed is an error, not seq 0: it may already hold prior artifacts.
+func TestNextQuarantineSeqUnreadableRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(root, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if seq, err := NextQuarantineSeq(root, "/city"); err == nil {
+		t.Fatalf("NextQuarantineSeq on a non-directory root = %d, nil; want an error", seq)
+	}
+	if path, _, err := QuarantineDirPath(root, "/city"); err == nil {
+		t.Fatalf("QuarantineDirPath on a non-directory root = %q, nil; want an error", path)
 	}
 }
 
@@ -73,7 +131,10 @@ func TestQuarantineDirPathSequencing(t *testing.T) {
 
 	var seqs []int
 	for i := 0; i < 4; i++ {
-		path, seq := QuarantineDirPath(root, scope)
+		path, seq, err := QuarantineDirPath(root, scope)
+		if err != nil {
+			t.Fatalf("QuarantineDirPath: %v", err)
+		}
 		seqs = append(seqs, seq)
 		if err := os.Mkdir(path, 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", path, err)
@@ -82,7 +143,38 @@ func TestQuarantineDirPathSequencing(t *testing.T) {
 	if !reflect.DeepEqual(seqs, []int{0, 1, 2, 3}) {
 		t.Fatalf("allocated seqs = %v, want [0 1 2 3]", seqs)
 	}
-	if got := sortedQuarantineSeqs(root, scope); !reflect.DeepEqual(got, []int{0, 1, 2, 3}) {
+	if got := sortedQuarantineSeqs(t, root, scope); !reflect.DeepEqual(got, []int{0, 1, 2, 3}) {
 		t.Fatalf("on-disk seqs = %v, want [0 1 2 3]", got)
 	}
+}
+
+func mustNextSeq(t *testing.T, root, scope string) int {
+	t.Helper()
+	seq, err := NextQuarantineSeq(root, scope)
+	if err != nil {
+		t.Fatalf("NextQuarantineSeq(%q, %q): %v", root, scope, err)
+	}
+	return seq
+}
+
+// sortedQuarantineSeqs returns the existing sequence numbers for a scope in
+// ascending order.
+func sortedQuarantineSeqs(t *testing.T, quarantineRoot, scope string) []int {
+	t.Helper()
+	entries, err := os.ReadDir(quarantineRoot)
+	if err != nil {
+		t.Fatalf("reading quarantine root: %v", err)
+	}
+	prefix := sanitizeScopeToken(scope) + "-"
+	var seqs []int
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), prefix) {
+			continue
+		}
+		if n, err := strconv.Atoi(strings.TrimPrefix(e.Name(), prefix)); err == nil && n >= 0 {
+			seqs = append(seqs, n)
+		}
+	}
+	sort.Ints(seqs)
+	return seqs
 }
