@@ -15025,3 +15025,61 @@ func TestReconcileSessionBeads_PoolSuccessClearsLegacyStartupHealthEpisode(t *te
 		}
 	})
 }
+
+// A session of a generic scope="rig" agent carries the rig-stamped template
+// "<rig>/<name>" that config.FindAgent synthesizes; its drift key must be
+// computed like a city-scoped session's instead of skipped.
+func TestSessionConfigDriftKey_GenericRigScopedTemplate(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "rig-0", Path: t.TempDir()}},
+		Agents: []config.Agent{
+			{Name: "lead", StartCommand: "new-cmd"},
+			{Name: "smith", Scope: "rig", StartCommand: "new-cmd"},
+		},
+	}
+	tests := []struct {
+		name     string
+		template string
+		drifted  bool
+		wantKey  bool
+	}{
+		{name: "generic rig agent drifted", template: "rig-0/smith", drifted: true, wantKey: true},
+		{name: "generic rig agent unchanged", template: "rig-0/smith", drifted: false, wantKey: false},
+		{name: "unconfigured rig", template: "rig-9/smith", drifted: true, wantKey: false},
+		{name: "city agent drifted", template: "lead", drifted: true, wantKey: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := newReconcilerTestEnv(t)
+			env.cfg = cfg
+			tp := TemplateParams{
+				TemplateName: tt.template,
+				InstanceName: tt.template,
+				Command:      "new-cmd",
+				OperatorEnv:  map[string]string{"CUSTOM_DRIFT": "v2"},
+			}
+			session := env.createSessionBead(tt.template, tt.template)
+			current := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(tp, env.sessionInfo(session.ID)))
+			stored := current
+			if tt.drifted {
+				oldTP := tp
+				oldTP.OperatorEnv = map[string]string{"CUSTOM_DRIFT": "v1"}
+				stored = runtime.CoreFingerprint(sessionCoreConfigForHashInfo(oldTP, env.sessionInfo(session.ID)))
+				if stored == current {
+					t.Fatalf("env change did not move the core fingerprint (%s)", stored)
+				}
+			}
+			env.setSessionMetadata(&session, map[string]string{"started_config_hash": stored})
+
+			got := sessionConfigDriftKey(env.sessionInfo(session.ID), env.cfg, tp)
+			want := ""
+			if tt.wantKey {
+				want = stored + ":" + current
+			}
+			if got != want {
+				t.Errorf("sessionConfigDriftKey(%q) = %q, want %q", tt.template, got, want)
+			}
+		})
+	}
+}
