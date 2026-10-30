@@ -157,7 +157,12 @@ func doctorReconcilerMode(cfg *config.City, lookupEnv func(string) (string, bool
 // last reason). It never re-latches: the running mode is fixed until the
 // controller restarts.
 type reconcilerModeDrift struct {
-	running   reconcilerMode
+	running reconcilerMode
+	// fellBack is set when this controller runs legacy because its default
+	// v2 failed the boot probe (reconcile_boot_fallback.go): an unset key
+	// that resolves to the v2 default is then not a pending restart, since
+	// the next start probes and falls back again until the refusal is fixed.
+	fellBack  bool
 	lookupEnv func(string) (string, bool) // what the controller latched with; nil has no override
 	reported  string                      // the on-disk value last reported; "" while in sync
 }
@@ -182,6 +187,14 @@ func (d *reconcilerModeDrift) observe(cfg *config.City) string {
 	if err == nil && r.Mode == d.running {
 		d.reported = ""
 		return ""
+	}
+	if err == nil && d.fellBack && r.Reason == reconcilerDefaultV2 && d.running == reconcilerLegacy {
+		const fallbackNote = "fallback"
+		if d.reported == fallbackNote {
+			return ""
+		}
+		d.reported = fallbackNote
+		return "session_reconciler on disk is unset, which resolves to the v2 default; this controller runs legacy because v2's boot check refused this city at start (gc doctor names why). A restart probes again and runs v2 only once that refusal is repaired"
 	}
 	mode, _, ok := cfg.Daemon.SessionReconcilerMode()
 	var onDisk string

@@ -1504,14 +1504,11 @@ func runController(
 
 	// doStartStandalone already refused an inadmissible mode before any init;
 	// this latch is the one whose mode the runtime runs.
-	wiring, wiringErr := newControllerWiring(cfg, reconcilerModeLookupEnv, stderr)
+	wiring, wiringErr := newStandaloneControllerWiring(cityPath, cfg, rec, stderr)
 	if wiringErr != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", wiringErr) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// The O6 safety net, before the socket below publishes the latch: a
-	// default v2 its own boot would refuse runs legacy, loudly.
-	_ = applyV2DefaultBootFallback(wiring, cityPath, loadedCityName(cfg, cityPath), cfg, stderr)
 
 	sockPath := controllerSocketPath(cityPath)
 	forceShutdown := &atomic.Bool{}

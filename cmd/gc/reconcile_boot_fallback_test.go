@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // stubV2BootProbe replaces the probe with one that returns refusal and counts
@@ -21,7 +23,7 @@ func stubV2BootProbe(t *testing.T, refusal error) *int {
 	calls := new(int)
 	prev := v2DefaultBootProbe
 	t.Cleanup(func() { v2DefaultBootProbe = prev })
-	v2DefaultBootProbe = func(string, string, *config.City) error {
+	v2DefaultBootProbe = func(string, string, *config.City, events.Recorder) error {
 		*calls++
 		return refusal
 	}
@@ -53,7 +55,7 @@ func TestDefaultV2FallsBackToLegacyOnABootRefusal(t *testing.T) {
 	}
 
 	var log bytes.Buffer
-	refusal := applyV2DefaultBootFallback(w, city, "fb-city", cfg, &log)
+	refusal := applyV2DefaultBootFallback(w, city, "fb-city", cfg, nil, &log)
 	if *calls != 1 || !errors.Is(refusal, errCensusRefusal) {
 		t.Fatalf("probe calls=%d refusal=%v, want one probe and its refusal", *calls, refusal)
 	}
@@ -85,7 +87,7 @@ func TestExplicitV2IsNeverProbedAndStillRefuses(t *testing.T) {
 	if err != nil || w.mode != reconcilerV2 || w.reason != reconcilerExplicit {
 		t.Fatalf("fixture wiring = (%+v, %v), want an explicit v2", w, err)
 	}
-	if refusal := applyV2DefaultBootFallback(w, city, "fb-city", cfg, io.Discard); refusal != nil || *calls != 0 {
+	if refusal := applyV2DefaultBootFallback(w, city, "fb-city", cfg, nil, io.Discard); refusal != nil || *calls != 0 {
 		t.Fatalf("explicit v2: refusal=%v probe calls=%d, want no probe", refusal, *calls)
 	}
 	if w.mode != reconcilerV2 || w.v2 == nil {
@@ -104,7 +106,7 @@ func TestLegacyIsNeverProbed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = applyV2DefaultBootFallback(w, fallbackCity(t), "fb-city", cfg, io.Discard)
+	_ = applyV2DefaultBootFallback(w, fallbackCity(t), "fb-city", cfg, nil, io.Discard)
 	if *calls != 0 || w.mode != reconcilerLegacy {
 		t.Fatalf("legacy: probe calls=%d mode=%v", *calls, w.mode)
 	}
@@ -123,7 +125,7 @@ func TestDefaultV2ThatBootsClearsAStaleFallbackRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if refusal := applyV2DefaultBootFallback(w, city, "fb-city", cfg, io.Discard); refusal != nil || w.mode != reconcilerV2 || w.v2 == nil {
+	if refusal := applyV2DefaultBootFallback(w, city, "fb-city", cfg, nil, io.Discard); refusal != nil || w.mode != reconcilerV2 || w.v2 == nil {
 		t.Fatalf("a clean default v2: refusal=%v mode=%v", refusal, w.mode)
 	}
 	if _, ok := readReconcilerV2FallbackRecord(city); ok {
@@ -177,25 +179,25 @@ func TestV2DefaultBootRefusalReadsTheSameChecksTheBootDoes(t *testing.T) {
 
 	t.Run("capability refusal", func(t *testing.T) {
 		stubV2ProbeStores(t, clean(), capRefusal)
-		if got := v2DefaultBootRefusal(t.TempDir(), "test-city", cfg); !errors.Is(got, capRefusal) {
+		if got := v2DefaultBootRefusal(t.TempDir(), "test-city", cfg, nil); !errors.Is(got, capRefusal) {
 			t.Fatalf("probe = %v, want the C0.7 refusal", got)
 		}
 	})
 	t.Run("census refusal", func(t *testing.T) {
 		stubV2ProbeStores(t, enterprise(), nil)
-		if got := v2DefaultBootRefusal(t.TempDir(), "test-city", cfg); got == nil || !strings.Contains(got.Error(), "enterprise-era") {
+		if got := v2DefaultBootRefusal(t.TempDir(), "test-city", cfg, nil); got == nil || !strings.Contains(got.Error(), "enterprise-era") {
 			t.Fatalf("probe = %v, want the C11 refusal", got)
 		}
 	})
 	t.Run("unread capability still censuses", func(t *testing.T) {
 		stubV2ProbeStores(t, enterprise(), &v2CapabilityUnreadError{Class: "sessions", Err: errors.New("timeout")})
-		if got := v2DefaultBootRefusal(t.TempDir(), "test-city", cfg); got == nil || !strings.Contains(got.Error(), "enterprise-era") {
+		if got := v2DefaultBootRefusal(t.TempDir(), "test-city", cfg, nil); got == nil || !strings.Contains(got.Error(), "enterprise-era") {
 			t.Fatalf("probe = %v, want the census refusal after an unread C0.7", got)
 		}
 	})
 	t.Run("clean", func(t *testing.T) {
 		stubV2ProbeStores(t, clean(), nil)
-		if got := v2DefaultBootRefusal(t.TempDir(), "test-city", cfg); got != nil {
+		if got := v2DefaultBootRefusal(t.TempDir(), "test-city", cfg, nil); got != nil {
 			t.Fatalf("probe over a clean city = %v, want nil", got)
 		}
 	})
@@ -203,8 +205,96 @@ func TestV2DefaultBootRefusalReadsTheSameChecksTheBootDoes(t *testing.T) {
 		prev := v2BootProbeOpenWork
 		t.Cleanup(func() { v2BootProbeOpenWork = prev })
 		v2BootProbeOpenWork = func(string) (beads.Store, error) { return nil, errors.New("dolt down") }
-		if got := v2DefaultBootRefusal(t.TempDir(), "test-city", cfg); got != nil {
+		if got := v2DefaultBootRefusal(t.TempDir(), "test-city", cfg, nil); got != nil {
 			t.Fatalf("probe with no store = %v, want no verdict", got)
 		}
 	})
+}
+
+// TestV2BootProbeGivesNoVerdictOnReadFailures (M21b, M21c): a storage boot
+// gate that refuses, or a census that cannot read its legs, is no verdict;
+// the probe leaves v2 to its own boot, which reports the real failure.
+func TestV2BootProbeGivesNoVerdictOnReadFailures(t *testing.T) {
+	cfg := chatCity("always")
+	cfg.Agents = append(cfg.Agents, allocPoolAgent("worker", 3))
+	t.Run("boot gate refuses", func(t *testing.T) {
+		stubV2ProbeStores(t, censusStore(poolRow("gc-1", "worker", 1, "archived")), errors.New("C0.7 would refuse"))
+		broken := *cfg
+		broken.Storage = &config.StorageConfig{Classes: config.StorageClasses{Work: "elsewhere"}}
+		if got := v2DefaultBootRefusal(t.TempDir(), "test-city", &broken, nil); got != nil {
+			t.Fatalf("probe over a refusing boot gate = %v, want no verdict", got)
+		}
+	})
+	t.Run("census read fails", func(t *testing.T) {
+		// A partial read: some enterprise-era rows came back with the error.
+		// Even rows that would refuse are no verdict while the read failed.
+		partial := &beads.PartialResultError{Op: "bd list", Err: errors.New("2 rows unparseable")}
+		stubV2ProbeStores(t, censusErrStore{Store: censusStore(poolRow("gc-1", "worker", 1, "archived"), poolRow("gc-2", "worker", 2, "archived")), err: partial}, nil)
+		if got := v2DefaultBootRefusal(t.TempDir(), "test-city", cfg, nil); got != nil {
+			t.Fatalf("probe over a census that failed to read = %v, want no verdict", got)
+		}
+	})
+}
+
+// TestStandaloneControllerWiringAppliesTheFallback (M27): gc start
+// --foreground's latch applies the O6 fallback before its socket.
+func TestStandaloneControllerWiringAppliesTheFallback(t *testing.T) {
+	city := fallbackCity(t)
+	cfg := v2DefaultCity(nil)
+	prevEnv := reconcilerModeLookupEnv
+	t.Cleanup(func() { reconcilerModeLookupEnv = prevEnv })
+	reconcilerModeLookupEnv = envOf(nil)
+	calls := stubV2BootProbe(t, errCensusRefusal)
+	var stderr bytes.Buffer
+	w, err := newStandaloneControllerWiring(city, cfg, nil, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *calls != 1 || w.mode != reconcilerLegacy || !w.fellBack || !strings.Contains(stderr.String(), "FALLING BACK TO LEGACY") {
+		t.Fatalf("standalone latch: probe calls=%d mode=%v fellBack=%v stderr=%q", *calls, w.mode, w.fellBack, stderr.String())
+	}
+	if p := w.runtimeParams(CityRuntimeParams{}); !p.ReconcilerV2FellBack || p.ReconcilerMode != reconcilerLegacy {
+		t.Errorf("runtime params = mode %v fellBack %v", p.ReconcilerMode, p.ReconcilerV2FellBack)
+	}
+}
+
+// TestFallbackDriftIsNotAPendingRestartToV2: after a fallback, a reload of the
+// same unset key must not claim a restart would run v2 (it would fall back
+// again); it says why legacy runs, once.
+func TestFallbackDriftIsNotAPendingRestartToV2(t *testing.T) {
+	cfg := v2DefaultCity(nil)
+	d := reconcilerModeDrift{running: reconcilerLegacy, lookupEnv: envOf(nil), fellBack: true}
+	got := d.observe(cfg)
+	if strings.Contains(got, "pending restart") || !strings.Contains(got, "boot check refused") {
+		t.Fatalf("fallback drift warning = %q", got)
+	}
+	if again := d.observe(cfg); again != "" {
+		t.Errorf("the fallback note repeated: %q", again)
+	}
+	plain := reconcilerModeDrift{running: reconcilerLegacy, lookupEnv: envOf(nil)}
+	if got := plain.observe(cfg); !strings.Contains(got, "pending restart") {
+		t.Errorf("a legacy controller that did not fall back lost its pending-restart warning: %q", got)
+	}
+}
+
+// TestV2BootProbeAndRuntimeAgreeOnC07: the probe reads C0.7 over the plain
+// routes the boot gate opens; the runtime reads it over the same routes
+// behind its controller cache. They must give the same verdict, or the probe
+// would fall back over a city the runtime would boot (or the reverse).
+func TestV2BootProbeAndRuntimeAgreeOnC07(t *testing.T) {
+	root := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(root, "store"))
+	stubInfraMigrationSource(t)
+	routes, err := storageBootGate(root, cfg, "gc v2 boot probe", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("boot gate: %v", err)
+	}
+	t.Cleanup(func() { _ = routes.close() })
+	work := beads.NewMemStore()
+	plain := v2CapabilityVerdict(v2ClassStoreCapabilities(resolveSessionStore(routes, work, cfg, root, nil), resolveGraphStore(routes, work, cfg, root, nil), false))
+	cached := routes.withControllerCache(context.Background(), nil)
+	runtime := v2CapabilityVerdict(v2ClassStoreCapabilities(resolveSessionStore(cached, work, cfg, root, nil), resolveGraphStore(cached, work, cfg, root, nil), false))
+	if (plain == nil) != (runtime == nil) {
+		t.Fatalf("probe C0.7 = %v, runtime C0.7 = %v; they must agree", plain, runtime)
+	}
 }

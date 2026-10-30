@@ -2380,15 +2380,6 @@ func startOneCity(
 		return
 	}
 
-	// The O6 safety net, now that the bead store is up and before the socket
-	// or the runtime sees the latch: a default v2 its own boot would refuse
-	// runs legacy, loudly (reconcile_boot_fallback.go).
-	var fallbackLog strings.Builder
-	_ = applyV2DefaultBootFallback(wiring, path, cityName, cfg, &fallbackLog)
-	if fallbackLog.Len() > 0 {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': %s", cityName, fallbackLog.String()) //nolint:errcheck
-	}
-
 	runPostPrepareStep := func(status string, fn func() error) error {
 		cr.BatchUpdate(func(
 			_ map[string]*managedCity,
@@ -2445,6 +2436,15 @@ func startOneCity(
 	if frErr == nil {
 		rec = fr
 		eventProv = fr
+	}
+
+	// The O6 safety net, now that the bead store is up and the city's event
+	// recorder is open, and before the socket or the runtime sees the latch: a default v2 its own boot would refuse
+	// runs legacy, loudly (reconcile_boot_fallback.go).
+	var fallbackLog strings.Builder
+	_ = applyV2DefaultBootFallback(wiring, path, cityName, cfg, rec, &fallbackLog)
+	if fallbackLog.Len() > 0 {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': %s", cityName, fallbackLog.String()) //nolint:errcheck
 	}
 
 	dops := newDrainOps(sp)

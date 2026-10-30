@@ -37,6 +37,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // reconcilerV2FallbackRecordName is the record a boot that fell back writes.
@@ -83,13 +84,16 @@ var v2BootProbeCapabilities = func(sessions, graph beads.Store) error {
 
 // v2DefaultBootRefusal opens the stores the v2 boot reads, as the runtime
 // would, and runs C0.7 and C11 over them.
-func v2DefaultBootRefusal(cityPath, cityName string, cfg *config.City) error {
+//
+// The storage boot gate it runs gets the city's event recorder: a genesis it
+// performs is the city's real genesis, and its outcome event must not be lost.
+func v2DefaultBootRefusal(cityPath, cityName string, cfg *config.City, rec events.Recorder) error {
 	work, err := v2BootProbeOpenWork(cityPath)
 	if err != nil {
 		return nil // no verdict: the runtime reports its own open
 	}
 	defer closeBeadStoreHandle(work) //nolint:errcheck // best-effort close
-	routes, err := storageBootGate(cityPath, cfg, "gc v2 boot probe", nil, io.Discard)
+	routes, err := storageBootGate(cityPath, cfg, "gc v2 boot probe", rec, io.Discard)
 	if err != nil {
 		return nil // no verdict: the runtime's own gate refuses, with the reason
 	}
@@ -131,11 +135,11 @@ func v2DefaultBootRefusal(cityPath, cityName string, cfg *config.City) error {
 // legacy on a refusal. It must run before the wiring reaches the controller
 // socket or the city runtime, and with the controller lock held. It returns
 // the refusal it fell back over, or nil.
-func applyV2DefaultBootFallback(w *controllerWiring, cityPath, cityName string, cfg *config.City, bootLog io.Writer) error {
+func applyV2DefaultBootFallback(w *controllerWiring, cityPath, cityName string, cfg *config.City, rec events.Recorder, bootLog io.Writer) error {
 	if w == nil || w.mode != reconcilerV2 || w.reason != reconcilerDefaultV2 {
 		return nil
 	}
-	refusal := v2DefaultBootProbe(cityPath, cityName, cfg)
+	refusal := v2DefaultBootProbe(cityPath, cityName, cfg, rec)
 	if refusal == nil {
 		_ = os.Remove(reconcilerV2FallbackRecordPath(cityPath))
 		return nil
@@ -158,9 +162,22 @@ func applyV2DefaultBootFallback(w *controllerWiring, cityPath, cityName string, 
 func (w *controllerWiring) fallBackToLegacy() {
 	w.mode = reconcilerLegacy
 	w.reason = reconcilerFallbackLegacy
+	w.fellBack = true
 	w.v2 = nil
 	// The wake newControllerWiringLoggingTo built, made legacy in place: the
 	// same channels, no planner to route to.
 	w.wake.mode = reconcilerLegacy
 	w.wake.planner, w.wake.waitDepClosed, w.wake.wakeReads = nil, nil, nil
+}
+
+// newStandaloneControllerWiring is runController's latch (gc start
+// --foreground): the wiring, with the O6 fallback applied before the
+// controller socket publishes it.
+func newStandaloneControllerWiring(cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer) (*controllerWiring, error) {
+	w, err := newControllerWiring(cfg, reconcilerModeLookupEnv, stderr)
+	if err != nil {
+		return nil, err
+	}
+	_ = applyV2DefaultBootFallback(w, cityPath, loadedCityName(cfg, cityPath), cfg, rec, stderr)
+	return w, nil
 }
