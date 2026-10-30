@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -13,6 +14,32 @@ import (
 
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
+
+// TestKeyedProbeRoots pins the roots a keyed probe searches: a claude-family
+// probe searches the roots exactly as given, every other family the
+// defaults, and a claude probe with no roots the defaults rather than
+// nothing.
+func TestKeyedProbeRoots(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", "")
+	defaults := sessionlog.DefaultSearchPaths()
+	roots := []string{"/observed"}
+	for _, c := range []struct {
+		provider string
+		roots    []string
+		want     []string
+	}{
+		{"claude", roots, roots},
+		{"claude-max", roots, roots},
+		{"claude", nil, defaults},
+		{"pi", roots, defaults},
+		{"kimi", roots, defaults},
+	} {
+		if got := KeyedProbeRoots(c.roots, c.provider); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("KeyedProbeRoots(%v, %q) = %v, want %v", c.roots, c.provider, got, c.want)
+		}
+	}
+}
 
 func TestDiscoverPathPrefersClaudeSessionID(t *testing.T) {
 	base := t.TempDir()

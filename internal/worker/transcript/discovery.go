@@ -159,6 +159,18 @@ func isProvisionalGCSessionID(sessionID string) bool {
 	return true
 }
 
+// KeyedProbeRoots is the roots a keyed probe of provider searches. A
+// claude-family probe searches the roots exactly as given, adding no default
+// of its own, so an empty list means the defaults rather than nothing. Every
+// other family probes the defaults alone, on top of which its reader adds
+// its own default roots.
+func KeyedProbeRoots(searchPaths []string, provider string) []string {
+	if len(searchPaths) == 0 || !strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude") {
+		return sessionlog.DefaultSearchPaths()
+	}
+	return searchPaths
+}
+
 // HasKeyedTranscript reports whether the per-session ("keyed") transcript that
 // a resume would reattach to is present on disk, and whether this provider
 // exposes a keyed transcript that can be probed on disk at all.

@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // Start ensures the worker exists and its runtime is live.
@@ -782,10 +783,20 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 		if command == "" {
 			command = strings.TrimSpace(h.session.Provider)
 		}
+		return startWithSessionID(command, h.session.Resume.SessionIDFlag, info.SessionKey)
+	}
+	if h.unlaunchedSessionKey(info, pr.Metadata) {
+		command := strings.TrimSpace(h.session.Command)
 		if command == "" {
-			return "", fmt.Errorf("%w: command is required for first start", ErrHandleConfig)
+			command = strings.TrimSpace(info.Command)
 		}
-		return command + " " + h.session.Resume.SessionIDFlag + " " + info.SessionKey, nil
+		if command == "" {
+			command = strings.TrimSpace(h.session.Provider)
+		}
+		if command == "" {
+			command = strings.TrimSpace(info.Provider)
+		}
+		return startWithSessionID(command, h.session.Resume.SessionIDFlag, info.SessionKey)
 	}
 	resumeInfo := info
 	if command := strings.TrimSpace(h.session.Command); command != "" {
@@ -804,6 +815,43 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 		resumeInfo.ResumeCommand = resumeCommand
 	}
 	return sessionpkg.BuildResumeCommand(resumeInfo), nil
+}
+
+// startWithSessionID builds the launch that names its conversation itself:
+// command flag key.
+func startWithSessionID(command, flag, key string) (string, error) {
+	if command == "" {
+		return "", fmt.Errorf("%w: command is required to start session", ErrHandleConfig)
+	}
+	return command + " " + flag + " " + key, nil
+}
+
+// unlaunchedSessionKey reports whether metadata's row holds a session key no
+// conversation has run under — a restart handoff rotated the key onto a row
+// whose next start must name a new conversation, not resume one the provider
+// has no record of and exits on. The row never committed a start
+// (started_config_hash empty: every key rotation clears it in the same patch
+// that writes the key), the handle's resume config can name a new
+// conversation (a session-id flag), and the keyed-transcript probe over the
+// roots this launch reads — the same probe the reconciler's own start
+// applies — finds the provider probeable and the key's transcript absent. A
+// committed row, an unprobeable provider or work dir keeps the resume path:
+// absence the probe cannot establish is not a fresh start.
+func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info, metadata map[string]string) bool {
+	key := strings.TrimSpace(info.SessionKey)
+	flag := strings.TrimSpace(h.session.Resume.SessionIDFlag)
+	if flag == "" || key == "" || strings.TrimSpace(metadata["started_config_hash"]) != "" {
+		return false
+	}
+	hints := h.runtimeHints()
+	workDir := strings.TrimSpace(hints.WorkDir)
+	if workDir == "" {
+		workDir = strings.TrimSpace(info.WorkDir)
+	}
+	provider := h.historyProvider(info)
+	exists, probeable := workertranscript.HasKeyedTranscript(
+		workertranscript.KeyedProbeRoots(h.adapter.SearchPaths, provider), provider, workDir, key)
+	return probeable && !exists
 }
 
 func firstProviderSessionStart(state sessionpkg.State, metadata map[string]string) bool {
