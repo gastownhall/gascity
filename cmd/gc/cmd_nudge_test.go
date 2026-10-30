@@ -7460,14 +7460,18 @@ func (p *turnLookProvider) TurnRunning(string) (bool, error) {
 }
 
 // busyQueuedNudgeFixture starts a worker session on a fake runtime whose
-// activity clock reads busy now and queues one nudge created at createdAt. It
-// returns the city dir, the fake, the store, the poller target, and the busy
-// observation the poller sees.
-func busyQueuedNudgeFixture(t *testing.T, createdAt time.Time) (string, *runtime.Fake, beads.NudgesStore, nudgeTarget, worker.LiveObservation) {
+// activity clock reads busy now and queues one nudge created at createdAt,
+// after applying edits to it. It returns the city dir, the fake, the store,
+// the poller target, and the busy observation the poller sees.
+func busyQueuedNudgeFixture(t *testing.T, createdAt time.Time, edits ...func(*queuedNudge)) (string, *runtime.Fake, beads.NudgesStore, nudgeTarget, worker.LiveObservation) {
 	t.Helper()
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", createdAt)); err != nil {
+	item := newQueuedNudge("worker", "review the deploy logs", createdAt)
+	for _, edit := range edits {
+		edit(&item)
+	}
+	if err := enqueueQueuedNudge(dir, item); err != nil {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 	store := openNudgeBeadStore(dir)
@@ -7643,4 +7647,51 @@ func TestTryDeliverQueuedNudgesByPollerKeepsFreshNudgeQueuedWhileBusy(t *testing
 		t.Fatalf("TurnRunning looks = %d, want 0", sp.looks)
 	}
 	assertQueuedNudgeHeld(t, dir, fake, target.sessionName)
+}
+
+// A starved item is still held while the leaf's turn look says a turn runs,
+// or cannot be read, and while it is not yet due or fenced to another
+// session; no attempt is charged and its retry time is left alone.
+func TestTryDeliverQueuedNudgesByPollerHoldsStarvedNudgeWhileTurnRuns(t *testing.T) {
+	deferredUntil := time.Now().Add(time.Minute).Round(time.Second)
+	for _, tc := range []struct {
+		name      string
+		running   bool
+		lookErr   error
+		edit      func(*queuedNudge)
+		wantLooks int
+	}{
+		{name: "turn running", running: true, wantLooks: 1},
+		{name: "turn look failed", lookErr: errors.New("capture failed"), wantLooks: 1},
+		{name: "deferred past now", edit: func(item *queuedNudge) { item.DeliverAfter = deferredUntil }},
+		{name: "fenced to another session", edit: func(item *queuedNudge) { item.SessionID = "gc-other-session" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var edits []func(*queuedNudge)
+			if tc.edit != nil {
+				edits = append(edits, tc.edit)
+			}
+			dir, fake, store, target, obs := busyQueuedNudgeFixture(t, time.Now().Add(-10*time.Minute), edits...)
+			before, _, _, err := listQueuedNudgesForTargetSnapshot(dir, target, time.Now())
+			if err != nil || len(before) != 1 {
+				t.Fatalf("queued before = %d (%v), want 1", len(before), err)
+			}
+			sp := &turnLookProvider{Fake: fake, running: tc.running, err: tc.lookErr}
+
+			delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, sp, time.Hour, obs)
+			if err != nil {
+				t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+			}
+			if delivered {
+				t.Fatal("delivered = true, want false")
+			}
+			if sp.looks != tc.wantLooks {
+				t.Fatalf("TurnRunning looks = %d, want %d", sp.looks, tc.wantLooks)
+			}
+			held := assertQueuedNudgeHeld(t, dir, fake, target.sessionName)
+			if !held.DeliverAfter.Equal(before[0].DeliverAfter) {
+				t.Fatalf("DeliverAfter = %s, want unchanged %s", held.DeliverAfter, before[0].DeliverAfter)
+			}
+		})
+	}
 }
