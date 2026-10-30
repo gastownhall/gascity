@@ -149,21 +149,11 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 	// gates only a copy. A city that already converged copies nothing, so the
 	// migration does not census it (doStorageMigrate), and what the census
 	// finds there is named without blocking.
-	state, stateErr := readInfraConvergenceState(target)
-	converged := stateErr == nil && state == infraConvergenceMarked
-	switch err := censusRigInfraResidue(request.CityPath, request.Cfg); {
-	case err == nil:
-		preflightPass(stdout, "rig scopes", "no infrastructure bead lives outside this city's work store")
-	case converged:
-		preflightNote(stdout, "rig scopes", fmt.Sprintf("this city already converged: the migration copies nothing here and does not census rig scopes, so these rows do not stop it and stay as reachable as they are now. The census finds: %v", err))
-	default:
-		return preflightBlock(stdout, "rig scopes", err)
+	if code := preflightRigScopes(request, target, stdout); code != 0 {
+		return code
 	}
 
-	// 4. The served-binding note, which is the migration's own first check and an
-	// unconditional hold: a note naming another binding means infrastructure
-	// state lives somewhere this configuration does not point, and copying the
-	// work store's slice would bless a destination that silently omits it.
+	state, stateErr := readInfraConvergenceState(target)
 	if blocked, held := servedBindingNoteHold(request.CityPath, target.Binding, config.StorageProviderSQLiteBeads, target.Database); held {
 		return preflightBlock(stdout, "served binding", errors.New(preflightAdviceDetail(blocked)))
 	}
@@ -324,4 +314,49 @@ func preflightBlock(stdout io.Writer, check string, cause error) int {
 	}
 	fmt.Fprintf(stdout, "\n%s: the migration would refuse. Fix the blocking check above and run this again.\n", storagePreflightLogPrefix) //nolint:errcheck // best-effort stdout
 	return 1
+}
+
+// preflightRigScopes is the per-rig importability census (S4b). Rig history,
+// closed or suspended, no longer stops the city's migration: the relic legs
+// keep it readable and `gc storage migrate --from-rigs` moves it. Each rig is
+// reported with what its import would do, and only a refusal — a shape the
+// import cannot move without a cross-store edge, or a rig it cannot read —
+// blocks.
+func preflightRigScopes(request storageOperatorRequest, target infraBindingTarget, stdout io.Writer) int {
+	rows := censusRigs(request.CityPath, request.Cfg, target, true)
+	if len(rows) == 0 {
+		preflightPass(stdout, "rig scopes", "this city declares no rig")
+		return 0
+	}
+	var refusals []string
+	for _, r := range rows {
+		switch {
+		case r.State == rigCensusSkipped:
+			preflightPass(stdout, "rig "+r.Rig, "n/a ("+r.Why+")")
+		case r.State == rigCensusUnreachable:
+			refusals = append(refusals, fmt.Sprintf("rig %s: %v", r.Rig, r.Err))
+		case r.Plan != nil && len(r.Plan.Refusals) > 0:
+			for _, refusal := range r.Plan.Refusals {
+				refusals = append(refusals, fmt.Sprintf("rig %s: %s", r.Rig, refusal))
+			}
+		case r.Err != nil:
+			refusals = append(refusals, fmt.Sprintf("rig %s: %v", r.Rig, r.Err))
+		case r.Plan != nil && (len(r.Plan.Move) > 0 || len(r.Plan.Retained) > 0):
+			closed := len(r.Plan.Move) - r.Plan.Open
+			preflightNote(stdout, "rig "+r.Rig, fmt.Sprintf("%s: would import %d bead(s) (%d open, %d closed), %d open routed bead(s) become visible to demand, %d scope annotation(s), %d cross-store gate(s) to mint, %d rig cop(ies) to clear (%s); run `%s`",
+				r.State, len(r.Plan.Move), r.Plan.Open, closed, r.Plan.OpenRouted, len(r.Plan.Annotated), len(r.Plan.Gates), len(r.Plan.Move)+len(r.Plan.Retained), infraStrandedIDList(append(rigPlanIDs(r.Plan.Move), rigPlanIDs(r.Plan.Retained)...)), rigImportInstruction(r.Rig)))
+		default:
+			preflightPass(stdout, "rig "+r.Rig, "no infrastructure bead lives in this rig's store")
+		}
+	}
+	if len(refusals) > 0 {
+		lines := strings.Split(strings.Join(refusals, "\n"), "\n")
+		fmt.Fprintf(stdout, preflightRowFormat, preflightBlockTag, "rig scopes", lines[0]) //nolint:errcheck // best-effort stdout
+		for _, line := range lines[1:] {
+			fmt.Fprintf(stdout, "%s%s\n", preflightDetailIndent, line) //nolint:errcheck // best-effort stdout
+		}
+		fmt.Fprintf(stdout, "\n%s: `%s` would refuse the rig(s) named above until each fix is made; each other rig imports on its own. Fix them and run this again.\n", storagePreflightLogPrefix, rigImportAllInstruction()) //nolint:errcheck // best-effort stdout
+		return 1
+	}
+	return 0
 }

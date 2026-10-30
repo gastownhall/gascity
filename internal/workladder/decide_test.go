@@ -770,11 +770,13 @@ func TestReleaseFoundStarted(t *testing.T) {
 }
 
 // A seat that refuses every nudge (a permission prompt) is retried no more
-// often than PausedCap, its count does not move, and one alert is raised.
+// often than PausedCap, its count does not move, and it is alerted at the
+// third refusal and again every refusedRealertEvery refusals after, about
+// hourly, while the refusals go on.
 func TestDecideRefusedNudgesBackOff(t *testing.T) {
 	r := Record{}
 	var at []time.Duration
-	alerts := 0
+	var alerts []int // the refusal counts that alerted
 	for now := t0; now.Before(t0.Add(6 * time.Hour)); now = now.Add(30 * time.Second) {
 		d := Decide(r, startedBy1(quiet(now, 1, claim("s")), "s", SrcAgent), p)
 		r = d.Next
@@ -786,13 +788,17 @@ func TestDecideRefusedNudgesBackOff(t *testing.T) {
 					t.Fatalf("NudgeRefused refused the attempt it was given")
 				}
 				if alert {
-					alerts++
+					alerts = append(alerts, r.Entries[0].Refused)
 				}
 			}
 		}
 	}
-	if alerts != 1 {
-		t.Fatalf("%d alerts, want one", alerts)
+	var want []int
+	for n := refusedAlertAt; n <= len(at); n += refusedRealertEvery {
+		want = append(want, n)
+	}
+	if len(want) < 4 || fmt.Sprint(alerts) != fmt.Sprint(want) {
+		t.Fatalf("alerts at refusals %v, want %v (%d refusals)", alerts, want, len(at))
 	}
 	for i := 2; i < len(at); i++ {
 		if gap := at[i] - at[i-1]; gap < DefaultPausedCap {

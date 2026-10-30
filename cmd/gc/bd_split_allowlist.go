@@ -376,6 +376,9 @@ var bdSplitReviewedPathFlags = map[string]string{
 var bdSplitConfigSetKeys = map[string]string{
 	"types.custom": "the custom bead types the store accepts (troubleshooting.md)",
 	"types.infra":  "which types list hides without --include-infra (troubleshooting.md)",
+	// The core reaper purges and prunes a scope that holds op rows only once
+	// its database names op here (reaper.sh op_rows_guard).
+	"types.retained": "the types a sweep without --retain-ids keeps, so closed op rows are not deleted untombstoned",
 }
 
 // bdSplitRefusalFor returns the decision for a path that is not allowlisted:

@@ -1859,11 +1859,11 @@ the same lock, so the pairs of the last cook to take the lock are the
 ones that stay.
 
 On a city that serves the graph class from its own [storage] binding, most
-of --attach in CITY scope is NOT SUPPORTED YET and refuses rather than
-serving. A graft is graph class whatever the formula's version — every bead
-it creates carries gc.root_bead_id — so the sub-DAG belongs in the binding
-while the blocking dependency belongs beside the attach bead, and a split
-city cannot have both:
+of --attach is NOT SUPPORTED YET, in city and rig scope alike, and refuses
+rather than serving. A graft is graph class whatever the formula's version —
+every bead it creates carries gc.root_bead_id — so the sub-DAG belongs in
+the binding while the blocking dependency belongs beside the attach bead,
+and a split city cannot have both:
 
   * attach bead in the city's WORK ledger — refused. Writing the sub-DAG
     beside it strands graph-class beads in the work store, which gc storage
@@ -1877,13 +1877,19 @@ city cannot have both:
     would be cross-class. Same remedy: ga-2orlf.
   * attach bead in the BINDING, v1 formula — served. The sub-DAG and its
     blocking dependency are both written to the binding.
-  * RIG scope (--rig, GC_RIG, or a cwd inside a rig) — served, unchanged.
-    A relocation moves city-level stores only, so a rig's ledger holds both
-    ends of the graft and nothing it writes can be stranded.
+  * attach bead in a RIG's own store (RIG scope: --rig, GC_RIG, or a cwd
+    inside a rig) — refused for a work bead, for the city work ledger's
+    reason: every graph bead of every rig lives in the binding, so a rig's
+    own store holds only work. Launch the formula against the bead with
+    gc sling &lt;target&gt; &lt;bead&gt; --on &lt;formula&gt; instead. The one graft served
+    there is a v1 formula onto a graph bead of a tree created before the
+    rig's graph beads moved to the binding, which extends that tree where
+    it lives; a v2 formula is refused, because it starts a new workflow
+    root in the binding and its attach edge would cross stores.
 
 Single-store cities are unaffected: --attach behaves exactly as it always
-has. If an earlier cook already stranded beads in a split city's work
-store, copy them into the binding with
+has, in every scope. If an earlier cook already stranded beads in a split
+city's work store, copy them into the binding with
 gc storage recover-stranded --from-work --fleet-stopped.
 
 ```
@@ -4795,7 +4801,7 @@ gc session submit mayor "stop and do this instead" --intent interrupt_now
 |------|------|---------|-------------|
 | `--intent` | string | `default` | submit intent: default, follow_up, or interrupt_now |
 | `--json` | bool |  | JSON output |
-| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again; ignored when the gate is off (default: a new key each run) |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] content gate is auto or require, or [ops] authoritative lists message), rerunning with the same key reports the first run's outcome instead of sending again; ignored otherwise (default: a new key each run) |
 
 ## gc session suspend
 
@@ -5146,6 +5152,13 @@ refuses such a city and names this command.
 --from-backup re-copies a binding whose database is gone from that backup
 instead of from the work store, which no longer holds the slice.
 
+--from-rigs moves each rig's graph and infrastructure beads (closed history,
+wisps and steps included) out of the rig's own store and into the city
+binding, keeping their ids and stamping each with gc.root_store_ref=rig:&lt;name&gt;;
+a rig store then holds only work. It runs per rig (--rig narrows it), is
+resumable at every step, and refuses, by bead and with the fix, the edge shapes
+it cannot carry without a cross-store edge. It needs a converged city binding.
+
 Last, on the converged binding, each open deliver-now unit the copy carried in
 is re-lowered under the binding's id prefix: its derived interrupt is re-created
 at the id a lowering there gives it, with its state, and the old row is closed
@@ -5167,9 +5180,12 @@ gc storage migrate [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--abandon-rig-store` | bool |  | with --from-rigs --rig X, record X's clear complete without its store, once the binding is proven to hold every row X's import recorded (for a rig store that is permanently gone) |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--from-backup` | bool |  | re-copy a binding whose database is gone from the retained-source backup |
+| `--from-rigs` | bool |  | import each rig's graph and infrastructure beads into the city binding |
 | `--from-work` | bool |  | migrate the infrastructure classes out of this city's work store |
+| `--rig` | stringSlice |  | with --from-rigs, import only this rig (repeatable) |
 
 ## gc storage preflight
 

@@ -77,6 +77,7 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/lanesubmit"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -733,19 +734,10 @@ func requestInFlight() error {
 	return apierr.IdempotencyInFlight.Msg("in_flight: request with this Idempotency-Key is already in progress")
 }
 
-// MessageOpPolicy is the message policy of a submit intent (DES-O0API §3.1);
-// /messages is the default intent. gc session submit's local path records its
-// op under the same policy, so a request the API recorded and its CLI
-// fallback derive one op digest.
+// MessageOpPolicy is the message policy of a submit intent on the legacy
+// paths (lanesubmit.LegacyPolicy): the API's and its tests' name for it.
 func MessageOpPolicy(intent session.SubmitIntent) opjournal.Policy {
-	when := opjournal.WhenBoundary
-	switch intent {
-	case session.SubmitIntentFollowUp:
-		when = opjournal.WhenAfterTurn
-	case session.SubmitIntentInterruptNow:
-		when = opjournal.WhenInterrupt
-	}
-	return opjournal.Policy{Message: opjournal.MessagePolicy{When: when, Wake: opjournal.WakeIfNeeded, Role: opjournal.RolePrompt}}
+	return lanesubmit.LegacyPolicy(intent)
 }
 
 // submitIntentForWhen is the submit intent a recorded message policy came

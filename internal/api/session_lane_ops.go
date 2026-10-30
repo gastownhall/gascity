@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/lanesubmit"
 )
 
 // laneControlAnswerBound is how long a control command under lane authority
@@ -1456,164 +1457,97 @@ var laneSubmitSettle = 5 * time.Second
 // conversation's members; their label is extmsg.
 const extmsgNoticePrincipal = "gc:extmsg"
 
-// LaneMessageOpPolicy is the lane policy of a submit intent: default and
-// follow_up deliver at the session's boundary (a lone after_turn message
-// would only ride another's boundary) and interrupt_now as a deliver-now
-// unit (D-DN: a failed interrupt makes the message wait, and nothing
-// restarts the session); /messages is the default. Every one wakes the
-// session if needed and is a prompt. A follow_up is therefore the default
-// request on the lane: under one key either answers from the other's op,
-// and its results say default (submitIntentForWhen). gc session submit's
-// local fallback records its own op under MessageOpPolicy, and answers from
-// the API's lane op under its key by admitting again under this policy,
-// which derives that op's digest (cliOp.start).
+// LaneMessageOpPolicy is the lane policy of a submit intent
+// (lanesubmit.Policy): the API's and its tests' name for it.
 func LaneMessageOpPolicy(intent session.SubmitIntent) opjournal.Policy {
-	when := opjournal.WhenBoundary
-	if intent == session.SubmitIntentInterruptNow {
-		when = opjournal.WhenNow
-	}
-	return opjournal.Policy{Message: opjournal.MessagePolicy{When: when, Wake: opjournal.WakeIfNeeded, Role: opjournal.RolePrompt}}
+	return lanesubmit.Policy(intent)
 }
 
 // acceptMessageLane is /submit and /messages under lane authority (message
-// listed): it proposes req as a lane message op, which the lane host
-// delivers, and answers 202 once the op is committed, its request_id the op
-// id. A configured named session's row is materialized before the Propose.
-// resume: true consumes the session's operator hold once the op is proposed
-// (resumeLaneSession), else a held session keeps the op waiting. A request
-// no op under its key answers is refused before the op is written, so the
-// key stays free, while the session waits on a pending interaction, or
-// when the session's row alone refuses its resume, as for a closed session
-// or one a drain is stopping (checkNewLaneMessage); a proposal that fails
-// leaves the hold in place; and a resume refused once the op is written
-// cancels the op this request wrote, its error saying the key is spent,
-// and to resend under a new key only when the cancel closed the op
-// (laneKeySpent). A same-key retry, on the API process that answered the
-// first request too (the Idempotency-Key LRU keeps no lane answer:
-// withMessageIdempotency), and whatever the session waits on, is answered
-// from the op under the key (answerLaneMessage): a closed op
-// replays (OJ-2b's path), an open legacy op is 409 in_flight, and an open
-// lane op is accepted again once its resume runs again, since the request
-// that proposed it may have died before its own; a resume refused there
-// leaves the op as it is, as an earlier answer may have accepted it. Every
-// resume consumes only a hold stamped by the op's proposal (its
-// created_at), so a hold the operator placed while the message waits
-// stands through any retry. The request's terminal event follows
-// laneSubmitSettle after its acceptance.
+// listed): it accepts req as a lane message op through lanesubmit.Accept,
+// the acceptance gc session submit's local fallback shares (the key, the
+// preview, the resolution that materializes a configured named session's
+// row, the op under the key, the front door's refusals, the proposal, the
+// resume and the cancel of an op this request wrote whose resume is
+// refused), maps its refusals onto the wire (laneAcceptError), and answers
+// from the op (answerLaneMessage): 202 once the op is committed, its
+// request_id the op id. The resolution is the API's
+// (resolveSessionIDMaterializingNamedWithContext, unless req's target
+// already resolved) and so is the front door (rejectPendingInteraction). A
+// same-key retry, on the API process that answered the first request too
+// (the Idempotency-Key LRU keeps no lane answer: withMessageIdempotency),
+// and whatever the session waits on, is answered from the op under the key:
+// a closed op replays (OJ-2b's path), an open legacy op is 409 in_flight,
+// and an open lane op is accepted again once its resume runs again. The
+// request's terminal event follows laneSubmitSettle after its acceptance.
 func (s *Server) acceptMessageLane(ctx context.Context, store beads.Store, req *messageOpRequest, ep events.Recorder, cursor string) (asyncAcceptedBody, error) {
 	st, err := s.conversationOpStore()
 	if err != nil {
 		return asyncAcceptedBody{}, err
 	}
-	key, minted := req.key, false
-	if key == "" {
-		if key, err = legacyop.MintKey(); err != nil {
-			return asyncAcceptedBody{}, apierr.Internal.Msg(err.Error())
-		}
-		minted = true
-	} else if err := opjournal.ValidateClientKey(key); err != nil {
-		return asyncAcceptedBody{}, apierr.InvalidIdempotencyKey.Msg("invalid_idempotency_key: " + err.Error())
-	}
-	oreq := opjournal.Request{
-		Conversation: previewConversation,
-		Kind:         opjournal.KindMessage,
-		Executor:     opjournal.ExecutorLane,
-		ClientKey:    key,
-		MintedKey:    minted,
-		Producer:     opjournal.Producer{Principal: legacyop.PrincipalOperator, Actor: opjournal.ActorOperator},
-		Payload:      req.text,
-		Policy:       LaneMessageOpPolicy(req.intent),
-	}
-	if _, err := st.Preview(oreq); err != nil {
-		return asyncAcceptedBody{}, laneMessageProposeError(err)
-	}
-	conv := req.conv
-	if conv == "" {
-		if conv, err = s.resolveSessionIDMaterializingNamedWithContext(ctx, store, req.target); err != nil {
-			return asyncAcceptedBody{}, humaResolveError(err)
-		}
-	}
-	oreq.Conversation = conv
-	// A lane op under the key answers only the same request (Propose refuses
-	// another as key reuse), and so does a legacy op recorded under it
-	// before the flip (sameLegacyMessage).
-	prior, found, err := keyedLaneOp(st, opjournal.KindMessage, conv, key)
-	if err != nil {
-		return asyncAcceptedBody{}, err
-	}
-	if found && prior.Executor != opjournal.ExecutorLane {
-		if err := sameLegacyMessage(st, oreq, req.intent, prior); err != nil {
-			return asyncAcceptedBody{}, err
-		}
-		return s.answerLaneMessage(store, st, prior, false, req, ep, key, cursor)
-	}
-	if !found {
-		if err := s.checkNewLaneMessage(ctx, store, conv, req.resume); err != nil {
-			return asyncAcceptedBody{}, err
-		}
-	}
-	op, created, err := st.Propose(oreq)
-	if err != nil {
-		return asyncAcceptedBody{}, laneMessageProposeError(err)
-	}
-	// The op is this request's own when its Propose created it, or found it
-	// under a key this request minted, which no other request holds: a
-	// create that committed and then answered an error. Any other op under
-	// the key may be one an earlier request was answered for, which nothing
-	// here cancels.
-	owned := created || minted
-	// The hold goes only once the op exists, and a retry consumes it again:
-	// the request that proposed the op may have died before its resume. Only
-	// a hold stamped by the op's proposal is consumed, so once one went, a
-	// retry finds nothing left to consume, and a hold placed while the
-	// message waits stands.
-	if req.resume && op.Status != opjournal.StatusClosed {
-		if err := s.resumeLaneSession(store, conv, op.CreatedAt); err != nil {
-			if owned {
-				canceled := s.cancelLaneMessage(st, op.ID, "the request's resume was refused")
-				return asyncAcceptedBody{}, laneKeySpent(err, op.ID, canceled)
+	acc, err := lanesubmit.Accept(ctx, st, session.NewStore(beads.SessionStore{Store: store}), lanesubmit.Request{
+		Key:    req.key,
+		Text:   req.text,
+		Intent: req.intent,
+		Resume: req.resume,
+		Resolve: func(ctx context.Context) (string, error) {
+			if req.conv != "" {
+				return req.conv, nil
 			}
-			return asyncAcceptedBody{}, err
+			id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, req.target)
+			if err != nil {
+				return "", humaResolveError(err)
+			}
+			return id, nil
+		},
+		Pending: func(ctx context.Context, id string) error {
+			return s.rejectPendingInteraction(ctx, store, id)
+		},
+	})
+	if err != nil {
+		return asyncAcceptedBody{}, s.laneAcceptError(err)
+	}
+	return s.answerLaneMessage(store, st, acc.Op, acc.Owned, req, ep, acc.Key, cursor)
+}
+
+// laneAcceptError maps a refusal of lanesubmit.Accept onto the wire: a key
+// that cannot be minted is 500, an invalid one 422 invalid_idempotency_key,
+// the journal's refusal laneMessageProposeError's, a read of the op under
+// the key that fails 503 op_journal_unavailable, a key that names an op of
+// another kind 422 idempotency_mismatch, and the session's refusal of the
+// resume laneResumeError's: once the op is written, an op this request
+// wrote was canceled first (its cancel logged) and the error says the key is
+// spent (laneKeySpent). The resolution's and the front door's errors are on
+// the wire already.
+func (s *Server) laneAcceptError(err error) error {
+	var (
+		mint    *lanesubmit.MintError
+		key     *lanesubmit.KeyError
+		journal *lanesubmit.JournalError
+		read    *lanesubmit.ReadError
+		kind    *lanesubmit.KindError
+		resume  *lanesubmit.ResumeError
+	)
+	switch {
+	case errors.As(err, &mint):
+		return apierr.Internal.Msg(mint.Err.Error())
+	case errors.As(err, &key):
+		return apierr.InvalidIdempotencyKey.Msg("invalid_idempotency_key: " + key.Err.Error())
+	case errors.As(err, &journal):
+		return laneMessageProposeError(journal.Err)
+	case errors.As(err, &read):
+		return apierr.OpJournalUnavailable.Msgf("op_journal_unavailable: reading op %s: %v", read.ID, read.Err)
+	case errors.As(err, &kind):
+		return apierr.IdempotencyMismatch.Msgf("idempotency_mismatch: Idempotency-Key reused with a different request: it names a %s op", kind.Op.Kind)
+	case errors.As(err, &resume):
+		mapped := laneResumeError(resume.Session, resume.Err)
+		if !resume.Owned {
+			return mapped
 		}
+		canceled := s.logLaneCancel(resume.Op.ID, lanesubmit.ResumeRefusedWhy, resume.Cancel, resume.CancelErr)
+		return laneKeySpent(mapped, resume.Op.ID, canceled)
 	}
-	return s.answerLaneMessage(store, st, op, owned, req, ep, key, cursor)
-}
-
-// resumeLaneSession is resume: true under lane authority: the operator's own
-// message, proposed at proposed, consumes the session's operator hold, which
-// the lane host's wake request cannot pass, and records the session's wake
-// in the same write (session.Store.ResumeHeld), and nothing else. A hold
-// stamped after proposed is one the request never saw, and stands. It
-// cancels no wait and asks for no will-not-start verdict: the controller
-// starts the session as it starts any session a message waits on. Its
-// refusals are laneResumeError's.
-func (s *Server) resumeLaneSession(store beads.Store, id string, proposed time.Time) error {
-	return laneResumeError(id, session.NewStore(beads.SessionStore{Store: store}).ResumeHeld(id, proposed, time.Now().UTC()))
-}
-
-// checkNewLaneMessage refuses, writing nothing, a lane message to session
-// id that no op under its key answers: while the session waits on a pending
-// interaction, as the front door refuses a legacy message
-// (rejectPendingInteraction), and for resume: true when the session's row
-// alone refuses the resume (checkLaneResume). A same-key retry is not
-// checked: its op answers it whatever the session waits on, such as an
-// approval its message raised (request_id rule 8).
-func (s *Server) checkNewLaneMessage(ctx context.Context, store beads.Store, id string, resume bool) error {
-	if err := s.rejectPendingInteraction(ctx, store, id); err != nil {
-		return err
-	}
-	if !resume {
-		return nil
-	}
-	return checkLaneResume(store, id)
-}
-
-// checkLaneResume refuses, writing nothing, a resume: true that session id's
-// row alone refuses (session.Store.ResumeHeldRefusal), as resumeLaneSession
-// would refuse it, so a request whose resume cannot run writes no op and
-// leaves its key free for a retry.
-func checkLaneResume(store beads.Store, id string) error {
-	return laneResumeError(id, session.NewStore(beads.SessionStore{Store: store}).ResumeHeldRefusal(id, time.Now().UTC()))
+	return err
 }
 
 // laneResumeError maps the refusal of a resume of session id onto the wire:
@@ -1651,24 +1585,6 @@ func laneKeySpent(err error, id string, canceled bool) error {
 		problem.Detail += fmt.Sprintf("; op %s, which this request wrote, may still deliver the message, as its cancel did not close it: a retry under this Idempotency-Key reports what became of it instead of sending again", id)
 	}
 	return err
-}
-
-// sameLegacyMessage refuses, 422 idempotency_mismatch, a request whose key
-// names prior, a message op the legacy path recorded before message was
-// listed, unless the request is the one prior recorded: its digest in the
-// legacy shape (MessageOpPolicy of its intent) is prior's.
-func sameLegacyMessage(st *opjournal.Store, oreq opjournal.Request, intent session.SubmitIntent, prior opjournal.Op) error {
-	legacy := oreq
-	legacy.Executor = prior.Executor
-	legacy.Policy = MessageOpPolicy(intent)
-	preview, err := st.Preview(legacy)
-	if err != nil {
-		return laneMessageProposeError(err)
-	}
-	if preview.PayloadDigest != prior.PayloadDigest {
-		return laneMessageProposeError(&opjournal.KeyReuseError{Existing: prior})
-	}
-	return nil
 }
 
 // laneMessageProposeError maps a refused lane message proposal onto the
@@ -1732,6 +1648,13 @@ func (s *Server) answerLaneMessage(store beads.Store, st *opjournal.Store, op op
 // that fails, and a same-key retry reports what became of the op.
 func (s *Server) cancelLaneMessage(st *opjournal.Store, id, why string) bool {
 	res, _, err := st.Cancel(id, legacyop.PrincipalOperator, why)
+	return s.logLaneCancel(id, why, res, err)
+}
+
+// logLaneCancel logs a cancel of lane message op id (why says what failed)
+// that answered res and err and did not close the op, and reports whether
+// it closed it.
+func (s *Server) logLaneCancel(id, why string, res opjournal.CancelResult, err error) bool {
 	switch {
 	case err != nil:
 		s.ops.logf("api: canceling op %s (%s): %v", id, why, err)

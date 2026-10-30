@@ -1,0 +1,115 @@
+# Top-level tests that fail in every GC_TEST_SPLIT_STRICT=1 run of this package.
+# Format: <test>\t<reason>. A reason is required. Regenerate with
+# scripts/split-strict-baseline (two or more full runs; a test that failed in
+# some runs but not all is refused unless it is in split_strict_known_flaky.list).
+# A test new to the list gets an "UNTRIAGED: <first log line>" reason, which
+# fails the gate's TESTS verdict and TestSplitStrictGateInputsParse until it is
+# replaced with why the test fails under the gate.
+# The nightly downward ratchet (--check) fails on an entry that now passes.
+TestAPIBeadCloseResolvesTheOwningScopeAsTheCommitRepo	fails under the gate: rig-resident bead resolves to "/data/tmp/TestAPIBeadCloseResolvesTheOwningScopeAsTheCommitRepo3237372320/001", want the rig checkout "/data/tmp/TestAPIBeadClose
+TestAPIBeadWriteStoreErrorEnqueuesNothing	fails under the gate: close on a failing store: status 200, want 500 carrying "write refused"; body: {"status":"closed"}
+TestAPIBeadWritesEnqueueAllocatorAndControlDispatch	fails under the gate: assign: status 400, want success; body: {"type":"urn:gascity:error:invalid-request","title":"Invalid Request","status":400,"detail":"assignee must resolve to a 
+TestAPIKeepsTheProbeForAnUncensusedState	fails under the gate: got 2 bindings, want the one this state relocates
+TestAPIKeepsTheProbeWhenTheStateReportsRelics	fails under the gate: got 2 bindings, want the one this state relocates
+TestAPIResidencyTopologyDoesNotRoundUpAPartialSplit	fails under the gate: got 2 bindings, want 1
+TestAPIResidencyTopologyIsSingleStoreOnADefaultCity	fails under the gate: a default city produced 1 bindings, want none
+TestAPIRetiresTheProbeWhenTheStateReportsACleanBinding	fails under the gate: got 2 bindings, want the one this state relocates
+TestBeadAPIUpdateRefusesAClassFlipOnASplitCity	fails under the gate: fixture split=false resolved 1 bindings
+TestBeadAssign	fails under the gate: assign status = 400, want 200, body: {"type":"urn:gascity:error:invalid-request","title":"Invalid Request","status":400,"detail":"assignee must resolve to a con
+TestBeadCreateOnAnUnsplitCityIsUnchanged	fails under the gate: POST /beads {Rig:myrig Title:a wisp Type:task Labels:[gc:wisp] Metadata:map[]} status = 400, want 201 (body="{\"type\":\"urn:gascity:error:invalid-request\",\"t
+TestBeadGraphDeclaredMembershipCoversTheEphemeralTier	fails under the gate: graph is missing ephemeral parent-linked descendant gc-4; the parent-closure half of "direct-root-id+parent-closure" is tier-scoped too
+TestBeadGraphReturnsErrorWhenDepListFails	fails under the gate: status = 200, want 500, body:
+TestBeadGraphReturnsErrorWhenGraphListFails	fails under the gate: status = 200, want 500, body:
+TestBeadListAllTrueBoundedPartialResultRigKeepsCount	fails under the gate: NextCursor empty, want a resume cursor on a partial page
+TestBeadListAllTrueBoundsCounterStore	fails under the gate: Count was not called; bounding did not engage
+TestBeadListReturns503OnEmptyPartialTotalOutage	fails under the gate: status = 200, want 503 when every backend has zero usable rows (body="{\"items\":[],\"total\":0,\"partial\":true,\"partial_errors\":[\"rig myrig: bd list: skipp
+TestBeadListReturns503OnTotalOutage	fails under the gate: status = 200, want 503 when every backend fails (body="{\"items\":[],\"total\":0,\"partial\":true,\"partial_errors\":[\"rig myrig: disk is on fire\"]}\n")
+TestBeadListSplitCityBoundsACounterCapableGraphLeg	fails under the gate: graph leg max List limit = 0, want 6 — a Counter-capable graph leg is bounded like the rest
+TestBeadListSplitCityKeepsWorkLegsBounded	fails under the gate: city leg max List limit = 0, want 6 — a non-Counter graph leg must not unbound the work legs
+TestBeadReadyLegacyCityDegradedCityStoreStaysPartial	fails under the gate: GET /beads/ready status = 503, want 200 (body="{\"type\":\"urn:gascity:error:store-unavailable\",\"title\":\"Store Unavailable\",\"status\":503,\"detail\":\"gra
+TestBeadReadyPreservesPartialResultRows	fails under the gate: Items = [{ID:gc-1 Title:ok-rig-task Status:open Type:task Priority:<nil> CreatedAt:2026-10-28 02:23:06.080269347 +0000 UTC UpdatedAt:2026-10-28 02:23:06.0802693
+TestBeadReadyReflectsAnInvalidatedCacheRow	fails under the gate: backing Ready scans = 1, want the invalidated row refreshed from the cache path
+TestBeadReadyReturns503OnEmptyPartialTotalOutage	fails under the gate: status = 200, want 503 when every backend has zero usable ready rows (body="{\"items\":[],\"total\":0,\"partial\":true,\"partial_errors\":[\"rig myrig: bd ready
+TestBeadReadyServesWarmCache	fails under the gate: backing Ready scans = 1, want a warm-cache answer
+TestBeadReopenLeavesASessionsRuntimeLease	fails under the gate: reopen status = 404: {"type":"urn:gascity:error:bead-not-found","title":"Bead Not Found","status":404,"detail":"bead myrig--1 not found","code":"bead-not-found"
+TestBeadStoresForIDClassArmBeatsCityRouteCapture	fails under the gate: beadStoresForID(gcg-1) = [0x185dd4cfa1c0 0x185dd4cd24c0] (len 2), want [graph, city]; graph is 0x185dd4cfa1c0, city is 0x185dd4cfa0e0
+TestBeadStoresForIDClassArmBeatsRigRouteCapture	fails under the gate: beadStoresForID(gcg-1) = [0x138a4ed38460 0x138a4e3dc7e0] (len 2), want [graph, city]; rig store is 0x138a4ed38540
+TestBeadStoresForIDClassArmBeatsShadowingRigPrefix	fails under the gate: beadStoresForID(gcg-1) = [0x17fdfa2c3340 0x17fdfa21cae0 0x17fdfa21cb80] (len 3), want [graph, city, rig]; graph is 0x17fdfa2c3340, city is 0x17fdfa2c3260, rig i
+TestBeadStoresForIDClassArmKeepsLongerRigPrefix	fails under the gate: beadStoresForID(gcg-alpha-1) = [0x3d2679e5a2a0 0x3d267871f860 0x3d267871f8e0] (len 3), want [graph, city, rig]; graph is 0x3d2679e5a2a0, city is 0x3d2679e5a1c0,
+TestBeadStoresForIDDefaultBackendIsCityLed	fails under the gate: beadStoresForID returned 2 stores, want 1 (city-led, no graph arm); got [0x337e547c9220 0x337e547c9200]
+TestBeadStoresForIDShadowingRigPrefixStillWinsOnDefaultCity	fails under the gate: beadStoresForID(gcg-1) = [0x185dd4cd2740 0x185dd4cd2720 0x185dd4cd27a0] (len 3), want only the shadowing rig store 0x185dd4cfa540
+TestBeadStoresForIDUsesConfiguredHyphenatedRigPrefix	fails under the gate: beadStoresForID(hyphenated prefix) = []beads.Store{(*splittest.view)(0x337e56660ea0), (*splittest.view)(0x337e56660ec0)}, want only configured rig store
+TestBeadStoresForIDUsesConfiguredRigPrefixBeforeFallback	fails under the gate: beadStoresForID(rw-1) = []beads.Store{(*splittest.view)(0x3d2678f82820), (*splittest.view)(0x3d2678f82840)}, want only configured rig store
+TestBeadStoresForIDUsesLongestConfiguredHyphenatedPrefix	fails under the gate: beadStoresForID returned []beads.Store{(*splittest.view)(0x12e468b09e80), (*splittest.view)(0x12e468b09ea0)}, want only authoritative rig store
+TestBeadUpdateRefusalMaterializesNothing	fails under the gate: status 404 ({"type":"urn:gascity:error:bead-not-found","title":"Bead Not Found","status":404,"detail":"bead gcg-1 not found","code":"bead-not-found"}
+TestBuildStatusBodyOmitsStoreHealthWhenTheRowCountIsContradicted	fails under the gate: StoreHealth = &{Path:/data/tmp/TestBuildStatusBodyOmitsStoreHealthWhenTheRowCountIsContradicted3295880133/001/.beads/dolt SizeBytes:0 LiveRows:0 RowsMeasured:tr
+TestBuildWorkflowRunProjectionsKeepsInProgressChildrenOnHistoryFailure	fails under the gate: items = 0, want 1
+TestByIDPlanLeadsWithTheResidenceProbe	fails under the gate: beadStoresForID(mc-123) = [0x3d267a31d6c0 0x3d26790537c0 0x3d26790537a0] (len 3), want [graph 0x3d267a31d6c0, city 0x3d267a31d260] — the binding probe leads, th
+TestCityEventStreamProjectsWorkflowEventsWhenKeepingUp	fails under the gate: event frame has no workflow projection: map[actor:controller payload:map[bead:map[created_at:2026-10-28T02:22:06.025131653Z id:gc-2 issue_type:task metadata:map
+TestClassArmStillDoesNotCoverMigratedLegacyIDs	fails under the gate: topology has 2 bindings, want 1 (the relocated graph store 0x12e468b460e0)
+TestConvoyDeleteOfAGraphWorkflowLeavesAFinishedStepsOutcomeAlone	fails under the gate: status = 404, want 200: {"type":"urn:gascity:error:convoy-not-found","title":"Convoy Not Found","status":404,"detail":"convoy gc-1 not found","code":"convoy-not
+TestFakeStateGraphBeadStoreFallsBackToCityStore	fails under the gate: default backend: GraphBeadStore() must equal CityBeadStore(); got distinct stores
+TestFakeStateNudgesBeadStoreFallsBackToCityStore	fails under the gate: default backend: NudgesBeadStore() must equal CityBeadStore(); got distinct stores
+TestFakeStateSessionsBeadStoreFallsBackToCityStore	fails under the gate: default backend: SessionsBeadStore() must equal CityBeadStore(); got distinct stores
+TestFormulaFeedReturnsWorkflowRunsOnly	fails under the gate: items = [], want exactly 1 workflow item
+TestGenericAPINeverWritesAControllerOwnedRow	fails under the gate: status 404 ({"type":"urn:gascity:error:bead-not-found","title":"Bead Not Found","status":404,"detail":"bead \"gcg-1\" is not in this store: bead not found","cod
+TestGenericAPIWritesAWorkBead	fails under the gate: status 400 ({"type":"urn:gascity:error:invalid-request","title":"Invalid Request","status":400,"detail":"assignee must resolve to a concrete open session bead I
+TestGraphResidentSingleStoreByteIdentical	fails under the gate: precondition: expected single-store (graph == city)
+TestHandleOrderCheckUsesRigStoreLastRunState	fails under the gate: due = true, want false when rig store has a recent run
+TestHandleOrderHistoryBeforeFiltersBeforeMergedLimit	fails under the gate: entry = {BeadID:gc-1 StoreRef:orders:test-city}, want old city run "gc-1"
+TestHandleOrderHistoryDetailUsesRigStore	fails under the gate: status = 404, want 200; body = {"type":"urn:gascity:error:bead-not-found","title":"Bead Not Found","status":404,"detail":"bead not found","code":"bead-not-found
+TestHandleOrderHistoryDetailUsesStoreRefForCollidingIDs	fails under the gate: test requires colliding IDs, got city="gc-1" rig="gcg-1"
+TestHandleOrderHistoryIncludesStoreRefForCollidingIDs	fails under the gate: test requires colliding IDs, got city="gc-1" rig="gcg-1"
+TestHandleOrderHistoryMarksAdHocOutputMetadata	fails under the gate: len(entries) = 0, want 1
+TestHandleOrderHistoryUsesRigStore	fails under the gate: len(entries) = 0, want 1
+TestHandleOrdersFeedCachesUntilIndexChanges	fails under the gate: city ListByLabel calls after cached repeat = 2, want 1
+TestHandleOrdersFeedIncludesLegacyIssuesTierTrackingBeads	fails under the gate: len(items) = 0, want legacy tracking item: []
+TestHandleOrdersFeedIncludesRigStoreTrackingBeads	fails under the gate: len(items) = 0, want 1
+TestHandleOrdersFeedReturnsWorkflowAndScheduledOrderRuns	fails under the gate: len(items) = 1, want 2
+TestHandleSessionNoCityStore	fails under the gate: got status 200, want 503
+TestHandleStatusCounterFailureReportsPartialWithoutListRetry	fails under the gate: List called on Counter-capable store, want Count path
+TestHandleStatusDegradesWhenReadModelStoreStalls	fails under the gate: status handler did not return while the read model was stalled; degrade timeout not honored
+TestHandleStatusServesRecentResponseDespiteIndexAdvance	fails under the gate: List called on Counter-capable store, want Count path
+TestHandleStatusWorkCountsUseCounterStores	fails under the gate: List called on Counter-capable store, want Count path
+TestIsGraphConvoyIDSkipsARelicFreeRig	fails under the gate: a pre-S4 rig graph convoy is not recognized while the rig awaits import
+TestOrderHistoryStoreRefUnchangedOnSingleStoreCity	fails under the gate: list store_ref = "orders:test-city", want city:test-city
+TestOrderStoreInfosStayOnTheOneStoreOnSingleStoreCity	fails under the gate: order store infos = [{ref:city:test-city scopeKind:city scopeRef:test-city store:0x185dd4c1e080} {ref:orders:test-city scopeKind:city scopeRef:test-city store:0
+TestProjectWorkflowEventDropsAmbiguousLegacyWorkflowWithoutStoreHint	fails under the gate: projection = &{Type:workflow:event WorkflowID:wf_city RootBeadID:gc-1 RootStoreRef:graph:gascity ScopeKind:city ScopeRef:gascity WatchGeneration:pending EventSe
+TestProjectWorkflowEventFallsBackToSubjectWhenPayloadIsNotWorkflowShaped	fails under the gate: projection = nil, want workflow event
+TestProjectWorkflowEventFallsBackToSubjectWhenPayloadMissing	fails under the gate: projection = nil, want workflow event
+TestProjectWorkflowEventUsesLegacyCityScopeForRigStoredWorkflow	fails under the gate: projection = nil, want workflow event
+TestProjectWorkflowEventUsesRootStoreRefHint	fails under the gate: workflow_id = "wf_city", want wf_rig
+TestResolveStoreByPrefixDoesNotCaptureForeignRoute	fails under the gate: beadStoresForID(gz-1) = [0x185dd4d02c60 0x185dd4d02c40 0x185dd4d02b00 0x185dd4d02b20] (len 4), want the full candidate scan [0x185dd4cfbce0 0x185dd40cf300 0x185
+TestResolveStoreByPrefixKeepsRigRouteResolution	fails under the gate: resolveStoreByPrefix(ga) = 0x138a4f85f200, want alpha store 0x138a4ede6dc0
+TestRetiredSessionWorkStoresIsTheSessionsStoreAloneOnASingleStoreCity	fails under the gate: single-store sweep = [0x2651b1997360 0x2651b1997380 0x2651b1997340 0x2651b12c7960], want only the sessions store
+TestRetiredSessionWorkStoresSkipsRigsSuspendedByEffectiveState	fails under the gate: rig store swept = false, want true (sweep = [0x155f2d592fc0 0x155f2d592fe0 0x155f30e46540])
+TestRunCancelAtomicRootCloseFailureLeavesRunCancelingForRetry	fails under the gate: cancel with a failing atomic root close returned nil error, want a retryable 5xx
+TestRunCancelInterruptsSessionsWorkingTheRun	fails under the gate: cancel error: run not found: gcg-1
+TestRunCancelMarksRunThenInterruptsBeforeClosesFinish	fails under the gate: cancel error: run not found: gcg-1
+TestRunCancelPartialFailureStopsClaimsAndRetryCompletes	fails under the gate: cancel with a failing close err = <nil>, want a retryable cancel-failed 5xx
+TestRunCancelStoreFailureReports503	fails under the gate: cancel with a failing store returned nil error, want a 5xx (no phantom success)
+TestRunCancelSucceedsWhenInterruptFails	fails under the gate: cancel error: run not found: gcg-1, want success: the graph cancel is durable even when an interrupt fails
+TestRunCancelUnderLaneProposesOneInterruptPerHolder	fails under the gate: cancel: run not found: gcg-1
+TestRunCancelUnderLaneSkipsAHolderWhoseAgentIsDead	fails under the gate: cancel: run not found: gcg-1
+TestRunReadAfterCancelReflectsTheCancel	fails under the gate: GET /bead/gc-2 = 404: {"type":"urn:gascity:error:bead-not-found","title":"Bead Not Found","status":404,"detail":"bead gc-2 not found","code":"bead-not-found"}
+TestRunViewsAgreeWithBeadAfterOutOfProcessClaim	fails under the gate: GET /bead/gc-2 = 404: {"type":"urn:gascity:error:bead-not-found","title":"Bead Not Found","status":404,"detail":"bead gc-2 not found","code":"bead-not-found"}
+TestSessionClassRoutingIsIdentityOnSingleStoreCity	fails under the gate: default backend: SessionsBeadStore().Store must be the identical value CityBeadStore() returns
+TestSingleStoreCityByIDPerformsNoProbe	fails under the gate: the work store was read 2 times, want 1 — a city that relocates nothing must not pay for the seam
+TestSlingDefaultFormulaCooksWorkflowWhereTheTargetsWorkersLook	fails under the gate: city store holds 1 workflow root(s) [{gcg-1001 graph-work in_progress task 0x17fdfa6fb100 2026-10-28 02:22:40.595803436 +0000 UTC 2026-10-28 02:22:40.595907202 
+TestSlingDefaultFormulaReceivesTitleAndVars	fails under the gate: no step titled "Say hi" in the rig store: the greeting var never reached the default formula
+TestSlingGraphV2RejectsLegacySourceWorkflowConflict	fails under the gate: status = 200, want 409; body = {"status":"slung","target":"myrig/worker","formula":"graph-work","workflow_id":"gcg-4","root_bead_id":"gcg-4","attached_bead_id":
+TestSlingStandaloneFormulaOnASingleStoreCityRigTargetMintsTheRootInTheRigStore	fails under the gate: fixture is not a single-store city
+TestSourceWorkflowStoresOmitsGraphLegOnSingleStoreCity	fails under the gate: fixture is not a single-store city
+TestStatusSessionSnapshotStoreIdentity	fails under the gate: read store = 0x17fdf963cf40, want CityBeadStore 0x17fdf963cfa0 — a city that relocates nothing must stay byte-identical
+TestWaitInspect_ExistingNonWaitIsWaitNotFound	fails under the gate: detail = "not_found: t-1", want not_a_wait: prefix
+TestWaitInspect_NoStoreIsServiceUnavailable	fails under the gate: status = 404, want 503; body="{\"type\":\"urn:gascity:error:wait-not-found\",\"title\":\"Wait Not Found\",\"status\":404,\"detail\":\"not_found: w-any\",\"code\
+TestWholeSplitBindingIsAuthorityForEveryReservedPrefix	fails under the gate: beadStoresForID(gcg-1) = [0x17fdfaab0700 0x17fdf9432320] (len 2), want [binding 0x17fdfaab0700, city 0x17fdfaab0620]
+TestWorkflowEventRootIsUnchangedOnASingleStoreCity	fails under the gate: single-store workflowEventRoot = (false, ), want the rig's root
+TestWorkflowEventRootProbesTheBindingBeforeTheScopeItNames	fails under the gate: workflowEventRoot for a pre-S4 rig root = (false, ), want it from the rig store
+TestWorkflowGetPreservesRequestedScopeForUniqueCrossStoreWorkflow	fails under the gate: status = 404, want 200: {"type":"urn:gascity:error:workflow-not-found","title":"Workflow Not Found","status":404,"detail":"workflow wf_city_scope not found","co
+TestWorkflowGetRejectsCityScopeForRigRootedWorkflow	fails under the gate: rig-scoped status = 404, want 200: {"type":"urn:gascity:error:workflow-not-found","title":"Workflow Not Found","status":404,"detail":"workflow wf_rig_rooted_sco
+TestWorkflowGetScopedRequestSurvivesUnrelatedStoreListFailure	fails under the gate: root_store_ref = "graph:test-city", want city:test-city
+TestWorkflowGetSelectsScopedRootMatch	fails under the gate: status = 404, want 200: {"type":"urn:gascity:error:workflow-not-found","title":"Workflow Not Found","status":404,"detail":"workflow wf_shared not found","code":
+TestWorkflowGetSkipsMetadataListSweepWhenIDResolvesDirectly	fails under the gate: status = 404, want 200: {"type":"urn:gascity:error:workflow-not-found","title":"Workflow Not Found","status":404,"detail":"workflow gc-1 not found","code":"work
+TestWorkflowStoreByRef	fails under the gate: city store mismatch
+TestWorkflowStoresSkipsCityStoreEntriesFromBeadStoreMap	fails under the gate: workflowStores() returned 3 entries, want 2

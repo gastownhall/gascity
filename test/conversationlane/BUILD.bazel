@@ -46,7 +46,11 @@ INTEGRATION_SOLO_TESTS = {
     # and the incapable store start once the baselines are learned.
     "conversationlane_x12_test": "TestX12.*",  # 198-201 s
     "conversationlane_x2_cli_test": "TestX2CLIKillMatrix",  # 14 cells, 8 at a time: 121-142 s
-    "conversationlane_x8_test": "TestX8OrderAcrossLaneHostRestart",  # 143 s
+    # X8, and beside it W5's work ladder on the lane on real tmux
+    # (ladder_lane_test.go, which waits out the ladder's 90 s grace before
+    # its first notice): both parallel, so the pair takes X8's time and adds
+    # no action to the integration-packages lane.
+    "conversationlane_x8_ladder_test": "TestX8OrderAcrossLaneHostRestart|TestWorkLadderLaneNoticeEndToEnd",  # 143 s
 }
 
 # The X2 host matrix by store arm, eight cities each: the "" target runs the
@@ -67,7 +71,9 @@ go_test(
         "harness_bddolt_test.go",
         "harness_test.go",
         "inline_pass_test.go",
+        "ladder_lane_test.go",
         "main_test.go",
+        "submit_lane_test.go",
         "testenv_import_test.go",
         "x12_evidence_guard_test.go",
         "x12_harness_test.go",
@@ -108,12 +114,15 @@ go_test(
         "//internal/bazeltest",
         "//internal/beads",
         "//internal/clock",
+        "//internal/events",
+        "//internal/fsys",
         "//internal/loopbackport",
         "//internal/opjournal",
         "//internal/pathutil",
         "//internal/storebinding/sqlite",
         "//internal/testenv",
         "//internal/testutil",
+        "//internal/workladder",
         "//test/toolhome",
         "@com_github_go_sql_driver_mysql//:mysql",
     ],

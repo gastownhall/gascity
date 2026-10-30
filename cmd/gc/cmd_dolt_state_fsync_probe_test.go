@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -221,7 +222,11 @@ esac
 		t.Fatal(err)
 	}
 
-	dataDir := filepath.Join(t.TempDir(), "dolt-data")
+	// op_recover's liveness check ends in a `ps` match on `--data-dir.*<basename>`
+	// (find_dolt_pid), so the basename must not be one a real Dolt on this host
+	// could carry: a plain "dolt-data" would make the "no process" tests depend
+	// on what else is running.
+	dataDir := filepath.Join(t.TempDir(), "fsyncguard-"+strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())+"-dolt-data")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -383,6 +388,88 @@ func TestGcBeadsBdRecoverNeedsNoProbeWhenDoltNotListening(t *testing.T) {
 	}
 	if strings.Contains(out, failOpenMarker) {
 		t.Fatalf("a not-listening Dolt is not a guard decision and must stay silent:\n%s", out)
+	}
+}
+
+// livePIDFileEnv plants a PID file naming a process that is alive (this test
+// binary) and returns the env that points op_recover at it: the shape
+// find_dolt_pid reads first, so the script sees a managed Dolt that is running
+// whether or not anything listens.
+//
+// The fake gc's recover-managed always succeeds, which returns from op_recover
+// before op_stop_impl. A case that reached the shell stop path would `kill`
+// this very process, so never combine this with a run that has no GC_BIN.
+func livePIDFileEnv(t *testing.T) string {
+	t.Helper()
+	pidFile := filepath.Join(t.TempDir(), "dolt.pid")
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return "GC_DOLT_PID_FILE=" + pidFile
+}
+
+// A Dolt that is running but not yet accepting connections (a stall-slowed
+// relaunch) is as exposed to a restart as a listening one: the guard must test
+// "managed Dolt running", not just "port answers".
+func TestGcBeadsBdRecoverSkipsARunningDoltThatIsNotListeningWhenFsyncStalled(t *testing.T) {
+	for name, extra := range map[string][]string{
+		"unfinished probe":               {"FAKE_PROBE_MODE=unfinished"},
+		"finished at the warn threshold": {"FAKE_PROBE_MODE=finished", "FAKE_PROBE_MS=1000"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFsyncGuardFixture(t, false)
+			out, err := f.recover(t, false, append(extra, livePIDFileEnv(t))...)
+			assertSkippedForStall(t, f, out, err)
+			if !strings.Contains(f.calls(t), "fsync-probe --dir "+f.dataDir+" --timeout-ms 1000") {
+				t.Fatalf("probe not called with the data dir and the default 1000ms bound; calls:\n%s", f.calls(t))
+			}
+			if strings.Contains(out, failOpenMarker) {
+				t.Fatalf("a stall decision must not print the fail-open line:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestGcBeadsBdRecoverProceedsForARunningDoltThatIsNotListeningWhenFsyncFast(t *testing.T) {
+	f := newFsyncGuardFixture(t, false)
+	out, err := f.recover(t, false, "FAKE_PROBE_MODE=finished", "FAKE_PROBE_MS=999", livePIDFileEnv(t))
+	assertRecoverProceeded(t, f, out, err)
+	if n := countLinesContaining(f.calls(t), "fsync-probe"); n != 1 {
+		t.Fatalf("a running Dolt must be probed exactly once, got %d; calls:\n%s", n, f.calls(t))
+	}
+	if strings.Contains(out, failOpenMarker) {
+		t.Fatalf("a fast probe must not print the fail-open line:\n%s", out)
+	}
+}
+
+func TestGcBeadsBdRecoverFailsOpenWithOneLineForARunningDoltThatIsNotListening(t *testing.T) {
+	for _, mode := range []string{"error", "exit1", "garbage", "empty"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newFsyncGuardFixture(t, false)
+			out, err := f.recover(t, false, "FAKE_PROBE_MODE="+mode, livePIDFileEnv(t))
+			assertRecoverProceeded(t, f, out, err)
+			if n := countLinesContaining(out, failOpenMarker); n != 1 {
+				t.Fatalf("fail-open stderr lines = %d, want exactly 1; output:\n%s", n, out)
+			}
+		})
+	}
+}
+
+// A PID file that names no live process is stale: nothing is running, so there
+// is nothing to protect and recovery must go ahead without probing.
+func TestGcBeadsBdRecoverIgnoresAStalePIDFileWhenNothingListens(t *testing.T) {
+	f := newFsyncGuardFixture(t, false)
+	pidFile := filepath.Join(t.TempDir(), "dolt.pid")
+	if err := os.WriteFile(pidFile, []byte("not-a-pid\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := f.recover(t, false, "FAKE_PROBE_MODE=unfinished", "GC_DOLT_PID_FILE="+pidFile)
+	assertRecoverProceeded(t, f, out, err)
+	if strings.Contains(f.calls(t), "fsync-probe") {
+		t.Fatalf("probed although the PID file names no live process; calls:\n%s", f.calls(t))
+	}
+	if strings.Contains(out, failOpenMarker) {
+		t.Fatalf("a stale PID file is not a guard decision and must stay silent:\n%s", out)
 	}
 }
 

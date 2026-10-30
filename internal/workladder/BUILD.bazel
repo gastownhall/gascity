@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "codec.go",
         "decide.go",
+        "notice.go",
         "policy.go",
         "types.go",
     ],
@@ -18,6 +19,7 @@ go_test(
     srcs = [
         "codec_test.go",
         "decide_test.go",
+        "notice_test.go",
         "property_test.go",
         "purity_test.go",
         "table_test.go",
