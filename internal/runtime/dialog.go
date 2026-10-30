@@ -2002,9 +2002,71 @@ func ProviderTerminalErrorReason(content string) string {
 		return "quota_exceeded"
 	case strings.Contains(lower, "quota exceeded") && !strings.Contains(lower, "disk quota"):
 		return "quota_exceeded"
+	case containsCreditBalanceStop(lower):
+		// Anthropic's exhausted-credit stop, in the same opaque class as
+		// insufficient_quota: no retry can succeed until credit is added or
+		// the key changes, so the session must be parked rather than
+		// crash-counted into quarantine.
+		return "quota_exceeded"
 	default:
 		return ""
 	}
+}
+
+const (
+	// creditBalanceStopIsPhrase is the headless/print rendering of Claude
+	// Code's exhausted-credit stop.
+	creditBalanceStopIsPhrase = "credit balance is too low"
+	// creditBalanceStopPhrase is the TUI rendering; it drops the "is".
+	creditBalanceStopPhrase = "credit balance too low"
+)
+
+// containsCreditBalanceStop reports whether lower, already-lowercased pane or
+// error text, shows Claude Code's exhausted-credit stop as an error line: the
+// stop phrase as the line's whole body — alone, or followed only by the "·"
+// remedy separator that introduces the add-funds link (which a short pane may
+// clip anywhere, separator included).
+//
+// The match is anchored to the error line because a terminal provider error
+// parks the session with no self-heal — it takes an explicit wake or an
+// operator — so a false hit on text that merely mentions the phrasing (a grep
+// hit, a chat quote) strands a healthy session, while a miss only degrades to
+// the ordinary crash-and-quarantine behavior.
+func containsCreditBalanceStop(lower string) bool {
+	for _, line := range strings.Split(lower, "\n") {
+		if creditBalanceStopLine(paneErrorLineBody(line)) {
+			return true
+		}
+	}
+	return false
+}
+
+// creditBalanceStopLine reports whether body, a pane line's error body, is
+// the credit stop itself: the phrase alone, or followed only by the "·"
+// remedy separator and whatever clipping left of the link after it. Prose
+// that starts a line with the phrase and keeps talking ("credit balance too
+// low warning fired") does not match.
+func creditBalanceStopLine(body string) bool {
+	for _, phrase := range [...]string{creditBalanceStopIsPhrase, creditBalanceStopPhrase} {
+		if !strings.HasPrefix(body, phrase) {
+			continue
+		}
+		rest := strings.TrimSpace(body[len(phrase):])
+		if rest == "" || strings.HasPrefix(rest, "·") {
+			return true
+		}
+	}
+	return false
+}
+
+// paneErrorLineBody trims a pane line down to its error body: surrounding
+// whitespace, then one leading "⎿" result marker and the whitespace after
+// it. TrimSpace tests unicode.IsSpace, so the no-break space Claude Code
+// pads the marker with trims like ASCII space.
+func paneErrorLineBody(line string) string {
+	body := strings.TrimSpace(line)
+	body = strings.TrimPrefix(body, "⎿")
+	return strings.TrimSpace(body)
 }
 
 // ProviderResumeRefusalReason classifies content, a startup death's error

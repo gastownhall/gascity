@@ -1818,6 +1818,55 @@ func TestProviderTerminalErrorReason(t *testing.T) {
 	}
 }
 
+// TestProviderTerminalErrorReasonCreditBalance pins the credit-balance arms
+// of ProviderTerminalErrorReason: Claude Code's exhausted-credit stop is
+// terminal quota_exceeded exactly when the phrasing is the error itself — the
+// stop line, or the API sentence inside an API error — never a mere mention
+// of it in scrollback, and never the spend-limit modal (which is a rate-limit
+// screen with a reset, not a terminal error).
+func TestProviderTerminalErrorReasonCreditBalance(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		// The stop as its own error line, in the renderings the pane and the
+		// startup-death capture produce.
+		{name: "tui stop after a tool call", content: strings.Join([]string{
+			"⏺ Bash(make test)",
+			"  ⎿ \u00a0Credit balance too low · Add funds: https://platform.claude.com/settings/billing",
+			"╭──────────╮",
+			"│ >        │",
+			"╰──────────╯",
+			" ? for shortcuts",
+		}, "\n"), want: "quota_exceeded"},
+		{name: "tui stop, ascii marker padding", content: "  ⎿  Credit balance too low · Add funds: https://platform.claude.com/settings/billing", want: "quota_exceeded"},
+		{name: "tui stop, marker omitted by a nested render", content: "Credit balance too low · Add funds: https://platform.claude.com/settings/billing", want: "quota_exceeded"},
+		{name: "tui stop, url clipped by a short pane", content: "  ⎿ \u00a0Credit balance too low · Add fu", want: "quota_exceeded"},
+		{name: "tui stop, clipped at the remedy separator", content: "  ⎿ \u00a0Credit balance too low ·", want: "quota_exceeded"},
+		{name: "tui stop, upper case", content: "  ⎿ \u00a0CREDIT BALANCE TOO LOW · ADD FUNDS: https://platform.claude.com/settings/billing", want: "quota_exceeded"},
+		{name: "headless message alone", content: "Credit balance is too low", want: "quota_exceeded"},
+		{name: "headless message after other output", content: strings.Join([]string{
+			"make test",
+			"ok  	github.com/gastownhall/gascity/internal/runtime",
+			"Credit balance is too low",
+		}, "\n"), want: "quota_exceeded"},
+		{name: "headless message under the marker", content: "  ⎿  Credit balance is too low", want: "quota_exceeded"},
+		{name: "startup death carrying the stop as its last pane output", content: strings.Join([]string{
+			`session died during startup: session "worker" exited after it started; last pane output:`,
+			"⎿ \u00a0Credit balance too low · Add funds: https://platform.claude.com/settings/billing",
+		}, "\n"), want: "quota_exceeded"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ProviderTerminalErrorReason(tt.content); got != tt.want {
+				t.Errorf("ProviderTerminalErrorReason(%q) = %q, want %q", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestContainsCustomAPIKeyDialog(t *testing.T) {
 	t.Parallel()
 
