@@ -332,3 +332,41 @@ args = ["{{.AgentName}}"]
 		t.Fatalf("template-only divergence must keep the generic detail, got: %s", joined)
 	}
 }
+
+func TestMCPSharedTargetDoctorCheckReportsStage2WorkDirConflict(t *testing.T) {
+	cityPath := t.TempDir()
+	alphaMCP := filepath.Join(cityPath, "agents", "alpha", "mcp", "notes.toml")
+	betaMCP := filepath.Join(cityPath, "agents", "beta", "mcp", "notes.toml")
+	writeMCPSource(t, alphaMCP, `
+name = "notes"
+command = "uvx"
+args = ["alpha-notes"]
+`)
+	writeMCPSource(t, betaMCP, `
+name = "notes"
+command = "uvx"
+args = ["beta-notes"]
+`)
+
+	shared := ".gc/worktrees/shared"
+	cfg := &config.City{
+		Workspace: config.Workspace{Provider: "gemini"},
+		Providers: map[string]config.ProviderSpec{
+			"gemini": {Command: "echo", PromptMode: "none"},
+		},
+		Session: config.SessionConfig{Provider: "tmux"},
+		Agents: []config.Agent{
+			{Name: "alpha", Scope: "city", Provider: "gemini", WorkDir: shared, MaxActiveSessions: intPtr(2), MCPDir: filepath.Dir(alphaMCP)},
+			{Name: "beta", Scope: "city", Provider: "gemini", WorkDir: shared, MaxActiveSessions: intPtr(2), MCPDir: filepath.Dir(betaMCP)},
+		},
+	}
+
+	result := newMCPSharedTargetDoctorCheck(cityPath, cfg, stubLookPath).Run(&doctor.CheckContext{CityPath: cityPath})
+	if result.Status != doctor.StatusError {
+		t.Fatalf("mcp-shared-target = %v (%q; %v), want error for divergent catalogs in one work dir", result.Status, result.Message, result.Details)
+	}
+	joined := strings.Join(result.Details, "\n")
+	if !strings.Contains(joined, "alpha") || !strings.Contains(joined, "beta") {
+		t.Fatalf("details %q want both agents named", joined)
+	}
+}
