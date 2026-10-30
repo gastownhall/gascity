@@ -8863,3 +8863,119 @@ func (p *probeCountingFake) IsRunning(name string) bool {
 	p.probes.Add(1)
 	return p.Fake.IsRunning(name)
 }
+
+// newWispGCReloadRuntime builds a city runtime from a city.toml whose
+// [daemon] table is daemon, wired so reloadConfigTraced can apply a reload.
+func newWispGCReloadRuntime(t *testing.T, daemon string) (*CityRuntime, string) {
+	t.Helper()
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	writeWispGCReloadConfig(t, tomlPath, daemon)
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	var stdout, stderr bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		LogPrefix: "gc reload",
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+	cr.sessionDrains = newDrainTracker()
+
+	prevStart := cityRuntimeStartBeadsLifecycle
+	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, cityStoreRecord, io.Writer) error { return nil }
+	t.Cleanup(func() { cityRuntimeStartBeadsLifecycle = prevStart })
+	return cr, tomlPath
+}
+
+func writeWispGCReloadConfig(t *testing.T, tomlPath, daemon string) {
+	t.Helper()
+	data := "[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n[daemon]\n" + daemon
+	if err := os.WriteFile(tomlPath, []byte(data), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}
+
+// reloadWispGCRuntime rewrites the [daemon] table, applies the reload, and
+// fails unless the reload was applied under a new config revision.
+func reloadWispGCRuntime(t *testing.T, cr *CityRuntime, tomlPath, daemon string) {
+	t.Helper()
+	oldRev := cr.configRev
+	writeWispGCReloadConfig(t, tomlPath, daemon)
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cr.cityPath, nil, reloadSourceManual)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reload outcome = %q (err %q), want %q", reply.Outcome, reply.Error, reloadOutcomeApplied)
+	}
+	if cr.configRev == oldRev {
+		t.Fatal("configRev unchanged after reload; the reload did not apply a new config")
+	}
+}
+
+// stampWispGCRun marks the runtime's wisp GC tracker as having last run at
+// lastRun and returns it, so a test can tell a rebuilt tracker from it.
+func stampWispGCRun(t *testing.T, cr *CityRuntime, lastRun time.Time) *memoryWispGC {
+	t.Helper()
+	m, ok := cr.wg.(*memoryWispGC)
+	if !ok || m == nil {
+		t.Fatalf("wisp GC tracker = %T, want *memoryWispGC", cr.wg)
+	}
+	m.lastRun = lastRun
+	return m
+}
+
+func rebuiltWispGC(t *testing.T, cr *CityRuntime, prev *memoryWispGC) *memoryWispGC {
+	t.Helper()
+	m, ok := cr.wg.(*memoryWispGC)
+	if !ok || m == nil {
+		t.Fatalf("wisp GC tracker after reload = %T, want *memoryWispGC", cr.wg)
+	}
+	if m == prev {
+		t.Fatal("wisp GC tracker not rebuilt by the reload")
+	}
+	return m
+}
+
+// An applied reload that rebuilds the wisp GC tracker keeps the configured
+// cadence: a GC that ran 10m ago on a 1h interval is not due, and is due
+// once the hour is up. A retention-only change does not reset it either.
+func TestCityRuntimeReloadKeepsWispGCCadence(t *testing.T) {
+	const gcKnobs = "wisp_gc_interval = \"1h\"\nwisp_ttl = \"24h\"\n"
+	cr, tomlPath := newWispGCReloadRuntime(t, gcKnobs)
+	lastRun := time.Now()
+	prev := stampWispGCRun(t, cr, lastRun)
+
+	reloadWispGCRuntime(t, cr, tomlPath, gcKnobs+"shutdown_timeout = \"1s\"\n")
+	m := rebuiltWispGC(t, cr, prev)
+	if m.shouldRun(lastRun.Add(10 * time.Minute)) {
+		t.Fatal("wisp GC due 10m after its last run, right after a config reload; want the 1h cadence kept")
+	}
+	if !m.shouldRun(lastRun.Add(time.Hour)) {
+		t.Fatal("wisp GC not due 1h after its last run; want it due on the 1h cadence")
+	}
+
+	reloadWispGCRuntime(t, cr, tomlPath, "wisp_gc_interval = \"1h\"\nwisp_ttl = \"48h\"\nshutdown_timeout = \"1s\"\n")
+	m = rebuiltWispGC(t, cr, m)
+	if m.ttl != 48*time.Hour {
+		t.Fatalf("rebuilt wisp GC ttl = %v, want the reloaded 48h", m.ttl)
+	}
+	if m.shouldRun(lastRun.Add(10 * time.Minute)) {
+		t.Fatal("wisp GC due 10m after its last run after a wisp_ttl reload; want the 1h cadence kept")
+	}
+}
