@@ -5090,6 +5090,40 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			default:
 				reason = "no-wake-reason"
 			}
+			// Held-work keep (ga-2ols7o): a live pool seat that already holds
+			// assigned work — open but not ready (its dependency still runs
+			// elsewhere), or in_progress and blocked, with no claim stamp —
+			// has no wake reason to run that work YET. The timer drains here
+			// (no-wake-reason, idle-sleep, config-suppressed) would stop the
+			// one seat the work is assigned to; the assignment is
+			// session-specific, so a sibling cannot take the work until it is
+			// released. Keep the seat, and cancel a timer drain an earlier
+			// tick began before the assignment landed. Explicit sleep intents
+			// (other than the idle probe's own idle-stop-pending) and the
+			// intent-class reasons above still drain. Fails closed: a work
+			// leg that could not be read keeps the seat.
+			if heldWorkDrainReason(reason) && (intent == "" || intent == "idle-stop-pending") &&
+				liveClaimVetoApplies(cityPath, cfg, info, suspState) {
+				held, workID, err := sessionHoldsAssignedWork(sw, info)
+				if err != nil {
+					fmt.Fprintf(stderr, "session reconciler: keeping %s from a %s drain: reading its assigned work: %v\n", name, reason, err) //nolint:errcheck
+				}
+				if held {
+					cancelSessionDrainIfInfo(info, sp, dt, heldWorkDrainReason)
+					clearCompletedIdleProbe(target.info.ID, dt)
+					if intent == "idle-stop-pending" {
+						tick.clearIdleStopPending(target.info.ID, sessFront)
+					}
+					if trace != nil {
+						trace.RecordDecision(TraceSiteReconcilerDrainDecision, TraceReasonCode(reason), TraceOutcomeKeptOpen,
+							target.tp.TemplateName, name, traceRecordPayload{
+								"sleep_intent": intent,
+								"held_work":    workID,
+							})
+					}
+					continue
+				}
+			}
 			// Live-claim veto (sessionOwnsLiveClaim) for the demand-class
 			// reasons: the wake verdict comes from the tick snapshot, which can
 			// miss a claim the worker just made out of process. Checked before

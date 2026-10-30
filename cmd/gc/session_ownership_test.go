@@ -563,7 +563,7 @@ func TestSessionOwnsLiveClaim_StopsAtFoundBead(t *testing.T) {
 	}
 
 	// The claimed bead is found by id (storeref ByID): past the city leg, only
-	// the rig whose prefix covers the id is read.
+	// the rig whose prefix covers it is read.
 	t.Run("not found in city leg moves on to the rig whose prefix covers it", func(t *testing.T) {
 		if err := city.SetMetadata(session.ID, beadmeta.CurrentClaimBeadIDMetadataKey, "ra-elsewhere"); err != nil {
 			t.Fatal(err)
@@ -577,4 +577,196 @@ func TestSessionOwnsLiveClaim_StopsAtFoundBead(t *testing.T) {
 			t.Fatalf("rig reads for a claim missing from the city leg: alpha +%d, beta +%d; want alpha only", rigA.count()-aBefore, rigB.count()-bBefore)
 		}
 	})
+}
+
+// Timer-drain keeps (ga-2ols7o). A live pool seat that already holds assigned
+// work the wake engine has no reason to run yet — open but not ready, or
+// in_progress and blocked, with no claim stamp — must not be drained by the
+// reconciler's own timer drains (no-wake-reason, idle-sleep,
+// config-suppressed). Stopping the one seat the work is assigned to wedges
+// the work until another seat picks it up; the assignment is session-specific
+// and follows the seat through any restart.
+
+// holdNotReadyOpenWork assigns f.work to the fixture's session by bead id and
+// blocks it on a dependency still running on another seat: work the seat owns
+// that reads not-ready, so no wake demand names it. No claim stamp — ownership
+// is by assignee.
+func (f *ownershipFixture) holdNotReadyOpenWork(t *testing.T) {
+	t.Helper()
+	dep, err := f.backing.Create(beads.Bead{Title: "running-dep", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(dep): %v", err)
+	}
+	inProgress := "in_progress"
+	other := "gc-other-session"
+	if err := f.backing.Update(dep.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &other}); err != nil {
+		t.Fatalf("Update(dep): %v", err)
+	}
+	if err := f.backing.DepAdd(f.work.ID, dep.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	holder := f.session.ID
+	if err := f.backing.Update(f.work.ID, beads.UpdateOpts{Assignee: &holder}); err != nil {
+		t.Fatalf("assign work: %v", err)
+	}
+	if err := f.env.store.(*beads.CachingStore).Prime(context.Background()); err != nil {
+		t.Fatalf("re-Prime: %v", err)
+	}
+}
+
+// holdBlockedInProgressWork creates a blocked in_progress bead assigned to
+// the fixture's session by bead id, with no claim stamp and no session id:
+// work the seat holds that gives no wake demand but no live-claim veto either.
+func (f *ownershipFixture) holdBlockedInProgressWork(t *testing.T) beads.Bead {
+	t.Helper()
+	blocked := true
+	work, err := f.backing.Create(beads.Bead{
+		Title:     "blocked-claim",
+		Type:      "task",
+		Status:    "in_progress",
+		Assignee:  f.session.ID,
+		IsBlocked: &blocked,
+	})
+	if err != nil {
+		t.Fatalf("Create(blocked work): %v", err)
+	}
+	if err := f.env.store.(*beads.CachingStore).Prime(context.Background()); err != nil {
+		t.Fatalf("re-Prime: %v", err)
+	}
+	return work
+}
+
+// assertNotTimerDrained pins the kept outcome beyond stopObservation: no
+// idle-stop-pending mark on the seat either.
+func (f *ownershipFixture) assertNotTimerDrained(t *testing.T) {
+	t.Helper()
+	b, err := f.backing.Get(f.session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if b.Metadata["sleep_intent"] == "idle-stop-pending" {
+		t.Fatal("seat holding assigned work was marked idle-stop-pending")
+	}
+}
+
+// reconcileKeptSeat runs one retained tick: the seat is desired, so the only
+// arm that could stop it is the timer-drain arm under test.
+func (f *ownershipFixture) reconcileKeptSeat() {
+	f.env.addDesired(ownershipWorkerName, ownershipPoolTemplate, false)
+	f.env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{f.session}, map[string]int{}, f.dops)
+}
+
+// TestReconcileSessionBeads_PoolSeatHoldingAssignedOpenWorkIsNotDrained: a
+// live, desired pool seat that holds an assigned open step whose dependency is
+// still running elsewhere (so the step reads not-ready and gives no wake
+// demand) must not be drained by the reconciler's own no-wake-reason timer.
+// The seat has no current_claim_bead_id stamp; ownership is by assignee.
+func TestReconcileSessionBeads_PoolSeatHoldingAssignedOpenWorkIsNotDrained(t *testing.T) {
+	f := newOwnershipFixture(t)
+	f.holdNotReadyOpenWork(t)
+	f.reconcileKeptSeat()
+	if stopped, why := f.stopObservation(t); stopped {
+		t.Fatalf("pool seat holding assigned open work %s was drained (%s); stdout:\n%s\nstderr:\n%s", f.work.ID, why, f.env.stdout.String(), f.env.stderr.String())
+	}
+	f.assertNotTimerDrained(t)
+	// The keep must hold past the drain deadline: a timer drain begun this
+	// tick would stop the seat once defaultDrainTimeout elapsed.
+	f.env.clk.Time = f.env.clk.Now().Add(defaultDrainTimeout + time.Minute)
+	f.env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{f.session}, map[string]int{}, f.dops)
+	if stopped, why := f.stopObservation(t); stopped {
+		t.Fatalf("pool seat holding assigned open work %s was drained after the drain deadline (%s); stdout:\n%s\nstderr:\n%s", f.work.ID, why, f.env.stdout.String(), f.env.stderr.String())
+	}
+}
+
+// TestReconcileSessionBeads_PoolSeatHoldingInProgressWorkIsNotDrained: the
+// in_progress shape of the same keep — blocked work with an empty
+// current_claim_bead_id, so the live-claim veto does not apply and only the
+// held-work keep stands between the seat and the no-wake-reason timer.
+func TestReconcileSessionBeads_PoolSeatHoldingInProgressWorkIsNotDrained(t *testing.T) {
+	f := newOwnershipFixture(t)
+	work := f.holdBlockedInProgressWork(t)
+	f.reconcileKeptSeat()
+	if stopped, why := f.stopObservation(t); stopped {
+		t.Fatalf("pool seat holding blocked in_progress work %s was drained (%s); stdout:\n%s\nstderr:\n%s", work.ID, why, f.env.stdout.String(), f.env.stderr.String())
+	}
+	f.assertNotTimerDrained(t)
+	f.env.clk.Time = f.env.clk.Now().Add(defaultDrainTimeout + time.Minute)
+	f.env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{f.session}, map[string]int{}, f.dops)
+	if stopped, why := f.stopObservation(t); stopped {
+		t.Fatalf("pool seat holding blocked in_progress work %s was drained after the drain deadline (%s); stdout:\n%s\nstderr:\n%s", work.ID, why, f.env.stdout.String(), f.env.stderr.String())
+	}
+}
+
+// TestReconcileSessionBeads_PoolSeatHoldingWorkIsNotTimerDrainedFor: every
+// other way the reconciler's own timers can name a live, pool-desired seat —
+// the awake set's idle-sleep pass, and the sleep policy suppressing a
+// pool-scale wake — keeps a seat holding assigned open work instead of
+// draining it.
+func TestReconcileSessionBeads_PoolSeatHoldingWorkIsNotTimerDrainedFor(t *testing.T) {
+	for name, arm := range map[string]func(t *testing.T, f *ownershipFixture){
+		// The agent sleeps its non-interactive sessions after 2h idle: the
+		// awake set flips the pool-scale wake to idle-sleep, which lands in
+		// the timer-drain arm as "idle".
+		"idle-sleep": func(_ *testing.T, f *ownershipFixture) {
+			f.env.cfg.Agents[0].Attach = boolPtr(false)
+			f.env.cfg.Agents[0].SleepAfterIdle = "2h"
+			f.env.setSessionMetadata(&f.session, map[string]string{
+				"detached_at": f.env.clk.Now().Add(-3 * time.Hour).UTC().Format(time.RFC3339),
+			})
+		},
+		// An interactive sleep policy whose window has passed suppresses the
+		// pool-scale wake (ordinary pool demand does not override an
+		// interactive session's idle window); a probe an earlier tick launched
+		// has answered idle, so this tick would begin the suppressed idle
+		// drain.
+		"config-suppressed": func(_ *testing.T, f *ownershipFixture) {
+			f.env.cfg.SessionSleep.InteractiveResume = "60s"
+			f.env.setSessionMetadata(&f.session, map[string]string{
+				"detached_at": f.env.clk.Now().Add(-6 * time.Minute).UTC().Format(time.RFC3339),
+			})
+			probe := f.env.dt.startIdleProbe(f.session.ID)
+			f.env.dt.finishIdleProbe(f.session.ID, probe, true, f.env.clk.Now().UTC())
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newOwnershipFixture(t)
+			arm(t, f)
+			f.holdNotReadyOpenWork(t)
+			f.env.addDesired(ownershipWorkerName, ownershipPoolTemplate, false)
+			f.env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{f.session}, map[string]int{ownershipPoolTemplate: 1}, f.dops)
+			if stopped, why := f.stopObservation(t); stopped {
+				t.Fatalf("pool seat holding assigned open work %s was timer-drained (%s); stdout:\n%s\nstderr:\n%s", f.work.ID, why, f.env.stdout.String(), f.env.stderr.String())
+			}
+			f.assertNotTimerDrained(t)
+		})
+	}
+}
+
+// TestReconcileSessionBeads_PoolSeatHoldingWorkKeptOpenTraced: the keep
+// records a KeptOpen drain decision naming the held bead.
+func TestReconcileSessionBeads_PoolSeatHoldingWorkKeptOpenTraced(t *testing.T) {
+	f := newOwnershipFixture(t)
+	f.holdNotReadyOpenWork(t)
+	f.env.addDesired(ownershipWorkerName, ownershipPoolTemplate, false)
+	trace := idleTimeoutBackstopTrace(ownershipPoolTemplate)
+	reconcileSessionBeadsTraced(
+		context.Background(), f.env.city, []beads.Bead{f.session}, f.env.desiredState,
+		configuredSessionNames(f.env.cfg, "", f.env.store), f.env.cfg, f.env.sp,
+		f.env.store, f.dops, nil, nil, nil, f.env.dt, map[string]int{}, false, nil, "",
+		nil, f.env.clk, f.env.rec, 0, 0, &f.env.stdout, &f.env.stderr, trace,
+		f.env.startOptions...,
+	)
+	var kept *SessionReconcilerTraceRecord
+	for i := range trace.records {
+		r := &trace.records[i]
+		if r.SiteCode == TraceSiteReconcilerDrainDecision &&
+			r.OutcomeCode == TraceOutcomeKeptOpen &&
+			r.SessionName == ownershipWorkerName &&
+			r.Fields["held_work"] == f.work.ID {
+			kept = r
+		}
+	}
+	if kept == nil {
+		t.Fatalf("no KeptOpen drain decision naming held work %s in %d records", f.work.ID, len(trace.records))
+	}
 }

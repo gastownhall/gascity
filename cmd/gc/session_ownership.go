@@ -58,6 +58,26 @@ func liveClaimVetoApplies(cityPath string, cfg *config.City, info sessionpkg.Inf
 	return !isAgentEffectivelySuspendedWith(cfg, cityPath, agentCfg, suspState)
 }
 
+// sessionHoldsAssignedWork reports the first open or in-progress work bead
+// assigned to info's ReleaseScope on sw's legs, blocked work included: work the
+// seat holds but has no wake reason to run yet. It fails closed: a leg that
+// could not be read, with no confirmed hit elsewhere, reports held.
+func sessionHoldsAssignedWork(sw *SeatWork, info sessionpkg.Info) (held bool, beadID string, err error) {
+	b, ok, err := sw.first(seatWorkQuery{scope: releaseScope(info, sw.Legs().cfg), statuses: seatWorkStatuses})
+	if !ok && err != nil {
+		return true, "", err
+	}
+	return ok, b.ID, nil
+}
+
+// heldWorkDrainReason reports whether reason is one of the reconciler's own
+// timer drains — the drain classes assigned work the seat already holds must
+// keep it out of (no-wake-reason, and "idle" from any of the idle-sleep,
+// config-suppressed, or idle-probe sources).
+func heldWorkDrainReason(reason string) bool {
+	return reason == "idle" || reason == "no-wake-reason"
+}
+
 // sessionOwnsLiveClaim reports whether the session still owns the work bead it
 // last claimed through `gc hook --claim`.
 //
