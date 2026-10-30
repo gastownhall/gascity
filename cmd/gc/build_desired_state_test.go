@@ -5522,6 +5522,81 @@ func TestBuildDesiredState_MaxOneCanonicalBeadIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestBuildDesiredState_MinFloorCanonicalPoolRowAfterRestartHandoffIsReused
+// is the end-to-end sibling of
+// TestReusablePoolSessionInfo_PersistentRestartHandoffIsReusable: a min=1,
+// max=1 canonical pool whose only session bead was handed off by a restart
+// request (asleep, continuation_reset_pending=true, reset_committed_at set,
+// no sleep_reason) must be taken back by the floor on the very next tick —
+// the same row stays desired — instead of stalling on the runtime name it
+// still holds until the session sweep closes it.
+func TestBuildDesiredState_MinFloorCanonicalPoolRowAfterRestartHandoffIsReused(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	now := time.Now().UTC()
+	row, err := store.Create(beads.Bead{
+		Title:  "rig/worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:rig/worker", "template:rig/worker"},
+		Metadata: map[string]string{
+			"template":                   "rig/worker",
+			"agent_name":                 "rig/worker",
+			"alias":                      "rig/worker",
+			"session_name":               "s-worker-canonical",
+			"state":                      "asleep",
+			poolManagedMetadataKey:       boolMetadata(true),
+			"continuation_reset_pending": "true",
+			"reset_committed_at":         now.Add(-time.Minute).Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "rig",
+			StartCommand:      "true",
+			ScaleCheck:        "printf 0",
+			MinActiveSessions: intPtr(1),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+
+	var firstErr bytes.Buffer
+	first := buildDesiredState("test-city", cityPath, now, cfg, runtime.NewFake(), store, &firstErr)
+	var secondErr bytes.Buffer
+	second := buildDesiredState("test-city", cityPath, now.Add(2*time.Minute), cfg, runtime.NewFake(), store, &secondErr)
+
+	for tick, result := range map[string]DesiredStateResult{"first": first, "second": second} {
+		if _, ok := result.State[row.Metadata["session_name"]]; !ok {
+			t.Fatalf("%s desired state missing the handed-off canonical row %s; keys=%v",
+				tick, row.ID, mapKeys(result.State))
+		}
+	}
+	for tick, buf := range map[string]*bytes.Buffer{"first": &firstErr, "second": &secondErr} {
+		for _, stall := range []string{"slot stalled on its own runtime name", "is held by session"} {
+			if strings.Contains(buf.String(), stall) {
+				t.Fatalf("%s stderr contains %q: %s", tick, stall, buf.String())
+			}
+		}
+	}
+	rows, err := store.List(beads.ListQuery{Label: sessionBeadLabel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := 0
+	for _, b := range rows {
+		if b.Status != "closed" {
+			open++
+		}
+	}
+	if open != 1 {
+		t.Fatalf("open session beads = %d, want 1 (the handed-off row reused, no second identity)", open)
+	}
+}
+
 func TestBuildDesiredState_NamepoolMaxOneUsesNamepoolIdentity(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
