@@ -7358,6 +7358,87 @@ func TestInjectImplicitAgents_RigInjection(t *testing.T) {
 	}
 }
 
+// TestInjectImplicitAgents_CityLevelImplicitAgentsAreCityScoped pins the scope
+// contract of provider-derived agents: a city-level implicit agent is composed
+// city-scoped (Scope "city") so the hook treats it as cross-store eligible and
+// fans its claim out across every store the city can see, while a rig-level
+// implicit agent stays rig-bound (empty Scope; its Dir binds it to its rig's
+// store).
+func TestInjectImplicitAgents_CityLevelImplicitAgentsAreCityScoped(t *testing.T) {
+	cfg := &City{
+		Daemon: DaemonConfig{FormulaV2: boolPtr(true)},
+		Providers: map[string]ProviderSpec{
+			"claude": {},
+			"codex":  {},
+		},
+		Rigs: []Rig{{Name: "frontend", Path: "/tmp/frontend"}},
+	}
+	InjectImplicitAgents(cfg)
+
+	cityScoped := map[string]bool{}
+	for _, a := range cfg.Agents {
+		if !a.Implicit {
+			continue
+		}
+		switch a.Dir {
+		case "":
+			if a.Scope != "city" {
+				t.Errorf("implicit city agent %q Scope = %q, want %q", a.Name, a.Scope, "city")
+			}
+			cityScoped[a.Name] = true
+		case "frontend":
+			if a.Scope != "" {
+				t.Errorf("implicit rig agent %s/%s Scope = %q, want empty (rig-bound)", a.Dir, a.Name, a.Scope)
+			}
+		}
+	}
+	for _, name := range []string{"claude", "codex"} {
+		if !cityScoped[name] {
+			t.Errorf("implicit city agent %q not injected; agents = %+v", name, cfg.Agents)
+		}
+	}
+
+	// An explicit city-level agent that omits scope stays untouched: only
+	// synthesis stamps "city", never a widening of explicit configuration.
+	explicit := &City{
+		Daemon: DaemonConfig{FormulaV2: boolPtr(true)},
+		Providers: map[string]ProviderSpec{
+			"claude": {},
+			"codex":  {},
+		},
+		Rigs:   []Rig{{Name: "frontend", Path: "/tmp/frontend"}},
+		Agents: []Agent{{Name: "claude"}},
+	}
+	InjectImplicitAgents(explicit)
+
+	var explicitClaude *Agent
+	injectedCity := map[string]bool{}
+	for i := range explicit.Agents {
+		a := &explicit.Agents[i]
+		if a.Name == "claude" && !a.Implicit {
+			explicitClaude = a
+		}
+		if a.Implicit && a.Dir == "" {
+			if a.Scope != "city" {
+				t.Errorf("implicit city agent %q Scope = %q, want %q", a.Name, a.Scope, "city")
+			}
+			injectedCity[a.Name] = true
+		}
+	}
+	if explicitClaude == nil {
+		t.Fatal("explicit claude agent disappeared after injection")
+	}
+	if explicitClaude.Scope != "" || explicitClaude.Implicit {
+		t.Errorf("explicit claude = {Scope: %q, Implicit: %v}, want untouched {Scope: \"\", Implicit: false}", explicitClaude.Scope, explicitClaude.Implicit)
+	}
+	if injectedCity["claude"] {
+		t.Error("implicit city claude injected despite the explicit entry")
+	}
+	if !injectedCity["codex"] {
+		t.Error("implicit city codex not injected alongside the explicit claude")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // agent_defaults.default_sling_formula
 // ---------------------------------------------------------------------------
