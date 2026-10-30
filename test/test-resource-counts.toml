@@ -3245,6 +3245,18 @@ calls = 7
 tagged = true
 
 [[count]]
+path = "test/integration/drift_sysprocattr_linux_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/integration/drift_sysprocattr_linux_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
 path = "test/integration/e2e_comm_test.go"
 resource = "fixed_sleep"
 calls = 2
