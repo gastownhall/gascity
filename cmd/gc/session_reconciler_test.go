@@ -15083,3 +15083,261 @@ func TestSessionConfigDriftKey_GenericRigScopedTemplate(t *testing.T) {
 		})
 	}
 }
+
+// namedEnvDriftShape is one way a configured named session can be backed: a
+// city agent, a rig agent bound by dir, or a generic scope="rig" agent whose
+// rig-stamped copy config.FindAgent synthesizes per rig.
+type namedEnvDriftShape struct {
+	name     string
+	identity string
+	agent    config.Agent
+	named    config.NamedSession
+}
+
+var namedEnvDriftShapes = []namedEnvDriftShape{
+	{
+		name:     "city agent",
+		identity: "lead",
+		agent:    config.Agent{Name: "lead"},
+		named:    config.NamedSession{Template: "lead"},
+	},
+	{
+		name:     "dir-bound rig agent",
+		identity: "rig-0/smith",
+		agent:    config.Agent{Name: "smith", Dir: "rig-0"},
+		named:    config.NamedSession{Template: "smith", Dir: "rig-0"},
+	},
+	{
+		name:     "generic rig-scope agent",
+		identity: "rig-0/smith",
+		agent:    config.Agent{Name: "smith", Scope: "rig"},
+		named:    config.NamedSession{Template: "smith", Dir: "rig-0"},
+	},
+}
+
+// namedEnvDriftCity is the city for shape whose agent env carries
+// CUSTOM_DRIFT=value, with its named session in mode.
+func namedEnvDriftCity(shape namedEnvDriftShape, rigPath, mode, value string) *config.City {
+	agent := shape.agent
+	agent.StartCommand = "agent-cmd"
+	agent.MaxActiveSessions = intPtr(1)
+	agent.Env = map[string]string{"CUSTOM_DRIFT": value}
+	named := shape.named
+	named.Mode = mode
+	return &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Rigs:          []config.Rig{{Name: "rig-0", Path: rigPath}},
+		Agents:        []config.Agent{agent},
+		NamedSessions: []config.NamedSession{named},
+	}
+}
+
+// namedEnvDriftTemplate resolves identity's configured named-session template
+// under cfg, the way the reconciler resolves a preserved named session.
+func namedEnvDriftTemplate(t *testing.T, env *reconcilerTestEnv, cfg *config.City, identity, id string) TemplateParams {
+	t.Helper()
+	info := env.sessionInfo(id)
+	tp, _, err := resolvePreservedConfiguredNamedSessionTemplate(env.city, cfg.Workspace.Name, cfg, env.sp, env.store, []sessionpkg.Info{info}, info, env.clk, io.Discard)
+	if err != nil {
+		t.Fatalf("resolving named session %q: %v", identity, err)
+	}
+	return tp
+}
+
+// setupAliveNamedEnvDriftSession creates an alive named session for shape
+// whose started_config_hash was stamped under CUSTOM_DRIFT=startedValue while
+// env.cfg now carries CUSTOM_DRIFT=v2. A desired session gets its current
+// template in env.desiredState; a preserved one is left to the reconciler's
+// preserved-named resolution. The sub-hashes stay empty, so drift takes the
+// full restart-in-place branch. It returns the session bead, its runtime
+// name, and the stored and current core hashes.
+func setupAliveNamedEnvDriftSession(t *testing.T, env *reconcilerTestEnv, shape namedEnvDriftShape, desired bool, startedValue string) (beads.Bead, string, string, string) {
+	t.Helper()
+	mode := "on_demand"
+	if desired {
+		mode = "always"
+	}
+	rigPath := t.TempDir()
+	env.cfg = namedEnvDriftCity(shape, rigPath, mode, "v2")
+	startedCfg := namedEnvDriftCity(shape, rigPath, mode, startedValue)
+
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, shape.identity)
+	session := env.createSessionBead(sessionName, shape.identity)
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: shape.identity,
+		namedSessionModeMetadata:     mode,
+		"session_key":                "warm-conversation",
+	})
+
+	currentTP := namedEnvDriftTemplate(t, env, env.cfg, shape.identity, session.ID)
+	startedTP := namedEnvDriftTemplate(t, env, startedCfg, shape.identity, session.ID)
+	info := env.sessionInfo(session.ID)
+	stored := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(startedTP, info))
+	current := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(currentTP, info))
+	env.setSessionMetadata(&session, map[string]string{"started_config_hash": stored})
+	if desired {
+		env.desiredState[sessionName] = currentTP
+	}
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: currentTP.Command}); err != nil {
+		t.Fatalf("Start(%s): %v", sessionName, err)
+	}
+	return session, sessionName, stored, current
+}
+
+// A change to operator-authored env drifts every configured named session,
+// however its agent is configured: the alive config-drift gate logs it and
+// restarts the session in place.
+func TestReconcileSessionBeads_NamedSessionDetectsOperatorEnvDrift(t *testing.T) {
+	for _, shape := range namedEnvDriftShapes {
+		for _, desired := range []bool{true, false} {
+			state := "preserved"
+			if desired {
+				state = "desired"
+			}
+			t.Run(shape.name+"/"+state, func(t *testing.T) {
+				env := newReconcilerTestEnv(t)
+				session, sessionName, stored, current := setupAliveNamedEnvDriftSession(t, env, shape, desired, "v1")
+				if stored == current {
+					t.Fatalf("operator env change did not move the core fingerprint (%s)", stored)
+				}
+
+				env.reconcile([]beads.Bead{session})
+
+				if want := "config-drift " + sessionName + ":"; !strings.Contains(env.stderr.String(), want) {
+					t.Fatalf("stderr missing %q; stderr=%s", want, env.stderr.String())
+				}
+				got, err := env.store.Get(session.ID)
+				if err != nil {
+					t.Fatalf("Get(%s): %v", session.ID, err)
+				}
+				if got.Status != "open" {
+					t.Fatalf("status = %q, want open (restart in place on the same bead)", got.Status)
+				}
+				if got.Metadata["started_config_hash"] == stored {
+					t.Fatalf("started_config_hash still %q, want the drifted session restarted in place", stored)
+				}
+				if got := env.sp.CountCalls("Stop", sessionName); got == 0 {
+					t.Fatalf("Stop calls = 0, want the drifted runtime stopped for restart; stderr=%s", env.stderr.String())
+				}
+			})
+		}
+	}
+}
+
+// With config unchanged since start, a generic rig-scope named session hashes
+// the same at the drift gate as it did at start: no drift, no restart loop.
+func TestReconcileSessionBeads_GenericRigNamedSessionUnchangedConfigNoDrift(t *testing.T) {
+	for _, desired := range []bool{true, false} {
+		t.Run(fmt.Sprintf("desired=%t", desired), func(t *testing.T) {
+			env := newReconcilerTestEnv(t)
+			session, sessionName, stored, current := setupAliveNamedEnvDriftSession(t, env, namedEnvDriftShapes[2], desired, "v2")
+			if stored != current {
+				t.Fatalf("stored hash %q != current %q for unchanged config", stored, current)
+			}
+
+			env.reconcile([]beads.Bead{session})
+			env.reconcile([]beads.Bead{session})
+
+			if strings.Contains(env.stderr.String(), "config-drift") {
+				t.Fatalf("unexpected config-drift for unchanged config; stderr=%s", env.stderr.String())
+			}
+			got, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", session.ID, err)
+			}
+			if got.Metadata["started_config_hash"] != stored {
+				t.Fatalf("started_config_hash = %q, want unchanged %q", got.Metadata["started_config_hash"], stored)
+			}
+			if got := env.sp.CountCalls("Stop", sessionName); got != 0 {
+				t.Fatalf("Stop calls = %d, want 0 for unchanged config", got)
+			}
+		})
+	}
+}
+
+// An attached generic rig-scope named session defers its config drift under
+// the stored:current drift key instead of restarting.
+func TestReconcileSessionBeads_AttachedGenericRigNamedSessionDefersConfigDrift(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	session, sessionName, stored, current := setupAliveNamedEnvDriftSession(t, env, namedEnvDriftShapes[2], true, "v1")
+	env.sp.SetAttached(sessionName, true)
+
+	env.reconcile([]beads.Bead{session})
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if key, want := got.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata], stored+":"+current; key != want {
+		t.Fatalf("attached config-drift deferral key = %q, want %q; stderr=%s", key, want, env.stderr.String())
+	}
+	if got.Metadata["started_config_hash"] != stored {
+		t.Fatalf("started_config_hash = %q, want unchanged %q while attached", got.Metadata["started_config_hash"], stored)
+	}
+	if got := env.sp.CountCalls("Stop", sessionName); got != 0 {
+		t.Fatalf("Stop calls = %d, want 0 while attached", got)
+	}
+}
+
+// A named session of a generic scope="rig" agent runs the rig-stamped copy
+// config.FindAgent synthesizes (template "<rig>/<name>"); its launch-only
+// drift must relaunch it like a city-scoped named session.
+func TestReconcileSessionBeads_LaunchOnlyDriftRelaunchesRigScopedNamedSession(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "rig-0", Path: t.TempDir()}},
+		Agents: []config.Agent{{
+			Name:              "smith",
+			Scope:             "rig",
+			StartCommand:      "new-cmd",
+			MaxActiveSessions: intPtr(1),
+		}},
+		NamedSessions: []config.NamedSession{{Template: "smith", Dir: "rig-0", Mode: "always"}},
+	}
+	const identity = "rig-0/smith"
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, identity)
+	env.desiredState[sessionName] = TemplateParams{
+		TemplateName:            identity,
+		InstanceName:            identity,
+		Alias:                   identity,
+		Command:                 "new-cmd",
+		ConfiguredNamedIdentity: identity,
+		ConfiguredNamedMode:     "always",
+	}
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "new-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	session := env.createSessionBead(sessionName, identity)
+	env.markSessionActive(&session)
+
+	agentCfg := sessionCoreConfigForHashInfo(env.desiredState[sessionName], env.sessionInfo(session.ID))
+	oldCfg := agentCfg
+	oldCfg.Command = "stale-" + agentCfg.Command
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: identity,
+		namedSessionModeMetadata:     "always",
+		"session_key":                "warm-conversation",
+		"started_config_hash":        runtime.CoreFingerprint(oldCfg),
+		"started_provision_hash":     runtime.ProvisionFingerprint(oldCfg),
+		"started_launch_hash":        runtime.LaunchFingerprint(oldCfg),
+		"started_live_hash":          runtime.LiveFingerprint(oldCfg),
+	})
+
+	if key := sessionConfigDriftKey(env.sessionInfo(session.ID), env.cfg, env.desiredState[sessionName]); key == "" {
+		t.Errorf("sessionConfigDriftKey = \"\", want stored:current drift key for rig-scoped named session %q", identity)
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	if got := env.sp.CountCalls("Relaunch", sessionName); got != 1 {
+		t.Fatalf("Relaunch calls = %d, want 1 (rig-scoped named launch-only drift must relaunch); stderr=%s", got, env.stderr.String())
+	}
+	b, _ := env.store.Get(session.ID)
+	if got, want := b.Metadata["started_config_hash"], runtime.CoreFingerprint(agentCfg); got != want {
+		t.Errorf("started_config_hash = %q, want rebaselined %q", got, want)
+	}
+}

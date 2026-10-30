@@ -3935,7 +3935,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// to avoid false-positive drains. Fixes #127.
 			storedHash := infoByID[id].StartedConfigHash
 			if template != "" && storedHash != "" {
-				cfgAgent := findAgentByTemplate(cfg, template)
+				cfgAgent := findSessionAgentByTemplate(cfg, template)
 				if cfgAgent != nil {
 					agentCfg := sessionCoreConfigForHashInfo(tp, infoByID[id])
 					currentHash := runtime.CoreFingerprint(agentCfg)
