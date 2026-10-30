@@ -938,10 +938,10 @@ func sessionHasClaimedInProgressWork(workBeads []AwakeWorkBead, named []AwakeNam
 
 // workBeadHasAwakeDemand reports whether a work bead currently contributes
 // awake demand: it must be in_progress and unblocked, or open and Ready, AND
-// must not be suppressed by an in-effect WakeBackoffUntil. The backoff check mirrors the QuarantinedUntil
-// suppression on AwakeSessionBead (see ComputeAwakeSet's "Quarantine
-// suppression" step) — same shape, applied to the work bead instead of the
-// session bead. See ga-7fldxz.2.
+// must not be suppressed by an in-effect WakeBackoffUntil. The backoff check
+// mirrors the QuarantinedUntil suppression on AwakeSessionBead (see
+// ComputeAwakeSet's "Quarantine suppression" step) — same shape, applied to
+// the work bead instead of the session bead. See ga-7fldxz.2.
 func workBeadHasAwakeDemand(bead AwakeWorkBead, now time.Time) bool {
 	var ready bool
 	switch bead.Status {
