@@ -258,7 +258,10 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 		}
 		// Matched a live, running session, yet nothing was claimed/delivered
 		// this tick — e.g. the poller quiescence gate (pollerSessionIdleEnough)
-		// hasn't cleared, or claimDueQueuedNudgesForTarget found nothing
+		// hasn't cleared and the queue hasn't starved past
+		// queuedNudgeStarvedAfter yet (a busy session's due item waits only
+		// until it starves, then until a turn look, on a leaf that takes one,
+		// says idle), or claimDueQueuedNudgesForTarget found nothing
 		// claimable (already claimed by a concurrent drain path). Either way
 		// this is the class of skip ra-oudpha finding-3 could not otherwise
 		// distinguish from "not matched" or "not running" without a trace.
