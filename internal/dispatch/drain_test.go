@@ -4167,3 +4167,49 @@ func TestProcessDrainRecordedCloseRetiresUnitConvoys(t *testing.T) {
 		}
 	}
 }
+
+// TestProcessDrainSplitCityRetiresUnitConvoysInTheWorkStore: on a split city
+// the units were minted in the work store — the class that owns synthetic
+// convoys — so the retire closes them there, and the graph binding never
+// holds a drain-unit convoy, open or closed.
+func TestProcessDrainSplitCityRetiresUnitConvoysInTheWorkStore(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	work, graph, drain, _ := seedSplitClassDrainWorkflow(t, false)
+	opts := ProcessOptions{FormulaSearchPaths: []string{dir}, MemberStores: []beads.Store{work}}
+
+	if _, err := ProcessControl(graph, drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	drain = mustGetBead(t, graph, drain.ID)
+	manifest := mustDrainManifest(t, drain)
+	for _, row := range manifest.Rows {
+		if err := updateMetadataAndClose(graph, row.ItemRootID, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass}); err != nil {
+			t.Fatalf("close item root %s: %v", row.ItemRootID, err)
+		}
+	}
+	result, err := ProcessControl(graph, mustGetBead(t, graph, drain.ID), opts)
+	if err != nil {
+		t.Fatalf("ProcessControl(drain complete): %v", err)
+	}
+	if result.Action != "drain-succeeded" {
+		t.Fatalf("Action = %q, want drain-succeeded", result.Action)
+	}
+	for _, row := range manifest.Rows {
+		unit, err := work.Get(row.UnitConvoyID)
+		if err != nil {
+			t.Fatalf("work.Get(unit %s): %v", row.UnitConvoyID, err)
+		}
+		if unit.Status != "closed" || unit.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+			t.Errorf("unit convoy %s = %s/%s in the work store, want closed pass", unit.ID, unit.Status, unit.Metadata[beadmeta.OutcomeMetadataKey])
+		}
+	}
+	graphUnits, err := graph.ListByMetadata(map[string]string{beadmeta.SyntheticKindMetadataKey: "drain-unit-convoy"}, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("graph.ListByMetadata(unit convoys): %v", err)
+	}
+	if len(graphUnits) != 0 {
+		t.Errorf("graph store holds %d drain-unit convoy(s), want none", len(graphUnits))
+	}
+}
