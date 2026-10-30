@@ -12911,6 +12911,33 @@ func TestOrphanSweepReleasesHookClaimOfClosedPoolSession(t *testing.T) {
 	}
 }
 
+// TestOrphanSweepKeepsUnresolvableStampedSessionNameUnverifiable pins the
+// fail-closed direction of the stamped-name rule: a gc.session_name that is
+// neither a probed candidate nor the "-<id>" runtime name of a terminal
+// session bead the sweep read (an identity-derived named-session runtime
+// name, for example) is still probed directly, and a failed read keeps the
+// claim unverifiable even though the canonical gc.session_id reads back
+// terminal. Absence from the store is never treated as death.
+func TestOrphanSweepKeepsUnresolvableStampedSessionNameUnverifiable(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{hookClaim("ga-named-worker", "gc-d34d1", "gastown__named-worker", nil)},
+		nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d1", Status: "closed", IssueType: "session"}},
+		nil, nil)
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if run.released("ga-named-worker") {
+		t.Fatalf("claim with an unresolvable stamped session name was released:\n%s", run.context())
+	}
+	if !strings.Contains(run.out, "orphan-sweep: reset 0 orphaned beads, skipped 1 unverifiable") {
+		t.Fatalf("unresolvable stamped name was not counted unverifiable:\n%s", run.out)
+	}
+	if !strings.Contains(run.log, "bd show gastown__named-worker --json") {
+		t.Fatalf("the stamped name was not probed directly:\n%s", run.log)
+	}
+}
+
 // TestOrphanSweepProtectsHQClaimsItCannotVouchFor applies the gate in HQ, this
 // city's own store, as the Go sweep does for every store: a claim under an
 // identity this city cannot vouch for (a person, a typo, a decommissioned
