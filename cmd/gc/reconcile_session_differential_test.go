@@ -1013,6 +1013,12 @@ func parityFixtures() []parityFixture {
 		return poolRow("gc-1", "worker", 1, "awake", append([]string{"instance_token", "tok-gc-1", "last_woke_at", at(-time.Minute)}, meta...)...)
 	}
 	assigned := []parityRow{{ID: "gw-1", Title: "gw-1", Type: "task", Status: "in_progress", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}}}
+	// heldWork is open work assigned to gc-1 that waits on the unmet
+	// dependency gw-0: the seat holds it with no wake reason to run it yet.
+	heldWork := []parityRow{
+		{ID: "gw-0", Title: "gw-0", Type: "task", Status: "open"},
+		{ID: "gw-1", Title: "gw-1", Type: "task", Status: "open", Assignee: "gc-1", Needs: []string{"gw-0"}, Metadata: map[string]string{"gc.routed_to": "worker"}},
+	}
 	napping := func() *config.City {
 		cfg := workerCity(3)
 		cfg.Agents[0].SleepAfterIdle = "5m"
@@ -1404,6 +1410,19 @@ func parityFixtures() []parityFixture {
 			// grace.
 			Name: "an unwanted row inside the wake grace is kept", Behaviors: []string{"INC-003"},
 			Rows: []parityRow{awake()}, Runtimes: []simRuntime{live},
+		},
+		{
+			// A pool seat past the wake grace holding assigned work it has no
+			// wake reason to run yet (open, blocked by an unmet dependency):
+			// both keep it from its no-wake-reason drain (the held-work keep).
+			Name: "a pool seat holding blocked work is not drained for no wake reason",
+			Rows: []parityRow{awake("last_woke_at", at(-time.Hour))}, Work: heldWork, Runtimes: []simRuntime{live}, Explain: explain(nil),
+		},
+		{
+			// A no-wake-reason drain requested before the work was assigned:
+			// both cancel it.
+			Name: "a pool seat holding blocked work cancels its requested no-wake-reason drain",
+			Rows: []parityRow{awake("last_woke_at", at(-time.Hour))}, Work: heldWork, Runtimes: []simRuntime{live}, Drains: map[string]string{"gc-1": "no-wake-reason"}, Explain: explain(nil),
 		},
 		{
 			// A suspended agent's row past the grace, with in-progress work:
