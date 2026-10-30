@@ -7,7 +7,10 @@
 # A claim whose assignee this city cannot vouch for (`gc agent is-foreign`:
 # not in its roster and no session record of its own answers to it, e.g.
 # another city's agent on a shared rig store) is never reset; each run that
-# keeps one names it and declares a partial outcome (order.skipped).
+# keeps one names it and declares a partial outcome (order.skipped). A local
+# claim left in place because its holder could not be verified dead, its bead
+# could not be re-read, or its conditional release failed is declared in the
+# same partial outcome, one scope per bead.
 # The gate is asked at most once per identity per run, within
 # GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS (default 120, under the order's 4m
 # timeout; where timeout(1) exists, an ask still running at the deadline is

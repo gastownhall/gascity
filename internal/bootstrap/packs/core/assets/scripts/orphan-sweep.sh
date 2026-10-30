@@ -673,6 +673,13 @@ for ((_i = 0; _i < ${#UNRECOGNIZED[@]}; _i++)); do
     claim_gate_verdict "${UNRECOGNIZED[$(((_gate_offset + _i) % ${#UNRECOGNIZED[@]}))]}"
 done
 
+# skip_local_claim counts a local claim left in place and declares it as an
+# outcome scope labeled with the bead and naming why.
+skip_local_claim() {
+    UNVERIFIABLE=$((UNVERIFIABLE + 1))
+    order_outcome_scope_skipped "$1" "$2"
+}
+
 ORPHANED=0
 UNVERIFIABLE=0
 # Count of undeliverable summaries. Load-bearing for the exit code below.
@@ -690,7 +697,7 @@ while IFS=$'\t' read -r bead_id assignee; do
     else
         recheck_status=$?
         if [ "$recheck_status" != "2" ]; then
-            UNVERIFIABLE=$((UNVERIFIABLE + 1))
+            skip_local_claim "$bead_id" "work bead could not be re-read as still in_progress under $assignee"
         fi
         continue
     fi
@@ -699,7 +706,8 @@ while IFS=$'\t' read -r bead_id assignee; do
     else
         session_status=$?
         if [ "$session_status" = "2" ]; then
-            UNVERIFIABLE=$((UNVERIFIABLE + 1))
+            unreadable="${SESSION_PROBE_UNREADABLE%$'\n'}"
+            skip_local_claim "$bead_id" "holder $assignee is not verifiably dead; could not read ${unreadable//$'\n'/, }"
             continue
         fi
     fi
@@ -708,12 +716,16 @@ while IFS=$'\t' read -r bead_id assignee; do
     else
         reset_status=$?
         if [ "$reset_status" != "2" ]; then
-            UNVERIFIABLE=$((UNVERIFIABLE + 1))
+            skip_local_claim "$bead_id" "conditional release under $assignee failed"
         fi
     fi
 done < <([ -z "$UNRECOGNIZED_ROWS" ] || printf '%s\n' "$UNRECOGNIZED_ROWS")
 
 PROTECTED_DETAIL=""
+# One partial outcome covers both the claims the gate protected and the local
+# claims left in place. Setting it once keeps the gate's reason: a later
+# order_outcome_set replaces the reason as well as the kind.
+OUTCOME_REASON=""
 if [ "$PROTECTED" -gt 0 ]; then
     PROTECTED_JSON=$(protected_claims_json) || PROTECTED_JSON=""
     if [ -n "$PROTECTED_JSON" ]; then
@@ -721,7 +733,7 @@ if [ "$PROTECTED" -gt 0 ]; then
             "orphan-sweep: protected \(length) foreign/unknown identities this pass (\($claims) claims): "
             + (map("\(.identity | tojson) (\(.beads | length): \(.beads[:$limit] | join(", "))\(if (.beads | length) > $limit then " +\((.beads | length) - $limit) more" else "" end))") | join(", "))
         ' <<<"$PROTECTED_JSON") || PROTECTED_DETAIL=""
-        order_outcome_set partial "protected $PROTECTED claim(s) held by identities this city could not vouch for; each scope names the identity and why"
+        OUTCOME_REASON="protected $PROTECTED claim(s) held by identities this city could not vouch for; each scope names the identity and why"
         # Reason first, identity last, joined by a bare tab: the spool holds no
         # tab or newline, so the identity reads back verbatim. @tsv would
         # escape a backslash, and the scope would stop naming the identity.
@@ -735,12 +747,18 @@ if [ "$PROTECTED" -gt 0 ]; then
     fi
     if [ -z "$PROTECTED_DETAIL" ]; then
         PROTECTED_DETAIL="orphan-sweep: protected $PROTECTED claims this pass, but the per-identity summary is UNAVAILABLE"
-        order_outcome_set partial "protected $PROTECTED claim(s) held by identities this city could not vouch for (per-identity summary unavailable)"
+        OUTCOME_REASON="protected $PROTECTED claim(s) held by identities this city could not vouch for (per-identity summary unavailable)"
     fi
     if [ "$GATE_BUDGET_SKIPPED" -gt 0 ]; then
         PROTECTED_DETAIL="$PROTECTED_DETAIL
 orphan-sweep: foreign-identity gate budget of ${GATE_BUDGET_SECONDS}s exhausted; $GATE_BUDGET_SKIPPED identities not asked this pass"
     fi
+fi
+if [ "$UNVERIFIABLE" -gt 0 ]; then
+    OUTCOME_REASON="${OUTCOME_REASON:+$OUTCOME_REASON; }left $UNVERIFIABLE local claim(s) in place whose holder could not be verified dead or released; each bead scope names the claim and why"
+fi
+if [ -n "$OUTCOME_REASON" ]; then
+    order_outcome_set partial "$OUTCOME_REASON"
 fi
 
 if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ] || [ "$PROTECTED" -gt 0 ]; then
@@ -776,10 +794,11 @@ misidentified live session -- inspect via gc bd show <id> --json." \
     fi
 fi
 
-# Declare protected claims as a partial outcome: the controller logs an exit-0
-# run's output nowhere, but turns this declaration into a typed order.skipped
-# event naming each protected identity (order_outcome.sh). A no-op when nothing
-# was protected or when run by hand without GC_ORDER_OUTCOME_FILE.
+# Declare protected and locally skipped claims as a partial outcome: the
+# controller logs an exit-0 run's output nowhere, but turns this declaration
+# into a typed order.skipped event naming each protected identity and each
+# local claim left in place (order_outcome.sh). A no-op when nothing was
+# protected or skipped, or when run by hand without GC_ORDER_OUTCOME_FILE.
 order_outcome_write
 
 # Loud-fail: the summary has been printed above, so a non-zero exit now
