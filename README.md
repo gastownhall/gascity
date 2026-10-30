@@ -12,25 +12,82 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
 </p>
 
-Gas City is an orchestration-builder SDK for multi-agent systems. It extracts
-the reusable infrastructure from Gas Town into a configurable toolkit with
-runtime providers, work routing, formulas, orders, health patrol, and a
-declarative city configuration.
+Gas City runs teams of coding agents (Claude Code, Codex, Gemini, and others)
+on your repositories. You hand it work; it breaks the work into tasks, runs
+agents on them in parallel, gates each step on review, and tracks everything
+in a dashboard. How the work gets done is a **formula**, and the default setup
+ships formulas for building features, fixing issues, and reviewing PRs.
 
-## Sponsors
+> **Agents:** if you were asked to get Gas City running, install it from
+> Homebrew and follow [Get it running](#get-it-running) step by step. Do not
+> build this repository. You are done when work has gone through a formula
+> and you have given the user the `Dashboard:` link that `gc sling` prints.
 
-<p align="center">
-  <a href="https://blacksmith.sh/">
-    <img src="docs/images/blacksmith-powered.png" alt="Powered by Blacksmith" height="40">
-  </a>
-</p>
+## Get it running
 
-## Coming from Gas Town?
+This takes about five minutes on macOS or Linux with
+[Homebrew](https://brew.sh) and a coding agent CLI that is already logged in
+(the examples use [Claude Code](https://claude.com/claude-code)).
 
-Start with [Coming from Gas Town?](docs/getting-started/coming-from-gastown.md).
-It maps Town roles, commands, plugins, convoys, and directory habits onto Gas
-City's primitive-first model so experienced Gas Town users can ramp without
-trying to port the entire Town architecture literally.
+**1. Install.** Homebrew installs `gc` and everything it needs (`bd`, `dolt`,
+`tmux`, `jq`, `flock`).
+
+```bash
+brew install gascity
+gc version
+```
+
+If you use Oh My Zsh, its `git` plugin aliases `gc` to `git commit`; run
+`unalias gc` first.
+
+**2. Give Dolt your identity.** Gas City stores work in
+[beads](https://github.com/gastownhall/beads), which keeps its data in Dolt,
+and Dolt needs an author. This copies your git identity if Dolt has none:
+
+```bash
+dolt config --global --get user.name  || dolt config --global --add user.name  "$(git config --global user.name)"
+dolt config --global --get user.email || dolt config --global --add user.email "$(git config --global user.email)"
+```
+
+**3. Create a city.** A city is a directory that holds your Gas City
+configuration. The defaults are the recommended setup.
+
+```bash
+gc init ~/my-city --template gascity --default-provider claude
+```
+
+`gc init` starts the city and prints the dashboard address
+(`http://127.0.0.1:8372/`). Use `--default-provider codex` (or `gemini`) to
+run a different agent CLI.
+
+**4. Add a project.** A project Gas City works on is a **rig**. Use one of your
+own repositories, or make a sample one:
+
+```bash
+mkdir -p ~/hello-world && cd ~/hello-world
+git init && git commit --allow-empty -m "initial commit"
+cd ~/my-city
+gc rig add ~/hello-world
+```
+
+**5. Send work through a formula.** `mol-do-work` is the smallest formula: one
+agent reads the task, does it, and closes it.
+
+```bash
+gc sling hello-world/claude "Create hello.sh that prints hello world and commit it" --on mol-do-work
+```
+
+`gc sling` prints a `Dashboard:` link to the formula run, for example
+`http://127.0.0.1:8372/city/my-city/runs/hw-4up`. Open it to watch the agent
+work. Within a minute or two, `hello.sh` is committed in `~/hello-world`.
+
+**Next:** run real orchestration with `build-basic` (plan, review, parallel
+implementation, code review, PR) in [Formulas](https://docs.gascityhall.com/tutorials/05-formulas),
+schedule work with [Orders](https://docs.gascityhall.com/tutorials/07-orders),
+or walk through everything from
+[Tutorial 01](https://docs.gascityhall.com/tutorials/01-cities-and-rigs).
+If something fails, see
+[Troubleshooting](https://docs.gascityhall.com/getting-started/troubleshooting).
 
 ## What You Get
 
@@ -40,14 +97,39 @@ trying to port the entire Town architecture literally.
 - A controller/supervisor loop that reconciles desired state to running state
 - Packs, overrides, and rig-scoped orchestration for multi-project setups
 
-## Quickstart
+## Coming from Gas Town?
 
-See the full install guide at [docs/getting-started/installation.md](docs/getting-started/installation.md).
+Read [Coming from Gas Town?](docs/getting-started/coming-from-gastown.md). It
+maps Town roles, commands, plugins, convoys, and directory habits onto Gas
+City's primitive-first model.
+
+## Documentation
+
+📖 **Read the docs online: [docs.gascityhall.com](https://docs.gascityhall.com)**
+
+- [Installation](https://docs.gascityhall.com/getting-started/installation)
+- [Quickstart](https://docs.gascityhall.com/getting-started/quickstart)
+- [How Gas City Works](https://docs.gascityhall.com/getting-started/how-gas-city-works)
+- [Tutorials](https://docs.gascityhall.com/tutorials/index)
+- [Reference](https://docs.gascityhall.com/reference/index)
+
+## Sponsors
+
+<p align="center">
+  <a href="https://blacksmith.sh/">
+    <img src="docs/images/blacksmith-powered.png" alt="Powered by Blacksmith" height="40">
+  </a>
+</p>
+
+## Developing Gas City
+
+Everything below is for working on Gas City itself. To use Gas City, follow
+[Get it running](#get-it-running) instead.
 
 ### Prerequisites
 
-Gas City requires the following tools on your system. `gc init` and
-`gc start` check for these automatically and report any that are missing.
+Building from source needs the following tools. `gc init` and `gc start`
+check for the runtime ones and report any that are missing.
 
 | Dependency | Required | Min Version | Install (macOS) | Install (Linux) |
 |------------|----------|-------------|-----------------|-----------------|
@@ -79,34 +161,20 @@ compromised eMudhra CA intermediates. Releases before 1.86.2 can also miss the
 upstream GC/writer deadlock fix in dolthub/dolt commit `ccf7bde206`, which can
 hang `dolt_backup sync` under heavy write load.
 
-Install from Homebrew:
+### Build from source
 
-```bash
-brew install gascity
-gc version
-```
-
-Or build from source (requires `make`, Go 1.27.3+, and ICU for a transitive Dolt
-CGO dependency — `brew install icu4c` on macOS, `apt install libicu-dev` on
-Linux; on macOS the Makefile auto-detects the keg-only `icu4c` paths):
+Building requires `make`, Go 1.27.3+, and ICU for a transitive Dolt CGO
+dependency (`brew install icu4c` on macOS, `apt install libicu-dev` on Linux;
+on macOS the Makefile auto-detects the keg-only `icu4c` paths):
 
 ```bash
 make install
-
-gc init ~/bright-lights
-cd ~/bright-lights
-gc start
-
-mkdir hello-world
-cd hello-world
-git init
-gc rig add .
-
-bd create "Create a script that prints hello world"
-gc session attach mayor
+gc version
 ```
 
-### Nix/Flox machines (ICU not on the default CGO path)
+Then follow [Get it running](#get-it-running) from step 2.
+
+#### Nix/Flox machines (ICU not on the default CGO path)
 
 On NixOS / Flox-managed Linux toolchains, system include/lib dirs are not
 searched, so the build fails with `fatal error: unicode/uregex.h: No such file
@@ -129,29 +197,10 @@ SYS_USR_CGO_FALLBACK=0 \
   make build      # or: go build -o bin/gc ./cmd/gc
 ```
 
-CGO-backed tests (e.g. `go test ./internal/beads`) take the same three CGO_*
-vars — no `CGO_ENABLED=0` workaround needed once ICU is pointed at correctly.
+### Developer documentation
 
-For the longer walkthrough, start with
-[Tutorial 01](docs/tutorials/01-cities-and-rigs.md).
-
-## Documentation
-
-📖 **Read the docs online: [docs.gascityhall.com](https://docs.gascityhall.com)**
-
-The docs now use a Mintlify structure rooted in [`docs/`](docs/README.md).
-
-- [Docs Home](docs/index.mdx)
-- [Installation](docs/getting-started/installation.md)
-- [Quickstart](docs/getting-started/quickstart.md)
-- [How Gas City Works](docs/getting-started/how-gas-city-works.md)
-- [Contributors](engdocs/contributors/index.md)
-- [Reference](docs/reference/index.md)
-- [Architecture](engdocs/architecture/index.md)
-- [Design Docs](engdocs/design/index.md)
-- [Archive](engdocs/archive/index.md)
-
-Preview the docs locally:
+The user docs are a Mintlify site rooted in [`docs/`](docs/README.md).
+Preview them locally:
 
 ```bash
 make docs-dev
@@ -160,7 +209,12 @@ make docs-dev
 ./mint.sh dev
 ```
 
-## Repository Map
+- [Contributors](engdocs/contributors/index.md)
+- [Architecture](engdocs/architecture/index.md)
+- [Design Docs](engdocs/design/index.md)
+- [Archive](engdocs/archive/index.md)
+
+### Repository Map
 
 | Path | What it contains |
 |---|---|
@@ -178,7 +232,7 @@ make docs-dev
 | `contrib/` | Helper scripts, Dockerfiles, and integration support assets |
 | `test/` | Integration and support test packages |
 
-### Where to start
+#### Where to start in the code
 
 - **CLI behavior** — `cmd/gc/`, then the command-specific helper it calls.
 - **Runtime/provider work** — `internal/runtime/runtime.go` and the provider package you're changing.
@@ -191,7 +245,7 @@ For the concepts these packages implement, see
 package walkthrough, see
 [`engdocs/contributors/codebase-map.md`](engdocs/contributors/codebase-map.md).
 
-## Contributing
+### Contributing
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) and
 [engdocs/contributors/index.md](engdocs/contributors/index.md) before opening a
