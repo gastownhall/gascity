@@ -1093,14 +1093,23 @@ func markRemainingSharedRowsSkipped(manifest *drainManifest, start int) {
 // carries no controller error: a transient one recorded by an earlier pass
 // (markControllerSpawnError) is cleared with the close.
 //
-// The unit convoy recorded on each row of the closing manifest is retired
-// first. Nothing else closes one: a drain never closes the source members its
-// units track, so convoy autoclose never fires for them. A failed retirement
-// leaves the drain open for the next pass to retry, and a unit already closed
-// is left as it is, so the retry rewrites none of the units an earlier pass
-// retired.
+// The unit convoy recorded on each row of the manifest is retired first.
+// Nothing else closes one: a drain never closes the source members its units
+// track, so convoy autoclose never fires for them. The manifest is the closing
+// one in metadata when the caller passes it, the only copy that holds a unit
+// minted in this pass; otherwise it is the one persisted on the drain
+// (finishRecordedDrainClose). A failed retirement leaves the drain open for
+// the next pass to retry, and a unit already closed is left as it is, so the
+// retry rewrites none of the units an earlier pass retired.
 func closeDrainControl(store beads.Store, drainID string, metadata map[string]string, action string, opts ProcessOptions) (ControlResult, error) {
-	raw := metadata[drainManifestMetadataKey]
+	raw, closing := metadata[drainManifestMetadataKey]
+	if !closing {
+		drain, err := store.Get(drainID)
+		if err != nil {
+			return ControlResult{}, fmt.Errorf("%s: loading drain to retire its unit convoys: %w", drainID, err)
+		}
+		raw = drain.Metadata[drainManifestMetadataKey]
+	}
 	if strings.TrimSpace(raw) != "" {
 		manifest, err := parseDrainManifest(raw)
 		if err != nil {

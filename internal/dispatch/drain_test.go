@@ -4094,3 +4094,48 @@ func TestProcessDrainUnitConvoyRetireFailureKeepsDrainOpen(t *testing.T) {
 		t.Fatalf("retry wrote to already-retired unit convoy %s; writes = %v", first, recording.writes)
 	}
 }
+
+func TestProcessDrainRecordedCloseRetiresUnitConvoys(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+	opts := ProcessOptions{FormulaSearchPaths: []string{dir}}
+
+	if _, err := ProcessControl(store, drain, opts); err != nil {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+	for i := range manifest.Rows {
+		if err := updateMetadataAndClose(store, manifest.Rows[i].ItemRootID, map[string]string{"gc.outcome": "pass"}); err != nil {
+			t.Fatalf("close item root %s: %v", manifest.Rows[i].ItemRootID, err)
+		}
+		manifest.Rows[i].Status = "succeeded"
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	// A pass recorded the terminal state and crashed before the close.
+	if err := store.SetMetadataBatch(drain.ID, map[string]string{
+		beadmeta.DrainStateMetadataKey: beadmeta.DrainStateSucceeded,
+		beadmeta.OutcomeMetadataKey:    beadmeta.OutcomePass,
+		drainManifestMetadataKey:       string(data),
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(recorded close): %v", err)
+	}
+
+	result, err := ProcessControl(store, mustGetBead(t, store, drain.ID), opts)
+	if err != nil {
+		t.Fatalf("ProcessControl(recorded close): %v", err)
+	}
+	if result.Action != "drain-succeeded" {
+		t.Fatalf("Action = %q, want drain-succeeded", result.Action)
+	}
+	if reloaded := mustGetBead(t, store, drain.ID); reloaded.Status != "closed" || reloaded.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("drain = status %q outcome %q, want closed/pass", reloaded.Status, reloaded.Metadata["gc.outcome"])
+	}
+	for _, row := range manifest.Rows {
+		assertDrainUnitRetired(t, store, row.UnitConvoyID, beadmeta.OutcomePass)
+	}
+}
