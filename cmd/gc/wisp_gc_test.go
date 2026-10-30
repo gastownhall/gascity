@@ -592,6 +592,96 @@ func TestWispGC_ReloadKeepsLastRunAndCursor(t *testing.T) {
 			t.Fatal("holder memo carried across a reload; memos were read against a leg set the reload may have changed")
 		}
 	})
+
+	t.Run("cursor is carried", func(t *testing.T) {
+		cursor := &beads.SeekBoundary{CreatedAt: lastRun, ID: "last-seen"}
+		prev := &memoryWispGC{interval: time.Hour, ttl: 24 * time.Hour, lastRun: lastRun, sessionPurgeCursor: cursor}
+		next := &memoryWispGC{interval: time.Hour, ttl: 24 * time.Hour}
+		got := carryWispGCState(prev, next).(*memoryWispGC)
+		if got.sessionPurgeCursor != cursor {
+			t.Fatalf("sessionPurgeCursor = %+v, want the carried boundary after %q", got.sessionPurgeCursor, cursor.ID)
+		}
+	})
+}
+
+// A config reload between sweeps must not restart the closed-session sweep
+// from the oldest candidate: the rebuilt tracker keeps the outgoing one's
+// cursor, so a backlog of child-holding sessions larger than the scan cap
+// cannot starve the purgeable sessions behind it.
+func TestWispGC_SessionPurgeCursorSurvivesReload(t *testing.T) {
+	t.Setenv("GC_INFRA_SESSION_PURGE_AGE", "")
+	prevScan := wispGCSessionPurgeScanCap
+	wispGCSessionPurgeScanCap = 2
+	t.Cleanup(func() { wispGCSessionPurgeScanCap = prevScan })
+
+	// runSweeps runs three GC passes, rebuilding the tracker from a config
+	// reload before passes 2 and 3. carry selects whether the rebuild keeps
+	// the outgoing tracker's cursor. It returns the purged count per pass.
+	runSweeps := func(t *testing.T, carry bool) (total []int, ledger *beads.SQLiteStore) {
+		t.Helper()
+		now := time.Now()
+		base := now.Add(-60 * 24 * time.Hour)
+		ledger = openSessionPurgeSQLiteStore(t)
+		// Three child-holding sessions are the oldest candidates, then two
+		// purgeable ones.
+		for i := 0; i < 3; i++ {
+			parent := fmt.Sprintf("gcg-session-held-%d", i)
+			mustCreateSessionPurgeBead(t, ledger, closedSessionPurgeBead(parent, "session", base.Add(time.Duration(i)*time.Minute)))
+			child := closedSessionPurgeBead(fmt.Sprintf("gcg-held-child-%d", i), "task", base)
+			child.ParentID = parent
+			mustCreateSessionPurgeBead(t, ledger, child)
+		}
+		mustCreateSessionPurgeBead(t, ledger, closedSessionPurgeBead("gcg-session-free-0", "session", base.Add(10*time.Minute)))
+		mustCreateSessionPurgeBead(t, ledger, closedSessionPurgeBead("gcg-session-free-1", "session", base.Add(11*time.Minute)))
+
+		wg := newWispGC(time.Minute, 24*time.Hour, 0)
+		sessionLedger := beads.SessionStore{Store: ledger}
+		graph := beads.GraphStore{Store: ledger}
+		for tick := 0; tick < 3; tick++ {
+			if tick > 0 {
+				rebuilt := newWispGC(time.Minute, 24*time.Hour, 0)
+				if carry {
+					rebuilt = carryWispGCState(wg, rebuilt)
+				}
+				wg = rebuilt
+			}
+			purged, err := wg.runGC(nil, graph, sessionLedger, beads.MailStore{}, now)
+			if err != nil {
+				t.Fatalf("tick %d runGC: %v", tick, err)
+			}
+			total = append(total, purged)
+		}
+		return total, ledger
+	}
+
+	t.Run("reload between sweeps keeps the cursor", func(t *testing.T) {
+		total, ledger := runSweeps(t, true)
+		if fmt.Sprint(total) != "[0 1 1]" {
+			t.Fatalf("purged per tick = %v, want [0 1 1] (the sweep resumes past the held sessions)", total)
+		}
+		for _, id := range []string{"gcg-session-free-0", "gcg-session-free-1"} {
+			if _, err := ledger.Get(id); !errors.Is(err, beads.ErrNotFound) {
+				t.Fatalf("Get %s = %v, want ErrNotFound", id, err)
+			}
+		}
+		for i := 0; i < 3; i++ {
+			if _, err := ledger.Get(fmt.Sprintf("gcg-session-held-%d", i)); err != nil {
+				t.Fatalf("held session %d deleted: %v", i, err)
+			}
+		}
+	})
+
+	t.Run("bare rebuild restarts from the oldest candidate", func(t *testing.T) {
+		total, ledger := runSweeps(t, false)
+		if fmt.Sprint(total) != "[0 0 0]" {
+			t.Fatalf("purged per tick = %v, want [0 0 0] (a rebuild without the carry starves the backlog)", total)
+		}
+		for _, id := range []string{"gcg-session-free-0", "gcg-session-free-1"} {
+			if _, err := ledger.Get(id); err != nil {
+				t.Fatalf("Get %s = %v, want the purgeable session still present", id, err)
+			}
+		}
+	})
 }
 
 func TestWispGC_NothingExpired(t *testing.T) {
