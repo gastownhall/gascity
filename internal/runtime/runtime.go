@@ -996,6 +996,18 @@ type BackgroundWorkStopper interface {
 	StopBackgroundWork(ctx context.Context, name string) error
 }
 
+// BackgroundWorkObserver is an optional extension for runtimes that can report
+// whether a session's agent has work running outside its turn: the shells a
+// Claude Code turn left running in the background, or a Codex turn's background
+// terminals. Such an agent is idle for input, so WaitForIdle succeeds, but
+// stopping its session kills that work. The idle sleep asks it after a
+// successful idle proof and does not drain while it reports work.
+// HasBackgroundWork returns [ErrInteractionUnsupported] for sessions whose
+// provider it cannot read this from.
+type BackgroundWorkObserver interface {
+	HasBackgroundWork(name string) (bool, error)
+}
+
 // RelaunchProvider is an optional extension for runtimes that can re-launch the
 // agent inside an already-provisioned (warm) box WITHOUT re-provisioning it — the
 // runtime/transport un-weld payoff. The reconciler calls Relaunch on a launch-only

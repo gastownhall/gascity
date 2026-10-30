@@ -30,6 +30,7 @@ import (
 // interfaces, by name. TestOptionalInterfacesAreListed keeps it complete.
 var optionalInterfaces = map[string]reflect.Type{
 	"AttachmentObserverWithError":     reflect.TypeFor[runtime.AttachmentObserverWithError](),
+	"BackgroundWorkObserver":          reflect.TypeFor[runtime.BackgroundWorkObserver](),
 	"BackgroundWorkStopper":           reflect.TypeFor[runtime.BackgroundWorkStopper](),
 	"BackendListingProvider":          reflect.TypeFor[runtime.BackendListingProvider](),
 	"BackendsProvider":                reflect.TypeFor[runtime.BackendsProvider](),
@@ -548,4 +549,77 @@ func (b *profileBackgroundStopSpy) StopBackgroundWork(ctx context.Context, name 
 	b.ctx, b.name = ctx, name
 	b.calls++
 	return b.result
+}
+
+// A profiled tmux must reach the backend's background-work observation and
+// pass its answer back.
+func TestTmuxProfileForwardsBackgroundWorkObservation(t *testing.T) {
+	for _, tc := range []struct {
+		session string
+		hasWork bool
+		result  error
+	}{
+		{session: "s-true", hasWork: true, result: nil},
+		{session: "s-false", hasWork: false, result: nil},
+		{session: "s-unsupported", hasWork: false, result: runtime.ErrInteractionUnsupported},
+		{session: "s-unavailable", hasWork: false, result: runtime.ErrRuntimeUnavailable},
+	} {
+		b := &profileBackgroundWorkSpy{FullFake: runtime.FullFake{Fake: runtime.NewFake()}, hasWork: tc.hasWork, result: tc.result}
+		p := runtime.NewFakeProfile(runtime.ProfileTmux, b)
+		obs, ok := p.(runtime.BackgroundWorkObserver)
+		if !ok {
+			t.Fatal("tmux profile lacks BackgroundWorkObserver")
+		}
+		got, err := obs.HasBackgroundWork(tc.session)
+		if !errors.Is(err, tc.result) {
+			t.Fatalf("HasBackgroundWork error = %v, want %v", err, tc.result)
+		}
+		if got != tc.hasWork {
+			t.Fatalf("HasBackgroundWork = %v, want %v", got, tc.hasWork)
+		}
+		if b.calls != 1 || b.name != tc.session {
+			t.Fatalf("HasBackgroundWork did not forward session: %+v", b)
+		}
+	}
+}
+
+type profileBackgroundWorkSpy struct {
+	runtime.FullFake
+	name    string
+	hasWork bool
+	result  error
+	calls   int
+}
+
+func (b *profileBackgroundWorkSpy) HasBackgroundWork(name string) (bool, error) {
+	b.name = name
+	b.calls++
+	return b.hasWork, b.result
+}
+
+// Kills a FullFake whose default background-work observation does not report
+// no work for a live session, fails to wrap ErrSessionNotFound for a missing
+// one, or does not record the calls.
+func TestFullFakeHasBackgroundWorkDefault(t *testing.T) {
+	f := runtime.NewFake()
+	b := runtime.FullFake{Fake: f}
+	if err := f.Start(t.Context(), "live", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if hasWork, err := b.HasBackgroundWork("live"); hasWork || err != nil {
+		t.Fatalf("HasBackgroundWork(live) = %v, %v; want false, nil", hasWork, err)
+	}
+	if hasWork, err := b.HasBackgroundWork("missing"); hasWork || !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("HasBackgroundWork(missing) = %v, %v; want false, wrapped ErrSessionNotFound", hasWork, err)
+	}
+	var gotCalls []string
+	for _, c := range f.SnapshotCalls() {
+		if c.Method == "HasBackgroundWork" {
+			gotCalls = append(gotCalls, c.Method+" "+c.Name)
+		}
+	}
+	wantCalls := []string{"HasBackgroundWork live", "HasBackgroundWork missing"}
+	if !slices.Equal(gotCalls, wantCalls) {
+		t.Fatalf("calls = %q, want %q", gotCalls, wantCalls)
+	}
 }

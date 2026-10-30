@@ -16,6 +16,7 @@ import (
 // its entry is dropped.
 var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 	"auto": {
+		"BackgroundWorkObserver":  {"deliberate", "background work is read on the routed leaf (cmd/gc/session_sleep.go idleProofHeldByBackgroundWork)", ""},
 		"FreshByConstruction":     {"deliberate", "a leaf's own read; readRuntime judges it on the routed leaf (cmd/gc/reconcile_effect_runtime.go freshReadable)", ""},
 		"IdentitySidecarProvider": {"deliberate", "identity is read on the routed leaf (cmd/gc/runtime_inventory_lane.go identityReadable)", ""},
 		"IdleProbeBudgetProvider": {"deliberate", "the idle-proof budget is read on the routed leaf (cmd/gc/session_sleep.go idleSleepProbeTimeoutFor)", ""},
@@ -24,6 +25,7 @@ var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 		"TurnRunningProvider":     {"deliberate", "the live turn reading is read on the routed leaf (runtime.TurnRunningFor)", ""},
 	},
 	"hybrid": {
+		"BackgroundWorkObserver":      {"deliberate", "as auto's", ""},
 		"FreshByConstruction":         {"deliberate", "as auto's", ""},
 		"IdentitySidecarProvider":     {"deliberate", "as auto's", ""},
 		"IdleProbeBudgetProvider":     {"deliberate", "as auto's", ""},
