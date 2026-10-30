@@ -139,14 +139,14 @@ skip_justification: 402 farm/native entries, 39 native residual SKIPs, 273 actua
 
 ## CI aggregate accounting
 
-ci_required_closure: `["python3", "/home/jaword/projects/gc-management/packs/actual/deployer/scripts/ci_required_triggers.py", "/var/tmp/gc-merge-validate.gybpf05.fhzf2zcs", "16777d7880f3bc7734bf49e76fc88d158ecbefaa", "5f8c1d0fa2b9f01c5957ceef331e9a7f6da61373", "fork"]`; merged workflow blob `e5b11c348505dab28dc223e874bc2c61cbbb33c5`; 4 LEAF jobs need a status. Full closure output retained at `/var/tmp/deploy-ga-gybpf05.jtn3dt64/ci-required-account/closure.txt`. The `check` job is an aggregator and takes no separate status. Runner expressions resolve to Blacksmith Ubuntu for the Linux jobs and Windows 2025 for credential-provider-windows.
+ci_required_closure: `["python3", "/home/jaword/projects/gc-management/packs/actual/deployer/scripts/ci_required_triggers.py", "/var/tmp/gc-merge-validate.gybpf05.fhzf2zcs", "16777d7880f3bc7734bf49e76fc88d158ecbefaa", "5f8c1d0fa2b9f01c5957ceef331e9a7f6da61373", "origin"]`; merged workflow blob `e5b11c348505dab28dc223e874bc2c61cbbb33c5`; 4 LEAF jobs need a status. Full closure output retained at `/var/tmp/deploy-ga-gybpf05.jtn3dt64/ci-required-account/closure.txt`. The `check` job is an aggregator and takes no separate status. Runner expressions resolve to Blacksmith Ubuntu for the Linux jobs and Windows 2025 for credential-provider-windows.
 
 ci_required_accounting:
 
 | Job | Status | Evidence |
 |---|---|---|
 | runner-policy | LOCAL-PASS | "EVENT_NAME=pull_request PR_AUTHOR=quad341 FORCE_BLACKSMITH= GITHUB_OUTPUT=/var/tmp/deploy-ga-gybpf05.jtn3dt64/ci-required-account/runner-policy.out python3 .github/workflows/scripts/runner_policy.py"; rc=0; log=/var/tmp/deploy-ga-gybpf05.jtn3dt64/ci-required-account/runner-policy.log |
-| changes | LOCAL-PASS | ["python3", "/home/jaword/projects/gc-management/packs/actual/deployer/scripts/ci_required_triggers.py", "/var/tmp/gc-merge-validate.gybpf05.fhzf2zcs", "16777d7880f3bc7734bf49e76fc88d158ecbefaa", "5f8c1d0fa2b9f01c5957ceef331e9a7f6da61373", "fork"]; rc=0; log=/var/tmp/deploy-ga-gybpf05.jtn3dt64/ci-required-account/closure.txt |
+| changes | LOCAL-PASS | ["python3", "/home/jaword/projects/gc-management/packs/actual/deployer/scripts/ci_required_triggers.py", "/var/tmp/gc-merge-validate.gybpf05.fhzf2zcs", "16777d7880f3bc7734bf49e76fc88d158ecbefaa", "5f8c1d0fa2b9f01c5957ceef331e9a7f6da61373", "origin"]; rc=0; log=/var/tmp/deploy-ga-gybpf05.jtn3dt64/ci-required-account/closure-origin.txt |
 | credential-provider-windows | NOT-TRIGGERED | credential-provider-windows            LEAF       NON-LINUX ${{ needs.runner-policy.outputs.runner_windows }} NOT-TRIGGERED  if: needs.changes.outputs.credential_provider == 'true' |
 | pack-gate | NOT-TRIGGERED | pack-gate                              LEAF       linux                      NOT-TRIGGERED  if: needs.changes.outputs.packs == 'true' |
 
