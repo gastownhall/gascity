@@ -43,6 +43,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/internal/worker/builtin"
 	"github.com/gastownhall/gascity/test/dolttest"
@@ -1591,6 +1592,9 @@ func buildIntegrationEnv(gcHome, runtimeDir string, useDolt bool) []string {
 		panic("integration: creating isolated CLAUDE_CONFIG_DIR: " + err.Error())
 	}
 	env = append(env, "CLAUDE_CONFIG_DIR="+claudeConfigDir)
+	// Mark every gc binary this env execs as test-spawned: its argv[0] has no
+	// ".test", so the host-protection guards cannot tell otherwise.
+	env = replaceEnv(env, proctable.TestSpawnedEnv, "1")
 	env = append(env, managedDoltTestModeEnv+"=1")
 	env = append(env, managedDoltTestParentEnv+"="+strconv.Itoa(os.Getpid()))
 	env = append(env, integrationRealBDBinaryEnv+"="+realBDBinary)

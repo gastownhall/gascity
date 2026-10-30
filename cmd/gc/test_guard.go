@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 // isTestBinary reports whether the current process is a Go test binary.
@@ -26,6 +28,13 @@ func isTestBinary() bool {
 		strings.Contains(os.Args[0], ".test")
 }
 
-// hostGuardedProcess reports whether host-protection guards must treat this
-// process as a test.
-func hostGuardedProcess() bool { return isTestBinary() }
+// hostGuardedProcess reports whether the host-protection guards (those that
+// panic rather than touch the operator's real supervisor socket or systemctl)
+// must treat this process as a test. It adds the marker the integration
+// harness stamps on the gc binaries it builds and execs, which carry no
+// ".test" in argv[0]. isTestBinary stays argv-based on purpose: it also gates
+// behavior (ambient city discovery, GC_BIN resolution, managed-dolt test mode)
+// that those spawned binaries must keep.
+func hostGuardedProcess() bool {
+	return isTestBinary() || proctable.TestSpawned()
+}

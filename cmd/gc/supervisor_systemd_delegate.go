@@ -106,9 +106,9 @@ func delegatedSystemctlPath() string {
 
 // guardDelegatedSystemctlPath panics when a test binary resolved
 // systemctl into a host system directory instead of a test-installed
-// PATH shim. No-op outside test binaries.
+// PATH shim. No-op outside test binaries and test-spawned gc binaries.
 func guardDelegatedSystemctlPath(resolved string) {
-	if !isTestBinary() {
+	if !hostGuardedProcess() {
 		return
 	}
 	dir := filepath.Dir(resolved) + string(filepath.Separator)
