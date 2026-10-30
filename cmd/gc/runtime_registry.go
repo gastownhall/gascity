@@ -75,7 +75,7 @@ func buildRuntimeRegistry() *registry.Registry {
 	// that selects session = "cloudflare" falls through to the tmux fallback
 	// (RUNTIME-SEL-006) — the delivery-independence boundary (RUNTIME-PLAN-004).
 	must(r.Register("k8s", func(_ string, _ config.SessionConfig, cityName, _ string) (runtime.Provider, error) {
-		return sessionk8s.NewSeamBackedForCity(cityName)
+		return sessionk8s.NewSeamBacked(sessionk8s.WithCityName(cityName))
 	}))
 	// herdr (https://herdr.dev): opt-in multiplexer backend. One shared herdr
 	// session-server per city; one workspace per rig/town, one tab per agent.
