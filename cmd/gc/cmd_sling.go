@@ -1970,7 +1970,10 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 	// Children list. routeOnly holds the open children the target already
 	// claims but that are routed elsewhere: the live batch re-routes them
 	// without attaching a formula (BeadCheckResult.RouteOnly), unless --force.
+	// skipped holds the open children already routed to the target, which the
+	// live batch neither cooks nor routes, unless --force.
 	routeOnly := make(map[string]bool)
+	skipped := make(map[string]bool)
 	w(fmt.Sprintf("  Children (%d total, %d open):", len(children), len(open)))
 	for _, c := range children {
 		clabel := sling.FormatBeadLabel(c.ID, c.Title)
@@ -1979,7 +1982,8 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 				NoConvoy: opts.NoConvoy,
 			})
 			switch {
-			case check.Idempotent:
+			case check.Idempotent && !opts.Force:
+				skipped[c.ID] = true
 				w("    " + clabel + " (open) → already routed (skip)")
 			case check.RouteOnly && !opts.Force:
 				routeOnly[c.ID] = true
@@ -1997,38 +2001,46 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 	}
 	w("")
 
-	// Attach formula section (per open child), omitted when every open child
-	// is only re-routed and so none would get a formula.
-	var attach []beads.Bead
+	// Attach formula section (per open child), omitted when no open child
+	// would get a formula: each is skipped or only re-routed.
+	var route, attach []beads.Bead
 	for _, c := range open {
+		if skipped[c.ID] {
+			continue
+		}
+		route = append(route, c)
 		if !routeOnly[c.ID] {
 			attach = append(attach, c)
 		}
 	}
-	if len(attach) > 0 && opts.OnFormula != "" {
-		w("Attach formula (per open child):")
-		w("  Would run:")
-		for _, c := range attach {
-			w("    gc formula cook " + opts.OnFormula + " --attach " + c.ID)
+	if len(attach) > 0 {
+		if opts.OnFormula != "" {
+			w("Attach formula (per open child):")
+			w("  Would run:")
+			for _, c := range attach {
+				w("    gc formula cook " + opts.OnFormula + " --attach " + c.ID)
+			}
+			w("")
+		} else if !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
+			w("Default formula (per open child):")
+			w("  Formula: " + a.EffectiveDefaultSlingFormula())
+			w("  Would run:")
+			for _, c := range attach {
+				w("    gc formula cook " + a.EffectiveDefaultSlingFormula() + " --attach " + c.ID)
+			}
+			w("")
 		}
-		w("")
-	} else if len(attach) > 0 && !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
-		w("Default formula (per open child):")
-		w("  Formula: " + a.EffectiveDefaultSlingFormula())
-		w("  Would run:")
-		for _, c := range attach {
-			w("    gc formula cook " + a.EffectiveDefaultSlingFormula() + " --attach " + c.ID)
-		}
-		w("")
 	}
 
-	// Route commands.
-	w("Route commands (not executed):")
-	for _, c := range open {
-		routeCmd, _ := sling.BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), c.ID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs)
-		w("  " + routeCmd)
+	// Route commands, omitted when every open child is skipped.
+	if len(route) > 0 {
+		w("Route commands (not executed):")
+		for _, c := range route {
+			routeCmd, _ := sling.BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), c.ID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs)
+			w("  " + routeCmd)
+		}
+		w("")
 	}
-	w("")
 
 	// Nudge section.
 	if opts.Nudge {

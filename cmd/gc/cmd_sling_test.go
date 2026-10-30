@@ -9550,3 +9550,80 @@ func TestSlingDryRunBatchAllChildrenRouteOnlyOmitsFormulaSection(t *testing.T) {
 		})
 	}
 }
+
+// An open child already routed to the target is skipped by the live batch
+// (no cook, no route command), so the dry run must not preview either for it.
+// With --force the live batch routes it again, and so does the preview.
+func TestSlingDryRunBatchAlreadyRoutedChildPreviewsNoCookOrRoute(t *testing.T) {
+	newQuerier := func(children ...beads.Bead) *fakeChildQuerier {
+		q := newFakeChildQuerier()
+		q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
+		q.childrenOf["CVY-1"] = children
+		for _, c := range children {
+			q.beadsByID[c.ID] = c
+		}
+		return q
+	}
+	routed := beads.Bead{ID: "BL-1", Status: "open", ParentID: "CVY-1", Metadata: map[string]string{"gc.routed_to": "mayor"}}
+	fresh := beads.Bead{ID: "BL-2", Status: "open", ParentID: "CVY-1"}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+
+	t.Run("skipped child left out", func(t *testing.T) {
+		runner := newFakeRunner()
+		deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+		opts := testOpts(a, "CVY-1")
+		opts.OnFormula = "code-review"
+		opts.DryRun = true
+		if code := doSlingBatch(opts, deps, newQuerier(routed, fresh), stdout, stderr); code != 0 {
+			t.Fatalf("dry run returned %d; stderr: %s", code, stderr.String())
+		}
+		out := stdout.String()
+		if !strings.Contains(out, "BL-1 (open) → already routed (skip)") {
+			t.Errorf("BL-1 should be listed as already routed; got:\n%s", out)
+		}
+		if strings.Contains(out, "--attach BL-1") || strings.Contains(out, "'BL-1'") {
+			t.Errorf("dry run previews a cook or route for skipped BL-1; got:\n%s", out)
+		}
+		if !strings.Contains(out, "gc formula cook code-review --attach BL-2") || !strings.Contains(out, "'BL-2'") {
+			t.Errorf("dry run should still cook and route BL-2; got:\n%s", out)
+		}
+		if len(runner.calls) != 0 {
+			t.Errorf("dry run executed commands: %v", runner.calls)
+		}
+	})
+
+	t.Run("every child skipped", func(t *testing.T) {
+		runner := newFakeRunner()
+		deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+		opts := testOpts(a, "CVY-1")
+		opts.OnFormula = "code-review"
+		opts.DryRun = true
+		if code := doSlingBatch(opts, deps, newQuerier(routed), stdout, stderr); code != 0 {
+			t.Fatalf("dry run returned %d; stderr: %s", code, stderr.String())
+		}
+		out := stdout.String()
+		if strings.Contains(out, "Attach formula (per open child):") || strings.Contains(out, "Route commands (not executed):") {
+			t.Errorf("no child is cooked or routed, so neither section should print; got:\n%s", out)
+		}
+	})
+
+	t.Run("force routes it", func(t *testing.T) {
+		runner := newFakeRunner()
+		deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+		opts := testOpts(a, "CVY-1")
+		opts.OnFormula = "code-review"
+		opts.Force = true
+		opts.DryRun = true
+		if code := doSlingBatch(opts, deps, newQuerier(routed), stdout, stderr); code != 0 {
+			t.Fatalf("dry run returned %d; stderr: %s", code, stderr.String())
+		}
+		out := stdout.String()
+		if strings.Contains(out, "already routed (skip)") {
+			t.Errorf("--force routes BL-1 again, so it should not be listed as skipped; got:\n%s", out)
+		}
+		if !strings.Contains(out, "gc formula cook code-review --attach BL-1") || !strings.Contains(out, "'BL-1'") {
+			t.Errorf("--force dry run should cook and route BL-1; got:\n%s", out)
+		}
+	})
+}
