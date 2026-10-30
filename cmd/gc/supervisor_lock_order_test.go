@@ -158,3 +158,63 @@ func TestSupervisorV2DefaultFallbackProbesUnderTheLockAfterInit(t *testing.T) {
 		t.Errorf("stderr %q does not carry the city's loud fallback warning", stderr.String())
 	}
 }
+
+// TestStartAfterDriftRestartAcceptsACityTheSupervisorIsInitializing: after a
+// drift auto-restart the new supervisor re-inits the city. It holds the
+// controller lock from the first init step and opens the socket only at the
+// end, so in that window the lock is held with no identity to read. A city the
+// supervisor lists as initializing is supervisor-managed: gc start and gc
+// register proceed instead of failing "controller hosting mode unknown".
+func TestStartAfterDriftRestartAcceptsACityTheSupervisorIsInitializing(t *testing.T) {
+	cityPath, setCommit := driftCheckEnv(t, "old-build-id")
+	setCommit("new-build-id")
+	oldDry, oldNoAR := dryRunMode, noAutoRestartMode
+	dryRunMode, noAutoRestartMode = false, false
+	t.Cleanup(func() { dryRunMode, noAutoRestartMode = oldDry, oldNoAR })
+	var stdout, stderr bytes.Buffer
+	if code, cont := runStartDriftCheck(cityPath, &stdout, &stderr); code != 0 || !cont {
+		t.Fatalf("drift auto-restart = (%d, %v); stderr=%s", code, cont, stderr.String())
+	}
+
+	// The restarted supervisor is initializing the city: lock held, no socket.
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"drift-city\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	held, err := acquireControllerLock(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close() //nolint:errcheck // test cleanup
+	prevIdentity := controllerIdentityHook
+	controllerIdentityHook = func(string) controllerIdentityReply { return controllerIdentityReply{} }
+	t.Cleanup(func() { controllerIdentityHook = prevIdentity })
+	prevRunning := supervisorCityRunningHook
+	t.Cleanup(func() { supervisorCityRunningHook = prevRunning })
+	status := "starting_bead_store"
+	supervisorCityRunningHook = func(string) (bool, string, bool) { return false, status, true }
+	reached := false
+	prevHook := registerCityWithSupervisorTestHook
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = prevHook })
+	registerCityWithSupervisorTestHook = func(string, string, io.Writer, io.Writer) (bool, int) {
+		reached = true
+		return true, 0
+	}
+
+	for _, cmd := range []string{"gc start", "gc register"} {
+		reached = false
+		stderr.Reset()
+		if code := registerCityWithSupervisorNamed(cityPath, "", io.Discard, &stderr, cmd, false); code != 0 || !reached {
+			t.Fatalf("%s while the supervisor initializes the city = %d (reached=%v); stderr=%s", cmd, code, reached, stderr.String())
+		}
+	}
+
+	// A failed init is not a managed city: the lock probe decides again.
+	status = "init_failed"
+	reached = false
+	if code := registerCityWithSupervisorNamed(cityPath, "", io.Discard, &stderr, "gc start", false); code == 0 || reached {
+		t.Fatal("a city whose supervisor init failed was treated as supervisor-managed while its lock is held")
+	}
+}
