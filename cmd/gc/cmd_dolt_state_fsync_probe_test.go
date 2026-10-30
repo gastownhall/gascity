@@ -517,6 +517,8 @@ func TestFindDoltPIDTreatsANonPIDFileAsStale(t *testing.T) {
 		"zero":            "0\n",
 		"negative":        "-1\n",
 		"number and word": "123 abc\n",
+		"empty":           "",
+		"leading zero":    "007\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			pid, pidFile := findDoltPID(t, content)
