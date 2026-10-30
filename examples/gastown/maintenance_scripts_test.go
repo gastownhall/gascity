@@ -11688,6 +11688,114 @@ exit 0
 	}
 }
 
+// TestGateSweepKeepsSweepingAfterARigTimerFailure verifies that a failing
+// timer check in one store fails the run without hiding the remaining
+// stores: the failure is reported on stderr naming the store, that store's
+// gh check is skipped (it would fail the same way, and its '|| true'
+// would hide it), and the sweep continues with the other stores.
+func TestGateSweepKeepsSweepingAfterARigTimerFailure(t *testing.T) {
+	rigs := `{"rigs":[{"name":"api","hq":false},{"name":"web","hq":false}]}`
+	assertBothChecksSwept := func(t *testing.T, bdLog string, scopes ...string) {
+		t.Helper()
+		log, err := os.ReadFile(bdLog)
+		if err != nil {
+			t.Fatalf("ReadFile(bd log): %v", err)
+		}
+		s := string(log)
+		for _, scope := range scopes {
+			for _, check := range []string{
+				"gate check --type=timer --escalate",
+				"gate check --type=gh --escalate",
+			} {
+				if want := scope + " " + check; !strings.Contains(s, want) {
+					t.Errorf("missing %q in bd log:\n%s", want, s)
+				}
+			}
+		}
+	}
+
+	t.Run("bd timer failure in a rig store", func(t *testing.T) {
+		binDir, bdLog, env := gateSweepEnv(t)
+		writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s %s\n' "$GC_FAKE_SCOPE" "$*" >> "$BD_LOG"
+case "$GC_FAKE_SCOPE" in
+  rig:api)
+    case "$*" in
+      *--type=timer*)
+        echo "bd: simulated timer-gate failure" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
+exit 0
+`)
+		env["FAKE_RIG_LIST_JSON"] = rigs
+
+		out, err := runScriptResult(t, coreScriptPath("gate-sweep.sh"), env)
+
+		if err == nil {
+			t.Fatalf("expected gate-sweep to exit non-zero after a rig timer failure:\n%s", out)
+		}
+		if !strings.Contains(string(out), "rig:api") {
+			t.Errorf("expected the failure report to name rig:api:\n%s", out)
+		}
+		assertBothChecksSwept(t, bdLog, "city", "rig:web")
+		log, err := os.ReadFile(bdLog)
+		if err != nil {
+			t.Fatalf("ReadFile(bd log): %v", err)
+		}
+		if strings.Contains(string(log), "rig:api gate check --type=gh") {
+			t.Errorf("a store whose timer check failed must not run its gh check:\n%s", log)
+		}
+	})
+
+	t.Run("gc fails the store before bd runs", func(t *testing.T) {
+		binDir, bdLog, env := gateSweepEnv(t)
+		writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s %s\n' "$GC_FAKE_SCOPE" "$*" >> "$BD_LOG"
+exit 0
+`)
+		env["FAKE_RIG_LIST_JSON"] = rigs
+		env["FAKE_UNREACHABLE_SCOPES"] = "rig:api"
+
+		out, err := runScriptResult(t, coreScriptPath("gate-sweep.sh"), env)
+
+		if err == nil {
+			t.Fatalf("expected gate-sweep to exit non-zero when gc cannot reach a store:\n%s", out)
+		}
+		if !strings.Contains(string(out), "rig:api") {
+			t.Errorf("expected the failure report to name rig:api:\n%s", out)
+		}
+		assertBothChecksSwept(t, bdLog, "city", "rig:web")
+	})
+
+	t.Run("city timer failure still sweeps the rigs", func(t *testing.T) {
+		binDir, bdLog, env := gateSweepEnv(t)
+		writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s %s\n' "$GC_FAKE_SCOPE" "$*" >> "$BD_LOG"
+case "$GC_FAKE_SCOPE|$*" in
+  city*--type=timer*)
+    echo "bd: simulated city timer-gate failure" >&2
+    exit 1
+    ;;
+esac
+exit 0
+`)
+		env["FAKE_RIG_LIST_JSON"] = rigs
+
+		out, err := runScriptResult(t, coreScriptPath("gate-sweep.sh"), env)
+
+		if err == nil {
+			t.Fatalf("expected gate-sweep to exit non-zero after a city timer failure:\n%s", out)
+		}
+		if !strings.Contains(string(out), "city") {
+			t.Errorf("expected the failure report to name the city store:\n%s", out)
+		}
+		assertBothChecksSwept(t, bdLog, "rig:api", "rig:web")
+	})
+}
+
 // hermeticGitEnv builds a git invocation env that strips any pre-existing
 // GIT_* control variables from the parent environment before applying the
 // overrides — same approach as mergeTestEnv. This avoids duplicate keys

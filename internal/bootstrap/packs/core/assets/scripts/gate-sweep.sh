@@ -26,6 +26,10 @@
 # `gc bd --city <city> --rig <rig>` front door (the same route the reaper
 # and jsonl-export orders use). Listing the rigs needs jq; a city with no
 # rigs pays only the rig-list call.
+#
+# A timer check that fails in one store is reported on stderr naming the
+# store; that store's gh check is skipped, the remaining stores are still
+# swept, and the run exits non-zero at the end.
 set -euo pipefail
 
 # Trace bd invocations to $GC_BD_TRACE when set (no-op otherwise).
@@ -40,10 +44,26 @@ CITY_ABS="$(cd "$CITY" 2>/dev/null && pwd -P || printf '%s\n' "$CITY")"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/scope_bd.sh"
 
+# One stderr capture file for the run, removed on exit.
+SWEEP_ERR_FILE="$(mktemp)"
+trap 'rm -f "$SWEEP_ERR_FILE"' EXIT
+
 # sweep_scope checks the timer and gh gates of the scope made current by
-# scope_select.
+# scope_select. bd reports per-gate errors on stderr but still exits 0, so
+# a non-zero timer exit means the store itself failed: name the store on
+# stderr, skip its gh check (it would fail the same way, and its '|| true'
+# would hide it) and let the sweep continue with the remaining stores. The
+# run's exit status is decided once, at the end, from SWEEP_FAILED.
+SWEEP_FAILED=0
 sweep_scope() {
-    scope_bd gate check --type=timer --escalate
+    local rc=0
+    scope_bd gate check --type=timer --escalate 2>"$SWEEP_ERR_FILE" || rc=$?
+    cat "$SWEEP_ERR_FILE" >&2
+    if [ "$rc" -ne 0 ]; then
+        echo "gate-sweep: timer gate check failed in $SCOPE_LABEL (exit $rc)" >&2
+        SWEEP_FAILED=1
+        return 0
+    fi
     scope_bd gate check --type=gh --escalate || true
 }
 
@@ -56,3 +76,5 @@ while IFS= read -r rig_name; do
     scope_select rig "$rig_name"
     sweep_scope </dev/null
 done <<< "$RIG_NAMES"
+
+exit "$SWEEP_FAILED"
