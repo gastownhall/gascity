@@ -13449,3 +13449,29 @@ func TestOrphanSweepReleasesHookClaimOfClosedPoolSession(t *testing.T) {
 		})
 	}
 }
+
+// TestOrphanSweepKeepsUnresolvableStampedSessionNameUnverifiable keeps the
+// stamped-name rule narrow: only the "-<id>" runtime name of a terminal
+// session bead the sweep read is skipped. Any other stamped name -- here an
+// identity-derived named-session runtime name -- is still probed, and a failed
+// probe keeps the claim even though gc.session_id reads back closed.
+func TestOrphanSweepKeepsUnresolvableStampedSessionNameUnverifiable(t *testing.T) {
+	const stampedName = "gastown__named-worker"
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{hookClaim("ga-hook-named", "gc-d34d1", stampedName, nil)},
+		nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d1", Status: "closed", IssueType: "session"}},
+		nil, nil)
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if !strings.Contains(run.log, "bd show "+stampedName+" --json") {
+		t.Fatalf("stamped name %q that is not a terminal session's runtime name was not probed\n%s", stampedName, run.context())
+	}
+	if run.released("ga-hook-named") {
+		t.Fatalf("claim whose stamped session name could not be read was released\n%s", run.context())
+	}
+	if !strings.Contains(run.out, "orphan-sweep: reset 0 orphaned beads, skipped 1 unverifiable") {
+		t.Fatalf("output does not count the claim as unverifiable:\n%s", run.out)
+	}
+}
