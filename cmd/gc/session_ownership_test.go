@@ -619,13 +619,19 @@ func (f *ownershipFixture) reprime(t *testing.T) {
 // tick runs one reconcile pass over the seat as the cache now reads it.
 func (f *ownershipFixture) tick(t *testing.T, poolDesired map[string]int, trace *sessionReconcilerTraceCycle) {
 	t.Helper()
+	f.tickWith(t, f.dops, poolDesired, trace)
+}
+
+// tickWith is tick through dops.
+func (f *ownershipFixture) tickWith(t *testing.T, dops drainOps, poolDesired map[string]int, trace *sessionReconcilerTraceCycle) {
+	t.Helper()
 	session, err := f.env.store.Get(f.session.ID)
 	if err != nil {
 		t.Fatalf("Get(session): %v", err)
 	}
 	reconcileSessionBeadsTraced(
 		context.Background(), f.env.city, []beads.Bead{session}, f.env.desiredState, configuredSessionNames(f.env.cfg, "", f.env.store), f.env.cfg, f.env.sp,
-		f.env.store, f.dops, nil, nil, nil, f.env.dt, poolDesired, false, nil, "",
+		f.env.store, dops, nil, nil, nil, f.env.dt, poolDesired, false, nil, "",
 		nil, f.env.clk, f.env.rec, 0, 0, &f.env.stdout, &f.env.stderr, trace,
 		f.env.startOptions...,
 	)
@@ -781,4 +787,53 @@ func (f *ownershipFixture) drainObservation(t *testing.T) string {
 	t.Helper()
 	_, why := f.stopObservation(t)
 	return why
+}
+
+// A held seat's timer drain that began before the work was assigned, whether
+// or not the reconciler has set its GC_DRAIN_ACK, and its leftover
+// idle-stop-pending mark are canceled and cleared by the next tick. The ack
+// lives on the runtime, as the provider's drain ops keep it.
+func TestReconcileSessionBeads_PoolSeatHoldingWorkCancelsBegunTimerDrain(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		drainReason string
+		acked       bool
+		idleStop    bool
+	}{
+		{name: "no-wake-reason drain", drainReason: "no-wake-reason"},
+		{name: "acked no-wake-reason drain", drainReason: "no-wake-reason", acked: true},
+		{name: "idle drain", drainReason: "idle"},
+		{name: "acked idle drain", drainReason: "idle", acked: true},
+		{name: "acked idle drain with idle-stop-pending", drainReason: "idle", acked: true, idleStop: true},
+		{name: "idle-stop-pending only", idleStop: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newOwnershipFixture(t)
+			f.env.addDesired(ownershipWorkerName, ownershipPoolTemplate, false)
+			if tc.idleStop {
+				f.env.setSessionMetadata(&f.session, map[string]string{"sleep_intent": sleepIntentIdle})
+				f.reprime(t)
+			}
+			if tc.drainReason != "" {
+				ds := beginDrainForTest(t, f.env.store, f.env.dt, f.session.ID, tc.drainReason, f.env.clk.Now(), f.env.clk.Now().Add(time.Hour))
+				if tc.acked {
+					if err := setReconcilerDrainAckMetadata(f.env.sp, ownershipWorkerName, ds); err != nil {
+						t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+					}
+					ds.ackSet = true
+				}
+			}
+			f.holdBlockedWork(t, "open")
+			dops := newDrainOps(f.env.sp)
+			f.tickWith(t, dops, map[string]int{}, nil)
+			f.env.clk.Advance(defaultDrainTimeout + time.Second)
+			f.tickWith(t, dops, map[string]int{}, nil)
+			if stopped, why := f.stopObservation(t); stopped {
+				t.Fatalf("pool seat holding assigned work %s was stopped (%s); stdout:\n%s\nstderr:\n%s", f.work.ID, why, f.env.stdout.String(), f.env.stderr.String())
+			}
+			if intent := f.sleepIntent(t); intent != "" {
+				t.Fatalf("sleep_intent = %q on a seat holding assigned work, want cleared", intent)
+			}
+		})
+	}
 }

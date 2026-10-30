@@ -3327,6 +3327,25 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							continue
 						}
 					}
+					// Held-work cancel lens for a reconciler-owned timer-drain ack
+					// (see the no-wake arm's held-work keep): a pool seat holding
+					// assigned work it has no wake reason to run yet keeps its
+					// runtime. A recovered ack with no tracked drain is cleared.
+					if alive && reconcilerOwnedAck && heldWorkDrainReason(ackReason) &&
+						liveClaimVetoApplies(cityPath, cfg, infoByID[id], suspState) {
+						if held, workID, _ := sessionHoldsAssignedWork(sw, infoByID[id]); held {
+							if !cancelSessionDrainIfInfo(infoByID[id], sp, dt, heldWorkDrainReason) {
+								_ = clearReconcilerDrainAckMetadata(sp, name)
+							}
+							_ = dops.clearDrain(name)
+							if trace != nil {
+								trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ackReason), TraceOutcomeCancelAssignedWork, tp.TemplateName, name, traceRecordPayload{
+									"held_work": workID,
+								})
+							}
+							continue
+						}
+					}
 					if reconcilerOwnedAck && assignedWorkDrainReasonCancelable(ackReason) {
 						hasAssignedWork, assignedErr := sessionHasAwakeAssignedWorkForReachableStore(sw, infoByID[id])
 						if assignedErr != nil {
@@ -5093,11 +5112,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// Held-work keep (sessionHoldsAssignedWork) for the timer drains: a
 			// pool seat holding assigned work it has no wake reason to run yet
 			// (blocked open or in_progress work) is kept, before the idle probe,
-			// so the work is not stranded on a stopped seat. The same intents
-			// and eligibility as the live-claim veto below apply.
+			// so the work is not stranded on a stopped seat: a timer drain begun
+			// before the work was assigned is canceled, with the reconciler's
+			// GC_DRAIN_ACK, and an idle-stop-pending mark is cleared. The same
+			// intents and eligibility as the live-claim veto below apply.
 			if heldWorkDrainReason(reason) && (intent == "" || intent == "idle-stop-pending") &&
 				liveClaimVetoApplies(cityPath, cfg, info, suspState) {
 				if held, workID, _ := sessionHoldsAssignedWork(sw, info); held {
+					cancelSessionDrainIfInfo(info, sp, dt, heldWorkDrainReason)
+					clearCompletedIdleProbe(target.info.ID, dt)
+					if intent == "idle-stop-pending" {
+						tick.clearIdleStopPending(target.info.ID, sessFront)
+					}
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerDrainDecision, TraceReasonCode(reason), TraceOutcomeKeptOpen, target.tp.TemplateName, name, traceRecordPayload{
 							"sleep_intent": intent,
