@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -812,5 +813,99 @@ args = ["{{.AgentName}}", "{{.WorkDir}}", "{{.TemplateName}}"]
 	}
 	if got, want := hints.MCPServers[0].Args[2], "myrig/ant"; got != want {
 		t.Fatalf("Args[2] = %q, want %q", got, want)
+	}
+}
+
+// TestSessionResumeWarnsOnLaunchCommandFallback covers the invalid closed-option
+// scenario reported in #8507, plus a valid override and malformed metadata.
+func TestSessionResumeWarnsOnLaunchCommandFallback(t *testing.T) {
+	resolvers := []struct {
+		name         string
+		resolve      func(*testing.T, *Server, session.Info) (string, error)
+		resumeSuffix string
+	}{
+		{
+			name: "buildSessionResume",
+			resolve: func(t *testing.T, s *Server, info session.Info) (string, error) {
+				command, _, err := s.buildSessionResume(info)
+				return command, err
+			},
+			resumeSuffix: " --resume session-key",
+		},
+		{
+			name: "workerRuntime",
+			resolve: func(t *testing.T, s *Server, info session.Info) (string, error) {
+				resolved, err := s.resolveWorkerSessionRuntimeWithMetadata(info, "", nil)
+				if err != nil {
+					return "", err
+				}
+				if resolved == nil {
+					t.Fatal("worker runtime was not resolved")
+				}
+				return resolved.Command, nil
+			},
+		},
+	}
+	for _, resolver := range resolvers {
+		t.Run(resolver.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name        string
+				overrides   string
+				wantCommand string
+				wantWarning bool
+			}{
+				{"invalid choice", `{"permission_mode":"private-option-marker"}`, "/bin/echo --stored-marker", true},
+				{"malformed overrides", `{"private-metadata-marker":`, "/bin/echo --stored-marker", true},
+				{"valid choice", `{"permission_mode":"plan"}`, "/bin/echo --permission-mode plan", false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					fs := newSessionFakeState(t)
+					fs.cfg.Agents = []config.Agent{{Name: "worker", Provider: "test-agent"}}
+					fs.cfg.Providers["test-agent"] = config.ProviderSpec{
+						Command:    "/bin/echo",
+						PathCheck:  "true",
+						ResumeFlag: "--resume",
+						Env:        map[string]string{"PRIVATE_ENV_MARKER": "private-env-marker"},
+						OptionsSchema: []config.ProviderOption{{
+							Key:     "permission_mode",
+							Choices: []config.OptionChoice{{Value: "plan", FlagArgs: []string{"--permission-mode", "plan"}}},
+						}},
+					}
+					info := createTestSession(t, fs.cityBeadStore, fs.sp, "Chat")
+					info.Template = "worker"
+					info.Provider = "test-agent"
+					info.Transport = "tmux"
+					info.Command = "/bin/echo --stored-marker"
+					info.ResumeFlag = "--resume"
+					info.SessionKey = "session-key"
+					if err := fs.cityBeadStore.SetMetadata(info.ID, "template_overrides", tc.overrides); err != nil {
+						t.Fatalf("SetMetadata(template_overrides): %v", err)
+					}
+					var logs bytes.Buffer
+					t.Cleanup(captureLog(t, &logs))
+					command, err := resolver.resolve(t, New(fs), info)
+					if err != nil {
+						t.Fatalf("resolve resume: %v", err)
+					}
+					if want := tc.wantCommand + resolver.resumeSuffix; command != want {
+						t.Errorf("command = %q, want %q", command, want)
+					}
+					if tc.wantWarning {
+						for _, want := range []string{"WARNING:", info.ID, "provider launch command resolution failed", "falling back"} {
+							if !strings.Contains(logs.String(), want) {
+								t.Errorf("log = %q, want %q", logs.String(), want)
+							}
+						}
+					} else if logs.Len() != 0 {
+						t.Errorf("valid override logged a warning: %s", &logs)
+					}
+					for _, private := range []string{"private-option-marker", "private-metadata-marker", "private-env-marker", "PRIVATE_ENV_MARKER", "--stored-marker", "/bin/echo"} {
+						if strings.Contains(logs.String(), private) {
+							t.Errorf("log exposed private runtime data %q: %s", private, &logs)
+						}
+					}
+				})
+			}
+		})
 	}
 }
