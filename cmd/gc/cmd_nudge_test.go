@@ -2952,7 +2952,9 @@ func TestTryDeliverQueuedNudgesByPollerExpiresABlockedItemInsteadOfHoldingIt(t *
 	dir, store, fake, target, obs := startBlockedNudgeTarget(t)
 	synctest.Test(t, func(t *testing.T) {
 		openOwnedNudgeBeadStore = func(string) (beads.NudgesStore, beads.Store) {
-			time.Sleep(nudgeEnqueueMaintenanceBudget + time.Second)
+			// A slow store open: the timer receive advances the bubble's
+			// virtual clock past the maintenance budget, costing no wall time.
+			<-time.After(nudgeEnqueueMaintenanceBudget + time.Second)
 			return beads.NudgesStore{Store: store}, nil
 		}
 		// Live at the claim; expired once the claim's slow store open has run.
