@@ -38,7 +38,7 @@ Native witness: PASS on tmux 3.8. TestProvider_NudgeResolvesDeadPane PASS (3.96s
 - owned_topup: none required; every owned test ran and passed in the full-suite output.
 - floor_topup: complete=true, all16 steps rc0; c3/evidence/remote/floor-topup.json and floor-logs. Includes every environment-absence SKIP selection, pinned beadstest, Darwin compile and both runner self-tests. Non-owned remaining SKIPs are inventoried.
 - latency_leg: complete=true, measured under clear farm probe, attempt1; both budget tests PASS; neither ran in the main full-integration leg. c3/evidence/remote/latency-leg.json.
-- waiver_ref: none; failure_attribution: none. No failures occurred.
+- waiver_ref: none; failure_attribution: none in the canonical criterion-3 run. Publication-hook failures are attributed separately below.
 
 | Diff-owned test | Result |
 |---|---|
@@ -84,3 +84,25 @@ All gate criteria PASS. Cut the isolated deploy branch from the resolved reviewe
 Native witness load: threshold15; waited1801s; timed_out1; run_start_load44.82; run_max_load44.60; run_mean_load43.66; run_readings3; wait_first_load63.55; wait_max_load120.78; wait_mean_load79.78; wait_readings62; read_errors0; prewait_s1801. Local-heavy admission floor40GiB, free57.59788131713867GiB, cap3; local-tmux-admission.json. The bounded soft wait completed before the local command.
 
 Artifact integrity: all998 retained raw farm log/XML files match their recorded SHA256 (retained-artifact-audit.json). Ancestry scope recheck PASS after fetching origin/main; accepted ids ga-ahh4ifs and ga-njc7gg6. The gate remains pinned to the base above; merge-time checks are required as main advances.
+
+## Publication-hook evidence
+
+The normal pre-commit hook passed for the gate record. The subsequent normal pre-push hook on `9b1f2c4e162f04e1c1578b64887571633f4e7858` ran `bazel test //... --config=fork-cache --keep_going`: 283/288 targets passed and five targets failed. This result remains a failed full-suite hook run. The focused coverage runs below establish attribution; they do not replace that run or the canonical full gate.
+
+All 12 original failed log/XML artifacts remain retained and hash-verified in `prepush-failed-artifacts.json`. The non-diff-owned-gate-failure protocol was read before attribution. Every failing test is UNCHANGED according to the official ownership/site evidence, with no shared hunk in its file (`prepush-attribution/ownership-explain.txt` and `other-sites.txt`). All cited trackers were opened and sightings were read back.
+
+| failure_attribution | Tracker | Clause 3 proof | Clause 4 |
+|---|---|---|---|
+| TestWriteTokenFileKeepsGroup: supplementary-group chown EINVAL | ga-bwvl64t | (a) Complete 47-package test-binary import closure excludes all changed inputs; mechanism.json and tokenrender-import-closure.txt. | No package overlap. |
+| productmetrics: both shards hit the 5m package alarm; active tests TestPurgeSpoolWithinBudgetKeepsCumulativeEventCapAcrossPasses and TestUploaderPersistsAttemptAndClosedSettlementDiagnostics/server_failure | ga-46vdxg | (a) Complete 8-package test-binary import closure excludes all changed inputs; productmetrics-mechanism.json and productmetrics-import-closure.txt. | No package overlap. |
+| TestStopManagedCityPreservingSessionsWaitsForRuntimeShutdownOnTimeout: state stopping instead of stopped | ga-elb781 | (c) Exact named test executed under coverage; all 50 instrumented lines in the sole changed production function, (*Tmux).agentInputTarget, had zero hits. | No package overlap. |
+| TestSimCoverageGate: target reached its 60s deadline | ga-3kc9awk | (c) Exact named test executed through gc_test with all 32 original census inputs copied and hash-verified; all 50 instrumented changed-function lines had zero hits. | No package overlap. |
+| TestDockerSessionProtocol/failed_start_removes_created_container: start process signal:killed instead of exit 1 | ga-hq0j256 | (c) Exact named subtest executed under coverage; all 50 instrumented changed-function lines had zero hits. | same_package=yes (scripts manifest), proof=c, added_test_load=no: no census/policy increase, new target or new scripts test file. |
+
+The first four trackers predate this run. Open-tracker search and the closed-tracker lookup (72 closed trackers, NONE for the Docker parent/subtest) found no Docker kill-signature match. ga-d5l7kb was opened and tracks a different cancellation assertion. ga-hq0j256 was created only after coverage proof (c) landed, satisfying the discovering-run tracker rule (gm-sf3238); it is an unrouted gate-tracker. No repeat blocking run occurred. Tracker sightings/proof updates are retained under `prepush-attribution/`, `cli-proof-comment-verified.json`, `sim-proof-comment-verified.json` and `docker-killed-tracker-verified.json`.
+
+Coverage evidence: `prepush-coverage-proof.json`, per-target coverage/log/XML in `prepush-coverage-artifacts/`, and fresh BEP in `prepush-coverage.bep.json`. Docker and shutdown tests executed PASS, with zero changed-function hits. The simulation variant executed PASS but emitted an empty coverage file, which was rejected as attribution evidence. Its replacement direct invocation is recorded in `sim-direct-coverage.sh`, `sim-direct-coverage-proof.json`, `sim-direct-coverage.bep.json` and `sim-direct-coverage-artifacts/`; TestSimCoverageGate executed PASS with a nonempty per-target coverage report and zero changed-function hits. The original simulation timeout log contains no PASS or teardown message; its cause is not asserted to be teardown.
+
+Native attribution load: original coverage run threshold15, waited840s, timed_out0, run_start14.23, max37.17, mean25.37, readings9; wait_first59.48, max59.48, mean28.19, readings30, errors0. Admission floor40GiB, free41.616756439208984GiB, cap3. Direct simulation proof threshold15, waited450s, timed_out0, run_start14.85, run_max/run_mean NA (zero samples); wait_first28.19, max28.19, mean19.57, readings17, errors0. Admission floor40GiB, free44.892391204833984GiB, cap3. Both ran through the isolation wrapper and detached service, at the unchanged pre-push head.
+
+All four attribution clauses pass for every hook failure. The protocol authorizes `git push --no-verify` for the specific resulting head after this record is committed; claim, isolated target, reviewed ancestry and remote-head equality are checked explicitly. This is attribution, with no waiver. Source code and tests remain exactly the reviewed source; the additional commit changes only this record.
