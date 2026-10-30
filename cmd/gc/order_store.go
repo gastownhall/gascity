@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 type (
@@ -694,10 +695,8 @@ func relocatedOrdersClassStore(cityPath string, cfg *config.City) beads.Store {
 // store stays the caller's for everything else it does; only the tracking bead
 // routes here. On a city that relocates nothing this returns a front door over
 // the exact store value it was handed.
-func orderTrackingFrontDoor(cityPath string, cfg *config.City, scopeStore beads.OrdersStore) *orders.Store {
-	return orders.NewStore(beads.OrdersStore{
-		Store: resolveOrderStore(cliStorageRoutes(cityPath), scopeStore.Store, cfg, cityPath, nil),
-	})
+func orderTrackingFrontDoor(cityPath string, _ *config.City, scopeStore beads.OrdersStore) *orders.Store {
+	return orders.NewStore(cliStores(cityPath, storeref.Leg{Store: scopeStore.Store}).Orders(storeref.WorkRef))
 }
 
 // appendOrdersSweepStore adds the orders-class binding to a tracking sweep's

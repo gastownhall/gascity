@@ -242,6 +242,9 @@ type CityRuntime struct {
 	// serviceStateMu and read through cityBeadStore/rigBeadStores. Only the
 	// controller goroutine writes them.
 	standaloneCityStore beads.Store // non-nil when API disabled; for chat auto-suspend
+	// stores is the class handles over the runtime's work and rig stores and
+	// its routes, re-minted when they change (city_stores.go).
+	stores              storesEpochCache
 	standaloneRigStores map[string]beads.Store
 
 	// storageRoutes is the opened non-work storage binding this process
@@ -2333,11 +2336,10 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(cfg *config.City, now time.Time
 	cr.nudgeMailSweepWatchdogLast = now
 
 	// The nudge phase routes through the typed nudges store; the mail phase
-	// through the typed messaging store. Both collapse to the city store today,
-	// so the sweep is byte-identical.
-	cityStore := cr.cityBeadStore()
-	nudgeStore := beads.NudgesStore{Store: resolveNudgesStore(cr.storageRoutes, cityStore, cfg, cr.cityPath, cr.rec)}
-	mailStore := beads.MailStore{Store: resolveMailMessagesStore(cr.storageRoutes, cityStore, cfg, cr.cityPath, cr.rec)}
+	// through the typed messaging store. Both are the city store on a city
+	// that relocates neither.
+	stores := cr.cityStores()
+	nudgeStore, mailStore := stores.Nudges(), stores.Mail()
 	if nudgeStore.Store == nil || mailStore.Store == nil {
 		return
 	}
@@ -4284,7 +4286,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		filteredCfg,
 		cr.sp,
 		sessionsStore.Store,
-		unwrapWorkStores(cr.workBeadStores()),
+		cr.rigBeadStores(), // residency:allow — the desired-state build's per-rig work tail, the map workBeadStores handed it before T2; the build plans its legs
 		sessionBeads,
 		nil,
 		cr.stderr,
@@ -4348,8 +4350,8 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		sw,
 		cr.dops,
 		nil,
-		unwrapWorkStores(cr.workBeadStores()),
-		nil, // control-dispatcher ticks only need ownership continuity, not main-tick assigned/ready snapshots
+		cr.rigBeadStores(), // residency:allow — the desired-state build's per-rig work tail, the map workBeadStores handed it before T2; the build plans its legs
+		nil,                // control-dispatcher ticks only need ownership continuity, not main-tick assigned/ready snapshots
 		cr.sessionDrains,
 		cr.providerHealthGate,
 		poolDesired,
@@ -4681,7 +4683,7 @@ func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trac
 	sessionsStore := cr.sessionsBeadStore()
 	var result DesiredStateResult
 	if cr.buildFnWithSessionBeads != nil {
-		result = cr.buildFnWithSessionBeads(cr.cfg, cr.sp, sessionsStore.Store, unwrapWorkStores(cr.workBeadStores()), sessionBeads, trace)
+		result = cr.buildFnWithSessionBeads(cr.cfg, cr.sp, sessionsStore.Store, cr.rigBeadStores(), sessionBeads, trace) // residency:allow — the desired-state build's per-rig work tail, the map workBeadStores handed it before T2; the build plans its legs
 	} else {
 		result = cr.buildFn(cr.cfg, cr.sp, sessionsStore.Store)
 	}

@@ -6,6 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 const (
@@ -94,7 +95,7 @@ func openNudgeBeadStoreOwned(cityPath string) (beads.NudgesStore, beads.Store, e
 	if err != nil {
 		return beads.NudgesStore{}, nil, fmt.Errorf("opening the city store at %q: %w", cityPath, err)
 	}
-	return beads.NudgesStore{Store: resolveNudgesStore(cliStorageRoutes(cityPath), store, nil, cityPath, nil)}, store, nil
+	return cliStores(cityPath, storeref.Leg{Store: store}).Nudges(), store, nil
 }
 
 // nudgeFrontDoor wraps a strongly-typed nudges store as the nudge object's

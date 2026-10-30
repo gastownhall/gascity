@@ -10,10 +10,12 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/spf13/cobra"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/executionevent"
-	"github.com/spf13/cobra"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 type eventsReemitExecutionResult struct {
@@ -90,11 +92,8 @@ func runEventsReemitExecution(cmd *cobra.Command, runID string, apply bool, stdo
 	if err != nil {
 		return fmt.Errorf("opening city work store: %w", err)
 	}
-	projection, err := executionevent.ProjectCurrent(
-		beads.GraphStore{Store: resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)},
-		beads.WorkStore{Store: store},
-		strings.TrimSpace(runID),
-	)
+	stores := cliStores(cityPath, storeref.Leg{Store: store})
+	projection, err := executionevent.ProjectCurrent(stores.Graph(storeref.WorkRef), stores.Work(), strings.TrimSpace(runID))
 	if err != nil {
 		return fmt.Errorf("projecting run %q: %w", runID, err)
 	}

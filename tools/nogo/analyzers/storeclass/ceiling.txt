@@ -4,17 +4,17 @@
 # growth fails. The generator only ever lowers a row; raising one is a
 # coordinator decision, made by hand, and visible in review.
 cmd/gc	cap-assert	107
-cmd/gc	mint	110
+cmd/gc	mint	82
 cmd/gc	raw-field	173
-cmd/gc	raw-param	1072
-cmd/gc	raw-result	253
+cmd/gc	raw-param	1069
+cmd/gc	raw-result	250
 cmd/gc	raw-type	4
 cmd/gc	raw-var	37
 cmd/gc	read-marker	31
-cmd/gc	unwrap	155
+cmd/gc	unwrap	154
 internal/agentutil	raw-param	2
 internal/api	cap-assert	10
-internal/api	mint	21
+internal/api	mint	17
 internal/api	raw-field	13
 internal/api	raw-param	139
 internal/api	raw-result	17
