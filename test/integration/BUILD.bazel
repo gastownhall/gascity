@@ -50,6 +50,7 @@ go_test(
         "dolt_persistence_test.go",
         "drift_sysprocattr_helper_linux_test.go",
         "drift_sysprocattr_linux_test.go",
+        "drift_sysprocattr_other_test.go",
         "e2e_comm_test.go",
         "e2e_config_test.go",
         "e2e_events_test.go",

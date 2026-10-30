@@ -551,10 +551,7 @@ func setupDriftDirectScenarioAsUID(t *testing.T, uid uint32) *driftScenario {
 	cmd := exec.Command(tc.binaryPath, "supervisor", "run")
 	cmd.Env = tc.env
 	cmd.Dir = tc.gcHome
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Credential: &syscall.Credential{Uid: uid},
-		Setpgid:    true,
-	}
+	cmd.SysProcAttr = driftSupervisorSysProcAttr(&syscall.Credential{Uid: uid})
 	logPath := filepath.Join(tc.gcHome, "supervisor.log")
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -716,7 +713,7 @@ func launchDirectSupervisor(t *testing.T, binary string, env []string, gcHome st
 	cmd.Dir = gcHome
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = driftSupervisorSysProcAttr(nil)
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
 		t.Fatalf("starting drift supervisor: %v", err)

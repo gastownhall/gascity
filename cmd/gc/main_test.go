@@ -114,6 +114,10 @@ func configureSupervisorHooksForTests() {
 	ensureSupervisorRunningHook = func(_, _ io.Writer) int { return 0 }
 	reloadSupervisorHook = func(_, _ io.Writer) int { return 0 }
 	supervisorAliveHook = func() int { return 0 }
+	// Keep install/uninstall tests from signaling real host processes through
+	// the leaked test-supervisor sweep; its own tests inject a fake process
+	// table.
+	sweepLeakedTestSupervisorsFn = func(io.Writer) {}
 	// Neutralize systemd lingering so install tests never spawn loginctl
 	// or mutate the test runner's real linger state. Reporting linger as
 	// already enabled makes ensureSupervisorLinger a silent no-op, keeping

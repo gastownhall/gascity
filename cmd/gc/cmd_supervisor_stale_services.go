@@ -30,7 +30,9 @@ import (
 const supervisorSystemdUnitPrefix = "gascity-supervisor-"
 
 // sweepStaleIsolatedSupervisorServices removes leaked isolated-home
-// supervisor services for the active platform. Failures are warnings
+// supervisor services for the active platform, and on Linux the leaked
+// test-supervisor processes whose environment is gone
+// (cmd_supervisor_leaked_procs.go). Failures are warnings
 // on stderr; the sweep never blocks the caller.
 func sweepStaleIsolatedSupervisorServices(stderr io.Writer) {
 	switch supervisorRuntimeGOOS {
@@ -38,6 +40,7 @@ func sweepStaleIsolatedSupervisorServices(stderr io.Writer) {
 		sweepStaleIsolatedSupervisorLaunchd(stderr)
 	case "linux":
 		sweepStaleIsolatedSupervisorSystemd(stderr)
+		sweepLeakedTestSupervisorsFn(stderr)
 	}
 }
 
