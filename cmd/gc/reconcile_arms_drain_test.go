@@ -872,3 +872,57 @@ func TestDrainVoidCancelCancelsRequestedTimerDrainOnHeldWork(t *testing.T) {
 		})
 	}
 }
+
+// TestSeatHoldsWork (AC-5). Pins the held-work keep's reach: a live-claim
+// veto eligible pool seat holding open or in-progress work assigned to its
+// scope, or a pass whose assigned-work read was partial; never a named row, a
+// suspended or removed agent, a suspended city, work it does not hold, or a
+// row under an explicit sleep intent.
+func TestSeatHoldsWork(t *testing.T) {
+	work := func(status, assignee string) func(*World) {
+		return func(w *World) { w.Demand.AssignedWork = []beads.Bead{{ID: "gw-1", Status: status, Assignee: assignee}} }
+	}
+	none := func(*World) {}
+	for _, c := range []struct {
+		name  string
+		meta  []string
+		world func(*World)
+		want  bool
+	}{
+		{"blocked open work", heldSeat, blockedOpenWork, true},
+		{"blocked in-progress work", heldSeat, blockedClaim, true},
+		{"partial read", heldSeat, storePartial, true},
+		{"idle-stop-pending", slices.Concat(heldSeat, []string{"sleep_intent", sleepIntentIdle}), blockedOpenWork, true},
+		{"no work", heldSeat, none, false},
+		{"closed work", heldSeat, work("closed", "gc-1"), false},
+		{"unassigned work", heldSeat, work("open", ""), false},
+		{"work assigned only to the pool route name", heldSeat, work("open", "worker"), false},
+		{"named row", slices.Concat(heldSeat, []string{namedSessionMetadataKey, "true"}), blockedOpenWork, false},
+		{"not pool-managed", nil, blockedOpenWork, false},
+		{"user-hold intent", slices.Concat(heldSeat, []string{"sleep_intent", "user-hold"}), blockedOpenWork, false},
+		{"agent suspended", heldSeat, func(w *World) { blockedOpenWork(w); w.Env.Cfg.Agents[0].Suspended = true }, false},
+		{"agent removed", heldSeat, func(w *World) {
+			blockedOpenWork(w)
+			w.Env.Cfg.Agents = []config.Agent{allocPoolAgent("other", 3)}
+		}, false},
+		{"city suspended", heldSeat, func(w *World) { blockedOpenWork(w); w.CitySuspended = true }, false},
+	} {
+		w := &World{}
+		poolSeatCity(w)
+		c.world(w)
+		r := &rowFacts{w: w, k: rowKeyOf("gc-1"), row: censusRowOf(t, drainRow(c.meta...)), found: true, entry: &selectionEntry{}}
+		if got := r.seatHoldsWork(); got != c.want {
+			t.Errorf("%s: seatHoldsWork = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestDrainBeginIgnoresHeldWorkOnNamedRow (AC-5). Kills a held-work keep
+// that reaches a named session: its no-wake-reason drain still begins.
+func TestDrainBeginIgnoresHeldWorkOnNamedRow(t *testing.T) {
+	noWake := func(e *selectionEntry) { e.Desired = desireSleep }
+	it, _ := decideDrain(t, slices.Concat(heldSeat, []string{namedSessionMetadataKey, "true"}), noWake, poolSeatCity, blockedOpenWork)
+	if (it.Kind != intentDrainBegin && it.Kind != intentDrainBeginFresh) || it.Reason != decideDrainBegin+reasonNoWake {
+		t.Fatalf("%+v, want the no-wake-reason begin", it)
+	}
+}
