@@ -56,9 +56,9 @@ configuration. The defaults are the recommended setup.
 gc init ~/my-city --template gascity --default-provider claude
 ```
 
-`gc init` starts the city and prints the dashboard address
-(`http://127.0.0.1:8372/`). Use `--default-provider codex` (or `gemini`) to
-run a different agent CLI.
+`gc init` starts the city in the background under a supervisor service. The
+dashboard is at `http://127.0.0.1:8372/`. Use `--default-provider codex` (or
+`gemini`) to run a different agent CLI.
 
 **4. Add a project.** A project Gas City works on is a **rig**. Use one of your
 own repositories, or make a sample one:
@@ -79,7 +79,13 @@ gc sling hello-world/claude "Create hello.sh that prints hello world and commit 
 
 `gc sling` prints a `Dashboard:` link to the formula run, for example
 `http://127.0.0.1:8372/city/my-city/runs/hw-4up`. Open it to watch the agent
-work. Within a minute or two, `hello.sh` is committed in `~/hello-world`.
+work. To check from the terminal, pass the run ID (the last part of the link)
+to `gc bd show`; it reports `CLOSED` when the run is done, usually within a
+minute or two, and `hello.sh` is committed in `~/hello-world`:
+
+```bash
+gc bd show hw-4up
+```
 
 **Next:** run real orchestration with `build-basic` (plan, review, parallel
 implementation, code review, PR) in [Formulas](https://docs.gascityhall.com/tutorials/05-formulas),
