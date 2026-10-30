@@ -3190,3 +3190,61 @@ func TestWispGC_SessionPurgeCursorSurvivesReload(t *testing.T) {
 		})
 	}
 }
+
+type otherWispGC struct{ wispGC }
+
+// carryWispGCState leaves the tracker the new config built when there is no
+// outgoing memoryWispGC to carry from or no rebuilt one to carry into, and
+// never carries the outgoing tracker's notes.
+func TestWispGC_ReloadFollowsEnabledState(t *testing.T) {
+	now := time.Now()
+	ran := func() *memoryWispGC {
+		m := newWispGC(time.Hour, 24*time.Hour, 0).(*memoryWispGC)
+		m.lastRun = now
+		m.sessionPurgeCursor = &beads.SeekBoundary{ID: "gcg-session-held-1"}
+		return m
+	}
+
+	t.Run("disabled stays an untyped nil", func(t *testing.T) {
+		if got := carryWispGCState(ran(), newWispGC(0, 24*time.Hour, 0)); got != nil {
+			t.Fatalf("carry into a disabled GC = %#v, want an untyped nil", got)
+		}
+	})
+	for _, tc := range []struct {
+		name string
+		prev wispGC
+	}{
+		{name: "newly enabled", prev: nil},
+		{name: "typed nil prev", prev: (*memoryWispGC)(nil)},
+		{name: "other tracker type", prev: otherWispGC{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			next := newWispGC(time.Hour, 24*time.Hour, 0)
+			got := carryWispGCState(tc.prev, next)
+			if got != next {
+				t.Fatalf("carry returned %#v, want the rebuilt tracker", got)
+			}
+			if !got.shouldRun(now) || got.(*memoryWispGC).sessionPurgeCursor != nil {
+				t.Fatal("rebuilt tracker took state from no outgoing memoryWispGC; want it due with no cursor")
+			}
+		})
+	}
+	t.Run("typed nil next", func(t *testing.T) {
+		next := wispGC((*memoryWispGC)(nil))
+		if got := carryWispGCState(ran(), next); got != next {
+			t.Fatalf("carry into a typed nil = %#v, want it returned untouched", got)
+		}
+	})
+	t.Run("notes not carried", func(t *testing.T) {
+		prev := ran()
+		root := beads.Bead{ID: "gc-root-1", UpdatedAt: now}
+		prev.notes.noteRefusal("graph", root, now, "held")
+		if _, ok := prev.notes.remembered("graph", root, now); !ok {
+			t.Fatal("vacuous: the outgoing tracker does not remember the seeded refusal")
+		}
+		got := carryWispGCState(prev, newWispGC(time.Hour, 24*time.Hour, 0)).(*memoryWispGC)
+		if _, ok := got.notes.remembered("graph", root, now); ok {
+			t.Fatal("rebuilt tracker remembers the outgoing tracker's refusal; want notes left behind")
+		}
+	})
+}

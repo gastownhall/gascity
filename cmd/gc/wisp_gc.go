@@ -270,7 +270,7 @@ func newWispGCForCity(cfg *config.City, cityName string) wispGC {
 func carryWispGCState(prev, next wispGC) wispGC {
 	p, pok := prev.(*memoryWispGC)
 	n, nok := next.(*memoryWispGC)
-	if !pok || !nok {
+	if !pok || !nok || p == nil || n == nil {
 		return next
 	}
 	n.lastRun = p.lastRun

@@ -9011,3 +9011,29 @@ func TestCityRuntimeReloadWispGCIntervalCountsFromLastRun(t *testing.T) {
 		})
 	}
 }
+
+// A reload that turns the wisp GC off leaves no tracker (an untyped nil the
+// tick skips), and one that turns it back on is due on its first tick, as at
+// process start.
+func TestCityRuntimeReloadWispGCFollowsEnabledState(t *testing.T) {
+	const gcKnobs = "wisp_gc_interval = \"1h\"\nwisp_ttl = \"24h\"\n"
+	cr, tomlPath := newWispGCReloadRuntime(t, gcKnobs)
+	stampWispGCRun(t, cr, time.Now())
+
+	reloadWispGCRuntime(t, cr, tomlPath, "shutdown_timeout = \"1s\"\n")
+	if cr.wg != nil {
+		t.Fatalf("wisp GC tracker after a disabling reload = %#v, want an untyped nil", cr.wg)
+	}
+	if cr.tickWispGC(nil) {
+		t.Fatal("tickWispGC with the GC disabled requested a re-tick")
+	}
+
+	reloadWispGCRuntime(t, cr, tomlPath, gcKnobs)
+	m, ok := cr.wg.(*memoryWispGC)
+	if !ok || m == nil {
+		t.Fatalf("wisp GC tracker after an enabling reload = %T, want *memoryWispGC", cr.wg)
+	}
+	if !m.shouldRun(time.Now()) {
+		t.Fatal("wisp GC enabled by a reload is not due on its first tick")
+	}
+}
