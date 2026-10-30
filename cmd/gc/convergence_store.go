@@ -90,7 +90,14 @@ func (a *convergenceStoreAdapter) list(query beads.ListQuery) ([]beads.Bead, err
 	if a.relic == nil {
 		return out, nil
 	}
-	relicRows, err := a.relic.List(query)
+	// Relic leg (S4 debt): the rig's own store holds convergence loops only
+	// from before S4a, until the rig is imported.
+	var relicRows []beads.Bead
+	err = beads.RelicRead(func() error {
+		var listErr error
+		relicRows, listErr = a.relic.List(query)
+		return listErr
+	})
 	if err != nil {
 		return nil, fmt.Errorf("listing the rig's own store for pre-S4 convergence loops: %w", err)
 	}

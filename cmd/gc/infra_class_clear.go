@@ -115,6 +115,9 @@ type infraBackupEdge struct {
 	Type        string `json:"type"`
 	Payload     string `json:"payload,omitempty"`
 	Carried     bool   `json:"carried,omitempty"`
+	// Disposition is what a rig import did with the edge (rig_import.go):
+	// copied, gated or dropped. The city clear leaves it empty.
+	Disposition string `json:"disposition,omitempty"`
 }
 
 func (e infraBackupEdge) dep() beads.Dep {
@@ -591,10 +594,16 @@ func mergeInfraBackupEntries(previous, current []infraBackupEntry) []infraBackup
 // rename, directory fsync. A crash leaves either the previous backup or the
 // new one, never a truncated file read as complete.
 func writeInfraRetainedBackup(target infraBindingTarget, entries []infraBackupEntry) error {
-	if err := os.MkdirAll(target.Root, 0o755); err != nil {
+	return writeInfraRetainedBackupAt(target.Root, target.RetainedBackupPath(), target.Binding, entries)
+}
+
+// writeInfraRetainedBackupAt is writeInfraRetainedBackup for the backup at
+// path in dir, labeled with binding: the city's, or a rig's.
+func writeInfraRetainedBackupAt(dir, path, binding string, entries []infraBackupEntry) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("writing the retained-source backup: %w", err)
 	}
-	tmp, err := os.CreateTemp(target.Root, infraRetainedBackupName+".tmp-*")
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("writing the retained-source backup: %w", err)
 	}
@@ -606,7 +615,7 @@ func writeInfraRetainedBackup(target infraBindingTarget, entries []infraBackupEn
 	}
 	writer := bufio.NewWriter(tmp)
 	encoder := json.NewEncoder(writer)
-	if err := encoder.Encode(infraBackupHeader{Format: infraRetainedBackupFormat, Binding: target.Binding, Beads: len(entries), WrittenAt: time.Now().UTC()}); err != nil {
+	if err := encoder.Encode(infraBackupHeader{Format: infraRetainedBackupFormat, Binding: binding, Beads: len(entries), WrittenAt: time.Now().UTC()}); err != nil {
 		return fail(err)
 	}
 	for _, entry := range entries {
@@ -624,45 +633,47 @@ func writeInfraRetainedBackup(target infraBindingTarget, entries []infraBackupEn
 		_ = os.Remove(name)
 		return fmt.Errorf("writing the retained-source backup: %w", err)
 	}
-	if err := infraMigrationRename(name, target.RetainedBackupPath()); err != nil {
+	if err := infraMigrationRename(name, path); err != nil {
 		_ = os.Remove(name)
 		return fmt.Errorf("writing the retained-source backup: %w", err)
 	}
-	if dir, err := os.Open(target.Root); err == nil {
-		_ = dir.Sync()
-		_ = dir.Close()
-	}
+	syncInfraDir(dir)
 	return nil
 }
 
 // readInfraRetainedBackup reads the backup. present=false with no error means
 // nothing was ever cleared from this city.
 func readInfraRetainedBackup(target infraBindingTarget) ([]infraBackupEntry, bool, error) {
-	contents, err := os.ReadFile(target.RetainedBackupPath())
+	return readInfraRetainedBackupAt(target.RetainedBackupPath())
+}
+
+// readInfraRetainedBackupAt reads the backup at path.
+func readInfraRetainedBackupAt(path string) ([]infraBackupEntry, bool, error) {
+	contents, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, false, nil
 		}
-		return nil, false, fmt.Errorf("reading the retained-source backup %s: %w", target.RetainedBackupPath(), err)
+		return nil, false, fmt.Errorf("reading the retained-source backup %s: %w", path, err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(contents))
 	var header infraBackupHeader
 	if err := decoder.Decode(&header); err != nil {
-		return nil, true, fmt.Errorf("reading the retained-source backup %s: header: %w", target.RetainedBackupPath(), err)
+		return nil, true, fmt.Errorf("reading the retained-source backup %s: header: %w", path, err)
 	}
 	if header.Format != infraRetainedBackupFormat {
-		return nil, true, fmt.Errorf("reading the retained-source backup %s: format %q, want %q", target.RetainedBackupPath(), header.Format, infraRetainedBackupFormat)
+		return nil, true, fmt.Errorf("reading the retained-source backup %s: format %q, want %q", path, header.Format, infraRetainedBackupFormat)
 	}
 	var entries []infraBackupEntry
 	for decoder.More() {
 		var entry infraBackupEntry
 		if err := decoder.Decode(&entry); err != nil {
-			return nil, true, fmt.Errorf("reading the retained-source backup %s: entry %d: %w", target.RetainedBackupPath(), len(entries)+1, err)
+			return nil, true, fmt.Errorf("reading the retained-source backup %s: entry %d: %w", path, len(entries)+1, err)
 		}
 		entries = append(entries, entry)
 	}
 	if len(entries) != header.Beads {
-		return nil, true, fmt.Errorf("reading the retained-source backup %s: header records %d bead(s), file holds %d", target.RetainedBackupPath(), header.Beads, len(entries))
+		return nil, true, fmt.Errorf("reading the retained-source backup %s: header records %d bead(s), file holds %d", path, header.Beads, len(entries))
 	}
 	return entries, true, nil
 }
@@ -670,12 +681,18 @@ func readInfraRetainedBackup(target infraBindingTarget) ([]infraBackupEntry, boo
 // verifyInfraRetainedBackup re-reads the backup from disk and proves it holds
 // every entry this pass is about to remove, byte-for-byte in its encoded form.
 func verifyInfraRetainedBackup(target infraBindingTarget, want []infraBackupEntry) error {
-	got, present, err := readInfraRetainedBackup(target)
+	return verifyInfraRetainedBackupAt(target.RetainedBackupPath(), want)
+}
+
+// verifyInfraRetainedBackupAt is verifyInfraRetainedBackup for the backup at
+// path.
+func verifyInfraRetainedBackupAt(path string, want []infraBackupEntry) error {
+	got, present, err := readInfraRetainedBackupAt(path)
 	if err != nil {
 		return fmt.Errorf("proving the retained-source backup: %w", err)
 	}
 	if !present {
-		return fmt.Errorf("proving the retained-source backup: %s is missing after it was written", target.RetainedBackupPath())
+		return fmt.Errorf("proving the retained-source backup: %s is missing after it was written", path)
 	}
 	byID := make(map[string]infraBackupEntry, len(got))
 	for _, e := range got {
@@ -684,7 +701,7 @@ func verifyInfraRetainedBackup(target infraBindingTarget, want []infraBackupEntr
 	for _, w := range want {
 		g, ok := byID[w.Bead.ID]
 		if !ok {
-			return fmt.Errorf("proving the retained-source backup: %s does not hold %s; nothing was removed", target.RetainedBackupPath(), w.Bead.ID)
+			return fmt.Errorf("proving the retained-source backup: %s does not hold %s; nothing was removed", path, w.Bead.ID)
 		}
 		wantJSON, err := json.Marshal(w)
 		if err != nil {
@@ -695,7 +712,7 @@ func verifyInfraRetainedBackup(target infraBindingTarget, want []infraBackupEntr
 			return fmt.Errorf("proving the retained-source backup: encoding %s: %w", w.Bead.ID, err)
 		}
 		if !bytes.Equal(wantJSON, gotJSON) {
-			return fmt.Errorf("proving the retained-source backup: %s holds a different %s than the work store; nothing was removed", target.RetainedBackupPath(), w.Bead.ID)
+			return fmt.Errorf("proving the retained-source backup: %s holds a different %s than the work store; nothing was removed", path, w.Bead.ID)
 		}
 	}
 	return nil
@@ -819,7 +836,12 @@ func readInfraClearedNoteAt(path string) (infraClearedNote, bool, error) {
 
 // writeInfraClearedNote records the cleared note atomically.
 func writeInfraClearedNote(cityPath string, note infraClearedNote) error {
-	path := infraClearedNotePath(cityPath)
+	return writeInfraClearedNoteAt(infraClearedNotePath(cityPath), note)
+}
+
+// writeInfraClearedNoteAt records a cleared note at path atomically: the
+// city's, or a rig's (rigGraphClearedNotePath).
+func writeInfraClearedNoteAt(path string, note infraClearedNote) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("recording the cleared note: %w", err)
 	}
@@ -827,7 +849,7 @@ func writeInfraClearedNote(cityPath string, note infraClearedNote) error {
 	if err != nil {
 		return fmt.Errorf("recording the cleared note: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "storage-infra-cleared.json.tmp-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("recording the cleared note: %w", err)
 	}

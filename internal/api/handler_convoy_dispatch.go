@@ -626,6 +626,17 @@ func workflowBeadResponseFromBead(bead beads.Bead) workflowBeadResponse {
 }
 
 func workflowStores(state State) []workflowStoreInfo {
+	return workflowStoresWith(state, false)
+}
+
+// workflowStoresIncludingRetiredRigs is workflowStores with every rig leg,
+// relic-free or not, for a reader that may be looking for rig WORK (an event
+// subject), which a relic-free rig still holds.
+func workflowStoresIncludingRetiredRigs(state State) []workflowStoreInfo {
+	return workflowStoresWith(state, true)
+}
+
+func workflowStoresWith(state State, includeRetiredRigs bool) []workflowStoreInfo {
 	beadStores := state.BeadStores()
 	stores := make([]workflowStoreInfo, 0, len(beadStores)+2)
 	cityName := workflowCityScopeRef(state.CityName())
@@ -663,6 +674,14 @@ func workflowStores(state State) []workflowStoreInfo {
 		}
 		store := state.BeadStore(rigName)
 		if store == nil {
+			continue
+		}
+		// On a split city a rig's graph rows live in the binding leading
+		// this list; the rig's own store is read only while it may still
+		// hold pre-S4 rows. Once the rig is imported or proven clean (the
+		// S4 relic-free predicate) its store holds only work, and no
+		// workflow reader here reads work.
+		if !includeRetiredRigs && rigGraphLegRetired(state, rigName) {
 			continue
 		}
 		stores = append(stores, workflowStoreInfo{

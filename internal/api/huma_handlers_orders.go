@@ -449,7 +449,10 @@ type orderHistoryStoreBead struct {
 func orderStoreInfosForState(state State, a orders.Order) ([]workflowStoreInfo, error) {
 	cityName := workflowCityScopeRef(state.CityName())
 	infos := make([]workflowStoreInfo, 0, 2)
-	if strings.TrimSpace(a.Rig) != "" {
+	// A rig order's tracking beads are born in the orders binding on a split
+	// city; the rig store holds only pre-split history, and none once the rig
+	// is imported or proven clean (the S4 relic-free predicate).
+	if strings.TrimSpace(a.Rig) != "" && !rigGraphLegRetired(state, a.Rig) {
 		if rigStore := state.BeadStore(a.Rig); rigStore != nil {
 			infos = append(infos, workflowStoreInfo{
 				ref:       "rig:" + a.Rig,

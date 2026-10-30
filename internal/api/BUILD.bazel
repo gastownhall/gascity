@@ -464,6 +464,7 @@ go_test(
         "rig_create_async_test.go",
         "rig_create_client_test.go",
         "rig_graph_legs_test.go",
+        "rig_relic_legs_s4b_test.go",
         "rig_rollback_test.go",
         "rigidem_class_pin_test.go",
         "rigidem_hardening_test.go",
