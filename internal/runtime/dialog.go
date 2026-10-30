@@ -2002,6 +2002,8 @@ func ProviderTerminalErrorReason(content string) string {
 		return "quota_exceeded"
 	case strings.Contains(lower, "quota exceeded") && !strings.Contains(lower, "disk quota"):
 		return "quota_exceeded"
+	case containsCreditBalanceStop(lower):
+		return "quota_exceeded"
 	default:
 		return ""
 	}
@@ -2029,6 +2031,40 @@ func ProviderResumeRefusalReason(content, sessionKey string) string {
 		}
 	}
 	return ""
+}
+
+// Claude Code's exhausted-credit stop phrases: the TUI's displayed stop and
+// the headless message.
+const (
+	creditBalanceStopPhrase         = "credit balance too low"
+	creditBalanceStopHeadlessPhrase = "credit balance is too low"
+)
+
+// containsCreditBalanceStop reports whether lowercased content shows Claude
+// Code's exhausted-credit stop as an error line of its own.
+//
+// The match is anchored rather than a bare substring because a terminal park
+// has no self-heal (it needs an explicit wake or an operator), so a false hit
+// on a session that merely quoted the phrase and then crashed is worse than a
+// miss, which degrades to ordinary crash counting.
+func containsCreditBalanceStop(lower string) bool {
+	for _, line := range strings.Split(lower, "\n") {
+		body := creditErrorBody(line)
+		if strings.HasPrefix(body, creditBalanceStopPhrase) ||
+			strings.HasPrefix(body, creditBalanceStopHeadlessPhrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// creditErrorBody returns line with its indentation and Claude Code's leading
+// "⎿" error marker trimmed. strings.TrimSpace trims Unicode space, so the
+// marker's no-break-space padding needs no special case.
+func creditErrorBody(line string) string {
+	body := strings.TrimSpace(line)
+	body = strings.TrimPrefix(body, "⎿")
+	return strings.TrimSpace(body)
 }
 
 // lineContainsAll reports whether any single line of content contains every
