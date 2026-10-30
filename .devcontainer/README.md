@@ -6,14 +6,14 @@ This devcontainer reproduces a development environment for [gastownhall/gascity]
 
 | Tool | Source | Version |
 |---|---|---|
-| Go 1.26 | `mcr.microsoft.com/devcontainers/go` base image | 1.26 (matches `go.mod`) |
+| Go 1.27 | `mcr.microsoft.com/devcontainers/go` base image | 1.27 (matches `go.mod`) |
 | `tmux` | apt | system |
 | `jq` | apt | system |
 | `libicu-dev` | apt | system |
 | `flock` | apt | system (via `util-linux`) |
 | `git` | devcontainer feature | latest |
 | `gh` | devcontainer feature | latest |
-| `dolt` | `.github/scripts/install-dolt-archive.sh` (SHA-256 verified) | `DOLT_VERSION` from `deps.env` (currently 2.2.0) |
+| `dolt` | `.github/scripts/install-dolt-archive.sh` (SHA-256 verified) | `DOLT_VERSION` from `deps.env` (currently 2.6.0) |
 | `bd` (Beads CLI) | `.github/scripts/install-bd-archive.sh` (SHA-256 verified) | `BD_VERSION` from `deps.env` (currently v1.3.2) |
 | `gc` (Gas City) | `make install` from source | built from current commit |
 

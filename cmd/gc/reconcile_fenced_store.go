@@ -252,13 +252,19 @@ func (s blindWriteRefusingStore) DepList(id, direction string) ([]beads.Dep, err
 func (blindWriteRefusingStore) Create(beads.Bead) (beads.Bead, error) {
 	return beads.Bead{}, errBlindWriteRefused
 }
+
 func (blindWriteRefusingStore) Update(string, beads.UpdateOpts) error { return errBlindWriteRefused }
-func (blindWriteRefusingStore) Close(string) error                    { return errBlindWriteRefused }
-func (blindWriteRefusingStore) Reopen(string) error                   { return errBlindWriteRefused }
+
+func (blindWriteRefusingStore) Close(string) error { return errBlindWriteRefused }
+
+func (blindWriteRefusingStore) Reopen(string) error { return errBlindWriteRefused }
+
 func (blindWriteRefusingStore) CloseAll([]string, map[string]string) (int, error) {
 	return 0, errBlindWriteRefused
 }
+
 func (blindWriteRefusingStore) SetMetadata(string, string, string) error { return errBlindWriteRefused }
+
 func (blindWriteRefusingStore) SetMetadataBatch(string, map[string]string) error {
 	return errBlindWriteRefused
 }
@@ -266,7 +272,11 @@ func (blindWriteRefusingStore) SetMetadataBatch(string, map[string]string) error
 func (blindWriteRefusingStore) SetLocalString(string, string, string) error {
 	return errBlindWriteRefused
 }
+
 func (blindWriteRefusingStore) Tx(string, func(beads.Tx) error) error { return errBlindWriteRefused }
-func (blindWriteRefusingStore) Delete(string) error                   { return errBlindWriteRefused }
-func (blindWriteRefusingStore) DepAdd(string, string, string) error   { return errBlindWriteRefused }
-func (blindWriteRefusingStore) DepRemove(string, string) error        { return errBlindWriteRefused }
+
+func (blindWriteRefusingStore) Delete(string) error { return errBlindWriteRefused }
+
+func (blindWriteRefusingStore) DepAdd(string, string, string) error { return errBlindWriteRefused }
+
+func (blindWriteRefusingStore) DepRemove(string, string) error { return errBlindWriteRefused }

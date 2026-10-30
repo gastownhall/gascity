@@ -92,8 +92,8 @@ type Quiet struct {
 }
 
 // Gate is open, or held by something that owns the seat for now (draining,
-// stop requested, kill pending, a user or wait hold, restart pending,
-// starting, a heartbeat hold).
+// stop requested, kill pending, an idle stop pending, a user or wait hold,
+// restart pending, starting, a heartbeat hold).
 type Gate struct {
 	Held   bool
 	Reason string
@@ -230,6 +230,9 @@ type Entry struct {
 	// permission prompt, a runtime unavailable): while it is above zero the
 	// entry is nudged no more often than PausedCap.
 	Refused int
+	// Notice is the asynchronous delivery of the entry's last nudge, until
+	// the caller settles it (SettleNotice); zero when there is none.
+	Notice NoticeMark
 }
 
 // ReleaseMark is a release of an unstarted claim in flight. While it names a

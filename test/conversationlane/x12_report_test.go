@@ -160,9 +160,16 @@ type x12Growth struct {
 	PhysicalOverOff int64            `json:"physical_bytes_over_off"`
 	PhysicalPerOp   *float64         `json:"physical_bytes_per_op,omitempty"`
 	PhysicalNote    string           `json:"physical_note"`
-	DailyOps        int              `json:"daily_ops_input,omitempty"`
-	DailyBytes      float64          `json:"daily_bytes,omitempty"`
-	DailyFormulaMD  string           `json:"daily_formula"`
+	// RetainedBytes, RetainedOverOff, RetainedPerOp and RetainedNote are
+	// the same over each round's Retained growth (x12RetainedGrowth): zero,
+	// with no note, on an arm that does not collect.
+	RetainedBytes   int64    `json:"retained_bytes_recorded_rounds,omitempty"`
+	RetainedOverOff int64    `json:"retained_bytes_over_off,omitempty"`
+	RetainedPerOp   *float64 `json:"retained_bytes_per_op,omitempty"`
+	RetainedNote    string   `json:"retained_note,omitempty"`
+	DailyOps        int      `json:"daily_ops_input,omitempty"`
+	DailyBytes      float64  `json:"daily_bytes,omitempty"`
+	DailyFormulaMD  string   `json:"daily_formula"`
 }
 
 // x12Size is a size distribution.
@@ -491,7 +498,11 @@ func renderX12Markdown(doc x12ReportDoc) string {
 			fmt.Fprintf(&b, "| %s | %s | %s | %d | %s | %s | %s | %s |\n", r.Backend, r.Mode, r.Path, r.N, r.P50, r.P95, r.P99, r.Max)
 		}
 		g := l.R3
-		fmt.Fprintf(&b, "\nR3 op-row growth (%s): %d recorded requests, the store gained %d op rows; physical %d bytes over the recorded rounds, %d over their off rounds; %s; %s\n\n", l.Backend, g.Recorded, g.NewRows, g.PhysicalBytes, g.PhysicalOverOff, g.PhysicalNote, g.DailyFormulaMD)
+		retained := ""
+		if g.RetainedNote != "" {
+			retained = fmt.Sprintf("; after a garbage collection at each round's end, retained %d bytes over the recorded rounds, %d over their off rounds; %s", g.RetainedBytes, g.RetainedOverOff, g.RetainedNote)
+		}
+		fmt.Fprintf(&b, "\nR3 op-row growth (%s): %d recorded requests, the store gained %d op rows; physical %d bytes over the recorded rounds, %d over their off rounds; %s%s; %s\n\n", l.Backend, g.Recorded, g.NewRows, g.PhysicalBytes, g.PhysicalOverOff, g.PhysicalNote, retained, g.DailyFormulaMD)
 		b.WriteString("| Kind | n | mean logical bytes | p95 |\n|---|---|---|---|\n")
 		for _, k := range sortedKeys(g.LogicalByKind) {
 			s := g.LogicalByKind[k]
@@ -758,6 +769,35 @@ func TestX12PhysicalGrowth(t *testing.T) {
 	}
 }
 
+// TestX12RetainedGrowth pins R3's retained measure: x12PhysicalGrowth's
+// rules over each round's growth after its collection, stated only when
+// every round carries one, and with no note on an arm that does not collect.
+func TestX12RetainedGrowth(t *testing.T) {
+	r := func(mode string, b, kept int64) x12RoundGrowth {
+		return x12RoundGrowth{Mode: mode, Bytes: b, Retained: &kept}
+	}
+	got := x12RetainedGrowth([]x12RoundGrowth{r("off", 27000, 5000), r("auto", 75000, 6000), r("require", 90000, 6500)}, 3)
+	if got.RecordedBytes != 12500 || got.OverOff != 2500 || got.PerOp == nil || *got.PerOp != 2500.0/3 {
+		t.Errorf("retained over three rounds = %+v, want 12500 recorded, 2500 over off, %v per op", got, 2500.0/3)
+	}
+	if !strings.Contains(got.Note, "833 retained bytes per op over the off round") {
+		t.Errorf("retained note %q", got.Note)
+	}
+	if got := x12RetainedGrowth([]x12RoundGrowth{r("off", 100, 50), r("auto", 300, -10)}, 2); got.PerOp != nil || !strings.Contains(got.Note, "no retained figure per op: round 2 (auto) shrank by 10 bytes, so the round's collection freed more than the round kept") {
+		t.Errorf("a shrinking retained round = %+v", got)
+	}
+	uncollected := []x12RoundGrowth{{Mode: "off", Bytes: 100}, {Mode: "auto", Bytes: 300}}
+	if got := x12RetainedGrowth(uncollected, 2); got != (x12Physical{}) {
+		t.Errorf("an arm that does not collect = %+v, want the zero measure", got)
+	}
+	if got := x12RetainedGrowth(append(uncollected, r("require", 300, 20)), 2); got != (x12Physical{}) {
+		t.Errorf("rounds only some of which collected = %+v, want the zero measure", got)
+	}
+	if got := x12PhysicalGrowth([]x12RoundGrowth{r("off", 100, 50), r("auto", 300, 60)}, 2); got.PerOp == nil || *got.PerOp != 100 {
+		t.Errorf("the physical measure of collected rounds = %+v, want 100 per op from the rounds' physical growth", got)
+	}
+}
+
 // TestX12BindingDirPerArm pins where R3 measures each arm's binding: the
 // bd-dolt arm's data sits in its server's data dir, not in its workspace,
 // which holds only bd's configuration.
@@ -823,7 +863,11 @@ func TestX12NotSucceeded(t *testing.T) {
 // or, for a load that stopped before its last round, how far it got.
 func TestX12LoadReportStatesLatencyPerBackendAndGrowth(t *testing.T) {
 	perOp := 150.0
-	stated := x12Growth{Recorded: 5, NewRows: 5, LogicalByKind: map[string]x12Size{}, PhysicalBytes: 1000, PhysicalOverOff: 750, PhysicalPerOp: &perOp, PhysicalNote: "150 physical bytes per op over the off round"}
+	keptPerOp := 4.0
+	stated := x12Growth{
+		Recorded: 5, NewRows: 5, LogicalByKind: map[string]x12Size{}, PhysicalBytes: 1000, PhysicalOverOff: 750, PhysicalPerOp: &perOp, PhysicalNote: "150 physical bytes per op over the off round",
+		RetainedBytes: 40, RetainedOverOff: 20, RetainedPerOp: &keptPerOp, RetainedNote: "4 retained bytes per op over the off round",
+	}
 	unstated := x12Growth{Recorded: 5, NewRows: 5, LogicalByKind: map[string]x12Size{}, PhysicalBytes: 1000, PhysicalOverOff: -750, PhysicalNote: "no physical figure per op: round 5 (auto) shrank by 9 bytes, so the store compacted mid-load"}
 	doc := x12ReportDoc{Tier: "evidence", Backend: "bd-dolt", Loads: []x12LoadRecord{{
 		Tier: "evidence", Backend: "bd-dolt",
@@ -840,7 +884,7 @@ func TestX12LoadReportStatesLatencyPerBackendAndGrowth(t *testing.T) {
 		"Well-formed requests that did not succeed: 1 of 7\n- require round 3 cli-nudge-wait key \"k\": client failed\n",
 		"| Backend | Mode | Path | n | p50 | p95 | p99 | max |",
 		"| bd-dolt | auto | submit | 3 | 1ms | 2ms | 3ms | 4ms |",
-		"R3 op-row growth (bd-dolt): 5 recorded requests, the store gained 5 op rows; physical 1000 bytes over the recorded rounds, 750 over their off rounds; 150 physical bytes per op over the off round;",
+		"R3 op-row growth (bd-dolt): 5 recorded requests, the store gained 5 op rows; physical 1000 bytes over the recorded rounds, 750 over their off rounds; 150 physical bytes per op over the off round; after a garbage collection at each round's end, retained 40 bytes over the recorded rounds, 20 over their off rounds; 4 retained bytes per op over the off round;",
 		"R3 op-row growth (sqlite): 5 recorded requests, the store gained 5 op rows; physical 1000 bytes over the recorded rounds, -750 over their off rounds; no physical figure per op: round 5 (auto) shrank",
 	} {
 		if !strings.Contains(md, want) {
@@ -854,10 +898,13 @@ func TestX12LoadReportStatesLatencyPerBackendAndGrowth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "physical_bytes_per_op") {
+	if strings.Contains(string(data), "physical_bytes_per_op") || strings.Contains(string(data), "retained") {
 		t.Errorf("the JSON states a figure per op it did not compute: %s", data)
 	}
-	if data, _ = json.Marshal(stated); !strings.Contains(string(data), `"physical_bytes_per_op":150`) {
+	if strings.Contains(md, "(sqlite): 5 recorded requests, the store gained 5 op rows; physical 1000 bytes over the recorded rounds, -750 over their off rounds; no physical figure per op: round 5 (auto) shrank by 9 bytes, so the store compacted mid-load; after") {
+		t.Errorf("the report states a retained measure for an arm that does not collect:\n%s", md)
+	}
+	if data, _ = json.Marshal(stated); !strings.Contains(string(data), `"physical_bytes_per_op":150`) || !strings.Contains(string(data), `"retained_bytes_per_op":4`) {
 		t.Errorf("the JSON lacks the computed figure per op: %s", data)
 	}
 }

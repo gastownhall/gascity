@@ -32,7 +32,7 @@ ACCEPTANCE_ENV = {
     "GC_ACCEPTANCE_BD_BIN": "$(rootpath @bd_bin_v1_3_2//:bd)",
     "GC_ACCEPTANCE_TOPOLOGY_MATRIX": "1",
     "GC_REQUIRE_ACCEPTANCE_TOOLING": "1",
-    "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_2//:bd) $(rootpath @dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt)",
+    "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_2//:bd) $(rootpath @dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt)",
 }
 
 # Tests that each run past the lane's ~120 s shard budget on rbe-west, by
@@ -152,6 +152,7 @@ go_test(
         "agent_suspend_test.go",
         "beads_blocked_repair_test.go",
         "beads_cli_contract_home_isolation_test.go",
+        "beads_cli_contract_port_file_test.go",
         "beads_cli_contract_test.go",
         "beads_health_test.go",
         "beads_migrate_proxied_test.go",
@@ -180,10 +181,12 @@ go_test(
         "import_named_sessions_regression_test.go",
         "init_lifecycle_test.go",
         "integration_selfhost_ux_test.go",
+        "managed_session_dolt_port_move_test.go",
         "mcp_adoption_test.go",
         "mcp_capability_test.go",
         "migration_regression_test.go",
         "nudge_service_test.go",
+        "ops_default_quiet_test.go",
         "order_commands_test.go",
         "order_env_test.go",
         "pack_registry_live_test.go",
@@ -211,7 +214,7 @@ go_test(
         # Pinned prebuilt release binaries (see MODULE.bazel): hermetic bd and
         # dolt, same versions the go-test CI installs.
         "@bd_bin_v1_3_2//:bd",
-        "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
+        "@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt",
     ],
     env = ACCEPTANCE_ENV,
     # rules_go assigns tests round-robin in source order; the lane is as slow
@@ -239,6 +242,7 @@ go_test(
         "//internal/testenv",
         "//internal/testutil",
         "//test/acceptance/helpers",
+        "//test/toolhome",
         "@com_github_burntsushi_toml//:toml",
         "@com_github_gastownhall_gascity_packs//:gascity-packs",
         "@com_github_go_sql_driver_mysql//:mysql",
@@ -263,7 +267,7 @@ exports_files(
 #   current  deps.env BD_CURRENT_REF; that commit is the v1.3.2 tag, whose
 #            release binary is @bd_bin_v1_3_2 (scripts/bd_contract_pins_test.go
 #            pins the correspondence)
-BD_CLI_CONTRACT_RUN = "-test.run=^(TestBdBasicCRUD|TestBdDependencies|TestBdDestructive|TestBdWorkflow|TestRunBDIsolatesHOMEFromSharedServerConfig)$$"
+BD_CLI_CONTRACT_RUN = "-test.run=^(TestBdBasicCRUD|TestBdDependencies|TestBdDestructive|TestBdWorkflow|TestRunBDIsolatesHOMEFromSharedServerConfig|TestBdReadsScopePortFileUnderWithheldSessionEnv)$$"
 
 go_variant_test(
     name = "bd_cli_contract_prev_test",

@@ -109,6 +109,11 @@ type cityOptions struct {
 	opTypeMissing bool
 	// realCadences runs controllers without GC_TEST_BACKSTOP_SPEEDUP.
 	realCadences bool
+	// pool runs the city's sessions on real tmux, under a socket root of
+	// the city's own, so the v2 reconciler and its work ladder run (v2
+	// refuses the exec runtime), and adds a pool of one seat that writes
+	// what is typed into it to a file (ladder_lane_test.go).
+	pool bool
 }
 
 // laneCity is one isolated city.
@@ -133,6 +138,9 @@ type laneCity struct {
 	// doltServer is the bd-dolt arm's dolt sql-server, stopped after the
 	// city's controllers.
 	doltServer *doltServer
+	// tmuxRoot is a pool city's TMUX_TMPDIR: its tmux servers' sockets
+	// live there and nowhere else, so the cleanup kills only those.
+	tmuxRoot string
 	// mu guards logs, procs, conv and token.
 	mu sync.Mutex
 	// doltMu serializes the test's own store handles on the Dolt arm:
@@ -172,6 +180,9 @@ func newLaneCityWith(t *testing.T, arm storeArm, activity string, opts cityOptio
 		}
 	}
 	t.Cleanup(c.cleanup)
+	if opts.pool {
+		c.preparePool()
+	}
 	wrapper := filepath.Join(c.dir, ".gc", "fake-runtime.sh")
 	c.writeFile(wrapper, fmt.Sprintf("#!/bin/sh\nexec %q --state %q \"$@\"\n", fake, c.state), 0o755)
 	c.setActivityMode(activity)
@@ -191,6 +202,9 @@ func newLaneCityWith(t *testing.T, arm storeArm, activity string, opts cityOptio
 		"GC_BEADS=file",
 		"GC_DOLT=skip",
 		"DO_NOT_TRACK=1",
+	}
+	if c.tmuxRoot != "" {
+		c.env = append(c.env, "TMUX_TMPDIR="+c.tmuxRoot)
 	}
 	return c
 }
@@ -215,7 +229,12 @@ func (c *laneCity) cityTOML(wrapper string) string {
 	if c.opts.apiPort > 0 {
 		ops += fmt.Sprintf("\n[api]\nport = %d\nbind = \"127.0.0.1\"\n", c.opts.apiPort)
 	}
+	provider := "exec:" + wrapper
 	var extra strings.Builder
+	if c.opts.pool {
+		provider = "tmux"
+		extra.WriteString(c.poolTOML())
+	}
 	for _, name := range c.opts.onDemand {
 		fmt.Fprintf(&extra, "\n[[named_session]]\nname = %q\ntemplate = %q\nmode = \"on_demand\"\n", name, sessionName)
 	}
@@ -226,7 +245,7 @@ name = %q
 provider = "file"
 
 [session]
-provider = "exec:%s"
+provider = %q
 
 %s
 [storage.classes]
@@ -246,7 +265,7 @@ start_command = "sleep 100000"
 [[named_session]]
 template = %q
 mode = "always"
-%s`, filepath.Base(c.root), wrapper, ops, binding, sessionName, sessionName, extra.String())
+%s`, filepath.Base(c.root), provider, ops, binding, sessionName, sessionName, extra.String())
 }
 
 // workspaceRoot is the Dolt arms' beads workspace (beadsworkspace's
@@ -333,6 +352,7 @@ func (c *laneCity) cleanup() {
 	if c.doltServer != nil {
 		c.doltServer.stop()
 	}
+	c.killTmuxServers()
 	if c.t.Failed() {
 		c.dumpLogs()
 	}
@@ -579,6 +599,9 @@ func (c *laneCity) apiUp() bool {
 }
 
 func (c *laneCity) boxUp() bool {
+	if c.opts.pool {
+		return true // no fake runtime: the session's row says it is up
+	}
 	_, err := os.Stat(filepath.Join(c.state, "box."+sessionName))
 	return err == nil
 }

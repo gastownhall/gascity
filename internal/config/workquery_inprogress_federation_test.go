@@ -12,11 +12,19 @@ import (
 //
 // The single-store control below is the other half. Together they say: the
 // reader swap happens on exactly the topologies that need it and nowhere else.
+//
+// The federated read asks for the candidates window, not one row: the merged
+// answer's first row may be gated, and the tier serves the first row of the
+// window its gate passes (TestFederatedInProgressTierServesTheFirstServableRowOfTheWindow).
+// The window excludes the dispatch holds and ends at its first unblocked row, so
+// a row past the one the tier serves is never resolved
+// (TestFederatedInProgressTierServesTheClaimAheadOfAnUnresolvableRow).
 func TestAssignedInProgressTierFederatesOnSplitTopology(t *testing.T) {
 	for _, shellVar := range []string{"id", "cand"} {
 		got := assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true})
-		want := `r=$(gc ready --status in_progress --assignee="$` + shellVar + `" --json --limit=1)` +
-			workQueryReadFailure("gc ready --status in_progress") + `; `
+		want := `r=$(gc ready --status in_progress --assignee="$` + shellVar + `" --exclude-label "hold:mayor" --exclude-label "hold:external" --until-unblocked --json --limit=20)` +
+			workQueryReadFailure("gc ready --status in_progress") + `; ` +
+			servableInProgressRowsScript(1)
 		if got != want {
 			t.Errorf("federated tier-0 for $%s =\n  %q\nwant\n  %q", shellVar, got, want)
 		}

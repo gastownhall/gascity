@@ -5441,7 +5441,9 @@ func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 // without a Dolt port and silently drop GC_DOLT_PORT/BEADS_DOLT_SERVER_PORT,
 // causing `bd --sandbox` to fall back to port 0. The dispatcher process's own
 // environment already carries the correct connection coordinates it was
-// spawned with, so the query string must carry them through explicitly.
+// spawned with, so the query string must carry them through — under the
+// private GC_AMBIENT_DOLT_* names, with a guard that promotes them to the
+// public names only when the per-poll env resolved no target.
 func TestWorkflowServeControlReadyQueryPassesThroughAmbientDoltPort(t *testing.T) {
 	t.Setenv("GC_DOLT_HOST", "127.0.0.1")
 	t.Setenv("GC_DOLT_PORT", "29620")
@@ -5450,10 +5452,10 @@ func TestWorkflowServeControlReadyQueryPassesThroughAmbientDoltPort(t *testing.T
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
 
 	for _, want := range []string{
-		"GC_DOLT_HOST='127.0.0.1'",
-		"BEADS_DOLT_SERVER_HOST='127.0.0.1'",
-		"GC_DOLT_PORT='29620'",
-		"BEADS_DOLT_SERVER_PORT='29620'",
+		"GC_AMBIENT_DOLT_HOST='127.0.0.1'",
+		"GC_AMBIENT_DOLT_PORT='29620'",
+		`export GC_DOLT_HOST="$GC_AMBIENT_DOLT_HOST" BEADS_DOLT_SERVER_HOST="$GC_AMBIENT_DOLT_HOST"`,
+		`export GC_DOLT_PORT="$GC_AMBIENT_DOLT_PORT" BEADS_DOLT_SERVER_PORT="$GC_AMBIENT_DOLT_PORT"`,
 	} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("workflowServeControlReadyQuery missing %q in %q", want, query)
@@ -5469,7 +5471,7 @@ func TestWorkflowServeControlReadyQueryOmitsDoltEnvWhenAmbientUnset(t *testing.T
 
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
 
-	for _, unwanted := range []string{"GC_DOLT_HOST=", "GC_DOLT_PORT=", "BEADS_DOLT_SERVER_HOST=", "BEADS_DOLT_SERVER_PORT="} {
+	for _, unwanted := range []string{"GC_DOLT_HOST=", "GC_DOLT_PORT=", "BEADS_DOLT_SERVER_HOST=", "BEADS_DOLT_SERVER_PORT=", "GC_AMBIENT_DOLT_HOST=", "GC_AMBIENT_DOLT_PORT="} {
 		if strings.Contains(query, unwanted) {
 			t.Fatalf("workflowServeControlReadyQuery should omit %q when ambient env is unset: %q", unwanted, query)
 		}
@@ -5492,10 +5494,13 @@ func TestWorkflowServeControlReadyQueryDoesNotMixDoltNamespaces(t *testing.T) {
 
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
 
-	for _, want := range []string{"GC_DOLT_PORT='29999'", "BEADS_DOLT_SERVER_PORT='29999'"} {
+	for _, want := range []string{"GC_AMBIENT_DOLT_PORT='29999'"} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("workflowServeControlReadyQuery missing %q in %q", want, query)
 		}
+	}
+	if strings.Contains(query, "GC_AMBIENT_DOLT_HOST=") {
+		t.Fatalf("workflowServeControlReadyQuery must not pair an empty GC host with the port: %q", query)
 	}
 	if strings.Contains(query, "9.9.9.9") {
 		t.Fatalf("workflowServeControlReadyQuery must not mix BEADS_DOLT_SERVER_HOST from a different namespace than the resolved port: %q", query)
@@ -5563,6 +5568,77 @@ printf '[]'
 	}
 	if !strings.Contains(string(logData), "GC_DOLT_PORT=29620") || !strings.Contains(string(logData), "BEADS_DOLT_SERVER_PORT=29620") {
 		t.Fatalf("bd did not see the ambient Dolt port despite a stripped outer env; log:\n%s", string(logData))
+	}
+}
+
+// TestWorkflowServeControlReadyQueryPrefersPerPollDoltPortOverAmbient pins the
+// fill-if-empty contract of gastownhall/gascity#1656: the ambient pair the
+// dispatcher process was spawned with is a fallback, never an override. A
+// per-poll env that resolved a live port must win whole (the ambient prefix
+// may carry a port dolt has since left), and only a per-poll env with no port
+// at all -- absent, or explicit-empty the way mergeRuntimeEnv leaves it -- may
+// fall back to the ambient one (the gc-74rxa protection).
+func TestWorkflowServeControlReadyQueryPrefersPerPollDoltPortOverAmbient(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "127.0.0.1")
+	t.Setenv("GC_DOLT_PORT", "29620")
+	unsetTestEnv(t, "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT")
+
+	for _, tc := range []struct {
+		name        string
+		perPollEnv  []string
+		wantPortLog string
+	}{
+		{
+			name:        "per-poll port wins",
+			perPollEnv:  []string{"GC_DOLT_PORT=29621", "BEADS_DOLT_SERVER_PORT=29621"},
+			wantPortLog: "GC_DOLT_PORT=29621 BEADS_DOLT_SERVER_PORT=29621",
+		},
+		{
+			name:        "per-poll explicit-empty falls back",
+			perPollEnv:  []string{"GC_DOLT_PORT=", "BEADS_DOLT_SERVER_PORT="},
+			wantPortLog: "GC_DOLT_PORT=29620 BEADS_DOLT_SERVER_PORT=29620",
+		},
+		{
+			name:        "per-poll absent falls back",
+			perPollEnv:  nil,
+			wantPortLog: "GC_DOLT_PORT=29620 BEADS_DOLT_SERVER_PORT=29620",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			query := workflowServeControlReadyQuery(
+				config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
+				"gascity--control-dispatcher",
+			)
+
+			tmp := t.TempDir()
+			logPath := filepath.Join(tmp, "bd.log")
+			bdPath := filepath.Join(tmp, "bd")
+			if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
+set -eu
+printf 'GC_DOLT_PORT=%s BEADS_DOLT_SERVER_PORT=%s\n' "${GC_DOLT_PORT:-}" "${BEADS_DOLT_SERVER_PORT:-}" >> "$BD_LOG"
+printf '[]'
+`), 0o755); err != nil {
+				t.Fatalf("write fake bd: %v", err)
+			}
+
+			env := append([]string{
+				"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"BD_LOG=" + logPath,
+				"GC_SESSION_NAME=gascity--control-dispatcher",
+				"GC_ALIAS=gascity/control-dispatcher",
+			}, tc.perPollEnv...)
+			if _, err := shellWorkQueryWithEnv(query, t.TempDir(), env); err != nil {
+				t.Fatalf("run workflow serve query: %v", err)
+			}
+
+			logData, readErr := os.ReadFile(logPath)
+			if readErr != nil {
+				t.Fatalf("read bd log: %v", readErr)
+			}
+			if !strings.Contains(string(logData), tc.wantPortLog) {
+				t.Fatalf("bd saw the wrong Dolt port; want %q in log:\n%s", tc.wantPortLog, string(logData))
+			}
+		})
 	}
 }
 

@@ -8694,13 +8694,34 @@ func TestReconcileSessionBeads_CrashDetection(t *testing.T) {
 // template, so a conversation kept under the operator's CLAUDE_CONFIG_DIR,
 // a dir not among the observed roots, survives an unrelated rapid crash.
 func TestReconcileSessionBeads_RapidCrashProbesTheLaunchConfigDir(t *testing.T) {
+	rapidCrashKeepsConfigDirConversation(t, func(tp *TemplateParams, dir string) {
+		tp.OperatorEnv = map[string]string{"CLAUDE_CONFIG_DIR": dir}
+	})
+}
+
+// Kills a rapid crash whose conversation probe ignores a CLAUDE_CONFIG_DIR
+// the launch is only handed (#6677): one passed through from gc's env to
+// tp.Env, not the operator's, is searched too, so a conversation kept there
+// survives an unrelated rapid crash.
+func TestReconcileSessionBeads_RapidCrashProbesThePassedThroughConfigDir(t *testing.T) {
+	rapidCrashKeepsConfigDirConversation(t, func(tp *TemplateParams, dir string) {
+		tp.Env = map[string]string{"CLAUDE_CONFIG_DIR": dir}
+	})
+}
+
+// rapidCrashKeepsConfigDirConversation rapidly crashes a configured named
+// claude row whose k-1 transcript lives only under a config dir that set
+// names on the row's template, and requires the crash recorded with the
+// conversation kept.
+func rapidCrashKeepsConfigDirConversation(t *testing.T, set func(tp *TemplateParams, dir string)) {
+	t.Helper()
 	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", false)
 	workDir := t.TempDir()
 	root := observedTranscript(t, workDir) // k-1's transcript, under <dir>/projects
 	tp := env.desiredState["worker"]
-	tp.OperatorEnv = map[string]string{"CLAUDE_CONFIG_DIR": filepath.Dir(root)}
+	set(&tp, filepath.Dir(root))
 	env.desiredState["worker"] = tp
 	session := env.createSessionBead("worker", "worker")
 	env.setSessionMetadata(&session, map[string]string{

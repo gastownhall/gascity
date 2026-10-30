@@ -7,7 +7,10 @@ exports_files(glob(
 
 go_library(
     name = "runtimetest",
-    srcs = ["conformance.go"],
+    srcs = [
+        "conformance.go",
+        "dolt_env.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/runtimetest",
     visibility = ["//:__subpackages__"],
     deps = ["//internal/runtime"],

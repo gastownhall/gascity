@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -24,7 +25,9 @@ const opsRecordingStaleAfter = 2 * opSweepInterval
 // ops gates that are on ([ops] content, control, lifecycle): it probes
 // opjournal.NewStore over the city's sessions-class store. With a gate on,
 // and with every gate off once that store holds an op row, it also warns
-// about expired legacy ops the controller's sweeper has left open.
+// about expired legacy ops the controller's sweeper has left open. Whatever
+// the gates, it warns about every bd scope holding op rows that the core
+// reaper does not purge or prune (reaper_op_rows.go).
 type opsRecordingDoctorCheck struct {
 	cfg        *config.City
 	flags      rollout.Flags
@@ -34,9 +37,15 @@ type opsRecordingDoctorCheck struct {
 	// sessions routes the city store to its sessions class.
 	sessions func(beads.Store) beads.Store
 	clk      clock.Clock
+	// reaperScopes lists the bd scopes the core reaper visits that doctor
+	// may read; nil checks none.
+	reaperScopes func() []reaperOpRowsScope
 }
 
-func newOpsRecordingDoctorCheck(cityPath string, cfg *config.City, flags rollout.Flags, resolveErr error) *opsRecordingDoctorCheck {
+// newOpsRecordingDoctorCheck builds the check. storeSkipped is the doctor
+// store gate's answer to whether doctor must not read a scope's store; the
+// reaper's op-row probe leaves such a scope out (nil skips none).
+func newOpsRecordingDoctorCheck(cityPath string, cfg *config.City, flags rollout.Flags, resolveErr error, storeSkipped func(scopeRoot string) bool) *opsRecordingDoctorCheck {
 	return &opsRecordingDoctorCheck{
 		cfg:        cfg,
 		flags:      flags,
@@ -44,6 +53,9 @@ func newOpsRecordingDoctorCheck(cityPath string, cfg *config.City, flags rollout
 		open:       func() (beads.Store, error) { return openCityStoreAtWithConfig(cityPath, cfg) },
 		sessions:   func(store beads.Store) beads.Store { return cliSessionStore(store, cfg, cityPath) },
 		clk:        clock.Real{},
+		reaperScopes: func() []reaperOpRowsScope {
+			return reaperOpRowsScopes(cityPath, cfg, storeSkipped)
+		},
 	}
 }
 
@@ -60,13 +72,27 @@ func (*opsRecordingDoctorCheck) WarmupEligible() bool { return false }
 func (*opsRecordingDoctorCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 // Run implements doctor.Check. With a gate on: an Error (any gate require)
-// or a Warning (auto only) when the store cannot record ops, else OK. With
+// or a Warning (auto only) when the store cannot record ops, else OK; gates
+// that are auto only by their builtin default treat a store that cannot
+// record ops at all as off (defaultCannotRecord), and record nothing on a
+// sessions store that is not SQLite-backed (defaultNotRecorded). With
 // every gate off: OK while the sessions store holds no submitted op row
 // (opjournal.HasSubmittedOps), and a Warning when that cannot be read. Then,
 // for either, a Warning for expired legacy ops left open or a scan for them
 // that stopped at its page cap: with every gate off the sweeper stops once a
-// pass leaves no work, so the ops it leaves are reported here.
+// pass leaves no work, so the ops it leaves are reported here. Last, a
+// Warning for every bd scope whose op rows hold the core reaper's purge and
+// prune back.
 func (c *opsRecordingDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+	r := c.runRecording()
+	if c.reaperScopes != nil {
+		addReaperOpRowsWarning(r, reaperOpRowsHeldScopes(c.reaperScopes()))
+	}
+	return r
+}
+
+// runRecording is Run without the reaper's op-row scopes.
+func (c *opsRecordingDoctorCheck) runRecording() *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name(), Status: doctor.StatusOK}
 	if c.resolveErr != nil {
 		r.Message = "ops recording not checked: the rollout gates did not resolve (see the rollout checks)"
@@ -96,12 +122,21 @@ func (c *opsRecordingDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 			return r
 		}
 	}
+	if gates != "" && opsGatesBuiltinDefaultOnly(c.flags) {
+		if err := opjournal.CheckRecordsByDefault(sessions); err != nil {
+			return c.defaultNotRecorded(r, sessions, err)
+		}
+	}
 	st, err := opjournal.NewStore(sessions, c.clk)
 	if err != nil {
 		if gates == "" {
 			return offCannotRead(r, err)
 		}
-		return c.cannotRecord(r, gates, require, legacyop.DegradeReason(err), err)
+		reason := legacyop.DegradeReason(err)
+		if legacyop.CannotRecord(reason) && opsGatesBuiltinDefaultOnly(c.flags) {
+			return defaultCannotRecord(r, sessions, reason, err)
+		}
+		return c.cannotRecord(r, gates, require, reason, err)
 	}
 	return c.scanExpired(r, st, gates)
 }
@@ -116,6 +151,12 @@ func (c *opsRecordingDoctorCheck) scanExpired(r *doctor.CheckResult, st *opjourn
 		state = "ops recording on (" + gates + ")"
 		capable = state + ": the sessions store can record ops"
 	}
+	return c.scanExpiredAs(r, st, gates, state, capable)
+}
+
+// scanExpiredAs is scanExpired reporting state, and capable when nothing is
+// wrong.
+func (c *opsRecordingDoctorCheck) scanExpiredAs(r *doctor.CheckResult, st *opjournal.Store, gates, state, capable string) *doctor.CheckResult {
 	scan, err := st.ListExpiredLegacy(c.clk.Now().Add(-opsRecordingStaleAfter), opSweepLimit)
 	if err != nil {
 		r.Status = doctor.StatusWarning
@@ -177,14 +218,7 @@ func staleOpDetails(r *doctor.CheckResult, stale []opjournal.Op) (oldest time.Ti
 // gatesOn lists the gates that are not off, as key=mode, and whether any is
 // require.
 func (c *opsRecordingDoctorCheck) gatesOn() (on []string, require bool) {
-	for _, g := range []struct {
-		key  string
-		mode rollout.Mode
-	}{
-		{rollout.KeyOpsContent, c.flags.OpsContent()},
-		{rollout.KeyOpsControl, c.flags.OpsControl()},
-		{rollout.KeyOpsLifecycle, c.flags.OpsLifecycle()},
-	} {
+	for _, g := range opsGateModes(c.flags) {
 		if g.mode == rollout.Auto || g.mode == rollout.Require {
 			on = append(on, g.key+"="+string(g.mode))
 			require = require || g.mode == rollout.Require
@@ -209,6 +243,80 @@ func (c *opsRecordingDoctorCheck) cannotRecord(r *doctor.CheckResult, gates stri
 	return r
 }
 
+// defaultCannotRecord reports a sessions store that cannot record ops under
+// gates that are auto only by their builtin default, which treat it as off:
+// OK while the store holds no submitted op row, as with every gate off, and a
+// Warning when it holds one, since those ops cannot be checked or swept.
+func defaultCannotRecord(r *doctor.CheckResult, sessions beads.SessionStore, reason string, err error) *doctor.CheckResult {
+	has, herr := opjournal.HasSubmittedOps(sessions)
+	if herr != nil {
+		return offCannotRead(r, herr)
+	}
+	state := fmt.Sprintf("the ops gates are auto by default, but the sessions store cannot record ops (%s), so requests run unrecorded", reason)
+	if !has {
+		r.Message = state
+		return r
+	}
+	r.Status = doctor.StatusWarning
+	r.Message = state + "; it holds open op rows that cannot be checked or swept"
+	r.Details = append(r.Details, err.Error())
+	r.FixHint = opsRecordingRemedy(reason, false)
+	return r
+}
+
+// defaultNotRecorded reports a sessions store the builtin auto default does
+// not record on (err is the *opjournal.NotRecordedByDefaultError): OK, as
+// with every gate off, so the store is only checked for the expired legacy
+// ops an earlier explicit gate may have left, which the sweeper still closes.
+// A store holding none is told whether an explicit gate would record there
+// (explicitGateHint).
+func (c *opsRecordingDoctorCheck) defaultNotRecorded(r *doctor.CheckResult, sessions beads.SessionStore, err error) *doctor.CheckResult {
+	where := "a sessions store that is not SQLite-backed"
+	var notDefault *opjournal.NotRecordedByDefaultError
+	if errors.As(err, &notDefault) {
+		if notDefault.Backend.DoltServed {
+			where = "a Dolt-served sessions store"
+		} else {
+			where += " (" + notDefault.Backend.Kind + ")"
+		}
+	}
+	state := "ops recording: auto (default) records nothing on " + where
+	has, herr := opjournal.HasSubmittedOps(sessions)
+	if herr != nil {
+		return offCannotRead(r, herr)
+	}
+	if !has {
+		r.Message = state + "; " + c.explicitGateHint(sessions)
+		return r
+	}
+	st, oerr := opjournal.NewStore(sessions, c.clk)
+	if oerr != nil {
+		reason := legacyop.DegradeReason(oerr)
+		if legacyop.CannotRecord(reason) {
+			return defaultCannotRecord(r, sessions, reason, oerr)
+		}
+		return offCannotRead(r, oerr)
+	}
+	return c.scanExpiredAs(r, st, "", state, state)
+}
+
+// explicitGateHint says whether an explicit [ops] gate would record over
+// sessions, a store the builtin default records nothing on: it opens the op
+// store as such a gate would, capability probe included, so a store that
+// cannot record ops at all (a released bd, a store with no id prefix) is not
+// offered an opt-in that would only run its requests unrecorded, or refuse
+// them under require.
+func (c *opsRecordingDoctorCheck) explicitGateHint(sessions beads.SessionStore) string {
+	_, err := opjournal.NewStore(sessions, c.clk)
+	if err == nil {
+		return "set the [ops] gates to auto or require to record ops here"
+	}
+	if reason := legacyop.DegradeReason(err); legacyop.CannotRecord(reason) {
+		return fmt.Sprintf("the store cannot record ops (%s), so an explicit [ops] gate would not record here either", reason)
+	}
+	return "an [ops] gate set to auto or require records here if the store can record ops"
+}
+
 // offCannotRead reports, with every gate off, a sessions store that could
 // not be checked for expired legacy ops: a Warning, as nothing is refused,
 // but the ops the sweeper may have left open go unseen.
@@ -230,7 +338,7 @@ func opsRecordingRemedy(reason string, gatesOn bool) string {
 	}
 	switch reason {
 	case legacyop.DegradeConditionalWritesUnsupported:
-		return "use a sessions store with conditional writes (for example a bd that supports --if-revision)" + orOff
+		return "use a sessions store with conditional writes (a native store; no released bd supports --if-revision yet)" + orOff
 	case legacyop.DegradeNoNamespace:
 		return "configure an id prefix for the sessions store" + orOff
 	default:

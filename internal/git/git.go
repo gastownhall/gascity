@@ -3,12 +3,14 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Worktree represents a single git worktree entry.
@@ -67,15 +69,37 @@ func (g *Git) CurrentBranchCtx(ctx context.Context) (string, error) {
 // clone (e.g., rigs added before gc rig add auto-detected the default
 // branch). See gc-8cowk / gc-ao9t.
 func (g *Git) DefaultBranch() (string, error) {
-	if out, err := g.run("symbolic-ref", "refs/remotes/origin/HEAD"); err == nil {
+	return g.DefaultBranchCtx(context.Background())
+}
+
+// DefaultBranchCtx is DefaultBranch bounded by ctx. An ordinary non-zero git
+// exit keeps the candidate chain going, and the chain still ends at "main".
+// A probe that ctx cut short, or whose output pipe was still held after git
+// exited, returns ("", err) with err wrapping ctx.Err() or exec.ErrWaitDelay:
+// "main" would be a guess presented as an answer, so the caller decides what
+// an unanswered probe means. A ctx that is already done spawns nothing.
+func (g *Git) DefaultBranchCtx(ctx context.Context) (string, error) {
+	out, err := g.runCtx(ctx, "symbolic-ref", "refs/remotes/origin/HEAD")
+	if err == nil {
 		ref := strings.TrimSpace(out)
 		if branch := strings.TrimPrefix(ref, "refs/remotes/origin/"); branch != "" {
 			return branch, nil
 		}
+	} else if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", fmt.Errorf("probing default branch: %w", ctxErr)
+	} else if errors.Is(err, exec.ErrWaitDelay) {
+		return "", fmt.Errorf("probing default branch: %w", err)
 	}
 	for _, candidate := range []string{"main", "master"} {
-		if _, err := g.run("show-ref", "--verify", "--quiet", "refs/remotes/origin/"+candidate); err == nil {
+		_, err := g.runCtx(ctx, "show-ref", "--verify", "--quiet", "refs/remotes/origin/"+candidate)
+		if err == nil {
 			return candidate, nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", fmt.Errorf("probing default branch: %w", ctxErr)
+		}
+		if errors.Is(err, exec.ErrWaitDelay) {
+			return "", fmt.Errorf("probing default branch: %w", err)
 		}
 	}
 	return "main", nil
@@ -493,14 +517,28 @@ func (g *Git) run(args ...string) (string, error) {
 	return g.runCtx(context.Background(), args...)
 }
 
+// gitWaitDelay bounds how long a call whose ctx carries a deadline waits for
+// output pipes after the deadline kills git: a descendant that inherited them
+// (a credential helper, a hook) would otherwise hold the call open for as
+// long as the descendant lives.
+const gitWaitDelay = 2 * time.Second
+
 // runCtx executes a git command with a context for cancellation/timeout.
+// A failure on a ctx that is done also wraps ctx.Err(), so callers can tell a
+// missed deadline from an ordinary non-zero exit.
 func (g *Git) runCtx(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = g.workDir
+	if _, ok := ctx.Deadline(); ok {
+		cmd.WaitDelay = gitWaitDelay
+	}
 	// Build clean env: inherit everything except git-specific vars.
 	cmd.Env = sanitizeGitEnv(os.Environ())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+			return "", fmt.Errorf("git %s: %s: %w: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err, ctxErr)
+		}
 		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 	}
 	return string(out), nil

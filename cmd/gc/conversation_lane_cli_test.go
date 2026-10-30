@@ -134,13 +134,11 @@ func TestCLILaneNudgePolicy(t *testing.T) {
 // With message listed, a nudge is one lane op: no legacy op, no queue item,
 // whatever ops.content says.
 func TestSessionNudgeLaneWritesOneLaneOp(t *testing.T) {
-	for _, gate := range []string{"", "auto", "require"} {
+	for _, gate := range []string{"off", "auto", "require"} {
 		for _, mode := range []nudgeDeliveryMode{nudgeDeliveryWaitIdle, nudgeDeliveryImmediate, nudgeDeliveryQueue} {
 			t.Run(gate+"/"+string(mode), func(t *testing.T) {
 				c := newCLILaneCity(t)
-				if gate != "" {
-					c.env["GC_OPS_CONTENT"] = gate
-				}
+				c.env["GC_OPS_CONTENT"] = gate
 				code, stdout, stderr := c.nudge(mode, "", true, cliLaneTestMessage)
 				if code != 0 {
 					t.Fatalf("nudge = %d; stderr=%s", code, stderr)
@@ -187,21 +185,19 @@ func TestSessionNudgeLaneWritesOneLaneOp(t *testing.T) {
 // With the list empty, the nudge takes OJ-5's path: a legacy op under auto,
 // none with the gate off, and no lane op either way.
 func TestSessionNudgeListEmptyKeepsOJ5Path(t *testing.T) {
-	for _, gate := range []string{"", "auto"} {
+	for _, gate := range []string{"off", "auto"} {
 		t.Run("gate="+gate, func(t *testing.T) {
 			c := newCLILaneCity(t)
 			c.cfg.Ops.Authoritative = nil
 			c.target = resolveNudgeTargetFromSessionInfo(c.dir, c.cfg, c.targetInfo(t))
-			if gate != "" {
-				c.env["GC_OPS_CONTENT"] = gate
-			}
+			c.env["GC_OPS_CONTENT"] = gate
 			code, stdout, stderr := c.nudge(nudgeDeliveryImmediate, "", false, cliLaneTestMessage)
 			if code != 0 || stdout != "Nudged "+c.target.agentKey()+"\n" {
 				t.Fatalf("nudge = %d, stdout %q; stderr=%s", code, stdout, stderr)
 			}
 			ops := c.ops(t)
 			switch gate {
-			case "":
+			case "off":
 				if len(ops) != 0 {
 					t.Fatalf("op rows %+v, want none with the gate off", ops)
 				}
@@ -1026,7 +1022,7 @@ func TestCLILaneQueuedNote(t *testing.T) {
 	}{
 		{name: "busy", op: ifNeeded, res: wait(opjournal.WaitBusy), want: " (the session is mid-turn; the controller delivers it at the next idle boundary)"},
 		{name: "boundary unknown", op: ifNeeded, res: wait(opjournal.WaitBoundaryUnknown), want: " (the session is mid-turn; the controller delivers it at the next idle boundary)"},
-		{name: "pending interaction", op: ifNeeded, res: wait(opjournal.WaitPendingInteraction), want: " (the session is waiting on a permission prompt; the controller delivers it after the prompt is answered)"},
+		{name: "pending interaction", op: ifNeeded, res: wait(opjournal.WaitPendingInteraction), want: " (the session is waiting on a permission prompt or a question; the controller delivers it after that is answered)"},
 		{name: "not running, if_needed", op: ifNeeded, res: wait(opjournal.WaitNotRunning), want: " (the session is not running; the controller wakes it to deliver the nudge)"},
 		{name: "dormant, if_needed", op: ifNeeded, res: wait(opjournal.WaitDormant), want: " (the session is not running; the controller wakes it to deliver the nudge)"},
 		{name: "not running, live_only", op: liveOnly, res: wait(opjournal.WaitNotRunning), want: " (the session is not running; the nudge is delivered the next time it runs)"},
@@ -1057,7 +1053,7 @@ func TestSessionNudgeLaneQueuedNotesFromThePass(t *testing.T) {
 		c := newCLILaneCity(t)
 		c.sp.SetPendingInteraction(c.name, &runtime.PendingInteraction{RequestID: "req-1", Kind: "approval"})
 		code, stdout, stderr := c.nudge(nudgeDeliveryWaitIdle, "", false, cliLaneTestMessage)
-		if code != 0 || !strings.Contains(stdout, "(the session is waiting on a permission prompt;") {
+		if code != 0 || !strings.Contains(stdout, "(the session is waiting on a permission prompt or a question;") {
 			t.Fatalf("nudge = %d, stdout %q; stderr %q", code, stdout, stderr)
 		}
 	})

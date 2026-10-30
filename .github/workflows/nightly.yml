@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  DOLT_VERSION: "2.2.0"
+  DOLT_VERSION: "2.6.0"
   BD_VERSION: "v1.3.2"
 
 jobs:

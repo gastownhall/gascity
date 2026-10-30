@@ -77,6 +77,7 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/lanesubmit"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -374,6 +375,11 @@ type serverOps struct {
 	content   *legacyop.Recorder
 	control   *legacyop.Recorder
 	lifecycle *legacyop.Recorder
+	// laneAdopt admits, for the lane, an open op of OJ-4's own that a
+	// same-key request finds while its kind is listed (adoptLegacyRespond):
+	// OJ-4's admission over the city's in-flight registry, whatever the
+	// kind's gate says, since no ops.* gate governs a listed kind.
+	laneAdopt *legacyop.Recorder
 	clk       clock.Clock
 	// openStore opens the op store over a sessions-class store; tests
 	// substitute it.
@@ -419,25 +425,45 @@ func newServerOps(s *Server, city *cityOps) *serverOps {
 	o.content = o.newRecorder(s, rollout.KeyOpsContent, s.bootFlags.OpsContent())
 	o.control = o.newRecorder(s, rollout.KeyOpsControl, s.bootFlags.OpsControl())
 	o.lifecycle = o.newRecorder(s, rollout.KeyOpsLifecycle, s.bootFlags.OpsLifecycle())
+	o.laneAdopt = &legacyop.Recorder{
+		Mode:        gate.Require,
+		Executor:    legacyop.ExecutorAPI,
+		Open:        s.openOpStore,
+		Inflight:    city.inflight,
+		Clock:       o.clk,
+		Done:        city.done,
+		CrashPoints: o.crashPoints,
+	}
 	return o
 }
 
 // newRecorder is the API's recorder for the ops gate gateKey under mode: it
 // records through s's op store and its city's in-flight registry, and reports
-// degrades and health to its city's reporter under gateKey.
+// degrades and health to its city's reporter under gateKey. A gate that is
+// auto only by its builtin default treats a store that cannot record ops at
+// all as off (legacyop.Recorder.QuietCannotRecord): that degrade raises no
+// event and logs at debug. Such a gate also leaves a sessions store that is
+// not SQLite-backed unopened (openDefaultOpStore), so it records nothing on a
+// Dolt-served store unless the gate is set explicitly.
 func (o *serverOps) newRecorder(s *Server, gateKey string, mode gate.Mode) *legacyop.Recorder {
 	city := o.city
+	builtinAuto := s.bootFlags.BuiltinAuto(gateKey)
+	open := s.openOpStore
+	if builtinAuto {
+		open = s.openDefaultOpStore
+	}
 	return &legacyop.Recorder{
 		Mode:     mode,
 		Executor: legacyop.ExecutorAPI,
-		Open:     s.openOpStore,
+		Open:     open,
 		Inflight: city.inflight,
 		Clock:    o.clk,
 		Degraded: func(d legacyop.Degrade) { city.degraded.Report(gateKey, d) },
 		Healthy:  func(stage string) { o.healthyGate(gateKey, stage) },
 		Done:     city.done,
 
-		CrashPoints: o.crashPoints,
+		QuietCannotRecord: builtinAuto,
+		CrashPoints:       o.crashPoints,
 	}
 }
 
@@ -485,6 +511,18 @@ func (s *Server) liveServer() *Server {
 func (s *Server) openOpStore() (*opjournal.Store, error) {
 	live := s.liveServer()
 	return live.ops.store(live.state.SessionsBeadStore())
+}
+
+// openDefaultOpStore is openOpStore for a gate that is auto only by its
+// builtin default: it answers *opjournal.NotRecordedByDefaultError, without
+// opening anything, when the live sessions store is not SQLite-backed.
+func (s *Server) openDefaultOpStore() (*opjournal.Store, error) {
+	live := s.liveServer()
+	over := live.state.SessionsBeadStore()
+	if err := opjournal.CheckRecordsByDefault(over); err != nil {
+		return nil, err
+	}
+	return live.ops.store(over)
 }
 
 // healthy tells the degrade reporter that stages of the content gate just
@@ -544,6 +582,14 @@ type messageOpRequest struct {
 	key    string
 	text   string
 	intent session.SubmitIntent
+	// resume is the request's resume: true.
+	resume bool
+	// lane is whether the city's lane host executes message for this
+	// request, read once (withMessageIdempotency): it is proposed as a lane
+	// op (acceptMessageLane), checked for a pending interaction only when
+	// no op under its key answers it, and the Idempotency-Key LRU keeps no
+	// answer of it.
+	lane bool
 	// operation is the endpoint's request operation, the one its terminal
 	// events name.
 	operation string
@@ -627,19 +673,26 @@ func (s *Server) replayAnswer(adm *legacyop.Admission, operation, cursor string)
 		}
 		return &answer.body, nil
 	}
+	return s.storedReplayAnswer(adm.Op, adm.Key, operation, cursor)
+}
+
+// storedReplayAnswer is the body a same-key retry of finished message op op,
+// recorded under key, is answered with: replayed, its request_id the op id,
+// with its terminal event re-emitted for operation's endpoint.
+func (s *Server) storedReplayAnswer(op opjournal.Op, key, operation, cursor string) (*asyncAcceptedBody, error) {
 	body := asyncAcceptedBody{
 		Status:         "accepted",
-		RequestID:      adm.Op.ID,
+		RequestID:      op.ID,
 		EventCursor:    cursor,
-		IdempotencyKey: adm.Key,
+		IdempotencyKey: key,
 		Replayed:       true,
-		Op:             conversationOpWire(adm.Op),
+		Op:             conversationOpWire(op),
 	}
 	// The replay's re-emitted event is a terminal event too: busy while one
 	// of the op's is kept, without keeping another, so the 202 has its event
 	// after its cursor, and only one: a kept one of its type for this
 	// endpoint, recorded now, is that event (cityOps.emitReplay).
-	if s.emitMessageOpProjection(operation, adm.Op) {
+	if s.emitMessageOpProjection(operation, op) {
 		return nil, requestInFlight()
 	}
 	return &body, nil
@@ -648,13 +701,24 @@ func (s *Server) replayAnswer(adm *legacyop.Admission, operation, cursor string)
 // withMessageIdempotency is withIdempotency for /submit and /messages: a
 // retry the LRU answers from its cached 202 is answered busy while that
 // request's terminal event is kept, as replayAnswer answers one the LRU
-// misses, so the 202 has its event after its cursor.
-func (s *Server) withMessageIdempotency(path, key string, body any, accept func() (asyncAcceptedBody, error)) (asyncAcceptedBody, error) {
+// misses, so the 202 has its event after its cursor. It reads once whether
+// the city's lane host executes message, and tells accept (lane): the LRU
+// keeps no answer of a request the lane accepts (withIdempotencyKeeping),
+// so a same-key retry whose target still resolves reaches the op under the
+// key (acceptMessageLane), which answers it whatever the session waits on,
+// runs a resend's resume: true and answers follow_up and default as one
+// request, where a kept 202, its body hashed whole, would refuse such a
+// resend 422 or replay it without its resume.
+// The LRU still holds the key while the request runs, so a concurrent
+// same-key request is 409 in_flight, and still replays an answer it kept
+// before the lane host ran, which the op journal may not have recorded.
+func (s *Server) withMessageIdempotency(path, key string, body any, accept func(lane bool) (asyncAcceptedBody, error)) (asyncAcceptedBody, error) {
+	lane := s.laneExecutes(opjournal.KindMessage)
 	cached := true
-	v, err := withIdempotency(s.idem, path, key, body, func() (asyncAcceptedBody, error) {
+	v, err := withIdempotencyKeeping(s.idem, path, key, body, func() (asyncAcceptedBody, error) {
 		cached = false
-		return accept()
-	})
+		return accept(lane)
+	}, func(asyncAcceptedBody) bool { return !lane })
 	if err != nil || !cached || s.ops == nil {
 		return v, err
 	}
@@ -670,28 +734,22 @@ func requestInFlight() error {
 	return apierr.IdempotencyInFlight.Msg("in_flight: request with this Idempotency-Key is already in progress")
 }
 
-// MessageOpPolicy is the message policy of a submit intent (DES-O0API §3.1);
-// /messages is the default intent. gc session submit's local path records its
-// op under the same policy, so a request the API recorded and its CLI
-// fallback derive one op digest.
+// MessageOpPolicy is the message policy of a submit intent on the legacy
+// paths (lanesubmit.LegacyPolicy): the API's and its tests' name for it.
 func MessageOpPolicy(intent session.SubmitIntent) opjournal.Policy {
-	when := opjournal.WhenBoundary
-	switch intent {
-	case session.SubmitIntentFollowUp:
-		when = opjournal.WhenAfterTurn
-	case session.SubmitIntentInterruptNow:
-		when = opjournal.WhenInterrupt
-	}
-	return opjournal.Policy{Message: opjournal.MessagePolicy{When: when, Wake: opjournal.WakeIfNeeded, Role: opjournal.RolePrompt}}
+	return lanesubmit.LegacyPolicy(intent)
 }
 
 // submitIntentForWhen is the submit intent a recorded message policy came
-// from, for a replay's projection.
+// from, for a replay's projection and a lane result's: MessageOpPolicy's and
+// LaneMessageOpPolicy's alike, except a lane follow_up, which the lane
+// records at the boundary as it records the default, so its result and its
+// replay say default.
 func submitIntentForWhen(when opjournal.When) session.SubmitIntent {
 	switch when {
 	case opjournal.WhenAfterTurn:
 		return session.SubmitIntentFollowUp
-	case opjournal.WhenInterrupt:
+	case opjournal.WhenInterrupt, opjournal.WhenNow:
 		return session.SubmitIntentInterruptNow
 	default:
 		return session.SubmitIntentDefault
@@ -711,7 +769,8 @@ func opAdmitError(err error, key string) error {
 		return apierr.OpJournalUnavailable.Msg("op_journal_unavailable: the operation journal cannot record this request; nothing was done: " + err.Error())
 	case errors.Is(err, opjournal.ErrPayloadTooLarge):
 		return apierr.PayloadTooLarge.Msg(fmt.Sprintf("payload_too_large: the request exceeds the operation journal's %d-byte limit", opjournal.MaxInlinePayload))
-	case errors.Is(err, opjournal.ErrInvalidRequest) && key != "" && opjournal.ValidateClientKey(key) != nil:
+	case errors.Is(err, legacyop.ErrReservedKey),
+		errors.Is(err, opjournal.ErrInvalidRequest) && key != "" && opjournal.ValidateClientKey(key) != nil:
 		return apierr.InvalidIdempotencyKey.Msg("invalid_idempotency_key: " + err.Error())
 	case errors.Is(err, opjournal.ErrInvalidRequest):
 		return apierr.ValidationFailed.Msg("invalid_request: " + err.Error())

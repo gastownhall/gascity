@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -85,6 +87,50 @@ func TestWatchResumeAcrossRotationReplaysArchive(t *testing.T) {
 		if e.Seq <= 2 {
 			t.Fatalf("event %d seq = %d, want > 2", i, e.Seq)
 		}
+	}
+}
+
+// TestWatchResumeReplaysAnUnanchoredRotation covers a rotation that stopped
+// after its rename: its window sits only in the rotating-* file, and the
+// active log is empty (the anchor write failed) or absent (the reopen failed).
+// A watcher resuming from a seq inside that window must replay the rest of it
+// before the next event, although the active log holds nothing yet.
+func TestWatchResumeReplaysAnUnanchoredRotation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		fresh bool
+	}{
+		{name: "empty active log", fresh: true},
+		{name: "no active log"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "events.jsonl")
+			seedEventLog(t, path, 3)
+			renameWithoutAnchor(t, path, 1, 3, tc.fresh)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			w, err := NewReadOnlyFileProvider(path, io.Discard).Watch(ctx, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer w.Close() //nolint:errcheck // test cleanup
+			if got := seqsOf(drainWatcher(t, w, 2)); !reflect.DeepEqual(got, []uint64{2, 3}) {
+				t.Fatalf("resumed watcher delivered seqs %v, want the rest of the rotated window [2 3]", got)
+			}
+
+			next, err := NewFileRecorder(path, io.Discard, WithMaxSize(0), WithoutStartupSweep())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer next.Close() //nolint:errcheck // test cleanup
+			if err := next.RecordAck(Event{Type: BeadCreated, Actor: "test", Subject: "next"}); err != nil {
+				t.Fatal(err)
+			}
+			if got := drainWatcher(t, w, 1); got[0].Seq != 4 || got[0].Subject != "next" {
+				t.Fatalf("watcher delivered %+v after the window, want the next event at seq 4", got[0])
+			}
+		})
 	}
 }
 

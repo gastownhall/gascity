@@ -12,55 +12,117 @@ import (
 // OpsConfig holds the operation-journal rollout gates, which record the
 // requests a session receives as ops beside their unchanged legacy execution,
 // and Authoritative, the conversation lane's switch, which is not a gate.
-// Each gate takes "off" (no op row; today's behavior), "auto" (shadow: the
-// request is recorded where the store can record it and runs unrecorded with a
-// loud degrade where it cannot) or "require" (durable: a request whose op
-// cannot be recorded is refused before any effect). Any other value fails
-// config load. A GC_OPS_CONTENT, GC_OPS_CONTROL or GC_OPS_LIFECYCLE env
-// override takes precedence; read the effective values through
-// internal/rollout.Flags, never these fields directly. The Go field names end
-// in Mode because cmd/gc's prompt-boundary lint forbids a gate's config field
-// name in prompt-rendering code, and a bare Content or Lifecycle would collide
-// with unrelated identifiers there.
+// Each gate takes "off" (no op row; the legacy behavior), "auto" (shadow: the
+// request is recorded where the store can record it and runs unrecorded where
+// it cannot, with a loud degrade when auto is set; the default for all three
+// gates when unset) or "require" (durable: a request whose op cannot be
+// recorded is refused before any effect; opt-in). Any other value fails
+// config load. Left unset, auto records only over a SQLite sessions store and
+// runs every request unrecorded, quietly, over any other, a Dolt-served one
+// included; an auto set in [ops] or GC_OPS_* records over any store that can.
+// A store served through bd can record once that bd's update, close, assign
+// and delete accept --if-revision, which no released bd does yet. A GC_OPS_CONTENT,
+// GC_OPS_CONTROL or GC_OPS_LIFECYCLE env override takes precedence; read the
+// effective values through internal/rollout.Flags, never these fields
+// directly. The Go field names end in Mode because cmd/gc's prompt-boundary
+// lint forbids a gate's config field name in prompt-rendering code, and a
+// bare Content or Lifecycle would collide with unrelated identifiers there.
 type OpsConfig struct {
 	// Records message deliveries (session submit and messages, nudge, mail
-	// notify) as message ops. "off" is the shipped default for all three
-	// gates. "auto" records where the store can and degrades loudly where it
-	// cannot. "require" refuses a request it cannot record before any effect.
-	// Experimental: each mode takes effect as each request surface gains op
-	// recording. A change takes effect at the next process start.
-	ContentMode string `toml:"content,omitempty" jsonschema:"default=off,enum=off,enum=auto,enum=require"`
-	// Records interrupt (stop) and respond requests as ops. "off" is the
-	// shipped default. "auto" records where the store can and degrades loudly
-	// where it cannot. "require" refuses a request it cannot record before any
-	// effect. Experimental: each mode takes effect as each request surface
-	// gains op recording. A change takes effect at the next process start.
-	ControlMode string `toml:"control,omitempty" jsonschema:"default=off,enum=off,enum=auto,enum=require"`
+	// notify) as message ops. "auto" is the default for all three gates.
+	// Left unset, it records only over a SQLite sessions store and runs
+	// unrecorded, quietly, over any other (a Dolt-served one included). Set
+	// to "auto", it records where the store can and warns where it cannot; a
+	// store served through bd can record once that bd supports --if-revision,
+	// which no released bd does yet. "off" records nothing. "require" (opt-in) refuses a request it
+	// cannot record before any effect. A change takes effect at the next
+	// process start. With message listed in authoritative, a surface that
+	// proposes lane message ops (the API's submit and messages, a provider
+	// session create's initial message, extmsg member notices, gc session
+	// nudge, gc session submit, planner notices) is not governed by this
+	// gate.
+	ContentMode string `toml:"content,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
+	// Records interrupt (stop) and respond requests as ops. "auto" is the
+	// default. Left unset, it records only over a SQLite sessions store and
+	// runs unrecorded, quietly, over any other (a Dolt-served one included).
+	// Set to "auto", it records where the store can and warns where it
+	// cannot; a store served through bd can record once that bd supports
+	// --if-revision, which no released bd does yet. "off" records nothing. "require" (opt-in)
+	// refuses a request it cannot record before any effect. A change takes
+	// effect at the next process start. A kind [ops] authoritative lists is
+	// a lane op instead, which this gate does not govern.
+	ControlMode string `toml:"control,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
 	// Records wake, suspend, reset (restart), kill and close requests as ops.
-	// "off" is the shipped default. "auto" records where the store can and
-	// degrades loudly where it cannot. "require" refuses a request it cannot
-	// record before any effect. Experimental: each mode takes effect as each
-	// request surface gains op recording. A change takes effect at the next
-	// process start.
-	LifecycleMode string `toml:"lifecycle,omitempty" jsonschema:"default=off,enum=off,enum=auto,enum=require"`
+	// "auto" is the default. Left unset, it records only over a SQLite
+	// sessions store and runs unrecorded, quietly, over any other (a
+	// Dolt-served one included). Set to "auto", it records where the store
+	// can and warns where it cannot; a store served through bd can record
+	// once that bd supports --if-revision, which no released bd does yet.
+	// "off" records nothing.
+	// "require" (opt-in) refuses a request it cannot record before any
+	// effect. A change takes effect at the next process start.
+	LifecycleMode string `toml:"lifecycle,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
 	// Authoritative lists the op kinds the conversation lane executes instead
 	// of their legacy path. The default is empty, and message is not on by
-	// default anywhere yet. This build accepts message and respond.
+	// default anywhere yet. This build accepts message, interrupt and respond.
 	// Experimental: listing message switches on the producers that write lane
 	// ops, whose messages the lane host then delivers: the API's POST
 	// /v0/city/{cityName}/session/{id}/ops (a T3 Code environment or an
 	// operator proposing a message) and, for sessions a lane host can type
 	// into (a keystroke-mode runtime, or one a box host serves), the
-	// controller's planner notices (drain reminders, the nudge backstop) and
+	// controller's planner notices (the work ladder's nudges, drain reminders,
+	// the nudge backstop) and
 	// gc session nudge. gc session nudge delivers inline what its delivery
 	// mode allows now, where it can type into the session: wait-idle only at
 	// an idle boundary; immediate there too, or into a running turn when the
 	// runtime can steer it, else at the next boundary. It leaves the rest to
 	// the controller's lane host, and the content gate no longer governs it.
-	// The API's submit and messages, gc session submit, mail --notify, sling
-	// --nudge and wait nudges keep their legacy delivery in this build. No
-	// request surface writes respond ops yet, so listing respond changes no
-	// request's delivery in this build.
+	// The API's POST .../session/{id}/submit and .../messages propose lane
+	// message ops too (interrupt_now as a deliver-now unit, which never
+	// restarts the session), answer 202 once the op is committed, and emit
+	// the request's result after a 5 s settle window (queued while the op
+	// still waits); their resume: true, once the message's op is proposed,
+	// consumes an operator's hold on the session and records its wake. A
+	// provider session create (POST /v0/city/{cityName}/sessions, kind
+	// provider) proposes its initial message as a lane op as well; an agent
+	// create's initial message rides its first start's prompt and is no lane
+	// op. A message over 16 KiB, the op journal's inline payload limit, is
+	// refused 422 payload_too_large, a provider create's before the session
+	// is created. extmsg member notices are lane notices, their inbound text
+	// cut to fit that limit. mail --notify, sling --nudge and the hook-claim
+	// continuation propose one lane notice per event (a mail, a sling, a
+	// claim), each under a minted key, to a session a lane host can type
+	// into; the session's row is read in the city's sessions store, and a
+	// row that cannot be read refuses the notice, which is then neither
+	// delivered nor queued. A session with no row, or one no lane serves,
+	// keeps their legacy delivery. A mail notice is withdrawn, best effort,
+	// when gc mail or the API reads, marks read, archives or deletes its
+	// message, or SessionStart archives a handoff; a message consumed any
+	// other way can leave its notice open. A ready wait's nudge is a lane
+	// notice from gc:wait to a session a lane host can type into, and its
+	// outcome finalizes the wait; for a session no lane serves, or a note the
+	// op store refuses, it keeps its legacy delivery. gc session submit sends
+	// the API its key whatever the content gate says; when the API call
+	// fails, it accepts the message as the API does, for every session the
+	// API accepts. It delivers inline only at an idle boundary of a
+	// keystroke-mode runtime, and never an interrupt_now, so a submit to a
+	// protocol-mode session waits for the controller.
+	// Listing interrupt switches the API's POST
+	// /v0/city/{cityName}/session/{id}/stop and run cancel onto the lane:
+	// each proposes interrupt ops the controller's lane host runs, and
+	// answers from their outcomes. A stop still running after 45 s answers
+	// 409 in_flight, naming the op; run cancel lists a holder whose interrupt
+	// is still running then, or failed, in its interrupt_failures. The ops
+	// route proposes interrupt ops too, and the control gate no longer
+	// governs them. gc stop's graceful interrupt wave is lifecycle and keeps
+	// its path.
+	// gc session nudge's inline pass never runs an interrupt, a respond or a
+	// deliver-now unit: it leaves them, and content queued behind them, to
+	// the controller's lane host. Listing respond switches the API's POST
+	// /v0/city/{cityName}/session/{id}/respond onto the lane: it proposes a
+	// respond op keyed by the interaction occurrence it answers, which the
+	// lane host runs at most once, and answers from its outcome (202 with
+	// the op still open after 20 s).
 	// The city's controller, standalone or supervisor-hosted, runs the lane
 	// host that delivers lane ops, and gc doctor reports a listed kind as an
 	// error when no lane host serves the city. A keystroke-mode runtime (tmux)
@@ -70,14 +132,14 @@ type OpsConfig struct {
 	// lane host interrupts the session's running turn, then delivers the
 	// message at the boundary the interrupt leaves.
 	// A listed kind needs a sessions store with guarded batches. A change
-	// takes effect at the controller's next start; gc session nudge reads it
-	// at once.
-	Authoritative []string `toml:"authoritative,omitempty" jsonschema:"enum=message,enum=respond"`
+	// takes effect at the controller's next start; gc session nudge and gc
+	// session submit read it at once.
+	Authoritative []string `toml:"authoritative,omitempty" jsonschema:"enum=message,enum=interrupt,enum=respond"`
 }
 
 // laneAuthoritativeKinds are the op kinds this build's conversation lane can
 // execute, so the only kinds [ops] authoritative accepts.
-var laneAuthoritativeKinds = []opjournal.Kind{opjournal.KindMessage, opjournal.KindRespond}
+var laneAuthoritativeKinds = []opjournal.Kind{opjournal.KindMessage, opjournal.KindInterrupt, opjournal.KindRespond}
 
 // LaneExecutes reports whether [ops] authoritative lists kind.
 func (o OpsConfig) LaneExecutes(kind string) bool {
@@ -91,7 +153,7 @@ func (o OpsConfig) LaneExecutes(kind string) bool {
 // composed root, beside validateBeadsModes, because a fragment may supply any
 // of these fields. A typo must never read as "off": an operator who wrote
 // "requre" would believe requests are refused unless recorded while none is.
-// The empty string (unset) is valid and defaults to off. A blank value such as
+// The empty string (unset) is valid and defaults to auto. A blank value such as
 // " " is not unset, because internal/rollout reads any non-empty value as set,
 // so it is rejected like a typo.
 func validateOpsModes(o OpsConfig) error {

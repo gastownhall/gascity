@@ -80,6 +80,14 @@ type wireEntry struct {
 	RecycleAt  string `json:"recycle_at"`
 	Unreleased bool   `json:"unreleased,omitempty"`
 	Refused    int    `json:"refused,omitempty"`
+	// Notice is the entry's notice mark; older builds ignore the field.
+	Notice *wireNotice `json:"notice,omitempty"`
+}
+
+type wireNotice struct {
+	Op     string `json:"op"`
+	At     string `json:"at"`
+	Paused bool   `json:"paused,omitempty"`
 }
 
 type wireRelease struct {
@@ -119,7 +127,7 @@ func EncodeLadder(r Record) string {
 			Store: e.Key.Store, Bead: e.Key.Bead, Kind: e.Kind.String(), Rung: e.Rung.String(),
 			Since: fmtTime(e.Since), Attempts: e.Attempts, Paused: e.Paused, Last: fmtTime(e.Last),
 			Next: fmtTime(e.Next), Recycles: e.Recycles, Escalated: e.Escalated, Seed: seed,
-			RecycleAt: fmtTime(e.RecycleAt), Unreleased: e.Unreleased, Refused: e.Refused,
+			RecycleAt: fmtTime(e.RecycleAt), Unreleased: e.Unreleased, Refused: e.Refused, Notice: encodeNotice(e.Notice),
 		})
 	}
 	if r.Release != nil {
@@ -130,6 +138,13 @@ func EncodeLadder(r Record) string {
 		panic(err)
 	}
 	return string(b)
+}
+
+func encodeNotice(m NoticeMark) *wireNotice {
+	if m.IsZero() {
+		return nil
+	}
+	return &wireNotice{Op: m.Op, At: fmtTime(m.At), Paused: m.Paused}
 }
 
 // DecodeLadder reads a work_ladder cell. "" is an absent cell (V == 0, no
@@ -188,6 +203,16 @@ func DecodeLadder(raw string) (Record, error) {
 				return bad("entry %d: time %q: %v", i, f.src, err)
 			}
 			*f.dst = t
+		}
+		if we.Notice != nil {
+			if we.Notice.Op == "" {
+				return bad("entry %d: notice with no op", i)
+			}
+			at, err := parseTime(we.Notice.At)
+			if err != nil || at.IsZero() {
+				return bad("entry %d: notice time %q", i, we.Notice.At)
+			}
+			e.Notice = NoticeMark{Op: we.Notice.Op, At: at, Paused: we.Notice.Paused}
 		}
 		r.Entries = append(r.Entries, e)
 	}

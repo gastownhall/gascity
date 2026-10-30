@@ -295,21 +295,19 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		return nil, fmt.Errorf("attach bead %s: %w", attachBeadID, err)
 	}
 
-	// Resolve the sub-DAG's workflow root through the canonical run chain
-	// (workflow_id -> molecule_id -> gc.root_bead_id -> the parent's own id),
-	// not gc.root_bead_id alone. A wisp/source bead grafted mid-workflow carries
-	// the true top root in workflow_id/molecule_id (written by sling) but no
-	// gc.root_bead_id of its own; the old fallback ignored those keys and rooted
-	// the whole sub-DAG at the parent's own id, stamping a WRONG gc.root_bead_id
-	// onto the attempt container, scope-check, and every child. Downstream
-	// reconciliation then enumerated siblings via
-	// beads.DirectMembers(<wrong root>) and burned ralph attempts
-	// (maintainer-city incident gcg-wisp-y785sz). A genuine top-level head
-	// with no run chain still self-roots via its own id (ResolveRunID's
-	// selfID fallback).
-	rootBeadID := beadmeta.ResolveRunID(parentBead.Metadata, attachBeadID, "")
+	// Resolve the sub-DAG's workflow root from the keys that name a container of
+	// the parent (workflow_id -> gc.root_bead_id -> the parent's own id). A
+	// wisp/source bead grafted mid-workflow carries the true top root in
+	// workflow_id but no gc.root_bead_id of its own; ignoring workflow_id would
+	// root the sub-DAG at the parent and stamp a wrong gc.root_bead_id on every
+	// child, burning ralph attempts (maintainer-city incident gcg-wisp-y785sz).
+	// molecule_id is deliberately not consulted: sling writes it on a source bead
+	// as a forward pointer to that bead's own v1 attachment, never to a container
+	// of it, so nesting there would adopt an unrelated molecule (ga-crz5ege). A
+	// genuine top-level head with no container key self-roots via its own id.
+	rootBeadID := beadmeta.ResolveNestingRootID(parentBead.Metadata, attachBeadID)
 
-	// A resolved run-chain root may point at a molecule that has since fully
+	// A resolved container root may point at a molecule that has since fully
 	// closed (e.g. re-attaching a content bead to a fresh formula after its
 	// prior review round-trip closed cleanly) -- a dead pointer, not a live
 	// upstream workflow to honor. Only a still-open chain root is trusted;
@@ -1914,4 +1912,33 @@ func existingLogicalBeadIDIndex(store beads.Store, rootID string) (map[string]st
 		}
 	}
 	return index, nil
+}
+
+// RecipeClass returns the coordination class of the beads instantiating recipe
+// produces, which decides the store its molecule belongs in.
+//
+// Instantiate materializes a recipe as one atomic plan, so the plan is
+// classified wholesale, as coordclass.ClassifyGraphPlan does: a single
+// graph-marked step makes the whole molecule graph class, which keeps its
+// intra-plan edges inside one store. Steps a RootOnly recipe never creates are
+// skipped, matching Instantiate's own RootOnly cut. A graph.v2 workflow or a
+// root-only wisp is graph class; a v1 POURED recipe (a molecule container plus
+// plain steps) is work class and belongs on the work ledger.
+func RecipeClass(recipe *formula.Recipe) coordclass.Class {
+	if recipe == nil {
+		return coordclass.ClassWork
+	}
+	for i, step := range recipe.Steps {
+		if recipe.RootOnly && i > 0 {
+			break
+		}
+		stepType := step.Type
+		if stepType == "" {
+			stepType = "task"
+		}
+		if coordclass.Classify(beads.Bead{Type: stepType, Labels: step.Labels, Metadata: step.Metadata}) == coordclass.ClassGraph {
+			return coordclass.ClassGraph
+		}
+	}
+	return coordclass.ClassWork
 }

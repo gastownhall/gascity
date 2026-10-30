@@ -183,12 +183,13 @@ func TestConditionalWritesDefaultsToAuto(t *testing.T) {
 			t.Errorf("%s: beads = %q/%q, want %q/%q", tc.name, got, f.OriginOf(keyBeadsConditionalWrites), tc.want, tc.origin)
 		}
 	}
-	// The other mode gates keep their own (off) defaults.
+	// The other mode gates keep their own defaults (guarded_release off,
+	// ops.content auto).
 	f, err := Resolve(cityWith("", nil), ResolveOptions{LookupEnv: envMap(nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.BeadsGuardedRelease() != Off || f.OpsContent() != Off {
-		t.Errorf("guarded_release/ops.content = %q/%q, want off/off", f.BeadsGuardedRelease(), f.OpsContent())
+	if f.BeadsGuardedRelease() != Off || f.OpsContent() != Auto {
+		t.Errorf("guarded_release/ops.content = %q/%q, want off/auto", f.BeadsGuardedRelease(), f.OpsContent())
 	}
 }

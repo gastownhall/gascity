@@ -115,6 +115,7 @@ go_test(
         "dog_prompt_test.go",
         "health_order_test.go",
         "health_test.go",
+        "journal_recovery_runbook_test.go",
         "logs_test.go",
         "main_test.go",
         "port_resolve_test.go",
@@ -123,6 +124,7 @@ go_test(
         "pull_test.go",
         "recover_host_test.go",
         "requires_backend_test.go",
+        "restart_fsync_stall_test.go",
         "restart_test.go",
         "runtime_bounded_test.go",
         "sql_test.go",
@@ -138,11 +140,12 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
+        "//examples/bd:assets/scripts/dolt-fsync-stall.sh",
         "//internal/bootstrap/packs/core:pack_files",
     ] + select({
         "//:gotags_integration": [
             "@bd_bin_v1_3_2//:bd",
-            "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
+            "@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt",
         ],
         "//conditions:default": [],
     }),
@@ -150,7 +153,7 @@ go_test(
     # the pinned binaries first on PATH (internal/testenv).
     env = select({
         "//:gotags_integration": {
-            "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_2//:bd) $(rootpath @dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt)",
+            "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_2//:bd) $(rootpath @dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt)",
         },
         "//conditions:default": {},
     }),

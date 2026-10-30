@@ -344,7 +344,10 @@ func agentSessionCreateTransport(cfg *config.City, agentCfg config.Agent) string
 	// StartCommand is ResolveProvider's escape hatch (step 1): it bypasses
 	// provider-catalog resolution entirely, so a cache entry for
 	// agentCfg.Provider would not describe this agent's actual resolution.
-	if agentCfg.StartCommand == "" {
+	// Neither would it under workspace.start_command (step 4b), which
+	// replaces the provider args the entry records as omitted from its ACP
+	// launch.
+	if agentCfg.StartCommand == "" && cfg.Workspace.StartCommand == "" {
 		name := agentCfg.Provider
 		if name == "" {
 			name = cfg.Workspace.Provider
@@ -417,8 +420,12 @@ func resolveProviderForACPTransport(cfg *config.City, providerName string) *conf
 	if cfg == nil || strings.TrimSpace(providerName) == "" {
 		return nil
 	}
-	if resolved, ok := config.ResolvedProviderCached(cfg, providerName); ok {
-		return &resolved
+	// A cache entry resolves the provider alone; workspace.start_command
+	// replaces the args it records as omitted from its ACP launch.
+	if cfg.Workspace.StartCommand == "" {
+		if resolved, ok := config.ResolvedProviderCached(cfg, providerName); ok {
+			return &resolved
+		}
 	}
 	resolved, err := config.ResolveProvider(
 		&config.Agent{Provider: providerName},
@@ -516,18 +523,10 @@ func beadUsesACPTransport(bead beads.Bead, cfg *config.City) bool {
 }
 
 func infoUsesACPTransport(info session.Info, cfg *config.City) bool {
-	transport := strings.TrimSpace(info.Transport)
-	if transport != "" {
+	if transport, recorded := recordedSessionTransport(info); recorded {
 		return transport == "acp"
 	}
 	providerName := strings.TrimSpace(info.Provider)
-	if providerName == "acp" {
-		return true
-	}
-	if strings.TrimSpace(info.MCPIdentity) != "" ||
-		strings.TrimSpace(info.MCPServersSnapshot) != "" {
-		return true
-	}
 	templateName := strings.TrimSpace(info.Template)
 	if cfg != nil {
 		if agentCfg, ok := resolveAgentIdentity(cfg, templateName, currentRigContext(cfg)); ok {
@@ -935,14 +934,27 @@ func openCityMailProvider(stderr io.Writer, cmdName string) (mail.Provider, int)
 		return nil, code
 	}
 	// The no-refresh cfg loader matches the other hot CLI roots (cmd_prime,
-	// completion): loadCityConfig's builtin-pack refresh is inappropriate here. A
-	// failed load yields nil cfg, which the class resolvers treat as identity —
-	// where a relocated class is SERVED from does not depend on it, because the
-	// routes come from cliStorageRoutes, which reads the city's own [storage].
-	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	// completion): loadCityConfig's builtin-pack refresh is inappropriate here.
+	//
+	// A failed load REFUSES on any city that may relocate a class
+	// (split-default audit R1). It used to continue with a nil cfg, and with the
+	// routes read the same way that put a `gc mail send` into the work store of
+	// a split city — a stranded infrastructure row the next boot refuses the
+	// city over. Where messages live is exactly what the unreadable file says,
+	// so the provider does not guess. A provably single-store city keeps the
+	// old behavior: its messages have only ever lived in the work store.
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err != nil {
+		if refusal := cityConfigLoadRefusal(cityPath, err); refusal != nil {
+			_ = closeBeadStoreHandle(store)
+			fmt.Fprintf(stderr, "%s: %v\n", cmdName, refusal) //nolint:errcheck // best-effort stderr
+			return nil, 1
+		}
+		cfg = nil
+	}
 	msgStore := resolveMailMessagesStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 	sessStore := cliSessionStore(store, cfg, cityPath)
-	return newMailProviderWithSessionStore(msgStore, sessStore), 0
+	return withMailNoticeWithdrawal(newMailProviderWithSessionStore(msgStore, sessStore), sessStore, cfg, stderr), 0
 }
 
 // eventsProviderName returns the events provider name.
@@ -1204,17 +1216,46 @@ func eventsFileRecorderOptions(eventsCfg config.EventsConfig, stderr io.Writer) 
 	if !settings.enabled {
 		maxSize = 0
 	}
-	return []events.FileRecorderOption{
+	opts := []events.FileRecorderOption{
 		events.WithMaxSize(maxSize),
 		events.WithRotationCheckRecords(settings.checkIntervalRecords),
 		events.WithRotationCheckInterval(settings.checkInterval),
 		events.WithArchiveRetainAge(settings.archiveRetainAge),
 	}
+	if mirror, ok := eventsMirrorOptions(eventsCfg.Mirror, stderr); ok {
+		opts = append(opts, events.WithMirror(mirror))
+	}
+	return opts
+}
+
+// eventsMirrorObserve, when set by a test, receives every step of the events
+// mirror copier, so the test can wait for a mirrored event.
+var eventsMirrorObserve func(events.MirrorProgress)
+
+// eventsMirrorOptions converts [events.mirror] into the recorder's mirror
+// options. It reports false when no mirror is configured, or when the
+// configured one is unusable, which it warns about: a bad mirror setting
+// disables the mirror, never the city.
+func eventsMirrorOptions(cfg config.EventsMirrorConfig, stderr io.Writer) (events.MirrorOptions, bool) {
+	if !cfg.Enabled() {
+		return events.MirrorOptions{}, false
+	}
+	if problem := cfg.Problem(); problem != "" {
+		warnEventsRotation(stderr, "events.mirror: warning: %s; the events mirror is disabled\n", problem)
+		return events.MirrorOptions{}, false
+	}
+	mode, _ := cfg.ModeOrDefault() // Problem already rejected a bad mode
+	return events.MirrorOptions{
+		Path:    cfg.Path,
+		Mode:    mode,
+		MaxSize: cfg.MaxSizeBytesOrDefault(),
+		Observe: eventsMirrorObserve,
+	}, true
 }
 
 // newFileEventsRecorder opens the city's rotation owner: the one long-lived
-// recorder that applies [events.rotation] and sweeps rotation leftovers on
-// open. Exactly one process per log may own it — the supervisor (its per-city
+// recorder that applies [events.rotation] and [events.mirror] and sweeps
+// rotation leftovers on open. Exactly one process per log may own it — the supervisor (its per-city
 // recorder and its own log) or, without a supervisor, the standalone
 // controller that holds .gc/controller.lock. Every other writer uses
 // newSecondaryFileEventsRecorder. Two rotators no longer lose events (the

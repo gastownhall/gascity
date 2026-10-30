@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"maps"
 	"os"
 	"path/filepath"
@@ -1742,6 +1743,67 @@ func TestPrepareStartCandidate_DoesNotAppendCLIResumeFlagForACP(t *testing.T) {
 
 	if prepared.cfg.Command != "opencode acp" {
 		t.Fatalf("prepared.cfg.Command = %q, want ACP command without CLI resume flag", prepared.cfg.Command)
+	}
+}
+
+// TestPrepareStartCandidate_RecordedACPTransportKeepsACPLaunch covers a
+// session recorded on ACP whose template now resolves the CLI transport: the
+// prepared start keeps the template's ACP launch, its core hash matches the
+// drift hash, and one notice names the session and "gc session close".
+func TestPrepareStartCandidate_RecordedACPTransportKeepsACPLaunch(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"template":            "worker",
+			"session_name":        "worker",
+			"session_key":         "opencode-provider-session",
+			"started_config_hash": "previous-start",
+			"transport":           "acp",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := sessiontest.SeedBead(t, session)
+	tp := cliTemplateWithACPLaunch()
+
+	var logs bytes.Buffer
+	prevOutput, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prevOutput)
+		log.SetFlags(prevFlags)
+	})
+
+	prepared, err := prepareStartCandidate(startCandidate{info: info, tp: tp, order: 0},
+		&config.City{}, store, &clock.Fake{Time: time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+
+	if prepared.cfg.Command != "opencode acp" {
+		t.Errorf("prepared.cfg.Command = %q, want the ACP launch %q without a CLI resume flag", prepared.cfg.Command, "opencode acp")
+	}
+	if want := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(tp, info)); prepared.coreHash != want {
+		t.Errorf("prepared.coreHash = %q, want the drift hash %q", prepared.coreHash, want)
+	}
+	var notices []string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "recorded ACP transport") {
+			notices = append(notices, line)
+		}
+	}
+	if len(notices) != 1 {
+		t.Fatalf("notices = %q, want exactly one", notices)
+	}
+	for _, want := range []string{`session "worker"`, `template "worker"`, `gc session close worker`} {
+		if !strings.Contains(notices[0], want) {
+			t.Errorf("notice %q missing %q", notices[0], want)
+		}
 	}
 }
 
@@ -8024,7 +8086,6 @@ func TestPrepareStartCandidateUsesBuiltinAncestorForGCProviderEnv(t *testing.T) 
 		Alias:       "mayor",
 		ResolvedProvider: &config.ResolvedProvider{
 			Name:            "claude-max",
-			Kind:            "claude",
 			BuiltinAncestor: "claude",
 		},
 		TemplateName: "mayor",
@@ -8832,21 +8893,24 @@ func TestBuildPreparedStartKeepsAnAllocatedKey(t *testing.T) {
 // agent moves to a new config dir its old conversation, still under an
 // observed root, reads gone and the start runs fresh instead of a resume the
 // provider will refuse; the old dir named, or none, it resumes. An ambient
-// CLAUDE_CONFIG_DIR (passthrough, not the operator's) is not read.
+// CLAUDE_CONFIG_DIR (passthrough, not the operator's) is searched beside the
+// observed roots, never instead of them (#6677).
 func TestBuildPreparedStartProbesTheLaunchConfigDir(t *testing.T) {
 	workDir := t.TempDir()
 	root := observedTranscript(t, workDir) // k-1's transcript, under an observed root
 	moved := t.TempDir()
 	for _, c := range []struct {
-		name     string
-		operator map[string]string
-		ambient  map[string]string
-		resumed  bool
+		name       string
+		operator   map[string]string
+		ambient    map[string]string
+		unobserved bool // no [daemon] observe_paths covers root
+		resumed    bool
 	}{
-		{"no config dir named: the observed roots", nil, nil, true},
-		{"the old config dir named", map[string]string{"CLAUDE_CONFIG_DIR": filepath.Dir(root)}, nil, true},
-		{"moved to a new config dir", map[string]string{"CLAUDE_CONFIG_DIR": moved}, nil, false},
-		{"an ambient config dir only", nil, map[string]string{"CLAUDE_CONFIG_DIR": moved}, true},
+		{"no config dir named: the observed roots", nil, nil, false, true},
+		{"the old config dir named", map[string]string{"CLAUDE_CONFIG_DIR": filepath.Dir(root)}, nil, false, true},
+		{"moved to a new config dir", map[string]string{"CLAUDE_CONFIG_DIR": moved}, nil, false, false},
+		{"an ambient config dir only", nil, map[string]string{"CLAUDE_CONFIG_DIR": moved}, false, true},
+		{"a passed-through config dir holding the transcript", nil, map[string]string{"CLAUDE_CONFIG_DIR": filepath.Dir(root)}, true, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			store := beads.NewMemStore()
@@ -8858,7 +8922,9 @@ func TestBuildPreparedStartProbesTheLaunchConfigDir(t *testing.T) {
 				t.Fatal(err)
 			}
 			cfg := &config.City{}
-			cfg.Daemon.ObservePaths = []string{root}
+			if !c.unobserved {
+				cfg.Daemon.ObservePaths = []string{root}
+			}
 			env := maps.Clone(c.ambient)
 			if env == nil {
 				env = map[string]string{}
@@ -8876,15 +8942,21 @@ func TestBuildPreparedStartProbesTheLaunchConfigDir(t *testing.T) {
 			if resumed := got.Metadata["session_key"] == "k-1" && strings.Contains(prepared.cfg.Command, "--resume k-1"); resumed != c.resumed {
 				t.Fatalf("stored key %q, command %q; want resumed=%v", got.Metadata["session_key"], prepared.cfg.Command, c.resumed)
 			}
+			if c.resumed && (got.Metadata["started_config_hash"] != "h-1" || got.Metadata["continuation_reset_pending"] != "") {
+				t.Fatalf("metadata %v; want no stale-key clear (started_config_hash h-1, no continuation reset)", got.Metadata)
+			}
 		})
 	}
 }
 
 // Kills launchTranscriptRoots pinning a value the probe cannot resolve as the
 // provider does: only an absolute CLAUDE_CONFIG_DIR pins it; a relative or ~
-// one, or none, falls back to the city roots.
+// one, or none, falls back to the city roots. An absolute one the launch is
+// only handed (tp.Env) adds its projects after the city roots, never instead
+// of them (#6677); gc's own environment is not read.
 func TestLaunchTranscriptRoots(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", "")
 	observed := &config.City{}
 	observed.Daemon.ObservePaths = []string{"/observed"}
@@ -8901,6 +8973,35 @@ func TestLaunchTranscriptRoots(t *testing.T) {
 		if got := launchTranscriptRoots(observed, TemplateParams{OperatorEnv: map[string]string{"CLAUDE_CONFIG_DIR": c.dir}}); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("CLAUDE_CONFIG_DIR %q: roots %v, want %v", c.dir, got, c.want)
 		}
+	}
+
+	t.Setenv("CLAUDE_CONFIG_DIR", "/ambient/a") // gc's own env: never read
+	dir := func(d string) map[string]string { return map[string]string{"CLAUDE_CONFIG_DIR": d} }
+	city := sessionTranscriptSearchPaths(observed)
+	for _, c := range []struct {
+		name     string
+		cfg      *config.City
+		env      map[string]string
+		operator map[string]string
+		want     []string
+	}{
+		{"an absolute passed-through dir", observed, dir("/cfg/claude-a"), nil, append(sessionTranscriptSearchPaths(observed), "/cfg/claude-a/projects")},
+		{"the default root's own dir", observed, dir(filepath.Join(home, ".claude")), nil, city},
+		{"no city", nil, dir("/cfg/claude-a"), nil, append(sessionTranscriptSearchPaths(nil), "/cfg/claude-a/projects")},
+		{"no passed-through dir", observed, map[string]string{}, nil, city},
+		{"the operator's absolute dir over a passed-through one", observed, dir("/cfg/claude-a"), dir("/cfg/claude-b"), []string{"/cfg/claude-b/projects"}},
+		{"a blank passed-through dir", observed, dir(""), nil, city},
+		{"a spaces-only passed-through dir", observed, dir("  "), nil, city},
+		{"a ~ passed-through dir", observed, dir("~/.claude-a"), nil, city}, // the provider resolves it, not the probe
+		{"a relative passed-through dir", observed, dir("cfg/claude-a"), nil, city},
+		{"the operator's ~ dir written over an ambient one", observed, dir("~/.claude-b"), dir("~/.claude-b"), city},
+	} {
+		if got := launchTranscriptRoots(c.cfg, TemplateParams{Env: c.env, OperatorEnv: c.operator}); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: roots %v, want %v", c.name, got, c.want)
+		}
+	}
+	if want := []string{"/observed"}; !reflect.DeepEqual(observed.Daemon.ObservePaths, want) {
+		t.Errorf("observe_paths after resolving = %v, want %v untouched", observed.Daemon.ObservePaths, want)
 	}
 }
 

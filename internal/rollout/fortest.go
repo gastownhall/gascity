@@ -20,9 +20,9 @@ func defaultFlags() Flags {
 		beadsGuardedRelease:      resolved[Mode]{value: Off, origin: OriginBuiltin},
 		formulaV2:                resolved[bool]{value: true, origin: OriginBuiltin},
 		allowSchemaBehindMigrate: resolved[bool]{value: false, origin: OriginBuiltin},
-		opsContent:               resolved[Mode]{value: Off, origin: OriginBuiltin},
-		opsControl:               resolved[Mode]{value: Off, origin: OriginBuiltin},
-		opsLifecycle:             resolved[Mode]{value: Off, origin: OriginBuiltin},
+		opsContent:               resolved[Mode]{value: Auto, origin: OriginBuiltin},
+		opsControl:               resolved[Mode]{value: Auto, origin: OriginBuiltin},
+		opsLifecycle:             resolved[Mode]{value: Auto, origin: OriginBuiltin},
 	}
 }
 

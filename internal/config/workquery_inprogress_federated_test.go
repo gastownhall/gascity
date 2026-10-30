@@ -5,8 +5,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // graphResidentInProgressRow is what the federated reader serves for a claim
@@ -139,5 +142,249 @@ func TestSingleStoreInProgressTierStillShellsBdList(t *testing.T) {
 	}
 	if strings.Contains(script, gcReadyCommand) {
 		t.Fatalf("single-store crash-recovery tier shells the federated reader: %q", script)
+	}
+}
+
+// fakeGCInProgressWindow answers `gc ready --status in_progress` with the rows
+// in $FAKE_GC_IN_PROGRESS_ROWS the way the real reader answers them: rows
+// carrying an --exclude-label label dropped, then bounded by --limit (after the
+// merge and the order, so a --limit=1 read is the first row and nothing else),
+// then, under --until-unblocked, ended at the first row with no blocker that is
+// not closed. A row marked "unresolvable" is one whose blocker no store holds:
+// the read fails when it has to resolve that row, which is every row of the
+// window, or under --until-unblocked every row up to the cut. Every other
+// `gc ready` answers an empty array, so only the crash-recovery tier can decide
+// the outcome.
+const fakeGCInProgressWindow = `#!/bin/sh
+[ "$1" = ready ] || { printf '[]'; exit 0; }
+case " $* " in
+  *" --status in_progress "*) ;;
+  *) printf '[]'; exit 0 ;;
+esac
+limit=0
+until=false
+excluded='[]'
+prev=
+for arg in "$@"; do
+  [ "$prev" = --exclude-label ] && excluded=$(printf '%s' "$excluded" | jq -c --arg label "$arg" '. + [$label]')
+  case "$arg" in
+    --limit=*) limit="${arg#--limit=}" ;;
+    --until-unblocked) until=true ;;
+  esac
+  prev="$arg"
+done
+rows=$(printf '%s' "$FAKE_GC_IN_PROGRESS_ROWS" | jq -c --argjson excluded "$excluded" --argjson limit "$limit" --argjson until "$until" '
+  def unblocked: ([(.blocked_by // [])[] | select(((.status // "") | ascii_downcase) != "closed")] | length) == 0;
+  [.[] | select(([(.labels // [])[] | . as $label | select($excluded | index($label) != null)] | length) == 0)]
+  | (if $limit > 0 then .[:$limit] else . end)
+  | if $until then
+      reduce .[] as $row ({rows: [], done: false};
+        if .done then . else .rows += [$row] | .done = (($row.unresolvable // false) or ($row | unblocked)) end)
+      | .rows
+    else . end')
+bad=$(printf '%s' "$rows" | jq -r '[.[] | select(.unresolvable // false) | .id][0] // empty')
+if [ -n "$bad" ]; then
+  printf 'gc ready: rig store: resolving blocker "gr-elsewhere" of "%s": bead not found\n' "$bad" >&2
+  exit 1
+fi
+printf '%s' "$rows"
+`
+
+// Federated in_progress rows, in the reader's order. The gated rows sort first,
+// the way a P0 claim in one store sorts ahead of a P2 claim in another.
+const (
+	federatedBlockedWinnerRow = `{"id":"gcr-blocked","status":"in_progress","assignee":"sess-1","priority":0,"blocked_by":[{"id":"gcr-gate","status":"open"}]}`
+	federatedServableRow      = `{"id":"gcs-servable","status":"in_progress","assignee":"sess-1","priority":2}`
+	federatedBlockedStepRow   = `{"id":"gcs-blocked-step","status":"in_progress","assignee":"sess-1","priority":1,"blocked_by":[{"id":"gcs-gate","status":"open"}]}`
+	federatedAnchorRow        = `{"id":"gc-root","status":"in_progress","assignee":"sess-1","priority":0,"metadata":{"gc.kind":"workflow","gc.formula_contract":"graph.v2"}}`
+)
+
+// federatedHeldWinnerRow carries a dispatch hold and no blocker.
+var federatedHeldWinnerRow = `{"id":"gc-held","status":"in_progress","assignee":"sess-1","priority":0,"labels":["` + beadmeta.HoldExternalLabel + `"]}`
+
+// federatedUnresolvableRow is a claim whose blocking edge targets a bead no
+// store holds, so the reader cannot resolve its blockers.
+const federatedUnresolvableRow = `{"id":"gcr-unresolvable","status":"in_progress","assignee":"sess-1","priority":3,"unresolvable":true}`
+
+func federatedInProgressRows(rows ...string) string {
+	return "[" + strings.Join(rows, ",") + "]"
+}
+
+// federatedInProgressQuery is one generated query that carries the
+// crash-recovery tier.
+type federatedInProgressQuery struct {
+	name    string
+	command string
+	// servesAnchor is whether the query serves an assigned graph workflow root
+	// from this tier: the standalone tier does, while the combined work query
+	// defers it behind the session's executable work.
+	servesAnchor bool
+}
+
+// federatedInProgressQueries builds, on a federated topology, both queries the
+// crash-recovery tier appears in — the standalone assigned_in_progress_query and
+// the combined work_query — for a plain agent and for the legacy
+// control-dispatcher shape, whose tier loops over two candidate identities.
+func federatedInProgressQueries() []federatedInProgressQuery {
+	var out []federatedInProgressQuery
+	for _, shape := range []struct {
+		name  string
+		agent *Agent
+	}{
+		{"worker", &Agent{Name: "worker"}},
+		{"legacy control", &Agent{Name: ControlDispatcherAgentName, Dir: "rig"}},
+	} {
+		out = append(out,
+			federatedInProgressQuery{shape.name + "/assigned_in_progress_query", shape.agent.EffectiveAssignedInProgressQueryFor(federatedTopology()), true},
+			federatedInProgressQuery{shape.name + "/work_query", shape.agent.EffectiveWorkQueryFor(federatedTopology()), false},
+		)
+	}
+	return out
+}
+
+// runFederatedInProgressWindow runs command with GC_SESSION_ID=sess-1 against
+// fakeGCInProgressWindow serving rows, and returns the served ids in order.
+func runFederatedInProgressWindow(t *testing.T, command, rows string) []string {
+	t.Helper()
+	res := runGeneratedQuery(t, command, map[string]string{
+		"GC_SESSION_ID":            "sess-1",
+		"FAKE_GC_IN_PROGRESS_ROWS": rows,
+	}, fakeGCInProgressWindow)
+	if res.exit != 0 {
+		t.Fatalf("query exited %d; stderr=%s", res.exit, res.stderr)
+	}
+	return workQueryOutputIDOrder(t, strings.TrimSpace(res.stdout))
+}
+
+// TestFederatedInProgressTierServesTheFirstServableRowOfTheWindow pins that a
+// blocked or held row first in the federated reader's order does not hide the
+// session's servable claim behind it. `gc ready` merges every store into one
+// ordered answer, so a one-row read was one row for the whole city: when that
+// row was gated the tier fell through, and the session was handed fresh work
+// while it still held a claim it could resume — the accumulation the tier
+// exists to stop. `gc hook` reads each store separately, so there one store's
+// gated row never hid another store's claim.
+func TestFederatedInProgressTierServesTheFirstServableRowOfTheWindow(t *testing.T) {
+	requireJQ(t)
+	for _, tc := range []struct {
+		name string
+		rows string
+		want []string
+	}{
+		{"blocked winner", federatedInProgressRows(federatedBlockedWinnerRow, federatedServableRow), []string{"gcs-servable"}},
+		{"held winner", federatedInProgressRows(federatedHeldWinnerRow, federatedServableRow), []string{"gcs-servable"}},
+		{"blocked and held ahead", federatedInProgressRows(federatedHeldWinnerRow, federatedBlockedWinnerRow, federatedServableRow), []string{"gcs-servable"}},
+		// The control: with no servable row the tier still falls through, and
+		// the query answers no work rather than a gated claim.
+		{"no servable row", federatedInProgressRows(federatedHeldWinnerRow, federatedBlockedWinnerRow), []string{}},
+	} {
+		for _, q := range federatedInProgressQueries() {
+			t.Run(tc.name+"/"+q.name, func(t *testing.T) {
+				got := runFederatedInProgressWindow(t, q.command, tc.rows)
+				if !slices.Equal(got, tc.want) {
+					t.Fatalf("served %v, want %v", got, tc.want)
+				}
+			})
+		}
+	}
+}
+
+// TestFederatedInProgressTierServesTheClaimAheadOfAnUnresolvableRow pins that a
+// claim the tier never serves cannot fail it. The window is twenty rows, and the
+// reader fails a read whose rows' blockers it cannot resolve, so reading the
+// window whole made a claim blocked by a bead no store holds fail the query for
+// the session's resumable claim ahead of it: no crash recovery, and a failed
+// hook. The tier's read ends at the first unblocked row, so a row past it is
+// never resolved.
+func TestFederatedInProgressTierServesTheClaimAheadOfAnUnresolvableRow(t *testing.T) {
+	requireJQ(t)
+	for _, tc := range []struct {
+		name string
+		rows string
+	}{
+		{"leading claim", federatedInProgressRows(federatedServableRow, federatedUnresolvableRow)},
+		{"behind a gated claim", federatedInProgressRows(federatedHeldWinnerRow, federatedBlockedWinnerRow, federatedServableRow, federatedUnresolvableRow)},
+	} {
+		for _, q := range federatedInProgressQueries() {
+			t.Run(tc.name+"/"+q.name, func(t *testing.T) {
+				if got := runFederatedInProgressWindow(t, q.command, tc.rows); !slices.Equal(got, []string{"gcs-servable"}) {
+					t.Fatalf("served %v, want the resumable claim gcs-servable", got)
+				}
+			})
+		}
+	}
+}
+
+// TestFederatedInProgressTierFailsOnAnUnresolvableRowAheadOfTheCut is the
+// fail-loud half: a claim whose blockers cannot be resolved, at or ahead of the
+// first claim the tier could serve, may be the claim to resume, so the query
+// fails, naming it, rather than fall through and hand the session fresh work.
+func TestFederatedInProgressTierFailsOnAnUnresolvableRowAheadOfTheCut(t *testing.T) {
+	requireJQ(t)
+	for _, tc := range []struct {
+		name string
+		rows string
+	}{
+		{"leading row", federatedInProgressRows(federatedUnresolvableRow, federatedServableRow)},
+		{"behind a gated claim", federatedInProgressRows(federatedBlockedWinnerRow, federatedUnresolvableRow, federatedServableRow)},
+	} {
+		for _, q := range federatedInProgressQueries() {
+			t.Run(tc.name+"/"+q.name, func(t *testing.T) {
+				res := runGeneratedQuery(t, q.command, map[string]string{
+					"GC_SESSION_ID":            "sess-1",
+					"FAKE_GC_IN_PROGRESS_ROWS": tc.rows,
+				}, fakeGCInProgressWindow)
+				if res.exit == 0 {
+					t.Fatalf("query exited 0 with %q; an unresolvable claim ahead of the cut must fail it", res.stdout)
+				}
+				if !strings.Contains(res.stderr, "gcr-unresolvable") {
+					t.Fatalf("stderr = %q, want the unresolvable claim named", res.stderr)
+				}
+			})
+		}
+	}
+}
+
+// TestFederatedWorkQueryServesTheServableStepBehindAGraphAnchor pins the same
+// window on the anchor path. The combined work query defers an assigned graph
+// workflow root and reads the window again for an ordinary claim; that pick has
+// to skip a gated step too, or the root is served while a step the session can
+// resume sits behind the gated one. The standalone tier still serves the root.
+func TestFederatedWorkQueryServesTheServableStepBehindAGraphAnchor(t *testing.T) {
+	requireJQ(t)
+	rows := federatedInProgressRows(federatedAnchorRow, federatedBlockedStepRow, federatedServableRow)
+	for _, q := range federatedInProgressQueries() {
+		t.Run(q.name, func(t *testing.T) {
+			want := []string{"gcs-servable"}
+			if q.servesAnchor {
+				want = []string{"gc-root"}
+			}
+			if got := runFederatedInProgressWindow(t, q.command, rows); !slices.Equal(got, want) {
+				t.Fatalf("served %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestFederatedInProgressTierServesUnparseableOutputUnchanged pins that the
+// window's narrowing fails open like the serve gate after it: reader output jq
+// cannot parse is served as printed, never dropped, so a log-prefixed answer
+// cannot disable crash recovery.
+func TestFederatedInProgressTierServesUnparseableOutputUnchanged(t *testing.T) {
+	requireJQ(t)
+	const unparseable = `gc: log line [{"id":"gcs-servable","status":"in_progress"}]`
+	fakeGC := `#!/bin/sh
+case "$1" in
+  ready) printf '%s' '` + unparseable + `' ;;
+  *) printf '[]' ;;
+esac
+`
+	a := &Agent{Name: "worker"}
+	res := runGeneratedQuery(t, a.EffectiveAssignedInProgressQueryFor(federatedTopology()), map[string]string{"GC_SESSION_ID": "sess-1"}, fakeGC)
+	if res.exit != 0 {
+		t.Fatalf("query exited %d; stderr=%s", res.exit, res.stderr)
+	}
+	if got := strings.TrimSpace(res.stdout); got != unparseable {
+		t.Fatalf("served %q, want the reader's unparseable output unchanged %q", got, unparseable)
 	}
 }

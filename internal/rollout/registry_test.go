@@ -192,8 +192,8 @@ func TestDefaultsDoNotDrift(t *testing.T) {
 		t.Errorf("config accessor formula_v2 default = false, want true")
 	}
 
-	// ops.content, ops.control, ops.lifecycle: Mode gates, default Off; the
-	// zero [ops] table (no accessor) resolves each to off.
+	// ops.content, ops.control, ops.lifecycle: Mode gates, default Auto
+	// (D-GATES, OJ-8); the zero [ops] table (no accessor) resolves each to auto.
 	unsetOps, err := Resolve(&config.City{}, ResolveOptions{LookupEnv: func(string) (string, bool) { return "", false }})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -208,14 +208,14 @@ func TestDefaultsDoNotDrift(t *testing.T) {
 		{keyOpsLifecycle, def.OpsLifecycle(), unsetOps.OpsLifecycle()},
 	} {
 		spec := byKey[g.key]
-		if spec.Default.Mode == nil || *spec.Default.Mode != Off {
-			t.Errorf("%s Spec.Default = %v, want Off", g.key, spec.Default.Mode)
+		if spec.Default.Mode == nil || *spec.Default.Mode != Auto {
+			t.Errorf("%s Spec.Default = %v, want Auto", g.key, spec.Default.Mode)
 		}
-		if g.def != Off {
-			t.Errorf("defaultFlags %s = %q, want off", g.key, g.def)
+		if g.def != Auto {
+			t.Errorf("defaultFlags %s = %q, want auto", g.key, g.def)
 		}
-		if g.res != Off {
-			t.Errorf("Resolve of an empty [ops] %s = %q, want off", g.key, g.res)
+		if g.res != Auto {
+			t.Errorf("Resolve of an empty [ops] %s = %q, want auto", g.key, g.res)
 		}
 	}
 }

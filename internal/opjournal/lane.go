@@ -26,6 +26,11 @@ const (
 	MaxFailures = 5
 	// DefaultLeaseTTL is a Take's lease when the executor declares none.
 	DefaultLeaseTTL = 2 * time.Minute
+	// RestartLeaseTTL is the shortest lease a Take of an interrupt with
+	// on_failure restart holds: a restart, once decided, runs apart from
+	// the effect's context for up to two minutes, so the lease covers one
+	// decided well into the effect.
+	RestartLeaseTTL = DefaultLeaseTTL + 2*time.Minute
 	// MinLeaseTTL is the shortest lease an executor may declare.
 	MinLeaseTTL = 10 * time.Second
 	// LeaseSkew is the allowance a lane that does not hold a lease adds
@@ -142,6 +147,26 @@ type Caps struct {
 	// runtime command (T3 protocol 2's restart_active, DES-O1 §10.3); the
 	// executor must implement FusedNowExecutor.
 	FusedNow bool
+	// ContentOnly says this host runs no control: a pass under it takes no
+	// interrupt, respond or deliver-now unit, which wait not_live for a
+	// lane host that runs control, and no content while such a control op
+	// waits, which waits blocked behind it (I10). Rule closes still run.
+	// The zero value runs control. The CLI's inline pass sets it: its lease
+	// is too short for an interrupt's waits, and it hosts neither the
+	// interrupt record nor a turn observer.
+	ContentOnly bool
+}
+
+// takeLeaseTTL is the lease a Take of ops under c holds: c's, raised to
+// RestartLeaseTTL when an interrupt among ops restarts on failure.
+func takeLeaseTTL(c Caps, ops []entry) time.Duration {
+	ttl := c.leaseTTL()
+	for _, e := range ops {
+		if e.op.Kind == KindInterrupt && e.op.Policy.Interrupt.OnFailure == OnFailureRestart {
+			return max(ttl, RestartLeaseTTL)
+		}
+	}
+	return ttl
 }
 
 // leaseTTL is the lease a Take under c holds.
@@ -181,6 +206,14 @@ type Probe struct {
 	Running   bool
 	// Boundary is whether the runtime is idle at input.
 	Boundary Tri
+	// BoundaryAt is the instant a closed Boundary opens by itself: a
+	// keystroke runtime's quiescence deadline, when quiescence is the only
+	// thing keeping it closed. Zero is unknown, and the host's busy backoff
+	// (Busy) finds the boundary. Content that waits busy (WaitBusy) for a
+	// BoundaryAt still ahead puts it in PassResult.Next, so the pass that
+	// follows runs at the deadline, not on the next re-probe of the grid.
+	// Read only with Boundary no.
+	BoundaryAt time.Time
 	// Turn is the turn running at the probe, "" when unknown.
 	Turn     string
 	TurnLive Tri
@@ -367,6 +400,10 @@ type Rejected struct {
 	// recorded as the outcome's Result.Turn: an interrupt whose turn was
 	// not seen to end (failed{no_boundary}) names the turn it sent into.
 	Turn string
+	// Cause, when set, is why, recorded as the op's last error: a restart
+	// whose start failed (failed{restart_not_started}) keeps the start's
+	// error.
+	Cause error
 }
 
 // Unknown says the effect may have happened.
@@ -495,7 +532,10 @@ type PassResult struct {
 	// More: something else is eligible now; pass again at once.
 	More bool
 	// Next is the earliest time a waiting op can change by itself, always
-	// after the instant the pass planned at; zero means none.
+	// after the instant the pass planned at; zero means none. It includes
+	// the deadline of a busy boundary that names one (Probe.BoundaryAt), so a
+	// Busy pass with a Next is passed again at the deadline, a wait the
+	// host's backoff only bounds from above.
 	Next time.Time
 }
 

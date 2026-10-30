@@ -85,12 +85,27 @@ type backstopHoldObserver interface {
 
 // Engine-level hold reasons passed to backstopHoldObserver.observeHold.
 const (
-	backstopHoldRuntimeNotRunning = "runtime_not_running"
-	backstopHoldRevalidate        = "revalidate_hold"
+	backstopHoldRuntimeNotRunning  = "runtime_not_running"
+	backstopHoldRevalidate         = "revalidate_hold"
+	backstopHoldPendingInteraction = "pending_interaction"
 	// backstopHoldContentHeld is a conversation an operator holds
 	// (backstopContentHeld) when the engine would act on it.
 	backstopHoldContentHeld = "content_held"
 )
+
+// pendingInteractionBlocked reports whether the session shows a pending
+// interaction (a permission prompt or an AskUserQuestion dialog), which a
+// typed nudge would answer. A probe that errors or a runtime with no
+// interactions is not blocked: the nudge's own guard still refuses, so this
+// look only spares the attempt a refused delivery would otherwise spend.
+func pendingInteractionBlocked(sp runtime.Provider, sessName string) bool {
+	ip, ok := pendingInteractionProvider(sp).(runtime.InteractionProvider)
+	if !ok {
+		return false
+	}
+	pending, err := ip.Pending(sessName)
+	return err == nil && pending != nil
+}
 
 func observeBackstopHold(pred backstopPredicate, store beads.Store, s *beads.Bead, reason string, stdout io.Writer) {
 	if ho, ok := pred.(backstopHoldObserver); ok {
@@ -305,6 +320,13 @@ func runNudgeBackstop(
 				clearBackstop(pred, store, s, label, stdout)
 				continue
 			case backstopResolutionOutstanding:
+				// Held before reserve so the open dialog costs no attempt. A
+				// dialog that opens after this look still spends one attempt
+				// on a refused delivery.
+				if pendingInteractionBlocked(sp, sessName) {
+					observeBackstopHold(pred, store, s, backstopHoldPendingInteraction, stdout)
+					continue
+				}
 				clearBackstopHold(pred, store, s, stdout)
 				// Deliver below.
 			default:

@@ -131,6 +131,7 @@ const (
 	drainReminderHoldExhausted     = "attempts_exhausted"
 	drainReminderHoldAckUnknown    = "ack_unreadable"
 	drainReminderHoldContentHeld   = "content_held"
+	drainReminderHoldPending       = "pending_interaction"
 )
 
 // drainReminderLabel prefixes this pass's journal lines so they are greppable
@@ -208,7 +209,7 @@ func maybeRemindDrainingSession(
 		return drainReminderHeld
 	}
 
-	if outcome, proceed := drainReminderQuietHold(sp, store, info, name, due.now); !proceed {
+	if outcome, proceed := drainReminderQuietHold(sp, store, info, name, due.now, stdout); !proceed {
 		return outcome
 	}
 
@@ -487,7 +488,7 @@ func drainReminderContentHeld(due drainReminderDue) bool {
 // a turn is answering its own drain; an unreadable signal is not evidence it is
 // not). proceed is false when one of those holds, carrying the outcome to return.
 // An attachment probe that cannot tell holds under its own reason.
-func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info sessions.Info, name string, now time.Time) (drainReminderOutcome, bool) {
+func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info sessions.Info, name string, now time.Time, stdout io.Writer) (drainReminderOutcome, bool) {
 	if !sp.IsRunning(name) {
 		return drainReminderSkipped, false // the stop took after all; the finalizer owns it
 	}
@@ -505,6 +506,17 @@ func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info session
 	}
 	if now.Sub(activity) < drainReminderGrace {
 		noteDrainReminderHold(store, info, drainReminderHoldBusy)
+		return drainReminderHeld, false
+	}
+	// A reminder typed into an open dialog (a permission prompt or an
+	// AskUserQuestion question) would answer it, and a refused attempt still
+	// spends budget, so hold before the marker is written.
+	if pendingInteractionBlocked(sp, name) {
+		if noteDrainReminderHold(store, info, drainReminderHoldPending) {
+			fmt.Fprintf(stdout, //nolint:errcheck // best-effort
+				"%s: holding the drain reminder for %s: it is waiting on a dialog that is answered in the terminal\n",
+				drainReminderLabel, name)
+		}
 		return drainReminderHeld, false
 	}
 	return drainReminderDelivered, true

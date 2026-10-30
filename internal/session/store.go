@@ -831,7 +831,7 @@ func (s *Store) CloseWithMetadataIfMatch(id string, decide func(Info, PersistedR
 // is returned unwrapped so Close can fall back. A non-nil guard vets every open
 // row the loop is about to close, the first read and each re-read alike; its
 // error aborts the close before the write.
-func (s *Store) closeAtomically(closer beads.AtomicConditionalCloser, bead beads.Bead, patch MetadataPatch, guard func(beads.Bead) error) (bool, error) {
+func (s *Store) closeAtomically(closer beads.AtomicConditionalCloser, bead beads.Bead, patch MetadataPatch, attempts int, guard func(beads.Bead) error) (bool, error) {
 	id := bead.ID
 	var conflict error
 	for attempt := 1; ; attempt++ {
@@ -850,8 +850,8 @@ func (s *Store) closeAtomically(closer beads.AtomicConditionalCloser, bead beads
 			return false, fmt.Errorf("closing session %q: %w", id, err)
 		}
 		conflict = err
-		if attempt == terminalCloseMaxAttempts {
-			return false, fmt.Errorf("closing session %q: %w %d times: %w", id, errCloseContended, terminalCloseMaxAttempts, conflict)
+		if attempt == attempts {
+			return false, fmt.Errorf("closing session %q: %w %d times: %w", id, errCloseContended, attempts, conflict)
 		}
 		bead, err = s.validatedBead(id)
 		if err != nil {
@@ -869,6 +869,15 @@ type CommitOpt func(*commitOpts)
 type commitOpts struct {
 	lease         *RuntimeLease
 	pastKillFence bool
+	attempts      int
+}
+
+// CommitAsOperator bounds a close's lost fences at operatorSuspendAttempts
+// instead of terminalCloseMaxAttempts: an operator's close stops the runtime
+// before it commits, so it competes with every controller write the tick
+// after the stop makes to the row, as an operator's suspend does.
+func CommitAsOperator() CommitOpt {
+	return func(o *commitOpts) { o.attempts = operatorSuspendAttempts }
 }
 
 // CommitUnder makes a close land only while every row it reads still records
@@ -898,8 +907,9 @@ func CommitPastKillFence() CommitOpt {
 // SQLite with a revision column, FileStore, a cache over one), terminal and
 // the closed status commit as ONE write fenced on the revision read, which
 // also clears the runtime lease record: a lost fence re-reads and checks
-// again, up to terminalCloseMaxAttempts, then CommitContended with the row
-// still open. It never degrades to a split write.
+// again, up to terminalCloseMaxAttempts (operatorSuspendAttempts under
+// CommitAsOperator), then CommitContended with the row still open. It never
+// degrades to a split write.
 //
 // Other stores (BdStore, the exec store, plain MemStore, a legacy SQLite
 // layout, conditional writes disabled), and a store that refuses the closer
@@ -920,7 +930,7 @@ func (s *Store) CommitClose(d Decided, terminal MetadataPatch, now time.Time, op
 			UnmintDisposition(d.info.ID, terminal) // the close did not land
 		}
 	}()
-	var o commitOpts
+	o := commitOpts{attempts: terminalCloseMaxAttempts}
 	for _, opt := range opts {
 		opt(&o)
 	}
@@ -948,7 +958,7 @@ func (s *Store) CommitClose(d Decided, terminal MetadataPatch, now time.Time, op
 		return nil
 	}
 	if closer, ok := beads.AtomicConditionalCloserFor(s.store); ok {
-		closed, err := s.closeAtomically(closer, bead, terminal, guard)
+		closed, err := s.closeAtomically(closer, bead, terminal, o.attempts, guard)
 		switch {
 		case closeRefusals[err] != 0:
 			return closeRefusals[err], nil
@@ -1069,7 +1079,7 @@ func (s *Store) RollbackPendingCreateAtomicallyUnder(ctx context.Context, expect
 		if bead.Status == "closed" {
 			return nil
 		}
-		closed, err = s.closeAtomically(closer, bead, closePatch, func(open beads.Bead) error {
+		closed, err = s.closeAtomically(closer, bead, closePatch, terminalCloseMaxAttempts, func(open beads.Bead) error {
 			if !lease.CanRollback(LeaseFromInfo(infoFromPersistedBead(open))) || (held != nil && !held.HoldsMeta(open.Metadata)) {
 				return errPendingCreateRollbackSuperseded
 			}

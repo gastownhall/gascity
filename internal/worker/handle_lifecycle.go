@@ -115,6 +115,36 @@ func (h *SessionHandle) Reset(ctx context.Context) (err error) {
 	return err
 }
 
+// ResetFenced is Reset for a request made from inside the session: it records
+// the restart only while the session row still records the caller's
+// incarnation, instanceToken being the caller's GC_INSTANCE_TOKEN
+// (session.Manager.RequestFreshRestartFenced). casOnly reports whether the
+// city records only by compare-and-swap (a v2 city); nil allows the checked
+// write. instanceToken is never logged.
+func (h *SessionHandle) ResetFenced(ctx context.Context, instanceToken string, casOnly func() bool) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationReset)
+	defer func() { event.finish(err) }()
+
+	id := h.currentSessionID()
+	if id == "" {
+		err = fmt.Errorf("%w: reset requires an existing bead-backed session", ErrOperationUnsupported)
+		return err
+	}
+	err = h.manager.RequestFreshRestartFenced(id, instanceToken, casOnly)
+	return err
+}
+
+// CheckResetFenced reports ResetFenced's decision on a fresh read of the
+// session row, writing nothing (session.Manager.CheckFreshRestartFenced).
+// instanceToken is never logged.
+func (h *SessionHandle) CheckResetFenced(_ context.Context, instanceToken string, casOnly func() bool) error {
+	id := h.currentSessionID()
+	if id == "" {
+		return fmt.Errorf("%w: reset requires an existing bead-backed session", ErrOperationUnsupported)
+	}
+	return h.manager.CheckFreshRestartFenced(id, instanceToken, casOnly)
+}
+
 // Stop suspends the worker runtime while preserving conversation state.
 //
 // This carries OPERATOR intent: it has targeted, single-session callers (the

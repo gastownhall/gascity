@@ -191,6 +191,9 @@ type buildDoctorChecksOpts struct {
 	// out and the probe's result cannot affect warmup output — it would only
 	// add up to doctorBeadStorePreflightTimeout of startup latency.
 	SkipStorePreflight bool
+	// Warmup builds the checks for gc start's warm-up scan: checks that
+	// would do slow work (the bd command-tree walk) report from caches only.
+	Warmup bool
 	// RolloutFlags is the on-disk rollout-gate snapshot doctor renders; RolloutResolveErr
 	// is set when resolving it failed (an out-of-enum config value).
 	RolloutFlags      rollout.Flags
@@ -294,6 +297,13 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(newDoltDriftCheck(cityPath, cfg))
 		}
 		register(doctor.NewConfigValidCheck(cfg))
+		// A split city's gc bd refuses everything when the scope's bd matches
+		// no pinned command-tree inventory (bd_inventory_trust.go).
+		if opts.Warmup {
+			register(newWarmupBdInventoryCheck(cityPath, cfg))
+		} else {
+			register(newBdInventoryCheck(cityPath, cfg))
+		}
 		register(doctor.NewLegacySuspendedFieldCheck(cfg))
 		reconcilerCheck = newSessionReconcilerDoctorCheck(cfg, reconcilerModeLookupEnv)
 		register(reconcilerCheck)
@@ -305,11 +315,16 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		}
 		// The ops-recording line sits with the rollout gates it reports on, so
 		// it runs before the bead-store preflight and opens its own store
-		// rather than the preflight's shared factory. With every ops gate off
-		// (the default) the check reads at most one op row, and scans for
-		// expired legacy ops only once that read finds one; during a store
-		// outage it reports the outage too, beside the preflight's line.
-		registerCityStoreCheck(newOpsRecordingDoctorCheck(cityPath, cfg, opts.RolloutFlags, opts.RolloutResolveErr))
+		// rather than the preflight's shared factory. With every ops gate off,
+		// or auto by default over a store the default does not record on (not
+		// SQLite, or unable to record ops), the check reads at most one op
+		// row, and scans for expired legacy ops only once that read finds
+		// one; during a store outage it reports the outage too, beside the
+		// preflight's line. It also counts op rows (one bd read per bd scope
+		// the store gate lets doctor read) and, on a scope holding any, reads
+		// the purge and prune help and the types.retained setting, as the
+		// core reaper does before it purges.
+		registerCityStoreCheck(newOpsRecordingDoctorCheck(cityPath, cfg, opts.RolloutFlags, opts.RolloutResolveErr, storeGate.Skipped))
 		registerCityStoreCheck(newConversationLanesDoctorCheck(cityPath, cfg))
 		register(doctor.NewConfigRefsCheck(cfg, cityPath))
 		register(doctor.NewStaleLocalPackDirCheck(cfg.Packs, cfg.Imports, cfg.DefaultRigImports, cityPath, cfg.Rigs...))
@@ -465,6 +480,9 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newCensusOwnerLivenessCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newRouteRecoveryQuarantineCheck(cfg, cityPath, storeFactory))
+			registerCityStoreCheck(newCrossStoreGatesCheck(cfg, cityPath, storeFactory))
+			registerCityStoreCheck(newStorageRigsCheck(cfg, cityPath))
+			registerCityStoreCheck(newDanglingBlockingEdgesCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newHoldLabelRoutedToCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newPoolIdleRoutedWorkCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newV2DemandMigrationsCheck(cfg, cityPath, storeFactory))

@@ -115,7 +115,8 @@ type WaitInfo struct {
 	RegisteredEpoch string
 	// DeliveryAttempt is the current delivery attempt counter (metadata delivery_attempt).
 	DeliveryAttempt string
-	// NudgeID is the shadow wait-nudge ID once dispatched (metadata nudge_id).
+	// NudgeID is the wait nudge's queue shadow ID, or its lane notice's op ID,
+	// once dispatched (metadata nudge_id).
 	NudgeID string
 	// ExpiresAt is the raw RFC3339 expiry string kept verbatim; consumers parse
 	// it and tolerate malformed values (metadata expires_at).

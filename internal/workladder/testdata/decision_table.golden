@@ -15,3 +15,8 @@
 | claim/started, >= 6, recycles 0 < R | recycle (keep claim) + alert started_recycled; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
 | claim/started, >= 6, recycles 1 = R | alert started_unanswered + nudge 7; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
 | claim/escalated | nudge 10; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
+| claim/started, attempts < 6, its notice pending | -; next now | -; next now | -; next now | -; next now | -; next now |
+| claim/claimed, attempts >= 3, its notice pending | -; next now | -; next now | -; next now | -; next now | -; next now |
+| claim/started, attempts < 6, another's notice pending | -; next now | -; next now | -; next now | -; next now | -; next now |
+| claim/claimed, attempts >= 3, another's notice pending | release; next - | -; next now | -; next now | -; next now | -; next now |
+| claim/started, >= 6, recycles 0 < R, another's notice pending | recycle (keep claim) + alert started_recycled; next 1h0m0s | -; next now | -; next now | -; next now | -; next now |

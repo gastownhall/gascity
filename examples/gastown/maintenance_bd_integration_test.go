@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // These tests drive the shipped maintenance orders against REAL bd scopes of
@@ -83,6 +85,9 @@ func newBdTopologyCity(t *testing.T, bd string) *bdTopologyCity {
 			t.Fatal(err)
 		}
 	}
+	if err := testutil.SeedDoltGlobalConfig(home); err != nil {
+		t.Fatal(err)
+	}
 	for _, entry := range os.Environ() {
 		key := entry[:strings.IndexByte(entry, '=')]
 		if strings.HasPrefix(key, "BEADS_") || strings.HasPrefix(key, "BD_") || strings.HasPrefix(key, "GC_") ||
@@ -108,6 +113,12 @@ func newBdTopologyCity(t *testing.T, bd string) *bdTopologyCity {
 		"DOLT_ESCALATE_SCRIPT="+filepath.Join(c.binDir, "escalate.sh"),
 		"GC_CALL_LOG="+c.gcLog,
 	)
+	// Every HTTPS request a child makes goes to a normally unroutable proxy. A
+	// proxied scope's `bd init` probes `dolt version`, whose update check is a
+	// network call unless HOME's dolt config disables it; on a healthy network
+	// that call returns in 0.2 s and hides a missing config, so on most hosts
+	// the slow network is reproduced instead of waited for.
+	c.env = append(c.env, testutil.UnroutableHTTPSProxyEnv()...)
 	writeExecutable(t, filepath.Join(c.binDir, "escalate.sh"), "#!/bin/sh\nprintf 'ESCALATION %s\\n' \"$*\" >> \""+c.gcLog+"\"\n")
 	t.Cleanup(c.stopProcesses)
 	return c
@@ -289,8 +300,12 @@ func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
-// stopProcesses kills the bd proxies and Dolt children this fixture's proxied
-// scopes started, found through their own pidfiles.
+// stopProcesses stops the bd proxies and Dolt children this fixture's proxied
+// scopes started, found through their own pidfiles, and waits for each to
+// exit. It runs before t.TempDir's removal (cleanups run last-in, first-out),
+// so no process may outlive it: a Dolt still shutting down writes into
+// .beads/dolt/.dolt/noms while the removal walks it, and the removal fails
+// with "directory not empty" (ga-urgs30).
 func (c *bdTopologyCity) stopProcesses() {
 	for _, s := range c.scopes {
 		if s.proxied {
@@ -300,9 +315,12 @@ func (c *bdTopologyCity) stopProcesses() {
 }
 
 // signalScopeProcesses signals the processes a proxied scope's pid records
-// name: the proxy (proxy.pid) and its dolt backend (proxy-child.pid).
+// name, its dolt backend (proxy-child.pid) and then the proxy (proxy.pid),
+// and waits for each to exit before the next: a proxy signaled first shuts
+// its backend down itself, which can take it many seconds. A process still
+// alive after scopeProcessExitWait is killed.
 func (c *bdTopologyCity) signalScopeProcesses(s bdTopologyScope, sig syscall.Signal) {
-	for _, name := range []string{"proxy.pid", "proxy-child.pid"} {
+	for _, name := range []string{"proxy-child.pid", "proxy.pid"} {
 		data, err := os.ReadFile(filepath.Join(s.dir, ".beads", "dolt", name))
 		if err != nil {
 			continue
@@ -313,8 +331,35 @@ func (c *bdTopologyCity) signalScopeProcesses(s bdTopologyScope, sig syscall.Sig
 		if json.Unmarshal(data, &rec) != nil || rec.PID <= 1 {
 			continue
 		}
-		_ = syscall.Kill(rec.PID, sig)
+		if syscall.Kill(rec.PID, sig) != nil {
+			continue
+		}
+		if !waitProcessExit(rec.PID, scopeProcessExitWait) {
+			c.t.Logf("%s %d did not exit within %s of %s; killing it", name, rec.PID, scopeProcessExitWait, sig)
+			_ = syscall.Kill(rec.PID, syscall.SIGKILL)
+			_ = waitProcessExit(rec.PID, scopeProcessExitWait)
+		}
 	}
+}
+
+// scopeProcessExitWait bounds the wait for a signaled scope process to exit.
+const scopeProcessExitWait = 30 * time.Second
+
+// waitProcessExit polls until pid no longer exists, for at most bound, and
+// reports whether it exited. The processes are bd's daemons, not this test's
+// children, so there is no Wait to call; once their parent has exited they
+// are reaped by init, and kill(pid, 0) then fails.
+func waitProcessExit(pid int, bound time.Duration) bool {
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	deadline := time.Now().Add(bound)
+	for syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			return false
+		}
+		<-tick.C
+	}
+	return true
 }
 
 // bdProxyStartTimeout is how bd reports a proxied first start that missed its

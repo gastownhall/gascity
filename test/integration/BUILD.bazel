@@ -84,6 +84,7 @@ go_test(
         "huma_binary_test.go",
         "integration_test.go",
         "mail_test.go",
+        "prompt_query_federation_test.go",
         "review_check_scripts_test.go",
         "review_formula_test.go",
         "skill_lifecycle_test.go",
@@ -116,7 +117,7 @@ go_test(
             # go-test CI installs via install-bd-archive.sh /
             # install-dolt-archive.sh.
             "@bd_bin_v1_3_2//:bd",
-            "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
+            "@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt",
         ],
         "//conditions:default": [],
     }),
@@ -124,6 +125,7 @@ go_test(
     deps = [
         "//internal/api/apicontract",
         "//internal/bazeltest",
+        "//internal/beadmeta",
         "//internal/beads",
         "//internal/beads/beadstest",
         "//internal/beads/contract",

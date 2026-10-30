@@ -138,7 +138,7 @@ func TestSessionStopInFlightReturnsConflict(t *testing.T) {
 
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { firstDone <- postSessionAction(t, h, url, "stop-1", "") }()
-	<-blocking.entered
+	requireProviderEntered(t, blocking.entered, firstDone)
 
 	inFlightDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { inFlightDone <- postSessionAction(t, h, url, "stop-1", "") }()
@@ -279,7 +279,7 @@ func TestSessionWakeInFlightReturnsConflict(t *testing.T) {
 
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { firstDone <- postSessionAction(t, h, url, "wake-1", "") }()
-	<-state.entered
+	requireProviderEntered(t, state.entered, firstDone)
 
 	inFlightDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { inFlightDone <- postSessionAction(t, h, url, "wake-1", "") }()

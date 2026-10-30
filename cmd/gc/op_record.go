@@ -19,17 +19,22 @@ package main
 // nudge and a mail notify under the caller's principal, the notify keyed by
 // its cause (mail:<message id>), and gc session submit under the operator on
 // its API and local paths alike. Submit mints its key before it calls the
-// API, which records the op as legacy:api; a fallback after a lost answer
-// proposes that op id locally, so it replays a closed op and reports an open
-// one as accepted rather than delivering again. A queued delivery closes its
-// op succeeded{via: legacy.queued} at enqueue (§8.5). The delivered text is
-// the legacy path's in every mode (I11).
+// API, which records the op as legacy:api, or proposes it as a lane op when
+// its lane host executes message; a fallback after a lost answer proposes
+// that op id locally, so it replays a closed op and reports an open one as
+// accepted rather than delivering again. That is submit's path only while
+// the CLI's config does not list message: in a city that lists it, submit
+// accepts the message as the API does (conversation_lane_submit.go), and
+// records nothing here. A queued delivery closes its op succeeded{via:
+// legacy.queued} at enqueue (§8.5). The delivered text is the legacy path's
+// in every mode (I11).
 //
 // Output (DES-O0API §8.3): stdout stays the command's own; JSON results gain
 // op_id, key and replayed when an op backs the run. The key, minted when --key
 // is absent, is printed only in JSON and on failures, never on a successful
-// plain-text run, except submit's report that the API accepted the message,
-// which names the key a rerun reports its outcome under. A replayed success
+// plain-text run, except submit's report, on its legacy path, that the API
+// accepted the message, which names the key a rerun reports its outcome
+// under. A replayed success
 // prints the command's success output rebuilt from the op, so what only the
 // first run saw is absent from its JSON (close's and wake's
 // wait_nudges_withdrawn, suspend's mode), and names the op on stderr, with any
@@ -134,6 +139,19 @@ var cliOpenOpStore = func(sessStore beads.Store) (*opjournal.Store, error) {
 	return opjournal.NewStore(beads.SessionStore{Store: sessStore}, cliOpClock)
 }
 
+// cliOpenOpStoreUnder is cliOpenOpStore for a gate that is auto only by its
+// builtin default when builtinAuto is set: such a gate records only over a
+// SQLite sessions store, so over any other it answers
+// *opjournal.NotRecordedByDefaultError without opening or probing anything.
+func cliOpenOpStoreUnder(builtinAuto bool, sessStore beads.Store) (*opjournal.Store, error) {
+	if builtinAuto {
+		if err := opjournal.CheckRecordsByDefault(beads.SessionStore{Store: sessStore}); err != nil {
+			return nil, err
+		}
+	}
+	return cliOpenOpStore(sessStore)
+}
+
 // cliOpClock is the clock CLI ops are proposed and closed under. A var so
 // tests can move past an op's finish_by.
 var cliOpClock clock.Clock = clock.Real{}
@@ -169,6 +187,13 @@ type cliOpRequest struct {
 	kind opjournal.Kind
 	// key is --key; empty mints one.
 	key string
+	// keyNamespace, when set, is the namespace the verb keeps key in
+	// (legacyop.Request.KeyNamespace): the in-session restart requests
+	// record restart{fresh} as gc session reset does, so each keeps its keys
+	// in its own, which no other restart request's key may start with, and
+	// never replays another verb's op under one --key. The command still
+	// names key as given.
+	keyNamespace string
 	// conversation is the resolved session id.
 	conversation string
 	scope        opjournal.Scope
@@ -185,6 +210,13 @@ type cliOpRequest struct {
 	// unreplayed names the execution options outside the op's digest this
 	// run was given (kill's --force); a replay says they were not reapplied.
 	unreplayed []string
+	// replaysAsSuccess, when set, decides a replayed op that did not
+	// succeed: ok replays it as the command's success after all, note
+	// following the op on the replay line. The in-session restart requests
+	// set it: their restart stops the session that asked for it, so it can
+	// stop the run before the run closes its op, which the op sweeper then
+	// closes failed{deadline_in_flight}.
+	replaysAsSuccess func(op opjournal.Op) (note string, ok bool)
 	// payload is a message op's text and causation the id of what caused it
 	// (a mail notify's message); both are empty for the lifecycle verbs.
 	payload   string
@@ -203,9 +235,20 @@ type cliOpRequest struct {
 	// after admission read it open: submit's local fallback after an API call
 	// whose answer was lost.
 	acceptsAPIOp bool
-	asJSON       bool
-	stdout       io.Writer
-	stderr       io.Writer
+	// lanePolicy, when set, is the policy the API proposes the request under
+	// as a lane op when its lane host executes message (lanesubmit.Policy).
+	// A lane op under the key is then the API's op: start admits again under
+	// this policy, so the op answers the request only when the request's
+	// digest under it is the op's, and an open one counts as the API's
+	// acceptance as an open legacy:api op does. gc session submit sets it on
+	// its legacy path, which runs only while the CLI's config does not list
+	// message: a lane op under its key is then one an API whose lane host
+	// still executes message wrote (W2, a rollback before the controller
+	// restarts). OJ-21 removes it with the legacy path.
+	lanePolicy *opjournal.Policy
+	asJSON     bool
+	stdout     io.Writer
+	stderr     io.Writer
 }
 
 // unrecordableCause is why the request cannot be recorded: its reason, with
@@ -261,12 +304,13 @@ type cliOp struct {
 // store opened lazily on sessStore. It records nothing yet.
 func newCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) *cliOp {
 	op := &cliOp{req: req, sessStore: sessStore}
+	mode, builtinAuto := op.mode(cfg)
 	op.rec = &legacyop.Recorder{
-		Mode:     op.mode(cfg),
+		Mode:     mode,
 		Executor: legacyop.ExecutorCLI,
 		Open: func() (*opjournal.Store, error) {
 			if op.opened == nil && op.openErr == nil {
-				op.opened, op.openErr = cliOpenOpStore(op.sessStore)
+				op.opened, op.openErr = cliOpenOpStoreUnder(builtinAuto, op.sessStore)
 			}
 			return op.opened, op.openErr
 		},
@@ -276,7 +320,16 @@ func newCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) *cliOp 
 		// reports a late or unrecordable close itself (finish).
 		Logger: slog.New(slog.DiscardHandler),
 
-		CrashPoints: opsFailpointState.hook(legacyop.SurfaceCLI),
+		// Under a gate that is auto only by its builtin default, a store that
+		// cannot record ops at all (a bd without --if-revision, a store with
+		// no id prefix), or one the default does not record on (not
+		// SQLite-backed, cliOpenOpStoreUnder), runs the request unrecorded
+		// without a warning, as if the gate were off: a warning there would
+		// print on every recorded command of a default city. A run that
+		// asked for a --key still warns, as it does not get the dedup it
+		// asked for.
+		QuietCannotRecord: builtinAuto && req.key == "",
+		CrashPoints:       opsFailpointState.hook(legacyop.SurfaceCLI),
 	}
 	return op
 }
@@ -320,14 +373,14 @@ func (o *cliOp) preflight() bool {
 		return false
 	}
 	if _, err := o.rec.Open(); err != nil {
-		_, aerr := o.rec.Admit(legacyop.Request{Key: o.requestKey(), Kind: o.req.kind})
+		_, aerr := o.rec.Admit(legacyop.Request{Key: o.requestKey(), KeyNamespace: o.req.keyNamespace, Kind: o.req.kind})
 		if !errors.Is(aerr, legacyop.ErrUnavailable) {
 			aerr = err
 		}
 		o.refuseAdmit(aerr)
 		return false
 	}
-	if err := o.rec.Check(legacyop.Request{Key: o.requestKey(), Payload: o.req.payload, Kind: o.req.kind}); err != nil {
+	if err := o.rec.Check(legacyop.Request{Key: o.requestKey(), KeyNamespace: o.req.keyNamespace, Payload: o.req.payload, Kind: o.req.kind}); err != nil {
 		o.refuseAdmit(err)
 		return false
 	}
@@ -369,6 +422,7 @@ func (o *cliOp) start() cliOpStart {
 		Principal:    principal,
 		Actor:        actor,
 		Key:          o.requestKey(),
+		KeyNamespace: req.keyNamespace,
 		Payload:      req.payload,
 		Causation:    req.causation,
 		Kind:         req.kind,
@@ -376,6 +430,13 @@ func (o *cliOp) start() cliOpStart {
 		Scope:        o.req.scope,
 	}
 	adm, err := rec.Admit(areq)
+	if err != nil && o.laneOpUnderKey(err) {
+		// The key names the API's lane op, recorded under the lane's policy,
+		// which a follow_up or interrupt_now records differently: it is this
+		// request when the request's digest under that policy is the op's.
+		areq.Policy = *req.lanePolicy
+		adm, err = rec.Admit(areq)
+	}
 	if err != nil {
 		switch o.apiOpState(err) {
 		case cliAPIOpOpen:
@@ -394,8 +455,12 @@ func (o *cliOp) start() cliOpStart {
 		o.warnUnrecordedKey(adm)
 		return cliOpExecute
 	}
-	if cliOpReplaysAsSuccess(adm.Op.Kind, adm.Op.Outcome) {
-		note := "replayed op " + adm.Op.ID + o.restartNote()
+	settled, success := "", cliOpReplaysAsSuccess(adm.Op.Kind, adm.Op.Outcome)
+	if !success && req.replaysAsSuccess != nil {
+		settled, success = req.replaysAsSuccess(adm.Op)
+	}
+	if success {
+		note := "replayed op " + adm.Op.ID + o.restartNote() + settled
 		if len(req.unreplayed) > 0 {
 			note += fmt.Sprintf("; %s was not reapplied (outside the op's request)", strings.Join(req.unreplayed, ", "))
 		}
@@ -421,7 +486,7 @@ func (o *cliOp) warnUnrecordedKey(adm *legacyop.Admission) {
 	if adm.Recorded || req.key == "" || o.rec.Mode != rollout.Auto {
 		return
 	}
-	if kerr := opjournal.ValidateClientKey(req.key); kerr != nil {
+	if kerr := legacyop.ValidateKey(req.kind, req.keyNamespace, req.key); kerr != nil {
 		fmt.Fprintf(req.stderr, "%s: warning: invalid --key (%v); running unrecorded, so a rerun acts again\n", req.verb, kerr) //nolint:errcheck // best-effort stderr
 		return
 	}
@@ -442,6 +507,7 @@ func (o *cliOp) principal() (principal, actor string) {
 
 // requestKey is the client key the op is admitted under: --key, else the key
 // the command minted itself (presetKey), else empty, which the recorder mints.
+// The recorder stores it in the verb's key namespace, if any.
 func (o *cliOp) requestKey() string {
 	if o.req.key != "" {
 		return o.req.key
@@ -450,7 +516,7 @@ func (o *cliOp) requestKey() string {
 }
 
 // cliAPIOp is what the op behind a busy refusal is to a request that accepts
-// an open legacy:api op (acceptsAPIOp).
+// an open legacy:api op (acceptsAPIOp), or a lane op (lanePolicy).
 type cliAPIOp int
 
 const (
@@ -458,15 +524,16 @@ const (
 	// accepts no API op, or the op does not read or another executor holds
 	// it.
 	cliAPIOpNone cliAPIOp = iota
-	// cliAPIOpOpen is the API's acceptance of the request: it runs the op.
+	// cliAPIOpOpen is the API's acceptance of the request: it runs the op,
+	// or its lane host does.
 	cliAPIOpOpen
 	// cliAPIOpClosed is an op the API closed after Admit read it open.
 	cliAPIOpClosed
 )
 
 // apiOpState reads the op behind err, a busy refusal, for a request that
-// accepts an open legacy:api op (acceptsAPIOp), and keeps it as apiOp when
-// the API holds it open.
+// accepts an open legacy:api op (acceptsAPIOp), or a lane op (lanePolicy),
+// and keeps it as apiOp when it is open.
 func (o *cliOp) apiOpState(err error) cliAPIOp {
 	var busy *legacyop.BusyError
 	if !o.req.acceptsAPIOp || !errors.As(err, &busy) {
@@ -478,13 +545,27 @@ func (o *cliOp) apiOpState(err error) cliAPIOp {
 	}
 	op, gerr := st.Get(busy.ID)
 	switch {
-	case gerr != nil || op.Executor != opjournal.ExecutorLegacyAPI:
+	case gerr != nil || !o.apiExecutes(op):
 		return cliAPIOpNone
 	case op.Status == opjournal.StatusClosed:
 		return cliAPIOpClosed
 	}
 	o.apiOp = op
 	return cliAPIOpOpen
+}
+
+// apiExecutes reports whether op is the API's for this request: a legacy:api
+// op, or a lane op when the request accepts one (lanePolicy).
+func (o *cliOp) apiExecutes(op opjournal.Op) bool {
+	return op.Executor == opjournal.ExecutorLegacyAPI || op.Executor == opjournal.ExecutorLane && o.req.lanePolicy != nil
+}
+
+// laneOpUnderKey reports whether err refuses the request's key as naming
+// another request, that request a lane op, for a request that accepts the
+// API's lane op (lanePolicy).
+func (o *cliOp) laneOpUnderKey(err error) bool {
+	var reuse *opjournal.KeyReuseError
+	return o.req.acceptsAPIOp && o.req.lanePolicy != nil && errors.As(err, &reuse) && reuse.Existing.Executor == opjournal.ExecutorLane
 }
 
 // rescopeRestartedKill scopes a kill under a client key to the earlier kill
@@ -519,7 +600,7 @@ func (o *cliOp) keyedOp(conversation, principal string) (prior opjournal.Op, fou
 	if err != nil {
 		return opjournal.Op{}, false, err
 	}
-	id, err := opjournal.DeriveID(st.Prefix(), conversation, principal, o.req.key)
+	id, err := opjournal.DeriveID(st.Prefix(), conversation, principal, legacyop.NamespacedKey(o.req.keyNamespace, o.req.key))
 	if err != nil {
 		return opjournal.Op{}, false, err
 	}
@@ -600,27 +681,28 @@ func (o *cliOp) noteReplayByID(target string) {
 }
 
 // mode is the gate mode of the op's kind, resolved from cfg and the env
-// break-glass. A gate that does not resolve (a misspelled config value) is
-// off, with a warning: a config typo never records, and never refuses. A
-// config that did not load at all leaves only the env break-glass, with a
-// warning that the config's gates were not read; a malformed env value is
-// ignored with a warning.
-func (o *cliOp) mode(cfg *config.City) rollout.Mode {
+// break-glass, and whether that mode is auto only by the gate's builtin
+// default. A gate that does not resolve (a misspelled config value) is off,
+// with a warning: a config typo never records, and never refuses. A config
+// that did not load at all leaves each gate at its builtin default unless
+// its env break-glass is set, with a warning that the config's gates were
+// not read; a malformed env value is ignored with a warning.
+func (o *cliOp) mode(cfg *config.City) (rollout.Mode, bool) {
 	if cfg == nil {
 		if o.req.cfgErr != nil {
-			fmt.Fprintf(o.req.stderr, "%s: warning: op journal: city config did not load (%v); its [ops] gates were not read, so only their environment overrides apply\n", o.req.verb, o.req.cfgErr) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(o.req.stderr, "%s: warning: op journal: city config did not load (%v); its [ops] gates were not read, so each takes its builtin default unless its environment override is set\n", o.req.verb, o.req.cfgErr) //nolint:errcheck // best-effort stderr
 		}
 		cfg = &config.City{}
 	}
 	flags, err := rollout.Resolve(cfg, rollout.ResolveOptions{LookupEnv: cliOpLookupEnv})
 	if err != nil {
 		fmt.Fprintf(o.req.stderr, "%s: warning: op journal: %v; not recording\n", o.req.verb, err) //nolint:errcheck // best-effort stderr
-		return rollout.Off
+		return rollout.Off, false
 	}
 	spec, err := opjournal.Lookup(o.req.kind)
 	if err != nil {
 		fmt.Fprintf(o.req.stderr, "%s: warning: op journal: %v; not recording\n", o.req.verb, err) //nolint:errcheck // best-effort stderr
-		return rollout.Off
+		return rollout.Off, false
 	}
 	key, mode := rollout.KeyOpsLifecycle, flags.OpsLifecycle()
 	switch spec.Class {
@@ -634,7 +716,7 @@ func (o *cliOp) mode(cfg *config.City) rollout.Mode {
 			fmt.Fprintf(o.req.stderr, "%s: warning: op journal: %s\n", o.req.verb, n.Message) //nolint:errcheck // best-effort stderr
 		}
 	}
-	return mode
+	return mode, flags.BuiltinAuto(key)
 }
 
 // cliPrincipal is the CLI's principal and actor (DES-O0API §3.3): the agent
@@ -680,7 +762,7 @@ func (o *cliOp) refuseAdmit(err error) {
 		o.refuse(cliOpCodeKeyMismatch, fmt.Sprintf("the key names a different request (%v); rerun with another --key", err), cliOpReusedID(err), o.requestKey())
 	case errors.Is(err, legacyop.ErrUnavailable):
 		o.refuse(cliOpCodeUnavailable, o.unavailableMessage(err), "", o.requestKey())
-	case o.requestKey() != "" && opjournal.ValidateClientKey(o.requestKey()) != nil:
+	case o.requestKey() != "" && legacyop.ValidateKey(o.req.kind, o.req.keyNamespace, o.requestKey()) != nil:
 		o.refuse(cliOpCodeInvalidKey, fmt.Sprintf("invalid --key (%v)", err), "", o.requestKey())
 	default:
 		o.refuse(cliOpCodeUnavailable, o.unavailableMessage(err), "", o.requestKey())
@@ -733,7 +815,9 @@ func (o *cliOp) writeFailure(code, message, opID, key string) {
 }
 
 // warnDegrade prints one warning per stage for a store failure the recorder
-// degraded past. A require-mode refusal is reported by refuse instead.
+// degraded past. A require-mode refusal is reported by refuse instead. A
+// store the builtin default treats as off never reaches it
+// (QuietCannotRecord in newCLIOp).
 func (o *cliOp) warnDegrade(d legacyop.Degrade) {
 	if d.Mode == rollout.Require && (d.Stage == legacyop.StageOpen || d.Stage == legacyop.StagePropose) {
 		return

@@ -311,7 +311,28 @@ const (
 	// gets `token: ''`, so pull requests diff with git instead of calling the
 	// pulls/files API on the shared github.token budget. Reviewed delta: one
 	// `with` input; no new job, step command or permission.
-	expectedCIExecutionHash     = "094fa149515765ad86669145929368481d2c8112e58396b4083a6947b6ec2564"
+	//
+	// Bumped again (MCP mail conformance on lock bumps): the changes job's
+	// mail filter adds .github/requirements/mcp-agent-mail.in, .overrides.txt
+	// and .txt. The mcp-mail job installs mcp_agent_mail from that lock and
+	// runs TestMCPMailConformanceLive, the only live gc <-> mcp_agent_mail
+	// test, yet #8307 (GitPython, filelock, fastmcp and opentelemetry-api
+	// bumps) merged without it running. requiredFilterPaths pins the three
+	// paths. Reviewed delta: three filter paths; no new job, step command or
+	// permission.
+	//
+	// Bumped again (eMudhra CA follow-up): the mcp-mail job's setup-python
+	// python-version moves from '3.12' to the patched '3.12.16'. Reviewed
+	// delta: one `with` input; no new job, step command or permission.
+	//
+	// Bumped again (ga-ylpbsy.55, advisory probes in their own workflow): the
+	// contract-radar-bd-head and mcp-mail jobs move, steps unchanged, to
+	// advisory-probes.yml, with the changes job's beads and mail filters and
+	// outputs that only they read. Neither was in the needs of Check or
+	// CI / required, whose needs are unchanged. Reviewed delta: two jobs, two
+	// filters and two outputs removed; no new job, trigger, step command or
+	// permission.
+	expectedCIExecutionHash     = "8d71c559b60d2715b518faf498209843132276ed3e448929e1841f082136e6cf"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -346,8 +367,10 @@ const (
 	// hard-errors on it), so it failed every night; no job may select a
 	// provider now. Reviewed delta: one job removed; no new job, trigger or
 	// permission. Then Beads v1.3.1 -> v1.3.2 (the v1.5.1 pin, merged back
-	// from hotfix/1.5.1): BD_VERSION env value only.
-	expectedNightlyExecutionHash = "a833f343b8875bf65347fcdbf42a51d20ba65ceaffc37e95e24d596059bec4d4"
+	// from hotfix/1.5.1): BD_VERSION env value only. Then Dolt 2.2.0 -> 2.6.0
+	// (the first patched Dolt release for the eMudhra CA distrust):
+	// the workflow DOLT_VERSION env value only.
+	expectedNightlyExecutionHash = "56ab9f58ed4e8b418c22d7890cd3372de3f276bdf37956322e2f1a69911205e4"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version
@@ -361,16 +384,9 @@ const (
 	expectedSetupActionHash = "2894a52d9e9e5fc4ae62402076003c6e7ee8f6ad74f53c14126ceda00b3dae70"
 )
 
+// requiredFilterPaths pins the paths each of ci.yml's changes filters must
+// keep. scripts/advisory_probes_workflow_test.go pins advisory-probes.yml's.
 var requiredFilterPaths = map[string][]string{
-	"mail": {"internal/mail/**", "contrib/mail-scripts/**"},
-	"beads": {
-		"go.mod",
-		"internal/beads/**",
-		"test/acceptance/beads_cli_contract_test.go",
-		"deps.env",
-		".github/scripts/install-bd-archive.sh",
-		"cmd/gc/init_provider_readiness.go",
-	},
 	"packs": {
 		"examples/gastown/**",
 		"internal/config/pack.go",

@@ -828,8 +828,13 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// Reserved coordination-class prefixes are a non-fatal advisory until
-	// per-class stores activate; warn but do not block startup.
+	// Reserved coordination-class prefixes refuse a split city (its binding
+	// mints in that namespace, R10) and stay a non-fatal advisory for a city
+	// that relocates nothing.
+	if err := config.ReservedPrefixSplitRefusal(cfg); err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	for _, w := range config.ReservedPrefixWarnings(cfg.Rigs, config.EffectiveHQPrefix(cfg)) {
 		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
@@ -983,6 +988,10 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		if frErr == nil {
 			recorder = fr
 			eventProv = fr
+			// Closed before the controller lock is released: Close lets the
+			// [events.mirror] copier catch up, so the mirror gets this run's
+			// last events, controller.stopped included.
+			defer fr.Close() //nolint:errcheck // best-effort at exit
 		}
 	}
 
@@ -1209,6 +1218,7 @@ func runStartWarmup(cityPath string, cfg *config.City, controllerLock *os.File, 
 		SkipManagedDoltCheck: managedDoltOpsCheckSkip(warmupCityPath, cfg, nil),
 		SkipRigDoltChecks:    skipRigDoltChecks,
 		SkipStorePreflight:   true,
+		Warmup:               true,
 	})
 	warmupOpts := warmup.WarmupOpts{
 		Checks: warmupChecks,

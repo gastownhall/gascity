@@ -19,6 +19,7 @@ nudge-unconfirmed
 dolt-topology
 dolt-drift
 config-valid
+bd-command-inventory
 legacy-suspended-field
 daemon-session-reconciler
 beads-ledger-feed
@@ -78,6 +79,9 @@ executor-identity-residue
 census-owner-liveness
 run-target-routed-to-backfill
 route-recovery-quarantine
+cross-store-gates
+storage-rigs
+dangling-blocking-edges
 hold-label-routed-to
 pool-idle-routed-work
 v2-demand-migrations

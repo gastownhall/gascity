@@ -2,6 +2,8 @@ package scripts_test
 
 import (
 	"fmt"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -13,9 +15,9 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 	const (
 		ghVersion                 = "2.96.0"
 		ghSourceRef               = "b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0"
-		doltSourceRef             = "a6690826d767743df7adf0b8bfea3830ee2c4cf6"
+		doltSourceRef             = "05e6bceb1a210a7a8d770b74b8ef4825c165c0a8"
 		ghSourceSHA256            = "a0c18c98c73f7333f73e19b3a0bf5bd18673f3dc226193ab6478b3ea1ea18f03"
-		doltSourceSHA256          = "3d7ed1a4ad464dca37228c8b069fc84c803be7ab5254534774728559492a0622"
+		doltSourceSHA256          = "8bd82ec8f9693d5e69d79fb26e361438859e4af96c48f99a40f324c0f2fc6d92"
 		doltToolchainRelease      = "20260611_0.0.5_trixie"
 		doltOptcrossX8664SHA256   = "caf703fb1cbc0c9ff9a5b506f73da6c6f5233c04a455e638cdc50267a4d0c0c0"
 		doltOptcrossAarch64SHA256 = "5635d0b38343fefb0c2b600d61c49ad9ceeaa1107bccdec8a60b1789100dc0ce"
@@ -99,6 +101,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		goModPinnedArg{"GRPC_VERSION", "google.golang.org/grpc", "v1.83.2"},
 		goModPinnedArg{"THRIFT_VERSION", "github.com/apache/thrift", "v0.24.0"},
 		goModPinnedArg{"XNET_VERSION", "golang.org/x/net", "v0.60.0"},
+		goModPinnedArg{"JOSE_VERSION", "github.com/go-jose/go-jose/v4", "v4.1.6"},
 	)
 	for _, want := range []string{
 		"ARG BD_VERSION=" + bdVersion,
@@ -114,6 +117,8 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} "`,
 		`go get "golang.org/x/net@v${XNET_VERSION}"`,
 		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/net v${XNET_VERSION} "`,
+		`go get "github.com/go-jose/go-jose/v4@v${JOSE_VERSION}"`,
+		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/go-jose/go-jose/v4 v${JOSE_VERSION} "`,
 		`CGO_ENABLED=1 go build`,
 		`-tags="gms_pure_go"`,
 		`-X main.Version=${bd_version}`,
@@ -153,14 +158,17 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	root := repoRoot(t)
 	input := readFile(t, root, ".github/requirements/mcp-agent-mail.in")
 	for _, want := range []string{
-		"gitpython>=3.1.62",
+		"gitpython>=3.1.62,<3.2",
 		"aiohttp>=3.14.4",
 		"anyio>=4.14.2",
 		"pillow>=13.0.0",
 		"mcp>=1.30.0",
 		"urllib3>=2.8.0",
 		"fsspec>=2026.6.0",
-		"litellm>=1.89.7",
+		"litellm>=1.106.3",
+		"filelock>=3.29.0,<4",
+		"opentelemetry-api>=1.45.1",
+		"dnspython>=2.9.0",
 	} {
 		if !strings.Contains(input, want) {
 			t.Errorf("mcp-agent-mail input requirements missing security floor %q", want)
@@ -170,6 +178,8 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	for _, want := range []string{
 		"cryptography>=50.0.0",
 		"pyjwt>=2.15.0",
+		"fastmcp>=3.4.10",
+		"authlib>=1.9.1",
 	} {
 		if !strings.Contains(overrides, want) {
 			t.Errorf("mcp-agent-mail overrides missing security floor %q", want)
@@ -187,7 +197,13 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"pyjwt==2.15.1 \\",
 		"urllib3==2.8.0 \\",
 		"fsspec==2026.6.0 \\",
-		"litellm==1.89.7 \\",
+		"litellm==1.106.3 \\",
+		"fastmcp==3.4.10 \\",
+		"fastmcp-slim==3.4.10 \\",
+		"filelock==3.29.0 \\",
+		"opentelemetry-api==1.45.1 \\",
+		"authlib==1.9.1 \\",
+		"dnspython==2.9.0 \\",
 		// Lock-only CVE bumps: no input floor, so this pin is their only guard.
 		"bleach==6.4.0 \\",
 		"h2==4.4.1 \\",
@@ -197,6 +213,172 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	} {
 		if !strings.Contains(lock, want) {
 			t.Errorf("mcp-agent-mail hashed lock missing patched dependency %q", want)
+		}
+	}
+}
+
+// mcpMailLockPath is the hashed lock Dockerfile.mail installs.
+const mcpMailLockPath = ".github/requirements/mcp-agent-mail.txt"
+
+// mcpMailFilelockExitRegression is the script that reproduces filelock 4.x
+// truncating the mail database at interpreter exit.
+const mcpMailFilelockExitRegression = ".github/scripts/mcp-mail-filelock-exit-regression.py"
+
+// lockPinnedVersion returns the version the hashed lock pins for dist, matching
+// the "name==version \" line uv writes. Names compare case-insensitively.
+func lockPinnedVersion(t *testing.T, lock, dist string) string {
+	t.Helper()
+	for _, line := range strings.Split(lock, "\n") {
+		name, rest, ok := strings.Cut(line, "==")
+		if !ok || !strings.EqualFold(name, dist) {
+			continue
+		}
+		version, _, _ := strings.Cut(rest, " ")
+		return version
+	}
+	t.Fatalf("%s does not pin %s", mcpMailLockPath, dist)
+	return ""
+}
+
+// releaseLine returns the first n numeric components of a dotted release.
+func releaseLine(t *testing.T, version string, n int) []int {
+	t.Helper()
+	parts := strings.Split(version, ".")
+	if len(parts) < n {
+		t.Fatalf("version %q has fewer than %d components", version, n)
+	}
+	line := make([]int, n)
+	for i := range line {
+		v, err := strconv.Atoi(parts[i])
+		if err != nil {
+			t.Fatalf("parsing version %q component %q: %v", version, parts[i], err)
+		}
+		line[i] = v
+	}
+	return line
+}
+
+// TestMCPMailImageHoldsFilelockAndGitPythonOnSafeLines keeps the two packages
+// #8307 moved off their safe release lines from drifting back. The deep review of
+// #8307 (https://github.com/gastownhall/gascity/pull/8307#pullrequestreview-5645840708)
+// found that:
+//   - filelock 4.x can truncate the mail SQLite database at shutdown. mcp-agent-mail's
+//     emergency cleanup (storage.cleanup_leaked_lockfile_fds) closes lock fds behind
+//     filelock's back, and 4.x's exit-time release writes "filelock/released\n" through
+//     the reused fd. mcp-mail-filelock-exit-regression.py reproduces it, and the container
+//     scan runs that script in the image.
+//   - GitPython 3.2 makes archive commits 1.5-2.9x slower. Bursts of mail then time out
+//     on the archive lock: 293-322 of 400 messages delivered, against about 395 on 3.1.x.
+//
+// The advisories the newer lines fix are unreachable here. Each is waived for the
+// pinned release in .trivyignore.yaml (TestTrivyIgnoreMCPMailWaiversNameTheLockedRelease).
+// Lift a ceiling only once the newer line has fixed its regression, and run the
+// script against the new lock when you do.
+func TestMCPMailImageHoldsFilelockAndGitPythonOnSafeLines(t *testing.T) {
+	lock := readFile(t, repoRoot(t), mcpMailLockPath)
+
+	if filelock := lockPinnedVersion(t, lock, "filelock"); releaseLine(t, filelock, 1)[0] >= 4 {
+		t.Errorf("%s pins filelock %s; filelock 4.x truncates the mail database through a reused fd at exit, so keep it below 4", mcpMailLockPath, filelock)
+	}
+	if gitpython := lockPinnedVersion(t, lock, "gitpython"); !slices.Equal(releaseLine(t, gitpython, 2), []int{3, 1}) {
+		t.Errorf("%s pins GitPython %s; GitPython 3.2 slows archive commits enough to drop mail under bursts, so keep it on 3.1.x", mcpMailLockPath, gitpython)
+	}
+}
+
+// TestContainerScanRunsMCPMailFilelockExitRegression keeps the filelock exit
+// regression running against the built gc-mcp-mail image. A text pin can say
+// which filelock the lock names; only this run shows that the image's actual
+// filelock and mcp-agent-mail leave the database intact. The workflow must also
+// rerun when the script itself changes.
+func TestContainerScanRunsMCPMailFilelockExitRegression(t *testing.T) {
+	root := repoRoot(t)
+	script := readFile(t, root, mcpMailFilelockExitRegression)
+	for _, want := range []string{"cleanup_leaked_lockfile_fds", "AsyncFileLock", "SQLite format 3"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("%s no longer exercises %q; it must drive mcp-agent-mail's own lock and cleanup and check the database header", mcpMailFilelockExitRegression, want)
+		}
+	}
+
+	workflow := readFile(t, root, ".github/workflows/container-scan.yml")
+	stepStart := strings.Index(workflow, "- name: Check MCP mail image database survives filelock exit")
+	if stepStart < 0 {
+		t.Fatal(".github/workflows/container-scan.yml has no step running the filelock exit regression in the gc-mcp-mail image")
+	}
+	step := workflow[stepStart:]
+	if next := strings.Index(step[1:], "\n      - name: "); next >= 0 {
+		step = step[:next+1]
+	}
+	for _, want := range []string{
+		"docker run --rm",
+		"--entrypoint python3",
+		"/" + mcpMailFilelockExitRegression + ":/tmp/mcp-mail-filelock-exit-regression.py:ro",
+		`"gc-mcp-mail:${IMAGE_TAG}"`,
+		"/tmp/mcp-mail-filelock-exit-regression.py",
+	} {
+		if !strings.Contains(step, want) {
+			t.Errorf("filelock exit regression step missing %q", want)
+		}
+	}
+	if strings.Contains(step, "continue-on-error") || strings.Contains(step, "|| true") {
+		t.Error("filelock exit regression step must fail the job when the database is corrupted")
+	}
+	if got := strings.Count(workflow, `- "`+mcpMailFilelockExitRegression+`"`); got != 2 {
+		t.Errorf("container-scan.yml lists %s in %d path filters, want 2 (push and pull_request)", mcpMailFilelockExitRegression, got)
+	}
+}
+
+// mcpMailSitePackages is where Dockerfile.mail's pip install puts the lock's
+// packages, and the path prefix Trivy reports for them.
+const mcpMailSitePackages = "usr/local/lib/python3.12/site-packages/"
+
+// reviewedMCPMailWaivers maps each Python-package waiver for the gc-mcp-mail
+// image to the distribution it covers. Both advisories are fixed only on the
+// lines TestMCPMailImageHoldsFilelockAndGitPythonOnSafeLines keeps the image
+// off, and neither is reachable from the image; each statement in
+// .trivyignore.yaml gives the reasoning.
+var reviewedMCPMailWaivers = map[string]string{
+	"CVE-2026-112940": "filelock",  // GHSA-v4x8-3wr5-3wq8, ReadWriteLock only
+	"CVE-2026-114145": "gitpython", // GHSA-83vg-56qc-22m7, submodule clone only
+}
+
+// TestTrivyIgnoreMCPMailWaiversNameTheLockedRelease holds every gc-mcp-mail
+// package waiver to the exact dist-info path of the release the lock pins. Trivy
+// matches the path literally, so moving the pin stops the waiver from applying
+// and the scan re-checks the new release. This test then fails until the entry
+// is dropped or re-pointed with a fresh review. It also keeps the waived set to
+// the reviewed entries.
+func TestTrivyIgnoreMCPMailWaiversNameTheLockedRelease(t *testing.T) {
+	root := repoRoot(t)
+	lock := readFile(t, root, mcpMailLockPath)
+
+	var doc trivyIgnoreDoc
+	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
+		t.Fatalf("parsing .trivyignore.yaml: %v", err)
+	}
+	found := map[string]bool{}
+	for _, v := range doc.Vulnerabilities {
+		for _, p := range v.Paths {
+			if !strings.HasPrefix(p, mcpMailSitePackages) {
+				continue
+			}
+			dist, ok := reviewedMCPMailWaivers[v.ID]
+			if !ok {
+				t.Errorf("%s waives gc-mcp-mail package path %q but is not a reviewed mail waiver; add it to reviewedMCPMailWaivers with its reasoning, or move the pin past it", v.ID, p)
+				continue
+			}
+			want := mcpMailSitePackages + dist + "-" + lockPinnedVersion(t, lock, dist) + ".dist-info/METADATA"
+			if p != want {
+				t.Errorf("%s waives %q, want %q, the release %s pins; re-check the advisory against the new release before re-pointing it", v.ID, p, want, mcpMailLockPath)
+			}
+			if len(v.Paths) != 1 || len(v.Purls) != 0 {
+				t.Errorf("%s waives the mail package together with paths %q and purls %q; scope it to the one dist-info path", v.ID, v.Paths, v.Purls)
+			}
+			found[v.ID] = true
+		}
+	}
+	for id, dist := range reviewedMCPMailWaivers {
+		if !found[id] {
+			t.Errorf(".trivyignore.yaml must waive %s for the locked %s dist-info path while the lock stays on the line that carries it", id, dist)
 		}
 	}
 }
@@ -275,6 +457,7 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		goModPinnedArg{"XMOD_VERSION", "golang.org/x/mod", "v0.41.0"},
 		goModPinnedArg{"THRIFT_VERSION", "github.com/apache/thrift", "v0.24.0"},
 		goModPinnedArg{"COMPRESS_VERSION", "github.com/klauspost/compress", "v1.18.7"},
+		goModPinnedArg{"JOSE_VERSION", "github.com/go-jose/go-jose/v4", "v4.1.6"},
 	)
 
 	// gh needs x/text, x/net and x/mod. Its pinned source selects x/crypto v0.53.0, below
@@ -295,6 +478,8 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		"golang.org/x/text":             "XTEXT_VERSION",
 		"github.com/apache/thrift":      "THRIFT_VERSION",
 		"github.com/klauspost/compress": "COMPRESS_VERSION",
+		// Dolt's pinned source selects go-jose/v4 4.1.4 (CVE-2026-116587).
+		"github.com/go-jose/go-jose/v4": "JOSE_VERSION",
 	}
 	// Each `go get` is looked for inside its own stanza. gh and Dolt share the x/text
 	// override verbatim, so a file-wide search lets one stand in for the other and a
@@ -347,9 +532,11 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 // never sees it.
 type trivyIgnoreDoc struct {
 	Vulnerabilities []struct {
-		ID    string   `yaml:"id"`
-		Paths []string `yaml:"paths"`
-		Purls []string `yaml:"purls"`
+		ID        string   `yaml:"id"`
+		Paths     []string `yaml:"paths"`
+		Purls     []string `yaml:"purls"`
+		ExpiredAt string   `yaml:"expired_at"`
+		Statement string   `yaml:"statement"`
 	} `yaml:"vulnerabilities"`
 }
 
@@ -406,14 +593,90 @@ func TestTrivyIgnoreRejectsPurlScopedWaivers(t *testing.T) {
 	}
 }
 
+// unscopedTrivyIgnorePathWaivers reports, as ready-to-print messages, every waiver
+// whose reach the path-keyed guards cannot see. Trivy matches each paths entry as a
+// doublestar glob (pkg/result/ignore.go), but those guards compare paths as literal
+// strings, so a pattern such as usr/local/bin/* waives kubectl, bd, dolt and gc
+// together while every guard sees no path it knows. An entry with neither paths nor
+// purls is worse: Trivy applies it to every file in every image.
+func unscopedTrivyIgnorePathWaivers(doc trivyIgnoreDoc) []string {
+	var found []string
+	for _, v := range doc.Vulnerabilities {
+		if len(v.Paths) == 0 && len(v.Purls) == 0 {
+			found = append(found, fmt.Sprintf("%s names no path and no purl, so Trivy waives it for every file in every image; scope it to the literal path of the binary it was reviewed against", v.ID))
+		}
+		for _, p := range v.Paths {
+			if strings.ContainsAny(p, `*?[{\`) {
+				found = append(found, fmt.Sprintf("%s waives path pattern %q; Trivy matches it as a glob that can reach binaries the guards here know only by literal path, so list each binary's literal path instead", v.ID, p))
+			}
+		}
+	}
+	return found
+}
+
+// TestTrivyIgnoreRejectsPathPatternAndUnscopedWaivers drives the path guard with
+// entries the real file does not (and must not) contain, because every path in it is
+// a literal binary path today. Each pattern below reaches usr/local/bin/kubectl under
+// Trivy's doublestar matching without equalling it, so every guard keyed on that
+// literal path misses it; the entry with no path and no purl is waived everywhere.
+func TestTrivyIgnoreRejectsPathPatternAndUnscopedWaivers(t *testing.T) {
+	const waived = `vulnerabilities:
+  - id: CVE-2026-90001
+    paths:
+      - "usr/local/bin/*"
+  - id: CVE-2026-90002
+    paths:
+      - "usr/local/bin/kubect?"
+  - id: CVE-2026-90003
+    paths:
+      - "usr/local/bin/[k]ubectl"
+  - id: CVE-2026-90004
+    paths:
+      - "usr/local/bin/{kubectl,bd}"
+  - id: CVE-2026-90005
+    paths:
+      - 'usr/local/bin/kube\ctl'
+  - id: CVE-2026-90006
+    expired_at: 2026-12-07
+  - id: CVE-2026-78667
+    paths:
+      - "usr/local/bin/kubectl"
+  - id: CVE-2026-43871
+    purls:
+      - pkg:golang/github.com/apache/thrift
+`
+	var doc trivyIgnoreDoc
+	if err := yaml.Unmarshal([]byte(waived), &doc); err != nil {
+		t.Fatalf("parsing the fixture: %v", err)
+	}
+	found := unscopedTrivyIgnorePathWaivers(doc)
+	for _, id := range []string{"CVE-2026-90001", "CVE-2026-90002", "CVE-2026-90003", "CVE-2026-90004", "CVE-2026-90005", "CVE-2026-90006"} {
+		flagged := false
+		for _, f := range found {
+			if strings.HasPrefix(f, id+" ") {
+				flagged = true
+			}
+		}
+		if !flagged {
+			t.Errorf("unscopedTrivyIgnorePathWaivers() did not flag %s; got %q", id, found)
+		}
+	}
+	if len(found) != 6 {
+		t.Errorf("unscopedTrivyIgnorePathWaivers() = %q, want exactly the five patterns and the unscoped entry (the literal kubectl path passes, and the purl entry is the purl guard's)", found)
+	}
+}
+
 // TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools enforces that the rebuilt-from-
 // source tools (bd, dolt, gh) carry no waiver at all. They are rebuilt with the Go
-// 1.26.10 toolchain, which fixes every stdlib CVE listed, and Dockerfile.base forces
+// 1.27.3 toolchain, which fixes every stdlib CVE listed, and Dockerfile.base forces
 // x/crypto, x/net, x/text and thrift forward in the gh and Dolt builds the same way
 // it forces grpc, so a waiver on those paths would let the scan gate mask a regressed
-// rebuild instead of proving the fix holds. The one surviving reviewed waiver is
-// CVE-2026-56852 for kubectl, which is an upstream-signed prebuilt this repo installs
-// rather than builds, so nothing here can move its dependencies. gc's module waivers
+// rebuild instead of proving the fix holds. The surviving reviewed waivers are the
+// five kubectl entries the v1.36.5 pin does not clear (CVE-2026-78667,
+// CVE-2026-78669, CVE-2026-97031, and the owner-approved CVE-2026-56851 and
+// CVE-2026-111943); kubectl is an upstream-signed prebuilt this repo installs
+// rather than builds, so nothing here can move its dependencies, and a kubectl
+// waiver outside that reviewed set fails here too. gc's module waivers
 // are enforced separately by TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
 func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	root := repoRoot(t)
@@ -424,6 +687,9 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	}
 	for _, unreviewed := range unreviewedTrivyIgnorePurlWaivers(doc) {
 		t.Error(unreviewed)
+	}
+	for _, unscoped := range unscopedTrivyIgnorePathWaivers(doc) {
+		t.Error(unscoped)
 	}
 
 	rebuiltPaths := map[string]bool{
@@ -452,16 +718,21 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	// Nothing rebuilt from source is waived here any more; only kubectl is, and
 	// kubectl is a prebuilt.
 	reviewedWaivers := map[string]map[string]bool{
-		"CVE-2026-56852": {
-			"usr/local/bin/kubectl": true,
-		},
+		"CVE-2026-78667": {"usr/local/bin/kubectl": true},
+		"CVE-2026-78669": {"usr/local/bin/kubectl": true},
+		"CVE-2026-97031": {"usr/local/bin/kubectl": true},
+		// Owner-approved 2026-10-25 (code-scanning alerts #481 and #490): no kubectl
+		// release ships x/text >= 0.41.0 or Go >= 1.26.10 yet. Each statement in
+		// .trivyignore.yaml carries the reasoning.
+		"CVE-2026-56851":  {"usr/local/bin/kubectl": true},
+		"CVE-2026-111943": {"usr/local/bin/kubectl": true},
 	}
 	foundReviewed := map[string]map[string]bool{}
 
 	for _, v := range doc.Vulnerabilities {
 		for _, p := range v.Paths {
 			if stdlibCVEs[v.ID] && rebuiltPaths[p] {
-				t.Errorf("%s still waives rebuilt tool %q for a Go-stdlib CVE the 1.26.10 rebuild clears; drop the path so the scan proves the fix stays effective", v.ID, p)
+				t.Errorf("%s still waives rebuilt tool %q for a Go-stdlib CVE the 1.27.3 rebuild clears; drop the path so the scan proves the fix stays effective", v.ID, p)
 			}
 			if allowedPaths, ok := reviewedWaivers[v.ID]; ok && allowedPaths[p] {
 				if foundReviewed[v.ID] == nil {
@@ -473,6 +744,9 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 			if rebuiltPaths[p] {
 				t.Errorf("%s waives rebuilt tool %q; Dockerfile.base forces the patched modules into the gh and Dolt builds and Dockerfile.agent forces bd's grpc, thrift and x/net forward, so move the module forward in that build instead of waiving the path", v.ID, p)
 			}
+			if p == "usr/local/bin/kubectl" {
+				t.Errorf("%s waives kubectl but is not a reviewed kubectl waiver; check the finding against the pinned binary and add it to reviewedWaivers with its reasoning, or move the pin past it", v.ID)
+			}
 		}
 	}
 	for cve, paths := range reviewedWaivers {
@@ -481,6 +755,212 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 				t.Errorf(".trivyignore.yaml must retain the reviewed %s waiver for %s until its pin moves past the fixed version", cve, path)
 			}
 		}
+	}
+}
+
+// TestTrivyIgnoreKubectlWaiversNameThePinnedRelease keeps every kubectl waiver's
+// statement in step with contrib/k8s/Dockerfile.controller's KUBECTL_VERSION. Each
+// statement records what the pinned release ships ("kubectl vX.Y.Z ships ..."), so
+// a pin bump that leaves a statement naming the old release has not re-checked that
+// waiver against the new binary: either the new release clears it and the entry
+// should go, or it does not and the statement must say what the new release ships.
+func TestTrivyIgnoreKubectlWaiversNameThePinnedRelease(t *testing.T) {
+	root := repoRoot(t)
+
+	var pins []string
+	for _, line := range strings.Split(readFile(t, root, "contrib/k8s/Dockerfile.controller"), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "ARG KUBECTL_VERSION="); ok {
+			pins = append(pins, strings.TrimSpace(v))
+		}
+	}
+	switch {
+	case len(pins) == 0:
+		t.Fatal("contrib/k8s/Dockerfile.controller has no ARG KUBECTL_VERSION=; the kubectl pin moved and this guard must follow it")
+	case len(pins) > 1:
+		t.Fatalf("contrib/k8s/Dockerfile.controller declares ARG KUBECTL_VERSION= %d times %q; a later declaration overrides the earlier one for every instruction after it; keep exactly one so this guard reads the release the build installs", len(pins), pins)
+	}
+	pin := pins[0]
+
+	var doc trivyIgnoreDoc
+	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
+		t.Fatalf("parsing .trivyignore.yaml: %v", err)
+	}
+	for _, stale := range staleKubectlWaiverStatements(pin, doc) {
+		t.Error(stale)
+	}
+}
+
+// kubectlShipsClause matches the "kubectl <release> ships" clause a kubectl
+// waiver's statement uses to record what a release ships, capturing the release.
+var kubectlShipsClause = regexp.MustCompile(`kubectl (v\S+) ships`)
+
+// staleKubectlWaiverStatements reports every usr/local/bin/kubectl waiver whose
+// statement does not describe the pinned release, as a ready-to-print message:
+// one that never says what the pin ships, and one that names the pin but still
+// says what another release ships in some other clause.
+func staleKubectlWaiverStatements(pin string, doc trivyIgnoreDoc) []string {
+	var found []string
+	want := "kubectl " + pin + " ships"
+	for _, v := range doc.Vulnerabilities {
+		if !slices.Contains(v.Paths, "usr/local/bin/kubectl") {
+			continue
+		}
+		if !strings.Contains(v.Statement, want) {
+			found = append(found, fmt.Sprintf("%s waives kubectl but its statement does not say what the pinned %s ships (want %q in it); re-check the waiver against the pinned binary and drop it if the pin clears it", v.ID, pin, want))
+			continue
+		}
+		for _, clause := range kubectlShipsClause.FindAllStringSubmatch(v.Statement, -1) {
+			if clause[1] != pin {
+				found = append(found, fmt.Sprintf("%s waives kubectl but its statement still says what kubectl %s ships next to the pinned %s; re-check that clause against the pinned binary and restate it for %s", v.ID, clause[1], pin, pin))
+			}
+		}
+	}
+	return found
+}
+
+// TestTrivyIgnoreRejectsKubectlStatementsNamingAnotherRelease drives the kubectl
+// statement guard itself, because the file it guards is (correctly) in step with
+// the pin today, so TestTrivyIgnoreKubectlWaiversNameThePinnedRelease cannot
+// demonstrate what it catches. The fixture is the next pin bump done by halves:
+// CVE-2026-78669's statement says what the release ships twice (x/net and Go), and
+// moving only the first clause to the new pin must not pass the guard. Nor may
+// CVE-2026-111943's free-form statement, which never says what any release ships
+// and so would never go stale at a pin bump.
+func TestTrivyIgnoreRejectsKubectlStatementsNamingAnotherRelease(t *testing.T) {
+	const waived = `vulnerabilities:
+  - id: CVE-2026-78667
+    paths:
+      - usr/local/bin/kubectl
+    statement: Reached through Go stdlib (kubectl v1.36.6 ships 1.26.8; fixed in 1.26.9, 1.27.2).
+  - id: CVE-2026-78669
+    paths:
+      - usr/local/bin/kubectl
+    statement: Reached through golang.org/x/net (kubectl v1.36.6 ships v0.56.0; fixed in 0.60.0) and Go stdlib (kubectl v1.36.5 ships 1.26.8; fixed in 1.26.9, 1.27.2).
+  - id: CVE-2026-97031
+    paths:
+      - usr/local/bin/kubectl
+    statement: Reached through Go stdlib (kubectl v1.36.5 ships 1.26.8; fixed in 1.26.9, 1.27.2).
+  - id: CVE-2026-56852
+    paths:
+      - usr/local/bin/kubectl
+    statement: Reached through golang.org/x/text (kubectl v1.36.60 ships v0.33.0; fixed in 0.39.0).
+  - id: CVE-2026-111943
+    paths:
+      - usr/local/bin/kubectl
+    statement: Accepted risk; see the kubectl notes.
+  - id: CVE-2026-25681
+    paths:
+      - usr/local/bin/bd
+    statement: Not a kubectl waiver, so it may name whatever kubectl v1.36.5 ships.
+`
+	var doc trivyIgnoreDoc
+	if err := yaml.Unmarshal([]byte(waived), &doc); err != nil {
+		t.Fatalf("parsing the fixture: %v", err)
+	}
+	found := staleKubectlWaiverStatements("v1.36.6", doc)
+	for _, id := range []string{"CVE-2026-78669", "CVE-2026-97031", "CVE-2026-56852", "CVE-2026-111943"} {
+		flagged := false
+		for _, f := range found {
+			if strings.HasPrefix(f, id+" ") {
+				flagged = true
+			}
+		}
+		if !flagged {
+			t.Errorf("staleKubectlWaiverStatements() did not flag %s; got %q", id, found)
+		}
+	}
+	for _, f := range found {
+		if strings.HasPrefix(f, "CVE-2026-78667 ") || strings.HasPrefix(f, "CVE-2026-25681 ") {
+			t.Errorf("staleKubectlWaiverStatements() flagged an entry it must accept: %q", f)
+		}
+	}
+}
+
+// TestTrivyIgnoreKubectlWaiversStayScopedAndTimeBoxed holds every kubectl waiver to
+// the kubectl binary alone and to one shared expiry. The waivers are reviewed
+// against the pinned binary as a set, at each pin bump, so they expire together; a
+// waiver that also named another path or a purl would hide its finding wherever
+// else it turned up, including in the binaries this image rebuilds from source.
+func TestTrivyIgnoreKubectlWaiversStayScopedAndTimeBoxed(t *testing.T) {
+	root := repoRoot(t)
+
+	var doc trivyIgnoreDoc
+	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
+		t.Fatalf("parsing .trivyignore.yaml: %v", err)
+	}
+	for _, problem := range kubectlWaiverScopeProblems(doc) {
+		t.Error(problem)
+	}
+}
+
+// kubectlWaiverScopeProblems reports, as ready-to-print messages, every
+// usr/local/bin/kubectl waiver that also names another path or a purl, and the
+// kubectl waivers' expiries when they are not all one date.
+func kubectlWaiverScopeProblems(doc trivyIgnoreDoc) []string {
+	var found []string
+	expiries := map[string][]string{}
+	for _, v := range doc.Vulnerabilities {
+		if !slices.Contains(v.Paths, "usr/local/bin/kubectl") {
+			continue
+		}
+		if len(v.Paths) != 1 || len(v.Purls) != 0 {
+			found = append(found, fmt.Sprintf("%s waives kubectl together with paths %q and purls %q; scope a kubectl waiver to usr/local/bin/kubectl alone", v.ID, v.Paths, v.Purls))
+		}
+		expiries[v.ExpiredAt] = append(expiries[v.ExpiredAt], v.ID)
+	}
+	if len(expiries) > 1 {
+		found = append(found, fmt.Sprintf("kubectl waivers expire on %d different dates %v; they are re-checked together at each kubectl pin bump, so keep them on one horizon", len(expiries), expiries))
+	}
+	return found
+}
+
+// TestTrivyIgnoreRejectsMisscopedKubectlWaivers drives kubectlWaiverScopeProblems
+// with entries the real file does not (and must not) contain: a kubectl waiver that
+// also waives a rebuilt binary, one that adds a purl, and one off the shared horizon.
+func TestTrivyIgnoreRejectsMisscopedKubectlWaivers(t *testing.T) {
+	const waived = `vulnerabilities:
+  - id: CVE-2026-78667
+    paths:
+      - usr/local/bin/kubectl
+    expired_at: 2026-12-07
+  - id: CVE-2026-56851
+    paths:
+      - usr/local/bin/kubectl
+      - usr/local/bin/bd
+    expired_at: 2026-12-07
+  - id: CVE-2026-111943
+    paths:
+      - usr/local/bin/kubectl
+    purls:
+      - pkg:golang/stdlib
+    expired_at: 2026-12-07
+  - id: CVE-2026-97031
+    paths:
+      - usr/local/bin/kubectl
+    expired_at: 2027-03-07
+  - id: CVE-2026-25681
+    paths:
+      - usr/local/bin/dolt
+    expired_at: 2027-06-07
+`
+	var doc trivyIgnoreDoc
+	if err := yaml.Unmarshal([]byte(waived), &doc); err != nil {
+		t.Fatalf("parsing the fixture: %v", err)
+	}
+	found := kubectlWaiverScopeProblems(doc)
+	for _, want := range []string{"CVE-2026-56851 ", "CVE-2026-111943 ", "kubectl waivers expire on 2 different dates"} {
+		flagged := false
+		for _, f := range found {
+			if strings.HasPrefix(f, want) {
+				flagged = true
+			}
+		}
+		if !flagged {
+			t.Errorf("kubectlWaiverScopeProblems() did not report %q; got %q", want, found)
+		}
+	}
+	if len(found) != 3 {
+		t.Errorf("kubectlWaiverScopeProblems() = %q, want exactly the two misscoped entries and the split horizon (the dolt entry is not a kubectl waiver)", found)
 	}
 }
 
