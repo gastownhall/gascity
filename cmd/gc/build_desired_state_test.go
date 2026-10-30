@@ -14674,3 +14674,72 @@ func TestBuildDesiredState_APICreatedAgentSessionBeadStaysDesired(t *testing.T) 
 		})
 	}
 }
+
+// A min=1, max=1 pool whose only row was stopped by a restart request
+// (restartHandoff: asleep, reset committed, no sleep reason) must keep that
+// row desired on every following tick so its reset-pending wake starts it,
+// rather than stalling the floor's fresh create on the name the row holds.
+func TestBuildDesiredState_MinFloorCanonicalPoolRowAfterRestartHandoffIsReused(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "repo",
+			StartCommand:      "true",
+			ScaleCheck:        "printf 0",
+			MinActiveSessions: intPtr(1),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	now := time.Date(2026, 10, 30, 5, 0, 0, 0, time.UTC)
+	sp := runtime.NewFake()
+
+	var stderr bytes.Buffer
+	if seed := buildDesiredState("test-city", cityPath, now, cfg, sp, store, &stderr); len(seed.State) != 1 {
+		t.Fatalf("seed tick desired = %d, want 1; stderr=%q", len(seed.State), stderr.String())
+	}
+	rows, err := store.List(beads.ListQuery{Label: sessionBeadLabel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("seed tick session beads = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	sessionName := row.Metadata["session_name"]
+	if sessionName == "" {
+		t.Fatalf("seed row %s has no session_name", row.ID)
+	}
+	if err := store.SetMetadataBatch(row.ID, restartHandoff("", true, finalizeFacts{Now: now.Add(time.Minute)})); err != nil {
+		t.Fatal(err)
+	}
+
+	for tick := 1; tick <= 2; tick++ {
+		var tickErr bytes.Buffer
+		got := buildDesiredState("test-city", cityPath, now.Add(time.Duration(tick+1)*time.Minute), cfg, sp, store, &tickErr)
+		for _, stall := range []string{"slot stalled on its own runtime name", "is held by session"} {
+			if strings.Contains(tickErr.String(), stall) {
+				t.Fatalf("tick %d stderr contains %q: %s", tick, stall, tickErr.String())
+			}
+		}
+		if _, ok := got.State[sessionName]; !ok {
+			t.Fatalf("tick %d desired state missing handed-off row %s (%s); keys=%v stderr=%q",
+				tick, row.ID, sessionName, mapKeys(got.State), tickErr.String())
+		}
+		after, err := store.List(beads.ListQuery{Label: sessionBeadLabel})
+		if err != nil {
+			t.Fatal(err)
+		}
+		open := 0
+		for _, b := range after {
+			if b.Status != "closed" {
+				open++
+			}
+		}
+		if open != 1 {
+			t.Fatalf("tick %d open session beads = %d, want 1 (the handed-off row reused)", tick, open)
+		}
+	}
+}
