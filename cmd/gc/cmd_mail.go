@@ -684,10 +684,13 @@ func renderMailCheckFromAPI(cr api.CachedRead[api.MailListView], recipient strin
 		}
 		return 0
 	}
-	if len(messages) == 0 {
+	// Items is one page of the inbox (GET /v0/mail pages by default); Total
+	// is the whole unread set, which is what the local path prints.
+	unread := max(cr.Body.Total, len(messages))
+	if unread == 0 {
 		return 1
 	}
-	fmt.Fprintf(stdout, "%d unread message(s) for %s\n", len(messages), recipient) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "%d unread message(s) for %s\n", unread, recipient) //nolint:errcheck // best-effort stdout
 	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
 		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
 	}
