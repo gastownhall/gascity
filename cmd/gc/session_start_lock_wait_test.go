@@ -318,76 +318,125 @@ func TestReconcileSessionBeads_BusySessionLockDefersPendingCreateRollback(t *tes
 }
 
 // Kills: recovery of an already-running pending create waiting on the held
-// session lock for the whole tick, or folding a half-applied batch for a commit
-// that never ran.
+// session lock for the whole tick, folding a half-applied batch for a commit
+// that never ran, or dropping the start-prep residue (an instance_token mint, a
+// stale-resume started_config_hash clear) prepare already persisted, which the
+// same-tick drift gate and drain scan read off the snapshot.
 func TestRecoverRunningPendingCreate_BusySessionLockIsAnUnappliedRecovery(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		testCity := t.TempDir()
-		store := beads.NewMemStore()
-		bead, err := store.Create(beads.Bead{
-			Title:  "helper",
-			Type:   sessionBeadType,
-			Labels: []string{sessionBeadLabel},
-			Metadata: map[string]string{
-				"session_name":         "sky",
-				"pending_create_claim": "true",
-				"state":                "active",
-				"state_reason":         "creation_complete",
-			},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
-		tp := TemplateParams{SessionName: "sky", TemplateName: "helper"}
-		clk := &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)}
-		trace := newPoolDesiredStateTestTrace("helper")
-		var log syncBuffer
-		recoverOnce := func() (bool, map[string]string) {
-			return recoverRunningPendingCreate(testCity, sessiontest.SeedBead(t, mustGetBead(t, store, bead.ID)), tp, cfg, store, nil, clk, &log, trace)
-		}
-		release := holdSessionMutationLock(t, bead.ID)
-
-		type outcome struct {
-			ok    bool
-			batch map[string]string
-		}
-		res := runBounded(release, func() outcome {
-			ok, batch := recoverOnce()
-			return outcome{ok, batch}
-		})
-
-		if !res.finished || res.elapsed != testGateWaitBound {
-			t.Fatalf("finished=%v elapsed=%v, want recovery to give up after exactly %v", res.finished, res.elapsed, testGateWaitBound)
-		}
-		if res.value.ok || res.value.batch != nil {
-			t.Fatalf("recovery = (%v, %v), want (false, nil) when the commit could not be attempted", res.value.ok, res.value.batch)
-		}
-		got := mustGetBead(t, store, bead.ID)
-		if got.Metadata["pending_create_claim"] != "true" || got.Metadata["creation_complete_at"] != "" {
-			t.Fatalf("a busy recovery committed: pending_create_claim=%q creation_complete_at=%q", got.Metadata["pending_create_claim"], got.Metadata["creation_complete_at"])
-		}
-		var skipped bool
-		for _, r := range trace.records {
-			if r.SiteCode == TraceSiteReconcilerPendingCreate && r.ReasonCode == testReasonRecoveryLockBusy && r.OutcomeCode == TraceOutcomeSkipped && r.SessionName == "sky" {
-				skipped = true
+	cases := []struct {
+		name string
+		// staleResume seeds a committed session_key whose transcript is gone,
+		// so prepare clears started_config_hash before the commit.
+		staleResume bool
+	}{
+		{name: "minted instance token"},
+		{name: "stale resume clear", staleResume: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.staleResume {
+				prevProbe := staleResumeKeyProbe
+				staleResumeKeyProbe = func(_ []string, _, _, _ string) (present, probeable bool) { return false, true }
+				t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 			}
-		}
-		if !skipped {
-			t.Fatalf("no skipped %q trace decision for sky", testReasonRecoveryLockBusy)
-		}
-		if !strings.Contains(log.String(), "session mutation lock busy") {
-			t.Fatalf("stderr = %q, want a recovery line naming the busy session lock", log.String())
-		}
-		release()
+			synctest.Test(t, func(t *testing.T) {
+				testCity := t.TempDir()
+				store := beads.NewMemStore()
+				meta := map[string]string{
+					"session_name":         "sky",
+					"pending_create_claim": "true",
+					"state":                "active",
+					"state_reason":         "creation_complete",
+				}
+				tp := TemplateParams{SessionName: "sky", TemplateName: "helper"}
+				if tc.staleResume {
+					meta["work_dir"] = t.TempDir()
+					meta["session_key"] = "gc-stale-key"
+					meta["started_config_hash"] = "deadbeef"
+					tp.Command = "claude"
+					tp.ResolvedProvider = &config.ResolvedProvider{Name: "claude", ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"}
+				}
+				bead, err := store.Create(beads.Bead{
+					Title:    "helper",
+					Type:     sessionBeadType,
+					Labels:   []string{sessionBeadLabel},
+					Metadata: meta,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+				clk := &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)}
+				trace := newPoolDesiredStateTestTrace("helper")
+				var log syncBuffer
+				recoverOnce := func() (bool, map[string]string) {
+					return recoverRunningPendingCreate(testCity, sessiontest.SeedBead(t, mustGetBead(t, store, bead.ID)), tp, cfg, store, nil, clk, &log, trace)
+				}
+				release := holdSessionMutationLock(t, bead.ID)
 
-		if ok, _ := recoverOnce(); !ok {
-			t.Fatal("the retry returned false, want the recovery applied once the lock is free")
-		}
-		if got := mustGetBead(t, store, bead.ID); got.Metadata["pending_create_claim"] != "" {
-			t.Fatalf("pending_create_claim = %q after the retry, want cleared", got.Metadata["pending_create_claim"])
-		}
-	})
+				type outcome struct {
+					ok    bool
+					batch map[string]string
+				}
+				res := runBounded(release, func() outcome {
+					ok, batch := recoverOnce()
+					return outcome{ok, batch}
+				})
+
+				if !res.finished || res.elapsed != testGateWaitBound {
+					t.Fatalf("finished=%v elapsed=%v, want recovery to give up after exactly %v", res.finished, res.elapsed, testGateWaitBound)
+				}
+				if res.value.ok {
+					t.Fatal("recovery ok = true, want false when the commit could not be attempted")
+				}
+				batch := res.value.batch
+				for _, k := range []string{"creation_complete_at", "pending_create_claim", "state"} {
+					if v, present := batch[k]; present {
+						t.Fatalf("busy recovery batch carries commit key %s=%q, want only the prep residue: %v", k, v, batch)
+					}
+				}
+				got := mustGetBead(t, store, bead.ID)
+				if got.Metadata["pending_create_claim"] != "true" || got.Metadata["creation_complete_at"] != "" {
+					t.Fatalf("a busy recovery committed: pending_create_claim=%q creation_complete_at=%q", got.Metadata["pending_create_claim"], got.Metadata["creation_complete_at"])
+				}
+				minted := got.Metadata["instance_token"]
+				if minted == "" {
+					t.Fatal("prepare did not mint an instance_token; the fixture no longer exercises the residue fold")
+				}
+				if batch["instance_token"] != minted {
+					t.Fatalf("busy recovery batch instance_token = %q, want the persisted mint %q", batch["instance_token"], minted)
+				}
+				if tc.staleResume {
+					if got.Metadata["started_config_hash"] != "" {
+						t.Fatalf("store started_config_hash = %q, want prepare's stale-resume clear", got.Metadata["started_config_hash"])
+					}
+					if v, present := batch["started_config_hash"]; !present || v != "" {
+						t.Fatalf("busy recovery batch started_config_hash = %q (present=%v), want the persisted clear %q", v, present, "")
+					}
+				}
+				var skipped bool
+				for _, r := range trace.records {
+					if r.SiteCode == TraceSiteReconcilerPendingCreate && r.ReasonCode == testReasonRecoveryLockBusy && r.OutcomeCode == TraceOutcomeSkipped && r.SessionName == "sky" {
+						skipped = true
+					}
+				}
+				if !skipped {
+					t.Fatalf("no skipped %q trace decision for sky", testReasonRecoveryLockBusy)
+				}
+				if !strings.Contains(log.String(), "session mutation lock busy") {
+					t.Fatalf("stderr = %q, want a recovery line naming the busy session lock", log.String())
+				}
+				release()
+
+				if ok, _ := recoverOnce(); !ok {
+					t.Fatal("the retry returned false, want the recovery applied once the lock is free")
+				}
+				if got := mustGetBead(t, store, bead.ID); got.Metadata["pending_create_claim"] != "" {
+					t.Fatalf("pending_create_claim = %q after the retry, want cleared", got.Metadata["pending_create_claim"])
+				}
+			})
+		})
+	}
 }
 
 // Kills: a lock wait too short to ride out a holder that lets go inside the

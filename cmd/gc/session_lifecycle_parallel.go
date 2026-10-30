@@ -3822,13 +3822,13 @@ func recoverRunningPendingCreate(
 	applied, err := sessionFrontDoor(store).CommitStartedIfCurrentUnder(lockCtx, prepared.candidate.info, metadata, lease, sessionpkg.StartCommitRefusingHolds())
 	if errors.Is(err, sessionpkg.ErrSessionMutationBusy) {
 		// Another goroutine holds the session's mutation lock past the tick's
-		// bounded wait, and the commit did not run. The recovery is idempotent and
-		// retried next tick, so nothing is folded here: the start-prep residue
-		// buildPreparedStart already persisted (an instance_token mint, a
-		// stale-resume clear) reaches the snapshot on that retry.
+		// bounded wait, and the commit did not run. As on the commit-error path,
+		// the start-prep residue buildPreparedStart already persisted (an
+		// instance_token mint, a stale-resume clear) is folded so the snapshot
+		// matches the store; only the commit is deferred to the next tick.
 		fmt.Fprintf(stderr, "session reconciler: pending-create recovery of %s skipped: session mutation lock busy\n", tp.SessionName) //nolint:errcheck
 		trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRecoveryLockBusy, TraceOutcomeSkipped, tp.TemplateName, tp.SessionName, nil)
-		return false, nil
+		return false, pendingCreateResidueFold(prepared.candidate.info)
 	}
 	if errors.Is(err, sessionpkg.ErrStartCommitHeld) {
 		// An operator suspended the row before its start committed (CONTRACT
