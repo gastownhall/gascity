@@ -968,6 +968,27 @@ func TestEventEvidenceSufficesMatchesOverdueLine(t *testing.T) {
 	}
 }
 
+// A sub-minute cooldown order fires at most once per patrol tick, so with the
+// default 30s patrol interval a 30s cooldown order last fired 60s ago is on its
+// normal cadence and must not be reported as overdue (ga-or367d).
+func TestOrderFiringCurrent_SubMinuteCooldownWithinPatrolTick(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "fast-cooldown", "cooldown", "30s")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-1 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "fast-cooldown", Ts: now.Add(-60 * time.Second)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK (30s cooldown at 60s age is one patrol tick late, not overdue); msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if details := strings.Join(result.Details, "\n"); !strings.Contains(details, "fast-cooldown: last fired 60s ago, expected every 30s") {
+		t.Fatalf("details = %v, want the age and interval printed in seconds", result.Details)
+	}
+}
+
 // An order its scope's backend rules out never fires, by design. The check
 // reports it as inapplicable and does not count it as stale or never-fired.
 func TestOrderFiringCurrent_InapplicableOrderIsReportedNotStale(t *testing.T) {
