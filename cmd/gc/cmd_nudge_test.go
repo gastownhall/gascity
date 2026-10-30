@@ -7605,3 +7605,42 @@ func TestTryDeliverQueuedNudgesByPollerDefersStarvedNudgeRefusedBusy(t *testing.
 		t.Fatalf("DeliverAfter = %s, want within [%s, %s]", pending[0].DeliverAfter, lo, hi)
 	}
 }
+
+// assertQueuedNudgeHeld fails unless the pass sent nothing and the worker's
+// single queued item is still pending with no attempt charged.
+func assertQueuedNudgeHeld(t *testing.T, dir string, fake *runtime.Fake, name string) queuedNudge {
+	t.Helper()
+	if now, nudge := fake.CountCalls("NudgeNow", name), fake.CountCalls("Nudge", name); now != 0 || nudge != 0 {
+		t.Fatalf("NudgeNow/Nudge calls = %d/%d, want 0/0", now, nudge)
+	}
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 1/0/0", len(pending), len(inFlight), len(dead))
+	}
+	if pending[0].Attempts != 0 {
+		t.Fatalf("Attempts = %d, want 0", pending[0].Attempts)
+	}
+	return pending[0]
+}
+
+// A busy session's item younger than queuedNudgeStarvedAfter keeps waiting on
+// the activity clock, and costs no turn look.
+func TestTryDeliverQueuedNudgesByPollerKeepsFreshNudgeQueuedWhileBusy(t *testing.T) {
+	dir, fake, store, target, obs := busyQueuedNudgeFixture(t, time.Now().Add(-1*time.Minute))
+	sp := &turnLookProvider{Fake: fake}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, sp, time.Hour, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if delivered {
+		t.Fatal("delivered = true, want false: a fresh item waits for the session to quiet")
+	}
+	if sp.looks != 0 {
+		t.Fatalf("TurnRunning looks = %d, want 0", sp.looks)
+	}
+	assertQueuedNudgeHeld(t, dir, fake, target.sessionName)
+}
