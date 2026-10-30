@@ -420,6 +420,15 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 		}
 		return nil, errors.New(advice)
 	}
+	// A rig whose import was interrupted during its clear holds twins: the
+	// same bead in the rig store and in the binding. File reads only, per rig
+	// (rig_import_census.go); a rig merely awaiting import serves, its relic
+	// legs keeping it readable, and the controller's boot census names it.
+	if target.Root != "" {
+		if err := rigBootRefusal(cityPath, target); err != nil {
+			return nil, fmt.Errorf("%s: %w", logPrefix, err)
+		}
+	}
 	// The serving outcome is published before the binding opens, so a boot
 	// whose open then fails has already reported converged. That ordering
 	// predates this file's note handling and is left as it is: the event

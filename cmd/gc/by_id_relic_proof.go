@@ -617,7 +617,42 @@ func migrationCopyManifest(cityPath string, cfg *config.City) (manifest map[stri
 	if err != nil || !recorded {
 		return nil, false
 	}
-	return proven, true
+	return unionRigImportManifests(proven, cityPath, cfg, target), true
+}
+
+// unionRigImportManifests adds to the city manifest's ids every id a rig
+// import recorded (S4b design §3.5): an id-level consumer reads the union of
+// the city manifest and the rig manifests, so an imported rig row the binding
+// has since collected is still known to have been delivered. A rig manifest
+// that cannot be read adds nothing; its ids keep the binding-held half of the
+// proof.
+func unionRigImportManifests(proven map[string]bool, cityPath string, cfg *config.City, target infraBindingTarget) map[string]bool {
+	if cfg == nil {
+		return proven
+	}
+	var union map[string]bool
+	for _, rig := range cfg.Rigs {
+		if !rigNameIsFileSafe(rig.Name) {
+			continue
+		}
+		manifest, _, err := newRigImportLocation(target, cityPath, rig.Name).readManifest()
+		if err != nil || manifest == nil || len(manifest.IDs) == 0 {
+			continue
+		}
+		if union == nil {
+			union = make(map[string]bool, len(proven)+len(manifest.IDs))
+			for id := range proven {
+				union[id] = true
+			}
+		}
+		for id := range manifest.IDs {
+			union[id] = true
+		}
+	}
+	if union == nil {
+		return proven
+	}
+	return union
 }
 
 // refusedBindingIsAlreadyOnDisk reports whether this city's configured binding

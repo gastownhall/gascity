@@ -113,6 +113,10 @@ var reviewedMarkers = map[string]reviewedMarker{
 	// Relic legs: graph rows read from city and rig scope stores (S4).
 	"internal/api/huma_handlers_convoys.go (*Server).humaDeleteWorkflow":       {"relic", 3, "workflowStores root probe, metadata sweep and descendant sweep in workflow teardown"},
 	"cmd/gc/cmd_convoy_dispatch.go findBeadScopeAcrossStores":                  {"relic", 2, "control-bead scope probe over the city and rig ledgers before the binding"},
+	"cmd/gc/graph_placement.go graphResidenceForTree":                          {"relic", 1, "the S4 rule's relic leg: a pre-S4 rig tree read from the rig ledger until the rig is imported (S4b)"},
+	"cmd/gc/convergence_store.go (*convergenceStoreAdapter).list":              {"relic", 1, "pre-S4a rig convergence loops in the rig's own store, read until the rig is imported (S4b)"},
+	"cmd/gc/formula_cook_attach_class.go attachGraftClassRefusal":              {"relic", 1, "cook --attach onto a pre-S4 rig tree reads the attach bead where it lives, until the rig is imported (S4b)"},
+	"internal/api/handler_convoys.go rigLegConvoyGet":                          {"relic", 1, "isGraphConvoyID's rig leg: a pre-S4 graph convoy in a rig ledger, until the rig is imported (S4b)"},
 	"cmd/gc/cmd_convoy_dispatch.go cmdWorkflowDelete":                          {"relic", 1, "workflow delete sweeps the retained scope-store copies beside the binding"},
 	"cmd/gc/cmd_convoy_dispatch.go (*sourceWorkflowMatchCollector).scanStore":  {"relic", 1, "the source-workflow walk's root probe over scope stores and the binding (child sources are ratcheted, not marked)"},
 	"cmd/gc/cmd_convoy_dispatch.go assessZeroMatchSourceWorkflowScan":          {"relic", 1, "zero-match re-scan over the same views"},

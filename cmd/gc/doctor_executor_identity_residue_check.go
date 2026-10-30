@@ -131,6 +131,9 @@ func (c *executorIdentityResidueCheck) collect() (findings []executorIdentityRes
 	type residueScope struct {
 		label string
 		store beads.Store
+		// sessionless marks a rig store proven relic-free (S4b): it holds
+		// no session bead to union into the identity index.
+		sessionless bool
 	}
 	var scopes []residueScope
 	var cityStore beads.Store
@@ -155,7 +158,7 @@ func (c *executorIdentityResidueCheck) collect() (findings []executorIdentityRes
 				skipped = append(skipped, fmt.Sprintf("%s skipped: opening bead store: %v", label, err))
 				continue
 			}
-			scopes = append(scopes, residueScope{label: label, store: store})
+			scopes = append(scopes, residueScope{label: label, store: store, sessionless: splitRigGraphRelicFree(cliStorageRoutes(c.cityPath), rig.Name)})
 		}
 	}
 	if len(scopes) == 0 {
@@ -198,7 +201,7 @@ func (c *executorIdentityResidueCheck) collect() (findings []executorIdentityRes
 		// engine. The union is built into the scope's own index rather than
 		// into the shared one, so one scope's session beads can never leak into
 		// the next scope's verdict.
-		if !sameStoreEngine(sc.store, sessionStore) {
+		if !sc.sessionless && !sameStoreEngine(sc.store, sessionStore) {
 			scopeIdentities, idxErr := buildExecutorRouteIdentityIndex(sc.store)
 			if idxErr != nil {
 				skipped = append(skipped, fmt.Sprintf("%s skipped: listing session beads: %v", sc.label, idxErr))

@@ -25,11 +25,18 @@ func isGraphConvoyID(s *Server, id string) bool {
 			continue
 		}
 		store := stores[rigName]
-		b, err := store.Get(id)
+		b, err := rigLegConvoyGet(store, id)
 		if err != nil {
 			continue
 		}
 		return isGraphConvoyBead(b)
 	}
 	return false
+}
+
+// rigLegConvoyGet is isGraphConvoyID's rig leg: a relic read (S4 debt) of a
+// graph convoy a rig ledger holds only from before S4a, until the rig is
+// imported; a work convoy is that rig's own row.
+func rigLegConvoyGet(store beads.Store, id string) (beads.Bead, error) {
+	return beads.RelicGet(store, id)
 }

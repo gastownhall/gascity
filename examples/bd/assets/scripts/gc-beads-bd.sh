@@ -4764,8 +4764,11 @@ op_recover() {
     # Skip recovery while the data directory's fsync is stalled. One stalled
     # commit fsync freezes the whole Dolt server, so a live but unresponsive
     # Dolt is waiting on storage; restarting it cannot fix that and adds
-    # recovery fsync load. Nothing to protect when Dolt is not listening.
-    if tcp_check && recovery_should_skip_due_to_fsync_stall; then
+    # recovery fsync load. A managed Dolt that is running but not yet
+    # listening (a stall-slowed relaunch) is exposed the same way, so the gate
+    # is "a Dolt is running", not "the port answers". Nothing to protect when
+    # neither holds.
+    if { tcp_check || [ -n "$(find_dolt_pid)" ]; } && recovery_should_skip_due_to_fsync_stall; then
         echo "skipping dolt recovery: the data directory's fsync is stalled; Dolt is waiting on storage, a restart cannot fix that" >&2
         echo "  see docs/troubleshooting/dolt-storage-stalls.md; use gc dolt restart --force only if a restart is still required" >&2
         die "dolt recovery skipped: storage stall"
@@ -5253,6 +5256,39 @@ provider_owned_scope_shares_city_proxy_root() {
     [ "$scope_root" = "$city_root" ]
 }
 
+# provider_owned_data_root prints the directory whose filesystem a retire of
+# this scope's local Dolt would stall on, for the transport the caller exported:
+# a proxied scope's physical proxy root (its own .beads before a sidecar names
+# one), a direct scope's .beads/dolt (else its .beads).
+provider_owned_data_root() {
+    local dir="$1" root=""
+    if [ "${GC_BEADS_TRANSPORT:-}" = proxied ]; then
+        root=$(provider_owned_proxy_root "$dir")
+        [ -n "$root" ] || root="$dir/.beads"
+    else
+        root="$dir/.beads/dolt"
+        [ -d "$root" ] || root="$dir/.beads"
+    fi
+    (cd "$root" 2>/dev/null && pwd -P) || printf '%s\n' "$root"
+}
+
+# provider_owned_recover_retire is the retire step of a provider-owned recover.
+# While the scope's data root has a stalled fsync it retires nothing: a restart
+# cannot fix a storage stall and adds recovery load to it (rule D4(iii) of
+# ga-8ws1ne). It returns 0 either way so the ping that follows still runs and
+# the op reports the store's real state. Intentional stop/shutdown never come
+# through here.
+provider_owned_recover_retire() {
+    local dir="$1" data_root
+    data_root=$(provider_owned_data_root "$dir")
+    if (DATA_DIR="$data_root"; recovery_should_skip_due_to_fsync_stall); then
+        echo "skipping dolt retire for $dir: storage stall; the data directory's fsync is stalled and a restart cannot fix that" >&2
+        echo "  see docs/troubleshooting/dolt-storage-stalls.md; use gc dolt restart --force only if a restart is still required" >&2
+        return 0
+    fi
+    provider_owned_retire_local_dolt "$dir"
+}
+
 op_provider_owned_lifecycle() {
     local op="$1" dir transport local_scope=false
     dir=$(provider_owned_scope_dir)
@@ -5291,7 +5327,7 @@ op_provider_owned_lifecycle() {
             case "$op" in
                 start|ensure-ready) run_provider_owned_bd "$dir" ping ;;
                 health|probe) run_provider_owned_bd "$dir" ping ;;
-                recover) [ "$local_scope" != true ] || provider_owned_retire_local_dolt "$dir"; run_provider_owned_bd "$dir" ping ;;
+                recover) [ "$local_scope" != true ] || provider_owned_recover_retire "$dir"; run_provider_owned_bd "$dir" ping ;;
                 stop|shutdown) [ "$local_scope" != true ] || provider_owned_retire_local_dolt "$dir" ;;
                 *) exit 2 ;;
             esac
@@ -5321,7 +5357,7 @@ op_provider_owned_lifecycle() {
                     if provider_owned_scope_shares_city_proxy_root "$dir"; then
                         printf 'scope %s shares the city proxy root; recovering by ping only\n' "$dir" >&2
                     else
-                        provider_owned_retire_local_dolt "$dir"
+                        provider_owned_recover_retire "$dir"
                     fi
                     run_provider_owned_bd "$dir" ping
                     ;;

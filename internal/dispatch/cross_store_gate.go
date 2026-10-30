@@ -553,17 +553,7 @@ func ensureCrossStoreGate(store beads.Store, control beads.Bead, blockerID strin
 		}
 		return gateAnswer(store, existing[0], foundOpen)
 	}
-	gate, err := store.Create(beads.Bead{
-		ID:     pinned,
-		Title:  fmt.Sprintf("Waits for %s, held in another store", blockerID),
-		Type:   crossStoreGateType,
-		Labels: []string{CrossStoreGateLabel},
-		Metadata: map[string]string{
-			beadmeta.RootBeadIDMetadataKey:          crossStoreGateRoot(control),
-			beadmeta.CrossStoreGateOwnerMetadataKey: control.ID,
-			beadmeta.CrossStoreBlockerMetadataKey:   blockerID,
-		},
-	})
+	gate, err := store.Create(NewCrossStoreGate(store, control, blockerID))
 	if err != nil {
 		if pinned != "" {
 			// A racing minter won the pinned id: settle its gate exactly as
@@ -575,6 +565,29 @@ func ensureCrossStoreGate(store beads.Store, control beads.Bead, blockerID strin
 		return "", fmt.Errorf("creating the cross-store gate for blocker %s: %w", blockerID, err)
 	}
 	return gate.ID, nil
+}
+
+// NewCrossStoreGate returns the gate bead, not yet created, that holds owner
+// back until blockerID — a bead held in another store — is satisfied: the
+// shape ensureCrossStoreGate mints, with the id pinned under store's mint
+// prefix when it declares one (crossStoreGateID). The release lane, the
+// cross-store-gates doctor check and the delete guard read a gate by these
+// fields alone, so a caller that mints one outside a drain (the rig importer,
+// cmd/gc rig_import.go) creates exactly this bead and adds the same-store edge
+// owner -> gate itself. The gate retires when owner closes (judgeCrossStoreGate
+// reads the owner as its drain control).
+func NewCrossStoreGate(store beads.Store, owner beads.Bead, blockerID string) beads.Bead {
+	return beads.Bead{
+		ID:     crossStoreGateID(store, owner, blockerID),
+		Title:  fmt.Sprintf("Waits for %s, held in another store", blockerID),
+		Type:   crossStoreGateType,
+		Labels: []string{CrossStoreGateLabel},
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey:          crossStoreGateRoot(owner),
+			beadmeta.CrossStoreGateOwnerMetadataKey: owner.ID,
+			beadmeta.CrossStoreBlockerMetadataKey:   blockerID,
+		},
+	}
 }
 
 // OpenCrossStoreGatesNaming returns the open cross-store gates in store that

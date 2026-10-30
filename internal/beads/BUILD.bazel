@@ -145,6 +145,7 @@ go_test(
         "caching_store_watermark_internal_test.go",
         "caching_store_writes_internal_test.go",
         "children_batch_test.go",
+        "class_store_as_test.go",
         "class_store_test.go",
         "close_reason_internal_test.go",
         "conditional_labels_conformance_test.go",

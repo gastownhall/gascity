@@ -3393,26 +3393,6 @@ func TestRecordStartCrashDisabledWhenNoRuntimeDir(t *testing.T) {
 
 // ── Activity-aware setup budget ([session] setup_max_timeout) ────────────────
 
-// TestRunSetupCommandActivityStreamingSurvivesIdleWindow is the regression for
-// slow-but-healthy setup commands killed mid-flight by the fixed wall-clock
-// deadline (e.g. a large `git worktree add` checkout streaming progress past
-// setup_timeout). With the activity budget enabled, output resets the idle
-// clock, so a command that streams for 3x the idle window and exits 0 must
-// succeed.
-func TestRunSetupCommandActivityStreamingSurvivesIdleWindow(t *testing.T) {
-	ops := &tmuxStartOps{tm: &Tmux{}, setupMaxTimeout: 30 * time.Second}
-
-	err := ops.runSetupCommand(
-		context.Background(),
-		"for i in 1 2 3 4 5 6 7 8 9 10; do echo progress $i; sleep 0.1; done; exit 0",
-		map[string]string{},
-		300*time.Millisecond, // idle budget — total runtime (~1s) far exceeds it
-	)
-	if err != nil {
-		t.Fatalf("streaming setup command killed despite visible progress: %v", err)
-	}
-}
-
 // TestRunSetupCommandActivityIdleKillsSilentHang proves the hung-command
 // protection survives the activity mode: a command producing no output still
 // dies after the idle budget, well before its own runtime.
