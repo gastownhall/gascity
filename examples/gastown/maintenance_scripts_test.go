@@ -7075,7 +7075,8 @@ func writeMaintenanceBdStub(t *testing.T, path string) {
 //   - close/update/delete succeed unless BD_CLOSE_FAIL is set. delete
 //     answers --json in bd's two shapes: a --from-file batch with exactly
 //     one non-empty line gets the single-id reply (deleted as a string, no
-//     count), any other batch gets {"deleted_count":N}.
+//     count), any other batch gets {"deleted_count":N}. BD_DELETE_JSON, when
+//     set, is printed by delete verbatim instead of the shaped reply.
 //   - `<verb> --help` prints a help line followed by BD_VERB_HELP_EXTRA.
 //   - `config get --json <key>` reports BD_TYPES_RETAINED as the value.
 //
@@ -7165,6 +7166,10 @@ case "$1" in
     if [ -n "${BD_CLOSE_FAIL:-}" ]; then
       printf '%s\n' "$BD_CLOSE_FAIL" >&2
       exit 1
+    fi
+    if [ -n "${BD_DELETE_JSON:-}" ]; then
+      printf '%s\n' "$BD_DELETE_JSON"
+      exit 0
     fi
     n=0
     file=""

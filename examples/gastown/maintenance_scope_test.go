@@ -853,6 +853,70 @@ func TestReaperTypeSafeSessionPruneCountsSingleIDBatch(t *testing.T) {
 	}
 }
 
+// A zero-exit delete reply that carries neither deleted_count nor a
+// non-empty string deleted is not a counted batch: the prune must record
+// the anomaly, raise the reaper escalation, and stop after that one delete
+// call. A counted zero (deleted_count:0) is not an anomaly either; the
+// zero-count loop guard stops the loop the same way.
+func TestReaperTypeSafeSessionPruneRejectsUncountedDeleteReply(t *testing.T) {
+	cases := []struct {
+		name        string
+		deleteJSON  string
+		wantAnomaly bool
+	}{
+		{name: "empty object", deleteJSON: `{}`, wantAnomaly: true},
+		{name: "empty deleted string", deleteJSON: `{"deleted":""}`, wantAnomaly: true},
+		{name: "non-json", deleteJSON: `not json`, wantAnomaly: true},
+		{name: "counted zero batch", deleteJSON: `{"deleted":["gc-session-1"],"deleted_count":0}`, wantAnomaly: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// The selection yields gc-session-1 twice before drying up, so a
+			// fix that counts an uncounted reply as 1 would loop to a second
+			// delete call instead of stopping.
+			stateFile := filepath.Join(t.TempDir(), "batches")
+			f := newScopeFixture(t, `
+  *"issue_type='session'"*"LIMIT 500"*)
+    n=0
+    [ -f "`+stateFile+`" ] && n=$(cat "`+stateFile+`")
+    if [ "$n" = "0" ] || [ "$n" = "1" ]; then
+      printf '2' > "`+stateFile+`"
+      printf 'id\ngc-session-1\n'
+    else
+      printf 'id\n'
+    fi
+    ;;`)
+			f.env["GC_REAPER_SESSION_BEAD_PATTERN"] = ""
+			f.env["BD_DELETE_JSON"] = tc.deleteJSON
+			f.runReaper(t)
+
+			bdLog := f.read(t, f.bdLog)
+			if got := strings.Count(bdLog, "args=delete "); got != 1 {
+				t.Fatalf("delete called %d times, want exactly 1:\n%s", got, bdLog)
+			}
+			gcLog := f.read(t, f.gcLog)
+			if tc.wantAnomaly {
+				if !strings.Contains(gcLog, "type-safe session prune failed after 0 deletions") {
+					t.Fatalf("uncounted delete reply was not recorded as a failed prune:\n%s", gcLog)
+				}
+				if !strings.Contains(gcLog, "ESCALATION: Reaper anomalies detected") {
+					t.Fatalf("uncounted delete reply did not raise the reaper escalation:\n%s", gcLog)
+				}
+			} else {
+				if strings.Contains(gcLog, "type-safe session prune failed") {
+					t.Fatalf("a counted zero batch was recorded as a failed prune:\n%s", gcLog)
+				}
+				if strings.Contains(gcLog, "ESCALATION") {
+					t.Fatalf("a counted zero batch was escalated as a reaper anomaly:\n%s", gcLog)
+				}
+			}
+			if !strings.Contains(gcLog, "sessions-pruned:0") {
+				t.Fatalf("summary counted deletions from an uncounted reply:\n%s", gcLog)
+			}
+		})
+	}
+}
+
 func TestReaperWritesNoOutcomeWithoutControllerFile(t *testing.T) {
 	f := newScopeFixture(t, "")
 	delete(f.env, "GC_ORDER_OUTCOME_FILE")
