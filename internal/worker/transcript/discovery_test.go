@@ -41,6 +41,32 @@ func TestKeyedProbeRoots(t *testing.T) {
 	}
 }
 
+// TestClaudeConfigProjectsRoot pins the root an absolute CLAUDE_CONFIG_DIR
+// adds: <dir>/projects, trimmed, and none for a missing, blank, relative or
+// ~ value.
+func TestClaudeConfigProjectsRoot(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		dir  string
+		want string
+		ok   bool
+	}{
+		{"absolute", "/cfg/claude-a", "/cfg/claude-a/projects", true},
+		{"whitespace-padded absolute", "  /cfg/claude-a  ", "/cfg/claude-a/projects", true},
+		{"empty", "", "", false},
+		{"relative", "cfg/claude-a", "", false},
+		{"home-relative", "~/.claude-a", "", false},
+	} {
+		got, ok := ClaudeConfigProjectsRoot(map[string]string{"CLAUDE_CONFIG_DIR": c.dir})
+		if ok != c.ok || got != c.want {
+			t.Errorf("%s: ClaudeConfigProjectsRoot(%q) = %q, %v; want %q, %v", c.name, c.dir, got, ok, c.want, c.ok)
+		}
+	}
+	if _, ok := ClaudeConfigProjectsRoot(nil); ok {
+		t.Error("ClaudeConfigProjectsRoot(nil) reports a root; want none")
+	}
+}
+
 func TestDiscoverPathPrefersClaudeSessionID(t *testing.T) {
 	base := t.TempDir()
 	workDir := filepath.Join(t.TempDir(), "claude-project")

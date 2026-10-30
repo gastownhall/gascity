@@ -202,6 +202,66 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 	}
 }
 
+// TestStartCommandRotatedKeyClaudeConfigDir pins the roots the rotated-key
+// probe reads for a launch whose env carries CLAUDE_CONFIG_DIR: an absolute
+// dir's projects is one of the probe roots, so a transcript kept only there
+// resumes, while a relative or ~ value adds no root, because the provider
+// resolves those against its own working dir and home, which the probe
+// cannot reproduce.
+func TestStartCommandRotatedKeyClaudeConfigDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", "")
+	const key = "k-rotated-5"
+	claudeResume := sessionpkg.ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"}
+	run := func(name, configDir string, writeTranscript func(t *testing.T, f rotatedKeyFixture), want string) {
+		t.Run(name, func(t *testing.T) {
+			f := newRotatedKeyHandle(t, SessionSpec{
+				Command:  "claude",
+				Provider: "claude",
+				WorkDir:  t.TempDir(),
+				Resume:   claudeResume,
+				Env:      map[string]string{"CLAUDE_CONFIG_DIR": configDir},
+			}, key)
+			if writeTranscript != nil {
+				writeTranscript(t, f)
+			}
+			got, err := f.handle.startCommand(f.id)
+			if err != nil {
+				t.Fatalf("startCommand: %v", err)
+			}
+			if got != want {
+				t.Fatalf("startCommand() = %q, want %q", got, want)
+			}
+		})
+	}
+	configDir := t.TempDir()
+	run("AC-5 an absolute config dir with the transcript only under it resumes",
+		configDir,
+		func(t *testing.T, f rotatedKeyFixture) {
+			writeKeyedTranscript(t, filepath.Join(configDir, "projects"), f.workDir, key)
+		},
+		"claude --resume "+key)
+	run("AC-5 an absolute config dir with no transcript anywhere starts a new conversation",
+		configDir, nil,
+		"claude --session-id "+key)
+	run("a relative config dir adds no root and starts a new conversation",
+		"rel/claude",
+		func(t *testing.T, f rotatedKeyFixture) {
+			writeKeyedTranscript(t, filepath.Join(f.root, "rel", "claude", "projects"), f.workDir, key)
+		},
+		"claude --session-id "+key)
+	run("a home-relative config dir adds no root and starts a new conversation",
+		"~/.claude-alt",
+		func(t *testing.T, f rotatedKeyFixture) {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				t.Fatalf("UserHomeDir: %v", err)
+			}
+			writeKeyedTranscript(t, filepath.Join(home, ".claude-alt", "projects"), f.workDir, key)
+		},
+		"claude --session-id "+key)
+}
+
 // TestSessionHandleAttachAfterRestartHandoffStartsWithSessionID runs the
 // restart handoff end to end through the Attach funnel: a first start under
 // the allocated key, a stop, the handoff's rotated key, then an operator

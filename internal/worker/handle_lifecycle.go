@@ -834,9 +834,13 @@ func startWithSessionID(command, flag, key string) (string, error) {
 // that writes the key), the handle's resume config can name a new
 // conversation (a session-id flag), and the keyed-transcript probe over the
 // roots this launch reads — the same probe the reconciler's own start
-// applies — finds the provider probeable and the key's transcript absent. A
-// committed row, an unprobeable provider or work dir keeps the resume path:
-// absence the probe cannot establish is not a fresh start.
+// applies — finds the provider probeable and the key's transcript absent.
+// Those roots are the adapter's search paths with an absolute
+// CLAUDE_CONFIG_DIR in the launch env merged in, never pinned by it: a
+// worker launch's env is not the reconciler's operator env, so a merge can
+// only err toward today's resume. A committed row, an unprobeable provider
+// or work dir keeps the resume path: absence the probe cannot establish is
+// not a fresh start.
 func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info, metadata map[string]string) bool {
 	key := strings.TrimSpace(info.SessionKey)
 	flag := strings.TrimSpace(h.session.Resume.SessionIDFlag)
@@ -849,8 +853,12 @@ func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info, metadata map[
 		workDir = strings.TrimSpace(info.WorkDir)
 	}
 	provider := h.historyProvider(info)
+	launchRoots := h.adapter.SearchPaths
+	if root, ok := workertranscript.ClaudeConfigProjectsRoot(hints.Env); ok {
+		launchRoots = sessionlog.MergeSearchPaths(append(append([]string(nil), launchRoots...), root))
+	}
 	exists, probeable := workertranscript.HasKeyedTranscript(
-		workertranscript.KeyedProbeRoots(h.adapter.SearchPaths, provider), provider, workDir, key)
+		workertranscript.KeyedProbeRoots(launchRoots, provider), provider, workDir, key)
 	return probeable && !exists
 }
 

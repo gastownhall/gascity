@@ -2,6 +2,7 @@
 package transcript
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -169,6 +170,19 @@ func KeyedProbeRoots(searchPaths []string, provider string) []string {
 		return sessionlog.DefaultSearchPaths()
 	}
 	return searchPaths
+}
+
+// ClaudeConfigProjectsRoot returns the transcript root an absolute
+// CLAUDE_CONFIG_DIR in env adds to a launch's probe: <dir>/projects. A
+// missing, blank, relative or ~ value adds none — the provider resolves
+// those against its own working dir and home, which a probe cannot
+// reproduce.
+func ClaudeConfigProjectsRoot(env map[string]string) (string, bool) {
+	dir := strings.TrimSpace(env["CLAUDE_CONFIG_DIR"])
+	if !filepath.IsAbs(dir) {
+		return "", false
+	}
+	return filepath.Join(dir, "projects"), true
 }
 
 // HasKeyedTranscript reports whether the per-session ("keyed") transcript that
