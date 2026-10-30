@@ -121,6 +121,16 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			}),
 		},
 		{
+			name: "AC-3 a committed started_config_hash resumes without a transcript",
+			spec: SessionSpec{Command: "claude", Provider: "claude", WorkDir: t.TempDir(), Resume: claudeResume},
+			patch: func(t *testing.T, f rotatedKeyFixture) {
+				if err := f.store.SetMetadata(f.id, "started_config_hash", "hash-abc"); err != nil {
+					t.Fatalf("SetMetadata(started_config_hash): %v", err)
+				}
+			},
+			want: "claude --resume " + key,
+		},
+		{
 			name: "a creating row with a stale creation-complete marker also starts a new conversation",
 			spec: SessionSpec{Command: "claude", Provider: "claude", WorkDir: t.TempDir(), Resume: claudeResume},
 			patch: func(t *testing.T, f rotatedKeyFixture) {
