@@ -68,9 +68,10 @@ type MaintenanceRun struct {
 }
 
 // DoltOps is the minimal SQL surface the maintenance loop needs to run
-// CALL DOLT_GC() and the post-gc smoke test. Production wraps *sql.DB
-// via NewSQLDoltOps; tests supply fakes. Close must release the
-// underlying connection exactly once per cycle.
+// CALL DOLT_GC() and the post-gc smoke test. NewSQLDoltOps adapts *sql.DB
+// to it, but the controller does not wire that adapter yet, so the
+// production loop runs observe-only; tests supply fakes. Close must
+// release the underlying connection exactly once per cycle.
 type DoltOps interface {
 	// ExecGC runs CALL DOLT_GC() with the supplied context's deadline.
 	ExecGC(ctx context.Context) error
@@ -130,13 +131,15 @@ type StoreMaintenanceLoopDeps struct {
 
 	// OpenDoltOps opens a SQL connection to the managed Dolt store for
 	// one maintenance cycle. Nil leaves runDoltGC a no-op so deployments
-	// can wire maintenance dependencies incrementally. Production wires
-	// this to NewSQLDoltOps.
+	// can wire maintenance dependencies incrementally. NewSQLDoltOps
+	// implements it, but the controller does not wire it yet, so the
+	// production loop runs observe-only.
 	OpenDoltOps DoltOpsFactory
 
 	// OpenDoltBackup opens a DoltBackupRunner for one snapshot cycle.
-	// Nil leaves runSnapshot a no-op. Production wires this to
-	// NewExecDoltBackupRunner rooted at the managed Dolt DB dir.
+	// Nil leaves runSnapshot a no-op. NewExecDoltBackupRunner, rooted at
+	// the managed Dolt DB dir, implements it, but the controller does not
+	// wire it yet, so the production loop takes no snapshot.
 	OpenDoltBackup DoltBackupRunnerFactory
 
 	// Mail sends operator alert mail on failed runs when Cfg.AlertTo is
