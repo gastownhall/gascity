@@ -734,8 +734,11 @@ func canInferSlingDefaultTargetFromBead(cfg *config.City, beadOrFormula string) 
 	return looksLikeBeadID(beadOrFormula) || looksLikeConfiguredBeadID(cfg, beadOrFormula)
 }
 
-// populateSlingDepsCallbacks fills in the interface fields on SlingDeps.
+// populateSlingDepsCallbacks fills in the interface fields on SlingDeps and
+// resolves the caller identity from the session environment (empty when none
+// is set, which matches no gc.routed_to).
 func populateSlingDepsCallbacks(deps *slingDeps) {
+	deps.CallerIdentity = defaultSessionDisplayIdentity()
 	deps.Resolver = cliAgentResolver{}
 	deps.Branches = cliBranchResolver{}
 	deps.Notify = &cliNotifier{}
@@ -1977,6 +1980,11 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 				w("Idempotency:")
 				w("  Bead " + opts.BeadOrFormula + " is already routed to " + a.QualifiedName() + ".")
 				w("  Without --force, sling would skip routing (exit 0).")
+				w("")
+			} else if check.Conflict != nil {
+				w("Routing conflict:")
+				w("  " + check.Conflict.Error() + ".")
+				w("  Without --force, sling would refuse to route (exit 1).")
 				w("")
 			}
 		}

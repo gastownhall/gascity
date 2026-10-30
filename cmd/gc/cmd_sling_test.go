@@ -7877,7 +7877,7 @@ func TestDoSlingRefusesThirdPartyRoute(t *testing.T) {
 
 	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	deps.Store = routedBeadStore("rig/polecat")
-	if code := doSling(testOpts(a, "BL-42"), deps, nil, stdout, stderr); code != 1 {
+	if code := doSling(testOpts(a, "BL-42"), deps, deps.Store, stdout, stderr); code != 1 {
 		t.Fatalf("doSling returned %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "--force") {
@@ -7895,7 +7895,7 @@ func TestDoSlingRefusesThirdPartyRouteWithoutCallerEnv(t *testing.T) {
 
 	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	deps.Store = routedBeadStore("rig/polecat")
-	if code := doSling(testOpts(a, "BL-42"), deps, nil, stdout, stderr); code != 1 {
+	if code := doSling(testOpts(a, "BL-42"), deps, deps.Store, stdout, stderr); code != 1 {
 		t.Fatalf("doSling returned %d, want 1; stderr: %s", code, stderr.String())
 	}
 	assertStoreRoutedTo(t, deps.Store, "BL-42", "rig/polecat")
@@ -7911,7 +7911,7 @@ func TestDoSlingAllowsRerouteOfCallersOwnRoute(t *testing.T) {
 
 	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	deps.Store = routedBeadStore("rig/reviewer")
-	if code := doSling(testOpts(a, "BL-42"), deps, nil, stdout, stderr); code != 0 {
+	if code := doSling(testOpts(a, "BL-42"), deps, deps.Store, stdout, stderr); code != 0 {
 		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 	assertStoreRoutedTo(t, deps.Store, "BL-42", "deacon")
@@ -7927,7 +7927,7 @@ func TestDoSlingForceOverridesThirdPartyRoute(t *testing.T) {
 	deps.Store = routedBeadStore("rig/polecat")
 	opts := testOpts(a, "BL-42")
 	opts.Force = true
-	if code := doSling(opts, deps, nil, stdout, stderr); code != 0 {
+	if code := doSling(opts, deps, deps.Store, stdout, stderr); code != 0 {
 		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 	assertStoreRoutedTo(t, deps.Store, "BL-42", "deacon")
