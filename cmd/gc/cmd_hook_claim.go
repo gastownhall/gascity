@@ -17,11 +17,14 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -402,8 +405,9 @@ type (
 	// toAssignee.
 	hookClaimRestampFunc func(context.Context, string, []string, string, string, string) (bool, error)
 	// hookEnqueueContinuationNudgeFunc enqueues the claiming session's
-	// hook-claim-continuation nudge, keyed by the claim assignee.
-	hookEnqueueContinuationNudgeFunc func(assignee string)
+	// hook-claim-continuation nudge, keyed by the claim assignee, for the
+	// workflow root it claimed; it warns on stderr of a nudge it refused.
+	hookEnqueueContinuationNudgeFunc func(assignee, rootID string, stderr io.Writer)
 	hookRecordWorkStartedFunc        func(sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error)
 	hookForgetWorkStartedFunc        func(sessionID string, key hookStartedKey) error
 	hookReadWorkStartedFunc          func(sessionID string) (string, error)
@@ -526,8 +530,13 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" {
 		pending, err := ops.DrainPending(sessionID)
 		switch {
+		case hookDrainProbeFailsClosed(err):
+			// A standing storage refusal fails CLOSED; see
+			// hookDrainProbeFailsClosed for why it is not a transient.
+			hookEmitDrainFenceUnavailable(stderr, sessionID, hookClaimEnvValue(opts.Env, "GC_TEMPLATE"), err)
+			return hookClaimResult{terminal: true, code: reportHookDrainFenceClosed("gc hook --claim", sessionID, err, stderr)}
 		case err != nil:
-			// Fail open. This probe is one store read on every agent turn in the
+			// Fail open on a transient fault. This probe is one store read on every agent turn in the
 			// city, so a store hiccup here must not idle every healthy seat; the
 			// drain lanes remain the backstop exactly as they are today. Name the
 			// fault without the alarming refusal wording, the same shape the
@@ -1621,7 +1630,7 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	// len(assigned) conjunct is what scopes this: the nudge only ever reaches a
 	// session that now owns pinned sibling work.
 	if len(assigned) > 0 && bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow {
-		ops.EnqueueContinuationNudge(opts.Assignee)
+		ops.EnqueueContinuationNudge(opts.Assignee, bead.ID, stderr)
 	}
 	return 0
 }
@@ -2247,14 +2256,38 @@ func hookSkipIfInputDone(candidate beads.Bead, opts hookClaimOptions, ops hookCl
 // identityCandidates, blocks. A root with no input convoy, or a convoy with
 // no resolvable members, is never "done".
 func workflowInputDone(store beads.Store, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
+	return workflowInputDoneAcross(store, store, candidate, identityCandidates)
+}
+
+// workflowRootIDForInputCheck is the workflow root workflowInputDone resolves
+// candidate to: itself when it carries gc.input_convoy_id, else its
+// gc.root_bead_id. It returns "" for a candidate that is not part of a
+// workflow (no root, or its own root without an input convoy).
+func workflowRootIDForInputCheck(candidate beads.Bead) string {
+	if strings.TrimSpace(candidate.Metadata[beadmeta.InputConvoyIDMetadataKey]) != "" {
+		return candidate.ID
+	}
+	rootID := strings.TrimSpace(candidate.Metadata[beadmeta.RootBeadIDMetadataKey])
+	if rootID == candidate.ID {
+		return ""
+	}
+	return rootID
+}
+
+// workflowInputDoneAcross is workflowInputDone with the workflow's two halves
+// read from their own stores: the root and its steps from graph, the input
+// convoy and its members from work. On a single-store city both are the same
+// store; on a split city the root lives in the binding and the synthetic input
+// convoy, which is work class, beside the work it tracks.
+func workflowInputDoneAcross(graph, work beads.Store, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
 	root := candidate
 	if strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey]) == "" {
-		rootID := strings.TrimSpace(candidate.Metadata[beadmeta.RootBeadIDMetadataKey])
-		if rootID == "" || rootID == candidate.ID {
+		rootID := workflowRootIDForInputCheck(candidate)
+		if rootID == "" {
 			return "", false, nil
 		}
 		var err error
-		root, err = store.Get(rootID)
+		root, err = graph.Get(rootID)
 		if err != nil {
 			return "", false, fmt.Errorf("loading workflow root %s: %w", rootID, err)
 		}
@@ -2263,7 +2296,7 @@ func workflowInputDone(store beads.Store, candidate beads.Bead, identityCandidat
 	if convoyID == "" {
 		return root.ID, false, nil
 	}
-	members, err := convoy.Members(store, convoyID, true)
+	members, err := convoy.Members(work, convoyID, true)
 	if err != nil {
 		return root.ID, false, fmt.Errorf("listing input convoy %s members: %w", convoyID, err)
 	}
@@ -2280,7 +2313,7 @@ func workflowInputDone(store beads.Store, candidate beads.Bead, identityCandidat
 			// (typically dead, its steps reopened), not another lane: the
 			// member was never handed off (sys-pxryan.44).
 			if workflowSeats == nil {
-				workflowSeats, err = workflowStepAssignees(store, root.ID)
+				workflowSeats, err = workflowStepAssignees(graph, root.ID)
 				if err != nil {
 					return root.ID, false, err
 				}
@@ -3857,24 +3890,41 @@ func emitClaimReclaimedStale(rec events.Recorder, beadID, previousOwner, newAssi
 // the root → step-1 transition without an external gc session nudge. The city
 // path is resolved from the environment so this call is self-contained — the
 // same pattern as hookEmitClaimRejected / openCityRecorder. Best-effort: any
-// error is swallowed so a nudge-queue failure never blocks the claim.
+// error is swallowed so a nudge-queue failure never blocks the claim, and a
+// lane notice the op journal refuses is only warned of on stderr
+// (continuationNudgeEnqueueAt).
 // ACP sessions: maybeStartNudgePoller is a no-op for acp transport; configure
 // daemon.nudge_dispatcher = "supervisor" for reliable queued delivery.
 // On a worker site it queues nothing and starts no poller: the box's nudge
 // queue is a local file the remote controller never reads, and the claimed
 // work is on the ledger either way.
 // See writeHookClaimWorkResultForBead for the call site.
-func hookContinuationNudgeEnqueue(assignee string) {
+func hookContinuationNudgeEnqueue(assignee, rootID string, stderr io.Writer) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		return
 	}
-	continuationNudgeEnqueueAt(cityPath, assignee)
+	continuationNudgeEnqueueAt(cityPath, assignee, rootID, stderr)
 }
 
+// hookClaimContinuationPrincipal is the principal of a hook-claim
+// continuation notice on the conversation lane; its label is
+// hook-claim-continuation.
+const hookClaimContinuationPrincipal = "gc:hook-claim-continuation"
+
+// hookClaimContinuationText is the continuation notice's text.
+const hookClaimContinuationText = "Work slung. Check your hook."
+
 // continuationNudgeEnqueueAt is hookContinuationNudgeEnqueue for an
-// already-resolved city.
-func continuationNudgeEnqueueAt(cityPath, assignee string) {
+// already-resolved city. When [ops] authoritative lists message, the nudge
+// routes by the CLI's lane rules (routeCLILaneNotice): a session a lane
+// serves gets one lane notice from gc:hook-claim-continuation per claim,
+// under a minted key with the root as its causation, scoped to the session's
+// generation and delivered only while it runs (live_only), as the queue item
+// was. A notice the lane refuses, and a nudge store or session provider that
+// does not open, are warned of on stderr, and nothing is queued; a session
+// with no row, or one no lane serves, takes the queue path.
+func continuationNudgeEnqueueAt(cityPath, assignee, rootID string, stderr io.Writer) {
 	if onWorkerSite(cityPath) {
 		return
 	}
@@ -3911,16 +3961,62 @@ func continuationNudgeEnqueueAt(cityPath, assignee string) {
 			target = withNudgeTargetFence(sessStore, target)
 		}
 	}
+	if rootID != "" && cliLaneExecutesMessage(cfg) {
+		// A lane that may serve the session takes the notice or refuses it;
+		// only a session no lane serves takes the queue path below.
+		if continuationLaneNoticeIn(cityPath, cfg, target, opened, rootID, stderr) {
+			return
+		}
+	}
 	// The assignee is the right queue key: delivery
 	// (queuedNudgeClaimableForTarget and the supervisor dispatcher) matches
 	// item.Agent against nudgeTarget.queueKeys, which carries the alias,
 	// session ID, agent identity, and session name for the session.
-	item := newQueuedNudgeWithOptions(assignee, "Work slung. Check your hook.", "hook-claim-continuation", time.Now(), queuedNudgeOptionsFromTarget(target))
+	item := newQueuedNudgeWithOptions(assignee, hookClaimContinuationText, "hook-claim-continuation", time.Now(), queuedNudgeOptionsFromTarget(target))
 	if err := enqueueQueuedNudgeWithStore(cityPath, store, item); err != nil {
 		return
 	}
 	maybeStartNudgePoller(target)
 	_ = pokeController(cityPath)
+}
+
+// continuationLaneNoticeIn is continuationLaneNotice under the city's session
+// provider, and reports whether the lane handled the notice: true once it
+// proposed or refused it, the refusal warned of on stderr. city is the
+// city's store the claim opened, nil when it did not open. A session
+// provider that does not open is a refusal: without it the CLI cannot tell
+// whether a lane serves the session (laneServesSession).
+func continuationLaneNoticeIn(cityPath string, cfg *config.City, target nudgeTarget, city beads.Store, rootID string, stderr io.Writer) bool {
+	sp, err := newSessionProviderForCity(cfg, cityPath)
+	if err != nil {
+		warnContinuationRefused(stderr, rootID, cliLaneRefusal(fmt.Errorf("opening the session provider: %w", err)))
+		return true
+	}
+	handled, err := continuationLaneNotice(target, city, sp, rootID)
+	if err != nil {
+		warnContinuationRefused(stderr, rootID, err)
+	}
+	return handled
+}
+
+// warnContinuationRefused warns on stderr that the lane refused rootID's
+// continuation nudge for err.
+func warnContinuationRefused(stderr io.Writer, rootID string, err error) {
+	fmt.Fprintf(stderr, "gc hook --claim: warning: the continuation nudge for %s was not sent: %v\n", rootID, err) //nolint:errcheck // best-effort stderr
+}
+
+// continuationLaneNotice proposes the hook-claim continuation for rootID as a
+// lane notice to target's session (continuationNudgeEnqueueAt), routed by
+// routeCLILaneNotice over city, the city's store: handled false leaves the
+// legacy queue path, nothing written; an error is the lane's refusal,
+// nothing written either.
+func continuationLaneNotice(target nudgeTarget, city beads.Store, sp runtime.Provider, rootID string) (handled bool, err error) {
+	prod, err := routeCLILaneNotice(cliLaneNoticeRoute{
+		target: target, city: city, sp: sp,
+		req:           cliLaneNotice(hookClaimContinuationPrincipal, rootID, hookClaimContinuationText, opjournal.WakeLiveOnly),
+		sessionScoped: true,
+	})
+	return prod.handled, err
 }
 
 func hookListContinuationWithBdStore(_ context.Context, dir string, env []string, rootID, group string) ([]beads.Bead, error) {

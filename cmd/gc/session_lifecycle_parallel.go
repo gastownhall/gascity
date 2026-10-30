@@ -1213,6 +1213,11 @@ func buildPreparedStartWithTranscript(
 	dispatchSources dispatchOptionSources,
 	transcript *sessTranscriptState,
 ) (*preparedStart, sessionpkg.Info, error) {
+	if tp, swapped := templateParamsForSession(candidate.tp, candidate.info); swapped {
+		log.Printf("session %q keeps its recorded ACP transport; template %q now resolves the CLI transport; run \"gc session close %s\" to recreate it",
+			candidate.name(), tp.TemplateName, candidate.name())
+		candidate.tp = tp
+	}
 	tp := candidate.tp
 	agentCfg, delivery, err := templateParamsToConfigWithDelivery(tp)
 	if err != nil {
@@ -1267,7 +1272,7 @@ func buildPreparedStartWithTranscript(
 	if _, err := repairConcretePoolTemplateWorkDirOverride(&candidate, cityPath, cfg, repairStore); err != nil {
 		return nil, candidate.info, err
 	}
-	if wd := resolvePreparedTaskWorkDir(candidate, cityPath, cfg, store, workDirResolver); wd != "" {
+	if wd := resolvePreparedTaskWorkDir(candidate, cityPath, cfg, store, workDirResolver, dispatchSources.trigger); wd != "" {
 		agentCfg.WorkDir = wd
 	} else if wd := preparedStartSessionWorkDir(candidate.info); wd != "" {
 		agentCfg.WorkDir = resolveWorkDirAgainstCity(cityPath, wd)
@@ -1407,18 +1412,7 @@ func buildPreparedStartWithTranscript(
 	// make the stored hash never match the re-derivation and re-prime forever.
 	promptHash := sessionpkg.PromptHash(tp.Prompt)
 	if !firstStart && !forceFresh && hasResumeKey {
-		agentCfg.PromptSuffix = ""
-		agentCfg.PromptFlag = ""
-		agentCfg.Nudge = restartPromptNudge(tp.Prompt, tp.Hints.Nudge)
-		if agentCfg.Env != nil {
-			delete(agentCfg.Env, startupPromptDeliveredEnv)
-		}
-		if strings.TrimSpace(tp.Prompt) != "" {
-			if agentCfg.Env == nil {
-				agentCfg.Env = map[string]string{}
-			}
-			agentCfg.Env[startupPromptDeliveredEnv] = "1"
-		}
+		resumeStartupPromptPlan(tp.Prompt, tp.Hints.Nudge).applyTo(&agentCfg)
 	}
 	// Initial message: append to prompt on first start only, reusing the
 	// overrides parsed once by parseSessionTemplateOverridesForLaunch above.
@@ -1705,20 +1699,31 @@ func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateP
 	}
 }
 
+// trigger, when non-nil, is the residency-correct by-id reader the start path
+// reads trigger beads through (withTriggerBeadResolver). store is the SESSIONS
+// store: on a split city the trigger's drain source is a work bead on the work
+// ledger, and the item step and its root are graph rows, so only the resolver
+// reaches all three. Without one, store answers, as it always has on a
+// single-store city.
 func resolvePreparedTaskWorkDir(
 	candidate startCandidate,
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
 	workDirResolver taskWorkDirResolver,
+	trigger warmClaimTriggerResolver,
 ) string {
 	// Prepared drain items only: the item step's copied metadata can still name
 	// the launcher checkout before prepare-worktree runs. Deliberately NOT the
 	// full resolveTaskBeadWorkDir chain — that would put the trigger bead ahead
 	// of the snapshot resolver for every pool session.
-	if triggerID := strings.TrimSpace(candidate.info.TriggerBeadID); triggerID != "" && store != nil {
-		if trigger, err := store.Get(triggerID); err == nil {
-			if workDir := resolveDrainSourceWorkDir(cityPath, store, trigger); workDir != "" {
+	get := trigger
+	if get == nil && store != nil {
+		get = store.Get
+	}
+	if triggerID := strings.TrimSpace(candidate.info.TriggerBeadID); triggerID != "" && get != nil {
+		if bead, err := get(triggerID); err == nil {
+			if workDir := resolveDrainSourceWorkDirWith(cityPath, get, bead); workDir != "" {
 				return workDir
 			}
 		}
@@ -2134,6 +2139,15 @@ func runPreparedStartCandidate(
 		unattributedErr = unattributedStartError(err, identity)
 		err = nil
 		rollbackPending = false
+	case attribution == pendingCreateRuntimeForeign && identity.otherEpochOfThisSession():
+		// The name holds another incarnation of this session (#2081): the
+		// rollback would stop it by name, killing in-flight work. Defer, as
+		// for an unknown attribution; the reconciler holds the row while it
+		// runs and rolls back once it is gone.
+		outcome = TraceOutcomeDeferred
+		unattributedErr = liveIncarnationStartError(err, item.candidate.info, identity)
+		err = nil
+		rollbackPending = false
 	case startCtxErr == context.DeadlineExceeded:
 		outcome = TraceOutcomeDeadlineExceeded
 		if err == nil {
@@ -2400,6 +2414,14 @@ func commitAsyncStartResultWithContext(
 			// or a capacity refusal keeps its own commit arm, as there.
 			if !refreshed.rateLimitScreen && !refreshed.capacityRefused {
 				refreshed.unattributedErr = unattributedStartError(refreshed.err, identity)
+				refreshed.err = nil
+				refreshed.outcome = TraceOutcomeDeferred
+				refreshed.rollbackPending = false
+			}
+		case pendingCreateRuntimeForeign:
+			// Same live-incarnation deferral as runPreparedStartCandidate's.
+			if identity.otherEpochOfThisSession() && !refreshed.rateLimitScreen && !refreshed.capacityRefused {
+				refreshed.unattributedErr = liveIncarnationStartError(refreshed.err, refreshed.prepared.candidate.info, identity)
 				refreshed.err = nil
 				refreshed.outcome = TraceOutcomeDeferred
 				refreshed.rollbackPending = false
@@ -2844,11 +2866,13 @@ func keyedProbeRoots(searchPaths []string, provider string) []string {
 // dir's projects, the one root the launch reads: a conversation an agent
 // left under another observed root when it moved reads gone rather than
 // resumable. Otherwise sessionTranscriptSearchPaths(cfg):
-//   - a CLAUDE_CONFIG_DIR passed through from gc's own environment is
-//     ambient, not the launch's choice, and is not read;
+//   - an absolute CLAUDE_CONFIG_DIR the launch is otherwise handed (tp.Env:
+//     passed through from gc's own environment, or an upstream's env) adds
+//     its projects after those roots, never instead of them, because a
+//     wrapper may set its own;
 //   - a relative or ~ value is resolved by the provider against its own
-//     working dir and home, which the probe cannot reproduce, so it does
-//     not pin the probe.
+//     working dir and home, which the probe cannot reproduce, so it adds no
+//     root and does not pin the probe.
 //
 // A wrapper that sets its own CLAUDE_CONFIG_DIR wins at runtime: an
 // operator value beside such a wrapper pins the probe to a root the launch
@@ -2857,7 +2881,11 @@ func launchTranscriptRoots(cfg *config.City, tp TemplateParams) []string {
 	if dir := strings.TrimSpace(tp.OperatorEnv["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
 		return []string{filepath.Join(dir, "projects")}
 	}
-	return sessionTranscriptSearchPaths(cfg)
+	roots := sessionTranscriptSearchPaths(cfg)
+	if dir := strings.TrimSpace(tp.Env["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
+		roots = worker.MergeSearchPaths(append(roots, filepath.Join(dir, "projects")))
+	}
+	return roots
 }
 
 // staleKeyConversationResetEvent is session.conversation_reset for info, a
@@ -3873,6 +3901,8 @@ type pendingCreateIdentity struct {
 	id, token, generation runtimeTokenVerdict
 	// expectsToken reports that the pending create carries an instance token.
 	expectsToken bool
+	// epoch is the GC_RUNTIME_EPOCH the runtime reported, when it was read.
+	epoch string
 	// failed names each unverifiable key with its read error.
 	failed []string
 }
@@ -3900,24 +3930,24 @@ func readPendingCreateIdentityVia(info sessionpkg.Info, sp runtime.Provider, get
 	if sp == nil {
 		return r
 	}
-	read := func(key, expected string) runtimeTokenVerdict {
+	read := func(key, expected string) (runtimeTokenVerdict, string) {
 		actual, err := getMeta(key)
 		verdict := classifyRuntimeInstanceToken(actual, err, expected)
 		if verdict == runtimeTokenUnverifiable {
 			r.failed = append(r.failed, fmt.Sprintf("%s: %v", key, err))
 		}
-		return verdict
+		return verdict, strings.TrimSpace(actual)
 	}
-	r.id = read("GC_SESSION_ID", info.ID)
+	r.id, _ = read("GC_SESSION_ID", info.ID)
 	if r.id == runtimeTokenMismatch || r.id == runtimeTokenGone {
 		return r
 	}
-	r.token = read("GC_INSTANCE_TOKEN", info.InstanceToken)
+	r.token, _ = read("GC_INSTANCE_TOKEN", info.InstanceToken)
 	expectedGeneration := strings.TrimSpace(info.Generation)
 	if expectedGeneration != "" &&
 		(r.token == runtimeTokenMismatch && r.id != runtimeTokenAbsent ||
 			r.token == runtimeTokenUnverifiable && r.id == runtimeTokenMatch) {
-		r.generation = read("GC_RUNTIME_EPOCH", expectedGeneration)
+		r.generation, r.epoch = read("GC_RUNTIME_EPOCH", expectedGeneration)
 	}
 	return r
 }
@@ -3935,7 +3965,10 @@ func (r pendingCreateIdentity) attribution() pendingCreateAttribution {
 		return pendingCreateRuntimeForeign
 	case runtimeTokenMismatch:
 		// Another token is another incarnation, unless the runtime carries
-		// this session's ID and no conflicting generation.
+		// this session's ID and no conflicting generation. With this
+		// session's ID and another epoch it is this session's own earlier or
+		// later incarnation (otherEpochOfThisSession): foreign to this
+		// create, but a rollback defers on it while it lives.
 		switch {
 		case r.id == runtimeTokenAbsent, r.generation == runtimeTokenMismatch, r.generation == runtimeTokenGone:
 			return pendingCreateRuntimeForeign
@@ -3973,6 +4006,23 @@ func (r pendingCreateIdentity) unstamped() bool {
 	return r.id == runtimeTokenAbsent && r.token == runtimeTokenAbsent
 }
 
+// otherEpochOfThisSession reports a runtime stamped with this row's own
+// session ID under another token and another epoch: an earlier or a later
+// incarnation of the same session, never another session's runtime.
+// attribution reads it as foreign; a start that finds it defers its
+// rollback, and the tick's rollback holds the row while the session has work
+// in flight (holdsOverLiveIncarnation) instead of stopping it or freeing its
+// name.
+func (r pendingCreateIdentity) otherEpochOfThisSession() bool {
+	return r.id == runtimeTokenMatch && r.token == runtimeTokenMismatch && r.generation == runtimeTokenMismatch
+}
+
+// liveIncarnationDetail names the runtime's epoch and the row's generation for
+// a live-incarnation hold.
+func liveIncarnationDetail(info sessionpkg.Info, identity pendingCreateIdentity) string {
+	return fmt.Sprintf("runtime epoch %s, row generation %s", identity.epoch, strings.TrimSpace(info.Generation))
+}
+
 // attributePendingCreateRuntime is startPreparedStartCandidate's attribution
 // of a runtime found under a pending create's name. The other deciders read
 // the identity itself (readPendingCreateIdentity) to act on its parts; the
@@ -3985,6 +4035,12 @@ func attributePendingCreateRuntime(info sessionpkg.Info, sessionName string, sp 
 // sets aside, annotated with the identity reads that failed.
 func unattributedStartError(err error, identity pendingCreateIdentity) error {
 	return fmt.Errorf("%w (attribution_unknown: %s)", err, strings.Join(identity.failed, "; "))
+}
+
+// liveIncarnationStartError is the start error a deferral over a live
+// incarnation of the row's own session carries for the lifecycle log.
+func liveIncarnationStartError(err error, info sessionpkg.Info, identity pendingCreateIdentity) error {
+	return fmt.Errorf("%w (live_incarnation: %s)", err, liveIncarnationDetail(info, identity))
 }
 
 // rollbackPendingCreateClears is the pending-create rollback: the failed-create

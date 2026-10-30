@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "opjournal",
     srcs = [
+        "by_causation.go",
         "codec.go",
         "default_recording.go",
         "delivery_key.go",
@@ -51,6 +52,7 @@ go_library(
 go_test(
     name = "opjournal_test",
     srcs = [
+        "by_causation_test.go",
         "codec_test.go",
         "default_recording_test.go",
         "delivery_key_test.go",
@@ -62,6 +64,7 @@ go_test(
         "interrupt_credit_test.go",
         "kind_test.go",
         "lane_content_hold_test.go",
+        "lane_content_only_test.go",
         "lane_done_test.go",
         "lane_harness_test.go",
         "lane_interrupt_test.go",

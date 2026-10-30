@@ -351,6 +351,9 @@ func (l *ConversationLane) doneNext(tb *takenBatch, er effectResult, success Out
 		if er.rejected.KeyRejected {
 			return failed(cur, lastError(lastErrorKeyRejected, errors.New(er.rejected.Reason)))
 		}
+		if cause := er.rejected.Cause; cause != nil {
+			cur.LastError = lastError(er.rejected.Reason, cause)
+		}
 		return closedAt(cur, success, by, now)
 	}
 }

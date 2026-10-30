@@ -15,7 +15,7 @@ import (
 // laneRespondRefusedAction closes a respond whose action the pending prompt
 // does not offer, or whose answer the runtime refuses: nothing was sent, and
 // the same answer would be refused again.
-const laneRespondRefusedAction = opjournal.RefusedReasonPrefix + "action"
+const laneRespondRefusedAction = opjournal.ReasonRefusedAction
 
 // Respond implements opjournal.Executor (DES-O1 §10.2): it answers the
 // request the call names, through the handle its probe resolved, only while

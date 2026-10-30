@@ -15,7 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -730,17 +729,17 @@ func splitShellWords(s string) []string {
 // production serving semantics rather than a test's reading of them.
 func parseReadyArgsForTest(t *testing.T, args []string) func(beads.Bead) bool {
 	t.Helper()
-	var opts readywork.Query
+	var opts readyFlags
 	var includeEphemeral, jsonOut bool
 	cmd := &cobra.Command{Use: "ready"}
 	registerReadyFlags(cmd, &opts, &includeEphemeral, &jsonOut)
 	if err := cmd.Flags().Parse(args); err != nil {
 		t.Fatalf("parsing the generated tier's flags %v: %v", args, err)
 	}
-	if len(opts.MetadataFields) == 0 {
+	if len(opts.query.MetadataFields) == 0 {
 		t.Fatalf("parsed no metadata filters from %v; the conformance would pass vacuously", args)
 	}
-	matches, err := opts.Matcher()
+	matches, err := opts.query.Matcher()
 	if err != nil {
 		t.Fatalf("compiling the generated tier's query: %v", err)
 	}

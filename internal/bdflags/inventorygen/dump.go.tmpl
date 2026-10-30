@@ -1,0 +1,126 @@
+// Code copied into a bd checkout (cmd/bd/zz_gc_inventory_dump.go) by
+// generate.sh. It is not part of gascity's build.
+
+package main
+
+import (
+	"encoding/json"
+	"os"
+	"runtime"
+	"runtime/debug"
+	"sort"
+	"strings"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+)
+
+type gcInventoryFlag struct {
+	Name        string `json:"name"`
+	Shorthand   string `json:"shorthand,omitempty"`
+	Type        string `json:"type"`
+	Default     string `json:"default"`
+	NoOptDefVal string `json:"no_opt_def_val,omitempty"`
+	Hidden      bool   `json:"hidden,omitempty"`
+	Usage       string `json:"usage,omitempty"`
+	// ShorthandDeprecated hides the shorthand from help.
+	ShorthandDeprecated bool `json:"shorthand_deprecated,omitempty"`
+}
+
+type gcInventoryCommand struct {
+	Path               string            `json:"path"`
+	Aliases            []string          `json:"aliases,omitempty"`
+	Hidden             bool              `json:"hidden,omitempty"`
+	Deprecated         bool              `json:"deprecated,omitempty"`
+	Runnable           bool              `json:"runnable"`
+	DisableFlagParsing bool              `json:"disable_flag_parsing,omitempty"`
+	Local              []gcInventoryFlag `json:"local,omitempty"`
+	Persistent         []gcInventoryFlag `json:"persistent,omitempty"`
+}
+
+type gcInventoryProvenance struct {
+	Commit       string `json:"commit"`
+	BuildTags    string `json:"build_tags"`
+	GoVersion    string `json:"go_version"`
+	CobraVersion string `json:"cobra_version"`
+	PflagVersion string `json:"pflag_version"`
+	CGOEnabled   string `json:"cgo_enabled"`
+}
+
+type gcInventory struct {
+	Version    string                 `json:"version"`
+	Build      string                 `json:"build"`
+	Provenance gcInventoryProvenance  `json:"provenance"`
+	Commands   []gcInventoryCommand   `json:"commands"`
+}
+
+func gcInventoryFlags(fs *pflag.FlagSet) []gcInventoryFlag {
+	var out []gcInventoryFlag
+	fs.VisitAll(func(f *pflag.Flag) {
+		out = append(out, gcInventoryFlag{
+			Name: f.Name, Shorthand: f.Shorthand, Type: f.Value.Type(),
+			Default: f.DefValue, NoOptDefVal: f.NoOptDefVal, Hidden: f.Hidden,
+			Usage: f.Usage, ShorthandDeprecated: f.ShorthandDeprecated != "",
+		})
+	})
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+func init() {
+	out := os.Getenv("GC_BD_INVENTORY_DUMP")
+	if out == "" {
+		return
+	}
+	// What main() and ExecuteC add before cobra resolves a command.
+	rootCmd.InitDefaultHelpCmd()
+	registerHelpAllFlag()
+	rootCmd.InitDefaultCompletionCmd()
+	inv := gcInventory{Version: Version, Build: Build}
+	inv.Provenance = gcInventoryProvenance{
+		Commit:    os.Getenv("GC_BD_INVENTORY_COMMIT"),
+		BuildTags: os.Getenv("GC_BD_INVENTORY_TAGS"),
+		GoVersion: runtime.Version(),
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range info.Settings {
+			if s.Key == "CGO_ENABLED" {
+				inv.Provenance.CGOEnabled = s.Value
+			}
+		}
+		for _, dep := range info.Deps {
+			switch dep.Path {
+			case "github.com/spf13/cobra":
+				inv.Provenance.CobraVersion = dep.Version
+			case "github.com/spf13/pflag":
+				inv.Provenance.PflagVersion = dep.Version
+			}
+		}
+	}
+	var walk func(c *cobra.Command, path []string)
+	walk = func(c *cobra.Command, path []string) {
+		c.InitDefaultHelpFlag()
+		if c == rootCmd {
+			c.InitDefaultVersionFlag()
+		}
+		inv.Commands = append(inv.Commands, gcInventoryCommand{
+			Path: strings.Join(path, " "), Aliases: c.Aliases, Hidden: c.Hidden, Deprecated: c.Deprecated != "",
+			Runnable: c.Runnable(), DisableFlagParsing: c.DisableFlagParsing,
+			Local:      gcInventoryFlags(c.LocalNonPersistentFlags()),
+			Persistent: gcInventoryFlags(c.PersistentFlags()),
+		})
+		for _, sub := range c.Commands() {
+			walk(sub, append(append([]string(nil), path...), sub.Name()))
+		}
+	}
+	walk(rootCmd, nil)
+	sort.Slice(inv.Commands, func(i, j int) bool { return inv.Commands[i].Path < inv.Commands[j].Path })
+	data, err := json.MarshalIndent(inv, "", " ")
+	if err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(out, append(data, '\n'), 0o644); err != nil {
+		panic(err)
+	}
+	os.Exit(0)
+}

@@ -61,14 +61,16 @@ func TestSplitGlobalFlagsSkipsGlobalFlagValues(t *testing.T) {
 // --readonly, --sandbox, -v/--verbose, -h/--help, -V/--version) is boolean and
 // consumes nothing.
 //
-// Two flags this table used to carry are gone as of the RC and must not come
-// back: --profile (renamed --cpu-profile, and now a bool) and --server-url,
-// which bd no longer registers anywhere.
+// --profile and --server-url are gone from OSS bd as of the RC, but the bd
+// 1.3.0 Enterprise build the fleet runs still declares both as `string`
+// value flags, so they are carried as value flags: filed as bools (or left
+// out) they would read their value as the verb on the fleet's bd. OSS bd
+// rejects them, so the superset costs nothing there.
 func TestGlobalValueFlagsIsComplete(t *testing.T) {
 	want := map[string]bool{
 		"--actor": true, "--database": true, "--db": true, "-C": true,
 		"--directory": true, "--dolt-auto-commit": true, "--format": true,
-		"--mem-profile": true,
+		"--mem-profile": true, "--profile": true, "--server-url": true,
 	}
 	if got := GlobalValueFlags(); !reflect.DeepEqual(got, want) {
 		t.Errorf("GlobalValueFlags() = %v, want %v; re-check `bd --help` persistent flags", got, want)

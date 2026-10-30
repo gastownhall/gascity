@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
@@ -114,6 +115,14 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 		applier, ok := beads.GraphApplyFor(store)
 		_, ephemeral := applier.(beads.EphemeralGraphApplyStore)
 		return ok && ephemeral
+	},
+	// Handle-only: the cache's LIVE handle forwards its backing's exact batch
+	// read, which is the read beads.GetMany takes by id. The cache itself does
+	// not carry it, so a caller reading by id through the cache (PrefetchExact)
+	// keeps reading the cache.
+	"GetExactBatch": func(store beads.Store) bool {
+		_, ok := beads.HandlesFor(store).Live.(beads.ExactBatchGetter)
+		return ok
 	},
 	// Engine-only (see above). CloseStore is also lifecycle: the storage
 	// routes stop the cache and close the engine once (storageRoutes.close).
@@ -500,6 +509,27 @@ func TestControllerBindingCacheSeesSQLiteReadyProjection(t *testing.T) {
 	}
 }
 
+// bindingGraphRow is a task-typed graph step for the binding engine fixtures:
+// a node of root (gc.root_bead_id), so it is graph class like every row a
+// split city's binding holds. A task row with no graph marker is work class,
+// which the binding never holds: these fixtures now match the production path,
+// where the controller's autoclose reads a closed binding row through the
+// binding (the split-strict gate charged the old work-class rows to it).
+func bindingGraphRow(title, root string) beads.Bead {
+	return beads.Bead{Title: title, Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root}}
+}
+
+// bindingGraphRoot seeds the graph.v2 root the bindingGraphRow fixtures hang
+// off.
+func bindingGraphRoot(t *testing.T, engine beads.Store) string {
+	t.Helper()
+	root, err := engine.Create(beads.Bead{Title: "workflow root", Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}})
+	if err != nil {
+		t.Fatalf("Create root: %v", err)
+	}
+	return root.ID
+}
+
 func containsBeadID(rows []beads.Bead, id string) bool {
 	for _, row := range rows {
 		if row.ID == id {
@@ -545,11 +575,12 @@ func TestControlReadyScanReadsTheBindingEngine(t *testing.T) {
 // key wiping them.
 func TestBindingCacheKeepsEngineEdgesThroughEveryWriteVerb(t *testing.T) {
 	engine := openBindingEngineForTest(t)
-	blocker, err := engine.Create(beads.Bead{Title: "blocker", Type: "task"})
+	root := bindingGraphRoot(t, engine)
+	blocker, err := engine.Create(bindingGraphRow("blocker", root))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	step, err := engine.Create(beads.Bead{Title: "step", Type: "task"})
+	step, err := engine.Create(bindingGraphRow("step", root))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -640,7 +671,9 @@ func TestBindingCacheKeepsEngineEdgesThroughEveryWriteVerb(t *testing.T) {
 		}},
 		// A new blocked step created through the cache; the checks follow it.
 		{"Create with Needs", func() error {
-			created, err := store.Create(beads.Bead{Title: "new step", Type: "task", Needs: []string{blocker.ID}})
+			row := bindingGraphRow("new step", root)
+			row.Needs = []string{blocker.ID}
+			created, err := store.Create(row)
 			if err == nil {
 				step = created
 			}
@@ -757,11 +790,12 @@ func TestCLIEventOnAnEdgelessRowDoesNotStormTheBindingCache(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			engine := openBindingEngineForTest(t)
-			blocker, err := engine.Create(beads.Bead{Title: "blocker", Type: "task"})
+			root := bindingGraphRoot(t, engine)
+			blocker, err := engine.Create(bindingGraphRow("blocker", root))
 			if err != nil {
 				t.Fatalf("Create: %v", err)
 			}
-			step, err := engine.Create(beads.Bead{Title: "step", Type: "task"})
+			step, err := engine.Create(bindingGraphRow("step", root))
 			if err != nil {
 				t.Fatalf("Create: %v", err)
 			}
@@ -770,13 +804,13 @@ func TestCLIEventOnAnEdgelessRowDoesNotStormTheBindingCache(t *testing.T) {
 			}
 			var loose []string
 			for i := 0; i < 5; i++ {
-				row, err := engine.Create(beads.Bead{Title: "edge-less", Type: "task"})
+				row, err := engine.Create(bindingGraphRow("edge-less", root))
 				if err != nil {
 					t.Fatalf("Create: %v", err)
 				}
 				loose = append(loose, row.ID)
 			}
-			other, err := engine.Create(beads.Bead{Title: "closes later", Type: "task"})
+			other, err := engine.Create(bindingGraphRow("closes later", root))
 			if err != nil {
 				t.Fatalf("Create: %v", err)
 			}

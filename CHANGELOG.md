@@ -9,6 +9,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **Stop a split city whose storage check refuses before you deploy, and
+  repair it with the new `gc`: `gc hook` now stops claiming there.** Before
+  `gc hook` claims work for a session, it reads that session's drain state
+  from the binding. When the city's storage check refuses (`gc storage
+  status` exits non-zero, for example because the work store holds
+  infrastructure beads the binding cannot read), the hook now fails closed:
+  it claims nothing, prints `GC_HOOK_STORE_UNAVAILABLE` on stderr, and exits
+  2. Earlier builds failed open and went on claiming from the work store, so
+  a city can have been refused for a long time while every session kept
+  working; deploying onto it stops every session's claims at its next hook.
+  A store that only timed out still fails open. Run the repair with this
+  build, not the one it replaces: an earlier `gc storage migrate` refuses a
+  converged city over infrastructure beads that rig scopes still hold, an
+  earlier `recover-stranded` has no per-id choices, and an earlier clear
+  matches the copy manifest by bare id, so it can delete a bead the copy
+  never carried. A stopped city runs no `gc hook`, so installing this build
+  while the city is stopped stops no claims.
+  1. Before you install this build, run its `gc storage status` in each
+     split city's directory, by the new binary's path. It is read-only, so
+     it is safe on a running city. Where it exits 0, deploy as usual: there
+     is nothing else to do.
+  2. Run `gc stop` in every city where it does not, then install the new
+     `gc`. Run every step below with it, in each stopped city.
+  3. Run `gc storage recover-stranded --from-work --dry-run --dump <file>`
+     and read the dump. Recovery copies each stranded bead into the binding
+     as it is, so an open message there is delivered: close any that must
+     not be, such as stale handoff mail, with `bd close <id>` from the city
+     directory.
+  4. Run `gc storage recover-stranded --from-work --fleet-stopped`. If it
+     names an id the binding holds for a different bead, decide per id with
+     `--replace-binding-row <id>` or `--drop-work-row <id>`. If it names a
+     row the copy manifest lists by id alone, decide per id with `--move
+     <id>` or `--record-carried <id>`.
+  5. Run `gc storage migrate --from-work --fleet-stopped`. On a converged
+     city it copies nothing and clears the retained copies, so
+     infrastructure beads left in rig scopes do not stop it.
+  6. Check that `gc storage status` exits 0, then `gc start`.
+
+  The split-storage runbook walks through it under "Upgrading a city whose
+  storage check refuses".
+
+- **Before you deploy, give a split city an explicit bead prefix if its
+  prefix, or a rig's, is in a reserved class namespace: this build refuses
+  such a city, so its `gc hook` stops claiming.** A split city's binding
+  mints ids under the reserved prefixes `gcg`, `gcm`, `gcs`, `gco`, `gcn`
+  and `gcnq`. A work store whose prefix is one of them, or starts with one
+  before its first hyphen (`gcg-alpha`), shares the binding's id namespace,
+  so their ids collide. Ordinary names derive such a prefix: a city named
+  `gas-city-ops` derives `gco`. Earlier builds only warned. This build
+  refuses `gc start`, boot, a config reload and `gc storage migrate` for
+  such a city. The refusal is standing, so from deploy on every `gc hook`
+  in the city fails closed, as in the note above, and the repair steps
+  there do not clear it. Run the new `gc storage status` in each split city
+  before you install it: it exits 1 with `boot plan: REFUSED` and names the
+  prefix. Then set a prefix whose first segment is outside the reserved
+  set: `workspace_prefix = "<prefix>"` in the city's `.gc/site.toml`, or
+  `prefix = "<prefix>"` on the rig's `[[rigs]]` entry. The new prefix
+  applies to beads minted from then on. Work beads already minted under the
+  reserved prefix keep their ids, which the split city looks up in the
+  binding: the new prefix does not move them. The split-storage runbook
+  covers it under "A bead prefix in a reserved namespace".
+
 - **The op journal now records session requests by default on a SQLite
   sessions store.** The three `[ops]` rollout gates, `content` (submit,
   messages, nudge, mail notify), `control` (interrupt, respond) and
@@ -434,6 +496,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it for every agent on the harness in `city.toml` (`[providers.codex]` with
   `option_defaults = { model = "gpt-5.5", effort = "xhigh" }`), or for one
   agent with the same `option_defaults` line in its `agent.toml` (#7944).
+- **Restart claude sessions started under gc 1.4.x once.** gc 1.5.0 gives
+  every new claude session a `session_key` (#5396) and accepts the id
+  claude's SessionStart hook reports (#3954, #5421), so `gc session logs`
+  resolves sessions that share a `work_dir`. A claude session still running
+  from 1.4.x has no key, and gc no longer mints one for a session whose
+  process may be running, since that key would name no transcript: restart
+  each such session once (`gc session reset <id>` or `gc restart`) and its
+  next start gets a key (#5439).
+
+- **`gc runtime request-restart` and a self `gc handoff` record a restart
+  only for the caller's own incarnation, and their exit codes change.** The
+  request is written to the session row first, and only while the row or the
+  session's live runtime carries the caller's `GC_INSTANCE_TOKEN`, so a
+  process left over from an earlier incarnation can no longer restart its
+  successor; a self `gc handoff` checks this before its mail and, refused
+  then, sends none. Both commands now exit 1 and record nothing when
+  `GC_INSTANCE_TOKEN` is not set. An agent CLI that scrubs `*TOKEN*`
+  variables from the shells it spawns (for example Claude Code with
+  `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`) removes it, so keep that variable in
+  the agent's subprocess environment. They also exit 1 and record nothing
+  when the session store cannot compare-and-swap and the request needs it:
+  in a v2 city, and under `[beads] conditional_writes = "require"`.
+  `gc runtime request-restart` also exits 1 when the session store does not
+  open, where it used to set only the runtime's restart flag. Once the
+  request is recorded, a failed controller poke exits 0 with the warning
+  `restart recorded; controller not notified, it will act on its next pass`,
+  where it used to exit 1: the controller acts on the recorded request at
+  its next pass, so a script need not retry. An operator on the controller
+  host can still restart any session with `gc session reset <session>`.
 
 ### Added
 
@@ -547,6 +638,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc prime --strict` fails on a `prompt_template` that does not render.**
+  A `.template.md` (or `.md.tmpl`) prompt_template that failed to parse or
+  execute, such as one calling an undefined function `{{base_branch}}`, was
+  reported on stderr while `gc prime --strict` printed the raw template text
+  and exited 0, so lint wrappers saw success. It now exits non-zero, prints
+  the render warnings and
+  `gc prime: prompt_template "<path>" for agent "<agent>": <error>` on
+  stderr, writes nothing to stdout, and in hook mode leaves the session's
+  `session_key` unset. Strict checks only the templates gc prime renders,
+  and stops at the agent whose prompt it prints, so a fallback agent from
+  `GC_TEMPLATE` that is never reached cannot fail it. Fragments appended to
+  the prompt (`global_fragments`, `inject_fragments`, `append_fragments`)
+  still only warn when missing or broken. Without `--strict` the raw-text
+  fallback is unchanged. (#8149)
+
 - **A rotation that stops after renaming the event log no longer hides its
   events from the log's head or from a resuming watcher.** A rotation renames
   `.gc/events.jsonl` to an `events.jsonl.rotating-*` file and then writes the
@@ -637,6 +743,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directories under `.gc/` (`cache`, `system`, `runtime`, and an empty
   `events.jsonl`) when they are missing. Its footer now says so, in place of
   "No side effects executed".
+
+- **`jsonl-export` no longer stops every export when the archive's loose-object
+  backlog is too large to pack within the order's timeout (#6573).** The run
+  now exports, commits and pushes first, then packs the archive, so a pack
+  that fails or times out can no longer hold back snapshots. The pass is an
+  incremental `git repack --geometric=2` (Git 2.32 or newer) that packs the
+  backlog and postpones rewriting a large existing pack, instead of a `git gc`
+  that rewrote the whole archive. It also runs on the "no changes" and
+  pending-push exits, keeps the largest pack when free space is short, stops
+  Git's own auto-maintenance from running during the archive commit, and
+  prints a one-line `archive maintenance:` summary. Geometric packing
+  postpones the full rewrite; run `git gc` on the archive by hand when
+  `packs_after` or `pack_kb_after` keeps growing. See the troubleshooting
+  guide's "Archive object maintenance".
 
 - **The core `orphan-sweep` order times out a minute before its next run is
   due.** The order declared no timeout, so it ran under the 300s exec

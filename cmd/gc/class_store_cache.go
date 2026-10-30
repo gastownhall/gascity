@@ -56,6 +56,20 @@ package main
 // would let the two caches trade the copy and the row back and forth forever.
 // Relics are rarely written; the re-scan bound (above) is theirs.
 //
+// # Tier
+//
+// A work store's reads are widened by its bead-policy layer: a read that leaves
+// TierMode at its zero value is answered across both tiers. On a single-store
+// city every class read is such a read, so the API's /status, /agents and
+// /bead/{id}/deps, the dashboard and the controller's own class reads were all
+// written against that answer, and none of them states a tier. The binding has
+// no policy layer, so on a split city the same reads lost the binding's whole
+// ephemeral tier: an agent running a wisp step read as not running, and a wisp
+// root's deps came back without its ephemeral children (read-audit R5). The
+// cache is the one layer every controller-side reader of the binding goes
+// through, so it widens the zero tier here, once, with WithLogicalReadTier,
+// and an explicit tier is still answered as asked.
+//
 // # Lifecycle
 //
 // Wrapped once, at controller-state construction and before any lane runs, so
@@ -97,7 +111,10 @@ func (r *storageRoutes) withControllerCache(ctx context.Context, ep events.Provi
 		}
 		wrapped, ok := cached[store]
 		if !ok {
-			wrapped = wrapWithCachingStore(ctx, store, ep, true, append([]beads.CachingStoreOption{beads.WithEventIDPrefixes(r.namespacesServedBy(store)...)}, opts...)...)
+			// WithLogicalReadTier: the binding answers a zero-tier read
+			// across both tiers, as every policy-wrapped work store does
+			// (# Tier, above).
+			wrapped = wrapWithCachingStore(ctx, store, ep, true, append([]beads.CachingStoreOption{beads.WithEventIDPrefixes(r.namespacesServedBy(store)...), beads.WithLogicalReadTier()}, opts...)...)
 			if wrapped == nil {
 				continue
 			}

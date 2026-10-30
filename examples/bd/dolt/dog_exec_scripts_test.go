@@ -6000,6 +6000,62 @@ exit 0
 	}
 }
 
+// TestDoctorTreatsBdDefaultBackupAsConfigured asserts mol-dog-doctor counts a
+// database whose only backup is bd's "default" (what mol-dog-backup registers
+// through `bd backup init`) as covered: no "backup remote missing" gap, and
+// the database reaches the manifest-freshness check.
+func TestDoctorTreatsBdDefaultBackupAsConfigured(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatalf("mkdir artifact dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir prod: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  backup)
+    if [ "$(basename "$PWD")" = "prod" ]; then
+      printf 'default\n'
+    fi
+    exit 0
+    ;;
+esac
+case "$*" in
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\n1\n'
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nprod\n'
+    exit 0
+    ;;
+esac
+exit 0
+`)
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("unexpected doctor output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if strings.Contains(string(gcLog), "prod backup remote missing") {
+		t.Fatalf("doctor reported prod's bd default backup as a missing remote:\n%s", gcLog)
+	}
+	if !strings.Contains(string(gcLog), "prod backup missing") {
+		t.Fatalf("doctor did not apply the manifest-freshness check to prod (default backup registered, no artifact):\n%s", gcLog)
+	}
+}
+
 func TestDoctorScriptDetectsDoctestOrphansWithBSDGrep(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")

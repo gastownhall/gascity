@@ -2035,6 +2035,17 @@ func buildThreadEnv(env map[string]string) map[string]string {
 		threadEnv["BEADS_DOLT_SERVER_MODE"] = "1"
 	}
 	delete(threadEnv, "BEADS_DOLT_SHARED_SERVER")
+	// Forward the controller's shared-server opt-out, never an opt-in. A
+	// session whose managed port gc withheld (gastownhall/gascity#1656) has no
+	// env port to outrank a HOME-level dolt.shared-server: true, so without the
+	// pin the thread's bd would use the host-wide shared server instead of the
+	// managed one the scope's .beads/dolt-server.port mirror tracks.
+	for _, key := range []string{"BEADS_DOLT_SHARED_SERVER", "BD_DOLT_SHARED_SERVER"} {
+		value := strings.TrimSpace(env[key])
+		if on, err := strconv.ParseBool(value); err == nil && !on {
+			threadEnv[key] = value
+		}
+	}
 	return threadEnv
 }
 
