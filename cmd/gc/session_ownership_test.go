@@ -742,6 +742,62 @@ func TestReconcileSessionBeads_PoolSeatHoldingWorkIsNotTimerDrainedFor(t *testin
 	}
 }
 
+// TestReconcileSessionBeads_PoolSeatHoldingWorkCancelsBegunTimerDrain: a
+// timer drain an earlier tick began on an empty seat — before the work was
+// assigned — is canceled once the assignment lands: the tracked drain is
+// removed, a reconciler-set GC_DRAIN_ACK is cleared, and a leftover
+// idle-stop-pending mark written before the assignment is removed. The
+// runtime keeps running (ga-2ols7o).
+func TestReconcileSessionBeads_PoolSeatHoldingWorkCancelsBegunTimerDrain(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, f *ownershipFixture)
+	}{
+		{
+			name: "idle drain in flight, reconciler ack published",
+			setup: func(t *testing.T, f *ownershipFixture) {
+				f.beginInFlightOrphanedDrain(t, "idle", true)
+			},
+		},
+		{
+			name: "no-wake-reason drain in flight, not acked",
+			setup: func(t *testing.T, f *ownershipFixture) {
+				f.beginInFlightOrphanedDrain(t, "no-wake-reason", false)
+			},
+		},
+		{
+			name: "idle drain in flight, idle-stop-pending mark left",
+			setup: func(t *testing.T, f *ownershipFixture) {
+				f.env.setSessionMetadata(&f.session, map[string]string{"sleep_intent": "idle-stop-pending"})
+				f.beginInFlightOrphanedDrain(t, "idle", false)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newOwnershipFixture(t)
+			tc.setup(t, f)
+			f.holdNotReadyOpenWork(t)
+			f.reconcileKeptSeat()
+			if stopped, why := f.stopObservation(t); stopped {
+				t.Fatalf("begun timer drain was not canceled once work %s landed (%s); stdout:\n%s\nstderr:\n%s", f.work.ID, why, f.env.stdout.String(), f.env.stderr.String())
+			}
+			if ds := f.env.dt.get(f.session.ID); ds != nil {
+				t.Fatalf("timer drain still tracked after the work landed: %+v", ds)
+			}
+			if ack, _ := f.env.sp.GetMeta(ownershipWorkerName, "GC_DRAIN_ACK"); ack != "" {
+				t.Fatalf("GC_DRAIN_ACK = %q, want cleared by the cancel", ack)
+			}
+			b, err := f.backing.Get(f.session.ID)
+			if err != nil {
+				t.Fatalf("Get(session): %v", err)
+			}
+			if b.Metadata["sleep_intent"] == "idle-stop-pending" {
+				t.Fatal("idle-stop-pending mark survived the tick that kept the seat")
+			}
+		})
+	}
+}
+
 // TestReconcileSessionBeads_PoolSeatHoldingWorkKeptOpenTraced: the keep
 // records a KeptOpen drain decision naming the held bead.
 func TestReconcileSessionBeads_PoolSeatHoldingWorkKeptOpenTraced(t *testing.T) {

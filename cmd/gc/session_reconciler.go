@@ -3349,6 +3349,34 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							continue
 						}
 					}
+					// Held-work fence for the reconciler's own timer acks
+					// (ga-2ols7o): an idle / no-wake-reason drain whose seat has
+					// since been assigned work it cannot run yet is canceled,
+					// not stopped — the timer's premise (nothing for this seat
+					// to do) is gone, and stopping the seat would wedge the
+					// work no sibling can serve. Fails closed on the work read.
+					// Agent-sourced handoff acks stay honored.
+					if alive && reconcilerOwnedAck && heldWorkDrainReason(ackReason) &&
+						liveClaimVetoApplies(cityPath, cfg, infoByID[id], suspState) {
+						held, _, heldErr := sessionHoldsAssignedWork(sw, infoByID[id])
+						if heldErr != nil {
+							fmt.Fprintf(stderr, "session reconciler: checking held work for drain-acked %s: %v\n", name, heldErr) //nolint:errcheck
+						}
+						if held {
+							drainCancelled := dt != nil && cancelSessionDrainIfInfo(infoByID[id], sp, dt, heldWorkDrainReason)
+							if !drainCancelled {
+								_ = clearReconcilerDrainAckMetadata(sp, name)
+							}
+							_ = dops.clearDrain(name)
+							telemetry.RecordDrainTransition(context.Background(), name, ackReason, "cancel")
+							if trace != nil {
+								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonCode(ackReason), TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, traceRecordPayload{
+									"active_reason": "held_assigned_work",
+								})
+							}
+							continue
+						}
+					}
 					configDriftAck := reconcilerOwnedAck && ackReason == "config-drift"
 					if !configDriftAck && dt != nil {
 						if ds := dt.get(id); ds != nil && ds.ackSet && ds.reason == "config-drift" {
