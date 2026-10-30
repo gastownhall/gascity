@@ -143,6 +143,37 @@ func TestMenuCursorRowIsNotAReadyPrompt(t *testing.T) {
 			"  3. Wait a minute",
 			"  Press enter to confirm or esc to go back",
 		}, "› ", false},
+
+		// Composers: ready, including drafts that start with a number.
+		{"bare composer", []string{"› "}, "› ", true},
+		{"placeholder above status footer", []string{
+			"› Ask Codex to do anything",
+			"",
+			"  ⏵⏵ bypass permissions on",
+		}, "› ", true},
+		{"numbered draft alone", []string{"› 1. fix the flake"}, "› ", true},
+		{"numbered draft with a non-adjacent option", []string{
+			"› 1. foo",
+			"  3. baz",
+		}, "› ", true},
+		{"numbered transcript list above a bare composer", []string{
+			"  1. Check the logs",
+			"  2. Fix the import",
+			"",
+			"› ",
+		}, "› ", true},
+		{"echoed numbered turn above a bare composer", []string{
+			"› 1. first",
+			"  2. second",
+			"",
+			"› ",
+		}, "› ", true},
+		{"stale menu frame above a live composer", []string{
+			"› 1. Trust and continue",
+			"  2. Quit",
+			"",
+			"› ",
+		}, "› ", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
