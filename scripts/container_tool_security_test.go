@@ -2,6 +2,9 @@ package scripts_test
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -383,35 +386,236 @@ func TestTrivyIgnoreMCPMailWaiversNameTheLockedRelease(t *testing.T) {
 	}
 }
 
-// TestMCPMailImageUpgradesPatchedOSPackages guards the --only-upgrade list in
-// Dockerfile.mail. The base image is pinned by digest, so an OS-package CVE is only
-// cleared by naming the package here, and Trivy reports every binary package of a
-// source separately: dropping one name leaves that package on the vulnerable version
-// and the scan red, with the other eight looking like the whole fix.
-func TestMCPMailImageUpgradesPatchedOSPackages(t *testing.T) {
-	dockerfile := readFile(t, repoRoot(t), "contrib/k8s/Dockerfile.mail")
-
-	upgrade, _, ok := strings.Cut(dockerfile, "&& apt-get install -y --no-install-recommends \\")
-	if !ok {
-		t.Fatal("contrib/k8s/Dockerfile.mail has no plain apt-get install stanza to bound the --only-upgrade list")
-	}
-	if !strings.Contains(upgrade, "--only-upgrade") {
-		t.Fatal("contrib/k8s/Dockerfile.mail no longer upgrades any pinned-base OS package")
-	}
-
-	for _, pkg := range []string{
-		// openssl / systemd set, already present.
-		"libcap2", "libssl3t64", "libsystemd0", "libudev1", "openssl", "openssl-provider-legacy",
-		// util-linux set, CVE-2026-53615, fixed in 2.41.5-0+deb13u1.
+// mcpMailUpgradeGroups names the binary packages of one source that Dockerfile.mail's
+// --only-upgrade list carries together. Trivy reports every binary package of a source
+// separately, so dropping one name leaves that package on the vulnerable version and
+// the scan red, with the rest of its group looking like the whole fix. A group is
+// all-or-nothing; a package that is the only installed binary of its source needs no
+// group. Whether the list is complete is the drift check's job
+// (mcpMailOSUpgradeDrift), not this table's.
+var mcpMailUpgradeGroups = []struct {
+	name string
+	pkgs []string
+}{
+	{"util-linux, CVE-2026-53615", []string{
 		"bsdutils", "libblkid1", "liblastlog2-2", "libmount1", "libsmartcols1",
 		"libuuid1", "login", "mount", "util-linux",
-		// gzip CVE-2026-41992; libpcre2-8-0 CVE-2026-86145 and CVE-2026-89161;
-		// libsqlite3-0 CVE-2026-11822 and CVE-2026-11824.
-		"gzip", "libpcre2-8-0", "libsqlite3-0",
-	} {
-		if !strings.Contains(upgrade, "\n    "+pkg+" \\") {
-			t.Errorf("contrib/k8s/Dockerfile.mail --only-upgrade list missing %q", pkg)
+	}},
+	{"openssl", []string{"libssl3t64", "openssl", "openssl-provider-legacy"}},
+	{"systemd", []string{"libsystemd0", "libudev1"}},
+}
+
+// mcpMailUpgradePackages returns the names in Dockerfile.mail's --only-upgrade stanza,
+// failing the test if the stanza is missing or an entry is not on its own
+// "    name \\" line.
+func mcpMailUpgradePackages(t *testing.T, dockerfile string) []string {
+	t.Helper()
+	_, stanza, ok := strings.Cut(dockerfile, "--only-upgrade \\\n")
+	if !ok {
+		t.Fatal("contrib/k8s/Dockerfile.mail no longer upgrades any pinned-base OS package")
+	}
+	entry := regexp.MustCompile(`^    ([a-z0-9][a-z0-9+.-]*) \\$`)
+	var pkgs []string
+	for _, line := range strings.Split(stanza, "\n") {
+		if strings.HasPrefix(line, "    && ") {
+			if len(pkgs) == 0 {
+				t.Fatal("contrib/k8s/Dockerfile.mail --only-upgrade list is empty")
+			}
+			return pkgs
 		}
+		m := entry.FindStringSubmatch(line)
+		if m == nil {
+			t.Fatalf("contrib/k8s/Dockerfile.mail --only-upgrade list line %q is not a %q entry", line, "    <package> \\")
+		}
+		pkgs = append(pkgs, m[1])
+	}
+	t.Fatal("contrib/k8s/Dockerfile.mail has no plain apt-get install stanza to bound the --only-upgrade list")
+	return nil
+}
+
+// TestMCPMailImageUpgradesPatchedOSPackages guards the shape of the --only-upgrade list
+// in Dockerfile.mail: every entry on its own line, no duplicates, and each package group
+// in mcpMailUpgradeGroups present whole or not at all. It deliberately holds no flat
+// list of names, so adding a package needs no edit here.
+func TestMCPMailImageUpgradesPatchedOSPackages(t *testing.T) {
+	pkgs := mcpMailUpgradePackages(t, readFile(t, repoRoot(t), "contrib/k8s/Dockerfile.mail"))
+
+	seen := map[string]bool{}
+	for _, pkg := range pkgs {
+		if seen[pkg] {
+			t.Errorf("contrib/k8s/Dockerfile.mail --only-upgrade list names %q twice", pkg)
+		}
+		seen[pkg] = true
+	}
+	for _, g := range mcpMailUpgradeGroups {
+		var missing []string
+		for _, pkg := range g.pkgs {
+			if !seen[pkg] {
+				missing = append(missing, pkg)
+			}
+		}
+		if len(missing) != 0 && len(missing) != len(g.pkgs) {
+			t.Errorf("contrib/k8s/Dockerfile.mail --only-upgrade list carries part of the %s group but is missing %q; the group is upgraded together", g.name, missing)
+		}
+	}
+}
+
+// mcpMailOSUpgradeDrift compares Dockerfile.mail's --only-upgrade list with the
+// packages the digest-pinned base image has pending upgrades for. It needs network
+// and a container runtime, so only the scheduled workflow runs it for real.
+const mcpMailOSUpgradeDrift = ".github/scripts/mcp-mail-os-upgrade-drift.sh"
+
+// Headings the drift check prints before each direction of a difference.
+const (
+	driftMissingHeading = "pending upgrade, not in the --only-upgrade list:"
+	driftStaleHeading   = "in the --only-upgrade list, no pending upgrade:"
+)
+
+// runMCPMailOSUpgradeDrift runs the drift check on dockerfile from an empty directory
+// with extraEnv added, and returns its combined output and exit error.
+func runMCPMailOSUpgradeDrift(t *testing.T, dockerfile string, extraEnv ...string) (string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "Dockerfile.mail")
+	writeTestFile(t, path, dockerfile)
+	cmd := exec.Command("bash", filepath.Join(repoRoot(t), mcpMailOSUpgradeDrift), path)
+	cmd.Dir = dir
+	cmd.Env = append([]string{"HOME=" + dir, "TMPDIR=" + dir, "LC_ALL=C"}, extraEnv...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// TestMCPMailOSUpgradeDriftCheck pins the comparison: silent and zero when the list
+// and the pending set agree, non-zero naming the package under the right heading for
+// a difference in either direction, and non-zero when it cannot find a list at all.
+func TestMCPMailOSUpgradeDriftCheck(t *testing.T) {
+	dockerfile := readFile(t, repoRoot(t), "contrib/k8s/Dockerfile.mail")
+	pkgs := mcpMailUpgradePackages(t, dockerfile)
+	if !slices.Contains(pkgs, "gzip") {
+		t.Fatal("test expects gzip in the --only-upgrade list as the package to drop")
+	}
+	without := slices.DeleteFunc(slices.Clone(pkgs), func(p string) bool { return p == "gzip" })
+	pending := func(names ...string) string {
+		path := filepath.Join(t.TempDir(), "pending")
+		writeTestFile(t, path, strings.Join(names, "\n")+"\n")
+		return "MCP_MAIL_PENDING_UPGRADES_FILE=" + path
+	}
+
+	tests := []struct {
+		name         string
+		env          string
+		wantFail     bool
+		wantMissing  string
+		wantStale    string
+		wantNoOutput bool
+	}{
+		{name: "in sync", env: pending(pkgs...), wantNoOutput: true},
+		{name: "pending upgrade not listed", env: pending(append(slices.Clone(pkgs), "libnewvuln1")...), wantFail: true, wantMissing: "libnewvuln1"},
+		{name: "listed package with nothing pending", env: pending(without...), wantFail: true, wantStale: "gzip"},
+		{name: "both directions", env: pending(append(slices.Clone(without), "libnewvuln1")...), wantFail: true, wantMissing: "libnewvuln1", wantStale: "gzip"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := runMCPMailOSUpgradeDrift(t, dockerfile, tt.env)
+			if (err != nil) != tt.wantFail {
+				t.Fatalf("drift check err = %v, want failure %v\n%s", err, tt.wantFail, out)
+			}
+			if tt.wantNoOutput && strings.TrimSpace(out) != "" {
+				t.Errorf("drift check printed %q for a list in sync", out)
+			}
+			for heading, pkg := range map[string]string{driftMissingHeading: tt.wantMissing, driftStaleHeading: tt.wantStale} {
+				_, rest, found := strings.Cut(out, heading+"\n")
+				section, _, _ := strings.Cut(rest, "\n\n")
+				if pkg == "" && found {
+					t.Errorf("output has unexpected heading %q:\n%s", heading, out)
+				}
+				if pkg != "" && !strings.Contains(section, pkg) {
+					t.Errorf("want package %q under %q, output:\n%s", pkg, heading, out)
+				}
+			}
+		})
+	}
+
+	t.Run("no list to compare", func(t *testing.T) {
+		out, err := runMCPMailOSUpgradeDrift(t, "FROM python:3.12-slim@sha256:abc\nRUN true\n", pending("gzip"))
+		if err == nil {
+			t.Fatalf("drift check passed on a Dockerfile with no --only-upgrade stanza\n%s", out)
+		}
+	})
+}
+
+// TestMCPMailOSUpgradeDriftCheckQueriesPinnedBase proves the check asks the image the
+// Dockerfile pins, by digest, and reads apt's simulated-upgrade "Inst" lines, using a
+// stand-in docker that records its arguments.
+func TestMCPMailOSUpgradeDriftCheckQueriesPinnedBase(t *testing.T) {
+	dockerfile := readFile(t, repoRoot(t), "contrib/k8s/Dockerfile.mail")
+	m := regexp.MustCompile(`(?m)^FROM (\S+@sha256:[0-9a-f]{64})$`).FindStringSubmatch(dockerfile)
+	if m == nil {
+		t.Fatal("contrib/k8s/Dockerfile.mail FROM line is not pinned by digest")
+	}
+	image := m[1]
+
+	bin := t.TempDir()
+	argsFile := filepath.Join(bin, "docker.args")
+	var inst strings.Builder
+	for _, pkg := range mcpMailUpgradePackages(t, dockerfile) {
+		fmt.Fprintf(&inst, "Inst %s [1.0-1] (1.0-2 Debian-Security:13/stable-security [amd64])\nConf %s (1.0-2 Debian-Security:13/stable-security [amd64])\n", pkg, pkg)
+	}
+	writeExecutable(t, filepath.Join(bin, "docker"), "#!/bin/sh\nprintf '%s\\n' \"$*\" > '"+argsFile+"'\ncat <<'EOF'\nReading package lists...\n"+inst.String()+"EOF\n")
+
+	out, err := runMCPMailOSUpgradeDrift(t, dockerfile, "PATH="+bin+":"+os.Getenv("PATH"))
+	if err != nil {
+		t.Fatalf("drift check failed against a base whose pending upgrades equal the list: %v\n%s", err, out)
+	}
+	args, readErr := os.ReadFile(argsFile)
+	if readErr != nil {
+		t.Fatalf("drift check never invoked docker: %v", readErr)
+	}
+	if !strings.Contains(string(args), image) || !strings.Contains(string(args), "apt-get update") {
+		t.Errorf("docker invoked as %q, want a run of %s that runs apt-get update", args, image)
+	}
+}
+
+// TestContainerScanRunsMCPMailOSUpgradeDriftCheck keeps the drift check in the
+// non-hermetic container-scan workflow, on its schedule, as a job of its own: the
+// hermetic make and bazel suites must not gain a network or container dependency, and
+// a pending upgrade that is not yet a CVE must not turn unrelated pull requests red.
+func TestContainerScanRunsMCPMailOSUpgradeDriftCheck(t *testing.T) {
+	root := repoRoot(t)
+	var wf struct {
+		Jobs map[string]struct {
+			If    string `yaml:"if"`
+			Steps []struct {
+				Run             string `yaml:"run"`
+				ContinueOnError bool   `yaml:"continue-on-error"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal([]byte(readFile(t, root, ".github/workflows/container-scan.yml")), &wf); err != nil {
+		t.Fatalf("parse container-scan.yml: %v", err)
+	}
+	ran := 0
+	for name, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			if !strings.Contains(step.Run, mcpMailOSUpgradeDrift) {
+				continue
+			}
+			ran++
+			if step.ContinueOnError {
+				t.Errorf("job %s runs the drift check with continue-on-error; a drifted list must fail the job", name)
+			}
+			if !strings.Contains(job.If, "schedule") || strings.Contains(job.If, "pull_request") {
+				t.Errorf("job %s runs the drift check with if: %q, want the schedule and manual dispatch only", name, job.If)
+			}
+		}
+	}
+	if ran != 1 {
+		t.Errorf("container-scan.yml runs %s in %d steps, want 1", mcpMailOSUpgradeDrift, ran)
+	}
+
+	makefile := readFile(t, root, "Makefile")
+	if strings.Contains(makefile, mcpMailOSUpgradeDrift) {
+		t.Errorf("Makefile references %s; its hermetic targets must not need network or a container runtime", mcpMailOSUpgradeDrift)
 	}
 }
 
