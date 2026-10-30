@@ -12938,6 +12938,33 @@ func TestOrphanSweepKeepsUnresolvableStampedSessionNameUnverifiable(t *testing.T
 	}
 }
 
+// TestOrphanSweepKeepsClaimWithUnreadableLegacySessionHint pins the
+// conflicting-evidence rule for stale holder hints: a legacy
+// gc.session_bead_id (or session_id) from an earlier holder that cannot be
+// read blocks release even when the claim's canonical gc.session_id reads
+// back terminal and the stamped name matches it. A terminal record under one
+// id never stands in for a candidate under another id that cannot be read,
+// so the claim stays counted as unverifiable rather than released.
+func TestOrphanSweepKeepsClaimWithUnreadableLegacySessionHint(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{hookClaim("ga-stale-hint", "gc-d34d1", "gastown__polecat-gc-d34d1", map[string]string{"gc.session_bead_id": "gc-legacy9"})},
+		nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d1", Status: "closed", IssueType: "session"}},
+		nil, nil)
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if run.released("ga-stale-hint") {
+		t.Fatalf("claim with an unreadable legacy session hint was released:\n%s", run.context())
+	}
+	if !strings.Contains(run.out, "orphan-sweep: reset 0 orphaned beads, skipped 1 unverifiable") {
+		t.Fatalf("unreadable legacy hint was not counted unverifiable:\n%s", run.out)
+	}
+	if !strings.Contains(run.log, "bd show gc-legacy9 --json") {
+		t.Fatalf("the legacy session hint was never probed:\n%s", run.log)
+	}
+}
+
 // TestOrphanSweepProtectsHQClaimsItCannotVouchFor applies the gate in HQ, this
 // city's own store, as the Go sweep does for every store: a claim under an
 // identity this city cannot vouch for (a person, a typo, a decommissioned
