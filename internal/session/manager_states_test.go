@@ -210,6 +210,80 @@ func TestConformance_SuspendForShutdownPropagatesDrainingTeardownFailure(t *test
 	}
 }
 
+// seedCreatingWithLiveRuntime puts id into creating the way an in-flight
+// async start leaves it once the provider's Start has returned: the runtime is
+// live, the pending-create claim and its start stamp are held, and PreWakePatch
+// has stamped last_woke_at. It returns the runtime name and the seeded row.
+func seedCreatingWithLiveRuntime(t *testing.T, m *Manager, sp *runtime.Fake, id string) (string, map[string]string) {
+	t.Helper()
+	b, err := m.store.Get(id)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	sessName := b.Metadata["session_name"]
+	if err := sp.Start(context.Background(), sessName, runtime.Config{}); err != nil {
+		t.Fatalf("seeding runtime: %v", err)
+	}
+	if err := m.PersistedStore().ApplyPatch(id, MetadataPatch{
+		"state":                     string(StateCreating),
+		"pending_create_claim":      "true",
+		"pending_create_started_at": "2026-10-30T17:00:00Z",
+		"last_woke_at":              "2026-10-30T17:00:01Z",
+		"instance_token":            "tok-worker",
+		"generation":                "3",
+	}); err != nil {
+		t.Fatalf("seeding creating row: %v", err)
+	}
+	seeded, err := m.store.Get(id)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	return sessName, seeded.Metadata
+}
+
+// A forced city stop abandons waitForAsyncStarts and re-lists, so its sweep can
+// reach a live runtime whose async start has not yet committed creating ->
+// active. The sweep tears that runtime down rather than refusing it (the stop
+// failed and the runtime survived). It writes no lifecycle state: the row still
+// belongs to the in-flight start's commit or rollback. It does clear the wake
+// stamp, so a commit that lands after this teardown cannot read the deliberate
+// stop as a rapid crash of that wake.
+func TestConformance_SweepSuspendCreatingTearsDownRuntimeWithoutRewritingState(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	m := newTestManager(t, store, sp)
+
+	id := createTestSession(t, m, "worker")
+	sessName, seeded := seedCreatingWithLiveRuntime(t, m, sp, id)
+
+	if err := m.Suspend(context.Background(), testActor(m, ActorSweep), id, false); err != nil {
+		t.Fatalf("sweep Suspend(creating) = %v, want nil (the runtime would survive the city stop)", err)
+	}
+	if sp.CountCalls("Stop", sessName) == 0 {
+		t.Errorf("sweep Suspend(creating) did not tear down the runtime session %q", sessName)
+	}
+	if sp.IsRunning(sessName) {
+		t.Errorf("runtime session %q still running after sweep Suspend(creating)", sessName)
+	}
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	if got := after.Metadata["last_woke_at"]; got != "" {
+		t.Errorf("last_woke_at = %q, want cleared: a late commit would classify the stop as a rapid crash", got)
+	}
+	for _, key := range []string{"state", "pending_create_claim", "pending_create_started_at", "instance_token", "generation"} {
+		if got, want := after.Metadata[key], seeded[key]; got != want {
+			t.Errorf("%s = %q, want %q: the async start's commit or rollback owns the row", key, got, want)
+		}
+	}
+	for _, key := range []string{"suspended_at", "sleep_reason"} {
+		if got := after.Metadata[key]; got != "" {
+			t.Errorf("%s = %q, want unset: this path performs no suspension", key, got)
+		}
+	}
+}
+
 // The scope control for the pin above. The draining escape hatch must be
 // draining-ONLY, never a blanket "any state suspends" that would hide a real
 // illegal-transition bug elsewhere. (An operator's suspend of a drained row is

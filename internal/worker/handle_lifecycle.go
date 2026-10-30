@@ -170,7 +170,9 @@ func (h *SessionHandle) Stop(ctx context.Context, by sessionpkg.Actor) (err erro
 // across every session bead with no state pre-filter. Only that sweep may use
 // it: it additionally tears down a DRAINING seat instead of rejecting it with an
 // illegal transition, because rejecting those made every restart skip them and
-// leave them alive holding their pool slot names (ga-rxhu2).
+// leave them alive holding their pool slot names (ga-rxhu2). It tears down a
+// CREATING seat the same way, so a forced stop's late relist does not leave an
+// async start's runtime alive; the row stays the start's to commit or roll back.
 //
 // Kept as a separate method rather than a flag on Stop so the latitude cannot
 // reach a targeted operator path by accident — that is exactly how it leaked

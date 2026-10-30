@@ -1433,7 +1433,10 @@ const (
 // with an illegal transition made every restart SKIP them, so they survived
 // as live panes still holding their pool slot names (ga-rxhu2). The runtime
 // is torn down and the bead is left in draining for the drain machinery or
-// the reconciler to finish.
+// the reconciler to finish. It tolerates a creating seat the same way, so a
+// forced stop's late relist does not leave an async start's runtime alive:
+// the wake stamp is cleared, the runtime torn down, and the row left in
+// creating for that start's commit or rollback.
 func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) error {
 	if err := m.checkActor(by); err != nil {
 		return err
@@ -1529,6 +1532,27 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 		if current == StateDraining && intent == suspendIntentShutdown {
 			return m.tearDownRuntimeForSuspend(sessName)
 		}
+		// creating is the same shape of problem as draining above, and likewise
+		// only for the SHUTDOWN sweep: an async start commits creating -> active
+		// only after the provider's Start returns, so a forced gc stop that
+		// abandons waitForAsyncStarts and re-lists can reach a live runtime whose
+		// row still reads creating. Rejecting it made the stop fail and the
+		// runtime survive the shutdown.
+		//
+		// Scoped to the sweep on purpose: an operator naming ONE creating session,
+		// and the idle auto-suspend, still get the illegal transition below.
+		//
+		// The early return writes NO lifecycle state. The row belongs to the
+		// in-flight async start: it commits creating -> active on success (the
+		// reconciler then finds the runtime dead) or rolls back to failed-create
+		// on failure. Rewriting state here would race that commit.
+		//
+		// last_woke_at is the one exception: PreWakePatch stamped it and
+		// CommitStartedPatch never clears it, so a commit that lands after this
+		// teardown would otherwise classify the deliberate stop as a rapid crash.
+		if current == StateCreating && intent == suspendIntentShutdown {
+			return m.tearDownRuntimeClearingWakeStamp(id, sessName)
+		}
 		// Normalize legacy/aliased states (empty and awake both mean active)
 		// after the failed-create pre-check above, preserving closed-guard-
 		// first ordering.
@@ -1578,15 +1602,7 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 
 		// The soft and sweep suspends write their state after the stop, so
 		// the stamp is cleared first, whatever stamp the row carries by then.
-		// A failed stop restores the stamp it cleared.
-		cleared, err := m.clearWakeStamp(id)
-		if err != nil {
-			return fmt.Errorf("clearing wake stamp for suspend: %w", err)
-		}
-		if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
-			if rbErr := m.restoreWakeStamp(id, cleared); rbErr != nil {
-				return fmt.Errorf("%w (restoring wake stamp: %w)", err, rbErr)
-			}
+		if err := m.tearDownRuntimeClearingWakeStamp(id, sessName); err != nil {
 			return err
 		}
 
@@ -1622,6 +1638,23 @@ func (m *Manager) clearWakeStamp(id string) (string, error) {
 		return "", current != ""
 	})
 	return cleared, err
+}
+
+// tearDownRuntimeClearingWakeStamp clears the wake stamp, then stops the
+// runtime; a failed stop restores the stamp it cleared. A clear lost to
+// concurrent writes stops nothing.
+func (m *Manager) tearDownRuntimeClearingWakeStamp(id, sessName string) error {
+	cleared, err := m.clearWakeStamp(id)
+	if err != nil {
+		return fmt.Errorf("clearing wake stamp for suspend: %w", err)
+	}
+	if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
+		if rbErr := m.restoreWakeStamp(id, cleared); rbErr != nil {
+			return fmt.Errorf("%w (restoring wake stamp: %w)", err, rbErr)
+		}
+		return err
+	}
+	return nil
 }
 
 // restoreWakeStamp puts back the stamp clearWakeStamp cleared, fenced on a

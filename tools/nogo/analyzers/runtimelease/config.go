@@ -105,7 +105,7 @@ var allowed = map[string]Allowance{
 	},
 	session + ":Manager.createStarted":                     {Reason: "CreateSession's first start of a new row: takes the runtime lease (leaseCreatedRuntime) before it", Callers: []string{"Manager.CreateSession"}},
 	session + ":Manager.Suspend":                           {Reason: "a suspend takes the lease (leaseForStop); the city stop's sweep (ActorSweep) takes none"},
-	session + ":Manager.tearDownRuntimeForSuspend":         {Reason: "a suspend's stop, under its lease", Callers: []string{"Manager.Suspend"}},
+	session + ":Manager.tearDownRuntimeForSuspend":         {Reason: "a suspend's stop, under its lease", Callers: []string{"Manager.Suspend", "Manager.tearDownRuntimeClearingWakeStamp"}},
 	session + ":Manager.CloseDetailed":                     {Reason: "takes the lease (leaseForStop)"},
 	session + ":Manager.Kill":                              {Reason: "takes the lease (leaseForStop), or runs under its caller's (Actor.Lease)"},
 	session + ":Manager.interruptAndSubmitLocked":          {Reason: "takes the lease before it interrupts (leaseForRestartLocked)"},
