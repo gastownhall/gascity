@@ -3858,3 +3858,152 @@ func assertDrainUnitRetired(t *testing.T, store beads.Store, unitID, outcome str
 		t.Fatalf("drain unit convoy %s close_reason = %q, want %q", unit.ID, got, drainUnitRetiredCloseReason)
 	}
 }
+
+func TestProcessDrainRetiresUnitConvoysOnFailureCloses(t *testing.T) {
+	type wantUnit struct {
+		row     int
+		outcome string
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, dir string, store *beads.MemStore, drain beads.Bead) (beads.Bead, ProcessOptions)
+		// close drives the drain to its failure close and returns that pass's
+		// result.
+		close     func(t *testing.T, store *beads.MemStore, drain beads.Bead, opts ProcessOptions) ControlResult
+		units     []wantUnit
+		unitless  []int
+		wantUnits int
+	}{
+		{
+			name: "separate with a pass and a skipped item outcome",
+			setup: func(t *testing.T, dir string, _ *beads.MemStore, drain beads.Bead) (beads.Bead, ProcessOptions) {
+				writeDrainItemFormula(t, dir)
+				return drain, ProcessOptions{FormulaSearchPaths: []string{dir}}
+			},
+			close: func(t *testing.T, store *beads.MemStore, drain beads.Bead, opts ProcessOptions) ControlResult {
+				if _, err := ProcessControl(store, drain, opts); err != nil {
+					t.Fatalf("ProcessControl(drain expand): %v", err)
+				}
+				manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+				for i, outcome := range []string{"pass", "skipped"} {
+					if err := updateMetadataAndClose(store, manifest.Rows[i].ItemRootID, map[string]string{"gc.outcome": outcome}); err != nil {
+						t.Fatalf("close item root %d %s: %v", i, outcome, err)
+					}
+				}
+				result, err := ProcessControl(store, mustGetBead(t, store, drain.ID), opts)
+				if err != nil {
+					t.Fatalf("ProcessControl(drain complete): %v", err)
+				}
+				return result
+			},
+			units:     []wantUnit{{row: 0, outcome: beadmeta.OutcomePass}, {row: 1, outcome: beadmeta.OutcomeFail}},
+			wantUnits: 2,
+		},
+		{
+			name: "shared skip_remaining after the first item fails",
+			setup: func(t *testing.T, dir string, store *beads.MemStore, drain beads.Bead) (beads.Bead, ProcessOptions) {
+				writeDrainItemFormula(t, dir)
+				if err := store.SetMetadataBatch(drain.ID, map[string]string{
+					"gc.drain_context":          "shared",
+					"gc.drain_on_item_failure":  "skip_remaining",
+					"gc.drain_item_single_lane": "true",
+				}); err != nil {
+					t.Fatalf("SetMetadataBatch(shared drain): %v", err)
+				}
+				return mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}}
+			},
+			close: func(t *testing.T, store *beads.MemStore, drain beads.Bead, opts ProcessOptions) ControlResult {
+				if _, err := ProcessControl(store, drain, opts); err != nil {
+					t.Fatalf("ProcessControl(shared first): %v", err)
+				}
+				manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+				if err := updateMetadataAndClose(store, manifest.Rows[0].ItemRootID, map[string]string{
+					"gc.outcome":        "fail",
+					"gc.failure_reason": "unit_failed",
+				}); err != nil {
+					t.Fatalf("close first root fail: %v", err)
+				}
+				result, err := ProcessControl(store, mustGetBead(t, store, drain.ID), opts)
+				if err != nil {
+					t.Fatalf("ProcessControl(shared failure): %v", err)
+				}
+				return result
+			},
+			units:     []wantUnit{{row: 0, outcome: beadmeta.OutcomeFail}},
+			unitless:  []int{1},
+			wantUnits: 1,
+		},
+		{
+			name: "invalid item formula",
+			setup: func(t *testing.T, dir string, store *beads.MemStore, drain beads.Bead) (beads.Bead, ProcessOptions) {
+				writeLegacyDrainItemFormula(t, dir)
+				if err := store.SetMetadata(drain.ID, "gc.drain_member_access", "exclusive"); err != nil {
+					t.Fatalf("SetMetadata(exclusive): %v", err)
+				}
+				return mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}}
+			},
+			close: func(t *testing.T, store *beads.MemStore, drain beads.Bead, opts ProcessOptions) ControlResult {
+				result, err := ProcessControl(store, drain, opts)
+				if err != nil {
+					t.Fatalf("ProcessControl(invalid item formula): %v", err)
+				}
+				return result
+			},
+			units:     []wantUnit{{row: 0, outcome: beadmeta.OutcomeFail}},
+			unitless:  []int{1},
+			wantUnits: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			formulatest.EnableV2ForTest(t)
+			store, drain := seedDrainWorkflow(t)
+			drain, opts := tc.setup(t, t.TempDir(), store, drain)
+
+			result := tc.close(t, store, drain, opts)
+			if result.Action != "drain-failed" {
+				t.Fatalf("Action = %q, want drain-failed", result.Action)
+			}
+			drain = mustGetBead(t, store, drain.ID)
+			if drain.Status != "closed" || drain.Metadata["gc.outcome"] != "fail" {
+				t.Fatalf("drain = status %q outcome %q, want closed/fail", drain.Status, drain.Metadata["gc.outcome"])
+			}
+			manifest := mustDrainManifest(t, drain)
+			for _, want := range tc.units {
+				assertDrainUnitRetired(t, store, manifest.Rows[want.row].UnitConvoyID, want.outcome)
+			}
+			for _, i := range tc.unitless {
+				if got := manifest.Rows[i].UnitConvoyID; got != "" {
+					t.Fatalf("row %d unit convoy = %q, want none for a row that never ran", i, got)
+				}
+			}
+			units, err := store.ListByMetadata(map[string]string{
+				beadmeta.DrainControlIDMetadataKey: drain.ID,
+				beadmeta.SyntheticKindMetadataKey:  "drain-unit-convoy",
+			}, 0, beads.IncludeClosed)
+			if err != nil {
+				t.Fatalf("ListByMetadata(drain unit convoys): %v", err)
+			}
+			if len(units) != tc.wantUnits {
+				t.Fatalf("drain unit convoys = %d, want %d", len(units), tc.wantUnits)
+			}
+		})
+	}
+}
+
+func TestDrainUnitRetiredOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		status string
+		want   string
+	}{
+		{status: "succeeded", want: beadmeta.OutcomePass},
+		{status: "failed", want: beadmeta.OutcomeFail},
+		{status: "skipped", want: beadmeta.OutcomeSkipped},
+		{status: "wired", want: beadmeta.OutcomeSkipped},
+		{status: "unit-created", want: beadmeta.OutcomeSkipped},
+		{status: "", want: beadmeta.OutcomeSkipped},
+	} {
+		if got := drainUnitRetiredOutcome(tc.status); got != tc.want {
+			t.Errorf("drainUnitRetiredOutcome(%q) = %q, want %q", tc.status, got, tc.want)
+		}
+	}
+}

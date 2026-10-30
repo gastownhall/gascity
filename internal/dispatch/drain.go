@@ -1109,7 +1109,7 @@ func closeDrainControl(store beads.Store, drainID string, metadata map[string]st
 			if unitID == "" {
 				continue
 			}
-			outcome := beadmeta.OutcomePass
+			outcome := drainUnitRetiredOutcome(row.Status)
 			if err := updateMetadataAndClose(store, unitID, map[string]string{
 				beadmeta.OutcomeMetadataKey: outcome,
 				"close_reason":              drainUnitRetiredCloseReason,
@@ -1121,6 +1121,20 @@ func closeDrainControl(store beads.Store, drainID string, metadata map[string]st
 	}
 	clearControllerSpawnErrorMetadata(metadata)
 	return closeScopedControl(store, drainID, metadata, action, opts)
+}
+
+// drainUnitRetiredOutcome is the gc.outcome a retired unit convoy closes
+// with: its row's verdict, so a unit whose item succeeded passes, one whose
+// item failed fails, and one whose item never reached a verdict is skipped.
+func drainUnitRetiredOutcome(rowStatus string) string {
+	switch rowStatus {
+	case "succeeded":
+		return beadmeta.OutcomePass
+	case "failed":
+		return beadmeta.OutcomeFail
+	default:
+		return beadmeta.OutcomeSkipped
+	}
 }
 
 // drainValidationClosedError reports a drain that failed validation while its
