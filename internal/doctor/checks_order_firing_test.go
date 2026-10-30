@@ -989,6 +989,41 @@ func TestOrderFiringCurrent_SubMinuteCooldownWithinPatrolTick(t *testing.T) {
 	}
 }
 
+// The patrol allowance comes from the city config the check already holds:
+// with [daemon] patrol_interval = "1m", a 1m cooldown order's effective
+// period is 2m, so a firing 2m50s ago is current and one 3m ago is overdue.
+// A hard-coded 30s allowance would flag the 2m50s firing.
+func TestOrderFiringCurrent_ReadsPatrolIntervalFromCityConfig(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		firedAgo   time.Duration
+		want       CheckStatus
+		wantDetail string
+	}{
+		{"two-minutes-fifty current", 170 * time.Second, StatusOK, ""},
+		{"three-minutes overdue", 3 * time.Minute, StatusWarning, "(overdue)"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+			cityPath, cfg := orderFiringTestCity(t)
+			cfg.Daemon.PatrolInterval = "1m"
+			writeOrderFiringTestOrder(t, cityPath, "paced-cooldown", "cooldown", "1m")
+			writeOrderFiringTestEvents(t, cityPath,
+				events.Event{Type: events.ControllerStarted, Ts: now.Add(-1 * time.Hour)},
+				events.Event{Type: events.OrderFired, Subject: "paced-cooldown", Ts: now.Add(-tt.firedAgo)},
+			)
+
+			result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+			if result.Status != tt.want {
+				t.Fatalf("status = %v, want %v; msg = %s; details = %v", result.Status, tt.want, result.Message, result.Details)
+			}
+			if tt.wantDetail != "" && !strings.Contains(strings.Join(result.Details, "\n"), tt.wantDetail) {
+				t.Fatalf("details = %v, want %q in the order's row", result.Details, tt.wantDetail)
+			}
+		})
+	}
+}
+
 // An order its scope's backend rules out never fires, by design. The check
 // reports it as inapplicable and does not count it as stale or never-fired.
 func TestOrderFiringCurrent_InapplicableOrderIsReportedNotStale(t *testing.T) {
