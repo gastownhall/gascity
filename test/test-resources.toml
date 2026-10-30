@@ -69,8 +69,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 279
-baseline_files = 116
+baseline_calls = 278
+baseline_files = 115
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-cp3hwi"
@@ -439,8 +439,8 @@ expires = "2026-10-31"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 279
-baseline_files = 116
+baseline_calls = 278
+baseline_files = 115
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-cp3hwi"
