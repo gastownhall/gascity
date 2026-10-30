@@ -543,12 +543,19 @@ func startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath
 		_ = os.Remove(disarmFile)
 		return managedDoltStartedProcess{}, fmt.Errorf("start dolt test watchdog: %w", err)
 	}
+	// Snapshot the watchdog's start identity while it is definitely alive, before
+	// the handshake read: if the read fails, the cleanup below re-verifies the
+	// PID against this snapshot so a reused PID is never signaled.
+	watchdogPID := cmd.Process.Pid
+	watchdogTicks, watchdogIdentity := snapshotManagedDoltStartIdentity(watchdogPID)
 	if parentPipeRead != nil {
 		_ = parentPipeRead.Close()
 	}
-	pid, err := readManagedDoltTestWatchdogPID(stdout, cmd.Process.Pid)
+	pid, err := readManagedDoltTestWatchdogPID(stdout, watchdogPID)
 	if err != nil {
-		_ = terminateManagedDoltPID(cityPath, cmd.Process.Pid)
+		_ = terminateManagedDoltPIDGuarded(cityPath, watchdogPID, func() bool {
+			return managedDoltPIDStartIdentityMatches(watchdogPID, watchdogTicks, watchdogIdentity)
+		})
 		_ = cmd.Wait()
 		if parentPipeWrite != nil {
 			_ = parentPipeWrite.Close()

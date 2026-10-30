@@ -1818,3 +1818,99 @@ func TestStartManagedDoltSQLServerDirectSpawnScrubsSessionIdentity(t *testing.T)
 		t.Errorf("dolt sql-server PATH = %q, want the parent's PATH carried through", env["PATH"])
 	}
 }
+
+// runFailedWatchdogSpawn drives a managed-dolt watchdog spawn whose handshake
+// fails after cmd.Start() succeeded, so the spawn's own failure cleanup runs
+// against a live watchdog. The stand-in watchdog prints a line the parent
+// rejects, then stays up for a second with a SIGTERM trap that records delivery
+// in a marker file. reused makes every live identity re-read disagree with the
+// spawn-time snapshot, as when the watchdog exited and its PID was reused during
+// cleanup. It reports whether the stand-in received SIGTERM and the captured
+// cleanup log; start must return the spawn's error.
+func runFailedWatchdogSpawn(t *testing.T, reused bool, start func(city, configFile, logPath string, logFile *os.File) error) (signaled bool, logged []string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal semantics required")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "sigterm-received")
+	script := filepath.Join(dir, "fake-watchdog")
+	body := "#!/bin/sh\ntrap 'echo term > " + marker + "; exit 0' TERM\necho not-a-pid\nsleep 1 </dev/null >/dev/null 2>&1 &\nwait\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatalf("write fake watchdog: %v", err)
+	}
+	oldExecutable := managedDoltTestExecutable
+	managedDoltTestExecutable = func() (string, error) { return script, nil }
+	t.Cleanup(func() { managedDoltTestExecutable = oldExecutable })
+
+	if reused {
+		oldTicks := managedDoltTestReadStartTimeTicks
+		oldIdent := managedDoltTestReadStartIdentity
+		managedDoltTestReadStartTimeTicks = func(int) uint64 { return 1 << 62 }
+		managedDoltTestReadStartIdentity = func(int) string { return "reused" }
+		t.Cleanup(func() {
+			managedDoltTestReadStartTimeTicks = oldTicks
+			managedDoltTestReadStartIdentity = oldIdent
+		})
+	}
+	oldLog := managedDoltCleanupLogf
+	managedDoltCleanupLogf = func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	t.Cleanup(func() { managedDoltCleanupLogf = oldLog })
+
+	logPath := filepath.Join(dir, "dolt.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		t.Fatalf("create log: %v", err)
+	}
+	t.Cleanup(func() { _ = logFile.Close() })
+
+	if err := start(dir, filepath.Join(dir, "config.yaml"), logPath, logFile); err == nil {
+		t.Fatal("spawn succeeded; the stand-in watchdog's handshake should have been rejected")
+	}
+	_, statErr := os.Stat(marker)
+	return statErr == nil, logged
+}
+
+func assertFailedWatchdogSpawnSkippedReusedPID(t *testing.T, signaled bool, logged []string) {
+	t.Helper()
+	if signaled {
+		t.Fatal("handshake-failure cleanup SIGTERMed a watchdog whose start identity changed (PID reused); the nil identity guard is still in place")
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "skipping terminate of pid") || !strings.Contains(logged[0], "start identity changed") {
+		t.Fatalf("expected exactly one identity-mismatch skip log, got %v", logged)
+	}
+}
+
+func assertFailedWatchdogSpawnTerminated(t *testing.T, signaled bool, logged []string) {
+	t.Helper()
+	if !signaled {
+		t.Fatal("handshake-failure cleanup did not terminate the watchdog it spawned although its start identity still matches")
+	}
+	if len(logged) != 0 {
+		t.Fatalf("unexpected cleanup log for a matching identity: %v", logged)
+	}
+}
+
+func startTestWatchdogForFailedSpawn(city, configFile, logPath string, logFile *os.File) error {
+	_, err := startManagedDoltSQLServerWithTestWatchdog(city, configFile, logPath, logFile)
+	return err
+}
+
+// TestStartManagedDoltSQLServerWithTestWatchdogSkipsReusedPIDOnHandshakeFailure
+// pins the ga-llfl37 fix for the test watchdog: when its pid handshake fails,
+// the cleanup that terminates the watchdog must be guarded by the identity
+// snapshotted right after cmd.Start(), not signal by bare PID.
+func TestStartManagedDoltSQLServerWithTestWatchdogSkipsReusedPIDOnHandshakeFailure(t *testing.T) {
+	signaled, logged := runFailedWatchdogSpawn(t, true, startTestWatchdogForFailedSpawn)
+	assertFailedWatchdogSpawnSkippedReusedPID(t, signaled, logged)
+}
+
+// TestStartManagedDoltSQLServerWithTestWatchdogTerminatesWatchdogOnHandshakeFailure
+// is the happy-path companion: the guard must not stop cleanup of the watchdog
+// this call spawned.
+func TestStartManagedDoltSQLServerWithTestWatchdogTerminatesWatchdogOnHandshakeFailure(t *testing.T) {
+	signaled, logged := runFailedWatchdogSpawn(t, false, startTestWatchdogForFailedSpawn)
+	assertFailedWatchdogSpawnTerminated(t, signaled, logged)
+}
