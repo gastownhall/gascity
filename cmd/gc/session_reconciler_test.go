@@ -15025,3 +15025,60 @@ func TestReconcileSessionBeads_PoolSuccessClearsLegacyStartupHealthEpisode(t *te
 		}
 	})
 }
+
+// TestSessionConfigDriftKey_GenericRigScopedTemplate covers the drift key
+// for a named session of a generic scope="rig" agent: the session's template
+// is the rig-stamped "<rig>/<name>" copy config.FindAgent synthesizes, so the
+// key must come from the session-side resolver, not the configured-agents-only
+// lookup.
+func TestSessionConfigDriftKey_GenericRigScopedTemplate(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "rig-0", Path: t.TempDir()}},
+		Agents:    []config.Agent{{Name: "smith", Scope: "rig", StartCommand: "new-cmd"}},
+	}
+	const identity = "rig-0/smith"
+	tp := TemplateParams{
+		TemplateName: identity,
+		InstanceName: identity,
+		Alias:        identity,
+		Command:      "new-cmd",
+	}
+	current := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(tp, sessionpkg.Info{}))
+	stale := sessionCoreConfigForHashInfo(tp, sessionpkg.Info{})
+	stale.Command = "old-" + stale.Command
+	stored := runtime.CoreFingerprint(stale)
+
+	if got := sessionConfigDriftKey(sessionpkg.Info{StartedConfigHash: stored}, cfg, tp); got != stored+":"+current {
+		t.Errorf("sessionConfigDriftKey = %q, want %q for a drifted rig-scoped named session", got, stored+":"+current)
+	}
+	if got := sessionConfigDriftKey(sessionpkg.Info{StartedConfigHash: current}, cfg, tp); got != "" {
+		t.Errorf("sessionConfigDriftKey = %q, want %q when the config is unchanged", got, "")
+	}
+
+	noRigCfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "smith", Scope: "rig", StartCommand: "new-cmd"}},
+	}
+	if got := sessionConfigDriftKey(sessionpkg.Info{StartedConfigHash: stored}, noRigCfg, tp); got != "" {
+		t.Errorf("sessionConfigDriftKey = %q, want %q when the rig is not configured", got, "")
+	}
+
+	cityCfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "lead", StartCommand: "new-cmd"}},
+	}
+	cityTp := TemplateParams{
+		TemplateName: "lead",
+		InstanceName: "lead",
+		Alias:        "lead",
+		Command:      "new-cmd",
+	}
+	cityCurrent := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(cityTp, sessionpkg.Info{}))
+	cityStale := sessionCoreConfigForHashInfo(cityTp, sessionpkg.Info{})
+	cityStale.Command = "old-" + cityStale.Command
+	cityStored := runtime.CoreFingerprint(cityStale)
+	if got := sessionConfigDriftKey(sessionpkg.Info{StartedConfigHash: cityStored}, cityCfg, cityTp); got != cityStored+":"+cityCurrent {
+		t.Errorf("sessionConfigDriftKey = %q, want %q for a drifted city-scoped named session", got, cityStored+":"+cityCurrent)
+	}
+}
