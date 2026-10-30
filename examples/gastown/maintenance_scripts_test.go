@@ -11698,6 +11698,85 @@ func TestGateSweepSkipsHQAndSuspendedRigs(t *testing.T) {
 	}
 }
 
+// gateSweepReport returns the lines gate-sweep itself printed (prefixed
+// "gate-sweep:") that mention scope.
+func gateSweepReport(out, scope string) []string {
+	var lines []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "gate-sweep:") && strings.Contains(line, scope) {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+// TestGateSweepKeepsSweepingAfterATimerFailure verifies that a failing timer
+// check in one store is reported on stderr naming the store, skips that
+// store's gh check, leaves the other stores swept, and fails the run.
+func TestGateSweepKeepsSweepingAfterATimerFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		failure string
+		env     map[string]string
+		failed  string
+		swept   []string
+	}{
+		{
+			name: "bd fails a rig timer check",
+			failure: `case "$GC_FAKE_SCOPE $*" in
+  "rig:api "*--type=timer*)
+    echo "bd: simulated timer-gate failure" >&2
+    exit 1
+    ;;
+esac`,
+			failed: "rig:api",
+			swept:  []string{"city", "rig:web"},
+		},
+		{
+			name:   "gc cannot reach a rig store",
+			env:    map[string]string{"FAKE_UNREACHABLE_SCOPES": "rig:api"},
+			failed: "rig:api",
+			swept:  []string{"city", "rig:web"},
+		},
+		{
+			name: "bd fails the city timer check",
+			failure: `case "$GC_FAKE_SCOPE $*" in
+  "city "*--type=timer*)
+    echo "bd: simulated timer-gate failure" >&2
+    exit 1
+    ;;
+esac`,
+			failed: "city",
+			swept:  []string{"rig:api", "rig:web"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir, bdLog, env := gateSweepEnv(t)
+			writeGateSweepScopeBd(t, binDir, tc.failure)
+			env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api"},{"name":"web"}]}`
+			for k, v := range tc.env {
+				env[k] = v
+			}
+
+			var stdout, stderr bytes.Buffer
+			cmd := scriptCmd("", coreScriptPath("gate-sweep.sh"), env)
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err == nil {
+				t.Fatalf("gate-sweep exited 0 after the %s timer check failed\nstdout:\n%s\nstderr:\n%s", tc.failed, stdout.String(), stderr.String())
+			}
+			if len(gateSweepReport(stderr.String(), tc.failed)) == 0 {
+				t.Errorf("stderr does not report the failing store %s:\n%s", tc.failed, stderr.String())
+			}
+			log := readGateSweepLog(t, bdLog)
+			requireGateSweepChecked(t, log, tc.swept...)
+			if bad := tc.failed + " gate check --type=gh"; strings.Contains(log, bad) {
+				t.Errorf("gh check ran in %s after its timer check failed; bd log:\n%s", tc.failed, log)
+			}
+		})
+	}
+}
+
 // TestGateSweepToleratesRigGhGateBdFailures verifies the gh-gate tolerance
 // holds per store: a rig's failing gh check neither fails the run nor stops
 // the next rig's sweep.
