@@ -282,8 +282,9 @@ func (a *convergenceStoreAdapter) Children(parentID string) ([]convergence.BeadI
 		return nil, err
 	}
 	children, err := store.List(beads.ListQuery{
-		ParentID: parentID,
-		Sort:     beads.SortCreatedAsc,
+		ParentID:      parentID,
+		Sort:          beads.SortCreatedAsc,
+		IncludeClosed: true,
 	})
 	if err != nil {
 		return nil, err

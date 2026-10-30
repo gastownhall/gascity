@@ -1380,6 +1380,7 @@ go_test(
         "controller_test.go",
         "controller_watcher_fd_test.go",
         "converge_scope_store_test.go",
+        "convergence_includeclosed_test.go",
         "convergence_integration_test.go",
         "conversation_lane_api_test.go",
         "conversation_lane_cli_control_test.go",
