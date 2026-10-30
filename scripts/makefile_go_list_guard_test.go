@@ -48,7 +48,7 @@ func TestMakeDryRunPackageListsAreNonEmpty(t *testing.T) {
 }
 
 // TestMakeDryRunFailsLoudlyWhenGoListFails is the RED target for ga-1qp5qo:
-// MAC_UNIT_PKGS (Makefile:458) and UNIT_COVER_PKGS_NONCMDGC (Makefile:778)
+// MAC_UNIT_PKGS (Makefile) and UNIT_COVER_PKGS_NONCMDGC (Makefile)
 // compute their package lists via $(shell go list ...), evaluated outside
 // the recipe's env -i TEST_ENV wrapper. $(shell ...) swallows a non-zero
 // exit and yields an empty variable, so a broken `go list` today silently
@@ -85,6 +85,9 @@ func TestMakeDryRunFailsLoudlyWhenGoListFails(t *testing.T) {
 			out, err := cmd.CombinedOutput()
 			if err == nil {
 				t.Fatalf("make -n %s must fail loudly when go list fails, but exited 0:\n%s", target, out)
+			}
+			if !strings.Contains(string(out), "resolved to an empty package list") {
+				t.Fatalf("make -n %s failed, but not via the empty-package-list guard:\n%s", target, out)
 			}
 		})
 	}

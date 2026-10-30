@@ -3,6 +3,7 @@
 - Deploy bead: `ga-ft1tmx`
 - Review bead: `ga-ofxxf2`
 - Reviewed commit: `c50338040187bd1922f01059067d17e2ecbcb68e`
+- Note: the PR head is `c992681` (origin/main merged into the reviewed commit). A herdr non-Linux skip guard recorded in an earlier draft of this gate is not part of this change.
 - Base evaluated: `origin/main@9700d9a48fb35a2063e1fcb9ee49ab664df26de0`
 - Deploy mode: `remote`
 
@@ -11,14 +12,14 @@
 | # | Criterion | Result | Evidence |
 |---|---|---|---|
 | 1 | Review PASS present | PASS | Review bead `ga-ofxxf2` is closed with `verdict: pass` for the exact reviewed commit. No review carryover was used. |
-| 2 | Acceptance criteria met | PASS | `MAC_UNIT_PKGS` and `UNIT_COVER_PKGS_NONCMDGC` now fail Make evaluation when `go list` returns an empty package set instead of silently invoking `go test` with zero packages. Both compose actions resolve the Go version from `go.mod`, the non-Linux herdr skip guard is present, both affected targets expanded and executed real suites, and the resource-census baselines/documentation match the added tests. |
+| 2 | Acceptance criteria met | PASS | `MAC_UNIT_PKGS` and `UNIT_COVER_PKGS_NONCMDGC` now fail Make evaluation when `go list` returns an empty package set instead of silently invoking `go test` with zero packages. A new policy test asserts both compose actions resolve the Go version from `go.mod` (already true on main), both affected targets expanded and executed real suites, and the resource-census baselines/documentation match the added tests. |
 | 3 | Tests pass | PASS | The documented full local CI aggregate ran through the isolation wrapper. Its four raw failures are tracked and independently proven non-diff-owned as recorded below. All diff-owned tests passed by name. Supplemental runs of the two affected targets also passed. |
 | 3b | Policy/lint lane | PASS | `make test-ci-policy` passed runner policy, suite coverage, `scripts/cipolicy`, `scripts/prwatchdog`, and static-scope checks. `make build`, `go vet ./...`, and `make check-hooks` also passed. |
 | 3c | CI-config lane | PASS | Not applicable: no workflow, job, matrix, timeout, or required-check configuration changed. The diff changes commands used by existing lanes, so their affected Make targets were run directly as supplemental evidence below. |
 | 4 | No high-severity review findings open | PASS | Review notes record no style, security, or specification findings; unresolved HIGH findings: 0. |
 | 5 | Final branch is clean | PASS | The detached reviewed checkout was clean after all gate commands and generated coverage output was removed. |
 | 6 | Branch diverges cleanly from main | PASS | `git merge-tree --write-tree origin/main c50338040187bd1922f01059067d17e2ecbcb68e` exited 0 against the base above. No bounded self-rebase was needed. |
-| 7 | Single feature theme | PASS | The Makefile guards, compose-action assertions, platform skip guard, census updates, and testing documentation all support one behavior: required CI lanes must resolve and execute a non-empty package set under the repository's declared Go version. |
+| 7 | Single feature theme | PASS | The Makefile guards, compose-action assertions, and census updates all support one behavior: required CI lanes must resolve and execute a non-empty package set under the repository's declared Go version. |
 
 ## Criterion 3 evidence
 
@@ -40,7 +41,6 @@ Every test below reported PASS in the full-scope output; several executed in bot
 - `TestComposeActionsResolveGoVersionFromGoMod`
   - `ubuntu`: PASS
   - `macos`: PASS
-- `TestHerdrXDGSocketPathTestsSkipOnNonLinuxPlatforms`: PASS
 - `TestMakeDryRunPackageListsAreNonEmpty`
   - `test-mac`: PASS
   - `test-cover-noncmdgc`: PASS
