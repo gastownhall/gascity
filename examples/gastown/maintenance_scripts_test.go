@@ -11777,6 +11777,69 @@ esac`,
 	}
 }
 
+// TestGateSweepSkipsStoresGcWillNotScope verifies that a store gc refuses to
+// point bd at (a non-bd beads provider, or a rig with no path binding on this
+// site) holds no bd gates: it is named as skipped on stdout, its gh check is
+// not run, the other stores are swept, and the run exits 0.
+func TestGateSweepSkipsStoresGcWillNotScope(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		failure string
+		env     map[string]string
+		skipped string
+		swept   []string
+	}{
+		{
+			name:    "rig is not bd-backed",
+			env:     map[string]string{"FAKE_NOT_BD_SCOPES": "rig:api"},
+			skipped: "rig:api",
+			swept:   []string{"city", "rig:web"},
+		},
+		{
+			name: "rig has no path binding",
+			failure: `case "$GC_FAKE_SCOPE $*" in
+  "rig:api "*--type=timer*)
+    echo 'gc bd: rig "api" is declared but has no path binding on this site' >&2
+    exit 1
+    ;;
+esac`,
+			skipped: "rig:api",
+			swept:   []string{"city", "rig:web"},
+		},
+		{
+			name:    "city is not bd-backed",
+			env:     map[string]string{"FAKE_NOT_BD_SCOPES": "city"},
+			skipped: "city",
+			swept:   []string{"rig:api", "rig:web"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir, bdLog, env := gateSweepEnv(t)
+			writeGateSweepScopeBd(t, binDir, tc.failure)
+			env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api"},{"name":"web"}]}`
+			for k, v := range tc.env {
+				env[k] = v
+			}
+
+			var stdout, stderr bytes.Buffer
+			cmd := scriptCmd("", coreScriptPath("gate-sweep.sh"), env)
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("gate-sweep should exit 0 when gc will not scope %s; got %v\nstdout:\n%s\nstderr:\n%s", tc.skipped, err, stdout.String(), stderr.String())
+			}
+			if len(gateSweepReport(stdout.String(), tc.skipped)) == 0 {
+				t.Errorf("stdout does not name the skipped store %s:\n%s", tc.skipped, stdout.String())
+			}
+			log := readGateSweepLog(t, bdLog)
+			requireGateSweepChecked(t, log, tc.swept...)
+			if bad := tc.skipped + " gate check --type=gh"; strings.Contains(log, bad) {
+				t.Errorf("gh check ran in %s, which gc will not scope; bd log:\n%s", tc.skipped, log)
+			}
+		})
+	}
+}
+
 // TestGateSweepToleratesRigGhGateBdFailures verifies the gh-gate tolerance
 // holds per store: a rig's failing gh check neither fails the run nor stops
 // the next rig's sweep.

@@ -26,7 +26,8 @@
 # first sweep after resume. Listing the rigs costs one `gc rig list --json`
 # (parsed with jq) on every run, even in a city with no rigs. A timer check
 # that fails in one store is reported on stderr naming the store; the other
-# stores are still swept and the run exits non-zero.
+# stores are still swept and the run exits non-zero. A store gc will not
+# scope for bd is skipped with a notice and does not fail the run.
 set -euo pipefail
 
 # Trace bd invocations to $GC_BD_TRACE when set (no-op otherwise).
@@ -42,16 +43,31 @@ CITY_ABS="$(cd "$CITY" 2>/dev/null && pwd -P || printf '%s\n' "$CITY")"
 . "$__SCRIPT_DIR/scope_bd.sh"
 
 FAILED=0
+ERR_FILE=$(mktemp)
+trap 'rm -f "$ERR_FILE"' EXIT
 
 # sweep_scope checks the timer and gh gates of the scope scope_select made
-# current. bd reports per-gate errors and still exits 0, so a failing timer
-# check means the store itself failed: it is reported, the store's gh check is
-# skipped (it would fail the same way behind its `|| true`), and the run fails
-# after the remaining stores are swept.
+# current. A store gc will not point bd at (a non-bd beads provider, or a rig
+# with no path binding on this site) holds no bd gates, so it is named as
+# skipped rather than failed. bd reports per-gate errors and still exits 0, so
+# any other failing timer check means the store itself failed: it is reported,
+# the store's gh check is skipped (it would fail the same way behind its
+# `|| true`), and the run fails after the remaining stores are swept.
 sweep_scope() {
     local rc=0
-    scope_bd gate check --type=timer --escalate || rc=$?
+    scope_bd gate check --type=timer --escalate 2>"$ERR_FILE" || rc=$?
+    cat "$ERR_FILE" >&2
     if [ "$rc" -ne 0 ]; then
+        case "$(cat "$ERR_FILE")" in
+            *"only supported for bd-backed beads providers"*)
+                echo "gate-sweep: $SCOPE_LABEL is not a bd bead store; no gates to check there"
+                return 0
+                ;;
+            *"is declared but has no path binding"*)
+                echo "gate-sweep: $SCOPE_LABEL has no path binding on this site; no gates to check there"
+                return 0
+                ;;
+        esac
         echo "gate-sweep: timer gate check failed in $SCOPE_LABEL (exit $rc)" >&2
         FAILED=1
         return 0
