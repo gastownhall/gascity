@@ -184,10 +184,13 @@ func armDrainVoidCancel(r *rowFacts) (intent, bool) {
 	switch {
 	case p.authorized == nil || (p.keepHolds && r.entry.Desired == desireKeep):
 		return intent{}, false
-	case drainLens(r, req.Reason) || (req.Reason == reasonNoWake && workKeepsNoWakeRow(r)):
+	case drainLens(r, req.Reason) || (req.Reason == reasonNoWake && workKeepsNoWakeRow(r)) ||
+		((req.Reason == reasonNoWake || req.Reason == drainIdle) && r.seatHoldsWork()):
 		// Work assigned to a no-wake-reason row after its begin: legacy's
 		// assigned-work cancel at its ack (DRAIN-046), which the begin's
-		// keep matches (C6a2 review 1b).
+		// keep matches (C6a2 review 1b). Work a pool seat holds but has no
+		// wake reason to run yet cancels its timer drain, as legacy's
+		// held-work keep does.
 		kind = intentDrainCancel
 	case p.authorized(r, req.Reason):
 		return intent{}, false
@@ -213,13 +216,49 @@ func workKeepsNoWakeRow(r *rowFacts) bool {
 // assigns to any of scope's identities of the row's session, blocked work
 // included.
 func (r *rowFacts) inProgressWorkAssigned(scope workScope) bool {
+	return r.workAssigned(scope, "in_progress")
+}
+
+// workAssigned reports work in one of statuses the pass's demand read
+// assigns to any of scope's identities of the row's session, blocked work
+// included.
+func (r *rowFacts) workAssigned(scope workScope, statuses ...string) bool {
 	ids := scope.scopeIDs()
 	for _, w := range r.w.Demand.AssignedWork {
-		if w.Status == "in_progress" && slices.Contains(ids, strings.TrimSpace(w.Assignee)) {
+		if slices.Contains(statuses, w.Status) && slices.Contains(ids, strings.TrimSpace(w.Assignee)) {
 			return true
 		}
 	}
 	return false
+}
+
+// seatHoldsWork is legacy's held-work keep (sessionHoldsAssignedWork) over
+// the pass's demand read: a pool seat the live-claim veto covers, with no
+// sleep intent but idle-stop-pending, holds open or in-progress work
+// assigned to its ReleaseScope, blocked work included. A partial demand read
+// fails closed.
+func (r *rowFacts) seatHoldsWork() bool {
+	cfg := worldCfg(r.w)
+	if intent := strings.TrimSpace(r.row.Info.SleepIntent); intent != "" && intent != sleepIntentIdle {
+		return false
+	}
+	if !r.liveClaimVetoApplies(cfg) {
+		return false
+	}
+	return r.w.Demand.StorePartial || r.workAssigned(releaseScope(r.row.Info, cfg), seatWorkStatuses...)
+}
+
+// liveClaimVetoApplies is liveClaimVetoApplies over the pass's suspension
+// read (CitySuspended, SuspendedRigPaths), as the allocator reads it: a pool
+// seat, not a named session, whose agent is configured and not suspended,
+// in a city and rig that are not suspended.
+func (r *rowFacts) liveClaimVetoApplies(cfg *config.City) bool {
+	info := r.row.Info
+	if cfg == nil || r.w.CitySuspended || !isPoolManagedSessionInfo(info) || isNamedSessionInfo(info) {
+		return false
+	}
+	a := sessionAgentConfigInfo(cfg, info)
+	return a != nil && !a.Suspended && !agentInSuspendedRig(r.w.CityPath, a, cfg.Rigs, r.w.SuspendedRigPaths)
 }
 
 // armAck is A11 (v5 D5; C6c2): an ack of the row's generation, the agent's
@@ -433,6 +472,11 @@ func armDrainBegin(r *rowFacts) (intent, bool) {
 		// (DRAIN-046), so a session it keeps running is never drained (ruling
 		// at the C6a2 review: match legacy).
 		return intent{Reason: decideDrainWorkKept}, true
+	case (reason == reasonNoWake || reason == drainIdle) && r.seatHoldsWork():
+		// A pool seat holding assigned work it has no wake reason to run yet
+		// (blocked open or in-progress work): legacy's held-work keep, so the
+		// work is not stranded on a stopped seat.
+		return r.workKept(basis), true
 	case e.Desired == desireDrain && wakeGracePreservesUndesiredRow(info, r.w.Now) && r.w.OperatorSuspend[r.k] == "":
 		woke, _ := parseRFC3339Metadata(info.LastWokeAt)
 		r.after(requeueUntil(r.w.Now, woke.Add(wakeUndesiredGrace)))
