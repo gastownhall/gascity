@@ -890,3 +890,33 @@ func TestClassifyOrderFiringThresholdsIncludePatrolInterval(t *testing.T) {
 		})
 	}
 }
+
+// The patrol allowance is the city's configured [daemon] patrol_interval,
+// not a fixed 30s: with a 1m patrol a 1m cooldown order is overdue from 3m.
+func TestOrderFiringCurrent_ReadsPatrolIntervalFromCityConfig(t *testing.T) {
+	tests := []struct {
+		name       string
+		age        time.Duration
+		wantStatus CheckStatus
+	}{
+		{"within the 1m patrol allowance", 2*time.Minute + 50*time.Second, StatusOK},
+		{"at the overdue line", 3 * time.Minute, StatusWarning},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+			cityPath, cfg := orderFiringTestCity(t)
+			cfg.Daemon.PatrolInterval = "1m"
+			writeOrderFiringTestOrder(t, cityPath, "fast-cooldown", "cooldown", "1m")
+			writeOrderFiringTestEvents(t, cityPath,
+				events.Event{Type: events.ControllerStarted, Ts: now.Add(-1 * time.Hour)},
+				events.Event{Type: events.OrderFired, Subject: "fast-cooldown", Ts: now.Add(-tt.age)},
+			)
+
+			result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+			if result.Status != tt.wantStatus {
+				t.Fatalf("status = %v, want %v; msg = %s; details = %v", result.Status, tt.wantStatus, result.Message, result.Details)
+			}
+		})
+	}
+}
