@@ -134,6 +134,12 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 	}
 	report.HadPID = true
 	report.PID = targetPID
+	// Snapshot before the SIGTERM: once the process exits there is nothing
+	// left to read, and recovery's pre-start cleanup needs it to refuse a
+	// reused PID. Ticks first, ps lstart only as the no-/proc fallback.
+	if report.StartTimeTicks = managedDoltTestReadStartTimeTicks(targetPID); report.StartTimeTicks == 0 {
+		report.StartIdentity = managedDoltTestReadStartIdentity(targetPID)
+	}
 	if managedStopPIDAlive(targetPID) {
 		killErr := syscall.Kill(targetPID, syscall.SIGTERM)
 		if killErr != nil && killErr != syscall.ESRCH {

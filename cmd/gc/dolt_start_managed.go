@@ -233,6 +233,8 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 		_ = logFile.Close()
 
 		report.PID = started.PID
+		report.StartTimeTicks = started.StartTimeTicks
+		report.StartIdentity = started.StartIdentity
 		report.Port = currentPort
 		if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
 			terminateManagedDoltStartedProcess(started)
@@ -1096,7 +1098,7 @@ func terminateManagedDoltPID(cityPath string, pid int) error {
 // deadline, and a bare-PID SIGKILL would land on the stranger. Re-verifying just
 // before the kill closes that window. A nil guard keeps the legacy unconditional
 // behavior for callers that never snapshotted an identity (test watchdog,
-// recovery cleanup, pre-handshake scope watchdog).
+// pre-handshake scope watchdog).
 func terminateManagedDoltPIDGuarded(cityPath string, pid int, identityMatches func() bool) error {
 	if pid <= 0 {
 		return nil

@@ -155,14 +155,19 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 	stopReport, stopErr := ops.stop(cityPath, port)
 	report.HadPID = stopReport.HadPID
 	report.Forced = stopReport.Forced
+	// The cleanup target tracks report.PID together with the start identity
+	// captured for that same process; a PID learned only from an earlier
+	// observation has no identity and keeps the unguarded termination.
+	target := managedDoltCleanupTarget{PID: report.PID}
 	if stopReport.PID > 0 {
 		report.PID = stopReport.PID
+		target = managedDoltCleanupTarget{PID: stopReport.PID, StartTimeTicks: stopReport.StartTimeTicks, StartIdentity: stopReport.StartIdentity}
 	}
 	// Match shell recover semantics: stop is best-effort before restart.
 	_ = stopErr
 
 	if err := ops.preflightCleanup(cityPath); err != nil {
-		return report, ops.failedCleanup(cityPath, managedDoltCleanupTarget{PID: report.PID}, report.Port, err)
+		return report, ops.failedCleanup(cityPath, target, report.Port, err)
 	}
 
 	startReport, err := ops.start(cityPath, host, port, user, logLevel, timeout)
@@ -170,6 +175,7 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 	report.Ready = startReport.Ready
 	if startReport.PID > 0 {
 		report.PID = startReport.PID
+		target = managedDoltCleanupTarget{PID: startReport.PID, StartTimeTicks: startReport.StartTimeTicks, StartIdentity: startReport.StartIdentity}
 	}
 	if startReport.Port > 0 {
 		report.Port = startReport.Port
@@ -182,18 +188,18 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 
 	health, err := ops.healthCheck(host, strconv.Itoa(report.Port), user)
 	if err != nil {
-		return report, ops.failedCleanup(cityPath, managedDoltCleanupTarget{PID: report.PID}, report.Port, err)
+		return report, ops.failedCleanup(cityPath, target, report.Port, err)
 	}
 	if health.ReadOnly == "true" {
 		report.Healthy = false
-		return report, ops.failedCleanup(cityPath, managedDoltCleanupTarget{PID: report.PID}, report.Port, fmt.Errorf("dolt server on %s:%d is still read-only after recovery", managedDoltConnectHost(host), report.Port))
+		return report, ops.failedCleanup(cityPath, target, report.Port, fmt.Errorf("dolt server on %s:%d is still read-only after recovery", managedDoltConnectHost(host), report.Port))
 	}
 	report.Healthy = health.QueryReady
 	if !report.Healthy {
-		return report, ops.failedCleanup(cityPath, managedDoltCleanupTarget{PID: report.PID}, report.Port, fmt.Errorf("dolt server on %s:%d is not query-ready after recovery", managedDoltConnectHost(host), report.Port))
+		return report, ops.failedCleanup(cityPath, target, report.Port, fmt.Errorf("dolt server on %s:%d is not query-ready after recovery", managedDoltConnectHost(host), report.Port))
 	}
 	if err := ops.publish(cityPath); err != nil {
-		return report, ops.failedCleanup(cityPath, managedDoltCleanupTarget{PID: report.PID}, report.Port, fmt.Errorf("publish managed dolt runtime state: %w", err))
+		return report, ops.failedCleanup(cityPath, target, report.Port, fmt.Errorf("publish managed dolt runtime state: %w", err))
 	}
 	return report, nil
 }
@@ -208,13 +214,18 @@ type managedDoltCleanupTarget struct {
 }
 
 func cleanupFailedManagedDoltRecovery(cityPath string, target managedDoltCleanupTarget, port int, cause error) error {
-	pid := target.PID
 	if cause == nil {
 		return nil
 	}
 	cleanupErrs := make([]error, 0, 3)
-	if pid > 0 {
-		if err := terminateManagedDoltPID(cityPath, pid); err != nil {
+	if target.PID > 0 {
+		// Health-check retries between spawn and cleanup leave room for the
+		// PID to be reused, so the termination re-verifies the start identity
+		// before both SIGTERM and SIGKILL.
+		identityMatches := func() bool {
+			return managedDoltPIDStartIdentityMatches(target.PID, target.StartTimeTicks, target.StartIdentity)
+		}
+		if err := terminateManagedDoltPIDGuarded(cityPath, target.PID, identityMatches); err != nil {
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("cleanup failed: %w", err))
 		}
 	}
