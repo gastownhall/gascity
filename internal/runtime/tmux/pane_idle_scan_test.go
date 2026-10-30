@@ -119,6 +119,30 @@ func TestMenuCursorRowIsNotAReadyPrompt(t *testing.T) {
 			"› 1. foo",
 			"  2. bar",
 		}, "› ", false},
+
+		// A menu below an echoed turn: the bottom-most prompt line is the
+		// menu's cursor row, so the pane still reads not-ready — skipping the
+		// cursor row and keeping the scan would land on the echoed turn.
+		{"folder trust below an echoed turn", []string{
+			"› Commit the staged API change",
+			"",
+			"  Trust this folder? Codex can read, edit, and run files here.",
+			"",
+			"› 1. Trust and continue",
+			"  2. Quit",
+			"",
+			"  enter continue · esc quit",
+		}, "› ", false},
+		{"model-switch modal below an echoed turn", []string{
+			"› fix the flaky test",
+			"",
+			"  Approaching rate limits",
+			"  Switch to gpt-5.4-mini for lower credit usage?",
+			"› 1. Switch to gpt-5.4-mini",
+			"  2. Keep current model",
+			"  3. Wait a minute",
+			"  Press enter to confirm or esc to go back",
+		}, "› ", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
