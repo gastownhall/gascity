@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -692,7 +693,7 @@ func TestLatestOrderFiredAt_RecentEventSkipsLastRun(t *testing.T) {
 		},
 	}
 
-	got, err := check.latestOrderFiredAt(evts, order, expected, now)
+	got, err := check.latestOrderFiredAt(evts, order, expected, 30*time.Second, now)
 	if err != nil {
 		t.Fatalf("latestOrderFiredAt returned error: %v", err)
 	}
@@ -708,7 +709,7 @@ func TestLatestOrderFiredAt_StaleEventConsultsLastRun(t *testing.T) {
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	expected := 4 * time.Hour
 	order := orders.Order{Name: "mol-dog-stale-db", Trigger: "cron"}
-	// Event age (13h) exceeds expected*1.5 (6h), so the fast path must not apply.
+	// Event age (13h) exceeds the overdue line (6h0m45s), so the fast path must not apply.
 	staleEvent := now.Add(-13 * time.Hour)
 	freshRun := now.Add(-1 * time.Hour)
 	evts := []events.Event{
@@ -723,7 +724,7 @@ func TestLatestOrderFiredAt_StaleEventConsultsLastRun(t *testing.T) {
 		},
 	}
 
-	got, err := check.latestOrderFiredAt(evts, order, expected, now)
+	got, err := check.latestOrderFiredAt(evts, order, expected, 30*time.Second, now)
 	if err != nil {
 		t.Fatalf("latestOrderFiredAt returned error: %v", err)
 	}
@@ -914,6 +915,69 @@ func TestOrderFiringCurrent_ReadsPatrolIntervalFromCityConfig(t *testing.T) {
 			)
 
 			result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+			if result.Status != tt.wantStatus {
+				t.Fatalf("status = %v, want %v; msg = %s; details = %v", result.Status, tt.wantStatus, result.Message, result.Details)
+			}
+		})
+	}
+}
+
+// The event-log shortcut answers alone exactly when the classifier would call
+// that age OK, so neither the prefetch nor the inline path skips the order-run
+// lookup for an order the classifier would flag.
+func TestEventEvidenceSufficesMatchesOverdueLine(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	started := now.Add(-48 * time.Hour)
+	order := orders.Order{Name: "fast-cooldown", Trigger: "cooldown"}
+	for _, tc := range []struct{ expected, patrol time.Duration }{
+		{time.Minute, 30 * time.Second},
+		{30 * time.Second, 15 * time.Second},
+		{4 * time.Hour, 30 * time.Second},
+	} {
+		line := orderFiringOverdueAfter(tc.expected, tc.patrol)
+		for _, age := range []time.Duration{line - time.Second, line, line + time.Second} {
+			latest := now.Add(-age)
+			suffices := eventEvidenceSuffices(latest, tc.expected, tc.patrol, now)
+			status, _, detail := classifyOrderFiring(order, now, tc.expected, tc.patrol, latest, started)
+			if suffices != (status == StatusOK) {
+				t.Errorf("expected %s, patrol %s, age %s: evidence suffices = %v, classifier = %v (%s)", tc.expected, tc.patrol, age, suffices, status, detail)
+			}
+			if want := age < line; suffices != want {
+				t.Errorf("expected %s, patrol %s, age %s: evidence suffices = %v, want %v", tc.expected, tc.patrol, age, suffices, want)
+			}
+		}
+	}
+	if eventEvidenceSuffices(time.Time{}, time.Minute, 30*time.Second, now) {
+		t.Errorf("evidence suffices for a zero event time; want the lookup consulted")
+	}
+
+	for _, tt := range []struct {
+		name       string
+		eventAge   time.Duration
+		wantLookup bool
+		wantStatus CheckStatus
+	}{
+		{"event younger than the overdue line", 2 * time.Minute, false, StatusOK},
+		{"event at the overdue line", 2*time.Minute + 15*time.Second, true, StatusWarning},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath, cfg := orderFiringTestCity(t)
+			writeOrderFiringTestOrder(t, cityPath, "fast-cooldown", "cooldown", "1m")
+			writeOrderFiringTestEvents(t, cityPath,
+				events.Event{Type: events.ControllerStarted, Ts: now.Add(-1 * time.Hour)},
+				events.Event{Type: events.OrderFired, Subject: "fast-cooldown", Ts: now.Add(-tt.eventAge)},
+			)
+			var lookups atomic.Int32
+			check := NewOrderFiringCurrentCheck(cfg, cityPath, WithOrderFiringCurrentLastRunFunc(func(orders.Order) (time.Time, error) {
+				lookups.Add(1)
+				return time.Time{}, nil
+			}))
+			check.clock = func() time.Time { return now }
+			result := check.Run(&CheckContext{CityPath: cityPath})
+
+			if got := lookups.Load() > 0; got != tt.wantLookup {
+				t.Fatalf("order-run lookup consulted = %v (%d calls), want %v", got, lookups.Load(), tt.wantLookup)
+			}
 			if result.Status != tt.wantStatus {
 				t.Fatalf("status = %v, want %v; msg = %s; details = %v", result.Status, tt.wantStatus, result.Message, result.Details)
 			}
