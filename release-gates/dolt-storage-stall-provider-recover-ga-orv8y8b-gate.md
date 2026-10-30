@@ -22,7 +22,7 @@ Build bead: ga-y64h4ww. Review bead: ga-5xzioyg (PASS).
 | 2 | Acceptance criteria | PASS — 11 owned script tests passed by name, including every AC1 branch; RED precedes GREEN. AC2's four-mutant map was checked against assertions and is in the PR body. AC3 BUILD registration and independent sync passed. AC4's complete caller inventory is in the PR body. AC5 page remains absent from origin/main at PR preparation, so the sentence is explicitly left to ga-dnqmzh. |
 | 3 | Tests | PASS — full-suite five-phase forced remote execution plus the complete mandatory native floor: 134194 PASS, 0 FAIL, 377 SKIP top-level result lines. All 11 owned tests passed, no owned skip/failure. Full execution record below. |
 | 4 | High-severity findings | PASS — zero unresolved HIGH/blocking findings in the review; known residual R1 is explicitly out of scope and disclosed. |
-| 5 | Clean branch | PASS — worktree was clean at reviewed source before writing this gate; only this record is staged for the gate commit. Normal .githooks/pre-commit is active and will run on that commit; final clean status is checked before push. |
+| 5 | Clean branch | PASS — worktree was clean at reviewed source before writing this gate; only this record is staged for the gate commit. Normal .githooks/pre-commit is active and ran on the gate-record commit; its Bazel docsync target passed. Final clean status is checked before push. |
 | 6 | Merge state and build/vet | PASS — source merged cleanly at the pinned base; exact merged tree verified. Detached bazel build --config=remote-exec --noremote_local_fallback //... completed successfully: 1411 targets, nogo lint/vet included, exit 0; c6.result.log. |
 | 7 | Single feature theme | PASS — one Dolt-recovery stall guard, its production-script tests and Bazel registration; ancestry citation check accepts ga-orv8y8b and its build bead ga-y64h4ww, no unrelated commits or .claude paths. |
 
@@ -120,6 +120,16 @@ diff_tests_executed:
   TestProviderScriptRecoverStillRetiresWhenFsyncIsFast PASS (integration-packages-56f04454dd9158a9ee8a.log, unit-fd986cf5bab8709b8d45.log)
   TestProviderScriptStopAndShutdownIgnoreTheStallGuard PASS (integration-packages-821a75e4a503601af052.log, unit-1cc8c8ab55e59a9e03a9.log)
 GATE_TEST_EVIDENCE_RESULT ok: 11 diff-owned tests verified by name
+```
+
+Instrumentation: after all tests, fixed native checks and by-name verification completed, the footprint sampler was blocked in Btrfs. Its single du subprocess (PID 436490) was verified by parent PID 2413465, scratch cwd and ISOLATED_TEST_BEAD=ga-orv8y8b, then terminated. The runner handled the unavailable measurement, exited 0, and produced the valid execution record below. No test was interrupted, repaired or rerun.
+
+Native skip justification: live herdr cases are disabled by their unit-lane environment; br is unavailable; replay/simulation inputs and the PostgreSQL DSN are unset; binding tests require an active tmux context; classified-start-error/fence subtests deliberately use unavailable or unsupported fake providers. All are unchanged tests outside the two edited test files and none exercises the changed recovery guard. The native inventory contains 39 skip events including subtests (14 top-level); exact reasons and sites are retained in floor_topup.log_dir.
+
+Remote-class outer-wrapper load (separate from the native-floor wait and run recorded above):
+
+```text
+LOAD_GATE_SUMMARY threshold=15 waited_seconds=0 wait_timed_out=0 run_start_load=54.61 run_max_load=145.94 run_mean_load=81.50 run_readings=115 wait_first_load=54.61 wait_max_load=54.61 wait_mean_load=54.61 wait_readings=1 read_errors=0
 ```
 
 ## Full criterion-3 execution record
