@@ -20,12 +20,12 @@ import (
 // top of the patrol cadence.
 const namedDriftRestartBudget = 4 * time.Minute
 
-// TestE2E_NamedSessionProviderEnvDrift_CityAndRigScope verifies that changing
-// a provider env value in city.toml restarts every on-demand named session
-// running on that provider, whether the named session is city-scoped or
-// rig-scoped (a generic scope = "rig" city agent, stamped per rig). Both
-// sessions run a stub agent that the provider's process_names match and use
-// wake_mode = "fresh".
+// TestE2E_NamedSessionProviderEnvDrift_CityAndRigScope verifies that, on the
+// legacy session reconciler, changing a provider env value in city.toml
+// restarts every on-demand named session running on that provider, whether
+// the named session is city-scoped or rig-scoped (a generic scope = "rig"
+// city agent, stamped per rig). Both sessions run a stub agent that the
+// provider's process_names match and use wake_mode = "fresh".
 func TestE2E_NamedSessionProviderEnvDrift_CityAndRigScope(t *testing.T) {
 	if usingSubprocess() {
 		t.Skip("named-session drift restart is exercised on the tmux provider")
@@ -153,9 +153,9 @@ mode = "on_demand"
 	writeNamedDriftCityToml(t, cityDir, cityName, value)
 }
 
-// writeNamedDriftCityToml writes city.toml with the stub provider's
-// CUSTOM_DRIFT env set to value. The stub runs e2e-report.sh under bash, which
-// the provider's process_names match.
+// writeNamedDriftCityToml writes city.toml, pinned to the legacy session
+// reconciler, with the stub provider's CUSTOM_DRIFT env set to value. The stub
+// runs e2e-report.sh under bash, which the provider's process_names match.
 func writeNamedDriftCityToml(t *testing.T, cityDir, cityName, value string) {
 	t.Helper()
 
@@ -164,14 +164,15 @@ func writeNamedDriftCityToml(t *testing.T, cityDir, cityName, value string) {
 	fmt.Fprintf(&b, "[workspace]\nname = %s\n", quote(cityName))
 	b.WriteString("\n[beads]\nprovider = \"file\"\n")
 	b.WriteString(e2eDaemonSection)
+	b.WriteString("session_reconciler = \"legacy\"\n")
 	fmt.Fprintf(&b, "\n[providers.stub]\ncommand = \"bash\"\nargs = [%s]\nprompt_mode = \"none\"\nprocess_names = [\"bash\"]\n", quote(script))
 	fmt.Fprintf(&b, "\n[providers.stub.env]\nCUSTOM_DRIFT = %s\n", quote(value))
 	b.WriteString("\n[[rigs]]\nname = \"rig-0\"\n")
 	writeFileAtomic(t, filepath.Join(cityDir, "city.toml"), []byte(b.String()))
 }
 
-// namedDriftSupervisorLog returns the isolated supervisor log's config-drift
-// lines and its tail, for a failure message.
+// namedDriftSupervisorLog returns the isolated supervisor log's drift lines
+// and its tail, for a failure message.
 func namedDriftSupervisorLog(cityDir string) string {
 	env := parseEnvList(commandEnvForDir(cityDir, false))
 	if env["GC_HOME"] == "" {
@@ -191,8 +192,8 @@ func namedDriftSupervisorLog(cityDir string) string {
 }
 
 // namedDriftBeads returns each bead in the city's file store with its
-// assignee and the metadata that routing and the config-drift gate read, for a
-// failure message.
+// assignee and the metadata the config-drift gate reads, for a failure
+// message.
 func namedDriftBeads(cityDir string) string {
 	store, recorder, err := openFileStoreBeads(cityDir)
 	if err != nil {
@@ -206,7 +207,7 @@ func namedDriftBeads(cityDir string) string {
 	var b strings.Builder
 	for _, item := range items {
 		fmt.Fprintf(&b, "%s %s %q status=%s assignee=%q", item.ID, item.Type, item.Title, item.Status, item.Assignee)
-		for _, key := range []string{"gc.routed_to", "template", "session_name", "state", "configured_named_identity", "started_config_hash", "config_drift_deferred_at", "pin_awake"} {
+		for _, key := range []string{"template", "session_name", "state", "configured_named_identity", "started_config_hash", "config_drift_deferred_at", "pin_awake"} {
 			if v := item.Metadata[key]; v != "" {
 				fmt.Fprintf(&b, " %s=%q", key, v)
 			}
