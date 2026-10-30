@@ -272,6 +272,21 @@ func newWispGCForConfig(cfg *config.City) wispGC {
 	return newWispGC(cfg.Daemon.WispGCIntervalDuration(), cfg.Daemon.WispTTLDuration(), mailRetentionTTL)
 }
 
+// carryWispGCState hands a tracker rebuilt by a config reload the run clock
+// of the one it replaces: lastRun, so the cadence counts from the last real
+// pass under the new interval. Config-derived fields (interval, TTLs,
+// cityName) and notes stay on next, which is returned as-is when either
+// tracker is not a *memoryWispGC.
+func carryWispGCState(prev, next wispGC) wispGC {
+	p, pok := prev.(*memoryWispGC)
+	n, nok := next.(*memoryWispGC)
+	if !pok || !nok {
+		return next
+	}
+	n.lastRun = p.lastRun
+	return next
+}
+
 func (m *memoryWispGC) shouldRun(now time.Time) bool {
 	return now.Sub(m.lastRun) >= m.interval
 }

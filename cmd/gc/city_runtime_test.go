@@ -5155,6 +5155,107 @@ func TestCityRuntimeReloadRetriesTransientLifecycleFailure(t *testing.T) {
 	}
 }
 
+// A config reload that rebuilds the wisp GC tracker must keep the configured
+// cadence: a GC that ran 10 minutes ago on a 1h interval is not due again
+// right after the reload, and a wisp_ttl change takes effect at the next
+// scheduled pass instead of resetting the clock.
+func TestCityRuntimeReloadKeepsWispGCCadence(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	base := "[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n[daemon]\nwisp_gc_interval = \"1h\"\nwisp_ttl = \"24h\"\n"
+	if err := os.WriteFile(tomlPath, []byte(base), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	var stdout, stderr bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		LogPrefix: "gc reload",
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+	cr.sessionDrains = newDrainTracker()
+
+	prevStart := cityRuntimeStartBeadsLifecycle
+	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, cityStoreRecord, io.Writer) error { return nil }
+	t.Cleanup(func() { cityRuntimeStartBeadsLifecycle = prevStart })
+
+	cr.wg = newWispGCForCity(cfg, cr.cityName)
+	m, ok := cr.wg.(*memoryWispGC)
+	if !ok {
+		t.Fatalf("wisp GC tracker = %T, want *memoryWispGC", cr.wg)
+	}
+	lastRun := time.Now()
+	m.lastRun = lastRun
+
+	// An edit unrelated to the GC (shutdown_timeout) reloads and rebuilds the
+	// tracker.
+	if err := os.WriteFile(tomlPath, []byte(base+"shutdown_timeout = \"1s\"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	oldRev := cr.configRev
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reply.Outcome = %q (err %q), want %q", reply.Outcome, reply.Error, reloadOutcomeApplied)
+	}
+	if cr.configRev == oldRev {
+		t.Fatal("configRev unchanged after reload")
+	}
+	rebuilt, ok := cr.wg.(*memoryWispGC)
+	if !ok || rebuilt == nil {
+		t.Fatalf("wisp GC tracker after reload = %T, want *memoryWispGC", cr.wg)
+	}
+	if rebuilt == m {
+		t.Fatal("wisp GC tracker not rebuilt by the reload")
+	}
+	if rebuilt.shouldRun(lastRun.Add(10 * time.Minute)) {
+		t.Fatal("wisp GC due 10m after its last run, right after a config reload; want the 1h cadence kept")
+	}
+	if !rebuilt.shouldRun(lastRun.Add(time.Hour)) {
+		t.Fatal("wisp GC not due 1h after its last run; want the 1h cadence kept")
+	}
+
+	// A wisp_ttl change keeps the cadence and applies the new TTL.
+	ttlEdit := "[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n[daemon]\nwisp_gc_interval = \"1h\"\nwisp_ttl = \"48h\"\nshutdown_timeout = \"1s\"\n"
+	if err := os.WriteFile(tomlPath, []byte(ttlEdit), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	reply = cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reply.Outcome = %q (err %q), want %q", reply.Outcome, reply.Error, reloadOutcomeApplied)
+	}
+	afterTTL, ok := cr.wg.(*memoryWispGC)
+	if !ok || afterTTL == nil {
+		t.Fatalf("wisp GC tracker after ttl edit = %T, want *memoryWispGC", cr.wg)
+	}
+	if afterTTL == rebuilt {
+		t.Fatal("wisp GC tracker not rebuilt by the ttl edit reload")
+	}
+	if afterTTL.shouldRun(lastRun.Add(10 * time.Minute)) {
+		t.Fatal("wisp GC due 10m after its last run, right after a ttl-edit reload; want the 1h cadence kept")
+	}
+	if afterTTL.ttl != 48*time.Hour {
+		t.Fatalf("rebuilt ttl = %v, want 48h (the new config's)", afterTTL.ttl)
+	}
+}
+
 func TestCityRuntimeReloadStrictWarningsReturnedOnFailure(t *testing.T) {
 	oldStrict := strictMode
 	strictMode = true
