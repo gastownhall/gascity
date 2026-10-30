@@ -53,46 +53,6 @@ type mcpTargetSpec struct {
 	Root       string
 	Projection materialize.MCPProjection
 	Agents     []string
-	// AgentDetails carries enough per-agent state to diagnose a conflict
-	// caused by a city-scoped agent's own agents/<name>/mcp/ catalog
-	// colliding with its provider's implicit agent at the same scope
-	// root (gastownhall/gascity#8267), without re-deriving it from cfg.
-	AgentDetails []mcpConflictAgentRef
-}
-
-// mcpConflictAgentRef is the subset of config.Agent a conflict message
-// needs: whether the agent is provider-implicit, and whether it defines
-// its own agent-local MCP catalog.
-type mcpConflictAgentRef struct {
-	Name     string
-	Implicit bool
-	MCPDir   string
-}
-
-// mcpAgentLocalConflictCause reports the agent-local mcp/ directory
-// responsible for a conflict between two MCP target specs, when the
-// conflict is exactly the gastownhall/gascity#8267 shape: one side is a
-// provider's implicit agent (no agent-local catalog), and the other is a
-// non-implicit agent with its own agents/<name>/mcp/ directory. Returns
-// ("", false) for any other conflict shape, so the generic message still
-// applies to genuinely unrelated divergences.
-func mcpAgentLocalConflictCause(a, b []mcpConflictAgentRef) (string, bool) {
-	var implicitSeen, localSeen bool
-	var localDir string
-	for _, ref := range append(append([]mcpConflictAgentRef{}, a...), b...) {
-		if ref.Implicit {
-			implicitSeen = true
-			continue
-		}
-		if ref.MCPDir != "" {
-			localSeen = true
-			localDir = ref.MCPDir
-		}
-	}
-	if implicitSeen && localSeen {
-		return localDir, true
-	}
-	return "", false
 }
 
 type resolvedMCPProjection struct {
@@ -330,6 +290,14 @@ func heldStage1MCPKey(cityPath string, cfg *config.City, agent *config.Agent, pa
 	return managedKey(kind, scopeRoot), true
 }
 
+// claimsStage1MCPTarget reports whether a resolved view claims a stage-1
+// target, the provider-native file at its scope root: an agent with a
+// provider or servers claims it even when its catalog is empty, so every
+// claimant of one target must project the same payload.
+func claimsStage1MCPTarget(view resolvedMCPProjection) bool {
+	return view.Delivery == "stage1" && (view.Projection.Provider != "" || len(view.Catalog.Servers) > 0)
+}
+
 // collectStage1MCPTargets resolves every stage-1 agent's MCP target, and the
 // targets of the agents it skips. With pathOnly, agents' work dirs are
 // resolved without being created, for a plan that must write nothing.
@@ -338,6 +306,7 @@ func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.
 		return stage1MCPTargets{}, nil
 	}
 	byKey := make(map[string]mcpTargetSpec)
+	claimants := make(map[string][]*config.Agent)
 	var (
 		skips mcpSkipGroups
 		held  []string
@@ -364,33 +333,14 @@ func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.
 		// Shared-layer servers the provider cannot receive are already out
 		// of view.Projection; say which agents start without them.
 		skips.add(mcpAgentLabel(agent), view.Skipped)
-		if view.Delivery != "stage1" {
+		if !claimsStage1MCPTarget(view) {
 			continue
 		}
-		if view.Projection.Provider == "" && len(view.Catalog.Servers) == 0 {
-			continue
-		}
-		ref := mcpConflictAgentRef{Name: agent.QualifiedName(), Implicit: agent.Implicit, MCPDir: agent.MCPDir}
 		key := view.Projection.Provider + "|" + view.Projection.Target
 		existing, ok := byKey[key]
 		if ok {
 			if existing.Projection.Hash() != view.Projection.Hash() {
-				if dir, found := mcpAgentLocalConflictCause(existing.AgentDetails, []mcpConflictAgentRef{ref}); found {
-					return stage1MCPTargets{}, fmt.Errorf(
-						"MCP target conflict at %s (%s): %s projects %s but %s projects %s — "+
-							"caused by the agent-local MCP catalog at %s, which differs from the "+
-							"provider's shared city-root catalog; give this agent its own work_dir, "+
-							"or move its MCP server definitions into the city's mcp/ directory instead",
-						view.Projection.Target,
-						view.Projection.Provider,
-						strings.Join(existing.Agents, ", "),
-						existing.Projection.Hash(),
-						agent.QualifiedName(),
-						view.Projection.Hash(),
-						dir,
-					)
-				}
-				return stage1MCPTargets{}, fmt.Errorf(
+				msg := fmt.Sprintf(
 					"MCP target conflict at %s (%s): %s projects %s but %s projects %s",
 					view.Projection.Target,
 					view.Projection.Provider,
@@ -399,18 +349,22 @@ func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.
 					agent.QualifiedName(),
 					view.Projection.Hash(),
 				)
+				if cause := mcpAgentLocalConflictCauseAmong(claimants[key], []*config.Agent{agent}); cause != "" {
+					msg += "; " + cause
+				}
+				return stage1MCPTargets{}, errors.New(msg)
 			}
 			existing.Agents = append(existing.Agents, agent.QualifiedName())
 			sort.Strings(existing.Agents)
-			existing.AgentDetails = append(existing.AgentDetails, ref)
 			byKey[key] = existing
+			claimants[key] = append(claimants[key], agent)
 			continue
 		}
+		claimants[key] = []*config.Agent{agent}
 		byKey[key] = mcpTargetSpec{
-			Root:         view.ScopeRoot,
-			Projection:   view.Projection,
-			Agents:       []string{agent.QualifiedName()},
-			AgentDetails: []mcpConflictAgentRef{ref},
+			Root:       view.ScopeRoot,
+			Projection: view.Projection,
+			Agents:     []string{agent.QualifiedName()},
 		}
 	}
 
@@ -429,6 +383,43 @@ func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.
 		out = append(out, byKey[key])
 	}
 	return stage1MCPTargets{targets: out, held: held}, nil
+}
+
+// mcpAgentLocalConflictCause names the agent-local mcp/ directory behind a
+// shared-target conflict when it is exactly one implicit agent against one
+// non-implicit agent with its own MCPDir: the implicit agent gc adds for a
+// provider claims the same scope-root file as the agent that defines its own
+// servers. Any other pairing returns "".
+func mcpAgentLocalConflictCause(a, b *config.Agent) string {
+	if a == nil || b == nil || a.Implicit == b.Implicit {
+		return ""
+	}
+	local, implicit := a, b
+	if a.Implicit {
+		local, implicit = b, a
+	}
+	if strings.TrimSpace(local.MCPDir) == "" {
+		return ""
+	}
+	return fmt.Sprintf(
+		"%s defines an agent-local MCP catalog at %s that diverges from %s — make the catalogs identical or split the targets",
+		mcpAgentLabel(local),
+		local.MCPDir,
+		mcpAgentLabel(implicit),
+	)
+}
+
+// mcpAgentLocalConflictCauseAmong returns the first agent-local conflict
+// cause between an agent of one diverging group and an agent of the other.
+func mcpAgentLocalConflictCauseAmong(left, right []*config.Agent) string {
+	for _, a := range left {
+		for _, b := range right {
+			if cause := mcpAgentLocalConflictCause(a, b); cause != "" {
+				return cause
+			}
+		}
+	}
+	return ""
 }
 
 func runStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer) error {
