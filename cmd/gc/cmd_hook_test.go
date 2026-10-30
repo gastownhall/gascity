@@ -1776,6 +1776,94 @@ esac
 	}
 }
 
+// TestCmdHookClaimImplicitCityAgentClaimsRigStoreWork: a seat of the
+// city-level implicit provider agent (no [[agent]] entry) whose routed work
+// lives only in a rig store claims it through the normal atomic claim against
+// that rig's store, instead of draining no_work after reading only the city
+// store.
+func TestCmdHookClaimImplicitCityAgentClaimsRigStoreWork(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "riga")
+	for _, dir := range []string{filepath.Join(cityDir, ".gc"), rigDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[providers.claude]
+base = "builtin:claude"
+
+[[rigs]]
+name = "riga"
+path = "rigs/riga"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	script := fmt.Sprintf(`#!/bin/sh
+printf 'pwd=%%s args=%%s\n' "$PWD" "$*" >> %q
+case "$PWD" in
+  */rigs/riga) ;;
+  *) printf '[]'; exit 0 ;;
+esac
+case "$*" in
+  *"update rg-work --claim --json"*|*"show --json rg-work"*)
+    printf '[{"id":"rg-work","status":"in_progress","assignee":"%%s","metadata":{"gc.routed_to":"claude"}}]' "${BEADS_ACTOR:-}"
+    ;;
+  *"gc.routed_to=claude"*)
+    printf '[{"id":"rg-work","status":"open","metadata":{"gc.routed_to":"claude"}}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`, logPath)
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_TEMPLATE", "claude")
+	t.Setenv("GC_ALIAS", "claude-1")
+	t.Setenv("GC_SESSION_ID", "session-claude-1")
+	t.Setenv("GC_SESSION_NAME", "test-city--claude-1")
+	t.Setenv("GC_SESSION_ORIGIN", "ephemeral")
+	t.Chdir(cityDir)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+	logData, err := os.ReadFile(logPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(%s): %v", logPath, err)
+	}
+	logText := string(logData)
+	if code != 0 {
+		t.Fatalf("cmdHookWithOptions(--claim, implicit city agent) = %d, want 0; stdout=%q stderr=%s\nbd log:\n%s", code, stdout.String(), stderr.String(), logText)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.Reason != "claimed" || result.BeadID != "rg-work" {
+		t.Fatalf("claim result = %+v, want action=work reason=claimed bead_id=rg-work; bd log:\n%s", result, logText)
+	}
+	if !strings.Contains(logText, "pwd="+rigDir+" args=update rg-work --claim --json") {
+		t.Fatalf("atomic claim did not run against the rig store leg %s; bd log:\n%s", rigDir, logText)
+	}
+	for _, line := range strings.Split(logText, "\n") {
+		if strings.Contains(line, " args=update ") && strings.Contains(line, "--assignee") {
+			t.Fatalf("hook wrote an assignee by hand instead of the atomic claim: %s\nbd log:\n%s", line, logText)
+		}
+	}
+}
+
 func TestHookSessionAgentForQueryPrefersOwnershipIdentity(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
