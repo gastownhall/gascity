@@ -1827,13 +1827,17 @@ func markdownBlockSpan(document string) (start, end int, err error) {
 	return start, end, nil
 }
 
+// walkedTops are the top-level directories walkedTrackedGoFiles walks.
+var walkedTops = []string{"internal", "cmd", "pkg", "examples", "test", "scripts", "tools"}
+
 // walkedTrackedGoFiles enumerates non-test .go files across the module when
 // the git index is unavailable (bazel runfiles trees). Best effort: hidden
-// directories and walk errors are skipped rather than fatal.
+// directories and walk errors are skipped rather than fatal. walkedTops names
+// every top-level directory that holds a tracked Go test, so a census under
+// Bazel counts what the git index counts.
 func walkedTrackedGoFiles(root string) []string {
 	var files []string
-	tops := []string{"internal", "cmd", "pkg", "examples", "test", "scripts"}
-	for _, top := range tops {
+	for _, top := range walkedTops {
 		_ = filepath.WalkDir(filepath.Join(root, top), func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return nil

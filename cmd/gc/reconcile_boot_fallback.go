@@ -71,16 +71,10 @@ func readReconcilerV2FallbackRecord(cityPath string) (reconcilerV2FallbackRecord
 // test seam.
 var v2DefaultBootProbe = v2DefaultBootRefusal
 
-// v2BootProbeOpenWork opens the city work store for the probe; a test seam.
-var v2BootProbeOpenWork = func(cityPath string) (beads.Store, error) {
-	return openStoreAtForCity(cityPath, cityPath)
-}
-
-// v2BootProbeCapabilities is C0.7's boot verdict over the probe's stores; a
-// test seam.
-var v2BootProbeCapabilities = func(sessions, graph beads.Store) error {
-	return v2CapabilityVerdict(v2ClassStoreCapabilities(sessions, graph, false))
-}
+// v2BootProbeVerdict is C0.7's boot verdict over the capabilities the probe
+// read; a test seam. It takes the capabilities, not the stores, so no raw
+// store crosses a package-level seam (storeclass).
+var v2BootProbeVerdict = v2CapabilityVerdict
 
 // v2DefaultBootRefusal opens the stores the v2 boot reads, as the runtime
 // would, and runs C0.7 and C11 over them.
@@ -88,7 +82,9 @@ var v2BootProbeCapabilities = func(sessions, graph beads.Store) error {
 // The storage boot gate it runs gets the city's event recorder: a genesis it
 // performs is the city's real genesis, and its outcome event must not be lost.
 func v2DefaultBootRefusal(cityPath, cityName string, cfg *config.City, rec events.Recorder) error {
-	work, err := v2BootProbeOpenWork(cityPath)
+	// The work store the migration and the boot census open (its seam lives
+	// with the migration engine).
+	work, err := openInfraMigrationSource(cityPath)
 	if err != nil {
 		return nil // no verdict: the runtime reports its own open
 	}
@@ -102,7 +98,7 @@ func v2DefaultBootRefusal(cityPath, cityName string, cfg *config.City, rec event
 	}
 	sessions := resolveSessionStore(routes, work, cfg, cityPath, nil)
 	graph := resolveGraphStore(routes, work, cfg, cityPath, nil)
-	if verdict := v2BootProbeCapabilities(sessions, graph); verdict != nil {
+	if verdict := v2BootProbeVerdict(v2ClassStoreCapabilities(sessions, graph, false)); verdict != nil {
 		var unread *v2CapabilityUnreadError
 		if !errors.As(verdict, &unread) {
 			return verdict

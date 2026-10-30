@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -2554,6 +2555,43 @@ func requireErrorContains(t *testing.T, err error, want string) {
 	}
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("error = %q, want substring %q", err, want)
+	}
+}
+
+// TestWalkedTopsCoverEveryTestRoot: with no git index (Bazel runfiles), the
+// census walks only walkedTops, so a top-level directory that holds a Go test
+// and is not among them goes uncounted under Bazel while the git index counts
+// it.
+func TestWalkedTopsCoverEveryTestRoot(t *testing.T) {
+	root := repositoryRoot(t)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read %s: %v", root, err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "bazel-") || slices.Contains(walkedTops, name) {
+			continue
+		}
+		var test string
+		err := filepath.WalkDir(filepath.Join(root, name), func(path string, d os.DirEntry, err error) error {
+			switch {
+			case err != nil:
+				return err
+			case d.IsDir() && strings.HasPrefix(d.Name(), "."):
+				return filepath.SkipDir
+			case !d.IsDir() && strings.HasSuffix(d.Name(), "_test.go"):
+				test = path
+				return filepath.SkipAll
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", name, err)
+		}
+		if test != "" {
+			t.Errorf("%s holds a Go test (%s), but walkedTops does not walk it: a census under Bazel would not count it", name, test)
+		}
 	}
 }
 

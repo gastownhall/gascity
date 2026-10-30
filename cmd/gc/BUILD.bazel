@@ -1054,6 +1054,7 @@ go_test(
         "beads_provider_missing_scope_stop_linux_test.go",
         "beads_provider_op_timeout_test.go",
         "beads_provider_ready_topology_test.go",
+        "beads_provider_script_fsync_stall_linux_test.go",
         "beads_provider_script_scope_lifecycle_linux_test.go",
         "beads_provider_script_shared_server_linux_test.go",
         "beads_provider_script_trace_test.go",

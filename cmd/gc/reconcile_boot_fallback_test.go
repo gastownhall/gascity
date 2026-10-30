@@ -156,13 +156,14 @@ func TestDoctorReportsTheV2Fallback(t *testing.T) {
 	}
 }
 
-// stubV2ProbeStores points the real probe at in-memory stores.
+// stubV2ProbeStores points the real probe at an in-memory work store and
+// fixes its C0.7 verdict.
 func stubV2ProbeStores(t *testing.T, work beads.Store, capabilities error) {
 	t.Helper()
-	prevOpen, prevCaps := v2BootProbeOpenWork, v2BootProbeCapabilities
-	t.Cleanup(func() { v2BootProbeOpenWork, v2BootProbeCapabilities = prevOpen, prevCaps })
-	v2BootProbeOpenWork = func(string) (beads.Store, error) { return work, nil }
-	v2BootProbeCapabilities = func(_, _ beads.Store) error { return capabilities }
+	prevOpen, prevVerdict := openInfraMigrationSource, v2BootProbeVerdict
+	t.Cleanup(func() { openInfraMigrationSource, v2BootProbeVerdict = prevOpen, prevVerdict })
+	openInfraMigrationSource = func(string) (beads.Store, error) { return work, nil }
+	v2BootProbeVerdict = func([]v2StoreCapability) error { return capabilities }
 }
 
 // TestV2DefaultBootRefusalReadsTheSameChecksTheBootDoes drives the real
@@ -202,9 +203,9 @@ func TestV2DefaultBootRefusalReadsTheSameChecksTheBootDoes(t *testing.T) {
 		}
 	})
 	t.Run("work store will not open", func(t *testing.T) {
-		prev := v2BootProbeOpenWork
-		t.Cleanup(func() { v2BootProbeOpenWork = prev })
-		v2BootProbeOpenWork = func(string) (beads.Store, error) { return nil, errors.New("dolt down") }
+		prev := openInfraMigrationSource
+		t.Cleanup(func() { openInfraMigrationSource = prev })
+		openInfraMigrationSource = func(string) (beads.Store, error) { return nil, errors.New("dolt down") }
 		if got := v2DefaultBootRefusal(t.TempDir(), "test-city", cfg, nil); got != nil {
 			t.Fatalf("probe with no store = %v, want no verdict", got)
 		}
