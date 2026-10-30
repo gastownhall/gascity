@@ -2186,6 +2186,12 @@ func terminalizeBlockedQueuedNudges(cityPath string, blocked map[string][]queued
 	return nil
 }
 
+// nudgePollerIsGoTestExecutable is ensureNudgePoller's guard against
+// re-executing a Go test binary (see nudgepoller.IsGoTestExecutable). It is a
+// variable only so a test whose child is a test binary that exits before
+// running any test can let that spawn through.
+var nudgePollerIsGoTestExecutable = nudgepoller.IsGoTestExecutable
+
 func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 	pidPath := nudgePollerPIDPath(cityPath, sessionName, agentName)
 	return withNudgePollerPIDLock(pidPath, func() error {
@@ -2205,7 +2211,7 @@ func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 		if err != nil {
 			return err
 		}
-		if nudgepoller.IsGoTestExecutable(exe) {
+		if nudgePollerIsGoTestExecutable(exe) {
 			return fmt.Errorf("refusing to start nudge poller with Go test binary %q", exe)
 		}
 		cmd := exec.Command(exe, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)

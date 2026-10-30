@@ -241,7 +241,7 @@ func TestIsGoTestExecutableRecognizesThisBinaryWhateverItIsCalled(t *testing.T) 
 
 	// A name-based guard would have to find ".test" in the path. A hard link
 	// is the same file under a different name, so it isolates the name from
-	// the identity: this must still be recognised while called api-tests.
+	// the identity: this must still be recognized while called api-tests.
 	//
 	// The link is cleaned up leniently rather than through t.TempDir, because
 	// it names the running executable — Windows holds that file open, and a
@@ -251,7 +251,7 @@ func TestIsGoTestExecutableRecognizesThisBinaryWhateverItIsCalled(t *testing.T) 
 		t.Fatalf("creating link dir: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(linkDir) })
-	linked := filepath.Join(linkDir, "api-tests"+filepath.Ext(self))
+	linked := filepath.Join(linkDir, "api-tests"+executableSuffix())
 	if err := os.Link(self, linked); err != nil {
 		t.Skipf("cannot hard-link this test binary (needs the same volume): %v", err)
 	}
@@ -274,20 +274,26 @@ func TestIsGoTestExecutableLeavesProductionBinariesAlone(t *testing.T) {
 	t.Cleanup(func() { runningGoTest = orig })
 	runningGoTest = func() bool { return false }
 
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatalf("os.Executable: %v", err)
-	}
 	// Name the file something a production binary would be called, so the
 	// fallback naming rules cannot be what decides this.
-	production := filepath.Join(t.TempDir(), "gc"+filepath.Ext(self))
+	production := filepath.Join(t.TempDir(), "gc"+executableSuffix())
 	if err := os.WriteFile(production, []byte("not really a binary"), 0o700); err != nil {
 		t.Fatalf("writing stand-in: %v", err)
 	}
 	if IsGoTestExecutable(production) {
 		t.Fatalf("IsGoTestExecutable(%q) = true outside a test binary; pollers could never start", production)
 	}
-	_ = self
+}
+
+// executableSuffix returns the extension this platform gives a program: ".exe"
+// on Windows and none on Unix. The tests above name their files with it rather
+// than with this test binary's own extension, which is ".exe" on Windows but
+// ".test" on Unix: the very marker those names must not carry.
+func executableSuffix() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
 }
 
 // TestRunningGoTestDetectsThisBinary pins the signal the guard now depends on.
