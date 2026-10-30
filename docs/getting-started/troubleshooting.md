@@ -599,6 +599,16 @@ exported in the calling shell still takes precedence over the file, and
 `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1` suppresses provider credentials from both
 sources.
 
+The service file that a reinstall replaces is the last fallback. A key set
+there, such as an `Environment=` line you added to the unit by hand, is kept
+when no other source sets it and the key passes the same check. Credentials are
+the exception: a provider credential, `CLAUDE_CODE_OAUTH_TOKEN` or
+`GC_DOLT_PASSWORD` in the old file is not kept, so a reinstall from a shell
+without it still removes it from the service file. Keep a credential in
+`secrets.env` instead. `gc supervisor install` prints on stderr the keys of the
+old file that it does not keep. To keep one of those, list it in
+`GC_SUPERVISOR_ENV` in the shell that runs the install.
+
 The same file is the durable home for the beads connection-pool deadlines.
 `gc` reads `BEADS_DOLT_POOL_READ_TIMEOUT` and `BEADS_DOLT_POOL_WRITE_TIMEOUT`
 for its own store connections only from its process environment; the

@@ -1981,6 +1981,198 @@ func supervisorSecretsEnvFileEntries() map[string]string {
 	return entries
 }
 
+// supervisorServiceFileEnv returns the environment variables a supervisor
+// service file sets: the EnvironmentVariables dict of a launchd plist (ext
+// ".plist") or the Environment= assignments of a systemd unit (ext
+// ".service"). Any other ext, or a file it cannot parse, yields nil.
+func supervisorServiceFileEnv(ext string, data []byte) map[string]string {
+	switch ext {
+	case ".plist":
+		dec := xml.NewDecoder(bytes.NewReader(data))
+		for {
+			tok, err := dec.Token()
+			if err != nil {
+				return nil
+			}
+			start, ok := tok.(xml.StartElement)
+			if !ok || start.Name.Local != "dict" {
+				continue
+			}
+			root, err := parsePlistDict(dec)
+			if err != nil {
+				return nil
+			}
+			env, ok := root["EnvironmentVariables"]
+			if !ok || env.dict == nil {
+				return nil
+			}
+			out := make(map[string]string, len(env.dict))
+			for k, v := range env.dict {
+				if v.dict != nil {
+					continue
+				}
+				out[k] = v.text
+			}
+			return out
+		}
+	case ".service":
+		scanner := bufio.NewScanner(bytes.NewReader(data))
+		out := make(map[string]string)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if !strings.HasPrefix(line, "Environment=") {
+				continue
+			}
+			rest := strings.TrimPrefix(line, "Environment=")
+			var words []string
+			var current strings.Builder
+			inDoubleQuote := false
+			inSingleQuote := false
+			for i := 0; i < len(rest); i++ {
+				c := rest[i]
+				switch {
+				case inDoubleQuote:
+					current.WriteByte(c)
+					switch {
+					case c == '\\' && i+1 < len(rest):
+						i++
+						current.WriteByte(rest[i])
+					case c == '"':
+						inDoubleQuote = false
+					}
+				case inSingleQuote:
+					current.WriteByte(c)
+					if c == '\'' {
+						inSingleQuote = false
+					}
+				case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+					if current.Len() > 0 {
+						words = append(words, current.String())
+						current.Reset()
+					}
+				default:
+					current.WriteByte(c)
+					switch c {
+					case '"':
+						inDoubleQuote = true
+					case '\'':
+						inSingleQuote = true
+					}
+				}
+			}
+			if current.Len() > 0 {
+				words = append(words, current.String())
+			}
+			for _, word := range words {
+				if len(word) >= 2 && strings.HasPrefix(word, "\"") && strings.HasSuffix(word, "\"") {
+					unquoted, err := strconv.Unquote(word)
+					if err != nil {
+						unquoted = word[1 : len(word)-1]
+					}
+					k, v, ok := strings.Cut(unquoted, "=")
+					if !ok || k == "" {
+						continue
+					}
+					out[k] = v
+					continue
+				}
+				if len(word) >= 2 && strings.HasPrefix(word, "'") && strings.HasSuffix(word, "'") {
+					unquoted := word[1 : len(word)-1]
+					k, v, ok := strings.Cut(unquoted, "=")
+					if !ok || k == "" {
+						continue
+					}
+					out[k] = v
+					continue
+				}
+				k, v, ok := strings.Cut(word, "=")
+				if !ok || k == "" {
+					continue
+				}
+				if len(v) >= 2 && strings.HasPrefix(v, "\"") && strings.HasSuffix(v, "\"") {
+					if u, err := strconv.Unquote(v); err == nil {
+						v = u
+					}
+				} else if len(v) >= 2 && strings.HasPrefix(v, "'") && strings.HasSuffix(v, "'") {
+					v = v[1 : len(v)-1]
+				}
+				out[k] = v
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			return nil
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// supervisorServiceSecretEnvKeys are the persist-allowlisted keys that hold a
+// secret rather than a setting. Like provider credentials, they are not
+// carried over from a previous service file.
+var supervisorServiceSecretEnvKeys = map[string]bool{
+	"CLAUDE_CODE_OAUTH_TOKEN": true,
+	"GC_DOLT_PASSWORD":        true,
+}
+
+// isSupervisorServiceSecretEnv reports whether key holds a credential: a
+// provider credential or an allowlisted secret.
+func isSupervisorServiceSecretEnv(key string) bool {
+	return supervisorServiceSecretEnvKeys[key] || isProviderCredentialEnv(key)
+}
+
+// carryOverSupervisorServiceEnv adds to extra each entry of previous (the
+// environment of the service file this install replaces) that no other tier
+// set, when its key is named in GC_SUPERVISOR_ENV, or is on the persist
+// allowlist (shouldPersistSupervisorEnv) and is not a credential. A
+// credential in the old file was usually copied there from the shell of an
+// earlier install, so carrying it would keep it after a reinstall from a
+// shell without it; secrets.env and GC_SUPERVISOR_ENV are where a credential
+// is kept on purpose. The fixed keys are rendered by the template, and every
+// tier treats an empty value as unset, so neither is carried nor reported. It
+// returns the merged list sorted by name and the sorted names of previous
+// entries it did not carry, so the install can say so.
+func carryOverSupervisorServiceEnv(extra []supervisorServiceEnvVar, previous map[string]string) ([]supervisorServiceEnvVar, []string) {
+	extraSet := make(map[string]bool, len(extra))
+	for _, v := range extra {
+		extraSet[v.Name] = true
+	}
+	optInSet := make(map[string]bool)
+	for _, key := range supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV")) {
+		optInSet[key] = true
+	}
+
+	merged := make([]supervisorServiceEnvVar, len(extra))
+	copy(merged, extra)
+
+	prevKeys := make([]string, 0, len(previous))
+	for k := range previous {
+		prevKeys = append(prevKeys, k)
+	}
+	sort.Strings(prevKeys)
+
+	var dropped []string
+	for _, key := range prevKeys {
+		val := previous[key]
+		if supervisorServiceFixedEnvKeys[key] || extraSet[key] || val == "" {
+			continue
+		}
+		if !supervisorServiceEnvNameRE.MatchString(key) ||
+			(!optInSet[key] && (!shouldPersistSupervisorEnv(key) || isSupervisorServiceSecretEnv(key))) {
+			dropped = append(dropped, key)
+			continue
+		}
+		merged = append(merged, supervisorServiceEnvVar{Name: key, Value: val})
+	}
+
+	sort.Slice(merged, func(i, j int) bool {
+		return merged[i].Name < merged[j].Name
+	})
+
+	return merged, dropped
+}
+
 func supervisorServiceExplicitEnvKeys(raw string) []string {
 	fields := strings.Fields(strings.NewReplacer(",", " ", ";", " ").Replace(raw))
 	out := make([]string, 0, len(fields))
@@ -2477,19 +2669,40 @@ func warnSupervisorSystemdWarmRefreshPreservedUnit(stderr io.Writer, service str
 	fmt.Fprintf(stderr, "gc supervisor install: leaving refreshed systemd unit %s in place after warm-refresh failure; not restoring the previous unit because it may lack KillMode=process. Resolve the error, then run 'systemctl --user start %s' or rerun 'gc supervisor install'.\n", service, service) //nolint:errcheck // best-effort stderr
 }
 
+// carryOverSupervisorServiceFile merges the environment of the service file
+// this install replaces into data.ExtraEnv as the lowest tier (see
+// carryOverSupervisorServiceEnv), so a value an operator pinned in the unit or
+// plist survives a reinstall from a shell that lacks it, and names on stderr
+// the previous keys the gate does not keep. A credential that secrets.env
+// could keep gets its own line that says so.
+func carryOverSupervisorServiceFile(data *supervisorServiceData, kind, path string, existing []byte, stderr io.Writer) {
+	previous := supervisorServiceFileEnv(filepath.Ext(path), existing)
+	if len(previous) == 0 {
+		return
+	}
+	var dropped, credentials, others []string
+	data.ExtraEnv, dropped = carryOverSupervisorServiceEnv(data.ExtraEnv, previous)
+	for _, key := range dropped {
+		if isSupervisorServiceSecretEnv(key) && shouldPersistSupervisorEnv(key) {
+			credentials = append(credentials, key)
+		} else {
+			others = append(others, key)
+		}
+	}
+	if len(credentials) > 0 {
+		fmt.Fprintf(stderr, "gc supervisor install: credentials not carried over from the previous %s: %s (keep one in %s, or name it in GC_SUPERVISOR_ENV)\n", kind, strings.Join(credentials, ", "), supervisorSecretsEnvFilePath()) //nolint:errcheck // best-effort stderr
+	}
+	if len(others) > 0 {
+		fmt.Fprintf(stderr, "gc supervisor install: not carried over from the previous %s: %s (name a key in GC_SUPERVISOR_ENV to keep it)\n", kind, strings.Join(others, ", ")) //nolint:errcheck // best-effort stderr
+	}
+}
+
 func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Writer) int {
 	sweepStaleIsolatedSupervisorServices(stderr)
-	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, data)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc supervisor install: rendering plist: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
 	path := supervisorLaunchdPlistPath()
 	legacyPresent := legacySupervisorTargetsCurrentHome(legacySupervisorLaunchdPlistPath())
 	existing, err := os.ReadFile(path)
 	hadCurrent := err == nil
-	contentUnchanged := hadCurrent && string(existing) == content
 	if err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(stderr, "gc supervisor install: reading existing plist: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -2498,6 +2711,14 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 		!checkSupervisorInstallBinaryGuard("plist", path, supervisorLaunchdPlistGCPath(string(existing)), data.GCPath, stdout, stderr) {
 		return 1
 	}
+	carryOverSupervisorServiceFile(data, "plist", path, existing, stderr)
+
+	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, data)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc supervisor install: rendering plist: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	contentUnchanged := hadCurrent && string(existing) == content
 	if contentUnchanged && supervisorAliveHook() != 0 {
 		fmt.Fprintf(stdout, "Installed launchd service: %s\n", path) //nolint:errcheck // best-effort stdout
 		return 0
@@ -2653,6 +2874,7 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 		return 1
 	}
 
+	carryOverSupervisorServiceFile(data, "unit", path, existing, stderr)
 	content, err := renderSupervisorTemplate(supervisorSystemdTemplate, data)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor install: rendering unit: %v\n", err) //nolint:errcheck // best-effort stderr
