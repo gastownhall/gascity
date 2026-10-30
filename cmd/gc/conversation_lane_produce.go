@@ -84,22 +84,32 @@ type cliLaneNoticeRoute struct {
 }
 
 // routeCLILaneNotice is Rule 1, the one routing rule of every CLI notice:
-// when [ops] authoritative lists message, off a worker site, it reads n's
-// target row in the city's sessions-class store (cliLaneNoticeRow) and
-// proposes the notice there when a lane serves the session (cliLaneProduce).
-// It returns handled false, having written nothing, when the lane is off,
-// the target has no row, or no lane serves the session: the producer then
-// takes its legacy path. A city store that did not open, and a row the read
-// could not answer for, are refusals (cliLaneRefusal), handled true.
+// when the lane executes message over the city's sessions-class store
+// (cliLaneExecutesMessage), off a worker site, it reads n's target row there
+// (cliLaneNoticeRow) and proposes the notice when a lane serves the session
+// (cliLaneProduce). It returns handled false, having written nothing, when
+// the lane is off, the target has no row, or no lane serves the session: the
+// producer then takes its legacy path. A city store that did not open while
+// [ops] authoritative lists message, and a row the read could not answer
+// for, are refusals (cliLaneRefusal), handled true; with the list unset a
+// city store that did not open keeps the legacy path, since the default
+// cannot be decided without it.
 func routeCLILaneNotice(n cliLaneNoticeRoute) (cliLaneProduced, error) {
 	cfg, cityPath := n.target.cfg, n.target.cityPath
-	if !cliLaneExecutesMessage(cfg) || onWorkerSite(cityPath) {
+	if cliLaneMessageOff(cfg) || onWorkerSite(cityPath) {
 		return cliLaneProduced{}, nil
 	}
 	if isNilBeadStore(n.city) {
+		if !cliLaneMessageListed(cfg) {
+			return cliLaneProduced{}, nil
+		}
 		return cliLaneProduced{handled: true}, cliLaneRefusal("the city store did not open")
 	}
-	info, found, err := cliLaneNoticeRow(n.target, cliSessionStore(n.city, cfg, cityPath))
+	sessions := cliSessionStore(n.city, cfg, cityPath)
+	if !cliLaneExecutesMessage(cfg, sessions) {
+		return cliLaneProduced{}, nil
+	}
+	info, found, err := cliLaneNoticeRow(n.target, sessions)
 	if err != nil {
 		return cliLaneProduced{handled: true}, cliLaneRefusal(err)
 	}

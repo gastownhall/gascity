@@ -157,10 +157,10 @@ func TestPlannerNoticeLaneForFollowsTheSwitch(t *testing.T) {
 // controller starts over controllerState.
 func TestPlannerNoticeLaneForFindsTheHostFromBothReconcilers(t *testing.T) {
 	f := newLaneFixture(t)
-	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Ops: config.OpsConfig{Authoritative: []string{"message"}}}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Ops: config.OpsConfig{Authoritative: config.OpsKinds("message")}}
 	cs := &controllerState{cfg: cfg, cityPath: f.dir, cityName: "test-city", cityBeadStore: beads.NewCachingStore(f.store, nil)}
 	cr := &CityRuntime{cityName: "test-city", cityPath: f.dir, cfg: cfg, cs: cs}
-	h := newConversationLaneHost(cs, cfg.Ops.Authoritative, sessionpkg.StopRequestsLive)
+	h := newConversationLaneHost(cs, cfg.Ops.AuthoritativeKinds(), sessionpkg.StopRequestsLive)
 	h.state = laneHostStateRunning
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -1040,7 +1040,7 @@ func TestRunNudgeBackstopNudgesDirectlyWithTheLaneOff(t *testing.T) {
 func TestRunNudgeBackstopLeavesNoticesDirectUnderTheContentGates(t *testing.T) {
 	f := newLaneFixture(t)
 	f.cfg.Ops = config.OpsConfig{ContentMode: "require", ControlMode: "require", LifecycleMode: "require"}
-	newNoticeLaneHost(t, f, f.cfg.Ops.Authoritative...)
+	newNoticeLaneHost(t, f, f.cfg.Ops.AuthoritativeKinds()...)
 	pred := noticeTestBackstop{target: backstopTarget{ID: "wb-1"}, text: "claim wb-1"}
 	var out bytes.Buffer
 	runNoticeBackstop(f, backstopRows(t, f, 0, f.clk.Now().Add(-time.Hour)), pred, &out)
