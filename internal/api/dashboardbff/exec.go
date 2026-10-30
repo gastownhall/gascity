@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/searchpath"
 )
 
 // Output caps and concurrency, mirroring the BFF's exec-core.ts contract.
@@ -184,6 +186,20 @@ func cleanEnv() []string {
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_ALLOW_PROTOCOL=none",
 	}
+}
+
+// cleanEnvBasePath is the fixed system base of the subprocess search path.
+const cleanEnvBasePath = "/usr/local/bin:/usr/bin:/bin"
+
+// cleanEnvPath returns the subprocess PATH: adminPath verbatim when set
+// (operator override), otherwise a deterministic, user-aware search order
+// built from cleanEnvBasePath. An empty home adds no home-derived entries.
+// The ambient process PATH is never consulted.
+func cleanEnvPath(adminPath, home, goos string) string {
+	if adminPath != "" {
+		return adminPath
+	}
+	return searchpath.ExpandPath(home, goos, cleanEnvBasePath)
 }
 
 // Terminal-output sanitizer, ported from exec.ts. Strips OSC sequences, CSI
