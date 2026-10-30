@@ -141,7 +141,7 @@ func TestMailReadCancelsItsNotice(t *testing.T) {
 	}
 	// Without message listed the provider is not wrapped.
 	c := newCLILaneCity(t)
-	c.cfg.Ops.Authoritative = nil
+	c.cfg.Ops.Authoritative = config.OpsKinds()
 	inner := mail.NewFake()
 	if p := withMailNoticeWithdrawal(inner, c.store, c.cfg, nil); p != mail.Provider(inner) {
 		t.Fatalf("provider wrapped with message unlisted: %T", p)
@@ -202,7 +202,7 @@ func TestMailNoticeWithdrawalKeepsTheHandoffArchive(t *testing.T) {
 		store := beads.NewMemStore()
 		cfg := &config.City{}
 		if listed {
-			cfg.Ops.Authoritative = []string{"message"}
+			cfg.Ops.Authoritative = config.OpsKinds("message")
 		}
 		mp := withMailNoticeWithdrawal(beadmail.New(store), store, cfg, io.Discard)
 		auto, err := store.Create(beads.Bead{
@@ -470,7 +470,7 @@ func TestHookClaimContinuationUnderLaneProposesANotice(t *testing.T) {
 // refused.
 func TestCLIProducersWithoutLaneKeepLegacy(t *testing.T) {
 	c := newCLILaneCity(t)
-	c.cfg.Ops.Authoritative = nil
+	c.cfg.Ops.Authoritative = config.OpsKinds()
 	c.target.cfg = c.cfg
 	if prod, err := routeCLILaneNotice(cliLaneNoticeRoute{
 		target: c.target, sp: c.sp,
@@ -755,7 +755,7 @@ func TestDoSlingNudgeUnderLaneResolvesARigBeadsSessionInTheCityStore(t *testing.
 		t.Run(tc.name, func(t *testing.T) {
 			c := newCLILaneCity(t)
 			if !tc.listed {
-				c.cfg.Ops.Authoritative = nil
+				c.cfg.Ops.Authoritative = config.OpsKinds()
 			}
 			c.cfg.Workspace.Name = "test-city"
 			writeSlingTestCity(t, c.dir, "[workspace]\nname = \"test-city\"\n")

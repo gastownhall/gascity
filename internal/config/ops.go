@@ -63,9 +63,15 @@ type OpsConfig struct {
 	// effect. A change takes effect at the next process start.
 	LifecycleMode string `toml:"lifecycle,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
 	// Authoritative lists the op kinds the conversation lane executes instead
-	// of their legacy path. The default is empty, and message is not on by
-	// default anywhere yet. This build accepts message, interrupt and respond.
-	// Experimental: listing message switches on the producers that write lane
+	// of their legacy path. This build accepts message, interrupt and respond.
+	// Left unset, a city whose sessions store is SQLite and applies guarded
+	// batches (a SQLite storage split) runs all three on the lane; any other
+	// city keeps their legacy delivery in this release. An explicit list,
+	// the empty list included, always wins: authoritative = [] on such a
+	// city keeps legacy delivery for one release, and is warned, since
+	// legacy delivery (the nudge queue, its pollers and the supervisor's
+	// dispatcher) is removed in a later release.
+	// Listing message switches on the producers that write lane
 	// ops, whose messages the lane host then delivers: the API's POST
 	// /v0/city/{cityName}/session/{id}/ops (a T3 Code environment or an
 	// operator proposing a message) and, for sessions a lane host can type
@@ -135,7 +141,31 @@ type OpsConfig struct {
 	// A listed kind needs a sessions store with guarded batches. A change
 	// takes effect at the controller's next start; gc session nudge and gc
 	// session submit read it at once.
-	Authoritative []string `toml:"authoritative,omitempty" jsonschema:"enum=message,enum=interrupt,enum=respond"`
+	Authoritative *[]string `toml:"authoritative,omitempty" jsonschema:"enum=message,enum=interrupt,enum=respond"`
+}
+
+// OpsKinds is an [ops] authoritative list set to kinds; with none it is the
+// explicit empty list.
+func OpsKinds(kinds ...string) *[]string {
+	list := append([]string{}, kinds...)
+	return &list
+}
+
+// AuthoritativeSet reports whether [ops] authoritative is set, an explicit
+// empty list included. Authoritative is a pointer so that unset (nil) stays
+// distinct from an explicit [] through decoding, fragment composition and
+// encoding: gc config show and a city.toml rewrite keep the rollback. Read
+// it through AuthoritativeSet and AuthoritativeKinds.
+func (o OpsConfig) AuthoritativeSet() bool {
+	return o.Authoritative != nil
+}
+
+// AuthoritativeKinds is the [ops] authoritative list as set, nil when unset.
+func (o OpsConfig) AuthoritativeKinds() []string {
+	if o.Authoritative == nil {
+		return nil
+	}
+	return *o.Authoritative
 }
 
 // laneAuthoritativeKinds are the op kinds this build's conversation lane can
@@ -144,7 +174,7 @@ var laneAuthoritativeKinds = []opjournal.Kind{opjournal.KindMessage, opjournal.K
 
 // LaneExecutes reports whether [ops] authoritative lists kind.
 func (o OpsConfig) LaneExecutes(kind string) bool {
-	return slices.Contains(o.Authoritative, kind)
+	return slices.Contains(o.AuthoritativeKinds(), kind)
 }
 
 // validateOpsModes rejects an out-of-enum value in any [ops] gate, and an
@@ -170,7 +200,7 @@ func validateOpsModes(o OpsConfig) error {
 			return fmt.Errorf("%s: %w", f.key, err)
 		}
 	}
-	return validateOpsAuthoritative(o.Authoritative)
+	return validateOpsAuthoritative(o.AuthoritativeKinds())
 }
 
 // validateOpsAuthoritative checks [ops] authoritative entry by entry. Entries

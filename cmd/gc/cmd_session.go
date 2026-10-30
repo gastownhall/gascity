@@ -2864,7 +2864,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 	}
 
 	gateCfg, gateErr := loadCityConfig(cityPath, io.Discard)
-	if gateErr == nil && cliLaneExecutesMessage(gateCfg) {
+	if gateErr == nil && cliLaneExecutesMessageAt(cityPath, gateCfg) {
 		return submitSessionLane(&sessionSubmitLane{
 			cityPath: cityPath, target: target, message: message, intent: intent, key: key,
 			asJSON: jsonOutput, stdout: stdout, stderr: stderr,

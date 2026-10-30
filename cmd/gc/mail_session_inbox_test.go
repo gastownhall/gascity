@@ -30,7 +30,7 @@ func TestSelfReadsAgreeOnTheSessionInbox(t *testing.T) {
 	for name, authoritative := range map[string][]string{"message unlisted": nil, "message listed": {"message"}} {
 		t.Run(name, func(t *testing.T) {
 			cfg := &config.City{}
-			cfg.Ops.Authoritative = authoritative
+			cfg.Ops.Authoritative = config.OpsKinds(authoritative...)
 			selfReadsAgreeOnTheSessionInbox(t, func(p mail.Provider, store beads.Store) mail.Provider {
 				return withMailNoticeWithdrawal(p, store, cfg, io.Discard)
 			})

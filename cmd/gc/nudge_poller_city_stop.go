@@ -91,6 +91,43 @@ func stopCityNudgePollers(cityPath string) error {
 	return errors.Join(errs...)
 }
 
+// liveCityNudgePollers counts cityPath's live nudge pollers: the PID files
+// under the city's pollers directory whose PID is live with this city's
+// poller command line for that file, as stopCityNudgePollers finds them. It
+// signals nothing and takes no lock. A missing pollers directory counts
+// none.
+func liveCityNudgePollers(cityPath string) (int, error) {
+	pollersDir := citylayout.RuntimePath(cityPath, "nudges", "pollers")
+	entries, err := os.ReadDir(pollersDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("reading nudge pollers dir: %w", err)
+	}
+	live := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".pid") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(pollersDir, entry.Name()))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return live, fmt.Errorf("read nudge poller pid %q: %w", entry.Name(), err)
+		}
+		var pid int
+		if n, parseErr := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); parseErr != nil || n != 1 || pid <= 0 {
+			continue
+		}
+		if pidutil.AliveWithCmdline(pid, nudgepoller.FileStemMatcher(cityPath, strings.TrimSuffix(entry.Name(), ".pid"))) {
+			live++
+		}
+	}
+	return live, nil
+}
+
 // stopCityNudgePoller terminates the poller pidPath names, if it is live and
 // is cityPath's poller for that file. It holds the per-file lock the spawn
 // and lease paths take, so no replacement poller starts for the same key
