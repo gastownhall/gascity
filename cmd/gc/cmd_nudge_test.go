@@ -2959,6 +2959,108 @@ func TestTryDeliverQueuedNudgesByPollerKeepsFreshNudgeQueuedWhileBusy(t *testing
 	}
 }
 
+// TestTryDeliverQueuedNudgesByPollerHoldsStarvedNudgeWhileTurnRuns guards
+// the turn look of the starvation bypass (ga-atd7r2): a starved item is held
+// — not delivered — while the leaf's turn reading says a turn runs, or the
+// look itself fails (a look failure is never an idle reading), is fenced to
+// another still-live session, or has an earlier deferral still in the
+// future. Held means untouched: no provider call, no claim, no attempt, and
+// deliver_after unchanged.
+func TestTryDeliverQueuedNudgesByPollerHoldsStarvedNudgeWhileTurnRuns(t *testing.T) {
+	type setup struct {
+		name       string
+		running    bool
+		lookErr    error
+		otherFence bool
+		deferIt    bool
+	}
+	cases := []setup{
+		{name: "turn running", running: true},
+		{name: "turn look fails", lookErr: errors.New("capture failed")},
+		{name: "fenced to another still-live session", otherFence: true},
+		{name: "earlier deferral still in the future", deferIt: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			dir := t.TempDir()
+			createdAt := time.Now().Add(-10 * time.Minute)
+			item := newQueuedNudge("worker", "review the deploy logs", createdAt)
+			if tc.otherFence {
+				item.SessionID = "bd-some-other-session"
+			}
+			if tc.deferIt {
+				item.DeliverAfter = time.Now().Add(30 * time.Second).UTC()
+			}
+			if err := enqueueQueuedNudge(dir, item); err != nil {
+				t.Fatalf("enqueueQueuedNudge: %v", err)
+			}
+
+			store := openNudgeBeadStore(dir)
+			fake := runtime.NewFake()
+			sp := &liveTurnProvider{Fake: fake, running: tc.running, err: tc.lookErr}
+			mgr := newSessionManagerWithConfig(dir, store, sp, nil)
+			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			busyAt := time.Now()
+			fake.Activity = map[string]time.Time{info.SessionName: busyAt}
+
+			target := nudgeTarget{
+				cityPath:    dir,
+				agent:       config.Agent{Name: "worker"},
+				sessionID:   info.ID,
+				resolved:    &config.ResolvedProvider{Name: "codex"},
+				sessionName: info.SessionName,
+			}
+			obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &busyAt}
+
+			delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, sp, time.Hour, obs)
+			if err != nil || delivered {
+				t.Fatalf("delivered %t err %v, want the starved item held", delivered, err)
+			}
+			if got := fake.CountCalls("Nudge", info.SessionName) + fake.CountCalls("NudgeNow", info.SessionName); got != 0 {
+				t.Fatalf("provider calls = %d, want 0", got)
+			}
+			state, err := nudgequeue.LoadState(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(state.Pending) != 1 || len(state.InFlight) != 0 || len(state.Dead) != 0 {
+				t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 1/0/0", len(state.Pending), len(state.InFlight), len(state.Dead))
+			}
+			pending := state.Pending[0]
+			if pending.Attempts != 0 {
+				t.Fatalf("attempts = %d, want 0", pending.Attempts)
+			}
+			if tc.deferIt {
+				if !pending.DeliverAfter.Equal(item.DeliverAfter) {
+					t.Fatalf("deliver_after = %v, want the deferral's %v untouched", pending.DeliverAfter, item.DeliverAfter)
+				}
+			} else if !pending.DeliverAfter.Equal(item.DeliverAfter) {
+				t.Fatalf("deliver_after = %v, want the enqueue's %v unchanged", pending.DeliverAfter, item.DeliverAfter)
+			}
+			if tc.otherFence && pending.SessionID != item.SessionID {
+				t.Fatalf("fence = %q, want %q: a sibling fence is not re-taken", pending.SessionID, item.SessionID)
+			}
+			// Only a turn-capable leaf with a claimable, due, starved item
+			// takes a look at all; the fenced and deferred cases never reach
+			// one.
+			wantLooks := 1
+			if tc.otherFence || tc.deferIt {
+				wantLooks = 0
+			}
+			if sp.turnLooks != wantLooks {
+				t.Fatalf("turn looks = %d, want %d", sp.turnLooks, wantLooks)
+			}
+		})
+	}
+}
+
 // TestTryDeliverQueuedNudgesByPollerAcksDeliveredUnobservedInsteadOfRetrying
 // guards ga-civwyz: when the provider reports
 // tmux.ErrNudgeSubmitDeliveredUnobserved (submit Enter delivered, composer
