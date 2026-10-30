@@ -144,6 +144,12 @@ jobs:
       - name: Summarize findings and enforce reachable vulnerability policy
         run: |
           set -uo pipefail
+          # Actions runs this under "bash -e", and -uo pipefail does not clear it: only
+          # +e does. Without it a nonzero govulncheck aborts the script on the call
+          # below, so the summary and the report are lost exactly when there is a
+          # finding to read. The job still fails with govulncheck's own status via the
+          # final exit.
+          set +e
           # Deliberately one command doing both jobs. govulncheck already exits 3 only
           # when a vulnerable symbol is genuinely called, and 0 when the findings are
           # merely imported or merely required, so the policy this repo wants is the
