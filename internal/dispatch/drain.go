@@ -1096,7 +1096,9 @@ func markRemainingSharedRowsSkipped(manifest *drainManifest, start int) {
 // The unit convoy recorded on each row of the closing manifest is retired
 // first. Nothing else closes one: a drain never closes the source members its
 // units track, so convoy autoclose never fires for them. A failed retirement
-// leaves the drain open for the next pass to retry.
+// leaves the drain open for the next pass to retry, and a unit already closed
+// is left as it is, so the retry rewrites none of the units an earlier pass
+// retired.
 func closeDrainControl(store beads.Store, drainID string, metadata map[string]string, action string, opts ProcessOptions) (ControlResult, error) {
 	raw := metadata[drainManifestMetadataKey]
 	if strings.TrimSpace(raw) != "" {
@@ -1109,12 +1111,19 @@ func closeDrainControl(store beads.Store, drainID string, metadata map[string]st
 			if unitID == "" {
 				continue
 			}
+			unit, err := store.Get(unitID)
+			if err != nil {
+				return ControlResult{}, fmt.Errorf("%s: loading drain unit convoy %s to retire it: %w", drainID, unitID, err)
+			}
+			if unit.Status == "closed" {
+				continue
+			}
 			outcome := drainUnitRetiredOutcome(row.Status)
 			if err := updateMetadataAndClose(store, unitID, map[string]string{
 				beadmeta.OutcomeMetadataKey: outcome,
 				"close_reason":              drainUnitRetiredCloseReason,
 			}); err != nil {
-				return ControlResult{}, err
+				return ControlResult{}, fmt.Errorf("%s: retiring drain unit convoy %s: %w", drainID, unitID, err)
 			}
 			opts.tracef("process-control bead=%s kind=drain retire-unit unit=%s outcome=%s", drainID, unitID, outcome)
 		}
