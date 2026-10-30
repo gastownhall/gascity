@@ -1209,8 +1209,9 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 // delivered nothing. It mirrors dispatchAllQueuedNudges' (nudge_dispatcher.go),
 // gate included: "not-delivered" means this target HAD work it could claim and
 // still got nothing this tick -- most commonly
-// tryDeliverQueuedNudgesByPoller's quiescence gate rejecting a continuously
-// busy session. A running session with nothing it may claim (nothing queued,
+// tryDeliverQueuedNudgesByPoller's quiescence gate holding a busy session's
+// due item until it has waited queuedNudgeStarvedAfter, and then until the
+// leaf's turn look (when it takes one) says no turn runs. A running session with nothing it may claim (nothing queued,
 // or only items fenced to a live sibling) is the dispatcher's separate
 // "not-matched" class and is deliberately not counted: the poll loop never
 // exits while the session runs, so counting it would turn this into a tick
@@ -2457,19 +2458,19 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	if !pollerSessionIdleEnough(target, sp, quiescence, obs) {
 		// The activity clock says busy. A fresh item waits for it to quiet;
 		// a starved one waits only for the leaf's turn look to say idle, and
-		// then this pass is the idle boundary.
+		// then this pass is the idle boundary. A leaf with no turn reading
+		// takes the starved item through its default delivery, which defers
+		// a busy session itself.
 		starved, err := queuedNudgeStarvedForTarget(target, time.Now())
 		if err != nil || !starved {
 			return false, err
 		}
-		tr, ok := runtime.TurnRunningFor(sp, target.sessionName)
-		if !ok {
-			return false, nil
+		if tr, ok := runtime.TurnRunningFor(sp, target.sessionName); ok {
+			if running, lookErr := tr.TurnRunning(target.sessionName); lookErr != nil || running {
+				return false, nil
+			}
+			delivery = worker.NudgeDeliveryImmediate
 		}
-		if running, lookErr := tr.TurnRunning(target.sessionName); lookErr != nil || running {
-			return false, nil
-		}
-		delivery = worker.NudgeDeliveryImmediate
 	}
 	items, err := claimDueQueuedNudgeBatchForTarget(target.cityPath, target, time.Now())
 	if err != nil || len(items) == 0 {

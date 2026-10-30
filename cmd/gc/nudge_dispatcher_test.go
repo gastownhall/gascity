@@ -280,6 +280,60 @@ func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
 	}
 }
 
+// TestDispatchAllQueuedNudgesDeliversStarvedNudgeToBusySession guards
+// ga-atd7r2 through the supervisor pass: a session whose activity clock reads
+// busy on every tick gets its starved item at the turn look's idle boundary,
+// and the pass records no not-delivered skip for it.
+func TestDispatchAllQueuedNudgesDeliversStarvedNudgeToBusySession(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store.Store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.Activity = map[string]time.Time{info.SessionName: time.Now()}
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", time.Now().Add(-10*time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	snapshot, err := loadSessionBeadSnapshot(store.Store)
+	if err != nil {
+		t.Fatalf("loadSessionBeadSnapshot: %v", err)
+	}
+	sp := &turnLookProvider{Fake: fake}
+	var debug strings.Builder
+
+	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), store.Store, store.Store, sp, snapshot, &debug)
+	if err != nil {
+		t.Fatalf("dispatchAllQueuedNudges: %v", err)
+	}
+	if delivered != 1 {
+		t.Fatalf("delivered = %d, want 1 (debug %q)", delivered, debug.String())
+	}
+	if strings.Contains(debug.String(), "not-delivered") {
+		t.Fatalf("debug = %q, want no not-delivered skip", debug.String())
+	}
+	if now, nudge := fake.CountCalls("NudgeNow", info.SessionName), fake.CountCalls("Nudge", info.SessionName); now != 1 || nudge != 0 {
+		t.Fatalf("NudgeNow/Nudge calls = %d/%d, want 1/0", now, nudge)
+	}
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("queue not drained: pending=%d inFlight=%d dead=%d", len(pending), len(inFlight), len(dead))
+	}
+}
+
 // dueKeysErrQueue answers DueKeys with its queue's keys beside err, as a store
 // holding a record it cannot decode answers.
 type dueKeysErrQueue struct {

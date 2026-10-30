@@ -7695,3 +7695,26 @@ func TestTryDeliverQueuedNudgesByPollerHoldsStarvedNudgeWhileTurnRuns(t *testing
 		})
 	}
 }
+
+// A leaf with no turn reading (ACP, t3bridge, subprocess, the plain fake)
+// cannot prove an idle boundary, and its activity clock may never quiet
+// either, so a starved item goes out through its default delivery: its
+// runtime defers a busy session itself.
+func TestTryDeliverQueuedNudgesByPollerDeliversStarvedNudgeWithoutTurnReading(t *testing.T) {
+	dir, fake, store, target, obs := busyQueuedNudgeFixture(t, time.Now().Add(-10*time.Minute))
+	if _, ok := runtime.TurnRunningFor(fake, target.sessionName); ok {
+		t.Fatal("runtime.Fake takes a turn reading; the fixture needs a leaf without one")
+	}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, time.Hour, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if !delivered {
+		t.Fatal("delivered = false, want true: a starved nudge must not wait forever on a leaf with no turn reading")
+	}
+	if now, nudge := fake.CountCalls("NudgeNow", target.sessionName), fake.CountCalls("Nudge", target.sessionName); now != 0 || nudge != 1 {
+		t.Fatalf("NudgeNow/Nudge calls = %d/%d, want 0/1", now, nudge)
+	}
+	assertQueuedNudgeDrained(t, dir)
+}
