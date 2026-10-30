@@ -2,6 +2,7 @@ package proctable
 
 import (
 	"fmt"
+	"os"
 	"testing"
 )
 
@@ -42,12 +43,24 @@ func SetScanRootForTesting(t testing.TB, root string) {
 	t.Cleanup(func() { scanRoot = prev })
 }
 
-// TestSpawnedEnv is set by a test harness on every gc binary it execs.
+// TestSpawnedEnv is set by a test harness on every gc binary it execs. Such a
+// binary is neither a `go test` binary (testing.Testing() is false) nor named
+// *.test, so liveScanGuard cannot see that it runs under test.
 const TestSpawnedEnv = "GC_TEST_SPAWNED"
 
-// TestSpawned reports whether this process was exec'd by a test harness.
-func TestSpawned() bool { return false }
+// TestSpawned reports whether this process was exec'd by a test harness. Any
+// non-empty value counts, so an ambiguous value errs toward protection.
+func TestSpawned() bool { return os.Getenv(TestSpawnedEnv) != "" }
 
-// orphanScanGuard refuses the orphan sweep's live /proc scan in a
-// test-spawned binary.
-func orphanScanGuard(_ string) error { return nil }
+// orphanScanGuard refuses the orphan sweep's live /proc scan (empty id) in a
+// test-spawned binary, for the reason liveScanGuard exists (#2839): the sweep
+// would see the host's real agents as orphans. A scan scoped to one session id
+// stays allowed, since it only matches that session's own processes and a
+// spawned supervisor needs it.
+func orphanScanGuard(id string) error {
+	if id == "" && scanRoot == "/proc" && TestSpawned() {
+		return fmt.Errorf("proctable: refusing the orphan sweep's live /proc scan in a test-spawned binary (%s is set); "+
+			"it would treat the host's real agent runtimes as orphans (see gastownhall/gascity#2839)", TestSpawnedEnv)
+	}
+	return nil
+}

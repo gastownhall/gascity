@@ -258,7 +258,7 @@ func acquireSupervisorLock() (*os.File, error) {
 var errSupervisorLockHeld = errors.New("supervisor already running")
 
 func guardSupervisorSocketDir(dir string) {
-	if !isTestBinary() {
+	if !hostGuardedProcess() {
 		return
 	}
 	home, err := os.UserHomeDir()

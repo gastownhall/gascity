@@ -43,6 +43,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
@@ -1547,6 +1548,9 @@ func buildIntegrationEnv(gcHome, runtimeDir string, useDolt bool) []string {
 	// so a lock directory under it keeps the serialization the lock exists for.
 	env = append(env, "GC_DOLT_INIT_LOCK_DIR="+filepath.Join(gcHome, "dolt-init-locks"))
 	env = append(env, "XDG_RUNTIME_DIR="+runtimeDir)
+	// Mark every gc binary this env execs as test-spawned: its argv[0] has no
+	// ".test", so the host-protection guards cannot tell otherwise.
+	env = replaceEnv(env, proctable.TestSpawnedEnv, "1")
 	env = append(env, managedDoltTestModeEnv+"=1")
 	env = append(env, managedDoltTestParentEnv+"="+strconv.Itoa(os.Getpid()))
 	env = append(env, integrationRealBDBinaryEnv+"="+realBDBinary)

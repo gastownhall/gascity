@@ -28,6 +28,9 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if err := liveScanGuard(); err != nil {
 		return []runtime.LiveRuntime{}, err
 	}
+	if err := orphanScanGuard(id); err != nil {
+		return []runtime.LiveRuntime{}, err
+	}
 	if id == "" {
 		return scanOrphanCandidatesWithRoot(scanRoot, detectSubreaper(os.Getpid()))
 	}

@@ -138,6 +138,7 @@ go_test(
         "//internal/materialize",
         "//internal/pathutil",
         "//internal/runtime",
+        "//internal/runtime/proctable",
         "//internal/supervisor",
         "//internal/testenv",
         "//internal/testfixtures/reviewworkflows",
