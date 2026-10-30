@@ -856,7 +856,8 @@ func cliWorkQueryProbe(cityPath, cityName string, cfg *config.City) func(a confi
 			return "", err
 		}
 		stores := hookWorkQueryStores(cityPath, cfg, &a, resolvedAgentName, workDir, queryEnv, overrides, buildEffectiveSuspendedRigNames(cfg, st))
-		stores = scopeFederatedHookStores(stores, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, os.Stderr))
+		// No scopeFederatedHookStores: for a custom work_query (the only kind
+		// probed) the federated and single-store forms are the same string.
 		return probeWorkQueryStores(workQuery, stores, shellWorkQueryWithEnv)
 	}
 }

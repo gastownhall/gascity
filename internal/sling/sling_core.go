@@ -1129,10 +1129,7 @@ func beadAwaitsWorkQuery(ready []beads.Bead, beadID string) bool {
 		if b.ID != beadID {
 			continue
 		}
-		held := slices.ContainsFunc(beadmeta.DispatchHoldLabels, func(hold string) bool {
-			return slices.Contains(b.Labels, hold)
-		})
-		return b.Assignee == "" && !held
+		return b.Assignee == "" && !beadmeta.HasDispatchHold(b.Labels)
 	}
 	return false
 }
@@ -1155,6 +1152,11 @@ const (
 // JSON null or an empty array or object. JSON beads match on their "id" field
 // alone. Any other output still counts as work to the hook, so it is searched
 // for the bead ID as a whole token.
+//
+// The verdict reads the raw output, before the hook's normalizeWorkQueryOutput,
+// filterUnreadyHookCandidates and filterForeignHookCandidates. Those only
+// reshape or remove entries, so output that omits beadID cannot gain it on the
+// hook's side: a hard failure never fires where the hook would serve the bead.
 func classifyWorkQueryOutput(output, beadID string) workQueryVerdict {
 	output = strings.TrimSpace(output)
 	if output == "" || strings.Contains(output, "No ready work found") {
