@@ -774,6 +774,37 @@ func TestOrderFiringCurrent_TimesOutStalledOrderHistory(t *testing.T) {
 	}
 }
 
+// Durations under two minutes print as whole seconds: rounding 30s or 75s to
+// a whole minute prints "1m" and hides exactly the evidence that shows a
+// sub-minute order's cadence (ga-or367d). Two minutes and up keep the
+// whole-minute / whole-hour form.
+func TestFormatOrderFiringDuration(t *testing.T) {
+	tests := []struct {
+		name string
+		in   time.Duration
+		want string
+	}{
+		{"zero", 0, "0s"},
+		{"thirty-seconds", 30 * time.Second, "30s"},
+		{"one-minute", 60 * time.Second, "60s"},
+		{"seventy-five-seconds", 75 * time.Second, "75s"},
+		{"just-under-two-minutes", 119 * time.Second, "119s"},
+		{"sub-second-fraction-rounds-down-to-119s", 119*time.Second + 400*time.Millisecond, "119s"},
+		{"sub-second-fraction-rounds-up-to-2m", 119*time.Second + 600*time.Millisecond, "2m"},
+		{"two-minutes", 2 * time.Minute, "2m"},
+		{"two-minutes-twenty-nine-seconds", 2*time.Minute + 29*time.Second, "2m"},
+		{"ninety-minutes", 90 * time.Minute, "90m"},
+		{"four-hours", 4 * time.Hour, "4h"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatOrderFiringDuration(tt.in); got != tt.want {
+				t.Fatalf("formatOrderFiringDuration(%s) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 // An order its scope's backend rules out never fires, by design. The check
 // reports it as inapplicable and does not count it as stale or never-fired.
 func TestOrderFiringCurrent_InapplicableOrderIsReportedNotStale(t *testing.T) {

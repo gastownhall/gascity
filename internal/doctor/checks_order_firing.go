@@ -786,11 +786,16 @@ func nonNegativeDuration(d time.Duration) time.Duration {
 	return d
 }
 
+// formatOrderFiringDuration renders an age or interval for a detail line.
+// Durations under two minutes keep their seconds: rounding 30s or 75s to a
+// whole minute prints "1m" and hides exactly the evidence that shows a
+// sub-minute order's cadence.
 func formatOrderFiringDuration(d time.Duration) string {
-	d = d.Round(time.Minute)
-	if d == 0 {
-		return "0s"
+	d = d.Round(time.Second)
+	if d < 2*time.Minute {
+		return fmt.Sprintf("%ds", int(d/time.Second))
 	}
+	d = d.Round(time.Minute)
 	if d%time.Hour == 0 {
 		return fmt.Sprintf("%dh", int(d/time.Hour))
 	}
