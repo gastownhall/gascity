@@ -947,7 +947,7 @@ func checkReadBeadState(q BeadQuerier, b beads.Bead, beadID string, a config.Age
 				Warnings:  []string{fmt.Sprintf("warning: bead %s was assigned to %q but routed to %q; re-routing", beadID, target, routedTo)},
 			}
 		}
-		return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
+		return BeadCheckResult{Warnings: routedStateWarnings(b, beadID), Conflict: routedConflict(b, beadID, deps.CallerIdentity)}
 	}
 
 	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == "" {
@@ -958,7 +958,7 @@ func checkReadBeadState(q BeadQuerier, b beads.Bead, beadID string, a config.Age
 			}
 		}
 	}
-	return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
+	return BeadCheckResult{Warnings: routedStateWarnings(b, beadID), Conflict: routedConflict(b, beadID, deps.CallerIdentity)}
 }
 
 // assigneeIsOwnPoolSession reports whether assignee is one of pool target's own
@@ -987,6 +987,19 @@ func assigneeIsOwnPoolSession(assignee, target string, sessions beads.SessionSto
 		return false
 	}
 	return session.IsOpenSessionOfTemplate(sb, target)
+}
+
+// routedConflict returns the error that refuses a sling of beadID when b's
+// gc.routed_to is set and names neither the sling target nor caller. A route
+// already at the target never reaches it; a route held by the caller is a
+// self-directed re-route, which stays allowed. An empty caller matches no
+// route, so an unresolved identity fails closed. It returns nil otherwise.
+func routedConflict(b beads.Bead, beadID, caller string) error {
+	routedTo := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey])
+	if routedTo == "" || routedTo == caller {
+		return nil
+	}
+	return fmt.Errorf("bead %s already routed to %q; use --force to override", beadID, routedTo)
 }
 
 // routedStateWarnings reports human-readable warnings describing any existing
