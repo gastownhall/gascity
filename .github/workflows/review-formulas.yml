@@ -189,7 +189,13 @@ jobs:
       - gate
     if: needs.gate.outputs.run_shard == 'true'
     runs-on: ${{ needs.gate.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'blacksmith-16vcpu-ubuntu-2404' }}
-    timeout-minutes: 45
+    # Measured over 14 passing main runs (2026-09-13T13:06Z through
+    # 2026-09-16T03:04Z, ~62h, including a heavy-load period): the slowest
+    # successful job took 15m39s, so 30 minutes leaves at least 14m21s of
+    # headroom. Use job durations, not workflow-run durations, when revisiting
+    # this. Change it together with reviewWorkflowTimeout in
+    # test/integration/review_formula_test.go.
+    timeout-minutes: 30
     permissions:
       contents: read
       issues: read # worker-env drift issues (tools/rbe/worker-env-drift)

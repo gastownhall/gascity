@@ -17,15 +17,13 @@ import (
 )
 
 // reviewWorkflowTimeout bounds waits for review-formula workflow beads to
-// close. Successful runs on CI average ~5 min per test, but runner variance
-// is high: mol-personal-work-v2 has 18+ steps across two Ralph loops (6
-// polecat in design-review, 2 in code-review), taking ~20 min on busy
-// runners. The transient-retry tests add extra polecat cycles on top. The
-// earlier 12-minute budget produced intermittent flakes; 18 min still left
-// no headroom for personal-work and retry tests (~38 s from done at cutoff
-// in CI run 27788351365). 24 min leaves ~4 min margin while staying under
-// the 30-minute job ceiling.
-const reviewWorkflowTimeout = 24 * time.Minute
+// close. Measured over 14 passing main runs (2026-09-13T13:06Z through
+// 2026-09-16T03:04Z, ~62h, including a heavy-load period of ~14 concurrent Go
+// builds at host load ~20), the slowest test package (basic-2-of-2) took
+// 2m53s-4m02s, so 18 minutes leaves at least 13m58s of headroom. Keep it under
+// the review-formulas-shard job timeout in .github/workflows/review-formulas.yml
+// and change the two together.
+const reviewWorkflowTimeout = 18 * time.Minute
 
 // reviewWorkflowSlingTimeout only covers formula instantiation and convoy
 // routing. The personal-work graph is large enough that bd-backed graph apply
