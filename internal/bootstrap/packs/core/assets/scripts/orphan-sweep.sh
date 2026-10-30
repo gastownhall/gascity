@@ -783,9 +783,16 @@ fi
 # could not be verified dead, or its conditional release failed is declared
 # too: the sweep exits 0 on these skips, and an exit-0 run's output is logged
 # nowhere (gastownhall/gascity#4543). The scopes recorded above name each bead
-# and why; the run is partial, because the sweep's other work ran.
+# and why; the run is partial, because the sweep's other work ran. When the
+# gate already declared this pass partial, its kind, reason and scopes stand:
+# the local skips join the same declaration (their scopes were recorded
+# above) and the reason states both counts, instead of replacing it.
 if [ "$UNVERIFIABLE" -gt 0 ]; then
-    order_outcome_set partial "left $UNVERIFIABLE claim(s) in place: the holder could not be verified dead, the bead could not be re-read, or the conditional release failed; each scope names the bead and why"
+    if [ -n "$ORDER_OUTCOME_KIND" ]; then
+        order_outcome_set partial "$ORDER_OUTCOME_REASON; skipped $UNVERIFIABLE unverifiable claim(s)"
+    else
+        order_outcome_set partial "left $UNVERIFIABLE claim(s) in place: the holder could not be verified dead, the bead could not be re-read, or the conditional release failed; each scope names the bead and why"
+    fi
 fi
 
 if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ] || [ "$PROTECTED" -gt 0 ]; then

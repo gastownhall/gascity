@@ -13042,6 +13042,63 @@ func TestOrphanSweepDeclaresLocalSkipsAsPartialScopes(t *testing.T) {
 	}
 }
 
+// TestOrphanSweepComposesGateAndLocalSkipOutcomes pins the one-declaration
+// composition: a pass that both protects a foreign claim and skips a local
+// unverifiable one declares a single partial outcome carrying the gate's
+// identity scope (reason text unchanged) and the local bead's scope, with a
+// top-level reason stating both counts. Declaring the local skips must not
+// replace the gate's declaration.
+func TestOrphanSweepComposesGateAndLocalSkipOutcomes(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{
+			inProgress("ga-foreign", "project/dalinar"),
+			hookClaim("ga-local-skip", "gc-d34d1", "gastown__polecat-gc-d34d1", map[string]string{"gc.session_bead_id": "gc-legacy9"}),
+		},
+		nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d1", Status: "closed", IssueType: "session"}},
+		[]string{"project/dalinar"},
+		nil)
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if run.released("ga-foreign") || run.released("ga-local-skip") {
+		t.Fatalf("a protected or unverifiable claim was released:\n%s", run.context())
+	}
+	outcome, ok := run.outcome(t)
+	if !ok {
+		t.Fatalf("no outcome declaration written:\n%s", run.context())
+	}
+	if outcome.Outcome != "partial" {
+		t.Fatalf("outcome = %q, want partial:\n%s", outcome.Outcome, run.context())
+	}
+	var gateScope, localScope *struct {
+		Scope  string `json:"scope"`
+		Reason string `json:"reason"`
+	}
+	for i := range outcome.Scopes {
+		switch outcome.Scopes[i].Scope {
+		case "project/dalinar":
+			gateScope = &outcome.Scopes[i]
+		case "ga-local-skip":
+			localScope = &outcome.Scopes[i]
+		}
+	}
+	if gateScope == nil || localScope == nil {
+		t.Fatalf("outcome scopes = %+v, want one for the protected identity and one for the skipped bead", outcome.Scopes)
+	}
+	if !strings.Contains(gateScope.Reason, "absent_from_roster") {
+		t.Fatalf("gate scope reason %q lost the gate's own reason text", gateScope.Reason)
+	}
+	if !strings.Contains(localScope.Reason, "gc-legacy9") {
+		t.Fatalf("local scope reason %q does not name the unreadable candidate", localScope.Reason)
+	}
+	for _, want := range []string{"protected 1 claim", "skipped 1 unverifiable"} {
+		if !strings.Contains(outcome.Reason, want) {
+			t.Fatalf("top-level reason %q does not state both counts (missing %q)", outcome.Reason, want)
+		}
+	}
+}
+
 // TestOrphanSweepProtectsHQClaimsItCannotVouchFor applies the gate in HQ, this
 // city's own store, as the Go sweep does for every store: a claim under an
 // identity this city cannot vouch for (a person, a typo, a decommissioned
