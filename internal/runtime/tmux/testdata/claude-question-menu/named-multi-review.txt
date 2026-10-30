@@ -1,0 +1,24 @@
+
+● Done.
+
+✻ Cooked for 3s · done 4:50 PM
+
+❯ Call the AskUserQuestion tool exactly once with TWO questions: (1) "Which
+  color?" header Color, options Red and Blue; (2) "Which size?" header Size,
+  options Small and Large. Do nothing else, and after it returns just say done.
+
+────────────────────────────────────────────────────────────────────────────────
+←  ☒ Color  ☒ Size  ✔ Submit  →
+
+Review your answers
+
+ ● Which color?
+   → Red
+ ● Which size?
+   → Small
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel
+──────────────────────────────────────────────────────────────────── project ─

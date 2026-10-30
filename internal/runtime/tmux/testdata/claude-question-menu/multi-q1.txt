@@ -1,0 +1,45 @@
+
+ ▐▛███▛█   Claude Code v2.1.314
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   ~/src/project · /rc
+
+
+❯ Call the AskUserQuestion tool exactly once with TWO questions: (1) "Which color?" header Color, options Red and Blue; (2) "Which size?"
+  header Size, options Small and Large. Do nothing else.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Color  ☐ Size  ✔ Submit  →
+
+Which color?
+
+❯ 1. Red
+     Choose red
+  2. Blue
+     Choose blue
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
