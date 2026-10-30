@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
 
@@ -25,6 +26,9 @@ import (
 // hot per-tick paths (order dispatch) must reuse an already-resolved
 // *config.City instead of driving this counter once per scope per tick
 // (ga-237xpr) — tests assert on this counter to guard against a regression.
+// It counts loader calls: inside an invocation scope a call the memo answers
+// still counts here (see invocationConfigMemo). composedCityConfigLoads counts
+// the compositions actually performed.
 var loadCityConfigCalls atomic.Int64
 
 const agentAddPromptScaffold = `You are the {{ .AgentName }} agent.
@@ -62,7 +66,7 @@ func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (
 	if err := ensureBuiltinPacksForConfigLoad(fs, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...)); err != nil {
 		return nil, err
 	}
-	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, skipRevisionSnapshot)
+	cfg, prov, err := loadComposedCityConfig(fs, tomlPath, skipRevisionSnapshot)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +97,7 @@ func loadCityConfigWithoutBuiltinPackRefresh(cityPath string, warningWriter ...i
 // only in skipping the refresh; opts is what separates a blocking load from an
 // advisory one.
 func loadPrematerializedCityConfig(fs fsys.FS, tomlPath string, opts config.LoadOptions, warnings io.Writer) (*config.City, error) {
-	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, opts)
+	cfg, prov, err := loadComposedCityConfig(fs, tomlPath, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -178,6 +182,9 @@ func emitLoadCityConfigWarnings(w io.Writer, prov *config.Provenance) {
 // default tables are ambiguous even after normalization.
 func isNonFatalLoadConfigWarning(warning string) bool {
 	if config.IsRetiredKeyWarning(warning) {
+		return true
+	}
+	if config.IsSessionReconcilerAliasWarning(warning) {
 		return true
 	}
 	if config.IsLegacyV1SurfaceWarning(warning) {
@@ -484,7 +491,7 @@ have moved to "gc session" and "gc runtime".`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc agent: missing subcommand (add, list, suspend, resume)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, "gc agent: missing subcommand (add, is-foreign, list, suspend, resume)") //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stderr, "gc agent: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}
@@ -493,6 +500,7 @@ have moved to "gc session" and "gc runtime".`,
 	}
 	cmd.AddCommand(
 		newAgentAddCmd(stdout, stderr),
+		newAgentIsForeignCmd(stdout, stderr),
 		newAgentListCmd(stdout, stderr),
 		newAgentResumeCmd(stdout, stderr),
 		newAgentSuspendCmd(stdout, stderr),
@@ -561,7 +569,12 @@ func doAgentList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io
 		fmt.Fprintf(stderr, "gc agent list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	items := agentListItems(cfg, cityQueryTopology(cityPath, cfg))
+	st, err := loadSuspensionState(fs, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc agent list: loading suspension state: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	items := agentListItems(cfg, cityQueryTopology(cityPath, cfg), cityPath, st)
 	if jsonOutput {
 		if err := writeCLIJSONLine(stdout, AgentListJSON{
 			SchemaVersion: "1",
@@ -586,7 +599,7 @@ func doAgentList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io
 	return 0
 }
 
-func agentListItems(cfg *config.City, topo config.QueryTopology) []AgentListItem {
+func agentListItems(cfg *config.City, topo config.QueryTopology, cityPath string, st suspensionstate.State) []AgentListItem {
 	if cfg == nil {
 		return nil
 	}
@@ -601,7 +614,7 @@ func agentListItems(cfg *config.City, topo config.QueryTopology) []AgentListItem
 			WorkDir:              a.WorkDir,
 			Provider:             a.Provider,
 			Session:              a.Session,
-			Suspended:            a.Suspended,
+			Suspended:            isAgentEffectivelySuspendedWith(cfg, cityPath, &a, st),
 			WorkQuery:            a.EffectiveWorkQueryFor(topo),
 			SlingQuery:           a.EffectiveSlingQuery(),
 			ConfiguredWorkQuery:  a.WorkQuery,

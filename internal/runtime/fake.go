@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,29 +15,63 @@ import (
 // When broken is true (via [NewFailFake]), all mutating operations return
 // an error and IsRunning always returns false. Calls are still recorded.
 type Fake struct {
-	mu                      sync.Mutex
-	sessions                map[string]Config            // live sessions
-	meta                    map[string]map[string]string // session → key → value
-	Calls                   []Call                       // recorded calls in order
-	broken                  bool                         // when true, all ops fail
-	OrphanedRuntimes        map[string]LiveRuntime       // session ID → untracked live runtime
-	Zombies                 map[string]bool              // sessions with dead agent processes
-	Attached                map[string]bool              // sessions with attached terminals
-	AttachedSequence        map[string][]bool            // scripted IsAttached results by session
-	PeekOutput              map[string]string            // session → canned peek output
-	Activity                map[string]time.Time         // session → last activity time
-	StartErrors             map[string]error             // per-session Start errors for testing
-	StopErrors              map[string]error             // per-session Stop errors for testing
-	StopLeavesRunning       map[string]bool              // per-session Stop returns nil without deleting the session
+	mu               sync.Mutex
+	sessions         map[string]Config            // live sessions
+	meta             map[string]map[string]string // session → key → value
+	Calls            []Call                       // recorded calls in order
+	broken           bool                         // when true, all ops fail
+	OrphanedRuntimes map[string]LiveRuntime       // session ID → untracked live runtime
+	// ExtraRuntimes are additional scan hits returned verbatim by
+	// FindRuntimesBySessionID, with no field forced. A real process-table scan
+	// reports SEVERAL roots for one session id — the pane plus anything that
+	// merely inherited GC_SESSION_ID and later reparented to init (the
+	// managed-Dolt scope watchdog, a detached supervisor). Those are reported
+	// IsTracked=true, because the tmux scanner keys tracked-ness by session id,
+	// so they cannot be modeled through OrphanedRuntimes, whose contract is that
+	// its entries are untracked orphans.
+	ExtraRuntimes    []LiveRuntime
+	Zombies          map[string]bool      // sessions with dead agent processes
+	Attached         map[string]bool      // sessions with attached terminals
+	AttachedSequence map[string][]bool    // scripted IsAttached results by session
+	AttachedErrors   map[string]error     // per-session IsAttachedWithError errors for testing
+	PeekOutput       map[string]string    // session → canned peek output
+	Activity         map[string]time.Time // session → last activity time
+	// Bindings are the threads a [FullFake]'s SessionBinding reports, by
+	// session name.
+	Bindings map[string]SessionBinding
+	// KeyedDeliveries are the deliveries a [FullFake] holds, by session name
+	// then delivery key: the first keyed delivery under a key stays, and
+	// LookupDelivery finds it. A test may seed it; it is created on first
+	// use.
+	KeyedDeliveries map[string]map[string]DeliveryReceipt
+	// LookupDeliveryErrors fail a [FullFake]'s LookupDelivery by session
+	// name.
+	LookupDeliveryErrors    map[string]error
+	StartErrors             map[string]error // per-session Start errors for testing
+	StopErrors              map[string]error // per-session Stop errors for testing
+	StopLeavesRunning       map[string]bool  // per-session Stop returns nil without deleting the session
 	PendingInteractions     map[string]*PendingInteraction
+	PendingErrors           map[string]error // per-session Pending errors for testing
+	RespondErrors           map[string]error // per-session Respond errors for testing; the answer is recorded as a call, not applied
 	Responses               map[string][]InteractionResponse
 	SleepCapabilityValue    SessionSleepCapability
+	TurnInterruptModeValue  TurnInterruptMode // reported by TurnInterruptMode; empty reads as keystroke
+	InputFencingValue       InputFencing      // reported by InputFencing; empty reads as atomic
+	SteerModeValue          SteerMode         // reported by SteerMode; empty reads as keystroke
 	WaitForIdleErrors       map[string]error
 	WaitForIdleSequence     map[string][]error
 	DialogErrors            map[string]error
 	ResetTurnErrors         map[string]error
 	InterruptBoundaryErrors map[string]error
-	RemoveMetaErrors        map[string]map[string]error // per-session/key RemoveMeta errors for testing
+	// InterruptErrors fail Interrupt and InterruptFenced per session name,
+	// after the call is recorded.
+	InterruptErrors  map[string]error
+	ClearInputErrors map[string]error
+	// BackgroundWorkStopErrors configures Fake.StopBackgroundWork errors per
+	// session name; an absent entry stops successfully.
+	BackgroundWorkStopErrors map[string]error
+	RemoveMetaErrors         map[string]map[string]error // per-session/key RemoveMeta errors for testing
+	GetMetaErrors            map[string]map[string]error // per-session/key GetMeta errors for testing
 	// WaitForIdleGates blocks WaitForIdle on a per-name channel until the
 	// caller closes it. A nil or absent entry returns the configured
 	// WaitForIdleErrors value immediately. The gate is read under f.mu
@@ -56,26 +91,71 @@ type Fake struct {
 	// NudgeErrors configures Fake.Nudge/Fake.NudgeNow errors per session name;
 	// an absent entry nudges successfully.
 	NudgeErrors map[string]error
+	// ListingUnattested makes Fake.ListRunningComplete report false, modeling
+	// a provider whose ListRunning may omit live sessions.
+	ListingUnattested bool
+	// TurnScripts script a FullFake's TurnFenceProvider by session name. Every
+	// turn read (ObserveTurn, InterruptTurn's fence read, each WaitTurnEnded
+	// read) takes the next entry, and the last entry repeats; "" means no turn.
+	// A session with no script has no turn in progress.
+	TurnScripts map[string][]string
+	// TurnReadErrors fail turn reads by session name, in order. A nil entry
+	// reads the script.
+	TurnReadErrors map[string][]error
+	// InterruptTurnErrors fail InterruptTurn after a matching fence read.
+	InterruptTurnErrors map[string]error
+	// FencedTurnInterrupts makes InterruptTurn answer Fenced: true.
+	FencedTurnInterrupts bool
+	// TurnCapabilityScripts script a FullFake's TurnCapabilities by session
+	// name. Each call takes the next entry, and the last entry repeats. A
+	// session with no script reports nothing on every axis.
+	TurnCapabilityScripts map[string][]TurnCapabilities
+	// TurnHistoryScripts script a FullFake's TurnHistory by session name. Each
+	// read takes the next entry, and the last entry repeats. A session with no
+	// script has no current or recent turn.
+	TurnHistoryScripts map[string][]TurnHistory
+	// TurnHistoryErrors fail TurnHistory reads by session name, in order. A
+	// nil entry reads the script.
+	TurnHistoryErrors map[string][]error
 }
 
 var (
 	_ ProcessTableScanner = (*Fake)(nil)
 	_ RelaunchProvider    = (*Fake)(nil)
+	_ ListingAttestation  = (*Fake)(nil)
+	_ InputClearProvider  = (*Fake)(nil)
+	_ FencedInputProvider = (*Fake)(nil)
+
+	_ BackgroundWorkStopper     = (*Fake)(nil)
+	_ FencedInteractionProvider = (*Fake)(nil)
+
+	_ AttachmentObserverWithError = (*Fake)(nil)
 )
 
 // Call records a single method invocation on [Fake].
 type Call struct {
-	Method    string         // method name (e.g. "Start", "Stop", "SetMeta")
-	Name      string         // session name argument
-	Config    Config         // only set for Start calls
-	Message   string         // only set for Nudge/SendKeys calls (flattened text)
-	Content   []ContentBlock // only set for Nudge calls (structured content)
-	Key       string         // only set for meta calls
-	Value     string         // only set for SetMeta calls
-	Src       string         // only set for CopyTo calls
-	Dst       string         // only set for CopyTo calls
-	RequestID string         // only set for Respond calls
-	Action    string         // only set for Respond calls
+	Method  string         // method name (e.g. "Start", "Stop", "SetMeta")
+	Name    string         // session name argument
+	Config  Config         // only set for Start calls
+	Message string         // only set for Nudge/SendKeys calls (flattened text)
+	Content []ContentBlock // only set for Nudge calls (structured content)
+	// DeliveryKey is set for a Nudge delivered through
+	// [KeyedNudgeProvider.NudgeKeyed] (a [FullFake]'s).
+	DeliveryKey string
+	// Key is set for meta calls, and for a [FullFake]'s turn-fence calls to
+	// the turn they name (empty for ObserveTurn and TurnHistory).
+	Key string
+	// Value is set for SetMeta calls, and for a [FullFake]'s InterruptTurn to
+	// what it did: sent, not_current or error.
+	Value     string
+	Src       string // only set for CopyTo calls
+	Dst       string // only set for CopyTo calls
+	RequestID string // only set for Respond calls
+	Action    string // only set for Respond calls
+	// Fence is set for a call made under an input fence: a fenced nudge,
+	// keys or interrupt, a ctx-fenced ClearInput, DismissKnownDialogs or
+	// ResetInterruptedTurn, and a refused one (Method "FenceMismatch").
+	Fence InputFence
 }
 
 // FakeExecResult configures one [Fake.Exec] outcome.
@@ -118,6 +198,7 @@ func NewFake() *Fake {
 		OrphanedRuntimes:        make(map[string]LiveRuntime),
 		Zombies:                 make(map[string]bool),
 		Attached:                make(map[string]bool),
+		AttachedErrors:          make(map[string]error),
 		AttachedSequence:        make(map[string][]bool),
 		StartErrors:             make(map[string]error),
 		StopErrors:              make(map[string]error),
@@ -130,7 +211,12 @@ func NewFake() *Fake {
 		DialogErrors:            make(map[string]error),
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
+		InterruptErrors:         make(map[string]error),
+		ClearInputErrors:        make(map[string]error),
 		RemoveMetaErrors:        make(map[string]map[string]error),
+		GetMetaErrors:           make(map[string]map[string]error),
+		PendingErrors:           make(map[string]error),
+		RespondErrors:           make(map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
 		WaitForIdleStarted:      make(map[string]chan struct{}),
 		RelaunchErrors:          make(map[string]error),
@@ -147,6 +233,7 @@ func NewFailFake() *Fake {
 		OrphanedRuntimes:        make(map[string]LiveRuntime),
 		Zombies:                 make(map[string]bool),
 		Attached:                make(map[string]bool),
+		AttachedErrors:          make(map[string]error),
 		StartErrors:             make(map[string]error),
 		StopErrors:              make(map[string]error),
 		StopLeavesRunning:       make(map[string]bool),
@@ -158,6 +245,8 @@ func NewFailFake() *Fake {
 		DialogErrors:            make(map[string]error),
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
+		InterruptErrors:         make(map[string]error),
+		ClearInputErrors:        make(map[string]error),
 		RemoveMetaErrors:        make(map[string]map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
 		WaitForIdleStarted:      make(map[string]chan struct{}),
@@ -235,14 +324,20 @@ func (f *Fake) Interrupt(name string) error {
 	if f.broken {
 		return fmt.Errorf("session unavailable")
 	}
-	return nil
+	return f.InterruptErrors[name]
 }
 
 // DismissKnownDialogs records the call and returns the configured result.
-func (f *Fake) DismissKnownDialogs(_ context.Context, name string, timeout time.Duration) error {
+// Under a ctx input fence it is refused, unrecorded, unless the fence matches
+// (see checkFenceLocked).
+func (f *Fake) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.Calls = append(f.Calls, Call{Method: "DismissKnownDialogs", Name: name, Value: timeout.String()})
+	fence, err := f.ctxFenceLocked(ctx, name)
+	if err != nil {
+		return err
+	}
+	f.Calls = append(f.Calls, Call{Method: "DismissKnownDialogs", Name: name, Value: timeout.String(), Fence: fence})
 	if f.broken {
 		return fmt.Errorf("session unavailable")
 	}
@@ -252,11 +347,16 @@ func (f *Fake) DismissKnownDialogs(_ context.Context, name string, timeout time.
 	return nil
 }
 
-// ResetInterruptedTurn records the call and returns the configured result.
-func (f *Fake) ResetInterruptedTurn(_ context.Context, name string) error {
+// ResetInterruptedTurn records the call and returns the configured result,
+// honoring a ctx input fence as DismissKnownDialogs does.
+func (f *Fake) ResetInterruptedTurn(ctx context.Context, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.Calls = append(f.Calls, Call{Method: "ResetInterruptedTurn", Name: name})
+	fence, err := f.ctxFenceLocked(ctx, name)
+	if err != nil {
+		return err
+	}
+	f.Calls = append(f.Calls, Call{Method: "ResetInterruptedTurn", Name: name, Fence: fence})
 	if f.broken {
 		return fmt.Errorf("session unavailable")
 	}
@@ -280,6 +380,39 @@ func (f *Fake) WaitForInterruptBoundary(_ context.Context, name string, since ti
 		return fmt.Errorf("session unavailable")
 	}
 	if err, ok := f.InterruptBoundaryErrors[name]; ok {
+		return err
+	}
+	return nil
+}
+
+// StopBackgroundWork records the call and returns the configured result.
+func (f *Fake) StopBackgroundWork(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "StopBackgroundWork", Name: name})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.BackgroundWorkStopErrors[name]; ok {
+		return err
+	}
+	return nil
+}
+
+// ClearInput records the call (the restore window in Value) and returns the
+// configured result, honoring a ctx input fence as DismissKnownDialogs does.
+func (f *Fake) ClearInput(ctx context.Context, name string, restoreWindow time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fence, err := f.ctxFenceLocked(ctx, name)
+	if err != nil {
+		return err
+	}
+	f.Calls = append(f.Calls, Call{Method: "ClearInput", Name: name, Value: restoreWindow.String(), Fence: fence})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.ClearInputErrors[name]; ok {
 		return err
 	}
 	return nil
@@ -325,6 +458,24 @@ func (f *Fake) IsAttached(name string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{Method: "IsAttached", Name: name})
+	return f.attachedLocked(name)
+}
+
+// IsAttachedWithError returns the configured AttachedErrors entry for the
+// named session. Without one it answers exactly as [Fake.IsAttached] with a
+// nil error, so tests that never set an error see no difference.
+func (f *Fake) IsAttachedWithError(name string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "IsAttachedWithError", Name: name})
+	if err := f.AttachedErrors[name]; err != nil {
+		return false, err
+	}
+	return f.attachedLocked(name), nil
+}
+
+// attachedLocked is the shared IsAttached answer. The caller holds f.mu.
+func (f *Fake) attachedLocked(name string) bool {
 	if f.broken {
 		return false
 	}
@@ -437,6 +588,9 @@ func (f *Fake) Pending(name string) (*PendingInteraction, error) {
 	if f.broken {
 		return nil, fmt.Errorf("session unavailable")
 	}
+	if err := f.PendingErrors[name]; err != nil {
+		return nil, err
+	}
 	pending := f.PendingInteractions[name]
 	if pending == nil {
 		return nil, nil
@@ -449,22 +603,52 @@ func (f *Fake) Pending(name string) (*PendingInteraction, error) {
 func (f *Fake) Respond(name string, response InteractionResponse) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.respondLocked(name, response, InputFence{})
+}
+
+// ResponseFencing returns the configured input fencing, atomic when unset:
+// the fake fences answers as it fences input.
+func (f *Fake) ResponseFencing(string) InputFencing {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.inputFencingLocked()
+}
+
+// RespondFenced implements [FencedInteractionProvider]: when fence matches
+// it answers as [Fake.Respond] does, recording the fence on the call;
+// otherwise see checkFenceLocked.
+func (f *Fake) RespondFenced(_ context.Context, name string, fence InputFence, response InteractionResponse) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.checkFenceLocked(name, fence); err != nil {
+		return err
+	}
+	return f.respondLocked(name, response, fence)
+}
+
+// respondLocked records one answer, under fence when it is set, and clears
+// the matching pending interaction. The caller holds f.mu.
+func (f *Fake) respondLocked(name string, response InteractionResponse, fence InputFence) error {
 	f.Calls = append(f.Calls, Call{
 		Method:    "Respond",
 		Name:      name,
 		RequestID: response.RequestID,
 		Action:    response.Action,
 		Message:   response.Text,
+		Fence:     fence,
 	})
 	if f.broken {
 		return fmt.Errorf("session unavailable")
 	}
+	if err := f.RespondErrors[name]; err != nil {
+		return err
+	}
 	pending := f.PendingInteractions[name]
 	if pending == nil {
-		return fmt.Errorf("no pending interaction")
+		return fmt.Errorf("no pending interaction: %w", ErrInteractionGone)
 	}
 	if pending.RequestID != "" && response.RequestID != "" && pending.RequestID != response.RequestID {
-		return fmt.Errorf("pending interaction %q does not match request %q", pending.RequestID, response.RequestID)
+		return fmt.Errorf("pending interaction %q does not match request %q: %w", pending.RequestID, response.RequestID, ErrInteractionGone)
 	}
 	if response.RequestID == "" {
 		response.RequestID = pending.RequestID
@@ -499,6 +683,9 @@ func (f *Fake) GetMeta(name, key string) (string, error) {
 	f.Calls = append(f.Calls, Call{Method: "GetMeta", Name: name, Key: key})
 	if f.broken {
 		return "", fmt.Errorf("session unavailable")
+	}
+	if err := f.GetMetaErrors[name][key]; err != nil {
+		return "", err
 	}
 	return f.meta[name][key], nil
 }
@@ -560,6 +747,22 @@ func (f *Fake) ListRunning(prefix string) ([]string, error) {
 	return names, nil
 }
 
+// ListRunningComplete implements [ListingAttestation]: the in-memory listing
+// is complete unless ListingUnattested is set.
+func (f *Fake) ListRunningComplete() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return !f.ListingUnattested
+}
+
+// Synthetic pids for the Fake's provider-owned pane root. The parent is a
+// stand-in for the provider's server process: what matters to consumers is that
+// it is > 1, i.e. the root has NOT been reparented to init.
+const (
+	fakePaneRootPID       = 4242
+	fakeProviderServerPID = 4200
+)
+
 // FindRuntimesBySessionID returns fake tracked and orphaned runtimes matching
 // a GC_SESSION_ID. Empty id returns all runtimes with a session ID.
 func (f *Fake) FindRuntimesBySessionID(id string) ([]LiveRuntime, error) {
@@ -586,6 +789,12 @@ func (f *Fake) FindRuntimesBySessionID(id string) ([]LiveRuntime, error) {
 		runtime.IsTracked = false
 		out = append(out, runtime)
 	}
+	for _, extra := range f.ExtraRuntimes {
+		if id != "" && strings.TrimSpace(extra.SessionID) != id {
+			continue
+		}
+		out = append(out, extra)
+	}
 	for name, cfg := range f.sessions {
 		sessionID := cfg.Env["GC_SESSION_ID"]
 		if sessionID == "" {
@@ -598,11 +807,21 @@ func (f *Fake) FindRuntimesBySessionID(id string) ([]LiveRuntime, error) {
 		if city == "" {
 			city = cfg.Env["GC_CITY"]
 		}
+		// A live provider-owned pane: its root process still has the provider's
+		// server as its parent, so PPID is a real pid rather than init and the
+		// scan can positively attribute the parent to the provider. That
+		// attribution is what separates this pane from a process that merely
+		// inherited GC_SESSION_ID (modeled through ExtraRuntimes, which sets no
+		// fields of its own), so it must be part of the fixture.
 		out = append(out, LiveRuntime{
-			SessionID:    sessionID,
-			City:         city,
-			ProviderName: name,
-			IsTracked:    true,
+			SessionID:                      sessionID,
+			City:                           city,
+			ProviderName:                   name,
+			IsTracked:                      true,
+			PID:                            fakePaneRootPID,
+			PPID:                           fakeProviderServerPID,
+			ParentIsProviderInfrastructure: true,
+			Name:                           cfg.Env["GC_AGENT_PROCESS"],
 		})
 	}
 	return out, nil
@@ -613,7 +832,10 @@ func (f *Fake) FindRuntimesBySessionID(id string) ([]LiveRuntime, error) {
 func (f *Fake) TerminateRuntime(runtime LiveRuntime) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.Calls = append(f.Calls, Call{Method: "TerminateRuntime", Name: runtime.SessionID})
+	// Value carries the PID: a session can have several scan hits (its pane root
+	// plus any detached process that merely inherited GC_SESSION_ID), so tests
+	// asserting WHICH process was terminated need more than the session id.
+	f.Calls = append(f.Calls, Call{Method: "TerminateRuntime", Name: runtime.SessionID, Value: strconv.Itoa(runtime.PID)})
 	if f.broken {
 		return fmt.Errorf("terminating runtime %q: session unavailable", runtime.SessionID)
 	}
@@ -753,6 +975,26 @@ func (f *Fake) SleepCapability(string) SessionSleepCapability {
 	return f.SleepCapabilityValue
 }
 
+// TurnInterruptMode returns the configured turn-interrupt mode. It records no
+// call: like SleepCapability it reports a fixed trait of the runtime.
+func (f *Fake) TurnInterruptMode(string) TurnInterruptMode {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.TurnInterruptModeValue
+}
+
+// SteerMode returns the configured steer mode, keystroke when unset: the
+// fake types NudgeNow as tmux does. It records no call: like
+// TurnInterruptMode it reports a fixed trait of the runtime.
+func (f *Fake) SteerMode(string) SteerMode {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.SteerModeValue == "" {
+		return SteerKeystroke
+	}
+	return f.SteerModeValue
+}
+
 // LastStartConfig returns the Config used in the most recent Start call for
 // the named session, or nil if no Start was recorded for that name.
 func (f *Fake) LastStartConfig(name string) *Config {
@@ -790,4 +1032,122 @@ func (f *Fake) RunLive(name string, _ Config) error {
 		return fmt.Errorf("session unavailable")
 	}
 	return nil
+}
+
+// InputFencing returns the configured input fencing, atomic when unset. It
+// records no call: like TurnInterruptMode it reports a fixed trait.
+func (f *Fake) InputFencing(string) InputFencing {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.inputFencingLocked()
+}
+
+func (f *Fake) inputFencingLocked() InputFencing {
+	if f.InputFencingValue == "" {
+		return InputFencingAtomic
+	}
+	return f.InputFencingValue
+}
+
+// checkFenceLocked compares fence with the incarnation name's start
+// environment names (InputFenceFromEnv of its Config.Env). A fence that names
+// no incarnation is ErrInvalidInputFence; a fake configured as
+// InputFencingNone refuses with ErrInputFenceUnsupported. A miss (no session,
+// a zombie, an env with no token, another incarnation) records a
+// "FenceMismatch" call and returns a *FenceMismatchError. The caller holds
+// f.mu.
+func (f *Fake) checkFenceLocked(name string, fence InputFence) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+	if f.inputFencingLocked() == InputFencingNone {
+		return fmt.Errorf("session %q: %w", name, ErrInputFenceUnsupported)
+	}
+	found := FenceFoundAbsent
+	if cfg, ok := f.sessions[name]; ok {
+		live, proven := InputFenceFromEnv(cfg.Env)
+		switch {
+		case f.Zombies[name]:
+			found = FenceFoundDead
+		case !proven:
+			found = FenceFoundUnproven
+		case live == fence:
+			return nil
+		default:
+			found = live.Digest()
+		}
+	}
+	f.Calls = append(f.Calls, Call{Method: "FenceMismatch", Name: name, Fence: fence})
+	return &FenceMismatchError{Session: name, Found: found}
+}
+
+// ctxFenceLocked applies the input fence ctx carries; a fake configured as
+// InputFencingNone refuses it with ErrInputFenceUnsupported rather than run
+// unfenced. It returns the fence applied, zero when none. The caller holds
+// f.mu.
+func (f *Fake) ctxFenceLocked(ctx context.Context, name string) (InputFence, error) {
+	fence, ok := InputFenceFrom(ctx)
+	if !ok {
+		return InputFence{}, nil
+	}
+	return fence, f.checkFenceLocked(name, fence)
+}
+
+// NudgeFenced implements [FencedInputProvider]: when n.Fence matches it
+// records a Nudge (NudgeNow when n.Immediate) carrying the fence and the
+// delivery key, and answers as [Fake.Nudge] does; otherwise see
+// checkFenceLocked.
+func (f *Fake) NudgeFenced(_ context.Context, name string, content []ContentBlock, n FencedNudge) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.checkFenceLocked(name, n.Fence); err != nil {
+		return err
+	}
+	method := "Nudge"
+	if n.Immediate {
+		method = "NudgeNow"
+	}
+	f.Calls = append(f.Calls, Call{
+		Method:      method,
+		Name:        name,
+		Message:     FlattenText(content),
+		Content:     content,
+		DeliveryKey: n.DeliveryKey,
+		Fence:       n.Fence,
+	})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.NudgeErrors[name]; ok {
+		return err
+	}
+	return nil
+}
+
+// SendKeysFenced implements [FencedInputProvider]: SendKeys under fence.
+func (f *Fake) SendKeysFenced(_ context.Context, name string, fence InputFence, keys ...string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.checkFenceLocked(name, fence); err != nil {
+		return err
+	}
+	f.Calls = append(f.Calls, Call{Method: "SendKeys", Name: name, Message: strings.Join(keys, " "), Fence: fence})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	return nil
+}
+
+// InterruptFenced implements [FencedInputProvider]: Interrupt under fence.
+func (f *Fake) InterruptFenced(_ context.Context, name string, fence InputFence) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.checkFenceLocked(name, fence); err != nil {
+		return err
+	}
+	f.Calls = append(f.Calls, Call{Method: "Interrupt", Name: name, Fence: fence})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	return f.InterruptErrors[name]
 }

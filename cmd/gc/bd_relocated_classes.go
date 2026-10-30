@@ -479,25 +479,37 @@ var bdRelocatedClassCreateVerbs = map[string]string{
 // against infraMigrationClasses and resolves every entry in the real command
 // tree, so neither a new class nor a renamed command can leave a refusal
 // pointing at nothing.
+//
+// The commands themselves are coordclass.MintCommand's, the one table every
+// class refusal quotes (the class-must-not-flip guard's included).
 var bdRelocatedClassMintPaths = map[string]string{
-	config.BeadClassGraph:     "gc sling",
-	config.BeadClassMessaging: "gc mail send",
-	config.BeadClassSessions:  "gc session new",
-	config.BeadClassOrders:    "gc order run",
-	config.BeadClassNudges:    "gc nudge",
+	config.BeadClassGraph:     coordclass.MintCommand(coordclass.ClassGraph),
+	config.BeadClassMessaging: coordclass.MintCommand(coordclass.ClassMessaging),
+	config.BeadClassSessions:  coordclass.MintCommand(coordclass.ClassSessions),
+	config.BeadClassOrders:    coordclass.MintCommand(coordclass.ClassOrders),
+	config.BeadClassNudges:    coordclass.MintCommand(coordclass.ClassNudges),
 }
 
 // bdRelocatedClassCreateShapeFlags are the create-dialect flags that state a
 // prospective bead's CLASS, and how each lands on the bead the classifier
 // judges. Title, priority, description and assignee are absent because
 // classification does not read them — they are stepped over, not modeled.
-var bdRelocatedClassCreateShapeFlags = map[string]func(*beads.Bead, string){
-	"--type":     bdRelocatedClassCreateSetType,
-	"-t":         bdRelocatedClassCreateSetType,
+var bdRelocatedClassCreateShapeFlags = map[string]func(*beads.Bead, string) error{
+	"--type":     bdRelocatedClassCreateInfallible(bdRelocatedClassCreateSetType),
+	"-t":         bdRelocatedClassCreateInfallible(bdRelocatedClassCreateSetType),
 	"--labels":   bdRelocatedClassCreateAddLabels,
 	"-l":         bdRelocatedClassCreateAddLabels,
 	"--label":    bdRelocatedClassCreateAddLabels,
-	"--metadata": bdRelocatedClassCreateAddMetadata,
+	"--metadata": bdRelocatedClassCreateInfallible(bdRelocatedClassCreateAddMetadata),
+}
+
+// bdRelocatedClassCreateInfallible adapts a shape recorder that cannot fail to
+// the table's signature.
+func bdRelocatedClassCreateInfallible(apply func(*beads.Bead, string)) func(*beads.Bead, string) error {
+	return func(shape *beads.Bead, value string) error {
+		apply(shape, value)
+		return nil
+	}
 }
 
 // bdRelocatedClassCreateSetType records a --type value on the prospective bead.
@@ -506,14 +518,18 @@ func bdRelocatedClassCreateSetType(shape *beads.Bead, value string) {
 }
 
 // bdRelocatedClassCreateAddLabels records a --labels value, which bd parses as
-// a comma-separated list (a cobra StringSlice), so `-l triage,gc:nudge` states
-// two labels and the second one decides the class.
-func bdRelocatedClassCreateAddLabels(shape *beads.Bead, value string) {
-	for _, label := range strings.Split(value, ",") {
-		if label = strings.TrimSpace(label); label != "" {
-			shape.Labels = append(shape.Labels, label)
-		}
+// a cobra StringSlice — ONE CSV record, quotes stripped — so `-l triage,gc:nudge`
+// states two labels and the second one decides the class, and `-l '"wisp"'`
+// states the label wisp. bdLabelFlagValues parses it the same way; a value bd
+// itself would reject is an error, and the create is refused rather than
+// guessed at.
+func bdRelocatedClassCreateAddLabels(shape *beads.Bead, value string) error {
+	labels, err := bdLabelFlagValues(value)
+	if err != nil {
+		return err
 	}
+	shape.Labels = append(shape.Labels, labels...)
+	return nil
 }
 
 // bdRelocatedClassCreateAddMetadata records a --metadata value, which bd parses
@@ -574,38 +590,41 @@ func bdRelocatedClassCreateAddMetadata(shape *beads.Bead, value string) {
 // JSON object bd expects likewise contributes nothing to the shape rather than a
 // wrong guess.)
 //
-// Three MINT VERBS are outside the guard entirely, because
-// bdRelocatedClassCreateVerbs holds only create/new/q: `bd import` replays a
-// JSONL export with issue_type and labels carried verbatim, `bd batch` reads a
-// create grammar from stdin or a file, and `bd create-form` mints from a form.
-// Each can still land a relocated-class bead in the work ledger at exit 0. None
-// of them was ever guarded, so this is a limit of the floor rather than a
-// regression — but it is a limit, and `import` in particular is the natural
-// restore path, since JSONL is what `bd export` emits.
+// Three MINT VERBS are outside THIS guard, because bdRelocatedClassCreateVerbs
+// holds only create/new/q: `bd import` replays a JSONL export with issue_type
+// and labels carried verbatim, `bd batch` reads a create grammar from stdin or
+// a file, and `bd create-form` mints from a form. The class-must-not-flip guard
+// (class_flip_guard.go) judges all three on a split city: import classifies
+// every row (and --skip-infra imports the work rows only), batch classifies
+// every create line, and create-form, which cannot be classified, is refused.
 //
 // The guard is a floor on stranded mints, not a proof of their impossibility:
 // the file-backed forms above close the two highest-value doors on the create
 // verbs it covers, and the migration's containment check only REPORTS strays
 // already on disk — it detects them, it does not move them.
-func bdRelocatedClassCreateShape(manifest string, verbArgs []string) beads.Bead {
+func bdRelocatedClassCreateShape(manifest string, verbArgs []string) (beads.Bead, error) {
 	values := bdflags.ValueFlags(manifest)
 	var shape beads.Bead
 	for i := 0; i < len(verbArgs); i++ {
 		name, value, stated := bdRelocatedClassCreateFlagValue(verbArgs[i])
 		apply, statesTheShape := bdRelocatedClassCreateShapeFlags[name]
+		var err error
 		switch {
 		case !statesTheShape:
 			if !stated && values[name] {
 				i++
 			}
 		case stated:
-			apply(&shape, value)
+			err = apply(&shape, value)
 		case i+1 < len(verbArgs):
 			i++
-			apply(&shape, verbArgs[i])
+			err = apply(&shape, verbArgs[i])
+		}
+		if err != nil {
+			return beads.Bead{}, fmt.Errorf("%s: %w", name, err)
 		}
 	}
-	return shape
+	return shape, nil
 }
 
 // bdRelocatedClassCreateFlagValue splits one argv token into the flag it names
@@ -740,8 +759,8 @@ func bdRelocatedClassGraphPlanClass(scopeRoot, path string) (class coordclass.Cl
 //
 // This is the write side of the same split the read guard above covers, over
 // the create verbs that state their beads in argv — not over every way bd can
-// mint: `import`, `batch` and `create-form` remain unguarded, as documented on
-// bdRelocatedClassCreateShape. Where it does fire it fails differently from the
+// mint: `import`, `batch` and `create-form` are judged by the class-must-not-flip
+// guard instead, as documented on bdRelocatedClassCreateShape. Where it does fire it fails differently from the
 // read guard: a blind READ answers emptily and can be re-run once the operator
 // knows better, while a blind CREATE leaves a row in the wrong ledger under the
 // wrong prefix — a bead no later read finds, and no migration moves, because
@@ -818,7 +837,11 @@ func bdRelocatedClassCreateRefusal(cfg *config.City, scopeRoot string, bdArgs []
 	}
 	// A work-class shape matches nothing: relocatedBeadClasses never names the
 	// work class, which is the residual one and the one bd's ledger holds.
-	return bdRelocatedClassMatch(verb, relocated, coordclass.Classify(bdRelocatedClassCreateShape(manifest, verbArgs)))
+	shape, err := bdRelocatedClassCreateShape(manifest, verbArgs)
+	if err != nil {
+		return fmt.Sprintf("bd %s: refused on this split city: gc cannot read %v the way bd does, so it cannot tell which storage class the bead would have. Nothing was written.", verb, err), true
+	}
+	return bdRelocatedClassMatch(verb, relocated, coordclass.Classify(shape))
 }
 
 // bdRelocatedClassMatch returns the create refusal for a prospective bead CLASS

@@ -1,0 +1,78 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "gc-write-mint_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/gastownhall/gascity/cmd/gc-write-mint",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//internal/citywriteauth",
+        "//internal/clientgrant",
+    ],
+)
+
+go_binary(
+    name = "gc-write-mint",
+    embed = [":gc-write-mint_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "gc-write-mint_test",
+    srcs = [
+        "e2e_test.go",
+        "main_test.go",
+        "testenv_import_test.go",
+    ],
+    data = select({
+        "//:gotags_integration": [
+            ":gc-write-mint",
+        ],
+        "//conditions:default": [],
+    }),
+    embed = [":gc-write-mint_lib"],
+    # e2e_test.go (integration) execs the built binary.
+    env = select({
+        "//:gotags_integration": {
+            "GC_TEST_WRITE_MINT_BIN": "$(rootpath :gc-write-mint)",
+        },
+        "//conditions:default": {},
+    }),
+    deps = [
+        "//internal/bazeltest",
+        "//internal/citywriteauth",
+        "//internal/clientgrant",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

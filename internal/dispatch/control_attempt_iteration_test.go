@@ -7,22 +7,15 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
-// gc.attempt answers "which attempt of THIS step is this". A ralph iteration
-// root is a step whose attempts are iterations, so attempt == iteration there.
-// Its body children are DIFFERENT steps: each owns a retry counter that starts
-// at 1 and is bounded by that child's own gc.max_attempts. Stamping the outer
-// iteration onto a child conflates the two counters, and the conflation is not
-// cosmetic — processRetryEval reads gc.attempt off the child and computes
-// nextAttempt = attempt + 1, so a child first run in iteration N is born at
-// attempt N against max_attempts 3. By iteration 3 it is exhausted before it
-// runs and hard-fails with zero retries taken. Live census of the
-// maintainer-city graph store found 81 of 382 retry-kind beads (21%) born at or
-// past their own max, including 40 at attempt 4 and 10 at attempt 5 against a
-// max of 3 — values a counter that starts at 1 can never reach (ga-v7pu5).
-//
-// The iteration index is still worth recording; it just needs its own key.
-// gc.iteration has existed in beadmeta since the runs view started reading it
-// (internal/runproj/detail_nodeshape.go) but nothing ever wrote it.
+// A ralph body has two counters and they need two keys. gc.attempt keeps its
+// v1.4.2 meaning on every body child: the iteration. Pack gates join the beads
+// of one iteration on it (gastownhall/workflows adopt-pr-review-approved.sh
+// load_verdict: gc.attempt == iteration), and #5635 briefly stamped a retry
+// child's own counter there instead, which left those loops iterating forever
+// from iteration 2 on. The retry counter lives in gc.retry_attempt: it starts
+// at 1 in every iteration and is bounded by the child's own gc.max_attempts, so
+// a retry first reached in iteration N is not born at attempt N (ga-v7pu5; the
+// census found 81 of 382 retry beads at or past their own max).
 func TestBuildAttemptRecipeKeepsChildRetryCountersIndependentOfIteration(t *testing.T) {
 	t.Parallel()
 
@@ -83,12 +76,15 @@ func TestBuildAttemptRecipeKeepsChildRetryCountersIndependentOfIteration(t *test
 		return step
 	}
 
-	t.Run("retry control starts its own counter at 1", func(t *testing.T) {
-		// This is the bead processRetryEval reads. Born at the iteration index,
-		// it spends the child's retry budget on iterations it never used.
+	t.Run("retry control carries the iteration in gc.attempt", func(t *testing.T) {
+		// The control is what a pack gate joins on once it passes: it inherits
+		// the attempt's verdict and must match gc.attempt == iteration.
 		got := stepByID(t, "mol-test.review-loop.iteration.3.scorecard")
-		if attempt := got.Metadata["gc.attempt"]; attempt != "1" {
-			t.Errorf("retry control gc.attempt = %q, want 1 (its own counter, not the iteration)", attempt)
+		if attempt := got.Metadata["gc.attempt"]; attempt != "3" {
+			t.Errorf("retry control gc.attempt = %q, want 3 (the iteration)", attempt)
+		}
+		if retryAttempt, ok := got.Metadata["gc.retry_attempt"]; ok {
+			t.Errorf("retry control gc.retry_attempt = %q; only attempt roots count retries", retryAttempt)
 		}
 		if kind := got.Metadata["gc.kind"]; kind != "retry" {
 			t.Fatalf("control gc.kind = %q, want retry — the fixture is not exercising a retry control", kind)
@@ -98,10 +94,16 @@ func TestBuildAttemptRecipeKeepsChildRetryCountersIndependentOfIteration(t *test
 		}
 	})
 
-	t.Run("first attempt bead keeps the attempt its spec carries", func(t *testing.T) {
+	t.Run("first attempt bead restarts its retry counter at 1", func(t *testing.T) {
+		// This is the bead processRetryControl reads the counter from. Born at
+		// the iteration index it would spend the child's retry budget on
+		// iterations it never used.
 		got := stepByID(t, "mol-test.review-loop.iteration.3.scorecard.attempt.1")
-		if attempt := got.Metadata["gc.attempt"]; attempt != "1" {
-			t.Errorf("gc.attempt = %q, want 1 — the ref says attempt.1, so the metadata must agree", attempt)
+		if retryAttempt := got.Metadata["gc.retry_attempt"]; retryAttempt != "1" {
+			t.Errorf("gc.retry_attempt = %q, want 1 — the ref says attempt.1, so the counter must agree", retryAttempt)
+		}
+		if attempt := got.Metadata["gc.attempt"]; attempt != "3" {
+			t.Errorf("gc.attempt = %q, want 3 (the iteration)", attempt)
 		}
 	})
 
@@ -217,20 +219,22 @@ func TestBuildAttemptRecipeInheritsIterationForNestedRetryAttempts(t *testing.T)
 		Type:  "task",
 		Retry: &formula.RetrySpec{MaxAttempts: 3},
 	}
-	// The control is the retry control bead minted as a child of iteration 2,
-	// so it carries that iteration.
+	// The control is the retry control bead minted as a child of iteration 3,
+	// so it carries that iteration. Iteration 3 and retry 2 keep the two
+	// counters distinguishable.
 	control := beads.Bead{
 		ID: "gc-3",
 		Metadata: map[string]string{
 			"gc.step_id":   "scorecard",
-			"gc.step_ref":  "mol-test.review-loop.iteration.2.scorecard",
-			"gc.iteration": "2",
+			"gc.step_ref":  "mol-test.review-loop.iteration.3.scorecard",
+			"gc.iteration": "3",
+			"gc.attempt":   "3",
 		},
 	}
 
 	recipe := buildAttemptRecipe(step, control, 2)
 
-	root := recipe.StepByID("mol-test.review-loop.iteration.2.scorecard.attempt.2")
+	root := recipe.StepByID("mol-test.review-loop.iteration.3.scorecard.attempt.2")
 	if root == nil {
 		ids := make([]string, 0, len(recipe.Steps))
 		for _, s := range recipe.Steps {
@@ -238,14 +242,16 @@ func TestBuildAttemptRecipeInheritsIterationForNestedRetryAttempts(t *testing.T)
 		}
 		t.Fatalf("missing attempt root; recipe has %v", ids)
 	}
-	if iteration := root.Metadata["gc.iteration"]; iteration != "2" {
-		t.Errorf("gc.iteration = %q, want 2 — inherited from the control, not from attemptNum", iteration)
+	if iteration := root.Metadata["gc.iteration"]; iteration != "3" {
+		t.Errorf("gc.iteration = %q, want 3 — inherited from the control, not from attemptNum", iteration)
 	}
-	// The two counters have genuinely diverged here: this is retry attempt 2 of
-	// a step inside iteration 2. Only coincidence makes them equal; the point is
-	// that each is now readable on its own.
-	if attempt := root.Metadata["gc.attempt"]; attempt != "2" {
-		t.Errorf("gc.attempt = %q, want 2", attempt)
+	// This is retry attempt 2 of a step inside iteration 3; each counter is
+	// readable under its own key.
+	if attempt := root.Metadata["gc.attempt"]; attempt != "3" {
+		t.Errorf("gc.attempt = %q, want 3 (the iteration)", attempt)
+	}
+	if retryAttempt := root.Metadata["gc.retry_attempt"]; retryAttempt != "2" {
+		t.Errorf("gc.retry_attempt = %q, want 2", retryAttempt)
 	}
 }
 

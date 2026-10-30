@@ -12,7 +12,7 @@ import (
 func coreFormulaDir(t *testing.T) string {
 	t.Helper()
 	_, filename, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(filename), "..", "..", "internal", "bootstrap", "packs", "core", "formulas")
+	return filepath.Join(gcCallerDir(filename), "..", "..", "internal", "bootstrap", "packs", "core", "formulas")
 }
 
 // TestPolecatReportFormulaParsesAndHasNoGHPRCreate verifies that the
@@ -20,6 +20,7 @@ func coreFormulaDir(t *testing.T) string {
 // terminal step, and never instructs the agent to call gh pr create or
 // git push in any step description.
 func TestPolecatReportFormulaParsesAndHasNoGHPRCreate(t *testing.T) {
+	chdirToRealPackageDir(t)
 	dir := coreFormulaDir(t)
 	path := filepath.Join(dir, "mol-polecat-report.toml")
 
@@ -49,7 +50,7 @@ func TestPolecatReportFormulaParsesAndHasNoGHPRCreate(t *testing.T) {
 		}
 		if step.ID == "write-report" {
 			hasWriteReport = true
-			if strings.Contains(step.Description, `bd update "$WORK_BEAD_ID" --notes`) {
+			if strings.Contains(step.Description, `bd update "$WORK_BEAD_ID" --append-notes`) {
 				hasWriteNotes = true
 			}
 			if strings.Contains(step.Description, `bd close "$WORK_BEAD_ID"`) {
@@ -67,7 +68,7 @@ func TestPolecatReportFormulaParsesAndHasNoGHPRCreate(t *testing.T) {
 		t.Error("mol-polecat-report formula missing 'write-report' step")
 	}
 	if !hasWriteNotes {
-		t.Error(`write-report step must write findings with 'bd update "$WORK_BEAD_ID" --notes'`)
+		t.Error(`write-report step must write findings with 'bd update "$WORK_BEAD_ID" --append-notes'`)
 	}
 	if !hasClose {
 		t.Error(`write-report step must close the bead with 'bd close "$WORK_BEAD_ID"'`)

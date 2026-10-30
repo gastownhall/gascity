@@ -25,10 +25,21 @@ func TestClassifyInfraBlind(t *testing.T) {
 			wantBlind: false,
 		},
 		{
-			name:       "native store unavailable marker",
-			result:     GateResult{Outcome: GateFail, ExitCode: exitCode(1), Stderr: "2026/09/13 WARN native_store_unavailable scope=/city\n"},
-			wantReason: "native_store_unavailable",
-			wantBlind:  true,
+			// internal/beads/factory.go logs this and then falls back to bd,
+			// so the read succeeds. A gate that prints it and fails has failed
+			// for its own reason; re-running it burns the infra budget and
+			// delays a real verdict.
+			name:      "native store unavailable is a recovered path, not blindness",
+			result:    GateResult{Outcome: GateFail, ExitCode: exitCode(1), Stderr: "2026/09/13 WARN native_store_unavailable scope=/city\n"},
+			wantBlind: false,
+		},
+		{
+			// "gc import install" is the remediation every pack-cache error
+			// carries and cmd/gc/cmd_import.go's own error prefix; the typed
+			// blindness it stood in for is "locked but not cached".
+			name:      "gc import install failing is a verdict, not blindness",
+			result:    GateResult{Outcome: GateFail, ExitCode: exitCode(1), Stderr: `gc import install: pack "core" failed checksum verification`},
+			wantBlind: false,
 		},
 		{
 			name:       "uncached pack import marker",
@@ -44,17 +55,17 @@ func TestClassifyInfraBlind(t *testing.T) {
 		},
 		{
 			name:      "passing gate is never blind",
-			result:    GateResult{Outcome: GatePass, ExitCode: exitCode(0), Stderr: "WARN native_store_unavailable"},
+			result:    GateResult{Outcome: GatePass, ExitCode: exitCode(0), Stderr: "Error 1045 (28000): Access denied for user 'root'@'localhost'"},
 			wantBlind: false,
 		},
 		{
 			name:      "already an infra outcome",
-			result:    GateResult{Outcome: GateError, Stderr: "native_store_unavailable"},
+			result:    GateResult{Outcome: GateError, Stderr: "Error 1045 (28000): Access denied for user 'root'@'localhost'"},
 			wantBlind: false,
 		},
 		{
 			name:      "marker on stdout only",
-			result:    GateResult{Outcome: GateFail, ExitCode: exitCode(1), Stdout: "native_store_unavailable"},
+			result:    GateResult{Outcome: GateFail, ExitCode: exitCode(1), Stdout: "Error 1045 (28000): Access denied for user 'root'@'localhost'"},
 			wantBlind: false,
 		},
 	}

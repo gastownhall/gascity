@@ -47,6 +47,12 @@ type Provider struct {
 	store        beads.Store
 	sessions     session.AddressDirectory
 	sessionCache *sessionInfoCache
+	// sender is the calling session, already resolved by the command; see
+	// PinSender.
+	sender *session.Info
+	// onConsumed, when set, is told each message a read, mark-read or
+	// archive consumed; see OnConsumed.
+	onConsumed func(id string)
 }
 
 type sessionInfoCache struct {
@@ -155,9 +161,24 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 	if to == "" {
 		return mail.Message{}, fmt.Errorf("beadmail send: recipient is required")
 	}
+	return p.sendWithExtraMetadata(from, to, subject, body, nil)
+}
+
+// sendWithExtraMetadata is the shared body of Send and SendDeduped: resolve
+// the sender route, derive title and thread label, merge extra metadata (the
+// dedup key), and create the message bead.
+func (p *Provider) sendWithExtraMetadata(from, to, subject, body string, extra map[string]string) (mail.Message, error) {
 	from, metadata, err := p.resolveSenderRoute(from)
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail send: %w", err)
+	}
+	if len(extra) > 0 {
+		if metadata == nil {
+			metadata = make(map[string]string, len(extra))
+		}
+		for k, v := range extra {
+			metadata[k] = v
+		}
 	}
 	threadID := generateThreadID()
 	labels := []string{"thread:" + threadID}
@@ -177,18 +198,104 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 	return beadToMessage(b), nil
 }
 
+// SendDeduped implements the optional [mail.DedupSender] capability: it
+// creates the message unless a live (un-archived) message carrying the same
+// dedup key, addressed to the same mailbox, already exists. "Same mailbox" is
+// the inbox's own question, so the probe compares against every route that
+// resolves to the recipient rather than the literal string it was given: an
+// alias and the session id behind it are one mailbox to [Provider.Inbox], and a
+// stream that addresses it both ways must not get two live copies. The probe is
+// one metadata-keyed list; a probe error fails the send rather than risking a
+// silent duplicate. A route resolution that degrades (an ambiguous or
+// unresolvable address) falls back to the literal recipient, exactly as
+// [Provider.Inbox] does, so the probe keeps answering the inbox's question: the
+// effect is a narrower match, which sends rather than suppresses, and a
+// duplicate notification beats a dropped one. The probe reads only open
+// messages, and archiving closes one, so an archived notification no longer
+// matches: the dedup horizon is the previous message's live lifetime by design
+// (see [mail.DedupSender]).
+func (p *Provider) SendDeduped(from, to, subject, body, key string) (mail.Message, bool, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return mail.Message{}, false, fmt.Errorf("beadmail send: dedup key is required")
+	}
+	if to == "" {
+		return mail.Message{}, false, fmt.Errorf("beadmail send: recipient is required")
+	}
+	existing, suppressed, err := p.findLiveDuplicate(to, key, false)
+	if err != nil {
+		return mail.Message{}, false, fmt.Errorf("beadmail send: dedup probe for key %q: %w", key, err)
+	}
+	if suppressed {
+		return existing, true, nil
+	}
+	msg, err := p.sendWithExtraMetadata(from, to, subject, body, map[string]string{mail.DedupKeyMetadataKey: key})
+	if err != nil {
+		return mail.Message{}, false, err
+	}
+	return msg, false, nil
+}
+
+func (p *Provider) findLiveDuplicate(to, key string, pendingHandoffOnly bool) (mail.Message, bool, error) {
+	existing, err := p.store.List(beads.ListQuery{
+		Type:     messageBeadType,
+		Status:   "open",
+		Metadata: map[string]string{mail.DedupKeyMetadataKey: key},
+		TierMode: beads.TierBoth,
+		Live:     true,
+	})
+	if err != nil {
+		return mail.Message{}, false, err
+	}
+	if len(existing) == 0 {
+		return mail.Message{}, false, nil
+	}
+	routes := p.recipientRoutes(to)
+	for _, b := range existing {
+		if pendingHandoffOnly && !isUnreadInjectedAutoHandoff(b) {
+			continue
+		}
+		if matchesRecipientRoute(routes, b.Assignee) {
+			return beadToMessage(b), true, nil
+		}
+	}
+	return mail.Message{}, false, nil
+}
+
 // SendHandoff creates a handoff message from a [mail.HandoffIntent]. It speaks
 // mail.Message at the boundary while confining the type=message bead, the
 // stable thread label, and the handoff-specific extra labels to this
 // implementation. Sender-route metadata is resolved exactly as [Provider.Send]
-// does, so handoff mail replies route correctly.
-func (p *Provider) SendHandoff(intent mail.HandoffIntent) (mail.Message, error) {
+// does, so handoff mail replies route correctly. When intent.DedupKey is
+// non-empty the send is suppressed, returning the existing message with
+// suppressed=true, only while an unread archive-after-inject auto-handoff for
+// the same recipient and key is pending; a handoff that was read but left open
+// does not suppress.
+func (p *Provider) SendHandoff(intent mail.HandoffIntent) (mail.Message, bool, error) {
 	if intent.To == "" {
-		return mail.Message{}, fmt.Errorf("beadmail handoff: recipient is required")
+		return mail.Message{}, false, fmt.Errorf("beadmail handoff: recipient is required")
+	}
+	dedupKey := strings.TrimSpace(intent.DedupKey)
+	if dedupKey != "" {
+		existing, suppressed, err := p.findLiveDuplicate(intent.To, dedupKey, true)
+		if err != nil {
+			return mail.Message{}, false, fmt.Errorf("beadmail handoff: dedup probe for key %q: %w", dedupKey, err)
+		}
+		if suppressed {
+			return existing, true, nil
+		}
 	}
 	from, metadata, err := p.resolveSenderRoute(intent.From)
 	if err != nil {
-		return mail.Message{}, fmt.Errorf("beadmail handoff: %w", err)
+		return mail.Message{}, false, fmt.Errorf("beadmail handoff: %w", err)
+	}
+	if dedupKey != "" {
+		withDedup := make(map[string]string, len(metadata)+1)
+		for key, value := range metadata {
+			withDedup[key] = value
+		}
+		withDedup[mail.DedupKeyMetadataKey] = dedupKey
+		metadata = withDedup
 	}
 	labels := make([]string, 0, 1+len(intent.ExtraLabels))
 	labels = append(labels, "thread:"+intent.ThreadID)
@@ -196,9 +303,9 @@ func (p *Provider) SendHandoff(intent mail.HandoffIntent) (mail.Message, error) 
 
 	b, err := p.createMessageBead(intent.Subject, intent.Body, from, intent.To, labels, metadata)
 	if err != nil {
-		return mail.Message{}, fmt.Errorf("beadmail handoff: %w", err)
+		return mail.Message{}, false, fmt.Errorf("beadmail handoff: %w", err)
 	}
-	return beadToMessage(b), nil
+	return beadToMessage(b), false, nil
 }
 
 // createMessageBead is the single confined edge where a mail message becomes a
@@ -218,10 +325,67 @@ func (p *Provider) createMessageBead(title, body, from, to string, labels []stri
 	})
 }
 
+// PinSender records the calling session, which the command has already
+// resolved from its own bead. A send whose sender names that session — by bead
+// id always, and by current alias or session name while the session is open —
+// takes its sender route from it rather than resolving the address again.
+//
+// The pin is the proven sender, so it wins where resolving would not agree: a
+// sender address that another live session also claims (its session name equal
+// to the pinned session's alias, say) records the pinned session, where
+// [session.AddressDirectory.ResolveAddress] could pick the other one. Any other
+// sender — a historical alias included — still resolves.
+func (p *Provider) PinSender(info session.Info) {
+	pinned := info
+	p.sender = &pinned
+}
+
+// OnConsumed registers fn to be told the id of each message a call consumed:
+// a successful Read, MarkRead, Archive (Delete, ArchiveMany and DeleteMany
+// included), ArchiveMatching, or archive of an injected auto-handoff
+// (ArchiveInjectedAutoHandoffs, ArchiveInjectedAutoHandoffsFromInbox). An
+// Archive of a message already archived or already gone
+// (mail.ErrAlreadyArchived) reports it again, as a repeated Read does, and so
+// does an Archive, ArchiveMatching or auto-handoff archive that loses the
+// message to a removal between its read and its close. fn
+// runs after the write, on the caller's goroutine, and cannot fail the call.
+// Register it before the provider is shared; a later call replaces it.
+func (p *Provider) OnConsumed(fn func(id string)) {
+	p.onConsumed = fn
+}
+
+// consumed reports id to the OnConsumed hook, if any.
+func (p *Provider) consumed(id string) {
+	if p.onConsumed != nil {
+		p.onConsumed(id)
+	}
+}
+
+// pinnedSenderFor returns the pinned sender when from names it.
+func (p *Provider) pinnedSenderFor(from string) (session.Info, bool) {
+	if p.sender == nil || from == "" {
+		return session.Info{}, false
+	}
+	info := *p.sender
+	if from == strings.TrimSpace(info.ID) {
+		return info, true
+	}
+	if info.Closed {
+		return session.Info{}, false
+	}
+	if from == strings.TrimSpace(info.Alias) || from == strings.TrimSpace(info.SessionNameMetadata) {
+		return info, true
+	}
+	return session.Info{}, false
+}
+
 func (p *Provider) resolveSenderRoute(from string) (string, map[string]string, error) {
 	from = strings.TrimSpace(from)
 	if from == "" || from == "human" || p.sessions == nil {
 		return from, nil, nil
+	}
+	if info, ok := p.pinnedSenderFor(from); ok {
+		return senderRouteFromInfo(info, from)
 	}
 	info, err := p.sessions.ResolveAddress(from, false)
 	if err != nil {
@@ -230,6 +394,11 @@ func (p *Provider) resolveSenderRoute(from string) (string, map[string]string, e
 		}
 		return "", nil, fmt.Errorf("resolving sender %q: %w", from, err)
 	}
+	return senderRouteFromInfo(info, from)
+}
+
+// senderRouteFromInfo is the sender route of a resolved sending session.
+func senderRouteFromInfo(info session.Info, from string) (string, map[string]string, error) {
 	display := senderDisplayAddress(info, from)
 	metadata := map[string]string{fromSessionIDMetadataKey: info.ID}
 	if display != "" {
@@ -300,6 +469,7 @@ func (p *Provider) Read(id string) (mail.Message, error) {
 			return mail.Message{}, fmt.Errorf("beadmail read: marking as read: %w", err)
 		}
 	}
+	p.consumed(id)
 	msg := beadToMessage(b)
 	msg.Read = true
 	return msg, nil
@@ -314,10 +484,14 @@ func (p *Provider) MarkRead(id string) error {
 	if isRemovedMessageBead(b) {
 		return beadmailError("mark-read", beads.ErrNotFound)
 	}
-	return p.store.Update(id, beads.UpdateOpts{
+	if err := p.store.Update(id, beads.UpdateOpts{
 		Labels:   []string{"read"},
 		Metadata: map[string]string{"mail.read": "true"},
-	})
+	}); err != nil {
+		return err
+	}
+	p.consumed(id)
+	return nil
 }
 
 // MarkUnread marks a message as unread (removes "read" label).
@@ -352,9 +526,15 @@ type ArchiveFilter struct {
 // (all listing paths filter Status != "open"). Archiving an already-closed
 // message is idempotent and returns ErrAlreadyArchived without mutating it.
 func (p *Provider) Archive(id string) error {
-	b, err := p.store.Get(id)
+	// The cached Get can answer ErrNotFound from a stale tombstone for a bead
+	// that is still open in the backing store; read live so archive repairs it.
+	b, err := beads.HandlesFor(p.store).Live.Get(id)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
+			// Gone already (purged after an earlier archive, say): consumed
+			// all the same, so a hook whose work failed after that archive
+			// gets another chance.
+			p.consumed(id)
 			return mail.ErrAlreadyArchived
 		}
 		return fmt.Errorf("beadmail archive: %w", err)
@@ -363,15 +543,40 @@ func (p *Provider) Archive(id string) error {
 		return fmt.Errorf("beadmail archive: bead %s is not a message", id)
 	}
 	if b.Status == "closed" {
+		// Consumed already, and again: a hook whose work failed after the
+		// first archive gets another chance, as a repeated Read gives it.
+		p.consumed(id)
 		return mail.ErrAlreadyArchived
 	}
-	if err := p.store.Close(id); err != nil {
+	if err := p.closeArchived(id, hasLabel(b.Labels, "read")); err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
+			// Removed under the archive: consumed all the same.
+			p.consumed(id)
 			return mail.ErrAlreadyArchived
 		}
 		return fmt.Errorf("beadmail archive: %w", err)
 	}
+	p.consumed(id)
 	return nil
+}
+
+// closeArchived marks an unread message read, then closes it. Archive means
+// "dismissed", and a dismissed message left unread was lost twice over: it
+// kept reading as unread in any history view, and the read-gated retention
+// sweep (SweepReadMessagesBefore / PurgeReadMessageWisps) never reclaims an
+// unread message, so it lingered forever. Marking read first is the
+// same order ArchiveInjectedAutoHandoffs already uses. alreadyRead skips the
+// write when the caller has seen the read label.
+func (p *Provider) closeArchived(id string, alreadyRead bool) error {
+	if !alreadyRead {
+		if err := p.store.Update(id, beads.UpdateOpts{
+			Labels:   []string{"read"},
+			Metadata: map[string]string{mail.ReadMetadataKey: "true"},
+		}); err != nil {
+			return err
+		}
+	}
+	return p.store.Close(id)
 }
 
 // ArchiveCandidates returns open messages that match filter without archiving
@@ -432,13 +637,16 @@ func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail
 		return candidates, results, nil
 	}
 	for i, id := range ids {
-		if err := p.store.Close(id); err != nil {
+		if err := p.closeArchived(id, candidates[i].Read); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				results[i].Err = mail.ErrAlreadyArchived
+				p.consumed(id)
 				continue
 			}
 			results[i].Err = fmt.Errorf("beadmail archive: %w", err)
+			continue
 		}
+		p.consumed(id)
 	}
 	return candidates, results, nil
 }
@@ -457,7 +665,10 @@ func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail
 // read-gated TTL sweep (PurgeReadMessageWisps) reclaims it later — one unified
 // retention path, no special-case delete, no permanent data loss.
 func (p *Provider) ArchiveInjectedAutoHandoffs(ids []string) error {
-	var errs []error
+	var (
+		errs     []error
+		handoffs []string
+	)
 	for _, id := range ids {
 		id = strings.TrimSpace(id)
 		if id == "" {
@@ -471,29 +682,77 @@ func (p *Provider) ArchiveInjectedAutoHandoffs(ids []string) error {
 			errs = append(errs, fmt.Errorf("loading %s: %w", id, err))
 			continue
 		}
-		if b.Type != messageBeadType ||
-			!hasLabel(b.Labels, mail.AutoHandoffLabel) ||
-			!hasLabel(b.Labels, mail.ArchiveAfterInjectLabel) {
+		if !isInjectedAutoHandoff(b) {
 			continue
 		}
-		// Mark read (label + metadata) so a later SessionStart does not re-inject
-		// it and the read-gated TTL sweep can later reclaim it.
-		if err := p.store.Update(id, beads.UpdateOpts{
-			Labels:   []string{"read"},
-			Metadata: map[string]string{mail.ReadMetadataKey: "true"},
-		}); err != nil && !errors.Is(err, beads.ErrNotFound) {
-			errs = append(errs, fmt.Errorf("marking %s read: %w", id, err))
+		handoffs = append(handoffs, id)
+	}
+	errs = append(errs, p.archiveInjectedAutoHandoffs(handoffs, nil))
+	return errors.Join(errs...)
+}
+
+// isInjectedAutoHandoff reports whether b is auto-handoff mail that opted into
+// being archived once injected.
+func isInjectedAutoHandoff(b beads.Bead) bool {
+	return b.Type == messageBeadType &&
+		hasLabel(b.Labels, mail.AutoHandoffLabel) &&
+		hasLabel(b.Labels, mail.ArchiveAfterInjectLabel)
+}
+
+func isUnreadInjectedAutoHandoff(b beads.Bead) bool {
+	return !hasLabel(b.Labels, "read") && isInjectedAutoHandoff(b)
+}
+
+// archiveInjectedAutoHandoffs marks each injected handoff read and closes it,
+// retain-addressable, mirroring SweepReadMessagesBefore: mail.read (so a later
+// SessionStart does not re-inject it, a read-back reports it read, and the
+// read-gated purge can reclaim it), the retention close_reason (so
+// isRemovedMessageBead keeps the closed handoff addressable — recoverable —
+// until PurgeReadMessageWisps reclaims it) and the "read" label. Never a hard
+// delete.
+//
+// It writes in two phases. First every handoff is closed, each by one
+// close-with-metadata write ([beads.Store.CloseAll] of its id) carrying
+// mail.read and the close_reason. Then each is given the "read" label, which
+// is what hides OPEN mail from a label-based inbox read, while mayLabel (nil:
+// always) allows it. Stopped before a handoff's close, it is open and unread:
+// the next hook delivers it again. A store that applies the metadata and the
+// close as two operations underneath can stop between them, leaving the
+// handoff open with mail.read=true but no label: a label-based inbox read
+// delivers it again, a read-back reports it read, and once past retention
+// PurgeReadMessageWisps may delete it. Stopped after the close — or with
+// mayLabel refusing — it is closed and read through mail.read, missing the
+// label for good: a closed handoff never returns to an inbox, so nothing
+// archives it again. That costs nothing a reader sees, which is why a hook
+// near its deadline skips the label rather than risk its output.
+func (p *Provider) archiveInjectedAutoHandoffs(ids []string, mayLabel func() bool) error {
+	var (
+		errs   []error
+		closed []string
+	)
+	for _, id := range ids {
+		if _, err := p.store.CloseAll([]string{id}, map[string]string{
+			mail.ReadMetadataKey: "true",
+			"close_reason":       RetentionSweepCloseReason,
+		}); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				// Removed under the archive: consumed all the same, as
+				// Archive reports it.
+				p.consumed(id)
+			} else {
+				errs = append(errs, fmt.Errorf("archiving %s: %w", id, err))
+			}
 			continue
 		}
-		// Stamp the retention marker then close, mirroring SweepReadMessagesBefore
-		// so isRemovedMessageBead keeps the closed handoff addressable (recoverable)
-		// until PurgeReadMessageWisps reclaims it — never a hard delete here.
-		if err := p.store.SetMetadata(id, "close_reason", RetentionSweepCloseReason); err != nil && !errors.Is(err, beads.ErrNotFound) {
-			errs = append(errs, fmt.Errorf("stamping %s close_reason: %w", id, err))
-			continue
+		closed = append(closed, id)
+		p.consumed(id)
+	}
+	for _, id := range closed {
+		if mayLabel != nil && !mayLabel() {
+			break
 		}
-		if err := p.store.Close(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
-			errs = append(errs, fmt.Errorf("archiving %s: %w", id, err))
+		if err := p.store.Update(id, beads.UpdateOpts{Labels: []string{"read"}}); err != nil && !errors.Is(err, beads.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("labeling archived %s read: %w", id, err))
 		}
 	}
 	return errors.Join(errs...)
@@ -693,9 +952,12 @@ func isRemovedMessageBead(b beads.Bead) bool {
 	if b.Type != messageBeadType || b.Status == "open" {
 		return false
 	}
-	// Retention-swept mail is system-aged, not user-removed; it stays
-	// addressable until PurgeReadMessageWisps deletes it.
-	return b.Metadata["close_reason"] != RetentionSweepCloseReason
+	// Retention-swept mail is system-aged, not user-removed. Read-swept mail
+	// stays addressable until PurgeReadMessageWisps deletes it; unread-swept
+	// mail stays addressable indefinitely (no purge arm collects it). Both
+	// reasons are system-aged, so neither is hidden here.
+	reason := b.Metadata["close_reason"]
+	return reason != RetentionSweepCloseReason && reason != UnreadRetentionSweepCloseReason
 }
 
 // deriveReplyTitle returns a non-empty title for a reply message. Callers
@@ -929,6 +1191,116 @@ func SweepReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int,
 // the two stay in lockstep.
 func CountReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int) (int, error) {
 	candidates, err := readMessagesBefore(store.Store, cutoff, limit)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, b := range candidates {
+		if limit > 0 && count >= limit {
+			break
+		}
+		if b.Status != "open" {
+			continue
+		}
+		count++
+	}
+	return count, nil
+}
+
+// unreadMessagesBefore lists message beads without the "read" label created
+// before `before`, oldest first — the candidate set for the stale-unread-mail
+// retention sweep (gastownhall/gascity#5240). Unlike readMessagesBefore, the
+// store cannot filter on label *absence*, so the "read" exclusion is applied
+// in memory after the query rather than in the query itself. For that reason
+// the query is deliberately unbounded: capping it would let the oldest aged
+// read beads (e.g. while the read-mail phase is disabled or its closes keep
+// failing) fill the fetch window and starve the unread sweep on every run.
+// Callers enforce their own close/count limit over the returned slice.
+func unreadMessagesBefore(store beads.Store, before time.Time) ([]beads.Bead, error) {
+	candidates, err := store.List(beads.ListQuery{
+		Type:          messageBeadType,
+		CreatedBefore: before,
+		Sort:          beads.SortCreatedAsc,
+		TierMode:      beads.TierBoth,
+	})
+	if err != nil {
+		return nil, err
+	}
+	unread := make([]beads.Bead, 0, len(candidates))
+	for _, b := range candidates {
+		if !hasLabel(b.Labels, "read") {
+			unread = append(unread, b)
+		}
+	}
+	return unread, nil
+}
+
+// UnreadRetentionSweepCloseReason is the canonical close_reason the
+// unread-mail retention sweep stamps on a message bead before closing it.
+// The unread sweep is opt-in ([mail] unread_retention_ttl); when enabled it
+// is normally given a much longer TTL than read mail so a recipient who has
+// not yet checked their inbox still sees it, but without this sweep unread
+// mail never matches readMessagesBefore's Label:"read" filter and accumulates
+// forever (gastownhall/gascity#5240). Like [RetentionSweepCloseReason], this
+// marks the bead as system-aged rather than user-removed; isRemovedMessageBead
+// recognizes both reasons. The 20-character floor satisfies
+// validation.on-close=error.
+//
+// Unlike [RetentionSweepCloseReason], no purge arm reclaims unread-swept beads
+// today: PurgeReadMessageWisps selects on the mail.read metadata key, which
+// unread mail never carries, and reapOrphanedClosedWisps skips beads without
+// root_bead_id. Such a bead is closed-but-not-reclaimed. Extending reclamation
+// to unread mail is tracked separately.
+const UnreadRetentionSweepCloseReason = "mail gc-swept: unread mail bead past gc retention window"
+
+// SweepUnreadMessagesBefore closes unread message beads created before
+// cutoff, oldest first, stamping closeReason as "close_reason" metadata on
+// each bead before closing it. It is the unread-mail half of the retention
+// sweep, mirroring SweepReadMessagesBefore's candidate-query-then-close-loop
+// shape but selecting on label absence via unreadMessagesBefore instead of
+// the "read" label.
+//
+// limit caps the number of beads closed (pass 0 for no cap); the close loop
+// enforces it over the full unbounded candidate set (see unreadMessagesBefore)
+// so a caller sharing a cross-phase close budget (see the nudge+mail sweep)
+// honors it exactly. Beads that are no longer open when revisited are skipped
+// without consuming the limit.
+//
+// Errors are split by severity the same way SweepReadMessagesBefore's are:
+// listErr is the fatal candidate-listing failure (no beads were swept), while
+// closeErrs holds the per-bead metadata/close failures that do not abort the
+// sweep. Returns the number of beads closed.
+func SweepUnreadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int, closeReason string) (closed int, closeErrs []error, listErr error) {
+	candidates, err := unreadMessagesBefore(store.Store, cutoff)
+	if err != nil {
+		return 0, nil, err
+	}
+	for _, b := range candidates {
+		if limit > 0 && closed >= limit {
+			break
+		}
+		if b.Status != "open" {
+			continue
+		}
+		if err := store.SetMetadata(b.ID, "close_reason", closeReason); err != nil {
+			closeErrs = append(closeErrs, fmt.Errorf("mail %s: set close_reason: %w", b.ID, err))
+			continue
+		}
+		if err := store.Close(b.ID); err != nil {
+			closeErrs = append(closeErrs, fmt.Errorf("mail %s: close: %w", b.ID, err))
+			continue
+		}
+		closed++
+	}
+	return closed, closeErrs, nil
+}
+
+// CountUnreadMessagesBefore returns how many unread message beads
+// SweepUnreadMessagesBefore would close for the same cutoff and limit,
+// without mutating any bead. It is the dry-run twin of the sweep and shares
+// its candidate query and limit semantics so the two stay in lockstep.
+func CountUnreadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int) (int, error) {
+	candidates, err := unreadMessagesBefore(store.Store, cutoff)
 	if err != nil {
 		return 0, err
 	}

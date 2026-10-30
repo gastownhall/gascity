@@ -413,9 +413,11 @@ func tutorialShellCommand(command, home string) string {
 }
 
 func (w *tutorialWorkspace) configureInitializedCities() error {
-	hostHome, err := os.UserHomeDir()
-	if err != nil {
-		return err
+	// Where the provider CLIs write their transcripts: the real home in host
+	// mode, the isolated provider home otherwise.
+	hostHome := w.env.ProviderHome
+	if hostHome == "" {
+		return fmt.Errorf("tutorial env has no provider home")
 	}
 	observePaths := []string{
 		filepath.Join(hostHome, ".claude", "projects"),

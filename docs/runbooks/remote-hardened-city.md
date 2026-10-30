@@ -22,10 +22,18 @@ new rig — both authenticated by a fresh, request-bound grant your machine mint
 
 ## 1. Prerequisites and threat posture
 
-- **One controller replica only.** The grant replay guard and the rig-create
-  in-flight index are process-local. A second controller against the same city
-  reopens the grant replay window and races double-clones. Nothing in code
-  detects a second replica — this is an operator rule.
+- **One controller replica only.** Every city runs exactly one controller. The
+  city's controller lock refuses a second controller on the same city
+  directory, but nothing detects one that runs against the same city from
+  another host or pod, so this is an operator rule. A hardened city has more
+  at stake: the grant replay guard and the rig-create in-flight index are
+  process-local, so a second controller against the same city reopens the
+  grant replay window and races double-clones. On Kubernetes, run the
+  controller as a single pod: under a Deployment, set `replicas: 1` and
+  `strategy: { type: Recreate }`, because the default `RollingUpdate` starts
+  the new pod before the old one stops.
+  `contrib/session-scripts/gc-controller-k8s` runs one fixed-name pod and
+  deletes the old pod before it creates the new one.
 - **The read plane is FULLY UNAUTHENTICATED.** Write-auth gates *mutations*
   only. Anyone who can reach the port can read every bead payload, all mail,
   session peeks and transcripts, and the entire event stream — **including the
@@ -230,7 +238,8 @@ operating constraints, not bugs.
 - **Single-replica only.** The replay guard (grant `jti`) and the rig-create
   in-flight index are process-local. A second controller against the same city
   reopens grant replay (bounded by the ≤2 m TTL + 30 s skew) and races
-  double-clones. Run exactly one controller per hardened city.
+  double-clones. Run exactly one controller per city (on Kubernetes,
+  `replicas: 1` with the `Recreate` strategy).
 - **Unauthenticated read plane.** Everything readable is readable by anyone who
   reaches the port. The mitigation is the network/TLS front — a mandatory part
   of the deployment, not an add-on.

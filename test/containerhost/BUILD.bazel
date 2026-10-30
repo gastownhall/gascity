@@ -1,0 +1,86 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "containerhost",
+    srcs = [
+        "docker.go",
+        "host.go",
+        "kubectl.go",
+        "tools.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/test/containerhost",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/fields",
+        "@io_k8s_apimachinery//pkg/labels",
+        "@io_k8s_apimachinery//pkg/runtime",
+        "@io_k8s_apimachinery//pkg/types",
+        "@io_k8s_apimachinery//pkg/util/yaml",
+        "@io_k8s_client_go//util/jsonpath",
+    ],
+)
+
+go_test(
+    name = "containerhost_test",
+    srcs = [
+        "docker_session_test.go",
+        "docker_test.go",
+        "k8s_session_test.go",
+        "kubectl_test.go",
+        "main_test.go",
+        "testenv_import_test.go",
+    ],
+    # The Docker and K8s session adapters under test run against this
+    # package's emulated container host; their tmux, bash and jq are the
+    # worker image's (tools/rbe/worker-env.txt).
+    data = [
+        "//contrib:session-scripts/gc-session-k8s",
+        "//scripts:gc-session-docker",
+    ],
+    embed = [":containerhost"],
+    env = {
+        "GC_SESSION_DOCKER_SCRIPT": "$(rootpath //scripts:gc-session-docker)",
+        "GC_SESSION_K8S_SCRIPT": "$(rootpath //contrib:session-scripts/gc-session-k8s)",
+    },
+    deps = [
+        "//internal/bazeltest",
+        "//internal/runtime",
+        "//internal/runtime/exec",
+        "//internal/runtime/runtimetest",
+        "//internal/testenv",
+        "//test/tmuxtest",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

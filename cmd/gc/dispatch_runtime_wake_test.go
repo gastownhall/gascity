@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestDispatchWakeFileReturnsGCSubpath(t *testing.T) {
@@ -27,27 +28,35 @@ func TestWriteDispatchWakeFileCreatesFile(t *testing.T) {
 	}
 }
 
+// TestWriteDispatchWakeFileAdvancesMtime pins that every wake is observable:
+// workers detect a wake by the file's mtime changing, so a second wake on an
+// existing file must move its mtime forward (ga-vnycm2.35: opening the file
+// without writing left the mtime at creation time, so only the first wake was
+// ever seen).
 func TestWriteDispatchWakeFileAdvancesMtime(t *testing.T) {
 	dir := t.TempDir()
-	gc := filepath.Join(dir, ".gc")
-	if err := os.MkdirAll(gc, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	writeDispatchWakeFile(dir)
 	path := dispatchWakeFile(dir)
-	info1, err := os.Stat(path)
-	if err != nil {
+
+	// Age the first wake by an hour so the second is distinguishable even by a
+	// reader that compares whole-second mtimes (stat -c %Y).
+	firstWake := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(path, firstWake, firstWake); err != nil {
 		t.Fatal(err)
 	}
 
-	// Second write must not return an error and the file must still exist.
+	before := time.Now().Add(-time.Second)
 	writeDispatchWakeFile(dir)
-	info2, err := os.Stat(path)
+	info, err := os.Stat(path)
 	if err != nil {
-		t.Errorf("dispatch-wake file missing after second write: %v", err)
+		t.Fatalf("dispatch-wake file missing after second wake: %v", err)
 	}
-	_ = info1
-	_ = info2
+	if got := info.ModTime(); !got.After(before) {
+		t.Fatalf("second wake left mtime at %v (first wake %v), want after %v: waiting workers cannot observe it", got, firstWake, before)
+	}
 }
 
 func TestWriteDispatchWakeFileNoopOnMissingCityPath(_ *testing.T) {

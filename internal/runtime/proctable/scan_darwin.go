@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,7 +19,9 @@ import (
 const processSnapshotTimeout = 10 * time.Second
 
 // ScanBySessionID returns live agent root processes whose environment carries
-// GC_SESSION_ID equal to id. Empty id returns all roots with any GC_SESSION_ID.
+// GC_SESSION_ID equal to id. Empty id is the orphan sweep's scan: the roots
+// with any GC_SESSION_ID reparented to launchd ([OrphanCandidate]), as on
+// Linux. Darwin reads one ps snapshot either way.
 func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if err := liveScanGuard(); err != nil {
 		return []runtime.LiveRuntime{}, err
@@ -27,7 +30,39 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if err != nil {
 		return []runtime.LiveRuntime{}, err
 	}
-	return scanRecordsBySessionID(records, id), nil
+	roots := scanRecordsBySessionID(records, id)
+	if id == "" {
+		roots = orphanCandidates(roots, 0)
+	}
+	return withStartIdentities(roots), nil
+}
+
+// orphanCandidates keeps the roots reparented to init or subreaperPID.
+func orphanCandidates(roots []runtime.LiveRuntime, subreaperPID int) []runtime.LiveRuntime {
+	out := roots[:0]
+	for _, r := range roots {
+		if OrphanCandidate(r.PPID, subreaperPID) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// withStartIdentities fills each root's StartIdentity and StartedAt from the
+// kernel's start time (ProcessIdentity: nanoseconds since the epoch). A root
+// whose identity cannot be read keeps both empty.
+func withStartIdentities(roots []runtime.LiveRuntime) []runtime.LiveRuntime {
+	for i := range roots {
+		identity, err := ProcessIdentity(roots[i].PID)
+		if err != nil {
+			continue
+		}
+		roots[i].StartIdentity = identity
+		if ns, err := strconv.ParseInt(identity, 10, 64); err == nil {
+			roots[i].StartedAt = time.Unix(0, ns).UTC()
+		}
+	}
+	return roots
 }
 
 // scanRecordsBySessionID is the pure half of ScanBySessionID, over an
@@ -55,7 +90,8 @@ func scanRecordsBySessionID(records map[int]psRecord, id string) []runtime.LiveR
 		if id != "" && sessionID != id {
 			continue
 		}
-		if parent, ok := records[record.ppid]; ok && parent.env["GC_SESSION_ID"] == sessionID && !isInfrastructureCommand(parent.command) {
+		parent, hasParent := records[record.ppid]
+		if hasParent && parent.env["GC_SESSION_ID"] == sessionID && !isInfrastructureCommand(parent.command) {
 			continue
 		}
 		epoch, _ := strconv.Atoi(record.env["GC_RUNTIME_EPOCH"])
@@ -68,6 +104,12 @@ func scanRecordsBySessionID(records map[int]psRecord, id string) []runtime.LiveR
 			City:      city,
 			Epoch:     epoch,
 			PID:       record.pid,
+			PPID:      record.ppid,
+			// A parent that is not in the snapshot at all (it exited, or ps
+			// could not report it) is not provider infrastructure: this field
+			// only ever reports what the scan positively saw.
+			ParentIsProviderInfrastructure: hasParent && isInfrastructureCommand(parent.command),
+			Name:                           filepath.Base(strings.TrimSpace(record.command)),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -77,6 +119,12 @@ func scanRecordsBySessionID(records map[int]psRecord, id string) []runtime.LiveR
 		out = []runtime.LiveRuntime{}
 	}
 	return out
+}
+
+// ScanBySessionIDSince returns the Darwin session-ID scan. Darwin collects one
+// complete ps snapshot, so it has no per-process inspection failures to bound.
+func ScanBySessionIDSince(id string, _ time.Time) ([]runtime.LiveRuntime, error) {
+	return ScanBySessionID(id)
 }
 
 // IsScanRoot reports whether pid should be treated as an agent root. A root

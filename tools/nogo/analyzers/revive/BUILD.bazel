@@ -1,0 +1,55 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "revive",
+    srcs = ["revive.go"],
+    importpath = "github.com/gastownhall/gascity/tools/nogo/analyzers/revive",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/nogo/analyzers/internal/position",
+        "@com_github_hashicorp_go_version//:go-version",
+        "@com_github_mgechev_revive//config",
+        "@com_github_mgechev_revive//lint",
+        "@org_golang_x_tools//go/analysis",
+    ],
+)
+
+go_test(
+    name = "revive_test",
+    srcs = ["revive_test.go"],
+    deps = [
+        ":revive",
+        "//tools/nogo/analyzers/internal/analyzertest",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

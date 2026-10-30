@@ -2,7 +2,6 @@ package executionevent
 
 import (
 	"compress/gzip"
-	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -51,19 +50,22 @@ func TestLifecycleEventsPreserveNativeGraphIdentityAndTopology(t *testing.T) {
 	}
 }
 
-func TestEmitCompletedFromClosedNotificationUsesPhysicalSnapshot(t *testing.T) {
+func TestEmitCompletedUsesPhysicalSnapshotOncePerFact(t *testing.T) {
 	graph := beads.NewMemStore()
 	root := mustCreateProjectionRoot(t, graph, "")
 	step := mustCreateProjectionStep(t, graph, "gcg-retry-attempt", root.ID, "build", `["prepare"]`)
-	step.Status = "closed"
 	step.Metadata[beadmeta.SessionIDMetadataKey] = "gcs-session"
-	payload, err := json.Marshal(step)
-	if err != nil {
-		t.Fatal(err)
-	}
 	rec := events.NewFake()
-	if !EmitCompletedFromClosedNotification(rec, graph, payload, "close-hook") {
-		t.Fatal("close notification did not emit completed")
+	var idx CompletedFactIndex
+	if idx.EmitCompleted(rec, graph, step, "close-hook") {
+		t.Fatal("an open step emitted completed")
+	}
+	step.Status = "closed"
+	if !idx.EmitCompleted(rec, graph, step, "close-hook") {
+		t.Fatal("close did not emit completed")
+	}
+	if idx.EmitCompleted(rec, graph, step, "cache-reconcile") {
+		t.Fatal("a replayed close emitted a second fact")
 	}
 	if len(rec.Events) != 1 {
 		t.Fatalf("events = %#v", rec.Events)
@@ -73,10 +75,46 @@ func TestEmitCompletedFromClosedNotificationUsesPhysicalSnapshot(t *testing.T) {
 		t.Fatalf("completed = %#v", got)
 	}
 	legacy := step
-	legacy.Metadata[beadmeta.RootBeadIDMetadataKey] = "unknown"
-	payload, _ = json.Marshal(legacy)
-	if EmitCompletedFromClosedNotification(rec, graph, payload, "close-hook") {
-		t.Fatal("unresolved close notification emitted")
+	legacy.Metadata = map[string]string{beadmeta.RootBeadIDMetadataKey: "unknown", beadmeta.StepIDMetadataKey: "other"}
+	if idx.EmitCompleted(rec, graph, legacy, "close-hook") {
+		t.Fatal("unresolved close emitted")
+	}
+}
+
+// TestEmitCompletedSkipsAJournaledFactAndKeepsTheIndexCold pins the shared
+// idempotency record: a fact the journal holds is not repeated by the close
+// path, and the close path's own record does not make a cold index look
+// loaded, which would skip its journal read and let the delta pass duplicate
+// facts.
+func TestEmitCompletedSkipsAJournaledFactAndKeepsTheIndexCold(t *testing.T) {
+	graph := beads.NewMemStore()
+	root := mustCreateProjectionRoot(t, graph, "")
+	step := mustCreateProjectionStep(t, graph, "gcg-attempt", root.ID, "build", `["prepare"]`)
+	step.Status = "closed"
+	step.Metadata[beadmeta.SessionIDMetadataKey] = "gcs-session"
+	rec := events.NewFake()
+	var idx CompletedFactIndex
+	if !idx.EmitCompleted(rec, graph, step, "close-hook") {
+		t.Fatal("close did not emit completed")
+	}
+	if idx.loaded {
+		t.Fatal("the close path marked a cold index loaded")
+	}
+	// Record is best-effort, so the emit is not proof the journal holds the
+	// fact: the key must stay unconfirmed until a journal read returns it, or
+	// a dropped emit would witness convergence forever.
+	if present, confirmed := idx.lookup(completedFactKeyFor(rec.Events[0])); !present || confirmed {
+		t.Fatalf("emitted key present=%v confirmed=%v, want present and unconfirmed", present, confirmed)
+	}
+
+	journaled := events.NewFake()
+	journaled.Record(rec.Events[0])
+	var warm CompletedFactIndex
+	if !warm.warm(journaled) {
+		t.Fatal("warm failed")
+	}
+	if warm.EmitCompleted(journaled, graph, step, "close-hook") {
+		t.Fatal("a journaled fact was emitted again")
 	}
 }
 

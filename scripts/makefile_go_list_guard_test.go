@@ -8,21 +8,39 @@ import (
 	"testing"
 )
 
-// TestMakeDryRunPackageListsAreNonEmpty is a regression guard: under normal
-// conditions, MAC_UNIT_PKGS and UNIT_COVER_PKGS_NONCMDGC must expand to a
-// real package list. See ga-1qp5qo.
+// TestMakeDryRunPackageListsAreNonEmpty is a regression guard: when go list
+// succeeds, MAC_UNIT_PKGS and UNIT_COVER_PKGS_NONCMDGC must expand to its
+// package list and not trip the empty-list guard. go list is shimmed because
+// a repo-wide go list cannot run in the Bazel test sandbox (the embed
+// patterns resolve to symlinks there). See ga-1qp5qo.
 func TestMakeDryRunPackageListsAreNonEmpty(t *testing.T) {
 	repoRoot := repoRoot(t)
+	realGo, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatalf("look up go: %v", err)
+	}
+	const pkg = "github.com/gastownhall/gascity/internal/fsys"
 
 	for _, target := range []string{"test-mac", "test-cover-noncmdgc"} {
 		t.Run(target, func(t *testing.T) {
+			binDir := t.TempDir()
+			writeExecutable(t, filepath.Join(binDir, "go"), "#!/usr/bin/env sh\n"+
+				"if [ \"$1\" = \"list\" ]; then\n"+
+				"  echo "+pkg+"\n"+
+				"  exit 0\n"+
+				"fi\n"+
+				"exec \""+realGo+"\" \"$@\"\n")
+
 			cmd := exec.Command("make", "--no-print-directory", "-n", target)
 			cmd.Dir = repoRoot
+			cmd.Env = append(os.Environ(),
+				"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+			)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				t.Fatalf("make -n %s failed: %v\n%s", target, err, out)
 			}
-			if !strings.Contains(string(out), "github.com/gastownhall/gascity/internal/") {
+			if !strings.Contains(string(out), pkg) {
 				t.Fatalf("make -n %s produced an empty package list:\n%s", target, out)
 			}
 		})

@@ -69,6 +69,9 @@ func beadFromGen(g genclient.Bead) beads.Bead {
 	if g.Description != nil {
 		out.Description = *g.Description
 	}
+	if g.CloseReason != nil {
+		out.CloseReason = *g.CloseReason
+	}
 	if g.Needs != nil {
 		out.Needs = append([]string(nil), *g.Needs...)
 	}

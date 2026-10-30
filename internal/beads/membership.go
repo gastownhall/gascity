@@ -204,14 +204,35 @@ func DirectMembers(store Store, rootID string) ([]Bead, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	result := make([]Bead, 0, len(all)+1)
-	seen := make(map[string]bool, len(all)+1)
-	if root, err := store.Get(rootID); err == nil {
-		result = append(result, root)
-		seen[root.ID] = true
+	var root *Bead
+	if got, err := store.Get(rootID); err == nil {
+		root = &got
 	} else if !errors.Is(err, ErrNotFound) {
 		return nil, err
+	}
+	return directMembersWithRoot(root, all), nil
+}
+
+// DirectMembersWithRoot is DirectMembers for a caller that has already read
+// the root in the same invocation: it lists the root's metadata members and
+// puts root first without reading the root again.
+func DirectMembersWithRoot(store Store, root Bead) ([]Bead, error) {
+	all, err := HandlesFor(store).Live.List(ListQuery{
+		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+		IncludeClosed: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return directMembersWithRoot(&root, all), nil
+}
+
+func directMembersWithRoot(root *Bead, all []Bead) []Bead {
+	result := make([]Bead, 0, len(all)+1)
+	seen := make(map[string]bool, len(all)+1)
+	if root != nil {
+		result = append(result, *root)
+		seen[root.ID] = true
 	}
 	for _, bead := range all {
 		if seen[bead.ID] {
@@ -220,5 +241,5 @@ func DirectMembers(store Store, rootID string) ([]Bead, error) {
 		result = append(result, bead)
 		seen[bead.ID] = true
 	}
-	return result, nil
+	return result
 }

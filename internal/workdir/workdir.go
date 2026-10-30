@@ -273,6 +273,18 @@ func ResolveWorkDirPathStrict(cityPath, cityName, qualifiedName string, a config
 				return ResolveDirPath(cityPath, rigRoot), nil
 			}
 		}
+		// A dir-less, work_dir-less agent with no explicit pool signal still
+		// gets concurrent distinct instances in practice (dynamic aliases,
+		// wisp sessions) even though nothing in its static config predicts
+		// that. Falling through to the bare city path here would let those
+		// instances silently share a working directory. Agents that DO carry
+		// an explicit pool signal are excluded: RequiresPoolWorkDirIsolationCheck
+		// already fails config validation at init time if their work_dir
+		// doesn't vary per instance, so auto-isolating here would just mask
+		// a misconfiguration ValidatePoolWorkDirIsolation is supposed to catch.
+		if a.Dir == "" && qualifiedName != a.QualifiedName() && !RequiresPoolWorkDirIsolationCheck(a) {
+			return filepath.Join(WorktreesRoot(cityPath), agent.SanitizeQualifiedNameForSession(qualifiedName)), nil
+		}
 		return ResolveDirPath(cityPath, a.Dir), nil
 	}
 	ctx := PathContextForQualifiedName(cityPath, cityName, qualifiedName, a, rigs)

@@ -25,13 +25,14 @@ import (
 // here — never silently unwitnessed.
 //
 // The reasons matter as much as the names. An exemption is normally a promise that
-// a copy which changed this field is still a faithful copy, and two of these five
+// a copy which changed this field is still a faithful copy, and two of these six
 // are only true because something else witnesses the same state.
-// IndefinitelyDeferred is the one exemption that does not carry that promise: the
-// destination cannot hold it, so the deferral genuinely does not cross. It is
-// exempt because comparing it would refuse every copy of a deferred infra row
+// IndefinitelyDeferred and SourceStatus are the two exemptions that do not carry
+// that promise: the destination cannot hold them, so bd's richer status genuinely
+// does not cross. They are exempt because comparing them would refuse every copy
+// of an infra row bd records as deferred, blocked or any other folded status
 // without preserving anything — not because the copy stays faithful. Do not cite
-// it as precedent for exempting a field the destination could hold.
+// them as precedent for exempting a field the destination could hold.
 var beadCopyExemptFields = map[string]string{
 	"Revision": "store-internal optimistic-concurrency token. Each store mints and bumps its own; the destination's row is a fresh create, so its revision is unrelated to the source's by construction.",
 	"ClaimFence": "store-internal ownership fence, maintained per store like Revision. " +
@@ -47,6 +48,12 @@ var beadCopyExemptFields = map[string]string{
 		"bead_json — so it is structurally absent from the destination and comparing it would refuse EVERY copy of a " +
 		"deferred infra row, identically on each retry. What does not cross is the deferral itself: the binding reads such " +
 		"a row as plainly open.",
+	"SourceStatus": "not a property of the copy but of READING the source, like IndefinitelyDeferred. It is the status " +
+		"bd recorded before the read folded it into Status (beads.mapBdStatus), re-derived on every work-store read; the " +
+		"destination stores Gas City's three-state status verbatim and reports no source status. Both sides therefore " +
+		"agree on the Status this stage does compare, and the field itself is json:\"-\" while SQLiteStore persists " +
+		"beads through bead_json — so comparing it would refuse EVERY copy of an infra row bd records as anything but " +
+		"open, in_progress or closed, identically on each retry. What does not cross is bd's richer status itself.",
 }
 
 // infraEqualityFixture is a source row with every durable field populated to a
@@ -79,12 +86,15 @@ func infraEqualityFixture() beads.Bead {
 		NoHistory:    true,
 		DeferUntil:   &deferred,
 		IsBlocked:    &blocked,
+		CloseReason:  "superseded by the next lifecycle row",
 		Revision:     7,
 		ClaimFence:   3,
-		// Set so the exempt mutation below models the loss that actually
-		// happens — a source row carrying the marker against a destination that
-		// cannot hold it — rather than the destination inventing one.
+		// Set so the exempt mutations below model the loss that actually
+		// happens — a source row carrying bd's deferred status against a
+		// destination that cannot hold it — rather than the destination
+		// inventing one.
 		IndefinitelyDeferred: true,
+		SourceStatus:         "deferred",
 	}
 }
 
@@ -117,6 +127,10 @@ func beadCopyFieldMutations() map[string]func(beads.Bead) beads.Bead {
 			b.DeferUntil = nil
 			return b
 		},
+		"CloseReason": func(b beads.Bead) beads.Bead {
+			b.CloseReason = ""
+			return b
+		},
 		// Unlike every other entry, this mutation is not a LOSS — it is a value
 		// the destination must never carry at all. infraMigrationRow strips it,
 		// so any non-nil value on the destination is a readiness projection the
@@ -142,6 +156,7 @@ func beadCopyExemptMutations() map[string]func(beads.Bead) beads.Bead {
 		// a destination that cannot hold what the source read produced. This is
 		// the mutation that must NOT be refused, or the migration wedges.
 		"IndefinitelyDeferred": func(b beads.Bead) beads.Bead { b.IndefinitelyDeferred = false; return b },
+		"SourceStatus":         func(b beads.Bead) beads.Bead { b.SourceStatus = ""; return b },
 	}
 }
 
@@ -360,7 +375,7 @@ func TestVerifyInfraCopyRefusesADroppedDurableField(t *testing.T) {
 		Ref:         "step-3",
 		NoHistory:   true,
 		DeferUntil:  &deferred,
-		Metadata:    beads.StringMap{"gc.session_name": "worker-1"},
+		Metadata:    beads.StringMap{"test_session_name": "worker-1"},
 		// The source row carries the status-based deferral marker the work
 		// store produces for a bd-`deferred` row. The destination cannot hold
 		// it — it is json:"-" and SQLiteStore persists through bead_json — so

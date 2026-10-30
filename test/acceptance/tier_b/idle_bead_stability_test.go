@@ -44,7 +44,7 @@ func TestGastownIdleOpenBeadCountsStayBounded(t *testing.T) {
 	var activity beadCountSnapshot
 	if ok := c.WaitForCondition(func() bool {
 		activity = readOpenBeadSnapshot(t, c.Dir)
-		return activity.OpenWisps > 0
+		return openOrderWispCount(t, c.Dir, "idle-wisp") > 0
 	}, 30*time.Second); !ok {
 		t.Fatalf("idle probe order did not create a wisp within 30s; last snapshot: %s", activity)
 	}
@@ -284,6 +284,9 @@ func writeGastownIdleProbeOrders(t *testing.T, cityDir string) {
 		t.Fatalf("copied digest order missing expected interval")
 	}
 	formulaOrderBody = strings.Replace(formulaOrderBody, `interval = "24h"`, `interval = "1s"`, 1)
+	// The gastown and bd packs both define a "dog" pool; a city-level order
+	// must name the pool it means, or dispatch fails as ambiguous.
+	formulaOrderBody = strings.Replace(formulaOrderBody, `pool = "dog"`, `pool = "gastown.dog"`, 1)
 	orders := map[string]string{
 		"idle-wisp.toml": formulaOrderBody,
 		"idle-exec.toml": `[order]
@@ -425,4 +428,26 @@ func formatBeadCountSnapshots(samples []beadCountSnapshot) string {
 func (s beadCountSnapshot) String() string {
 	return fmt.Sprintf("open_issues=%d open_wisps=%d issue_ids=%v wisp_ids=%v",
 		s.OpenIssues, s.OpenWisps, s.IssueIDs, s.WispIDs)
+}
+
+// openOrderWispCount counts open formula wisps an order created, in either
+// storage tier: under the default bd-1.0.4 compatibility the wisp policy is
+// history-backed, so the root lands in the issues tier.
+func openOrderWispCount(t *testing.T, cityDir, orderName string) int {
+	t.Helper()
+	store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cityDir, ".gc", "beads.json"))
+	if err != nil {
+		t.Fatalf("open file bead store: %v", err)
+	}
+	rows, err := store.List(beads.ListQuery{Status: "open", Label: "order-run:" + orderName, AllowScan: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("list open order wisps for %q: %v", orderName, err)
+	}
+	n := 0
+	for _, row := range rows {
+		if row.Metadata["gc.kind"] == "wisp" {
+			n++
+		}
+	}
+	return n
 }

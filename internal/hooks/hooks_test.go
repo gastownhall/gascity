@@ -261,7 +261,7 @@ func TestInstallClaudeUpgradesPreviousCanonicalSessionStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readEmbedded: %v", err)
 	}
-	stale := strings.Replace(string(current), sessionStartCurrentFormBody(""), sessionStartPreviousManagedFormBody, 1)
+	stale := strings.Replace(string(current), sessionStartCurrentFormBody("", "gc"), sessionStartPreviousManagedFormBody, 1)
 	if stale == string(current) {
 		t.Fatal("stale fixture did not diverge from current embedded config — check previous SessionStart pattern")
 	}
@@ -275,8 +275,8 @@ func TestInstallClaudeUpgradesPreviousCanonicalSessionStart(t *testing.T) {
 	hookData := fs.Files["/city/hooks/claude.json"]
 	runtimeData := fs.Files["/city/.gc/settings.json"]
 	sessionStartCommand := claudeHookCommand(t, hookData, "SessionStart")
-	if got := commandBodyAfterCanonicalPrefix(sessionStartCommand); got != sessionStartCurrentFormBody("") {
-		t.Fatalf("upgraded SessionStart body = %q, want %q", got, sessionStartCurrentFormBody(""))
+	if got := commandBodyAfterCanonicalPrefix(sessionStartCommand); got != sessionStartCurrentFormBody("", "gc") {
+		t.Fatalf("upgraded SessionStart body = %q, want %q", got, sessionStartCurrentFormBody("", "gc"))
 	}
 	if string(runtimeData) != string(hookData) {
 		t.Fatalf("runtime Claude settings should mirror upgraded hook settings:\n%s", string(runtimeData))
@@ -768,6 +768,64 @@ func TestUpgradeCodexHooksSkipsWhenDesiredPreCompactUnavailable(t *testing.T) {
 	}
 }
 
+func TestUpgradeCodexHooksPreservesLegacyShapeWhenAddingPreCompact(t *testing.T) {
+	desired, err := core.PackFS.ReadFile("overlay/per-provider/codex/.codex/hooks.json")
+	if err != nil {
+		t.Fatalf("read embedded codex overlay: %v", err)
+	}
+	for _, tc := range []struct {
+		name            string
+		sessionStart    string
+		wantPrefix      string
+		wantGCToken     string
+		forbidSubstring string
+	}{
+		{
+			name:            "legacy prepend and bare gc",
+			sessionStart:    canonicalGCPathPrefix + `gc prime --hook --hook-format codex`,
+			wantPrefix:      canonicalGCPathPrefix,
+			wantGCToken:     "gc",
+			forbidSubstring: "${GC_BIN",
+		},
+		{
+			name:            "current append and GC_BIN",
+			sessionStart:    canonicalGCPathPrefixAppend + managedGCBinInvocation + ` prime --hook --hook-format codex`,
+			wantPrefix:      canonicalGCPathPrefixAppend,
+			wantGCToken:     managedGCBinInvocation,
+			forbidSubstring: canonicalGCPathPrefix,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			existing, err := json.Marshal(map[string]any{
+				"hooks": map[string]any{
+					"SessionStart": []any{map[string]any{
+						"hooks": []any{map[string]any{"type": "command", "command": tc.sessionStart}},
+					}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal fixture: %v", err)
+			}
+			got, changed, err := upgradeCodexHooks(existing, desired, "/city")
+			if err != nil {
+				t.Fatalf("upgradeCodexHooks: %v", err)
+			}
+			if !changed {
+				t.Fatal("upgradeCodexHooks changed = false, want true")
+			}
+			if want := tc.wantPrefix + preCompactCurrentFormBody("/city", tc.wantGCToken); codexHookCommand(t, got, "PreCompact") != want {
+				t.Fatalf("PreCompact command = %q, want %q", codexHookCommand(t, got, "PreCompact"), want)
+			}
+			if want := tc.wantPrefix + sessionStartCurrentFormBody("/city", tc.wantGCToken); codexHookCommand(t, got, "SessionStart") != want {
+				t.Fatalf("SessionStart command = %q, want %q", codexHookCommand(t, got, "SessionStart"), want)
+			}
+			if strings.Contains(string(got), tc.forbidSubstring) {
+				t.Fatalf("upgraded hooks switched shape, found %q:\n%s", tc.forbidSubstring, got)
+			}
+		})
+	}
+}
+
 func TestAddCodexPreCompactHookRejectsInvalidRoots(t *testing.T) {
 	desired := []byte(`{"hooks":{"PreCompact":[{"hooks":[{"type":"command","command":"gc handoff --auto"}]}]}}`)
 	for name, root := range map[string]any{
@@ -792,7 +850,7 @@ func TestAddCodexPreCompactHookRejectsInvalidRoots(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if addCodexPreCompactHook(root, desired) {
+			if addCodexPreCompactHook(root, desired, "") {
 				t.Fatalf("addCodexPreCompactHook(%s) = true, want false", name)
 			}
 		})
@@ -1246,6 +1304,73 @@ func TestInstallClaudeIdempotent(t *testing.T) {
 	}
 }
 
+// tornWriteFS models os.WriteFile on an existing file: O_TRUNC exposes an
+// empty file before the new bytes land. It records every content of watch a
+// concurrent reader could observe between filesystem operations.
+type tornWriteFS struct {
+	*fsys.Fake
+	watch string
+	seen  []string
+}
+
+func (f *tornWriteFS) observe() {
+	if data, ok := f.Files[f.watch]; ok {
+		f.seen = append(f.seen, string(data))
+	}
+}
+
+func (f *tornWriteFS) WriteFile(name string, data []byte, perm os.FileMode) error {
+	if _, ok := f.Files[name]; ok && name == f.watch {
+		f.Files[name] = []byte{}
+		f.observe()
+	}
+	err := f.Fake.WriteFile(name, data, perm)
+	f.observe()
+	return err
+}
+
+func (f *tornWriteFS) Rename(oldpath, newpath string) error {
+	err := f.Fake.Rename(oldpath, newpath)
+	f.observe()
+	return err
+}
+
+// TestInstallClaudeReplacesRuntimeSettingsAtomically verifies that rewriting
+// .gc/settings.json never exposes an empty or partial file. The runtime file
+// is also a settings source, and a concurrent projection that reads it empty
+// falls back to the embedded base and discards the customizations it holds.
+func TestInstallClaudeReplacesRuntimeSettingsAtomically(t *testing.T) {
+	const runtimePath = "/city/.gc/settings.json"
+	fs := &tornWriteFS{Fake: fsys.NewFake(), watch: runtimePath}
+	old := `{"previous_projection": true}`
+	fs.Files["/city/.claude/settings.json"] = []byte(`{"custom": true}`)
+	fs.Files[runtimePath] = []byte(old)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	want := string(fs.Files[runtimePath])
+	if !strings.Contains(want, `"custom": true`) {
+		t.Fatalf("runtime settings missing .claude override:\n%s", want)
+	}
+	for i, got := range fs.seen {
+		if got != old && got != want {
+			t.Fatalf("observation %d of %s was neither the old nor the new settings (torn write):\n%q", i, runtimePath, got)
+		}
+	}
+
+	// Identical bytes must still skip the write entirely.
+	fs.Calls = nil
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("second Install: %v", err)
+	}
+	for _, call := range fs.Calls {
+		if (call.Method == "WriteFile" || call.Method == "Rename") && strings.HasPrefix(call.Path, runtimePath) {
+			t.Fatalf("second Install rewrote unchanged %s: %+v", runtimePath, call)
+		}
+	}
+}
+
 func TestInstallClaudeMergesCityDotClaudeSettings(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/.claude/settings.json"] = []byte(`{
@@ -1680,7 +1805,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	codexHooks := fs.Files["/work/.codex/hooks.json"]
 	codexHooksText := string(codexHooks)
 	sessionStartCommand := codexHookCommand(t, codexHooks, "SessionStart")
-	if !strings.Contains(sessionStartCommand, `gc --city '/city' prime --hook --hook-format codex`) {
+	if !strings.Contains(sessionStartCommand, `"${GC_BIN:-gc}" --city '/city' prime --hook --hook-format codex`) {
 		t.Fatalf("codex SessionStart hook command = %q, want city-bound gc prime --hook --hook-format codex", sessionStartCommand)
 	}
 	if !strings.Contains(sessionStartCommand, "GC_HOOK_EVENT_NAME=SessionStart") {
@@ -1692,12 +1817,12 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	if !strings.Contains(codexHooksText, `"PreCompact"`) {
 		t.Error("codex hooks should include PreCompact")
 	}
-	if !strings.Contains(codexHooksText, `gc --city '/city' handoff --auto --hook-format codex \"context cycle\"`) {
+	if !strings.Contains(codexHooksText, `\"${GC_BIN:-gc}\" --city '/city' handoff --auto --hook-format codex \"context cycle\"`) {
 		t.Error("codex PreCompact should use auto handoff with Codex hook output format")
 	}
 	for _, want := range []string{
-		`gc --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format codex`,
-		`gc --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format codex`,
+		`\"${GC_BIN:-gc}\" --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format codex`,
+		`\"${GC_BIN:-gc}\" --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format codex`,
 	} {
 		if !strings.Contains(codexHooksText, want) {
 			t.Errorf("codex prompt hooks missing bounded command %q:\n%s", want, codexHooksText)
@@ -1714,8 +1839,8 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	for path, wants := range map[string][]string{
 		"/work/.github/hooks/gascity.json": {
-			`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
-			`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
+			`\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
+			`\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
 		},
 		"/work/.cursor/hooks.json": {
 			`hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
@@ -1757,14 +1882,14 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	if !strings.Contains(copilotHooks, `"preCompact"`) {
 		t.Error("copilot hooks should include preCompact (closes #672 gap 3)")
 	}
-	if !strings.Contains(copilotHooks, `gc handoff --auto \"context cycle\"`) {
+	if !strings.Contains(copilotHooks, `\"${GC_BIN:-gc}\" handoff --auto \"context cycle\"`) {
 		t.Error("copilot preCompact should use auto handoff")
 	}
 	antigravityHooks := string(fs.Files["/work/.agents/hooks.json"])
 	for hookName, wantCommand := range map[string]string{
-		"gascity-prime":       `GC_PROVIDER_SESSION_ID_REQUIRED=antigravity GC_PROVIDER_SESSION_ID=\"${ANTIGRAVITY_CONVERSATION_ID:-}\" GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format antigravity`,
-		"gascity-nudge-drain": "gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format antigravity",
-		"gascity-mail-check":  "gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format antigravity",
+		"gascity-prime":       `GC_PROVIDER_SESSION_ID_REQUIRED=antigravity GC_PROVIDER_SESSION_ID=\"${ANTIGRAVITY_CONVERSATION_ID:-}\" GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart \"${GC_BIN:-gc}\" prime --hook --hook-format antigravity`,
+		"gascity-nudge-drain": `\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format antigravity`,
+		"gascity-mail-check":  `\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format antigravity`,
 	} {
 		if !strings.Contains(antigravityHooks, `"`+hookName+`"`) {
 			t.Errorf("Antigravity hooks missing hook %q:\n%s", hookName, antigravityHooks)
@@ -1778,8 +1903,11 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	opencodeHooks := string(fs.Files["/work/.opencode/plugins/gascity.js"])
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 6",
+		"const GC_OPENCODE_HOOK_VERSION = 8",
 		"pending.child.stdin?.end();",
+		"appendVolatileSystem",
+		"const turns = new Map()",
+		"state.userMessageIDs.has(messageID)",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		`"experimental.session.compacting"`,
@@ -1808,7 +1936,11 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	mimocodeHooks := string(fs.Files["/work/.mimocode/plugin/gascity.js"])
 	for _, want := range []string{
 		"Gas City hooks for MiMo Code.",
-		"const GC_MIMOCODE_HOOK_VERSION = 2",
+		"const GC_MIMOCODE_HOOK_VERSION = 4",
+		"pending.child.stdin?.end();",
+		"appendVolatileSystem",
+		"const turns = new Map()",
+		"state.userMessageIDs.has(messageID)",
 		`process.env.GC_BIN || "gc"`,
 		"process.env.GC_MIMOCODE_TRANSCRIPT_DIR || defaultTranscriptDir()",
 		`path.join(home, ".local", "share", "gascity", "mimocode-transcripts")`,
@@ -1934,9 +2066,9 @@ func TestInstallAntigravityMergesExistingHooks(t *testing.T) {
 		`"custom-reminder"`,
 		`"command": "echo custom"`,
 		`"gascity-prime"`,
-		`gc prime --hook --hook-format antigravity`,
-		`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format antigravity`,
-		`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format antigravity`,
+		`\"${GC_BIN:-gc}\" prime --hook --hook-format antigravity`,
+		`\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format antigravity`,
+		`\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format antigravity`,
 	} {
 		if !strings.Contains(data, want) {
 			t.Errorf("merged Antigravity hooks missing %q:\n%s", want, data)
@@ -2200,8 +2332,11 @@ export default async function gascityPlugin() {
 		t.Fatal("stale OpenCode managed plugin was preserved; expected managed upgrade")
 	}
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 6",
+		"const GC_OPENCODE_HOOK_VERSION = 8",
 		"pending.child.stdin?.end();",
+		"appendVolatileSystem",
+		"const turns = new Map()",
+		"state.userMessageIDs.has(messageID)",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		`"experimental.session.compacting"`,
@@ -2223,7 +2358,7 @@ export default async function gascityPlugin() {
 
 func TestOpenCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for OpenCode.
-const GC_OPENCODE_HOOK_VERSION = 6;
+const GC_OPENCODE_HOOK_VERSION = 8;
 const GC_BIN = process.env.GC_BIN || "gc";
 const PATH_PREFIX =
   "/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:";
@@ -2238,11 +2373,17 @@ output.context.push(handoff);
 GC_PROVIDER_SESSION_ID;
 GC_PROVIDER_SESSION_ID_REQUIRED;
 pending.child.stdin?.end();
+function appendVolatileSystem(system, volatile) {}
+const turns = new Map();
+if (state.userMessageIDs.has(messageID)) {}
 `)
-	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 6"), []byte("GC_OPENCODE_HOOK_VERSION = 5"), 1)
-	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 6"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
+	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 8"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
+	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 8"), []byte("GC_OPENCODE_HOOK_VERSION = 9"), 1)
 	missingStderrLog := bytes.Replace(current, []byte("logRunStderr(stderr);\n"), nil, 1)
 	openStdin := bytes.Replace(current, []byte("pending.child.stdin?.end();\n"), nil, 1)
+	volatileInHeader := bytes.Replace(current, []byte("function appendVolatileSystem(system, volatile) {}\n"), nil, 1)
+	sharedTurnState := bytes.Replace(current, []byte("const turns = new Map();\n"), []byte("let drainedTurnID = null;\n"), 1)
+	idOrderTurnGate := bytes.Replace(current, []byte("if (state.userMessageIDs.has(messageID)) {}\n"), []byte("if (messageID <= state.currentTurnID) {}\n"), 1)
 
 	if !opencodeHookNeedsUpgrade(stale) {
 		t.Fatal("stale OpenCode hook version did not request upgrade")
@@ -2258,6 +2399,15 @@ pending.child.stdin?.end();
 	}
 	if !opencodeHookNeedsUpgrade(openStdin) {
 		t.Fatal("OpenCode hook leaving child stdin open did not request upgrade")
+	}
+	if !opencodeHookNeedsUpgrade(volatileInHeader) {
+		t.Fatal("OpenCode hook that folds the clock line into system[0] did not request upgrade")
+	}
+	if !opencodeHookNeedsUpgrade(sharedTurnState) {
+		t.Fatal("OpenCode hook with directory-wide turn state did not request upgrade")
+	}
+	if !opencodeHookNeedsUpgrade(idOrderTurnGate) {
+		t.Fatal("OpenCode hook that opens turns by message-id order did not request upgrade")
 	}
 }
 
@@ -2281,14 +2431,26 @@ func TestInstallOpenCodeHookPreservesUserAuthoredPlugin(t *testing.T) {
 
 func TestMimoCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for MiMo Code.
-const GC_MIMOCODE_HOOK_VERSION = 2;
+const GC_MIMOCODE_HOOK_VERSION = 4;
 const GC_BIN = process.env.GC_BIN || "gc";
+pending.child.stdin?.end();
+function appendVolatileSystem(system, volatile) {}
+const turns = new Map();
+if (state.userMessageIDs.has(messageID)) {}
 `)
 	versionless := []byte(`// Gas City hooks for MiMo Code.
 const GC_BIN = process.env.GC_BIN || "gc";
+pending.child.stdin?.end();
+function appendVolatileSystem(system, volatile) {}
+const turns = new Map();
+if (state.userMessageIDs.has(messageID)) {}
 `)
-	stale := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 2"), []byte("GC_MIMOCODE_HOOK_VERSION = 1"), 1)
-	future := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 2"), []byte("GC_MIMOCODE_HOOK_VERSION = 3"), 1)
+	stale := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 4"), []byte("GC_MIMOCODE_HOOK_VERSION = 3"), 1)
+	future := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 4"), []byte("GC_MIMOCODE_HOOK_VERSION = 5"), 1)
+	openStdin := bytes.Replace(current, []byte("pending.child.stdin?.end();\n"), nil, 1)
+	volatileInHeader := bytes.Replace(current, []byte("function appendVolatileSystem(system, volatile) {}\n"), nil, 1)
+	sharedTurnState := bytes.Replace(current, []byte("const turns = new Map();\n"), []byte("let drainedTurnID = null;\n"), 1)
+	idOrderTurnGate := bytes.Replace(current, []byte("if (state.userMessageIDs.has(messageID)) {}\n"), []byte("if (messageID <= state.currentTurnID) {}\n"), 1)
 
 	if !mimocodeHookNeedsUpgrade(versionless) {
 		t.Fatal("versionless managed MiMo Code hook did not request upgrade")
@@ -2301,6 +2463,18 @@ const GC_BIN = process.env.GC_BIN || "gc";
 	}
 	if mimocodeHookNeedsUpgrade(future) {
 		t.Fatal("newer MiMo Code hook version requested downgrade")
+	}
+	if !mimocodeHookNeedsUpgrade(openStdin) {
+		t.Fatal("MiMo Code hook leaving child stdin open did not request upgrade")
+	}
+	if !mimocodeHookNeedsUpgrade(volatileInHeader) {
+		t.Fatal("MiMo Code hook that folds the clock line into system[0] did not request upgrade")
+	}
+	if !mimocodeHookNeedsUpgrade(sharedTurnState) {
+		t.Fatal("MiMo Code hook with directory-wide turn state did not request upgrade")
+	}
+	if !mimocodeHookNeedsUpgrade(idOrderTurnGate) {
+		t.Fatal("MiMo Code hook that opens turns by message-id order did not request upgrade")
 	}
 }
 
@@ -2321,7 +2495,7 @@ export default async function gascityPlugin() {
 	if data == string(legacy) {
 		t.Fatal("stale MiMo Code managed plugin was preserved; expected managed upgrade")
 	}
-	if !strings.Contains(data, "const GC_MIMOCODE_HOOK_VERSION = 2") {
+	if !strings.Contains(data, "const GC_MIMOCODE_HOOK_VERSION = 4") {
 		t.Errorf("upgraded MiMo Code plugin missing version marker:\n%s", data)
 	}
 	backup := string(fs.Files["/work/.mimocode/plugin/gascity.js.bak"])
@@ -2502,7 +2676,7 @@ func TestInstallCodexWritesCanonicalJSON(t *testing.T) {
 	if bytes.Contains(data, []byte(`\u0026`)) {
 		t.Fatalf("codex hook escaped command operator:\n%s", data)
 	}
-	if !bytes.Contains(data, []byte(` && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/city' prime`)) {
+	if !bytes.Contains(data, []byte(` && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart \"${GC_BIN:-gc}\" --city '/city' prime`)) {
 		t.Fatalf("codex hook missing literal command operator:\n%s", data)
 	}
 	if !bytes.HasSuffix(data, []byte("\n")) {
@@ -2592,5 +2766,50 @@ func TestInstallEmpty(t *testing.T) {
 	}
 	if len(fs.Files) != 0 {
 		t.Errorf("Install(nil) should not write files; got %v", fs.Files)
+	}
+}
+
+// TestInstalledWorkDirPathsMatchesInstall pins InstalledWorkDirPaths to what
+// Install really writes into the work dir, provider by provider: the overlay
+// staging caller skips exactly these paths to leave them to the installer, so
+// a path Install writes but the set omits would get two writers, and a path
+// the set names but Install never writes would get none on the tick.
+func TestInstalledWorkDirPathsMatchesInstall(t *testing.T) {
+	for _, provider := range SupportedProviders() {
+		t.Run(provider, func(t *testing.T) {
+			fs := fsys.NewFake()
+			if err := Install(fs, "/city", "/work", []string{provider}); err != nil {
+				t.Fatalf("Install(%s): %v", provider, err)
+			}
+			written := make(map[string]bool)
+			for p := range fs.Files {
+				if rel, ok := strings.CutPrefix(filepath.ToSlash(p), "/work/"); ok {
+					written[rel] = true
+				}
+			}
+			got := InstalledWorkDirPaths([]string{provider}, nil)
+			for rel := range written {
+				if !got[rel] {
+					t.Errorf("Install(%s) wrote %q, missing from InstalledWorkDirPaths %v", provider, rel, got)
+				}
+			}
+			for rel := range got {
+				if !written[rel] {
+					t.Errorf("InstalledWorkDirPaths(%s) names %q, which Install did not write (wrote %v)", provider, rel, written)
+				}
+			}
+		})
+	}
+	if got := InstalledWorkDirPaths([]string{"no-such-provider"}, nil); len(got) != 0 {
+		t.Errorf("InstalledWorkDirPaths(unsupported) = %v, want empty", got)
+	}
+	resolver := func(name string) string {
+		if name == "my-codex" {
+			return "codex"
+		}
+		return ""
+	}
+	if got := InstalledWorkDirPaths([]string{"my-codex"}, resolver); !got[".codex/hooks.json"] {
+		t.Errorf("InstalledWorkDirPaths(my-codex -> codex) = %v, want .codex/hooks.json", got)
 	}
 }

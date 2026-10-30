@@ -10,13 +10,14 @@
 #   PATH     — must include gc and bd binaries
 
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/bead-id.sh"
 cd "$GC_CITY"
 ASSIGNEE="${GC_SESSION_NAME:-$GC_AGENT}"
 
 while true; do
     hooked=$(bd ready --assignee="$ASSIGNEE" 2>/dev/null || true)
-    if echo "$hooked" | grep -q "^gc-"; then
-        work_id=$(echo "$hooked" | grep "^gc-" | head -1 | awk '{print $1}')
+    if echo "$hooked" | bead_id_rows | grep -q .; then
+        work_id=$(echo "$hooked" | bead_id_rows | head -1 | awk '{print $1}')
 
         # Step 1: Create feature branch
         if [ -n "${GC_DIR:-}" ] && [ -d "$GC_DIR" ]; then

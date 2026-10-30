@@ -24,20 +24,47 @@ import (
 // gate-admit identity equals the claim-match identity.
 
 // fakeBDSelfRoutedFrontier returns a fake bd whose only ready work is a single
-// unassigned bead routed to route. list/query/show are empty, so the assigned
-// and migration/ephemeral tiers all miss — the bead is discoverable ONLY through
-// the routed (pool-demand) tier keyed on gc.routed_to=route. That isolates the
+// unassigned bead routed to route, served to any ready read that probes
+// gc.routed_to=route. Every other verb is empty, so the assigned and
+// migration/ephemeral tiers all miss — the bead is discoverable ONLY through the
+// routed (pool-demand) tier keyed on gc.routed_to=route. That isolates the
 // origin gate: if the routed tier never runs, the bead never surfaces.
 func fakeBDSelfRoutedFrontier(route, beadID string) string {
+	return fakeBDRoutedFrontier(route, beadID, "", routedReadGlob(route))
+}
+
+// routedReadGlob is the sh `case` pattern for a `bd ready` argv that probes
+// gc.routed_to=route, whatever else the read carries. Matching the field alone
+// keeps the fakes independent of the order PoolDemandServeRules.ShellArgs()
+// happens to render the serve flags in — which flags the routed read carries,
+// and that they follow the route predicate immediately, are pinned against the
+// production rendering by TestWorkQueryGolden,
+// TestPoolDemandPredicateSharedWithWorkQuery and
+// TestBdReadyPoolDemandShellExcludesDispatchHoldLabels.
+func routedReadGlob(route string) string {
+	return `*"--metadata-field gc.routed_to=` + route + `"*`
+}
+
+// fakeBDRoutedFrontier is this package's single `bd ready` fake for routed-tier
+// tests: one unassigned bead routed to route, served to reads whose argv matches
+// serveGlob, with an optional earlier skipGlob arm that is always answered empty.
+// All other verbs and all non-matching reads are empty.
+//
+// The two globs are what let one fake cover every routed-tier regime this
+// package pins: a self-route serve (skipGlob empty), and an over-claim control
+// that inverts it — skipGlob naming the seat's own route so only a read that
+// does NOT key on that identity reaches serveGlob and surfaces foreign work.
+func fakeBDRoutedFrontier(route, beadID, skipGlob, serveGlob string) string {
+	skipArm := ""
+	if skipGlob != "" {
+		skipArm = "      " + skipGlob + ")\n        printf '[]'\n        ;;\n"
+	}
 	return `#!/bin/sh
 set -eu
 case "$1" in
-  list|query|show)
-    printf '[]'
-    ;;
   ready)
     case "$*" in
-      *"--metadata-field gc.routed_to=` + route + `"*)
+` + skipArm + `      ` + serveGlob + `)
         printf '[{"id":"` + beadID + `","status":"open","assignee":"","metadata":{"gc.routed_to":"` + route + `"}}]'
         ;;
       *)

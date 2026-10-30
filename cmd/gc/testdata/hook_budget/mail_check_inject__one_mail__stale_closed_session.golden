@@ -1,0 +1,2 @@
+--- stderr ---
+gc mail check: the hook's own session is closed: session "tc-3" (GC_SESSION_ID); not reading its mailbox

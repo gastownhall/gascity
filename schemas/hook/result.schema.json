@@ -32,12 +32,16 @@
         "claimed",
         "existing_assignment",
         "ready_assignment",
+        "started_claim_held",
         "no_work",
         "claims_errored",
         "stale_session",
         "non_turn_context",
         "drain_pending",
-        "missing_session_registration"
+        "missing_session_registration",
+        "city_suspended",
+        "agent_suspended",
+        "rig_suspended"
       ]
     },
     "bead_id": {
@@ -104,7 +108,10 @@
               "stale_session",
               "non_turn_context",
               "drain_pending",
-              "missing_session_registration"
+              "missing_session_registration",
+              "city_suspended",
+              "agent_suspended",
+              "rig_suspended"
             ]
           }
         }

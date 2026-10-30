@@ -147,3 +147,21 @@ func TestWorkAssignmentForStore_NilUnderlyingStoreSafe(t *testing.T) {
 		t.Fatalf("nil store CachedOpenAssignedWisps: items=%#v ok=%v", items, ok)
 	}
 }
+
+// TestWorkAssignmentHasNonSessionWork_SkipsMail pins the gate half of the mail exemption:
+// excludeMailMessageBeads filters mail only at the OpenAssignedTo
+// sources, but ReadyAssignedTo and the CachedOpenAssignedWisps fast path hand
+// HasNonSessionWork raw results. A session whose only assigned bead is its own
+// unread mail must not read as holding work.
+func TestWorkAssignmentHasNonSessionWork_SkipsMail(t *testing.T) {
+	wa := workAssignmentForStore(beads.WorkStore{Store: beads.NewMemStore()})
+	mail := beads.Bead{ID: "m-1", Type: "message", Assignee: "worker"}
+	task := beads.Bead{ID: "t-1", Type: "task", Assignee: "worker"}
+
+	if wa.HasNonSessionWork([]beads.Bead{mail}) {
+		t.Fatal("HasNonSessionWork(mail only) = true, want false: mail is not work")
+	}
+	if !wa.HasNonSessionWork([]beads.Bead{mail, task}) {
+		t.Fatal("HasNonSessionWork(mail + task) = false, want true")
+	}
+}

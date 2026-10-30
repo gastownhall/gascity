@@ -138,7 +138,7 @@ func TestTutorial01Cities(t *testing.T) {
 				`schema = 2`,
 				`[imports.core]`,
 				`[imports.bd]`,
-				`[imports.gascity]`,
+				`[imports.gc]`,
 				`[[named_session]]`,
 				`template = "mayor"`,
 				`mode = "always"`,
@@ -236,6 +236,8 @@ func TestTutorial01Cities(t *testing.T) {
 				t.Fatal("missing hello.py task id from prior sling step")
 			}
 			const helloPyReadyTimeout = 3 * time.Minute
+			// On the default proxied transport bd refuses show --watch; gc bd
+			// serves the watch itself there, so the tutorial step runs as written.
 			rs, err := ws.startShell(fmt.Sprintf("gc bd show %s --watch", helloTaskID), "")
 			if err != nil {
 				t.Fatalf("gc bd show --watch start: %v", err)

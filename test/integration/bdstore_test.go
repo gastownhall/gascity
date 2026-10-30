@@ -43,16 +43,15 @@ const (
 // Requires: Dolt and bd binaries configured via PATH or the integration
 // override env vars.
 func TestBdStoreConformance(t *testing.T) {
-	// Skipped while gascity is pinned to bd 1.0.4 (ga-e7z613). bd 1.0.4 avoids
-	// bd 1.0.5's data-corruption bug but lacks the #3691 empty-DB-guard fix (it
-	// was tagged ~6.5h before #3691 merged), so it silently auto-imports into an
-	// empty on-disk DB, which trips gascity's ErrBDSilentFallback guard (#2080).
-	// This is NOT a regression: gascity 1.2.1 shipped on bd 1.0.4 with identical
-	// bd behavior; only the loud-fallback detection added after 1.2.1
-	// (#1930/#2080/#2079) is new. The user explicitly authorized applying this
-	// skip on main on 2026-06-21 as part of merging release/v1.3.0 into main.
-	// Remove once gascity moves to a clean bd (#3691 + the corruption fix).
-	t.Skip("bd 1.0.4 trips the silent-fallback guard (pre-existing, non-regression; pinned to avoid 1.0.5 corruption) — ga-e7z613")
+	// Skipped because BdStore fails this suite's
+	// ParentIDNamesARowThisStoreDoesNotHave row on every pinned bd: it hands
+	// ParentID to bd as --parent, and bd 1.3.x refuses a parent it cannot
+	// resolve ("parent issue ... not found"), the divergence ga-6od57 tracks.
+	// The bd 1.0.4 reason the skip was added for (ga-e7z613) no longer applies;
+	// every pin carries the #3691 empty-DB guard. The suite is in the gating
+	// integration-smoke filter, so un-skipping it (ga-x4j5ka) needs that row
+	// fixed or opted out, and a green run on both pins.
+	t.Skip("BdStore fails ParentIDNamesARowThisStoreDoesNotHave: bd refuses an unresolvable --parent (ga-6od57); un-skip is ga-x4j5ka")
 	requireDoltIntegration(t)
 	env := newIsolatedToolEnv(t, true)
 
@@ -93,6 +92,7 @@ func TestBdStoreConformance(t *testing.T) {
 	// uses bd's ID format (prefix-XXXX), not gc-N sequential format.
 	beadstest.RunStoreTests(t, newStore)
 	beadstest.RunMetadataTests(t, newStore)
+	beadstest.RunCloseReasonTests(t, newStore)
 }
 
 // startSharedDoltServer starts one explicit Dolt SQL server for the test and
@@ -105,14 +105,11 @@ func startSharedDoltServer(t *testing.T, env []string, dataDir string) string {
 		t.Fatalf("creating dolt data dir: %v", err)
 	}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	reserved, err := reserveLoopbackPort()
 	if err != nil {
 		t.Fatalf("allocating dolt port: %v", err)
 	}
-	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-	if err := listener.Close(); err != nil {
-		t.Fatalf("closing dolt port probe: %v", err)
-	}
+	port := strconv.Itoa(reserved)
 
 	logPath := filepath.Join(dataDir, "sql-server.log")
 	logFile, err := os.Create(logPath)
@@ -168,7 +165,7 @@ func runBDInit(t *testing.T, env []string, dir, prefix, port string) {
 
 	bdInit := exec.CommandContext(ctx, bdBinary, "init", "--server", "--server-host", "127.0.0.1", "--server-port", port, "-p", prefix, "--skip-hooks", "--skip-agents")
 	bdInit.Dir = dir
-	bdInit.Env = env
+	bdInit.Env = isolateBdHomeEnv(env)
 	out, err := bdInit.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		t.Fatalf("bd init timed out after %s: %s", bdInitTimeout, out)
@@ -189,25 +186,7 @@ func runBDInit(t *testing.T, env []string, dir, prefix, port string) {
 // BdStore → bd create --ephemeral → Dolt → wisp_events INSERT path directly.
 func TestBdStoreMailWispInsert(t *testing.T) {
 	requireDoltIntegration(t)
-	env := newIsolatedToolEnv(t, true)
-
-	rootDir := t.TempDir()
-	doltDataDir := filepath.Join(rootDir, "dolt")
-	wsDir := filepath.Join(rootDir, "ws")
-	serverPort := startSharedDoltServer(t, env, doltDataDir)
-
-	if err := os.MkdirAll(wsDir, 0o755); err != nil {
-		t.Fatalf("creating workspace: %v", err)
-	}
-	gitCmd := exec.Command("git", "init", "--quiet")
-	gitCmd.Dir = wsDir
-	if out, err := gitCmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v: %s", err, out)
-	}
-	runBDInit(t, env, wsDir, "mc", serverPort)
-	configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
-
-	store := beads.NewBdStore(wsDir, pinnedBdStoreCommandRunner())
+	store := newRealBdStoreWorkspace(t, "mc")
 
 	// Create an ephemeral message bead — exercises bd create --ephemeral →
 	// Dolt SQL INSERT INTO wisps + INSERT INTO wisp_events.
@@ -248,6 +227,114 @@ func TestBdStoreMailWispInsert(t *testing.T) {
 	}
 }
 
+// newRealBdStoreWorkspace starts a Dolt server, initializes one bd workspace
+// against it with prefix, and returns a BdStore over it running the isolated
+// tool environment's bd.
+func newRealBdStoreWorkspace(t *testing.T, prefix string) *beads.BdStore {
+	t.Helper()
+	env := newIsolatedToolEnv(t, true)
+
+	rootDir := t.TempDir()
+	doltDataDir := filepath.Join(rootDir, "dolt")
+	wsDir := filepath.Join(rootDir, "ws")
+	serverPort := startSharedDoltServer(t, env, doltDataDir)
+
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatalf("creating workspace: %v", err)
+	}
+	gitCmd := exec.Command("git", "init", "--quiet")
+	gitCmd.Dir = wsDir
+	if out, err := gitCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	runBDInit(t, env, wsDir, prefix, serverPort)
+	configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
+
+	return beads.NewBdStore(wsDir, isolatedBdStoreCommandRunner(env))
+}
+
+// TestBdStoreMailWispInsertIsolatesHOMEFromSharedServerConfig mirrors
+// TestBdStoreMailWispInsert but deliberately points env's HOME at a
+// shared-server config.yaml before running the exact same
+// runBDInit/configureCustomTypes/pinnedBdStoreCommandRunnerWithEnv chain.
+//
+// newIsolatedToolEnv sets env's own HOME explicitly (via isolateGCHomeEnv/
+// integrationEnvFor), so t.Setenv("HOME", ...) cannot reach it. This test
+// substitutes a controlled, worst-case stand-in for "whatever the
+// real invoking user's real home happens to contain" (on a fleet host that
+// runs a real shared bd/dolt server out of that real home — this one does —
+// that's a real shared-server config, not a hypothetical) so the
+// reproduction is deterministic and machine-independent rather than
+// depending on whatever this specific test run's real $HOME happens to hold.
+func TestBdStoreMailWispInsertIsolatesHOMEFromSharedServerConfig(t *testing.T) {
+	requireDoltIntegration(t)
+	env := newIsolatedToolEnv(t, true)
+
+	pollutedHome := t.TempDir()
+	beadsDir := filepath.Join(pollutedHome, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("creating polluted HOME .beads dir: %v", err)
+	}
+	cfg := "no-db: true\ndolt:\n    shared-server: true\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("writing polluted HOME config.yaml: %v", err)
+	}
+	env = replaceEnv(env, "HOME", pollutedHome)
+	// Pollute the process HOME too, so the BdStore runner below inherits it
+	// unless its own HOME pin wins.
+	t.Setenv("HOME", pollutedHome)
+
+	rootDir := t.TempDir()
+	doltDataDir := filepath.Join(rootDir, "dolt")
+	wsDir := filepath.Join(rootDir, "ws")
+	serverPort := startSharedDoltServer(t, env, doltDataDir)
+
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatalf("creating workspace: %v", err)
+	}
+	gitCmd := exec.Command("git", "init", "--quiet")
+	gitCmd.Dir = wsDir
+	if out, err := gitCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	runBDInit(t, env, wsDir, "hi", serverPort)
+	configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
+
+	isoHome := parseEnvList(isolateBdHomeEnv(env))["HOME"]
+	if isoHome == pollutedHome {
+		t.Fatalf("isolateBdHomeEnv left HOME at the polluted %s; env has no GC_HOME to isolate to", pollutedHome)
+	}
+	store := beads.NewBdStore(wsDir, pinnedBdStoreCommandRunnerWithEnv(map[string]string{"HOME": isoHome}))
+
+	sent, err := store.Create(beads.Bead{
+		Title:     "home-isolation probe",
+		Type:      "message",
+		Assignee:  "builder",
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("BdStore Create under a shared-server HOME: %v", err)
+	}
+
+	results, err := store.List(beads.ListQuery{
+		TierMode: beads.TierWisps,
+		Assignee: "builder",
+	})
+	if err != nil {
+		t.Fatalf("BdStore List under a shared-server HOME: %v", err)
+	}
+	var found bool
+	for _, b := range results {
+		if b.ID == sent.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("sent bead %s not in BdStore List(TierWisps) under a shared-server HOME; got %d beads total", sent.ID, len(results))
+	}
+}
+
 func configureCustomTypes(t *testing.T, env []string, wsDir string, customTypes []string) {
 	t.Helper()
 
@@ -256,7 +343,7 @@ func configureCustomTypes(t *testing.T, env []string, wsDir string, customTypes 
 
 	cmd := exec.CommandContext(ctx, bdBinary, "config", "set", "types.custom", strings.Join(customTypes, ","))
 	cmd.Dir = wsDir
-	cmd.Env = env
+	cmd.Env = isolateBdHomeEnv(env)
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		t.Fatalf("bd config set types.custom timed out after %s: %s", bdInitTimeout, out)

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"os"
+	"time"
 )
 
 // TailUsage is the per-invocation token usage parsed from one
@@ -38,6 +39,15 @@ type TailUsage struct {
 	// ContextWindowTokens is the model context window reported by the
 	// provider for this invocation, when available.
 	ContextWindowTokens int
+	// Timestamp is the transcript entry's own timestamp, when the provider
+	// format carries one. Zero when absent or unparseable.
+	Timestamp time.Time
+	// ReportedCostUSD is the cost the provider's own transcript recorded for
+	// this invocation, valid only when HasReportedCost is set. Families whose
+	// transcripts carry no cost leave both zero and are priced from the
+	// pricing registry instead.
+	ReportedCostUSD float64
+	HasReportedCost bool
 }
 
 // ExtractTailUsage reads the tail of a session transcript and returns one
@@ -224,6 +234,7 @@ func parseTailUsage(data []byte) ([]TailUsage, error) {
 			OutputTokens:        msg.Usage.OutputTokens,
 			CacheReadTokens:     msg.Usage.CacheReadInputTokens,
 			CacheCreationTokens: msg.Usage.CacheCreationInputTokens,
+			Timestamp:           entry.Timestamp.Time,
 		}
 		if u.InputTokens <= 0 && u.OutputTokens <= 0 && u.CacheReadTokens <= 0 && u.CacheCreationTokens <= 0 {
 			continue

@@ -31,9 +31,10 @@ const droppedDatabasesDir = ".beads/dolt/.dolt_dropped_databases"
 // into report.Errors but never abort the run.
 //
 // Purge.OK is true only when --force was set and every purge call
-// succeeded; in dry-run mode OK stays false because no work was done.
+// succeeded; in dry-run mode OK stays false because no work was done. A
+// legacy-fallback port is never purged; runDoltCleanup records that refusal.
 func runPurgeStage(report *CleanupReport, opts cleanupOptions) {
-	if opts.FS == nil {
+	if opts.FS == nil || opts.PortResolution.Fallback {
 		return
 	}
 	if opts.Force && hasRigProtectionError(report) {
@@ -131,8 +132,8 @@ func runPurgeStage(report *CleanupReport, opts cleanupOptions) {
 // excluded from purge accounting). A scope that merely cannot be resolved
 // right now (legacy scope without canonical config, stopped managed dolt —
 // contract.IsManagedRuntimeUnavailable) is treated as sharing only when the
-// cleanup port itself came from the legacy fallback or the city config,
-// preserving the conservative pre-P1.7 missing-port-file semantics.
+// cleanup port itself came from the city config. The legacy fallback never
+// vouches for a scope: nothing proves this city's server listens there.
 func rigSharesResolvedDoltServer(rig resolverRig, opts cleanupOptions) bool {
 	if opts.PortResolution.Port <= 0 || opts.FS == nil {
 		return true
@@ -147,7 +148,7 @@ func rigSharesResolvedDoltServer(rig resolverRig, opts cleanupOptions) bool {
 			return false
 		}
 	}
-	return opts.PortResolution.Fallback || cityConfigPortSelectsRig(rig, opts)
+	return cityConfigPortSelectsRig(rig, opts)
 }
 
 func cityConfigPortSelectsRig(_ resolverRig, opts cleanupOptions) bool {

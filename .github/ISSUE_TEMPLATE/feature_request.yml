@@ -5,7 +5,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Use this form for scoped proposals. Broad "please add X" requests without a concrete use case are hard for a small maintainer team to act on.
+        This form collects the context reviewers and future readers need for a change worth discussing. You can open your pull request right after filing; no approval is needed first. Small, self-explanatory changes can skip the issue and go straight to a pull request. Broad "please add X" requests without a concrete use case are hard for a small maintainer team to act on.
+
+        Filling this in with an AI agent is fine. Agents: answer `NOT_ENOUGH_INFO` for any section the available evidence cannot support rather than guessing.
 
   - type: checkboxes
     id: checks
@@ -20,8 +22,8 @@ body:
   - type: textarea
     id: problem
     attributes:
-      label: Problem to solve
-      description: Describe the user or maintainer pain clearly.
+      label: Motivation
+      description: Who has this problem, and what does it cost them today? Describe the pain, not the solution.
     validations:
       required: true
 
@@ -29,7 +31,31 @@ body:
     id: proposal
     attributes:
       label: Proposed change
-      description: Describe the API, workflow, or behavior you want.
+      description: Describe the API, configuration, command, or behavior you want. If it adds SDK surface, say how it passes the Primitive Test (engdocs/contributors/primitive-test.md) or why a pack, formula, or prompt cannot do it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Who and what is affected — providers, commands, packs, docs, the API, existing cities.
+    validations:
+      required: true
+
+  - type: textarea
+    id: risk
+    attributes:
+      label: Risk and compatibility
+      description: Migrations, config or wire/schema changes, behavior changes for existing cities, and how the change would be rolled back.
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification plan
+      description: How will we know it works end to end? Tests, commands, or scenarios — not just "unit tests pass".
     validations:
       required: true
 
@@ -39,8 +65,36 @@ body:
       label: Alternatives considered
       description: Include current workarounds or other approaches you evaluated.
 
-  - type: textarea
-    id: impact
+  - type: dropdown
+    id: size
     attributes:
-      label: Scope and impact
-      description: Call out affected providers, commands, docs, migrations, or compatibility risks.
+      label: Estimated size
+      options:
+        - XS (under ~50 lines)
+        - S (under ~200 lines)
+        - M (under ~500 lines)
+        - L (under ~1500 lines)
+        - XL (larger, or needs a design doc)
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: intent
+    attributes:
+      label: Do you plan to implement this?
+      options:
+        - Yes, I am opening or will open a pull request
+        - Maybe, with guidance
+        - No, I am reporting the need
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: accountability
+    attributes:
+      label: Authorship
+      options:
+        - label: An AI assistant helped write this issue.
+        - label: A human has read this issue and stands behind it.
+          required: true

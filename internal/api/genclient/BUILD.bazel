@@ -1,0 +1,65 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "genclient",
+    srcs = [
+        "client_gen.go",
+        "doc.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/api/genclient",
+    visibility = ["//:__subpackages__"],
+    deps = ["@com_github_oapi_codegen_runtime//:runtime"],
+)
+
+go_test(
+    name = "genclient_test",
+    srcs = [
+        "genclient_test.go",
+        "testenv_import_test.go",
+    ],
+    data = [
+        "//:go.mod",
+        "//cmd/gen-client",
+        "//internal/api/genclient:client_gen.go",
+        "@com_github_oapi_codegen_oapi_codegen_v2//cmd/oapi-codegen",
+    ],
+    # The MODULE.bazel-pinned oapi-codegen, so the drift check never depends
+    # on (or skips for lack of) a host install.
+    env = {"GC_OAPI_CODEGEN": "$(rlocationpath @com_github_oapi_codegen_oapi_codegen_v2//cmd/oapi-codegen)"},
+    deps = [
+        ":genclient",
+        "//internal/bazeltest",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

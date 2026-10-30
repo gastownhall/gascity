@@ -38,7 +38,7 @@ func TestGCNonTestFilesUsePooledDoltConnections(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	gcDir := filepath.Dir(currentFile)
+	gcDir := gcCallerDir(currentFile)
 	roots := []string{
 		gcDir,
 		filepath.Join(gcDir, "..", "..", "internal", "api"),

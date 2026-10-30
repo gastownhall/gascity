@@ -7,12 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/cityinit"
-	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -66,7 +64,7 @@ type cityInitLifecycleEvents struct {
 }
 
 func (e cityInitLifecycleEvents) EnsureCityLog(cityPath string) error {
-	fr, err := events.NewFileRecorder(filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"), e.stderrOrDiscard())
+	fr, err := openCityEventsLog(cityPath, e.stderrOrDiscard())
 	if err != nil {
 		return err
 	}
@@ -85,7 +83,7 @@ func (e cityInitLifecycleEvents) CityUnregisterRequested(city cityinit.Registere
 }
 
 func (e cityInitLifecycleEvents) record(cityPath, eventType, subject string, payload api.CityLifecyclePayload) error {
-	fr, err := events.NewFileRecorder(filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"), e.stderrOrDiscard())
+	fr, err := openCityEventsLog(cityPath, e.stderrOrDiscard())
 	if err != nil {
 		return err
 	}

@@ -39,6 +39,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -524,4 +525,48 @@ func functionLabel(function *ast.FuncDecl) string {
 		return function.Name.Name
 	}
 	return receiverTypeName(function.Recv.List[0].Type) + "." + function.Name.Name
+}
+
+// wrappedNudgeQueuePassThroughs are the queue reads and writes the wrapper
+// promotes from the binding without an event. Every other NudgeQueue verb must
+// be intercepted, so a verb added to the contract is reported unless it is
+// named here on purpose.
+var wrappedNudgeQueuePassThroughs = map[string]bool{
+	"ListFor":                  true,
+	"ListForAgent":             true,
+	"WithdrawQueuedWaitNudges": true,
+}
+
+// TestWrappedNudgeQueueInterceptsEveryQueueVerb is the queue's half of the
+// event census. The contract is read from the interface itself, so a verb the
+// contract grows (ClaimBatch, Lookup, DueKeys, Empty and the two-argument
+// ReleaseClaims grew together) fails here until the wrapper declares it and
+// emits under its own name. A wrapper that merely promotes a new verb would
+// otherwise serve it with no event at all, and nothing else would notice.
+func TestWrappedNudgeQueueInterceptsEveryQueueVerb(t *testing.T) {
+	methods := packageReceiverFuncDecls(t, "wrappedNudgeQueue")
+	contract := reflect.TypeOf((*NudgeQueue)(nil)).Elem()
+	if contract.NumMethod() == 0 {
+		t.Fatal("the NudgeQueue contract has no methods; the census is reading the wrong type")
+	}
+	for index := 0; index < contract.NumMethod(); index++ {
+		name := contract.Method(index).Name
+		if wrappedNudgeQueuePassThroughs[name] {
+			continue
+		}
+		method, declared := methods[name]
+		if !declared {
+			t.Errorf("wrappedNudgeQueue does not intercept NudgeQueue.%s; the verb is served with no event", name)
+			continue
+		}
+		emitted := emittedOperations(method)
+		if len(emitted) != 1 || emitted[0] != name {
+			t.Errorf("wrappedNudgeQueue.%s emits %v, want exactly one event named %q", name, emitted, name)
+		}
+	}
+	for name := range wrappedNudgeQueuePassThroughs {
+		if _, onContract := contract.MethodByName(name); !onContract {
+			t.Errorf("pass-through %q is not a NudgeQueue verb; the allowance is stale", name)
+		}
+	}
 }

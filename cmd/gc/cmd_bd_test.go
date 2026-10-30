@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -514,14 +513,75 @@ func TestResolveBdScopeTargetErrorsOnForeignRedirect(t *testing.T) {
 	}
 }
 
+// TestResolveBdScopeTargetCityStoreRedirectUsesCityStore is the positive twin
+// of TestResolveBdScopeTargetErrorsOnForeignRedirect: a city-scoped agent's
+// worktree of the city repo redirects to the city's own HQ store, and that is
+// city scope, not a foreign store. Only an arg naming an existing bead skips
+// the cwd step (via the prefix probes above it), which is why `show` and
+// `update` of an HQ bead worked from that cwd while create, list, --help and
+// a show of a missing id were refused (ga-k1e9yp). The probe is stubbed to
+// miss, so every case here must resolve through the cwd step.
+func TestResolveBdScopeTargetCityStoreRedirectUsesCityStore(t *testing.T) {
+	cityDir := t.TempDir()
+	worktreeDir := filepath.Join(cityDir, ".gc", "worktrees", "gascity", "pack-author")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(city .beads): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktreeDir, ".beads"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree .beads): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".beads", "redirect"), []byte(filepath.Join(cityDir, ".beads")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(redirect): %v", err)
+	}
+	setCwd(t, worktreeDir)
+	// City-scoped agents run without GC_RIG; an ambient one would win before
+	// the cwd step this test exercises.
+	t.Setenv("GC_RIG", "")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "gascity"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: filepath.Join("rigs", "frontend"), Prefix: "fr"}},
+	}
+	origProbe := bdBeadExists
+	defer func() { bdBeadExists = origProbe }()
+	bdBeadExists = func(string, *config.City, execStoreTarget, string) bool { return false }
+
+	for _, args := range [][]string{
+		{"create", "--title", "probe"},
+		{"list"},
+		{"--help"},
+		{"show", config.EffectiveHQPrefix(cfg) + "-missing"},
+	} {
+		got, err := resolveBdScopeTarget(cfg, cityDir, "", args, false, io.Discard)
+		if err != nil {
+			t.Fatalf("resolveBdScopeTarget(%v) error = %v, want city store", args, err)
+		}
+		if got.ScopeKind != "city" || got.ScopeRoot != cityDir {
+			t.Fatalf("resolveBdScopeTarget(%v) = %#v, want the city store at %q", args, got, cityDir)
+		}
+	}
+}
+
 func TestBdCommandEnvUsesCanonicalRigTarget(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BIN", "/tmp/ambient-gc")
+	invokingDir := t.TempDir()
+	invokingGC := filepath.Join(invokingDir, "gc")
+	if err := os.WriteFile(invokingGC, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write invoking gc fixture: %v", err)
+	}
+	invokingLink := filepath.Join(invokingDir, "gc-link")
+	if err := os.Symlink(invokingGC, invokingLink); err != nil {
+		t.Fatalf("symlink invoking gc fixture: %v", err)
+	}
+	oldResolve := resolveInvokingExecutable
+	resolveInvokingExecutable = func() (string, error) { return invokingLink, nil }
+	t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
 	_ = os.Unsetenv("BEADS_ACTOR")
 
-	cityDir := t.TempDir()
+	cityDir := normalizePathForCompare(t.TempDir())
 	wantPort := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
-	rigDir := filepath.Join(t.TempDir(), "repo")
+	rigDir := filepath.Join(normalizePathForCompare(t.TempDir()), "repo")
 	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -564,9 +624,33 @@ dolt.auto-start: false
 	if got := env["GC_BEADS_PREFIX"]; got != "repo" {
 		t.Fatalf("GC_BEADS_PREFIX = %q, want %q", got, "repo")
 	}
+	wantGC, err := filepath.EvalSymlinks(invokingGC)
+	if err != nil {
+		t.Fatalf("resolve invoking gc fixture: %v", err)
+	}
+	if got := env["GC_BIN"]; got != wantGC {
+		t.Fatalf("GC_BIN = %q, want physical invoking executable %q", got, wantGC)
+	}
 	if _, present := env["BEADS_ACTOR"]; present {
 		t.Fatalf("BEADS_ACTOR = %q, want absent for direct gc bd env without explicit actor", env["BEADS_ACTOR"])
 	}
+}
+
+func TestResolveBdInvokingGCBinaryFailsClosed(t *testing.T) {
+	oldResolve := resolveInvokingExecutable
+	t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
+	t.Run("resolver error", func(t *testing.T) {
+		resolveInvokingExecutable = func() (string, error) { return "", errors.New("unavailable") }
+		if _, err := resolveBdInvokingGCBinary(); err == nil {
+			t.Fatal("resolveBdInvokingGCBinary unexpectedly succeeded")
+		}
+	})
+	t.Run("relative path", func(t *testing.T) {
+		resolveInvokingExecutable = func() (string, error) { return "gc", nil }
+		if _, err := resolveBdInvokingGCBinary(); err == nil {
+			t.Fatal("resolveBdInvokingGCBinary unexpectedly accepted a relative path")
+		}
+	})
 }
 
 func TestBdCommandEnvRefusesAnUnregisteredBackend(t *testing.T) {
@@ -1394,14 +1478,16 @@ func TestFreshManagedBdCityInitSeedsPinnedHQDatabaseAndKeepsGCPrefix(t *testing.
 	cityPath := setupFreshManagedBdWaitTestCity(t)
 	bdPath := waitTestRealBDPath(t)
 
-	cmd := exec.Command("dolt", "sql", "-q", "show tables")
-	cmd.Dir = filepath.Join(cityPath, ".beads", "dolt", "hq")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("dolt sql show tables in hq: %v\n%s", err, out)
+	mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json"))
+	if err != nil || !ok {
+		t.Fatalf("ReadDoltMode(metadata): mode=%q ok=%v err=%v", mode, ok, err)
 	}
-	if !strings.Contains(string(out), "config") {
-		t.Fatalf("hq database missing bead schema tables:\n%s", out)
+	if mode != "proxied-server" {
+		t.Fatalf("metadata dolt_mode = %q, want proxied-server", mode)
+	}
+	database, ok, err := contract.ReadDoltDatabase(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json"))
+	if err != nil || !ok || database != "hq" {
+		t.Fatalf("ReadDoltDatabase(metadata) = (%q, %v, %v), want (hq, true, nil)", database, ok, err)
 	}
 
 	rawDir := filepath.Join(cityPath, "fresh-nested")
@@ -2748,7 +2834,12 @@ func TestDoBdReleaseIfCurrentUpdatesOnlyMatchingAssignment(t *testing.T) {
 	}
 }
 
-func TestDoBdReleaseIfCurrentWorksForBdStoreFallback(t *testing.T) {
+// TestDoBdReleaseIfCurrentRefusesAnOldBdWithoutSQL is the CLI twin of the
+// store-level floor: a bd below 1.3.0 rejects the conditional-release flags,
+// and the command must fail with the typed refusal naming the floor. It must
+// never reach `bd sql` (or, on this embedded-Dolt rig, the `dolt sql` CLI): no
+// release path writes the row behind bd's back.
+func TestDoBdReleaseIfCurrentRefusesAnOldBdWithoutSQL(t *testing.T) {
 	clearInheritedBeadsEnv(t)
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
@@ -2785,9 +2876,9 @@ prefix = "fe"
 	}
 	fakeBin := t.TempDir()
 	sqlLog := filepath.Join(fakeBin, "sql.log")
-	// bd 1.0.4 — the contract-tested minimum (deps.env BD_PREV_VERSION) — has no
-	// conditional-release flags and rejects them the way its flag parser does,
-	// which is what latches the store onto the raw-SQL path this test pins.
+	// A bd older than 1.3.0 has no conditional-release flags and rejects them
+	// the way its flag parser does. The sql branch only records a call, so the
+	// test can prove none happened.
 	fakeBD := "#!/bin/sh\n" +
 		"if [ \"$1\" = \"update\" ]; then\n" +
 		"  printf 'unknown flag: --if-assignee\\n' >&2\n" +
@@ -2820,22 +2911,19 @@ prefix = "fe"
 
 	target := execStoreTarget{ScopeRoot: rigDir, ScopeKind: "rig", Prefix: "fe"}
 	var stdout, stderr bytes.Buffer
-	if got := doBdReleaseIfCurrent(cityDir, nil, target, "fe-abc", "worker-1", &stdout, &stderr); got != 0 {
-		t.Fatalf("doBdReleaseIfCurrent = %d, want 0; stderr=%q", got, stderr.String())
+	if got := doBdReleaseIfCurrent(cityDir, nil, target, "fe-abc", "worker-1", &stdout, &stderr); got != 1 {
+		t.Fatalf("doBdReleaseIfCurrent = %d, want 1; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
 	}
-	if strings.TrimSpace(stdout.String()) != "released" {
-		t.Fatalf("output = %q, want released", stdout.String())
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want nothing on a refusal", stdout.String())
 	}
-	query, err := os.ReadFile(sqlLog)
-	if err != nil {
-		t.Fatalf("read SQL log: %v", err)
+	for _, want := range []string{beads.ErrConditionalReleaseUnsupported.Error(), "bd >= 1.3.0"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+		}
 	}
-	// The release mints a fresh revision so the pre-release token is stale, so
-	// the token itself is not pinnable — everything around it is.
-	gotQuery := strings.TrimSpace(string(query))
-	wantQuery := regexp.MustCompile(`^UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = -?\d+ WHERE id = 'fe-abc' AND status = 'in_progress' AND assignee = 'worker-1'$`)
-	if !wantQuery.MatchString(gotQuery) {
-		t.Fatalf("SQL query = %q, want match for %s", gotQuery, wantQuery)
+	if _, err := os.Stat(sqlLog); !os.IsNotExist(err) {
+		t.Fatalf("an old bd reached `bd sql` (log stat err=%v)", err)
 	}
 }
 
@@ -3333,5 +3421,56 @@ func writeGcBdProbeScript(t *testing.T, path, identity string) {
 	script := "#!/bin/sh\necho " + identity + "\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestGcBdPassthroughIgnoresStaleAmbientBdBin pins ga-weekw end to end: a
+// stale absolute BD_BIN inherited from a long-lived shell must not take
+// `gc bd` offline for a managed city with no workspace pin. The passthrough
+// runs the PATH bd, and the operator sees one warning naming the ignored value.
+func TestGcBdPassthroughIgnoresStaleAmbientBdBin(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	warnings := captureAmbientBdBinWarnings(t)
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	defer func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	}()
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setCwd(t, cityDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeBuiltinImportsFixture(t, cityDir, "core", "bd")
+
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(`#!/bin/sh
+set -eu
+printf '{"id":"gc-1","status":"in_progress"}\n'
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY_PATH", cityDir)
+	stale := "/nonexistent/beads/bd-rc2"
+	t.Setenv("BD_BIN", stale)
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"update", "gc-1", "--claim", "--json"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd() = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"id":"gc-1"`) {
+		t.Fatalf("stdout = %q, want PATH bd output", stdout.String())
+	}
+	if msg := warnings.String(); strings.Count(msg, "\n") != 1 || !strings.Contains(msg, stale) {
+		t.Fatalf("warning = %q, want one line naming ignored BD_BIN %q", msg, stale)
 	}
 }

@@ -29,7 +29,9 @@ func (c *City) StartWithSupervisor() {
 	c.started = true
 	c.usedSupervisor = true
 	c.t.Cleanup(func() {
-		c.Stop()
+		if c.stop() {
+			c.tornDown = true
+		}
 		RunGC(c.Env, "", "supervisor", "stop", "--wait") //nolint:errcheck
 	})
 }

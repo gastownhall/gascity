@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // TestIdentitySeparatorContractDocExists guards the acceptance criteria for
@@ -66,6 +68,10 @@ func TestSessionNameCommentReferencesIdentitySeparatorContract(t *testing.T) {
 
 func repoRootFromCaller(t *testing.T) string {
 	t.Helper()
+
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")

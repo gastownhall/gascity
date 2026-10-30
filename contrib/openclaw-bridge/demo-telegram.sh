@@ -82,6 +82,7 @@ trap cleanup EXIT
 
 step "Preflight"
 command -v node >/dev/null || die "node is required"
+command -v npm >/dev/null || die "npm is required"
 command -v curl >/dev/null || die "curl is required"
 command -v python3 >/dev/null || die "python3 is required"
 if curl -fs --max-time 2 "http://127.0.0.1:$SUPERVISOR_PORT/v0/cities" >/dev/null 2>&1; then
@@ -91,9 +92,13 @@ fi
 if [ -e "$DEMO" ] && [ ! -e "$DEMO/.gc-openclaw-telegram-demo" ]; then
   die "$DEMO exists but was not created by this demo; remove it or set DEMO_DIR elsewhere"
 fi
-if [ ! -d "$ROOT/node_modules/openclaw/dist" ]; then
+# (Re)install the locked tree unless node_modules already holds what
+# package.json pins: `npm ls` fails on a missing or differently versioned
+# dependency, e.g. a tree installed before @openclaw/imessage was split out
+# of openclaw.
+if ! (cd "$ROOT" && npm ls --depth=0 >/dev/null 2>&1); then
   bold "installing openclaw from npm (pinned via package-lock.json)..."
-  (cd "$ROOT" && npm install --no-audit --no-fund)
+  (cd "$ROOT" && npm ci --no-audit --no-fund)
 fi
 GC="${GC_BIN:-$ROOT/.cache/gc}"
 if [ ! -x "$GC" ]; then

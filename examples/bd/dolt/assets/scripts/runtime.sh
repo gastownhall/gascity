@@ -48,6 +48,55 @@ is_local_dolt_host() {
   esac
 }
 
+# beads_config_value <config.yaml> <section.field> prints a two-part dotted
+# bd config key's value in either spelling bd reads: the flat top-level
+# `section.field: v` gc writes, or the nested `section:` / `  field: v` that
+# bd >= 1.3.1 writes on `bd config set`. The flat spelling wins when both are
+# present, as it does in viper. Trailing comments and surrounding quotes are
+# stripped; an absent file or key prints nothing. Mirrors findConfigValue in
+# internal/beads/contract/files.go and beads_config_value in the bd pack's
+# gc-beads-bd.sh.
+beads_config_value() {
+  [ -f "$1" ] || return 0
+  awk -v key="$2" '
+    function clean(v) {
+      sub(/^[[:space:]]+/, "", v)
+      if (v ~ /^#/) v = ""
+      sub(/[[:space:]]+#.*$/, "", v)
+      sub(/[[:space:]]+$/, "", v)
+      if (v ~ /^".*"$/ || v ~ /^\047.*\047$/) v = substr(v, 2, length(v) - 2)
+      return v
+    }
+    BEGIN {
+      dot = index(key, ".")
+      section = substr(key, 1, dot - 1)
+      field = substr(key, dot + 1)
+    }
+    { sub(/\r$/, "") }
+    /^[[:space:]]*(#.*)?$/ { next }
+    /^[^[:space:]]/ {
+      in_section = 0
+      child_indent = -1
+      if (!flat_seen && index($0, key ":") == 1) {
+        flat_seen = 1
+        flat = clean(substr($0, length(key) + 2))
+      }
+      if (index($0, section ":") == 1 && clean(substr($0, length(section) + 2)) == "") in_section = 1
+      next
+    }
+    in_section {
+      match($0, /^[[:space:]]+/)
+      if (child_indent < 0) child_indent = RLENGTH
+      if (RLENGTH == child_indent && nested == "" && index(substr($0, RLENGTH + 1), field ":") == 1)
+        nested = clean(substr($0, RLENGTH + length(field) + 2))
+    }
+    END {
+      if (flat_seen) print flat
+      else if (nested != "") print nested
+    }
+  ' "$1"
+}
+
 read_runtime_state_flag() (
   state_file="$1"
   key="$2"
@@ -119,6 +168,85 @@ pid_is_running() (
   return 1
 )
 
+# managed_runtime_listener_pids prints every PID holding a LISTEN socket on
+# PORT, ascending and deduplicated. On a host with a readable kernel socket
+# table the answer comes from that table plus the /proc/<pid>/fd link text
+# and lsof is never run: an -i-only lsof query stats every /proc/<pid>/fd
+# entry before it filters, so a single stalled FUSE mount anywhere on the
+# host parks lsof in uninterruptible sleep — unkillable, and with it every
+# dolt order that waits on the probe (gascity#7553). Only when no table is
+# readable (no procfs) does the probe fall back to lsof. GC_DOLT_PROC_ROOT
+# repoints the proc root for tests.
+managed_runtime_listener_pids() (
+  port="$1"
+
+  case "$port" in
+    ''|*[!0-9]*)
+      return 0
+      ;;
+  esac
+
+  proc_root="${GC_DOLT_PROC_ROOT:-/proc}"
+
+  set --
+  for table in "$proc_root/net/tcp" "$proc_root/net/tcp6"; do
+    if [ -r "$table" ]; then
+      set -- "$@" "$table"
+    fi
+  done
+
+  if [ $# -eq 0 ]; then
+    command -v lsof >/dev/null 2>&1 || return 0
+    lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null
+    return 0
+  fi
+
+  # One awk pass over the readable tables collects the socket inodes of every
+  # LISTEN row on PORT ($4 is the connection state, 0A is TCP_LISTEN; the
+  # port is the hex field after the last colon of the local address; rows
+  # without an inode, like TIME_WAIT, are skipped). An empty answer is a
+  # definitive no-listener; lsof is not consulted as a second opinion,
+  # because that call is the one the kernel tables exist to replace.
+  port_hex=$(printf '%04X' "$port")
+
+  inodes=$(awk -v want="$port_hex" '
+    NF >= 10 && $4 == "0A" && $10 ~ /^[1-9][0-9]*$/ {
+      local_address = $2
+      sub(/.*:/, "", local_address)
+      if (local_address == want) {
+        print $10
+      }
+    }
+  ' "$@")
+
+  [ -n "$inodes" ] || return 0
+
+  # One find maps the inodes to their holders. -lname matches the text of
+  # each /proc/<pid>/fd symlink — the kernel-rendered socket:[inode] name —
+  # and never stats the link target, so the scan cannot block on any mounted
+  # filesystem. The brackets in each pattern are escaped: unescaped, find
+  # reads them as an fnmatch character class. Unreadable fd directories
+  # (other users, processes that exit mid-scan) are skipped.
+  set --
+  for inode in $inodes; do
+    if [ $# -gt 0 ]; then
+      set -- "$@" -o
+    fi
+    set -- "$@" -lname 'socket:\['"$inode"'\]'
+  done
+
+  find "$proc_root" -mindepth 3 -maxdepth 3 \
+    -path "$proc_root/[0-9]*/fd/[0-9]*" \
+    \( "$@" \) 2>/dev/null \
+    | while IFS= read -r fd_path; do
+        pid_path=${fd_path%/fd/*}
+        printf '%s\n' "${pid_path##*/}"
+      done \
+    | sort -n -u
+)
+
+# managed_runtime_listener_pid prints the PID of the first running process
+# holding a LISTEN socket on PORT, or nothing when there is none.
 managed_runtime_listener_pid() (
   port="$1"
 
@@ -128,11 +256,7 @@ managed_runtime_listener_pid() (
       ;;
   esac
 
-  if ! command -v lsof >/dev/null 2>&1; then
-    return 0
-  fi
-
-  lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null \
+  managed_runtime_listener_pids "$port" \
     | while IFS= read -r holder_pid; do
         case "$holder_pid" in
           ''|*[!0-9]*)
@@ -215,26 +339,37 @@ managed_runtime_port() (
   printf '%s\n' "$port"
 )
 
-# Resolve GC_DOLT_PORT. The shared helper prefers validated live managed
-# runtime state over stale inherited env, then falls back to GC_DOLT_PORT as an
-# operator seed, and exits 78 if neither yields a port.
 . "${GC_PACK_DIR:-${PACK_DIR:-${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}/dolt}}/assets/scripts/port_resolve.sh"
-GC_DOLT_PORT=$(resolve_dolt_port_or_die "$DOLT_STATE_FILE" "$DOLT_PROVIDER_STATE_FILE" "$DOLT_DATA_DIR" "$GC_CITY_PATH") || exit $?
+. "${GC_PACK_DIR:-${PACK_DIR:-${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}/dolt}}/assets/scripts/proxied_scope.sh"
 
-# Resolve a bounded-execution helper. Prefer gtimeout (coreutils on
-# macOS), fall back to timeout (coreutils on Linux), then to running
-# the command directly if neither is installed. Running unbounded is
-# still better than letting a wedged dolt client hang the caller, but
-# patrol callers need a hard upper bound wherever possible.
-if command -v gtimeout >/dev/null 2>&1; then
-  TIMEOUT_BIN="gtimeout"
-elif command -v timeout >/dev/null 2>&1; then
-  TIMEOUT_BIN="timeout"
+# On a bd-owned proxied scope there is no gc-managed Dolt server: bd starts,
+# supervises and stops it. Every command in this pack is a typed no-op there,
+# and there is no managed runtime port to resolve. A command that shapes its
+# own output (health, cleanup) sets GC_DOLT_PROXIED_HANDLED=1 before sourcing
+# this file and emits its own skip document instead.
+#
+# The guard runs before the commands parse their own flags, so it has to
+# honour --json itself: status, cleanup, compact and sync all have machine
+# consumers, and a plain sentence on stdout would break every one of them.
+if bd_owns_proxied_scope; then
+  GC_DOLT_SCOPE_BD_PROXIED=1
+  if [ "${GC_DOLT_PROXIED_HANDLED:-0}" != "1" ]; then
+    case " $* " in
+      *" --json "*) print_proxied_skip_json ;;
+      *) printf '%s\n' "$GC_DOLT_PROXIED_NOOP_MESSAGE" ;;
+    esac
+    exit 0
+  fi
+  GC_DOLT_PORT=""
 else
-  TIMEOUT_BIN=""
+  GC_DOLT_SCOPE_BD_PROXIED=0
+  # Resolve GC_DOLT_PORT. The shared helper prefers validated live managed
+  # runtime state over stale inherited env, then falls back to GC_DOLT_PORT as
+  # an operator seed, and exits 78 if neither yields a port.
+  GC_DOLT_PORT=$(resolve_dolt_port_or_die "$DOLT_STATE_FILE" "$DOLT_PROVIDER_STATE_FILE" "$DOLT_DATA_DIR" "$GC_CITY_PATH") || exit $?
 fi
 
-_run_bounded_warned_no_timeout=""
+. "${GC_PACK_DIR:-${PACK_DIR:-${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}/dolt}}/assets/scripts/_bounded.sh"
 
 # Wall-clock bound (seconds) for `gc rig list --json` rig discovery, shared
 # by the compact and health commands and tunable via
@@ -244,40 +379,3 @@ _run_bounded_warned_no_timeout=""
 # (gascity#2740).
 GC_DOLT_RIG_LIST_TIMEOUT_SECS="${GC_DOLT_RIG_LIST_TIMEOUT_SECS:-30}"
 
-# run_bounded SECS CMD...  — Run CMD with a wall-clock timeout. Exits
-# 124 on timeout (coreutils convention). Uses --kill-after=2 so an
-# uncooperative child that ignores SIGTERM (e.g. a dolt client stuck
-# in kernel socket wait) is escalated to SIGKILL rather than leaking
-# zombies — which is the failure mode the bounded helper exists to
-# prevent. If no bounded execution mechanism is available, fail closed rather
-# than running a potentially wedged Dolt client unbounded.
-run_bounded() {
-  _t="$1"; shift
-  if [ -n "$TIMEOUT_BIN" ]; then
-    "$TIMEOUT_BIN" --kill-after=2 "$_t" "$@"
-  elif command -v python3 >/dev/null 2>&1; then
-    python3 - "$_t" "$@" <<'PY'
-import subprocess
-import sys
-
-limit = float(sys.argv[1])
-cmd = sys.argv[2:]
-
-proc = subprocess.Popen(cmd)
-try:
-    proc.wait(timeout=limit)
-except subprocess.TimeoutExpired:
-    proc.terminate()
-    try:
-        proc.wait(timeout=2)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-    sys.exit(124)
-sys.exit(proc.returncode)
-PY
-  else
-    printf 'dolt runtime: timeout/gtimeout/python3 not found; cannot run bounded command\n' >&2
-    return 124
-  fi
-}

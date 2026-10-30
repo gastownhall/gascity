@@ -34,6 +34,14 @@ var paneBindSession int64
 func newFakeHerdrProvider(t *testing.T) (*Provider, string) {
 	t.Helper()
 	session := fmt.Sprintf("gctest-pb-%d-%d", os.Getpid(), atomic.AddInt64(&paneBindSession, 1))
+	return newFakeHerdrProviderForSession(t, session)
+}
+
+// newFakeHerdrProviderForSession is newFakeHerdrProvider with caller-supplied
+// session naming, for callers (e.g. kindpath_live_test.go) that must exercise
+// their own generated names rather than this file's own sequence.
+func newFakeHerdrProviderForSession(t *testing.T, session string) (*Provider, string) {
+	t.Helper()
 	state := t.TempDir()
 	metaDir := t.TempDir()
 	script := filepath.Join(t.TempDir(), "herdr")
@@ -61,6 +69,14 @@ agent_start)
     : > "$STATE/registered"
     : > "$STATE/busy"
     printf '%s' '{"error":{"code":"agent_name_taken","message":"agent name already registered"}}'
+  elif [ -e "$STATE/pane_busy_once" ]; then
+    # A fresh pane's shell can still be sourcing rc files when herdr's own
+    # availability check runs: unlike agent_name_taken above, herdr reports
+    # this by exiting non-zero with the error on stderr (an untyped shape —
+    # ga-iwanrj). Fires once so the retry's second attempt lands below.
+    rm -f "$STATE/pane_busy_once"
+    echo '{"error":{"code":"agent_pane_busy","message":"agent target pane %5 is not an available shell"}}' >&2
+    exit 1
   else
     : > "$STATE/agent_started"
     : > "$STATE/registered"
@@ -81,13 +97,16 @@ agent_prompt)
     printf '%s' '{"error":{"code":"agent_not_found","message":"agent target not found"}}'
   elif [ -e "$STATE/prompt_stalled" ]; then
     # No state change inside herdr's fixed 5000ms window: the submit CR never
-    # reached the TUI and the text sits unsubmitted in an idle input box.
-    printf '%s' '{"error":{"code":"agent_prompt_stalled","message":"no state change observed after submission"}}'
+    # reached the TUI and the text sits unsubmitted in an idle input box. Real
+    # herdr reports a failed verb on stderr with a non-zero exit.
+    printf '%s' '{"error":{"code":"agent_prompt_stalled","message":"no state change observed after submission"}}' >&2
+    exit 1
   elif [ -e "$STATE/prompt_times_out" ]; then
     # The state-change gate passed (the CR landed) but no --until state was
     # observed before --timeout. herdr only reports this when --timeout
     # exceeds its 5000ms window; a shorter one masks the stall as a timeout.
-    printf '%s' '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}'
+    printf '%s' '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}' >&2
+    exit 1
   elif [ -e "$STATE/prompt_blocked" ]; then
     # The first turn opened a confirmation dialog. herdr matches only the
     # requested --until states, so this settles iff the caller asked for
@@ -284,6 +303,24 @@ func TestStartKindPathRegistersAndPersistsBinding(t *testing.T) {
 	}
 	if got, _ := p.GetMeta("gastown__witness", metaBoundMode); got != bindModeAgent {
 		t.Fatalf("bound mode after Start = %q; want %q", got, bindModeAgent)
+	}
+}
+
+// ga-iwanrj: herdr's agent_pane_busy rejection (a fresh pane's shell still
+// sourcing rc files) arrives via a non-zero exit, an error shape the retry
+// guard at provider.go:198 could not see through herdrErrorCode alone. Start
+// must retry the launch rather than surface the rejection.
+func TestStartRetriesAgentStartOnNonZeroExitPaneBusy(t *testing.T) {
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
+	setState(t, state, "pane_busy_once")
+
+	if err := p.Start(context.Background(), "gastown__witness", runtime.Config{Command: "claude"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	calls := fakeCalls(t, state)
+	if got := strings.Count(calls, "agent start gastown__witness --kind claude --pane %5"); got != 2 {
+		t.Fatalf("agent start attempts = %d; want 2 (one agent_pane_busy rejection, one retry that succeeds):\n%s", got, calls)
 	}
 }
 

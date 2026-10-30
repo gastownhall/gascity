@@ -252,7 +252,7 @@ func legacyStructuredFallbackTranscriptResponse(ctx context.Context, info sessio
 		Provider:           info.Provider,
 		Format:             "structured",
 		SchemaVersion:      sessionStructuredSchemaVersion,
-		History:            structuredFallbackHistory(info.ID, info.SessionKey, activity),
+		History:            structuredFallbackHistory(info, activity),
 		StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
 	}, includeThinking)
 	return structuredTranscriptResponseFromEvent(projection)

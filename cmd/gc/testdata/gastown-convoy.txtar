@@ -14,7 +14,7 @@ cd $WORK/bright-lights
 # --- 1. Create convoy with no issues ---
 
 exec gc convoy create 'Sprint 42'
-stdout 'Created convoy gc-1 "Sprint 42"'
+stdout 'Created convoy bl-1 "Sprint 42"'
 
 # --- 2. Create issues and add to convoy ---
 
@@ -25,26 +25,26 @@ stdout 'gc-3'
 exec bd create 'Update docs'
 stdout 'gc-4'
 
-exec gc convoy add gc-1 gc-2
-stdout 'Added gc-2 to convoy gc-1'
+exec gc convoy add bl-1 gc-2
+stdout 'Added gc-2 to convoy bl-1'
 
-exec gc convoy add gc-1 gc-3
-stdout 'Added gc-3 to convoy gc-1'
+exec gc convoy add bl-1 gc-3
+stdout 'Added gc-3 to convoy bl-1'
 
-exec gc convoy add gc-1 gc-4
-stdout 'Added gc-4 to convoy gc-1'
+exec gc convoy add bl-1 gc-4
+stdout 'Added gc-4 to convoy bl-1'
 
 # --- 3. Convoy list shows open convoy with progress ---
 
 exec gc convoy list
-stdout 'gc-1'
+stdout 'bl-1'
 stdout 'Sprint 42'
 stdout '0/3 closed'
 
 # --- 4. Convoy status shows details ---
 
-exec gc convoy status gc-1
-stdout 'Convoy:   gc-1'
+exec gc convoy status bl-1
+stdout 'Convoy:   bl-1'
 stdout 'Title:    Sprint 42'
 stdout 'Status:   open'
 stdout 'Progress: 0/3 closed'
@@ -56,11 +56,11 @@ stdout 'Add dark mode'
 # --- 5. Close some issues, progress updates ---
 
 exec bd close gc-2
-exec gc convoy status gc-1
+exec gc convoy status bl-1
 stdout 'Progress: 1/3 closed'
 
 exec bd close gc-3
-exec gc convoy status gc-1
+exec gc convoy status bl-1
 stdout 'Progress: 2/3 closed'
 
 # --- 6. Stranded detects unassigned open issues ---
@@ -73,7 +73,7 @@ stdout 'Update docs'
 
 exec bd close gc-4
 exec gc convoy check
-stdout 'Auto-closed convoy gc-1 "Sprint 42"'
+stdout 'Auto-closed convoy bl-1 "Sprint 42"'
 stdout '1 convoy.s. auto-closed'
 
 # --- 8. After auto-close, convoy list is empty ---
@@ -91,15 +91,15 @@ stdout 'No stranded work'
 exec bd create 'Task A'
 exec bd create 'Task B'
 exec gc convoy create 'Batch' gc-5 gc-6
-stdout 'Created convoy gc-7 "Batch" tracking 2 issue'
+stdout 'Created convoy bl-7 "Batch" tracking 2 issue'
 
-exec gc convoy status gc-7
+exec gc convoy status bl-7
 stdout 'Progress: 0/2 closed'
 
 # --- 11. Manual convoy close ---
 
-exec gc convoy close gc-7
-stdout 'Closed convoy gc-7'
+exec gc convoy close bl-7
+stdout 'Closed convoy bl-7'
 
 # --- 12. Convoy check with nothing to close ---
 
