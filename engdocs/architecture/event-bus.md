@@ -297,6 +297,7 @@ API/SSE projection:
 | `RequestResultSessionMessage` | `request.result.session.message` | API async session message completion |
 | `RequestResultSessionSubmit` | `request.result.session.submit` | API async session submit completion |
 | `RequestFailed` | `request.failed` | Supervisor/API async request failure handlers |
+| `RequestAccepted` | `request.accepted` | API async session create/message/submit acceptance marker read by `GET /v0/city/{cityName}/request/{requestId}` |
 | `CityCreated` | `city.created` | City init lifecycle diagnostics |
 | `CityUnregisterRequested` | `city.unregister_requested` | City unregister lifecycle diagnostics |
 | `OrderFired` | `order.fired` | Order dispatch when a trigger is due |

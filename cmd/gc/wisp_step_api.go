@@ -247,6 +247,13 @@ func (l *wispStepLookup) content() string {
 	return wispStepInjectionContentInProcess(l.city)
 }
 
+// answered reports whether the controller answered the lookup, step or none,
+// waiting for the answer no longer than content does. It is false for a nil
+// lookup.
+func (l *wispStepLookup) answered() bool {
+	return l != nil && l.take().answered
+}
+
 // contentFor is the step reminder for cityPath: the lookup's content when
 // cityPath is the lookup's city, and a fresh wispStepInjectionContent
 // otherwise (a nil lookup included), so a hook whose own resolution names a
@@ -265,11 +272,22 @@ func (l *wispStepLookup) take() wispStepAnswer {
 	if l.taken != nil {
 		return *l.taken
 	}
+	// An answer already in hand wins over an expired bound: a caller that takes
+	// the answer late finds both ready, and a random pick would discard it.
 	var answer wispStepAnswer
 	select {
 	case answer = <-l.answer:
-	case <-l.expired.C:
-		answer = wispStepAnswer{route: "fallback", reason: "timeout"}
+	default:
+		select {
+		case answer = <-l.answer:
+		case <-l.expired.C:
+			// The answer may have landed in the same instant the bound fired.
+			select {
+			case answer = <-l.answer:
+			default:
+				answer = wispStepAnswer{route: "fallback", reason: "timeout"}
+			}
+		}
 	}
 	l.expired.Stop()
 	l.cancel()

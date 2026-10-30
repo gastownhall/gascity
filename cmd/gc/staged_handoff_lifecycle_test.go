@@ -52,13 +52,15 @@ func TestRestartableSelfHandoffStagesBeforeRestartRequest(t *testing.T) {
 	var stagedBeforeRestartPatch bool
 	var inspectErr error
 
-	outcome := doHandoffWithOutcome(store, store, recorder, dops, func() error {
+	restart := testRowFirstRestart("gc handoff", "worker", dops, &stderr)
+	restart.record = func(string) error {
 		stagedBeforeRestartPatch, inspectErr = hasDurableStagedHandoff(store)
 		return store.SetMetadataBatch(sessionBead.ID, map[string]string{
 			"restart_requested":          "true",
 			"continuation_reset_pending": "true",
 		})
-	}, "worker", "worker", []string{"context cycle", "resume from this brief"}, &stdout, &stderr)
+	}
+	outcome := doHandoffWithOutcome(store, store, recorder, dops, restart, "worker", "worker", []string{"context cycle", "resume from this brief"}, &stdout, &stderr)
 	if outcome.code != 0 || !outcome.restartRequested {
 		t.Fatalf("handoff outcome = %#v, want accepted restart; stdout=%q stderr=%q", outcome, stdout.String(), stderr.String())
 	}
@@ -114,9 +116,9 @@ func TestFailedSelfHandoffRemainsProvisionalAndAuditable(t *testing.T) {
 			dops := newFakeDrainOps()
 			var stdout, stderr bytes.Buffer
 
-			outcome := doHandoffWithOutcome(store, store, recorder, dops, func() error {
-				return test.err
-			}, "worker", "worker", []string{"context cycle", "resume from this brief"}, &stdout, &stderr)
+			restart := testRowFirstRestart("gc handoff", "worker", dops, &stderr)
+			restart.record = func(string) error { return test.err }
+			outcome := doHandoffWithOutcome(store, store, recorder, dops, restart, "worker", "worker", []string{"context cycle", "resume from this brief"}, &stdout, &stderr)
 			if outcome.code != 1 || outcome.restartRequested {
 				t.Fatalf("handoff outcome = %#v, want failed restart", outcome)
 			}
@@ -164,6 +166,7 @@ func TestControllerLossLeavesSelfHandoffProvisional(t *testing.T) {
 	t.Setenv("GC_AGENT", "worker")
 	t.Setenv("GC_SESSION_NAME", "test-city--worker")
 	t.Setenv("GC_TMUX_SESSION", "test-city--worker")
+	t.Setenv("GC_INSTANCE_TOKEN", "origin-instance")
 
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
@@ -180,8 +183,12 @@ func TestControllerLossLeavesSelfHandoffProvisional(t *testing.T) {
 	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdHandoff([]string{"context cycle", "resume from this brief"}, "", false, "", &stdout, &stderr); code != 1 {
-		t.Fatalf("handoff exit = %d, want 1 when controller is unavailable; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	// The restart request is recorded on the session row before the controller
+	// is poked (SG-3), so an unreachable controller is a warning, not a failure:
+	// the controller acts at its next pass and the brief stays staged until a
+	// successor starts.
+	if code := cmdHandoff(handoffRun{args: []string{"context cycle", "resume from this brief"}, stdout: &stdout, jsonOut: &stdout, stderr: &stderr}); code != 0 {
+		t.Fatalf("handoff exit = %d, want 0 once the restart request is recorded; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	message := onlyOpenHandoffMessage(t, store)
 	assertHandoffProvisionalRecord(t, message, "origin-instance")
@@ -192,7 +199,7 @@ func TestControllerLossLeavesSelfHandoffProvisional(t *testing.T) {
 	if got := strings.ToLower(stdout.String()); strings.Contains(got, "sent") || strings.Contains(got, "delivered") {
 		t.Fatalf("stdout = %q, must not claim delivery after controller loss", stdout.String())
 	}
-	if got := strings.ToLower(stderr.String()); !strings.Contains(got, "controller") || !strings.Contains(got, "restart request remains") {
+	if got := strings.ToLower(stderr.String()); !strings.Contains(got, "restart recorded") || !strings.Contains(got, "controller not notified") {
 		t.Fatalf("stderr = %q, want truthful controller-loss and durable-pending diagnostic", stderr.String())
 	}
 }
@@ -225,7 +232,8 @@ func TestNonRestartingHandoffModesRemainOrdinaryMail(t *testing.T) {
 				}); err != nil {
 					t.Fatalf("configure named session: %v", err)
 				}
-				return doHandoff(store, store, events.Discard, newFakeDrainOps(), nil, "worker", "worker",
+				dops := newFakeDrainOps()
+				return doHandoff(store, store, events.Discard, dops, testRowFirstRestart("gc handoff", "worker", dops, stderr), "worker", "worker",
 					[]string{"context cycle"}, stdout, stderr)
 			},
 		},
@@ -453,7 +461,7 @@ func newStagedSuccessorReconcileScenario(t *testing.T, originToken, currentToken
 	})
 
 	provider := beadmail.New(env.store)
-	message, err := provider.SendHandoff(mail.HandoffIntent{
+	message, _, err := provider.SendHandoff(mail.HandoffIntent{
 		From:     "worker",
 		To:       "worker",
 		Subject:  "context cycle",

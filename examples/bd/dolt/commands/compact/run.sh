@@ -3514,7 +3514,7 @@ flatten_database() {
     return 1
   fi
 
-  table_count=$(wc -l < "$preflight_tmp")
+  table_count=$(($(wc -l < "$preflight_tmp")))
   printf 'compact: db=%s commits=%s%s tables=%s — flattening...\n' \
     "$db" "$count" "$flatten_target_detail" "$table_count"
 

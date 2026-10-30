@@ -97,7 +97,16 @@ func TestV2SessionMigrationCheckCountsPerLeg(t *testing.T) {
 			if tc.message != "" && r.Message != tc.message {
 				t.Errorf("message = %q, want %q", r.Message, tc.message)
 			}
-			if tc.details != nil && !slices.Equal(r.Details, tc.details) {
+			// The last detail names the resolved mode and why.
+			resolved := r.Details[len(r.Details)-1]
+			wantResolved := "session reconciler: legacy (default fallback: "
+			if tc.mode == config.SessionReconcilerV2 {
+				wantResolved = "session reconciler: v2 (set by [daemon] session_reconciler)"
+			}
+			if !strings.HasPrefix(resolved, wantResolved) {
+				t.Errorf("resolved-mode detail = %q, want prefix %q", resolved, wantResolved)
+			}
+			if tc.details != nil && !slices.Equal(r.Details[:len(r.Details)-1], tc.details) {
 				t.Errorf("details = %q, want %q", r.Details, tc.details)
 			}
 		})

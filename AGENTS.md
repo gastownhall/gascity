@@ -268,18 +268,25 @@ targets, and a green `go test` is not evidence a change passes CI.
   `gc_sim_*` corpus: the package's `BUILD.bazel` lists them. Bazel runs only
   the test files `BUILD.bazel` lists; run `make bazel-sync` after adding one.
 - **Flags.** `go test`'s `-run X` is `--test_filter=X` (one per invocation,
-  for every target named), `-v` is `--test_output=all --test_arg=-test.v`,
-  `-count=N` is `--test_arg=-test.count=N` (`--runs_per_test=N` runs N
-  separate actions instead), `VAR=x go test` is `--test_env=VAR=x` and
-  `-tags integration` is `--config=integration`. On a sharded target,
-  `--test_sharding_strategy=disabled` runs a narrow filter as one action.
+  for every target named), `-v` is
+  `--test_env=GO_TEST_WRAP_TESTV=1 --test_output=all` (rules_go's test
+  wrapper then runs the binary with `-test.v`, and the log and `test.xml`
+  list every test that ran), `-count=N` is `--test_arg=-test.count=N`
+  (`--runs_per_test=N` runs N separate actions instead), `VAR=x go test` is
+  `--test_env=VAR=x` and `-tags integration` is `--config=integration`. On a
+  sharded target, `--test_sharding_strategy=disabled` runs a narrow filter
+  as one action.
 - **Evidence.** Results are cached by input: an unchanged target returns its
   cached result, which is the same evidence, so do not add
   `--nocache_test_results` to re-prove a pass (timing runs are the
   exception: TESTING.md "Timing objectives and resource ratchets"). A target
   also passes when its filter matches nothing, its tests skip, or its
-  `BUILD.bazel` omits a test file: when a filtered run is your evidence, read
-  its `--test_output=all --test_arg=-test.v` output for the named tests.
+  `BUILD.bazel` omits a test file: when a filtered run is your evidence, run
+  it with `--test_env=GO_TEST_WRAP_TESTV=1 --test_output=all` and check the
+  log for `--- PASS: <TestName>`. Re-run with the same flags: `--test_output`
+  and `--test_summary` only change what is printed, but any other change to
+  `--test_arg`, `--test_env` or `--test_filter` is a new cache key, and
+  `--test_arg=-test.v` keys the same verbose run apart from everyone else's.
 - **Regenerating checked files** (`-update`, `-update-golden`,
   `UPDATE_GOLDEN=1`) is not a test run: `bazel test` runs the test in a
   sandbox, so `--test_arg=-update` can pass while changing nothing. Run the

@@ -285,7 +285,8 @@ func TestRestageRoutesEachClassToItsOwnStore(t *testing.T) {
 	stage := func(brief string) {
 		t.Helper()
 		var stdout, stderr bytes.Buffer
-		outcome := doHandoffWithOutcome(msgStore, sessStore, recorder, newFakeDrainOps(), nil, "worker", "worker",
+		dops := newFakeDrainOps()
+		outcome := doHandoffWithOutcome(msgStore, sessStore, recorder, dops, testRowFirstRestart("gc handoff", "worker", dops, &stderr), "worker", "worker",
 			[]string{"context cycle", brief}, &stdout, &stderr)
 		if outcome.code != 0 || !outcome.restartRequested {
 			t.Fatalf("handoff %q outcome = %#v, want accepted restart; stdout=%q stderr=%q", brief, outcome, stdout.String(), stderr.String())
@@ -319,7 +320,7 @@ func TestRestageRoutesEachClassToItsOwnStore(t *testing.T) {
 // TestHandoffStagedArmLandsInTheBindingOnAMigratedCity drives the staged
 // self-handoff through the real command root on a city whose messaging and
 // sessions classes have moved to a binding, then has the controller release the
-// surviving brief to a successor. It drives cmdHandoffWithForce rather than
+// surviving brief to a successor. It drives cmdHandoff rather than
 // doHandoffWithOutcome for the reason TestHandoffMailWritesTheBindingOnAMigratedCity
 // does: the defect is at the root, in which stores the command derives, and a
 // test that hands routed stores in would pass unrouted. The restartable arm is
@@ -332,6 +333,7 @@ func TestHandoffStagedArmLandsInTheBindingOnAMigratedCity(t *testing.T) {
 	t.Setenv("GC_SESSION", "fake")
 	t.Setenv("GC_ALIAS", "worker")
 	t.Setenv("GC_SESSION_NAME", "worker")
+	t.Setenv("GC_INSTANCE_TOKEN", "origin-instance")
 	oldBuild := buildSessionProviderByName
 	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
 		return &stagedHandoffStoppedProvider{Fake: runtime.NewFake()}, nil
@@ -351,7 +353,7 @@ func TestHandoffStagedArmLandsInTheBindingOnAMigratedCity(t *testing.T) {
 	handoff := func(brief string) {
 		t.Helper()
 		var stdout, stderr bytes.Buffer
-		if code := cmdHandoffWithForce([]string{"context cycle", brief}, "", false, "", false, &stdout, &stderr); code != 0 {
+		if code := cmdHandoff(handoffRun{args: []string{"context cycle", brief}, stdout: &stdout, jsonOut: &stdout, stderr: &stderr}); code != 0 {
 			t.Fatalf("gc handoff %q exited %d; stdout=%q stderr=%q", brief, code, stdout.String(), stderr.String())
 		}
 	}
@@ -423,7 +425,12 @@ func TestHandoffStagedArmLandsInTheBindingOnAMigratedCity(t *testing.T) {
 // real staging path and returns its outcome with the captured stdout and stderr.
 func runSelfHandoff(store beads.Store, rec events.Recorder, persistRestart func() error, brief string) (handoffOutcome, string, string) {
 	var stdout, stderr bytes.Buffer
-	outcome := doHandoffWithOutcome(store, store, rec, newFakeDrainOps(), persistRestart, "worker", "worker",
+	dops := newFakeDrainOps()
+	restart := testRowFirstRestart("gc handoff", "worker", dops, &stderr)
+	if persistRestart != nil {
+		restart.record = func(string) error { return persistRestart() }
+	}
+	outcome := doHandoffWithOutcome(store, store, rec, dops, restart, "worker", "worker",
 		[]string{"context cycle", brief}, &stdout, &stderr)
 	return outcome, stdout.String(), stderr.String()
 }

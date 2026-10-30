@@ -179,6 +179,7 @@ var infoKeyCodec = []infoKeySpec{
 	{beadmeta.CurrentClaimBeadIDMetadataKey, func(i *Info, v string) { i.CurrentClaimBeadID = v }},
 	{WorkStartedKey, func(i *Info, v string) { i.WorkStartedRaw = v }},
 	{WorkLadderKey, func(i *Info, v string) { i.WorkLadderRaw = v }},
+	{ContentHoldKey, func(i *Info, v string) { i.ContentHoldRaw = v }},
 	{"execution_claim_started", func(i *Info, v string) { i.ExecutionClaimStarted = v }},
 	{"core_hash_breakdown", func(i *Info, v string) { i.CoreHashBreakdown = v }},
 	{"started_provision_hash", func(i *Info, v string) { i.StartedProvisionHash = v }},

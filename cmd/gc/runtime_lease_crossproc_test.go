@@ -47,7 +47,7 @@ func openRequireSQLite(t *testing.T, dir string) beads.Store {
 	}
 	s := opened.(*beads.SQLiteStore)
 	t.Cleanup(func() { _ = s.CloseStore() })
-	if err := beads.StampOpenedStore(s, "SQLiteStore", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(s, "SQLiteStore", gate.Require, false, nil, nil); err != nil {
 		t.Fatalf("StampOpenedStore: %v", err)
 	}
 	return s

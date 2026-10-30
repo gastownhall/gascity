@@ -76,10 +76,16 @@ type Provider struct {
 	// the thread and its dispatch.
 	fenceChecked func(name string)
 
+	// fresh coalesces fresh snapshot reads (DES-T3I D7).
+	fresh freshReads
+
 	// Cached snapshot for batching multiple IsRunning/ProcessAlive calls.
+	// snapshotClears counts clearSnapshotCache calls: a read that started
+	// before the latest clear does not refill the cache.
 	snapshotSnapshot map[string]interface{}
 	snapshotCache    map[string]string // threadID → session status
 	snapshotCacheAt  time.Time
+	snapshotClears   uint64
 }
 
 type threadBinding struct {
@@ -1302,10 +1308,27 @@ func (p *Provider) rpcCallOnceCtx(ctx context.Context, method string, params map
 	if len(failures) > 1 {
 		lastErr = fmt.Errorf("all T3 WebSocket candidates failed: %s", strings.Join(failures, "; "))
 	}
+	// The failures above are text, so ctx's error survives only if named here.
+	if ctxErr := ctxEndErr(ctx); ctxErr != nil && !errors.Is(lastErr, ctxErr) {
+		lastErr = fmt.Errorf("%w: %w", ctxErr, lastErr)
+	}
 	if written {
 		return nil, fmt.Errorf("%w: %w", errRPCWrittenUnanswered, lastErr)
 	}
 	return nil, lastErr
+}
+
+// ctxEndErr is ctx.Err(), or context.DeadlineExceeded once ctx's deadline has
+// passed before its timer has run: a socket deadline taken from ctx.Deadline()
+// fires in that gap, and ctx.Err() is still nil there.
+func ctxEndErr(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 // readRPCAnswer reads conn, for up to 30 s or until ctx's deadline, until T3
@@ -1371,30 +1394,12 @@ func (p *Provider) threadSessionStatus(threadID string) string {
 	if err != nil {
 		return ""
 	}
-
-	cache := make(map[string]string)
-	for _, raw := range snapshotItems(snapshot, "threads") {
-		thread, _ := raw.(map[string]interface{})
-		if thread == nil {
-			continue
-		}
-		id, _ := thread["id"].(string)
-		session, _ := thread["session"].(map[string]interface{})
-		if session != nil {
-			st, _ := session["status"].(string)
-			cache[id] = st
-		}
-	}
-
-	p.mu.Lock()
-	p.snapshotCache = cache
-	p.snapshotCacheAt = time.Now()
-	p.mu.Unlock()
-
-	return cache[threadID]
+	return snapshotThreadStatuses(snapshot)[threadID]
 }
 
-func (p *Provider) cacheSnapshot(snapshot map[string]interface{}) {
+// snapshotThreadStatuses maps each thread id in snapshot to its session
+// status.
+func snapshotThreadStatuses(snapshot map[string]interface{}) map[string]string {
 	cache := make(map[string]string)
 	for _, raw := range snapshotItems(snapshot, "threads") {
 		thread, _ := raw.(map[string]interface{})
@@ -1408,16 +1413,37 @@ func (p *Provider) cacheSnapshot(snapshot map[string]interface{}) {
 			cache[id] = st
 		}
 	}
+	return cache
+}
 
+// cacheSnapshot caches snapshot for the bridge's cached readers.
+func (p *Provider) cacheSnapshot(snapshot map[string]interface{}) {
 	p.mu.Lock()
+	clears := p.snapshotClears
+	p.mu.Unlock()
+	p.cacheSnapshotRead(snapshot, clears)
+}
+
+// cacheSnapshotRead caches snapshot, read by a read that started when the
+// cache had been cleared clears times, unless the cache was cleared since:
+// that read may predate the write the clear followed.
+func (p *Provider) cacheSnapshotRead(snapshot map[string]interface{}, clears uint64) {
+	cache := snapshotThreadStatuses(snapshot)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.snapshotClears != clears {
+		return
+	}
 	p.snapshotSnapshot = snapshot
 	p.snapshotCache = cache
 	p.snapshotCacheAt = time.Now()
-	p.mu.Unlock()
 }
 
+// clearSnapshotCache empties the cache after a write the bridge made, so the
+// next cached read is answered by a read that started after the write.
 func (p *Provider) clearSnapshotCache() {
 	p.mu.Lock()
+	p.snapshotClears++
 	p.snapshotSnapshot = nil
 	p.snapshotCache = nil
 	p.snapshotCacheAt = time.Time{}
@@ -1504,21 +1530,37 @@ func (p *Provider) rpcHTTPSnapshot(ctx context.Context, bearerToken string) (map
 	return nil, lastErr
 }
 
+// rpcSnapshot returns the cached snapshot while it is younger than
+// snapshotCacheTTL, else reads one. A cache that only aged out takes the
+// read in flight, if one is; a cache a write cleared (or never filled) waits
+// for a read that started after it arrived, so the write is visible.
 func (p *Provider) rpcSnapshot() (map[string]interface{}, error) {
 	p.mu.Lock()
-	if time.Since(p.snapshotCacheAt) < snapshotCacheTTL && p.snapshotSnapshot != nil {
-		snapshot := p.snapshotSnapshot
+	cached := p.snapshotSnapshot
+	if cached != nil && time.Since(p.snapshotCacheAt) < snapshotCacheTTL {
 		p.mu.Unlock()
-		return snapshot, nil
+		return cached, nil
 	}
 	p.mu.Unlock()
-	return p.rpcSnapshotFresh(context.Background())
+	if cached == nil {
+		return p.rpcSnapshotFresh(context.Background())
+	}
+	return p.fresh.shared(context.Background(), p.rpcSnapshotRead)
 }
 
 // rpcSnapshotFresh reads the orchestration snapshot from T3, bounded by ctx,
 // never from the cache, and caches what it read for the bridge's other
-// readers.
+// readers. Concurrent callers share reads by generation (freshReads): each
+// is answered by a read that started after it arrived.
 func (p *Provider) rpcSnapshotFresh(ctx context.Context) (map[string]interface{}, error) {
+	return p.fresh.do(ctx, p.rpcSnapshotRead)
+}
+
+// rpcSnapshotRead is one snapshot read for rpcSnapshotFresh.
+func (p *Provider) rpcSnapshotRead(ctx context.Context) (map[string]interface{}, error) {
+	p.mu.Lock()
+	clears := p.snapshotClears
+	p.mu.Unlock()
 	bearerToken, err := resolveBearerSessionToken()
 	if err != nil {
 		return nil, err
@@ -1535,7 +1577,7 @@ func (p *Provider) rpcSnapshotFresh(ctx context.Context) (map[string]interface{}
 	if err != nil {
 		return nil, err
 	}
-	p.cacheSnapshot(snapshot)
+	p.cacheSnapshotRead(snapshot, clears)
 	return snapshot, nil
 }
 
@@ -1762,14 +1804,17 @@ func deliveryIDNamespace(city string) string {
 const t3TimeLayout = "2006-01-02T15:04:05.000Z"
 
 func (p *Provider) dispatchTurnStart(threadID, text, provider, model string, ids turnStartIDs) error {
-	return p.dispatchTurnStartFor(context.Background(), threadID, text, provider, model, ids, nil)
+	_, err := p.dispatchTurnStartFor(context.Background(), threadID, text, provider, model, ids, nil)
+	return err
 }
 
-// dispatchTurnStartFor dispatches thread.turn.start bounded by ctx. ids are
-// reused by every retry; beforeRetry, when set, must pass before each
-// transient retry.
-func (p *Provider) dispatchTurnStartFor(ctx context.Context, threadID, text, provider, model string, ids turnStartIDs, beforeRetry func(context.Context) error) error {
-	now := time.Now().UTC().Format(t3TimeLayout)
+// dispatchTurnStartFor dispatches thread.turn.start bounded by ctx and
+// returns the createdAt it stamped, which T3 stores as the message's
+// creation time and the turn's requestedAt. ids and the stamp are reused by
+// every retry; beforeRetry, when set, must pass before each transient retry.
+func (p *Provider) dispatchTurnStartFor(ctx context.Context, threadID, text, provider, model string, ids turnStartIDs, beforeRetry func(context.Context) error) (time.Time, error) {
+	stamp := time.Now().UTC().Truncate(time.Millisecond)
+	now := stamp.Format(t3TimeLayout)
 	_, err := p.rpcCallCheckedCtx(ctx, "orchestration.dispatchCommand", map[string]interface{}{
 		"type":      "thread.turn.start",
 		"commandId": ids.commandID,
@@ -1788,7 +1833,10 @@ func (p *Provider) dispatchTurnStartFor(ctx context.Context, threadID, text, pro
 		"interactionMode": "default",
 		"createdAt":       now,
 	}, beforeRetry)
-	return err
+	if err != nil {
+		return time.Time{}, err
+	}
+	return stamp, nil
 }
 
 func (p *Provider) dispatchTurnInterrupt(threadID string) error {
@@ -1987,6 +2035,17 @@ func buildThreadEnv(env map[string]string) map[string]string {
 		threadEnv["BEADS_DOLT_SERVER_MODE"] = "1"
 	}
 	delete(threadEnv, "BEADS_DOLT_SHARED_SERVER")
+	// Forward the controller's shared-server opt-out, never an opt-in. A
+	// session whose managed port gc withheld (gastownhall/gascity#1656) has no
+	// env port to outrank a HOME-level dolt.shared-server: true, so without the
+	// pin the thread's bd would use the host-wide shared server instead of the
+	// managed one the scope's .beads/dolt-server.port mirror tracks.
+	for _, key := range []string{"BEADS_DOLT_SHARED_SERVER", "BD_DOLT_SHARED_SERVER"} {
+		value := strings.TrimSpace(env[key])
+		if on, err := strconv.ParseBool(value); err == nil && !on {
+			threadEnv[key] = value
+		}
+	}
 	return threadEnv
 }
 
@@ -3151,38 +3210,42 @@ func (p *Provider) SessionBinding(name string) (runtime.SessionBinding, error) {
 // caller that delivers without first checking IsRunning, which reports such a
 // thread as not running.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	return p.nudge(name, content, "")
+	_, err := p.nudge(name, content, "")
+	return err
 }
 
 // NudgeKeyed implements [runtime.KeyedNudgeProvider]: it delivers like Nudge,
 // deriving the turn's T3 command and message ids from key, so a redelivery
 // under the same key replays T3's receipt instead of starting a second turn.
 // A definitive T3 refusal is reported as [runtime.ErrNudgeRejected]; the
-// caller then redelivers under a new key.
-func (p *Provider) NudgeKeyed(name string, content []runtime.ContentBlock, key string) error {
+// caller then redelivers under a new key. The receipt is the turn's message
+// id and the createdAt this send stamped on it.
+func (p *Provider) NudgeKeyed(name string, content []runtime.ContentBlock, key string) (runtime.DeliveryReceipt, error) {
 	return p.nudge(name, content, key)
 }
 
-func (p *Provider) nudge(name string, content []runtime.ContentBlock, key string) error {
+func (p *Provider) nudge(name string, content []runtime.ContentBlock, key string) (runtime.DeliveryReceipt, error) {
 	thread, binding, err := p.boundThread(name)
 	if err != nil {
-		return err
+		return runtime.DeliveryReceipt{}, err
 	}
 	return p.nudgeThread(name, thread, binding, content, key)
 }
 
 // nudgeThread starts a turn carrying content on the thread bound to name, as
 // read: thread and its binding. A non-empty key derives the turn's T3 ids.
-func (p *Provider) nudgeThread(name string, thread map[string]interface{}, binding *threadBinding, content []runtime.ContentBlock, key string) error {
+func (p *Provider) nudgeThread(name string, thread map[string]interface{}, binding *threadBinding, content []runtime.ContentBlock, key string) (runtime.DeliveryReceipt, error) {
 	return p.nudgeThreadFor(context.Background(), name, thread, binding, content, key, nil)
 }
 
 // nudgeThreadFor is nudgeThread bounded by ctx, with beforeRetry gating each
-// transient retry of the turn start.
-func (p *Provider) nudgeThreadFor(ctx context.Context, name string, thread map[string]interface{}, binding *threadBinding, content []runtime.ContentBlock, key string, beforeRetry func(context.Context) error) error {
+// transient retry of the turn start. It returns the receipt of the turn
+// start: its message id and the createdAt it stamped. Empty text dispatches
+// nothing and reports no receipt.
+func (p *Provider) nudgeThreadFor(ctx context.Context, name string, thread map[string]interface{}, binding *threadBinding, content []runtime.ContentBlock, key string, beforeRetry func(context.Context) error) (runtime.DeliveryReceipt, error) {
 	text := runtime.FlattenText(content)
 	if strings.TrimSpace(text) == "" {
-		return nil
+		return runtime.DeliveryReceipt{}, nil
 	}
 	meta := threadCustomMetadata(thread)
 	provider := meta["gc.runtimeProvider"]
@@ -3197,16 +3260,17 @@ func (p *Provider) nudgeThreadFor(ctx context.Context, name string, thread map[s
 	if key != "" {
 		ids = deriveDeliveryIDs(meta["gc.city"], binding.ThreadID, key)
 	}
-	if err := p.dispatchTurnStartFor(ctx, binding.ThreadID, text, provider, model, ids, beforeRetry); err != nil {
+	stamp, err := p.dispatchTurnStartFor(ctx, binding.ThreadID, text, provider, model, ids, beforeRetry)
+	if err != nil {
 		if isT3Rejection(err) {
-			return fmt.Errorf("%w: t3 refused the turn for %q: %w", runtime.ErrNudgeRejected, name, err)
+			return runtime.DeliveryReceipt{}, fmt.Errorf("%w: t3 refused the turn for %q: %w", runtime.ErrNudgeRejected, name, err)
 		}
 		if errors.Is(err, errRPCWrittenUnanswered) {
-			return fmt.Errorf("%w: t3 took the turn for %q without answering: %w", runtime.ErrNudgeDeliveryUnconfirmed, name, err)
+			return runtime.DeliveryReceipt{}, fmt.Errorf("%w: t3 took the turn for %q without answering: %w", runtime.ErrNudgeDeliveryUnconfirmed, name, err)
 		}
-		return err
+		return runtime.DeliveryReceipt{}, err
 	}
-	return nil
+	return runtime.DeliveryReceipt{MessageID: ids.messageID, MessageAt: stamp}, nil
 }
 
 // SetMeta persists a session metadata value and reflects drain transitions onto

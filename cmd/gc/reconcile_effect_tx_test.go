@@ -123,7 +123,7 @@ func newCloseTxKit(t *testing.T) *txKit {
 
 func newTxKitOn(t *testing.T, m, backing beads.Store) *txKit {
 	t.Helper()
-	if err := beads.StampOpenedStore(m, "MemStore", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(m, "MemStore", gate.Require, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	cache := beads.NewCachingStoreForTest(backing, nil)
@@ -286,7 +286,7 @@ func TestTxCallIsGatedLikeAWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-inCall
-	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 2)
+	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 1)
 	clk.Advance(time.Minute)
 	s := receive(t, posted)
 	close(release) // what it returns carries no facts, so nothing is posted late
@@ -830,7 +830,7 @@ func TestExecutorSettlesAnAbandonedEffectByItsLatch(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	waitTimersAt(t, clk, plannerT0.Add(30*time.Second), 4)
+	waitTimersAt(t, clk, plannerT0.Add(30*time.Second), 2)
 	clk.Advance(30 * time.Second)
 	for range latches {
 		switch s := receive(t, posted); s.Key.ID {
@@ -1016,7 +1016,7 @@ func (b racingBacking) Get(id string) (beads.Bead, error) {
 func TestTxRetriesAFencedRefresh(t *testing.T) {
 	k := newTxKit(t)
 	m := beads.NewMemStoreFrom(0, []beads.Bead{poolRow("gc-1", "worker", 1, "asleep")}, nil)
-	if err := beads.StampOpenedStore(m, "MemStore", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(m, "MemStore", gate.Require, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	var cache *beads.CachingStore

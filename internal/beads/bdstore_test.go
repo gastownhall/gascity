@@ -2944,6 +2944,9 @@ func TestBdStoreStatusMapping(t *testing.T) {
 			if b.IndefinitelyDeferred != tt.wantIndefiniteHold {
 				t.Errorf("IndefinitelyDeferred = %v, want %v", b.IndefinitelyDeferred, tt.wantIndefiniteHold)
 			}
+			if b.SourceStatus != tt.bdStatus {
+				t.Errorf("SourceStatus = %q, want bd's %q", b.SourceStatus, tt.bdStatus)
+			}
 		})
 	}
 }
@@ -4562,10 +4565,13 @@ func TestBdStoreCreateOmitsEphemeralFlagByDefault(t *testing.T) {
 }
 
 func TestBdStoreListWispsUsesBdListWithClientTierFilter(t *testing.T) {
+	var callsMu sync.Mutex
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		gotCmd := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
 		calls = append(calls, gotCmd)
+		callsMu.Unlock()
 		if strings.HasPrefix(gotCmd, "bd query ") {
 			return []byte(`[
 				{"id":"bd-w","title":"wisp","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:02Z","ephemeral":true,"labels":["order-tracking"]}
@@ -4603,10 +4609,13 @@ func TestBdStoreListWispsUsesBdListWithClientTierFilter(t *testing.T) {
 }
 
 func TestBdStoreListWispsRequestsUnlimitedResultsByDefault(t *testing.T) {
+	var callsMu sync.Mutex
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		gotCmd := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
 		calls = append(calls, gotCmd)
+		callsMu.Unlock()
 		var b strings.Builder
 		b.WriteByte('[')
 		for i := 0; i < 55; i++ {
@@ -4633,10 +4642,13 @@ func TestBdStoreListWispsRequestsUnlimitedResultsByDefault(t *testing.T) {
 }
 
 func TestBdStoreListWispsAppliesMetadataBeforeClientLimit(t *testing.T) {
+	var callsMu sync.Mutex
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		gotCmd := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
 		calls = append(calls, gotCmd)
+		callsMu.Unlock()
 		if !strings.Contains(gotCmd, "--limit 0") {
 			return []byte(`[{"id":"bd-new","title":"wrong first page","status":"closed","issue_type":"task","created_at":"2026-05-03T00:00:00Z","ephemeral":true,"labels":["order-run:o"],"metadata":{"phase":"skip"}}]`), nil
 		}
@@ -4693,10 +4705,13 @@ func TestBdStoreListWispsReturnsPartialRowsWithErrorOnCorruptEntries(t *testing.
 }
 
 func TestBdStoreListBothTiersUnionsBdListAndEphemeralQuery(t *testing.T) {
+	var callsMu sync.Mutex
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		full := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
 		calls = append(calls, full)
+		callsMu.Unlock()
 		if strings.Contains(full, "--include-ephemeral") {
 			t.Fatalf("bd list command = %q, --include-ephemeral is only valid for bd ready", full)
 		}
@@ -4730,10 +4745,13 @@ func TestBdStoreListBothTiersUnionsBdListAndEphemeralQuery(t *testing.T) {
 
 func TestBdStoreListBothTiersAppliesCreatedBeforeBeforeMergedLimit(t *testing.T) {
 	before := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+	var callsMu sync.Mutex
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		full := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
 		calls = append(calls, full)
+		callsMu.Unlock()
 		if strings.Contains(full, "--include-ephemeral") {
 			t.Fatalf("bd list command = %q, --include-ephemeral is only valid for bd ready", full)
 		}
@@ -4773,10 +4791,13 @@ func TestBdStoreListBothTiersAppliesCreatedBeforeBeforeMergedLimit(t *testing.T)
 }
 
 func TestBdStoreListBothTiersMessageUnionsEphemeralQueryWithoutTierFiltering(t *testing.T) {
+	var callsMu sync.Mutex
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		full := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
 		calls = append(calls, full)
+		callsMu.Unlock()
 		if strings.HasPrefix(full, "bd query ") {
 			return []byte(`[]`), nil
 		}
@@ -4820,45 +4841,277 @@ func TestBdStoreListAssigneesSingleUsesAssigneeFlag(t *testing.T) {
 	}
 }
 
-func TestBdStoreListAssigneesMultipleFallsBackToClientFilter(t *testing.T) {
-	var gotCmd string
+// TestBdStoreListAssigneesMultipleFansOutPerAssignee pins GH#7794's fix: two
+// or more Assignees used to clear the predicate and scan every row of the
+// type (one deployment measured ~1,300 rows per multi-route inbox read).
+// Each distinct Assignees value now gets its own predicated
+// `bd list --assignee=X` read instead. Sort is explicit (SortCreatedDesc, not the default) so the
+// combined limit below proves a real cross-assignee merge, not just
+// whichever assignee happens to be listed first in query.Assignees:
+// route-b's row is newer than route-a's, so it must win the cut even though
+// route-a is read first.
+func TestBdStoreListAssigneesMultipleFansOutPerAssignee(t *testing.T) {
+	var calls []string
+	rows := map[string]string{
+		"route-a": `{"id":"bd-route-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:01Z"}`,
+		"route-b": `{"id":"bd-route-b","title":"message","status":"open","issue_type":"message","assignee":"route-b","created_at":"2026-05-01T00:00:02Z"}`,
+	}
 	runner := func(_, name string, args ...string) ([]byte, error) {
-		gotCmd = name + " " + strings.Join(args, " ")
-		if strings.Contains(gotCmd, "--assignee=") {
-			t.Fatalf("cmd = %q, multi-route Assignees must not emit a single --assignee", gotCmd)
+		gotCmd := name + " " + strings.Join(args, " ")
+		calls = append(calls, gotCmd)
+		if strings.Contains(gotCmd, "assignee=route-c") {
+			t.Fatalf("cmd = %q, a route not asked for must not be queried", gotCmd)
 		}
-		if strings.Contains(gotCmd, "--limit 1") {
-			return []byte(`[{"id":"bd-route-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:00Z"}]`), nil
+		if !strings.Contains(gotCmd, "--limit 0") {
+			t.Fatalf("cmd = %q, want each fanned-out read unlimited before the combined client limit", gotCmd)
 		}
-		return []byte(`[
-			{"id":"bd-route-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:00Z"},
-			{"id":"bd-route-b","title":"message","status":"open","issue_type":"message","assignee":"route-b","created_at":"2026-05-01T00:00:01Z"},
-			{"id":"bd-route-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:02Z"}
-		]`), nil
+		if !strings.Contains(gotCmd, "--status=open") || !strings.Contains(gotCmd, "--type=message") {
+			t.Fatalf("cmd = %q, want each fanned-out read to keep the query's --status and --type", gotCmd)
+		}
+		for route, row := range rows {
+			if strings.Contains(gotCmd, "--assignee="+route) {
+				return []byte("[" + row + "]"), nil
+			}
+		}
+		t.Fatalf("cmd = %q, want exactly one --assignee=<route> per Assignees value", gotCmd)
+		return nil, nil
 	}
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.List(beads.ListQuery{
 		Assignees: []string{"route-a", "route-b"},
 		Type:      "message",
 		Status:    "open",
+		Sort:      beads.SortCreatedDesc,
 		Limit:     1,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(gotCmd, "--limit 0") {
-		t.Fatalf("cmd = %q, want unlimited server query before multi-Assignees client filtering", gotCmd)
+	if len(calls) != 2 {
+		t.Fatalf("calls = %v, want exactly 2 (one bd list per Assignees value)", calls)
 	}
 	if len(got) != 1 || got[0].ID != "bd-route-b" {
-		t.Fatalf("got = %+v, want first matching route after client filter", got)
+		t.Fatalf("got = %+v, want bd-route-b: newer, so it must win the combined limit despite being read second", got)
+	}
+}
+
+// TestBdStoreListAssigneesFanOutNormalizesTheSet pins that the fan-out reads
+// the set nativeListFanOutAssignees picks for NativeDoltStore's plan: a
+// repeated assignee is read once, and an empty entry ("unassigned", which
+// --assignee cannot say) keeps the single unpredicated read.
+func TestBdStoreListAssigneesFanOutNormalizesTheSet(t *testing.T) {
+	const (
+		unassigned = `{"id":"bd-unassigned","title":"message","status":"open","issue_type":"message","created_at":"2026-05-01T00:00:00Z"}`
+		routeA     = `{"id":"bd-route-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:01Z"}`
+		routeC     = `{"id":"bd-route-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:02Z"}`
+	)
+	// runner answers like bd list: route-a's row for --assignee=route-a, and
+	// every row of the type for a read with no --assignee.
+	runner := func(calls *[]string) beads.CommandRunner {
+		return func(_, name string, args ...string) ([]byte, error) {
+			cmd := name + " " + strings.Join(args, " ")
+			*calls = append(*calls, cmd)
+			if strings.Contains(cmd, "--assignee=route-a") {
+				return []byte("[" + routeA + "]"), nil
+			}
+			if strings.Contains(cmd, "--assignee=") {
+				return nil, fmt.Errorf("unexpected assignee read: %s", cmd)
+			}
+			return []byte("[" + unassigned + "," + routeA + "," + routeC + "]"), nil
+		}
+	}
+
+	t.Run("repeated assignee is read once", func(t *testing.T) {
+		var calls []string
+		s := beads.NewBdStore("/city", runner(&calls))
+		got, err := s.List(beads.ListQuery{Assignees: []string{"route-a", "route-a"}, Type: "message", Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(calls) != 1 || !strings.Contains(calls[0], "--assignee=route-a") {
+			t.Fatalf("calls = %v, want one bd list --assignee=route-a", calls)
+		}
+		if ids := beadIDs(got); !reflect.DeepEqual(ids, []string{"bd-route-a"}) {
+			t.Fatalf("got ids %v, want [bd-route-a] once", ids)
+		}
+	})
+
+	t.Run("empty entry keeps the single read", func(t *testing.T) {
+		var calls []string
+		s := beads.NewBdStore("/city", runner(&calls))
+		got, err := s.List(beads.ListQuery{Assignees: []string{"", "route-a"}, Type: "message", Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(calls) != 1 || strings.Contains(calls[0], "--assignee=") || !strings.Contains(calls[0], "--limit 0") {
+			t.Fatalf("calls = %v, want one unpredicated bd list --limit 0: --assignee cannot ask for unassigned rows", calls)
+		}
+		if ids := beadIDs(got); !reflect.DeepEqual(ids, []string{"bd-unassigned", "bd-route-a"}) {
+			t.Fatalf("got ids %v, want [bd-unassigned bd-route-a]", ids)
+		}
+	})
+}
+
+// TestBdStoreListAssigneesFanOutUnionsByID pins the union. The reads are
+// several snapshots, so a bead reassigned from route-a to route-b between them
+// can come back from both; it is returned once, as the first read saw it.
+func TestBdStoreListAssigneesFanOutUnionsByID(t *testing.T) {
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		cmd := name + " " + strings.Join(args, " ")
+		for _, route := range []string{"route-a", "route-b"} {
+			if strings.Contains(cmd, "--assignee="+route) {
+				return []byte(`[{"id":"bd-moved","title":"message","status":"open","issue_type":"message","assignee":"` + route + `","created_at":"2026-05-01T00:00:01Z"}]`), nil
+			}
+		}
+		return nil, fmt.Errorf("unexpected command: %s", cmd)
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{Assignees: []string{"route-a", "route-b"}, Type: "message", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "bd-moved" || got[0].Assignee != "route-a" {
+		t.Fatalf("got = %+v, want bd-moved once, as the route-a read returned it", got)
+	}
+}
+
+// TestBdStoreListAssigneesFanOutKeepsBdDefaultOrder pins the SortDefault
+// union. bd list answers in priority, then newest-first, then id order, and a
+// Limit on the single scan this fan-out replaces kept that order's prefix. The
+// union is put back into that order, so route-b's newer row outranks route-a's
+// older one of the same priority although route-a is read first.
+func TestBdStoreListAssigneesFanOutKeepsBdDefaultOrder(t *testing.T) {
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		cmd := name + " " + strings.Join(args, " ")
+		switch {
+		case strings.Contains(cmd, "--assignee=route-a"):
+			return []byte(`[
+				{"id":"bd-a-urgent","title":"message","status":"open","issue_type":"message","assignee":"route-a","priority":0,"created_at":"2026-05-01T00:00:00Z"},
+				{"id":"bd-a-old","title":"message","status":"open","issue_type":"message","assignee":"route-a","priority":2,"created_at":"2026-05-01T00:00:01Z"}
+			]`), nil
+		case strings.Contains(cmd, "--assignee=route-b"):
+			return []byte(`[{"id":"bd-b-new","title":"message","status":"open","issue_type":"message","assignee":"route-b","priority":2,"created_at":"2026-05-01T00:00:03Z"}]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command: %s", cmd)
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{Assignees: []string{"route-a", "route-b"}, Type: "message", Status: "open", Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := beadIDs(got); !reflect.DeepEqual(ids, []string{"bd-a-urgent", "bd-b-new"}) {
+		t.Fatalf("got ids %v, want [bd-a-urgent bd-b-new]: the first two rows of the single scan, in bd's default order", ids)
+	}
+}
+
+// TestBdStoreListAssigneesFanOutReturnsPartialResults pins bd list's partial
+// contract across the fan-out, as TestBdStoreListReturnsPartialResultsOnCorruptEntries
+// pins it for one read: a row parseIssuesTolerant drops from any one read
+// marks the whole answer partial, and an answer with no surviving row is an
+// error rather than an empty success.
+func TestBdStoreListAssigneesFanOutReturnsPartialResults(t *testing.T) {
+	const (
+		routeA  = `{"id":"bd-route-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:01Z"}`
+		routeB  = `{"id":"bd-route-b","title":"message","status":"open","issue_type":"message","assignee":"route-b","created_at":"2026-05-01T00:00:02Z"}`
+		corrupt = `{"id":"bd-corrupt","title":"message","status":"open","issue_type":"message","assignee":"route-b","created_at":"not-a-time"}`
+	)
+	runner := func(answers map[string]string) beads.CommandRunner {
+		return func(_, name string, args ...string) ([]byte, error) {
+			cmd := name + " " + strings.Join(args, " ")
+			for route, out := range answers {
+				if strings.Contains(cmd, "--assignee="+route) {
+					return []byte(out), nil
+				}
+			}
+			return nil, fmt.Errorf("unexpected command: %s", cmd)
+		}
+	}
+	query := beads.ListQuery{Assignees: []string{"route-a", "route-b"}, Type: "message", Status: "open", Sort: beads.SortCreatedAsc}
+
+	t.Run("surviving rows come back marked partial", func(t *testing.T) {
+		s := beads.NewBdStore("/city", runner(map[string]string{
+			"route-a": "[" + routeA + "]",
+			"route-b": "[" + routeB + "," + corrupt + "]",
+		}))
+		got, err := s.List(query)
+		var partial *beads.PartialResultError
+		if !errors.As(err, &partial) || partial.Op != "bd list" {
+			t.Fatalf("err = %v, want a bd list *beads.PartialResultError: route-b's read dropped a row", err)
+		}
+		if ids := beadIDs(got); !reflect.DeepEqual(ids, []string{"bd-route-a", "bd-route-b"}) {
+			t.Fatalf("got ids %v, want both surviving rows [bd-route-a bd-route-b]", ids)
+		}
+	})
+
+	t.Run("no surviving row is an error", func(t *testing.T) {
+		s := beads.NewBdStore("/city", runner(map[string]string{
+			"route-a": "[]",
+			"route-b": "[" + corrupt + "]",
+		}))
+		got, err := s.List(query)
+		var partial *beads.PartialResultError
+		if err == nil || errors.As(err, &partial) {
+			t.Fatalf("List() = %+v, %v; want a hard error: the reads' only row was dropped", got, err)
+		}
+	})
+}
+
+// TestBdStoreListBothTiersAssigneesMultipleFansOutTheListLegOnly pins both
+// legs of a multi-assignee TierBoth read, the shape of a multi-route mail
+// inbox. The bd list leg fans out to one --assignee read per route; the
+// listEphemeral bd query leg still carries no assignee clause and reads every
+// open ephemeral message, the part of GH#7794 the fan-out does not fix.
+func TestBdStoreListBothTiersAssigneesMultipleFansOutTheListLegOnly(t *testing.T) {
+	var listCalls, queryCalls []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		cmd := name + " " + strings.Join(args, " ")
+		switch {
+		case strings.HasPrefix(cmd, "bd list "):
+			listCalls = append(listCalls, cmd)
+			return []byte(`[]`), nil
+		case strings.HasPrefix(cmd, "bd query "):
+			queryCalls = append(queryCalls, cmd)
+			return []byte(`[
+				{"id":"bd-wisp-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:00Z","ephemeral":true},
+				{"id":"bd-wisp-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:01Z","ephemeral":true}
+			]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command: %s", cmd)
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{
+		Assignees: []string{"route-a", "route-b"},
+		Type:      "message",
+		Status:    "open",
+		TierMode:  beads.TierBoth,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listCalls) != 2 {
+		t.Fatalf("bd list calls = %v, want one per route", listCalls)
+	}
+	for i, route := range []string{"route-a", "route-b"} {
+		if !strings.Contains(listCalls[i], "--assignee="+route) || !strings.Contains(listCalls[i], "--status=open") || !strings.Contains(listCalls[i], "--type=message") {
+			t.Fatalf("bd list call %d = %q, want --assignee=%s with the query's --status and --type", i, listCalls[i], route)
+		}
+	}
+	if len(queryCalls) != 1 || strings.Contains(queryCalls[0], "assignee=") || !strings.Contains(queryCalls[0], "--limit 0") {
+		t.Fatalf("bd query calls = %v, want one unbounded read with no assignee clause: bd query cannot yet ask for one of several assignees, so GH#7794 stays open for this leg (when it can, update this test and listViaBDList's comment)", queryCalls)
+	}
+	if ids := beadIDs(got); !reflect.DeepEqual(ids, []string{"bd-wisp-a"}) {
+		t.Fatalf("got ids %v, want [bd-wisp-a]: route-c's row is filtered client-side", ids)
 	}
 }
 
 func TestBdStoreListWispsAssigneesSingleUsesAssigneeClause(t *testing.T) {
+	var callsMu sync.Mutex
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		gotCmd := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
 		calls = append(calls, gotCmd)
+		callsMu.Unlock()
 		return []byte(`[{"id":"bd-wisp-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:00Z","ephemeral":true}]`), nil
 	}
 	s := beads.NewBdStore("/city", runner)
@@ -4875,12 +5128,20 @@ func TestBdStoreListWispsAssigneesSingleUsesAssigneeClause(t *testing.T) {
 	}
 }
 
+// TestBdStoreListWispsAssigneesMultipleFallsBackToClientFilter also pins the
+// TierWisps carve-out on listViaBDList's fan-out: the runner refuses every
+// --assignee flag, so a wisps-tier bd list leg that fanned out fails here.
 func TestBdStoreListWispsAssigneesMultipleFallsBackToClientFilter(t *testing.T) {
-	var gotCmd string
+	var callsMu sync.Mutex
+	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
-		gotCmd = name + " " + strings.Join(args, " ")
+		gotCmd := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
+		calls = append(calls, gotCmd)
+		callsMu.Unlock()
 		if strings.Contains(gotCmd, "--assignee=") {
-			t.Fatalf("cmd = %q, multi-route Assignees must not emit one --assignee", gotCmd)
+			t.Errorf("cmd = %q, multi-route Assignees must not emit one --assignee", gotCmd)
+			return nil, fmt.Errorf("unexpected --assignee read: %s", gotCmd)
 		}
 		if strings.Contains(gotCmd, "--limit 1") {
 			return []byte(`[{"id":"bd-wisp-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:00Z","ephemeral":true}]`), nil
@@ -4902,8 +5163,16 @@ func TestBdStoreListWispsAssigneesMultipleFallsBackToClientFilter(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(gotCmd, "--limit 0") {
-		t.Fatalf("cmd = %q, want unlimited server query before multi-Assignees client filtering", gotCmd)
+	callsMu.Lock()
+	gotCalls := append([]string(nil), calls...)
+	callsMu.Unlock()
+	if len(gotCalls) == 0 {
+		t.Fatal("runner never called")
+	}
+	for _, c := range gotCalls {
+		if !strings.Contains(c, "--limit 0") {
+			t.Fatalf("cmd = %q, want unlimited server query before multi-Assignees client filtering", c)
+		}
 	}
 	if len(got) != 1 || got[0].ID != "bd-wisp-b" {
 		t.Fatalf("got = %+v, want first matching wisp after client filter", got)
@@ -4938,10 +5207,13 @@ func firstCommandWithPrefix(calls []string, prefix string) string {
 }
 
 func TestBdStoreListBothTiersReturnsWholeReadError(t *testing.T) {
+	var callsMu sync.Mutex
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		full := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
 		calls = append(calls, full)
+		callsMu.Unlock()
 		if strings.Contains(full, "--include-ephemeral") {
 			t.Fatalf("bd list command = %q, --include-ephemeral is only valid for bd ready", full)
 		}
@@ -4977,10 +5249,13 @@ func TestBdStoreListWispAwareTiersTolerateAdaptersWithoutBdQuery(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			var callsMu sync.Mutex
 			var calls []string
 			runner := func(_, name string, args ...string) ([]byte, error) {
 				full := name + " " + strings.Join(args, " ")
+				callsMu.Lock()
 				calls = append(calls, full)
+				callsMu.Unlock()
 				if strings.HasPrefix(full, "bd query ") {
 					return nil, fmt.Errorf("bd: unknown subcommand \"query\"")
 				}
@@ -5036,10 +5311,13 @@ func TestBdStoreListWispsQuotesNonBareQueryValues(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			var callsMu sync.Mutex
 			var calls []string
 			runner := func(_, name string, args ...string) ([]byte, error) {
 				gotCmd := name + " " + strings.Join(args, " ")
+				callsMu.Lock()
 				calls = append(calls, gotCmd)
+				callsMu.Unlock()
 				return []byte(`[
 					{"id":"bd-match-assignee","title":"message","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","created_at":"2026-05-01T00:00:00Z","ephemeral":true},
 					{"id":"bd-match-label","title":"label","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","ephemeral":true,"labels":["order tracking"]},
@@ -5279,5 +5557,118 @@ func TestBdStoreReportsNoGuardedBatches(t *testing.T) {
 	}
 	if batcher, ok := beads.GuardedBatcherFor(beads.NewCachingStoreForTest(store, nil)); ok {
 		t.Fatalf("GuardedBatcherFor(CachingStore over BdStore) = (%T, true), want no capability", batcher)
+	}
+}
+
+// staleProjectionBd fakes a bd whose writes exit 0 but whose reads can lag
+// them, the shape behind a session close that answered 500 while the close had
+// landed: `bd close` drops the row's metadata (as in dolt-server mode) and the
+// post-close `bd update` that re-asserts it exits 0 without a read showing it.
+// hidePreClose makes the pre-close update read back stale instead.
+type staleProjectionBd struct {
+	mu            sync.Mutex
+	closed        bool
+	metadata      map[string]string
+	hidePreClose  bool
+	failPostClose bool
+	updates       int
+}
+
+func (f *staleProjectionBd) run(_, _ string, args ...string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch args[0] {
+	case "show":
+		status := "open"
+		if f.closed {
+			status = "closed"
+		}
+		return []byte(fmt.Sprintf(`[{"id":"bd-7","title":"before","status":%q,"issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":%s}]`,
+			status, mustJSONPlain(f.metadata))), nil
+	case "close":
+		f.closed = true
+		f.metadata = map[string]string{}
+		return []byte(`[{"id":"bd-7","status":"closed"}]`), nil
+	case "update":
+		f.updates++
+		postClose := strings.Contains(strings.Join(args, " "), "--status closed")
+		if postClose && f.failPostClose {
+			return nil, errors.New("exit status 1: Error updating bd-7: disk full")
+		}
+		if postClose || f.hidePreClose {
+			return []byte(`[{"id":"bd-7"}]`), nil // exit 0; no read shows it
+		}
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "--set-metadata" {
+				k, v, _ := strings.Cut(args[i+1], "=")
+				f.metadata[k] = v
+			}
+		}
+		return []byte(`[{"id":"bd-7"}]`), nil
+	}
+	return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
+}
+
+func mustJSONPlain(v any) string {
+	data, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return string(data)
+}
+
+func runStaleProjectionCloseTx(f *staleProjectionBd) error {
+	s := beads.NewBdStore("/city", f.run)
+	s.SetTxProjectionTimeoutForTest(200 * time.Millisecond)
+	return s.Tx("close", func(tx beads.Tx) error {
+		if err := tx.SetMetadataBatch("bd-7", map[string]string{"tx": "applied"}); err != nil {
+			return err
+		}
+		return tx.Close("bd-7")
+	})
+}
+
+// TestBdStoreTxUnconfirmedPostCloseUpdateIsWriteUnconfirmed: a staged
+// close whose writes all exited 0, but whose last update never read back,
+// reports ErrWriteUnconfirmed rather than a bare deadline, so a caller can tell
+// "committed, not confirmed" from "failed". The close itself ran.
+func TestBdStoreTxUnconfirmedPostCloseUpdateIsWriteUnconfirmed(t *testing.T) {
+	f := &staleProjectionBd{metadata: map[string]string{}}
+	err := runStaleProjectionCloseTx(f)
+	if !errors.Is(err, beads.ErrWriteUnconfirmed) {
+		t.Fatalf("Tx error = %v, want ErrWriteUnconfirmed", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Tx error = %v, want it to keep the deadline cause", err)
+	}
+	if !f.closed {
+		t.Fatal("bd close did not run, want the close applied before the unconfirmed update")
+	}
+}
+
+// TestBdStoreTxUnconfirmedPreCloseUpdateStopsBeforeTheClose: an update that
+// never reads back before the close is also unconfirmed, and the Tx stops
+// there: the close does not run on an unconfirmed row.
+func TestBdStoreTxUnconfirmedPreCloseUpdateStopsBeforeTheClose(t *testing.T) {
+	f := &staleProjectionBd{metadata: map[string]string{}, hidePreClose: true}
+	err := runStaleProjectionCloseTx(f)
+	if !errors.Is(err, beads.ErrWriteUnconfirmed) {
+		t.Fatalf("Tx error = %v, want ErrWriteUnconfirmed", err)
+	}
+	if f.closed {
+		t.Fatal("bd close ran after an unconfirmed update, want the Tx to stop before it")
+	}
+}
+
+// TestBdStoreTxFailedUpdateIsNotWriteUnconfirmed: an update bd refused is a
+// failed write, never an unconfirmed one.
+func TestBdStoreTxFailedUpdateIsNotWriteUnconfirmed(t *testing.T) {
+	f := &staleProjectionBd{metadata: map[string]string{}, failPostClose: true}
+	err := runStaleProjectionCloseTx(f)
+	if err == nil {
+		t.Fatal("Tx error = nil, want the refused update's error")
+	}
+	if errors.Is(err, beads.ErrWriteUnconfirmed) {
+		t.Fatalf("Tx error = %v, want a failed write, not ErrWriteUnconfirmed", err)
 	}
 }

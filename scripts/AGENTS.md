@@ -62,3 +62,18 @@ hooks; it derives the soname list from a single ICU-major constant, and
 `TestBazelLocalRuntimePinMatchesProbe` fails when that constant, the
 `MODULE.bazel` pin and `engdocs/bazel-quickstart.md` disagree. Only `auto`
 probes: an explicit mode is never replaced.
+
+## The tmux test inventory is derived, never counted
+
+The `internal/runtime/tmux` integration inventory is `scripts/runtime-tmux-tests.manifest`
+(every test name, in discovery order) plus `scripts/runtime-tmux-integration-files.manifest`
+(the `_test.go` files that compile only with `-tags integration`, one basename
+per line, ascending). Both are admin-gated through CODEOWNERS `/scripts/`.
+`scripts/runtime_tmux_manifest_test.go` and `scripts/runtime_tmux_lane_test.go`
+derive their expectations from the source tree, so never type an inventory
+count (total, default-lane, integration-only, or per-shard) into a test: two
+PRs that each add a test would conflict on it. Adding a test costs manifest
+lines only; a new integration-only test file costs one sorted record line.
+The shard rule is `i % shard_total == shard_index - 1` in
+`scripts/test-go-test-shard` (`TestRuntimeTmuxIntegrationShardUsesCheckedManifestOnLinux`
+restates it and runs each shard through the real script).

@@ -214,8 +214,13 @@ func hookStartedFenceOf(env []string) hookStartedFence {
 }
 
 // hookStartedKey is a claim as the work cells name it: its store ref
-// (normalizeIdleClaimStoreRef's form, "" when unknown) and bead ID.
-type hookStartedKey struct{ Store, Bead string }
+// (claimStoreRef's form, "" when unknown) and bead ID. Resident reports that
+// Store is the store the claim was proved to reside in (hookStartedKeyFor),
+// which the entry it writes is marked as (session.WorkStartedEntry.Resident).
+type hookStartedKey struct {
+	Store, Bead string
+	Resident    bool
+}
 
 // hookStartedResult is what the started write found.
 type hookStartedResult uint8
@@ -245,6 +250,11 @@ var errWorkStartedContended = errors.New("work_started: the row moved on every a
 // the claim is recorded, but the claims the old cell held are not.
 var errWorkStartedReset = errors.New("work_started was unreadable and was reset to this claim; the claims it held are no longer recorded")
 
+// errWorkStartedRespell marks a re-spelling write that failed on a claim the
+// cell already records: the claim is recorded (under the leg's spelling, which
+// the readers still match at its generation), so it is not unrecorded.
+var errWorkStartedRespell = errors.New("migrating the claim's work_started entry to the store it resides in failed; it stays recorded as it was, under the leg the hook ran in")
+
 // decideWorkStarted is the started write's decision on a fresh read of the
 // row: refuse a closed row and another incarnation's (stale), refuse a claim
 // the controller is releasing, skip one already recorded, else record it
@@ -261,21 +271,53 @@ func decideWorkStarted(fresh session.Info, fence hookStartedFence, key hookStart
 	case strings.TrimSpace(fresh.InstanceToken) != fence.Token || (fence.HasGen && rowGen != fence.Gen):
 		return hookStartedStale, nil, nil
 	}
-	if session.WorkLadderReleases(fresh.WorkLadderRaw, key.Store, key.Bead) {
+	// The ladder keys its release by the claim's residence (claimStoreRef). A
+	// key whose store is not a proven residence may be the leg's spelling of
+	// it, so the fence then matches the release by bead alone: refusing a
+	// hand-over the controller is releasing is the safe side of a doubt.
+	fenceStore := key.Store
+	if !key.Resident {
+		fenceStore = ""
+	}
+	if session.WorkLadderReleases(fresh.WorkLadderRaw, fenceStore, key.Bead) {
 		return hookStartedReleasing, nil, nil
 	}
 	cell, err := session.DecodeWorkStarted(fresh.WorkStartedRaw)
 	if err != nil {
 		cell, reset = session.WorkStarted{}, err
 	}
-	if cell.Names(key.Store, key.Bead) {
-		return hookStartedAlreadyRecorded, nil, nil
-	}
 	gen := rowGen
 	if fence.HasGen {
 		gen = fence.Gen
 	}
-	cell = cell.With(session.WorkStartedEntry{Store: key.Store, Bead: key.Bead, Gen: gen, At: now.UTC(), Via: via})
+	// Recorded already: an entry names the claim. A proven residence key is
+	// matched as the readers match it (Names). A key that is not one may be the
+	// leg's spelling of a claim the readers key by another store, so only an
+	// entry naming the bead under every store counts (RecordsBead): a resident
+	// entry is exact to its store, the leg's included, and may be another
+	// copy's record (a co-resident copy on a migrated city). With no readable
+	// generation the readers match exactly and nothing else, so an unproven key
+	// is then matched as any key is.
+	recorded := cell.Names(key.Store, key.Bead, gen)
+	if !key.Resident && gen > 0 {
+		recorded = cell.RecordsBead(key.Bead, gen)
+	}
+	if recorded {
+		// An older hook (or an unproven adoption) may have spelled it by its
+		// leg: re-spell that entry as the residence this run proved, in place,
+		// keeping its generation, time and way (the cell's migration).
+		if key.Resident {
+			if respelled, changed := cell.Respelled(key.Store, key.Bead, gen); changed {
+				return hookStartedAlreadyRecorded, session.MetadataPatch{session.WorkStartedKey: session.EncodeWorkStarted(respelled)}, nil
+			}
+		}
+		return hookStartedAlreadyRecorded, nil, nil
+	}
+	// An unproven key's entry goes beside a resident entry of this
+	// generation, not over it (With): that one is the proof a minted claim or
+	// a readback left, and the next proven hand-over re-spells or drops the
+	// leg spelling (Respelled).
+	cell = cell.With(session.WorkStartedEntry{Store: key.Store, Bead: key.Bead, Gen: gen, At: now.UTC(), Via: via, Resident: key.Resident && key.Store != ""})
 	return hookStartedRecorded, session.MetadataPatch{session.WorkStartedKey: session.EncodeWorkStarted(cell)}, reset
 }
 
@@ -308,6 +350,8 @@ func recordWorkStarted(front *session.Store, sessionID string, fence hookStarted
 		return session.RowPatch{Metadata: patch}, len(patch) > 0
 	})
 	switch {
+	case err != nil && res == hookStartedAlreadyRecorded:
+		return res, fmt.Errorf("%w: %w", errWorkStartedRespell, err)
 	case err != nil:
 		return hookStartedUnrecorded, err
 	case res == hookStartedRecorded && !wrote:
@@ -339,10 +383,11 @@ func forgetWorkStartedVia(front sessionFrontGetter, sessionID string, key hookSt
 func forgetWorkStarted(front *session.Store, sessionID string, key hookStartedKey) error {
 	_, err := front.UpdateRowFenced(sessionID, hookStartedWriteAttempts, func(fresh session.Info, _ session.PersistedResponse) (session.RowPatch, bool) {
 		cell, err := session.DecodeWorkStarted(fresh.WorkStartedRaw)
-		if fresh.Closed || err != nil || !cell.Names(key.Store, key.Bead) {
+		gen, _ := strconv.ParseInt(strings.TrimSpace(fresh.Generation), 10, 64)
+		if fresh.Closed || err != nil || !cell.Names(key.Store, key.Bead, gen) {
 			return session.RowPatch{}, false
 		}
-		return session.RowPatch{Metadata: session.MetadataPatch{session.WorkStartedKey: session.EncodeWorkStarted(cell.Without(key.Store, key.Bead))}}, true
+		return session.RowPatch{Metadata: session.MetadataPatch{session.WorkStartedKey: session.EncodeWorkStarted(cell.Without(key.Store, key.Bead, gen))}}, true
 	})
 	return err
 }
@@ -366,9 +411,11 @@ func sessionWorkStartedVia(front sessionFrontGetter, sessionID string) (string, 
 	return info.WorkStartedRaw, nil
 }
 
-// hookClaimStoreRefForDir is the production StoreRef seam: the store a claim
-// made in dir lives in, as the work cells key it ("city" or "rig:<name>"),
-// or "" when the city or its config cannot be read or dir is no store root.
+// hookClaimStoreRefForDir is the production StoreRef seam: the work leg at
+// dir, as the work cells key a claim residing in it ("city" or
+// "rig:<name>"), or "" when the city or its config cannot be read or dir is
+// no store root. A claim the class route took resides in the binding instead
+// (hookStartedKeyFor).
 func hookClaimStoreRefForDir(dir string) string {
 	cityPath, err := resolveCity()
 	if err != nil {
@@ -388,7 +435,7 @@ func claimStoreRefAt(cityPath string, cfg *config.City, dir string) string {
 	if ref == "" {
 		return ""
 	}
-	return normalizeIdleClaimStoreRef(ref)
+	return claimStoreRef(ref)
 }
 
 // emitWorkStartedUnrecorded is the production EmitWorkStartedUnrecorded seam:

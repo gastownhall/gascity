@@ -343,6 +343,8 @@ const defaultClientTimeout = 60 * time.Second
 // Replayed marks a SubmitSessionWithKey retry answered from a finished
 // request's stored outcome: nothing ran again, and Message says that the
 // retry's own options, resume included, took no effect (request_id rule 6).
+// OpID is the id of the op the server recorded the request as, empty when it
+// recorded none.
 type SessionSubmitResponse struct {
 	Status   string               `json:"status"`
 	ID       string               `json:"id"`
@@ -350,6 +352,7 @@ type SessionSubmitResponse struct {
 	Intent   session.SubmitIntent `json:"intent"`
 	Replayed bool                 `json:"replayed,omitempty"`
 	Message  string               `json:"message,omitempty"`
+	OpID     string               `json:"op_id,omitempty"`
 }
 
 // sseEvent is a parsed SSE frame from the event stream.
@@ -1480,9 +1483,10 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 }
 
 // SubmitSessionWithKey is SubmitSession under an Idempotency-Key. When the
-// server records both requests (a recording ops.content mode), a retry with
-// the same key against the same session gets the first request's outcome
-// instead of a second delivery. Otherwise only a retry the server's
+// server records both requests (a recording ops.content mode, or lane
+// authority: message listed in [ops] authoritative), a retry with the same
+// key against the same session gets the first request's outcome instead of
+// a second delivery. Otherwise only a retry the server's
 // Idempotency-Key cache answers gets it (the same id spelling, at most 30
 // minutes later, and not across a restart); any other retry delivers again
 // (request_id rules 3 and 6 in engdocs/design/async-request-result.md). A
@@ -1493,7 +1497,10 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 // was not delivered. A replay runs nothing, so this call's resume does not
 // start a session the first request only queued for (request_id rule 6); a
 // replayed success says so in the response's Replayed and Message, a replayed
-// failure in its error. An empty key sends none, as SubmitSession does.
+// failure in its error. Under lane authority a retry of a message still
+// waiting is no replay: it is accepted again, and its resume consumes an
+// operator hold placed before the message (request_id rule 6). An empty key
+// sends none, as SubmitSession does.
 func (c *Client) SubmitSessionWithKey(id, message string, intent session.SubmitIntent, key string) (SessionSubmitResponse, error) {
 	return c.submitSession(id, message, intent, key)
 }
@@ -1527,12 +1534,16 @@ func (c *Client) submitSession(id, message string, intent session.SubmitIntent, 
 	if err := json.Unmarshal(env.Payload, &p); err != nil {
 		return SessionSubmitResponse{}, fmt.Errorf("decode submit result: %w", err)
 	}
-	return SessionSubmitResponse{
+	out := SessionSubmitResponse{
 		Status: "accepted",
 		ID:     p.SessionID,
 		Queued: p.Queued,
 		Intent: session.SubmitIntent(p.Intent),
-	}, nil
+	}
+	if accepted.Op != nil {
+		out.OpID = accepted.Op.Id
+	}
+	return out, nil
 }
 
 // postSubmitSession posts one submit request and returns its 202 body; key,
@@ -1591,7 +1602,7 @@ func replayedSubmitOutcome(body *genclient.AsyncAcceptedBody, intent session.Sub
 	}
 	return SessionSubmitResponse{
 		Status: "accepted", ID: op.Conversation, Queued: queued, Intent: intent,
-		Replayed: true, Message: replayMessage(op.Id, arm, reason),
+		Replayed: true, Message: replayMessage(op.Id, arm, reason), OpID: op.Id,
 	}, true, nil
 }
 

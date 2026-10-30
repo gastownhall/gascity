@@ -21,6 +21,7 @@ go_test(
     name = "ssh_test",
     srcs = [
         "conformance_integration_test.go",
+        "process_alive_script_test.go",
         "provider_test.go",
         "seams_test.go",
         "session_env_file_integration_test.go",
@@ -32,6 +33,7 @@ go_test(
     embed = [":ssh"],
     deps = [
         "//internal/runtime",
+        "//internal/runtime/proctable",
         "//internal/runtime/runtimetest",
         "//internal/testenv",
         "//internal/testutil",

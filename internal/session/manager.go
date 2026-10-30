@@ -412,6 +412,9 @@ type Info struct {
 	// the ladder's release refuses one the hook recorded.
 	WorkStartedRaw string // work_started (raw JSON)
 	WorkLadderRaw  string // work_ladder (raw JSON)
+	// ContentHoldRaw is the RAW content_hold cell (ContentHoldKey;
+	// content_hold.go), read by ContentHeldInfo and ParseContentHold.
+	ContentHoldRaw string // content_hold (raw)
 	// ExecutionClaimStarted is the RAW execution_claim_started stamp
 	// ("<instance_token>|<bead>") the execution backstop writes once a claim's
 	// step started: with the work_started cell, the started records a release
@@ -1556,6 +1559,12 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 		// after the failed-create pre-check above, preserving closed-guard-
 		// first ordering.
 		current = canonicalLifecycleState(current)
+		// drained -> suspended is the operator's alone. The shutdown sweep
+		// and the idle auto-suspend write no hold, so moving a drained row to
+		// suspended would only lose its drain; they still refuse it.
+		if current == StateDrained && intent != suspendIntentOperator {
+			return &IllegalTransitionError{From: current, Command: CmdSuspend}
+		}
 		if _, err := Transition(current, CmdSuspend); err != nil {
 			return err
 		}
@@ -1798,14 +1807,14 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 		terminal = CellInto(id, b.Metadata, ActorController, DispEvent{Kind: EvRetire}, m.now(), terminal)
 		// Past a kill fence: the operator's close ends the session a kill was
 		// tearing down, as it did before CommitClose.
-		res, err := NewStore(beads.SessionStore{Store: m.store}).CommitClose(Decide(infoFromPersistedBead(b), FactsOpClose), terminal, m.now(), CommitPastKillFence())
+		res, err := NewStore(beads.SessionStore{Store: m.store}).CommitClose(Decide(infoFromPersistedBead(b), FactsOpClose), terminal, m.now(), CommitPastKillFence(), CommitAsOperator())
 		switch {
 		case err != nil:
 			return fmt.Errorf("closing session %s: %w", id, err)
 		case res == CommitMoved:
 			return fmt.Errorf("closing session %s: %w", id, ErrSessionCloseSuperseded)
 		case res == CommitContended:
-			return fmt.Errorf("closing session %s: lost the revision fence %d times", id, terminalCloseMaxAttempts)
+			return fmt.Errorf("closing session %s: lost the revision fence %d times", id, operatorSuspendAttempts)
 		case res != CommitLanded && res != CommitClosed:
 			return fmt.Errorf("closing session %s: refused (%s)", id, res)
 		}

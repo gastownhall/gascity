@@ -36,7 +36,7 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	mgr := s.sessionManager(store.Store)
 	cfg := s.state.Config()
 
-	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store))
+	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store), input.State)
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
@@ -139,6 +139,9 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 	wantPeek := input.Peek
 	resp := sessionResponseWithReason(info, pr, cfg, s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek, true, true, input.PeekLines)
+	if len(s.conversationLaneKinds()) > 0 {
+		resp.Turn = s.observedSessionTurn(id, info.Generation)
+	}
 	return &IndexOutput[sessionResponse]{
 		Index:     index,
 		CacheAgeS: cacheAgeSeconds(store.Store),

@@ -239,6 +239,13 @@ func stepHookCity(t *testing.T) (hookBudgetFixture, *controllerState) {
 	t.Helper()
 	f := newHookBudgetFixture(t)
 	f.activeStep(t)
+	return f, hookCityController(t, f)
+}
+
+// hookCityController is a controller holding the hook budget fixture city's
+// store, as the supervisor would.
+func hookCityController(t *testing.T, f hookBudgetFixture) *controllerState {
+	t.Helper()
 	cfg, err := loadCityConfig(f.cityDir, io.Discard)
 	if err != nil {
 		t.Fatalf("loadCityConfig: %v", err)
@@ -248,7 +255,7 @@ func stepHookCity(t *testing.T) (hookBudgetFixture, *controllerState) {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
 	resetHookBudgetProcessState(t)
-	return f, &controllerState{cfg: cfg, cityBeadStore: store, beadStores: map[string]beads.Store{}, cityName: loadedCityName(cfg, f.cityDir), cityPath: f.cityDir}
+	return &controllerState{cfg: cfg, cityBeadStore: store, beadStores: map[string]beads.Store{}, cityName: loadedCityName(cfg, f.cityDir), cityPath: f.cityDir}
 }
 
 // withActiveWorkStepClient points the step reminder at client for the test.
@@ -538,6 +545,26 @@ func TestWispStepLookupIsBoundedWhileItsClientResolves(t *testing.T) {
 	case <-stopped:
 	case <-time.After(testutil.GoroutineRaceTimeout):
 		t.Fatal("stop waited on a client that never resolved; it must give up at activeWorkStepAPITimeout")
+	}
+}
+
+// TestWispStepLookupTakesAnAnswerInHandOverAnExpiredBound pins that a caller
+// taking the answer after the bound has passed still gets the controller's
+// answer when it has already arrived: a hook that reads its SessionStart mail
+// before taking the step answer can find both ready, and a fallback there costs
+// an in-process read the controller already saved it.
+func TestWispStepLookupTakesAnAnswerInHandOverAnExpiredBound(t *testing.T) {
+	step := &api.ActiveWorkStep{ID: "gc-step", Title: "inspect the queue"}
+	for i := 0; i < 200; i++ {
+		answer := make(chan wispStepAnswer, 1)
+		answer <- wispStepAnswer{answered: true, step: step, route: "api"}
+		// Timer channels are synchronous: a zero-duration timer's channel is
+		// ready to receive from as soon as it is made.
+		lookup := &wispStepLookup{answer: answer, expired: time.NewTimer(0), cancel: func() {}}
+		got := lookup.take()
+		if !got.answered || got.route != "api" {
+			t.Fatalf("take %d = %+v, want the controller's answer already in hand over the expired bound", i, got)
+		}
 	}
 }
 

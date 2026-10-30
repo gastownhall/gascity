@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -36,12 +37,30 @@ func workerFactoryWithConfig(cityPath string, store beads.Store, sp runtime.Prov
 	return workerFactoryWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, nil)
 }
 
+// workerFactoryWithStaleKeyDetectionWaiter builds a factory whose usage
+// attribution reads work beads from store only: city-resident beads. A caller
+// that serves rig-resident work uses workerFactoryWithAttribution.
 func workerFactoryWithStaleKeyDetectionWaiter(
 	cityPath string,
 	store beads.Store,
 	sp runtime.Provider,
 	cfg *config.City,
 	waiter session.StaleKeyDetectionWaiter,
+) (*worker.Factory, error) {
+	return workerFactoryWithAttribution(cityPath, store, sp, cfg, waiter, nil, nil)
+}
+
+// workerFactoryWithAttribution is the factory constructor with formula
+// attribution injected: resolveBead reads a work bead wherever it lives (nil
+// falls back to store) and memo outlives the factory (nil derives every time).
+func workerFactoryWithAttribution(
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	waiter session.StaleKeyDetectionWaiter,
+	resolveBead func(id string) (beads.Bead, error),
+	memo *worker.FormulaNameMemo,
 ) (*worker.Factory, error) {
 	var (
 		resolveTransport func(template, provider string) string
@@ -95,6 +114,8 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 		StaleKeyDetectionWaiter: waiter,
 		Pricing:                 cfg.PricingRegistry(),
 		RuntimeLeaseTTL:         session.RuntimeLeaseTTLFor(cfg),
+		ResolveBead:             resolveBead,
+		FormulaMemo:             memo,
 		// The zero store resolves no class store: a deferred submit writes
 		// no shadow, so it opens nothing.
 		DeferredSubmits: openNudgeQueue(cityPath, beads.NudgesStore{}).Queue,
@@ -758,6 +779,13 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// path does; this resume resolver builds runtime.Config directly and never
 	// routes through resolveTemplate (gc-6bw8o).
 	applyWorkerOverlayHints(&runtimeHints, cfg, cityPath, info.Template, resolved)
+	// Deliver the startup prompt the way the reconciler's resume does: this
+	// resolver builds runtime.Config directly, so without it a resumed launch
+	// leaves the SessionStart hook as the only carrier of the prompt (ga-4k4zfk).
+	runtimeHints, err = startupPromptCity{path: cityPath, cfg: cfg, stderr: os.Stderr}.applyTo(info, resolved, transport, runtimeHints)
+	if err != nil {
+		return nil, err
+	}
 	return &worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    workDir,

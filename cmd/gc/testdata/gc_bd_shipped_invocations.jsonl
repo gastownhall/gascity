@@ -1,0 +1,462 @@
+{"argv": ["backup", "restore", "/path/to/city/.dolt-backup/X", "--force"], "src": "gascity:examples/bd/dolt/docs/journal-corruption-recovery.md:144"}
+{"argv": ["backup", "restore"], "src": "gascity:examples/bd/dolt/docs/journal-corruption-recovery.md:149"}
+{"argv": ["backup", "status", "--json"], "src": "gascity:examples/bd/dolt/docs/journal-corruption-recovery.md:143"}
+{"argv": ["backup", "status"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/reaper.sh:1312"}
+{"argv": ["backup", "sync"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/reaper.sh:1311"}
+{"argv": ["blocked"], "src": "gascity-packs:gastown/agents/mayor/prompt.template.md:163"}
+{"argv": ["close", "$@"], "src": "gascity-packs:gastown/commands/pr-merge-reconcile/run.sh:26"}
+{"argv": ["close", "--force", "--reason", "X"], "src": "workflows:scripts/pr_review.py:1768"}
+{"argv": ["close", "--force"], "src": "gascity-packs:gastown/formulas/mol-witness-patrol.toml:513"}
+{"argv": ["close", "--reason", "X"], "src": "gascity:examples/bd/dolt/formulas/mol-dog-stale-db.toml:322"}
+{"argv": ["close", "X", "--force", "--reason", "X"], "src": "maintainer-city:rig-packs/checkpoint-pipeline/scripts/cp.py:1192"}
+{"argv": ["close", "X", "--reason", "EXECUTE_FAILED: kill did not take effect, escalated to mayor"], "src": "gascity-packs:gastown/formulas/mol-shutdown-dance.toml:504"}
+{"argv": ["close", "X", "--reason", "MALFORMED_WARRANT: missing target or reason metadata"], "src": "gascity-packs:gastown/formulas/mol-shutdown-dance.toml:44"}
+{"argv": ["close", "X", "--reason", "Merged to X at X"], "src": "gascity-packs:gastown/formulas/mol-refinery-patrol.toml:1030"}
+{"argv": ["close", "X", "--reason", "PARDONED: pre-kill progress checks inconclusive"], "src": "gascity-packs:gastown/formulas/mol-shutdown-dance.toml:452"}
+{"argv": ["close", "X", "--reason", "PR #X not merged"], "src": "gascity-packs:pr-review/formulas/mol-pr-revert.formula.toml:118"}
+{"argv": ["close", "X", "--reason", "PR #X opened"], "src": "gascity-packs:pr-pipeline/formulas/mol-pr-from-issue.formula.toml:728"}
+{"argv": ["close", "X", "--reason", "PR not open"], "src": "gascity-packs:pr-review/formulas/mol-pr-iterate.formula.toml:139"}
+{"argv": ["close", "X", "--reason", "Session responded at attempt 1"], "src": "gascity-packs:gastown/formulas/mol-shutdown-dance.toml:175"}
+{"argv": ["close", "X", "--reason", "Session responded at attempt 2"], "src": "gascity-packs:gastown/formulas/mol-shutdown-dance.toml:211"}
+{"argv": ["close", "X", "--reason", "Session responded at attempt 3"], "src": "gascity-packs:gastown/formulas/mol-shutdown-dance.toml:245"}
+{"argv": ["close", "X", "--reason", "Synthesized: X"], "src": "gascity:internal/bootstrap/packs/core/formulas/mol-prompt-synth.toml:147"}
+{"argv": ["close", "X", "--reason", "Target already dead"], "src": "gascity-packs:gastown/formulas/mol-shutdown-dance.toml:137"}
+{"argv": ["close", "X", "--reason", "X for issue #X"], "src": "gascity-packs:contributing-to-gascity/formulas/mol-contributing-plan-implementation.formula.toml:91"}
+{"argv": ["close", "X", "--reason", "X"], "src": "gascity-packs:compound-engineering/assets/workflows/compound-resolution/{target}.md:71"}
+{"argv": ["close", "X", "--reason", "active refactor in area"], "src": "gascity-packs:pr-pipeline/formulas/mol-pr-start.formula.toml:291"}
+{"argv": ["close", "X", "--reason", "auto-push gate halt: X"], "src": "gascity-packs:pr-pipeline/formulas/mol-pr-from-issue.formula.toml:431"}
+{"argv": ["close", "X", "--reason", "auto-push gate halt: kill-switch absent"], "src": "gascity-packs:pr-pipeline/formulas/mol-pr-from-issue.formula.toml:440"}
+{"argv": ["close", "X", "--reason", "branch mismatch in apply"], "src": "gascity-packs:pr-review/formulas/mol-pr-iterate.formula.toml:412"}
+{"argv": ["close", "X", "--reason", "build failed after apply"], "src": "gascity-packs:pr-review/formulas/mol-pr-iterate.formula.toml:446"}
+{"argv": ["close", "X", "--reason", "complex merge conflicts"], "src": "gascity-packs:pr-review/formulas/mol-adopt-pr.formula.toml:283"}
+{"argv": ["close", "X", "--reason", "conditional reviewer selected"], "src": "gascity-packs:compound-engineering/agents/ce-code-review-selector/prompt.template.md:132"}
+{"argv": ["close", "X", "--reason", "conflicts, maintainerCanModify=false"], "src": "gascity-packs:pr-review/formulas/mol-adopt-pr.formula.toml:246"}
+{"argv": ["close", "X", "--reason", "contributor codebase review written: X"], "src": "gascity-packs:contributing-to-gascity/formulas/mol-contributing-review.formula.toml:131"}
+{"argv": ["close", "X", "--reason", "contributor fine-tune report written: X"], "src": "gascity-packs:contributing-to-gascity/formulas/mol-contributing-fine-tune.formula.toml:143"}
+{"argv": ["close", "X", "--reason", "contributor triage report written: X"], "src": "gascity-packs:contributing-to-gascity/formulas/mol-contributing-find-work.formula.toml:169"}
+{"argv": ["close", "X", "--reason", "dirty working tree"], "src": "gascity-packs:pr-review/formulas/mol-pr-revert.formula.toml:291"}
+{"argv": ["close", "X", "--reason", "dirty worktree in apply"], "src": "gascity-packs:pr-review/formulas/mol-pr-iterate.formula.toml:421"}
+{"argv": ["close", "X", "--reason", "dirty/wrong-branch staged worktree in intake"], "src": "gascity-packs:pr-review/formulas/mol-adopt-pr.formula.toml:160"}
+{"argv": ["close", "X", "--reason", "feedback ambiguity"], "src": "gascity-packs:pr-review/formulas/mol-pr-iterate.formula.toml:308"}
+{"argv": ["close", "X", "--reason", "feedback_ref required"], "src": "gascity-packs:pr-review/formulas/mol-pr-iterate.formula.toml:123"}
+{"argv": ["close", "X", "--reason", "gh not authenticated"], "src": "gascity-packs:contributing-to-gascity/formulas/mol-contributing-find-work.formula.toml:74"}
+{"argv": ["close", "X", "--reason", "gh pr create failed or url empty"], "src": "gascity-packs:pr-pipeline/formulas/mol-pr-from-issue.formula.toml:702"}
+{"argv": ["close", "X", "--reason", "gh pr create failed"], "src": "gascity-packs:pr-review/formulas/mol-pr-revert.formula.toml:442"}
+{"argv": ["close", "X", "--reason", "git push failed"], "src": "gascity-packs:pr-review/formulas/mol-pr-revert.formula.toml:340"}
+{"argv": ["close", "X", "--reason", "git revert conflict"], "src": "gascity-packs:pr-review/formulas/mol-pr-revert.formula.toml:317"}
+{"argv": ["close", "X", "--reason", "halt_chain set after pr-start"], "src": "gascity-packs:pr-pipeline/formulas/mol-pr-from-issue.formula.toml:232"}
+{"argv": ["close", "X", "--reason", "invalid feedback_source"], "src": "gascity-packs:pr-review/formulas/mol-pr-iterate.formula.toml:111"}
+{"argv": ["close", "X", "--reason", "merge_sha not on default branch"], "src": "gascity-packs:pr-review/formulas/mol-pr-revert.formula.toml:187"}
+{"argv": ["close", "X", "--reason", "merge_sha not reachable"], "src": "gascity-packs:pr-review/formulas/mol-pr-revert.formula.toml:179"}
+{"argv": ["close", "X", "--reason", "no branch resolved"], "src": "gascity-packs:contributing-to-gascity/formulas/mol-contributing-fine-tune.formula.toml:66"}
+{"argv": ["close", "X", "--reason", "not a git checkout"], "src": "gascity-packs:contributing-to-gascity/formulas/mol-contributing-find-work.formula.toml:59"}
+{"argv": ["close", "X", "--reason", "on default branch"], "src": "gascity-packs:contributing-to-gascity/formulas/mol-contributing-fine-tune.formula.toml:81"}
+{"argv": ["close", "X", "--reason", "open-pr carve-out not satisfied"], "src": "gascity-packs:pr-review/formulas/mol-pr-revert.formula.toml:398"}
+{"argv": ["close", "X", "--reason", "push carve-out not satisfied"], "src": "gascity-packs:pr-review/formulas/mol-pr-revert.formula.toml:280"}
+{"argv": ["close", "X", "--reason", "revert PR #X opened for #X"], "src": "gascity-packs:pr-review/formulas/mol-pr-revert.formula.toml:574"}
+{"argv": ["close", "X", "--reason", "scope mismatch"], "src": "gascity-packs:pr-review/formulas/mol-pr-merge-only.formula.toml:90"}
+{"argv": ["close", "X", "--reason", "ship verdict != pass"], "src": "gascity-packs:pr-pipeline/formulas/mol-pr-from-issue.formula.toml:365"}
+{"argv": ["close", "X", "--reason", "triage report written: X"], "src": "gascity-packs:pr-pipeline/formulas/mol-pr-triage.formula.toml:428"}
+{"argv": ["close", "X", "--reason", "verify-clearance failed after 2 iterations"], "src": "gascity-packs:pr-review/formulas/mol-pr-iterate.formula.toml:553"}
+{"argv": ["close", "X", "--reason", "work_dir missing in apply"], "src": "gascity-packs:pr-review/formulas/mol-pr-iterate.formula.toml:399"}
+{"argv": ["close", "X", "--reason", "work_dir missing in finalize"], "src": "gascity-packs:pr-review/formulas/mol-adopt-pr.formula.toml:452"}
+{"argv": ["close", "X", "--reason", "work_dir missing in parse-feedback"], "src": "gascity-packs:pr-review/formulas/mol-pr-iterate.formula.toml:231"}
+{"argv": ["close", "X", "--reason", "work_dir missing in propose-patch"], "src": "gascity-packs:pr-review/formulas/mol-pr-iterate.formula.toml:333"}
+{"argv": ["close", "X", "--reason", "work_dir missing in rebase-check"], "src": "gascity-packs:pr-review/formulas/mol-adopt-pr.formula.toml:227"}
+{"argv": ["close", "X", "--reason", "work_dir missing in review"], "src": "gascity-packs:pr-review/formulas/mol-adopt-pr.formula.toml:316"}
+{"argv": ["close", "X", "--reason", "work_dir missing in verify-clearance"], "src": "gascity-packs:pr-review/formulas/mol-pr-iterate.formula.toml:491"}
+{"argv": ["close", "X", "--reason", "wrong repo for contributor triage"], "src": "gascity-packs:contributing-to-gascity/formulas/mol-contributing-find-work.formula.toml:68"}
+{"argv": ["close", "X", "--reason", "wrong repo for triage"], "src": "gascity-packs:pr-pipeline/formulas/mol-pr-triage.formula.toml:69"}
+{"argv": ["close", "X"], "src": "gascity-packs:discord/formulas/mol-discord-fix-issue.formula.toml:325"}
+{"argv": ["close", "failed"], "src": "gascity:examples/bd/dolt/formulas/mol-dog-stale-db.toml:334"}
+{"argv": ["close"], "src": "gascity:examples/hyperscale/packs/hyperscale/agents/worker/prompt.template.md:13"}
+{"argv": ["comment", "X", "Promoted from wisp: X"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/wisp-compact.sh:82"}
+{"argv": ["comment", "X", "X"], "src": "workflows:formulas/mol-ac-quality-gate.toml:139"}
+{"argv": ["comments", "add"], "src": "workflows:prompts/adopt-pr-operator.md:1906"}
+{"argv": ["comments"], "src": "workflows:prompts/adopt-pr-operator.md:1908"}
+{"argv": ["create", "--json"], "src": "workflows:scripts/normalized_decompose_runner.py:825"}
+{"argv": ["create", "--root-bead"], "src": "gascity-packs:gascity/assets/workflows/build-basic/decompose.md:58"}
+{"argv": ["create", "--type", "bug", "--title", "X", "--external-ref", "X", "--priority", "1", "--silent"], "src": "workflows:scripts/bugflow_canonical.py:60"}
+{"argv": ["create", "--type=task", "--labels=warrant", " ", "--title=Stuck: X", " ", "--metadata", "{\"target\":\"Xdeacon\",\"reason\":\"Stale patrol wisp, no activity\",\"requester\":\"boot\",\"gc.routed_to\":\"Xdog\"}"], "src": "gascity-packs:gastown/formulas/mol-boot-patrol.toml:127"}
+{"argv": ["create", "--type=task", "--labels=warrant", "--metadata", "{\"target\":\"X\",\"reason\":\"X\",\"requester\":\"deacon\",\"gc.routed_to\":\"Xdog\"}"], "src": "gascity-packs:gastown/agents/deacon/prompt.template.md:260"}
+{"argv": ["create", "--type=task", "--labels=warrant", "--metadata", "{\"target\":\"X\",\"reason\":\"X\",\"requester\":\"witness\",\"gc.routed_to\":\"Xdog\"}"], "src": "gascity-packs:gastown/agents/witness/prompt.template.md:355"}
+{"argv": ["create", "--type=task", "--labels=warrant", "--metadata", "{\"target\":\"Xdeacon\",\"reason\":\"...\",\"requester\":\"boot\",\"gc.routed_to\":\"Xdog\"}"], "src": "gascity-packs:gastown/agents/boot/prompt.template.md:176"}
+{"argv": ["create", "--type=task", "--title=Digest: X", "--labels=digest,X"], "src": "gascity-packs:gastown/formulas/mol-digest-generate.toml:173"}
+{"argv": ["create", "Add CSV export to the reports page"], "src": "gascity-packs:gstack/README.md:85"}
+{"argv": ["create", "Add a --json flag to the export command"], "src": "gascity-packs:README.md:76"}
+{"argv": ["create", "Add rate limiting to API", "-t", "task"], "src": "gascity:examples/swarm/packs/swarm/agents/mayor/prompt.template.md:17"}
+{"argv": ["create", "Add rate limiting to the public API"], "src": "gascity-packs:compound-engineering/README.md:316"}
+{"argv": ["create", "Fix off-by-one in pagination cursor"], "src": "gascity-packs:bmad/README.md:265"}
+{"argv": ["create", "Fix the off-by-one in pagination page counts"], "src": "gascity-packs:gstack/README.md:233"}
+{"argv": ["create", "Follow-up: description", "-t", "task"], "src": "gascity-packs:gastown/assets/prompts/crew.template.md:330"}
+{"argv": ["create", "Harden webhook signature verification"], "src": "gascity-packs:compound-engineering/README.md:333"}
+{"argv": ["create", "Implement user authentication", "-t", "task"], "src": "gascity:examples/swarm/packs/swarm/agents/mayor/prompt.template.md:16"}
+{"argv": ["create", "Migrate config loading from JSON to TOML"], "src": "gascity-packs:superpowers/README.md:329"}
+{"argv": ["create", "Migrate config parsing from INI to TOML"], "src": "gascity-packs:compound-engineering/README.md:324"}
+{"argv": ["create", "Migrate the config loader from JSON to TOML"], "src": "gascity-packs:bmad/README.md:256"}
+{"argv": ["create", "Migrate the settings page to the v2 form components"], "src": "gascity-packs:gstack/README.md:225"}
+{"argv": ["create", "Write integration tests for auth", "-t", "task"], "src": "gascity:examples/swarm/packs/swarm/agents/mayor/prompt.template.md:18"}
+{"argv": ["create", "X", "--type", "bug", "--priority", "2", "--description", "X", "--external-ref", "X", "--labels", "X", "--assignee", "X", "--silent"], "src": "maintainer-city:rig-packs/checkpoint-pipeline/scripts/cp_prsource.py:135"}
+{"argv": ["create", "X", "--type", "bug", "--priority", "2", "--description", "X", "--external-ref", "X", "--labels", "cp/pr-source", "--assignee", "X", "--silent"], "src": "maintainer-city:rig-packs/checkpoint-pipeline/scripts/cp_prsource.py:200"}
+{"argv": ["create", "X", "--type", "task", "--description", "X", "--external-ref", "X", "--metadata", "{}", "--json"], "src": "workflows:scripts/bugflow_request.py:200"}
+{"argv": ["create", "X", "--type", "task", "--description", "X", "--metadata", "{}", "--json"], "src": "workflows:scripts/adopt_pr_review_coverage.py:1276"}
+{"argv": ["create", "X"], "src": "gascity:cmd/gc/prompts/mayor.md:33"}
+{"argv": ["create", "fix the bug"], "src": "gascity:internal/bootstrap/packs/core/skills/gc-dispatch/SKILL.md:43"}
+{"argv": ["create", "returned", "an", "empty", "issue", "id"], "src": "workflows:scripts/bugflow_canonical.py:76"}
+{"argv": ["create", "returned", "no", "bead", "id"], "src": "workflows:scripts/adopt_pr_review_coverage.py:1287"}
+{"argv": ["create", "returned", "no", "bead, code=invalid_bd_json"], "src": "workflows:scripts/bugflow_request.py:219"}
+{"argv": ["create", "returned", "no", "inference", "bead, code=invalid_bd_json"], "src": "workflows:scripts/pr_merge.py:3625"}
+{"argv": ["create", "returned", "no", "merge", "bead, code=invalid_bd_json"], "src": "workflows:scripts/pr_merge.py:1298"}
+{"argv": ["create", "title", "--label", "priority=high"], "src": "gascity:internal/bootstrap/packs/core/skills/gc-work/SKILL.md:32"}
+{"argv": ["create", "title", "-t", "bug"], "src": "gascity:internal/bootstrap/packs/core/skills/gc-work/SKILL.md:31"}
+{"argv": ["create", "title"], "src": "gascity:internal/bootstrap/packs/core/skills/gc-rigs/SKILL.md:18"}
+{"argv": ["create"], "src": "gascity:internal/bootstrap/packs/core/skills/gc-dispatch/SKILL.md:39"}
+{"argv": ["delete", "--force"], "src": "gascity-packs:gastown/template-fragments/operational-awareness.template.md:33"}
+{"argv": ["delete", "X", "--force"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/wisp-compact.sh:88"}
+{"argv": ["dep", "add", "X", "X"], "src": "workflows:formulas/mol-feature-refine.toml:155"}
+{"argv": ["dep", "add", "X", "external:X", "--type=related"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/cross-rig-deps.sh:103"}
+{"argv": ["dep", "add", "phase1", "phase2"], "src": "gascity-packs:gastown/agents/mayor/prompt.template.md:160"}
+{"argv": ["dep", "add", "phase2", "phase1"], "src": "gascity-packs:gastown/agents/mayor/prompt.template.md:161"}
+{"argv": ["dep", "add"], "src": "gascity:examples/swarm/packs/swarm/agents/mayor/prompt.template.md:25"}
+{"argv": ["dep", "list", "X", "--direction=up", "--type=blocks", "--json"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/cross-rig-deps.sh:84"}
+{"argv": ["dep", "list", "X", "X", "--direction=up", "--type=blocks", "--json"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/cascade-nudge-on-blocker-close.sh:115"}
+{"argv": ["dep", "list"], "src": "gascity:internal/bootstrap/packs/core/README.md:89"}
+{"argv": ["dep", "remove", "X", "external:X"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/cross-rig-deps.sh:102"}
+{"argv": ["dep", "remove"], "src": "gascity-packs:gastown/agents/deacon/prompt.template.md:259"}
+{"argv": ["dep", "tree", "X", "--max-depth", "1", "--json"], "src": "workflows:scripts/pr_review.py:1297"}
+{"argv": ["dep", "tree", "X"], "src": "workflows:scripts/adopt_pr_approval_summary.py:2429"}
+{"argv": ["dep", "tree"], "src": "workflows:scripts/pr_merge.py:328"}
+{"argv": ["export", "--all"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/jsonl-export.sh:160"}
+{"argv": ["export", "are", "a", "single"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/jsonl-export.sh:136"}
+{"argv": ["export"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/jsonl-export.sh:4"}
+{"argv": ["formula", "show", "mol-boot-patrol"], "src": "gascity-packs:gastown/agents/boot/prompt.template.md:87"}
+{"argv": ["formula", "show", "mol-deacon-patrol"], "src": "gascity-packs:gastown/agents/deacon/prompt.template.md:108"}
+{"argv": ["formula", "show", "mol-digest-generate", "--json"], "src": "gascity-packs:gastown/formulas/mol-digest-generate.toml:7"}
+{"argv": ["formula", "show", "mol-dog-stale-db", "--json"], "src": "gascity:examples/bd/dolt/formulas/mol-dog-stale-db.toml:7"}
+{"argv": ["formula", "show", "mol-polecat-work"], "src": "gascity-packs:gastown/agents/polecat/prompt.template.md:146"}
+{"argv": ["formula", "show"], "src": "gascity:examples/bd/dolt/agents/dog/prompt.template.md:46"}
+{"argv": ["gate", "check", "--type=bead", "--escalate"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/gate-sweep.sh:20"}
+{"argv": ["gate", "check", "--type=gh", "--escalate"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/gate-sweep.sh:29"}
+{"argv": ["gate", "check", "--type=timer", "--escalate"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/gate-sweep.sh:28"}
+{"argv": ["gate", "check"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/notify-on-human-gate-creation.sh:8"}
+{"argv": ["gate", "create"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/notify-on-human-gate-creation.sh:5"}
+{"argv": ["gate", "list", "--json"], "src": "gascity-packs:gastown/agents/deacon/prompt.template.md:256"}
+{"argv": ["gate", "list", "X", "--limit", "0", "--json"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/renudge-stale-human-gates.sh:156"}
+{"argv": ["gate", "list"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/renudge-stale-human-gates.sh:15"}
+{"argv": ["gate", "resolve", "X"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/notify-on-human-gate-creation.sh:186"}
+{"argv": ["graph"], "src": "workflows:scripts/pr_review.py:1287"}
+{"argv": ["heartbeat", "X"], "src": "gascity:internal/bootstrap/packs/core/formulas/mol-do-work.toml:65"}
+{"argv": ["human"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/orphan-sweep.sh:364"}
+{"argv": ["import", ".gc/runtime/packs/core/jsonl-archive/X/issues.jsonl"], "src": "gascity:examples/bd/dolt/docs/journal-corruption-recovery.md:180"}
+{"argv": ["import", "/path/to/city/.gc/runtime/packs/core/jsonl-archive/X/issues.jsonl"], "src": "gascity:examples/bd/dolt/docs/journal-corruption-recovery.md:52"}
+{"argv": ["init", "--db", "X"], "src": "gascity:examples/bd/dolt/docs/journal-corruption-recovery.md:176"}
+{"argv": ["label", "add", "X", "ready-for-build"], "src": "workflows:formulas/mol-ac-quality-gate.toml:222"}
+{"argv": ["label", "add", "X", "triage/needs-decision"], "src": "workflows:formulas/mol-feature-refine.toml:154"}
+{"argv": ["list", "--all", "--has-metadata-key", "gc.step_id", "--metadata-field", "gc.root_bead_id=X", "--metadata-field", "gc.step_id=requirements.apply-spec-feedback", "--metadata-field", "gc.scope_role=member", "--json"], "src": "gascity-packs:superpowers/assets/workflows/superpowers-brainstorming/{target}.confirm-spec-approval.md:85"}
+{"argv": ["list", "--all", "--has-metadata-key", "gc.step_id", "--metadata-field", "gc.root_bead_id=X", "--metadata-field", "gc.step_id=requirements.review-written-spec", "--metadata-field", "gc.scope_role=member", "--json"], "src": "gascity-packs:superpowers/assets/workflows/superpowers-brainstorming/{target}.confirm-spec-approval.md:84"}
+{"argv": ["list", "--all", "--has-metadata-key=pr_reconcile_pending", "--limit=0", "--json"], "src": "gascity-packs:gastown/commands/pr-merge-reconcile/run.sh:340"}
+{"argv": ["list", "--all", "--include-infra", "--include-gates", "--label", "gc:wait", "--limit", "0", "--json"], "src": "workflows:formulas/mol-normalized-issue-pr-v1.toml:2351"}
+{"argv": ["list", "--all", "--include-infra", "--include-gates"], "src": "workflows:formulas/mol-normalized-issue-pr-work-v1.toml:3832"}
+{"argv": ["list", "--all", "--include-infra", "--limit", "0", "--title", "X", "--json"], "src": "workflows:formulas/mol-normalized-issue-pr-v1.toml:729"}
+{"argv": ["list", "--all", "--json", "--limit=0"], "src": "gascity-packs:gastown/assets/scripts/checks/adopt-pr-review-approved.sh:95"}
+{"argv": ["list", "--all", "--limit", "0", "--max-rows", "1", "--json", "--type", "convoy", "--flat"], "src": "workflows:scripts/bug_hunt_cleanup.py:589"}
+{"argv": ["list", "--all", "--metadata-field", "X", "--limit", "0"], "src": "workflows:scripts/pr_merge.py:799"}
+{"argv": ["list", "--all", "--metadata-field", "gc.root_bead_id=X"], "src": "gascity-packs:compound-engineering/agents/ce-code-review-selector/prompt.template.md:141"}
+{"argv": ["list", "--all", "--type", "convoy"], "src": "workflows:formulas/mol-bug-hunt-v2.toml:651"}
+{"argv": ["list", "--assignee=X", "--status=in_progress", "--json"], "src": "workflows:packs/maintainer-city/city-template/rig-packs/github-mayor/agents/mayor/prompt.template.md:20"}
+{"argv": ["list", "--assignee=X", "--status=in_progress", "--type=molecule", "--include-infra", "--limit=0", "--json"], "src": "gascity-packs:gastown/agents/witness/prompt.template.md:188"}
+{"argv": ["list", "--assignee=X", "--status=in_progress", "--type=molecule", "--include-infra", "--limit=1", "--json"], "src": "gascity-packs:gastown/agents/boot/prompt.template.md:114"}
+{"argv": ["list", "--assignee=X", "--status=in_progress"], "src": "gascity:internal/bootstrap/packs/core/formulas/mol-polecat-base.toml:89"}
+{"argv": ["list", "--assignee=X", "--status=open", "--type=molecule", "--include-infra", "--limit=0", "--json"], "src": "gascity-packs:gastown/agents/boot/prompt.template.md:121"}
+{"argv": ["list", "--assignee=X", "--status=open,in_progress", "--type=molecule", "--include-infra", "--limit=0", "--json"], "src": "gascity-packs:gastown/agents/refinery/prompt.template.md:79"}
+{"argv": ["list", "--assignee=X"], "src": "gascity:examples/bd/dolt/agents/dog/prompt.template.md:22"}
+{"argv": ["list", "--assignee=X/Xrefinery", "--status=open", "--json"], "src": "gascity-packs:gastown/formulas/mol-witness-patrol.toml:1043"}
+{"argv": ["list", "--assignee=Xdeacon", "--status=in_progress", "--include-infra", "--json"], "src": "gascity-packs:gastown/agents/boot/prompt.template.md:174"}
+{"argv": ["list", "--assignee=Xdeacon", "--status=in_progress", "--type=molecule", "--include-infra", "--json", "--limit=5"], "src": "gascity-packs:gastown/formulas/mol-boot-patrol.toml:81"}
+{"argv": ["list", "--created-after=X", "--json", "--limit=0"], "src": "gascity-packs:gastown/formulas/mol-digest-generate.toml:99"}
+{"argv": ["list", "--id", "X"], "src": "workflows:scripts/pr_review.py:1288"}
+{"argv": ["list", "--json", "--all", "--id", "X"], "src": "workflows:skills/pr-review/SKILL.md:287"}
+{"argv": ["list", "--json", "--all", "--include-infra", "--include-gates", "--limit", "0"], "src": "workflows:skills/pr-review/SKILL.md:194"}
+{"argv": ["list", "--json", "--all", "-n", "0"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/wisp-compact.sh:27"}
+{"argv": ["list", "--json", "--assignee=X", "--status=in_progress"], "src": "gascity:examples/bd/template-fragments/bead-worktree.template.md:8"}
+{"argv": ["list", "--json", "output"], "src": "gascity-packs:scripts/gascity_pack_inference_gate.py:2132"}
+{"argv": ["list", "--json"], "src": "gascity-packs:compound-engineering/assets/workflows/compound-code-review/{target}.conditional-review-gate.md:29"}
+{"argv": ["list", "--label", "rollup", "--label", "severity:escalate", "--status", "open", "--json"], "src": "gascity-packs:oversight-rig/agents/project-lead/prompt.template.md:122"}
+{"argv": ["list", "--label", "rollup", "--status", "open", "--json"], "src": "gascity-packs:oversight-rig/agents/project-lead/prompt.template.md:43"}
+{"argv": ["list", "--label=escalation", "--created-after=X", "--json"], "src": "gascity-packs:gastown/formulas/mol-digest-generate.toml:122"}
+{"argv": ["list", "--label=incident", "--created-after=X", "--json"], "src": "gascity-packs:gastown/formulas/mol-digest-generate.toml:110"}
+{"argv": ["list", "--label=warrant", "--created-after=X", "--json"], "src": "gascity-packs:gastown/formulas/mol-digest-generate.toml:127"}
+{"argv": ["list", "--label=warrant", "--json", "--limit=0"], "src": "gascity-packs:gastown/formulas/mol-deacon-patrol.toml:238"}
+{"argv": ["list", "--metadata-field", "X"], "src": "gascity-packs:gascity/assets/scripts/checks/design-review-approved.sh:7"}
+{"argv": ["list", "--metadata-field", "gc.kind=github_source", "--metadata-field", "gc.github.kind=issue", "--metadata-field", "gc.github.repo=X/X", "--metadata-field", "gc.github.number=X", "--status", "open,in_progress,closed", "--limit", "1", "--json"], "src": "gascity-packs:gascity/assets/workflows/github-issue-fix-base/snapshot.md:75"}
+{"argv": ["list", "--metadata-field", "gc.kind=github_source", "--metadata-field", "gc.github.kind=pull", "--metadata-field", "gc.github.repo=X/X", "--metadata-field", "gc.github.number=X", "--status", "open,in_progress,closed", "--limit", "1", "--json"], "src": "gascity-packs:gascity/assets/workflows/github-pr-review/snapshot.md:52"}
+{"argv": ["list", "--metadata-field", "gc.routed_to=X", "--metadata-field", "gc.continuation_group=X", "--status=open", "--json"], "src": "maintainer-city:prompts/graph-worker.md:69"}
+{"argv": ["list", "--ready"], "src": "gascity:internal/bootstrap/packs/core/skills/gc-work/SKILL.md:47"}
+{"argv": ["list", "--root", "X"], "src": "gascity-packs:superpowers/assets/workflows/superpowers-brainstorming/{target}.confirm-spec-approval.md:79"}
+{"argv": ["list", "--status", "X"], "src": "workflows:prompts/adopt-pr-operator.md:1897"}
+{"argv": ["list", "--status", "all", "--type", "bug", "--limit", "0", "--json"], "src": "workflows:scripts/bugflow_canonical.py:41"}
+{"argv": ["list", "--status", "blocked", "--json"], "src": "gascity-packs:oversight-rig/agents/project-lead/prompt.template.md:41"}
+{"argv": ["list", "--status", "in_progress", "--json"], "src": "gascity:examples/bd/dolt/docs/journal-corruption-recovery.md:183"}
+{"argv": ["list", "--status", "open", "--has-metadata-key", "bugflow_request.external_ref", "--limit", "0"], "src": "workflows:scripts/bugflow_request.py:397"}
+{"argv": ["list", "--status", "open", "--has-metadata-key", "pr_merge.external_ref", "--limit", "0"], "src": "workflows:scripts/pr_merge.py:2983"}
+{"argv": ["list", "--status", "open", "--has-metadata-key", "pr_review.external_ref", "--limit", "0"], "src": "workflows:scripts/pr_review.py:2400"}
+{"argv": ["list", "--status", "open", "--limit", "0"], "src": "workflows:scripts/pr_review.py:2007"}
+{"argv": ["list", "--status", "open", "--metadata-field", "X", "--limit", "0", "--json"], "src": "workflows:scripts/attention_commands.py:1053"}
+{"argv": ["list", "--status", "open", "--metadata-field", "X", "--limit", "0"], "src": "workflows:scripts/bugflow_request.py:224"}
+{"argv": ["list", "--status=closed", "--closed-after=X", "--json", "--limit=0"], "src": "gascity-packs:gastown/formulas/mol-digest-generate.toml:100"}
+{"argv": ["list", "--status=in_progress", "--json", "--limit=0"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/orphan-sweep.sh:89"}
+{"argv": ["list", "--status=in_progress", "--metadata-field", "gc.routed_to=Xdog", "--json", "--limit=0"], "src": "gascity-packs:gastown/formulas/mol-deacon-patrol.toml:342"}
+{"argv": ["list", "--status=in_progress"], "src": "gascity:examples/swarm/packs/swarm/agents/mayor/prompt.template.md:33"}
+{"argv": ["list", "--status=open", "--assignee=", "--json", "--limit=0"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/spawn-storm-detect.sh:44"}
+{"argv": ["list", "--status=open", "--assignee=X", "--json", "--limit=0"], "src": "gascity-packs:gastown/formulas/mol-deacon-patrol.toml:274"}
+{"argv": ["list", "--status=open", "--json", "--limit=0"], "src": "gascity-packs:gastown/formulas/mol-witness-patrol.toml:162"}
+{"argv": ["list", "--status=open", "--json"], "src": "gascity-packs:gastown/assets/scripts/polecat-churn-watcher.sh:88"}
+{"argv": ["list", "--status=open"], "src": "gascity:examples/swarm/packs/swarm/agents/mayor/prompt.template.md:32"}
+{"argv": ["list", "--title-contains", "X", "--status", "closed", "--closed-after", "X", "--json"], "src": "gascity:internal/bootstrap/packs/core/formulas/mol-polecat-base.toml:266"}
+{"argv": ["list", "--title-contains", "X", "--status", "open,in_progress,blocked", "--json"], "src": "gascity:internal/bootstrap/packs/core/formulas/mol-polecat-base.toml:210"}
+{"argv": ["list", "--type=bug", "--status=open", "--search", "X"], "src": "gascity-packs:gastown/formulas/mol-refinery-patrol.toml:633"}
+{"argv": ["list", "--type=convoy", "--status=open"], "src": "gascity-packs:gastown/formulas/mol-refinery-patrol.toml:1451"}
+{"argv": ["list", "--type=molecule"], "src": "gascity-packs:gastown/formulas/mol-refinery-patrol.toml:1436"}
+{"argv": ["list", "--type=session", "--label=gc:session", "--include-infra", "--include-gates", "--all", "--json", "--limit=0"], "src": "gascity-packs:gastown/formulas/mol-witness-patrol.toml:175"}
+{"argv": ["list", "X", "--assignee=X", "--status=open,in_progress", "--exclude-type=epic", "--has-metadata-key=branch", "--limit=1", "--json"], "src": "gascity-packs:gastown/formulas/mol-refinery-patrol.toml:238"}
+{"argv": ["list", "X", "--assignee=X", "--status=open,in_progress"], "src": "gascity-packs:gastown/agents/refinery/prompt.template.md:400"}
+{"argv": ["list", "X", "--metadata-field", "gc.routed_to=XXrefinery", "--status=open", "--json"], "src": "gascity-packs:gastown/agents/refinery/prompt.template.md:176"}
+{"argv": ["list", "hides", "without", "--include-infra"], "src": "gascity-packs:gastown/agents/boot/prompt.template.md:110"}
+{"argv": ["list", "hides", "without"], "src": "gascity-packs:gastown/agents/witness/prompt.template.md:184"}
+{"argv": ["list", "to", "return", "a", "JSON", "array"], "src": "workflows:scripts/bugflow_canonical.py:43"}
+{"argv": ["list"], "src": "gascity:cmd/gc/prompts/mayor.md:35"}
+{"argv": ["mol", "burn", "", "--force"], "src": "gascity-packs:gastown/formulas/mol-boot-patrol.toml:212"}
+{"argv": ["mol", "burn", "X", "--force"], "src": "gascity-packs:gastown/agents/boot/prompt.template.md:80"}
+{"argv": ["mol", "burn"], "src": "gascity-packs:gastown/formulas/mol-refinery-patrol.toml:23"}
+{"argv": ["mol", "current", "--json"], "src": "gascity-packs:contributing-to-gascity/formulas/mol-contributing-find-work.formula.toml:56"}
+{"argv": ["mol", "current"], "src": "gascity:internal/bootstrap/packs/core/assets/prompts/graph-worker.md:10"}
+{"argv": ["mol", "pour"], "src": "gascity-packs:gastown/agents/mayor/prompt.template.md:58"}
+{"argv": ["mol", "progress"], "src": "gascity:internal/bootstrap/packs/core/assets/prompts/pool-worker.template.md:66"}
+{"argv": ["mol", "show"], "src": "gascity-packs:gastown/agents/boot/prompt.template.md:178"}
+{"argv": ["mol", "wisp", "gc", "--age", "24h", "--dry-run"], "src": "gascity-packs:gastown/agents/deacon/prompt.template.md:262"}
+{"argv": ["mol", "wisp", "gc", "--age", "24h"], "src": "gascity-packs:gastown/agents/deacon/prompt.template.md:263"}
+{"argv": ["mol", "wisp", "gc", "--help"], "src": "gascity-packs:tests/gastown_lint_upstream_defects.txt:100"}
+{"argv": ["mol", "wisp", "mol-boot-patrol", "--root-only", "--var", "binding_prefix=X", "--json"], "src": "gascity-packs:gastown/agents/boot/prompt.template.md:65"}
+{"argv": ["mol", "wisp", "mol-boot-patrol", "--root-only", "--var", "binding_prefix=X"], "src": "gascity-packs:gastown/agents/boot/prompt.template.md:177"}
+{"argv": ["mol", "wisp", "mol-deacon-patrol", "--root-only", "--var", "binding_prefix=X", "--json"], "src": "gascity-packs:gastown/agents/deacon/prompt.template.md:90"}
+{"argv": ["mol", "wisp", "mol-deacon-patrol", "--root-only", "--var", "binding_prefix=X"], "src": "gascity-packs:gastown/agents/deacon/prompt.template.md:250"}
+{"argv": ["mol", "wisp", "mol-refinery-patrol", "--root-only", "--var", "target_branch=X", "--var", "rig_name=X", "--var", "binding_prefix=X", "--json"], "src": "gascity-packs:gastown/agents/refinery/prompt.template.md:85"}
+{"argv": ["mol", "wisp", "mol-refinery-patrol", "--root-only", "--var", "target_branch=X", "--var", "rig_name=X", "--var", "binding_prefix=X"], "src": "gascity-packs:gastown/agents/refinery/prompt.template.md:398"}
+{"argv": ["mol", "wisp", "mol-witness-patrol", "--root-only", "--var", "binding_prefix=X", "--json"], "src": "gascity-packs:gastown/agents/witness/prompt.template.md:201"}
+{"argv": ["mol", "wisp", "mol-witness-patrol", "--root-only", "--var", "binding_prefix=X"], "src": "gascity-packs:gastown/agents/witness/prompt.template.md:349"}
+{"argv": ["new", "-t", "task", "Add gc convoy land", "-l", "desire-path"], "src": "gascity-packs:gastown/assets/prompts/crew.template.md:398"}
+{"argv": ["prime"], "src": "gascity:internal/bootstrap/packs/core/formulas/mol-polecat-base.toml:78"}
+{"argv": ["promote", "X", "--reason", "persist normalized clarification receipt"], "src": "workflows:formulas/mol-normalized-issue-pr-v1.toml:739"}
+{"argv": ["prune"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/reaper.sh:1284"}
+{"argv": ["purge", "to", "keep", "a", "closed"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/reaper.sh:153"}
+{"argv": ["query", "per", "workflow"], "src": "workflows:skills/pr-review/SKILL.md:192"}
+{"argv": ["query", "status=closed AND closed>\"X\"", "--json", "--limit", "0"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/cross-rig-deps.sh:48"}
+{"argv": ["query", "status=closed AND closed>\"X\"", "--json"], "src": "maintainer-city:orders/scripts/cross-rig-deps-http.sh:37"}
+{"argv": ["ready", "--assignee=X", "--json", "--limit=1"], "src": "workflows:packs/maintainer-city/city-template/rig-packs/github-mayor/agents/mayor/prompt.template.md:27"}
+{"argv": ["ready", "--assignee=X"], "src": "maintainer-city:prompts/graph-worker.md:83"}
+{"argv": ["ready", "--label", "role:worker"], "src": "gascity:internal/bootstrap/packs/core/skills/gc-work/SKILL.md:41"}
+{"argv": ["ready", "--label=pool:worker", "--unassigned", "--limit=1", "--json"], "src": "gascity:examples/hyperscale/packs/hyperscale/agents/worker/prompt.template.md:20"}
+{"argv": ["ready", "--metadata-field", "gc.routed_to=X", "--unassigned"], "src": "maintainer-city:prompts/pool-worker.md:24"}
+{"argv": ["ready", "--mol", "X"], "src": "workflows:skills/pr-review/SKILL.md:236"}
+{"argv": ["ready", "--parent", "X"], "src": "workflows:skills/pr-review/SKILL.md:238"}
+{"argv": ["ready", "--unassigned"], "src": "gascity:examples/swarm/packs/swarm/agents/coder/prompt.template.md:14"}
+{"argv": ["ready", "X"], "src": "gascity-packs:discord/formulas/mol-discord-fix-issue.formula.toml:286"}
+{"argv": ["ready"], "src": "gascity:examples/bd/dolt/agents/dog/prompt.template.md:10"}
+{"argv": ["reopen"], "src": "gascity:examples/swarm/packs/swarm/agents/coder/prompt.template.md:48"}
+{"argv": ["search", "X"], "src": "workflows:prompts/adopt-pr-operator.md:1896"}
+{"argv": ["search"], "src": "workflows:formulas/mol-bug-report-flow-v2.toml:223"}
+{"argv": ["show", "$1", "--json"], "src": "gascity-packs:gastown/commands/pr-merge-reconcile/run.sh:34"}
+{"argv": ["show", "--json", "or", "gc", "bd", "list", "--json", "output"], "src": "gascity-packs:scripts/gascity_pack_inference_gate.py:2132"}
+{"argv": ["show", "--json"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/notify-on-human-gate-creation.sh:13"}
+{"argv": ["show", "X", "--json"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/orphan-sweep.sh:212"}
+{"argv": ["show", "X", "X", "--json"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/notify-on-human-gate-creation.sh:157"}
+{"argv": ["show", "X"], "src": "gascity:internal/bootstrap/packs/core/formulas/mol-do-work.toml:52"}
+{"argv": ["show", "X-xyz"], "src": "gascity-packs:gastown/assets/prompts/crew.template.md:52"}
+{"argv": ["show", "always", "puts"], "src": "workflows:scripts/adopt_pr_approval_summary.py:2710"}
+{"argv": ["show", "gcg-arn"], "src": "workflows:scripts/pr_review.py:1157"}
+{"argv": ["show", "hq-abc"], "src": "gascity-packs:gastown/assets/prompts/crew.template.md:53"}
+{"argv": ["show", "my-project-abc"], "src": "gascity:cmd/gc/prompts/mayor.md:47"}
+{"argv": ["show", "non-zero", "/", "empty", "JSON", "\u2014"], "src": "gascity-packs:gastown/agents/polecat/prompt.template.md:238"}
+{"argv": ["show"], "src": "gascity:examples/bd/dolt/agents/dog/prompt.template.md:19"}
+{"argv": ["status", "to"], "src": "gascity-packs:gastown/agents/polecat/prompt.template.md:184"}
+{"argv": ["update", "$@"], "src": "gascity-packs:gastown/commands/pr-merge-reconcile/run.sh:18"}
+{"argv": ["update", "--add-label", "pool:...~~", "/", "~~--assignee=X/polecat~~"], "src": "gascity-packs:gastown/assets/prompts/crew.template.md:410"}
+{"argv": ["update", "--claim"], "src": "gascity-packs:pr-pipeline/formulas/mol-pr-review.formula.toml:66"}
+{"argv": ["update", "--force"], "src": "gascity-packs:gastown/formulas/mol-witness-patrol.toml:515"}
+{"argv": ["update", "--metadata", "{}"], "src": "gascity-packs:bmad/assets/workflows/bmad-code-review-flow/{target}.md:59"}
+{"argv": ["update", "--set-metadata", "k=X"], "src": "gascity:examples/bd/dolt/formulas/mol-dog-stale-db.toml:115"}
+{"argv": ["update", "--status", "closed"], "src": "workflows:scripts/pr_review.py:1768"}
+{"argv": ["update", "-s", "closed"], "src": "gascity-packs:gastown/agents/polecat/prompt.template.md:15"}
+{"argv": ["update", "X", " ", "--set-metadata", "evidence.artifact_path=.gc/pr-pipeline/plans/issue-X.md", " ", "--set-metadata", "evidence.reviewer_verdict=pass", " ", "--set-metadata", "evidence.reviewer_agent=X", " ", "--set-metadata", "evidence.commit_sha=X", " ", "--set-metadata", "evidence.branch=X"], "src": "gascity-packs:pr-pipeline/formulas/mol-pr-from-issue.formula.toml:192"}
+{"argv": ["update", "X", " ", "--set-metadata", "evidence.comment_status=X"], "src": "gascity-packs:pr-review/formulas/mol-pr-revert.formula.toml:516"}
+{"argv": ["update", "X", " ", "--set-metadata", "evidence.comment_status=skipped_carve_out"], "src": "gascity-packs:pr-review/formulas/mol-pr-revert.formula.toml:489"}
+{"argv": ["update", "X", " ", "--set-metadata", "evidence.gate_passed=true", " ", "--set-metadata", "evidence.auto_push_bypass_token=X", " ", "--set-metadata", "evidence.gate_diff_loc=X", " ", "--set-metadata", "evidence.gate_diff_files=X", " ", "--set-metadata", "evidence.gate_commits=X", " ", "--set-metadata", "evidence.gate_confidence=X"], "src": "gascity-packs:pr-pipeline/formulas/mol-pr-from-issue.formula.toml:546"}
+{"argv": ["update", "X", " ", "--set-metadata", "evidence.pr_number=X", " ", "--set-metadata", "evidence.feedback_source=X", " ", "--set-metadata", "evidence.iteration=X", " ", "--set-metadata", "evidence.last_apply_commit=X", " ", "--set-metadata", "evidence.plan_path=X", " ", "--set-metadata", "summary_for_human=X"], "src": "gascity-packs:pr-review/formulas/mol-pr-iterate.formula.toml:595"}
+{"argv": ["update", "X", " ", "--set-metadata", "evidence.revert_branch=X", " ", "--set-metadata", "evidence.revert_sha=X", " ", "--set-metadata", "evidence.fork_remote=X"], "src": "gascity-packs:pr-review/formulas/mol-pr-revert.formula.toml:347"}
+{"argv": ["update", "X", " ", "--set-metadata", "evidence.revert_pr_url=X", " ", "--set-metadata", "evidence.revert_pr_number=X"], "src": "gascity-packs:pr-review/formulas/mol-pr-revert.formula.toml:452"}
+{"argv": ["update", "X", " ", "--set-metadata", "evidence.reviewer_verdict=pass", " ", "--set-metadata", "evidence.reviewer_agent=X", " ", "--set-metadata", "evidence.subsequent_commits=X", " ", "--set-metadata", "evidence.overlap_files=X"], "src": "gascity-packs:pr-review/formulas/mol-pr-revert.formula.toml:219"}
+{"argv": ["update", "X", "$@"], "src": "gascity-packs:gastown/assets/scripts/task-artifact-cleanup.sh:171"}
+{"argv": ["update", "X", "--add-label", "delivered"], "src": "gascity-packs:oversight-rig/assets/scripts/deliver-rollup.sh:162"}
+{"argv": ["update", "X", "--append-notes", "Synthesized: X"], "src": "gascity:internal/bootstrap/packs/core/formulas/mol-prompt-synth.toml:146"}
+{"argv": ["update", "X", "--append-notes", "X"], "src": "gascity:internal/bootstrap/packs/core/formulas/mol-polecat-report.toml:166"}
+{"argv": ["update", "X", "--append-notes", "orphan-sweep: reset from assignee X -- no live session matched"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/orphan-sweep.sh:348"}
+{"argv": ["update", "X", "--assignee", "X"], "src": "maintainer-city:rig-packs/checkpoint-pipeline/scripts/cp.py:254"}
+{"argv": ["update", "X", "--assignee=", "--set-metadata", "merge_result=blocked", "--set-metadata", "gc.routed_to=human", "--set-metadata", "blocked_reason=X"], "src": "gascity-packs:gastown/formulas/mol-refinery-patrol.toml:687"}
+{"argv": ["update", "X", "--assignee=", "--set-metadata", "merge_result=blocked", "--set-metadata", "gc.routed_to=human", "--set-metadata", "halt_reason=target_branch_missing", "--set-metadata", "blocked_reason=X"], "src": "gascity-packs:gastown/formulas/mol-refinery-patrol.toml:384"}
+{"argv": ["update", "X", "--assignee=X"], "src": "gascity-packs:gastown/agents/boot/prompt.template.md:76"}
+{"argv": ["update", "X", "--claim"], "src": "gascity:internal/bootstrap/packs/core/formulas/mol-do-work.toml:61"}
+{"argv": ["update", "X", "--notes", "X"], "src": "gascity-packs:discord/formulas/mol-discord-fix-issue.formula.toml:198"}
+{"argv": ["update", "X", "--notes", "gates: cleared"], "src": "gascity-packs:contributing-to-gascity/formulas/mol-contributing-plan-implementation.formula.toml:98"}
+{"argv": ["update", "X", "--notes", "status: complete"], "src": "gascity-packs:contributing-to-gascity/formulas/mol-contributing-find-work.formula.toml:168"}
+{"argv": ["update", "X", "--notes", "verdict: too_large"], "src": "gascity-packs:pr-pipeline/formulas/mol-pr-review.formula.toml:110"}
+{"argv": ["update", "X", "--persistent"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/wisp-compact.sh:81"}
+{"argv": ["update", "X", "--remove-label", "cp/running"], "src": "maintainer-city:rig-packs/checkpoint-pipeline/scripts/cp.py:1360"}
+{"argv": ["update", "X", "--set-metadata", "addressed.ack_comment_id=X", "--set-metadata", "addressed.ack_comment_url=X", "--set-metadata", "addressed.acknowledged_at=X"], "src": "gascity-packs:github/formulas/github-addressed-message.formula.toml:132"}
+{"argv": ["update", "X", "--set-metadata", "addressed.response_comment_id=X", "--set-metadata", "addressed.response_comment_url=X", "--set-metadata", "addressed.responded_at=X"], "src": "gascity-packs:github/formulas/github-addressed-message.formula.toml:172"}
+{"argv": ["update", "X", "--set-metadata", "architecture_improvement.backlog_count=0", "--set-metadata", "architecture_improvement.human_verdict=aborted", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/mol-architecture-improvement-v1.toml:520"}
+{"argv": ["update", "X", "--set-metadata", "architecture_improvement.backlog_count=X", "--set-metadata", "architecture_improvement.dispatch_summary=X/approved/dispatch-summary.json", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/mol-architecture-improvement-v1.toml:516"}
+{"argv": ["update", "X", "--set-metadata", "architecture_improvement.candidates_json=X", "--set-metadata", "architecture_improvement.synthesis_path=X", "--set-metadata", "architecture_improvement.candidate_count=X", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/mol-architecture-improvement-v1.toml:325"}
+{"argv": ["update", "X", "--set-metadata", "architecture_improvement.html_report_path=X", "--set-metadata", "architecture_improvement.candidates_json=X", "--set-metadata", "architecture_improvement.synthesis_path=X", "--set-metadata", "architecture_improvement.candidate_count=X", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/mol-architecture-improvement-v1.toml:397"}
+{"argv": ["update", "X", "--set-metadata", "architecture_improvement.workflow_status=report_ready", "--set-metadata", "architecture_improvement.html_report_path=X", "--set-metadata", "architecture_improvement.candidates_json=X", "--set-metadata", "architecture_improvement.synthesis_path=X", "--set-metadata", "architecture_improvement.candidate_count=X"], "src": "workflows:formulas/mol-architecture-improvement-v1.toml:395"}
+{"argv": ["update", "X", "--set-metadata", "artifact_cleanup_state=pending"], "src": "gascity-packs:gastown/formulas/mol-refinery-patrol.toml:341"}
+{"argv": ["update", "X", "--set-metadata", "artifact_dir=X", "--unset-metadata", "work_dir"], "src": "gascity-packs:gastown/formulas/mol-polecat-work.toml:373"}
+{"argv": ["update", "X", "--set-metadata", "artifact_source_sha=X", "--set-metadata", "artifact_cleanup_state=pending"], "src": "gascity-packs:gastown/formulas/mol-refinery-patrol.toml:335"}
+{"argv": ["update", "X", "--set-metadata", "auto_push=false"], "src": "gascity-packs:gastown/formulas/mol-polecat-work.toml:925"}
+{"argv": ["update", "X", "--set-metadata", "auto_push=true"], "src": "gascity-packs:gastown/formulas/mol-polecat-work.toml:926"}
+{"argv": ["update", "X", "--set-metadata", "base_ref=X"], "src": "gascity-packs:gastown/formulas/mol-polecat-work.toml:145"}
+{"argv": ["update", "X", "--set-metadata", "branch=X", "--set-metadata", "fork_sha=X"], "src": "gascity-packs:gastown/formulas/mol-polecat-work.toml:455"}
+{"argv": ["update", "X", "--set-metadata", "branch=X"], "src": "gascity-packs:discord/formulas/mol-discord-fix-issue.formula.toml:156"}
+{"argv": ["update", "X", "--set-metadata", "bug_hunt.convoy_cleanup_json=X", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/mol-bug-hunt-v2.toml:640"}
+{"argv": ["update", "X", "--set-metadata", "bug_hunt.finalization_json=X", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/mol-bug-hunt-v2.toml:561"}
+{"argv": ["update", "X", "--set-metadata", "bugflow.approval_gate=classification", "--set-metadata", "bugflow.approval_verdict=approved", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/mol-bug-report-flow-v2.toml:1042"}
+{"argv": ["update", "X", "--set-metadata", "bugflow.approval_gate=fix-plan", "--set-metadata", "bugflow.approval_verdict=approved", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/mol-bug-report-implementation-v2.toml:165"}
+{"argv": ["update", "X", "--set-metadata", "bugflow.approval_gate=merge", "--set-metadata", "bugflow.approval_verdict=approved", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/mol-bug-report-implementation-v2.toml:906"}
+{"argv": ["update", "X", "--set-metadata", "bugflow.approval_gate=pr-open", "--set-metadata", "bugflow.approval_verdict=approved", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/mol-bug-report-implementation-v2.toml:656"}
+{"argv": ["update", "X", "--set-metadata", "bugflow.approval_gate=test-hardening-plan", "--set-metadata", "bugflow.approval_verdict=approved", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/mol-bug-report-implementation-v2.toml:242"}
+{"argv": ["update", "X", "--set-metadata", "bugflow.implementation_workflow_id=X", "--set-metadata", "gc.outcome=pass", "--set-metadata", "gc.failure_class=", "--set-metadata", "gc.failure_reason=", "--status", "closed"], "src": "workflows:formulas/mol-bug-report-flow-v2.toml:1319"}
+{"argv": ["update", "X", "--set-metadata", "ci.verdict=X", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:prompts/adopt-pr-operator.md:1291"}
+{"argv": ["update", "X", "--set-metadata", "cleanup.preserved_worktree=true", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:prompts/adopt-pr-operator.md:2511"}
+{"argv": ["update", "X", "--set-metadata", "code_review.verdict=done", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/mol-bug-report-implementation-v2.toml:557"}
+{"argv": ["update", "X", "--set-metadata", "code_review.verdict=done", "--set-metadata", "post_merge.remediation=followup_ready", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:prompts/post-merge-review-operator.md:211"}
+{"argv": ["update", "X", "--set-metadata", "code_review.verdict=done", "--set-metadata", "post_merge.remediation=none", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:prompts/post-merge-review-operator.md:204"}
+{"argv": ["update", "X", "--set-metadata", "design_review.output_path=X", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/expansion-design-review-persona-review.toml:166"}
+{"argv": ["update", "X", "--set-metadata", "discord_fix_started_message_id=X"], "src": "gascity-packs:discord/formulas/mol-discord-fix-issue.formula.toml:112"}
+{"argv": ["update", "X", "--set-metadata", "evidence.carve_out_verified=true", " ", "--set-metadata", "evidence.carve_out_path=X"], "src": "gascity-packs:pr-review/formulas/mol-pr-revert.formula.toml:284"}
+{"argv": ["update", "X", "--set-metadata", "evidence.plan_path=X", " ", "--set-metadata", "evidence.estimated_loc=X"], "src": "gascity-packs:pr-review/formulas/mol-pr-iterate.formula.toml:370"}
+{"argv": ["update", "X", "--set-metadata", "gate.lint_report=X/lint.json", "--set-metadata", "gate.rubric_path=X", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/mol-ac-quality-gate.toml:132"}
+{"argv": ["update", "X", "--set-metadata", "gate.verdict_path=X/verdict.json", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/mol-ac-quality-gate.toml:189"}
+{"argv": ["update", "X", "--set-metadata", "gc.awaiting_human="], "src": "workflows:prompts/adopt-pr-operator.md:1478"}
+{"argv": ["update", "X", "--set-metadata", "gc.build.decomposition_path=X"], "src": "gascity-packs:gascity/assets/workflows/build-base/decompose.md:30"}
+{"argv": ["update", "X", "--set-metadata", "gc.build.final_report_path=X", "--set-metadata", "gc.build.factory_run_path=X"], "src": "gascity-packs:gascity/assets/workflows/build-basic/finalize.md:98"}
+{"argv": ["update", "X", "--set-metadata", "gc.build.final_report_path=X"], "src": "gascity-packs:compound-engineering/assets/workflows/compound-resolution/{target}.md:58"}
+{"argv": ["update", "X", "--set-metadata", "gc.build.implementation_summary_path=X"], "src": "gascity-packs:gascity/assets/workflows/build-base/summarize-implementation.md:17"}
+{"argv": ["update", "X", "--set-metadata", "gc.build.plan_path=X"], "src": "gascity-packs:gascity/assets/workflows/build-base/plan.md:6"}
+{"argv": ["update", "X", "--set-metadata", "gc.build.requirements_path=X"], "src": "gascity-packs:gascity/assets/workflows/build-base/requirements.md:7"}
+{"argv": ["update", "X", "--set-metadata", "gc.build.review_report_path=X"], "src": "gascity-packs:bmad/assets/workflows/bmad-build/review.md:14"}
+{"argv": ["update", "X", "--set-metadata", "gc.current_run_id=X"], "src": "gascity-packs:gascity/commands/claim/run.sh:249"}
+{"argv": ["update", "X", "--set-metadata", "gc.halt_chain=true", " ", "--set-metadata", "gc.escalate_to=mayor", " ", "--set-metadata", "summary_for_human=X"], "src": "gascity-packs:pr-review/formulas/mol-pr-iterate.formula.toml:49"}
+{"argv": ["update", "X", "--set-metadata", "gc.halt_chain=true"], "src": "gascity-packs:pr-pipeline/formulas/mol-pr-from-issue.formula.toml:361"}
+{"argv": ["update", "X", "--set-metadata", "gc.input_convoy_id=X", "--set-metadata", "gc.build.implementation_convoy_id=X"], "src": "gascity-packs:gascity/assets/workflows/build-base/decompose.md:21"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=X", "--set-metadata", "gc.failure_reason=X", "--status", "closed"], "src": "workflows:formulas/mol-architecture-improvement-v1.toml:385"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=$1", "--set-metadata", "gc.final_disposition=hard_fail", "--status", "closed"], "src": "workflows:formulas/mol-normalized-issue-pr-work-v1.toml:4108"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=X", "--set-metadata", "gc.final_disposition=hard_fail", "--status", "closed"], "src": "workflows:formulas/mol-normalized-issue-pr-work-v1.toml:1829"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=X", "--status", "closed"], "src": "workflows:formulas/mol-bug-report-flow-v2.toml:351"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=X", "--status=closed"], "src": "gascity-packs:gastown/formulas/mol-polecat-work.toml:792"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=X_wait_reconciliation_failed", "--set-metadata", "gc.final_disposition=hard_fail", "--status", "closed"], "src": "workflows:formulas/mol-normalized-issue-pr-work-v1.toml:2713"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=attempt_dir_unstamped", "--status", "closed"], "src": "workflows:formulas/expansion-design-review-core.toml:456"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=auto_push_false", "--status=closed"], "src": "gascity-packs:gastown/formulas/mol-polecat-work.toml:945"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=base_branch_local_only", "--status=closed"], "src": "gascity-packs:gastown/formulas/mol-polecat-work.toml:1066"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=branch_shape_gate", "--status=closed"], "src": "gascity-packs:gastown/formulas/mol-polecat-work.toml:679"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=builder_X_adapter_error_evidence_malformed", "--set-metadata", "gc.final_disposition=hard_fail", "--status", "closed"], "src": "workflows:formulas/mol-normalized-issue-pr-work-v1.toml:1746"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=builder_X_adapter_nonretryable", "--set-metadata", "gc.final_disposition=hard_fail", "--status", "closed"], "src": "workflows:formulas/mol-normalized-issue-pr-work-v1.toml:1742"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=builder_X_retryability_evidence_malformed", "--set-metadata", "gc.final_disposition=hard_fail", "--status", "closed"], "src": "workflows:formulas/mol-normalized-issue-pr-work-v1.toml:1832"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=design_review_reuse_invalid", "--status", "closed"], "src": "workflows:formulas/expansion-design-review-core.toml:619"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=metadata_unreadable", "--status=closed"], "src": "gascity-packs:gastown/formulas/mol-polecat-work.toml:931"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=no_push_rail_unresolved", "--status=closed"], "src": "gascity-packs:gastown/formulas/mol-polecat-work.toml:1043"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=nothing_to_adopt", "--status", "closed"], "src": "workflows:prompts/adopt-pr-operator.md:408"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=push_conflict", "--status=closed"], "src": "gascity:internal/bootstrap/packs/core/formulas/mol-polecat-commit.toml:136"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=push_failed", "--status=closed"], "src": "gascity-packs:gastown/formulas/mol-polecat-work.toml:1081"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=push_verify_failed", "--status=closed"], "src": "gascity-packs:gastown/formulas/mol-polecat-work.toml:1095"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=stale_attempt_dir", "--status", "closed"], "src": "workflows:formulas/expansion-design-review-persona-review.toml:134"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=wait_registration_hard", "--set-metadata", "gc.final_disposition=hard_fail", "--status", "closed"], "src": "workflows:formulas/mol-normalized-issue-pr-v1.toml:2446"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=transient", "--set-metadata", "gc.failure_reason=X", "--status", "closed"], "src": "workflows:formulas/mol-bug-report-flow-v2.toml:347"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=transient", "--set-metadata", "gc.failure_reason=evidence_unavailable", "--status", "closed"], "src": "workflows:formulas/mol-bug-hunt-v2.toml:726"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=transient", "--set-metadata", "gc.failure_reason=implementation_workflow_id_missing", "--status", "closed"], "src": "workflows:formulas/mol-bug-report-flow-v2.toml:1311"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=transient", "--set-metadata", "gc.failure_reason=rate_limited", "--status", "closed"], "src": "workflows:prompts/deepseek-reviewer.md:6"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=transient", "--set-metadata", "gc.failure_reason=root_not_closed_yet", "--status", "closed"], "src": "workflows:prompts/adopt-pr-operator.md:2521"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--set-metadata", "code_review.acceptance_verdict=approve", "--set-metadata", "code_review.output_path=X"], "src": "gascity-packs:gascity/assets/workflows/build-basic-review/{target}.acceptance-review.md:39"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--set-metadata", "code_review.gap_verdict=approve", "--set-metadata", "code_review.gap_report_path=X", "--set-metadata", "code_review.output_path=X"], "src": "gascity-packs:superpowers/assets/workflows/superpowers-code-review/{target}.gap-analysis-review.md:109"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--set-metadata", "code_review.gate_decision=selected", "--set-metadata", "code_review.review_key=X"], "src": "gascity-packs:compound-engineering/agents/ce-code-review-selector/prompt.template.md:131"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--set-metadata", "code_review.review_verdict=approve", "--set-metadata", "code_review.review_report_path=X", "--set-metadata", "code_review.output_path=X"], "src": "gascity-packs:superpowers/assets/workflows/superpowers-code-review/{target}.request-code-review.md:96"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--set-metadata", "code_review.simplicity_verdict=approve", "--set-metadata", "code_review.output_path=X"], "src": "gascity-packs:gascity/assets/workflows/build-basic-review/{target}.simplicity-review.md:28"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--set-metadata", "code_review.test_evidence_verdict=approve", "--set-metadata", "code_review.output_path=X"], "src": "gascity-packs:gascity/assets/workflows/build-basic-review/{target}.test-evidence-review.md:30"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--set-metadata", "code_review.verdict=done", "--set-metadata", "code_review.report_path=X", "--set-metadata", "code_review.output_path=X"], "src": "gascity-packs:gascity/assets/workflows/build-basic-review/{target}.apply-review-findings.md:45"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--set-metadata", "design_review.output_path=X", "--set-metadata", "design_review.required_changes_applied=false"], "src": "gascity-packs:superpowers/assets/workflows/superpowers-brainstorming/{target}.apply-spec-feedback.md:18"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--set-metadata", "design_review.output_path=X", "--set-metadata", "design_review.self_review_passed=true"], "src": "gascity-packs:superpowers/assets/workflows/superpowers-brainstorming/{target}.write-requirements-spec.md:88"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--set-metadata", "design_review.output_path=X"], "src": "gascity-packs:superpowers/assets/workflows/superpowers-brainstorming/{target}.brainstorm-design.md:36"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--set-metadata", "design_review.review_verdict=approve", "--set-metadata", "design_review.output_path=X"], "src": "gascity-packs:superpowers/assets/workflows/superpowers-brainstorming/{target}.review-written-spec.md:18"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--set-metadata", "design_review.verdict=done", "--set-metadata", "design_review.output_path=X", "--set-metadata", "design_review.approval_mode=autonomous", "--set-metadata", "gc.continuation_group=superpowers-spec-fixes"], "src": "gascity-packs:superpowers/assets/workflows/superpowers-brainstorming/{target}.confirm-spec-approval.md:18"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--set-metadata", "design_review.verdict=done", "--set-metadata", "design_review.output_path=X", "--set-metadata", "gc.continuation_group=superpowers-design-fixes"], "src": "gascity-packs:superpowers/assets/workflows/superpowers-brainstorming/{target}.confirm-design-approval.md:66"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--set-metadata", "example.key=example-value"], "src": "gascity-packs:gascity/template-fragments/gc-role-worker.template.md:50"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--set-metadata", "gc.failure_class=", "--set-metadata", "gc.failure_reason=", "--set-metadata", "gc.final_disposition=", "--status", "closed"], "src": "workflows:scripts/normalized_flow_checkpoint.py:1743"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--set-metadata", "gc.failure_class=", "--set-metadata", "gc.failure_reason=", "--set-metadata", "k=X", "--status", "closed"], "src": "workflows:scripts/normalized_flow_checkpoint.py:1645"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--set-metadata", "gc.final_disposition=skipped", "--status", "closed"], "src": "workflows:formulas/mol-normalized-issue-pr-v1.toml:1243"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--set-metadata", "gc.publish_outcome=noop", "--set-metadata", "gc.publish_mode=disabled", "--set-metadata", "gc.build_outcome=pass", "--set-metadata", "gc.final_report=X", "--set-metadata", "gc.artifact_root=X"], "src": "gascity-packs:gascity/assets/workflows/build-basic/publish.md:14"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--set-metadata", "pr_review.workflow_status=already_merged", "--set-metadata", "pr_review.canonical_pr_url=X", "--set-metadata", "pr_review.canonical_pr_number=X", "--set-metadata", "pr_review.canonical_head_sha=X"], "src": "workflows:prompts/adopt-pr-operator.md:1525"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--status", "X"], "src": "workflows:formulas/mol-normalized-issue-pr-v1.toml:501"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/mol-bug-report-flow-v2.toml:343"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "--status=closed"], "src": "gascity:internal/bootstrap/packs/core/formulas/mol-do-work.toml:137"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "X", "--set-metadata", "pr_review.merge_ready_label_applied=true"], "src": "workflows:prompts/adopt-pr-operator.md:2444"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass", "X"], "src": "workflows:prompts/adopt-pr-operator.md:2420"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=pass"], "src": "gascity:examples/bd/dolt/formulas/mol-dog-stale-db.toml:331"}
+{"argv": ["update", "X", "--set-metadata", "gc.outcome=skipped", "--status", "closed"], "src": "workflows:scripts/adopt_pr_rebase_gate.py:596"}
+{"argv": ["update", "X", "--set-metadata", "gc.output_json=X", "--set-metadata", "architecture_improvement.artifact_dir=X", "--set-metadata", "architecture_improvement.parent=X", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/mol-architecture-improvement-v1.toml:212"}
+{"argv": ["update", "X", "--set-metadata", "gc.output_json=X", "--set-metadata", "bug_hunt.artifact_dir=X", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/mol-bug-hunt-v2.toml:173"}
+{"argv": ["update", "X", "--set-metadata", "gc.output_json=X", "--set-metadata", "bug_hunt.synthesis_checkpoint=X", "--set-metadata", "bug_hunt.synthesis_input_hash=X", "--set-metadata", "bug_hunt.findings_json=X", "--set-metadata", "bug_hunt.synthesis_path=X", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/mol-bug-hunt-v2.toml:480"}
+{"argv": ["update", "X", "--set-metadata", "gc.output_json=X", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/mol-bug-hunt-v2.toml:258"}
+{"argv": ["update", "X", "--set-metadata", "github_fix_complete_comment_id=X", "--set-metadata", "github_fix_complete_comment_url=X"], "src": "gascity-packs:github/formulas/mol-github-fix-issue.formula.toml:339"}
+{"argv": ["update", "X", "--set-metadata", "github_fix_pr_url=X", "--set-metadata", "github_fix_pr_number=X"], "src": "gascity-packs:github/formulas/mol-github-fix-issue.formula.toml:315"}
+{"argv": ["update", "X", "--set-metadata", "github_fix_started_comment_id=X", "--set-metadata", "github_fix_started_comment_url=X"], "src": "gascity-packs:github/formulas/mol-github-fix-issue.formula.toml:100"}
+{"argv": ["update", "X", "--set-metadata", "halt_reason=base_branch_diverged"], "src": "gascity-packs:gastown/formulas/mol-polecat-work.toml:128"}
+{"argv": ["update", "X", "--set-metadata", "halt_reason=base_branch_missing"], "src": "gascity-packs:gastown/formulas/mol-polecat-work.toml:140"}
+{"argv": ["update", "X", "--set-metadata", "k=X", "--set-metadata", "k=X", "--set-metadata", "k=X", "--set-metadata", "k=X"], "src": "maintainer-city:rig-packs/checkpoint-pipeline/scripts/cp.py:1233"}
+{"argv": ["update", "X", "--set-metadata", "k=X", "--set-metadata", "k=X"], "src": "workflows:scripts/attention_commands.py:1360"}
+{"argv": ["update", "X", "--set-metadata", "k=X"], "src": "workflows:formulas/mol-normalized-issue-pr-v1.toml:27"}
+{"argv": ["update", "X", "--set-metadata", "key=value"], "src": "gascity-packs:gastown/agents/refinery/prompt.template.md:405"}
+{"argv": ["update", "X", "--set-metadata", "merge_result=already_merged", "--set-metadata", "merged_sha=X", "--set-metadata", "merged_target=X", "--unset-metadata", "rejection_reason"], "src": "gascity-packs:gastown/formulas/mol-refinery-patrol.toml:954"}
+{"argv": ["update", "X", "--set-metadata", "merge_result=merged", "--set-metadata", "merged_sha=X", "--set-metadata", "merged_target=X", "--unset-metadata", "rejection_reason"], "src": "gascity-packs:gastown/formulas/mol-refinery-patrol.toml:1030"}
+{"argv": ["update", "X", "--set-metadata", "normalized.state=model_unavailable", "--set-metadata", "normalized.blocked_reason=review_unavailable"], "src": "workflows:formulas/workflows-build-from-convoy.toml:221"}
+{"argv": ["update", "X", "--set-metadata", "polecat_session=X"], "src": "gascity-packs:gastown/agents/polecat/prompt.template.md:275"}
+{"argv": ["update", "X", "--set-metadata", "pr_review.approval_actor=X", "--set-metadata", "pr_review.approval_reply_id=X", "X", "--set-metadata", "human.approval=approved", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:prompts/adopt-pr-operator.md:1469"}
+{"argv": ["update", "X", "--set-metadata", "pr_review.approval_mail_id=X", "--set-metadata", "gc.awaiting_human=X"], "src": "workflows:prompts/adopt-pr-operator.md:1414"}
+{"argv": ["update", "X", "--set-metadata", "pr_review.auto_approval_summary=X", "--set-metadata", "human.approval=auto", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:prompts/adopt-pr-operator.md:1388"}
+{"argv": ["update", "X", "--set-metadata", "pr_review.followup_pr_url=X", "--set-metadata", "pr_review.followup_pr_number=X", "--set-metadata", "pr_review.followup_base_sha=X", "--set-metadata", "pr_review.final_pr_url=X", "--set-metadata", "pr_review.final_pr_number=X", "--set-metadata", "pr_review.finalizer_head_sha=X"], "src": "workflows:prompts/post-merge-review-operator.md:229"}
+{"argv": ["update", "X", "--set-metadata", "pr_review.handoff_review_range=X"], "src": "workflows:prompts/adopt-pr-operator.md:2269"}
+{"argv": ["update", "X", "--set-metadata", "pr_review.merge_blocked_alert=alert #X rule=X path=X"], "src": "workflows:prompts/adopt-pr-operator.md:1767"}
+{"argv": ["update", "X", "--set-metadata", "pr_review.workflow_status=already_merged", "--set-metadata", "pr_review.canonical_pr_url=X", "--set-metadata", "pr_review.canonical_pr_number=X", "--set-metadata", "pr_review.canonical_head_sha=X"], "src": "workflows:prompts/adopt-pr-operator.md:1527"}
+{"argv": ["update", "X", "--set-metadata", "pr_review.workflow_status=rejected", "--set-metadata", "k=X", "--set-metadata", "k=X", "--status", "closed"], "src": "workflows:scripts/attention_commands.py:1465"}
+{"argv": ["update", "X", "--set-metadata", "rebase.adopted_via=merge"], "src": "workflows:scripts/adopt_pr_rebase_gate.py:722"}
+{"argv": ["update", "X", "--set-metadata", "refine.anchors=X"], "src": "workflows:formulas/mol-feature-refine.toml:90"}
+{"argv": ["update", "X", "--set-metadata", "refine.compiled=true", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:formulas/mol-feature-refine.toml:171"}
+{"argv": ["update", "X", "--set-metadata", "review.verdict=X", "--set-metadata", "gc.outcome=pass", "--status", "closed"], "src": "workflows:prompts/adopt-pr-operator.md:980"}
+{"argv": ["update", "X", "--set-metadata", "work_dir=X", "--set-metadata", "review_context=X/.gc/reviews/X/review-context.md", "--set-metadata", "review_diff_range=X..X", "--set-metadata", "pr_review.workflow_status=reviewing"], "src": "workflows:prompts/post-merge-review-operator.md:137"}
+{"argv": ["update", "X", "--set-metadata", "work_dir=X"], "src": "gascity:internal/bootstrap/packs/core/formulas/mol-polecat-commit.toml:78"}
+{"argv": ["update", "X", "--status", "closed", "--set-metadata", "gc.outcome=skipped", "--set-metadata", "gc.abandon_reason=superseded by PR-review retry"], "src": "workflows:scripts/pr_review.py:1776"}
+{"argv": ["update", "X", "--status", "open", "--append-notes", "X"], "src": "maintainer-city:rig-packs/checkpoint-pipeline/scripts/cp.py:1493"}
+{"argv": ["update", "X", "--status", "open"], "src": "workflows:formulas/mol-ac-quality-gate.toml:221"}
+{"argv": ["update", "X", "--status=closed"], "src": "gascity-packs:gastown/formulas/mol-review-leg.toml:147"}
+{"argv": ["update", "X", "--status=open", "--assignee=", "--unset-metadata", "handoff_stage", "--set-metadata", "rejection_reason=Conflicts with X at X", "--set-metadata", "gc.routed_to=XXpolecat"], "src": "gascity-packs:gastown/formulas/mol-refinery-patrol.toml:494"}
+{"argv": ["update", "X", "--status=open", "--assignee=", "--unset-metadata", "handoff_stage", "--set-metadata", "rejection_reason=X", "--set-metadata", "gc.routed_to=XXpolecat"], "src": "gascity-packs:gastown/formulas/mol-refinery-patrol.toml:595"}
+{"argv": ["update", "X", "--status=open", "--assignee="], "src": "gascity-packs:gastown/agents/polecat/prompt.template.md:263"}
+{"argv": ["update", "X", "--status=open", "--assignee=X", "--set-metadata", "gc.routed_to="], "src": "gascity-packs:gastown/formulas/mol-polecat-work.toml:1165"}
+{"argv": ["update", "X", "--title", "X", "--external-ref", "X"], "src": "workflows:scripts/bugflow_canonical.py:81"}
+{"argv": ["update", "X", "--unset-metadata", "gc.outcome"], "src": "gascity:examples/bd/dolt/formulas/mol-dog-stale-db.toml:333"}
+{"argv": ["update", "X", "--unset-metadata", "handoff_stage"], "src": "gascity-packs:gastown/formulas/mol-polecat-work.toml:92"}
+{"argv": ["update", "X", "--unset-metadata", "key"], "src": "gascity-packs:gastown/agents/refinery/prompt.template.md:406"}
+{"argv": ["update", "X", "--unset-metadata", "rejection_reason", "--set-metadata", "fork_sha=X"], "src": "gascity-packs:gastown/formulas/mol-polecat-work.toml:433"}
+{"argv": ["update", "X", "--unset-metadata", "work_dir"], "src": "gascity:internal/bootstrap/packs/core/formulas/mol-polecat-commit.toml:167"}
+{"argv": ["update", "X", "-d", "1"], "src": "workflows:formulas/mol-feature-refine.toml:148"}
+{"argv": ["update", "X", "X", "--set-metadata", "pr_review.merge_ready_label_applied=true"], "src": "workflows:prompts/adopt-pr-operator.md:2454"}
+{"argv": ["update", "X"], "src": "gascity-packs:superpowers/assets/workflows/superpowers-brainstorming/{target}.confirm-spec-approval.md:120"}
+{"argv": ["update"], "src": "gascity:examples/bd/template-fragments/bead-worktree.template.md:12"}
+{"argv": ["version"], "src": "gascity-packs:discord/doctor/check-bd.sh:4"}

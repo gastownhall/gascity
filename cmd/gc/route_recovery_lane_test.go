@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"path/filepath"
 	"slices"
@@ -32,6 +33,9 @@ type countingRouteStore struct {
 	lists  int
 	gets   int
 	writes int
+	// batches counts exact batch reads (GetExactBatch), the one read by id a
+	// production work store (bd, native Dolt) answers beads.GetMany with.
+	batches int
 	// scanned records whether any List asked for the whole open corpus, which is
 	// the read this slice moved off the tick.
 	scanned int
@@ -60,7 +64,27 @@ func (s *countingRouteStore) SetMetadataBatch(id string, kvs map[string]string) 
 	return s.Store.SetMetadataBatch(id, kvs)
 }
 
-func (s *countingRouteStore) reads() int { return s.lists + s.gets }
+// GetExactBatch answers an exact batch read from the wrapped store, as one
+// counted round trip.
+func (s *countingRouteStore) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	s.batches++
+	found := make(map[string]beads.Bead, len(ids))
+	var unresolved []string
+	for _, id := range ids {
+		b, err := s.Store.Get(id)
+		switch {
+		case err == nil:
+			found[id] = b
+		case errors.Is(err, beads.ErrNotFound):
+			unresolved = append(unresolved, id)
+		default:
+			return nil, nil, err
+		}
+	}
+	return found, unresolved, nil
+}
+
+func (s *countingRouteStore) reads() int { return s.lists + s.gets + s.batches }
 
 // unroutedWorkBead is the recoverable shape: open, unassigned, kind-less, a pool
 // route in gc.run_target and nothing in gc.routed_to.

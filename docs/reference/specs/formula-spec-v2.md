@@ -683,14 +683,18 @@ the attach bead, and one store cannot hold both:
 | Scope | Attach bead lives in | Formula | Outcome |
 |---|---|---|---|
 | city | the city's work ledger | v1 or v2 | refused: the sub-DAG would be stranded in the work ledger, or the work store would keep a `blocks` row naming an id it cannot resolve |
-| city | the binding | v2 | refused: the invocation mints a work-class input convoy, whose `tracks` edge to a binding-owned target is cross-class |
-| city | the binding | v1 | served: the sub-DAG and its blocking dependency are both written to the binding |
-| rig | that rig's own store | v1 or v2 | served, unaffected: relocation is a city-scope property, so a rig's ledger holds both ends of the graft |
+| city or rig | the binding | v2 | refused: the invocation mints a work-class input convoy, whose `tracks` edge to a binding-owned target is cross-class |
+| city or rig | the binding | v1 | served: the sub-DAG and its blocking dependency are both written to the binding |
+| rig | that rig's own store, as a work bead | v1 or v2 | refused: a rig's own store holds only work, so the graft fails as it does in the city's work ledger; `gc sling <target> <bead> --on <formula>` launches the formula against the bead instead |
+| rig | that rig's own store, as a graph bead of an older tree | v1 | served: the graft extends that tree where it lives |
+| rig | that rig's own store, as a graph bead of an older tree | v2 | refused: the invocation starts a new workflow root, which is created in the binding, so its attach edge would cross stores |
 
-Relocation applies to the CITY scope only: the migration copies the city work
-store alone and the class routes hold one city-level store per class, so a
-rig scope — `--rig`, `GC_RIG`, or a cwd inside a rig — keeps serving
-`--attach` exactly as it always has, and nothing it writes is stranded.
+A rig scope — `--rig`, `GC_RIG`, or a cwd inside a rig — follows the same
+placement rule as the city: every rig's graph beads live in the binding,
+recorded with the rig as their scope (`gc.root_store_ref`), so a rig's own
+store holds only work. An older tree, one the rig created before its graph
+beads moved to the binding, stays in the rig's own store, and a v1 graft onto
+one of its beads extends it there.
 
 Both refusals are lifted by the same missing mechanism, a cross-class
 membership edge (`ga-2orlf`). Cities that author no `[storage]` section are
@@ -708,9 +712,9 @@ participates.
 
 `[steps.check]` wraps a step in an inline run/check verification loop:
 after each iteration closes, the orchestrator runs the configured script.
-Exit 0 closes the step; an infrastructure outcome — exit 75, or the narrow
-stderr fallback described below — re-runs the script without spending an
-attempt; any other nonzero exit is a "not yet" verdict that spawns the next
+Exit 0 closes the step; an infrastructure outcome — a run stopped at its
+timeout, exit 75, or the narrow stderr fallback described below — re-runs the
+script without spending an attempt; any other nonzero exit is a "not yet" verdict that spawns the next
 iteration while budget remains, and exhaustion closes the step as failed.
 
 | Key | Purpose |
@@ -787,10 +791,13 @@ that run as an infrastructure outcome rather than a verdict:
 | `75` | Infrastructure unreachable; the check produced no verdict | **No** — re-run attempt-free |
 | any other nonzero carrying a typed infrastructure string on stderr | Infrastructure unreachable, via the stderr fallback below | **No** — re-run attempt-free |
 | any other nonzero | Fail — the verdict is "not yet" | Yes |
+| none: the script ran past `check.timeout` and was stopped | No verdict | **No** — re-run attempt-free under the same budget |
+| none: the script could not start (for example, its working directory is gone) | Graded as a failure | Yes |
 | none: the script could not be launched (missing, not a regular file, or not executable) | No verdict. The step stays open and the steps that need it stay blocked; the reason is recorded in `gc.control_pending_reason` | **No**, and no infrastructure budget either. Re-checked every sweep until the script can run |
 
 Attempt-free re-runs are themselves bounded by a separate infrastructure
-budget, so a script that exits 75 forever still terminates; it just does not
+budget, counted in `gc.check_infra_retry` on the step, so a script that exits
+75 or times out forever still terminates; it just does not
 burn the semantic budget on the way there. No Go code inspects what the check
 was verifying — exit 75 is the signal a script declares deliberately, and the
 one to write against. It is not the only route to an infrastructure outcome,
@@ -907,6 +914,17 @@ at runtime.
 | `continuation_group` | Shared execution group suffix; valid only with `context = "shared"` |
 | `item.single_lane` | Must be `true` for shared drains |
 
+A `blocks` edge is satisfied by its predecessor's close whatever
+`gc.outcome` that close carries, but a drain does not expand when a direct
+blocking predecessor in the same workflow closed with a failed outcome: it
+reserves no members, creates no unit convoys or item roots, and closes with
+`gc.outcome = fail` and `gc.failure_reason = predecessor_failed`, naming the
+predecessor in `gc.failure_subject`. The steps that need it and
+`workflow-finalize` still run, and they see the failure: a drain chained
+behind it does not expand either, and the run finalizes `fail` with its
+source bead left open. A drain inside a scope aborts the scope, like any
+failed scope member.
+
 ```toml
 formula = "review-batch"
 description = "Run a work formula for each convoy member"
@@ -940,6 +958,13 @@ each element of a collection in its output. The compiler marks such steps
 `gc.output_json_required` and injects a `<step>-fanout` control step (kind
 `fanout`) carrying `gc.for_each`, `gc.bond`, the fan-out mode
 (`parallel` | `sequential`), and any bond variable bindings.
+
+The `<step>-fanout` control converges the spawned children: it blocks on the
+source step and closes only after the fan-out work completes. Every downstream
+`needs` / `depends_on` reference to the source is rewritten to the fan-out
+control (for a scoped source, its minted `<step>-scope-check` also blocks on
+the fan-out control), so downstream work waits for the spawned children instead
+of racing them.
 
 | Key | Purpose |
 |---|---|

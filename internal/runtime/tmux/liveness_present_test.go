@@ -467,3 +467,238 @@ func TestUnixSocketPathCandidates(t *testing.T) {
 		}
 	}
 }
+
+// presenceHarness is a Provider over the real tmuxFetcher: its tmux calls go
+// to a fake executor, its process-table snapshot is counted instead of run,
+// and its cache runs on a fake clock. The socket observer reports a live
+// server, so a no-server answer is never confirmed dead.
+type presenceHarness struct {
+	p         *Provider
+	fe        *fakeExecutor
+	now       time.Time
+	snapshots int
+	processes []processRuntimeState
+}
+
+func newPresenceHarness(t *testing.T) *presenceHarness {
+	t.Helper()
+	h := &presenceHarness{fe: &fakeExecutor{}, now: time.Date(2026, 10, 20, 3, 0, 0, 0, time.UTC)}
+	tm := &Tmux{
+		cfg:                  Config{SocketName: "presence-test"},
+		exec:                 h.fe,
+		serverSocketObserver: func(context.Context, string) error { return errors.New("live-unix-socket") },
+	}
+	fetcher := &tmuxFetcher{tm: tm, snapshot: func(context.Context) (processSnapshot, error) {
+		h.snapshots++
+		return newProcessSnapshot(h.processes), nil
+	}}
+	cache := NewStateCache(fetcher, 2*time.Second)
+	cache.now = func() time.Time { return h.now }
+	h.p = &Provider{tm: tm, cache: cache, unixListening: func(string) (bool, error) { return true, nil }, logf: func(string, ...any) {}}
+	return h
+}
+
+// presenceLines is a presence listing's output for names, each line ended as
+// presenceListingFormat ends it.
+func presenceLines(names ...string) string {
+	lines := make([]string, len(names))
+	for i, name := range names {
+		lines[i] = name + "\t" + runtimeInventoryEnd
+	}
+	return strings.Join(lines, "\n")
+}
+
+// presenceListings counts the presence-only listings (list-panes -a in
+// presenceListingFormat) among the executor's calls.
+func (h *presenceHarness) presenceListings() int {
+	n := 0
+	for _, call := range h.fe.calls {
+		if call[len(call)-1] == presenceListingFormat {
+			n++
+		}
+	}
+	return n
+}
+
+// A fresh read of a name the server does not hold is proven absent by a
+// presence-only listing taken at or after since: no process-table scan runs
+// (the scan only refines sessions a listing holds), and the shared cache is
+// neither refreshed nor published.
+// Kills: refreshing the cache (and scanning the OS process table) to prove an
+// absence; publishing the presence listing into the shared snapshot.
+func TestFreshReadAbsentNameRunsNoProcessSnapshot(t *testing.T) {
+	h := newPresenceHarness(t)
+	h.fe.outs = []string{presenceLines("worker-1", "worker-1", "worker-2")}
+	got, err := h.p.ObserveLivenessSince("worker-9", []string{"codex"}, h.now)
+	requireLiveness(t, got, err, runtime.Liveness{})
+	if h.snapshots != 0 {
+		t.Fatalf("process snapshots = %d, want 0 for an absent name", h.snapshots)
+	}
+	if len(h.fe.calls) != 1 || h.presenceListings() != 1 {
+		t.Fatalf("tmux calls = %q, want one presence-only list-panes", h.fe.calls)
+	}
+	if obs := h.p.cache.observation(); obs.primed() || h.p.cache.generation != 0 {
+		t.Fatalf("cache primed=%v generation=%d, want the shared snapshot untouched", obs.primed(), h.p.cache.generation)
+	}
+
+	// A server that answers with no sessions holds no name either.
+	h.fe.calls, h.fe.outs, h.fe.idx = nil, nil, 0
+	h.fe.err = ErrNoCurrentTarget
+	got, err = h.p.ObserveLivenessSince("worker-9", nil, h.now)
+	requireLiveness(t, got, err, runtime.Liveness{})
+	if h.snapshots != 0 || len(h.fe.calls) != 1 {
+		t.Fatalf("empty server: snapshots=%d calls=%q, want 0 and one listing", h.snapshots, h.fe.calls)
+	}
+}
+
+// A fresh read of a name the presence listing holds takes today's full
+// refresh, whose process-table scan is read: the agent process under the pane
+// decides alive versus zombie.
+// Kills: answering a present name from the presence listing; skipping the
+// process snapshot for it.
+func TestFreshReadPresentNameTakesFullRefreshWithProcesses(t *testing.T) {
+	h := newPresenceHarness(t)
+	h.fe.outs = []string{
+		presenceLines("worker-1"),
+		"worker-1\t0\tbash\t101\t0\t1000\t$3\t800",
+	}
+	h.processes = []processRuntimeState{
+		{PID: "101", PPID: "1", Command: "bash", Args: "bash"},
+		{PID: "102", PPID: "101", Command: "codex", Args: "codex"},
+	}
+	got, err := h.p.ObserveLivenessSince("worker-1", []string{"codex"}, h.now)
+	requireLiveness(t, got, err, runtime.Liveness{Running: true, Alive: true, ObjectID: "$3", ObjectCreated: "800", PanePID: "101"})
+	if h.snapshots != 1 {
+		t.Fatalf("process snapshots = %d, want 1 (the full refresh reads processes)", h.snapshots)
+	}
+	if len(h.fe.calls) != 2 || h.presenceListings() != 1 {
+		t.Fatalf("tmux calls = %q, want the presence listing then the full list-panes", h.fe.calls)
+	}
+
+	// The agent gone from under the pane reads as a zombie from the same
+	// full refresh, not as alive.
+	h.now = h.now.Add(time.Second)
+	h.fe.calls, h.fe.idx = nil, 0
+	h.processes = h.processes[:1]
+	got, err = h.p.ObserveLivenessSince("worker-1", []string{"codex"}, h.now)
+	requireLiveness(t, got, err, runtime.Liveness{Running: true, ObjectID: "$3", ObjectCreated: "800", PanePID: "101"})
+	if h.snapshots != 2 {
+		t.Fatalf("process snapshots = %d, want 2", h.snapshots)
+	}
+}
+
+// Only a listing taken at or after since is evidence. A published snapshot
+// older than since that lacks the name proves nothing: the presence listing
+// taken now holds it, and the read answers from a full refresh. A since the
+// cache clock has not reached yet is never answered from a presence listing,
+// which would start before it.
+// Kills: answering absent from a snapshot fetched before since; a presence
+// listing used when it starts before since.
+func TestFreshReadNeverUsesAListingTakenBeforeSince(t *testing.T) {
+	h := newPresenceHarness(t)
+	// Publish a snapshot without worker-1.
+	h.fe.outs = []string{"other\t0\tbash\t201\t0\t1000\t$1\t700"}
+	if _, err := h.p.ObserveLivenessWithError("other", nil); err != nil || !h.p.cache.observation().primed() {
+		t.Fatalf("priming the cache: %v", err)
+	}
+	h.now = h.now.Add(time.Second) // inside the TTL: the old snapshot is still a cache hit
+	h.fe.calls, h.fe.idx = nil, 0
+	h.fe.outs = []string{
+		presenceLines("other", "worker-1"),
+		"other\t0\tbash\t201\t0\t1000\t$1\t700\nworker-1\t0\tbash\t101\t0\t1000\t$3\t800",
+	}
+	h.processes = []processRuntimeState{{PID: "101", PPID: "1", Command: "bash", Args: "bash"}, {PID: "102", PPID: "101", Command: "codex", Args: "codex"}}
+	got, err := h.p.ObserveLivenessSince("worker-1", []string{"codex"}, h.now)
+	requireLiveness(t, got, err, runtime.Liveness{Running: true, Alive: true, ObjectID: "$3", ObjectCreated: "800", PanePID: "101"})
+	if h.presenceListings() != 1 {
+		t.Fatalf("tmux calls = %q, want a presence listing taken now", h.fe.calls)
+	}
+
+	// since ahead of the cache clock: no listing can start at or after it.
+	h.fe.calls, h.fe.idx, h.fe.outs = nil, 0, nil
+	h.fe.out = "other\t0\tbash\t201\t0\t1000\t$1\t700"
+	got, err = h.p.ObserveLivenessSince("worker-9", nil, h.now.Add(time.Minute))
+	requireLivenessUnknown(t, got, err, nil)
+	if h.presenceListings() != 0 {
+		t.Fatalf("tmux calls = %q, want no presence listing for a since ahead of the clock", h.fe.calls)
+	}
+}
+
+// A presence listing that fails proves nothing: the read takes today's full
+// refresh and answers as it does today. A refresh error is unknown; a missing
+// server is unknown while its socket is not confirmed dead.
+// Kills: reading a failed listing as an empty one; answering a no-server
+// listing absent.
+func TestFreshReadFailedPresenceListingTakesFullRefresh(t *testing.T) {
+	h := newPresenceHarness(t)
+	h.fe.errs = []error{errors.New("tmux list-panes: signal: killed"), nil}
+	h.fe.outs = []string{"", "worker-1\t0\tbash\t101\t0\t1000\t$3\t800"}
+	got, err := h.p.ObserveLivenessSince("worker-9", nil, h.now)
+	requireLiveness(t, got, err, runtime.Liveness{})
+	if h.snapshots != 1 || len(h.fe.calls) != 2 {
+		t.Fatalf("snapshots=%d calls=%q, want the full refresh after the failed listing", h.snapshots, h.fe.calls)
+	}
+
+	h.now = h.now.Add(time.Minute)
+	h.fe.calls, h.fe.idx, h.fe.outs, h.fe.errs = nil, 0, nil, nil
+	h.fe.err = ErrNoServer
+	got, err = h.p.ObserveLivenessSince("worker-9", nil, h.now)
+	requireLivenessUnknown(t, got, err, ErrNoServer)
+	if h.presenceListings() != 1 {
+		t.Fatalf("tmux calls = %q, want one presence listing before the full refresh", h.fe.calls)
+	}
+}
+
+// Only a well-formed listing is evidence, and only for a name gc could have
+// created: a line without the end marker, or a name validateSessionName
+// rejects (whose trailing whitespace the executor's trim could cut from a
+// bare name listing), takes today's full refresh.
+// Kills: parsing a listing whose lines lack the marker; answering a name gc
+// cannot create from the presence listing.
+func TestFreshReadPresenceListingOnlyForWellFormedValidNames(t *testing.T) {
+	h := newPresenceHarness(t)
+	h.fe.outs = []string{"worker-1", "worker-1\t0\tbash\t101\t0\t1000\t$3\t800"}
+	got, err := h.p.ObserveLivenessSince("worker-9", nil, h.now)
+	requireLiveness(t, got, err, runtime.Liveness{})
+	if h.snapshots != 1 || len(h.fe.calls) != 2 {
+		t.Fatalf("malformed listing: snapshots=%d calls=%q, want the full refresh", h.snapshots, h.fe.calls)
+	}
+
+	h.now = h.now.Add(time.Minute)
+	h.fe.calls, h.fe.idx = nil, 0
+	h.fe.outs = []string{"zz-trail \t0\tbash\t101\t0\t1000\t$3\t800"}
+	got, err = h.p.ObserveLivenessSince("zz-trail ", nil, h.now)
+	requireLiveness(t, got, err, runtime.Liveness{Running: true, Alive: true, ObjectID: "$3", ObjectCreated: "800", PanePID: "101"})
+	if h.presenceListings() != 0 {
+		t.Fatalf("tmux calls = %q, want no presence listing for a name gc cannot create", h.fe.calls)
+	}
+}
+
+// deadlineExecutor is a fakeExecutor that records each call's context
+// deadline.
+type deadlineExecutor struct {
+	fakeExecutor
+	deadlines []time.Duration
+}
+
+func (d *deadlineExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
+	if dl, ok := ctx.Deadline(); ok {
+		d.deadlines = append(d.deadlines, time.Until(dl))
+	}
+	return d.execute(args)
+}
+
+// The presence listing runs under its own short bound, so a wedged server
+// costs a fresh read at most presenceListingTimeout more than the full refresh
+// alone did.
+// Kills: running the listing under fetchTimeout or with no bound.
+func TestFreshReadPresenceListingHasItsOwnShortBound(t *testing.T) {
+	h := newPresenceHarness(t)
+	de := &deadlineExecutor{fakeExecutor: fakeExecutor{out: presenceLines("worker-1")}}
+	h.p.tm.exec = de
+	got, err := h.p.ObserveLivenessSince("worker-9", nil, h.now)
+	requireLiveness(t, got, err, runtime.Liveness{})
+	if len(de.deadlines) != 1 || de.deadlines[0] > presenceListingTimeout || de.deadlines[0] <= 0 {
+		t.Fatalf("listing deadlines = %v, want one within %v", de.deadlines, presenceListingTimeout)
+	}
+}

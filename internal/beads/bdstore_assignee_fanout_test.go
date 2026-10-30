@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -27,12 +28,15 @@ type fanoutRow struct {
 type predicatedBd struct {
 	t     *testing.T
 	rows  []fanoutRow
+	mu    sync.Mutex // guards calls: a two-tier List runs its two bd reads at once
 	calls []string
 }
 
 func (f *predicatedBd) runner(_, name string, args ...string) ([]byte, error) {
 	full := name + " " + strings.Join(args, " ")
+	f.mu.Lock()
 	f.calls = append(f.calls, full)
+	f.mu.Unlock()
 	if len(args) > 0 && args[0] == "list" {
 		return []byte(`[]`), nil
 	}

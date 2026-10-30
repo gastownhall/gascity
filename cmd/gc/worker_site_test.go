@@ -269,7 +269,7 @@ func TestWorkerSiteSessionNudgeRefusesBeforeWriting(t *testing.T) {
 
 			for _, target := range []string{sessionID, "no-such-session"} {
 				var stdout, stderr bytes.Buffer
-				if code := cmdSessionNudge([]string{target, "check", "deploy", "status"}, mode, false, &stdout, &stderr); code != 1 {
+				if code := cmdSessionNudge([]string{target, "check", "deploy", "status"}, mode, "", false, &stdout, &stderr); code != 1 {
 					t.Fatalf("gc session nudge %s on a worker site = %d, want 1; stdout=%q stderr=%q", target, code, stdout.String(), stderr.String())
 				}
 				if !strings.Contains(stderr.String(), errWorkerSiteDeliveryNeedsController.Error()) || strings.Contains(stderr.String(), "recorded change") {
@@ -301,7 +301,7 @@ func TestWorkerSiteSessionSubmitRefusesBeforeWriting(t *testing.T) {
 	dials := countSocketDials(t)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionSubmit([]string{sessionID, "check", "deploy", "status"}, session.SubmitIntentDefault, false, &stdout, &stderr); code != 1 {
+	if code := cmdSessionSubmit([]string{sessionID, "check", "deploy", "status"}, session.SubmitIntentDefault, "", false, &stdout, &stderr); code != 1 {
 		t.Fatalf("gc session submit on a worker site = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stderr.String(), errWorkerSiteDeliveryNeedsController.Error()) {
@@ -333,7 +333,7 @@ func TestWorkerSiteMailNotifyToADormantTargetRecordsOnlyAWake(t *testing.T) {
 	t.Cleanup(func() { nudgeWarningWriter = prevWarnings })
 	beforeCalls := len(fake.Calls)
 
-	if err := sendMailNotifyWithWorker(target, store, fake, "human", ""); err != nil {
+	if err := sendMailNotifyWithWorker(target, store, fake, ""); err != nil {
 		t.Fatalf("sendMailNotifyWithWorker on a worker site: %v", err)
 	}
 	assertNudgeNotQueuedNotice(t, warnings.String(), true)
@@ -377,7 +377,7 @@ func TestWorkerSiteMailNotifyWithoutARecordedWakeNotifiesNobody(t *testing.T) {
 			t.Cleanup(func() { nudgeWarningWriter = prevWarnings })
 			beforeCalls := len(fake.Calls)
 
-			err = sendMailNotifyWithWorker(target, store, fake, "human", "")
+			err = sendMailNotifyWithWorker(target, store, fake, "")
 			if !errors.Is(err, errWorkerSiteNotifyNotDelivered) {
 				t.Fatalf("sendMailNotifyWithWorker = %v, want errWorkerSiteNotifyNotDelivered", err)
 			}
@@ -455,6 +455,47 @@ func TestWorkerSiteMailSendNotifiedMeansAWakeWasRecorded(t *testing.T) {
 	}
 }
 
+// A worker-site mail notice records only the recipient's wake and never an
+// op (sendMailNotifyWithOp), so whether the op journal can record does not
+// decide whether it is sent: under require, with an op store that cannot
+// record and with the box's own store, the wake is recorded.
+func TestWorkerSiteMailNotifyUnderRequireRecordsTheWake(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		incapable bool
+	}{
+		{name: "op store cannot record", incapable: true},
+		{name: "box store"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir, sessionID := newWorkerSiteSessionCity(t, map[string]string{"state": string(session.StateAsleep), "alias": "worker"})
+			if tc.incapable {
+				h := newCLIOpHarness(t, map[string]string{"GC_OPS_CONTENT": "require"})
+				h.opStore = cliOpIncapableStore{&beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}}
+			} else {
+				t.Setenv("GC_OPS_CONTENT", "require")
+			}
+			var stdout, stderr bytes.Buffer
+			if code := cmdMailSendJSON([]string{"worker", "check the deploy"}, true, false, "human", "", "", "", "", true, &stdout, &stderr); code != 0 {
+				t.Fatalf("gc mail send --notify = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			var result struct {
+				Notified bool `json:"notified"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("decoding %q: %v", stdout.String(), err)
+			}
+			recipient, err := localLedger(t, cityDir).Get(sessionID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if !result.Notified || recipient.Metadata["wake_request"] == "" {
+				t.Fatalf("notified = %v, wake_request = %q; stderr=%q: the notice records no op, so require must not refuse it", result.Notified, recipient.Metadata["wake_request"], stderr.String())
+			}
+		})
+	}
+}
+
 // TestWorkerSiteSlingNudgePokesAreNotices: gc sling's courtesy nudge on a box
 // queues no text, since the box's nudge queue is a local file the remote
 // controller never reads, and claims no poke. A pool with no running member
@@ -481,7 +522,7 @@ func TestWorkerSiteSlingNudgePokesAreNotices(t *testing.T) {
 		sp := runtime.NewFake()
 		deps, stdout, stderr := testDeps(cfg, sp, newFakeRunner().run)
 
-		doSlingNudge(&a, deps.CityName, dir, cfg, sp, deps.Store, stdout, stderr)
+		doSlingNudge(&a, deps.CityName, dir, cfg, sp, deps.Store, "", stdout, stderr)
 
 		assertWorkerSitePokeNotice(t, stderr.String())
 		if strings.Contains(stdout.String(), "poked controller") {
@@ -507,7 +548,7 @@ func TestWorkerSiteSlingNudgePokesAreNotices(t *testing.T) {
 		t.Helper()
 		dials := countSocketDials(t)
 		var out, errOut bytes.Buffer
-		deliverSlingNudge(target, fake, store, target.cityPath, &out, &errOut)
+		deliverSlingNudge(target, fake, store, store, target.cityPath, "", &out, &errOut)
 		if got := dials.Load(); got != 0 {
 			t.Fatalf("the sling nudge dialed %d gc sockets, want 0", got)
 		}
@@ -589,7 +630,7 @@ func TestWorkerSiteHookContinuationNudgeQueuesNothing(t *testing.T) {
 	}
 	t.Cleanup(func() { startNudgePoller = prevPoller })
 
-	hookContinuationNudgeEnqueue(sessionID)
+	hookContinuationNudgeEnqueue(sessionID, "", io.Discard)
 
 	assertNoNudgeQueued(t, cityDir)
 	if len(pollers) != 0 {
@@ -889,7 +930,7 @@ func TestWorkerSiteSessionResetRefusesBeforeWriting(t *testing.T) {
 	dials := countSocketDials(t)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionReset([]string{sessionID}, &stdout, &stderr); code != 1 {
+	if code := cmdSessionReset([]string{sessionID}, "", &stdout, &stderr, false); code != 1 {
 		t.Fatalf("gc session reset on a worker site = %d, want 1; stdout=%q", code, stdout.String())
 	}
 	if !strings.Contains(stderr.String(), errWorkerSiteResetNeedsController.Error()) {
@@ -916,7 +957,7 @@ func TestWorkerSiteSessionSuspendWritesTheOperatorHold(t *testing.T) {
 	dials := countSocketDials(t)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionSuspend([]string{sessionID}, &stdout, &stderr, true); code != 0 {
+	if code := cmdSessionSuspend([]string{sessionID}, "", &stdout, &stderr, true); code != 0 {
 		t.Fatalf("gc session suspend on a worker site = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	var result sessionActionResult
@@ -955,7 +996,7 @@ func TestWorkerSiteSessionWakeRecordsTheWakeWithANotice(t *testing.T) {
 	dials := countSocketDials(t)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionWake([]string{sessionID}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionWake([]string{sessionID}, "", &stdout, &stderr, false); code != 0 {
 		t.Fatalf("gc session wake on a worker site = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "wake requested") {
@@ -1927,17 +1968,20 @@ func assertNoControllerReached(t *testing.T, dials *atomic.Int32, accepted <-cha
 	}
 }
 
+// workerSiteRestartToken is the incarnation the worker-site restart seeds
+// record; a test sets it as the caller's GC_INSTANCE_TOKEN (SG-3's fence).
+const workerSiteRestartToken = "tok-worker-site"
+
 // workerSiteRestartSeeds are the sessions a restart request reaches: an
-// ordinary one, whose bead marker backs up the runtime flag on a Local city,
-// and a pinned named one, whose marker is mandatory there. On a worker site
-// the marker is the whole request for both.
+// ordinary one and a pinned named one. The row marker is the whole request
+// for both, everywhere (SG-3); on a worker site no runtime hint follows it.
 var workerSiteRestartSeeds = []struct {
 	name string
 	seed map[string]string
 }{
-	{name: "session", seed: map[string]string{"state": "awake", "alias": "worker"}},
+	{name: "session", seed: map[string]string{"state": "awake", "alias": "worker", "instance_token": workerSiteRestartToken}},
 	{name: "pinned named session", seed: map[string]string{
-		"state": "awake", "alias": "worker",
+		"state": "awake", "alias": "worker", "instance_token": workerSiteRestartToken,
 		"configured_named_session": "true", "configured_named_mode": "always", "pin_awake": "true",
 	}},
 }
@@ -1966,11 +2010,12 @@ func TestWorkerSiteRequestRestartRecordsTheBeadMarker(t *testing.T) {
 			cityDir, _ := newWorkerSiteSessionCity(t, tc.seed)
 			t.Setenv("GC_ALIAS", "worker")
 			t.Setenv("GC_SESSION_NAME", "worker-1")
+			t.Setenv("GC_INSTANCE_TOKEN", workerSiteRestartToken)
 			accepted := startFakeControllerSocket(t, cityDir, "ok\n")
 			dials := countSocketDials(t)
 
 			var stdout, stderr bytes.Buffer
-			if code := cmdRuntimeRequestRestart(&stdout, &stderr); code != 0 {
+			if code := cmdRuntimeRequestRestart("", &stdout, &stderr); code != 0 {
 				t.Fatalf("gc runtime request-restart = %d on a worker site, want 0; stderr=%s", code, stderr.String())
 			}
 			if !strings.Contains(stdout.String(), "remote controller") || strings.Contains(stdout.String(), "controller notified") {
@@ -1984,23 +2029,27 @@ func TestWorkerSiteRequestRestartRecordsTheBeadMarker(t *testing.T) {
 }
 
 // TestWorkerSiteRestartWithoutItsMarkerRequestsNothing: the marker is the
-// whole request on a worker site, so request-restart and handoff fail without
-// it and promise no restart, for an ordinary session as for a pinned one.
+// whole request, so request-restart and handoff fail without it and promise no
+// restart, for an ordinary session as for a pinned one. No runtime hint is
+// attempted on a worker site.
 func TestWorkerSiteRestartWithoutItsMarkerRequestsNothing(t *testing.T) {
 	for _, tc := range []struct {
-		name           string
-		persistRestart func() error
+		name   string
+		record func(string) error
 	}{
 		{name: "no restart persistence"},
-		{name: "marker write fails", persistRestart: func() error { return errors.New("ledger unreachable") }},
+		{name: "marker write fails", record: func(string) error { return errors.New("ledger unreachable") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearGCEnv(t)
 			dops := newDrainOps(guard.New())
+			restart := testRowFirstRestart("gc runtime request-restart", "worker", nil, nil)
+			restart.record = tc.record
 
 			rec := events.NewFake()
 			var stdout, stderr bytes.Buffer
-			if code := doRuntimeRequestRestart(dops, tc.persistRestart, false, rec, "worker", "worker", t.TempDir(), &stdout, &stderr); code != 1 {
+			restart.stderr = &stderr
+			if code := doRuntimeRequestRestart(restart, rec, &stdout); code != 1 {
 				t.Fatalf("request-restart = %d, want 1; stderr=%s", code, stderr.String())
 			}
 			if strings.Contains(stdout.String(), "Restart requested") || len(rec.Events) != 0 {
@@ -2014,7 +2063,8 @@ func TestWorkerSiteRestartWithoutItsMarkerRequestsNothing(t *testing.T) {
 			rec = events.NewFake()
 			stdout.Reset()
 			stderr.Reset()
-			outcome := doHandoffWithOutcome(store, store, rec, dops, tc.persistRestart, "worker", "worker", []string{"HANDOFF: context full"}, &stdout, &stderr)
+			restart.verb = "gc handoff"
+			outcome := doHandoffWithOutcome(store, store, rec, dops, restart, "worker", "worker", []string{"HANDOFF: context full"}, &stdout, &stderr)
 			if outcome.code != 1 || outcome.restartRequested || strings.Contains(stdout.String(), "requesting restart") {
 				t.Fatalf("handoff = %+v, stdout = %q; want 1 and no restart promised; stderr=%s", outcome, stdout.String(), stderr.String())
 			}
@@ -2039,14 +2089,17 @@ func TestWorkerSiteHandoffRecordsTheRestart(t *testing.T) {
 			cityDir, _ := newWorkerSiteSessionCity(t, tc.seed)
 			t.Setenv("GC_ALIAS", "worker")
 			t.Setenv("GC_SESSION_NAME", "worker-1")
+			t.Setenv("GC_INSTANCE_TOKEN", workerSiteRestartToken)
 			accepted := startFakeControllerSocket(t, cityDir, "ok\n")
 			dials := countSocketDials(t)
 
 			var stdout, stderr bytes.Buffer
-			if code := cmdHandoffWithForce([]string{"HANDOFF: context full"}, "", false, "", false, &stdout, &stderr); code != 0 {
+			if code := handoffForTest([]string{"HANDOFF: context full"}, "", false, &stdout, &stderr); code != 0 {
 				t.Fatalf("gc handoff = %d on a worker site, want 0; stderr=%s", code, stderr.String())
 			}
-			if !strings.Contains(stdout.String(), "requesting restart") {
+			// The seeded row carries an instance token, so the handoff stages its
+			// brief and reports the accepted restart instead of the plain request.
+			if !strings.Contains(stdout.String(), "requesting restart") && !strings.Contains(stdout.String(), "restart accepted") {
 				t.Fatalf("stdout = %q, want the restart request", stdout.String())
 			}
 			assertWorkerSitePokeNotice(t, stderr.String())
@@ -2070,7 +2123,7 @@ func TestWorkerSiteHandoffRecordsTheRestart(t *testing.T) {
 		dials := countSocketDials(t)
 
 		var stdout, stderr bytes.Buffer
-		if code := cmdHandoffWithForce([]string{"HANDOFF: context full"}, "", false, "", false, &stdout, &stderr); code != 0 {
+		if code := handoffForTest([]string{"HANDOFF: context full"}, "", false, &stdout, &stderr); code != 0 {
 			t.Fatalf("gc handoff = %d on a worker site, want 0; stderr=%s", code, stderr.String())
 		}
 		if !strings.Contains(stdout.String(), "restart skipped") {
@@ -2145,7 +2198,7 @@ func TestWorkerSiteHandoffTargetRefusesBeforeWriting(t *testing.T) {
 
 	for _, target := range []string{sessionID, "no-such-session"} {
 		var stdout, stderr bytes.Buffer
-		if code := cmdHandoffWithForce([]string{"HANDOFF: context full"}, target, false, "", false, &stdout, &stderr); code != 1 {
+		if code := handoffForTest([]string{"HANDOFF: context full"}, target, false, &stdout, &stderr); code != 1 {
 			t.Fatalf("gc handoff --target %s on a worker site = %d, want 1; stdout=%q stderr=%q", target, code, stdout.String(), stderr.String())
 		}
 		if !strings.Contains(stderr.String(), errWorkerSiteHandoffTargetNeedsController.Error()) {

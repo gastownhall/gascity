@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1233,7 +1234,7 @@ func TestDoSlingNudgePoolBeadDerivedSession(t *testing.T) {
 	startNudgePoller = func(_, _, _ string) error { return nil }
 	t.Cleanup(func() { startNudgePoller = prev })
 
-	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, stdout, stderr)
+	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, "", stdout, stderr)
 	if strings.Contains(stdout.String(), "No running sessions") || strings.Contains(stderr.String(), "poke failed") {
 		t.Fatalf("sling nudge missed live bead-derived pool session; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
@@ -1301,7 +1302,7 @@ func TestDoSlingNudgePoolUsesCityStoreForSessionBeads(t *testing.T) {
 	startNudgePoller = func(_, _, _ string) error { return nil }
 	t.Cleanup(func() { startNudgePoller = prevPoller })
 
-	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, stdout, stderr)
+	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, "", stdout, stderr)
 	if strings.Contains(stdout.String(), "No running sessions") || strings.Contains(stderr.String(), "poke failed") {
 		t.Fatalf("sling nudge missed live city-store pool session; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
@@ -1368,7 +1369,7 @@ func TestDoSlingNudgePoolMemberBindingQualifiedCityScope(t *testing.T) {
 	startNudgePoller = func(_, _, _ string) error { return nil }
 	t.Cleanup(func() { startNudgePoller = prev })
 
-	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, stdout, stderr)
+	doSlingNudge(&a, deps.CityName, deps.CityPath, cfg, sp, deps.Store, "", stdout, stderr)
 	if strings.Contains(stderr.String(), "not found in config") {
 		t.Fatalf("doSlingNudge logged 'not found in config' for a binding-qualified pool instance (#4843); stderr=%q", stderr.String())
 	}
@@ -1953,18 +1954,23 @@ type bdInvocation struct {
 // responses for the subcommands cmdSling's inline-text path actually
 // runs (show, create, update). Unexpected subcommands fail the test
 // loudly so drift in sling's bd usage surfaces instead of silently
-// passing. Returns a pointer to the capture slice; auto-restores via
+// passing. Returns a snapshot func for the captured invocations; the runner
+// can be entered from several goroutines at once (a two-tier List reads both
+// tiers concurrently), so the capture is mutex-protected. Auto-restores via
 // t.Cleanup.
-func installCaptureBdRunner(t *testing.T) *[]bdInvocation {
+func installCaptureBdRunner(t *testing.T) func() []bdInvocation {
 	t.Helper()
 	orig := beadsExecCommandRunnerWithEnv
 	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = orig })
 
-	calls := &[]bdInvocation{}
+	var mu sync.Mutex
+	var calls []bdInvocation
 	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
 		snap := maps.Clone(env)
 		return func(dir, name string, args ...string) ([]byte, error) {
-			*calls = append(*calls, bdInvocation{Env: snap, Dir: dir, Args: append([]string(nil), args...)})
+			mu.Lock()
+			calls = append(calls, bdInvocation{Env: snap, Dir: dir, Args: append([]string(nil), args...)})
+			mu.Unlock()
 			if name != "bd" {
 				t.Errorf("unexpected command %q args=%v", name, args)
 				return nil, fmt.Errorf("unexpected command %q", name)
@@ -1990,7 +1996,11 @@ func installCaptureBdRunner(t *testing.T) *[]bdInvocation {
 			}
 		}
 	}
-	return calls
+	return func() []bdInvocation {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(calls)
+	}
 }
 
 // firstBdCreate returns the first `bd create --json` invocation
@@ -2018,7 +2028,7 @@ func TestCmdSlingInlineBeadRigScopedBdProvider(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir, rigDir := setupRigScopedBdCity(t)
-	calls := installCaptureBdRunner(t)
+	captured := installCaptureBdRunner(t)
 
 	t.Chdir(cityDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
@@ -2029,10 +2039,11 @@ func TestCmdSlingInlineBeadRigScopedBdProvider(t *testing.T) {
 		t.Fatalf("cmdSling returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	create := firstBdCreate(t, *calls)
+	calls := captured()
+	create := firstBdCreate(t, calls)
 	wantBeadsDir := filepath.Join(rigDir, ".beads")
 	if got := create.Env["BEADS_DIR"]; got != wantBeadsDir {
-		t.Fatalf("bd create BEADS_DIR = %q, want %q (rig-scoped); all calls: %v", got, wantBeadsDir, *calls)
+		t.Fatalf("bd create BEADS_DIR = %q, want %q (rig-scoped); all calls: %v", got, wantBeadsDir, calls)
 	}
 	if got := create.Env["GC_RIG_ROOT"]; got != rigDir {
 		t.Fatalf("bd create GC_RIG_ROOT = %q, want %q", got, rigDir)
@@ -2053,7 +2064,7 @@ func TestCmdSlingInlineBeadBareTargetFromRigCwdBdProvider(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
 	cityDir, rigDir := setupRigScopedBdCity(t)
-	calls := installCaptureBdRunner(t)
+	captured := installCaptureBdRunner(t)
 
 	t.Chdir(rigDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
@@ -2064,11 +2075,12 @@ func TestCmdSlingInlineBeadBareTargetFromRigCwdBdProvider(t *testing.T) {
 		t.Fatalf("cmdSling returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	create := firstBdCreate(t, *calls)
+	calls := captured()
+	create := firstBdCreate(t, calls)
 	wantBeadsDir := filepath.Join(rigDir, ".beads")
 	if got := create.Env["BEADS_DIR"]; got != wantBeadsDir {
 		t.Fatalf("bd create BEADS_DIR = %q, want %q (rig-scoped). Bare target %q from rig cwd must land in the rig store; all calls: %v",
-			got, wantBeadsDir, "worker", *calls)
+			got, wantBeadsDir, "worker", calls)
 	}
 	// Mirror the env-surface assertions from the qualified-target
 	// variant so a regression that sets BEADS_DIR correctly but drops
@@ -4368,8 +4380,9 @@ version = 1
 	if root.Type != "molecule" {
 		t.Fatalf("attached root type = %q, want molecule", root.Type)
 	}
-	if root.Metadata["gc.kind"] == "wisp" {
-		t.Fatalf("attached root leaked gc.kind=wisp metadata: %+v", root.Metadata)
+	// The root stays a wisp (graph class): only its type keeps it private.
+	if root.Metadata["gc.kind"] != "wisp" {
+		t.Fatalf("attached root lost its gc.kind=wisp marker: %+v", root.Metadata)
 	}
 	ready, err := deps.Store.Ready()
 	if err != nil {
@@ -9538,5 +9551,70 @@ func TestCmdSlingMultiDefaultTargetsEmptyEntryRejected(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "empty entry") {
 		t.Errorf("stderr = %q, want to mention 'empty entry'", stderr.String())
+	}
+}
+
+// Review 6a: on a single-store bd-1.0.5 city the bead-policy layer maps the
+// wisp policy onto the ephemeral tier, which bd's own wisp GC (`gc bd mol wisp
+// gc --age`) reaps by age. The attached root-only wisp keeps its gc.kind=wisp
+// marker but must stay on the durable tier: it lives exactly as long as its
+// source bead. A standalone root-only wisp keeps the ephemeral tier.
+func TestAttachedRootOnlyWispIsNotEphemeralOnABd105City(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "root-only.toml"), []byte("formula = \"root-only\"\nversion = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		FormulaLayers: config.FormulaLayers{City: []string{dir}},
+		Beads:         config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105},
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	runner := newFakeRunner()
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg)
+	src, err := deps.Store.Create(beads.Bead{Title: "Work", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := testOpts(a, src.ID)
+	opts.OnFormula = "root-only"
+	if code := doSling(opts, deps, deps.Store, stdout, stderr); code != 0 {
+		t.Fatalf("doSling --on returned %d; stderr: %s", code, stderr.String())
+	}
+	source, err := deps.Store.Get(src.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := deps.Store.Get(source.Metadata["molecule_id"])
+	if err != nil {
+		t.Fatalf("attached root: %v", err)
+	}
+	if root.Metadata["gc.kind"] != "wisp" {
+		t.Fatalf("attached root lost its wisp marker: %+v", root.Metadata)
+	}
+	if root.Ephemeral {
+		t.Fatalf("attached root-only wisp %s is on the ephemeral tier; bd's wisp GC would reap it while its source %s is live", root.ID, src.ID)
+	}
+
+	standalone := testOpts(a, "root-only")
+	standalone.IsFormula = true
+	stdout.Reset()
+	stderr.Reset()
+	if code := doSling(standalone, deps, deps.Store, stdout, stderr); code != 0 {
+		t.Fatalf("doSling --formula returned %d; stderr: %s", code, stderr.String())
+	}
+	rows, err := deps.Store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth, Metadata: map[string]string{"gc.kind": "wisp"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundEphemeral := false
+	for _, b := range rows {
+		if b.Type != "molecule" && b.Ephemeral {
+			foundEphemeral = true
+		}
+	}
+	if !foundEphemeral {
+		t.Fatalf("standalone root-only wisp is not ephemeral on a bd-1.0.5 city: %+v", rows)
 	}
 }

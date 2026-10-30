@@ -18,7 +18,7 @@ func newStagedHandoff(t *testing.T) (*Provider, *beads.MemStore, mail.Message) {
 	t.Helper()
 	store := beads.NewMemStore()
 	provider := New(store)
-	message, err := provider.SendHandoff(mail.HandoffIntent{
+	message, _, err := provider.SendHandoff(mail.HandoffIntent{
 		From:     "worker",
 		To:       "worker",
 		Subject:  "context cycle",
@@ -152,7 +152,7 @@ func assertNoStagedMessages(t *testing.T, surface string, messages []mail.Messag
 func TestExistingOrdinaryAutoHandoffRemainsVisible(t *testing.T) {
 	store := beads.NewMemStore()
 	provider := New(store)
-	message, err := provider.SendHandoff(mail.HandoffIntent{
+	message, _, err := provider.SendHandoff(mail.HandoffIntent{
 		From:     "worker",
 		To:       "worker",
 		Subject:  "legacy context cycle",

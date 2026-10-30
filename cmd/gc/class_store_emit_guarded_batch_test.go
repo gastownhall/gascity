@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -159,5 +160,162 @@ func TestEmittingClassStoreGuardedBatchSkipsACreateItCannotReRead(t *testing.T) 
 	}
 	if len(warned) != 1 || !strings.Contains(warned[0], "gc-gbunread") {
 		t.Errorf("diagnostics = %q, want one naming the skipped create gc-gbunread", warned)
+	}
+}
+
+// ctxEndingReadStore ends the batch's context on its first row read after a
+// batch landed, standing in for re-reads that run past the caller's deadline.
+type ctxEndingReadStore struct {
+	*beads.MemStore
+	cancel context.CancelFunc
+	// landed is set once a batch has landed; reads counts the row reads
+	// since.
+	landed bool
+	reads  int
+}
+
+func (s *ctxEndingReadStore) Get(id string) (beads.Bead, error) {
+	if s.landed {
+		s.reads++
+		s.cancel()
+	}
+	return s.MemStore.Get(id)
+}
+
+func (s *ctxEndingReadStore) GuardedBatcherHandle() (beads.GuardedBatcher, bool) {
+	return s, true
+}
+
+func (s *ctxEndingReadStore) ApplyGuarded(ctx context.Context, b beads.GuardedBatch) (beads.GuardedResult, error) {
+	res, err := s.MemStore.ApplyGuarded(ctx, b)
+	s.landed = err == nil
+	return res, err
+}
+
+// A batch that lands before its context ends still succeeds, but the
+// emitter's re-reads stop once that context ends: no more rows are read and
+// nothing is journaled, with one diagnostic, so a caller bounded by the
+// context (the in-band hook pass) is not held past it.
+func TestEmittingClassStoreGuardedBatchStopsOnceItsContextEnds(t *testing.T) {
+	cityPath := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	leaf := &ctxEndingReadStore{MemStore: beads.NewMemStore(), cancel: cancel}
+	row, err := leaf.Create(beads.Bead{Title: "row"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	var warned []string
+	restore := classStoreEmitWarn
+	classStoreEmitWarn = func(err error) { warned = append(warned, err.Error()) }
+	t.Cleanup(func() { classStoreEmitWarn = restore })
+
+	store := &emittingClassStore{Store: leaf, cityPath: cityPath}
+	closed := "closed"
+	if _, err := store.ApplyGuarded(ctx, beads.GuardedBatch{Items: []beads.GuardedItem{
+		{Create: &beads.Bead{ID: "gc-gblate", Title: "late"}},
+		{Update: &beads.GuardedUpdate{ID: row.ID, ExpectedRevision: &row.Revision, Opts: beads.UpdateOpts{Status: &closed}}},
+	}}); err != nil {
+		t.Fatalf("ApplyGuarded = %v; want the landed batch's success", err)
+	}
+	if got, err := leaf.MemStore.Get(row.ID); err != nil || got.Status != closed {
+		t.Fatalf("row after the batch = %+v, %v; want it closed", got, err)
+	}
+	if leaf.reads != 1 {
+		t.Errorf("emitter read %d rows after the batch, want the one that ended the context", leaf.reads)
+	}
+	if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 0 {
+		t.Errorf("journaled %s after the context ended, want nothing", eventSummary(got))
+	}
+	if len(warned) != 1 || !strings.Contains(warned[0], "bead.* skipped") || !strings.Contains(warned[0], context.Canceled.Error()) {
+		t.Errorf("diagnostics = %q, want one saying the events were skipped for the ended context", warned)
+	}
+}
+
+// A batch whose context has already ended is not applied: the emitter reads
+// nothing and returns the context's cause, and nothing is written.
+func TestEmittingClassStoreGuardedBatchAppliesNothingPastItsContext(t *testing.T) {
+	cityPath := t.TempDir()
+	leaf := &getCountingGuardedStore{MemStore: beads.NewMemStore()}
+	row, err := leaf.Create(beads.Bead{Title: "row"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cause := errors.New("the hook's settle-by time passed")
+	cancel(cause)
+	store := &emittingClassStore{Store: leaf, cityPath: cityPath}
+	closed := "closed"
+	leaf.gets = 0
+	if _, err := store.ApplyGuarded(ctx, beads.GuardedBatch{Items: []beads.GuardedItem{
+		{Create: &beads.Bead{ID: "gc-gbpast", Title: "past"}},
+		{Update: &beads.GuardedUpdate{ID: row.ID, ExpectedRevision: &row.Revision, Opts: beads.UpdateOpts{Status: &closed}}},
+	}}); !errors.Is(err, cause) {
+		t.Fatalf("ApplyGuarded = %v; want the context's cause", err)
+	}
+	if _, err := leaf.MemStore.Get("gc-gbpast"); err == nil {
+		t.Fatal("the batch landed though its context had ended")
+	}
+	if leaf.gets != 0 {
+		t.Errorf("emitter read %d rows, want none", leaf.gets)
+	}
+	if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 0 {
+		t.Errorf("journaled %s, want nothing", eventSummary(got))
+	}
+}
+
+// ctxEndingPreReadStore ends the batch's context on the emitter's row read
+// before the batch, as a pre-read that runs past the caller's deadline would,
+// and counts the batches handed to it. It applies them without consulting
+// ctx, as a backing that starts work before it looks at ctx does.
+type ctxEndingPreReadStore struct {
+	*beads.MemStore
+	cancel  context.CancelCauseFunc
+	cause   error
+	batches int
+}
+
+func (s *ctxEndingPreReadStore) Get(id string) (beads.Bead, error) {
+	s.cancel(s.cause)
+	return s.MemStore.Get(id)
+}
+
+func (s *ctxEndingPreReadStore) GuardedBatcherHandle() (beads.GuardedBatcher, bool) {
+	return s, true
+}
+
+func (s *ctxEndingPreReadStore) ApplyGuarded(ctx context.Context, b beads.GuardedBatch) (beads.GuardedResult, error) {
+	s.batches++
+	return s.MemStore.ApplyGuarded(context.WithoutCancel(ctx), b)
+}
+
+// A batch whose context ends during the emitter's last read before it is not
+// handed to the backing, whatever the backing does with an ended context: the
+// emitter returns the context's cause, and nothing is written or journaled.
+func TestEmittingClassStoreGuardedBatchAppliesNothingOnceAPreReadEndsItsContext(t *testing.T) {
+	cityPath := t.TempDir()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	leaf := &ctxEndingPreReadStore{MemStore: beads.NewMemStore(), cancel: cancel, cause: errors.New("the hook's settle-by time passed")}
+	row, err := leaf.Create(beads.Bead{Title: "row"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	store := &emittingClassStore{Store: leaf, cityPath: cityPath}
+	closed := "closed"
+	if _, err := store.ApplyGuarded(ctx, beads.GuardedBatch{Items: []beads.GuardedItem{
+		{Create: &beads.Bead{ID: "gc-gbpreread", Title: "pre-read"}},
+		{Update: &beads.GuardedUpdate{ID: row.ID, ExpectedRevision: &row.Revision, Opts: beads.UpdateOpts{Status: &closed}}},
+	}}); !errors.Is(err, leaf.cause) {
+		t.Fatalf("ApplyGuarded = %v; want the context's cause", err)
+	}
+	if leaf.batches != 0 {
+		t.Fatalf("the backing was handed %d batches after the context ended, want none", leaf.batches)
+	}
+	if got, err := leaf.MemStore.Get(row.ID); err != nil || got.Status == closed {
+		t.Fatalf("row = %+v, %v; want it unwritten", got, err)
+	}
+	if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 0 {
+		t.Errorf("journaled %s, want nothing", eventSummary(got))
 	}
 }

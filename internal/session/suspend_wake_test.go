@@ -82,6 +82,7 @@ func TestOperatorSuspendHoldsTheRow(t *testing.T) {
 	}{
 		"operator":                    {state: StateActive, suspend: operatorSuspend, held: true},
 		"operator on sweep-suspended": {state: StateSuspended, suspend: operatorSuspend, held: true},
+		"operator on drained":         {state: StateDrained, suspend: operatorSuspend, held: true},
 		"shutdown":                    {state: StateActive, suspend: sweepSuspend},
 		"chat idle":                   {state: StateActive, suspend: idleSuspend},
 		"chat idle on suspended":      {state: StateSuspended, suspend: idleSuspend},
@@ -104,6 +105,33 @@ func TestOperatorSuspendHoldsTheRow(t *testing.T) {
 				got.Metadata["suspended_at"] == now.Format(time.RFC3339)
 			if got.Metadata["held_until"] != "" && !held || held != tc.held || got.Metadata["state"] != string(StateSuspended) {
 				t.Fatalf("state=%q held_until=%q sleep_intent=%q, want suspended held=%v", got.Metadata["state"], got.Metadata["held_until"], got.Metadata["sleep_intent"], tc.held)
+			}
+		})
+	}
+}
+
+// TestOnlyTheOperatorSuspendsADrainedRow: an operator's suspend holds a
+// drained row (TestOperatorSuspendHoldsTheRow), but the shutdown sweep and
+// the idle auto-suspend write no hold, so they leave a drained row to its
+// drain: they still refuse it, and the row stays drained.
+func TestOnlyTheOperatorSuspendsADrainedRow(t *testing.T) {
+	for name, suspend := range map[string]func(m *Manager, id string) error{
+		"shutdown":  sweepSuspend,
+		"chat idle": idleSuspend,
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			mgr := newTestManager(t, store, runtime.NewFake())
+			b := wakeRow(t, store)
+			if err := store.SetMetadata(b.ID, "state", string(StateDrained)); err != nil {
+				t.Fatal(err)
+			}
+			var illegal *IllegalTransitionError
+			if err := suspend(mgr, b.ID); !errors.As(err, &illegal) {
+				t.Fatalf("suspend of a drained row = %v, want an illegal transition", err)
+			}
+			if got := mustGet(t, store, b.ID).Metadata; got["state"] != string(StateDrained) || got["held_until"] != "" {
+				t.Fatalf("state=%q held_until=%q, want the row left drained", got["state"], got["held_until"])
 			}
 		})
 	}

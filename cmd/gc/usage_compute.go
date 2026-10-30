@@ -267,7 +267,8 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		if cr.cfg == nil {
 			return nil
 		}
-		f, ferr := workerFactoryWithConfig(cr.cityPath, store, cr.sp, cr.cfg)
+		f, ferr := workerFactoryWithAttribution(cr.cityPath, store, cr.sp, cr.cfg, nil,
+			cr.formulaBeadResolver(cr.cfg, nil), cr.formulaMemo())
 		if ferr != nil {
 			logf("usage: building worker factory for model-usage sweep failed: %v", ferr)
 			return nil

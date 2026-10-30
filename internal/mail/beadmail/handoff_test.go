@@ -17,7 +17,7 @@ func TestSendHandoffConfinesBeadSerialization(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
-	msg, err := p.SendHandoff(mail.HandoffIntent{
+	msg, _, err := p.SendHandoff(mail.HandoffIntent{
 		From:     "mayor",
 		To:       "mayor",
 		Subject:  "HANDOFF: context full",
@@ -101,7 +101,7 @@ func TestSendHandoffResolvesSenderRoute(t *testing.T) {
 		t.Fatalf("Create session: %v", err)
 	}
 
-	msg, err := p.SendHandoff(mail.HandoffIntent{
+	msg, _, err := p.SendHandoff(mail.HandoffIntent{
 		From:     sess.ID,
 		To:       "human",
 		Subject:  "HANDOFF: context cycle",
@@ -123,5 +123,72 @@ func TestSendHandoffResolvesSenderRoute(t *testing.T) {
 	}
 	if got := b.Metadata[mail.FromDisplayMetadataKey]; got != "sky" {
 		t.Errorf("from-display metadata = %q, want %q", got, "sky")
+	}
+}
+
+func autoHandoffIntent() mail.HandoffIntent {
+	return mail.HandoffIntent{
+		From:        "mayor",
+		To:          "mayor",
+		Subject:     "HANDOFF: context full",
+		Body:        "drain now",
+		ThreadID:    "thread-deadbeef",
+		DedupKey:    "precompact:s1",
+		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	}
+}
+
+func TestSendHandoffSuppressesWhileUnreadHandoffPending(t *testing.T) {
+	p := New(beads.NewMemStore())
+
+	first, suppressed, err := p.SendHandoff(autoHandoffIntent())
+	if err != nil || suppressed {
+		t.Fatalf("first SendHandoff = suppressed %v, err %v; want created", suppressed, err)
+	}
+	second, suppressed, err := p.SendHandoff(autoHandoffIntent())
+	if err != nil {
+		t.Fatalf("second SendHandoff: %v", err)
+	}
+	if !suppressed {
+		t.Fatal("second send while first is unread not suppressed; want suppressed")
+	}
+	if second.ID != first.ID {
+		t.Fatalf("suppressed send returned %s, want the pending %s", second.ID, first.ID)
+	}
+}
+
+func TestSendHandoffResendsAfterPendingHandoffRead(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	first, _, err := p.SendHandoff(autoHandoffIntent())
+	if err != nil {
+		t.Fatalf("first SendHandoff: %v", err)
+	}
+	if err := p.MarkRead(first.ID); err != nil {
+		t.Fatalf("MarkRead: %v", err)
+	}
+	b, err := store.Get(first.ID)
+	if err != nil || b.Status != "open" {
+		t.Fatalf("read handoff = status %q, err %v; want it still open", b.Status, err)
+	}
+
+	second, suppressed, err := p.SendHandoff(autoHandoffIntent())
+	if err != nil {
+		t.Fatalf("second SendHandoff: %v", err)
+	}
+	if suppressed {
+		t.Fatal("send after the pending handoff was read suppressed; want a fresh unread handoff")
+	}
+	if second.ID == first.ID {
+		t.Fatalf("second send reused %s; want a new message", first.ID)
+	}
+
+	pending, err := p.CheckAutoHandoffs([]string{"mayor"})
+	if err != nil {
+		t.Fatalf("CheckAutoHandoffs: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != second.ID {
+		t.Fatalf("injectable handoffs = %v, want exactly the new %s", pending, second.ID)
 	}
 }

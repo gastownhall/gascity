@@ -2351,6 +2351,109 @@ func TestSubmitDefaultQueuesOverACrashedAgent(t *testing.T) {
 	}
 }
 
+// busyNudgeProvider defers every wait-idle Nudge with runtime.ErrSessionBusy,
+// typing nothing, the way the tmux provider answers a Codex pane still running
+// a turn when its wait for idle runs out.
+type busyNudgeProvider struct{ *runtime.Fake }
+
+func (p *busyNudgeProvider) Nudge(name string, _ []runtime.ContentBlock) error {
+	return fmt.Errorf("%w: session %q is still running a turn", runtime.ErrSessionBusy, name)
+}
+
+// TestSendQueuesWhenTheRuntimeDefersABusySession: a default send the runtime
+// defers rather than interrupt a running turn is queued for later delivery
+// (queued, deferred), not reported as a failure that loses it; the live-only
+// send, whose caller is the queue itself, reports the deferral so the queue
+// keeps its item.
+func TestSendQueuesWhenTheRuntimeDefersABusySession(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &busyNudgeProvider{Fake: runtime.NewFake()}
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	origPoller := startSessionSubmitPoller
+	startSessionSubmitPoller = func(string, string, string) error { return nil }
+	defer func() { startSessionSubmitPoller = origPoller }()
+	hints := runtime.Config{WorkDir: info.WorkDir}
+
+	out, err := mgr.Send(context.Background(), testActor(mgr, ActorBackground), info.ID, "while you work", BuildResumeCommand(info), hints)
+	if err != nil || !out.Queued || !out.Deferred {
+		t.Fatalf("Send = %+v, %v; want queued and deferred", out, err)
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Pending) != 1 || state.Pending[0].SessionID != info.ID || state.Pending[0].Message != "while you work" {
+		t.Fatalf("pending %+v, want the message queued for the session", state.Pending)
+	}
+
+	delivered, err := mgr.SendLiveOnly(context.Background(), info.ID, "x", nil)
+	if delivered || !errors.Is(err, runtime.ErrSessionBusy) {
+		t.Fatalf("SendLiveOnly = %t, %v; want undelivered with runtime.ErrSessionBusy", delivered, err)
+	}
+}
+
+// TestSubmitDefaultCodexQueuesWhenTheRuntimeDefersABusyTurn: a default Codex
+// submit goes out through NudgeNow, and the tmux runtime answers a Codex pane
+// still running a turn with runtime.ErrSessionBusy, nothing typed, rather than
+// lead its submit with an Escape that aborts that turn. The submit is then
+// queued for the next idle boundary, never reported delivered.
+func TestSubmitDefaultCodexQueuesWhenTheRuntimeDefersABusyTurn(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	origPoller := startSessionSubmitPoller
+	startSessionSubmitPoller = func(string, string, string) error { return nil }
+	defer func() { startSessionSubmitPoller = origPoller }()
+	sp.NudgeErrors = map[string]error{info.SessionName: fmt.Errorf("%w: session %q is still running a turn", runtime.ErrSessionBusy, info.SessionName)}
+
+	out, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "marker", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
+	if err != nil || !out.Queued {
+		t.Fatalf("Submit(default) = %+v, %v; want queued", out, err)
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Pending) != 1 || state.Pending[0].SessionID != info.ID || state.Pending[0].Message != "marker" {
+		t.Fatalf("pending %+v, want the submit queued for the session", state.Pending)
+	}
+}
+
+// TestSubmitDefaultCodexReportsALostDeliveryAsAFailure: when the runtime
+// proves the message never landed (the tmux runtime's ErrNudgeSubmitLost:
+// Codex's rollout records the turn aborted and never the message), the submit
+// fails rather than report a delivery. Only a delivery the runtime proved
+// (runtime.ErrNudgeDeliveredUnobserved) counts as one.
+func TestSubmitDefaultCodexReportsALostDeliveryAsAFailure(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := newTestManager(t, store, sp)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	lost := errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed): the provider ended the turn before it recorded the message")
+	sp.NudgeErrors = map[string]error{info.SessionName: lost}
+
+	out, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "marker", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
+	if !errors.Is(err, lost) {
+		t.Fatalf("Submit(default) = %+v, %v; want the lost delivery reported", out, err)
+	}
+	if out.Queued {
+		t.Fatalf("Submit(default) = %+v, want not queued", out)
+	}
+}
+
 // TestSendPathsQueueOverACrashedAgent (mc-wdjni): every send path, not only
 // Submit's default, holds text off a pane whose agent is dead: Send and
 // SendImmediate queue it (queued, deferred), the live-only sends and the

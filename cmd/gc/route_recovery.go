@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -73,6 +74,20 @@ func carriedPoolRoute(b beads.Bead) string {
 func (cr *CityRuntime) routeRecoveryLaneOf() *routeRecoveryLane {
 	cr.routeRecoveryOnce.Do(func() { cr.routeRecovery = newRouteRecoveryLane() })
 	return cr.routeRecovery
+}
+
+// claimLoopGuardOf is the runtime's claim-loop guard, created on first use. Its
+// alerts go to the runtime's recorder and stderr.
+func (cr *CityRuntime) claimLoopGuardOf() *claimLoopGuard {
+	cr.claimLoopOnce.Do(func() {
+		record := func(e events.Event) {
+			if cr.rec != nil {
+				cr.rec.Record(e)
+			}
+		}
+		cr.claimLoop = newClaimLoopGuard(record, cr.stderr)
+	})
+	return cr.claimLoop
 }
 
 // routeRecoveryEventProvider is the journal the delta feed tails, or nil when
@@ -223,10 +238,11 @@ func (cr *CityRuntime) recoverUnroutedWorkRoutesDelta() routeRecoveryReport {
 // feed that makes the tick's delta passes possible, and the background sweeps
 // that converge what the feed can miss.
 //
-// One feed, three lanes plus the completion-fact index. A second watcher on the
-// same journal would be a second cursor to keep honest, and the gap semantics
-// have to be identical anyway: an event the tail missed is a gap for ALL of
-// them.
+// One feed, three lanes plus the completion-fact index and the claim-loop
+// guard. A second watcher on the same journal would be a second cursor to keep
+// honest, and the lanes' gap semantics have to be identical anyway: an event the
+// tail missed is a gap for ALL of the lanes. The guard is the one consumer that
+// treats a gap as nothing (see below).
 //
 // The sweeps are minutes of sequential remote reads on a large city — together
 // 88% of a 373s tick before this slice and its predecessor — so they run off the
@@ -237,6 +253,12 @@ func (cr *CityRuntime) startTickDeltaLanes(ctx context.Context, prov events.Prov
 	route := cr.routeRecoveryLaneOf()
 	completions := cr.completionsLaneOf()
 	orphans := cr.detachedOrphanLaneOf()
+	// The claim-loop guard rides the same feed and is published for the demand
+	// passes, which reach it by city path (claim_loop_guard.go). It needs no gap
+	// handling: a missed claim failure only delays a hold, and a missed bead
+	// change is covered by the hold's own expiry.
+	claimLoop := cr.claimLoopGuardOf()
+	registerClaimLoopGuard(ctx, cr.cityPath, claimLoop)
 	watchJournalForDeltaLanes(ctx, prov,
 		func() {
 			route.force(backstopReasonCursorGap)
@@ -249,8 +271,12 @@ func (cr *CityRuntime) startTickDeltaLanes(ctx context.Context, prov events.Prov
 			completions.observe(evt)
 			orphans.observe(evt)
 			cr.absorbCompletionFact(evt)
+			claimLoop.observe(evt)
 		})
 	go cr.runRouteRecoveryBackstopLoop(ctx, route)
+	// The cross-store gate lane reads work stores, so it polls off the tick
+	// too (cross_store_gate_lane.go).
+	go cr.runCrossStoreGateLoop(ctx)
 	go cr.runCompletionsSweepLoop(ctx, completions)
 	go cr.runDetachedOrphanBackstopLoop(ctx, orphans)
 }
@@ -268,7 +294,36 @@ func (cr *CityRuntime) runRouteRecoveryBackstopLoop(ctx context.Context, lane *r
 		if reason, due := lane.backstopDue(time.Now()); due {
 			cr.safeTick(func() { cr.runRouteRecoveryBackstop(reason) }, "route-recovery-backstop")
 		}
+		cr.safeTick(func() { cr.runRouteRecoveryLedgerDeferred() }, "route-recovery-ledger-deferred")
 	}
+}
+
+// runRouteRecoveryLedgerDeferred repairs, off the tick, the named candidates the
+// tick's delta pass found in no binding (work beads on a work leg, read-audit
+// R11). An empty queue reads nothing and builds no plan.
+func (cr *CityRuntime) runRouteRecoveryLedgerDeferred() routeRecoveryReport {
+	if cr.beadsQuiescent.Load() {
+		// Suspended with nothing running: no store is read until resume, and
+		// the queue waits for it.
+		return routeRecoveryReport{lane: "ledger-delta"}
+	}
+	lane := cr.routeRecoveryLaneOf()
+	candidates := lane.takeLedgerPending()
+	if len(candidates) == 0 {
+		return routeRecoveryReport{lane: "ledger-delta"}
+	}
+	plan, err := cr.routeRecoveryPlan()
+	if err != nil {
+		fmt.Fprintf(cr.stderr, "%s: route recovery: resolving work legs: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		lane.force(backstopReasonCursorGap)
+		return routeRecoveryReport{lane: "ledger-delta", candidates: len(candidates), err: err}
+	}
+	report := lane.ledgerCandidatePass(plan, candidates)
+	if report.partial || report.err != nil {
+		lane.force(backstopReasonLegDegrade)
+	}
+	cr.logRouteRecovery(report)
+	return report
 }
 
 // backstopPollInterval is how often a background convergence lane asks whether
@@ -295,10 +350,23 @@ func (cr *CityRuntime) logRouteRecovery(report routeRecoveryReport) {
 			len(report.flapping), routeRecoveryFlapLimit, strings.Join(report.flapping, " "))
 		fmt.Fprintf(cr.stderr, "%s: route recovery (%s): %s\n", cr.logPrefix, report.lane, flap) //nolint:errcheck // best-effort stderr
 	}
-	if report.offPlaneRouted > 0 {
-		// Loud, because the tick's demand read cannot see these and therefore
-		// spawns nothing for them. The remedy is a migration, not a wider tick.
-		fmt.Fprintf(cr.stderr, "%s: route recovery (%s): %d open routed bead(s) sit on a work leg the runtime plane does not read, so no pool seat is spawned for them; run `gc storage migrate` to move them to the infra binding\n", cr.logPrefix, report.lane, report.offPlaneRouted) //nolint:errcheck // best-effort stderr
+	if report.offPlaneInfra > 0 {
+		// Loud, because no runtime reader looks for an infrastructure-class row
+		// in a work store. A work-class bead never moves and a single-store
+		// city has nothing to move (#7410). Rig-resident residue is pre-S4
+		// graph history, which `gc storage migrate --from-rigs` moves (S4b),
+		// so it names that command per rig; residue in the city work store
+		// stays the operator's decision.
+		remedy := "need an operator decision"
+		if len(report.offPlaneRigs) > 0 {
+			rigs := slices.Sorted(slices.Values(report.offPlaneRigs))
+			commands := make([]string, 0, len(rigs))
+			for _, rig := range rigs {
+				commands = append(commands, "`"+rigImportInstruction(rig)+"`")
+			}
+			remedy = "are rig graph history; import them with " + strings.Join(commands, ", ")
+		}
+		fmt.Fprintf(cr.stderr, "%s: route recovery (%s): %d open routed infrastructure-class bead(s) sit in a work store, outside the class binding their class is served from, where no runtime reader looks for them (e.g. %s); they are pre-split residue the storage migration did not move and %s\n", cr.logPrefix, report.lane, report.offPlaneInfra, strings.Join(report.offPlaneSample, " "), remedy) //nolint:errcheck // best-effort stderr
 	}
 	if report.quarantined > 0 {
 		fmt.Fprintf(cr.stderr, "%s: route recovery (%s): quarantined %d bead(s) for operator review (`gc doctor` route-recovery-quarantine)\n", cr.logPrefix, report.lane, report.quarantined) //nolint:errcheck // best-effort stderr

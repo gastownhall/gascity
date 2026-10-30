@@ -578,7 +578,7 @@ var wakeSignalMentions = map[string]bool{
 	"reconcile_wake.go:(*controllerWake).OnBeadEvent":           true,
 	"reconcile_wake.go:(*CityRuntime).initWake":                 true,
 	"reconcile_wiring.go:type controllerWiring":                 true,
-	"reconcile_wiring.go:newControllerWiring":                   true,
+	"reconcile_wiring.go:newControllerWiringLoggingTo":          true,
 	"reconcile_wiring.go:(*controllerWiring).runtimeParams":     true, // hands the wiring's signals to the runtime
 }
 

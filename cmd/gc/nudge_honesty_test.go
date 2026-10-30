@@ -58,7 +58,7 @@ func TestQueuedNudgeResultNamesTheQueueAndTheDowngrade(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	if code := writeQueuedSessionNudgeResult(target, nudgeDeliveryWaitIdle, false,
-		worker.NudgeUndeliveredProviderUnsupported, &stdout, &stderr); code != 0 {
+		worker.NudgeUndeliveredProviderUnsupported, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("writeQueuedSessionNudgeResult = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	out := stdout.String()
@@ -72,7 +72,7 @@ func TestQueuedNudgeResultNamesTheQueueAndTheDowngrade(t *testing.T) {
 	// Control: a nudge queued BY REQUEST carries no downgrade note — the note
 	// must describe something that happened, not decorate every queue write.
 	stdout.Reset()
-	if code := writeQueuedSessionNudgeResult(target, nudgeDeliveryQueue, false, "", &stdout, &stderr); code != 0 {
+	if code := writeQueuedSessionNudgeResult(target, nudgeDeliveryQueue, false, "", nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("writeQueuedSessionNudgeResult = %d, want 0", code)
 	}
 	out = stdout.String()

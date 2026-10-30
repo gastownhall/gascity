@@ -23,7 +23,10 @@ package main
 //
 // The confirming read goes to the store whose configured prefix owns the id,
 // or on the unconfigured fallback to the first store that holds the row
-// (liveReadOwner).
+// (liveReadOwner). A migrated relic's id may also have a row in the binding
+// that holds the relic; then the read takes the first store whose row reads
+// closed (liveCloseOwner), so an open work bead reusing the id does not refute
+// the relic's close.
 //
 // Known limits: the first census of a cache only seeds it, so a close made
 // while the controller was down, or a row opened and closed between two
@@ -297,9 +300,17 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 		}
 		cs.mu.RLock()
 		stores := cs.beadEventStoresLocked(id)
+		probe := cs.beadEventRelicProbeLocked(id)
 		storeRef := cs.autocloseStoreRefLocked(id)
 		suspendedStore := cs.anySuspendedRigStoreLocked(stores)
 		cs.mu.RUnlock()
+		relic, _ := probe.residentStore(id)
+		if relic != nil {
+			stores = withRelicStore(stores, relic)
+		}
+		// The sweep's reads see the split-strict gate's views, like the
+		// event path's (identity in production).
+		stores, relic = splitStrictEventStores(id, stores, relic)
 		if len(stores) == 0 {
 			continue
 		}
@@ -310,11 +321,11 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 			sweep.deferID(id, now.Add(sweep.interval))
 			continue
 		}
-		store, live, err := liveReadOwner(stores, id)
+		store, live, err := liveCloseOwner(stores, id, relic)
 		switch confirmInferredClose(live, err) {
 		case closeConfirmed:
 			cs.emitCompletedFact(live, autocloseSweepActor)
-			if cs.beadCloseAutoclose(id, store, storeRef)() {
+			if cs.beadCloseAutoclose(id, store, relicStoreRef(store, relic, storeRef))() {
 				res.Ran++
 			} else {
 				res.Retried++

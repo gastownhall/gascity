@@ -144,7 +144,7 @@ func TestDoHookClaimUsesSelectedStoreContextForMutationAndContinuation(t *testin
 			return nil
 		},
 		DrainAck:                 func(io.Writer) error { return nil },
-		EnqueueContinuationNudge: func(string) {},
+		EnqueueContinuationNudge: func(string, string, io.Writer) {},
 	}
 
 	var stdout, stderr bytes.Buffer

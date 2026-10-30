@@ -252,7 +252,7 @@ func (s *writeCountingStore) Close(id string) error {
 func TestArchiveFromInboxRetiresWithoutRereading(t *testing.T) {
 	store := &writeCountingStore{readCountingStore: &readCountingStore{MemStore: beads.NewMemStore()}}
 	p := New(store)
-	handoff, err := p.SendHandoff(mail.HandoffIntent{
+	handoff, _, err := p.SendHandoff(mail.HandoffIntent{
 		From: "human", To: "sky", Subject: "context cycle", ThreadID: "t1",
 		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
 	})
@@ -263,7 +263,7 @@ func TestArchiveFromInboxRetiresWithoutRereading(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	elsewhere, err := p.SendHandoff(mail.HandoffIntent{
+	elsewhere, _, err := p.SendHandoff(mail.HandoffIntent{
 		From: "human", To: "other", Subject: "not this inbox", ThreadID: "t2",
 		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
 	})
@@ -316,7 +316,7 @@ func TestArchiveFromInboxRetiresWithoutRereading(t *testing.T) {
 func TestArchiveWhoseLabelWriteFailsStillRetiresTheHandoff(t *testing.T) {
 	store := &writeCountingStore{readCountingStore: &readCountingStore{MemStore: beads.NewMemStore()}}
 	p := New(store)
-	handoff, err := p.SendHandoff(mail.HandoffIntent{
+	handoff, _, err := p.SendHandoff(mail.HandoffIntent{
 		From: "human", To: "sky", Subject: "context cycle", ThreadID: "t1",
 		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
 	})
@@ -372,7 +372,7 @@ func TestArchiveFromInboxClosesEveryHandoffBeforeAnyLabel(t *testing.T) {
 			p := New(store)
 			var ids []string
 			for _, thread := range []string{"t1", "t2"} {
-				handoff, err := p.SendHandoff(mail.HandoffIntent{
+				handoff, _, err := p.SendHandoff(mail.HandoffIntent{
 					From: "human", To: "sky", Subject: "context cycle " + thread, ThreadID: thread,
 					ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
 				})
@@ -419,11 +419,11 @@ func TestInboxUnreadAutoHandoffsMatchesCheckAutoHandoffs(t *testing.T) {
 	_, p, info := newInboxFixture(t)
 	labels := []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}
 	for i, to := range []string{"sky", info.ID, "old-sky", "someone-else"} {
-		if _, err := p.SendHandoff(mail.HandoffIntent{From: "sky", To: to, Subject: "handoff " + to, ThreadID: "t" + to, ExtraLabels: labels}); err != nil {
+		if _, _, err := p.SendHandoff(mail.HandoffIntent{From: "sky", To: to, Subject: "handoff " + to, ThreadID: "t" + to, ExtraLabels: labels}); err != nil {
 			t.Fatalf("SendHandoff %d: %v", i, err)
 		}
 	}
-	if _, err := p.SendHandoff(mail.HandoffIntent{From: "sky", To: "sky", Subject: "not archive-after-inject", ThreadID: "plain", ExtraLabels: []string{mail.AutoHandoffLabel}}); err != nil {
+	if _, _, err := p.SendHandoff(mail.HandoffIntent{From: "sky", To: "sky", Subject: "not archive-after-inject", ThreadID: "plain", ExtraLabels: []string{mail.AutoHandoffLabel}}); err != nil {
 		t.Fatalf("SendHandoff: %v", err)
 	}
 	want, err := p.CheckAutoHandoffs(session.MailboxAddressesFromInfo(info))

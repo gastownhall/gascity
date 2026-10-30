@@ -71,7 +71,7 @@ func TestSubmitFollowUpQueuesThroughAnInjectedDeferredQueue(t *testing.T) {
 	if !strings.HasPrefix(item.ID, "nudge-") || len(item.ID) != len("nudge-")+12 {
 		t.Fatalf("ID = %q, want nudge-<12>", item.ID)
 	}
-	if item.Agent != "helper-alias" || item.SessionID != info.ID || item.Source != "session" || item.Message != "follow up later" {
+	if item.Agent != "helper-alias" || item.SessionID != info.ID || item.Source != nudgequeue.SourceSubmit || item.Message != "follow up later" {
 		t.Fatalf("item = %+v, want the follow-up addressed to helper-alias for %s", item, info.ID)
 	}
 	if item.ContinuationEpoch != deferredSubmitEpoch(beads.Bead{Metadata: mustSessionMetadata(t, store, info.ID)}) {
@@ -162,7 +162,7 @@ func TestDeferredSubmitQueueNeedsACityPath(t *testing.T) {
 			if got := mgr.deferredQueue() != nil; got != tc.want {
 				t.Fatalf("has a deferred queue = %v, want %v", got, tc.want)
 			}
-			err := mgr.enqueueDeferredSubmitLocked(beads.Bead{ID: "s-1"}, "s-name", "hello")
+			err := mgr.enqueueDeferredSubmitLocked(beads.Bead{ID: "s-1"}, "s-name", "hello", nudgequeue.SourceSubmit)
 			if tc.want {
 				if err != nil {
 					t.Fatalf("enqueueDeferredSubmitLocked: %v", err)

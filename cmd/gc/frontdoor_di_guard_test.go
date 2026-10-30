@@ -305,7 +305,7 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 //
 // cmd_handoff.go routes its full SESSION arm — restartability
 // (sessionRestartableByController), restart-request clear (clearRestartRequest ->
-// sessionFrontDoor(sessStore).ApplyPatch), restart persist (sessionRestartPersister),
+// sessionFrontDoor(sessStore).ApplyPatch), restart record (sessionRestartRecorder),
 // the remote kill/observe/identity trio, resolveSessionID, sender-identity resolution
 // (resolveDefaultMailSenderForCommand), and beadmail's session addressing via
 // beadmail.NewWithStores(msgStore, sessStore) — through cliSessionStore. Its messaging
@@ -414,6 +414,11 @@ var sessionRelocationRoutedFiles = []string{
 	// dead local claim the orphan-sweep order asks about reads as foreign and is
 	// kept forever.
 	"cmd_agent_is_foreign.go",
+	// The in-band lane pass of `gc nudge drain --inject` reads the session row
+	// and writes the conversation's op rows and the delivery stamp. Unrouted,
+	// it would find no open lane op under a relocated sessions class, and the
+	// hook would deliver no notice while the controller is down.
+	"conversation_lane_hook.go",
 }
 
 // sessionRelocationForbidden are the UNROUTED session-front-door constructions a

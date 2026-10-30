@@ -155,8 +155,13 @@ func projectControllerRuntimePathToPod(path, ctrlCity, ctrlRuntimeDir, podRuntim
 // target. Managed-local controller projections intentionally omit GC_DOLT_HOST
 // and use a host-local runtime port; pods translate that blank-host managed
 // shape to the provider-configured in-cluster alias at this adapter edge so
-// agents still consume one GC_DOLT_* connection contract. Explicit
-// GC_DOLT_HOST values are preserved as written.
+// agents still consume one GC_DOLT_* connection contract. A managed-local
+// projection whose port the controller withheld, so host-local bd follows the
+// scope's .beads/dolt-server.port mirror (gastownhall/gascity#1656), carries
+// no port either and says so with GC_DOLT_MANAGED_LOCAL=1; a pod cannot read
+// that mirror, so it gets the same alias. Without the marker, an empty host
+// and port means no Dolt target. Explicit GC_DOLT_HOST values are preserved
+// as written.
 // BEADS_DOLT_SERVER_HOST/PORT are compatibility mirrors derived from the GC
 // projection, not independent input authorities.
 func controllerLocalDoltHost(host string) bool {
@@ -182,7 +187,7 @@ func projectedPodDoltEnv(cfgEnv map[string]string, managedHost, managedPort stri
 	}
 
 	switch {
-	case host == "" && port == "":
+	case host == "" && port == "" && strings.TrimSpace(cfgEnv["GC_DOLT_MANAGED_LOCAL"]) != "1":
 		return map[string]string{}, nil
 	case host != "" && port == "":
 		return nil, fmt.Errorf("requires both GC_DOLT_HOST and GC_DOLT_PORT when GC_DOLT_HOST is set")
@@ -444,6 +449,8 @@ func agentSecurityContext(linuxUsername string) *corev1.SecurityContext {
 func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, managedServicePort string) ([]corev1.EnvVar, error) {
 	// Start with cfg.Env, removing controller-only vars.
 	// Auth creds (GC_DOLT_USER, GC_DOLT_PASSWORD, BEADS_DOLT_*_USER/PASSWORD) intentionally pass through.
+	// GC_DOLT_MANAGED_LOCAL marks a controller-local target, which
+	// projectedPodDoltEnv rewrites to the in-cluster service.
 	skip := map[string]bool{
 		"GC_BEADS":               true,
 		"GC_SESSION":             true,
@@ -452,6 +459,7 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 		"GC_K8S_DOLT_PORT":       true,
 		"GC_DOLT_HOST":           true,
 		"GC_DOLT_PORT":           true,
+		"GC_DOLT_MANAGED_LOCAL":  true,
 		"BEADS_DOLT_SERVER_HOST": true,
 		"BEADS_DOLT_SERVER_PORT": true,
 	}

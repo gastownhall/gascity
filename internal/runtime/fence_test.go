@@ -206,8 +206,9 @@ func TestInputFenceContextLatestWins(t *testing.T) {
 type plainProvider struct{ runtime.Provider }
 
 // Kills a change to the legacy dispatch NudgeWithContext replaces: NudgeNow
-// when immediate on an ImmediateNudgeProvider, else the keyed nudge when the
-// context carries a key and the provider deduplicates, else Nudge.
+// when immediate on an ImmediateNudgeProvider (unless the context's key goes
+// to a deduplicating leaf), else the keyed nudge when the context carries a
+// key and the provider deduplicates, else Nudge.
 func TestNudgeWithContextUnfencedDispatchUnchanged(t *testing.T) {
 	content := runtime.TextContent("hi")
 	for _, c := range []struct {
@@ -218,7 +219,10 @@ func TestNudgeWithContextUnfencedDispatchUnchanged(t *testing.T) {
 		want      string
 	}{
 		{"immediate", func(f *runtime.Fake) runtime.Provider { return f }, true, "", "NudgeNow"},
-		{"immediate keyed", func(f *runtime.Fake) runtime.Provider { return runtime.FullFake{Fake: f} }, true, "k", "NudgeNow"},
+		// A key outranks immediacy for a leaf that deduplicates keyed
+		// deliveries: NudgeNow would drop the key (OJ-7 D7).
+		{"immediate keyed to a keyed leaf", func(f *runtime.Fake) runtime.Provider { return runtime.FullFake{Fake: f} }, true, "k", "Nudge/k"},
+		{"immediate keyed to a plain leaf", func(f *runtime.Fake) runtime.Provider { return f }, true, "k", "NudgeNow"},
 		{"default", func(f *runtime.Fake) runtime.Provider { return f }, false, "", "Nudge"},
 		{"default keyed on a plain fake", func(f *runtime.Fake) runtime.Provider { return f }, false, "k", "Nudge"},
 		{"default keyed", func(f *runtime.Fake) runtime.Provider { return runtime.FullFake{Fake: f} }, false, "k", "Nudge/k"},

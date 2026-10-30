@@ -22,6 +22,7 @@ go_test(
         "beadmail_retention_test.go",
         "beadmail_test.go",
         "conformance_test.go",
+        "consumed_test.go",
         "handoff_archive_test.go",
         "handoff_test.go",
         "inbox_test.go",

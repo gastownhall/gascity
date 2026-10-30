@@ -76,8 +76,13 @@ func (s *seamBackedProvider) Interrupt(name string) error {
 
 // NudgeKeyed passes the caller's delivery key through to the raw bridge,
 // which derives T3's idempotency ids from it.
-func (s *seamBackedProvider) NudgeKeyed(name string, content []runtime.ContentBlock, key string) error {
+func (s *seamBackedProvider) NudgeKeyed(name string, content []runtime.ContentBlock, key string) (runtime.DeliveryReceipt, error) {
 	return s.raw.NudgeKeyed(name, content, key)
+}
+
+// LookupDelivery passes through to the raw bridge.
+func (s *seamBackedProvider) LookupDelivery(ctx context.Context, name, key string) (runtime.DeliveryReceipt, error) {
+	return s.raw.LookupDelivery(ctx, name, key)
 }
 
 // SessionBinding reports the T3 thread and project bound to name.

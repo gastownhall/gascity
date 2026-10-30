@@ -31,6 +31,10 @@ type namedSessionResolveOptions struct {
 	// skipExactID skips the bead-id lookup for a caller that has just made it
 	// (resolveExactSessionInfo), so a miss is not asked twice.
 	skipExactID bool
+	// beforeReopen, when materializing, is called with the id of a closed
+	// configured named row before it is reopened; an error leaves the row
+	// closed and is the resolution's.
+	beforeReopen func(id string) error
 }
 
 const templateTargetPrefix = "template:"
@@ -65,6 +69,9 @@ func resolveConfiguredNamedSessionID(
 	// When materializing, check for a closed bead with this identity and
 	// reopen it (preserves bead ID for reference continuity).
 	if opts.materialize {
+		if err := beforeConfiguredNamedSessionReopen(store, cfg, cityName, spec, opts.beforeReopen); err != nil {
+			return "", true, err
+		}
 		if bead, _, ok := reopenClosedConfiguredNamedSessionBead(
 			cityPath, store, cfg, cityName, spec.Identity, spec.SessionName, "stopped", time.Now().UTC(), opts.materializeMetadata, io.Discard,
 		); ok {
@@ -93,6 +100,14 @@ func resolveSessionIDAllowClosedWithConfig(cityPath string, cfg *config.City, st
 
 func resolveSessionIDMaterializingNamed(cityPath string, cfg *config.City, store beads.Store, identifier string) (string, error) {
 	return resolveSessionIDWithOptions(cityPath, cfg, store, identifier, namedSessionResolveOptions{materialize: true})
+}
+
+// resolveSessionIDMaterializingNamedBeforeReopen is
+// resolveSessionIDMaterializingNamed calling beforeReopen with a closed
+// configured named row's id before it reopens it; an error from beforeReopen
+// leaves the row closed and is returned.
+func resolveSessionIDMaterializingNamedBeforeReopen(cityPath string, cfg *config.City, store beads.Store, identifier string, beforeReopen func(id string) error) (string, error) {
+	return resolveSessionIDWithOptions(cityPath, cfg, store, identifier, namedSessionResolveOptions{materialize: true, beforeReopen: beforeReopen})
 }
 
 func resolveSessionIDMaterializingNamedWithMetadata(cityPath string, cfg *config.City, store beads.Store, identifier string, metadata map[string]string) (string, error) {

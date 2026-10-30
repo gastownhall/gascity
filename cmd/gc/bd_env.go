@@ -1896,9 +1896,28 @@ func bdRuntimeEnvForRigWithErrorRecovery(cityPath string, cfg *config.City, rigP
 }
 
 func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath string, cfg *config.City, rigPath string, allowRecovery bool) (map[string]string, error) {
+	env, _, err := bdRuntimeEnvForRigReportingContext(ctx, cityPath, cfg, rigPath, allowRecovery)
+	return env, err
+}
+
+// rigManagedRuntimeUnavailable reports whether rigPath's store resolves to a
+// managed Dolt runtime that is not running: the case bdRuntimeEnvForRigWithError
+// answers with an env naming no Dolt server and a nil error, so every read
+// through that env fails. It asks without recovery, so it starts nothing. An
+// env that cannot be built at all is not that case and reports false.
+func rigManagedRuntimeUnavailable(cityPath string, cfg *config.City, rigPath string) bool {
+	_, unavailable, _ := bdRuntimeEnvForRigReportingContext(context.Background(), cityPath, cfg, rigPath, false)
+	return unavailable
+}
+
+// bdRuntimeEnvForRigReportingContext is bdRuntimeEnvForRigWithErrorRecoveryContext,
+// also reporting whether the rig's managed Dolt runtime was unavailable: the
+// recoverable resolution failure (isRecoverableManagedDoltEnvError) that the env
+// answers with its Dolt coordinates cleared rather than with an error.
+func bdRuntimeEnvForRigReportingContext(ctx context.Context, cityPath string, cfg *config.City, rigPath string, allowRecovery bool) (map[string]string, bool, error) {
 	cached, stamp, ok := cachedProxiedScopeRuntimeEnv(cityPath, rigPath)
 	if ok {
-		return cached, nil
+		return cached, false, nil
 	}
 	env, cityErr := bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, allowRecovery)
 	// The city projection carries the shared-server opt-out when the CITY is
@@ -1925,34 +1944,34 @@ func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath st
 		env["GC_BEADS_BACKEND"] = "doltlite"
 		env["BEADS_BACKEND"] = "doltlite"
 		mirrorBeadsDoltEnv(env)
-		return env, nil
+		return env, false, nil
 	}
 	// Each proxied workspace has its own proxy root, so a rig answers from its
 	// own binding rather than inheriting the city's endpoint.
 	if scopeUsesProxiedDoltMode(cityPath, rigPath) {
 		if err := applyProxiedScopeRuntimeEnvFn(env, rigPath); err != nil {
-			return env, err
+			return env, false, err
 		}
 		if err := applyGCOwnedScopeSharedServerOptOut(env, cityPath, rigPath); err != nil {
-			return env, err
+			return env, false, err
 		}
 		if cityErr != nil {
-			return env, cityErr
+			return env, false, cityErr
 		}
-		return rememberProxiedScopeRuntimeEnv(cityPath, rigPath, stamp, env), nil
+		return rememberProxiedScopeRuntimeEnv(cityPath, rigPath, stamp, env), false, nil
 	}
 	if err := applyResolvedRigDoltEnvContext(ctx, env, cityPath, rigPath, explicitRig, allowRecovery); err != nil {
 		clearProjectedDoltEnv(env)
 		mirrorBeadsDoltEnv(env)
 		if isRecoverableManagedDoltEnvError(err) {
-			return env, nil
+			return env, true, nil
 		}
-		return env, err
+		return env, false, err
 	}
 	if cityErr != nil {
-		return env, cityErr
+		return env, false, cityErr
 	}
-	return env, nil
+	return env, false, nil
 }
 
 func nativeDoltOpenEnvForScope(cityPath string, cfg *config.City, scopeRoot string) (map[string]string, error) {

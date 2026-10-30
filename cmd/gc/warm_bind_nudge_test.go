@@ -36,6 +36,28 @@ func warmBindPoolSession() *beads.Bead {
 func alwaysUnclaimed(beads.Bead) bool { return true }
 func neverUnclaimed(beads.Bead) bool  { return false }
 
+// TestWarmBindClaimText: a warm reuse reminds a slot with its template's
+// claim nudge, else the pool default the claim backstop sends later; a slot
+// whose template is unknown, or suppresses its startup prompt, gets none.
+func TestWarmBindClaimText(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "worker", Nudge: "  " + warmClaimText + "\n"},
+		{Name: "quiet"},
+		{Name: config.ControlDispatcherAgentName, StartCommand: "gc convoy control --serve"},
+	}}
+	for template, want := range map[string]string{
+		"worker":                          warmClaimText,
+		"quiet":                           defaultPoolClaimNudge,
+		"ghost":                           "",
+		config.ControlDispatcherAgentName: "",
+	} {
+		s := beads.Bead{ID: "s-1", Metadata: map[string]string{"template": template}}
+		if got := warmBindClaimText(cfg, s); got != want {
+			t.Errorf("template %q: text = %q, want %q", template, got, want)
+		}
+	}
+}
+
 // countNudges returns how many Nudge calls the fake recorded and the message of
 // the last one.
 func countNudges(sp *runtime.Fake) (int, string) {

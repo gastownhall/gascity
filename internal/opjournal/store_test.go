@@ -56,7 +56,10 @@ func assertOnlyKeyedLists(t *testing.T, rec *beadstest.OpRecordingStore) {
 		openKeyed := q.Label == "" && len(q.Metadata) == 1 && q.Metadata[keyOpen] != ""
 		legacyKeyed := q.Label == LabelOp && len(q.Metadata) == 1 && q.Metadata[keyStatus] == string(StatusSubmitted)
 		laneScanKeyed := q.Label == LabelOp && len(q.Metadata) == 2 && q.Metadata[keyExecutor] == string(ExecutorLane) && q.Metadata[keyStatus] != ""
-		if !openKeyed && !legacyKeyed && !laneScanKeyed {
+		openLaneKeyed := q.Label == "" && len(q.Metadata) == 2 && q.Metadata[keyOpen] != "" && q.Metadata[keyExecutor] == string(ExecutorLane)
+		interruptsKeyed := strings.HasPrefix(q.Label, labelOpConvPrefix) && len(q.Metadata) == 1 && q.Metadata[keyKind] == string(KindInterrupt) && q.Limit > 0
+		causationKeyed := q.Label == LabelOp && len(q.Metadata) == 2 && q.Metadata[keyCausation] != "" && q.Metadata[keyExecutor] == string(ExecutorLane)
+		if !openKeyed && !legacyKeyed && !laneScanKeyed && !openLaneKeyed && !interruptsKeyed && !causationKeyed {
 			t.Errorf("unkeyed list %+v from %v", q, op.Caller)
 		}
 		for _, req := range beads.NativeListPlan(op.Query) {
@@ -305,6 +308,36 @@ func TestProposeKeyReuse(t *testing.T) {
 	}
 }
 
+// A close takes an optional payload (the API's close?delete=true carries
+// {"delete":true}) and the digest covers it: under one key, a close with the
+// payload and one without are different requests, each direction
+// ErrKeyReuse, nothing written.
+func TestProposeCloseOptionalPayload(t *testing.T) {
+	h := newHarness(t)
+	plain := h.propose(t, lifecycleReq(KindClose, "c1"))
+	deleting := lifecycleReq(KindClose, "c2")
+	deleting.Payload = `{"delete":true}`
+	withPayload := h.propose(t, deleting)
+	if plain.Payload != "" || withPayload.Payload != deleting.Payload || plain.PayloadDigest == withPayload.PayloadDigest {
+		t.Fatalf("plain close %q digest %s, deleting close %q digest %s; want the payload kept and the digests apart",
+			plain.Payload, plain.PayloadDigest, withPayload.Payload, withPayload.PayloadDigest)
+	}
+	revs := map[string]int64{plain.ID: h.revision(t, plain.ID), withPayload.ID: h.revision(t, withPayload.ID)}
+	flipped := lifecycleReq(KindClose, "c1")
+	flipped.Payload = deleting.Payload
+	if _, _, err := h.store.Propose(flipped); !errors.Is(err, ErrKeyReuse) {
+		t.Fatalf("Propose(c1 with the payload) = %v, want ErrKeyReuse", err)
+	}
+	if _, _, err := h.store.Propose(lifecycleReq(KindClose, "c2")); !errors.Is(err, ErrKeyReuse) {
+		t.Fatalf("Propose(c2 without the payload) = %v, want ErrKeyReuse", err)
+	}
+	for id, rev := range revs {
+		if h.revision(t, id) != rev {
+			t.Fatalf("key reuse wrote op %s", id)
+		}
+	}
+}
+
 func TestProposePayloadCap(t *testing.T) {
 	h := newHarness(t)
 	if _, _, err := h.store.Propose(msgReq("max", strings.Repeat("a", MaxInlinePayload))); err != nil {
@@ -316,6 +349,34 @@ func TestProposePayloadCap(t *testing.T) {
 	}
 	if h.countOps(beadstest.OpCreate) != creates {
 		t.Fatal("an oversized payload reached the store")
+	}
+}
+
+// TestValidatePayload pins the exported payload check's verdicts: it refuses
+// what Propose refuses of a payload whatever the op's conversation, a payload
+// over the cap as ErrPayloadTooLarge, one a kind cannot carry as
+// ErrInvalidRequest, and an unknown kind as ErrUnknownKind. It is
+// validatePayload, the check Propose applies, so the two cannot drift.
+func TestValidatePayload(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		kind    Kind
+		payload string
+		want    error
+	}{
+		{"message", KindMessage, "hello", nil},
+		{"message at the cap", KindMessage, strings.Repeat("a", MaxInlinePayload), nil},
+		{"message over the cap", KindMessage, strings.Repeat("a", MaxInlinePayload+1), ErrPayloadTooLarge},
+		{"message not UTF-8", KindMessage, "bad \xff text", ErrInvalidRequest},
+		{"message empty", KindMessage, "", ErrInvalidRequest},
+		{"wake without payload", KindWake, "", nil},
+		{"wake with payload", KindWake, "x", ErrInvalidRequest},
+		{"unknown kind", "teleport", "x", ErrUnknownKind},
+	} {
+		err := ValidatePayload(tc.kind, tc.payload)
+		if (tc.want == nil) != (err == nil) || tc.want != nil && !errors.Is(err, tc.want) {
+			t.Errorf("%s: ValidatePayload = %v, want %v", tc.name, err, tc.want)
+		}
 	}
 }
 
@@ -383,7 +444,7 @@ func TestProposeEveryKindWithDefaults(t *testing.T) {
 			Scope: Scope{Kind: ScopeSession, Generation: 3, Turn: "t1"},
 		},
 		{
-			Conversation: "gc-1", Kind: KindRespond, ClientKey: "respond:3:r1", Payload: "allow", Producer: Producer{Principal: "p", Actor: "operator"},
+			Conversation: "gc-1", Kind: KindRespond, ClientKey: "r1", Payload: `{"action":"approve"}`, Producer: Producer{Principal: "p", Actor: "operator"},
 			Scope: Scope{Kind: ScopeSession, Generation: 3, Interaction: "r1"},
 		},
 	}
@@ -1490,6 +1551,79 @@ func TestAdopt(t *testing.T) {
 		}
 		if got, _ := h.store.Get(op.ID); got.Attempt != 1 {
 			t.Fatalf("attempt %d after one adoption", got.Attempt)
+		}
+	})
+}
+
+// SetCausation names, on an open legacy:api op at the attempt its adopter
+// holds, what answers the op: one revision CAS that writes the causation and
+// nothing else, outside the request digest. A causation is set once: the
+// same one again writes nothing, and another is refused. A closed op, any
+// other executor, an attempt another adopter moved past and a causation the
+// journal refuses are refused, nothing written.
+func TestSetCausation(t *testing.T) {
+	t.Run("names once", func(t *testing.T) {
+		h := newHarness(t)
+		op := h.propose(t, legacyReq(ExecutorLegacyAPI, "k"))
+		adopted, err := h.store.Adopt(op.ID, 0, "legacy:api", t0.Add(30*time.Minute))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := h.store.SetCausation(op.ID, 1, "req-1#1", "api")
+		if err != nil {
+			t.Fatal(err)
+		}
+		stored, err := h.store.Get(op.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Causation != "req-1#1" || stored.Causation != "req-1#1" || stored.Status != StatusSubmitted ||
+			stored.Attempt != 1 || !stored.FinishBy.Equal(adopted.FinishBy) || len(stored.Transitions) != len(adopted.Transitions) ||
+			stored.PayloadDigest != op.PayloadDigest || RequestDigest(stored) != op.PayloadDigest {
+			t.Fatalf("named op = %+v, want the adopted op %+v with causation req-1#1, its digest unchanged", stored, adopted)
+		}
+		rev := h.revision(t, op.ID)
+		if again, err := h.store.SetCausation(op.ID, 1, "req-1#1", "api"); err != nil || again.Causation != "req-1#1" || h.revision(t, op.ID) != rev {
+			t.Fatalf("the same causation again = %+v, %v; want the op as stored, nothing written", again, err)
+		}
+		if _, err := h.store.SetCausation(op.ID, 1, "req-1#2", "api"); !errors.Is(err, ErrIllegalTransition) || h.revision(t, op.ID) != rev {
+			t.Fatalf("another causation = %v, want ErrIllegalTransition, nothing written", err)
+		}
+	})
+	t.Run("refusals", func(t *testing.T) {
+		h := newHarness(t)
+		closedOp := h.propose(t, legacyReq(ExecutorLegacyAPI, "closed"))
+		if _, err := h.store.Close(closedOp.ID, Outcome{Arm: ArmSucceeded}, "legacy:api"); err != nil {
+			t.Fatal(err)
+		}
+		lane := h.propose(t, legacyReq(ExecutorLane, "lane"))
+		cli := h.propose(t, legacyReq(ExecutorLegacyCLI, "cli"))
+		bare := h.propose(t, legacyReq(ExecutorLegacy, "bare"))
+		api := h.propose(t, legacyReq(ExecutorLegacyAPI, "api"))
+		for _, c := range []struct {
+			name, id  string
+			attempt   int
+			causation string
+			by        string
+			want      error
+		}{
+			{"closed", closedOp.ID, 0, "req-1#1", "api", ErrAlreadyTerminal},
+			{"lane", lane.ID, 0, "req-1#1", "api", ErrIllegalTransition},
+			{"legacy:cli", cli.ID, 0, "req-1#1", "api", ErrIllegalTransition},
+			{"bare legacy", bare.ID, 0, "req-1#1", "api", ErrIllegalTransition},
+			{"an attempt another adopter moved past", api.ID, 1, "req-1#1", "api", ErrAttemptMoved},
+			{"no causation", api.ID, 0, "", "api", ErrInvalidRequest},
+			{"a causation with surrounding space", api.ID, 0, " req-1#1", "api", ErrInvalidRequest},
+			{"a causation an update stores as a number", api.ID, 0, "42", "api", ErrInvalidRequest},
+			{"no writer", api.ID, 0, "req-1#1", "", ErrInvalidRequest},
+		} {
+			rev := h.revision(t, c.id)
+			if _, err := h.store.SetCausation(c.id, c.attempt, c.causation, c.by); !errors.Is(err, c.want) {
+				t.Errorf("%s: SetCausation = %v, want %v", c.name, err, c.want)
+			}
+			if h.revision(t, c.id) != rev {
+				t.Errorf("%s: a refused SetCausation wrote the row", c.name)
+			}
 		}
 	})
 }

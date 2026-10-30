@@ -29,7 +29,7 @@ gc [flags]
 | [gc agent](#gc-agent) | Manage agent configuration |
 | [gc agent-script](#gc-agent-script) | Run a deterministic YAML agent script |
 | [gc analyze](#gc-analyze) | Read-only analysis over events and beads |
-| [gc bd](#gc-bd) | Run bd in the correct rig directory |
+| [gc bd](#gc-bd) | Run a bd command in the correct rig directory |
 | [gc beads](#gc-beads) | Manage the beads provider |
 | [gc build-image](#gc-build-image) | Build a prebaked agent container image |
 | [gc cities](#gc-cities) | List registered cities |
@@ -356,8 +356,8 @@ conditionally resets an in-progress assignment only when the bead still has
 that assignee.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
-from wedging the wrapper after printing command output. If you need
-auto-export behavior, invoke bd directly.
+from wedging the wrapper after printing command output. To write a JSONL
+snapshot, run "gc bd export".
 
 ```
 gc bd [bd-args...]
@@ -1411,15 +1411,25 @@ Cost is a list-price estimate for decision support, not an authoritative
 charge; invocations with no pricing are flagged "unpriced" and excluded from
 the cost total.
 
+With --by-formula, model usage is grouped by the formula the acting bead's run
+was compiled from instead of by run; usage with no formula appears as "-".
+Compute wall-seconds are not attributed to a formula, so that table has no
+WALL_S column.
+
 ```
-gc costs
+gc costs [flags]
 ```
 
 **Example:**
 
 ```
 gc costs
+gc costs --by-formula
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--by-formula` | bool |  | group model usage by the formula each fact is attributed to instead of by run |
 
 ## gc dashboard
 
@@ -1597,7 +1607,7 @@ error is reported on stderr and the command still exits 0, so bead hooks never
 fail on it. JSON summaries report whether submission to the configured provider
 was attempted; the event bus does not acknowledge durable persistence.
 
-Two requests are refused with exit 1 and nothing is recorded. In --json mode
+Four requests are refused with exit 1 and nothing is recorded. In --json mode
 the failure object carries the code.
 
 - reserved_actor: --actor starts with "cache-", or the default actor is one
@@ -1605,6 +1615,8 @@ the failure object carries the code.
 - bead_payload_refused: --payload on bead.created, bead.updated, bead.closed
   or bead.deleted. Their payload is the bead row; use --bead-payload &lt;id&gt; so
   gc reads it from the store.
+- journal_derived_refused: op.changed or fact.recorded, which the
+  controller derives from operation-journal rows; no command records one.
 - bead_payload_not_found: --bead-payload names a bead the store it resolves
   to does not hold (bead.deleted excepted: the event is recorded with its
   subject alone). Any other failure to read it is reported on stderr and the
@@ -1841,14 +1853,17 @@ With --attach on a v2 formula — one declaring
 [requires] formula_compiler = "&gt;=2.0.0" — the invocation runs under a
 per-source workflow lock and is idempotent: a repeat cook for the same
 source bead reuses the live workflow instead of duplicating it, and a
-conflicting live workflow from the same source is an error.
+conflicting live workflow from the same source is an error. A repeat
+cook still writes its --meta pairs to the workflow root it reuses, under
+the same lock, so the pairs of the last cook to take the lock are the
+ones that stay.
 
 On a city that serves the graph class from its own [storage] binding, most
-of --attach in CITY scope is NOT SUPPORTED YET and refuses rather than
-serving. A graft is graph class whatever the formula's version — every bead
-it creates carries gc.root_bead_id — so the sub-DAG belongs in the binding
-while the blocking dependency belongs beside the attach bead, and a split
-city cannot have both:
+of --attach is NOT SUPPORTED YET, in city and rig scope alike, and refuses
+rather than serving. A graft is graph class whatever the formula's version —
+every bead it creates carries gc.root_bead_id — so the sub-DAG belongs in
+the binding while the blocking dependency belongs beside the attach bead,
+and a split city cannot have both:
 
   * attach bead in the city's WORK ledger — refused. Writing the sub-DAG
     beside it strands graph-class beads in the work store, which gc storage
@@ -1862,13 +1877,19 @@ city cannot have both:
     would be cross-class. Same remedy: ga-2orlf.
   * attach bead in the BINDING, v1 formula — served. The sub-DAG and its
     blocking dependency are both written to the binding.
-  * RIG scope (--rig, GC_RIG, or a cwd inside a rig) — served, unchanged.
-    A relocation moves city-level stores only, so a rig's ledger holds both
-    ends of the graft and nothing it writes can be stranded.
+  * attach bead in a RIG's own store (RIG scope: --rig, GC_RIG, or a cwd
+    inside a rig) — refused for a work bead, for the city work ledger's
+    reason: every graph bead of every rig lives in the binding, so a rig's
+    own store holds only work. Launch the formula against the bead with
+    gc sling &lt;target&gt; &lt;bead&gt; --on &lt;formula&gt; instead. The one graft served
+    there is a v1 formula onto a graph bead of a tree created before the
+    rig's graph beads moved to the binding, which extends that tree where
+    it lives; a v2 formula is refused, because it starts a new workflow
+    root in the binding and its attach edge would cross stores.
 
 Single-store cities are unaffected: --attach behaves exactly as it always
-has. If an earlier cook already stranded beads in a split city's work
-store, copy them into the binding with
+has, in every scope. If an earlier cook already stranded beads in a split
+city's work store, copy them into the binding with
 gc storage recover-stranded --from-work --fleet-stopped.
 
 ```
@@ -2040,11 +2061,26 @@ For controller-restartable sessions, equivalent to:
   gc mail send $GC_ALIAS &lt;subject&gt; [message]
   gc runtime request-restart
 
-The command exits 0 once the restart request is durably persisted and the
-controller has been signaled, even if the controller has not yet acted. If
-the controller cannot be signaled, gc handoff exits 1 with a diagnostic — the
-restart request itself remains durably set, so the controller still picks it
-up on its next periodic reconcile tick regardless.
+The restart request is recorded on this session's row, bound to this
+session's incarnation: it is recorded only while the session row, or the
+live runtime under the session's name, still carries the GC_INSTANCE_TOKEN
+this process runs under. A check before the mail refuses the restart, and
+sends no mail, when this process has no GC_INSTANCE_TOKEN (an agent CLI that
+scrubs *TOKEN* variables from the shells it spawns removes it), when the
+session row and the live runtime name another incarnation, or when the
+session store cannot compare-and-swap where the request needs it (below).
+The write after the mail decides again: a row that moved after the check can
+still refuse it there, with the mail already sent. Outside a worker site the
+runtime's GC_RESTART_REQUESTED hint follows, then the controller poke.
+gc handoff exits 0 once the request is recorded, even when the controller
+could not be signaled: a warning says so, and the controller acts at its next
+pass. It exits 1 with no restart requested and no runtime hint set when the
+request cannot be recorded: no GC_INSTANCE_TOKEN, an unreachable session
+store, a session whose row and live runtime name another incarnation, or a
+session store that cannot compare-and-swap where the request needs it: a v2
+city records the request only by compare-and-swap, and
+[beads] conditional_writes = "require" refuses any write the store cannot
+fence.
 
 Auto handoff (--auto): sends mail to self and returns without requesting a
 restart. This is for PreCompact hooks, where the provider is already managing
@@ -2060,6 +2096,23 @@ For controller-restartable targets, equivalent to:
   gc mail send &lt;target&gt; &lt;subject&gt; [message]
   gc session kill &lt;target&gt;
 
+While the op journal records ops, a restartable self-handoff is recorded as a
+restart&#123;fresh&#125; op and a notice op to self; a rerun with the same --key reports
+the first run's outcome without sending the mail again. The key covers neither
+the subject nor the message: a rerun under it sends no mail whatever they say,
+and its --json result leaves the subject out. The key is the handoff's own: gc
+runtime request-restart or gc session reset under the same --key records
+another op. The restart stops this session, and so can stop the run before it
+closes its restart op: a rerun with the same --key is then refused as in
+progress until the op's deadline passes, and after that replays the first
+run's success when its notice op succeeded and the session row shows that the
+restart is still pending or has run, else reports the op's failure. The
+notice op rides the restart op: when the restart op is not recorded
+(ops.lifecycle off), no notice op is recorded either, even under ops.content =
+"require". --auto and --target record no ops and refuse --key. A self handoff
+of a session the controller does not restart records no ops and warns that
+--key is not recorded.
+
 Self-handoff requires session context (GC_ALIAS or GC_SESSION_ID, plus
 GC_SESSION_NAME and city context env). Remote handoff accepts a session alias
 or ID. Subject is required unless --auto is set.
@@ -2074,6 +2127,7 @@ gc handoff [subject] [message] [flags]
 | `--force` | bool |  | destroy a target even when it has live background subagents |
 | `--hook-format` | string |  | format hook output for a provider |
 | `--json` | bool |  | emit JSON summary |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again, also from the restarted session if the first run closed its op before the restart stopped it; the key covers neither the subject nor the message, so a rerun under it sends no mail whatever they say; ignored when the gate is off (default: a new key each run) |
 | `--target` | string |  | Remote session alias or ID to handoff (kills only controller-restartable sessions) |
 
 ## gc help
@@ -2089,19 +2143,48 @@ gc help [command]
 
 Finds routed work using the agent's work_query config.
 
-Without --inject: prints normalized ready-only output, exits 0 if work exists, 1 if empty.
+Without --inject: prints normalized ready-only output, exits 0 if work exists,
+1 if the queue is empty, and 2 if the work query itself failed (for example bd
+missing from PATH, a store bd could not read, or a store environment that could
+not be built); the failure is named on stderr. A suspended city, rig or agent,
+and an error before the work query is built (no agent named, a city or config
+that cannot be loaded, an unknown agent), also exit 1.
 With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
-With --claim: runs the standard startup claim protocol for one work item.
+With --claim: runs the standard startup claim protocol for one work item. A
+failed work query is an error (nothing on stdout), never a drain result.
 
 A work query that gets no answer from the bead store (a connection error, a
 timeout, a killed query, a locked database, or bd's circuit breaker failing
 fast) exits 2 and prints GC_HOOK_STORE_UNAVAILABLE on stderr: the answer is
-unknown, not empty. Any other work-query failure exits 1. This applies with and
-without --claim, and neither writes a drain result. The generated default work
-query discards bd's errors in its single-store tiers, so there a store that
-fails fast still reads as no work; only a deadline overrun exits 2. Only the
-agent's own store reports: other stores the hook also searches are
-best-effort, and one that fails reads as having no work.
+unknown, not empty. This applies with and without --claim. The answers that
+count as "no answer" are shared with the storage gate's transient faults and
+include a hosted bd serve answering 502, 503 or 504, "cannot reach bd serve",
+a killed bd ("signal: killed"), "too many open files", network timeouts and
+unreachable hosts (EHOSTUNREACH), and EMFILE/EAGAIN; each of these exits 2
+with the token (stdout keeps any partial output). Any other
+work-query failure exits 2 without --claim and 1 with --claim. Neither writes a
+drain result. When another store the hook searches serves work, a store that
+failed is named on stderr and the work is served; when no store has work, a
+failed read of any of them is a failed query, not an empty queue, so a rig
+store that cannot be read keeps every city-scoped agent that searches it from
+draining until it answers again. Two kinds of rig are exceptions: a suspended
+rig is not searched at all (gc ready does not read it either), and a rig whose
+managed Dolt server is not running is named on stderr but does not hold the
+answer up. A failed query is also recorded as a session.work_query_failed event,
+one per store that failed, naming it.
+
+Before the work query, a session keyed by $GC_SESSION_ID is checked for a
+pending drain (the drain fence), with and without --claim. A draining session
+gets the drain result instead of work. If the session row cannot be read, the
+fence depends on why. A store fault that may clear on its own (a timeout, a
+locked database, a work store the storage gate could not read) fails open:
+the hook proceeds, names the fault on stderr, and records a
+session.drain_fence_unavailable event. A standing storage refusal (the city's
+storage gate refuses to serve its relocated classes, for example a retained
+work store holding infrastructure beads the binding cannot read) fails closed:
+nothing is claimed or served, GC_HOOK_STORE_UNAVAILABLE is printed on stderr
+with the refusal, the hook exits 2, and the event says the fence failed
+closed.
 
 The agent is determined from $GC_AGENT or a positional argument.
 
@@ -2519,7 +2602,7 @@ gc mail
 | [gc mail count](#gc-mail-count) | Show total/unread message count |
 | [gc mail delete](#gc-mail-delete) | Delete one or more messages (closes the beads) |
 | [gc mail inbox](#gc-mail-inbox) | List unread messages (defaults to your inbox) |
-| [gc mail mark-read](#gc-mail-mark-read) | Mark a message as read |
+| [gc mail mark-read](#gc-mail-mark-read) | Mark one or more messages as read |
 | [gc mail mark-unread](#gc-mail-mark-unread) | Mark a message as unread |
 | [gc mail peek](#gc-mail-peek) | Show a message without marking it as read |
 | [gc mail read](#gc-mail-read) | Read a message and mark it as read |
@@ -2626,10 +2709,14 @@ gc mail inbox [session] [flags]
 
 ## gc mail mark-read
 
-Mark a message as read without displaying it. The message will no longer appear in inbox results.
+Mark one or more messages as read without displaying them. They will no
+longer appear in inbox results. When multiple IDs are passed (as separate
+arguments, or as one whitespace-separated argument such as an unsplit "$IDS"),
+each is marked in input order; a failure on one is reported and the rest are
+still marked.
 
 ```
-gc mail mark-read <id> [flags]
+gc mail mark-read <id>... [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -2821,7 +2908,12 @@ gc mcp
 
 ## gc mcp list
 
-Show the precedence-resolved MCP servers that Gas City would project into the provider-native config for one agent or session target.
+Show the precedence-resolved MCP servers that Gas City would project into the
+provider-native config for one agent or session target.
+
+Servers from a shared layer (the city or rig pack, or an import) that the
+target's provider cannot receive are listed separately under "Not projected",
+with the reason: the agent starts without them.
 
 ```
 gc mcp list [flags]
@@ -3460,14 +3552,22 @@ the default prompt. Strict errors on:
   - no agent name given (from args, GC_ALIAS, or GC_AGENT)
   - agent name not in city config (typo detection — the main use case)
   - agent's prompt_template points at a file that cannot be read
+  - agent's prompt_template fails to parse or execute
 
 Without --strict, a prompt_template that cannot be read is reported on
-stderr and the default prompt is output.
+stderr and the default prompt is output; one that fails to parse or
+execute is reported on stderr and its raw unrendered text is output.
 
 Strict does NOT error on agents whose config intentionally lacks a
 prompt_template (a supported minimal config), on templates that render
 to empty output from valid conditional logic, or on suspended states
 (city or agent) — those are legitimate quiet states, not mistakes.
+
+Fragments appended to the prompt (global_fragments, inject_fragments,
+append_fragments) do not fail --strict: one that is missing or fails to
+render is reported on stderr and left out of the prompt. gc lint
+reports a pack's missing or failing inject_fragments and
+append_fragments.
 
 ```
 gc prime [agent-name] [flags]
@@ -3478,7 +3578,7 @@ gc prime [agent-name] [flags]
 | `--hook` | bool |  | compatibility mode for runtime hook invocations |
 | `--hook-format` | string |  | format hook output for a provider |
 | `--json` | bool |  | emit JSON summary |
-| `--strict` | bool |  | fail on missing city, missing or unknown agent, or unreadable prompt_template instead of falling back to the default prompt |
+| `--strict` | bool |  | fail on missing city, missing or unknown agent, or a prompt_template that cannot be read or rendered instead of falling back |
 
 ## gc prompt
 
@@ -3578,7 +3678,8 @@ roots, step beads and control beads live.
 It is the in-process, city-wide drop-in for the single-store "bd ready" work
 query, so workers and the control plane see graph-class work instead of an
 authoritative-looking short answer. On a city that relocates no coordination
-class it reads the one store, unchanged.
+class there is no graph store to add: it reads the city store and the rig
+stores.
 
 The flags mirror the "bd ready" contract the default work_query builds:
   gc ready --metadata-field "gc.routed_to=$target" --unassigned \
@@ -3590,6 +3691,12 @@ Rows are emitted in canonical ready order (priority, created_at, id) unless
 --sort selects a created_at order, and --limit is applied last, so a bounded
 read is the true top-N of the merged set rather than the top-N of whichever
 store answered first.
+
+The rows of --status in_progress carry their blockers (blocked_by), and a row
+whose blockers cannot be resolved fails the read. --until-unblocked ends that
+answer at its first unblocked row, the one a crash-recovery read resumes, and
+resolves no row past it, so a later row's unresolvable blocker does not fail
+the read.
 
 Every leg is read across both storage tiers, so the wisp/ephemeral rows an
 orchestration step runs as are claimable work here whether or not
@@ -3629,6 +3736,7 @@ gc ready [flags]
 | `--sort` | string |  | sort order: oldest\|newest (default: canonical ready order) |
 | `--status` | string |  | list beads in this status instead of ready work: open\|in_progress\|blocked\|closed |
 | `--unassigned` | bool |  | only unassigned work |
+| `--until-unblocked` | bool |  | with --status in_progress, end the answer at its first unblocked row, resolving no row past it |
 
 ## gc register
 
@@ -4061,7 +4169,7 @@ Signal a session to drain — wind down its current work gracefully.
 Sets a GC_DRAIN metadata flag on the session. The agent should check
 for drain status periodically (via "gc runtime drain-check") and finish
 its current task before exiting. Pass a session alias or ID. Use
-"gc runtime undrain" to cancel. Under session_reconciler = "v2" it also
+"gc runtime undrain" to cancel. Under the v2 session reconciler it also
 marks the session row, so the agent's drain-ack stops the session even on a
 min_active_sessions floor.
 
@@ -4082,7 +4190,7 @@ socket so the reconciler stops the session immediately rather than on
 its next patrol tick. Call this after the session has finished its
 current work in response to a drain signal.
 
-Under session_reconciler = "v2" the ack is first written to the session
+Under the v2 session reconciler the ack is first written to the session
 row, bound to its current incarnation. A session acking itself must
 carry a GC_INSTANCE_TOKEN that matches the row; an operator acking a
 session from outside it passes --operator and a target, and the ack binds
@@ -4162,26 +4270,52 @@ gc runtime heartbeat [flags]
 
 ## gc runtime request-restart
 
-Signal the controller to stop and restart this session.
+Ask the controller to stop this session and start it again fresh.
 
-Sets GC_RESTART_REQUESTED metadata on the session, pokes the controller for
-an immediate reconcile tick, and returns without waiting. Control-plane
-authority over the actual stop/start stays with the controller's reconcile
-loop; this command only signals it so the request need not wait for the next
-periodic patrol tick.
+Records the restart request on this session's row (the request the
+controller acts on). Outside a worker site it then sets the runtime's
+GC_RESTART_REQUESTED hint. Then it pokes the controller for an immediate
+reconcile. It returns without waiting for the restart.
 
-The command exits 0 once the restart request is durably persisted and the
-controller has been signaled, even if the controller has not yet acted. If
-the controller cannot be signaled, the command exits 1 with a diagnostic —
-the restart request itself remains durably set, so the controller still
-picks it up on its next periodic reconcile tick regardless.
+The request is bound to this session's incarnation. It is recorded only while
+the session row, or the live runtime under the session's name, still carries
+the GC_INSTANCE_TOKEN this process runs under, so a process left over from an
+earlier incarnation cannot restart its successor. An agent CLI that scrubs
+*TOKEN* variables from the shells it spawns (for example Claude Code with
+CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1) removes GC_INSTANCE_TOKEN, and the
+request is refused; keep that variable in the agent's subprocess environment.
+
+Exits 0 once the request is recorded, even when the controller could not be
+signaled: a warning says so, and the controller acts at its next pass. Exits 1
+with no restart requested and no runtime hint set when the request cannot be
+recorded: no session context or GC_INSTANCE_TOKEN, an unreachable session
+store, a session whose row and live runtime name another incarnation, or a
+session store that cannot compare-and-swap where the request needs it: a v2
+city records the request only by compare-and-swap, and
+[beads] conditional_writes = "require" refuses any write the store cannot
+fence.
+
+While the op journal records lifecycle ops, the request is recorded as a
+restart&#123;fresh&#125; op, which closes with the request's outcome, a refusal
+included; a rerun with the same --key reports the first run's outcome instead
+of requesting again. The key is request-restart's own: gc handoff or gc
+session reset under the same --key records another op. The restart stops this
+session, and so can stop the run before it closes its op: a rerun with the
+same --key is then refused as in progress until the op's deadline passes, and
+after that replays the first run's success while the session row still
+records the restart as pending, else reports the op's failure, also once the
+restart has run, since the op records no context to tell it by.
 
 This command is designed to be called from within a session context.
-It emits a session.draining event before signaling the controller.
+It emits a session.draining event once the request is recorded.
 
 ```
-gc runtime request-restart
+gc runtime request-restart [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again, also from the restarted session if the first run closed its op before the restart stopped it; ignored when the gate is off (default: a new key each run) |
 
 ## gc runtime undrain
 
@@ -4189,7 +4323,7 @@ Cancel a pending drain signal on a session.
 
 Clears the GC_DRAIN and GC_DRAIN_ACK metadata flags, allowing the
 session to continue normal operation. Pass a session alias or ID. Under
-session_reconciler = "v2" it also clears the session row's drain-ack and
+the v2 session reconciler it also clears the session row's drain-ack and
 its operator drain mark.
 
 ```
@@ -4354,7 +4488,11 @@ gc session attach <session-id-or-alias>
 
 End a conversation. Stops the runtime if active and closes the bead.
 
-Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor). A rerun
+with the same --key replays the close only when it names the session by its
+ID: a closed session's alias no longer resolves to it, and once another
+session holds the alias (a configured named session is created again under
+its name), a rerun by the alias closes that session.
 
 ```
 gc session close <session-id-or-alias> [flags]
@@ -4363,6 +4501,7 @@ gc session close <session-id-or-alias> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again (without the first run's wait_nudges_withdrawn in --json); ignored when the gate is off (default: a new key each run) |
 
 ## gc session kill
 
@@ -4383,6 +4522,24 @@ restarts in place on its bead; while its started work is blocked, it holds its
 slot asleep. A task assigned directly to the seat with no route is kept, not
 released, and the seat holds its slot until that task is ready.
 
+With --key, a rerun after the controller restarted the session under the same
+ID reports the first kill, noting the restart, instead of killing the new run.
+A pool seat replaced as above is a new session with a new ID, though it may
+keep the killed seat's alias: a rerun must name the killed session by its ID,
+since by the alias it would kill the replacement.
+
+While the ops.lifecycle gate is require, a kill whose session row cannot be
+read, or names no session generation, is refused (op_journal_unavailable,
+naming unreadable_target and the read error, or no_generation) and nothing is
+killed. At auto, or with GC_OPS_LIFECYCLE=auto set to break glass, it runs the
+best-effort kill unrecorded.
+
+A recorded kill (the gate at auto or require) names the session generation it
+read before taking the session's runtime lease. If a start runs while it waits
+for that lease, the kill stops nothing and exits 1, its op closed
+failed&#123;refused:target_moved&#125;: rerun it without --key to kill the new run. A
+rerun with the same --key replays that failure, noting the restart.
+
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
 ```
@@ -4393,6 +4550,7 @@ gc session kill <session-id-or-alias> [flags]
 |------|------|---------|-------------|
 | `--force` | bool |  | destroy a session even when it has live background subagents, or past a hung holder of its runtime lease whose record expired |
 | `--json` | bool |  | emit JSONL |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again, even after the session restarted under the same ID; ignored when the gate is off (default: a new key each run) |
 
 ## gc session list
 
@@ -4494,6 +4652,19 @@ equivalent to typing the message into the session's terminal.
 Accepts a session ID or session alias. Multi-word messages are
 joined automatically.
 
+When [ops] authoritative lists message, a nudge to a session a conversation
+lane can type into is recorded as a lane op instead. wait-idle delivers it
+as a prompt at an idle boundary only, never into a running turn. immediate
+delivers it as a prompt at an idle boundary or, when the session's runtime
+can steer, into its running turn; a busy session whose runtime cannot steer
+gets it at the next boundary. queue delivers it as a notice at the next
+boundary and never wakes the session. When this process can type into the
+session, wait-idle and immediate deliver at once what their mode allows
+now, with or without a running controller; otherwise the nudge is reported
+queued, and the lane host serving the session delivers it as its mode
+says. The [ops] content gate does not govern such a nudge, and one whose op
+cannot be written is refused.
+
 ```
 gc session nudge <id-or-alias> <message...> [flags]
 ```
@@ -4502,6 +4673,7 @@ gc session nudge <id-or-alias> <message...> [flags]
 |------|------|---------|-------------|
 | `--delivery` | string | `wait-idle` | delivery mode: immediate, wait-idle, or queue |
 | `--json` | bool |  | JSON output |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] content gate is auto or require, or [ops] authoritative lists message), rerunning with the same key reports the first run's outcome instead of acting again, except across a change to whether [ops] authoritative lists message, which refuses the rerun as a different request; ignored otherwise (default: a new key each run) |
 
 ## gc session peek
 
@@ -4586,7 +4758,16 @@ session back instead: it closes the bead as a failed create and releases the
 alias so the controller can create a replacement. A create that is still
 starting, or whose runtime is running, is never rolled back.
 
-Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor). A rerun
+with the same --key of a reset that rolled back replays it only when it names
+the session by its ID: the rollback released the alias, and once the
+replacement the controller creates holds it, a rerun by the alias resets that
+session.
+
+A --key may not start with handoff: or request-restart:, where gc handoff and
+gc runtime request-restart keep the keys of the restart ops they record. Such
+a key is invalid: under ops.lifecycle = "require" the reset is refused, and
+under "auto" it runs unrecorded with a warning.
 
 ```
 gc session reset <session-id-or-alias> [flags]
@@ -4595,6 +4776,7 @@ gc session reset <session-id-or-alias> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again; ignored when the gate is off (default: a new key each run) |
 
 ## gc session submit
 
@@ -4619,6 +4801,7 @@ gc session submit mayor "stop and do this instead" --intent interrupt_now
 |------|------|---------|-------------|
 | `--intent` | string | `default` | submit intent: default, follow_up, or interrupt_now |
 | `--json` | bool |  | JSON output |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] content gate is auto or require, or [ops] authoritative lists message), rerunning with the same key reports the first run's outcome instead of sending again; ignored otherwise (default: a new key each run) |
 
 ## gc session suspend
 
@@ -4634,6 +4817,7 @@ gc session suspend <session-id-or-alias> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again (without the first run's mode in --json); ignored when the gate is off (default: a new key each run) |
 
 ## gc session unpin
 
@@ -4673,6 +4857,12 @@ After waking, the reconciler will start the session on its next tick
 if it has wake reasons (e.g., a matching config agent). If the session
 has no wake reasons, it remains asleep.
 
+When a configured named session has no session to wake or reopen, the wake
+creates one as it resolves the target, before the wake is recorded. While the
+ops.lifecycle gate is require, a wake whose op the journal then cannot record
+is refused (op_journal_unavailable): the wake did not run, but the session it
+created stays and may start.
+
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
 ```
@@ -4689,6 +4879,7 @@ gc session wake mayor
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again (without the first run's wait_nudges_withdrawn in --json); ignored when the gate is off (default: a new key each run) |
 
 ## gc shell
 
@@ -4856,7 +5047,7 @@ gc supervisor run
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--allow-supervisor-mismatch` | bool |  | start even when the running supervisor is a different gc installation than this binary |
-| `-n`, `--dry-run` | bool |  | preview what agents would start without starting them |
+| `-n`, `--dry-run` | bool |  | preview the agents that would start and the MCP config, skill links, and .gitignore entries gc would write, without starting or writing them |
 | `--json` | bool |  | emit JSONL summary |
 | `--no-auto-restart` | bool |  | detect supervisor binary drift but do not auto-restart; exits non-zero on drift |
 | `--verbose` | bool |  | disable warning deduplication and print every supervisor warning |
@@ -4933,6 +5124,7 @@ gc storage
 | [gc storage recover-stranded](#gc-storage-recover-stranded) | Copy stranded infrastructure beads from the work store into the converged binding |
 | [gc storage repair-sequence](#gc-storage-repair-sequence) | Inspect or raise a SQLite bead store's id-sequence floor |
 | [gc storage status](#gc-storage-status) | Report this city's storage-class layout (read-only) |
+| [gc storage vouch-bd](#gc-storage-vouch-bd) | Walk a scope's bd and, if it matches a pinned gc bd inventory, vouch for it |
 
 ## gc storage migrate
 
@@ -4960,6 +5152,24 @@ refuses such a city and names this command.
 --from-backup re-copies a binding whose database is gone from that backup
 instead of from the work store, which no longer holds the slice.
 
+--from-rigs moves each rig's graph and infrastructure beads (closed history,
+wisps and steps included) out of the rig's own store and into the city
+binding, keeping their ids and stamping each with gc.root_store_ref=rig:&lt;name&gt;;
+a rig store then holds only work. It runs per rig (--rig narrows it), is
+resumable at every step, and refuses, by bead and with the fix, the edge shapes
+it cannot carry without a cross-store edge. It needs a converged city binding.
+
+Last, on the converged binding, each open deliver-now unit the copy carried in
+is re-lowered under the binding's id prefix: its derived interrupt is re-created
+at the id a lowering there gives it, with its state, and the old row is closed
+as a pointer to it, one all-or-nothing write per unit. A unit in flight or that
+may have run, one with more than one open derived interrupt, and one whose id
+there another row already holds are left as they are and named; their lanes run
+each one as a unit by identity. A message not yet lowered, or whose unit is
+over, is not a unit to move, and is not named. A city whose binding holds no
+lowered deliver-now message skips the step and prints nothing for it. A step
+that did not finish exits non-zero, and running this command again finishes it.
+
 The move refuses while a writer can reach the source. This binary can prove the
 absence of a controller and cannot prove the absence of anything else, so that
 half is an explicit operator attestation.
@@ -4970,9 +5180,12 @@ gc storage migrate [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--abandon-rig-store` | bool |  | with --from-rigs --rig X, record X's clear complete without its store, once the binding is proven to hold every row X's import recorded (for a rig store that is permanently gone) |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--from-backup` | bool |  | re-copy a binding whose database is gone from the retained-source backup |
+| `--from-rigs` | bool |  | import each rig's graph and infrastructure beads into the city binding |
 | `--from-work` | bool |  | migrate the infrastructure classes out of this city's work store |
+| `--rig` | stringSlice |  | with --from-rigs, import only this rig (repeatable) |
 
 ## gc storage preflight
 
@@ -5006,10 +5219,11 @@ gc storage preflight
 Copy the infrastructure beads a converged city's proven copy never carried
 out of the retained work store and into the binding that is already serving.
 
-This is the recovery the stranded-write refusal names. It is additive: it moves
-only ids the binding does not hold and the proven-copy manifest does not record,
-it deletes nothing from either store, and it extends the manifest only after
-every moved bead has been proven equal against a closed and reopened
+This is the recovery the stranded-write refusal names. Unless you name a row
+with --replace-binding-row or --drop-work-row (below), it is additive: it
+moves only ids the binding does not hold and the proven-copy manifest does not
+record, it deletes nothing from either store, and it extends the manifest only
+after every moved bead has been proven equal against a closed and reopened
 destination. A bead whose class it cannot state is named and left where it is.
 
 It refuses on a city that has NOT converged — the whole copy is still owed
@@ -5021,16 +5235,43 @@ what the binding does.
 The recovered beads stay in the work store until the migration is run again,
 which clears them exactly as it clears the cutover's own copies.
 
+A manifest written by an older build may list a work-store row by id alone,
+with nothing that says whether it is the bead the copy carried: no time
+bounds the entry, the row carries no created_at, or the row is younger than
+the manifest, which an older recover-stranded extended with the id of every
+row it carried. When the binding no longer holds such a row, a closed one is
+moved. One that is not closed is refused and shown (status, type,
+timestamps, title): nothing here can tell whether the binding collected the
+bead the copy carried or never received it. Decide per id with --move &lt;id&gt;
+(copy it in as it is) or --record-carried &lt;id&gt; (record it as carried; the
+clear then deletes its work-store row, and the clear's backup keeps it).
+Both also accept closed rows. --dry-run and --dump show these rows without
+writing, and naming an already-resolved id again is a no-op.
+
+A work-store row can also reuse an id the binding still holds for a
+different bead: the work store minted the id again after the copy carried
+the original. No copy can carry it under that id, so it is named and left
+unrecorded until you decide per id: --replace-binding-row &lt;id&gt; (the
+work-store row replaces the binding's) or --drop-work-row &lt;id&gt; (the
+work-store row is removed and the binding's stays). These are the only
+choices that remove a row, and each first backs up the row it removes, with
+every edge touching it, to infra.recover-choices.jsonl at the binding root.
+--dry-run shows both rows of each such id.
+
 ```
 gc storage recover-stranded [flags]
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--drop-work-row` | stringSlice |  | for a work-store row whose id the binding holds for a different bead: back up and remove the work-store row, keeping the binding's (repeatable, comma-separated) |
 | `--dry-run` | bool |  | report the gap and write the dump without touching the binding or the manifest |
 | `--dump` | string |  | write every stranded bead and its source dep edges to this JSON file before any write |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--from-work` | bool |  | recover the stranded infrastructure beads out of this city's work store |
+| `--move` | stringSlice |  | for a work-store row the manifest lists by id alone and the binding no longer holds: copy it into the binding as it is (required for a row that is not closed; a closed one is moved by default) (repeatable, comma-separated) |
+| `--record-carried` | stringSlice |  | for a work-store row the manifest lists by id alone and the binding no longer holds: record it as the bead the copy carried, so the clear deletes its work-store row (the backup keeps it); accepted for closed rows too (repeatable, comma-separated) |
+| `--replace-binding-row` | stringSlice |  | for a work-store row whose id the binding holds for a different bead: back up and remove the binding's row, then copy the work-store row in under the id (repeatable, comma-separated) |
 
 ## gc storage repair-sequence
 
@@ -5099,6 +5340,30 @@ every check the migration makes without migrating.
 ```
 gc storage status
 ```
+
+## gc storage vouch-bd
+
+On a split city, gc bd judges commands only for a bd binary whose command
+tree matches a pinned gc bd inventory. It walks each new binary's --help tree
+once and caches the verdict. This command walks the city's bd (or a rig's, with
+--rig) for real and, only if the tree matches, records a vouch for that binary
+by path and bytes (sha256) in .gc/bd-inventory-vouch.json, so gc bd admits it without
+walking it again. A binary whose tree matches no inventory is refused and
+nothing is written. city.toml is never edited.
+
+The vouch is a convenience, not a security boundary: gc doctor re-walks
+binaries and reports a mismatch, and the first admission by a vouch in each
+gc process records a gc_bd.vouch_used event. A gc whose pinned inventories
+differ from the ones the vouch was written under ignores it and walks the
+binary again.
+
+```
+gc storage vouch-bd [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--rig` | string |  | vouch for this rig's bd instead of the city's |
 
 ## gc supervisor
 

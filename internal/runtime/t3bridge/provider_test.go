@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
 	"github.com/gorilla/websocket"
 )
 
@@ -744,6 +745,36 @@ func TestBuildThreadEnv_MirrorsDoltEndpointForNonDoltliteSessions(t *testing.T) 
 	}
 }
 
+// TestBuildThreadEnv_ForwardsSharedServerOptOutForWithheldDoltPort pins the
+// thread half of the gastownhall/gascity#1656 withhold. With the managed port
+// withheld, nothing in the thread env outranks a HOME-level
+// dolt.shared-server: true any more, so the thread's bd would read and write
+// the host-wide shared server instead of the managed one the scope's
+// .beads/dolt-server.port mirror tracks. The session env's shared-server
+// opt-out must therefore reach the thread, and no port may be rebuilt from it.
+func TestBuildThreadEnv_ForwardsSharedServerOptOutForWithheldDoltPort(t *testing.T) {
+	sessionEnv := runtimetest.WithheldManagedDoltEnv()
+	sessionEnv["GC_BEADS_BACKEND"] = "dolt"
+	sessionEnv["GC_SESSION_NAME"] = "gc--worker"
+
+	env := buildThreadEnv(sessionEnv)
+
+	for key, want := range map[string]string{
+		"BEADS_DOLT_SHARED_SERVER": "0",
+		"BD_DOLT_SHARED_SERVER":    "false",
+		"GC_DOLT_MANAGED_LOCAL":    "1",
+	} {
+		if got := env[key]; got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+	for _, key := range []string{"GC_DOLT_PORT", "BEADS_DOLT_PORT", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_MODE"} {
+		if got, ok := env[key]; ok {
+			t.Fatalf("%s = %q rebuilt for a withheld port; the thread's bd must follow the scope's port mirror", key, got)
+		}
+	}
+}
+
 // TestBuildThreadEnv_PreservesHolderTokenAlignedToInstanceToken proves the GC_
 // allowlist does not strip the incarnation credential: BEADS_HOLDER_TOKEN
 // (BEADS_-prefixed, so dropped by the allowlist) is realigned to the surviving
@@ -1027,15 +1058,18 @@ func TestCopyTo_RejectsRelDstEscapingWorkDir(t *testing.T) {
 }
 
 type t3BridgeTestServer struct {
-	t                  *testing.T
-	server             *httptest.Server
-	mu                 sync.Mutex
-	commands           []string
-	payloads           []map[string]interface{}
-	rejectCommands     map[string]interface{}
-	snapshot           map[string]interface{}
-	snapshots          []map[string]interface{}
-	commandHook        func(payload map[string]interface{})
+	t              *testing.T
+	server         *httptest.Server
+	mu             sync.Mutex
+	commands       []string
+	payloads       []map[string]interface{}
+	rejectCommands map[string]interface{}
+	snapshot       map[string]interface{}
+	snapshots      []map[string]interface{}
+	commandHook    func(payload map[string]interface{})
+	// snapshotHook runs as the server answers a snapshot read, after it
+	// chose the snapshot it answers.
+	snapshotHook       func()
 	commandDrops       int
 	commandDropClose   []byte
 	stalled            bool
@@ -1313,15 +1347,20 @@ func (ts *t3BridgeTestServer) closeCommands(n int, closeMessage []byte) {
 // nextSnapshot is the snapshot the next read answers; false for an outage.
 func (ts *t3BridgeTestServer) nextSnapshot() (map[string]interface{}, bool) {
 	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	if len(ts.snapshots) == 0 {
-		return ts.snapshot, true
+	next, ok := ts.snapshot, true
+	if len(ts.snapshots) > 0 {
+		next = ts.snapshots[0]
+		ok = next != nil
+		if len(ts.snapshots) > 1 {
+			ts.snapshots = ts.snapshots[1:]
+		}
 	}
-	next := ts.snapshots[0]
-	if len(ts.snapshots) > 1 {
-		ts.snapshots = ts.snapshots[1:]
+	hook := ts.snapshotHook
+	ts.mu.Unlock()
+	if hook != nil {
+		hook()
 	}
-	return next, next != nil
+	return next, ok
 }
 
 func (ts *t3BridgeTestServer) recordCommand(typ string) {

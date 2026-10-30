@@ -119,9 +119,12 @@ func (s *roleStorageSpy) EdgeReader() (issueops.EdgeReader, error) { return s.ed
 func (s *roleStorageSpy) IssueRelations() (issueops.Relations, error) {
 	return s.relations, nil
 }
+
 func (s *roleStorageSpy) DependencyEditor() (issueops.DependencyEditor, error) { return s.deps, nil }
-func (s *roleStorageSpy) Deleter() (issueops.Deleter, error)                   { return s.deleter, nil }
-func (s *roleStorageSpy) StatsReporter() (issueops.StatsReporter, error)       { return s.stats, nil }
+
+func (s *roleStorageSpy) Deleter() (issueops.Deleter, error) { return s.deleter, nil }
+
+func (s *roleStorageSpy) StatsReporter() (issueops.StatsReporter, error) { return s.stats, nil }
 
 // The raw refusals. Reaching any of these is the bug this file guards.
 func unservedRaw(op string) error {

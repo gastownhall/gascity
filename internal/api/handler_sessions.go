@@ -52,7 +52,15 @@ type sessionResponse struct {
 	AgentKind string `json:"agent_kind,omitempty"`
 
 	// Enrichment fields for dashboard consumption.
-	Running       bool   `json:"running"`
+	//
+	// Running is a point-in-time observation of the session's runtime, in any
+	// open state: whether the provider held it live when this response was
+	// built (sessionRuntimeRunning). On tmux that is a pane whose process has
+	// not exited, not proof the agent itself is up: a launch wrapper or shell
+	// pane reads true, a remain-on-exit corpse reads false. A session in a
+	// transitional state (creating, start-pending, draining) can start or stop
+	// its process right after that.
+	Running       bool   `json:"running" doc:"Whether the session's runtime was live when this response was built, in any open state. It observes the runtime, not the agent: on tmux it is true while the session has a pane whose process has not exited, so a pane still running a launch wrapper or shell before the agent starts reads true, and a pane kept by remain-on-exit after its process exited reads false. GET /session/{id} and GET /sessions read the same probe, which tmux serves from a fleet snapshot refreshed at most every 2 s. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles."`
 	ActiveBead    string `json:"active_bead,omitempty"`
 	LastOutput    string `json:"last_output,omitempty"`
 	Model         string `json:"model,omitempty"`
@@ -76,6 +84,11 @@ type sessionResponse struct {
 
 	// Metadata exposes real_world_app_-prefixed bead metadata for external consumers.
 	Metadata map[string]string `json:"metadata,omitempty"`
+
+	// Turn is the turn the session's conversation-lane observer last
+	// recorded (X11 §5.3). Set on GET /session/{id} only, and only while
+	// the city's lane host runs with a kind to execute.
+	Turn *SessionTurn `json:"turn,omitempty" doc:"The turn the session's conversation lane last observed, with the runtime's turn capabilities. Set on a single-session read while the city's conversation lane host runs with a kind of [ops] authoritative, once its observer has recorded the session's runtime row."`
 }
 
 type sessionResponseHandle interface {
@@ -83,17 +96,42 @@ type sessionResponseHandle interface {
 	worker.PeekHandle
 }
 
+// runtimeSessionResponseHandle returns the runtime handle the list endpoints
+// enrich a session from. Every open session gets one, not only active ones:
+// running must report a live agent in a transitional state (creating,
+// start-pending, draining) too.
 func (s *Server) runtimeSessionResponseHandle(info session.Info) sessionResponseHandle {
-	if info.State != session.StateActive {
+	if info.Closed {
 		return nil
 	}
 	return newProviderSessionResponseHandle(s.state.SessionProvider(), info.SessionName, info.Provider)
 }
 
+// sessionProviderInfo is resolveProviderInfo for a session: the provider it
+// recorded, else the workspace default. A control-dispatcher session records
+// none because its agent has none (agentProviderName), so it inherits none.
+func sessionProviderInfo(info session.Info, cfg *config.City) (provider, displayName string) {
+	if strings.TrimSpace(info.Provider) == "" && isControlDispatcherSession(info, cfg) {
+		return "", ""
+	}
+	return resolveProviderInfo(info.Provider, cfg)
+}
+
+// isControlDispatcherSession reports whether a session's template resolves to
+// the SDK's providerless control dispatcher
+// (config.IsDeterministicControlDispatcher).
+func isControlDispatcherSession(info session.Info, cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	a, ok := findAgent(cfg, info.Template)
+	return ok && config.IsDeterministicControlDispatcher(&a)
+}
+
 func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 	provider, displayName := info.Provider, ""
 	if cfg != nil {
-		provider, displayName = resolveProviderInfo(info.Provider, cfg)
+		provider, displayName = sessionProviderInfo(info, cfg)
 	}
 	rig, _ := config.ParseQualifiedName(info.Template)
 	state := string(info.State)
@@ -264,7 +302,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	templateFilter := q.Get("template")
 	wantPeek := q.Get("peek") == "true"
 
-	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store))
+	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store), stateFilter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -613,18 +651,21 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 // exact transcript paths. A non-nil map is authoritative, including misses,
 // so list callers can batch Codex discovery once instead of scanning per row.
 func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery bool, peekLines int, keyedTranscriptPaths map[string]string) {
+	if info.Closed || runtimeHandle == nil {
+		return
+	}
+	// running reports the runtime in every open state: a start-pending or
+	// draining session can have a live agent, and a client checking for
+	// quiescence must see it. It is the runtime probe, the same one for every
+	// endpoint, never the worker phase: that phase is derived from the
+	// lifecycle state, so a start-pending or creating session reads
+	// "starting" before any agent process exists, and the single-session read
+	// would claim a runtime the list endpoints do not see. The rest of the
+	// enrichment is for active sessions only.
+	resp.Running = sessionRuntimeRunning(s.state.SessionProvider(), info.SessionName)
 	if info.State != session.StateActive {
 		return
 	}
-	stateHandle, peekHandle := s.sessionRuntimeHandles(runtimeHandle, info)
-	if stateHandle == nil {
-		return
-	}
-	state, err := stateHandle.State(context.Background())
-	if err != nil {
-		return
-	}
-	resp.Running = workerPhaseHasLiveOutput(state.Phase)
 
 	// Active bead: search rig stores for in_progress work assigned to the
 	// concrete session first, then fall back to alias/runtime/session names.
@@ -646,41 +687,43 @@ func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info
 	// Peek preview (opt-in, only when running). peekLines=0 means "use
 	// default" so existing callers that omit the query param keep the
 	// historical 5-line preview.
-	if wantPeek && resp.Running && peekHandle != nil {
-		lines := peekLines
-		if lines <= 0 {
-			lines = defaultSessionPeekLines
-		}
-		if output, err := peekHandle.Peek(context.Background(), lines); err == nil {
-			resp.LastOutput = output
+	if wantPeek && resp.Running {
+		if peekHandle := s.sessionPeekHandle(runtimeHandle, info); peekHandle != nil {
+			lines := peekLines
+			if lines <= 0 {
+				lines = defaultSessionPeekLines
+			}
+			if output, err := peekHandle.Peek(context.Background(), lines); err == nil {
+				resp.LastOutput = output
+			}
 		}
 	}
 
 	s.applySessionModelContext(resp, info, cfg, allowWorkdirTranscriptDiscovery, keyedTranscriptPaths)
 }
 
-// sessionRuntimeHandles resolves the state and peek handles for an active
-// session from its runtime handle. It returns nil handles when none is usable
-// (unsupported handle type, missing bead store, or a worker lookup error); the
-// caller treats a nil state handle as "nothing to enrich".
-func (s *Server) sessionRuntimeHandles(runtimeHandle any, info session.Info) (worker.StateHandle, worker.PeekHandle) {
+// sessionPeekHandle resolves the peek handle for an active session from its
+// runtime handle. It returns nil when none is usable (unsupported handle type,
+// missing bead store, or a worker lookup error). A bare runtime provider is
+// resolved to the session's worker handle only here, when a peek is wanted.
+func (s *Server) sessionPeekHandle(runtimeHandle any, info session.Info) worker.PeekHandle {
 	switch v := runtimeHandle.(type) {
 	case worker.Handle:
-		return v, v
+		return v
 	case sessionResponseHandle:
-		return v, v
+		return v
 	case runtime.Provider:
 		store := s.state.SessionsBeadStore()
 		if store.Store == nil {
-			return nil, nil
+			return nil
 		}
 		resolved, err := s.workerHandleForSession(store.Store, info.ID)
 		if err != nil {
-			return nil, nil
+			return nil
 		}
-		return resolved, resolved
+		return resolved
 	default:
-		return nil, nil
+		return nil
 	}
 }
 
@@ -701,6 +744,11 @@ func (s *Server) applySessionModelContext(resp *sessionResponse, info session.In
 	// Prefer session-key lookup to avoid cross-reading another session's transcript.
 	provider := info.Provider
 	if strings.TrimSpace(provider) == "" && cfg != nil {
+		if isControlDispatcherSession(info, cfg) {
+			// The control dispatcher runs no model, so it writes no
+			// transcript: one found in its work dir is another session's.
+			return
+		}
 		provider, _ = resolveProviderInfo(provider, cfg)
 	}
 	transcriptProvider := session.ProviderFamilyFromInfo(info, provider)

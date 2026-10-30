@@ -202,6 +202,10 @@ type ledgerFeedSet struct {
 	// wake is the controller wake, stored by startBeadEventWatcher once the
 	// entry point has wired it.
 	wake atomic.Pointer[controllerWake]
+	// rowsChanged, stored by the conversation-lane host as it starts, hears
+	// the rows each refresh pass changed, under either reconciler: the
+	// host's ledger-feed doorbell (DES-O1 §7.3).
+	rowsChanged atomic.Pointer[func([]beads.Bead)]
 
 	mu sync.Mutex
 	// mode is the mode of the latest wrap request.
@@ -246,6 +250,15 @@ func (s *ledgerFeedSet) setWake(w *controllerWake) {
 		return
 	}
 	s.wake.Store(w)
+}
+
+// setRowsChanged stores fn as the listener for the rows each refresh pass
+// changed. Nil-safe.
+func (s *ledgerFeedSet) setRowsChanged(fn func([]beads.Bead)) {
+	if s == nil {
+		return
+	}
+	s.rowsChanged.Store(&fn)
 }
 
 func (s *ledgerFeedSet) setMode(mode string) {
@@ -702,7 +715,8 @@ func (f *ledgerFeed) withRetries(plan ledgerFeedPagePlan) ([]string, map[string]
 }
 
 // refreshRows refreshes ids through the cache, keeps the dropped ones for a
-// retry, and wakes the legacy reconciler once when a refresh changed a row.
+// retry, wakes the legacy reconciler once when a refresh changed a row, and
+// hands the changed rows to the set's rowsChanged listener.
 // A close the refresh announced only on the page's word, of a row the cache
 // never held or held closed already, is handed to the autoclose sweep. The
 // caller holds refreshMu and counts the work.
@@ -784,6 +798,9 @@ func (f *ledgerFeed) refreshRows(ids []string, closing, seenOpen map[string]bool
 	if reconcile {
 		f.miss.noteUnhealthy(now)
 		f.cache.RequestReconcile()
+	}
+	if fn := f.set.rowsChanged.Load(); fn != nil && *fn != nil && len(changed) > 0 {
+		(*fn)(changed)
 	}
 	if wake := legacyWakeOf(f.set.wake.Load()); wake != nil && len(changed) > 0 {
 		keys := ledgerFeedWakeKeys(changed)

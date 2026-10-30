@@ -619,6 +619,39 @@ func TestWaitForInterruptBoundaryDelegatesToRoutedBackend(t *testing.T) {
 	}
 }
 
+// StopBackgroundWork must reach the routed backend, or session StopTurn's
+// BackgroundWorkStopper type-assert would be masked by the auto router and a
+// stopped Codex turn's background terminals would keep running.
+func TestStopBackgroundWorkDelegatesToRoutedBackend(t *testing.T) {
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	p := New(defaultSP, acpSP)
+	p.RouteACP("acp-agent")
+
+	for _, tc := range []struct {
+		name string
+		leg  *runtime.Fake
+	}{{"tmux-agent", defaultSP}, {"acp-agent", acpSP}} {
+		if err := p.StopBackgroundWork(context.Background(), tc.name); err != nil {
+			t.Fatalf("StopBackgroundWork(%s): %v", tc.name, err)
+		}
+		if got := tc.leg.CountCalls("StopBackgroundWork", tc.name); got != 1 {
+			t.Fatalf("routed backend StopBackgroundWork(%s) calls = %d, want 1", tc.name, got)
+		}
+	}
+	if got := defaultSP.CountCalls("StopBackgroundWork", "acp-agent") + acpSP.CountCalls("StopBackgroundWork", "tmux-agent"); got != 0 {
+		t.Fatalf("StopBackgroundWork reached the other backend %d times, want 0", got)
+	}
+}
+
+func TestStopBackgroundWorkUnsupportedWhenBackendLacksIt(t *testing.T) {
+	p := New(runtime.NewFake(), &runtimeNoInteractionProvider{Provider: runtime.NewFake()})
+	p.RouteACP("plain-agent")
+	if err := p.StopBackgroundWork(context.Background(), "plain-agent"); !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		t.Fatalf("StopBackgroundWork = %v, want ErrInteractionUnsupported", err)
+	}
+}
+
 // capsFake overrides the fake's capabilities so the intersection can be
 // exercised with differing backend support.
 type capsFake struct {

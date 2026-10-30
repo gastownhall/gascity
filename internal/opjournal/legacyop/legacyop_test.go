@@ -154,6 +154,9 @@ type want struct {
 	recorded bool
 	adopted  bool
 	degraded string // the Degrade stage reported, or ""
+	// rejected is the journal's rejection an unrecorded admission carries
+	// (Admission.Unrecordable), or nil.
+	rejected error
 }
 
 // TestAdmitMatrix runs every store state under auto and require, for the
@@ -161,6 +164,7 @@ type want struct {
 func TestAdmitMatrix(t *testing.T) {
 	execRec := want{decision: Execute, recorded: true}
 	execUnrec := func(stage string) want { return want{decision: Execute, degraded: stage} }
+	rejected := func(err error) want { return want{decision: Execute, rejected: err} }
 	unavailable := func(stage string) want { return want{err: ErrUnavailable, degraded: stage} }
 	busy := want{err: ErrBusy}
 	replay := want{decision: Replay, recorded: true}
@@ -219,10 +223,10 @@ func TestAdmitMatrix(t *testing.T) {
 		}, [2]want{{err: opjournal.ErrKeyReuse}, {err: opjournal.ErrKeyReuse}}, [2]want{{err: opjournal.ErrKeyReuse}, {err: opjournal.ErrKeyReuse}}},
 		{"payload too large", func(*testing.T, *env, *Recorder) Request {
 			return msg("k1", strings.Repeat("x", opjournal.MaxInlinePayload+1))
-		}, [2]want{execUnrec(""), execUnrec("")}, [2]want{{err: opjournal.ErrPayloadTooLarge}, {err: opjournal.ErrPayloadTooLarge}}},
+		}, [2]want{rejected(opjournal.ErrPayloadTooLarge), rejected(opjournal.ErrPayloadTooLarge)}, [2]want{{err: opjournal.ErrPayloadTooLarge}, {err: opjournal.ErrPayloadTooLarge}}},
 		{
 			"invalid key", func(*testing.T, *env, *Recorder) Request { return msg(" k1", "hello") },
-			[2]want{execUnrec(""), execUnrec("")},
+			[2]want{rejected(opjournal.ErrInvalidRequest), rejected(opjournal.ErrInvalidRequest)},
 			[2]want{{err: opjournal.ErrInvalidRequest}, {err: opjournal.ErrInvalidRequest}},
 		},
 		{"closed replay", func(t *testing.T, e *env, r *Recorder) Request {
@@ -287,6 +291,9 @@ func TestAdmitMatrix(t *testing.T) {
 						}
 						if adm.Decision != w.decision || adm.Recorded != w.recorded || adm.Adopted != w.adopted {
 							t.Fatalf("Admit = decision %d recorded %t adopted %t; want %+v", adm.Decision, adm.Recorded, adm.Adopted, w)
+						}
+						if (w.rejected == nil) != (adm.Unrecordable == nil) || (w.rejected != nil && !errors.Is(adm.Unrecordable, w.rejected)) {
+							t.Fatalf("Admit unrecordable = %v, want %v", adm.Unrecordable, w.rejected)
 						}
 						if adm.Key == "" || (req.Key == "") != adm.Minted {
 							t.Fatalf("key %q minted %t for supplied %q", adm.Key, adm.Minted, req.Key)
@@ -858,5 +865,79 @@ func TestFinishPanicReleasesTheEntry(t *testing.T) {
 	}
 	if f := adm.Finish(Result{Outcome: failed(opjournal.ReasonOther)}); f.Closed || f.Late || f.Background != nil {
 		t.Fatalf("second Finish = %+v", f)
+	}
+}
+
+// Kills a key carrying the attempt (M19) or a key for a request no op row
+// backs (M20): a recorded Execute, adopted or not, delivers under
+// gc:<op id>:1; an unrecorded request and either replay deliver unkeyed.
+func TestAdmissionDeliveryKey(t *testing.T) {
+	key := func(op opjournal.Op) string { return "gc:" + op.ID + ":1" }
+	t.Run("recorded execute", func(t *testing.T) {
+		e := newEnv(t)
+		adm, err := apiRecorder(e, gate.Auto).Admit(msg("k1", "hello"))
+		if err != nil || adm.Decision != Execute || !adm.Recorded {
+			t.Fatalf("Admit = %+v, %v", adm, err)
+		}
+		if got := adm.DeliveryKey(); got != key(adm.Op) {
+			t.Fatalf("DeliveryKey = %q, want %q", got, key(adm.Op))
+		}
+	})
+	t.Run("adopted", func(t *testing.T) {
+		e := newEnv(t)
+		op := e.seed(t, msg("k1", "hello"), ExecutorAPI)
+		adm, err := apiRecorder(e, gate.Auto).Admit(msg("k1", "hello"))
+		if err != nil || !adm.Adopted || adm.Op.Attempt != 1 {
+			t.Fatalf("Admit = %+v, %v; want an adoption", adm, err)
+		}
+		if got := adm.DeliveryKey(); got != key(op) {
+			t.Fatalf("adopted DeliveryKey = %q, want the first execution's %q", got, key(op))
+		}
+	})
+	t.Run("unrecorded", func(t *testing.T) {
+		e := newEnv(t)
+		e.fault.createErr = errors.New("transport: refused")
+		adm, err := apiRecorder(e, gate.Auto).Admit(msg("k1", "hello"))
+		if err != nil || adm.Recorded {
+			t.Fatalf("Admit = %+v, %v; want unrecorded", adm, err)
+		}
+		if got := adm.DeliveryKey(); got != "" {
+			t.Fatalf("unrecorded DeliveryKey = %q, want none", got)
+		}
+	})
+	t.Run("stored replay", func(t *testing.T) {
+		e := newEnv(t)
+		op := e.seed(t, msg("k1", "hello"), ExecutorAPI)
+		if _, err := e.st.Close(op.ID, succeeded(ViaLegacyQueued), "legacy:api"); err != nil {
+			t.Fatal(err)
+		}
+		adm, err := apiRecorder(e, gate.Auto).Admit(msg("k1", "hello"))
+		if err != nil || adm.Decision != Replay {
+			t.Fatalf("Admit = %+v, %v; want a replay", adm, err)
+		}
+		if got := adm.DeliveryKey(); got != "" {
+			t.Fatalf("replay DeliveryKey = %q, want none", got)
+		}
+	})
+	t.Run("in-flight replay", func(t *testing.T) {
+		e := newEnv(t)
+		r := apiRecorder(e, gate.Auto)
+		first, err := r.Admit(msg("k1", "hello"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		first.Accept("202 body")
+		second, err := r.Admit(msg("k1", "hello"))
+		if err != nil || second.Decision != Replay {
+			t.Fatalf("Admit = %+v, %v; want an in-flight replay", second, err)
+		}
+		if got := second.DeliveryKey(); got != "" {
+			t.Fatalf("in-flight replay DeliveryKey = %q, want none", got)
+		}
+		first.Finish(Result{Outcome: succeeded(ViaLegacyDelivered)})
+	})
+	var nilAdm *Admission
+	if got := nilAdm.DeliveryKey(); got != "" {
+		t.Fatalf("nil DeliveryKey = %q", got)
 	}
 }

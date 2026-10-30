@@ -102,7 +102,8 @@ func TestOpsUnknownKeySuggests(t *testing.T) {
 }
 
 // TestOpsAuthoritativeParses proves [ops] authoritative defaults to nil, and
-// accepts message, the one kind this build's conversation lane executes.
+// accepts message and respond, the kinds this build's conversation lane
+// executes.
 func TestOpsAuthoritativeParses(t *testing.T) {
 	empty, err := Parse([]byte("[ops]\ncontent = \"auto\"\n"))
 	if err != nil {
@@ -124,8 +125,38 @@ func TestOpsAuthoritativeParses(t *testing.T) {
 	if !cfg.Ops.LaneExecutes("message") {
 		t.Fatal("LaneExecutes(message) = false with message listed")
 	}
-	if cfg.Ops.LaneExecutes("interrupt") || cfg.Ops.LaneExecutes("") {
+	if cfg.Ops.LaneExecutes("interrupt") || cfg.Ops.LaneExecutes("respond") || cfg.Ops.LaneExecutes("") {
 		t.Fatal("LaneExecutes is true for a kind that is not listed")
+	}
+	both, err := Parse([]byte("[ops]\nauthoritative = [\"respond\", \"message\"]\n"))
+	if err != nil {
+		t.Fatalf("Parse respond: %v", err)
+	}
+	if !both.Ops.LaneExecutes("respond") || !both.Ops.LaneExecutes("message") {
+		t.Fatalf("LaneExecutes(respond, message) false with both listed: %#v", both.Ops.Authoritative)
+	}
+}
+
+// TestOpsAuthoritativeAcceptsInterrupt proves [ops] authoritative accepts
+// interrupt beside message and respond (ga-6plx6a): the lane executes
+// interrupt ops, and the CLI's inline pass leaves them to the controller's
+// lane host (opjournal.Caps.ContentOnly).
+func TestOpsAuthoritativeAcceptsInterrupt(t *testing.T) {
+	cfg, err := Parse([]byte("[ops]\nauthoritative = [\"message\", \"interrupt\", \"respond\"]\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for _, kind := range []string{"message", "interrupt", "respond"} {
+		if !cfg.Ops.LaneExecutes(kind) {
+			t.Fatalf("LaneExecutes(%s) = false with it listed: %#v", kind, cfg.Ops.Authoritative)
+		}
+	}
+	only, err := Parse([]byte("[ops]\nauthoritative = [\"interrupt\"]\n"))
+	if err != nil {
+		t.Fatalf("Parse interrupt alone: %v", err)
+	}
+	if !only.Ops.LaneExecutes("interrupt") || only.Ops.LaneExecutes("message") {
+		t.Fatalf("LaneExecutes with interrupt alone listed: %#v", only.Ops.Authoritative)
 	}
 }
 
@@ -136,13 +167,12 @@ func TestOpsAuthoritativeRejects(t *testing.T) {
 	for _, tc := range []struct {
 		name, list, want string
 	}{
-		{"empty", `[""]`, "empty entry; accepted kinds: message"},
-		{"blank", `[" "]`, "empty entry; accepted kinds: message"},
+		{"empty", `[""]`, "empty entry; accepted kinds: message, interrupt, respond"},
+		{"blank", `[" "]`, "empty entry; accepted kinds: message, interrupt, respond"},
 		{"duplicate", `["message", "message"]`, `"message" is listed twice`},
-		{"unknown", `["mesage"]`, `"mesage" is not an op kind; accepted kinds: message`},
-		{"interrupt", `["interrupt"]`, `cannot execute "interrupt" in this build; accepted kinds: message`},
-		{"respond", `["respond"]`, `cannot execute "respond"`},
-		{"lifecycle", `["kill"]`, `cannot execute "kill"`},
+		{"unknown", `["mesage"]`, `"mesage" is not an op kind; accepted kinds: message, interrupt, respond`},
+		{"lifecycle", `["kill"]`, `cannot execute "kill" in this build; accepted kinds: message, interrupt, respond`},
+		{"wake", `["wake"]`, `cannot execute "wake"`},
 		{"cased", `["Message"]`, `"Message" is not an op kind`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

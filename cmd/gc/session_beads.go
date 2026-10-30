@@ -171,6 +171,20 @@ func findOpenSessionBeadBySessionName(store beads.Store, sessionName string) (be
 	return beads.Bead{}, false, nil
 }
 
+// sessionStateMayBeRunning reports whether a row in state may hold a running
+// provider process: "" (read as active), active, awake, creating or draining.
+// Such a process may have minted its own conversation id, which only its
+// SessionStart hook reports, so a session_key minted for the row now would
+// name a transcript that does not exist and make the hook's set-once capture
+// drop the real one; the row gets its key at its next start instead.
+func sessionStateMayBeRunning(state string) bool {
+	switch session.State(strings.TrimSpace(state)) {
+	case "", session.StateActive, session.StateAwake, session.StateCreating, session.StateDraining:
+		return true
+	}
+	return false
+}
+
 func syncSessionCachedState(sessionName string, existing beads.Bead, exists bool, sp runtime.Provider) string {
 	if exists {
 		switch session.State(strings.TrimSpace(existing.Metadata["state"])) {
@@ -442,6 +456,62 @@ func preserveConfiguredNamedSessionBeadInfo(i session.Info, cfg *config.City, ci
 	return true
 }
 
+// closedConfiguredNamedSessionBeadToReopen finds the closed row a reopen of
+// the configured named session identity would revive: its canonical row,
+// still holding sessionName, while the config still names the session so.
+// It reports false when there is none; a lookup that fails is reported on
+// stderr.
+func closedConfiguredNamedSessionBeadToReopen(
+	store beads.Store,
+	cfg *config.City,
+	cityName string,
+	identity string,
+	sessionName string,
+	stderr io.Writer,
+) (beads.Bead, bool) {
+	if store == nil || cfg == nil {
+		return beads.Bead{}, false
+	}
+	bead, ok, err := session.FindClosedNamedSessionBeadForSessionName(store, identity, sessionName)
+	if err != nil {
+		fmt.Fprintf(stderr, "session beads: finding closed configured named session %q: %v\n", identity, err) //nolint:errcheck
+		return beads.Bead{}, false
+	}
+	if !ok {
+		return beads.Bead{}, false
+	}
+	// Explicit gc session close retires the canonical identifiers before
+	// closing. In that case, mint a fresh canonical bead instead of reviving
+	// a deliberately retired runtime identity.
+	if strings.TrimSpace(bead.Metadata["session_name"]) == "" {
+		return beads.Bead{}, false
+	}
+	if strings.TrimSpace(bead.Metadata["session_name"]) != strings.TrimSpace(sessionName) {
+		return beads.Bead{}, false
+	}
+	spec, ok := findNamedSessionSpec(cfg, cityName, identity)
+	if !ok || strings.TrimSpace(spec.SessionName) != strings.TrimSpace(sessionName) {
+		return beads.Bead{}, false
+	}
+	return bead, true
+}
+
+// beforeConfiguredNamedSessionReopen calls hook with the id of the closed row
+// a reopen of the configured named session spec would revive, if there is
+// one, and returns its error; a nil hook does nothing. A caller that must
+// decide before the row is reopened (an op's admission) runs it ahead of
+// the reopen.
+func beforeConfiguredNamedSessionReopen(store beads.Store, cfg *config.City, cityName string, spec namedSessionSpec, hook func(id string) error) error {
+	if hook == nil {
+		return nil
+	}
+	bead, ok := closedConfiguredNamedSessionBeadToReopen(store, cfg, cityName, spec.Identity, spec.SessionName, io.Discard)
+	if !ok {
+		return nil
+	}
+	return hook(bead.ID)
+}
+
 func reopenClosedConfiguredNamedSessionBead(
 	cityPath string,
 	store beads.Store,
@@ -454,35 +524,15 @@ func reopenClosedConfiguredNamedSessionBead(
 	extraMeta map[string]string,
 	stderr io.Writer,
 ) (beads.Bead, string, bool) {
-	if store == nil || cfg == nil {
-		return beads.Bead{}, "", false
-	}
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	bead, ok, err := session.FindClosedNamedSessionBeadForSessionName(store, identity, sessionName)
-	if err != nil {
-		fmt.Fprintf(stderr, "session beads: finding closed configured named session %q: %v\n", identity, err) //nolint:errcheck
-		return beads.Bead{}, "", false
-	}
+	bead, ok := closedConfiguredNamedSessionBeadToReopen(store, cfg, cityName, identity, sessionName, stderr)
 	if !ok {
 		return beads.Bead{}, "", false
 	}
-	// Explicit gc session close retires the canonical identifiers before
-	// closing. In that case, mint a fresh canonical bead instead of reviving
-	// a deliberately retired runtime identity.
-	if strings.TrimSpace(bead.Metadata["session_name"]) == "" {
-		return beads.Bead{}, "", false
-	}
-	if strings.TrimSpace(bead.Metadata["session_name"]) != strings.TrimSpace(sessionName) {
-		return beads.Bead{}, "", false
-	}
-	spec, ok := findNamedSessionSpec(cfg, cityName, identity)
-	if !ok || strings.TrimSpace(spec.SessionName) != strings.TrimSpace(sessionName) {
-		return beads.Bead{}, "", false
-	}
 	var reopened beads.Bead
-	err = session.WithCitySessionIdentifierLocks(cityPath, []string{identity, sessionName}, func() error {
+	err := session.WithCitySessionIdentifierLocks(cityPath, []string{identity, sessionName}, func() error {
 		// The lookup above ran before the lock, so another writer may have
 		// reopened the row while this caller waited for it. Re-read the row
 		// live under the lock and reopen only if it is still the closed row
@@ -2237,7 +2287,10 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			}
 		}
 		needsAliasSync := b.Metadata["alias"] != managedAlias
-		if b.Metadata["pool_slot"] == "" {
+		// Configured named sessions never carry a pool slot (cleared above).
+		// Backfilling here would re-derive one from a numeric name suffix
+		// (deputy-2 -> 2) and flap the bead against that clear every tick.
+		if !isConfiguredNamed && b.Metadata["pool_slot"] == "" {
 			queuePoolSlotMeta := queueMeta
 			if needsAliasSync && isManagedPool && isPoolInstance {
 				queuePoolSlotMeta = queueAliasGuardedMeta
@@ -2299,9 +2352,11 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		if b.Metadata["wake_mode"] != tp.WakeMode {
 			queueMeta("wake_mode", tp.WakeMode)
 		}
-		// Backfill session_key for beads created before this fix.
+		// Backfill session_key for beads created before this fix, but not
+		// under a process that may be running and own its id.
 		if b.Metadata["session_key"] == "" &&
-			tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
+			tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" &&
+			!sessionStateMayBeRunning(state) {
 			if key, err := session.GenerateSessionKey(); err == nil {
 				queueMeta("session_key", key)
 			}
@@ -4208,8 +4263,9 @@ func closeBeadPreservingAssignees(store beads.Store, sw *SeatWork, expected sess
 	// writes nothing and reports false, and the next tick decides again. Every
 	// other store makes the same checks on one read, then keeps the single Tx
 	// with the metadata ordered first. There the metadata may land while the
-	// Close fails; the helper then reports failure and the reconciler re-runs
-	// the close next tick, so no bead is durably left half-closed.
+	// Close fails or never runs; the helper then reports failure and the open
+	// row carries the close code as its state. The reconciler finishes that
+	// interrupted close on a later tick (finishInterruptedClose).
 	if commitLegacyClose(sessionFrontDoor(store), expected, session.ClosePatch(now, reason), now, stderr, "session") != session.CommitLanded {
 		return false
 	}
