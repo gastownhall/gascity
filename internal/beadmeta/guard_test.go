@@ -60,6 +60,10 @@ var allowedNonMetadata = map[string]string{
 	"gc.bash": "shell completion filename (cmd/gc/cmd_shell.go)",
 	"gc.fish": "shell completion filename (cmd/gc/cmd_shell.go)",
 
+	// Windows executable name, not a metadata key: in PowerShell a bare gc is
+	// the Get-Content alias, so agent-facing command text names gc.exe.
+	"gc.exe": "Windows gc executable name (internal/runtime/gccommand_windows.go, internal/overlay/platform_windows.go)",
+
 	// City config YAML keys (config-file rewrite, not bead metadata).
 	"gc.endpoint_origin": "city config YAML key (internal/beads/contract/files.go)",
 	"gc.endpoint_status": "city config YAML key (internal/beads/contract/files.go)",
