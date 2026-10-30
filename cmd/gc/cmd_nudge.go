@@ -47,6 +47,16 @@ const (
 	defaultQueuedNudgeMaxAttempts   = 5
 	defaultQueuedNudgeDeadRetention = 1 * time.Hour
 
+	// queuedNudgeStarvedAfter is how long a due item a target may claim
+	// waits on a session whose activity clock never quiets before the
+	// poller stops waiting on that clock (ga-atd7r2): a session that stays
+	// continuously busy — a repainting idle TUI, or back-to-back turns —
+	// otherwise starves its queue, because the quiescence gate never
+	// clears for it. It sits above the #5317 busy-skip fixture (1 minute),
+	// so a fresh busy deferral still reads as a quiet-session courtesy
+	// skip, not a starvation.
+	queuedNudgeStarvedAfter = 2 * time.Minute
+
 	// nudgeEnqueueMaintenanceBudget bounds the wall-clock time the foreground
 	// `gc sling --nudge` enqueue path spends on best-effort nudge-queue
 	// maintenance (expiring/pruning stale entries) while holding the
@@ -1205,7 +1215,10 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 // gate included: "not-delivered" means this target HAD work it could claim and
 // still got nothing this tick -- most commonly
 // tryDeliverQueuedNudgesByPoller's quiescence gate rejecting a continuously
-// busy session. A running session with nothing it may claim (nothing queued,
+// busy session whose due items have not yet starved past
+// queuedNudgeStarvedAfter (a starved item is delivered without waiting on the
+// activity clock, immediately when the leaf's turn look says no turn runs). A
+// running session with nothing it may claim (nothing queued,
 // or only items fenced to a live sibling) is the dispatcher's separate
 // "not-matched" class and is deliberately not counted: the poll loop never
 // exits while the session runs, so counting it would turn this into a tick
@@ -2448,8 +2461,33 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 			return false, nil
 		}
 	}
+	// A continuously busy session starves the queue the quiescence gate
+	// holds back (ga-atd7r2): an idle TUI that keeps repainting, or a run of
+	// back-to-back turns, keeps LastActivity fresher than any quiescence
+	// window, so the gate never clears. Once a due claimable item has waited
+	// queuedNudgeStarvedAfter, the pass stops waiting on that clock. A leaf
+	// that takes a turn reading must first prove no turn is running — only
+	// (false, nil) is an idle reading (runtime.TurnRunningProvider) — and
+	// then delivers immediately, the idle question the default path would
+	// wait out already answered. A leaf with no turn reading (ACP, Fake,
+	// t3bridge, ...) bypasses on the default path: its Nudge runs no tmux
+	// idle wait, and holding it would leave the same starvation in place.
+	delivery := worker.NudgeDeliveryDefault
 	if !pollerSessionIdleEnough(target, sp, quiescence, obs) {
-		return false, nil
+		starved, err := queuedNudgeStarvedForTarget(target, time.Now())
+		if err != nil {
+			return false, err
+		}
+		if !starved {
+			return false, nil
+		}
+		if tr, ok := runtime.TurnRunningFor(sp, target.sessionName); ok {
+			running, lookErr := tr.TurnRunning(target.sessionName)
+			if lookErr != nil || running {
+				return false, nil
+			}
+			delivery = worker.NudgeDeliveryImmediate
+		}
 	}
 	items, err := claimDueQueuedNudgeBatchForTarget(target.cityPath, target, time.Now())
 	if err != nil || len(items) == 0 {
@@ -2547,7 +2585,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	}
 	result, err := handle.Nudge(context.Background(), sessionActor(session.ActorAgent, target.cityPath), worker.NudgeRequest{
 		Text:        msg,
-		Delivery:    worker.NudgeDeliveryDefault,
+		Delivery:    delivery,
 		Source:      "queue",
 		Wake:        worker.NudgeWakeLiveOnly,
 		DeliveryKey: queuedNudgeDeliveryKey(items),
@@ -2624,6 +2662,31 @@ func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence
 	ctx, cancel := context.WithTimeout(context.Background(), quiescence)
 	defer cancel()
 	return waiter.WaitForIdle(ctx, target.sessionName, quiescence) == nil
+}
+
+// queuedNudgeStarvedForTarget reports, from a lock-free queue snapshot
+// (listQueuedNudgesForTargetSnapshot — same cost class as the dispatcher's
+// WouldClaimBatch probe: no flock, no store open, no write), whether target
+// holds a due item it may claim that has waited queuedNudgeStarvedAfter:
+// the queue a closed quiescence gate holds back is starving, not merely
+// waiting (ga-atd7r2). The claimable check takes the nil census, which is
+// strict — an item fenced to another still-live session never qualifies —
+// and the due check keeps the bypass from being re-taken on every tick
+// while an earlier deferral's deliver_after is still in the future.
+func queuedNudgeStarvedForTarget(target nudgeTarget, now time.Time) (bool, error) {
+	pending, _, _, err := listQueuedNudgesForTargetSnapshot(target.cityPath, target, now)
+	if err != nil {
+		return false, err
+	}
+	due := func(item queuedNudge) bool {
+		return item.DeliverAfter.IsZero() || !item.DeliverAfter.After(now)
+	}
+	for _, item := range pending {
+		if due(item) && queuedNudgeClaimableForTarget(target, item, nil) && now.Sub(item.CreatedAt) >= queuedNudgeStarvedAfter {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func pollerCanDeliverWithoutActivitySignal(target nudgeTarget, sp runtime.Provider) bool {
