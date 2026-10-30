@@ -284,11 +284,52 @@ func TestConformance_SweepSuspendCreatingTearsDownRuntimeWithoutRewritingState(t
 	}
 }
 
-// The scope control for the pin above. The draining escape hatch must be
-// draining-ONLY, never a blanket "any state suspends" that would hide a real
-// illegal-transition bug elsewhere. (An operator's suspend of a drained row is
-// legal and holds it; the sweep and the idle auto-suspend still refuse it, see
-// TestOnlyTheOperatorSuspendsADrainedRow.)
+// The creating latitude belongs to the city-stop SWEEP. An operator naming one
+// creating session, and the idle auto-suspend, still get the illegal
+// transition and leave the runtime alone.
+func TestConformance_NonSweepSuspendStillRejectsCreating(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		soft bool
+	}{
+		{name: "operator", soft: false},
+		{name: "idle", soft: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			m := newTestManager(t, store, sp)
+
+			id := createTestSession(t, m, "worker")
+			sessName, _ := seedCreatingWithLiveRuntime(t, m, sp, id)
+
+			err := m.Suspend(context.Background(), testActor(m, ActorOperator), id, tc.soft)
+			if !errors.Is(err, ErrIllegalTransition) {
+				t.Fatalf("Suspend(creating, soft=%v) = %v, want ErrIllegalTransition", tc.soft, err)
+			}
+			var ite *IllegalTransitionError
+			if !errors.As(err, &ite) {
+				t.Fatalf("err should unwrap to *IllegalTransitionError; got %T", err)
+			}
+			if ite.From != StateCreating || ite.Command != CmdSuspend {
+				t.Errorf("IllegalTransitionError = {From: %q, Command: %q}, want {%q, %q}", ite.From, ite.Command, StateCreating, CmdSuspend)
+			}
+			if sp.CountCalls("Stop", sessName) != 0 {
+				t.Errorf("rejected Suspend(creating, soft=%v) tore down runtime %q anyway", tc.soft, sessName)
+			}
+			if !sp.IsRunning(sessName) {
+				t.Errorf("runtime session %q was killed by a rejected Suspend(creating, soft=%v)", sessName, tc.soft)
+			}
+		})
+	}
+}
+
+// The scope control for the pins above. The sweep's draining and creating
+// latitudes are state-specific and sweep-only, never a blanket "any state
+// suspends" that would hide a real illegal-transition bug elsewhere: an
+// operator's suspend of creating or start-pending still refuses. (An
+// operator's suspend of a drained row is legal and holds it; the sweep and the
+// idle auto-suspend still refuse it, see TestOnlyTheOperatorSuspendsADrainedRow.)
 func TestConformance_SuspendStillRejectsOtherIllegalStates(t *testing.T) {
 	for _, from := range []State{StateStartPending, StateCreating} {
 		t.Run(string(from), func(t *testing.T) {
