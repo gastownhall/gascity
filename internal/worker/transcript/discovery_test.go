@@ -629,6 +629,32 @@ func TestKeyedProbeRoots(t *testing.T) {
 	}
 }
 
+func TestClaudeConfigProjectsRoot(t *testing.T) {
+	abs := t.TempDir()
+	for _, c := range []struct {
+		name   string
+		dir    string
+		want   string
+		wantOK bool
+	}{
+		{"absolute", abs, filepath.Join(abs, "projects"), true},
+		{"whitespace padded", "  " + abs + "\n", filepath.Join(abs, "projects"), true},
+		{"empty", "", "", false},
+		{"relative", filepath.Join("rel", "claude"), "", false},
+		{"home relative", "~/.claude-alt", "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := ClaudeConfigProjectsRoot(map[string]string{"CLAUDE_CONFIG_DIR": c.dir})
+			if got != c.want || ok != c.wantOK {
+				t.Fatalf("ClaudeConfigProjectsRoot(%q) = (%q, %v), want (%q, %v)", c.dir, got, ok, c.want, c.wantOK)
+			}
+		})
+	}
+	if got, ok := ClaudeConfigProjectsRoot(nil); got != "" || ok {
+		t.Fatalf("ClaudeConfigProjectsRoot(nil) = (%q, %v), want (\"\", false)", got, ok)
+	}
+}
+
 func TestHasKeyedTranscript(t *testing.T) {
 	base := t.TempDir()
 	workDir := filepath.Join(t.TempDir(), "claude-project")

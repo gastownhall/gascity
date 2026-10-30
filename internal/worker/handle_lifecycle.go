@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -828,13 +829,20 @@ func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info, metadata map[
 	if strings.TrimSpace(metadata["started_config_hash"]) != "" {
 		return false
 	}
-	workDir := h.runtimeHints().WorkDir
+	hints := h.runtimeHints()
+	workDir := hints.WorkDir
 	if workDir == "" {
 		workDir = info.WorkDir
 	}
+	// The launch env's own config dir adds its root to the handle's, never
+	// replaces them: a probe that misses a root keeps today's resume.
+	launchRoots := h.adapter.SearchPaths
+	if root, ok := workertranscript.ClaudeConfigProjectsRoot(hints.Env); ok {
+		launchRoots = sessionlog.MergeSearchPaths(append(slices.Clone(launchRoots), root))
+	}
 	provider := h.historyProvider(info)
 	exists, probeable := workertranscript.HasKeyedTranscript(
-		workertranscript.KeyedProbeRoots(h.adapter.SearchPaths, provider), provider, workDir, key)
+		workertranscript.KeyedProbeRoots(launchRoots, provider), provider, workDir, key)
 	return probeable && !exists
 }
 

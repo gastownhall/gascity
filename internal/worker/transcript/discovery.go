@@ -2,6 +2,7 @@
 package transcript
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -193,6 +194,19 @@ func KeyedProbeRoots(searchPaths []string, provider string) []string {
 		return sessionlog.DefaultSearchPaths()
 	}
 	return searchPaths
+}
+
+// ClaudeConfigProjectsRoot is the transcript root a launch under env reads
+// for its CLAUDE_CONFIG_DIR: <dir>/projects for an absolute dir. A relative
+// or ~ value is resolved by the provider against its own working dir and
+// home, which a probe cannot reproduce, so it reports false, as it does for
+// an unset one.
+func ClaudeConfigProjectsRoot(env map[string]string) (string, bool) {
+	dir := strings.TrimSpace(env["CLAUDE_CONFIG_DIR"])
+	if !filepath.IsAbs(dir) {
+		return "", false
+	}
+	return filepath.Join(dir, "projects"), true
 }
 
 // ProviderHasKeyedTranscript reports whether the provider family can use keyed
