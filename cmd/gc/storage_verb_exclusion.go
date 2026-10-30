@@ -213,20 +213,29 @@ var storageVerbSessionInventory = func(cfg *config.City, cityPath string) ([]str
 }
 
 // cityRunsRemoteSessions reports whether the city's session runtime runs its
-// sessions on other hosts: k8s, hybrid (whose remote leg is k8s), ssh, or a
-// pack-declared runtime, which can be anything.
+// sessions on other hosts: k8s, hybrid (whose remote leg is k8s) or ssh:.
+//
+// The city's own [session] provider decides, not the operator's shell: a
+// GC_SESSION override in the shell running this command (a developer's
+// "fake") must not hide that the city's sessions run in pods. An override
+// that names a remote runtime counts too. Pack-declared runtimes declare no
+// remoteness, so they are not presumed remote; a remote one that cannot list
+// its sessions completely still refuses through the inventory check.
 func cityRunsRemoteSessions(cfg *config.City) (string, bool) {
 	if cfg == nil {
 		return "", false
 	}
-	name := strings.TrimSpace(effectiveProviderName(cfg.Session.Provider))
-	if name == "k8s" || name == "hybrid" || strings.HasPrefix(name, "ssh:") {
-		return name, true
+	remote := func(name string) bool {
+		return name == "k8s" || name == "hybrid" || strings.HasPrefix(name, "ssh:")
 	}
-	if _, pack := cfg.Runtimes[name]; pack && name != "" {
-		return name, true
+	configured := strings.TrimSpace(cfg.Session.Provider)
+	if remote(configured) {
+		return configured, true
 	}
-	return name, false
+	if override := strings.TrimSpace(os.Getenv("GC_SESSION")); remote(override) {
+		return override, true
+	}
+	return configured, false
 }
 
 // sharedWorkStoreRefusal is the shared-store check for this city's work store

@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/cityinit"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -74,4 +76,18 @@ func TestInitRefusesAnExistingStore(t *testing.T) {
 			t.Fatalf("gc init --from --adopt-store = %d; stderr=%s", code, stderr.String())
 		}
 	})
+}
+
+// TestAPIInitSurfacesTheRefusalReason: the API's init reports why the
+// scaffold refused (an existing .gc/store), not a bare exit code.
+func TestAPIInitSurfacesTheRefusalReason(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	dst := filepath.Join(t.TempDir(), "reused")
+	leaveStaleStore(t, dst)
+	err := cityInitDoInit(context.Background(), cityinit.InitRequest{Dir: dst, ConfigName: "minimal", Provider: "claude"})
+	if err == nil || !strings.Contains(err.Error(), ".gc/store") || !strings.Contains(err.Error(), "--adopt-store") {
+		t.Fatalf("API init over an existing store = %v, want the refusal reason", err)
+	}
 }

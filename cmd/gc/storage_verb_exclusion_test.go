@@ -286,3 +286,21 @@ func storeSharerCitiesForTest(t *testing.T) string {
 	}
 	return paths[0]
 }
+
+// TestRemoteRuntimeIsReadFromTheCityNotTheShell: an operator shell's
+// GC_SESSION override does not hide a city's k8s sessions, and a pack runtime
+// is not presumed remote.
+func TestRemoteRuntimeIsReadFromTheCityNotTheShell(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+	if name, remote := cityRunsRemoteSessions(&config.City{Session: config.SessionConfig{Provider: "k8s"}}); !remote || name != "k8s" {
+		t.Fatalf("a k8s city under GC_SESSION=fake = (%q, %v), want remote", name, remote)
+	}
+	cfg := &config.City{Session: config.SessionConfig{Provider: "mybox"}, Runtimes: map[string]config.DiscoveredRuntime{"mybox": {Name: "mybox"}}}
+	if _, remote := cityRunsRemoteSessions(cfg); remote {
+		t.Fatal("a pack runtime was presumed remote")
+	}
+	t.Setenv("GC_SESSION", "ssh:box")
+	if _, remote := cityRunsRemoteSessions(&config.City{}); !remote {
+		t.Fatal("a remote GC_SESSION override was ignored")
+	}
+}
