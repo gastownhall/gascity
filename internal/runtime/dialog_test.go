@@ -1869,6 +1869,41 @@ func TestProviderTerminalErrorReasonCreditBalance(t *testing.T) {
 			`session died during startup: session "worker" exited after it started; last pane output:`,
 			"⎿ \u00a0Credit balance too low · Add funds: https://platform.claude.com/settings/billing",
 		}, "\n"), want: "quota_exceeded"},
+		// Text that merely mentions the phrasing is not terminal: a terminal
+		// park has no self-heal, so a false hit strands a healthy session
+		// while a miss only degrades to crash-and-quarantine.
+		{name: "grep hit with a path prefix", content: "internal/runtime/x.go:12:  // Credit balance too low · Add funds", want: ""},
+		{name: "docs grep hit", content: "docs/x.md:3:Credit balance is too low", want: ""},
+		{name: "mid-line prose", content: "The run stopped: credit balance is too low on that key.", want: ""},
+		{name: "chat mention", content: "I saw Credit balance too low earlier", want: ""},
+		{name: "wrapped prose starting a line with the phrase", content: strings.Join([]string{
+			"The patrol restarted it because the",
+			"credit balance too low warning fired twice",
+		}, "\n"), want: ""},
+		{name: "prose continuing past the phrase", content: "credit balance is too low to matter here", want: ""},
+		{name: "api sentence in prose", content: "The API replied your credit balance is too low to access the Anthropic API, so I stopped.", want: ""},
+		{name: "api sentence on an unindented line after the error line", content: strings.Join([]string{
+			`  ⎿  API Error: 400 {"type":"error","error":{"type":"invalid_request_error"}}`,
+			"credit balance is too low to access the Anthropic API.",
+		}, "\n"), want: ""},
+		{name: "api sentence after a blank line", content: strings.Join([]string{
+			`  ⎿  API Error: 400 {"type":"error","error":{"type":"invalid_request_error"}}`,
+			"",
+			"     credit balance is too low to access the Anthropic API.",
+		}, "\n"), want: ""},
+		{name: "api sentence past the continuation bound", content: strings.Join([]string{
+			`  ⎿  API Error: 400 {"type":"error","error":{"type":"invalid_request_error",`,
+			"     filler row one",
+			"     filler row two",
+			"     filler row three",
+			"     filler row four",
+			"     filler row five",
+			"     credit balance is too low to access the Anthropic API.",
+		}, "\n"), want: ""},
+		{name: "api sentence after a 529 error line", content: strings.Join([]string{
+			`  ⎿  API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}`,
+			"     credit balance is too low to access the Anthropic API.",
+		}, "\n"), want: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
