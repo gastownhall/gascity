@@ -2695,10 +2695,19 @@ find_dolt_pid() {
     if [ -f "$PID_FILE" ]; then
         local file_pid
         file_pid=$(cat "$PID_FILE" 2>/dev/null)
-        if [ -n "$file_pid" ] && kill -0 "$file_pid" 2>/dev/null; then
-            echo "$file_pid"
-            return
-        fi
+        # Only a positive decimal is a PID, so check that before kill -0. In
+        # POSIX mode bash 5.3 (/bin/sh on Fedora 44) kill -0 exits 0 for an
+        # operand that is not a PID, and kill -0 0 or -1 signals a whole
+        # process group in every shell: either would read as a live Dolt.
+        case "$file_pid" in
+            ''|0*|*[!0-9]*) ;;
+            *)
+                if kill -0 "$file_pid" 2>/dev/null; then
+                    echo "$file_pid"
+                    return
+                fi
+                ;;
+        esac
         # Stale PID file — clean up.
         rm -f "$PID_FILE"
     fi
