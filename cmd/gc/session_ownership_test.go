@@ -35,14 +35,23 @@ const (
 // transient backing-store read failure behind the cache.
 type ownershipFailingGetStore struct {
 	beads.Store
-	mu     sync.Mutex
-	failID string
+	mu         sync.Mutex
+	failID     string
+	failStatus string
 }
 
 func (s *ownershipFailingGetStore) arm(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failID = id
+}
+
+// armListFailure fails the live List of one status, standing in for a
+// transient backing-store list failure on the tick's seat-work read.
+func (s *ownershipFailingGetStore) armListFailure(status string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failStatus = status
 }
 
 func (s *ownershipFailingGetStore) Get(id string) (beads.Bead, error) {
@@ -53,6 +62,16 @@ func (s *ownershipFailingGetStore) Get(id string) (beads.Bead, error) {
 		return beads.Bead{}, errors.New("transient backing read failure")
 	}
 	return s.Store.Get(id)
+}
+
+func (s *ownershipFailingGetStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.mu.Lock()
+	failStatus := s.failStatus
+	s.mu.Unlock()
+	if failStatus != "" && q.Live && q.Status == failStatus {
+		return nil, errors.New("transient backing list failure")
+	}
+	return s.Store.List(q)
 }
 
 // ownershipFixture is one live pool worker behind a primed CachingStore. The
@@ -795,6 +814,23 @@ func TestReconcileSessionBeads_PoolSeatHoldingWorkCancelsBegunTimerDrain(t *test
 				t.Fatal("idle-stop-pending mark survived the tick that kept the seat")
 			}
 		})
+	}
+}
+
+// TestReconcileSessionBeads_PoolSeatHoldingWorkKeptWhenWorkReadFails: a work
+// leg that cannot answer — a failed live list with no confirmed hit
+// elsewhere — keeps a pool seat out of the timer drain, and the deferral is
+// visible: stderr names the session and the drain reason it was kept from
+// (ga-2ols7o).
+func TestReconcileSessionBeads_PoolSeatHoldingWorkKeptWhenWorkReadFails(t *testing.T) {
+	f := newOwnershipFixture(t)
+	f.reads.armListFailure("open") // the tick's live open list fails; the in_progress list is readable and empty
+	f.reconcileKeptSeat()
+	if stopped, why := f.stopObservation(t); stopped {
+		t.Fatalf("seat whose assigned-work read failed was timer-drained (%s); stdout:\n%s\nstderr:\n%s", why, f.env.stdout.String(), f.env.stderr.String())
+	}
+	if !strings.Contains(f.env.stderr.String(), ownershipWorkerName) || !strings.Contains(f.env.stderr.String(), "no-wake-reason") {
+		t.Fatalf("stderr %q does not name the session and the drain reason it was kept from", f.env.stderr.String())
 	}
 }
 
