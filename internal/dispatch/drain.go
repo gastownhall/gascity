@@ -1116,25 +1116,26 @@ func closeDrainControl(store beads.Store, drainID string, metadata map[string]st
 			return ControlResult{}, fmt.Errorf("%s: parsing drain manifest to retire unit convoys: %w", drainID, err)
 		}
 		for _, row := range manifest.Rows {
-			unitID := strings.TrimSpace(row.UnitConvoyID)
-			if unitID == "" {
+			if strings.TrimSpace(row.UnitConvoyID) == "" {
 				continue
 			}
-			unit, err := store.Get(unitID)
+			// The unit is closed in the store that owns it, which on a split
+			// city is the work store, not the ambient graph binding.
+			unit, owner, found, err := drainUnitConvoyByKey(store, row.UnitKey, opts)
 			if err != nil {
-				return ControlResult{}, fmt.Errorf("%s: loading drain unit convoy %s to retire it: %w", drainID, unitID, err)
+				return ControlResult{}, fmt.Errorf("%s: loading drain unit convoy %s to retire it: %w", drainID, row.UnitConvoyID, err)
 			}
-			if unit.Status == "closed" {
+			if !found || unit.Status == "closed" {
 				continue
 			}
 			outcome := drainUnitRetiredOutcome(row.Status)
-			if err := updateMetadataAndClose(store, unitID, map[string]string{
+			if err := updateMetadataAndClose(owner, unit.ID, map[string]string{
 				beadmeta.OutcomeMetadataKey: outcome,
 				"close_reason":              drainUnitRetiredCloseReason,
 			}); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: retiring drain unit convoy %s: %w", drainID, unitID, err)
+				return ControlResult{}, fmt.Errorf("%s: retiring drain unit convoy %s: %w", drainID, unit.ID, err)
 			}
-			opts.tracef("process-control bead=%s kind=drain retire-unit unit=%s outcome=%s", drainID, unitID, outcome)
+			opts.tracef("process-control bead=%s kind=drain retire-unit unit=%s outcome=%s", drainID, unit.ID, outcome)
 		}
 	}
 	clearControllerSpawnErrorMetadata(metadata)

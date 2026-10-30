@@ -4139,3 +4139,41 @@ func TestProcessDrainRecordedCloseRetiresUnitConvoys(t *testing.T) {
 		assertDrainUnitRetired(t, store, row.UnitConvoyID, beadmeta.OutcomePass)
 	}
 }
+
+func TestProcessDrainSplitCityRetiresUnitConvoysInTheWorkStore(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	work, graph, drain, _ := seedSplitClassDrainWorkflow(t, false)
+	opts := ProcessOptions{FormulaSearchPaths: []string{dir}, MemberStores: []beads.Store{work}}
+
+	if _, err := ProcessControl(graph, drain, opts); err != nil {
+		t.Fatalf("ProcessControl(split-city expand): %v", err)
+	}
+	manifest := mustDrainManifest(t, mustGetBead(t, graph, drain.ID))
+	for _, row := range manifest.Rows {
+		if err := updateMetadataAndClose(graph, row.ItemRootID, map[string]string{"gc.outcome": "pass"}); err != nil {
+			t.Fatalf("close item root %s: %v", row.ItemRootID, err)
+		}
+	}
+	result, err := ProcessControl(graph, mustGetBead(t, graph, drain.ID), opts)
+	if err != nil {
+		t.Fatalf("ProcessControl(split-city complete): %v", err)
+	}
+	if result.Action != "drain-succeeded" {
+		t.Fatalf("Action = %q, want drain-succeeded", result.Action)
+	}
+	if len(manifest.Rows) == 0 {
+		t.Fatal("manifest has no rows")
+	}
+	for _, row := range manifest.Rows {
+		assertDrainUnitRetired(t, work, row.UnitConvoyID, beadmeta.OutcomePass)
+	}
+	strays, err := graph.ListByMetadata(map[string]string{beadmeta.SyntheticKindMetadataKey: "drain-unit-convoy"}, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("ListByMetadata(graph drain unit convoys): %v", err)
+	}
+	if len(strays) != 0 {
+		t.Fatalf("graph store holds drain unit convoys %+v; a unit convoy is a work bead", strays)
+	}
+}
