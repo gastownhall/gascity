@@ -3802,3 +3802,59 @@ func TestProcessDrainReHoldsItsItemWhenAReleasedBlockerClosesBlocked(t *testing.
 		t.Fatalf("gates = %+v; want the one gate reopened as an ordinary open gate", gates)
 	}
 }
+
+func TestProcessDrainSeparateClosesUnitConvoysOnCompletion(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+
+	if _, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}}); err != nil {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+	for _, row := range manifest.Rows {
+		if err := updateMetadataAndClose(store, row.ItemRootID, map[string]string{"gc.outcome": "pass"}); err != nil {
+			t.Fatalf("close item root %s: %v", row.ItemRootID, err)
+		}
+	}
+	result, err := ProcessControl(store, mustGetBead(t, store, drain.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(drain complete): %v", err)
+	}
+	if result.Action != "drain-succeeded" {
+		t.Fatalf("Action = %q, want drain-succeeded", result.Action)
+	}
+	drain = mustGetBead(t, store, drain.ID)
+	if drain.Status != "closed" || drain.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("drain = status %q outcome %q, want closed/pass", drain.Status, drain.Metadata["gc.outcome"])
+	}
+	if len(manifest.Rows) == 0 {
+		t.Fatal("manifest has no rows")
+	}
+	for _, row := range manifest.Rows {
+		assertDrainUnitRetired(t, store, row.UnitConvoyID, beadmeta.OutcomePass)
+	}
+	if len(drainUnitRetiredCloseReason) < 20 {
+		t.Fatalf("drainUnitRetiredCloseReason = %q; bd rejects close reasons shorter than 20 characters", drainUnitRetiredCloseReason)
+	}
+}
+
+// assertDrainUnitRetired fails unless the unit convoy unitID is closed with
+// outcome and the drain's retirement close_reason.
+func assertDrainUnitRetired(t *testing.T, store beads.Store, unitID, outcome string) {
+	t.Helper()
+	if unitID == "" {
+		t.Fatal("manifest row has no unit convoy")
+	}
+	unit := mustGetBead(t, store, unitID)
+	if unit.Status != "closed" {
+		t.Fatalf("drain unit convoy %s status = %q after its drain closed, want closed", unit.ID, unit.Status)
+	}
+	if got := unit.Metadata[beadmeta.OutcomeMetadataKey]; got != outcome {
+		t.Fatalf("drain unit convoy %s gc.outcome = %q, want %q", unit.ID, got, outcome)
+	}
+	if got := unit.Metadata["close_reason"]; got != drainUnitRetiredCloseReason {
+		t.Fatalf("drain unit convoy %s close_reason = %q, want %q", unit.ID, got, drainUnitRetiredCloseReason)
+	}
+}

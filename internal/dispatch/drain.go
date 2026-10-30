@@ -33,6 +33,10 @@ const (
 	// scopeAbortSkippedCloseReason: bd rejects close reasons shorter than 20
 	// characters.
 	drainPredecessorFailedCloseReason = "drain failed: a blocking predecessor closed with a failed outcome"
+	// drainUnitRetiredCloseReason is stamped as close_reason on each unit
+	// convoy a drain retires when the drain reaches a terminal close. It is
+	// prose for the same reason as drainPredecessorFailedCloseReason.
+	drainUnitRetiredCloseReason = "drain unit retired: its drain control reached a terminal state"
 )
 
 type drainManifest struct {
@@ -1088,7 +1092,33 @@ func markRemainingSharedRowsSkipped(manifest *drainManifest, start int) {
 // settled before the drain closes (closeScopedControl). A terminal drain
 // carries no controller error: a transient one recorded by an earlier pass
 // (markControllerSpawnError) is cleared with the close.
+//
+// The unit convoy recorded on each row of the closing manifest is retired
+// first. Nothing else closes one: a drain never closes the source members its
+// units track, so convoy autoclose never fires for them. A failed retirement
+// leaves the drain open for the next pass to retry.
 func closeDrainControl(store beads.Store, drainID string, metadata map[string]string, action string, opts ProcessOptions) (ControlResult, error) {
+	raw := metadata[drainManifestMetadataKey]
+	if strings.TrimSpace(raw) != "" {
+		manifest, err := parseDrainManifest(raw)
+		if err != nil {
+			return ControlResult{}, fmt.Errorf("%s: parsing drain manifest to retire unit convoys: %w", drainID, err)
+		}
+		for _, row := range manifest.Rows {
+			unitID := strings.TrimSpace(row.UnitConvoyID)
+			if unitID == "" {
+				continue
+			}
+			outcome := beadmeta.OutcomePass
+			if err := updateMetadataAndClose(store, unitID, map[string]string{
+				beadmeta.OutcomeMetadataKey: outcome,
+				"close_reason":              drainUnitRetiredCloseReason,
+			}); err != nil {
+				return ControlResult{}, err
+			}
+			opts.tracef("process-control bead=%s kind=drain retire-unit unit=%s outcome=%s", drainID, unitID, outcome)
+		}
+	}
 	clearControllerSpawnErrorMetadata(metadata)
 	return closeScopedControl(store, drainID, metadata, action, opts)
 }
