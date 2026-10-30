@@ -233,6 +233,11 @@ type ResolvedProvider struct {
 	BuiltinAncestor string
 	// Chain records the resolved ancestry from leaf (index 0) to root.
 	Chain []HopIdentity
+	// ArgsAppend mirrors ProviderSpec.ArgsAppend: the provider's accumulated
+	// extra args, already folded into Args. It is carried forward so a later
+	// agent-level Args replace can re-fold it. Schema-managed flags are
+	// stripped (they ride EffectiveDefaults), leaving only bespoke entries.
+	ArgsAppend []string
 	// Provenance records per-field and per-map-key layer attribution.
 	Provenance             ProviderProvenance
 	Command                string

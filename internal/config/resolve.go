@@ -678,11 +678,19 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		copy(rp.Args, spec.Args)
 	}
 
-	// Strip schema-managed flags from Args. This handles backward compatibility:
-	// if a city.toml still has schema-managed flags in args (e.g.,
-	// --dangerously-skip-permissions), they get removed because the option is
-	// covered by OptionsSchema. Inferred defaults preserve user intent.
-	if len(rp.OptionsSchema) > 0 && rp.Args != nil {
+	if spec.ArgsAppend != nil {
+		rp.ArgsAppend = make([]string, len(spec.ArgsAppend))
+		copy(rp.ArgsAppend, spec.ArgsAppend)
+	}
+
+	// Strip schema-managed flags from Args and ArgsAppend. This handles
+	// backward compatibility: if a city.toml still has schema-managed flags in
+	// args (e.g., --dangerously-skip-permissions), they get removed because
+	// the option is covered by OptionsSchema. Inferred defaults preserve user
+	// intent. Both slices share one inferred-defaults map, so a flag stripped
+	// from ArgsAppend lands in EffectiveDefaults once and never reappears in
+	// Args when mergeAgentOverrides re-folds ArgsAppend.
+	if len(rp.OptionsSchema) > 0 && (rp.Args != nil || rp.ArgsAppend != nil) {
 		allFlags := CollectAllSchemaFlags(rp.OptionsSchema)
 		inferredDefaults := make(map[string]string)
 		// Seed with existing OptionDefaults; same-layer Args override them
@@ -690,7 +698,12 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		for k, v := range spec.OptionDefaults {
 			inferredDefaults[k] = v
 		}
-		rp.Args = stripArgsSlice(rp.Args, allFlags, rp.OptionsSchema, inferredDefaults)
+		if rp.Args != nil {
+			rp.Args = stripArgsSlice(rp.Args, allFlags, rp.OptionsSchema, inferredDefaults)
+		}
+		if rp.ArgsAppend != nil {
+			rp.ArgsAppend = stripArgsSlice(rp.ArgsAppend, allFlags, rp.OptionsSchema, inferredDefaults)
+		}
 		// Compute EffectiveDefaults using inferred defaults (which include
 		// both the spec's OptionDefaults and any values inferred from stripped Args).
 		rp.EffectiveDefaults = ComputeEffectiveDefaults(rp.OptionsSchema, inferredDefaults, nil)
@@ -772,6 +785,11 @@ func mergeAgentOverrides(rp *ResolvedProvider, agent *Agent) {
 	agentDefaults := cloneStringMap(agent.OptionDefaults)
 	if len(agent.Args) > 0 {
 		rp.Args, agentDefaults = normalizeAgentArgs(rp.OptionsSchema, agent.Args, agentDefaults)
+		// Agent args replace the provider's Args, which already carry the
+		// provider's args_append; re-fold it so the replace does not drop it.
+		// rp.ArgsAppend holds only non-schema entries, so no flag duplicates
+		// what EffectiveDefaults already emits.
+		rp.Args = append(rp.Args, rp.ArgsAppend...)
 	}
 	if agent.PromptMode != "" {
 		rp.PromptMode = agent.PromptMode
@@ -878,6 +896,9 @@ func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
 	if r.Args != nil {
 		out.Args = append([]string(nil), r.Args...)
 	}
+	// The leaf's raw ArgsAppend would drop what ancestors contributed and
+	// still carry schema-managed flags; the resolved chain has both right.
+	out.ArgsAppend = append([]string(nil), r.ArgsAppend...)
 	if r.PromptMode != "" {
 		out.PromptMode = r.PromptMode
 	}
