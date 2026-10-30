@@ -692,7 +692,7 @@ func TestLatestOrderFiredAt_RecentEventSkipsLastRun(t *testing.T) {
 		},
 	}
 
-	got, err := check.latestOrderFiredAt(evts, order, expected, now)
+	got, err := check.latestOrderFiredAt(evts, order, expected, 30*time.Second, now)
 	if err != nil {
 		t.Fatalf("latestOrderFiredAt returned error: %v", err)
 	}
@@ -708,7 +708,8 @@ func TestLatestOrderFiredAt_StaleEventConsultsLastRun(t *testing.T) {
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	expected := 4 * time.Hour
 	order := orders.Order{Name: "mol-dog-stale-db", Trigger: "cron"}
-	// Event age (13h) exceeds expected*1.5 (6h), so the fast path must not apply.
+	// Event age (13h) exceeds the overdue line (6h0m45s at a 30s patrol), so
+	// the fast path must not apply.
 	staleEvent := now.Add(-13 * time.Hour)
 	freshRun := now.Add(-1 * time.Hour)
 	evts := []events.Event{
@@ -723,7 +724,7 @@ func TestLatestOrderFiredAt_StaleEventConsultsLastRun(t *testing.T) {
 		},
 	}
 
-	got, err := check.latestOrderFiredAt(evts, order, expected, now)
+	got, err := check.latestOrderFiredAt(evts, order, expected, 30*time.Second, now)
 	if err != nil {
 		t.Fatalf("latestOrderFiredAt returned error: %v", err)
 	}
@@ -802,6 +803,86 @@ func TestFormatOrderFiringDuration(t *testing.T) {
 				t.Fatalf("formatOrderFiringDuration(%s) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestClassifyOrderFiringThresholdsIncludePatrolInterval pins the fired-path
+// thresholds: the orders lane evaluates gates only during passes paced one
+// patrol interval apart, so a healthy order with expected interval E fires up
+// to E+patrol apart, and the overdue/stale lines scale by that effective
+// period (overdue at 1.5x, stale at 3x) instead of the bare interval. Cron
+// and cooldown share the same fired-path switch, so both trigger kinds are
+// pinned. A zero or negative patrol interval means passes can run back to
+// back, so those rows keep today's bare-interval lines.
+func TestClassifyOrderFiringThresholdsIncludePatrolInterval(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		trigger    string
+		expected   time.Duration
+		patrol     time.Duration
+		age        time.Duration
+		want       CheckStatus
+		wantSev    CheckSeverity
+		wantSuffix string
+	}{
+		{"cooldown 1m patrol 30s just under overdue line", "cooldown", time.Minute, 30 * time.Second, 134 * time.Second, StatusOK, SeverityBlocking, ""},
+		{"cooldown 1m patrol 30s at overdue line", "cooldown", time.Minute, 30 * time.Second, 135 * time.Second, StatusWarning, SeverityBlocking, "(overdue)"},
+		{"cooldown 1m patrol 30s just under stale line", "cooldown", time.Minute, 30 * time.Second, 269 * time.Second, StatusWarning, SeverityBlocking, "(overdue)"},
+		{"cooldown 1m patrol 30s at stale line", "cooldown", time.Minute, 30 * time.Second, 270 * time.Second, StatusError, SeverityBlocking, "(CRITICAL: stale)"},
+		{"cron 1m patrol 30s just under overdue line", "cron", time.Minute, 30 * time.Second, 134 * time.Second, StatusOK, SeverityBlocking, ""},
+		{"cron 1m patrol 30s at overdue line", "cron", time.Minute, 30 * time.Second, 135 * time.Second, StatusWarning, SeverityBlocking, "(overdue)"},
+		{"cron 1m patrol 30s just under stale line", "cron", time.Minute, 30 * time.Second, 269 * time.Second, StatusWarning, SeverityBlocking, "(overdue)"},
+		{"cron 1m patrol 30s at stale line", "cron", time.Minute, 30 * time.Second, 270 * time.Second, StatusError, SeverityBlocking, "(CRITICAL: stale)"},
+		// Hour-scale orders: the +30s patrol shifts the lines by seconds, so
+		// the existing 7h / 13h fixtures stay on the same side of the line.
+		{"cron 4h patrol 30s just under overdue line", "cron", 4 * time.Hour, 30 * time.Second, 6*time.Hour + 44*time.Second, StatusOK, SeverityBlocking, ""},
+		{"cron 4h patrol 30s at overdue line", "cron", 4 * time.Hour, 30 * time.Second, 6*time.Hour + 45*time.Second, StatusWarning, SeverityBlocking, "(overdue)"},
+		{"cron 4h patrol 30s just under stale line", "cron", 4 * time.Hour, 30 * time.Second, 12*time.Hour + 89*time.Second, StatusWarning, SeverityBlocking, "(overdue)"},
+		{"cron 4h patrol 30s at stale line", "cron", 4 * time.Hour, 30 * time.Second, 12*time.Hour + 90*time.Second, StatusError, SeverityBlocking, "(CRITICAL: stale)"},
+		{"cooldown 1m zero patrol keeps bare-interval lines", "cooldown", time.Minute, 0, 89 * time.Second, StatusOK, SeverityBlocking, ""},
+		{"cooldown 1m zero patrol overdue at bare line", "cooldown", time.Minute, 0, 90 * time.Second, StatusWarning, SeverityBlocking, "(overdue)"},
+		{"cooldown 1m negative patrol keeps bare-interval lines", "cooldown", time.Minute, -5 * time.Second, 89 * time.Second, StatusOK, SeverityBlocking, ""},
+		{"cooldown 1m negative patrol overdue at bare line", "cooldown", time.Minute, -5 * time.Second, 90 * time.Second, StatusWarning, SeverityBlocking, "(overdue)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			order := orders.Order{Name: "paced-order", Trigger: tt.trigger}
+			lastFired := now.Add(-tt.age)
+			status, severity, detail := classifyOrderFiring(order, now, tt.expected, tt.patrol, lastFired, now.Add(-24*time.Hour))
+			if status != tt.want {
+				t.Fatalf("status = %v, want %v; detail = %q", status, tt.want, detail)
+			}
+			if severity != tt.wantSev {
+				t.Fatalf("severity = %v, want %v; detail = %q", severity, tt.wantSev, detail)
+			}
+			if tt.wantSuffix != "" && !strings.Contains(detail, tt.wantSuffix) {
+				t.Fatalf("detail = %q, want it to contain %q", detail, tt.wantSuffix)
+			}
+		})
+	}
+}
+
+// A never-fired cooldown order is due on the orders lane's first pass, so the
+// never-fired line keeps the raw 1.5x interval with no patrol slack: a 30s
+// cooldown with the controller up 45s is a blocking error, not OK.
+func TestOrderFiringCurrent_NeverFiredSubMinuteCooldown_StaysBlocking(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "fast-cooldown", "cooldown", "30s")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-45 * time.Second)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want error; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if result.Severity != SeverityBlocking {
+		t.Fatalf("Severity = %v, want SeverityBlocking for a never-fired cooldown", result.Severity)
+	}
+	if details := strings.Join(result.Details, "\n"); !strings.Contains(details, "fast-cooldown: never fired since controller start 45s ago") {
+		t.Fatalf("details = %v, want the raw-interval never-fired line", result.Details)
 	}
 }
 
