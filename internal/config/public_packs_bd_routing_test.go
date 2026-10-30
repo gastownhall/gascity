@@ -10,9 +10,12 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
+	"golang.org/x/mod/modfile"
+	"golang.org/x/mod/module"
 )
 
 // gascity-packs 9b4df3e ("route shipped beads commands through gc",
@@ -26,14 +29,19 @@ import (
 // preBdRoutingFixPins are the gascity-packs registry release commits that
 // predate 9b4df3e. Fresh init must never pin one of them again.
 var preBdRoutingFixPins = map[string]string{
-	// gascity releases 0.1.1 through 0.1.6.
-	"sha:788b6e8ec224a8951c728ef6da74dab8bc04d474": "gascity 0.1.1",
+	// gascity releases 0.1.1 through 0.1.6 (the registry has no 0.1.5).
+	"sha:788b6e8ec224a8951c728ef6da74dab8bc04d474": "gascity 0.1.1 and gastown 0.1.1",
 	"sha:5fc675b85d4ae0ebca2f17cb027a24b03f2832f8": "gascity 0.1.2",
 	"sha:af1640917a24f88126c37a1e3697a619b731cc0f": "gascity 0.1.3",
 	"sha:99464ed9240b1f6e6b7ab1d351f67016e1a973ff": "gascity 0.1.4",
 	"sha:3b3b89f2011e06d84459aa7bea1552382f13930a": "gascity 0.1.6",
-	// gastown releases 0.1.6 through 0.1.11. 0.1.11 was cut on
-	// release/gastown-0.1.11 from 0.1.10 and does not carry the fix.
+	// gastown releases 0.1.2 through 0.1.11; 0.1.1 shares its commit with
+	// gascity 0.1.1. 0.1.11 was cut on release/gastown-0.1.11 from 0.1.10
+	// and does not carry the fix.
+	"sha:1f45471e8bdc5dece030dfc99406ca7d3d45f9c0": "gastown 0.1.2",
+	"sha:31382fc6dd86b747d19687f6028d8bcd85e059a7": "gastown 0.1.3",
+	"sha:fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9": "gastown 0.1.4",
+	"sha:817f85e155e2b0b0c375835b076103108f8a4724": "gastown 0.1.5",
 	"sha:4212acb7046c11f6f633df73307006493185233a": "gastown 0.1.6",
 	"sha:342bcfb0775ad79d2c67df3b235edf70a0a7e372": "gastown 0.1.7",
 	"sha:2cd3360f36b2ff55f6c306546841963cbca1ed69": "gastown 0.1.8",
@@ -53,11 +61,14 @@ func TestPublicPackPinsPostdateBdRoutingFix(t *testing.T) {
 	}
 }
 
-// The gastown pin and the embedded module are one commit
-// (scripts/update-bundled-gastown-pack pins go.mod with go get), so the
-// embedded-content scan below speaks for the pinned commit. CI's
-// `update-bundled-gastown-pack --check` ties the gascity pin to the same
-// embedded gascity tree.
+// scripts/update-bundled-gastown-pack pins go.mod with `go get
+// module@commit`, so the embedded module is the gastown pin's own commit and
+// the embedded-content scan below speaks for that pin. The script also
+// accepts a semver tag on a content-identical commit. go.mod then records no
+// commit to compare, so the test skips, and packman's
+// TestEmbeddedPublicPacksHashToTheirPinnedRegistryReleases still proves the
+// embedded tree is the pinned release. CI's `update-bundled-gastown-pack
+// --check` ties the gascity pin to the same embedded gascity tree.
 func TestPublicGastownPinIsEmbeddedModuleCommit(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -67,16 +78,33 @@ func TestPublicGastownPinIsEmbeddedModuleCommit(t *testing.T) {
 	if repoRoot == "" {
 		repoRoot = filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
 	}
-	data, err := os.ReadFile(filepath.Join(repoRoot, "go.mod"))
+	goModPath := filepath.Join(repoRoot, "go.mod")
+	data, err := os.ReadFile(goModPath)
 	if err != nil {
 		t.Fatalf("read go.mod: %v", err)
 	}
-	m := regexp.MustCompile(`(?m)^\s*github\.com/gastownhall/gascity-packs\s+v\S+-([0-9a-f]{12})\s*$`).FindSubmatch(data)
-	if m == nil {
-		t.Fatal("go.mod: gascity-packs is not pinned to a commit pseudo-version")
+	goMod, err := modfile.Parse(goModPath, data, nil)
+	if err != nil {
+		t.Fatalf("parse go.mod: %v", err)
 	}
-	if !strings.HasPrefix(PublicGastownPackVersion, "sha:"+string(m[1])) {
-		t.Errorf("PublicGastownPackVersion = %s, but go.mod embeds gascity-packs %s", PublicGastownPackVersion, m[1])
+	version := ""
+	for _, req := range goMod.Require {
+		if req.Mod.Path == "github.com/gastownhall/gascity-packs" {
+			version = req.Mod.Version
+		}
+	}
+	if version == "" {
+		t.Fatal("go.mod does not require github.com/gastownhall/gascity-packs")
+	}
+	if !module.IsPseudoVersion(version) {
+		t.Skipf("go.mod pins gascity-packs at tag %s, which records no commit; TestEmbeddedPublicPacksHashToTheirPinnedRegistryReleases (internal/packman) checks the embedded content against the pin", version)
+	}
+	rev, err := module.PseudoVersionRev(version)
+	if err != nil {
+		t.Fatalf("go.mod gascity-packs %s: %v", version, err)
+	}
+	if !strings.HasPrefix(PublicGastownPackVersion, "sha:"+rev) {
+		t.Errorf("PublicGastownPackVersion = %s, but go.mod embeds gascity-packs %s (%s)", PublicGastownPackVersion, rev, version)
 	}
 }
 
@@ -356,14 +384,14 @@ func TestEmbeddedPacksRouteBeadsCommandsThroughGC(t *testing.T) {
 				}
 				return nil
 			}
-			switch path.Ext(p) {
-			case ".md", ".tmpl", ".toml", ".sh", ".bash", ".py":
-			default:
-				return nil
-			}
 			data, err := fs.ReadFile(pack.FS, p)
 			if err != nil {
 				return err
+			}
+			// Every text file is in scope, as in gascity-packs' detector:
+			// provider hooks (.json, .js, .ts) run commands at session events.
+			if !utf8.Valid(data) {
+				return nil
 			}
 			scanned[pack.Name]++
 			key := pack.Name + "/" + p
@@ -373,11 +401,12 @@ func TestEmbeddedPacksRouteBeadsCommandsThroughGC(t *testing.T) {
 			lines := strings.Split(string(data), "\n")
 			for _, n := range rawBdInvocations(string(data)) {
 				line := strings.TrimSpace(lines[n-1])
-				// The bundled packs are gc's own maintenance scripts; their
-				// comments name bd verbs to explain what the gc bd call does.
-				// The public packs are agent instructions, where prose is read
-				// as a command, so their comments stay in scope.
-				if bundledPacks[pack.Name] && strings.HasPrefix(line, "#") {
+				// A # line in a bundled pack's script or TOML is a comment
+				// naming the bd verb its gc bd call runs. Markdown is agent
+				// instruction in every pack: a # line there is a heading, or a
+				// comment in a fenced shell block an agent runs, so it stays in
+				// scope, as does every line of the public packs.
+				if bundledPacks[pack.Name] && hashCommentExts[path.Ext(p)] && strings.HasPrefix(line, "#") {
 					continue
 				}
 				if rawBdAllowedLines[key][line] {
@@ -400,6 +429,10 @@ func TestEmbeddedPacksRouteBeadsCommandsThroughGC(t *testing.T) {
 
 var bundledPacks = map[string]bool{"core": true, "bd": true, "dolt": true}
 
+// hashCommentExts are the file types whose # lines the scan treats as
+// comments: scripts, and TOML, whose formula strings embed shell scripts.
+var hashCommentExts = map[string]bool{".sh": true, ".bash": true, ".py": true, ".toml": true}
+
 // rawBdAllowedFiles are embedded files that run bd directly by design.
 var rawBdAllowedFiles = map[string]string{
 	"bd/assets/scripts/gc-beads-bd.sh": "the exec beads provider: it is the bd transport gc itself calls",
@@ -421,6 +454,14 @@ var rawBdAllowedLines = func() map[string]map[string]bool {
 		// it through gc bd.
 		"dolt/orders/mol-dog-backup.toml": {
 			`description = "Back up every bead scope with bd backup"`: true,
+		},
+		// The cursor hooks put BD_BIN's directory on PATH for the gc command
+		// they run; they never run bd themselves.
+		"core/overlay/per-provider/cursor/.cursor/hooks.json": {
+			`"command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\"; if [ -n \"${BD_BIN:-}\" ]; then export PATH=\"${BD_BIN%/*}:$PATH\"; fi; \"${GC_BIN:-gc}\" prime --hook"`:                                                         true,
+			`"command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\"; if [ -n \"${BD_BIN:-}\" ]; then export PATH=\"${BD_BIN%/*}:$PATH\"; fi; \"${GC_BIN:-gc}\" handoff --auto \"context cycle\""`:                                     true,
+			`"command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\"; if [ -n \"${BD_BIN:-}\" ]; then export PATH=\"${BD_BIN%/*}:$PATH\"; fi; \"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject"`: true,
+			`"command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\"; if [ -n \"${BD_BIN:-}\" ]; then export PATH=\"${BD_BIN%/*}:$PATH\"; fi; \"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject"`:  true,
 		},
 	}
 	// The dolt pack is also embedded as the bd pack's dolt/ subpack.
