@@ -21,6 +21,11 @@ import (
 // stamped on the row since the pass refuses has-work. A19's assigned-work
 // lens cancels the request once the allocation sees the work; a claim only
 // the live-claim veto finds keeps the request, refused at the row's backoff.
+// An idle or no-wake-reason signal of a seat the held-work keep covers
+// (intent.HeldWork) also reads the work the seat holds, blocked work
+// included, as legacy's held-work cancel does at the controller's own ack:
+// work assigned since the pass's held-work read refuses has-work, and A19's
+// held-work cancel cancels the request once the pass reads it.
 
 // signalSections are a signal's one section, behind the drain basis
 // (premiseDrainBasis), so an agent's heartbeat cannot starve it. Every
@@ -131,10 +136,11 @@ func signalNeeds(_ *World, it intent) needs {
 }
 
 // signalReadsWork reports a controller signal that reads L5: no-wake-reason
-// and orphaned (v5.10a B). An ack's signal (A11) reads none.
+// and orphaned (v5.10a B), and idle on a seat the held-work keep covers
+// (intent.HeldWork). An ack's signal (A11) reads none.
 func signalReadsWork(it intent) bool {
 	return (it.Kind == intentSignal || it.Kind == intentSignalFresh) &&
-		(it.Reason == decideDrainSignal+reasonNoWake || it.Reason == decideDrainSignal+drainOrphaned)
+		(it.Reason == decideDrainSignal+reasonNoWake || it.Reason == decideDrainSignal+drainOrphaned || it.HeldWork)
 }
 
 // redecideSignal is redecideRow, then, for the fresh kind, an idle-respawn

@@ -50,6 +50,16 @@ func TestBeadEventRelevantMatchesC9Policy(t *testing.T) {
 	}
 }
 
+// Kills a seat kept for held work that no event re-decides until the patrol
+// pass: the relevant set carries the held-work read, so unassigning held work
+// with no route, which the demand read does not carry, is worth a pass.
+func TestRelevantSetCoversHeldWork(t *testing.T) {
+	recent := newRelevantSet(demandView{HeldWork: []beads.Bead{routedWorkBead("w-3", "open", "worker-a", "")}})
+	if !beadEventRelevant(beadEvent(t, events.BeadUpdated, routedWorkBead("w-3", "open", "", "")), *recent) {
+		t.Fatal("unassigning held work the last pass read is not worth a pass")
+	}
+}
+
 // Kills a missed or spurious inventory wake: a fact flip, a new name, a
 // dropped name, a primed change and a health change are each a change; a
 // republish of the same facts is not.

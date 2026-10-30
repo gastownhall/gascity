@@ -259,8 +259,6 @@ row:gc-1:started_live_hash=<changed>
 === a live quarantined row 29s after wake
 ## 0 seed (+0s)
 @ +0s
-provider:RemoveMeta s-gc-1=11
-provider:SetMeta s-gc-1=4
 row:gc-1:command=true
 row:gc-1:continuation_epoch=1
 row:gc-1:effective_sleep_after_idle=off
@@ -277,19 +275,7 @@ row:gc-1:synced_at=T+0s
 row:gc-1:work_dir=<city>
 work:gw-1:gc.session_name=s-gc-1
 ## 1 alive (+29s)
-@ +10s
-provider:RemoveMeta s-gc-1=11
-provider:SetMeta s-gc-1=4
-@ +20s
-provider:RemoveMeta s-gc-1=11
-provider:SetMeta s-gc-1=4
-@ +29s
-provider:RemoveMeta s-gc-1=11
-provider:SetMeta s-gc-1=4
 ## 2 settled (+1m19s)
-@ +29s
-provider:RemoveMeta s-gc-1=11
-provider:SetMeta s-gc-1=4
 @ +39s
 row:gc-1:currently_processing_bead_id=gw-1
 row:gc-1:quarantined_until=
@@ -297,8 +283,6 @@ row:gc-1:wake_attempts=0
 === a live quarantined row 31s after wake
 ## 0 seed (+0s)
 @ +0s
-provider:RemoveMeta s-gc-1=11
-provider:SetMeta s-gc-1=4
 row:gc-1:command=true
 row:gc-1:continuation_epoch=1
 row:gc-1:effective_sleep_after_idle=off
@@ -315,12 +299,6 @@ row:gc-1:synced_at=T+0s
 row:gc-1:work_dir=<city>
 work:gw-1:gc.session_name=s-gc-1
 ## 1 alive (+31s)
-@ +10s
-provider:RemoveMeta s-gc-1=11
-provider:SetMeta s-gc-1=4
-@ +20s
-provider:RemoveMeta s-gc-1=11
-provider:SetMeta s-gc-1=4
 @ +30s
 row:gc-1:currently_processing_bead_id=gw-1
 row:gc-1:quarantined_until=

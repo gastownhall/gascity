@@ -636,8 +636,11 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 		// assigned demand work are exempt. A claimed in_progress bead also
 		// vetoes idle sleep even when blocked: blocked work does not wake an
 		// asleep owner, but it must not park the live seat that owns the claim.
-		// Blocked open assignments do not prevent idle sleep. Manual sessions
-		// within their grace period are also exempt.
+		// Blocked open assignments do not prevent idle sleep here, though the
+		// reconcilers' held-work keep (sessionHoldsAssignedWork,
+		// rowFacts.seatHoldsWork) keeps a live pool seat holding them out of
+		// its timer drain. Manual sessions within their grace period are also
+		// exempt.
 		//
 		// On_demand named sessions woken by routed/named demand
 		// ("named-demand", "routed-demand", "work-query") are also exempt:

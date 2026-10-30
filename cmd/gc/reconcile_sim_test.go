@@ -472,6 +472,8 @@ type simOpts struct {
 	// noPendingCreates seeds no pending creates (reconcile_sim_pending_test.go):
 	// the floored corpus keeps its floor members' acks in reach.
 	noPendingCreates bool
+	// cityDeps seeds the city leg's dependency edges.
+	cityDeps []beads.Dep
 }
 
 func newSim(t *testing.T, seed uint64, o simOpts) *sim {
@@ -492,7 +494,11 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	s.noPendingCreates = o.noPendingCreates
 	city, rig := o.rows(s)
 	for name, rows := range map[string][]beads.Bead{simCityLeg: city, simRigLeg: rig} {
-		m := beads.NewMemStoreFrom(0, rows, nil)
+		var deps []beads.Dep
+		if name == simCityLeg {
+			deps = o.cityDeps
+		}
+		m := beads.NewMemStoreFrom(0, rows, deps)
 		if err := beads.StampOpenedStore(m, "MemStore", gate.Require, false, nil, nil); err != nil {
 			t.Fatalf("stamp: %v", err)
 		}

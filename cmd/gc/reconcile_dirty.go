@@ -16,8 +16,8 @@ import (
 // is the router's allocator wake policy (C9) without the router's indexes;
 // the "previously indexed" work is the relevant set the last pass published.
 
-// relevantSet is the work the last pass read as demand: assigned work and
-// open unassigned routed work, by bead ID. The pass publishes a fresh one,
+// relevantSet is the work the last pass read as demand: assigned work, held
+// work and open unassigned routed work, by bead ID. The pass publishes a fresh one,
 // never mutated after publish, so a filter on another goroutine may read the
 // one it loaded.
 type relevantSet map[string]bool
@@ -26,8 +26,8 @@ type relevantSet map[string]bool
 //
 //gc:pure
 func newRelevantSet(v demandView) *relevantSet {
-	s := make(relevantSet, len(v.AssignedWork)+len(v.Collected.UnassignedRouted))
-	for _, b := range append(slices.Clip(v.AssignedWork), v.Collected.UnassignedRouted...) {
+	s := make(relevantSet, len(v.AssignedWork)+len(v.HeldWork)+len(v.Collected.UnassignedRouted))
+	for _, b := range slices.Concat(v.AssignedWork, v.HeldWork, v.Collected.UnassignedRouted) {
 		s[b.ID] = true
 	}
 	return &s
