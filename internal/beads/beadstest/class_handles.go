@@ -86,6 +86,7 @@ var capabilityProbes = []capabilityProbe{
 	probe[beads.DependencyBatchLister]("DependencyBatchLister"),
 	probe[beads.GraphOnlyReadyStore]("GraphOnlyReadyStore"),
 	probe[beads.AssignmentGuardedUpdater]("AssignmentGuardedUpdater"),
+	probe[beads.AbsentBlockedReader]("AbsentBlockedReader"),
 	probe[beads.Counter]("Counter"),
 	probe[beads.ForeignIDCreator]("ForeignIDCreator"),
 	probe[beads.StorageCreateStore]("StorageCreateStore"),
@@ -108,6 +109,19 @@ func RunClassHandleCapabilityConformance(t *testing.T, newStore func(t *testing.
 	raw := newStore(t)
 	handles := SingleStore(raw).All()
 	handles["nested"] = Graph(Work(raw))
+	checkHandleCapabilities(t, raw, handles)
+}
+
+// errorReporter is the part of *testing.T the conformance reports through.
+type errorReporter interface {
+	Helper()
+	Errorf(format string, args ...any)
+}
+
+// checkHandleCapabilities reports each handle, keyed by class, that is not
+// over raw or does not reach a capability exactly as raw does.
+func checkHandleCapabilities(t errorReporter, raw beads.Store, handles map[string]beads.Store) {
+	t.Helper()
 	for class, h := range handles {
 		if !beads.SameStore(h, raw) {
 			t.Errorf("%s handle: SameStore with its store = false", class)

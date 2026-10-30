@@ -66,16 +66,32 @@ var Default = Config{
 		beads + "/splittest",
 	},
 	// D9: the split-strict gate's markers (#8335) are frozen. A call site
-	// lands only as a reviewed baseline row; T7 replaces them with plan roles.
+	// lands only as a reviewed baseline row, and as an entry in the gate's
+	// own reviewedMarkers table (the package doc's two ledgers); T7 replaces
+	// them with plan roles.
 	Markers: []string{
 		beads + ".FederatedRead",
 		beads + ".FederatedGet",
 		beads + ".RelicRead",
 		beads + ".RelicGet",
 	},
+	// Each package is named: a new one under internal/beads or
+	// internal/storebinding is linted until an entry here, a change the
+	// growth gate refuses without the label, exempts it.
 	Allow: []Allow{
-		{Package: "internal/beads/...", Reason: "the engines, the typed handles, the capability helpers, and the test minting helpers (beadstest, splittest)"},
-		{Package: "internal/storebinding/...", Reason: "the binding engines and the migration copy and clear: they move rows between physical stores, raw by nature"},
+		{Package: "internal/beads", Rules: AllRulesBut(TestMintImport), Reason: beadsEngines},
+		{Package: "internal/beads/closeorder", Rules: AllRulesBut(TestMintImport), Reason: beadsEngines},
+		{Package: "internal/beads/contract", Rules: AllRulesBut(TestMintImport), Reason: beadsEngines},
+		{Package: "internal/beads/exec", Rules: AllRulesBut(TestMintImport), Reason: beadsEngines},
+		{Package: "internal/beads/ledgerfeed", Rules: AllRulesBut(TestMintImport), Reason: beadsEngines},
+		{Package: "internal/beads/proxyendpoint", Rules: AllRulesBut(TestMintImport), Reason: beadsEngines},
+		{Package: "internal/beads/proxyendpoint/proxyendpointtest", Rules: AllRulesBut(TestMintImport), Reason: beadsEngines},
+		{Package: "internal/beads/beadstest", Reason: "the test minting helpers: test-only, so they may mint, and use the other test mint"},
+		{Package: "internal/beads/splittest", Reason: "the split-city test helpers: test-only, so they may mint, and use the other test mint"},
+		{Package: "internal/storebinding", Reason: storeBindings},
+		{Package: "internal/storebinding/beadsworkspace", Reason: storeBindings},
+		{Package: "internal/storebinding/sqlite", Reason: storeBindings},
+		{Package: "internal/storebinding/storebindingtest", Reason: storeBindings},
 		{Package: "internal/storeref", Rules: AllRulesBut(CapAssert), Reason: "the residency resolver: the mint (T2) and the plan executors that run legs over physical stores. A capability assertion here still goes through beads.As"},
 		{Package: "cmd/gc", File: "storage_boot.go", Reason: "storage-class routing at boot: opens and holds the physical engines the router later wraps"},
 		{Package: "cmd/gc", File: "infra_class_migrate.go", Rules: rawRules, Reason: "the storage-class migration: copies a class's rows between physical stores, raw by nature (S5)"},
@@ -95,6 +111,12 @@ var Default = Config{
 // rawRules are the raw-signature rules: the migration engine takes physical
 // stores, but it still mints, unwraps and asserts only through the baseline.
 var rawRules = []Rule{RawParam, RawResult, RawField, RawVar, RawType}
+
+// The reasons the allowlist's package entries share.
+const (
+	beadsEngines  = "the engines, the typed handles and the capability helpers; a production file here may not import a test mint either"
+	storeBindings = "the binding engines and the migration copy and clear: they move rows between physical stores, raw by nature"
+)
 
 // Analyzer runs the rules with Default.
 var Analyzer = New(Default)

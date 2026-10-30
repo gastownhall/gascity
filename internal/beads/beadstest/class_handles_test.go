@@ -1,7 +1,9 @@
 package beadstest
 
 import (
+	"fmt"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -45,19 +47,32 @@ func TestSingleStoreMintsEveryClassOverOneStore(t *testing.T) {
 	}
 }
 
-// TestConformanceCatchesAHiddenCapability: the conformance fails on a handle
-// that hides a capability its store has.
+// recordedErrors is an errorReporter that keeps what the conformance reports.
+type recordedErrors []string
+
+func (*recordedErrors) Helper() {}
+
+func (r *recordedErrors) Errorf(format string, args ...any) {
+	*r = append(*r, fmt.Sprintf(format, args...))
+}
+
+// TestConformanceCatchesAHiddenCapability: the conformance fails a handle
+// that hides a capability its store has, and passes the handles it mints.
 func TestConformanceCatchesAHiddenCapability(t *testing.T) {
 	mem := beads.NewMemStore()
-	want, ok := beads.As[beads.ConditionalWriter](mem)
-	if !ok {
+	if _, ok := beads.As[beads.ConditionalWriter](mem); !ok {
 		t.Fatal("fixture: MemStore is no ConditionalWriter")
 	}
+	var got recordedErrors
+	checkHandleCapabilities(&got, mem, SingleStore(mem).All())
+	if len(got) != 0 {
+		t.Fatalf("the minted handles over a MemStore: %q", got)
+	}
 	// A wrapper that is not a class layer stops As: the capability is hidden.
-	hidden := struct{ beads.Store }{mem}
-	got, gotOK := capabilityProbes[0].look(hidden)
-	if capabilityProbes[0].name != "ConditionalWriter" || gotOK || got == want {
-		t.Fatalf("probe through an opaque wrapper = %v, %v; the conformance would not catch a hidden capability", got, gotOK)
+	checkHandleCapabilities(&got, mem, map[string]beads.Store{"opaque": struct{ beads.Store }{mem}})
+	const want = "opaque handle, ConditionalWriter: found = false, the store's = true"
+	if !slices.Contains(got, want) {
+		t.Fatalf("the conformance over a handle that hides ConditionalWriter reported %q, want %q among them", got, want)
 	}
 }
 

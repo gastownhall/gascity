@@ -34,17 +34,33 @@
 // longer typed as a store (var x any = s; x.(T)), through reflect, or through
 // a helper outside the linted packages. A conversion that boxes a store at the
 // assertion (any(s).(T)) is caught. The runtime class guard (T8) is the
-// backstop for what a type check cannot see.
+// backstop for what a type check cannot see. Also out of scope: debt moved
+// into a package the allowlist exempts whole (internal/beads, the
+// internal/storebinding packages, internal/storeref). Such a move changes
+// that package's API, which its review sees, but no count does.
 //
 // Every finding counts against a generated baseline keyed by file, enclosing
 // function and rule (baseline.txt). A count above its pin reports every site
 // of that key; a pin the tree no longer reaches reports too, so the baseline
 // shrinks in the commit that retires a site. A package compiled under several
 // build-tag sets is checked in each, against the rows for the files that set
-// compiles. A Sealed package has no
-// baseline at all. Test files and generated files are not linted, and a
-// //nolint:storeclass directive is itself a finding: the baseline is the only
-// exemption.
+// compiles. A Sealed package has no baseline at all.
+//
+// The allowlist exempts a package entry's findings outright, and names each
+// package: a package added below an allowlisted one is linted until an entry
+// names it. An entry for one file (cmd/gc's storage_boot.go and
+// infra_class_*.go) exempts its findings from nogo only. The generator counts
+// them in allowed.txt, by the baseline's key, and the growth gate judges
+// allowed.txt like the baseline, so new raw-store code in such a file, or
+// debt moved into it, is a new or raised allowed.txt row that needs the
+// label.
+//
+// Test files are not linted. Generated files are: a _gen.go name or a
+// generated-code header does not take a file the compiler builds out of the
+// lint, or its rows out of the baseline (tools/nogo/config.json gives
+// storeclass its own scope, _base's without the _gen.go exclusion). A
+// //nolint:storeclass directive is itself a finding: the baseline is the
+// only exemption.
 //
 // # Raising the baseline
 //
@@ -53,20 +69,30 @@
 // package: S3b, S4a and S7 are expected to) raises the baseline this way:
 //
 //  1. Regenerate: from tools/nogo, go run ./analyzers/storeclass/cmd/storeclass-baseline -write.
-//     It refuses growth, so raise ceiling.txt by hand to the totals it
-//     reports, and rerun.
+//     It refuses baseline growth, so raise ceiling.txt by hand to the totals
+//     it reports, and rerun. allowed.txt has no ceiling: -write rewrites it,
+//     and the gate judges its rows.
 //  2. List the new rows and why each cannot use a typed handle yet in the
 //     pull request description.
 //  3. The typed-store programme's coordinator reviews the rows and applies
 //     the storeclass/baseline-raise label. Without it the storeclass
-//     baseline workflow fails on any new or raised row or ceiling against
-//     the merge-base. CODEOWNERS (gascity-admin) gates baseline.txt,
-//     ceiling.txt, config.go and sealed_floor.txt.
+//     baseline workflow fails on any new or raised baseline or allowed.txt
+//     row or ceiling against the merge-base. CODEOWNERS (gascity-admin)
+//     gates this directory, tools/nogo/analyzers.bzl, tools/nogo/BUILD.bazel
+//     and the two rules_go nogo patches.
+//
+// The same label approves a change that could weaken the lint rather than
+// raise its baseline: to this directory, the analyzer set and nogo target, the
+// two rules_go nogo patches, or the nogo wiring in files the gate does not
+// protect whole (MODULE.bazel's rules_go override and go_sdk.nogo
+// registration, tools/nogo/config.json's _base and storeclass scopes; see
+// cmd/storeclass-baseline).
 //
 // Shrinking needs no label: regenerate with -write, which lowers the
 // ceiling, in the commit that retires the sites. A shrink still edits
-// baseline.txt and ceiling.txt, so once code-owner review is enforced on main
-// (an admin setting #8435 asks for), it needs a gascity-admin review too.
+// baseline.txt and ceiling.txt (or allowed.txt), so once code-owner review is
+// enforced on main (an admin setting #8435 asks for), it needs a
+// gascity-admin review too.
 //
 // # What row-level strictness costs
 //
@@ -82,7 +108,8 @@
 //     -write.
 //   - A rename, a move or a split of a function or file that holds debt is a
 //     new row, so the growth gate counts it as a raise that needs the label,
-//     though no package's total grows.
+//     though no package's total grows. A move into an allowlisted file is a
+//     new allowed.txt row, so it needs the label too.
 //   - Every shrink edits baseline.txt and ceiling.txt, which CODEOWNERS
 //     assigns to gascity-admin (above).
 //   - baseline.txt is an input of every main-repository nogo action, so any
@@ -92,6 +119,23 @@
 // committed ceiling, would remove the first two costs, and a per-package
 // baseline the last; revisit both before the phases that retire debt (T2
 // onward) make shrinks common.
+//
+// The gate protects tools/nogo/analyzers.bzl and tools/nogo/BUILD.bazel
+// whole, so a change that cannot weaken storeclass still needs the label
+// there: adding another analyzer, or a staticcheck bump that edits the check
+// lists. Guarding only the storeclass wiring in those two files (storeclass
+// in WRAPPED, WRAPPED in NOGO_ANALYZERS, the nogo target and main_repo_data),
+// as MODULE.bazel and config.json are guarded, would remove that cost.
+//
+// # The read markers have two ledgers
+//
+// The split-strict gate (#8335) reviews every production use of a read marker
+// in its own table, reviewedMarkers in internal/beads/splittest
+// (TestReadMarkersAreReviewed), by file and function, internal/storeref's
+// uses included. read-marker pins the uses outside internal/storeref a second
+// time, as baseline rows under this gate's approval. Until T7 replaces the
+// markers with plan roles, a change that adds, moves or removes a marker
+// updates both: its reviewedMarkers entry, and the baseline (regenerate).
 package storeclass
 
 import (
@@ -139,10 +183,15 @@ func AllRulesBut(rs ...Rule) []Rule {
 	return out
 }
 
-// Allow exempts a package (a module-relative path; a trailing "/..." takes
-// its subpackages too), or one file of it (File, a base name or a path.Match
-// glob), from Rules (nil: every rule), for a reviewed Reason. A File entry
-// that matches no file of its package is stale and reports.
+// Allow exempts a package (a module-relative path, exactly: a subpackage
+// needs its own entry, so a new package is linted until the allowlist names
+// it), or one file of it (File, a base name or a path.Match glob), from Rules
+// (nil: every rule), for a reviewed Reason. A package entry exempts its
+// findings outright. A File entry exempts them from nogo only: the generator
+// still counts them in allowed.txt, and the growth gate judges that file
+// like the baseline, so debt moved into an allowlisted file is a raise. A
+// File entry that matches no file of its package is stale and reports, and
+// the generator refuses an entry whose package the module does not have.
 type Allow struct {
 	Package string
 	File    string
@@ -170,10 +219,13 @@ type Config struct {
 }
 
 // Finding is one site: its baseline key, where it is, and what it is.
+// Allowed marks a site an Allow entry for its file exempts: nogo does not
+// report it, and the generator counts it in allowed.txt, not the baseline.
 type Finding struct {
-	Key  Key
-	Pos  token.Pos
-	Desc string
+	Key     Key
+	Pos     token.Pos
+	Desc    string
+	Allowed bool
 }
 
 // New builds the analyzer for cfg.
@@ -199,8 +251,9 @@ func New(cfg Config) *analysis.Analyzer {
 }
 
 // NewCollector builds an analyzer that hands every finding to collect,
-// unfiltered by the baseline, and reports nothing: the baseline generator.
-// collect may be called from several goroutines' passes; it is serialized.
+// unfiltered by the baseline and marked Allowed where an Allow entry for its
+// file exempts it, and reports nothing: the baseline generator. collect may
+// be called from several goroutines' passes; it is serialized.
 func NewCollector(cfg Config, collect func(Finding)) *analysis.Analyzer {
 	var mu sync.Mutex
 	serial := func(f Finding) {
@@ -228,13 +281,6 @@ func relPackage(cfg Config, pkgPath string) (string, bool) {
 	return "", false
 }
 
-func allowMatches(a Allow, rel string) bool {
-	if pkg, ok := strings.CutSuffix(a.Package, "/..."); ok {
-		return rel == pkg || strings.HasPrefix(rel, pkg+"/")
-	}
-	return rel == a.Package
-}
-
 func fileMatches(a Allow, base string) bool {
 	if a.File == "" {
 		return true
@@ -243,21 +289,36 @@ func fileMatches(a Allow, base string) bool {
 	return err == nil && ok
 }
 
-func (c Config) allowed(rel, base string, r Rule) bool {
+// exemption is what the allowlist does with one finding.
+type exemption int
+
+const (
+	notExempt     exemption = iota
+	exemptCounted           // an entry for its file: nogo skips it, allowed.txt counts it
+	exemptWhole             // an entry for its package: nothing counts it
+)
+
+func (c Config) exempt(rel, base string, r Rule) exemption {
+	e := notExempt
 	for _, a := range c.Allow {
-		if allowMatches(a, rel) && fileMatches(a, base) && (a.Rules == nil || slices.Contains(a.Rules, r)) {
-			return true
+		if a.Package != rel || !fileMatches(a, base) || a.Rules != nil && !slices.Contains(a.Rules, r) {
+			continue
 		}
+		if a.File == "" {
+			return exemptWhole
+		}
+		e = exemptCounted
 	}
-	return false
+	return e
 }
 
-// linted reports whether a file of the pass is linted: not a test file, and
-// not generated (nogo's config excludes _gen.go files; the generator must
-// agree with it).
+// linted reports whether a file of the pass is linted: any file but a test
+// file. A generated one is linted too: were a _gen.go name or a generated-code
+// header to skip a file, renaming a baselined file or adding the header would
+// drop its rows from the census, a shrink that needs no label, and hide every
+// later raw store in it.
 func linted(filename string) bool {
-	base := path.Base(strings.ReplaceAll(filename, "\\", "/"))
-	return !strings.HasSuffix(base, "_test.go") && !strings.HasSuffix(base, "_gen.go")
+	return !strings.HasSuffix(path.Base(strings.ReplaceAll(filename, "\\", "/")), "_test.go")
 }
 
 func run(pass *analysis.Pass, cfg Config, collect func(Finding)) error {
@@ -270,8 +331,10 @@ func run(pass *analysis.Pass, cfg Config, collect func(Finding)) error {
 	var first *ast.File
 	var bases []string
 	for _, file := range pass.Files {
-		name := pass.Fset.Position(file.Pos()).Filename
-		if !linted(name) || ast.IsGenerated(file) {
+		// The file's own name: a //line directive renames the positions after
+		// it, and would otherwise make it a test file or another file's rows.
+		name := pass.Fset.PositionFor(file.Pos(), false).Filename
+		if !linted(name) {
 			continue
 		}
 		if first == nil {
@@ -285,7 +348,7 @@ func run(pass *analysis.Pass, cfg Config, collect func(Finding)) error {
 		return nil // a test-only pass
 	}
 	if collect != nil {
-		for _, f := range c.found {
+		for _, f := range slices.Concat(c.found, c.allowed) {
 			collect(f)
 		}
 		return nil
@@ -299,7 +362,8 @@ type checker struct {
 	pass       *analysis.Pass
 	rel        string
 	storeIface *types.Interface
-	found      []Finding
+	found      []Finding // judged against the baseline
+	allowed    []Finding // exempt by an entry for their file: only the generator sees them
 	nolint     []token.Pos
 	concrete   map[*types.Named]bool
 }
@@ -372,14 +436,20 @@ func (c *checker) fileOf(pos token.Pos) *ast.File {
 }
 
 func (c *checker) add(base, fn string, r Rule, pos token.Pos, desc string) {
-	if c.cfg.allowed(c.rel, base, r) {
+	ex := c.cfg.exempt(c.rel, base, r)
+	if ex == exemptWhole {
 		return
 	}
 	p := base
 	if c.rel != "." {
 		p = c.rel + "/" + base
 	}
-	c.found = append(c.found, Finding{Key: Key{Path: p, Func: fn, Rule: r}, Pos: pos, Desc: desc})
+	f := Finding{Key: Key{Path: p, Func: fn, Rule: r}, Pos: pos, Desc: desc, Allowed: ex == exemptCounted}
+	if f.Allowed {
+		c.allowed = append(c.allowed, f)
+		return
+	}
+	c.found = append(c.found, f)
 }
 
 // file collects one file's findings.

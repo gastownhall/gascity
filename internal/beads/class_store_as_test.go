@@ -2,6 +2,11 @@ package beads
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -69,7 +74,8 @@ func TestAsIsNilSafe(t *testing.T) {
 }
 
 // TestAsMatchesTheOutermostLayer: a capability the handle itself has is
-// answered by the handle, so As[Store] keeps the class handle.
+// answered by the handle, so As[Store] keeps the class handle when no class
+// guard is below it (TestAsThroughAClassGate has one).
 func TestAsMatchesTheOutermostLayer(t *testing.T) {
 	h := GraphStore{NewMemStore()}
 	s, ok := As[Store](h)
@@ -101,7 +107,16 @@ func TestAsNeverPeelsTheCache(t *testing.T) {
 func TestAsHonorsProviders(t *testing.T) {
 	mem := NewMemStore()
 	cache := NewCachingStoreForTest(mem, nil)
-	for name, raw := range map[string]Store{"mem": mem, "cache": cache} {
+	// A cache over a store that strands nothing (bd/Dolt's case): the cache
+	// has AbsentBlockedReader's methods, but its helper answers no.
+	unstranding := NewCachingStoreForTest(struct{ Store }{NewMemStore()}, nil)
+	if _, ok := Store(unstranding).(AbsentBlockedReader); !ok {
+		t.Fatal("fixture: the cache is no AbsentBlockedReader by assertion; the test proves nothing")
+	}
+	if _, ok := ReadyBlockedByAbsentFor(unstranding); ok {
+		t.Fatal("fixture: ReadyBlockedByAbsentFor answers yes for a cache over a store that strands nothing")
+	}
+	for name, raw := range map[string]Store{"mem": mem, "cache": cache, "cache over a store that strands nothing": unstranding} {
 		h := SessionStore{raw}
 		check := func(capability string, viaAs, viaFor bool) {
 			t.Helper()
@@ -136,10 +151,131 @@ func TestAsHonorsProviders(t *testing.T) {
 		_, a = As[AssignmentGuardedUpdater](h)
 		_, f = AssignmentGuardedUpdaterFor(raw)
 		check("AssignmentGuardedUpdater", a, f)
+		_, a = As[AbsentBlockedReader](h)
+		_, f = ReadyBlockedByAbsentFor(raw)
+		check("AbsentBlockedReader", a, f)
 	}
 	if _, ok := As[ConditionalWriter](GraphStore{mem}); !ok {
 		t.Fatal("the fixture's MemStore is no ConditionalWriter: the test proves nothing")
 	}
+}
+
+// TestAsRoutesEveryCapabilityHelper holds As to its doc for a helper that
+// lands later: every exported func XFor(Store) (T, bool) of this package is a
+// case *T of resolveCapability that calls it, and As's doc names it. Without
+// the case, As[T] is a plain assertion, which answers yes where the helper
+// gates the capability (ReadyBlockedByAbsentFor) or no where it follows a
+// resolution target.
+func TestAsRoutesEveryCapabilityHelper(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	helpers := map[string]string{} // helper -> the capability it returns
+	routed := map[string]string{}  // helper -> the case of resolveCapability that calls it
+	var asDoc string
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil {
+				continue
+			}
+			switch fn.Name.Name {
+			case "As":
+				asDoc = fn.Doc.Text()
+			case "resolveCapability":
+				resolveCapabilityRoutes(fn, routed)
+			}
+			if capability, ok := capabilityHelperOf(fn); ok {
+				helpers[fn.Name.Name] = capability
+			}
+		}
+	}
+	if len(helpers) < 10 || len(routed) == 0 || asDoc == "" {
+		t.Fatalf("parsed %d XFor helpers, %d resolveCapability cases and %d bytes of As doc; the guard would pass vacuously", len(helpers), len(routed), len(asDoc))
+	}
+	for helper, capability := range helpers {
+		if got := routed[helper]; got != capability {
+			t.Errorf("%s returns %s, but no case *%s of resolveCapability calls it (it is under %q): As[%s] is a plain assertion", helper, capability, capability, got, capability)
+		}
+		if !strings.Contains(asDoc, helper) {
+			t.Errorf("As's doc does not list %s among the helpers it answers through", helper)
+		}
+	}
+}
+
+// capabilityHelperOf is the capability an exported func XFor(Store) (T, bool)
+// returns.
+func capabilityHelperOf(fn *ast.FuncDecl) (string, bool) {
+	if !fn.Name.IsExported() || !strings.HasSuffix(fn.Name.Name, "For") {
+		return "", false
+	}
+	params, results := fieldTypes(fn.Type.Params), fieldTypes(fn.Type.Results)
+	if len(params) != 1 || len(results) != 2 || !identNamed(params[0], "Store") || !identNamed(results[1], "bool") {
+		return "", false
+	}
+	capability, ok := results[0].(*ast.Ident)
+	if !ok {
+		return "", false
+	}
+	return capability.Name, true
+}
+
+// fieldTypes is fl's type once per name it declares: (a, b T) is two.
+func fieldTypes(fl *ast.FieldList) []ast.Expr {
+	if fl == nil {
+		return nil
+	}
+	var out []ast.Expr
+	for _, f := range fl.List {
+		for range max(1, len(f.Names)) {
+			out = append(out, f.Type)
+		}
+	}
+	return out
+}
+
+func identNamed(e ast.Expr, name string) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == name
+}
+
+// resolveCapabilityRoutes records, for each case *T of resolveCapability,
+// the helpers its body calls, as helper -> T.
+func resolveCapabilityRoutes(fn *ast.FuncDecl, routed map[string]string) {
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		clause, ok := n.(*ast.CaseClause)
+		if !ok || len(clause.List) != 1 {
+			return true
+		}
+		star, ok := clause.List[0].(*ast.StarExpr)
+		if !ok {
+			return true
+		}
+		capability, ok := star.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		for _, stmt := range clause.Body {
+			ast.Inspect(stmt, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok {
+					if helper, ok := call.Fun.(*ast.Ident); ok {
+						routed[helper.Name] = capability.Name
+					}
+				}
+				return true
+			})
+		}
+		return true
+	})
 }
 
 func TestRawReturnsTheWrappedStore(t *testing.T) {
@@ -180,18 +316,28 @@ func TestSameStore(t *testing.T) {
 }
 
 // testGate is a class-guard layer as T8 adds one: a class layer that vets
-// class-write capabilities. It adapts ForeignIDCreator and hides the rest.
+// class-write capabilities. It adapts ForeignIDCreator, and Store when it has
+// a guarded one, and hides the rest.
 type testGate struct {
 	Store
 	adapted ForeignIDCreator
+	guarded Store
 }
 
 func (g testGate) unwrapClassLayer() Store { return g.Store }
 
 func (g testGate) gateCapability(target any) bool {
-	if p, ok := target.(*ForeignIDCreator); ok && g.adapted != nil {
-		*p = g.adapted
-		return true
+	switch p := target.(type) {
+	case *ForeignIDCreator:
+		if g.adapted != nil {
+			*p = g.adapted
+			return true
+		}
+	case *Store:
+		if g.guarded != nil {
+			*p = g.guarded
+			return true
+		}
 	}
 	return false
 }
@@ -253,6 +399,29 @@ func TestAsThroughAClassGate(t *testing.T) {
 	if _, ok := As[UpdateReporter](h); ok {
 		t.Fatal("As[UpdateReporter] leaked the unguarded updater through a gate")
 	}
+	// The handle above the gate is itself a Store and a
+	// GuardedBatcherHandleProvider, but the gate answers both: the handle
+	// never does.
+	if _, ok := Store(h).(GuardedBatcherHandleProvider); !ok {
+		t.Fatal("fixture: the handle is no GuardedBatcherHandleProvider")
+	}
+	if s, ok := As[Store](h); ok {
+		t.Fatalf("As[Store] through a gate that declines it = %T, true; want nothing", s)
+	}
+	if p, ok := As[GuardedBatcherHandleProvider](h); ok {
+		t.Fatalf("As[GuardedBatcherHandleProvider] through a gate = %T, true; want nothing", p)
+	}
+	guarded := NewMemStore()
+	for name, over := range map[string]Store{
+		"a handle over the gate":     GraphStore{testGate{Store: inner, guarded: guarded}},
+		"two handles over the gate":  WorkStore{GraphStore{testGate{Store: inner, guarded: guarded}}},
+		"the gate over a handle":     testGate{Store: GraphStore{inner}, guarded: guarded},
+		"a handle, a gate, a handle": MailStore{testGate{Store: GraphStore{inner}, guarded: guarded}},
+	} {
+		if s, ok := As[Store](over); !ok || s != Store(guarded) {
+			t.Errorf("%s: As[Store] = %T, %v; want the gate's guarded store", name, s, ok)
+		}
+	}
 	cache := NewCachingStoreForTest(NewMemStore(), nil)
 	if _, ok := As[*CachingStore](GraphStore{cache}); !ok {
 		t.Fatal("fixture: As[*CachingStore] does not find the cache without a gate")
@@ -292,6 +461,7 @@ func TestClassGateAllowlist(t *testing.T) {
 		"ParentProjectionWaiter":        passesClassGate[ParentProjectionWaiter](),
 		"ConditionalAssignmentReleaser": passesClassGate[ConditionalAssignmentReleaser](),
 		"ConditionalAssigneeTransferer": passesClassGate[ConditionalAssigneeTransferer](),
+		"AbsentBlockedReader":           passesClassGate[AbsentBlockedReader](),
 	} {
 		if !got {
 			t.Errorf("%s is not class-neutral: a gate hides it", name)

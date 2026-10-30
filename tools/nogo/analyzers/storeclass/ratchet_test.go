@@ -17,10 +17,23 @@ var ceilingText string
 //go:embed baseline.txt
 var baselineText string
 
+//go:embed allowed.txt
+var allowedText string
+
 // baseline is baseline.txt as the analyzer loads it.
 func baseline(t *testing.T) map[storeclass.Key]int {
 	t.Helper()
 	rows, err := storeclass.ParseBaseline(baselineText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rows
+}
+
+// allowedRows is allowed.txt as the generator reads it.
+func allowedRows(t *testing.T) map[storeclass.Key]int {
+	t.Helper()
+	rows, err := storeclass.ParseBaseline(allowedText)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,12 +47,15 @@ func baseline(t *testing.T) map[storeclass.Key]int {
 //go:embed sealed_floor.txt
 var sealedFloorText string
 
-// TestBaselineIsCanonical: the embedded baseline is exactly what the
-// generator writes, so a hand edit that reorders, duplicates or zeroes a row
-// fails here before review has to spot it.
+// TestBaselineIsCanonical: the embedded baseline and allowed.txt are exactly
+// what the generator writes, so a hand edit that reorders, duplicates or
+// zeroes a row fails here before review has to spot it.
 func TestBaselineIsCanonical(t *testing.T) {
 	if got, want := baselineText, storeclass.FormatBaseline(baseline(t)); got != want {
 		t.Fatal("baseline.txt is not canonical: regenerate it with go run ./analyzers/storeclass/cmd/storeclass-baseline -write (from tools/nogo)")
+	}
+	if got, want := allowedText, storeclass.FormatAllowed(allowedRows(t)); got != want {
+		t.Fatal("allowed.txt is not canonical: regenerate it with go run ./analyzers/storeclass/cmd/storeclass-baseline -write (from tools/nogo)")
 	}
 	ceiling, err := storeclass.ParseCeiling(ceilingText)
 	if err != nil {
@@ -117,13 +133,30 @@ func TestBaselineHasNoAllowlistedRows(t *testing.T) {
 	}
 }
 
-func allowCovers(a storeclass.Allow, k storeclass.Key) bool {
-	pkg := k.Package()
-	inPkg := pkg == a.Package
-	if base, ok := cutSuffix(a.Package, "/..."); ok {
-		inPkg = pkg == base || len(pkg) > len(base) && pkg[:len(base)+1] == base+"/"
+// TestAllowedRowsAreFileScoped: every allowed.txt row is a finding an Allow
+// entry for its file exempts, and no entry for its whole package: the
+// generator counts nothing else there.
+func TestAllowedRowsAreFileScoped(t *testing.T) {
+	rows := allowedRows(t)
+	if len(rows) == 0 {
+		t.Fatal("allowed.txt has no rows: the allowlisted cmd/gc files hold raw stores, so the census counts some")
 	}
-	if !inPkg {
+	for k := range rows {
+		var byFile, byPackage bool
+		for _, a := range storeclass.Default.Allow {
+			if allowCovers(a, k) {
+				byFile = byFile || a.File != ""
+				byPackage = byPackage || a.File == ""
+			}
+		}
+		if !byFile || byPackage {
+			t.Errorf("allowed.txt row %s: an entry for its file covers it = %v, one for its package = %v; want true and false", k, byFile, byPackage)
+		}
+	}
+}
+
+func allowCovers(a storeclass.Allow, k storeclass.Key) bool {
+	if k.Package() != a.Package {
 		return false
 	}
 	if a.File != "" {
@@ -132,13 +165,6 @@ func allowCovers(a storeclass.Allow, k storeclass.Key) bool {
 		}
 	}
 	return a.Rules == nil || slices.Contains(a.Rules, k.Rule)
-}
-
-func cutSuffix(s, suffix string) (string, bool) {
-	if len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix {
-		return s[:len(s)-len(suffix)], true
-	}
-	return s, false
 }
 
 // TestAllowlistReasons: every exemption says why.

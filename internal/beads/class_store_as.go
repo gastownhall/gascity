@@ -24,12 +24,15 @@ type classLayer interface {
 
 // classGateLayer is a class layer that vets capabilities: the class guard
 // (T8). For every T but a class-neutral one (passesClassGate), As asks the
-// gate instead of looking at or below it: gateCapability stores the guarded
-// adapter for *T in target and reports true, or reports false and the
-// capability is hidden. A class-neutral capability passes the gate as the
-// store below it, so a caller that asserts that value onward to a writer
-// launders past the gate, like the assertions the storeclass lint leaves out
-// of scope: the guard (T8) must re-vet that path.
+// outermost gate among a store's class layers instead of looking at any
+// layer, above the gate or below it: a typed handle over a gate is itself a
+// Store and a GuardedBatcherHandleProvider, and would otherwise answer those
+// before the gate is reached. gateCapability stores the guarded adapter for
+// *T in target and reports true, or reports false and the capability is
+// hidden. A class-neutral capability passes the gate as the store below it,
+// so a caller that asserts that value onward to a writer launders past the
+// gate, like the assertions the storeclass lint leaves out of scope: the
+// guard (T8) must re-vet that path.
 type classGateLayer interface {
 	classLayer
 	gateCapability(target any) bool
@@ -71,47 +74,61 @@ const classLayerMaxDepth = 8
 // class layers it answers what the capability's XFor helper answers on that
 // store (ConditionalWriterFor, GuardedBatcherFor, GraphApplyFor,
 // MetadataCASWriterFor, AtomicConditionalCloserFor, NamespaceCensusFor,
-// DepListBatchFor, GraphOnlyReadyFor, AssignmentGuardedUpdaterFor), or a
-// plain assertion for any other T, including *CachingStore. So for every T,
-// As[T](h) is exactly what the lookup answers on h's store.
+// DepListBatchFor, GraphOnlyReadyFor, AssignmentGuardedUpdaterFor,
+// ReadyBlockedByAbsentFor), or a plain assertion for any other T, including
+// *CachingStore. So for every T, As[T](h) is exactly what the lookup answers
+// on h's store; TestAsRoutesEveryCapabilityHelper fails when a helper lands
+// without its case in resolveCapability.
 //
 // As[ConditionalWriter] is the capability, not the rollout policy: a write
 // that obeys the conditional-writes mode still goes through
 // ResolveConditionalWriter.
 //
-// A capability outside the class-neutral allowlist (passesClassGate) met at
-// a class guard is the guard's adapter or nothing. As is nil-safe: nil, a
-// zero handle (or a handle over one), or a walk deeper than
-// classLayerMaxDepth answers false, before any layer is asked, so As[Store]
-// never hands out an absent handle.
+// A class guard among s's class layers answers every capability outside the
+// class-neutral allowlist (passesClassGate): its adapter or nothing, even for
+// a T a handle above it implements, so As[Store] on a handle over a guard is
+// the guard's answer, not the handle. As is nil-safe: nil, a zero handle (or
+// a handle over one), or a walk deeper than classLayerMaxDepth answers
+// false, before any layer is asked, so As[Store] never hands out an absent
+// handle.
 func As[T any](s Store) (T, bool) {
 	var zero T
-	neutral := passesClassGate[T]()
-	for range classLayerMaxDepth {
-		if s == nil {
-			return zero, false
+	if physicalStore(s) == nil {
+		return zero, false // nil, a zero handle, or a handle over one, is no store
+	}
+	if gate := classGate(s); gate != nil && !passesClassGate[T]() {
+		var v T
+		if gate.gateCapability(&v) {
+			return v, true
 		}
+		return zero, false
+	}
+	for range classLayerMaxDepth {
 		layer, isLayer := s.(classLayer)
 		if !isLayer {
 			return resolveCapability[T](s)
 		}
-		inner := layer.unwrapClassLayer()
-		if physicalStore(inner) == nil {
-			return zero, false // a zero handle, or one over a zero handle, is no store
-		}
-		if gate, ok := layer.(classGateLayer); ok && !neutral {
-			var v T
-			if gate.gateCapability(&v) {
-				return v, true
-			}
-			return zero, false
-		}
 		if v, ok := s.(T); ok {
 			return v, true
 		}
-		s = inner
+		s = layer.unwrapClassLayer()
 	}
 	return zero, false
+}
+
+// classGate is the outermost class guard among s's class layers, or nil.
+func classGate(s Store) classGateLayer {
+	for range classLayerMaxDepth {
+		layer, ok := s.(classLayer)
+		if !ok {
+			return nil
+		}
+		if gate, ok := layer.(classGateLayer); ok {
+			return gate
+		}
+		s = layer.unwrapClassLayer()
+	}
+	return nil
 }
 
 // resolveCapability is T on a store below the class layers: its XFor helper
@@ -138,6 +155,8 @@ func resolveCapability[T any](s Store) (T, bool) {
 		*p, ok = GraphOnlyReadyFor(s)
 	case *AssignmentGuardedUpdater:
 		*p, ok = AssignmentGuardedUpdaterFor(s)
+	case *AbsentBlockedReader:
+		*p, ok = ReadyBlockedByAbsentFor(s)
 	default:
 		v, ok = s.(T)
 	}
@@ -156,7 +175,7 @@ func passesClassGate[T any]() bool {
 	case *Counter, *NamespaceCensus, *DependencyBatchLister, *DepMetadataReader,
 		*GraphOnlyReadyStore, *ContextReadyReader, *OrderedReadyReader, *CachePreferredReadyReader,
 		*ChildrenBatchLister, *ExactBatchGetter, *CachedReadExact, *ReadOnlyReporter,
-		*RowWitness, *ParentProjectionWaiter,
+		*RowWitness, *ParentProjectionWaiter, *AbsentBlockedReader,
 		*ConditionalAssignmentReleaser, *ConditionalAssigneeTransferer:
 		return true
 	}

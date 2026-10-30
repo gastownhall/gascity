@@ -123,6 +123,19 @@ func TestAnalyzersValidate(t *testing.T) {
 	if !slices.Equal(names, want) {
 		t.Errorf("analyzer names = %v, want %v", names, want)
 	}
+	// nogo runs analyzers.bzl's WRAPPED, not the list above: an in-repo
+	// analyzer dropped from it stops linting while this list stays whole.
+	var wantWrapped []string
+	for _, name := range want {
+		if name != "errcheck" && name != "ineffassign" { // upstream, in NOGO_ANALYZERS directly
+			wantWrapped = append(wantWrapped, "//tools/nogo/analyzers/"+name)
+		}
+	}
+	wrappedBzl := bzlList(t, readFile(t, "analyzers.bzl"), "WRAPPED")
+	sort.Strings(wrappedBzl)
+	if !slices.Equal(wrappedBzl, wantWrapped) {
+		t.Errorf("WRAPPED in analyzers.bzl = %v\nwant %v", wrappedBzl, wantWrapped)
+	}
 }
 
 // TestConfigNamesKnownAnalyzers keeps config.json from configuring an analyzer

@@ -3419,6 +3419,11 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "tools/nogo/analyzers/storeclass/cmd/storeclass-baseline/main_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "tools/nogo/nolinttest/storeclass_nolint_test.go"
 resource = "subprocess"
 calls = 1

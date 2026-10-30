@@ -3,27 +3,29 @@
 # exactly these totals, so a shrink lowers a row here in the same commit and a
 # growth fails. The generator only ever lowers a row; raising one is a
 # coordinator decision, made by hand, and visible in review.
-cmd/gc	cap-assert	102
-cmd/gc	mint	102
-cmd/gc	raw-field	163
-cmd/gc	raw-param	1029
-cmd/gc	raw-result	236
+cmd/gc	cap-assert	107
+cmd/gc	mint	109
+cmd/gc	raw-field	172
+cmd/gc	raw-param	1072
+cmd/gc	raw-result	253
 cmd/gc	raw-type	4
-cmd/gc	raw-var	34
-cmd/gc	unwrap	151
+cmd/gc	raw-var	37
+cmd/gc	read-marker	31
+cmd/gc	unwrap	155
 internal/agentutil	raw-param	2
 internal/api	cap-assert	10
-internal/api	mint	22
+internal/api	mint	21
 internal/api	raw-field	13
-internal/api	raw-param	141
+internal/api	raw-param	139
 internal/api	raw-result	17
-internal/api	unwrap	205
+internal/api	read-marker	20
+internal/api	unwrap	206
 internal/convoy	cap-assert	1
 internal/convoy	raw-field	4
 internal/convoy	raw-param	14
 internal/dispatch	cap-assert	2
 internal/dispatch	raw-field	5
-internal/dispatch	raw-param	199
+internal/dispatch	raw-param	200
 internal/dispatch	raw-result	5
 internal/dispatch	raw-type	1
 internal/doctor	raw-field	1
@@ -52,6 +54,7 @@ internal/opjournal	raw-param	2
 internal/opjournal	unwrap	5
 internal/orders	raw-param	2
 internal/orders	raw-result	1
+internal/orders	read-marker	1
 internal/orders	unwrap	21
 internal/readywork	raw-field	1
 internal/readywork	raw-param	1
@@ -68,8 +71,9 @@ internal/session/sessiontest	raw-result	1
 internal/sling	cap-assert	2
 internal/sling	mint	2
 internal/sling	raw-field	12
-internal/sling	raw-param	41
+internal/sling	raw-param	42
 internal/sling	raw-result	5
+internal/sling	read-marker	3
 internal/sourceworkflow	raw-param	16
 internal/storeref	cap-assert	4
 internal/storeref/storereftest	raw-field	2

@@ -24,6 +24,7 @@ go_test(
         "baseline.txt",
         "ceiling.txt",
         "sealed_floor.txt",
+        "allowed.txt",
     ],
     deps = [
         ":storeclass",
