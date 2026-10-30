@@ -6,6 +6,7 @@ go_library(
         "envfile.go",
         "gcbin_path.go",
         "provider.go",
+        "provider_key.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/processenv",
     visibility = ["//:__subpackages__"],
@@ -17,6 +18,7 @@ go_test(
     srcs = [
         "envfile_test.go",
         "gcbin_path_test.go",
+        "provider_key_ref_test.go",
         "provider_test.go",
         "testenv_import_test.go",
     ],
