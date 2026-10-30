@@ -443,6 +443,83 @@ func TestHookWorkQueryStoresSkipsSuspendedRigs(t *testing.T) {
 	}
 }
 
+// TestHookWorkQueryStoresFansOutImplicitCityAgentToRigs: the city-level
+// implicit provider agent, as InjectImplicitAgents composes it, is
+// cross-store eligible, so its hook fan-out reaches every serving rig store —
+// its own city leg first, then one leg per rig in rig order (PR #6003). A
+// suspended rig contributes no leg, a rig-less city stays single-store, and a
+// hand-built explicit city agent without scope keeps its single leg: the fix
+// is at synthesis, not a widened predicate.
+func TestHookWorkQueryStoresFansOutImplicitCityAgentToRigs(t *testing.T) {
+	prev := hookStoreQueryEnv
+	hookStoreQueryEnv = func(_ string, _ *config.City, a *config.Agent) (map[string]string, error) {
+		return map[string]string{"GC_STORE": "leg-" + a.Dir}, nil
+	}
+	t.Cleanup(func() { hookStoreQueryEnv = prev })
+	cityDir := t.TempDir()
+	implicitCityClaude := func(rigs ...config.Rig) *config.Agent {
+		cfg := &config.City{
+			Providers: map[string]config.ProviderSpec{"claude": {}},
+			Rigs:      rigs,
+		}
+		config.InjectImplicitAgents(cfg)
+		for i := range cfg.Agents {
+			if cfg.Agents[i].Implicit && cfg.Agents[i].Dir == "" && cfg.Agents[i].Name == "claude" {
+				return &cfg.Agents[i]
+			}
+		}
+		t.Fatalf("InjectImplicitAgents did not compose a city-level claude agent: %+v", cfg.Agents)
+		return nil
+	}
+	rigsOf := func(stores []hookStore) []string {
+		var rigs []string
+		for _, st := range stores[1:] {
+			rigs = append(rigs, st.rig)
+		}
+		return rigs
+	}
+	twoRigs := []config.Rig{
+		{Name: "riga", Path: filepath.Join(cityDir, "rigs", "riga")},
+		{Name: "rigb", Path: filepath.Join(cityDir, "rigs", "rigb")},
+	}
+
+	t.Run("one leg per rig after the city leg", func(t *testing.T) {
+		cfg := &config.City{Providers: map[string]config.ProviderSpec{"claude": {}}, Rigs: twoRigs}
+		stores := hookWorkQueryStores(cityDir, cfg, implicitCityClaude(twoRigs...), "claude", cityDir, nil, nil, nil)
+		if len(stores) != 3 {
+			t.Fatalf("fan-out = %d legs, want 3 (city + riga + rigb)", len(stores))
+		}
+		if got := rigsOf(stores); !slices.Equal(got, []string{"riga", "rigb"}) {
+			t.Fatalf("fan-out rigs = %v, want [riga rigb]", got)
+		}
+	})
+	t.Run("suspended rig contributes no leg", func(t *testing.T) {
+		cfg := &config.City{Providers: map[string]config.ProviderSpec{"claude": {}}, Rigs: twoRigs}
+		stores := hookWorkQueryStores(cityDir, cfg, implicitCityClaude(twoRigs...), "claude", cityDir, nil, nil, map[string]bool{"rigb": true})
+		if len(stores) != 2 {
+			t.Fatalf("fan-out with rigb suspended = %d legs, want 2 (city + riga)", len(stores))
+		}
+		if got := rigsOf(stores); !slices.Equal(got, []string{"riga"}) {
+			t.Fatalf("fan-out rigs with rigb suspended = %v, want [riga]", got)
+		}
+	})
+	t.Run("rig-less city stays single-store", func(t *testing.T) {
+		cfg := &config.City{Providers: map[string]config.ProviderSpec{"claude": {}}}
+		stores := hookWorkQueryStores(cityDir, cfg, implicitCityClaude(), "claude", cityDir, nil, nil, nil)
+		if len(stores) != 1 {
+			t.Fatalf("fan-out on a rig-less city = %d legs, want 1 (city only)", len(stores))
+		}
+	})
+	t.Run("explicit city agent without scope keeps a single leg", func(t *testing.T) {
+		cfg := &config.City{Providers: map[string]config.ProviderSpec{"claude": {}}, Rigs: twoRigs}
+		explicit := &config.Agent{Name: "claude", Provider: "claude"}
+		stores := hookWorkQueryStores(cityDir, cfg, explicit, "claude", cityDir, nil, nil, nil)
+		if len(stores) != 1 {
+			t.Fatalf("explicit scope-less agent fan-out = %d legs, want 1 (synthesis stamps city, the predicate does not widen)", len(stores))
+		}
+	})
+}
+
 // TestHookCommandDoesNotSearchASuspendedRig drives plain `gc hook` over a city
 // whose only rig store cannot be read: while the rig is serving, the failed
 // read is the answer (exit 2, the rig named); once the rig is suspended, the
@@ -517,5 +594,44 @@ func TestHookCommandEnvBuildFailureIsAFailedQuery(t *testing.T) {
 	stderr.Reset()
 	if code := cmdHookWithOptions([]string{"worker"}, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr); code == 0 || stdout.Len() != 0 {
 		t.Fatalf("gc hook --claim with an unbuildable query env = exit %d stdout=%q, want a failure with no result; stderr=%s", code, stdout.String(), stderr.String())
+	}
+}
+
+// TestHookWorkQueryStoresImplicitCityAgentFansOutAcrossRigs: a targetless
+// (city-level) implicit provider agent, as InjectImplicitAgents composes it,
+// claims city-scoped work, so its hook fan-out must reach every rig store the
+// city can see — not stop at its own city store (PR #6003).
+func TestHookWorkQueryStoresImplicitCityAgentFansOutAcrossRigs(t *testing.T) {
+	prev := hookStoreQueryEnv
+	hookStoreQueryEnv = func(_ string, _ *config.City, a *config.Agent) (map[string]string, error) {
+		return map[string]string{"GC_STORE": "leg-" + a.Dir}, nil
+	}
+	t.Cleanup(func() { hookStoreQueryEnv = prev })
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Providers: map[string]config.ProviderSpec{"claude": {}},
+		Rigs: []config.Rig{
+			{Name: "riga", Path: filepath.Join(cityDir, "rigs", "riga")},
+			{Name: "rigb", Path: filepath.Join(cityDir, "rigs", "rigb")},
+		},
+	}
+	config.InjectImplicitAgents(cfg)
+	var agent *config.Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Implicit && cfg.Agents[i].Dir == "" && cfg.Agents[i].Name == "claude" {
+			agent = &cfg.Agents[i]
+		}
+	}
+	if agent == nil {
+		t.Fatalf("InjectImplicitAgents did not compose a city-level claude agent: %+v", cfg.Agents)
+	}
+
+	stores := hookWorkQueryStores(cityDir, cfg, agent, "claude", cityDir, nil, nil, nil)
+	var rigs []string
+	for _, st := range stores[1:] {
+		rigs = append(rigs, st.rig)
+	}
+	if !slices.Equal(rigs, []string{"riga", "rigb"}) {
+		t.Fatalf("implicit city agent hook fan-out rigs = %v (stores=%d), want [riga rigb]", rigs, len(stores))
 	}
 }
