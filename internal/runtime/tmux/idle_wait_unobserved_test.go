@@ -80,6 +80,17 @@ func TestWaitForIdleIndeterminateReadingsAreUnobserved(t *testing.T) {
 	}
 }
 
+// A pane parked on a numbered menu whose cursor row carries the prompt glyph
+// (the session-limit chooser) is waiting for a choice, not idle: the wait times
+// out without ever having observed a running turn.
+func TestWaitForIdleMenuIsNotIdle(t *testing.T) {
+	tm := scriptedTmux(scriptedCapture{out: sessionLimitChooserPane})
+	err := tm.WaitForIdle(context.Background(), "w", 500*time.Millisecond)
+	if !errors.Is(err, ErrIdleTimeout) || !errors.Is(err, runtime.ErrWaitUnobserved) {
+		t.Fatalf("WaitForIdle = %v, want ErrIdleTimeout wrapping ErrWaitUnobserved", err)
+	}
+}
+
 // One busy reading makes the timeout an observed one, even when later reads
 // fail.
 func TestWaitForIdleBusyReadingIsObserved(t *testing.T) {
@@ -138,17 +149,19 @@ func TestClassifyIdlePane(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		lines    []string
+		prefix   string
 		wantIdle bool
 		wantErr  error
 	}{
-		{"busy", []string{"❯ ", busyPane}, false, nil},
-		{"idle", []string{"❯ "}, true, nil},
-		{"indeterminate", strings.Split(indeterminatePane, "\n"), false, runtime.ErrIdleIndeterminate},
+		{"busy", []string{"❯ ", busyPane}, DefaultReadyPromptPrefix, false, nil},
+		{"idle", []string{"❯ "}, DefaultReadyPromptPrefix, true, nil},
+		{"indeterminate", strings.Split(indeterminatePane, "\n"), DefaultReadyPromptPrefix, false, runtime.ErrIdleIndeterminate},
+		{"menu", codexTrustMenuLines, "› ", false, runtime.ErrIdleIndeterminate},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			idle, err := ClassifyIdlePane(tc.lines, DefaultReadyPromptPrefix)
+			idle, err := ClassifyIdlePane(tc.lines, tc.prefix)
 			if idle != tc.wantIdle || !errors.Is(err, tc.wantErr) || (tc.wantErr == nil && err != nil) {
-				t.Fatalf("ClassifyIdlePane(%q) = (%v, %v), want (%v, %v)", tc.lines, idle, err, tc.wantIdle, tc.wantErr)
+				t.Fatalf("ClassifyIdlePane(%q, %q) = (%v, %v), want (%v, %v)", tc.lines, tc.prefix, idle, err, tc.wantIdle, tc.wantErr)
 			}
 		})
 	}

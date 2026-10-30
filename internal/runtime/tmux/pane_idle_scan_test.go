@@ -39,3 +39,23 @@ func TestPaneShowsIdlePrompt(t *testing.T) {
 		})
 	}
 }
+
+// codexTrustMenuLines is codex-cli 0.157's folder-trust dialog: the selected
+// option carries codex's prompt glyph, so its row matches the "› " prefix.
+var codexTrustMenuLines = []string{
+	"  Trust this folder? Codex can read, edit, and run files here.",
+	"",
+	"› 1. Trust and continue",
+	"  2. Quit",
+	"",
+	"  enter continue · esc quit",
+}
+
+// A numbered menu whose selected row carries the prompt glyph (codex's
+// folder-trust dialog) is waiting for an answer, not an idle composer: a nudge
+// typed now lands in the dialog, and codex's leading Escape quits it.
+func TestPaneShowsIdlePromptMenuCursorRowIsNotIdle(t *testing.T) {
+	if PaneShowsIdlePrompt(codexTrustMenuLines, "› ") {
+		t.Errorf("PaneShowsIdlePrompt(%q, %q) = true, want false: a numbered menu's cursor row is not a ready prompt", codexTrustMenuLines, "› ")
+	}
+}

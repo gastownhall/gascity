@@ -5177,8 +5177,16 @@ func (t *Tmux) WaitForShellReady(session string, timeout time.Duration) error {
 // NBSP after its ❯ prompt character while the default ReadyPromptPrefix
 // uses a regular space. See https://github.com/steveyegge/gastown/issues/1387.
 func matchesPromptPrefix(line, readyPromptPrefix string) bool {
+	_, ok := promptLineRest(line, readyPromptPrefix)
+	return ok
+}
+
+// promptLineRest is the normalization behind matchesPromptPrefix: ok reports
+// whether line matches readyPromptPrefix, and rest is the text after the
+// prefix (empty for a bare prompt glyph).
+func promptLineRest(line, readyPromptPrefix string) (rest string, ok bool) {
 	if readyPromptPrefix == "" {
-		return false
+		return "", false
 	}
 	trimmed := strings.TrimSpace(line)
 	// Normalize NBSP (U+00A0) → regular space so that prompt matching
@@ -5191,11 +5199,62 @@ func matchesPromptPrefix(line, readyPromptPrefix string) bool {
 	// too so the prompt glyph after the border is detected — otherwise readiness
 	// and idle detection never match and queued prompt delivery is never released.
 	for _, cand := range []string{trimmed, stripLeadingBoxBorder(trimmed)} {
-		if strings.HasPrefix(cand, normalizedPrefix) || (prefix != "" && cand == prefix) {
+		if rest, found := strings.CutPrefix(cand, normalizedPrefix); found {
+			return rest, true
+		}
+		if prefix != "" && cand == prefix {
+			return "", true
+		}
+	}
+	return "", false
+}
+
+// paneShowsReadyPrompt reports whether captured pane lines show a ready prompt
+// for promptPrefix: a line matching the prefix that is not the cursor row of a
+// numbered menu. A menu's selected option can carry the same glyph as the
+// composer ("› 1. Trust and continue"), but it is a pending choice: keys typed
+// into it are menu input and Enter picks the highlighted option. The dialog
+// layer's prompt-indicator scan rejects such rows the same way
+// (runtime.isNumberedMenuRow).
+func paneShowsReadyPrompt(lines []string, promptPrefix string) bool {
+	for i, line := range lines {
+		if !matchesPromptPrefix(line, promptPrefix) {
+			continue
+		}
+		if !isMenuCursorRow(lines, i, promptPrefix) {
 			return true
 		}
 	}
 	return false
+}
+
+// isMenuCursorRow reports whether lines[i], a line matching promptPrefix, is
+// the selected row of a numbered menu: the text after the prompt glyph is an
+// option label ("1. Trust and continue").
+func isMenuCursorRow(lines []string, i int, promptPrefix string) bool {
+	rest, ok := promptLineRest(lines[i], promptPrefix)
+	if !ok {
+		return false
+	}
+	_, ok = menuOptionNumber(rest)
+	return ok
+}
+
+// menuOptionNumber parses a numbered option label at the start of s: a run of
+// ASCII digits followed by ". ". Labels that overflow int are not labels.
+func menuOptionNumber(s string) (int, bool) {
+	end := 0
+	for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+		end++
+	}
+	if end == 0 || !strings.HasPrefix(s[end:], ". ") {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s[:end])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // stripLeadingBoxBorder removes a leading vertical box-drawing character
@@ -5389,8 +5448,6 @@ func ClassifyIdlePane(lines []string, promptPrefix string) (bool, error) {
 // the pane over their own connection (PromptObservationLines lines) and apply
 // this same scan, so their idle boundary matches local tmux exactly.
 func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
-	prefix := strings.TrimSpace(promptPrefix)
-
 	// Check for active processing indicator in the status bar.
 	// Claude Code shows "esc to interrupt" while processing — if present,
 	// the agent is busy regardless of whether the prompt is visible.
@@ -5415,16 +5472,7 @@ func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
 	// Scan captured lines for the prompt prefix.
 	// Claude Code renders a status bar below the prompt line,
 	// so the prompt may not be the last non-empty line.
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if matchesPromptPrefix(trimmed, promptPrefix) || (prefix != "" && trimmed == prefix) {
-			return true
-		}
-	}
-	return false
+	return paneShowsReadyPrompt(lines, promptPrefix)
 }
 
 // SnapshotIdle reports whether the named session is at an idle interactive
