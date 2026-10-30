@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **Run `gc doctor --fix` in each existing gastown or gascity city after you
+  install this build.** gc now pins gastown 0.1.12 and gascity 0.1.7 (see
+  Changed) and serves only those pins from the packs it embeds. A city still
+  pinned to an earlier release, which is every city gc 1.3.0 through 1.5.1
+  made from the `gastown` or `gascity` template, does not load its config
+  until then: gc reports the import as "locked but not cached" and names the
+  fix. `gc doctor --fix` re-pins it, offline, to the release this build
+  embeds.
+
 - **Stop a split city whose storage check refuses before you deploy, and
   repair it with the new `gc`: `gc hook` now stops claiming there.** Before
   `gc hook` claims work for a session, it reads that session's drain state
@@ -580,11 +589,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   breaks the pre-commit formatter. Rebuild it with Go 1.27.3:
   `rm "$(go env GOPATH)/bin/golangci-lint" && make install-tools`.
 
-- **`gc init` pins the gastown pack to registry release 0.1.11.** Fresh
-  cities, `examples/gastown`, and the pinned-import examples in the docs now
-  use `sha:66c672b5ed00af143158b4eac960523c56b977ee`; the 0.1.10 pin
-  (`sha:33d3a430a67d`) is recorded as superseded, so `gc doctor` migrates
-  cities still pinned to it.
+- **`gc init` pins the gastown pack to registry release 0.1.12 and the
+  gascity pack to 0.1.7.** Their role prompts, workflow pages and check
+  scripts run bead commands through `gc bd` instead of raw `bd`
+  (gascity-packs `9b4df3e`, backported to gastown 0.1.12), so on a split
+  city they resolve graph steps in the city binding rather than the work
+  store. Fresh cities, `examples/gastown`, and the pinned-import examples in
+  the docs now use gastown `sha:cb6a612882b8402569c495c90ab75bb257a51bdc`
+  and gascity `sha:5bf643ca55bd20f080994cc31414ee4596015a0c`. The gastown
+  0.1.11 and 0.1.10 pins (`sha:66c672b5ed00`, `sha:33d3a430a67d`) and the
+  gascity 0.1.6 pin (`sha:3b3b89f2011e`) are recorded as superseded, so
+  `gc doctor --fix` migrates cities still pinned to them.
 
 - **A suspended rig or city is left cold.** gc no longer touches the bead
   store of a suspended rig, or of any scope of a suspended city. That covers

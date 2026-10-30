@@ -1469,6 +1469,10 @@ type tmuxStartOps struct {
 	// and RunLive drive an already-warm box and must leave it standing on
 	// failure (see Provider.Relaunch), so they set this false.
 	freshStart bool
+	// monitorClock is the time source of runSetupCommand's activity-aware
+	// budget. Nil means the real clock; tests inject a fake so the idle
+	// window is decided by what the command printed, not by host speed.
+	monitorClock execgrace.Clock
 }
 
 // newTmuxStartOps builds the startup adapter for one session, deriving the
@@ -1788,7 +1792,7 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 	if o.setupMaxTimeout > 0 {
 		idle, grace = timeout, setupCancelGrace
 	}
-	mon := execgrace.NewMonitor(ctx, idle, o.setupMaxTimeout)
+	mon := execgrace.NewMonitorWithClock(ctx, idle, o.setupMaxTimeout, o.monitorClock)
 	defer mon.Stop()
 	runCtx := mon.Context()
 	if !mon.Enabled() {
