@@ -26,6 +26,10 @@ type mcpTargetConflict struct {
 	Provider string
 	Target   string
 	Agents   []string
+	// Cause names the agent-local mcp/ directory behind the conflict when
+	// it is the implicit-agent shape (mcpAgentLocalConflictCause); ""
+	// otherwise.
+	Cause string
 }
 
 func newMCPConfigDoctorCheck(cityPath string, cfg *config.City, lookPath config.LookPathFunc) *mcpConfigDoctorCheck {
@@ -75,12 +79,16 @@ func (c *mcpSharedTargetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckRe
 	}
 	details := make([]string, 0, len(conflicts))
 	for _, conflict := range conflicts {
-		details = append(details, fmt.Sprintf(
+		detail := fmt.Sprintf(
 			"%s (%s): %s",
 			conflict.Target,
 			conflict.Provider,
 			strings.Join(conflict.Agents, ", "),
-		))
+		)
+		if conflict.Cause != "" {
+			detail += "; " + conflict.Cause
+		}
+		details = append(details, detail)
 	}
 	return &doctor.CheckResult{
 		Name:    c.Name(),
@@ -104,13 +112,32 @@ type mcpProjectionHealth struct {
 	conflicts []mcpTargetConflict
 }
 
+// claimsSharedMCPTarget reports whether a resolved view competes for a
+// provider-native target whose payload doctor compares. Every stage-1
+// claimant counts under the start gate's own rule (claimsStage1MCPTarget),
+// so an implicit provider agent with an empty catalog is a claimant exactly
+// as gc start counts it, plus the stage-2 agents that share a non-root work
+// dir. An ACP session receives its servers in-band and writes no
+// provider-native file, so it shares no target with anyone.
+func claimsSharedMCPTarget(view resolvedMCPProjection) bool {
+	if claimsStage1MCPTarget(view) {
+		return true
+	}
+	return view.Delivery == "stage2" &&
+		len(view.Catalog.Servers) > 0 &&
+		strings.TrimSpace(view.Projection.Provider) != "" &&
+		strings.TrimSpace(view.Projection.Target) != ""
+}
+
 func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath config.LookPathFunc) mcpProjectionHealth {
 	if cfg == nil || len(cfg.Agents) == 0 {
 		return mcpProjectionHealth{}
 	}
 
 	type targetState struct {
-		hashes map[string][]string
+		// hashes maps a projection hash to its member agents, in config
+		// order, so a conflict can name a representative per payload.
+		hashes map[string][]*config.Agent
 	}
 
 	targets := make(map[string]*targetState)
@@ -127,22 +154,17 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 			continue
 		}
 		skips.add(mcpAgentLabel(agent), view.Skipped)
-		// An ACP session receives its servers in-band and writes no
-		// provider-native file, so it shares no target with anyone.
-		if view.Delivery == "acp" {
-			continue
-		}
-		if len(view.Catalog.Servers) == 0 || strings.TrimSpace(view.Projection.Provider) == "" || strings.TrimSpace(view.Projection.Target) == "" {
+		if !claimsSharedMCPTarget(view) {
 			continue
 		}
 		key := view.Projection.Provider + "|" + filepath.Clean(view.Projection.Target)
 		state := targets[key]
 		if state == nil {
-			state = &targetState{hashes: make(map[string][]string)}
+			state = &targetState{hashes: make(map[string][]*config.Agent)}
 			targets[key] = state
 		}
 		hash := view.Projection.Hash()
-		state.hashes[hash] = append(state.hashes[hash], agent.QualifiedName())
+		state.hashes[hash] = append(state.hashes[hash], agent)
 	}
 
 	sort.Strings(issues)
@@ -154,16 +176,30 @@ func inspectMCPProjectionHealth(cityPath string, cfg *config.City, lookPath conf
 		}
 		parts := strings.SplitN(key, "|", 2)
 		agents := make([]string, 0, 4)
+		representatives := make([]*config.Agent, 0, len(state.hashes))
 		for _, members := range state.hashes {
-			sort.Strings(members)
-			agents = append(agents, members...)
+			sort.Slice(members, func(i, j int) bool {
+				return members[i].QualifiedName() < members[j].QualifiedName()
+			})
+			representatives = append(representatives, members[0])
+			for _, member := range members {
+				agents = append(agents, member.QualifiedName())
+			}
 		}
 		sort.Strings(agents)
-		conflicts = append(conflicts, mcpTargetConflict{
-			Provider: parts[0],
-			Target:   parts[1],
-			Agents:   agents,
-		})
+		conflict := mcpTargetConflict{Provider: parts[0], Target: parts[1], Agents: agents}
+		for i, a := range representatives {
+			for _, b := range representatives[i+1:] {
+				if cause := mcpAgentLocalConflictCause(a, b); cause != "" {
+					conflict.Cause = cause
+					break
+				}
+			}
+			if conflict.Cause != "" {
+				break
+			}
+		}
+		conflicts = append(conflicts, conflict)
 	}
 	sort.Slice(conflicts, func(i, j int) bool {
 		if conflicts[i].Target != conflicts[j].Target {

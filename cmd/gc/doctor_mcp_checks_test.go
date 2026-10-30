@@ -1,6 +1,8 @@
 package main
 
 import (
+	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -139,5 +141,56 @@ url = "https://example.com/deputy"
 	}
 	if !strings.Contains(result.Details[0], "mayor") || !strings.Contains(result.Details[0], "deputy") {
 		t.Fatalf("details = %#v, want both agents named", result.Details)
+	}
+}
+
+func TestMCPSharedTargetDoctorCheckReportsImplicitAgentLocalConflict(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	writeProjectedMCPCity(t, cityDir, `
+[workspace]
+provider = "claude"
+
+[beads]
+provider = "file"
+
+[session]
+provider = "tmux"
+
+[providers.claude]
+command = "echo"
+prompt_mode = "none"
+`, `
+name = "mayor"
+provider = "claude"
+scope = "city"
+`)
+	writeCatalogFile(t, cityDir, "agents/mayor/mcp/notes.toml", `
+name = "notes"
+command = "npx"
+`)
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	_, gateErr := buildStage1MCPTargets(cityDir, cfg, stubLookPath, io.Discard)
+	if gateErr == nil {
+		t.Fatal("buildStage1MCPTargets accepted a city whose agent-local catalog conflicts with the implicit provider agent")
+	}
+	result := newMCPSharedTargetDoctorCheck(cityDir, cfg, stubLookPath).Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true})
+	if result.Status != doctor.StatusError {
+		t.Fatalf("mcp-shared-target = %v (%q; %v), want error: gc start rejects this city", result.Status, result.Message, result.Details)
+	}
+	joined := strings.Join(result.Details, "\n")
+	for _, want := range []string{
+		"mayor",
+		`(the implicit agent for provider "claude")`,
+		filepath.Join("agents", "mayor", "mcp"),
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("details %q missing %q", joined, want)
+		}
 	}
 }

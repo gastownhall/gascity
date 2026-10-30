@@ -290,6 +290,15 @@ func heldStage1MCPKey(cityPath string, cfg *config.City, agent *config.Agent, pa
 	return managedKey(kind, scopeRoot), true
 }
 
+// claimsStage1MCPTarget reports whether a resolved view is a claimant of a
+// stage-1 target, the provider-native file at its scope root: the start
+// gate's own membership rule, shared with gc doctor so the two cannot
+// disagree. An implicit provider agent with an empty catalog claims its
+// provider's target as much as an agent with servers does.
+func claimsStage1MCPTarget(view resolvedMCPProjection) bool {
+	return view.Delivery == "stage1" && (view.Projection.Provider != "" || len(view.Catalog.Servers) > 0)
+}
+
 // mcpAgentLocalConflictCause names the agent-local mcp/ directory behind a
 // shared-target conflict when one side is the implicit agent a declared
 // provider gets at the city root and the other carries its own agent-local
@@ -351,10 +360,7 @@ func collectStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.
 		// Shared-layer servers the provider cannot receive are already out
 		// of view.Projection; say which agents start without them.
 		skips.add(mcpAgentLabel(agent), view.Skipped)
-		if view.Delivery != "stage1" {
-			continue
-		}
-		if view.Projection.Provider == "" && len(view.Catalog.Servers) == 0 {
+		if !claimsStage1MCPTarget(view) {
 			continue
 		}
 		key := view.Projection.Provider + "|" + view.Projection.Target
