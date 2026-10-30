@@ -477,6 +477,104 @@ func TestReusablePoolSessionInfo_PersistentRestartHandoffIsReusable(t *testing.T
 	}
 }
 
+// TestReusablePoolSessionInfo_RestartHandoffControlsStayRejected pins the
+// boundary of the committed-handoff admission in
+// TestReusablePoolSessionInfo_PersistentRestartHandoffIsReusable: every other
+// asleep shape of a persistent pool keeps today's answer (false), so the fix
+// admits exactly a committed handoff with no sleep reason and no assigned
+// work. These controls hold both before and after the fix; they exist to fail
+// if a future widening admits more than the handoff shape.
+func TestReusablePoolSessionInfo_RestartHandoffControlsStayRejected(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 30, 5, 0, 0, 0, time.UTC)
+	awake := session.Info{
+		ID:                  "session-restart-handoff-control",
+		Template:            "rig/worker",
+		SessionNameMetadata: "rig--worker-canonical",
+		Alias:               "rig/worker-handoff",
+		PoolManaged:         true,
+		MetadataState:       "awake",
+	}
+	handedOff := awake.ApplyPatch(restartHandoff("", true, finalizeFacts{Now: now}))
+
+	persistentAgent := &config.Agent{Name: "worker", Dir: "rig"}
+	oneShotAgent := &config.Agent{Name: "worker", Dir: "rig", Lifecycle: config.AgentLifecycleOneShot}
+	template := "rig/worker"
+
+	notHandoff := func(name string, mutate func(*session.Info)) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			row := handedOff
+			mutate(&row)
+			if got := reusablePoolSessionInfo(&agentBuildParams{}, persistentAgent, template, row, nil); got {
+				t.Fatalf("reusablePoolSessionInfo(persistent, %s) = true; want false", name)
+			}
+		})
+	}
+
+	// An asleep row with no reset markers is today's plain asleep row.
+	notHandoff("asleep without reset markers", func(row *session.Info) {
+		row.ContinuationResetPending = ""
+		row.ResetCommittedAt = ""
+	})
+	// Reset pending but never committed: no handoff to admit.
+	notHandoff("reset pending with empty reset_committed_at", func(row *session.Info) {
+		row.ResetCommittedAt = ""
+	})
+	// Reset pending with an unparseable committed marker: the reader is
+	// parse-strict, so this is no handoff either.
+	notHandoff("reset pending with non-RFC3339 reset_committed_at", func(row *session.Info) {
+		row.ResetCommittedAt = "not-a-time"
+	})
+	// A fresh-wake drain sleep: reset pending, but a sleep reason and
+	// slept_at are stamped and the reset was never committed.
+	notHandoff("fresh-wake drain sleep", func(row *session.Info) {
+		row.ResetCommittedAt = ""
+		row.SleepReason = "idle"
+		row.SleptAt = now.Format(time.RFC3339)
+	})
+	// A handoff that a later sleep stamped a reason on is no longer waiting
+	// for its fresh start.
+	notHandoff("handed off then slept", func(row *session.Info) {
+		row.SleepReason = "idle"
+		row.SleptAt = now.Format(time.RFC3339)
+	})
+
+	// A committed handoff that still holds open assigned work under any of
+	// its identities is not taken back by new or floor demand, for either
+	// lifecycle: its own resume request serves it.
+	t.Run("handed off with open assigned work", func(t *testing.T) {
+		t.Parallel()
+		bp := &agentBuildParams{assignedWorkBeads: []beads.Bead{{
+			// Claimed work is assigned under the session's actor identity
+			// (Alias — GC_ALIAS/BEADS_ACTOR), as in
+			// TestReusablePoolSessionInfo_OneShotAsleepFreeableWithOpenAssignedWorkNotReusable.
+			ID:       "work-in-progress",
+			Status:   "in_progress",
+			Assignee: handedOff.Alias,
+		}}}
+		if got := reusablePoolSessionInfo(bp, persistentAgent, template, handedOff, nil); got {
+			t.Fatalf("reusablePoolSessionInfo(persistent, asleep restart handoff with open assigned work) = true; " +
+				"want false — the any-identity assigned-work check must stay in front of every admitted asleep row")
+		}
+		if got := reusablePoolSessionInfo(bp, oneShotAgent, template, handedOff, nil); got {
+			t.Fatalf("reusablePoolSessionInfo(one_shot, asleep restart handoff with open assigned work) = true; " +
+				"want false — the any-identity assigned-work check must stay in front of every admitted asleep row")
+		}
+	})
+
+	// A row already consumed by this pass's selection is not reusable again.
+	t.Run("handed off already used", func(t *testing.T) {
+		t.Parallel()
+		used := map[string]bool{handedOff.ID: true}
+		if got := reusablePoolSessionInfo(&agentBuildParams{}, persistentAgent, template, handedOff, used); got {
+			t.Fatalf("reusablePoolSessionInfo(persistent, asleep restart handoff already in used) = true; want false")
+		}
+	})
+}
+
 func createRoutedReadyBeadForReplacement(t *testing.T, store beads.Store, template, title string) beads.Bead {
 	t.Helper()
 	b, err := store.Create(beads.Bead{
