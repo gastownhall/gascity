@@ -1928,6 +1928,22 @@ func TestProviderTerminalErrorReasonCreditBalanceTooLow(t *testing.T) {
 	}
 }
 
+// TestProviderTerminalErrorReasonSpendLimitModal pins that Claude's
+// spend-limit modal stays what it is — a rate-limit screen with a reset, not
+// a terminal error: callers check terminal before rate-limit, so a false
+// terminal hit on its "Usage credit balance" row would steal the modal's
+// recoverable stop permanently.
+func TestProviderTerminalErrorReasonSpendLimitModal(t *testing.T) {
+	t.Parallel()
+	content := "What do you want to do?\nUsage credit balance: $573.37\n❯ Adjust monthly spend limit: $1503.19\n  Wait for limit to reset      Resets Jul 12 at 11pm (America/Los_Angeles)\nEnter to confirm · Esc to cancel"
+	if got := ProviderTerminalErrorReason(content); got != "" {
+		t.Errorf("ProviderTerminalErrorReason(spend limit modal) = %q, want %q", got, "")
+	}
+	if !ContainsProviderRateLimitScreen(content) {
+		t.Error("ContainsProviderRateLimitScreen(spend limit modal) = false, want true")
+	}
+}
+
 func TestContainsCustomAPIKeyDialog(t *testing.T) {
 	t.Parallel()
 
