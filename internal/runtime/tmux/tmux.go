@@ -5286,7 +5286,10 @@ func stripLeadingBoxBorder(s string) string {
 }
 
 // WaitForRuntimeReady polls until the agent runtime's ready prompt appears in
-// the pane. Falls back to a fixed delay when prompt detection is unavailable.
+// the pane: the bottom-most line matching the ready-prompt prefix, unless it is
+// a numbered menu's cursor row (paneShowsReadyPrompt), so a start dialog still
+// waiting for an answer is not ready. Falls back to a fixed delay when prompt
+// detection is unavailable.
 func (t *Tmux) WaitForRuntimeReady(ctx context.Context, session string, rc *RuntimeConfig, timeout time.Duration) error {
 	if rc == nil || rc.Tmux == nil {
 		return nil
@@ -5337,11 +5340,8 @@ func (t *Tmux) WaitForRuntimeReady(ctx context.Context, session string, rc *Runt
 			}
 			continue
 		}
-		// Look for runtime prompt indicator at start of line
-		for _, line := range lines {
-			if matchesPromptPrefix(line, rc.Tmux.ReadyPromptPrefix) {
-				return nil
-			}
+		if paneShowsReadyPrompt(lines, rc.Tmux.ReadyPromptPrefix) {
+			return nil
 		}
 		select {
 		case <-ctx.Done():
@@ -5440,8 +5440,9 @@ func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, e
 // ClassifyIdlePane classifies captured pane lines the way every pane-scanning
 // idle check does: a busy-indicator string anywhere in lines is the busy
 // reading, (false, nil); a ready prompt (PaneShowsIdlePrompt) is idle,
-// (true, nil); anything else returns [runtime.ErrIdleIndeterminate], since a
-// pane showing neither is not evidence of work. The tmux idle wait and its
+// (true, nil); anything else, including a numbered menu waiting for a choice,
+// returns [runtime.ErrIdleIndeterminate], since a pane showing neither is not
+// evidence of work. The tmux idle wait and its
 // exec twin both classify each capture through it.
 func ClassifyIdlePane(lines []string, promptPrefix string) (bool, error) {
 	if paneContainsBusyIndicator(lines) {
@@ -5455,7 +5456,11 @@ func ClassifyIdlePane(lines []string, promptPrefix string) (bool, error) {
 
 // PaneShowsIdlePrompt is the pure scan behind tmux idle detection: it reports
 // whether captured pane lines show promptPrefix with no active-processing
-// indicator. It does not substitute a default for a blank promptPrefix;
+// indicator. The bottom-most line matching promptPrefix is the live composer;
+// when it is a numbered menu's cursor row ("› 1. Trust and continue" above
+// "  2. Quit") the pane waits for a choice, not input, and is not idle: keys
+// typed into it are menu input and Enter picks the highlighted option. See
+// runtime.isNumberedMenuRow for the dialog layer's rule. It does not substitute a default for a blank promptPrefix;
 // callers resolve the prefix first (DefaultReadyPromptPrefix when the session
 // configures none).
 //
