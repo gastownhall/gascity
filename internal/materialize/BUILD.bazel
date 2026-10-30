@@ -38,6 +38,7 @@ go_test(
         "mcp_project_test.go",
         "mcp_read_test.go",
         "mcp_test.go",
+        "skill_name_test.go",
         "skills_test.go",
         "testenv_import_test.go",
     ],

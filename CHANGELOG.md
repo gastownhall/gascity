@@ -653,6 +653,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The skills appendix names the SKILL.md name of an imported skill.** An
+  imported pack's skill is listed under its binding-qualified name (for
+  example `core.gc-work`), but its materialized `SKILL.md` keeps the pack's
+  own `name:` (`gc-work`), and opencode 1.x registers skills by that name
+  only, so a model that asked for the listed name got "skill not found"
+  (#8501). The "Skills available to this session" bullet now also shows the
+  `SKILL.md` name when it differs:
+  `` `core.gc-work` (SKILL.md name: `gc-work`) ``. Skill naming,
+  materialization and the binding-qualified name are unchanged.
+
 - **`gc prime --strict` fails on a `prompt_template` that does not render.**
   A `.template.md` (or `.md.tmpl`) prompt_template that failed to parse or
   execute, such as one calling an undefined function `{{base_branch}}`, was
