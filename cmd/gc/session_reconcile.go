@@ -397,8 +397,8 @@ func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
 // matches first, then config.FindAgent's rig-stamped copy of a generic
 // scope="rig" agent, which is how session.FindNamedSessionSpec backs each
 // rig's named session. That copy is not an element of cfg.Agents, so
-// callers only read it. The config-drift checks use this helper; other
-// callers keep findAgentByTemplate.
+// callers only read it. The config-drift checks and the v2 template memo's
+// row filter use this helper; other callers keep findAgentByTemplate.
 func findSessionAgentByTemplate(cfg *config.City, template string) *config.Agent {
 	if a := findAgentByTemplate(cfg, template); a != nil {
 		return a
