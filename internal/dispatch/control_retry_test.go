@@ -137,6 +137,13 @@ func TestClassifyControllerErrorTiers(t *testing.T) {
 		// unreachable must never burn the bounded budget. Order-independence is
 		// pinned separately by TestAvailabilityTierWinsRegardlessOfTableOrder.
 		{name: "refusal during an outage", err: errors.New("cannot close blocked issue: x is blocked by [y]: bad connection"), want: TierAvailability},
+		// A stop (a drain, a SIGTERM) that cuts a bd read short makes it exit
+		// "context canceled" with no typed cause: the command never finished,
+		// so it never answered, the same reasoning as "timed out after".
+		{name: "stop-canceled finalizer outcome read", err: errors.New("gcg-1: resolving workflow outcome: bd list both tiers: bd query: bd query (wisps): exit status 1: search count wisps: context canceled"), want: TierAvailability},
+		{name: "wrapped context canceled", err: fmt.Errorf("gc-1: closing source bead chain: %w", context.Canceled), want: TierAvailability},
+		{name: "typed canceled without the text", err: opaqueCanceledErr{"source workflow lock abandoned"}, want: TierAvailability},
+		{name: "operator canceled is not a canceled read", err: errors.New("workflow gc-1 canceled by operator"), want: TierNone},
 	}
 
 	for _, tt := range tests {
@@ -579,5 +586,35 @@ func TestClassifyControllerErrorTreatsExhaustedMetadataMergeAsTransient(t *testi
 	// carries the classification.
 	if got := ClassifyControllerError(fmt.Errorf("%w: expected 7, got 8", beadslib.ErrVersionMismatch)); got != TierNone {
 		t.Fatalf("ClassifyControllerError(bare version mismatch) = %v, want %v", got, TierNone)
+	}
+}
+
+// opaqueCanceledErr carries context.Canceled behind a message that names none
+// of the classifier's text, so a row pins the typed check alone.
+type opaqueCanceledErr struct{ msg string }
+
+func (e opaqueCanceledErr) Error() string { return e.msg }
+func (e opaqueCanceledErr) Unwrap() error { return context.Canceled }
+
+// TestClassifyControllerErrorStopCanceledStoreRead pins ga-5p9c6t: a bd read
+// cut short by a stop (context canceled) never answered, so it must be Tier A,
+// not a hard quarantine.
+func TestClassifyControllerErrorStopCanceledStoreRead(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "observed finalizer read", err: errors.New("gcg-x: resolving workflow outcome: bd list both tiers: bd query: bd query (wisps): exit status 1: search count wisps: context canceled")},
+		{name: "wrapped context canceled", err: fmt.Errorf("waiting on source workflow lock: %w", context.Canceled)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ClassifyControllerError(tt.err); got != TierAvailability {
+				t.Fatalf("ClassifyControllerError(%v) = %v, want %v", tt.err, got, TierAvailability)
+			}
+		})
 	}
 }
