@@ -124,6 +124,7 @@ go_test(
         "pull_test.go",
         "recover_host_test.go",
         "requires_backend_test.go",
+        "restart_fsync_stall_test.go",
         "restart_test.go",
         "runtime_bounded_test.go",
         "sql_test.go",
@@ -139,6 +140,7 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
+        "//examples/bd:assets/scripts/dolt-fsync-stall.sh",
         "//internal/bootstrap/packs/core:pack_files",
     ] + select({
         "//:gotags_integration": [

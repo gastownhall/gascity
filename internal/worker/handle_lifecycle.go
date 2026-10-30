@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // Start ensures the worker exists and its runtime is live.
@@ -772,20 +774,7 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if firstProviderSessionStart(info.State, pr.Metadata) &&
 		h.session.Resume.SessionIDFlag != "" &&
 		strings.TrimSpace(info.SessionKey) != "" {
-		command := strings.TrimSpace(info.Command)
-		if command == "" {
-			command = strings.TrimSpace(h.session.Command)
-		}
-		if command == "" {
-			command = strings.TrimSpace(info.Provider)
-		}
-		if command == "" {
-			command = strings.TrimSpace(h.session.Provider)
-		}
-		if command == "" {
-			return "", fmt.Errorf("%w: command is required for first start", ErrHandleConfig)
-		}
-		return command + " " + h.session.Resume.SessionIDFlag + " " + info.SessionKey, nil
+		return startCommandWithSessionID(info, h.session)
 	}
 	resumeInfo := info
 	if command := strings.TrimSpace(h.session.Command); command != "" {
@@ -803,7 +792,36 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if resumeCommand := strings.TrimSpace(h.session.Resume.ResumeCommand); resumeCommand != "" {
 		resumeInfo.ResumeCommand = resumeCommand
 	}
+	isClaude := strings.Contains(strings.ToLower(strings.TrimSpace(resumeInfo.Provider)), "claude")
+	probePaths := h.searchPaths
+	if len(probePaths) == 0 || !isClaude {
+		probePaths = DefaultSearchPaths()
+	}
+	if dir := strings.TrimSpace(h.session.Env["CLAUDE_CONFIG_DIR"]); isClaude && filepath.IsAbs(dir) {
+		probePaths = MergeSearchPaths(append(append([]string(nil), probePaths...), filepath.Join(dir, "projects")))
+	}
+	present, probeable := workertranscript.HasKeyedTranscript(probePaths, resumeInfo.Provider, resumeInfo.WorkDir, resumeInfo.SessionKey)
+	if probeable && !present && h.session.Resume.SessionIDFlag != "" {
+		return startCommandWithSessionID(resumeInfo, h.session)
+	}
 	return sessionpkg.BuildResumeCommand(resumeInfo), nil
+}
+
+func startCommandWithSessionID(info sessionpkg.Info, spec SessionSpec) (string, error) {
+	command := strings.TrimSpace(info.Command)
+	if command == "" {
+		command = strings.TrimSpace(spec.Command)
+	}
+	if command == "" {
+		command = strings.TrimSpace(info.Provider)
+	}
+	if command == "" {
+		command = strings.TrimSpace(spec.Provider)
+	}
+	if command == "" {
+		return "", fmt.Errorf("%w: command is required to start session", ErrHandleConfig)
+	}
+	return command + " " + spec.Resume.SessionIDFlag + " " + info.SessionKey, nil
 }
 
 func firstProviderSessionStart(state sessionpkg.State, metadata map[string]string) bool {

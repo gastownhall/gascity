@@ -33,9 +33,10 @@ var ErrSessionInitializing = errors.New("session is initializing")
 var ErrInteractionUnsupported = errors.New("session interaction is unsupported")
 
 // ErrPendingInteraction reports that a session is showing a blocking
-// interaction (for example a tool permission prompt) that must be answered
-// before any text is delivered to it. Typing into such a prompt can select
-// one of its options, so providers refuse the delivery instead.
+// interaction (a tool permission prompt or an AskUserQuestion question
+// dialog) that must be answered before any text is delivered to it. Typing
+// into such a prompt can select one of its options, so providers refuse the
+// delivery instead.
 var ErrPendingInteraction = errors.New("session has a pending interaction")
 
 // ErrInputClearSkipped reports that a runtime left a session's input box

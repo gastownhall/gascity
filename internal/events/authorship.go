@@ -282,6 +282,8 @@ var builtinAuthorship = map[string]Authorship{
 	StorageBindingUnconverged:       AuthorController,
 	StorageBindingUncheckable:       AuthorController,
 	StorageBindingNotConfigured:     AuthorController,
+	StorageRigImport:                AuthorController,
+	StorageRigResidue:               AuthorController,
 }
 
 func init() {

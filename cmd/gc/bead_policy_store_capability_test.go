@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -334,5 +337,75 @@ func TestBeadPolicyStoreReportsNoGuardedBatcherOverAnIncapableBacking(t *testing
 	wrapped := wrapStoreWithBeadPolicies(storeWithoutBatchedDepRead{Store: beads.NewMemStore()}, &config.City{})
 	if batcher, ok := beads.GuardedBatcherFor(wrapped); ok {
 		t.Fatalf("GuardedBatcherFor = (%T, true) over a backing with no guarded batches", batcher)
+	}
+}
+
+// TestEveryLegShapeReadsByIDThroughTheEnginesExactBatch: beads.GetMany reads
+// every cross-store verdict by id through the leg's LIVE handle, and on a
+// controller leg (the policy over a CachingStore over bd or native Dolt) that
+// handle used to reach no exact batch read, so GetMany took a listing by id,
+// which both engines can only answer by walking the whole ledger (#8360
+// review, iteration 2). Every shape a leg has — the controller's, the CLI's
+// policy over the bare engine, the controller binding's cache, the one-shot
+// emitter — must reach the engine's own batch read and answer what it holds.
+func TestEveryLegShapeReadsByIDThroughTheEnginesExactBatch(t *testing.T) {
+	bdRows := map[string]string{"gc-1": `{"id":"gc-1","title":"one","status":"open","issue_type":"task"}`}
+	var bdCalls []string
+	bd := beads.NewBdStore(t.TempDir(), func(_, name string, args ...string) ([]byte, error) {
+		call := name + " " + strings.Join(args, " ")
+		bdCalls = append(bdCalls, call)
+		if len(args) < 2 || args[0] != "show" || args[1] != "--json" {
+			return nil, fmt.Errorf("unexpected command: %s", call)
+		}
+		var rows []string
+		for _, id := range args[2:] {
+			if row, ok := bdRows[id]; ok {
+				rows = append(rows, row)
+			}
+		}
+		return []byte("[" + strings.Join(rows, ",") + "]"), nil
+	})
+	native := splittest.NewNativeWorkStore(t, "gc")
+	held, err := native.Create(beads.Bead{Title: "held", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Workspace: config.Workspace{Name: "gc", Prefix: "gc"}}
+	for _, engine := range []struct {
+		name  string
+		store beads.Store
+		id    string
+	}{
+		{"bd", bd, "gc-1"},
+		{"native", native, held.ID},
+	} {
+		for _, shape := range []struct {
+			name  string
+			store beads.Store
+		}{
+			{"policy over cache (controller leg)", wrapStoreWithBeadPolicies(beads.NewCachingStoreForTest(engine.store, nil), cfg)},
+			{"policy (CLI leg)", wrapStoreWithBeadPolicies(engine.store, cfg)},
+			{"cache (controller binding)", beads.NewCachingStoreForTest(engine.store, nil)},
+			{"emitter (CLI binding)", &emittingClassStore{Store: engine.store, cityPath: t.TempDir()}},
+		} {
+			getter, ok := beads.HandlesFor(shape.store).Live.(beads.ExactBatchGetter)
+			if !ok {
+				t.Errorf("%s over %s: the live handle reaches no exact batch read; GetMany reads it one Get per id", shape.name, engine.name)
+				continue
+			}
+			found, unresolved, err := getter.GetExactBatch([]string{engine.id, "gc-absent"})
+			if err != nil {
+				t.Errorf("%s over %s: GetExactBatch: %v", shape.name, engine.name, err)
+				continue
+			}
+			if _, ok := found[engine.id]; !ok || !slices.Equal(unresolved, []string{"gc-absent"}) {
+				t.Errorf("%s over %s: GetExactBatch = %v, unresolved %v; want %s found and gc-absent unresolved", shape.name, engine.name, found, unresolved, engine.id)
+			}
+		}
+	}
+	for _, call := range bdCalls {
+		if !strings.HasPrefix(call, "bd show --json ") {
+			t.Errorf("a by-id read ran %q against bd; want only bd show", call)
+		}
 	}
 }

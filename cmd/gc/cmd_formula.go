@@ -667,11 +667,11 @@ the same lock, so the pairs of the last cook to take the lock are the
 ones that stay.
 
 On a city that serves the graph class from its own [storage] binding, most
-of --attach in CITY scope is NOT SUPPORTED YET and refuses rather than
-serving. A graft is graph class whatever the formula's version — every bead
-it creates carries gc.root_bead_id — so the sub-DAG belongs in the binding
-while the blocking dependency belongs beside the attach bead, and a split
-city cannot have both:
+of --attach is NOT SUPPORTED YET, in city and rig scope alike, and refuses
+rather than serving. A graft is graph class whatever the formula's version —
+every bead it creates carries gc.root_bead_id — so the sub-DAG belongs in
+the binding while the blocking dependency belongs beside the attach bead,
+and a split city cannot have both:
 
   * attach bead in the city's WORK ledger — refused. Writing the sub-DAG
     beside it strands graph-class beads in the work store, which gc storage
@@ -685,13 +685,19 @@ city cannot have both:
     would be cross-class. Same remedy: ga-2orlf.
   * attach bead in the BINDING, v1 formula — served. The sub-DAG and its
     blocking dependency are both written to the binding.
-  * RIG scope (--rig, GC_RIG, or a cwd inside a rig) — served, unchanged.
-    A relocation moves city-level stores only, so a rig's ledger holds both
-    ends of the graft and nothing it writes can be stranded.
+  * attach bead in a RIG's own store (RIG scope: --rig, GC_RIG, or a cwd
+    inside a rig) — refused for a work bead, for the city work ledger's
+    reason: every graph bead of every rig lives in the binding, so a rig's
+    own store holds only work. Launch the formula against the bead with
+    gc sling <target> <bead> --on <formula> instead. The one graft served
+    there is a v1 formula onto a graph bead of a tree created before the
+    rig's graph beads moved to the binding, which extends that tree where
+    it lives; a v2 formula is refused, because it starts a new workflow
+    root in the binding and its attach edge would cross stores.
 
 Single-store cities are unaffected: --attach behaves exactly as it always
-has. If an earlier cook already stranded beads in a split city's work
-store, copy them into the binding with
+has, in every scope. If an earlier cook already stranded beads in a split
+city's work store, copy them into the binding with
 ` + storageRecoveryInstruction() + `.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -726,11 +732,11 @@ store, copy them into the binding with
 			// The --attach arms do not use this: a graft follows its PARENT,
 			// not its class, so they route by the attach bead's id instead —
 			// see attachStore below. Following the parent is only sound when
-			// the parent's store may hold graph-class beads, which in a split
-			// city's CITY scope means the binding; attachGraftClassRefusal is
-			// the gate that keeps the two rules from contradicting each other,
-			// and it asks the scope question first because a rig store holds
-			// its own graph-class beads and the relocation never moves it.
+			// the parent's store may hold graph-class beads, which on a split
+			// city means the binding at every scope (the S4 placement rule),
+			// or a rig store still holding a pre-S4 tree;
+			// attachGraftClassRefusal is the gate that keeps the two rules
+			// from contradicting each other.
 			graphStore := resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 
 			cookVars := parseFormulaVars(vars)
@@ -782,9 +788,10 @@ store, copy them into the binding with
 				// ledger, which is a stranded write. Neither placement is
 				// expressible on a split city, so the graft is refused before
 				// either arm runs — see formula_cook_attach_class.go, ga-99xhy.
-				// The scope root travels with the store because relocation is a
-				// CITY-scope property: a rig store is never relocated, so a
-				// rig-scoped graft is co-resident and stays served.
+				// The scope root travels with the store because a rig scope has
+				// one more served shape than the city: a graft onto a graph node
+				// of a tree the rig minted before S4 follows that tree in the
+				// rig's store until the rig is imported.
 				if err := attachGraftClassRefusal(cityPath, scope.storeRoot, attach, store, attachStore); err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 				}
@@ -832,12 +839,20 @@ store, copy them into the binding with
 							"--attach %s: %s is owned by the relocated class binding, and a graph.v2 formula's synthetic input convoy is a work bead — it can live neither there (a work-class bead in the infra ledger) nor in the work ledger (its `tracks` edge to %s would be cross-class, which convoy.TrackItemIn refuses); grafting a graph.v2 formula onto a class-owned bead needs a cross-class membership edge: ga-2orlf. A v1 formula attaches to %s today",
 							attach, attach, attach, attach))
 					}
-					// Past both refusals — this one, and the class gate above
-					// that rejects a work-resident attach bead on a split city —
-					// only a single-store city reaches here. attachStore IS
-					// store, this arm runs on the one store it always did, and
-					// its execution-fact legs are the same value: the root, its
-					// steps and the input convoy are all minted here.
+					// A rig-resident attach bead that passed the class gate is a
+					// graph node of a pre-S4 rig tree. A graph.v2 pour is a NEW
+					// root, which the placement rule puts in the binding, so its
+					// attach edge would cross stores: refused, naming the v1 arm
+					// that extends the tree in place.
+					placement := graphPlacementForScope(cliStorageRoutes(cityPath), cfg, cityPath, formulaCookGraphScope(scope), store)
+					if placement != store {
+						return formulaCommandError(stderr, "gc formula cook", jsonOutput, rigAttachGraphV2Refusal(attach))
+					}
+					// Past all three refusals only a single-store city reaches
+					// here, so the placement store IS store: this arm runs on the
+					// one store it always did, and its execution-fact legs are
+					// the same value — the root, its steps and the input convoy
+					// are all minted here.
 					storeRef := workflowStoreRefForDir(scope.storeRoot, cityPath, loadedCityName(cfg, cityPath), cfg)
 					var result *molecule.Result
 					var syntheticInputConvoyID string
@@ -904,7 +919,7 @@ store, copy them into the binding with
 						if err != nil {
 							return fmt.Errorf("attach bead %s: %w", attach, err)
 						}
-						result, err = molecule.Instantiate(cmd.Context(), store, recipe, molecule.Options{
+						result, err = molecule.Instantiate(cmd.Context(), placement, recipe, molecule.Options{
 							Title:            title,
 							Vars:             cookVars,
 							IdempotencyKey:   graphRootKey,
@@ -1438,6 +1453,14 @@ type formulaScope struct {
 	// rig is the resolved rig name ("" for city scope). Rig-scoped formula
 	// steps need this context to resolve bare rig-scoped targets during cook.
 	rig string
+}
+
+// formulaCookGraphScope names the graph scope a formula invocation runs in.
+func formulaCookGraphScope(scope formulaScope) graphScope {
+	if scope.rig != "" {
+		return rigGraphScope(scope.rig)
+	}
+	return cityGraphScope()
 }
 
 // resolveFormulaScope determines the rig (if any) under which a formula

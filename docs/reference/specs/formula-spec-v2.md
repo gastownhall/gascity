@@ -683,14 +683,18 @@ the attach bead, and one store cannot hold both:
 | Scope | Attach bead lives in | Formula | Outcome |
 |---|---|---|---|
 | city | the city's work ledger | v1 or v2 | refused: the sub-DAG would be stranded in the work ledger, or the work store would keep a `blocks` row naming an id it cannot resolve |
-| city | the binding | v2 | refused: the invocation mints a work-class input convoy, whose `tracks` edge to a binding-owned target is cross-class |
-| city | the binding | v1 | served: the sub-DAG and its blocking dependency are both written to the binding |
-| rig | that rig's own store | v1 or v2 | served, unaffected: relocation is a city-scope property, so a rig's ledger holds both ends of the graft |
+| city or rig | the binding | v2 | refused: the invocation mints a work-class input convoy, whose `tracks` edge to a binding-owned target is cross-class |
+| city or rig | the binding | v1 | served: the sub-DAG and its blocking dependency are both written to the binding |
+| rig | that rig's own store, as a work bead | v1 or v2 | refused: a rig's own store holds only work, so the graft fails as it does in the city's work ledger; `gc sling <target> <bead> --on <formula>` launches the formula against the bead instead |
+| rig | that rig's own store, as a graph bead of an older tree | v1 | served: the graft extends that tree where it lives |
+| rig | that rig's own store, as a graph bead of an older tree | v2 | refused: the invocation starts a new workflow root, which is created in the binding, so its attach edge would cross stores |
 
-Relocation applies to the CITY scope only: the migration copies the city work
-store alone and the class routes hold one city-level store per class, so a
-rig scope — `--rig`, `GC_RIG`, or a cwd inside a rig — keeps serving
-`--attach` exactly as it always has, and nothing it writes is stranded.
+A rig scope — `--rig`, `GC_RIG`, or a cwd inside a rig — follows the same
+placement rule as the city: every rig's graph beads live in the binding,
+recorded with the rig as their scope (`gc.root_store_ref`), so a rig's own
+store holds only work. An older tree, one the rig created before its graph
+beads moved to the binding, stays in the rig's own store, and a v1 graft onto
+one of its beads extends it there.
 
 Both refusals are lifted by the same missing mechanism, a cross-class
 membership edge (`ga-2orlf`). Cities that author no `[storage]` section are
