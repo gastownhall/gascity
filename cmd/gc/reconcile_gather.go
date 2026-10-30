@@ -619,7 +619,7 @@ func (m *gatherMemo) refresh(e gatherEnv, env *reconcileEnv, now time.Time, rows
 	next := make(map[templateMemoKey]templateResolution, len(rows))
 	missed := false
 	for _, row := range rows {
-		if mislabelled[row.Key] || findAgentByTemplate(env.Cfg, resolvedSessionTemplateInfo(row.Info, env.Cfg)) == nil {
+		if mislabelled[row.Key] || findSessionAgentByTemplate(env.Cfg, resolvedSessionTemplateInfo(row.Info, env.Cfg)) == nil {
 			continue
 		}
 		k := templateMemoKeyOf(row.Info)

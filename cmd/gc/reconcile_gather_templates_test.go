@@ -521,6 +521,73 @@ func TestTemplateResolverResolvesFromTheRowAlone(t *testing.T) {
 	}
 }
 
+// Kills a gather filter that drops a configured named row backed by a
+// generic scope="rig" agent. findAgentByTemplate matches no configured agent
+// for that row's rig-stamped template, the copy config.FindAgent synthesizes,
+// so the row got no memo entry: v2 refused its start as an unresolved
+// template and never saw its config drift. A named row of every backing shape
+// resolves through its named spec, an operator env change restarts it in
+// place, and unchanged config proposes no drift.
+func TestGatherResolvesNamedRowsOfEveryBackingShape(t *testing.T) {
+	withoutA7(t)
+	driftReasons := []string{decideDriftAttached, decideDriftPinned, decideDriftResolved, decideDrainBegin + drainConfigDrift, decideDriftRepair, decideLiveApply, decideDriftRestart, decideDriftRelaunch}
+	for _, shape := range namedEnvDriftShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			cityPath, rigPath := t.TempDir(), t.TempDir()
+			cfg := namedEnvDriftCity(shape, rigPath, "always", "v2")
+			named := []string{
+				"template", shape.identity, "agent_name", shape.identity,
+				"session_name", config.NamedSessionRuntimeName("test-city", cfg.Workspace, shape.identity),
+				namedSessionMetadataKey, "true", namedSessionIdentityMetadata, shape.identity, namedSessionModeMetadata, "always",
+			}
+			resolver := func(env *reconcileEnv, now time.Time) templateResolver {
+				return newTemplateResolver(newAgentBuildParams("test-city", cityPath, env.Cfg, env.SP, now, beads.NewMemStore(), io.Discard))
+			}
+			info := censusRowOf(t, drainRow(named...)).Info
+			hashUnder := func(cfg *config.City) string {
+				t.Helper()
+				res := resolver(&reconcileEnv{Cfg: cfg, SP: runtime.NewFake()}, gatherNow).Resolve(info)
+				if res.Err != nil {
+					t.Fatalf("resolving %s: %v", shape.identity, res.Err)
+				}
+				return runtime.CoreFingerprint(sessionCoreConfigForHashInfo(res.TP, info))
+			}
+			current, started := hashUnder(cfg), hashUnder(namedEnvDriftCity(shape, rigPath, "always", "v1"))
+			if started == current {
+				t.Fatalf("operator env change did not move the core fingerprint (%s)", current)
+			}
+			for _, tc := range []struct {
+				name, stored string
+				drifts       bool
+			}{
+				{name: "operator env changed", stored: started, drifts: true},
+				{name: "config unchanged", stored: current},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					it, _ := decideDrain(t, append(slices.Clone(named), "started_config_hash", tc.stored), func(e *selectionEntry) {
+						e.InDesired, e.Desired = true, desireKeep
+					}, func(w *World) {
+						env := &reconcileEnv{Gen: 1, Cfg: cfg, SP: struct{ runtime.Provider }{runtime.NewFake()}} // no Relaunch
+						var memo gatherMemo
+						memo.refresh(gatherEnv{Templates: resolver, LookPath: func(name string) (string, error) { return "/bin/" + name, nil }}, env, gatherNow, w.Census.Canonical(), w.Mislabelled)
+						w.Env, w.Templates = env, memo.templates.Load()
+						w.Observed = map[rowKey]rowObservation{rowKeyOf("gc-1"): {Liveness: livenessAlive}}
+						if _, core, ok := w.coreHash(w.Census.Rows[rowKeyOf("gc-1")].Info); !ok || core != current {
+							t.Fatalf("memo core hash %q (resolved %v), want the row resolved through its named spec to %q", core, ok, current)
+						}
+					})
+					switch {
+					case tc.drifts && (it.Kind != intentDriftRestart || it.Reason != decideDriftRestart):
+						t.Fatalf("decideRow = (%q, %q), want the named row restarted in place (%q, %q)", it.Kind, it.Reason, intentDriftRestart, decideDriftRestart)
+					case !tc.drifts && slices.Contains(driftReasons, it.Reason):
+						t.Fatalf("decideRow = (%q, %q), want no drift for unchanged config", it.Kind, it.Reason)
+					}
+				})
+			}
+		})
+	}
+}
+
 // countingReadStore counts the store's reads.
 type countingReadStore struct {
 	beads.Store

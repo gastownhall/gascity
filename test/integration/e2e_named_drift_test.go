@@ -154,8 +154,11 @@ mode = "on_demand"
 }
 
 // writeNamedDriftCityToml writes city.toml, pinned to the legacy session
-// reconciler, with the stub provider's CUSTOM_DRIFT env set to value. The stub
-// runs e2e-report.sh under bash, which the provider's process_names match.
+// reconciler, with the stub provider's CUSTOM_DRIFT env set to value. The pin
+// states what this file-beads city runs anyway: v2 refuses to boot on a file
+// store (C0.7), so cmd/gc's TestGatherResolvesNamedRowsOfEveryBackingShape
+// covers v2's drift restart. The stub runs e2e-report.sh under bash, which
+// the provider's process_names match.
 func writeNamedDriftCityToml(t *testing.T, cityDir, cityName, value string) {
 	t.Helper()
 

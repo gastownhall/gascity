@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -15254,6 +15255,102 @@ func TestReconcileSessionBeads_GenericRigNamedSessionUnchangedConfigNoDrift(t *t
 				t.Fatalf("Stop calls = %d, want 0 for unchanged config", got)
 			}
 		})
+	}
+}
+
+// setupStubProviderNamedSession creates a preserved named session for shape
+// whose agent runs a stub provider binary instead of a start command, so
+// removing the binary fails the session's template resolution while its
+// config stays unchanged. Its started_config_hash is the drift gate's hash
+// with the binary present, and an alive session's runtime is started. It
+// returns the session bead, its runtime name and the binary's path.
+func setupStubProviderNamedSession(t *testing.T, env *reconcilerTestEnv, shape namedEnvDriftShape, alive bool) (beads.Bead, string, string) {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "stub-agent")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("writing stub provider: %v", err)
+	}
+	env.cfg = namedEnvDriftCity(shape, t.TempDir(), "on_demand", "v1")
+	env.cfg.Agents[0].StartCommand = ""
+	env.cfg.Agents[0].Provider = "stub"
+	env.cfg.Providers = map[string]config.ProviderSpec{"stub": {Command: bin, PromptMode: "none"}}
+
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, shape.identity)
+	session := env.createSessionBead(sessionName, shape.identity)
+	if alive {
+		env.markSessionActive(&session)
+	}
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: shape.identity,
+		namedSessionModeMetadata:     "on_demand",
+		"session_key":                "warm-conversation",
+	})
+	tp := namedEnvDriftTemplate(t, env, env.cfg, shape.identity, session.ID)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(sessionCoreConfigForHashInfo(tp, env.sessionInfo(session.ID))),
+	})
+	if alive {
+		if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: tp.Command}); err != nil {
+			t.Fatalf("Start(%s): %v", sessionName, err)
+		}
+	}
+	return session, sessionName, bin
+}
+
+// A template resolution that fails for a while with config unchanged (the
+// provider binary briefly missing) leaves a preserved named session with no
+// params on those ticks. Hashing the empty params reads as drift, so neither
+// drift check runs until the template resolves again: the alive check would
+// restart the session, and the asleep repair would reset its conversation.
+func TestReconcileSessionBeads_UnresolvedNamedSessionTemplateIsNoConfigDrift(t *testing.T) {
+	for _, shape := range namedEnvDriftShapes {
+		for _, alive := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/alive=%t", shape.name, alive), func(t *testing.T) {
+				env := newReconcilerTestEnv(t)
+				session, sessionName, bin := setupStubProviderNamedSession(t, env, shape, alive)
+				stored := session.Metadata["started_config_hash"]
+				tick := func() {
+					t.Helper()
+					current, err := env.store.Get(session.ID)
+					if err != nil {
+						t.Fatalf("Get(%s): %v", session.ID, err)
+					}
+					env.reconcile([]beads.Bead{current})
+				}
+
+				tick()
+				if strings.Contains(env.stderr.String(), "config-drift") {
+					t.Fatalf("config-drift with the provider present and config unchanged; stderr=%s", env.stderr.String())
+				}
+				if err := os.Remove(bin); err != nil {
+					t.Fatalf("removing stub provider: %v", err)
+				}
+				// Five minutes apart, past every named-session drift deferral.
+				for range 3 {
+					env.clk.Advance(5 * time.Minute)
+					tick()
+				}
+
+				stderr := env.stderr.String()
+				if want := "resolve preserved named session " + sessionName + ": "; !strings.Contains(stderr, want) {
+					t.Fatalf("stderr missing %q, the resolution failure under test; stderr=%s", want, stderr)
+				}
+				if strings.Contains(stderr, "config-drift") {
+					t.Fatalf("an unresolved template read as config drift; stderr=%s", stderr)
+				}
+				got, err := env.store.Get(session.ID)
+				if err != nil {
+					t.Fatalf("Get(%s): %v", session.ID, err)
+				}
+				if got.Metadata["started_config_hash"] != stored || got.Metadata["continuation_reset_pending"] != "" {
+					t.Fatalf("started_config_hash = %q, continuation_reset_pending = %q; want %q and unset (no drift repair)", got.Metadata["started_config_hash"], got.Metadata["continuation_reset_pending"], stored)
+				}
+				if stops := env.sp.CountCalls("Stop", sessionName); stops != 0 {
+					t.Fatalf("Stop calls = %d, want 0: the config never changed", stops)
+				}
+			})
+		}
 	}
 }
 

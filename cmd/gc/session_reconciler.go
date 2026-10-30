@@ -3924,7 +3924,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		driftRestartedInPlace := false
 		// Config drift: if alive and config changed, drain for restart.
 		// Live-only drift: re-apply session_live without restart.
-		if alive {
+		// Both drift checks hash tp, so they run only on a desired session.
+		// The one undesired row that reaches here is a preserved named
+		// session whose template did not resolve this tick (preserveErr
+		// above): its tp is zero, and hashing that would read as drift and
+		// restart or reset a session whose config never changed.
+		if alive && desired {
 			template := tp.TemplateName
 			if template == "" {
 				template = normalizedSessionTemplateInfo(infoByID[id], cfg)
@@ -4266,7 +4271,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		infoAsleepDrift := infoByID[id]
 		skipAsleepDriftRepair := driftRestartedInPlace ||
 			pendingResumePreservingNamedRestartInfo(infoAsleepDrift, clk, startupTimeout)
-		if !alive && isNamedSessionInfo(infoByID[id]) && !skipAsleepDriftRepair {
+		if !alive && desired && isNamedSessionInfo(infoByID[id]) && !skipAsleepDriftRepair {
 			template := tp.TemplateName
 			if template == "" {
 				template = normalizedSessionTemplateInfo(infoByID[id], cfg)
