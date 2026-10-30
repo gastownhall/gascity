@@ -353,7 +353,13 @@ const (
 	// copied into a binding with the name of the binding it came from, so a
 	// resumed attempt can tell a row it wrote from content the destination
 	// already owned.
-	InfraMigratedFromMetadataKey   = "gc.infra_migrated_from"
+	InfraMigratedFromMetadataKey = "gc.infra_migrated_from"
+	// MigratedCrossEdgesMetadataKey records, on a bead the rig importer moved
+	// into the city binding, the cross-boundary edges it did not copy: a JSON
+	// list of {dir, type, other, other_status_at_import, payload, action}. No
+	// cross-store edge is ever written, so this keeps the history readable;
+	// the rig's retained-source backup is authoritative for a reverse.
+	MigratedCrossEdgesMetadataKey  = "gc.migrated_cross_edges"
 	TriggerBeadStoreRefMetadataKey = "gc.trigger_bead_store_ref"
 	TruncatedMetadataKey           = "gc.truncated"
 	WorkBranchMetadataKey          = "gc.work_branch"
@@ -704,6 +710,7 @@ var KnownMetadataKeys = []string{
 	TerminalMetadataKey,
 	TriggerBeadIDMetadataKey,
 	InfraMigratedFromMetadataKey,
+	MigratedCrossEdgesMetadataKey,
 	TriggerBeadStoreRefMetadataKey,
 	TruncatedMetadataKey,
 	WorkBranchMetadataKey,

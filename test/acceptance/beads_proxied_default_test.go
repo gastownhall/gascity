@@ -122,19 +122,7 @@ type beadsStorePayloadDoc struct {
 // they are absent, or fails under GC_REQUIRE_ACCEPTANCE_TOOLING.
 func requireProxiedTooling(t *testing.T) (string, string) {
 	t.Helper()
-	bdPath := helpers.FindBD()
-	if bdPath == "" {
-		helpers.MissingTooling(t, "bd is not available; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0")
-	}
-	out, err := helpers.ToolCommand(t, bdPath, "init", "--help").CombinedOutput()
-	if err != nil || !strings.Contains(string(out), "--proxied-server") {
-		helpers.MissingTooling(t, "bd at %s has no proxied-server support; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0", bdPath)
-	}
-	doltPath, err := exec.LookPath("dolt")
-	if err != nil {
-		helpers.MissingTooling(t, "dolt is not installed")
-	}
-	return bdPath, doltPath
+	return helpers.RequireTopologyTooling(t)
 }
 
 // proxiedEnv builds this test's own environment: the shared Tier A env with a

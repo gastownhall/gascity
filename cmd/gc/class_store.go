@@ -297,7 +297,7 @@ func resolveClassStore(routes *storageRoutes, workStore beads.Store, cfg *config
 	if relocated {
 		return store
 	}
-	return workStore
+	return splitStrictClassView(workStore)
 }
 
 // coordclassFor maps a config class name to its coordination class. An

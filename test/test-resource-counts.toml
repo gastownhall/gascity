@@ -1125,6 +1125,11 @@ resource = "cwd"
 calls = 2
 
 [[count]]
+path = "cmd/gc/rig_import_fixtures_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
 path = "cmd/gc/rig_remote_test.go"
 resource = "http_test_server"
 calls = 7
@@ -2894,11 +2899,6 @@ tagged = true
 path = "test/acceptance/helpers/recording_bd_test.go"
 resource = "subprocess"
 calls = 1
-
-[[count]]
-path = "test/acceptance/helpers/tool_home_test.go"
-resource = "subprocess"
-calls = 4
 
 [[count]]
 path = "test/acceptance/import_named_sessions_regression_test.go"

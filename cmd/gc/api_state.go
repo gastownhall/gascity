@@ -910,7 +910,9 @@ func (cs *controllerState) completionReconcileInputs(plane storePlane) (events.P
 	cs.mu.RLock()
 	stores := []beads.Store{
 		resolveGraphStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv),
-		cs.cityBeadStore,
+		// The city leg is a work leg (the split-strict gate's work view;
+		// identity in production).
+		splitStrictWorkView(cs.cityBeadStore),
 	}
 	// A suspended rig is not swept: it runs nothing, and a bd read restarts
 	// its retired proxy and Dolt.
@@ -927,7 +929,7 @@ func (cs *controllerState) completionReconcileInputs(plane storePlane) (events.P
 		if splitRigGraphRelicFree(cs.storageRoutes, name) {
 			continue
 		}
-		rigStores[name] = store
+		rigStores[name] = splitStrictWorkView(store)
 	}
 	cs.mu.RUnlock()
 
@@ -1102,6 +1104,9 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 		}
 	}
 	wake.OnBeadEvent(evt, snapshot)
+	// The reads after the cache application (autoclose) see the event's
+	// stores as the split-strict test gate's views (identity in production).
+	stores, relic = splitStrictEventStores(id, stores, relic)
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
 		if evt.Actor == cacheLocalActor {
 			owner := stores[0]
@@ -1245,7 +1250,13 @@ func liveCloseOwner(stores []beads.Store, id string, relic beads.Store) (beads.S
 	var openStore beads.Store
 	var open beads.Bead
 	for _, store := range stores {
-		b, err := beads.HandlesFor(store).Live.Get(id)
+		// A first-owner probe over the prefix route and the binding the
+		// residence probe proved holds the id: a relic's row lives in one.
+		var b beads.Bead
+		err := beads.FederatedRead(func() (err error) {
+			b, err = beads.HandlesFor(store).Live.Get(id)
+			return err
+		})
 		switch {
 		case errors.Is(err, beads.ErrNotFound):
 		case err != nil || b.Status == "closed":
@@ -1345,9 +1356,10 @@ func (cs *controllerState) beadCloseAutoclose(beadID string, store beads.Store, 
 	// co-residence with the closed bead. On a single-store city GraphBeadStore()
 	// returns the same store, so this is identity today.
 	graphStore := cs.GraphBeadStore()
+	homes := cs.convoyAutocloseHomes(store, graphStore.Store)
 	return func() bool {
 		for attempt := 1; ; attempt++ {
-			run := doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
+			run := doConvoyAutocloseWith(store, homes, rec, beadID, os.Stderr, os.Stderr)
 			run.merge(doWispAutocloseWith(store, beadID, os.Stderr, graphStore))
 			run.merge(doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore))
 			if !run.refused || attempt >= autocloseRefusalAttempts {
@@ -1355,6 +1367,67 @@ func (cs *controllerState) beadCloseAutoclose(beadID string, store beads.Store, 
 			}
 		}
 	}
+}
+
+// convoyAutocloseHomes is where the convoy autoclose of a row closed in store
+// finds what store does not hold on a split city:
+//
+//   - A closed class row's legacy parent can be work class (a convoy, a work
+//     bead a graph root was poured under), which lives on the work ledger, not
+//     beside the row. The row's own store is read first (doConvoyAutocloseWith),
+//     then this work home: the rig whose prefix the parent id carries, else the
+//     city.
+//   - A work convoy's legacy children can be graph rows in the class binding
+//     (graph), counted too once every work child is terminal.
+//
+// A work store's own rows keep their parent beside them, and a city that
+// relocates nothing has no binding, so a single-store city reads exactly what
+// it read before.
+func (cs *controllerState) convoyAutocloseHomes(store, graph beads.Store) convoyAutocloseHomes {
+	var homes convoyAutocloseHomes
+	cs.mu.RLock()
+	cityRaw := cs.cityBeadStore
+	cs.mu.RUnlock()
+	if graph != nil && !sameBeadStore(graph, cityRaw) && !sameBeadStore(graph, store) {
+		homes.children = graph
+	}
+	city := cs.CityBeadStore()
+	rigs := cs.BeadStores() // residency:allow — the controller's own work stores, compared against store and keyed by rig name for the prefix table below; no leg list is built
+	if store == nil || sameBeadStore(store, city) || sameBeadStore(store, cityRaw) {
+		return homes
+	}
+	for _, rig := range rigs {
+		if sameBeadStore(store, rig) {
+			return homes
+		}
+	}
+	type rigPrefix struct{ prefix, name string }
+	var prefixes []rigPrefix
+	cs.mu.RLock()
+	if cs.cfg != nil {
+		for _, rig := range cs.cfg.Rigs {
+			if prefix := rig.EffectivePrefix(); prefix != "" {
+				prefixes = append(prefixes, rigPrefix{prefix + "-", rig.Name})
+			}
+		}
+	}
+	cs.mu.RUnlock()
+	// Longest prefix first, so a rig whose prefix extends another's wins.
+	sort.SliceStable(prefixes, func(i, j int) bool { return len(prefixes[i].prefix) > len(prefixes[j].prefix) })
+	homes.parent = func(id string) beads.Store {
+		if bdIDIsClassReserved(id) { // residency:allow — a binding-minted parent id has no work-ledger home; the by-id read stays on the row's own store
+			return nil
+		}
+		for _, p := range prefixes {
+			if strings.HasPrefix(id, p.prefix) {
+				if rig := rigs[p.name]; rig != nil {
+					return rig
+				}
+			}
+		}
+		return city
+	}
+	return homes
 }
 
 // beadEventStores is beadEventStoresLocked plus the residence probe for a
@@ -2094,7 +2167,7 @@ func (cs *controllerState) SessionProvider() runtime.Provider {
 func (cs *controllerState) BeadStore(rig string) beads.Store {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return cs.beadStores[rig]
+	return splitStrictWorkView(cs.beadStores[rig])
 }
 
 // BeadStores returns all rig names and their stores, including the HQ city store.
@@ -2111,7 +2184,7 @@ func (cs *controllerState) BeadStores() map[string]beads.Store {
 	for k, v := range cs.beadStores {
 		m[k] = v
 	}
-	return m
+	return splitStrictWorkViews(m)
 }
 
 // MailProvider returns the city-level mail provider.
@@ -2261,7 +2334,7 @@ func (cs *controllerState) RawConfig() *config.City {
 func (cs *controllerState) CityBeadStore() beads.Store {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return cs.cityBeadStore
+	return splitStrictWorkView(cs.cityBeadStore)
 }
 
 // ScopedStoreLike implements api.State. See the interface doc comment for

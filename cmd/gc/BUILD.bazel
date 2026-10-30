@@ -328,6 +328,7 @@ go_library(
         "doctor_run_target_backfill.go",
         "doctor_session_model.go",
         "doctor_startup_health.go",
+        "doctor_storage_rigs.go",
         "doctor_store_gate.go",
         "doctor_store_preflight.go",
         "doctor_v2_checks.go",
@@ -575,7 +576,11 @@ go_library(
         "restart_request.go",
         "rig_add_options.go",
         "rig_beads.go",
+        "rig_import.go",
+        "rig_import_census.go",
+        "rig_import_plan.go",
         "rig_include_imports.go",
+        "rig_relic_legs.go",
         "rig_remote.go",
         "rig_scope_resolution.go",
         "root_argv.go",
@@ -652,6 +657,7 @@ go_library(
         "sling_dashboard_link.go",
         "sling_remote.go",
         "soft_reload.go",
+        "split_strict_seam.go",
         "stage1_plan.go",
         "start_output.go",
         "startup_kickoff.go",
@@ -983,6 +989,7 @@ go_test(
         "assigned_work_scope_test.go",
         "async_start_command_gate_test.go",
         "autoclose_fence_test.go",
+        "autoclose_parent_split_test.go",
         "autoclose_sweep_test.go",
         "backend_env_census_test.go",
         "bd_buildinfo_test.go",
@@ -1132,12 +1139,14 @@ go_test(
         "class_store_emit_test.go",
         "class_store_test.go",
         "cli_class_stores_test.go",
+        "cli_session_name_split_test.go",
         "cli_storage_routes_config_failure_test.go",
         "cli_storage_routes_snapshot_test.go",
         "cli_storage_routes_test.go",
         "clock_inject_test.go",
         "close_allowed_scenarios_test.go",
         "close_allowed_test.go",
+        "closed_named_index_split_test.go",
         "cmd_agent_is_foreign_test.go",
         "cmd_agent_script_test.go",
         "cmd_agent_test.go",
@@ -1751,6 +1760,7 @@ go_test(
         "prepared_start_input_fence_test.go",
         "prepared_start_oversized_prompt_test.go",
         "prepared_start_priming_test.go",
+        "prepared_workdir_split_test.go",
         "prime_inbox_test.go",
         "prime_mail_step_overlap_test.go",
         "prime_manual_provider_session_test.go",
@@ -1901,11 +1911,16 @@ go_test(
         "rig_convergence_s4_test.go",
         "rig_fresh_inherited_scope_test.go",
         "rig_graph_readers_s4_test.go",
+        "rig_import_fixtures_test.go",
+        "rig_import_review_side_test.go",
+        "rig_import_review_test.go",
+        "rig_import_test.go",
         "rig_include_imports_test.go",
         "rig_inherited_endpoint_test.go",
         "rig_pool_scale_hook_4189_test.go",
         "rig_provision_boundary_import_test.go",
         "rig_provision_parity_test.go",
+        "rig_relic_legs_test.go",
         "rig_remote_test.go",
         "rig_scope_resolution_test.go",
         "root_argv_test.go",
@@ -2109,6 +2124,7 @@ go_test(
         "sling_order_handoff_test.go",
         "sling_remote_test.go",
         "sling_reserved_class_test.go",
+        "sling_residence_s4b_test.go",
         "sling_seam_test.go",
         "sling_source_workflow_binding_test.go",
         "soft_reload_test.go",
@@ -2121,6 +2137,7 @@ go_test(
         "split_store_cascade_test.go",
         "split_store_closeread_test.go",
         "split_store_work_legs_test.go",
+        "split_strict_gate_test.go",
         "split_topology_conformance_test.go",
         "split_topology_env_test.go",
         "sql_open_guard_test.go",
@@ -2503,6 +2520,28 @@ go_test(
         ],
         "//conditions:default": [],
     }),
+)
+
+# The split-strict projection gate (internal/beads/splittest/projection.go):
+# gc_test with GC_TEST_SPLIT_STRICT=1, which installs splitStrictSeam
+# (split_strict_seam.go), so a city that relocates nothing looks split to the
+# code under test. Non-blocking for now: manual, so //... skips it, and
+# bazel.yml's evidence-only split-strict lane runs it. TestMain fails the run
+# on a violation site testdata/split_strict_baseline.tsv does not list (the
+# ratchet), and on a failing test testdata/split_strict_known_failures.list does
+# not list; it reports the two apart. It becomes required before new cities
+# default to split.
+go_variant_test(
+    name = "gc_split_strict_test",
+    size = "large",
+    # -test.v: the gate reads the test binary's own RUN/PAUSE/CONT/PASS/FAIL
+    # lines to time each test (the per-test hang watchdog) and to tell new
+    # failing tests from the known ones.
+    args = ["-test.v"],
+    env = {"GC_TEST_SPLIT_STRICT": "1"},
+    shard_count = 24,
+    tags = ["manual"],
+    test = ":gc_test",
 )
 
 # The tagged product-metrics contracts (`make test-productmetrics-testhook`):

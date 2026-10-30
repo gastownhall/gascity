@@ -6949,6 +6949,17 @@ type StorageBindingOutcomePayload struct {
 	ProvenBeads    int64     `json:"proven_beads"`
 }
 
+// StorageRigPayload defines model for StorageRigPayload.
+type StorageRigPayload struct {
+	Beads   int64   `json:"beads"`
+	Binding string  `json:"binding"`
+	Cleared *int64  `json:"cleared,omitempty"`
+	Detail  *string `json:"detail,omitempty"`
+	Gates   *int64  `json:"gates,omitempty"`
+	Outcome string  `json:"outcome"`
+	Rig     string  `json:"rig"`
+}
+
 // StoreDiskCriticalPayload defines model for StoreDiskCriticalPayload.
 type StoreDiskCriticalPayload struct {
 	DataDir    string `json:"data_dir"`
@@ -8881,6 +8892,38 @@ type TypedEventStreamEnvelopeStorageBindingUnconverged struct {
 	Ts               time.Time                    `json:"ts"`
 	Type             string                       `json:"type"`
 	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeStorageRigImport defines model for TypedEventStreamEnvelopeStorageRigImport.
+type TypedEventStreamEnvelopeStorageRigImport struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          StorageRigPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeStorageRigResidue defines model for TypedEventStreamEnvelopeStorageRigResidue.
+type TypedEventStreamEnvelopeStorageRigResidue struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          StorageRigPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick defines model for TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick.
@@ -10929,6 +10972,40 @@ type TypedTaggedEventStreamEnvelopeStorageBindingUnconverged struct {
 	Ts               time.Time                    `json:"ts"`
 	Type             string                       `json:"type"`
 	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeStorageRigImport defines model for TypedTaggedEventStreamEnvelopeStorageRigImport.
+type TypedTaggedEventStreamEnvelopeStorageRigImport struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          StorageRigPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeStorageRigResidue defines model for TypedTaggedEventStreamEnvelopeStorageRigResidue.
+type TypedTaggedEventStreamEnvelopeStorageRigResidue struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          StorageRigPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick defines model for TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick.
@@ -14442,6 +14519,32 @@ func (t *EventPayload) FromStorageBindingOutcomePayload(v StorageBindingOutcomeP
 
 // MergeStorageBindingOutcomePayload performs a merge with any union data inside the EventPayload, using the provided StorageBindingOutcomePayload
 func (t *EventPayload) MergeStorageBindingOutcomePayload(v StorageBindingOutcomePayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsStorageRigPayload returns the union data inside the EventPayload as a StorageRigPayload
+func (t EventPayload) AsStorageRigPayload() (StorageRigPayload, error) {
+	var body StorageRigPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromStorageRigPayload overwrites any union data inside the EventPayload as the provided StorageRigPayload
+func (t *EventPayload) FromStorageRigPayload(v StorageRigPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeStorageRigPayload performs a merge with any union data inside the EventPayload, using the provided StorageRigPayload
+func (t *EventPayload) MergeStorageRigPayload(v StorageRigPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -19433,6 +19536,62 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeStorageBindingUn
 	return err
 }
 
+// AsTypedEventStreamEnvelopeStorageRigImport returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeStorageRigImport
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeStorageRigImport() (TypedEventStreamEnvelopeStorageRigImport, error) {
+	var body TypedEventStreamEnvelopeStorageRigImport
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeStorageRigImport overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeStorageRigImport
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeStorageRigImport(v TypedEventStreamEnvelopeStorageRigImport) error {
+	v.Type = "storage.rig_import"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeStorageRigImport performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeStorageRigImport
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeStorageRigImport(v TypedEventStreamEnvelopeStorageRigImport) error {
+	v.Type = "storage.rig_import"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeStorageRigResidue returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeStorageRigResidue
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeStorageRigResidue() (TypedEventStreamEnvelopeStorageRigResidue, error) {
+	var body TypedEventStreamEnvelopeStorageRigResidue
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeStorageRigResidue overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeStorageRigResidue
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeStorageRigResidue(v TypedEventStreamEnvelopeStorageRigResidue) error {
+	v.Type = "storage.rig_residue"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeStorageRigResidue performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeStorageRigResidue
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeStorageRigResidue(v TypedEventStreamEnvelopeStorageRigResidue) error {
+	v.Type = "storage.rig_residue"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick() (TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick, error) {
 	var body TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick
@@ -20081,6 +20240,10 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeStorageBindingUncheckable()
 	case "storage.binding.unconverged":
 		return t.AsTypedEventStreamEnvelopeStorageBindingUnconverged()
+	case "storage.rig_import":
+		return t.AsTypedEventStreamEnvelopeStorageRigImport()
+	case "storage.rig_residue":
+		return t.AsTypedEventStreamEnvelopeStorageRigResidue()
 	case "supervisor.fs_pressure.skipped_tick":
 		return t.AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick()
 	case "supervisor.request":
@@ -23092,6 +23255,62 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeStor
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeStorageRigImport returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeStorageRigImport
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeStorageRigImport() (TypedTaggedEventStreamEnvelopeStorageRigImport, error) {
+	var body TypedTaggedEventStreamEnvelopeStorageRigImport
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeStorageRigImport overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeStorageRigImport
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeStorageRigImport(v TypedTaggedEventStreamEnvelopeStorageRigImport) error {
+	v.Type = "storage.rig_import"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeStorageRigImport performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeStorageRigImport
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeStorageRigImport(v TypedTaggedEventStreamEnvelopeStorageRigImport) error {
+	v.Type = "storage.rig_import"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeStorageRigResidue returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeStorageRigResidue
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeStorageRigResidue() (TypedTaggedEventStreamEnvelopeStorageRigResidue, error) {
+	var body TypedTaggedEventStreamEnvelopeStorageRigResidue
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeStorageRigResidue overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeStorageRigResidue
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeStorageRigResidue(v TypedTaggedEventStreamEnvelopeStorageRigResidue) error {
+	v.Type = "storage.rig_residue"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeStorageRigResidue performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeStorageRigResidue
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeStorageRigResidue(v TypedTaggedEventStreamEnvelopeStorageRigResidue) error {
+	v.Type = "storage.rig_residue"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick() (TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick, error) {
 	var body TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick
@@ -23740,6 +23959,10 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingUncheckable()
 	case "storage.binding.unconverged":
 		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingUnconverged()
+	case "storage.rig_import":
+		return t.AsTypedTaggedEventStreamEnvelopeStorageRigImport()
+	case "storage.rig_residue":
+		return t.AsTypedTaggedEventStreamEnvelopeStorageRigResidue()
 	case "supervisor.fs_pressure.skipped_tick":
 		return t.AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick()
 	case "supervisor.request":

@@ -226,7 +226,7 @@ internal/api/dashport_support.go	BeadStores	ast:returns-store-list	1
 internal/api/handler_agents.go	findActiveBeadForAssigneesWithFreshness	a:BeadStores	1
 internal/api/handler_beads.go	findStore	a:BeadStores	1
 internal/api/handler_beads.go	resolveStoreByPrefix	a:BeadStores	1
-internal/api/handler_convoy_dispatch.go	workflowStores	a:BeadStores	1
+internal/api/handler_convoy_dispatch.go	workflowStoresWith	a:BeadStores	1
 internal/api/handler_convoys.go	isGraphConvoyID	a:BeadStores	1
 internal/api/handler_sling.go	sourceWorkflowStores	a:BeadStores	2
 internal/api/handler_status.go	statusWorkCounts	a:BeadStores	1

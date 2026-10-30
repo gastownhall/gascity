@@ -592,6 +592,16 @@ const (
 	StorageBindingUnconverged   = "storage.binding.unconverged"
 	StorageBindingUncheckable   = "storage.binding.uncheckable"
 	StorageBindingNotConfigured = "storage.binding.not_configured"
+
+	// StorageRigImport is published once per rig by `gc storage migrate
+	// --from-rigs`: what the import did for that rig (imported, clean,
+	// nothing to import, refused, failed).
+	StorageRigImport = "storage.rig_import"
+	// StorageRigResidue is published by the controller's one asynchronous
+	// census at boot for each rig that holds infrastructure rows the city
+	// binding should hold: a rig awaiting import, a clear left pending, or
+	// rows written to the rig after its import.
+	StorageRigResidue = "storage.rig_residue"
 )
 
 // IsJournalDerived reports whether eventType is one the controller derives
@@ -668,6 +678,7 @@ var KnownEventTypes = []string{
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured,
+	StorageRigImport, StorageRigResidue,
 	// ProviderHealthGateAlert and ReconcilerAlert are intentionally omitted
 	// from KnownEventTypes. Each is emitted by the reconciler but its typed
 	// SSE payload is not yet registered in internal/api (the payload registration lives in a
