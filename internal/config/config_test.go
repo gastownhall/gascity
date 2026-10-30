@@ -7358,6 +7358,68 @@ func TestInjectImplicitAgents_RigInjection(t *testing.T) {
 	}
 }
 
+func TestInjectImplicitAgents_CityLevelImplicitAgentsAreCityScoped(t *testing.T) {
+	// City-level implicit agents are city-scoped so they discover and claim
+	// routed work in every rig store; rig-level implicit agents stay rig-bound.
+	cfg := &City{
+		Providers: map[string]ProviderSpec{
+			"claude": {},
+			"codex":  {},
+		},
+		Rigs: []Rig{{Name: "frontend", Path: "/tmp/frontend"}},
+	}
+	InjectImplicitAgents(cfg)
+
+	wantScope := map[string]string{
+		"/claude":         "city",
+		"/codex":          "city",
+		"frontend/claude": "",
+		"frontend/codex":  "",
+	}
+	got := make(map[string]string, len(cfg.Agents))
+	for _, a := range cfg.Agents {
+		if !a.Implicit {
+			t.Fatalf("unexpected non-implicit agent %s/%s", a.Dir, a.Name)
+		}
+		got[a.Dir+"/"+a.Name] = a.Scope
+	}
+	if len(got) != len(wantScope) {
+		t.Fatalf("injected agents = %v, want keys of %v", got, wantScope)
+	}
+	for key, want := range wantScope {
+		scope, ok := got[key]
+		if !ok {
+			t.Fatalf("agent %s was not injected; got %v", key, got)
+		}
+		if scope != want {
+			t.Errorf("agent %s Scope = %q, want %q", key, scope, want)
+		}
+	}
+
+	t.Run("explicit city agent keeps its own scope", func(t *testing.T) {
+		cfg := &City{
+			Providers: map[string]ProviderSpec{
+				"claude": {},
+				"codex":  {},
+			},
+			Agents: []Agent{{Name: "claude"}},
+		}
+		InjectImplicitAgents(cfg)
+
+		if len(cfg.Agents) != 2 {
+			t.Fatalf("got %d agents, want explicit claude + implicit codex: %+v", len(cfg.Agents), cfg.Agents)
+		}
+		explicit := cfg.Agents[0]
+		if explicit.Name != "claude" || explicit.Implicit || explicit.Scope != "" {
+			t.Errorf("explicit claude = {Name:%q Implicit:%v Scope:%q}, want untouched {claude false \"\"}", explicit.Name, explicit.Implicit, explicit.Scope)
+		}
+		injected := cfg.Agents[1]
+		if injected.Name != "codex" || injected.Dir != "" || !injected.Implicit || injected.Scope != "city" {
+			t.Errorf("injected agent = {Name:%q Dir:%q Implicit:%v Scope:%q}, want city-scoped implicit codex", injected.Name, injected.Dir, injected.Implicit, injected.Scope)
+		}
+	})
+}
+
 // ---------------------------------------------------------------------------
 // agent_defaults.default_sling_formula
 // ---------------------------------------------------------------------------

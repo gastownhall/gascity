@@ -4130,6 +4130,9 @@ func (a *Agent) EffectiveDefaultSlingFormula() string {
 	return ""
 }
 
+// agentKey identifies an agent by its rig directory and name.
+type agentKey struct{ dir, name string }
+
 // InjectImplicitAgents adds on-demand agents for each explicitly configured
 // provider at both city scope and each rig scope. A provider is configured
 // only when it appears in cfg.Providers; workspace.provider selects the
@@ -4138,12 +4141,10 @@ func (a *Agent) EffectiveDefaultSlingFormula() string {
 // explicit [[agent]] entry. Explicit agents always win — if city.toml defines
 // [[agent]] name="claude" (or a rig-scoped equivalent), no implicit agent is
 // added for that scope.
-// agentKey identifies an agent by its rig directory and name.
-type agentKey struct{ dir, name string }
-
-// InjectImplicitAgents adds implicit agent entries for configured providers
-// that lack an explicit [[agent]] entry, enabling auto-materialization of
-// sling targets without requiring manual agent declarations.
+//
+// City-level implicit agents are city-scoped (Scope "city"), so like an
+// explicit scope = "city" agent they discover and claim routed work in every
+// serving rig store. Rig-level implicit agents stay bound to their rig.
 func InjectImplicitAgents(cfg *City) {
 	// Build set of existing agent keys (dir, name).
 	existing := make(map[agentKey]bool, len(cfg.Agents))
@@ -4181,6 +4182,7 @@ func InjectImplicitAgents(cfg *City) {
 		}
 		cfg.Agents = append(cfg.Agents, Agent{
 			Name:                name,
+			Scope:               "city",
 			Provider:            name,
 			PromptTemplate:      promptTemplate,
 			DefaultSlingFormula: &slingFormula,
