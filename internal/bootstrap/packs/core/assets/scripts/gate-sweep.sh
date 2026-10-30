@@ -27,7 +27,9 @@
 # (parsed with jq) on every run, even in a city with no rigs. A timer check
 # that fails in one store is reported on stderr naming the store; the other
 # stores are still swept and the run exits non-zero. A store gc will not
-# scope for bd is skipped with a notice and does not fail the run.
+# scope for bd is skipped with a notice and does not fail the run. A run that
+# cannot list the rigs (gc rig list fails, or jq is missing) fails after the
+# city store is swept.
 set -euo pipefail
 
 # Trace bd invocations to $GC_BD_TRACE when set (no-op otherwise).
@@ -78,7 +80,16 @@ sweep_scope() {
 scope_select city
 sweep_scope
 
-RIG_NAMES=$(core_rig_names)
+# The city sweep needs no jq, so jq is checked only once it is swept. A run
+# that cannot list the rigs fails rather than quietly narrowing to the city.
+if ! command -v jq >/dev/null 2>&1; then
+    echo "gate-sweep: jq is required to list rig stores but not found in PATH; rig stores were not checked this run" >&2
+    exit 1
+fi
+if ! RIG_NAMES=$(core_rig_names); then
+    echo "gate-sweep: gc rig list failed; rig stores were not checked this run" >&2
+    exit 1
+fi
 while IFS= read -r rig_name; do
     [ -n "$rig_name" ] || continue
     scope_select rig "$rig_name"
