@@ -257,10 +257,15 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// Record the pod as a remote stage of the controller's city, staged and
 	// prebaked alike (S5-A): on a split city its infrastructure-class
 	// commands then refuse instead of creating a pod-local empty binding. A
-	// direct write, so it works whatever gc the pod image carries.
+	// direct write, so it works whatever gc the pod image carries. The pod
+	// spec's remote-stage environment already covers every process from its
+	// start; the record is the durable copy for tools that read the
+	// directory. Failing to write it fails the start: a pod that cannot be
+	// marked is not one this controller hands work to.
 	if ctrlCity != "" {
 		if err := writeRemoteStageInPod(ctx, p.ops, podName, p.cityName, ctrlCity); err != nil {
-			fmt.Fprintf(p.stderr, "gc: warning: recording the remote stage in %s: %v\n", podName, err) //nolint:errcheck
+			cleanup("remote stage record")
+			return fmt.Errorf("recording pod %q as a remote stage of city %s (%s): %w; the pod was removed rather than run unmarked", podName, remoteStageCityName(p.cityName, ctrlCity), ctrlCity, err)
 		}
 	}
 
@@ -956,11 +961,37 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity string) er
 // both staged and prebaked pods.
 const remoteStageRecordPath = podWorkspaceRoot + "/.gc/remote-stage.toml"
 
+// The remote-stage environment cmd/gc's remote_stage.go honors from process
+// start. Keep the names in step with cmd/gc (remoteStageControllerEnv,
+// remoteStageCityEnv).
+const (
+	remoteStageControllerEnv = "GC_REMOTE_STAGE_CONTROLLER"
+	remoteStageCityEnv       = "GC_REMOTE_STAGE_CITY"
+)
+
+// remoteStageCityName is the controller's city name, else its path's base.
+func remoteStageCityName(cityName, ctrlCity string) string {
+	if strings.TrimSpace(cityName) == "" {
+		return filepath.Base(ctrlCity)
+	}
+	return cityName
+}
+
+// remoteStageEnv marks every process of a pod as a remote stage of ctrlCity,
+// or nothing without a controller city.
+func remoteStageEnv(cityName, ctrlCity string) []corev1.EnvVar {
+	if strings.TrimSpace(ctrlCity) == "" {
+		return nil
+	}
+	return []corev1.EnvVar{
+		{Name: remoteStageControllerEnv, Value: ctrlCity},
+		{Name: remoteStageCityEnv, Value: remoteStageCityName(cityName, ctrlCity)},
+	}
+}
+
 // remoteStageRecord renders the record cmd/gc's remote_stage.go reads.
 func remoteStageRecord(cityName, ctrlCity string, now time.Time) string {
-	if strings.TrimSpace(cityName) == "" {
-		cityName = filepath.Base(ctrlCity)
-	}
+	cityName = remoteStageCityName(cityName, ctrlCity)
 	return fmt.Sprintf("controller_city = %q\ncontroller_path = %q\nstaged_at = %q\n", cityName, ctrlCity, now.UTC().Format(time.RFC3339))
 }
 

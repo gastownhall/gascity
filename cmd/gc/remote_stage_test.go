@@ -233,3 +233,24 @@ func TestStorageVerbsRefuseOnARemoteStage(t *testing.T) {
 		t.Fatalf("recover-stranded on a remote stage = %d %q", code, errOut.String())
 	}
 }
+
+// TestRemoteStageEnvRefusesBeforeAnyRecordExists closes the prebaked window
+// (S5-A round 2): a pod's processes carry the remote-stage environment from
+// the container's start, so a gc command that runs before the on-disk record
+// is written still refuses the infrastructure classes and creates no binding.
+func TestRemoteStageEnvRefusesBeforeAnyRecordExists(t *testing.T) {
+	city := t.TempDir()
+	t.Setenv(remoteStageControllerEnv, "/city")
+	t.Setenv(remoteStageCityEnv, "bright-lights")
+	if _, err := os.Stat(remoteStagePath(city)); !os.IsNotExist(err) {
+		t.Fatalf("precondition: a record exists: %v", err)
+	}
+	cfg := infraSplitConfig(filepath.Join(city, ".gc", "store"))
+	_, err := storageBootGate(city, cfg, "gc mail send", nil, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "remote stage of city bright-lights (/city)") {
+		t.Fatalf("an infra command in a pod before its record = %v, want the remote-stage refusal", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(city, ".gc", "store")); !os.IsNotExist(statErr) {
+		t.Fatalf("the pod created a local binding before its record existed: %v", statErr)
+	}
+}

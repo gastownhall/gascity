@@ -300,6 +300,11 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	if err != nil {
 		return nil, err
 	}
+	// Every process in the pod is a remote stage of the controller's city
+	// from the container's first instruction (S5-A): gc honors these from
+	// process start, so no gc command in the pod, the agent's first one
+	// included, can run storage genesis before the on-disk record exists.
+	env = append(env, remoteStageEnv(p.cityName, controllerCityPath(cfg.Env))...)
 
 	// Build volume mounts for the main container.
 	// When prebaked, skip the ws EmptyDir — it would shadow baked image content.

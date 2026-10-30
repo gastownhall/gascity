@@ -53,8 +53,32 @@ func remoteStagePath(cityPath string) string {
 	return filepath.Join(cityPath, ".gc", remoteStageFileName)
 }
 
-// readRemoteStage reads the record; ok is false when there is none.
+// The remote-stage environment. A pod's spec sets these for every process in
+// it (internal/runtime/k8s remoteStageEnv, and gc-session-k8s's manifest), so
+// a gc process in a pod is a remote stage from its first instruction, before
+// and regardless of the on-disk record. Keep the names in step with those.
+const (
+	remoteStageControllerEnv = "GC_REMOTE_STAGE_CONTROLLER"
+	remoteStageCityEnv       = "GC_REMOTE_STAGE_CITY"
+)
+
+// remoteStageFromEnv reads the remote-stage environment; ok is false when the
+// process carries none.
+func remoteStageFromEnv() (remoteStage, bool) {
+	controller := strings.TrimSpace(os.Getenv(remoteStageControllerEnv))
+	if controller == "" {
+		return remoteStage{}, false
+	}
+	return remoteStage{ControllerCity: strings.TrimSpace(os.Getenv(remoteStageCityEnv)), ControllerPath: controller}, true
+}
+
+// readRemoteStage reports whether cityPath is a remote stage: the process
+// environment says so (a pod), or the directory's record does. ok is false
+// when neither does.
 func readRemoteStage(cityPath string) (remoteStage, bool, error) {
+	if stage, ok := remoteStageFromEnv(); ok {
+		return stage, true, nil
+	}
 	data, err := os.ReadFile(remoteStagePath(cityPath))
 	if errors.Is(err, fs.ErrNotExist) {
 		return remoteStage{}, false, nil

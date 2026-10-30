@@ -2494,6 +2494,54 @@ func TestStartRecordsTheRemoteStageInBothModes(t *testing.T) {
 			if strings.Contains(call.stdin, "/tmp/city-src") {
 				t.Errorf("record names the staging copy: %q", call.stdin)
 			}
+			// The pod spec marks every process a remote stage from its
+			// start, which is what closes the prebaked window: the agent can
+			// start before the record lands, but never without the env.
+			env := map[string]string{}
+			for _, pod := range fake.pods {
+				for _, e := range pod.Spec.Containers[0].Env {
+					env[e.Name] = e.Value
+				}
+			}
+			if env[remoteStageControllerEnv] != "/city" || env[remoteStageCityEnv] != "bright-lights" {
+				t.Errorf("pod env %s=%q %s=%q, want /city and bright-lights", remoteStageControllerEnv, env[remoteStageControllerEnv], remoteStageCityEnv, env[remoteStageCityEnv])
+			}
+		})
+	}
+}
+
+// TestStartFailsClosedWhenTheRemoteStageRecordFails: a pod that cannot be
+// marked is deleted and the start fails, in both modes.
+func TestStartFailsClosedWhenTheRemoteStageRecordFails(t *testing.T) {
+	for _, prebaked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("prebaked=%v", prebaked), func(t *testing.T) {
+			fake := newFakeK8sOps()
+			p := newProviderWithOps(fake)
+			p.prebaked = prebaked
+			p.postStartSettle = 0
+			fake.execFunc = func(_ string, cmd []string) (string, error) {
+				if len(cmd) == 3 && cmd[0] == "sh" && strings.Contains(cmd[2], remoteStageRecordPath) {
+					return "", errors.New("read-only file system")
+				}
+				return "", nil
+			}
+			cfg := runtime.Config{Command: "claude", WorkDir: "/city", Env: map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/city"}}
+			err := p.Start(context.Background(), "gc-test-agent", cfg)
+			if err == nil || !strings.Contains(err.Error(), "remote stage") || !strings.Contains(err.Error(), "read-only file system") {
+				t.Fatalf("Start with an unwritable record = %v, want a remote-stage failure", err)
+			}
+			deleted := false
+			for _, c := range fake.calls {
+				if c.method == "deletePod" {
+					deleted = true
+				}
+				if c.method == "execInPod" && len(c.cmd) >= 2 && c.cmd[0] == "touch" && containsStr(c.cmd[1], ".gc-workspace-ready") {
+					t.Error("the ready sentinel was touched on a pod that could not be marked")
+				}
+			}
+			if !deleted {
+				t.Error("the unmarked pod was not deleted")
+			}
 		})
 	}
 }
