@@ -156,6 +156,11 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want: "claude --resume " + rotatedKey,
 		},
 		{
+			name: "AC-4 unprobeable provider resumes",
+			opts: rotatedKeyOptions{provider: "legacy-provider", storedCommand: "legacy-agent"},
+			want: "legacy-agent --resume " + rotatedKey,
+		},
+		{
 			name: "creating with a stale creation_complete_at starts with the session id",
 			opts: rotatedKeyOptions{meta: map[string]string{"state": string(sessionpkg.StateCreating)}},
 			want: "claude --session-id " + rotatedKey,
