@@ -826,7 +826,7 @@ func TestSessionResumeWarnsOnLaunchCommandFallback(t *testing.T) {
 	}{
 		{
 			name: "buildSessionResume",
-			resolve: func(t *testing.T, s *Server, info session.Info) (string, error) {
+			resolve: func(_ *testing.T, s *Server, info session.Info) (string, error) {
 				command, _, err := s.buildSessionResume(info)
 				return command, err
 			},
