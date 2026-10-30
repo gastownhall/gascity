@@ -1188,7 +1188,7 @@ calls = 1
 [[count]]
 path = "cmd/gc/session_lifecycle_parallel_test.go"
 resource = "fixed_sleep"
-calls = 1
+calls = 2
 
 [[count]]
 path = "cmd/gc/session_model_phase0_hook_spec_test.go"
