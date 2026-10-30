@@ -42,12 +42,18 @@ If you use Oh My Zsh, its `git` plugin aliases `gc` to `git commit`; run
 
 **2. Give Dolt your identity.** Gas City stores work in
 [beads](https://github.com/gastownhall/beads), which keeps its data in Dolt,
-and Dolt needs an author. This copies your git identity if Dolt has none:
+and Dolt needs an author. This is required: `gc init` stops with "startup is
+blocked by Dolt author identity" without it. Run this before step 3; it copies
+your git identity into Dolt only where Dolt has none:
 
 ```bash
 dolt config --global --get user.name  || dolt config --global --add user.name  "$(git config --global user.name)"
 dolt config --global --get user.email || dolt config --global --add user.email "$(git config --global user.email)"
 ```
+
+If git has no identity either, set one first with
+`git config --global user.name "Your Name"` and
+`git config --global user.email "you@example.com"`.
 
 **3. Create a city.** A city is a directory that holds your Gas City
 configuration. The defaults are the recommended setup.
@@ -59,6 +65,15 @@ gc init ~/my-city --template gascity --default-provider claude
 `gc init` starts the city in the background under a supervisor service. The
 dashboard is at `http://127.0.0.1:8372/`. Use `--default-provider codex` (or
 `gemini`) to run a different agent CLI.
+
+The city takes a few minutes to warm up after it starts. During that time these
+are expected and need no action, so go on to step 4:
+
+- `gc init`'s output can end at `Adopting sessions...` without a final
+  "City started" line.
+- `gc status` can list agents as `unknown (partial status)` and print
+  `bead cache unavailable` or `session snapshot timed out`.
+- `gc doctor` can report the store as not running and suggest a proxy fix.
 
 **4. Add a project.** A project Gas City works on is a **rig**. Use one of your
 own repositories, or make a sample one:
@@ -78,8 +93,10 @@ gc sling hello-world/claude "Create hello.sh that prints hello world and commit 
 ```
 
 `gc sling` prints a `Dashboard:` link to the formula run, for example
-`http://127.0.0.1:8372/city/my-city/runs/hw-4up`. Open it to watch the agent
-work. To check from the terminal, pass the run ID (the last part of the link)
+`http://127.0.0.1:8372/city/my-city/runs/hw-4up`. (Its `Attached workflow`
+line names the run ID twice; the run ID is the one in the link.) Open the link
+to watch the agent work; while the city is still warming up the page can say
+"run projection is warming", so refresh after a minute. To check from the terminal, pass the run ID (the last part of the link)
 to `gc bd show`; it reports `CLOSED` when the run is done, usually within a
 minute or two, and `hello.sh` is committed in `~/hello-world`:
 
