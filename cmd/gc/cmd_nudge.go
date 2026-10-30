@@ -46,6 +46,11 @@ const (
 	defaultQueuedNudgeRetryDelay    = 15 * time.Second
 	defaultQueuedNudgeMaxAttempts   = 5
 	defaultQueuedNudgeDeadRetention = 1 * time.Hour
+	// queuedNudgeStarvedAfter is how long a due queued nudge waits on a
+	// session whose activity clock never goes quiet before the poller stops
+	// waiting on that clock (ga-atd7r2): an idle TUI that keeps repainting,
+	// or back-to-back turns, would otherwise hold it until its TTL.
+	queuedNudgeStarvedAfter = 2 * time.Minute
 
 	// nudgeEnqueueMaintenanceBudget bounds the wall-clock time the foreground
 	// `gc sling --nudge` enqueue path spends on best-effort nudge-queue
@@ -2448,8 +2453,23 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 			return false, nil
 		}
 	}
+	delivery := worker.NudgeDeliveryDefault
 	if !pollerSessionIdleEnough(target, sp, quiescence, obs) {
-		return false, nil
+		// The activity clock says busy. A fresh item waits for it to quiet;
+		// a starved one waits only for the leaf's turn look to say idle, and
+		// then this pass is the idle boundary.
+		starved, err := queuedNudgeStarvedForTarget(target, time.Now())
+		if err != nil || !starved {
+			return false, err
+		}
+		tr, ok := runtime.TurnRunningFor(sp, target.sessionName)
+		if !ok {
+			return false, nil
+		}
+		if running, lookErr := tr.TurnRunning(target.sessionName); lookErr != nil || running {
+			return false, nil
+		}
+		delivery = worker.NudgeDeliveryImmediate
 	}
 	items, err := claimDueQueuedNudgeBatchForTarget(target.cityPath, target, time.Now())
 	if err != nil || len(items) == 0 {
@@ -2547,7 +2567,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	}
 	result, err := handle.Nudge(context.Background(), sessionActor(session.ActorAgent, target.cityPath), worker.NudgeRequest{
 		Text:        msg,
-		Delivery:    worker.NudgeDeliveryDefault,
+		Delivery:    delivery,
 		Source:      "queue",
 		Wake:        worker.NudgeWakeLiveOnly,
 		DeliveryKey: queuedNudgeDeliveryKey(items),
@@ -2600,6 +2620,26 @@ func stampLastNudgeDeliveredAt(sessFront *session.Store, sessionID string, t tim
 	// Best-effort stamp. Delivery already succeeded, so a metadata write
 	// failure here must not bubble back to the caller and force a redelivery.
 	_ = sessFront.SetMarker(sessionID, session.MetadataLastNudgeDeliveredAt, t.UTC().Format(time.RFC3339))
+}
+
+// queuedNudgeStarvedForTarget reports whether target may claim a due queued
+// nudge that has waited at least queuedNudgeStarvedAfter since it was queued.
+// Age runs from CreatedAt, so a busy deferral does not restart it; the item
+// must be due, so a deferred one is not retried before its DeliverAfter. An
+// item fenced to another session never counts (nil census). It reads a
+// lock-free snapshot and writes nothing.
+func queuedNudgeStarvedForTarget(target nudgeTarget, now time.Time) (bool, error) {
+	pending, _, _, err := listQueuedNudgesForTargetSnapshot(target.cityPath, target, now)
+	if err != nil {
+		return false, fmt.Errorf("reading queued nudges for %s: %w", target.agentKey(), err)
+	}
+	for _, item := range pending {
+		due := item.DeliverAfter.IsZero() || !item.DeliverAfter.After(now)
+		if due && now.Sub(item.CreatedAt) >= queuedNudgeStarvedAfter && queuedNudgeClaimableForTarget(target, item, nil) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {

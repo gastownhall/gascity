@@ -7443,3 +7443,165 @@ func TestManagedWakeRollbackErrorKeepsTheWakeOutcome(t *testing.T) {
 		t.Fatalf("err = %q, want the rollback failure named", err)
 	}
 }
+
+// turnLookProvider is a runtime that takes a live turn reading
+// (runtime.TurnRunningProvider) and counts the looks taken.
+type turnLookProvider struct {
+	*runtime.Fake
+	running bool
+	err     error
+	looks   int
+}
+
+// TurnRunning is the live screen's reading.
+func (p *turnLookProvider) TurnRunning(string) (bool, error) {
+	p.looks++
+	return p.running, p.err
+}
+
+// busyQueuedNudgeFixture starts a worker session on a fake runtime whose
+// activity clock reads busy now and queues one nudge created at createdAt. It
+// returns the city dir, the fake, the store, the poller target, and the busy
+// observation the poller sees.
+func busyQueuedNudgeFixture(t *testing.T, createdAt time.Time) (string, *runtime.Fake, beads.NudgesStore, nudgeTarget, worker.LiveObservation) {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", createdAt)); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	busyAt := time.Now()
+	fake.Activity = map[string]time.Time{info.SessionName: busyAt}
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	return dir, fake, store, target, worker.LiveObservation{Running: true, Alive: true, LastActivity: &busyAt}
+}
+
+// assertQueuedNudgeDrained fails unless the worker's queue holds no pending,
+// in-flight or dead item.
+func assertQueuedNudgeDrained(t *testing.T, dir string) {
+	t.Helper()
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 0/0/0", len(pending), len(inFlight), len(dead))
+	}
+}
+
+// TestTryDeliverQueuedNudgesByPollerDeliversStarvedNudgeToBusySession guards
+// ga-atd7r2: a session whose activity clock never goes quiet (an idle TUI that
+// keeps repainting, or back-to-back turns) used to hold its queue at the
+// quiescence gate forever. Once a due item has waited queuedNudgeStarvedAfter
+// and the leaf's turn look says no turn is running, that pass is the idle
+// boundary and the item goes out immediately.
+func TestTryDeliverQueuedNudgesByPollerDeliversStarvedNudgeToBusySession(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		age  time.Duration
+	}{
+		{name: "waited ten minutes", age: 10 * time.Minute},
+		{name: "waited exactly the starvation bound", age: queuedNudgeStarvedAfter},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, fake, store, target, obs := busyQueuedNudgeFixture(t, time.Now().Add(-tc.age))
+			sp := &turnLookProvider{Fake: fake}
+
+			delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, sp, time.Hour, obs)
+			if err != nil {
+				t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+			}
+			if !delivered {
+				t.Fatal("delivered = false, want true: a starved nudge to a busy session with no running turn must go out")
+			}
+			if now, nudge := fake.CountCalls("NudgeNow", target.sessionName), fake.CountCalls("Nudge", target.sessionName); now != 1 || nudge != 0 {
+				t.Fatalf("NudgeNow/Nudge calls = %d/%d, want 1/0", now, nudge)
+			}
+			assertQueuedNudgeDrained(t, dir)
+		})
+	}
+}
+
+// A starved item opens the gate for its target's whole claim: a fresher item
+// queued behind it goes out in the same immediate send under the existing
+// batch rules.
+func TestTryDeliverQueuedNudgesByPollerSendsFreshNudgeWithStarvedOneInOneBatch(t *testing.T) {
+	dir, fake, store, target, obs := busyQueuedNudgeFixture(t, time.Now().Add(-10*time.Minute))
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "then rerun the smoke test", time.Now())); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	sp := &turnLookProvider{Fake: fake}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, sp, time.Hour, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if !delivered {
+		t.Fatal("delivered = false, want true")
+	}
+	var sent []runtime.Call
+	for _, call := range fake.Calls {
+		if call.Method == "Nudge" || call.Method == "NudgeNow" {
+			sent = append(sent, call)
+		}
+	}
+	if len(sent) != 1 || sent[0].Method != "NudgeNow" {
+		t.Fatalf("sends = %+v, want one NudgeNow", sent)
+	}
+	for _, want := range []string{"review the deploy logs", "then rerun the smoke test"} {
+		if !strings.Contains(sent[0].Message, want) {
+			t.Fatalf("NudgeNow message = %q, want it to carry %q", sent[0].Message, want)
+		}
+	}
+	assertQueuedNudgeDrained(t, dir)
+}
+
+// A turn that starts between the look and the immediate send makes the
+// runtime refuse it busy; the existing release defers the item without
+// charging an attempt.
+func TestTryDeliverQueuedNudgesByPollerDefersStarvedNudgeRefusedBusy(t *testing.T) {
+	dir, fake, store, target, obs := busyQueuedNudgeFixture(t, time.Now().Add(-10*time.Minute))
+	fake.NudgeErrors = map[string]error{target.sessionName: fmt.Errorf("turn started: %w", runtime.ErrSessionBusy)}
+	sp := &turnLookProvider{Fake: fake}
+
+	before := time.Now()
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, sp, time.Hour, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if delivered {
+		t.Fatal("delivered = true, want false: the runtime refused the send busy")
+	}
+	if got := fake.CountCalls("NudgeNow", target.sessionName); got != 1 {
+		t.Fatalf("NudgeNow calls = %d, want 1", got)
+	}
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 1/0/0", len(pending), len(inFlight), len(dead))
+	}
+	if pending[0].Attempts != 0 {
+		t.Fatalf("Attempts = %d, want 0: a busy refusal charges no attempt", pending[0].Attempts)
+	}
+	if lo, hi := before.Add(defaultQueuedNudgeRetryDelay), time.Now().Add(defaultQueuedNudgeRetryDelay); pending[0].DeliverAfter.Before(lo) || pending[0].DeliverAfter.After(hi) {
+		t.Fatalf("DeliverAfter = %s, want within [%s, %s]", pending[0].DeliverAfter, lo, hi)
+	}
+}
