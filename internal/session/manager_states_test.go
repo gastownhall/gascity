@@ -284,6 +284,55 @@ func TestConformance_SweepSuspendCreatingTearsDownRuntimeWithoutRewritingState(t
 	}
 }
 
+// The creating latitude belongs to the city-stop SWEEP alone, like draining: an
+// operator naming ONE session in creating, and the idle auto-suspend, still get
+// the illegal transition, because the row is its in-flight start's to finish
+// (TestConformance_SuspendStillRejectsOtherIllegalStates pins the operator arm
+// generically; this pins both intents against a live runtime).
+func TestConformance_OperatorSuspendStillRejectsCreating(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		soft bool
+	}{
+		{"operator", false},
+		{"idle auto-suspend", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			m := newTestManager(t, store, sp)
+
+			id := createTestSession(t, m, "worker")
+			b, err := store.Get(id)
+			if err != nil {
+				t.Fatalf("get bead: %v", err)
+			}
+			sessName := b.Metadata["session_name"]
+			if err := sp.Start(context.Background(), sessName, runtime.Config{}); err != nil {
+				t.Fatalf("seeding runtime: %v", err)
+			}
+			if err := store.SetMetadata(id, "state", string(StateCreating)); err != nil {
+				t.Fatalf("set state creating: %v", err)
+			}
+
+			err = m.Suspend(context.Background(), testActor(m, ActorOperator), id, tc.soft)
+			if !errors.Is(err, ErrIllegalTransition) {
+				t.Fatalf("Suspend(creating) = %v, want ErrIllegalTransition — the row is its start's to finish", err)
+			}
+			var ite *IllegalTransitionError
+			if !errors.As(err, &ite) || ite.From != StateCreating || ite.Command != CmdSuspend {
+				t.Fatalf("err = %v (%T), want *IllegalTransitionError{From: creating, Command: suspend}", err, err)
+			}
+			if sp.CountCalls("Stop", sessName) != 0 {
+				t.Errorf("%s Suspend(creating) tore down runtime %q anyway", tc.name, sessName)
+			}
+			if !sp.IsRunning(sessName) {
+				t.Errorf("runtime session %q was killed by a rejected %s suspend", sessName, tc.name)
+			}
+		})
+	}
+}
+
 // The scope control for the pins above. The sweep's escape hatches stay
 // state-specific (draining, creating) and sweep-only, never a blanket "any
 // state suspends" that would hide a real illegal-transition bug elsewhere: an
