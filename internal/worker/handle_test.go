@@ -2514,12 +2514,13 @@ func TestSessionHandleStartResolvedUsesProvidedRuntime(t *testing.T) {
 }
 
 func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *testing.T) {
-	handle, _, sp, _ := newTestSessionHandle(t, SessionSpec{
+	workDir := t.TempDir()
+	handle, _, sp, manager := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileClaudeTmuxCLI,
 		Template: "probe",
 		Title:    "Probe",
 		Command:  "claude --dangerously-skip-permissions",
-		WorkDir:  t.TempDir(),
+		WorkDir:  workDir,
 		Provider: "claude",
 		Resume: sessionpkg.ProviderResume{
 			ResumeFlag:    "--resume",
@@ -2527,6 +2528,8 @@ func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *tes
 			SessionIDFlag: "--session-id",
 		},
 	})
+	root := t.TempDir()
+	handle.adapter.SearchPaths = []string{root}
 
 	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start(first): %v", err)
@@ -2546,6 +2549,12 @@ func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *tes
 	if err := handle.Stop(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
+	// The conversation the first start opened left its transcript.
+	info, err := manager.Get(handle.currentSessionID())
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	writeKeyedClaudeTranscript(t, root, workDir, info.SessionKey)
 	// Resuming a suspended session is an operator's own act (D8): Attach.
 	if err := handle.Attach(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Attach(second): %v", err)

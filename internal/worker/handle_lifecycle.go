@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // Start ensures the worker exists and its runtime is live.
@@ -772,20 +773,16 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if firstProviderSessionStart(info.State, pr.Metadata) &&
 		h.session.Resume.SessionIDFlag != "" &&
 		strings.TrimSpace(info.SessionKey) != "" {
-		command := strings.TrimSpace(info.Command)
-		if command == "" {
-			command = strings.TrimSpace(h.session.Command)
-		}
-		if command == "" {
-			command = strings.TrimSpace(info.Provider)
-		}
-		if command == "" {
-			command = strings.TrimSpace(h.session.Provider)
-		}
-		if command == "" {
-			return "", fmt.Errorf("%w: command is required for first start", ErrHandleConfig)
-		}
-		return command + " " + h.session.Resume.SessionIDFlag + " " + info.SessionKey, nil
+		return startWithSessionID(
+			firstNonEmpty(info.Command, h.session.Command, info.Provider, h.session.Provider),
+			h.session.Resume.SessionIDFlag, info.SessionKey)
+	}
+	if h.unlaunchedSessionKey(info, pr.Metadata) {
+		// The launch the resume below would build, with the conversation
+		// flag swapped: the same command precedence.
+		return startWithSessionID(
+			firstNonEmpty(h.session.Command, info.Command, h.session.Provider, info.Provider),
+			h.session.Resume.SessionIDFlag, info.SessionKey)
 	}
 	resumeInfo := info
 	if command := strings.TrimSpace(h.session.Command); command != "" {
@@ -804,6 +801,41 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 		resumeInfo.ResumeCommand = resumeCommand
 	}
 	return sessionpkg.BuildResumeCommand(resumeInfo), nil
+}
+
+// startWithSessionID is command launched with a new conversation under key.
+func startWithSessionID(command, sessionIDFlag, key string) (string, error) {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return "", fmt.Errorf("%w: command is required to start session", ErrHandleConfig)
+	}
+	return command + " " + sessionIDFlag + " " + key, nil
+}
+
+// unlaunchedSessionKey reports whether the row's session key provably names
+// no conversation yet, so a resume of it would find nothing: a restart
+// handoff rotates the key and clears started_config_hash in one patch but
+// leaves creation_complete_at, so firstProviderSessionStart misses it. It
+// holds when the handle can start a conversation under a given key, the row
+// never committed one, and the keyed-transcript probe of the roots this
+// launch reads finds none for the key. A provider the probe cannot read, or
+// a launch without a work dir, keeps the resume.
+func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info, metadata map[string]string) bool {
+	key := strings.TrimSpace(info.SessionKey)
+	if h.session.Resume.SessionIDFlag == "" || key == "" {
+		return false
+	}
+	if strings.TrimSpace(metadata["started_config_hash"]) != "" {
+		return false
+	}
+	workDir := h.runtimeHints().WorkDir
+	if workDir == "" {
+		workDir = info.WorkDir
+	}
+	provider := h.historyProvider(info)
+	exists, probeable := workertranscript.HasKeyedTranscript(
+		workertranscript.KeyedProbeRoots(h.adapter.SearchPaths, provider), provider, workDir, key)
+	return probeable && !exists
 }
 
 func firstProviderSessionStart(state sessionpkg.State, metadata map[string]string) bool {

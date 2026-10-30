@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -604,6 +605,27 @@ func TestSupportsIDLookup(t *testing.T) {
 				t.Fatalf("SupportsIDLookup(%q) = %v, want %v", tt.provider, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestKeyedProbeRoots(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", "")
+	defaults, roots := sessionlog.DefaultSearchPaths(), []string{"/observed"}
+	for _, c := range []struct {
+		provider string
+		roots    []string
+		want     []string
+	}{
+		{"claude", roots, roots},
+		{"claude-max", roots, roots},
+		{"claude", nil, defaults},
+		{"pi", roots, defaults},
+		{"kimi", roots, defaults},
+	} {
+		if got := KeyedProbeRoots(c.roots, c.provider); !slices.Equal(got, c.want) {
+			t.Errorf("KeyedProbeRoots(%v, %q) = %v, want %v", c.roots, c.provider, got, c.want)
+		}
 	}
 }
 
