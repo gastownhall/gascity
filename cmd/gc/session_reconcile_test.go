@@ -3144,6 +3144,81 @@ func TestFindAgentByTemplate(t *testing.T) {
 	}
 }
 
+// TestFindSessionAgentByTemplate pins the session-side resolver: wherever
+// findAgentByTemplate resolves, the same agent comes back; where it misses a
+// session's template — the rig-stamped "<rig>/<name>" copy a generic
+// scope="rig" agent's named session runs — config.FindAgent's synthesized
+// result stands in.
+func TestFindSessionAgentByTemplate(t *testing.T) {
+	configured := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker"},
+			{Name: "lead", Dir: "rig-0", StartCommand: "new-cmd"},
+		},
+	}
+	if a, want := findSessionAgentByTemplate(configured, "worker"), findAgentByTemplate(configured, "worker"); a == nil || a != want {
+		t.Fatalf("city agent: got %#v, want findAgentByTemplate's agent %#v", a, want)
+	}
+	if a, want := findSessionAgentByTemplate(configured, "rig-0/lead"), findAgentByTemplate(configured, "rig-0/lead"); a == nil || a != want {
+		t.Fatalf("dir-bound agent: got %#v, want findAgentByTemplate's agent %#v", a, want)
+	}
+
+	generic := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "rig-0", Path: t.TempDir()}},
+		Agents:    []config.Agent{{Name: "smith", Scope: "rig", StartCommand: "new-cmd"}},
+	}
+	if a := findAgentByTemplate(generic, "rig-0/smith"); a != nil {
+		t.Fatalf("findAgentByTemplate resolved the rig-stamped template, got %#v", a)
+	}
+	a := findSessionAgentByTemplate(generic, "rig-0/smith")
+	if a == nil || a.QualifiedName() != "rig-0/smith" || a.Dir != "rig-0" || a.Scope != "rig" || a.Name != "smith" || a.StartCommand != "new-cmd" {
+		t.Fatalf("rig-stamped template: got %#v, want config.FindAgent's rig-stamped copy of smith", a)
+	}
+	// findAgentByTemplate trims its input and config.FindAgent does not; the
+	// fallback must trim so a padded persisted template still resolves.
+	if a := findSessionAgentByTemplate(generic, " rig-0/smith "); a == nil || a.QualifiedName() != "rig-0/smith" {
+		t.Fatalf("padded rig-stamped template: got %#v, want the trimmed lookup's copy", a)
+	}
+
+	noRig := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "smith", Scope: "rig", StartCommand: "new-cmd"}},
+	}
+	if a := findSessionAgentByTemplate(noRig, "rig-0/smith"); a != nil {
+		t.Fatalf("template whose rig is not configured: got %#v, want nil", a)
+	}
+	unscoped := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "rig-0", Path: t.TempDir()}},
+		Agents:    []config.Agent{{Name: "smith", StartCommand: "new-cmd"}},
+	}
+	if a := findSessionAgentByTemplate(unscoped, "rig-0/smith"); a != nil {
+		t.Fatalf("agent without scope=\"rig\": got %#v, want nil", a)
+	}
+	ambiguous := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "rig-0", Path: t.TempDir()}},
+		Agents: []config.Agent{
+			{Name: "smith", Scope: "rig"},
+			{Name: "smith", Scope: "rig"},
+		},
+	}
+	if a := findSessionAgentByTemplate(ambiguous, "rig-0/smith"); a != nil {
+		t.Fatalf("two generic agents with the same name: got %#v, want nil", a)
+	}
+	if a := findSessionAgentByTemplate(configured, "missing"); a != nil {
+		t.Fatalf("missing template: got %#v, want nil", a)
+	}
+	if a := findSessionAgentByTemplate(nil, "worker"); a != nil {
+		t.Fatalf("nil config: got %#v, want nil", a)
+	}
+	if a := findSessionAgentByTemplate(configured, ""); a != nil {
+		t.Fatalf("empty template: got %#v, want nil", a)
+	}
+}
+
 // TestAgentTemplateIdentitiesEquivalent pins the load-bearing asymmetry of
 // the identity-equivalence helper: a legacy bound identity is equivalent to
 // the unbound agent only after the bound agent is gone. While both a bound
