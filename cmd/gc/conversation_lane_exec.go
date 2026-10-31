@@ -49,10 +49,12 @@ const (
 	// draw nothing while its screen shows a running turn before
 	// quietBoundary takes that reading as stale. A live turn redraws its
 	// status every second (Claude Code's spinner and timer, Codex's Working
-	// row), and the activity clock lags the pane by no more than the tmux
-	// state cache's stale window (30 s) while the session reads running, so
-	// a pane quiet this long runs no turn: what reads as one is a frozen
-	// frame or transcript text, which an idle pane never redraws.
+	// row), so a pane whose own activity clock, read after its screen showed
+	// the turn (runtime.FreshActivityProvider), has stood still this long
+	// runs no turn: what reads as one is a frozen frame or transcript text,
+	// which an idle pane never redraws. The look's observation cannot show
+	// that: its activity can come from a snapshot taken before the turn
+	// started.
 	laneScreenTurnQuietLimit = time.Minute
 )
 
@@ -112,6 +114,12 @@ type conversationLaneExec struct {
 	// pane scan reads (tmux.BusyIndicatorReadable). known is false where no
 	// such reading exists, which leaves the quiescence rule alone.
 	turnOnScreen func(nudgeTarget) (running, known bool, err error)
+	// paneActivity is the session's last activity read from its runtime
+	// now, after turnOnScreen showed a turn, not from the snapshot the
+	// look's observation may have come from: production reads
+	// runtime.FreshActivityProvider on the session's routed leaf. known is
+	// false where no such read exists.
+	paneActivity func(nudgeTarget) (at time.Time, known bool, err error)
 	// steerable says whether a session row takes a steer from a runtime
 	// that steers in a mode; production reads session.SupportsSteerForInfo,
 	// the source session responses read too.
@@ -213,6 +221,9 @@ func newConversationLaneExec(deps laneExecDeps, row laneRow) *conversationLaneEx
 	}
 	e.turnOnScreen = func(t nudgeTarget) (bool, bool, error) {
 		return laneTurnOnScreen(e.deps.sp, t)
+	}
+	e.paneActivity = func(t nudgeTarget) (time.Time, bool, error) {
+		return lanePaneActivity(e.deps.sp, t)
 	}
 	e.steerable = session.SupportsSteerForInfo
 	e.sessionTurns = func(id string) (worker.TurnHandle, error) {
@@ -419,8 +430,15 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 // a turn running there keeps the boundary closed, with no deadline, so the
 // busy backoff paces the next look. A screen the look could not read is no
 // boundary either (noted). Without a screen reading the rule stands, and it
-// stands over a running turn the pane has drawn nothing of for
-// laneScreenTurnQuietLimit (noted): that reading is stale.
+// stands over a stale running turn (staleTurnBoundary).
+//
+// A No does more than hold a boundary prompt: it closes a when=if_idle op
+// skipped{busy}, and a deliver-now unit whose turn its transcript shows ended
+// skips its interrupt (skipped{stale}) and holds its message for the
+// boundary. So while a quiet pane shows busy text (transcript text quoting an
+// indicator counts), an if_idle op is skipped and a deliver-now message waits
+// until the reading goes stale, where the quiescence rule alone delivered
+// both: the price of never typing into a running turn.
 func (e *conversationLaneExec) quietBoundary(obs worker.LiveObservation) opjournal.Tri {
 	running, known, err := e.turnOnScreen(e.target)
 	switch {
@@ -431,10 +449,34 @@ func (e *conversationLaneExec) quietBoundary(obs worker.LiveObservation) opjourn
 		return opjournal.TriUnknown
 	case !running:
 		return opjournal.TriYes
-	case obs.LastActivity == nil || obs.LastActivity.IsZero():
+	}
+	return e.staleTurnBoundary(obs)
+}
+
+// staleTurnBoundary is the boundary of a keystroke runtime whose screen shows
+// a running turn: none, unless its pane has drawn nothing for
+// laneScreenTurnQuietLimit, when the reading is stale (noted) and the
+// quiescence rule stands. The look's observation (obs) can only rule that
+// out: its activity can come from a snapshot taken before the turn started,
+// so a pane obs shows quiet that long has its activity read again, now
+// (paneActivity), and the stale verdict rests on that read alone. Without an
+// activity reading the screen decides, and a read that fails is no known
+// boundary (noted).
+func (e *conversationLaneExec) staleTurnBoundary(obs worker.LiveObservation) opjournal.Tri {
+	if obs.LastActivity == nil || obs.LastActivity.IsZero() || e.now().Sub(*obs.LastActivity) < laneScreenTurnQuietLimit {
 		return opjournal.TriNo
 	}
-	quiet := e.now().Sub(*obs.LastActivity)
+	at, known, err := e.paneActivity(e.target)
+	switch {
+	case !known:
+		return opjournal.TriNo
+	case err != nil:
+		e.note("pane_activity", fmt.Errorf("reading session %s's activity after its screen showed a running turn: %w", e.info.ID, err))
+		return opjournal.TriUnknown
+	case at.IsZero():
+		return opjournal.TriNo
+	}
+	quiet := e.now().Sub(at)
 	if quiet < laneScreenTurnQuietLimit {
 		return opjournal.TriNo
 	}
@@ -459,6 +501,22 @@ func laneTurnOnScreen(sp runtime.Provider, target nudgeTarget) (running, known b
 	}
 	running, err = tr.TurnRunning(target.sessionName)
 	return running, true, err
+}
+
+// lanePaneActivity reads the last activity of the session target names from
+// its runtime now (runtime.FreshActivityProvider, on the routed leaf), not
+// from the snapshot a look's observation may have come from. It is known only
+// where that leaf takes such a read.
+func lanePaneActivity(sp runtime.Provider, target nudgeTarget) (at time.Time, known bool, err error) {
+	if target.sessionName == "" {
+		return time.Time{}, false, nil
+	}
+	fa, ok := runtime.FreshActivityFor(sp, target.sessionName)
+	if !ok {
+		return time.Time{}, false, nil
+	}
+	at, err = fa.FreshActivity(target.sessionName)
+	return at, true, err
 }
 
 // quiescenceDeadline is the instant a keystroke runtime that e.idle found
