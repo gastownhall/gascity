@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -25,7 +26,12 @@ func sequences() int {
 // workers, failing on the lowest failing seed.
 func forEachSequence(t *testing.T, check func(seed uint64) error) {
 	t.Helper()
-	n := sequences()
+	forEachN(t, sequences(), check)
+}
+
+// forEachN runs check on seeds 0..n-1 as forEachSequence does.
+func forEachN(t *testing.T, n int, check func(seed uint64) error) {
+	t.Helper()
 	workers := min(runtime.GOMAXPROCS(0), 8)
 	errs := make([]error, n)
 	var wg sync.WaitGroup
@@ -237,7 +243,7 @@ func (s *sim) settleMarks() {
 		if e.Notice.IsZero() || (s.chance(30) && s.now.Sub(e.Notice.At) < 5*time.Minute) {
 			continue
 		}
-		if r, _, ok := SettleNotice(s.rec, e.Notice.Op, NoticeFate(1+s.rng.IntN(4))); ok {
+		if r, _, ok := SettleNotice(s.rec, e.Notice.Op, NoticeFate(1+s.rng.IntN(4)), time.Time{}); ok {
 			s.rec = r
 		}
 	}
@@ -475,8 +481,11 @@ func (s *sim) run() error {
 }
 
 // WL8: whatever a row carried before the ladder first sees it (no cell, or
-// a cell for another generation with any counts), no recycle or release
-// lands within Grace + Base + 2·Base of continuous quiet.
+// a cell for another generation with any counts, or one an earlier build
+// wrote with its per-claim rate-limit flags), no recycle, release or fresh
+// restart lands within Grace + Base + 2·Base of continuous quiet, however
+// many refusals its transcript already holds (RL7): a refusal is an answer
+// only to a nudge delivered in this generation.
 func TestNoDrainWave(t *testing.T) {
 	window := DefaultGrace + DefaultBase + 2*DefaultBase
 	forEachSequence(t, func(seq uint64) error {
@@ -505,9 +514,21 @@ func TestNoDrainWave(t *testing.T) {
 				})
 			}
 		}
+		if prev.V != 0 && rng.IntN(2) == 0 { // written by a per-claim-flag build
+			text := strings.ReplaceAll(EncodeLadder(prev), `"recycle_at":`, `"rate_limit_alerted":true,"fresh_recycled":true,"fresh_served":false,"fresh_queued":true,"recycle_at":`)
+			var err error
+			if prev, err = DecodeLadder(text); err != nil {
+				return fmt.Errorf("an earlier build's cell: %w", err)
+			}
+		}
+		refusals := TurnReading{Read: true, Conv: 1}
+		if n := rng.IntN(5); n > 0 {
+			refusals = TurnReading{Read: true, Conv: 1, LastFailed: true, Refused: n, RefusedAt: t0.Add(-time.Duration(rng.IntN(600)) * time.Second)}
+		}
 		r := prev
 		for now := t0; now.Sub(t0) < window; now = now.Add(time.Duration(1+rng.IntN(60)) * time.Second) {
 			o := quiet(now, 42, work...)
+			o.Conv, o.Turns = 1, refusals
 			if r.V == 0 || r.Gen != 42 {
 				o.Started = started
 			} else {
@@ -521,12 +542,17 @@ func TestNoDrainWave(t *testing.T) {
 			d := Decide(r, o, p)
 			for _, a := range d.Actions {
 				switch a.(type) {
-				case Recycle, Release:
+				case Recycle, Release, FreshRestart, RateLimitMove:
 					return fmt.Errorf("%T at %v after deploy (prev %s)", a, now.Sub(t0), EncodeLadder(prev))
 				}
 			}
 			if d.Changed {
 				r = d.Next
+			}
+			for _, a := range d.Actions {
+				if n, ok := a.(Nudge); ok {
+					r, _ = NudgeDelivered(r, n.Key, 42, now)
+				}
 			}
 		}
 		return nil

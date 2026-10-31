@@ -19,6 +19,12 @@ import (
 // and so does an entry whose last nudge's delivery is unsettled (a
 // NoticeMark), which also holds the seat's nudge slot (WN1). A mark ends with its episode:
 // a new generation, a rung rise and a progress reset clear it.
+//
+// Before acting, on a pass that may act on the seat, the seat's rate-limit
+// episode takes its step (rateLimit): it opens on an answered refusal, paces
+// the seat paused while it stands, asks for at most one fresh restart and
+// raises at most one alert, and closes on service, stale evidence or a
+// changed conversation. A pass that restarts the seat fresh nudges nothing.
 func Decide(prev Record, obs Observation, p Policy) Decision {
 	p = p.withDefaults()
 	now := obs.Now
@@ -59,7 +65,13 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 		e = p.progressReset(e, obs)
 		entries = append(entries, e)
 	}
-	next := Record{V: Version, Gen: obs.Gen, Entries: entries, LastNudge: minTime(prev.LastNudge, now), RecycledGen: prev.RecycledGen}
+	next := Record{
+		V: Version, Gen: obs.Gen, Entries: entries, LastNudge: minTime(prev.LastNudge, now), RecycledGen: prev.RecycledGen,
+		Delivered: minTime(prev.Delivered, now), RateLimit: clampRateLimit(prev.RateLimit, now),
+	}
+	if newGen {
+		next.Delivered = time.Time{}
+	}
 	idx := func(k ClaimKey) int { return slices.IndexFunc(next.Entries, func(e Entry) bool { return e.Key == k }) }
 
 	// 3. A pending release: re-emit while the claim is still outstanding and
@@ -80,24 +92,30 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 	}
 
 	d := Decision{Next: next, Actions: acts}
-	// 4-6. Held, not running, or not quiet: nothing more.
-	if len(next.Entries) == 0 || obs.Gate.Held || obs.Runtime != TriTrue || obs.Quiet.State != Quiescent {
+	// 4. The seat's rate-limit episode, on a pass that may act on the seat.
+	// A fresh restart ends the pass: the seat is restarted, not nudged.
+	if p.rateLimit(&d, obs) {
+		return p.settle(d, prev)
+	}
+	// 5-6. Held, not running, or not quiet: nothing more.
+	if len(next.Entries) == 0 || !obs.seatActs() {
 		return p.settle(d, prev)
 	}
 
-	// 7-8. Quiet: act on the due entries, earliest first.
-	degraded := obs.Provider.Degraded
+	// 7-8. Quiet: act on the due entries, earliest first. A degraded
+	// provider or an open rate-limit episode paces the seat paused (WL4).
+	paused := obs.Provider.Degraded || d.Next.RateLimit.Phase != RateLimitClear
 	order := make([]int, 0, len(d.Next.Entries))
 	for i, e := range d.Next.Entries {
 		if obs.Hold[e.Key] || (d.Next.Release != nil && d.Next.Release.Key == e.Key) || !e.Notice.IsZero() {
 			continue // a read that could not tell, being released, or its last nudge's delivery not yet settled
 		}
-		if !p.dueAt(e, degraded).After(now) {
+		if !p.dueAt(e, paused).After(now) {
 			order = append(order, i)
 		}
 	}
 	slices.SortStableFunc(order, func(a, b int) int {
-		return p.dueAt(d.Next.Entries[a], degraded).Compare(p.dueAt(d.Next.Entries[b], degraded))
+		return p.dueAt(d.Next.Entries[a], paused).Compare(p.dueAt(d.Next.Entries[b], paused))
 	})
 	// The seat's nudge slot: one per pass, none within Base of its last, and
 	// none while a nudge's delivery is unsettled (a notice mark, WN1).
@@ -116,7 +134,7 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 		}
 		t := p.threshold(e.Kind, e.Rung)
 		switch {
-		case degraded: // WL4: deliver, never count, never escalate
+		case paused: // WL4: deliver, never count, never escalate
 			if !nudged {
 				nudge(true)
 			}
@@ -241,16 +259,17 @@ func minTime(t, now time.Time) time.Time {
 
 // dueAt is when a quiet seat's entry is next due: a grace after the entry
 // (or its generation, or its last progress) started, else the backoff after
-// its last nudge. While the provider is degraded the backoff is PausedCap,
-// both floor and cap: delivery goes on, at a steady pace. While the seat
-// refuses nudges (Refused) PausedCap is the floor.
-func (p Policy) dueAt(e Entry, degraded bool) time.Time {
+// its last nudge. While the seat is paced paused (a degraded provider, an
+// open rate-limit episode) the backoff is PausedCap, both floor and cap:
+// delivery goes on, at a steady pace. While the seat refuses nudges
+// (Refused) PausedCap is the floor.
+func (p Policy) dueAt(e Entry, paused bool) time.Time {
 	if e.Attempts == 0 && e.Paused == 0 && !e.Unreleased {
 		return e.Since.Add(p.Grace)
 	}
 	iv := p.backoff(e)
 	switch {
-	case degraded:
+	case paused:
 		iv = p.PausedCap
 	case e.Refused > 0:
 		iv = max(iv, p.PausedCap)
@@ -258,14 +277,15 @@ func (p Policy) dueAt(e Entry, degraded bool) time.Time {
 	return e.Last.Add(iv)
 }
 
-// settle stamps each entry's Next and decides whether the cell changed. Two
-// empty cells are equal whatever their generations, so a seat with nothing
-// outstanding never writes.
+// settle stamps each entry's Next and decides whether the cell changed:
+// exactly when its stored text differs. Two empty cells are equal whatever
+// their generations, so a seat with nothing outstanding and no rate-limit
+// state never writes.
 func (p Policy) settle(d Decision, prev Record) Decision {
 	for i := range d.Next.Entries {
 		d.Next.Entries[i].Next = p.dueAt(d.Next.Entries[i], false)
 	}
-	empty := func(r Record) bool { return len(r.Entries) == 0 && r.Release == nil }
+	empty := func(r Record) bool { return len(r.Entries) == 0 && r.Release == nil && r.RateLimit.IsZero() }
 	switch {
 	case empty(d.Next) && (prev.V == 0 || empty(prev)):
 		d.Changed = false
@@ -275,29 +295,9 @@ func (p Policy) settle(d Decision, prev Record) Decision {
 	return d
 }
 
-// sameRecord reports whether a and b store the same cell text.
-func sameRecord(a, b Record) bool {
-	if a.V != b.V || a.Gen != b.Gen || a.RecycledGen != b.RecycledGen || !a.LastNudge.Equal(b.LastNudge) || len(a.Entries) != len(b.Entries) || (a.Release == nil) != (b.Release == nil) {
-		return false
-	}
-	if a.Release != nil && (a.Release.Key != b.Release.Key || a.Release.Gen != b.Release.Gen || !a.Release.At.Equal(b.Release.At)) {
-		return false
-	}
-	for i, x := range a.Entries {
-		y := b.Entries[i]
-		if x.Key != y.Key || x.Kind != y.Kind || x.Rung != y.Rung || x.Attempts != y.Attempts || x.Paused != y.Paused ||
-			x.Recycles != y.Recycles || x.Escalated != y.Escalated || x.Seed != y.Seed || x.Unreleased != y.Unreleased ||
-			x.Refused != y.Refused || !sameMark(x.Notice, y.Notice) || !x.Since.Equal(y.Since) || !x.Last.Equal(y.Last) || !x.Next.Equal(y.Next) || !x.RecycleAt.Equal(y.RecycleAt) {
-			return false
-		}
-	}
-	return true
-}
-
-// sameMark reports whether a and b store the same notice mark.
-func sameMark(a, b NoticeMark) bool {
-	return a.Op == b.Op && a.Paused == b.Paused && a.At.Equal(b.At)
-}
+// sameRecord reports whether a and b store the same cell text (sameText),
+// so no field the codec writes can be missed.
+func sameRecord(a, b Record) bool { return sameText(a, b) }
 
 // outstanding is ws deduplicated by key (the first wins) in key order.
 func outstanding(ws []Work) []Work {
@@ -418,14 +418,20 @@ func NudgeRefused(r Record, key ClaimKey, attempt int, now time.Time) (out Recor
 	return r, recountPaused(&r.Entries[i], true), true
 }
 
-// NudgeTaken is r after the seat took a nudge about key: its refusals end.
-// ok is false when there were none (no write needed).
-func NudgeTaken(r Record, key ClaimKey) (Record, bool) {
-	i := slices.IndexFunc(r.Entries, func(e Entry) bool { return e.Key == key })
-	if i < 0 || r.Entries[i].Refused == 0 {
-		return r, false
+// NudgeDelivered is r after a direct nudge about key reached the seat at at
+// (the caller's clock right after the delivery returned), in generation gen:
+// the entry's refusals end, and the seat's Delivered moves to at when r is
+// gen's cell and at is newer. A zero at moves nothing. ok is false when
+// nothing changed (no write needed).
+func NudgeDelivered(r Record, key ClaimKey, gen int64, at time.Time) (Record, bool) {
+	changed := false
+	if r.V != 0 && r.Gen == gen {
+		changed = noteDelivered(&r, at)
 	}
-	r.Entries = slices.Clone(r.Entries)
-	r.Entries[i].Refused = 0
-	return r, true
+	if i := slices.IndexFunc(r.Entries, func(e Entry) bool { return e.Key == key }); i >= 0 && r.Entries[i].Refused != 0 {
+		r.Entries = slices.Clone(r.Entries)
+		r.Entries[i].Refused = 0
+		changed = true
+	}
+	return r, changed
 }
