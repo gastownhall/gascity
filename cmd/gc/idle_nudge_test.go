@@ -401,6 +401,37 @@ func TestNudgeStalledPoolClaims_DrainsAWedgedSlotAtCap(t *testing.T) {
 	}
 }
 
+// Kills a drain on the first quiet pass after the cap (ga-uns4sw): every
+// earlier nudge gets idleClaimNudgeBackoff to be answered before the next
+// step, so the last one must too. A slot at the cap whose last nudge was
+// reserved at base is not drained, nudged or latched until base+backoff, and
+// then exactly once.
+func TestNudgeStalledPoolClaims_WaitsOutTheLastBackoffBeforeDraining(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s := atCapSession(base, "tok-1")
+	store := beads.NewMemStoreFrom(0, []beads.Bead{s, {ID: "work-a", Status: "open"}}, nil)
+	open := []beads.Bead{{ID: "work-a", Status: "open"}}
+	drains := &drainRecorder{}
+	var out bytes.Buffer
+	run := func(at time.Time) *runtime.Fake {
+		sp := quietClaimFake(t, at)
+		nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{mustGetTestBead(t, store, s.ID)}, open, nil, at, liveClaimDrain(store, drains.request), &out)
+		return sp
+	}
+	for _, at := range []time.Time{base.Add(10 * time.Second), base.Add(idleClaimNudgeBackoff - time.Second)} {
+		sp := run(at)
+		got := mustGetTestBead(t, store, s.ID)
+		if len(drains.ids) != 0 || sp.CountCalls("Nudge", "session-a") != 0 || got.Metadata[idleClaimNudgeStalledKey] != "" {
+			t.Fatalf("run %s after the last nudge: drains %v, nudges %d, latch %q; want the last attempt's %s backoff to run first; journal %q",
+				at.Sub(base), drains.ids, sp.CountCalls("Nudge", "session-a"), got.Metadata[idleClaimNudgeStalledKey], idleClaimNudgeBackoff, out.String())
+		}
+	}
+	run(base.Add(idleClaimNudgeBackoff))
+	if len(drains.ids) != 1 || drains.ids[0] != s.ID {
+		t.Fatalf("drains after the last nudge's backoff = %v, want exactly one of %s; journal %q", drains.ids, s.ID, out.String())
+	}
+}
+
 // Kills a re-woken incarnation drained on sight (#7752 review, probe P1): a
 // slot restarted at a new incarnation for the same trigger, its marker at the
 // cap and the old latch on it, gets its own grace and nudges before its own
