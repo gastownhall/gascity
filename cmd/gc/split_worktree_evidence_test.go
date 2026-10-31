@@ -35,7 +35,7 @@ func seedEvidenceStep(t *testing.T, store beads.Store, target, ownerRef string) 
 	path := filepath.Join(root, step.ID)
 	spec := worktree.Spec{
 		RepoDir: repo, Root: root, Path: path, Branch: "wt/task/" + step.ID, Base: base,
-		BeadID: step.ID, StoreRef: ownerRef, Creator: "provisioner", Owner: "line",
+		BeadID: step.ID, StoreRef: ownerRef, Creator: "test", Owner: "gc-sling",
 		Generation: "g1", Lifecycle: worktree.LifecycleActive,
 	}
 	report, err := worktree.Ensure(spec)
