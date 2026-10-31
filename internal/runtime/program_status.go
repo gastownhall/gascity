@@ -75,6 +75,7 @@ type ProgramStatus struct {
 	WorkingChildren int
 	Probed          bool // the program sent the support probe this incarnation (doctor)
 	LastError       bool // an error report was seen; sticky across clear (annotation only)
+	Reported        bool // a root report was seen this incarnation: no root then reads cleared, not silent
 	ReaderVerified  bool // the process table confirmed the tap; false when the snapshot was unavailable
 }
 
@@ -286,7 +287,8 @@ type ProgramPaneRow struct {
 //  5. a record of an unknown codec version under a live tap: reader_lost;
 //     otherwise an absent or undecodable record, one whose nonce is not Tap
 //     exactly, or one with an unknown root word: silent (treated as absent);
-//  6. no root: silent if nothing was ever reported (Seq 0), else cleared;
+//  6. no root: silent if no root was ever reported this incarnation (a
+//     probe or child reports alone leave it silent), else cleared;
 //  7. valid, ReaderVerified when the process table confirmed the tap.
 //
 // Only a valid reading carries state.
@@ -318,7 +320,7 @@ func JudgeProgramStatus(row ProgramPaneRow) ProgramStatus {
 	s.Mode = mode
 	s.ReaderVerified = row.TapLiveness == ProgramTapAlive
 	switch {
-	case s.State == "" && s.Seq == 0:
+	case s.State == "" && !s.Reported:
 		s.Validity = ProgramStatusSilent
 	case s.State == "":
 		s.Validity = ProgramStatusCleared

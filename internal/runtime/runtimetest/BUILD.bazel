@@ -10,16 +10,23 @@ go_library(
     srcs = [
         "conformance.go",
         "dolt_env.go",
+        "program_status.go",
+        "program_status_fake.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/runtimetest",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/runtime"],
+    deps = [
+        "//internal/runtime",
+        "//internal/runtime/programstatus",
+        "//internal/runtime/runtimetest/osc7501emitter/emit",
+    ],
 )
 
 go_test(
     name = "runtimetest_test",
     srcs = [
         "conformance_test.go",
+        "program_status_test.go",
         "testenv_import_test.go",
     ],
     embed = [":runtimetest"],

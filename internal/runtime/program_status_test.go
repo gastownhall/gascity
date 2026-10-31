@@ -30,6 +30,7 @@ func armedRow() runtime.ProgramPaneRow {
 			TurnStarts: 1,
 			Probed:     true,
 			LastError:  true,
+			Reported:   true,
 		},
 	}
 }
@@ -148,7 +149,8 @@ func TestJudgeProgramStatusFirstMatchingRuleWins(t *testing.T) {
 		{"absent", func(r *runtime.ProgramPaneRow) { r.RecordForm = runtime.ProgramRecordAbsent }, runtime.ProgramStatusSilent, runtime.ProgramStatusOn, false, false},
 		{"unknown record form", func(r *runtime.ProgramPaneRow) { r.RecordForm = "v9" }, runtime.ProgramStatusSilent, runtime.ProgramStatusOn, false, false},
 		{"unknown root word", func(r *runtime.ProgramPaneRow) { r.Record.State = "sleeping" }, runtime.ProgramStatusSilent, runtime.ProgramStatusOn, false, false},
-		{"no root, never reported", func(r *runtime.ProgramPaneRow) { r.Record.State, r.Record.Seq = "", 0 }, runtime.ProgramStatusSilent, runtime.ProgramStatusOn, false, true},
+		{"no root, never reported", func(r *runtime.ProgramPaneRow) { r.Record.State, r.Record.Seq, r.Record.Reported = "", 0, false }, runtime.ProgramStatusSilent, runtime.ProgramStatusOn, false, true},
+		{"probed only, no root ever reported", func(r *runtime.ProgramPaneRow) { r.Record.State, r.Record.Seq, r.Record.Reported = "", 1, false }, runtime.ProgramStatusSilent, runtime.ProgramStatusOn, false, true},
 		{"no root after reports", func(r *runtime.ProgramPaneRow) { r.Record.State = "" }, runtime.ProgramStatusCleared, runtime.ProgramStatusOn, false, true},
 	}
 	for _, tc := range cases {
