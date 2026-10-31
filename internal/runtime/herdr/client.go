@@ -586,9 +586,13 @@ var startupConfirmStates = []string{"working", "done", "blocked"}
 //     Enter would answer the dialog rather than do nothing. No keystroke —
 //     report it unconfirmed and let the caller record the strand.
 //
-// Unregistered panes (raw shells) keep the best-effort paste+settle+Enter
-// path. A non-nil error means the turn could not be confirmed submitted.
-func (c *client) deliverStartupTurn(ctx context.Context, paneID, text string) error {
+// A pane with no named agent keeps the best-effort paste+settle+Enter path
+// only when mode is bindModeShell: a raw or bare-shell launch registers no
+// agent. A kind launch (bindModeAgent) registers its agent, so its pane with
+// no named agent is one whose agent exited, and the shell that outlived the
+// agent would run the turn as commands. A non-nil error means the turn could
+// not be confirmed submitted.
+func (c *client) deliverStartupTurn(ctx context.Context, paneID, text, mode string) error {
 	args := []string{"agent", "prompt", paneID, text, "--wait"}
 	for _, s := range startupConfirmStates {
 		args = append(args, "--until", s)
@@ -599,6 +603,9 @@ func (c *client) deliverStartupTurn(ctx context.Context, paneID, text string) er
 		return nil
 	}
 	if c.targetHasNoNamedAgent(ctx, paneID, err) {
+		if mode != bindModeShell {
+			return fmt.Errorf("%w; the agent launched on pane %s is gone, and the turn is not typed into the shell it left", err, paneID)
+		}
 		return c.pasteAndSubmit(ctx, paneID, text)
 	}
 	// herdr reports both verdicts through a non-zero exit, which herdrErrorCode

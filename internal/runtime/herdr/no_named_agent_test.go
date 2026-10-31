@@ -302,10 +302,26 @@ func TestDeliverStartupTurnFallsBackWhenThePaneHasNoNamedAgent(t *testing.T) {
 		`{"error":{"code":"agent_not_ready","message":"agent w1:p1 is not an active named agent"},"id":"cli:agent:prompt"}`)
 	c := &client{session: "gc-test", bin: bin}
 
-	if err := c.deliverStartupTurn(context.Background(), "w1:p1", "first turn"); err != nil {
+	if err := c.deliverStartupTurn(context.Background(), "w1:p1", "first turn", bindModeShell); err != nil {
 		t.Fatalf("deliverStartupTurn on a pane with no named agent: %v", err)
 	}
 	assertPasted(t, trace, true)
+}
+
+// TestDeliverStartupTurnNeverPastesIntoAKindLaunchedPane is the fallback's
+// limit. A kind launch registers its agent, so its pane with no named agent is
+// one whose agent exited, and the shell that outlived it would run the first
+// turn as commands. The same rejection that pastes into a raw pane above is
+// reported as an undelivered turn here.
+func TestDeliverStartupTurnNeverPastesIntoAKindLaunchedPane(t *testing.T) {
+	bin, trace := registryFake(t, []string{},
+		`{"error":{"code":"agent_not_ready","message":"agent w1:p1 is not an active named agent"},"id":"cli:agent:prompt"}`)
+	c := &client{session: "gc-test", bin: bin}
+
+	if err := c.deliverStartupTurn(context.Background(), "w1:p1", "first turn", bindModeAgent); err == nil {
+		t.Fatal("deliverStartupTurn reported the first turn delivered to a kind launch's pane with no agent on it")
+	}
+	assertPasted(t, trace, false)
 }
 
 // TestWaitForIdleOutcomeTreatsAPaneWithNoNamedAgentAsNothingToWaitOn covers the

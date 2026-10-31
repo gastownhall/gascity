@@ -2,6 +2,7 @@ package herdr
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 	"time"
 
@@ -35,26 +36,54 @@ type idleWaitOutcome string
 
 const (
 	idleWaitReached idleWaitOutcome = "idle"     // herdr observed the agent idle
+	idleWaitBlocked idleWaitOutcome = "blocked"  // herdr reads the agent as waiting at a dialog
 	idleWaitTimeout idleWaitOutcome = "timeout"  // bound elapsed without idle
 	idleWaitNoAgent idleWaitOutcome = "no_agent" // no registered agent (raw shell pane)
 	idleWaitError   idleWaitOutcome = "error"    // transport or unexpected herdr error
 )
+
+// agentStateBlocked is herdr's agent_status for an agent waiting at a dialog;
+// herdr ≥0.8.2 reads Claude's workspace-trust dialog this way.
+const agentStateBlocked = "blocked"
 
 // waitForIdleOutcome blocks until herdr reports the agent idle or the timeout
 // elapses, via herdr's native `agent wait --until idle` (the ≥0.7.5 flag
 // spelling) — vs the pane-polling tmux does — and returns the verdict
 // distinctly instead of discarding it.
 func (p *Provider) waitForIdleOutcome(ctx context.Context, name string, timeout time.Duration) idleWaitOutcome {
+	// A Claude pane that has finished a turn reports "done", not "idle";
+	// waiting for idle alone never returns for it.
+	return p.waitForAgentStatus(ctx, name, timeout, "idle", "done")
+}
+
+// waitForStartupReadiness is Start's readiness wait: waitForIdleOutcome that
+// also ends when herdr reads the agent as blocked. herdr matches only the
+// states a wait names, so without blocked an agent parked on a dialog — a
+// trust cursor no pass could move, a dialog the matcher does not know, or
+// dialog acceptance turned off — holds the wait for its whole bound. That
+// outlasts Start's own deadline under the default 60s [session]
+// startup_timeout, and Start would fail before the dialog pass, the warning
+// and the withheld or refused first turn that follow the wait.
+func (p *Provider) waitForStartupReadiness(ctx context.Context, name string, timeout time.Duration) idleWaitOutcome {
+	return p.waitForAgentStatus(ctx, name, timeout, "idle", "done", agentStateBlocked)
+}
+
+// waitForAgentStatus runs `agent wait --until <status>…` and classifies the
+// verdict; a blocked match is reported apart from idle or done.
+func (p *Provider) waitForAgentStatus(ctx context.Context, name string, timeout time.Duration, until ...string) idleWaitOutcome {
 	ms := int(timeout / time.Millisecond)
 	if ms < 1 {
 		ms = 1
 	}
-	// A Claude pane that has finished a turn reports "done", not "idle";
-	// waiting for idle alone never returns for it.
-	_, err := p.c.run(ctx, "agent", "wait", herdrAgentName(name), "--until", "idle", "--until", "done", "--timeout", strconv.Itoa(ms))
+	args := []string{"agent", "wait", herdrAgentName(name)}
+	for _, s := range until {
+		args = append(args, "--until", s)
+	}
+	args = append(args, "--timeout", strconv.Itoa(ms))
+	res, err := p.c.run(ctx, args...)
 	switch {
 	case err == nil:
-		return idleWaitReached
+		return matchedStatusOutcome(res)
 	case herdrErrorCode(err) == "timeout":
 		return idleWaitTimeout
 	case p.c.targetHasNoNamedAgent(ctx, herdrAgentName(name), err):
@@ -62,6 +91,22 @@ func (p *Provider) waitForIdleOutcome(ctx context.Context, name string, timeout 
 	default:
 		return idleWaitError
 	}
+}
+
+// matchedStatusOutcome classifies a successful `agent wait` by the agent
+// status herdr matched. A reply that does not decode is an unexpected herdr
+// answer, not a reached idle.
+func matchedStatusOutcome(res json.RawMessage) idleWaitOutcome {
+	var wrap struct {
+		Agent agentInfo `json:"agent"`
+	}
+	if err := json.Unmarshal(res, &wrap); err != nil {
+		return idleWaitError
+	}
+	if normalizeAgentState(wrap.Agent.AgentStatus) == agentStateBlocked {
+		return idleWaitBlocked
+	}
+	return idleWaitReached
 }
 
 // WaitForIdle blocks until herdr reports the agent idle or the timeout

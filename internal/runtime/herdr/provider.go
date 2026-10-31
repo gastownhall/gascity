@@ -89,8 +89,8 @@ func (p *Provider) TeardownServer() error { return p.c.stopServer() }
 
 // Start ensures the shared server is up, prepares the session's working
 // directory (overlay/CopyFiles staging + pre_start), spawns the agent into its
-// placed workspace/tab, runs session_setup, and delivers the startup nudge
-// once the agent reaches idle.
+// placed workspace/tab, accepts its startup dialogs, runs session_setup, and
+// delivers the startup nudge once the agent reaches idle.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if err := p.ConfigureServer(); err != nil {
 		return fmt.Errorf("herdr: configure server: %w", err)
@@ -143,7 +143,6 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 	spec := launchSpecFor(cfg.Command)
 	info := agentInfo{PaneID: paneID, TabID: tabID}
-	adopted := false
 	mode := bindModeShell
 	if spec.Kind != "" {
 		mode = bindModeAgent
@@ -183,13 +182,40 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	if err != nil {
 		return err
 	}
-	// Launch. herdr ≥0.7.5's `agent start` launches a supported agent kind's
-	// canonical executable into the shell pane and blocks until the TUI is
-	// detected (native claude-detection); commands that aren't a clean kind
-	// invocation are exec'd through the pane's shell instead, so the pane
-	// still dies with the command. On agent_name_taken (a concurrent Start
-	// won the name), adopt the live holder or reap a stale one and retry once
-	// — never loop placement, which is the pane/PTY/process storm.
+	info, adopted, err := p.launchCommand(ctx, name, spec, info)
+	if err != nil {
+		return fmt.Errorf("herdr: start %q: %w", name, err)
+	}
+	// Re-persist the binding with the launch's final placement: adoption may
+	// have landed on the live holder's pane rather than the one placed above.
+	// This binding is what keeps IsRunning/paneID resolving the session when
+	// no registry name exists — herdr ≥0.7.4 clears names on occupant change,
+	// and raw/bare-shell sessions never register one (see panebinding.go).
+	if err := p.bindPlacement(name, info, mode); err != nil {
+		return fmt.Errorf("herdr: persist pane binding for %q: %w", name, err)
+	}
+	// Skip every post-launch step when we adopted an already-running holder:
+	// it is a live, already-primed agent whose winning Start already answered
+	// its startup dialogs, ran session_setup and delivered its prime. Re-running
+	// here could answer an in-session dialog, would double session_setup, and
+	// would inject the startup prime into a working session.
+	if adopted || info.PaneID == "" {
+		return nil
+	}
+	return p.launchOrchestration(ctx, name, cfg, launchedPane{paneID: info.PaneID, workDir: workDir, mode: mode}, startupText)
+}
+
+// launchCommand runs the session's command in its placed pane and returns
+// where the session landed and whether Start adopted a live holder of its
+// name. herdr ≥0.7.5's `agent start` launches a supported agent kind's
+// canonical executable into the shell pane and blocks until the TUI is
+// detected (native claude-detection); commands that aren't a clean kind
+// invocation are exec'd through the pane's shell instead, so the pane still
+// dies with the command. On agent_name_taken (a concurrent Start won the
+// name), adopt the live holder or reap a stale one and retry once — never
+// loop placement, which is the pane/PTY/process storm.
+func (p *Provider) launchCommand(ctx context.Context, name string, spec launchSpec, placed agentInfo) (info agentInfo, adopted bool, err error) {
+	info, paneID := placed, placed.PaneID
 	switch {
 	case spec.Kind != "":
 		// herdr requires the target pane to be "an available shell" — a
@@ -207,7 +233,7 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 			// retry burns the attempt against the same stale verdict.
 			select {
 			case <-ctx.Done():
-				return fmt.Errorf("herdr: start %q: %w", name, ctx.Err())
+				return info, false, ctx.Err()
 			case <-time.After(time.Second << attempt):
 			}
 			p.waitPaneShellReady(ctx, paneID)
@@ -215,7 +241,7 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 		if err == nil && adopted && info.PaneID != "" && info.PaneID != paneID {
 			// Adopted a live holder elsewhere: the fresh pane placed above is
 			// surplus — close it (with its tab) or it leaks one shell per adopt.
-			_ = p.c.tabClose(ctx, tabID)
+			_ = p.c.tabClose(ctx, placed.TabID)
 		}
 	case spec.Raw != "":
 		// exec through the shell so the pane's root process becomes the
@@ -230,44 +256,62 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	default:
 		// Empty command: the pane's own shell is the session.
 	}
-	if err != nil {
-		return fmt.Errorf("herdr: start %q: %w", name, err)
+	return info, adopted, err
+}
+
+// launchedPane is a fresh launch as Start's post-launch steps see it.
+type launchedPane struct {
+	paneID  string
+	workDir string // the launch's effective working directory
+	mode    string // bindModeAgent for a kind launch, else bindModeShell
+}
+
+// launchOrchestration runs Start's post-launch steps on a freshly launched
+// agent's pane, mirroring tmux's launchOrchestration: accept startup dialogs
+// before and after the readiness wait, check that the session survived them
+// (Step 5), run session_setup (Step 5.5), then deliver the startup nudge
+// (Step 6). Only the dialog passes fail Start here: when its ctx has ended by
+// the end of a pass, or when the session did not survive them. Even then, a
+// deadline that passes in the readiness wait or the pass after it does not
+// fail a session that is still up (see ignoreDeadlineIfLaunchAlive). Failing
+// Start for anything else would only respawn a live session, so a first turn
+// that cannot be delivered is recorded instead.
+//
+// The first turn has two independent sources, mirroring tmux: a named
+// always-awake Claude session carries its behavioral prime in
+// cfg.PromptSuffix (PromptMode=arg); a pool/sling slot carries its claim
+// instruction in cfg.Nudge; a named session may carry BOTH. herdr launches
+// via exec argv and — unlike tmux/acp/t3bridge — has no shell-arg slot to
+// ride PromptSuffix onto, so without this it would drop the prime, boot a
+// bare `claude` REPL, and (because the resolver already set
+// startupPromptDeliveredEnv, suppressing the SessionStart hook's copy of the
+// prime) leave the agent wholly unprimed and idle. startupDeliveryText
+// returns prime-then-nudge when both are set; a pool slot's claim nudge is
+// returned unchanged. Route it through the one hardened post-idle delivery
+// path. See startupDeliveryText.
+//
+// The identity keys (GC_SESSION_ID/GC_INSTANCE_TOKEN/…) a reconcile tick
+// probes via GetMeta during this window are already in the sidecar: Start
+// seeds the whole cfg.Env before the launch (seedMetaFromEnv), a superset of
+// and earlier than a post-launch identity stamp.
+func (p *Provider) launchOrchestration(ctx context.Context, name string, cfg runtime.Config, launch launchedPane, startupText string) error {
+	acceptDialogs := runtime.ShouldAcceptStartupDialogs(cfg)
+	// Accept startup dialogs (workspace trust, bypass permissions), mirroring
+	// tmux's doStartSession Step 3. It runs before the idle wait, because an
+	// agent parked on a dialog never reports idle, and outside the provisioning
+	// tail's guard, because a session with no first turn still has to get past
+	// its dialog before a later nudge reaches it. Best-effort: the pass after
+	// the idle wait retries a dialog this pass leaves, and reports it if it
+	// persists.
+	if acceptDialogs {
+		_ = p.acceptStartupDialogs(ctx, launch.paneID, launch.workDir)
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("herdr: start %q: accepting startup dialogs: %w", name, err)
+		}
 	}
-	// Re-persist the binding with the launch's final placement: adoption may
-	// have landed on the live holder's pane rather than the one placed above.
-	// This binding is what keeps IsRunning/paneID resolving the session when
-	// no registry name exists — herdr ≥0.7.4 clears names on occupant change,
-	// and raw/bare-shell sessions never register one (see panebinding.go).
-	if err := p.bindPlacement(name, info, mode); err != nil {
-		return fmt.Errorf("herdr: persist pane binding for %q: %w", name, err)
-	}
-	// Post-launch steps mirror tmux's doStartSession ordering: wait for
-	// readiness, run session_setup (Step 5.5), then deliver the startup nudge
-	// (Step 6).
-	//
-	// The first turn has two independent sources, mirroring tmux: a named
-	// always-awake Claude session carries its behavioral prime in
-	// cfg.PromptSuffix (PromptMode=arg); a pool/sling slot carries its claim
-	// instruction in cfg.Nudge; a named session may carry BOTH. herdr launches
-	// via exec argv and — unlike tmux/acp/t3bridge — has no shell-arg slot to
-	// ride PromptSuffix onto, so without this it would drop the prime, boot a
-	// bare `claude` REPL, and (because the resolver already set
-	// startupPromptDeliveredEnv, suppressing the SessionStart hook's copy of the
-	// prime) leave the agent wholly unprimed and idle. startupDeliveryText
-	// returns prime-then-nudge when both are set; a pool slot's claim nudge is
-	// returned unchanged. Route it through the one hardened post-idle delivery
-	// path. See startupDeliveryText.
-	//
-	// The identity keys (GC_SESSION_ID/GC_INSTANCE_TOKEN/…) a reconcile tick
-	// probes via GetMeta during this window are already in the sidecar: Start
-	// seeds the whole cfg.Env before the launch (seedMetaFromEnv above), a
-	// superset of and earlier than a post-launch identity stamp.
-	//
-	// Skip the whole provisioning tail when we adopted an already-running
-	// holder: it is a live, already-primed agent whose winning Start already ran
-	// session_setup and delivered its prime; re-running here would double
-	// session_setup and inject the startup prime into a working session.
-	if !adopted && info.PaneID != "" && (startupText != "" || hasSessionSetup(cfg)) {
+	provision := startupText != "" || hasSessionSetup(cfg)
+	var idleOutcome idleWaitOutcome
+	if provision {
 		// A freshly-spawned agent boots through a shell→TUI handoff before its
 		// input prompt is listening; a paste or submit delivered in that window is
 		// silently swallowed, leaving the agent idle forever instead of running its
@@ -279,39 +323,110 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 		// prompt`, which owns landing the input reliably rather than trusting a bare
 		// `pane run` paste.
 		// Bounded and best-effort: on a boot that never idles we deliver anyway (no
-		// worse than the prior unconditional send), and the reconciler tolerates a
-		// slow Start (pendingCreateNeverStartedTimeout = 10m).
-		idleOutcome := p.waitForIdleOutcome(ctx, name, startupNudgeIdleTimeout)
-		// session_setup runs host-side ("in gc's process via sh -c", per the Config
-		// contract), so herdr can honor it the same way tmux does. Non-fatal, and
-		// ordered before the first turn so the agent's workspace is prepared when
-		// it starts working.
-		p.runSessionSetup(ctx, name, cfg, os.Stderr)
-		// Deliver with submission confirmation: the swallowed-CR strand is
-		// detected (agent_prompt_stalled) and recovered in-band with an explicit
-		// Enter (deliverStartupTurn). An error here means even recovery could not
-		// confirm the first turn started — the session is live, so failing Start
-		// would only trigger a respawn storm; record the strand durably instead
-		// so it is machine-visible and countable. For a warm-bind slot, the
-		// event-based claim nudge (startPreparedStartCandidate's warm-reuse
-		// branch) also re-delivers on the next reconcile tick; for every other
-		// path nudgeStalledPoolClaims remains the reconcile-tick backstop of
-		// last resort.
-		if startupText != "" {
-			if err := p.c.deliverStartupTurn(ctx, info.PaneID, startupText); err != nil {
-				p.recordStartupDeliveryUnconfirmed(name, info.PaneID, idleOutcome, err)
-			}
+		// worse than the prior unconditional send). The wait also ends when herdr
+		// reads the agent as blocked on a dialog: Start's own ctx, not this bound,
+		// is the limit that applies, and waiting out the dialog would end Start
+		// before the pass below or the first turn's verdict ran (see
+		// waitForStartupReadiness).
+		idleOutcome = p.waitForStartupReadiness(ctx, name, startupNudgeIdleTimeout)
+	}
+	// Some CLIs surface trust or permissions dialogs only after their initial
+	// ready screen, and the pass above stops at the first prompt it sees or the
+	// first pane read that fails. Re-run it after the idle wait, as tmux does
+	// after readiness, so a late dialog does not take the first turn; a wait
+	// that ended on blocked leaves this pass the dialog that blocked it. A
+	// session with no first turn has no idle wait, so for it this pass only
+	// retries what the first one left.
+	var dialogErr error
+	if acceptDialogs {
+		dialogErr = p.acceptStartupDialogs(ctx, launch.paneID, launch.workDir)
+		if ctx.Err() != nil {
+			return p.ignoreDeadlineIfLaunchAlive(ctx, name, launch, startupText, idleOutcome)
 		}
+		if dialogErr != nil {
+			_, _ = fmt.Fprintf(startupDialogWarningOut, "warning: session %q: startup dialogs: %v\n", name, dialogErr)
+		}
+		if err := p.confirmSurvivedStartupDialogs(ctx, name, launch); err != nil {
+			return err
+		}
+	}
+	if !provision {
+		return nil
+	}
+	// session_setup runs host-side ("in gc's process via sh -c", per the Config
+	// contract), so herdr can honor it the same way tmux does. Non-fatal, and
+	// ordered before the first turn so the agent's workspace is prepared when
+	// it starts working.
+	p.runSessionSetup(ctx, name, cfg, os.Stderr)
+	if startupText == "" {
+		return nil
+	}
+	// A trust dialog the last pass could not confirm is still on screen with
+	// its cursor off the trust row, possibly on "No, exit", and the first
+	// turn's submit Enter would answer it. Withhold the turn and record the
+	// strand instead.
+	if errors.Is(dialogErr, runtime.ErrWorkspaceTrustUnconfirmed) {
+		p.recordStartupDeliveryUnconfirmed(name, launch.paneID, idleOutcome, fmt.Errorf("first turn withheld: %w", dialogErr))
+		return nil
+	}
+	// Deliver with submission confirmation: the swallowed-CR strand is
+	// detected (agent_prompt_stalled) and recovered in-band with an explicit
+	// Enter (deliverStartupTurn). An error here means even recovery could not
+	// confirm the first turn started — the session is live, so failing Start
+	// would only trigger a respawn storm; record the strand durably instead
+	// so it is machine-visible and countable. For a warm-bind slot, the
+	// event-based claim nudge (startPreparedStartCandidate's warm-reuse
+	// branch) also re-delivers on the next reconcile tick; for every other
+	// path nudgeStalledPoolClaims remains the reconcile-tick backstop of
+	// last resort.
+	if err := p.c.deliverStartupTurn(ctx, launch.paneID, startupText, launch.mode); err != nil {
+		p.recordStartupDeliveryUnconfirmed(name, launch.paneID, idleOutcome, err)
 	}
 	return nil
 }
 
+// ignoreDeadlineIfLaunchAlive settles a Start whose ctx ended during the
+// readiness wait or the dialog pass after it, mirroring tmux's
+// ignoreDeadlineIfSessionAlive. A deadline that passes while the launched
+// session is alive does not fail Start: a slow but healthy boot is live, and
+// failing Start would only respawn it. Start skips its remaining steps, which
+// need the ctx, and records the first turn it did not deliver. A canceled
+// ctx, or a deadline on a session that is gone or could not be checked, fails
+// Start.
+func (p *Provider) ignoreDeadlineIfLaunchAlive(ctx context.Context, name string, launch launchedPane, startupText string, idleOutcome idleWaitOutcome) error {
+	stageErr := fmt.Errorf("accepting startup dialogs after readiness: %w", ctx.Err())
+	if !errors.Is(stageErr, context.DeadlineExceeded) {
+		return fmt.Errorf("herdr: start %q: %w", name, stageErr)
+	}
+	// ctx is over, so the check runs on a bound of its own.
+	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), startupLivenessCheckTimeout)
+	defer cancel()
+	alive, err := p.launchAlive(checkCtx, launch)
+	switch {
+	case err != nil:
+		return fmt.Errorf("herdr: start %q: %w; checking the session after the deadline: %w", name, stageErr, err)
+	case !alive:
+		return fmt.Errorf("herdr: start %q: %w", name, stageErr)
+	}
+	fmt.Fprintf(os.Stderr, "herdr: start %q: %v; the session is live, so Start returns without its remaining startup steps\n", name, stageErr) //nolint:errcheck // best-effort diagnostic
+	if startupText != "" {
+		p.recordStartupDeliveryUnconfirmed(name, launch.paneID, idleOutcome, fmt.Errorf("first turn not delivered: %w", stageErr))
+	}
+	return nil
+}
+
+// startupLivenessCheckTimeout bounds the check that a launched session is
+// still up once Start's own ctx has ended (ignoreDeadlineIfLaunchAlive).
+const startupLivenessCheckTimeout = 5 * time.Second
+
 // metaStartupUnconfirmed is the sidecar key recording that this life's startup
-// first-turn delivery was never confirmed submitted — either the swallowed-CR
-// recovery did not confirm, or the submit landed but never settled into a
-// confirming state. The value carries when, the pane, the readiness-guard
-// verdict, and herdr's error, so a reader can tell those cases apart rather
-// than treating every marker as a stranded turn.
+// first-turn delivery was never confirmed submitted — the swallowed-CR
+// recovery did not confirm, the submit landed but never settled into a
+// confirming state, the turn was withheld because a workspace-trust dialog
+// its submit would answer was still on screen, or Start's deadline passed
+// before it on a live session. The value carries when, the pane, the
+// readiness-guard verdict, and the error, so a reader can tell those cases
+// apart rather than treating every marker as a stranded turn.
 //
 // The key means "the CURRENT life", which takes two writes to hold: Stop's
 // clearMeta wipes it with the session, and Start clears it unconditionally
@@ -418,10 +533,11 @@ func startupPrimeText(cfg runtime.Config) string {
 
 // startupNudgeIdleTimeout bounds how long Start waits for a freshly-spawned
 // agent to reach its idle input prompt before delivering the startup nudge. The
-// wait returns as soon as the agent idles (typically a few seconds); the bound
-// only bites on a boot that never idles, after which delivery proceeds anyway —
-// deliverStartupTurn confirms (or recovers) the submit either way. Sized
-// generously to cover cold, concurrent boots during a town-wide restart.
+// wait returns as soon as the agent idles (typically a few seconds) or herdr
+// reads it blocked on a dialog; the bound only bites on a boot that does
+// neither, after which delivery proceeds anyway — deliverStartupTurn confirms
+// (or recovers) the submit either way. Sized generously to cover cold,
+// concurrent boots during a town-wide restart.
 const startupNudgeIdleTimeout = 60 * time.Second
 
 const (
@@ -653,7 +769,7 @@ func (p *Provider) processAliveByPane(ctx context.Context, name, paneID string, 
 // skip re-priming a live agent.
 func (p *Provider) startAgentAdopting(ctx context.Context, name, kind, paneID string, args []string) (info agentInfo, adopted bool, err error) {
 	hn := herdrAgentName(name) // herdr ≥0.7.5 rejects raw gc session names (invalid_agent_name)
-	started, startErr := p.c.startAgentKind(ctx, hn, kind, paneID, args)
+	started, startErr := p.launchAgentKind(ctx, hn, kind, paneID, args)
 	return resolveAgentNameTaken(started, startErr, agentStartOps{
 		getAgent: func() (agentInfo, bool, error) { return p.c.getAgent(ctx, herdrAgentName(name)) },
 		paneAlive: func(holderPane string) bool {
@@ -661,8 +777,57 @@ func (p *Provider) startAgentAdopting(ctx context.Context, name, kind, paneID st
 			return perr == nil && probe.Exists && probe.Busy
 		},
 		closePane:  func(holderPane string) error { return p.c.closePane(ctx, holderPane) },
-		retryStart: func() (agentInfo, error) { return p.c.startAgentKind(ctx, hn, kind, paneID, args) },
+		retryStart: func() (agentInfo, error) { return p.launchAgentKind(ctx, hn, kind, paneID, args) },
 	})
+}
+
+// launchAgentKind issues the kind launch and counts one that herdr reports
+// blocked at startup as launched. herdr ≥0.8.2's `agent start` exits with
+// agent_not_ready as soon as its detection reads the new agent as blocked —
+// parked on a startup dialog such as Claude's workspace trust — and leaves the
+// agent registered on the pane. Failing Start there would skip the
+// startup-dialog step that answers the dialog while the reconciler still
+// commits the session as live, leaving the agent on the dialog (#7027).
+//
+// Turning a failure into a launch is a grant, so the code is read only from
+// the channels a caller's text cannot write (herdrAnswerCode), and herdr's
+// registry must still hold an agent on paneID. Without one there is no agent
+// to answer, and the first turn would fall back to typing into a bare shell.
+func (p *Provider) launchAgentKind(ctx context.Context, name, kind, paneID string, args []string) (agentInfo, error) {
+	info, err := p.c.startAgentKind(ctx, name, kind, paneID, args)
+	if herdrAnswerCode(err) != "agent_not_ready" {
+		return info, err
+	}
+	blocked, ok, gerr := p.agentOnPane(ctx, paneID)
+	switch {
+	case gerr != nil:
+		return agentInfo{}, fmt.Errorf("%w; confirming the blocked launch: %w", err, gerr)
+	case !ok:
+		return agentInfo{}, fmt.Errorf("%w; herdr lists no agent on pane %s", err, paneID)
+	}
+	return blocked, nil
+}
+
+// agentOnPane returns the agent herdr's registry lists on paneID, if any.
+func (p *Provider) agentOnPane(ctx context.Context, paneID string) (agentInfo, bool, error) {
+	a, ok, err := p.c.getAgent(ctx, paneID)
+	if err != nil || !ok || a.PaneID != paneID {
+		return agentInfo{}, false, err
+	}
+	return a, true, nil
+}
+
+// launchAlive reports whether a launched session is still up. A kind launch
+// is up while herdr lists an agent on its pane: the pane's shell outlives the
+// agent. A raw or bare-shell launch is up while its pane exists, since the
+// pane dies with the command it exec'd.
+func (p *Provider) launchAlive(ctx context.Context, launch launchedPane) (bool, error) {
+	if launch.mode != bindModeAgent {
+		probe, err := p.probePane(ctx, launch.paneID)
+		return probe.Exists, err
+	}
+	_, ok, err := p.agentOnPane(ctx, launch.paneID)
+	return ok, err
 }
 
 // paneBusyRetries bounds how many agent_pane_busy rejections the kind launch
@@ -899,11 +1064,16 @@ func (p *Provider) SendKeys(name string, keys ...string) error {
 	if err != nil || pid == "" {
 		return nil
 	}
+	return p.c.sendKeys(ctx, pid, translateKeys(keys)...)
+}
+
+// translateKeys maps tmux-style key names to herdr's (see translateKey).
+func translateKeys(keys []string) []string {
 	hk := make([]string, len(keys))
 	for i, k := range keys {
 		hk[i] = translateKey(k)
 	}
-	return p.c.sendKeys(ctx, pid, hk...)
+	return hk
 }
 
 // Capabilities reports which optional provider features this backend supports.
