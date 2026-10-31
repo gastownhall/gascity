@@ -151,6 +151,54 @@ func TestMaybePrintWizardProviderGuidanceNeedsAuth(t *testing.T) {
 	}
 }
 
+func TestProviderReadinessProbeNameOrdinaryAliasFallsBackToBuiltinAncestor(t *testing.T) {
+	cfg := config.DefaultCity("alias-city")
+	cfg.Providers = map[string]config.ProviderSpec{
+		"claude-fast": {Base: strPtr("builtin:claude")},
+	}
+	if err := config.BuildResolvedProviderCache(&cfg); err != nil {
+		t.Fatalf("BuildResolvedProviderCache: %v", err)
+	}
+
+	if got := providerReadinessProbeName("claude-fast", &cfg); got != "claude" {
+		t.Fatalf("providerReadinessProbeName(%q) = %q, want %q", "claude-fast", got, "claude")
+	}
+}
+
+func TestProviderReadinessProbeNameRespectsCommandOverride(t *testing.T) {
+	cfg := config.DefaultCity("kiro-city")
+	cfg.Providers = map[string]config.ProviderSpec{
+		"kiro": {
+			Base:    strPtr("builtin:claude"),
+			Command: "kiro-cli",
+		},
+	}
+	if err := config.BuildResolvedProviderCache(&cfg); err != nil {
+		t.Fatalf("BuildResolvedProviderCache: %v", err)
+	}
+
+	if got := providerReadinessProbeName("kiro", &cfg); got != "" {
+		t.Fatalf("providerReadinessProbeName(%q) = %q, want empty: a command override to a non-probeable CLI must not fall back to the builtin ancestor", "kiro", got)
+	}
+}
+
+func TestProviderReadinessProbeNameCanonicalNameCommandOverrideNotMisattributed(t *testing.T) {
+	cfg := config.DefaultCity("kiro-as-claude-city")
+	cfg.Providers = map[string]config.ProviderSpec{
+		"claude": {
+			Base:    strPtr("builtin:claude"),
+			Command: "kiro-cli",
+		},
+	}
+	if err := config.BuildResolvedProviderCache(&cfg); err != nil {
+		t.Fatalf("BuildResolvedProviderCache: %v", err)
+	}
+
+	if got := providerReadinessProbeName("claude", &cfg); got != "" {
+		t.Fatalf("providerReadinessProbeName(%q) = %q, want empty: a canonical provider name whose command is overridden to a non-probeable CLI must not be probed under its own name", "claude", got)
+	}
+}
+
 func TestProviderStatusFixHintIncludesClaudeOAuthToken(t *testing.T) {
 	got := providerStatusFixHint("claude", api.ProbeStatusInvalidConfiguration)
 	for _, want := range []string{"`claude.ai`", "`oauth_token`", "`firstParty`"} {

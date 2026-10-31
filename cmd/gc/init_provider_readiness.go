@@ -391,11 +391,11 @@ func seedDeferredManagedBeadsBeforeProviderReadiness(cityPath string, cfg *confi
 }
 
 func providerReadinessProbeName(ref string, cfg *config.City) string {
-	if api.SupportsProviderReadiness(ref) {
-		return ref
-	}
-	spec, ok := cfg.Providers[ref]
-	if !ok {
+	spec, hasSpec := cfg.Providers[ref]
+	if !hasSpec {
+		if api.SupportsProviderReadiness(ref) {
+			return ref
+		}
 		return ""
 	}
 	candidate := strings.TrimSpace(spec.PathCheck)
@@ -405,11 +405,39 @@ func providerReadinessProbeName(ref string, cfg *config.City) string {
 			candidate = command
 		}
 	}
-	candidate = filepath.Base(candidate)
-	if api.SupportsProviderReadiness(candidate) {
-		return candidate
+	if candidate != "" {
+		if base := filepath.Base(candidate); api.SupportsProviderReadiness(base) {
+			return base
+		}
+		// An explicit command/path_check override that isn't itself a
+		// known readiness target must not be probed under its own
+		// canonical name either -- e.g. a Kiro provider declared
+		// directly as [providers.claude] with command = "kiro-cli" is
+		// not the claude CLI, even though "claude" itself has a probe.
+		return ""
 	}
-	return ""
+	// The leaf spec has no own PathCheck/Command override. ref may be a
+	// canonical readiness-supported name declared with no override (pure
+	// default), or a bare alias like [providers.claude-fast] base =
+	// "builtin:claude": fall back to the already-resolved base chain to
+	// find the built-in it derives from. Only trust that fallback when
+	// the resolved command/path_check actually originates from the
+	// builtin layer itself.
+	if api.SupportsProviderReadiness(ref) {
+		return ref
+	}
+	resolved, ok := cfg.ResolvedProviders[ref]
+	if !ok || !api.SupportsProviderReadiness(resolved.BuiltinAncestor) {
+		return ""
+	}
+	layer, layerSet := resolved.Provenance.FieldLayer["path_check"]
+	if !layerSet {
+		layer, layerSet = resolved.Provenance.FieldLayer["command"]
+	}
+	if layerSet && !strings.HasPrefix(layer, config.BasePrefixBuiltin) {
+		return ""
+	}
+	return resolved.BuiltinAncestor
 }
 
 func providerStatusSummary(status string) string {
