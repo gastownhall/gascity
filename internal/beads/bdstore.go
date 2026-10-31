@@ -3564,6 +3564,11 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 // blocking" reasoning already used for DepListBatch callers elsewhere
 // (e.g. the Postgres backend's IssueRelations gap, ga-7i7ts), just applied
 // before spending the subprocess call instead of after.
+//
+// The blocker-status lookup itself (blockerStatuses) still costs a real
+// subprocess call, unlike the dependency edges above — but a targeted one:
+// see blockerStatuses for why this must never go through List/bd list
+// (ga-ntr7gn).
 func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
 	if len(candidates) == 0 {
 		return candidates, nil
@@ -3590,20 +3595,9 @@ func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
 	for id := range blockerIDSet {
 		blockerIDs = append(blockerIDs, id)
 	}
-	// Status "closed" is what makes this lookup closed-inclusive: it adds
-	// --all server-side and keeps closed rows through ListQuery.Matches. A
-	// default query drops every closed row on both sides, and a closed
-	// blocker is the ONLY kind this veto can ever fire on, so without it the
-	// statusByID lookup below is empty and the whole check is dead code.
-	blockers, err := s.List(ListQuery{IDs: blockerIDs, TierMode: TierBoth, Status: "closed"})
+	statusByID, workOutcomeByID, err := s.blockerStatuses(blockerIDs)
 	if err != nil {
 		return nil, fmt.Errorf("checking blocking dependency outcomes: fetching blockers: %w", err)
-	}
-	statusByID := make(map[string]string, len(blockers))
-	workOutcomeByID := make(map[string]string, len(blockers))
-	for _, b := range blockers {
-		statusByID[b.ID] = b.Status
-		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
 	}
 	result := make([]Bead, 0, len(candidates))
 	for _, c := range candidates {
@@ -3622,6 +3616,97 @@ func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
 		}
 	}
 	return result, nil
+}
+
+// blockerStatuses looks up status and gc.work_outcome for ids via a single
+// batched "bd show" call, the same command Get uses for one ID at a time.
+// This must not go through List: List filters IDs Go-side only (see
+// bdListRequiresClientLimit), so an IDs-filtered List fetches unbounded — here
+// "every closed bead in both tiers of the whole ledger", once per federated
+// leg with a blocking dependency — and that dominated gc ready's wall clock
+// (ga-ntr7gn). bd show resolves exactly the requested IDs instead, in one call.
+//
+// bd show only queries the issues table, so a blocking dependency on a
+// wisp/ephemeral-tier bead is never in its reply. Nor is an omitted ID
+// evidence that the issues table lacks it: bd show skips an ID whose own fetch
+// failed (printing the error to stderr) and still exits 0 when any other ID
+// resolves, and a failure carrying only bd's not-found envelope (a remote bd
+// serve, or a lookup that failed against Dolt; see isBdNotFoundEnvelope) proves
+// nothing either. Every ID bd show did not return is therefore confirmed with
+// the both-tier exact-ID bd query bdShowMissError uses, which also reaches the
+// dotted child IDs molecule steps carry ("ga-abc.1"). Only a bead-level miss
+// from that query (isBdNoIssueMatch, isBdBeadNotFound) or an empty result
+// counts as absent, and a blocker absent from both tiers is the
+// no-evidence-of-blocking degrade filterReadyByWorkOutcome documents. A lookup
+// that failed (bd or its database unreachable, a query bd does not support, an
+// undecodable reply, an ID no exact query can carry) proves nothing about the
+// blocker, and serving the dependent on it would fail the
+// gc.work_outcome=blocked veto open, so it fails the whole lookup instead.
+//
+// ids come from dependency rows that agents can write, so they follow "--":
+// one that begins with "-" must reach bd as an argument, not as a flag.
+func (s *BdStore) blockerStatuses(ids []string) (statusByID, workOutcomeByID map[string]string, err error) {
+	statusByID = make(map[string]string, len(ids))
+	workOutcomeByID = make(map[string]string, len(ids))
+	found := make(map[string]bool, len(ids))
+
+	args := append([]string{"show", "--json", "--"}, ids...)
+	out, showErr := s.runBDTransientRead(args...)
+	switch {
+	case showErr == nil:
+		issues, parseErr := parseIssuesTolerant(extractJSON(out))
+		if parseErr != nil {
+			return nil, nil, fmt.Errorf("bd show (blockers): %w", parseErr)
+		}
+		for _, issue := range issues {
+			b := issue.toBead()
+			statusByID[b.ID] = b.Status
+			workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
+			found[b.ID] = true
+		}
+	case isBdBeadNotFound(showErr):
+		// bd show resolved none of the requested IDs; each is confirmed below.
+		// An infrastructure failure whose text merely says "not found" is not
+		// this case: it takes the default arm.
+	case isBdNotFoundEnvelope(out):
+		// bd show resolved nothing, but the envelope alone does not prove the
+		// issues table lacks these IDs; each is confirmed below.
+	default:
+		return nil, nil, fmt.Errorf("bd show (blockers): %w", showErr)
+	}
+
+	record := func(b Bead) {
+		statusByID[b.ID] = b.Status
+		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
+		found[b.ID] = true
+	}
+	for _, id := range ids {
+		if found[id] {
+			continue
+		}
+		if !isExactIDQueryable(id) {
+			return nil, nil, fmt.Errorf("blocker %q cannot be looked up: no exact bd query can carry its ID", id)
+		}
+		// isExactIDQueryable admits only printable ASCII without '"' or '\',
+		// which strconv.Quote leaves unescaped, so this is exactly id="<id>".
+		qout, qerr := s.runBDTransientRead("query", "--json", "id="+strconv.Quote(id), "--all", "--limit", "1")
+		if qerr != nil {
+			if isBdNoIssueMatch(qerr) || isBdBeadNotFound(qerr) {
+				continue
+			}
+			return nil, nil, fmt.Errorf("confirming blocker %q: bd query: %w", id, qerr)
+		}
+		issues, parseErr := parseIssuesTolerant(extractJSON(qout))
+		if parseErr != nil {
+			return nil, nil, fmt.Errorf("confirming blocker %q: %w", id, parseErr)
+		}
+		for _, issue := range issues {
+			if b := issue.toBead(); b.ID == id {
+				record(b)
+			}
+		}
+	}
+	return statusByID, workOutcomeByID, nil
 }
 
 func bdReadyArgs(q ReadyQuery, includeEphemeral bool) []string {
