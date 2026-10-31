@@ -85,6 +85,7 @@ go_test(
         "testenv_import_test.go",
         "type_naming_test.go",
         "watch_backfill_test.go",
+        "work_payloads_test.go",
     ],
     # The authorship test parses events.go.
     data = ["events.go"],

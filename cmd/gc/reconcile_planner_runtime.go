@@ -235,6 +235,7 @@ func (rt *plannerRuntime) start(parent context.Context) bool {
 	lane.stranded = h.stranded
 	lane.addWaitsStep()
 	lane.addPoolSteps(rt.planner.out.summary.Load, rt.planner.postExecutionStalled)
+	lane.turnReaderFor = workerLadderTurns
 	rt.lane.Store(lane)
 	if h.setInventoryHook != nil {
 		h.setInventoryHook(func(prev, next *ObservationSnapshot) {

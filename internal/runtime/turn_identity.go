@@ -174,6 +174,10 @@ type TurnFailure struct {
 	// RateLimited reports that the provider refused the turn with a rate
 	// limit (HTTP 429, or the source's rate-limit class).
 	RateLimited bool
+	// Quota reports that the source classed the rate limit a spent usage
+	// quota: an allowance that comes back only when the account's period
+	// resets, so a new conversation is refused too. It implies RateLimited.
+	Quota bool
 	// Message is the error's text, bounded by its source: for people, never
 	// for a decision.
 	Message string
