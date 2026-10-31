@@ -50,7 +50,14 @@ filegroup(
 
 go_library(
     name = "schemacontract",
-    srcs = ["schemacontract.go"],
+    srcs = [
+        "baseline.go",
+        "compare.go",
+        "extract.go",
+        "merge.go",
+        "schemacontract.go",
+    ],
+    embedsrcs = ["baseline.json"],
     importpath = "github.com/gastownhall/gascity/internal/schemacontract",
     visibility = ["//:__subpackages__"],
 )
