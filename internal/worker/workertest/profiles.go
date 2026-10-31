@@ -65,6 +65,9 @@ type Profile struct {
 	Fixtures     ProfileFixtureSet
 	Continuation ContinuationOracle
 	Usage        UsageExpectation
+	// ProgramStatus is the profile's OSC 7501 program-status declaration,
+	// held to the WC-PSTAT rows (ProgramStatusCatalog).
+	ProgramStatus ProgramStatusExpectation
 }
 
 // Phase1Profiles returns the canonical phase-1 worker-core profiles.

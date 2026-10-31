@@ -221,8 +221,8 @@ func TestStoreProbeAndSeq(t *testing.T) {
 	s := NewStore(testNonce)
 	s.Probe()
 	got := s.Status()
-	if !got.Probed || got.Seq != 1 {
-		t.Fatalf("probe: %+v", got)
+	if !got.Probed || got.Seq != 1 || got.Reported {
+		t.Fatalf("probe: %+v, want probed, Seq 1, no root reported", got)
 	}
 	s.Probe()
 	if got := s.Status(); got.Seq != 1 {
@@ -283,5 +283,26 @@ func TestStoreEffectiveAppInherits(t *testing.T) {
 	empty := NewStore(testNonce)
 	if got := empty.EffectiveApp(mustParse(t, "state=idle:id=a")); got != "" {
 		t.Errorf("no app anywhere: %q", got)
+	}
+}
+
+// Kills a Store that reads a probe or a child report as a root report, or
+// that forgets a root was reported once it is cleared: the judge tells a
+// silent incarnation from a cleared one by Reported.
+func TestStoreReportedMeansARootWasReported(t *testing.T) {
+	s := NewStore(testNonce)
+	s.Probe()
+	apply(t, s, "state=working:id=sub", at(1))
+	if got := s.Status(); got.Reported || got.Seq == 0 {
+		t.Fatalf("probe and child only: %+v, want changes published but no root reported", got)
+	}
+	apply(t, s, "state=idle", at(2))
+	if !s.Status().Reported {
+		t.Fatal("a root report did not set Reported")
+	}
+	apply(t, s, "state=clear", at(3))
+	s.PromptStart()
+	if got := s.Status(); !got.Reported || got.State != "" {
+		t.Fatalf("after clear: %+v, want no root, Reported kept", got)
 	}
 }

@@ -44,6 +44,7 @@ func sampleStatus() runtime.ProgramStatus {
 		WorkingChildren: 1,
 		Probed:          true,
 		LastError:       true,
+		Reported:        true,
 	}
 }
 
@@ -52,7 +53,7 @@ func TestEncodeGoldenFormat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "v1|a1B2-c_3.%12|17|blocked|permission|1793408464412|1793408400000|3|2|40|1|2|PE|claude-code"
+	const want = "v1|a1B2-c_3.%12|17|blocked|permission|1793408464412|1793408400000|3|2|40|1|2|PER|claude-code"
 	if got != want {
 		t.Fatalf("Encode\n got %s\nwant %s", got, want)
 	}
@@ -72,6 +73,8 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		{Nonce: "r.%0", Progress: -1, State: runtime.ProgramIdle, App: "a+b.c_d-e", Since: time.UnixMilli(1), Seq: 1},
 		{Nonce: "r.%0", Progress: 0, State: runtime.ProgramWorking, Since: time.UnixMilli(5), Seq: 2, Probed: true},
 		{Nonce: "r.%0", Progress: -1, Seq: 9, LastError: true, TurnEnds: 4, TurnStarts: 4, QuietSince: time.UnixMilli(7)},
+		{Nonce: "r.%0", Progress: -1, Seq: 3, Reported: true},
+		{Nonce: "r.%0", Progress: -1, Seq: 3, Probed: true, Reported: true},
 	}
 	for _, s := range statuses {
 		v, err := Encode(s)
@@ -205,6 +208,8 @@ func TestDecodeRejectsForgedFields(t *testing.T) {
 		"unknown flag":              set(12, "X"),
 		"duplicate flag":            set(12, "PP"),
 		"flags out of order":        set(12, "EP"),
+		"reported before error":     set(12, "PRE"),
+		"duplicate reported":        set(12, "RR"),
 		"app too long":              set(13, strings.Repeat("a", 33)),
 		"app outside charset":       set(13, "a=b"),
 		"lowercase version":         "V1" + strings.TrimPrefix(good, "v1"),

@@ -44,6 +44,9 @@ type record struct {
 //     and stamps QuietSince;
 //   - Since moves only when the root's state changes;
 //   - LastError, set by a root error report, survives clear;
+//   - Reported, set by any root report, survives clear, so a reader tells an
+//     incarnation that never reported (only probed, or only children) from
+//     one whose root was cleared;
 //   - Seq increments with every change to the encoded record ([Encode]).
 //
 // Children never start or end the root's turn. A Store is not safe for
@@ -57,6 +60,7 @@ type Store struct {
 	turnStarts uint32
 	turnEnds   uint32
 	probed     bool
+	reported   bool // a root report was applied
 	lastError  bool
 	lastErrMsg string
 	seq        uint64
@@ -81,6 +85,7 @@ func (s *Store) Apply(r Report, now time.Time) {
 		s.dropSubtree(r.ID)
 	default:
 		s.put(r)
+		s.reported = s.reported || r.ID == ""
 	}
 	if r.ID == "" && r.State == runtime.ProgramError {
 		s.lastError, s.lastErrMsg = true, r.Msg
@@ -121,6 +126,7 @@ func (s *Store) Status() runtime.ProgramStatus {
 		TurnEnds:   s.turnEnds,
 		Probed:     s.probed,
 		LastError:  s.lastError,
+		Reported:   s.reported,
 	}
 	for id, rec := range s.records {
 		if id == "" {
