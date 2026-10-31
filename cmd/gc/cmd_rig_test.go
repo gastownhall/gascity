@@ -3547,3 +3547,74 @@ func TestRigAddRollbackRestoresThroughCityTomlSymlink(t *testing.T) {
 	}
 	assertCityTomlSymlinkRestored(t, link, target, symlinkedCityTomlOriginal)
 }
+
+func TestRigAddDryRunPreservesUserData(t *testing.T) {
+	resetFlags(t)
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "preview-city", "[workspace]\n", "")
+	setCwd(t, cityPath)
+	t.Setenv("GC_CITY", cityPath)
+	rigPath := filepath.Join(t.TempDir(), "adopted-rig")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"metadata.json": `{"name":"adopted-rig","issue_prefix":"ar"}`,
+		"config.yaml":   "issue_prefix: ar\n",
+		"issues.jsonl":  "{\"id\":\"ar-1\",\"title\":\"Keep my existing task\",\"status\":\"open\"}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(rigPath, ".beads", name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot := func() []byte {
+		t.Helper()
+		files := make(map[string]string)
+		for _, root := range []string{cityPath, rigPath} {
+			if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return err
+				}
+				if info.IsDir() {
+					files[path] = "directory:" + info.Mode().String()
+				} else {
+					data, readErr := os.ReadFile(path)
+					if readErr != nil {
+						return readErr
+					}
+					files[path] = string(data)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		data, err := json.Marshal(files)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	before := snapshot()
+	var stdout, stderr bytes.Buffer
+	cmd := newRigAddCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{rigPath, "--name", "existing", "--prefix", "ar", "--adopt", "--dry-run", "--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("preview failed: %v; stderr=%s", err, stderr.String())
+	}
+	if after := snapshot(); !bytes.Equal(before, after) {
+		t.Fatalf("preview changed city or existing queue data:\nbefore=%s\nafter=%s", before, after)
+	}
+	var result struct {
+		Action string `json:"action"`
+		Prefix string `json:"prefix"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != "plan" || result.Prefix != "ar" {
+		t.Fatalf("preview must report the proposed action, not a completed add: %s", stdout.String())
+	}
+}

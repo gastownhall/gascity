@@ -80,3 +80,25 @@ func TestProvisionReachesCoreWhenValid(t *testing.T) {
 		t.Fatalf("unexpected core error: got %q, want %q", got, want)
 	}
 }
+
+func TestDryRunDoesNotCreateRigOrReachMutations(t *testing.T) {
+	deps := stubDeps(t.TempDir())
+	req := ProvisionRequest{Name: "preview", Path: filepath.Join(t.TempDir(), "new-rig"), DryRun: true}
+	deps.InitStore = func(string, string, string) (bool, error) { t.Fatal("dry run initialized store"); return false, nil }
+	deps.InitAndHook = func(string, string, string) error { t.Fatal("dry run installed hooks"); return nil }
+	deps.WriteRoutes = func(string, *config.City) error { t.Fatal("dry run wrote routes"); return nil }
+	deps.PostProvision = func(ProvisionContext) error { t.Fatal("dry run reloaded runtime"); return nil }
+	got, result, err := Provision(deps, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "preview" || len(result.Steps) == 0 {
+		t.Fatalf("missing proposed rig: %+v %+v", got, result)
+	}
+	if _, err := deps.FS.Stat(req.Path); err == nil {
+		t.Fatal("dry run created rig directory")
+	}
+	if len(deps.Cfg.Rigs) != 0 {
+		t.Fatal("dry run mutated input config")
+	}
+}

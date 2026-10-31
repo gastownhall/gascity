@@ -100,13 +100,24 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 		return config.Rig{}, result, err
 	}
 
-	// Step 10: create the rig directory when missing.
-	if err := createRigDirIfMissing(fs, rigPath, rigPathExists); err != nil {
+	// Validate existing queue ownership before creating or changing anything.
+	if err := validateAdoptAndBeadsStore(deps, req, rigPath, plan); err != nil {
 		return config.Rig{}, result, err
 	}
+	if req.DryRun {
+		emit(ProvisionStep{Name: "dry-run", Detail: fmt.Sprintf("Dry run: would register rig %q at %s with prefix %q and default branch %q", req.Name, rigPath, plan.prefix, resolvedDefaultBranch)})
+		if req.Adopt {
+			emit(ProvisionStep{Name: "adopt-plan", Detail: "  Would adopt the existing beads queue; preserve its issue IDs and history"})
+		} else {
+			emit(ProvisionStep{Name: "store-plan", Detail: "  Would initialize the rig's beads provider"})
+		}
+		emit(ProvisionStep{Name: "topology-plan", Detail: "  Would write rig topology and routes, install configured imports and hooks, and reload this city"})
+		emit(ProvisionStep{Name: "dry-run-complete", Detail: "  No city configuration, rig files, queue data, hooks or runtime state were changed"})
+		return resolveResultRig(plan.nextCfg, req, resolvedDefaultBranch), result, nil
+	}
 
-	// Step 11: adopt validation, prefix-mismatch guard, fresh-add store guard.
-	if err := validateAdoptAndBeadsStore(deps, req, rigPath, plan); err != nil {
+	// Step 10: create the rig directory when missing.
+	if err := createRigDirIfMissing(fs, rigPath, rigPathExists); err != nil {
 		return config.Rig{}, result, err
 	}
 

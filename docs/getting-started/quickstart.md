@@ -104,8 +104,8 @@ gc rig add ~/code/my-project --name project --prefix proj
 Gas City records the repository's default branch. Check out that branch before
 submitting work. Review the registration changes with Git and commit the
 infrastructure files you want tracked; task setup refuses a dirty checkout.
-If the project already has a beads database, use `gc rig add --adopt` instead
-and preserve a backup of the queue before adoption.
+If the project already has a beads database, use the adoption preview below
+before registering it.
 
 Create a task with specific acceptance criteria, then submit its printed ID:
 
@@ -125,6 +125,37 @@ Diverged branches or a failed fetch stop setup visibly; reconcile them explicitl
 and retain the task. A repository without `origin` uses its local default branch.
 Review, verification, integration and cleanup follow the same rules as the
 practice task. Publication remains a separate choice.
+
+## Adopt an existing beads queue
+
+Keep a recoverable backup of your existing beads database before adoption.
+A JSONL export preserves issue records, dependencies and comments, but it is
+not a full database backup. Use the installed Beads `backup` commands when
+you need Dolt branches, commit history and working-set state as well.
+
+From your Gas City directory, preview the existing project's registration:
+
+```bash
+gc rig add ~/code/my-project --name project --adopt --dry-run
+```
+
+The preview checks the path, existing queue prefix and proposed city topology.
+It reports the proposed rig, prefix and default branch without changing your
+city files, repository, queue, hooks or running sessions. Pack resolution may
+populate a derived download cache. A prefix collision is an error; keep the
+existing issue IDs and resolve the conflicting registration before proceeding.
+
+Read the plan, then apply the same command without `--dry-run`:
+
+```bash
+gc rig add ~/code/my-project --name project --adopt
+gc doctor --json
+```
+
+Inspect existing work with `gc --rig project bd list --all`. Its issue IDs,
+dependencies, comments and statuses should remain intact. Use the same source
+task submission and verification path described above. Adoption does not mean
+old work is complete or permission to start every queued task.
 
 ## Continue with the same city
 

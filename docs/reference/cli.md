@@ -3927,6 +3927,7 @@ gc rig add /path/to/existing --adopt
 | `--adopt` | bool |  | adopt existing .beads/ directory (skip init) |
 | `--allow-ephemeral` | bool |  | register the rig even though its path is on a filesystem that does not survive a restart |
 | `--default-branch` | string |  | mainline branch (default: auto-detect from a remote HEAD — origin preferred — or the current branch) |
+| `--dry-run` | bool |  | preview local registration or adoption without changing city, rig, queue or runtime state |
 | `--git-url` | string |  | git URL to clone into a new rig on a REMOTE city (server-side provisioning) |
 | `--include` | stringArray |  | pack to import into the rig: a source, a pack name, or &lt;binding&gt;=&lt;source&gt; (repeatable) |
 | `--json` | bool |  | Output in JSONL format |

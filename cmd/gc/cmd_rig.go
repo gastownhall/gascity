@@ -73,6 +73,7 @@ func newRigAddCmd(stdout, stderr io.Writer) *cobra.Command {
 	var gitURLFlag string
 	var requestIDFlag string
 	var allowEphemeralFlag bool
+	var dryRunFlag bool
 	cmd := &cobra.Command{
 		Use:   "add <path>",
 		Short: "Register a project as a rig",
@@ -152,6 +153,10 @@ check remains informational.`,
 				fmt.Fprintf(stderr, "gc rig add: %v\n", rerr) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
+			if isRemote && dryRunFlag {
+				fmt.Fprintln(stderr, "gc rig add: --dry-run requires a local city; remote provisioning has no preview surface") //nolint:errcheck // best-effort stderr
+				return errExit
+			}
 			if isRemote {
 				// --allow-ephemeral has no remote surface: ProvisionRequest
 				// carries it, but the remote add never populates it, so honoring
@@ -219,13 +224,17 @@ check remains informational.`,
 					fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 					return errExit
 				}
-				rig, code := doRigAddWithResult(fsys.OSFS{}, cityPath, rigPath, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, io.Discard, stderr, withAllowEphemeralPath(allowEphemeralFlag))
+				rig, code := doRigAddWithResult(fsys.OSFS{}, cityPath, rigPath, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, io.Discard, stderr, withAllowEphemeralPath(allowEphemeralFlag), withRigAddDryRun(dryRunFlag))
 				if code != 0 {
 					return errExit
 				}
-				return writeManagementActionJSON(stdout, rigAddJSONSummary(rigPath, rig))
+				summary := rigAddJSONSummary(rigPath, rig)
+				if dryRunFlag {
+					summary.Action = "plan"
+				}
+				return writeManagementActionJSON(stdout, summary)
 			}
-			if cmdRigAdd(args, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, stdout, stderr, withAllowEphemeralPath(allowEphemeralFlag)) != 0 {
+			if cmdRigAdd(args, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, stdout, stderr, withAllowEphemeralPath(allowEphemeralFlag), withRigAddDryRun(dryRunFlag)) != 0 {
 				return errExit
 			}
 			return nil
@@ -237,6 +246,7 @@ check remains informational.`,
 	cmd.Flags().StringVar(&defaultBranchFlag, "default-branch", "", "mainline branch (default: auto-detect from a remote HEAD — origin preferred — or the current branch)")
 	cmd.Flags().BoolVar(&startSuspended, "start-suspended", false, "add rig in suspended state (dormant-by-default)")
 	cmd.Flags().BoolVar(&adoptFlag, "adopt", false, "adopt existing .beads/ directory (skip init)")
+	cmd.Flags().BoolVar(&dryRunFlag, "dry-run", false, "preview local registration or adoption without changing city, rig, queue or runtime state")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
 	cmd.Flags().StringVar(&gitURLFlag, "git-url", "", "git URL to clone into a new rig on a REMOTE city (server-side provisioning)")
 	cmd.Flags().StringVar(&requestIDFlag, "request-id", "", "idempotency key for a remote --git-url add; reuse it to resume/retry a provision")
@@ -422,12 +432,16 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		Includes:           includes,
 		StartSuspended:     startSuspended,
 		Adopt:              adopt,
+		DryRun:             addOpts.dryRun,
 		AllowEphemeralPath: addOpts.allowEphemeralPath,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 		printCredentialHint(stderr, err)
 		return config.Rig{}, 1
+	}
+	if addOpts.dryRun {
+		return r, 0
 	}
 	if reloaded, loadErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); loadErr != nil {
 		fmt.Fprintf(stderr, "gc rig add: reload provider ownership after rig add: %v\n", loadErr) //nolint:errcheck // best-effort stderr

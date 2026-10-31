@@ -132,6 +132,7 @@ type ProvisionRequest struct {
 	Includes       []string
 	StartSuspended bool
 	Adopt          bool
+	DryRun         bool // validate and report the plan without writing city or rig state
 	// GitURL, when set, is the remote the rig is cloned from at provisioning time
 	// via Deps.CloneGitURL (C3/G15). It is consumed by the clone and never
 	// persisted — no config.Rig field records it — so an embedded credential
@@ -191,6 +192,9 @@ type ProvisionContext struct {
 // provisioning work. Name and Path are always required; the caller is
 // responsible for resolving Path to an absolute location.
 func validateRequest(req ProvisionRequest) error {
+	if req.DryRun && req.GitURL != "" {
+		return errors.New("rig: dry-run does not clone repositories; preview an existing local checkout")
+	}
 	if req.Name == "" {
 		return errors.New("rig: ProvisionRequest.Name is required")
 	}
