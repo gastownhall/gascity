@@ -67,6 +67,13 @@ type sim struct {
 	marks bool
 	ops   int
 	seed  uint64
+	// turns: the caller reads the seat's turns on some passes (a reading
+	// that may show the newest turn failed, service, or nothing).
+	turns bool
+	// served is when the seat's newest completed turn ended, and lastFailed
+	// whether its newest ended turn failed.
+	served     time.Time
+	lastFailed bool
 }
 
 var simKeys = []ClaimKey{key("a"), key("b"), key("c")}
@@ -144,6 +151,12 @@ func (s *sim) step() Observation {
 	s.obs.StartedRead = !s.event(3)
 	if s.event(4) { // the seat did some work
 		s.activity = s.now.Add(-time.Duration(s.rng.IntN(120)) * time.Second)
+		if s.turns { // its turn ended: the provider completed it, or failed it
+			s.lastFailed = s.chance(50)
+			if !s.lastFailed {
+				s.served = s.activity
+			}
+		}
 	}
 	s.obs.LastActivity = s.activity
 	s.obs.Hold = nil
@@ -158,6 +171,9 @@ func (s *sim) step() Observation {
 
 	o := s.obs
 	o.Now, o.Gen, o.Outstanding, o.Started = s.now, s.gen, nil, map[ClaimKey]StartSource{}
+	if s.turns {
+		o.Conv, o.Turns = 1, s.reading()
+	}
 	seeding := s.rec.V == 0 || s.rec.Gen != s.gen
 	for _, k := range simKeys {
 		kind, ok := s.kinds[k]
@@ -175,6 +191,18 @@ func (s *sim) step() Observation {
 		}
 	}
 	return o
+}
+
+// reading is the caller's reading of the seat's turns: now and then none
+// (a read that failed), or one of another conversation (it moved since).
+func (s *sim) reading() TurnReading {
+	switch {
+	case s.chance(10):
+		return TurnReading{}
+	case s.chance(5):
+		return TurnReading{Read: true, Conv: 2, LastFailed: true}
+	}
+	return TurnReading{Read: true, Conv: 1, LastFailed: s.lastFailed, ServedAt: s.served}
 }
 
 func countNudges(d Decision) int {
@@ -268,6 +296,30 @@ func (s *sim) run() error {
 				delete(lastTrigger, e.Key)
 				if !ok {
 					delete(recycles, e.Key)
+				}
+			}
+		}
+
+		// Progress: an entry's count restarts exactly on a pass that may
+		// act on it whose evidence (the newest completed turn when the
+		// newest ended turn failed, else the activity clock) is at least
+		// ProgressReset past its last nudge. A failed turn is never
+		// progress, and a pass that cannot act judges nothing.
+		if prev.V != 0 && prev.Gen == o.Gen {
+			for _, e := range d.Next.Entries {
+				pe, ok := entryOf(prev, e.Key)
+				if !ok || pe.Kind != e.Kind || (e.Rung != pe.Rung && e.Rung != RungEscalated) {
+					continue
+				}
+				acting := !o.Gate.Held && o.Runtime == TriTrue && o.Quiet.State == Quiescent && !o.Hold[e.Key]
+				evidence := o.LastActivity
+				if o.Turns.Read && o.Turns.Conv == o.Conv && o.Turns.LastFailed {
+					evidence = o.Turns.ServedAt
+				}
+				counted := !pe.Last.IsZero() && (pe.Attempts > 0 || pe.Paused > 0 || pe.Unreleased)
+				want := acting && counted && !evidence.Before(pe.Last.Add(DefaultProgressReset))
+				if got := !e.Since.Equal(pe.Since); got != want {
+					return fail("progress: %v reset %v, want %v (acting %v, evidence %v, last %v)", e.Key, got, want, acting, evidence.Sub(t0), pe.Last.Sub(t0))
 				}
 			}
 		}

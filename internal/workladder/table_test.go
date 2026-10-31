@@ -13,8 +13,10 @@ import (
 var updateGolden = flag.Bool("update", false, "rewrite testdata/decision_table.golden")
 
 // TestDecisionTable renders what Decide does for a due entry in every
-// (kind, rung, count) state under each seat condition, for review. A change
-// to the policy or the steps shows here; regenerate with -update.
+// (kind, rung, count) state under each seat condition, for review; "count
+// reset" marks a pass whose judgment of the seat's progress restarted the
+// count. A change to the policy or the steps shows here; regenerate with
+// -update.
 func TestDecisionTable(t *testing.T) {
 	now := t0.Add(10 * time.Hour)
 	type row struct {
@@ -60,6 +62,13 @@ func TestDecisionTable(t *testing.T) {
 		{"gate held", func(o *Observation) { o.Gate.Held = true }},
 		{"not quiet", func(o *Observation) { o.Quiet.State = NotQuiet }},
 		{"runtime dead", func(o *Observation) { o.Runtime = TriFalse }},
+		{"quiet, worked since", workedSince(nil)},
+		{"not quiet, worked since", workedSince(func(o *Observation) { o.Quiet.State = NotQuiet })},
+		{"gate held, worked since", workedSince(func(o *Observation) { o.Gate.Held = true })},
+		{"quiet, worked since, newest turn failed", workedSince(func(o *Observation) { o.Turns = TurnReading{Read: true, Conv: 1, LastFailed: true} })},
+		{"quiet, newest turn failed, served since", workedSince(func(o *Observation) {
+			o.Turns = TurnReading{Read: true, Conv: 1, LastFailed: true, ServedAt: o.Now.Add(-5 * time.Minute)}
+		})},
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "# workladder decision table (DefaultPolicy; a due entry; next = when the entry is next due)\n\n")
@@ -89,7 +98,11 @@ func TestDecisionTable(t *testing.T) {
 			if len(acts) == 0 {
 				acts = []string{"-"}
 			}
-			fmt.Fprintf(&b, " %s; next %v |", strings.Join(acts, " + "), nextLook(d, now, o.Provider.Degraded))
+			reset := ""
+			if len(d.Next.Entries) > 0 && !d.Next.Entries[0].Since.Equal(r.e.Since) {
+				reset = "count reset; "
+			}
+			fmt.Fprintf(&b, " %s%s; next %v |", reset, strings.Join(acts, " + "), nextLook(d, now, o.Provider.Degraded))
 		}
 		b.WriteString("\n")
 	}
@@ -109,6 +122,17 @@ func TestDecisionTable(t *testing.T) {
 	}
 	if got != string(want) {
 		t.Fatalf("decision table drifted; review and regenerate with -update:\n%s", got)
+	}
+}
+
+// workedSince is a column whose seat worked five minutes ago, long after
+// the table's last nudge, with mut applied.
+func workedSince(mut func(*Observation)) func(*Observation) {
+	return func(o *Observation) {
+		o.Conv, o.LastActivity = 1, o.Now.Add(-5*time.Minute)
+		if mut != nil {
+			mut(o)
+		}
 	}
 }
 

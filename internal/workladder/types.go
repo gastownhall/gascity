@@ -124,6 +124,30 @@ type Observation struct {
 	LastActivity time.Time
 	Gate         Gate
 	Provider     ProviderState
+	// Conv is the row's conversation: its continuation epoch.
+	Conv int64
+	// Turns is what the seat's own turns said on this pass; the zero value
+	// is no reading, and progress is then judged on the activity clock.
+	Turns TurnReading
+}
+
+// TurnReading is one read of the seat's turns, reduced to what Decide
+// judges progress by. A turn the provider failed is not progress: when the
+// newest ended turn failed, only a turn the provider completed shows the
+// seat at work. A reading of another conversation than the observation's
+// is no reading.
+type TurnReading struct {
+	// Read is true when the turns were read; false is no reading (a family
+	// that records no turns, a read that failed, a pass that read none).
+	Read bool
+	// Conv is the conversation (continuation epoch) the turns were read in.
+	Conv int64
+	// LastFailed reports that the newest ended turn failed, whatever the
+	// cause, and no turn is open.
+	LastFailed bool
+	// ServedAt is when the newest turn the provider completed ended,
+	// anywhere in the turns read; zero when none did.
+	ServedAt time.Time
 }
 
 // Policy is the ladder's pacing. DefaultPolicy is OD7's.
