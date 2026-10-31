@@ -137,6 +137,45 @@ func (in bdClassGuardInput) checkEdgeEndpoints(ids ...string) string {
 	return ""
 }
 
+// mintIDRefusal says why bd must not mint a new bead under one of ids, the
+// explicit ids a create names, or returns "". gc's by-id routing answers such
+// an id from a class binding rather than from this work store in two cases:
+// the id is inside a reserved namespace, or the binding holds a bead with that
+// id. The second is a migrated city's ordinary state: `gc storage migrate`
+// moves a bead with its id preserved and clears the work store's copy, so bd
+// would mint the id here afresh while every by-id gc command keeps answering
+// from the binding's bead. A binding gc cannot ask is a refusal, as it is for
+// an edge endpoint. Empty ids (bd mints its own) are skipped; the binding is
+// asked once for all the rest.
+func (in bdClassGuardInput) mintIDRefusal(ids ...string) string {
+	var ask []string
+	for _, id := range ids {
+		if id == "" || slices.Contains(ask, id) {
+			continue
+		}
+		if bdIDIsClassReserved(id) { // residency:allow — refuses minting a NEW bead inside a reserved namespace; resolves no bead
+			return fmt.Sprintf("id %s is inside a class binding's reserved namespace, so the bead would answer to a store that never holds it", id)
+		}
+		ask = append(ask, id)
+	}
+	if len(ask) == 0 {
+		return ""
+	}
+	if in.held == nil {
+		return fmt.Sprintf("gc cannot check whether the class binding holds %s", strings.Join(ask, ", "))
+	}
+	held, err := in.held(ask)
+	if err != nil {
+		return fmt.Sprintf("gc could not check whether the class binding holds %s (%v)", strings.Join(ask, ", "), err)
+	}
+	for _, id := range ask {
+		if held[id] {
+			return fmt.Sprintf("the class binding holds a bead with id %s (gc storage migrate keeps a moved bead's id), so every by-id gc command would answer from that bead and never reach the new one", id)
+		}
+	}
+	return ""
+}
+
 // bdDepsEndpoints returns the ids a create --deps value names: each element is
 // "<id>" or "<type>:<id>".
 func bdDepsEndpoints(values []string) []string {
@@ -180,8 +219,10 @@ func judgeBdCreate(in bdClassGuardInput) bdClassGuard {
 	if len(in.args.Values("--file")) > 0 {
 		return in.refuse("gc bd %s --file: refused on this split city: bd's multi-issue markdown is not classified by gc. Create the beads one at a time with flags. Nothing was written.", in.path)
 	}
-	if id, ok := in.args.Last("--id"); ok && bdIDIsClassReserved(id) { // residency:allow — refuses minting a NEW bead inside a reserved namespace; resolves no bead
-		return in.refuse("gc bd %s --id %s: refused on this split city: that id is inside a class binding's reserved namespace, so the bead would answer to a store that never holds it. Nothing was written.", in.path, id)
+	if id, ok := in.args.Last("--id"); ok {
+		if why := in.mintIDRefusal(id); why != "" {
+			return in.refuse("gc bd %s --id %s: refused on this split city: %s. Omit --id to let bd mint one. Nothing was written.", in.path, id, why)
+		}
 	}
 	var shape beads.Bead
 	if t, ok := in.args.Last("--type"); ok {
