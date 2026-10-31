@@ -4825,6 +4825,59 @@ func TestProcessWorkflowFinalizeClosesOpenBlockedSourceAndStopsChain(t *testing.
 	}
 }
 
+// TestProcessWorkflowFinalizeClosesSourceChainPastUnblockedWorkOutcomes
+// guards the complement of the blocked stop: a closed source whose
+// gc.work_outcome is any unblocked value (or none) still closes its parents
+// with gc.outcome=pass, exactly as before the blocked-source stop existed.
+func TestProcessWorkflowFinalizeClosesSourceChainPastUnblockedWorkOutcomes(t *testing.T) {
+	t.Parallel()
+
+	for _, workOutcome := range []string{"shipped", "no-op", "abandoned", ""} {
+		name := "work_outcome=" + workOutcome
+		if workOutcome == "" {
+			name = "work_outcome=unset"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSourceChainFinalizeFixture(t)
+			metadata := map[string]string{}
+			if workOutcome != "" {
+				metadata["gc.work_outcome"] = workOutcome
+			}
+			mustStampSourceBead(t, f.rigStore, f.rigLaunch.ID, "closed", metadata)
+			var trace bytes.Buffer
+
+			result, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{
+				ResolveStoreRef: f.resolver,
+				Tracef: func(format string, args ...any) {
+					fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
+				},
+			})
+			if err != nil {
+				t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+			}
+			if !result.Processed || result.Action != "workflow-pass" {
+				t.Fatalf("workflow result = %+v, want processed workflow-pass", result)
+			}
+
+			citySourceAfter, err := f.cityStore.Get(f.citySource.ID)
+			if err != nil {
+				t.Fatalf("get city source: %v", err)
+			}
+			if citySourceAfter.Status != "closed" {
+				t.Fatalf("city source status = %q for gc.work_outcome=%q, want closed (only blocked holds the chain)", citySourceAfter.Status, workOutcome)
+			}
+			if got := citySourceAfter.Metadata["gc.outcome"]; got != "pass" {
+				t.Errorf("city source gc.outcome = %q for gc.work_outcome=%q, want pass", got, workOutcome)
+			}
+			if strings.Contains(trace.String(), "blocked_source") {
+				t.Errorf("trace mentions blocked_source for gc.work_outcome=%q; only blocked holds the chain:\n%s", workOutcome, trace.String())
+			}
+		})
+	}
+}
+
 func TestProcessWorkflowFinalizeClosesSourcesUnderProvidedLock(t *testing.T) {
 	t.Parallel()
 
