@@ -1682,7 +1682,12 @@ func (c *CachingStore) prime(ctx context.Context) error {
 				}
 				continue
 			}
-			if current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
+			// Absence from the active-only listing is not a close: the row may
+			// be closed, deleted, or merely omitted. An open row is carried for
+			// the next reconcile's per-id re-verify (recoverMissingFromList),
+			// which announces a close exactly once; dropping it here would lose
+			// that announcement for good. Only a row held closed is dropped.
+			if current.Status != "closed" {
 				nextBeads[id] = cloneBead(current)
 				if deps, ok := c.deps[id]; ok {
 					nextDeps[id] = cloneDeps(deps)
@@ -1712,10 +1717,10 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		c.readyProjectionLost = nextReadyLost
 		c.deletedSeq = make(map[string]uint64)
 		// The replace dropped every beadSeq fence and the deletion fences;
-		// like an eviction, it keeps the write fences of the rows it drops
-		// for the next reconcile to retain. It runs only when no mutation
-		// followed startSeq, so every start below the current seq saw one
-		// and is refused wholesale (writeFencedLocked).
+		// like an eviction, it keeps the write fences of the rows it drops,
+		// the ones it held closed, for the next reconcile to retain. It runs
+		// only when no mutation followed startSeq, so every start below the
+		// current seq saw one and is refused wholesale (writeFencedLocked).
 		c.fenceFloor = c.mutationSeq
 	} else {
 		for id, b := range beadMap {

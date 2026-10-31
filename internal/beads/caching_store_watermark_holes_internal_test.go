@@ -947,10 +947,13 @@ func TestCachingStoreGetAnswersRowDroppedByFullReplace(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	ageLocalWrite(cache, row.ID)
-	// Closed around the cache, so the active full scan drops it while the
-	// backing still has it.
+	// Closed around the cache and installed closed by a live list, so the
+	// active full scan drops it while the backing still has it.
 	if err := backing.Close(row.ID); err != nil {
 		t.Fatalf("backing Close: %v", err)
+	}
+	if _, err := cache.List(ListQuery{AllowScan: true, IncludeClosed: true, Live: true}); err != nil {
+		t.Fatalf("live List: %v", err)
 	}
 	cache.mu.Lock()
 	cache.noteMutationLocked(row.ID)

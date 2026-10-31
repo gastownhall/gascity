@@ -1105,16 +1105,16 @@ func TestCachingStoreRefreshRowReport(t *testing.T) {
 		},
 		{
 			// An out-of-band close of a row this cache wrote but never
-			// announced closed, dropped silently by a full Prime before the
-			// refresh: the cache's write fence for the row is no evidence the
-			// close went out, so the refresh announces it.
-			name: "oob_close_of_written_row_dropped_by_prime",
+			// announced closed, missing from a full Prime's active listing
+			// before the refresh: the Prime carries the row open, so the
+			// refresh installs the close over it and announces it.
+			name: "oob_close_of_written_row_carried_by_prime",
 			setup: func(t *testing.T, cache *CachingStore, backing Store) string {
 				id := mustCreateCached(t, cache).ID
 				if err := cache.SetMetadata(id, "k", "v"); err != nil {
 					t.Fatalf("SetMetadata: %v", err)
 				}
-				// Past the recency keep, so the full Prime drops the row.
+				// Past the recency keep, so only the carry keeps the row.
 				ageLocalWriteBy(cache, id, 10*time.Second)
 				if err := backing.Close(id); err != nil {
 					t.Fatalf("backing Close: %v", err)
@@ -1122,13 +1122,13 @@ func TestCachingStoreRefreshRowReport(t *testing.T) {
 				if err := cache.Prime(context.Background()); err != nil {
 					t.Fatalf("Prime: %v", err)
 				}
-				if _, held, _ := cachedRowState(cache, id); held {
-					t.Fatal("the full Prime kept the closed row")
+				if got, held, _ := cachedRowState(cache, id); !held || got.Status != "open" {
+					t.Fatalf("after the full Prime held=%v status=%q, want the row held open", held, got.Status)
 				}
 				return id
 			},
 			opts:      RowRefreshOptions{AnnounceUnheldClose: true, YieldToLocalWrites: true},
-			wantFound: true, wantEvent: "bead.closed", wantStatus: "closed",
+			wantFound: true, wantHeld: true, wantEvent: "bead.closed", wantStatus: "closed",
 		},
 		{
 			// A close RefreshRow installed over no cached row without

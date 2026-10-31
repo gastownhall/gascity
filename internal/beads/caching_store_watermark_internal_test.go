@@ -1471,8 +1471,8 @@ func TestCachingStorePrimeKeepsWriteRevisionsOfDroppedRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := backing.Close(dropped.ID); err != nil {
-		t.Fatalf("backing Close: %v", err)
+	if err := cache.Close(dropped.ID); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 	ageLocalWrite(cache, kept.ID)
 	ageLocalWrite(cache, dropped.ID)
@@ -1486,7 +1486,7 @@ func TestCachingStorePrimeKeepsWriteRevisionsOfDroppedRows(t *testing.T) {
 	_, droppedRow := cache.beads[dropped.ID]
 	cache.mu.RUnlock()
 	if droppedRow {
-		t.Fatal("prime kept the out-of-band closed row; the drop was not exercised")
+		t.Fatal("prime kept the closed row; the drop was not exercised")
 	}
 	if !keptRev || !droppedRev || !droppedAt {
 		t.Fatalf("after prime writeSeq kept=%v dropped=%v, writeAt dropped=%v; want all true", keptRev, droppedRev, droppedAt)
