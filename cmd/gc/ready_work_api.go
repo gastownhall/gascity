@@ -15,20 +15,23 @@ import (
 
 var _ api.ReadyWorkReader = (*controllerState)(nil)
 
-// configFreshness lets a ready-work read show that the config the controller
-// holds, and so the set of stores its legs read, is the one on disk.
+// configFreshness lets a controller read show that the config it answers from,
+// and so the set of stores it reads, is the one the controller has published
+// and is not being replaced or left behind by a failed reload.
 //
-// The dirty flag alone cannot show it. A reload clears the flag as it begins
-// and publishes the new config only as it ends; an API config write changes the
-// files before it sets the flag; a failed reload leaves the flag clear while
-// disk and controller differ. So each reload and API config write is marked in
-// progress from before it clears the flag or writes a file until it has
+// A reload publishes its new config and stores only as it ends, and an API
+// config write changes the files before its reload runs; either may swap the
+// stores a read holds. So each reload and API config write is marked in
+// progress from before it clears the dirty flag or writes a file until it has
 // published, a failed reload is remembered until a later one applies or finds
 // no change, and a read answers only when no change began during it, from
 // assembling its legs to its last store read. A failed reload is remembered
-// here, not by setting the flag again, which would rerun a failing reload every
-// tick. An edit made on disk is covered once the config watcher sets the flag,
-// not before.
+// here, not by setting the dirty flag again, which would rerun a failing
+// reload every tick.
+//
+// The dirty flag itself is not consulted. It records only that a reload is
+// due, and the config and stores a read holds are one generation whatever it
+// reads; an edit on disk reaches the read at the next reload.
 type configFreshness struct {
 	changing     atomic.Int64  // reloads and API config writes in progress
 	began        atomic.Uint64 // reloads and API config writes ever begun
@@ -67,18 +70,15 @@ func (f *configFreshness) endReload(outcome reloadOutcome) {
 	f.changing.Add(-1)
 }
 
-// read runs answer and reports whether it ran under a current config: no
-// change pending on dirty, none in progress, no failed reload, and no change
-// begun or marked pending while answer ran. The config watcher marks an edit
-// pending without beginning a change, so dirty is checked again after answer.
-func (f *configFreshness) read(dirty *atomic.Bool, answer func()) bool {
-	pending := func() bool { return dirty != nil && dirty.Load() }
+// read runs answer and reports whether it ran under the published config: no
+// change in progress, no failed reload, and no change begun while answer ran.
+func (f *configFreshness) read(answer func()) bool {
 	began := f.began.Load()
-	if f.changing.Load() != 0 || pending() || f.reloadFailed.Load() {
+	if f.changing.Load() != 0 || f.reloadFailed.Load() {
 		return false
 	}
 	answer()
-	return f.began.Load() == began && !pending()
+	return f.began.Load() == began
 }
 
 // freshness is the ready-work freshness marker of this runtime's API state, or
@@ -134,11 +134,7 @@ func (cs *controllerState) ReadyWork(ctx context.Context, q readywork.Query) ([]
 	// The refusal outranks an error from the same read: a read taken under a
 	// changing config shows nothing, and the in-process read the refusal sends
 	// the CLI to meets any failure that persists.
-	//
-	// The dirty flag is not passed (nil): it records only that a reload is
-	// due, and a refusal keyed on it turned the endpoint off on
-	// maintainer-city (8d5: 0 of 60 requests answered).
-	if !cs.freshness.read(nil, func() {
+	if !cs.freshness.read(func() {
 		var legs []readywork.Leg
 		if legs, err = cs.readyWorkLegs(ctx); err == nil {
 			rows, err = readywork.ReadContext(ctx, legs, q)

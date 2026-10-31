@@ -648,9 +648,9 @@ func writeFileMkdir(path, data string) error {
 	return os.WriteFile(path, []byte(data), 0o644)
 }
 
-// TestConfigFreshnessRead pins when a ready-work read may answer: nothing
-// pending, nothing in progress, the last reload applied or found no change, and
-// no change begun or marked pending while it answered.
+// TestConfigFreshnessRead pins when a controller read may answer: nothing in
+// progress, the last reload applied or found no change, and no change begun
+// while it answered.
 func TestConfigFreshnessRead(t *testing.T) {
 	reload := func(outcome reloadOutcome) func(*configFreshness) {
 		return func(f *configFreshness) {
@@ -663,15 +663,12 @@ func TestConfigFreshnessRead(t *testing.T) {
 		f.endChange()
 	}
 	for _, tc := range []struct {
-		name        string
-		dirty       bool
-		before      []func(*configFreshness)
-		during      func(*configFreshness)
-		dirtyDuring bool
-		want        bool
+		name   string
+		before []func(*configFreshness)
+		during func(*configFreshness)
+		want   bool
 	}{
 		{name: "current", want: true},
-		{name: "a change is pending", dirty: true},
 		{name: "a change is in progress", before: []func(*configFreshness){(*configFreshness).beginChange}},
 		{name: "the last reload applied", before: []func(*configFreshness){reload(reloadOutcomeApplied)}, want: true},
 		{name: "the last reload found no change", before: []func(*configFreshness){reload(reloadOutcomeNoChange)}, want: true},
@@ -683,24 +680,17 @@ func TestConfigFreshnessRead(t *testing.T) {
 		{name: "an API write does not clear a failed reload", before: []func(*configFreshness){reload(reloadOutcomeFailed), apiWrite}},
 		{name: "a change began during the answer", during: (*configFreshness).beginChange},
 		{name: "a change began and ended during the answer", during: apiWrite},
-		// The config watcher marks an edit it saw pending without beginning a change.
-		{name: "a change was marked pending during the answer", dirtyDuring: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var fresh configFreshness
 			for _, step := range tc.before {
 				step(&fresh)
 			}
-			var dirty atomic.Bool
-			dirty.Store(tc.dirty)
 			answers := 0
-			got := fresh.read(&dirty, func() {
+			got := fresh.read(func() {
 				answers++
 				if tc.during != nil {
 					tc.during(&fresh)
-				}
-				if tc.dirtyDuring {
-					dirty.Store(true)
 				}
 			})
 			if got != tc.want {
@@ -711,16 +701,6 @@ func TestConfigFreshnessRead(t *testing.T) {
 			}
 		})
 	}
-	t.Run("a state without a dirty flag reads on the marker alone", func(t *testing.T) {
-		var fresh configFreshness
-		if !fresh.read(nil, func() {}) {
-			t.Fatal("read with no dirty flag refused a current config")
-		}
-		fresh.beginChange()
-		if fresh.read(nil, func() {}) {
-			t.Fatal("read with no dirty flag answered while a change is in progress")
-		}
-	})
 	t.Run("a runtime without an API state keeps no marker", func(t *testing.T) {
 		fresh := (&CityRuntime{}).freshness()
 		if fresh != nil {
