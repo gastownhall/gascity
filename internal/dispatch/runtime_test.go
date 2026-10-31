@@ -4516,6 +4516,125 @@ func TestProcessWorkflowFinalizeRetriesWhenSourceStoreResolverFails(t *testing.T
 	}
 }
 
+// stampSourceChainFixture puts the fixture's rig launch bead (the workflow's
+// source) into sourceStatus with sourceMeta, and stamps rootMeta on the
+// workflow root, before the passing finalizer runs.
+func stampSourceChainFixture(t *testing.T, f sourceChainFinalizeFixture, sourceStatus string, sourceMeta, rootMeta map[string]string) {
+	t.Helper()
+	if len(sourceMeta) > 0 {
+		if err := f.rigStore.SetMetadataBatch(f.rigLaunch.ID, sourceMeta); err != nil {
+			t.Fatalf("stamp source metadata: %v", err)
+		}
+	}
+	if sourceStatus != "open" {
+		if err := f.rigStore.Update(f.rigLaunch.ID, beads.UpdateOpts{Status: &sourceStatus}); err != nil {
+			t.Fatalf("set source status %q: %v", sourceStatus, err)
+		}
+	}
+	if len(rootMeta) > 0 {
+		if err := f.rigStore.SetMetadataBatch(f.workflow.ID, rootMeta); err != nil {
+			t.Fatalf("stamp root metadata: %v", err)
+		}
+	}
+}
+
+// finalizeSourceChainFixture runs the fixture's workflow-finalize with opts
+// and returns the result and the captured trace.
+func finalizeSourceChainFixture(t *testing.T, f sourceChainFinalizeFixture, opts ProcessOptions) (ControlResult, string) {
+	t.Helper()
+	var trace bytes.Buffer
+	opts.Tracef = func(format string, args ...any) {
+		fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
+	}
+	result, err := ProcessControl(f.rigStore, f.finalizer, opts)
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v\ntrace:\n%s", err, trace.String())
+	}
+	return result, trace.String()
+}
+
+// assertSourceChainHeldAtBlockedSource checks a passing finalize that closed
+// the workflow and its blocked source but left the source's parent open.
+func assertSourceChainHeldAtBlockedSource(t *testing.T, f sourceChainFinalizeFixture, result ControlResult, trace string) {
+	t.Helper()
+	if !result.Processed || result.Action != "workflow-pass" {
+		t.Fatalf("result = %+v, want processed workflow-pass", result)
+	}
+	if got := mustGetBead(t, f.rigStore, f.workflow.ID); got.Status != "closed" {
+		t.Fatalf("workflow root status = %q, want closed", got.Status)
+	}
+	if got := mustGetBead(t, f.rigStore, f.finalizer.ID); got.Status != "closed" {
+		t.Fatalf("finalizer status = %q, want closed", got.Status)
+	}
+	source := mustGetBead(t, f.rigStore, f.rigLaunch.ID)
+	if source.Status != "closed" {
+		t.Fatalf("blocked source status = %q, want closed", source.Status)
+	}
+	if got := source.Metadata[beadmeta.WorkOutcomeMetadataKey]; got != beadmeta.WorkOutcomeBlocked {
+		t.Fatalf("blocked source gc.work_outcome = %q, want %q", got, beadmeta.WorkOutcomeBlocked)
+	}
+	if got := source.Metadata[beadmeta.OutcomeMetadataKey]; got != beadmeta.OutcomePass {
+		t.Fatalf("blocked source gc.outcome = %q, want %q", got, beadmeta.OutcomePass)
+	}
+	if got := source.Metadata["pr_review.verdict"]; got != "approve" {
+		t.Fatalf("blocked source pr_review.verdict = %q, want propagated approve", got)
+	}
+	parent := mustGetBead(t, f.cityStore, f.citySource.ID)
+	if parent.Status != "open" {
+		t.Fatalf("parent of blocked source status = %q (gc.outcome %q), want open", parent.Status, parent.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	if got := parent.Metadata[beadmeta.OutcomeMetadataKey]; got != "" {
+		t.Fatalf("parent of blocked source gc.outcome = %q, want unset", got)
+	}
+	if got := parent.Metadata["pr_review.verdict"]; got != "" {
+		t.Fatalf("parent of blocked source pr_review.verdict = %q, want unset", got)
+	}
+	if want := "stop reason=blocked_source source=" + f.rigLaunch.ID; !strings.Contains(trace, want) {
+		t.Fatalf("trace missing %q:\n%s", want, trace)
+	}
+}
+
+func TestProcessWorkflowFinalizeStopsSourceChainAtClosedBlockedSource(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		formula    string
+		sourceMeta map[string]string
+	}{
+		{name: "mol-do-work root", formula: "mol-do-work"},
+		{name: "mol-polecat-report root", formula: "mol-polecat-report"},
+		{name: "stale failure stamp", formula: "mol-do-work", sourceMeta: failureStamp("postcondition_failed", "transient", "ga-earlier")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSourceChainFinalizeFixture(t)
+			sourceMeta := map[string]string{
+				beadmeta.OutcomeMetadataKey:     beadmeta.OutcomePass,
+				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+			}
+			for key, value := range tc.sourceMeta {
+				sourceMeta[key] = value
+			}
+			stampSourceChainFixture(t, f, "closed", sourceMeta, map[string]string{
+				beadmeta.FormulaNameMetadataKey: tc.formula,
+				"pr_review.verdict":             "approve",
+			})
+
+			result, trace := finalizeSourceChainFixture(t, f, ProcessOptions{
+				ResolveStoreRef:      f.resolver,
+				SourceWorkflowStores: sourceChainFixtureStores(f),
+			})
+
+			assertSourceChainHeldAtBlockedSource(t, f, result, trace)
+			if source := mustGetBead(t, f.rigStore, f.rigLaunch.ID); hasFailureStamp(source) {
+				t.Fatalf("blocked source kept failure stamp %v, want cleared", source.Metadata)
+			}
+		})
+	}
+}
+
 type getErrorStore struct {
 	beads.Store
 	failID string

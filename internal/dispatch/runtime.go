@@ -1484,6 +1484,10 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 			}
 			if loaded.Status == "closed" {
 				opts.tracef("close-source-chain root=%s skip reason=already_closed source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
+				if sourceHoldsChain(loaded) {
+					opts.tracef("close-source-chain root=%s stop reason=blocked_source source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
+					stopWalk = true
+				}
 				return nil
 			}
 			if err := closeSourceBeadPreservingOutcome(nextStore, loaded); err != nil {
@@ -1677,6 +1681,14 @@ func sourceChainRootIDs(roots []beads.Bead) string {
 	}
 	sort.Strings(ids)
 	return strings.Join(ids, ",")
+}
+
+// sourceHoldsChain reports whether a source bead, once closed, keeps the
+// source chain above it open: the readiness rule that withholds a closed
+// blocked bead's dependents (beads.DependencySatisfied) withholds its
+// parents too.
+func sourceHoldsChain(source beads.Bead) bool {
+	return !beads.DependencySatisfied("closed", beads.ReadinessWorkOutcome(source.Metadata))
 }
 
 func closeSourceBeadPreservingOutcome(store beads.Store, bead beads.Bead) error {
