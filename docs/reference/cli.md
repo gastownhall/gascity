@@ -5260,22 +5260,24 @@ every edge touching it, to infra.recover-choices.jsonl at the binding root.
 
 --purge-type message is the other answer for stranded mail nobody will read:
 instead of copying, it backs up and then deletes every row the containment
-check calls stranded whose type is message (each must also classify as
-messaging). It selects by that check, never by manifest id, because bd reuses
-short wisp ids. --dry-run lists the count, id range, dates and titles and
-writes nothing; the delete needs --fleet-stopped and --confirm-purge. Every
-row, with its metadata, labels and edges, is first written to a timestamped
+check calls stranded whose type is message and that classifies as messaging.
+It selects by that check, never by manifest id, because bd reuses short wisp
+ids. --dry-run lists the count, id range, dates and titles and writes
+nothing; the delete needs --fleet-stopped and --confirm-purge. Every row, with
+its metadata, labels and edges, is first written to a timestamped
 infra.purged-stranded-&lt;time&gt;.jsonl at the binding root and proven from disk;
 the run is recorded in infra.purged-stranded.jsonl, and a run interrupted
 after the backup resumes from it (--abandon-purge closes one whose rows and
 edges were put back by hand). The delete must also name what the dry run
 showed: --expect-count &lt;n&gt;, and --expect-digest &lt;digest&gt;. A row the binding
-holds as the same bead is never deleted, and stranded rows of other types are
-left where they are. --restore-purge &lt;backup&gt; puts a purge's rows and edges
-back into the work store, where they are stranded again. While a run is
-interrupted, --restore-purge restores only that run's backup, and the copy
-and the per-id answers above refuse until the run is finished, restored or
-closed.
+holds as the same bead is never deleted, and stranded rows of other types or
+classes are left where they are: recover them once the mail is purged, or the
+copy carries the mail too. --restore-purge &lt;backup&gt; puts a purge's rows and
+edges back into the work store, where they are stranded again; an edge whose
+far end is gone, or is a different bead now, is left out and named. A restore
+that stops partway leaves its run interrupted. While a run is interrupted,
+--restore-purge restores only that run's backup, and the copy and the per-id
+answers above refuse until the run is finished, restored or closed.
 
 ```
 gc storage recover-stranded [flags]
@@ -5293,7 +5295,7 @@ gc storage recover-stranded [flags]
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--from-work` | bool |  | recover the stranded infrastructure beads out of this city's work store |
 | `--move` | stringSlice |  | for a work-store row the manifest lists by id alone and the binding no longer holds: copy it into the binding as it is (required for a row that is not closed; a closed one is moved by default) (repeatable, comma-separated) |
-| `--purge-type` | string |  | instead of copying, back up and then DELETE every stranded work-store row of this type (only "message"): the rows the containment check calls stranded, each also message-class; --dry-run lists them |
+| `--purge-type` | string |  | instead of copying, back up and then DELETE every stranded work-store row of this type (only "message"): the rows the containment check calls stranded that are also message-class; --dry-run lists them |
 | `--record-carried` | stringSlice |  | for a work-store row the manifest lists by id alone and the binding no longer holds: record it as the bead the copy carried, so the clear deletes its work-store row (the backup keeps it); accepted for closed rows too (repeatable, comma-separated) |
 | `--replace-binding-row` | stringSlice |  | for a work-store row whose id the binding holds for a different bead: back up and remove the binding's row, then copy the work-store row in under the id (repeatable, comma-separated) |
 | `--restore-purge` | string |  | put the rows of this purge backup (infra.purged-stranded-&lt;time&gt;.jsonl) back into the work store with their edges; they are stranded again afterwards |

@@ -27,9 +27,11 @@ package main
 //
 // Every selected row must also classify (coordclass, under the manifest's
 // generation) as the purge type's class. A type=message row the classifier
-// puts elsewhere — a wisp step typed message is graph — is not mail, and the
-// whole run refuses rather than purging it. Stranded rows of other types are
-// left exactly where they are and named.
+// puts elsewhere — a wisp step typed message is graph — is not mail. It is
+// left exactly where it is and named, as a stranded row of another type is,
+// and the run purges the rest. recover-stranded carries those rows once the
+// mail is gone; run before that, its copy would carry the mail too, which is
+// what the purge exists to prevent, so that is the order the run names.
 //
 // A work-store row the binding holds as the same bead (the same id, created
 // in the same second) is never deleted. Such a row is not stranded, so it is
@@ -49,7 +51,12 @@ package main
 // Every selected row is written, with its metadata, labels and every edge
 // touching it, to a timestamped JSONL file at the binding root (under
 // .gc/store), in recover-stranded's choice-backup shape
-// (infraRecoverChoiceRecord). The file is synced, renamed into place, its
+// (infraRecoverChoiceRecord). An edge's far end outside the selection is
+// recorded by which bead it is, its id and created_at, because bd mints a
+// deleted id again: a restore puts back only an edge whose far end is still
+// that bead (infraPurgeRestorableEdges), and names the rest. The dry run and
+// the run name every edge whose far end the work store does not hold, which
+// no restore could put back. The file is synced, renamed into place, its
 // directory synced, and re-read and compared record for record before
 // anything is deleted. The run is recorded in a ledger beside it
 // (infra.purged-stranded.jsonl): "backed-up" before the delete, "purged"
@@ -90,6 +97,14 @@ package main
 // is interrupted (infraPurgeUnsettledRefusal): it would carry the run's rows
 // into the binding without the edges the run removed, which only the backup
 // holds, and the restore writes only the work store.
+//
+// A restore of a finished run opens the run again before it writes anything
+// (a "restoring" record), and its "restored" record closes it. A restore that
+// dies between the two leaves the run interrupted: rows back without the edges
+// the restore had still to add, which recover-stranded must not carry into the
+// binding either. Running the restore again finishes it, running the purge
+// again deletes the rows it put back, and --abandon-purge closes it once its
+// rows and edges are all back.
 //
 // # Capabilities
 //
@@ -158,6 +173,15 @@ var infraPurgeTypes = map[string]coordclass.Class{
 	"message": coordclass.ClassMessaging,
 }
 
+// infraPurgePayloadFreeClasses are the purge classes whose edges never carry a
+// payload. gc writes edge payloads only on recipe steps (BdStore.ApplyGraphPlan
+// carries them into bd, which keeps them), and a messaging row is never a
+// recipe step. Only for such a class does a work store with no payload read
+// back an edge up as carrying none (infraPurgeBackupEdge).
+var infraPurgePayloadFreeClasses = map[coordclass.Class]bool{
+	coordclass.ClassMessaging: true,
+}
+
 // infraPurgeChoice is the Choice a purge backup record carries.
 const infraPurgeChoice = "purge-type"
 
@@ -170,11 +194,13 @@ const (
 
 // The ledger's events. One purge run writes backed-up then purged; abandoned
 // closes an interrupted run whose rows were put back by hand; restored records
-// rows --restore-purge put back.
+// rows --restore-purge put back. restoring opens a finished run again before
+// --restore-purge writes anything, until its restored record closes it.
 const (
 	infraPurgeEventBackedUp  = "backed-up"
 	infraPurgeEventPurged    = "purged"
 	infraPurgeEventAbandoned = "abandoned"
+	infraPurgeEventRestoring = "restoring"
 	infraPurgeEventRestored  = "restored"
 )
 
@@ -431,8 +457,11 @@ func doStoragePurgeStranded(ctx context.Context, request storageOperatorRequest,
 	for _, b := range all {
 		byID[b.ID] = b
 	}
+	// A stranded row of another type, or of the type and another class, is not
+	// what this purge deletes: it stays, and is named. Neither ever refuses the
+	// run, so neither can hold an interrupted run's resume either.
 	var selected, others []beads.Bead
-	var wrongClass, vanished []string
+	var otherClass, vanished []string
 	for _, id := range gap.Stranded {
 		b, present := byID[id]
 		if !present {
@@ -444,7 +473,7 @@ func doStoragePurgeStranded(ctx context.Context, request storageOperatorRequest,
 			continue
 		}
 		if got := coordclass.ClassifyAt(b, manifest.Generation); got != class {
-			wrongClass = append(wrongClass, fmt.Sprintf("%s (classifies as %s, not %s)", b.ID, got, class))
+			otherClass = append(otherClass, fmt.Sprintf("%s (classifies as %s)", b.ID, got))
 			continue
 		}
 		selected = append(selected, b)
@@ -454,17 +483,13 @@ func doStoragePurgeStranded(ctx context.Context, request storageOperatorRequest,
 			logPrefix, strings.Join(vanished, ", "))
 		return 1
 	}
-	if len(wrongClass) > 0 {
-		fmt.Fprintf(stderr, "%s: %d stranded row(s) of type %s are not %s-class, and this purge only deletes %s: %s. Nothing was written. Recover them with `%s`\n", //nolint:errcheck // best-effort stderr
-			logPrefix, len(wrongClass), opts.Type, class, class, strings.Join(wrongClass, "; "), storageRecoveryCommand)
-		return 1
-	}
 	// An interrupted run is finished over its own rows only; any other
 	// stranded row of the type waits for the run after it.
 	var notOfRun []beads.Bead
 	if hasPending {
 		selected, notOfRun = infraPurgeRowsOfRun(selected, pending.Rows)
 	}
+	recoverAfter := infraPurgeRecoverAfter(opts.Type, len(selected)+len(notOfRun) > 0)
 	nonStranded := 0
 	stranded := setOf(gap.Stranded)
 	for _, b := range all {
@@ -478,11 +503,15 @@ func doStoragePurgeStranded(ctx context.Context, request storageOperatorRequest,
 		fmt.Fprintf(stdout, "left in place: %d %s row(s) the containment check does not call stranded (the binding holds them, or the manifest records them); they are never purged\n", nonStranded, opts.Type) //nolint:errcheck // best-effort stdout
 	}
 	if len(others) > 0 {
-		fmt.Fprintf(stdout, "not purged: %d stranded row(s) of other types stay where they are, and the boot keeps refusing over them until they are recovered with `%s`: %s\n", //nolint:errcheck // best-effort stdout
-			len(others), storageRecoveryCommand, beadIDList(others))
+		fmt.Fprintf(stdout, "not purged: %d stranded row(s) of other types stay where they are, and the boot keeps refusing over them until they are recovered with `%s`%s: %s\n", //nolint:errcheck // best-effort stdout
+			len(others), storageRecoveryCommand, recoverAfter, beadIDList(others))
+	}
+	if len(otherClass) > 0 {
+		fmt.Fprintf(stdout, "not purged: %d stranded %s row(s) are not %s-class, so this purge does not delete them; they stay where they are, and the boot keeps refusing over them until they are recovered with `%s`%s: %s\n", //nolint:errcheck // best-effort stdout
+			len(otherClass), opts.Type, class, storageRecoveryCommand, recoverAfter, strings.Join(otherClass, ", "))
 	}
 	if hasPending {
-		fmt.Fprintf(stdout, "interrupted purge: run %s backed up %d row(s) to %s; %d of them are no longer in the work store\n", pending.Run, len(pending.Rows), pending.Backup, len(pendingGone)) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "interrupted purge: %s; %d of its %d row(s) are no longer in the work store\n", infraPurgePendingSummary(pending), len(pendingGone), len(pending.Rows)) //nolint:errcheck // best-effort stdout
 	}
 	if len(notOfRun) > 0 {
 		ids := make([]string, 0, len(notOfRun))
@@ -516,6 +545,10 @@ func doStoragePurgeStranded(ctx context.Context, request storageOperatorRequest,
 		inbound += len(entry.Dependents)
 	}
 	fmt.Fprintf(stdout, "  edges:   %d outbound, %d inbound (backed up and removed with the rows)\n", outbound, inbound) //nolint:errcheck // best-effort stdout
+	if _, unheld := infraPurgeRestorableEdges(entries, byID); len(unheld) > 0 {
+		fmt.Fprintf(stdout, "  not restorable: %d edge(s) end at a row the work store does not hold, so --%s could not put them back; the backup keeps them: %s\n", //nolint:errcheck // best-effort stdout
+			len(unheld), strandedRestorePurgeFlag, infraPurgeLeftOutList(unheld))
+	}
 
 	// An interrupted run resumes only over its own backup, checked before the
 	// dry run returns so the rehearsal refuses where the run would.
@@ -624,8 +657,8 @@ func doStoragePurgeStranded(ctx context.Context, request storageOperatorRequest,
 // records nothing.
 func settleInfraPurgeWithNothingSelected(target infraBindingTarget, ledger []infraPurgeLedgerRecord, pending infraPurgeLedgerRecord, gone []infraPurgeRowKey, dryRun bool, logPrefix string, stdout, stderr io.Writer) int {
 	if len(gone) == 0 {
-		fmt.Fprintf(stderr, "%s: the interrupted purge run %s deleted none of its %d row(s), and none of them is stranded now. If they were put back on purpose, close the run with --%s\n", //nolint:errcheck // best-effort stderr
-			logPrefix, pending.Run, len(pending.Rows), strandedAbandonPurgeFlag)
+		fmt.Fprintf(stderr, "%s: every one of the %d row(s) of the interrupted purge run %s is in the work store, and none of them is stranded now. If they were put back on purpose, close the run with --%s\n", //nolint:errcheck // best-effort stderr
+			logPrefix, len(pending.Rows), pending.Run, strandedAbandonPurgeFlag)
 		return 1
 	}
 	if err := infraPurgeLeftBehindRefusal(pending, gone, nil); err != nil {
@@ -645,14 +678,15 @@ func settleInfraPurgeWithNothingSelected(target infraBindingTarget, ledger []inf
 }
 
 // abandonInfraPurge is --abandon-purge: it closes an interrupted run whose
-// rows and edges are all back in the work store, put back by hand. It refuses
-// while any row is missing, because closing the run then would lose the
-// record of a delete, and while a backed-up edge whose two ends are both there
-// is not back as backed up, payload included (infraPurgeEdgeDifference): the
-// run removes its edges before its rows, and once the run is closed nothing
-// points at the backup that is their only copy. reminted are the ids of gone
-// rows the work store holds for a different bead now, which --restore-purge
-// refuses too, so the refusal names the purge itself as the way out.
+// rows and edges are all back in the work store, put back by hand or by a
+// restore that did not record its end. It refuses while any row is missing,
+// because closing the run then would lose the record of a delete, and while a
+// backed-up edge a restore would put back (infraPurgeEdgesNotBack) is not back
+// as backed up, payload included (infraPurgeEdgeDifference): the run removes
+// its edges before its rows, and once the run is closed nothing points at the
+// backup that is their only copy. reminted are the ids of gone rows the work
+// store holds for a different bead now, which --restore-purge refuses too, so
+// the refusal names the purge itself as the way out.
 func abandonInfraPurge(session *infraPurgeSession, ledger []infraPurgeLedgerRecord, pending infraPurgeLedgerRecord, hasPending bool, gone []infraPurgeRowKey, reminted []string, dryRun bool, logPrefix string, stdout, stderr io.Writer) int {
 	target := session.target
 	if !hasPending {
@@ -679,7 +713,7 @@ func abandonInfraPurge(session *infraPurgeSession, ledger []infraPurgeLedgerReco
 		return 1
 	}
 	if len(missing) > 0 {
-		fmt.Fprintf(stderr, "%s: --%s refused: %d backed-up edge(s) of the interrupted run %s are not back in the work store as backed up although both their ends are (%s), and the backup %s is their only copy. Restore the run with --%s %s, which puts them back and closes it, or put them back by hand and run this again\n", //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: --%s refused: %d backed-up edge(s) of the interrupted run %s are not back in the work store as backed up although both their ends are there as the beads the backup recorded (%s), and the backup %s is their only copy. Restore the run with --%s %s, which puts them back and closes it, or put them back by hand and run this again\n", //nolint:errcheck // best-effort stderr
 			logPrefix, strandedAbandonPurgeFlag, len(missing), pending.Run, strings.Join(missing, "; "), pending.Backup, strandedRestorePurgeFlag, pending.Backup)
 		return 1
 	}
@@ -707,44 +741,58 @@ func recordInfraPurged(target infraBindingTarget, ledger []infraPurgeLedgerRecor
 	return appendInfraPurgeLedger(target, ledger, record)
 }
 
-// infraPurgePendingRun returns the interrupted run: the latest backed-up record
-// no later record of the same run (purged, abandoned or restored) closed. A
-// record of another run does not close it. A purge never starts a run while
-// one is pending, and a restore refuses another run's backup then, so at most
-// one run is ever pending.
+// infraPurgePendingRun returns the interrupted run: the latest record that
+// opens a run (backed-up, or restoring) no later record of the same run
+// (purged, abandoned or restored) closed. A record of another run does not
+// close it. A purge never starts a run while one is pending, and a restore
+// refuses another run's backup then, so at most one run is ever pending.
 func infraPurgePendingRun(ledger []infraPurgeLedgerRecord) (infraPurgeLedgerRecord, bool) {
 	closed := map[string]bool{}
 	for i := len(ledger) - 1; i >= 0; i-- {
 		record := ledger[i]
-		if record.Event != infraPurgeEventBackedUp {
+		switch record.Event {
+		case infraPurgeEventBackedUp, infraPurgeEventRestoring:
+			if !closed[record.Run] {
+				return record, true
+			}
+		default:
 			closed[record.Run] = true
-			continue
-		}
-		if !closed[record.Run] {
-			return record, true
 		}
 	}
 	return infraPurgeLedgerRecord{}, false
 }
 
+// infraPurgePendingSummary says what left run, the interrupted run's open
+// record, unfinished.
+func infraPurgePendingSummary(run infraPurgeLedgerRecord) string {
+	if run.Event == infraPurgeEventRestoring {
+		return fmt.Sprintf("the restore of run %s from %s did not record its end", run.Run, run.Backup)
+	}
+	return fmt.Sprintf("run %s backed up %d row(s) to %s and did not record the delete", run.Run, len(run.Rows), run.Backup)
+}
+
 // infraPurgeRunRemedy names the three ways to settle the interrupted run, each
-// as the command an operator runs. Status and recover-stranded's refusal print
-// it.
+// as the command an operator runs, the restore first when a restore left it
+// open. Status and recover-stranded's refusal print it.
 func infraPurgeRunRemedy(run infraPurgeLedgerRecord) string {
-	return fmt.Sprintf("finish it by running `%s --%s %s --dry-run`, then the same command without --dry-run and with the flags its last line names (a run with nothing left to delete only records it); restore it with `%s --%s --%s %s`; or, if its rows and edges were all put back by hand, close it with `%s --%s --%s %s --%s`",
-		storageRecoveryCommand, strandedPurgeTypeFlag, run.Type,
-		storageRecoveryCommand, storageFleetStoppedFlag, strandedRestorePurgeFlag, run.Backup,
-		storageRecoveryCommand, storageFleetStoppedFlag, strandedPurgeTypeFlag, run.Type, strandedAbandonPurgeFlag)
+	purge := fmt.Sprintf("`%s --%s %s --dry-run`, then the same command without --dry-run and with the flags its last line names", storageRecoveryCommand, strandedPurgeTypeFlag, run.Type)
+	restore := fmt.Sprintf("`%s --%s --%s %s`", storageRecoveryCommand, storageFleetStoppedFlag, strandedRestorePurgeFlag, run.Backup)
+	abandon := fmt.Sprintf("`%s --%s --%s %s --%s`", storageRecoveryCommand, storageFleetStoppedFlag, strandedPurgeTypeFlag, run.Type, strandedAbandonPurgeFlag)
+	if run.Event == infraPurgeEventRestoring {
+		return fmt.Sprintf("finish the restore by running %s again; delete the rows it put back by running %s; or, if its rows and edges are all back, close it with %s", restore, purge, abandon)
+	}
+	return fmt.Sprintf("finish it by running %s (a run with nothing left to delete only records it); restore it with %s; or, if its rows and edges were all put back by hand, close it with %s", purge, restore, abandon)
 }
 
 // infraPurgeUnsettledRefusal says why recover-stranded must write nothing now,
 // its copy and its per-id answers alike, or returns "" when the purge ledger
 // lets it: no purge run is interrupted. An interrupted run owns the rows it
-// backed up until it is settled: it may have removed their edges, with its
-// backup their only copy. A copy would carry those rows into the binding
-// without them, and --restore-purge, which writes only the work store, could
-// not put them back where the city reads them. A ledger that cannot be read
-// cannot say whether a run is interrupted, so it refuses too.
+// backed up until it is settled: it may have removed their edges, or its
+// restore may have put the rows back before their edges, with its backup their
+// only copy. A copy would carry those rows into the binding without them, and
+// --restore-purge, which writes only the work store, could not put them back
+// where the city reads them. A ledger that cannot be read cannot say whether a
+// run is interrupted, so it refuses too.
 func infraPurgeUnsettledRefusal(target infraBindingTarget) string {
 	ledger, err := readInfraPurgeLedger(target)
 	if err != nil {
@@ -754,8 +802,23 @@ func infraPurgeUnsettledRefusal(target infraBindingTarget) string {
 	if !interrupted {
 		return ""
 	}
-	return fmt.Sprintf("the purge run %s is interrupted (backup %s), and it owns the rows it backed up until it is settled: it may have removed their edges, with its backup their only copy, and a copy now would carry those rows into the binding without them. Nothing was written. Settle the run first: %s",
-		run.Run, run.Backup, infraPurgeRunRemedy(run))
+	why := "it may have removed their edges"
+	if run.Event == infraPurgeEventRestoring {
+		why = "its restore did not finish, and may have put rows back without the edges it had still to add"
+	}
+	return fmt.Sprintf("the purge run %s is interrupted (backup %s), and it owns the rows it backed up until it is settled: %s, with its backup their only copy, and a copy now would carry those rows into the binding without them. Nothing was written. Settle the run first: %s",
+		run.Run, run.Backup, why, infraPurgeRunRemedy(run))
+}
+
+// infraPurgeRecoverAfter is the order recover-stranded's copy must take for
+// the stranded rows a purge of purgeType leaves in place, or "" when no
+// stranded row of purgeType is left to purge (mail): the copy carries every
+// stranded row, so run before the purge it would carry that mail too.
+func infraPurgeRecoverAfter(purgeType string, mail bool) string {
+	if !mail {
+		return ""
+	}
+	return fmt.Sprintf(" once the stranded %s rows are purged (run before that, its copy would carry them too)", purgeType)
 }
 
 // infraPurgeConfirmationRefusal says why opts do not confirm deleting the
@@ -847,8 +910,9 @@ const infraPurgeBatchChunk = 256
 
 // infraPurgeBackupEntries reads every selected row's edges: its own outbound
 // edges and every inbound edge from any work-store row, with payloads where
-// the store can report them. The class is recorded under gen, the manifest's
-// classifier generation, which is what selected the row.
+// the store can report them, and which bead each far end the work store holds
+// outside rows is (infraPurgeEndpoints). The class is recorded under gen, the
+// manifest's classifier generation, which is what selected the row.
 func infraPurgeBackupEntries(stores *infraPurgeStores, rows, all []beads.Bead, gen coordclass.Generation) ([]infraBackupEntry, error) {
 	reader, err := newSourceDepReader(stores.work, rows[0].ID, sourceAnchorIDs(rows))
 	if err != nil {
@@ -858,22 +922,31 @@ func infraPurgeBackupEntries(stores *infraPurgeStores, rows, all []beads.Bead, g
 	if err != nil {
 		return nil, err
 	}
+	selected := make(map[string]bool, len(rows))
+	for _, b := range rows {
+		selected[b.ID] = true
+	}
+	held := make(map[string]beads.Bead, len(all))
+	for _, b := range all {
+		held[b.ID] = b
+	}
 	entries := make([]infraBackupEntry, 0, len(rows))
 	for _, b := range rows {
-		entry := infraBackupEntry{Bead: b, Class: coordclass.ClassifyAt(b, gen).String()}
+		class := coordclass.ClassifyAt(b, gen)
+		entry := infraBackupEntry{Bead: b, Class: class.String()}
 		down, ok, err := reader.deps(b)
 		if !ok {
 			return nil, fmt.Errorf("the edges of %s cannot be read: %w", b.ID, err)
 		}
 		for _, d := range down {
-			edge, err := infraPurgeBackupEdge(stores, d)
+			edge, err := infraPurgeBackupEdge(stores, class, d)
 			if err != nil {
 				return nil, err
 			}
 			entry.Deps = append(entry.Deps, edge)
 		}
 		for _, d := range inbound[b.ID] {
-			edge, err := infraPurgeBackupEdge(stores, d)
+			edge, err := infraPurgeBackupEdge(stores, class, d)
 			if err != nil {
 				return nil, err
 			}
@@ -881,9 +954,34 @@ func infraPurgeBackupEntries(stores *infraPurgeStores, rows, all []beads.Bead, g
 		}
 		sortInfraBackupEdges(entry.Deps)
 		sortInfraBackupEdges(entry.Dependents)
+		entry.Endpoints = infraPurgeEndpoints(entry, selected, held)
 		entries = append(entries, entry)
 	}
 	return entries, nil
+}
+
+// infraPurgeEndpoints is which bead each far end of entry's edges is, by id
+// and created_at, sorted by id, for every far end that held, the work store's
+// rows by id, holds and that is not a selected row. A selected far end is
+// backed up itself. A far end the work store does not hold has no identity to
+// record, and no restore can put its edge back (infraPurgeRestorableEdges).
+func infraPurgeEndpoints(entry infraBackupEntry, selected map[string]bool, held map[string]beads.Bead) []infraPurgeRowKey {
+	seen := map[string]bool{}
+	var keys []infraPurgeRowKey
+	for _, list := range [][]infraBackupEdge{entry.Deps, entry.Dependents} {
+		for _, edge := range list {
+			for _, end := range []string{edge.IssueID, edge.DependsOnID} {
+				b, ok := held[end]
+				if !ok || selected[end] || seen[end] {
+					continue
+				}
+				seen[end] = true
+				keys = append(keys, infraPurgeRowKey{ID: end, CreatedAt: b.CreatedAt.UTC()})
+			}
+		}
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i].ID < keys[j].ID })
+	return keys
 }
 
 // infraPurgeInboundEdges returns, per selected row, every edge into it from
@@ -960,16 +1058,23 @@ func infraPurgeInboundEdgesInBatches(batch beads.DependencyBatchLister, selected
 	return inbound, true, nil
 }
 
-// infraPurgeBackupEdge records one edge, with its payload when the store can
-// report one. A store that has no payload read at all (bd, exec) never stored
-// a payload through gc, so the edge is recorded without one. A store that has
-// the read and cannot answer it now (a proxied store whose native leaf stood
+// infraPurgeBackupEdge records one edge of a row of class, with its payload
+// when the store can report one. A store with no payload read at all (bd's CLI
+// provider, exec) cannot say whether an edge carries one, which is not the
+// same as carrying none: BdStore.ApplyGraphPlan writes payloads into bd. Its
+// edges are recorded without one only for a class whose edges never carry a
+// payload (infraPurgePayloadFreeClasses); for any other class the run
+// refuses, rather than remove a payload no backup holds. A store that has the
+// read and cannot answer it now (a proxied store whose native leaf stood
 // down) refuses the run, as every unanswerable read does. The read is decided
 // on the store under the policy wrapper (infraPurgeStores.underPolicy).
-func infraPurgeBackupEdge(stores *infraPurgeStores, d beads.Dep) (infraBackupEdge, error) {
+func infraPurgeBackupEdge(stores *infraPurgeStores, class coordclass.Class, d beads.Dep) (infraBackupEdge, error) {
 	edge := infraBackupEdge{IssueID: d.IssueID, DependsOnID: d.DependsOnID, Type: d.Type}
 	reader, ok := beads.As[beads.DepMetadataReader](stores.underPolicy)
 	if !ok {
+		if !infraPurgePayloadFreeClasses[class] {
+			return infraBackupEdge{}, fmt.Errorf("the work store %s cannot report edge payloads, and the edge %s of a %s-class row can carry one, which the backup would then not hold", stores.engine, edge, class)
+		}
 		return edge, nil
 	}
 	payload, err := infraReadEdgePayloadFrom(reader, d.IssueID, d.DependsOnID)
@@ -1100,13 +1205,15 @@ func infraPurgeBackupCovers(path string, entries []infraBackupEntry) ([]string, 
 }
 
 // infraPurgeEntryCovers reports whether backed, a backup entry, holds now's
-// row and a superset of its edges. The rows must be the same in every field
-// but those a store derives from the row's edges (infraPurgeRowWithoutEdgeState),
+// row and a superset of its edges, each ending at the bead it ended at then
+// (infraPurgeEndpointsSubset). The rows must be the same in every field but
+// those a store derives from the row's edges (infraPurgeRowWithoutEdgeState),
 // because the run's own edge removal changes them: bd and native Dolt list a
 // row with its outbound edges, and bd also reports is_blocked and a parent
 // read off a parent-child edge.
 func infraPurgeEntryCovers(backed, now infraBackupEntry) bool {
-	if backed.Class != now.Class || !infraPurgeEdgesSubset(now.Deps, backed.Deps) || !infraPurgeEdgesSubset(now.Dependents, backed.Dependents) {
+	if backed.Class != now.Class || !infraPurgeEdgesSubset(now.Deps, backed.Deps) || !infraPurgeEdgesSubset(now.Dependents, backed.Dependents) ||
+		!infraPurgeEndpointsSubset(now.Endpoints, backed.Endpoints) {
 		return false
 	}
 	wantRow, err := json.Marshal(infraPurgeRowWithoutEdgeState(backed.Bead, backed.Deps))
@@ -1123,12 +1230,25 @@ func infraPurgeEntryCovers(backed, now infraBackupEntry) bool {
 func infraPurgeRowWithoutEdgeState(row beads.Bead, edges []infraBackupEdge) beads.Bead {
 	row.Dependencies = nil
 	row.IsBlocked = nil
+	return infraPurgeRowWithoutEdgeParent(row, edges)
+}
+
+// infraPurgeRowWithoutEdgeParent is row without a parent set by a
+// parent-child edge among edges (infraPurgeEdgeSetsParent).
+func infraPurgeRowWithoutEdgeParent(row beads.Bead, edges []infraBackupEdge) beads.Bead {
 	for _, edge := range edges {
-		if edge.Type == "parent-child" && edge.IssueID == row.ID && edge.DependsOnID == row.ParentID {
+		if infraPurgeEdgeSetsParent(edge, row) {
 			row.ParentID = ""
 		}
 	}
 	return row
+}
+
+// infraPurgeEdgeSetsParent reports whether edge is the parent-child edge from
+// row to its parent: bd keeps no parent of its own, and reads row's off that
+// edge.
+func infraPurgeEdgeSetsParent(edge infraBackupEdge, row beads.Bead) bool {
+	return edge.Type == "parent-child" && edge.IssueID == row.ID && edge.DependsOnID == row.ParentID
 }
 
 // infraPurgeEdgesSubset reports whether every edge of sub is in super, with
@@ -1140,6 +1260,25 @@ func infraPurgeEdgesSubset(sub, super []infraBackupEdge) bool {
 	}
 	for _, edge := range sub {
 		if !have[edge] {
+			return false
+		}
+	}
+	return true
+}
+
+// infraPurgeEndpointsSubset reports whether every far end of sub is in super
+// as the same bead: the same id, created in the same second. An edge that now
+// ends at a bead bd minted under the id since the backup, or at a row the
+// backup's work store did not hold, is not the edge the backup holds, though
+// its pair and type are.
+func infraPurgeEndpointsSubset(sub, super []infraPurgeRowKey) bool {
+	have := make(map[string]time.Time, len(super))
+	for _, key := range super {
+		have[key.ID] = key.CreatedAt
+	}
+	for _, key := range sub {
+		at, ok := have[key.ID]
+		if !ok || !sameCreatedSecond(at, key.CreatedAt) {
 			return false
 		}
 	}
@@ -1253,6 +1392,101 @@ func infraPurgeEdges(entries []infraBackupEntry) []infraBackupEdge {
 	return edges
 }
 
+// infraPurgeRestorableEdges splits every edge of entries, once, into those a
+// restore can put back and the rest, each named with why not. An end of an
+// edge is restorable when it is a row of entries, which the restore puts back
+// itself, or when work, the work store's rows by id, holds under its id the
+// bead the entry recorded there (infraBackupEntry.Endpoints, by id and created
+// second). Any other end is not proven the bead the edge pointed at, and the
+// edge is left out rather than attached to whatever holds the id now: an end
+// the work store no longer holds, one it holds for a different bead (bd minted
+// the id again), and one the entry recorded no bead for, which the work store
+// did not hold when the backup was written, or which a backup written before
+// endpoints were recorded cannot vouch for. A row whose parent-child edge is
+// left out comes back without the parent that edge set, and the edge's name
+// says so.
+// The restore and --abandon-purge judge a backup's edges this way, and the
+// purge names up front every edge no restore could put back.
+func infraPurgeRestorableEdges(entries []infraBackupEntry, work map[string]beads.Bead) ([]infraBackupEdge, []infraPurgeLeftOutEdge) {
+	backed := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		backed[entry.Bead.ID] = true
+	}
+	seen := map[[3]string]bool{}
+	var edges []infraBackupEdge
+	var left []infraPurgeLeftOutEdge
+	for _, entry := range entries {
+		recorded := make(map[string]time.Time, len(entry.Endpoints))
+		for _, key := range entry.Endpoints {
+			recorded[key.ID] = key.CreatedAt
+		}
+		for _, list := range [][]infraBackupEdge{entry.Deps, entry.Dependents} {
+			for _, edge := range list {
+				key := [3]string{edge.IssueID, edge.DependsOnID, edge.Type}
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				if why := infraPurgeEdgeEndUnproven(edge, backed, recorded, work); why != "" {
+					if infraPurgeEdgeSetsParent(edge, entry.Bead) {
+						why += fmt.Sprintf("; %s comes back without this parent", entry.Bead.ID)
+					}
+					left = append(left, infraPurgeLeftOutEdge{edge: edge, why: why})
+					continue
+				}
+				edges = append(edges, edge)
+			}
+		}
+	}
+	sort.Slice(left, func(i, j int) bool { return left[i].String() < left[j].String() })
+	return edges, left
+}
+
+// infraPurgeLeftOutEdge is a backed-up edge no restore puts back
+// (infraPurgeRestorableEdges), with why.
+type infraPurgeLeftOutEdge struct {
+	edge infraBackupEdge
+	why  string
+}
+
+func (l infraPurgeLeftOutEdge) String() string {
+	return fmt.Sprintf("%s (%s)", l.edge, l.why)
+}
+
+// infraPurgeLeftOutList names every edge of left with why it is left out, for
+// one line of output.
+func infraPurgeLeftOutList(left []infraPurgeLeftOutEdge) string {
+	names := make([]string, 0, len(left))
+	for _, l := range left {
+		names = append(names, l.String())
+	}
+	return strings.Join(names, "; ")
+}
+
+// infraPurgeEdgeEndUnproven names why an end of edge is not proven the bead it
+// was when the edge was backed up (infraPurgeRestorableEdges), or returns ""
+// when both ends are. recorded is the backup entry's far ends by id.
+func infraPurgeEdgeEndUnproven(edge infraBackupEdge, backed map[string]bool, recorded map[string]time.Time, work map[string]beads.Bead) string {
+	for _, end := range []string{edge.IssueID, edge.DependsOnID} {
+		if backed[end] {
+			continue
+		}
+		at, known := recorded[end]
+		got, held := work[end]
+		switch {
+		case !held && known:
+			return fmt.Sprintf("no row %s: the bead created %s that it pointed at is gone", end, at.UTC().Format(time.RFC3339))
+		case !held:
+			return fmt.Sprintf("no row %s", end)
+		case !known:
+			return fmt.Sprintf("the backup records no bead under %s, so nothing proves the row the work store holds under it now is the one the edge pointed at", end)
+		case !sameCreatedSecond(at, got.CreatedAt):
+			return fmt.Sprintf("%s is a different bead now, created %s: bd minted the id again since the edge pointed at the one created %s", end, got.CreatedAt.UTC().Format(time.RFC3339), at.UTC().Format(time.RFC3339))
+		}
+	}
+	return ""
+}
+
 // infraPurgeRecordEntries is the backup entries records carry.
 func infraPurgeRecordEntries(records []infraRecoverChoiceRecord) []infraBackupEntry {
 	entries := make([]infraBackupEntry, 0, len(records))
@@ -1262,11 +1496,13 @@ func infraPurgeRecordEntries(records []infraRecoverChoiceRecord) []infraBackupEn
 	return entries
 }
 
-// infraPurgeEdgesNotBack names the edges of the backup at path that the work
-// store does not hold as backed up (infraPurgeEdgeDifference) although it
-// holds both their ends. A run interrupted after its edge removal leaves
-// exactly those, with the backup their only copy. An edge with an end the work
-// store no longer holds could not be put back, so it is not named.
+// infraPurgeEdgesNotBack names the edges of the backup at path that a restore
+// would put back (infraPurgeRestorableEdges) and that the work store does not
+// hold as backed up (infraPurgeEdgeDifference). A run interrupted after its
+// edge removal leaves exactly those, with the backup their only copy. An edge
+// whose far end the work store no longer holds, or holds for a different bead,
+// could not be put back, so it is not named. --abandon-purge asks only once
+// every row of the run is in the work store.
 func infraPurgeEdgesNotBack(stores *infraPurgeStores, path string) ([]string, error) {
 	records, err := readInfraPurgeBackup(path)
 	if err != nil {
@@ -1276,15 +1512,13 @@ func infraPurgeEdgesNotBack(stores *infraPurgeStores, path string) ([]string, er
 	if err != nil {
 		return nil, fmt.Errorf("listing work store: %w", err)
 	}
-	held := make(map[string]bool, len(rows))
+	work := make(map[string]beads.Bead, len(rows))
 	for _, b := range rows {
-		held[b.ID] = true
+		work[b.ID] = b
 	}
+	edges, _ := infraPurgeRestorableEdges(infraPurgeRecordEntries(records), work)
 	var missing []string
-	for _, edge := range infraPurgeEdges(infraPurgeRecordEntries(records)) {
-		if !held[edge.IssueID] || !held[edge.DependsOnID] {
-			continue
-		}
+	for _, edge := range edges {
 		diff, err := infraPurgeEdgeDifference(stores, edge)
 		if err != nil {
 			return nil, fmt.Errorf("reading edge %s: %w", edge, err)
@@ -1514,8 +1748,10 @@ func appendInfraPurgeLedger(target infraBindingTarget, previous []infraPurgeLedg
 	return nil
 }
 
-// infraPurgeNetRows replays the ledger: a purged record adds its rows, a
-// restored record removes them. What is left is every row a purge deleted and
+// infraPurgeNetRows replays the ledger: a purged record adds its rows, and a
+// restored or abandoned record removes them, because --abandon-purge closes a
+// run only once every row of it is back in the work store (a finished run its
+// restore left open included). What is left is every row a purge deleted and
 // nothing has put back.
 func infraPurgeNetRows(ledger []infraPurgeLedgerRecord) map[infraPurgeRowKey]string {
 	net := map[infraPurgeRowKey]string{}
@@ -1525,7 +1761,7 @@ func infraPurgeNetRows(ledger []infraPurgeLedgerRecord) map[infraPurgeRowKey]str
 			switch record.Event {
 			case infraPurgeEventPurged:
 				net[key] = record.Backup
-			case infraPurgeEventRestored:
+			case infraPurgeEventRestored, infraPurgeEventAbandoned:
 				delete(net, key)
 			}
 		}
@@ -1567,8 +1803,8 @@ func reportInfraPurgeLedger(target infraBindingTarget, stdout io.Writer) bool {
 		}
 	}
 	if last, pending := infraPurgePendingRun(ledger); pending {
-		fmt.Fprintf(stdout, "  purge: INTERRUPTED (run %s backed up %d row(s) to %s and did not record the delete)\nblocking invariant: %s. Until then recover-stranded refuses\n", //nolint:errcheck // best-effort stdout
-			last.Run, len(last.Rows), last.Backup, infraPurgeRunRemedy(last))
+		fmt.Fprintf(stdout, "  purge: INTERRUPTED (%s)\nblocking invariant: %s. Until then recover-stranded refuses\n", //nolint:errcheck // best-effort stdout
+			infraPurgePendingSummary(last), infraPurgeRunRemedy(last))
 		return false
 	}
 	return true

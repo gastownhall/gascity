@@ -145,6 +145,11 @@ type infraBackupEntry struct {
 	Class      string            `json:"class"`
 	Deps       []infraBackupEdge `json:"deps,omitempty"`
 	Dependents []infraBackupEdge `json:"dependents,omitempty"`
+	// Endpoints is which bead each far end of the row's edges was when a purge
+	// backed the row up, by id and created_at, for every far end the work store
+	// held that is not itself a backed-up row (infraPurgeBackupEntries). The
+	// clear and recover-stranded record none.
+	Endpoints []infraPurgeRowKey `json:"endpoints,omitempty"`
 }
 
 // infraClearResult is what one clear pass did.

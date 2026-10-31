@@ -575,8 +575,12 @@ The purge never deletes:
 
 - a row the binding holds as the same bead (the same id and creation time);
 - a stranded row of another type, which you must still recover;
-- a `message` row that the classifier puts in another class. If any selected
-  row is in another class, the run refuses and writes nothing.
+- a stranded `message` row that the classifier puts in another class, which
+  is not mail and which you must still recover too.
+
+The run names the stranded rows it leaves. Recover them with
+`gc storage recover-stranded --from-work` once the mail is purged: run before
+the purge, that copy would carry the stranded mail into the binding too.
 
 It also refuses, dry run included, a work store that cannot list relations,
 such as bd's Postgres backend: the restore reads every edge back through that
@@ -619,10 +623,14 @@ gc storage status        # converged, and it names the purge and its backup
 ```
 
 Every row is first written to `infra.purged-stranded-<time>.jsonl` at the
-binding root, with its metadata, labels and every edge touching it. The file
-is synced and read back before anything is deleted. The edges are removed
-before the rows, because `bd delete --force` rewrites every mention of a
-deleted id in the text of rows still linked to it. The run is recorded in
+binding root, with its metadata, labels and every edge touching it. For an
+edge to a row outside the purge, the backup also records which bead that row
+is (its id and creation time). The dry run and the run name every edge whose
+other end the work store does not hold, such as an `external:` reference: no
+restore could put it back. The file is synced and read back before anything
+is deleted. The edges are removed before the rows, because
+`bd delete --force` rewrites every mention of a deleted id in the text of
+rows still linked to it. The run is recorded in
 `infra.purged-stranded.jsonl`.
 
 If a run stops partway, `gc storage status` reports `purge: INTERRUPTED`,
@@ -660,13 +668,24 @@ both directions. It refuses, before writing anything:
   the new row out of the work store first;
 - a row the binding now holds as the same bead. It was carried into the
   binding after the purge, by an older build's `recover-stranded` or by hand,
-  so the binding serves it, and this command writes only the work store;
-- an edge whose other end no longer exists.
+  so the binding serves it, and this command writes only the work store.
+
+An edge comes back only when its other end is a row of the backup or the bead
+the backup recorded there. An edge whose other end no longer exists, or is a
+different bead under the same id now (bd minted it again), is left out and
+named, and the rest of the backup is restored. The backup keeps that edge.
+When the edge left out is a row's parent-child edge, the row comes back
+without that parent, and the line naming the edge says so.
 
 While a purge run is interrupted, it restores only that run's backup. The rows
 are stranded again afterwards, and `gc storage status` names them. `--dry-run`
 shows what it would do, and refuses wherever the restore would. Running it
 again skips what is already back.
+
+If a restore stops partway, `gc storage status` reports `purge: INTERRUPTED`,
+and `recover-stranded` refuses until the run is settled: the restored rows may
+lack edges the restore had not added yet. Run the same restore again to finish
+it.
 
 If the work store cannot import rows verbatim, or cannot list relations, the
 command says so, in the dry run too. Restore with the city's own bd instead,
@@ -683,12 +702,14 @@ First check that no id in the backup is now held by a different row:
 `bd import` overwrites an existing id. When the restore refused a row the
 binding holds as the same bead, leave that row out of the import (start the
 first `jq` with `select(.entry.bead.id != "<id>") |`), and add the backup's
-edges of that row to the binding's copy where it lacks them. If the
-purge was interrupted, close the run after a raw restore with
+edges of that row to the binding's copy where it lacks them. Also leave out
+an edge whose other end is outside the backup and is gone, or is now a bead
+with a creation time other than the one its record lists under
+`.entry.endpoints`: `bd dep add` would attach it to whatever holds the id now.
+If the run is interrupted, close it after a raw restore with
 `gc storage recover-stranded --from-work --fleet-stopped --purge-type message --abandon-purge`.
-That command refuses while any row of the run, or any of its edges between
-rows that are back, is still missing, or is back without the payload it
-carried.
+That command refuses while any row of the run, or any edge the restore would
+put back, is still missing, or is back without the payload it carried.
 
 #### Example: maintainer-city
 

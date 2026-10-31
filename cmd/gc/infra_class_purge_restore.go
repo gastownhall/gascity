@@ -24,8 +24,6 @@ package main
 //     parent-child edge is left out of that comparison
 //     (restoredRowDifferenceBeforeEdges): the purge removed the edge, and the
 //     restore adds it back;
-//   - every edge's far endpoint must be a backed-up row or a row the work
-//     store holds, or the edge could not be put back;
 //   - edges are read back through the work store's relation listing, so a
 //     store that refuses it is refused when there is an edge to restore, as
 //     the purge refuses it;
@@ -52,6 +50,21 @@ package main
 // of another run put back now would be selected again by the interrupted
 // run's resume, which its backup does not hold.
 //
+// An edge is put back only when each of its ends is a backed-up row or the
+// bead the backup recorded under that id (infraPurgeRestorableEdges). bd mints
+// a deleted id again, so an edge whose far end is gone, or is a different bead
+// now, is left out and named, never attached to whatever holds the id, and the
+// rest of the backup is restored; --abandon-purge judges the edges the same
+// way. A row whose parent-child edge is left out comes back without the parent
+// that edge set, and the line naming the edge says so.
+//
+// The restore of a finished run opens the run again before it writes anything
+// (beginInfraPurgeRestore), and the ledger's restored record closes it. A
+// restore that dies between the two leaves the run interrupted, so status
+// names it and recover-stranded refuses: the rows may be back without the
+// edges the restore had still to add, which a copy into the binding would
+// leave behind. Running the restore again finishes it.
+//
 // Rows are imported verbatim (beads.VerbatimImporter: bd import keeps the
 // timestamps) and re-read and compared field for field before any edge is
 // written, so a row that does not read back leaves no edge written. bd keeps
@@ -60,8 +73,9 @@ package main
 // backed-up edges imply. Then the outbound and inbound edges are added, each
 // with the payload it carried, and re-read; an edge already back without its
 // payload is written again (infraPurgeEdgeDifference). Then the rows are
-// re-read and compared again, whole, parent included. The ledger records the
-// rows put back, which takes them out of status's purged count and closes an
+// re-read and compared again, whole, parent included, but for a parent whose
+// edge is left out (restoredEntryDifference). The ledger records the rows put
+// back, which takes them out of status's purged count and closes an
 // interrupted run.
 
 import (
@@ -109,12 +123,21 @@ func doStorageRestorePurge(ctx context.Context, request storageOperatorRequest, 
 	}
 
 	fmt.Fprintf(stdout, "backup:  %s (%d row(s))\nrestore: %d row(s), %d already back, %d edge(s)\n", run.Backup, len(records), len(plan.toImport), plan.already, len(plan.edges)) //nolint:errcheck // best-effort stdout
+	if len(plan.leftOut) > 0 {
+		fmt.Fprintf(stdout, "left out: %d backed-up edge(s) whose far end is not the bead it was when the purge backed it up, so the restore does not attach them to whatever holds the id now; the backup keeps them: %s\n", //nolint:errcheck // best-effort stdout
+			len(plan.leftOut), infraPurgeLeftOutList(plan.leftOut))
+	}
 	if dryRun {
 		fmt.Fprintln(stdout, "dry-run: nothing was written") //nolint:errcheck // best-effort stdout
 		return 0
 	}
+	ledger, err = beginInfraPurgeRestore(session.target, ledger, run)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v. Nothing was written\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if err := applyInfraPurgeRestore(session.stores, records, plan); err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %v. Until the restore finishes, `gc storage status` reports the run interrupted and recover-stranded refuses\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if err := recordInfraPurgeRestore(session.target, ledger, run, records); err != nil {
@@ -123,6 +146,25 @@ func doStorageRestorePurge(ctx context.Context, request storageOperatorRequest, 
 	}
 	fmt.Fprintf(stdout, "restored: %d row(s) and %d edge(s) into the work store; they are stranded again, and `gc storage status` names them\n", len(records), len(plan.edges)) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// beginInfraPurgeRestore records that the restore of run's backup has started,
+// before it writes anything, and returns ledger with the record: a restoring
+// record opens a finished run again (infraPurgePendingRun), until the restored
+// record recordInfraPurgeRestore writes closes it. A run the ledger has open
+// already, the interrupted run whose own backup this is, needs no record.
+func beginInfraPurgeRestore(target infraBindingTarget, ledger []infraPurgeLedgerRecord, run infraPurgeLedgerRecord) ([]infraPurgeLedgerRecord, error) {
+	if pending, interrupted := infraPurgePendingRun(ledger); interrupted && pending.Run == run.Run {
+		return ledger, nil
+	}
+	record := infraPurgeLedgerRecord{
+		Format: infraPurgeLedgerFormat, Event: infraPurgeEventRestoring, Run: run.Run, Type: run.Type,
+		Backup: run.Backup, Rows: run.Rows, RecordedAt: time.Now().UTC(),
+	}
+	if err := appendInfraPurgeLedger(target, ledger, record); err != nil {
+		return nil, err
+	}
+	return append(ledger, record), nil
 }
 
 // infraPurgeRestoreScope returns the ledger's backed-up record of the run whose
@@ -192,18 +234,31 @@ func infraPurgeRestoreBindingRefusal(stores *infraPurgeStores, target infraBindi
 // infraPurgeRestorePlan is what a restore writes, and the capabilities it
 // writes through, decided on the store under the policy wrapper.
 type infraPurgeRestorePlan struct {
-	// toImport are the backed-up rows the work store does not hold.
+	// toImport are the backed-up rows the work store does not hold, each
+	// without a parent its left-out parent-child edge set.
 	toImport []beads.Bead
 	// already counts the backed-up rows the work store holds as backed up.
 	already int
-	// edges are every backed-up edge, once.
+	// edges are every backed-up edge the restore can put back, once
+	// (infraPurgeRestorableEdges).
 	edges []infraBackupEdge
+	// leftOut is every other backed-up edge, with why it is left out.
+	leftOut []infraPurgeLeftOutEdge
 	// importer imports toImport; nil when the store cannot, which the plan
 	// refuses whenever there is a row to import.
 	importer beads.VerbatimImporter
 	// writer adds an edge with its payload; nil when the store cannot, which
 	// the plan refuses whenever an edge carries one.
 	writer beads.DepMetadataWriter
+}
+
+// leftOutEdges is the edges of leftOut.
+func (p infraPurgeRestorePlan) leftOutEdges() []infraBackupEdge {
+	edges := make([]infraBackupEdge, 0, len(p.leftOut))
+	for _, l := range p.leftOut {
+		edges = append(edges, l.edge)
+	}
+	return edges
 }
 
 // planInfraPurgeRestore decides what the restore of records writes, or names
@@ -219,11 +274,9 @@ func planInfraPurgeRestore(stores *infraPurgeStores, records []infraRecoverChoic
 	for _, b := range all {
 		byID[b.ID] = b
 	}
-	backed := make(map[string]bool, len(records))
 	var reminted, changed []string
 	for _, record := range records {
 		want := record.Entry.Bead
-		backed[want.ID] = true
 		got, present := byID[want.ID]
 		if !present {
 			plan.toImport = append(plan.toImport, want)
@@ -242,10 +295,14 @@ func planInfraPurgeRestore(stores *infraPurgeStores, records []infraRecoverChoic
 	if err := infraPurgeRestoreCollisionRefusal(reminted, changed, interrupted); err != nil {
 		return plan, err
 	}
-	var missing []string
-	plan.edges, missing = restorePurgeEdges(records, backed, byID)
-	if len(missing) > 0 {
-		return plan, fmt.Errorf("%d backed-up edge(s) point at a row that is neither in the backup nor in the work store, so they cannot be put back: %s", len(missing), strings.Join(missing, "; "))
+	plan.edges, plan.leftOut = infraPurgeRestorableEdges(infraPurgeRecordEntries(records), byID)
+	// A row whose parent-child edge is left out is imported without the parent
+	// that edge set: bd reads a parent off the edge and would drop it anyway,
+	// and a store that keeps the parent on the row would otherwise name a bead
+	// that is gone, or whatever holds the id now.
+	leftOut := plan.leftOutEdges()
+	for i, row := range plan.toImport {
+		plan.toImport[i] = infraPurgeRowWithoutEdgeParent(row, leftOut)
 	}
 	if len(plan.edges) > 0 {
 		if err := infraPurgeRelationListingRefusal(stores.work, plan.edges[0].IssueID); err != nil {
@@ -308,6 +365,10 @@ func infraPurgeRelationListingRefusal(source beads.WorkStore, probeID string) er
 	return nil
 }
 
+// infraPurgeRestoreAfterImport is a seam: a test makes it fail to stand in for
+// a restore that dies once its rows are imported, before any edge is back.
+var infraPurgeRestoreAfterImport = func() error { return nil }
+
 // applyInfraPurgeRestore imports the plan's rows and proves them, then adds
 // the plan's edges and proves them, and the rows again with their edges. Its
 // error says what is already back.
@@ -315,10 +376,13 @@ func applyInfraPurgeRestore(stores *infraPurgeStores, records []infraRecoverChoi
 	if len(plan.toImport) > 0 {
 		if err := plan.importer.ImportVerbatim(plan.toImport); err != nil {
 			if errors.Is(err, beads.ErrVerbatimImportUnsupported) {
-				return fmt.Errorf("%w. Nothing was written. Restore with raw bd instead (docs/runbooks/split-storage-classes.md, \"Restoring purged mail\")", err)
+				return fmt.Errorf("%w. No row was written. Restore with raw bd instead (docs/runbooks/split-storage-classes.md, \"Restoring purged mail\")", err)
 			}
 			return fmt.Errorf("importing the rows: %w. Run this again; rows already back are skipped", err)
 		}
+	}
+	if err := infraPurgeRestoreAfterImport(); err != nil {
+		return fmt.Errorf("%w. Run this again; rows already back are skipped", err)
 	}
 	// The rows, proven before any edge touches them.
 	differ, err := infraPurgeRowsNotBack(stores.work, records, restoredRowDifferenceBeforeEdges)
@@ -359,8 +423,12 @@ func applyInfraPurgeRestore(stores *infraPurgeStores, records []infraRecoverChoi
 	if len(lost) > 0 {
 		return fmt.Errorf("%d edge(s) do not read back after the restore: %s", len(lost), strings.Join(lost, "; "))
 	}
-	// The rows again, whole, now that their edges are back.
-	differ, err = infraPurgeRowsNotBack(stores.work, records, restoredEntryDifference)
+	// The rows again, now that their edges are back: whole, but for a parent
+	// whose edge is left out.
+	leftOut := plan.leftOutEdges()
+	differ, err = infraPurgeRowsNotBack(stores.work, records, func(entry infraBackupEntry, got beads.Bead) string {
+		return restoredEntryDifference(entry, got, leftOut)
+	})
 	if err != nil {
 		return err
 	}
@@ -398,8 +466,9 @@ func infraPurgeRowsNotBack(source beads.WorkStore, records []infraRecoverChoiceR
 
 // recordInfraPurgeRestore records the restore of run's backup: every row of it
 // now back that the ledger still counts as purged, and, while run is the
-// interrupted one, the end of that run. The record names the backup as the
-// ledger does.
+// interrupted one, the end of that run, which closes the restoring record
+// beginInfraPurgeRestore wrote. The record names the backup as the ledger
+// does.
 func recordInfraPurgeRestore(target infraBindingTarget, ledger []infraPurgeLedgerRecord, run infraPurgeLedgerRecord, records []infraRecoverChoiceRecord) error {
 	net := infraPurgeNetRows(ledger)
 	var restored []infraPurgeRowKey
@@ -429,10 +498,15 @@ func restoredRowDifference(want, got beads.Bead) string {
 	return beadCopyDifference(want, got)
 }
 
-// restoredEntryDifference is restoredRowDifference of entry's row, the whole
-// row: the comparison once the row's edges are back.
-func restoredEntryDifference(entry infraBackupEntry, got beads.Bead) string {
-	return restoredRowDifference(entry.Bead, got)
+// restoredEntryDifference is restoredRowDifference of entry's row once the
+// restore's edges are back: the whole row, parent included, but for a parent
+// set by an edge of leftOut, the edges the restore does not put back. Both
+// rows are compared without that parent (infraPurgeRowWithoutEdgeParent): bd
+// reads the row back with none, the import leaves it out, and a store that
+// keeps the parent on the row still holds it on a row the restore found
+// already back.
+func restoredEntryDifference(entry infraBackupEntry, got beads.Bead, leftOut []infraBackupEdge) string {
+	return restoredRowDifference(infraPurgeRowWithoutEdgeParent(entry.Bead, leftOut), infraPurgeRowWithoutEdgeParent(got, leftOut))
 }
 
 // restoredRowDifferenceBeforeEdges is restoredRowDifference of entry's row
@@ -443,22 +517,6 @@ func restoredEntryDifference(entry infraBackupEntry, got beads.Bead) string {
 // restore imported, reads back with no parent until the edge is added again.
 func restoredRowDifferenceBeforeEdges(entry infraBackupEntry, got beads.Bead) string {
 	return restoredRowDifference(infraPurgeRowWithoutEdgeState(entry.Bead, entry.Deps), infraPurgeRowWithoutEdgeState(got, entry.Deps))
-}
-
-// restorePurgeEdges collects every backed-up edge once, outbound and inbound,
-// and names any whose far endpoint is neither backed up nor in the work store.
-func restorePurgeEdges(records []infraRecoverChoiceRecord, backed map[string]bool, work map[string]beads.Bead) ([]infraBackupEdge, []string) {
-	edges := infraPurgeEdges(infraPurgeRecordEntries(records))
-	var missing []string
-	for _, edge := range edges {
-		for _, end := range []string{edge.IssueID, edge.DependsOnID} {
-			if _, held := work[end]; !backed[end] && !held {
-				missing = append(missing, fmt.Sprintf("%s (no row %s)", edge, end))
-			}
-		}
-	}
-	sort.Strings(missing)
-	return edges, missing
 }
 
 // infraRestoreScopeRefusal names why records are not exactly the rows run

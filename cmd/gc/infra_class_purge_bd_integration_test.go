@@ -397,3 +397,130 @@ func TestRestorePurgePutsAParentBackOnARealBdWorkStore(t *testing.T) {
 		t.Errorf("status after the restore should show the rows stranded and no interrupted purge:\n%s", out)
 	}
 }
+
+// TestRestorePurgeLeavesOutAParentThatIsGoneOrADifferentBeadOnARealBdWorkStore:
+// bd reads a row's parent off its parent-child edge, and bd import drops it.
+// When a purged mail's parent is deleted before the restore, or its id then
+// holds a different bead, the restore, its dry run first, leaves that edge out
+// and says the mail comes back without the parent. It exits 0, records the
+// restore and closes the run, and attaches nothing to the id; the neighbour's
+// blocks edge, whose far end is still the bead it was, comes back. After a full
+// purge, and after a run interrupted once it removed its edges.
+func TestRestorePurgeLeavesOutAParentThatIsGoneOrADifferentBeadOnARealBdWorkStore(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// crash is the seam the purge dies at; nil runs it to the end.
+		crash *func() error
+		// remint gives the parent's id to a new bead once it is deleted.
+		remint bool
+		// plan is what the restore says it puts back.
+		plan string
+	}{
+		{"after a full purge, parent gone", nil, false, "restore: 2 row(s), 0 already back, 1 edge(s)"},
+		{"after a run interrupted once its edges were removed, parent minted again", &infraPurgeAfterEdgesRemoved, true, "restore: 0 row(s), 2 already back, 1 edge(s)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city := newRealBdPurgeCity(t)
+			mail := parseCreatedBeadID(t, city.must("bd", "create", "--json", mcPurgeTitle, "-t", "message", "--ephemeral"))
+			other := parseCreatedBeadID(t, city.must("bd", "create", "--json", mcPurgeTitle, "-t", "message", "--ephemeral"))
+			parent := parseCreatedBeadID(t, city.must("bd", "create", "--json", "work the mail is filed under", "-t", "task"))
+			task := parseCreatedBeadID(t, city.must("bd", "create", "--json", "ordinary backlog work", "-t", "task"))
+			city.must("bd", "dep", "add", mail, parent, "--type", "parent-child")
+			city.must("bd", "dep", "add", other, task)
+			if got := strandedIDs(t, city.cityPath, city.target); len(got) != 2 {
+				t.Fatalf("stranded = %v, want the 2 messages", got)
+			}
+			store := city.store()
+			original, err := store.Get(parent)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var stdout, stderr bytes.Buffer
+			if tc.crash != nil {
+				finish := failPurgeAt(t, tc.crash, "simulated crash after the edges")
+				if code := runStrandedPurge(t, city.purgeCity, confirmedPurge(t, city.purgeCity, 2), &stdout, &stderr); code == 0 {
+					t.Fatalf("the crashed run exited 0")
+				}
+				finish()
+			} else if code := runStrandedPurge(t, city.purgeCity, confirmedPurge(t, city.purgeCity, 2), &stdout, &stderr); code != 0 {
+				t.Fatalf("purge exited %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+			}
+			files := purgeBackupFiles(t, city.purgeCity)
+			if len(files) != 1 {
+				t.Fatalf("backups = %v, want one", files)
+			}
+			records, err := readInfraPurgeBackup(files[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			backed := map[string]beads.Bead{}
+			for _, record := range records {
+				backed[record.Entry.Bead.ID] = record.Entry.Bead
+			}
+			if got := backed[mail].ParentID; got != parent {
+				t.Fatalf("the backup records %s with parent %q, want %q; the scenario under test was never created", mail, got, parent)
+			}
+
+			// After the purge the parent is deleted, and in one case its id goes
+			// to a new bead, imported with a creation time apart from the old
+			// bead's, which a create in the same second would not have.
+			city.must("bd", "delete", "--force", parent)
+			why := "no row " + parent + ": the bead created "
+			if tc.remint {
+				at := original.CreatedAt.Add(48 * time.Hour)
+				if err := store.ImportVerbatim([]beads.Bead{{ID: parent, Title: "a new bead under the id", Status: "open", Type: "task", CreatedAt: at, UpdatedAt: at}}); err != nil {
+					t.Fatal(err)
+				}
+				why = parent + " is a different bead now"
+			}
+
+			request := storageOperatorRequest{CityPath: city.cityPath, Cfg: city.cfg, FleetStopped: true}
+			for _, dryRun := range []bool{true, false} {
+				stdout.Reset()
+				stderr.Reset()
+				if code := doStorageRestorePurge(context.Background(), request, files[0], dryRun, &stdout, &stderr); code != 0 {
+					t.Fatalf("the restore (dry run %v) exited %d; stdout: %s stderr: %s", dryRun, code, stdout.String(), stderr.String())
+				}
+				for _, want := range []string{tc.plan, "left out: 1 backed-up edge(s)", mail + " -[parent-child]-> " + parent + " (" + why, "; " + mail + " comes back without this parent)"} {
+					if !strings.Contains(stdout.String(), want) {
+						t.Errorf("the restore (dry run %v) does not say %q:\n%s", dryRun, want, stdout.String())
+					}
+				}
+			}
+			orphan := backed[mail]
+			orphan.ParentID = ""
+			for id, want := range map[string]beads.Bead{mail: orphan, other: backed[other]} {
+				got, err := store.Get(id)
+				if err != nil {
+					t.Errorf("%s did not come back: %v", id, err)
+					continue
+				}
+				if diff := restoredRowDifference(want, got); diff != "" {
+					t.Errorf("%s came back different: %s", id, diff)
+				}
+			}
+			if deps, err := store.DepList(mail, "down"); err != nil || len(deps) != 0 {
+				t.Errorf("the restore attached %s to %s: %v (err %v)", mail, parent, deps, err)
+			}
+			stores, err := openInfraPurgeStores(city.cityPath, city.target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stores.closeWork()
+			if diff, err := infraPurgeEdgeDifference(stores, infraBackupEdge{IssueID: other, DependsOnID: task, Type: "blocks"}); err != nil || diff != "" {
+				t.Errorf("the edge %s -> %s did not come back: %s (err %v)", other, task, diff, err)
+			}
+			ledger, err := readInfraPurgeLedger(city.target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, interrupted := infraPurgePendingRun(ledger); interrupted || ledger[len(ledger)-1].Event != infraPurgeEventRestored {
+				t.Errorf("the restore did not record its end and close the run: ledger %+v", ledger)
+			}
+			if _, out := runPurgeStatus(t, city.purgeCity); strings.Contains(out, "INTERRUPTED") || !strings.Contains(out, "stranded:    2") {
+				t.Errorf("status after the restore should show the rows stranded and no interrupted purge:\n%s", out)
+			}
+		})
+	}
+}
