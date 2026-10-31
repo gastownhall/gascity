@@ -839,6 +839,9 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 // printSlingWarnings prints only warnings from a SlingResult to stderr.
 // Called before error handling so warnings are visible even on failure.
 func printSlingWarnings(result sling.SlingResult, stderr io.Writer) {
+	if result.CitySuspended {
+		fmt.Fprintln(stderr, "warning: city is suspended — bead routed but no worker will spawn until 'gc resume'") //nolint:errcheck
+	}
 	if result.AgentSuspended {
 		fmt.Fprintf(stderr, "warning: agent %q is suspended — bead routed but may not be picked up\n", result.Target) //nolint:errcheck
 	}
@@ -1198,6 +1201,9 @@ func slingJSONFromResult(result sling.SlingResult) slingJSONResult {
 
 func slingJSONWarnings(result sling.SlingResult) []string {
 	var warnings []string
+	if result.CitySuspended {
+		warnings = append(warnings, "city_suspended")
+	}
 	if result.AgentSuspended {
 		warnings = append(warnings, "agent_suspended")
 	}

@@ -29,6 +29,7 @@ import (
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // selectiveErrStore wraps a beads.Store and injects Create errors for selected
@@ -925,6 +926,37 @@ func TestSlingJSONWarningsSuspendedRig(t *testing.T) {
 	warnings := slingJSONWarnings(sling.SlingResult{SuspendedRig: "myrig"})
 	if !slices.Contains(warnings, "rig_suspended") {
 		t.Errorf("warnings = %v, want to contain rig_suspended", warnings)
+	}
+}
+
+const citySuspendedWarning = "warning: city is suspended — bead routed but no worker will spawn until 'gc resume'"
+
+func TestDoSlingWarnsCitySuspendedByRuntimeState(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = t.TempDir()
+	suspended := true
+	if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, deps.CityPath, &suspended); err != nil {
+		t.Fatalf("SetCitySuspended: %v", err)
+	}
+	code := doSling(testOpts(a, "my-1"), deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0 (still routes); stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), citySuspendedWarning) {
+		t.Errorf("stderr = %q, want city suspended warning %q", stderr.String(), citySuspendedWarning)
+	}
+	assertStoreRoutedTo(t, deps.Store, "my-1", "worker")
+}
+
+func TestSlingJSONWarningsCitySuspended(t *testing.T) {
+	warnings := slingJSONWarnings(sling.SlingResult{CitySuspended: true})
+	if !slices.Contains(warnings, "city_suspended") {
+		t.Errorf("warnings = %v, want to contain city_suspended", warnings)
 	}
 }
 

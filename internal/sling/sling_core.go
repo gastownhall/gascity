@@ -15,10 +15,12 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -91,8 +93,11 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	if a.Suspended && !opts.Force {
 		result.AgentSuspended = true
 	}
-	if !opts.Force && rigSuspended(deps.Cfg, a.Dir) {
-		result.SuspendedRig = a.Dir
+	if !opts.Force {
+		result.CitySuspended = targetScopeSuspension(fsys.OSFS{}, deps)
+		if rigSuspended(deps.Cfg, a.Dir) {
+			result.SuspendedRig = a.Dir
+		}
 	}
 	sp := agentutil.ScaleParamsFor(&a)
 	if sp.Max == 0 && !opts.Force {
@@ -241,6 +246,26 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 		result.NudgeAgent = &a
 	}
 	return true, nil
+}
+
+// targetScopeSuspension reports whether the city is effectively suspended,
+// using the runtime suspension state that gc suspend and gc resume write. The
+// pool reconciler spawns no workers in a suspended city, so a bead routed into
+// it stalls silently. An empty CityPath skips the disk read (Load would
+// otherwise resolve a cwd-relative .gc/runtime file). A state read or parse
+// error is traced and degrades to the zero State: sling warns about
+// suspension but never fails a route because of it.
+func targetScopeSuspension(fs fsys.FS, deps SlingDeps) bool {
+	var st suspensionstate.State
+	if deps.CityPath != "" {
+		loaded, err := suspensionstate.Load(fs, deps.CityPath)
+		if err != nil {
+			depsTracef(deps, "sling suspension check: loading suspension state for %s: %v", deps.CityPath, err)
+		} else {
+			st = loaded
+		}
+	}
+	return suspensionstate.EffectiveCitySuspended(st, false)
 }
 
 // rigSuspended reports whether the named rig is marked suspended in config.
