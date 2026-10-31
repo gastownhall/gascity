@@ -3441,14 +3441,29 @@ func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Tim
 	return result, nil
 }
 
-func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (orderTrackingRetentionSweepResult, error) {
+// sweepClosedOrderTrackingRetentionAcrossStores prunes expired closed
+// order-tracking beads in every store. limit is a deletion budget shared
+// across the stores; limit <= 0 means no budget. A store whose sweep stops on
+// the budget still counts as swept: the run made progress, and the next run
+// resumes from what is left because each run re-reads the eligible set.
+func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (orderTrackingRetentionSweepResult, error) {
 	result := orderTrackingRetentionSweepResult{}
 	var errs []error
 	for i, store := range stores {
 		if store == nil {
 			continue
 		}
-		n, err := sweepClosedOrderTrackingRetention(store, now, policy, onlyOrders)
+		var n int
+		var err error
+		if limit > 0 {
+			remaining := limit - result.deleted
+			if remaining <= 0 {
+				break
+			}
+			n, err = sweepClosedOrderTrackingRetentionBounded(store, now, policy, onlyOrders, remaining)
+		} else {
+			n, err = sweepClosedOrderTrackingRetention(store, now, policy, onlyOrders)
+		}
 		result.deleted += n
 		if err != nil {
 			errs = append(errs, fmt.Errorf("pruning closed order-tracking %s: %w", orderTrackingSweepStoreLabel(store, i), err))
@@ -3544,6 +3559,11 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 					retained = append(retained, run.ID)
 					continue
 				}
+				if errors.Is(err, beads.ErrNotFound) {
+					// Already gone (an orphaned row, or another sweeper got
+					// there first): nothing is left to prune.
+					continue
+				}
 				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", run.ID, err))
 				continue
 			}
@@ -3623,6 +3643,11 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 			if err := deleteWorkflowBead(store, run.ID); err != nil {
 				if errors.Is(err, errWorkflowDeleteLiveDescendants) {
 					retained = append(retained, run.ID)
+					continue
+				}
+				if errors.Is(err, beads.ErrNotFound) {
+					// Already gone (an orphaned row, or another sweeper got
+					// there first): nothing is left to prune.
 					continue
 				}
 				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", run.ID, err))

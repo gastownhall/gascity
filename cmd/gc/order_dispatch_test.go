@@ -4629,7 +4629,7 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresTracksSuccessfulStores(t *
 	result, err := sweepClosedOrderTrackingRetentionAcrossStores([]beads.Store{store}, now, orderTrackingRetentionPolicy{
 		deleteAfterClose: 24 * time.Hour,
 		retainLast:       minClosedOrderTrackingRetained,
-	}, nil)
+	}, nil, 0)
 	if err == nil {
 		t.Fatal("sweepClosedOrderTrackingRetentionAcrossStores err = nil, want delete failure")
 	}

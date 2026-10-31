@@ -3210,6 +3210,9 @@ Closed order-tracking history is deleted after
 always retaining at least the latest 10 closed tracking beads per order.
 The manual command runs to completion; controller startup and watchdog sweeps
 use bounded cleanup to avoid spending an unbounded tick on stale work.
+--max-delete caps how many closed tracking beads one run deletes; the run then
+exits 0 and the next run continues with what is left. The cap counts
+deletions only; it does not bound how long a run takes.
 
 Use --include-wisps for operator recovery of abandoned order-run wisp
 subtrees whose open descendants are also older than --stale-after. Pass one
@@ -3230,6 +3233,7 @@ gc order sweep-tracking [order ...] [flags]
 | `--confirm` | bool |  | confirm bulk deletion when eligible count &gt; GC_BULK_DELETE_CONFIRM_THRESHOLD (default 20) |
 | `--dry-run` | bool |  | report stale order-tracking and order wisp beads without closing them |
 | `--include-wisps` | bool |  | also close stale order-run wisp subtrees with open descendants |
+| `--max-delete` | int |  | delete at most this many closed order-tracking beads in this run (0 = no limit) |
 | `--quiet` | bool |  | suppress success output |
 | `--stale-after` | duration | `10m0s` | minimum age for an open tracking bead to be closed |
 
