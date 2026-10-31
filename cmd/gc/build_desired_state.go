@@ -2284,6 +2284,60 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 	return counts, partialTemplates, errs
 }
 
+// controllerDemandReadyLeg is one store a demand pass reads, with the label
+// its read is traced under.
+type controllerDemandReadyLeg struct {
+	store beads.Store
+	label string
+}
+
+type controllerDemandReadyResult struct {
+	rows []beads.Bead
+	err  error
+}
+
+// readControllerDemandReadyLegs reads every leg's controller-demand ready set
+// concurrently, as the session census and assigned-work legs do, and returns
+// the results index-aligned with legs. Each read is a store round trip (a bd
+// subprocess on a Dolt-backed store), so a serial loop paid the sum of them on
+// every pass. A store named by two legs is read once when cache is non-nil,
+// because the cache memoizes per store.
+//
+// A panicking read is re-raised on the caller's goroutine once every leg has
+// returned, exactly as the serial loop let it escape: the demand gather turns
+// an inline probe panic into the whole gather's error with an empty view
+// (TestGatherDemandSurvivesCollectorPanic), and a panic left on a spawned
+// goroutine would instead kill the process.
+func readControllerDemandReadyLegs(cache *readyDemandCache, legs []controllerDemandReadyLeg) []controllerDemandReadyResult {
+	results := make([]controllerDemandReadyResult, len(legs))
+	if len(legs) == 1 {
+		results[0].rows, results[0].err = cache.controllerDemandReady(legs[0].store, legs[0].label)
+		return results
+	}
+	panics := make([]any, len(legs))
+	var wg sync.WaitGroup
+	for idx, leg := range legs {
+		idx, leg := idx, leg
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if p := recover(); p != nil {
+					panics[idx] = p
+				}
+			}()
+			results[idx].rows, results[idx].err = cache.controllerDemandReady(leg.store, leg.label)
+		}()
+	}
+	wg.Wait()
+	for _, p := range panics {
+		if p != nil {
+			panic(p)
+		}
+	}
+	return results
+}
+
 func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCheckTarget, caches ...*readyDemandCache) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
 	cache := optionalReadyDemandCache(caches)
 	counts := make(map[string]int, len(targets))
@@ -2364,14 +2418,23 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 	// and "city" groups and would double the template's demand. With the city
 	// probe no longer cold-gated, that double-count would be a persistent
 	// warm condition rather than a one-tick wake overshoot, so dedup by ID.
-	for _, group := range groupOrder {
+	//
+	// The groups' ready reads run concurrently and are folded here in group
+	// order, so the counts stay deterministic while a city with many rigs pays
+	// the slowest read's latency instead of the sum of them.
+	legs := make([]controllerDemandReadyLeg, len(groupOrder))
+	for i, group := range groupOrder {
+		legs[i] = controllerDemandReadyLeg{store: group.store, label: cache.storeLabel(group.store, group.storeKey)}
+	}
+	groupReady := readControllerDemandReadyLegs(cache, legs)
+	for groupIdx, group := range groupOrder {
 		key := group.storeKey
 		// Ready()/CachedReady() iteration surfaces actionable work
 		// matched against gc.routed_to/gc.run_target. Formula orders that
 		// should wake pools must create an actionable root, such as a
 		// vapor/root-only wisp. Molecule containers and formula step
 		// beads remain hidden by readyExcludeTypes.
-		ready, readyErr := cache.controllerDemandReady(group.store, cache.storeLabel(group.store, key))
+		ready, readyErr := groupReady[groupIdx].rows, groupReady[groupIdx].err
 		if readyErr != nil {
 			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), readyErr))
 			partialTemplates = markScaleCheckPartialSet(partialTemplates, group.templates)

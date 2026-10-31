@@ -1413,6 +1413,7 @@ go_test(
         "demand_cross_store_gate_test.go",
         "demand_divergence_test.go",
         "demand_pool_scale_check_leg_test.go",
+        "demand_ready_overlap_test.go",
         "demand_serve_agreement_test.go",
         "demand_serve_cross_store_test.go",
         "demand_serve_passed_step_test.go",
