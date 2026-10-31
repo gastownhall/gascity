@@ -299,7 +299,11 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				}
 			}
 			quarantined := s.state.IsQuarantined(sessionName)
-			resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity)
+			var program runtime.ProgramStatus
+			if running {
+				program = runtimeProgramStatus(ctx, sp, sessionName, provider)
+			}
+			resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity, program)
 
 			if wantPeek && running {
 				if output, err := sp.Peek(sessionName, 5); err == nil {
@@ -310,6 +314,8 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 			if running && provider == "claude" && canAttributeSession(a, ea.qualifiedName, cfg, s.state.CityPath()) {
 				s.enrichSessionMeta(&resp, a, ea.qualifiedName)
 			}
+			obs := observeProgram(program, resp.Activity)
+			resp.ProgramStatus, resp.Activity, resp.ActivitySource = obs.status, obs.activity, obs.activitySource
 
 			agents = append(agents, resp)
 		}
@@ -444,11 +450,17 @@ func (s *Server) agentByName(ctx context.Context, name string) (*IndexOutput[age
 		}
 	}
 	quarantined := s.state.IsQuarantined(sessionName)
-	resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity)
+	var program runtime.ProgramStatus
+	if running {
+		program = runtimeProgramStatus(ctx, sp, sessionName, provider)
+	}
+	resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity, program)
 
 	if running && provider == "claude" && canAttributeSession(agentCfg, name, cfg, s.state.CityPath()) {
 		s.enrichSessionMeta(&resp, agentCfg, name)
 	}
+	obs := observeProgram(program, resp.Activity)
+	resp.ProgramStatus, resp.Activity, resp.ActivitySource = obs.status, obs.activity, obs.activitySource
 
 	return &IndexOutput[agentResponse]{
 		Index: index,

@@ -8,7 +8,9 @@ import (
 
 // programStatusChecks are the checks of the landed WC-PSTAT rows, by code. A
 // row joins this map in the change that removes it from programStatusPending.
-var programStatusChecks = map[RequirementCode]func(t *testing.T, profile Profile) Result{}
+var programStatusChecks = map[RequirementCode]func(t *testing.T, profile Profile) Result{
+	RequirementProgramStatusPhase: checkProgramStatusPhase,
+}
 
 // providerDataDeclaresProgramStatus reports whether gc's provider data
 // declares OSC 7501 program status for profile's family. No family declares
@@ -94,7 +96,7 @@ func TestProgramStatusGate(t *testing.T) {
 	undeclared := Phase1Profiles()[0]
 	declared := undeclared
 	declared.ProgramStatus.Declared = true
-	code := RequirementProgramStatusPhase
+	code := RequirementProgramStatusPendingKindOnly
 
 	if r, run := ProgramStatusGate(undeclared, code, true); run || r.Status != ResultFail || !strings.Contains(r.Detail, "drift") {
 		t.Fatalf("provider data declares, profile does not: %+v run=%t, want a drift failure", r, run)
@@ -106,8 +108,11 @@ func TestProgramStatusGate(t *testing.T) {
 		t.Fatalf("undeclared: %+v run=%t, want unsupported", r, run)
 	}
 	r, run := ProgramStatusGate(declared, code, true)
-	if run || r.Status != ResultUnsupported || r.Evidence["pending_slice"] != "ga-f4ovjm.16" {
-		t.Fatalf("declared, row pending: %+v run=%t, want unsupported naming ga-f4ovjm.16", r, run)
+	if run || r.Status != ResultUnsupported || r.Evidence["pending_slice"] != "ga-f4ovjm.22" {
+		t.Fatalf("declared, row pending: %+v run=%t, want unsupported naming ga-f4ovjm.22", r, run)
+	}
+	if r, run := ProgramStatusGate(declared, RequirementProgramStatusPhase, true); !run || r.Status != "" {
+		t.Fatalf("declared, WC-PSTAT-002 landed: %+v run=%t, want the row run", r, run)
 	}
 
 	slice := programStatusPending[code]

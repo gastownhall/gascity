@@ -18,7 +18,6 @@ type ProgramStatusExpectation struct {
 // change that lands its behavior and registers its check.
 var programStatusPending = map[RequirementCode]string{
 	RequirementProgramStatusSurfaces:           "ga-f4ovjm.18 (codex, claude), ga-f4ovjm.38 (other families)",
-	RequirementProgramStatusPhase:              "ga-f4ovjm.16",
 	RequirementProgramStatusPendingKindOnly:    "ga-f4ovjm.22",
 	RequirementProgramStatusQueueBehindBlocked: "ga-f4ovjm.22",
 	RequirementProgramStatusImmediateRefused:   "ga-f4ovjm.22",

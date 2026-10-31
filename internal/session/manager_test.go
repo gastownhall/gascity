@@ -4464,6 +4464,36 @@ func TestPendingByNameProbesProviderWithoutBeadLookup(t *testing.T) {
 	}
 }
 
+// TestProgramStatusByNameReadsTheRuntimeReading proves SESSION-RUNTIME-031:
+// the manager passes the runtime's judged program-status reading through
+// unchanged, reads Unread from a runtime without the capability, and returns
+// a missing session's error rather than inventing a reading.
+func TestProgramStatusByNameReadsTheRuntimeReading(t *testing.T) {
+	sp := runtime.NewFake()
+	mgr := newTestManager(t, beads.NewMemStore(), runtime.FullFake{Fake: sp})
+	if err := sp.Start(context.Background(), "s", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	row := runtime.ProgramPaneRow{
+		Mode: runtime.ProgramStatusShadow, CaptureGate: true, PaneID: "%1",
+		PanePipe: true, Tap: "n.%1", TapLiveness: runtime.ProgramTapAlive,
+		RecordForm: runtime.ProgramRecordDecoded,
+		Record:     runtime.ProgramStatus{Nonce: "n.%1", State: runtime.ProgramBlocked, Kind: runtime.ProgramBlockAuth, Seq: 2, Progress: -1, Reported: true},
+	}
+	sp.SetProgramPane("s", row)
+	got, err := mgr.ProgramStatusByName("s")
+	if err != nil || got != runtime.JudgeProgramStatus(row) || !got.Blocked() || got.Decides() {
+		t.Fatalf("ProgramStatusByName = %+v, %v; want the judged shadow blocked reading", got, err)
+	}
+	if _, err := mgr.ProgramStatusByName("gone"); !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("missing session: %v, want ErrSessionNotFound", err)
+	}
+	plain := newTestManager(t, beads.NewMemStore(), sp)
+	if got, err := plain.ProgramStatusByName("s"); err != nil || got != (runtime.ProgramStatus{}) {
+		t.Fatalf("runtime without the capability: %+v, %v; want Unread", got, err)
+	}
+}
+
 type pendingSessionGoneProvider struct {
 	*runtime.Fake
 }

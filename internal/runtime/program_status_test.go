@@ -430,6 +430,23 @@ func TestProgramStatusForResolvesTheRoutedLeaf(t *testing.T) {
 	}
 }
 
+// Kills a ReadProgramStatus that drops the routed leaf's reading or error,
+// or invents state for a backend without the capability.
+func TestReadProgramStatusReadsTheRoutedLeaf(t *testing.T) {
+	boom := errors.New("boom")
+	leaf := &programLeaf{Provider: runtime.NewFake(), read: valid(runtime.ProgramBlocked, 2, 1), err: boom}
+	composite := hybrid.New(leaf, runtime.NewFake(), func(name string) bool { return name == "remote" })
+	if got, err := runtime.ReadProgramStatus(composite, "local"); !errors.Is(err, boom) || got != leaf.read {
+		t.Fatalf("routed to the leaf: %+v, %v; want the leaf's reading and error", got, err)
+	}
+	if got, err := runtime.ReadProgramStatus(composite, "remote"); err != nil || got != (runtime.ProgramStatus{}) {
+		t.Fatalf("routed elsewhere: %+v, %v; want an Unread reading and no error", got, err)
+	}
+	if got, err := runtime.ReadProgramStatus(nil, "s"); err != nil || got.Validity != runtime.ProgramStatusUnread {
+		t.Fatalf("nil provider: %+v, %v; want Unread", got, err)
+	}
+}
+
 // Kills an inventory entry whose zero program reading is not Unread.
 func TestInventoryEntryProgramDefaultsToUnread(t *testing.T) {
 	var e runtime.InventoryEntry

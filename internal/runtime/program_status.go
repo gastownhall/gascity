@@ -184,6 +184,18 @@ func ProgramStatusFor(p Provider, name string) (ProgramStatusProvider, bool) {
 	return ps, ok
 }
 
+// ReadProgramStatus reads session name's judged reading from the backend
+// serving it ([ProgramStatusFor]). A backend that takes no such reading
+// yields an Unread reading and nil error; otherwise the leaf's reading and
+// error are returned as is.
+func ReadProgramStatus(p Provider, name string) (ProgramStatus, error) {
+	ps, ok := ProgramStatusFor(p, name)
+	if !ok {
+		return ProgramStatus{}, nil
+	}
+	return ps.ProgramStatus(name)
+}
+
 // ProgramStatusArm is a session's capture declaration, resolved from provider
 // data, the city switch and the transport. The zero value declares nothing.
 type ProgramStatusArm struct {

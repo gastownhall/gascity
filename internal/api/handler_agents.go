@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -63,7 +64,7 @@ type agentResponse struct {
 	// for city-native agents.
 	Pack string `json:"pack,omitempty"`
 
-	State string `json:"state"`
+	State string `json:"state" doc:"Agent state: suspended, quarantined, stopped, working, waiting, idle, blocked or error. blocked and error come only from the session program's own status report, under the city's program_status switch on."`
 
 	Available         bool   `json:"available"`
 	UnavailableReason string `json:"unavailable_reason,omitempty"`
@@ -72,6 +73,12 @@ type agentResponse struct {
 
 	// Activity indicates session turn state: "idle", "in-turn", or omitted.
 	Activity string `json:"activity,omitempty"`
+	// ActivitySource names where Activity came from. Set only while
+	// ProgramStatus is shown.
+	ActivitySource string `json:"activity_source,omitempty" enum:"program,transcript" doc:"Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present."`
+	// ProgramStatus is the agent session program's own status report;
+	// absent means unknown, never idle.
+	ProgramStatus *SessionProgramStatus `json:"program_status,omitempty" doc:"The agent session program's own status report (OSC 7501), present while the city's program_status switch is shadow or on and the reading is valid. Absent means the status is unknown, never idle."`
 
 	Model         string `json:"model,omitempty"`
 	ContextPct    *int   `json:"context_pct,omitempty"`
@@ -635,8 +642,12 @@ func agentProviderInfo(a *config.Agent, cfg *config.City) (provider, displayName
 	return resolveProviderInfo(provider, cfg)
 }
 
-// computeAgentState derives the state enum from existing agent data.
-func computeAgentState(suspended, quarantined, running bool, activeBead string, lastActivity *time.Time) string {
+// computeAgentState derives the state enum from existing agent data. A
+// running agent's program-status reading decides its state only when it
+// Decides (valid, city switch on): working is working, blocked is blocked,
+// error is error, and idle or done is waiting with an active bead and idle
+// without one. Any other reading leaves today's derivation.
+func computeAgentState(suspended, quarantined, running bool, activeBead string, lastActivity *time.Time, program runtime.ProgramStatus) string {
 	if suspended {
 		return "suspended"
 	}
@@ -645,6 +656,20 @@ func computeAgentState(suspended, quarantined, running bool, activeBead string, 
 	}
 	if !running {
 		return "stopped"
+	}
+	if program.Decides() {
+		switch program.State {
+		case runtime.ProgramWorking:
+			return "working"
+		case runtime.ProgramBlocked:
+			return "blocked"
+		case runtime.ProgramError:
+			return "error"
+		}
+		if activeBead != "" {
+			return "waiting"
+		}
+		return "idle"
 	}
 	if activeBead != "" {
 		if lastActivity != nil && time.Since(*lastActivity) < 10*time.Minute {
