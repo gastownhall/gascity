@@ -63,6 +63,16 @@ const (
 type Work struct {
 	Key  ClaimKey
 	Kind Kind
+	// AwaitsHuman: the seat said it waits on a person's decision about this
+	// work (the caller reads it off the claim). Its entry is only nudged, a
+	// Cap apart, and never recycled or released, and its pacing raises none
+	// of AlertStartedRecycled, AlertStartedUnanswered and
+	// AlertReleaseUnfinished: no nudge can hurry a person, and one a Cap
+	// apart still re-drives a seat whose turn ended after the answer came
+	// but before the seat said the wait is over. A nudge the seat cannot
+	// take still counts toward AlertNudgeRefused, and a pending release that
+	// raced a start still raises AlertReleaseRacedStart.
+	AwaitsHuman bool
 }
 
 // Tri is a three-valued reading.
@@ -240,7 +250,7 @@ type Entry struct {
 	Since     time.Time // the rung's (or the generation's) start
 	Attempts  int       // counted nudges on this rung, this generation
 	Paused    int       // nudges sent while the provider was degraded
-	Last      time.Time // the last nudge or recycle
+	Last      time.Time // the last nudge or recycle, or the start of a wait on a person
 	Next      time.Time // when the entry is next due if the seat stays quiet
 	Recycles  int       // across generations
 	Escalated bool      // the entry's alert was raised (cleared on a rung change)
@@ -257,6 +267,10 @@ type Entry struct {
 	// Notice is the asynchronous delivery of the entry's last nudge, until
 	// the caller settles it (SettleNotice); zero when there is none.
 	Notice NoticeMark
+	// AwaitsHuman: the entry's episode is a wait on a person
+	// (Work.AwaitsHuman). The wait's start and its end each begin a new
+	// episode, with a fresh count.
+	AwaitsHuman bool
 }
 
 // ReleaseMark is a release of an unstarted claim in flight. While it names a

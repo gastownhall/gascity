@@ -57,6 +57,7 @@ type sim struct {
 	agent    map[ClaimKey]bool // the agent cell
 	seeds    map[ClaimKey]StartSource
 	started  map[ClaimKey]bool // ever started while continuously outstanding as a claim
+	waiting  map[ClaimKey]bool // the seat asked a person about the claim and waits on the answer
 	obs      Observation
 	activity time.Time // the seat's last activity: it works now and then
 	lastStep time.Duration
@@ -84,6 +85,7 @@ func newSim(seed uint64) *sim {
 	s := &sim{
 		seed: seed, rng: rand.New(rand.NewPCG(seed, 0x6c6164646572)), now: t0, gen: 1,
 		kinds: map[ClaimKey]Kind{}, agent: map[ClaimKey]bool{}, seeds: map[ClaimKey]StartSource{}, started: map[ClaimKey]bool{},
+		waiting: map[ClaimKey]bool{},
 	}
 	s.obs = Observation{StartedRead: true, Runtime: TriTrue, Quiet: Quiet{State: Quiescent}}
 	if s.chance(70) {
@@ -102,6 +104,7 @@ func (s *sim) drop(k ClaimKey) {
 	delete(s.agent, k)
 	delete(s.seeds, k)
 	delete(s.started, k)
+	delete(s.waiting, k)
 }
 
 // step advances the world and builds the next observation.
@@ -130,6 +133,8 @@ func (s *sim) step() Observation {
 			}
 		case ok && kind == KindClaim && s.event(5):
 			s.agent[k] = true
+		case ok && kind == KindClaim && s.event(4): // the seat asks a person, or works the step again
+			s.waiting[k] = !s.waiting[k]
 		}
 	}
 	if s.event(3) {
@@ -180,7 +185,7 @@ func (s *sim) step() Observation {
 		if !ok {
 			continue
 		}
-		o.Outstanding = append(o.Outstanding, Work{Key: k, Kind: kind})
+		o.Outstanding = append(o.Outstanding, Work{Key: k, Kind: kind, AwaitsHuman: s.waiting[k]})
 		if s.agent[k] {
 			o.Started[k] = SrcAgent
 		} else if src, ok := s.seeds[k]; ok && seeding {
@@ -256,6 +261,7 @@ func (s *sim) run() error {
 	}
 	lastCounted := map[ClaimKey]counted{}  // the entry's last counted nudge
 	unfinished := map[ClaimKey]time.Time{} // when the lane last reported a release kept
+	waitFrom := map[ClaimKey]time.Time{}   // a wait on a person's start, or its last nudge
 	for i := range 90 {
 		o := s.step()
 		if s.marks {
@@ -304,11 +310,12 @@ func (s *sim) run() error {
 		// act on it whose evidence (the newest completed turn when the
 		// newest ended turn failed, else the activity clock) is at least
 		// ProgressReset past its last nudge. A failed turn is never
-		// progress, and a pass that cannot act judges nothing.
+		// progress, and a pass that cannot act judges nothing. A wait on a
+		// person that begins or ends starts a new episode instead.
 		if prev.V != 0 && prev.Gen == o.Gen {
 			for _, e := range d.Next.Entries {
 				pe, ok := entryOf(prev, e.Key)
-				if !ok || pe.Kind != e.Kind || (e.Rung != pe.Rung && e.Rung != RungEscalated) {
+				if !ok || pe.Kind != e.Kind || (e.Rung != pe.Rung && e.Rung != RungEscalated) || pe.AwaitsHuman != e.AwaitsHuman {
 					continue
 				}
 				acting := !o.Gate.Held && o.Runtime == TriTrue && o.Quiet.State == Quiescent && !o.Hold[e.Key]
@@ -324,11 +331,37 @@ func (s *sim) run() error {
 			}
 		}
 
+		// A wait on a person is paced from its start, or its last nudge,
+		// whatever else begins a new episode meanwhile.
+		waits := func(k ClaimKey) bool {
+			return slices.ContainsFunc(o.Outstanding, func(w Work) bool { return w.Key == k && w.AwaitsHuman })
+		}
+		for _, e := range d.Next.Entries {
+			pe, ok := entryOf(prev, e.Key)
+			switch {
+			case !e.AwaitsHuman:
+				delete(waitFrom, e.Key)
+			case !ok || !pe.AwaitsHuman:
+				waitFrom[e.Key] = o.Now
+			}
+		}
+
 		nudges := 0
 		for _, a := range d.Actions {
+			if _, ok := a.(Nudge); !ok && waits(actionKey(a)) {
+				if al, ok := a.(Alert); !ok || al.Reason != AlertReleaseRacedStart {
+					return fail("%T about %v, whose seat waits on a person: only a nudge", a, actionKey(a))
+				}
+			}
 			switch a := a.(type) {
 			case Nudge:
 				nudges++
+				if waits(a.Key) {
+					if from := waitFrom[a.Key]; o.Now.Sub(from) < DefaultCap {
+						return fail("a wait on a person nudged %v after its start or last nudge, want >= %v", o.Now.Sub(from), DefaultCap)
+					}
+					waitFrom[a.Key] = o.Now
+				}
 				// WL5: no nudge under a hold.
 				if o.Gate.Held || o.Hold[a.Key] {
 					return fail("WL5: nudge under a hold")
@@ -411,12 +444,15 @@ func (s *sim) run() error {
 
 		// WL1: every entry of a nudgeable seat hears from the ladder (a
 		// nudge or an alert) within Cap, give or take the passes it waits
-		// for the seat's nudge slot; a release, kept, never silences it.
+		// for the seat's nudge slot; a release, kept, never silences it,
+		// and neither does a wait on a person, whose start or end begins a
+		// new episode.
 		eligible := !o.Gate.Held && o.Runtime == TriTrue && o.Quiet.State == Quiescent
 		for _, e := range d.Next.Entries {
 			since, ok := lastHeard[e.Key]
+			pe, _ := entryOf(prev, e.Key)
 			switch {
-			case !eligible || !ok || o.Hold[e.Key] || prev.Gen != o.Gen || (d.Next.Release != nil && d.Next.Release.Key == e.Key):
+			case !eligible || !ok || o.Hold[e.Key] || prev.Gen != o.Gen || (d.Next.Release != nil && d.Next.Release.Key == e.Key) || pe.AwaitsHuman != e.AwaitsHuman:
 				lastHeard[e.Key] = o.Now
 			case o.Now.Sub(since) > DefaultCap+3*maxStep+2*DefaultBase:
 				return fail("WL1: %v of a quiet seat has not heard from the ladder for %v", e.Key, o.Now.Sub(since))
@@ -531,6 +567,89 @@ func TestNoDrainWave(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+// A wait on a person is only ever nudged, a Cap after it began and a Cap
+// apart after that, whatever the cell carried when it began (any rung, count
+// or recycle, an alert raised, a release that did not finish, a release in
+// flight) and whatever the seat or the provider does while it waits. Its
+// pace is tracked here from the actions alone, not from the cell.
+func TestPropertyAWaitIsOnlyNudged(t *testing.T) {
+	forEachSequence(t, func(seq uint64) error {
+		rng := rand.New(rand.NewPCG(seq, 0x6177616974))
+		prev := Record{V: 1, Gen: 1}
+		var work []Work
+		started := map[ClaimKey]StartSource{}
+		from := map[ClaimKey]time.Time{} // the wait's start, or its last nudge
+		for _, k := range simKeys {
+			work = append(work, Work{Key: k, Kind: KindClaim, AwaitsHuman: true})
+			rung := RungClaimed + Rung(rng.IntN(3))
+			if rung >= RungStarted {
+				started[k] = SrcAgent
+			}
+			e := Entry{
+				Key: k, Kind: KindClaim, Rung: rung, Since: t0.Add(-10 * time.Hour), Attempts: rng.IntN(12), Paused: rng.IntN(3),
+				Last: t0.Add(-time.Duration(rng.IntN(180)) * time.Minute), Recycles: rng.IntN(2), Escalated: rng.IntN(2) == 0,
+				Unreleased: rng.IntN(3) == 0, AwaitsHuman: rng.IntN(2) == 0,
+			}
+			if e.AwaitsHuman {
+				from[k] = e.Last
+			}
+			prev.Entries = append(prev.Entries, e)
+		}
+		if rng.IntN(2) == 0 {
+			prev.Release = &ReleaseMark{Key: simKeys[rng.IntN(len(simKeys))], Gen: 1, At: t0.Add(-time.Minute)}
+		}
+		r := prev
+		for now := t0; now.Sub(t0) < 12*time.Hour; now = now.Add(time.Duration(1+rng.IntN(20)) * time.Minute) {
+			o := quiet(now, 1, work...)
+			o.Started = started
+			o.Provider.Degraded = rng.IntN(10) == 0
+			if rng.IntN(10) == 0 { // the seat did something while it waits
+				o.LastActivity = now.Add(-time.Duration(rng.IntN(120)) * time.Second)
+			}
+			d := Decide(r, o, p)
+			for _, e := range d.Next.Entries {
+				if pe, ok := entryOf(r, e.Key); !ok || !pe.AwaitsHuman {
+					from[e.Key] = now
+				}
+			}
+			for _, a := range d.Actions {
+				switch a := a.(type) {
+				case Nudge:
+					if gap := now.Sub(from[a.Key]); gap < DefaultCap {
+						return fmt.Errorf("at %v: %v nudged %v after its wait began or its last nudge (prev %s)", now.Sub(t0), a.Key, gap, EncodeLadder(prev))
+					}
+					from[a.Key] = now
+				case Alert:
+					if a.Reason != AlertReleaseRacedStart {
+						return fmt.Errorf("at %v: alert %s about a wait on a person (prev %s)", now.Sub(t0), a.Reason, EncodeLadder(prev))
+					}
+				default:
+					return fmt.Errorf("at %v: %T about a wait on a person (prev %s)", now.Sub(t0), a, EncodeLadder(prev))
+				}
+			}
+			if d.Changed {
+				r = d.Next
+			}
+		}
+		return nil
+	})
+}
+
+// actionKey is the work a is about.
+func actionKey(a Action) ClaimKey {
+	switch a := a.(type) {
+	case Nudge:
+		return a.Key
+	case Recycle:
+		return a.Key
+	case Release:
+		return a.Key
+	case Alert:
+		return a.Key
+	}
+	return ClaimKey{}
 }
 
 func entryKind(r Record, k ClaimKey) Kind {
