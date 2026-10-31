@@ -1239,6 +1239,7 @@ go_test(
         "cmd_hook_claim_turnbound_test.go",
         "cmd_hook_claim_work_branch_test.go",
         "cmd_hook_claim_workflow_stop_test.go",
+        "cmd_hook_claim_worktree_affinity_test.go",
         "cmd_hook_current_test.go",
         "cmd_hook_discovery_drain_test.go",
         "cmd_hook_stdin_drain_test.go",
