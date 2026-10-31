@@ -145,6 +145,11 @@ city files, repository, queue, hooks or running sessions. Pack resolution may
 populate a derived download cache. A prefix collision is an error; keep the
 existing issue IDs and resolve the conflicting registration before proceeding.
 
+Gas City keeps the existing queue's prefix, including when Beads stores it in
+its database. You do not need to add the prefix to a YAML file. If the queue's
+database is stopped, run `bd ping` in that repository before previewing;
+the preview itself does not start it.
+
 Read the plan, then apply the same command without `--dry-run`:
 
 ```bash

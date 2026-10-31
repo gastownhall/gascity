@@ -3314,6 +3314,9 @@ func (cs *controllerState) rigProvisionDeps(editCfg *config.City, r config.Rig, 
 		NormalizeScopes: func(cp string, c *config.City) error {
 			return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)
 		},
+		ReadStorePrefix: func(path string, readOnly bool) (string, error) {
+			return readRigAdoptStorePrefix(cs.cityPath, path, readOnly)
+		},
 		PrepareAdopt:  prepareRigAdoptProviderState,
 		StoreContract: cityUsesBdStoreContract,
 		DoltSkip:      gcDoltSkip,

@@ -984,6 +984,12 @@ func TestBeadsProxiedDefaultRig(t *testing.T) {
 	})
 
 	t.Run("adopt-un-journaled", func(t *testing.T) {
+		// Stop the city's background orders before measuring the preview's
+		// provider calls. The independently initialized workspace below stays
+		// live; preview must inspect it without starting the destination city.
+		if out, err := p.city.GC("stop", p.cityRoot); err != nil {
+			t.Fatalf("stop destination city before preview: %v\n%s", err, out)
+		}
 		// A workspace bd initialised on its own carries the proxied binding
 		// with no gc journal entry — the migrated and cloned shapes R1 covers.
 		env, bdPath, cityRoot := p.env, p.bdPath, p.cityRoot
@@ -1005,24 +1011,42 @@ func TestBeadsProxiedDefaultRig(t *testing.T) {
 			stop.Run() //nolint:errcheck // best effort
 		})
 
-		// gc's adopt gate reads the issue prefix from .beads/config.yaml, and
-		// `bd init` records its prefix in the store instead — its generated
-		// config leaves issue-prefix commented out, and bd refuses
-		// `bd config set issue_prefix` outright. So adopting a bd-initialised
-		// workspace means writing that one line by hand today. Worth closing:
-		// gc could read the prefix back from bd rather than require the file.
-		configPath := filepath.Join(adopted, ".beads", "config.yaml")
-		existing, err := os.ReadFile(configPath)
-		if err != nil {
-			t.Fatal(err)
+		// Keep bd's native workspace unchanged: its prefix lives in the
+		// database. Preview must discover that namespace without provider verbs
+		// or persistent configuration changes.
+		originals := map[string][]byte{}
+		for _, path := range []string{filepath.Join(adopted, ".beads", "config.yaml"), filepath.Join(adopted, ".beads", "metadata.json"), filepath.Join(cityRoot, "city.toml")} {
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			originals[path] = body
 		}
-		if err := os.WriteFile(configPath, append([]byte("issue_prefix: adopt\n"), existing...), 0o600); err != nil {
-			t.Fatal(err)
+		p.bdCalls.Reset()
+		preview, previewErr := helpers.RunGC(env, cityRoot, "rig", "add", "--adopt", "--dry-run", "--json", adopted)
+		if previewErr != nil {
+			t.Fatalf("native adoption preview: %v\n%s", previewErr, preview)
+		}
+		var plan struct {
+			Action string `json:"action"`
+			Prefix string `json:"prefix"`
+		}
+		if err := json.Unmarshal([]byte(preview), &plan); err != nil || plan.Action != "plan" || plan.Prefix != "adopt" {
+			t.Fatalf("incorrect adoption plan: %+v error=%v\n%s", plan, err, preview)
+		}
+		if calls := p.bdCalls.Invocations(); len(calls) != 0 {
+			t.Fatalf("preview invoked provider commands:\n%s", p.bdCalls.Describe())
+		}
+		for path, want := range originals {
+			got, err := os.ReadFile(path)
+			if err != nil || string(got) != string(want) {
+				t.Fatalf("preview changed %s: %v", path, err)
+			}
 		}
 
 		// A workspace that already holds a beads store is an adoption, which gc
 		// makes explicit rather than inferring.
-		owned, addErr := helpers.RunGC(env, cityRoot, "rig", "add", "--adopt", "--prefix", "adopt", adopted)
+		owned, addErr := helpers.RunGC(env, cityRoot, "rig", "add", "--adopt", adopted)
 		if addErr != nil {
 			t.Fatalf("gc rig add --adopt on a bd-initialised proxied workspace: %v\n%s", addErr, owned)
 		}

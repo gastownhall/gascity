@@ -97,6 +97,10 @@ type Deps struct {
 	// rollback protection. nil = fatal at the config-write step for callers that
 	// write config.
 	NormalizeScopes func(cityPath string, cfg *config.City) error
+	// ReadStorePrefix reads a native queue namespace, including when YAML mirrors it.
+	// readOnly forbids provider startup, migrations and persistent writes.
+	// nil retains the legacy YAML-only validation.
+	ReadStorePrefix func(rigPath string, readOnly bool) (string, error)
 	// PrepareAdopt readies provider state for --adopt (cmd/gc
 	// prepareRigAdoptProviderState). nil = skip; only consulted when req.Adopt.
 	PrepareAdopt func(cityPath, rigPath string) error

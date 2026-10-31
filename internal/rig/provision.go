@@ -93,6 +93,17 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 		return config.Rig{}, result, err
 	}
 
+	var adoptedPrefix string
+	if req.Adopt {
+		adoptedPrefix, err = readAdoptPrefix(deps, req, rigPath)
+		if err != nil {
+			return config.Rig{}, result, err
+		}
+		if req.Prefix == "" {
+			req.Prefix = adoptedPrefix
+		}
+	}
+
 	// Steps 5-9: detect re-add, derive the prefix, resolve imports, build the
 	// next config, and validate it before any filesystem mutation.
 	plan, err := planRigMutation(deps, req, rigPath, resolvedDefaultBranch, specs)
@@ -101,7 +112,7 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 	}
 
 	// Validate existing queue ownership before creating or changing anything.
-	if err := validateAdoptAndBeadsStore(deps, req, rigPath, plan); err != nil {
+	if err := validateAdoptAndBeadsStore(deps, req, rigPath, plan, adoptedPrefix); err != nil {
 		return config.Rig{}, result, err
 	}
 	if req.DryRun {
@@ -455,22 +466,16 @@ func createRigDirIfMissing(fs fsys.FS, rigPath string, rigPathExists bool) error
 // existing store whose prefix disagrees with the resolved one is rejected with
 // role-specific recovery text; and a fresh add refuses to run over a directory
 // that already holds a store. All returned texts are byte-identical to the CLI.
-func validateAdoptAndBeadsStore(deps Deps, req ProvisionRequest, rigPath string, plan rigMutationPlan) error {
+func validateAdoptAndBeadsStore(deps Deps, req ProvisionRequest, rigPath string, plan rigMutationPlan, adoptedPrefix string) error {
 	fs := deps.FS
 	name := req.Name
 	prefix := plan.prefix
 
+	existingPrefix, ok := ReadBeadsPrefix(fs, rigPath)
 	if req.Adopt {
-		metaPath := filepath.Join(rigPath, ".beads", "metadata.json")
-		if _, err := fs.Stat(metaPath); err != nil {
-			return fmt.Errorf("--adopt requires .beads/metadata.json in %s", rigPath)
-		}
-		if _, ok := ReadBeadsPrefix(fs, rigPath); !ok {
-			return fmt.Errorf("--adopt requires a valid issue_prefix in .beads/config.yaml in %s", rigPath)
-		}
+		existingPrefix, ok = adoptedPrefix, true
 	}
-
-	if existingPrefix, ok := ReadBeadsPrefix(fs, rigPath); ok && existingPrefix != prefix {
+	if ok && existingPrefix != prefix {
 		switch {
 		case plan.reAdd:
 			// On re-add, --prefix is ignored (we use the existing rig's

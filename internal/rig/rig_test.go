@@ -1,7 +1,10 @@
 package rig
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -100,5 +103,67 @@ func TestDryRunDoesNotCreateRigOrReachMutations(t *testing.T) {
 	}
 	if len(deps.Cfg.Rigs) != 0 {
 		t.Fatal("dry run mutated input config")
+	}
+}
+
+func TestAdoptNativeDatabasePrefixBeforePlanning(t *testing.T) {
+	for _, tc := range []struct {
+		name, explicit, stored, wantErr string
+		yaml                            string
+		readErr                         error
+	}{
+		{name: "infer existing namespace", stored: "prod"},
+		{name: "matching explicit namespace", stored: "prod", explicit: "prod"},
+		{name: "mismatching explicit namespace", stored: "prod", explicit: "other", wantErr: "already has bead prefix"},
+		{name: "collision with HQ", stored: "gc", wantErr: "collides with HQ"},
+		{name: "unavailable namespace", readErr: errors.New("proxy is stopped"), wantErr: "proxy is stopped"},
+		{name: "empty namespace", wantErr: "issue_prefix"},
+		{name: "matching YAML mirror", stored: "prod", yaml: "prod"},
+		{name: "conflicting YAML mirror", stored: "prod", yaml: "other", wantErr: "conflicts with stored"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps := stubDeps(t.TempDir())
+			deps.Cfg.Workspace.Prefix = "gc"
+			path := t.TempDir()
+			if err := os.Mkdir(filepath.Join(path, ".beads"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for name, body := range map[string]string{"metadata.json": `{"dolt_mode":"proxied-server"}`, "config.yaml": "# native bd keeps its prefix in the database\n"} {
+				if err := os.WriteFile(filepath.Join(path, ".beads", name), []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.yaml != "" {
+				if err := os.WriteFile(filepath.Join(path, ".beads", "config.yaml"), []byte("issue_prefix: "+tc.yaml+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			reads := 0
+			deps.ReadStorePrefix = func(got string, readOnly bool) (string, error) {
+				reads++
+				if got != path || !readOnly {
+					t.Fatalf("prefix lookup=(%q,%v)", got, readOnly)
+				}
+				return tc.stored, tc.readErr
+			}
+			deps.InitStore = func(string, string, string) (bool, error) { t.Fatal("preview initialized store"); return false, nil }
+			deps.PrepareAdopt = func(string, string) error { t.Fatal("preview prepared store"); return nil }
+			deps.WriteRoutes = func(string, *config.City) error { t.Fatal("preview wrote routes"); return nil }
+			deps.PostProvision = func(ProvisionContext) error { t.Fatal("preview reloaded city"); return nil }
+			got, _, err := Provision(deps, ProvisionRequest{Name: "renamed-project", Path: path, Adopt: true, DryRun: true, Prefix: tc.explicit})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error=%v; want %s", err, tc.wantErr)
+				}
+			} else if err != nil || got.EffectivePrefix() != tc.stored {
+				t.Fatalf("rig=%+v, error=%v", got, err)
+			}
+			if reads != 1 {
+				t.Fatalf("prefix reads=%d; want1", reads)
+			}
+			if len(deps.Cfg.Rigs) != 0 {
+				t.Fatal("preview mutated input config")
+			}
+		})
 	}
 }

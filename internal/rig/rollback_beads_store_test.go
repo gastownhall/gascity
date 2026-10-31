@@ -96,6 +96,7 @@ func TestProvisionKeepsAdoptedBeadsStoreWhenInitFails(t *testing.T) {
 	deps, req := provisionWithFailingStoreInit(t, func(_, _, _ string) (bool, error) {
 		return false, initErr
 	})
+	deps.StoreContract = func(string) bool { return true }
 	req.Adopt = true
 	writePartialStore(t, req.Path)
 	if err := os.WriteFile(filepath.Join(req.Path, ".beads", "config.yaml"), []byte("issue_prefix: storerig\n"), 0o644); err != nil {
@@ -103,8 +104,8 @@ func TestProvisionKeepsAdoptedBeadsStoreWhenInitFails(t *testing.T) {
 	}
 	marker := filepath.Join(req.Path, ".beads", "metadata.json")
 
-	if _, _, provErr := Provision(deps, req); provErr == nil {
-		t.Fatal("expected the store-init failure to surface")
+	if _, _, provErr := Provision(deps, req); !errors.Is(provErr, initErr) {
+		t.Fatalf("expected store-init failure, got %v", provErr)
 	}
 
 	if _, err := os.Stat(marker); err != nil {

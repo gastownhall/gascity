@@ -2972,7 +2972,7 @@ func TestDoRigAdd_AdoptRejectsEmptyConfigYaml(t *testing.T) {
 	}
 }
 
-func TestDoRigAdd_AdoptWithoutPrefixMismatch(t *testing.T) {
+func TestDoRigAdd_AdoptInfersExistingPrefix(t *testing.T) {
 	cityPath := t.TempDir()
 	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
 
@@ -2994,14 +2994,18 @@ func TestDoRigAdd_AdoptWithoutPrefixMismatch(t *testing.T) {
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BEADS", "file")
 
-	// No --prefix: derived prefix from basename "mismatch-rig" won't match "xr".
+	// Without --prefix, preserve the existing namespace instead of deriving a new one.
 	var stdout, stderr bytes.Buffer
 	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, true, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("expected prefix mismatch failure, got code %d, stdout: %s", code, stdout.String())
+	if code != 0 {
+		t.Fatalf("adoption failed: %s", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "already has bead prefix") {
-		t.Errorf("error should mention prefix mismatch: %s", stderr.String())
+	cfg, err := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Rigs) != 1 || cfg.Rigs[0].EffectivePrefix() != "xr" {
+		t.Fatalf("adoption changed namespace: %+v", cfg.Rigs)
 	}
 }
 
