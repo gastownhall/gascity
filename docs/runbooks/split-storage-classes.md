@@ -438,6 +438,13 @@ gc serves its own `release-if-current` itself.
   such edges into the binding): `purge` and `prune` can delete that work bead
   and leave the edge dangling.
 - `batch`: every `create` line is classified.
+- A file gc judges (`batch --file`, `delete --from-file`, a `--metadata @file`,
+  the `import` source) is copied to a private temporary file once judged, and
+  bd is pointed at the copy, which is removed when `gc bd` returns. bd writes
+  exactly what gc judged: a file rewritten after gc read it changes nothing.
+  A pipe (`<(...)`, `/dev/stdin`) given to `batch --file`, `delete
+  --from-file` or `import` is drained by gc's read, and bd gets the drained
+  bytes. bd names the copy, not your file, in what it prints.
 - `sql`: only a single plain read is allowed: no comments, no Dolt procedures,
   no backtick-quoted Dolt names.
 - `config set`: only `types.custom`, `types.infra` and `types.retained`.
