@@ -63,6 +63,7 @@ type rlSim struct {
 	direct     bool // nudges are delivered directly, else as notices
 	ops        int
 	delivered  time.Time // the newest delivery this generation, as the harness saw it
+	answeredAt time.Time // the end of the newest answered refusal the harness saw
 	// episode bookkeeping (RL3)
 	epRestarts, epAlerts int
 	lastHeard            map[ClaimKey]time.Time
@@ -351,7 +352,8 @@ func maxTime(a, b time.Time) time.Time {
 // nudge of this generation, while it holds work.
 func answered(o Observation, delivered time.Time, entries int) bool {
 	t := o.Turns
-	return t.Read && t.Conv == o.Conv && entries > 0 && t.Refused >= DefaultRateLimitThreshold && !delivered.IsZero() && t.RefusedAt.After(delivered)
+	return t.Read && t.Conv == o.Conv && entries > 0 && t.Refused >= DefaultRateLimitThreshold && !delivered.IsZero() && t.RefusedAt.After(delivered) &&
+		o.Now.Sub(t.RefusedAt) <= DefaultCap
 }
 
 // alertMove is the move an episode's alert reason rides with.
@@ -496,8 +498,13 @@ func (w *rlWorld) pass(i, step int) error {
 		o.Now.Sub(nrl.Since) >= DefaultPausedCap+DefaultCap && nrl.Alerted == "" {
 		return fail("RL5: confirmed %v ago and neither restarted nor alerted", o.Now.Sub(nrl.Since))
 	}
-	if acting && !ans && nrl.Phase != RateLimitClear && o.Now.Sub(nrl.Checked) > DefaultCap {
-		return fail("RL5: no answered refusal for %v and still open", o.Now.Sub(nrl.Checked))
+	// No new answered refusal for EvidenceMaxAge: closed, by the harness's
+	// own clock of the newest answered refusal, not the cell's.
+	if ans && o.Turns.RefusedAt.After(s.answeredAt) {
+		s.answeredAt = minTime(o.Turns.RefusedAt, o.Now)
+	}
+	if acting && nrl.Phase != RateLimitClear && o.Now.Sub(s.answeredAt) > DefaultCap {
+		return fail("RL5: no new answered refusal for %v and still open", o.Now.Sub(s.answeredAt))
 	}
 	if t := o.Turns; acting && t.Read && t.Conv == o.Conv && prl.Phase != RateLimitClear {
 		ref := prl.Since

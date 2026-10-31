@@ -84,7 +84,7 @@ func TestRateLimitOpens(t *testing.T) {
 	delivered := rlAt.Add(-4 * time.Minute)
 	refusal := rlAt.Add(-time.Minute)
 	d := Decide(rlSeat(delivered, RateLimit{}), rlPass(rlAt, 1, refusedTurns(1, 2, refusal)), p)
-	want := RateLimit{Phase: RateLimitOpen, Conv: 1, Since: refusal, Checked: rlAt}
+	want := RateLimit{Phase: RateLimitOpen, Conv: 1, Since: refusal, Checked: refusal}
 	if !reflect.DeepEqual(d.Next.RateLimit, want) {
 		t.Fatalf("episode %+v, want %+v", d.Next.RateLimit, want)
 	}
@@ -142,6 +142,10 @@ func TestRateLimitNearMisses(t *testing.T) {
 			o.Runtime = TriUnknown
 			return o
 		}()},
+		{
+			"a refusal older than the evidence bound answers nothing", rlSeat(rlAt.Add(-DefaultCap-2*time.Minute), RateLimit{}),
+			rlPass(rlAt, 1, refusedTurns(1, 3, rlAt.Add(-DefaultCap-time.Second))),
+		},
 		{"no outstanding work", rlSeat(delivered, RateLimit{}), func() Observation {
 			o := rlPass(rlAt, 1, refusedTurns(1, 3, refusal))
 			o.Outstanding = nil
@@ -215,22 +219,82 @@ func TestRateLimitCloses(t *testing.T) {
 	}
 }
 
-// An answered refusal keeps the episode's evidence fresh in every open
-// phase, degraded too: a provider hold is no reason to forget it.
+// A new answered refusal keeps the episode's evidence fresh in every open
+// phase, degraded too (a provider hold is no reason to forget it): Checked
+// moves to the refusal's own end, never to the pass that reads it, and
+// never back.
 func TestRateLimitAnsweredRefreshesChecked(t *testing.T) {
 	since := rlAt.Add(-5 * time.Minute)
+	refusal := rlAt.Add(-time.Minute)
 	for _, rl := range []RateLimit{
 		{Phase: RateLimitOpen, Conv: 1, Since: since, Checked: since},
 		{Phase: RateLimitExhausted, Conv: 1, Since: since, Checked: since, Alerted: AlertRateLimitedAgain},
 	} {
 		for _, deg := range []bool{false, true} {
-			o := rlPass(rlAt, 1, refusedTurns(1, 2, rlAt.Add(-time.Minute)))
+			o := rlPass(rlAt, 1, refusedTurns(1, 2, refusal))
 			o.Provider.Degraded = deg
 			d := Decide(rlSeat(rlAt.Add(-3*time.Minute), rl), o, p)
-			if !d.Next.RateLimit.Checked.Equal(rlAt) || d.Next.RateLimit.Phase != rl.Phase || len(rlMoves(d)) != 0 {
+			if !d.Next.RateLimit.Checked.Equal(refusal) || d.Next.RateLimit.Phase != rl.Phase || len(rlMoves(d)) != 0 {
 				t.Fatalf("%v degraded=%v: episode %+v, moves %+v", rl.Phase, deg, d.Next.RateLimit, rlMoves(d))
 			}
+			// The same refusal read again later moves nothing.
+			again := rl
+			again.Checked = refusal
+			o.Now = rlAt.Add(5 * time.Minute)
+			if d := Decide(rlSeat(rlAt.Add(-3*time.Minute), again), o, p); !d.Next.RateLimit.Checked.Equal(refusal) {
+				t.Fatalf("%v degraded=%v: re-reading the refusal moved Checked to %v", rl.Phase, deg, d.Next.RateLimit.Checked)
+			}
 		}
+	}
+}
+
+// An exhausted seat whose nudges stop reaching it (every delivery fails)
+// reads the same answered refusal on every pass for a day, about 144 paused
+// nudges. That one refusal must not keep the episode standing: it closes
+// stale RateLimitEvidenceMaxAge after the refusal ended, never reopens on
+// it, and the seat keeps hearing from the ladder.
+func TestRateLimitUndeliveredNudgesGoStale(t *testing.T) {
+	refusal := rlAt
+	r := rlSeat(rlAt.Add(-time.Minute), RateLimit{
+		Phase: RateLimitExhausted, Conv: 1, Since: rlAt.Add(-20 * time.Minute), Checked: refusal, Alerted: AlertRateLimitedAgain,
+	})
+	r.Entries[0].Last, r.LastNudge = refusal, refusal
+	var closed time.Time
+	nudges := 0
+	step := time.Minute
+	end := rlAt.Add(24 * time.Hour)
+	for now := rlAt.Add(step); !now.After(end); now = now.Add(step) {
+		d := Decide(r, rlPass(now, 1, refusedTurns(1, 2, refusal)), p)
+		if d.Changed {
+			r = d.Next
+		}
+		for _, m := range rlMoves(d) {
+			if m != move(RateLimitTransitionClosed, RateLimitCauseStale) || !closed.IsZero() {
+				t.Fatalf("at +%v: move %+v (closed at +%v)", now.Sub(refusal), m, closed.Sub(refusal))
+			}
+			closed = now
+		}
+		for _, a := range d.Actions {
+			if n, ok := a.(Nudge); ok {
+				nudges++
+				// The delivery fails: nothing reaches the seat.
+				if out, _, ok := NudgeRefused(r, n.Key, n.Attempt, now); ok {
+					r = out
+				}
+			}
+		}
+		if !closed.IsZero() && r.RateLimit.Phase != RateLimitClear {
+			t.Fatalf("at +%v: the episode reopened on the stale refusal: %+v", now.Sub(refusal), r.RateLimit)
+		}
+	}
+	if closed.IsZero() {
+		t.Fatalf("the episode stood for a day on one refusal: %+v", r.RateLimit)
+	}
+	if late := closed.Sub(refusal); late <= DefaultCap || late > DefaultCap+step {
+		t.Fatalf("closed stale %v after the refusal, want just past %v", late, DefaultCap)
+	}
+	if nudges < 100 {
+		t.Fatalf("the seat was nudged %d times in a day: silenced", nudges)
 	}
 }
 
@@ -249,7 +313,7 @@ func TestRateLimitRestartsFresh(t *testing.T) {
 	since := rlAt.Add(-DefaultPausedCap)
 	prev, o := confirmedPass(openSince(since))
 	d := Decide(prev, o, p)
-	want := RateLimit{Phase: RateLimitRestarted, Conv: 1, Since: since, Checked: rlAt, FreshAt: rlAt, FromConv: 1, LastFresh: rlAt}
+	want := RateLimit{Phase: RateLimitRestarted, Conv: 1, Since: since, Checked: o.Turns.RefusedAt, FreshAt: rlAt, FromConv: 1, LastFresh: rlAt}
 	if !reflect.DeepEqual(d.Next.RateLimit, want) {
 		t.Fatalf("episode %+v, want %+v", d.Next.RateLimit, want)
 	}

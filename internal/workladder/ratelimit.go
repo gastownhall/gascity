@@ -12,7 +12,7 @@ type RateLimit struct {
 	Phase    RateLimitPhase // RateLimitClear when no episode is open
 	Conv     int64          // the conversation (continuation epoch) it stands in
 	Since    time.Time      // when the refusal that opened it ended
-	Checked  time.Time      // the last acting pass that read an answered refusal
+	Checked  time.Time      // when the newest answered refusal it read ended
 	FreshAt  time.Time      // the episode's fresh restart; zero before it
 	FromConv int64          // the conversation that restart left
 	Alerted  string         // the episode's one alert reason, once raised
@@ -99,8 +99,12 @@ func (obs Observation) seatActs() bool {
 // The evidence is this conversation's reading only. A, the answered refusal:
 // the provider refused at least RateLimitThreshold of the seat's newest
 // turns in a row, the newest after the seat's last delivered nudge of this
-// generation, while it holds work. S, served: a turn the provider completed
-// after the episode began (or after its fresh restart).
+// generation and no older than RateLimitEvidenceMaxAge, while it holds work.
+// S, served: a turn the provider completed after the episode began (or after
+// its fresh restart). The evidence ages by the refusal's own time, never by
+// the pass that reads it: a seat whose nudges stop reaching it reads the
+// same refusal on every pass, and that one refusal must not keep its episode
+// standing past the bound.
 //
 // Nothing moves on a pass that cannot act on the seat. Every move but
 // closing needs the provider not degraded (WL4): closing stays allowed so a
@@ -114,7 +118,8 @@ func (p Policy) rateLimit(d *Decision, obs Observation) bool {
 	t := obs.Turns
 	reading := t.Read && t.Conv == obs.Conv
 	answered := reading && len(d.Next.Entries) > 0 && t.Refused >= p.RateLimitThreshold &&
-		!d.Next.Delivered.IsZero() && t.RefusedAt.After(d.Next.Delivered)
+		!d.Next.Delivered.IsZero() && t.RefusedAt.After(d.Next.Delivered) && now.Sub(t.RefusedAt) <= p.RateLimitEvidenceMaxAge
+	refusedAt := minTime(t.RefusedAt, now)
 	degraded := obs.Provider.Degraded
 	move := func(tr RateLimitTransition, c RateLimitCause) {
 		d.Actions = append(d.Actions, RateLimitMove{Transition: tr, Cause: c})
@@ -156,8 +161,8 @@ func (p Policy) rateLimit(d *Decision, obs Observation) bool {
 	if !answered {
 		return false
 	}
-	if rl.Phase != RateLimitClear {
-		rl.Checked = now
+	if rl.Phase != RateLimitClear && refusedAt.After(rl.Checked) {
+		rl.Checked = refusedAt
 	}
 	if degraded {
 		return false
@@ -165,7 +170,7 @@ func (p Policy) rateLimit(d *Decision, obs Observation) bool {
 
 	switch rl.Phase {
 	case RateLimitClear:
-		*rl = RateLimit{Phase: RateLimitOpen, Conv: obs.Conv, Since: minTime(t.RefusedAt, now), Checked: now, LastFresh: rl.LastFresh}
+		*rl = RateLimit{Phase: RateLimitOpen, Conv: obs.Conv, Since: refusedAt, Checked: refusedAt, LastFresh: rl.LastFresh}
 		move(RateLimitTransitionOpened, "")
 	case RateLimitRestarted:
 		if !t.RefusedAt.After(rl.FreshAt) {
