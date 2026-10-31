@@ -214,6 +214,15 @@ const (
 	TraceReasonOnDeathHookPending    TraceReasonCode = "on_death_hook_pending"
 	TraceReasonPrepareBudgetSpent    TraceReasonCode = "prepare_budget_spent"
 	TraceReasonInterruptedClose      TraceReasonCode = "interrupted_close"
+	// TraceReasonSessionLockBusy is a start skipped because the session's
+	// mutation lock stayed held for the tick's bounded wait.
+	TraceReasonSessionLockBusy TraceReasonCode = "session_lock_busy"
+	// TraceReasonPendingCreateRollbackLockBusy is a pending-create rollback
+	// skipped for the same reason; the next tick retries it.
+	TraceReasonPendingCreateRollbackLockBusy TraceReasonCode = "pending_create_rollback_lock_busy"
+	// TraceReasonPendingCreateRecoveryLockBusy is a running pending-create
+	// recovery whose commit was skipped for the same reason.
+	TraceReasonPendingCreateRecoveryLockBusy TraceReasonCode = "pending_create_recovery_lock_busy"
 )
 
 type TraceOutcomeCode string

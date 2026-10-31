@@ -147,7 +147,7 @@ func TestPoolSessionCreate_TeardownFailureHoldsTheSlot(t *testing.T) {
 	if !releaseRowOwnedRuntime(first, sp, io.Discard, nil, nil) {
 		t.Fatal("teardown still refused after the backend recovered")
 	}
-	rollbackPendingCreate(first, sessionFrontDoor(store), now, io.Discard)
+	rollbackPendingCreate(context.Background(), first, sessionFrontDoor(store), now, io.Discard)
 	open, err := loadSessionBeads(store)
 	if err != nil {
 		t.Fatalf("loadSessionBeads: %v", err)
@@ -520,7 +520,7 @@ func TestCommitAsyncStart_StaleResultStopsUnattributedBeadScopedPoolRuntime(t *t
 		store := beads.NewMemStore()
 		sp := runtime.NewFake()
 		info := createBeadScopedPoolRowWithBox(t, store, sp, now)
-		rollbackPendingCreate(info, sessionFrontDoor(store), now, io.Discard)
+		rollbackPendingCreate(context.Background(), info, sessionFrontDoor(store), now, io.Discard)
 		if got, _ := store.Get(info.ID); got.Status != "closed" {
 			t.Fatalf("fixture: row status = %q, want closed by the rollback", got.Status)
 		}
@@ -539,7 +539,7 @@ func TestCommitAsyncStart_StaleResultStopsUnattributedBeadScopedPoolRuntime(t *t
 		if err := sp.SetMeta(info.SessionNameMetadata, "GC_INSTANCE_TOKEN", "newer-generation-token"); err != nil {
 			t.Fatalf("SetMeta: %v", err)
 		}
-		rollbackPendingCreate(info, sessionFrontDoor(store), now, io.Discard)
+		rollbackPendingCreate(context.Background(), info, sessionFrontDoor(store), now, io.Discard)
 		commitAsyncStartResultWithContext(context.Background(), successfulPoolStartResult(info, now), sp, store, clk, events.Discard, 0, io.Discard, io.Discard, nil)
 		if !sp.IsRunning(info.SessionNameMetadata) {
 			t.Fatalf("box %q positively owned by another generation was stopped", info.SessionNameMetadata)

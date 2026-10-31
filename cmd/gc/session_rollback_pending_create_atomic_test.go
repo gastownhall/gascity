@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"path/filepath"
 	"strconv"
@@ -94,21 +95,21 @@ func rollbackVariants(now time.Time) []rollbackVariant {
 		{
 			name: "rollbackPendingCreate",
 			run: func(info session.Info, store beads.Store, stderr *bytes.Buffer) bool {
-				return rollbackPendingCreate(info, sessionFrontDoor(store), now, stderr) != nil
+				return rollbackPendingCreate(context.Background(), info, sessionFrontDoor(store), now, stderr) != nil
 			},
 			want: want(nil),
 		},
 		{
 			name: "rollbackPendingCreateClearingClaim",
 			run: func(info session.Info, store beads.Store, stderr *bytes.Buffer) bool {
-				return rollbackPendingCreateClearingClaim(info, sessionFrontDoor(store), now, stderr) != nil
+				return rollbackPendingCreateClearingClaim(context.Background(), info, sessionFrontDoor(store), now, stderr) != nil
 			},
 			want: want(nil),
 		},
 		{
 			name: "rollbackPendingCreateMarkingTerminal",
 			run: func(info session.Info, store beads.Store, stderr *bytes.Buffer) bool {
-				rollbackPendingCreateMarkingTerminal(info, sessionFrontDoor(store), now, reason, stderr)
+				rollbackPendingCreateMarkingTerminal(context.Background(), info, sessionFrontDoor(store), now, reason, stderr)
 				return true
 			},
 			want: want(providerTerminalErrorPatch(reason, now)),
@@ -254,7 +255,7 @@ func TestRollbackPendingCreateReleasesTheNameOnlyAfterTheClose(t *testing.T) {
 			info := rollbackObserved(t, order, created.ID)
 
 			var stderr bytes.Buffer
-			batch := rollbackPendingCreate(info, sessionFrontDoor(order), rollbackAtomicNow, &stderr)
+			batch := rollbackPendingCreate(context.Background(), info, sessionFrontDoor(order), rollbackAtomicNow, &stderr)
 			if batch == nil {
 				t.Fatalf("rollbackPendingCreate did not apply: %s", stderr.String())
 			}
@@ -341,7 +342,7 @@ func TestRollbackPendingCreateLeavesAReopenedRowItsName(t *testing.T) {
 	info := rollbackObserved(t, order, created.ID)
 
 	var stderr bytes.Buffer
-	batch := rollbackPendingCreate(info, sessionFrontDoor(order), rollbackAtomicNow, &stderr)
+	batch := rollbackPendingCreate(context.Background(), info, sessionFrontDoor(order), rollbackAtomicNow, &stderr)
 	if batch == nil {
 		t.Fatalf("rollbackPendingCreate did not report its close: %s", stderr.String())
 	}
@@ -462,7 +463,7 @@ func TestRollbackPendingCreateRefusesAStaleObservationBeforeWriting(t *testing.T
 			}
 
 			var stderr bytes.Buffer
-			if batch := rollbackPendingCreate(stale, sessionFrontDoor(race), rollbackAtomicNow, &stderr); batch != nil {
+			if batch := rollbackPendingCreate(context.Background(), stale, sessionFrontDoor(race), rollbackAtomicNow, &stderr); batch != nil {
 				t.Fatalf("rollbackPendingCreate applied on a stale observation: %v", batch)
 			}
 			// A cache that has not seen the other process's write still
@@ -502,7 +503,7 @@ func TestRollbackPendingCreateFallsBackToTheTxWhenTheCloseIsRefused(t *testing.T
 	info := rollbackObserved(t, race, created.ID)
 
 	var stderr bytes.Buffer
-	if rollbackPendingCreate(info, sessionFrontDoor(race), rollbackAtomicNow, &stderr) == nil {
+	if rollbackPendingCreate(context.Background(), info, sessionFrontDoor(race), rollbackAtomicNow, &stderr) == nil {
 		t.Fatalf("rollbackPendingCreate did not apply through the fallback: %s", stderr.String())
 	}
 	if race.atomicCalls != 1 || race.txCalls != 1 {
@@ -612,7 +613,7 @@ func TestRollbackPendingCreateUnderRealConcurrentWritersNeverRestsClosedAwake(t 
 					defer rolling.Done()
 					<-start
 					var stderr bytes.Buffer
-					wins[i] = rollbackPendingCreate(info, sessionFrontDoor(race), rollbackAtomicNow, &stderr) != nil
+					wins[i] = rollbackPendingCreate(context.Background(), info, sessionFrontDoor(race), rollbackAtomicNow, &stderr) != nil
 				}()
 			}
 			close(start)
@@ -635,7 +636,7 @@ func TestRollbackPendingCreateUnderRealConcurrentWritersNeverRestsClosedAwake(t 
 			// back.
 			if winners == 0 {
 				var stderr bytes.Buffer
-				if rollbackPendingCreate(info, sessionFrontDoor(race), rollbackAtomicNow, &stderr) == nil {
+				if rollbackPendingCreate(context.Background(), info, sessionFrontDoor(race), rollbackAtomicNow, &stderr) == nil {
 					t.Fatalf("follow-up rollback after the writer stopped failed: %s", stderr.String())
 				}
 				winners = 1
