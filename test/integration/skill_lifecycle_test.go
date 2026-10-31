@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && unix
 
 // Skill materialization lifecycle integration tests (Phase 4B).
 //

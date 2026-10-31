@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // TriggerResult holds the outcome of a trigger check.
@@ -352,7 +353,13 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", a.Check)
+	if reason := runtime.ShellCommandUnavailable(a.Check); reason != "" {
+		return TriggerResult{Due: false, Reason: "check command refused: " + reason}
+	}
+	cmd, err := runtime.ShellCommandContext(ctx, a.Check)
+	if err != nil {
+		return TriggerResult{Due: false, Reason: fmt.Sprintf("check command failed: %v", err)}
+	}
 	cleanupCommand := prepareConditionCommand(cmd, conditionCheckSignalGrace)
 	cmd.WaitDelay = conditionCheckPostCancelWaitDelay
 	cmd.Stdout = io.Discard
@@ -367,7 +374,12 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 	if opts.ConditionDir != "" {
 		cmd.Dir = opts.ConditionDir
 	}
-	if err := cmd.Run(); err != nil {
+	err = startConditionCommand(cmd)
+	if err == nil {
+		defer releaseConditionCommand(cmd)
+		err = cmd.Wait()
+	}
+	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			reason := fmt.Sprintf("check command %s after %s", ConditionCheckTimedOutMarker, timeout)
 			if cleanupErr := cleanupCommand(); cleanupErr != nil {

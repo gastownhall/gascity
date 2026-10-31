@@ -17,6 +17,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/spf13/cobra"
 )
 
@@ -658,6 +659,9 @@ func defaultPromptSynthRunner(ctx context.Context, provider *config.ResolvedProv
 	cmd := exec.CommandContext(ctx, provider.Command, args...)
 	if workDir != "" {
 		cmd.Dir = workDir
+	}
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		return "", err
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

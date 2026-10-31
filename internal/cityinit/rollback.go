@@ -7,7 +7,8 @@ import (
 	"io/fs"
 	"path/filepath"
 	"sort"
-	"syscall"
+
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func rollbackScaffoldFailure(sfs ScaffoldFS, dir string, dirExisted bool, rollbackState *scaffoldRollbackState, err error) error {
@@ -198,7 +199,7 @@ func (s *scaffoldRollbackState) restore(sfs ScaffoldFS) error {
 	})
 	for _, rel := range createdDirs {
 		if err := sfs.Remove(filepath.Join(s.root, rel)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			if errors.Is(err, syscall.ENOTEMPTY) {
+			if fsys.IsDirNotEmpty(err) {
 				continue
 			}
 			errs = append(errs, fmt.Errorf("remove %q: %w", filepath.Join(s.root, rel), err))

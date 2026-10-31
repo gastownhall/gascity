@@ -45,6 +45,7 @@ type BuiltinProviderSpec struct {
 	PromptFlag             string
 	ReadyDelayMs           int
 	ReadyPromptPrefix      string
+	NotReadyMarkers        []string
 	ProcessNames           []string
 	EmitsPermissionWarning bool
 	AcceptStartupDialogs   *bool
@@ -632,6 +633,11 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		InstructionsFile:  "AGENTS.md",
 		ResumeFlag:        "--resume",
 		ResumeStyle:       "flag",
+		// Copilot renders its input prompt before its managed account and
+		// plugin policies load, and until they do it discards a submitted
+		// prompt with "Managed {account,plugin} policy is still loading.
+		// Please wait a moment and try again." (copilot CLI 1.0.95).
+		NotReadyMarkers: []string{"policy is still loading"},
 	},
 	"amp": {
 		// Hook mechanism: Amp CLI's plugin system (session.start,
@@ -994,6 +1000,7 @@ func newProfileIdentity(profile, family string) ProfileIdentity {
 func cloneBuiltinProviderSpec(spec BuiltinProviderSpec) BuiltinProviderSpec {
 	spec.Args = cloneStrings(spec.Args)
 	spec.ProcessNames = cloneStrings(spec.ProcessNames)
+	spec.NotReadyMarkers = cloneStrings(spec.NotReadyMarkers)
 	spec.Env = cloneStringMap(spec.Env)
 	spec.PermissionModes = cloneStringMap(spec.PermissionModes)
 	spec.OptionDefaults = cloneStringMap(spec.OptionDefaults)

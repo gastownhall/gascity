@@ -1,4 +1,4 @@
-//go:build acceptance_a
+//go:build acceptance_a && unix
 
 // Lifecycle-example worktree acceptance tests.
 //

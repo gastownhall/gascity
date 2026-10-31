@@ -349,6 +349,9 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	if city.ProcessNames != nil {
 		result.ProcessNames = city.ProcessNames
 	}
+	if city.NotReadyMarkers != nil {
+		result.NotReadyMarkers = cloneStrings(city.NotReadyMarkers)
+	}
 	pruneOptionDefaults := map[string]bool{}
 	if city.OptionsSchema != nil {
 		if city.OptionsSchemaMerge == "by_key" {
@@ -707,6 +710,7 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		rp.ProcessNames = make([]string, len(spec.ProcessNames))
 		copy(rp.ProcessNames, spec.ProcessNames)
 	}
+	rp.NotReadyMarkers = cloneStrings(spec.NotReadyMarkers)
 	if len(spec.Env) > 0 {
 		rp.Env = make(map[string]string, len(spec.Env))
 		for k, v := range spec.Env {
@@ -898,6 +902,9 @@ func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
 	}
 	if r.ProcessNames != nil {
 		out.ProcessNames = append([]string(nil), r.ProcessNames...)
+	}
+	if r.NotReadyMarkers != nil {
+		out.NotReadyMarkers = append([]string(nil), r.NotReadyMarkers...)
 	}
 	// Tri-state *bool: preserve from leaf if set; else fold from the
 	// resolved value only when some chain layer explicitly contributed it.

@@ -8,11 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/executionevent"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 	"github.com/spf13/cobra"
 )
 
@@ -69,13 +69,13 @@ func runEventsReemitExecution(cmd *cobra.Command, runID string, apply bool, stdo
 	if err != nil {
 		return fmt.Errorf("resolving --city: %w", err)
 	}
-	controllerLock, err := requireStoppedExecutionReemitCity(cityPath)
+	controllerLock, controllerLockFile, err := requireStoppedExecutionReemitCity(cityPath)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		_ = syscall.Flock(int(controllerLock.Fd()), syscall.LOCK_UN)
-		_ = controllerLock.Close()
+		_ = controllerLock.Release()
+		_ = controllerLockFile.Close()
 	}()
 	executionReemitAfterLockAcquiredHook()
 
@@ -164,27 +164,28 @@ func requireExistingExecutionReemitBdStore(scopeRoot string) error {
 	return nil
 }
 
-func requireStoppedExecutionReemitCity(cityPath string) (*os.File, error) {
+func requireStoppedExecutionReemitCity(cityPath string) (*filelock.Lock, *os.File, error) {
 	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
-		return nil, fmt.Errorf("validating city config: %w", err)
+		return nil, nil, fmt.Errorf("validating city config: %w", err)
 	}
 	runtimeDir := filepath.Join(cityPath, ".gc")
 	if info, err := os.Stat(runtimeDir); err != nil || !info.IsDir() {
 		if err != nil {
-			return nil, fmt.Errorf("validating city runtime: %w", err)
+			return nil, nil, fmt.Errorf("validating city runtime: %w", err)
 		}
-		return nil, fmt.Errorf("validating city runtime: not a directory")
+		return nil, nil, fmt.Errorf("validating city runtime: not a directory")
 	}
 	lock, err := os.OpenFile(filepath.Join(runtimeDir, "controller.lock"), os.O_RDWR, 0)
 	if err != nil {
-		return nil, fmt.Errorf("opening controller lock: %w", err)
+		return nil, nil, fmt.Errorf("opening controller lock: %w", err)
 	}
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	controllerLock, err := filelock.Acquire(lock, filelock.Options{Mode: filelock.Exclusive, NonBlocking: true, Label: lock.Name()})
+	if err != nil {
 		_ = lock.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-			return nil, fmt.Errorf("city controller is running")
+		if errors.Is(err, filelock.ErrBusy) {
+			return nil, nil, fmt.Errorf("city controller is running")
 		}
-		return nil, fmt.Errorf("probing controller lock: %w", err)
+		return nil, nil, fmt.Errorf("probing controller lock: %w", err)
 	}
-	return lock, nil
+	return controllerLock, lock, nil
 }

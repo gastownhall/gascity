@@ -2146,6 +2146,10 @@ func TestDoStart_FlagValidationRunsBeforeDriftCheck(t *testing.T) {
 // real child that way and asks it what it actually sees. Deleting the key
 // instead of pinning it empty passes every assertion on the map and fails here,
 // which is how the leak shipped.
+//
+// The child is this test binary re-executed into maybeRunControllerTokenChildSpy
+// rather than a shell one-liner: the leak is platform-neutral, so the check has
+// to run everywhere the CLI runs, not only where a POSIX shell exists.
 func TestPassthroughEnvWithholdsControllerTokenFromChildProcess(t *testing.T) {
 	const token = "super-secret-controller-token"
 	t.Setenv(convergence.TokenEnvVar, token)
@@ -2156,11 +2160,21 @@ func TestPassthroughEnvWithholdsControllerTokenFromChildProcess(t *testing.T) {
 		env = append(env, k+"="+v)
 	}
 
-	cmd := exec.Command("/bin/sh", "-c", `printf %s "[${`+convergence.TokenEnvVar+`-ABSENT}]"`)
-	cmd.Env = env
-	out, err := cmd.Output()
+	exe, err := os.Executable()
 	if err != nil {
-		t.Fatalf("running child: %v", err)
+		t.Fatalf("locating test binary: %v", err)
+	}
+	record := filepath.Join(t.TempDir(), "child-view")
+	cmd := exec.Command(exe)
+	env = append(env, controllerTokenChildSpyPath+"="+record)
+	cmd.Env = env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("running child: %v\n%s", err, out)
+	}
+
+	out, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatalf("reading child view of %s: %v", convergence.TokenEnvVar, err)
 	}
 
 	if got := string(out); got != "[]" {

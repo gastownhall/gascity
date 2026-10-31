@@ -1184,7 +1184,9 @@ func (a *Agent) effectiveQuery(kind queryKind, topo QueryTopology) string {
 	if o := spec.override(a); o != "" {
 		return o
 	}
-	return spec.build(a, topo)
+	command := spec.build(a, topo)
+	noteGeneratedQuery(kind, command)
+	return command
 }
 
 // EffectiveWorkQuery returns the work query command for this agent.
@@ -1470,6 +1472,12 @@ func (a *Agent) EffectiveOnDeathFor(topo QueryTopology) string {
 	return a.effectiveQuery(queryOnDeath, topo)
 }
 
+// OnDeathIsGenerated reports whether EffectiveOnDeath returns the generated
+// recovery hook, as it does when the agent sets no on_death.
+func (a *Agent) OnDeathIsGenerated() bool {
+	return queryTable[queryOnDeath].override(a) == ""
+}
+
 func buildOnDeath(a *Agent, topo QueryTopology) string {
 	route := a.QualifiedName()
 	if a.PoolName != "" {
@@ -1511,6 +1519,12 @@ func (a *Agent) EffectiveOnBoot() string {
 // write form (ga-601v2).
 func (a *Agent) EffectiveOnBootFor(topo QueryTopology) string {
 	return a.effectiveQuery(queryOnBoot, topo)
+}
+
+// OnBootIsGenerated reports whether EffectiveOnBoot returns the generated
+// recovery hook, as it does when the agent sets no on_boot.
+func (a *Agent) OnBootIsGenerated() bool {
+	return queryTable[queryOnBoot].override(a) == ""
 }
 
 func buildOnBoot(a *Agent, topo QueryTopology) string {

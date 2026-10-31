@@ -1486,6 +1486,13 @@ func deepMergeProvider(base, frag ProviderSpec, name string, fragMeta toml.MetaD
 		result.ProcessNames = make([]string, len(frag.ProcessNames))
 		copy(result.ProcessNames, frag.ProcessNames)
 	}
+	if fragMeta.IsDefined("providers", name, "not_ready_markers") {
+		if len(base.NotReadyMarkers) > 0 {
+			prov.Warnings = append(prov.Warnings,
+				fmt.Sprintf("provider %q.not_ready_markers redefined by %q", name, fragPath))
+		}
+		result.NotReadyMarkers = cloneStrings(frag.NotReadyMarkers)
+	}
 
 	// Env merges additively (individual keys override).
 	// Clone the map to avoid mutating the original base Env.

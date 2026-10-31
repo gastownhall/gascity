@@ -32,6 +32,12 @@ type sessionConn struct {
 	token    string             // the GC_INSTANCE_TOKEN Start seeded (empty for a sentinel)
 	fence    string             // the input-fence digest of the incarnation Start launched (empty for a sentinel or an env naming none)
 
+	// pgid is the process-group identity captured when cmd was spawned. It is
+	// recorded rather than looked up on demand because the lookup stops
+	// answering once the group leader is reaped, which is precisely when
+	// surviving descendants still need to be reached.
+	pgid int
+
 	mu             sync.Mutex
 	sessionID      string
 	activePromptID int64         // non-zero when a prompt response is pending

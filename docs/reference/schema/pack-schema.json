@@ -1269,6 +1269,13 @@
           "type": "string",
           "description": "ReadyPromptPrefix is the string prefix that indicates the provider is ready for input."
         },
+        "not_ready_markers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "NotReadyMarkers lists text the provider prints when it discards a\nsubmitted prompt because it is not ready for input yet, although its\ninput prompt is already showing (Copilot prints \"Managed account policy\nis still loading\" until its policy loads). A runtime that sees one\nappear after delivering the startup prompt delivers the prompt again."
+        },
         "process_names": {
           "items": {
             "type": "string"

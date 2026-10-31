@@ -114,6 +114,16 @@ func IsProviderCapacity(err error) bool { return errors.Is(err, ErrProviderCapac
 // dispatch with errors.Is.
 var ErrSessionNotFound = errors.New("session not found")
 
+// ErrAgentBlocked reports that the runtime refused to deliver input because
+// the agent is waiting on interactive input of its own: a question to the
+// user, a permission or trust dialog. Typing into the session then would
+// answer that prompt, so the refusal is correct, and it lasts until someone
+// answers. Callers holding the input should keep it and retry later instead of
+// treating the refusal as a delivery failure. Providers wrap their own
+// "blocked" condition with this sentinel so callers can dispatch with
+// errors.Is.
+var ErrAgentBlocked = errors.New("agent is blocked on interactive input")
+
 // ErrNudgeDeliveredUnobserved reports that a nudge reached the session and
 // was consumed, but the provider never observed the session start the turn.
 // Delivery is proven, so callers must treat the nudge as delivered and must
@@ -1321,6 +1331,13 @@ type Config struct {
 	// ReadyDelayMs is a fallback fixed delay when no prompt prefix is available.
 	ReadyDelayMs int
 
+	// NotReadyMarkers are text the agent prints when it discards a submitted
+	// prompt because it is not ready for input yet, even though its input
+	// prompt is showing (e.g. Copilot's "policy is still loading"). A marker
+	// that appears after a startup turn is submitted means the turn was
+	// dropped, so the runtime may submit it again.
+	NotReadyMarkers []string
+
 	// ProcessNames lists expected process names for liveness checks.
 	ProcessNames []string
 
@@ -1346,7 +1363,8 @@ type Config struct {
 	PreStart []string
 
 	// SessionSetup is a list of shell commands run after session creation,
-	// between verify-alive and nudge. Commands run in gc's process via sh -c.
+	// between verify-alive and nudge. Commands run in gc's process through the
+	// platform's command interpreter (see [ShellCommandContext]).
 	SessionSetup []string
 
 	// SessionSetupScript is a script path run after session_setup commands.
@@ -1399,7 +1417,9 @@ type Config struct {
 	// PromptSuffix is the shell-quoted prompt text appended to Command
 	// when starting the session. Excluded from CoreFingerprint because
 	// it contains beacon text with timestamps or other volatile data
-	// that should not trigger restarts.
+	// that should not trigger restarts. On Windows the ACP provider
+	// refuses it: no prompt text may reach a command line there (see
+	// [ShellQuote]), so an ACP agent's prompts ride Nudge instead.
 	PromptSuffix string
 
 	// PromptFlag is the CLI flag (e.g., "--prompt") prepended to

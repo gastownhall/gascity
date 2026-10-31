@@ -2896,7 +2896,7 @@ func TestBuildDesiredState_UsesAgentHookOverride(t *testing.T) {
 			Name:              "hookoverride",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 			InstallAgentHooks: []string{"claude"},
 		}},
 	}
@@ -3345,7 +3345,7 @@ func TestBuildDesiredState_RoutedQueueDoesNotCreateOneSessionPerBead(t *testing.
 			Name:              "claude",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(20),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -3377,7 +3377,7 @@ func TestBuildDesiredState_NewPoolSessionBeadCreatedWithConcreteIdentity(t *test
 			Dir:               "rig",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(3),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -3433,7 +3433,7 @@ func TestBuildDesiredState_MaxOneAgentDemandUsesCanonicalIdentity(t *testing.T) 
 			Dir:               "cashmaster",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -3492,7 +3492,7 @@ func TestBuildDesiredState_NoStoreMaxOneAgentDemandUsesCanonicalSlotZero(t *test
 			Dir:               "cashmaster",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -3525,7 +3525,7 @@ func TestSyncSessionBeads_DoesNotBackfillPoolSlotForCanonicalMaxOneDemand(t *tes
 			Dir:               "cashmaster",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -3590,7 +3590,7 @@ func TestBuildDesiredState_MaxOneAgentNormalizesStalePoolIdentityBead(t *testing
 			Dir:               "cashmaster",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -3683,7 +3683,7 @@ func TestBuildDesiredState_MaxOneAgentPrefersCanonicalWhenStaleDuplicateExists(t
 			Dir:               "cashmaster",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -3737,7 +3737,7 @@ func TestBuildDesiredState_MaxOneAgentPreservesManualStaleIdentityBesideCanonica
 			Dir:               "cashmaster",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -4689,14 +4689,14 @@ func TestBuildDesiredStateTranslatesFloorDemandIntoCreateBudget(t *testing.T) {
 			{
 				Name:              "alpha",
 				StartCommand:      "true",
-				ScaleCheck:        "printf 5",
+				ScaleCheck:        printCountCommand(5),
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(5),
 			},
 			{
 				Name:              "zulu",
 				StartCommand:      "true",
-				ScaleCheck:        "printf 0",
+				ScaleCheck:        printCountCommand(0),
 				MinActiveSessions: intPtr(1),
 				MaxActiveSessions: intPtr(5),
 			},
@@ -4745,14 +4745,14 @@ func TestBuildDesiredStateFairShareIgnoresInFlightPoolCreates(t *testing.T) {
 			{
 				Name:              "alpha",
 				StartCommand:      "true",
-				ScaleCheck:        "printf 1",
+				ScaleCheck:        printCountCommand(1),
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(5),
 			},
 			{
 				Name:              "zulu",
 				StartCommand:      "true",
-				ScaleCheck:        "printf 2",
+				ScaleCheck:        printCountCommand(2),
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(5),
 			},
@@ -4785,7 +4785,7 @@ func TestBuildDesiredStateDependencyFloorExemptFromFreshCreateBudget(t *testing.
 				Name:              "db",
 				Dir:               "svc",
 				StartCommand:      "true",
-				ScaleCheck:        "printf 0",
+				ScaleCheck:        printCountCommand(0),
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(3),
 			},
@@ -4793,7 +4793,7 @@ func TestBuildDesiredStateDependencyFloorExemptFromFreshCreateBudget(t *testing.
 				Name:              "api",
 				Dir:               "svc",
 				StartCommand:      "true",
-				ScaleCheck:        "printf 2",
+				ScaleCheck:        printCountCommand(2),
 				DependsOn:         []string{"svc/db"},
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(3),
@@ -5533,7 +5533,7 @@ func TestBuildDesiredState_NamepoolMaxOneUsesNamepoolIdentity(t *testing.T) {
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
 			NamepoolNames:     []string{"furiosa"},
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -5598,7 +5598,7 @@ func TestBuildDesiredState_DoesNotCreateWhenConcreteNamepoolIdentityHeld(t *test
 			Dir:               "rig",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(3),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 			// A one-member namepool: the foreign manual row above holds its only
 			// concrete identity, so fresh allocation must fail at capacity rather
 			// than creating another occupant with the alias merely deferred.
@@ -7384,7 +7384,7 @@ func TestBuildDesiredState_RigPoolIgnoresAssignedWorkInUnreachableStore(t *testi
 			Dir:               "riga",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(5),
-			ScaleCheck:        "printf 0",
+			ScaleCheck:        printCountCommand(0),
 		}},
 	}
 
@@ -7562,7 +7562,9 @@ func TestBuildDesiredState_ProductionDemandSkipsAllScaleChecksWhenCitySuspended(
 }
 
 func scaleCheckMarkerCommand(marker string, count int) string {
-	return fmt.Sprintf("printf probed > %s; printf %d", strconv.Quote(marker), count)
+	return platformCommand(
+		fmt.Sprintf("printf probed > %s; printf %d", strconv.Quote(marker), count),
+		fmt.Sprintf("Set-Content -LiteralPath %s -Value probed; Write-Output %d", psLiteral(marker), count))
 }
 
 func assertMarkerExists(t *testing.T, marker string) {
@@ -8620,7 +8622,7 @@ func TestBuildDesiredState_ScaleCheckErrorRetainsOnlyAffectedPoolSessions(t *tes
 			{
 				Name:              "helper",
 				StartCommand:      "echo",
-				ScaleCheck:        "printf 0",
+				ScaleCheck:        printCountCommand(0),
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(3),
 			},
@@ -8709,7 +8711,7 @@ func TestBuildDesiredState_ScaleCheckErrorPreservesDormantAffectedPoolSessionWit
 			{
 				Name:              "helper",
 				StartCommand:      "echo",
-				ScaleCheck:        "printf 0",
+				ScaleCheck:        printCountCommand(0),
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(3),
 			},
@@ -8973,7 +8975,7 @@ func TestBuildDesiredState_PoolSessionCoreFingerprintStableAcrossTicks(t *testin
 			StartCommand:      "true",
 			MinActiveSessions: intPtr(0),
 			MaxActiveSessions: intPtr(3),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -9112,7 +9114,7 @@ func TestBuildDesiredState_StoreBackedPoolUsesLogicalInstanceIdentity(t *testing
 				StartCommand:      "true",
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(2),
-				ScaleCheck:        "printf 2",
+				ScaleCheck:        printCountCommand(2),
 			},
 		},
 	}
@@ -9178,7 +9180,7 @@ func TestBuildDesiredState_StoreBackedPoolUsesQualifiedInstanceNameForBindings(t
 			WorkDir:           ".gc/worktrees/{{.AgentBase}}",
 			MinActiveSessions: intPtr(0),
 			MaxActiveSessions: intPtr(2),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
@@ -9242,7 +9244,7 @@ func TestBuildDesiredState_RecoversPoolTemplateFromAliasOnlyBindingIdentity(t *t
 			StartCommand:  "true",
 			NamepoolNames: []string{"furiosa", "nux"},
 			WorkDir:       ".gc/worktrees/{{.AgentBase}}",
-			ScaleCheck:    "printf 1",
+			ScaleCheck:    printCountCommand(1),
 		}},
 	}
 
@@ -9358,7 +9360,7 @@ func TestBuildDesiredState_PendingCreatePoolSessionDropsWithoutScaleDemand(t *te
 			WorkDir:           ".",
 			MinActiveSessions: intPtr(0),
 			MaxActiveSessions: intPtr(5),
-			ScaleCheck:        "printf 0",
+			ScaleCheck:        printCountCommand(0),
 		}},
 	}
 
@@ -9931,13 +9933,13 @@ func TestBuildDesiredState_ZeroScaledPoolSessionKeepsDependencyFloorWhileDrainin
 			{
 				Name:              "db",
 				StartCommand:      "true",
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: printCountCommand(0),
 			},
 			{
 				Name:              "api",
 				StartCommand:      "true",
 				DependsOn:         []string{"db"},
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: printCountCommand(0),
 			},
 		},
 	}
@@ -9968,7 +9970,8 @@ func TestBuildDesiredState_PoolCheckInjectsDoltPortForRigScopedAgent(t *testing.
 	// The check command outputs "2" only when BEADS_DOLT_SERVER_PORT is set.
 	// If the fix works, buildDesiredState prefixes the command with
 	// BEADS_DOLT_SERVER_PORT=9876, so the inner shell sees the variable.
-	checkCmd := `sh -c 'test -n "$BEADS_DOLT_SERVER_PORT" && printf 2 || printf 0'`
+	checkCmd := platformCommand(`sh -c 'test -n "$BEADS_DOLT_SERVER_PORT" && printf 2 || printf 0'`,
+		`if ($env:BEADS_DOLT_SERVER_PORT) { 2 } else { 0 }`)
 	cfg := &config.City{
 		Rigs: []config.Rig{{
 			Name:     "myrig",
@@ -10020,7 +10023,8 @@ func TestBuildDesiredState_PoolCheckUsesCityDoltPortForCityScopedAgent(t *testin
 	}
 	// Same check command but for a city-scoped agent (no rig). The canonical
 	// projected Dolt port should still be present, so the check outputs 2.
-	checkCmd := `sh -c 'test -n "$BEADS_DOLT_SERVER_PORT" && printf 2 || printf 0'`
+	checkCmd := platformCommand(`sh -c 'test -n "$BEADS_DOLT_SERVER_PORT" && printf 2 || printf 0'`,
+		`if ($env:BEADS_DOLT_SERVER_PORT) { 2 } else { 0 }`)
 	cfg := &config.City{
 		Agents: []config.Agent{
 			{
@@ -10072,7 +10076,8 @@ func TestBuildDesiredState_PoolCheckUsesExplicitRigPassword(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	checkCmd := `sh -c 'test "$BEADS_DOLT_PASSWORD" = "rig-secret" && printf 2 || printf 0'`
+	checkCmd := platformCommand(`sh -c 'test "$BEADS_DOLT_PASSWORD" = "rig-secret" && printf 2 || printf 0'`,
+		`if ($env:BEADS_DOLT_PASSWORD -ceq 'rig-secret') { 2 } else { 0 }`)
 	cfg := &config.City{
 		Rigs: []config.Rig{{
 			Name: "demo",
@@ -12047,7 +12052,7 @@ func TestBuildDesiredState_DependencyFloorIgnoresConfigBlindLegacySlotRecovery(t
 				StartCommand:      "true",
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(3),
-				ScaleCheck:        "printf 0",
+				ScaleCheck:        printCountCommand(0),
 			},
 			{
 				Name:              "api",
@@ -12055,7 +12060,7 @@ func TestBuildDesiredState_DependencyFloorIgnoresConfigBlindLegacySlotRecovery(t
 				StartCommand:      "true",
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(3),
-				ScaleCheck:        "printf 0",
+				ScaleCheck:        printCountCommand(0),
 				DependsOn:         []string{"gascity/db"},
 			},
 		},
@@ -12136,7 +12141,7 @@ func TestBuildDesiredState_PoolBeadIdentityAgreesAcrossRealizeAndCanonicalHelper
 				StartCommand:      "true",
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(3),
-				ScaleCheck:        "printf 1",
+				ScaleCheck:        printCountCommand(1),
 			},
 		},
 	}
@@ -12257,7 +12262,7 @@ func TestBuildDesiredState_RigScopedScaleCheckExpandsRigTemplate(t *testing.T) {
 				StartCommand:      "true",
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(5),
-				ScaleCheck:        "echo {{.Rig}} | grep -c alpha",
+				ScaleCheck:        platformCommand("echo {{.Rig}} | grep -c alpha", "if ('{{.Rig}}' -like '*alpha*') { 1 } else { 0 }"),
 			},
 			{
 				Name:              "ant",
@@ -12265,7 +12270,7 @@ func TestBuildDesiredState_RigScopedScaleCheckExpandsRigTemplate(t *testing.T) {
 				StartCommand:      "true",
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(5),
-				ScaleCheck:        "echo {{.Rig}} | grep -c beta",
+				ScaleCheck:        platformCommand("echo {{.Rig}} | grep -c beta", "if ('{{.Rig}}' -like '*beta*') { 1 } else { 0 }"),
 			},
 		},
 	}
@@ -14066,7 +14071,7 @@ func TestBuildDesiredState_ProviderRedBlocksNewPoolSessionCreate(t *testing.T) {
 				Name:              "worker",
 				Provider:          "claude",
 				StartCommand:      "echo",
-				ScaleCheck:        "printf 3",
+				ScaleCheck:        printCountCommand(3),
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(5),
 			}},

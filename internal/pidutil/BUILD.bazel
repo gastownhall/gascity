@@ -5,9 +5,15 @@ go_library(
     srcs = [
         "cmdline_darwin.go",
         "cmdline_other.go",
+        "cmdline_windows.go",
         "listener.go",
         "pidutil.go",
+        "pidutil_unix.go",
+        "pidutil_windows.go",
         "procargs2.go",
+        "procfs.go",
+        "procfs_unix.go",
+        "procfs_windows.go",
         "subreaper.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/pidutil",
@@ -19,6 +25,9 @@ go_library(
         "@rules_go//go/platform:ios": [
             "@org_golang_x_sys//unix",
         ],
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
         "//conditions:default": [],
     }),
 )
@@ -27,16 +36,30 @@ go_test(
     name = "pidutil_test",
     srcs = [
         "cmdline_portable_test.go",
+        "cmdline_unix_test.go",
         "listener_test.go",
+        "pidutil_identity_windows_test.go",
+        "pidutil_ps_unix_test.go",
         "pidutil_test.go",
         "procargs2_test.go",
+        "procfs_windows_test.go",
         "starttime_portable_test.go",
+        "starttime_unix_test.go",
         "subreaper_test.go",
+        "testcmd_unix_test.go",
+        "testcmd_windows_test.go",
         "testenv_import_test.go",
         "vanish_linux_test.go",
     ],
     embed = [":pidutil"],
-    deps = ["//internal/testenv"],
+    deps = [
+        "//internal/testenv",
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

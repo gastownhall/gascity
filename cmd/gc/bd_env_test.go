@@ -12,7 +12,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -4879,48 +4878,6 @@ dolt.auto-start: false
 	if got, ok := env["BEADS_DOLT_SERVER_TLS"]; !ok || got != "1" {
 		t.Fatalf("BEADS_DOLT_SERVER_TLS = %q (present=%v), want %q: ambient hosted-gateway TLS must be carried to a legacy external rig native-open env", got, ok, "1")
 	}
-}
-
-func TestNativeDoltOpenEnvForScopeContextCancelsManagedRecovery(t *testing.T) {
-	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("GC_DOLT", "")
-	cityPath := t.TempDir()
-	writeManagedBdCityFixture(t, cityPath)
-
-	childPIDFile := filepath.Join(cityPath, "provider.pid")
-	script := gcBeadsBdScriptPath(cityPath)
-	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	content := `#!/bin/sh
-echo $$ > "$GC_TEST_CHILD_PID"
-while :; do sleep 1; done
-`
-	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GC_TEST_CHILD_PID", childPIDFile)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	resultCh := make(chan error, 1)
-	go func() {
-		_, err := nativeDoltOpenEnvForScopeContext(ctx, cityPath, nil, cityPath)
-		resultCh <- err
-	}()
-
-	pid := waitForProviderTestChildPID(t, childPIDFile)
-	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
-	cancel()
-
-	select {
-	case err := <-resultCh:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("native env recovery error = %v, want context canceled", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("native env recovery did not return after parent cancellation")
-	}
-	waitForProviderTestPIDExit(t, pid, "native env recovery")
 }
 
 // TestBdRuntimeEnvForRig_ExplicitLocalExternalRigClearsAmbientTLS is the

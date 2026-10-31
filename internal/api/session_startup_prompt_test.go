@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -27,6 +28,12 @@ type startupPromptCall struct {
 // payload, so a test can see the API return exactly what State produced.
 func startupPromptState(t *testing.T) (*fakeState, *[]startupPromptCall) {
 	t.Helper()
+	// The resolver LookPaths the provider's path_check; the test binary exists
+	// on every OS, where "true" is not on a Windows PATH.
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
 	fs := newSessionFakeState(t)
 	fs.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -36,7 +43,7 @@ func startupPromptState(t *testing.T) (*fakeState, *[]startupPromptCall) {
 				DisplayName:       "Wrapped",
 				Command:           "aimux",
 				Args:              []string{"run", "gemini"},
-				PathCheck:         "true", // use /usr/bin/true so LookPath succeeds in CI
+				PathCheck:         exe,
 				ReadyPromptPrefix: "> ",
 			},
 		},

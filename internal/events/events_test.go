@@ -9,12 +9,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
 	// Embedded zoneinfo: named-zone results must not depend on the host's tzdata.
 	_ "time/tzdata"
+
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 
 // Compile-time interface checks.
@@ -1534,20 +1535,39 @@ func writeEmpty(path string) error {
 	return f.Close()
 }
 
-// mustOpenSiblingLock opens a separate file descriptor against path and
-// takes a non-blocking exclusive flock on it. The returned *os.File is
-// the caller's to close (which also releases the flock).
-func mustOpenSiblingLock(t *testing.T, path string) *os.File {
+// mustOpenSiblingLock opens a separate writable handle against path and takes
+// the same advisory write lock the recorder takes, non-blocking, the way a
+// second process mid-Record would. The returned *os.File stays writable so a
+// caller can append through the lock holder; the returned release drops the
+// lock and closes the handle, and is safe to call more than once.
+//
+// The lock is taken through filelock rather than a raw flock so it lands on
+// whatever the recorder itself locks: a sidecar that outlives rotation, plus,
+// on Unix, the data file.
+func mustOpenSiblingLock(t *testing.T, path string) (*os.File, func()) {
 	t.Helper()
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
 	if err != nil {
 		t.Fatalf("open sibling: %v", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	lock, err := filelock.AcquireAdvisoryFile(f, path, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	})
+	if err != nil {
 		_ = f.Close()
-		t.Fatalf("sibling flock: %v", err)
+		t.Fatalf("sibling lock: %v", err)
 	}
-	return f
+	var once sync.Once
+	return f, func() {
+		once.Do(func() {
+			if err := lock.Release(); err != nil {
+				t.Errorf("sibling unlock: %v", err)
+			}
+			_ = f.Close()
+		})
+	}
 }
 
 func TestFileRecorderFlockTimeoutFiresWithinBudget(t *testing.T) {
@@ -1560,11 +1580,8 @@ func TestFileRecorderFlockTimeoutFiresWithinBudget(t *testing.T) {
 	}
 	defer rec.Close() //nolint:errcheck // test cleanup
 
-	sib := mustOpenSiblingLock(t, path)
-	defer func() {
-		_ = syscall.Flock(int(sib.Fd()), syscall.LOCK_UN)
-		_ = sib.Close()
-	}()
+	_, releaseSibling := mustOpenSiblingLock(t, path)
+	defer releaseSibling()
 
 	start := time.Now()
 	rec.Record(Event{Type: "test"})
@@ -1580,8 +1597,8 @@ func TestFileRecorderFlockTimeoutFiresWithinBudget(t *testing.T) {
 	if !strings.Contains(out, "events: lock: timed out") {
 		t.Errorf("stderr = %q, want substring %q", out, "events: lock: timed out")
 	}
-	if !strings.Contains(out, "waiting on flock at") {
-		t.Errorf("stderr = %q, want substring %q", out, "waiting on flock at")
+	if !strings.Contains(out, "waiting on lock at") {
+		t.Errorf("stderr = %q, want substring %q", out, "waiting on lock at")
 	}
 	if !strings.Contains(out, path) {
 		t.Errorf("stderr = %q, want substring %q", out, path)
@@ -1598,11 +1615,8 @@ func TestFileRecorderFlockSucceedsAfterShortContention(t *testing.T) {
 	}
 	defer rec.Close() //nolint:errcheck // test cleanup
 
-	sib := mustOpenSiblingLock(t, path)
-	time.AfterFunc(50*time.Millisecond, func() {
-		_ = syscall.Flock(int(sib.Fd()), syscall.LOCK_UN)
-		_ = sib.Close()
-	})
+	_, releaseSibling := mustOpenSiblingLock(t, path)
+	time.AfterFunc(50*time.Millisecond, releaseSibling)
 
 	start := time.Now()
 	rec.Record(Event{Type: "test"})

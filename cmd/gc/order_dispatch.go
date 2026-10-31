@@ -15,7 +15,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -35,6 +34,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/processgroup"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
@@ -156,13 +156,21 @@ func tailForOrderFailureEvent(output string) string {
 	return "[output truncated] " + tail
 }
 
-// shellExecRunner is the production ExecRunner using os/exec.
+// shellExecRunner is the production ExecRunner using os/exec. command runs
+// through the platform's interpreter (runtime.ShellCommandContext), and one
+// the platform refuses (runtime.ShellCommandUnavailable) starts nothing.
 func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
+		return nil, fmt.Errorf("order command refused: %s", reason)
+	}
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd, err := runtime.ShellCommandContext(ctx, command)
+	if err != nil {
+		return nil, err
+	}
 	cmd.Dir = dir
 	cmd.Env = mergeOrderExecEnv(cmd.Environ(), env)
 	processgroup.StartCommandInNewGroup(cmd)
@@ -199,17 +207,16 @@ func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]
 	}
 	cmd.WaitDelay = shellExecPostCancelWaitDelay
 
-	if err := cmd.Start(); err != nil {
+	pgid, err := startOrderCommand(cmd)
+	if err != nil {
 		return output.Bytes(), err
 	}
+	defer releaseOrderCommand(cmd)
 	cleanupMu.Lock()
-	startedPGID = cmd.Process.Pid
-	if pgid, err := syscall.Getpgid(cmd.Process.Pid); err == nil {
-		startedPGID = pgid
-	}
+	startedPGID = pgid
 	cleanupMu.Unlock()
 
-	err := cmd.Wait()
+	err = cmd.Wait()
 	cleanupMu.Lock()
 	wasCanceled := canceled
 	cleanupMu.Unlock()
@@ -472,11 +479,20 @@ func buildOrderDispatcherFromOrderSet(routes *storageRoutes, cityPath string, cf
 
 	// Filter out manual- and webhook-trigger orders — they are never
 	// auto-dispatched (webhook orders fire only via the supervisor receiver).
+	// An exec order this platform refuses to run is left out too, named once
+	// per build, rather than failing on every tick.
 	var auto []orders.Order
 	for _, a := range allAA {
-		if a.Trigger != "manual" && a.Trigger != "webhook" {
-			auto = append(auto, a)
+		if a.Trigger == "manual" || a.Trigger == "webhook" {
+			continue
 		}
+		if a.IsExec() {
+			if reason := runtime.ShellCommandUnavailable(a.Exec); reason != "" {
+				logDispatchError(stderr, "order %s is not scheduled: %s", a.ScopedName(), reason)
+				continue
+			}
+		}
+		auto = append(auto, a)
 	}
 	if len(auto) == 0 {
 		return nil

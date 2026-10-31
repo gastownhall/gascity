@@ -12,6 +12,19 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+// KillRuntime terminates a runtime the process-table scan found. The runtime's
+// root leads a process group, and KillByPID signals that group, so the root's
+// PID reaches the whole tree. KillByPID reads the target's start identity
+// itself; the Unix scan does not record one yet.
+func KillRuntime(live runtime.LiveRuntime) error {
+	return KillByPID(live.PID)
+}
+
+// RescanAfterTermination is false here: the group signal reaches every process
+// still in the runtime's group, whether or not its parent has exited, so
+// terminating the roots a scan found surfaces no new ones.
+const RescanAfterTermination = false
+
 // KillByPID terminates pid with SIGTERM, then SIGKILL after
 // runtime.ManagedProcessStopGrace, then waits (bounded by
 // runtime.ManagedProcessReapGrace) for the process to be confirmed dead — gone

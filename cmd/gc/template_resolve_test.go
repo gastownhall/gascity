@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"path/filepath"
+	"reflect"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -176,6 +179,34 @@ func TestT3BridgeStartupEnvelopeModel_UsesCurrentProviderDefaults(t *testing.T) 
 				t.Fatalf("startupEnvelopeModel() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// The reconciler launches a session from templateParamsToConfig(resolveTemplate),
+// so a provider's not_ready_markers must survive that path to reach the runtime
+// that delivers the startup prompt (a reconciler-relaunched Copilot
+// session lost its prompt to "Managed account policy is still loading").
+func TestResolveTemplateCarriesNotReadyMarkers(t *testing.T) {
+	params := &agentBuildParams{
+		cityName:   "not-ready-city",
+		cityPath:   t.TempDir(),
+		workspace:  &config.Workspace{Provider: "copilot"},
+		providers:  builtinProviderAliasesForTest("copilot"),
+		lookPath:   func(name string) (string, error) { return filepath.Join("/usr/bin", name), nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agentCfg := &config.Agent{Name: "worker", Provider: "copilot", Nudge: "run your hook"}
+
+	tp, err := resolveTemplate(params, agentCfg, agentCfg.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	cfg := templateParamsToConfig(tp)
+	if want := []string{"policy is still loading"}; !reflect.DeepEqual(cfg.NotReadyMarkers, want) {
+		t.Fatalf("NotReadyMarkers = %q, want %q", cfg.NotReadyMarkers, want)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -23,6 +24,11 @@ import (
 // os.UserConfigDir() is not that rule — on darwin it ignores XDG_CONFIG_HOME
 // and resolves under "$HOME/Library/Application Support", a directory herdr
 // never binds in, which is what made every start time out on macOS (#5770).
+//
+// Windows is the exception: herdr there resolves the directory by its own
+// rules (herdrConfigDir in endpoint_windows.go), which agree with the above
+// only while XDG_CONFIG_HOME is set. Tests that exercise the HOME fallback
+// skip on Windows; TestHerdrConfigDirReproducesHerdrsResolution pins it.
 
 // unsetEnv makes key absent for the rest of the test; t.Setenv's cleanup
 // restores the inherited value. Setting it to "" is not the same thing:
@@ -32,6 +38,15 @@ func unsetEnv(t *testing.T, key string) {
 	t.Setenv(key, "")
 	if err := os.Unsetenv(key); err != nil {
 		t.Fatalf("unsetting %s: %v", key, err)
+	}
+}
+
+// skipHomeFallbackOnWindows skips a test of herdr's HOME fallback on Windows,
+// where herdr reads HOME only when APPDATA and USERPROFILE are unset.
+func skipHomeFallbackOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("herdr on Windows reads HOME only when APPDATA and USERPROFILE are unset; TestHerdrConfigDirReproducesHerdrsResolution pins that")
 	}
 }
 
@@ -52,6 +67,7 @@ func TestSocketPathHonorsXDGConfigHomeOverHome(t *testing.T) {
 }
 
 func TestSocketPathFallsBackToHomeConfigWhenXDGUnset(t *testing.T) {
+	skipHomeFallbackOnWindows(t)
 	unsetEnv(t, "XDG_CONFIG_HOME")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -79,6 +95,7 @@ func TestSocketPathMatchesHerdrWhereUserConfigDirFails(t *testing.T) {
 		}
 	})
 	t.Run("no_xdg_no_home", func(t *testing.T) {
+		skipHomeFallbackOnWindows(t)
 		unsetEnv(t, "XDG_CONFIG_HOME")
 		unsetEnv(t, "HOME")
 
@@ -105,6 +122,7 @@ func TestSocketPathCountsSetButEmptyVariablesAsSet(t *testing.T) {
 		}
 	})
 	t.Run("no_xdg_empty_home", func(t *testing.T) {
+		skipHomeFallbackOnWindows(t)
 		unsetEnv(t, "XDG_CONFIG_HOME")
 		t.Setenv("HOME", "")
 
@@ -133,6 +151,7 @@ func TestStartServerRefusesRelativeSocketPath(t *testing.T) {
 		{"relative_xdg", func(t *testing.T) { t.Setenv("XDG_CONFIG_HOME", "rel") }},
 		{"empty_xdg", func(t *testing.T) { t.Setenv("XDG_CONFIG_HOME", "") }},
 		{"no_xdg_empty_home", func(t *testing.T) {
+			skipHomeFallbackOnWindows(t)
 			unsetEnv(t, "XDG_CONFIG_HOME")
 			t.Setenv("HOME", "")
 		}},

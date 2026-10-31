@@ -202,7 +202,7 @@ func runGeneratedQueryWithBD(t *testing.T, command string, env map[string]string
 	writeFakeBin(t, filepath.Join(tmp, "gc"), gcScript)
 	writeFakeBin(t, filepath.Join(tmp, "bd"), bdScript)
 
-	commandEnv := []string{"PATH=" + tmp + ":" + os.Getenv("PATH")}
+	commandEnv := []string{"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH")}
 	for k, v := range env {
 		commandEnv = append(commandEnv, k+"="+v)
 	}

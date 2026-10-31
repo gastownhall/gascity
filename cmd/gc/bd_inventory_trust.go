@@ -15,11 +15,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 	"unicode/utf8"
-
-	"golang.org/x/sys/unix"
 
 	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -99,20 +96,11 @@ func statBdBinary(bdPath string) (bdBinaryID, error) {
 	if abs, err = filepath.Abs(abs); err != nil {
 		return bdBinaryID{}, err
 	}
-	// x/sys/unix, not syscall: syscall.Stat_t names the times Mtimespec and
-	// Ctimespec on darwin, unix.Stat_t names them Mtim and Ctim everywhere.
-	var st unix.Stat_t
-	if err := unix.Stat(abs, &st); err != nil {
+	id, err := statBdBinaryFile(abs)
+	if err != nil {
 		return bdBinaryID{}, fmt.Errorf("reading bd binary %s: %w", abs, err)
 	}
-	return bdBinaryID{
-		Path:  abs,
-		Dev:   uint64(st.Dev), //nolint:unconvert // Darwin's field is signed int32.
-		Ino:   st.Ino,
-		Size:  st.Size,
-		MTime: st.Mtim.Nano(),
-		CTime: st.Ctim.Nano(),
-	}, nil
+	return id, nil
 }
 
 // bdTrustCacheEntry is one cached verdict, or one remembered walk failure.
@@ -190,14 +178,11 @@ func lockBdTrustCache(cityPath string) (func(), error) {
 	}
 	deadline := time.Now().Add(bdWalkDeadline + 30*time.Second)
 	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		release, busy, err := tryLockBdTrustCacheFile(f)
 		if err == nil {
-			return func() {
-				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-				_ = f.Close()
-			}, nil
+			return release, nil
 		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) {
+		if !busy {
 			_ = f.Close()
 			return nil, fmt.Errorf("locking %s: %w", path, err)
 		}
@@ -532,13 +517,7 @@ func bdHelpRunnerFor(bdPath, home string) bdHelpRunner {
 		cmd.Dir = home
 		cmd.Env = env
 		cmd.Stdin = nil
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Cancel = func() error {
-			if cmd.Process == nil {
-				return nil
-			}
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
+		cancelBdCommandAsGroup(cmd)
 		cmd.WaitDelay = 2 * time.Second
 		out, err := cmd.CombinedOutput()
 		return string(out), err
@@ -773,13 +752,7 @@ func bdGuardRead(cityPath string, cfg *config.City, target execStoreTarget, args
 	cmd := exec.CommandContext(ctx, bdPath, args...)
 	cmd.Dir = target.ScopeRoot
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
+	cancelBdCommandAsGroup(cmd)
 	cmd.WaitDelay = 2 * time.Second
 	var stderr strings.Builder
 	cmd.Stderr = &stderr

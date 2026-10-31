@@ -1,3 +1,5 @@
+//go:build unix
+
 // Package dolt_test validates that the dolt pack's health.sh script
 // completes within a bounded time even when the Dolt server is
 // unresponsive. This is a regression guard for the hang reported in
@@ -14,14 +16,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // healthScript is the on-disk path to the health command script. The
@@ -29,15 +28,6 @@ import (
 // `run.sh` entry point (and a sibling `command.toml` descriptor), so
 // the health script lives at `commands/health/run.sh`.
 const healthScript = "commands/health/run.sh"
-
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	if root := bazeltest.OverrideRoot(); root != "" {
-		return filepath.Join(root, "examples", "bd", "dolt")
-	}
-	_, filename, _, _ := runtime.Caller(0)
-	return filepath.Dir(filename)
-}
 
 // filteredEnv returns os.Environ() with the supplied keys removed and
 // every GC_* / DOLT_* entry stripped unconditionally. The blanket

@@ -296,9 +296,7 @@ schema = 1
 func TestValidateSyntheticRepoRejectsTamperedMode(t *testing.T) {
 	dst := materializeTestRepo(t)
 	target := filepath.Join(dst, "internal/bootstrap/packs/core/pack.toml")
-	if err := os.Chmod(target, 0o600); err != nil {
-		t.Fatalf("Chmod(%q): %v", target, err)
-	}
+	tamperMaterializedFileMode(t, target)
 
 	err := ValidateSyntheticRepo(dst, Repository, testCommit)
 	if err == nil {

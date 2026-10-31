@@ -1786,6 +1786,8 @@ func providerScriptTraceDir(environ []string) string {
 // runProviderOwnedOpStrict differs from the legacy generic provider runner:
 // an exit status of 2 is a provider failure for a scope GC has explicitly
 // handed to the provider, never an invitation to fall back to GC lifecycle.
+// Where the platform cannot exec the bundled gc-beads-bd script, gc's native
+// form of it runs in its place (builtinProviderOwnedOp).
 func runProviderOwnedOpStrict(parent context.Context, timeout time.Duration, script string, environ []string, args ...string) error {
 	op := "provider operation"
 	if len(args) > 0 {
@@ -1793,14 +1795,21 @@ func runProviderOwnedOpStrict(parent context.Context, timeout time.Duration, scr
 	}
 	ctx, cancel := providerLifecycleContext(parent, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, script, args...)
-	cmd.WaitDelay = 2 * time.Second
-	prepareProviderOpCommand(cmd)
-	cmd.Env = environ
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	start := time.Now()
-	err := cmd.Run()
+	var start time.Time
+	var err error
+	if native := builtinProviderOwnedOp(script, environ); native != nil {
+		start = time.Now()
+		err = native(ctx, environ, &stderr, args)
+	} else {
+		cmd := exec.CommandContext(ctx, script, args...)
+		cmd.WaitDelay = 2 * time.Second
+		prepareProviderOpCommand(cmd)
+		cmd.Env = environ
+		cmd.Stderr = &stderr
+		start = time.Now()
+		err = cmd.Run()
+	}
 	traceProviderScriptCall(script, providerScriptTraceDir(environ), args, start, err)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -2769,7 +2778,12 @@ func managedDoltRuntimeProcessOwned(state doltRuntimeState, layout managedDoltRu
 	if holderPID > 0 && holderPID != state.PID {
 		return false
 	}
-	owned, deleted := inspectManagedDoltOwnership(state.PID, layout)
+	owned, deleted, err := inspectManagedDoltOwnership(state.PID, layout)
+	if err != nil {
+		// Ownership undecided: refuse to adopt the process as ours. This gate
+		// only grants trust, so declining is the safe direction.
+		return false
+	}
 	if deleted {
 		return false
 	}

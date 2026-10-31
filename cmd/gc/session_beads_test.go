@@ -17,7 +17,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -29,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
@@ -264,12 +264,16 @@ func citySessionIdentifierLockHeld(cityPath, identifier string) (bool, error) {
 		return false, err
 	}
 	defer f.Close() //nolint:errcheck
-	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	lock, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       lockPath,
+	})
 	if err == nil {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = lock.Release()
 		return false, nil
 	}
-	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+	if errors.Is(err, filelock.ErrBusy) {
 		return true, nil
 	}
 	return false, err
@@ -8872,6 +8876,38 @@ func TestSweepProcessTableOrphansContinuesAfterErrors(t *testing.T) {
 		t.Fatalf("terminated = %s, want gm-reaped", got)
 	}
 	for _, want := range []string{"partial scan failed", "gm-reaped", "gm-term-fails", "terminate failed"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+}
+
+// TestSweepProcessTableOrphansLeavesARootItCannotClassify pins that a root the
+// infrastructure fence could not read is neither reaped nor passed over in
+// silence, and that it does not stop the sweep reaping the roots it can.
+func TestSweepProcessTableOrphansLeavesARootItCannotClassify(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := newProcessTableSweepProvider(
+		runtime.LiveRuntime{SessionID: "gm-unreadable", PID: 301, PPID: 1, StartIdentity: "7", IsTracked: false},
+		runtime.LiveRuntime{SessionID: "gm-reaped", PID: 302, PPID: 1, StartIdentity: "8", IsTracked: false},
+	)
+	prev := sweepRootIsCityInfrastructure
+	sweepRootIsCityInfrastructure = func(live runtime.LiveRuntime) (bool, error) {
+		if live.PID == 301 {
+			return false, errors.New("command line unreadable")
+		}
+		return false, nil
+	}
+	t.Cleanup(func() { sweepRootIsCityInfrastructure = prev })
+
+	var stderr bytes.Buffer
+	if got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, "", &stderr); got != 1 {
+		t.Fatalf("sweepProcessTableOrphans() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+	if got := terminatedSessionIDs(sp.terminated); got != "gm-reaped" {
+		t.Fatalf("terminated = %s, want only gm-reaped: the unclassified root must be left running", got)
+	}
+	for _, want := range []string{"pid=301", "command line unreadable"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 		}

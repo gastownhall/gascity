@@ -27,7 +27,6 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
@@ -520,9 +519,15 @@ func SlingDirForBead(cfg *config.City, cityPath, beadID string) string {
 }
 
 // BuildSlingCommand replaces {} in the sling query template with the bead ID.
-// The bead ID is shell-quoted to prevent command injection.
+// The bead ID is quoted as one literal argument of the interpreter the command
+// runs under (runtime.ShellQuote) to prevent command injection: POSIX quoting
+// does not protect a command PowerShell runs. That quoting protects only the
+// interpreter: on Windows, when the sling program is a batch file, cmd.exe
+// reads the ID again and runs or expands what it holds whatever the quoting,
+// so a caller that runs the result first checks the ID with
+// CheckSlingQueryBeadID.
 func BuildSlingCommand(template, beadID string) string {
-	return strings.ReplaceAll(template, "{}", shellquote.Quote(beadID))
+	return strings.ReplaceAll(template, "{}", runtime.ShellQuote(beadID))
 }
 
 // BuildSlingCommandForAgent expands any PathContext placeholders in a custom

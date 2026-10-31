@@ -1,3 +1,5 @@
+//go:build unix
+
 // Command fakeruntime is a file-backed exec session runtime for the
 // conversation-lane evidence tests (test/conversationlane). It implements the
 // exec runtime protocol (docs/reference/exec-session-provider.md) with no

@@ -233,9 +233,14 @@ func cloneStringMap(source map[string]string) map[string]string {
 	return cloned
 }
 
+// prefixShellEnv prefixes command with POSIX assignments of env, sorted by
+// key: `KEY='value' command`. Where the platform's interpreter has no such
+// syntax (posixEnvPrefix is false: Windows, whose interpreter is PowerShell)
+// it returns command unprefixed, and a variable then reaches the command only
+// if the caller also passes it in the subprocess environment.
 func prefixShellEnv(env map[string]string, command string) string {
 	command = strings.TrimSpace(command)
-	if command == "" || len(env) == 0 {
+	if command == "" || len(env) == 0 || !posixEnvPrefix {
 		return command
 	}
 	keys := make([]string, 0, len(env))

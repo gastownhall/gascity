@@ -228,6 +228,8 @@ func installOverlayManaged(fs fsys.FS, cityDir, workDir, provider string) error 
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", name, err)
 		}
+		rawData := data
+		data = overlay.AdaptSettingsForPlatform(filepath.FromSlash(rel), data)
 		dst := filepath.Join(workDir, filepath.FromSlash(rel))
 		if provider == "antigravity" && rel == path.Join(".agents", "hooks.json") {
 			return writeJSONOverlayManaged(fs, dst, data)
@@ -240,8 +242,30 @@ func installOverlayManaged(fs fsys.FS, cityDir, workDir, provider string) error 
 				data = normalized
 			}
 		}
-		return writeEmbeddedManaged(fs, dst, data, overlayManagedNeedsUpgrade(provider, rel, data))
+		needsUpgrade := overlayManagedNeedsUpgrade(provider, rel, data)
+		needsPlatformUpgrade := overlay.ManagedFileNeedsPlatformUpgrade(filepath.FromSlash(rel), rawData, data)
+		return writeEmbeddedManaged(fs, dst, data, combineManagedUpgradeChecks(needsUpgrade, needsPlatformUpgrade))
 	})
+}
+
+func combineManagedUpgradeChecks(checks ...func([]byte) bool) func([]byte) bool {
+	var active []func([]byte) bool
+	for _, check := range checks {
+		if check != nil {
+			active = append(active, check)
+		}
+	}
+	if len(active) == 0 {
+		return nil
+	}
+	return func(existing []byte) bool {
+		for _, check := range active {
+			if check(existing) {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 func writeJSONOverlayManaged(fs fsys.FS, dst string, data []byte) error {

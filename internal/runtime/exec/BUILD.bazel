@@ -15,6 +15,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/citylayout",
+        "//internal/execenv",
         "//internal/execgrace",
         "//internal/runtime",
         "//internal/runtime/tmux",
@@ -24,6 +25,7 @@ go_library(
 go_test(
     name = "exec_test",
     srcs = [
+        "batchfile_windows_test.go",
         "capacity_test.go",
         "carrier_fence_integration_test.go",
         "cutover_test.go",

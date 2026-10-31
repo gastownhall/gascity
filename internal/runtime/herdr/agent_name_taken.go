@@ -32,7 +32,7 @@ func resolveAgentNameTaken(startInfo agentInfo, startErr error, ops agentStartOp
 	if startErr == nil {
 		return startInfo, false, nil
 	}
-	if herdrErrorCode(startErr) != "agent_name_taken" {
+	if herdrVerdictCode(startErr) != "agent_name_taken" {
 		return agentInfo{}, false, startErr
 	}
 	existing, ok, gerr := ops.getAgent()

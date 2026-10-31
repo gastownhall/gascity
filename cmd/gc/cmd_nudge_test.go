@@ -4908,7 +4908,7 @@ func waitForPollerCmdline(t *testing.T, pid int, cityPath, sessionName, agentNam
 	matches := nudgepoller.CmdlineMatcher(cityPath, sessionName, agentName)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if pidutil.AliveWithCmdline(pid, matches) {
+		if matched, err := pidutil.AliveWithCmdline(pid, matches); err == nil && matched {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -7441,5 +7441,30 @@ func TestManagedWakeRollbackErrorKeepsTheWakeOutcome(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "n-1") || !strings.Contains(err.Error(), nudgequeue.ErrQueueBusy.Error()) {
 		t.Fatalf("err = %q, want the rollback failure named", err)
+	}
+}
+
+// TestEnsureNudgePollerRefusesToReExecuteATestBinary pins the containment this
+// package's own test run depends on.
+//
+// ensureNudgePoller starts a poller by re-executing os.Executable(), which
+// under `go test` is the test binary itself. A Go test binary ignores the
+// poller argv and runs its whole suite instead, reaching this spawn path again
+// and spawning again from there, with no -test.timeout to bound any of it.
+// That fan-out leaked 203 processes and wedged a developer machine.
+//
+// This spawn path had no test-binary guard at all; the sibling path in
+// internal/session had one that only recognized the Unix <pkg>.test name.
+func TestEnsureNudgePollerRefusesToReExecuteATestBinary(t *testing.T) {
+	cityPath := t.TempDir()
+	const sessionName = "s-gc-1"
+	const agentName = "agent"
+
+	err := ensureNudgePoller(cityPath, agentName, sessionName)
+	if err == nil || !strings.Contains(err.Error(), "Go test binary") {
+		t.Fatalf("ensureNudgePoller error = %v, want Go test binary refusal", err)
+	}
+	if _, statErr := os.Stat(nudgePollerPIDPath(cityPath, sessionName, agentName)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("poller pid file stat error = %v, want not exist", statErr)
 	}
 }

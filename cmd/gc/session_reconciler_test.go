@@ -13512,7 +13512,7 @@ func TestReconcileSessionBeads_FreshAlwaysNamedWithPoolDemandMaterializesNamedDe
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{
-			{Name: "mayor", StartCommand: "true", ScaleCheck: "printf 1", MaxActiveSessions: intPtr(3)},
+			{Name: "mayor", StartCommand: "true", ScaleCheck: printCountCommand(1), MaxActiveSessions: intPtr(3)},
 		},
 		NamedSessions: []config.NamedSession{
 			{Template: "mayor", Mode: "always"},
@@ -13551,7 +13551,7 @@ func TestReconcileSessionBeads_ExistingAlwaysNamedStillAllowsSameTemplatePoolDem
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{
-			{Name: "mayor", StartCommand: "true", ScaleCheck: "printf 1", MaxActiveSessions: intPtr(3)},
+			{Name: "mayor", StartCommand: "true", ScaleCheck: printCountCommand(1), MaxActiveSessions: intPtr(3)},
 		},
 		NamedSessions: []config.NamedSession{
 			{Template: "mayor", Mode: "always"},
@@ -14084,7 +14084,7 @@ func TestReconcileSessionBeads_FailedCreatePoolSlotIsReplacedUnderAFreshBeadScop
 					Name:              "worker",
 					StartCommand:      "true",
 					MaxActiveSessions: intPtr(3),
-					ScaleCheck:        "printf 1",
+					ScaleCheck:        printCountCommand(1),
 				}},
 			}
 
@@ -14195,7 +14195,7 @@ func poolTeardownHoldCity() *config.City {
 			Name:              "claude",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 }

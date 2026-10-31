@@ -3796,6 +3796,11 @@ type fencedInfrastructureRootSet struct {
 
 var fencedInfrastructureRoots = &fencedInfrastructureRootSet{}
 
+// sweepRootIsCityInfrastructure classifies a scanned root before the orphan
+// sweep reaps it. It is a variable so tests can supply a classification the
+// host does not produce under `go test`.
+var sweepRootIsCityInfrastructure = proctable.RootIsCityInfrastructure
+
 func (s *fencedInfrastructureRootSet) take(cityPath string) map[string]struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -4035,8 +4040,14 @@ func sweepProcessTableOrphans(
 		// started from an agent shell). Terminating a watchdog or proxy signals
 		// its process group and takes the city's Dolt server down with it
 		// (#6316). The fence is per-process argv, so it also covers processes
-		// stamped before their spawners began scrubbing session identity.
-		if proctable.IsCityInfrastructureRoot(live.PID) {
+		// stamped before their spawners began scrubbing session identity. A root
+		// that cannot be classified is left running and reported.
+		infrastructure, err := sweepRootIsCityInfrastructure(live)
+		if err != nil {
+			fmt.Fprintf(stderr, "session reconciler: leaving process-table orphan pid=%d session=%s running: %v\n", live.PID, live.SessionID, err) //nolint:errcheck
+			continue
+		}
+		if infrastructure {
 			key := strconv.Itoa(live.PID) + ":" + proctable.RootStartIdentity(live.PID)
 			fenced[key] = struct{}{}
 			if _, reported := previouslyFenced[key]; !reported {

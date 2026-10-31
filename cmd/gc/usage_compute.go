@@ -239,6 +239,9 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 	runtimeKind := ""
 	if cr.cfg != nil {
 		runtimeKind = cr.cfg.Session.Provider
+		if runtimeKind == "" {
+			runtimeKind = sessionProviderRuntimeDefault
+		}
 	}
 	// Throttle sink-failure noise: a persistently broken sink would otherwise log
 	// once per terminal bead per tick. One line per tick is enough signal that

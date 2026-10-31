@@ -2734,9 +2734,7 @@ esac
 }
 
 func TestEffectiveWorkQueryClaimsRunTargetOnlyRootDuringMigration(t *testing.T) {
-	if _, err := exec.LookPath("jq"); err != nil {
-		t.Skip("jq not available; migration fallback filters routed_to with jq")
-	}
+	requireGeneratedCorpusJQ(t, "jq not available; migration fallback filters routed_to with jq")
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	out := runEffectiveWorkQuery(t, a, map[string]string{
 		"GC_SESSION_ORIGIN": "ephemeral",
@@ -2759,9 +2757,7 @@ esac
 }
 
 func TestEffectiveWorkQueryIgnoresDivergentRunTargetWhenRoutedToPresent(t *testing.T) {
-	if _, err := exec.LookPath("jq"); err != nil {
-		t.Skip("jq not available; migration fallback filters routed_to with jq")
-	}
+	requireGeneratedCorpusJQ(t, "jq not available; migration fallback filters routed_to with jq")
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	out := runEffectiveWorkQuery(t, a, map[string]string{
 		"GC_SESSION_ORIGIN": "ephemeral",
@@ -2786,9 +2782,7 @@ esac
 // counts gc.routed_to demand — the spawn-side counterpart to the worker claim
 // path for the canonical persisted routing key.
 func TestEffectivePoolDemandQueryCountsRoutedTo(t *testing.T) {
-	if _, err := exec.LookPath("jq"); err != nil {
-		t.Skip("jq not available; count-form exercises a jq pipeline")
-	}
+	requireGeneratedCorpusJQ(t, "jq not available; count-form exercises a jq pipeline")
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
 set -eu
@@ -2832,9 +2826,7 @@ esac
 }
 
 func TestEffectivePoolDemandQueryCountsRunTargetOnlyRootDuringMigration(t *testing.T) {
-	if _, err := exec.LookPath("jq"); err != nil {
-		t.Skip("jq not available; count-form exercises a jq pipeline")
-	}
+	requireGeneratedCorpusJQ(t, "jq not available; count-form exercises a jq pipeline")
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
 set -eu
@@ -2857,9 +2849,7 @@ esac
 }
 
 func TestEffectivePoolDemandQueryIgnoresDivergentRunTargetWhenRoutedToPresent(t *testing.T) {
-	if _, err := exec.LookPath("jq"); err != nil {
-		t.Skip("jq not available; count-form exercises a jq pipeline")
-	}
+	requireGeneratedCorpusJQ(t, "jq not available; count-form exercises a jq pipeline")
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
 set -eu
@@ -2881,9 +2871,7 @@ esac
 }
 
 func TestEffectivePoolDemandQueryTreatsEmptyReadyOutputAsZero(t *testing.T) {
-	if _, err := exec.LookPath("jq"); err != nil {
-		t.Skip("jq not available; count-form exercises a jq pipeline")
-	}
+	requireGeneratedCorpusJQ(t, "jq not available; count-form exercises a jq pipeline")
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
 set -eu
@@ -3012,9 +3000,7 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 }
 
 func TestEffectivePoolDemandQueryDedupsMigrationOverlap(t *testing.T) {
-	if _, err := exec.LookPath("jq"); err != nil {
-		t.Skip("jq not available; count-form exercises a jq pipeline")
-	}
+	requireGeneratedCorpusJQ(t, "jq not available; count-form exercises a jq pipeline")
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), nil, `#!/bin/sh
 set -eu
@@ -6032,7 +6018,7 @@ func runShellWithFakeBd(t *testing.T, shellCmd string, env map[string]string, bd
 		t.Fatalf("write fake bd: %v", err)
 	}
 
-	commandEnv := []string{"PATH=" + tmp + ":" + os.Getenv("PATH")}
+	commandEnv := []string{"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH")}
 	for k, v := range env {
 		commandEnv = append(commandEnv, k+"="+v)
 	}
@@ -6055,6 +6041,9 @@ func runShellWithFakeBd(t *testing.T, shellCmd string, env map[string]string, bd
 // source call site").
 func runShellCommandCapture(t *testing.T, command string, env []string) (stdout, stderr string, exit int) {
 	t.Helper()
+	if stdout, stderr, exit, ok := runShellCommandInProcess(t, command, env); ok {
+		return stdout, stderr, exit
+	}
 	cmd := exec.Command("sh", "-c", command)
 	cmd.Env = env
 	var outBuf, errBuf strings.Builder
@@ -6081,13 +6070,20 @@ func runLifecycleHookCommand(t *testing.T, command string, bdScript string) stri
 	}
 	logPath := filepath.Join(tmp, "bd.log")
 
-	cmd := exec.Command("sh", "-c", command)
-	cmd.Env = []string{
-		"PATH=" + tmp + ":" + os.Getenv("PATH"),
+	env := []string{
+		"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"BD_LOG=" + logPath,
 	}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("run lifecycle hook: %v\n%s", err, out)
+	if stdout, stderr, exit, ok := runShellCommandInProcess(t, command, env); ok {
+		if exit != 0 {
+			t.Fatalf("run lifecycle hook: exit status %d\n%s%s", exit, stdout, stderr)
+		}
+	} else {
+		cmd := exec.Command("sh", "-c", command)
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("run lifecycle hook: %v\n%s", err, out)
+		}
 	}
 	data, err := os.ReadFile(logPath)
 	if err != nil {

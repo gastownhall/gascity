@@ -164,6 +164,10 @@ func (r *Registry) Clone() *Registry {
 }
 
 // Has reports whether an exact selection name is registered.
+//
+// A false result does not mean New would fail: a name can still match a
+// registered prefix, or reach the fallback. Callers asking "would this
+// selection resolve to a real provider" want [Registry.Resolves].
 func (r *Registry) Has(name string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

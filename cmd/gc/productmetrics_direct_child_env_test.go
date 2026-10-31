@@ -74,7 +74,7 @@ func TestProductMetricsDirectChildEnvHookWorkQuery(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		_, err = shellWorkQueryWithEnv(shellquote.Quote(binary), "", nil)
+		_, err = shellWorkQueryWithEnv(platformCommand(shellquote.Quote(binary), "& "+psLiteral(binary)), "", nil)
 		return err
 	})
 	assertProductMetricsDirectChildEnv(t, entries)
@@ -120,6 +120,17 @@ func TestProductMetricsDirectChildEnvGitHubNudge(t *testing.T) {
 }
 
 func TestProductMetricsDirectChildEnvNudgePoller(t *testing.T) {
+	// The poller is this binary re-executed, which under go test is the test
+	// binary the guard refuses. This child is safe to start: the spy variable
+	// captureProductMetricsDirectChildEnv sets makes TestMain turn it into the
+	// environment spy, which exits before any test runs. So the guard is lifted
+	// only while that variable is set.
+	// TestEnsureNudgePollerRefusesToReExecuteATestBinary pins the guard itself.
+	guard := nudgePollerIsGoTestExecutable
+	t.Cleanup(func() { nudgePollerIsGoTestExecutable = guard })
+	nudgePollerIsGoTestExecutable = func(path string) bool {
+		return os.Getenv(productMetricsDirectChildEnvSpyPath) == "" && guard(path)
+	}
 	entries := captureProductMetricsDirectChildEnv(t, func() error {
 		return ensureNudgePoller(t.TempDir(), "worker", "session-worker")
 	})

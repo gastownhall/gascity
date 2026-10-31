@@ -1,11 +1,13 @@
 package gitcred
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // DefaultUsername is the username sent to the remote when a rule omits one.
@@ -66,7 +68,10 @@ func Resolve(rule Rule) (Credential, error) {
 }
 
 // RunCredentialCommand runs the $GC_GIT_CREDENTIAL_COMMAND helper for req. The
-// command runs via "sh -c" with the git-credential request piped to its stdin.
+// command runs through the platform's command interpreter
+// (runtime.ShellCommandContext: "sh -c" on Unix, PowerShell on Windows) with
+// the git-credential request piped to its stdin; a command the platform
+// refuses (runtime.ShellCommandUnavailable) starts nothing.
 // Empty stdout means the helper declines (ok=false, no error), matching git's
 // own credential-helper convention.
 func RunCredentialCommand(command string, req Request) (Credential, bool, error) {
@@ -74,7 +79,13 @@ func RunCredentialCommand(command string, req Request) (Credential, bool, error)
 	if command == "" {
 		return Credential{}, false, nil
 	}
-	cmd := exec.Command("sh", "-c", command)
+	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
+		return Credential{}, false, fmt.Errorf("credential command refused: %s", reason)
+	}
+	cmd, err := runtime.ShellCommandContext(context.Background(), command)
+	if err != nil {
+		return Credential{}, false, fmt.Errorf("running credential command: %w", err)
+	}
 	var stdin strings.Builder
 	writeRequestLine(&stdin, "protocol", req.Protocol)
 	writeRequestLine(&stdin, "host", req.Host)
@@ -101,12 +112,14 @@ func writeRequestLine(b *strings.Builder, key, value string) {
 }
 
 // parseCredentialResponse reads a username=/password= response body. It returns
-// ok=false when the body carries no password (an empty decline).
+// ok=false when the body carries no password (an empty decline). A line may
+// end in CRLF, as git's own credential reader accepts; PowerShell's
+// Write-Output ends every line that way.
 func parseCredentialResponse(body string) (Credential, bool) {
 	var cred Credential
 	hasPassword := false
 	for _, line := range strings.Split(body, "\n") {
-		key, value, ok := strings.Cut(line, "=")
+		key, value, ok := strings.Cut(strings.TrimSuffix(line, "\r"), "=")
 		if !ok {
 			continue
 		}
@@ -127,8 +140,18 @@ func parseCredentialResponse(body string) (Credential, bool) {
 	return cred, true
 }
 
+// runHelper runs a rule's helper command through the platform's command
+// interpreter (runtime.ShellCommandContext: "sh -c" on Unix, PowerShell on
+// Windows) and returns its trimmed stdout. A command the platform refuses
+// (runtime.ShellCommandUnavailable) starts nothing.
 func runHelper(command string) (string, error) {
-	cmd := exec.Command("sh", "-c", command)
+	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
+		return "", fmt.Errorf("credential helper %q refused: %s", command, reason)
+	}
+	cmd, err := runtime.ShellCommandContext(context.Background(), command)
+	if err != nil {
+		return "", fmt.Errorf("running credential helper %q: %w", command, err)
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("running credential helper %q: %w", command, err)

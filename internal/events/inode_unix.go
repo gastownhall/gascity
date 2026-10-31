@@ -4,8 +4,28 @@ package events
 
 import (
 	"io/fs"
+	"os"
 	"syscall"
 )
+
+// statInode stats path and returns the result with its inodeOf identity.
+func statInode(path string) (fs.FileInfo, uint64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	return info, inodeOf(info), nil
+}
+
+// inodeOfFile stats the open file f and returns the result with its inodeOf
+// identity.
+func inodeOfFile(f *os.File) (fs.FileInfo, uint64, error) {
+	info, err := f.Stat()
+	if err != nil {
+		return nil, 0, err
+	}
+	return info, inodeOf(info), nil
+}
 
 // inodeOf returns a non-zero file identity for use by the file
 // watcher's rotation detector. On Unix this is the inode number from

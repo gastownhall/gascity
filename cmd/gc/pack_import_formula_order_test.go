@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -651,9 +652,9 @@ func assertSymlinkExists(t *testing.T, path string) {
 	t.Helper()
 	info, err := os.Lstat(path)
 	if err != nil {
-		t.Fatalf("missing symlink %s: %v", path, err)
+		t.Fatalf("missing formula entry %s: %v", path, err)
 	}
-	if info.Mode()&os.ModeSymlink == 0 {
+	if info.Mode()&os.ModeSymlink == 0 && runtime.GOOS != "windows" {
 		t.Fatalf("%s is not a symlink", path)
 	}
 }
@@ -661,12 +662,30 @@ func assertSymlinkExists(t *testing.T, path string) {
 func assertSymlinkTarget(t *testing.T, path, want string) {
 	t.Helper()
 	assertSymlinkExists(t, path)
-	got, err := os.Readlink(path)
+	info, err := os.Lstat(path)
 	if err != nil {
-		t.Fatalf("Readlink(%s): %v", path, err)
+		t.Fatalf("Lstat(%s): %v", path, err)
 	}
-	if got != want {
-		t.Fatalf("Readlink(%s) = %q, want %q", path, got, want)
+	if info.Mode()&os.ModeSymlink != 0 {
+		got, err := os.Readlink(path)
+		if err != nil {
+			t.Fatalf("Readlink(%s): %v", path, err)
+		}
+		if got != want {
+			t.Fatalf("Readlink(%s) = %q, want %q", path, got, want)
+		}
+		return
+	}
+	gotBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	wantBytes, err := os.ReadFile(want)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", want, err)
+	}
+	if !bytes.Equal(gotBytes, wantBytes) {
+		t.Fatalf("ReadFile(%s) = %q, want content of %s (%q)", path, gotBytes, want, wantBytes)
 	}
 }
 

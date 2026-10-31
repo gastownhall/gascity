@@ -151,7 +151,7 @@ func TestRunGrantCommand_RealExec(t *testing.T) {
 	valid := fakeToken(`{"city":"mc"}`)
 	// The command proves env delivery (echoes the token only when GC_GRANT_INFO
 	// carries the city) and asserts the sibling GC_EXEC_INFO was stripped.
-	script := `test -z "$GC_EXEC_INFO" && echo "$GC_GRANT_INFO" | grep -q '"city":"mc"' && printf '%s\n' '` + valid + `'`
+	script := realExecCommand(valid)
 	// runGrantCommand returns raw stdout (Mint owns the trim), so compare trimmed.
 	tok, err := runGrantCommand(context.Background(), script, GrantInfo{Version: Version, City: "mc"})
 	if err != nil {
@@ -163,7 +163,7 @@ func TestRunGrantCommand_RealExec(t *testing.T) {
 }
 
 func TestRunGrantCommand_NonZeroExit(t *testing.T) {
-	_, err := runGrantCommand(context.Background(), "echo boom >&2; exit 3", GrantInfo{Version: Version})
+	_, err := runGrantCommand(context.Background(), failingCommand, GrantInfo{Version: Version})
 	if err == nil {
 		t.Fatal("non-zero exit must error")
 	}

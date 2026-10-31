@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -156,7 +155,7 @@ func openTranscriptCapture(root string, id captureIdentity) (*transcriptCapture,
 	}
 	// O_RDWR (not O_WRONLY) so the torn-tail check below can read the last
 	// byte; every write still goes through O_APPEND.
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND|captureNoFollow, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("opening acp transcript %q: %w", path, err)
 	}

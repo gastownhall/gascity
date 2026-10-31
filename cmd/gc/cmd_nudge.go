@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -30,6 +29,8 @@ import (
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
+	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
@@ -3007,15 +3008,33 @@ func splitStaleMailQueuedNudges(target nudgeTarget, mp mail.Provider, sessStore 
 	return keep, stale, nil
 }
 
+// nudgePollerIsGoTestExecutable is ensureNudgePoller's guard against
+// re-executing a Go test binary (see nudgepoller.IsGoTestExecutable). It is a
+// variable only so a test whose child is a test binary that exits before
+// running any test can let that spawn through.
+var nudgePollerIsGoTestExecutable = nudgepoller.IsGoTestExecutable
+
 func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 	pidPath := nudgePollerPIDPath(cityPath, sessionName, agentName)
 	return withNudgePollerPIDLock(pidPath, func() error {
-		if running, _ := existingPollerPID(pidPath, cityPath, sessionName, agentName); running {
+		running, err := existingPollerPID(pidPath, cityPath, sessionName, agentName)
+		if err != nil {
+			// The recorded PID is live but could not be identified. Starting a
+			// replacement here would overwrite the pidfile and leave two
+			// pollers delivering the same nudges, and nothing downstream can
+			// undo that. Refuse instead: the caller retries, and a PID that has
+			// genuinely exited reads as not-running on the next pass.
+			return fmt.Errorf("checking for an existing nudge poller: %w", err)
+		}
+		if running {
 			return nil
 		}
 		exe, err := os.Executable()
 		if err != nil {
 			return err
+		}
+		if nudgePollerIsGoTestExecutable(exe) {
+			return fmt.Errorf("refusing to start nudge poller with Go test binary %q", exe)
 		}
 		cmd := newNudgePollerCommand(exe, os.Environ(), cityPath, sessionName, agentName)
 		if err := cmd.Start(); err != nil {
@@ -3038,7 +3057,7 @@ func newNudgePollerCommand(exe string, environ []string, cityPath, sessionName, 
 	cmd.Env = nudgepoller.ChildEnv(environ)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	processgroup.StartCommandInNewGroup(cmd)
 	disableProductMetricsForChild(cmd)
 	return cmd
 }
@@ -3630,7 +3649,15 @@ func acquireNudgePollerLease(cityPath, sessionName, agentName string) (func(), e
 		case err == nil && strings.TrimSpace(string(current)) == strings.TrimSpace(string(pid)):
 			return nil
 		case err == nil:
-			if running, _ := existingPollerPID(pidPath, cityPath, sessionName, agentName); running {
+			running, err := existingPollerPID(pidPath, cityPath, sessionName, agentName)
+			if err != nil {
+				// The recorded PID is live but could not be identified, so
+				// whether it is already this key's poller is unknown. Taking
+				// the lease here would overwrite the pidfile and run a second
+				// singleton alongside the first. Refuse instead.
+				return fmt.Errorf("checking for an existing nudge poller: %w", err)
+			}
+			if running {
 				return errNudgePollerRunning
 			}
 		case !errors.Is(err, os.ErrNotExist):
@@ -3644,6 +3671,13 @@ func acquireNudgePollerLease(cityPath, sessionName, agentName string) (func(), e
 	return release, nil
 }
 
+// existingPollerPID reports whether the recorded PID is still this session's
+// nudge poller.
+//
+// A non-nil error means the PID is LIVE but its identity could not be read, so
+// whether it is the poller is unknown. That is deliberately distinct from
+// (false, nil): the caller must not create a second singleton on the strength
+// of a check that did not run.
 func existingPollerPID(pidPath, cityPath, sessionName, agentName string) (bool, error) {
 	data, err := os.ReadFile(pidPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -3663,10 +3697,7 @@ func existingPollerPID(pidPath, cityPath, sessionName, agentName string) (bool, 
 	if cityPath == "" || sessionName == "" || agentName == "" {
 		return false, nil
 	}
-	if pidutil.AliveWithCmdline(pid, nudgepoller.CmdlineMatcher(cityPath, sessionName, agentName)) {
-		return true, nil
-	}
-	return false, nil
+	return pidutil.AliveWithCmdline(pid, nudgepoller.CmdlineMatcher(cityPath, sessionName, agentName))
 }
 
 func writeNudgePollerPID(pidPath string, pid int) error {
@@ -3687,9 +3718,10 @@ func withNudgePollerPIDLock(pidPath string, fn func() error) error {
 		return fmt.Errorf("opening nudge poller lock: %w", err)
 	}
 	defer lockFile.Close() //nolint:errcheck
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+	lock, err := filelock.Acquire(lockFile, filelock.Options{Mode: filelock.Exclusive, Label: lockPath})
+	if err != nil {
 		return fmt.Errorf("locking nudge poller: %w", err)
 	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	defer lock.Release() //nolint:errcheck
 	return fn()
 }

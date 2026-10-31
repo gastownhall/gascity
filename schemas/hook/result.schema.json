@@ -65,6 +65,12 @@
         "type": "string"
       }
     },
+    "work_dir": {
+      "type": "string"
+    },
+    "work_branch": {
+      "type": "string"
+    },
     "drain_acknowledged": {
       "type": "boolean"
     }

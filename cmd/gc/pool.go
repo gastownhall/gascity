@@ -28,6 +28,28 @@ type poolSessionRef struct {
 	sessionName       string
 }
 
+// limitedBuffer keeps the first limit bytes written to it and accepts the
+// rest without keeping them.
+type limitedBuffer struct {
+	buf   bytes.Buffer
+	limit int
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	if room := b.limit - b.buf.Len(); room > 0 {
+		if len(p) > room {
+			b.buf.Write(p[:room])
+		} else {
+			b.buf.Write(p)
+		}
+	}
+	return len(p), nil
+}
+
+func (b *limitedBuffer) String() string {
+	return b.buf.String()
+}
+
 // ScaleCheckRunner runs a scale_check command and returns stdout.
 // dir specifies the working directory for the command (e.g., rig path
 // for rig-scoped pools so bd queries the correct database). env, when
@@ -64,30 +86,56 @@ const bdProbeTimeoutFloor = 5 * time.Second
 // synchronously in the reconciler loop and should not stall a tick.
 const hookTimeout = 30 * time.Second
 
-// shellCommand runs a command via sh -c with the given timeout and
-// returns stdout. dir sets the command's working directory. When env is
-// non-nil, it is merged into the subprocess environment after sanitizing
-// inherited GC_DOLT_* and BEADS_* keys.
+// preparedStderrLimit bounds the standard error runPreparedCommand and the
+// generated-program branch keep for a failed command, as cmd.Output does.
+const preparedStderrLimit = 32 << 10
+
+// shellCommand runs command through the platform's command interpreter with
+// the given timeout and returns stdout. dir sets the command's working
+// directory. When env is non-nil, it is merged into the subprocess environment
+// after sanitizing inherited GC_DOLT_* and BEADS_* keys.
 func shellCommand(command, dir string, timeout time.Duration, env map[string]string) (string, error) {
 	return runShellCommand(command, dir, timeout, env, nil)
 }
 
-// runShellCommand is the shared `sh -c` body. prepare, when non-nil, adjusts
-// the command before it starts — it is how a caller opts into a cancellation
-// policy stronger than CommandContext's default.
+// runShellCommand is the shared body. command runs through
+// runtime.ShellCommandContext (`sh -c` on Unix, PowerShell on Windows), and a
+// command the platform refuses (runtime.ShellCommandUnavailable) starts
+// nothing, but on Windows a program this process generated, a read program or
+// a recovery hook, runs in gc's embedded interpreter instead
+// (generatedProgram). prepare, when non-nil, adjusts the command before it
+// starts — it is how a caller opts into a cancellation policy stronger than
+// CommandContext's default. A generated program has no command to adjust:
+// each bd and gc it starts runs in a tree that canceling it terminates.
 func runShellCommand(command, dir string, timeout time.Duration, env map[string]string, prepare func(*exec.Cmd)) (string, error) {
+	if generated := generatedProgram(command); generated != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		stderr := &limitedBuffer{limit: preparedStderrLimit}
+		out, err := generated(ctx, dir, mergeRuntimeEnv(os.Environ(), env), stderr)
+		if err != nil {
+			if msg := strings.TrimSpace(stderr.String()); msg != "" {
+				return "", fmt.Errorf("running command %q: %w: %s", command, err, msg)
+			}
+			return "", fmt.Errorf("running command %q: %w", command, err)
+		}
+		return string(out), nil
+	}
+	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
+		return "", fmt.Errorf("command refused: %s", reason)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd, err := runtime.ShellCommandContext(ctx, command)
+	if err != nil {
+		return "", fmt.Errorf("running command %q: %w", command, err)
+	}
 	cmd.WaitDelay = 2 * time.Second
 	if dir != "" {
 		cmd.Dir = dir
 	}
 	cmd.Env = mergeRuntimeEnv(os.Environ(), env)
-	if prepare != nil {
-		prepare(cmd)
-	}
-	out, err := cmd.Output()
+	out, err := runPreparedCommand(cmd, prepare)
 	if err != nil {
 		return "", fmt.Errorf("running command %q: %w", command, err)
 	}
@@ -109,6 +157,9 @@ const hookSignalGrace = 2 * time.Second
 // is released the moment the shell dies, so the pool admits the next hook while
 // the previous one's bd is still connected, and the bound that exists to stop a
 // boot-time read storm quietly stops bounding anything.
+//
+// On Windows a process group only routes console signals, so the group that
+// terminate reaches is the Job Object runPreparedCommand starts the hook in.
 func hookProcessGroupCleanup(cmd *exec.Cmd) {
 	processgroup.StartCommandInNewGroup(cmd)
 	cmd.Cancel = func() error {
@@ -136,16 +187,16 @@ func parseBDProbeTimeout(stderr io.Writer) time.Duration {
 	return d
 }
 
-// shellScaleCheck runs a scale_check command via sh -c and returns stdout.
-// dir sets the command's working directory. Uses bdProbeTimeoutDefault (180s)
-// unless GC_BD_PROBE_TIMEOUT overrides it.
+// shellScaleCheck runs a scale_check command through the platform's command
+// interpreter and returns stdout. dir sets the command's working directory.
+// Uses bdProbeTimeoutDefault (180s) unless GC_BD_PROBE_TIMEOUT overrides it.
 func shellScaleCheck(command, dir string, env map[string]string) (string, error) {
 	return shellCommand(command, dir, parseBDProbeTimeout(os.Stderr), env)
 }
 
-// shellRunHook runs a lifecycle hook command (on_death, on_boot) via
-// sh -c with the shorter hookTimeout (30s). Separated from
-// shellScaleCheck so that hung hooks don't stall the reconciler for
+// shellRunHook runs a lifecycle hook command (on_death, on_boot) through the
+// platform's command interpreter with the shorter hookTimeout (30s). Separated
+// from shellScaleCheck so that hung hooks don't stall the reconciler for
 // the full bd probe timeout.
 //
 // Hooks run in their own process group so a timeout reaps the whole pipeline
@@ -493,6 +544,14 @@ func planPoolOnBootHooks(cfg *config.City, cityPath string, stderr io.Writer) []
 			continue
 		}
 		cmd = expandAgentCommandTemplate(cityPath, cityName, &a, cfg.Rigs, "on_boot", cmd, stderr)
+		if a.OnBootIsGenerated() {
+			if reason := generatedHookUnavailable(cmd); reason != "" {
+				if stderr != nil {
+					fmt.Fprintf(stderr, "on_boot %s: not run: %s\n", a.QualifiedName(), reason) //nolint:errcheck // best-effort stderr
+				}
+				continue
+			}
+		}
 		env, err := controllerQueryRuntimeEnv(cityPath, cfg, &a)
 		if err != nil {
 			fmt.Fprintf(stderr, "on_boot %s env: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr

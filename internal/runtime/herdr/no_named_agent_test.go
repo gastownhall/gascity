@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -28,7 +29,7 @@ func registryFake(t *testing.T, registered []string, rejection string) (bin, tra
 		if n, p, ok := strings.Cut(entry, "="); ok {
 			name, pane = n, p
 		}
-		entries = append(entries, fmt.Sprintf(`{"agent":"%s","pane_id":"%s","agent_status":"working"}`, name, pane))
+		entries = append(entries, fmt.Sprintf(`{"name":"%s","agent":"%s","pane_id":"%s","agent_status":"working"}`, name, name, pane))
 	}
 	list := `{"result":{"agents":[` + strings.Join(entries, ",") + `]}}`
 	if registered == nil {
@@ -36,6 +37,9 @@ func registryFake(t *testing.T, registered []string, rejection string) (bin, tra
 	}
 
 	trace = filepath.Join(t.TempDir(), "verbs")
+	if goruntime.GOOS == "windows" {
+		return newGoFakeHerdr(t, fakeHerdrSpec{Mode: "registry", Trace: trace, List: list, Rejection: rejection}), trace
+	}
 	reject := "    echo '" + rejection + "'\n"
 	switch {
 	case rejection == "!!echo-argv":
@@ -302,7 +306,7 @@ func TestDeliverStartupTurnFallsBackWhenThePaneHasNoNamedAgent(t *testing.T) {
 		`{"error":{"code":"agent_not_ready","message":"agent w1:p1 is not an active named agent"},"id":"cli:agent:prompt"}`)
 	c := &client{session: "gc-test", bin: bin}
 
-	if err := c.deliverStartupTurn(context.Background(), "w1:p1", "first turn"); err != nil {
+	if err := c.deliverStartupTurn(context.Background(), "w1:p1", "first turn", nil, ""); err != nil {
 		t.Fatalf("deliverStartupTurn on a pane with no named agent: %v", err)
 	}
 	assertPasted(t, trace, true)

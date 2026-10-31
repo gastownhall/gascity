@@ -390,6 +390,9 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	if initNeedsBdTooling(cityPath) {
 		register(&doctor.BeadsRoleCheck{})
 	}
+	if bdBatchFileCheckApplies(cityPath) {
+		register(newBdBatchFileCheck(cityPath))
+	}
 
 	// Controller check + supervisor HTTP check + session checks. Session
 	// checks are read-only reporting and register regardless of controller

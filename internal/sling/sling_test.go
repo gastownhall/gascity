@@ -237,6 +237,18 @@ func TestBuildSlingCommandSling(t *testing.T) {
 	}
 }
 
+// TestBuildSlingCommandQuotesForThePlatformInterpreter pins that a bead ID
+// reaches the command as one literal argument of the interpreter the command
+// runs under (runtime.ShellQuote, whose contract is proven against each real
+// interpreter) rather than POSIX quoting, which PowerShell reads as code.
+func TestBuildSlingCommandQuotesForThePlatformInterpreter(t *testing.T) {
+	for _, id := range []string{"it's", "x\u2019; New-Item -ItemType File -Path pwned; \u2019"} {
+		if got, want := BuildSlingCommand("custom {} --flag", id), "custom "+runtime.ShellQuote(id)+" --flag"; got != want {
+			t.Errorf("BuildSlingCommand(%q) = %q, want %q", id, got, want)
+		}
+	}
+}
+
 func TestBuildSlingCommandForAgentParseErrorRedactsTemplate(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "demo-city")
 	a := config.Agent{Name: "worker"}

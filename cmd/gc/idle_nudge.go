@@ -71,7 +71,7 @@ const (
 	idleClaimNudgeBusyHoldLimit = 10 * time.Minute
 )
 
-const defaultPoolClaimNudge = "Run gc hook --claim --drain-ack --json now; if it returns work, execute it immediately."
+const defaultPoolClaimNudge = "Run " + runtime.GCCommandName + " hook --claim --drain-ack --json now; if it returns work, execute it immediately."
 
 // defaultHeldClaimNudge is the default for a seat whose claim (the %s) has
 // started its step, the execution backstop's started seat: PHASE1-2 §6.6's

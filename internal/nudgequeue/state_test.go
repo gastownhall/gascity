@@ -7,10 +7,37 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
+
+// holdQueueLock takes the city's nudge-queue lock from an independent handle
+// and holds it for the rest of the test, the way a separate controller process
+// would. It takes the same kernel lock WithState takes, so the contention it
+// creates is the contention production would meet.
+func holdQueueLock(t *testing.T, cityPath string) {
+	t.Helper()
+	path := LockPath(cityPath)
+	lockFile, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("open lock file: %v", err)
+	}
+	lock, err := filelock.Acquire(lockFile, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	})
+	if err != nil {
+		_ = lockFile.Close()
+		t.Fatalf("hold queue lock: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = lock.Release()
+		_ = lockFile.Close()
+	})
+}
 
 // TestWithState_TimesOutInsteadOfBlockingForever guards ga-2kzci3 FR1/FR2:
 // WithState itself -- not just the withStateBounded helper it wraps -- must
@@ -28,15 +55,7 @@ func TestWithState_TimesOutInsteadOfBlockingForever(t *testing.T) {
 		t.Fatalf("seed queue state: %v", err)
 	}
 
-	lockFile, err := os.OpenFile(LockPath(cityPath), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		t.Fatalf("open lock file: %v", err)
-	}
-	defer lockFile.Close() //nolint:errcheck
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
-		t.Fatalf("hold queue lock: %v", err)
-	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	holdQueueLock(t, cityPath)
 
 	done := make(chan error, 1)
 	go func() {
@@ -75,15 +94,7 @@ func TestWithStateBounded_TimesOutInsteadOfBlockingForever(t *testing.T) {
 		t.Fatalf("seed queue state: %v", err)
 	}
 
-	lockFile, err := os.OpenFile(LockPath(cityPath), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		t.Fatalf("open lock file: %v", err)
-	}
-	defer lockFile.Close() //nolint:errcheck
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
-		t.Fatalf("hold queue lock: %v", err)
-	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	holdQueueLock(t, cityPath)
 
 	const waitTimeout = 150 * time.Millisecond
 	done := make(chan error, 1)
@@ -137,12 +148,12 @@ func TestWithStateBounded_TimeoutIsErrQueueBusy(t *testing.T) {
 	if got, want := err.Error(), "locking nudge queue: timed out waiting 50ms for lock"; got != want {
 		t.Fatalf("err text = %q, want %q", got, want)
 	}
-	if errors.Is(fmt.Errorf("locking nudge queue: %w", syscall.EBADF), ErrQueueBusy) {
+	if errors.Is(fmt.Errorf("locking nudge queue: %w", os.ErrClosed), ErrQueueBusy) {
 		t.Fatal("a non-timeout lock error must not be ErrQueueBusy")
 	}
 }
 
-// holdQueueLockForTest takes the queue flock on its own descriptor and
+// holdQueueLockForTest takes the queue lock on its own descriptor and
 // returns the release.
 func holdQueueLockForTest(t *testing.T, cityPath string) func() {
 	t.Helper()
@@ -153,11 +164,13 @@ func holdQueueLockForTest(t *testing.T, cityPath string) func() {
 	if err != nil {
 		t.Fatalf("open lock file: %v", err)
 	}
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+	lock, err := filelock.Acquire(lockFile, filelock.Options{Mode: filelock.Exclusive, Label: LockPath(cityPath)})
+	if err != nil {
+		lockFile.Close() //nolint:errcheck
 		t.Fatalf("hold queue lock: %v", err)
 	}
 	return func() {
-		syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
-		lockFile.Close()                                   //nolint:errcheck
+		lock.Release()   //nolint:errcheck
+		lockFile.Close() //nolint:errcheck
 	}
 }

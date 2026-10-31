@@ -77,10 +77,10 @@ cmd/gc/api_state.go	liveCloseOwner	raw-result	1
 cmd/gc/api_state.go	liveCloseOwner	read-marker	1
 cmd/gc/api_state.go	liveReadOwner	raw-param	1
 cmd/gc/api_state.go	liveReadOwner	raw-result	1
+cmd/gc/api_state.go	newBeadStoreCloseRequest	raw-param	1
 cmd/gc/api_state.go	primeThenStartReconciler	raw-param	1
 cmd/gc/api_state.go	relicStoreRef	raw-param	2
-cmd/gc/api_state.go	scheduleCloseBeadStoreHandle	raw-param	1
-cmd/gc/api_state.go	scheduleCloseReplacedBeadStoreHandles	raw-param	2
+cmd/gc/api_state.go	replacedBeadStoreCloseRequests	raw-param	2
 cmd/gc/api_state.go	storePointerKey	raw-param	1
 cmd/gc/api_state.go	uncachedBeadStore	cap-assert	1
 cmd/gc/api_state.go	uncachedBeadStore	raw-param	1
@@ -303,6 +303,7 @@ cmd/gc/city_status_snapshot.go	collectCityStatusSnapshotFromStoreSnapshot	raw-pa
 cmd/gc/city_status_snapshot.go	namedSessionStatusForCity	raw-param	1
 cmd/gc/city_status_snapshot.go	observeStatusTargetsParallel	raw-param	1
 cmd/gc/city_status_snapshot.go	openCityStatusStore	raw-result	1
+cmd/gc/city_store_quiesce_other.go	trackRetiringBeadStoreHandle	raw-param	1
 cmd/gc/claim_class_route.go	classRoutedHookClaimOps	cap-assert	1
 cmd/gc/claim_class_route.go	classRoutedHookClaimOps	raw-result	1
 cmd/gc/claim_class_route.go	classRoutedHookClaimOps	read-marker	5
@@ -311,6 +312,8 @@ cmd/gc/claim_class_route.go	newClaimClassRouteOver	raw-param	1
 cmd/gc/claim_class_route.go	newHookClaimClassRoute	cap-assert	1
 cmd/gc/claim_class_route.go	newHookClaimClassRoute	raw-param	1
 cmd/gc/claim_identity_provenance.go	claimIdentityProvenance	raw-param	1
+cmd/gc/claimed_work_refresh_other.go	refreshDrainAckedOrExitedClaimedWorkForDemand	raw-param	1
+cmd/gc/claimed_work_refresh_other.go	refreshDrainAckedOrExitedClaimedWorkForDemand	raw-result	1
 cmd/gc/class_flip_guard.go	routesClassHolds	raw-param	1
 cmd/gc/class_store.go	CityRuntime.cityWorkStore	mint	1
 cmd/gc/class_store.go	CityRuntime.graphBeadStore	mint	1

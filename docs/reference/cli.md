@@ -2198,6 +2198,7 @@ gc hook [agent] [flags]
 | `--drain-ack` | bool |  | with --claim, acknowledge runtime drain when no work is available |
 | `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
 | `--json` | bool |  | emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal) |
+| `--worktree` | bool |  | with --claim, create or verify a gc-owned git worktree for the claimed work |
 
 | Subcommand | Description |
 |------------|-------------|

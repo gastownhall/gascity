@@ -125,6 +125,29 @@ differs, fix code and prove the row with a test.
 | RUNTIME-CONTRACT-015 | Keyed deliveries report receipts and can be looked up | `KeyedNudgeProvider.NudgeKeyed` delivers without an idle wait, so it also serves immediate delivery, and returns the runtime's `DeliveryReceipt` (message id, creation stamp, and the turn when the runtime names it; zero on any error), and `LookupDelivery` reports, sending nothing, whether the runtime holds the delivery a key made: its receipt, `ErrDeliveryNotFound`, `ErrSessionNotFound`, `ErrInteractionUnsupported` from a composite whose routed leaf keeps no keyed deliveries, or `ErrRuntimeUnavailable` when it cannot tell. The funnel `LookupDelivery` reads only an inability to tell as an error; no key, no keyed leaf, `ErrInteractionUnsupported`, not found and an unbound name (not joined with unavailable) are not found. `auto` and `hybrid` forward both to a keyed leaf, and answer `ErrInteractionUnsupported` for another without calling it. `NudgeWithReceipt` asks a receipt only of a leaf that deduplicates keyed deliveries (`FencedNudge.Receipt`), and sends a keyed nudge to such a leaf even when immediate, where `NudgeNow` would drop the key; `NudgeWithContext` is it without the receipt. t3bridge's receipt is the derived message id and the `createdAt` its turn start stamped (ms), or on lookup the one T3 stored, read from an uncached snapshot's thread messages; a snapshot thread that omits its messages is `ErrRuntimeUnavailable`, never not found; its `TurnID` is empty on V1. `FullFake` holds the first delivery under each key and answers lookups from it. | `internal/runtime/nudge_delivery.go`; `internal/runtime/fence.go`; `internal/runtime/fake_profile.go`; `internal/runtime/t3bridge/delivery_lookup.go`; `internal/runtime/nudge_delivery_test.go` (`TestNudgeWithReceiptReturnsTheKeyedLeafsReceipt`, `TestNudgeWithReceiptFencedFillsTheSlotOnlyForAKeyedLeaf`, `TestNudgeWithReceiptKeepsTheKeyOnAnImmediateNudgeBehindAComposite`, `TestNudgeWithContextIsNudgeWithReceipt`, `TestLookupDeliveryFunnel`, `TestFullFakeKeyedDeliveries`); `internal/runtime/t3bridge/delivery_ids_test.go` (`TestNudgeKeyedReceiptIsTheSentMessage`, `TestNudgeFencedFillsTheReceiptSlot`, `TestNudgeKeyedErrorsReportNoReceipt`, `TestNudgeKeyedReceiptMatchesTheTurnsRequestedAt`); `internal/runtime/t3bridge/delivery_lookup_test.go`; `internal/runtime/{auto,hybrid}/nudge_keyed_test.go` (`TestLookupDeliveryForwardsOnlyToAKeyedBackend`) |
 | RUNTIME-CONTRACT-016 | An idle or interrupt-boundary wait reports a timeout it observed nothing in | An `IdleWaitProvider.WaitForIdle` or `InterruptBoundaryWaitProvider.WaitForInterruptBoundary` that reaches its timeout without one reading that showed the session busy returns an error wrapping `ErrWaitUnobserved` beside its own timeout error (tmux `ErrIdleTimeout`, exec `context.DeadlineExceeded`); one that saw the session busy at least once returns the timeout alone. "Without a busy reading" means every read failed, or none was definitive: a pane showing neither a busy indicator nor its ready prompt (`ErrIdleIndeterminate`'s reading), or a Codex rollout whose turn activity cannot be told. Both pane loops classify each capture through `tmux.ClassifyIdlePane`. `ErrWaitUnobserved` is not `ErrRuntimeUnavailable`: callers that test only `err != nil` or the timeout sentinel are unchanged, and a restart decider (the worker's turn settle, `Manager.StopTurnWith`'s session-scoped restart, SESSION-RUNTIME-026) reads it as no evidence that a turn runs (ga-pts3qe). | `internal/runtime/runtime.go`; `internal/runtime/tmux/tmux.go`; `internal/runtime/exec/idle.go`; `internal/runtime/tmux/idle_wait_unobserved_test.go` (`TestWaitForIdleWithNoReadingIsUnobserved`, `TestWaitForIdleIndeterminateReadingsAreUnobserved`, `TestWaitForIdleBusyReadingIsObserved`, `TestCodexInterruptBoundaryUnreadableRolloutIsUnobserved`, `TestCodexInterruptBoundaryRunningTurnIsObserved`, `TestClassifyIdlePane`); `internal/runtime/exec/idle_budget_test.go` (`TestWaitForPaneIdleUnreadIsUnobserved`, `TestWaitForPaneIdleBusyIsObserved`) |
 
+### Windows Runtime Scanning
+
+With a statically resolved city executable scope, subprocess scans skip unrelated
+unreadable images, but refuse matching or unknown images. Missing or unresolved
+scope remains strict. Config reload unions the scope with all earlier scopes in
+the controller's lifetime, including when the runtime provider is replaced.
+Once any applied config requires strict scanning, reload cannot narrow it.
+Readable roots, unscoped snapshots and kill checks are not filtered. Custom
+providers should declare `process_names` for interpreter or alias target images;
+dynamic command positions retain strict scanning. The diagnostic identifies the
+unresolved config field without logging its command contents.
+
+The scope history is not persisted across controller restarts or standalone CLI
+invocations. Keep old executable names in `process_names` until earlier sessions
+are stopped; otherwise an unreadable orphan of a removed command can fall outside
+the new controller's scope.
+
+Evidence: `TestProcessTableRuntimeInspectionScope`, `TestConfigureProcessTableScan`,
+`TestCityRuntimeExecutablesRefusesDynamicCommands`,
+`TestCityRuntimeExecutablesReportsUnresolvedCommand`,
+`TestCityRuntimeReloadRefreshesScanScope`, `TestSeamScanScopeForwarding`,
+`TestShellCommandProgramsMatchesParser`.
+
 ### RPP v0 (Exec Protocol)
 
 | ID | Scenario | Required behavior | Evidence |

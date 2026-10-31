@@ -1420,7 +1420,7 @@ func buildPreparedStartWithTranscript(
 	// resolveSessionCommand only adds --resume/--session-id which are not schema
 	// flags, so the overrides don't need to be re-applied.
 	if msg, ok := sessionOverrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) {
-		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
+		if (tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none") || initialMessageRidesStartupPrompt(tp.IsACP) {
 			agentCfg.Nudge = appendInitialMessageToStartupNudge(agentCfg.Nudge, msg)
 		} else {
 			existing := ""
@@ -2057,10 +2057,21 @@ func runPreparedStartCandidate(
 	// the dead resume's pane for the resume backstop to read that
 	// refusal from, so recordWakeFailure clears the key for the
 	// next attempt.
+	//
+	// A start whose startup prompt rides the agent's first ACP
+	// session/prompt (an ACP session on Windows; see
+	// initialMessageRidesStartupPrompt) is gated the same way: an agent that
+	// exits after session/new leaves the command wrapper that launched it
+	// alive past Start, so the prompt write succeeds into the pipe and the
+	// prompt would be lost behind a successful start. A Start that overran
+	// startupTimeout skips that check: it is a startup timeout whether or not
+	// the session lived.
 	var diedPane string
-	if startedFresh && err == nil && strings.TrimSpace(item.candidate.info.ID) != "" && item.candidate.info.SessionKey != "" {
+	if startedFresh && err == nil && strings.TrimSpace(item.candidate.info.ID) != "" &&
+		(item.candidate.info.SessionKey != "" ||
+			(startCtxErr == nil && item.cfg.Nudge != "" && initialMessageRidesStartupPrompt(item.candidate.tp.IsACP))) {
 		postStartBegin := time.Now()
-		if stabilityWaiter(startCtx, item.candidate.name()) {
+		if stabilityWaiter(ctx, item.candidate.name()) {
 			running := false
 			alive := false
 			if store == nil || strings.TrimSpace(item.candidate.info.ID) == "" {

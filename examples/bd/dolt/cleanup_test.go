@@ -1,3 +1,5 @@
+//go:build unix
+
 // cleanup_test.go pins the dry-run and --force behavior of
 // commands/cleanup/run.sh when the rig registry query fails. See ga-a5mi0k:
 // metadata_files() and compute_allowlist_file() both call

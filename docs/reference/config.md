@@ -765,6 +765,7 @@ ProviderSpec defines a named provider's startup parameters.
 | `prompt_flag` | string |  |  | PromptFlag is the CLI flag used when prompt_mode is "flag" (e.g. "--prompt"). |
 | `ready_delay_ms` | integer |  |  | ReadyDelayMs is milliseconds to wait after launch before the provider is considered ready. |
 | `ready_prompt_prefix` | string |  |  | ReadyPromptPrefix is the string prefix that indicates the provider is ready for input. |
+| `not_ready_markers` | []string |  |  | NotReadyMarkers lists text the provider prints when it discards a submitted prompt because it is not ready for input yet, although its input prompt is already showing (Copilot prints "Managed account policy is still loading" until its policy loads). A runtime that sees one appear after delivering the startup prompt delivers the prompt again. |
 | `process_names` | []string |  |  | ProcessNames lists process names to look for when checking if the provider is running. |
 | `emits_permission_warning` | boolean |  |  | EmitsPermissionWarning is tri-state: nil = inherit, &true = enable, &false = explicit disable. |
 | `accept_startup_dialogs` | boolean |  |  | AcceptStartupDialogs is tri-state: nil = default startup dialog handling, &true = force dialog acceptance, &false = suppress it for providers that handle permissions entirely through launch flags. |

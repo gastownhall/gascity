@@ -71,6 +71,9 @@ func sessionProviderContextForCity(cfg *config.City, cityPath, providerOverride 
 	if ctx.providerName == "" {
 		ctx.providerName = cfg.Session.Provider
 	}
+	if ctx.providerName == "" {
+		ctx.providerName = sessionProviderRuntimeDefault
+	}
 	return ctx
 }
 
@@ -177,7 +180,12 @@ func resolveWorkerSpec(cfg *config.City, spec runtime.WorkerSpec, sc config.Sess
 	if err != nil {
 		return nil, err
 	}
-	return reg.New(spec.Runtime, sc, cityName, cityPath)
+	sp, err := reg.New(spec.Runtime, sc, cityName, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	configureProcessTableScan(sp, cfg)
+	return sp, nil
 }
 
 func isLegacyT3BridgeExecScript(script string) bool {

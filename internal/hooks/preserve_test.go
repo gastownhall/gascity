@@ -20,7 +20,12 @@ func installedOpenCodePlugin(t *testing.T) []byte {
 	if err := Install(fs, "/city", "/work", []string{"opencode"}); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	return fs.Files["/work/.opencode/plugins/gascity.js"]
+	key := filepath.Join("/work", ".opencode", "plugins", "gascity.js")
+	data, ok := fs.Files[key]
+	if !ok {
+		t.Fatalf("installed OpenCode plugin missing at %q", key)
+	}
+	return data
 }
 
 // A current managed hook file must be preserved so overlay staging cannot
@@ -117,14 +122,14 @@ func TestManagedOverlayHookPathsCoverEveryVersionedFile(t *testing.T) {
 				return nil
 			}
 			if overlay.IsMergeablePath(filepath.FromSlash(rel)) {
-				if got, ok := managedOverlayHookPaths[filepath.FromSlash(rel)]; ok {
+				if got, ok := managedOverlayHookPaths[filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel)))]; ok {
 					t.Errorf("mergeable path %q is listed in managedOverlayHookPaths (provider %q); "+
 						"staging skips it before the predicate runs", rel, got)
 				}
 				return nil
 			}
 			checked++
-			got, ok := managedOverlayHookPaths[filepath.FromSlash(rel)]
+			got, ok := managedOverlayHookPaths[filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel)))]
 			if !ok {
 				t.Errorf("provider %q file %q has a version marker but no managedOverlayHookPaths "+
 					"entry, so overlay staging will silently revert it", provider, rel)

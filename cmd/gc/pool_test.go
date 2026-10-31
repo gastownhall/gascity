@@ -1461,14 +1461,15 @@ func handlerKeys(m map[string]poolDeathInfo) []string {
 // rig-scoped agent's scale_check needs BEADS_DOLT_SERVER_PORT injected so bd can
 // find the managed Dolt server, but shellScaleCheck has no mechanism for this.
 func TestShellScaleCheck_NoBEADS_DOLT_SERVER_PORT_Injection(t *testing.T) {
-	// shellScaleCheck runs the command via `sh -c`. Verify that the command
-	// environment does NOT contain BEADS_DOLT_SERVER_PORT by having the command
-	// print the variable.
+	// shellScaleCheck runs the command via `sh -c` (PowerShell on Windows).
+	// Verify that the command environment does NOT contain
+	// BEADS_DOLT_SERVER_PORT by having the command print the variable.
 	//
 	// Clear any inherited value first so we can detect injection (or lack thereof).
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 
-	out, err := shellScaleCheck("echo ${BEADS_DOLT_SERVER_PORT:-unset}", "", nil)
+	out, err := shellScaleCheck(platformCommand("echo ${BEADS_DOLT_SERVER_PORT:-unset}",
+		"if ($env:BEADS_DOLT_SERVER_PORT) { $env:BEADS_DOLT_SERVER_PORT } else { 'unset' }"), "", nil)
 	if err != nil {
 		t.Fatalf("shellScaleCheck: %v", err)
 	}

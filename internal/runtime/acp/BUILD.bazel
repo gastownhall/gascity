@@ -7,15 +7,23 @@ go_library(
         "activity_publisher.go",
         "agent_requests.go",
         "capture.go",
+        "capture_open_unix.go",
+        "capture_open_windows.go",
         "conn.go",
         "cutover.go",
         "events.go",
         "fence.go",
         "interrupt.go",
+        "interrupt_signal_unix.go",
+        "interrupt_signal_windows.go",
         "lifecycle_lock.go",
+        "lifecycle_lock_open_unix.go",
+        "lifecycle_lock_open_windows.go",
         "local_transcripts.go",
         "permission.go",
         "proctable.go",
+        "promptsuffix_other.go",
+        "promptsuffix_windows.go",
         "protocol.go",
         "seams.go",
         "turn_events.go",
@@ -27,6 +35,8 @@ go_library(
     deps = [
         "//internal/citylayout",
         "//internal/fsys",
+        "//internal/platform/filelock",
+        "//internal/processgroup",
         "//internal/runtime",
         "//internal/runtime/proctable",
     ],
@@ -44,12 +54,17 @@ go_test(
         "events_protocol_test.go",
         "events_test.go",
         "fence_test.go",
+        "fixture_other_test.go",
+        "fixture_windows_test.go",
         "interrupt_test.go",
+        "lifecycle_lock_open_windows_test.go",
         "meta_privacy_test.go",
         "permission_test.go",
         "pipe_error_test.go",
         "proctable_integration_test.go",
         "proctable_linux_test.go",
+        "promptsuffix_other_test.go",
+        "promptsuffix_windows_test.go",
         "protocol_conformance_test.go",
         "protocol_test.go",
         "seams_test.go",
@@ -86,11 +101,55 @@ go_test(
         "//internal/testenv",
         "//internal/testutil",
     ] + select({
+        "@rules_go//go/platform:aix": [
+            "//internal/shellquote",
+        ],
         "@rules_go//go/platform:android": [
             "//internal/runtime/proctable",
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:dragonfly": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:freebsd": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:illumos": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:ios": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:js": [
+            "//internal/shellquote",
         ],
         "@rules_go//go/platform:linux": [
             "//internal/runtime/proctable",
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:netbsd": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:openbsd": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:osx": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:plan9": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:qnx": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:solaris": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:windows": [
+            "//internal/shellquote",
         ],
         "//conditions:default": [],
     }),

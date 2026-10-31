@@ -586,7 +586,7 @@ func TestShellSlingRunnerOverridesInheritedBDEnv(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
 
-	out, err := shellSlingRunner("", `printf '%s|%s|%s|%s' "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$BEADS_DOLT_SERVER_HOST" "$BEADS_DOLT_SERVER_PORT"`, map[string]string{
+	out, err := shellSlingRunner("", slingRunnerPrintStoreEnvCommand, map[string]string{
 		"GC_DOLT_HOST":           "rig-db.example.com",
 		"GC_DOLT_PORT":           "3307",
 		"BEADS_DOLT_SERVER_HOST": "rig-db.example.com",
@@ -604,7 +604,7 @@ func TestShellSlingRunnerStripsInheritedSecrets(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "ghs_should_not_leak")
 	t.Setenv("OPENAI_API_KEY", "sk-should-not-leak")
 
-	out, err := shellSlingRunner("", `printf '%s|%s' "${GITHUB_TOKEN:-unset}" "${OPENAI_API_KEY:-unset}"`, nil)
+	out, err := shellSlingRunner("", slingRunnerPrintSecretsCommand, nil)
 	if err != nil {
 		t.Fatalf("shellSlingRunner: %v", err)
 	}

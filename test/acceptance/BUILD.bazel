@@ -244,11 +244,45 @@ go_test(
         "//test/acceptance/helpers",
         "//test/toolhome",
         "@com_github_burntsushi_toml//:toml",
-        "@com_github_gastownhall_gascity_packs//:gascity-packs",
         "@com_github_go_sql_driver_mysql//:mysql",
         "@com_github_santhosh_tekuri_jsonschema_v6//:jsonschema",
         "@net_pgregory_rapid//:rapid",
-    ],
+    ] + select({
+        "@rules_go//go/platform:aix": [
+            "@com_github_gastownhall_gascity_packs//:gascity-packs",
+        ],
+        "@rules_go//go/platform:android": [
+            "@com_github_gastownhall_gascity_packs//:gascity-packs",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "@com_github_gastownhall_gascity_packs//:gascity-packs",
+        ],
+        "@rules_go//go/platform:dragonfly": [
+            "@com_github_gastownhall_gascity_packs//:gascity-packs",
+        ],
+        "@rules_go//go/platform:freebsd": [
+            "@com_github_gastownhall_gascity_packs//:gascity-packs",
+        ],
+        "@rules_go//go/platform:illumos": [
+            "@com_github_gastownhall_gascity_packs//:gascity-packs",
+        ],
+        "@rules_go//go/platform:ios": [
+            "@com_github_gastownhall_gascity_packs//:gascity-packs",
+        ],
+        "@rules_go//go/platform:linux": [
+            "@com_github_gastownhall_gascity_packs//:gascity-packs",
+        ],
+        "@rules_go//go/platform:netbsd": [
+            "@com_github_gastownhall_gascity_packs//:gascity-packs",
+        ],
+        "@rules_go//go/platform:openbsd": [
+            "@com_github_gastownhall_gascity_packs//:gascity-packs",
+        ],
+        "@rules_go//go/platform:solaris": [
+            "@com_github_gastownhall_gascity_packs//:gascity-packs",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # The shard placement guard (scripts/acceptance_shards_test.go) reads this

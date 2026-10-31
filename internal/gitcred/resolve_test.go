@@ -8,7 +8,7 @@ import (
 )
 
 func TestResolveHelper(t *testing.T) {
-	cred, err := Resolve(Rule{Match: "github.com", Helper: "printf 'ghp_tok\\n'"})
+	cred, err := Resolve(Rule{Match: "github.com", Helper: tokenHelperCommand})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestResolveTokenEnvValue(t *testing.T) {
 }
 
 func TestRunCredentialCommandDeclineOnEmptyOutput(t *testing.T) {
-	_, ok, err := RunCredentialCommand("true", Request{Host: "github.com"})
+	_, ok, err := RunCredentialCommand(declineCommand, Request{Host: "github.com"})
 	if err != nil {
 		t.Fatalf("RunCredentialCommand: %v", err)
 	}
@@ -91,11 +91,31 @@ func TestRunCredentialCommandDeclineOnEmptyOutput(t *testing.T) {
 }
 
 func TestRunCredentialCommandEmit(t *testing.T) {
-	cred, ok, err := RunCredentialCommand("printf 'username=bot\\npassword=tok\\n'", Request{Host: "github.com"})
+	cred, ok, err := RunCredentialCommand(emitCommand, Request{Host: "github.com"})
 	if err != nil {
 		t.Fatalf("RunCredentialCommand: %v", err)
 	}
 	if !ok || cred.Username != "bot" || cred.Password != "tok" {
 		t.Fatalf("unexpected credential: %+v ok=%v", cred, ok)
+	}
+}
+
+func TestRunCredentialCommandReadsRequestOnStdin(t *testing.T) {
+	cred, ok, err := RunCredentialCommand(echoHostCommand, Request{Protocol: "https", Host: "example.com"})
+	if err != nil {
+		t.Fatalf("RunCredentialCommand: %v", err)
+	}
+	if !ok || cred.Password != "example.com" {
+		t.Fatalf("credential = %+v ok=%v, want the request's host echoed back as the password", cred, ok)
+	}
+}
+
+func TestRunCredentialCommandAcceptsCRLF(t *testing.T) {
+	cred, ok, err := RunCredentialCommand(crlfEmitCommand, Request{Host: "github.com"})
+	if err != nil {
+		t.Fatalf("RunCredentialCommand: %v", err)
+	}
+	if !ok || cred.Username != "bot" || cred.Password != "tok" {
+		t.Fatalf("credential = %+v ok=%v, want bot/tok without a trailing CR", cred, ok)
 	}
 }

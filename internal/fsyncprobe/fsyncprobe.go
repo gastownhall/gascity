@@ -14,7 +14,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"syscall"
 	"time"
 )
 
@@ -112,7 +111,7 @@ func workerCommand(exe, dir string, result *os.File) *exec.Cmd {
 	cmd := exec.Command(exe, "dolt-state", "fsync-probe-worker", "--dir", dir)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
 	cmd.ExtraFiles = []*os.File{result}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.SysProcAttr = workerSysProcAttr()
 	return cmd
 }
 

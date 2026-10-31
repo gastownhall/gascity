@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -85,6 +86,9 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		return "", fmt.Errorf("exec provider %s: %w", args[0], err)
+	}
 	// Run the adapter in its own process group with TERM-then-kill
 	// cancellation (execgrace.Apply) so cooperative cancellation reaches a
 	// foreground child (e.g. a readiness sleep in the adapter), not just the
@@ -217,6 +221,9 @@ func isStartCollision(errMsg string) bool {
 // runWithTTY executes the script with the terminal inherited (for Attach).
 func (p *Provider) runWithTTY(args ...string) error {
 	cmd := exec.Command(p.script, args...)
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		return fmt.Errorf("exec provider %s: %w", args[0], err)
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -441,6 +448,10 @@ func (p *Provider) startStartupWatch(
 ) (<-chan string, func() error, bool, error) {
 	watchCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(watchCtx, p.script, "watch-startup", name)
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		cancel()
+		return nil, nil, false, fmt.Errorf("exec provider watch-startup: %w", err)
+	}
 	// Startup watchers are short-lived probes; tear them down quickly once the
 	// dialog helper is finished so Start cannot stall behind a sleeping wrapper.
 	cmd.WaitDelay = 250 * time.Millisecond
@@ -952,6 +963,9 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 	defer cancel()
 
 	cmd := exec.CommandContext(cmdCtx, p.script, "exec", name)
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		return nil, -1, fmt.Errorf("exec provider exec: %w", err)
+	}
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

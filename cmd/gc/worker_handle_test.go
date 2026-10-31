@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1330,6 +1331,96 @@ session_id_flag = "--session-id"
 	}
 }
 
+// TestWorkerHandleAttachStartsDeadSessionWithStartupPrompt pins the
+// `gc session attach` path: with no controller running, a session bead that is
+// still awake but has no runtime is started by Attach itself, through the worker
+// factory's resolved hints. With no session key the launch is a fresh
+// conversation, so the hints must carry the startup prompt and the delivered
+// marker, or the agent comes up without its prompt.
+func TestWorkerHandleAttachStartsDeadSessionWithStartupPrompt(t *testing.T) {
+	cityDir := t.TempDir()
+	// After TempDir: cleanups run LIFO, so the memoized events recorder closes
+	// before the city directory is removed (Windows cannot remove an open file).
+	resetCLIFactoryRecorders(t)
+	// The fake runtime never executes the command, but the resolver LookPaths
+	// it, so use a path that exists on every OS.
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	writePhase0InterfaceCity(t, cityDir, fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "worker"
+provider = "stub"
+prompt_template = "prompts/worker.template.md"
+
+[providers.stub]
+command = %q
+resume_flag = "--resume"
+resume_style = "flag"
+`, filepath.ToSlash(exe)))
+	if err := os.MkdirAll(filepath.Join(cityDir, "prompts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "prompts", "worker.template.md"), []byte(contractPromptBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+
+	sp := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template: "worker", Title: "Probe", Command: filepath.ToSlash(exe), WorkDir: t.TempDir(), Provider: "stub",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	// The host rebooted: the runtime is gone, the bead still says awake, and the
+	// provider never reported a session key to resume.
+	if err := sp.Stop(info.SessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "session_key", ""); err != nil {
+		t.Fatalf("SetMetadata(session_key): %v", err)
+	}
+
+	handle, err := workerHandleForSessionWithConfig(cityDir, store, sp, cfg, info.ID)
+	if err != nil {
+		t.Fatalf("workerHandleForSessionWithConfig: %v", err)
+	}
+	sp.Calls = nil
+	if err := handle.Attach(context.Background(), testActorIn(t, session.ActorOperator, cityDir)); err != nil {
+		t.Fatalf("handle.Attach: %v", err)
+	}
+
+	start := sp.LastStartConfig(info.SessionName)
+	if start == nil {
+		t.Fatalf("Attach did not start %q", info.SessionName)
+	}
+	if strings.Contains(start.Command, "--resume") {
+		t.Fatalf("start command = %q, want a fresh launch with no session key", start.Command)
+	}
+	if !strings.Contains(start.Nudge, contractPromptBody) {
+		t.Errorf("start Nudge = %q, want it to carry the startup prompt", abbreviate(start.Nudge))
+	}
+	if got := start.Env[startupPromptDeliveredEnv]; got != "1" {
+		t.Errorf("start Env[%s] = %q, want 1", startupPromptDeliveredEnv, got)
+	}
+}
+
 func TestWorkerHandleForSessionTargetWithConfigResolvesSessionName(t *testing.T) {
 	cityDir := t.TempDir()
 	writePhase0InterfaceCity(t, cityDir, `[workspace]
@@ -2306,6 +2397,7 @@ func TestWorkerSessionRuntimeResolverWithConfigFallsBackToPersistedRuntimeOnInco
 			"stub": {
 				ReadyPromptPrefix: "resolved-ready>",
 				ReadyDelayMs:      321,
+				NotReadyMarkers:   []string{"resolved-not-ready"},
 			},
 		},
 	}
@@ -2358,6 +2450,9 @@ func TestWorkerSessionRuntimeResolverWithConfigFallsBackToPersistedRuntimeOnInco
 	}
 	if got, want := runtimeCfg.Hints.ReadyDelayMs, 321; got != want {
 		t.Fatalf("Hints.ReadyDelayMs = %d, want %d", got, want)
+	}
+	if got, want := runtimeCfg.Hints.NotReadyMarkers, []string{"resolved-not-ready"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Hints.NotReadyMarkers = %q, want %q", got, want)
 	}
 }
 
@@ -2412,6 +2507,15 @@ func TestWorkerSessionCreateHintsEnablesMouse(t *testing.T) {
 	hints := workerSessionCreateHints(&config.ResolvedProvider{Name: "stub"})
 	if !hints.MouseOn {
 		t.Error("workerSessionCreateHints().MouseOn = false, want true (gc session new unmanaged-direct wheel→scrollback, ga-c4w)")
+	}
+}
+
+// `gc session new` starts the session from these hints, so the provider's
+// not_ready_markers must reach the runtime that delivers its first turn.
+func TestWorkerSessionCreateHintsCarriesNotReadyMarkers(t *testing.T) {
+	hints := workerSessionCreateHints(&config.ResolvedProvider{Name: "stub", NotReadyMarkers: []string{"still loading"}})
+	if want := []string{"still loading"}; !reflect.DeepEqual(hints.NotReadyMarkers, want) {
+		t.Fatalf("NotReadyMarkers = %q, want %q", hints.NotReadyMarkers, want)
 	}
 }
 

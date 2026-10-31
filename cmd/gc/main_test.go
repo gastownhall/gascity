@@ -243,6 +243,8 @@ func exitTestProcess(code int) {
 func TestMain(m *testing.M) {
 	maybeRunHostedBeadsCredentialProvider()
 	maybeRunProductMetricsDirectChildEnvSpy()
+	maybeRunControllerTokenChildSpy()
+	maybeRunNativeFakeBd()
 	maybeRunFakeDoltSQLServer()
 
 	// testscript re-executes the test binary as "gc" or "bd" for each txtar

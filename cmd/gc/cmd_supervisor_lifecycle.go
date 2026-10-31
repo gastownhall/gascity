@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -31,6 +32,7 @@ import (
 	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/searchpath"
 	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/internal/tailfile"
 	"github.com/spf13/cobra"
 )
 
@@ -155,9 +157,9 @@ var (
 	supervisorProcReadDir                               = os.ReadDir
 	supervisorProcReadFile                              = os.ReadFile
 	supervisorParentPID                                 = pidutil.ParentPID
-	supervisorGetpgid                                   = syscall.Getpgid
-	supervisorGetpgrp                                   = syscall.Getpgrp
-	supervisorKill                                      = syscall.Kill
+	supervisorGetpgid                                   = platformGetpgid
+	supervisorGetpgrp                                   = platformGetpgrp
+	supervisorKill                                      = platformKill
 	supervisorProcessGroupPollPeriod                    = 20 * time.Millisecond
 	supervisorRuntimeGOOS                               = goruntime.GOOS
 	supervisorWorkspaceServiceCleanupWarnings io.Writer = os.Stderr
@@ -1127,6 +1129,19 @@ func ensureSupervisorRunning(stdout, stderr io.Writer) int {
 		}
 		return startBareSupervisor(stdout, stderr, false, true)
 	}
+	// Where there is no service manager to install into, go straight to the
+	// supported lifecycle rather than attempting an install whose only
+	// possible outcome is the unsupported error. This keeps the same order the
+	// install path uses: an already-running supervisor satisfies the request,
+	// and only its absence is worth starting one for. Starting unconditionally
+	// would report "supervisor already running" as a failure of a call whose
+	// contract is merely that a supervisor is running when it returns.
+	if !supervisorServiceManagerAvailable() {
+		if supervisorAliveHook() != 0 {
+			return 0
+		}
+		return doSupervisorStart(stdout, stderr)
+	}
 	// Always regenerate the service file so upgrades pick up template
 	// changes (e.g. PATH captured from the user's shell).
 	if doSupervisorInstall(stdout, stderr) != 0 {
@@ -1368,6 +1383,10 @@ func waitForSupervisorReady(stderr io.Writer) int {
 // never been registered. It reports command failures only; confirming
 // the service actually went away is verifySupervisorServiceStopped's
 // job, because launchd drops the job only once the process has exited.
+// unloadSupervisorService stops the platform service. On a platform with no
+// service manager it has nothing to stop and says so by returning nil: the
+// supervisor there is a plain process the control endpoint already stopped,
+// and reporting an error would turn the supported lifecycle into a failure.
 func unloadSupervisorService() error {
 	var errs []error
 	switch goruntime.GOOS {
@@ -1549,16 +1568,10 @@ func doSupervisorLogs(numLines int, follow bool, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, supervisorLogsTeeDisabledWarning(goruntime.GOOS, logPath, numLines, follow)) //nolint:errcheck // best-effort stderr
 	}
 
-	args := []string{"-n", fmt.Sprintf("%d", numLines)}
-	if follow {
-		args = append(args, "-f")
-	}
-	args = append(args, logPath)
-
-	cmd := exec.Command("tail", args...)
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
+	err := tailfile.Tail(context.Background(), logPath, numLines, follow, stdout, func() {
+		fmt.Fprintf(stderr, "gc supervisor logs: %s: file truncated\n", logPath) //nolint:errcheck // best-effort stderr
+	})
+	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor logs: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1617,7 +1630,7 @@ func doSupervisorInstall(stdout, stderr io.Writer) int {
 	case "linux":
 		return installSupervisorSystemd(data, stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "gc supervisor install: not supported on %s\n", goruntime.GOOS) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc supervisor install: %v\n", newSupervisorServiceManagerUnsupportedError("gc supervisor install")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 }
@@ -1665,7 +1678,7 @@ func doSupervisorUninstall(stdout, stderr io.Writer) int {
 	case "linux":
 		return uninstallSupervisorSystemd(data, stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "gc supervisor uninstall: not supported on %s\n", goruntime.GOOS) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc supervisor uninstall: %v\n", newSupervisorServiceManagerUnsupportedError("gc supervisor uninstall")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 }

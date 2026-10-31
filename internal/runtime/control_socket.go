@@ -33,7 +33,8 @@ func ClassifyControlSocketDial(err error) ControlSocketOutcome {
 		return ControlSocketPresent
 	case errors.Is(err, os.ErrNotExist),
 		errors.Is(err, syscall.ENOENT),
-		errors.Is(err, syscall.ECONNREFUSED):
+		errors.Is(err, syscall.ECONNREFUSED),
+		platformControlSocketAbsent(err):
 		return ControlSocketAbsent
 	default:
 		return ControlSocketUnknown

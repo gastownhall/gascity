@@ -11,17 +11,13 @@ import (
 	"path/filepath"
 	"sort"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
+	"github.com/gastownhall/gascity/internal/platform/localsocket"
 )
-
-// wakeSocketPathLimit caps the canonical socket path length below the
-// platform sockaddr_un limit (108 bytes on Linux, 104 on macOS). Matches
-// the controllerSocketPathLimit pattern in cmd/gc/controller.go.
-const wakeSocketPathLimit = 100
 
 // Reference links a queued nudge back to the object that produced it.
 type Reference struct {
@@ -406,11 +402,18 @@ func lockState(cityPath string, waitTimeout time.Duration) (func(), error) {
 
 	deadline := time.Now().Add(waitTimeout)
 	for {
-		lockErr := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		lock, lockErr := filelock.Acquire(lockFile, filelock.Options{
+			Mode:        filelock.Exclusive,
+			NonBlocking: true,
+			Label:       lockFile.Name(),
+		})
 		if lockErr == nil {
-			break
+			return func() {
+				lock.Release()   //nolint:errcheck
+				lockFile.Close() //nolint:errcheck
+			}, nil
 		}
-		if !errors.Is(lockErr, syscall.EWOULDBLOCK) {
+		if !errors.Is(lockErr, filelock.ErrBusy) {
 			lockFile.Close() //nolint:errcheck
 			return nil, fmt.Errorf("locking nudge queue: %w", lockErr)
 		}
@@ -420,10 +423,6 @@ func lockState(cityPath string, waitTimeout time.Duration) (func(), error) {
 		}
 		time.Sleep(nudgeQueueLockPollInterval)
 	}
-	return func() {
-		syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
-		lockFile.Close()                                   //nolint:errcheck
-	}, nil
 }
 
 // marshalState is the exact bytes a write of state puts in state.json.
@@ -478,12 +477,12 @@ func LockPath(cityPath string) string {
 // "supervisor".
 //
 // Preserves the legacy `<city>/.gc/runtime/nudges/wake.sock` location for
-// short city paths but falls back to a deterministic short temp-path
-// when the legacy pathname is too close to the platform sockaddr_un
-// limit. Mirrors the controllerSocketPath pattern in cmd/gc/controller.go.
+// short city paths but falls back to a deterministic short path when the
+// legacy pathname is too close to the platform's endpoint limit. Mirrors the
+// controllerSocketPath pattern in cmd/gc/controller.go.
 func WakeSocketPath(cityPath string) string {
 	legacy := citylayout.RuntimePath(cityPath, "nudges", "wake.sock")
-	if len(legacy) <= wakeSocketPathLimit {
+	if len(legacy) <= localsocket.PathLimit {
 		return legacy
 	}
 	canonical, err := filepath.Abs(cityPath)
@@ -492,5 +491,5 @@ func WakeSocketPath(cityPath string) string {
 	}
 	canonical = filepath.Clean(canonical)
 	sum := sha256.Sum256([]byte(canonical))
-	return filepath.Join("/tmp", "gascity-nudge", fmt.Sprintf("%x.sock", sum[:16]))
+	return filepath.Join(localsocket.FallbackDir("gascity-nudge"), fmt.Sprintf("%x.sock", sum[:16]))
 }

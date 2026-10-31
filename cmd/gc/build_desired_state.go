@@ -642,6 +642,18 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 			"beads":   len(assignedWorkBeads),
 			"partial": storePartial,
 		})
+		if !storePartial {
+			assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned = refreshDrainAckedOrExitedClaimedWorkForDemand(
+				cfg,
+				sp,
+				assignedWorkBeads,
+				assignedWorkStores,
+				assignedWorkStoreRefs,
+				readyAssigned,
+				sessionBeads,
+				stderr,
+			)
+		}
 		if storePartial {
 			fmt.Fprintf(stderr, "assignedWorkBeads: PARTIAL — store query failed, drain decisions suppressed\n") //nolint:errcheck
 		}

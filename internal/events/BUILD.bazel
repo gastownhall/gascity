@@ -12,6 +12,8 @@ go_library(
         "inode_unix.go",
         "inode_windows.go",
         "mirror.go",
+        "mirror_unix.go",
+        "mirror_windows.go",
         "multiplexer.go",
         "order_payloads.go",
         "payload.go",
@@ -36,12 +38,18 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/events",
     visibility = ["//:__subpackages__"],
-    deps = select({
+    deps = [
+        "//internal/platform/filelock",
+        "//internal/platform/livefile",
+    ] + select({
         "@rules_go//go/platform:android": [
             "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:linux": [
             "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
         ],
         "//conditions:default": [],
     }),
@@ -77,6 +85,7 @@ go_test(
         "rotation_archive_test.go",
         "rotation_auto_test.go",
         "rotation_force_test.go",
+        "rotation_helpers_test.go",
         "rotation_reader_test.go",
         "rotation_superseded_test.go",
         "rotation_test.go",
@@ -91,6 +100,7 @@ go_test(
     embed = [":events"],
     deps = [
         "//internal/events/eventstest",
+        "//internal/platform/filelock",
         "//internal/testenv",
         "//internal/testutil",
     ],

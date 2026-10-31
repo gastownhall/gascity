@@ -141,7 +141,7 @@ func repairedManagedDoltRuntimeState(_ string, layout managedDoltRuntimeLayout, 
 	if stateDir == "" {
 		stateDir = layout.DataDir
 	}
-	if !managedDoltProcessOwnedWithStateDir(holderPID, layout, stateDir) {
+	if owned, err := managedDoltProcessOwnedWithStateDir(holderPID, layout, stateDir); err != nil || !owned {
 		return doltRuntimeState{}, false
 	}
 	if processHasDeletedDataInodes(holderPID, layout.DataDir) {

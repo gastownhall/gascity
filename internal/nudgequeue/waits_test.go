@@ -4,11 +4,11 @@ import (
 	"errors"
 	"os"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 
 type listQueryCaptureStore struct {
@@ -176,15 +176,21 @@ func (s queueLockDetectStore) Close(id string) error {
 }
 
 func (s queueLockDetectStore) requireQueueLockAvailable() error {
-	lockFile, err := os.OpenFile(LockPath(s.cityPath), os.O_CREATE|os.O_RDWR, 0o600)
+	path := LockPath(s.cityPath)
+	lockFile, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
 	}
 	defer lockFile.Close() //nolint:errcheck
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	lock, err := filelock.Acquire(lockFile, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	})
+	if err != nil {
 		return errors.New("bead store work ran while nudge queue lock was held")
 	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	defer lock.Release() //nolint:errcheck
 	return nil
 }
 

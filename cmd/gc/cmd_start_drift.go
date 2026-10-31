@@ -217,7 +217,7 @@ var driftVerifyProbeTimeout = 2 * time.Second
 // the production kill+spawn (or systemctl) side effects.
 var restartHelpersHook = defaultRestartHelpers
 
-// readSupervisorExePathHook lets tests avoid platform-specific /proc lookups.
+// readSupervisorExePathHook lets tests avoid platform-specific process image lookups.
 var readSupervisorExePathHook = readSupervisorExePath
 
 // readProcExeLinkHook reads the raw /proc/<pid>/exe link target.
@@ -500,32 +500,10 @@ func pollDelegatedRestartVerified(baseURL string, oldPID int, oldBuildID, localB
 	}
 }
 
-func printUnreadableSupervisorRestartError(stderr io.Writer, pid int, exeErr error) {
-	if supervisorRuntimeGOOS == "darwin" {
-		fmt.Fprintf(stderr, "error: cannot auto-restart supervisor: macOS cannot resolve the executable path for a direct supervisor (%v). If the supervisor is launchd-managed, rerun 'gc supervisor install' and then 'gc start'; otherwise stop the supervisor manually and rerun 'gc start', or pass --no-auto-restart to skip the restart and surface the drift as an error.\n", exeErr) //nolint:errcheck // best-effort stderr
-		return
-	}
-	fmt.Fprintf(stderr, "error: cannot auto-restart supervisor: /proc/%d/exe is owned by a different user (permission denied: %v). Either rerun gc start as the supervisor's uid, or pass --no-auto-restart to skip the restart and surface the drift as an error.\n", pid, exeErr) //nolint:errcheck // best-effort stderr
-}
-
-// readSupervisorExePath returns the resolved path of the supervisor's
-// executable via /proc/<pid>/exe. The kernel readlink resolves
-// symlinks for us — no extra realpath layer needed.
-//
-// When the binary on disk has been replaced (the typical drift case:
-// `go install` writes a new file at the same path, unlinking the
-// original inode the supervisor still has open), the kernel decorates
-// the link target with a literal " (deleted)" suffix. We strip that
-// suffix because the on-disk path is what the auto-restart needs to
-// spawn — the new bytes already live at the un-suffixed path.
-func readSupervisorExePath(pid int) (string, error) {
-	path, _, err := readSupervisorExeLink(pid)
-	return path, err
-}
-
-// readSupervisorExeLink is readSupervisorExePath plus whether the kernel
-// marked the link target " (deleted)": the file the process was started
-// from has since been unlinked or replaced.
+// readSupervisorExeLink resolves the supervisor's executable through
+// readProcExeLinkHook and reports whether the kernel marked the link target
+// " (deleted)": the file the process was started from has since been
+// unlinked or replaced.
 func readSupervisorExeLink(pid int) (string, bool, error) {
 	target, err := readProcExeLinkHook(pid)
 	if err != nil {
@@ -555,9 +533,7 @@ func defaultRestartHelpers() restartHelpers {
 	return restartHelpers{
 		Systemctl: supervisorSystemctlRun,
 		Launchctl: supervisorLaunchctlRun,
-		Kill: func(pid int) error {
-			return syscall.Kill(pid, syscall.SIGTERM)
-		},
+		Kill:      platformDriftRestartKill,
 		WaitExit: func(pid int) error {
 			return waitForPIDExit(pid, driftKillTimeout, driftKillEscalateTimeout)
 		},
@@ -598,7 +574,7 @@ func waitForPIDExit(pid int, timeout, escalate time.Duration) error {
 	// the only failure mode here is that the process already exited
 	// between our last probe and the signal call, which is not a real
 	// error from the caller's perspective.
-	_ = syscall.Kill(pid, syscall.SIGKILL)
+	_ = platformKill(pid, syscall.SIGKILL)
 	deadline = time.Now().Add(escalate)
 	for time.Now().Before(deadline) {
 		if pidGone(pid) {
@@ -642,7 +618,7 @@ func spawnDetachedSupervisor(exe string, argv ...string) error {
 	// The supervisor is Setpgid and outlives this `gc start`, so it reparents
 	// to init; inheriting an agent shell's session identity would make it that
 	// session's orphan-sweep target once the session closes (#6316).
-	child.Env = withoutSessionIdentityEnv(os.Environ())
+	child.Env = driftRestartSupervisorEnv(os.Environ())
 	disableProductMetricsForChild(child)
 	return child.Start()
 }

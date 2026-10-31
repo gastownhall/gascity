@@ -63,6 +63,17 @@ func RequireLive(t *testing.T) {
 	}
 }
 
+// Binary returns the herdr the live tier runs: the one PATH resolves the bare
+// name "herdr" to, which is what a client started with that name launches.
+func Binary(t *testing.T) string {
+	t.Helper()
+	bin, err := exec.LookPath("herdr")
+	if err != nil {
+		t.Fatalf("herdr is not on PATH: %v", err)
+	}
+	return bin
+}
+
 // Poll waits for cond to hold at the live herdr boundary. A real herdr server
 // exposes no completion signal for "the pane binding landed" or "the agent
 // registered", so this is the one shape of waiting the live tier needs: a

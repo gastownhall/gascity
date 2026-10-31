@@ -14,8 +14,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/platform/livefile"
 )
 
 // rotatingBasenameRE matches the new-format rotating filename
@@ -62,7 +63,9 @@ func gzipAndArchive(source, dest string, stderr io.Writer) error {
 		return fmt.Errorf("stat %q: %w", dest, err)
 	}
 
-	in, err := os.Open(source)
+	// The deferred close runs after os.Remove(source) below; on Windows a handle
+	// that does not share delete access would make that removal fail.
+	in, err := livefile.Open(source)
 	if err != nil {
 		return fmt.Errorf("opening source: %w", err)
 	}
@@ -230,11 +233,11 @@ func readNulTailWindow(f *os.File, size, n int64) (tail []byte, ok bool, err err
 // to, it is a no-op — this is deliberately conservative and only repairs
 // the specific delayed-allocation pattern described above.
 //
-// The read-decide-truncate sequence runs under the same cross-process flock
-// Record/AppendBatch use, so a concurrent append cannot land between the
-// Stat and the Truncate and be discarded.
+// The read-decide-truncate sequence runs under the same cross-process lock
+// Record/AppendBatch use, so a concurrent append cannot land between the Stat
+// and the Truncate and be discarded.
 func truncateNulPaddedTail(path string, stderr io.Writer) error {
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	f, err := livefile.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -243,12 +246,12 @@ func truncateNulPaddedTail(path string, stderr io.Writer) error {
 	}
 	defer f.Close() //nolint:errcheck // read handle; write path (Truncate) checked separately
 
-	fd := int(f.Fd())
-	if err := lockRecorderFile(fd, path); err != nil {
+	lock, err := lockRecorderFile(f, path)
+	if err != nil {
 		return fmt.Errorf("checking for NUL-padded tail: %w", err)
 	}
 	defer func() {
-		if err := syscall.Flock(fd, syscall.LOCK_UN); err != nil {
+		if err := lock.Release(); err != nil {
 			fmt.Fprintf(stderr, "events: unlock: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 	}()
@@ -433,7 +436,7 @@ func parseRotatingBasename(name string) (time.Time, uint64, uint64, bool) {
 // ReadLatestSeq for the last line. Returns an error if the file has
 // no parseable events.
 func readSeqWindow(path string) (uint64, uint64, error) {
-	f, err := os.Open(path)
+	f, err := livefile.Open(path)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -481,7 +484,7 @@ func readSeqWindow(path string) (uint64, uint64, error) {
 // the full stream forward because gzip streams do not support the
 // active-log tail seek used for plain JSONL files.
 func readGzipSeqWindow(path string) (uint64, uint64, error) {
-	f, err := os.Open(path)
+	f, err := livefile.Open(path)
 	if err != nil {
 		return 0, 0, err
 	}
