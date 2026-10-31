@@ -381,6 +381,7 @@ var registry = slices.Concat([]Field{
 	// reads it through configWakeSuppressedInfo.
 	{Key: "sleep_policy_fingerprint", Class: ClassMarker, Writers: sites(sleepPolicy[0], v2("cmd/gc/reconcile_arms_drain.go", "armDrainBegin")), Readers: sites(v2(srcSleep, "configWakeSuppressedInfoWithError"))},
 	{Key: CurrentBeadIDKey, Class: ClassMarker, Writers: sites(legacy("cmd/gc/session_bead_cycle.go", "recordCurrentBeadIDOnWake"), v2(srcHeals, "armCurrentBead"))},
+	{Key: CurrentWorkflowRootKey, Class: ClassMarker, Writers: sites(op("internal/session/store.go", "Store.RecordCurrentBeadWithRoot"), legacy("cmd/gc/session_bead_cycle.go", "recordCurrentBeadIDOnWake"), v2(srcHeals, "armCurrentBead"))},
 	{Key: beadmeta.CurrentClaimBeadIDMetadataKey, Class: ClassMarker, Writers: sites(op("internal/session/store.go", "Store.SetCurrentClaim"))},
 
 	// The work cells (PHASE1-2 §6.1): each written whole, by its one owner,

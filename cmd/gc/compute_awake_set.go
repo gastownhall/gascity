@@ -130,6 +130,9 @@ type AwakeSessionBead struct {
 	ContinuationResetPending  bool      // continuation_reset_pending metadata is set
 	CurrentlyProcessingBeadID string    // work bead the session is currently processing
 	PostCreateProtected       bool      // fresh successful pool create; preferred for scaled slots during grace
+	// CurrentlyProcessingWorkflowRoot is the workflow root recorded alongside
+	// CurrentlyProcessingBeadID (empty for legacy sessions and standalone beads).
+	CurrentlyProcessingWorkflowRoot string
 }
 
 // AwakeWorkBead represents a work bead with an assignee.
@@ -149,6 +152,9 @@ type AwakeWorkBead struct {
 	// releases the session's scale slot, which can wake a different session
 	// as scaled:demand.
 	Blocked bool
+	// WorkflowRoot identifies the molecule this bead is a step of (gc.root_bead_id,
+	// or the bead's own ID when it is a workflow root). Empty for standalone work.
+	WorkflowRoot string
 }
 
 // AwakeDecision is the output for a single session.
@@ -170,6 +176,9 @@ type AwakeDecision struct {
 	// AssignedWorkClaimed distinguishes an in-progress claim from ready open
 	// work. Destructive idle recovery must never recycle a live claim holder.
 	AssignedWorkClaimed bool
+	// AssignedWorkflowRoot is the workflow root of AssignedWorkBeadID (empty for
+	// standalone work); persisted next to it so the next tick compares roots.
+	AssignedWorkflowRoot string
 	// RequiresFreshCycle is true when an alive session's recorded
 	// currently_processing_bead_id differs from AssignedWorkBeadID. The
 	// reconciler combines this with wake_mode=fresh to trigger a
@@ -451,7 +460,8 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 	// to the first matching work bead and flag the divergence — the
 	// reconciler reads this to decide whether to cycle the conversation for
 	// wake_mode=fresh.
-	assignedAnchor := make(map[string]string) // key → matched work bead ID
+	assignedAnchor := make(map[string]string)     // key → matched work bead ID
+	assignedAnchorRoot := make(map[string]string) // key → workflow root of that anchor
 	for _, bead := range input.SessionBeads {
 		if bead.State == "closed" {
 			continue
@@ -460,11 +470,15 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 			continue
 		}
 		var (
-			fallback   string
-			haveExact  bool
-			anchorBead string
-			recorded   = bead.CurrentlyProcessingBeadID
-			matchedAny = false
+			fallback     string
+			fallbackRoot string
+			siblingFound bool
+			haveExact    bool
+			anchorBead   string
+			anchorRoot   string
+			recorded     = bead.CurrentlyProcessingBeadID
+			recordedRoot = bead.CurrentlyProcessingWorkflowRoot
+			matchedAny   = false
 		)
 		for _, wb := range input.workIndex.candidates(input.WorkBeads, input.NamedSessions, bead) {
 			assignee := strings.TrimSpace(wb.Assignee)
@@ -477,11 +491,22 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 			matchedAny = true
 			if recorded != "" && wb.ID == recorded {
 				anchorBead = wb.ID
+				anchorRoot = wb.WorkflowRoot
 				haveExact = true
 				break
 			}
+			// Prefer a sibling of the recorded bead (same workflow root) as the
+			// fallback anchor: a session that just closed one molecule step is
+			// still on that molecule, and its next step is the real anchor.
+			if recordedRoot != "" && wb.WorkflowRoot == recordedRoot && !siblingFound {
+				fallback = wb.ID
+				fallbackRoot = wb.WorkflowRoot
+				siblingFound = true
+				continue
+			}
 			if fallback == "" {
 				fallback = wb.ID
+				fallbackRoot = wb.WorkflowRoot
 			}
 		}
 		if !matchedAny {
@@ -489,9 +514,11 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 		}
 		if !haveExact {
 			anchorBead = fallback
+			anchorRoot = fallbackRoot
 		}
 		desired[key(bead)] = "assigned-work"
 		assignedAnchor[key(bead)] = anchorBead
+		assignedAnchorRoot[key(bead)] = anchorRoot
 	}
 
 	// Min-active-sessions wake: keep min_active_sessions pool sessions warm
@@ -571,8 +598,19 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 					break
 				}
 			}
+			decision.AssignedWorkflowRoot = assignedAnchorRoot[name]
+			// A fresh cycle means "this session was pointed at different work"
+			// (#1893). A different anchor bead inside the SAME workflow root is
+			// not that: it is the session advancing from one molecule step to the
+			// next, which must never restart the conversation. Roots are compared
+			// only when the recorded root is known; a legacy session without one
+			// keeps the id-only rule.
 			if bead.CurrentlyProcessingBeadID != "" && anchor != bead.CurrentlyProcessingBeadID {
-				decision.RequiresFreshCycle = true
+				sameWorkflow := bead.CurrentlyProcessingWorkflowRoot != "" &&
+					decision.AssignedWorkflowRoot == bead.CurrentlyProcessingWorkflowRoot
+				if !sameWorkflow {
+					decision.RequiresFreshCycle = true
+				}
 			}
 		}
 

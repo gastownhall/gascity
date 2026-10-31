@@ -199,6 +199,7 @@ func newAwakeInputFromSnapshot(
 			blocked := wb.Status == "in_progress" && wb.IsBlocked != nil && *wb.IsBlocked
 			input.WorkBeads = append(input.WorkBeads, AwakeWorkBead{
 				ID: wb.ID, Assignee: a, Status: wb.Status, Ready: ready, Blocked: blocked,
+				WorkflowRoot: awakeWorkflowRoot(wb),
 			})
 		}
 	}
@@ -244,8 +245,9 @@ func newAwakeInputFromSnapshot(
 			RestartRequested:       strings.TrimSpace(info.RestartRequested) == "true",
 			ContinuationResetPending: strings.TrimSpace(info.ContinuationResetPending) == "true" &&
 				strings.TrimSpace(info.ResetCommittedAt) != "",
-			CurrentlyProcessingBeadID: strings.TrimSpace(info.CurrentlyProcessingBeadID),
-			PostCreateProtected:       poolSessionWithinPostCreateProtection(info, clk),
+			CurrentlyProcessingBeadID:       strings.TrimSpace(info.CurrentlyProcessingBeadID),
+			PostCreateProtected:             poolSessionWithinPostCreateProtection(info, clk),
+			CurrentlyProcessingWorkflowRoot: strings.TrimSpace(info.CurrentlyProcessingWorkflowRoot),
 		}
 		bead.HeldUntil = lifecycle.HeldUntil
 		bead.QuarantinedUntil = lifecycle.QuarantinedUntil

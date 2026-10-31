@@ -181,6 +181,7 @@ var infoKeyCodec = []infoKeySpec{
 	{WorkLadderKey, func(i *Info, v string) { i.WorkLadderRaw = v }},
 	{ContentHoldKey, func(i *Info, v string) { i.ContentHoldRaw = v }},
 	{"execution_claim_started", func(i *Info, v string) { i.ExecutionClaimStarted = v }},
+	{CurrentWorkflowRootKey, func(i *Info, v string) { i.CurrentlyProcessingWorkflowRoot = v }},
 	{"core_hash_breakdown", func(i *Info, v string) { i.CoreHashBreakdown = v }},
 	{"started_provision_hash", func(i *Info, v string) { i.StartedProvisionHash = v }},
 	{"started_launch_hash", func(i *Info, v string) { i.StartedLaunchHash = v }},

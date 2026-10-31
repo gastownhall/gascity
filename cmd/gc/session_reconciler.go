@@ -4893,7 +4893,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					"should_wake": shouldWake,
 				})
 			}
-			if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
+			if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, decision.AssignedWorkflowRoot, stderr); fold != nil {
 				tick.apply(target.info.ID, fold)
 			}
 			// Capture-at-append: the recordCurrentBeadIDOnWake fold above lands on
@@ -4977,7 +4977,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if terminal, err := freshAnchorBeadTerminal(topo, decision.AssignedWorkBeadID); err == nil && terminal {
 						continue
 					}
-					if ran, fold := cycleAliveSessionForFreshReassign(cityPath, infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace); ran {
+					if ran, fold := cycleAliveSessionForFreshReassign(cityPath, infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, decision.AssignedWorkflowRoot, clk.Now(), stdout, stderr, trace); ran {
 						if fold != nil {
 							tick.apply(target.info.ID, fold)
 						}
@@ -5000,7 +5000,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// stale sibling bead instead of the session's actual current
 			// assignment (Finding 4/#3835 review). Idempotent —
 			// recordCurrentBeadIDOnWake no-ops when the bead ID is unchanged.
-			if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
+			if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, decision.AssignedWorkflowRoot, stderr); fold != nil {
 				tick.apply(target.info.ID, fold)
 			}
 			beganIdleRespawn, idleRespawnFold, observationErr := beginIdleRespawnDrainIfIdle(info, eval, dt, sp, sessFront, clk)

@@ -26,7 +26,7 @@ import (
 // the session id and the currently-processing bead off the caller's coherent
 // typed Info (Info.ID / Info.CurrentlyProcessingBeadID, both verbatim raw
 // mirrors); the fold the caller applies keeps the snapshot in step.
-func recordCurrentBeadIDOnWake(info sessionpkg.Info, sessFront *sessionpkg.Store, beadID string, stderr io.Writer) sessionpkg.MetadataPatch {
+func recordCurrentBeadIDOnWake(info sessionpkg.Info, sessFront *sessionpkg.Store, beadID, workflowRoot string, stderr io.Writer) sessionpkg.MetadataPatch {
 	if strings.TrimSpace(info.ID) == "" || sessFront == nil {
 		return nil
 	}
@@ -34,16 +34,17 @@ func recordCurrentBeadIDOnWake(info sessionpkg.Info, sessFront *sessionpkg.Store
 	if beadID == "" {
 		return nil
 	}
-	if info.CurrentlyProcessingBeadID == beadID {
+	workflowRoot = strings.TrimSpace(workflowRoot)
+	if info.CurrentlyProcessingBeadID == beadID && info.CurrentlyProcessingWorkflowRoot == workflowRoot {
 		return nil
 	}
-	if err := sessFront.RecordCurrentBead(info.ID, beadID); err != nil {
+	if err := sessFront.RecordCurrentBeadWithRoot(info.ID, beadID, workflowRoot); err != nil {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "session reconciler: recording %s for %s: %v\n", sessionpkg.CurrentBeadIDKey, info.SessionNameMetadata, err) //nolint:errcheck
 		}
 		return nil
 	}
-	return sessionpkg.MetadataPatch{sessionpkg.CurrentBeadIDKey: beadID}
+	return sessionpkg.MetadataPatch{sessionpkg.CurrentBeadIDKey: beadID, sessionpkg.CurrentWorkflowRootKey: workflowRoot}
 }
 
 // prevAssignedBeadStatus looks up a single bead by id over the caller's
@@ -196,6 +197,7 @@ func cycleAliveSessionForFreshReassign(
 	cb *sessionCircuitBreaker,
 	name string,
 	newBeadID string,
+	newWorkflowRoot string,
 	now time.Time,
 	stdout, stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
@@ -238,6 +240,7 @@ func cycleAliveSessionForFreshReassign(
 	// ga-2fpf9z.
 	batch["state"] = string(sessionpkg.StateAsleep)
 	batch[sessionpkg.CurrentBeadIDKey] = newBeadID
+	batch[sessionpkg.CurrentWorkflowRootKey] = strings.TrimSpace(newWorkflowRoot)
 	if err := sessionFrontDoor(store).ApplyPatch(info.ID, batch); err != nil {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "session reconciler: recording fresh-cycle handoff for %s: %v\n", name, err) //nolint:errcheck

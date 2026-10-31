@@ -420,6 +420,9 @@ type Info struct {
 	// step started: with the work_started cell, the started records a release
 	// keeps a seat's claims by, read off the Info as off the bead.
 	ExecutionClaimStarted string // execution_claim_started (raw)
+	// CurrentlyProcessingWorkflowRoot is the RAW currently_processing_workflow_root
+	// metadata (CurrentWorkflowRootKey): the workflow root of the bead above.
+	CurrentlyProcessingWorkflowRoot string // currently_processing_workflow_root (raw)
 	// CoreHashBreakdown is the RAW core_hash_breakdown metadata (a JSON blob). The
 	// config-drift path feeds it verbatim to runtime.CoreFingerprintDriftFieldsFromJSON
 	// / LogCoreFingerprintDrift for the drift trace payload; the mirror keeps the

@@ -262,6 +262,7 @@ go_library(
         "completions_lane.go",
         "compute_awake_bridge.go",
         "compute_awake_set.go",
+        "compute_awake_workflow_root.go",
         "config_hash.go",
         "config_invocation_memo.go",
         "context_inject.go",

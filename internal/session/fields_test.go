@@ -191,7 +191,7 @@ func TestSessionFieldRegistryCatches(t *testing.T) {
 // premiseGolden is every key F2's premise compares. A change here is a
 // change to what every v2 fence refuses on.
 var premiseGolden = strings.Fields(`archived_at churn_count close_reason closed_at configured_named_identity continuation_reset_pending
-	continuity_eligible crash_count creation_complete_at current_claim_bead_id currently_processing_bead_id
+	continuity_eligible crash_count creation_complete_at current_claim_bead_id currently_processing_bead_id currently_processing_workflow_root
 	detached_at drain_ack_at drain_ack_incarnation drain_at drain_finalize drain_intent_at
 	drain_intent_incarnation drain_intent_reason generation held_until idle_respawn_attempts idle_respawn_bead_id
 	instance_token last_woke_at operator_drain pending_create_claim pending_create_started_at pin_awake

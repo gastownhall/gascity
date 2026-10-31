@@ -465,7 +465,7 @@ func (p *decidePass) openAssignedWork(info session.Info) *assignedWorkView {
 			continue
 		}
 		if slices.Contains(ids, strings.TrimSpace(w.Assignee)) {
-			return &assignedWorkView{BeadID: w.ID, Claimed: w.Status == "in_progress"}
+			return &assignedWorkView{BeadID: w.ID, Claimed: w.Status == "in_progress", WorkflowRoot: awakeWorkflowRoot(w)}
 		}
 	}
 	return nil
@@ -641,7 +641,7 @@ func (p *decidePass) classify(decisions map[string]AwakeDecision) {
 		}
 		d := decisions[info.ID]
 		if d.HasAssignedWork || d.AssignedWorkBeadID != "" {
-			e.AssignedWork = &assignedWorkView{BeadID: d.AssignedWorkBeadID, Claimed: d.AssignedWorkClaimed, RequiresFreshCycle: d.RequiresFreshCycle}
+			e.AssignedWork = &assignedWorkView{BeadID: d.AssignedWorkBeadID, Claimed: d.AssignedWorkClaimed, RequiresFreshCycle: d.RequiresFreshCycle, WorkflowRoot: d.AssignedWorkflowRoot}
 		}
 		eval := awakeSetToWakeEvals(map[string]AwakeDecision{info.SessionNameMetadata: d},
 			[]AwakeSessionBead{{ID: info.ID, SessionName: info.SessionNameMetadata}})[info.ID]
