@@ -2974,6 +2974,77 @@ func TestRestampWorkBeadRoutingClearsStaleRoutedTo(t *testing.T) {
 	}
 }
 
+// failingRestampStore wraps a beads.Store and rejects any metadata write to
+// beadID that carries gc.execution_routed_to, through either SetMetadata or
+// SetMetadataBatch, so the source restamp fails while every other launch
+// write succeeds.
+type failingRestampStore struct {
+	beads.Store
+	beadID string
+	err    error
+}
+
+func (f *failingRestampStore) SetMetadata(id, key, value string) error {
+	if id == f.beadID && key == beadmeta.ExecutionRoutedToMetadataKey {
+		return f.err
+	}
+	return f.Store.SetMetadata(id, key, value)
+}
+
+func (f *failingRestampStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if _, ok := kvs[beadmeta.ExecutionRoutedToMetadataKey]; ok && id == f.beadID {
+		return f.err
+	}
+	return f.Store.SetMetadataBatch(id, kvs)
+}
+
+// TestSlingAttachGraphFormulaReportsRestampWriteFailure pins the soft-failure
+// policy of the source restamp: once the graph.v2 workflow is launched, a
+// rejected routing write is surfaced in MetadataErrors and the attach still
+// succeeds.
+func TestSlingAttachGraphFormulaReportsRestampWriteFailure(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2ConvoyFormula(t, formulaDir)
+	cfg := graphV2SlingTestConfig(t, formulaDir)
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	source, err := deps.Store.Create(beads.Bead{
+		Title:    "work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "mayor"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected restamp failure")
+	deps.Store = &failingRestampStore{Store: deps.Store, beadID: source.ID, err: injected}
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.AttachFormula(context.Background(), "graph-work", source.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v, want nil (restamp failure is advisory)", err)
+	}
+	if result.WorkflowID == "" {
+		t.Fatal("result.WorkflowID is empty, want the launched workflow root")
+	}
+	if _, err := deps.Store.Get(result.WorkflowID); err != nil {
+		t.Fatalf("Get(root %s): %v", result.WorkflowID, err)
+	}
+	var found bool
+	for _, e := range result.MetadataErrors {
+		if strings.Contains(e, source.ID) && strings.Contains(e, injected.Error()) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("MetadataErrors = %v, want an entry naming %s and %q", result.MetadataErrors, source.ID, injected.Error())
+	}
+}
+
 func TestSlingAttachGraphFormulaEmitsCurrentExecutionFacts(t *testing.T) {
 	formulaDir := t.TempDir()
 	writeGraphV2ConvoyFormula(t, formulaDir)
