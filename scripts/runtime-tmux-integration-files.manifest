@@ -16,6 +16,8 @@ nudge_poke_integration_test.go
 nudge_staged_draft_integration_test.go
 nudge_submit_confirm_integration_test.go
 nudge_submit_key_sequence_integration_test.go
+program_capture_integration_test.go
+program_status_integration_test.go
 respond_fence_integration_test.go
 runtime_inventory_integration_test.go
 seam_conformance_test.go

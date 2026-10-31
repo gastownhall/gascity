@@ -219,6 +219,12 @@ func fillAllFields(t *testing.T, v any) {
 			f.Set(reflect.ValueOf(stamp))
 		case f.Type() == reflect.TypeOf((*time.Time)(nil)):
 			f.Set(reflect.ValueOf(&stamp))
+		case f.Type() == reflect.TypeOf((*api.SessionProgramStatus)(nil)):
+			progress := 40
+			f.Set(reflect.ValueOf(&api.SessionProgramStatus{
+				State: "blocked", Kind: "permission", App: "x-app", Progress: &progress,
+				Since: stamp, QuietSince: &stamp, WorkingChildren: 1,
+			}))
 		default:
 			t.Fatalf("fillAllFields: %s.%s has unsupported type %s", rv.Type(), name, f.Type())
 		}

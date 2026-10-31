@@ -164,6 +164,11 @@ type State struct {
 	Provider    string              `json:"provider,omitempty"`
 	Detail      string              `json:"detail,omitempty"`
 	Pending     *PendingInteraction `json:"pending,omitempty"`
+	// Program is the session program's own judged OSC 7501 status, read
+	// while the runtime is live. The zero (Unread) reading means unknown,
+	// never idle. It decides Phase only when Program.Decides()
+	// (ProgramPhase); its counters, nonce and annotations stay internal.
+	Program runtime.ProgramStatus `json:"-"`
 }
 
 // DeliveryIntent controls how a message should be delivered.

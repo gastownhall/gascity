@@ -116,6 +116,11 @@ type sessionRuntimeState struct {
 	// seconds), which tells a reused ID apart. Empty when tmux reported no
 	// decimal value or the row predates the field.
 	Created string
+	// Program is the session's agent pane's capture fields (see
+	// foldProgramPane), read only while the program-status switch is not
+	// off; ProgramNamed is false when no pane could be named.
+	Program      programPane
+	ProgramNamed bool
 }
 
 type processRuntimeState struct {
@@ -142,6 +147,18 @@ type runtimeStateSnapshot struct {
 	// busy fleet it is marked unavailable rather than discarding the
 	// authoritative tmux liveness, and processAlive degrades optimistically.
 	ProcessesAvailable bool
+	// ProgramRead reports that the listing carried each pane's capture
+	// fields: the program-status switch was not off.
+	ProgramRead bool
+	// ProgramTaps holds the nonce of every capture reader (tap) in the
+	// process table, when ProgramRead and ProcessesAvailable.
+	ProgramTaps map[string]struct{}
+}
+
+// programTaps is the snapshot's tap liveness: known only when the process
+// table was read for a capture-field listing.
+func (s runtimeStateSnapshot) programTaps() programTaps {
+	return programTaps{known: s.ProgramRead && s.ProcessesAvailable, nonces: s.ProgramTaps}
 }
 
 // StateCache caches tmux runtime state to avoid spawning N subprocess calls per
@@ -816,7 +833,12 @@ func (g *processSnapshotGate) succeeded() bool {
 // still contribute no liveness — they represent exited processes, not
 // running ones.
 func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, error) {
-	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}\t#{session_attached}\t#{window_activity}\t#{session_id}\t#{session_created}")
+	program := f.tm.programReadEnabled()
+	format, fields := stateFetchFormat, stateFetchFields
+	if program {
+		format, fields = programStateFetchFormat, programStateFetchFields
+	}
+	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", format)
 	if err != nil {
 		if errors.Is(err, ErrNoCurrentTarget) {
 			// The server ANSWERED and holds zero sessions. gc configures
@@ -853,18 +875,30 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 		return runtimeStateSnapshot{}, err
 	}
 	state := runtimeStateSnapshot{
-		Sessions: make(map[string]sessionRuntimeState),
+		Sessions:    make(map[string]sessionRuntimeState),
+		ProgramRead: program,
 	}
 	if out == "" {
 		return state, nil
 	}
 
+	programRows := make(map[string][]programPane)
+	programBad := make(map[string]bool)
 	for _, line := range strings.Split(out, "\n") {
-		parts := strings.SplitN(line, "\t", 8)
+		parts := strings.SplitN(line, "\t", fields)
 		if len(parts) < 2 || parts[0] == "" {
 			continue
 		}
 		name := parts[0]
+		if program {
+			// A row whose capture fields do not parse leaves its session's
+			// agent pane unnamed rather than folding the rest.
+			if pane, ok := parseProgramPaneRow(parts); ok {
+				programRows[name] = append(programRows[name], pane)
+			} else {
+				programBad[name] = true
+			}
+		}
 		session := state.Sessions[name]
 		// Attachment and activity are read from EVERY pane row, dead panes
 		// included. A remain-on-exit corpse window is still a window, and the
@@ -912,6 +946,14 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 		}
 		state.Sessions[name] = session
 	}
+	for name, rows := range programRows {
+		if programBad[name] {
+			continue
+		}
+		session := state.Sessions[name]
+		session.Program, session.ProgramNamed = foldProgramPane(rows)
+		state.Sessions[name] = session
+	}
 	// Skipping is the same outcome as failing — process detail unavailable,
 	// sessions retained — reached without spending fetchTimeout and a full-OS
 	// scan to rediscover it. Silent by design: the whole point is to stop
@@ -944,7 +986,36 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 	}
 	state.Processes = processes
 	state.ProcessesAvailable = true
+	if program {
+		state.ProgramTaps = tapNonces(processes)
+	}
 	return state, nil
+}
+
+// stateFetchFormat is FetchState's per-pane list-panes row: session name,
+// pane_dead, the pane's current command and pid, attached clients, window
+// activity, session id and session creation time. While the program-status
+// switch is not off, programPaneFormat follows it.
+const stateFetchFormat = "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}\t#{session_attached}\t#{window_activity}\t#{session_id}\t#{session_created}"
+
+// stateFetchFields is the field count of stateFetchFormat.
+const stateFetchFields = 8
+
+// programStateFetchFormat is stateFetchFormat with the capture fields, ended
+// by runtimeInventoryEnd so the executor's trim cannot drop an empty last
+// option field.
+const programStateFetchFormat = stateFetchFormat + "\t" + programPaneFormat + "\t" + runtimeInventoryEnd
+
+// programStateFetchFields is the field count of programStateFetchFormat.
+const programStateFetchFields = stateFetchFields + programPaneFields + 1
+
+// parseProgramPaneRow parses the capture fields of a programStateFetchFormat
+// row split into its fields.
+func parseProgramPaneRow(parts []string) (programPane, bool) {
+	if len(parts) != programStateFetchFields || parts[programStateFetchFields-1] != runtimeInventoryEnd {
+		return programPane{}, false
+	}
+	return parseProgramPane(parts[stateFetchFields:programStateFetchFields-1], parts[1] == "1")
 }
 
 func (s runtimeStateSnapshot) processAlive(sessionName string, processNames []string) bool {

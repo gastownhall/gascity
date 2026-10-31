@@ -322,6 +322,7 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 		state.Pending = pending
 		return state, nil
 	case sessionpkg.StateActive, sessionpkg.StateAwake:
+		state.Program = h.programStatus(info.SessionName)
 		pending, err := h.Pending(ctx)
 		if err != nil {
 			return State{}, err
@@ -329,6 +330,10 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 		if pending != nil {
 			state.Phase = PhaseBlocked
 			state.Pending = pending
+			return state, nil
+		}
+		if phase, decided := ProgramPhase(state.Program); decided {
+			state.Phase = phase
 			return state, nil
 		}
 		state.Phase = PhaseReady
@@ -373,6 +378,17 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 	}
 
 	return state, nil
+}
+
+// programStatus reads runtime session sessionName's judged program status
+// through the session manager; a reading the runtime cannot take is Unread
+// (ProgramStatusOf).
+func (h *SessionHandle) programStatus(sessionName string) runtime.ProgramStatus {
+	ps, err := h.manager.ProgramStatusByName(sessionName)
+	if err != nil {
+		return runtime.ProgramStatus{}
+	}
+	return ps
 }
 
 // Message sends a user turn to the worker.
