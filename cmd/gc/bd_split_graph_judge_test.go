@@ -108,7 +108,13 @@ func TestGcBdSplitCreateGraphJudgesEveryNode(t *testing.T) {
 		{"case-variant Labels", `{"nodes":[{"key":"a","title":"a","Labels":["gc:session"]}]}`, true, "sessions-class"},
 		{"padded label", `{"nodes":[{"key":"a","title":"a","labels":[" gc:session"]}]}`, true, "sessions-class"},
 		{"gc.kind wisp", `{"nodes":[{"key":"a","title":"a","metadata":{"gc.kind":"wisp"}}]}`, true, "class"},
-		{"class key in metadata_refs", `{"nodes":[{"key":"a","title":"a"},{"key":"b","title":"b","metadata_refs":{"gc.root_bead_id":"a"}}]}`, true, "metadata_refs"},
+		{"class key in metadata_refs", `{"nodes":[{"key":"a","title":"a"},{"key":"b","title":"b","metadata_refs":{"gc.root_bead_id":"a"}}]}`, true, "graph-class"},
+		{"metadata_refs writes over its key", `{"nodes":[{"key":"a","title":"a"},{"key":"b","title":"b","metadata":{"gc.root_bead_id":""},"metadata_refs":{"gc.root_bead_id":"a"}}]}`, true, "graph-class"},
+		{"metadata_refs naming an explicit id a label names", `{"nodes":[{"key":"s","title":"s","id":"demo-s1"},{"key":"w","title":"w","type":"gate","labels":["session:demo-s1"],"metadata_refs":{"session_id":"s"}}]}`, true, "sessions-class"},
+		{"metadata_refs naming a minted id a label could name", `{"nodes":[{"key":"s","title":"s"},{"key":"w","title":"w","type":"gate","labels":["session:demo-7"],"metadata_refs":{"session_id":"s"}}]}`, true, "sessions-class"},
+		{"raw spelling only", `{"nodes":[{"key":"g","title":"g","type":"gate","labels":["session:S "],"metadata":{"session_id":"S "}}]}`, true, "sessions-class"},
+		{"plan id the class binding holds, named by an edge", `{"nodes":[{"key":"a","title":"a","id":"relic-1"},{"key":"b","title":"b"}],"edges":[{"from_key":"b","to_id":"relic-1"}]}`, true, "class binding holds a bead with id relic-1"},
+		{"padded id names no plan node", `{"nodes":[{"key":"a","title":"a","id":"demo-x1"},{"key":"b","title":"b"}],"edges":[{"from_key":"b","to_id":" demo-x1"}]}`, true, "never written"},
 		{"reserved explicit id", `{"nodes":[{"key":"a","title":"a","id":"gcg-abc"}]}`, true, "reserved namespace"},
 		{"explicit id the class binding holds", `{"nodes":[{"key":"a","title":"a","id":"relic-1"}]}`, true, "class binding holds a bead with id relic-1"},
 		{"a second node's id the class binding holds", `{"nodes":[{"key":"a","title":"a","id":"demo-9"},{"key":"b","title":"b","id":"relic-1"}]}`, true, "relic-1"},
@@ -131,6 +137,14 @@ func TestGcBdSplitCreateGraphJudgesEveryNode(t *testing.T) {
 		{"deps target that is a plan key", `{"nodes":[{"key":"a","title":"a"},{"key":"b","title":"b","deps":[{"target":"a"}]}]}`, false, ""},
 		{"external: dep", `{"nodes":[{"key":"a","title":"a","deps":[{"target":"external:p:cap"}]}]}`, false, ""},
 		{"free explicit id", `{"nodes":[{"key":"a","title":"a","id":"demo-9"}]}`, false, ""},
+		{"deps target naming a plan id", `{"nodes":[{"key":"a","title":"a","id":"demo-x1"},{"key":"b","title":"b","deps":[{"target":"demo-x1"}]}]}`, false, ""},
+		{"edge to_id naming a plan id", `{"nodes":[{"key":"a","title":"a","id":"demo-x1"},{"key":"b","title":"b"}],"edges":[{"from_key":"b","to_id":"demo-x1"}]}`, false, ""},
+		{"edge from_id naming a plan id", `{"nodes":[{"key":"a","title":"a","id":"demo-x1"},{"key":"b","title":"b"}],"edges":[{"from_id":"demo-x1","to_key":"b"}]}`, false, ""},
+		{"parent_id naming a plan id", `{"nodes":[{"key":"a","title":"a","id":"demo-x1"},{"key":"b","title":"b","parent_id":"demo-x1"}]}`, false, ""},
+		{"thread_id naming a plan id", `{"nodes":[{"key":"a","title":"a","id":"demo-x1"},{"key":"b","title":"b"},{"key":"c","title":"c"}],"edges":[{"from_key":"b","to_key":"c","type":"replies-to","thread_id":"demo-x1"}]}`, false, ""},
+		{"parent_id beside parent_key", `{"nodes":[{"key":"a","title":"a"},{"key":"b","title":"b","parent_key":"a","parent_id":"gcg-p"}]}`, false, ""},
+		{"parent_id beside parent", `{"nodes":[{"key":"a","title":"a"},{"key":"b","title":"b","parent":"a","parent_id":"gcg-p"}]}`, false, ""},
+		{"metadata_refs naming an explicit id no label names", `{"nodes":[{"key":"s","title":"s","id":"demo-s1"},{"key":"w","title":"w","type":"gate","labels":["session:demo-s2"],"metadata_refs":{"session_id":"s"}}]}`, false, ""},
 	}
 	for _, c := range cases {
 		for _, inventory := range graphJudgeInventories {
@@ -159,6 +173,29 @@ func TestGcBdSplitCreateGraphUnreadablePlan(t *testing.T) {
 	g := bdClassFlipGuard(splitGuardTestCity(), t.TempDir(), []string{"create", "--graph", "missing.json"}, graphJudgeDeps("bd-1.3.2"))
 	if !strings.Contains(g.refusal, "missing.json") || !strings.HasSuffix(g.refusal, "Nothing was written.") {
 		t.Fatalf("an unreadable plan was not refused: %q", g.refusal)
+	}
+}
+
+// TestGcBdSplitCreateGraphMetadataRefsOnAGraphHoldingSplit: on a partial
+// split whose work store holds the graph class, a node whose metadata_refs
+// writes gc.root_bead_id is no flip; on a full split it is refused as a
+// graph-class bead.
+func TestGcBdSplitCreateGraphMetadataRefsOnAGraphHoldingSplit(t *testing.T) {
+	city := splitGuardTestCity()
+	city.Storage.Classes.Graph = config.StorageWorkBinding
+	for _, plan := range []string{
+		`{"nodes":[{"key":"root","title":"r"},{"key":"s","title":"s","metadata_refs":{"gc.root_bead_id":"root"}}]}`,
+		`{"nodes":[{"key":"root","title":"r","id":"demo-r1"},{"key":"s","title":"s","metadata_refs":{"gc.root_bead_id":"root"}}]}`,
+	} {
+		scope := writeGraphPlan(t, plan)
+		for _, inventory := range graphJudgeInventories {
+			if g := bdClassFlipGuard(city, scope, []string{"create", "--graph", "plan.json"}, graphJudgeDeps(inventory)); g.refusal != "" {
+				t.Errorf("%s: %s on a graph-on-work split was refused: %q", inventory, plan, g.refusal)
+			}
+			if g := bdClassFlipGuard(splitGuardTestCity(), scope, []string{"create", "--graph", "plan.json"}, graphJudgeDeps(inventory)); !strings.Contains(g.refusal, "graph-class") {
+				t.Errorf("%s: %s on a full split was not refused as graph-class: %q", inventory, plan, g.refusal)
+			}
+		}
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -36,6 +37,8 @@ type bdGraphNode struct {
 	Labels       []string                   `json:"labels"`
 	Metadata     map[string]json.RawMessage `json:"metadata"`
 	MetadataRefs map[string]string          `json:"metadata_refs"`
+	Parent       string                     `json:"parent"`
+	ParentKey    string                     `json:"parent_key"`
 	ParentID     string                     `json:"parent_id"`
 	Deps         []bdGraphDep               `json:"deps"`
 }
@@ -93,44 +96,65 @@ func judgeBdCreateGraph(in bdClassGuardInput, planPath string) bdClassGuard {
 	if err := json.Unmarshal(data, &plan); err != nil {
 		return in.refuse("%s: refused on this split city: the plan cannot be read as bd reads it (%v). Nothing was written.", who, err)
 	}
+	// A node of this plan is named by its key, or by its explicit id: bd
+	// mints the node under that id in this store in the same transaction, so
+	// an endpoint naming it exactly is that node, which this judge classifies
+	// and whose id mintIDRefusal vets, never a bead to read.
 	keys := map[string]bool{}
+	explicit := map[string]string{}
+	var ids []string
 	for _, n := range plan.Nodes {
 		keys[n.Key] = true
+		if n.ID != "" {
+			explicit[n.Key] = n.ID
+		}
+		ids = append(ids, n.ID)
 	}
-	classKeys := coordclass.ClassifierMetadataKeys()
-	var endpoints, ids []string
+	var endpoints []string
+	idNamed := func(id string) {
+		if !slices.Contains(ids, id) {
+			endpoints = append(endpoints, id)
+		}
+	}
 	for _, n := range plan.Nodes {
 		node := fmt.Sprintf("%s node %q", who, n.Key)
-		ids = append(ids, n.ID)
-		for k := range n.MetadataRefs {
-			if slices.Contains(classKeys, k) {
-				return in.refuse("%s: refused on this split city: its metadata_refs sets %s, a key that decides the bead's storage class. Nothing was written.", node, k)
-			}
-		}
 		meta, err := bdGraphNodeMetadata(n.Metadata)
 		if err != nil {
 			return in.refuse("%s: refused on this split city: its metadata cannot be read (%v). Nothing was written.", node, err)
 		}
-		// bd stores the node's type and labels as written; gc reads them back
-		// trimmed. Both spellings must keep the bead's class.
+		// bd stores a node's type and labels as written (its type aliases are
+		// class-free), and gc's readers keep them as stored, so the raw
+		// spelling is the bead's class. The trimmed spelling is a conservative
+		// second reading. Each spelling, with every metadata bd could leave
+		// once it splices the node's metadata_refs, must keep the bead's class.
+		readings := bdGraphSplicedMetadata(meta, n.MetadataRefs, explicit, n.Labels)
 		for _, shape := range []beads.Bead{
-			{Type: n.Type, Labels: n.Labels, Metadata: meta},
-			{Type: strings.TrimSpace(n.Type), Labels: normalizeBdLabels(n.Labels), Metadata: meta},
+			{Type: n.Type, Labels: n.Labels},
+			{Type: strings.TrimSpace(n.Type), Labels: normalizeBdLabels(n.Labels)},
 		} {
-			if flip := coordclass.CheckFlip(beads.Bead{}, shape, in.holds); flip != nil {
-				return in.refuse("%s", classFlipRefusalText(node, flip))
+			for _, m := range readings {
+				shape.Metadata = m
+				if flip := coordclass.CheckFlip(beads.Bead{}, shape, in.holds); flip != nil {
+					return in.refuse("%s", classFlipRefusalText(node, flip))
+				}
 			}
 		}
-		endpoints = append(endpoints, n.ParentID)
+		// bd links a node to its parent key when it names one (parent_key,
+		// then the parent alias) and reads parent_id only otherwise.
+		if n.ParentKey == "" && n.Parent == "" {
+			idNamed(n.ParentID)
+		}
 		for _, d := range n.Deps {
 			// bd resolves a deps target as a plan key first, then as an id.
 			if !keys[d.Target] {
-				endpoints = append(endpoints, d.Target)
+				idNamed(d.Target)
 			}
 		}
 	}
 	for _, e := range plan.Edges {
-		endpoints = append(endpoints, e.FromID, e.ToID, e.SpawnerID, e.ThreadID)
+		for _, id := range []string{e.FromID, e.ToID, e.SpawnerID, e.ThreadID} {
+			idNamed(id)
+		}
 	}
 	// The node ids are judged after every node's static class checks, so a
 	// plan those refuse asks the binding nothing.
@@ -141,6 +165,57 @@ func judgeBdCreateGraph(in bdClassGuardInput, planPath string) bdClassGuard {
 		return in.refuse("%s", refusal)
 	}
 	return in.pass()
+}
+
+// bdGraphMintedID stands in for an id bd mints while it applies the plan: a
+// fresh <prefix>-<suffix> id gc cannot know before bd runs.
+const bdGraphMintedID = "gc-plan-minted-id"
+
+// bdGraphSplicedMetadata returns the metadata bd leaves on a node once it
+// splices the node's metadata_refs, one map per value the judge must try. bd
+// writes, over each referring key and after every node exists, the id of the
+// node the ref names: that node's explicit id when it has one, else the id bd
+// mints for it. Classification cannot tell one minted id from another except
+// through a label that names it (the own-session-wait arm compares session_id
+// with a session:<id> label, and a counter-mode id is predictable), so a
+// minted value is tried as a fresh id and as each id a label of the node
+// names behind a classifier label prefix, raw and normalized.
+func bdGraphSplicedMetadata(meta map[string]string, refs, explicit map[string]string, labels []string) []map[string]string {
+	if len(refs) == 0 {
+		return []map[string]string{meta}
+	}
+	spliced := maps.Clone(meta)
+	if spliced == nil {
+		spliced = map[string]string{}
+	}
+	var minted []string
+	for k, ref := range refs {
+		if id := explicit[ref]; id != "" {
+			spliced[k] = id
+		} else {
+			minted = append(minted, k)
+		}
+	}
+	if len(minted) == 0 {
+		return []map[string]string{spliced}
+	}
+	values := []string{bdGraphMintedID}
+	for _, l := range append(slices.Clone(labels), normalizeBdLabels(labels)...) {
+		for _, prefix := range coordclass.ClassifierLabelPrefixes() {
+			if named, ok := strings.CutPrefix(l, prefix); ok {
+				values = append(values, named)
+			}
+		}
+	}
+	out := make([]map[string]string, 0, len(values))
+	for _, v := range values {
+		m := maps.Clone(spliced)
+		for _, k := range minted {
+			m[k] = v
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // bdGraphNodeMetadata coerces a node's raw metadata values to strings the way

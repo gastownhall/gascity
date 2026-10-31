@@ -384,9 +384,10 @@ gc serves its own `release-if-current` itself.
   plan (relative to the directory bd runs in) and judges it node by node, a
   dry run exactly like the live call. Each node's type, labels and metadata
   are classified as bd writes them (bd never copies a parent's labels onto a
-  graph node); a node `id` refused for `--id` above, a
-  class-deciding key in `metadata_refs`, a field outside bd's graph-plan
-  schema, and a plan gc cannot read are refused.
+  graph node, and writes over each `metadata_refs` key the id of the node it
+  names: that node's `id`, or the id bd mints for it); a node `id` refused for
+  `--id` above, a field outside bd's graph-plan schema, and a plan gc cannot
+  read are refused.
 - `delete` (positionals and `--from-file`): every id must name exactly one
   bead of the work store (bd would delete whatever bead a short id
   prefixes). Refused when a class-binding bead depends on one of the beads,
@@ -457,8 +458,9 @@ gc serves its own `release-if-current` itself.
   `--depends-on`), `dep relate`, `link`, `duplicate` (`--of`), `supersede`
   (`--with`), `gate create` (`--blocks`), `create`/`q`/`update --parent`, `create --deps` and
   `--waits-for`, the id-named endpoints of a `create --graph` plan (a node's
-  `parent_id`, a `deps` target that is not a plan key, and an edge's
-  `from_id`, `to_id`, `spawner_id` and `thread_id`), the `dep add` lines of a `batch`, and the dependencies of an
+  `parent_id` when it names no parent key, a `deps` target that is not a plan
+  key, and an edge's `from_id`, `to_id`, `spawner_id` and `thread_id`; an id
+  that is a node's own `id` names that node of the plan), the `dep add` lines of a `batch`, and the dependencies of an
   `import` must each name beads of the city's work stores that no class
   binding holds. Each endpoint is read in the work store its id prefix names,
   so a dependency between a rig's bead and the city's (or another rig's) is
