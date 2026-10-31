@@ -41,20 +41,19 @@ func (s stagedEnv) staged() bool { return s.dir != "" }
 // the plain argv path — so a box with no writable temp dir still starts sessions
 // that carry no credentials.
 //
-// tmuxArgv, when non-empty, is the new-session argv to stage as a tmux command
-// file. Relaunch passes nil: respawn-pane takes no -e and reuses the session
-// environment already set at creation.
+// tmuxCmds, when non-empty, are tmux commands to stage as a tmux command file,
+// run as one sequence: Start's new-session, or Relaunch's session env update.
 //
 // A failure here is returned, never swallowed. Falling back to argv would put
 // the credential right back on the command line, which is the leak this closes.
-func (p *Provider) stageSecretEnv(ctx context.Context, secretEnv map[string]string, tmuxArgv []string) (stagedEnv, error) {
+func (p *Provider) stageSecretEnv(ctx context.Context, secretEnv map[string]string, tmuxCmds [][]string) (stagedEnv, error) {
 	if len(secretEnv) == 0 {
 		return stagedEnv{}, nil
 	}
 	envBody := shellEnvFile(secretEnv)
 	var tmuxBody string
-	if len(tmuxArgv) > 0 {
-		tmuxBody = tmuxCommandLine(tmuxArgv) + "\n"
+	if len(tmuxCmds) > 0 {
+		tmuxBody = tmuxCommandSequence(tmuxCmds) + "\n"
 	}
 	script, err := stagingScript(envBody, tmuxBody)
 	if err != nil {
@@ -213,6 +212,17 @@ func shellEnvFile(env map[string]string) string {
 		b.WriteString("export " + k + "\n")
 	}
 	return b.String()
+}
+
+// tmuxCommandSequence renders tmux commands as one line of a tmux command
+// file, separated by bare ";" so tmux runs them as one sequence that stops at
+// the first failure.
+func tmuxCommandSequence(cmds [][]string) string {
+	lines := make([]string, len(cmds))
+	for i, c := range cmds {
+		lines[i] = tmuxCommandLine(c)
+	}
+	return strings.Join(lines, " ; ")
 }
 
 // tmuxCommandLine renders a tmux argv as one line of a tmux command file.

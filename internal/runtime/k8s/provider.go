@@ -21,6 +21,7 @@ import (
 	execerr "k8s.io/client-go/util/exec"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // Compile-time interface checks.
@@ -358,10 +359,15 @@ func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cf
 // The pod must be Running with a live tmux "main" session, else
 // [runtime.ErrSessionNotFound] (the reconciler decides whether to Start fresh —
 // it does NOT recreate the pod here). Staging, city/beads init, and PreStart are
-// NOT re-run here (k8s treats PreStart as provision-half); env is provision-half
-// too (set in the pod spec at create time, not re-injected — respawn-pane carries
-// no env). NOTE: tmux diverges — as of the relaunch pre_start fix it re-runs
-// PreStart on Relaunch (launch-half), while k8s and ssh intentionally do not.
+// NOT re-run here (k8s treats PreStart as provision-half). NOTE: tmux diverges —
+// as of the relaunch pre_start fix it re-runs PreStart on Relaunch
+// (launch-half), while k8s and ssh intentionally do not.
+//
+// Env is launch-half: a relaunch is how a launch-only env change is applied. A
+// running pod's spec env cannot change and respawn-pane carries no env, so the
+// in-pod session environment is first brought to what a pod created for cfg
+// would give the agent (see [Provider.applyLaunchEnv]); otherwise the agent
+// would restart on the pod spec's values.
 //
 // CAVEAT (unverified on a real cluster — see the B3 design doc): for
 // LINUX_USERNAME pods the entrypoint runs tmux under `su - <user>`, so the
@@ -372,15 +378,20 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	podName, err := p.findRunningPod(ctx, name)
+	pod, err := p.runningPod(ctx, name)
 	if err != nil {
 		return fmt.Errorf("%w: session %q (no running pod to relaunch into)", runtime.ErrSessionNotFound, name)
 	}
+	podName := pod.Name
 	// The tmux server + "main" session must be alive to respawn into; a dead
 	// session means the box is not warm enough — reprovision, don't respawn.
 	if _, err := p.ops.execInPod(ctx, podName, "agent",
 		[]string{"tmux", "has-session", "-t", tmuxSession}, nil); err != nil {
 		return fmt.Errorf("%w: session %q (pod %s has no live tmux session)", runtime.ErrSessionNotFound, name, podName)
+	}
+
+	if err := p.applyLaunchEnv(ctx, pod, cfg); err != nil {
+		return fmt.Errorf("k8s relaunch %q: %w", name, err)
 	}
 
 	// Respawn the agent in the warm "main" session.
@@ -414,6 +425,69 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 		_ = p.Nudge(name, runtime.TextContent(cfg.Nudge))
 	}
 	return nil
+}
+
+// applyLaunchEnv brings the in-pod "main" session's environment to what the
+// agent of a pod created for cfg would start with, before a relaunch respawns
+// it (see [runtime.PlanTmuxLaunchEnv]). The target env is cfg's env as
+// buildPodEnv projects it into the pod; the base is the agent container's env
+// from the running pod's spec, which the in-pod tmux server inherited. A key
+// the pod spec sets that cfg no longer does is marked removed in the session,
+// so the agent no longer sees the container's value. Env sourced from a
+// secret reference (valueFrom) is neither compared nor touched.
+//
+// The session environment and its launch-key record are read in one exec; an
+// unchanged env writes nothing. The update runs as one tmux command sequence
+// in a script on the exec's stdin, never in the exec command: that command is
+// the request the API server receives and may audit-log, and these are
+// credential-bearing values. A read or write failure fails the relaunch before
+// the respawn; the caller then falls back to a full restart, which recreates
+// the pod with the new env.
+func (p *Provider) applyLaunchEnv(ctx context.Context, pod *corev1.Pod, cfg runtime.Config) error {
+	vars, err := buildPodEnv(cfg.Env, projectedPodWorkDir(cfg), p.managedServiceHost, p.managedServicePort)
+	if err != nil {
+		return fmt.Errorf("building pod env: %w", err)
+	}
+	want := plainEnv(vars)
+	var base map[string]string
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == "agent" {
+			base = plainEnv(pod.Spec.Containers[i].Env)
+		}
+	}
+	out, err := p.ops.execInPod(ctx, pod.Name, "agent",
+		append([]string{"tmux"}, runtime.TmuxLaunchEnvStateArgs(tmuxSession, tmuxSession)...), nil)
+	if err != nil {
+		return fmt.Errorf("reading session env: %w", err)
+	}
+	cmds := runtime.PlanTmuxLaunchEnv(tmuxSession, tmuxSession, runtime.ParseTmuxLaunchEnvState(out), want, base)
+	if len(cmds) == 0 {
+		return nil
+	}
+	args := append([]string{"tmux"}, runtime.TmuxCommandSequence(cmds)...)
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		quoted[i] = shellquote.Quote(a)
+	}
+	script := "exec " + strings.Join(quoted, " ") + "\n"
+	if _, err := p.ops.execInPod(ctx, pod.Name, "agent", []string{"sh"}, strings.NewReader(script)); err != nil {
+		return fmt.Errorf("updating session env: %w", err)
+	}
+	return nil
+}
+
+// plainEnv returns the literal-valued entries of a container env; a later
+// entry for a name wins, as it does in the container.
+func plainEnv(vars []corev1.EnvVar) map[string]string {
+	env := make(map[string]string, len(vars))
+	for _, v := range vars {
+		if v.ValueFrom == nil {
+			env[v.Name] = v.Value
+		} else {
+			delete(env, v.Name)
+		}
+	}
+	return env
 }
 
 func k8sRequiresPostStartLiveness(cfg runtime.Config) bool {
@@ -840,15 +914,24 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 // failure reaching a pod that does exist — the same distinction Relaunch
 // already draws at its own call site.
 func (p *Provider) findRunningPod(ctx context.Context, name string) (string, error) {
-	label := SanitizeLabel(name)
-	pods, err := p.ops.listPods(ctx, "gc-session="+label, "status.phase=Running")
+	pod, err := p.runningPod(ctx, name)
 	if err != nil {
 		return "", err
 	}
-	if len(pods) == 0 {
-		return "", fmt.Errorf("%w: no running pod for session %q", runtime.ErrSessionNotFound, name)
+	return pod.Name, nil
+}
+
+// runningPod returns the running pod for a session, as findRunningPod finds it.
+func (p *Provider) runningPod(ctx context.Context, name string) (*corev1.Pod, error) {
+	label := SanitizeLabel(name)
+	pods, err := p.ops.listPods(ctx, "gc-session="+label, "status.phase=Running")
+	if err != nil {
+		return nil, err
 	}
-	return pods[0].Name, nil
+	if len(pods) == 0 {
+		return nil, fmt.Errorf("%w: no running pod for session %q", runtime.ErrSessionNotFound, name)
+	}
+	return &pods[0], nil
 }
 
 // findPod finds a pod by session label (any phase).

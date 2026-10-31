@@ -197,9 +197,9 @@ func TestProvider_StartFailsClosedWhenStagingFails(t *testing.T) {
 	}
 }
 
-// TestProvider_RelaunchKeepsSecretEnvOutOfArgv covers the warm-box path: no -e
-// is re-applied, but the setup prelude still has to export the credentials, and
-// it must do it from the staged file rather than inline in `sh -c`.
+// TestProvider_RelaunchKeepsSecretEnvOutOfArgv covers the warm-box path: the
+// session env update and the setup prelude both carry the credentials, and
+// both must take them from staged files rather than a command line.
 func TestProvider_RelaunchKeepsSecretEnvOutOfArgv(t *testing.T) {
 	const secret = "sk-test-not-a-real-credential"
 	f := &fakeRunner{respond: answerStaging(nil)}
@@ -228,9 +228,14 @@ func TestProvider_RelaunchKeepsSecretEnvOutOfArgv(t *testing.T) {
 	if !strings.Contains(setup[2], ". '"+stagedDir+"/env.sh'") {
 		t.Errorf("prelude does not source the staged env file:\n%s", setup[2])
 	}
-	// Relaunch creates no session, so it stages no tmux command file.
-	if strings.Contains(stdinFor(f, isStagingScript), "session.tmux") {
-		t.Error("relaunch must not stage a tmux command file")
+	// The session env update is staged as a tmux command file and sourced.
+	if !strings.Contains(stdinFor(f, isStagingScript), tmuxQuote(secret)) {
+		t.Error("the staged tmux command file does not carry the session env update")
+	}
+	if firstCall(f, func(argv []string) bool {
+		return slices.Equal(argv, []string{"tmux", "source-file", stagedDir + "/session.tmux"})
+	}) == nil {
+		t.Error("the staged session env update was not sourced")
 	}
 	if firstCall(f, func(argv []string) bool {
 		return slices.Equal(argv, []string{"rm", "-rf", stagedDir})
@@ -283,7 +288,8 @@ func TestProvider_RelaunchRespawnsAgentInWarmSession(t *testing.T) {
 		t.Fatalf("Relaunch: %v", err)
 	}
 	got := firstCall(f, isTmux("respawn-pane"))
-	// respawn-pane has no -e, so env is NOT re-applied (provision-half).
+	// respawn-pane has no -e: the env reaches the agent through the session
+	// environment (relaunch_env_test.go).
 	want := []string{"tmux", "respawn-pane", "-k", "-t", "=s:@1.%1", "-c", "/w", "agent --resumed"}
 	if !slices.Equal(got, want) {
 		t.Errorf("respawn-pane argv =\n  %v\nwant\n  %v", got, want)
