@@ -1257,9 +1257,7 @@ func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses,
 		if resp.JSON200 == nil || resp.JSON200.Items == nil {
 			break
 		}
-		if resp.JSON200.ScanTruncated != nil && *resp.JSON200.ScanTruncated {
-			scanTruncated = true
-		}
+		scanTruncated = anyScanTruncated(scanTruncated, resp.JSON200.ScanTruncated)
 		for _, item := range *resp.JSON200.Items {
 			wire, err := cityWireEventFromTyped(item)
 			if err != nil {
@@ -1286,11 +1284,24 @@ func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses,
 		}
 		cursor = next
 	}
-	if scanTruncated {
-		fmt.Fprintf(warn, "gc events: the server's archive scan hit its per-request byte budget at least once while fetching this range; increase events.scan_budget.max_archive_bytes_per_request in city.toml to reduce round trips.\n") //nolint:errcheck
-	}
+	warnScanTruncated(warn, scanTruncated)
 	sort.Slice(all, func(i, j int) bool { return all[i].Seq < all[j].Seq })
 	return all, nil
+}
+
+// anyScanTruncated folds one page's scan_truncated flag into the running
+// answer for the whole walk.
+func anyScanTruncated(seen bool, page *bool) bool {
+	return seen || (page != nil && *page)
+}
+
+// warnScanTruncated tells the operator when the server's archive scan hit its
+// per-request byte budget during the walk.
+func warnScanTruncated(warn io.Writer, truncated bool) {
+	if !truncated {
+		return
+	}
+	fmt.Fprintf(warn, "gc events: the server's archive scan hit its per-request byte budget at least once while fetching this range; increase events.scan_budget.max_archive_bytes_per_request in city.toml to reduce round trips.\n") //nolint:errcheck
 }
 
 // fetchCityEventsAfterSeq returns every city event with Seq > afterSeq in
