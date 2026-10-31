@@ -1226,6 +1226,73 @@ func TestRestorePurgeRestoresOnlyWhatAPurgeRecorded(t *testing.T) {
 	}
 }
 
+// TestRestorePurgeRefusesABackupThatDoesNotHoldEveryRecordedRowOnce: a known
+// backup with a recorded row taken out, or a row in it twice, is not the
+// backup the purge wrote, and restores nothing. Restoring the rest would
+// leave the ledger counting the missing row as purged with no copy of it.
+func TestRestorePurgeRefusesABackupThatDoesNotHoldEveryRecordedRowOnce(t *testing.T) {
+	city := newMCShapedPurgeCity(t)
+	var stdout, stderr bytes.Buffer
+	if code := runStrandedPurge(t, city, confirmedPurge(t, city, mcPurgeRows), &stdout, &stderr); code != 0 {
+		t.Fatalf("purge exited %d: %s", code, stderr.String())
+	}
+	backup := purgeBackupFiles(t, city)[0]
+	records, err := readInfraPurgeBackup(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) < 2 {
+		t.Fatalf("the fixture backed up %d row(s); the test needs two", len(records))
+	}
+	request := storageOperatorRequest{CityPath: city.cityPath, Cfg: city.cfg, FleetStopped: true}
+	keyOf := func(record infraRecoverChoiceRecord) string {
+		return infraPurgeSecondKey(record.Entry.Bead.ID, record.Entry.Bead.CreatedAt).String()
+	}
+	last := len(records) - 1
+	for _, tc := range []struct {
+		name    string
+		records []infraRecoverChoiceRecord
+		want    []string
+	}{
+		{"a recorded row missing", records[:last], []string{keyOf(records[last]) + " (not held)"}},
+		{"a row twice", append(slices.Clone(records), records[0]), []string{keyOf(records[0]) + " (held more than once)"}},
+		{
+			"a row twice in place of another", append(slices.Clone(records[:last]), records[0]),
+			[]string{keyOf(records[0]) + " (held more than once)", keyOf(records[last]) + " (not held)"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var lines bytes.Buffer
+			for _, record := range tc.records {
+				line, err := json.Marshal(record)
+				if err != nil {
+					t.Fatal(err)
+				}
+				lines.Write(append(line, '\n'))
+			}
+			if err := os.WriteFile(backup, lines.Bytes(), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			for _, dryRun := range []bool{true, false} {
+				stdout.Reset()
+				stderr.Reset()
+				code := doStorageRestorePurge(context.Background(), request, backup, dryRun, &stdout, &stderr)
+				if code == 0 {
+					t.Fatalf("dry-run=%v: the restore exited 0: %s", dryRun, stdout.String())
+				}
+				for _, want := range tc.want {
+					if !strings.Contains(stderr.String(), want) {
+						t.Errorf("dry-run=%v: the refusal does not name %q: %s", dryRun, want, stderr.String())
+					}
+				}
+			}
+			if got := countPurgeRowsOfType(purgeWorkRows(t, city), "message"); got != 0 {
+				t.Errorf("a refused restore wrote %d row(s)", got)
+			}
+		})
+	}
+}
+
 // TestPurgeStrandedResumesAfterTheEdgesWereRemoved: a run that died after it
 // removed the edges and before it deleted the rows resumes from its backup,
 // which still holds the edges, rather than refusing.

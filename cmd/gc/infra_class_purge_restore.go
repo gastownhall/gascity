@@ -36,7 +36,8 @@ package main
 //
 // It restores only what a purge deleted: the backup must be one the ledger
 // recorded, every row must be one the ledger recorded for that backup (by id
-// and created_at), every row must be of a purge type and classify as its
+// and created_at), the backup must hold each row the ledger recorded for it
+// exactly once, every row must be of a purge type and classify as its
 // class, and every edge must touch its record's row. A hand-built file
 // therefore cannot use this to write arbitrary rows under fixed ids, or an
 // edge between rows the purge never touched. This is the only sanctioned
@@ -460,9 +461,12 @@ func restorePurgeEdges(records []infraRecoverChoiceRecord, backed map[string]boo
 	return edges, missing
 }
 
-// infraRestoreScopeRefusal names why records are not all rows run recorded
-// backing up, of a purge type and classifying as its class, each with only
-// edges that touch it (infraRestoreForeignEdges), or returns "" when they are.
+// infraRestoreScopeRefusal names why records are not exactly the rows run
+// recorded backing up, each once, of a purge type and classifying as its
+// class, each with only edges that touch it (infraRestoreForeignEdges), or
+// returns "" when they are. A backup missing a recorded row would restore
+// part of the run, and the ledger would still count the rest as purged with
+// no copy left to put back.
 func infraRestoreScopeRefusal(run infraPurgeLedgerRecord, records []infraRecoverChoiceRecord, gen coordclass.Generation) string {
 	if len(records) == 0 {
 		return fmt.Sprintf("%s holds no rows", run.Backup)
@@ -471,12 +475,15 @@ func infraRestoreScopeRefusal(run infraPurgeLedgerRecord, records []infraRecover
 	for _, key := range run.Rows {
 		recorded[infraPurgeSecondKey(key.ID, key.CreatedAt)] = true
 	}
-	var stray []string
+	held := make(map[infraPurgeRowKey]bool, len(records))
+	var stray, uncovered []string
 	for _, record := range records {
 		b := record.Entry.Bead
 		key := infraPurgeSecondKey(b.ID, b.CreatedAt)
 		class, purgeable := infraPurgeTypes[b.Type]
 		switch {
+		case held[key]:
+			uncovered = append(uncovered, fmt.Sprintf("%s (held more than once)", key))
 		case !recorded[key]:
 			stray = append(stray, fmt.Sprintf("%s (the ledger records no purge of this row under this backup)", key))
 		case !purgeable:
@@ -484,13 +491,24 @@ func infraRestoreScopeRefusal(run infraPurgeLedgerRecord, records []infraRecover
 		case coordclass.ClassifyAt(b, gen) != class:
 			stray = append(stray, fmt.Sprintf("%s (classifies as %s, not %s)", b.ID, coordclass.ClassifyAt(b, gen), class))
 		}
+		held[key] = true
 		stray = append(stray, infraRestoreForeignEdges(record.Entry)...)
 	}
+	for key := range recorded {
+		if !held[key] {
+			uncovered = append(uncovered, fmt.Sprintf("%s (not held)", key))
+		}
+	}
+	var parts []string
 	if len(stray) > 0 {
 		sort.Strings(stray)
-		return fmt.Sprintf("%d row(s) or edge(s) of %s are not what a purge deleted: %s", len(stray), run.Backup, strings.Join(stray, "; "))
+		parts = append(parts, fmt.Sprintf("%d row(s) or edge(s) of %s are not what a purge deleted: %s", len(stray), run.Backup, strings.Join(stray, "; ")))
 	}
-	return ""
+	if len(uncovered) > 0 {
+		sort.Strings(uncovered)
+		parts = append(parts, fmt.Sprintf("%s does not hold each row the ledger records backing up under it exactly once, so it is not the backup that purge wrote: %s", run.Backup, strings.Join(uncovered, "; ")))
+	}
+	return strings.Join(parts, ". ")
 }
 
 // infraRestoreForeignEdges names every edge of entry that does not touch its
