@@ -210,6 +210,19 @@ func (s *Store) CancelWait(id string, now time.Time, lastError string) error {
 	return s.setWaitTerminalState(id, batch)
 }
 
+// RearmWait moves a live wait registered at fromEpoch onto the session's
+// current continuation epoch toEpoch, keeping its state, dependencies and note.
+// A ready wait's shadow nudge was fenced to the old epoch, so the nudge id is
+// cleared and the next dispatch queues a nudge for the new epoch.
+func (s *Store) RearmWait(id, fromEpoch, toEpoch string, now time.Time) error {
+	return s.store.SetMetadataBatch(id, map[string]string{
+		"registered_epoch":   toEpoch,
+		"rearmed_from_epoch": fromEpoch,
+		"rearmed_at":         now.UTC().Format(time.RFC3339),
+		"nudge_id":           "",
+	})
+}
+
 // ExpireWait marks a wait expired and closes it.
 func (s *Store) ExpireWait(id string, now time.Time) error {
 	return s.setWaitTerminalState(id, map[string]string{
