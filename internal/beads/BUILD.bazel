@@ -220,6 +220,7 @@ go_test(
         "native_dolt_store_integration_test.go",
         "native_dolt_store_label_cas_integration_test.go",
         "native_dolt_store_lifecycle_test.go",
+        "native_dolt_store_list_ids_test.go",
         "native_dolt_store_list_revision_integration_test.go",
         "native_dolt_store_list_sort_test.go",
         "native_dolt_store_metadata_cas_integration_test.go",
