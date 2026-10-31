@@ -1001,12 +1001,16 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 					return startFailure(resumeCommand, b.Metadata, err)
 				}
 				started = retried
-			case errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName):
+			case errors.Is(err, runtime.ErrSessionExists):
 				// The runtime came up past the fresh read (a start that took
 				// no lease, or a resume of ours that returned before
-				// confirming it: the canceled stale-key wait below). The
-				// resume converged on it: the mint is withdrawn, and active
-				// state is persisted below with the binding of that runtime.
+				// confirming it: the canceled stale-key wait below). When a
+				// fresh read finds it running, the resume converged on it: the
+				// mint is withdrawn, and active state is persisted below with
+				// the binding of that runtime.
+				if convErr := m.convergedOnRunning(err, sessName, unroute); convErr != nil {
+					return convErr
+				}
 				if !m.unmintStart(*inc, &b) {
 					provisional = false
 					// The route stays: the runtime it routes to is up.
@@ -1044,7 +1048,13 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 			}
 			return err
 		}
-		if !m.sp.IsRunning(sessName) {
+		// An unreadable runtime may be up: a fresh retry would clear its
+		// resume identity and start a second one. The next attempt converges.
+		up, upErr := m.runningOrUnroute(sessName, unroute)
+		if upErr != nil {
+			return upErr
+		}
+		if !up {
 			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute, lease, inc)
 			if err != nil {
 				return err
@@ -1151,8 +1161,90 @@ func (m *Manager) ensureDeliverable(ctx context.Context, by Actor, id string, b 
 // cache: the tmux state cache can show a crashed agent alive for seconds,
 // and a crash never invalidates it (mc-48az4). Alive is by processNames;
 // with none (and none the runtime published) a running pane reads alive.
+//
+// A composite in front of the backend (hybrid) routes by name and does not
+// claim the fresh read for a leaf that may not have it, so its own read
+// answers from the leaf's cache. The fresh read is the leaf's, when the leaf
+// serving the name has it. A leaf the composite cannot vouch for (auto before
+// SeedRoutes) that reads not running is also asked of the composite, whose
+// read covers its other backend.
 func (m *Manager) freshLiveness(sessName string, processNames []string) (runtime.Liveness, error) {
-	return runtime.ObserveLivenessSince(m.sp, sessName, processNames, time.Now())
+	now := time.Now()
+	leaf, labels, known := runtime.ResolveBackend(m.sp, sessName)
+	if _, fresh := leaf.(runtime.FreshLivenessObserver); !fresh || len(labels) == 0 {
+		return runtime.ObserveLivenessSince(m.sp, sessName, processNames, now)
+	}
+	live, err := runtime.ObserveLivenessSince(leaf, sessName, processNames, now)
+	if err != nil || live.Running || known {
+		return live, err
+	}
+	if other, otherErr := runtime.ObserveLivenessSince(m.sp, sessName, processNames, now); otherErr != nil || other.Running {
+		return other, otherErr
+	}
+	return live, nil
+}
+
+// runtimeRunning reports whether sessName's runtime is running, for a start
+// path to decide whether it is up. A provider's IsRunning can answer false
+// for a live runtime (tmux's state cache), so a false is confirmed by a fresh
+// read (freshLiveness). A fresh read that fails returns its error, wrapping
+// [runtime.ErrRuntimeUnavailable] when the runtime could not be read: an
+// unreadable runtime is neither running nor absent, and the caller must not
+// start, scan for orphans or reset resume state on it. Only Running counts: a
+// corpse is not running and still reaches Start.
+//
+// Only a provider that can read fresh has a cached false to confirm: for any
+// other the IsRunning false stands and no liveness read is taken, since a
+// start path must not add a read to a provider that never had one.
+func (m *Manager) runtimeRunning(sessName string) (bool, error) {
+	if m.sp.IsRunning(sessName) {
+		return true, nil
+	}
+	leaf, _, _ := runtime.ResolveBackend(m.sp, sessName)
+	_, leafFresh := leaf.(runtime.FreshLivenessObserver)
+	_, topFresh := m.sp.(runtime.FreshLivenessObserver)
+	if !leafFresh && !topFresh {
+		return false, nil
+	}
+	live, err := m.freshLiveness(sessName, nil)
+	if err != nil {
+		return false, fmt.Errorf("confirming %q is not running: %w", sessName, err)
+	}
+	return live.Running, nil
+}
+
+// runningOrUnroute is runtimeRunning for a start path that holds an ACP route:
+// when the runtime cannot be read it releases the route before returning the
+// error, since the caller abandons the start.
+func (m *Manager) runningOrUnroute(sessName string, unroute func()) (bool, error) {
+	running, err := m.runtimeRunning(sessName)
+	if err != nil && unroute != nil {
+		unroute()
+	}
+	return running, err
+}
+
+// convergedOnRunning handles a failed Start (startErr) and returns nil only
+// when the start converged: Start refused because sessName's runtime already
+// exists and is running, as when another caller resumed it first. Otherwise it
+// releases the ACP route and returns the error to surface: startErr wrapped as
+// a failed resume or, when the runtime cannot be read, an error matching both
+// startErr and the read's failure.
+func (m *Manager) convergedOnRunning(startErr error, sessName string, unroute func()) error {
+	var err error
+	if errors.Is(startErr, runtime.ErrSessionExists) {
+		var running bool
+		if running, err = m.runtimeRunning(sessName); err == nil && running {
+			return nil
+		}
+	}
+	if unroute != nil {
+		unroute()
+	}
+	if err != nil {
+		return fmt.Errorf("resuming session: %w: %w", startErr, err)
+	}
+	return fmt.Errorf("resuming session: %w", startErr)
 }
 
 // leasedLiveness is the fresh read (freshLiveness) a start of row id decides
@@ -1195,7 +1287,11 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 	}
 	transport, _ := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
-	if m.sp.IsRunning(sessName) {
+	running, runErr := m.runningOrUnroute(sessName, unroute)
+	if runErr != nil {
+		return runErr
+	}
+	if running {
 		return nil
 	}
 	if resumeCommand == "" {
@@ -1255,7 +1351,10 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 				return startFailure(resumeCommand, b.Metadata, err)
 			}
 			started = retried
-		case errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName):
+		case errors.Is(err, runtime.ErrSessionExists):
+			if convErr := m.convergedOnRunning(err, sessName, unroute); convErr != nil {
+				return convErr
+			}
 			return err
 		default:
 			if unroute != nil {
@@ -1273,7 +1372,11 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 			}
 			return err
 		}
-		if !m.sp.IsRunning(sessName) {
+		up, upErr := m.runningOrUnroute(sessName, unroute)
+		if upErr != nil {
+			return upErr
+		}
+		if !up {
 			if _, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute, nil, nil); err != nil {
 				return err
 			}
