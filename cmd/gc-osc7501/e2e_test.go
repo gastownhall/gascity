@@ -53,9 +53,17 @@ type scratchTmux struct {
 	bin    string
 	name   string
 	socket string
+	killed bool
 }
 
 func newScratchTmux(t *testing.T) *scratchTmux {
+	t.Helper()
+	return newScratchTmuxNamed(t, "osc7501x-test-")
+}
+
+// newScratchTmuxNamed starts a scratch server on the socket prefix plus a
+// random suffix.
+func newScratchTmuxNamed(t *testing.T, prefix string) *scratchTmux {
 	t.Helper()
 	tmuxtest.RequireTmux(t)
 	bin, err := exec.LookPath("tmux")
@@ -66,16 +74,23 @@ func newScratchTmux(t *testing.T) *scratchTmux {
 	if _, err := rand.Read(b[:]); err != nil {
 		t.Fatal(err)
 	}
-	s := &scratchTmux{t: t, bin: bin, name: "osc7501x-test-" + hex.EncodeToString(b[:])}
+	s := &scratchTmux{t: t, bin: bin, name: prefix + hex.EncodeToString(b[:])}
 	s.must("-f", "/dev/null", "new-session", "-d", "-s", "boot", "-x", "200", "-y", "50", "sleep 3600")
 	t.Cleanup(func() {
-		// Kill only this test's server, by its socket name.
-		if out, err := s.cmd("kill-server").CombinedOutput(); err != nil {
-			t.Logf("killing scratch tmux server %s: %v: %s", s.name, err, out)
+		if !s.killed {
+			s.kill()
 		}
 	})
 	s.socket = s.must("display-message", "-p", "-t", "boot", "#{socket_path}")
 	return s
+}
+
+// kill kills only this test's server, by its socket name.
+func (s *scratchTmux) kill() {
+	s.killed = true
+	if out, err := s.cmd("kill-server").CombinedOutput(); err != nil {
+		s.t.Logf("killing scratch tmux server %s: %v: %s", s.name, err, out)
+	}
 }
 
 func (s *scratchTmux) cmd(args ...string) *exec.Cmd {

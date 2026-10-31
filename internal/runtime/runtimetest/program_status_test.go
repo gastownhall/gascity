@@ -35,7 +35,7 @@ func misreading(rewrite func(runtime.ProgramStatus) runtime.ProgramStatus) Progr
 		s.Provider = misreader{Provider: s.Provider, rewrite: rewrite}
 		return s
 	}
-	armed, unarmed, inherited := f.Armed, f.Unarmed, f.Inherited
+	armed, unarmed, inherited, relayed := f.Armed, f.Unarmed, f.Inherited, f.Relayed
 	f.Armed = func(t *testing.T, m runtime.ProgramStatusMode, script ...string) ProgramStatusSession {
 		return wrap(armed(t, m, script...))
 	}
@@ -44,6 +44,9 @@ func misreading(rewrite func(runtime.ProgramStatus) runtime.ProgramStatus) Progr
 	}
 	f.Inherited = func(t *testing.T, m runtime.ProgramStatusMode) ProgramStatusSession {
 		return wrap(inherited(t, m))
+	}
+	f.Relayed = func(t *testing.T, m runtime.ProgramStatusMode, script ...string) ProgramStatusSession {
+		return wrap(relayed(t, m, script...))
 	}
 	return f
 }
@@ -197,4 +200,19 @@ func (neverArms) HealProgramCapture(string, runtime.ProgramStatusArm) (runtime.P
 // build.
 func TestRunProgramStatusContractSkipsWithoutFixtures(t *testing.T) {
 	RunProgramStatusContract(t, ProgramStatusFixtures{})
+}
+
+// Kills a Relayed fixture whose relay does not answer the probe: PS-004's
+// relay half then fails, so the fake's passing relay half is the relay's
+// doing, not the fixture's.
+func TestProgramStatusPS004RelayHalfNeedsTheRelaysAnswer(t *testing.T) {
+	ps004 := caseNamed(t, "PS-004")
+	if err := ps004.run(t, FakeProgramStatusFixtures()); err != nil {
+		t.Fatalf("PS-004 with the relay: %v", err)
+	}
+	err := ps004.run(t, fakeProgramStatusFixtures(relayPassesThrough))
+	var s skipError
+	if err == nil || errors.As(err, &s) {
+		t.Fatalf("PS-004 passed a relay that never answers the probe (err %v)", err)
+	}
 }

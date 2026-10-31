@@ -30,6 +30,9 @@ func TestVersionReportsCodec(t *testing.T) {
 	if v.Version != version || v.Relay != relayVersion {
 		t.Fatalf("version line %q parsed as %+v", out, v)
 	}
+	if v.Relay != 1 {
+		t.Fatalf("version line %q: relay=%d, want relay=1 (the relay subcommand ships)", out, v.Relay)
+	}
 	if !strings.HasSuffix(out, "\n") || strings.Count(out, "\n") != 1 {
 		t.Fatalf("version output %q, want exactly one line", out)
 	}
@@ -44,7 +47,9 @@ func TestVersionRejectsArguments(t *testing.T) {
 func TestUsageErrors(t *testing.T) {
 	for _, args := range [][]string{
 		nil,
-		{"relay"}, // part B
+		{"relay"},
+		{"relay", "--"},
+		{"relay", "-x", "--", "sh"},
 		{"bogus"},
 		{"tap"},
 		{"tap", "-x", "tmux", "-S", "/tmp/s", "-t", "%3"},                 // no -n

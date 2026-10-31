@@ -2,13 +2,17 @@ package runtimetest
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/programstatus"
+	"github.com/gastownhall/gascity/internal/runtime/programstatus/relay"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest/osc7501emitter/emit"
 )
 
@@ -26,10 +30,40 @@ const fakeProgramSession = "program-status-session"
 // what the capture path makes of the program's bytes: a [programstatus.Scanner]
 // reassembles them, [programstatus.ParseBody] validates each report, a
 // [programstatus.Store] applies it, and the record round-trips through the
-// pane-option codec before the fake reads it. The program reads no input, so
-// a probe goes unanswered: there is no Relayed fixture.
+// pane-option codec before the fake reads it. An Armed or Unarmed program
+// reads no input, so a probe goes unanswered. A Relayed program runs behind
+// the relay's byte path ([relay.Bridge]) in front of a pane that answers DA1
+// as tmux does, so its probe is answered first only because the relay
+// answers it.
 func FakeProgramStatusFixtures() ProgramStatusFixtures {
+	return fakeProgramStatusFixtures(relayAnswersProbes)
+}
+
+// fakeRelay says what stands between a Relayed fixture's program and its
+// pane.
+type fakeRelay int
+
+const (
+	// noRelay: the program writes to the pane and reads nothing.
+	noRelay fakeRelay = iota
+	// relayAnswersProbes: the relay's bridge, answering probes.
+	relayAnswersProbes
+	// relayPassesThrough: a bridge that forwards both ways but answers
+	// nothing, so the pane's DA1 reply is the program's only answer.
+	relayPassesThrough
+)
+
+// fakeProgramStatusFixtures is FakeProgramStatusFixtures with the Relayed
+// fixture's program behind relayed.
+func fakeProgramStatusFixtures(relayed fakeRelay) ProgramStatusFixtures {
 	return ProgramStatusFixtures{
+		Relayed: func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) ProgramStatusSession {
+			p := newFakeProgramPane(t, mode)
+			p.relay = relayed
+			p.arm(t)
+			p.emit(t, script...)
+			return p.session()
+		},
 		Armed: func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) ProgramStatusSession {
 			p := newFakeProgramPane(t, mode)
 			p.arm(t)
@@ -62,6 +96,7 @@ type fakeProgramPane struct {
 	incarnations int
 	store        *programstatus.Store // the current incarnation's capture; nil before arming
 	stale        *programstatus.Store // the incarnation a respawn replaced
+	relay        fakeRelay            // what stands between the program and the pane
 }
 
 // newFakeProgramPane starts the fixture session on a new fake, its pane
@@ -146,8 +181,7 @@ func (p *fakeProgramPane) emit(t *testing.T, steps ...string) {
 	if err != nil {
 		t.Fatalf("emitter script: %v", err)
 	}
-	var out bytes.Buffer
-	outcome, err := emit.Run(t.Context(), prog, emit.Terminal{Out: &out})
+	out, outcome, err := runFakeProgram(t, prog, p.relay)
 	if err != nil {
 		t.Fatalf("running emitter script: %v", err)
 	}
@@ -157,7 +191,7 @@ func (p *fakeProgramPane) emit(t *testing.T, steps ...string) {
 		p.store = programstatus.NewStore(row.Tap)
 	}
 	if armed && row.PanePipe && row.TapLiveness != runtime.ProgramTapGone {
-		p.capture(out.Bytes())
+		p.capture(out)
 		p.publish(t, p.store)
 	}
 	if outcome.Ended {
@@ -196,4 +230,92 @@ func (p *fakeProgramPane) publish(t *testing.T, store *programstatus.Store) {
 	p.update(func(row *runtime.ProgramPaneRow) {
 		row.RecordForm, row.Record = programstatus.RecordForm(err), rec
 	})
+}
+
+// runFakeProgram runs prog as a pane's program, behind relayed, and returns
+// what reached the pane.
+func runFakeProgram(t *testing.T, prog emit.Program, relayed fakeRelay) ([]byte, emit.Outcome, error) {
+	if relayed == noRelay {
+		var out bytes.Buffer
+		outcome, err := emit.Run(t.Context(), prog, emit.Terminal{Out: &out})
+		return out.Bytes(), outcome, err
+	}
+	programInR, programInW := io.Pipe()   // the relay writes the program's input
+	programOutR, programOutW := io.Pipe() // the program writes its output
+	typedR, typedW := io.Pipe()           // the pane types into the relay
+	pane := &fakeTmuxPane{typed: typedW}
+	var b *relay.Bridge
+	if relayed == relayAnswersProbes {
+		b = relay.NewBridge(programInW)
+	} else {
+		b = relay.NewBridge(io.Discard)
+	}
+	defer b.Close()
+	outDone := make(chan error, 1)
+	inDone := make(chan error, 1)
+	if relayed == relayAnswersProbes {
+		go func() { outDone <- b.Output(programOutR, pane) }()
+		go func() { inDone <- b.Input(typedR) }()
+	} else {
+		go func() {
+			_, err := io.Copy(pane, programOutR)
+			outDone <- err
+		}()
+		go func() {
+			_, err := io.Copy(programInW, typedR)
+			inDone <- err
+		}()
+	}
+	outcome, runErr := emit.Run(t.Context(), prog, emit.Terminal{In: programInR, Out: programOutW})
+	// The program is gone: its output ends, then its input, then the pane's
+	// typing.
+	err := errors.Join(runErr, programOutW.Close(), <-outDone, programInR.Close(), typedW.Close())
+	err = errors.Join(err, ignoreClosedPipe(<-inDone))
+	return pane.output(), outcome, err
+}
+
+// ignoreClosedPipe drops the error a forward into a program that has ended
+// returns.
+func ignoreClosedPipe(err error) error {
+	if errors.Is(err, io.ErrClosedPipe) || errors.Is(err, relay.ErrProgramGone) {
+		return nil
+	}
+	return err
+}
+
+// fakeTmuxPane is the outer terminal of a relayed fake program: it keeps
+// what the program's output brings, and answers a DA1 request the moment it
+// arrives, as tmux does.
+type fakeTmuxPane struct {
+	mu    sync.Mutex
+	out   bytes.Buffer
+	typed io.Writer
+}
+
+// DA1 exchange the fake pane answers.
+const (
+	fakeDA1Request = "\x1b[c"
+	fakeDA1Reply   = "\x1b[?1;2c"
+)
+
+func (p *fakeTmuxPane) Write(b []byte) (int, error) {
+	p.mu.Lock()
+	before := p.out.Len()
+	p.out.Write(b)
+	window := p.out.Bytes()[max(before-len(fakeDA1Request)+1, 0):]
+	requests := bytes.Count(window, []byte(fakeDA1Request))
+	p.mu.Unlock()
+	for range requests {
+		if _, err := io.WriteString(p.typed, fakeDA1Reply); err != nil {
+			return 0, fmt.Errorf("answering DA1: %w", err)
+		}
+	}
+	return len(b), nil
+}
+
+// output is everything the pane received.
+func (p *fakeTmuxPane) output() []byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return bytes.Clone(p.out.Bytes())
 }
