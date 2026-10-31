@@ -3552,6 +3552,9 @@
             "$ref": "#/components/schemas/WorkLadderPayload"
           },
           {
+            "$ref": "#/components/schemas/WorkRateLimitedPayload"
+          },
+          {
             "$ref": "#/components/schemas/WorkerOperationEventPayload"
           }
         ]
@@ -14562,6 +14565,7 @@
             "work.escalated": "#/components/schemas/TypedEventStreamEnvelopeWorkEscalated",
             "work.nudge_failed": "#/components/schemas/TypedEventStreamEnvelopeWorkNudgeFailed",
             "work.nudged": "#/components/schemas/TypedEventStreamEnvelopeWorkNudged",
+            "work.rate_limited": "#/components/schemas/TypedEventStreamEnvelopeWorkRateLimited",
             "work.recycle_requested": "#/components/schemas/TypedEventStreamEnvelopeWorkRecycleRequested",
             "work.release_unfinished": "#/components/schemas/TypedEventStreamEnvelopeWorkReleaseUnfinished",
             "work.released": "#/components/schemas/TypedEventStreamEnvelopeWorkReleased",
@@ -14921,6 +14925,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkNudged"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkRateLimited"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkRecycleRequested"
@@ -16459,6 +16466,7 @@
                 "work.released",
                 "work.release_unfinished",
                 "work.escalated",
+                "work.rate_limited",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -21792,6 +21800,63 @@
         "title": "TypedEventStreamEnvelope work.nudged",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeWorkRateLimited": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorkRateLimitedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.rate_limited",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope work.rate_limited",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeWorkRecycleRequested": {
         "additionalProperties": false,
         "properties": {
@@ -22198,6 +22263,7 @@
             "work.escalated": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkEscalated",
             "work.nudge_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkNudgeFailed",
             "work.nudged": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkNudged",
+            "work.rate_limited": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkRateLimited",
             "work.recycle_requested": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkRecycleRequested",
             "work.release_unfinished": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished",
             "work.released": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkReleased",
@@ -22557,6 +22623,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkNudged"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkRateLimited"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkRecycleRequested"
@@ -24198,6 +24267,7 @@
                 "work.released",
                 "work.release_unfinished",
                 "work.escalated",
+                "work.rate_limited",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -29900,6 +29970,67 @@
         "title": "TypedTaggedEventStreamEnvelope work.nudged",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeWorkRateLimited": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorkRateLimitedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.rate_limited",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope work.rate_limited",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeWorkRecycleRequested": {
         "additionalProperties": false,
         "properties": {
@@ -30678,6 +30809,9 @@
           "paused": {
             "type": "boolean"
           },
+          "provider": {
+            "type": "string"
+          },
           "reason": {
             "type": "string"
           },
@@ -30701,6 +30835,83 @@
           "session_id",
           "bead_id",
           "generation"
+        ],
+        "type": "object"
+      },
+      "WorkRateLimitedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "alerted": {
+            "type": "boolean"
+          },
+          "cause": {
+            "type": "string"
+          },
+          "claims": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "conversation": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "error_code": {
+            "type": "string"
+          },
+          "error_text": {
+            "type": "string"
+          },
+          "fresh_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "generation": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "http_status": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "refused": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "refused_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "session_name": {
+            "type": "string"
+          },
+          "since": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "template": {
+            "type": "string"
+          },
+          "transition": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "generation",
+          "conversation",
+          "transition",
+          "since"
         ],
         "type": "object"
       },

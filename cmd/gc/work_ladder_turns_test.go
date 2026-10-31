@@ -16,9 +16,13 @@ import (
 	"github.com/gastownhall/gascity/internal/workladder"
 )
 
-// A reading reduces the seat's turns to what the ladder judges progress by:
-// whether the newest ended turn failed (whatever the cause, with no turn
-// open), and when the newest turn the provider completed ended.
+// A reading reduces the seat's turns to what the ladder judges progress and
+// rate limits by: whether the newest ended turn failed (whatever the cause,
+// with no turn open), when the newest turn the provider completed ended, and
+// how many of the newest ended turns in a row the provider refused with a
+// rate limit (none while a turn is open), the newest's end and whether its
+// source classed it a spent quota. The refusal's failure rides beside it for
+// events, never into the reading.
 func TestLadderTurnReading(t *testing.T) {
 	at := stepsTestNow
 	completed := runtime.EndedTurn{TurnID: "ok", EndedAt: at.Add(-time.Hour), Status: runtime.TurnStatusCompleted}
@@ -27,22 +31,32 @@ func TestLadderTurnReading(t *testing.T) {
 	noStatus := runtime.EndedTurn{TurnID: "gemini", EndedAt: at}
 	canceled := runtime.EndedTurn{TurnID: "esc", EndedAt: at, Status: runtime.TurnStatusCancelled}
 	open := runtime.TurnState{TurnID: "open"}
+	earlier := limited
+	earlier.TurnID, earlier.EndedAt = "429-earlier", at.Add(-time.Minute)
+	spent := runtime.EndedTurn{TurnID: "quota", EndedAt: at, Status: runtime.TurnStatusFailed, Failure: runtime.TurnFailure{Code: "usage_limit_exceeded", RateLimited: true, Quota: true, Message: "You've hit your usage limit."}}
 	for _, tc := range []struct {
-		name string
-		hist runtime.TurnHistory
-		want workladder.TurnReading
+		name    string
+		hist    runtime.TurnHistory
+		want    workladder.TurnReading
+		refusal runtime.TurnFailure
 	}{
-		{"newest completed", runtime.TurnHistory{Recent: []runtime.EndedTurn{completed}}, workladder.TurnReading{Read: true, Conv: 3, ServedAt: completed.EndedAt}},
-		{"newest refused (429), served behind it", runtime.TurnHistory{Recent: []runtime.EndedTurn{limited, completed}}, workladder.TurnReading{Read: true, Conv: 3, LastFailed: true, ServedAt: completed.EndedAt}},
-		{"newest failed (524), never served", runtime.TurnHistory{Recent: []runtime.EndedTurn{gateway, limited}}, workladder.TurnReading{Read: true, Conv: 3, LastFailed: true}},
-		{"no status (Gemini) is no failure", runtime.TurnHistory{Recent: []runtime.EndedTurn{noStatus, limited}}, workladder.TurnReading{Read: true, Conv: 3}},
-		{"canceled is neither", runtime.TurnHistory{Recent: []runtime.EndedTurn{canceled}}, workladder.TurnReading{Read: true, Conv: 3}},
-		{"a turn open has no failure yet", runtime.TurnHistory{Current: open, Recent: []runtime.EndedTurn{limited, completed}}, workladder.TurnReading{Read: true, Conv: 3, ServedAt: completed.EndedAt}},
-		{"nothing yet", runtime.TurnHistory{}, workladder.TurnReading{Read: true, Conv: 3}},
+		{"newest completed", runtime.TurnHistory{Recent: []runtime.EndedTurn{completed}}, workladder.TurnReading{Read: true, Conv: 3, ServedAt: completed.EndedAt}, runtime.TurnFailure{}},
+		{"newest refused (429), served behind it", runtime.TurnHistory{Recent: []runtime.EndedTurn{limited, completed}}, workladder.TurnReading{Read: true, Conv: 3, LastFailed: true, ServedAt: completed.EndedAt, Refused: 1, RefusedAt: at}, limited.Failure},
+		{"two refused in a row", runtime.TurnHistory{Recent: []runtime.EndedTurn{limited, earlier, completed}}, workladder.TurnReading{Read: true, Conv: 3, LastFailed: true, ServedAt: completed.EndedAt, Refused: 2, RefusedAt: at}, limited.Failure},
+		{"a 524 breaks the run", runtime.TurnHistory{Recent: []runtime.EndedTurn{limited, gateway, earlier}}, workladder.TurnReading{Read: true, Conv: 3, LastFailed: true, Refused: 1, RefusedAt: at}, limited.Failure},
+		{"a spent quota", runtime.TurnHistory{Recent: []runtime.EndedTurn{spent, limited}}, workladder.TurnReading{Read: true, Conv: 3, LastFailed: true, Refused: 2, RefusedAt: at, Quota: true}, spent.Failure},
+		{"newest failed (524), never served", runtime.TurnHistory{Recent: []runtime.EndedTurn{gateway, limited}}, workladder.TurnReading{Read: true, Conv: 3, LastFailed: true}, runtime.TurnFailure{}},
+		{"no status (Gemini) is no failure", runtime.TurnHistory{Recent: []runtime.EndedTurn{noStatus, limited}}, workladder.TurnReading{Read: true, Conv: 3}, runtime.TurnFailure{}},
+		{"canceled is neither", runtime.TurnHistory{Recent: []runtime.EndedTurn{canceled}}, workladder.TurnReading{Read: true, Conv: 3}, runtime.TurnFailure{}},
+		{"a turn open has no failure yet", runtime.TurnHistory{Current: open, Recent: []runtime.EndedTurn{limited, completed}}, workladder.TurnReading{Read: true, Conv: 3, ServedAt: completed.EndedAt}, runtime.TurnFailure{}},
+		{"nothing yet", runtime.TurnHistory{}, workladder.TurnReading{Read: true, Conv: 3}, runtime.TurnFailure{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := ladderTurnReading(tc.hist, 3); got != tc.want {
 				t.Fatalf("reading = %+v, want %+v", got, tc.want)
+			}
+			if got := ladderRefusal(tc.hist); got != tc.refusal {
+				t.Fatalf("refusal = %+v, want %+v", got, tc.refusal)
 			}
 		})
 	}
@@ -71,7 +85,7 @@ const answerDelay = 12 * time.Minute
 // answeredSeat is a started seat whose every nudge is answered, answerDelay
 // later, by a turn that ends with status (and failure), its end the seat's
 // newest activity; its turns are read when read is set. It runs until the
-// ladder recycles the seat, or for eight hours.
+// ladder recycles the seat or restarts it fresh, or for eight hours.
 func answeredSeat(t *testing.T, status runtime.TurnStatus, failure runtime.TurnFailure, read bool) *ladderCity {
 	t.Helper()
 	c := newLadderCity(t)
@@ -81,7 +95,7 @@ func answeredSeat(t *testing.T, status runtime.TurnStatus, failure runtime.TurnF
 	if read {
 		turns.install(c)
 	}
-	for end := c.now.Add(8 * time.Hour); c.now.Before(end) && len(c.posted) == 0; c.now = c.now.Add(30 * time.Second) {
+	for end := c.now.Add(8 * time.Hour); c.now.Before(end) && len(c.posted) == 0 && c.row().Metadata["restart_requested"] == ""; c.now = c.now.Add(30 * time.Second) {
 		turns.hist = runtime.TurnHistory{}
 		for _, n := range c.nudgedAt {
 			at := c.start.Add(n + answerDelay)
@@ -102,9 +116,10 @@ func answeredSeat(t *testing.T, status runtime.TurnStatus, failure runtime.TurnF
 
 // C1. A seat whose every answer is a turn its provider failed, ending 12
 // minutes after the nudge it answers (a slow 429, a slow Cloudflare 524), is
-// not making progress: it climbs the ladder to its recycle. Rolled back (no
-// turn reads), each failure is activity past the reset and the seat is
-// nudged forever, never recycled or escalated.
+// not making progress. A slow 524 climbs the ladder to its recycle; a slow
+// 429 is a rate-limit episode (C3), restarted fresh once confirmed, never
+// recycled. Rolled back (no turn reads), each failure is activity past the
+// reset and the seat is nudged forever, never recycled or escalated.
 func TestWorkLadderFailedTurnIsNotProgress(t *testing.T) {
 	for name, failure := range map[string]runtime.TurnFailure{
 		"429": {Code: "rate_limit", HTTPStatus: 429, RateLimited: true, Message: "API Error: Request rejected (429)"},
@@ -112,15 +127,21 @@ func TestWorkLadderFailedTurnIsNotProgress(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := answeredSeat(t, runtime.TurnStatusFailed, failure, true)
-			if len(c.posted) != 1 {
-				t.Fatalf("nudged at %v, recycles posted %+v: want the seat recycled, its failed turns no progress", c.nudgedAt, c.posted)
-			}
-			if got := escalations(c); len(got) != 1 || got[0] != workladder.AlertStartedRecycled {
-				t.Fatalf("work.escalated reasons = %v, want the recycle's alert", got)
+			if failure.RateLimited {
+				if len(c.posted) != 0 || c.row().Metadata["restart_requested"] != "true" || c.cell().RateLimit.Phase != workladder.RateLimitRestarted {
+					t.Fatalf("nudged at %v, recycles posted %+v, cell %s: want the seat restarted fresh, never recycled", c.nudgedAt, c.posted, c.row().Metadata[session.WorkLadderKey])
+				}
+			} else {
+				if len(c.posted) != 1 {
+					t.Fatalf("nudged at %v, recycles posted %+v: want the seat recycled, its failed turns no progress", c.nudgedAt, c.posted)
+				}
+				if got := escalations(c); len(got) != 1 || got[0] != workladder.AlertStartedRecycled {
+					t.Fatalf("work.escalated reasons = %v, want the recycle's alert", got)
+				}
 			}
 			old := answeredSeat(t, runtime.TurnStatusFailed, failure, false)
-			if len(old.posted) != 0 {
-				t.Fatalf("with no turn reads: recycles posted %+v; the replay assumes each failure resets the count", old.posted)
+			if len(old.posted) != 0 || old.row().Metadata["restart_requested"] != "" {
+				t.Fatalf("with no turn reads: recycles posted %+v, restart %q; the replay assumes each failure resets the count", old.posted, old.row().Metadata["restart_requested"])
 			}
 		})
 	}
@@ -202,7 +223,7 @@ func TestWorkLadderJudgesProgressOnlyWhenActing(t *testing.T) {
 // The ladder reads a seat's turns only on a pass that may act on it (a
 // running, quiet seat, its gate open, with work outstanding), and reads it
 // again only when the seat moves (its generation, conversation, activity or
-// the ladder's last nudge) or the reading is ladderTurnsMaxAge old.
+// the last nudge it took) or the reading is ladderTurnsMaxAge old.
 func TestWorkLadderReadsTurnsOnlyWhenActing(t *testing.T) {
 	c := newLadderCity(t)
 	turns := &fakeLadderTurns{}
