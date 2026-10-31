@@ -145,6 +145,12 @@ func TestExtMsgClientRoutesToSupervisor(t *testing.T) {
 	supervisorClient := func(*testing.T) func(string) *api.Client {
 		return func(string) *api.Client { return sentinel }
 	}
+	supervisorUnconsulted := func(t *testing.T) func(string) *api.Client {
+		return func(string) *api.Client {
+			t.Errorf("supervisor-managed client resolved where no endpoint is usable")
+			return sentinel
+		}
+	}
 	identity := func(reply controllerIdentityReply) func(*testing.T) func(string) controllerIdentityReply {
 		return func(*testing.T) func(string) controllerIdentityReply {
 			return func(string) controllerIdentityReply { return reply }
@@ -177,6 +183,38 @@ func TestExtMsgClientRoutesToSupervisor(t *testing.T) {
 			identity:   identity(controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}),
 			supervisor: supervisorClient,
 			wantClient: true,
+		},
+		{
+			// AC-3: a controller that identifies as standalone serves only its
+			// own [api] port; the supervisor does not host its city.
+			name:       "standalone-no-api-port-names-reason",
+			toml:       "name = \"t\"\n",
+			identity:   identity(controllerIdentityReply{PID: 4242, HostingMode: controllerHostingStandalone}),
+			supervisor: supervisorUnconsulted,
+			wantStderr: []string{"gc extmsg bind: requires the city API server", "controller-down"},
+		},
+		{
+			// AC-3: a standalone controller's [api] bound off loopback without
+			// allow_mutations serves read-only.
+			name:       "standalone-read-only-bind-names-reason",
+			toml:       "name = \"t\"\n[api]\nport = 9443\nbind = \"0.0.0.0\"\n",
+			identity:   identity(controllerIdentityReply{PID: 4242, HostingMode: controllerHostingStandalone}),
+			supervisor: supervisorUnconsulted,
+			wantStderr: []string{"gc extmsg bind: requires the city API server", "non-loopback-bind"},
+		},
+		{
+			// AC-3: the GC_NO_API escape hatch disables every endpoint.
+			name:  "escape-hatch-names-reason",
+			noAPI: "1",
+			toml:  "name = \"t\"\n",
+			identity: func(t *testing.T) func(string) controllerIdentityReply {
+				return func(string) controllerIdentityReply {
+					t.Errorf("controller identity probed under the GC_NO_API escape hatch")
+					return controllerIdentityReply{PID: 4242}
+				}
+			},
+			supervisor: supervisorUnconsulted,
+			wantStderr: []string{"gc extmsg bind: requires the city API server", "escape-hatch"},
 		},
 	}
 	for _, tc := range cases {
