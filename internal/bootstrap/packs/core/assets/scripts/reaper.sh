@@ -1540,7 +1540,10 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
                 printf '%s\n' "$SQL_ROWS_RESULT" >"$SESSION_IDS_FILE"
                 DELETED_COUNT=""
                 if DELETE_OUT=$(scope_bd delete --force --json --from-file "$SESSION_IDS_FILE" 2>"$DELETE_ERR_FILE"); then
-                    DELETED_COUNT=$(printf '%s' "$DELETE_OUT" | jq -r '.deleted_count // empty' 2>/dev/null || true)
+                    # bd 1.3.1 omits deleted_count for a one-id batch: `deleted` is a
+                    # bare string there instead of the array it is for 2+, so count it
+                    # from `deleted`'s own shape rather than trusting deleted_count alone.
+                    DELETED_COUNT=$(printf '%s' "$DELETE_OUT" | jq -r '.deleted_count // (.deleted | if type == "array" then length elif type == "string" then 1 else empty end)' 2>/dev/null || true)
                 fi
                 case "$DELETED_COUNT" in
                     ''|*[!0-9]*)
