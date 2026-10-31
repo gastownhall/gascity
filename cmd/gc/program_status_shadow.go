@@ -24,8 +24,9 @@ import (
 // continuously evaluated point's comparison is kept only when its (scrape,
 // program, validity) triple for the session changed, then pushed onto a
 // bounded per-city queue. A full queue drops the newest comparison and
-// counts it into the next recorded payload's dropped. One goroutine per city
-// drains the queue into the city's events log as
+// counts it into the next recorded payload's dropped, as are the drops a
+// comparison carries when the change filter does not record it. One
+// goroutine per city drains the queue into the city's events log as
 // session.program_status_shadow, opening the recorder lazily on the first
 // comparison and keeping it for the process.
 //
@@ -133,6 +134,8 @@ func (r *programShadowRecorder) offer(c runtime.ProgramStatusComparison) {
 	reading := programShadowReading{scrape: c.Scrape, program: c.Program, validity: c.Status.Validity}
 	if c.Point.RecordsOnChange() {
 		if prev, ok := r.last[key]; ok && prev == reading {
+			// The comparison is not recorded; the drops it carries are.
+			r.dropped.Add(int64(c.Dropped))
 			return
 		}
 	}
@@ -237,7 +240,10 @@ func shadowHold(sp runtime.Provider, sessName, sessionID, family string, point r
 // alphabet so no free text reaches the payload.
 var programShadowFamily = regexp.MustCompile(`^[a-z0-9][a-z0-9_.+-]{0,31}$`)
 
-// programShadowPayload is c's typed payload at now, carrying dropped.
+// programShadowPayload is c's typed payload recorded at now, carrying
+// dropped. The record's age and hold liveness are the ones its rule judged
+// with, at c's judged time: a timed point records after its follow-up, which
+// can end minutes after the decision.
 func programShadowPayload(c runtime.ProgramStatusComparison, dropped int, now time.Time) events.SessionProgramStatusShadowPayload {
 	s := c.Status
 	p := events.SessionProgramStatusShadowPayload{
@@ -265,8 +271,8 @@ func programShadowPayload(c runtime.ProgramStatusComparison, dropped int, now ti
 		if s.Blocked() {
 			p.Kind = string(s.Kind)
 		}
-		if !s.Since.IsZero() && now.After(s.Since) {
-			p.RecordAgeMs = now.Sub(s.Since).Milliseconds()
+		if judged := c.JudgedTime(now); !s.Since.IsZero() && judged.After(s.Since) {
+			p.RecordAgeMs = judged.Sub(s.Since).Milliseconds()
 		}
 	}
 	if c.Timed {

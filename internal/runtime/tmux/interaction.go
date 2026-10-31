@@ -47,7 +47,7 @@ func (p *Provider) shadowPending(name string, pending *runtime.PendingInteractio
 		if err != nil || s.Mode != runtime.ProgramStatusShadow {
 			return
 		}
-		p.tm.shadowEmit(name, runtime.ProgramPointPending, scrape, runtime.ProgramPendingVerdict(s, time.Time{}, now), s, 0, false)
+		p.tm.shadowEmit(name, runtime.ProgramPointPending, scrape, runtime.ProgramPendingVerdict(s, time.Time{}, now), s, now, 0, false)
 	})
 }
 

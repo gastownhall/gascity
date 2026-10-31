@@ -23,7 +23,12 @@ type shadowExecutor struct {
 	inner executor
 	// record returns the nth program read's published record.
 	record func(n int) string
-	reads  int
+	// dead reports whether the nth program read finds the pane dead; nil
+	// never does.
+	dead func(n int) bool
+	// tap returns the nth program read's tap nonce; nil reads readNonce.
+	tap   func(n int) string
+	reads int
 	// order is every command in the order sent, a program read as
 	// "program-read".
 	order []string
@@ -34,13 +39,19 @@ func (e *shadowExecutor) execute(args []string) (string, error) {
 	defer e.mu.Unlock()
 	switch {
 	case tmuxSubcommand(args) == "list-panes" && args[len(args)-1] == programFreshFormat:
-		rec := ""
+		rec, dead, tap := "", "0", readNonce
 		if e.record != nil {
 			rec = e.record(e.reads)
 		}
+		if e.dead != nil && e.dead(e.reads) {
+			dead = "1"
+		}
+		if e.tap != nil {
+			tap = e.tap(e.reads)
+		}
 		e.reads++
 		e.order = append(e.order, "program-read")
-		return strings.Join([]string{"0", "agent", "%5", "1", readNonce, rec, runtimeInventoryEnd}, "\t"), nil
+		return strings.Join([]string{dead, "agent", "%5", "1", tap, rec, runtimeInventoryEnd}, "\t"), nil
 	case tmuxSubcommand(args) == "show-environment" && strings.HasPrefix(args[len(args)-1], "="):
 		return "GC_PROVIDER=claude\nGC_SESSION_ID=gc-7\nSECRET=x", nil
 	}
@@ -412,7 +423,7 @@ func TestShadowGoDropsWhenFull(t *testing.T) {
 		t.Fatal("shadowGo blocked on full slots")
 	}
 	close(release)
-	tm.shadowEmit("s", runtime.ProgramPointPending, runtime.ProgramVerdictNone, runtime.ProgramVerdictNone, runtime.ProgramStatus{}, 0, false)
+	tm.shadowEmit("s", runtime.ProgramPointPending, runtime.ProgramVerdictNone, runtime.ProgramVerdictNone, runtime.ProgramStatus{}, time.Now(), 0, false)
 	if got := col.wait(t, 1)[0]; got.Dropped != 1 {
 		t.Fatalf("next comparison Dropped = %d, want 1", got.Dropped)
 	}
@@ -441,18 +452,235 @@ func (e *pendingPaneExecutor) executeCtx(_ context.Context, args []string) (stri
 }
 
 // Kills a readiness comparison that ignores the settle after the program's
-// first report, or records a wait its context ended.
+// first report, records a wait its context ended, stops following a capture
+// that is still silent (so a program that reports after the scrape decided is
+// never timed), or follows a capture that will not report.
 func TestShadowReadiness(t *testing.T) {
 	stubShadowFollow(t)
-	reported := psRecord(t, readNonce, runtime.ProgramIdle, func(s *runtime.ProgramStatus) { s.Since = time.Now().Add(-2 * time.Second) })
-	col := newShadowCollector()
-	tm, _ := shadowTmux(runtime.ProgramStatusShadow, &fakeExecutor{}, func(int) string { return reported }, col.sink)
-	tm.shadowReadiness("s", time.Now(), context.Canceled)
-	tm.shadowReadiness("s", time.Now(), nil)
-	got := col.wait(t, 1)
-	if len(got) != 1 || got[0].Point != runtime.ProgramPointReadiness || got[0].Scrape != runtime.ProgramVerdictReady ||
-		got[0].Program != runtime.ProgramVerdictReady || !got[0].Timed || got[0].LatencyMs >= 0 {
-		t.Fatalf("comparisons %+v, want one readiness ready/ready, timed, the record earlier", got)
+	t.Run("reported before the decision", func(t *testing.T) {
+		reported := psRecord(t, readNonce, runtime.ProgramIdle, func(s *runtime.ProgramStatus) { s.Since = time.Now().Add(-2 * time.Second) })
+		col := newShadowCollector()
+		tm, _ := shadowTmux(runtime.ProgramStatusShadow, &fakeExecutor{}, func(int) string { return reported }, col.sink)
+		tm.shadowReadiness("s", time.Now(), context.Canceled)
+		tm.shadowReadiness("s", time.Now(), nil)
+		got := col.wait(t, 1)
+		if len(got) != 1 || got[0].Point != runtime.ProgramPointReadiness || got[0].Scrape != runtime.ProgramVerdictReady ||
+			got[0].Program != runtime.ProgramVerdictReady || !got[0].Timed || got[0].LatencyMs >= 0 {
+			t.Fatalf("comparisons %+v, want one readiness ready/ready, timed, the record earlier", got)
+		}
+	})
+	t.Run("first report after the decision", func(t *testing.T) {
+		decided := time.Now().Truncate(time.Millisecond)
+		first := psRecord(t, readNonce, runtime.ProgramIdle, func(s *runtime.ProgramStatus) { s.Since = decided.Add(time.Second) })
+		// Silent, silent, then the program's first report.
+		records := []string{"", "", first}
+		col := newShadowCollector()
+		tm, ex := shadowTmux(runtime.ProgramStatusShadow, &fakeExecutor{}, func(n int) string { return records[min(n, 2)] }, col.sink)
+		tm.shadowReadiness("s", decided, nil)
+		got := col.wait(t, 1)[0]
+		if got.Scrape != runtime.ProgramVerdictReady || got.Program != runtime.ProgramVerdictNotReady || got.Status.Validity != runtime.ProgramStatusSilent {
+			t.Fatalf("comparison %+v, want ready/not_ready on the silent reading judged at the decision", got)
+		}
+		want := (time.Second + runtime.ProgramStatusReadySettle).Milliseconds()
+		if !got.Timed || got.LatencyMs != want {
+			t.Fatalf("comparison timed %v latency %d ms, want timed %d ms (first report plus settle after the decision)", got.Timed, got.LatencyMs, want)
+		}
+		if reads := ex.programReads(); reads != 3 {
+			t.Fatalf("took %d program reads, want 3: through both silent readings to the report", reads)
+		}
+	})
+	t.Run("capture ends before a report", func(t *testing.T) {
+		col := newShadowCollector()
+		tm, ex := shadowTmux(runtime.ProgramStatusShadow, &fakeExecutor{}, func(int) string { return "" }, col.sink)
+		ex.dead = func(n int) bool { return n >= 1 }
+		tm.shadowReadiness("s", time.Now(), nil)
+		got := col.wait(t, 1)[0]
+		if got.Timed || got.Status.Validity != runtime.ProgramStatusSilent {
+			t.Fatalf("comparison %+v, want untimed on the silent reading judged at the decision", got)
+		}
+		if reads := ex.programReads(); reads != 2 {
+			t.Fatalf("took %d program reads, want 2: the follow-up ends at the exited reading", reads)
+		}
+	})
+}
+
+// Kills a comparison that carries a follow-up's last reading instead of the
+// reading its rule judged at the decision, or that does not say when it
+// judged: a record cleared or lost during the follow-up would turn a valid
+// disagreement into capture noise, one that moved on would pair the verdict
+// with a state it was not taken from, and the hold liveness and record age
+// recorded beside it would be the follow-up's, minutes after the decision.
+func TestShadowComparisonCarriesDecisionReading(t *testing.T) {
+	stubShadowFollow(t)
+	working := func(t *testing.T) string { return psRecord(t, readNonce, runtime.ProgramWorking, liveSince) }
+	ended := func(t *testing.T) string {
+		return psRecord(t, readNonce, runtime.ProgramIdle, liveSince, func(s *runtime.ProgramStatus) {
+			s.Seq, s.TurnStarts, s.TurnEnds, s.QuietSince = 3, 1, 1, time.Now()
+		})
+	}
+	cleared := func(t *testing.T) string {
+		return psRecord(t, readNonce, "", func(s *runtime.ProgramStatus) { s.Seq, s.Reported = 3, true })
+	}
+	idle := runtime.ProgramStatus{Validity: runtime.ProgramStatusValid, State: runtime.ProgramIdle, Nonce: readNonce, Seq: 1}
+	cases := []struct {
+		name      string
+		records   func(t *testing.T) []string
+		run       func(tm *Tmux, decided time.Time)
+		program   runtime.ProgramVerdict
+		state     runtime.ProgramState
+		wantTimed bool
+	}{
+		{
+			name:    "wait_for_idle: working, then cleared",
+			records: func(t *testing.T) []string { return []string{working(t), cleared(t)} },
+			run: func(tm *Tmux, decided time.Time) {
+				tm.shadowWaitForIdle("s", decided, decided, nil)
+			},
+			program: runtime.ProgramVerdictBusy, state: runtime.ProgramWorking,
+		},
+		{
+			name:    "wait_for_idle: working, then idle",
+			records: func(t *testing.T) []string { return []string{working(t), ended(t)} },
+			run: func(tm *Tmux, decided time.Time) {
+				tm.shadowWaitForIdle("s", decided, decided, nil)
+			},
+			program: runtime.ProgramVerdictBusy, state: runtime.ProgramWorking, wantTimed: true,
+		},
+		{
+			name: "submit_confirm: not advanced, then cleared",
+			records: func(t *testing.T) []string {
+				return []string{psRecord(t, readNonce, runtime.ProgramIdle, liveSince), cleared(t)}
+			},
+			run: func(tm *Tmux, decided time.Time) {
+				tm.shadowSubmit("s", idle.Baseline(), runtime.ProgramVerdictConfirmed, decided)
+			},
+			program: runtime.ProgramVerdictUnconfirmed, state: runtime.ProgramIdle,
+		},
+		{
+			name:    "interrupt_settle: working, then settled",
+			records: func(t *testing.T) []string { return []string{working(t), ended(t)} },
+			run: func(tm *Tmux, decided time.Time) {
+				mark := shadowInterrupt{baseline: runtime.ProgramStatus{Validity: runtime.ProgramStatusValid, State: runtime.ProgramWorking, Nonce: readNonce, Seq: 1}.Baseline(), at: decided}
+				tm.shadowSettleFrom("s", mark, decided, nil)
+			},
+			program: runtime.ProgramVerdictUnsettled, state: runtime.ProgramWorking, wantTimed: true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			records := c.records(t)
+			col := newShadowCollector()
+			tm, ex := shadowTmux(runtime.ProgramStatusShadow, &fakeExecutor{}, func(n int) string { return records[min(n, len(records)-1)] }, col.sink)
+			decided := time.Now()
+			c.run(tm, decided)
+			got := col.wait(t, 1)[0]
+			if got.Program != c.program || got.Timed != c.wantTimed {
+				t.Fatalf("comparison %+v, want program %s timed %v", got, c.program, c.wantTimed)
+			}
+			if got.Status.Validity != runtime.ProgramStatusValid || got.Status.State != c.state {
+				t.Fatalf("comparison carries a %q %q reading, want the valid %q one judged at the decision", got.Status.Validity, got.Status.State, c.state)
+			}
+			if !got.JudgedAt.Equal(decided) {
+				t.Fatalf("comparison judged at %v, want the decision's %v", got.JudgedAt, decided)
+			}
+			if reads := ex.programReads(); reads != 2 {
+				t.Fatalf("took %d program reads, want 2: the decision's and one follow-up read", reads)
+			}
+		})
+	}
+}
+
+// Kills a follow-up that misses a boundary shorter than its poll: gc types
+// its delivery as soon as the scrape reads idle, so the program's boundary
+// lasts only until that delivery starts its next turn, and the follow-up
+// would time the delivered turn's end instead. A turn that ended since the
+// decision is the boundary, timed at its QuietSince when it is the only one;
+// with more the first one's time is gone, and a boundary of another
+// incarnation is not this decision's at all.
+func TestShadowFollowUpTimesTheFirstBoundary(t *testing.T) {
+	stubShadowFollow(t)
+	const respawnNonce = "r3spawn.%5"
+	decided := time.Now().Truncate(time.Millisecond)
+	ended := decided.Add(300 * time.Millisecond) // the boundary the delivery left at once
+	later := decided.Add(5 * time.Second)        // the delivered turn's own end
+	working := func(t *testing.T) string {
+		return psRecord(t, readNonce, runtime.ProgramWorking, func(s *runtime.ProgramStatus) { s.Since = decided })
+	}
+	// resumed is the record back at work after turns ended since the
+	// decision, the last of them at quiet.
+	resumed := func(t *testing.T, turns uint32, quiet time.Time) string {
+		return psRecord(t, readNonce, runtime.ProgramWorking, func(s *runtime.ProgramStatus) {
+			s.Seq, s.TurnStarts, s.TurnEnds, s.QuietSince, s.Since = 2+2*uint64(turns), 1+turns, turns, quiet, quiet
+		})
+	}
+	quietAfter := func(t *testing.T, turns uint32, quiet time.Time) string {
+		return psRecord(t, readNonce, runtime.ProgramIdle, func(s *runtime.ProgramStatus) {
+			s.Seq, s.TurnStarts, s.TurnEnds, s.QuietSince, s.Since = 2+2*uint64(turns), turns, turns, quiet, quiet
+		})
+	}
+	wait := func(tm *Tmux) { tm.shadowWaitForIdle("s", decided.Add(-time.Second), decided, nil) }
+	settle := func(tm *Tmux) {
+		baseline := runtime.ProgramStatus{Validity: runtime.ProgramStatusValid, State: runtime.ProgramWorking, Nonce: readNonce, Seq: 1}.Baseline()
+		tm.shadowSettleFrom("s", shadowInterrupt{baseline: baseline, at: decided.Add(-time.Second)}, decided, nil)
+	}
+	cases := []struct {
+		name      string
+		records   func(t *testing.T) []string
+		tap       func(n int) string
+		run       func(tm *Tmux)
+		wantTimed bool
+		wantMs    int64
+	}{
+		{
+			name: "wait_for_idle: one turn ended, the next started",
+			records: func(t *testing.T) []string {
+				return []string{working(t), resumed(t, 1, ended), quietAfter(t, 2, later)}
+			},
+			run: wait, wantTimed: true, wantMs: 300,
+		},
+		{
+			name: "interrupt_settle: one turn ended, the next started",
+			records: func(t *testing.T) []string {
+				return []string{working(t), resumed(t, 1, ended), quietAfter(t, 2, later)}
+			},
+			run: settle, wantTimed: true, wantMs: 300,
+		},
+		{
+			name: "wait_for_idle: two turns ended",
+			records: func(t *testing.T) []string {
+				return []string{working(t), resumed(t, 2, later), quietAfter(t, 3, later)}
+			},
+			run: wait,
+		},
+		{
+			name: "wait_for_idle: the next incarnation's boundary",
+			records: func(t *testing.T) []string {
+				return []string{working(t), psRecord(t, respawnNonce, runtime.ProgramIdle, func(s *runtime.ProgramStatus) { s.Since = ended })}
+			},
+			tap: func(n int) string {
+				if n == 0 {
+					return readNonce
+				}
+				return respawnNonce
+			},
+			run: wait,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			records := c.records(t)
+			col := newShadowCollector()
+			tm, ex := shadowTmux(runtime.ProgramStatusShadow, &fakeExecutor{}, func(n int) string { return records[min(n, len(records)-1)] }, col.sink)
+			ex.tap = c.tap
+			c.run(tm)
+			got := col.wait(t, 1)[0]
+			if got.Timed != c.wantTimed || (c.wantTimed && got.LatencyMs != c.wantMs) {
+				t.Fatalf("comparison timed %v latency %d ms, want timed %v latency %d ms", got.Timed, got.LatencyMs, c.wantTimed, c.wantMs)
+			}
+			if reads := ex.programReads(); reads != 2 {
+				t.Fatalf("took %d program reads, want 2: the follow-up ends at the first reading past the decision's turn", reads)
+			}
+		})
 	}
 }
 
@@ -632,7 +860,7 @@ func TestShadowGoRecoversPanic(t *testing.T) {
 	if held := len(tm.shadow.slots); held != 0 {
 		t.Fatalf("a panicking shadow goroutine kept its slot (%d held)", held)
 	}
-	tm.shadowEmit("s", runtime.ProgramPointPending, runtime.ProgramVerdictNone, runtime.ProgramVerdictNone, runtime.ProgramStatus{}, 0, false)
+	tm.shadowEmit("s", runtime.ProgramPointPending, runtime.ProgramVerdictNone, runtime.ProgramVerdictNone, runtime.ProgramStatus{}, time.Now(), 0, false)
 	if got := col.wait(t, 1)[0]; got.Dropped != 1 {
 		t.Fatalf("next comparison Dropped = %d, want the panicked one", got.Dropped)
 	}

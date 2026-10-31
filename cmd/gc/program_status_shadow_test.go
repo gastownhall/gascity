@@ -12,9 +12,11 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -238,6 +240,50 @@ func TestShadowSinkNeverBlocks(t *testing.T) {
 	}
 }
 
+// Kills a change filter that discards the drops a comparison carries: an
+// unchanged change-point comparison is not recorded, but the leaf's drops it
+// carries ride on the next recorded payload.
+func TestShadowCarriesDropsPastTheChangeFilter(t *testing.T) {
+	c := &eventCollector{}
+	sink, r := shadowRecorderUnder(t, c)
+	pending := comparison("s", runtime.ProgramPointPending, runtime.ProgramVerdictNone, runtime.ProgramVerdictNone)
+	sink(pending)
+	unchanged := pending
+	unchanged.Dropped = 5
+	sink(unchanged)
+	sink(comparison("s", runtime.ProgramPointWaitForIdle, runtime.ProgramVerdictIdle, runtime.ProgramVerdictIdle))
+	if !r.flush(5 * time.Second) {
+		t.Fatal("flush timed out")
+	}
+	got := c.payloads(t)
+	dropped := 0
+	for _, p := range got {
+		dropped += p.Dropped
+	}
+	if len(got) != 2 || dropped != 5 {
+		t.Fatalf("recorded %d comparisons carrying %d dropped, want 2 carrying 5", len(got), dropped)
+	}
+}
+
+// Kills a payload whose record age and hold liveness are taken when the
+// comparison is written rather than when its rule judged: a timed point is
+// written after its follow-up, up to the hold bound after the decision.
+func TestShadowPayloadDescribesTheDecision(t *testing.T) {
+	judged := time.Date(2026, 11, 2, 8, 0, 0, 0, time.UTC)
+	c := runtime.ProgramStatusComparison{
+		Session: "s", Point: runtime.ProgramPointWaitForIdle, Scrape: runtime.ProgramVerdictIdle, Program: runtime.ProgramVerdictBusy,
+		Status: runtime.ProgramStatus{
+			Mode: runtime.ProgramStatusShadow, Validity: runtime.ProgramStatusValid, State: runtime.ProgramWorking,
+			Since: judged.Add(-3 * time.Second),
+		},
+		JudgedAt: judged,
+	}
+	p := programShadowPayload(c, 0, judged.Add(runtime.ProgramStatusHoldLimit))
+	if p.RecordAgeMs != 3000 || !p.HoldLive {
+		t.Fatalf("payload record_age_ms %d hold_live %v, want 3000 and true: the record as its rule judged it", p.RecordAgeMs, p.HoldLive)
+	}
+}
+
 // Kills a tmux config whose shadow sink depends on the switch it was built
 // under: a reload that publishes shadow to a leaf built under off or on must
 // find the sink there (the leaf hands it out only under shadow; tmux
@@ -353,9 +399,12 @@ func TestShadowReportAgreementTable(t *testing.T) {
 		rec(30, "b", "wait_for_idle", "claude", "silent", false, 0, false, 0),
 		rec(40, "c", "wait_for_idle", "codex", "valid", true, 100, true, 0),
 		rec(100, "c", "pending", "", "valid", true, 0, false, 0),
+		// Readiness judged a silent capture at the decision and timed the
+		// program's first report after it.
+		rec(50, "d", "readiness", "claude", "silent", false, 1800, true, 0),
 	})
-	if report.Total != 8 || report.Dropped != 2 {
-		t.Fatalf("total %d dropped %d, want 8 and 2", report.Total, report.Dropped)
+	if report.Total != 9 || report.Dropped != 2 {
+		t.Fatalf("total %d dropped %d, want 9 and 2", report.Total, report.Dropped)
 	}
 	cells := map[string]programShadowCell{}
 	for _, c := range report.Rows {
@@ -376,6 +425,10 @@ func TestShadowReportAgreementTable(t *testing.T) {
 	}
 	if _, ok := cells["pending/unknown"]; !ok {
 		t.Fatalf("a comparison with no family is not reported as unknown: %+v", report.Rows)
+	}
+	if ready := cells["readiness/claude"]; ready.Valid != 0 || ready.AgreePct != -1 || ready.Timed != 1 || ready.LatencyP50Ms != 1800 ||
+		ready.DisagreeByValidity["silent"] != 1 {
+		t.Fatalf("readiness cell %+v, want its timed latency counted though the reading judged at the decision was silent", ready)
 	}
 }
 
@@ -416,6 +469,37 @@ func TestProvedIdleMarksItsWaitCallerRecorded(t *testing.T) {
 	got := c.payloads(t)
 	if len(got) != 1 || got[0].Point != string(runtime.ProgramPointProvedIdle) {
 		t.Fatalf("400 failed proofs recorded %+v, want one proved_idle", got)
+	}
+}
+
+// Kills a legacy reconciler idle probe whose leaf wait records a
+// wait_for_idle of its own (R1B M1 on the legacy path, which a city runs by
+// its config or by fallback): like provedIdle, the probe, launched again
+// every tick while its seat is busy, marks its wait as recorded by its
+// caller and records the proof as proved_idle, which records only when its
+// pair changes.
+func TestLaunchIdleProbesMarksItsWaitCallerRecorded(t *testing.T) {
+	shadow, _ := shadowLeaf(t, runtime.ProgramStatusShadow)
+	offered := make(chan runtime.ProgramStatusComparison, 1)
+	shadow.ProgramShadowSink = func(c runtime.ProgramStatusComparison) { offered <- c }
+	shadow.WaitForIdleErrors["s"] = errors.New("busy")
+	leaf := &ctxCapturingLeaf{FullFake: shadow}
+	info := sessionpkg.Info{ID: "gc-1", SessionNameMetadata: "s"}
+	launchIdleProbes(context.Background(), map[string]bool{"gc-1": true}, []wakeTarget{{info: info}},
+		newDrainTracker(), leaf, clock.Real{}, map[string]sessionpkg.Info{"gc-1": info})
+	var got runtime.ProgramStatusComparison
+	select {
+	case got = <-offered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the idle probe recorded no comparison")
+	}
+	if got.Point != runtime.ProgramPointProvedIdle || got.Scrape != runtime.ProgramVerdictBusy {
+		t.Fatalf("the idle probe recorded %+v, want proved_idle beside its failed proof", got)
+	}
+	// The probe records after its wait returns, so the wait's context is
+	// set by now.
+	if !runtime.ShadowCallerRecords(leaf.waitCtx) {
+		t.Fatal("the idle probe's wait is not marked as recorded by its caller")
 	}
 }
 

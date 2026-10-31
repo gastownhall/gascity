@@ -152,16 +152,24 @@ func (p *effectPass) readSignalWork(row session.Info, it intent) *txWork {
 
 // provedIdle is legacy's idle probe (shouldBeginIdleDrainInfo) on leaf:
 // WaitForIdle succeeds, and the runtime reports no activity after the pass
-// began.
-//
-// Under the program-status shadow switch the proof is recorded beside the
-// record's own (proved_idle: two quiescent readings, one before the proof and
-// one after, under one nonce and Seq); the proof returned is legacy's alone.
-// proved_idle covers the proof's leaf wait, so that wait records no
-// wait_for_idle of its own (runtime.WithShadowCallerRecords).
+// began. It is recorded as an idle proof (shadowIdleProof).
 func provedIdle(ctx context.Context, leaf runtime.Provider, name string, passNow time.Time) bool {
+	return shadowIdleProof(ctx, leaf, name, func(ctx context.Context) bool {
+		return legacyProvedIdle(ctx, leaf, name, passNow)
+	})
+}
+
+// shadowIdleProof runs prove, an idle proof of session name on leaf, and
+// returns its verdict. Under the program-status shadow switch the proof is
+// recorded beside the record's own (proved_idle: two quiescent readings, one
+// before the proof and one after, under one nonce and Seq); the proof
+// returned is prove's alone. proved_idle covers the proof's leaf wait, so
+// prove's ctx is marked and that wait records no wait_for_idle of its own
+// (runtime.WithShadowCallerRecords): a busy seat's idle proof fails every
+// tick.
+func shadowIdleProof(ctx context.Context, leaf runtime.Provider, name string, prove func(context.Context) bool) bool {
 	before, _, shadowed := runtime.ProgramStatusShadowFor(leaf, name)
-	proved := legacyProvedIdle(runtime.WithShadowCallerRecords(ctx), leaf, name, passNow)
+	proved := prove(runtime.WithShadowCallerRecords(ctx))
 	if shadowed {
 		scrape := runtime.ProgramVerdictBusy
 		if proved {

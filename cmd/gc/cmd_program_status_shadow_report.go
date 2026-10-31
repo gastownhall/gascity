@@ -140,8 +140,11 @@ type programShadowCell struct {
 	// DisagreeByValidity counts the comparisons whose readings disagree, by
 	// the record reading's validity.
 	DisagreeByValidity map[string]int `json:"disagree_by_validity"`
-	// LatencyP50Ms and LatencyP95Ms are over valid timed comparisons; Timed
-	// is how many there were.
+	// LatencyP50Ms and LatencyP95Ms are over timed comparisons; Timed is how
+	// many there were. A comparison is timed only when a valid reading showed
+	// the program's signal, so its latency counts whatever the validity of the
+	// reading judged at the decision (readiness's, before the first report,
+	// is silent).
 	Timed        int   `json:"timed"`
 	LatencyP50Ms int64 `json:"latency_p50_ms"`
 	LatencyP95Ms int64 `json:"latency_p95_ms"`
@@ -206,6 +209,9 @@ func summarizeProgramShadow(records []programShadowRecord) programShadowReport {
 		if !p.Agree {
 			a.cell.DisagreeByValidity[p.Validity]++
 		}
+		if p.Timed {
+			a.latencies = append(a.latencies, p.LatencyMs)
+		}
 		if p.Validity != string(runtime.ProgramStatusValid) {
 			continue
 		}
@@ -214,9 +220,6 @@ func summarizeProgramShadow(records []programShadowRecord) programShadowReport {
 		if p.Agree {
 			a.cell.Agree++
 			a.agreeTime += standing[i]
-		}
-		if p.Timed {
-			a.latencies = append(a.latencies, p.LatencyMs)
 		}
 	}
 	for _, a := range cells {
