@@ -457,6 +457,8 @@ func (p *decidePass) realizePools() {
 func (p *decidePass) realizeRequest(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, prefer *session.Info, request SessionRequest, used map[string]bool, usedSlots map[int]bool) {
 	info, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, request, p.in.Now, used, usedSlots)
 	switch {
+	case errors.Is(err, errPoolTriggerWorktreeEvidence):
+		p.refuseWork(qualifiedName, "", rowKey{}, request, err)
 	case err != nil:
 		p.refuse(qualifiedName, "", rowKey{}, planErrorCause(err))
 	case plan != nil:
@@ -503,10 +505,11 @@ func (p *decidePass) selectPoolRow(cfgAgent *config.Agent, info session.Info, sl
 	// whose liveness is unknown, keeps its selection and gets no binding.
 	if p.snap.Entries[k].Liveness.startCandidate() {
 		workDir, err := verifiedPoolTriggerWorkDir(p.bp, cfgAgent, ref.QualifiedInstance, request)
-		if err == nil && p.worktreeRefused(request) {
-			err = errPoolTriggerWorktreeEvidence
-		}
-		if err != nil {
+		switch {
+		case err != nil:
+			p.refuseWork(cfgAgent.QualifiedName(), ref.QualifiedInstance, k, request, err)
+			return
+		case p.worktreeRefused(request):
 			p.refuse(cfgAgent.QualifiedName(), ref.QualifiedInstance, k, gateWorktreeRefused)
 			return
 		}
@@ -818,6 +821,18 @@ func (p *decidePass) bindings() {
 // refuse traces a refused plan or skipped selection; it consumes nothing.
 func (p *decidePass) refuse(template, instance string, k rowKey, cause string) {
 	p.trace = append(p.trace, allocTraceRecord{Template: template, Instance: instance, Key: k, Reason: "ineligible:" + cause})
+}
+
+// refuseWork traces a request refused because the pass found its worktree
+// evidence unusable (incomplete or conflicting, or naming another bead or
+// store), with its work item and err. Such a request never reaches a create
+// effect, whose verification failures log themselves, so the record is all
+// that reports it; a request refused while a failed verification's backoff
+// is live is traced by refuse alone.
+func (p *decidePass) refuseWork(template, instance string, k rowKey, request SessionRequest, err error) {
+	p.refuse(template, instance, k, gateWorktreeRefused)
+	r := &p.trace[len(p.trace)-1]
+	r.WorkBeadID, r.Detail = strings.TrimSpace(request.WorkBeadID), err.Error()
 }
 
 // createRefused returns the cause of a create backoff live at Now for the
