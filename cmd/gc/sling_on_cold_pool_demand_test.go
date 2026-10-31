@@ -217,3 +217,138 @@ title = "Do work"
 		t.Fatalf("cold-pool demand after graph.v2 --on = %d, want 1 (work stranded if 0)", got)
 	}
 }
+
+// TestOnFormulaGraphV2RawRoutedThenWrappedIsSingleDemand closes the loop on
+// the PR #7846 repro shape: a work bead first routed by a PLAIN pool sling
+// (gc.routed_to=<pool>, the only key built-in plain sling stamps) and then
+// wrapped by a graph.v2 pour formula via --on. The wrap must clear the
+// source's claim-semantics route: if the stale gc.routed_to survives, the
+// source stays open + unassigned + routed next to the workflow's executable
+// step, and a cold pool reads demand 2 for one job — two spawned workers
+// racing over independent paths. After the wrap the routed, unassigned
+// executable step is the ONLY demand unit.
+func TestOnFormulaGraphV2RawRoutedThenWrappedIsSingleDemand(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	maxPolecats := 5
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	applyFeatureFlags(cfg)
+	t.Cleanup(func() { applyFeatureFlags(&config.City{}) })
+	dir := testFormulaDir(t)
+	cfg.FormulaLayers.City = []string{dir}
+	graphFormula := `
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`
+	if err := os.WriteFile(filepath.Join(dir, "graph-work.toml"), []byte(graphFormula), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	store := beads.NewMemStoreFrom(1, []beads.Bead{
+		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
+	}, nil)
+	deps.Store = store
+	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "")
+
+	// City-level pool target: pooled so the executable step binds MetadataOnly
+	// (routed + unassigned) rather than being pre-assigned to a fixed session.
+	a := config.Agent{Name: "polecat", MaxActiveSessions: &maxPolecats}
+
+	// Step 1: a real plain sling routes BL-42 to the pool. This is the exact
+	// routing a user does before deciding to wrap the bead with a workflow.
+	// (No scope: plain slings are not formula-backed, and doSling rejects
+	// scope on a non-formula launch.)
+	plainOpts := testOpts(a, "BL-42")
+	if code := doSling(plainOpts, deps, nil, stdout, stderr); code != 0 {
+		t.Fatalf("plain doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	preRouted, err := store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("get source after plain sling: %v", err)
+	}
+	if got := preRouted.Metadata["gc.routed_to"]; got != "polecat" {
+		t.Fatalf("precondition broken: plain sling left gc.routed_to = %q, want polecat (if plain sling stops routing, this repro no longer reproduces the bug)", got)
+	}
+
+	// Step 2: wrap the now-routed bead with the graph.v2 formula.
+	wrapOpts := testOpts(a, "BL-42")
+	wrapOpts.OnFormula = "graph-work"
+	wrapOpts.ScopeKind = "city"
+	wrapOpts.ScopeRef = "test-city"
+	if code := doSling(wrapOpts, deps, nil, stdout, stderr); code != 0 {
+		t.Fatalf("doSling --on graph-work returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	// The source is now an input-convoy member: open, unassigned, and carrying
+	// the execution route instead of the claim route.
+	source, err := store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("get source after wrap: %v", err)
+	}
+	if got := source.Status; got != "open" {
+		t.Fatalf("source status = %q, want open", got)
+	}
+	if got := source.Assignee; got != "" {
+		t.Fatalf("source assignee = %q, want empty (unassigned)", got)
+	}
+	if got := source.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("source gc.routed_to = %q after graph.v2 wrap, want empty (stale claim route doubles cold-pool demand next to the executable step)", got)
+	}
+	if got := source.Metadata["gc.execution_routed_to"]; got != "polecat" {
+		t.Fatalf("source gc.execution_routed_to = %q, want polecat", got)
+	}
+
+	// Classify the workflow beads: the root must be in_progress+routed (thus
+	// excluded from demand), and EXACTLY ONE executable step may remain
+	// open+routed+unassigned — the single demand unit for this job.
+	all, err := store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("list beads: %v", err)
+	}
+	var root beads.Bead
+	readySteps := 0
+	for _, b := range all {
+		if b.Metadata["gc.kind"] == "workflow" && b.Metadata["gc.routed_to"] == "polecat" {
+			root = b
+			continue
+		}
+		if b.ID != "BL-42" &&
+			b.Metadata["gc.routed_to"] == "polecat" &&
+			b.Metadata["gc.kind"] != "workflow-finalize" &&
+			b.Status == "open" && b.Assignee == "" {
+			readySteps++
+		}
+	}
+	if root.ID == "" {
+		t.Fatalf("no routed workflow root found; beads=%#v", all)
+	}
+	if got := root.Status; got != "in_progress" {
+		t.Fatalf("workflow root status = %q, want in_progress", got)
+	}
+	if readySteps != 1 {
+		t.Fatalf("open+routed+unassigned executable steps = %d, want exactly 1 (the workflow step must be the only demand unit); beads=%#v", readySteps, all)
+	}
+
+	// The anti-stranding invariant, sharpened against this repro: a cold pool
+	// sees EXACTLY one unit of demand for the wrapped job. With the stale
+	// source route this was 2 (source + step), spawning two racing workers.
+	counts, partials, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{
+		defaultScaleCheckTargetForAgent(sharedTestCityDir, cfg, &a, store, nil),
+	})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errors: %v", errs)
+	}
+	if len(partials) != 0 {
+		t.Fatalf("defaultScaleCheckCounts partials: %v", partials)
+	}
+	if got := counts["polecat"]; got != 1 {
+		t.Fatalf("cold-pool demand for wrapped pre-routed bead = %d, want exactly 1 (2 means the stale source route still counts next to the workflow step)", got)
+	}
+}
