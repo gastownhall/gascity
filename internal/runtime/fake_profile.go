@@ -144,7 +144,7 @@ var profileCapabilities = map[Profile]ProviderCapabilities{
 	ProfileACP:      {CanReportActivity: true},
 	ProfileHerdr:    {CanReportActivity: true, CanStream: true, CanAttachTTY: true, NeedsClaimBackstop: true},
 	ProfileK8s:      {CanReportActivity: true},
-	ProfileSSH:      {CanReportActivity: true},
+	ProfileSSH:      {CanReportActivity: true, CanAttachTTY: true},
 	ProfileT3Bridge: {CanReportActivity: true},
 }
 

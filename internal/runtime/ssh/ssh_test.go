@@ -94,6 +94,7 @@ func TestSSHArgs_BuildsClientInvocation(t *testing.T) {
 	want := []string{
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "LogLevel=ERROR",
 		"-o", "UserKnownHostsFile=/k/known",
 		"-i", "/k/id",
 		"-p", "2222",
@@ -110,6 +111,7 @@ func TestSSHArgs_MinimalEndpoint(t *testing.T) {
 	want := []string{
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "LogLevel=ERROR",
 		"--", "box", "'true'",
 	}
 	if !slices.Equal(got, want) {

@@ -8,8 +8,9 @@ import (
 
 // seamBackedProvider serves the legacy [runtime.Provider] through the
 // de-conflated seams (via [runtime.NewProviderFromSeams]), passing SleepCapability,
-// Relaunch, and the error-bearing probes (attachment, liveness, Peek) through to
-// the underlying *Provider. The early cut-over for the ssh provider.
+// Relaunch, Capabilities, and the error-bearing probes (attachment, liveness,
+// Peek) through to the underlying *Provider. The early cut-over for the ssh
+// provider.
 //
 // ExecProvider is not passed through: ssh's Exec (over the connection) is what
 // the carrier drives over internally; no production caller type-asserts it.
@@ -45,6 +46,14 @@ func (s *seamBackedProvider) SleepCapability(name string) runtime.SessionSleepCa
 // (respawn-pane over the ssh Conn; B2, RelaunchProvider).
 func (s *seamBackedProvider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
 	return s.raw.Relaunch(ctx, name, cfg)
+}
+
+// Capabilities passes through to the underlying provider: the seams carry
+// only activity and attachment reporting, and the destructive-action fence
+// reads CanAttachTTY to keep ssh, whose sessions a human can attach to
+// without the box reporting it, on its quiet window.
+func (s *seamBackedProvider) Capabilities() runtime.ProviderCapabilities {
+	return s.raw.Capabilities()
 }
 
 // IsAttachedWithError passes through to the underlying provider's single
