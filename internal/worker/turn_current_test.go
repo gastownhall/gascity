@@ -185,7 +185,9 @@ func TestTurnHistoryFromScan(t *testing.T) {
 	t.Run("a failed turn keeps the error its source recorded", func(t *testing.T) {
 		cooling := sessionlog.TurnFailure{Code: "rate_limit", Status: 429, RateLimited: true, Message: "API Error: Request rejected (429) · pool cooling for another 3d 16h"}
 		overloaded := sessionlog.TurnFailure{Code: "server_error", Status: 529, Message: "API Error: overloaded"}
+		spent := sessionlog.TurnFailure{Code: "usage_limit_exceeded", RateLimited: true, Quota: true, Message: "You've hit your usage limit."}
 		got, err := turnHistoryFromScan(sessionlog.TurnScan{Recent: []sessionlog.ScannedTurn{
+			{ID: "spent", StartedAt: at, EndedAt: at, Status: sessionlog.TurnStatusFailed, Failure: spent},
 			{ID: "refused", StartedAt: at, EndedAt: at, Status: sessionlog.TurnStatusFailed, Failure: cooling},
 			{ID: "overloaded", StartedAt: at, EndedAt: at, Status: sessionlog.TurnStatusFailed, Failure: overloaded},
 			{ID: "done", StartedAt: at, EndedAt: at, Status: sessionlog.TurnStatusCompleted},
@@ -194,6 +196,7 @@ func TestTurnHistoryFromScan(t *testing.T) {
 			t.Fatalf("turnHistoryFromScan: %v", err)
 		}
 		want := []runtime.TurnFailure{
+			{Code: "usage_limit_exceeded", RateLimited: true, Quota: true, Message: spent.Message},
 			{Code: "rate_limit", HTTPStatus: 429, RateLimited: true, Message: cooling.Message},
 			{Code: "server_error", HTTPStatus: 529, Message: overloaded.Message},
 			{},

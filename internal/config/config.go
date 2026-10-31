@@ -2959,7 +2959,17 @@ type DaemonConfig struct {
 	// unanswered nudge (a nudge the seat could not take, such as one held at
 	// a permission prompt, does not count). A claim whose metadata
 	// gc.awaiting_human names its seat (the seat asked a person and waits on
-	// their decision) is not nudged, recycled or released. "off" runs the
+	// their decision) is not nudged, recycled or released. A seat whose
+	// provider refuses its turns with a rate limit (two in a row, as its own
+	// transcript records them, the newest after a nudge it took) is paced as
+	// on a degraded provider, and after 10 minutes restarted on a fresh
+	// conversation once, keeping its claims, at most one seat per provider
+	// per 30 minutes and once per seat per hour; if the fresh conversation is
+	// refused too (or the refusal is a spent usage quota, or a person is
+	// attached), one alert names the provider and the seat stays paced until
+	// its provider serves it. Every move is a work.rate_limited event, on
+	// which a pack may hold the provider through provider-health.json. Seats
+	// whose turns cannot be read are judged on their activity alone. "off" runs the
 	// three backstops it replaced (idle-claim, continuation, execution)
 	// instead: the rollback. Read on every pass, so a config reload applies.
 	// Legacy ignores it.

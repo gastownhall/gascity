@@ -557,6 +557,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-claimed by another seat is paced as usual. Pack formulas write and clear
   the key; gc only reads it.
 
+- **The work ladder restarts a rate-limited seat on a fresh conversation, once
+  per episode, and reports every move as `work.rate_limited`.** With
+  `[daemon] work_ladder` on, a seat whose provider refused its last two turns
+  with a rate limit (as the agent CLI's own transcript classifies them: HTTP
+  429, Claude Code's `rate_limit`, Codex's `usage_limit_exceeded`), the newer
+  ending after a nudge the seat took, opens a rate-limit episode, kept on the
+  seat's `work_ladder` cell. While it stands the seat is paced as on a
+  degraded provider: nudges every 10 minutes that count toward nothing, and
+  no drain, release or escalation. After 10 minutes it is restarted in place
+  on a fresh conversation (`gc session reset`'s request), keeping its claims,
+  unless a person is attached to it, its work awaits a person, a claim cannot
+  be re-read, or another seat on the same provider was restarted fresh in the
+  last 30 minutes. If the fresh conversation is refused too, if the refusal
+  is a spent usage quota, or if the seat was restarted fresh within the hour,
+  one `work.escalated` alert names the provider and quotes its refusal, and
+  the seat stays paced until the provider serves it. Every move (`opened`,
+  `restarted`, `held`, `exhausted`, `closed`) is a typed `work.rate_limited`
+  event carrying the provider, the conversation, the CLI's error class and
+  text, and the seat's started claims, so a pack can decide whether a pool is
+  refusing every seat and hold the provider through `provider-health.json`,
+  which pauses its seats and their respawns. Every `work.*` event now names
+  the seat's provider. Seats whose turns cannot be read are judged on their
+  activity alone, as before. Cells written by the per-claim-flag builds decode
+  as they stand; their flags drop on the first rewrite.
+
 - **`[events.mirror]` writes a copy of the city's event log outside `.gc`**
   for a log shipper that may not enter `.gc` (which gc keeps at `0700`). The
   city's controller tails `.gc/events.jsonl` and appends every event line to
