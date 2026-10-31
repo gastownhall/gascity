@@ -101,6 +101,7 @@ go_test(
         "identity_darwin_test.go",
         "infrastructure_argv_test.go",
         "kill_unix_test.go",
+        "names_test.go",
         "openfiles_darwin_test.go",
         "openfiles_linux_test.go",
         "proctable_test.go",
