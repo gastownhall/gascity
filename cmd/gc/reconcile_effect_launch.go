@@ -265,20 +265,25 @@ func preWakeRefuses(d session.Disposition, reason string, now time.Time) bool {
 }
 
 // triggerEnvKeys are the template env keys a row's trigger stamps
-// (resolveTemplateForSessionBeadInfo, sessionTriggerBeadEnv).
+// (resolveTemplateForSessionBeadInfo, sessionTriggerBeadEnv), and the set
+// agentEnv withholds: pinned empty there so a seat no trigger started
+// cannot inherit a stale marker from the environment the child overlays.
 var triggerEnvKeys = []string{"GC_SPAWN_ORIGIN", "GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID", "GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"}
 
 // boundTemplate is tp with its trigger env derived from row, as legacy binds
-// and then resolves: none when the row has no trigger.
+// and then resolves: stamped from the row when it has a trigger, pinned
+// empty when it does not. Pinned, not deleted: the launch env is an overlay
+// on the environment the child already inherits, so an absent key would
+// fall back to the stale marker the agentEnv pin exists to withhold.
 func boundTemplate(tp TemplateParams, row session.Info) TemplateParams {
 	env := maps.Clone(tp.Env)
+	if env == nil {
+		env = make(map[string]string, len(triggerEnvKeys)+1)
+	}
 	for _, k := range triggerEnvKeys {
-		delete(env, k)
+		env[k] = ""
 	}
 	if trigger := sessionTriggerBeadEnv(row); trigger != nil {
-		if env == nil {
-			env = make(map[string]string, len(trigger)+1)
-		}
 		env["GC_SPAWN_ORIGIN"] = "demand"
 		maps.Copy(env, trigger)
 	}

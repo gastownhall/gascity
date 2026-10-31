@@ -1132,6 +1132,22 @@ func TestLaunchTriggerEnvFollowsTheBoundRow(t *testing.T) {
 				t.Errorf("%s: launch %s = %q, want %q", c.name, key, got, want)
 			}
 		}
+		// Presence, not just value: the withheld markers are pinned empty,
+		// never deleted, because the launch env is an overlay on the
+		// environment the child already inherits — an absent key falls back
+		// to the stale marker the pin exists to withhold.
+		for _, key := range triggerEnvKeys {
+			if _, ok := leaf.cfgs[0].Env[key]; !ok {
+				t.Errorf("%s: launch env omits %s, want present (pinned empty, not deleted)", c.name, key)
+			}
+		}
+		// The bind carries no store ref, so both store-ref keys stay pinned
+		// empty rather than reading the inherited pair.
+		for _, key := range []string{"GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"} {
+			if got, ok := leaf.cfgs[0].Env[key]; !ok || got != "" {
+				t.Errorf("%s: launch %s = %q (present=%v), want present and empty", c.name, key, got, ok)
+			}
+		}
 	}
 }
 
