@@ -95,15 +95,15 @@ gc storage preflight
 Runs every check the migration runs against a **live** city — and copies
 nothing, creates nothing, takes no migration guard, and publishes no event. It
 exists because the migration's refusals are all correct and all arrive at the
-worst possible moment: with the fleet stopped and a window running. The
-rig-scope census is the one that most justifies it, because its remedy is moving
-beads by hand and no command here does that for you.
+worst possible moment: with the fleet stopped and a window running. It also
+reports, per rig, what `gc storage migrate --from-rigs` would do there (see
+"Step 4b: import each rig").
 
 The checks that most often stop a real cutover, and what each wants from you:
 
 | Block | What it means | What to do |
 | --- | --- | --- |
-| `rig scopes` | An infrastructure bead lives in a rig's store, and the copy reads only the city work store. | Move the named beads into the city work store by hand. On a city that already converged this row is a `[note]`: the migration copies nothing there, so it does not stop for them. |
+| `rig scopes` | A rig's graph rows have a shape the rig import cannot move without a cross-store edge (an open `tracks`/`parent-child` edge between a graph row and rig work, open work blocked by an open graph row), or a rig store cannot be read. | Do what the named fix says (close the workflow or convoy, finish the work, or remove the edge), or restore access to the rig. Rig history, closed or suspended, no longer blocks: each rig is a `[note]` with what its import would move. |
 | `served binding` | This city already served its infrastructure classes from a different binding. | Verify or recover that binding first. Removing the note is your attestation that you have. |
 | `edge payloads` | The work store cannot be asked what its dependency edges carry — `waits_for` gates store a payload there. | Nothing in your data: this city's work store runs on an engine that cannot report edge payloads, so this binary cannot split it. The block is permanent until the work store is on an engine that can (SQLite or native Dolt). |
 | `destination` | The binding already holds beads this migration did not write. | Find out whose they are before letting a copy overwrite them. |
@@ -143,13 +143,9 @@ What the command does, in order:
    refused here first rather than migrated toward.
 2. Refuses if a controller answers the city's socket.
 3. Takes a migration guard over the city, so a second migrator cannot run.
-4. Censuses every rig's bead scope for infrastructure beads and **refuses by
-   id and rig** if it finds any. The copy reads the city work store only, so a
-   bead sitting in a rig scope would be left unreachable. Move those into the
-   city work store first. A city that already converged copies nothing on a
-   re-run, so the census is skipped there: the run only clears the retained
-   copies, rig beads stay as unreachable as they already were, and `gc storage
-   preflight` still names them.
+4. Does not census rig scopes. A rig's graph rows stay readable through its
+   relic legs and move with `gc storage migrate --from-rigs` once the binding
+   has converged; the success message names every rig still awaiting that.
 5. Copies every infrastructure bead with its id and within-class dependency
    topology preserved.
 6. Closes the destination, reopens it, and proves field-level equality against
@@ -211,6 +207,55 @@ cross-store edges of rows an interrupted run already removed, which the note
 names until the clear finishes; that is also how a
 city migrated by gc 1.5.0, which kept the work store's copies, is repaired (see
 below).
+
+## Step 4b: import each rig
+
+Before S4 a rig's convergence loops, `cook --attach` grafts and their control
+trees were written to the rig's own store. On a split city graph beads live in
+the city binding at every scope, so those rows move too, rig by rig, with the
+fleet stopped:
+
+```
+gc storage migrate --from-rigs --fleet-stopped            # every rig
+gc storage migrate --from-rigs --rig <rig> --fleet-stopped # one rig
+```
+
+Each row keeps its id and is stamped `gc.root_store_ref = rig:<rig>` (wisps and
+steps included). Edges inside the moved set are copied; an open `blocks` edge
+onto rig work becomes a cross-store gate in the binding; every other boundary
+edge is dropped and recorded on the row (`gc.migrated_cross_edges`) and in the
+rig's backup. Shapes that would need a cross-store edge are refused by bead,
+with the fix. Per rig it writes `infra.rig.<rig>.migrated.beads` (the manifest)
+and `infra.rig.<rig>.migrated` beside `infra.migrated`, backs the rows up to
+`infra.rig.<rig>.retained-source.jsonl`, raises the rig's `min_hash_length` so a
+later short id cannot re-mint an imported one, then clears the rig's copies and
+marks `.gc/storage-infra-cleared.rig.<rig>.json` complete. A rig with no graph
+row is recorded `infra.rig.<rig>.clean`. Suspended rigs are imported without
+being resumed; a rig that cannot be read blocks only itself. Every step resumes:
+run the command again after any failure. A pending clear makes boot refuse
+until the re-run finishes it.
+
+`gc storage status` exits non-zero while any rig awaits import, holds a pending
+clear, or holds rows written after its import.
+
+The import refuses, before writing anything, a rig store another registered
+city also uses or that it cannot rule out as one (shared or company stores wait
+for the single-writer attestation; a Dolt rig whose endpoint does not resolve
+and that pins no database name cannot be compared), rows scoped to another rig
+or city, open rows another city's agent claims, rows its manifest says it
+carried that the binding no longer holds, and a rig whose store cannot read the
+payload of an edge the import copies or backs up. A bd CLI rig with an edge on
+a row it moves is such a rig; a proxied-server rig reads payloads natively with
+`GC_BEADS_PROXIED_NATIVE=1`. While an
+import is in flight (`infra.rig.<rig>.importing` beside the binding) boot and
+every gc command refuse; re-run the import to finish it. If a rig store is
+gone for good after its import wrote its marker, `gc storage migrate
+--from-rigs --rig <rig> --abandon-rig-store --fleet-stopped` proves the binding
+holds every row the manifest records and then records the clear complete. It
+refuses while the rig store is still reachable, while an import is in flight,
+and while the binding holds rows of that rig its manifest does not record. Rig
+records name the store they speak for: a new store under a reused rig name is
+not taken for the old one.
 
 ## Step 5: start, and verify
 

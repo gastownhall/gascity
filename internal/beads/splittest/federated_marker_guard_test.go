@@ -77,6 +77,18 @@ var reviewedMarkers = map[string]reviewedMarker{
 		"federated", 1,
 		"one leg of the stepless-root holder walk (S3a): the graph store, then every work leg; a holder lives in one",
 	},
+	"cmd/gc/cmd_convoy.go closeCompletedConvoyAcross": {
+		"federated", 2,
+		"the two legs of a work convoy's legacy-child union (S3c): a graph child poured under it lives in the binding, a work child on the convoy's ledger",
+	},
+	"cmd/gc/molecule_autoclose.go autocloseLocate": {
+		"federated", 2,
+		"a two-store residence probe for an autoclose parent or root (S3a, S3c): the second store answers when the first misses",
+	},
+	"internal/orders/store_reads.go (*Store).LastRun": {
+		"federated", 1,
+		"one leg of the last-run read (S3a, S3c): run evidence is a tracking bead (orders), a graph root, or a v1 poured root on the work leg",
+	},
 	"cmd/gc/api_state.go liveCloseOwner": {
 		"federated", 1,
 		"first-owner close probe (S3a R4): the prefix route and the binding the residence probe proved holds a relic id",
@@ -101,6 +113,10 @@ var reviewedMarkers = map[string]reviewedMarker{
 	// Relic legs: graph rows read from city and rig scope stores (S4).
 	"internal/api/huma_handlers_convoys.go (*Server).humaDeleteWorkflow":       {"relic", 3, "workflowStores root probe, metadata sweep and descendant sweep in workflow teardown"},
 	"cmd/gc/cmd_convoy_dispatch.go findBeadScopeAcrossStores":                  {"relic", 2, "control-bead scope probe over the city and rig ledgers before the binding"},
+	"cmd/gc/graph_placement.go graphResidenceForTree":                          {"relic", 1, "the S4 rule's relic leg: a pre-S4 rig tree read from the rig ledger until the rig is imported (S4b)"},
+	"cmd/gc/convergence_store.go (*convergenceStoreAdapter).list":              {"relic", 1, "pre-S4a rig convergence loops in the rig's own store, read until the rig is imported (S4b)"},
+	"cmd/gc/formula_cook_attach_class.go attachGraftClassRefusal":              {"relic", 1, "cook --attach onto a pre-S4 rig tree reads the attach bead where it lives, until the rig is imported (S4b)"},
+	"internal/api/handler_convoys.go rigLegConvoyGet":                          {"relic", 1, "isGraphConvoyID's rig leg: a pre-S4 graph convoy in a rig ledger, until the rig is imported (S4b)"},
 	"cmd/gc/cmd_convoy_dispatch.go cmdWorkflowDelete":                          {"relic", 1, "workflow delete sweeps the retained scope-store copies beside the binding"},
 	"cmd/gc/cmd_convoy_dispatch.go (*sourceWorkflowMatchCollector).scanStore":  {"relic", 1, "the source-workflow walk's root probe over scope stores and the binding (child sources are ratcheted, not marked)"},
 	"cmd/gc/cmd_convoy_dispatch.go assessZeroMatchSourceWorkflowScan":          {"relic", 1, "zero-match re-scan over the same views"},

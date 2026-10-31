@@ -516,6 +516,10 @@ func TestCmdSessionNew_PoolTemplateBareAliasStillResolves(t *testing.T) {
 	if store == nil {
 		t.Fatalf("openCityStore = nil, code=%d", code)
 	}
+	// Session resolution and session-row writes go through the session-class
+	// store, as the CLI's own callers do (cliSessionStore): the fixture now
+	// matches the production path.
+	store = cliSessionStore(store, cfg, cityDir)
 
 	id, err := resolveSessionIDMaterializingNamed(cityDir, cfg, store, "ant-fenrir")
 	if err != nil {
@@ -3402,9 +3406,8 @@ func TestRouteSessionList_APIJSONIncludesCacheAge(t *testing.T) {
 		t.Errorf("sessions len = %d, want 1:\n%s", len(arr), stdout.String())
 	}
 
-	// Fallback path must omit _cache_age_s. The fallback emits the
-	// legacy bare array shape, so json.Unmarshal into map[string]any
-	// fails; that itself proves the envelope is not present.
+	// Fallback path must omit _cache_age_s: it renders the local result
+	// (schema_version, ok, filters, sessions, summary), not the API envelope.
 	stdout.Reset()
 	stderr.Reset()
 	if code := routeSessionList(cityPath, "", "", nil, "controller-down", true, &stdout, &stderr); code != 0 {

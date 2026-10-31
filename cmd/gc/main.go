@@ -347,7 +347,7 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 	root.PersistentFlags().StringVar(&contextFlag, "context", "",
 		"operate the REMOTE city named by this context (~/.gc/contexts.toml)")
 	root.PersistentFlags().StringVar(&cityURLFlag, "city-url", "",
-		"operate a REMOTE city at this base URL (https; requires --city-name)")
+		"operate a REMOTE city at this base URL (https, or http on a loopback host; requires --city-name). A remote target is served by the API, so --json prints the API rendering where a command has two (see gc session list --help)")
 	root.PersistentFlags().StringVar(&cityNameFlag, "city-name", "",
 		"remote city name for --city-url (does not overload --city)")
 	configureJSONSchemaFlag(root)
@@ -538,6 +538,12 @@ var cliStoreCache struct {
 // have a store open. Caches the bead store per cityPath so loops over
 // agents don't open the store repeatedly. Silently falls back to legacy
 // naming if the store is unavailable.
+//
+// The lookup reads session beads, so it goes through the session-class store:
+// on a split city they live only in the binding, and a lookup through the
+// work store missed every one and fell back to the legacy name (gc prime's
+// hook resolved the wrong tmux session). A single-store city gets its one
+// store back.
 func cliSessionName(cityPath, cityName, agentName, sessionTemplate string) string {
 	if strings.TrimSpace(cityPath) == "" {
 		return sessionName(nil, cityName, agentName, sessionTemplate)
@@ -549,6 +555,9 @@ func cliSessionName(cityPath, cityName, agentName, sessionTemplate string) strin
 	}
 	store := cliStoreCache.store
 	cliStoreCache.mu.Unlock()
+	if store != nil {
+		store = cliSessionStore(store, nil, cityPath)
+	}
 	return sessionName(store, cityName, agentName, sessionTemplate)
 }
 

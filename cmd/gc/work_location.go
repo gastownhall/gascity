@@ -21,6 +21,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -325,4 +326,24 @@ func refuseScope(info sessionpkg.Info, cfg *config.City) RefuseScope {
 		}
 	}
 	return RefuseScope{ids: drainAckAssigneeIdentities(info, cfg)}
+}
+
+// legsTriggerResolver reads a bead by id from the store that owns it among
+// legs (WorkLegs.readLive: the class binding, the serving rigs, the city work
+// store), for the start path's trigger reads. nil when legs are unusable (a
+// refused city, or no work store), which keeps the sessions-store read.
+func legsTriggerResolver(legs WorkLegs) warmClaimTriggerResolver {
+	if legs.unusable() != nil {
+		return nil
+	}
+	return func(id string) (beads.Bead, error) {
+		b, found, err := legs.readLive(id)
+		switch {
+		case err != nil:
+			return beads.Bead{}, err
+		case !found:
+			return beads.Bead{}, fmt.Errorf("bead %q: %w", id, beads.ErrNotFound)
+		}
+		return b, nil
+	}
 }
