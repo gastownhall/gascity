@@ -930,6 +930,81 @@ func (c *wedgeOnFixCheck) Fix(_ *CheckContext) error {
 }
 func (c *wedgeOnFixCheck) WarmupEligible() bool { return false }
 
+// TestRunCheckTimeoutBoundsFixForAdvisoryWarning proves the abandoned-fix path
+// reports TimedOut for a nonblocking warning exactly as it does for a blocking
+// error: a fix that wedges past CheckTimeout must not hang gc doctor --fix,
+// and the abandoned remediation must surface as an explicitly incomplete
+// result rather than a settled OK. Unlike TestRunCheckTimeoutBoundsFix, the
+// original result here is a non-gating StatusWarning/SeverityAdvisory, so this
+// also proves the incomplete-observation signal does not depend on the
+// check's severity.
+func TestRunCheckTimeoutBoundsFixForAdvisoryWarning(t *testing.T) {
+	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	check := &wedgeOnFixAdvisoryWarningCheck{name: "wedge-on-fix-advisory", release: make(chan struct{})}
+	t.Cleanup(func() { close(check.release) }) // release the abandoned fix goroutine
+
+	d.Register(check)
+
+	var buf bytes.Buffer
+	start := time.Now()
+	report := d.Run(&CheckContext{}, &buf, true)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("run took %s; the wedged fix was not bounded", elapsed)
+	}
+
+	if got := check.fixCalls.Load(); got != 1 {
+		t.Fatalf("fixCalls = %d, want 1 (fix runs once for the initial warning)", got)
+	}
+	if len(report.Results) != 1 {
+		t.Fatalf("Results = %d, want 1", len(report.Results))
+	}
+	got := report.Results[0]
+	if got.Fixed {
+		t.Fatalf("result.Fixed = true, want the abandoned fix unconfirmed")
+	}
+	if !got.FixAttempted {
+		t.Fatalf("result.FixAttempted = false, want true; the fix ran but never confirmed")
+	}
+	if !strings.Contains(got.FixError, "timed out") {
+		t.Fatalf("result.FixError = %q, want a fix-timeout explanation", got.FixError)
+	}
+	// The nonblocking warning's own status and severity survive the abandoned
+	// fix unchanged: an unconfirmed remediation must never look like an OK
+	// result, and must not get promoted to a blocking failure either.
+	if got.Status != StatusWarning || got.Severity != SeverityAdvisory {
+		t.Fatalf("result = %+v, want the original warning/advisory status preserved", got)
+	}
+	if !got.TimedOut {
+		t.Fatalf("result.TimedOut = false, want true; the fix was abandoned and never confirmed")
+	}
+	if report.Warned != 1 || report.Failed != 0 || report.BlockingFailed != 0 {
+		t.Fatalf("report = %+v, want the check tallied as a nonblocking warning, never a blocking failure", report)
+	}
+}
+
+// wedgeOnFixAdvisoryWarningCheck models a nonblocking, fixable check (e.g. a
+// stale cache advisory) whose remediation hangs — proving the abandon-on-
+// timeout path is independent of the check's severity. Fix runs in the
+// abandoned goroutine, so fixCalls is atomic: the goroutine writes it while
+// the test reads it after the fix is abandoned.
+type wedgeOnFixAdvisoryWarningCheck struct {
+	name     string
+	fixCalls atomic.Int32
+	release  chan struct{} // closed by the test to release the abandoned fix goroutine
+}
+
+func (c *wedgeOnFixAdvisoryWarningCheck) Name() string { return c.name }
+func (c *wedgeOnFixAdvisoryWarningCheck) Run(_ *CheckContext) *CheckResult {
+	return &CheckResult{Name: c.name, Status: StatusWarning, Severity: SeverityAdvisory, Message: "stale cache"}
+}
+func (c *wedgeOnFixAdvisoryWarningCheck) CanFix() bool { return true }
+func (c *wedgeOnFixAdvisoryWarningCheck) Fix(_ *CheckContext) error {
+	c.fixCalls.Add(1)
+	<-c.release // wedged remediation; abandoned on timeout, released at cleanup
+	return nil
+}
+func (c *wedgeOnFixAdvisoryWarningCheck) WarmupEligible() bool { return false }
+
 // TestRunCheckTimeoutIsolatesLateOutputAndSkipsRenderExtras proves the two
 // safety guards the timeout path adds: an abandoned check's late writes land
 // in its private buffer (never the real writer), and RenderExtras is not
