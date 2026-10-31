@@ -533,3 +533,48 @@ func TestStopKillsRelayedProgramThatIgnoresTermAndHup(t *testing.T) {
 	}
 	eventually(t, "the relayed program to die", func() bool { return processGone(program) })
 }
+
+// The switch-off disarm sweep unsets the capture of a dead pane too, which
+// pipe-pane refuses to touch: a later respawn into that pane never starts
+// under the old nonce or record.
+func TestDisarmSweepUnsetsDeadPaneCapture(t *testing.T) {
+	socket := newScratchServer(t, "heal")
+	p := captureProvider(t, socket, captureCompanionBin(t))
+	p.tm.cfg.ProgramStatus = runtime.ProgramStatusOn
+	const name = "gc-ps-dead-sweep"
+	cfg := runtime.Config{
+		Command:       emitterCommand(captureEmitterBin(t), "report state=working", "interactive"),
+		WorkDir:       t.TempDir(),
+		ProgramStatus: runtime.ProgramStatusArm{Capture: true},
+	}
+	if err := p.Start(context.Background(), name, cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop(name) })
+	nonce := armedNonce(t, p, name)
+	target, err := p.tm.agentPaneTarget(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the record to publish", func() bool { return paneOption(t, p, name, programStatusOption) != "" })
+	for _, keys := range [][]string{{"-l", "exit 1"}, {"Enter"}} {
+		if _, err := p.tm.run(append([]string{"send-keys", "-t", target}, keys...)...); err != nil {
+			t.Fatalf("send-keys %q: %v", keys, err)
+		}
+	}
+	eventually(t, "the pane to die with its record published", func() bool {
+		out, err := p.tm.run("display-message", "-p", "-t", target, "#{pane_dead}")
+		return err == nil && strings.TrimSpace(out) == "1" && paneOption(t, p, name, programStatusOption) != ""
+	})
+
+	p.SetProgramStatusMode(runtime.ProgramStatusOff)
+	n, err := p.DisarmProgramCaptures()
+	if err != nil || n != 1 {
+		t.Fatalf("DisarmProgramCaptures = %d, %v; want the dead pane of %s disarmed", n, err, nonce)
+	}
+	for _, opt := range []string{programTapOption, programStatusOption, programTextOption} {
+		if got := paneOption(t, p, name, opt); got != "" {
+			t.Fatalf("dead pane %s = %q after the sweep, want unset", opt, got)
+		}
+	}
+}

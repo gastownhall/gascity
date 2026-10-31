@@ -292,7 +292,7 @@ func (s *programSession) foreignPipe(t *testing.T) {
 // setMode flips the switch the provider reads under.
 func (s *programSession) setMode(t *testing.T, mode runtime.ProgramStatusMode) {
 	t.Helper()
-	s.p.tm.cfg.ProgramStatus, s.p.cfg.ProgramStatus = mode, mode
+	s.p.SetProgramStatusMode(mode)
 	s.p.cache.Invalidate()
 }
 

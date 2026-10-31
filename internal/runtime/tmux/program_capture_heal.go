@@ -322,9 +322,11 @@ func (p *Provider) captureTaps() programTaps {
 // DisarmProgramCaptures is the controller's disarm sweep for a city whose
 // program-status switch is off, run once per config load: one list-panes -a
 // of every pane's tap nonce, then the disarm rule of [Provider.HealProgramCapture]
-// for each live pane bearing a nonce bound to it. It returns how many panes it
-// disarmed. With no server, or one holding no sessions, there is nothing to
-// disarm.
+// for each pane bearing a nonce bound to it. A dead pane has its capture
+// options unset and its pipe left alone (pipe-pane refuses a dead pane), so a
+// respawn into it never inherits the old nonce or record. It returns how many
+// panes it disarmed. With no server, or one holding no sessions, there is
+// nothing to disarm.
 func (p *Provider) DisarmProgramCaptures() (int, error) {
 	out, err := p.tm.run("list-panes", "-a", "-F", captureSweepFormat)
 	if err != nil {
@@ -333,18 +335,21 @@ func (p *Provider) DisarmProgramCaptures() (int, error) {
 		}
 		return 0, fmt.Errorf("listing panes for the program-capture disarm sweep: %w", err)
 	}
-	type armed struct{ target, tap string }
+	type armed struct {
+		target, tap string
+		dead        bool
+	}
 	var panes []armed
 	for _, line := range strings.Split(out, "\n") {
 		parts := strings.Split(line, "\t")
-		if len(parts) != captureSweepFields || parts[captureSweepFields-1] != runtimeInventoryEnd || parts[3] != "0" {
+		if len(parts) != captureSweepFields || parts[captureSweepFields-1] != runtimeInventoryEnd || (parts[3] != "0" && parts[3] != "1") {
 			continue
 		}
 		pane := programPane{id: parts[2], tap: parts[4]}
 		if parts[0] == "" || !wellFormedTmuxID(parts[1], '@') || !pane.ownNonce() {
 			continue
 		}
-		panes = append(panes, armed{target: paneTarget(parts[0]) + parts[1] + "." + pane.id, tap: pane.tap})
+		panes = append(panes, armed{target: paneTarget(parts[0]) + parts[1] + "." + pane.id, tap: pane.tap, dead: parts[3] == "1"})
 	}
 	if len(panes) == 0 {
 		return 0, nil
@@ -353,7 +358,8 @@ func (p *Provider) DisarmProgramCaptures() (int, error) {
 	disarmed := 0
 	var errs []error
 	for _, pane := range panes {
-		if err := p.tm.disarmPane(pane.target, taps.liveness(pane.tap) == runtime.ProgramTapAlive); err != nil {
+		closePipe := !pane.dead && taps.liveness(pane.tap) == runtime.ProgramTapAlive
+		if err := p.tm.disarmPane(pane.target, closePipe); err != nil {
 			errs = append(errs, err)
 			continue
 		}
