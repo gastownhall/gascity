@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -359,6 +360,63 @@ func TestTapFlushesPendingWriteOnEOF(t *testing.T) {
 	if st := decode(t, writes[1]); st.State != runtime.ProgramDone || st.TurnEnds != 1 {
 		t.Fatalf("flushed %+v, want done with one turn end", st)
 	}
+}
+
+// TestTapRunReportsCancel cancels Run while the writer waits and the reader
+// is still parked in Read: Run returns ctx's error and publishes nothing
+// more, neither a flush nor a retry.
+func TestTapRunReportsCancel(t *testing.T) {
+	t.Run("coalescing wait", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			pub := newFake(false)
+			cfg := fastConfig()
+			cfg.minInterval = time.Hour // the second snapshot waits out the interval
+			r := newStepReader()
+			defer close(r.chunks)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- run(ctx, r, pub, Options{Nonce: testNonce}, cfg) }()
+
+			r.feed(t, report("state=working"))
+			pub.next(t)
+			r.feed(t, report("state=done"))
+			synctest.Wait() // the writer is waiting out the interval
+			cancel()
+			if err := result(t, done); !errors.Is(err, context.Canceled) {
+				t.Errorf("Run = %v, want context.Canceled", err)
+			}
+			if n := len(pub.all()); n != 1 {
+				t.Errorf("%d publishes, want none after the cancel", n)
+			}
+		})
+	})
+	t.Run("retry wait", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			pub := newFake(true)
+			cfg := fastConfig()
+			cfg.retryMin, cfg.retryMax = time.Hour, time.Hour // the failed write waits to retry
+			r := newStepReader()
+			defer close(r.chunks)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- run(ctx, r, pub, Options{Nonce: testNonce}, cfg) }()
+
+			r.feed(t, report("state=working"))
+			c := pub.next(t)
+			r.feed(t, report("state=done")) // posted while the write is in flight
+			c.reply <- errors.New("tmux: server busy")
+			synctest.Wait() // the writer is waiting to retry
+			cancel()
+			if err := result(t, done); !errors.Is(err, context.Canceled) {
+				t.Errorf("Run = %v, want context.Canceled", err)
+			}
+			if n := len(pub.all()); n != 1 {
+				t.Errorf("%d publishes, want none after the cancel", n)
+			}
+		})
+	})
 }
 
 func TestTapFlushFailureStillExitsCleanly(t *testing.T) {

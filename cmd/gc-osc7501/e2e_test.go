@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -251,6 +252,9 @@ func TestTapGuardRefusesForeignNonce(t *testing.T) {
 // the raw sample maximum at 6700-7992 KiB. The budget stays at 8 MiB. VmHWM
 // is still logged.
 func TestTapRSSBudget(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("peak RSS is read from /proc")
+	}
 	bin := companion(t)
 	trueBin, err := exec.LookPath("true")
 	if err != nil {
@@ -266,6 +270,8 @@ func TestTapRSSBudget(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	// A failure before the Wait below must not leave the tap running.
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 
 	var block bytes.Buffer
 	for block.Len() < 64<<10 {

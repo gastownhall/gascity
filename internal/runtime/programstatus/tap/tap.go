@@ -62,8 +62,10 @@ type Options struct {
 // Run reads pane output from r until EOF, publishing through pub, and
 // returns nil after the final flush. It returns an error wrapping
 // [ErrPublishFailed] after consecutive failed writes, a read error, or an
-// options error. On a publish failure Run returns without waiting for a
-// read that is blocked; the caller is expected to exit.
+// options error. When ctx ends first, Run returns an error wrapping ctx's
+// error and skips the final flush. On a publish failure or cancellation Run
+// returns without waiting for a read that is blocked; the caller is expected
+// to exit.
 func Run(ctx context.Context, r io.Reader, pub Publisher, opts Options) error {
 	return run(ctx, r, pub, opts, defaultConfig())
 }
@@ -140,6 +142,7 @@ func run(ctx context.Context, r io.Reader, pub Publisher, opts Options, cfg conf
 	if err := e.write(ctx, readDone); err != nil {
 		return err
 	}
+	<-readDone // write returns nil only once the reader finished
 	if readErr != nil {
 		return fmt.Errorf("tap: reading pane output: %w", readErr)
 	}
@@ -206,7 +209,11 @@ func (e *engine) write(ctx context.Context, readDone <-chan struct{}) error {
 		}
 		if !last.IsZero() {
 			if wait := e.coalesce.interval - time.Since(last); wait > 0 {
-				if !e.sleep(ctx, wait, readDone) {
+				eof, err := e.sleep(ctx, wait, readDone)
+				if err != nil {
+					return err
+				}
+				if eof {
 					e.flush(ctx)
 					return nil
 				}
@@ -226,8 +233,8 @@ func (e *engine) write(ctx context.Context, readDone <-chan struct{}) error {
 
 // publishWithRetry publishes the pending snapshot, retrying failures with
 // backoff and always with the latest snapshot, until one write succeeds,
-// the reader finishes (then it flushes once), or maxFailures writes in a
-// row failed.
+// the reader finishes (then it flushes once), ctx ends (then it returns
+// ctx's error), or maxFailures writes in a row failed.
 func (e *engine) publishWithRetry(ctx context.Context, readDone <-chan struct{}) error {
 	for failures := 0; ; {
 		err := e.publish(ctx)
@@ -239,7 +246,11 @@ func (e *engine) publishWithRetry(ctx context.Context, readDone <-chan struct{})
 			return fmt.Errorf("%w: %d consecutive writes: %w", ErrPublishFailed, failures, err)
 		}
 		e.logf("tap: write %d of %d failed, retrying: %v", failures, e.cfg.maxFailures, err)
-		if !e.sleep(ctx, e.cfg.retryDelay(failures), readDone) {
+		eof, err := e.sleep(ctx, e.cfg.retryDelay(failures), readDone)
+		if err != nil {
+			return err
+		}
+		if eof {
 			return nil // the caller sees readDone and flushes
 		}
 		e.takeLatest()
@@ -287,17 +298,18 @@ func (e *engine) publish(ctx context.Context) error {
 	return nil
 }
 
-// sleep waits d, returning false early when the reader finishes or ctx ends.
-func (e *engine) sleep(ctx context.Context, d time.Duration, readDone <-chan struct{}) bool {
+// sleep waits d. It returns eof when the reader finished first, and ctx's
+// error when ctx ended first.
+func (e *engine) sleep(ctx context.Context, d time.Duration, readDone <-chan struct{}) (eof bool, err error) {
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
 	case <-t.C:
-		return true
+		return false, nil
 	case <-readDone:
-		return false
+		return true, nil
 	case <-ctx.Done():
-		return false
+		return false, fmt.Errorf("tap: %w", ctx.Err())
 	}
 }
 
