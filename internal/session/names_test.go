@@ -607,6 +607,85 @@ func TestEnsureSessionNameAvailableWithConfig_UsesResolvedWorkspaceName(t *testi
 	}
 }
 
+// TestConfigReservationChecksMatchTheFullChecksWithNoHolders pins the
+// configuration-only checks `gc session new` runs to the configuration half
+// of the full checks: over a store that holds no session, each answers
+// exactly as its full check does.
+func TestConfigReservationChecksMatchTheFullChecksWithNoHolders(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		ResolvedWorkspaceName: "test-city",
+		Workspace:             config.Workspace{SessionTemplate: "{{.City}}--{{.Name}}"},
+		NamedSessions:         []config.NamedSession{{Template: "mayor"}},
+	}
+	text := func(err error) string {
+		if err == nil {
+			return "<nil>"
+		}
+		return err.Error()
+	}
+	type check struct {
+		cfg       *config.City
+		id, owner string
+	}
+	for _, c := range []check{
+		{cfg, "mayor", ""},
+		{cfg, "mayor", "mayor"},
+		{cfg, "mayor", "foreman"},
+		{cfg, " mayor ", ""},
+		{cfg, "worker", ""},
+		{cfg, "", ""},
+		{nil, "mayor", ""},
+	} {
+		got := text(EnsureAliasNotReservedByConfig(c.cfg, c.id, c.owner))
+		want := text(EnsureAliasAvailableWithConfigForOwner(store, c.cfg, c.id, "", c.owner))
+		if got != want {
+			t.Errorf("EnsureAliasNotReservedByConfig(cfg=%v, %q, owner %q) = %s, full check %s", c.cfg != nil, c.id, c.owner, got, want)
+		}
+	}
+	for _, c := range []check{
+		{cfg, "test-city--mayor", ""},
+		{cfg, "test-city--mayor", "mayor"},
+		{cfg, "test-city--mayor", "foreman"},
+		{cfg, "test-city--worker", ""},
+		{cfg, "", ""},
+		{nil, "test-city--mayor", ""},
+	} {
+		got := text(EnsureSessionNameNotReservedByConfig(c.cfg, c.id, c.owner))
+		want := text(EnsureSessionNameAvailableWithConfigForOwner(store, c.cfg, c.id, "", c.owner))
+		if got != want {
+			t.Errorf("EnsureSessionNameNotReservedByConfig(cfg=%v, %q, owner %q) = %s, full check %s", c.cfg != nil, c.id, c.owner, got, want)
+		}
+	}
+}
+
+// TestConfigReservationChecksIgnoreLiveHolders: the configuration-only checks
+// read no store, so a live holder the full checks reject passes them;
+// Manager.CreateSession's own check under the reservation lock rejects it.
+func TestConfigReservationChecksIgnoreLiveHolders(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Type:     BeadType,
+		Labels:   []string{LabelSession},
+		Metadata: map[string]string{"alias": "worker", "session_name": "worker"},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cfg := &config.City{}
+	if err := EnsureAliasAvailableWithConfigForOwner(store, cfg, "worker", "", ""); !errors.Is(err, ErrSessionAliasExists) {
+		t.Fatalf("full alias check = %v, want %v from the live holder", err, ErrSessionAliasExists)
+	}
+	if err := EnsureAliasNotReservedByConfig(cfg, "worker", ""); err != nil {
+		t.Fatalf("EnsureAliasNotReservedByConfig = %v, want nil: it reads no holder", err)
+	}
+	if err := EnsureSessionNameAvailableWithConfigForOwner(store, cfg, "worker", "", ""); !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("full session-name check = %v, want %v from the live holder", err, ErrSessionNameExists)
+	}
+	if err := EnsureSessionNameNotReservedByConfig(cfg, "worker", ""); err != nil {
+		t.Fatalf("EnsureSessionNameNotReservedByConfig = %v, want nil: it reads no holder", err)
+	}
+}
+
 func TestWithCitySessionNameLock_EmptyCityPathFallsBackWithoutLockFile(t *testing.T) {
 	wd, err := os.Getwd()
 	if err != nil {

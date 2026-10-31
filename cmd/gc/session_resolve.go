@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // resolveSessionID delegates to session.ResolveSessionID.
@@ -35,6 +36,36 @@ type namedSessionResolveOptions struct {
 	// configured named row before it is reopened; an error leaves the row
 	// closed and is the resolution's.
 	beforeReopen func(id string) error
+	// loaded, when set, is called with the session record a resolution step
+	// read whole on its way to the id it returns: the bead-id lookup's, or the
+	// configured-identity check's for a live session_name or alias match. It
+	// is a read-only snapshot (loadedSessionRecord); a lifecycle write reads
+	// the session again.
+	loaded func(session.Info, session.PersistedResponse)
+}
+
+// loadedSessionRecord keeps the record a command's session resolution read
+// (namedSessionResolveOptions.loaded), so building the session's worker handle
+// in the same read-only prefix does not read the bead again.
+type loadedSessionRecord struct {
+	info session.Info
+	pr   session.PersistedResponse
+	ok   bool
+}
+
+func (r *loadedSessionRecord) set(info session.Info, pr session.PersistedResponse) {
+	r.info, r.pr, r.ok = info, pr, true
+}
+
+// handle builds id's worker handle from the loaded record, or by reading id
+// when resolution loaded none (a configured named session, a qualified alias
+// basename). The handle's lifecycle operations read the session fresh under
+// its mutation lock, so the snapshot never decides a write.
+func (r loadedSessionRecord) handle(factory *worker.Factory, id string) (worker.Handle, error) {
+	if r.ok && r.info.ID == id {
+		return factory.SessionByRecord(r.info, r.pr)
+	}
+	return factory.SessionByID(id)
 }
 
 const templateTargetPrefix = "template:"
@@ -141,8 +172,11 @@ func resolveSessionIDWithOptions(
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
 	if !opts.skipExactID {
-		if id, err := session.ResolveSessionIDByExactID(store, identifier); err == nil {
-			return id, nil
+		if info, pr, err := session.ResolveSessionRecordByExactID(store, identifier); err == nil {
+			if opts.loaded != nil {
+				opts.loaded(info, pr)
+			}
+			return info.ID, nil
 		} else if !errors.Is(err, session.ErrSessionNotFound) {
 			return "", err
 		}
@@ -154,12 +188,15 @@ func resolveSessionIDWithOptions(
 	}
 	if id, err := session.ResolveSessionID(store, identifier); err == nil {
 		if cfg != nil {
-			if info, getErr := sessionFrontDoor(store).Get(id); getErr == nil {
+			if info, pr, getErr := sessionFrontDoor(store).GetPersistedResponse(id); getErr == nil {
 				if isNamedSessionInfo(info) {
 					identity := namedSessionIdentityInfo(info)
 					if identity != "" && config.FindNamedSession(cfg, identity) == nil {
 						return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 					}
+				}
+				if opts.loaded != nil {
+					opts.loaded(info, pr)
 				}
 			}
 		}
