@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -563,6 +565,349 @@ func TestPreassignHookContinuationGroupSkipsHeldSiblings(t *testing.T) {
 			}
 			if want := []string{"worker-1", "worker-1"}; !reflect.DeepEqual(gotAssignees, want) {
 				t.Fatalf("pinned assignees = %#v, want %#v", gotAssignees, want)
+			}
+		})
+	}
+}
+
+// A subprocess can report its committed CAS after the mutation deadline has
+// elapsed. Advance the deadline in virtual time while the CAS is in flight.
+func TestHookClaimWithBdStoreReadbackAfterMutationDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		projection string
+		canonical  string
+		conflict   bool
+		readErr    error
+		wantOK     bool
+		wantOwner  string
+		wantReads  int
+	}{
+		{name: "canonical owner and metadata", projection: "worker-1", canonical: "worker-1", wantOK: true, wantOwner: "worker-1", wantReads: 1},
+		{name: "committed but unconfirmed", projection: "worker-1", readErr: errors.New("verification unavailable"), wantOK: true, wantOwner: "worker-1", wantReads: 1},
+		{name: "foreign canonical owner", projection: "worker-1", canonical: "other-1", wantOwner: "other-1", wantReads: 1},
+		{name: "foreign mutation projection", projection: "other-1", wantOwner: "other-1"},
+		{name: "conflict identifies winner", conflict: true, canonical: "other-1", wantOwner: "other-1", wantReads: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				original := hookClaimCommandRunnerWithEnvContext
+				t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = original })
+				mutation, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				env := []string{"BEADS_DIR=/rig/.beads", "GC_RIG_ROOT=/rig"}
+				wantEnv := hookClaimEnvMap(env, "/rig", "worker-1")
+				var readContext context.Context
+				mutations, reads := 0, 0
+				hookClaimCommandRunnerWithEnvContext = func(ctx context.Context, bound map[string]string) beads.CommandRunner {
+					if !reflect.DeepEqual(bound, wantEnv) {
+						t.Fatalf("bound environment = %#v, want %#v", bound, wantEnv)
+					}
+					return func(dir, name string, args ...string) ([]byte, error) {
+						if dir != "/rig" || name != "bd" {
+							t.Fatalf("command binding = (%q, %q), want (/rig, bd)", dir, name)
+						}
+						switch {
+						case reflect.DeepEqual(args, []string{"update", "work-1", "--claim", "--json"}):
+							mutations++
+							if !tc.conflict {
+								<-ctx.Done()
+							}
+							if ctx != mutation || (!tc.conflict && !errors.Is(ctx.Err(), context.DeadlineExceeded)) {
+								t.Fatal("mutation must retain its original exhausted deadline")
+							}
+							if tc.conflict {
+								return nil, errors.New("already claimed by other-1")
+							}
+							out, err := json.Marshal([]beads.Bead{{ID: "work-1", Status: "in_progress", Assignee: tc.projection}})
+							return out, err
+						case reflect.DeepEqual(args, []string{"show", "--json", "work-1"}):
+							reads++
+							readContext = ctx
+							deadline, bounded := ctx.Deadline()
+							if ctx.Err() != nil || !bounded || time.Until(deadline) <= 0 || time.Until(deadline) > hookClaimReadbackTimeout {
+								t.Fatalf("canonical read lacks a fresh bounded context: err=%v deadline=%v", ctx.Err(), deadline)
+							}
+							if tc.readErr != nil {
+								return nil, tc.readErr
+							}
+							out, err := json.Marshal([]beads.Bead{{ID: "work-1", Status: "in_progress", Assignee: tc.canonical, Metadata: map[string]string{"canonical": "retained"}}})
+							return out, err
+						default:
+							t.Fatalf("unexpected bd arguments: %q", args)
+							return nil, errors.New("unexpected command")
+						}
+					}
+				}
+				claimed, ok, err := hookClaimWithBdStore(mutation, "/rig", env, "work-1", "worker-1")
+				if ok != tc.wantOK || claimed.Assignee != tc.wantOwner || mutations != 1 || reads != tc.wantReads {
+					t.Fatalf("claim = (%+v, %v, %v), mutations=%d reads=%d", claimed, ok, err, mutations, reads)
+				}
+				if tc.readErr != nil {
+					if !errors.Is(err, tc.readErr) || !strings.Contains(err.Error(), "reloading claimed bead") {
+						t.Fatalf("error = %v, want committed canonical-read failure", err)
+					}
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				if ok && err == nil && claimed.Metadata["canonical"] != "retained" {
+					t.Fatal("claim returned the mutation projection instead of the canonical row")
+				}
+				if tc.conflict && readContext != mutation {
+					t.Fatal("conflict read must retain the original mutation context")
+				}
+				if readContext != nil && !tc.conflict && !errors.Is(readContext.Err(), context.Canceled) {
+					t.Fatal("canonical-read context was not canceled on return")
+				}
+			})
+		})
+	}
+}
+
+// Both claim tiers must stop after the real BdStore claim commits and its
+// independent canonical read fails; neither may try the second candidate.
+func TestHookClaimTiersStopAfterBdStoreReadbackFailure(t *testing.T) {
+	for _, ready := range []bool{false, true} {
+		name := "fresh"
+		if ready {
+			name = "ready assignment"
+		}
+		t.Run(name, func(t *testing.T) {
+			original := hookClaimCommandRunnerWithEnvContext
+			t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = original })
+			var cancelMutation context.CancelFunc
+			mutations := 0
+			hookClaimCommandRunnerWithEnvContext = func(ctx context.Context, _ map[string]string) beads.CommandRunner {
+				return func(_ string, _ string, args ...string) ([]byte, error) {
+					switch args[0] {
+					case "update":
+						mutations++
+						if args[1] != "work-1" {
+							t.Fatalf("replayed or additional claim: %q", args)
+						}
+						cancelMutation()
+						return []byte(`[{"id":"work-1","status":"in_progress","assignee":"worker-1"}]`), nil
+					case "show":
+						if ctx.Err() != nil {
+							t.Fatalf("read inherited canceled mutation context: %v", ctx.Err())
+						}
+						return nil, errors.New("canonical verification unavailable")
+					default:
+						t.Fatalf("unexpected command: %q", args)
+						return nil, errors.New("unexpected command")
+					}
+				}
+			}
+			ops := hookClaimOps{Claim: func(ctx context.Context, dir string, env []string, id, owner string) (beads.Bead, bool, error) {
+				mutation, cancel := context.WithCancel(ctx)
+				cancelMutation = cancel
+				defer cancel()
+				return hookClaimWithBdStore(mutation, dir, env, id, owner)
+			}}
+			opts := hookClaimOptions{Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"worker"}, JSON: true}
+			candidates := []beads.Bead{
+				{ID: "work-1", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+				{ID: "work-2", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			}
+			var stdout, stderr bytes.Buffer
+			var result hookClaimResult
+			if ready {
+				for i := range candidates {
+					candidates[i].Assignee = "worker-1"
+				}
+				result = claimFirstReadyHookAssignment(candidates, opts, ops, "/rig", &stdout, &stderr)
+			} else {
+				result = claimFirstEligibleHookCandidate(candidates, opts, ops, "/rig", &stdout, &stderr)
+			}
+			if !result.terminal || result.code != 1 || mutations != 1 || stdout.Len() != 0 {
+				t.Fatalf("result=%+v mutations=%d stdout=%q; want terminal failure with no receipt", result, mutations, stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "claimed work-1 but loading canonical bead failed") {
+				t.Fatalf("missing committed-but-unconfirmed diagnostic: %q", stderr.String())
+			}
+		})
+	}
+}
+
+// A timely CAS must remain deliverable when canonical readback crosses the
+// landing fence; an actually late CAS must still unwind. No wall-clock sleeps.
+func TestHookClaimTiersUseCASLandingBeforeCanonicalReadback(t *testing.T) {
+	for _, assigned := range []bool{false, true} {
+		tier := "fresh"
+		if assigned {
+			tier = "assigned"
+		}
+		for _, outcome := range []string{"timely CAS", "late CAS", "failed readback"} {
+			t.Run(tier+"/"+outcome, func(t *testing.T) {
+				const window = time.Minute
+				invokedAt := time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)
+				clock := invokedAt.Add(window - time.Second)
+				landing := invokedAt.Add(window + hookClaimMutationTimeout - time.Second)
+				if outcome == "late CAS" {
+					landing = invokedAt.Add(window + hookClaimMutationTimeout + time.Second)
+				}
+				env := []string{"BEADS_DIR=/rig/.beads", "GC_RIG_ROOT=/rig"}
+				original := hookClaimCommandRunnerWithEnvContext
+				t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = original })
+				mutations, reads := 0, 0
+				hookClaimCommandRunnerWithEnvContext = func(ctx context.Context, bound map[string]string) beads.CommandRunner {
+					if !reflect.DeepEqual(bound, hookClaimEnvMap(env, "/rig", "worker-1")) {
+						t.Fatalf("claim/read environment changed: %#v", bound)
+					}
+					return func(dir, name string, args ...string) ([]byte, error) {
+						if dir != "/rig" || name != "bd" {
+							t.Fatalf("command binding = (%q, %q)", dir, name)
+						}
+						switch {
+						case reflect.DeepEqual(args, []string{"update", "work-1", "--claim", "--json"}):
+							mutations++
+							clock = landing
+							return []byte(`[{"id":"work-1","status":"in_progress","assignee":"worker-1"}]`), nil
+						case reflect.DeepEqual(args, []string{"show", "--json", "work-1"}):
+							reads++
+							if ctx.Err() != nil {
+								t.Fatalf("canonical read context failed: %v", ctx.Err())
+							}
+							clock = clock.Add(5 * time.Second)
+							if outcome == "failed readback" {
+								return nil, errors.New("canonical verification unavailable")
+							}
+							return []byte(`[{"id":"work-1","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}]`), nil
+						default:
+							t.Fatalf("unexpected or replayed command: %q", args)
+							return nil, errors.New("unexpected command")
+						}
+					}
+				}
+				rec := &turnBoundClaimRecorder{}
+				ops := rec.ops(t, "")
+				ops.Claim = hookClaimWithBdStore
+				ops.StoreRef = func(string) string { return "rig:fixture" }
+				ops.Now = func() time.Time { return clock }
+				ops.InvokedAt, ops.ClaimWindow = invokedAt, window
+				opts := hookClaimOptions{Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"worker"}, Env: env, JSON: true}
+				candidates := []beads.Bead{
+					{ID: "work-1", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+					{ID: "work-2", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+				}
+				var stdout, stderr bytes.Buffer
+				var result hookClaimResult
+				if assigned {
+					for i := range candidates {
+						candidates[i].Assignee = "worker-1"
+					}
+					result = claimFirstReadyHookAssignment(candidates, opts, ops, "/rig", &stdout, &stderr)
+				} else {
+					result = claimFirstEligibleHookCandidate(candidates, opts, ops, "/rig", &stdout, &stderr)
+				}
+				if mutations != 1 || reads != 1 || !result.terminal {
+					t.Fatalf("result=%+v mutations=%d reads=%d; want one CAS and one read", result, mutations, reads)
+				}
+				if clock.Sub(invokedAt) <= window+hookClaimMutationTimeout {
+					t.Fatal("fixture did not cross the landing fence during canonical readback")
+				}
+				switch outcome {
+				case "timely CAS":
+					if result.code != 0 || len(rec.releases) != 0 || decodeTurnBoundResult(t, stdout.String()).BeadID != "work-1" {
+						t.Fatalf("timely CAS refused: result=%+v releases=%v stdout=%q stderr=%s", result, rec.releases, stdout.String(), stderr.String())
+					}
+				case "late CAS":
+					if result.code != 1 || stdout.Len() != 0 || !reflect.DeepEqual(rec.releases, []string{"work-1"}) || len(rec.claimReleased) != 1 || rec.claimReleased[0].Reason != hookClaimReleaseReasonStraddled {
+						t.Fatalf("late CAS not unwound: result=%+v releases=%v events=%+v stdout=%q stderr=%s", result, rec.releases, rec.claimReleased, stdout.String(), stderr.String())
+					}
+				case "failed readback":
+					if result.code != 1 || stdout.Len() != 0 || len(rec.releases) != 0 || !strings.Contains(stderr.String(), "claimed work-1 but loading canonical bead failed") {
+						t.Fatalf("committed-but-unconfirmed claim lost: result=%+v releases=%v stdout=%q stderr=%s", result, rec.releases, stdout.String(), stderr.String())
+					}
+				}
+				if rec.drainAcked {
+					t.Fatal("claimed work must not be acknowledged as idle")
+				}
+			})
+		}
+	}
+}
+
+// Consumer-local class-store double: only the mutation and canonical read are
+// controlled; the existing graph adapter and claim router remain in the path.
+type hookClaimLandingClassStore struct {
+	beads.Store
+	claim func(string, string) (beads.Bead, bool, error)
+	get   func(string) (beads.Bead, error)
+}
+
+// Claim completes the controlled class-store mutation.
+func (s *hookClaimLandingClassStore) Claim(id, assignee string) (beads.Bead, bool, error) {
+	return s.claim(id, assignee)
+}
+
+// Get returns the controlled canonical row.
+func (s *hookClaimLandingClassStore) Get(id string) (beads.Bead, error) { return s.get(id) }
+
+func TestClassRoutedClaimCapturesLandingBeforeCanonicalReadback(t *testing.T) {
+	for _, outcome := range []string{"canonical owner", "failed readback", "conflict", "foreign projection", "foreign canonical owner"} {
+		t.Run(outcome, func(t *testing.T) {
+			clock := time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)
+			landing := clock.Add(7 * time.Second)
+			mutations, reads := 0, 0
+			readErr := errors.New("canonical verification unavailable")
+			store := &hookClaimLandingClassStore{Store: beads.NewMemStore()}
+			store.claim = func(id, assignee string) (beads.Bead, bool, error) {
+				mutations++
+				clock = landing
+				if outcome == "foreign projection" {
+					assignee = "other-1"
+				}
+				return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee}, outcome != "conflict", nil
+			}
+			store.get = func(id string) (beads.Bead, error) {
+				reads++
+				clock = clock.Add(5 * time.Second)
+				if outcome == "failed readback" {
+					return beads.Bead{}, readErr
+				}
+				owner := "worker-1"
+				if outcome == "conflict" || outcome == "foreign canonical owner" {
+					owner = "other-1"
+				}
+				return beads.Bead{ID: id, Status: "in_progress", Assignee: owner, Metadata: map[string]string{"canonical": "retained"}}, nil
+			}
+			route, err := newHookClaimClassRoute(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			route.resident["work-1"] = true
+			ops := classRoutedHookClaimOps(hookClaimOps{
+				Now: func() time.Time { return clock },
+				Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+					t.Fatal("resident class claim reached the work store")
+					return beads.Bead{}, false, errors.New("unexpected work claim")
+				},
+			}, route)
+			claimed, ok, landedAt, err := ops.claimWithLanding(context.Background(), "/rig", nil, "work-1", "worker-1")
+			wantOK := outcome == "canonical owner" || outcome == "failed readback"
+			wantReads := 1
+			if outcome == "foreign projection" {
+				wantReads = 0
+			}
+			if ok != wantOK || mutations != 1 || reads != wantReads {
+				t.Fatalf("claim=(%+v,%v,%v) mutations=%d reads=%d", claimed, ok, err, mutations, reads)
+			}
+			if outcome != "conflict" && !landedAt.Equal(landing) {
+				t.Fatalf("landing=%s, want successful CAS completion %s", landedAt, landing)
+			}
+			if outcome == "failed readback" {
+				if !errors.Is(err, readErr) {
+					t.Fatalf("committed read failure = %v, want %v", err, readErr)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if outcome == "canonical owner" && claimed.Metadata["canonical"] != "retained" {
+				t.Fatal("canonical metadata lost")
+			}
+			if !wantOK && claimed.Assignee != "other-1" {
+				t.Fatalf("rejection lost foreign owner: %+v", claimed)
 			}
 		})
 	}
