@@ -2066,6 +2066,10 @@ if [ "$*" = "rig list --json" ]; then
   printf '{"rigs":[{"name":"hq","hq":true},{"name":"project-alpha","hq":false}]}\n'
   exit 0
 fi
+if [ "$*" = "ready --status in_progress --json" ]; then
+  printf '%s\n' "${ORPHAN_SWEEP_FEDERATED_JSON:-[]}"
+  exit 0
+fi
 if [ "$*" = "bd list --rig project-alpha --status=in_progress --json --limit=0" ]; then
   printf '%s\n' "$ORPHAN_SWEEP_RIG_JSON"
   exit 0
@@ -12554,6 +12558,16 @@ const orphanSweepGateStubArm = `if [ "$1" = "agent" ] && [ "$2" = "is-foreign" ]
   if [ -n "${ORPHAN_SWEEP_GATE_LINGER:-}" ]; then sleep "$ORPHAN_SWEEP_GATE_LINGER"; fi
   exit 0
 fi
+if [ "$1" = "ready" ] && [ "$2" = "--status" ] && [ "$3" = "in_progress" ]; then
+  if [ -n "${ORPHAN_SWEEP_FEDERATED_EXIT:-}" ]; then
+    echo "${ORPHAN_SWEEP_FEDERATED_ERR:-gc ready: graph store: unreadable}" >&2
+    exit "$ORPHAN_SWEEP_FEDERATED_EXIT"
+  fi
+  cat <<FEDERATED_EOF
+${ORPHAN_SWEEP_FEDERATED_BEADS_JSON:-[]}
+FEDERATED_EOF
+  exit 0
+fi
 `
 
 // orphanSweepSharedRigFakeGC fakes a city that shares the rig store "shared"
@@ -12621,7 +12635,7 @@ EOF
       exit 0
     fi
     if [ "$2" = "show" ] && [ "$4" = "--json" ]; then
-      row=$(printf '%s\n%s\n%s\n' "${ORPHAN_SWEEP_HQ_BEADS_JSON:-[]}" "${ORPHAN_SWEEP_SHARED_BEADS_JSON:-[]}" "${ORPHAN_SWEEP_SESSION_BEADS_JSON:-[]}" | jq -c --arg id "$3" '.[] | select(.id == $id)' | head -n 1)
+      row=$(printf '%s\n%s\n%s\n%s\n' "${ORPHAN_SWEEP_HQ_BEADS_JSON:-[]}" "${ORPHAN_SWEEP_SHARED_BEADS_JSON:-[]}" "${ORPHAN_SWEEP_FEDERATED_BEADS_JSON:-[]}" "${ORPHAN_SWEEP_SESSION_BEADS_JSON:-[]}" | jq -c --arg id "$3" '.[] | select(.id == $id)' | head -n 1)
       if [ -n "$row" ]; then
         printf '[%s]\n' "$row"
         exit 0
@@ -12941,6 +12955,102 @@ func TestOrphanSweepProtectsHQClaimsItCannotVouchFor(t *testing.T) {
 	}
 	if len(outcome.Scopes) != 1 || outcome.Scopes[0].Scope != "retired-hand" || !strings.Contains(outcome.Scopes[0].Reason, "hq-retired") {
 		t.Fatalf("outcome scopes = %+v, want one for retired-hand naming hq-retired", outcome.Scopes)
+	}
+}
+
+// TestOrphanSweepJudgesClaimsOnlyTheFederatedReaderReturns is the split-city
+// regression: on a city whose [storage.classes] serves the graph class from a
+// binding, every molecule root and step lives there, and `gc bd list` answers
+// from a work store only, so it lists none of their claims (exit 0, empty).
+// The sweep reads them through `gc ready --status in_progress`, and judges
+// them like any other claim: a dead local holder is released, a holder this
+// city cannot vouch for is kept and named.
+func TestOrphanSweepJudgesClaimsOnlyTheFederatedReaderReturns(t *testing.T) {
+	run := runOrphanSweepGateFixture(t, nil, nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d3", Status: "closed", IssueType: "session"}},
+		[]string{"human/alice"},
+		map[string]string{"ORPHAN_SWEEP_FEDERATED_BEADS_JSON": orphanSweepGateJSON(t, []orphanSweepGateRow{
+			inProgress("gcg-1026", "human/alice"),
+			inProgress("gcg-1027", "gc-d34d3"),
+		})})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if !run.released("gcg-1027") {
+		t.Fatalf("dead local claim on a graph step was not released\n%s", run.context())
+	}
+	if run.released("gcg-1026") {
+		t.Fatalf("graph-step claim held by an identity this city cannot vouch for was released\n%s", run.context())
+	}
+	if want := `"human/alice" (1: gcg-1026)`; !strings.Contains(run.out, want) {
+		t.Fatalf("output does not name the protected graph-step claim %s:\n%s", want, run.out)
+	}
+}
+
+// TestOrphanSweepJudgesAClaimBothReadersReturnOnce: on every city the
+// federated reader also returns the work stores' claims the scope reads
+// already staged. Each claim is judged once.
+func TestOrphanSweepJudgesAClaimBothReadersReturnOnce(t *testing.T) {
+	row := []orphanSweepGateRow{inProgress("hq-local-dead", "gc-d34d2")}
+	run := runOrphanSweepGateFixture(t, row, nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d2", Status: "closed", IssueType: "session"}},
+		nil,
+		map[string]string{"ORPHAN_SWEEP_FEDERATED_BEADS_JSON": orphanSweepGateJSON(t, row)})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	lines := nonEmptyLogLines(run.log)
+	if got := countExactLine(lines, "bd release-if-current hq-local-dead gc-d34d2"); got != 1 {
+		t.Fatalf("release-if-current count = %d, want 1\n%s", got, run.context())
+	}
+	if got := countExactLine(lines, "bd show hq-local-dead --json"); got != 1 {
+		t.Fatalf("revalidation count = %d, want 1\n%s", got, run.context())
+	}
+}
+
+// TestOrphanSweepDeclaresAFederatedReadItCouldNotComplete: gc ready fails on a
+// store it cannot read instead of answering short. The sweep must not read
+// that as "no claims": it says so on stderr and in a partial outcome, and
+// still judges the claims the scope reads returned.
+func TestOrphanSweepDeclaresAFederatedReadItCouldNotComplete(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hq   []orphanSweepGateRow
+	}{
+		{"with scope claims", []orphanSweepGateRow{inProgress("hq-local-dead", "gc-d34d2")}},
+		{"with no scope claims", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := runOrphanSweepGateFixture(t, tc.hq, nil,
+				[]orphanSweepGateRow{{ID: "gc-d34d2", Status: "closed", IssueType: "session"}},
+				nil,
+				map[string]string{
+					"ORPHAN_SWEEP_FEDERATED_EXIT": "1",
+					"ORPHAN_SWEEP_FEDERATED_ERR":  "gc ready: graph store: database is locked",
+				})
+			if run.err != nil {
+				t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+			}
+			if tc.hq != nil && !run.released("hq-local-dead") {
+				t.Fatalf("a failed federated read stopped the scope claims from being judged\n%s", run.context())
+			}
+			if want := "database is locked"; !strings.Contains(run.out, want) {
+				t.Fatalf("output does not report the failed federated read (%q):\n%s", want, run.out)
+			}
+			outcome, ok := run.outcome(t)
+			if !ok || outcome.Outcome != "partial" {
+				t.Fatalf("outcome = %+v (written %v), want partial\n%s", outcome, ok, run.context())
+			}
+			found := false
+			for _, scope := range outcome.Scopes {
+				if strings.Contains(scope.Reason, "database is locked") {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("outcome scopes = %+v, want one naming the failed federated read", outcome.Scopes)
+			}
+		})
 	}
 }
 

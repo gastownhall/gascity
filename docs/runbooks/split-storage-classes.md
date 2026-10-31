@@ -698,7 +698,8 @@ just as the controller skips it: what its own store holds comes back on
 `gc rig resume`, and routed graph work in the binding stays visible throughout
 (see [`gc ready`](/reference/cli#gc-ready)). Every worker's generated work query
 is already swapped onto it, so this affects operators and ad-hoc scripts, not
-the work loop.
+the work loop. The core orphan-sweep order also reads in-progress claims
+through it.
 
 `gc ready` is flag-compatible with the `bd ready` invocation that generated work
 query builds — **not** with all of `bd ready`. It takes `--assignee`,
