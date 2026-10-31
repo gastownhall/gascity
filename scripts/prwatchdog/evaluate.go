@@ -70,6 +70,10 @@ type Input struct {
 	NeedsMacLabel            bool
 	NeedsReviewFormulasLabel bool
 	FetchError               error
+	// AwaitingApproval reports that the head's workflows are held for a
+	// maintainer's approval (a fork pull_request run in action_required), so
+	// an absent Check is explained by that hold rather than by a failure.
+	AwaitingApproval bool
 }
 
 // Summary is a human-readable rendering of each tracked check's state.
@@ -173,6 +177,15 @@ func evaluateGate(runs []CheckRun, headSHA, name, absentWord, inProgressWord str
 	}
 }
 
+// Reason and Summary.Check wording for a Check that never appeared. Watch
+// matches on these to decide whether the approval lookup applies.
+const (
+	reasonTestsNeverRan    = "tests never ran"
+	reasonAwaitingApproval = "awaiting maintainer approval: a maintainer must approve this fork's workflow runs before tests can start"
+	wordNeverRan           = "never ran"
+	wordAwaitingApproval   = "awaiting maintainer approval"
+)
+
 // Evaluate inspects the observed check runs for in.HeadSHA and decides
 // whether the watchdog should keep observing, or stop with a pass/fail
 // verdict.
@@ -184,13 +197,16 @@ func Evaluate(in Input) Evaluation {
 	atDeadline := in.Elapsed >= in.Deadline
 	var summary Summary
 
-	v, word, fk := evaluateGate(in.CheckRuns, in.HeadSHA, CheckName, "never ran", "in progress", atDeadline)
+	v, word, fk := evaluateGate(in.CheckRuns, in.HeadSHA, CheckName, wordNeverRan, "in progress", atDeadline)
 	summary.Check = word
 	switch {
 	case v == verdictWait:
 		return Evaluation{Summary: summary}
+	case v == verdictFail && fk == failNotConcluded && word == wordNeverRan && in.AwaitingApproval:
+		summary.Check = wordAwaitingApproval
+		return Evaluation{Terminal: true, Reason: reasonAwaitingApproval, Summary: summary}
 	case v == verdictFail && fk == failNotConcluded:
-		return Evaluation{Terminal: true, Reason: "tests never ran", Summary: summary}
+		return Evaluation{Terminal: true, Reason: reasonTestsNeverRan, Summary: summary}
 	case v == verdictFail:
 		return Evaluation{Terminal: true, Reason: "CI ran but preflight did not pass", Summary: summary}
 	}
