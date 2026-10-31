@@ -269,6 +269,64 @@ api_key     = "$MY_PROVIDER_KEY"
 api_key_env = "OPENROUTER_API_KEY"   # whatever env var the chosen provider reads
 ```
 
+### Permissions
+
+An unattended session that stops at a permission prompt stalls until someone
+answers it. To prevent that, the `opencode`, `groq`, and `cerebras` presets
+launch OpenCode with `OPENCODE_PERMISSION={"*":"allow"}`.
+
+OpenCode merges `OPENCODE_PERMISSION` over every config file and applies the
+last matching rule. The preset's catch-all therefore overrides the permission
+rules in the project's `opencode.json`, including one an overlay stages into
+the work directory (for example
+`agents/<name>/overlay/per-provider/opencode/opencode.json`). Pick one place
+for the policy.
+
+**Recipe A — the policy lives in `opencode.json`.** Withhold the preset
+default with an empty value:
+
+```toml
+# agents/worker/agent.toml
+provider = "opencode"
+env      = { OPENCODE_PERMISSION = "" }
+
+# or, for every agent on the harness, in city.toml:
+# [providers.opencode]   (or [providers.groq], [providers.cerebras])
+# env = { OPENCODE_PERMISSION = "" }
+```
+
+Then the `opencode.json` that reaches the work directory carries the rules:
+
+```json
+{
+  "permission": {
+    "*": "allow",
+    "bash": { "git push*": "deny" },
+    "edit": "deny"
+  }
+}
+```
+
+**Recipe B — the policy lives in the env.** Replace the preset default with
+the full rule set, and leave the `permission` block out of `opencode.json`:
+
+```toml
+# agents/worker/agent.toml
+provider = "opencode"
+env      = { OPENCODE_PERMISSION = '{"*":"allow","bash":{"git push*":"deny"},"edit":"deny"}' }
+```
+
+If both the env and the file carry rules, OpenCode merges the env over the
+file and its catch-all wins again.
+
+In both recipes, start the policy with `"*": "allow"`. Without it, OpenCode's
+own defaults ask before reading `.env` files or touching paths outside the work
+directory, and an unattended session waits at that prompt; any rule that
+resolves to `ask` stops the session the same way. Rules match command text, so
+treat them as guardrails rather than a security boundary. See OpenCode's
+[permissions documentation](https://opencode.ai/docs/permissions/) for the
+rule syntax.
+
 ---
 
 ## Login-based harnesses
