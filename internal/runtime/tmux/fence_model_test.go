@@ -113,7 +113,17 @@ func (m *fenceModel) execute(args []string) (string, error) {
 		args = args[2:]
 	}
 	m.calls = append(m.calls, slices.Clone(args))
-	return m.dispatch(args, false)
+	// A ";"-separated sequence runs one command at a time, stopping at the
+	// first failure, as tmux does.
+	var outs []string
+	for _, cmd := range splitTmuxSequence(args) {
+		out, err := m.dispatch(cmd, false)
+		if err != nil {
+			return "", err
+		}
+		outs = append(outs, out)
+	}
+	return strings.Join(outs, "\n"), nil
 }
 
 func (m *fenceModel) executeCtx(ctx context.Context, args []string) (string, error) {

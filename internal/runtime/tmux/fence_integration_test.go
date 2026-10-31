@@ -164,7 +164,9 @@ func TestFencedNudgeRealTmuxSameIdentityRelaunchDelivers(t *testing.T) {
 	_ = startRawCat(t, p, name, f, nil)
 	dir := t.TempDir()
 	file := filepath.Join(dir, "typed")
-	if err := p.Relaunch(context.Background(), name, runtime.Config{Command: rawCatCommand(file), WorkDir: dir}); err != nil {
+	env := fenceEnv(f)
+	env["GC_PROVIDER"] = "opencode" // as startRawCat: a relaunch carries its config's env
+	if err := p.Relaunch(context.Background(), name, runtime.Config{Command: rawCatCommand(file), WorkDir: dir, Env: env}); err != nil {
 		t.Fatalf("Relaunch: %v", err)
 	}
 	waitCaptureFile(t, file)

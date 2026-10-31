@@ -137,7 +137,7 @@ func TestStageSecretEnvRejectsOutputThatIsNotAStagedDir(t *testing.T) {
 func TestStageSecretEnvIsANoOpWithoutSecrets(t *testing.T) {
 	f := &fakeRunner{}
 	p := &Provider{conn: &Conn{ep: Endpoint{Host: "box"}, run: f}}
-	staged, err := p.stageSecretEnv(context.Background(), nil, []string{"new-session"})
+	staged, err := p.stageSecretEnv(context.Background(), nil, [][]string{{"new-session"}})
 	if err != nil {
 		t.Fatalf("stageSecretEnv: %v", err)
 	}
