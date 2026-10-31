@@ -97,7 +97,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileExec:
 		return execProfile{core, b, b, b, b, b, timed, probeBudgetTrait{}}
 	case ProfileSSH:
-		return sshProfile{core, b, timed}
+		return sshProfile{core, b, b, b, timed}
 	case ProfileT3Bridge:
 		return t3bridgeProfile{core, b, b, b, b, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
 	}
@@ -144,7 +144,7 @@ var profileCapabilities = map[Profile]ProviderCapabilities{
 	ProfileACP:      {CanReportActivity: true},
 	ProfileHerdr:    {CanReportActivity: true, CanStream: true, CanAttachTTY: true, NeedsClaimBackstop: true},
 	ProfileK8s:      {CanReportActivity: true},
-	ProfileSSH:      {CanReportActivity: true},
+	ProfileSSH:      {CanReportActivity: true, CanAttachTTY: true},
 	ProfileT3Bridge: {CanReportActivity: true},
 }
 
@@ -248,6 +248,8 @@ type (
 	}
 	sshProfile struct {
 		Provider
+		AttachmentObserverWithError
+		LivenessObserverWithError
 		RelaunchProvider
 		sleepTrait
 	}
