@@ -87,6 +87,7 @@ go_test(
         "pack_orders_test.go",
         "pack_prompt_bead_ids_test.go",
         "testenv_import_test.go",
+        "wisp_compact_script_test.go",
     ],
     data = glob(
         ["**"],
