@@ -12,6 +12,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -242,14 +243,30 @@ func (b *sessionCircuitBreaker) RecordRestart(identity string, now time.Time) ci
 }
 
 func (b *sessionCircuitBreaker) recordRestartLocked(identity string, now time.Time) circuitBreakerStateKind {
+	state, _, _ := b.recordRestartWithSnapshotLocked(identity, now)
+	return state
+}
+
+// recordRestartWithSnapshotLocked records one start attempt and returns the
+// state immediately before it. The snapshot is taken after an automatic
+// cooldown reset, so undoing a start cannot resurrect history that had already
+// expired. recorded is false when the breaker was already open and no marker
+// was added.
+func (b *sessionCircuitBreaker) recordRestartWithSnapshotLocked(identity string, now time.Time) (circuitBreakerStateKind, sessionCircuitBreakerEntrySnapshot, bool) {
 	e := b.entries[identity]
+	hadEntry := e != nil
 	if e == nil {
 		e = &circuitBreakerEntry{}
 		b.entries[identity] = e
 	}
 	b.maybeAutoResetLocked(e, now)
+	snapshot := sessionCircuitBreakerEntrySnapshot{
+		entry:           cloneCircuitBreakerEntry(e),
+		existed:         hadEntry,
+		resetGeneration: b.resetGenerationLocked(identity),
+	}
 	if e.state == circuitOpen {
-		return e.state
+		return e.state, snapshot, false
 	}
 	e.restarts = append(e.restarts, now)
 	e.lastRestart = now
@@ -264,7 +281,7 @@ func (b *sessionCircuitBreaker) recordRestartLocked(identity string, now time.Ti
 			e.openRestartCnt = len(e.restarts)
 		}
 	}
-	return e.state
+	return e.state, snapshot, true
 }
 
 // RecordProgress records an observable progress signal (a bead state
@@ -660,13 +677,13 @@ func recordSessionCircuitBreakerRestart(
 	cb *sessionCircuitBreaker,
 	identity string,
 	now time.Time,
-) (circuitBreakerStateKind, error) {
+) (circuitBreakerStateKind, sessionCircuitBreakerEntrySnapshot, bool, error) {
 	if sessFront == nil || strings.TrimSpace(id) == "" {
-		return circuitClosed, nil
+		return circuitClosed, sessionCircuitBreakerEntrySnapshot{}, false, nil
 	}
 	identity = strings.TrimSpace(identity)
 	if identity == "" {
-		return circuitClosed, nil
+		return circuitClosed, sessionCircuitBreakerEntrySnapshot{}, false, nil
 	}
 	if cb == nil {
 		cb = defaultSessionCircuitBreaker()
@@ -674,33 +691,33 @@ func recordSessionCircuitBreakerRestart(
 
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
-	previous, hadPrevious := cloneCircuitBreakerEntry(cb.entries[identity]), cb.entries[identity] != nil
-	state := cb.recordRestartLocked(identity, now)
+	state, previous, recorded := cb.recordRestartWithSnapshotLocked(identity, now)
 	metadata, err := cb.metadataLocked(identity, now)
 	if err != nil {
-		cb.restoreEntryLocked(identity, previous, hadPrevious)
-		return state, err
+		cb.restoreEntryLocked(identity, previous.entry, previous.existed)
+		return state, previous, false, err
 	}
 	current, err := sessFront.CircuitState(id)
 	if err != nil {
-		cb.restoreEntryLocked(identity, previous, hadPrevious)
-		return state, fmt.Errorf("loading session circuit breaker metadata for %s: %w", id, err)
+		cb.restoreEntryLocked(identity, previous.entry, previous.existed)
+		return state, previous, false, fmt.Errorf("loading session circuit breaker metadata for %s: %w", id, err)
 	}
 	if current == session.CircuitStateFromMetadata(metadata) {
-		return state, nil
+		return state, previous, recorded, nil
 	}
 	if err := sessFront.ApplyPatch(id, metadata); err != nil {
-		cb.restoreEntryLocked(identity, previous, hadPrevious)
-		return state, fmt.Errorf("persisting session circuit breaker metadata for %s: %w", id, err)
+		cb.restoreEntryLocked(identity, previous.entry, previous.existed)
+		return state, previous, false, fmt.Errorf("persisting session circuit breaker metadata for %s: %w", id, err)
 	}
-	return state, nil
+	return state, previous, recorded, nil
 }
 
 // sessionCircuitBreakerEntrySnapshot is an identity's breaker entry before a
 // restart was recorded.
 type sessionCircuitBreakerEntrySnapshot struct {
-	entry   *circuitBreakerEntry
-	existed bool
+	entry           *circuitBreakerEntry
+	existed         bool
+	resetGeneration uint64
 }
 
 // entrySnapshot captures identity's entry, to undo a restart that turned out
@@ -708,22 +725,205 @@ type sessionCircuitBreakerEntrySnapshot struct {
 func (b *sessionCircuitBreaker) entrySnapshot(identity string) sessionCircuitBreakerEntrySnapshot {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return sessionCircuitBreakerEntrySnapshot{entry: cloneCircuitBreakerEntry(b.entries[identity]), existed: b.entries[identity] != nil}
+	return sessionCircuitBreakerEntrySnapshot{
+		entry:           cloneCircuitBreakerEntry(b.entries[identity]),
+		existed:         b.entries[identity] != nil,
+		resetGeneration: b.resetGenerationLocked(identity),
+	}
 }
 
-// restoreEntrySnapshot undoes a restart recorded for a start that never ran
-// (its PreWake was refused): identity's entry goes back to snap and the row's
-// breaker metadata follows. No identity is a no-op.
-func (b *sessionCircuitBreaker) restoreEntrySnapshot(sessFront *session.Store, id, identity string, snap sessionCircuitBreakerEntrySnapshot, now time.Time, stderr io.Writer) {
+// restoreEntrySnapshot removes only this attempt's restart marker. The
+// process-local undo always happens under b.mu, even when the row is closed or
+// its runtime-name lease moved. The lease fences only the row patch; that patch
+// removes this marker from the fresh persisted state and leaves concurrent
+// progress, restart and reset metadata intact.
+func (b *sessionCircuitBreaker) restoreEntrySnapshot(sessFront *session.Store, lease *session.RuntimeLease, id, identity string, snap sessionCircuitBreakerEntrySnapshot, recordedAt time.Time, stderr io.Writer) {
 	if b == nil || identity == "" {
 		return
 	}
 	b.mu.Lock()
-	b.restoreEntryLocked(identity, snap.entry, snap.existed)
-	b.mu.Unlock()
-	if err := persistSessionCircuitBreakerMetadata(sessFront, id, b, identity, now); err != nil {
-		fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
+	if b.resetGenerationLocked(identity) != snap.resetGeneration {
+		b.mu.Unlock()
+		return
 	}
+	e := b.entries[identity]
+	if e == nil || !removeRestartTimestamp(e, recordedAt) {
+		b.mu.Unlock()
+		return
+	}
+	if e.lastRestart.Equal(recordedAt) {
+		e.lastRestart = snapshotLastRestart(snap)
+	}
+	if e.state == circuitOpen && e.openedAt.Equal(recordedAt) {
+		e.state = snapshotState(snap)
+		e.openedAt = snapshotOpenedAt(snap)
+		e.openRestartCnt = snapshotOpenRestartCount(snap)
+		e.loggedOpenOnce = snapshotLoggedOpenOnce(snap)
+	}
+	if !snap.existed && circuitBreakerEntryEmpty(e) {
+		delete(b.entries, identity)
+	}
+	if sessFront == nil || strings.TrimSpace(id) == "" || lease == nil || !lease.HeldAt(time.Now()) {
+		b.mu.Unlock()
+		return
+	}
+
+	var patchErr error
+	undoPatchNeeded := false
+	applied, err := lease.UpdateMetadataFenced(3, func(_ session.Info, persisted session.PersistedResponse) session.MetadataPatch {
+		undoPatchNeeded = false
+		if persisted.Status == "closed" || !lease.HeldAt(time.Now()) || !lease.HoldsMeta(persisted.Metadata) {
+			return nil
+		}
+		patch, changed, err := circuitBreakerRestartUndoPatch(persisted.Metadata, snap, recordedAt)
+		if err != nil {
+			patchErr = err
+			return nil
+		}
+		if !changed {
+			return nil
+		}
+		undoPatchNeeded = true
+		return patch
+	})
+	b.mu.Unlock()
+	if patchErr != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "session reconciler: restoring session circuit breaker for %s: %v\n", id, patchErr) //nolint:errcheck // best-effort stderr
+		}
+		return
+	}
+	if err == nil && !applied && undoPatchNeeded {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "session reconciler: restoring session circuit breaker for %s: conditional undo remained contended after 3 attempts; kept the in-memory undo\n", id) //nolint:errcheck // best-effort stderr
+		}
+		return
+	}
+	if err != nil && !errors.Is(err, session.ErrRuntimeLeaseLost) && !errors.Is(err, session.ErrRuntimeLeaseAfterRelease) {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "session reconciler: restoring session circuit breaker for %s after keeping the in-memory undo: %v\n", id, err) //nolint:errcheck // best-effort stderr
+		}
+	}
+}
+
+func removeRestartTimestamp(entry *circuitBreakerEntry, recordedAt time.Time) bool {
+	for i, restart := range entry.restarts {
+		if restart.Equal(recordedAt) {
+			entry.restarts = append(entry.restarts[:i], entry.restarts[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+func snapshotLastRestart(snap sessionCircuitBreakerEntrySnapshot) time.Time {
+	if snap.entry == nil {
+		return time.Time{}
+	}
+	return snap.entry.lastRestart
+}
+
+func snapshotState(snap sessionCircuitBreakerEntrySnapshot) circuitBreakerStateKind {
+	if snap.entry == nil {
+		return circuitClosed
+	}
+	return snap.entry.state
+}
+
+func snapshotOpenedAt(snap sessionCircuitBreakerEntrySnapshot) time.Time {
+	if snap.entry == nil {
+		return time.Time{}
+	}
+	return snap.entry.openedAt
+}
+
+func snapshotOpenRestartCount(snap sessionCircuitBreakerEntrySnapshot) int {
+	if snap.entry == nil {
+		return 0
+	}
+	return snap.entry.openRestartCnt
+}
+
+func snapshotLoggedOpenOnce(snap sessionCircuitBreakerEntrySnapshot) bool {
+	if snap.entry == nil {
+		return false
+	}
+	return snap.entry.loggedOpenOnce
+}
+
+func circuitBreakerEntryEmpty(entry *circuitBreakerEntry) bool {
+	return entry != nil && len(entry.restarts) == 0 && entry.lastRestart.IsZero() &&
+		entry.lastProgress.IsZero() && entry.lastObserved.IsZero() && entry.progressSig == "" &&
+		!entry.observedSig && entry.state == circuitClosed && entry.openedAt.IsZero() &&
+		entry.openRestartCnt == 0 && !entry.loggedOpenOnce
+}
+
+func circuitBreakerRestartUndoPatch(metadata map[string]string, snap sessionCircuitBreakerEntrySnapshot, recordedAt time.Time) (session.MetadataPatch, bool, error) {
+	current := session.CircuitStateFromMetadata(metadata)
+	resetGeneration, err := parseCircuitResetGeneration(current.ResetGeneration)
+	if err != nil {
+		return nil, false, err
+	}
+	if resetGeneration != snap.resetGeneration {
+		return nil, false, nil
+	}
+	restarts, changed, err := removePersistedRestartTimestamp(current.Restarts, recordedAt)
+	if err != nil || !changed {
+		return nil, false, err
+	}
+	patch := session.MetadataPatch{sessionCircuitRestartsMetadata: restarts}
+	lastRestart, err := parseCircuitTime(current.LastRestart)
+	if err != nil {
+		return nil, false, fmt.Errorf("parsing %s: %w", sessionCircuitLastRestartMetadata, err)
+	}
+	if lastRestart.Equal(recordedAt) {
+		patch[sessionCircuitLastRestartMetadata] = formatCircuitTime(snapshotLastRestart(snap))
+	}
+	if current.State == circuitOpen.String() {
+		openedAt, err := parseCircuitTime(current.OpenedAt)
+		if err != nil {
+			return nil, false, fmt.Errorf("parsing %s: %w", sessionCircuitOpenedAtMetadata, err)
+		}
+		if openedAt.Equal(recordedAt) {
+			patch[sessionCircuitStateMetadata] = snapshotState(snap).String()
+			patch[sessionCircuitOpenedAtMetadata] = formatCircuitTime(snapshotOpenedAt(snap))
+			if count := snapshotOpenRestartCount(snap); count > 0 {
+				patch[sessionCircuitOpenRestartCountMetadata] = strconv.Itoa(count)
+			} else {
+				patch[sessionCircuitOpenRestartCountMetadata] = ""
+			}
+		}
+	}
+	return patch, true, nil
+}
+
+func removePersistedRestartTimestamp(value string, recordedAt time.Time) (string, bool, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", false, nil
+	}
+	var encoded []string
+	if err := json.Unmarshal([]byte(value), &encoded); err != nil {
+		return "", false, fmt.Errorf("parsing %s: %w", sessionCircuitRestartsMetadata, err)
+	}
+	for i, raw := range encoded {
+		restart, err := parseCircuitTime(raw)
+		if err != nil {
+			return "", false, fmt.Errorf("parsing %s: %w", sessionCircuitRestartsMetadata, err)
+		}
+		if restart.Equal(recordedAt) {
+			encoded = append(encoded[:i], encoded[i+1:]...)
+			if len(encoded) == 0 {
+				return "", true, nil
+			}
+			updated, err := json.Marshal(encoded)
+			if err != nil {
+				return "", false, err
+			}
+			return string(updated), true, nil
+		}
+	}
+	return "", false, nil
 }
 
 func cloneCircuitBreakerEntry(e *circuitBreakerEntry) *circuitBreakerEntry {

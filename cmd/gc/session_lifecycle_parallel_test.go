@@ -4394,6 +4394,131 @@ func TestCommitAsyncStartResult_IgnoresCommandChangedDuringStartup(t *testing.T)
 	}
 }
 
+func TestCommitAsyncStartResult_UnansweredLivenessRestoresPriorIdentityAfterRefreshDrift(t *testing.T) {
+	store := beads.NewMemStore()
+	if err := beads.StampOpenedStore(store, "MemStore", gate.Auto, false, nil, nil); err != nil {
+		t.Fatalf("enabling conditional writes for async T1 restore: %v", err)
+	}
+	f := newLeaseStartFixture(t, store)
+	lease, release, err := tryRuntimeLease(store, f.city, "worker", f.cand.info.ID, sessionpkg.RuntimeLeaseTTL(0))
+	if err != nil {
+		t.Fatalf("taking runtime lease: %v", err)
+	}
+	defer release()
+	if err := store.SetMetadata(f.cand.info.ID, "command", "worker"); err != nil {
+		t.Fatal(err)
+	}
+	clk := &clock.Fake{Time: time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)}
+	before, persisted, err := sessionFrontDoor(store).GetPersistedResponse(f.cand.info.ID)
+	if err != nil {
+		t.Fatalf("loading pre-wake session: %v", err)
+	}
+	_, _, fold, err := preWakeCommit(before, sessionFrontDoor(store), clk)
+	if err != nil {
+		t.Fatalf("pre-waking session: %v", err)
+	}
+	attempted := before.ApplyPatch(fold)
+	undo := newPreWakeUndo(before, persisted.Metadata, fold)
+	undo.token = attempted.InstanceToken
+	if err := store.SetMetadata(f.cand.info.ID, "command", "worker-updated"); err != nil {
+		t.Fatal(err)
+	}
+	result := startResult{
+		prepared: preparedStart{
+			candidate:                 startCandidate{info: attempted, tp: f.cand.tp, lease: lease},
+			preWakeUndo:               undo,
+			preWakeLivenessUnanswered: true,
+		},
+		outcome:                             TraceOutcomeDeferred,
+		started:                             clk.Now(),
+		finished:                            clk.Now(),
+		restorePreWakeIdentity:              true,
+		restorePreWakeIdentityRequiresFence: true,
+		startBoundaryLivenessUnanswered:     true,
+		storeOnly:                           true,
+	}
+	sp := runtime.NewFake()
+
+	if commitAsyncStartResultWithContext(context.Background(), result, sp, store, clk, events.Discard, 0, ioDiscard{}, ioDiscard{}, nil) {
+		t.Fatal("unanswered-liveness result should not commit after command drift")
+	}
+	got := mustGetBead(t, store, f.cand.info.ID).Metadata
+	if got["generation"] != before.Generation || got["instance_token"] != before.InstanceToken || got["continuation_epoch"] != before.ContinuationEpoch {
+		t.Fatalf("async settle kept the attempted identity: %v, want prior fence (%q, %q, %q)", got, before.Generation, before.InstanceToken, before.ContinuationEpoch)
+	}
+	if got["last_woke_at"] != "" {
+		t.Fatalf("last_woke_at = %q, want the unanswered attempt's lease cleared", got["last_woke_at"])
+	}
+	if got["command"] != "worker-updated" {
+		t.Fatalf("command = %q, want the concurrent command update preserved", got["command"])
+	}
+	if calls := sp.SnapshotCalls(); len(calls) != 0 {
+		t.Fatalf("async settle touched the provider for an unanswered result: %#v", calls)
+	}
+}
+
+func TestCommitStartResult_IdentityRestoreRefusesMovedLease(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	enableConditionalWritesForStartTest(t, env)
+	candidate, bead, _ := identityPlannerCandidate(t, env, "active")
+	lease, release, err := tryRuntimeLease(env.store, env.city, candidate.name(), bead.ID, startRuntimeLeaseTTL(time.Minute, 0))
+	if err != nil {
+		t.Fatalf("taking runtime lease: %v", err)
+	}
+	defer release()
+
+	sessFront := sessionFrontDoor(env.store)
+	before, persisted, err := sessFront.GetPersistedResponse(bead.ID)
+	if err != nil {
+		t.Fatalf("loading pre-wake session: %v", err)
+	}
+	_, fold, err := preWakeCommitUnder(before, sessFront, env.clk, lease)
+	if err != nil {
+		t.Fatalf("pre-waking session under lease: %v", err)
+	}
+	attempted := before.ApplyPatch(fold)
+	undo := newPreWakeUndo(before, persisted.Metadata, fold)
+	undo.token = attempted.InstanceToken
+	candidate.info = attempted
+	candidate.lease = lease
+
+	if err := sessFront.ApplyPatch(bead.ID, sessionpkg.MetadataPatch{
+		sessionpkg.RuntimeLeaseHolderKey: "successor/1/nonce",
+		sessionpkg.RuntimeLeaseEpochKey:  "999",
+	}); err != nil {
+		t.Fatalf("moving runtime lease record: %v", err)
+	}
+	beforeRefusal := mustGetBead(t, env.store, bead.ID).Metadata
+	sp := runtime.NewFake()
+	result := startResult{
+		prepared: preparedStart{
+			candidate:                 candidate,
+			preWakeUndo:               undo,
+			preWakeLivenessUnanswered: true,
+		},
+		outcome:                             TraceOutcomeDeferred,
+		started:                             env.clk.Now(),
+		finished:                            env.clk.Now(),
+		restorePreWakeIdentity:              true,
+		restorePreWakeIdentityRequiresFence: true,
+		storeOnly:                           true,
+		provider:                            sp,
+	}
+	if verdict := commitStartResultTraced(result, sessFront, env.clk, events.Discard, 0, io.Discard, io.Discard, nil); verdict != startCommitFailed {
+		t.Fatalf("commit verdict = %v, want failed store-only deferral", verdict)
+	}
+	after := mustGetBead(t, env.store, bead.ID).Metadata
+	if !reflect.DeepEqual(after, beforeRefusal) {
+		t.Fatalf("moved-lease restore changed the successor's row:\nbefore: %#v\nafter:  %#v", beforeRefusal, after)
+	}
+	if after[sessionpkg.RuntimeLeaseHolderKey] != "successor/1/nonce" || after[sessionpkg.RuntimeLeaseEpochKey] != "999" {
+		t.Fatalf("runtime lease after refused restore = (%q, %q), want successor record", after[sessionpkg.RuntimeLeaseHolderKey], after[sessionpkg.RuntimeLeaseEpochKey])
+	}
+	if calls := sp.SnapshotCalls(); len(calls) != 0 {
+		t.Fatalf("moved-lease store-only restore touched provider: %#v", calls)
+	}
+}
+
 func TestCommitAsyncStartResult_PreservesRuntimeWhenRefreshFails(t *testing.T) {
 	store := &getErrorStore{MemStore: beads.NewMemStore()}
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 2, 50, 0, time.UTC)}

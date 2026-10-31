@@ -122,6 +122,9 @@ func TestObserveBoundedWedgedObservationReturnsUnavailableAtTheBound(t *testing.
 		if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
 			t.Fatalf("err = %v, want it to wrap runtime.ErrRuntimeUnavailable", err)
 		}
+		if !errors.Is(err, ErrObservationUnanswered) {
+			t.Fatalf("err = %v, want it to identify an unanswered bounded observation", err)
+		}
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("err = %v, want it to wrap context.DeadlineExceeded", err)
 		}
