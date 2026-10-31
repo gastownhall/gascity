@@ -7072,7 +7072,11 @@ func writeMaintenanceBdStub(t *testing.T, path string) {
 //   - backup status reports the timestamp in $BEADS_DIR/backup/backup_state.json
 //     (written by writeFreshBackupState) or BD_BACKUP_STATUS_JSON verbatim;
 //     BD_BACKUP_STATUS_FAIL makes it fail with that text.
-//   - close/update/delete succeed unless BD_CLOSE_FAIL is set.
+//   - close/update/delete succeed unless BD_CLOSE_FAIL is set. delete
+//     answers --json in bd's two shapes: a --from-file batch with exactly
+//     one non-empty line gets the single-id reply (deleted as a string, no
+//     count), any other batch gets {"deleted_count":N}. BD_DELETE_JSON, when
+//     set, is printed by delete verbatim instead of the shaped reply.
 //   - `<verb> --help` prints a help line followed by BD_VERB_HELP_EXTRA.
 //   - `config get --json <key>` reports BD_TYPES_RETAINED as the value.
 //
@@ -7163,14 +7167,26 @@ case "$1" in
       printf '%s\n' "$BD_CLOSE_FAIL" >&2
       exit 1
     fi
+    if [ -n "${BD_DELETE_JSON:-}" ]; then
+      printf '%s\n' "$BD_DELETE_JSON"
+      exit 0
+    fi
     n=0
+    file=""
     while [ $# -gt 0 ]; do
       if [ "$1" = "--from-file" ]; then
-        n=$(grep -c . "$2")
+        file=$2
+        n=$(grep -c . "$file")
       fi
       shift
     done
-    printf '{"deleted_count":%s}\n' "$n"
+    # bd routes a one-id --from-file batch through its single-id delete
+    # path, whose --json reply carries the id in deleted and no count.
+    if [ "$n" = "1" ]; then
+      printf '{"deleted":"%s","dependencies_removed":0,"references_updated":0,"schema_version":1}\n' "$(grep . "$file")"
+    else
+      printf '{"deleted_count":%s}\n' "$n"
+    fi
     ;;
 esac
 exit 0
