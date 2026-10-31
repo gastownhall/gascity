@@ -17,18 +17,17 @@ import (
 // doltDriftCheck detects bd-vs-gc Dolt drift in managed-city topology: rigs
 // configured inherited_city but running their own Dolt (Case A), port-file
 // mismatches between rig mirrors and the canonical managed city port (Case B),
-// rig mirrors that are missing where the port-file sync would write one
-// (Case D), and stale .dolt/sql-server.info files left over from abandoned
-// rig-local servers (Case C).
-// Embedded rigs serve their own store and are skipped, as the port-file sync
-// skips them.
+// rig mirrors that are missing or empty where the port-file sync would write
+// one (Case D), and stale .dolt/sql-server.info files left over from abandoned
+// rig-local servers (Case C). Embedded rigs serve their own store and are
+// skipped, as the port-file sync skips them.
 type doltDriftCheck struct {
 	cityPath string
 	cfg      *config.City
 
 	// repinnablePortDrift is set by Run when at least one rig's
 	// .beads/dolt-server.port disagrees with the managed city port (Case B)
-	// or is missing (Case D) — drift that re-pinning the configured port
+	// or is missing or empty (Case D) — drift that re-pinning the configured port
 	// files repairs.
 	repinnablePortDrift bool
 	// liveRigLocalBlocking is set by Run when a rig configured inherited_city
@@ -137,6 +136,8 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 				))
 			}
 			continue
+		case err == nil:
+			mirrorGap = "empty"
 		case scopeArtifactAbsent(err):
 			mirrorGap = "missing"
 		default:
@@ -145,7 +146,7 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 			continue
 		}
 		// Case D: the mirror raw bd resolves the managed port through is
-		// missing, so every bd call in the rig resolves port 0.
+		// missing or blank, so every bd call in the rig resolves port 0.
 		c.repinnablePortDrift = true
 		errors = append(errors, fmt.Sprintf(
 			"rig %q .beads/dolt-server.port is %s, so raw bd in the rig cannot reach the managed city Dolt on port %s; `gc doctor --fix --check dolt-drift` restores it (or next `gc start` rewrites it)",
@@ -182,7 +183,7 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 
 // CanFix reports whether the detected drift is the re-pinnable kind: at least
 // one rig port file disagrees with the managed city port (Case B) or is
-// missing (Case D), and no rig
+// missing or empty (Case D), and no rig
 // has a conflicting live rig-local Dolt (Case A). Re-pinning while a rig-local
 // server is listening would point the file at the wrong server, so that case is
 // left for the operator (the FixHint covers it). Run populates these flags and
@@ -192,7 +193,7 @@ func (c *doltDriftCheck) CanFix() bool {
 }
 
 // Fix re-pins the configured .beads/dolt-server.port files to the managed city
-// port, repairing Case-B drift and restoring Case-D missing mirrors. It reuses the same syncConfiguredDoltPortFiles
+// port, repairing Case-B drift and restoring Case-D missing or empty mirrors. It reuses the same syncConfiguredDoltPortFiles
 // path that `gc start` runs at startup, so a stale rig port file no longer
 // requires a full restart to correct. The doctor framework re-runs Run
 // afterward to verify (and to surface any remaining non-re-pinnable drift).

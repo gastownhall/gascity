@@ -248,12 +248,22 @@ func removeRigPortMirror(t *testing.T, rigDir string) string {
 // empty reaches no managed port through raw bd, so the check reports it as
 // re-pinnable drift instead of staying green.
 func TestDoltDriftCheckReportsMissingOrEmptyInheritedRigPortMirror(t *testing.T) {
+	writeMirror := func(content string) func(t *testing.T, rigDir string) {
+		return func(t *testing.T, rigDir string) {
+			if err := os.WriteFile(filepath.Join(rigDir, ".beads", "dolt-server.port"), []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	for _, tc := range []struct {
 		name    string
 		arrange func(t *testing.T, rigDir string)
 		gap     string
 	}{
 		{name: "missing", arrange: func(t *testing.T, rigDir string) { removeRigPortMirror(t, rigDir) }, gap: "missing"},
+		{name: "empty", arrange: writeMirror(""), gap: "empty"},
+		{name: "newline", arrange: writeMirror("\n"), gap: "empty"},
+		{name: "whitespace", arrange: writeMirror(" \t\n"), gap: "empty"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cityDir, rigDir, managedPort, cfg := managedCityDriftFixture(t, "severed")
