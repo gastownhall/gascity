@@ -137,6 +137,12 @@ type SkillEntry struct {
 	// absent/malformed. Used by prompt-rendering surfaces that want to
 	// show each skill's purpose alongside its name.
 	Description string
+	// FrontmatterName is the SKILL.md frontmatter `name:` value, or ""
+	// when absent. It differs from Name for an imported pack's skill,
+	// whose Name carries the binding prefix while the materialized
+	// SKILL.md keeps the pack's own name; a provider that registers
+	// skills by frontmatter name (opencode 1.x) loads it under this one.
+	FrontmatterName string
 }
 
 // ShadowedEntry records a name that was provided by more than one source
@@ -831,6 +837,20 @@ func LegacyStubNames() []string {
 // supported in v0.15.1 and return "" — same end state as a missing
 // description, which the caller handles gracefully.
 func readSkillDescription(path string) string {
+	return readSkillFrontmatterValue(path, "description", true)
+}
+
+// readSkillName returns the SKILL.md frontmatter `name:` value, read the
+// way readSkillDescription reads `description:`, but only from an
+// unindented key so a nested `name:` under another mapping is ignored.
+func readSkillName(path string) string {
+	return readSkillFrontmatterValue(path, "name", false)
+}
+
+// readSkillFrontmatterValue returns the single-line value of key in the
+// SKILL.md frontmatter, or "" (see readSkillDescription for the rules).
+// allowIndent also matches the key on an indented line.
+func readSkillFrontmatterValue(path, key string, allowIndent bool) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
@@ -856,11 +876,14 @@ func readSkillDescription(path string) string {
 		if line == "---" {
 			break
 		}
-		trimmed := strings.TrimLeft(line, " \t")
-		if !strings.HasPrefix(trimmed, "description:") {
+		trimmed := line
+		if allowIndent {
+			trimmed = strings.TrimLeft(line, " \t")
+		}
+		if !strings.HasPrefix(trimmed, key+":") {
 			continue
 		}
-		value := strings.TrimSpace(strings.TrimPrefix(trimmed, "description:"))
+		value := strings.TrimSpace(strings.TrimPrefix(trimmed, key+":"))
 		// Strip a matching pair of surrounding quotes; no escape handling
 		// needed for the typical single-line description.
 		if len(value) >= 2 {
@@ -907,10 +930,11 @@ func readSkillDir(root, origin string) ([]SkillEntry, error) {
 			continue
 		}
 		out = append(out, SkillEntry{
-			Name:        e.Name(),
-			Source:      dir,
-			Origin:      origin,
-			Description: readSkillDescription(skillMD),
+			Name:            e.Name(),
+			Source:          dir,
+			Origin:          origin,
+			Description:     readSkillDescription(skillMD),
+			FrontmatterName: readSkillName(skillMD),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
