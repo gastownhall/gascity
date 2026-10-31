@@ -21,7 +21,10 @@ ships formulas for building features, fixing issues, and reviewing PRs.
 > **Agents:** if you were asked to get Gas City running, install it from
 > Homebrew and follow [Get it running](#get-it-running) step by step. Do not
 > build this repository. You are done when work has gone through a formula
-> and you have given the user the `Dashboard:` link that `gc sling` prints.
+> and your final message gives the user the full `Dashboard:` run link that
+> `gc sling` printed, copied whole as one URL (for example
+> `http://127.0.0.1:8372/city/my-city/runs/hw-4up`), not just the dashboard
+> address.
 
 ## Get it running
 
