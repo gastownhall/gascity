@@ -16,6 +16,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/deps"
 	"github.com/gastownhall/gascity/internal/doltversion"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -766,7 +767,13 @@ func checkHardDependencies(cityPath string) []missingDep {
 			continue
 		}
 		if d.minVersion != "" {
-			if ver, ok := depMeetsMinVersion(d.name, d.minVersion); ver != "" && !ok {
+			ver, ok, err := depMeetsMinVersion(d.name, d.minVersion)
+			if err != nil {
+				missing = append(missing, missingDep{
+					name:        fmt.Sprintf("%s (could not verify required version v%s+: %v)", d.name, d.minVersion, err),
+					installHint: d.installHint,
+				})
+			} else if !ok {
 				missing = append(missing, missingDep{
 					name:        fmt.Sprintf("%s (found v%s, need v%s+)", d.name, ver, d.minVersion),
 					installHint: d.installHint,
@@ -962,26 +969,29 @@ func initConfigForBdTooling(cityPath string) (*config.City, bool) {
 	return cfg, true
 }
 
-func depMeetsMinVersion(binary, minVersion string) (string, bool) {
+// depMeetsMinVersion distinguishes an incompatible version from a probe that
+// could not establish a version. Both block startup; only the former can
+// truthfully report a found/needed version pair.
+func depMeetsMinVersion(binary, minVersion string) (string, bool, error) {
 	line, err := initRunVersion(binary)
 	if err != nil {
-		return "", true
+		return "", false, err
 	}
 	if binary == "dolt" {
 		info, err := doltversion.CheckFinalMinimum(line, minVersion)
 		if errors.Is(err, doltversion.ErrPreRelease) || errors.Is(err, doltversion.ErrBelowMinimum) {
-			return info.Raw, false
+			return info.Raw, false, nil
 		}
 		if err != nil {
-			return "", true
+			return "", false, err
 		}
-		return info.Raw, true
+		return info.Raw, true, nil
 	}
 	ver := parseDepVersionLine(line)
-	if ver == "" {
-		return "", true
+	if !deps.ValidVersion(ver) {
+		return "", false, errors.New("unrecognized version output")
 	}
-	return ver, compareVersions(ver, minVersion) >= 0
+	return ver, deps.CompareVersions(ver, minVersion) >= 0, nil
 }
 
 func parseDepVersionLine(line string) string {
@@ -992,27 +1002,4 @@ func parseDepVersionLine(line string) string {
 		}
 	}
 	return ""
-}
-
-// compareVersions compares two dot-separated version strings.
-// Returns -1 if a < b, 0 if a == b, 1 if a > b.
-func compareVersions(a, b string) int {
-	aParts := strings.Split(a, ".")
-	bParts := strings.Split(b, ".")
-	for i := 0; i < len(aParts) || i < len(bParts); i++ {
-		var ai, bi int
-		if i < len(aParts) {
-			_, _ = fmt.Sscanf(aParts[i], "%d", &ai)
-		}
-		if i < len(bParts) {
-			_, _ = fmt.Sscanf(bParts[i], "%d", &bi)
-		}
-		if ai < bi {
-			return -1
-		}
-		if ai > bi {
-			return 1
-		}
-	}
-	return 0
 }

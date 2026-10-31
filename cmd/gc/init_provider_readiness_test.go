@@ -815,7 +815,10 @@ func TestFreshProviderBd13FloorAcceptsReleaseCandidateAndRelease(t *testing.T) {
 	}{{"1.2.2", false}, {"1.3.0-rc.1", true}, {"1.3.0", true}} {
 		t.Run(tt.version, func(t *testing.T) {
 			initRunVersion = func(string) (string, error) { return "bd version " + tt.version, nil }
-			_, got := depMeetsMinVersion("bd", bdFreshProviderMinVersion)
+			_, got, err := depMeetsMinVersion("bd", bdFreshProviderMinVersion)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if got != tt.want {
 				t.Fatalf("bd %s accepted=%t, want %t", tt.version, got, tt.want)
 			}
@@ -2465,5 +2468,46 @@ func TestInstallInitRemoteImportsGascityTemplateNeedsNoNetwork(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cachePath, "gascity", "roles", "pack.toml")); err != nil {
 		t.Fatalf("roles pack not materialized from embedded content: %v", err)
+	}
+}
+
+// Init must stop before handing an unverifiable required runtime to the
+// supervisor, just as doctor does for an existing city.
+func TestInitRequiredDependencyVersionProbeFailuresBlock(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "")
+	oldLookPath, oldVersion := initLookPath, initRunVersion
+	t.Cleanup(func() { initLookPath, initRunVersion = oldLookPath, oldVersion })
+	initLookPath = func(string) (string, error) { return "/usr/bin/tool", nil }
+	for _, binary := range []string{"bd", "dolt"} {
+		for _, tc := range []struct {
+			name, output string
+			err          error
+		}{
+			{name: "command failure", err: errors.New("version command failed")},
+			{name: "empty"},
+			{name: "unrecognized", output: "unexpected output"},
+			{name: "malformed high version", output: "version 999.bad"},
+			{name: "extra components", output: "version 999.0.0.4"},
+		} {
+			t.Run(binary+"/"+tc.name, func(t *testing.T) {
+				initRunVersion = func(name string) (string, error) {
+					if name == binary {
+						if tc.output != "" {
+							return binary + " " + tc.output, tc.err
+						}
+						return tc.output, tc.err
+					}
+					if name == "dolt" {
+						return "dolt version " + doltMinVersion, nil
+					}
+					return "bd version " + bdMinVersion, nil
+				}
+				missing := checkHardDependencies(t.TempDir())
+				if len(missing) != 1 || !strings.Contains(missing[0].name, binary) || !strings.Contains(missing[0].name, "could not verify") || missing[0].installHint == "" {
+					t.Fatalf("dependencies = %#v, want actionable unverifiable %s blocker", missing, binary)
+				}
+			})
+		}
 	}
 }
