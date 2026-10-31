@@ -161,7 +161,14 @@ func parseBead(data string) (beads.Bead, error) {
 	if err := json.Unmarshal([]byte(data), &w); err != nil {
 		return beads.Bead{}, fmt.Errorf("parsing JSON: %w", err)
 	}
-	return w.toBead(), nil
+	b, err := w.toBead()
+	if err != nil {
+		if w.ID != "" {
+			return beads.Bead{}, fmt.Errorf("parsing bead %s: %w", w.ID, err)
+		}
+		return beads.Bead{}, err
+	}
+	return b, nil
 }
 
 // parseBeadList parses a JSON array of beads. Returns empty slice for
@@ -176,13 +183,44 @@ func parseBeadList(data string) ([]beads.Bead, error) {
 	}
 	result := make([]beads.Bead, len(ws))
 	for i := range ws {
-		result[i] = ws[i].toBead()
+		b, err := ws[i].toBead()
+		if err != nil {
+			id := ws[i].ID
+			if id == "" {
+				id = fmt.Sprintf("#%d", i)
+			}
+			return nil, fmt.Errorf("parsing bead %s: %w", id, err)
+		}
+		result[i] = b
 	}
 	return result, nil
 }
 
+// decodeOptionalBead validates a script's echoed bead when stdout is JSON.
+// Empty output and non-JSON text stay success: update scripts are not
+// required to echo the bead they wrote.
+func decodeOptionalBead(out string) error {
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return nil
+	}
+	var err error
+	switch out[0] {
+	case '{':
+		_, err = parseBead(out)
+	case '[':
+		_, err = parseBeadList(out)
+	default:
+		return nil
+	}
+	if err != nil && errors.Is(err, beads.ErrMetadataParse) {
+		return err
+	}
+	return nil
+}
+
 // toBead converts the wire format to a Gas City Bead.
-func (w *beadWire) toBead() beads.Bead {
+func (w *beadWire) toBead() (beads.Bead, error) {
 	var priority *int
 	if w.Priority != nil {
 		cloned := *w.Priority
@@ -191,6 +229,10 @@ func (w *beadWire) toBead() beads.Bead {
 	status := w.Status
 	if strings.TrimSpace(status) == "" {
 		status = "open"
+	}
+	metadata, err := coerceMetadata(w.Metadata)
+	if err != nil {
+		return beads.Bead{}, err
 	}
 	return beads.Bead{
 		ID:          w.ID,
@@ -207,12 +249,12 @@ func (w *beadWire) toBead() beads.Bead {
 		Needs:       w.Needs,
 		Description: w.Description,
 		Labels:      w.Labels,
-		Metadata:    coerceMetadata(w.Metadata),
+		Metadata:    metadata,
 		Ephemeral:   w.Ephemeral,
 		NoHistory:   w.NoHistory,
 		DeferUntil:  cloneTimePtr(w.DeferUntil),
 		CloseReason: closeReasonFor(status, w.CloseReason),
-	}
+	}, nil
 }
 
 // closeReasonFor keeps a script's close_reason only on a closed bead: a bead
@@ -232,14 +274,24 @@ func cloneTimePtr(v *time.Time) *time.Time {
 	return &cloned
 }
 
+const excludeClaimantsMetadataKey = "gc.exclude_claimants"
+
 // coerceMetadata converts raw JSON metadata values to strings. Backing stores
 // may return numbers or booleans; the domain model is map[string]string.
-func coerceMetadata(raw map[string]json.RawMessage) map[string]string {
+//
+// gc.exclude_claimants is a comma-separated identity list. A non-string JSON
+// value must not become its raw text: that text matches no claimant, so the
+// exclusion would fail open. Reject it with the same message as the other
+// metadata decoders.
+func coerceMetadata(raw map[string]json.RawMessage) (map[string]string, error) {
 	if len(raw) == 0 {
-		return nil
+		return nil, nil
 	}
 	m := make(map[string]string, len(raw))
 	for k, v := range raw {
+		if k == excludeClaimantsMetadataKey && (len(v) == 0 || v[0] != '"') {
+			return nil, fmt.Errorf("metadata %s must be a string: %w", k, beads.ErrMetadataParse)
+		}
 		var s string
 		if json.Unmarshal(v, &s) == nil {
 			m[k] = s
@@ -248,7 +300,7 @@ func coerceMetadata(raw map[string]json.RawMessage) map[string]string {
 			m[k] = strings.TrimSpace(string(v))
 		}
 	}
-	return m
+	return m, nil
 }
 
 // Create persists a new bead: script create (stdin: JSON)
@@ -298,12 +350,15 @@ func (s *Store) Update(id string, opts beads.UpdateOpts) error {
 	if err != nil {
 		return fmt.Errorf("exec beads update: marshaling: %w", err)
 	}
-	_, err = s.run(data, "update", id)
+	out, err := s.run(data, "update", id)
 	if err != nil {
 		if isNotFoundError(err) {
 			return fmt.Errorf("updating bead %q: %w", id, beads.ErrNotFound)
 		}
 		return fmt.Errorf("updating bead %q: %w", id, err)
+	}
+	if err := decodeOptionalBead(out); err != nil {
+		return fmt.Errorf("exec beads update: %w", err)
 	}
 	return nil
 }

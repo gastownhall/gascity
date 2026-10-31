@@ -50,7 +50,8 @@ type updateRequest struct {
 //
 // Metadata uses json.RawMessage values because backing stores (e.g. bd) may
 // return non-string types (numbers, booleans). The controller's domain model
-// is map[string]string, so toBead coerces all values via [coerceMetadata].
+// is map[string]string, so toBead coerces values via [coerceMetadata].
+// gc.exclude_claimants is the exception: a non-string value is an error.
 type beadWire struct {
 	ID          string                     `json:"id"`
 	Title       string                     `json:"title"`
