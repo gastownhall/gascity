@@ -5324,8 +5324,9 @@ func (cr *CityRuntime) shutdown() {
 // bounded parallel) decides, and a probe that fails keeps the name (unknown
 // is not absent; the stop reports it as unknown). That holds only where the
 // provider reports a failed probe (runtime.LivenessObserverWithError); on
-// one that does not (exec, ssh, herdr) a failed probe reads as not running,
-// and the row is passed over like a stopped one. A session recorded
+// one that does not (ssh, herdr), or an exec pack that is not v2-ready
+// (whose error-bearing read is its bool read with a nil error), a failed
+// probe reads as not running, and the row is passed over like a stopped one. A session recorded
 // creating is skipped: it is its start's to finish (shutdown waits for async
 // starts first, and a standalone stop reaps one whose start died with its
 // controller in stopInterruptedStartsForStop).

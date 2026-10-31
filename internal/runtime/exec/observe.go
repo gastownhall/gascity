@@ -303,7 +303,7 @@ func (p *Provider) startFresh(ctx context.Context, name string, cfg runtime.Conf
 
 // createFresh creates the box and launches the agent: `provision` then a
 // fresh launchAgent for a separable pack, otherwise the welded `start` op
-// followed by Start's fence, ready prompt and startup dialogs.
+// followed by finishStart, as Start runs it.
 func (p *Provider) createFresh(ctx context.Context, name string, cfg runtime.Config) error {
 	data, err := marshalStartConfig(cfg)
 	if err != nil {
@@ -318,14 +318,8 @@ func (p *Provider) createFresh(ctx context.Context, name string, cfg runtime.Con
 	if _, err := p.runWithContext(ctx, p.startTimeout, data, "start", name); err != nil {
 		return err
 	}
-	if err := p.publishInputFence(ctx, name, cfg); err != nil {
-		return err
-	}
-	p.publishReadyPrompt(ctx, name, cfg)
-	if err := p.dismissStartupDialogs(ctx, name, cfg); err != nil {
-		return fmt.Errorf("exec provider: dismissing startup dialogs: %w", err)
-	}
-	return nil
+	_, err = p.finishStart(ctx, name, cfg)
+	return err
 }
 
 // freshStartConfig is cfg as a fresh start sends it: fresh_only set, and
@@ -356,9 +350,12 @@ func freshStartConfig(cfg runtime.Config) (runtime.Config, error) {
 }
 
 // freshCollision reports a fresh start the script refused because a box
-// holds the name: exit 73, or the existing collision phrases.
+// holds the name: a `start` or `provision` op's exit 73, or its existing
+// collision phrases. Nothing else is a collision, however it is worded or
+// wrapped: a refused launch into the box this attempt provisioned is a
+// start failure, whose cleanup stops that box when it carries our token.
 func freshCollision(err error) bool {
-	if errors.Is(err, runtime.ErrSessionExists) || exitCode(err) == exitCodeFreshCollision {
+	if exitCode(err) == exitCodeFreshCollision {
 		return true
 	}
 	var e *opExitError

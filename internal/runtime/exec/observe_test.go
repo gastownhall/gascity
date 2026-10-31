@@ -612,26 +612,36 @@ func TestFreshOnlyStartMintsToken(t *testing.T) {
 	}
 }
 
-// Kills (F2): a fresh launch that respawns into an existing agent session.
+// Kills (F2, S3): a fresh launch that respawns into an existing agent
+// session, or that reads its own refusal as a collision and so leaks the
+// box this attempt provisioned. Only `start`/`provision`'s exit 73 or
+// collision phrase is a collision; a refused launch is a start failure, and
+// the box carrying this attempt's token is stopped.
 func TestFreshOnlySeparableLaunchNeverRespawns(t *testing.T) {
+	const ours = "tok-ours"
 	for _, tc := range []struct {
 		name       string
 		hasSession string
-		wantErr    error
+		provisions string // what provision leaves under the name
+		wantErr    bool
+		wantStop   bool
 		wantLaunch string
 	}{
-		{"warm box refused", "0", runtime.ErrSessionExists, ""},
-		{"cold box launched", "1", nil, "new-session"},
+		{name: "warm box refused, ours stopped", hasSession: "0", provisions: boxWithToken("running", ours), wantErr: true, wantStop: true},
+		{name: "warm box refused, foreign kept", hasSession: "0", provisions: boxWithToken("running", "tok-other"), wantErr: true},
+		{name: "cold box launched", hasSession: "1", provisions: boxWithToken("running", ours), wantLaunch: "new-session"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			script, dir := observePack(t, `{"version":0,"capabilities":["proc.exec","proc.provision","observe.v1","report-attachment"]}`, map[string]string{
-				"observe":   `cat >/dev/null; echo '{"state":"absent"}'`,
-				"provision": `cat > "$dir/provision.stdin"`,
+				"observe":   freshOps["observe"],
+				"stop":      freshOps["stop"],
+				"provision": `cat > "$dir/provision.stdin"; cp "$dir/after_provision" "$dir/state"`,
 				"exec":      `cmd="$(cat)"; echo "$cmd" >> "$dir/exec.log"; case "$cmd" in *has-session*) exit ` + tc.hasSession + ` ;; *) exit 0 ;; esac`,
 			})
-			err := NewSeamBacked(script).Start(t.Context(), "s", runtime.Config{FreshOnly: true, Command: "claude"})
-			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) || tc.wantErr == nil && err != nil {
-				t.Fatalf("Start = %v, want %v", err, tc.wantErr)
+			writeFile(t, filepath.Join(dir, "after_provision"), tc.provisions)
+			err := NewSeamBacked(script).Start(t.Context(), "s", runtime.Config{FreshOnly: true, Command: "claude", Env: map[string]string{"GC_INSTANCE_TOKEN": ours}})
+			if tc.wantErr != (err != nil) || errors.Is(err, runtime.ErrSessionExists) {
+				t.Fatalf("Start = %v, want a start failure %v (never ErrSessionExists)", err, tc.wantErr)
 			}
 			execLog := readLog(t, filepath.Join(dir, "exec.log"))
 			if strings.Contains(execLog, "respawn-pane") {
@@ -643,8 +653,47 @@ func TestFreshOnlySeparableLaunchNeverRespawns(t *testing.T) {
 			if !strings.Contains(readLog(t, filepath.Join(dir, "provision.stdin")), `"fresh_only":true`) {
 				t.Error("provision did not carry fresh_only")
 			}
-			if ran := opsRan(t, dir); slices.Contains(ran, "stop") || slices.Contains(ran, "start") {
-				t.Errorf("ops %v: want no welded start and no cleanup", ran)
+			ran := opsRan(t, dir)
+			if slices.Contains(ran, "stop") != tc.wantStop || slices.Contains(ran, "start") {
+				t.Errorf("ops %v: want stop %v and no welded start", ran, tc.wantStop)
+			}
+		})
+	}
+}
+
+// Kills (S2): a fresh welded start that skips the post-start steps Start
+// runs: on an input-fence pack the new incarnation's fence is published
+// after the start op, and a publish that fails is a start failure whose
+// cleanup stops the box carrying this attempt's token.
+func TestFreshOnlyStartPublishesTheFence(t *testing.T) {
+	const ours = "tok-ours"
+	for _, failPublish := range []bool{false, true} {
+		t.Run(fmt.Sprintf("publish fails %v", failPublish), func(t *testing.T) {
+			publishExit := "0"
+			if failPublish {
+				publishExit = "1"
+			}
+			script, dir := observePack(t, `{"version":0,"capabilities":["proc.exec","input-fence","observe.v1","report-attachment"]}`, map[string]string{
+				"observe": freshOps["observe"],
+				"start":   freshOps["start"],
+				"stop":    freshOps["stop"],
+				"exec":    `cmd="$(cat)"; echo "$cmd" >> "$dir/exec.log"; case "$cmd" in *set-option*-F*) exit ` + publishExit + ` ;; esac`,
+			})
+			writeFile(t, filepath.Join(dir, "after_start"), boxWithToken("running", ours))
+			cfg := runtime.Config{FreshOnly: true, AcceptStartupDialogs: new(bool), Env: map[string]string{runtime.InstanceTokenEnv: ours, runtime.RuntimeEpochEnv: "2"}}
+			err := NewSeamBacked(script).Start(t.Context(), "s", cfg)
+			if failPublish != (err != nil) || errors.Is(err, runtime.ErrSessionExists) {
+				t.Fatalf("Start = %v, want failure %v", err, failPublish)
+			}
+			if execLog := readLog(t, filepath.Join(dir, "exec.log")); !strings.Contains(execLog, "'@gc_fence'") || strings.Contains(execLog, "'-u'") {
+				t.Errorf("exec log %q: want the new fence published and no fence cleared", execLog)
+			}
+			want := []string{"observe", "start", "exec"}
+			if failPublish {
+				want = append(want, "observe", "stop")
+			}
+			if got := opsRan(t, dir); !slices.Equal(got, want) {
+				t.Errorf("ops = %v, want %v", got, want)
 			}
 		})
 	}
@@ -695,5 +744,70 @@ func TestCityEnvOnEveryOp(t *testing.T) {
 	}
 	if v, _ := NewSeamBacked(script).GetMeta("s", "k"); v != "stale|" {
 		t.Errorf("a provider for no city: get-meta saw %q, want gc's own env", v)
+	}
+}
+
+// Kills (S1): the Relaunch readiness gate dropped: a welded pack that is
+// not v2-ready relaunches as before, Stop then a legacy Start, with no
+// `observe` and no fresh_only.
+func TestNotReadyWeldedRelaunchIsLegacy(t *testing.T) {
+	for _, handshake := range []string{"", `{"version":0,"capabilities":["observe.v1"]}`} {
+		script, dir := observePack(t, handshake, legacyOps)
+		if err := NewSeamBacked(script).(runtime.RelaunchProvider).Relaunch(t.Context(), "s", runtime.Config{}); err != nil {
+			t.Fatalf("handshake %q: Relaunch = %v", handshake, err)
+		}
+		ran := opsRan(t, dir)
+		if slices.Contains(ran, "observe") || !slices.Contains(ran, "stop") || !slices.Contains(ran, "start") {
+			t.Errorf("handshake %q: ops %v, want stop then start and no observe", handshake, ran)
+		}
+		if strings.Contains(readLog(t, filepath.Join(dir, "start.stdin")), "fresh_only") {
+			t.Errorf("handshake %q: a legacy relaunch sent fresh_only", handshake)
+		}
+	}
+}
+
+// Kills (S1): the 4s is-attached bound applied to a pack that is not
+// v2-ready, which keeps the op timeout it had.
+func TestNotReadyIsAttachedKeepsItsTimeout(t *testing.T) {
+	script, _ := observePack(t, `{"version":0,"capabilities":["report-attachment"]}`, map[string]string{"is-attached": `sleep 4.6 & wait $!; echo true`})
+	if attached, err := NewProvider(script).IsAttachedWithError("s"); !attached || err != nil {
+		t.Fatalf("slow is-attached on a pack that is not v2-ready = %v, %v; want true, nil", attached, err)
+	}
+}
+
+// Kills (NIT 4): the seam's not-ready liveness read taken from the raw
+// provider instead of the seams. With is-running false and process-alive
+// true the seams read no box (ProcessAlive asks the attachment, which is
+// not open), where the raw provider would read a live agent.
+func TestNotReadySeamLivenessReadsThroughTheSeams(t *testing.T) {
+	script, _ := observePack(t, "", map[string]string{"is-running": `echo false`, "process-alive": `cat >/dev/null; echo true`})
+	sp := NewSeamBacked(script)
+	pn := []string{"claude"}
+	got, err := sp.(runtime.LivenessObserverWithError).ObserveLivenessWithError("s", pn)
+	if err != nil || got != (runtime.Liveness{}) {
+		t.Fatalf("seam ObserveLivenessWithError = %+v, %v; want the seams' read, no box", got, err)
+	}
+	if raw := runtime.ObserveLiveness(NewProvider(script), "s", pn); raw == got {
+		t.Fatalf("raw read %+v equals the seams'; this fixture pins nothing", raw)
+	}
+}
+
+// Kills (NIT 3): watch-startup or the attach TTY run without the city.
+func TestCityEnvOnWatchAndAttach(t *testing.T) {
+	script, dir := observePack(t, "", map[string]string{
+		"watch-startup": `echo "$GC_EXEC_CITY_NAME|$GC_EXEC_CITY_PATH" > "$dir/watch.env"; exit 2`,
+		"attach":        `echo "$GC_EXEC_CITY_NAME|$GC_EXEC_CITY_PATH" > "$dir/attach.env"`,
+	})
+	p := NewProviderForCity(script, "alpha", "/cities/alpha")
+	if _, _, ok, err := p.startStartupWatch(t.Context(), "s", time.Second); ok || err != nil {
+		t.Fatalf("startStartupWatch = %v, %v; want unsupported", ok, err)
+	}
+	if err := p.Attach("s"); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"watch.env", "attach.env"} {
+		if got := readLog(t, filepath.Join(dir, f)); got != "alpha|/cities/alpha\n" {
+			t.Errorf("%s = %q, want the city env", f, got)
+		}
 	}
 }
