@@ -71,6 +71,11 @@ func managedCityDriftFixture(t *testing.T, rigName string) (cityDir, rigDir, man
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// A started city pins the inherited rig's mirror to the managed port; a
+	// rig describing a severed mirror removes or overwrites this file.
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "dolt-server.port"), []byte(managedPort+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	cfg = &config.City{
 		Workspace: config.Workspace{Name: "drift-test"},
@@ -92,11 +97,8 @@ func writeSQLServerInfo(t *testing.T, rigDir string, pid, port int) {
 }
 
 func TestDoltDriftCheckCleanManagedCityIsOK(t *testing.T) {
-	cityDir, rigDir, managedPort, cfg := managedCityDriftFixture(t, "clean")
-	// Port file matches canonical managed port — no drift.
-	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "dolt-server.port"), []byte(managedPort+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	cityDir, _, _, cfg := managedCityDriftFixture(t, "clean")
+	// The fixture's port file matches the canonical managed port — no drift.
 	r := newDoltDriftCheck(cityDir, cfg).Run(&doctor.CheckContext{CityPath: cityDir})
 	if r.Status != doctor.StatusOK {
 		t.Fatalf("Run() status = %v, want StatusOK; message=%q details=%v", r.Status, r.Message, r.Details)
@@ -339,6 +341,50 @@ func TestDoltDriftCheckFixConvergesBesideEmbeddedRig(t *testing.T) {
 	}
 	if string(got) != embeddedPort {
 		t.Errorf("embedded rig port file = %q, want it left byte-identical at %q", got, embeddedPort)
+	}
+}
+
+// TestDoltDriftCheckReportsMissingOrEmptyInheritedRigPortMirror pins that an
+// inherited_city rig whose .beads/dolt-server.port mirror is missing or blank
+// is reported as re-pinnable drift (Case D): without the mirror, raw bd in the
+// rig resolves no managed port and fails on every call, so `gc doctor` must
+// not stay green — and `--fix` must be offered, because the port-file sync
+// restores exactly this file.
+func TestDoltDriftCheckReportsMissingOrEmptyInheritedRigPortMirror(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		wantWord string
+		write    func(t *testing.T, portFile string)
+	}{
+		{name: "missing", wantWord: "missing", write: func(t *testing.T, portFile string) {
+			if err := os.Remove(portFile); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir, rigDir, managedPort, cfg := managedCityDriftFixture(t, "severed")
+			tc.write(t, filepath.Join(rigDir, ".beads", "dolt-server.port"))
+
+			check := newDoltDriftCheck(cityDir, cfg)
+			r := check.Run(&doctor.CheckContext{CityPath: cityDir})
+			if r.Status != doctor.StatusError {
+				t.Fatalf("Run() status = %v, want StatusError for a %s inherited rig port mirror; message=%q details=%v", r.Status, tc.name, r.Message, r.Details)
+			}
+			joined := strings.Join(r.Details, " ")
+			if !strings.Contains(joined, `rig "severed"`) {
+				t.Errorf("details = %q, want the severed rig named", joined)
+			}
+			if !strings.Contains(joined, tc.wantWord) {
+				t.Errorf("details = %q, want the mirror described as %s", joined, tc.wantWord)
+			}
+			if !strings.Contains(joined, managedPort) {
+				t.Errorf("details = %q, want the managed port %s named", joined, managedPort)
+			}
+			if !check.CanFix() {
+				t.Error("CanFix() = false for a missing/empty port mirror, want true (the re-pin sync restores it)")
+			}
+		})
 	}
 }
 

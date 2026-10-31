@@ -202,16 +202,16 @@ repo and does not affect actual resolution.
 
 The `dolt-drift` check (`cmd/gc/cmd_doctor_drift.go`) is registered
 automatically when the workspace is in `bd`-backed `managed_city`
-topology and catches three shapes of drift:
+topology and catches four shapes of drift:
 
 | Shape | Severity | Trigger |
 |-------|----------|---------|
 | Live rig-local Dolt under `inherited_city` | Error | Rig's `.dolt/sql-server.info` lists a PID that is alive, but its canonical origin is still `inherited_city`. |
 | Port mismatch under `inherited_city` | Error | Rig's `.beads/dolt-server.port` disagrees with the managed city port from `.gc/runtime/packs/dolt/dolt-state.json`. |
 | Stale `.dolt/sql-server.info` | Warning | Info file exists under an inherited rig but its PID is no longer alive. |
+| Missing or empty port mirror under `inherited_city` | Error | Rig's `.beads/dolt-server.port` is absent or blank while the managed city port resolves and `gc start` would write it; raw `bd` in the rig resolves port 0. `gc doctor --fix --check dolt-drift` restores it. |
 
-All three carry `FixHint` text pointing at the specific
-`gc rig set-endpoint` invocation that resolves them.
+All four carry `FixHint` text pointing at the command that resolves them.
 
 At `gc start`, the Dolt-port normalization pass also emits a WARN
 line on stderr for each rig whose `.beads/dolt-server.port` it is
