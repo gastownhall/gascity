@@ -728,7 +728,9 @@ cmd/gc/convergence_tick.go	CityRuntime.buildConvergenceScopes	unwrap	1
 cmd/gc/convergence_tick.go	CityRuntime.newConvergenceScope	raw-param	1
 cmd/gc/convergence_tick.go	convergenceScope	raw-field	1
 cmd/gc/convergence_tick.go	rigStoreIsCityStore	raw-param	2
+cmd/gc/conversation_lane_cli.go	cliLaneExecutesMessage	raw-param	1
 cmd/gc/conversation_lane_cli.go	cliLaneInlinePass	raw-param	1
+cmd/gc/conversation_lane_cli.go	cliLaneKinds	raw-param	1
 cmd/gc/conversation_lane_cli.go	cliLaneNudge	raw-field	1
 cmd/gc/conversation_lane_cli.go	cliLaneNudgePreflight	mint	1
 cmd/gc/conversation_lane_cli.go	cliLaneNudgePreflight	unwrap	2

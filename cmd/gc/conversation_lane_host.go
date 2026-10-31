@@ -16,7 +16,10 @@ package main
 // the last scan found an open lane op, so with the list empty an idle city
 // pays one keyed scan per controller start, and lane ops already open after a
 // rollback still drain once whatever gate they wait on clears (DES-O1 §7.1,
-// §12). The list is latched at controller start.
+// §12). The list is latched at controller start; left unset, the host
+// latches the builtin default (effectiveLaneKinds: message, interrupt and
+// respond over a SQLite sessions store) when it first finds its store, and
+// logs the legacy-delivery deprecation warnings for the latched kinds once.
 //
 // Each worker also hosts its conversation's turn observer
 // (conversation_lane_turns.go), which folds the session's turn updates while
@@ -256,7 +259,18 @@ type laneHostEnv interface {
 type conversationLaneHost struct {
 	env   laneHostEnv
 	kinds []string
-	clk   clock.Clock
+	// kindsUnset says [ops] authoritative was unset at controller start, so
+	// the host latches the builtin default (effectiveLaneKinds) into kinds
+	// when it first finds its sessions store; kindsDefault says it did.
+	// kindsLatched says the host has latched its kinds against a store and
+	// logged their legacy-delivery warnings, once, and defaultApplies whether
+	// that store is one the default covers. All four are written under mu
+	// before the host first runs.
+	kindsUnset     bool
+	kindsDefault   bool
+	kindsLatched   bool
+	defaultApplies bool
+	clk            clock.Clock
 	// maxWorkers and scanInterval are laneHostMaxWorkers and
 	// laneHostScanInterval; tests shrink them.
 	maxWorkers   int
@@ -392,19 +406,29 @@ func newConversationLaneHost(env laneHostEnv, kinds []string, reading session.St
 }
 
 // startConversationLaneHost starts the controller's lane host until ctx
-// ends, with [ops] authoritative as the controller loaded it at start, and
+// ends, with [ops] authoritative as the controller loaded it at start (left
+// unset, the builtin default the host latches over its sessions store), and
 // rings it from the controller's ledger feeds, and reads stop requests by
 // mode, the reconciler its controller latched.
 func (cs *controllerState) startConversationLaneHost(ctx context.Context, mode reconcilerMode) *conversationLaneHost {
-	var kinds []string
-	if cfg := cs.Config(); cfg != nil {
-		kinds = cfg.Ops.Authoritative
-	}
+	kinds, unset := laneHostConfiguredKinds(cs.Config())
 	h := newConversationLaneHost(cs, kinds, laneStopReading(mode))
+	h.kindsUnset = unset
 	h.start(ctx)
 	cs.ledgerFeeds.setRowsChanged(h.pokeChangedRows)
 	cs.setConversationLaneHost(h)
 	return h
+}
+
+// laneHostConfiguredKinds is [ops] authoritative as a controller starts
+// its lane host with it: the list, and whether it is unset, so the host
+// latches the builtin default over its sessions store. A nil config lists
+// nothing and is not unset: such a controller serves no default.
+func laneHostConfiguredKinds(cfg *config.City) (kinds []string, unset bool) {
+	if cfg == nil {
+		return nil, false
+	}
+	return cfg.Ops.AuthoritativeKinds(), !cfg.Ops.AuthoritativeSet()
 }
 
 // pokeChangedRows is the ledger-feed doorbell: it pokes, once each, the
@@ -465,8 +489,13 @@ func (h *conversationLaneHost) start(ctx context.Context) {
 // decide sets the host's state from the current sessions store, logging a
 // refusal, and returns it.
 func (h *conversationLaneHost) decide() string {
-	err := laneStoreCapability(h.env.SessionsBeadStore().Store)
+	sessions := h.env.SessionsBeadStore()
+	err := laneStoreCapability(sessions.Store)
 	h.mu.Lock()
+	var warnings []string
+	if !errors.Is(err, errLaneStoreMissing) {
+		warnings = h.latchKindsLocked(sessions)
+	}
 	switch {
 	case err == nil:
 		h.state, h.reason = laneHostStateRunning, ""
@@ -482,7 +511,34 @@ func (h *conversationLaneHost) decide() string {
 	if state == laneHostStateRefused {
 		h.logf("conversation-lanes: not started: %s", reason)
 	}
+	for _, w := range warnings {
+		h.logf("conversation-lanes: warning: %s", w)
+	}
 	return state
+}
+
+// latchKindsLocked latches the host's kinds against sessions, the first
+// time it has a store: with [ops] authoritative unset, the builtin default
+// (effectiveLaneKinds), and either way returns the legacy-delivery
+// deprecation warnings for the kinds (laneLegacyDeliveryWarnings), which
+// the caller logs once. Later calls return nothing. h.mu is held.
+func (h *conversationLaneHost) latchKindsLocked(sessions beads.SessionStore) []string {
+	if h.kindsLatched {
+		return nil
+	}
+	h.kindsLatched = true
+	h.defaultApplies = laneDefaultApplies(sessions)
+	if h.kindsUnset && h.defaultApplies {
+		h.kinds, h.kindsDefault = slices.Clone(laneDefaultKinds), true
+	}
+	return laneLegacyDeliveryWarnings(h.env.Config(), h.kinds, h.defaultApplies)
+}
+
+// latchedKinds is the host's kinds, read under its lock.
+func (h *conversationLaneHost) latchedKinds() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.kinds
 }
 
 // run is the anti-entropy loop: a boot step, then one step every
@@ -518,7 +574,7 @@ func (h *conversationLaneHost) step() bool {
 	case laneHostStateUnavailable:
 		return true
 	case laneHostStateRunning:
-		return h.scan() || len(h.kinds) > 0
+		return h.scan() || len(h.latchedKinds()) > 0
 	default:
 		return false
 	}
@@ -994,6 +1050,12 @@ type conversationLaneStatus struct {
 	State  string   `json:"state"`
 	Reason string   `json:"reason,omitempty"`
 	Kinds  []string `json:"kinds,omitempty"`
+	// KindsDefault says [ops] authoritative was unset and the builtin
+	// default supplied Kinds (effectiveLaneKinds); DefaultApplies says the
+	// host's sessions store is one the default covers (laneDefaultApplies),
+	// whatever the list says, as it latched them.
+	KindsDefault   bool `json:"kinds_default,omitempty"`
+	DefaultApplies bool `json:"default_applies,omitempty"`
 	// Workers are the conversations being served; Queued wait for a slot;
 	// Parked gave theirs up and wait, on a timer or in the queue, for their
 	// next worker, so a conversation can count in both Queued and Parked.
@@ -1036,7 +1098,7 @@ func (h *conversationLaneHost) status(now time.Time) conversationLaneStatus {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	st := conversationLaneStatus{
-		State: h.state, Reason: h.reason, Kinds: append([]string(nil), h.kinds...),
+		State: h.state, Reason: h.reason, Kinds: append([]string(nil), h.kinds...), KindsDefault: h.kindsDefault, DefaultApplies: h.defaultApplies,
 		Workers: len(h.workers), Queued: len(h.queued), Parked: len(h.parked), Passes: h.passes, Reprobes: h.reprobes,
 		LastPassFailed: h.lastFailed, Errors: h.passErrors, ErrorsSinceSuccess: h.sinceSuccess, LastError: h.lastErr,
 		Turns:      h.turnStats.status(),

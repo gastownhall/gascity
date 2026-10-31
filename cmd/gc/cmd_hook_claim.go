@@ -3949,9 +3949,10 @@ func continuationNudgeEnqueueAt(cityPath, assignee, rootID string, stderr io.Wri
 	// (see openOwnedNudgeBeadStore), and read session beads from the session
 	// class, not the nudges class.
 	store, opened := openOwnedNudgeBeadStore(cityPath)
+	var sessStore beads.Store
 	if opened != nil {
 		defer closeBeadStoreHandle(opened) //nolint:errcheck
-		sessStore := cliSessionStore(opened, cfg, cityPath)
+		sessStore = cliSessionStore(opened, cfg, cityPath)
 		if id, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, assignee); err == nil {
 			if info, err := sessionFrontDoor(sessStore).Get(id); err == nil {
 				target = resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
@@ -3961,7 +3962,7 @@ func continuationNudgeEnqueueAt(cityPath, assignee, rootID string, stderr io.Wri
 			target = withNudgeTargetFence(sessStore, target)
 		}
 	}
-	if rootID != "" && cliLaneExecutesMessage(cfg) {
+	if rootID != "" && (cliLaneMessageListed(cfg) || cliLaneExecutesMessage(cfg, sessStore)) {
 		// A lane that may serve the session takes the notice or refuses it;
 		// only a session no lane serves takes the queue path below.
 		if continuationLaneNoticeIn(cityPath, cfg, target, opened, rootID, stderr) {
