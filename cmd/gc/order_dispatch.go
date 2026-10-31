@@ -176,12 +176,18 @@ func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]
 	var cleanupOnce sync.Once
 	startedPGID := 0
 	canceled := false
+	var escapedGroups []int
+	var escapedErr error
 	cleanupProcess := func() error {
 		cleanupOnce.Do(func() {
 			cleanupMu.Lock()
 			pgid := startedPGID
+			escaped := escapedGroups
+			snapErr := escapedErr
 			cleanupMu.Unlock()
-			err := cancelShellExecProcessGroup(cmd, pgid)
+			escapedDone := make(chan error, 1)
+			go func() { escapedDone <- terminateProcessGroups(escaped, shellExecSignalGrace) }()
+			err := errors.Join(cancelShellExecProcessGroup(cmd, pgid), <-escapedDone, snapErr)
 			cleanupMu.Lock()
 			cleanupErr = err
 			cleanupMu.Unlock()
@@ -191,8 +197,14 @@ func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]
 		return cleanupErr
 	}
 	cmd.Cancel = func() error {
+		// os/exec cancels only an unreaped command, so the shell's PID still
+		// names it: collect the groups its descendants started before anything
+		// is signaled and they are reparented away from it.
+		escaped, snapErr := snapshotEscapedOrderGroups(cmd)
 		cleanupMu.Lock()
 		canceled = true
+		escapedGroups = escaped
+		escapedErr = snapErr
 		cleanupMu.Unlock()
 		_ = cleanupProcess()
 		return nil
