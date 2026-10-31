@@ -150,18 +150,29 @@ func TestExtMsgClientRoutesToSupervisor(t *testing.T) {
 	}
 
 	legacyHosted := func(string) controllerIdentityReply { return controllerIdentityReply{PID: 4242} }
+	standaloneHosted := func(string) controllerIdentityReply {
+		return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingStandalone}
+	}
 	supervisorHosted := func(string) controllerIdentityReply {
 		return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
 	}
+	supervisorUnconsulted := func(t *testing.T) func(string) *api.Client {
+		return func(string) *api.Client {
+			t.Errorf("supervisor client consulted for a controller that serves its own [api] port")
+			return sentinel
+		}
+	}
 
 	cases := []struct {
-		name         string
-		gcNoAPI      string
-		identity     func(string) controllerIdentityReply
-		supervisor   func(string) *api.Client
-		toml         string
-		wantSentinel bool
-		wantReasons  []string
+		name              string
+		gcNoAPI           string
+		identity          func(string) controllerIdentityReply
+		noIdentityProbe   bool
+		supervisor        func(string) *api.Client
+		noSupervisorProbe bool
+		toml              string
+		wantSentinel      bool
+		wantReasons       []string
 	}{
 		{
 			// A controller predating identify answers only ping: alive, mode
@@ -186,12 +197,55 @@ func TestExtMsgClientRoutesToSupervisor(t *testing.T) {
 			toml:         "name = \"t\"\n",
 			wantSentinel: true,
 		},
+		{
+			// A controller that identifies as standalone serves only its own
+			// [api] port; the supervisor does not host this city, so it is
+			// never consulted. With no usable port there is no endpoint these
+			// verbs can use, and the refusal names why.
+			name:              "standalone-no-api-port-names-reason",
+			gcNoAPI:           "",
+			identity:          standaloneHosted,
+			noSupervisorProbe: true,
+			toml:              "name = \"t\"\n",
+			wantReasons:       []string{"controller-down"},
+		},
+		{
+			// A standalone [api] port bound non-loopback without
+			// allow_mutations serves reads only; mutating bindings refuse it.
+			name:              "standalone-read-only-bind-names-reason",
+			gcNoAPI:           "",
+			identity:          standaloneHosted,
+			noSupervisorProbe: true,
+			toml:              "name = \"t\"\n[api]\nport = 9443\nbind = \"0.0.0.0\"\n",
+			wantReasons:       []string{"non-loopback-bind"},
+		},
+		{
+			// GC_NO_API is the operator escape hatch: nothing is probed.
+			name:            "escape-hatch-names-reason",
+			gcNoAPI:         "1",
+			identity:        legacyHosted,
+			noIdentityProbe: true,
+			supervisor:      func(string) *api.Client { return sentinel },
+			toml:            "name = \"t\"\n",
+			wantReasons:     []string{"escape-hatch"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("GC_NO_API", tc.gcNoAPI)
-			apiRouteControllerIdentityHook = tc.identity
-			apiRouteSupervisorClientHook = tc.supervisor
+			identity := tc.identity
+			if tc.noIdentityProbe {
+				identity = func(string) controllerIdentityReply {
+					t.Errorf("controller identity probed with GC_NO_API set")
+					return controllerIdentityReply{PID: 4242}
+				}
+			}
+			supervisor := tc.supervisor
+			if tc.noSupervisorProbe {
+				supervisor = supervisorUnconsulted(t)
+			}
+			apiRouteControllerIdentityHook = identity
+			apiRouteSupervisorClientHook = supervisor
 			withCityFlag(t, writeCityTOMLForRoute(t, t.TempDir(), tc.toml))
 
 			var stderr bytes.Buffer
