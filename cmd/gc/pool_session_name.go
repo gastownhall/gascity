@@ -261,6 +261,7 @@ func releaseOrphanedPoolAssignments(
 	fallbackProbeCount := 0
 
 	openIdentifiers := makeOpenSessionStoreRefIndex(cityPath, cfg, store, openSessionInfos, storeRefAware)
+	legacyAwakeCurrentBeads, awakeCurrentBeads := makeAwakeCurrentBeadIndex(cityPath, cfg, store, openSessionInfos, storeRefAware)
 	legacyOpenIdentifiers := make(map[string]struct{}, len(openSessionInfos)*5)
 	for _, info := range openSessionInfos {
 		if info.Closed {
@@ -320,6 +321,11 @@ func releaseOrphanedPoolAssignments(
 			}
 		} else {
 			if openSessionOwnsWork(legacyOpenIdentifiers, openIdentifiers, assignee, workStoreRef, storeRefAware) {
+				continue
+			}
+			// An awake session executing this bead owns it even when the
+			// claim still names a drained predecessor (gascity#6362).
+			if openSessionOwnsWork(legacyAwakeCurrentBeads, awakeCurrentBeads, wb.ID, workStoreRef, storeRefAware) {
 				continue
 			}
 			if assigneePreservesNamedSessionRoute(cfg, cityPath, template, assignee, workStoreRef, storeRefAware) {
@@ -610,6 +616,46 @@ func makeOpenSessionStoreRefIndex(cityPath string, cfg *config.City, leading bea
 		}
 	}
 	return index
+}
+
+// makeAwakeCurrentBeadIndex indexes the work an awake open session reports as
+// its currently_processing_bead_id, keyed by bead ID and scoped to the stores
+// that session reaches, in the two shapes openSessionOwnsWork reads.
+//
+// The reconciler stamps the pointer only on a session its wake decision
+// anchored to that bead, so an awake session naming it is live, first-party
+// evidence the work is being executed whatever the bead's assignee says. A
+// replacement session that continues a drained predecessor's work leaves the
+// claim naming the predecessor (gascity#6362). A session that is not awake
+// keeps its last pointer while it sleeps, so only awake sessions count.
+func makeAwakeCurrentBeadIndex(cityPath string, cfg *config.City, leading beads.Store, openSessionInfos []session.Info, storeRefAware bool) (map[string]struct{}, map[string]map[string]struct{}) {
+	legacy := make(map[string]struct{})
+	scoped := make(map[string]map[string]struct{})
+	var claimRefs []string
+	claimRefsResolved := false
+	for _, info := range openSessionInfos {
+		if info.Closed || (info.State != session.StateAwake && info.State != session.StateActive) {
+			continue
+		}
+		beadID := strings.TrimSpace(info.CurrentlyProcessingBeadID)
+		if beadID == "" {
+			continue
+		}
+		legacy[beadID] = struct{}{}
+		if !storeRefAware {
+			continue
+		}
+		// A property of the city, resolved only when an awake session names
+		// a bead, so the common no-pointer sweep pays nothing for it.
+		if !claimRefsResolved {
+			claimRefs = assignedWorkClaimRefs(cityPath, cfg, leading)
+			claimRefsResolved = true
+		}
+		for _, storeRef := range openSessionReachableStoreRefInfo(cityPath, cfg, claimRefs, info) {
+			addOpenSessionStoreRef(scoped, beadID, storeRef)
+		}
+	}
+	return legacy, scoped
 }
 
 func addOpenSessionStoreRef(index map[string]map[string]struct{}, identifier, storeRef string) {

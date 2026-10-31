@@ -1744,6 +1744,7 @@ go_test(
         "pool_release_bd_guard_test.go",
         "pool_session_identifier_lock_test.go",
         "pool_session_name_churn_test.go",
+        "pool_session_name_current_bead_test.go",
         "pool_session_name_holder_test.go",
         "pool_session_name_orphan_release_fanout_test.go",
         "pool_session_name_protected_wake_test.go",
