@@ -235,8 +235,18 @@ func rateLimitTable(b *strings.Builder, now time.Time) {
 		{"answered, attached", with(answered, func(o *Observation) { o.RestartHold = RestartHoldAttached })},
 		{"answered, another seat on the provider restarted 10m ago", with(answered, func(o *Observation) { o.ProviderFreshAt = now.Add(-10 * time.Minute) })},
 		{"answered, a claim unread", with(answered, func(o *Observation) { o.Hold = map[ClaimKey]bool{key("x"): true} })},
+		{"answered, no nudge delivered since it opened", func(r *Record, o *Observation) {
+			if !r.RateLimit.Since.IsZero() {
+				r.Delivered = minTime(r.Delivered, r.RateLimit.Since.Add(-time.Minute))
+			}
+			answered(r, o)
+		}},
 		{"refused x1", refused(1, now.Add(-time.Minute))},
 		{"refused x2 before the delivery", refused(2, delivered.Add(-time.Minute))},
+		{"refused x2 61m ago, past the evidence bound", func(r *Record, o *Observation) {
+			r.Delivered = now.Add(-65 * time.Minute)
+			refused(2, now.Add(-61*time.Minute))(r, o)
+		}},
 		{"served 1m ago", func(_ *Record, o *Observation) {
 			o.Turns = TurnReading{Read: true, Conv: o.Conv, ServedAt: now.Add(-time.Minute)}
 		}},

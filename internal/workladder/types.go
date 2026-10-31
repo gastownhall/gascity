@@ -197,7 +197,8 @@ type Policy struct {
 	// refuse with a rate limit before the refusals open an episode.
 	RateLimitThreshold int
 	// FreshConfirm is how long an episode stands, from the refusal that
-	// opened it, before its one fresh restart.
+	// opened it, before it is confirmed (by a refusal of a nudge delivered
+	// after it opened) and may take its one fresh restart.
 	FreshConfirm time.Duration
 	// SeatFreshGap: no second fresh restart of a seat within this of its
 	// last; an episode confirmed inside it is exhausted instead.
@@ -280,7 +281,10 @@ const (
 	// of its last fresh restart.
 	AlertRateLimitedAgain = "rate_limited_again"
 	// AlertRateLimitedHeld: a standing hold, or a block lasting past
-	// FreshConfirm + Cap, keeps the ladder from restarting the seat.
+	// FreshConfirm + Cap, keeps the ladder from restarting the seat. It is
+	// the episode's one alert: how the episode ends after it (a fresh
+	// restart refused too, a spent quota) is reported only by its
+	// RateLimitMove.
 	AlertRateLimitedHeld = "rate_limited_held"
 	// AlertRateLimitedQuota: the provider refuses the seat on a spent usage
 	// quota, which no fresh restart gets past.

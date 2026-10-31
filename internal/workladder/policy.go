@@ -27,9 +27,10 @@ const (
 
 // DefaultPolicy is OD7's: grace 90s, base 3m doubling to a 60m cap and then
 // hourly forever, a 10m cap while the provider is degraded, R = 1; and the
-// rate-limit episode's: 2 refusals in a row open one, confirmed after 10m,
-// one fresh restart per seat per hour and per provider per 30m, closed stale
-// after an hour without an answered refusal.
+// rate-limit episode's: 2 refusals in a row open one, confirmed after 10m
+// by a refusal of a nudge delivered since, one fresh restart per seat per
+// hour and per provider per 30m, and closed stale an hour after its newest
+// answered refusal ended (an older refusal answers nothing).
 func DefaultPolicy() Policy {
 	return Policy{
 		Grace:         DefaultGrace,

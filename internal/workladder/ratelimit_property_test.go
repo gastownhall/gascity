@@ -22,8 +22,12 @@ import (
 // it reads turns only on acting passes (90% readable), delivers nudges
 // directly (10% fail) or as notices settled later with a random fate,
 // restarts the seat fresh after 1 to 3 held passes (5% of restarts lose the
-// new conversation), and keeps two copies of every cell: one committed
-// through its text, one in memory (RL6).
+// new conversation, and 3% of requests are cleared with no restart at all),
+// and keeps two copies of every cell: one committed through its text, one
+// in memory (RL6). A seat may also stand for hours under an operator hold,
+// or hold no work for hours before its work comes back; in half the worlds
+// the lane then decides no seat that holds no work, no entry and no
+// release, so a workless seat's episode stands as it is until then.
 
 // rlPool is how the world's provider pool answers a turn.
 type rlPool uint8
@@ -64,6 +68,11 @@ type rlSim struct {
 	ops        int
 	delivered  time.Time // the newest delivery this generation, as the harness saw it
 	answeredAt time.Time // the end of the newest answered refusal the harness saw
+	// heldUntil ends an operator hold: the gate holds the seat for hours,
+	// keeping its generation. idleUntil ends a stretch with no work (a pool
+	// sibling took it), and parked is the work that comes back then.
+	heldUntil, idleUntil time.Time
+	parked               []Work
 	// episode bookkeeping (RL3)
 	epRestarts, epAlerts int
 	lastHeard            map[ClaimKey]time.Time
@@ -75,6 +84,7 @@ type rlWorld struct {
 	now       time.Time
 	pool      rlPool
 	quota     bool          // this world's refusing pool is a spent quota
+	laneSkips bool          // the lane decides no seat holding no work, no entry and no release
 	stuck     map[int]int64 // seat -> the newest conversation a sticky pool refuses
 	seats     []*rlSim
 	degraded  map[string]bool // per provider name
@@ -91,6 +101,11 @@ type rlWorld struct {
 var rlCoverage = struct {
 	moves    sync64Map
 	restarts atomic.Int64
+	// Acting passes reading a refusal of the last delivered nudge that is
+	// no evidence: past the evidence bound (old), standing alone in an open
+	// episode past FreshConfirm with no nudge delivered since it opened
+	// (unprobed), or from before a restarted episode's restart (preRestart).
+	old, unprobed, preRestart atomic.Int64
 }{moves: sync64Map{}}
 
 type sync64Map struct{ m [64]atomic.Int64 }
@@ -121,7 +136,7 @@ func newRLWorld(seed uint64, seats int) *rlWorld {
 		rng: rand.New(rand.NewPCG(seed, 0x726174656c696d)), now: t0, stuck: map[int]int64{},
 		degraded: map[string]bool{}, lastFresh: map[string]time.Time{},
 	}
-	w.quota = w.chance(20)
+	w.quota, w.laneSkips = w.chance(20), w.chance(50)
 	providers := []string{"p1"}
 	if seats > 1 && w.chance(50) {
 		providers = append(providers, "p2")
@@ -242,7 +257,9 @@ func (w *rlWorld) step() {
 	}
 	for i, s := range w.seats {
 		if s.restarting > 0 {
-			if s.restarting--; s.restarting == 0 {
+			// The restart lands in a new generation, unless its request
+			// was cleared with no restart at all.
+			if s.restarting--; s.restarting == 0 && !w.chance(3) {
 				s.gen++
 				if !w.chance(5) { // else the restart lost its new conversation
 					s.conv++
@@ -255,6 +272,15 @@ func (w *rlWorld) step() {
 		}
 		if w.chance(5) {
 			s.hold = RestartHold(w.rng.IntN(3))
+		}
+		if !w.now.Before(s.heldUntil) && w.chance(1) { // an operator hold or a quarantine
+			s.heldUntil = w.now.Add(w.between(time.Hour, 4*time.Hour))
+		}
+		switch {
+		case !s.idleUntil.IsZero() && !w.now.Before(s.idleUntil): // the work comes back
+			s.work, s.parked, s.idleUntil = s.parked, nil, time.Time{}
+		case s.idleUntil.IsZero() && len(s.work) > 0 && w.chance(1): // a pool sibling takes the work
+			s.work, s.parked, s.idleUntil = nil, s.work, w.now.Add(w.between(30*time.Minute, 4*time.Hour))
 		}
 		if w.chance(3) && !s.running(w.now) { // the agent's own turn
 			w.startTurn(i, w.now.Add(-w.between(0, time.Minute)), 10*time.Second, 10*time.Minute)
@@ -275,9 +301,12 @@ func (w *rlWorld) observe(i int) Observation {
 			o.Started[wk.Key] = SrcAgent
 		}
 	}
-	if s.restarting > 0 {
+	switch {
+	case s.restarting > 0:
 		o.Gate = Gate{Held: true, Reason: "restart_pending"}
-	} else if w.chance(3) {
+	case w.now.Before(s.heldUntil):
+		o.Gate = Gate{Held: true, Reason: "operator_hold"}
+	case w.chance(3):
 		o.Gate = Gate{Held: true, Reason: "draining"}
 	}
 	if w.chance(2) {
@@ -347,13 +376,18 @@ func maxTime(a, b time.Time) time.Time {
 	return a
 }
 
-// answered is the RL evidence computed apart from Decide: this pass's
-// reading shows the provider refused the seat after its last delivered
-// nudge of this generation, while it holds work.
-func answered(o Observation, delivered time.Time, entries int) bool {
+// refusedSince reports whether this pass's reading shows the provider
+// refused the seat after its last delivered nudge of this generation, while
+// it holds work, however long ago.
+func refusedSince(o Observation, delivered time.Time, entries int) bool {
 	t := o.Turns
-	return t.Read && t.Conv == o.Conv && entries > 0 && t.Refused >= DefaultRateLimitThreshold && !delivered.IsZero() && t.RefusedAt.After(delivered) &&
-		o.Now.Sub(t.RefusedAt) <= DefaultCap
+	return t.Read && t.Conv == o.Conv && entries > 0 && t.Refused >= DefaultRateLimitThreshold && !delivered.IsZero() && t.RefusedAt.After(delivered)
+}
+
+// answered is the RL evidence computed apart from Decide: refusedSince, the
+// refusal no longer than RateLimitEvidenceMaxAge ago.
+func answered(o Observation, delivered time.Time, entries int) bool {
+	return refusedSince(o, delivered, entries) && o.Now.Sub(o.Turns.RefusedAt) <= DefaultCap
 }
 
 // alertMove is the move an episode's alert reason rides with.
@@ -370,6 +404,9 @@ func (w *rlWorld) pass(i, step int) error {
 	w.settleNotices(i)
 	if s.rec.Gen != s.gen && s.rec.V != 0 {
 		s.delivered = time.Time{}
+	}
+	if w.laneSkips && len(s.work) == 0 && len(s.rec.Entries) == 0 && s.rec.Release == nil {
+		return nil // the lane neither decides nor writes the seat
 	}
 	o := w.observe(i)
 	prev := s.rec
@@ -394,6 +431,17 @@ func (w *rlWorld) pass(i, step int) error {
 	ans := answered(o, s.delivered, len(d.Next.Entries))
 	prl := clampRateLimit(prev.RateLimit, o.Now)
 	nrl := d.Next.RateLimit
+	probed := s.delivered.After(prl.Since) // a nudge reached the seat after its episode opened
+	if acting && refusedSince(o, s.delivered, len(d.Next.Entries)) {
+		switch {
+		case !ans:
+			rlCoverage.old.Add(1)
+		case prl.Phase == RateLimitOpen && !probed && o.Now.Sub(prl.Since) >= DefaultPausedCap:
+			rlCoverage.unprobed.Add(1)
+		case prl.Phase == RateLimitRestarted && !o.Turns.RefusedAt.After(prl.FreshAt):
+			rlCoverage.preRestart.Add(1)
+		}
+	}
 
 	// RL1: an acting, healthy pass reading an answered refusal leaves an
 	// episode standing; an episode opens only on such a pass.
@@ -436,6 +484,22 @@ func (w *rlWorld) pass(i, step int) error {
 			return fail("RL2: restarted %v after another seat on the provider", o.Now.Sub(o.ProviderFreshAt))
 		case nudges > 0:
 			return fail("RL2: a nudge in the restart's pass")
+		}
+	}
+	// RL2: every move but opening and closing stands on evidence: an
+	// exhausted restart on a refusal after it, and a confirmed episode's
+	// move (its restart, hold or exhaustion) on an answered refusal of a
+	// nudge delivered after the episode opened, FreshConfirm past its
+	// opening. FreshConfirm is observed, never inferred from an old Since.
+	for _, m := range moves {
+		switch {
+		case m.Transition == RateLimitTransitionOpened || m.Transition == RateLimitTransitionClosed:
+		case prl.Phase == RateLimitRestarted:
+			if !ans || !o.Turns.RefusedAt.After(prl.FreshAt) {
+				return fail("RL2: %v on no refusal after the restart", m)
+			}
+		case !ans || !probed || o.Now.Sub(prl.Since) < DefaultPausedCap:
+			return fail("RL2: %v with answered %v, a nudge delivered since the episode opened %v", m, ans, probed)
 		}
 	}
 
@@ -493,8 +557,10 @@ func (w *rlWorld) pass(i, step int) error {
 		}
 	}
 
-	// RL5: liveness.
-	if acting && ans && !degraded && nrl.Phase == RateLimitOpen && prl.Phase == RateLimitOpen && nrl.Since.Equal(prl.Since) &&
+	// RL5: liveness. An episode whose probe was refused has restarted or
+	// alerted by FreshConfirm + Cap, and Checked moves only on an answered
+	// refusal.
+	if acting && ans && probed && !degraded && nrl.Phase == RateLimitOpen && prl.Phase == RateLimitOpen && nrl.Since.Equal(prl.Since) &&
 		o.Now.Sub(nrl.Since) >= DefaultPausedCap+DefaultCap && nrl.Alerted == "" {
 		return fail("RL5: confirmed %v ago and neither restarted nor alerted", o.Now.Sub(nrl.Since))
 	}
@@ -505,6 +571,9 @@ func (w *rlWorld) pass(i, step int) error {
 	}
 	if acting && nrl.Phase != RateLimitClear && o.Now.Sub(s.answeredAt) > DefaultCap {
 		return fail("RL5: no new answered refusal for %v and still open", o.Now.Sub(s.answeredAt))
+	}
+	if nrl.Phase != RateLimitClear && !nrl.Checked.Equal(prl.Checked) && !ans {
+		return fail("RL5: Checked moved to %v on no answered refusal", nrl.Checked.Sub(t0))
 	}
 	if t := o.Turns; acting && t.Read && t.Conv == o.Conv && prl.Phase != RateLimitClear {
 		ref := prl.Since
@@ -532,6 +601,11 @@ func (w *rlWorld) pass(i, step int) error {
 			s.lastHeard[a.Key] = o.Now
 		case Alert:
 			s.lastHeard[a.Key] = o.Now
+		}
+	}
+	for k := range s.lastHeard { // work that left the cell starts afresh if it comes back
+		if _, ok := entryOf(d.Next, k); !ok {
+			delete(s.lastHeard, k)
 		}
 	}
 
@@ -655,8 +729,21 @@ func rlCovered(t *testing.T) {
 			missing = append(missing, fmt.Sprintf("%s/%s", mv.Transition, mv.Cause))
 		}
 	}
-	if len(missing) > 0 || rlCoverage.restarts.Load() == 0 {
-		t.Fatalf("the sims never reached: %s (restarts %d)", strings.Join(missing, ", "), rlCoverage.restarts.Load())
+	for _, c := range []struct {
+		name string
+		n    *atomic.Int64
+	}{
+		{"a fresh restart", &rlCoverage.restarts},
+		{"a refusal past the evidence bound", &rlCoverage.old},
+		{"an unprobed refusal past FreshConfirm", &rlCoverage.unprobed},
+		{"a refusal from before the restart", &rlCoverage.preRestart},
+	} {
+		if c.n.Load() == 0 {
+			missing = append(missing, c.name)
+		}
+	}
+	if len(missing) > 0 {
+		t.Fatalf("the sims never reached: %s", strings.Join(missing, ", "))
 	}
 }
 

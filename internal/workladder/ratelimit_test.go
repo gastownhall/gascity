@@ -100,6 +100,13 @@ func TestRateLimitOpens(t *testing.T) {
 			t.Fatalf("counted nudge %+v on the pass the episode opened", n)
 		}
 	}
+	t.Run("on a refusal at the evidence bound", func(t *testing.T) {
+		refusal := rlAt.Add(-DefaultCap)
+		d := Decide(rlSeat(refusal.Add(-time.Minute), RateLimit{}), rlPass(rlAt, 1, refusedTurns(1, 2, refusal)), p)
+		if want := (RateLimit{Phase: RateLimitOpen, Conv: 1, Since: refusal, Checked: refusal}); !reflect.DeepEqual(d.Next.RateLimit, want) {
+			t.Fatalf("episode %+v, want %+v", d.Next.RateLimit, want)
+		}
+	})
 }
 
 // No answered refusal, no episode.
@@ -351,6 +358,89 @@ func TestRateLimitRestartsFresh(t *testing.T) {
 			t.Fatalf("moved while degraded: %+v", d.Actions)
 		}
 	})
+	// FreshConfirm is observed, never inferred from Since: a refusal
+	// confirms only when a nudge delivered after the episode opened drew it.
+	t.Run("not without a nudge delivered since it opened", func(t *testing.T) {
+		prev, o := confirmedPass(openSince(since))
+		prev.Delivered = since.Add(-time.Minute) // the nudge the opening refusal answered
+		if d := Decide(prev, o, p); freshRestarts(d) != 0 || len(rlMoves(d)) != 0 || len(rlAlerts(d)) != 0 {
+			t.Fatalf("confirmed on the opening refusal alone: %+v", d.Actions)
+		}
+	})
+}
+
+// An episode that stood through a long gate hold (an operator hold, a
+// quarantine: the generation stays) moves on what it reads after the hold,
+// not on the refusal it read before it: past RateLimitEvidenceMaxAge that
+// refusal is no evidence, and within it only a refused probe confirms.
+func TestRateLimitAfterALongHold(t *testing.T) {
+	t.Run("past the evidence bound: closed stale, the ladder resumes", func(t *testing.T) {
+		since := rlAt.Add(-3 * time.Hour)
+		prev := rlSeat(since.Add(-2*time.Minute), openSince(since))
+		d := Decide(prev, rlPass(rlAt, 1, refusedTurns(1, 2, since)), p)
+		wantEffects(t, d, move(RateLimitTransitionClosed, RateLimitCauseStale), Nudge{Key: key("s"), Kind: KindClaim, Rung: RungStarted, Attempt: 3})
+	})
+	t.Run("within it: a probe first, then the restart", func(t *testing.T) {
+		since := rlAt.Add(-50 * time.Minute)
+		prev := rlSeat(since.Add(-2*time.Minute), openSince(since))
+		d := Decide(prev, rlPass(rlAt, 1, refusedTurns(1, 2, since)), p)
+		wantEffects(t, d, Nudge{Key: key("s"), Kind: KindClaim, Rung: RungStarted, Attempt: 2, Paused: true})
+		if want := (RateLimit{Phase: RateLimitOpen, Conv: 1, Since: since, Checked: since}); !reflect.DeepEqual(d.Next.RateLimit, want) {
+			t.Fatalf("episode %+v, want %+v", d.Next.RateLimit, want)
+		}
+		// The probe reaches the seat and is refused too: confirmed.
+		r, _ := NudgeDelivered(d.Next, key("s"), 1, rlAt)
+		if d := Decide(r, rlPass(rlAt.Add(2*time.Minute), 1, refusedTurns(1, 3, rlAt.Add(time.Minute))), p); freshRestarts(d) != 1 {
+			t.Fatalf("a refused probe did not confirm: %+v", d.Actions)
+		}
+	})
+}
+
+// A seat whose work drains and comes back in the same generation (a pool
+// sibling took its trigger, new work arrived): a refusal past the evidence
+// bound opens nothing, and one within it opens an episode whose Since
+// reaches back to it, which only a refused probe confirms.
+func TestRateLimitWhenWorkReturns(t *testing.T) {
+	refusal := rlAt.Add(-3 * time.Hour)
+	workless := Record{V: 1, Gen: 1, Delivered: refusal.Add(-2 * time.Minute)}
+	t.Run("past the evidence bound: no episode", func(t *testing.T) {
+		d := Decide(workless, rlPass(rlAt, 1, refusedTurns(1, 2, refusal)), p)
+		if d.Next.RateLimit.Phase != RateLimitClear || len(rlMoves(d)) != 0 {
+			t.Fatalf("episode %+v, moves %+v", d.Next.RateLimit, rlMoves(d))
+		}
+	})
+	t.Run("an episode the seat kept while workless closes stale", func(t *testing.T) {
+		kept := workless
+		kept.RateLimit = openSince(refusal)
+		d := Decide(kept, rlPass(rlAt, 1, refusedTurns(1, 2, refusal)), p)
+		if freshRestarts(d) != 0 || !reflect.DeepEqual(rlMoves(d), []RateLimitMove{move(RateLimitTransitionClosed, RateLimitCauseStale)}) {
+			t.Fatalf("episode %+v, actions %+v", d.Next.RateLimit, d.Actions)
+		}
+	})
+	t.Run("within it: the probe confirms, not the backdated Since", func(t *testing.T) {
+		refusal := rlAt.Add(-30 * time.Minute)
+		r := Record{V: 1, Gen: 1, Delivered: refusal.Add(-2 * time.Minute)}
+		reading := refusedTurns(1, 2, refusal)
+		var probed, restarted time.Time
+		for now := rlAt; now.Before(rlAt.Add(10*time.Minute)) && restarted.IsZero(); now = now.Add(30 * time.Second) {
+			d := Decide(r, rlPass(now, 1, reading), p)
+			if d.Changed {
+				r = d.Next
+			}
+			for _, a := range d.Actions {
+				switch a.(type) {
+				case Nudge: // delivered, and refused 30s later
+					r, _ = NudgeDelivered(r, key("s"), 1, now)
+					probed, reading = now, refusedTurns(1, 3, now.Add(30*time.Second))
+				case FreshRestart:
+					restarted = now
+				}
+			}
+		}
+		if !r.RateLimit.Since.Equal(refusal) || probed.IsZero() || !restarted.Equal(probed.Add(30*time.Second)) {
+			t.Fatalf("since %v, probed %v, restarted %v after the work returned", r.RateLimit.Since.Sub(rlAt), probed.Sub(rlAt), restarted.Sub(rlAt))
+		}
+	})
 }
 
 func TestRateLimitExhaustsWithoutARestart(t *testing.T) {
@@ -545,8 +635,33 @@ func TestRateLimitAfterTheRestart(t *testing.T) {
 	t.Run("a refusal from before the restart moves nothing", func(t *testing.T) {
 		prev := rlSeat(fresh.Add(-time.Minute), restarted)
 		d := Decide(prev, rlPass(rlAt, 1, refusedTurns(1, 2, fresh.Add(-time.Second))), p)
-		if d.Next.RateLimit.Phase != RateLimitRestarted || len(rlMoves(d)) != 0 {
+		if !reflect.DeepEqual(d.Next.RateLimit, restarted) || len(rlMoves(d)) != 0 {
 			t.Fatalf("episode %+v, actions %+v", d.Next.RateLimit, d.Actions)
+		}
+	})
+	// A restart that never landed (the same generation and conversation),
+	// its paused nudges not reaching the seat: the refusal from before the
+	// restart keeps answering the last delivery, but it neither exhausts the
+	// restarted episode nor keeps it standing: the episode closes stale an
+	// hour after the evidence it restarted on.
+	t.Run("a refusal from before the restart keeps nothing standing", func(t *testing.T) {
+		r := rlSeat(fresh.Add(-2*time.Minute), restarted)
+		reading := refusedTurns(1, 2, fresh.Add(-time.Minute))
+		var closed time.Time
+		for now := fresh.Add(30 * time.Minute); closed.IsZero() && now.Before(fresh.Add(5*time.Hour)); now = now.Add(30 * time.Minute) {
+			d := Decide(r, rlPass(now, 1, reading), p)
+			if freshRestarts(d) != 0 || (d.Next.RateLimit.Phase == RateLimitRestarted && !d.Next.RateLimit.Checked.Equal(fresh)) {
+				t.Fatalf("%v after the restart: episode %+v, actions %+v", now.Sub(fresh), d.Next.RateLimit, d.Actions)
+			}
+			if slices.Contains(rlMoves(d), move(RateLimitTransitionClosed, RateLimitCauseStale)) {
+				closed = now
+			}
+			if d.Changed {
+				r = d.Next
+			}
+		}
+		if !closed.Equal(fresh.Add(90 * time.Minute)) {
+			t.Fatalf("closed stale %v after the restart, want the first pass past RateLimitEvidenceMaxAge", closed.Sub(fresh))
 		}
 	})
 }
@@ -654,8 +769,9 @@ func TestRestartDue(t *testing.T) {
 // the nudge it answers opens the episode on the first acting pass that reads
 // it, whatever it does to the activity clock, and the seat is restarted
 // fresh at the first acting pass at or after Since + FreshConfirm that reads
-// an answered refusal (a seat busy with a slow refusal cannot act until it
-// ends), with its entry's counts unchanged.
+// a refusal of a nudge delivered after the episode opened (a seat busy with
+// a slow refusal cannot act until it ends), with its entry's counts
+// unchanged.
 func TestRateLimitSlowRefusals(t *testing.T) {
 	for _, after := range []time.Duration{2 * time.Second, 9*time.Minute + 59*time.Second, 10*time.Minute + 30*time.Second, 19 * time.Minute} {
 		t.Run(after.String(), func(t *testing.T) {
