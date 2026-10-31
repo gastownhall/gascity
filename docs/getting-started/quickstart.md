@@ -76,7 +76,14 @@ gc sling hello-world/claude "Create hello.sh that prints hello world and commit 
 
 `gc sling` creates a bead for the task and runs the `mol-do-work` formula on
 it: one agent reads the task, does it, and closes it. It prints a `Dashboard:`
-link to the run, such as `http://127.0.0.1:8372/city/my-city/runs/hw-4up`.
+link to the run:
+
+```text
+Dashboard: http://127.0.0.1:8372/city/my-city/runs/hw-4up
+```
+
+That line is the result of getting Gas City running. An agent doing this setup
+for you should end its final message with it exactly as printed.
 
 ## 5. Watch It Finish
 
