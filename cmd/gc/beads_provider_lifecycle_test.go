@@ -9387,8 +9387,15 @@ func TestGcBeadsBdInitDoltliteInitializesDelegatedBdWrites(t *testing.T) {
 		"BD_NON_INTERACTIVE=1",
 		"PATH="+os.Getenv("PATH"),
 	)...)
-	created, err := create.CombinedOutput()
+	// Output, not CombinedOutput: bd logs diagnostics to stderr behind a bare
+	// timestamp, and merged ahead of the JSON document it breaks the parse
+	// below. stderr stays reachable on the failure path via *exec.ExitError.
+	created, err := create.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			t.Fatalf("bd create after doltlite init failed: %v\nstdout:\n%s\nstderr:\n%s", err, created, exitErr.Stderr)
+		}
 		t.Fatalf("bd create after doltlite init failed: %v\n%s", err, created)
 	}
 	var createdIssue struct {
