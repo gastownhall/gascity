@@ -1995,7 +1995,25 @@ func cmdSessionClose(args []string, key string, stdout, stderr io.Writer, asJSON
 	// retirement gives it; a claim no lane serves stays on the closed row and
 	// raises session.stranded_claims, which the controller's detector repeats.
 	legs := workLegsFromCensus(cityPath, cfg, cityWorkLegOf(beads.WorkStore{Store: store}), rigStores)
-	out := unclaimWorkAssignedToRetiredSessionBeadVia(legs, sessStore, closedSessionBead, retiredSessionFallbackRoute(closedSessionBead), stderr)
+	// A still-configured named session's current incarnation closing is not
+	// the identity leaving: the controller re-materializes it right away.
+	// Work addressed to the identity is demand for the identity, which
+	// outlives this bead, not for the dying bead itself — releasing it here
+	// strands it unrouted until something re-discovers it (gastownhall/gascity#8179).
+	// Mirrors the reconciler's own recyclableDeadConfiguredNamePhantom guard
+	// (session_reconciler.go), which preserves the same two identity forms
+	// for the same reason when it recycles a phantom squatting the identity.
+	var preserve []string
+	if cfg != nil && isNamedSessionBead(closedSessionBead) {
+		if identity := namedSessionIdentity(closedSessionBead); identity != "" && config.FindNamedSession(cfg, identity) != nil {
+			preserve = []string{identity}
+			cityName := config.EffectiveCityName(cfg, "")
+			if rn := config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity); rn != "" && rn != identity {
+				preserve = append(preserve, rn)
+			}
+		}
+	}
+	out := unclaimWorkAssignedToRetiredSessionBeadVia(legs, sessStore, closedSessionBead, retiredSessionFallbackRoute(closedSessionBead), preserve, stderr)
 	if cityErr == nil {
 		strand(&strandedClaimAlerts{rec: openCityRecorderAt(cityPath, stderr)}, releaseSeatOfBead(closedSessionBead), "manual", out, time.Now(), stderr)
 	}

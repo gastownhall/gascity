@@ -191,7 +191,7 @@ func TestUnclaimWorkAssignedToRetiredSessionClearsClaimInTheSessionStore(t *test
 	}
 
 	var stderr bytes.Buffer
-	unclaimWorkAssignedToRetiredSessionBeadVia(testWorkLegs("", servingCity("worker"), work, nil), sessions, sessionBead, "", &stderr)
+	unclaimWorkAssignedToRetiredSessionBeadVia(testWorkLegs("", servingCity("worker"), work, nil), sessions, sessionBead, "", nil, &stderr)
 
 	if got := currentClaimStamp(t, sessions, sessionBead.ID); got != "" {
 		t.Fatalf("current claim = %q, want cleared in the session store", got)
