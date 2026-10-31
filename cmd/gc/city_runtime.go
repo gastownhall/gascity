@@ -3444,7 +3444,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		"awake_assigned_work_bead_count": len(awakeAssignedWorkBeads),
 	})
 	phaseStart = time.Now()
-	triggerResolver := cr.newWarmClaimTriggerResolver(rigStores)
+	warmClaimTriggers := cr.newWarmClaimTriggerResolver(rigStores)
 	reconcileStartOptions := []startExecutionOption{
 		withAsyncStartExecution(),
 		withAsyncStartFollowUp(cr.requestAsyncStartFollowUpTick),
@@ -3473,9 +3473,12 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		// warm-bind gap; on tmux it is the fast primary nudge ahead of the
 		// idle-timeout relaunch backstop, deduped by the marker + the
 		// unclaimed-trigger gate.
-		withWarmClaimProbe(cr.warmClaimTriggerProbe(triggerResolver)),
-		// The launch-time opt_* lookup reads a pool slot's trigger bead through the same residency reader.
-		withTriggerBeadResolver(triggerResolver),
+		withWarmClaimProbe(cr.warmClaimTriggerProbe(warmClaimTriggers)),
+		// The launch reads a pool slot's trigger bead (its opt_* pins and drain
+		// work dir) live from the owning leg, past the bead cache, as v2's start
+		// effect does: demand counts ready work from a live read, and an
+		// out-of-process pin reaches the cache only at its next re-scan.
+		withTriggerBeadResolver(legsTriggerResolver(sw.Legs())),
 	}
 	if bootReconcile {
 		// #3288: skip the per-session orphan/failed-create session-bead closes on
