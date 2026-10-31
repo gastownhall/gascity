@@ -174,17 +174,6 @@ func judgeProgramPane(mode runtime.ProgramStatusMode, gate bool, pane programPan
 	return runtime.JudgeProgramStatus(row)
 }
 
-// programStatusMode is the switch this Tmux reads under: shadow or on, and
-// off for anything else.
-func (t *Tmux) programStatusMode() runtime.ProgramStatusMode {
-	switch mode := t.cfg.ProgramStatus; mode {
-	case runtime.ProgramStatusShadow, runtime.ProgramStatusOn:
-		return mode
-	default:
-		return runtime.ProgramStatusOff
-	}
-}
-
 // programReadEnabled reports whether the read formats carry capture fields.
 func (t *Tmux) programReadEnabled() bool {
 	return t.programStatusMode() != runtime.ProgramStatusOff

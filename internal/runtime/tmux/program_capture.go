@@ -303,16 +303,19 @@ func (p *capturePlan) wrapRelay(command string) string {
 
 // tapCommand is the pipe-pane command: the tap reading the pane's output.
 // tmux expands its formats (#{socket_path}, #{pane_id}) when it runs it, so
-// every literal '#' is doubled.
+// every literal '#' is doubled. The nonce's words ("-t <pane_id> -n <rand>")
+// come first after "tap", ahead of the paths, so a process listing that cuts
+// long argv short still carries them whole.
 func (p *capturePlan) tapCommand() string {
 	literal := func(s string) string { return strings.ReplaceAll(shellquote.Join([]string{s}), "#", "##") }
 	var b strings.Builder
 	b.WriteString("exec ")
 	b.WriteString(literal(p.capability.companion))
-	b.WriteString(" tap -x ")
-	b.WriteString(literal(p.capability.tmux))
-	b.WriteString(" -S #{socket_path} -t #{pane_id} -n ")
+	b.WriteString(" tap -t #{pane_id} -n ")
 	b.WriteString(p.rand)
+	b.WriteString(" -x ")
+	b.WriteString(literal(p.capability.tmux))
+	b.WriteString(" -S #{socket_path}")
 	if p.app != "" {
 		b.WriteString(" -a ")
 		b.WriteString(p.app)
@@ -331,6 +334,30 @@ func (p *capturePlan) armCommands(target string, clearRecord bool) [][]string {
 			[]string{"set-option", "-pu", "-t", target, programTextOption})
 	}
 	return append(cmds, []string{"pipe-pane", "-O", "-t", target, p.tapCommand()})
+}
+
+// disarmCommands are the commands removing target's capture: the nonce, then
+// the record, then the tap. With the nonce gone first, the tap's last write
+// cannot land; pipe-pane comes last because it fails on an exited pane, which
+// would otherwise abort the unsets.
+func disarmCommands(target string) [][]string {
+	return [][]string{
+		{"set-option", "-pu", "-t", target, programTapOption},
+		{"set-option", "-pu", "-t", target, programStatusOption},
+		{"set-option", "-pu", "-t", target, programTextOption},
+		{"pipe-pane", "-t", target},
+	}
+}
+
+// programStatusMode is the program-status switch this Tmux runs under:
+// shadow or on, and off for anything else.
+func (t *Tmux) programStatusMode() runtime.ProgramStatusMode {
+	switch mode := t.cfg.ProgramStatus; mode {
+	case runtime.ProgramStatusShadow, runtime.ProgramStatusOn:
+		return mode
+	default:
+		return runtime.ProgramStatusOff
+	}
 }
 
 // tmuxArgvList joins commands into one tmux argv, separated by bare ";"
