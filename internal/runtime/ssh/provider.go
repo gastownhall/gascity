@@ -69,8 +69,10 @@ func paneTarget(name string) string {
 // k8s), and CopyTo.
 type Provider struct {
 	conn            *Conn
-	postStartSettle time.Duration // settle before the post-start liveness recheck
-	psDegraded      atomic.Bool   // ProcessAlive's degraded episode is logged once
+	postStartSettle time.Duration      // settle before the post-start liveness recheck
+	psDegraded      atomic.Bool        // ProcessAlive's degraded episode is logged once
+	pokes           runtime.PokeLedger // gc's own input, discounted from GetLastActivity
+	now             func() time.Time   // the poke ledger's clock; nil is time.Now
 }
 
 var (
@@ -677,7 +679,7 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	}
 	ctx := context.Background()
 	if c, err := p.carrier(ctx, name); err == nil {
-		_ = c.Nudge(ctx, name, content)
+		_ = p.poke(ctx, name, func() error { return c.Nudge(ctx, name, content) })
 	}
 	return nil
 }
@@ -689,9 +691,33 @@ func (p *Provider) SendKeys(name string, keys ...string) error {
 	}
 	ctx := context.Background()
 	if c, err := p.carrier(ctx, name); err == nil {
-		_ = c.SendKeys(ctx, name, keys...)
+		_ = p.poke(ctx, name, func() error { return c.SendKeys(ctx, name, keys...) })
 	}
 	return nil
+}
+
+// poke runs send, gc's own input to the session, and records it in the poke
+// ledger: tmux counts gc's keystrokes as window activity even when the agent
+// never answers, so GetLastActivity discounts their echo. The session's raw
+// activity is read before send types anything, the genuine baseline, and
+// again once send has delivered, the echo: the box stamps both on its own
+// clock, so the echo is matched there and only the grace runs on the
+// provider's ([runtime.PokeLedger]).
+func (p *Provider) poke(ctx context.Context, name string, send func() error) error {
+	commit := p.pokes.Begin(name, p.rawActivity(ctx, name))
+	if err := send(); err != nil {
+		return err
+	}
+	commit(p.clock(), p.rawActivity(ctx, name))
+	return nil
+}
+
+// clock is the poke ledger's time source.
+func (p *Provider) clock() time.Time {
+	if p.now != nil {
+		return p.now()
+	}
+	return time.Now()
 }
 
 // Peek captures the last N lines of the session pane (best-effort: empty on failure).
@@ -805,20 +831,26 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	return names, nil
 }
 
-// GetLastActivity returns the session's last-activity time (zero if unknown).
+// GetLastActivity returns the session's last-activity time (zero if unknown),
+// read as the local tmux provider reads it: the newest #{window_activity} of
+// the session's windows, less the keystroke echo of gc's own nudges and keys
+// (see [Provider.poke]). #{session_activity} is pinned at creation/attach time
+// for a detached session and does not advance when the agent prints output.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	if checkName(name) != nil {
 		return time.Time{}, nil
 	}
-	out, code, err := p.tmux(context.Background(), name, "display-message", "-t", paneTarget(name), "-p", "#{session_activity}")
-	if err != nil || code != 0 {
-		return time.Time{}, nil
+	return p.pokes.Discount(name, p.rawActivity(context.Background(), name), p.clock()), nil
+}
+
+// rawActivity reads a (checked) session's raw activity clock, the newest
+// #{window_activity} of its windows (zero if unknown).
+func (p *Provider) rawActivity(ctx context.Context, name string) time.Time {
+	activity, err := runtime.ReadTmuxWindowActivity(ctx, p.conn, name, sessionTarget(name))
+	if err != nil {
+		return time.Time{}
 	}
-	secs, perr := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
-	if perr != nil {
-		return time.Time{}, nil
-	}
-	return time.Unix(secs, 0), nil
+	return activity
 }
 
 // CopyTo is not yet supported by the v0 ssh provider (best-effort no-op).
@@ -828,13 +860,13 @@ func (p *Provider) CopyTo(_, _, _ string) error { return nil }
 func (p *Provider) RunLive(_ string, _ runtime.Config) error { return nil }
 
 // Capabilities reports what this provider can observe. Activity is reported
-// via tmux #{session_activity}. Attachment is observable (IsAttached queries
+// via tmux #{window_activity}. Attachment is observable (IsAttached queries
 // #{session_attached}) but — matching the Kubernetes provider — is left
 // undeclared so idle-sleep resolves to timed-only on a remote box; revisit
 // once attachment-aware sleep is validated against a real remote.
 func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{
-		CanReportActivity: true, // tmux #{session_activity}
+		CanReportActivity: true, // tmux #{window_activity}
 	}
 }
 

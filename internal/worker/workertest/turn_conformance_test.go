@@ -173,3 +173,58 @@ func TestTurnHandleConformanceClosedSession(t *testing.T) {
 		t.Fatalf("WatchTurns of a closed session = %v, want ErrSessionNotFound", err)
 	}
 }
+
+// A transcript whose turn ended failed on a provider refusal keeps the
+// contract, and every read reports the failure as the transcript recorded
+// it: the source's class and status, classed a rate limit, and its text.
+func TestTurnHandleConformanceFailedTurn(t *testing.T) {
+	const refusal = "API Error: Request rejected (429)"
+	h := turnConformanceSession(t, runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()}), nil, []string{
+		`{"type":"user","isSidechain":false,"timestamp":"2026-10-13T05:00:00.123Z","message":{"role":"user","content":"a prompt"},"promptId":"7f3e9a10-1111-4aaa-8000-000000000001","origin":"user","promptSource":"prompt"}`,
+		`{"type":"assistant","isSidechain":false,"timestamp":"2026-10-13T05:00:01.000Z","isApiErrorMessage":true,"error":"rate_limit","apiErrorStatus":429,"message":{"role":"assistant","content":[{"type":"text","text":"` + refusal + `"}]}}`,
+		`{"type":"system","subtype":"turn_duration","isSidechain":false,"timestamp":"2026-10-13T05:00:01.010Z"}`,
+		`{"type":"user","isSidechain":false,"timestamp":"2026-10-13T05:01:00.789Z","message":{"role":"user","content":"a prompt"},"promptId":"7f3e9a10-2222-4aaa-8000-000000000002","origin":"user","promptSource":"prompt"}`,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := CheckTurnHandle(ctx, h); err != nil {
+		t.Fatal(err)
+	}
+	want := runtime.TurnFailure{Code: "rate_limit", HTTPStatus: 429, RateLimited: true, Message: refusal}
+	for name, read := range map[string]func(context.Context) (runtime.TurnHistory, error){"CurrentTurn": h.CurrentTurn, "FreshTurn": h.FreshTurn} {
+		hist, err := read(ctx)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(hist.Recent) != 1 || hist.Recent[0].Status != runtime.TurnStatusFailed || hist.Recent[0].Failure != want {
+			t.Fatalf("%s recent = %+v, want one failed turn with failure %+v", name, hist.Recent, want)
+		}
+	}
+}
+
+// checkTurnRead rejects a failure on a turn that did not fail, and a rate
+// limit with neither the source's class nor HTTP 429 (read from the text).
+func TestCheckTurnReadFailures(t *testing.T) {
+	const id = "7f3e9a10-1111-4aaa-8000-000000000001"
+	tests := []struct {
+		name    string
+		status  runtime.TurnStatus
+		failure runtime.TurnFailure
+		ok      bool
+	}{
+		{"failed with its class", runtime.TurnStatusFailed, runtime.TurnFailure{Code: "rate_limit", RateLimited: true, Message: "m"}, true},
+		{"failed with 429", runtime.TurnStatusFailed, runtime.TurnFailure{HTTPStatus: 429, RateLimited: true}, true},
+		{"failed, text only", runtime.TurnStatusFailed, runtime.TurnFailure{Message: "API Error"}, true},
+		{"failed, no failure recorded", runtime.TurnStatusFailed, runtime.TurnFailure{}, true},
+		{"completed, no failure", runtime.TurnStatusCompleted, runtime.TurnFailure{}, true},
+		{"completed with a failure", runtime.TurnStatusCompleted, runtime.TurnFailure{Message: "API Error"}, false},
+		{"closed by a newer turn with a failure", "", runtime.TurnFailure{Code: "server_error"}, false},
+		{"rate limit read from the text", runtime.TurnStatusFailed, runtime.TurnFailure{RateLimited: true, HTTPStatus: 503, Message: "429"}, false},
+	}
+	for _, tc := range tests {
+		hist := runtime.TurnHistory{ObservedAt: time.Now(), Recent: []runtime.EndedTurn{{TurnID: id, Status: tc.status, Failure: tc.failure}}}
+		if err := checkTurnRead(hist, nil); (err == nil) != tc.ok {
+			t.Errorf("%s: checkTurnRead = %v, want ok=%v", tc.name, err, tc.ok)
+		}
+	}
+}

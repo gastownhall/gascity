@@ -537,10 +537,19 @@ func TestGetLastActivity(t *testing.T) {
 
 	addRunningPod(fake, "gc-test-agent", "gc-test-agent")
 
-	// Configure fake to return epoch timestamp.
+	// Detached tmux advances #{window_activity} on pane output but pins
+	// #{session_activity} at creation/attach time, so the output clock is the
+	// one GetLastActivity must read: the newest window's, as the local tmux
+	// provider reads it, not just the current window's.
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "list-windows", "-t", "main", "-F", "#{window_activity}"},
+		"1709200000\n1709300000\n", nil)
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "display-message", "-t", "main", "-p", "#{window_activity}"},
+		"1709200000\n", nil)
 	fake.setExecResult("gc-test-agent",
 		[]string{"tmux", "display-message", "-t", "main", "-p", "#{session_activity}"},
-		"1709300000\n", nil)
+		"1600000000\n", nil)
 
 	activity, err := p.GetLastActivity("gc-test-agent")
 	if err != nil {
@@ -558,6 +567,141 @@ func TestGetLastActivity(t *testing.T) {
 	}
 	if !activity.IsZero() {
 		t.Errorf("expected zero time, got %v", activity)
+	}
+}
+
+// pokedPod is a running pod whose in-pod tmux reports an activity clock that
+// gc's own keystrokes advance, as tmux counts them as window activity: every
+// send-keys moves it to the pod's time, which runs skew off the provider's
+// clock (now). sendErr fails the send-keys whose last argument it names, after
+// the keystrokes reached the pane; refuse makes tmux reject every send-keys: a
+// non-zero exit, with nothing typed.
+type pokedPod struct {
+	activity, now time.Time
+	skew          time.Duration
+	sendErr       map[string]error
+	refuse        bool
+}
+
+func newPokedPod(t *testing.T, genuine time.Time, skew time.Duration) (*Provider, *pokedPod) {
+	t.Helper()
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "gc-test-agent", "gc-test-agent")
+	pod := &pokedPod{activity: genuine, now: genuine.Add(5 * time.Hour), skew: skew}
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) < 2 || cmd[0] != "tmux" {
+			return "", nil
+		}
+		switch cmd[1] {
+		case "list-windows":
+			return strconv.FormatInt(pod.activity.Unix(), 10) + "\n", nil
+		case "send-keys":
+			if pod.refuse {
+				return "", execerr.CodeExitError{Err: errors.New("can't find pane"), Code: 1}
+			}
+			pod.activity = pod.now.Add(pod.skew)
+			return "", pod.sendErr[cmd[len(cmd)-1]]
+		}
+		return "", nil
+	}
+	p.now = func() time.Time { return pod.now }
+	return p, pod
+}
+
+// TestPokeEchoIsDiscountedFromLastActivity: a nudge or keys advance
+// #{window_activity} with their own keystroke echo even when the agent never
+// answers. GetLastActivity counts the echo while the agent may still reply,
+// reverts to the activity before the poke once the grace passes unanswered,
+// so a nudged but silent agent does not look perpetually active (#3049,
+// #4187), and keeps the agent's real output that follows. The pod's clock is
+// not the provider's: with it ahead or behind, the echo is still matched and
+// a reply 10s after the poke is still the agent's own.
+func TestPokeEchoIsDiscountedFromLastActivity(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		poke func(*Provider) error
+	}{
+		{"Nudge", func(p *Provider) error { return p.Nudge("gc-test-agent", runtime.TextContent("wake up")) }},
+		{"SendKeys", func(p *Provider) error { return p.SendKeys("gc-test-agent", "Enter") }},
+	} {
+		for _, skew := range []time.Duration{0, -10 * time.Second, 10 * time.Second} {
+			t.Run(tc.name+" pod clock "+skew.String(), func(t *testing.T) {
+				genuine := time.Unix(1709300000, 0) // the agent's last real output
+				p, pod := newPokedPod(t, genuine, skew)
+				if err := tc.poke(p); err != nil {
+					t.Fatalf("poke: %v", err)
+				}
+				poked, echo := pod.now, pod.activity
+
+				if got, _ := p.GetLastActivity("gc-test-agent"); !got.Equal(echo) {
+					t.Errorf("inside the grace window LastActivity = %v, want the echo %v", got, echo)
+				}
+				pod.now = poked.Add(runtime.PokeGrace + time.Second)
+				if got, _ := p.GetLastActivity("gc-test-agent"); !got.Equal(genuine) {
+					t.Errorf("unanswered poke after the grace: LastActivity = %v, want the genuine %v", got, genuine)
+				}
+				pod.activity = echo.Add(10 * time.Second) // the agent answers
+				pod.now = poked.Add(time.Minute)
+				if got, _ := p.GetLastActivity("gc-test-agent"); !got.Equal(pod.activity) {
+					t.Errorf("after the agent answered LastActivity = %v, want its output %v", got, pod.activity)
+				}
+			})
+		}
+	}
+}
+
+// TestUndeliveredNudgeIsNotDiscounted: a nudge whose submit never lands
+// reports the failure and records no poke, so its echo is not discounted:
+// only input gc delivered is gc's to take back.
+func TestUndeliveredNudgeIsNotDiscounted(t *testing.T) {
+	p, pod := newPokedPod(t, time.Unix(1709300000, 0), 0)
+	pod.sendErr = map[string]error{"Enter": errors.New("stream error: broken pipe")}
+	if err := p.Nudge("gc-test-agent", runtime.TextContent("wake up")); err == nil {
+		t.Fatal("Nudge: want the failed submit reported, got nil")
+	}
+	echo := pod.now
+
+	pod.now = echo.Add(runtime.PokeGrace + time.Second)
+	if got, _ := p.GetLastActivity("gc-test-agent"); !got.Equal(echo) {
+		t.Errorf("LastActivity = %v, want the raw clock %v: an undelivered nudge records no poke", got, echo)
+	}
+}
+
+// TestPokeThatTypedNothingKeepsBaseline: a nudge with no text, keys with
+// none, or a send-keys tmux refuses types nothing into the pane, so it must
+// not cost an earlier unanswered poke its genuine baseline: once the grace
+// passes, LastActivity is still the activity from before the first poke.
+func TestPokeThatTypedNothingKeepsBaseline(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		poke func(*Provider, *pokedPod) error
+	}{
+		{"empty Nudge", func(p *Provider, _ *pokedPod) error {
+			return p.Nudge("gc-test-agent", runtime.TextContent(""))
+		}},
+		{"no keys", func(p *Provider, _ *pokedPod) error { return p.SendKeys("gc-test-agent") }},
+		{"refused send-keys", func(p *Provider, pod *pokedPod) error {
+			pod.refuse = true
+			return p.SendKeys("gc-test-agent", "Enter")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			genuine := time.Unix(1709300000, 0) // the agent's last real output
+			p, pod := newPokedPod(t, genuine, 0)
+			if err := p.Nudge("gc-test-agent", runtime.TextContent("wake up")); err != nil {
+				t.Fatalf("Nudge: %v", err)
+			}
+			pod.now = pod.now.Add(time.Minute) // far past that nudge's echo window
+			if err := tc.poke(p, pod); err != nil {
+				t.Fatalf("poke: %v", err)
+			}
+
+			pod.now = pod.now.Add(runtime.PokeGrace + time.Second)
+			if got, _ := p.GetLastActivity("gc-test-agent"); !got.Equal(genuine) {
+				t.Errorf("LastActivity = %v, want the genuine %v from before the first poke", got, genuine)
+			}
+		})
 	}
 }
 
