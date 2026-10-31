@@ -16,6 +16,7 @@ import (
 // its entry is dropped.
 var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 	"auto": {
+		"BackgroundWorkObserver":       {"deliberate", "background work is read on the routed leaf (cmd/gc/session_sleep.go idleProofHeldByBackgroundWork)", ""},
 		"FreshByConstruction":          {"deliberate", "a leaf's own read; readRuntime judges it on the routed leaf (cmd/gc/reconcile_effect_runtime.go freshReadable)", ""},
 		"FreshActivityProvider":        {"deliberate", "the fresh activity read is read on the routed leaf (runtime.FreshActivityFor)", ""},
 		"HeldFileProvider":             {"deliberate", "the held files are read on the routed leaf (runtime.HeldFilesFor)", ""},
@@ -38,6 +39,7 @@ var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 		"TmuxSubtreeFence":             {"deliberate", "the composite's own scan reports only the PIDs its fencing default leaf reports (runtime.FindRuntimesAcross)", ""},
 	},
 	"hybrid": {
+		"BackgroundWorkObserver":       {"deliberate", "as auto's", ""},
 		"FreshByConstruction":          {"deliberate", "as auto's", ""},
 		"FreshActivityProvider":        {"deliberate", "as auto's", ""},
 		"HeldFileProvider":             {"deliberate", "as auto's", ""},
