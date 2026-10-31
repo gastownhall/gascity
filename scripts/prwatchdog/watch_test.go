@@ -3,6 +3,7 @@ package prwatchdog
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -29,6 +30,15 @@ type fetchResponse struct {
 type scriptedFetcher struct {
 	responses []fetchResponse
 	calls     []string
+
+	awaiting      bool
+	awaitingErr   error
+	awaitingCalls []string
+}
+
+func (f *scriptedFetcher) FetchAwaitingApproval(_ context.Context, headSHA string) (bool, error) {
+	f.awaitingCalls = append(f.awaitingCalls, headSHA)
+	return f.awaiting, f.awaitingErr
 }
 
 func (f *scriptedFetcher) FetchCheckRuns(_ context.Context, headSHA string) ([]CheckRun, error) {
@@ -231,5 +241,80 @@ func passingRequiredRuns() []CheckRun {
 	return []CheckRun{
 		{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: started},
 		{Name: CIRequiredName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: started},
+	}
+}
+
+func watchToDeadline(t *testing.T, fetcher *scriptedFetcher) Evaluation {
+	t.Helper()
+	clock := &fakeClock{now: time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)}
+	return Watch(context.Background(), fetcher, clock, &fakeSleeper{clock: clock}, PollOptions{
+		HeadSHA:  testHeadSHA,
+		Deadline: 25 * time.Minute,
+		Interval: 5 * time.Minute,
+	})
+}
+
+func TestWatch_CheckNeverRanChecksForPendingApprovalOnce(t *testing.T) {
+	fetcher := &scriptedFetcher{responses: []fetchResponse{{runs: nil}}, awaiting: true}
+
+	eval := watchToDeadline(t, fetcher)
+
+	if eval.Pass || !eval.Terminal || !strings.Contains(eval.Reason, "maintainer approval") {
+		t.Fatalf("expected a terminal failure naming maintainer approval, got %+v", eval)
+	}
+	if len(fetcher.awaitingCalls) != 1 || fetcher.awaitingCalls[0] != testHeadSHA {
+		t.Fatalf("approval lookup calls = %v, want exactly one for the explicit head SHA (not once per poll)", fetcher.awaitingCalls)
+	}
+}
+
+func TestWatch_CheckNeverRanWithoutPendingApprovalKeepsTestsNeverRan(t *testing.T) {
+	fetcher := &scriptedFetcher{responses: []fetchResponse{{runs: nil}}, awaiting: false}
+
+	eval := watchToDeadline(t, fetcher)
+
+	if eval.Reason != "tests never ran" {
+		t.Fatalf("Reason = %q, want the unchanged %q", eval.Reason, "tests never ran")
+	}
+	if len(fetcher.awaitingCalls) != 1 {
+		t.Fatalf("approval lookup calls = %v, want exactly one", fetcher.awaitingCalls)
+	}
+}
+
+// The lookup failing must not turn into a silent "tests never ran": the
+// reason says the approval check could not be made.
+func TestWatch_ApprovalLookupErrorIsReportedNotSwallowed(t *testing.T) {
+	fetcher := &scriptedFetcher{responses: []fetchResponse{{runs: nil}}, awaitingErr: errors.New("suites unavailable")}
+
+	eval := watchToDeadline(t, fetcher)
+
+	if eval.Pass || !eval.Terminal {
+		t.Fatalf("expected a fail-closed terminal result, got %+v", eval)
+	}
+	if !strings.HasPrefix(eval.Reason, "tests never ran") || !strings.Contains(eval.Reason, "suites unavailable") {
+		t.Fatalf("Reason = %q, want tests-never-ran plus the lookup error", eval.Reason)
+	}
+}
+
+// Only an ABSENT Check is explained by a pending approval, and only a failing
+// run needs explaining, so no other path pays for the extra request.
+func TestWatch_NoApprovalLookupUnlessCheckNeverRan(t *testing.T) {
+	base := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		runs []CheckRun
+	}{
+		{"passes", passingRequiredRuns()},
+		{"check in progress at deadline", []CheckRun{{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusInProgress, StartedAt: base}}},
+		{"check failed", []CheckRun{{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionFailure, StartedAt: base}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fetcher := &scriptedFetcher{responses: []fetchResponse{{runs: tc.runs}}, awaiting: true}
+
+			watchToDeadline(t, fetcher)
+
+			if len(fetcher.awaitingCalls) != 0 {
+				t.Fatalf("approval lookup calls = %v, want none", fetcher.awaitingCalls)
+			}
+		})
 	}
 }

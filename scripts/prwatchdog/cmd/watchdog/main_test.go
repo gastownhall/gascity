@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -149,5 +150,103 @@ func TestFetchCheckRuns_OtherForbiddenIsNotRateLimit(t *testing.T) {
 	var limited *prwatchdog.RateLimitError
 	if err == nil || errors.As(err, &limited) {
 		t.Fatalf("err = %v, want a plain (fail-closed) error", err)
+	}
+}
+
+// Suite shapes below are copied from live fork PR heads (2026-10-31): a
+// github-actions suite whose workflow awaits approval is completed with
+// conclusion action_required and latest_check_runs_count 0.
+const (
+	suiteAwaiting     = `{"id":%d,"status":"completed","conclusion":"action_required","latest_check_runs_count":0,"app":{"slug":"github-actions"}}`
+	suiteRan          = `{"id":%d,"status":"completed","conclusion":"success","latest_check_runs_count":1,"app":{"slug":"github-actions"}}`
+	suiteSkippedOther = `{"id":%d,"status":"completed","conclusion":"skipped","latest_check_runs_count":1,"app":{"slug":"blacksmith-sh"}}`
+)
+
+func suitesHandler(t *testing.T, suites ...string) http.Handler {
+	t.Helper()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/gastownhall/gascity/commits/sha1/check-suites" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		_, _ = fmt.Fprintf(w, `{"total_count":%d,"check_suites":[%s]}`, len(suites), strings.Join(suites, ","))
+	})
+}
+
+func TestFetchAwaitingApproval(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		suites []string
+		want   bool
+	}{
+		{"awaiting-approval suite among others", []string{fmt.Sprintf(suiteSkippedOther, 1), fmt.Sprintf(suiteRan, 2), fmt.Sprintf(suiteAwaiting, 3)}, true},
+		{"no suites", nil, false},
+		{"every suite ran", []string{fmt.Sprintf(suiteRan, 1), fmt.Sprintf(suiteSkippedOther, 2)}, false},
+		{
+			"action_required but it did create check runs",
+			[]string{`{"id":1,"status":"completed","conclusion":"action_required","latest_check_runs_count":2,"app":{"slug":"github-actions"}}`},
+			false,
+		},
+		{
+			"action_required from an app other than github-actions",
+			[]string{`{"id":1,"status":"completed","conclusion":"action_required","latest_check_runs_count":0,"app":{"slug":"blacksmith-sh"}}`},
+			false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := newTestFetcher(suitesHandler(t, tc.suites...)).FetchAwaitingApproval(context.Background(), "sha1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("FetchAwaitingApproval = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFetchAwaitingApproval_Paginates(t *testing.T) {
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page == 1 {
+			filler := make([]string, 100)
+			for i := range filler {
+				filler[i] = fmt.Sprintf(suiteRan, i)
+			}
+			_, _ = fmt.Fprintf(w, `{"check_suites":[%s]}`, strings.Join(filler, ","))
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"check_suites":[`+suiteAwaiting+`]}`, 500)
+	})
+
+	got, err := newTestFetcher(h).FetchAwaitingApproval(context.Background(), "sha1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got {
+		t.Fatal("FetchAwaitingApproval = false, want true from the suite on page 2")
+	}
+}
+
+func TestFetchAwaitingApproval_RateLimitIsTyped(t *testing.T) {
+	h := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = fmt.Fprint(w, `{"message":"You have exceeded a secondary rate limit."}`)
+	})
+
+	_, err := newTestFetcher(h).FetchAwaitingApproval(context.Background(), "sha1")
+	var limited *prwatchdog.RateLimitError
+	if !errors.As(err, &limited) {
+		t.Fatalf("err = %v, want *prwatchdog.RateLimitError", err)
+	}
+}
+
+func TestFetchAwaitingApproval_OtherErrorsAreReturned(t *testing.T) {
+	h := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	if _, err := newTestFetcher(h).FetchAwaitingApproval(context.Background(), "sha1"); err == nil {
+		t.Fatal("err = nil, want the unexpected-status error")
 	}
 }
