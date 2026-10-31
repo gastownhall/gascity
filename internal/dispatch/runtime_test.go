@@ -4694,6 +4694,137 @@ func TestProcessWorkflowFinalizeStopsSourceChainAtBlockedSource(t *testing.T) {
 	}
 }
 
+// TestProcessWorkflowFinalizeClosesOpenBlockedSourceAndStopsChain is the
+// open-source form of TestProcessWorkflowFinalizeStopsSourceChainAtBlockedSource:
+// a source bead still open with gc.work_outcome=blocked is closed in the
+// established blocked form (status closed, gc.work_outcome=blocked kept,
+// gc.outcome defaulting to pass) and its parent stays open. A live sibling
+// workflow on the same source still takes precedence over the blocked stop:
+// the source stays open for it.
+func TestProcessWorkflowFinalizeClosesOpenBlockedSourceAndStopsChain(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name        string
+		formulaName string
+		liveSibling bool
+	}{
+		{name: "formula=mol-do-work", formulaName: "mol-do-work"},
+		{name: "formula=mol-polecat-report", formulaName: "mol-polecat-report"},
+		{name: "formula=mol-do-work live sibling workflow", formulaName: "mol-do-work", liveSibling: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSourceChainFinalizeFixture(t)
+			mustStampSourceBead(t, f.rigStore, f.workflow.ID, "", map[string]string{
+				"gc.formula_name":   tc.formulaName,
+				"pr_review.verdict": "approve",
+			})
+			mustStampSourceBead(t, f.rigStore, f.rigLaunch.ID, "", map[string]string{
+				"gc.work_outcome": "blocked",
+			})
+			var sibling beads.Bead
+			if tc.liveSibling {
+				sibling = mustCreateWorkflowBead(t, f.rigStore, beads.Bead{
+					Title: "second live workflow",
+					Type:  "task",
+					Metadata: map[string]string{
+						"gc.kind":             "workflow",
+						"gc.formula_contract": "graph.v2",
+						"gc.source_bead_id":   f.rigLaunch.ID,
+						"gc.source_store_ref": "rig:test",
+					},
+				})
+			}
+			var trace bytes.Buffer
+
+			opts := ProcessOptions{
+				ResolveStoreRef: f.resolver,
+				Tracef: func(format string, args ...any) {
+					fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
+				},
+			}
+			if tc.liveSibling {
+				opts.SourceWorkflowStores = sourceChainFixtureStores(f)
+			}
+			result, err := ProcessControl(f.rigStore, f.finalizer, opts)
+			if err != nil {
+				t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+			}
+			if !result.Processed || result.Action != "workflow-pass" {
+				t.Fatalf("workflow result = %+v, want processed workflow-pass", result)
+			}
+			finalizerAfter, err := f.rigStore.Get(f.finalizer.ID)
+			if err != nil {
+				t.Fatalf("get finalizer: %v", err)
+			}
+			if finalizerAfter.Status != "closed" {
+				t.Fatalf("finalizer status = %q, want closed", finalizerAfter.Status)
+			}
+
+			rigLaunchAfter, err := f.rigStore.Get(f.rigLaunch.ID)
+			if err != nil {
+				t.Fatalf("get rig launch: %v", err)
+			}
+			citySourceAfter, err := f.cityStore.Get(f.citySource.ID)
+			if err != nil {
+				t.Fatalf("get city source: %v", err)
+			}
+			traceText := trace.String()
+
+			if tc.liveSibling {
+				if rigLaunchAfter.Status != "open" {
+					t.Fatalf("rig launch status = %q, want open: the live sibling workflow takes precedence over the blocked stop", rigLaunchAfter.Status)
+				}
+				if citySourceAfter.Status != "open" {
+					t.Fatalf("city source status = %q, want open while sibling workflow %s is live", citySourceAfter.Status, sibling.ID)
+				}
+				for _, want := range []string{
+					"reason=live_child_workflow",
+					"source=" + f.rigLaunch.ID,
+					"live_roots=" + sibling.ID,
+				} {
+					if !strings.Contains(traceText, want) {
+						t.Errorf("trace missing %q:\n%s", want, traceText)
+					}
+				}
+				if strings.Contains(traceText, "blocked_source") {
+					t.Errorf("trace mentions blocked_source; the live-child stop must take precedence:\n%s", traceText)
+				}
+				return
+			}
+
+			if rigLaunchAfter.Status != "closed" {
+				t.Fatalf("rig launch status = %q, want closed (blocked form is closed, not left open)", rigLaunchAfter.Status)
+			}
+			if got := rigLaunchAfter.Metadata["gc.work_outcome"]; got != "blocked" {
+				t.Errorf("rig launch gc.work_outcome = %q, want blocked (kept through the close)", got)
+			}
+			if got := rigLaunchAfter.Metadata["gc.outcome"]; got != "pass" {
+				t.Errorf("rig launch gc.outcome = %q, want pass (defaulted by the close)", got)
+			}
+			if got := rigLaunchAfter.Metadata["pr_review.verdict"]; got != "approve" {
+				t.Errorf("rig launch pr_review.verdict = %q, want approve (propagated from root)", got)
+			}
+			if citySourceAfter.Status == "closed" {
+				t.Fatalf("city source status = closed with gc.outcome %q; the source chain must stop at a gc.work_outcome=blocked source", citySourceAfter.Metadata["gc.outcome"])
+			}
+			if got := citySourceAfter.Metadata["gc.outcome"]; got != "" {
+				t.Errorf("city source gc.outcome = %q, want none", got)
+			}
+			for _, want := range []string{
+				"stop reason=blocked_source",
+				"source=" + f.rigLaunch.ID,
+			} {
+				if !strings.Contains(traceText, want) {
+					t.Errorf("trace missing %q:\n%s", want, traceText)
+				}
+			}
+		})
+	}
+}
+
 func TestProcessWorkflowFinalizeClosesSourcesUnderProvidedLock(t *testing.T) {
 	t.Parallel()
 
