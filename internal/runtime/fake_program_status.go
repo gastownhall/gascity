@@ -51,9 +51,11 @@ func (f FullFake) ProgramStatus(name string) (ProgramStatus, error) {
 // HealProgramCapture implements [ProgramCaptureHealer] over name's agent-pane
 // row, recording what it did in the call's Value:
 //
-//   - want declares no capture: an armed pane is disarmed (its tap and
-//     record dropped, its pipe closed), anything else is unchanged;
+//   - want declares no capture and the pane is not armed: unchanged;
 //   - a session without a row, or whose pane is dead, is deferred;
+//   - want declares no capture: the armed pane is disarmed, its tap and
+//     record dropped, and its pipe closed only when the process table shows
+//     its own tap alive, since any other pipe may be foreign;
 //   - an armed pane whose pipe is open and tap not gone is unchanged;
 //   - any other open pipe (a foreign reader, or a dead tap's pipe not yet
 //     closed) is deferred: heal never takes a pipe over;
@@ -75,11 +77,14 @@ func (f FullFake) HealProgramCapture(name string, want ProgramStatusArm) (Progra
 	switch armed := ok && row.PaneID != "" && strings.HasSuffix(row.Tap, "."+row.PaneID); {
 	case !want.Capture && !armed:
 		action = ProgramCaptureUnchanged
+	case !ok || row.PaneID == "" || row.PaneDead:
 	case !want.Capture:
-		row.Tap, row.PanePipe, row.TapLiveness = "", false, ProgramTapUnknown
+		if row.TapLiveness == ProgramTapAlive {
+			row.PanePipe = false
+		}
+		row.Tap, row.TapLiveness = "", ProgramTapUnknown
 		row.RecordForm, row.Record = ProgramRecordAbsent, ProgramStatus{}
 		action = ProgramCaptureDisarmed
-	case !ok || row.PaneID == "" || row.PaneDead:
 	case armed && row.PanePipe && row.TapLiveness != ProgramTapGone:
 		action = ProgramCaptureUnchanged
 	case row.PanePipe:

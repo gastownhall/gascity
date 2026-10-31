@@ -7,7 +7,8 @@ import (
 	"time"
 )
 
-// The replies probe-gated tells apart.
+// The replies a probe-gated handshake reads: the 7501 reply (its introducer,
+// a body, then BEL or ESC \) and the DA1 reply (ESC [ ? params c).
 const (
 	reply7501   = "\x1b]7501;"
 	da1ReplyCSI = "\x1b[?"
@@ -72,54 +73,89 @@ func (i *input) fill(ctx context.Context, timeout <-chan time.Time) (bool, error
 	}
 }
 
-// awaitReply consumes input until a 7501 reply or a DA1 reply completes, and
-// reports whether the 7501 reply came first. Input ending, or wait passing,
-// with neither reads as unanswered. Bytes after the deciding reply stay
-// pending for line reads.
+// awaitReply consumes the handshake's replies and reports whether a 7501
+// reply came before the DA1 reply. A terminal answers in order, so the DA1
+// reply ends the handshake; input ending, or wait passing, ends it sooner,
+// answered only if a 7501 reply came by then. Every other byte stays
+// pending, in order, for line reads.
 func (i *input) awaitReply(ctx context.Context, wait time.Duration) (bool, error) {
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
+	answered := false
 	for {
-		if answered, used, ok := firstReply(i.pending); ok {
-			i.pending = i.pending[used:]
+		is7501, ok := i.takeReply()
+		switch {
+		case ok && is7501:
+			answered = true
+		case ok:
 			return answered, nil
-		}
-		more, err := i.fill(ctx, timer.C)
-		if err != nil || !more {
-			return false, err
+		default:
+			more, err := i.fill(ctx, timer.C)
+			if err != nil {
+				return false, err
+			}
+			if !more {
+				return answered, nil
+			}
 		}
 	}
 }
 
-// firstReply finds the first complete reply in b: a 7501 reply (its
-// introducer suffices) or a DA1 reply (CSI ? params c). used is how many
-// bytes it and what preceded it took.
-func firstReply(b []byte) (answered bool, used int, ok bool) {
-	for at := 0; at < len(b); at++ {
-		rest := b[at:]
-		if bytes.HasPrefix(rest, []byte(reply7501)) {
-			return true, at + len(reply7501), true
-		}
-		if !bytes.HasPrefix(rest, []byte(da1ReplyCSI)) {
+// takeReply removes the first complete reply from pending, keeping the bytes
+// around it, and reports whether it was a 7501 reply.
+func (i *input) takeReply() (is7501, ok bool) {
+	for at, c := range i.pending {
+		if c != '\x1b' {
 			continue
 		}
-		for j := len(da1ReplyCSI); j < len(rest); j++ {
-			c := rest[j]
-			if c == 'c' {
-				return false, at + j + 1, true
-			}
-			if (c < '0' || c > '9') && c != ';' {
-				break
-			}
+		if n, is7501 := replyLen(i.pending[at:]); n > 0 {
+			i.pending = append(i.pending[:at], i.pending[at+n:]...)
+			return is7501, true
 		}
 	}
-	return false, 0, false
+	return false, false
+}
+
+// dropReplies removes every complete reply from pending.
+func (i *input) dropReplies() {
+	for {
+		if _, ok := i.takeReply(); !ok {
+			return
+		}
+	}
+}
+
+// replyLen returns the length of the reply b starts with, and whether it is
+// a 7501 reply; n is 0 when b starts with no reply, or with one not yet
+// complete. A 7501 reply runs through its BEL or ESC \. An escape inside it
+// that starts anything else interrupts it, so it is no reply, as the
+// reader's Scanner abandons an interrupted sequence.
+func replyLen(b []byte) (n int, is7501 bool) {
+	if body, ok := bytes.CutPrefix(b, []byte(reply7501)); ok {
+		switch end := bytes.IndexAny(body, terminatorBEL+"\x1b"); {
+		case end < 0:
+		case body[end] == terminatorBEL[0]:
+			return len(b) - len(body) + end + len(terminatorBEL), true
+		case bytes.HasPrefix(body[end:], []byte(terminatorST)):
+			return len(b) - len(body) + end + len(terminatorST), true
+		}
+		return 0, false
+	}
+	if params, ok := bytes.CutPrefix(b, []byte(da1ReplyCSI)); ok {
+		if rest := bytes.TrimLeft(params, "0123456789;"); len(rest) > 0 && rest[0] == 'c' {
+			return len(b) - len(rest) + 1, false
+		}
+	}
+	return 0, false
 }
 
 // line returns the next non-empty input line (CR or LF ends one); ok is
-// false once input ends with nothing left.
+// false once input ends with nothing left. A terminal reply is never part
+// of a line: one arriving after the handshake ended (a DA1 reply past the
+// probe's wait, a 7501 reply after the DA1 reply) is dropped.
 func (i *input) line(ctx context.Context) (string, bool, error) {
 	for {
+		i.dropReplies()
 		if at := bytes.IndexAny(i.pending, "\r\n"); at >= 0 {
 			text := string(i.pending[:at])
 			i.pending = i.pending[at+1:]

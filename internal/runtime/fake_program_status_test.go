@@ -72,8 +72,9 @@ func TestFullFakeProgramStatusJudgesItsRow(t *testing.T) {
 	}
 }
 
-// Kills a fake heal that takes a foreign or not-yet-closed pipe over, arms a
-// dead pane, re-arms a healthy capture, reuses a nonce, or does not disarm.
+// Kills a fake heal that takes a foreign or not-yet-closed pipe over, arms or
+// disarms a dead pane, re-arms a healthy capture, reuses a nonce, does not
+// disarm, or closes on disarm a pipe it cannot show its own tap holds.
 func TestFullFakeHealProgramCapture(t *testing.T) {
 	want := runtime.ProgramStatusArm{Capture: true}
 	cases := []struct {
@@ -108,6 +109,21 @@ func TestFullFakeHealProgramCapture(t *testing.T) {
 			return runtime.ProgramPaneRow{Mode: runtime.ProgramStatusOn, CaptureGate: true, PaneID: "%2"}, true
 		}, want, runtime.ProgramCaptureArmed},
 		{"disarm", func() (runtime.ProgramPaneRow, bool) { return armedFakeRow(), true }, runtime.ProgramStatusArm{}, runtime.ProgramCaptureDisarmed},
+		{"disarm beside a foreign pipe", func() (runtime.ProgramPaneRow, bool) {
+			r := armedFakeRow()
+			r.TapLiveness = runtime.ProgramTapGone
+			return r, true
+		}, runtime.ProgramStatusArm{}, runtime.ProgramCaptureDisarmed},
+		{"disarm with tap liveness unknown", func() (runtime.ProgramPaneRow, bool) {
+			r := armedFakeRow()
+			r.TapLiveness = runtime.ProgramTapUnknown
+			return r, true
+		}, runtime.ProgramStatusArm{}, runtime.ProgramCaptureDisarmed},
+		{"disarm a dead pane", func() (runtime.ProgramPaneRow, bool) {
+			r := armedFakeRow()
+			r.PaneDead = true
+			return r, true
+		}, runtime.ProgramStatusArm{}, runtime.ProgramCaptureDeferred},
 		{"nothing to disarm", func() (runtime.ProgramPaneRow, bool) {
 			return runtime.ProgramPaneRow{Mode: runtime.ProgramStatusOn, PaneID: "%2"}, true
 		}, runtime.ProgramStatusArm{}, runtime.ProgramCaptureUnchanged},
@@ -138,8 +154,11 @@ func TestFullFakeHealProgramCapture(t *testing.T) {
 					t.Fatalf("second heal = %q, want unchanged", again)
 				}
 			case runtime.ProgramCaptureDisarmed:
-				if r.Validity != runtime.ProgramStatusNotArmed || after.PanePipe {
-					t.Fatalf("disarmed row %+v reads %q; want not_armed, pipe closed", after, r.Validity)
+				// Only a pipe the process table shows our tap holding is
+				// closed: any other may be foreign.
+				pipeOpen := before.TapLiveness != runtime.ProgramTapAlive
+				if r.Validity != runtime.ProgramStatusNotArmed || after.PanePipe != pipeOpen {
+					t.Fatalf("disarmed row %+v reads %q; want not_armed, pipe open %v", after, r.Validity, pipeOpen)
 				}
 			default:
 				if after != before {

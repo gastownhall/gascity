@@ -104,6 +104,10 @@ func (p *fakeProgramPane) session() ProgramStatusSession {
 			// exits, and the pane's pipe stays open, now not ours.
 			p.update(func(row *runtime.ProgramPaneRow) { row.PanePipe, row.TapLiveness = true, runtime.ProgramTapGone })
 		},
+		PipeOpen: func(*testing.T) bool {
+			row, _ := p.fake.ProgramPane(fakeProgramSession)
+			return row.PanePipe
+		},
 		SetMode: func(_ *testing.T, mode runtime.ProgramStatusMode) {
 			p.update(func(row *runtime.ProgramPaneRow) { row.Mode = mode })
 		},

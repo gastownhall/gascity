@@ -56,7 +56,8 @@ func main() {
 }
 
 // run parses args, runs the script on the process's terminal, and returns
-// its exit status or signal.
+// its exit status or signal. TERM, INT or HUP ends the run early, and the
+// process then ends by the signal it received.
 func run(args []string) (int, syscall.Signal, error) {
 	fs := flag.NewFlagSet("osc7501emitter", flag.ContinueOnError)
 	var inline steps
@@ -68,8 +69,20 @@ func run(args []string) (int, syscall.Signal, error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
-	defer stop()
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	defer signal.Stop(sigs)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	received := make(chan os.Signal, 1)
+	go func() {
+		select {
+		case s := <-sigs:
+			received <- s
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	out, err := emit.Run(ctx, prog, emit.Terminal{
 		In:         os.Stdin,
 		Out:        os.Stdout,
@@ -78,7 +91,10 @@ func run(args []string) (int, syscall.Signal, error) {
 		SplitPause: splitPause,
 	})
 	if errors.Is(err, context.Canceled) {
-		return 0, syscall.SIGTERM, nil
+		// Only the goroutine above cancels the run, after it sends the signal.
+		if sig, ok := (<-received).(syscall.Signal); ok {
+			return 0, sig, nil
+		}
 	}
 	return out.Exit, out.Signal, err
 }
