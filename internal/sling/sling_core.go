@@ -15,10 +15,12 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -90,6 +92,9 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 
 	if a.Suspended && !opts.Force {
 		result.AgentSuspended = true
+	}
+	if targetCitySuspended(fsys.OSFS{}, deps) {
+		result.CitySuspended = true
 	}
 	if !opts.Force && rigSuspended(deps.Cfg, a.Dir) {
 		result.SuspendedRig = a.Dir
@@ -256,6 +261,20 @@ func rigSuspended(cfg *config.City, rigName string) bool {
 		}
 	}
 	return false
+}
+
+// targetCitySuspended reports whether the city the sling runs in is
+// explicitly suspended in the runtime state file — the write `gc suspend`
+// performs. The pool reconciler skips a suspended city entirely, so a routed
+// bead stalls with no worker until `gc resume`. Empty CityPath skips the
+// disk read (Load would otherwise resolve a cwd-relative .gc/runtime file);
+// a read error degrades to not suspended.
+func targetCitySuspended(fs fsys.FS, deps SlingDeps) bool {
+	if deps.CityPath == "" {
+		return false
+	}
+	st, _ := suspensionstate.Load(fs, deps.CityPath)
+	return suspensionstate.IsCitySuspended(st)
 }
 
 func shouldValidateExistingBead(opts SlingOpts) bool {

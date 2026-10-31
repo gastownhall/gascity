@@ -29,6 +29,7 @@ import (
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // selectiveErrStore wraps a beads.Store and injects Create errors for selected
@@ -925,6 +926,57 @@ func TestSlingJSONWarningsSuspendedRig(t *testing.T) {
 	warnings := slingJSONWarnings(sling.SlingResult{SuspendedRig: "myrig"})
 	if !slices.Contains(warnings, "rig_suspended") {
 		t.Errorf("warnings = %v, want to contain rig_suspended", warnings)
+	}
+}
+
+// slingSuspensionCityDir returns an isolated city dir with .gc/runtime in
+// place, so runtime suspension-state writes never touch the shared test city.
+func slingSuspensionCityDir(t *testing.T) string {
+	t.Helper()
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc", "runtime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return cityPath
+}
+
+// writeSlingCitySuspension records an explicit city preference in the
+// runtime state file — the write `gc suspend` / `gc resume` perform.
+func writeSlingCitySuspension(t *testing.T, cityPath string, suspended bool) {
+	t.Helper()
+	if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, cityPath, &suspended); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDoSlingWarnsCitySuspendedByRuntimeState(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.CityPath = slingSuspensionCityDir(t)
+	writeSlingCitySuspension(t, deps.CityPath, true)
+	opts := testOpts(a, "my-1")
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0 (still routes)", code)
+	}
+	if !strings.Contains(stderr.String(), "warning: city is suspended") {
+		t.Errorf("stderr = %q, want city suspended warning", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc resume") {
+		t.Errorf("stderr = %q, want gc resume hint", stderr.String())
+	}
+	assertStoreRoutedTo(t, deps.Store, "my-1", "worker")
+}
+
+func TestSlingJSONWarningsCitySuspended(t *testing.T) {
+	warnings := slingJSONWarnings(sling.SlingResult{CitySuspended: true})
+	if !slices.Contains(warnings, "city_suspended") {
+		t.Errorf("warnings = %v, want to contain city_suspended", warnings)
 	}
 }
 
