@@ -39,6 +39,14 @@ const ( //nolint:revive // exported requirement IDs are documented by the catalo
 	RequirementInputOverrideDefaults               RequirementCode = "WC-INPUT-003"
 	RequirementInputInProgressResumeRestart        RequirementCode = "WC-INPUT-004"
 	RequirementInputPreClaimResumeRestart          RequirementCode = "WC-INPUT-005"
+	RequirementProgramStatusSurfaces               RequirementCode = "WC-PSTAT-001"
+	RequirementProgramStatusPhase                  RequirementCode = "WC-PSTAT-002"
+	RequirementProgramStatusPendingKindOnly        RequirementCode = "WC-PSTAT-003"
+	RequirementProgramStatusQueueBehindBlocked     RequirementCode = "WC-PSTAT-004"
+	RequirementProgramStatusImmediateRefused       RequirementCode = "WC-PSTAT-005"
+	RequirementProgramStatusReadiness              RequirementCode = "WC-PSTAT-006"
+	RequirementProgramStatusShadowIdentical        RequirementCode = "WC-PSTAT-007"
+	RequirementProgramStatusTranscriptTurn         RequirementCode = "WC-PSTAT-008"
 	RequirementInferenceFreshSpawn                 RequirementCode = "WI-START-001"
 	RequirementInferenceTemplateStartup            RequirementCode = "WI-START-002"
 	RequirementInferenceFreshTask                  RequirementCode = "WI-TASK-001"
@@ -125,6 +133,57 @@ func DeliveryHandleCatalog() []Requirement {
 			Code:        RequirementAcceptedMessageQueuesBehindPending,
 			Group:       "delivery",
 			Description: "A message its caller already accepted (MessageRequest.QueueBehindPending), sent to a session waiting on a pending interaction, is queued as a user turn for after the interaction is answered. A plain message is refused with the pending-interaction error.",
+		},
+	}
+}
+
+// ProgramStatusCatalog returns the OSC 7501 program-status requirements: a
+// profile's own status reports, read through the runtime program-status
+// seam, and the worker decisions they may change. Only profiles that
+// declare program status are held to them (see ProgramStatusGate); the
+// phase-2 catalog cannot express a capability some profiles lack, so these
+// rows live here.
+func ProgramStatusCatalog() []Requirement {
+	return []Requirement{
+		{
+			Code:        RequirementProgramStatusSurfaces,
+			Group:       "program_status",
+			Description: "A declared profile's own status reports surface through the runtime program-status seam: first report, turn start, turn end.",
+		},
+		{
+			Code:        RequirementProgramStatusPhase,
+			Group:       "program_status",
+			Description: "Worker phase follows a valid record under on: working is Busy, blocked is Blocked, idle, done and error are Ready. Under shadow, phase is unchanged.",
+		},
+		{
+			Code:        RequirementProgramStatusPendingKindOnly,
+			Group:       "program_status",
+			Description: "A program-reported dialog yields a kind-only pending interaction that cannot be answered by key.",
+		},
+		{
+			Code:        RequirementProgramStatusQueueBehindBlocked,
+			Group:       "program_status",
+			Description: "Under a live blocked record, wait-idle and queue delivery queue the message and spend no attempt.",
+		},
+		{
+			Code:        RequirementProgramStatusImmediateRefused,
+			Group:       "program_status",
+			Description: "Under a live blocked record, explicit immediate delivery is refused with the pending-interaction error.",
+		},
+		{
+			Code:        RequirementProgramStatusReadiness,
+			Group:       "program_status",
+			Description: "A prefixless declared profile is ready at its first valid report plus settle. A prefixed profile's readiness ignores reports.",
+		},
+		{
+			Code:        RequirementProgramStatusShadowIdentical,
+			Group:       "program_status",
+			Description: "With the switch at shadow, every worker decision is identical to off.",
+		},
+		{
+			Code:        RequirementProgramStatusTranscriptTurn,
+			Group:       "program_status",
+			Description: "A record never ends a transcript turn whose start is newer than the record's edge.",
 		},
 	}
 }

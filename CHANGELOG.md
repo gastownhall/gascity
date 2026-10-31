@@ -535,6 +535,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its next pass, so a script need not retry. An operator on the controller
   host can still restart any session with `gc session reset <session>`.
 
+- **Delete any `[[orders.overrides]]` entry that names `wisp-compact`.** The
+  core pack no longer ships that order (see Fixed). An override naming an
+  order that no longer exists is a config error: `gc order` commands exit 1,
+  and the controller logs the error and skips every override after it.
+  `[orders] skip` entries that name `wisp-compact` stay valid; the order
+  scanner ignores names it does not find.
+
 ### Added
 
 - **`[events.mirror]` writes a copy of the city's event log outside `.gc`**
@@ -673,6 +680,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   take their owner from their own `gc.root_store_ref`, which
   `worktree.Verify` still checks against the on-disk provenance; work-ledger,
   rig-store and cross-rig rows keep the strict store comparison (ga-8tpvb).
+
+- **The core pack no longer ships the `wisp-compact` order, which never
+  selected a wisp.** The order's script picked its targets from `gc bd list
+  --json --all -n 0`, but every bd release gc supports (1.3.0 and later) omits
+  ephemeral rows from `bd list` unless `--include-infra` (or, from bd 1.3.1,
+  `--include-ephemeral`) is passed. Every hourly run therefore listed every
+  durable bead, found no wisp, and was recorded as a successful run that
+  changed nothing. Repairing the read would have deleted read mail after 24
+  hours and moved live wisps out of the ephemeral tier that agents query.
+  Closed and stale wisps are already handled elsewhere: on bd 1.3.1 and later,
+  the `reaper` order purges closed wisps-plane rows after its retention window
+  and keeps any a live bead still depends on, and reports stale open wisps;
+  `[mail]` retention covers read mail; and the controller wisp GC (`[daemon]
+  wisp_gc_interval` and `wisp_ttl`) collects expired wisps, including on
+  split-storage cities, where `gc bd` refuses the script's writes. (#4937)
 
 - **`gc prime --strict` fails on a `prompt_template` that does not render.**
   A `.template.md` (or `.md.tmpl`) prompt_template that failed to parse or
