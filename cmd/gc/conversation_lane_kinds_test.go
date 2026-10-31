@@ -40,17 +40,25 @@ func TestEffectiveLaneKindsDefaultsOnSQLiteOnly(t *testing.T) {
 		name     string
 		store    beads.Store
 		defaults bool
+		fit      laneStoreFit
 	}{
-		{"sqlite", sqlite, true},
-		{"cached sqlite", beads.NewCachingStoreForTest(sqlite, nil), true},
-		{"native dolt", beads.NewCachingStoreForTest(&beads.NativeDoltStore{}, nil), false},
-		{"file", file, false},
-		{"bd", &beads.BdStore{}, false},
-		{"exec", beadsexec.NewStore("/bin/false"), false},
-		{"no store", nil, false},
+		{"sqlite", sqlite, true, laneStoreFitDefault},
+		{"cached sqlite", beads.NewCachingStoreForTest(sqlite, nil), true, laneStoreFitDefault},
+		{"native dolt", beads.NewCachingStoreForTest(&beads.NativeDoltStore{}, nil), false, laneStoreFitListed},
+		{"file", file, false, laneStoreFitListed},
+		{"bd", &beads.BdStore{}, false, laneStoreFitNone},
+		{"exec", beadsexec.NewStore("/bin/false"), false, laneStoreFitNone},
+		{"no store", nil, false, laneStoreFitNone},
 	}
 	for _, tc := range stores {
 		t.Run(tc.name, func(t *testing.T) {
+			var sessions beads.SessionStore
+			if tc.store != nil {
+				sessions = sessionFrontDoor(tc.store).Store()
+			}
+			if got := laneStoreFitFor(sessions); got != tc.fit {
+				t.Fatalf("laneStoreFitFor = %v, want %v", got, tc.fit)
+			}
 			kinds, defaulted := cliLaneKinds(&config.City{}, tc.store)
 			if tc.defaults {
 				if !defaulted || !slices.Equal(kinds, []string{"message", "interrupt", "respond"}) {
@@ -97,9 +105,14 @@ func TestLegacyDeliveryWarnings(t *testing.T) {
 	// The keys still govern the legacy deliverers in this release (queue
 	// leftovers, sessions without a row); removing [daemon] nudge_dispatcher
 	// would re-enable the per-session pollers. No warning may ask for removal.
+	// Legacy delivery is removed one release after gc init splits storage by
+	// default (D-NOLANE), so no warning may promise the next release.
 	for _, w := range all {
 		if strings.Contains(w, "remove it") || !strings.Contains(w, "leave it set until then") {
-			t.Fatalf("lane on: warning %q asks for removal; want it to say to leave the key set until the next release", w)
+			t.Fatalf("lane on: warning %q asks for removal; want it to say to leave the key set until legacy delivery is removed", w)
+		}
+		if strings.Contains(w, "next release") || !strings.Contains(w, "a future release") {
+			t.Fatalf("lane on: warning %q, want legacy delivery's removal in a future release", w)
 		}
 	}
 	interruptOnly := laneLegacyDeliveryWarnings(keys(), []string{"interrupt"}, false)
@@ -107,8 +120,8 @@ func TestLegacyDeliveryWarnings(t *testing.T) {
 		t.Fatalf("interrupt only: warnings %q, want only [ops] control's", interruptOnly)
 	}
 	rollback := &config.City{Ops: config.OpsConfig{Authoritative: config.OpsKinds()}}
-	if got := laneLegacyDeliveryWarnings(rollback, nil, true); len(got) != 1 || !strings.Contains(got[0], "authoritative = []") {
-		t.Fatalf("[] on a capable city: warnings %q, want the rollback warning", got)
+	if got := laneLegacyDeliveryWarnings(rollback, nil, true); len(got) != 1 || !strings.Contains(got[0], "authoritative = []") || strings.Contains(got[0], "next") {
+		t.Fatalf("[] on a capable city: warnings %q, want the rollback warning, promising no next-release removal", got)
 	}
 	if got := laneLegacyDeliveryWarnings(rollback, nil, false); len(got) != 0 {
 		t.Fatalf("[] on an incapable city: warnings %q, want none", got)

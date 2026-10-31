@@ -2,9 +2,10 @@ package main
 
 // The conversation lane's effective kinds (OJ-21 21a, DES-OJ21 §6). [ops]
 // authoritative left unset runs message, interrupt and respond on the lane
-// where the city's sessions store is SQLite and applies guarded batches, the
-// configuration the maintainer-city soak proves; any other store keeps their
-// legacy delivery in this release. An explicit list, [] included, always
+// where the city's sessions store is SQLite and applies guarded batches (a
+// split city), the configuration the maintainer-city soak proves; any other
+// store keeps their legacy delivery until the city splits its storage
+// (D-NOLANE: lanes need a split store). An explicit list, [] included, always
 // wins. The controller latches the kinds when its lane host first finds its
 // sessions store; the CLI reads them at once over the store it opened.
 
@@ -26,20 +27,56 @@ var laneDefaultKinds = []string{
 	string(opjournal.KindRespond),
 }
 
-// laneDefaultApplies reports whether an unset [ops] authoritative runs
-// laneDefaultKinds over sessions: its conditional writes land in a SQLite
-// store (opjournal.CheckRecordsByDefault, the ops gates' own allowlist) and
-// it applies guarded batches. A zero handle (no store) does not. It does no
-// I/O.
-func laneDefaultApplies(sessions beads.SessionStore) bool {
+// laneStoreFit is how a sessions store can host the conversation lane.
+type laneStoreFit int
+
+const (
+	// laneStoreFitNone: no store, or one that cannot apply guarded batches
+	// (bd-served, exec, DoltLite); it hosts no lane, so the city keeps
+	// legacy delivery until it splits its storage.
+	laneStoreFitNone laneStoreFit = iota
+	// laneStoreFitListed: guarded batches whose conditional writes do not
+	// land in SQLite (native Dolt); it hosts the kinds [ops] authoritative
+	// lists, and an unset list runs none.
+	laneStoreFitListed
+	// laneStoreFitDefault: SQLite with guarded batches (a split city); an
+	// unset [ops] authoritative runs laneDefaultKinds on it.
+	laneStoreFitDefault
+)
+
+// String names f for test failures and diagnostics.
+func (f laneStoreFit) String() string {
+	switch f {
+	case laneStoreFitListed:
+		return "listed"
+	case laneStoreFitDefault:
+		return "default"
+	}
+	return "none"
+}
+
+// laneStoreFitFor classifies sessions by the capabilities the lane host
+// needs: guarded batches to host a lane at all, and conditional writes that
+// land in a SQLite store (opjournal.CheckRecordsByDefault, the ops gates' own
+// allowlist) for the unset default. A zero handle (no store) fits none. It
+// does no I/O.
+func laneStoreFitFor(sessions beads.SessionStore) laneStoreFit {
 	if sessions == (beads.SessionStore{}) {
-		return false
+		return laneStoreFitNone
+	}
+	if _, ok := beads.GuardedBatcherFor(sessions); !ok {
+		return laneStoreFitNone
 	}
 	if opjournal.CheckRecordsByDefault(sessions) != nil {
-		return false
+		return laneStoreFitListed
 	}
-	_, ok := beads.GuardedBatcherFor(sessions)
-	return ok
+	return laneStoreFitDefault
+}
+
+// laneDefaultApplies reports whether an unset [ops] authoritative runs
+// laneDefaultKinds over sessions (laneStoreFitDefault).
+func laneDefaultApplies(sessions beads.SessionStore) bool {
+	return laneStoreFitFor(sessions) == laneStoreFitDefault
 }
 
 // effectiveLaneKinds is the op kinds the conversation lane executes for cfg
@@ -65,9 +102,10 @@ func effectiveLaneKinds(cfg *config.City, sessions beads.SessionStore) (kinds []
 // (defaultApplies): each legacy-delivery key the city still sets, and an
 // explicit [ops] authoritative = [] that holds back the default. They are
 // empty where no lane runs and the default does not apply, since legacy
-// delivery is still that city's only delivery in this release. A key warning
-// never asks for removal: each key still governs the legacy deliverers in
-// this release, and removing [daemon] nudge_dispatcher would restart the
+// delivery is still that city's only delivery. A key warning never asks for
+// removal: each key still governs the legacy deliverers until legacy
+// delivery is removed in a future release (one after gc init splits storage
+// by default), and removing [daemon] nudge_dispatcher would restart the
 // per-session pollers.
 func laneLegacyDeliveryWarnings(cfg *config.City, kinds []string, defaultApplies bool) []string {
 	if cfg == nil {
@@ -76,7 +114,7 @@ func laneLegacyDeliveryWarnings(cfg *config.City, kinds []string, defaultApplies
 	var out []string
 	if cfg.Ops.AuthoritativeSet() && len(cfg.Ops.AuthoritativeKinds()) == 0 && defaultApplies {
 		out = append(out, "[ops] authoritative = [] keeps message, interrupt and respond on legacy delivery; "+
-			"this rollback works for one release only, since legacy delivery is removed in the next")
+			"this rollback works only until legacy delivery is removed in a future release")
 	}
 	if len(kinds) == 0 {
 		return out
@@ -97,7 +135,7 @@ func laneLegacyDeliveryWarnings(cfg *config.City, kinds []string, defaultApplies
 		if !k.superseded || strings.TrimSpace(k.value) == "" {
 			continue
 		}
-		out = append(out, fmt.Sprintf("%s is deprecated: the conversation lane delivers %s here, and the key is retired with legacy delivery in the next release; leave it set until then, since it still governs legacy delivery here (queue items written before the upgrade, sessions without a row)", k.key, listed))
+		out = append(out, fmt.Sprintf("%s is deprecated: the conversation lane delivers %s here, and the key is retired when legacy delivery is removed in a future release; leave it set until then, since it still governs legacy delivery here (queue items written before the upgrade, sessions without a row)", k.key, listed))
 	}
 	return out
 }
