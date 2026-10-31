@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -117,7 +118,9 @@ func TestRelayUnderTmuxMakesProbeGatedProgramReport(t *testing.T) {
 	}
 
 	s.kill()
-	await(t, "every relay and program process to exit", func() bool { return len(processesNaming(t, marker)) == 0 })
+	if runtime.GOOS == "linux" { // processesNaming reads /proc
+		await(t, "every relay and program process to exit", func() bool { return len(processesNaming(t, marker)) == 0 })
+	}
 }
 
 // processesNaming lists the pids whose command line holds s or its hex.
@@ -246,7 +249,9 @@ func (r *paneRun) wait() syscall.WaitStatus {
 
 // The relay process ends as its program did: same exit code, or death by
 // the same signal (so #{pane_dead_signal} keeps its fidelity), including the
-// signals the Go runtime would otherwise turn into a traceback.
+// signals the Go runtime would otherwise turn into a traceback, and SIGKILL,
+// whose disposition cannot be reset. kill(1) signals itself, not the shell:
+// bash, macOS's /bin/sh, ignores SIGQUIT.
 func TestRelayBinaryEndsAsItsProgramEnded(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -256,10 +261,11 @@ func TestRelayBinaryEndsAsItsProgramEnded(t *testing.T) {
 	}{
 		{"exit 0", "exit 0", 0, 0},
 		{"exit 7", "exit 7", 7, 0},
-		{"SIGTERM", "kill -s TERM $$", 0, syscall.SIGTERM},
-		{"SIGQUIT", "kill -s QUIT $$", 0, syscall.SIGQUIT},
-		{"SIGSEGV", "kill -s SEGV $$", 0, syscall.SIGSEGV},
-		{"SIGUSR1", "kill -s USR1 $$", 0, syscall.SIGUSR1},
+		{"SIGTERM", "exec /bin/kill -s TERM $$", 0, syscall.SIGTERM},
+		{"SIGKILL", "exec /bin/kill -s KILL $$", 0, syscall.SIGKILL},
+		{"SIGQUIT", "exec /bin/kill -s QUIT $$", 0, syscall.SIGQUIT},
+		{"SIGSEGV", "exec /bin/kill -s SEGV $$", 0, syscall.SIGSEGV},
+		{"SIGUSR1", "exec /bin/kill -s USR1 $$", 0, syscall.SIGUSR1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ws := runRelayOnPane(t, "/bin/sh", "-c", tc.script).wait()
@@ -286,9 +292,9 @@ func TestRelayBinaryForwardsSignalsToProgram(t *testing.T) {
 			if err := r.cmd.Process.Signal(sig); err != nil {
 				t.Fatal(err)
 			}
-			// The emitter ends on any of them by re-raising SIGTERM.
-			if ws := r.wait(); !ws.Signaled() || ws.Signal() != syscall.SIGTERM {
-				t.Fatalf("relay ended %#x, want the program's death by SIGTERM", ws)
+			// The emitter ends by the signal it received.
+			if ws := r.wait(); !ws.Signaled() || ws.Signal() != sig {
+				t.Fatalf("relay ended %#x, want the program's death by %v", ws, sig)
 			}
 		})
 	}
@@ -324,6 +330,9 @@ const relayRSSBudget = 8 << 20
 // TestRelayRSSBudget relays 80 MB of program output and checks the relay's
 // peak resident set.
 func TestRelayRSSBudget(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("peak RSS is read from /proc")
+	}
 	const size = 80 << 20
 	r := runRelayOnPane(t, "/bin/sh", "-c", "head -c "+strconv.Itoa(size)+" /dev/urandom; read line")
 	start := time.Now()
