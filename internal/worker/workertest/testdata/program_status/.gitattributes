@@ -1,0 +1,2 @@
+# Raw pane-output captures (pipe-pane -O) replayed byte for byte by WC-PSTAT-001.
+*.bin binary
