@@ -16,9 +16,12 @@ import (
 // the city switch is shadow or on, each listed session whose reading calls
 // for it (programCaptureHealNeeded) is healed through its routed leaf's
 // runtime.ProgramCaptureHealer toward the capture its config declares. While
-// the switch is off, the steady state reads nothing: one disarm sweep per
-// config load (programCaptureDisarmer) takes down whatever capture an
-// earlier switch left armed.
+// the switch is off, the steady state reads nothing: one clean disarm sweep
+// per config load (programCaptureDisarmer) takes down whatever capture an
+// earlier switch left armed, a failed sweep running again at the next pass.
+// The leaf reads under the switch the controller published with the config
+// (publishProgramStatusMode), so on->shadow, shadow->on and off->on heal
+// from readings taken under the new switch.
 
 // programCaptureDisarmer is a leaf backend's disarm sweep for a city whose
 // program-status switch is off: tmux's DisarmProgramCaptures.
@@ -159,8 +162,12 @@ func (cr *CityRuntime) healProgramCaptures(lane *runtimeInventoryLane, cfg *conf
 	}
 	if cfg.Session.ProgramStatusMode() == runtime.ProgramStatusOff {
 		if lane.captureSweptCfg != cfg {
-			lane.captureSweptCfg = cfg
 			report.captureHeals = disarmProgramCaptures(sp)
+			// Only a sweep that finished clean is done for this load: a
+			// failed one runs again at the next pass.
+			if len(report.captureHeals.errs) == 0 {
+				lane.captureSweptCfg = cfg
+			}
 		}
 	} else {
 		lane.captureSweptCfg = nil

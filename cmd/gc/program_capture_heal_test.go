@@ -174,11 +174,51 @@ func TestInventoryLaneDisarmSweepsOncePerConfigLoadWhenSwitchOff(t *testing.T) {
 	}
 
 	sweepErr = errors.New("tmux: boom")
-	if r := pass(&config.City{}); runs != 3 || len(r.captureHeals.errs) != 1 || !strings.Contains(r.captureHeals.String(), "tmux: boom") {
+	failing := &config.City{}
+	if r := pass(failing); runs != 3 || len(r.captureHeals.errs) != 1 || !strings.Contains(r.captureHeals.String(), "tmux: boom") {
 		t.Fatalf("a failed sweep: %d sweeps, tally %q", runs, r.captureHeals.String())
 	}
 	if !strings.Contains(stderr.String(), "program-status capture heal") || !strings.Contains(stderr.String(), "tmux: boom") {
 		t.Fatalf("a failed sweep was not logged: %q", stderr.String())
+	}
+	// A failed sweep is not done: the next pass of the same load retries it,
+	// until one finishes clean.
+	pass(failing)
+	if runs != 4 {
+		t.Fatalf("%d sweeps after a failed one, want the next pass to retry it", runs)
+	}
+	sweepErr = nil
+	pass(failing)
+	pass(failing)
+	if runs != 5 {
+		t.Fatalf("%d sweeps, want retries to stop once a sweep finishes clean", runs)
+	}
+}
+
+// Kills a heal step that keeps the switch it started with across reloads:
+// on->shadow keeps healing (the capture stays armed for advisory readings,
+// which the leaf now stamps shadow) and sweeps nothing, on->off sweeps once,
+// and off->on->off sweeps again.
+func TestInventoryLaneHealFollowsSwitchAcrossReloads(t *testing.T) {
+	runs := 0
+	var sweepErr error
+	sp := sweepLeaf{Provider: runtime.NewFake(), runs: &runs, err: &sweepErr}
+	lane := &runtimeInventoryLane{stderr: &strings.Builder{}, logPrefix: "gc"}
+	cr := &CityRuntime{}
+	pass := func(set string) {
+		var report inventoryPassReport
+		cr.healProgramCaptures(lane, &config.City{Session: config.SessionConfig{ProgramStatus: set}}, sp, &report)
+	}
+	for _, step := range []struct {
+		set   string
+		sweep int
+	}{
+		{"on", 0}, {"shadow", 0}, {"shadow", 0}, {"off", 1}, {"on", 1}, {"shadow", 1}, {"off", 2},
+	} {
+		pass(step.set)
+		if runs != step.sweep {
+			t.Fatalf("after a pass under %q: %d sweeps, want %d", step.set, runs, step.sweep)
+		}
 	}
 }
 

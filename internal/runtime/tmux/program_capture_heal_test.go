@@ -180,6 +180,9 @@ func (s *healServer) run(cmd []string) (string, error) {
 			return "", err
 		}
 		p := s.pane(target)
+		if p.dead {
+			return "", fmt.Errorf("tmux: target pane has exited: %s", target)
+		}
 		for nonce := range s.taps {
 			if strings.HasSuffix(nonce, "."+p.id) {
 				delete(s.taps, nonce)
@@ -416,19 +419,27 @@ func TestHealDisarmsWhenSwitchOff(t *testing.T) {
 	}
 }
 
-func TestDisarmSweepDisarmsOnlyOurLivePanes(t *testing.T) {
+func TestDisarmSweepDisarmsOnlyOurPanes(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	liveTap := &healModelPane{session: "a", window: "@1", id: "%1", tap: "l1ve.%1", pipe: true, record: "v1|x"}
 	lostTap := &healModelPane{session: "b", window: "@2", id: "%2", tap: "l0st.%2", pipe: true}
 	inherited := &healModelPane{session: "c", window: "@3", id: "%3", tap: "gl0bal.%42", pipe: true}
-	dead := &healModelPane{session: "d", window: "@4", id: "%4", tap: "d3ad.%4", dead: true}
+	// A dead pane whose tap still runs: its options are unset, and its pipe,
+	// which pipe-pane refuses to touch on a dead pane, is left alone.
+	dead := &healModelPane{session: "d", window: "@4", id: "%4", tap: "d3ad.%4", pipe: true, record: "v1|y", text: "t", dead: true}
 	never := &healModelPane{session: "e", window: "@5", id: "%5"}
-	server := &healServer{panes: []*healModelPane{liveTap, lostTap, inherited, dead, never}, taps: map[string]bool{"l1ve.%1": true}}
+	server := &healServer{panes: []*healModelPane{liveTap, lostTap, inherited, dead, never}, taps: map[string]bool{"l1ve.%1": true, "d3ad.%4": true}}
 	p := healProvider(server, &now)
 
 	n, err := p.DisarmProgramCaptures()
-	if err != nil || n != 2 {
-		t.Fatalf("DisarmProgramCaptures = %d, %v, want 2 disarmed", n, err)
+	if err != nil || n != 3 {
+		t.Fatalf("DisarmProgramCaptures = %d, %v, want 3 disarmed", n, err)
+	}
+	if dead.tap != "" || dead.record != "" || dead.text != "" {
+		t.Fatalf("dead pane: %+v, want its capture options unset", dead)
+	}
+	if got := callsContaining(server.calls, "pipe-pane"); len(got) != 1 || !slices.Contains(got[0], "=a:@1.%1") {
+		t.Fatalf("pipe-pane calls %q, want only the live tap's pane closed", got)
 	}
 	if liveTap.tap != "" || liveTap.record != "" || liveTap.pipe {
 		t.Fatalf("live tap's pane: %+v, want disarmed with its pipe closed", liveTap)
@@ -436,8 +447,8 @@ func TestDisarmSweepDisarmsOnlyOurLivePanes(t *testing.T) {
 	if lostTap.tap != "" || !lostTap.pipe {
 		t.Fatalf("lost tap's pane: %+v, want its options unset and its (maybe foreign) pipe left open", lostTap)
 	}
-	if inherited.tap != "gl0bal.%42" || dead.tap != "d3ad.%4" {
-		t.Fatalf("the sweep touched an inherited value or a dead pane: %+v %+v", inherited, dead)
+	if inherited.tap != "gl0bal.%42" {
+		t.Fatalf("the sweep touched an inherited value: %+v", inherited)
 	}
 	if got := len(callsContaining(server.calls, "list-panes")); got != 1 {
 		t.Fatalf("the sweep listed panes %d times, want once", got)

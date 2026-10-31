@@ -92,8 +92,8 @@ type runtimeInventoryLane struct {
 	envWindowRefreshes int
 	lastSignature      string
 	alerted            map[string]time.Time
-	// captureSweptCfg is the config the last program-capture disarm sweep
-	// ran under (healProgramCaptures): one sweep per config load.
+	// captureSweptCfg is the config the last clean program-capture disarm
+	// sweep ran under (healProgramCaptures): one clean sweep per config load.
 	captureSweptCfg *config.City
 	// poolDeathPrev holds the on_death handler names listed and not yet
 	// proven gone (detectPoolDeathEdges).
