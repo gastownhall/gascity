@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"maps"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // TestOneFailedStartDoesNotLoseTheSession is mc-ydyvj (found in #7565's max
@@ -60,6 +64,39 @@ func TestFailedRelaunchOfAnAbandonedStartSurvivesTheReap(t *testing.T) {
 	var log bytes.Buffer
 	if n := reapStaleSessionBeads(env.city, env.store, testSeatWork(env.city, env.cfg, env.store, nil), env.sp, env.dt, nil, env.clk, &log); n != 0 {
 		t.Fatalf("a failed relaunch of an abandoned start lost the session: %s", log.String())
+	}
+}
+
+// TestSweepStopOfAnAbandonedStartKeepsItForTheNextStart (PR #8369 review): a
+// city stop cancels its controller's starts, so a start the stop catches
+// after its runtime came up never commits, and the stop sweep finds that
+// runtime under a row still reading creating. The sweep stops the runtime and
+// writes nothing, so the row keeps PreWake's in-flight marker: the next
+// start's stuck-creating reap, which runs before the heal, keeps it
+// (mc-5a1ma), and the next pass relaunches it.
+func TestSweepStopOfAnAbandonedStartKeepsItForTheNextStart(t *testing.T) {
+	env, row := abandonedRestart(t)
+	delete(env.sp.StartErrors, "worker")
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatal(err)
+	}
+	before := mustGetBead(t, env.store, row.ID).Metadata
+	var stdout, stderr bytes.Buffer
+	markCityStopSessionSleepReason(sessionFrontDoor(env.store), &stderr)
+	targets := stopTargetsForNames([]string{"worker"}, env.cfg, env.store, &stderr)
+	if stopped := stopTargetsBounded(targets, env.cfg, env.store, env.sp, events.Discard, "gc", &stdout, &stderr); stopped != 1 || env.sp.IsRunning("worker") {
+		t.Fatalf("the stop sweep stopped %d, running %v; want the abandoned start's runtime stopped\nstderr %s", stopped, env.sp.IsRunning("worker"), stderr.String())
+	}
+	if after := mustGetBead(t, env.store, row.ID).Metadata; !maps.Equal(after, before) {
+		t.Fatalf("the stop wrote the abandoned start's row: %v, want it unchanged %v", after, before)
+	}
+	env.clk.Advance(5 * time.Second)
+	var log bytes.Buffer
+	if n := reapStaleSessionBeads(env.city, env.store, testSeatWork(env.city, env.cfg, env.store, nil), env.sp, env.dt, nil, env.clk, &log); n != 0 {
+		t.Fatalf("the next start's reap closed %d row(s) the stop left creating: %s", n, log.String())
+	}
+	if woken := env.reconcile([]beads.Bead{mustGetBead(t, env.store, row.ID)}); woken != 1 || !env.sp.IsRunning("worker") {
+		t.Fatalf("the next pass woke %d, running %v; want the abandoned start relaunched\nstderr %s", woken, env.sp.IsRunning("worker"), env.stderr.String())
 	}
 }
 

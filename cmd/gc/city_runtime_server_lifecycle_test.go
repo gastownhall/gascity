@@ -201,10 +201,12 @@ type forceLifecycleProvider struct {
 	// moments and the gap between them is what used to make this test flaky:
 	// enqueuePreparedStartWaveForCity runs the provider Start, then commits
 	// the session's creating -> active transition, and only then releases the
-	// tracker. A stop that lands in the gap is rejected by the session state
-	// machine ("state \"creating\" does not accept command \"suspend\""), so
-	// the late runtime survives a shutdown the test expected to tear it down.
-	// Waiting on the tracker puts the second sweep strictly after the commit.
+	// tracker. A sweep stop that lands in the gap now tears the runtime down
+	// through Manager.Suspend's sweep-only creating latitude, writing nothing
+	// to the row, which stays its start's; this test still waits out the gap
+	// so the second sweep stops a committed row, the ordinary path (a sweep
+	// stop of a row still reading creating is
+	// TestCityRuntimeForceShutdownStopsALateStartItCanceled's).
 	awaitAsyncStart func() bool
 }
 
@@ -271,8 +273,9 @@ func (p *forceLifecycleProvider) ListRunning(prefix string) ([]string, error) {
 		}
 		// Provider Start has returned; the session's creating -> active commit
 		// has not necessarily landed yet. Wait for the whole async-start
-		// goroutine so the second sweep stops a session the state machine will
-		// actually accept a stop for.
+		// goroutine so the second sweep stops a committed row, the ordinary
+		// path (a sweep stop of a row still reading creating is
+		// TestCityRuntimeForceShutdownStopsALateStartItCanceled's).
 		if awaitAsyncStart != nil && !awaitAsyncStart() {
 			p.record("asyncStartWaitTimedOut")
 		}
