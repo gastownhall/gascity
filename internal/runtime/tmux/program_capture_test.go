@@ -87,7 +87,7 @@ func stagedRand(t *testing.T, line string) string {
 }
 
 func wantTapCommand(rand, app string) string {
-	cmd := "exec " + testCompanion + " tap -x " + testTmuxBin + " -S #{socket_path} -t #{pane_id} -n " + rand
+	cmd := "exec " + testCompanion + " tap -t #{pane_id} -n " + rand + " -x " + testTmuxBin + " -S #{socket_path}"
 	if app != "" {
 		cmd += " -a " + app
 	}
@@ -577,7 +577,7 @@ func TestTapCommandEscapesFormatAndShellCharacters(t *testing.T) {
 		app:        "claude-code",
 		rand:       "r_1-x",
 	}
-	want := `exec '/opt/a##b/my bin/gc-osc7501' tap -x /usr/bin/tmux -S #{socket_path} -t #{pane_id} -n r_1-x -a claude-code`
+	want := `exec '/opt/a##b/my bin/gc-osc7501' tap -t #{pane_id} -n r_1-x -x /usr/bin/tmux -S #{socket_path} -a claude-code`
 	if got := p.tapCommand(); got != want {
 		t.Fatalf("tapCommand = %q, want %q", got, want)
 	}
@@ -594,5 +594,59 @@ func TestInvalidAppIsNeverArmed(t *testing.T) {
 	}
 	if !strings.Contains(warnings.String(), "app") {
 		t.Fatalf("bad app not logged: %q", warnings.String())
+	}
+}
+
+// An unarmed respawn while the switch is shadow or on (the provider declares
+// no capture, or the capability gate refuses) removes the previous
+// incarnation's capture in the respawn's own list, after the marker: the
+// nonce, the record and then the pipe, so the old tap can never publish the
+// new program under its nonce.
+func TestUnarmedRespawnUnderLiveSwitchRemovesCapture(t *testing.T) {
+	for _, mode := range []runtime.ProgramStatusMode{runtime.ProgramStatusShadow, runtime.ProgramStatusOn} {
+		for name, arm := range map[string]runtime.ProgramStatusArm{
+			"undeclared":   {},
+			"gate refused": {Capture: true},
+		} {
+			t.Run(string(mode)+"/"+name, func(t *testing.T) {
+				tm, rec, _, _ := captureTestTmux(t)
+				tm.cfg.ProgramStatus = mode
+				tm.capture.probe = func() (captureCapability, error) {
+					return captureCapability{}, errors.New("companion missing")
+				}
+				if err := tm.respawnPaneWithWorkDir("%5", "/w", "codex", arm); err != nil {
+					t.Fatalf("respawnPaneWithWorkDir: %v", err)
+				}
+				want := append([]string{"-u"}, tmuxArgvList([][]string{
+					{"respawn-pane", "-k", "-t", "%5", "-c", "/w", "codex"},
+					{"display-message", "-p", "-t", "%5", "#{pane_id}"},
+					{"set-option", "-pu", "-t", "%5", programTapOption},
+					{"set-option", "-pu", "-t", "%5", programStatusOption},
+					{"set-option", "-pu", "-t", "%5", programTextOption},
+					{"pipe-pane", "-t", "%5"},
+				})...)
+				if len(rec.calls) != 1 || !slices.Equal(rec.calls[0], want) {
+					t.Fatalf("respawn calls\n got %q\nwant [%q]", rec.calls, want)
+				}
+			})
+		}
+	}
+}
+
+// A respawn that ran but whose capture removal failed is still a respawn:
+// the failure is logged, never returned.
+func TestUnarmedRespawnDisarmFailureKeepsTheRespawn(t *testing.T) {
+	tm, rec, warnings, _ := captureTestTmux(t)
+	tm.cfg.ProgramStatus = runtime.ProgramStatusOn
+	rec.errs = []error{&tmuxOutputError{Stdout: "%5", Err: errors.New("tmux pipe-pane: target pane has exited")}}
+	if err := tm.respawnPaneWithWorkDir("%5", "", "codex", runtime.ProgramStatusArm{}); err != nil {
+		t.Fatalf("respawn whose disarm failed = %v, want nil (the marker proves it respawned)", err)
+	}
+	if !strings.Contains(warnings.String(), "removing program-status capture") {
+		t.Fatalf("disarm failure not logged: %q", warnings.String())
+	}
+	rec.errs, rec.idx = []error{ErrSessionNotFound}, 0
+	if err := tm.respawnPaneWithWorkDir("%5", "", "codex", runtime.ProgramStatusArm{}); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("err = %v, want the respawn's own failure", err)
 	}
 }

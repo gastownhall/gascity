@@ -28,6 +28,7 @@ func (cr *CityRuntime) publishRuntimeConfig(
 	cr.publishedRev = revision
 	cr.serviceStateMu.Unlock()
 	cr.demandSnapshot = nil
+	publishProgramStatusMode(cfg, sp)
 	return true
 }
 

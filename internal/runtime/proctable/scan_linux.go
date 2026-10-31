@@ -74,7 +74,7 @@ func IsScanRoot(pid int) bool {
 	if sessionID == "" {
 		return false
 	}
-	if isInfrastructureProcess(scanRoot, pid) {
+	if isInfrastructureProcess(scanRoot, pid) || isProgramStatusRelay(scanRoot, pid) {
 		return false
 	}
 	isRoot, err := isRootWithSessionID(scanRoot, pid, sessionID)
@@ -93,13 +93,30 @@ func scanWithRootSince(root, id string, incarnationStartedAt time.Time) ([]runti
 // reparented to init or subreaperPID (OrphanCandidate), each decided on its
 // stat before anything else is read. A stat that cannot be read is the
 // entry's error, as an unreadable owner is: the scan stays fail-closed.
+//
+// A process whose parent is the program-status relay is decided on the
+// relay's parent, as the scan reports it (see effectiveParent): an orphaned
+// relay's program is the orphan. Each parent's relay check is read once per
+// scan.
 func scanOrphanCandidatesWithRoot(root string, subreaperPID int) ([]runtime.LiveRuntime, error) {
+	relays := make(map[int]bool)
 	return scanEntries(root, "", time.Time{}, func(pid int) (bool, error) {
 		ppid, ok, err := readParentPID(filepath.Join(root, strconv.Itoa(pid), "stat"))
 		if err != nil || !ok {
 			return false, err // a vanished process is no candidate; a failed read is the entry's error
 		}
-		return OrphanCandidate(ppid, subreaperPID), nil
+		if OrphanCandidate(ppid, subreaperPID) {
+			return true, nil
+		}
+		relay, seen := relays[ppid]
+		if !seen {
+			relay = ppid > 1 && isProgramStatusRelay(root, ppid)
+			relays[ppid] = relay
+		}
+		if !relay {
+			return false, nil
+		}
+		return OrphanCandidate(effectiveParent(root, ppid), subreaperPID), nil
 	})
 }
 
@@ -201,6 +218,11 @@ func scanProcEntry(root, entryName, id string, incarnationStartedAt time.Time) (
 	if isInfrastructureProcess(root, pid) {
 		return runtime.LiveRuntime{}, false, nil
 	}
+	// The program-status relay is looked through (IsProgramStatusRelayArgv):
+	// the program it runs is reported in its place.
+	if isProgramStatusRelay(root, pid) {
+		return runtime.LiveRuntime{}, false, nil
+	}
 	rootProcess, err := isRootWithSessionID(root, pid, sessionID)
 	if err != nil {
 		return runtime.LiveRuntime{}, false, fmt.Errorf("checking root for pid %d: %w", pid, err)
@@ -214,13 +236,17 @@ func scanProcEntry(root, entryName, id string, incarnationStartedAt time.Time) (
 		city = env["GC_CITY"]
 	}
 	ppid, _, startIdentity, _, _ := readProcStatIdentity(filepath.Join(root, entryName, "stat"))
+	ppid = effectiveParent(root, ppid)
 	comm, _ := os.ReadFile(filepath.Join(root, entryName, "comm"))
 	return runtime.LiveRuntime{
 		SessionID: sessionID,
 		City:      city,
 		Epoch:     epoch,
 		PID:       pid,
-		PPID:      ppid,
+		// A relay's program reports the relay's parent (effectiveParent), so
+		// it reads as the relay itself would have: owned while the relay's
+		// tmux server is its parent, an orphan once the relay is adopted.
+		PPID: ppid,
 		// Read from the SAME ppid that is reported above, so a caller fencing
 		// on this field is fencing on the parent it was told about. A pid <= 1
 		// parent is init or an unreadable stat, never the provider's server, so
@@ -623,10 +649,32 @@ func isRootWithSessionID(root string, pid int, sessionID string) (bool, error) {
 	case err != nil:
 		return false, err
 	}
-	if parentEnv["GC_SESSION_ID"] == sessionID && isInfrastructureProcess(root, ppid) {
+	if parentEnv["GC_SESSION_ID"] == sessionID && (isInfrastructureProcess(root, ppid) || isProgramStatusRelay(root, ppid)) {
 		return true, nil
 	}
 	return parentEnv["GC_SESSION_ID"] != sessionID, nil
+}
+
+// isProgramStatusRelay reports whether pid is gc's program-status relay
+// (IsProgramStatusRelayArgv). An unreadable argv reports false.
+func isProgramStatusRelay(root string, pid int) bool {
+	argv, err := readArgv(root, pid)
+	return err == nil && IsProgramStatusRelayArgv(argv)
+}
+
+// effectiveParent is the parent the scan reports for a process whose parent
+// is ppid: ppid itself, or, when ppid is the program-status relay, the
+// relay's own parent (0 when it cannot be read). The relay is looked
+// through, so its program stands where the relay stood.
+func effectiveParent(root string, ppid int) int {
+	if ppid <= 1 || !isProgramStatusRelay(root, ppid) {
+		return ppid
+	}
+	grand, ok, err := readParentPID(filepath.Join(root, strconv.Itoa(ppid), "stat"))
+	if err != nil || !ok {
+		return 0
+	}
+	return grand
 }
 
 // isInfrastructureProcess reports whether pid's comm names infrastructure (a

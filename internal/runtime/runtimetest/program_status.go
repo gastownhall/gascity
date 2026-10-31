@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,6 +77,16 @@ type skipError struct{ reason string }
 func (e skipError) Error() string { return "skipped: " + e.reason }
 
 func skip(reason string) error { return skipError{reason} }
+
+// skipUnchecked is nil when every part of a case ran, else a skip naming the
+// parts its fixtures could not run: a case that checked only part of its
+// claim reports a skip, never a pass.
+func skipUnchecked(unchecked []string) error {
+	if len(unchecked) == 0 {
+		return nil
+	}
+	return skip("unchecked: " + strings.Join(unchecked, "; "))
+}
 
 // programStatusCases are PS-001…PS-014 in order.
 var programStatusCases = []programStatusCase{
@@ -220,7 +231,7 @@ func checkPS001(t *testing.T, f ProgramStatusFixtures) error {
 	}
 	on := f.Armed(t, runtime.ProgramStatusOn, "report state=working:app=psdemo")
 	if on.SetMode == nil {
-		return nil
+		return skipUnchecked([]string{"no set-mode hook: a valid session flipped off"})
 	}
 	if _, err := readValid(on, "switch on", runtime.ProgramWorking); err != nil {
 		return err
@@ -282,7 +293,7 @@ func checkPS003(t *testing.T, f ProgramStatusFixtures) error {
 		return wantSessionNotFound("read of a missing session", err)
 	}
 	if f.Unarmed == nil {
-		return nil
+		return skipUnchecked([]string{"no unarmed-session fixture: an unarmed pane reads not_armed"})
 	}
 	u := f.Unarmed(t, runtime.ProgramStatusOn, "report state=working")
 	_, err := readWant(u, "unarmed pane", runtime.ProgramStatusNotArmed)
@@ -304,7 +315,7 @@ func checkPS004(t *testing.T, f ProgramStatusFixtures) error {
 		return fmt.Errorf("probe-gated, no relay: %+v, want Probed", r)
 	}
 	if f.Relayed == nil {
-		return nil
+		return skipUnchecked([]string{"no relayed-session fixture: a probe-gated program reports under the relay"})
 	}
 	relayed := f.Relayed(t, runtime.ProgramStatusOn, "term bel", "probe-gated", "report state=working")
 	_, err = readValid(relayed, "probe-gated under the relay", runtime.ProgramWorking)
@@ -333,11 +344,14 @@ func checkPS005(t *testing.T, f ProgramStatusFixtures) error {
 	if r.Nonce == old.Nonce {
 		return fmt.Errorf("after respawn: nonce %q unchanged", r.Nonce)
 	}
+	var unchecked []string
 	if s.PublishStale != nil {
 		s.PublishStale(t)
 		if _, err := readWant(s, "late write from the old incarnation", runtime.ProgramStatusSilent); err != nil {
 			return err
 		}
+	} else {
+		unchecked = append(unchecked, "no publish-stale hook: a late write from the old incarnation")
 	}
 	s.Emit(t, "report state=working")
 	r, err = readValid(s, "new incarnation's report", runtime.ProgramWorking)
@@ -350,7 +364,7 @@ func checkPS005(t *testing.T, f ProgramStatusFixtures) error {
 	if r.AdvancedPast(old.Baseline()) {
 		return fmt.Errorf("a baseline from the old incarnation credited %+v", r)
 	}
-	return nil
+	return skipUnchecked(unchecked)
 }
 
 // PS-006: reader death reads reader_lost, whether the pipe closed or the
@@ -359,7 +373,7 @@ func checkPS006(t *testing.T, f ProgramStatusFixtures) error {
 	if f.Armed == nil {
 		return skip("no armed-session fixture")
 	}
-	ran := false
+	var unchecked []string
 	for _, death := range []struct {
 		label string
 		hook  func(ProgramStatusSession) func(*testing.T)
@@ -370,18 +384,15 @@ func checkPS006(t *testing.T, f ProgramStatusFixtures) error {
 		s := f.Armed(t, runtime.ProgramStatusOn, "report state=working")
 		hook := death.hook(s)
 		if hook == nil {
+			unchecked = append(unchecked, "no hook for reader death by "+death.label)
 			continue
 		}
-		ran = true
 		hook(t)
 		if _, err := readWant(s, death.label, runtime.ProgramStatusReaderLost); err != nil {
 			return err
 		}
 	}
-	if !ran {
-		return skip("no reader-death hook")
-	}
-	return nil
+	return skipUnchecked(unchecked)
 }
 
 // PS-007: pane death reads exited, even under a working record, and keeps
@@ -618,7 +629,10 @@ func checkPS014(t *testing.T, f ProgramStatusFixtures) error {
 	}
 
 	s := f.Armed(t, runtime.ProgramStatusOn, "report state=working")
-	if s.ClosePipe != nil {
+	var unchecked []string
+	if s.ClosePipe == nil {
+		unchecked = append(unchecked, "no close-pipe hook: heal re-arms a closed pipe")
+	} else {
 		s.ClosePipe(t)
 		if _, err := readWant(s, "pipe closed", runtime.ProgramStatusReaderLost); err != nil {
 			return err
@@ -632,7 +646,7 @@ func checkPS014(t *testing.T, f ProgramStatusFixtures) error {
 		}
 	}
 	if s.SetMode == nil {
-		return nil
+		return skipUnchecked(append(unchecked, "no set-mode hook: heal disarms when the switch goes off"))
 	}
 	s.SetMode(t, runtime.ProgramStatusOff)
 	if err := heal(s, "switch off", runtime.ProgramStatusArm{}, runtime.ProgramCaptureDisarmed); err != nil {
@@ -642,6 +656,8 @@ func checkPS014(t *testing.T, f ProgramStatusFixtures) error {
 		return err
 	}
 	s.SetMode(t, runtime.ProgramStatusOn)
-	_, err := readWant(s, "disarmed, switch back on", runtime.ProgramStatusNotArmed)
-	return err
+	if _, err := readWant(s, "disarmed, switch back on", runtime.ProgramStatusNotArmed); err != nil {
+		return err
+	}
+	return skipUnchecked(unchecked)
 }

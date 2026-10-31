@@ -1,5 +1,7 @@
 package proctable
 
+import "path/filepath"
+
 // ManagedDoltScopeWatchdogVerb is the argv[1] re-exec marker of gc's managed
 // Dolt scope watchdog (cmd/gc/dolt_scope_watchdog.go).
 const ManagedDoltScopeWatchdogVerb = "__gc-managed-dolt-scope-watchdog"
@@ -76,4 +78,23 @@ func RootStartIdentity(pid int) string {
 		return ""
 	}
 	return rootStartIdentity(pid)
+}
+
+// ProgramStatusCompanionName and ProgramStatusRelayVerb are argv[0]'s base
+// name and argv[1] of gc's program-status relay (`gc-osc7501 relay -- argv`;
+// programstatus.CompanionName, duplicated here and pinned equal by a test).
+const (
+	ProgramStatusCompanionName = "gc-osc7501"
+	ProgramStatusRelayVerb     = "relay"
+)
+
+// IsProgramStatusRelayArgv reports whether argv is gc's program-status relay.
+// The relay runs its program on a pty of its own, in a session and process
+// group of its own, so the scan looks through it: the relay is never a root,
+// and the program it runs is the root in its place, whose own process group
+// a kill of the root signals. Reporting the relay instead would signal only
+// the relay's group, and a program that ignores the relay's hangup outlives
+// it.
+func IsProgramStatusRelayArgv(argv []string) bool {
+	return len(argv) > 1 && filepath.Base(argv[0]) == ProgramStatusCompanionName && argv[1] == ProgramStatusRelayVerb
 }
