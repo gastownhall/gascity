@@ -84,9 +84,11 @@ go_test(
         "escalate_script_test.go",
         "pack_assets_test.go",
         "pack_formulas_test.go",
+        "pack_formulas_worktree_anchor_test.go",
         "pack_orders_test.go",
         "pack_prompt_bead_ids_test.go",
         "testenv_import_test.go",
+        "workspace_setup_worktree_test.go",
     ],
     data = glob(
         ["**"],
