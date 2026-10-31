@@ -11,7 +11,7 @@ description: "Every gc command, flag, and example, generated from the CLI defini
 |------|------|---------|-------------|
 | `--city` | string |  | path to the city directory (default: walk up from cwd) |
 | `--city-name` | string |  | remote city name for --city-url (does not overload --city) |
-| `--city-url` | string |  | operate a REMOTE city at this base URL (https; requires --city-name) |
+| `--city-url` | string |  | operate a REMOTE city at this base URL (https, or http on a loopback host; requires --city-name). A remote target is served by the API, so --json prints the API rendering where a command has two (see gc session list --help) |
 | `--context` | string |  | operate the REMOTE city named by this context (~/.gc/contexts.toml) |
 | `--json-schema` | string |  | emit JSON Schema for this command; optional value: result or failure |
 | `--rig` | string |  | rig name or path (default: discover from cwd) |
@@ -4559,6 +4559,21 @@ gc session kill <session-id-or-alias> [flags]
 ## gc session list
 
 List all chat sessions. By default shows active and suspended sessions.
+
+With --json the output is one JSON document that validates against
+"gc session list --json-schema=result". It has one of two renderings, and
+the route a command takes decides which one it gets:
+
+  - Local rendering (a supervisor-hosted city, a city with no reachable
+    API, or GC_NO_API set for a local target; a remote target rejects
+    GC_NO_API): filters, sessions and summary. Each row carries closed, and
+    agent_name when the session has one, and no liveness.
+  - API rendering (a remote target such as --city-url, a standalone
+    controller's [api] port, or a supervisor serving a city that has no
+    controller): _cache_age_s and sessions. Each row carries running, and no
+    agent_name or closed.
+
+Both carry schema_version "1" and ok true, and an empty list renders as [].
 
 ```
 gc session list [flags]

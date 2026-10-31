@@ -2262,6 +2262,43 @@ func TestProvider_RelaunchSuWrapsForLinuxUsername(t *testing.T) {
 	}
 }
 
+// A pane's pipe-pane survives respawn-pane -k, and `pipe-pane -o` toggles (it
+// closes an existing pipe). Relaunch re-runs the post-launch setup, so every
+// pipe-pane it issues must (re)open the pane log rather than toggle it, or
+// alternate relaunches would silently turn diagnostic logging off.
+func TestProvider_RelaunchKeepsPaneLogPipeOn(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "s", "s")
+	hasSessionAlive(fake, "s")
+
+	for i := 0; i < 2; i++ {
+		if err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent"}); err != nil {
+			t.Fatalf("Relaunch #%d: %v", i+1, err)
+		}
+	}
+
+	var pipes [][]string
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) > 1 && c.cmd[0] == "tmux" && c.cmd[1] == "pipe-pane" {
+			pipes = append(pipes, c.cmd)
+		}
+	}
+	if len(pipes) != 2 {
+		t.Fatalf("pipe-pane calls = %d (%v), want one per Relaunch", len(pipes), pipes)
+	}
+	for _, cmd := range pipes {
+		for _, arg := range cmd {
+			if arg == "-o" {
+				t.Errorf("pipe-pane cmd = %q uses -o, which toggles the pipe off on an already-piped pane", cmd)
+			}
+		}
+		if got := cmd[len(cmd)-1]; got != "cat >> /tmp/agent-output.log" {
+			t.Errorf("pipe-pane shell command = %q, want append to /tmp/agent-output.log", got)
+		}
+	}
+}
+
 // --- Test helpers ---
 
 func addRunningPod(fake *fakeK8sOps, name, sessionLabel string) { //nolint:unparam // name varies in future tests

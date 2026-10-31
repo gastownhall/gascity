@@ -245,6 +245,7 @@ go_test(
         "//test/toolhome",
         "@com_github_burntsushi_toml//:toml",
         "@com_github_go_sql_driver_mysql//:mysql",
+        "@com_github_santhosh_tekuri_jsonschema_v6//:jsonschema",
         "@net_pgregory_rapid//:rapid",
     ] + select({
         "@rules_go//go/platform:aix": [

@@ -7776,6 +7776,13 @@ func initEmptyArchiveRemote(t *testing.T, archiveRepo string, prevCount int) str
 	return remoteRepo
 }
 
+func initEmptyArchiveRemoteOnBranch(t *testing.T, archiveRepo string, prevCount int, branch string) string {
+	t.Helper()
+	remoteRepo := initEmptyArchiveRemote(t, archiveRepo, prevCount)
+	runGit(t, archiveRepo, "branch", "-m", branch)
+	return remoteRepo
+}
+
 // initSeedArchiveWithUnreachableRemote seeds the archive and adds an `origin`
 // that points at a nonexistent path, so any `git fetch`/`git push` fails.
 // Used by tests that specifically exercise the push-failure recovery paths:
@@ -8933,6 +8940,90 @@ func TestJsonlExportPushBootstrapCreatesRemoteMainWhenMissing(t *testing.T) {
 	}
 	if strings.Contains(string(stateData), `"pending_archive_push":true`) {
 		t.Fatalf("expected pending_archive_push to clear after bootstrap push, got:\n%s", stateData)
+	}
+}
+
+func TestJsonlExportPushUsesExistingArchiveBranch(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+
+	remoteRepo := initEmptyArchiveRemoteOnBranch(t, archiveRepo, 3, "archive")
+	writeMultiRecordDoltStub(t, binDir, 5)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+
+	localHead := runGitOut(t, archiveRepo, "rev-parse", "HEAD")
+	remoteHead := runGitOut(t, remoteRepo, "rev-parse", "refs/heads/archive")
+	if remoteHead != localHead {
+		t.Fatalf("remote archive branch = %s, want local HEAD %s", remoteHead, localHead)
+	}
+}
+
+func TestJsonlExportPushHonorsArchiveBranchOverride(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+
+	remoteRepo := initEmptyArchiveRemote(t, archiveRepo, 3)
+	writeMultiRecordDoltStub(t, binDir, 5)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["GC_JSONL_ARCHIVE_BRANCH"] = "archive-x"
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+
+	localHead := runGitOut(t, archiveRepo, "rev-parse", "HEAD")
+	remoteHead := runGitOut(t, remoteRepo, "rev-parse", "refs/heads/archive-x")
+	if remoteHead != localHead {
+		t.Fatalf("remote archive-x = %s, want local HEAD %s", remoteHead, localHead)
+	}
+	if branch := runGitOut(t, archiveRepo, "symbolic-ref", "--short", "HEAD"); branch != "main" {
+		t.Fatalf("local branch = %q, want main (override must not rename it)", branch)
+	}
+}
+
+func TestJsonlExportPushBootstrapFromDetachedHeadCreatesRemoteMain(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	remoteRepo := initEmptyArchiveRemote(t, archiveRepo, 3)
+	runGit(t, archiveRepo, "checkout", "-q", "--detach")
+	writeMultiRecordDoltStub(t, binDir, 5)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+
+	localHead := runGitOut(t, archiveRepo, "rev-parse", "HEAD")
+	remoteHead := runGitOut(t, remoteRepo, "rev-parse", "refs/heads/main")
+	if remoteHead != localHead {
+		t.Fatalf("remote main = %s, want local HEAD %s", remoteHead, localHead)
+	}
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got := state["consecutive_push_failures"]; got != nil && got != float64(0) {
+		t.Fatalf("consecutive_push_failures = %v, want unset or 0\nstate: %s", got, stateData)
 	}
 }
 
