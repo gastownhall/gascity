@@ -20,4 +20,15 @@ text. A read that cannot tell the current turn is an error, never an idle scan:
 a torn last record, or a truncated window holding no turn record or, in a
 Gemini JSONL file, no snapshot. `TurnScan.Open` means the transcript records
 the turn's start and no end; whether the agent is still running is the caller's
-call.
+call. `TurnScan.Stopped` is how an open turn ended if it stopped at a provider
+error it has not recovered from (Claude's pending API error): failed on that
+error, at the error, as the transcript records it once the next turn starts.
+The scan never ends the turn itself, since the agent may still be retrying.
+
+A failed turn carries the error it ended on (`ScannedTurn.Failure`), as its
+family recorded it: Claude's API error entry (`error`, `apiErrorStatus`, its
+text) and Codex's `task_complete` error (`codex_error_info`, the HTTP status
+a variant carries, `message`). Each family classes its own rate limit
+(`TurnFailure.RateLimited`: its rate-limit class, or HTTP 429); the text is
+cut to `MaxTurnFailureMessage` and never classified. Gemini transcripts record
+no failed turns.
