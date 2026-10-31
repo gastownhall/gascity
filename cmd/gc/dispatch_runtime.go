@@ -58,11 +58,47 @@ var (
 	// At the former 30s cap each graph hop could wait up to ~30s, so a
 	// multi-step workflow accumulated minutes of pure wake latency (the bulk of
 	// the TestGraphWorkflowSuccessPath flake). 5s keeps the loop responsive
-	// across hops while still backing off from the 1s base; the cost is one
-	// serve loop polling every 5s rather than 30s when a city is fully idle.
+	// across hops while still backing off from the 1s base. This is the
+	// responsive-tier cap; once the loop has been continuously empty for
+	// workflowServeDeepIdleThreshold sweeps it relaxes further to
+	// workflowServeDeepIdleSleep (see below), so a fully idle city eventually
+	// polls every 30s rather than every 5s.
 	// (Complementary to the wake-debounce coalescing below, which only helps
 	// the event-arrival path; a raw-bd-write close publishes no event.)
 	workflowServeMaxIdleSleep = 5 * time.Second
+	// workflowServeDeepIdleSleep is the sleep cap once the loop has been
+	// continuously empty for workflowServeDeepIdleThreshold consecutive sweeps.
+	// Each sweep runs the full work query — a shell that forks several
+	// `bd --readonly --sandbox ready` subprocesses (one per identity candidate
+	// plus two per routed target). At the 5s cap a fully idle city therefore
+	// pays that multi-fork scan ~12x/min per dispatcher forever; on a
+	// multi-dispatcher city this idle polling is the dominant residual store
+	// load behind gastownhall/gascity#2463 (measured: ~50 serve events/min per
+	// dispatcher, dolt pegged while the city was otherwise quiescent). The deep
+	// cap only engages after ~52s of continuous emptiness (the 1s/2s/4s ramp
+	// plus nine 5s sweeps), and any relevant event or non-empty drain resets
+	// idleSweeps to 0, restoring the responsive 1s→5s ladder while a workflow
+	// is in flight. The only cost is worst-case pickup latency for transitions
+	// that publish no city event (raw `bd` writes, see workflowServeMaxIdleSleep
+	// comment above) arriving after a sustained quiet period: ≤30s for the
+	// first hop, after which the loop is active again at 1–5s.
+	//
+	// Sustained transient work-query failures engage this deep tier too: a
+	// timed-out/saturated-store drain is downgraded to an empty sweep in
+	// runWorkflowServeFollow (it must not kill the long-running dispatcher), and
+	// the SessionWorkQueryFailed event it publishes is not workflowEventRelevant,
+	// so it does not reset idleSweeps. After ~52s of continuous failures the cap
+	// therefore stretches to 30s. This is deliberate, not incidental: each sweep
+	// is itself a multi-fork `bd ready` scan against the very store that is
+	// struggling, so backing off is load-shedding that helps a pegged store
+	// recover — the goal of #2463 — rather than hammering it 12x/min. The
+	// residual exposure is narrow: bead events published through normal paths
+	// still wake the loop immediately, so only work written by a raw `bd` write
+	// *during* an active outage is discovered up to 30s late instead of 5s.
+	workflowServeDeepIdleSleep = 30 * time.Second
+	// workflowServeDeepIdleThreshold is the consecutive-empty-sweep count at
+	// which the deep-idle cap engages. ≤0 disables deep idle entirely.
+	workflowServeDeepIdleThreshold = 12
 	// workflowServeWakeDebounce is the coalescing window opened once the first
 	// relevant event wakes the --follow loop. Additional buffered events that
 	// arrive during the window are drained and folded into the same wake so a
@@ -104,6 +140,14 @@ var (
 func followSleepDuration(idleSweeps int) time.Duration {
 	if idleSweeps <= 0 {
 		return workflowServeWakeSweepInterval
+	}
+	if workflowServeDeepIdleThreshold > 0 && idleSweeps >= workflowServeDeepIdleThreshold {
+		// Sustained emptiness: back off to the deep-idle cap (never below the
+		// responsive cap, in case a test or override inverts the two).
+		if workflowServeDeepIdleSleep > workflowServeMaxIdleSleep {
+			return workflowServeDeepIdleSleep
+		}
+		return workflowServeMaxIdleSleep
 	}
 	const maxShift = 30
 	shift := idleSweeps
