@@ -233,3 +233,39 @@ func TestDoSlingCityTargetIgnoresOtherSuspendedRig(t *testing.T) {
 		t.Errorf("SuspendedRig = %q, want empty for a city-scoped target", result.SuspendedRig)
 	}
 }
+
+func TestDoSlingWarnsRigSuspendedOnStart(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", SuspendedOnStart: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+	deps := suspensionTestDeps(t, cfg, runner)
+
+	result, err := DoSling(testOpts(a, suspensionTestBead), deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if result.SuspendedRig != "myrig" {
+		t.Errorf("SuspendedRig = %q, want %q for a rig with suspended_on_start and no runtime entry", result.SuspendedRig, "myrig")
+	}
+	assertSlingRouted(t, result, runner)
+}
+
+func TestTargetScopeSuspensionSkipsStateReadWithoutCityPath(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", SuspendedOnStart: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig"}
+	fs := fsys.NewFake()
+
+	city, rig := targetScopeSuspension(fs, SlingDeps{Cfg: cfg}, a)
+	if city || rig != "myrig" {
+		t.Errorf("targetScopeSuspension = (%v, %q), want (false, %q) from authored defaults", city, rig, "myrig")
+	}
+	if len(fs.Calls) != 0 {
+		t.Errorf("filesystem calls = %v, want none when CityPath is empty", fs.Calls)
+	}
+}
