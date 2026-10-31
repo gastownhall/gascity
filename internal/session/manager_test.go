@@ -6200,3 +6200,33 @@ func TestCloseRidesALifecycleWrite(t *testing.T) {
 		t.Fatalf("status %s, want closed", b.Status)
 	}
 }
+
+// TestManagerCloseStampsUsageCloseMarker: an operator close does not build its
+// terminal patch from ClosePatch, so it merges the usage close marker itself;
+// without it an operator-closed interval would never be accounted (#6672).
+func TestManagerCloseStampsUsageCloseMarker(t *testing.T) {
+	store := beads.NewMemStore()
+	mgr := newTestManager(t, store, runtime.NewFake())
+	closeAt := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
+	mgr.clk = &clock.Fake{Time: closeAt}
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: "/tmp", Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	closed, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status != "closed" {
+		t.Fatalf("status = %q, want closed", closed.Status)
+	}
+	if got := closed.Metadata["usage_close_pending"]; got != "true" {
+		t.Errorf("usage_close_pending = %q, want true", got)
+	}
+	if got := closed.Metadata["usage_closed_at"]; got != closeAt.Format(time.RFC3339Nano) {
+		t.Errorf("usage_closed_at = %q, want %q", got, closeAt.Format(time.RFC3339Nano))
+	}
+}

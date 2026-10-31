@@ -307,6 +307,10 @@ type Info struct {
 	// terminal session whose current interval is already accounted BEFORE issuing a
 	// per-session store Get.
 	UsageComputeEmittedAt string // usage_compute_emitted_at (raw)
+	// UsageClosePending is the RAW usage_close_pending metadata: "true" while a
+	// close's awake interval awaits the compute-usage lane. A reopened row keeps
+	// it, so the lane settles that interval from the open snapshot too.
+	UsageClosePending string // usage_close_pending (raw)
 	// StateReason is the RAW state_reason metadata. The pool sweep's
 	// post-create-protection window matches state_reason == "creation_complete".
 	StateReason string // state_reason (raw)
@@ -1778,6 +1782,7 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 		// named session's identifiers, on the incarnation this close stopped.
 		terminal := retiredIdentifiersPatch(b)
 		terminal["pin_awake"] = ""
+		maps.Copy(terminal, UsageClosePatch(m.now()))
 		terminal = CellInto(id, b.Metadata, ActorController, DispEvent{Kind: EvRetire}, m.now(), terminal)
 		// Past a kill fence: the operator's close ends the session a kill was
 		// tearing down, as it did before CommitClose.
@@ -2397,9 +2402,27 @@ func (m *Manager) PersistSessionKey(id, sessionKey string) error {
 // dedup cursor must live on the session bead, not in memory.
 const MetadataKeyInvocationUsageCursor = "invocation_usage_cursor"
 
+// MetadataKeyUsageClosePending marks a session row closed while it may still
+// hold an unaccounted awake interval ("true"); see UsageClosePatch.
+const MetadataKeyUsageClosePending = "usage_close_pending"
+
+// MetadataKeyUsageClosedAt is the close time (RFC3339Nano) that ends the
+// interval a pending usage close accounts; see UsageClosePatch.
+const MetadataKeyUsageClosedAt = "usage_closed_at"
+
+// MetadataKeyUsageClosedAwakeStartedAt is the awake_started_at of the interval
+// a pending usage close ended, kept by the row's reopen; see UsageReopenPatch.
+const MetadataKeyUsageClosedAwakeStartedAt = "usage_closed_awake_started_at"
+
+// MetadataKeyUsageClosedSessionKey is the session_key of the interval a pending
+// usage close ended, kept by the row's reopen; see UsageReopenPatch.
+const MetadataKeyUsageClosedSessionKey = "usage_closed_session_key"
+
 // PersistInvocationUsageCursor stores the invocation-usage telemetry cursor
 // on an existing session. Unlike PersistSessionKey it overwrites any
 // existing value — the cursor advances with every recorded invocation.
+// A closed session is accepted: the usage lane sweeps a closed row's last
+// interval, and its cursor must advance past the turns it billed.
 // Empty id or cursor is a no-op.
 func (m *Manager) PersistInvocationUsageCursor(id, cursor string) error {
 	cursor = strings.TrimSpace(cursor)
@@ -2407,7 +2430,7 @@ func (m *Manager) PersistInvocationUsageCursor(id, cursor string) error {
 		return nil
 	}
 	return withSessionMutationLock(id, func() error {
-		if _, _, err := m.sessionBead(id); err != nil {
+		if _, _, err := m.loadSessionBead(id, true); err != nil {
 			return err
 		}
 		if err := m.store.SetMetadata(id, MetadataKeyInvocationUsageCursor, cursor); err != nil {
