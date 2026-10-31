@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
 
@@ -905,11 +906,15 @@ type RigListItem struct {
 	// Path is the absolute filesystem path to the rig directory, resolved from
 	// city.toml by resolveRigPaths. Always absolute in output, regardless of
 	// the relative form stored in city.toml.
-	Path                string   `json:"path"`
-	Prefix              string   `json:"prefix"`
-	DefaultBranch       string   `json:"default_branch,omitempty"`
-	HQ                  bool     `json:"hq"`
-	Suspended           bool     `json:"suspended"`
+	Path          string `json:"path"`
+	Prefix        string `json:"prefix"`
+	DefaultBranch string `json:"default_branch,omitempty"`
+	HQ            bool   `json:"hq"`
+	Suspended     bool   `json:"suspended"`
+	// SuspendedAt is the UTC instant an explicitly suspended rig was
+	// suspended (RFC3339). Empty when the rig is not explicitly suspended,
+	// including a rig that is cold only via suspended_on_start.
+	SuspendedAt         string   `json:"suspended_at,omitempty"`
 	Running             bool     `json:"running"`
 	DefaultSlingTarget  string   `json:"default_sling_target,omitempty"`
 	DefaultSlingTargets []string `json:"default_sling_targets,omitempty"`
@@ -989,12 +994,17 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 		if jsonOutput {
 			running = rigHasRunningAgent(cfg, cfg.Rigs[i].Name, sp)
 		}
+		suspendedAt := ""
+		if at, ok := suspensionstate.RigSuspendedAt(suspState, cfg.Rigs[i].Name); ok {
+			suspendedAt = at.UTC().Format(time.RFC3339)
+		}
 		result.Rigs = append(result.Rigs, RigListItem{
 			Name:                cfg.Rigs[i].Name,
 			Path:                cfg.Rigs[i].Path,
 			Prefix:              cfg.Rigs[i].EffectivePrefix(),
 			DefaultBranch:       cfg.Rigs[i].EffectiveDefaultBranch(),
 			Suspended:           suspNames[cfg.Rigs[i].Name],
+			SuspendedAt:         suspendedAt,
 			Running:             running,
 			DefaultSlingTarget:  cfg.Rigs[i].DefaultSlingTarget,
 			DefaultSlingTargets: cfg.Rigs[i].DefaultSlingTargets,

@@ -16,7 +16,7 @@
 //
 //	{
 //	  "city":   { "suspended": true },
-//	  "rigs":   { "alpha": { "suspended": false } },
+//	  "rigs":   { "alpha": { "suspended": true, "suspended_at": "2026-05-20T..." } },
 //	  "agents": { "rig/worker": { "suspended": true } },
 //	  "updated_at": "2026-05-20T..."
 //	}
@@ -62,6 +62,11 @@ import (
 // values on write.
 type Override struct {
 	Suspended *bool `json:"suspended,omitempty"`
+	// SuspendedAt is the UTC instant this scope last transitioned to an
+	// explicit suspend. Resume clears it. A file written before the field
+	// existed leaves it empty; [RigSuspendedAt] then falls back to the
+	// document's UpdatedAt.
+	SuspendedAt *time.Time `json:"suspended_at,omitempty"`
 }
 
 // State is the runtime suspension state persisted to disk.
@@ -244,9 +249,25 @@ func EffectiveRigSuspended(st State, name string, suspendedOnStart bool) bool {
 // nil to clear (effective state defers to SuspendedOnStart); pass
 // &true / &false to record the explicit user choice. The entry is
 // removed when no overrides remain so the JSON file stays minimal.
+//
+// Transitioning to suspended stamps SuspendedAt. A repeat of an
+// existing explicit suspend keeps the stamp already on the entry.
+// Resume and clear drop it.
 func SetRig(st *State, name string, suspended *bool) {
-	r := st.Rigs[name]
+	var r Override
+	if st.Rigs != nil {
+		r = st.Rigs[name]
+	}
+	wasSuspended := r.Suspended != nil && *r.Suspended
 	r.Suspended = suspended
+	if suspended != nil && *suspended {
+		if !wasSuspended || r.SuspendedAt == nil || r.SuspendedAt.IsZero() {
+			now := time.Now().UTC()
+			r.SuspendedAt = &now
+		}
+	} else {
+		r.SuspendedAt = nil
+	}
 	if r == (Override{}) {
 		delete(st.Rigs, name)
 		return
@@ -255,6 +276,26 @@ func SetRig(st *State, name string, suspended *bool) {
 		st.Rigs = make(map[string]Override)
 	}
 	st.Rigs[name] = r
+}
+
+// RigSuspendedAt reports when an explicitly suspended rig was suspended.
+// The per-rig SuspendedAt stamp wins. A legacy explicit suspend that has
+// no stamp falls back to the document UpdatedAt, which is at least as new
+// as the write that recorded the suspend. A rig that is not explicitly
+// suspended — including one that is cold only because of suspended_on_start
+// — has no instant and returns false.
+func RigSuspendedAt(st State, name string) (time.Time, bool) {
+	ov, ok := st.Rigs[name]
+	if !ok || ov.Suspended == nil || !*ov.Suspended {
+		return time.Time{}, false
+	}
+	if ov.SuspendedAt != nil && !ov.SuspendedAt.IsZero() {
+		return ov.SuspendedAt.UTC(), true
+	}
+	if !st.UpdatedAt.IsZero() {
+		return st.UpdatedAt.UTC(), true
+	}
+	return time.Time{}, false
 }
 
 // SetRigSuspended is a convenience that records an explicit rig
