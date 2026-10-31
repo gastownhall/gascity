@@ -1012,6 +1012,7 @@ go_test(
         "bd_passthrough_trims_test.go",
         "bd_relocated_classes_test.go",
         "bd_split_allowlist_realbd_integration_test.go",
+        "bd_split_graph_judge_realbd_integration_test.go",
         "bd_split_graph_judge_test.go",
         "bd_split_judges_test.go",
         "bd_testscript_test.go",
