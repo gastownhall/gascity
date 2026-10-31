@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/extmsg"
 )
 
@@ -120,5 +121,94 @@ func TestPrintExtMsgBindingOutputs(t *testing.T) {
 		if !strings.Contains(human, want) {
 			t.Fatalf("human output = %q, want it to contain %q", human, want)
 		}
+	}
+}
+
+// TestExtMsgClientRoutesToSupervisor pins the routing decision for the
+// extmsg verbs, which have no local fallback: a live controller of unknown
+// hosting mode (a supervisor predating identify) with no standalone [api]
+// port, and a supervisor-hosted city whose supervisor requires city grants,
+// resolve the supervisor-managed client, where apiClient would return nil
+// for a local fallback these verbs do not have. A controller that identifies
+// as standalone is never sent to the supervisor, and each refusal names the
+// routing reason. The supervisor's grant requirement is never consulted on
+// this route. (ga-qr4s5g, PR #7825)
+func TestExtMsgClientRoutesToSupervisor(t *testing.T) {
+	sentinel := api.NewClient("http://supervisor.sentinel:1")
+	origIdentity, origSup, origGrants := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook
+	t.Cleanup(func() {
+		apiRouteControllerIdentityHook = origIdentity
+		apiRouteSupervisorClientHook = origSup
+		apiRouteSupervisorGrantsHook = origGrants
+	})
+	// The extmsg route never consults the grants hook (PreferSupervisor does
+	// not read it), so consulting it is a routing regression — as is a
+	// grants-required supervisor city failing to resolve the supervisor.
+	apiRouteSupervisorGrantsHook = func() bool {
+		t.Errorf("supervisor grant requirement consulted on the extmsg route")
+		return true
+	}
+
+	legacyHosted := func(string) controllerIdentityReply { return controllerIdentityReply{PID: 4242} }
+
+	cases := []struct {
+		name         string
+		gcNoAPI      string
+		identity     func(string) controllerIdentityReply
+		supervisor   func(string) *api.Client
+		toml         string
+		wantSentinel bool
+		wantReasons  []string
+	}{
+		{
+			// A controller predating identify answers only ping: alive, mode
+			// unknown. With no standalone [api] port the supervisor-managed
+			// client is the only endpoint these verbs can use.
+			name:         "alive-unknown-mode-no-api-port-routes-to-supervisor",
+			gcNoAPI:      "",
+			identity:     legacyHosted,
+			supervisor:   func(string) *api.Client { return sentinel },
+			toml:         "name = \"t\"\n",
+			wantSentinel: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_NO_API", tc.gcNoAPI)
+			apiRouteControllerIdentityHook = tc.identity
+			apiRouteSupervisorClientHook = tc.supervisor
+			withCityFlag(t, writeCityTOMLForRoute(t, t.TempDir(), tc.toml))
+
+			var stderr bytes.Buffer
+			c, cityPath, ok := extMsgClient("bind", &stderr)
+			if tc.wantSentinel {
+				if !ok || c != sentinel {
+					t.Fatalf("extMsgClient = (%p, ok=%v), want the supervisor sentinel %p; stderr: %s",
+						c, ok, sentinel, stderr.String())
+				}
+				if cityPath == "" {
+					t.Fatalf("extMsgClient cityPath = empty, want the resolved city path")
+				}
+				if stderr.Len() != 0 {
+					t.Fatalf("extMsgClient stderr = %q, want nothing on success", stderr.String())
+				}
+				return
+			}
+			if ok || c != nil {
+				t.Fatalf("extMsgClient = (%p, ok=%v), want (nil, false); stderr: %s", c, ok, stderr.String())
+			}
+			if cityPath != "" {
+				t.Fatalf("extMsgClient cityPath = %q, want empty on failure", cityPath)
+			}
+			got := stderr.String()
+			if !strings.Contains(got, "gc extmsg bind: requires the city API server") {
+				t.Fatalf("stderr = %q, want it to name the refused verbs", got)
+			}
+			for _, want := range tc.wantReasons {
+				if !strings.Contains(got, want) {
+					t.Fatalf("stderr = %q, want it to contain reason %q", got, want)
+				}
+			}
+		})
 	}
 }
