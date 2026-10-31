@@ -593,6 +593,16 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			env[k] = v
 		}
 	}
+	// Step 10c: program status (OSC 7501). A declared provider's forced env is
+	// merged into the session env only, never OperatorEnv, so it stays off the
+	// launch fingerprint (the Config.Env hash is an allow-list these keys are
+	// not on). Empty unless the switch is shadow or on, the transport is not
+	// ACP, and the provider declares the protocol. The controller-only re-pin
+	// below stays the last writer.
+	programStatusArm, programStatusEnv := config.ProgramStatusArmFor(p.city, resolved, sessionTransport)
+	for k, v := range expandEnvMap(programStatusEnv) {
+		env[k] = v
+	}
 	// Managed agents are Gas City-owned recursive execution environments. Set
 	// the GC-only opt-out after configurable layers so child gc commands cannot
 	// re-enable product metrics; Beads telemetry remains independent.
@@ -807,6 +817,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		PackOverlayDirs:        effectiveOverlayDirs(p.packOverlayDirs, p.rigOverlayDirs, rigName),
 		OverlayDir:             overlayDir,
 		CopyFiles:              copyFiles,
+		ProgramStatus:          programStatusArm,
 	}
 
 	params := TemplateParams{
