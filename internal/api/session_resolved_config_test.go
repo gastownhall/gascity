@@ -50,6 +50,7 @@ func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
 	cfg, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
 		workspaceEnv,
+		runtime.ProgramStatusOff,
 		"worker",
 		"worker-named",
 		"myrig/worker",
@@ -158,6 +159,7 @@ func TestResolvedSessionConfigForProviderPinsControllerTokenEmpty(t *testing.T) 
 	cfg, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
 		workspaceEnv,
+		runtime.ProgramStatusOff,
 		"worker",
 		"",
 		"myrig/worker",
@@ -206,6 +208,7 @@ func TestResolvedSessionConfigForProviderRejectsNilProvider(t *testing.T) {
 	if _, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
 		nil,
+		runtime.ProgramStatusOff,
 		"worker",
 		"",
 		"myrig/worker",
@@ -229,7 +232,7 @@ func TestSessionCreateHintsSeedsRuntimeEnv(t *testing.T) {
 		"GC_CITY":              "/tmp/test-city",
 	}
 
-	hints := sessionCreateHints(&config.ResolvedProvider{Name: "stub"}, sessionEnv, nil)
+	hints := sessionCreateHints(&config.ResolvedProvider{Name: "stub"}, sessionEnv, nil, runtime.ProgramStatusArm{})
 
 	for key, want := range sessionEnv {
 		if got := hints.Env[key]; got != want {
@@ -248,7 +251,7 @@ func TestSessionCreateHintsSeedsRuntimeEnv(t *testing.T) {
 // resolve MouseOn from cmd/gc/template_resolve.go and are unaffected (guarded
 // separately in template_resolve_prompt_test.go).
 func TestSessionCreateHintsEnablesMouse(t *testing.T) {
-	hints := sessionCreateHints(&config.ResolvedProvider{Name: "stub"}, nil, nil)
+	hints := sessionCreateHints(&config.ResolvedProvider{Name: "stub"}, nil, nil, runtime.ProgramStatusArm{})
 	if !hints.MouseOn {
 		t.Error("sessionCreateHints().MouseOn = false, want true (interactive wheel→scrollback, ga-c4w)")
 	}
@@ -263,10 +266,10 @@ func TestSessionCreateHintsEnablesMouse(t *testing.T) {
 // only the interactive case and let the unconditional MouseOn=true default leak
 // mouse-on onto resumed pool agents (ga-g7go).
 func TestSessionResumeHintsEnablesMouse(t *testing.T) {
-	if hints := sessionResumeHints(&config.ResolvedProvider{Name: "stub"}, "", nil, nil, true); !hints.MouseOn {
+	if hints := sessionResumeHints(&config.ResolvedProvider{Name: "stub"}, "", nil, nil, true, runtime.ProgramStatusArm{}); !hints.MouseOn {
 		t.Error("sessionResumeHints(interactive=true).MouseOn = false, want true (interactive wheel survives resume, ga-c4w)")
 	}
-	if hints := sessionResumeHints(&config.ResolvedProvider{Name: "stub"}, "", nil, nil, false); hints.MouseOn {
+	if hints := sessionResumeHints(&config.ResolvedProvider{Name: "stub"}, "", nil, nil, false, runtime.ProgramStatusArm{}); hints.MouseOn {
 		t.Error("sessionResumeHints(interactive=false).MouseOn = true, want false (polled pool agent stays mouse-off, ga-g7go)")
 	}
 }
@@ -290,6 +293,7 @@ func TestResolvedSessionConfigForProviderSeedsCityRuntimeEnv(t *testing.T) {
 	cfg, err := resolvedSessionConfigForProvider(
 		cityPath,
 		nil,
+		runtime.ProgramStatusOff,
 		"worker",
 		"",
 		"myrig/worker",
@@ -380,6 +384,7 @@ func TestResolvedSessionConfigForProviderCityAnchorsBeatConflictingProviderEnv(t
 	cfg, err := resolvedSessionConfigForProvider(
 		cityPath,
 		nil,
+		runtime.ProgramStatusOff,
 		"worker",
 		"",
 		"myrig/worker",
@@ -513,6 +518,7 @@ func TestResolvedSessionConfigForProviderSkipsStoredMCPMetadataForTmuxTransport(
 	cfg, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
 		nil,
+		runtime.ProgramStatusOff,
 		"worker",
 		"",
 		"myrig/worker",
