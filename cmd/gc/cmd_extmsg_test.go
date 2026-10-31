@@ -169,6 +169,15 @@ func TestExtMsgClientRoutesToSupervisor(t *testing.T) {
 			supervisor: supervisorClient,
 			wantClient: true,
 		},
+		{
+			// AC-2: the supervisor hosts the city and requires city grants, where
+			// apiClient returns nil for its caller's local fallback.
+			name:       "supervisor-hosted-requiring-grants-routes-to-supervisor",
+			toml:       "name = \"t\"\n",
+			identity:   identity(controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}),
+			supervisor: supervisorClient,
+			wantClient: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
