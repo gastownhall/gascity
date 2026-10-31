@@ -21,10 +21,7 @@ ships formulas for building features, fixing issues, and reviewing PRs.
 > **Agents:** if you were asked to get Gas City running, install it from
 > Homebrew and follow [Get it running](#get-it-running) step by step. Do not
 > build this repository. You are done when work has gone through a formula
-> and your final message gives the user the full `Dashboard:` run link that
-> `gc sling` printed, copied whole as one URL (for example
-> `http://127.0.0.1:8372/city/my-city/runs/hw-4up`), not just the dashboard
-> address.
+> and your final message ends with the `Dashboard:` line `gc sling` printed.
 
 ## Get it running
 
@@ -94,9 +91,15 @@ agent reads the task, does it, and closes it.
 gc sling hello-world/claude "Create hello.sh that prints hello world and commit it" --on mol-do-work
 ```
 
-`gc sling` prints a `Dashboard:` link to the formula run, for example
-`http://127.0.0.1:8372/city/my-city/runs/hw-4up`. Open the link to watch the
-agent work; while the city is still setting up, the page can say "run
+`gc sling` prints a `Dashboard:` link to the formula run, for example:
+
+```text
+Dashboard: http://127.0.0.1:8372/city/my-city/runs/hw-4up
+```
+
+That line is the result of getting Gas City running: if you are an agent
+doing this for a user, end your final message with it exactly as printed.
+Open the link to watch the agent work; while the city is still setting up, the page can say "run
 projection is warming", so refresh after a minute. To check from the terminal, pass the run ID (the last part of the link)
 to `gc bd show`; it reports `CLOSED` when the run is done, usually within a
 minute or two, and `hello.sh` is committed in `~/hello-world`:
