@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -325,8 +326,80 @@ func (cr *CityRuntime) startRigResidueCensus(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		emitRigResidue(rec, stderr, logPrefix, target, censusRigs(cityPath, &census, target, false), unchecked)
+		rows := censusRigs(cityPath, &census, target, false)
+		recordCensusCleanRows(cityPath, target, census.Rigs, rows, stderr, logPrefix)
+		emitRigResidue(rec, stderr, logPrefix, target, rows, unchecked)
 	}()
+}
+
+// recordCensusCleanRows records clean every censused rig with nothing to
+// import (recordCensusClean) and marks its row clean, so a rig added before
+// the binding converged, or one whose add-time census failed, is not asked to
+// be imported. A rig that cannot be recorded keeps its row and is warned on.
+func recordCensusCleanRows(cityPath string, target infraBindingTarget, rigs []config.Rig, rows []rigCensusRow, stderr io.Writer, logPrefix string) {
+	byName := make(map[string]config.Rig, len(rigs))
+	for _, rig := range rigs {
+		byName[rig.Name] = rig
+	}
+	for i := range rows {
+		rig, ok := byName[rows[i].Rig]
+		if !ok {
+			continue
+		}
+		recorded, err := recordCensusClean(cityPath, target, rig, rows[i], "the controller's boot census")
+		switch {
+		case err != nil:
+			if stderr != nil {
+				fmt.Fprintf(stderr, "%s: storage: rig %s: warning: recording it clean: %v\n", logPrefix, rows[i].Rig, err) //nolint:errcheck // best-effort stderr
+			}
+		case recorded:
+			rows[i].State = rigCensusClean
+			if stderr != nil {
+				fmt.Fprintf(stderr, "%s: storage: rig %s: recorded clean — its store holds no infrastructure bead\n", logPrefix, rows[i].Rig) //nolint:errcheck // best-effort stderr
+			}
+		}
+	}
+}
+
+// recordCensusClean writes rig's clean record when its census found it
+// awaiting import with no infrastructure row (closed rows and both tiers
+// counted): the record `gc storage migrate --from-rigs` writes for such a rig
+// (importRig, plan.Infra == 0), so a rig with nothing to import is never asked
+// to be imported. Only that state is promoted, and only beside a converged
+// binding. A rig with an infrastructure row, a census error, or any record or
+// cleared note of its own (the import's to resolve: a complete note without a
+// marker is a lost marker the import refuses) keeps its state. A record path
+// that cannot be stat'ed is an error, not proof of absence. by names the
+// census in the record. It reports whether it wrote the record.
+func recordCensusClean(cityPath string, target infraBindingTarget, rig config.Rig, row rigCensusRow, by string) (bool, error) {
+	if row.State != rigCensusAwaiting || row.Err != nil || row.Infra != 0 || len(row.Reused) != 0 {
+		return false, nil
+	}
+	if !rigNameIsFileSafe(rig.Name) || strings.TrimSpace(rig.Path) == "" {
+		return false, nil
+	}
+	state, err := readInfraConvergenceState(target)
+	if err != nil {
+		return false, err
+	}
+	if state != infraConvergenceMarked {
+		return false, nil
+	}
+	loc := newRigImportLocation(target, cityPath, rig.Name)
+	for _, path := range []string{loc.MarkerPath(), loc.CleanPath(), loc.InFlightPath(), loc.NotePath()} {
+		present, err := infraPathExists(path)
+		if err != nil {
+			return false, fmt.Errorf("checking rig %s's record %s: %w", rig.Name, path, err)
+		}
+		if present {
+			return false, nil
+		}
+	}
+	line := fmt.Sprintf("rig %s holds no infrastructure bead (%s, %s)", rig.Name, by, time.Now().UTC().Format(time.RFC3339))
+	if err := loc.writeRecord(loc.CleanPath(), line, rigStoreRoot(cityPath, rig)); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // emitRigResidue publishes storage.rig_residue for every rig whose census
@@ -356,21 +429,9 @@ func emitRigResidue(rec events.Recorder, stderr io.Writer, logPrefix string, tar
 	}
 }
 
-// rigStoreListsEmpty reports whether the rig's store holds no row at all,
-// closed and both tiers included. A store that cannot be opened, listed or
-// closed is not proven empty.
-func rigStoreListsEmpty(cityPath string, r config.Rig) bool {
-	// A scope with no store on disk at all holds no row, and opening it
-	// would only create (or start a server for) the store being asked about.
+// rigScopeHasNoStore reports whether the rig's scope has no store on disk at
+// all, so it holds no row.
+func rigScopeHasNoStore(cityPath string, r config.Rig) bool {
 	root := resolveStoreScopeRoot(cityPath, r.Path)
-	if !fileExists(filepath.Join(root, ".beads")) && !fileExists(filepath.Join(root, ".gc", "beads.json")) {
-		return true
-	}
-	store, err := openStorageScopeStore(r.Path, cityPath)
-	if err != nil {
-		return false
-	}
-	rows, listErr := store.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
-	closeErr := closeBeadStoreHandle(store)
-	return listErr == nil && closeErr == nil && len(rows) == 0
+	return !fileExists(filepath.Join(root, ".beads")) && !fileExists(filepath.Join(root, ".gc", "beads.json"))
 }

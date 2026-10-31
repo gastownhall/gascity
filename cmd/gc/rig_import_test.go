@@ -921,25 +921,8 @@ func TestControllerBootCensusEmitsRigResidue(t *testing.T) {
 		t.Error("the boot census opened a suspended rig")
 		return beads.NewMemStore(), errors.New("suspended")
 	}
-	done := make(chan struct{})
-	prev := rigResidueCensusDone
-	rigResidueCensusDone = func() { close(done) }
-	t.Cleanup(func() { rigResidueCensusDone = prev })
-	rec := events.NewFake()
 	var stderr bytes.Buffer
-	cr := &CityRuntime{cfg: f.cfg, cityPath: f.request.CityPath, rec: rec, stderr: &stderr, logPrefix: "gc start"}
-	cr.startRigResidueCensus(context.Background())
-	select {
-	case <-done:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the boot census did not finish")
-	}
-	var residue []string
-	for _, e := range rec.Events {
-		if e.Type == events.StorageRigResidue {
-			residue = append(residue, e.Subject)
-		}
-	}
+	residue := rigResidueSubjects(runRigBootCensus(t, f.cfg, f.request.CityPath, &stderr))
 	if len(residue) != 1 || residue[0] != "packs" {
 		t.Errorf("storage.rig_residue subjects = %v, want [packs]", residue)
 	}
@@ -948,24 +931,250 @@ func TestControllerBootCensusEmitsRigResidue(t *testing.T) {
 	}
 }
 
-// TestRigAddRecordsANewRigCleanOnAConvergedSplitCity: a new, empty rig store
-// needs no relic leg; an adopted one stays awaiting import.
-func TestRigAddRecordsANewRigCleanOnAConvergedSplitCity(t *testing.T) {
-	f := newRigImportFixture(t)
+// TestRigAddRecordsARigCleanWhenItsCensusFindsNothingToImport: on a converged
+// split city, gc rig add records a rig clean when a census of its store finds
+// no infrastructure row (a new rig, or an adopted store holding only work)
+// and leaves an adopted store holding a graph row awaiting import. A
+// single-store city writes nothing.
+func TestRigAddRecordsARigCleanWhenItsCensusFindsNothingToImport(t *testing.T) {
+	f := newRigImportFixture(t, config.Rig{Name: "adopted-work", Prefix: "ga"}, config.Rig{Name: "adopted-graph", Prefix: "gg"})
+	f.seed("adopted-work", []beads.Bead{workRow("ga-1", "open"), workRow("ga-2", "closed")}, nil)
+	f.seed("adopted-graph", []beads.Bead{workRow("gg-1", "open"), graphRow("gg-a", "gg-a", "closed", nil)}, nil)
 	var stderr bytes.Buffer
-	recordNewRigClean(f.request.CityPath, f.cfg, config.Rig{Name: "fresh", Path: t.TempDir()}, false, &stderr)
+	recordNewRigClean(f.request.CityPath, f.cfg, config.Rig{Name: "fresh", Path: t.TempDir()}, &stderr)
 	if !fileExists(f.loc("fresh").CleanPath()) {
 		t.Errorf("a new rig was not recorded clean: %s", stderr.String())
 	}
-	recordNewRigClean(f.request.CityPath, f.cfg, config.Rig{Name: "adopted", Path: t.TempDir()}, true, &stderr)
-	if fileExists(f.loc("adopted").CleanPath()) {
-		t.Error("an adopted rig was recorded clean without a census")
+	recordNewRigClean(f.request.CityPath, f.cfg, f.cfg.Rigs[0], &stderr)
+	if !fileExists(f.loc("adopted-work").CleanPath()) || !f.relicFree("adopted-work") {
+		t.Errorf("an adopted store holding only work was not recorded clean: %s", stderr.String())
+	}
+	recordNewRigClean(f.request.CityPath, f.cfg, f.cfg.Rigs[1], &stderr)
+	if fileExists(f.loc("adopted-graph").CleanPath()) {
+		t.Error("an adopted store holding a graph row was recorded clean")
 	}
 	single := &config.City{}
-	recordNewRigClean(f.request.CityPath, single, config.Rig{Name: "plain", Path: t.TempDir()}, false, &stderr)
+	recordNewRigClean(f.request.CityPath, single, config.Rig{Name: "plain", Path: t.TempDir()}, &stderr)
 	if fileExists(f.loc("plain").CleanPath()) {
 		t.Error("a single-store city wrote a rig record")
 	}
+}
+
+// TestAdoptedRigWithNothingToImportPassesTheStorageGate: an adopted store
+// holding only work (open and closed) on a converged split city passes `gc
+// storage status` right after gc rig add, with no import step.
+func TestAdoptedRigWithNothingToImportPassesTheStorageGate(t *testing.T) {
+	f := newRigImportFixture(t, config.Rig{Name: "webapp", Prefix: "gw"})
+	f.seed("webapp", []beads.Bead{workRow("gw-1", "open"), workRow("gw-2", "closed")}, nil)
+	var stderr bytes.Buffer
+	recordNewRigClean(f.request.CityPath, f.cfg, f.cfg.Rigs[0], &stderr)
+	var stdout bytes.Buffer
+	if code := doStorageStatus(f.request, &stdout, &stderr); code != 0 || !strings.Contains(stdout.String(), "rig webapp: clean") {
+		t.Errorf("status = %d, want 0 naming webapp clean: %s %s", code, stdout.String(), stderr.String())
+	}
+}
+
+// TestBornSplitRigAddedBeforeFirstStartIsRecordedCleanByTheBootCensus: a rig
+// added to a born-split city before its first start cannot be recorded by gc
+// rig add (the binding has not converged); the controller's boot census after
+// genesis records it clean, so status and the doctor pass with no import.
+func TestBornSplitRigAddedBeforeFirstStartIsRecordedCleanByTheBootCensus(t *testing.T) {
+	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
+	request := storageTestRequest(t, cfg)
+	stubInfraMigrationSource(t)
+	stubInfraControllerPing(t, 0)
+	rigPath := t.TempDir()
+	rig := config.Rig{Name: "r1", Prefix: "gr", Path: rigPath}
+	cfg.Rigs = append(cfg.Rigs, rig)
+	rigFile := filepath.Join(rigPath, ".gc", "beads.json")
+	prevOpen := openStorageScopeStore
+	openStorageScopeStore = func(storePath, cityPath string) (beads.Store, error) {
+		if samePath(storePath, rigPath) {
+			store, err := beads.OpenFileStore(fsys.OSFS{}, rigFile, beads.WithFileStoreIDPrefix("gr"))
+			if err != nil {
+				return nil, err
+			}
+			store.HonorExplicitIDs = true
+			return store, nil
+		}
+		return prevOpen(storePath, cityPath)
+	}
+	t.Cleanup(func() { openStorageScopeStore = prevOpen })
+	target := mustResolveInfraTarget(t, request.CityPath, cfg)
+	loc := newRigImportLocation(target, request.CityPath, rig.Name)
+
+	var stderr bytes.Buffer
+	// gc rig add, before the first start.
+	recordNewRigClean(request.CityPath, cfg, rig, &stderr)
+	if present, err := infraPathExists(loc.CleanPath()); err != nil || present {
+		t.Fatalf("gc rig add wrote a clean record beside an unconverged binding (present=%v err=%v)", present, err)
+	}
+	seedStore, err := openStorageScopeStore(rigPath, request.CityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seedStore.Create(workRow("gr-1", "open")); err != nil {
+		t.Fatal(err)
+	}
+	// The first start: genesis, then the controller's boot census.
+	routes, err := storageBootGate(request.CityPath, cfg, "gc start", nil, &stderr)
+	if err != nil {
+		t.Fatalf("genesis boot refused: %v", err)
+	}
+	_ = routes.close()
+	rec := runRigBootCensus(t, cfg, request.CityPath, &stderr)
+
+	if !rigRecordSpeaksFor(loc.CleanPath(), rigStoreRoot(request.CityPath, rig)) {
+		t.Errorf("the boot census did not record r1 clean for its store: %s", stderr.String())
+	}
+	routesView := &storageRoutes{rigMarkers: &rigGraphMarkers{bindingRoot: target.Root, cityPath: request.CityPath, rigs: cfg.Rigs}}
+	if !routesView.rigGraphRelicFree(rig.Name) {
+		t.Error("r1 is not relic-free after the boot census recorded it clean")
+	}
+	if subjects := rigResidueSubjects(rec); len(subjects) != 0 {
+		t.Errorf("storage.rig_residue subjects = %v, want none", subjects)
+	}
+	if !strings.Contains(stderr.String(), "rig r1: recorded clean") {
+		t.Errorf("the boot census did not say it recorded r1 clean: %q", stderr.String())
+	}
+	var stdout bytes.Buffer
+	if code := doStorageStatus(request, &stdout, &stderr); code != 0 || !strings.Contains(stdout.String(), "rig r1: clean") {
+		t.Errorf("status = %d, want 0 naming r1 clean: %s", code, stdout.String())
+	}
+	if res := newStorageRigsCheck(cfg, request.CityPath).Run(nil); res.Status != doctor.StatusOK {
+		t.Errorf("doctor storage-rigs = %v %q %v, want OK", res.Status, res.Message, res.Details)
+	}
+}
+
+// TestControllerBootCensusRecordsARigWithNothingToImportClean: the boot
+// census records a record-less rig holding only work clean (no residue for
+// it), keeps a rig with a graph row awaiting import, and leaves alone a rig
+// whose cleared note outlived its marker, a suspended rig and an unreachable
+// one.
+func TestControllerBootCensusRecordsARigWithNothingToImportClean(t *testing.T) {
+	f := newRigImportFixture(t,
+		config.Rig{Name: "quiet", Prefix: "gq"},
+		config.Rig{Name: "packs", Prefix: "gp"},
+		config.Rig{Name: "lost", Prefix: "gl"},
+		config.Rig{Name: "sleepy", Prefix: "gs", Suspended: true},
+		config.Rig{Name: "unreachable", Prefix: "gu"})
+	f.seed("quiet", []beads.Bead{workRow("gq-1", "open")}, nil)
+	f.seed("packs", []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil)}, nil)
+	f.seed("lost", []beads.Bead{workRow("gl-1", "open")}, nil)
+	if err := writeInfraClearedNoteAt(f.loc("lost").NotePath(), infraClearedNote{Binding: f.target.Binding, Database: f.target.Database, Backup: f.loc("lost").BackupPath(), Complete: true}); err != nil {
+		t.Fatal(err)
+	}
+	f.open["sleepy"] = func() (beads.Store, error) {
+		t.Error("the boot census opened a suspended rig")
+		return beads.NewMemStore(), errors.New("suspended")
+	}
+	f.open["unreachable"] = func() (beads.Store, error) { return nil, errors.New("connection refused") }
+	var stderr bytes.Buffer
+	rec := runRigBootCensus(t, f.cfg, f.request.CityPath, &stderr)
+	if !fileExists(f.loc("quiet").CleanPath()) || !f.relicFree("quiet") {
+		t.Errorf("the boot census did not record quiet clean: %s", stderr.String())
+	}
+	for _, rig := range []string{"packs", "lost", "sleepy", "unreachable"} {
+		if fileExists(f.loc(rig).CleanPath()) {
+			t.Errorf("the boot census recorded %s clean", rig)
+		}
+	}
+	got := rigResidueSubjects(rec)
+	sort.Strings(got)
+	if want := []string{"lost", "packs", "unreachable"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("storage.rig_residue subjects = %v, want %v", got, want)
+	}
+	if !strings.Contains(stderr.String(), "rig quiet: recorded clean") || strings.Contains(stderr.String(), "rig quiet: awaiting import") {
+		t.Errorf("the boot warning = %q", stderr.String())
+	}
+}
+
+// TestRecordCensusCleanPromotesOnlyARecordlessRigWithNoInfrastructureRow:
+// the helper writes nothing unless the census found the rig awaiting import
+// with no infrastructure row, beside a converged binding, with no record or
+// cleared note of its own; a record path it cannot stat is an error.
+func TestRecordCensusCleanPromotesOnlyARecordlessRigWithNoInfrastructureRow(t *testing.T) {
+	awaiting := func(rig string) rigCensusRow { return rigCensusRow{Rig: rig, State: rigCensusAwaiting} }
+	f := newRigImportFixture(t)
+	cityPath := f.request.CityPath
+	rigNamed := func(name string) config.Rig { return config.Rig{Name: name, Path: t.TempDir()} }
+
+	t.Run("records an awaiting rig with nothing to import", func(t *testing.T) {
+		rig := rigNamed("ok")
+		recorded, err := recordCensusClean(cityPath, f.target, rig, awaiting("ok"), "a test")
+		if err != nil || !recorded || !rigRecordSpeaksFor(f.loc("ok").CleanPath(), rigStoreRoot(cityPath, rig)) {
+			t.Errorf("recorded=%v err=%v", recorded, err)
+		}
+	})
+
+	rows := map[string]rigCensusRow{
+		"infra":    {Rig: "infra", State: rigCensusAwaiting, Infra: 1},
+		"errored":  {Rig: "errored", State: rigCensusAwaiting, Err: errors.New("boom")},
+		"reused":   {Rig: "reused", State: rigCensusAwaiting, Reused: []string{"gx-1"}},
+		"imported": {Rig: "imported", State: rigCensusImported},
+		"retained": {Rig: "retained", State: rigCensusRetained},
+	}
+	for name, row := range rows {
+		t.Run("row "+name, func(t *testing.T) {
+			if recorded, err := recordCensusClean(cityPath, f.target, rigNamed(name), row, "a test"); err != nil || recorded || fileExists(f.loc(name).CleanPath()) {
+				t.Errorf("recorded=%v err=%v", recorded, err)
+			}
+		})
+	}
+
+	for name, write := range map[string]func(loc rigImportLocation) error{
+		"marker":    func(loc rigImportLocation) error { return os.WriteFile(loc.MarkerPath(), []byte("x\n"), 0o644) },
+		"clean":     func(loc rigImportLocation) error { return os.WriteFile(loc.CleanPath(), []byte("x\n"), 0o644) },
+		"in-flight": func(loc rigImportLocation) error { return os.WriteFile(loc.InFlightPath(), []byte("x\n"), 0o644) },
+		"note": func(loc rigImportLocation) error {
+			return writeInfraClearedNoteAt(loc.NotePath(), infraClearedNote{Binding: f.target.Binding, Database: f.target.Database, Backup: loc.BackupPath(), Complete: true})
+		},
+	} {
+		t.Run("existing "+name, func(t *testing.T) {
+			rigName := "has-" + name
+			loc := f.loc(rigName)
+			if err := write(loc); err != nil {
+				t.Fatal(err)
+			}
+			before, _ := os.ReadFile(loc.CleanPath())
+			recorded, err := recordCensusClean(cityPath, f.target, rigNamed(rigName), awaiting(rigName), "a test")
+			after, _ := os.ReadFile(loc.CleanPath())
+			if err != nil || recorded || string(before) != string(after) {
+				t.Errorf("recorded=%v err=%v clean %q -> %q", recorded, err, before, after)
+			}
+		})
+	}
+
+	t.Run("unbound or unsafe rig", func(t *testing.T) {
+		for _, rig := range []config.Rig{{Name: "unbound"}, {Name: "a/b", Path: t.TempDir()}} {
+			if recorded, err := recordCensusClean(cityPath, f.target, rig, awaiting(rig.Name), "a test"); err != nil || recorded {
+				t.Errorf("rig %q: recorded=%v err=%v", rig.Name, recorded, err)
+			}
+		}
+	})
+
+	t.Run("unconverged binding", func(t *testing.T) {
+		cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
+		other := t.TempDir()
+		target := mustResolveInfraTarget(t, other, cfg)
+		recorded, err := recordCensusClean(other, target, rigNamed("early"), awaiting("early"), "a test")
+		if present, _ := infraPathExists(newRigImportLocation(target, other, "early").CleanPath()); err != nil || recorded || present {
+			t.Errorf("recorded=%v err=%v present=%v", recorded, err, present)
+		}
+	})
+
+	t.Run("unstattable record path", func(t *testing.T) {
+		// A city path that is a regular file makes the cleared note's path
+		// unstattable (ENOTDIR), which is not proof of absence.
+		notADir := filepath.Join(t.TempDir(), "file")
+		if err := os.WriteFile(notADir, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		recorded, err := recordCensusClean(notADir, f.target, rigNamed("blind"), awaiting("blind"), "a test")
+		if err == nil || recorded || fileExists(newRigImportLocation(f.target, notADir, "blind").CleanPath()) {
+			t.Errorf("recorded=%v err=%v, want an error and no record", recorded, err)
+		}
+	})
 }
 
 // TestByIDRelicProofReadsTheRigManifestsToo: the id-level proof reads the
@@ -990,5 +1199,36 @@ func rigTestKeys(m map[string]bool) []string {
 		out = append(out, k)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// runRigBootCensus runs the controller's one asynchronous boot census, waits
+// for it, and returns the recorder it published to.
+func runRigBootCensus(t *testing.T, cfg *config.City, cityPath string, stderr *bytes.Buffer) *events.Fake {
+	t.Helper()
+	done := make(chan struct{})
+	prev := rigResidueCensusDone
+	rigResidueCensusDone = func() { close(done) }
+	t.Cleanup(func() { rigResidueCensusDone = prev })
+	rec := events.NewFake()
+	cr := &CityRuntime{cfg: cfg, cityPath: cityPath, rec: rec, stderr: stderr, logPrefix: "gc start"}
+	cr.startRigResidueCensus(context.Background())
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the boot census did not finish")
+	}
+	return rec
+}
+
+// rigResidueSubjects names the rigs a storage.rig_residue event was
+// published for.
+func rigResidueSubjects(rec *events.Fake) []string {
+	var out []string
+	for _, e := range rec.Events {
+		if e.Type == events.StorageRigResidue {
+			out = append(out, e.Subject)
+		}
+	}
 	return out
 }
