@@ -207,10 +207,10 @@
 {"argv": ["list", "--status=in_progress", "--json", "--limit=0"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/orphan-sweep.sh:89"}
 {"argv": ["list", "--status=in_progress", "--metadata-field", "gc.routed_to=Xdog", "--json", "--limit=0"], "src": "gascity-packs:gastown/formulas/mol-deacon-patrol.toml:342"}
 {"argv": ["list", "--status=in_progress"], "src": "gascity:examples/swarm/packs/swarm/agents/mayor/prompt.template.md:33"}
-{"argv": ["list", "--status=open", "--assignee=", "--json", "--limit=0"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/spawn-storm-detect.sh:44"}
 {"argv": ["list", "--status=open", "--assignee=X", "--json", "--limit=0"], "src": "gascity-packs:gastown/formulas/mol-deacon-patrol.toml:274"}
 {"argv": ["list", "--status=open", "--json", "--limit=0"], "src": "gascity-packs:gastown/formulas/mol-witness-patrol.toml:162"}
 {"argv": ["list", "--status=open", "--json"], "src": "gascity-packs:gastown/assets/scripts/polecat-churn-watcher.sh:88"}
+{"argv": ["list", "--status=open", "--no-assignee", "--json", "--limit=0"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/spawn-storm-detect.sh:44"}
 {"argv": ["list", "--status=open"], "src": "gascity:examples/swarm/packs/swarm/agents/mayor/prompt.template.md:32"}
 {"argv": ["list", "--title-contains", "X", "--status", "closed", "--closed-after", "X", "--json"], "src": "gascity:internal/bootstrap/packs/core/formulas/mol-polecat-base.toml:266"}
 {"argv": ["list", "--title-contains", "X", "--status", "open,in_progress,blocked", "--json"], "src": "gascity:internal/bootstrap/packs/core/formulas/mol-polecat-base.toml:210"}
