@@ -5,13 +5,14 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
-const programStatusTestEnvKey = "GC_TEST_PROGRAM_STATUS_FLAG"
+const programStatusTestEnvKey = "PROGRAM_STATUS_TEST_FLAG"
 
 func programStatusTestBinding() config.ProgramStatusBinding {
 	relay := true
@@ -35,26 +36,38 @@ func newProgramStatusTestCity(t *testing.T) string {
 	return cityPath
 }
 
-// programStatusTemplateConfig resolves a declared provider through the
-// reconciler/CLI create path under the given switch and returns its
-// runtime.Config.
-func programStatusTemplateConfig(t *testing.T, cityPath, mode string, binding config.ProgramStatusBinding, agentSession string) runtime.Config {
-	t.Helper()
-	params := upstreamTestParams(t, &config.City{Session: config.SessionConfig{ProgramStatus: mode}})
-	params.cityPath = cityPath
+// programStatusTestProvider is an ACP-capable provider declaring binding.
+func programStatusTestProvider(binding config.ProgramStatusBinding) config.ProviderSpec {
 	supportsACP := true
-	params.providers = map[string]config.ProviderSpec{"test": {
+	return config.ProviderSpec{
 		Command:       "echo",
 		PromptMode:    "none",
 		SupportsACP:   &supportsACP,
 		ProgramStatus: binding,
-	}}
+	}
+}
+
+// programStatusTemplateParams resolves provider through the reconciler/CLI
+// create path under the given switch.
+func programStatusTemplateParams(t *testing.T, cityPath, mode string, provider config.ProviderSpec, agentSession string) TemplateParams {
+	t.Helper()
+	params := upstreamTestParams(t, &config.City{Session: config.SessionConfig{ProgramStatus: mode}})
+	params.cityPath = cityPath
+	params.providers = map[string]config.ProviderSpec{"test": provider}
 	agent := &config.Agent{Name: "runner", Session: agentSession}
 	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
 	if err != nil {
 		t.Fatalf("resolveTemplate: %v", err)
 	}
-	return templateParamsToConfig(tp)
+	return tp
+}
+
+// programStatusTemplateConfig resolves a declared provider through the
+// reconciler/CLI create path under the given switch and returns its
+// runtime.Config.
+func programStatusTemplateConfig(t *testing.T, cityPath, mode string, binding config.ProgramStatusBinding, agentSession string) runtime.Config {
+	t.Helper()
+	return templateParamsToConfig(programStatusTemplateParams(t, cityPath, mode, programStatusTestProvider(binding), agentSession))
 }
 
 func TestProgramStatusEnvDoesNotMoveLaunchFingerprint(t *testing.T) {
@@ -96,6 +109,56 @@ func TestProgramStatusEnvSkippedOnACPTransport(t *testing.T) {
 	}
 }
 
+// TestProgramStatusRecordedACPLaunchIsDisarmed pins the recorded-ACP transport
+// swap (templateParamsForSession): a session recorded on ACP whose template now
+// resolves the CLI transport starts on its ACP launch disarmed, and a key the
+// binding forces keeps the value the template's other layers resolved (here
+// the provider's), neither the forced value nor deleted. Both builders the
+// swap feeds are checked: the start path and the drift hash.
+func TestProgramStatusRecordedACPLaunchIsDisarmed(t *testing.T) {
+	cityPath := newProgramStatusTestCity(t)
+	provider := programStatusTestProvider(programStatusTestBinding())
+	provider.Env = map[string]string{programStatusTestEnvKey: "provider"}
+	tp := programStatusTemplateParams(t, cityPath, "on", provider, "")
+	if tp.IsACP || tp.ACPLaunch == nil {
+		t.Fatalf("template IsACP = %v, ACPLaunch = %v; want a CLI template that keeps an ACP launch", tp.IsACP, tp.ACPLaunch)
+	}
+
+	// Control: the CLI launch, and the drift hash of a session that records
+	// no transport, are armed with the forced env.
+	for name, cfg := range map[string]runtime.Config{
+		"templateParamsToConfig":       templateParamsToConfig(tp),
+		"sessionCoreConfigForHashInfo": sessionCoreConfigForHashInfo(tp, session.Info{}),
+	} {
+		if cfg.ProgramStatus != programStatusTestArm {
+			t.Errorf("%s: CLI launch ProgramStatus = %+v, want %+v", name, cfg.ProgramStatus, programStatusTestArm)
+		}
+		if got := cfg.Env[programStatusTestEnvKey]; got != "1" {
+			t.Errorf("%s: CLI launch Env[%s] = %q, want the binding's forced %q", name, programStatusTestEnvKey, got, "1")
+		}
+	}
+
+	recorded := session.Info{Transport: config.SessionTransportACP}
+	acp, swapped := templateParamsForSession(tp, recorded)
+	if !swapped {
+		t.Fatal("templateParamsForSession kept the CLI launch for a session recorded on ACP")
+	}
+	for name, cfg := range map[string]runtime.Config{
+		"templateParamsToConfig":       templateParamsToConfig(acp),
+		"sessionCoreConfigForHashInfo": sessionCoreConfigForHashInfo(tp, recorded),
+	} {
+		if cfg.Command != tp.ACPLaunch.Command {
+			t.Fatalf("%s: Command = %q, want the ACP launch %q", name, cfg.Command, tp.ACPLaunch.Command)
+		}
+		if cfg.ProgramStatus != (runtime.ProgramStatusArm{}) {
+			t.Errorf("%s: recorded-ACP launch ProgramStatus = %+v, want disarmed", name, cfg.ProgramStatus)
+		}
+		if got := cfg.Env[programStatusTestEnvKey]; got != "provider" {
+			t.Errorf("%s: recorded-ACP launch Env[%s] = %q, want the provider's %q", name, programStatusTestEnvKey, got, "provider")
+		}
+	}
+}
+
 func TestProgramStatusOffInjectsNothing(t *testing.T) {
 	cityPath := newProgramStatusTestCity(t)
 	declared := programStatusTemplateConfig(t, cityPath, "off", programStatusTestBinding(), "")
@@ -112,6 +175,10 @@ func TestProgramStatusOffInjectsNothing(t *testing.T) {
 	}
 }
 
+// TestProgramStatusEnvYieldsToControllerOnlyRepin pins resolveTemplate's
+// managed pins as the last writers over a binding's forced env. Load rejects
+// such keys in a configured binding; built-in profiles are not validated, so
+// the template launch re-pins them after the forced env.
 func TestProgramStatusEnvYieldsToControllerOnlyRepin(t *testing.T) {
 	cityPath := newProgramStatusTestCity(t)
 	var key, pinned string
@@ -124,9 +191,13 @@ func TestProgramStatusEnvYieldsToControllerOnlyRepin(t *testing.T) {
 	}
 	binding := programStatusTestBinding()
 	binding.Env[key] = "from-binding"
+	binding.Env[execenv.UsageMetricsDisableEnv] = "from-binding"
 	cfg := programStatusTemplateConfig(t, cityPath, "on", binding, "")
 	if got := cfg.Env[key]; got != pinned {
 		t.Errorf("Env[%s] = %q, want the controller-only re-pin %q to stay the last writer", key, got, pinned)
+	}
+	if got := cfg.Env[execenv.UsageMetricsDisableEnv]; got != execenv.UsageMetricsDisableValue {
+		t.Errorf("Env[%s] = %q, want the usage-metrics opt-out %q to stay the last writer", execenv.UsageMetricsDisableEnv, got, execenv.UsageMetricsDisableValue)
 	}
 }
 

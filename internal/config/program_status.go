@@ -36,8 +36,9 @@ type ProgramStatusBinding struct {
 	Relay *bool `toml:"relay,omitempty"`
 	// Env is forced into the session environment when capture is armed (for
 	// example PI_PROGRAM_STATUS = "1"). It is not part of the launch
-	// fingerprint, so changing it does not relaunch running agents. Keys merge
-	// per layer; an empty value withholds the variable.
+	// fingerprint, so changing it does not relaunch running agents: keys gc
+	// sets itself (GC_*, BEADS_*, BD_*, GT_ROOT) are rejected. Keys merge per
+	// layer; an empty value withholds the variable.
 	Env map[string]string `toml:"env,omitempty"`
 }
 
@@ -121,8 +122,14 @@ func ProgramStatusArmFor(cfg *City, resolved *ResolvedProvider, transport string
 var (
 	programStatusAppPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 	programStatusEnvKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	programStatusModes         = []string{"", string(runtime.ProgramStatusOff), string(runtime.ProgramStatusShadow), string(runtime.ProgramStatusOn)}
-	programStatusProtocols     = []string{"", ProgramStatusProtocolOSC7501, ProgramStatusProtocolNone}
+	// programStatusReservedEnvKeyPattern matches the session env gc writes
+	// itself: identity and city anchors (GC_*, GT_ROOT) and the beads scope
+	// and bd pins (BEADS_*, BD_*). Every key the launch fingerprint hashes is
+	// among them, so a binding env that avoids them can neither override a
+	// session's identity nor move its fingerprint.
+	programStatusReservedEnvKeyPattern = regexp.MustCompile(`^(?:(?:GC|BEADS|BD)_|GT_ROOT$)`)
+	programStatusModes                 = []string{"", string(runtime.ProgramStatusOff), string(runtime.ProgramStatusShadow), string(runtime.ProgramStatusOn)}
+	programStatusProtocols             = []string{"", ProgramStatusProtocolOSC7501, ProgramStatusProtocolNone}
 )
 
 // validateProgramStatus rejects an out-of-enum [session] program_status switch
@@ -162,6 +169,9 @@ func validateProgramStatusBinding(b ProgramStatusBinding) error {
 	for _, k := range keys {
 		if !programStatusEnvKeyPattern.MatchString(k) {
 			return fmt.Errorf("env key %q is not a valid environment variable name", k)
+		}
+		if programStatusReservedEnvKeyPattern.MatchString(k) {
+			return fmt.Errorf("env key %q is reserved: gc sets GC_*, BEADS_*, BD_* and GT_ROOT itself", k)
 		}
 	}
 	return nil

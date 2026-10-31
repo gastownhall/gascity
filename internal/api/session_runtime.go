@@ -132,8 +132,10 @@ func configuredProgramStatusMode(cfg *config.City) runtime.ProgramStatusMode {
 
 // sessionProgramStatus derives a session's program-status capture arm and its
 // provider-authored env layer: the resolved provider env followed, when armed,
-// by the binding's forced env (the order cmd/gc resolveTemplate uses). The
-// resolved provider is never mutated.
+// by the binding's forced env. The city anchors cityAnchoredSessionEnv writes
+// after this layer cannot collide with it, because config rejects binding env
+// keys in gc's own namespaces (GC_*, BEADS_*, BD_*, GT_ROOT). The resolved
+// provider is never mutated.
 func sessionProgramStatus(mode runtime.ProgramStatusMode, resolved *config.ResolvedProvider, transport string) (runtime.ProgramStatusArm, map[string]string) {
 	arm, env := resolved.ProgramStatus.Arm(mode, transport == config.SessionTransportACP)
 	if len(env) == 0 {

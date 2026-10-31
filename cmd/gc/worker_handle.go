@@ -439,8 +439,9 @@ func resolvedWorkerSessionConfigWithConfig(
 // create and resume paths. Workspace environment belongs between the ambient
 // provider process context and provider-authored values, matching the
 // canonical resolveTemplate layering. The program-status env (empty unless
-// armed for transport) follows the provider env, as in resolveTemplate.
-// Identity and controller-only overlays remain authoritative at the end.
+// armed for transport) follows the provider env, as on the template launch
+// path (applyTemplateProgramStatus). Identity and controller-only overlays
+// remain authoritative at the end.
 func resolvedWorkerSessionEnvWithConfig(cityPath string, cfg *config.City, resolved *config.ResolvedProvider, transport string) map[string]string {
 	if resolved == nil {
 		return nil

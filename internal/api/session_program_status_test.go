@@ -8,7 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-const apiProgramStatusEnvKey = "GC_TEST_PROGRAM_STATUS_FLAG"
+const apiProgramStatusEnvKey = "PROGRAM_STATUS_TEST_FLAG"
 
 var apiProgramStatusArm = runtime.ProgramStatusArm{Capture: true, App: "agent"}
 

@@ -1155,7 +1155,7 @@
             "type": "string"
           },
           "type": "object",
-          "description": "Env is forced into the session environment when capture is armed (for\nexample PI_PROGRAM_STATUS = \"1\"). It is not part of the launch\nfingerprint, so changing it does not relaunch running agents. Keys merge\nper layer; an empty value withholds the variable."
+          "description": "Env is forced into the session environment when capture is armed (for\nexample PI_PROGRAM_STATUS = \"1\"). It is not part of the launch\nfingerprint, so changing it does not relaunch running agents: keys gc\nsets itself (GC_*, BEADS_*, BD_*, GT_ROOT) are rejected. Keys merge per\nlayer; an empty value withholds the variable."
         }
       },
       "additionalProperties": false,

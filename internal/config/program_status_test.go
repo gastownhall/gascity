@@ -137,6 +137,7 @@ func TestParseRejectsInvalidProgramStatus(t *testing.T) {
 		"bad app":          "[providers.p]\ncommand = \"p\"\n[providers.p.program_status]\nprotocol = \"osc7501\"\napp = \"has space\"\n",
 		"bad env key":      "[providers.p]\ncommand = \"p\"\n[providers.p.program_status]\nprotocol = \"osc7501\"\nenv = { \"1BAD\" = \"x\" }\n",
 		"empty env key":    "[providers.p]\ncommand = \"p\"\n[providers.p.program_status]\nprotocol = \"osc7501\"\nenv = { \"\" = \"x\" }\n",
+		"reserved env key": "[providers.p]\ncommand = \"p\"\n[providers.p.program_status]\nprotocol = \"osc7501\"\nenv = { GC_TEMPLATE = \"x\" }\n",
 	}
 	for name, doc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -146,6 +147,25 @@ func TestParseRejectsInvalidProgramStatus(t *testing.T) {
 				t.Errorf("error %q does not name program_status", err)
 			}
 		})
+	}
+}
+
+// TestProgramStatusEnvRejectsReservedKeys pins the namespaces gc writes into a
+// session env itself: the identity and city anchors (GC_*, GT_ROOT), the
+// beads scope and bd pins (BEADS_*, BD_*), and with them every key the launch
+// fingerprint hashes. A binding naming one would override it and move the
+// fingerprint its env is documented to stay off.
+func TestProgramStatusEnvRejectsReservedKeys(t *testing.T) {
+	for _, key := range []string{"GC_TEMPLATE", "GC_CITY", "GC_CONTROLLER_TOKEN", "BEADS_DIR", "BD_BACKUP_ENABLED", "GT_ROOT"} {
+		err := validateProgramStatusBinding(ProgramStatusBinding{Protocol: ProgramStatusProtocolOSC7501, Env: map[string]string{key: "x"}})
+		if err == nil || !strings.Contains(err.Error(), key) {
+			t.Errorf("env key %s: err = %v, want a reserved-key error naming it", key, err)
+		}
+	}
+	for _, key := range []string{"PI_PROGRAM_STATUS", "PI_GC_MODE", "GT_ROOT_HINT", "gc_lowercase"} {
+		if err := validateProgramStatusBinding(ProgramStatusBinding{Protocol: ProgramStatusProtocolOSC7501, Env: map[string]string{key: "x"}}); err != nil {
+			t.Errorf("env key %s: err = %v, want accepted", key, err)
+		}
 	}
 }
 
@@ -297,6 +317,38 @@ env = { B = "2" }
 	}
 	if !maps.Equal(ps.Env, map[string]string{"A": "1", "B": "2"}) {
 		t.Errorf("env = %v, want per-key merge", ps.Env)
+	}
+}
+
+// TestComposeSessionFragmentKeepsProgramStatus pins that a fragment defining
+// other [session] keys keeps the root's program_status switch, while a
+// fragment that sets the switch itself, to "off" or "" included, still wins.
+func TestComposeSessionFragmentKeepsProgramStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		frag string
+		want runtime.ProgramStatusMode
+	}{
+		{"other key only", "[session]\nsocket = \"frag-socket\"\n", runtime.ProgramStatusShadow},
+		{"sets on", "[session]\nsocket = \"frag-socket\"\nprogram_status = \"on\"\n", runtime.ProgramStatusOn},
+		{"sets off", "[session]\nsocket = \"frag-socket\"\nprogram_status = \"off\"\n", runtime.ProgramStatusOff},
+		{"sets empty", "[session]\nsocket = \"frag-socket\"\nprogram_status = \"\"\n", runtime.ProgramStatusOff},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := fsys.NewFake()
+			fs.Files["/city/city.toml"] = []byte("include = [\"frag.toml\"]\n[workspace]\nname = \"c\"\n[session]\nprogram_status = \"shadow\"\n")
+			fs.Files["/city/frag.toml"] = []byte(tc.frag)
+			cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+			if err != nil {
+				t.Fatalf("LoadWithIncludes: %v", err)
+			}
+			if got := cfg.Session.ProgramStatusMode(); got != tc.want {
+				t.Errorf("program_status = %q, want %q", got, tc.want)
+			}
+			if cfg.Session.Socket != "frag-socket" {
+				t.Errorf("socket = %q, want the fragment's [session] socket", cfg.Session.Socket)
+			}
+		})
 	}
 }
 

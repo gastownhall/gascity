@@ -711,7 +711,7 @@ ProgramStatusBinding is a provider's program-status declaration: whether its pro
 | `protocol` | string |  |  | Protocol declares the status protocol: "osc7501" declares, "none" explicitly undeclares an inherited declaration, and "" inherits. Enum: `osc7501`, `none` |
 | `app` | string |  |  | App is the program name the capture reader accepts reports from; reports naming another program are dropped. Empty accepts any program name. |
 | `relay` | boolean |  |  | Relay wraps the agent in the probe-answering relay, for programs that only report after their support probe is answered. Unset inherits. |
-| `env` | map[string]string |  |  | Env is forced into the session environment when capture is armed (for example PI_PROGRAM_STATUS = "1"). It is not part of the launch fingerprint, so changing it does not relaunch running agents. Keys merge per layer; an empty value withholds the variable. |
+| `env` | map[string]string |  |  | Env is forced into the session environment when capture is armed (for example PI_PROGRAM_STATUS = "1"). It is not part of the launch fingerprint, so changing it does not relaunch running agents: keys gc sets itself (GC_*, BEADS_*, BD_*, GT_ROOT) are rejected. Keys merge per layer; an empty value withholds the variable. |
 
 ## ProviderOption
 
