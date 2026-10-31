@@ -3309,7 +3309,7 @@ func TestManifestLoadAndReservationAgreeOnACoResidentMember(t *testing.T) {
 	work, graph, control, member := seedCoResidentDrainMember(t)
 	opts := ProcessOptions{MemberStores: []beads.Store{work}}
 
-	if err := reserveDrainMember(graph, control, member, opts); err != nil {
+	if _, err := reserveDrainMember(graph, control, member, opts); err != nil {
 		t.Fatalf("reserveDrainMember: %v", err)
 	}
 	loaded, err := loadDrainManifestMembers(graph, control.ID, coResidentDrainManifest(member.ID), opts)
@@ -3337,7 +3337,7 @@ func TestCoResidentDrainMemberAnswersFromTheBinding(t *testing.T) {
 	work, graph, control, member := seedCoResidentDrainMember(t)
 	opts := ProcessOptions{MemberStores: []beads.Store{work}}
 
-	if err := reserveDrainMember(graph, control, member, opts); err != nil {
+	if _, err := reserveDrainMember(graph, control, member, opts); err != nil {
 		t.Fatalf("reserveDrainMember: %v", err)
 	}
 	loaded, err := loadDrainManifestMembers(graph, control.ID, coResidentDrainManifest(member.ID), opts)

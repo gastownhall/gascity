@@ -15,6 +15,7 @@
 package worktree
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -122,6 +123,15 @@ type Spec struct {
 	//
 	// Ensure ignores this field; it mints its own.
 	AttemptID string
+	// NoHooks creates the worktree with the repository's hooks disabled: no
+	// hook of the checkout RepoDir names (its post-checkout hook, say) runs
+	// in the new worktree or fails its creation. It changes nothing Verify
+	// or Cleanup checks.
+	NoHooks bool
+	// NoTrack creates Branch, when Ensure creates it, with no upstream, even
+	// when Base is a remote-tracking branch git would otherwise make it
+	// track. It changes nothing Verify or Cleanup checks.
+	NoTrack bool
 	// DryRun plans without mutating anything.
 	DryRun bool
 }
@@ -339,6 +349,18 @@ func verifyGitState(spec Spec) (Report, error) {
 //     rolls back the created worktree and any created branch;
 //   - with Spec.DryRun, Ensure plans and validates but mutates nothing.
 func Ensure(spec Spec) (Report, error) {
+	return EnsureContext(context.Background(), spec)
+}
+
+// EnsureContext is Ensure with ctx bounding the checkout: the `git worktree
+// add` that creates the worktree, runs the repository's checkout filters and,
+// without Spec.NoHooks, its hooks. A checkout ctx cut short fails like any
+// other creation, wrapping ctx.Err(). The repository probes around it and the
+// rollback after a failure run without ctx, so the deadline never also stops
+// the rollback. git leaves a checkout it was killed in locked, though, and the
+// rollback, which never forces a removal, reports that worktree rather than
+// removing it.
+func EnsureContext(ctx context.Context, spec Spec) (Report, error) {
 	if err := spec.validate(); err != nil {
 		return Report{}, err
 	}
@@ -378,7 +400,7 @@ func Ensure(spec Spec) (Report, error) {
 		return planDryRun(spec, rep, branchExists, resolvedBase)
 	}
 
-	if err := createWorktree(repoGit, spec, branchExists); err != nil {
+	if err := createWorktree(ctx, repoGit, spec, branchExists); err != nil {
 		return rep, rollbackResult(err, rollbackAfterFailedCreate(repoGit, spec.Path, spec.Branch, !branchExists, resolvedBase))
 	}
 	created, err := verifyCreatedWorktree(spec, branchExists, resolvedBase)
@@ -595,14 +617,15 @@ func planDryRun(spec Spec, rep Report, branchExists bool, resolvedBase string) (
 	return rep, nil
 }
 
-func createWorktree(repoGit *git.Git, spec Spec, branchExists bool) error {
+func createWorktree(ctx context.Context, repoGit *git.Git, spec Spec, branchExists bool) error {
+	opts := git.WorktreeAddOptions{NoHooks: spec.NoHooks, NoTrack: spec.NoTrack}
 	var err error
 	if branchExists {
-		err = repoGit.WorktreeAddExistingBranch(spec.Path, spec.Branch)
+		err = repoGit.WorktreeAddExistingBranchCtx(ctx, spec.Path, spec.Branch, opts)
 	} else {
 		// Preserve the explicit base verbatim so git's own branch-setup
 		// semantics follow the operator's stated intent.
-		err = repoGit.WorktreeAddNewBranch(spec.Path, spec.Branch, spec.Base)
+		err = repoGit.WorktreeAddNewBranchCtx(ctx, spec.Path, spec.Branch, spec.Base, opts)
 	}
 	if err != nil {
 		return fmt.Errorf("ensuring worktree %q: %w", spec.Path, err)

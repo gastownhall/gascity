@@ -36,7 +36,7 @@ formulas.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `context` | string | Yes | — | `"separate"` creates one item convoy per member; `"shared"` materializes one single-lane item at a time with continuation affinity |
+| `context` | string | Yes | — | `"separate"` creates one item convoy per member; `"shared"` materializes one single-lane item at a time with continuation affinity, and with `member_access = "exclusive"` in a rig works every item in one controller-provisioned worktree |
 | `formula` | string | Yes | — | Name of the `graph.v2` formula to run for each item convoy |
 | `member_access` | string | No | — | `"read"` for read-only access; `"exclusive"` records a per-member reservation before materializing item work |
 | `max_units` | int | No | unlimited | Safety cap. Caps one drain expansion to prevent accidental runaway materialization (1–100 in v0) |
@@ -101,6 +101,98 @@ Shared drains materialize one single-lane item at a time with continuation
 affinity. This is useful when item work requires exclusive sequential access
 to a shared resource. Shared drains require `[steps.drain.item].single_lane = true`.
 Separate drains (`context = "separate"`) are the common case.
+
+A rig-scoped shared drain with `member_access = "exclusive"` also gets one
+git worktree for the whole drain. The controller creates it at
+`<worktrees root>/<rig>/<workflow root>-<drain id>` on the branch
+`gc/drain/<drain id>`, cut from `refs/remotes/origin/<default branch>`, the
+base the single-lane `do-work` cuts its own worktree from. The branch has no
+upstream (`--no-track`), so a bare `git push` from the worktree never targets
+the default branch. The default branch is the rig's `default_branch`, else the
+branch `refs/remotes/origin/HEAD` names (then `origin/main`, then
+`origin/master`). The controller reads that ref as last fetched and does not
+fetch. A rig without it fails the drain; the controller never falls back to
+the rig checkout's HEAD, which may be any branch, such as a deploy branch far
+behind origin. The worktrees root is
+`GC_WORKTREES_DIR`, else `T3CODE_WORKTREES_DIR`, else `$T3CODE_HOME/worktrees`,
+else `<city>/.gc/worktrees`, and must lie outside the rig checkout.
+
+The controller checks the worktree out inside its serve loop, so the checkout
+runs with the rig's git hooks disabled (`core.hooksPath=/dev/null`) and must
+finish within 5 minutes, the bound an exec check has in the same loop. A rig
+hook therefore neither runs in the worktree nor fails or stalls the drain;
+checkout filters such as Git LFS still run. A checkout cut off by the deadline
+fails the drain, and since git leaves that partial worktree locked, it stays on
+disk for an operator to remove (`git worktree remove -f -f`).
+
+Exec checks of the item steps run in the worktree wherever that root is, but a
+relative check script resolves from the rig root only, exactly as for a step
+with no `work_dir`. The worktree is never searched, not even first: the item's
+worker writes the worktree, so a copy it leaves at the check's path must not
+become the script that judges it. (A `work_dir` no drain lent keeps the usual
+order: its own copy first, then the rig root.) The check's `work_dir` must
+still be the worktree the drain's manifest records lending when the check
+runs: one rewritten to point anywhere else, even into the city or the rig,
+errors instead of running the check there.
+
+The drain lends the worktree to each member it reserves: it records the
+worktree as the member's `work_dir` and its `gc.work_dir` mirror, names itself
+in `gc.drain_workspace_control` on the member and on every bead of the
+member's item, and records the worktree as the row's `workspace` in the drain
+manifest. It provisions the worktree once, for the first member it lends it
+to. Every later member is lent the path the manifest records, as the earlier
+items left it: an item may commit on, switch or rename the branch, and the
+next item works on from there. The drain neither re-verifies nor re-creates
+the worktree, so an item that finds it removed fails as any item does.
+A member keeps a `work_dir` no drain lent it (an operator's or a pack step's)
+and one this drain lent before a crash; a `work_dir` another drain lent and
+never took back is replaced. Every close the drain makes itself (it passed,
+failed, failed hard, or was refused a reservation) takes the loan back from
+each member still open before it releases the reservation: it clears
+`gc.drain_workspace_control`, and each of `work_dir` and `gc.work_dir` that
+still holds the lent worktree. A scope abort that closes the drain as skipped
+takes back its loans and reservations the same way, whichever control drives
+the abort (a scope-check, a failed sibling's own close, or a quarantine): the
+dispatcher hands every control kind the work-class member tail, which on a
+split city is the only way to the store that holds the members. A drain
+closed from outside its own processing takes back neither: the gate that
+closes a control whose run was canceled or whose workflow root already
+settled or is missing, and a quarantine of the drain control itself, leave the
+loans and reservations on the members until an operator clears them, and
+until then an exclusive drain over such a member fails on its reservation. A
+member its item closed keeps the loan, since its `work_dir` records where its
+work was done. If it is reopened, no other drain's item steps get that
+`work_dir`, and the next drain that reserves it exclusively, of either
+context, takes the loan back first: it clears the lender key and each work_dir
+key that still holds the worktree the lender's manifest records lending (the
+`gc.work_dir` mirror when that manifest is gone, else the bare `work_dir`), so
+a `work_dir` a pack step replaced since stays. The drain then works from the
+member as the take-back left it: a `work_dir` it kept is one no drain lent, so
+the item's steps carry it, the item's session launches in it, and a shared
+drain does not lend its own worktree over it. A read-access drain owns no
+member, so it leaves the loan in place.
+
+A re-run over the same convoy is a drain of its own. Members an earlier run's
+items closed are not drained again, and the rest are lent a new worktree, cut
+afresh from origin: it does not carry the commits the earlier items left on
+`gc/drain/<earlier drain id>`. Merge that branch first if the remaining items
+build on it.
+
+A provisioning error closes the drain failed with
+`gc.failure_reason = shared_workspace_unavailable` and the error in
+`gc.controller_error`. A provisioning error is git's, not a store outage, so it
+is not retried. A rig git cannot answer for (a missing path, a repository git
+refuses) is such an error. A rig is a non-git rig, whose shared drains run with
+no worktree, only on git's own "not a git repository" reply, or when the rig
+path lies below the top level of an enclosing repository, such as a plain
+directory inside a versioned city.
+
+Closing the drain or its workflow removes neither the worktree nor its branch;
+remove them by hand. The closed-bead worktree reaper
+(`[daemon] auto_reap_closed_bead_worktrees`, off by default) collects one only
+when the workflow root's id parses from the worktree name and that root lives
+in the rig's own store and has closed. A city whose graph store is relocated (graph ids such
+as `gcg--<n>`) never matches, and the reaper never deletes branches.
 
 **Q: Can drain item formulas use drain themselves?**
 

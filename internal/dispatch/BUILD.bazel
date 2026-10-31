@@ -51,6 +51,7 @@ go_test(
         "cross_store_gate_test.go",
         "drain_conditional_test.go",
         "drain_test.go",
+        "drain_workspace_test.go",
         "fanout_membership_test.go",
         "finalize_quarantined_root_test.go",
         "finalize_query_timeout_tier_repro_test.go",

@@ -1,8 +1,10 @@
 package git
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -47,6 +49,12 @@ func (g *Git) BranchExists(branch string) (bool, error) {
 // verbatim against the local repository — no remote fallback — so an
 // explicit local base like "main" keeps its local meaning.
 func (g *Git) RevParseVerifyCommit(ref string) (string, error) {
+	return g.RevParseVerifyCommitCtx(context.Background(), ref)
+}
+
+// RevParseVerifyCommitCtx is RevParseVerifyCommit bounded by ctx. A lookup
+// ctx cut short returns an error wrapping ctx.Err().
+func (g *Git) RevParseVerifyCommitCtx(ctx context.Context, ref string) (string, error) {
 	if err := validateRefArg("ref", ref); err != nil {
 		return "", err
 	}
@@ -58,7 +66,7 @@ func (g *Git) RevParseVerifyCommit(ref string) (string, error) {
 	if appendedPeel {
 		spec = ref + "^{commit}"
 	}
-	out, err := g.run("rev-parse", "--verify", "--quiet", spec)
+	out, err := g.runCtx(ctx, "rev-parse", "--verify", "--quiet", spec)
 	if err != nil {
 		return "", fmt.Errorf("resolving ref %q: %w", ref, err)
 	}
@@ -74,7 +82,7 @@ func (g *Git) RevParseVerifyCommit(ref string) (string, error) {
 	// Only a caller-supplied peel can resolve to a ^{tree}/^{blob}, so
 	// re-verify the object type only in that case.
 	if !appendedPeel {
-		typ, err := g.run("cat-file", "-t", sha)
+		typ, err := g.runCtx(ctx, "cat-file", "-t", sha)
 		if err != nil {
 			return "", fmt.Errorf("resolving ref %q: %w", ref, err)
 		}
@@ -85,10 +93,45 @@ func (g *Git) RevParseVerifyCommit(ref string) (string, error) {
 	return sha, nil
 }
 
+// WorktreeAddOptions changes how a worktree add runs git.
+type WorktreeAddOptions struct {
+	// NoHooks disables the repository's hooks for the add
+	// (core.hooksPath=/dev/null), so a hook of the checkout the worktree is
+	// added from, such as its post-checkout hook, neither runs in the new
+	// worktree nor fails the add.
+	NoHooks bool
+	// NoTrack gives a new branch no upstream (--no-track), even one cut from
+	// a remote-tracking branch, which git's default branch.autoSetupMerge
+	// would make it track. It changes nothing when the branch exists.
+	NoTrack bool
+}
+
+// args returns the git arguments that precede the worktree subcommand.
+func (o WorktreeAddOptions) args() []string {
+	if o.NoHooks {
+		return []string{"-c", "core.hooksPath=" + os.DevNull}
+	}
+	return nil
+}
+
+// newBranchArgs returns the `worktree add` options for a new branch.
+func (o WorktreeAddOptions) newBranchArgs() []string {
+	if o.NoTrack {
+		return []string{"--no-track"}
+	}
+	return nil
+}
+
 // WorktreeAddNewBranch creates a worktree at path with a NEW branch created
 // from base. It never detaches: the new worktree has branch checked out.
 // Fails if the branch already exists.
 func (g *Git) WorktreeAddNewBranch(path, branch, base string) error {
+	return g.WorktreeAddNewBranchCtx(context.Background(), path, branch, base, WorktreeAddOptions{})
+}
+
+// WorktreeAddNewBranchCtx is WorktreeAddNewBranch bounded by ctx and run with
+// opts. An add that ctx cut short returns an error wrapping ctx.Err().
+func (g *Git) WorktreeAddNewBranchCtx(ctx context.Context, path, branch, base string, opts WorktreeAddOptions) error {
 	if err := validateRefArg("branch", branch); err != nil {
 		return err
 	}
@@ -98,7 +141,10 @@ func (g *Git) WorktreeAddNewBranch(path, branch, base string) error {
 	if err := validateRefArg("path", path); err != nil {
 		return err
 	}
-	if _, err := g.run("worktree", "add", "-b", branch, path, base); err != nil {
+	args := append(opts.args(), "worktree", "add")
+	args = append(args, opts.newBranchArgs()...)
+	args = append(args, "-b", branch, path, base)
+	if _, err := g.runCtx(ctx, args...); err != nil {
 		return fmt.Errorf("adding worktree %q on new branch %q from %q: %w", path, branch, base, err)
 	}
 	return nil
@@ -108,13 +154,21 @@ func (g *Git) WorktreeAddNewBranch(path, branch, base string) error {
 // branch checked out. It never detaches. Fails if the branch is already
 // checked out in another worktree.
 func (g *Git) WorktreeAddExistingBranch(path, branch string) error {
+	return g.WorktreeAddExistingBranchCtx(context.Background(), path, branch, WorktreeAddOptions{})
+}
+
+// WorktreeAddExistingBranchCtx is WorktreeAddExistingBranch bounded by ctx and
+// run with opts. An add that ctx cut short returns an error wrapping
+// ctx.Err().
+func (g *Git) WorktreeAddExistingBranchCtx(ctx context.Context, path, branch string, opts WorktreeAddOptions) error {
 	if err := validateRefArg("branch", branch); err != nil {
 		return err
 	}
 	if err := validateRefArg("path", path); err != nil {
 		return err
 	}
-	if _, err := g.run("worktree", "add", path, branch); err != nil {
+	args := append(opts.args(), "worktree", "add", path, branch)
+	if _, err := g.runCtx(ctx, args...); err != nil {
 		return fmt.Errorf("adding worktree %q on branch %q: %w", path, branch, err)
 	}
 	return nil

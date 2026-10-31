@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -54,6 +55,9 @@ type drainManifestRow struct {
 	OutcomeBead  string `json:"outcome_bead_id,omitempty"`
 	OutcomeKind  string `json:"outcome_kind,omitempty"`
 	Failure      string `json:"failure_reason,omitempty"`
+	// Workspace is the shared drain workspace this drain lent the row's
+	// member as its work_dir. A terminal close takes it back.
+	Workspace string `json:"workspace,omitempty"`
 }
 
 func processDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
@@ -327,6 +331,9 @@ var (
 	errDrainLimitExceeded      = errors.New("drain limit exceeded")
 	errDrainInvalidItemFormula = errors.New("invalid drain item formula")
 	errDrainUnresolvedMember   = errors.New("drain unresolved member")
+	// errDrainWorkspaceUnavailable marks a shared drain whose workspace hook
+	// refused to provision; the drain fails hard and releases its members.
+	errDrainWorkspaceUnavailable = errors.New("shared drain workspace unavailable")
 )
 
 type drainUnresolvedMemberError struct {
@@ -628,13 +635,25 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 		if i > len(members)-1 {
 			return ControlResult{}, fmt.Errorf("%s: shared drain manifest/member length mismatch", bead.ID)
 		}
-		member := members[i]
-		if err := reserveDrainMember(store, bead, member, opts); err != nil {
+		member, err := reserveDrainMember(store, bead, members[i], opts)
+		if err != nil {
 			if retryableDrainReservationError(err) {
 				return ControlResult{}, fmt.Errorf("%s: reserving drain member %s (retrying next pass): %w", bead.ID, member.ID, err)
 			}
 			return closeDrainReservationFailure(store, bead, manifest, err, opts)
 		}
+		member, err = ensureSharedDrainWorkspace(store, bead, member, manifest, row, opts)
+		if err != nil {
+			if errors.Is(err, errDrainWorkspaceUnavailable) {
+				return closeDrainHardFailure(store, bead, manifest, drainHardFailure{
+					Reason:  "shared_workspace_unavailable",
+					Subject: member.ID,
+					Detail:  err.Error(),
+				}, err, opts)
+			}
+			return ControlResult{}, err
+		}
+		members[i] = member
 		created, err := materializeDrainRow(store, bead, manifest, members, row, member, itemFormula, parentVars, opts)
 		if err != nil {
 			if errors.Is(err, errDrainInvalidItemFormula) {
@@ -661,6 +680,123 @@ func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManife
 		return closeDrainWithManifest(store, bead.ID, manifest, "failed", beadmeta.OutcomeFail, "drain-failed", opts)
 	}
 	return closeDrainWithManifest(store, bead.ID, manifest, "succeeded", beadmeta.OutcomePass, "drain-succeeded", opts)
+}
+
+// ensureSharedDrainWorkspace lends the shared drain's workspace to the
+// reserved member as its work_dir, so the item recipe stamped from that member
+// and the session launched for it both work in the one workspace the drain
+// shares. It records the lending drain next to the work_dir and on the row, so
+// a terminal close takes back exactly what was lent (releaseDrainWorkspace),
+// and returns the member as recorded.
+//
+// The drain provisions its workspace once, for the first member it lends one
+// to; every later member is lent the workspace an earlier row records, as the
+// earlier items left it (their branch, commits and working tree), without
+// provisioning or verifying it again. member is as the reservation left it
+// (reserveDrainMember): the reservation has taken back a work_dir another
+// drain lent and never took back (takeBackStaleDrainWorkspace), so this drain
+// lends its own in its place, and a work_dir a pack step replaced since that
+// loan, which the take-back keeps, is one no drain lent. A member keeps a
+// work_dir no drain lent it: a pack step that prepared its own workspace or an
+// operator put it there. It also keeps one this drain lent before a crash.
+// Only exclusive access writes: a read-access drain never owns its members. A
+// hook error fails the drain hard (errDrainWorkspaceUnavailable).
+func ensureSharedDrainWorkspace(store beads.Store, control, member beads.Bead, manifest drainManifest, row *drainManifestRow, opts ProcessOptions) (beads.Bead, error) {
+	if opts.SharedDrainWorkspace == nil || drainMemberAccess(control) != beadmeta.DrainMemberAccessExclusive {
+		return member, nil
+	}
+	if convoycore.IsUnresolvedTrackedItem(member) {
+		return member, nil
+	}
+	existing := strings.TrimSpace(member.Metadata[beadmeta.LegacyWorkDirMetadataKey])
+	lender := strings.TrimSpace(member.Metadata[beadmeta.DrainWorkspaceControlMetadataKey])
+	switch {
+	case existing != "" && lender == "":
+		return member, nil
+	case existing != "" && lender == control.ID:
+		row.Workspace = existing
+		return member, nil
+	case existing != "":
+		opts.tracef("drain-shared-workspace control=%s member=%s replacing the workspace drain %s lent", control.ID, member.ID, lender)
+	}
+	workDir, err := sharedDrainWorkspace(control, member, manifest, opts)
+	if err != nil || workDir == "" {
+		return member, err
+	}
+	memberStore, err := drainMemberOwningStore(store, member.ID, opts)
+	if err != nil {
+		return member, fmt.Errorf("%s: resolving drain member store for %s: %w", control.ID, member.ID, err)
+	}
+	// Both work_dir keys, as a verified worktree is published: a member whose
+	// gc.work_dir mirror disagreed with its work_dir would read as residue.
+	lent := map[string]string{
+		beadmeta.LegacyWorkDirMetadataKey:         workDir,
+		beadmeta.WorkDirMetadataKey:               workDir,
+		beadmeta.DrainWorkspaceControlMetadataKey: control.ID,
+	}
+	if err := memberStore.SetMetadataBatch(member.ID, lent); err != nil {
+		return member, fmt.Errorf("%s: recording shared drain workspace on member %s: %w", control.ID, member.ID, err)
+	}
+	row.Workspace = workDir
+	return withMetadata(member, lent), nil
+}
+
+// withMetadata returns bead with updates written over a copy of its metadata,
+// as a store records it once it has written updates, and leaves bead's own
+// metadata as it was.
+func withMetadata(bead beads.Bead, updates map[string]string) beads.Bead {
+	metadata := make(map[string]string, len(bead.Metadata)+len(updates))
+	maps.Copy(metadata, bead.Metadata)
+	maps.Copy(metadata, updates)
+	bead.Metadata = metadata
+	return bead
+}
+
+// sharedDrainWorkspace returns the workspace the drain lends member: the one
+// an earlier row of manifest records, else what the hook provisions. "" means
+// the control's scope has no workspace.
+func sharedDrainWorkspace(control, member beads.Bead, manifest drainManifest, opts ProcessOptions) (string, error) {
+	if workDir := manifest.workspace(); workDir != "" {
+		return workDir, nil
+	}
+	workDir, err := opts.SharedDrainWorkspace(control)
+	if err != nil {
+		return "", fmt.Errorf("%w: %s: provisioning shared drain workspace for member %s: %w", errDrainWorkspaceUnavailable, control.ID, member.ID, err)
+	}
+	if workDir == "" {
+		opts.tracef("drain-shared-workspace control=%s member=%s no workspace for this scope", control.ID, member.ID)
+	}
+	return workDir, nil
+}
+
+// workspace returns the shared drain workspace a row of the manifest records
+// the drain lent, or "" when the drain lent none. A drain lends one
+// workspace, so every row that records one records the same.
+func (m drainManifest) workspace() string {
+	for _, row := range m.Rows {
+		if row.Workspace != "" {
+			return row.Workspace
+		}
+	}
+	return ""
+}
+
+// lentDrainWorkspace returns the workspace the drain control controlID records
+// in its manifest as lent to its members, or "" when it records none.
+func lentDrainWorkspace(store beads.Store, controlID string) (string, error) {
+	control, err := store.Get(controlID)
+	if err != nil {
+		return "", fmt.Errorf("loading drain %s: %w", controlID, err)
+	}
+	raw := control.Metadata[drainManifestMetadataKey]
+	if strings.TrimSpace(raw) == "" {
+		return "", nil
+	}
+	manifest, err := parseDrainManifest(raw)
+	if err != nil {
+		return "", fmt.Errorf("parsing drain %s manifest: %w", controlID, err)
+	}
+	return manifest.workspace(), nil
 }
 
 func materializeDrainRow(store beads.Store, control beads.Bead, manifest drainManifest, members []beads.Bead, row *drainManifestRow, member beads.Bead, itemFormula string, parentVars map[string]string, opts ProcessOptions) (int, error) {
@@ -1645,10 +1781,7 @@ func stampDrainItemRecipe(recipe *formula.Recipe, control, unit, member beads.Be
 	if metadata := graphv2.RuntimeVarsMetadata(vars); metadata != "" {
 		root.Metadata[graphv2.RuntimeVarsMetadataKey] = metadata
 	}
-	workDir := strings.TrimSpace(member.Metadata[beadmeta.WorkDirMetadataKey])
-	if workDir == "" {
-		workDir = strings.TrimSpace(member.Metadata[beadmeta.LegacyWorkDirMetadataKey])
-	}
+	workDir, lender := drainItemWorkDir(control, member)
 	if workDir != "" {
 		for i := range recipe.Steps {
 			step := &recipe.Steps[i]
@@ -1657,6 +1790,9 @@ func stampDrainItemRecipe(recipe *formula.Recipe, control, unit, member beads.Be
 			}
 			step.Metadata[beadmeta.WorkDirMetadataKey] = workDir
 			step.Metadata[beadmeta.LegacyWorkDirMetadataKey] = workDir
+			if lender != "" {
+				step.Metadata[beadmeta.DrainWorkspaceControlMetadataKey] = lender
+			}
 		}
 	}
 	if strings.TrimSpace(control.Metadata[beadmeta.DrainContextMetadataKey]) == beadmeta.DrainContextShared {
@@ -1673,6 +1809,30 @@ func stampDrainItemRecipe(recipe *formula.Recipe, control, unit, member beads.Be
 			step.Metadata[beadmeta.SessionAffinityMetadataKey] = "require"
 		}
 	}
+}
+
+// drainItemWorkDir returns the member work_dir control stamps on the item it
+// materializes for member, and the drain that lent it ("" when no drain did).
+// The bare work_dir is the worktree creator's record and the launch authority;
+// gc.work_dir is only an observability mirror. A work_dir a shared drain lent
+// travels with the drain that lent it, so an exec check knows the worker it
+// judges writes that tree (runRalphCheck). One another drain lent and never
+// took back is that drain's workspace, not this item's: the item gets none.
+func drainItemWorkDir(control, member beads.Bead) (string, string) {
+	lender := strings.TrimSpace(member.Metadata[beadmeta.DrainWorkspaceControlMetadataKey])
+	if lender != "" && lender != control.ID {
+		return "", ""
+	}
+	return memberWorkDir(member), lender
+}
+
+// memberWorkDir returns a drain member's work_dir: the bare work_dir, else
+// its gc.work_dir mirror.
+func memberWorkDir(member beads.Bead) string {
+	if workDir := strings.TrimSpace(member.Metadata[beadmeta.LegacyWorkDirMetadataKey]); workDir != "" {
+		return workDir
+	}
+	return strings.TrimSpace(member.Metadata[beadmeta.WorkDirMetadataKey])
 }
 
 // isSharedDrainExecutableStep reports whether a drain item recipe step is
@@ -1717,29 +1877,92 @@ func (e drainReservationError) Error() string {
 // reservation read and write route to the member's owning store
 // (drainMemberOwningStore). On origin/main the owning store is the single store,
 // matching the pre-seam store.Get/store.SetMetadata behavior exactly.
-func reserveDrainMember(store beads.Store, control, member beads.Bead, opts ProcessOptions) error {
+//
+// It returns the member as the reservation left it: read from its owning store,
+// with the claim and the take-back of another drain's loan
+// (takeBackStaleDrainWorkspace) applied, so the drain lends its workspace and
+// stamps the item from what the member now records. A member it does not
+// reserve (read access, or no store has it) is returned as given.
+func reserveDrainMember(store beads.Store, control, member beads.Bead, opts ProcessOptions) (beads.Bead, error) {
 	if drainMemberAccess(control) != beadmeta.DrainMemberAccessExclusive {
-		return nil
+		return member, nil
 	}
 	memberStore, err := drainMemberOwningStore(store, member.ID, opts)
 	if err != nil {
-		return fmt.Errorf("%s: resolving exclusive drain member store for %s: %w", control.ID, member.ID, err)
+		return member, fmt.Errorf("%s: resolving exclusive drain member store for %s: %w", control.ID, member.ID, err)
 	}
 	current, err := memberStore.Get(member.ID)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
-			return nil
+			return member, nil
 		}
-		return fmt.Errorf("%s: loading exclusive drain member %s: %w", control.ID, member.ID, err)
+		return member, fmt.Errorf("%s: loading exclusive drain member %s: %w", control.ID, member.ID, err)
 	}
 	owner := strings.TrimSpace(current.Metadata[beadmeta.ExclusiveDrainReservationMetadataKey])
 	if owner != "" && owner != control.ID {
-		return drainReservationError{ControlID: control.ID, MemberID: member.ID, Owner: owner}
+		return member, drainReservationError{ControlID: control.ID, MemberID: member.ID, Owner: owner}
 	}
-	if owner == control.ID {
-		return nil
+	if owner != control.ID {
+		if err := claimDrainReservation(memberStore, control, member); err != nil {
+			return member, err
+		}
+		current = withMetadata(current, map[string]string{beadmeta.ExclusiveDrainReservationMetadataKey: control.ID})
 	}
-	return claimDrainReservation(memberStore, control, member)
+	return takeBackStaleDrainWorkspace(store, memberStore, control.ID, current, opts)
+}
+
+// takeBackStaleDrainWorkspace clears a work_dir another drain lent member and
+// never took back: the member was closed when that drain released its
+// members and has been reopened since, or a crash left the loan behind. A
+// drain lends only a member it holds the exclusive reservation of, and
+// controlID holds it now, so no other drain's loan stands. Like the lender's
+// own release (releaseDrainWorkspace), it clears the key naming the lender and
+// each work_dir key that still holds the workspace the lender's manifest
+// (read from store, where drain controls live) records lending, so the
+// member's next item neither starts in nor is checked in a closed drain's
+// workspace, and a work_dir replaced since the lend stays. When the lender is
+// gone or records no workspace, the lent workspace is the gc.work_dir mirror
+// the lend wrote: a step that replaces a member's workspace writes only the
+// bare work_dir. With no mirror either, the key naming the lender is all that
+// records the loan, and the lent workspace is the bare work_dir. It returns
+// member as the take-back left it.
+func takeBackStaleDrainWorkspace(store, memberStore beads.Store, controlID string, member beads.Bead, opts ProcessOptions) (beads.Bead, error) {
+	lender := strings.TrimSpace(member.Metadata[beadmeta.DrainWorkspaceControlMetadataKey])
+	if lender == "" || lender == controlID {
+		return member, nil
+	}
+	lent, err := lentDrainWorkspace(store, lender)
+	if err != nil && !errors.Is(err, beads.ErrNotFound) {
+		return member, fmt.Errorf("%s: reading the workspace drain %s lent member %s: %w", controlID, lender, member.ID, err)
+	}
+	if lent == "" {
+		lent = strings.TrimSpace(member.Metadata[beadmeta.WorkDirMetadataKey])
+	}
+	if lent == "" {
+		lent = strings.TrimSpace(member.Metadata[beadmeta.LegacyWorkDirMetadataKey])
+	}
+	released := drainWorkspaceRelease(member, lent)
+	if err := memberStore.SetMetadataBatch(member.ID, released); err != nil {
+		return member, fmt.Errorf("%s: taking back the workspace drain %s lent member %s: %w", controlID, lender, member.ID, err)
+	}
+	opts.tracef("drain-shared-workspace control=%s member=%s took back the workspace %q drain %s lent", controlID, member.ID, lent, lender)
+	return withMetadata(member, released), nil
+}
+
+// drainWorkspaceRelease returns the metadata that takes back the workspace a
+// drain lent member: it clears the key naming the drain, and each work_dir
+// key (work_dir, gc.work_dir) that still holds workspace.
+func drainWorkspaceRelease(member beads.Bead, workspace string) map[string]string {
+	released := map[string]string{beadmeta.DrainWorkspaceControlMetadataKey: ""}
+	if workspace == "" {
+		return released
+	}
+	for _, key := range []string{beadmeta.LegacyWorkDirMetadataKey, beadmeta.WorkDirMetadataKey} {
+		if strings.TrimSpace(member.Metadata[key]) == workspace {
+			released[key] = ""
+		}
+	}
+	return released
 }
 
 // claimDrainReservation claims the empty reservation slot. When the member's
@@ -1804,21 +2027,33 @@ func claimDrainReservationCAS(memberStore beads.Store, writer beads.ConditionalW
 	return fmt.Errorf("%s: reserving drain member %s: %w", control.ID, member.ID, lastErr)
 }
 
+// reserveDrainMembers reserves each member (reserveDrainMember) and replaces it
+// in members with the member as its reservation left it, so the items are
+// stamped from what each member now records.
 func reserveDrainMembers(store beads.Store, control beads.Bead, members []beads.Bead, opts ProcessOptions) error {
-	for _, member := range members {
-		if err := reserveDrainMember(store, control, member, opts); err != nil {
+	for i, member := range members {
+		reserved, err := reserveDrainMember(store, control, member, opts)
+		if err != nil {
 			return err
 		}
+		members[i] = reserved
 	}
 	return nil
 }
 
+// releaseDrainReservations releases what a drain holds on its members: the
+// workspace it lent each one (releaseDrainWorkspace), then its exclusive
+// reservation. The workspace goes first, while the reservation still keeps
+// any other drain from lending that member a workspace of its own. It traces
+// how many of the drain's members it released anything from, so a release
+// that found nothing to take back shows as such.
 func releaseDrainReservations(store beads.Store, controlID string, manifest drainManifest, opts ProcessOptions) error {
 	controlID = strings.TrimSpace(controlID)
 	if store == nil || controlID == "" {
 		return nil
 	}
 	seen := make(map[string]bool, len(manifest.Rows))
+	released := 0
 	for _, row := range manifest.Rows {
 		memberID := strings.TrimSpace(row.MemberID)
 		if memberID == "" || seen[memberID] {
@@ -1829,63 +2064,132 @@ func releaseDrainReservations(store beads.Store, controlID string, manifest drai
 		if err != nil {
 			return fmt.Errorf("%s: resolving drain member store for %s: %w", controlID, memberID, err)
 		}
-		if err := releaseDrainReservation(memberStore, controlID, memberID); err != nil {
+		lent, err := releaseDrainWorkspace(memberStore, controlID, memberID, row.Workspace)
+		if err != nil {
 			return err
+		}
+		reserved, err := releaseDrainReservation(memberStore, controlID, memberID)
+		if err != nil {
+			return err
+		}
+		if lent || reserved {
+			released++
+		}
+	}
+	opts.tracef("drain-release control=%s released=%d members=%d", controlID, released, len(seen))
+	return nil
+}
+
+// releaseSkippedDrains releases, for each drain control among ids (scope
+// members of pending a scope abort is about to close as skipped), what it
+// holds on its own members: the workspace it lent each one, then its
+// exclusive reservation (releaseDrainReservations), as every terminal close
+// of a drain does. The skip closes a drain without processing it, so nothing
+// else would take them back. A drain is read again for its latest manifest;
+// one that recorded no manifest has reserved nothing.
+func releaseSkippedDrains(store beads.Store, ids []string, pending map[string]beads.Bead, opts ProcessOptions) error {
+	for _, id := range ids {
+		if strings.TrimSpace(pending[id].Metadata[beadmeta.KindMetadataKey]) != beadmeta.KindDrain {
+			continue
+		}
+		drain, err := store.Get(id)
+		if err != nil {
+			return fmt.Errorf("%s: loading skipped drain to release its members: %w", id, err)
+		}
+		raw := drain.Metadata[drainManifestMetadataKey]
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		manifest, err := parseDrainManifest(raw)
+		if err != nil {
+			return fmt.Errorf("%s: parsing skipped drain manifest to release its members: %w", id, err)
+		}
+		if err := releaseDrainReservations(store, id, manifest, opts); err != nil {
+			return fmt.Errorf("releasing the members of skipped drain %s: %w", id, err)
 		}
 	}
 	return nil
 }
 
-// releaseDrainReservation clears this control's reservation on one member.
-// The fenced form is symmetric with the claim: CAS(controlID → ""), and
-// LOSING that CAS is the correct outcome — the member was already re-claimed
-// by a successor drain, which is precisely the case where clearing it would
-// clobber; the loss is never retried. The legacy form preserves the original
-// read-verify-clear byte-for-byte.
-func releaseDrainReservation(memberStore beads.Store, controlID, memberID string) error {
+// releaseDrainWorkspace takes back the workspace a shared drain lent a member
+// (ensureSharedDrainWorkspace) and reports whether it did. It clears the key
+// naming the drain and each work_dir key (work_dir, gc.work_dir) that still
+// holds the lent workspace. A work_dir replaced since the drain lent it, or
+// one another drain lent, stays. A member its item closed keeps them all: the
+// work_dir is the record of where its work was done, and a drain never
+// expands a closed member. If the member is reopened, no later drain's item
+// works there (drainItemWorkDir), and the next drain to reserve it takes them
+// back (takeBackStaleDrainWorkspace).
+func releaseDrainWorkspace(memberStore beads.Store, controlID, memberID, workspace string) (bool, error) {
+	if workspace == "" {
+		return false, nil
+	}
+	member, err := memberStore.Get(memberID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("%s: loading drain member %s for workspace release: %w", controlID, memberID, err)
+	}
+	if member.Status == "closed" || strings.TrimSpace(member.Metadata[beadmeta.DrainWorkspaceControlMetadataKey]) != controlID {
+		return false, nil
+	}
+	if err := memberStore.SetMetadataBatch(memberID, drainWorkspaceRelease(member, workspace)); err != nil {
+		return false, fmt.Errorf("%s: releasing shared drain workspace on %s: %w", controlID, memberID, err)
+	}
+	return true, nil
+}
+
+// releaseDrainReservation clears this control's reservation on one member and
+// reports whether this call cleared it. The fenced form is symmetric with the
+// claim: CAS(controlID → ""), and LOSING that CAS is the correct outcome — the
+// member was already re-claimed by a successor drain, which is precisely the
+// case where clearing it would clobber; the loss is never retried. The legacy
+// form preserves the original read-verify-clear byte-for-byte.
+func releaseDrainReservation(memberStore beads.Store, controlID, memberID string) (bool, error) {
 	writer, _, err := beads.ResolveConditionalWriter(memberStore)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if writer == nil {
 		member, err := memberStore.Get(memberID)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
-				return nil
+				return false, nil
 			}
-			return fmt.Errorf("%s: loading drain member %s for reservation release: %w", controlID, memberID, err)
+			return false, fmt.Errorf("%s: loading drain member %s for reservation release: %w", controlID, memberID, err)
 		}
 		if strings.TrimSpace(member.Metadata[beadmeta.ExclusiveDrainReservationMetadataKey]) != controlID {
-			return nil
+			return false, nil
 		}
 		if err := memberStore.SetMetadata(memberID, beadmeta.ExclusiveDrainReservationMetadataKey, ""); err != nil {
-			return fmt.Errorf("%s: releasing drain reservation on %s: %w", controlID, memberID, err)
+			return false, fmt.Errorf("%s: releasing drain reservation on %s: %w", controlID, memberID, err)
 		}
-		return nil
+		return true, nil
 	}
 	ok, casErr := writer.CompareAndSetMetadataKey(memberID, beadmeta.ExclusiveDrainReservationMetadataKey, controlID, "")
 	if ok {
-		return nil
+		return true, nil
 	}
 	if casErr == nil || beads.IsPreconditionFailed(casErr) {
 		// Value loss or revision conflict: we no longer own the slot (already
 		// cleared, or a successor re-claimed it). Clearing now would clobber —
 		// the loss IS the release goal being moot.
-		return nil
+		return false, nil
 	}
 	if errors.Is(casErr, beads.ErrNotFound) {
-		return nil
+		return false, nil
 	}
 	// Ambiguous transport errors may have committed our clear: verify before
 	// surfacing (§9.3 — never conclude from the error alone).
 	if member, getErr := memberStore.Get(memberID); getErr == nil {
 		if strings.TrimSpace(member.Metadata[beadmeta.ExclusiveDrainReservationMetadataKey]) != controlID {
-			return nil
+			return false, nil
 		}
 	} else if errors.Is(getErr, beads.ErrNotFound) {
-		return nil
+		return false, nil
 	}
-	return fmt.Errorf("%s: releasing drain reservation on %s: %w", controlID, memberID, casErr)
+	return false, fmt.Errorf("%s: releasing drain reservation on %s: %w", controlID, memberID, casErr)
 }
 
 // retryableDrainReservationError reports whether a reservation failure is a
@@ -1941,11 +2245,31 @@ func closeDrainReservationFailure(store beads.Store, bead beads.Bead, manifest d
 }
 
 func closeDrainItemFormulaFailure(store beads.Store, bead beads.Bead, manifest drainManifest, err error, opts ProcessOptions) (ControlResult, error) {
-	const failureReason = "invalid_drain_item_formula"
-	if closeErr := closeOpenDrainItemRoots(store, &manifest, failureReason); closeErr != nil {
+	return closeDrainHardFailure(store, bead, manifest, drainHardFailure{
+		Reason:  "invalid_drain_item_formula",
+		Subject: manifest.Formula,
+	}, err, opts)
+}
+
+// drainHardFailure names why a drain failed hard. A non-empty Subject is
+// recorded as gc.failure_subject; a non-empty Detail as a hard
+// gc.controller_error.
+type drainHardFailure struct {
+	Reason  string
+	Subject string
+	Detail  string
+}
+
+// closeDrainHardFailure terminally fails a drain: it closes open item roots,
+// marks incomplete rows failed, records the manifest and a hard failure,
+// releases the drain's member reservations, and closes the control. Like
+// closeDrainControl it clears stale controller-error state, then records the
+// failure's Detail in its place.
+func closeDrainHardFailure(store beads.Store, bead beads.Bead, manifest drainManifest, failure drainHardFailure, err error, opts ProcessOptions) (ControlResult, error) {
+	if closeErr := closeOpenDrainItemRoots(store, &manifest, failure.Reason); closeErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: closing partial drain item roots after %w: %w", bead.ID, err, closeErr)
 	}
-	markIncompleteDrainRowsFailed(&manifest, failureReason)
+	markIncompleteDrainRowsFailed(&manifest, failure.Reason)
 	data, marshalErr := json.Marshal(manifest)
 	if marshalErr != nil {
 		return ControlResult{}, marshalErr
@@ -1954,18 +2278,23 @@ func closeDrainItemFormulaFailure(store beads.Store, bead beads.Bead, manifest d
 		beadmeta.DrainStateMetadataKey:    beadmeta.DrainStateFailed,
 		beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
 		beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassHard,
-		beadmeta.FailureReasonMetadataKey: failureReason,
+		beadmeta.FailureReasonMetadataKey: failure.Reason,
 		drainManifestMetadataKey:          string(data),
 	}
-	if manifest.Formula != "" {
-		metadata[beadmeta.FailureSubjectMetadataKey] = manifest.Formula
+	if failure.Subject != "" {
+		metadata[beadmeta.FailureSubjectMetadataKey] = failure.Subject
+	}
+	clearControllerSpawnErrorMetadata(metadata)
+	if failure.Detail != "" {
+		metadata[beadmeta.ControllerErrorMetadataKey] = failure.Detail
+		metadata[beadmeta.ControllerErrorClassMetadataKey] = beadmeta.FailureClassHard
 	}
 	if releaseErr := releaseDrainReservations(store, bead.ID, manifest, opts); releaseErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: releasing reservations after %w: %w", bead.ID, err, releaseErr)
 	}
-	result, closeErr := closeDrainControl(store, bead.ID, metadata, "drain-failed", opts)
+	result, closeErr := closeScopedControl(store, bead.ID, metadata, "drain-failed", opts)
 	if closeErr != nil {
-		return ControlResult{}, fmt.Errorf("%s: closing invalid-item-formula drain after %w: %w", bead.ID, err, closeErr)
+		return ControlResult{}, fmt.Errorf("%s: closing %s drain after %w: %w", bead.ID, failure.Reason, err, closeErr)
 	}
 	return result, nil
 }

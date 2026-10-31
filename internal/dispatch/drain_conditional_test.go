@@ -109,7 +109,7 @@ func TestReserveDrainMemberCASContention(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			results[i] = reserveDrainMember(store, controls[i], member, ProcessOptions{})
+			_, results[i] = reserveDrainMember(store, controls[i], member, ProcessOptions{})
 		}()
 	}
 	wg.Wait()
@@ -145,8 +145,12 @@ func TestReserveDrainMemberCASReentryIsIdempotent(t *testing.T) {
 	store := newStampedDrainStore(t, gate.Auto)
 	control, member := newDrainReservationFixtures(t, store)
 	for i := range 2 {
-		if err := reserveDrainMember(store, control, member, ProcessOptions{}); err != nil {
+		reserved, err := reserveDrainMember(store, control, member, ProcessOptions{})
+		if err != nil {
 			t.Fatalf("reserve #%d: %v (re-entry must be success, not skip)", i+1, err)
+		}
+		if got := reserved.Metadata[beadmeta.ExclusiveDrainReservationMetadataKey]; got != "drain-a" {
+			t.Fatalf("reserve #%d returned the member with owner %q, want drain-a as the reservation left it", i+1, got)
 		}
 	}
 	if owner := reservationOwner(t, store, member.ID); owner != "drain-a" {
@@ -159,7 +163,7 @@ func TestReserveDrainMemberRequireIncapableFailsClosed(t *testing.T) {
 	store.DisableConditionalWrites = true
 	control, member := newDrainReservationFixtures(t, store)
 
-	err := reserveDrainMember(store, control, member, ProcessOptions{})
+	_, err := reserveDrainMember(store, control, member, ProcessOptions{})
 	if !beads.IsConditionalWritesRequired(err) {
 		t.Fatalf("err = %v, want the typed require refusal", err)
 	}
@@ -239,11 +243,15 @@ func TestReleaseDrainReservationCAS(t *testing.T) {
 	t.Run("owner clears its own reservation", func(t *testing.T) {
 		store := newStampedDrainStore(t, gate.Auto)
 		control, member := newDrainReservationFixtures(t, store)
-		if err := reserveDrainMember(store, control, member, ProcessOptions{}); err != nil {
+		if _, err := reserveDrainMember(store, control, member, ProcessOptions{}); err != nil {
 			t.Fatalf("reserve: %v", err)
 		}
-		if err := releaseDrainReservation(store, "drain-a", member.ID); err != nil {
+		released, err := releaseDrainReservation(store, "drain-a", member.ID)
+		if err != nil {
 			t.Fatalf("release: %v", err)
+		}
+		if !released {
+			t.Fatal("release reported nothing released, want the owner's own reservation cleared")
 		}
 		if owner := reservationOwner(t, store, member.ID); owner != "" {
 			t.Fatalf("owner = %q after release, want empty", owner)
@@ -257,8 +265,12 @@ func TestReleaseDrainReservationCAS(t *testing.T) {
 		if err := store.SetMetadata(member.ID, beadmeta.ExclusiveDrainReservationMetadataKey, "drain-successor"); err != nil {
 			t.Fatalf("seed successor: %v", err)
 		}
-		if err := releaseDrainReservation(store, "drain-a", member.ID); err != nil {
+		released, err := releaseDrainReservation(store, "drain-a", member.ID)
+		if err != nil {
 			t.Fatalf("release after successor re-claim = %v, want nil (loss is correct)", err)
+		}
+		if released {
+			t.Fatal("release after successor re-claim reported a release, want none (the slot is the successor's)")
 		}
 		if owner := reservationOwner(t, store, member.ID); owner != "drain-successor" {
 			t.Fatalf("owner = %q, want the successor's reservation intact", owner)

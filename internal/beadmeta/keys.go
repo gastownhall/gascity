@@ -193,7 +193,13 @@ const (
 	// constraint. Drains no longer write it — they hold the item behind a
 	// cross-store gate instead (internal/dispatch cross_store_gate.go) — and it
 	// is kept so the roots that carry it still read. Comma-separated bead ids.
-	DrainUnprojectedBlockersMetadataKey  = "gc.drain_unprojected_blockers"
+	DrainUnprojectedBlockersMetadataKey = "gc.drain_unprojected_blockers"
+	// DrainWorkspaceControlMetadataKey names, on a drain member, the shared
+	// drain control that lent the member its work_dir. A work_dir without it
+	// came from an operator or a pack step, and no drain releases it. Every
+	// bead of the member's item carries it next to the stamped work_dir, so
+	// an exec check runs there but never resolves its script there.
+	DrainWorkspaceControlMetadataKey     = "gc.drain_workspace_control"
 	DurationMsMetadataKey                = "gc.duration_ms"
 	DynamicFragmentMetadataKey           = "gc.dynamic_fragment"
 	ExclusiveDrainReservationMetadataKey = "gc.exclusive_drain_reservation"
@@ -606,6 +612,7 @@ var KnownMetadataKeys = []string{
 	DrainStateMetadataKey,
 	DrainUnitKeyMetadataKey,
 	DrainUnprojectedBlockersMetadataKey,
+	DrainWorkspaceControlMetadataKey,
 	DurationMsMetadataKey,
 	DynamicFragmentMetadataKey,
 	ExclusiveDrainReservationMetadataKey,

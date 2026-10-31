@@ -250,6 +250,20 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 
 	opts := dispatch.ProcessOptions{CityPath: cityPath, StorePath: storePath}
 	opts.Tracef = workflowTracef
+	// The control kinds read work beads they did not create: a drain reads the
+	// convoy it expands over, which is minted alongside its work members and
+	// stays in the scope store (the same store handed to EmitCurrent below as
+	// the work leg that owns that convoy's tracks edges), and reserves and lends
+	// those members; the retry lane reads a required artifact's source bead or
+	// input convoy. A scope abort, which any control kind's failed close can
+	// drive, takes back what each drain it skips holds on its members. Naming
+	// the work leg as the member tail is what lets those reads and writes cross
+	// the class boundary. Only when the class actually relocated: on every other
+	// city graphStore IS store, and an empty tail keeps each of them on the
+	// single direct call it makes today.
+	if graphStore != store {
+		opts.MemberStores = []beads.Store{store}
+	}
 	loadCfg := false
 	// This is a per-kind capability switch (does this control kind need city
 	// config loaded to resolve store-refs/formulas/sessions?), not a
@@ -290,50 +304,23 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 			opts.PrepareRecipe = func(recipe *formula.Recipe, source beads.Bead) error {
 				return decorateDrainItemRecipe(recipe, source, graphStore, workflowStoreRefForDir(storePath, cityPath, loadedCityName(cfg, cityPath), cfg), loadedCityName(cfg, cityPath), cityPath, cfg)
 			}
-			// A drain is the one control kind that reads beads it did not
-			// create. Its control and item roots are graph class and run
-			// against graphStore above, but the convoy it expands over is
-			// minted alongside its work members and stays in the scope store —
-			// the same store handed to EmitCurrent below as the work leg that
-			// owns that convoy's tracks edges. Naming it here is what lets the
-			// membership read, the member reservations and the member
-			// dependency projection cross the class boundary. Only when the
-			// class actually relocated: on every other city graphStore IS
-			// store, and an empty tail keeps each of those reads on the single
-			// direct call it makes today.
-			// Both readings above assume the drain's convoy lives in the SCOPE
-			// store it is dispatched from. Enforce that (ga-w2mf3).
+			opts.SharedDrainWorkspace = sharedDrainWorkspaceProvisioner(cityPath, storePath, cfg)
+			// The member tail above assumes the drain's convoy lives in the
+			// SCOPE store it is dispatched from. Enforce that (ga-w2mf3).
 			if err := assertDrainRootScopeMatchesDispatch(bead, workflowStoreRefForDir(storePath, cityPath, loadedCityName(cfg, cityPath), cfg)); err != nil {
 				return err
 			}
-			if graphStore != store {
-				opts.MemberStores = []beads.Store{store}
-			}
 		case "retry-eval":
-			// A retry-eval validating a required artifact resolves the
-			// artifact worktree through the workflow's source bead or input
-			// convoy, which are work class; when the graph class relocated,
-			// supply the work leg as the member tail so that read crosses the
-			// class boundary. Route-gated exactly like the drain: on every
-			// other city graphStore IS store and the tail stays empty.
-			if graphStore != store {
-				opts.MemberStores = []beads.Store{store} // residency:allow route-gated work-leg tail for the retry lane's cross-store required-artifact source read; same shape as the drain arm above
-			}
 			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, store, cfg)
 		case "retry", "ralph":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
-			// Same cross-store required-artifact source resolution as
-			// retry-eval above.
-			if graphStore != store {
-				opts.MemberStores = []beads.Store{store} // residency:allow route-gated work-leg tail for the retry lane's cross-store required-artifact source read; same shape as the drain arm above
-			}
 			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, store, cfg)
 		}
 	}
 
 	result, err := dispatch.ProcessControl(graphStore, bead, opts)
 	if err != nil {
-		return handleControlDispatchError(cityPath, storePath, graphStore, bead, beadID, err, stderr)
+		return handleControlDispatchError(cityPath, storePath, graphStore, bead, beadID, err, stderr, opts.MemberStores...)
 	}
 	if result.Processed {
 		if rootID := controlRootID(bead.Metadata); rootID != "" {
@@ -416,8 +403,10 @@ func recycleDispatchSubjectSession(cityPath string, store beads.Store, cfg *conf
 // and either retried — quietly once it repeats — or, once the budget expires,
 // quarantined; any other classification quarantines on the first refusal. It
 // returns nil once the bead is quarantined and the (possibly quiet-wrapped)
-// cause when the bead should be retried.
-func handleControlDispatchError(cityPath, storePath string, graphStore beads.Store, bead beads.Bead, beadID string, cause error, stderr io.Writer) error {
+// cause when the bead should be retried. memberStores is the dispatch's
+// work-class store tail (ProcessOptions.MemberStores), which the quarantine's
+// scope reconcile needs (quarantineControlFailureBead).
+func handleControlDispatchError(cityPath, storePath string, graphStore beads.Store, bead beads.Bead, beadID string, cause error, stderr io.Writer, memberStores ...beads.Store) error {
 	if errors.Is(cause, dispatch.ErrControlDriftPending) {
 		return handleControlDriftRefusal(cityPath, storePath, graphStore, bead, beadID, cause, stderr)
 	}
@@ -459,7 +448,7 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 	// because RecordSemanticControlRetry already persisted first_seen/count/error
 	// on the bead, so `bd show` still explains the stall even when the event is
 	// lost.
-	settleFailure, quarantineErr := quarantineControlFailureBead(graphStore, bead, cause)
+	settleFailure, quarantineErr := quarantineControlFailureBead(graphStore, bead, cause, memberStores...)
 	if quarantineErr != nil {
 		return errors.Join(cause, quarantineErr)
 	}
@@ -713,7 +702,11 @@ type rootSettleFailure struct {
 // make progress. When the bead is a workflow-finalize control whose workflow
 // root fails to settle behind it, the returned *rootSettleFailure is non-nil
 // so the caller can surface the stranded root instead of it going silent.
-func quarantineControlFailureBead(store beads.Store, bead beads.Bead, cause error) (*rootSettleFailure, error) {
+// memberStores is the work-class store tail the closed bead's scope reconcile
+// resolves members through: the quarantine is a failed close, so it aborts
+// the bead's scope, and the abort takes back what each drain it skips holds
+// on its members, which are work beads.
+func quarantineControlFailureBead(store beads.Store, bead beads.Bead, cause error, memberStores ...beads.Store) (*rootSettleFailure, error) {
 	beadID := bead.ID
 	failureReason := "control_dispatch_error"
 	if errors.Is(cause, dispatch.ErrControlGraphMalformed) {
@@ -739,7 +732,9 @@ func quarantineControlFailureBead(store beads.Store, bead beads.Bead, cause erro
 	}); err != nil {
 		return nil, err
 	}
-	_, _ = dispatch.ReconcileClosedScopeMember(store, beadID)
+	if _, err := dispatch.ReconcileClosedScopeMember(store, beadID, memberStores...); err != nil {
+		workflowTracef("control-quarantine bead=%s: reconciling its scope failed err=%v", beadID, err)
+	}
 
 	if strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflowFinalize {
 		// Best-effort, like the ReconcileClosedScopeMember call above: the
@@ -751,7 +746,7 @@ func quarantineControlFailureBead(store beads.Store, bead beads.Bead, cause erro
 		// so instead of letting the stranded root go silent, record the
 		// failure durably on the root and hand it back to the caller. See
 		// ga-li4qa4.
-		if settleErr := settleRootForQuarantinedFinalizer(store, bead); settleErr != nil {
+		if settleErr := settleRootForQuarantinedFinalizer(store, bead, memberStores...); settleErr != nil {
 			workflowTracef("control-quarantine bead=%s: closing root for quarantined finalizer failed err=%v", beadID, settleErr)
 			rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 			return recordRootSettleFailure(store, rootID, beadID, settleErr), nil
@@ -809,8 +804,10 @@ func recordRootSettleFailure(store beads.Store, rootID, finalizerBeadID string, 
 // via setOutcomeAndClose before closing the finalizer itself), so without
 // this the root never reaches Status=="closed" and survives every
 // rootSettled-gated check forever even though its finalizer is dead. See
-// ga-japz50 / ga-xn8ml8.
-func settleRootForQuarantinedFinalizer(store beads.Store, finalizer beads.Bead) error {
+// ga-japz50 / ga-xn8ml8. memberStores is the work-class store tail the closed
+// root's scope reconcile resolves members through, as for
+// quarantineControlFailureBead.
+func settleRootForQuarantinedFinalizer(store beads.Store, finalizer beads.Bead, memberStores ...beads.Store) error {
 	rootID := strings.TrimSpace(finalizer.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" || rootID == finalizer.ID {
 		return nil
@@ -838,7 +835,9 @@ func settleRootForQuarantinedFinalizer(store beads.Store, finalizer beads.Bead) 
 	}); err != nil {
 		return err
 	}
-	_, _ = dispatch.ReconcileClosedScopeMember(store, rootID)
+	if _, err := dispatch.ReconcileClosedScopeMember(store, rootID, memberStores...); err != nil {
+		workflowTracef("control-quarantine root=%s: reconciling its scope failed err=%v", rootID, err)
+	}
 	return nil
 }
 

@@ -181,6 +181,65 @@ func TestIsRepo(t *testing.T) {
 	}
 }
 
+// TestProbeRepoRootCtx pins that only a repository's top level reads as a
+// repository, and that only git's own "no repository here or in any parent"
+// reply or a directory inside another repository's checkout reads as none:
+// every probe that fails for another reason is an error, never a quiet "not a
+// repo".
+func TestProbeRepoRootCtx(t *testing.T) {
+	repo := initTestRepo(t)
+	if ok, err := New(repo).ProbeRepoRootCtx(context.Background()); !ok || err != nil {
+		t.Fatalf("ProbeRepoRootCtx(repo) = %v, %v; want true, nil", ok, err)
+	}
+	nested := filepath.Join(repo, "rigs", "notes")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", nested, err)
+	}
+	if ok, err := New(nested).ProbeRepoRootCtx(context.Background()); ok || err != nil {
+		t.Fatalf("ProbeRepoRootCtx(dir inside a repository) = %v, %v; want false, nil", ok, err)
+	}
+
+	parent := t.TempDir()
+	t.Setenv("GIT_CEILING_DIRECTORIES", parent)
+	plain := filepath.Join(parent, "plain")
+	broken := filepath.Join(parent, "broken")
+	for _, dir := range []string{plain, broken} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if ok, err := New(plain).ProbeRepoRootCtx(context.Background()); ok || err != nil {
+		t.Fatalf("ProbeRepoRootCtx(plain dir) = %v, %v; want false, nil", ok, err)
+	}
+
+	// A .git file naming a git dir that is gone: a repository git cannot
+	// open, which git also words as "not a git repository".
+	if err := os.WriteFile(filepath.Join(broken, ".git"), []byte("gitdir: "+filepath.Join(parent, "gone")+"\n"), 0o644); err != nil {
+		t.Fatalf("write .git file: %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name string
+		dir  string
+		ctx  context.Context
+	}{
+		{name: "missing dir", dir: filepath.Join(parent, "missing"), ctx: context.Background()},
+		{name: "unopenable repository", dir: broken, ctx: context.Background()},
+		{name: "probe cut short", dir: repo, ctx: canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, err := New(tc.dir).ProbeRepoRootCtx(tc.ctx)
+			if err == nil || ok {
+				t.Fatalf("ProbeRepoRootCtx = %v, %v; want false and an error", ok, err)
+			}
+			if !strings.Contains(err.Error(), tc.dir) {
+				t.Fatalf("error %q does not name the probed dir %q", err, tc.dir)
+			}
+		})
+	}
+}
+
 func TestCurrentBranch(t *testing.T) {
 	repo := initTestRepo(t)
 	g := New(repo)
