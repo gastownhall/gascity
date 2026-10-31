@@ -25,8 +25,7 @@ cd ~/bright-lights
 
 Init checks your provider, registers the city, and starts the orchestrator.
 The beginner choice uses the default Gas City pack. It starts model sessions
-on demand, uses Sonnet with medium effort for Claude, and bounds concurrent
-sessions. The orchestrator and token-free maintenance can run while idle;
+on demand and preserves your normal provider and capacity choices. The orchestrator and token-free maintenance can run while idle;
 model work begins when you submit a task or explicitly request a session.
 
 If preflight reports a missing dependency or login, fix the named problem and
