@@ -2952,9 +2952,12 @@ type DaemonConfig struct {
 	// 3 to 60 minutes and never stop, a started claim is recycled at most once
 	// and then escalated, and an unstarted claim is released after its third
 	// unanswered nudge (a nudge the seat could not take, such as one held at
-	// a permission prompt, does not count). "off" runs the three backstops it
-	// replaced (idle-claim, continuation, execution) instead: the rollback.
-	// Read on every pass, so a config reload applies. Legacy ignores it.
+	// a permission prompt, does not count). A claim whose metadata
+	// gc.awaiting_human names its seat (the seat asked a person and waits on
+	// their decision) is not nudged, recycled or released. "off" runs the
+	// three backstops it replaced (idle-claim, continuation, execution)
+	// instead: the rollback. Read on every pass, so a config reload applies.
+	// Legacy ignores it.
 	WorkLadder string `toml:"work_ladder,omitempty" jsonschema:"default=on,enum=on,enum=off"`
 	// AutoRestartOnDrift controls whether `gc start` automatically restarts
 	// the supervisor when it detects the running supervisor's binary or
