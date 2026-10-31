@@ -154,17 +154,19 @@ type PaginationParam struct {
 // endpoint having to return a 5xx. ScanTruncated is the same kind of signal
 // for a different cause: the events list endpoint sets it when the
 // provider's bounded archive scan (events.BoundedScanProvider) stopped at
-// its byte budget rather than exhausting history, so Total under-counts and
-// NextCursor must still be followed to reach older matches. Endpoints that
+// its byte budget rather than exhausting history, so the page may be short and
+// NextCursor must still be followed to reach older matches. It is not the
+// signal that Total is inexact: a filtered events read reports a lower-bound
+// Total whenever NextCursor is present, truncated or not. Endpoints that
 // never hit that path leave it at the zero value and it is omitted from the
 // wire.
 type ListBody[T any] struct {
 	Items         []T      `json:"items" doc:"The list of items."`
-	Total         int      `json:"total" doc:"Total number of items matching the query."`
+	Total         int      `json:"total" doc:"Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present."`
 	NextCursor    string   `json:"next_cursor,omitempty" doc:"Cursor for the next page of results."`
 	Partial       bool     `json:"partial,omitempty" doc:"True when one or more backends failed and the list is incomplete."`
 	PartialErrors []string `json:"partial_errors,omitempty" doc:"Human-readable errors from backends that failed during aggregation."`
-	ScanTruncated bool     `json:"scan_truncated,omitempty" doc:"True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed."`
+	ScanTruncated bool     `json:"scan_truncated,omitempty" doc:"True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed."`
 }
 
 // ListOutput is a generic output type for list endpoints. It sets the

@@ -208,10 +208,15 @@ func TestEventListFileRecorderWalkAcrossRotations(t *testing.T) {
 	}
 }
 
-// TestEventListFilteredTotalAfterRotation pins that the filtered Total does
-// not change: when the page comes from the archives it is still the count of
-// every match below the boundary, as the full scan reported it, also when
-// more pages follow. The bounded read counts them without holding them.
+// TestEventListFilteredTotalAfterRotation pins the filtered Total contract
+// when the page comes from the archives: Total counts the matches the scan
+// saw at or below the page boundary. With no next_cursor it is exact; with a
+// next_cursor it is a lower bound (never below the page, never above the true
+// count), and next_cursor — not Total — is the has-more signal. It
+// deliberately replaces the earlier pin that every filtered page reported the
+// exact count of all matches: the bounded archive scan stops once it holds a
+// page instead of counting the whole history to produce a number no consumer
+// reads (ga-60jbsrt).
 func TestEventListFilteredTotalAfterRotation(t *testing.T) {
 	dir := t.TempDir()
 	rareEvery10 := func(seq uint64) string {
@@ -226,22 +231,56 @@ func TestEventListFilteredTotalAfterRotation(t *testing.T) {
 	state := fileBackedEventState(t, dir)
 	h := newTestCityHandler(t, state)
 
-	for _, tc := range []struct {
-		limit, items, total int
-		more                bool
-	}{
-		{limit: 500, items: 100, total: 100, more: false},
-		{limit: 40, items: 40, total: 100, more: true},
-	} {
-		rec := getList(t, h, cityURL(state, fmt.Sprintf("/events?type=rare.t&limit=%d", tc.limit)))
+	// No next_cursor: Total is exact.
+	rec := getList(t, h, cityURL(state, "/events?type=rare.t&limit=500"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("limit 500: status %d, body %s", rec.Code, rec.Body.String())
+	}
+	items, total, next := decodeEventList(t, rec)
+	if len(items) != 100 || total != 100 || next != "" {
+		t.Fatalf("limit 500: items=%d total=%d cursor=%q, want items=100 total=100 no cursor", len(items), total, next)
+	}
+
+	// next_cursor present: Total is a lower bound on the 100 matches.
+	rec = getList(t, h, cityURL(state, "/events?type=rare.t&limit=40"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("limit 40: status %d, body %s", rec.Code, rec.Body.String())
+	}
+	items, total, next = decodeEventList(t, rec)
+	if next == "" || len(items) != 40 || total < len(items) || total > 100 {
+		t.Fatalf("limit 40: items=%d total=%d cursor=%q, want items=40, a cursor, and 40 <= total <= 100", len(items), total, next)
+	}
+
+	// Walk the same fixture: every cursor-bearing page is a lower bound at
+	// least as large as the page, and the final page is exact.
+	cursor, seen := "", 0
+	for page := 1; ; page++ {
+		if page > 100 {
+			t.Fatal("walk did not terminate")
+		}
+		url := cityURL(state, "/events?type=rare.t&limit=40")
+		if cursor != "" {
+			url += "&cursor=" + cursor
+		}
+		rec := getList(t, h, url)
 		if rec.Code != http.StatusOK {
-			t.Fatalf("limit %d: status %d, body %s", tc.limit, rec.Code, rec.Body.String())
+			t.Fatalf("page %d: status %d, body %s", page, rec.Code, rec.Body.String())
 		}
 		items, total, next := decodeEventList(t, rec)
-		if len(items) != tc.items || total != tc.total || (next != "") != tc.more {
-			t.Fatalf("limit %d: items=%d total=%d more=%v, want items=%d total=%d more=%v",
-				tc.limit, len(items), total, next != "", tc.items, tc.total, tc.more)
+		seen += len(items)
+		if total < len(items) {
+			t.Fatalf("page %d: total=%d below page size %d", page, total, len(items))
 		}
+		if next == "" {
+			if total != len(items) {
+				t.Fatalf("final page %d: total=%d, want exact %d", page, total, len(items))
+			}
+			break
+		}
+		cursor = next
+	}
+	if seen != 100 {
+		t.Fatalf("walk saw %d rare events, want 100", seen)
 	}
 }
 

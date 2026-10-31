@@ -1934,11 +1934,11 @@ export type ListBodyAgentPatch = {
      */
     partial_errors?: Array<string> | null;
     /**
-     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     * True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
      */
     scan_truncated?: boolean;
     /**
-     * Total number of items matching the query.
+     * Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
      */
     total: number;
 };
@@ -1961,11 +1961,11 @@ export type ListBodyAgentResponse = {
      */
     partial_errors?: Array<string> | null;
     /**
-     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     * True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
      */
     scan_truncated?: boolean;
     /**
-     * Total number of items matching the query.
+     * Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
      */
     total: number;
 };
@@ -1988,11 +1988,11 @@ export type ListBodyBead = {
      */
     partial_errors?: Array<string> | null;
     /**
-     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     * True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
      */
     scan_truncated?: boolean;
     /**
-     * Total number of items matching the query.
+     * Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
      */
     total: number;
 };
@@ -2015,11 +2015,11 @@ export type ListBodyCityPendingEntry = {
      */
     partial_errors?: Array<string> | null;
     /**
-     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     * True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
      */
     scan_truncated?: boolean;
     /**
-     * Total number of items matching the query.
+     * Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
      */
     total: number;
 };
@@ -2042,11 +2042,11 @@ export type ListBodyConversationOp = {
      */
     partial_errors?: Array<string> | null;
     /**
-     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     * True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
      */
     scan_truncated?: boolean;
     /**
-     * Total number of items matching the query.
+     * Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
      */
     total: number;
 };
@@ -2069,11 +2069,11 @@ export type ListBodyConversationTranscriptRecord = {
      */
     partial_errors?: Array<string> | null;
     /**
-     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     * True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
      */
     scan_truncated?: boolean;
     /**
-     * Total number of items matching the query.
+     * Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
      */
     total: number;
 };
@@ -2096,11 +2096,11 @@ export type ListBodyExtmsgAdapterInfo = {
      */
     partial_errors?: Array<string> | null;
     /**
-     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     * True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
      */
     scan_truncated?: boolean;
     /**
-     * Total number of items matching the query.
+     * Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
      */
     total: number;
 };
@@ -2123,11 +2123,11 @@ export type ListBodyProviderPatch = {
      */
     partial_errors?: Array<string> | null;
     /**
-     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     * True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
      */
     scan_truncated?: boolean;
     /**
-     * Total number of items matching the query.
+     * Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
      */
     total: number;
 };
@@ -2150,11 +2150,11 @@ export type ListBodyProviderResponse = {
      */
     partial_errors?: Array<string> | null;
     /**
-     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     * True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
      */
     scan_truncated?: boolean;
     /**
-     * Total number of items matching the query.
+     * Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
      */
     total: number;
 };
@@ -2177,11 +2177,11 @@ export type ListBodyRigPatch = {
      */
     partial_errors?: Array<string> | null;
     /**
-     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     * True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
      */
     scan_truncated?: boolean;
     /**
-     * Total number of items matching the query.
+     * Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
      */
     total: number;
 };
@@ -2204,11 +2204,11 @@ export type ListBodyRigResponse = {
      */
     partial_errors?: Array<string> | null;
     /**
-     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     * True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
      */
     scan_truncated?: boolean;
     /**
-     * Total number of items matching the query.
+     * Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
      */
     total: number;
 };
@@ -2231,11 +2231,11 @@ export type ListBodySessionBindingRecord = {
      */
     partial_errors?: Array<string> | null;
     /**
-     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     * True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
      */
     scan_truncated?: boolean;
     /**
-     * Total number of items matching the query.
+     * Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
      */
     total: number;
 };
@@ -2258,11 +2258,11 @@ export type ListBodySessionResponse = {
      */
     partial_errors?: Array<string> | null;
     /**
-     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     * True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
      */
     scan_truncated?: boolean;
     /**
-     * Total number of items matching the query.
+     * Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
      */
     total: number;
 };
@@ -2285,11 +2285,11 @@ export type ListBodyStatus = {
      */
     partial_errors?: Array<string> | null;
     /**
-     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     * True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
      */
     scan_truncated?: boolean;
     /**
-     * Total number of items matching the query.
+     * Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
      */
     total: number;
 };
@@ -2312,11 +2312,11 @@ export type ListBodyWireEvent = {
      */
     partial_errors?: Array<string> | null;
     /**
-     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     * True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
      */
     scan_truncated?: boolean;
     /**
-     * Total number of items matching the query.
+     * Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
      */
     total: number;
 };

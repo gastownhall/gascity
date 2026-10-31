@@ -3454,10 +3454,10 @@ type ListBodyAgentPatch struct {
 	// PartialErrors Human-readable errors from backends that failed during aggregation.
 	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
-	// ScanTruncated True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+	// ScanTruncated True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
 	ScanTruncated *bool `json:"scan_truncated,omitempty"`
 
-	// Total Total number of items matching the query.
+	// Total Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
 	Total int64 `json:"total"`
 }
 
@@ -3475,10 +3475,10 @@ type ListBodyAgentResponse struct {
 	// PartialErrors Human-readable errors from backends that failed during aggregation.
 	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
-	// ScanTruncated True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+	// ScanTruncated True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
 	ScanTruncated *bool `json:"scan_truncated,omitempty"`
 
-	// Total Total number of items matching the query.
+	// Total Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
 	Total int64 `json:"total"`
 }
 
@@ -3496,10 +3496,10 @@ type ListBodyBead struct {
 	// PartialErrors Human-readable errors from backends that failed during aggregation.
 	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
-	// ScanTruncated True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+	// ScanTruncated True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
 	ScanTruncated *bool `json:"scan_truncated,omitempty"`
 
-	// Total Total number of items matching the query.
+	// Total Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
 	Total int64 `json:"total"`
 }
 
@@ -3517,10 +3517,10 @@ type ListBodyCityPendingEntry struct {
 	// PartialErrors Human-readable errors from backends that failed during aggregation.
 	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
-	// ScanTruncated True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+	// ScanTruncated True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
 	ScanTruncated *bool `json:"scan_truncated,omitempty"`
 
-	// Total Total number of items matching the query.
+	// Total Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
 	Total int64 `json:"total"`
 }
 
@@ -3538,10 +3538,10 @@ type ListBodyConversationOp struct {
 	// PartialErrors Human-readable errors from backends that failed during aggregation.
 	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
-	// ScanTruncated True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+	// ScanTruncated True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
 	ScanTruncated *bool `json:"scan_truncated,omitempty"`
 
-	// Total Total number of items matching the query.
+	// Total Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
 	Total int64 `json:"total"`
 }
 
@@ -3559,10 +3559,10 @@ type ListBodyConversationTranscriptRecord struct {
 	// PartialErrors Human-readable errors from backends that failed during aggregation.
 	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
-	// ScanTruncated True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+	// ScanTruncated True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
 	ScanTruncated *bool `json:"scan_truncated,omitempty"`
 
-	// Total Total number of items matching the query.
+	// Total Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
 	Total int64 `json:"total"`
 }
 
@@ -3580,10 +3580,10 @@ type ListBodyExtmsgAdapterInfo struct {
 	// PartialErrors Human-readable errors from backends that failed during aggregation.
 	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
-	// ScanTruncated True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+	// ScanTruncated True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
 	ScanTruncated *bool `json:"scan_truncated,omitempty"`
 
-	// Total Total number of items matching the query.
+	// Total Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
 	Total int64 `json:"total"`
 }
 
@@ -3601,10 +3601,10 @@ type ListBodyProviderPatch struct {
 	// PartialErrors Human-readable errors from backends that failed during aggregation.
 	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
-	// ScanTruncated True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+	// ScanTruncated True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
 	ScanTruncated *bool `json:"scan_truncated,omitempty"`
 
-	// Total Total number of items matching the query.
+	// Total Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
 	Total int64 `json:"total"`
 }
 
@@ -3622,10 +3622,10 @@ type ListBodyProviderResponse struct {
 	// PartialErrors Human-readable errors from backends that failed during aggregation.
 	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
-	// ScanTruncated True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+	// ScanTruncated True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
 	ScanTruncated *bool `json:"scan_truncated,omitempty"`
 
-	// Total Total number of items matching the query.
+	// Total Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
 	Total int64 `json:"total"`
 }
 
@@ -3643,10 +3643,10 @@ type ListBodyRigPatch struct {
 	// PartialErrors Human-readable errors from backends that failed during aggregation.
 	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
-	// ScanTruncated True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+	// ScanTruncated True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
 	ScanTruncated *bool `json:"scan_truncated,omitempty"`
 
-	// Total Total number of items matching the query.
+	// Total Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
 	Total int64 `json:"total"`
 }
 
@@ -3664,10 +3664,10 @@ type ListBodyRigResponse struct {
 	// PartialErrors Human-readable errors from backends that failed during aggregation.
 	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
-	// ScanTruncated True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+	// ScanTruncated True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
 	ScanTruncated *bool `json:"scan_truncated,omitempty"`
 
-	// Total Total number of items matching the query.
+	// Total Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
 	Total int64 `json:"total"`
 }
 
@@ -3685,10 +3685,10 @@ type ListBodySessionBindingRecord struct {
 	// PartialErrors Human-readable errors from backends that failed during aggregation.
 	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
-	// ScanTruncated True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+	// ScanTruncated True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
 	ScanTruncated *bool `json:"scan_truncated,omitempty"`
 
-	// Total Total number of items matching the query.
+	// Total Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
 	Total int64 `json:"total"`
 }
 
@@ -3706,10 +3706,10 @@ type ListBodySessionResponse struct {
 	// PartialErrors Human-readable errors from backends that failed during aggregation.
 	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
-	// ScanTruncated True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+	// ScanTruncated True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
 	ScanTruncated *bool `json:"scan_truncated,omitempty"`
 
-	// Total Total number of items matching the query.
+	// Total Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
 	Total int64 `json:"total"`
 }
 
@@ -3727,10 +3727,10 @@ type ListBodyStatus struct {
 	// PartialErrors Human-readable errors from backends that failed during aggregation.
 	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
-	// ScanTruncated True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+	// ScanTruncated True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
 	ScanTruncated *bool `json:"scan_truncated,omitempty"`
 
-	// Total Total number of items matching the query.
+	// Total Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
 	Total int64 `json:"total"`
 }
 
@@ -3748,10 +3748,10 @@ type ListBodyWireEvent struct {
 	// PartialErrors Human-readable errors from backends that failed during aggregation.
 	PartialErrors *[]string `json:"partial_errors,omitempty"`
 
-	// ScanTruncated True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+	// ScanTruncated True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.
 	ScanTruncated *bool `json:"scan_truncated,omitempty"`
 
-	// Total Total number of items matching the query.
+	// Total Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.
 	Total int64 `json:"total"`
 }
 

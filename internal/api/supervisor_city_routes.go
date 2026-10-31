@@ -279,7 +279,8 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityDelete(sm, "/convoy/{id}", (*Server).humaHandleConvoyDelete, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound))
 
 	// Events (list/emit/rotate — stream is a separate SSE registration below).
-	cityGet(sm, "/events", (*Server).humaHandleEventList, errorStatuses(http.StatusBadRequest, http.StatusNotFound), listOrder("seq DESC — newest events first"))
+	cityGet(sm, "/events", (*Server).humaHandleEventList, errorStatuses(http.StatusBadRequest, http.StatusNotFound), listOrder("seq DESC — newest events first"),
+		describes("`total` is exact for an unfiltered read. For a filtered read it counts the matches the scan saw at or below the page boundary: exact when the response has no `next_cursor`, a lower bound when it has one. Use `next_cursor`, not `total`, to decide whether more pages exist. `scan_truncated` means the scan stopped at its per-request byte budget before it filled a page or reached the start of history; the page may be short, and `next_cursor` resumes without a gap."))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "emit-event",
 		Method:        http.MethodPost,

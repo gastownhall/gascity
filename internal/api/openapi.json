@@ -4859,11 +4859,11 @@
             ]
           },
           "scan_truncated": {
-            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "description": "True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.",
             "type": "boolean"
           },
           "total": {
-            "description": "Total number of items matching the query.",
+            "description": "Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.",
             "format": "int64",
             "type": "integer"
           }
@@ -4906,11 +4906,11 @@
             ]
           },
           "scan_truncated": {
-            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "description": "True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.",
             "type": "boolean"
           },
           "total": {
-            "description": "Total number of items matching the query.",
+            "description": "Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.",
             "format": "int64",
             "type": "integer"
           }
@@ -4953,11 +4953,11 @@
             ]
           },
           "scan_truncated": {
-            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "description": "True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.",
             "type": "boolean"
           },
           "total": {
-            "description": "Total number of items matching the query.",
+            "description": "Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.",
             "format": "int64",
             "type": "integer"
           }
@@ -5000,11 +5000,11 @@
             ]
           },
           "scan_truncated": {
-            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "description": "True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.",
             "type": "boolean"
           },
           "total": {
-            "description": "Total number of items matching the query.",
+            "description": "Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.",
             "format": "int64",
             "type": "integer"
           }
@@ -5047,11 +5047,11 @@
             ]
           },
           "scan_truncated": {
-            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "description": "True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.",
             "type": "boolean"
           },
           "total": {
-            "description": "Total number of items matching the query.",
+            "description": "Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.",
             "format": "int64",
             "type": "integer"
           }
@@ -5094,11 +5094,11 @@
             ]
           },
           "scan_truncated": {
-            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "description": "True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.",
             "type": "boolean"
           },
           "total": {
-            "description": "Total number of items matching the query.",
+            "description": "Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.",
             "format": "int64",
             "type": "integer"
           }
@@ -5141,11 +5141,11 @@
             ]
           },
           "scan_truncated": {
-            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "description": "True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.",
             "type": "boolean"
           },
           "total": {
-            "description": "Total number of items matching the query.",
+            "description": "Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.",
             "format": "int64",
             "type": "integer"
           }
@@ -5188,11 +5188,11 @@
             ]
           },
           "scan_truncated": {
-            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "description": "True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.",
             "type": "boolean"
           },
           "total": {
-            "description": "Total number of items matching the query.",
+            "description": "Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.",
             "format": "int64",
             "type": "integer"
           }
@@ -5235,11 +5235,11 @@
             ]
           },
           "scan_truncated": {
-            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "description": "True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.",
             "type": "boolean"
           },
           "total": {
-            "description": "Total number of items matching the query.",
+            "description": "Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.",
             "format": "int64",
             "type": "integer"
           }
@@ -5282,11 +5282,11 @@
             ]
           },
           "scan_truncated": {
-            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "description": "True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.",
             "type": "boolean"
           },
           "total": {
-            "description": "Total number of items matching the query.",
+            "description": "Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.",
             "format": "int64",
             "type": "integer"
           }
@@ -5329,11 +5329,11 @@
             ]
           },
           "scan_truncated": {
-            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "description": "True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.",
             "type": "boolean"
           },
           "total": {
-            "description": "Total number of items matching the query.",
+            "description": "Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.",
             "format": "int64",
             "type": "integer"
           }
@@ -5376,11 +5376,11 @@
             ]
           },
           "scan_truncated": {
-            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "description": "True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.",
             "type": "boolean"
           },
           "total": {
-            "description": "Total number of items matching the query.",
+            "description": "Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.",
             "format": "int64",
             "type": "integer"
           }
@@ -5423,11 +5423,11 @@
             ]
           },
           "scan_truncated": {
-            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "description": "True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.",
             "type": "boolean"
           },
           "total": {
-            "description": "Total number of items matching the query.",
+            "description": "Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.",
             "format": "int64",
             "type": "integer"
           }
@@ -5470,11 +5470,11 @@
             ]
           },
           "scan_truncated": {
-            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "description": "True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.",
             "type": "boolean"
           },
           "total": {
-            "description": "Total number of items matching the query.",
+            "description": "Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.",
             "format": "int64",
             "type": "integer"
           }
@@ -5517,11 +5517,11 @@
             ]
           },
           "scan_truncated": {
-            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "description": "True when the underlying scan stopped at a budget limit before it filled a page or exhausted matching history; the page may be short and NextCursor should still be followed.",
             "type": "boolean"
           },
           "total": {
-            "description": "Total number of items matching the query.",
+            "description": "Total number of items matching the query. A filtered GET /events reports a lower bound whenever next_cursor is present.",
             "format": "int64",
             "type": "integer"
           }
@@ -37496,7 +37496,7 @@
     },
     "/v0/city/{cityName}/events": {
       "get": {
-        "description": "Results are ordered seq DESC — newest events first. A truncated response always carries next_cursor; passing it back returns the next page in the same order. Invalid or legacy cursors are rejected with a typed 400 (invalid-cursor).",
+        "description": "Results are ordered seq DESC — newest events first. A truncated response always carries next_cursor; passing it back returns the next page in the same order. Invalid or legacy cursors are rejected with a typed 400 (invalid-cursor).\n\n`total` is exact for an unfiltered read. For a filtered read it counts the matches the scan saw at or below the page boundary: exact when the response has no `next_cursor`, a lower bound when it has one. Use `next_cursor`, not `total`, to decide whether more pages exist. `scan_truncated` means the scan stopped at its per-request byte budget before it filled a page or reached the start of history; the page may be short, and `next_cursor` resumes without a gap.",
         "operationId": "get-v0-city-by-city-name-events",
         "parameters": [
           {

@@ -351,6 +351,8 @@ export const createConvoy = <ThrowOnError extends boolean = false>(options: Opti
  * Get v0 city by city name events
  *
  * Results are ordered seq DESC — newest events first. A truncated response always carries next_cursor; passing it back returns the next page in the same order. Invalid or legacy cursors are rejected with a typed 400 (invalid-cursor).
+ *
+ * `total` is exact for an unfiltered read. For a filtered read it counts the matches the scan saw at or below the page boundary: exact when the response has no `next_cursor`, a lower bound when it has one. Use `next_cursor`, not `total`, to decide whether more pages exist. `scan_truncated` means the scan stopped at its per-request byte budget before it filled a page or reached the start of history; the page may be short, and `next_cursor` resumes without a gap.
  */
 export const getV0CityByCityNameEvents = <ThrowOnError extends boolean = false>(options: Options<GetV0CityByCityNameEventsData, ThrowOnError>) => (options.client ?? client).get<GetV0CityByCityNameEventsResponses, GetV0CityByCityNameEventsErrors, ThrowOnError>({ url: '/v0/city/{cityName}/events', ...options });
 
