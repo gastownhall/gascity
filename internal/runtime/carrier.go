@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"strconv"
+	"strings"
+	"time"
 )
 
 // Carrier drives the high-level session interactions — input delivery, output
@@ -69,20 +71,40 @@ type Carrier interface {
 // the commands address (e.g. "main"); it is fixed per carrier today — a
 // name->target resolver is the natural extension if one connection ever
 // multiplexes sessions on distinct targets. The mapping mirrors the tmux
-// commands the Kubernetes provider issues over execInPod today, so once k8s
-// exposes an [ExecProvider], delegating its driving methods here is
-// argv-for-argv behavior-preserving (the provider keeps its own per-verb
-// error policy; see [Carrier]).
+// commands the Kubernetes provider issued over execInPod, except Nudge, which
+// pauses before its Enter and re-presses a dropped one (see Nudge). The
+// provider keeps its own per-verb error policy; see [Carrier].
 type tmuxCarrier struct {
 	conn   ExecProvider
 	target string
+	// sleep waits d or until ctx ends. Tests swap it to run without real time.
+	sleep func(ctx context.Context, d time.Duration) error
 }
 
 // NewTmuxCarrier returns a [Carrier] that drives the in-box tmux session
 // target over conn.
 func NewTmuxCarrier(conn ExecProvider, target string) Carrier {
-	return &tmuxCarrier{conn: conn, target: target}
+	return &tmuxCarrier{conn: conn, target: target, sleep: sleepCtx}
 }
+
+// Nudge submit tuning, matching the local tmux runtime (internal/runtime/tmux:
+// the 500ms paste debounce in NudgeSession and submitEnterMaxSends).
+const (
+	// nudgeSubmitDebounce is the pause between typing the text and pressing
+	// Enter, and again between an Enter and the look that checks it landed.
+	// An Enter sent right behind the text can be dropped: Gemini CLI 0.64
+	// drops it and the text sits unsent in its input box.
+	nudgeSubmitDebounce = 500 * time.Millisecond
+	// nudgeSubmitMaxPresses bounds the Enters one Nudge sends.
+	nudgeSubmitMaxPresses = 3
+	// nudgeBoxLines is how many of the pane's last lines (blank rows at the
+	// bottom dropped) count as "the input box" when checking whether an Enter
+	// took the text.
+	nudgeBoxLines = 10
+	// nudgeTextProbeRunes is the length of the tail of the message looked for
+	// in the box. A short tail survives the box wrapping a long line.
+	nudgeTextProbeRunes = 24
+)
 
 // tmux runs `tmux <args...>` in the box over the connection and returns its
 // standard output and exit code. A non-zero command exit is reported via err
@@ -92,6 +114,13 @@ func (c *tmuxCarrier) tmux(ctx context.Context, name string, args ...string) ([]
 	return c.conn.Exec(ctx, name, append([]string{"tmux"}, args...))
 }
 
+// Nudge types content into the pane, waits nudgeSubmitDebounce, and presses
+// Enter. When the box showed the typed text before the Enter and still shows
+// it unchanged after, the Enter was dropped, so it presses again, up to
+// nudgeSubmitMaxPresses Enters. This is the local tmux runtime's debounce and
+// re-Enter (internal/runtime/tmux NudgeSession) for tmux-in-a-box runtimes.
+// Waiting for a booting agent's prompt stays above the carrier: the
+// provider's ready_prompt_prefix and ready_delay_ms gate the first nudge.
 func (c *tmuxCarrier) Nudge(ctx context.Context, name string, content []ContentBlock) error {
 	message := FlattenText(content)
 	if message == "" {
@@ -105,8 +134,71 @@ func (c *tmuxCarrier) Nudge(ctx context.Context, name string, content []ContentB
 	if _, _, err := c.tmux(ctx, name, append([]string{"send-keys", "-t", c.target, "-l"}, TmuxLiteralArgs(message)...)...); err != nil {
 		return err
 	}
-	_, _, err := c.tmux(ctx, name, "send-keys", "-t", c.target, "Enter")
-	return err
+	// Let the TUI take the text before the Enter (see nudgeSubmitDebounce).
+	if err := c.sleep(ctx, nudgeSubmitDebounce); err != nil {
+		return err
+	}
+	// Look at the box once before the first Enter. Re-pressing is only safe
+	// when we can see the text sitting there; a box we cannot read (a peek
+	// error, a paste shown as a label, an empty fake) gets one Enter, as
+	// before.
+	before, err := c.Peek(ctx, name, nudgeBoxLines)
+	box := paneBox(before)
+	watch := err == nil && boxShowsText(box, message)
+	for press := 1; ; press++ {
+		if _, _, err := c.tmux(ctx, name, "send-keys", "-t", c.target, "Enter"); err != nil {
+			return err
+		}
+		if !watch || press == nudgeSubmitMaxPresses {
+			return nil
+		}
+		// From here an Enter has gone out, so every exit reports success: a
+		// caller that retried on an error would type the text twice.
+		if c.sleep(ctx, nudgeSubmitDebounce) != nil {
+			return nil
+		}
+		after, err := c.Peek(ctx, name, nudgeBoxLines)
+		// A box that changed took the Enter, or moved for some other reason
+		// and cannot be read; either way, stop. Only a box still showing
+		// exactly the typed text gets another Enter, so a turn that started
+		// is never pressed again.
+		if err != nil || paneBox(after) != box {
+			return nil
+		}
+	}
+}
+
+// paneBox is the last nudgeBoxLines lines of a pane capture, blank rows at the
+// bottom dropped: the part of the screen that holds a TUI's input box.
+func paneBox(pane string) string {
+	lines := strings.Split(strings.TrimRight(pane, " \n"), "\n")
+	if len(lines) > nudgeBoxLines {
+		lines = lines[len(lines)-nudgeBoxLines:]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// boxShowsText reports whether box shows the end of message: the last
+// nudgeTextProbeRunes runes of its last non-blank line.
+func boxShowsText(box, message string) bool {
+	lines := strings.Split(strings.TrimSpace(message), "\n")
+	probe := []rune(strings.TrimSpace(lines[len(lines)-1]))
+	if len(probe) > nudgeTextProbeRunes {
+		probe = probe[len(probe)-nudgeTextProbeRunes:]
+	}
+	return len(probe) > 0 && strings.Contains(box, string(probe))
+}
+
+// sleepCtx waits d, or until ctx ends.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (c *tmuxCarrier) SendKeys(ctx context.Context, name string, keys ...string) error {

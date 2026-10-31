@@ -3,8 +3,11 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 )
 
 var errBoom = errors.New("boom: transport failure")
@@ -49,16 +52,216 @@ func wantExec(t *testing.T, f *Fake, want ...string) {
 	}
 }
 
+// testCarrier is a tmux carrier whose sleeps take no real time. Each sleep is
+// written into log (when non-nil) as "sleep <d>", so a test can see where the
+// pauses fall between the tmux commands.
+func testCarrier(conn ExecProvider, log *[]string) *tmuxCarrier {
+	c := NewTmuxCarrier(conn, "main").(*tmuxCarrier)
+	c.sleep = func(ctx context.Context, d time.Duration) error {
+		if log != nil {
+			*log = append(*log, fmt.Sprintf("sleep %s", d))
+		}
+		return ctx.Err()
+	}
+	return c
+}
+
+// fakePane is a tmux pane running a TUI with an input box. It drops the first
+// dropEnters Enters it gets, as Gemini CLI 0.64 drops an Enter sent right
+// behind the text, and submits on the next one. Every command
+// and every carrier sleep goes into log, in order.
+type fakePane struct {
+	log        []string
+	box        string // what the input box holds
+	dropEnters int
+	submitted  []string
+	peekErr    error
+	enterErr   error
+	// label, when set, is what the box shows for typed text instead of the
+	// text itself (the way a TUI shows a large paste).
+	label string
+}
+
+func (p *fakePane) Exec(_ context.Context, _ string, argv []string) ([]byte, int, error) {
+	p.log = append(p.log, strings.Join(argv, " "))
+	switch {
+	case slices.Equal(argv[:2], []string{"tmux", "capture-pane"}):
+		if p.peekErr != nil {
+			return nil, 0, p.peekErr
+		}
+		return []byte("Welcome\n\n> " + p.box + "\n  ~/work  model\n\n\n"), 0, nil
+	case len(argv) == 6 && argv[4] == "-l":
+		p.box = argv[5]
+		if p.label != "" {
+			p.box = p.label
+		}
+	case len(argv) == 5 && argv[4] == "Enter":
+		if p.enterErr != nil {
+			return nil, 0, p.enterErr
+		}
+		if p.dropEnters > 0 {
+			p.dropEnters--
+			break
+		}
+		if p.box != "" {
+			p.submitted = append(p.submitted, p.box)
+		}
+		p.box = ""
+	}
+	return nil, 0, nil
+}
+
+func (p *fakePane) enters() int {
+	n := 0
+	for _, l := range p.log {
+		if strings.HasSuffix(l, " Enter") {
+			n++
+		}
+	}
+	return n
+}
+
+func wantLog(t *testing.T, got []string, want ...string) {
+	t.Helper()
+	if !slices.Equal(got, want) {
+		t.Fatalf("log =\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+	}
+}
+
 func TestTmuxCarrier_NudgeTypesThenSubmits(t *testing.T) {
 	f := NewFake()
-	c := NewTmuxCarrier(f, "main")
+	c := testCarrier(f, nil)
 	if err := c.Nudge(context.Background(), "s", TextContent("hi there")); err != nil {
 		t.Fatalf("Nudge: %v", err)
 	}
+	// An empty pane cannot show the text, so there is nothing to watch: one
+	// look, one Enter.
 	wantExec(t, f,
 		"tmux send-keys -t main -l hi there",
+		"tmux capture-pane -t main -p -S -10",
 		"tmux send-keys -t main Enter",
 	)
+}
+
+// The Enter waits nudgeSubmitDebounce behind the text, like the local tmux
+// runtime. Back to back, Gemini CLI 0.64 drops it.
+func TestTmuxCarrier_NudgePausesBeforeEnter(t *testing.T) {
+	p := &fakePane{}
+	c := testCarrier(p, &p.log)
+	if err := c.Nudge(context.Background(), "s", TextContent("Hi")); err != nil {
+		t.Fatalf("Nudge: %v", err)
+	}
+	wantLog(t, p.log,
+		"tmux send-keys -t main -l Hi",
+		"sleep 500ms",
+		"tmux capture-pane -t main -p -S -10",
+		"tmux send-keys -t main Enter",
+		"sleep 500ms",
+		"tmux capture-pane -t main -p -S -10",
+	)
+	if !slices.Equal(p.submitted, []string{"Hi"}) {
+		t.Errorf("submitted = %q, want [Hi]", p.submitted)
+	}
+}
+
+// A dropped Enter leaves the text in the box. The carrier sees the box
+// unchanged and presses again, so the text is sent once.
+func TestTmuxCarrier_NudgeRepressesDroppedEnter(t *testing.T) {
+	p := &fakePane{dropEnters: 1}
+	c := testCarrier(p, &p.log)
+	if err := c.Nudge(context.Background(), "s", TextContent("Hi")); err != nil {
+		t.Fatalf("Nudge: %v", err)
+	}
+	if !slices.Equal(p.submitted, []string{"Hi"}) {
+		t.Fatalf("submitted = %q, want [Hi] (the dropped Enter was not pressed again)", p.submitted)
+	}
+	if got := p.enters(); got != 2 {
+		t.Errorf("Enters = %d, want 2", got)
+	}
+}
+
+// The presses are bounded: a box that never takes the text gets
+// nudgeSubmitMaxPresses Enters, then Nudge returns. The Enters went out, so
+// it reports success; an error would make a caller type the text twice.
+func TestTmuxCarrier_NudgeStopsAfterMaxPresses(t *testing.T) {
+	p := &fakePane{dropEnters: 100}
+	c := testCarrier(p, &p.log)
+	if err := c.Nudge(context.Background(), "s", TextContent("Hi")); err != nil {
+		t.Fatalf("Nudge: %v", err)
+	}
+	if got := p.enters(); got != nudgeSubmitMaxPresses {
+		t.Errorf("Enters = %d, want %d", got, nudgeSubmitMaxPresses)
+	}
+	p2 := &fakePane{dropEnters: nudgeSubmitMaxPresses - 1}
+	c2 := testCarrier(p2, &p2.log)
+	if err := c2.Nudge(context.Background(), "s", TextContent("Hi")); err != nil {
+		t.Fatalf("Nudge: %v", err)
+	}
+	if !slices.Equal(p2.submitted, []string{"Hi"}) {
+		t.Errorf("submitted = %q, want [Hi] on the last allowed press", p2.submitted)
+	}
+}
+
+// An Enter that lands changes the box, and is never pressed again: a second
+// Enter could land in the turn it just started.
+func TestTmuxCarrier_NudgeDoesNotRepressALandedEnter(t *testing.T) {
+	p := &fakePane{}
+	c := testCarrier(p, &p.log)
+	if err := c.Nudge(context.Background(), "s", TextContent("Hi")); err != nil {
+		t.Fatalf("Nudge: %v", err)
+	}
+	if got := p.enters(); got != 1 {
+		t.Errorf("Enters = %d, want 1", got)
+	}
+}
+
+// A box that does not show the text (a paste shown as a label) cannot tell a
+// dropped Enter from a landed one, so it gets one Enter and no second look.
+func TestTmuxCarrier_NudgeUnreadableBoxGetsOneEnter(t *testing.T) {
+	p := &fakePane{dropEnters: 1, label: "[Pasted text #1 +3 lines]"}
+	c := testCarrier(p, &p.log)
+	if err := c.Nudge(context.Background(), "s", TextContent("line one\nline two")); err != nil {
+		t.Fatalf("Nudge: %v", err)
+	}
+	wantLog(t, p.log,
+		"tmux send-keys -t main -l line one\nline two",
+		"sleep 500ms",
+		"tmux capture-pane -t main -p -S -10",
+		"tmux send-keys -t main Enter",
+	)
+}
+
+// A failed look is the same: one Enter, and success.
+func TestTmuxCarrier_NudgePeekErrorGetsOneEnter(t *testing.T) {
+	p := &fakePane{dropEnters: 1, peekErr: errBoom}
+	c := testCarrier(p, &p.log)
+	if err := c.Nudge(context.Background(), "s", TextContent("Hi")); err != nil {
+		t.Fatalf("Nudge: %v", err)
+	}
+	if got := p.enters(); got != 1 {
+		t.Errorf("Enters = %d, want 1", got)
+	}
+}
+
+// A failed Enter is a failed delivery, and the caller hears it.
+func TestTmuxCarrier_NudgeEnterErrorSurfaces(t *testing.T) {
+	p := &fakePane{enterErr: errBoom}
+	c := testCarrier(p, &p.log)
+	if err := c.Nudge(context.Background(), "s", TextContent("Hi")); !errors.Is(err, errBoom) {
+		t.Fatalf("Nudge err = %v, want errBoom", err)
+	}
+}
+
+// A message longer than the box is wide wraps; its tail is still found.
+func TestTmuxCarrier_NudgeFindsAWrappedMessage(t *testing.T) {
+	msg := strings.Repeat("please read the bead and start the work ", 5)
+	box := msg[:60] + "\n│ " + msg[60:120] + "\n│ " + msg[120:]
+	if !boxShowsText(paneBox("history\n> "+box+"\nfooter\n\n"), msg) {
+		t.Errorf("boxShowsText missed the wrapped message's tail")
+	}
+	if boxShowsText(paneBox("history\n> \nfooter\n"), msg) {
+		t.Errorf("boxShowsText found text in an empty box")
+	}
 }
 
 func TestTmuxCarrier_NudgeEmptyIsNoOp(t *testing.T) {
@@ -126,12 +329,12 @@ func TestTmuxCarrier_NudgeMessageIsASingleArg(t *testing.T) {
 	// Guards against a regression that splits the message into multiple argv
 	// elements — which the space-joined Fake assertions above cannot catch.
 	rec := &recordingExec{}
-	c := NewTmuxCarrier(rec, "main")
+	c := testCarrier(rec, nil)
 	if err := c.Nudge(context.Background(), "s", TextContent("hi there friend")); err != nil {
 		t.Fatalf("Nudge: %v", err)
 	}
-	if len(rec.calls) != 2 {
-		t.Fatalf("got %d exec calls, want 2", len(rec.calls))
+	if len(rec.calls) != 3 {
+		t.Fatalf("got %d exec calls, want 3 (type, look, Enter)", len(rec.calls))
 	}
 	want := []string{"tmux", "send-keys", "-t", "main", "-l", "hi there friend"}
 	if !slices.Equal(rec.calls[0], want) {
@@ -176,11 +379,12 @@ func TestTmuxCarrier_NudgeTextIsTmuxLiteral(t *testing.T) {
 		"a;b":    {"tmux", "send-keys", "-t", "main", "-l", "a;b"},
 	} {
 		r := &recordingExec{}
-		if err := NewTmuxCarrier(r, "main").Nudge(context.Background(), "s", TextContent(text)); err != nil {
+		if err := testCarrier(r, nil).Nudge(context.Background(), "s", TextContent(text)); err != nil {
 			t.Fatalf("Nudge(%q): %v", text, err)
 		}
-		if len(r.calls) != 2 || !slices.Equal(r.calls[0], want) {
-			t.Errorf("Nudge(%q) argv = %q, want %q then Enter", text, r.calls, want)
+		enter := []string{"tmux", "send-keys", "-t", "main", "Enter"}
+		if len(r.calls) < 2 || !slices.Equal(r.calls[0], want) || !slices.Equal(r.calls[len(r.calls)-1], enter) {
+			t.Errorf("Nudge(%q) argv = %q, want %q first and Enter last", text, r.calls, want)
 		}
 	}
 }

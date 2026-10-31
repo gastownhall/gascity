@@ -376,10 +376,11 @@ func TestProvider_NudgeDrivesNamedTmuxTarget(t *testing.T) {
 	want := [][]string{
 		{"tmux", "list-panes", "-s", "-t", "=sess-7:", "-F", agentPaneRowFormat},
 		{"tmux", "send-keys", "-t", "=sess-7:@1.%1", "-l", "hi"},
+		{"tmux", "capture-pane", "-t", "=sess-7:@1.%1", "-p", "-S", "-10"},
 		{"tmux", "send-keys", "-t", "=sess-7:@1.%1", "Enter"},
 	}
-	if len(f.calls) != 3 {
-		t.Fatalf("calls = %v, want 3", f.calls)
+	if len(f.calls) != len(want) {
+		t.Fatalf("calls = %v, want %v", f.calls, want)
 	}
 	for i := range want {
 		if !slices.Equal(f.calls[i], want[i]) {

@@ -1927,7 +1927,10 @@ func TestStartAllowsOneShotLifecycleCommands(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := newFakeK8sOps()
 			p := newProviderWithOps(fake)
-			p.postStartSettle = 100 * time.Millisecond
+			// Well above the initial nudge's own pause before its Enter
+			// (500ms in the tmux carrier), so the elapsed check below still
+			// tells a skipped settle from a waited one.
+			p.postStartSettle = 2 * time.Second
 
 			hasSessionCalls := 0
 			fake.execFunc = func(_ string, cmd []string) (string, error) {

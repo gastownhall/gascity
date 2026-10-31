@@ -188,6 +188,7 @@ func TestTmuxCarrierDrivesOverSSH(t *testing.T) {
 	}
 	want := [][]string{
 		{"tmux", "send-keys", "-t", "main", "-l", "hello"},
+		{"tmux", "capture-pane", "-t", "main", "-p", "-S", "-10"},
 		{"tmux", "send-keys", "-t", "main", "Enter"},
 	}
 	if len(f.calls) != len(want) {
