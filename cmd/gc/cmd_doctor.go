@@ -430,6 +430,16 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	}
 
 	storeFactory := storeGate.StoreFactory(perRunStoreFactory(openStoreForCity(cityPath)))
+	// liveRowCount is the data-presence check's view of a rig store: the row
+	// count, closed rows included, read through the same gated per-run factory.
+	liveRowCount := func(rigPath string) (int, error) {
+		store, err := storeFactory(rigPath)
+		if err != nil {
+			return 0, err
+		}
+		rows, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+		return len(rows), err
+	}
 
 	// One preflight gates all store-dependent checks so outages are not re-probed (#5064).
 	storeOK := true
@@ -625,6 +635,8 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			rigLabel := []string{rig.Name}
 			if storeOK {
 				register(storeGate.Check(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory), rigScope, rigLabel))
+				register(storeGate.Check(doctor.NewRigDataPresenceCheck(cityPath, rig, liveRowCount).
+					WithArchiveExportRows(archiveExportRowsFor(cityPath)), rigScope, rigLabel))
 			}
 			register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || opts.SkipRigDoltChecks))
 			if storeOK {

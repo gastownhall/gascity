@@ -301,6 +301,7 @@ go_library(
         "dispatch_control_ready.go",
         "dispatch_execution_emit.go",
         "dispatch_runtime.go",
+        "doctor_archive_export_rows.go",
         "doctor_backlog_depth.go",
         "doctor_bd_inventory.go",
         "doctor_bd_read_memo.go",
