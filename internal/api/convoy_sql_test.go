@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -354,4 +356,66 @@ func mustWriteManagedRuntimeState(t *testing.T, fs fsys.FS, city string, port in
 		t.Fatal(err)
 	}
 	return port
+}
+
+// mustWriteProxiedLocalScope writes the files a bd-owned proxied-local scope
+// carries after `gc init` / `gc rig add`: a config with no gc endpoint fields,
+// metadata naming the proxied-server mode, and the provider sidecar with
+// lifecycle fields only (no external upstream).
+func mustWriteProxiedLocalScope(t *testing.T, fs fsys.FS, dir, db string) {
+	t.Helper()
+	if err := fs.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("dolt:\n  shared-server: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contract.EnsureCanonicalMetadata(fs, filepath.Join(dir, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "proxied-server",
+		DoltDatabase: db,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "proxied_server_client_info.json"), []byte(`{"idle_timeout": 1800000000000}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// bd owns a proxied-local scope's proxy and Dolt, and gc does not dial it
+// (engdocs/design/beads-proxied-local-default.md, "Native SQL over the
+// proxy"), so the contract returns its target with no endpoint. That is "no
+// SQL store here", not a probe failure.
+func TestResolveDoltConnectionProxiedLocalScopeHasNoDirectEndpoint(t *testing.T) {
+	clearDoltAuthEnv(t)
+	city := t.TempDir()
+	mustWriteProxiedLocalScope(t, fsys.OSFS{}, city, "hq")
+
+	_, _, _, _, _, err := resolveDoltConnection(city, city)
+	if !errors.Is(err, errNoDirectSQLEndpoint) {
+		t.Fatalf("resolveDoltConnection() error = %v, want errNoDirectSQLEndpoint", err)
+	}
+}
+
+// A city whose every scope is proxied-local has no SQL workflow store, so the
+// fast path reports the quiet errNoSQLWorkflowStores and the store scan runs
+// without logging a fallback on every fetch.
+func TestTryFullWorkflowSQLTreatsProxiedLocalScopesAsNoSQLStores(t *testing.T) {
+	clearDoltAuthEnv(t)
+	state := newFakeState(t)
+	rigDir := t.TempDir()
+	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: rigDir, Prefix: "mr"}}
+	mustWriteProxiedLocalScope(t, fsys.OSFS{}, state.cityPath, "hq")
+	mustWriteProxiedLocalScope(t, fsys.OSFS{}, rigDir, "mr")
+	srv := New(state)
+
+	_, err := srv.tryFullWorkflowSQL("nodashid", "", "", 0)
+	if !errors.Is(err, errNoSQLWorkflowStores) {
+		t.Fatalf("tryFullWorkflowSQL() error = %v, want errNoSQLWorkflowStores", err)
+	}
+	_, err = srv.tryFullWorkflowSQL("mr-1", "rig", "myrig", 0)
+	if !errors.Is(err, errNoSQLWorkflowStores) {
+		t.Fatalf("scoped tryFullWorkflowSQL() error = %v, want errNoSQLWorkflowStores", err)
+	}
 }
