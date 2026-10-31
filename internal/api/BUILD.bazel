@@ -549,6 +549,7 @@ go_test(
         "worker_capability_guardrail_test.go",
         "worker_factory_test.go",
         "writeauth_test.go",
+        "zz_repro_bead_list_ids_test.go",
     ],
     data = glob(
         ["**"],
