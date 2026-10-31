@@ -1581,21 +1581,7 @@ func drainWorkflowExternalDeps(recipe *formula.Recipe, blockerIDs []string) []mo
 }
 
 func drainItemRuntimeVars(recipe *formula.Recipe, vars map[string]string) map[string]string {
-	out := make(map[string]string, len(vars))
-	if recipe != nil {
-		for name, def := range recipe.Vars {
-			if def != nil && def.Default != nil {
-				out[name] = *def.Default
-			}
-		}
-	}
-	for key, value := range vars {
-		out[key] = value
-	}
-	if len(out) == 0 {
-		return map[string]string{}
-	}
-	return out
+	return graphv2.EffectiveRecipeRuntimeVars(recipe, vars)
 }
 
 func closeFailedDrainItemRoots(store beads.Store, controlID, itemRootKey string) error {
