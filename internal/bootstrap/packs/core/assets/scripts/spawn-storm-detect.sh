@@ -52,7 +52,7 @@ COUNTS=$(cat "$LEDGER")
 # Step 3: For each open unassigned bead, check if it has rejection metadata
 # (indicates it was returned for rework or recovered by a work-health patrol).
 STORMS=0
-RESET_IDS=$(echo "$OPEN_BEADS" | jq -r '.[] | select(.metadata.rejection_reason != null or .metadata.recovered != null) | .id' 2>/dev/null)
+RESET_IDS=$(echo "$OPEN_BEADS" | jq -r '.[] | select(((.metadata.rejection_reason // "") != "") or ((.metadata.recovered // "") != "")) | .id' 2>/dev/null)
 while IFS= read -r bead_id; do
     [ -z "$bead_id" ] && continue
 

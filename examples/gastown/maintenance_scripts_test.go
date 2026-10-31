@@ -6495,6 +6495,183 @@ exit 0
 	}
 }
 
+// TestSpawnStormDetectIgnoresEmptyRejectionMetadata pins that a metadata key
+// left set to "" is not a reset signal: only a non-empty rejection_reason or
+// recovered value counts toward a spawn storm.
+func TestSpawnStormDetectIgnoresEmptyRejectionMetadata(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  list)
+    printf '[{"id":"ga-empty","status":"open","metadata":{"rejection_reason":"","recovered":""}}]\n'
+    ;;
+  show)
+    printf '[{"id":"%s","status":"open","title":"Empty metadata bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CITY":               cityDir,
+		"GC_CITY_PATH":          cityDir,
+		"GC_PACK_STATE_DIR":     stateDir,
+		"GC_CALL_LOG":           gcLog,
+		"SPAWN_STORM_THRESHOLD": "1",
+		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+
+	ledgerData, err := os.ReadFile(filepath.Join(stateDir, "spawn-storm-counts.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(ledger): %v", err)
+	}
+	var counts map[string]int
+	if err := json.Unmarshal(ledgerData, &counts); err != nil {
+		t.Fatalf("Unmarshal(ledger): %v\n%s", err, ledgerData)
+	}
+	if got, ok := counts["ga-empty"]; ok {
+		t.Fatalf("ledger counted ga-empty = %d with empty rejection_reason/recovered; want no entry\nledger: %s", got, ledgerData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(gcData), "SPAWN_STORM") {
+		t.Fatalf("spawn storm alert sent for a bead with empty rejection metadata:\n%s", gcData)
+	}
+}
+
+// TestSpawnStormDetectIgnoresEmptyResetMarkers covers the empty-marker cases
+// one key at a time: an empty rejection_reason with no recovered key, an
+// empty recovered with no rejection_reason, both empty, a boolean false
+// recovery, and a null metadata object. None of them is a reset signal.
+func TestSpawnStormDetectIgnoresEmptyResetMarkers(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  list)
+    printf '[{"id":"ga-cleared-rr","status":"open","metadata":{"rejection_reason":""}},{"id":"ga-cleared-rec","status":"open","metadata":{"recovered":""}},{"id":"ga-both-empty","status":"open","metadata":{"rejection_reason":"","recovered":""}},{"id":"ga-rec-false","status":"open","metadata":{"recovered":false}},{"id":"ga-null-meta","status":"open","metadata":null}]\n'
+    ;;
+  show)
+    printf '[{"id":"%s","status":"open","title":"Marker bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CITY":               cityDir,
+		"GC_CITY_PATH":          cityDir,
+		"GC_PACK_STATE_DIR":     stateDir,
+		"GC_CALL_LOG":           gcLog,
+		"SPAWN_STORM_THRESHOLD": "1",
+		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+
+	ledgerData, err := os.ReadFile(filepath.Join(stateDir, "spawn-storm-counts.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(ledger): %v", err)
+	}
+	var counts map[string]int
+	if err := json.Unmarshal(ledgerData, &counts); err != nil {
+		t.Fatalf("Unmarshal(ledger): %v\n%s", err, ledgerData)
+	}
+	if len(counts) != 0 {
+		t.Fatalf("ledger counted beads whose only markers are empty, false or absent; want no entries\nledger: %s", ledgerData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(gcData), "SPAWN_STORM") {
+		t.Fatalf("spawn storm alert sent for beads with no non-empty reset marker:\n%s", gcData)
+	}
+}
+
+// TestSpawnStormDetectCountsNonEmptyResetMarkers guards the non-empty check
+// against over-filtering: a real rejection_reason counts on its own, a
+// recovered marker counts even when the sibling rejection_reason key is
+// empty, and non-empty strings like "false" get no special handling.
+func TestSpawnStormDetectCountsNonEmptyResetMarkers(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  list)
+    printf '[{"id":"ga-rejected","status":"open","metadata":{"rejection_reason":"Conflicts with main"}},{"id":"ga-empty-rr-live-rec","status":"open","metadata":{"rejection_reason":"","recovered":"true"}},{"id":"ga-rec-string-false","status":"open","metadata":{"recovered":"false"}}]\n'
+    ;;
+  show)
+    printf '[{"id":"%s","status":"open","title":"Marker bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CITY":               cityDir,
+		"GC_CITY_PATH":          cityDir,
+		"GC_PACK_STATE_DIR":     stateDir,
+		"GC_CALL_LOG":           gcLog,
+		"SPAWN_STORM_THRESHOLD": "1",
+		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+
+	ledgerData, err := os.ReadFile(filepath.Join(stateDir, "spawn-storm-counts.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(ledger): %v", err)
+	}
+	var counts map[string]int
+	if err := json.Unmarshal(ledgerData, &counts); err != nil {
+		t.Fatalf("Unmarshal(ledger): %v\n%s", err, ledgerData)
+	}
+	for _, id := range []string{"ga-rejected", "ga-empty-rr-live-rec", "ga-rec-string-false"} {
+		if got := counts[id]; got != 1 {
+			t.Fatalf("ledger count for %s = %d, want 1\nledger: %s", id, got, ledgerData)
+		}
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	for _, id := range []string{"ga-rejected", "ga-empty-rr-live-rec", "ga-rec-string-false"} {
+		if !strings.Contains(string(gcData), "SPAWN_STORM: bead "+id+" reset 1x") {
+			t.Fatalf("gc log missing spawn storm notification for %s:\n%s", id, gcData)
+		}
+	}
+}
+
 func TestSpawnStormDetectPersistsCountWhenTitleLookupFails(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
