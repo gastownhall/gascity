@@ -44,6 +44,7 @@ func (p Profile) String() string {
 type ProfileBackend interface {
 	Provider
 	AttachmentObserverWithError
+	BackgroundWorkObserver
 	BackgroundWorkStopper
 	DeadRuntimeSessionChecker
 	DialogProvider
@@ -85,7 +86,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	core, timed := profileProvider{b, profileCapabilities[p]}, sleepTrait{SessionSleepCapabilityTimedOnly}
 	switch p {
 	case ProfileTmux:
-		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}, steerTrait{SteerKeystroke}}
+		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}, steerTrait{SteerKeystroke}}
 	case ProfileACP:
 		return acpProfile{core, b, b, b, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}, localTranscriptTrait{}}
 	case ProfileSubprocess:
@@ -161,6 +162,7 @@ type (
 	tmuxProfile struct {
 		Provider
 		AttachmentObserverWithError
+		BackgroundWorkObserver
 		BackgroundWorkStopper
 		DeadRuntimeSessionChecker
 		DialogProvider
@@ -478,6 +480,18 @@ func (f FullFake) TurnRunning(name string) (bool, error) {
 	defer f.mu.Unlock()
 	if _, running := f.sessions[name]; !running {
 		return false, fmt.Errorf("turn of %q: %w", name, ErrSessionNotFound)
+	}
+	return false, nil
+}
+
+// HasBackgroundWork implements [BackgroundWorkObserver]: a running session has no
+// background work, and a session that is not running cannot be looked at.
+func (f FullFake) HasBackgroundWork(name string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "HasBackgroundWork", Name: name})
+	if _, running := f.sessions[name]; !running {
+		return false, fmt.Errorf("background work of %q: %w", name, ErrSessionNotFound)
 	}
 	return false, nil
 }
