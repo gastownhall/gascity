@@ -6502,6 +6502,48 @@ exit 0
 	}
 }
 
+// TestSpawnStormDetectIgnoresEmptyResetMarkers pins that a rejection_reason or
+// recovered key holding "" is not a reset signal: only a non-empty marker
+// counts toward a spawn storm.
+func TestSpawnStormDetectIgnoresEmptyResetMarkers(t *testing.T) {
+	counts, gcLog := runSpawnStormSweep(t, `#!/bin/sh
+case "$1" in
+  list)
+    printf '[
+      {"id":"ga-cleared-rr","status":"open","metadata":{"rejection_reason":""}},
+      {"id":"ga-cleared-rec","status":"open","metadata":{"recovered":""}},
+      {"id":"ga-both-empty","status":"open","metadata":{"rejection_reason":"","recovered":""}},
+      {"id":"ga-rec-false","status":"open","metadata":{"recovered":false}},
+      {"id":"ga-null-meta","status":"open","metadata":null},
+      {"id":"ga-rejected","status":"open","metadata":{"rejection_reason":"Conflicts with main"}},
+      {"id":"ga-rr-empty-rec","status":"open","metadata":{"rejection_reason":"","recovered":"true"}}
+    ]\n'
+    ;;
+  show)
+    printf '[{"id":"%s","status":"open","title":"Marker bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+
+	for _, id := range []string{"ga-cleared-rr", "ga-cleared-rec", "ga-both-empty", "ga-rec-false", "ga-null-meta"} {
+		if got, ok := counts[id]; ok {
+			t.Errorf("ledger counted %s = %d without a non-empty reset marker; want no entry\nledger: %v", id, got, counts)
+		}
+		if strings.Contains(gcLog, "SPAWN_STORM: bead "+id+" ") {
+			t.Errorf("spawn storm alert sent for %s without a non-empty reset marker:\n%s", id, gcLog)
+		}
+	}
+	for _, id := range []string{"ga-rejected", "ga-rr-empty-rec"} {
+		if got := counts[id]; got != 1 {
+			t.Errorf("ledger count for %s = %d, want 1\nledger: %v", id, got, counts)
+		}
+		if !strings.Contains(gcLog, "SPAWN_STORM: bead "+id+" reset 1x") {
+			t.Errorf("gc log missing spawn storm notification for %s:\n%s", id, gcLog)
+		}
+	}
+}
+
 func TestSpawnStormDetectPersistsCountWhenTitleLookupFails(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
