@@ -17,6 +17,7 @@ go_library(
         "process_group_unix.go",
         "process_group_windows.go",
         "process_signal.go",
+        "program_capture.go",
         "seams.go",
         "server_socket_probe.go",
         "server_socket_probe_darwin.go",
@@ -39,6 +40,7 @@ go_library(
         "//internal/processenv",
         "//internal/runtime",
         "//internal/runtime/proctable",
+        "//internal/runtime/programstatus",
         "//internal/sessionlog",
         "//internal/shellquote",
         "@org_golang_x_sync//singleflight",
@@ -116,6 +118,8 @@ go_test(
         "nudge_submit_key_sequence_test.go",
         "pane_idle_scan_test.go",
         "proctable_tracking_test.go",
+        "program_capture_integration_test.go",
+        "program_capture_test.go",
         "respond_fence_integration_test.go",
         "respond_refusal_test.go",
         "runtime_inventory_integration_test.go",
@@ -151,8 +155,23 @@ go_test(
     data = glob(
         ["**"],
         exclude = ["BUILD.bazel"],
-    ),
+    ) + select({
+        "//:gotags_integration": [
+            "//cmd/gc-osc7501",
+            "//internal/runtime/runtimetest/osc7501emitter",
+        ],
+        "//conditions:default": [],
+    }),
     embed = [":tmux"],
+    # program_capture_integration_test.go arms capture with the built
+    # companion and drives it with the scripted emitter.
+    env = select({
+        "//:gotags_integration": {
+            "GC_TEST_OSC7501_BIN": "$(rootpath //cmd/gc-osc7501)",
+            "GC_TEST_OSC7501_EMITTER_BIN": "$(rootpath //internal/runtime/runtimetest/osc7501emitter)",
+        },
+        "//conditions:default": {},
+    }),
     # ~590 tests, ~90 s on one worker in the integration build
     # (//test:integration_packages); 3 shards keep each under 40 s.
     shard_count = 3,
@@ -164,6 +183,7 @@ go_test(
         "//internal/runtime/acp",
         "//internal/runtime/auto",
         "//internal/runtime/proctable",
+        "//internal/runtime/programstatus",
         "//internal/runtime/runtimetest",
         "//internal/session",
         "//internal/shellquote",
