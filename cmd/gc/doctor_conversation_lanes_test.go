@@ -179,7 +179,7 @@ func TestConversationLanesDoctorDefault(t *testing.T) {
 	}{
 		{name: "sqlite, host running the default", store: sqlite, st: running, status: doctor.StatusOK, want: "conversation lanes on (default: message, interrupt, respond): last pass 2s ago"},
 		{name: "sqlite, no host", store: sqlite, st: conversationLaneStatus{State: laneHostStateNone}, status: doctor.StatusError, want: "conversation lanes on (default: message, interrupt, respond): the controller runs no lane host"},
-		{name: "memory store", store: newLaneTestStore(), status: doctor.StatusOK, want: "conversation lanes are off by default here (the sessions store is not SQLite); this city keeps legacy delivery in this release"},
+		{name: "memory store", store: newLaneTestStore(), status: doctor.StatusOK, want: "conversation lanes are off by default here (the sessions store is not SQLite); this city keeps legacy delivery until its storage is split"},
 		{name: "bd", store: bd, status: doctor.StatusOK, want: "off by default here (conversation lanes need guarded batches; this city's sessions class is bound to the bd CLI (BdStore)"},
 		{name: "no sessions store", status: doctor.StatusWarning, want: "conversation lanes default undecided: the city store has no sessions store"},
 	} {

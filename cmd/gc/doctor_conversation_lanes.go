@@ -125,8 +125,30 @@ func (c *conversationLanesDoctorCheck) defaultKinds(ctx *doctor.CheckContext, r 
 	if capErr != nil {
 		why = capErr.Error()
 	}
-	r.Message = fmt.Sprintf("conversation lanes are off by default here (%s); this city keeps legacy delivery in this release", why)
+	r.Message = fmt.Sprintf("conversation lanes are off by default here (%s); this city keeps legacy delivery until its storage is split", why)
 	return nil, true
+}
+
+// sessionsFit opens the city store and reports how its sessions class can
+// host the conversation lane (laneStoreFitFor, the lane host's own
+// predicate) and, for a store that fits none, what it is bound to
+// (laneStoreBinding). errLaneStoreMissing when the city store has no
+// sessions store. It closes the store after.
+func (c *conversationLanesDoctorCheck) sessionsFit() (laneStoreFit, string, error) {
+	store, err := c.open()
+	if err != nil {
+		return laneStoreFitNone, "", fmt.Errorf("opening the city store: %w", err)
+	}
+	defer func() { _ = closeBeadStoreHandle(store) }()
+	sessions := c.sessions(store)
+	if isNilBeadStore(sessions) {
+		return laneStoreFitNone, "", errLaneStoreMissing
+	}
+	fit := laneStoreFitFor(sessionFrontDoor(sessions).Store())
+	if fit != laneStoreFitNone {
+		return fit, "", nil
+	}
+	return fit, laneStoreBinding(sessions), nil
 }
 
 // reportOff reports the list empty on r: OK, unless the controller still

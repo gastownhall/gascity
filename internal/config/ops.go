@@ -66,11 +66,11 @@ type OpsConfig struct {
 	// of their legacy path. This build accepts message, interrupt and respond.
 	// Left unset, a city whose sessions store is SQLite and applies guarded
 	// batches (a SQLite storage split) runs all three on the lane; any other
-	// city keeps their legacy delivery in this release. An explicit list,
-	// the empty list included, always wins: authoritative = [] on such a
-	// city keeps legacy delivery for one release, and is warned, since
-	// legacy delivery (the nudge queue, its pollers and the supervisor's
-	// dispatcher) is removed in a later release.
+	// city keeps their legacy delivery until it splits its storage (gc
+	// storage migrate). An explicit list, the empty list included, always
+	// wins: authoritative = [] on such a city keeps legacy delivery, and is
+	// warned, since legacy delivery (the nudge queue, its pollers and the
+	// supervisor's dispatcher) is removed in a future release.
 	// Listing message switches on the producers that write lane
 	// ops, whose messages the lane host then delivers: the API's POST
 	// /v0/city/{cityName}/session/{id}/ops (a T3 Code environment or an
