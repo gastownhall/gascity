@@ -120,9 +120,15 @@ func cityInitDoInit(_ context.Context, req cityinit.InitRequest) error {
 		startCommand:     req.StartCommand,
 		bootstrapProfile: req.BootstrapProfile,
 	}
-	if code := doInit(fsys.OSFS{}, req.Dir, wiz, req.NameOverride, io.Discard, io.Discard, false); code != 0 {
+	var stderr bytes.Buffer
+	if code := doInit(fsys.OSFS{}, req.Dir, wiz, req.NameOverride, io.Discard, &stderr, false); code != 0 {
 		if code == initExitAlreadyInitialized {
 			return cityinit.ErrAlreadyInitialized
+		}
+		// The refusal doInit printed is the reason (an existing .gc/store,
+		// say); a bare exit code tells an API caller nothing.
+		if reason := strings.TrimSpace(stderr.String()); reason != "" {
+			return fmt.Errorf("scaffold failed: %s", reason)
 		}
 		return fmt.Errorf("scaffold failed (exit %d)", code)
 	}

@@ -95,9 +95,9 @@ func newRigImportFixture(t *testing.T, rigs ...config.Rig) *rigImportFixture {
 		return prevOpen(storePath, cityPath)
 	}
 	t.Cleanup(func() { openStorageScopeStore = prevOpen })
-	prevOthers := rigImportOtherCities
-	rigImportOtherCities = func(string) ([]string, error) { return f.otherCities, nil }
-	t.Cleanup(func() { rigImportOtherCities = prevOthers })
+	prevOthers := storeSharerCities
+	storeSharerCities = func(string) ([]string, error) { return f.otherCities, nil }
+	t.Cleanup(func() { storeSharerCities = prevOthers })
 	prevHash := rigImportHashConfigOpener
 	rigImportHashConfigOpener = func(_ string, _ *config.City, rig config.Rig) (rigHashLengthConfig, error) {
 		conf := f.hashConf[rig.Name]

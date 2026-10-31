@@ -33,7 +33,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -43,12 +42,10 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
@@ -255,6 +252,9 @@ type rigImportEnv struct {
 	Stderr   io.Writer
 	// Started is the run's start, recorded in the marker.
 	Started time.Time
+	// Force carries the operator's named attestations (--force=); only
+	// shared-store:<identity> bears on an import.
+	Force storageForce
 }
 
 // rigImportOutcome names what an import did for one rig.
@@ -668,159 +668,14 @@ func probeElsewhere(env rigImportEnv, rig config.Rig, ids []string) (map[string]
 // rigImportCityWorkOpener opens the city work store for the blocker probe.
 var rigImportCityWorkOpener = func(cityPath string) (beads.Store, error) { return openInfraMigrationSource(cityPath) }
 
-// rigImportOtherCities lists the other cities registered on this machine.
-var rigImportOtherCities = func(cityPath string) ([]string, error) {
-	entries, err := otherRegisteredCities(cityPath)
-	if err != nil {
-		return nil, err
-	}
-	paths := make([]string, 0, len(entries))
-	for _, e := range entries {
-		paths = append(paths, e.Path)
-	}
-	return paths, nil
-}
-
-// rigDoltIdentity is the Dolt database a scope's store lives in.
-type rigDoltIdentity struct {
-	// Database is the database name; empty for a scope with no
-	// authoritative Dolt target (a file store).
-	Database string
-	// Endpoint is the normalized server address (loopback spellings fold to
-	// one; a host name resolves to its sorted addresses) or the socket path.
-	Endpoint string
-	// Unresolved reports that the endpoint could not be resolved, so the
-	// identity names a database without saying where it lives.
-	Unresolved bool
-	Err        error
-}
-
-// rigImportScopeDoltTarget resolves the Dolt database a scope's store lives
-// in.
-var rigImportScopeDoltTarget = func(cityPath, scopeRoot string) rigDoltIdentity {
-	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
-	if err != nil {
-		// The endpoint could not be resolved (that city's Dolt is down, its
-		// runtime state is gone). The database name is still the scope's own
-		// pin in .beads/metadata.json: compare by it, and leave it empty,
-		// which refuses, only when that cannot be read either.
-		db, _, _ := contract.ReadDoltDatabase(fsys.OSFS{}, filepath.Join(scopeRoot, ".beads", "metadata.json"))
-		return rigDoltIdentity{Database: strings.TrimSpace(db), Unresolved: true, Err: err}
-	}
-	if !ok || strings.TrimSpace(target.Database) == "" {
-		return rigDoltIdentity{}
-	}
-	id := rigDoltIdentity{Database: strings.TrimSpace(target.Database)}
-	if socket := strings.TrimSpace(target.Socket); socket != "" {
-		id.Endpoint = "unix:" + filepath.Clean(socket)
-		return id
-	}
-	host, herr := normalizeDoltHost(target.Host)
-	if herr != nil {
-		id.Unresolved, id.Err = true, herr
-		return id
-	}
-	id.Endpoint = host + ":" + strings.TrimSpace(target.Port)
-	return id
-}
-
-// normalizeDoltHost folds the loopback spellings (localhost, 127.0.0.1, ::1,
-// empty) to one and resolves any other host name to its sorted addresses,
-// so two spellings of one server compare equal.
-func normalizeDoltHost(host string) (string, error) {
-	host = strings.Trim(strings.TrimSpace(strings.ToLower(host)), "[]")
-	switch host {
-	case "", "localhost", "127.0.0.1", "::1", "0.0.0.0", "::":
-		// A wildcard listen address names this host too: a client
-		// configured with it reaches the server over loopback.
-		return "loopback", nil
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLoopback() || ip.IsUnspecified() {
-			return "loopback", nil
-		}
-		return ip.String(), nil
-	}
-	addrs, err := rigImportLookupHost(host)
-	if err == nil && len(addrs) == 0 {
-		err = errors.New("no addresses")
-	}
-	if err != nil {
-		return "", fmt.Errorf("resolving Dolt host %q: %w", host, err)
-	}
-	norm := make([]string, 0, len(addrs))
-	for _, a := range addrs {
-		if ip := net.ParseIP(a); ip != nil && ip.IsLoopback() {
-			norm = append(norm, "loopback")
-			continue
-		}
-		norm = append(norm, a)
-	}
-	sort.Strings(norm)
-	return strings.Join(norm, ","), nil
-}
-
-// rigImportLookupHost resolves a host name; a test seam.
-var rigImportLookupHost = net.LookupHost
-
 // rigImportSharedStoreRefusal refuses a rig whose store another registered
-// city also uses: the same scope root, or the same Dolt database. A shared
-// or company store holds rows another city owns, and is refused until S5's
-// single-writer attestation exists. A registry that cannot be read refuses
-// too: absence of a sharer must be shown, not assumed.
+// city also uses (findStoreSharers, storage_shared_store.go), unless the
+// operator attested --force=shared-store:<identity> for it and every
+// co-tenant city is stopped. A registry or config that cannot be read
+// refuses: absence of a sharer must be shown, not assumed.
 func rigImportSharedStoreRefusal(env rigImportEnv, rig config.Rig) error {
-	others, err := rigImportOtherCities(env.CityPath)
-	if err != nil {
-		return fmt.Errorf("rig %s: reading the city registry to rule out a shared rig store: %w; nothing was written", rig.Name, err)
-	}
-	selfRoot := rigStoreRoot(env.CityPath, rig)
-	self := rigImportScopeDoltTarget(env.CityPath, selfRoot)
-	// A rig with no Dolt database (a file store) shares none. One whose
-	// endpoint cannot be resolved and which pins no database name cannot be
-	// told apart from any other city's Dolt rig, so it is compared, and
-	// refused, rather than skipped.
-	noDatabase := self.Database == "" && !self.Unresolved
-	for _, otherPath := range others {
-		cfg, err := loadCityConfigWithoutBuiltinPackRefresh(otherPath, io.Discard)
-		if err == nil && cfg == nil {
-			err = errors.New("it loaded no configuration")
-		}
-		if err != nil {
-			return fmt.Errorf("rig %s: city %s is registered but its config cannot be read (%w), so it cannot be ruled out as sharing the rig store; nothing was written", rig.Name, otherPath, err)
-		}
-		for _, other := range cfg.Rigs {
-			if strings.TrimSpace(other.Path) == "" {
-				continue
-			}
-			root := rigStoreRoot(otherPath, other)
-			if samePath(root, selfRoot) {
-				return fmt.Errorf("rig %s's store %s is also city %s's rig %s: a shared rig store holds rows another city owns, and is refused until the single-writer attestation exists; nothing was written", rig.Name, selfRoot, otherPath, other.Name)
-			}
-			if noDatabase {
-				continue
-			}
-			theirs := rigImportScopeDoltTarget(otherPath, root)
-			if theirs.Database == "" && !theirs.Unresolved {
-				continue
-			}
-			switch {
-			case self.Unresolved && self.Database == "":
-				return fmt.Errorf("rig %s's Dolt endpoint cannot be resolved (%w) and its .beads/metadata.json pins no dolt_database, so it cannot be ruled out as city %s's rig %s's database: start this rig's Dolt server so its endpoint resolves, or pin its database name, then re-run; nothing was written", rig.Name, self.Err, otherPath, other.Name)
-			case self.Unresolved || theirs.Unresolved:
-				if theirs.Database != "" && theirs.Database != self.Database {
-					continue
-				}
-				why := theirs.Err
-				if self.Unresolved {
-					why = self.Err
-				}
-				return fmt.Errorf("rig %s's Dolt database %q may also be city %s's rig %s, and the endpoints cannot be compared (%w): start that city's Dolt server (or this rig's) so they can be, or unregister that city if it is gone; nothing was written", rig.Name, self.Database, otherPath, other.Name, why)
-			case theirs.Database == self.Database && theirs.Endpoint == self.Endpoint:
-				return fmt.Errorf("rig %s's Dolt database %s at %s is also city %s's rig %s: a shared rig store holds rows another city owns, and is refused until the single-writer attestation exists; nothing was written", rig.Name, self.Database, self.Endpoint, otherPath, other.Name)
-			}
-		}
-	}
-	return nil
+	_, err := sharedStoreRefusal(env.CityPath, "rig "+rig.Name, rigStoreRoot(env.CityPath, rig), env.Force)
+	return err
 }
 
 // rigImportPrepare removes the binding rows an interrupted earlier attempt
@@ -1586,6 +1441,14 @@ func doStorageMigrateFromRigs(ctx context.Context, request storageOperatorReques
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// The controller lock for the whole run, and the liveness checks under it
+	// (storage_verb_exclusion.go); the ping below is the advisory second check.
+	controllerLock, err := acquireStorageVerbExclusion(request, storageVerbScope{})
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer controllerLock.Close() //nolint:errcheck // released last, after the guard
 	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
 		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city. Stop it (%s) and run this again\n", logPrefix, pid, storageStopCommand) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1613,6 +1476,7 @@ func doStorageMigrateFromRigs(ctx context.Context, request storageOperatorReques
 			fmt.Fprintf(stderr, "%s: releasing the migration guard: %v\n", logPrefix, releaseErr) //nolint:errcheck // best-effort stderr
 		}
 	}()
+	recordStorageAttestation(request.CityPath, logPrefix, request.Force.hazards(), stderr)
 	env := rigImportEnv{
 		CityPath: request.CityPath,
 		CityName: loadedCityName(request.Cfg, request.CityPath),
@@ -1621,6 +1485,7 @@ func doStorageMigrateFromRigs(ctx context.Context, request storageOperatorReques
 		Stdout:   stdout,
 		Stderr:   stderr,
 		Started:  time.Now(),
+		Force:    request.Force,
 	}
 	shared := rigsSharingOneDatabase(env, rigs)
 	rec := openCityRecorderAt(request.CityPath, stderr)
@@ -1830,6 +1695,12 @@ func doStorageAbandonRigStore(ctx context.Context, request storageOperatorReques
 		fmt.Fprintf(stderr, "%s: this city has no converged binding to abandon a rig store into (%v)\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	controllerLock, err := acquireStorageVerbExclusion(request, storageVerbScope{})
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer controllerLock.Close() //nolint:errcheck // released last, after the guard
 	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
 		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city. Stop it (%s) and run this again\n", logPrefix, pid, storageStopCommand) //nolint:errcheck // best-effort stderr
 		return 1

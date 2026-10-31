@@ -406,6 +406,9 @@ type CityRuntimeParams struct {
 	// reload's pending-restart warning judges admission the same way; nil has
 	// no developer override.
 	ReconcilerLookupEnv func(string) (string, bool)
+	// ReconcilerV2FellBack reports that the latch was a default v2 the boot
+	// probe demoted to legacy (applyV2DefaultBootFallback).
+	ReconcilerV2FellBack bool
 	// Wake is the controller wiring's wake, which the socket and the API
 	// state already use; nil builds a legacy one over PokeCh and
 	// ControlDispatcherCh.
@@ -550,7 +553,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		configRev:               p.ConfigRev,
 		configDirty:             configDirty,
 		configDebounce:          p.ConfigDebounce,
-		reconcilerDrift:         reconcilerModeDrift{running: p.ReconcilerMode, lookupEnv: p.ReconcilerLookupEnv},
+		reconcilerDrift:         reconcilerModeDrift{running: p.ReconcilerMode, lookupEnv: p.ReconcilerLookupEnv, fellBack: p.ReconcilerV2FellBack},
 		cfg:                     p.Cfg,
 		sp:                      p.SP,
 		publishedRev:            p.ConfigRev,
