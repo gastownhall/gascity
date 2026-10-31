@@ -2506,6 +2506,854 @@ exit 1
 	}
 }
 
+// TestOrphanSweepProtectsDurableIDHolderWithUnreadableSessionRecord covers
+// the gastownhall/gascity#7686 review finding: a durable-ID claim (assignee
+// equals gc.session_id, the shape continuationPinAssignee stamps) whose
+// stamped runtime name merely suffixes that id carries no independent
+// evidence, so when every read of the canonical session record fails the
+// holder's state is unknown. Release requires a session record that actually
+// read back terminal; a failed read must leave the claim protected instead
+// of being swallowed by the self-probe exception.
+func TestOrphanSweepProtectsDurableIDHolderWithUnreadableSessionRecord(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+`+orphanSweepGateStubArm+`case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: deployer
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-durable-holder","status":"in_progress","assignee":"oc-wisp-holder"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "ga-durable-holder" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-durable-holder","status":"in_progress","assignee":"oc-wisp-holder","metadata":{"gc.session_id":"oc-wisp-holder","gc.session_name":"worker-oc-wisp-holder"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := coreScriptPath("orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "skipped 1 unverifiable") {
+		t.Fatalf("durable-ID holder with unreadable session record was not counted unverifiable:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(logData), "bd release-if-current ga-durable-holder ") {
+		t.Fatalf("durable-ID holder was released without a readable terminal session record:\n%s", logData)
+	}
+}
+
+// TestOrphanSweepIgnoresUnrelatedTerminalSessionRecord covers the matching
+// half of the same finding: terminal evidence must identify as the record
+// that was asked for. A probe of the claim's canonical session id that
+// answers with a terminal session record under a DIFFERENT id is not death
+// evidence for the holder and must not unlock release.
+func TestOrphanSweepIgnoresUnrelatedTerminalSessionRecord(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+`+orphanSweepGateStubArm+`case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: deployer
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-mixed-record","status":"in_progress","assignee":"gc-dead8"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "ga-mixed-record" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-mixed-record","status":"in_progress","assignee":"gc-dead8","metadata":{"gc.session_id":"gc-dead8","gc.session_name":"pool-gc-dead8"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "gc-dead8" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"gc-other","status":"closed","issue_type":"session","metadata":{"state":"closed"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := coreScriptPath("orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "skipped 1 unverifiable") {
+		t.Fatalf("holder with only an unrelated terminal record was not counted unverifiable:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(logData), "bd release-if-current ga-mixed-record ") {
+		t.Fatalf("holder was released on an unrelated terminal session record:\n%s", logData)
+	}
+}
+
+// TestOrphanSweepRejectsStaleLegacySessionRecordForStampedHolder covers the
+// gastownhall/gascity#7686 round-2 review finding: the claim hook refreshes
+// gc.session_id without clearing older identity fields, so a work bead can
+// carry a stale legacy session_id from an earlier holder. When every read of
+// the CURRENT canonical holder fails, a terminal record read through that
+// stale legacy id must not stand in as the holder's death evidence — the
+// claim stays protected.
+func TestOrphanSweepRejectsStaleLegacySessionRecordForStampedHolder(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+`+orphanSweepGateStubArm+`case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: deployer
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-stale-legacy","status":"in_progress","assignee":"oc-wisp-holder"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "ga-stale-legacy" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-stale-legacy","status":"in_progress","assignee":"oc-wisp-holder","metadata":{"gc.session_id":"oc-wisp-holder","gc.session_name":"worker-oc-wisp-holder","session_id":"oc-wisp-old"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "oc-wisp-old" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"oc-wisp-old","status":"closed","issue_type":"session","metadata":{"state":"closed"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := coreScriptPath("orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "skipped 1 unverifiable") {
+		t.Fatalf("stamped holder with only stale legacy terminal evidence was not counted unverifiable:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(logData), "bd show oc-wisp-old --json") {
+		t.Fatalf("stale legacy session id was never probed (fixture did not exercise the boundary):\n%s", logData)
+	}
+	if strings.Contains(string(logData), "bd release-if-current ga-stale-legacy ") {
+		t.Fatalf("stamped holder was released on a stale legacy terminal record while its canonical read failed:\n%s", logData)
+	}
+}
+
+// TestOrphanSweepReleasesRuntimeNameAssigneeOnCanonicalTerminalRecord covers
+// the matching gastownhall/gascity#7686 round-2 finding: a claim whose
+// assignee IS the stamped runtime session name (a rig-qualified double-dash
+// shape, never a bead id) self-probes that name and the read fails. That
+// expected failure must be deferred — not classified as a dead-end probe —
+// so the terminal record read under the claim's canonical gc.session_id can
+// release the dead holder's work.
+func TestOrphanSweepReleasesRuntimeNameAssigneeOnCanonicalTerminalRecord(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+`+orphanSweepGateStubArm+`case "$1" in
+  mail)
+    exit 0
+    ;;
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: deployer
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-name-assignee","status":"in_progress","assignee":"beads--deployer-oc-wisp-dead"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "ga-name-assignee" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-name-assignee","status":"in_progress","assignee":"beads--deployer-oc-wisp-dead","metadata":{"gc.session_id":"oc-wisp-dead","gc.session_name":"beads--deployer-oc-wisp-dead"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "oc-wisp-dead" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"oc-wisp-dead","status":"closed","issue_type":"session","metadata":{"state":"closed"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := coreScriptPath("orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "orphan-sweep: reset 1 orphaned beads") {
+		t.Fatalf("runtime-name assignee with canonical terminal record was not released:\n%s", out)
+	}
+	if strings.Contains(string(out), "unverifiable") {
+		t.Fatalf("failed name-shaped self-probe still vetoed the canonical terminal evidence:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(logData), "bd release-if-current ga-name-assignee beads--deployer-oc-wisp-dead") {
+		t.Fatalf("release-if-current was not called with the exact assignee fence:\n%s", logData)
+	}
+}
+
+// TestOrphanSweepReleasesCanonicalDeadHolderDespiteUnreadableStaleHint covers
+// the gastownhall/gascity#7686 round-3 finding: the claim hook refreshes
+// gc.session_id without clearing a legacy session_id, so a claim can carry a
+// readable terminal record under its canonical current-holder id NEXT TO a
+// stale legacy hint whose read fails. The failed stale probe says nothing
+// about the current holder, so the canonical terminal read must release the
+// claim instead of being vetoed into a permanent unverifiable skip.
+func TestOrphanSweepReleasesCanonicalDeadHolderDespiteUnreadableStaleHint(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+`+orphanSweepGateStubArm+`case "$1" in
+  mail)
+    exit 0
+    ;;
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: deployer
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-inverse","status":"in_progress","assignee":"oc-wisp-dead"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "ga-inverse" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-inverse","status":"in_progress","assignee":"oc-wisp-dead","metadata":{"gc.session_id":"oc-wisp-dead","gc.session_name":"worker-oc-wisp-dead","session_id":"oc-wisp-old"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "oc-wisp-dead" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"oc-wisp-dead","status":"closed","issue_type":"session","metadata":{"state":"closed"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := coreScriptPath("orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "orphan-sweep: reset 1 orphaned beads") {
+		t.Fatalf("canonical terminal holder with an unreadable stale hint was not released:\n%s", out)
+	}
+	if strings.Contains(string(out), "unverifiable") {
+		t.Fatalf("failed stale-hint probe still vetoed the canonical current-holder death evidence:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(logData), "bd show oc-wisp-old --json") {
+		t.Fatalf("stale legacy hint was never probed (fixture did not exercise the boundary):\n%s", logData)
+	}
+	if !strings.Contains(string(logData), "bd release-if-current ga-inverse oc-wisp-dead") {
+		t.Fatalf("release-if-current was not called with the exact assignee fence:\n%s", logData)
+	}
+}
+
+// TestOrphanSweepPreservesLiveStaleCandidateDespiteCanonicalTerminalRead is
+// the safety sibling of the inverse case above: legacy ids stay probe
+// candidates, so when the stale legacy session_id reads back LIVE after the
+// canonical current-holder record has already been read terminal, that
+// positive live read must still protect the claim. Candidate order puts the
+// canonical id before the stale hint, so this guards against any early
+// release decision made before every candidate has been scanned.
+func TestOrphanSweepPreservesLiveStaleCandidateDespiteCanonicalTerminalRead(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+`+orphanSweepGateStubArm+`case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: deployer
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-stalive","status":"in_progress","assignee":"oc-wisp-dead"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "ga-stalive" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-stalive","status":"in_progress","assignee":"oc-wisp-dead","metadata":{"gc.session_id":"oc-wisp-dead","gc.session_name":"worker-oc-wisp-dead","session_id":"oc-wisp-old"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "oc-wisp-dead" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"oc-wisp-dead","status":"closed","issue_type":"session","metadata":{"state":"closed"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "oc-wisp-old" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"oc-wisp-old","status":"in_progress","issue_type":"session","metadata":{"state":"running"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := coreScriptPath("orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if strings.Contains(string(out), "orphan-sweep: reset") {
+		t.Fatalf("a live stale candidate did not protect the claim after a canonical terminal read:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(logData), "bd show oc-wisp-old --json") {
+		t.Fatalf("stale legacy hint was never probed (fixture did not exercise the boundary):\n%s", logData)
+	}
+	if strings.Contains(string(logData), "bd release-if-current") {
+		t.Fatalf("claim was released although a probed candidate read back live:\n%s", logData)
+	}
+}
+
+// orphanSweepOutcomeDeclaration mirrors the strict JSON contract decoded by
+// cmd/gc/order_outcome.go from GC_ORDER_OUTCOME_FILE.
+type orphanSweepOutcomeDeclaration struct {
+	Outcome string `json:"outcome"`
+	Reason  string `json:"reason"`
+	Scopes  []struct {
+		Scope  string `json:"scope"`
+		Reason string `json:"reason"`
+	} `json:"scopes"`
+}
+
+// TestOrphanSweepDeclaresSkippedOutcomeWhenOnlyUnverifiableSkips covers the
+// gastownhall/gascity#7686 skipped-work visibility requirement: the
+// controller logs an exec order's combined output only on a non-zero exit
+// (#4543), so a sweep that skips every staged bead and exits 0 must declare
+// a typed "skipped" outcome through the existing GC_ORDER_OUTCOME_FILE
+// contract (order_outcome.sh), naming each protected bead and its reason.
+func TestOrphanSweepDeclaresSkippedOutcomeWhenOnlyUnverifiableSkips(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	outcomeFile := filepath.Join(t.TempDir(), "outcome.json")
+	if err := os.WriteFile(outcomeFile, nil, 0o644); err != nil {
+		t.Fatalf("WriteFile(outcome file): %v", err)
+	}
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+`+orphanSweepGateStubArm+`case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: deployer
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-skiponly","status":"in_progress","assignee":"oc-wisp-holder"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "ga-skiponly" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-skiponly","status":"in_progress","assignee":"oc-wisp-holder","metadata":{"gc.session_id":"oc-wisp-holder","gc.session_name":"worker-oc-wisp-holder"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":               cityDir,
+		"GC_CITY_PATH":          cityDir,
+		"GC_CALL_LOG":           gcLog,
+		"GC_ORDER_OUTCOME_FILE": outcomeFile,
+		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := coreScriptPath("orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "skipped 1 unverifiable") {
+		t.Fatalf("unreadable canonical holder was not counted unverifiable:\n%s", out)
+	}
+
+	data, err := os.ReadFile(outcomeFile)
+	if err != nil {
+		t.Fatalf("ReadFile(outcome file): %v", err)
+	}
+	var decl orphanSweepOutcomeDeclaration
+	if err := json.Unmarshal(data, &decl); err != nil {
+		t.Fatalf("skip-only exit-0 run declared no decodable outcome (%v):\n%s", err, data)
+	}
+	if decl.Outcome != "skipped" {
+		t.Fatalf("skip-only run declared outcome %q, want \"skipped\":\n%s", decl.Outcome, data)
+	}
+	if decl.Reason == "" {
+		t.Fatalf("skipped declaration carries no reason:\n%s", data)
+	}
+	if len(decl.Scopes) != 1 || decl.Scopes[0].Scope != "ga-skiponly" {
+		t.Fatalf("skipped declaration does not name the protected bead:\n%s", data)
+	}
+	if !strings.Contains(decl.Scopes[0].Reason, "holder session unverifiable") {
+		t.Fatalf("skipped scope does not carry the skip reason:\n%s", data)
+	}
+}
+
+// TestOrphanSweepDeclaresPartialOutcomeOnMixedResetAndSkip covers the mixed
+// shape of the same requirement: an exit-0 sweep that reset some staged
+// beads and skipped others declares "partial" with a scope per skipped bead,
+// while the resets themselves appear only in the summary — a fully
+// successful sweep makes no declaration at all (covered by every fixture
+// above that runs without GC_ORDER_OUTCOME_FILE writing anything).
+func TestOrphanSweepDeclaresPartialOutcomeOnMixedResetAndSkip(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	outcomeFile := filepath.Join(t.TempDir(), "outcome.json")
+	if err := os.WriteFile(outcomeFile, nil, 0o644); err != nil {
+		t.Fatalf("WriteFile(outcome file): %v", err)
+	}
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+`+orphanSweepGateStubArm+`case "$1" in
+  mail)
+    exit 0
+    ;;
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: deployer
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-mixdead","status":"in_progress","assignee":"gc-mixdead"},
+  {"id":"ga-mixskip","status":"in_progress","assignee":"oc-wisp-holder"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "ga-mixdead" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-mixdead","status":"in_progress","assignee":"gc-mixdead","metadata":{"gc.session_id":"gc-mixdead","gc.session_name":"pool-gc-mixdead"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "gc-mixdead" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"gc-mixdead","status":"closed","issue_type":"session","metadata":{"state":"closed"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$3" = "ga-mixskip" ] && [ "$4" = "--json" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-mixskip","status":"in_progress","assignee":"oc-wisp-holder","metadata":{"gc.session_id":"oc-wisp-holder","gc.session_name":"worker-oc-wisp-holder"}}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":               cityDir,
+		"GC_CITY_PATH":          cityDir,
+		"GC_CALL_LOG":           gcLog,
+		"GC_ORDER_OUTCOME_FILE": outcomeFile,
+		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := coreScriptPath("orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "reset 1 orphaned beads, skipped 1 unverifiable") {
+		t.Fatalf("mixed sweep summary missing:\n%s", out)
+	}
+
+	data, err := os.ReadFile(outcomeFile)
+	if err != nil {
+		t.Fatalf("ReadFile(outcome file): %v", err)
+	}
+	var decl orphanSweepOutcomeDeclaration
+	if err := json.Unmarshal(data, &decl); err != nil {
+		t.Fatalf("mixed exit-0 run declared no decodable outcome (%v):\n%s", err, data)
+	}
+	if decl.Outcome != "partial" {
+		t.Fatalf("mixed run declared outcome %q, want \"partial\":\n%s", decl.Outcome, data)
+	}
+	if len(decl.Scopes) != 1 || decl.Scopes[0].Scope != "ga-mixskip" {
+		t.Fatalf("partial declaration must name exactly the skipped bead:\n%s", data)
+	}
+}
+
 // TestOrphanSweepTreatsUnresolvableDoubleDashAssigneeAsUnverifiable covers
 // ga-7p4aab fix 3: when a work bead's only session-bead candidate is the
 // assignee itself and that assignee is a session-name shape (not a
@@ -13077,6 +13925,54 @@ func TestOrphanSweepReportsProtectedIdentitiesWhenEscalationMailFails(t *testing
 	}
 	if outcome, ok := run.outcome(t); !ok || outcome.Outcome != "partial" {
 		t.Fatalf("outcome = %+v (written %v), want partial declared before the loud-fail exit", outcome, ok)
+	}
+}
+
+// TestOrphanSweepKeepsGateDeclarationWhenLocalClaimsAreAlsoSkipped covers one
+// sweep that both protects a claim the gate cannot vouch for and skips a local
+// claim whose holder it cannot verify (gastownhall/gascity#7686). The local
+// skip must not replace the gate's partial declaration with "skipped": the
+// outcome stays partial, keeps the gate's reason, adds the local skip count,
+// and names both the protected identity and the skipped bead.
+func TestOrphanSweepKeepsGateDeclarationWhenLocalClaimsAreAlsoSkipped(t *testing.T) {
+	// A rig-encoded session name ("--") is not a bead id, so a failed
+	// self-probe leaves the holder unverifiable rather than dead.
+	const localUnverifiable = "shared--gastown__polecat-gc-q9j0"
+	run := runOrphanSweepGateFixture(t, nil,
+		[]orphanSweepGateRow{
+			inProgress("sh-foreign-crew", "shared/dalinar"),
+			inProgress("sh-local-unverifiable", localUnverifiable),
+		}, nil, []string{"shared/dalinar"}, nil)
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	for _, bead := range []string{"sh-foreign-crew", "sh-local-unverifiable"} {
+		if run.released(bead) {
+			t.Fatalf("%s was released\n%s", bead, run.context())
+		}
+	}
+	if want := "orphan-sweep: reset 0 orphaned beads, skipped 1 unverifiable, protected 1 foreign/unknown claims"; !strings.Contains(run.out, want) {
+		t.Fatalf("output missing %q:\n%s", want, run.out)
+	}
+	outcome, ok := run.outcome(t)
+	if !ok || outcome.Outcome != "partial" {
+		t.Fatalf("outcome = %+v (written %v), want the gate's partial kept\n%s", outcome, ok, run.context())
+	}
+	if !strings.Contains(outcome.Reason, "could not vouch for") || !strings.Contains(outcome.Reason, "skipped 1 unverifiable") {
+		t.Fatalf("outcome reason %q, want the gate's reason with the local skip count appended", outcome.Reason)
+	}
+	scopes := map[string]string{}
+	for _, scope := range outcome.Scopes {
+		scopes[scope.Scope] = scope.Reason
+	}
+	if len(outcome.Scopes) != 2 {
+		t.Fatalf("outcome scopes = %+v, want one for the protected identity and one for the skipped bead", outcome.Scopes)
+	}
+	if !strings.Contains(scopes["shared/dalinar"], "sh-foreign-crew") {
+		t.Fatalf("no scope names protected identity shared/dalinar with sh-foreign-crew: %+v", outcome.Scopes)
+	}
+	if !strings.Contains(scopes["sh-local-unverifiable"], "holder session unverifiable") {
+		t.Fatalf("no scope names skipped bead sh-local-unverifiable with its reason: %+v", outcome.Scopes)
 	}
 }
 
