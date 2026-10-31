@@ -102,7 +102,7 @@ func ParseBody(body string) (Report, error) {
 		if len(app) > MaxApp {
 			return Report{}, fmt.Errorf("%w: app over %d bytes", ErrDropped, MaxApp)
 		}
-		if validApp(app) {
+		if ValidApp(app) {
 			r.App = app
 		}
 	}
@@ -168,8 +168,9 @@ func isNameByte(c byte) bool {
 	return isAlnum(c) || c == '_' || c == '.' || c == '+' || c == '-'
 }
 
-// validApp reports whether app matches [A-Za-z0-9_.+-]{1,32}.
-func validApp(app string) bool {
+// ValidApp reports whether app matches [A-Za-z0-9_.+-]{1,32}, the only app
+// names a parsed report carries.
+func ValidApp(app string) bool {
 	if app == "" || len(app) > MaxApp {
 		return false
 	}

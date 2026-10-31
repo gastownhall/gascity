@@ -137,8 +137,9 @@ func TestProgramStatusContractCatchesMisreadings(t *testing.T) {
 	}
 }
 
-// Kills heal cases that pass a healer taking a foreign pipe over or never
-// arming, and a suite that runs heal cases without a healer.
+// Kills heal cases that pass a healer taking a foreign pipe over, closing
+// one when it disarms, or never arming, and a suite that runs heal cases
+// without a healer.
 func TestProgramStatusContractCatchesBadHeals(t *testing.T) {
 	takeover := FakeProgramStatusFixtures()
 	armed := takeover.Armed
@@ -149,6 +150,19 @@ func TestProgramStatusContractCatchesBadHeals(t *testing.T) {
 	}
 	if err := caseNamed(t, "PS-013").run(t, takeover); err == nil {
 		t.Fatal("PS-013 passed a healer that takes a foreign pipe over")
+	}
+	closer := FakeProgramStatusFixtures()
+	closer.Armed = func(t *testing.T, m runtime.ProgramStatusMode, script ...string) ProgramStatusSession {
+		s := armed(t, m, script...)
+		fake, ok := s.Provider.(runtime.FullFake)
+		if !ok {
+			t.Fatalf("fake fixture provider is %T, want runtime.FullFake", s.Provider)
+		}
+		s.Provider = closesPipeOnDisarm{FullFake: fake}
+		return s
+	}
+	if err := caseNamed(t, "PS-013").run(t, closer); err == nil {
+		t.Fatal("PS-013 passed a healer that closes a foreign pipe when it disarms")
 	}
 	stuck := FakeProgramStatusFixtures()
 	unarmed := stuck.Unarmed
@@ -179,6 +193,20 @@ func (a alwaysArms) ProgramStatus(name string) (runtime.ProgramStatus, error) {
 
 func (alwaysArms) HealProgramCapture(string, runtime.ProgramStatusArm) (runtime.ProgramCaptureAction, error) {
 	return runtime.ProgramCaptureArmed, nil
+}
+
+// closesPipeOnDisarm heals as its fake does, except that a disarm closes the
+// pane's pipe whoever holds it.
+type closesPipeOnDisarm struct{ runtime.FullFake }
+
+func (c closesPipeOnDisarm) HealProgramCapture(name string, want runtime.ProgramStatusArm) (runtime.ProgramCaptureAction, error) {
+	action, err := c.FullFake.HealProgramCapture(name, want)
+	if action == runtime.ProgramCaptureDisarmed {
+		row, _ := c.ProgramPane(name)
+		row.PanePipe = false
+		c.SetProgramPane(name, row)
+	}
+	return action, err
 }
 
 // neverArms heals by reporting nothing to do.

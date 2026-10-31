@@ -54,6 +54,9 @@ type ProgramStatusSession struct {
 	// ForeignPipe attaches a reader that is not the runtime's to the pane,
 	// displacing the capture reader.
 	ForeignPipe func(t *testing.T)
+	// PipeOpen reports whether a reader, the runtime's or another, holds
+	// the pane's pipe.
+	PipeOpen func(t *testing.T) bool
 	// SetMode flips the city switch the provider reads under.
 	SetMode func(t *testing.T, mode runtime.ProgramStatusMode)
 }
@@ -563,7 +566,8 @@ func checkPS012(t *testing.T, f ProgramStatusFixtures) error {
 }
 
 // PS-013: a foreign pipe displaces the reader and reads reader_lost; heal
-// defers and never takes the pipe over.
+// defers and never takes the pipe over, and a disarm when the switch goes
+// off leaves the pipe open.
 func checkPS013(t *testing.T, f ProgramStatusFixtures) error {
 	if f.Armed == nil {
 		return skip("no armed-session fixture")
@@ -582,7 +586,20 @@ func checkPS013(t *testing.T, f ProgramStatusFixtures) error {
 	if err := heal(s, "foreign pipe", captureAll, runtime.ProgramCaptureDeferred); err != nil {
 		return err
 	}
-	_, err := readWant(s, "foreign pipe after heal", runtime.ProgramStatusReaderLost)
+	if _, err := readWant(s, "foreign pipe after heal", runtime.ProgramStatusReaderLost); err != nil {
+		return err
+	}
+	if s.SetMode == nil || s.PipeOpen == nil {
+		return nil
+	}
+	s.SetMode(t, runtime.ProgramStatusOff)
+	if err := heal(s, "foreign pipe, switch off", runtime.ProgramStatusArm{}, runtime.ProgramCaptureDisarmed); err != nil {
+		return err
+	}
+	if !s.PipeOpen(t) {
+		return errors.New("foreign pipe, switch off: the disarm closed a pipe the runtime's reader does not hold")
+	}
+	_, err := readWant(s, "foreign pipe, disarmed", runtime.ProgramStatusUnread)
 	return err
 }
 

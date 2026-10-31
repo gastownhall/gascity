@@ -162,6 +162,16 @@ type TemplateParams struct {
 	// (templateParamsForSession). Nil for ACP templates and providers
 	// without ACP support.
 	ACPLaunch *TemplateACPLaunch
+	// ProgramStatusArm is the OSC 7501 capture arm for the template's
+	// resolved transport (config.ProgramStatusArmFor). It stays out of Hints:
+	// templateParamsToConfig applies it, with ProgramStatusEnv, only to a
+	// launch whose transport is not ACP, so a session kept on its ACP launch
+	// (templateParamsForSession) starts disarmed.
+	ProgramStatusArm runtime.ProgramStatusArm
+	// ProgramStatusEnv is the declared provider's forced session env that goes
+	// with ProgramStatusArm, already expanded. It stays out of Env, so an ACP
+	// launch keeps the value Env resolved for any key it names.
+	ProgramStatusEnv map[string]string
 }
 
 // TemplateACPLaunch is the ACP launch command and session/new MCP server set
@@ -593,16 +603,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			env[k] = v
 		}
 	}
-	// Step 10c: program status (OSC 7501). A declared provider's forced env is
-	// merged into the session env only, never OperatorEnv, so it stays off the
-	// launch fingerprint (the Config.Env hash is an allow-list these keys are
-	// not on). Empty unless the switch is shadow or on, the transport is not
-	// ACP, and the provider declares the protocol. The controller-only re-pin
-	// below stays the last writer.
+	// Step 10c: program status (OSC 7501). Empty unless the switch is shadow
+	// or on, the transport is not ACP, and the provider declares the protocol.
+	// The arm and the forced env stay out of hints and env:
+	// templateParamsToConfig applies them to a launch whose transport is not
+	// ACP, so a session kept on its ACP launch starts disarmed with this env.
 	programStatusArm, programStatusEnv := config.ProgramStatusArmFor(p.city, resolved, sessionTransport)
-	for k, v := range expandEnvMap(programStatusEnv) {
-		env[k] = v
-	}
 	// Managed agents are Gas City-owned recursive execution environments. Set
 	// the GC-only opt-out after configurable layers so child gc commands cannot
 	// re-enable product metrics; Beads telemetry remains independent.
@@ -817,7 +823,6 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		PackOverlayDirs:        effectiveOverlayDirs(p.packOverlayDirs, p.rigOverlayDirs, rigName),
 		OverlayDir:             overlayDir,
 		CopyFiles:              copyFiles,
-		ProgramStatus:          programStatusArm,
 	}
 
 	params := TemplateParams{
@@ -841,6 +846,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		HookEnabled:      hasHooks,
 		MCPServers:       mcpServers,
 		ACPLaunch:        acpLaunch,
+		ProgramStatusArm: programStatusArm,
+		ProgramStatusEnv: expandEnvMap(programStatusEnv),
 	}
 	params.SessionOverride = cfgAgent.Session
 	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
@@ -1007,6 +1014,8 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	cfg.OperatorEnv = maps.Clone(tp.OperatorEnv)
 	if tp.IsACP {
 		cfg.MCPServers = tp.MCPServers
+	} else {
+		applyTemplateProgramStatus(&cfg, tp)
 	}
 	cfg.WorkDir = tp.WorkDir
 	cfg.FingerprintExtra = tp.FPExtra
@@ -1025,6 +1034,25 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	cfg.MouseOn = tp.Hints.MouseOn || templateParamsSessionOrigin(tp) == "manual"
 	applyT3BridgeRuntimeConfig(tp, cfg.Env)
 	return cfg, plan.Delivery, nil
+}
+
+// applyTemplateProgramStatus applies a template's OSC 7501 program status to a
+// launch whose transport is not ACP: the capture arm, and the forced env
+// written over the template env. resolveTemplate's managed pins (the
+// usage-metrics opt-out and the controller-only keys) stay the last writers.
+// The forced env never reaches OperatorEnv, so it stays off the launch
+// fingerprint.
+func applyTemplateProgramStatus(cfg *runtime.Config, tp TemplateParams) {
+	cfg.ProgramStatus = tp.ProgramStatusArm
+	if len(tp.ProgramStatusEnv) == 0 {
+		return
+	}
+	if cfg.Env == nil {
+		cfg.Env = make(map[string]string, len(tp.ProgramStatusEnv))
+	}
+	maps.Copy(cfg.Env, tp.ProgramStatusEnv)
+	cfg.Env[execenv.UsageMetricsDisableEnv] = execenv.UsageMetricsDisableValue
+	maps.Copy(cfg.Env, processenv.ControllerOnlyEnvOverlay())
 }
 
 // logOversizedPromptDelivery emits the one structured launch-log record

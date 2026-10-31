@@ -22,11 +22,15 @@
 //	on-line <path>      run the script at path once per typed input line
 //	interactive         run each typed input line as a step
 //	exit <code>         end with exit status code
-//	signal <name>       end by signal name (TERM, INT, HUP, KILL, QUIT, USR1, USR2)
+//	signal <name>       end by signal name (TERM, INT, HUP, KILL)
 //	hang                stop reading and writing until canceled
 //
 // Reports are gated: probe-gated and force-env can silence the program, after
 // which report, oversize and clear write nothing. raw is never gated.
+//
+// Terminal replies never reach on-line or interactive as typed text:
+// probe-gated reads its handshake's replies off the input, keeping the bytes
+// typed around them, and a reply that arrives later is dropped.
 package emit
 
 import (
@@ -81,15 +85,14 @@ const (
 	opHang        op = "hang"
 )
 
-// signals are the signals a script may end by.
+// signals are the signals a script may end by: those a Go process dies by
+// once it resets their handling. Go dumps and exits 2 on QUIT and ignores
+// USR1 and USR2, so a pane would never read them as its death signal.
 var signals = map[string]syscall.Signal{
 	"TERM": syscall.SIGTERM,
 	"INT":  syscall.SIGINT,
 	"HUP":  syscall.SIGHUP,
 	"KILL": syscall.SIGKILL,
-	"QUIT": syscall.SIGQUIT,
-	"USR1": syscall.SIGUSR1,
-	"USR2": syscall.SIGUSR2,
 }
 
 // step is one parsed script line.
@@ -367,21 +370,17 @@ func splitChunks(seq string, n int) []string {
 }
 
 // oversizeBody is a working report body whose whole sequence, introducer
-// and terminator included, is exactly n bytes. Its msg is valid unpadded
-// base64 of printable text, so only its length breaks a limit; space the
-// parser strips around a pair evens out a length base64 cannot take.
+// and terminator included, is exactly n bytes. A key the parser ignores
+// fills it, so only the sequence's length can break a limit: a report of
+// exactly the sequence limit parses, and one byte more is discarded. Space
+// the parser strips around a pair fills a room too small for the key.
 func oversizeBody(n int, terminator string) string {
-	const state, msgKey = "state=working", ":msg="
+	const state, padKey = "state=working", ":zz="
 	room := n - len(oscIntro) - len(terminator) - len(state)
-	if room < len(msgKey)+2 {
+	if room <= len(padKey) {
 		return state + strings.Repeat(" ", max(room, 0))
 	}
-	pad := room - len(msgKey)
-	gap := ""
-	if pad%4 == 1 {
-		gap, pad = " ", pad-1
-	}
-	return state + gap + msgKey + strings.Repeat("eHh4", pad/4+1)[:pad]
+	return state + padKey + strings.Repeat("x", room-len(padKey))
 }
 
 // write writes b to the terminal.

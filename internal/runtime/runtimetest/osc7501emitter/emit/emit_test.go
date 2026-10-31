@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -116,15 +118,19 @@ func TestEmitterOversizeIsExact(t *testing.T) {
 		}
 	}
 	// At the limit the report parses; one byte over, the scanner drops it.
-	at, _ := run(t, nil, nil, "oversize 4096")
-	if b := bodies(events(t, at)); len(b) != 1 {
-		t.Fatalf("a 4096-byte report scanned as %d reports", len(b))
-	} else if r, err := programstatus.ParseBody(b[0]); err == nil && r.State != runtime.ProgramWorking {
-		t.Fatalf("a 4096-byte report parsed as %+v", r)
-	}
-	over, _ := run(t, nil, nil, "oversize 4097")
-	if b := bodies(events(t, over)); len(b) != 0 {
-		t.Fatalf("a 4097-byte report scanned: %d", len(b))
+	for _, term := range []string{"bel", "st"} {
+		at, _ := run(t, nil, nil, "term "+term, "oversize 4096")
+		b := bodies(events(t, at))
+		if len(b) != 1 {
+			t.Fatalf("a 4096-byte report (%s) scanned as %d reports", term, len(b))
+		}
+		if r, err := programstatus.ParseBody(b[0]); err != nil || r.State != runtime.ProgramWorking {
+			t.Fatalf("a 4096-byte report (%s) parsed as %+v, %v; want working", term, r, err)
+		}
+		over, _ := run(t, nil, nil, "term "+term, "oversize 4097")
+		if b := bodies(events(t, over)); len(b) != 0 {
+			t.Fatalf("a 4097-byte report (%s) scanned: %d", term, len(b))
+		}
 	}
 }
 
@@ -167,6 +173,70 @@ func TestEmitterProbeGatedReportsAfterReply(t *testing.T) {
 	}
 	if time.Since(start) > 5*time.Second {
 		t.Fatalf("probe wait took %v, want about its 50ms bound", time.Since(start))
+	}
+}
+
+// Kills a probe-gated program whose handshake leaves reply bytes for its line
+// reads, or drops typed input that arrives around the replies: after the
+// probe, interactive runs every typed line as a step, whatever terminates the
+// 7501 reply, whichever reply comes first, and however reads split them.
+func TestEmitterProbeGatedLeavesTypedLinesClean(t *testing.T) {
+	const (
+		da1   = "\x1b[?62;22c"
+		typed = "raw 41\rreport state=working\rexit 7\r"
+	)
+	for name, c := range map[string]struct {
+		in       string
+		answered bool
+	}{
+		"BEL reply then DA1":       {"\x1b]7501;state=idle\x07" + da1 + typed, true},
+		"ST reply then DA1":        {"\x1b]7501;?\x1b\\" + da1 + typed, true},
+		"typed around the replies": {"raw 41\r\x1b]7501;?\x1b\\report state=working\r" + da1 + "exit 7\r", true},
+		"DA1 then a late reply":    {da1 + "\x1b]7501;?\x1b\\" + typed, false},
+	} {
+		for _, oneByte := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/one byte per read %v", name, oneByte), func(t *testing.T) {
+				var in io.Reader = strings.NewReader(c.in)
+				if oneByte {
+					in = iotest.OneByteReader(in)
+				}
+				out, o := run(t, in, nil, "term bel", "probe-gated", "interactive")
+				if o != (Outcome{Ended: true, Exit: 7}) {
+					t.Fatalf("outcome %+v, want the typed exit 7", o)
+				}
+				if !strings.Contains(out.String(), da1Request+"A") {
+					t.Fatalf("wrote %q: the typed raw step did not run first after the probe", out.String())
+				}
+				var want []string
+				if c.answered {
+					want = []string{"state=working"}
+				}
+				if got := bodies(events(t, out)); !slices.Equal(got, want) {
+					t.Fatalf("reported %q, want %q", got, want)
+				}
+			})
+		}
+	}
+}
+
+// Kills a line reader that hands a step a terminal reply arriving after the
+// handshake ended: a DA1 reply past the probe's wait, or a 7501 reply after
+// the DA1 reply.
+func TestEmitterLinesDropLateReplies(t *testing.T) {
+	in := newInput(strings.NewReader("raw 41\r\x1b[?62;22cexit 7\x1b]7501;?\x07\r\x1b]7501;state=idle\x1b\\"))
+	var got []string
+	for {
+		text, ok, err := in.line(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			break
+		}
+		got = append(got, text)
+	}
+	if !slices.Equal(got, []string{"raw 41", "exit 7"}) {
+		t.Fatalf("lines %q, want the typed lines without the replies", got)
 	}
 }
 
@@ -248,7 +318,8 @@ func TestEmitterHangUntilCanceled(t *testing.T) {
 func TestParseRejectsMalformedSteps(t *testing.T) {
 	for _, line := range []string{
 		"bogus", "report", "raw zz", "split 0", "split x", "term crlf", "sleep soon",
-		"probe-gated never", "exit 256", "exit -1", "signal STOP", "oversize 5", "hang now", "clear all",
+		"probe-gated never", "exit 256", "exit -1", "signal STOP", "signal QUIT", "signal USR1", "signal USR2",
+		"oversize 5", "hang now", "clear all",
 	} {
 		if _, err := ParseLines(line); !errors.Is(err, ErrScript) {
 			t.Errorf("ParseLines(%q) err = %v, want ErrScript", line, err)

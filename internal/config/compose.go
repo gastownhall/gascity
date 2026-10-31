@@ -1223,7 +1223,15 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		}
 	}
 	if fragMeta.IsDefined("session") {
+		// Preserve the program_status rollout gate unless the fragment sets
+		// it, as [beads] and [daemon] preserve theirs: a fragment defining any
+		// other [session] key would otherwise reset an explicit shadow or on
+		// to the off default. A fragment that sets it, "off" included, wins.
+		programStatus := base.Session.ProgramStatus
 		base.Session = fragment.Session
+		if !fragMeta.IsDefined("session", "program_status") {
+			base.Session.ProgramStatus = programStatus
+		}
 	}
 	if fragMeta.IsDefined("mail") {
 		base.Mail = fragment.Mail

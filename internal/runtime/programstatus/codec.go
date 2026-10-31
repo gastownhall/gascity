@@ -73,7 +73,7 @@ func Encode(s runtime.ProgramStatus) (string, error) {
 	if !knownKind(s.Kind) {
 		return "", fmt.Errorf("encoding program status: unknown kind %q", s.Kind)
 	}
-	if s.App != "" && !validApp(s.App) {
+	if s.App != "" && !ValidApp(s.App) {
 		return "", fmt.Errorf("encoding program status: invalid app %q", s.App)
 	}
 	if s.Progress > 100 {
@@ -180,7 +180,7 @@ func Decode(v string) (runtime.ProgramStatus, error) {
 	if !decodeFlags(f[12], &s) {
 		return bad("flags", f[12])
 	}
-	if f[13] != "" && !validApp(f[13]) {
+	if f[13] != "" && !ValidApp(f[13]) {
 		return bad("app", f[13])
 	}
 	s.App = f[13]
