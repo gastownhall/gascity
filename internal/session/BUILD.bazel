@@ -234,6 +234,7 @@ go_test(
         "transcript_acp_test.go",
         "transcript_lookup_test.go",
         "transcript_meta_legacy_test.go",
+        "transport_probe_test.go",
         "turn_interrupt_mode_test.go",
         "turn_observation_test.go",
         "turn_replacement_test.go",
