@@ -500,6 +500,70 @@ func TestControlReadyFallbackReadyNoWarningBelowLimit(t *testing.T) {
 	}
 }
 
+// TestControlReadyFallbackReadyOmitsReadonlyOnProxiedScope pins #7358: bd
+// refuses --readonly on a proxied-server scope (proxy.readonly.unsupported),
+// so the fallback read there must not pass it, or every scan in that scope
+// fails and the dispatcher is never fed work. A scope on another mode keeps
+// --readonly.
+func TestControlReadyFallbackReadyOmitsReadonlyOnProxiedScope(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		metadata     string
+		wantReadonly bool
+	}{
+		{name: "proxied-server", metadata: `{"backend":"dolt","dolt_mode":"proxied-server"}`, wantReadonly: false},
+		{name: "server", metadata: `{"backend":"dolt","dolt_mode":"server"}`, wantReadonly: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configureIsolatedRuntimeEnv(t)
+			tmp := t.TempDir()
+			logPath := filepath.Join(tmp, "bd.log")
+			// Like bd 1.3.1: --readonly is refused on a proxied-server scope only.
+			script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case " $* " in
+  *" --readonly "*)
+    if grep -q proxied-server .beads/metadata.json 2>/dev/null; then
+      printf '{"code":"proxy.readonly.unsupported","error":"strict readonly is unavailable for dolt proxied-server backend","mutates":false,"reason":"design","schema_version":1}\n'
+      exit 1
+    fi
+    ;;
+esac
+printf '[{"id":"proxied-ready"}]'
+`, logPath)
+			if err := os.WriteFile(filepath.Join(tmp, "bd"), []byte(script), 0o755); err != nil {
+				t.Fatalf("write fake bd: %v", err)
+			}
+			t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("GC_BEADS", "bd")
+
+			dir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+				t.Fatalf("mkdir .beads: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, ".beads", "metadata.json"), []byte(tc.metadata), 0o644); err != nil {
+				t.Fatalf("write metadata.json: %v", err)
+			}
+
+			result, err := controlReadyFallbackReady(dir, dir, nil, false)
+			logData, _ := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatalf("controlReadyFallbackReady: %v (bd calls %q)", err, logData)
+			}
+			if len(result) != 1 || result[0].ID != "proxied-ready" {
+				t.Fatalf("result = %#v, want the single ready bead", result)
+			}
+			call := strings.TrimSpace(string(logData))
+			if got := strings.Contains(" "+call+" ", " --readonly "); got != tc.wantReadonly {
+				t.Fatalf("bd call %q: --readonly passed = %v, want %v", call, got, tc.wantReadonly)
+			}
+			if !strings.Contains(call, "--sandbox") || !strings.Contains(call, "ready ") {
+				t.Fatalf("bd call %q, want a --sandbox ready read", call)
+			}
+		})
+	}
+}
+
 func TestNextWorkflowServeBeadsNonControlQueryUsesOriginalShellPath(t *testing.T) {
 	tmp := t.TempDir()
 	bdPath := filepath.Join(tmp, "bd")
