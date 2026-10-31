@@ -168,6 +168,111 @@ func TestLaneExecQuietBoundaryScreenReadings(t *testing.T) {
 	})
 }
 
+// TestLaneExecStaleTurnOnScreenIsABoundary: a live turn redraws its status
+// every second, so a screen that shows a running turn over a pane that has
+// drawn nothing for laneScreenTurnQuietLimit runs no turn. Its busy text is a
+// frozen frame or transcript text (a line quoting "esc to interrupt"), which
+// an idle pane never redraws, and holding the boundary on it would hold every
+// boundary prompt to the session until its start_by closed it undelivered.
+// Short of the limit the screen still decides.
+func TestLaneExecStaleTurnOnScreenIsABoundary(t *testing.T) {
+	probe := func(t *testing.T, provider string, quiet time.Duration) (opjournal.Probe, []error) {
+		t.Helper()
+		f, deps, _ := newScreenTurnFixture(t, provider)
+		f.showTurn(true)
+		var noted []error
+		deps.note = func(stage string, err error) {
+			if stage == "turn_on_screen_stale" {
+				noted = append(noted, err)
+			}
+		}
+		f.sp.SetActivity(f.name, f.clk.Now().Add(-quiet))
+		v, row := f.view(t)
+		e := newConversationLaneExec(deps, row)
+		quiescenceOnFixtureClock(f, e)
+		p, err := e.Probe(context.Background(), v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p, noted
+	}
+	t.Run("quiet for less than the limit", func(t *testing.T) {
+		if p, noted := probe(t, "claude", laneScreenTurnQuietLimit-time.Second); p.Boundary != opjournal.TriNo || len(noted) != 0 {
+			t.Fatalf("boundary %v, noted %v; want no and nothing noted: short of the limit the screen decides", p.Boundary, noted)
+		}
+	})
+	t.Run("quiet for the limit", func(t *testing.T) {
+		p, noted := probe(t, "claude", laneScreenTurnQuietLimit)
+		if p.Boundary != opjournal.TriYes {
+			t.Fatalf("boundary %v over a pane that drew nothing for %s, want yes: the running turn on its screen is stale", p.Boundary, laneScreenTurnQuietLimit)
+		}
+		if len(noted) != 1 {
+			t.Fatalf("noted %v; want the stale reading noted once", noted)
+		}
+	})
+	t.Run("codex", func(t *testing.T) {
+		if p, _ := probe(t, "codex", laneScreenTurnQuietLimit); p.Boundary != opjournal.TriYes {
+			t.Fatalf("boundary %v over a codex pane that drew nothing for %s, want yes", p.Boundary, laneScreenTurnQuietLimit)
+		}
+	})
+	t.Run("no activity reading", func(t *testing.T) {
+		// The quiescence rule read the runtime quiet with no activity clock
+		// (its idle wait), so nothing bounds the screen's reading: it decides.
+		f, deps, _ := newScreenTurnFixture(t, "claude")
+		f.showTurn(true)
+		f.sp.SetActivity(f.name, time.Time{})
+		v, row := f.view(t)
+		e := newConversationLaneExec(deps, row)
+		e.now = f.clk.Now
+		e.idle = func(nudgeTarget, worker.LiveObservation) bool { return true }
+		p, err := e.Probe(context.Background(), v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.Boundary != opjournal.TriNo {
+			t.Fatalf("boundary %v over a running turn on screen with no activity reading, want no", p.Boundary)
+		}
+	})
+}
+
+// TestLaneBoundaryPromptPastAStaleTurnOnScreenIsTypedOnce: a boundary prompt
+// to an idle Claude session whose screen still shows busy text is typed once,
+// a busy backoff or two after its pane has drawn nothing for
+// laneScreenTurnQuietLimit, not held until its start_by closes it undelivered.
+func TestLaneBoundaryPromptPastAStaleTurnOnScreenIsTypedOnce(t *testing.T) {
+	f, deps, st := newScreenTurnFixture(t, "claude")
+	f.showTurn(true)
+	l := f.lane(t, st)
+	const payload = "blocker gc-1 closed — routed dependent gc-2 may be ready to claim"
+	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, payload, func(r *opjournal.Request) {
+		r.Policy = cliLaneNudgePolicy(nudgeDeliveryWaitIdle)
+		r.Producer = opjournal.Producer{Principal: "operator", Actor: opjournal.ActorOperator}
+	}))
+	// The pane last drew the end of the turn that left the busy text.
+	lastDraw := f.clk.Now().Add(-5 * time.Second)
+	f.sp.SetActivity(f.name, lastDraw)
+	var got opjournal.Op
+	for range 30 {
+		v, row := f.view(t)
+		e := newConversationLaneExec(deps, row)
+		quiescenceOnFixtureClock(f, e)
+		if _, err := l.Pass(context.Background(), v, e); err != nil {
+			t.Fatalf("Pass: %v", err)
+		}
+		if got = f.get(t, st, op.ID); got.Status == opjournal.StatusClosed {
+			break
+		}
+		f.clk.Advance(laneBusyMax)
+	}
+	quiet := f.clk.Now().Sub(lastDraw)
+	if got.Status != opjournal.StatusClosed || got.Outcome.Arm != opjournal.ArmSucceeded || quiet > laneScreenTurnQuietLimit+2*laneBusyMax {
+		t.Fatalf("op %s %+v with the pane quiet %s; want it closed succeeded within two busy backoffs of %s", got.Status, got.Outcome, quiet, laneScreenTurnQuietLimit)
+	}
+	if typed := f.nudges(); len(typed) != 1 || !strings.Contains(typed[0].Message, payload) {
+		t.Fatalf("typed %+v; want the prompt once", typed)
+	}
+}
+
 // TestLaneBoundaryPromptIntoRunningTurnIsTypedOnce reproduces the soak's
 // signature end to end at the lane: a gc session nudge (wait-idle, so a
 // boundary prompt, at_least_once) to a Claude session in a long turn. A submit
