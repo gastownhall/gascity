@@ -237,7 +237,7 @@ func TestPoolDesiredIndexOracle(t *testing.T) {
 		}
 		infos := sessionInfosFromBeads(rows)
 		want := computePoolDesiredStatesAtPreA3(cfg, work, infos, counts, demand, allocNow, nil)
-		got := computePoolDesiredStatesAt(cfg, work, infos, counts, demand, allocNow, nil)
+		got := computePoolDesiredStatesAt(cfg, work, nil, nil, infos, counts, demand, allocNow, nil)
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("seed %d: bucketed pool desired\n%+v\nwant the frozen scan's\n%+v", seed, got, want)
 		}
