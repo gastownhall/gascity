@@ -79,7 +79,7 @@ func cmdMaintenanceDoltGC(wait, jsonOut bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc maintenance dolt-gc: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 2
 	}
-	c, reason := maintenanceAPIClient(cityPath)
+	c, reason := maintenanceDoltGCAPIClient(cityPath)
 	return routeMaintenanceDoltGC(c, reason, wait, jsonOut, stdout, stderr)
 }
 
@@ -96,6 +96,13 @@ func cmdMaintenanceDoltGC(wait, jsonOut bool, stdout, stderr io.Writer) int {
 // though the controller socket is alive; route to the supervisor-managed
 // client directly rather than reporting controller-down.
 var maintenanceAPIClient = supervisorFallthroughAPIClient
+
+// maintenanceDoltGCAPIClient resolves the supervisor API client for
+// `gc maintenance dolt-gc`. It routes like maintenanceAPIClient, except that a
+// supervisor-hosted city whose supervisor requires city grants gets (nil,
+// "grant-required"): this client mints no grant, so the trigger would be
+// refused with a 401. Indirected through a var for tests.
+var maintenanceDoltGCAPIClient = supervisorFallthroughMutationAPIClient
 
 // routeMaintenanceStatus dispatches `gc maintenance status` to the
 // supervisor API. There is no local fallback (the in-memory ring buffer
@@ -130,12 +137,16 @@ func routeMaintenanceStatus(c *api.Client, nilReason string, jsonOut bool, stdou
 
 // routeMaintenanceDoltGC dispatches `gc maintenance dolt-gc` to the
 // supervisor API. Exit codes match the bead spec: 0 on success/accepted,
-// 1 on --wait failure, 2 when the supervisor is unreachable, 3 on 409
-// (run already in progress).
+// 1 on --wait failure, 2 when the supervisor is unreachable or requires a
+// city grant this client cannot mint, 3 on 409 (run already in progress).
 func routeMaintenanceDoltGC(c *api.Client, nilReason string, wait, jsonOut bool, stdout, stderr io.Writer) int {
 	const cmdName = "maintenance dolt-gc"
 	if c == nil {
 		logRoute(stderr, cmdName, "fallback", nilReason)
+		if nilReason == "grant-required" {
+			fmt.Fprintf(stderr, "gc maintenance dolt-gc: the supervisor requires a signed city grant (%s); run it through a city context with a grant command\n", nilReason) //nolint:errcheck // best-effort stderr
+			return 2
+		}
 		fmt.Fprintf(stderr, "gc maintenance dolt-gc: supervisor not running (%s)\n", nilReason) //nolint:errcheck // best-effort stderr
 		return 2
 	}

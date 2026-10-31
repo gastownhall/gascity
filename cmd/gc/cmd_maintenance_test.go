@@ -390,3 +390,97 @@ func TestRouteMaintenanceStatus_JSONOutput(t *testing.T) {
 		t.Errorf("JSON envelope missing status: %v", env)
 	}
 }
+
+// TestMaintenanceDoltGCAPIClientGrantGatedSupervisor proves `gc maintenance
+// dolt-gc` never dials a supervisor-hosted city's supervisor that requires
+// city grants: that client mints no grant, so the trigger would be refused
+// with a 401 no caller falls back from. The resolver returns (nil,
+// "grant-required") without resolving the supervisor client, and the
+// command reports the refusal without an HTTP call. A supervisor that
+// requires no grants, and a live controller predating identify, still route
+// to the supervisor-managed client, as `gc maintenance status` does.
+func TestMaintenanceDoltGCAPIClientGrantGatedSupervisor(t *testing.T) {
+	sentinel := api.NewClient("http://supervisor.sentinel:1")
+	origIdentity, origSup, origGrants := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook
+	t.Cleanup(func() {
+		apiRouteControllerIdentityHook = origIdentity
+		apiRouteSupervisorClientHook = origSup
+		apiRouteSupervisorGrantsHook = origGrants
+	})
+	supervisorHosted := func(string) controllerIdentityReply {
+		return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
+	}
+
+	t.Run("grants-required-skips-supervisor", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "")
+		apiRouteControllerIdentityHook = supervisorHosted
+		apiRouteSupervisorClientHook = func(string) *api.Client {
+			t.Errorf("supervisor client resolved for a supervisor that requires city grants")
+			return sentinel
+		}
+		apiRouteSupervisorGrantsHook = func() bool { return true }
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+		c, reason := maintenanceDoltGCAPIClient(dir)
+		if c != nil || reason != "grant-required" {
+			t.Fatalf("maintenanceDoltGCAPIClient = (%p, %q), want (nil, \"grant-required\")", c, reason)
+		}
+	})
+
+	t.Run("grants-not-required-routes-to-supervisor", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "")
+		apiRouteControllerIdentityHook = supervisorHosted
+		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
+		apiRouteSupervisorGrantsHook = func() bool { return false }
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+		c, reason := maintenanceDoltGCAPIClient(dir)
+		if c != sentinel || reason != "" {
+			t.Fatalf("maintenanceDoltGCAPIClient = (%p, %q), want (supervisor sentinel %p, \"\")", c, reason, sentinel)
+		}
+	})
+
+	t.Run("unknown-hosting-no-api-port-routes-to-supervisor", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "")
+		apiRouteControllerIdentityHook = func(string) controllerIdentityReply { return controllerIdentityReply{PID: 4242} }
+		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
+		apiRouteSupervisorGrantsHook = func() bool {
+			t.Errorf("grant requirement consulted for a controller of unknown hosting mode")
+			return true
+		}
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+		c, reason := maintenanceDoltGCAPIClient(dir)
+		if c != sentinel || reason != "" {
+			t.Fatalf("maintenanceDoltGCAPIClient = (%p, %q), want (supervisor sentinel %p, \"\")", c, reason, sentinel)
+		}
+	})
+
+	t.Run("status-still-routes-to-grant-gated-supervisor", func(t *testing.T) {
+		// The status read keeps the fall-through: a write-auth-only
+		// supervisor serves it without a grant.
+		t.Setenv("GC_NO_API", "")
+		apiRouteControllerIdentityHook = supervisorHosted
+		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
+		apiRouteSupervisorGrantsHook = func() bool { return true }
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+		if c, _ := maintenanceAPIClient(dir); c != sentinel {
+			t.Fatalf("maintenanceAPIClient = %p, want supervisor sentinel %p", c, sentinel)
+		}
+	})
+}
+
+// TestRouteMaintenanceDoltGC_GrantRequired verifies the grant-required
+// refusal names the cause instead of reporting the supervisor as down.
+func TestRouteMaintenanceDoltGC_GrantRequired(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1")
+	var stdout, stderr bytes.Buffer
+	code := routeMaintenanceDoltGC(nil, "grant-required", false, false, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2; stderr=%q", code, stderr.String())
+	}
+	assertMaintenanceRouteLog(t, stderr.String(), "fallback", "grant-required")
+	if !strings.Contains(stderr.String(), "requires a signed city grant") {
+		t.Errorf("stderr missing grant-required explanation:\n%s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "not running") {
+		t.Errorf("stderr reports the supervisor as not running for a grant refusal:\n%s", stderr.String())
+	}
+}

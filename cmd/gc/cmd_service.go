@@ -144,8 +144,19 @@ func cmdServiceRestart(name string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc service restart: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	client := serviceRestartClient(cityPath, cfg)
+	client, reason := serviceRestartClient(cityPath, cfg)
+	return doServiceRestart(client, reason, name, stdout, stderr)
+}
+
+// doServiceRestart posts the restart through client, or reports why no client
+// resolved: reason "grant-required" when the supervisor requires a city grant
+// this client cannot mint, anything else when no controller serves the city.
+func doServiceRestart(client *api.Client, reason, name string, stdout, stderr io.Writer) int {
 	if client == nil {
+		if reason == "grant-required" {
+			fmt.Fprintf(stderr, "gc service restart: the supervisor requires a signed city grant (%s); run it through a city context with a grant command\n", reason) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		fmt.Fprintln(stderr, "gc service restart: controller is not running") //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -157,7 +168,13 @@ func cmdServiceRestart(name string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func serviceRestartClient(cityPath string, cfg *config.City) *api.Client {
+// serviceRestartClient resolves the API client `gc service restart` posts
+// through: the standalone controller's [api] port, else the
+// supervisor-managed client. A supervisor that requires city grants
+// (supervisorRequiresCityGrants) yields (nil, "grant-required"): this client
+// mints no grant, so the supervisor would refuse the restart with a 401. With
+// no client the reason is "controller-down".
+func serviceRestartClient(cityPath string, cfg *config.City) (*api.Client, string) {
 	if controllerAlive(cityPath) != 0 && cfg.API.Port > 0 {
 		bind := cfg.API.BindOrDefault()
 		switch bind {
@@ -167,12 +184,15 @@ func serviceRestartClient(cityPath string, cfg *config.City) *api.Client {
 			bind = "::1"
 		}
 		baseURL := fmt.Sprintf("http://%s", net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port)))
-		return api.NewCityScopedClient(baseURL, standaloneControllerCityName(cfg, cityPath))
+		return api.NewCityScopedClient(baseURL, standaloneControllerCityName(cfg, cityPath)), ""
 	}
-	if client := supervisorCityAPIClient(cityPath); client != nil {
-		return client
+	if client := apiRouteSupervisorClientHook(cityPath); client != nil {
+		if apiRouteSupervisorGrantsHook() {
+			return nil, "grant-required"
+		}
+		return client, ""
 	}
-	return nil
+	return nil, "controller-down"
 }
 
 func doServiceList(cityPath string, cfg *config.City, reader serviceStatusReader, jsonOutput bool, stdout, stderr io.Writer) int {

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -177,4 +178,60 @@ func TestDoServiceDoctorJSON(t *testing.T) {
 	if payload.Service.ServiceName != "review-intake" || payload.Service.WorkflowContract != "pack.gc/review.v1" {
 		t.Fatalf("service = %+v", payload.Service)
 	}
+}
+
+// TestServiceRestartClientGrantGatedSupervisor proves `gc service restart`
+// never posts to a supervisor that requires city grants: that client mints
+// no grant, so the restart would be refused with a 401. With grants required
+// the resolver returns (nil, "grant-required") and the command fails without
+// an HTTP call; without them it routes to the supervisor-managed client.
+func TestServiceRestartClientGrantGatedSupervisor(t *testing.T) {
+	origSup, origGrants := apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook
+	t.Cleanup(func() {
+		apiRouteSupervisorClientHook = origSup
+		apiRouteSupervisorGrantsHook = origGrants
+	})
+	supervisor := api.NewCityScopedClient("http://supervisor.sentinel:1", "t")
+	apiRouteSupervisorClientHook = func(string) *api.Client { return supervisor }
+	cfg := &config.City{}
+	dir := t.TempDir()
+
+	t.Run("grants-required", func(t *testing.T) {
+		apiRouteSupervisorGrantsHook = func() bool { return true }
+		client, reason := serviceRestartClient(dir, cfg)
+		if client != nil || reason != "grant-required" {
+			t.Fatalf("serviceRestartClient = (%p, %q), want (nil, \"grant-required\")", client, reason)
+		}
+		var stdout, stderr bytes.Buffer
+		if code := doServiceRestart(client, reason, "web", &stdout, &stderr); code != 1 {
+			t.Fatalf("exit = %d, want 1", code)
+		}
+		if !strings.Contains(stderr.String(), "requires a signed city grant") {
+			t.Errorf("stderr missing grant-required explanation:\n%s", stderr.String())
+		}
+	})
+
+	t.Run("grants-not-required", func(t *testing.T) {
+		apiRouteSupervisorGrantsHook = func() bool { return false }
+		client, reason := serviceRestartClient(dir, cfg)
+		if client != supervisor || reason != "" {
+			t.Fatalf("serviceRestartClient = (%p, %q), want (supervisor %p, \"\")", client, reason, supervisor)
+		}
+	})
+
+	t.Run("no-supervisor-client", func(t *testing.T) {
+		apiRouteSupervisorClientHook = func(string) *api.Client { return nil }
+		apiRouteSupervisorGrantsHook = func() bool { return true }
+		client, reason := serviceRestartClient(dir, cfg)
+		if client != nil || reason != "controller-down" {
+			t.Fatalf("serviceRestartClient = (%p, %q), want (nil, \"controller-down\")", client, reason)
+		}
+		var stdout, stderr bytes.Buffer
+		if code := doServiceRestart(client, reason, "web", &stdout, &stderr); code != 1 {
+			t.Fatalf("exit = %d, want 1", code)
+		}
+		if !strings.Contains(stderr.String(), "controller is not running") {
+			t.Errorf("stderr = %q, want controller is not running", stderr.String())
+		}
+	})
 }

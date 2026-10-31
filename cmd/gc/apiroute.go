@@ -75,6 +75,20 @@ func supervisorFallthroughAPIClient(cityPath string) (*api.Client, string) {
 	return nil, routeFallbackReason(cityPath, apiRoutePreferSupervisor)
 }
 
+// supervisorFallthroughMutationAPIClient resolves an API client the way
+// supervisorFallthroughAPIClient does, for a mutation with no local fallback,
+// except that a supervisor-hosted city whose supervisor requires city grants
+// (supervisorRequiresCityGrants) gets nil with reason "grant-required"
+// without resolving the supervisor client: that client mints no grant, so the
+// supervisor would refuse the mutation with a 401 no caller falls back from.
+// `gc maintenance dolt-gc` is that mutation.
+func supervisorFallthroughMutationAPIClient(cityPath string) (*api.Client, string) {
+	if c := routeAPIClient(cityPath, apiRoutePreferSupervisorMutation); c != nil {
+		return c, ""
+	}
+	return nil, routeFallbackReason(cityPath, apiRoutePreferSupervisorMutation)
+}
+
 // localWhenSupervisorHostedAPIClient resolves an API client the way apiClient
 // does, for a read whose local path renders the command's own JSON contract
 // from on-disk state, except that a supervisor-hosted city gets nil with
@@ -106,11 +120,16 @@ const (
 	// apiRouteLocalWhenSupervisorHosted is localWhenSupervisorHostedAPIClient's
 	// routing: nil for a supervisor-hosted city.
 	apiRouteLocalWhenSupervisorHosted
+	// apiRoutePreferSupervisorMutation is
+	// supervisorFallthroughMutationAPIClient's routing: apiRoutePreferSupervisor,
+	// except nil for a supervisor-hosted city whose supervisor requires grants.
+	apiRoutePreferSupervisorMutation
 )
 
 // routeAPIClient is the routing ladder apiClient,
-// supervisorFallthroughAPIClient and localWhenSupervisorHostedAPIClient share;
-// route selects which of them it resolves for.
+// supervisorFallthroughAPIClient, supervisorFallthroughMutationAPIClient and
+// localWhenSupervisorHostedAPIClient share; route selects which of them it
+// resolves for.
 func routeAPIClient(cityPath string, route apiRoute) *api.Client {
 	// Remote routing is NOT handled here. A remote target is refused upstream by
 	// the capability gate in resolveContext (Phase 1) and, once enabled, will be
@@ -141,7 +160,7 @@ func routeAPIClient(cityPath string, route apiRoute) *api.Client {
 		switch route {
 		case apiRouteLocalWhenSupervisorHosted:
 			return nil
-		case apiRouteGeneral:
+		case apiRouteGeneral, apiRoutePreferSupervisorMutation:
 			if apiRouteSupervisorGrantsHook() {
 				return nil
 			}
@@ -151,7 +170,8 @@ func routeAPIClient(cityPath string, route apiRoute) *api.Client {
 	// Standalone controller, or one predating identify (hosting mode
 	// unknown): its configured [api] port is the only endpoint it serves.
 	c := standaloneControllerClient(cityPath)
-	if c == nil && route == apiRoutePreferSupervisor && identity.HostingMode == controllerHostingUnknown {
+	preferSupervisor := route == apiRoutePreferSupervisor || route == apiRoutePreferSupervisorMutation
+	if c == nil && preferSupervisor && identity.HostingMode == controllerHostingUnknown {
 		return apiRouteSupervisorClientHook(cityPath)
 	}
 	return c
@@ -220,7 +240,7 @@ func routeFallbackReason(cityPath string, route apiRoute) string {
 		switch route {
 		case apiRouteLocalWhenSupervisorHosted:
 			return "supervisor-hosted"
-		case apiRouteGeneral:
+		case apiRouteGeneral, apiRoutePreferSupervisorMutation:
 			if apiRouteSupervisorGrantsHook() {
 				return "grant-required"
 			}
