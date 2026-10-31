@@ -1360,7 +1360,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestAcceptedPayload | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StorageRigPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkRateLimitedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestAcceptedPayload | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionProgramStatusShadowPayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StorageRigPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkRateLimitedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -4077,6 +4077,69 @@ export type SessionPoolSlotRetiredAtDrainDeadlinePayload = {
     template?: string;
 };
 
+export type SessionProgramStatusShadowPayload = {
+    /**
+     * Whether the two readings agree.
+     */
+    agree: boolean;
+    /**
+     * Comparisons this process dropped since its last recorded one.
+     */
+    dropped?: number;
+    /**
+     * The session's provider family (resolved built-in ancestor).
+     */
+    family?: string;
+    /**
+     * Whether a hold derived from the record is still within its bound.
+     */
+    hold_live: boolean;
+    /**
+     * The blocked state's kind.
+     */
+    kind?: 'permission' | 'question' | 'auth';
+    /**
+     * Program signal minus scrape signal, in milliseconds (timed points only).
+     */
+    latency_ms?: number;
+    /**
+     * The decision point.
+     */
+    point: 'wait_for_idle' | 'typing_gate' | 'submit_confirm' | 'escape_resend' | 'readiness' | 'startup_ladder' | 'interrupt_settle' | 'pending' | 'wait_idle_preread' | 'execution_backstop' | 'claim_nudge_hold' | 'work_ladder' | 'proved_idle' | 'queued_delivery' | 'drain_reminder' | 'observation';
+    /**
+     * What the program-status record would decide.
+     */
+    program: 'idle' | 'busy' | 'indeterminate' | 'pending' | 'confirmed' | 'unconfirmed' | 'ready' | 'not_ready' | 'settled' | 'unsettled' | 'hold' | 'no_hold' | 'resend' | 'no_resend' | 'none';
+    /**
+     * Whether the process table confirmed the capture reader.
+     */
+    reader_verified: boolean;
+    /**
+     * How long the record's root has been in its state, in milliseconds.
+     */
+    record_age_ms: number;
+    /**
+     * Today's screen reading, which decided.
+     */
+    scrape: 'idle' | 'busy' | 'indeterminate' | 'pending' | 'confirmed' | 'unconfirmed' | 'ready' | 'not_ready' | 'settled' | 'unsettled' | 'hold' | 'no_hold' | 'resend' | 'no_resend' | 'none';
+    /**
+     * The session's bead id, when the decision point knows it.
+     */
+    session_id?: string;
+    /**
+     * The record's root state (valid readings only).
+     */
+    state?: 'idle' | 'working' | 'done' | 'blocked' | 'error';
+    /**
+     * Whether latency_ms was measured.
+     */
+    timed?: boolean;
+    /**
+     * The record reading's validity.
+     */
+    validity: 'unread' | 'valid' | 'not_armed' | 'silent' | 'cleared' | 'reader_lost' | 'exited';
+};
+
 /**
  * Session raw transcript frame
  *
@@ -6596,6 +6659,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionPendingCleared) | ({
     type: 'session.pool_slot_retired_at_drain_deadline';
 } & TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) | ({
+    type: 'session.program_status_shadow';
+} & TypedEventStreamEnvelopeSessionProgramStatusShadow) | ({
     type: 'session.quarantined';
 } & TypedEventStreamEnvelopeSessionQuarantined) | ({
     type: 'session.reset_stalled';
@@ -8288,6 +8353,24 @@ export type TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.program_status_shadow
+ */
+export type TypedEventStreamEnvelopeSessionProgramStatusShadow = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionProgramStatusShadowPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.program_status_shadow';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.quarantined
  */
 export type TypedEventStreamEnvelopeSessionQuarantined = {
@@ -9083,6 +9166,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionPendingCleared) | ({
     type: 'session.pool_slot_retired_at_drain_deadline';
 } & TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) | ({
+    type: 'session.program_status_shadow';
+} & TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow) | ({
     type: 'session.quarantined';
 } & TypedTaggedEventStreamEnvelopeSessionQuarantined) | ({
     type: 'session.reset_stalled';
@@ -10861,6 +10946,25 @@ export type TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline 
     subject?: string;
     ts: string;
     type: 'session.pool_slot_retired_at_drain_deadline';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.program_status_shadow
+ */
+export type TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionProgramStatusShadowPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.program_status_shadow';
     workflow?: WorkflowEventProjection;
 };
 

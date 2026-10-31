@@ -296,6 +296,13 @@ const (
 	// first, which is correct pull, not a defect) and divergence (the row is
 	// still open, unassigned and route-matching, so the readers disagreed).
 	SessionDemandClaimDivergence = "session.demand_claim_divergence"
+	// SessionProgramStatusShadow fires, only while the city's [session]
+	// program_status switch is shadow, at a decision point that reads the
+	// screen today: it records today's reading beside what the program's own
+	// OSC 7501 record would decide. It is a diagnostics comparison and never
+	// influences the decision it reports on. Continuously evaluated points
+	// record only when their reading changes. Closed tokens only.
+	SessionProgramStatusShadow = "session.program_status_shadow"
 	// SessionColdStartTimeout fires when a pool session's first runtime spawn
 	// (a pending create) exceeds the start deadline and is rolled back. It is
 	// per-session: it fires whenever a fresh spawn times out, including a warm
@@ -639,6 +646,7 @@ var KnownEventTypes = []string{
 	SessionDrainFenceUnavailable,
 	WorkStartedUnrecorded,
 	SessionDemandClaimDivergence,
+	SessionProgramStatusShadow,
 	SessionColdStartTimeout,
 	SessionConversationReset,
 	SessionPending, SessionPendingCleared,

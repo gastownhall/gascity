@@ -222,16 +222,19 @@ func ProgramCaptureHealerFor(p Provider, name string) (ProgramCaptureHealer, boo
 }
 
 // ProgramStatusComparison is one shadow-mode decision: today's reading beside
-// what the record would decide. Closed tokens only.
+// what the record would decide. Closed tokens only: no field carries program
+// text (title, msg) or prompt text.
 type ProgramStatusComparison struct {
-	Session   string
-	Family    string // provider family (resolved built-in ancestor); config data, not a role
-	Point     string // closed token, validated by the event payload enum
-	Scrape    string // closed token
-	Program   string // closed token
-	Status    ProgramStatus
-	LatencyMs int64 // program signal minus scrape signal; meaningful only when Timed
+	Session   string             // the session's runtime name
+	SessionID string             // the session's bead id, when the point knows it
+	Family    string             // provider family (resolved built-in ancestor); config data, not a role
+	Point     ProgramStatusPoint // the decision point
+	Scrape    ProgramVerdict     // today's reading, which decided
+	Program   ProgramVerdict     // what the record-side rule would decide
+	Status    ProgramStatus      // the reading the record-side rule judged
+	LatencyMs int64              // program signal minus scrape signal; meaningful only when Timed
 	Timed     bool
+	Dropped   int // comparisons the emitter dropped, under pressure, since its last one
 }
 
 // ProgramStatusComparisonSink receives shadow comparisons. Implementations

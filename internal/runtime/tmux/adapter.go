@@ -90,12 +90,16 @@ func NewProvider() *Provider {
 func NewProviderWithConfig(cfg Config) *Provider {
 	tm := NewTmuxWithConfig(cfg)
 	ttl := cacheTTLFromEnv()
-	return &Provider{
+	p := &Provider{
 		tm:       tm,
 		cfg:      cfg,
 		cache:    NewStateCache(&tmuxFetcher{tm: tm}, ttl),
 		workDirs: make(map[string]string),
 	}
+	// Shadow reads take tap liveness from the cache's last process table,
+	// never refreshing it.
+	tm.shadow.taps = func() programTaps { return p.cache.observation().state.programTaps() }
+	return p
 }
 
 // Start creates a new detached tmux session and performs a multi-step
@@ -342,6 +346,9 @@ func (p *Provider) Interrupt(name string) error {
 // interrupt is Interrupt under ctx. Inside a fenced operation a missing
 // session or server is reported (paneGuard.gone), never absorbed.
 func (p *Provider) interrupt(ctx context.Context, name string) error {
+	if p.tm.shadowing() {
+		p.tm.shadowNoteInterrupt(name)
+	}
 	if p.tm.isClaudeTarget(name) {
 		handled, err := p.tm.cancelClaudeApproval(ctx, name)
 		if handled {
@@ -1614,7 +1621,30 @@ func (o *tmuxStartOps) waitForReady(ctx context.Context, name string, rc *Runtim
 	if err != nil {
 		return err
 	}
-	return o.tm.WaitForRuntimeReady(ctx, target, rc, timeout)
+	if !o.tm.shadowing() || rc == nil || rc.Tmux == nil || (rc.Tmux.ReadyPromptPrefix == "" && rc.Tmux.ReadyDelayMs <= 0) {
+		return o.tm.WaitForRuntimeReady(ctx, target, rc, timeout)
+	}
+	err = o.tm.WaitForRuntimeReady(ctx, target, rc, timeout)
+	o.tm.shadowReadiness(name, time.Now(), err)
+	return err
+}
+
+// startupLadderShadower is the start ops' shadow seam for the startup
+// ladder's busy look (startup_ladder); ops that do not implement it record
+// nothing.
+type startupLadderShadower interface {
+	shadowStartupBusy(name string, busy func() (bool, error)) func() (bool, error)
+}
+
+// shadowStartupBusy wraps busy to record each look beside the program's
+// record, against a baseline read now, before the ladder's first send. Off
+// shadow, busy is returned as is.
+func (o *tmuxStartOps) shadowStartupBusy(name string, busy func() (bool, error)) func() (bool, error) {
+	s, ok := o.tm.shadowRead(name)
+	if !ok {
+		return busy
+	}
+	return o.tm.shadowStartupBusy(name, s.Baseline(), busy)
 }
 
 func (o *tmuxStartOps) hasSession(name string) (bool, error) {
@@ -2228,10 +2258,14 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 		return fmt.Errorf("running session_setup: %w", err)
 	}
 	if cfg.Nudge != "" {
+		busy := func() (bool, error) { return ops.paneBusy(name) }
+		if sh, ok := ops.(startupLadderShadower); ok {
+			busy = sh.shadowStartupBusy(name, busy)
+		}
 		if err := sendStartupNudgeWithRetry(ctx,
 			func() error { return ops.sendKeys(name, cfg.Nudge) },
 			func(d time.Duration) { _ = sleepWithContext(ctx, d) },
-			func() (bool, error) { return ops.paneBusy(name) }); err != nil {
+			busy); err != nil {
 			// A resume-mode (or cold-start) session's startup nudge races the
 			// TUI's own boot: readiness detection and the TUI actually being
 			// able to accept input are not the same moment, so a submit
