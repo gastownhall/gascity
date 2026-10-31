@@ -151,6 +151,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"pending_create_claim":      "",
 				"pending_create_started_at": "",
 				"slept_at":                  now.Format(time.RFC3339),
+				CurrentBeadIDKey:            "",
 			},
 		},
 		{
@@ -163,6 +164,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"slept_at":                  now.UTC().Format(time.RFC3339),
 				"pending_create_claim":      "",
 				"pending_create_started_at": "",
+				CurrentBeadIDKey:            "",
 			},
 		},
 		{
@@ -186,6 +188,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"priming_attempted_at":       "",
 				"prompt_hash":                "",
 				"continuation_reset_pending": "true",
+				CurrentBeadIDKey:             "",
 			},
 		},
 		{
@@ -210,6 +213,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"priming_attempted_at":       "",
 				"prompt_hash":                "",
 				"continuation_reset_pending": "true",
+				CurrentBeadIDKey:             "",
 			},
 		},
 		{

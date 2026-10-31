@@ -278,8 +278,8 @@ var observed = []struct {
 	asClear bool
 	keys    []string
 }{
-	{legacy(srcReconciler, "finalizeDrainAckStoppedSession"), false, []string{"last_woke_at", "pending_create_claim", "pending_create_started_at", "slept_at", "state", "state_reason"}},
-	{op("internal/session/kill_fence.go", "KillPendingPatch"), false, []string{"last_woke_at", "pending_create_claim", "pending_create_started_at", "sleep_reason", "state", "synced_at"}},
+	{legacy(srcReconciler, "finalizeDrainAckStoppedSession"), false, []string{"currently_processing_bead_id", "last_woke_at", "pending_create_claim", "pending_create_started_at", "slept_at", "state", "state_reason"}},
+	{op("internal/session/kill_fence.go", "KillPendingPatch"), false, []string{"currently_processing_bead_id", "last_woke_at", "pending_create_claim", "pending_create_started_at", "sleep_reason", "state", "synced_at"}},
 	{op("internal/session/kill_fence.go", "KillPendingPatch"), true, []string{"wake_request", "wake_requested_at"}},
 	{legacy(srcTransition, "CommitStartedPatch"), true, []string{"reset_committed_at"}},
 	{legacy(srcTransition, "ConfigDriftResetPatch"), false, []string{"continuation_reset_pending", "last_woke_at", "live_hash", "pending_create_claim", "pending_create_started_at", "primed_at", "priming_attempted_at", "prompt_hash", "session_key", "started_config_hash", "started_live_hash", "startup_dialog_verified", "state"}},

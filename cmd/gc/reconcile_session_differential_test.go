@@ -215,7 +215,7 @@ var parityFindings = map[string]parityEntry{
 	"drift-deferral-skips": {"C7b1 (A14 runs after A6's heals and the allocation's writes, CONTRACT v5 §4)", "legacy's config-drift deferral (SESS-553/558/559) continues past the row, so that tick it skips the row's later writes, its current-bead stamp (SESS-613) and sleep-policy keys among them; v2's A6 and the allocation write them before A14 decides", []string{"currently_processing_bead_id"}},
 	"idle-rewake-lag": {
 		"BEHAVIORS SESS-576/577 (A15 idle-timeout; C7a-1, §12.2 #60, v5.9s)", "legacy re-wakes an idle-killed row its demand still wants in the same tick (the kill falls through to the wake pass); v2's stop verb finalizes it asleep (SleepPatch(idle-timeout)) and A18 starts it the next pass, so the restart lands a pass later",
-		append([]string{"sleep_reason", "slept_at"}, parityStartKeys...),
+		append([]string{"sleep_reason", "slept_at", session.CurrentBeadIDKey}, parityStartKeys...),
 	},
 	"recycle-by-object":  {"CONTRACT v5 S5, F2 (C5a3)", "v2's start recycle removes the row's own dead runtime by exact session object (KillZombieObject, KillCorpseObject) after re-checking it; legacy's start recycle stops it by name, and a death that accrues legacy leaves listed until its next start. §12.2 does not list it", nil},
 	"mislabelled-close":  {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},

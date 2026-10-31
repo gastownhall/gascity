@@ -169,6 +169,34 @@ func freshAnchorBeadTerminal(topo storeref.Topology, anchorID string) (bool, err
 	return convoycore.IsTerminalStatus(anchor.Status), nil
 }
 
+// clearCurrentBeadIDWhenUnassigned clears currently_processing_bead_id for a
+// session with no currently-matching assigned work. recordCurrentBeadIDOnWake
+// only ever refreshes the stamp forward to a bead whose Assignee presently
+// names this session (hasAssignedWork=true); it never clears it, because an
+// empty beadID short-circuits as a no-op. So once a session's last assigned
+// bead moves on to someone else, the session keeps reporting that bead as
+// "currently processing" indefinitely even though nothing names it anymore.
+// releaseOrphanedPoolAssignments treats any open session's
+// currently_processing_bead_id as first-party proof of ownership
+// (gastownhall/gascity#6362), so a stale stamp like this can shield that bead
+// from a legitimate orphan-release sweep aimed at whoever it was later,
+// legitimately, reassigned to (gastownhall/gascity#6410).
+func clearCurrentBeadIDWhenUnassigned(info sessionpkg.Info, sessFront *sessionpkg.Store, hasAssignedWork bool, stderr io.Writer) sessionpkg.MetadataPatch {
+	if hasAssignedWork || sessFront == nil {
+		return nil
+	}
+	if strings.TrimSpace(info.ID) == "" || info.CurrentlyProcessingBeadID == "" {
+		return nil
+	}
+	if err := sessFront.RecordCurrentBead(info.ID, ""); err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "session reconciler: clearing %s for %s: %v\n", sessionpkg.CurrentBeadIDKey, info.SessionNameMetadata, err) //nolint:errcheck
+		}
+		return nil
+	}
+	return sessionpkg.MetadataPatch{sessionpkg.CurrentBeadIDKey: ""}
+}
+
 // cycleAliveSessionForFreshReassign tears down a live wake_mode=fresh
 // session whose assigned bead has changed, then primes the bead so the
 // next reconciler tick wakes the session on a brand-new conversation.
