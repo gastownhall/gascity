@@ -10,8 +10,20 @@ import (
 // pull request URL.
 var referencePattern = regexp.MustCompile(`^(#[0-9]+|https://github\.com/[^/\s]+/[^/\s]+/pull/[0-9]+)$`)
 
+// generator is the command that seeds or refreshes the baseline.
+const generator = "bazel run //cmd/gen-schema-baseline"
+
 // regenerate is the instruction appended to problems the generator fixes.
-const regenerate = "run the generator: bazel run //cmd/gen-schema-baseline"
+const regenerate = "run the generator: " + generator
+
+// versionText names a schema's version in a message: the quoted const, or
+// "unversioned" for a schema that declares none.
+func versionText(version string) string {
+	if version == "" {
+		return "unversioned"
+	}
+	return fmt.Sprintf("schema_version %q", version)
+}
 
 // Check compares the live schemas against the baseline and returns one
 // message per violation, ordered by schema path. A change that narrows or
@@ -31,9 +43,9 @@ func Check(b Baseline, live map[string]Entry) []string {
 		liveEntry, isLive := live[path]
 		switch {
 		case !recorded:
-			problems = append(problems, fmt.Sprintf("%s: no baseline record; %s", path, regenerate))
+			problems = append(problems, fmt.Sprintf("%s: no baseline record (%s); %s", path, versionText(liveEntry.SchemaVersion), regenerate))
 		case !isLive:
-			problems = append(problems, fmt.Sprintf("%s: schema removed from schemas/; removing a CLI JSON contract is breaking: add a `BREAKING CHANGE:` footer to the commit and delete its baseline record deliberately", path))
+			problems = append(problems, fmt.Sprintf("%s: schema removed from schemas/ (newest recorded %s); removing a CLI JSON contract is breaking: add a `BREAKING CHANGE:` footer to the commit and delete its record from %s by hand (the generator never drops one)", path, versionText(entries[len(entries)-1].SchemaVersion), BaselinePath))
 		default:
 			problems = append(problems, checkSchema(path, entries, liveEntry)...)
 		}
@@ -96,7 +108,7 @@ func validateEntries(path string, entries []Entry) []string {
 func compareShape(path string, recorded, live Entry) []string {
 	var problems []string
 	breaking := func(format string, args ...any) {
-		problems = append(problems, fmt.Sprintf("%s: BREAKING: %s; bump schema_version and add an entry, or revert", path, fmt.Sprintf(format, args...)))
+		problems = append(problems, fmt.Sprintf("%s: BREAKING (%s): %s; bump the schema_version const, then run %s to seed its entry and fill the entry's note and issue or pr reference, or revert", path, versionText(live.SchemaVersion), fmt.Sprintf(format, args...), generator))
 	}
 	if recorded.JSONL != live.JSONL {
 		breaking("jsonl framing changed (%t -> %t)", recorded.JSONL, live.JSONL)
@@ -140,7 +152,7 @@ func additions(path string, recorded, live Entry) []string {
 	for _, key := range sortedKeys(live.Variants) {
 		old, ok := recorded.Variants[key]
 		if !ok {
-			problems = append(problems, fmt.Sprintf("%s: variant %q added; %s", path, key, regenerate))
+			problems = append(problems, fmt.Sprintf("%s: variant %q added (%s); %s", path, key, versionText(live.SchemaVersion), regenerate))
 			continue
 		}
 		have := map[string]bool{}
@@ -149,7 +161,7 @@ func additions(path string, recorded, live Entry) []string {
 		}
 		for _, f := range live.Variants[key] {
 			if !have[f.Path] {
-				problems = append(problems, fmt.Sprintf("%s: field %s added%s; %s", path, f.Path, variantSuffix(key), regenerate))
+				problems = append(problems, fmt.Sprintf("%s: field %s added%s (%s); %s", path, f.Path, variantSuffix(key), versionText(live.SchemaVersion), regenerate))
 			}
 		}
 	}
