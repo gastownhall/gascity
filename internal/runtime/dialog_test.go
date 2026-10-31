@@ -1644,27 +1644,32 @@ func TestAcceptStartupDialogsWithTimeoutBoundsBlankPaneToOneTimeout(t *testing.T
 // dismissed an earlier one must still be handled. Every dismissal grants a fresh
 // timeout, so a chain of slow-rendering dialogs is not cut off by the bound that
 // stops a dead pane.
+//
+// The render delays and the budget run on a stepped virtual clock, so a
+// scheduler stall cannot spend the 500ms budget before the 300ms render delay
+// elapses; only the handler's own polling sleeps move time.
 func TestAcceptStartupDialogsWithTimeoutRefreshesBudgetOnProgress(t *testing.T) {
 	withZeroDialogTimings(t)
 	dialogPollInterval = 5 * time.Millisecond
+	clock := useSteppedDialogClock(t)
 
 	const timeout = 500 * time.Millisecond
 	const renderDelay = 300 * time.Millisecond
 
 	var sent []string
-	start := time.Now()
+	start := clock.Now()
 	var trustAccepted time.Time
 	err := AcceptStartupDialogsWithTimeout(
 		context.Background(),
 		timeout,
 		func(_ int) (string, error) {
 			if trustAccepted.IsZero() {
-				if time.Since(start) < renderDelay {
+				if clock.Now().Sub(start) < renderDelay {
 					return "", nil // agent still booting: nothing on screen yet
 				}
 				return "Quick safety check: Is this a project you created or one you trust?\n\n❯ Yes, I trust this folder\n  No, exit\n\nEnter to confirm · Esc to cancel", nil
 			}
-			if time.Since(trustAccepted) < renderDelay {
+			if clock.Now().Sub(trustAccepted) < renderDelay {
 				return "", nil // next dialog has not rendered yet
 			}
 			return "Bypass Permissions mode", nil
@@ -1672,7 +1677,7 @@ func TestAcceptStartupDialogsWithTimeoutRefreshesBudgetOnProgress(t *testing.T) 
 		func(keys ...string) error {
 			sent = append(sent, keys...)
 			if keys[0] == "Enter" && trustAccepted.IsZero() {
-				trustAccepted = time.Now()
+				trustAccepted = clock.Now()
 			}
 			return nil
 		},
