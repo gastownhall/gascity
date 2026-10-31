@@ -130,7 +130,7 @@ type controllerState struct {
 	pokeCh                 chan struct{}   // wakeOf's fallback when no wake is wired; triggers immediate reconciler tick
 	controlDispatcherCh    chan struct{}   // wakeOf's fallback when no wake is wired; triggers the control-dispatcher-only reconcile
 	configDirty            *atomic.Bool    // optional dirty flag shared with the reconciler reload path
-	freshness              configFreshness // reloads and API config writes in progress, for ReadyWork
+	freshness              configFreshness // reloads and API config writes in progress, for ReadyWork and ActiveWorkStep
 	services               workspacesvc.Registry
 	extmsgSvc              *extmsg.Services
 	adapterReg             *extmsg.AdapterRegistry

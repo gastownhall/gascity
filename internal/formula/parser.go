@@ -373,6 +373,9 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 	if err := merged.Validate(); err != nil {
 		return nil, err
 	}
+	if err := validateScopeMembership(merged); err != nil {
+		return nil, err
+	}
 	if err := validateResolvedGraphV2DescriptionFiles(merged); err != nil {
 		return nil, err
 	}

@@ -45,16 +45,19 @@ package main
 // signal HOLDS rather than proceeds — the #312 rule that "we cannot tell" is
 // never "idle".
 //
-// Known bounded exposure: the k8s and ssh providers' GetLastActivity shell
-// `tmux display-message -p '#{session_activity}'` inside the pod, and
-// session-level activity does not advance on pane I/O for a detached session
-// (see Tmux.rawSessionActivity, which queries per-window activity for exactly
-// this reason). A busy k8s agent therefore reads as idle-since-attach and can
-// be nudged mid-turn. The ssh provider has the same exposure for the same
-// reason (internal/runtime/ssh/provider.go reads #{session_activity} and
-// reports CanReportActivity: true). Every other provider is fail-closed. The
-// exposure is capped at drainReminderMaxAttempts informational nudges per drain
-// and is tracked as its own fix rather than papered over here.
+// Known bounded exposure: the maintained exec session scripts for k8s and
+// Docker boxes (contrib/session-scripts/gc-session-k8s,
+// scripts/gc-session-docker) answer get-last-activity from
+// `tmux display-message -p '#{session_activity}'`, and session-level activity
+// does not advance on pane I/O for a detached session (see
+// Tmux.rawSessionActivity, which queries per-window activity for exactly this
+// reason). A busy agent in such a box therefore reads as idle-since-attach and
+// can be nudged mid-turn. (The native k8s and ssh providers read the
+// per-window clock less gc's own keystroke echo, as the local tmux provider
+// does; see runtime.PokeLedger.) The exposure is capped at
+// drainReminderMaxAttempts informational nudges per drain. Fixing it needs the
+// scripts to read the per-window clock and the exec provider to discount its
+// own nudges, not a workaround here.
 
 import (
 	"errors"
