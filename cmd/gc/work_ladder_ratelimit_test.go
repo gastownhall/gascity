@@ -962,3 +962,164 @@ func TestWorkLadderRateLimitVocabularyMatchesTheEvent(t *testing.T) {
 		}
 	}
 }
+
+// slowNudgeProvider is a runtime whose Nudge returns only once took has run:
+// a tmux nudge returns after its submit is confirmed, seconds after the
+// prompt landed.
+type slowNudgeProvider struct {
+	runtime.Provider
+	took func()
+}
+
+func (s slowNudgeProvider) Nudge(name string, content []runtime.ContentBlock) error {
+	err := s.Provider.Nudge(name, content)
+	s.took()
+	return err
+}
+
+// A provider refuses within a second of the prompt, before a direct
+// delivery returns (2.2s here): the refusal answers the nudge, so its
+// episode opens. Delivered is the attempt's start, read before the call,
+// not the lane's clock once the call returned.
+func TestWorkLadderFastRefusalAnswersASlowDelivery(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("the step")
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+	turns := &fakeLadderTurns{}
+	turns.install(c)
+	var starts []time.Time
+	c.env.SP = slowNudgeProvider{Provider: c.sp, took: func() {
+		starts = append(starts, c.now)
+		c.now = c.now.Add(2200 * time.Millisecond)
+	}}
+	const refusedAfter = time.Second
+	for end := c.now.Add(2 * time.Hour); c.now.Before(end) && c.cell().RateLimit.Phase == workladder.RateLimitClear; c.now = c.now.Add(30 * time.Second) {
+		turns.hist = runtime.TurnHistory{}
+		for i, s := range starts {
+			if at := s.Add(refusedAfter); !at.After(c.now) {
+				turns.hist.Recent = append([]runtime.EndedTurn{{TurnID: fmt.Sprint(i), StartedAt: s, EndedAt: at, Status: runtime.TurnStatusFailed, Failure: coolingRefusal}}, turns.hist.Recent...)
+				c.sp.SetActivity(ladderSeatName, at)
+			}
+		}
+		c.pass()
+	}
+	r := c.cell()
+	if r.RateLimit.Phase != workladder.RateLimitOpen || len(starts) < 2 {
+		t.Fatalf("nudged at %v, cell %s: want the fast refusals to open an episode", starts, c.row().Metadata[session.WorkLadderKey])
+	}
+	if want := starts[len(starts)-1].Add(refusedAfter); !r.RateLimit.Since.Equal(want) || !r.Delivered.Equal(starts[len(starts)-1]) {
+		t.Fatalf("episode since %v, delivered %v: want the refusal at %v answering the delivery started at %v", r.RateLimit.Since, r.Delivered, want, starts[len(starts)-1])
+	}
+}
+
+// refusedSeat is a seat holding one started claim, its last nudge delivered
+// five minutes ago and answered by two refusals a minute ago, its episode
+// rl (in the seat's conversation).
+func refusedSeat(t *testing.T, rl workladder.RateLimit) *ladderCity {
+	t.Helper()
+	c := newLadderCity(t)
+	id := c.claim("the step")
+	key := workladder.ClaimKey{Store: "city", Bead: id}
+	delivered := c.now.Add(-5 * time.Minute)
+	rl.Conv = rowConversation(c.row().Metadata)
+	cell := workladder.Record{V: 1, Gen: 7, Delivered: delivered, LastNudge: delivered, RateLimit: rl, Entries: []workladder.Entry{{
+		Key: key, Kind: workladder.KindClaim, Rung: workladder.RungStarted, Since: c.now.Add(-2 * time.Hour), Attempts: 2, Last: delivered,
+	}}}
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id, session.WorkLadderKey: workladder.EncodeLadder(cell)})
+	turns := &fakeLadderTurns{}
+	turns.install(c)
+	refused := func(id string, ago time.Duration) runtime.EndedTurn {
+		return runtime.EndedTurn{TurnID: id, EndedAt: c.now.Add(-ago), Status: runtime.TurnStatusFailed, Failure: coolingRefusal}
+	}
+	turns.hist = runtime.TurnHistory{Recent: []runtime.EndedTurn{refused("t2", time.Minute), refused("t1", 2*time.Minute)}}
+	return c
+}
+
+// raceCell rewrites c's cell, between the pass's read and its CAS, with
+// change applied.
+func raceCell(t *testing.T, c *ladderCity, change func(*workladder.Record)) *agentRaceStore {
+	t.Helper()
+	race := &agentRaceStore{MemStore: c.sessions, row: c.seat, agent: func() {
+		r := c.cell()
+		change(&r)
+		casSetRow(t, c.sessions, c.seat, map[string]string{session.WorkLadderKey: workladder.EncodeLadder(r)})
+	}}
+	c.env.CityStore = blindWriteRefusingStore{inner: race}
+	return race
+}
+
+// L9. An episode confirmed only on the revision the CAS reads (another
+// write moved its start back past FreshConfirm) was not confirmed when the
+// pass read the seat, so the pass read nothing that holds a restart: here a
+// person is attached. The CAS restarts nothing; the next pass reads the
+// attachment and holds the restart, alerting held (attached).
+func TestWorkLadderRestartConfirmedOnlyAtTheCASWaits(t *testing.T) {
+	c := refusedSeat(t, workladder.RateLimit{Phase: workladder.RateLimitOpen, Since: stepsTestNow.Add(-5 * time.Minute), Checked: stepsTestNow.Add(-5 * time.Minute)})
+	c.sp.SetAttached(ladderSeatName, true)
+	race := raceCell(t, c, func(r *workladder.Record) {
+		r.RateLimit.Since = c.now.Add(-workladder.DefaultPausedCap - time.Minute)
+	})
+	c.pass()
+	if !race.fired.Load() {
+		t.Fatal("the ladder never tried its CAS")
+	}
+	if got := c.row().Metadata["restart_requested"]; got != "" {
+		t.Fatalf("restart_requested %q: a restart confirmed only at the CAS skipped its holds", got)
+	}
+	c.now = c.now.Add(30 * time.Second)
+	c.pass()
+	if got := c.row().Metadata["restart_requested"]; got != "" || c.cell().RateLimit.Alerted != workladder.AlertRateLimitedHeld {
+		t.Fatalf("restart_requested %q, cell %s: want the attached seat held", got, c.row().Metadata[session.WorkLadderKey])
+	}
+}
+
+// LOW-3. The pass read a confirmed episode and decided no restart (the
+// seat was restarted fresh within SeatFreshGap: exhausted); another write
+// lifted that block before the CAS, whose decision would restart the seat.
+// The pass re-read none of the seat's claims for a restart, so the CAS
+// holds its work, and the restart with it, for the pass; the next pass,
+// reading them, restarts it.
+func TestWorkLadderRestartTheCASAloneDecidedWaits(t *testing.T) {
+	since := stepsTestNow.Add(-workladder.DefaultPausedCap - time.Minute)
+	// LastFresh within SeatFreshGap: the pass's decision exhausts the episode.
+	c := refusedSeat(t, workladder.RateLimit{Phase: workladder.RateLimitOpen, Since: since, Checked: since, LastFresh: stepsTestNow.Add(-30 * time.Minute)})
+	race := raceCell(t, c, func(r *workladder.Record) { r.RateLimit.LastFresh = time.Time{} })
+	c.pass()
+	if !race.fired.Load() {
+		t.Fatal("the ladder never tried its CAS")
+	}
+	cell := c.cell()
+	if got := c.row().Metadata["restart_requested"]; got != "" || cell.RateLimit.Phase != workladder.RateLimitOpen {
+		t.Fatalf("restart_requested %q, cell %s: a restart only the CAS decided landed", got, c.row().Metadata[session.WorkLadderKey])
+	}
+	c.now = c.now.Add(30 * time.Second)
+	c.pass()
+	if got := c.row().Metadata["restart_requested"]; got != "true" || c.cell().RateLimit.Phase != workladder.RateLimitRestarted {
+		t.Fatalf("restart_requested %q, cell %s: want the next pass to restart the seat", got, c.row().Metadata[session.WorkLadderKey])
+	}
+}
+
+// L12. A closed move reports the episode it closed: its start and its fresh
+// restart, gone from the landed cell.
+func TestWorkLadderClosedPayloadNamesTheClosedEpisode(t *testing.T) {
+	w := newRLWorld(t, false, "claude")
+	s := w.seats[0]
+	first := rowConversation(w.rowOf(s).Metadata)
+	s.refuse = func(conv int64) bool { return conv == first } // the fresh conversation is served
+	s.restartAfter = 1
+	w.claimFor(s, "the step")
+	if !w.runUntil(4*time.Hour, func() bool { return len(w.moves(s)) >= 3 }) {
+		t.Fatalf("moves %v", w.transitions(s))
+	}
+	if got := w.transitions(s); !slices.Equal(got, []string{"opened", "restarted", "closed(served)"}) {
+		t.Fatalf("moves %v", got)
+	}
+	m := w.moves(s)
+	opened, restarted, closed := m[0], m[1], m[2]
+	if closed.Since.IsZero() || !closed.Since.Equal(opened.Since) {
+		t.Fatalf("closed since %v, want the closed episode's (%v)", closed.Since, opened.Since)
+	}
+	if closed.FreshAt == nil || restarted.FreshAt == nil || !closed.FreshAt.Equal(*restarted.FreshAt) {
+		t.Fatalf("closed fresh_at %v, want the closed episode's restart (%v)", closed.FreshAt, restarted.FreshAt)
+	}
+}
