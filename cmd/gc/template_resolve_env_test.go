@@ -559,3 +559,55 @@ func TestResolveTemplateScrubsControllerTokenFromOperatorEnv(t *testing.T) {
 		t.Errorf("OperatorEnv[%s] = %q, want empty (a config-authored literal must not survive into the fingerprint hash-preimage)", convergence.TokenEnvVar, val)
 	}
 }
+
+// staleDemandMarkerEnv seeds the controller's process environment with every
+// demand marker a trigger stamps, the shape a reused controller or tmux
+// server environment carries: passthroughEnv forwards each one (a non-empty
+// GC_* key) into the session env verbatim.
+func staleDemandMarkerEnv(t *testing.T) {
+	t.Helper()
+	for _, kv := range [][2]string{
+		{"GC_SPAWN_ORIGIN", "demand"},
+		{"GC_TRIGGER_BEAD_ID", "stale-bead"},
+		{"GC_TRIGGER_WORK_BEAD_ID", "stale-work"},
+		{"GC_TRIGGER_BEAD_STORE_REF", "rig:stale"},
+		{"GC_TRIGGER_WORK_STORE_REF", "rig:stale"},
+	} {
+		t.Setenv(kv[0], kv[1])
+	}
+}
+
+// A seat no trigger started must not inherit a trigger's demand markers: the
+// final agentEnv layer pins each triggerEnvKeys key to an explicit empty
+// value — the same withhold idiom as GC_RIG above it — because a stale
+// GC_SPAWN_ORIGIN=demand makes the seat pass the demand divergence gate
+// with a blank trigger id and emit an unknown-classified divergence.
+func TestResolveTemplatePinsInheritedDemandMarkersEmpty(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	staleDemandMarkerEnv(t)
+
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{Name: "runner"}
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	for _, key := range triggerEnvKeys {
+		val, ok := tp.Env[key]
+		if !ok || val != "" {
+			t.Errorf("Env[%s] = %q (present=%v), want present and empty: a seat no trigger started must not inherit a stale demand marker", key, val, ok)
+		}
+	}
+}

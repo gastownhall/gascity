@@ -355,6 +355,15 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		// Rig-scoped agents override the rig-specific keys below.
 		"GT_ROOT": p.cityPath,
 	}
+	// A trigger's demand markers are stamped after resolution, and only
+	// for a row that has a trigger (resolveTemplateForSessionBeadInfo;
+	// the start-time merge). Pinned empty here, like the rig scope above,
+	// so a seat no trigger started cannot inherit a stale demand origin
+	// or trigger id from the controller's or the tmux server's
+	// environment.
+	for _, k := range triggerEnvKeys {
+		agentEnv[k] = ""
+	}
 	for key, value := range cityRuntimeEnvMapForCity(p.cityPath) {
 		agentEnv[key] = value
 	}
