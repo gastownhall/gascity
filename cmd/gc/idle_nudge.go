@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -632,6 +633,14 @@ func (p poolClaimBackstop) clearHold(store beads.Store, s *beads.Bead, stdout io
 // whose in-progress claim is exactly what a working agent looks like, keeps
 // the stricter rule.
 func claimNudgeBusyHold(sp runtime.Provider, s beads.Bead, sessName string, now time.Time) string {
+	hold := claimNudgeScreenHold(sp, s, sessName, now)
+	shadowHold(sp, sessName, s.ID, sessionpkg.ProviderFamilyFromMetadata(s.Metadata, ""),
+		runtime.ProgramPointClaimNudgeHold, hold != "", now, runtime.ProgramHoldVerdict)
+	return hold
+}
+
+// claimNudgeScreenHold is claimNudgeBusyHold's reading.
+func claimNudgeScreenHold(sp runtime.Provider, s beads.Bead, sessName string, now time.Time) string {
 	last, err := sp.GetLastActivity(sessName)
 	if err != nil || (!last.IsZero() && now.Sub(last) < idleClaimNudgeGrace) {
 		return executionHoldNotQuiet

@@ -1427,6 +1427,7 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, by Actor, id strin
 	if !ok {
 		return false, nil
 	}
+	m.shadowWaitIdlePreread(b, sessName)
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
 		return false, nil
 	}
@@ -1453,6 +1454,7 @@ func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Be
 	if !ok {
 		return false, nil
 	}
+	m.shadowWaitIdlePreread(b, sessName)
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
 		return false, nil
 	}

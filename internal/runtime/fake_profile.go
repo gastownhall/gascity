@@ -64,6 +64,8 @@ type ProfileBackend interface {
 	LivenessObserver
 	LivenessObserverWithError
 	ProcessTableScanner
+	ProgramStatusProvider
+	ProgramStatusShadowProvider
 	RelaunchProvider
 	ServerDeathConfirmer
 	ServerLifecycleProvider
@@ -85,7 +87,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	core, timed := profileProvider{b, profileCapabilities[p]}, sleepTrait{SessionSleepCapabilityTimedOnly}
 	switch p {
 	case ProfileTmux:
-		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}, steerTrait{SteerKeystroke}}
+		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}, steerTrait{SteerKeystroke}}
 	case ProfileACP:
 		return acpProfile{core, b, b, b, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}, localTranscriptTrait{}}
 	case ProfileSubprocess:
@@ -180,6 +182,8 @@ type (
 		LivenessObserver
 		LivenessObserverWithError
 		ProcessTableScanner
+		ProgramStatusProvider
+		ProgramStatusShadowProvider
 		RelaunchProvider
 		ServerDeathConfirmer
 		ServerLifecycleProvider
@@ -483,14 +487,19 @@ func (f FullFake) TurnRunning(name string) (bool, error) {
 }
 
 // RuntimeInventory implements [InventoryProvider]: every running session,
-// its attachment known, and its activity when one was set.
+// its attachment known, its activity when one was set, and, for a session
+// with an agent-pane row, its program status as ProgramStatus judges it.
 func (f FullFake) RuntimeInventory(context.Context) (map[string]InventoryEntry, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	inv := make(map[string]InventoryEntry, len(f.sessions))
 	for name := range f.sessions {
 		at := f.Activity[name]
-		inv[name] = InventoryEntry{AttachedKnown: true, Attached: f.Attached[name], ActivityKnown: !at.IsZero(), LastActivity: at}
+		e := InventoryEntry{AttachedKnown: true, Attached: f.Attached[name], ActivityKnown: !at.IsZero(), LastActivity: at}
+		if row, ok := f.ProgramPanes[name]; ok {
+			e.Program = JudgeProgramStatus(row)
+		}
+		inv[name] = e
 	}
 	return inv, nil
 }

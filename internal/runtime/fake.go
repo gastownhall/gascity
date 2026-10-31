@@ -117,6 +117,24 @@ type Fake struct {
 	// TurnHistoryErrors fail TurnHistory reads by session name, in order. A
 	// nil entry reads the script.
 	TurnHistoryErrors map[string][]error
+	// ProgramPanes are the agent-pane rows a FullFake's ProgramStatus judges
+	// with [JudgeProgramStatus], by session name; a running session without
+	// one reads Unread, as under the switch off. HealProgramCapture rewrites
+	// them. Use SetProgramPane and ProgramPane while other goroutines may
+	// read the fake.
+	ProgramPanes map[string]ProgramPaneRow
+	// ProgramStatusErrors fail a FullFake's ProgramStatus by session name.
+	ProgramStatusErrors map[string]error
+	// ProgramCaptureHealErrors fail a FullFake's HealProgramCapture by
+	// session name.
+	ProgramCaptureHealErrors map[string]error
+	// ProgramShadowSink is the comparison sink a FullFake hands out as a
+	// shadowing leaf ([ProgramStatusShadowProvider]); nil, as under a switch
+	// that is not shadow, records nothing.
+	ProgramShadowSink ProgramStatusComparisonSink
+	// programArms counts the captures HealProgramCapture armed, naming each
+	// one's nonce.
+	programArms int
 }
 
 var (

@@ -16,12 +16,14 @@ import (
 // its entry is dropped.
 var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 	"auto": {
-		"FreshByConstruction":     {"deliberate", "a leaf's own read; readRuntime judges it on the routed leaf (cmd/gc/reconcile_effect_runtime.go freshReadable)", ""},
-		"IdentitySidecarProvider": {"deliberate", "identity is read on the routed leaf (cmd/gc/runtime_inventory_lane.go identityReadable)", ""},
-		"IdleProbeBudgetProvider": {"deliberate", "the idle-proof budget is read on the routed leaf (cmd/gc/session_sleep.go idleSleepProbeTimeoutFor)", ""},
-		"InventoryProvider":       {"deliberate", "the inventory lane reads each backend's leaf through Backends (cmd/gc/runtime_inventory_lane.go)", ""},
-		"LocalTranscriptProvider": {"deliberate", "transcript locality is read on the routed leaf (runtime.LocalTranscriptsFor)", ""},
-		"TurnRunningProvider":     {"deliberate", "the live turn reading is read on the routed leaf (runtime.TurnRunningFor)", ""},
+		"FreshByConstruction":         {"deliberate", "a leaf's own read; readRuntime judges it on the routed leaf (cmd/gc/reconcile_effect_runtime.go freshReadable)", ""},
+		"IdentitySidecarProvider":     {"deliberate", "identity is read on the routed leaf (cmd/gc/runtime_inventory_lane.go identityReadable)", ""},
+		"IdleProbeBudgetProvider":     {"deliberate", "the idle-proof budget is read on the routed leaf (cmd/gc/session_sleep.go idleSleepProbeTimeoutFor)", ""},
+		"InventoryProvider":           {"deliberate", "the inventory lane reads each backend's leaf through Backends (cmd/gc/runtime_inventory_lane.go)", ""},
+		"LocalTranscriptProvider":     {"deliberate", "transcript locality is read on the routed leaf (runtime.LocalTranscriptsFor)", ""},
+		"ProgramStatusProvider":       {"deliberate", "the program-status reading is read on the routed leaf (runtime.ProgramStatusFor)", ""},
+		"ProgramStatusShadowProvider": {"deliberate", "the shadow sink is read on the routed leaf with its reading (runtime.ProgramStatusShadowFor)", ""},
+		"TurnRunningProvider":         {"deliberate", "the live turn reading is read on the routed leaf (runtime.TurnRunningFor)", ""},
 	},
 	"hybrid": {
 		"FreshByConstruction":         {"deliberate", "as auto's", ""},
@@ -29,6 +31,8 @@ var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 		"IdleProbeBudgetProvider":     {"deliberate", "as auto's", ""},
 		"InventoryProvider":           {"deliberate", "as auto's", ""},
 		"LocalTranscriptProvider":     {"deliberate", "as auto's", ""},
+		"ProgramStatusProvider":       {"deliberate", "as auto's", ""},
+		"ProgramStatusShadowProvider": {"deliberate", "as auto's", ""},
 		"TurnRunningProvider":         {"deliberate", "as auto's", ""},
 		"FreshLivenessObserver":       {"deliberate", "hybrid's read is its leaves' cached one, so a hop through it proves absence only by its attested listing (cmd/gc/reconcile_effect_runtime.go unlistedElsewhere)", ""},
 		"TransportCapabilityProvider": {"deliberate", "production's hybrid is tmux over k8s (cmd/gc/providers.go newHybridProvider), and neither has it", ""},
