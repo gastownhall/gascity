@@ -1566,3 +1566,51 @@ func TestExecutionBackstopTheLastNudgeGetsItsFullBackoff(t *testing.T) {
 		}
 	}
 }
+
+// TestExecutionBackstopEscalatesOnceTheLastBackoffHasPassed (ga-uns4sw): the
+// last nudge's backoff is the whole answer window, not a grace on top of it.
+// The first pass at or after it records exactly one latch, one
+// execution.step_stalled event and one drain request, and later passes inside
+// executionStalledLatchRetryAfter add none.
+func TestExecutionBackstopEscalatesOnceTheLastBackoffHasPassed(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	driveToLastNudge(t, f)
+	lastNudge := f.now
+
+	f.now = lastNudge.Add(idleClaimNudgeBackoff - time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 0 || f.stalledEvents() != 0 {
+		t.Fatalf("one second before the last backoff ends: drains %v, events %d; want neither yet", f.drained, f.stalledEvents())
+	}
+
+	f.now = lastNudge.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 1 || f.drained[0] != f.sessName {
+		t.Fatalf("drain requests once the last backoff passed = %v, want exactly one for %s; stdout=%s", f.drained, f.sessName, f.stdout.String())
+	}
+	if got := f.stalledEvents(); got != 1 {
+		t.Fatalf("execution.step_stalled events once the last backoff passed = %d, want 1", got)
+	}
+	latchedAt := f.sessionMeta(t, executionClaimNudgeStalledKey)
+	if latchedAt != f.now.UTC().Format(time.RFC3339) {
+		t.Fatalf("stalled latch = %q, want the escalating pass %s", latchedAt, f.now.UTC().Format(time.RFC3339))
+	}
+
+	escalatedAt := f.now
+	for _, after := range []time.Duration{time.Second, idleClaimNudgeBackoff, executionStalledLatchRetryAfter - time.Second} {
+		f.now = escalatedAt.Add(after)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	if len(f.drained) != 1 || f.stalledEvents() != 1 {
+		t.Fatalf("inside the latch window: drains %v, events %d; want still one of each", f.drained, f.stalledEvents())
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeStalledKey); got != latchedAt {
+		t.Fatalf("stalled latch inside its window = %q, want unchanged %q", got, latchedAt)
+	}
+	if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
+		t.Fatalf("delivered nudges = %d, want still %d", got, idleClaimNudgeMaxAttempts)
+	}
+}
