@@ -54,8 +54,10 @@ const (
 
 // rigCensusRow is one rig's census.
 type rigCensusRow struct {
-	Rig      string
-	State    rigCensusState
+	Rig   string
+	State rigCensusState
+	// Why says why the rig is skipped or retained, or why an awaiting rig
+	// was not recorded clean (recordCensusClean).
 	Why      string
 	Infra    int
 	Open     int
@@ -230,6 +232,11 @@ func rigCensusLine(r rigCensusRow) string {
 	case rigCensusUnreachable:
 		return fmt.Sprintf("rig %s: UNREACHABLE — %v", r.Rig, r.Err)
 	case rigCensusAwaiting:
+		if r.Why != "" {
+			// The import refuses the rig for the same reason, which names
+			// its own remedy.
+			return fmt.Sprintf("rig %s: awaiting import (%d infrastructure bead(s), %d open), not recorded clean: %s", r.Rig, r.Infra, r.Open, r.Why)
+		}
 		return fmt.Sprintf("rig %s: awaiting import (%d infrastructure bead(s), %d open); run `%s`", r.Rig, r.Infra, r.Open, rigImportInstruction(r.Rig))
 	case rigCensusRetained:
 		if r.Why != "" {
@@ -335,7 +342,8 @@ func (cr *CityRuntime) startRigResidueCensus(ctx context.Context) {
 // recordCensusCleanRows records clean every censused rig with nothing to
 // import (recordCensusClean) and marks its row clean, so a rig added before
 // the binding converged, or one whose add-time census failed, is not asked to
-// be imported. A rig that cannot be recorded keeps its row and is warned on.
+// be imported. A rig that cannot be recorded keeps its row and is warned on;
+// one the record's gate refuses keeps its row, which says why.
 func recordCensusCleanRows(cityPath string, target infraBindingTarget, rigs []config.Rig, rows []rigCensusRow, stderr io.Writer, logPrefix string) {
 	byName := make(map[string]config.Rig, len(rigs))
 	for _, rig := range rigs {
@@ -346,14 +354,13 @@ func recordCensusCleanRows(cityPath string, target infraBindingTarget, rigs []co
 		if !ok {
 			continue
 		}
-		recorded, err := recordCensusClean(cityPath, target, rig, rows[i], "the controller's boot census")
+		recorded, err := recordCensusClean(cityPath, target, rig, &rows[i], "the controller's boot census")
 		switch {
 		case err != nil:
 			if stderr != nil {
 				fmt.Fprintf(stderr, "%s: storage: rig %s: warning: recording it clean: %v\n", logPrefix, rows[i].Rig, err) //nolint:errcheck // best-effort stderr
 			}
 		case recorded:
-			rows[i].State = rigCensusClean
 			if stderr != nil {
 				fmt.Fprintf(stderr, "%s: storage: rig %s: recorded clean — its store holds no infrastructure bead\n", logPrefix, rows[i].Rig) //nolint:errcheck // best-effort stderr
 			}
@@ -363,15 +370,20 @@ func recordCensusCleanRows(cityPath string, target infraBindingTarget, rigs []co
 
 // recordCensusClean writes rig's clean record when its census found it
 // awaiting import with no infrastructure row (closed rows and both tiers
-// counted): the record `gc storage migrate --from-rigs` writes for such a rig
-// (importRig, plan.Infra == 0), so a rig with nothing to import is never asked
-// to be imported. Only that state is promoted, and only beside a converged
-// binding. A rig with an infrastructure row, a census error, or any record or
-// cleared note of its own (the import's to resolve: a complete note without a
-// marker is a lost marker the import refuses) keeps its state. A record path
-// that cannot be stat'ed is an error, not proof of absence. by names the
-// census in the record. It reports whether it wrote the record.
-func recordCensusClean(cityPath string, target infraBindingTarget, rig config.Rig, row rigCensusRow, by string) (bool, error) {
+// counted), and marks the row clean: the record `gc storage migrate
+// --from-rigs` writes for such a rig (importRig, plan.Infra == 0), behind the
+// same gate (rigCleanRecordRefusal), so a rig with nothing to import is never
+// asked to be imported. Only that state is promoted, and only beside a
+// converged binding. A rig with an infrastructure row, a census error, or any
+// record or cleared note of its own (the import's to resolve: a complete note
+// without a marker is a lost marker the import refuses) keeps its state. A
+// rig the gate refuses (a store another registered city also uses, or one it
+// cannot rule out as one) stays awaiting import, the refusal as its row's
+// Why. The import's other refusals guard the rows it moves (id minting,
+// scope stamps, edge payloads), and such a rig moves none. A record path that
+// cannot be stat'ed is an error, not proof of absence. by names the census in
+// the record. It reports whether it wrote the record.
+func recordCensusClean(cityPath string, target infraBindingTarget, rig config.Rig, row *rigCensusRow, by string) (bool, error) {
 	if row.State != rigCensusAwaiting || row.Err != nil || row.Infra != 0 || len(row.Reused) != 0 {
 		return false, nil
 	}
@@ -386,7 +398,7 @@ func recordCensusClean(cityPath string, target infraBindingTarget, rig config.Ri
 		return false, nil
 	}
 	loc := newRigImportLocation(target, cityPath, rig.Name)
-	for _, path := range []string{loc.MarkerPath(), loc.CleanPath(), loc.InFlightPath(), loc.NotePath()} {
+	for _, path := range []string{loc.MarkerPath(), loc.CleanPath(), loc.NotePath()} {
 		present, err := infraPathExists(path)
 		if err != nil {
 			return false, fmt.Errorf("checking rig %s's record %s: %w", rig.Name, path, err)
@@ -395,10 +407,15 @@ func recordCensusClean(cityPath string, target infraBindingTarget, rig config.Ri
 			return false, nil
 		}
 	}
+	if err := rigCleanRecordRefusal(rigImportEnv{CityPath: cityPath}, loc, rig); err != nil {
+		row.Why = err.Error()
+		return false, nil
+	}
 	line := fmt.Sprintf("rig %s holds no infrastructure bead (%s, %s)", rig.Name, by, time.Now().UTC().Format(time.RFC3339))
 	if err := loc.writeRecord(loc.CleanPath(), line, rigStoreRoot(cityPath, rig)); err != nil {
 		return false, err
 	}
+	row.State = rigCensusClean
 	return true, nil
 }
 

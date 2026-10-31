@@ -443,11 +443,13 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 
 // recordNewRigClean writes the S4 clean record for a rig `gc rig add` just
 // added, adopted or re-added on a split city whose binding has converged,
-// when a census of its store finds no infrastructure row: the record `gc
-// storage migrate --from-rigs` writes for such a rig, so its readers need no
-// relic leg (rigGraphRelicFree) and it never holds the deploy gate. A store
-// that holds an infrastructure row (pre-split history, an adopted store's
-// rows) stays awaiting import, and any error reading it writes nothing. A
+// when a census of its store finds no infrastructure row (recordCensusClean):
+// the record `gc storage migrate --from-rigs` writes for such a rig, so its
+// readers need no relic leg (rigGraphRelicFree) and it never holds the deploy
+// gate. A store that holds an infrastructure row (pre-split history, an
+// adopted store's rows) stays awaiting import. So, with a warning, does one
+// the census cannot read, one another registered city also uses or that
+// cannot be ruled out as one, and one whose record cannot be written. A
 // single-store city, or one whose binding has not converged, writes nothing:
 // the controller's boot census records a rig added before then.
 func recordNewRigClean(cityPath string, cfg *config.City, r config.Rig, stderr io.Writer) {
@@ -469,8 +471,15 @@ func recordNewRigClean(cityPath string, cfg *config.City, r config.Rig, stderr i
 	if !rigScopeHasNoStore(cityPath, r) {
 		row = censusRig(cityPath, loadedCityName(cfg, cityPath), cfg, target, r, false)
 	}
-	if _, err := recordCensusClean(cityPath, target, r, row, "gc rig add"); err != nil {
+	if _, err := recordCensusClean(cityPath, target, r, &row, "gc rig add"); err != nil {
 		fmt.Fprintf(stderr, "gc rig add: warning: recording rig %s clean for the split store: %v (run `%s` to record it)\n", r.Name, err, rigImportInstruction(r.Name)) //nolint:errcheck // best-effort stderr
+		return
+	}
+	switch {
+	case row.Err != nil:
+		fmt.Fprintf(stderr, "gc rig add: warning: rig %s stays awaiting import: its store could not be censused (%v); the controller's next boot census tries again\n", r.Name, row.Err) //nolint:errcheck // best-effort stderr
+	case row.State == rigCensusAwaiting && row.Why != "":
+		fmt.Fprintf(stderr, "gc rig add: warning: rig %s stays awaiting import, not recorded clean: %s\n", r.Name, row.Why) //nolint:errcheck // best-effort stderr
 	}
 }
 
