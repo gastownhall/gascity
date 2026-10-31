@@ -3924,3 +3924,98 @@ func TestInstantiateFragmentRefusesASessionStep(t *testing.T) {
 		t.Fatalf("InstantiateFragment = %v, beads %d; want refused with only the root", err, len(all))
 	}
 }
+
+// TestCookStampsDeclaredGateType pins that the type a formula declares on a
+// [steps.gate] reaches the synthesized gate bead as gc.gate_type metadata.
+// gc's stores have no gate-condition column, so without the stamp no reader
+// (such as the core human-gate notify and re-nudge orders) can tell a human
+// gate from a timer gate. The stamp must survive every instantiation path:
+// v1 and graph.v2 formulas, with graph-apply on and off.
+func TestCookStampsDeclaredGateType(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	const steps = `
+[[steps]]
+id = "approve"
+title = "Approve"
+[steps.gate]
+type = "human"
+id = "approval"
+
+[[steps]]
+id = "wait"
+title = "Wait"
+[steps.gate]
+type = "timer"
+timeout = "1h"
+
+[[steps]]
+id = "untyped"
+title = "Untyped"
+[steps.gate]
+id = "bare"
+
+[[steps]]
+id = "plain"
+title = "Plain"
+`
+	formulas := map[string]string{
+		"gate-type-v1": `
+formula = "gate-type-v1"
+`,
+		"gate-type-v2": `
+formula = "gate-type-v2"
+version = 2
+contract = "graph.v2"
+`,
+	}
+
+	for name, header := range formulas {
+		for _, graphApply := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/graphApply=%t", name, graphApply), func(t *testing.T) {
+				prev := IsGraphApplyEnabled()
+				SetGraphApplyEnabled(graphApply)
+				t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, name+".toml"), []byte(header+steps), 0o644); err != nil {
+					t.Fatalf("writing formula: %v", err)
+				}
+				store := beads.NewMemStore()
+				result, err := Cook(context.Background(), store, name, []string{dir}, Options{})
+				if err != nil {
+					t.Fatalf("Cook: %v", err)
+				}
+
+				wantGateType := map[string]string{
+					name + ".gate-approve": "human",
+					name + ".gate-wait":    "timer",
+					name + ".gate-untyped": "",
+					name + ".approve":      "",
+					name + ".wait":         "",
+					name + ".plain":        "",
+				}
+				for stepID, want := range wantGateType {
+					beadID, ok := result.IDMapping[stepID]
+					if !ok {
+						t.Fatalf("IDMapping has no %q; mapping=%v", stepID, result.IDMapping)
+					}
+					b, err := store.Get(beadID)
+					if err != nil {
+						t.Fatalf("Get %s (%s): %v", stepID, beadID, err)
+					}
+					got, present := b.Metadata[beadmeta.GateTypeMetadataKey]
+					if want == "" {
+						if present {
+							t.Errorf("%s: %s = %q, want no key", stepID, beadmeta.GateTypeMetadataKey, got)
+						}
+						continue
+					}
+					if got != want {
+						t.Errorf("%s: %s = %q, want %q", stepID, beadmeta.GateTypeMetadataKey, got, want)
+					}
+				}
+			})
+		}
+	}
+}
