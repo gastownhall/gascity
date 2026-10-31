@@ -3107,6 +3107,12 @@ calls = 1
 tagged = true
 
 [[count]]
+path = "test/conversationlane/busy_turn_lane_test.go"
+resource = "fixed_sleep"
+calls = 3
+tagged = true
+
+[[count]]
 path = "test/conversationlane/harness_bddolt_test.go"
 resource = "fixed_sleep"
 calls = 1

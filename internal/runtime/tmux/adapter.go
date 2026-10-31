@@ -73,6 +73,7 @@ var (
 	_ runtime.SessionObjectKiller           = (*Provider)(nil)
 	_ runtime.FreshLivenessObserver         = (*Provider)(nil)
 	_ runtime.TurnRunningProvider           = (*Provider)(nil)
+	_ runtime.FreshActivityProvider         = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -1245,6 +1246,15 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	if activity, ok := p.cache.SessionActivity(name); ok {
 		return p.tm.discountedActivity(name, activity), nil
 	}
+	return p.tm.GetSessionActivity(name)
+}
+
+// FreshActivity returns the time of the last I/O activity in the named
+// session, read from its own windows now ([Tmux.GetSessionActivity]: one
+// `list-windows`, poke discount applied), never from the fleet snapshot
+// GetLastActivity serves for the snapshot's TTL. It implements
+// [runtime.FreshActivityProvider].
+func (p *Provider) FreshActivity(name string) (time.Time, error) {
 	return p.tm.GetSessionActivity(name)
 }
 

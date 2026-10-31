@@ -751,6 +751,30 @@ func TurnRunningFor(p Provider, name string) (TurnRunningProvider, bool) {
 	return tr, ok
 }
 
+// FreshActivityProvider is an optional extension for runtimes whose
+// [Provider.GetLastActivity] may answer from a cached snapshot (tmux: the
+// fleet snapshot, kept for its TTL): FreshActivity reads session name's last
+// activity from the session itself, so a read taken after another
+// observation, such as a [TurnRunningProvider] look at its screen, reflects
+// the session no earlier than that observation. The snapshot's activity can
+// predate it: a turn that started after the snapshot was taken is not in it.
+//
+// It discounts gc's own input as [Provider.GetLastActivity] does. A non-nil
+// err means the read could not be made. Composites do not implement it: it
+// is read on the session's routed leaf ([FreshActivityFor]).
+type FreshActivityProvider interface {
+	FreshActivity(name string) (time.Time, error)
+}
+
+// FreshActivityFor returns the [FreshActivityProvider] of the backend serving
+// session name, the leaf [ResolveBackend] names, and false when that backend
+// takes no such read.
+func FreshActivityFor(p Provider, name string) (FreshActivityProvider, bool) {
+	leaf, _, _ := ResolveBackend(p, name)
+	fa, ok := leaf.(FreshActivityProvider)
+	return fa, ok
+}
+
 // ExecProvider is an optional extension for runtimes that expose the RPP
 // connection primitive: run a command inside the box and return its standard
 // output and exit code. It is the op a [Carrier] drives the session-interaction
