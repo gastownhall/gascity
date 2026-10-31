@@ -207,6 +207,51 @@ func TestDoSlingWarnsRigSuspendedOnStart(t *testing.T) {
 	}
 }
 
+func TestDoSlingRuntimeResumeOverridesAuthoredSuspend(t *testing.T) {
+	cases := []struct {
+		name      string
+		workspace config.Workspace
+		rig       config.Rig
+	}{
+		{
+			name:      "suspended_on_start",
+			workspace: config.Workspace{Name: "test-city", SuspendedOnStart: true},
+			rig:       config.Rig{Name: "myrig", SuspendedOnStart: true},
+		},
+		{
+			name:      "deprecated_suspended",
+			workspace: config.Workspace{Name: "test-city", Suspended: true},
+			rig:       config.Rig{Name: "myrig", Suspended: true},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := newFakeRunner()
+			cfg := &config.City{Workspace: tc.workspace, Rigs: []config.Rig{tc.rig}}
+			a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+			deps := testDeps(cfg, runtime.NewFake(), runner.run)
+			deps.CityPath = suspensionTestCityDir(t)
+			deps.Store = seededStore("my-1")
+			// Explicit resumes recorded by `gc resume` / `gc rig resume myrig`:
+			// the runtime override must win over the authored default.
+			writeCitySuspension(t, deps.CityPath, false)
+			writeRigSuspension(t, deps.CityPath, "myrig", false)
+
+			result, err := DoSling(testOpts(a, "my-1"), deps, nil)
+			if err != nil {
+				t.Fatalf("DoSling error: %v", err)
+			}
+			if result.CitySuspended {
+				t.Error("expected CitySuspended=false: explicit runtime resume wins over the authored default")
+			}
+			if result.SuspendedRig != "" {
+				t.Errorf("SuspendedRig = %q, want empty: explicit runtime resume wins over the authored default", result.SuspendedRig)
+			}
+		})
+	}
+}
+
 func TestDoSlingCityAndRigBothSuspendedSetBothFields(t *testing.T) {
 	runner := newFakeRunner()
 	cfg := &config.City{
