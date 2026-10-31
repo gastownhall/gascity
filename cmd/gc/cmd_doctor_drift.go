@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
@@ -68,6 +69,11 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	}
 
 	managedPort := currentResolvableManagedDoltPort(c.cityPath)
+	// Probed only once a rig's mirror turns up missing or empty, so a healthy
+	// city pays nothing for it.
+	cityPinsMirrors := sync.OnceValues(func() (bool, error) {
+		return cityPinsRigPortMirrors(c.cityPath, cityState)
+	})
 
 	var errors []string
 	var warnings []string
@@ -124,11 +130,12 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 		}
 		rigPortFile := filepath.Join(rig.Path, ".beads", "dolt-server.port")
 		data, err := os.ReadFile(rigPortFile)
+		got := strings.TrimSpace(string(data))
 		mirrorGap := ""
 		switch {
-		case err == nil && strings.TrimSpace(string(data)) != "":
+		case err == nil && got != "":
 			// Case B: rig port file disagrees with managed city port.
-			if got := strings.TrimSpace(string(data)); got != managedPort {
+			if got != managedPort {
 				c.repinnablePortDrift = true
 				errors = append(errors, fmt.Sprintf(
 					"rig %q .beads/dolt-server.port=%s disagrees with managed city port %s; `gc doctor --fix` re-pins it (or next `gc start` overwrites it)",
@@ -149,6 +156,15 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 			// Case A already names this rig's real problem, and restoring a
 			// managed port beside a listening rig-local server is the re-pin
 			// CanFix withholds.
+			continue
+		}
+		expected, err := rigExpectsManagedPortMirror(c.cityPath, rig, cityPinsMirrors)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("rig %q classify port mirror ownership: %v", rig.Name, err))
+			continue
+		}
+		if !expected {
+			// The sync does not write this mirror, so --fix could not restore it.
 			continue
 		}
 		// Case D: the mirror raw bd resolves the managed port through is
@@ -215,6 +231,54 @@ func (c *doltDriftCheck) Fix(ctx *doctor.CheckContext) error {
 		warn = ctx.Output
 	}
 	return syncConfiguredDoltPortFiles(c.cityPath, c.cfg.Dolt, config.EffectiveHQPrefix(c.cfg), c.cfg.Rigs, warn)
+}
+
+// rigExpectsManagedPortMirror reports whether syncConfiguredDoltPortFiles
+// writes the managed city port into this rig's .beads/dolt-server.port, so a
+// missing or empty mirror there is Case D drift that --fix restores. It applies
+// the sync's skips Run has not already applied: the city-level ones through
+// cityPinsMirrors, then a provider-owned rig and a rig with a complete storage
+// binding. Run has already required a managed_city city with a resolvable
+// managed port and an inherited, non-embedded rig on the bd store contract.
+func rigExpectsManagedPortMirror(cityPath string, rig config.Rig, cityPinsMirrors func() (bool, error)) (bool, error) {
+	pins, err := cityPinsMirrors()
+	if err != nil || !pins {
+		return false, err
+	}
+	rigProviderOwned, err := scopeProviderOwned(cityPath, rig.Path)
+	if err != nil {
+		return false, fmt.Errorf("classifying rig provider ownership: %w", err)
+	}
+	if rigProviderOwned {
+		return false, nil
+	}
+	rigBound, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(rig.Path))
+	if err != nil {
+		return false, fmt.Errorf("classifying rig backend: %w", err)
+	}
+	return !rigBound, nil
+}
+
+// cityPinsRigPortMirrors reports whether syncConfiguredDoltPortFiles pins the
+// managed port into inherited rigs' mirrors at all: it removes them under a
+// proxied-server city, and resolves no managed port for a provider-owned city
+// or one with a complete storage binding.
+func cityPinsRigPortMirrors(cityPath string, cityState contract.ConfigState) (bool, error) {
+	if strings.EqualFold(strings.TrimSpace(cityState.DoltMode), "proxied-server") {
+		return false, nil
+	}
+	cityProviderOwned, err := scopeProviderOwned(cityPath, cityPath)
+	if err != nil {
+		return false, fmt.Errorf("classifying city provider ownership: %w", err)
+	}
+	if cityProviderOwned {
+		return false, nil
+	}
+	cityBound, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
+	if err != nil {
+		return false, fmt.Errorf("classifying city backend: %w", err)
+	}
+	return !cityBound, nil
 }
 
 // rigLocalDoltPIDFromSQLServerInfo reads the colon-separated PID:PORT:UUID

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -345,6 +346,107 @@ func TestDoltDriftCheckMissingPortMirrorBesideLiveRigLocalReportsOnlyCaseA(t *te
 	}
 	if _, err := os.Stat(portFile); !os.IsNotExist(err) {
 		t.Errorf("rig port mirror stat err = %v, want it still absent", err)
+	}
+}
+
+// TestDoltDriftCheckPortMirrorParityWithSync pins Case D to the port-file
+// sync: a missing mirror is reported (and offered to --fix) exactly where
+// syncConfiguredDoltPortFiles then writes the managed port, and stays silent
+// in every topology the sync leaves the mirror absent.
+func TestDoltDriftCheckPortMirrorParityWithSync(t *testing.T) {
+	const completeStorageBinding = `{"backend":"dolt","storage_endpoint":"opaque-remote","storage_database":"work"}`
+	writeMetadata := func(t *testing.T, scopeDir, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(scopeDir, ".beads", "metadata.json"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	journalReadyScope := func(t *testing.T, cityDir, scopeDir string) {
+		t.Helper()
+		key := providerScopeOwnershipKey(cityDir, scopeDir)
+		if err := writeProviderScopeOwnershipJournal(cityDir, providerScopeOwnershipJournal{
+			Version: 1,
+			Scopes: map[string]providerScopeOwnershipEntry{key: {
+				ScopePath:      normalizePathForCompare(scopeDir),
+				LifecycleOwner: providerScopeLifecycleOwner,
+				State:          providerScopeReady,
+			}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		owned, err := scopeProviderOwned(cityDir, scopeDir)
+		if err != nil || !owned {
+			t.Fatalf("scopeProviderOwned(%s) = %v, %v; want the journaled scope provider-owned", scopeDir, owned, err)
+		}
+	}
+	// A city whose Dolt lifecycle gc does not own still resolves a managed
+	// port through provider state, so the city-level skips are reachable.
+	publishProviderState := func(t *testing.T, cityDir string) {
+		t.Helper()
+		state, err := readDoltRuntimeStateFile(managedDoltStatePath(cityDir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := writeDoltRuntimeStateFile(providerManagedDoltStatePath(cityDir), state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name      string
+		arrange   func(t *testing.T, cityDir, rigDir string)
+		wantCaseD bool
+	}{
+		{name: "pinned rig", arrange: func(*testing.T, string, string) {}, wantCaseD: true},
+		{name: "proxied-server city", arrange: func(t *testing.T, cityDir, _ string) {
+			writeMetadata(t, cityDir, `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"gc"}`)
+			publishProviderState(t, cityDir)
+		}},
+		{name: "provider-owned city", arrange: func(t *testing.T, cityDir, _ string) {
+			journalReadyScope(t, cityDir, cityDir)
+			publishProviderState(t, cityDir)
+		}},
+		{name: "storage-bound city", arrange: func(t *testing.T, cityDir, _ string) {
+			writeMetadata(t, cityDir, completeStorageBinding)
+			publishProviderState(t, cityDir)
+		}},
+		{name: "provider-owned rig", arrange: func(t *testing.T, cityDir, rigDir string) {
+			journalReadyScope(t, cityDir, rigDir)
+		}},
+		{name: "storage-bound rig", arrange: func(t *testing.T, _, rigDir string) {
+			writeMetadata(t, rigDir, completeStorageBinding)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir, rigDir, managedPort, cfg := managedCityDriftFixture(t, "parity")
+			tc.arrange(t, cityDir, rigDir)
+			if got := currentResolvableManagedDoltPort(cityDir); got != managedPort {
+				t.Fatalf("currentResolvableManagedDoltPort = %q, want %q (a row without a managed port proves nothing)", got, managedPort)
+			}
+			portFile := removeRigPortMirror(t, rigDir)
+
+			check := newDoltDriftCheck(cityDir, cfg)
+			r := check.Run(&doctor.CheckContext{CityPath: cityDir})
+			gotCaseD := strings.Contains(strings.Join(r.Details, " "), "dolt-server.port is missing")
+			if gotCaseD != tc.wantCaseD {
+				t.Errorf("Case D reported = %v, want %v; status=%v details=%v", gotCaseD, tc.wantCaseD, r.Status, r.Details)
+			}
+			if check.CanFix() != tc.wantCaseD {
+				t.Errorf("CanFix() = %v, want %v", check.CanFix(), tc.wantCaseD)
+			}
+
+			if err := syncConfiguredDoltPortFiles(cityDir, cfg.Dolt, config.EffectiveHQPrefix(cfg), cfg.Rigs, io.Discard); err != nil {
+				t.Fatalf("syncConfiguredDoltPortFiles: %v", err)
+			}
+			got, err := os.ReadFile(portFile)
+			switch {
+			case tc.wantCaseD && err != nil:
+				t.Errorf("sync left the mirror unreadable (%v), want it written with the managed port %s", err, managedPort)
+			case tc.wantCaseD && strings.TrimSpace(string(got)) != managedPort:
+				t.Errorf("sync wrote mirror %q, want the managed port %s", got, managedPort)
+			case !tc.wantCaseD && !os.IsNotExist(err):
+				t.Errorf("sync left mirror %q (err %v), want it absent where Case D stays silent", got, err)
+			}
+		})
 	}
 }
 
