@@ -2155,7 +2155,9 @@ failed work query is an error (nothing on stdout), never a drain result. A
 pool session does not claim unassigned routed work whose managed worktree
 (gc.work_dir with complete gc worktree ownership metadata) is a directory
 other than its own: the controller starts a session inside that worktree for
-it.
+it. A pool session running inside a managed worktree also leaves unassigned
+routed work that names no managed worktree: the controller starts a session
+in the pool's own directory for it.
 
 A work query that gets no answer from the bead store (a connection error, a
 timeout, a killed query, a locked database, or bd's circuit breaker failing

@@ -672,9 +672,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   routed window, so work ran in one checkout and on one branch while the bead
   named another. The fresh-claim tier now skips, for a pool session, any
   unassigned bead whose managed worktree is a different directory than the
-  session's own; that bead is left to the session started inside it. Named,
-  manual and session-less claimants, assigned work, and beads without
-  complete worktree evidence claim as before.
+  session's own; that bead is left to the session started inside it. A pool
+  session running inside a managed worktree also leaves unassigned work that
+  names no managed worktree, which would otherwise run on another bead's
+  checkout and branch; the controller starts a session in the pool's own
+  directory for it. Named, manual and session-less claimants and assigned
+  work claim as before.
 
 - **`gc prime --strict` fails on a `prompt_template` that does not render.**
   A `.template.md` (or `.md.tmpl`) prompt_template that failed to parse or

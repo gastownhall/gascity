@@ -13,6 +13,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 const affinityRoute = "r1/dev"
@@ -69,6 +71,7 @@ func affinityClaimOps(t *testing.T, candidates []beads.Bead, claimed, reclaimed 
 		DrainAck:              func(io.Writer) error { return nil },
 		DrainPending:          func(string) (bool, error) { return false, nil },
 		ResolveSessionWorkDir: func(string) string { return "" },
+		SeatInManagedWorktree: func(string) bool { return false },
 		ResolveWorkBranch:     func(hookClaimWorkTree) string { return "" },
 		StampWorkMeta: func(context.Context, string, []string, string, string, map[string]string) error {
 			return nil
@@ -398,5 +401,248 @@ work_query = "cat '` + candidatesPath + `'"
 	}
 	if result.Action != "drain" || result.Reason != "no_work" {
 		t.Fatalf("result = %+v, want a no_work drain: the seat in /wt/r1/r1-b must leave r1-a to the seat in its own worktree; stderr=%s", result, stderr.String())
+	}
+}
+
+// countingSeatProbe stubs the managed-worktree probe with a fixed answer and
+// counts how often a claim asks it.
+func countingSeatProbe(answer bool, calls *int) func(string) bool {
+	return func(string) bool {
+		*calls++
+		return answer
+	}
+}
+
+// The controller started this seat inside r1-a's verified worktree for r1-a,
+// and work bound to no worktree (r1-u) sits ahead of r1-a in the routed window.
+// The seat must leave r1-u: it would run in r1-a's checkout, on r1-a's branch,
+// while r1-a's demand starts a second seat in the same worktree.
+func TestHookClaimSeatInVerifiedWorktreeLeavesUnboundWork(t *testing.T) {
+	var claimed, reclaimed []string
+	ops := affinityClaimOps(t, []beads.Bead{
+		unboundRoutedCandidate("r1-u"),
+		managedWorktreeCandidate("r1-a", "/wt/r1/r1-a"),
+	}, &claimed, &reclaimed)
+	calls := 0
+	ops.SeatInManagedWorktree = countingSeatProbe(true, &calls)
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("query", "/rigs/r1", affinitySeatOpts("/wt/r1/r1-a"), ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := strings.Join(claimed, ","); got != "r1-a" {
+		t.Fatalf("claim CAS attempted on %q, want only r1-a (the seat's own verified worktree)", got)
+	}
+	if calls != 1 {
+		t.Fatalf("managed-worktree probe ran %d times, want once", calls)
+	}
+}
+
+// The same seat with only unbound work ready drains no_work rather than run
+// that work inside another bead's worktree, and asks the probe once per claim.
+func TestHookClaimSeatInVerifiedWorktreeDrainsRatherThanTakeUnboundWork(t *testing.T) {
+	var claimed, reclaimed []string
+	ops := affinityClaimOps(t, []beads.Bead{
+		unboundRoutedCandidate("r1-v"),
+		unboundRoutedCandidate("r1-w"),
+	}, &claimed, &reclaimed)
+	calls := 0
+	ops.SeatInManagedWorktree = countingSeatProbe(true, &calls)
+	var stdout, stderr bytes.Buffer
+	doHookClaim("query", "/rigs/r1", affinitySeatOpts("/wt/r1/r1-a"), ops, &stdout, &stderr)
+	if len(claimed) != 0 {
+		t.Fatalf("claim CAS attempted on %v, want none", claimed)
+	}
+	if !strings.Contains(stdout.String(), `"action":"drain"`) || !strings.Contains(stdout.String(), `"reason":"no_work"`) {
+		t.Fatalf("result = %s, want a no_work drain", stdout.String())
+	}
+	if calls != 1 {
+		t.Fatalf("managed-worktree probe ran %d times, want once per claim", calls)
+	}
+}
+
+// A seat outside every managed worktree (the pool's own directory, where the
+// controller places seats for unbound work) still takes unbound work.
+func TestHookClaimSeatOutsideManagedWorktreeTakesUnboundWork(t *testing.T) {
+	var claimed, reclaimed []string
+	ops := affinityClaimOps(t, []beads.Bead{unboundRoutedCandidate("r1-x")}, &claimed, &reclaimed)
+	calls := 0
+	ops.SeatInManagedWorktree = countingSeatProbe(false, &calls)
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("query", "/rigs/r1", affinitySeatOpts("/rigs/r1/.gc/slots/dev-3"), ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := strings.Join(claimed, ","); got != "r1-x" {
+		t.Fatalf("claim CAS attempted on %q, want r1-x", got)
+	}
+	if calls != 1 {
+		t.Fatalf("managed-worktree probe ran %d times, want once", calls)
+	}
+}
+
+// The probe spawns git, so a claim asks it only when it reaches a candidate
+// bound to no worktree, and never without a pool-seat directory.
+func TestHookClaimSeatProbeIsNotAskedWithoutUnboundCandidateOrSeatDir(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		seat       string
+		candidates []beads.Bead
+	}{
+		{"every candidate bound", "/wt/r1/r1-b", []beads.Bead{
+			managedWorktreeCandidate("r1-a", "/wt/r1/r1-a"),
+			managedWorktreeCandidate("r1-b", "/wt/r1/r1-b"),
+		}},
+		{"no seat dir", "", []beads.Bead{unboundRoutedCandidate("r1-y")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var claimed, reclaimed []string
+			ops := affinityClaimOps(t, tc.candidates, &claimed, &reclaimed)
+			calls := 0
+			ops.SeatInManagedWorktree = countingSeatProbe(true, &calls)
+			var stdout, stderr bytes.Buffer
+			doHookClaim("query", "/rigs/r1", affinitySeatOpts(tc.seat), ops, &stdout, &stderr)
+			if calls != 0 {
+				t.Fatalf("managed-worktree probe ran %d times, want 0", calls)
+			}
+			if len(claimed) != 1 {
+				t.Fatalf("claim CAS attempted on %v, want exactly one claim", claimed)
+			}
+		})
+	}
+}
+
+// The opt-in stale reclaim must not free unbound work a seat inside a managed
+// worktree would then skip.
+func TestHookClaimSeatInVerifiedWorktreeSkipsStaleUnboundBeforeReclaim(t *testing.T) {
+	stale := unboundRoutedCandidate("r1-s")
+	stale.Assignee = "dead-seat"
+	var claimed, reclaimed []string
+	ops := affinityClaimOps(t, []beads.Bead{stale}, &claimed, &reclaimed)
+	ops.SeatInManagedWorktree = func(string) bool { return true }
+	opts := affinitySeatOpts("/wt/r1/r1-a")
+	opts.AutoReclaimStaleClaims = true
+	var stdout, stderr bytes.Buffer
+	doHookClaim("query", "/rigs/r1", opts, ops, &stdout, &stderr)
+	if len(reclaimed) != 0 || len(claimed) != 0 {
+		t.Fatalf("reclaim on %v, claim on %v; want neither for unbound work from a seat inside a managed worktree", reclaimed, claimed)
+	}
+}
+
+// ensureAffinityWorktree creates a managed worktree with worktree.Ensure, the
+// way the controller does before placing a pool seat in it, and returns the
+// main checkout, the base ref, and the worktree path.
+func ensureAffinityWorktree(t *testing.T) (string, string, string) {
+	t.Helper()
+	repo, base := worktreeTestRepo(t)
+	root := t.TempDir()
+	managed := filepath.Join(root, "gc-a")
+	if _, err := worktree.Ensure(worktree.Spec{
+		RepoDir: repo, Root: root, Path: managed, Branch: "work/gc-a", Base: base,
+		BeadID: "gc-a", StoreRef: "rig:r1", Creator: "provisioner",
+		Owner: "provisioner", Generation: "1", Lifecycle: worktree.LifecycleActive,
+	}); err != nil {
+		t.Fatalf("worktree.Ensure: %v", err)
+	}
+	return repo, base, managed
+}
+
+// The default probe answers true only for a directory whose git dir holds the
+// provenance a completed Ensure published; anything else leaves unbound work
+// claimable.
+func TestHookClaimSeatInManagedWorktreeReadsEnsureProvenance(t *testing.T) {
+	repo, base, managed := ensureAffinityWorktree(t)
+	plain := filepath.Join(t.TempDir(), "plain-linked")
+	testutil.RunGit(t, repo, "worktree", "add", "-b", "plain", plain, base)
+	for _, tc := range []struct {
+		name, dir string
+		want      bool
+	}{
+		{"worktree Ensure created", managed, true},
+		{"main checkout", repo, false},
+		{"linked worktree with no provenance", plain, false},
+		{"not a repository", t.TempDir(), false},
+		{"missing directory", filepath.Join(t.TempDir(), "absent"), false},
+		{"empty", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hookClaimSeatInManagedWorktree(tc.dir); got != tc.want {
+				t.Fatalf("hookClaimSeatInManagedWorktree(%q) = %v, want %v", tc.dir, got, tc.want)
+			}
+		})
+	}
+}
+
+// `gc hook --claim` from a pool seat whose row places it in a real managed
+// worktree leaves the only ready work, bound to no worktree, to a seat in the
+// pool's own directory and drains no_work. This drives the default probe and
+// the PoolSeatWorkDir wiring end to end.
+func TestHookClaimCommandSeatInManagedWorktreeLeavesUnboundWork(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	_, _, managed := ensureAffinityWorktree(t)
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unbound := unboundRoutedCandidate("r1-z")
+	unbound.Metadata["gc.routed_to"] = "dev"
+	candidates, err := json.Marshal([]beads.Bead{unbound})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidatesPath := filepath.Join(cityDir, "candidates.json")
+	if err := os.WriteFile(candidatesPath, candidates, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "dev"
+scope = "city"
+max_active_sessions = 3
+work_query = "cat '` + candidatesPath + `'"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	seat, err := store.Create(beads.Bead{
+		Title:  "dev",
+		Type:   session.BeadType,
+		Labels: []string{"gc:session", "agent:dev"},
+		Metadata: map[string]string{
+			"session_name":                    "dev-2",
+			"template":                        "dev",
+			"pool_slot":                       "2",
+			"state":                           string(session.StateActive),
+			"instance_token":                  "live-token",
+			beadmeta.WorkDirMetadataKey:       managed,
+			beadmeta.LegacyWorkDirMetadataKey: managed,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_TEMPLATE", "dev")
+	t.Setenv("GC_ALIAS", "dev-2")
+	t.Setenv("GC_AGENT", "dev-2")
+	t.Setenv("GC_SESSION_ID", seat.ID)
+	t.Setenv("GC_SESSION_NAME", "dev-2")
+	t.Setenv("GC_SESSION_ORIGIN", "ephemeral")
+	t.Setenv("GC_INSTANCE_TOKEN", "live-token")
+
+	var stdout, stderr bytes.Buffer
+	_ = cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("stdout is not a JSON claim result: %v\n%s; stderr=%s", err, stdout.String(), stderr.String())
+	}
+	if result.Action != "drain" || result.Reason != "no_work" {
+		t.Fatalf("result = %+v, want a no_work drain: the seat in a managed worktree must leave unbound work to a seat in the pool's own directory; stderr=%s", result, stderr.String())
 	}
 }
