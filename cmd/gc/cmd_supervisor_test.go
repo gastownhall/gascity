@@ -5516,14 +5516,220 @@ func TestStopManagedCityPreservingSessionsSkipsBeadsProviderShutdown(t *testing.
 	}
 }
 
+// preserveModeShutdownMessage is printed by CityRuntime.shutdown only after
+// its workspace services have finished closing.
+const preserveModeShutdownMessage = "Preserving agent sessions for supervisor re-adoption."
+
+// closeDoneOnPreserveMessageWriter is the CityRuntime stdout for the
+// preserve-mode shutdown tests. The preserve-mode message is the last thing
+// shutdown prints, after svc.Close has returned, which is the point where a
+// real city goroutine would return and close mc.done. Closing done there ends
+// the stop call's tail wait on the shutdown actually completing rather than on
+// a wall-clock deadline, and the lock makes the captured text safe to read
+// while an abandoned shutdown goroutine is still writing.
+type closeDoneOnPreserveMessageWriter struct {
+	lockedBuffer
+	done chan struct{}
+	once sync.Once
+}
+
+func (w *closeDoneOnPreserveMessageWriter) Write(p []byte) (int, error) {
+	n, err := w.lockedBuffer.Write(p)
+	if strings.Contains(w.String(), preserveModeShutdownMessage) {
+		w.once.Do(func() { close(w.done) })
+	}
+	return n, err
+}
+
+// gatedCloseService is a workspace service whose Close parks on a gate the
+// test controls. It holds the service in "stopping" for exactly as long as a
+// test needs, so the test rendezvouses with the shutdown lifecycle instead of
+// racing a real process's exit time.
+type gatedCloseService struct {
+	closeEntered chan struct{}
+	releaseClose chan struct{}
+	enterOnce    sync.Once
+}
+
+func newGatedCloseService() *gatedCloseService {
+	return &gatedCloseService{
+		closeEntered: make(chan struct{}),
+		releaseClose: make(chan struct{}),
+	}
+}
+
+func (s *gatedCloseService) Status() workspacesvc.Status {
+	return workspacesvc.Status{State: "ready", LocalState: "ready"}
+}
+
+func (s *gatedCloseService) HandleHTTP(http.ResponseWriter, *http.Request, string) bool {
+	return false
+}
+
+func (s *gatedCloseService) Tick(context.Context, time.Time) {}
+
+func (s *gatedCloseService) Close() error {
+	s.enterOnce.Do(func() { close(s.closeEntered) })
+	<-s.releaseClose
+	return nil
+}
+
+// gatedCloseServiceConfig registers svc as the workflow contract named after
+// the test and returns the service config that selects it. The workspacesvc
+// registry has no unregister, so the entry stays for the life of the test
+// binary; the contract name is unique to the test and nothing else selects it.
+func gatedCloseServiceConfig(t *testing.T, svc *gatedCloseService) config.Service {
+	t.Helper()
+	contract := "cmd-gc-test.gated-close." + t.Name()
+	workspacesvc.RegisterWorkflowContract(contract, func(workspacesvc.RuntimeContext, config.Service) (workspacesvc.Instance, error) {
+		return svc, nil
+	})
+	return config.Service{
+		Name:     "bridge",
+		Kind:     "workflow",
+		Workflow: config.ServiceWorkflowConfig{Contract: contract},
+	}
+}
+
+// newPreserveShutdownCity builds a managedCity whose runtime owns one workspace
+// service and whose city goroutine never exits on its own, so the stop call has
+// to force the runtime shutdown after shutdownTimeout. The caller owns done.
+func newPreserveShutdownCity(t *testing.T, shutdownTimeout string, svc config.Service, stdout io.Writer, done chan struct{}) *managedCity {
+	t.Helper()
+	cityPath := t.TempDir()
+	cr := &CityRuntime{
+		cityPath: cityPath,
+		cityName: "bright-lights",
+		cfg: &config.City{
+			Daemon:   config.DaemonConfig{ShutdownTimeout: shutdownTimeout},
+			Services: []config.Service{svc},
+		},
+		sp:     runtime.NewFake(),
+		rec:    events.Discard,
+		stdout: stdout,
+		stderr: io.Discard,
+	}
+	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
+	if err := cr.svc.Reload(); err != nil {
+		t.Fatalf("service Reload: %v", err)
+	}
+	if status := requireServiceStatus(t, cr, svc.Name); status.LocalState != "ready" {
+		t.Fatalf("service %s local_state = %q, want ready; status=%#v", svc.Name, status.LocalState, status)
+	}
+	return &managedCity{
+		name:   "bright-lights",
+		cancel: func() {},
+		done:   done,
+		cr:     cr,
+	}
+}
+
+func requireServiceStatus(t *testing.T, cr *CityRuntime, name string) workspacesvc.Status {
+	t.Helper()
+	status, ok := cr.svc.Get(name)
+	if !ok {
+		t.Fatalf("service %s missing from runtime service manager", name)
+	}
+	return status
+}
+
+// The stop call spends its whole grace period before forcing the runtime
+// shutdown (mc.done only closes once the forced shutdown finishes), so the
+// forced budget of 5x this timeout is spent entirely on the wait under test.
+// The gate is released only after the test has seen the service stopping and
+// the stop call still waiting, and the stop call ends when shutdown prints its
+// final message, so no assertion depends on how long Close takes.
 func TestStopManagedCityPreservingSessionsWaitsForRuntimeShutdownOnTimeout(t *testing.T) {
+	gate := newGatedCloseService()
+	done := make(chan struct{})
+	stdout := &closeDoneOnPreserveMessageWriter{done: done}
+	var stderr lockedBuffer
+	mc := newPreserveShutdownCity(t, "500ms", gatedCloseServiceConfig(t, gate), stdout, done)
+
+	stopErr := make(chan error, 1)
+	go func() { stopErr <- stopManagedCityPreservingSessions(mc, mc.cr.cityPath, &stderr) }()
+
+	select {
+	case <-gate.closeEntered:
+	case err := <-stopErr:
+		t.Fatalf("stop returned before the forced runtime shutdown closed the service; err=%v stderr=%q", err, stderr.String())
+	case <-time.After(hangBudget):
+		t.Fatalf("forced runtime shutdown did not reach service Close within the hang budget (%s)", hangBudget)
+	}
+	if status := requireServiceStatus(t, mc.cr, "bridge"); status.LocalState != "stopping" {
+		t.Fatalf("service bridge local_state = %q while Close is in flight, want stopping; status=%#v", status.LocalState, status)
+	}
+	select {
+	case err := <-stopErr:
+		t.Fatalf("stop returned while the service Close was still in flight; err=%v", err)
+	default:
+	}
+
+	close(gate.releaseClose)
+	select {
+	case err := <-stopErr:
+		if err != nil {
+			t.Fatalf("stopManagedCityPreservingSessions error = %v, want nil once the forced shutdown finished", err)
+		}
+	case <-time.After(hangBudget):
+		t.Fatalf("stop did not return within the hang budget (%s) after the service Close finished", hangBudget)
+	}
+	if status := requireServiceStatus(t, mc.cr, "bridge"); status.LocalState != "stopped" {
+		t.Fatalf("service bridge local_state = %q, want stopped after preserve-mode shutdown wait; status=%#v", status.LocalState, status)
+	}
+	if want := "did not exit within 500ms after preserve-mode cancel"; !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stderr = %q, want it to report the grace period expiring (%q)", stderr.String(), want)
+	}
+	if !strings.Contains(stdout.String(), preserveModeShutdownMessage) {
+		t.Fatalf("runtime stdout = %q, want preserve-mode shutdown message", stdout.String())
+	}
+}
+
+// A service Close that never returns must not turn the stop call into an
+// unbounded wait: the call gives up at the forced-stop budget with a timeout
+// error and leaves the service stopping. Close is gated for the whole call and
+// released only by cleanup, so nothing here depends on timing beyond the call
+// returning at all.
+func TestStopManagedCityPreservingSessionsBoundsRuntimeShutdownWait(t *testing.T) {
+	gate := newGatedCloseService()
+	t.Cleanup(func() { close(gate.releaseClose) })
+	done := make(chan struct{})
+	mc := newPreserveShutdownCity(t, "20ms", gatedCloseServiceConfig(t, gate), io.Discard, done)
+
+	stopErr := make(chan error, 1)
+	go func() { stopErr <- stopManagedCityPreservingSessions(mc, mc.cr.cityPath, io.Discard) }()
+
+	select {
+	case err := <-stopErr:
+		if err == nil {
+			t.Fatal("stopManagedCityPreservingSessions error = nil, want timeout error while service Close is wedged")
+		}
+	case <-time.After(hangBudget):
+		t.Fatalf("stop did not give up within the hang budget (%s); the runtime shutdown wait is unbounded", hangBudget)
+	}
+	select {
+	case <-gate.closeEntered:
+	case <-time.After(hangBudget):
+		t.Fatalf("forced runtime shutdown did not reach service Close within the hang budget (%s)", hangBudget)
+	}
+	if status := requireServiceStatus(t, mc.cr, "bridge"); status.LocalState != "stopping" {
+		t.Fatalf("service bridge local_state = %q while Close is wedged, want stopping; status=%#v", status.LocalState, status)
+	}
+}
+
+// Real-process composition proof: the same stop path against an actual
+// proxy_process service. The forced-stop budget is 5x the shutdown timeout and
+// a proxy process Close allows 2s (proxyProcessShutdownWait) before SIGKILL, so
+// a 1s timeout gives the process 5s to go away, enough for the slowest Close
+// under scheduler load. The stop call ends when shutdown finishes, so the budget
+// is headroom, not a wait.
+func TestStopManagedCityPreservingSessionsStopsProxyProcessServiceOnTimeout(t *testing.T) {
 	if goruntime.GOOS != "linux" {
 		t.Skip("proxy process service shutdown uses process groups on linux")
 	}
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not in PATH")
 	}
-	cityPath := t.TempDir()
 	serviceScript := filepath.Join(t.TempDir(), "service.sh")
 	if err := os.WriteFile(serviceScript, []byte(`#!/usr/bin/env python3
 import os
@@ -5550,57 +5756,36 @@ while True:
 `), 0o755); err != nil {
 		t.Fatalf("WriteFile(service script): %v", err)
 	}
-	var runtimeStdout bytes.Buffer
-	cr := &CityRuntime{
-		cityPath: cityPath,
-		cityName: "bright-lights",
-		cfg: &config.City{
-			Daemon: config.DaemonConfig{ShutdownTimeout: "20ms"},
-			Services: []config.Service{{
-				Name: "bridge",
-				Kind: "proxy_process",
-				Process: config.ServiceProcessConfig{
-					Command: []string{serviceScript},
-				},
-			}},
+	done := make(chan struct{})
+	stdout := &closeDoneOnPreserveMessageWriter{done: done}
+	var stderr lockedBuffer
+	mc := newPreserveShutdownCity(t, "1s", config.Service{
+		Name: "bridge",
+		Kind: "proxy_process",
+		Process: config.ServiceProcessConfig{
+			Command: []string{serviceScript},
 		},
-		sp:     runtime.NewFake(),
-		rec:    events.Discard,
-		stdout: &runtimeStdout,
-		stderr: io.Discard,
-	}
-	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
-	if err := cr.svc.Reload(); err != nil {
-		t.Fatalf("service Reload: %v", err)
-	}
-	status, ok := cr.svc.Get("bridge")
-	if !ok {
-		t.Fatal("service bridge missing after Reload")
-	}
-	if status.LocalState != "ready" {
-		t.Fatalf("service bridge local_state = %q, want ready; status=%#v", status.LocalState, status)
-	}
+	}, stdout, done)
 
-	mc := &managedCity{
-		name:   "bright-lights",
-		cancel: func() {},
-		done:   make(chan struct{}),
-		cr:     cr,
-	}
+	stopErr := make(chan error, 1)
+	go func() { stopErr <- stopManagedCityPreservingSessions(mc, mc.cr.cityPath, &stderr) }()
 
-	err := stopManagedCityPreservingSessions(mc, cityPath, io.Discard)
-	if err == nil {
-		t.Fatal("stopManagedCityPreservingSessions error = nil, want timeout error")
+	select {
+	case err := <-stopErr:
+		if err != nil {
+			t.Fatalf("stopManagedCityPreservingSessions error = %v, want nil once the forced shutdown finished; stderr=%q", err, stderr.String())
+		}
+	case <-time.After(hangBudget):
+		t.Fatalf("stop did not return within the hang budget (%s)", hangBudget)
 	}
-	status, ok = cr.svc.Get("bridge")
-	if !ok {
-		t.Fatal("service bridge missing after preserve-mode shutdown wait")
-	}
-	if status.LocalState != "stopped" {
+	if status := requireServiceStatus(t, mc.cr, "bridge"); status.LocalState != "stopped" {
 		t.Fatalf("service bridge local_state = %q, want stopped after preserve-mode shutdown wait; status=%#v", status.LocalState, status)
 	}
-	if !strings.Contains(runtimeStdout.String(), "Preserving agent sessions for supervisor re-adoption.") {
-		t.Fatalf("runtime stdout = %q, want preserve-mode shutdown message", runtimeStdout.String())
+	if want := "did not exit within 1s after preserve-mode cancel"; !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stderr = %q, want it to report the grace period expiring (%q)", stderr.String(), want)
+	}
+	if !strings.Contains(stdout.String(), preserveModeShutdownMessage) {
+		t.Fatalf("runtime stdout = %q, want preserve-mode shutdown message", stdout.String())
 	}
 }
 
