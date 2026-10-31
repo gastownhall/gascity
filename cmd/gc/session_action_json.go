@@ -10,6 +10,7 @@ type sessionActionResult struct {
 	SessionID           string `json:"session_id,omitempty"`
 	State               string `json:"state,omitempty"`
 	Mode                string `json:"mode,omitempty"`
+	RuntimeStop         string `json:"runtime_stop,omitempty"`
 	Title               string `json:"title,omitempty"`
 	Identity            string `json:"identity,omitempty"`
 	Before              string `json:"before,omitempty"`
