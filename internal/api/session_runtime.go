@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -392,6 +393,8 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, 
 	if command, err := s.resolvedSessionRuntimeCommand(resolved, transport, info.Command, metadata); err == nil {
 		resolvedInfo.Command = command
 	} else {
+		// The error may contain raw option values; keep the warning secret-safe.
+		log.Printf("WARNING: session %q: provider launch command resolution failed; falling back without applying option overrides", info.ID)
 		resolvedInfo.Command = fallbackSessionRuntimeCommand(resolved, transport, info.Command, info.Provider)
 	}
 	resumeCommand := resolved.ResumeCommand
@@ -515,6 +518,8 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 	}
 	command, err := s.resolvedSessionRuntimeCommand(resolved, transport, info.Command, metadata)
 	if err != nil {
+		// The error may contain raw option values; keep the warning secret-safe.
+		log.Printf("WARNING: session %q: provider launch command resolution failed; falling back without applying option overrides", info.ID)
 		command = fallbackSessionRuntimeCommand(resolved, transport, info.Command, info.Provider)
 	}
 	resumeCommand := firstNonEmptyString(resolved.ResumeCommand, info.ResumeCommand)
