@@ -278,6 +278,14 @@ func releaseOrphanedPoolAssignments(
 		if wb.Status != "open" && wb.Status != "in_progress" {
 			continue
 		}
+		// A bead carrying bd's human label waits on a person. Route-scoped
+		// dispatch serves it to no worker (config.PoolDemandServeRulesForQuery),
+		// so no pool lane takes it back, and its holder may be a person, whom
+		// no session answers to: a missing session is no evidence that the
+		// claim is dead. Releasing it would only wipe the claim.
+		if beadmeta.HasHumanLabel(wb.Labels) {
+			continue
+		}
 		workStoreRef := ""
 		if storeRefAware {
 			workStoreRef = assignedWorkStoreRefs[i]
