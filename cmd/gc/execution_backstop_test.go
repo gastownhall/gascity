@@ -1621,3 +1621,72 @@ func TestExecutionBackstopReproLastNudgeGetsItsFullBackoff(t *testing.T) {
 		t.Fatalf("drain requests after the last nudge's backoff = %v, want exactly one for %s", f.drained, f.sessName)
 	}
 }
+
+// TestExecutionBackstopANewClaimStartsWithoutTheOldLatch (ga-uns4sw): the
+// escalation latch belongs to the claim it escalated. A seat that releases an
+// escalated claim and takes another in the same incarnation — close, then
+// `gc hook --claim`, between two passes — must not have the new claim's
+// escalation silenced by the old claim's latch for up to
+// executionStalledLatchRetryAfter.
+func TestExecutionBackstopANewClaimStartsWithoutTheOldLatch(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.setInstanceToken(t, "incarnation-1")
+	driveToEscalation(t, f)
+
+	// The seat releases claim A and takes claim B, same incarnation.
+	closed := "closed"
+	if err := f.store.Update(f.work.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("closing claim A: %v", err)
+	}
+	workB, err := f.store.Create(beads.Bead{
+		Title: "second claimed step",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey:  "root-1",
+			beadmeta.StepIDMetadataKey:      "step-2",
+			beadmeta.SessionIDMetadataKey:   f.session.ID,
+			beadmeta.SessionNameMetadataKey: f.sessName,
+		},
+	})
+	if err != nil {
+		t.Fatalf("seeding claim B: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := f.store.Update(workB.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &f.sessName}); err != nil {
+		t.Fatalf("claiming B: %v", err)
+	}
+
+	f.now = f.now.Add(2 * time.Minute)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != workB.ID {
+		t.Fatalf("marker work after the fresh window = %q, want claim B %s", got, workB.ID)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "0" {
+		t.Fatalf("marker count after the fresh window = %q, want 0", got)
+	}
+	for _, key := range []string{executionClaimNudgeStalledKey, executionClaimNudgeStalledTokenKey} {
+		if got := f.sessionMeta(t, key); got != "" {
+			t.Fatalf("%s after the fresh window = %q, want claim A's latch cleared", key, got)
+		}
+	}
+
+	// B, left quiet and unstarted, gets its own grace, three nudges and
+	// backoff before a second escalation, well inside A's 30m latch window.
+	nudgesBefore := f.nudgeCount()
+	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	if got := f.nudgeCount() - nudgesBefore; got != idleClaimNudgeMaxAttempts {
+		t.Fatalf("claim B's nudges = %d, want its own %d; stdout=%s", got, idleClaimNudgeMaxAttempts, f.stdout.String())
+	}
+	f.now = f.now.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 2 || f.stalledEvents() != 2 {
+		t.Fatalf("after claim B's own budget: drains %v, stalled events %d; want a second escalation; stdout=%s",
+			f.drained, f.stalledEvents(), f.stdout.String())
+	}
+}

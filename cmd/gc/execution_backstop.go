@@ -651,7 +651,20 @@ func (p poolExecutionBackstop) markStarted(s *beads.Bead, beadID string) bool {
 	return true
 }
 
+// observe opens a new window: the escalation latch of the claim it replaces
+// (or of an earlier incarnation) covered that window's escalation, not this
+// one's, so it is cleared first — the pool-claim sibling's shape
+// (clearIdleClaimLatch). The clear fails closed: a window whose latch could
+// not be wiped is not opened, so the next pass observes again.
 func (p poolExecutionBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer) {
+	if s.Metadata[executionClaimNudgeStalledKey] != "" || s.Metadata[executionClaimNudgeStalledTokenKey] != "" {
+		if !writeSessionMetadata(store, s, map[string]string{
+			executionClaimNudgeStalledKey:      "",
+			executionClaimNudgeStalledTokenKey: "",
+		}, executionClaimNudgeLabel, stdout) {
+			return
+		}
+	}
 	writeExecutionClaimMarker(store, s, target, 0, now, stdout)
 }
 
