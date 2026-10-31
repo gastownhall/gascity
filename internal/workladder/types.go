@@ -205,8 +205,9 @@ type Policy struct {
 	// ProviderFreshGap: no fresh restart within this of another seat's on
 	// the same provider (Observation.ProviderFreshAt).
 	ProviderFreshGap time.Duration
-	// RateLimitEvidenceMaxAge: an open episode whose acting passes read no
-	// answered refusal for this long closes stale.
+	// RateLimitEvidenceMaxAge: an open episode with no new answered
+	// refusal for this long (by the refusal's own end time) closes stale,
+	// and an older refusal answers nothing.
 	RateLimitEvidenceMaxAge time.Duration
 }
 
@@ -308,9 +309,9 @@ type Record struct {
 	// whatever the switch says by then.
 	RecycledGen int64
 	// Delivered is when the seat last took a nudge, about any of its work,
-	// in this generation: a direct delivery that returned, or a notice the
-	// caller settled delivered (the start of its delivering attempt). Zero
-	// until one lands; a new generation clears it.
+	// in this generation: the start of the attempt that delivered it,
+	// direct or a notice the caller settled delivered. Zero until one
+	// lands; a new generation clears it.
 	Delivered time.Time
 	// RateLimit is the seat's rate-limit state: its episode, if one is
 	// open, and its last fresh restart. The zero value is neither. A new

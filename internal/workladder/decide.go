@@ -419,7 +419,8 @@ func NudgeRefused(r Record, key ClaimKey, attempt int, now time.Time) (out Recor
 }
 
 // NudgeDelivered is r after a direct nudge about key reached the seat at at
-// (the caller's clock right after the delivery returned), in generation gen:
+// (the caller's clock at the delivery attempt's start: a refusal answering
+// the nudge may end before the delivery returns), in generation gen:
 // the entry's refusals end, and the seat's Delivered moves to at when r is
 // gen's cell and at is newer. A zero at moves nothing. ok is false when
 // nothing changed (no write needed).
