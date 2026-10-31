@@ -2198,6 +2198,7 @@ gc hook [agent] [flags]
 | `--drain-ack` | bool |  | with --claim, acknowledge runtime drain when no work is available |
 | `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
 | `--json` | bool |  | emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal) |
+| `--worktree` | bool |  | with --claim, create or verify a gc-owned git worktree for the claimed work |
 
 | Subcommand | Description |
 |------------|-------------|
@@ -2240,10 +2241,6 @@ Runs a managed gc hook command in a child process with a hard timeout.
 This protects provider hook callbacks from wedged data-plane commands. The
 child process is the current gc executable, and &lt;gc args...&gt; are passed to it
 verbatim.
-
-On timeout the child is killed and its output is discarded, except output the
-child sealed as complete before the deadline (nudge drain seals the nudges it
-is about to acknowledge), which is still forwarded.
 
 ```
 gc hook run -- <gc args...> [flags]
