@@ -193,7 +193,7 @@ func TestIsReadyCandidate(t *testing.T) {
 // satisfies unless it was explicitly closed as gc.work_outcome=blocked. A
 // closed dependency carrying no work_outcome at all (the legacy/pre-ADR-0009
 // case) must still satisfy — that's the backward-compat guarantee.
-func TestReadinessWorkOutcomeDefersToAPassedStep(t *testing.T) {
+func TestReadinessWorkOutcomeIgnoresAFormulaStep(t *testing.T) {
 	tests := []struct {
 		name     string
 		metadata map[string]string
@@ -202,8 +202,12 @@ func TestReadinessWorkOutcomeDefersToAPassedStep(t *testing.T) {
 		{"no metadata", nil, ""},
 		{"work outcome alone", map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
 		{"passed step ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
-		{"failed step keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
-		{"skipped step keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		// A failed step is settled by the members after it (a finalize step, a
+		// ralph or retry, the finalizer), so its blocked work outcome must not
+		// strand them either.
+		{"failed step ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		{"skipped step ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		{"step with no outcome ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
 		{"passed step with shipped outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}, ""},
 		// A plain work bead (no gc.step_ref) is not a control-plane step: the
 		// core mol-do-work formula stamps gc.outcome=pass on the work bead
@@ -217,9 +221,27 @@ func TestReadinessWorkOutcomeDefersToAPassedStep(t *testing.T) {
 				t.Fatalf("ReadinessWorkOutcome(%v) = %q, want %q", tt.metadata, got, tt.want)
 			}
 			if tt.want == "" && !DependencySatisfied("closed", ReadinessWorkOutcome(tt.metadata)) {
-				t.Fatalf("a closed dependency whose step passed must satisfy its dependents (%v)", tt.metadata)
+				t.Fatalf("a closed formula step dependency must satisfy its dependents (%v)", tt.metadata)
 			}
 		})
+	}
+}
+
+func TestWorkOutcomeGatesDependentExemptsControlBeads(t *testing.T) {
+	for _, kind := range beadmeta.ControlKinds {
+		dependent := Bead{Metadata: map[string]string{beadmeta.KindMetadataKey: kind}}
+		if WorkOutcomeGatesDependent(dependent) {
+			t.Errorf("WorkOutcomeGatesDependent(gc.kind=%s) = true, want false: a control bead settles its workflow from gc.outcome", kind)
+		}
+	}
+	for _, dependent := range []Bead{
+		{},
+		{Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindTask}},
+		{Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}},
+	} {
+		if !WorkOutcomeGatesDependent(dependent) {
+			t.Errorf("WorkOutcomeGatesDependent(%v) = false, want true: a work dependent stays withheld by a blocked work outcome", dependent.Metadata)
+		}
 	}
 }
 

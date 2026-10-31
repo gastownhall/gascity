@@ -676,12 +676,26 @@ func abortScopeWith(store beads.Store, snapshot scopeSnapshot, opts ProcessOptio
 }
 
 // closedWithHardFailure reports whether a bead closed with gc.outcome=fail and
-// an explicit gc.failure_class=hard. An empty or transient class is not hard:
-// such a failure stays repairable by the next attempt or iteration.
+// either an explicit gc.failure_class=hard or gc.work_outcome=blocked. An
+// empty or transient class is not hard: such a failure stays repairable by the
+// next attempt or iteration.
 func closedWithHardFailure(bead beads.Bead) bool {
-	return bead.Status == "closed" &&
-		strings.TrimSpace(bead.Metadata[beadmeta.OutcomeMetadataKey]) == beadmeta.OutcomeFail &&
-		strings.TrimSpace(bead.Metadata[beadmeta.FailureClassMetadataKey]) == beadmeta.FailureClassHard
+	if bead.Status != "closed" || strings.TrimSpace(bead.Metadata[beadmeta.OutcomeMetadataKey]) != beadmeta.OutcomeFail {
+		return false
+	}
+	return strings.TrimSpace(bead.Metadata[beadmeta.FailureClassMetadataKey]) == beadmeta.FailureClassHard ||
+		failedWithBlockedWorkOutcome(bead)
+}
+
+// failedWithBlockedWorkOutcome reports whether a bead closed gc.outcome=fail
+// with gc.work_outcome=blocked. The worker that wrote it asked that no further
+// work start on the bead, so ralph and retry read it as terminal whatever its
+// gc.failure_class says, rather than cloning the step again. Readiness lets
+// their controls run behind such a step (beads.WorkOutcomeGatesDependent) so
+// that they can settle the workflow failed.
+func failedWithBlockedWorkOutcome(bead beads.Bead) bool {
+	return strings.TrimSpace(bead.Metadata[beadmeta.OutcomeMetadataKey]) == beadmeta.OutcomeFail &&
+		strings.TrimSpace(bead.Metadata[beadmeta.WorkOutcomeMetadataKey]) == beadmeta.WorkOutcomeBlocked
 }
 
 // firstHardFailedMember returns the scope work member, in bead-ID order, that

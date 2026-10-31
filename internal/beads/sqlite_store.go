@@ -1708,6 +1708,12 @@ func (s *SQLiteStore) readyRows(ctx context.Context, q ReadyQuery) ([]Bead, erro
 	if err := contextErr(); err != nil {
 		return nil, err
 	}
+	result, err = FilterReadyByWorkflowRoot(result, now, func(ids []string) ([]Bead, error) {
+		return s.List(ListQuery{IDs: ids, TierMode: TierBoth})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing sqlite ready beads: %w", err)
+	}
 	// Cut the Limit prefix only after the canonical sort, so a bounded read
 	// takes the same rows a cache-served read over this store takes (#3208).
 	if err := sortBeadsReadyOrderContext(ctx, result); err != nil {
@@ -1757,11 +1763,16 @@ func sqliteReadyCandidateSQL(q ReadyQuery, projection, blocking string) (string,
 // sqliteReadyBlockerExists is SQLite's one statement of "blocked": an EXISTS
 // over issueCol's blocks/waits-for/conditional-blocks edges whose target is not
 // closed, or closed with gc.work_outcome=blocked unless it is a formula step
-// (gc.step_ref) that passed (gc.outcome=pass). A target missing from this
-// store (deleted, or another store's id) has no status and so blocks. Ready
-// negates it and enrichReadyProjectionForCache selects it, so the store and a
-// cache over it cannot disagree about which rows are blocked.
+// (gc.step_ref, ReadinessWorkOutcome) or issueCol is a workflow control bead
+// (WorkOutcomeGatesDependent). A target missing from this store (deleted,
+// or another store's id) has no status and so blocks. Ready negates it and
+// enrichReadyProjectionForCache selects it, so the store and a cache over it
+// cannot disagree about which rows are blocked.
 func sqliteReadyBlockerExists(issueCol string) string {
+	controlKinds := make([]string, 0, len(beadmeta.ControlKinds))
+	for _, kind := range beadmeta.ControlKinds {
+		controlKinds = append(controlKinds, "'"+kind+"'")
+	}
 	return fmt.Sprintf(`EXISTS (
 			SELECT 1 FROM deps d
 			LEFT JOIN beads blocker ON blocker.id=d.depends_on_id
@@ -1776,23 +1787,21 @@ func sqliteReadyBlockerExists(issueCol string) string {
 			             AND m.meta_key = '%s'
 			             AND m.meta_value = '%s'
 			         )
-			         AND NOT (
-			           EXISTS (
-			             SELECT 1 FROM metadata o
-			             WHERE o.bead_id = blocker.id
-			               AND o.meta_key = '%s'
-			               AND o.meta_value = '%s'
-			           )
-			           AND EXISTS (
-			             SELECT 1 FROM metadata r
-			             WHERE r.bead_id = blocker.id
-			               AND r.meta_key = '%s'
-			               AND r.meta_value <> ''
-			           )
+			         AND NOT EXISTS (
+			           SELECT 1 FROM metadata k
+			           WHERE k.bead_id = d.issue_id
+			             AND k.meta_key = '%s'
+			             AND k.meta_value IN (%s)
+			         )
+			         AND NOT EXISTS (
+			           SELECT 1 FROM metadata r
+			           WHERE r.bead_id = blocker.id
+			             AND r.meta_key = '%s'
+			             AND r.meta_value <> ''
 			         )
 			       )
 			  )
-		  )`, issueCol, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked, beadmeta.OutcomeMetadataKey, beadmeta.OutcomePass, beadmeta.StepRefMetadataKey)
+		  )`, issueCol, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked, beadmeta.KindMetadataKey, strings.Join(controlKinds, ","), beadmeta.StepRefMetadataKey)
 }
 
 // Children returns all non-closed beads whose ParentID matches the given ID.

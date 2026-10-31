@@ -169,16 +169,17 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 		return ControlResult{Processed: true, Action: "pass"}, nil
 	}
 
-	// A hard-class subject failure is terminal: stop the loop immediately in a
-	// single attempt instead of cloning further attempts (the treadmill that
+	// A hard subject failure is terminal: stop the loop immediately in a single
+	// attempt instead of cloning further attempts (the treadmill that
 	// abort_scope-killed molecules). This mirrors the retry dispatcher's explicit
 	// hard disposition (see processRetryEval in retry.go) but deliberately
 	// diverges on the empty class: classifyRetryAttempt maps an empty
 	// gc.failure_class to hard (retry.go: `case beadmeta.FailureClassHard, "":`),
 	// whereas this loop keeps an empty or transient class repairable and clones up
-	// to gc.max_attempts below. Only an explicit "hard" class terminates here.
-	if subject.Metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomeFail &&
-		strings.TrimSpace(subject.Metadata[beadmeta.FailureClassMetadataKey]) == beadmeta.FailureClassHard {
+	// to gc.max_attempts below. Only an explicit "hard" class or a blocked work
+	// outcome terminates here (closedWithHardFailure), the same reading the
+	// simple and scoped ralph give an iteration.
+	if closedWithHardFailure(subject) {
 		if err := settleLogicalBead(store, logicalID, map[string]string{
 			beadmeta.OutcomeMetadataKey:          beadmeta.OutcomeFail,
 			beadmeta.FailedAttemptMetadataKey:    strconv.Itoa(attempt),

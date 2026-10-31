@@ -1005,6 +1005,7 @@ func (c *CachingStore) readyFromCache(query ReadyQuery) ([]Bead, bool) {
 	var (
 		statusByID      map[string]string
 		workOutcomeByID map[string]string
+		holdsByID       map[string]bool
 		depsByID        map[string][]Dep
 		openBeads       []Bead
 		unanswerable    bool
@@ -1021,6 +1022,7 @@ func (c *CachingStore) readyFromCache(query ReadyQuery) ([]Bead, bool) {
 		func(suppressed map[string]struct{}) {
 			statusByID = make(map[string]string, len(c.beads))
 			workOutcomeByID = make(map[string]string, len(c.beads))
+			holdsByID = make(map[string]bool)
 			openBeads = make([]Bead, 0, len(c.beads))
 			now := time.Now().UTC()
 			for _, b := range c.beads {
@@ -1029,6 +1031,9 @@ func (c *CachingStore) readyFromCache(query ReadyQuery) ([]Bead, bool) {
 				}
 				statusByID[b.ID] = b.Status
 				workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
+				if WorkflowRootHolds(b, now) {
+					holdsByID[b.ID] = true
+				}
 				if !IsReadyCandidateForTier(b, now, query.TierMode) {
 					continue
 				}
@@ -1057,7 +1062,7 @@ func (c *CachingStore) readyFromCache(query ReadyQuery) ([]Bead, bool) {
 
 	var result []Bead
 	for _, b := range openBeads {
-		if cachedBeadReady(b, statusByID, workOutcomeByID, depsByID[b.ID]) {
+		if cachedBeadReady(b, statusByID, workOutcomeByID, holdsByID, depsByID[b.ID]) {
 			result = append(result, cloneBead(b))
 		}
 	}
@@ -1109,11 +1114,15 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 
 	statusByID := make(map[string]string, len(c.beads))
 	workOutcomeByID := make(map[string]string, len(c.beads))
+	holdsByID := make(map[string]bool)
 	openBeads := make([]Bead, 0, len(c.beads))
 	now := time.Now().UTC()
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
 		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
+		if WorkflowRootHolds(b, now) {
+			holdsByID[b.ID] = true
+		}
 		if IsReadyCandidateForTier(b, now, c.readTier(TierIssues)) {
 			if c.readyProjectionUnknownLocked(b.ID) {
 				return nil, false
@@ -1135,7 +1144,7 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 		if c.state == cachePartial && !cachedReadyDependencyStatusesKnown(b, statusByID, deps) {
 			return nil, false
 		}
-		if cachedBeadReady(b, statusByID, workOutcomeByID, deps) {
+		if cachedBeadReady(b, statusByID, workOutcomeByID, holdsByID, deps) {
 			result = append(result, cloneBead(b))
 		}
 	}
@@ -1146,6 +1155,14 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 }
 
 func cachedReadyDependencyStatusesKnown(b Bead, statusByID map[string]string, deps []Dep) bool {
+	if root := WorkflowRootID(b); root != "" {
+		// The workflow root's status is read from the cache (cachedBeadReady)
+		// whatever bd projected, so a root outside the snapshot leaves the
+		// verdict unknown.
+		if _, ok := statusByID[root]; !ok {
+			return false
+		}
+	}
 	if b.IsBlocked != nil {
 		// bd's own projection (true or false) is trusted outright and needs
 		// no per-dependency status data to back it up — see cachedBeadReady.
@@ -1174,10 +1191,19 @@ func cachedReadyDependencyStatusesKnown(b Bead, statusByID map[string]string, de
 	return !missing
 }
 
-func cachedBeadReady(b Bead, statusByID, workOutcomeByID map[string]string, deps []Dep) bool {
+func cachedBeadReady(b Bead, statusByID, workOutcomeByID map[string]string, holdsByID map[string]bool, deps []Dep) bool {
+	// A deferred workflow root holds its members whatever bd projected: bd's
+	// IsBlocked does not know gc.root_bead_id (WorkflowRootHolds).
+	if holdsByID[WorkflowRootID(b)] {
+		return false
+	}
+	gated := WorkOutcomeGatesDependent(b)
 	if b.IsBlocked != nil {
 		if *b.IsBlocked {
 			return false
+		}
+		if !gated {
+			return true
 		}
 		// bd's own false verdict already reflects its richer native gating
 		// semantics (e.g. a waits-for gate opened through bd-native state,
@@ -1211,7 +1237,11 @@ func cachedBeadReady(b Bead, statusByID, workOutcomeByID map[string]string, deps
 		if !ok {
 			continue
 		}
-		if !DependencySatisfied(status, workOutcomeByID[dep.DependsOnID]) {
+		workOutcome := ""
+		if gated {
+			workOutcome = workOutcomeByID[dep.DependsOnID]
+		}
+		if !DependencySatisfied(status, workOutcome) {
 			return false
 		}
 	}

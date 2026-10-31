@@ -848,7 +848,7 @@ func IsReadyBlockingDependencyType(t string) bool {
 // open rather than newly stalling dependents it doesn't understand.
 //
 // Callers pass ReadinessWorkOutcome(dep.Metadata), not the raw gc.work_outcome,
-// so a dependency whose control-plane step passed is never vetoed.
+// so a formula step dependency is never vetoed.
 func DependencySatisfied(depStatus, depWorkOutcome string) bool {
 	if depStatus != "closed" {
 		return false
@@ -860,21 +860,104 @@ func DependencySatisfied(depStatus, depWorkOutcome string) bool {
 // closed dependency by. gc.outcome is the control-plane step result that
 // internal/dispatch sequences a workflow on, and gc.work_outcome the worker's
 // work-record disposition (ADR-0009); the two vocabularies are disjoint and can
-// disagree. A step that closed with gc.outcome=pass has already been advanced
-// past by dispatch, so letting gc.work_outcome=blocked veto its dependents
-// strands them: the graph waits on work that readiness never offers to any
-// worker. When the step passed, its work outcome does not gate readiness.
+// disagree. A formula step bead (one carrying gc.step_ref) is sequenced on
+// gc.outcome alone: a step that passed has been advanced past, and a step that
+// failed is settled by the members after it, a finalize step that reports the
+// failure, a ralph or retry that reads a blocked work outcome as a hard
+// failure, the workflow finalizer. Letting gc.work_outcome=blocked veto a
+// step's dependents strands them: the next step, a ralph iteration or a
+// workflow-step alike, is never offered to a worker, so nothing downstream
+// closes and the workflow root stays open. A step's work outcome therefore
+// never gates readiness.
 //
-// The override applies only to formula step beads (those carrying
-// gc.step_ref). A plain work bead can also carry gc.outcome=pass — the core
-// mol-do-work formula stamps it on the work bead it closes, blocked or not —
-// and there gc.outcome is not a dispatch verdict, so its blocked work outcome
-// keeps withholding dependents.
+// A plain work bead (no gc.step_ref) keeps the veto. It can also carry
+// gc.outcome=pass — the core mol-do-work formula stamps it on the work bead it
+// closes, blocked or not — and there gc.outcome is not a dispatch verdict, so
+// its blocked work outcome keeps withholding dependents.
 func ReadinessWorkOutcome(metadata map[string]string) string {
-	if metadata[beadmeta.StepRefMetadataKey] != "" && metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomePass {
+	if metadata[beadmeta.StepRefMetadataKey] != "" {
 		return ""
 	}
 	return metadata[beadmeta.WorkOutcomeMetadataKey]
+}
+
+// WorkOutcomeGatesDependent reports whether a blocking dependency's
+// gc.work_outcome may withhold dependent from Ready. It may not when dependent
+// is a workflow control bead (beadmeta.IsControlKind). A step dependency never
+// gates (ReadinessWorkOutcome); this covers the controls that block on beads
+// that are not steps, such as a drain on the child workflow roots it waits for.
+// A finalizer, drain, fanout or scope check reads its blockers' gc.outcome,
+// starts no further work and settles the workflow, a failure included; a ralph
+// or retry reads a blocked work outcome as a hard failure (dispatch
+// closedWithHardFailure and classifyRetryAttempt). Withheld, the control is
+// never offered to the control dispatcher, and the workflow root stays open
+// with nothing left that can close it.
+func WorkOutcomeGatesDependent(dependent Bead) bool {
+	return !beadmeta.IsControlKind(dependent.Metadata[beadmeta.KindMetadataKey])
+}
+
+// WorkflowRootID returns the workflow root b names in gc.root_bead_id, or ""
+// when it names none or names itself.
+func WorkflowRootID(b Bead) string {
+	root := strings.TrimSpace(b.Metadata[beadmeta.RootBeadIDMetadataKey])
+	if root == b.ID {
+		return ""
+	}
+	return root
+}
+
+// WorkflowRootHolds reports whether root, the workflow root a bead names,
+// holds that bead out of Ready. A deferred root does (IsDeferred), with or
+// without a date: deferring a workflow root holds its steps and controls, so a
+// step whose blockers close is not offered while its root stays deferred.
+// bd's own deferred-parent rule does not cover this: it holds only the
+// parent-child children of a parent deferred to a future date, while a
+// workflow's members name their root in gc.root_bead_id and a hold is usually
+// undated. An undated hold reads as IndefinitelyDeferred on the bd-backed
+// stores, which normalize bd's deferred status on read, and as a stored
+// status="deferred" on the stores that keep the status they are given
+// (MemStore, FileStore, SQLiteStore, exec). A root the store cannot find holds
+// nothing.
+func WorkflowRootHolds(root Bead, now time.Time) bool {
+	return root.Status == "deferred" || IsDeferred(root, now)
+}
+
+// FilterReadyByWorkflowRoot drops the candidates whose workflow root holds
+// them (WorkflowRootHolds). roots returns the beads it can find among the ids
+// it is given; it is called once, and only when some candidate names a root.
+func FilterReadyByWorkflowRoot(candidates []Bead, now time.Time, roots func(ids []string) ([]Bead, error)) ([]Bead, error) {
+	seen := make(map[string]bool)
+	var ids []string
+	for _, c := range candidates {
+		if root := WorkflowRootID(c); root != "" && !seen[root] {
+			seen[root] = true
+			ids = append(ids, root)
+		}
+	}
+	if len(ids) == 0 {
+		return candidates, nil
+	}
+	found, err := roots(ids)
+	if err != nil {
+		return nil, fmt.Errorf("checking workflow roots: %w", err)
+	}
+	held := make(map[string]bool, len(found))
+	for _, r := range found {
+		if WorkflowRootHolds(r, now) {
+			held[r.ID] = true
+		}
+	}
+	if len(held) == 0 {
+		return candidates, nil
+	}
+	result := make([]Bead, 0, len(candidates))
+	for _, c := range candidates {
+		if held[WorkflowRootID(c)] {
+			continue
+		}
+		result = append(result, c)
+	}
+	return result, nil
 }
 
 // IsReadyExcludedType reports whether the bead type is excluded from

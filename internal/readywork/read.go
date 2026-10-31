@@ -450,7 +450,7 @@ func resolveBlockers(ctx context.Context, cs *crossStore, items []beads.Bead, le
 	if len(owners) == 0 || len(items) == 0 {
 		return nil, nil
 	}
-	byLeg := make(map[int][]string)
+	byLeg := make(map[int][]beads.Bead)
 	var legOrder []int
 	for _, item := range items {
 		idx, ok := owners[item.ID]
@@ -460,7 +460,7 @@ func resolveBlockers(ctx context.Context, cs *crossStore, items []beads.Bead, le
 		if _, seen := byLeg[idx]; !seen {
 			legOrder = append(legOrder, idx)
 		}
-		byLeg[idx] = append(byLeg[idx], item.ID)
+		byLeg[idx] = append(byLeg[idx], item)
 	}
 	perLeg := make([]legBlockers, len(legOrder))
 	fanout.Bounded(len(legOrder), LegFanOut, func(i int) {
@@ -499,26 +499,27 @@ type legBlockers struct {
 // from every leg, one call each, judged from every copy as the ready arm
 // judges it, and reported with the status of the copy that holds it and a
 // reason. A target no store holds is reported as BlockerUnresolved, and one
-// whose every unreleased copy is closed blocked as BlockerClosedBlocked; every
-// blocked_by reader treats both as gated: such a blocker blocks its row, and
-// never fails the tier. An "external:<rig>:<capability>" target names no bead
-// and is omitted, as bd omits it. A blocker READ that fails still fails the
-// answer.
-func readLegBlockers(ctx context.Context, cs *crossStore, legs []Leg, own int, ids []string) legBlockers {
+// whose every unreleased copy is closed blocked as BlockerClosedBlocked (closed
+// to a workflow control bead, which such a blocker releases); every blocked_by
+// reader treats both as gated: such a blocker blocks its row, and never fails
+// the tier. An "external:<rig>:<capability>" target names no bead and is
+// omitted, as bd omits it. A blocker READ that fails still fails the answer.
+func readLegBlockers(ctx context.Context, cs *crossStore, legs []Leg, own int, rows []beads.Bead) legBlockers {
 	leg := legs[own]
-	out := legBlockers{blockers: make(map[string][]ReadyBeadBlocker, len(ids)), errs: make(map[string]error)}
+	out := legBlockers{blockers: make(map[string][]ReadyBeadBlocker, len(rows)), errs: make(map[string]error)}
 	live := beads.HandlesFor(leg.Store).Live
-	deps := make([][]beads.Dep, len(ids))
-	depErrs := make([]error, len(ids))
-	fanout.Bounded(len(ids), LegFanOut, func(i int) {
+	deps := make([][]beads.Dep, len(rows))
+	depErrs := make([]error, len(rows))
+	fanout.Bounded(len(rows), LegFanOut, func(i int) {
 		if depErrs[i] = ctx.Err(); depErrs[i] != nil {
 			return
 		}
-		deps[i], depErrs[i] = live.DepList(ids[i], "down")
+		deps[i], depErrs[i] = live.DepList(rows[i].ID, "down")
 	})
 	var targets []string
 	seen := make(map[string]bool)
-	for i, id := range ids {
+	for i, row := range rows {
+		id := row.ID
 		if depErrs[i] != nil {
 			out.errs[id] = fmt.Errorf("%s store: listing dependencies of %q: %w", leg.Label, id, depErrs[i])
 			continue
@@ -532,7 +533,8 @@ func readLegBlockers(ctx context.Context, cs *crossStore, legs []Leg, own int, i
 		}
 	}
 	verdicts, verr := blockerStatuses(ctx, cs, legs, own, targets)
-	for i, id := range ids {
+	for i, row := range rows {
+		id := row.ID
 		if depErrs[i] != nil {
 			continue
 		}
@@ -552,6 +554,7 @@ func readLegBlockers(ctx context.Context, cs *crossStore, legs []Leg, own int, i
 				// ref, or on a city with no binding one bd never blocks on.
 				continue
 			}
+			v = v.forDependent(dep.DependsOnID, row)
 			blockers = append(blockers, ReadyBeadBlocker{ID: dep.DependsOnID, Status: v.status, Reason: v.reason})
 		}
 		if _, failed := out.errs[id]; !failed {

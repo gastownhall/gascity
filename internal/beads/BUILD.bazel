@@ -78,6 +78,7 @@ go_test(
         "bdstore_tier_pair_test.go",
         "bdstore_transfer_if_current_test.go",
         "bdstore_update_if_assignment_test.go",
+        "bdstore_workflow_root_hold_test.go",
         "bdtrace_smoke_test.go",
         "bead_database_dirs_internal_test.go",
         "beads_test.go",
@@ -293,6 +294,7 @@ go_test(
         "unread_store_notice_test.go",
         "update_reporting_test.go",
         "updated_at_store_test.go",
+        "workflow_root_hold_internal_test.go",
     ],
     data = glob(
         ["**"],
