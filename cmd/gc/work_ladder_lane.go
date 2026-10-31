@@ -460,8 +460,8 @@ type ladderRuntime struct {
 }
 
 // observeRuntime reads row's runtime: running, quiet (sessionQuietHold's
-// rule: activity older than the grace and, for a busy-readable provider, no
-// busy indicator; an unreadable clock is not quiet), and its provider's
+// rule: activity older than the grace and, off ACP, no busy snapshot reading;
+// an unreadable clock is not quiet), and its provider's
 // health. Quiet is read only for a running runtime.
 func (p *ladderPass) observeRuntime(row beads.Bead) ladderRuntime {
 	var rt ladderRuntime

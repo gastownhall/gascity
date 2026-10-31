@@ -37,6 +37,7 @@ go_test(
         "delivery_handle_conformance_test.go",
         "hangbudget_test.go",
         "nocity_guard_test.go",
+        "nudge_handle_conformance_test.go",
         "phase1_conformance_test.go",
         "phase2_conformance_test.go",
         "phase2_fake_worker_test.go",

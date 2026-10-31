@@ -15,6 +15,7 @@ const ( //nolint:revive // exported requirement IDs are documented by the catalo
 	RequirementInvocationUsageRecording            RequirementCode = "WC-USAGE-RECORD-001"
 	RequirementDeliveryQueuesBehindPending         RequirementCode = "WC-DELIVERY-001"
 	RequirementAcceptedMessageQueuesBehindPending  RequirementCode = "WC-DELIVERY-002"
+	RequirementWaitIdleOutOfReachQueuesAtOnce      RequirementCode = "WC-NUDGE-001"
 	RequirementContinuationContinuity              RequirementCode = "WC-CONT-001"
 	RequirementFreshSessionIsolation               RequirementCode = "WC-CONT-002"
 	RequirementStartupOutcomeBound                 RequirementCode = "WC-BRINGUP-001"
@@ -183,6 +184,19 @@ func ProgramStatusCatalog() []Requirement {
 			Code:        RequirementProgramStatusTranscriptTurn,
 			Group:       "program_status",
 			Description: "A record never ends a transcript turn whose start is newer than the record's edge.",
+		},
+	}
+}
+
+// NudgeHandleCatalog returns worker-handle nudge-delivery requirements. Like
+// TelemetryHandleCatalog, these are handle-behavior rules enforced through
+// the exported worker API rather than the fixture-driven profile runner.
+func NudgeHandleCatalog() []Requirement {
+	return []Requirement{
+		{
+			Code:        RequirementWaitIdleOutOfReachQueuesAtOnce,
+			Group:       "nudge",
+			Description: "A wait-idle nudge to a non-ACP session whose non-blocking idle pre-read (runtime.IdleBoundaryNow) reads busy, or reads indeterminate while the runtime reports a pending interaction, is reported undelivered at once, without entering the idle wait and without typing, on a SessionHandle and a RuntimeHandle alike; a pre-read at the boundary, or indeterminate with nothing pending, waits for idle and delivers.",
 		},
 	}
 }
