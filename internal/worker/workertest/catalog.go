@@ -14,6 +14,7 @@ const ( //nolint:revive // exported requirement IDs are documented by the catalo
 	RequirementInvocationUsageCost                 RequirementCode = "WC-USAGE-COST-001"
 	RequirementInvocationUsageRecording            RequirementCode = "WC-USAGE-RECORD-001"
 	RequirementDeliveryQueuesBehindPending         RequirementCode = "WC-DELIVERY-001"
+	RequirementAcceptedMessageQueuesBehindPending  RequirementCode = "WC-DELIVERY-002"
 	RequirementContinuationContinuity              RequirementCode = "WC-CONT-001"
 	RequirementFreshSessionIsolation               RequirementCode = "WC-CONT-002"
 	RequirementStartupOutcomeBound                 RequirementCode = "WC-BRINGUP-001"
@@ -118,6 +119,11 @@ func DeliveryHandleCatalog() []Requirement {
 			Code:        RequirementDeliveryQueuesBehindPending,
 			Group:       "delivery",
 			Description: "A nudge that may wait for a safe boundary, sent to a session waiting on a pending interaction, is queued for delivery after the interaction is answered: nothing is typed and nothing is dropped. An immediate nudge is refused with the pending-interaction error.",
+		},
+		{
+			Code:        RequirementAcceptedMessageQueuesBehindPending,
+			Group:       "delivery",
+			Description: "A message its caller already accepted (MessageRequest.QueueBehindPending), sent to a session waiting on a pending interaction, is queued as a user turn for after the interaction is answered. A plain message is refused with the pending-interaction error.",
 		},
 	}
 }

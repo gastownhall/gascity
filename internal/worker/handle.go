@@ -195,6 +195,13 @@ type MessageRequest struct {
 	// turn sighting, interrupt, start or send, and the result is Replayed.
 	// Ignored without a DeliveryKey.
 	Redelivery bool `json:"redelivery,omitempty"`
+	// QueueBehindPending is set by a caller that has already accepted the
+	// message, such as a session create's initial message: a session waiting
+	// on a pending interaction gets the message queued as a user turn for
+	// after the interaction is answered (Queued), where a plain request is
+	// refused with session.ErrPendingInteraction. A runtime-only handle has
+	// no queue and refuses either way.
+	QueueBehindPending bool `json:"queue_behind_pending,omitempty"`
 }
 
 // MessageResult reports whether a worker turn was queued or delivered now.

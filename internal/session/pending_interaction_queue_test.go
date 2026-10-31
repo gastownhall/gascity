@@ -122,6 +122,30 @@ func TestSendQueuesWhenRuntimeRefusesBehindPendingInteraction(t *testing.T) {
 	}
 }
 
+// TestQueueSubmitQueuesAUserTurn (row A17): QueueSubmit queues the message
+// for the session's next boundary as a user's submit, delivering nothing
+// now, for a caller that already accepted a message the session cannot take
+// yet.
+func TestQueueSubmitQueuesAUserTurn(t *testing.T) {
+	sp := runtime.NewFake()
+	mgr, info, cityPath := newPendingQueueSession(t, sp, "claude")
+	sp.SetPendingInteraction(info.SessionName, pendingTestApproval)
+
+	if err := mgr.QueueSubmit(info.ID, "first prompt"); err != nil {
+		t.Fatalf("QueueSubmit: %v", err)
+	}
+	if got := sp.CountCalls("Nudge", info.SessionName) + sp.CountCalls("NudgeNow", info.SessionName); got != 0 {
+		t.Fatalf("typed %d messages, want none", got)
+	}
+	items := queuedMessages(t, cityPath, info.ID)
+	if len(items) != 1 || items[0].Message != "first prompt" || items[0].Source != nudgequeue.SourceSubmit {
+		t.Fatalf("queued %+v, want the message queued as a user submit", items)
+	}
+	if err := mgr.QueueSubmit("gc-missing", "x"); err == nil {
+		t.Fatal("QueueSubmit(missing session) = nil, want an error")
+	}
+}
+
 // TestInterruptNowQueuesWhenDialogAppearsAfterInterrupt (rows A21, B3): the
 // up-front refusal saw no prompt, the interrupt went out, and a permission
 // prompt opened as the turn ended. The turn is already interrupted, so the

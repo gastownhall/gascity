@@ -229,6 +229,22 @@ func (m *Manager) submit(ctx context.Context, by Actor, id, message, resumeComma
 	return outcome, err
 }
 
+// QueueSubmit queues message for session id's next delivery boundary as a
+// user's submit (delivered as its prompt), sending nothing now. It is for a
+// message its caller has already accepted that the session cannot take yet,
+// such as a create's initial message to a session that came up waiting on a
+// pending interaction: the queue delivers it once the interaction is
+// answered.
+func (m *Manager) QueueSubmit(id, message string) error {
+	return withSessionMutationLock(id, func() error {
+		b, sessName, err := m.sessionBead(id)
+		if err != nil {
+			return err
+		}
+		return m.enqueueDeferredSubmitLocked(b, sessName, message, nudgequeue.SourceSubmit)
+	})
+}
+
 // pendingConversationRestart reports whether a fresh restart has been recorded
 // for this session but not yet carried out, so its live runtime — if any — is
 // the outgoing incarnation.
