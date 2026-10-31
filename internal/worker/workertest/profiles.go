@@ -65,6 +65,9 @@ type Profile struct {
 	Fixtures     ProfileFixtureSet
 	Continuation ContinuationOracle
 	Usage        UsageExpectation
+	// ProgramStatus is the profile's OSC 7501 program-status declaration,
+	// held to the WC-PSTAT rows (ProgramStatusCatalog).
+	ProgramStatus ProgramStatusExpectation
 }
 
 // Phase1Profiles returns the canonical phase-1 worker-core profiles.
@@ -252,6 +255,11 @@ func Phase1Profiles() []Profile {
 				RecallPromptContains:   "Repeat the exact Pi phase-1 summary from earlier before answering.",
 				RecallResponseContains: "Pi phase 1 validates the tmux CLI transcript contract.",
 				ResetResponseContains:  "I cannot repeat the earlier Pi summary because this session started fresh.",
+			},
+			ProgramStatus: ProgramStatusExpectation{
+				Declared: true,
+				Capture:  "testdata/program_status/pi-1.4.0.bin",
+				Program:  "pi 1.4.0 (npm @earendil-works/pi-coding-agent)",
 			},
 		},
 		{
