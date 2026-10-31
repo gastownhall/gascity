@@ -174,6 +174,39 @@ func TestDoSlingWarnsRigSuspendedByRuntimeState(t *testing.T) {
 	}
 }
 
+func TestDoSlingWarnsRigSuspendedOnStart(t *testing.T) {
+	cases := []struct {
+		name string
+		rig  config.Rig
+	}{
+		{name: "suspended_on_start", rig: config.Rig{Name: "myrig", SuspendedOnStart: true}},
+		{name: "deprecated_suspended", rig: config.Rig{Name: "myrig", Suspended: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := newFakeRunner()
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Rigs:      []config.Rig{tc.rig},
+			}
+			a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+			deps := testDeps(cfg, runtime.NewFake(), runner.run)
+			// No runtime rig entry: the authored default must apply on its own.
+			deps.CityPath = suspensionTestCityDir(t)
+			deps.Store = seededStore("my-1")
+
+			result, err := DoSling(testOpts(a, "my-1"), deps, nil)
+			if err != nil {
+				t.Fatalf("DoSling error: %v", err)
+			}
+			if result.SuspendedRig != "myrig" {
+				t.Errorf("SuspendedRig = %q, want myrig from the authored rig default", result.SuspendedRig)
+			}
+		})
+	}
+}
+
 func TestDoSlingCityAndRigBothSuspendedSetBothFields(t *testing.T) {
 	runner := newFakeRunner()
 	cfg := &config.City{
