@@ -653,6 +653,17 @@ func (p poolExecutionBackstop) markStarted(s *beads.Bead, beadID string) bool {
 }
 
 func (p poolExecutionBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer) {
+	// A new claim, or a new incarnation, starts without the old latch. A
+	// failed clear leaves the window unopened, so the next pass observes
+	// again rather than opening the new window under the old latch.
+	if s.Metadata[executionClaimNudgeStalledKey] != "" || s.Metadata[executionClaimNudgeStalledTokenKey] != "" {
+		if !writeSessionMetadata(store, s, map[string]string{
+			executionClaimNudgeStalledKey:      "",
+			executionClaimNudgeStalledTokenKey: "",
+		}, executionClaimNudgeLabel, stdout) {
+			return
+		}
+	}
 	writeExecutionClaimMarker(store, s, target, 0, now, stdout)
 }
 
