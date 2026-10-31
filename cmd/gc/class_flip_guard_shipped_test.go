@@ -84,3 +84,41 @@ func TestGcBdShippedInvocationsAreAllowedOnSplit(t *testing.T) {
 		}
 	}
 }
+
+// TestGcBdShippedInvocationsSpawnStormRowPinsNoAssignee pins the census row
+// for spawn-storm-detect.sh to the unassigned list filter: --no-assignee,
+// never an empty --assignee= value (bd applies --assignee only when
+// non-empty, so the empty value sweeps assigned beads into the storm count,
+// and the detector fails open when the list call is refused).
+func TestGcBdShippedInvocationsSpawnStormRowPinsNoAssignee(t *testing.T) {
+	f, err := os.Open("testdata/gc_bd_shipped_invocations.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close() //nolint:errcheck // test read
+	const want = "list --status=open --no-assignee --json --limit=0"
+	found := false
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var row struct {
+			Argv []string `json:"argv"`
+			Src  string   `json:"src"`
+		}
+		if err := json.Unmarshal(sc.Bytes(), &row); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(row.Src, "scripts/spawn-storm-detect.sh") {
+			continue
+		}
+		found = true
+		if got := strings.Join(row.Argv, " "); got != want {
+			t.Errorf("spawn-storm-detect.sh census row = %q, want %q", got, want)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("no census row for spawn-storm-detect.sh; the detector's list call must stay pinned")
+	}
+}
