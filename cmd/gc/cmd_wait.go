@@ -1267,6 +1267,21 @@ func prepareWaitWakeStateHooked(sessFront *sessionpkg.Store, dependencies waitDe
 				}
 				continue
 			}
+			// An ordinary read fault on ANY leg — rig or city-work, this wait's
+			// dependency or any other's — aborts the whole pass and discards every
+			// ready wait this pass already found, deliberately: the by-id plan
+			// makes every leg fatal (TestPrepareWaitWakeState_DarkCityWorkLegStillAbortsThePass,
+			// the "dark serving rig" row of TestPrepareWaitWakeState_ResolvesRigDependencyBeads),
+			// and both callers additionally re-zero the ready-wait set on any
+			// error from this function, so a failed pass publishes nothing ready
+			// (city_runtime.go, reconcile_steps_waits.go). There is today no
+			// signal here that distinguishes "this one dependency's read failed
+			// for an isolated reason" from "the store this plan depends on is
+			// unreliable enough that nothing it answered this pass should be
+			// trusted" — so every read fault is treated as the latter. Relaxing
+			// that to let unrelated, independently-provable waits still ready
+			// during a degraded pass is a real availability/safety trade-off,
+			// not a mechanical change; see gascity#7998.
 			return nil, depErr
 		}
 		if ready {

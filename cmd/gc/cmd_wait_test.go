@@ -3219,11 +3219,16 @@ func assertWaitStillOpen(t *testing.T, store beads.Store, wantState string) {
 	}
 }
 
-// TestPrepareWaitWakeState_DarkCityWorkLegStillAbortsThePass is the CONTROL for
-// the dark-rig row above. A rig leg degrades and the pass goes on; the city work
-// leg is the authority and its going dark is a pass-level fault, so this row
-// asserts the error IS returned. Without it, a reader that simply stopped
-// reporting every leg failure would satisfy the dark-rig row.
+// TestPrepareWaitWakeState_DarkCityWorkLegStillAbortsThePass pins the SAME
+// pass-level-fault behavior for the city work leg that the "dark serving rig"
+// row of TestPrepareWaitWakeState_ResolvesRigDependencyBeads pins for a rig
+// leg: the by-id plan makes every leg fatal on an ordinary read error, with
+// no city-work-vs-rig distinction. (An earlier version of this comment
+// claimed a rig leg degrading let the pass continue; that was never actually
+// implemented — the rig-leg row's own comment and assertion say the
+// opposite.) Without this row, a reader that aborted only on a city-store
+// fault, and silently swallowed a rig-store fault instead, would still
+// satisfy every other test here.
 func TestPrepareWaitWakeState_DarkCityWorkLegStillAbortsThePass(t *testing.T) {
 	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
 	const depID = "ga-dep-1"
