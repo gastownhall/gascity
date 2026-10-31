@@ -18,6 +18,7 @@ go_library(
     deps = [
         "//internal/runtime",
         "//internal/runtime/programstatus",
+        "//internal/runtime/programstatus/relay",
         "//internal/runtime/runtimetest/osc7501emitter/emit",
     ],
 )

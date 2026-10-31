@@ -7,6 +7,7 @@ go_library(
     visibility = ["//visibility:private"],
     deps = [
         "//internal/runtime/programstatus",
+        "//internal/runtime/programstatus/relay",
         "//internal/runtime/programstatus/tap",
     ],
 )
@@ -26,19 +27,23 @@ go_test(
     srcs = [
         "e2e_test.go",
         "main_test.go",
+        "relay_e2e_test.go",
         "testenv_import_test.go",
     ],
     data = select({
         "//:gotags_integration": [
             ":gc-osc7501",
+            "//internal/runtime/runtimetest/osc7501emitter",
         ],
         "//conditions:default": [],
     }),
     embed = [":gc-osc7501_lib"],
-    # e2e_test.go (integration) runs the built binary under a scratch tmux.
+    # e2e_test.go and relay_e2e_test.go (integration) run the built binary
+    # under a scratch tmux and on test-held ptys, relaying the emitter.
     env = select({
         "//:gotags_integration": {
             "GC_TEST_OSC7501_BIN": "$(rootpath :gc-osc7501)",
+            "GC_TEST_OSC7501_EMITTER_BIN": "$(rootpath //internal/runtime/runtimetest/osc7501emitter)",
         },
         "//conditions:default": {},
     }),
@@ -46,6 +51,7 @@ go_test(
         "//internal/bazeltest",
         "//internal/runtime",
         "//internal/runtime/programstatus",
+        "//internal/runtime/programstatus/relay",
         "//internal/runtime/programstatus/tap",
         "//internal/testenv",
         "//test/tmuxtest",
