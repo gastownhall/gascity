@@ -26,7 +26,7 @@ package main
 // rig-store graph write on a split city: rig convergence, `cook --attach` in a
 // rig, and control dispatch over the trees those two created. Since
 // typed-stores T2 the rule itself is storeref's (storeref.Place, which
-// Stores.Graph(scope) mints from); graphPlacementForScope is its raw form for
+// Stores.Graph() mints from); graphPlacementForScope is its raw form for
 // callers that still take a beads.Store.
 
 import (
@@ -76,9 +76,9 @@ func (s graphScope) rootStoreRef(cityName string) string {
 // It goes through resolveGraphStore so the worker-site refusal applies exactly
 // as it does to every other graph-class write. scope is not consulted for the
 // store choice — that is the point of the rule — but it stays in the signature
-// so a caller retyped to hold Stores passes the same scope to Graph(scope).
+// so the scope a caller names is still visible where the rule is applied.
 func graphPlacementForScope(routes *storageRoutes, cfg *config.City, cityPath string, scope graphScope, scopeStore beads.Store) beads.Store {
-	_ = scope // deliberately unused: the rule is scope-independent; kept for Stores.Graph(scope)
+	_ = scope // deliberately unused: the rule is scope-independent
 	return resolveGraphStore(routes, scopeStore, cfg, cityPath, nil)
 }
 

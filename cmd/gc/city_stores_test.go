@@ -214,9 +214,10 @@ func TestStoresEpochSeesAnInPlaceRoutesRewrite(t *testing.T) {
 	}
 }
 
-// TestStoresEpochSurvivesTheRealControllerCache drives the same rewrite through
-// withControllerCache itself: the controller's handles are the cache.
-func TestStoresEpochSurvivesTheRealControllerCache(t *testing.T) {
+// TestStoresEpochRemintsAfterTheRealControllerCache drives the same rewrite
+// through withControllerCache itself: the epoch minted before it does not
+// survive, and the controller's handles are the cache.
+func TestStoresEpochRemintsAfterTheRealControllerCache(t *testing.T) {
 	engine := beads.NewMemStore()
 	routes := messagingSplitRoutes(engine)
 	cs := &controllerState{cityName: "c", storageRoutes: routes, cityBeadStore: beads.NewMemStore()}
@@ -241,6 +242,9 @@ func TestStoresReadersSeeTheFinalEpoch(t *testing.T) {
 	binding := beads.NewMemStore()
 	graphOnly := &storageRoutes{stores: map[coordclass.Class]beads.Store{coordclass.ClassGraph: binding}, binding: "infra"}
 	cs := &controllerState{cityName: "c", cityBeadStore: beads.NewMemStore(), storageRoutes: graphOnly}
+	// Mint the first epoch before any swap, so a key that missed the work
+	// store would keep it deterministically rather than by scheduling.
+	_ = cs.SessionsBeadStore()
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	for range 8 {

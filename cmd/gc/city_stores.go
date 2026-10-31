@@ -14,8 +14,8 @@ package main
 // # One epoch, re-minted when its inputs change
 //
 // A holder keeps one Stores beside the inputs it was minted from and re-mints
-// on the first read after any of them changed: the city work store, the routes
-// pointer, and the store the routes hand each class. The last is what makes an
+// on the first read after any of them changed: the city work store, and the
+// routes — which routes value, and the store it hands each class. The last is what makes an
 // IN-PLACE rewrite of the routes visible, and the controller makes one:
 // withControllerCache replaces each binding engine with its CachingStore under
 // the same pointer. Keying on the pointer alone would keep handles over the
@@ -160,7 +160,6 @@ func cliStores(cityPath string, scope beads.Store) storeref.Stores {
 // storesEpoch is one minted Stores and the inputs it was minted from.
 type storesEpoch struct {
 	cityPath string
-	routes   *storageRoutes
 	bindings *routesBindings
 	work     beads.Store
 	stores   storeref.Stores
@@ -170,14 +169,17 @@ type storesEpoch struct {
 type storesEpochCache struct{ current atomic.Pointer[storesEpoch] }
 
 // get returns the Stores over work and routes, minting it when the cached
-// epoch was minted from a different city path, work store, routes pointer,
-// or class store. A cache hit reads the routes and allocates nothing.
+// epoch was minted from a different city path, work store, or routes state.
+// The bindings memo stands for the routes: it lives on one routes value and is
+// replaced whenever that value hands a class a different store, so comparing
+// it covers both the pointer and an in-place rewrite. A cache hit reads the
+// routes and allocates nothing.
 func (c *storesEpochCache) get(cityPath string, routes *storageRoutes, work beads.Store) storeref.Stores {
 	bindings := routes.mintBindings()
-	if e := c.current.Load(); e != nil && e.cityPath == cityPath && e.routes == routes && e.bindings == bindings && sameBeadStore(e.work, work) {
+	if e := c.current.Load(); e != nil && e.cityPath == cityPath && e.bindings == bindings && sameBeadStore(e.work, work) {
 		return e.stores
 	}
-	e := &storesEpoch{cityPath: cityPath, routes: routes, bindings: bindings, work: work, stores: mintCityStores(cityPath, routes, work)}
+	e := &storesEpoch{cityPath: cityPath, bindings: bindings, work: work, stores: mintCityStores(cityPath, routes, work)}
 	c.current.Store(e)
 	return e.stores
 }

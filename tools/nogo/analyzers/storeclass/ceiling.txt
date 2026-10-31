@@ -5,9 +5,9 @@
 # coordinator decision, made by hand, and visible in review.
 cmd/gc	cap-assert	107
 cmd/gc	mint	81
-cmd/gc	raw-field	177
-cmd/gc	raw-param	1094
-cmd/gc	raw-result	261
+cmd/gc	raw-field	178
+cmd/gc	raw-param	1104
+cmd/gc	raw-result	271
 cmd/gc	raw-type	4
 cmd/gc	raw-var	38
 cmd/gc	read-marker	31
@@ -26,7 +26,7 @@ internal/convoy	raw-param	14
 internal/dispatch	cap-assert	2
 internal/dispatch	raw-field	5
 internal/dispatch	raw-param	202
-internal/dispatch	raw-result	6
+internal/dispatch	raw-result	7
 internal/dispatch	raw-type	1
 internal/doctor	raw-field	1
 internal/doctor	raw-param	2

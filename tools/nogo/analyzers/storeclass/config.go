@@ -64,14 +64,18 @@ var Default = Config{
 	// the router's cmd/gc file calls them (its Allow entry below); any other
 	// call is a baseline row.
 	MintFuncs: []string{beads + ".MintClassStores", storeref + ".NewStores", storeref + ".Place"},
-	// The storeref types that carry raw stores. Without them a Leg or a
-	// Topology would launder any store into NewStores uncounted.
+	// The storeref types that carry raw stores: the mint's inputs (a Leg or a
+	// Topology would otherwise launder any store into NewStores uncounted) and
+	// the plan executors' outputs (an Owner's or a plan leg's store).
 	RawCarriers: []string{
 		storeref + ".Leg",
 		storeref + ".Topology",
 		storeref + ".ClassBinding",
 		storeref + ".Projection",
 		storeref + ".StoresOptions",
+		storeref + ".Owner",
+		storeref + ".PlanLeg",
+		storeref + ".ResolvedPlan",
 	},
 	TestMintPackages: []string{
 		beads + "/beadstest",
