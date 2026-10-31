@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -367,7 +368,10 @@ func TestProvider_IsRunning(t *testing.T) {
 
 func TestProvider_NudgeDrivesNamedTmuxTarget(t *testing.T) {
 	// The carrier targets the session's agent pane, resolved once for the
-	// operation and fenced to the session (one host, many sessions).
+	// operation and fenced to the session (one host, many sessions). The
+	// session's activity is read before the first keystroke, the baseline
+	// GetLastActivity falls back to if the agent never answers, and again
+	// after the last, where the box's tmux stamped the keystroke echo.
 	f := &fakeRunner{}
 	p := providerWith(f)
 	if err := p.Nudge("sess-7", runtime.TextContent("hi")); err != nil {
@@ -375,16 +379,143 @@ func TestProvider_NudgeDrivesNamedTmuxTarget(t *testing.T) {
 	}
 	want := [][]string{
 		{"tmux", "list-panes", "-s", "-t", "=sess-7:", "-F", agentPaneRowFormat},
+		{"tmux", "list-windows", "-t", "=sess-7", "-F", "#{window_activity}"},
 		{"tmux", "send-keys", "-t", "=sess-7:@1.%1", "-l", "hi"},
 		{"tmux", "send-keys", "-t", "=sess-7:@1.%1", "Enter"},
+		{"tmux", "list-windows", "-t", "=sess-7", "-F", "#{window_activity}"},
 	}
-	if len(f.calls) != 3 {
-		t.Fatalf("calls = %v, want 3", f.calls)
+	if len(f.calls) != len(want) {
+		t.Fatalf("calls = %v, want %d", f.calls, len(want))
 	}
 	for i := range want {
 		if !slices.Equal(f.calls[i], want[i]) {
 			t.Errorf("call[%d] = %v, want %v", i, f.calls[i], want[i])
 		}
+	}
+}
+
+// pokedBox is a remote session whose tmux reports an activity clock that gc's
+// own keystrokes advance, as tmux counts them as window activity: every
+// send-keys moves it to the box's time, which runs skew off the provider's
+// clock (now). refuse makes tmux reject every send-keys: a non-zero exit,
+// with nothing typed.
+type pokedBox struct {
+	activity, now time.Time
+	skew          time.Duration
+	refuse        bool
+}
+
+func newPokedBox(genuine time.Time, skew time.Duration) (*Provider, *pokedBox) {
+	box := &pokedBox{activity: genuine, now: genuine.Add(5 * time.Hour), skew: skew}
+	p := providerWith(&fakeRunner{respond: func(argv []string) ([]byte, int, error) {
+		switch {
+		case isTmux("list-windows")(argv):
+			return []byte(fmt.Sprintf("%d\n", box.activity.Unix())), 0, nil
+		case isTmux("send-keys")(argv):
+			if box.refuse {
+				return nil, 1, nil
+			}
+			box.activity = box.now.Add(box.skew)
+		}
+		return nil, 0, nil
+	}})
+	p.now = func() time.Time { return box.now }
+	return p, box
+}
+
+// TestProvider_PokeEchoIsDiscountedFromLastActivity: a nudge or keys advance
+// #{window_activity} with their own keystroke echo even when the agent never
+// answers. GetLastActivity counts the echo while the agent may still reply,
+// reverts to the activity before the poke once the grace passes unanswered,
+// so a nudged but silent agent does not look perpetually active (#3049,
+// #4187), and keeps the agent's real output that follows. The box's clock is
+// not the provider's: with it ahead or behind, the echo is still matched and
+// a reply 10s after the poke is still the agent's own.
+func TestProvider_PokeEchoIsDiscountedFromLastActivity(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		poke func(*Provider) error
+	}{
+		{"Nudge", func(p *Provider) error { return p.Nudge("s", runtime.TextContent("wake up")) }},
+		{"SendKeys", func(p *Provider) error { return p.SendKeys("s", "Enter") }},
+	} {
+		for _, skew := range []time.Duration{0, -10 * time.Second, 10 * time.Second} {
+			t.Run(tc.name+" box clock "+skew.String(), func(t *testing.T) {
+				genuine := time.Unix(1700000000, 0) // the agent's last real output
+				p, box := newPokedBox(genuine, skew)
+				if err := tc.poke(p); err != nil {
+					t.Fatalf("poke: %v", err)
+				}
+				poked, echo := box.now, box.activity
+
+				if got, _ := p.GetLastActivity("s"); !got.Equal(echo) {
+					t.Errorf("inside the grace window LastActivity = %v, want the echo %v", got, echo)
+				}
+				box.now = poked.Add(runtime.PokeGrace + time.Second)
+				if got, _ := p.GetLastActivity("s"); !got.Equal(genuine) {
+					t.Errorf("unanswered poke after the grace: LastActivity = %v, want the genuine %v", got, genuine)
+				}
+				box.activity = echo.Add(10 * time.Second) // the agent answers
+				box.now = poked.Add(time.Minute)
+				if got, _ := p.GetLastActivity("s"); !got.Equal(box.activity) {
+					t.Errorf("after the agent answered LastActivity = %v, want its output %v", got, box.activity)
+				}
+			})
+		}
+	}
+}
+
+// TestProvider_PokeThatTypedNothingKeepsBaseline: a nudge with no text, keys
+// with none, or a send-keys tmux refuses types nothing into the pane, so it
+// must not cost an earlier unanswered poke its genuine baseline: once the
+// grace passes, LastActivity is still the activity from before the first poke.
+func TestProvider_PokeThatTypedNothingKeepsBaseline(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		poke func(*Provider, *pokedBox) error
+	}{
+		{"empty Nudge", func(p *Provider, _ *pokedBox) error { return p.Nudge("s", runtime.TextContent("")) }},
+		{"no keys", func(p *Provider, _ *pokedBox) error { return p.SendKeys("s") }},
+		{"refused send-keys", func(p *Provider, box *pokedBox) error {
+			box.refuse = true
+			return p.SendKeys("s", "Enter")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			genuine := time.Unix(1700000000, 0) // the agent's last real output
+			p, box := newPokedBox(genuine, 0)
+			if err := p.Nudge("s", runtime.TextContent("wake up")); err != nil {
+				t.Fatalf("Nudge: %v", err)
+			}
+			box.now = box.now.Add(time.Minute) // far past that nudge's echo window
+			if err := tc.poke(p, box); err != nil {
+				t.Fatalf("poke: %v", err)
+			}
+
+			box.now = box.now.Add(runtime.PokeGrace + time.Second)
+			if got, _ := p.GetLastActivity("s"); !got.Equal(genuine) {
+				t.Errorf("LastActivity = %v, want the genuine %v from before the first poke", got, genuine)
+			}
+		})
+	}
+}
+
+// TestProvider_LastActivityIsNewestWindow: a human's window on the remote
+// session may be the current one, so the clock is the newest window's, not
+// the current window's.
+func TestProvider_LastActivityIsNewestWindow(t *testing.T) {
+	f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
+		if isTmux("list-windows")(argv) {
+			return []byte("1700000000\n1700000300\n1700000100\n"), 0, nil
+		}
+		return []byte("1600000000"), 0, nil // any single-window or session read
+	}}
+	got, err := providerWith(f).GetLastActivity("s")
+	if err != nil {
+		t.Fatalf("GetLastActivity: %v", err)
+	}
+	if want := time.Unix(1700000300, 0); !got.Equal(want) {
+		t.Errorf("GetLastActivity = %v, want the newest window %v", got, want)
 	}
 }
 
@@ -1052,7 +1183,7 @@ func TestProvider_TargetsSessionsExactly(t *testing.T) {
 		{"IsRunning", func(p *Provider) { _ = p.IsRunning("worker-1") }, "has-session", session},
 		{"Stop", func(p *Provider) { _ = p.Stop("worker-1") }, "kill-session", session},
 		{"IsAttached", func(p *Provider) { _ = p.IsAttached("worker-1") }, "display-message", pane},
-		{"GetLastActivity", func(p *Provider) { _, _ = p.GetLastActivity("worker-1") }, "display-message", pane},
+		{"GetLastActivity", func(p *Provider) { _, _ = p.GetLastActivity("worker-1") }, "list-windows", session},
 		{"SetMeta", func(p *Provider) { _ = p.SetMeta("worker-1", "GC_SESSION_ID", "gc-1") }, "set-environment", session},
 		{"GetMeta", func(p *Provider) { _, _ = p.GetMeta("worker-1", "GC_K") }, "show-environment", session},
 		{"RemoveMeta", func(p *Provider) { _ = p.RemoveMeta("worker-1", "GC_K") }, "set-environment", session},
