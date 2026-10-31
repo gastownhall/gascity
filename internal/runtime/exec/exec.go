@@ -224,14 +224,15 @@ func (p *Provider) runError(runErr error, stderr string, args []string) error {
 	// Only the ops strictExitTwo names consult the handshake, so the
 	// `protocol` op's own failure never re-enters it.
 	strict := code == 2 && strictWhenReady(op) && p.v2Ready()
-	base := &opExitError{code: code, msg: errMsg, err: fmt.Errorf("exec provider %s %s: %s", p.script, strings.Join(args, " "), errMsg)}
+	base := &opExitError{op: op, code: code, msg: errMsg, err: fmt.Errorf("exec provider %s %s: %s", p.script, strings.Join(args, " "), errMsg)}
 	return classifyExecExit(op, code, errMsg, strict, base)
 }
 
-// opExitError is an op's failure with the exit code and stderr message it
-// ended with, so a caller can read a code the contract reserves (exit 73
+// opExitError is an op's failure with the op, exit code and stderr message
+// it ended with, so a caller can read a code the contract reserves (exit 73
 // under fresh_only) without parsing text. It reads as its wrapped error.
 type opExitError struct {
+	op   string
 	code int
 	msg  string
 	err  error
@@ -240,15 +241,6 @@ type opExitError struct {
 func (e *opExitError) Error() string { return e.err.Error() }
 
 func (e *opExitError) Unwrap() error { return e.err }
-
-// exitCode reports the exit code an op failure ended with, or -1.
-func exitCode(err error) int {
-	var e *opExitError
-	if errors.As(err, &e) {
-		return e.code
-	}
-	return -1
-}
 
 // classifyExecExit maps an adapter op's exit code and message onto the
 // provider's contract. base is the formatted adapter error. Exit code 2 is an
@@ -376,8 +368,8 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 		return p.cleanupAfterStartFailure(name, err, foreignBox)
 	}
-	if fenced, err := p.finishStart(ctx, name, cfg); err != nil {
-		if !fenced && startFailureKeepsBox(err, foreignBox) {
+	if publishFailed, err := p.finishStart(ctx, name, cfg); err != nil {
+		if publishFailed && startFailureKeepsBox(err, foreignBox) {
 			// The box was up before the attempt and stays: its pane, unless
 			// the start op replaced its process, keeps the fence it held.
 			p.restoreInputFence(context.WithoutCancel(ctx), name, saved)
@@ -389,17 +381,17 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 
 // finishStart runs what follows a successful welded `start` op, for Start
 // and startFresh alike: it publishes the agent pane's input fence, then its
-// ready prompt, then dismisses startup dialogs. fenced reports that the new
-// fence was published, so a failure after it is not the publish's.
-func (p *Provider) finishStart(ctx context.Context, name string, cfg runtime.Config) (fenced bool, err error) {
+// ready prompt, then dismisses startup dialogs. publishFailed reports that
+// the error is the fence publish's.
+func (p *Provider) finishStart(ctx context.Context, name string, cfg runtime.Config) (publishFailed bool, err error) {
 	if err := p.publishInputFence(ctx, name, cfg); err != nil {
-		return false, err
+		return true, err
 	}
 	p.publishReadyPrompt(ctx, name, cfg)
 	if err := p.dismissStartupDialogs(ctx, name, cfg); err != nil {
-		return true, fmt.Errorf("exec provider: dismissing startup dialogs: %w", err)
+		return false, fmt.Errorf("exec provider: dismissing startup dialogs: %w", err)
 	}
-	return true, nil
+	return false, nil
 }
 
 // cleanupAfterStartFailure tears down the box the adapter may already have

@@ -355,11 +355,11 @@ func freshStartConfig(cfg runtime.Config) (runtime.Config, error) {
 // wrapped: a refused launch into the box this attempt provisioned is a
 // start failure, whose cleanup stops that box when it carries our token.
 func freshCollision(err error) bool {
-	if exitCode(err) == exitCodeFreshCollision {
-		return true
-	}
 	var e *opExitError
-	return errors.As(err, &e) && isStartCollision(e.msg)
+	if !errors.As(err, &e) || e.op != "start" && e.op != "provision" {
+		return false
+	}
+	return e.code == exitCodeFreshCollision || isStartCollision(e.msg)
 }
 
 // cleanupAfterFreshStartFailure returns the error a failed fresh start

@@ -41,11 +41,18 @@ func (p *Provider) Protocol() (runtime.ProtocolInfo, error) {
 	}
 	p.handshakeRetrying = true
 	p.handshakeMu.Unlock()
+	// Cleared however the retry ends, a panic included, or a second failure
+	// would end retrying for the provider's life.
+	defer func() {
+		p.handshakeMu.Lock()
+		p.handshakeRetrying = false
+		p.handshakeMu.Unlock()
+	}()
 
 	info, err := p.queryProtocol(context.Background(), p.timeout)
 	p.handshakeMu.Lock()
-	defer p.handshakeMu.Unlock()
-	p.handshakeInfo, p.handshakeErr, p.handshakeAt, p.handshakeRetrying = info, err, handshakeNow(), false
+	p.handshakeInfo, p.handshakeErr, p.handshakeAt = info, err, handshakeNow()
+	p.handshakeMu.Unlock()
 	return info, err
 }
 

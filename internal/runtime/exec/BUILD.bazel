@@ -41,6 +41,7 @@ go_test(
         "json_test.go",
         "observe_test.go",
         "readiness_test.go",
+        "readiness_unix_test.go",
         "seams_test.go",
         "testenv_import_test.go",
     ],

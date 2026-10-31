@@ -811,3 +811,27 @@ func TestCityEnvOnWatchAndAttach(t *testing.T) {
 		}
 	}
 }
+
+// Kills (NIT 1): a collision read from an op other than `start` or
+// `provision`, or from anything but exit 73 or the collision phrase.
+func TestFreshCollision(t *testing.T) {
+	base := errors.New("boom")
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"start exit 73", &opExitError{op: "start", code: 73, err: base}, true},
+		{"provision exit 73", &opExitError{op: "provision", code: 73, err: base}, true},
+		{"provision phrase", &opExitError{op: "provision", code: 1, msg: "box already exists", err: base}, true},
+		{"start phrase, classified", fmt.Errorf("%w: %w", runtime.ErrSessionExists, &opExitError{op: "start", code: 1, msg: "already running", err: base}), true},
+		{"start other failure", &opExitError{op: "start", code: 1, msg: "broken", err: base}, false},
+		{"stop exit 73", &opExitError{op: "stop", code: 73, err: base}, false},
+		{"exec phrase", &opExitError{op: "exec", code: 1, msg: "already exists", err: base}, false},
+		{"bare ErrSessionExists", fmt.Errorf("%w: launch refused", runtime.ErrSessionExists), false},
+	} {
+		if got := freshCollision(tc.err); got != tc.want {
+			t.Errorf("%s: freshCollision = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
