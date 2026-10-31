@@ -19,11 +19,10 @@ import (
 )
 
 // RUNTIME-CONTRACT-017 on the real tmux: the runtimetest program-status
-// suite (PS-001…PS-012) against sessions whose agent pane runs the scripted
-// emitter, armed with the built companion, each on its own scratch server;
-// the Relayed fixture runs the emitter under the built companion's relay.
-// The heal cases (PS-013's heal half, PS-014) skip: ProgramCaptureHealer
-// lands with a later slice.
+// suite (PS-001…PS-014) against sessions whose agent pane runs the scripted
+// emitter, armed with the built companion, each on its own scratch server
+// (osc7501x-heal-<rand> for the heal cases PS-013 and PS-014). The Relayed
+// fixture runs the emitter under the built companion's relay.
 func TestTmuxProgramStatusContract(t *testing.T) {
 	companion := captureCompanionBin(t)
 	emitter := captureEmitterBin(t)
@@ -66,7 +65,7 @@ type programSession struct {
 // waits until the capture has published what the script wrote.
 func startProgramSession(t *testing.T, companion, emitter string, mode runtime.ProgramStatusMode, arm runtime.ProgramStatusArm, script []string) *programSession {
 	t.Helper()
-	p := captureProvider(t, newCaptureScratchServer(t), companion)
+	p := captureProvider(t, newScratchServer(t, programScratchKind(t)), companion)
 	p.tm.cfg.ProgramStatus, p.cfg.ProgramStatus = mode, mode
 	s := &programSession{p: p, name: "gc-ps-contract", emitter: emitter, relay: arm.Relay}
 	s.cfg = runtime.Config{Command: s.command(script), WorkDir: t.TempDir(), ProgramStatus: arm}
@@ -79,6 +78,15 @@ func startProgramSession(t *testing.T, companion, emitter string, mode runtime.P
 	}
 	s.settle(t, script)
 	return s
+}
+
+// programScratchKind names the scratch server of a contract case: heal for
+// the heal cases (PS-013, PS-014), arm for the rest.
+func programScratchKind(t *testing.T) string {
+	if strings.Contains(t.Name(), "/PS-013_") || strings.Contains(t.Name(), "/PS-014_") {
+		return "heal"
+	}
+	return "arm"
 }
 
 // command is the pane command: the emitter running script, then each typed
@@ -129,9 +137,14 @@ func (s *programSession) paneFormat(t *testing.T, format string) string {
 }
 
 // emit types each step into the pane as one line, then waits until the
-// capture has published what they wrote.
+// capture has published what they wrote. A pane heal armed or re-armed since
+// the last step is a new capture incarnation: its tap sees only what the
+// program writes from here on.
 func (s *programSession) emit(t *testing.T, steps ...string) {
 	t.Helper()
+	if nonce := paneOption(t, s.p, s.name, programTapOption); nonce != s.nonce {
+		s.nonce, s.out = nonce, nil
+	}
 	target := s.target(t)
 	for _, step := range steps {
 		s.tmux(t, "send-keys", "-t", target, "-l", step)
