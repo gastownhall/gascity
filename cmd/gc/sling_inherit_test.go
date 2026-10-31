@@ -37,7 +37,23 @@ func inheritClaimFor(t *testing.T, store beads.Store, assignee, chainKey, rootID
 	if chainKey != "" {
 		meta[chainKey] = rootID
 	}
-	b := mustCreateInheritBead(t, store, beads.Bead{Title: "claimed step", Type: "task", Metadata: meta})
+	return claimInheritBead(t, store, assignee, beads.Bead{Title: "claimed step", Type: "task", Metadata: meta})
+}
+
+// inheritEphemeralClaimFor is inheritClaimFor for an ephemeral (wisp-tier) claim,
+// the storage wisp-policy steps get on a bd-compatibility split city.
+func inheritEphemeralClaimFor(t *testing.T, store beads.Store, assignee, chainKey, rootID string) {
+	t.Helper()
+	claimInheritBead(t, store, assignee, beads.Bead{
+		Title: "claimed wisp step", Type: "task", Ephemeral: true,
+		Metadata: map[string]string{chainKey: rootID},
+	})
+}
+
+// claimInheritBead creates b in store and claims it in_progress for assignee.
+func claimInheritBead(t *testing.T, store beads.Store, assignee string, b beads.Bead) beads.Bead {
+	t.Helper()
+	b = mustCreateInheritBead(t, store, b)
 	status, owner := "in_progress", assignee
 	if err := store.Update(b.ID, beads.UpdateOpts{Status: &status, Assignee: &owner}); err != nil {
 		t.Fatalf("Update(%s): %v", b.ID, err)
@@ -104,6 +120,28 @@ func TestResolveInheritedInitiator(t *testing.T) {
 			},
 			want:         "carol",
 			wantNoStderr: true,
+		},
+		{
+			name: "an ephemeral graph claim with no current-claim pointer inherits",
+			build: func(t *testing.T, _, graph beads.Store) string {
+				root := inheritRootWithInitiator(t, graph, "carol")
+				inheritEphemeralClaimFor(t, graph, session, "workflow_id", root.ID)
+				return ""
+			},
+			want:         "carol",
+			wantNoStderr: true,
+		},
+		{
+			name: "an ephemeral graph claim on another initiator conflicts with the pointer claim",
+			build: func(t *testing.T, work, graph beads.Store) string {
+				a := inheritRootWithInitiator(t, work, "alice")
+				pointed := inheritClaimFor(t, work, session, beadmeta.RootBeadIDMetadataKey, a.ID, nil)
+				b := inheritRootWithInitiator(t, graph, "bob")
+				inheritEphemeralClaimFor(t, graph, session, "workflow_id", b.ID)
+				return pointed.ID
+			},
+			want:       "",
+			wantStderr: []string{"gc.initiator", "alice", "bob"},
 		},
 		{
 			name: "session current claim assigned under another identity inherits",

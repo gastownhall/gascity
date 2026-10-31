@@ -136,7 +136,10 @@ func resolveInheritedInitiator(src slingInheritSources, stderr io.Writer) string
 	}
 	if len(src.identities) > 0 {
 		for _, store := range src.stores {
-			listed, err := store.List(beads.ListQuery{Status: "in_progress", Assignees: src.identities})
+			// FederatedReadTier on every leg: a relocated class store answers at
+			// exactly the queried tier, so the zero value would drop its
+			// ephemeral claims while the policy-wrapped legs still return theirs.
+			listed, err := store.List(beads.ListQuery{Status: "in_progress", Assignees: src.identities, TierMode: beads.FederatedReadTier})
 			if err != nil {
 				warnSlingInitiatorNotInherited(stderr, fmt.Sprintf("listing the session's claims: %v", err))
 				return ""
