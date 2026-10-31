@@ -226,6 +226,7 @@ func TestRenudgeStaleHumanGatesCoversFormulaGates(t *testing.T) {
 	cases := []struct {
 		name      string
 		fake      humanGateFake
+		env       []string        // extra script environment for this case
 		wantTo    map[string]bool // gate ids that must be re-nudged exactly once
 		wantShows []string        // exact `gc bd show` invocations expected
 	}{
@@ -240,13 +241,17 @@ func TestRenudgeStaleHumanGatesCoversFormulaGates(t *testing.T) {
 			wantShows: []string{"gc bd show gcg-1 --json"},
 		},
 		{
+			// A zero re-nudge interval disables the cadence gate, so only
+			// the per-sweep dedupe keeps the second listing from re-sending.
 			name: "formula gate listed by both enumerations",
 			fake: humanGateFake{
 				gateList: `[{"id":"gcg-1","issue_type":"gate","status":"open","created_at":"2026-01-01T00:00:00Z","await_type":"human"}]`,
 				ready:    `[` + formulaHumanGateRow + `]`,
 				shows:    map[string]string{"gcg-1": `[` + formulaHumanGateRow + `]`},
 			},
-			wantTo: map[string]bool{"gcg-1": true},
+			env:       []string{"GC_STALE_GATE_RENUDGE_INTERVAL=0s"},
+			wantTo:    map[string]bool{"gcg-1": true},
+			wantShows: []string{"gc bd show gcg-1 --json"},
 		},
 		{
 			name: "bd human gate",
@@ -282,9 +287,14 @@ func TestRenudgeStaleHumanGatesCoversFormulaGates(t *testing.T) {
 			binDir, logPath := fakeGCBin(t, tc.fake.install(t))
 			stateDir := t.TempDir()
 
-			runHumanGateScript(t, renudgeHumanGateScriptPath, binDir, stateDir, "GC_STALE_GATE_THRESHOLD=0s")
+			runHumanGateScript(t, renudgeHumanGateScriptPath, binDir, stateDir,
+				append([]string{"GC_STALE_GATE_THRESHOLD=0s"}, tc.env...)...)
 
 			calls := gcLog(t, logPath)
+			const wantReady = "gc ready --status open --metadata-field gc.gate_type=human --json"
+			if ready := callsWithPrefix(calls, "gc ready"); len(ready) != 1 || strings.TrimSpace(ready[0]) != wantReady {
+				t.Errorf("gc ready calls = %q, want exactly [%q]", ready, wantReady)
+			}
 			sends := callsWithPrefix(calls, "gc mail send ")
 			if len(sends) != len(tc.wantTo) {
 				t.Fatalf("want %d reminder(s), got %d:\n%s", len(tc.wantTo), len(sends), strings.Join(calls, "\n"))

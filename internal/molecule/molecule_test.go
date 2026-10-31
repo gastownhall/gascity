@@ -3981,10 +3981,26 @@ contract = "graph.v2"
 				if err := os.WriteFile(filepath.Join(dir, name+".toml"), []byte(header+steps), 0o644); err != nil {
 					t.Fatalf("writing formula: %v", err)
 				}
-				store := beads.NewMemStore()
+				// A plain MemStore lacks GraphApplyStore, so Instantiate would
+				// silently take the sequential path; the spy forces the
+				// graph-apply path and captures the plan it submits.
+				var store beads.Store = beads.NewMemStore()
+				spy := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+				if graphApply {
+					store = spy
+				}
 				result, err := Cook(context.Background(), store, name, []string{dir}, Options{})
 				if err != nil {
 					t.Fatalf("Cook: %v", err)
+				}
+				planMetadata := map[string]map[string]string{}
+				if graphApply {
+					if spy.calls != 1 || spy.plan == nil {
+						t.Fatalf("ApplyGraphPlan calls = %d, want 1 (graph-apply path not taken)", spy.calls)
+					}
+					for _, node := range spy.plan.Nodes {
+						planMetadata[node.Key] = node.Metadata
+					}
 				}
 
 				wantGateType := map[string]string{
@@ -4000,11 +4016,20 @@ contract = "graph.v2"
 					if !ok {
 						t.Fatalf("IDMapping has no %q; mapping=%v", stepID, result.IDMapping)
 					}
-					b, err := store.Get(beadID)
-					if err != nil {
-						t.Fatalf("Get %s (%s): %v", stepID, beadID, err)
+					var metadata map[string]string
+					if graphApply {
+						metadata, ok = planMetadata[stepID]
+						if !ok {
+							t.Fatalf("graph-apply plan has no node %q", stepID)
+						}
+					} else {
+						b, err := store.Get(beadID)
+						if err != nil {
+							t.Fatalf("Get %s (%s): %v", stepID, beadID, err)
+						}
+						metadata = b.Metadata
 					}
-					got, present := b.Metadata[beadmeta.GateTypeMetadataKey]
+					got, present := metadata[beadmeta.GateTypeMetadataKey]
 					if want == "" {
 						if present {
 							t.Errorf("%s: %s = %q, want no key", stepID, beadmeta.GateTypeMetadataKey, got)
