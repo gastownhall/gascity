@@ -323,14 +323,19 @@ func judgeBdEdgeVerb(in bdClassGuardInput) bdClassGuard {
 	return in.pass()
 }
 
-// judgeBdConfigSet admits only the keys in bdSplitConfigSetKeys.
-func judgeBdConfigSet(in bdClassGuardInput) bdClassGuard {
+// judgeBdConfigKey admits config set and config unset of the keys
+// bdSplitConfigKeyAdmitted admits.
+func judgeBdConfigKey(in bdClassGuardInput) bdClassGuard {
 	if len(in.args.positionals) < 1 {
-		return in.refuse("gc bd config set: refused on this split city: expected <key> <value>. Nothing was written.")
+		return in.refuse("gc bd %s: refused on this split city: expected a key. Nothing was written.", in.path)
 	}
 	key := in.args.positionals[0]
-	if _, ok := bdSplitConfigSetKeys[key]; !ok {
-		return in.refuse("gc bd config set %s: refused on this split city: only %s may be set through gc bd here; other keys (storage-class.*, routing.*, dolt.*, backup.*, sync.*, federation.*, ...) can redirect writes or change what create does. Nothing was written.", key, strings.Join(slices.Sorted(maps.Keys(bdSplitConfigSetKeys)), ", "))
+	if !bdSplitConfigKeyAdmitted(key) {
+		namespaces := slices.Sorted(maps.Keys(bdSplitConfigNamespaces))
+		for i, ns := range namespaces {
+			namespaces[i] = ns + "*"
+		}
+		return in.refuse("gc bd %s %s: refused on this split city: only %s and keys under %s may be set or unset through gc bd here; other keys (storage-class.*, routing.*, dolt.*, backup.*, sync.*, federation.*, ...) can redirect writes or change what create does. Nothing was written.", in.path, key, strings.Join(slices.Sorted(maps.Keys(bdSplitConfigSetKeys)), ", "), strings.Join(namespaces, ", "))
 	}
 	return in.pass()
 }

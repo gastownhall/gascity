@@ -440,7 +440,9 @@ gc serves its own `release-if-current` itself.
 - `batch`: every `create` line is classified.
 - `sql`: only a single plain read is allowed: no comments, no Dolt procedures,
   no backtick-quoted Dolt names.
-- `config set`: only `types.custom`, `types.infra` and `types.retained`.
+- `config set` and `config unset`: only `types.custom`, `types.infra`,
+  `types.retained`, and keys under `custom.` (bd's namespace for
+  user-defined integration keys, which no class route and no create reads).
 - `mol wisp` and `mol wisp create`: only with `--root-only` (the gastown
   patrols' shape). That creates a single bead, and gc judges every bead bd
   could clone for it before bd runs.
