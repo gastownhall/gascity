@@ -290,6 +290,34 @@ func TestDoltDriftCheckReportsMissingOrEmptyInheritedRigPortMirror(t *testing.T)
 	}
 }
 
+// TestDoltDriftCheckFixRestoresMissingPortMirror drives `gc doctor --fix
+// --check dolt-drift` through the doctor framework: the missing mirror is
+// rewritten to the managed port by the same sync `gc start` runs, and the
+// verifying re-run comes back clean.
+func TestDoltDriftCheckFixRestoresMissingPortMirror(t *testing.T) {
+	cityDir, rigDir, managedPort, cfg := managedCityDriftFixture(t, "severed")
+	portFile := removeRigPortMirror(t, rigDir)
+
+	check := newDoltDriftCheck(cityDir, cfg)
+	d := &doctor.Doctor{}
+	d.Register(check)
+	report := d.RunCollect(&doctor.CheckContext{CityPath: cityDir}, true)
+	res := report.Results[0]
+	if report.Fixed != 1 || report.Failed != 0 {
+		t.Fatalf("doctor --fix: fixed=%d failed=%d, want the missing mirror fixed; status=%v details=%v fixErr=%q", report.Fixed, report.Failed, res.Status, res.Details, res.FixError)
+	}
+	if res.Status != doctor.StatusOK {
+		t.Errorf("verifying re-run status = %v, want StatusOK; details=%v", res.Status, res.Details)
+	}
+	got, err := os.ReadFile(portFile)
+	if err != nil {
+		t.Fatalf("rig port mirror after --fix: %v", err)
+	}
+	if strings.TrimSpace(string(got)) != managedPort {
+		t.Errorf("rig port mirror = %q, want it restored to the managed port %s", got, managedPort)
+	}
+}
+
 // TestDoltDriftCheckCanFixGating pins the fix-eligibility decision: re-pinning
 // is offered only for port-file drift (Case B) and is suppressed when a live
 // rig-local Dolt (Case A) would make re-pinning point at the wrong server.
