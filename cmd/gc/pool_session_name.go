@@ -59,6 +59,20 @@ func sessionBeadAssigneeIdentitiesInfo(i session.Info) []string {
 	return session.AssigneeIdentities(i)
 }
 
+// sessionBeadAssigneeIdentitiesForConfigInfo is sessionBeadAssigneeIdentitiesInfo
+// plus the one form a session row's own metadata cannot carry: its named
+// session's runtime name when a requalification renamed the row in place and
+// it kept the bare form's runtime name (requalifiedSpecRuntimeNameInfo). A
+// claim under that name is the renamed row's, as it is a born-qualified row's
+// by its session_name.
+func sessionBeadAssigneeIdentitiesForConfigInfo(i session.Info, cfg *config.City) []string {
+	identities := sessionBeadAssigneeIdentitiesInfo(i)
+	if name := requalifiedSpecRuntimeNameInfo(i, cfg, config.EffectiveCityName(cfg, "")); name != "" {
+		identities = append(identities, name)
+	}
+	return identities
+}
+
 type releasedPoolAssignment struct {
 	ID    string
 	Index int
@@ -266,7 +280,7 @@ func releaseOrphanedPoolAssignments(
 		if info.Closed {
 			continue
 		}
-		for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
+		for _, id := range sessionBeadAssigneeIdentitiesForConfigInfo(info, cfg) {
 			legacyOpenIdentifiers[id] = struct{}{}
 		}
 	}
@@ -603,7 +617,7 @@ func makeOpenSessionStoreRefIndex(cityPath string, cfg *config.City, leading bea
 		// identities (WI-5 W4 — the boundary projection this loop used to carry
 		// moved to the snapshot's load edge).
 		storeRefs := openSessionReachableStoreRefInfo(cityPath, cfg, claimRefs, info)
-		for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
+		for _, id := range sessionBeadAssigneeIdentitiesForConfigInfo(info, cfg) {
 			for _, storeRef := range storeRefs {
 				addOpenSessionStoreRef(index, id, storeRef)
 			}

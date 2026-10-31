@@ -4316,6 +4316,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 
+		// The lifecycle trackers below key a session's settings by the runtime
+		// name they were registered under: for a configured named session that
+		// a requalification renamed in place, its named session's runtime name,
+		// not the bare form's it keeps running under (lifecycleSessionNameInfo).
+		lifecycleName := lifecycleSessionNameInfo(infoByID[id], cfg, cityName, name)
+
 		// Preemptive max session age: restart sessions whose wall-clock age
 		// exceeds the agent's max_session_age threshold. Motivation: provider
 		// SDKs that cache credentials at session start (e.g., Claude Code via
@@ -4333,7 +4339,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if maxAgeTr != nil && alive {
 			creationCompleteAt, hasAnchor := parseRFC3339Metadata(infoByID[id].CreationCompleteAt)
 			facts := sessionpkg.TimerFacts{
-				Triggered: hasAnchor && maxAgeTr.shouldRestart(name, tp.TemplateName, creationCompleteAt, clk.Now()),
+				Triggered: hasAnchor && maxAgeTr.shouldRestart(lifecycleName, tp.TemplateName, creationCompleteAt, clk.Now()),
 			}
 			if facts.Triggered {
 				facts.Blocker = maxSessionAgeBlockerInfo(infoByID[id], clk.Now())
@@ -4433,7 +4439,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 		if it != nil && alive {
 			facts := sessionpkg.TimerFacts{
-				Triggered: it.checkIdle(name, tp.TemplateName, infoByID[id].Provider, infoByID[id].Transport, sp, clk.Now()),
+				Triggered: it.checkIdleUnder(name, lifecycleName, tp.TemplateName, infoByID[id].Provider, infoByID[id].Transport, sp, clk.Now()),
 			}
 			if facts.Triggered {
 				facts.Blocker = lifecycleTimerBlockerInfo(infoByID[id], clk.Now())
@@ -4492,11 +4498,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if assignedWorkDeferTr != nil {
 				if dec.Action == sessionpkg.TimerActionDefer && dec.TraceReason == string(TraceReasonAssignedWork) {
 					anchorBeadID := strings.TrimSpace(infoByID[id].CurrentlyProcessingBeadID)
-					if assignedWorkDeferTr.recordDefer(name, tp.TemplateName, anchorBeadID) {
+					if assignedWorkDeferTr.recordDefer(lifecycleName, tp.TemplateName, anchorBeadID) {
 						dec = sessionpkg.DecideAssignedWorkExhausted()
 					}
 				} else {
-					assignedWorkDeferTr.reset(name)
+					assignedWorkDeferTr.reset(lifecycleName)
 				}
 			}
 			switch dec.Action {

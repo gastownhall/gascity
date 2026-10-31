@@ -419,7 +419,9 @@ var registry = slices.Concat([]Field{
 	// Launch configuration.
 	{Key: "session_key", Class: ClassLaunchConfig, Premise: true, Writers: sites(op(srcManager, "Manager.PersistSessionKey"))},
 	{Key: "alias", Class: ClassAssignmentIdentity, Writers: sites(legacy(srcPoolNames, "createPoolSessionBeadWithIdentifiers"), v2("cmd/gc/allocator_create_named.go", "createEffects.writeNamed"))},
-	{Key: aliasHistoryMetadataKey, Class: ClassLaunchConfig, Writers: sites(legacy("internal/session/alias.go", "UpdatedAliasMetadata"))},
+	// A requalified named session's prior bare identity is read from its alias
+	// history into the narrow release scope (gastownhall/gascity#5957).
+	{Key: aliasHistoryMetadataKey, Class: ClassAssignmentIdentity, Writers: sites(legacy("internal/session/alias.go", "UpdatedAliasMetadata"))},
 	{Key: "common_name", Class: ClassLaunchConfig, NoWriter: "retired: no production writer; name lookups still query it"},
 	{Key: "work_dir", Class: ClassLaunchConfig, Writers: sites(legacyCreate, v2("cmd/gc/allocator_create.go", "createEffects.verifiedMetadata"))},
 	{Key: beadmeta.WorkDirMetadataKey, Class: ClassLaunchConfig, Writers: sites(legacy("cmd/gc/build_desired_state.go", "computePoolTriggerBindingPatch"), v2("cmd/gc/allocator_create.go", "createEffects.verifiedMetadata"))},

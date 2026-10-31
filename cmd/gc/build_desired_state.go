@@ -861,7 +861,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 	// canonical bead or direct assigned work.
 	subPhaseStart = trace.demandNow()
 	namedMaterialized := 0
-	named := computeNamedSessionDemand(cityName, cityPath, cfg, store, suspendedRigPaths, namedDefaultDemand, assignedWorkBeads, assignedWorkStoreRefs, readyAssigned, scaleCheckCounts, stderr)
+	named := computeNamedSessionDemand(cityName, cityPath, cfg, store, bp.sessionBeads, suspendedRigPaths, namedDefaultDemand, assignedWorkBeads, assignedWorkStoreRefs, readyAssigned, scaleCheckCounts, stderr)
 	for identity, spec := range named.specs {
 		canonicalInfo, hasCanonical := findCanonicalNamedSessionInfo(bp.sessionBeads, spec)
 		if !hasCanonical {
@@ -976,11 +976,13 @@ type namedSessionDemand struct {
 }
 
 // computeNamedSessionDemand derives named-session demand from the demand
-// pass's collected work and scale-check counts.
+// pass's collected work and scale-check counts. sessionBeads holds the open
+// rows a named session's canonical row is looked up in.
 func computeNamedSessionDemand(
 	cityName, cityPath string,
 	cfg *config.City,
 	store beads.Store,
+	sessionBeads *sessionBeadSnapshot,
 	suspendedRigPaths map[string]bool,
 	namedDefaultDemand map[string]bool,
 	assignedWorkBeads []beads.Bead,
@@ -990,17 +992,22 @@ func computeNamedSessionDemand(
 	stderr io.Writer,
 ) namedSessionDemand {
 	claimRefs := func() []string { return assignedWorkRelocatedClaimRefs(cityPath, cfg, store) }
-	return computeNamedSessionDemandOn(cityName, cityPath, cfg, claimRefs, suspendedRigPaths, namedDefaultDemand, assignedWorkBeads, assignedWorkStoreRefs, readyAssigned, scaleCheckCounts, stderr)
+	canonical := func(spec namedSessionSpec) (session.Info, bool) {
+		return findCanonicalNamedSessionInfo(sessionBeads, spec)
+	}
+	return computeNamedSessionDemandOn(cityName, cityPath, cfg, claimRefs, canonical, suspendedRigPaths, namedDefaultDemand, assignedWorkBeads, assignedWorkStoreRefs, readyAssigned, scaleCheckCounts, stderr)
 }
 
 // computeNamedSessionDemandOn is computeNamedSessionDemand with the claim-ref
-// lookup supplied: claimRefs runs only when there is work to match and a named
-// spec to match it, as before. The v2 allocator passes refs it resolved
-// outside its pure pass.
+// and canonical-row lookups supplied: claimRefs runs only when there is work
+// to match and a named spec to match it, as before, and canonical only for a
+// claim under a requalified session's bare leaf (namedBareClaimOwner). The v2
+// allocator passes refs it resolved outside its pure pass and its own rows.
 func computeNamedSessionDemandOn(
 	cityName, cityPath string,
 	cfg *config.City,
 	claimRefs func() []string,
+	canonical func(namedSessionSpec) (session.Info, bool),
 	suspendedRigPaths map[string]bool,
 	namedDefaultDemand map[string]bool,
 	assignedWorkBeads []beads.Bead,
@@ -1055,6 +1062,7 @@ func computeNamedSessionDemandOn(
 		namedClaimRefs = claimRefs()
 	}
 	for identity, spec := range namedSpecs {
+		ownsBareClaim := namedBareClaimOwner(cfg, spec, canonical)
 		for i, wb := range assignedWorkBeads {
 			// in_progress work is always actionable; open work is direct named
 			// demand only when it passed the store's readiness/deps gate. Without
@@ -1075,7 +1083,7 @@ func computeNamedSessionDemandOn(
 				continue
 			}
 			assignee := strings.TrimSpace(wb.Assignee)
-			if !namedSessionAssigneeMatchesSpec(spec, identity, assignee) {
+			if !namedSessionAssigneeMatchesSpec(spec, identity, assignee) && !ownsBareClaim(assignee) {
 				continue
 			}
 			// ga-i1d0tr Candidate B: a bare-template Assignee used to be
@@ -2115,7 +2123,7 @@ func readyAssignedWorkAssignees(cfg *config.City, sessionsStore beads.Store, ses
 			if info.Closed {
 				continue
 			}
-			for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
+			for _, id := range sessionBeadAssigneeIdentitiesForConfigInfo(info, cfg) {
 				add(id)
 			}
 		}

@@ -117,7 +117,10 @@ func (p *decidePass) demand() {
 		}
 	}
 	refs := p.in.Demand.RelocatedClaimRefs
-	p.named = computeNamedSessionDemandOn(p.in.CityName, p.in.CityPath, p.cfg, func() []string { return refs },
+	canonical := func(spec namedSessionSpec) (session.Info, bool) {
+		return session.FindCanonicalNamedSessionInfo(p.namedCandidates(), spec)
+	}
+	p.named = computeNamedSessionDemandOn(p.in.CityName, p.in.CityPath, p.cfg, func() []string { return refs }, canonical,
 		p.in.SuspendedRigPaths, p.in.Demand.NamedDefault, p.in.Demand.AssignedWork, p.in.Demand.AssignedStoreRefs,
 		p.in.Demand.ReadyAssigned, p.merged.ScaleCheckCounts, io.Discard)
 }
@@ -605,17 +608,7 @@ func (p *decidePass) planIdentifiers(cfgAgent *config.Agent, template string, pl
 // so a named row on any leg counts as canonical; legacy checks only the
 // sessions store.
 func (p *decidePass) planNamed() {
-	// Identity duplicates never stand for their identity: the canonical
-	// lookup takes the first claimant in census order.
-	candidates := p.occupancy
-	if slices.Contains(slices.Collect(maps.Values(p.none)), reasonIdentityDuplicate) {
-		candidates = make([]session.Info, 0, len(p.occupancy))
-		for _, info := range p.occupancy {
-			if k, ok := p.byID[info.ID]; !ok || p.none[k] != reasonIdentityDuplicate {
-				candidates = append(candidates, info)
-			}
-		}
-	}
+	candidates := p.namedCandidates()
 	for _, identity := range slices.Sorted(maps.Keys(p.named.specs)) {
 		spec := p.named.specs[identity]
 		template := namedSessionBackingTemplate(spec)
@@ -656,6 +649,23 @@ func (p *decidePass) planNamed() {
 			Alias: identity, ConfiguredNamedIdentity: identity,
 		}
 	}
+}
+
+// namedCandidates are the rows a configured named session's canonical row is
+// looked up in: the occupancy without its identity duplicates, which never
+// stand for their identity, so the lookup takes the first claimant in census
+// order.
+func (p *decidePass) namedCandidates() []session.Info {
+	if !slices.Contains(slices.Collect(maps.Values(p.none)), reasonIdentityDuplicate) {
+		return p.occupancy
+	}
+	candidates := make([]session.Info, 0, len(p.occupancy))
+	for _, info := range p.occupancy {
+		if k, ok := p.byID[info.ID]; !ok || p.none[k] != reasonIdentityDuplicate {
+			candidates = append(candidates, info)
+		}
+	}
+	return candidates
 }
 
 // namedGate returns why a named plan is refused, or "". It sets the plan's
