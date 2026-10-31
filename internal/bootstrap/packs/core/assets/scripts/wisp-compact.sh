@@ -13,6 +13,12 @@
 #   recovery, error, escalation: 7d
 #   default (untyped): 24h
 #
+# Mail is not wisp churn. Messages (issue_type "message") are ephemeral
+# beads too. Reading one labels it read and leaves it open; archiving or a
+# retention sweep closes it. This script never deletes or promotes them:
+# mail retention is the controller wisp GC's [mail] retention_ttl arm, not
+# this TTL table.
+#
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
@@ -23,9 +29,9 @@ __SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CITY="${GC_CITY:-.}"
 
-# Get all ephemeral beads.
+# Get all ephemeral beads except mail.
 ALL=$(gc bd list --json --all -n 0 2>/dev/null) || exit 0
-EPHEMERALS=$(echo "$ALL" | jq '[.[] | select(.ephemeral == true)]' 2>/dev/null) || exit 0
+EPHEMERALS=$(echo "$ALL" | jq '[.[] | select(.ephemeral == true and .issue_type != "message")]' 2>/dev/null) || exit 0
 
 if [ -z "$EPHEMERALS" ] || [ "$EPHEMERALS" = "[]" ]; then
     exit 0
