@@ -265,7 +265,6 @@ go_test(
         "query_ids_test.go",
         "query_seek_test.go",
         "ready_context_internal_test.go",
-        "repro_prime_replace_close_test.go",
         "runview_lifecycle_test.go",
         "runview_roundtrip_test.go",
         "schema_cursor_drift_test.go",

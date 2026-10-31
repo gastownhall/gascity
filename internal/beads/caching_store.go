@@ -1645,12 +1645,12 @@ func (c *CachingStore) prime(ctx context.Context) error {
 
 	now := c.clockNow()
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.fullScanGen > startScan {
 		// A reconcile merged after this listing started (full Primes do not
 		// overlap). It is as complete and may be newer, and it promoted the
 		// cache live, so this merges nothing, including the store-wide flags,
 		// as a reconcile skips after a newer full Prime.
+		c.mu.Unlock()
 		return nil
 	}
 	// The replace runs only when no mutation or merge followed the listing:
@@ -1658,6 +1658,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	replace := c.mutationSeq == startSeq && c.scanGen == startScan
 	c.scanGen++
 	c.fullScanGen = c.scanGen
+	reverify := false
 	if replace {
 		nextBeads := beadMap
 		nextDeps := depsFromBeads(beadMap, depMap, depsComplete && depErr == nil)
@@ -1669,35 +1670,23 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		// carried over from the old cache keep theirs.
 		nextReadyLost := make(map[string]struct{})
 		for id, current := range c.beads {
-			if fresh, exists := beadMap[id]; exists {
-				if _, keep := c.recentLocalBeadConflictLocked(id, fresh, now, true); keep {
-					nextBeads[id] = cloneBead(current)
-					if deps, ok := c.deps[id]; ok {
-						nextDeps[id] = cloneDeps(deps)
-					}
-					if _, lost := c.readyProjectionLost[id]; lost {
-						nextReadyLost[id] = struct{}{}
-					}
-					c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
-				}
+			carry, unverified := c.primeCarriesLocked(id, current, beadMap, now)
+			if !carry {
 				continue
 			}
-			// Absent from the scan is not a close: the listing is
-			// active-only, so a row closed, deleted, or merely omitted
-			// behind the cache looks the same here. Carry every non-closed
-			// row for the next cacheFullScanQuery reconcile, whose per-id
-			// re-verify (recoverMissingFromList) merges an alive row back,
-			// announces a verified close exactly once, or defers on error.
-			// Only a row the cache already holds closed is dropped.
-			if current.Status != "closed" {
-				nextBeads[id] = cloneBead(current)
-				if deps, ok := c.deps[id]; ok {
-					nextDeps[id] = cloneDeps(deps)
-				}
-				if _, lost := c.readyProjectionLost[id]; lost {
-					nextReadyLost[id] = struct{}{}
-				}
-				c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
+			nextBeads[id] = cloneBead(current)
+			if deps, ok := c.deps[id]; ok {
+				nextDeps[id] = cloneDeps(deps)
+			}
+			if _, lost := c.readyProjectionLost[id]; lost {
+				nextReadyLost[id] = struct{}{}
+			}
+			c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
+			if unverified {
+				// Dirty, so reads take the backing for the row until a
+				// refresh or the re-verify settles it.
+				nextDirty[id] = struct{}{}
+				reverify = true
 			}
 		}
 		if depErr != nil {
@@ -1718,12 +1707,12 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		c.localBeadAt = nextLocalBeadAt
 		c.readyProjectionLost = nextReadyLost
 		c.deletedSeq = make(map[string]uint64)
-		// The replace dropped every beadSeq fence and the deletion fences;
-		// like an eviction, it keeps the write fences of the rows it drops
-		// (the ones it holds closed) for the next reconcile to retain. It
-		// runs only when no mutation followed startSeq, so every start below
-		// the current seq saw one and is refused wholesale
-		// (writeFencedLocked).
+		// The replace dropped the beadSeq fences of the rows it replaced or
+		// dropped, and the deletion fences; like an eviction, it keeps the
+		// write fences of the rows it drops (the ones it holds closed) for
+		// the next reconcile to retain. It runs only when no mutation
+		// followed startSeq, so every start below the current seq saw one and
+		// is refused wholesale (writeFencedLocked).
 		c.fenceFloor = c.mutationSeq
 	} else {
 		for id, b := range beadMap {
@@ -1755,7 +1744,37 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	c.markFreshLocked(now)
 	c.lastScanAt = now
 	c.updateStatsLocked()
+	c.mu.Unlock()
+	if reverify {
+		// Ask for the re-verify now rather than a cadence after this scan:
+		// it announces the carried rows' closes, and a reconcile this Prime
+		// made discard its merge re-arms only a request it took itself.
+		c.RequestReconcile()
+	}
 	return nil
+}
+
+// primeCarriesLocked reports whether a full Prime's replace keeps current, the
+// row the cache holds for id, over what the scan (beadMap) returned, and
+// whether the kept row is unverified. A listed row is kept only when a recent
+// local write changed it, which the scan may predate. A row absent from the
+// scan is not known to be closed: the listing is active-only, so a row closed,
+// deleted, or merely omitted behind the cache looks the same here. Every
+// non-closed one is kept for the next cacheFullScanQuery reconcile, whose
+// per-id re-verify (recoverMissingFromList) merges an alive row back,
+// announces a verified close exactly once, or defers on error; only a row the
+// cache already holds closed is dropped. A kept absent row is unverified
+// unless a recent local write vouches for the cached row, as it does for a
+// listed one. Caller must hold c.mu.
+func (c *CachingStore) primeCarriesLocked(id string, current Bead, beadMap map[string]Bead, now time.Time) (carry, unverified bool) {
+	if fresh, listed := beadMap[id]; listed {
+		_, keep := c.recentLocalBeadConflictLocked(id, fresh, now, true)
+		return keep, false
+	}
+	if current.Status == "closed" {
+		return false, false
+	}
+	return true, !recentLocalMutation(c.localBeadAt[id], now)
 }
 
 func (c *CachingStore) beginFullPrime() (*fullPrimeCycle, bool) {
