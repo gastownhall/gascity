@@ -49,7 +49,7 @@ schema = 1
     description = "Route every shipped bead command through gc, so role workers, workflow pages and check scripts reach graph steps on split-store cities (no raw bd), and carry the graph.v2 prompt, check-script and workflow fixes on main since 0.1.6."
 
   [[pack.release]]
-    version = "0.0.0-rfc8191.1"
+    version = "0.0.8191"
     ref = "feat/rfc-8191-beginner-experience"
     commit = "4fcf37600776fd885f4bef74785305508218d2cb"
     hash = "sha256:3656065babc9a9794d8ecf92a647c8d6c0594fcab64ec246a5a6814f929212b6"
@@ -146,7 +146,7 @@ schema = 1
     description = "Maintenance release for Gas City 1.5.x, cut from 0.1.11: every shipped gastown bead command goes through gc bd (backport of 9b4df3e), so split-store cities reach graph steps from the polecat and witness prompts, the polecat-work and witness-patrol formulas, the review check scripts (which now read molecules through a federated gc ready union) and the churn watcher; the refinery duplicate-bug check filters with --title-contains, a flag that exists."
 
   [[pack.release]]
-    version = "0.0.0-rfc8191.1"
+    version = "0.0.8191"
     ref = "feat/rfc-8191-beginner-experience"
     commit = "4fcf37600776fd885f4bef74785305508218d2cb"
     hash = "sha256:ab73744a44615b021691e5ed13f44a51b5f9c5821a994c4c3397b109b63bf799"
