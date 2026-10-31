@@ -1801,3 +1801,224 @@ func repoRoot(t *testing.T) string {
 		dir = parent
 	}
 }
+
+// TestValidateRequiresOptionsProofToUseOptionsRunner pins the ledger-level
+// pairing of ProofRef.Options and ProofRef.Runner: a proof that declares
+// options must name RunProviderTestsWithOptions, and a proof that declares
+// none must name RunProviderTests.
+func TestValidateRequiresOptionsProofToUseOptionsRunner(t *testing.T) {
+	tests := []struct {
+		name    string
+		options *ProofOptions
+		runner  SymbolRef
+		want    string
+	}{
+		{
+			name:    "options declared with the plain runner",
+			options: &ProofOptions{DuplicateStartReconnects: true},
+			runner:  runtimeProviderRunner,
+			want:    "proof runner is internal/runtime/runtimetest.RunProviderTests, want internal/runtime/runtimetest.RunProviderTestsWithOptions",
+		},
+		{
+			name:   "no options declared with the options runner",
+			runner: runtimeProviderRunnerWithOptions,
+			want:   "proof runner is internal/runtime/runtimetest.RunProviderTestsWithOptions, want internal/runtime/runtimetest.RunProviderTests",
+		},
+		{
+			name:    "options declared with the options runner",
+			options: &ProofOptions{DuplicateStartReconnects: true},
+			runner:  runtimeProviderRunnerWithOptions,
+		},
+		{
+			name:   "no options declared with the plain runner",
+			runner: runtimeProviderRunner,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry := validRuntimeEntry("runtime.fixture", "exact:fixture", ContractClaim{
+				Contract:    ContractRuntimeProvider,
+				Disposition: DispositionProved,
+				Proof: &ProofRef{
+					File:    "internal/runtime/fake_conformance_test.go",
+					Test:    "TestFakeConformance",
+					Runner:  tt.runner,
+					Options: tt.options,
+				},
+			})
+			err := Validate([]Entry{entry})
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() error = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestValidateProofRefsChecksContractRunnerOptions pins the options-literal
+// rules the AST proof validator applies to RunProviderTestsWithOptions: the
+// third argument must be an inline runtimetest.Options literal that sets only
+// DuplicateStartReconnects, to a literal bool equal to the ledger's
+// ProofOptions, so a proved claim cannot hide a skip or a weakened
+// expectation behind a runner option the static check cannot read.
+func TestValidateProofRefsChecksContractRunnerOptions(t *testing.T) {
+	const imports = `import (
+	fmtalias "fmt"
+	runtimealias "github.com/gastownhall/gascity/internal/runtime"
+	contractalias "github.com/gastownhall/gascity/internal/runtime/runtimetest"
+	testalias "testing"
+)
+`
+	reconnects := &ProofOptions{DuplicateStartReconnects: true}
+	noKnob := &ProofOptions{}
+	tests := []struct {
+		name     string
+		options  *ProofOptions
+		preamble string
+		trailing string
+		want     string
+	}{
+		{
+			name:     "explicit true matching the ledger",
+			options:  reconnects,
+			trailing: `, contractalias.Options{DuplicateStartReconnects: true}`,
+		},
+		{
+			name:     "empty literal when the ledger declares no knob",
+			options:  noKnob,
+			trailing: `, contractalias.Options{}`,
+		},
+		{
+			name:     "explicit false when the ledger declares no knob",
+			options:  noKnob,
+			trailing: `, contractalias.Options{DuplicateStartReconnects: false}`,
+		},
+		{
+			name:    "options argument missing",
+			options: reconnects,
+			want:    "requires the test parameter, one inline factory, and an options literal",
+		},
+		{
+			name:     "extra argument after the options literal",
+			options:  reconnects,
+			trailing: `, contractalias.Options{DuplicateStartReconnects: true}, "extra"`,
+			want:     "requires the test parameter, one inline factory, and an options literal",
+		},
+		{
+			name:     "options passed without being declared",
+			trailing: `, contractalias.Options{DuplicateStartReconnects: true}`,
+			want:     "requires the test parameter and one inline factory",
+		},
+		{
+			name:     "options held in a variable",
+			options:  reconnects,
+			preamble: "var opts contractalias.Options\n",
+			trailing: `, opts`,
+			want:     "options argument must be an inline internal/runtime/runtimetest.Options composite literal",
+		},
+		{
+			name:     "options literal of another package's type",
+			options:  reconnects,
+			trailing: `, fmtalias.Options{DuplicateStartReconnects: true}`,
+			want:     "options argument must be an inline internal/runtime/runtimetest.Options composite literal",
+		},
+		{
+			name:     "options literal of an unqualified local type",
+			options:  reconnects,
+			trailing: `, Options{DuplicateStartReconnects: true}`,
+			want:     "options argument must be an inline internal/runtime/runtimetest.Options composite literal",
+		},
+		{
+			name:     "options literal that is not a named type",
+			options:  reconnects,
+			trailing: `, []bool{true}`,
+			want:     "options argument must be an inline internal/runtime/runtimetest.Options composite literal",
+		},
+		{
+			name:     "positional field",
+			options:  reconnects,
+			trailing: `, contractalias.Options{true}`,
+			want:     "options literal fields must use key: value form",
+		},
+		{
+			name:     "non-identifier field key",
+			options:  reconnects,
+			trailing: `, contractalias.Options{"DuplicateStartReconnects": true}`,
+			want:     "options literal has a non-identifier field key",
+		},
+		{
+			name:     "SkipStartError beside the knob",
+			options:  reconnects,
+			trailing: `, contractalias.Options{DuplicateStartReconnects: true, SkipStartError: func(error) bool { return true }}`,
+			want:     "options literal field SkipStartError is not allowed",
+		},
+		{
+			name:     "SkipStartError without the knob",
+			options:  reconnects,
+			trailing: `, contractalias.Options{SkipStartError: func(error) bool { return true }}`,
+			want:     "options literal field SkipStartError is not allowed",
+		},
+		{
+			name:     "knob set from a variable",
+			options:  reconnects,
+			preamble: "var reconnect bool\n",
+			trailing: `, contractalias.Options{DuplicateStartReconnects: reconnect}`,
+			want:     "options field DuplicateStartReconnects must be a literal bool",
+		},
+		{
+			name:     "knob set from an expression",
+			options:  reconnects,
+			trailing: `, contractalias.Options{DuplicateStartReconnects: !false}`,
+			want:     "options field DuplicateStartReconnects must be a literal bool",
+		},
+		{
+			name:     "knob false where the ledger declares true",
+			options:  reconnects,
+			trailing: `, contractalias.Options{DuplicateStartReconnects: false}`,
+			want:     "options field DuplicateStartReconnects is false, want true",
+		},
+		{
+			name:     "knob true where the ledger declares none",
+			options:  noKnob,
+			trailing: `, contractalias.Options{DuplicateStartReconnects: true}`,
+			want:     "options field DuplicateStartReconnects is true, want false",
+		},
+		{
+			name:     "knob omitted where the ledger declares true",
+			options:  reconnects,
+			trailing: `, contractalias.Options{}`,
+			want:     "options literal must set DuplicateStartReconnects: true explicitly",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			body := "func TestProof(t *testalias.T) {\n" + tt.preamble +
+				"contractalias.RunProviderTestsWithOptions(t, func(_ *testalias.T) (any, any, string) {\n" +
+				"return runtimealias.NewFake(), nil, \"session\"\n}" + tt.trailing + ")\n}\n"
+			if err := os.WriteFile(filepath.Join(root, "provider_test.go"), []byte("package fixture\n"+imports+body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			entry := proofFixtureEntry("provider_test.go", "TestProof")
+			entry.Claims[0].Proof.Runner = runtimeProviderRunnerWithOptions
+			entry.Claims[0].Proof.Options = tt.options
+			err := ValidateProofRefs(root, []Entry{entry})
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("ValidateProofRefs() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ValidateProofRefs() error = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
