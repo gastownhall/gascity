@@ -821,12 +821,12 @@ func TestDecideRefusedNudgesBackOff(t *testing.T) {
 	if e := r.Entries[0]; e.Attempts != 0 || e.Rung != RungStarted || e.Recycles != 0 {
 		t.Fatalf("entry %+v: refusals moved it toward escalation", e)
 	}
-	got, ok := NudgeTaken(r, key("s"))
-	if !ok || got.Entries[0].Refused != 0 {
-		t.Fatalf("NudgeTaken = %+v, %v", got.Entries[0], ok)
+	got, ok := NudgeDelivered(r, key("s"), r.Gen, time.Time{})
+	if !ok || got.Entries[0].Refused != 0 || !got.Delivered.IsZero() {
+		t.Fatalf("NudgeDelivered = %+v, %v", got, ok)
 	}
-	if _, ok := NudgeTaken(got, key("s")); ok {
-		t.Fatal("NudgeTaken wrote with no refusals")
+	if _, ok := NudgeDelivered(got, key("s"), r.Gen, time.Time{}); ok {
+		t.Fatal("NudgeDelivered wrote with no refusals and no delivery time")
 	}
 	if _, _, ok := NudgeRefused(r, key("s"), 99, t0); ok {
 		t.Fatal("NudgeRefused re-counted an attempt the cell no longer holds")

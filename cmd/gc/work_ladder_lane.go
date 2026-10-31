@@ -811,7 +811,11 @@ func (p *ladderPass) nudge(row beads.Bead, n workladder.Nudge, gen int64, refuse
 	}
 	p.event(events.WorkNudged, row, n.Key, gen, fields)
 	if refused > 0 {
-		p.settle(row.ID, func(r workladder.Record) (workladder.Record, bool) { return workladder.NudgeTaken(r, n.Key) })
+		// No delivery time is recorded yet (a zero time moves nothing): only
+		// the entry's refusals end.
+		p.settle(row.ID, func(r workladder.Record) (workladder.Record, bool) {
+			return workladder.NudgeDelivered(r, n.Key, gen, time.Time{})
+		})
 	}
 }
 
