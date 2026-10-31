@@ -2204,7 +2204,7 @@ func runPreparedStartCandidate(
 	defer cancel()
 	var phases startPhaseTimings
 	startCallBegin := time.Now()
-	startWitness, err := startPreparedStartCandidateWithContexts(ctx, startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
+	startWitness, err := startPreparedStartCandidate(ctx, startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startedFresh := startWitness == sessionpkg.StartRuntimeWitnessProviderStart
 	startBoundaryErr := err
 	startBoundaryUnavailable := errors.Is(startBoundaryErr, runtime.ErrRuntimeUnavailable)
@@ -3119,21 +3119,6 @@ func clonePreparedStartForAsync(item preparedStart) preparedStart {
 }
 
 func startPreparedStartCandidate(
-	ctx context.Context,
-	item preparedStart,
-	cityPath string,
-	store beads.Store,
-	sp runtime.Provider,
-	cfg *config.City,
-	phases *startPhaseTimings,
-	staleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter,
-	warmClaim warmClaimTriggerProbe,
-) (bool, error) {
-	witness, err := startPreparedStartCandidateWithContexts(ctx, ctx, item, cityPath, store, sp, cfg, phases, staleKeyDetectionWaiter, warmClaim)
-	return witness == sessionpkg.StartRuntimeWitnessProviderStart, err
-}
-
-func startPreparedStartCandidateWithContexts(
 	observationCtx context.Context,
 	startCtx context.Context,
 	item preparedStart,
