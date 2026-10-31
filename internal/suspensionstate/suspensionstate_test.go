@@ -3,9 +3,11 @@ package suspensionstate
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -500,5 +502,87 @@ func TestSuspendedRigNames(t *testing.T) {
 	}
 	if names["delta"] {
 		t.Error("delta should not be in suspended names (no preference)")
+	}
+}
+
+// TestUpdate_SerializesConcurrentUpdates proves Update's cross-process
+// flock actually closes the lost-update race described in #6056: two
+// (or more) concurrent load-mutate-save sequences against the same
+// suspension-state.json must not clobber one another.
+//
+// Each goroutine opens its own lock-file fd via a fresh Update call
+// (mirroring separate OS processes, since flock is scoped to the open
+// file description rather than the process) and mutates a distinct
+// rig key, sleeping briefly between Load and Save to widen the race
+// window. Without the lock, a later Save would overwrite an earlier
+// goroutine's in-memory copy of the map and silently drop its rig
+// entry (last-write-wins); with the lock serializing the whole
+// load-mutate-save section, every goroutine's entry must survive.
+func TestUpdate_SerializesConcurrentUpdates(t *testing.T) {
+	cityDir := t.TempDir()
+
+	const goroutines = 8
+	var wg sync.WaitGroup
+	errCh := make(chan error, goroutines)
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(i int) {
+			defer wg.Done()
+			name := fmt.Sprintf("rig-%d", i)
+			err := Update(fsys.OSFS{}, cityDir, func(st *State) bool {
+				// Widen the load->save window so an unlocked
+				// implementation would reliably interleave and lose
+				// updates instead of the race being too narrow to
+				// observe.
+				time.Sleep(10 * time.Millisecond)
+				SetRig(st, name, boolPtr(true))
+				return true
+			})
+			errCh <- err
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+	}
+
+	got, err := Load(fsys.OSFS{}, cityDir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got.Rigs) != goroutines {
+		t.Fatalf("expected %d rig entries to survive concurrent updates (no lost update), got %d: %v",
+			goroutines, len(got.Rigs), got.Rigs)
+	}
+	for i := 0; i < goroutines; i++ {
+		name := fmt.Sprintf("rig-%d", i)
+		if !IsRigSuspended(got, name) {
+			t.Errorf("expected %s to be suspended (its update was lost), rigs=%v", name, got.Rigs)
+		}
+	}
+}
+
+// TestUpdate_LoadMutateSaveRoundTrip is the basic single-writer
+// sanity check: Update should behave like Load, mutate, Save chained
+// together for the non-concurrent case.
+func TestUpdate_LoadMutateSaveRoundTrip(t *testing.T) {
+	cityDir := t.TempDir()
+
+	if err := Update(fsys.OSFS{}, cityDir, func(st *State) bool {
+		SetRig(st, "alpha", boolPtr(true))
+		return true
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := Load(fsys.OSFS{}, cityDir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !IsRigSuspended(got, "alpha") {
+		t.Fatal("expected alpha suspended after Update")
 	}
 }
