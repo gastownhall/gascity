@@ -275,18 +275,29 @@ func (t *Tmux) isClaudeTarget(target string) bool {
 
 // clearInputBeforePaste empties the input box of session's pane target before
 // a nudge pastes into it. The caller holds the nudge lock and has checked that
-// no client is attached. For Claude it clears the whole draft and verifies it,
-// checking before every key that no client has attached since: a human who
-// attaches mid-clear stops it with an error wrapping
-// runtime.ErrInputClearSkipped, and the nudge must not paste onto what is left
-// of the draft (#5192). When the input box cannot be read, and for other
-// providers, it sends the single Ctrl-U it always has.
-func (t *Tmux) clearInputBeforePaste(ctx context.Context, session, target string) error {
+// no client is attached. look runs before every key the clear sends, and its
+// error stops the clear: a permission prompt or question dialog that opened
+// since the caller's last look owns the pane's input, and the clear's keys
+// would reach it instead of the input box (#8150). For Claude it clears the
+// whole draft and verifies it, checking before every key that no client has
+// attached since: a human who attaches mid-clear stops it with an error
+// wrapping runtime.ErrInputClearSkipped, and the nudge must not paste onto
+// what is left of the draft (#5192). When the input box cannot be read, and
+// for other providers, it sends the single Ctrl-U it always has.
+func (t *Tmux) clearInputBeforePaste(ctx context.Context, session, target string, look func() error) error {
 	if t.isClaudeTarget(target) {
 		in, ok, err := t.readInput(target)
 		if err == nil && ok {
-			return t.emptyInput(ctx, target, in, func() error { return t.noClientAttached(session) })
+			return t.emptyInput(ctx, target, in, func() error {
+				if err := t.noClientAttached(session); err != nil {
+					return err
+				}
+				return look()
+			})
 		}
+	}
+	if err := look(); err != nil {
+		return err
 	}
 	if _, err := t.runCtx(ctx, "send-keys", "-t", paneTarget(target), "C-u"); err != nil {
 		return err
