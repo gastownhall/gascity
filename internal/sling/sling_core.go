@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 const (
@@ -246,7 +247,8 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 }
 
 // targetScopeSuspension reports whether the city is effectively suspended
-// and, when the target agent belongs to a suspended rig, that rig's name. For
+// and, when the target agent belongs to a suspended rig, that rig's name. The
+// rig is resolved by name or by path, as gc hook and gc session wake do. For
 // each scope the runtime suspension state that gc suspend / gc rig suspend and
 // their resume commands write wins over the authored suspended_on_start
 // default, which also honors the deprecated suspended field. The pool
@@ -269,11 +271,12 @@ func targetScopeSuspension(fs fsys.FS, deps SlingDeps, a config.Agent) (city boo
 		}
 	}
 	city = suspensionstate.EffectiveCitySuspended(st, deps.Cfg.Workspace.EffectiveSuspendedOnStart())
-	if a.Dir == "" {
+	rigName := workdirutil.ConfiguredRigName(deps.CityPath, a, deps.Cfg.Rigs)
+	if rigName == "" {
 		return city, ""
 	}
 	for _, r := range deps.Cfg.Rigs {
-		if r.Name == a.Dir && suspensionstate.EffectiveRigSuspended(st, r.Name, r.EffectiveSuspendedOnStart()) {
+		if r.Name == rigName && suspensionstate.EffectiveRigSuspended(st, r.Name, r.EffectiveSuspendedOnStart()) {
 			return city, r.Name
 		}
 	}
