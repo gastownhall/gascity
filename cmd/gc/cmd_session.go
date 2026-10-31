@@ -760,8 +760,23 @@ func newSessionListCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List chat sessions",
-		Long:  `List all chat sessions. By default shows active and suspended sessions.`,
-		Args:  cobra.NoArgs,
+		Long: `List all chat sessions. By default shows active and suspended sessions.
+
+With --json the output is one JSON document that validates against
+"gc session list --json-schema=result". It has one of two renderings, and
+the route a command takes decides which one it gets:
+
+  - Local rendering (a supervisor-hosted city, a city with no reachable
+    API, or GC_NO_API set for a local target; a remote target rejects
+    GC_NO_API): filters, sessions and summary. Each row carries closed, and
+    agent_name when the session has one, and no liveness.
+  - API rendering (a remote target such as --city-url, a standalone
+    controller's [api] port, or a supervisor serving a city that has no
+    controller): _cache_age_s and sessions. Each row carries running, and no
+    agent_name or closed.
+
+Both carry schema_version "1" and ok true, and an empty list renders as [].`,
+		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdSessionList(stateFilter, templateFilter, jsonOutput, stdout, stderr) != 0 {
 				return errExit
@@ -805,8 +820,10 @@ func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Clien
 // alongside at the envelope level — the shape documented in the
 // ga-h6w designer's D5 contract.
 type sessionListJSONEnvelope struct {
-	CacheAgeS float64       `json:"_cache_age_s"`
-	Sessions  []SessionView `json:"sessions"`
+	SchemaVersion string        `json:"schema_version"`
+	OK            bool          `json:"ok"`
+	CacheAgeS     float64       `json:"_cache_age_s"`
+	Sessions      []SessionView `json:"sessions"`
 }
 
 // SessionView mirrors api.SessionView for CLI JSON output. Defined as an
@@ -820,8 +837,10 @@ type SessionView = api.SessionView
 func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool, stdout io.Writer) int {
 	if jsonOutput {
 		env := sessionListJSONEnvelope{
-			CacheAgeS: cr.AgeSeconds,
-			Sessions:  cr.Body,
+			SchemaVersion: "1",
+			OK:            true,
+			CacheAgeS:     cr.AgeSeconds,
+			Sessions:      cr.Body,
 		}
 		if env.Sessions == nil {
 			env.Sessions = []SessionView{}

@@ -347,7 +347,7 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 	root.PersistentFlags().StringVar(&contextFlag, "context", "",
 		"operate the REMOTE city named by this context (~/.gc/contexts.toml)")
 	root.PersistentFlags().StringVar(&cityURLFlag, "city-url", "",
-		"operate a REMOTE city at this base URL (https; requires --city-name)")
+		"operate a REMOTE city at this base URL (https, or http on a loopback host; requires --city-name). A remote target is served by the API, so --json prints the API rendering where a command has two (see gc session list --help)")
 	root.PersistentFlags().StringVar(&cityNameFlag, "city-name", "",
 		"remote city name for --city-url (does not overload --city)")
 	configureJSONSchemaFlag(root)
