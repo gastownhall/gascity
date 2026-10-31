@@ -165,10 +165,10 @@ func writeCorruptSuspensionState(t *testing.T, cityPath string) {
 	}
 }
 
-func setRigSuspendedState(t *testing.T, cityPath, rig string, suspended bool) {
+func setRigSuspendedState(t *testing.T, cityPath string, suspended bool) {
 	t.Helper()
-	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityPath, rig, &suspended); err != nil {
-		t.Fatalf("SetRigSuspended(%q, %v): %v", rig, suspended, err)
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityPath, "myrig", &suspended); err != nil {
+		t.Fatalf("SetRigSuspended(myrig, %v): %v", suspended, err)
 	}
 }
 
@@ -180,7 +180,7 @@ func TestDoSlingWarnsRigSuspendedByRuntimeState(t *testing.T) {
 	}
 	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
 	deps := suspensionTestDeps(t, cfg, runner)
-	setRigSuspendedState(t, deps.CityPath, "myrig", true)
+	setRigSuspendedState(t, deps.CityPath, true)
 
 	result, err := DoSling(testOpts(a, suspensionTestBead), deps, nil)
 	if err != nil {
@@ -204,7 +204,7 @@ func TestDoSlingWarnsCityAndRigBothSuspended(t *testing.T) {
 	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
 	deps := suspensionTestDeps(t, cfg, runner)
 	setCitySuspendedState(t, deps.CityPath, true)
-	setRigSuspendedState(t, deps.CityPath, "myrig", true)
+	setRigSuspendedState(t, deps.CityPath, true)
 
 	result, err := DoSling(testOpts(a, suspensionTestBead), deps, nil)
 	if err != nil {
@@ -223,7 +223,7 @@ func TestDoSlingCityTargetIgnoresOtherSuspendedRig(t *testing.T) {
 	}
 	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
 	deps := suspensionTestDeps(t, cfg, runner)
-	setRigSuspendedState(t, deps.CityPath, "myrig", true)
+	setRigSuspendedState(t, deps.CityPath, true)
 
 	result, err := DoSling(testOpts(a, suspensionTestBead), deps, nil)
 	if err != nil {
@@ -267,5 +267,42 @@ func TestTargetScopeSuspensionSkipsStateReadWithoutCityPath(t *testing.T) {
 	}
 	if len(fs.Calls) != 0 {
 		t.Errorf("filesystem calls = %v, want none when CityPath is empty", fs.Calls)
+	}
+}
+
+func TestDoSlingRuntimeResumeOverridesAuthoredSuspend(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		workspace config.Workspace
+		rig       config.Rig
+	}{
+		{
+			name:      "suspended_on_start",
+			workspace: config.Workspace{Name: "test-city", SuspendedOnStart: true},
+			rig:       config.Rig{Name: "myrig", SuspendedOnStart: true},
+		},
+		{
+			name:      "deprecated suspended",
+			workspace: config.Workspace{Name: "test-city", Suspended: true},
+			rig:       config.Rig{Name: "myrig", Suspended: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := newFakeRunner()
+			cfg := &config.City{Workspace: tc.workspace, Rigs: []config.Rig{tc.rig}}
+			a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+			deps := suspensionTestDeps(t, cfg, runner)
+			setCitySuspendedState(t, deps.CityPath, false)
+			setRigSuspendedState(t, deps.CityPath, false)
+
+			result, err := DoSling(testOpts(a, suspensionTestBead), deps, nil)
+			if err != nil {
+				t.Fatalf("DoSling error: %v", err)
+			}
+			if result.CitySuspended || result.SuspendedRig != "" {
+				t.Errorf("CitySuspended = %v, SuspendedRig = %q; want neither after an explicit runtime resume", result.CitySuspended, result.SuspendedRig)
+			}
+			assertSlingRouted(t, result, runner)
+		})
 	}
 }
