@@ -1341,7 +1341,11 @@ func preflightSourceBeadChain(rootStore beads.Store, rootID string, opts Process
 
 // closeSourceBeadChain walks gc.source_bead_id / gc.source_store_ref upward
 // from the just-finalized workflow root and closes every parent source bead
-// in its native store. A missing resolver for a cross-store ref, a deleted
+// in its native store. The walk stops after the first source whose closed
+// work outcome withholds dependents (gc.work_outcome=blocked, the readiness
+// rule in beads.DependencySatisfied): that source is closed or left closed in
+// its blocked form and its parents stay open, because the blocked work did
+// not complete them. A missing resolver for a cross-store ref, a deleted
 // parent, or a cycle stops the walk as a traced no-op.
 // Resolver, store read, and close failures are returned so the finalizer stays
 // open for retry. This is what makes "Adopt PR" city-scope source beads
@@ -1476,20 +1480,24 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 				stopWalk = true
 				return nil
 			}
-			if !mutate {
-				return nil
+			holds := sourceHoldsChain(loaded)
+			if mutate {
+				if err := propagateSourceBeadTerminalMetadata(nextStore, loaded, current.Metadata); err != nil {
+					return fmt.Errorf("propagating source bead metadata %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
+				}
+				if loaded.Status == "closed" {
+					opts.tracef("close-source-chain root=%s skip reason=already_closed source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
+				} else {
+					if err := closeSourceBeadPreservingOutcome(nextStore, loaded); err != nil {
+						return fmt.Errorf("closing source bead %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
+					}
+					opts.tracef("close-source-chain root=%s closed source=%s ref=%s preserved_outcome=%t", rootID, nextID, sourceChainStoreLabel(effectiveRef), strings.TrimSpace(loaded.Metadata[beadmeta.OutcomeMetadataKey]) != "")
+				}
 			}
-			if err := propagateSourceBeadTerminalMetadata(nextStore, loaded, current.Metadata); err != nil {
-				return fmt.Errorf("propagating source bead metadata %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
+			if holds {
+				opts.tracef("close-source-chain root=%s stop reason=blocked_source source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
+				stopWalk = true
 			}
-			if loaded.Status == "closed" {
-				opts.tracef("close-source-chain root=%s skip reason=already_closed source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
-				return nil
-			}
-			if err := closeSourceBeadPreservingOutcome(nextStore, loaded); err != nil {
-				return fmt.Errorf("closing source bead %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
-			}
-			opts.tracef("close-source-chain root=%s closed source=%s ref=%s preserved_outcome=%t", rootID, nextID, sourceChainStoreLabel(effectiveRef), strings.TrimSpace(loaded.Metadata[beadmeta.OutcomeMetadataKey]) != "")
 			return nil
 		}
 		if mutate && opts.SourceWorkflowLock != nil {
@@ -1677,6 +1685,15 @@ func sourceChainRootIDs(roots []beads.Bead) string {
 	}
 	sort.Strings(ids)
 	return strings.Join(ids, ",")
+}
+
+// sourceHoldsChain reports whether a source bead, once closed, keeps the
+// source chain above it open: the readiness rule that withholds a closed
+// blocked bead's dependents (beads.DependencySatisfied) withholds its
+// parents too. Status is "closed" because every source the walk reaches is
+// left closed (already closed, or closed by the mutate pass).
+func sourceHoldsChain(source beads.Bead) bool {
+	return !beads.DependencySatisfied("closed", beads.ReadinessWorkOutcome(source.Metadata))
 }
 
 func closeSourceBeadPreservingOutcome(store beads.Store, bead beads.Bead) error {

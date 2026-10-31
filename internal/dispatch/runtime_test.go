@@ -4559,6 +4559,141 @@ func TestProcessWorkflowFinalizeRetriesWhenSourceBeadLookupFails(t *testing.T) {
 	}
 }
 
+// mustStampSourceBead stamps metadata keys on an existing fixture bead and
+// optionally closes it, mirroring mustCreateWorkflowBead's stamp order so the
+// bead keeps the metadata it was created with.
+func mustStampSourceBead(t *testing.T, store beads.Store, beadID string, status string, metadata map[string]string) {
+	t.Helper()
+	for key, value := range metadata {
+		if err := store.SetMetadata(beadID, key, value); err != nil {
+			t.Fatalf("set metadata %s=%s on %s: %v", key, value, beadID, err)
+		}
+	}
+	if status == "closed" {
+		if err := store.Close(beadID); err != nil {
+			t.Fatalf("close source bead %s: %v", beadID, err)
+		}
+	}
+}
+
+// TestProcessWorkflowFinalizeStopsSourceChainAtBlockedSource asserts that a
+// passing workflow whose source bead is already closed with
+// gc.work_outcome=blocked keeps that source closed in its blocked form and
+// leaves the source's own parent open: the readiness rule withholds a closed
+// blocked bead's dependents (beads.DependencySatisfied), so finalize must not
+// close the parents above it as if the work had completed. The walk never
+// reads the root's formula, so both core work formulas behave the same.
+func TestProcessWorkflowFinalizeStopsSourceChainAtBlockedSource(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		formulaName  string
+		staleFailure bool
+	}{
+		{name: "formula=mol-do-work", formulaName: "mol-do-work"},
+		{name: "formula=mol-polecat-report", formulaName: "mol-polecat-report"},
+		{name: "formula=mol-do-work stale failure stamp", formulaName: "mol-do-work", staleFailure: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSourceChainFinalizeFixture(t)
+			mustStampSourceBead(t, f.rigStore, f.workflow.ID, "", map[string]string{
+				"gc.formula_name":   tc.formulaName,
+				"pr_review.verdict": "approve",
+			})
+			blocked := map[string]string{
+				"gc.outcome":      "pass",
+				"gc.work_outcome": "blocked",
+			}
+			if tc.staleFailure {
+				blocked["gc.failure_reason"] = "earlier attempt failed"
+				blocked["gc.failure_class"] = "hard"
+				blocked["gc.failure_subject"] = f.workflow.ID
+			}
+			mustStampSourceBead(t, f.rigStore, f.rigLaunch.ID, "closed", blocked)
+			var trace bytes.Buffer
+
+			result, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{
+				ResolveStoreRef: f.resolver,
+				Tracef: func(format string, args ...any) {
+					fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
+				},
+			})
+			if err != nil {
+				t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+			}
+			if !result.Processed || result.Action != "workflow-pass" {
+				t.Fatalf("workflow result = %+v, want processed workflow-pass", result)
+			}
+
+			rootAfter, err := f.rigStore.Get(f.workflow.ID)
+			if err != nil {
+				t.Fatalf("get workflow root: %v", err)
+			}
+			if rootAfter.Status != "closed" {
+				t.Fatalf("workflow root status = %q, want closed", rootAfter.Status)
+			}
+			finalizerAfter, err := f.rigStore.Get(f.finalizer.ID)
+			if err != nil {
+				t.Fatalf("get finalizer: %v", err)
+			}
+			if finalizerAfter.Status != "closed" {
+				t.Fatalf("finalizer status = %q, want closed", finalizerAfter.Status)
+			}
+
+			rigLaunchAfter, err := f.rigStore.Get(f.rigLaunch.ID)
+			if err != nil {
+				t.Fatalf("get rig launch: %v", err)
+			}
+			if rigLaunchAfter.Status != "closed" {
+				t.Fatalf("rig launch status = %q, want closed (the blocked form is closed, not open)", rigLaunchAfter.Status)
+			}
+			if got := rigLaunchAfter.Metadata["gc.work_outcome"]; got != "blocked" {
+				t.Errorf("rig launch gc.work_outcome = %q, want blocked (preserved)", got)
+			}
+			if got := rigLaunchAfter.Metadata["gc.outcome"]; got != "pass" {
+				t.Errorf("rig launch gc.outcome = %q, want pass (unchanged)", got)
+			}
+			if got := rigLaunchAfter.Metadata["pr_review.verdict"]; got != "approve" {
+				t.Errorf("rig launch pr_review.verdict = %q, want approve (propagated from root)", got)
+			}
+			if tc.staleFailure {
+				for _, key := range []string{"gc.failure_reason", "gc.failure_class", "gc.failure_subject"} {
+					if got := strings.TrimSpace(rigLaunchAfter.Metadata[key]); got != "" {
+						t.Errorf("rig launch %s = %q, want cleared by the pass-path propagation", key, got)
+					}
+				}
+			}
+
+			citySourceAfter, err := f.cityStore.Get(f.citySource.ID)
+			if err != nil {
+				t.Fatalf("get city source: %v", err)
+			}
+			if citySourceAfter.Status == "closed" {
+				t.Fatalf("city source status = closed with gc.outcome %q; the source chain must stop at a gc.work_outcome=blocked source", citySourceAfter.Metadata["gc.outcome"])
+			}
+			if got := citySourceAfter.Metadata["gc.outcome"]; got != "" {
+				t.Errorf("city source gc.outcome = %q, want none", got)
+			}
+			if got := citySourceAfter.Metadata["pr_review.verdict"]; got != "" {
+				t.Errorf("city source pr_review.verdict = %q, want none (nothing propagates past a blocked source)", got)
+			}
+
+			traceText := trace.String()
+			for _, want := range []string{
+				"stop reason=blocked_source",
+				"source=" + f.rigLaunch.ID,
+			} {
+				if !strings.Contains(traceText, want) {
+					t.Errorf("trace missing %q:\n%s", want, traceText)
+				}
+			}
+		})
+	}
+}
+
 func TestProcessWorkflowFinalizeClosesSourcesUnderProvidedLock(t *testing.T) {
 	t.Parallel()
 
