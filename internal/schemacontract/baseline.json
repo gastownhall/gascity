@@ -1,0 +1,3421 @@
+{
+  "format": 1,
+  "schemas": {
+    "agent/add/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"add","required":true},
+            {"path":"$.command","types":["string"],"const":"agent add","required":true},
+            {"path":"$.name","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.qualified_name","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.suspended","types":["boolean"],"required":true}
+          ]
+        }
+      }
+    ],
+    "agent/is-foreign/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.city_name","types":["string"],"required":false},
+            {"path":"$.detail","types":["string"],"required":false},
+            {"path":"$.identity","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.reason","types":["string"],"required":true},
+            {"path":"$.roster_source","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.verdict","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "agent/list/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.agents","types":["array"],"required":true},
+            {"path":"$.agents[]","types":["object"],"required":false},
+            {"path":"$.agents[].configured_sling_query","types":["string"],"required":false},
+            {"path":"$.agents[].configured_work_query","types":["string"],"required":false},
+            {"path":"$.agents[].dir","types":["string"],"required":false},
+            {"path":"$.agents[].name","types":["string"],"required":true},
+            {"path":"$.agents[].pool","types":["object"],"required":false},
+            {"path":"$.agents[].pool.max","types":["integer"],"required":true},
+            {"path":"$.agents[].pool.min","types":["integer"],"required":true},
+            {"path":"$.agents[].provider","types":["string"],"required":false},
+            {"path":"$.agents[].qualified_name","types":["string"],"required":true},
+            {"path":"$.agents[].scope","types":["string"],"required":false},
+            {"path":"$.agents[].session","types":["string"],"required":false},
+            {"path":"$.agents[].sling_query","types":["string"],"required":true},
+            {"path":"$.agents[].suspended","types":["boolean"],"required":true},
+            {"path":"$.agents[].work_dir","types":["string"],"required":false},
+            {"path":"$.agents[].work_query","types":["string"],"required":true},
+            {"path":"$.city_name","types":["string"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "agent/resume/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"resume","required":true},
+            {"path":"$.command","types":["string"],"const":"agent resume","required":true},
+            {"path":"$.name","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.qualified_name","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.suspended","types":["boolean"],"const":false,"required":true}
+          ]
+        }
+      }
+    ],
+    "agent/suspend/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"suspend","required":true},
+            {"path":"$.command","types":["string"],"const":"agent suspend","required":true},
+            {"path":"$.name","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.qualified_name","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.suspended","types":["boolean"],"const":true,"required":true}
+          ]
+        }
+      }
+    ],
+    "analyze/reliability/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.ambiguous_aliases","types":["integer"],"required":true},
+            {"path":"$.groups","types":["array"],"required":true},
+            {"path":"$.groups[]","types":["object"],"required":false},
+            {"path":"$.groups[].crashed","types":["integer"],"required":true},
+            {"path":"$.groups[].drained","types":["integer"],"required":true},
+            {"path":"$.groups[].idle_killed","types":["integer"],"required":true},
+            {"path":"$.groups[].key","types":["object"],"required":true},
+            {"path":"$.groups[].quarantined","types":["integer"],"required":true},
+            {"path":"$.groups[].sessions","types":["integer"],"required":true},
+            {"path":"$.groups[].unhealthy_total","types":["integer"],"required":true},
+            {"path":"$.instrumentation","types":["object"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.skipped","types":["integer"],"required":true},
+            {"path":"$.total","types":["object"],"required":true}
+          ]
+        }
+      }
+    ],
+    "bd/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["any"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true}
+          ]
+        }
+      }
+    ],
+    "beads/city/migrate-proxied/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.city","types":["string"],"required":true},
+            {"path":"$.dry_run","types":["boolean"],"required":true},
+            {"path":"$.failed","types":["integer"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.scopes","types":["array"],"required":true},
+            {"path":"$.scopes[]","types":["object"],"required":false},
+            {"path":"$.scopes[].detail","types":["string"],"required":false},
+            {"path":"$.scopes[].dolt_data_dir","types":["string"],"required":false},
+            {"path":"$.scopes[].dolt_mode","types":["string"],"required":false},
+            {"path":"$.scopes[].error","types":["string"],"required":false},
+            {"path":"$.scopes[].path","types":["string"],"required":true},
+            {"path":"$.scopes[].scope","types":["string"],"required":true},
+            {"path":"$.scopes[].status","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "beads/health/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": true,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.provider","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.status","types":["string"],"const":"healthy","required":true}
+          ]
+        }
+      }
+    ],
+    "beads/metadata-cas/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.bead_id","types":["string"],"required":true},
+            {"path":"$.key","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.outcome","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.store_ref","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "build-image/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.base_image","types":["string"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":false},
+            {"path":"$.context_dir","types":["string"],"required":false},
+            {"path":"$.context_only","types":["boolean"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.push","types":["boolean"],"required":true},
+            {"path":"$.rig_path_count","types":["integer"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.tag","types":["string"],"required":false}
+          ]
+        }
+      }
+    ],
+    "cities/list/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": true,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.cities","types":["array"],"required":true},
+            {"path":"$.cities[]","types":["object"],"required":false},
+            {"path":"$.cities[].name","types":["string"],"required":true},
+            {"path":"$.cities[].path","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.registry_path","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "cities/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": true,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.cities","types":["array"],"required":true},
+            {"path":"$.cities[]","types":["object"],"required":false},
+            {"path":"$.cities[].name","types":["string"],"required":true},
+            {"path":"$.cities[].path","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.registry_path","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "config/explain/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.builtin_ancestor","types":["string"],"required":false},
+            {"path":"$.chain","types":["array"],"required":true},
+            {"path":"$.chain[]","types":["object"],"required":false},
+            {"path":"$.chain[].kind","types":["string"],"required":true},
+            {"path":"$.chain[].name","types":["string"],"required":true},
+            {"path":"$.name","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.provenance","types":["object"],"required":true},
+            {"path":"$.provenance.field_layer","types":["object"],"required":false},
+            {"path":"$.provenance.map_key_layer","types":["object"],"required":false},
+            {"path":"$.resolved","types":["object"],"required":true}
+          ]
+        }
+      }
+    ],
+    "config/show/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.config","types":["object"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.provenance","types":["any"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.validation","types":["object"],"required":true},
+            {"path":"$.validation.errors","types":["array"],"required":true},
+            {"path":"$.validation.errors[]","types":["string"],"required":false},
+            {"path":"$.validation.ok","types":["boolean"],"required":true},
+            {"path":"$.validation.warnings","types":["array"],"required":true},
+            {"path":"$.validation.warnings[]","types":["string"],"required":false},
+            {"path":"$.warnings","types":["array"],"required":true},
+            {"path":"$.warnings[]","types":["string"],"required":false}
+          ]
+        }
+      }
+    ],
+    "converge/approve/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"required":true},
+            {"path":"$.bead_id","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "converge/create/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.bead_id","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "converge/iterate/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"required":true},
+            {"path":"$.bead_id","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "converge/list/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.entries","types":["array"],"required":true},
+            {"path":"$.entries[]","types":["object"],"required":false},
+            {"path":"$.entries[].formula","types":["string"],"required":true},
+            {"path":"$.entries[].gate","types":["string"],"required":true},
+            {"path":"$.entries[].id","types":["string"],"required":true},
+            {"path":"$.entries[].iteration","types":["string"],"required":true},
+            {"path":"$.entries[].state","types":["string"],"required":true},
+            {"path":"$.entries[].target","types":["string"],"required":true},
+            {"path":"$.entries[].title","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true}
+          ]
+        }
+      }
+    ],
+    "converge/retry/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.new_bead_id","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.source_bead_id","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "converge/status/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true}
+          ]
+        }
+      }
+    ],
+    "converge/stop/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"required":true},
+            {"path":"$.bead_id","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "converge/test-gate/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.bead_id","types":["string"],"required":true},
+            {"path":"$.condition","types":["string"],"required":false},
+            {"path":"$.exit_code","types":["integer"],"required":false},
+            {"path":"$.mode","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.outcome","types":["string"],"required":false},
+            {"path":"$.reason","types":["string"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.skipped","types":["boolean"],"required":false},
+            {"path":"$.stderr","types":["string"],"required":false},
+            {"path":"$.stdout","types":["string"],"required":false}
+          ]
+        }
+      }
+    ],
+    "converge/test-trigger/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.bead_id","types":["string"],"required":true},
+            {"path":"$.condition","types":["string"],"required":false},
+            {"path":"$.exit_code","types":["integer"],"required":false},
+            {"path":"$.mode","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.outcome","types":["string"],"required":false},
+            {"path":"$.reason","types":["string"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.skipped","types":["boolean"],"required":false},
+            {"path":"$.stderr","types":["string"],"required":false},
+            {"path":"$.stdout","types":["string"],"required":false}
+          ]
+        }
+      }
+    ],
+    "convoy/add/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"add","required":true},
+            {"path":"$.command","types":["string"],"const":"convoy.add","required":true},
+            {"path":"$.convoy_id","types":["string"],"required":true},
+            {"path":"$.issue_ids","types":["array"],"required":true},
+            {"path":"$.issue_ids[]","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "convoy/check/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"check","required":true},
+            {"path":"$.closed","types":["integer"],"required":true},
+            {"path":"$.command","types":["string"],"const":"convoy.check","required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "convoy/close/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"close","required":true},
+            {"path":"$.command","types":["string"],"const":"convoy.close","required":true},
+            {"path":"$.convoy_id","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "convoy/create/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"create","required":true},
+            {"path":"$.command","types":["string"],"const":"convoy.create","required":true},
+            {"path":"$.convoy_id","types":["string"],"required":true},
+            {"path":"$.issue_ids","types":["array"],"required":false},
+            {"path":"$.issue_ids[]","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.title","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "convoy/land/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"land","required":true},
+            {"path":"$.already_closed","types":["boolean"],"required":false},
+            {"path":"$.command","types":["string"],"const":"convoy.land","required":true},
+            {"path":"$.convoy_id","types":["string"],"required":true},
+            {"path":"$.dry_run","types":["boolean"],"required":false},
+            {"path":"$.forced","types":["boolean"],"required":false},
+            {"path":"$.notify","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.open_children","types":["integer"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.title","types":["string"],"required":true},
+            {"path":"$.total_children","types":["integer"],"required":false}
+          ]
+        }
+      }
+    ],
+    "convoy/list/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.convoys","types":["array"],"required":true},
+            {"path":"$.convoys[]","types":["object"],"required":false},
+            {"path":"$.convoys[].child_ids","types":["array"],"required":false},
+            {"path":"$.convoys[].child_ids[]","types":["string"],"required":false},
+            {"path":"$.convoys[].fields","types":["object"],"required":false},
+            {"path":"$.convoys[].fields.merge","types":["string"],"required":false},
+            {"path":"$.convoys[].fields.notify","types":["string"],"required":false},
+            {"path":"$.convoys[].fields.owner","types":["string"],"required":false},
+            {"path":"$.convoys[].fields.target","types":["string"],"required":false},
+            {"path":"$.convoys[].id","types":["string"],"required":true},
+            {"path":"$.convoys[].owned","types":["boolean"],"required":true},
+            {"path":"$.convoys[].progress","types":["object"],"required":true},
+            {"path":"$.convoys[].progress.closed","types":["integer"],"required":true},
+            {"path":"$.convoys[].progress.total","types":["integer"],"required":true},
+            {"path":"$.convoys[].status","types":["string"],"required":true},
+            {"path":"$.convoys[].title","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.summary","types":["object"],"required":true},
+            {"path":"$.summary.total","types":["integer"],"required":true}
+          ]
+        }
+      }
+    ],
+    "convoy/status/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.children","types":["array"],"required":true},
+            {"path":"$.children[]","types":["object"],"required":false},
+            {"path":"$.children[].assignee","types":["string"],"required":false},
+            {"path":"$.children[].id","types":["string"],"required":true},
+            {"path":"$.children[].status","types":["string"],"required":true},
+            {"path":"$.children[].title","types":["string"],"required":true},
+            {"path":"$.children[].type","types":["string"],"required":true},
+            {"path":"$.convoy","types":["object"],"required":true},
+            {"path":"$.convoy.fields","types":["object"],"required":false},
+            {"path":"$.convoy.fields.merge","types":["string"],"required":false},
+            {"path":"$.convoy.fields.notify","types":["string"],"required":false},
+            {"path":"$.convoy.fields.owner","types":["string"],"required":false},
+            {"path":"$.convoy.fields.target","types":["string"],"required":false},
+            {"path":"$.convoy.id","types":["string"],"required":true},
+            {"path":"$.convoy.labels","types":["array"],"required":false},
+            {"path":"$.convoy.labels[]","types":["string"],"required":false},
+            {"path":"$.convoy.owned","types":["boolean"],"required":true},
+            {"path":"$.convoy.status","types":["string"],"required":true},
+            {"path":"$.convoy.title","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.progress","types":["object"],"required":true},
+            {"path":"$.progress.closed","types":["integer"],"required":true},
+            {"path":"$.progress.total","types":["integer"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "convoy/stranded/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"stranded","required":true},
+            {"path":"$.command","types":["string"],"const":"convoy.stranded","required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.stranded","types":["integer"],"required":true}
+          ]
+        }
+      }
+    ],
+    "convoy/target/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"target","required":true},
+            {"path":"$.command","types":["string"],"const":"convoy.target","required":true},
+            {"path":"$.convoy_id","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.target","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "doctor/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": true,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.blocking_failed","types":["integer"],"required":false},
+            {"path":"$.failed","types":["integer"],"required":true},
+            {"path":"$.fixed","types":["integer"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.passed","types":["integer"],"required":true},
+            {"path":"$.results","types":["array"],"required":true},
+            {"path":"$.results[]","types":["object"],"required":false},
+            {"path":"$.results[].details","types":["array"],"required":false},
+            {"path":"$.results[].details[]","types":["string"],"required":false},
+            {"path":"$.results[].fix_attempted","types":["boolean"],"required":false},
+            {"path":"$.results[].fix_error","types":["string"],"required":false},
+            {"path":"$.results[].fix_hint","types":["string"],"required":false},
+            {"path":"$.results[].fixed","types":["boolean"],"required":false},
+            {"path":"$.results[].message","types":["string"],"required":true},
+            {"path":"$.results[].name","types":["string"],"required":true},
+            {"path":"$.results[].status","types":["any"],"required":true},
+            {"path":"$.warned","types":["integer"],"required":true}
+          ]
+        }
+      }
+    ],
+    "dolt-cleanup/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.dropped","types":["object"],"required":true},
+            {"path":"$.errors","types":["array"],"required":true},
+            {"path":"$.errors[]","types":["object"],"required":false},
+            {"path":"$.force_blockers","types":["array"],"required":true},
+            {"path":"$.force_blockers[]","types":["object"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.port","types":["object"],"required":true},
+            {"path":"$.port.fallback","types":["boolean"],"required":true},
+            {"path":"$.port.resolved","types":["integer"],"required":true},
+            {"path":"$.port.source","types":["string"],"required":true},
+            {"path":"$.purge","types":["object"],"required":true},
+            {"path":"$.reaped","types":["object"],"required":true},
+            {"path":"$.rigs_protected","types":["array"],"required":true},
+            {"path":"$.rigs_protected[]","types":["object"],"required":false},
+            {"path":"$.schema","types":["string"],"const":"gc.dolt.cleanup.v1","required":true},
+            {"path":"$.summary","types":["object"],"required":true},
+            {"path":"$.summary.bytes_freed_disk","types":["integer"],"required":true},
+            {"path":"$.summary.bytes_freed_rss","types":["integer"],"required":true},
+            {"path":"$.summary.errors_total","types":["integer"],"required":true}
+          ]
+        }
+      }
+    ],
+    "event/emit/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.actor","types":["string"],"required":true},
+            {"path":"$.event_type","types":["string"],"required":true},
+            {"path":"$.has_payload","types":["boolean"],"required":true},
+            {"path":"$.message","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.subject","types":["string"],"required":false},
+            {"path":"$.submitted","types":["boolean"],"required":true}
+          ]
+        }
+      }
+    ],
+    "events/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": true,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.actor","types":["string"],"required":true},
+            {"path":"$.city","types":["string"],"required":false},
+            {"path":"$.message","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.payload","types":["any"],"required":false},
+            {"path":"$.seq","types":["integer"],"required":true},
+            {"path":"$.subject","types":["string"],"required":false},
+            {"path":"$.ts","types":["string"],"required":true},
+            {"path":"$.type","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "failure.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.error","types":["object"],"required":true},
+            {"path":"$.error.code","types":["string"],"required":true},
+            {"path":"$.error.exit_code","types":["integer"],"required":true},
+            {"path":"$.error.message","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":false,"required":true},
+            {"path":"$.schema_version","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "formula/catalog/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.formulas","types":["array"],"required":true},
+            {"path":"$.formulas[]","types":["object"],"required":false},
+            {"path":"$.formulas[].description","types":["string"],"required":true},
+            {"path":"$.formulas[].name","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.summary","types":["object"],"required":true},
+            {"path":"$.summary.count","types":["integer"],"required":true},
+            {"path":"$.warnings","types":["array"],"required":false},
+            {"path":"$.warnings[]","types":["object"],"required":false},
+            {"path":"$.warnings[].code","types":["string"],"required":true},
+            {"path":"$.warnings[].message","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "formula/cook/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.attach_bead_id","types":["string"],"required":false},
+            {"path":"$.created","types":["integer"],"required":true},
+            {"path":"$.formula","types":["string"],"required":true},
+            {"path":"$.id_mapping","types":["object"],"required":false},
+            {"path":"$.mode","types":["any"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.root_id","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.workflow_root_id","types":["string"],"required":false}
+          ]
+        }
+      }
+    ],
+    "formula/list/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":false},
+            {"path":"$.formulas","types":["array"],"required":true},
+            {"path":"$.formulas[]","types":["object"],"required":false},
+            {"path":"$.formulas[].name","types":["string"],"required":true},
+            {"path":"$.formulas[].source","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.search_paths","types":["array"],"required":false},
+            {"path":"$.search_paths[]","types":["string"],"required":false},
+            {"path":"$.summary","types":["object"],"required":true},
+            {"path":"$.summary.count","types":["integer"],"required":true},
+            {"path":"$.warnings","types":["array"],"required":false},
+            {"path":"$.warnings[]","types":["object"],"required":false},
+            {"path":"$.warnings[].code","types":["string"],"required":true},
+            {"path":"$.warnings[].message","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "formula/show/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":false},
+            {"path":"$.deps","types":["array"],"required":false},
+            {"path":"$.deps[]","types":["object"],"required":false},
+            {"path":"$.deps[].depends_on_id","types":["string"],"required":true},
+            {"path":"$.deps[].metadata","types":["string"],"required":false},
+            {"path":"$.deps[].step_id","types":["string"],"required":true},
+            {"path":"$.deps[].type","types":["string"],"required":false},
+            {"path":"$.description","types":["string"],"required":false},
+            {"path":"$.metadata","types":["object"],"required":false},
+            {"path":"$.name","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.phase","types":["string"],"required":false},
+            {"path":"$.pour","types":["boolean"],"required":false},
+            {"path":"$.provided_vars","types":["object"],"required":false},
+            {"path":"$.root_only","types":["boolean"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.search_paths","types":["array"],"required":true},
+            {"path":"$.search_paths[]","types":["string"],"required":false},
+            {"path":"$.steps","types":["array"],"required":true},
+            {"path":"$.steps[]","types":["object"],"required":false},
+            {"path":"$.steps[].assignee","types":["string"],"required":false},
+            {"path":"$.steps[].description","types":["string"],"required":false},
+            {"path":"$.steps[].id","types":["string"],"required":true},
+            {"path":"$.steps[].is_root","types":["boolean"],"required":false},
+            {"path":"$.steps[].labels","types":["array"],"required":false},
+            {"path":"$.steps[].labels[]","types":["string"],"required":false},
+            {"path":"$.steps[].metadata","types":["object"],"required":false},
+            {"path":"$.steps[].notes","types":["string"],"required":false},
+            {"path":"$.steps[].priority","types":["integer"],"required":false},
+            {"path":"$.steps[].title","types":["string"],"required":false},
+            {"path":"$.steps[].type","types":["string"],"required":false},
+            {"path":"$.vars","types":["array"],"required":false},
+            {"path":"$.vars[]","types":["object"],"required":false},
+            {"path":"$.vars[].default","types":["string"],"required":false},
+            {"path":"$.vars[].description","types":["string"],"required":false},
+            {"path":"$.vars[].enum","types":["array"],"required":false},
+            {"path":"$.vars[].enum[]","types":["string"],"required":false},
+            {"path":"$.vars[].name","types":["string"],"required":true},
+            {"path":"$.vars[].pattern","types":["string"],"required":false},
+            {"path":"$.vars[].required","types":["boolean"],"required":false},
+            {"path":"$.vars[].rig_default","types":["string"],"required":false},
+            {"path":"$.vars[].type","types":["string"],"required":false},
+            {"path":"$.warnings","types":["array"],"required":false},
+            {"path":"$.warnings[]","types":["object"],"required":false},
+            {"path":"$.warnings[].code","types":["string"],"required":true},
+            {"path":"$.warnings[].message","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "github/pr/backfill/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.actionable_count","types":["integer"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.created_repairs","types":["integer"],"required":false},
+            {"path":"$.dispatched_repairs","types":["integer"],"required":false},
+            {"path":"$.existing_repairs","types":["integer"],"required":false},
+            {"path":"$.monitor_count","types":["integer"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.repair_beads","types":["array"],"required":false},
+            {"path":"$.repair_beads[]","types":["object"],"required":false},
+            {"path":"$.repair_beads[].created","types":["boolean"],"required":true},
+            {"path":"$.repair_beads[].dispatched","types":["boolean"],"required":false},
+            {"path":"$.repair_beads[].id","types":["string"],"required":true},
+            {"path":"$.repair_beads[].pr","types":["integer"],"required":true},
+            {"path":"$.repair_beads[].route","types":["string"],"required":false},
+            {"path":"$.repair_beads[].updated","types":["boolean"],"required":false},
+            {"path":"$.repair_beads[].url","types":["string"],"required":false},
+            {"path":"$.repair_beads[].workflow","types":["string"],"required":false},
+            {"path":"$.result_count","types":["integer"],"required":true},
+            {"path":"$.results","types":["array"],"required":true},
+            {"path":"$.results[]","types":["object"],"required":false},
+            {"path":"$.results[].actionable","types":["boolean"],"required":true},
+            {"path":"$.results[].base_ref_name","types":["string"],"required":true},
+            {"path":"$.results[].failed_checks","types":["array"],"required":false},
+            {"path":"$.results[].failed_checks[]","types":["string"],"required":false},
+            {"path":"$.results[].failure_kind","types":["string"],"required":false},
+            {"path":"$.results[].head_ref_name","types":["string"],"required":false},
+            {"path":"$.results[].head_sha","types":["string"],"required":false},
+            {"path":"$.results[].merge_state_status","types":["string"],"required":false},
+            {"path":"$.results[].monitor","types":["string"],"required":true},
+            {"path":"$.results[].notify","types":["array"],"required":false},
+            {"path":"$.results[].notify[]","types":["string"],"required":false},
+            {"path":"$.results[].number","types":["integer"],"required":true},
+            {"path":"$.results[].owner","types":["string"],"required":true},
+            {"path":"$.results[].pending_checks","types":["array"],"required":false},
+            {"path":"$.results[].pending_checks[]","types":["string"],"required":false},
+            {"path":"$.results[].repair_route","types":["string"],"required":true},
+            {"path":"$.results[].repo","types":["string"],"required":true},
+            {"path":"$.results[].rig","types":["string"],"required":true},
+            {"path":"$.results[].state","types":["string"],"required":true},
+            {"path":"$.results[].title","types":["string"],"required":false},
+            {"path":"$.results[].url","types":["string"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.updated_repairs","types":["integer"],"required":false}
+          ]
+        }
+      }
+    ],
+    "graph/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.input","types":["array"],"required":true},
+            {"path":"$.input[]","types":["string"],"required":false},
+            {"path":"$.nodes","types":["array"],"required":true},
+            {"path":"$.nodes[]","types":["object"],"required":false},
+            {"path":"$.nodes[].blocked_by","types":["array"],"required":true},
+            {"path":"$.nodes[].blocked_by[]","types":["string"],"required":false},
+            {"path":"$.nodes[].id","types":["string"],"required":true},
+            {"path":"$.nodes[].open_blockers","types":["array"],"required":true},
+            {"path":"$.nodes[].open_blockers[]","types":["string"],"required":false},
+            {"path":"$.nodes[].parent_id","types":["string"],"required":false},
+            {"path":"$.nodes[].ready","types":["boolean"],"required":true},
+            {"path":"$.nodes[].status","types":["string"],"required":true},
+            {"path":"$.nodes[].title","types":["string"],"required":true},
+            {"path":"$.nodes[].type","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.summary","types":["object"],"required":true},
+            {"path":"$.summary.blocked","types":["integer"],"required":true},
+            {"path":"$.summary.closed","types":["integer"],"required":true},
+            {"path":"$.summary.ready","types":["integer"],"required":true},
+            {"path":"$.summary.total","types":["integer"],"required":true}
+          ]
+        }
+      }
+    ],
+    "handoff/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.auto","types":["boolean"],"required":true},
+            {"path":"$.key","types":["string"],"required":false},
+            {"path":"$.mode","types":["string"],"required":true},
+            {"path":"$.notice_op_id","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.op_id","types":["string"],"required":false},
+            {"path":"$.replayed","types":["boolean"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.subject","types":["string"],"required":false},
+            {"path":"$.target","types":["string"],"required":false}
+          ]
+        }
+      }
+    ],
+    "hook/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["any"],"required":true},
+            {"path":"$.assignee","types":["string"],"required":false},
+            {"path":"$.bead_id","types":["string"],"required":false},
+            {"path":"$.command","types":["string"],"const":"hook","required":true},
+            {"path":"$.continuation_assigned","types":["array"],"required":false},
+            {"path":"$.continuation_assigned[]","types":["string"],"required":false},
+            {"path":"$.continuation_group","types":["string"],"required":false},
+            {"path":"$.drain_acknowledged","types":["boolean"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.reason","types":["any"],"required":true},
+            {"path":"$.root_bead_id","types":["string"],"required":false},
+            {"path":"$.route","types":["string"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "import/status/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.imports","types":["array"],"required":true},
+            {"path":"$.imports[]","types":["object"],"required":false},
+            {"path":"$.imports[].constraint","types":["string"],"required":false},
+            {"path":"$.imports[].kind","types":["string"],"required":true},
+            {"path":"$.imports[].name","types":["string"],"required":true},
+            {"path":"$.imports[].path","types":["string"],"required":false},
+            {"path":"$.imports[].pin","types":["object"],"required":false},
+            {"path":"$.imports[].pin.commit","types":["string"],"required":true},
+            {"path":"$.imports[].pin.fetched","types":["string"],"required":false},
+            {"path":"$.imports[].pin.version","types":["string"],"required":true},
+            {"path":"$.imports[].source","types":["string"],"required":true},
+            {"path":"$.locked_packs","types":["array"],"required":true},
+            {"path":"$.locked_packs[]","types":["object"],"required":false},
+            {"path":"$.locked_packs[].commit","types":["string"],"required":true},
+            {"path":"$.locked_packs[].fetched","types":["string"],"required":false},
+            {"path":"$.locked_packs[].source","types":["string"],"required":true},
+            {"path":"$.locked_packs[].version","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.packs_lock_path","types":["string"],"required":true},
+            {"path":"$.packs_lock_sha256","types":["string"],"required":false},
+            {"path":"$.root","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "init/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.bootstrap_profile","types":["string"],"required":false},
+            {"path":"$.city_name","types":["string"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.mode","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.provider","types":["string"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "lint/result.schema.json": [
+      {
+        "schema_version": "2",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.error_count","types":["integer"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.packs","types":["array"],"required":true},
+            {"path":"$.packs[]","types":["object"],"required":false},
+            {"path":"$.packs[].diagnostics","types":["array"],"required":false},
+            {"path":"$.packs[].diagnostics[]","types":["object"],"required":false},
+            {"path":"$.packs[].diagnostics[].line","types":["integer"],"required":false},
+            {"path":"$.packs[].diagnostics[].message","types":["string"],"required":true},
+            {"path":"$.packs[].diagnostics[].path","types":["string"],"required":true},
+            {"path":"$.packs[].diagnostics[].severity","types":["string"],"required":true},
+            {"path":"$.packs[].name","types":["string"],"required":false},
+            {"path":"$.packs[].ok","types":["boolean"],"required":true},
+            {"path":"$.packs[].path","types":["string"],"required":true},
+            {"path":"$.passed","types":["boolean"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"2","required":true}
+          ]
+        }
+      }
+    ],
+    "mail/archive/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"archive","required":true},
+            {"path":"$.already_done","types":["boolean"],"required":false},
+            {"path":"$.command","types":["string"],"const":"mail.archive","required":true},
+            {"path":"$.count","types":["integer"],"required":true},
+            {"path":"$.id","types":["string"],"required":false},
+            {"path":"$.ids","types":["array"],"required":true},
+            {"path":"$.ids[]","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "mail/count/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.recipient","types":["string"],"required":true},
+            {"path":"$.recipients","types":["array"],"required":true},
+            {"path":"$.recipients[]","types":["string"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.total","types":["integer"],"required":true},
+            {"path":"$.unread","types":["integer"],"required":true}
+          ]
+        }
+      }
+    ],
+    "mail/delete/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"delete","required":true},
+            {"path":"$.already_done","types":["boolean"],"required":false},
+            {"path":"$.command","types":["string"],"const":"mail.delete","required":true},
+            {"path":"$.count","types":["integer"],"required":true},
+            {"path":"$.id","types":["string"],"required":false},
+            {"path":"$.ids","types":["array"],"required":true},
+            {"path":"$.ids[]","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "mail/inbox/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.messages","types":["array"],"required":true},
+            {"path":"$.messages[]","types":["object"],"required":false},
+            {"path":"$.messages[].body","types":["string"],"required":true},
+            {"path":"$.messages[].cc","types":["array"],"required":false},
+            {"path":"$.messages[].cc[]","types":["string"],"required":false},
+            {"path":"$.messages[].created_at","types":["string"],"required":true},
+            {"path":"$.messages[].from","types":["string"],"required":true},
+            {"path":"$.messages[].id","types":["string"],"required":true},
+            {"path":"$.messages[].priority","types":["integer"],"required":false},
+            {"path":"$.messages[].read","types":["boolean"],"required":true},
+            {"path":"$.messages[].reply_to","types":["string"],"required":false},
+            {"path":"$.messages[].rig","types":["string"],"required":false},
+            {"path":"$.messages[].subject","types":["string"],"required":true},
+            {"path":"$.messages[].thread_id","types":["string"],"required":false},
+            {"path":"$.messages[].to","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.recipient","types":["string"],"required":false},
+            {"path":"$.recipients","types":["array"],"required":true},
+            {"path":"$.recipients[]","types":["string"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "mail/mark-read/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"mark-read","required":true},
+            {"path":"$.command","types":["string"],"const":"mail.mark-read","required":true},
+            {"path":"$.count","types":["integer"],"required":true},
+            {"path":"$.id","types":["string"],"required":true},
+            {"path":"$.ids","types":["array"],"required":true},
+            {"path":"$.ids[]","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "mail/mark-unread/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"mark-unread","required":true},
+            {"path":"$.command","types":["string"],"const":"mail.mark-unread","required":true},
+            {"path":"$.count","types":["integer"],"required":true},
+            {"path":"$.id","types":["string"],"required":true},
+            {"path":"$.ids","types":["array"],"required":true},
+            {"path":"$.ids[]","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "mail/peek/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.message","types":["object"],"required":true},
+            {"path":"$.message.body","types":["string"],"required":true},
+            {"path":"$.message.cc","types":["array"],"required":false},
+            {"path":"$.message.cc[]","types":["string"],"required":false},
+            {"path":"$.message.created_at","types":["string"],"required":true},
+            {"path":"$.message.from","types":["string"],"required":true},
+            {"path":"$.message.id","types":["string"],"required":true},
+            {"path":"$.message.priority","types":["integer"],"required":false},
+            {"path":"$.message.read","types":["boolean"],"required":true},
+            {"path":"$.message.reply_to","types":["string"],"required":false},
+            {"path":"$.message.rig","types":["string"],"required":false},
+            {"path":"$.message.subject","types":["string"],"required":true},
+            {"path":"$.message.thread_id","types":["string"],"required":false},
+            {"path":"$.message.to","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "mail/read/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.message","types":["object"],"required":true},
+            {"path":"$.message.body","types":["string"],"required":true},
+            {"path":"$.message.cc","types":["array"],"required":false},
+            {"path":"$.message.cc[]","types":["string"],"required":false},
+            {"path":"$.message.created_at","types":["string"],"required":true},
+            {"path":"$.message.from","types":["string"],"required":true},
+            {"path":"$.message.id","types":["string"],"required":true},
+            {"path":"$.message.priority","types":["integer"],"required":false},
+            {"path":"$.message.read","types":["boolean"],"required":true},
+            {"path":"$.message.reply_to","types":["string"],"required":false},
+            {"path":"$.message.rig","types":["string"],"required":false},
+            {"path":"$.message.subject","types":["string"],"required":true},
+            {"path":"$.message.thread_id","types":["string"],"required":false},
+            {"path":"$.message.to","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "mail/reply/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"reply","required":true},
+            {"path":"$.command","types":["string"],"const":"mail.reply","required":true},
+            {"path":"$.count","types":["integer"],"required":true},
+            {"path":"$.id","types":["string"],"required":true},
+            {"path":"$.message","types":["object"],"required":true},
+            {"path":"$.message.from","types":["string"],"required":false},
+            {"path":"$.message.id","types":["string"],"required":true},
+            {"path":"$.message.reply_to","types":["string"],"required":false},
+            {"path":"$.message.subject","types":["string"],"required":false},
+            {"path":"$.message.thread_id","types":["string"],"required":false},
+            {"path":"$.message.to","types":["string"],"required":false},
+            {"path":"$.messages","types":["array"],"required":true},
+            {"path":"$.messages[]","types":["object"],"required":false},
+            {"path":"$.messages[].from","types":["string"],"required":false},
+            {"path":"$.messages[].id","types":["string"],"required":true},
+            {"path":"$.messages[].reply_to","types":["string"],"required":false},
+            {"path":"$.messages[].subject","types":["string"],"required":false},
+            {"path":"$.messages[].thread_id","types":["string"],"required":false},
+            {"path":"$.messages[].to","types":["string"],"required":false},
+            {"path":"$.notified","types":["boolean"],"required":false},
+            {"path":"$.notify_op_ids","types":["array"],"required":false},
+            {"path":"$.notify_op_ids[]","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "mail/send/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"send","required":true},
+            {"path":"$.command","types":["string"],"const":"mail.send","required":true},
+            {"path":"$.count","types":["integer"],"required":true},
+            {"path":"$.id","types":["string"],"required":false},
+            {"path":"$.message","types":["object"],"required":false},
+            {"path":"$.message.from","types":["string"],"required":false},
+            {"path":"$.message.id","types":["string"],"required":true},
+            {"path":"$.message.reply_to","types":["string"],"required":false},
+            {"path":"$.message.subject","types":["string"],"required":false},
+            {"path":"$.message.thread_id","types":["string"],"required":false},
+            {"path":"$.message.to","types":["string"],"required":false},
+            {"path":"$.messages","types":["array"],"required":true},
+            {"path":"$.messages[]","types":["object"],"required":false},
+            {"path":"$.messages[].from","types":["string"],"required":false},
+            {"path":"$.messages[].id","types":["string"],"required":true},
+            {"path":"$.messages[].reply_to","types":["string"],"required":false},
+            {"path":"$.messages[].subject","types":["string"],"required":false},
+            {"path":"$.messages[].thread_id","types":["string"],"required":false},
+            {"path":"$.messages[].to","types":["string"],"required":false},
+            {"path":"$.notified","types":["boolean"],"required":false},
+            {"path":"$.notify_op_ids","types":["array"],"required":false},
+            {"path":"$.notify_op_ids[]","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "mail/thread/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.messages","types":["array"],"required":true},
+            {"path":"$.messages[]","types":["object"],"required":false},
+            {"path":"$.messages[].body","types":["string"],"required":true},
+            {"path":"$.messages[].cc","types":["array"],"required":false},
+            {"path":"$.messages[].cc[]","types":["string"],"required":false},
+            {"path":"$.messages[].created_at","types":["string"],"required":true},
+            {"path":"$.messages[].from","types":["string"],"required":true},
+            {"path":"$.messages[].id","types":["string"],"required":true},
+            {"path":"$.messages[].priority","types":["integer"],"required":false},
+            {"path":"$.messages[].read","types":["boolean"],"required":true},
+            {"path":"$.messages[].reply_to","types":["string"],"required":false},
+            {"path":"$.messages[].rig","types":["string"],"required":false},
+            {"path":"$.messages[].subject","types":["string"],"required":true},
+            {"path":"$.messages[].thread_id","types":["string"],"required":false},
+            {"path":"$.messages[].to","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.thread_id","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "mcp/list/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": true,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.projection","types":["object"],"required":true},
+            {"path":"$.projection.delivery","types":["string"],"required":false},
+            {"path":"$.projection.identity","types":["string"],"required":false},
+            {"path":"$.projection.not_adopted","types":["object"],"required":false},
+            {"path":"$.projection.not_adopted.parse_error","types":["string"],"required":false},
+            {"path":"$.projection.not_adopted.read_error","types":["string"],"required":false},
+            {"path":"$.projection.not_adopted.reason","types":["string"],"required":true},
+            {"path":"$.projection.not_adopted.redefined_servers","types":["array"],"required":false},
+            {"path":"$.projection.not_adopted.redefined_servers[]","types":["string"],"required":false},
+            {"path":"$.projection.not_adopted.remedy","types":["string"],"required":true},
+            {"path":"$.projection.not_adopted.symlink","types":["string"],"required":false},
+            {"path":"$.projection.not_adopted.unmanaged_keys","types":["array"],"required":false},
+            {"path":"$.projection.not_adopted.unmanaged_keys[]","types":["string"],"required":false},
+            {"path":"$.projection.not_adopted.unmanaged_servers","types":["array"],"required":false},
+            {"path":"$.projection.not_adopted.unmanaged_servers[]","types":["string"],"required":false},
+            {"path":"$.projection.provider","types":["string"],"required":true},
+            {"path":"$.projection.provider_kind","types":["string"],"required":false},
+            {"path":"$.projection.scope_root","types":["string"],"required":false},
+            {"path":"$.projection.target","types":["string"],"required":true},
+            {"path":"$.projection.work_dir","types":["string"],"required":false},
+            {"path":"$.query","types":["object"],"required":true},
+            {"path":"$.query.agent","types":["string"],"required":false},
+            {"path":"$.query.session","types":["string"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.servers","types":["array"],"required":true},
+            {"path":"$.servers[]","types":["object"],"required":false},
+            {"path":"$.servers[].args","types":["array"],"required":false},
+            {"path":"$.servers[].args[]","types":["string"],"required":false},
+            {"path":"$.servers[].command","types":["string"],"required":false},
+            {"path":"$.servers[].description","types":["string"],"required":false},
+            {"path":"$.servers[].env_keys","types":["array"],"required":false},
+            {"path":"$.servers[].env_keys[]","types":["string"],"required":false},
+            {"path":"$.servers[].header_keys","types":["array"],"required":false},
+            {"path":"$.servers[].header_keys[]","types":["string"],"required":false},
+            {"path":"$.servers[].layer","types":["string"],"required":false},
+            {"path":"$.servers[].name","types":["string"],"required":true},
+            {"path":"$.servers[].origin","types":["string"],"required":false},
+            {"path":"$.servers[].source","types":["string"],"required":true},
+            {"path":"$.servers[].template","types":["boolean"],"required":false},
+            {"path":"$.servers[].transport","types":["string"],"required":true},
+            {"path":"$.servers[].url","types":["string"],"required":false},
+            {"path":"$.shadows","types":["array"],"required":false},
+            {"path":"$.shadows[]","types":["object"],"required":false},
+            {"path":"$.shadows[].loser","types":["string"],"required":true},
+            {"path":"$.shadows[].loser_file","types":["string"],"required":true},
+            {"path":"$.shadows[].name","types":["string"],"required":true},
+            {"path":"$.shadows[].winner","types":["string"],"required":true},
+            {"path":"$.shadows[].winner_file","types":["string"],"required":true},
+            {"path":"$.skipped","types":["array"],"required":false},
+            {"path":"$.skipped[]","types":["object"],"required":false},
+            {"path":"$.skipped[].args","types":["array"],"required":false},
+            {"path":"$.skipped[].args[]","types":["string"],"required":false},
+            {"path":"$.skipped[].command","types":["string"],"required":false},
+            {"path":"$.skipped[].env_keys","types":["array"],"required":false},
+            {"path":"$.skipped[].env_keys[]","types":["string"],"required":false},
+            {"path":"$.skipped[].header_keys","types":["array"],"required":false},
+            {"path":"$.skipped[].header_keys[]","types":["string"],"required":false},
+            {"path":"$.skipped[].layer","types":["string"],"required":false},
+            {"path":"$.skipped[].name","types":["string"],"required":true},
+            {"path":"$.skipped[].origin","types":["string"],"required":false},
+            {"path":"$.skipped[].reason","types":["string"],"required":true},
+            {"path":"$.skipped[].source","types":["string"],"required":true},
+            {"path":"$.skipped[].transport","types":["string"],"required":true},
+            {"path":"$.skipped[].url","types":["string"],"required":false}
+          ]
+        }
+      }
+    ],
+    "metrics/example/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": true,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.events","types":["array"],"required":true},
+            {"path":"$.events[]","types":["object"],"required":false},
+            {"path":"$.events[].app","types":["string"],"const":"gascity","required":true},
+            {"path":"$.events[].command_id","types":["any"],"required":true},
+            {"path":"$.events[].event_id","types":["string"],"required":true},
+            {"path":"$.events[].installation_id","types":["string"],"required":true},
+            {"path":"$.events[].occurred_hour_utc","types":["string"],"required":true},
+            {"path":"$.events[].os","types":["any"],"required":true},
+            {"path":"$.events[].release_version","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["integer"],"const":1,"required":true}
+          ]
+        }
+      }
+    ],
+    "metrics/status/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.accepted_notice_version","types":["integer"],"required":true},
+            {"path":"$.cleanup_pending","types":["boolean"],"required":true},
+            {"path":"$.config_path","types":["string"],"required":true},
+            {"path":"$.config_present","types":["boolean"],"required":true},
+            {"path":"$.diagnostics","types":["object"],"required":true},
+            {"path":"$.diagnostics.available","types":["boolean"],"required":true},
+            {"path":"$.diagnostics.dropped_events","types":["integer"],"required":true},
+            {"path":"$.diagnostics.last_error_class","types":["any"],"required":true},
+            {"path":"$.diagnostics.last_upload_attempt_hour_utc","types":["null","string"],"required":true},
+            {"path":"$.diagnostics.last_upload_success_hour_utc","types":["null","string"],"required":true},
+            {"path":"$.diagnostics.spawn_throttle_age_seconds","types":["integer","null"],"required":true},
+            {"path":"$.endpoint_hostname","types":["string"],"required":true},
+            {"path":"$.home_reason","types":["any"],"required":true},
+            {"path":"$.home_stable","types":["boolean"],"required":true},
+            {"path":"$.independence","types":["string"],"const":"Gas City OTel, local costs, event export, and Beads telemetry are separate and unchanged.","required":true},
+            {"path":"$.installation_id_present","types":["boolean"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.queue","types":["object"],"required":true},
+            {"path":"$.queue.available","types":["boolean"],"required":true},
+            {"path":"$.queue.bytes","types":["integer"],"required":true},
+            {"path":"$.queue.events","types":["integer"],"required":true},
+            {"path":"$.queue.oldest_age_seconds","types":["integer","null"],"required":true},
+            {"path":"$.reason","types":["any"],"required":true},
+            {"path":"$.required_notice_version","types":["integer"],"required":true},
+            {"path":"$.retention","types":["object"],"required":true},
+            {"path":"$.retention.aggregate_months","types":["integer"],"const":13,"required":true},
+            {"path":"$.retention.edge_log_days","types":["integer"],"const":7,"required":true},
+            {"path":"$.retention.privacy_url","types":["string"],"required":true},
+            {"path":"$.retention.raw_event_days","types":["integer"],"const":90,"required":true},
+            {"path":"$.spool_generation_present","types":["boolean"],"required":true},
+            {"path":"$.state","types":["any"],"required":true},
+            {"path":"$.state_schema","types":["integer"],"required":true}
+          ]
+        }
+      }
+    ],
+    "nudge/status/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.agent","types":["string"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.command","types":["string"],"const":"nudge status","required":true},
+            {"path":"$.counts","types":["object"],"required":true},
+            {"path":"$.counts.dead","types":["integer"],"required":true},
+            {"path":"$.counts.in_flight","types":["integer"],"required":true},
+            {"path":"$.counts.pending","types":["integer"],"required":true},
+            {"path":"$.dead","types":["array"],"required":true},
+            {"path":"$.dead[]","types":["object"],"required":false},
+            {"path":"$.dead[].agent","types":["string"],"required":true},
+            {"path":"$.dead[].attempts","types":["integer"],"required":false},
+            {"path":"$.dead[].bead_id","types":["string"],"required":false},
+            {"path":"$.dead[].claimed_at","types":["string"],"required":false},
+            {"path":"$.dead[].continuation_epoch","types":["string"],"required":false},
+            {"path":"$.dead[].created_at","types":["string"],"required":true},
+            {"path":"$.dead[].dead_at","types":["string"],"required":false},
+            {"path":"$.dead[].deliver_after","types":["string"],"required":true},
+            {"path":"$.dead[].expires_at","types":["string"],"required":true},
+            {"path":"$.dead[].id","types":["string"],"required":true},
+            {"path":"$.dead[].last_attempt_at","types":["string"],"required":false},
+            {"path":"$.dead[].last_error","types":["string"],"required":false},
+            {"path":"$.dead[].lease_until","types":["string"],"required":false},
+            {"path":"$.dead[].message","types":["string"],"required":true},
+            {"path":"$.dead[].reference","types":["object"],"required":false},
+            {"path":"$.dead[].reference.id","types":["string"],"required":false},
+            {"path":"$.dead[].reference.kind","types":["string"],"required":false},
+            {"path":"$.dead[].session_id","types":["string"],"required":false},
+            {"path":"$.dead[].source","types":["string"],"required":true},
+            {"path":"$.in_flight","types":["array"],"required":true},
+            {"path":"$.in_flight[]","types":["object"],"required":false},
+            {"path":"$.in_flight[].agent","types":["string"],"required":true},
+            {"path":"$.in_flight[].attempts","types":["integer"],"required":false},
+            {"path":"$.in_flight[].bead_id","types":["string"],"required":false},
+            {"path":"$.in_flight[].claimed_at","types":["string"],"required":false},
+            {"path":"$.in_flight[].continuation_epoch","types":["string"],"required":false},
+            {"path":"$.in_flight[].created_at","types":["string"],"required":true},
+            {"path":"$.in_flight[].dead_at","types":["string"],"required":false},
+            {"path":"$.in_flight[].deliver_after","types":["string"],"required":true},
+            {"path":"$.in_flight[].expires_at","types":["string"],"required":true},
+            {"path":"$.in_flight[].id","types":["string"],"required":true},
+            {"path":"$.in_flight[].last_attempt_at","types":["string"],"required":false},
+            {"path":"$.in_flight[].last_error","types":["string"],"required":false},
+            {"path":"$.in_flight[].lease_until","types":["string"],"required":false},
+            {"path":"$.in_flight[].message","types":["string"],"required":true},
+            {"path":"$.in_flight[].reference","types":["object"],"required":false},
+            {"path":"$.in_flight[].reference.id","types":["string"],"required":false},
+            {"path":"$.in_flight[].reference.kind","types":["string"],"required":false},
+            {"path":"$.in_flight[].session_id","types":["string"],"required":false},
+            {"path":"$.in_flight[].source","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.pending","types":["array"],"required":true},
+            {"path":"$.pending[]","types":["object"],"required":false},
+            {"path":"$.pending[].agent","types":["string"],"required":true},
+            {"path":"$.pending[].attempts","types":["integer"],"required":false},
+            {"path":"$.pending[].bead_id","types":["string"],"required":false},
+            {"path":"$.pending[].claimed_at","types":["string"],"required":false},
+            {"path":"$.pending[].continuation_epoch","types":["string"],"required":false},
+            {"path":"$.pending[].created_at","types":["string"],"required":true},
+            {"path":"$.pending[].dead_at","types":["string"],"required":false},
+            {"path":"$.pending[].deliver_after","types":["string"],"required":true},
+            {"path":"$.pending[].expires_at","types":["string"],"required":true},
+            {"path":"$.pending[].id","types":["string"],"required":true},
+            {"path":"$.pending[].last_attempt_at","types":["string"],"required":false},
+            {"path":"$.pending[].last_error","types":["string"],"required":false},
+            {"path":"$.pending[].lease_until","types":["string"],"required":false},
+            {"path":"$.pending[].message","types":["string"],"required":true},
+            {"path":"$.pending[].reference","types":["object"],"required":false},
+            {"path":"$.pending[].reference.id","types":["string"],"required":false},
+            {"path":"$.pending[].reference.kind","types":["string"],"required":false},
+            {"path":"$.pending[].session_id","types":["string"],"required":false},
+            {"path":"$.pending[].source","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.session","types":["string"],"required":true},
+            {"path":"$.session_id","types":["string"],"required":false}
+          ]
+        }
+      }
+    ],
+    "order/check/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.any_due","types":["boolean"],"required":true},
+            {"path":"$.due_total","types":["integer"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.orders","types":["array"],"required":true},
+            {"path":"$.orders[]","types":["object"],"required":false},
+            {"path":"$.orders[].due","types":["boolean"],"required":true},
+            {"path":"$.orders[].name","types":["string"],"required":true},
+            {"path":"$.orders[].reason","types":["string"],"required":true},
+            {"path":"$.orders[].rig","types":["string"],"required":false},
+            {"path":"$.orders[].scoped_name","types":["string"],"required":true},
+            {"path":"$.orders[].trigger","types":["string"],"required":true},
+            {"path":"$.orders_total","types":["integer"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "order/history/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.entries","types":["array"],"required":true},
+            {"path":"$.entries[]","types":["object"],"required":false},
+            {"path":"$.entries[].bead_id","types":["string"],"required":true},
+            {"path":"$.entries[].created_at","types":["string"],"required":true},
+            {"path":"$.entries[].executed","types":["string"],"required":true},
+            {"path":"$.entries[].order","types":["string"],"required":true},
+            {"path":"$.entries[].rig","types":["string"],"required":false},
+            {"path":"$.name","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.rig","types":["string"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.summary","types":["object"],"required":true},
+            {"path":"$.summary.total","types":["integer"],"required":true}
+          ]
+        }
+      }
+    ],
+    "order/list/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.city_name","types":["string"],"required":false},
+            {"path":"$.city_path","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.orders","types":["array"],"required":true},
+            {"path":"$.orders[]","types":["object"],"required":false},
+            {"path":"$.orders[].check","types":["string"],"required":false},
+            {"path":"$.orders[].description","types":["string"],"required":false},
+            {"path":"$.orders[].enabled","types":["boolean"],"required":true},
+            {"path":"$.orders[].env","types":["object"],"required":false},
+            {"path":"$.orders[].exec","types":["string"],"required":false},
+            {"path":"$.orders[].formula","types":["string"],"required":false},
+            {"path":"$.orders[].formula_layer","types":["string"],"required":false},
+            {"path":"$.orders[].interval","types":["string"],"required":false},
+            {"path":"$.orders[].name","types":["string"],"required":true},
+            {"path":"$.orders[].on","types":["string"],"required":false},
+            {"path":"$.orders[].rig","types":["string"],"required":false},
+            {"path":"$.orders[].schedule","types":["string"],"required":false},
+            {"path":"$.orders[].scoped_name","types":["string"],"required":true},
+            {"path":"$.orders[].source","types":["string"],"required":false},
+            {"path":"$.orders[].target","types":["string"],"required":false},
+            {"path":"$.orders[].timeout","types":["string"],"required":false},
+            {"path":"$.orders[].trigger","types":["string"],"required":true},
+            {"path":"$.orders[].type","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"required":true},
+            {"path":"$.summary","types":["object"],"required":true},
+            {"path":"$.summary.count","types":["integer"],"required":true},
+            {"path":"$.warnings","types":["array"],"required":false},
+            {"path":"$.warnings[]","types":["object"],"required":false}
+          ]
+        }
+      }
+    ],
+    "order/run/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"formula","required":true},
+            {"path":"$.event_cursor","types":["integer"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.order","types":["string"],"required":true},
+            {"path":"$.rig","types":["string"],"required":false},
+            {"path":"$.routed_to","types":["string"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.scoped_name","types":["string"],"required":true},
+            {"path":"$.wisp_id","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "order/show/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.city_name","types":["string"],"required":false},
+            {"path":"$.city_path","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.order","types":["object"],"required":true},
+            {"path":"$.order.check","types":["string"],"required":false},
+            {"path":"$.order.description","types":["string"],"required":false},
+            {"path":"$.order.enabled","types":["boolean"],"required":true},
+            {"path":"$.order.env","types":["object"],"required":false},
+            {"path":"$.order.exec","types":["string"],"required":false},
+            {"path":"$.order.formula","types":["string"],"required":false},
+            {"path":"$.order.formula_layer","types":["string"],"required":false},
+            {"path":"$.order.interval","types":["string"],"required":false},
+            {"path":"$.order.name","types":["string"],"required":true},
+            {"path":"$.order.on","types":["string"],"required":false},
+            {"path":"$.order.rig","types":["string"],"required":false},
+            {"path":"$.order.schedule","types":["string"],"required":false},
+            {"path":"$.order.scoped_name","types":["string"],"required":true},
+            {"path":"$.order.source","types":["string"],"required":false},
+            {"path":"$.order.target","types":["string"],"required":false},
+            {"path":"$.order.timeout","types":["string"],"required":false},
+            {"path":"$.order.trigger","types":["string"],"required":true},
+            {"path":"$.order.type","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"required":true},
+            {"path":"$.warnings","types":["array"],"required":false},
+            {"path":"$.warnings[]","types":["object"],"required":false}
+          ]
+        }
+      }
+    ],
+    "pack/registry/add/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.cached","types":["boolean"],"required":true},
+            {"path":"$.name","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.source","types":["string"],"required":true},
+            {"path":"$.validated","types":["boolean"],"required":true}
+          ]
+        }
+      }
+    ],
+    "pack/registry/list/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.count","types":["integer"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.registries","types":["array"],"required":true},
+            {"path":"$.registries[]","types":["object"],"required":false},
+            {"path":"$.registries[].name","types":["string"],"required":true},
+            {"path":"$.registries[].source","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "pack/registry/refresh/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.failures","types":["array"],"required":true},
+            {"path":"$.failures[]","types":["object"],"required":false},
+            {"path":"$.failures[].message","types":["string"],"required":true},
+            {"path":"$.failures[].name","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.pruned_caches","types":["boolean"],"required":true},
+            {"path":"$.refreshed","types":["array"],"required":true},
+            {"path":"$.refreshed[]","types":["object"],"required":false},
+            {"path":"$.refreshed[].name","types":["string"],"required":true},
+            {"path":"$.refreshed[].pack_count","types":["integer"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.target","types":["string"],"required":false}
+          ]
+        }
+      }
+    ],
+    "pack/registry/remove/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.name","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.removed","types":["boolean"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "pack/registry/requests/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": true,
+        "variants": {
+          "detailResponse": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.publishRequest","types":["object"],"required":true},
+            {"path":"$.publishRequest.actionRequiredBy","types":["string"],"required":false},
+            {"path":"$.publishRequest.comments","types":["array"],"required":true},
+            {"path":"$.publishRequest.comments[]","types":["object"],"required":false},
+            {"path":"$.publishRequest.comments[].authorHandle","types":["string"],"required":true},
+            {"path":"$.publishRequest.comments[].authorRole","types":["string"],"required":true},
+            {"path":"$.publishRequest.comments[].body","types":["string"],"required":true},
+            {"path":"$.publishRequest.comments[].createdAt","types":["string"],"required":true},
+            {"path":"$.publishRequest.comments[].id","types":["string"],"required":true},
+            {"path":"$.publishRequest.id","types":["string"],"required":true},
+            {"path":"$.publishRequest.nextStep","types":["string"],"required":true},
+            {"path":"$.publishRequest.requestedName","types":["string"],"required":true},
+            {"path":"$.publishRequest.requestedVersion","types":["string"],"required":true},
+            {"path":"$.publishRequest.status","types":["string"],"required":true},
+            {"path":"$.publishRequest.submitterUnreadAt","types":["string"],"required":false},
+            {"path":"$.publishRequest.unread","types":["boolean"],"required":true}
+          ],
+          "listResponse": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.publishRequests","types":["array"],"required":true},
+            {"path":"$.publishRequests[]","types":["object"],"required":false},
+            {"path":"$.publishRequests[].actionRequiredBy","types":["string"],"required":false},
+            {"path":"$.publishRequests[].id","types":["string"],"required":true},
+            {"path":"$.publishRequests[].nextStep","types":["string"],"required":true},
+            {"path":"$.publishRequests[].requestedName","types":["string"],"required":true},
+            {"path":"$.publishRequests[].requestedVersion","types":["string"],"required":true},
+            {"path":"$.publishRequests[].status","types":["string"],"required":true},
+            {"path":"$.publishRequests[].submitterUnreadAt","types":["string"],"required":false},
+            {"path":"$.publishRequests[].unread","types":["boolean"],"required":true},
+            {"path":"$.unreadCount","types":["integer"],"required":true}
+          ]
+        }
+      }
+    ],
+    "pack/registry/search/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.all","types":["boolean"],"required":true},
+            {"path":"$.count","types":["integer"],"required":true},
+            {"path":"$.failures","types":["array"],"required":true},
+            {"path":"$.failures[]","types":["object"],"required":false},
+            {"path":"$.failures[].message","types":["string"],"required":true},
+            {"path":"$.failures[].name","types":["string"],"required":true},
+            {"path":"$.limit","types":["integer"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.query","types":["string"],"required":true},
+            {"path":"$.refreshed","types":["boolean"],"required":true},
+            {"path":"$.registry","types":["string"],"required":false},
+            {"path":"$.results","types":["array"],"required":true},
+            {"path":"$.results[]","types":["object"],"required":false},
+            {"path":"$.results[].description","types":["string"],"required":true},
+            {"path":"$.results[].latest","types":["string"],"required":true},
+            {"path":"$.results[].name","types":["string"],"required":true},
+            {"path":"$.results[].publisher","types":["string"],"required":true},
+            {"path":"$.results[].registry","types":["string"],"required":true},
+            {"path":"$.results[].source","types":["string"],"required":true},
+            {"path":"$.results[].source_kind","types":["string"],"const":"git","required":true},
+            {"path":"$.results[].tier","types":["any"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.truncated","types":["boolean"],"required":true}
+          ]
+        }
+      }
+    ],
+    "pack/registry/show/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.description","types":["string"],"required":true},
+            {"path":"$.latest","types":["string"],"required":true},
+            {"path":"$.name","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.publisher","types":["string"],"required":true},
+            {"path":"$.registry","types":["string"],"required":true},
+            {"path":"$.releases","types":["array"],"required":true},
+            {"path":"$.releases[]","types":["object"],"required":false},
+            {"path":"$.releases[].commit","types":["string"],"required":true},
+            {"path":"$.releases[].description","types":["string"],"required":true},
+            {"path":"$.releases[].hash","types":["string"],"required":true},
+            {"path":"$.releases[].ref","types":["string"],"required":true},
+            {"path":"$.releases[].version","types":["string"],"required":true},
+            {"path":"$.releases[].withdrawn","types":["boolean"],"required":true},
+            {"path":"$.releases[].withdrawn_reason","types":["string"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.source","types":["string"],"required":true},
+            {"path":"$.source_kind","types":["string"],"const":"git","required":true},
+            {"path":"$.tier","types":["any"],"required":true}
+          ]
+        }
+      }
+    ],
+    "prime/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.agent","types":["string"],"required":false},
+            {"path":"$.bytes","types":["integer"],"required":true},
+            {"path":"$.content","types":["string"],"required":true},
+            {"path":"$.hook","types":["boolean"],"required":true},
+            {"path":"$.hook_format","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "ready/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": true,
+        "variants": {
+          "": [
+            {"path":"$","types":["array"],"required":true},
+            {"path":"$[]","types":["object"],"required":false},
+            {"path":"$[].assignee","types":["string"],"required":false},
+            {"path":"$[].blocked_by","types":["array"],"required":false},
+            {"path":"$[].blocked_by[]","types":["object"],"required":false},
+            {"path":"$[].blocked_by[].id","types":["string"],"required":true},
+            {"path":"$[].blocked_by[].status","types":["string"],"required":true},
+            {"path":"$[].close_reason","types":["string"],"required":false},
+            {"path":"$[].created_at","types":["string"],"required":true},
+            {"path":"$[].defer_until","types":["string"],"required":false},
+            {"path":"$[].dependencies","types":["array"],"required":false},
+            {"path":"$[].dependencies[]","types":["object"],"required":false},
+            {"path":"$[].dependencies[].depends_on_id","types":["string"],"required":true},
+            {"path":"$[].dependencies[].issue_id","types":["string"],"required":true},
+            {"path":"$[].dependencies[].type","types":["string"],"required":true},
+            {"path":"$[].description","types":["string"],"required":false},
+            {"path":"$[].ephemeral","types":["boolean"],"required":false},
+            {"path":"$[].from","types":["string"],"required":false},
+            {"path":"$[].id","types":["string"],"required":true},
+            {"path":"$[].is_blocked","types":["boolean"],"required":false},
+            {"path":"$[].issue_type","types":["string"],"required":true},
+            {"path":"$[].labels","types":["array"],"required":false},
+            {"path":"$[].labels[]","types":["string"],"required":false},
+            {"path":"$[].metadata","types":["object"],"required":false},
+            {"path":"$[].needs","types":["array"],"required":false},
+            {"path":"$[].needs[]","types":["string"],"required":false},
+            {"path":"$[].no_history","types":["boolean"],"required":false},
+            {"path":"$[].parent","types":["string"],"required":false},
+            {"path":"$[].priority","types":["integer"],"required":false},
+            {"path":"$[].ref","types":["string"],"required":false},
+            {"path":"$[].status","types":["string"],"required":true},
+            {"path":"$[].title","types":["string"],"required":true},
+            {"path":"$[].updated_at","types":["string"],"required":false}
+          ]
+        }
+      }
+    ],
+    "register/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"register","required":true},
+            {"path":"$.city_name","types":["string"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.command","types":["string"],"const":"register","required":true},
+            {"path":"$.message","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "reload/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"reload","required":true},
+            {"path":"$.async","types":["boolean"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.command","types":["string"],"const":"reload","required":true},
+            {"path":"$.message","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.outcome","types":["any"],"required":true},
+            {"path":"$.revision","types":["string"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.soft","types":["boolean"],"required":true}
+          ]
+        }
+      }
+    ],
+    "restart/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"restart","required":true},
+            {"path":"$.city_name","types":["string"],"required":false},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.command","types":["string"],"const":"restart","required":true},
+            {"path":"$.message","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "resume/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"resume","required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.command","types":["string"],"const":"resume","required":true},
+            {"path":"$.message","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "rig/add/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"add","required":true},
+            {"path":"$.command","types":["string"],"const":"rig add","required":true},
+            {"path":"$.default_branch","types":["string"],"required":false},
+            {"path":"$.name","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.path","types":["string"],"required":true},
+            {"path":"$.prefix","types":["string"],"required":true},
+            {"path":"$.rig","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.suspended","types":["boolean"],"required":false}
+          ]
+        }
+      }
+    ],
+    "rig/list/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$._cache_age_s","types":["number"],"required":false},
+            {"path":"$.city_name","types":["string"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.rigs","types":["array"],"required":true},
+            {"path":"$.rigs[]","types":["object"],"required":false},
+            {"path":"$.rigs[].beads","types":["string"],"required":true},
+            {"path":"$.rigs[].default_branch","types":["string"],"required":false},
+            {"path":"$.rigs[].default_sling_target","types":["string"],"required":false},
+            {"path":"$.rigs[].hq","types":["boolean"],"required":true},
+            {"path":"$.rigs[].name","types":["string"],"required":true},
+            {"path":"$.rigs[].path","types":["string"],"required":true},
+            {"path":"$.rigs[].prefix","types":["string"],"required":true},
+            {"path":"$.rigs[].running","types":["boolean"],"required":true},
+            {"path":"$.rigs[].suspended","types":["boolean"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.summary","types":["object"],"required":true},
+            {"path":"$.summary.running","types":["integer"],"required":true},
+            {"path":"$.summary.suspended","types":["integer"],"required":true},
+            {"path":"$.summary.total","types":["integer"],"required":true}
+          ]
+        }
+      }
+    ],
+    "rig/remove/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"remove","required":true},
+            {"path":"$.command","types":["string"],"const":"rig remove","required":true},
+            {"path":"$.name","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.rig","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "rig/resume/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"resume","required":true},
+            {"path":"$.command","types":["string"],"const":"rig resume","required":true},
+            {"path":"$.name","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.rig","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.suspended","types":["boolean"],"const":false,"required":true}
+          ]
+        }
+      }
+    ],
+    "rig/set-endpoint/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"set-endpoint","required":true},
+            {"path":"$.command","types":["string"],"const":"rig set-endpoint","required":true},
+            {"path":"$.dry_run","types":["boolean"],"required":true},
+            {"path":"$.endpoint","types":["object"],"required":true},
+            {"path":"$.endpoint.adopt_unverified","types":["boolean"],"required":false},
+            {"path":"$.endpoint.host","types":["string"],"required":false},
+            {"path":"$.endpoint.mode","types":["any"],"required":true},
+            {"path":"$.endpoint.port","types":["string"],"required":false},
+            {"path":"$.endpoint.user","types":["string"],"required":false},
+            {"path":"$.name","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.rig","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "rig/status/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.agents","types":["array"],"required":true},
+            {"path":"$.agents[]","types":["object"],"required":false},
+            {"path":"$.agents[].draining","types":["boolean"],"required":true},
+            {"path":"$.agents[].name","types":["string"],"required":true},
+            {"path":"$.agents[].qualified_name","types":["string"],"required":true},
+            {"path":"$.agents[].running","types":["boolean"],"required":true},
+            {"path":"$.agents[].runtime_session_name","types":["string"],"required":true},
+            {"path":"$.agents[].session_id","types":["string"],"required":false},
+            {"path":"$.agents[].status","types":["string"],"required":true},
+            {"path":"$.agents[].suspended","types":["boolean"],"required":true},
+            {"path":"$.city_name","types":["string"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.rig","types":["object"],"required":true},
+            {"path":"$.rig.beads","types":["string"],"required":true},
+            {"path":"$.rig.default_branch","types":["string"],"required":false},
+            {"path":"$.rig.name","types":["string"],"required":true},
+            {"path":"$.rig.path","types":["string"],"required":true},
+            {"path":"$.rig.prefix","types":["string"],"required":true},
+            {"path":"$.rig.suspended","types":["boolean"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "rig/suspend/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"suspend","required":true},
+            {"path":"$.command","types":["string"],"const":"rig suspend","required":true},
+            {"path":"$.name","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.rig","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.suspended","types":["boolean"],"const":true,"required":true}
+          ]
+        }
+      }
+    ],
+    "runtime/drain-ack/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"drain-ack","required":true},
+            {"path":"$.command","types":["string"],"const":"runtime drain-ack","required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.session","types":["string"],"required":true},
+            {"path":"$.status","types":["string"],"const":"acknowledged","required":true},
+            {"path":"$.target","types":["string"],"required":false}
+          ]
+        }
+      }
+    ],
+    "runtime/drain-check/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.command","types":["string"],"const":"runtime drain-check","required":true},
+            {"path":"$.draining","types":["boolean"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.session","types":["string"],"required":true},
+            {"path":"$.source","types":["any"],"required":false},
+            {"path":"$.target","types":["string"],"required":false}
+          ]
+        }
+      }
+    ],
+    "runtime/drain/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"drain","required":true},
+            {"path":"$.command","types":["string"],"const":"runtime drain","required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.session","types":["string"],"required":true},
+            {"path":"$.status","types":["string"],"const":"draining","required":true},
+            {"path":"$.target","types":["string"],"required":false}
+          ]
+        }
+      }
+    ],
+    "runtime/undrain/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"undrain","required":true},
+            {"path":"$.command","types":["string"],"const":"runtime undrain","required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.session","types":["string"],"required":true},
+            {"path":"$.status","types":["string"],"const":"undrained","required":true},
+            {"path":"$.target","types":["string"],"required":false}
+          ]
+        }
+      }
+    ],
+    "service/doctor/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.live","types":["boolean"],"required":true},
+            {"path":"$.observed_state","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"required":true},
+            {"path":"$.service","types":["object"],"required":true},
+            {"path":"$.service.allow_websockets","types":["boolean"],"required":false},
+            {"path":"$.service.hostname","types":["string"],"required":false},
+            {"path":"$.service.kind","types":["string"],"required":true},
+            {"path":"$.service.local_state","types":["string"],"required":true},
+            {"path":"$.service.mount_path","types":["string"],"required":true},
+            {"path":"$.service.publication_state","types":["string"],"required":true},
+            {"path":"$.service.publish_mode","types":["string"],"required":true},
+            {"path":"$.service.reason","types":["string"],"required":false},
+            {"path":"$.service.service_name","types":["string"],"required":true},
+            {"path":"$.service.state","types":["string"],"required":false},
+            {"path":"$.service.state_root","types":["string"],"required":true},
+            {"path":"$.service.updated_at","types":["string"],"required":false},
+            {"path":"$.service.url","types":["string"],"required":false},
+            {"path":"$.service.visibility","types":["string"],"required":false},
+            {"path":"$.service.workflow_contract","types":["string"],"required":false}
+          ]
+        }
+      }
+    ],
+    "service/list/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.live","types":["boolean"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"required":true},
+            {"path":"$.services","types":["array"],"required":true},
+            {"path":"$.services[]","types":["object"],"required":false},
+            {"path":"$.services[].allow_websockets","types":["boolean"],"required":false},
+            {"path":"$.services[].hostname","types":["string"],"required":false},
+            {"path":"$.services[].kind","types":["string"],"required":true},
+            {"path":"$.services[].local_state","types":["string"],"required":true},
+            {"path":"$.services[].mount_path","types":["string"],"required":true},
+            {"path":"$.services[].publication_state","types":["string"],"required":true},
+            {"path":"$.services[].publish_mode","types":["string"],"required":true},
+            {"path":"$.services[].reason","types":["string"],"required":false},
+            {"path":"$.services[].service_name","types":["string"],"required":true},
+            {"path":"$.services[].state","types":["string"],"required":false},
+            {"path":"$.services[].state_root","types":["string"],"required":true},
+            {"path":"$.services[].updated_at","types":["string"],"required":false},
+            {"path":"$.services[].url","types":["string"],"required":false},
+            {"path":"$.services[].visibility","types":["string"],"required":false},
+            {"path":"$.services[].workflow_contract","types":["string"],"required":false}
+          ]
+        }
+      }
+    ],
+    "service/restart/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"restart","required":true},
+            {"path":"$.command","types":["string"],"const":"service restart","required":true},
+            {"path":"$.name","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "session/close/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": true,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"close","required":true},
+            {"path":"$.command","types":["string"],"const":"session close","required":true},
+            {"path":"$.key","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.op_id","types":["string"],"required":false},
+            {"path":"$.replayed","types":["boolean"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.session_id","types":["string"],"required":true},
+            {"path":"$.state","types":["string"],"required":false},
+            {"path":"$.wait_nudges_withdrawn","types":["integer"],"required":false}
+          ]
+        }
+      }
+    ],
+    "session/kill/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": true,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"kill","required":true},
+            {"path":"$.command","types":["string"],"const":"session kill","required":true},
+            {"path":"$.key","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.op_id","types":["string"],"required":false},
+            {"path":"$.replayed","types":["boolean"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.session_id","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "session/list/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "api": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$._cache_age_s","types":["number"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.sessions","types":["array"],"required":true},
+            {"path":"$.sessions[]","types":["object"],"required":false},
+            {"path":"$.sessions[].alias","types":["string"],"required":true},
+            {"path":"$.sessions[].attached","types":["boolean"],"required":true},
+            {"path":"$.sessions[].created_at","types":["string"],"required":true},
+            {"path":"$.sessions[].id","types":["string"],"required":true},
+            {"path":"$.sessions[].last_active","types":["string"],"required":true},
+            {"path":"$.sessions[].last_output","types":["string"],"required":true},
+            {"path":"$.sessions[].reason","types":["string"],"required":true},
+            {"path":"$.sessions[].running","types":["boolean"],"required":true},
+            {"path":"$.sessions[].session_name","types":["string"],"required":true},
+            {"path":"$.sessions[].state","types":["string"],"required":true},
+            {"path":"$.sessions[].template","types":["string"],"required":true},
+            {"path":"$.sessions[].title","types":["string"],"required":true},
+            {"path":"$.sessions[].work_dir","types":["string"],"required":true}
+          ],
+          "local": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.filters","types":["object"],"required":true},
+            {"path":"$.filters.state","types":["string"],"required":false},
+            {"path":"$.filters.template","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.sessions","types":["array"],"required":true},
+            {"path":"$.sessions[]","types":["object"],"required":false},
+            {"path":"$.sessions[].agent_name","types":["string"],"required":false},
+            {"path":"$.sessions[].alias","types":["string"],"required":false},
+            {"path":"$.sessions[].attached","types":["boolean"],"required":true},
+            {"path":"$.sessions[].closed","types":["boolean"],"required":true},
+            {"path":"$.sessions[].command","types":["string"],"required":false},
+            {"path":"$.sessions[].created_at","types":["string"],"required":true},
+            {"path":"$.sessions[].id","types":["string"],"required":true},
+            {"path":"$.sessions[].last_active","types":["string"],"required":true},
+            {"path":"$.sessions[].last_nudge_delivered_at","types":["string"],"required":false},
+            {"path":"$.sessions[].name","types":["string"],"required":false},
+            {"path":"$.sessions[].provider","types":["string"],"required":false},
+            {"path":"$.sessions[].resume_command","types":["string"],"required":false},
+            {"path":"$.sessions[].resume_flag","types":["string"],"required":false},
+            {"path":"$.sessions[].resume_style","types":["string"],"required":false},
+            {"path":"$.sessions[].rig","types":["string"],"required":false},
+            {"path":"$.sessions[].session_key","types":["string"],"required":false},
+            {"path":"$.sessions[].session_name","types":["string"],"required":false},
+            {"path":"$.sessions[].state","types":["string"],"required":true},
+            {"path":"$.sessions[].template","types":["string"],"required":true},
+            {"path":"$.sessions[].title","types":["string"],"required":false},
+            {"path":"$.sessions[].transport","types":["string"],"required":false},
+            {"path":"$.sessions[].work_dir","types":["string"],"required":false},
+            {"path":"$.sessions[].worker_dir","types":["string"],"required":false},
+            {"path":"$.summary","types":["object"],"required":true},
+            {"path":"$.summary.active","types":["integer"],"required":true},
+            {"path":"$.summary.closed","types":["integer"],"required":true},
+            {"path":"$.summary.suspended","types":["integer"],"required":true},
+            {"path":"$.summary.total","types":["integer"],"required":true}
+          ]
+        }
+      }
+    ],
+    "session/logs/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": true,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.entries","types":["array"],"required":true},
+            {"path":"$.entries[]","types":["object"],"required":false},
+            {"path":"$.entries[].blocks","types":["array"],"required":false},
+            {"path":"$.entries[].blocks[]","types":["object"],"required":false},
+            {"path":"$.entries[].blocks[].action","types":["string"],"required":false},
+            {"path":"$.entries[].blocks[].content","types":["any"],"required":false},
+            {"path":"$.entries[].blocks[].id","types":["string"],"required":false},
+            {"path":"$.entries[].blocks[].input","types":["any"],"required":false},
+            {"path":"$.entries[].blocks[].is_error","types":["boolean"],"required":false},
+            {"path":"$.entries[].blocks[].kind","types":["string"],"required":false},
+            {"path":"$.entries[].blocks[].metadata","types":["any"],"required":false},
+            {"path":"$.entries[].blocks[].name","types":["string"],"required":false},
+            {"path":"$.entries[].blocks[].options","types":["array"],"required":false},
+            {"path":"$.entries[].blocks[].options[]","types":["string"],"required":false},
+            {"path":"$.entries[].blocks[].prompt","types":["string"],"required":false},
+            {"path":"$.entries[].blocks[].request_id","types":["string"],"required":false},
+            {"path":"$.entries[].blocks[].state","types":["string"],"required":false},
+            {"path":"$.entries[].blocks[].text","types":["string"],"required":false},
+            {"path":"$.entries[].blocks[].tool_use_id","types":["string"],"required":false},
+            {"path":"$.entries[].blocks[].type","types":["string"],"required":true},
+            {"path":"$.entries[].compact_boundary","types":["boolean"],"required":false},
+            {"path":"$.entries[].message","types":["any"],"required":false},
+            {"path":"$.entries[].parent_uuid","types":["string"],"required":false},
+            {"path":"$.entries[].role","types":["string"],"required":false},
+            {"path":"$.entries[].subtype","types":["string"],"required":false},
+            {"path":"$.entries[].text","types":["string"],"required":false},
+            {"path":"$.entries[].timestamp","types":["string"],"required":false},
+            {"path":"$.entries[].type","types":["string"],"required":true},
+            {"path":"$.entries[].uuid","types":["string"],"required":false},
+            {"path":"$.entry_count","types":["integer"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.provider","types":["string"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.tail","types":["integer"],"required":true},
+            {"path":"$.target","types":["string"],"required":true},
+            {"path":"$.transcript_path","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "session/new/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.alias","types":["string"],"required":false},
+            {"path":"$.attached","types":["boolean"],"required":true},
+            {"path":"$.deferred_start","types":["boolean"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.session_id","types":["string"],"required":true},
+            {"path":"$.session_name","types":["string"],"required":true},
+            {"path":"$.template","types":["string"],"required":true},
+            {"path":"$.transport","types":["string"],"required":true},
+            {"path":"$.work_dir","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "session/nudge/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.delivery","types":["string"],"required":true},
+            {"path":"$.key","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.op_id","types":["string"],"required":false},
+            {"path":"$.outcome","types":["string"],"required":true},
+            {"path":"$.queued","types":["boolean"],"required":true},
+            {"path":"$.replayed","types":["boolean"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.session_id","types":["string"],"required":false},
+            {"path":"$.session_name","types":["string"],"required":false},
+            {"path":"$.target","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "session/peek/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": true,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.line_count","types":["integer"],"required":true},
+            {"path":"$.lines","types":["integer"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.output","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.session_id","types":["string"],"required":true},
+            {"path":"$.target","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "session/pin/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": true,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"pin","required":true},
+            {"path":"$.command","types":["string"],"const":"session pin","required":true},
+            {"path":"$.materialized_named","types":["boolean"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.pinned","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.session_id","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "session/prune/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": true,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"prune","required":true},
+            {"path":"$.before","types":["string"],"required":true},
+            {"path":"$.command","types":["string"],"const":"session prune","required":true},
+            {"path":"$.count","types":["integer"],"required":true},
+            {"path":"$.cutoff","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "session/rename/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": true,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"rename","required":true},
+            {"path":"$.command","types":["string"],"const":"session rename","required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.session_id","types":["string"],"required":true},
+            {"path":"$.title","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "session/reset/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": true,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"reset","required":true},
+            {"path":"$.command","types":["string"],"const":"session reset","required":true},
+            {"path":"$.identity","types":["string"],"required":false},
+            {"path":"$.key","types":["string"],"required":false},
+            {"path":"$.mode","types":["any"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.op_id","types":["string"],"required":false},
+            {"path":"$.replayed","types":["boolean"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.session_id","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "session/submit/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.intent","types":["string"],"required":true},
+            {"path":"$.key","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.op_id","types":["string"],"required":false},
+            {"path":"$.outcome","types":["string"],"required":true},
+            {"path":"$.queued","types":["boolean"],"required":true},
+            {"path":"$.replayed","types":["boolean"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.target","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "session/suspend/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": true,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"suspend","required":true},
+            {"path":"$.command","types":["string"],"const":"session suspend","required":true},
+            {"path":"$.key","types":["string"],"required":false},
+            {"path":"$.mode","types":["any"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.op_id","types":["string"],"required":false},
+            {"path":"$.replayed","types":["boolean"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.session_id","types":["string"],"required":true},
+            {"path":"$.state","types":["string"],"required":false}
+          ]
+        }
+      }
+    ],
+    "session/unpin/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": true,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"unpin","required":true},
+            {"path":"$.command","types":["string"],"const":"session unpin","required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.pinned","types":["boolean"],"const":false,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.session_id","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "session/wake/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": true,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"wake","required":true},
+            {"path":"$.command","types":["string"],"const":"session wake","required":true},
+            {"path":"$.key","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.op_id","types":["string"],"required":false},
+            {"path":"$.replayed","types":["boolean"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.session_id","types":["string"],"required":true},
+            {"path":"$.state","types":["string"],"required":false},
+            {"path":"$.wait_nudges_withdrawn","types":["integer"],"required":false}
+          ]
+        }
+      }
+    ],
+    "shell/status/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": true,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.installed","types":["boolean"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.shells","types":["array"],"required":true},
+            {"path":"$.shells[]","types":["object"],"required":false},
+            {"path":"$.shells[].completion_script_exists","types":["boolean"],"required":true},
+            {"path":"$.shells[].completion_script_path","types":["string"],"required":true},
+            {"path":"$.shells[].installed","types":["boolean"],"required":true},
+            {"path":"$.shells[].rc_hook_present","types":["boolean"],"required":true},
+            {"path":"$.shells[].rc_path","types":["string"],"required":true},
+            {"path":"$.shells[].shell","types":["string"],"required":true},
+            {"path":"$.shells[].status","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "skill/list/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.agent","types":["string"],"required":false},
+            {"path":"$.count","types":["integer"],"required":true},
+            {"path":"$.entries","types":["array"],"required":true},
+            {"path":"$.entries[]","types":["object"],"required":false},
+            {"path":"$.entries[].name","types":["string"],"required":true},
+            {"path":"$.entries[].path","types":["string"],"required":true},
+            {"path":"$.entries[].source","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"required":true},
+            {"path":"$.session","types":["string"],"required":false}
+          ]
+        }
+      }
+    ],
+    "sling/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.batch","types":["object"],"required":false},
+            {"path":"$.batch.container_type","types":["string"],"required":false},
+            {"path":"$.batch.failed","types":["integer"],"required":true},
+            {"path":"$.batch.idempotent","types":["integer"],"required":true},
+            {"path":"$.batch.routed","types":["integer"],"required":true},
+            {"path":"$.batch.skipped","types":["integer"],"required":true},
+            {"path":"$.batch.total","types":["integer"],"required":true},
+            {"path":"$.bead_id","types":["string"],"required":false},
+            {"path":"$.convoy_id","types":["string"],"required":false},
+            {"path":"$.dashboard_url","types":["string"],"required":false},
+            {"path":"$.dry_run","types":["boolean"],"required":true},
+            {"path":"$.formula","types":["string"],"required":false},
+            {"path":"$.method","types":["string"],"required":false},
+            {"path":"$.molecule_id","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.queued","types":["boolean"],"required":true},
+            {"path":"$.routed","types":["boolean"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.success","types":["boolean"],"required":true},
+            {"path":"$.target","types":["string"],"required":true},
+            {"path":"$.warnings","types":["array"],"required":false},
+            {"path":"$.warnings[]","types":["string"],"required":false},
+            {"path":"$.workflow_id","types":["string"],"required":false}
+          ]
+        }
+      }
+    ],
+    "start/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"start","required":true},
+            {"path":"$.city_name","types":["string"],"required":false},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.command","types":["string"],"const":"start","required":true},
+            {"path":"$.message","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "status/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.agents","types":["array"],"required":true},
+            {"path":"$.agents[]","types":["object"],"required":false},
+            {"path":"$.agents[].name","types":["string"],"required":true},
+            {"path":"$.agents[].pool","types":["object"],"required":false},
+            {"path":"$.agents[].pool.max","types":["integer"],"required":true},
+            {"path":"$.agents[].pool.min","types":["integer"],"required":true},
+            {"path":"$.agents[].qualified_name","types":["string"],"required":true},
+            {"path":"$.agents[].running","types":["boolean"],"required":true},
+            {"path":"$.agents[].scope","types":["string"],"required":true},
+            {"path":"$.agents[].suspended","types":["boolean"],"required":true},
+            {"path":"$.beads","types":["object"],"required":false},
+            {"path":"$.beads.beads_store","types":["string"],"required":true},
+            {"path":"$.beads.native_store_eligible","types":["boolean"],"required":true},
+            {"path":"$.beads.preflight_gate","types":["string"],"required":false},
+            {"path":"$.beads.preflight_reason","types":["string"],"required":false},
+            {"path":"$.city_name","types":["string"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.controller","types":["object"],"required":true},
+            {"path":"$.controller.mode","types":["string"],"required":false},
+            {"path":"$.controller.pid","types":["integer"],"required":false},
+            {"path":"$.controller.running","types":["boolean"],"required":true},
+            {"path":"$.controller.status","types":["string"],"required":false},
+            {"path":"$.health","types":["object"],"required":true},
+            {"path":"$.health.degraded","types":["boolean"],"required":true},
+            {"path":"$.health.signals","types":["array"],"required":false},
+            {"path":"$.health.signals[]","types":["string"],"required":false},
+            {"path":"$.health.usable","types":["boolean"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.partial","types":["boolean"],"required":false},
+            {"path":"$.partial_errors","types":["array"],"required":false},
+            {"path":"$.partial_errors[]","types":["string"],"required":false},
+            {"path":"$.rigs","types":["array"],"required":true},
+            {"path":"$.rigs[]","types":["object"],"required":false},
+            {"path":"$.rigs[].default_sling_target","types":["string"],"required":false},
+            {"path":"$.rigs[].name","types":["string"],"required":true},
+            {"path":"$.rigs[].path","types":["string"],"required":true},
+            {"path":"$.rigs[].prefix","types":["string"],"required":false},
+            {"path":"$.rigs[].suspended","types":["boolean"],"required":true},
+            {"path":"$.running","types":["boolean"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.summary","types":["object"],"required":true},
+            {"path":"$.summary.active_sessions","types":["integer"],"required":false},
+            {"path":"$.summary.running_agents","types":["integer"],"required":true},
+            {"path":"$.summary.suspended_sessions","types":["integer"],"required":false},
+            {"path":"$.summary.total_agents","types":["integer"],"required":true},
+            {"path":"$.summary.unknown_agents","types":["integer"],"required":false},
+            {"path":"$.suspended","types":["boolean"],"required":true},
+            {"path":"$.workspace","types":["object"],"required":true},
+            {"path":"$.workspace.name","types":["string"],"required":true},
+            {"path":"$.workspace.path","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "stop/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"stop","required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.command","types":["string"],"const":"stop","required":true},
+            {"path":"$.force","types":["boolean"],"required":false},
+            {"path":"$.message","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "supervisor/reload/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"reload","required":true},
+            {"path":"$.command","types":["string"],"const":"supervisor reload","required":true},
+            {"path":"$.message","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "supervisor/start/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"start","required":true},
+            {"path":"$.command","types":["string"],"const":"supervisor start","required":true},
+            {"path":"$.message","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.supervisor_pid","types":["integer"],"required":true}
+          ]
+        }
+      }
+    ],
+    "supervisor/status/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.checked_paths","types":["array"],"required":true},
+            {"path":"$.checked_paths[]","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.pid","types":["integer"],"required":true},
+            {"path":"$.running","types":["boolean"],"required":true},
+            {"path":"$.schema_version","types":["string"],"required":true},
+            {"path":"$.socket_path","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "supervisor/stop/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"stop","required":true},
+            {"path":"$.command","types":["string"],"const":"supervisor stop","required":true},
+            {"path":"$.message","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.wait","types":["boolean"],"required":false}
+          ]
+        }
+      }
+    ],
+    "suspend/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"suspend","required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.command","types":["string"],"const":"suspend","required":true},
+            {"path":"$.message","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "trace/show/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.count","types":["integer"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.records","types":["array"],"required":true},
+            {"path":"$.records[]","types":["object"],"required":false},
+            {"path":"$.records[].outcome_code","types":["string"],"required":false},
+            {"path":"$.records[].reason_code","types":["string"],"required":false},
+            {"path":"$.records[].record_id","types":["string"],"required":false},
+            {"path":"$.records[].record_type","types":["string"],"required":false},
+            {"path":"$.records[].seq","types":["integer"],"required":false},
+            {"path":"$.records[].session_name","types":["string"],"required":false},
+            {"path":"$.records[].template","types":["string"],"required":false},
+            {"path":"$.records[].tick_id","types":["string"],"required":false},
+            {"path":"$.records[].trace_id","types":["string"],"required":false},
+            {"path":"$.records[].trace_schema_version","types":["integer"],"required":false},
+            {"path":"$.records[].ts","types":["string"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "trace/status/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.active_arms","types":["array"],"required":true},
+            {"path":"$.active_arms[]","types":["object"],"required":false},
+            {"path":"$.as_of","types":["string"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.controller_pid","types":["integer"],"required":false},
+            {"path":"$.controller_running","types":["boolean"],"required":true},
+            {"path":"$.head_seq","types":["integer"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "unregister/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"unregister","required":true},
+            {"path":"$.city_name","types":["string"],"required":false},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.command","types":["string"],"const":"unregister","required":true},
+            {"path":"$.message","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "version/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.commit","types":["string"],"required":true},
+            {"path":"$.date","types":["string"],"required":true},
+            {"path":"$.long","types":["boolean"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"required":true},
+            {"path":"$.version","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "wait/cancel/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"cancel","required":true},
+            {"path":"$.command","types":["string"],"const":"wait cancel","required":true},
+            {"path":"$.name","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.state","types":["string"],"const":"canceled","required":true}
+          ]
+        }
+      }
+    ],
+    "wait/inspect/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"required":true},
+            {"path":"$.wait","types":["object"],"required":true},
+            {"path":"$.wait.created_at","types":["string"],"required":false},
+            {"path":"$.wait.delivery_attempt","types":["string"],"required":false},
+            {"path":"$.wait.dep_ids","types":["array"],"required":false},
+            {"path":"$.wait.dep_ids[]","types":["string"],"required":false},
+            {"path":"$.wait.dep_mode","types":["string"],"required":false},
+            {"path":"$.wait.id","types":["string"],"required":true},
+            {"path":"$.wait.kind","types":["string"],"required":true},
+            {"path":"$.wait.note","types":["string"],"required":false},
+            {"path":"$.wait.nudge_id","types":["string"],"required":false},
+            {"path":"$.wait.registered_epoch","types":["string"],"required":false},
+            {"path":"$.wait.session_id","types":["string"],"required":true},
+            {"path":"$.wait.session_name","types":["string"],"required":false},
+            {"path":"$.wait.state","types":["string"],"required":true},
+            {"path":"$.wait.status","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "wait/list/result.schema.json": [
+      {
+        "schema_version": "",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.city_path","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.schema_version","types":["string"],"required":true},
+            {"path":"$.waits","types":["array"],"required":true},
+            {"path":"$.waits[]","types":["object"],"required":false},
+            {"path":"$.waits[].created_at","types":["string"],"required":false},
+            {"path":"$.waits[].delivery_attempt","types":["string"],"required":false},
+            {"path":"$.waits[].dep_ids","types":["array"],"required":false},
+            {"path":"$.waits[].dep_ids[]","types":["string"],"required":false},
+            {"path":"$.waits[].dep_mode","types":["string"],"required":false},
+            {"path":"$.waits[].id","types":["string"],"required":true},
+            {"path":"$.waits[].kind","types":["string"],"required":true},
+            {"path":"$.waits[].note","types":["string"],"required":false},
+            {"path":"$.waits[].nudge_id","types":["string"],"required":false},
+            {"path":"$.waits[].registered_epoch","types":["string"],"required":false},
+            {"path":"$.waits[].session_id","types":["string"],"required":true},
+            {"path":"$.waits[].session_name","types":["string"],"required":false},
+            {"path":"$.waits[].state","types":["string"],"required":true},
+            {"path":"$.waits[].status","types":["string"],"required":true}
+          ]
+        }
+      }
+    ],
+    "wait/ready/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"ready","required":true},
+            {"path":"$.command","types":["string"],"const":"wait ready","required":true},
+            {"path":"$.name","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.ready_wait_id","types":["string"],"required":false},
+            {"path":"$.retried","types":["boolean"],"required":false},
+            {"path":"$.retried_from_wait","types":["string"],"required":false},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true},
+            {"path":"$.state","types":["string"],"const":"ready","required":true}
+          ]
+        }
+      }
+    ],
+    "worktree/cleanup/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"cleanup","required":true},
+            {"path":"$.already_absent","types":["boolean"],"required":true},
+            {"path":"$.branch","types":["string"],"required":true},
+            {"path":"$.cleanup_pending","types":["boolean"],"const":false,"required":true},
+            {"path":"$.command","types":["string"],"const":"worktree cleanup","required":true},
+            {"path":"$.head","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.path","types":["string"],"required":true},
+            {"path":"$.provenance","types":["object"],"required":false},
+            {"path":"$.provenance.attempt_id","types":["any"],"required":true},
+            {"path":"$.provenance.base_ref","types":["any"],"required":true},
+            {"path":"$.provenance.base_sha","types":["any"],"required":true},
+            {"path":"$.provenance.bead_id","types":["any"],"required":true},
+            {"path":"$.provenance.branch","types":["any"],"required":true},
+            {"path":"$.provenance.created_at","types":["any"],"required":true},
+            {"path":"$.provenance.creator","types":["any"],"required":true},
+            {"path":"$.provenance.generation","types":["any"],"required":true},
+            {"path":"$.provenance.lifecycle","types":["any"],"required":true},
+            {"path":"$.provenance.owner","types":["any"],"required":true},
+            {"path":"$.provenance.path","types":["any"],"required":true},
+            {"path":"$.provenance.repo_identity","types":["any"],"required":true},
+            {"path":"$.provenance.schema_version","types":["any"],"required":true},
+            {"path":"$.provenance.store_ref","types":["any"],"required":true},
+            {"path":"$.removed","types":["boolean"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "worktree/ensure/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"ensure","required":true},
+            {"path":"$.branch","types":["string"],"required":true},
+            {"path":"$.branch_created","types":["boolean"],"required":true},
+            {"path":"$.command","types":["string"],"const":"worktree ensure","required":true},
+            {"path":"$.created","types":["boolean"],"required":true},
+            {"path":"$.head","types":["string"],"required":false},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.path","types":["string"],"required":true},
+            {"path":"$.planned","types":["array"],"required":false},
+            {"path":"$.planned[]","types":["string"],"required":false},
+            {"path":"$.provenance","types":["object"],"required":false},
+            {"path":"$.provenance.attempt_id","types":["string"],"required":false},
+            {"path":"$.provenance.base_ref","types":["string"],"required":true},
+            {"path":"$.provenance.base_sha","types":["string"],"required":true},
+            {"path":"$.provenance.bead_id","types":["string"],"required":true},
+            {"path":"$.provenance.branch","types":["string"],"required":true},
+            {"path":"$.provenance.created_at","types":["string"],"required":false},
+            {"path":"$.provenance.creator","types":["string"],"required":true},
+            {"path":"$.provenance.generation","types":["string"],"required":true},
+            {"path":"$.provenance.lifecycle","types":["string"],"required":true},
+            {"path":"$.provenance.owner","types":["string"],"required":true},
+            {"path":"$.provenance.path","types":["string"],"required":true},
+            {"path":"$.provenance.repo_identity","types":["string"],"required":true},
+            {"path":"$.provenance.schema_version","types":["integer"],"const":1,"required":true},
+            {"path":"$.provenance.store_ref","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ],
+    "worktree/verify/result.schema.json": [
+      {
+        "schema_version": "1",
+        "jsonl": false,
+        "raw_json": false,
+        "variants": {
+          "": [
+            {"path":"$","types":["object"],"required":true},
+            {"path":"$.action","types":["string"],"const":"verify","required":true},
+            {"path":"$.branch","types":["string"],"required":true},
+            {"path":"$.branch_created","types":["boolean"],"const":false,"required":true},
+            {"path":"$.command","types":["string"],"const":"worktree verify","required":true},
+            {"path":"$.created","types":["boolean"],"const":false,"required":true},
+            {"path":"$.head","types":["string"],"required":true},
+            {"path":"$.ok","types":["boolean"],"const":true,"required":true},
+            {"path":"$.path","types":["string"],"required":true},
+            {"path":"$.planned","types":["array"],"required":false},
+            {"path":"$.planned[]","types":["string"],"required":false},
+            {"path":"$.provenance","types":["object"],"required":false},
+            {"path":"$.provenance.attempt_id","types":["string"],"required":true},
+            {"path":"$.provenance.base_ref","types":["string"],"required":true},
+            {"path":"$.provenance.base_sha","types":["string"],"required":true},
+            {"path":"$.provenance.bead_id","types":["string"],"required":true},
+            {"path":"$.provenance.branch","types":["string"],"required":true},
+            {"path":"$.provenance.created_at","types":["string"],"required":true},
+            {"path":"$.provenance.creator","types":["string"],"required":true},
+            {"path":"$.provenance.generation","types":["string"],"required":true},
+            {"path":"$.provenance.lifecycle","types":["string"],"required":true},
+            {"path":"$.provenance.owner","types":["string"],"required":true},
+            {"path":"$.provenance.path","types":["string"],"required":true},
+            {"path":"$.provenance.repo_identity","types":["string"],"required":true},
+            {"path":"$.provenance.schema_version","types":["integer"],"const":1,"required":true},
+            {"path":"$.provenance.store_ref","types":["string"],"required":true},
+            {"path":"$.schema_version","types":["string"],"const":"1","required":true}
+          ]
+        }
+      }
+    ]
+  }
+}

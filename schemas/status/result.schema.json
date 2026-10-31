@@ -20,7 +20,7 @@
   ],
   "properties": {
     "schema_version": {
-      "type": "string",
+      "const": "1",
       "description": "Schema version for this command output."
     },
     "ok": {
