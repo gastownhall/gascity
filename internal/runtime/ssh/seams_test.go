@@ -168,8 +168,8 @@ func TestSeamsSshObserve(t *testing.T) {
 			return nil, 0, nil
 		case isProcessAliveScript(argv):
 			return []byte(processTable("1234", "1234 1 claude")), 0, nil
-		case last == "#{session_attached}":
-			return []byte("1"), 0, nil // attached
+		case last == "#{session_name}|#{session_attached}":
+			return []byte("s|1"), 0, nil // attached
 		case last == "#{window_activity}":
 			return []byte("1700000000"), 0, nil // pane-output clock, epoch seconds
 		case last == "#{session_activity}":

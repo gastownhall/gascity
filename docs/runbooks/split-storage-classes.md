@@ -238,6 +238,15 @@ until the re-run finishes it.
 `gc storage status` exits non-zero while any rig awaits import, holds a pending
 clear, or holds rows written after its import.
 
+A rig whose store holds no infrastructure bead never needs this step: `gc rig
+add` (a new rig, `--adopt`, or a re-add) and the rig census the city runs at
+each boot record it `infra.rig.<rig>.clean` once the city binding has
+converged, so a rig added before a born-split city's first start, or an adopted
+store holding only work, does not wait for an import. A suspended rig is not
+censused at boot. Neither records a store the import refuses as shared (see
+below): that rig stays awaiting import, and `gc rig add` and the boot census's
+`storage.rig_residue` event say why.
+
 The import refuses, before writing anything, a rig store another registered
 city also uses or that it cannot rule out as one (shared or company stores wait
 for the single-writer attestation; a Dolt rig whose endpoint does not resolve
@@ -438,6 +447,13 @@ gc serves its own `release-if-current` itself.
   such edges into the binding): `purge` and `prune` can delete that work bead
   and leave the edge dangling.
 - `batch`: every `create` line is classified.
+- A file gc judges (`batch --file`, `delete --from-file`, a `--metadata @file`,
+  the `import` source) is copied to a private temporary file once judged, and
+  bd is pointed at the copy, which is removed when `gc bd` returns. bd writes
+  exactly what gc judged: a file rewritten after gc read it changes nothing.
+  A pipe (`<(...)`, `/dev/stdin`) given to `batch --file`, `delete
+  --from-file` or `import` is drained by gc's read, and bd gets the drained
+  bytes. bd names the copy, not your file, in what it prints.
 - `sql`: only a single plain read is allowed: no comments, no Dolt procedures,
   no backtick-quoted Dolt names.
 - `config set` and `config unset`: only `types.custom`, `types.infra`,
@@ -700,7 +716,8 @@ just as the controller skips it: what its own store holds comes back on
 `gc rig resume`, and routed graph work in the binding stays visible throughout
 (see [`gc ready`](/reference/cli#gc-ready)). Every worker's generated work query
 is already swapped onto it, so this affects operators and ad-hoc scripts, not
-the work loop.
+the work loop. The core orphan-sweep order also reads in-progress claims
+through it.
 
 `gc ready` is flag-compatible with the `bd ready` invocation that generated work
 query builds — **not** with all of `bd ready`. It takes `--assignee`,

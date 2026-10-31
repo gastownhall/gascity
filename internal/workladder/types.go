@@ -124,7 +124,63 @@ type Observation struct {
 	LastActivity time.Time
 	Gate         Gate
 	Provider     ProviderState
+	// Conv is the row's conversation: its continuation epoch.
+	Conv int64
+	// Turns is what the seat's own turns said on this pass; the zero value
+	// is no reading: progress is then judged on the activity clock, and no
+	// rate-limit episode opens or moves on the reading's evidence.
+	Turns TurnReading
+	// RestartHold is a standing reason the seat must not be restarted fresh
+	// now, read by the caller only while RestartDue: a person attached to
+	// it, or work of it awaiting a person.
+	RestartHold RestartHold
+	// ProviderFreshAt is the newest fresh restart (RateLimit.LastFresh) of
+	// another governed seat on this seat's provider, read off their saved
+	// cells; zero when there is none.
+	ProviderFreshAt time.Time
 }
+
+// TurnReading is one read of the seat's turns, reduced to what Decide
+// judges progress and rate limits by. A turn the provider failed is not
+// progress: when the newest ended turn failed, only a turn the provider
+// completed shows the seat at work. A reading of another conversation than
+// the observation's is no reading. Nothing in it is read out of an error's
+// text: every rate-limit fact is the turn's source's own classification.
+type TurnReading struct {
+	// Read is true when the turns were read; false is no reading (a family
+	// that records no turns, a read that failed, a pass that read none).
+	Read bool
+	// Conv is the conversation (continuation epoch) the turns were read in.
+	Conv int64
+	// LastFailed reports that the newest ended turn failed, whatever the
+	// cause, and no turn is open.
+	LastFailed bool
+	// ServedAt is when the newest turn the provider completed ended,
+	// anywhere in the turns read; zero when none did.
+	ServedAt time.Time
+	// Refused is how many of the newest ended turns in a row the provider
+	// refused with a rate limit, as their source classified them; 0 while a
+	// turn is open (it has no answer yet).
+	Refused int
+	// RefusedAt is when the newest of those refused turns ended.
+	RefusedAt time.Time
+	// Quota reports that the newest refused turn's source classed its
+	// refusal a spent usage quota (an allowance that comes back only when
+	// the account's period resets), not a rate limit a fresh conversation
+	// may get past. Such an episode is never restarted fresh: a new
+	// conversation draws on the same spent allowance.
+	Quota bool
+}
+
+// RestartHold is a standing reason not to restart a seat fresh now.
+type RestartHold uint8
+
+// Restart holds. RestartHoldNone is the zero value.
+const (
+	RestartHoldNone          RestartHold = iota
+	RestartHoldAttached                  // a person is attached to the seat
+	RestartHoldAwaitingHuman             // work of the seat awaits a person
+)
 
 // Policy is the ladder's pacing. DefaultPolicy is OD7's.
 type Policy struct {
@@ -136,6 +192,24 @@ type Policy struct {
 	RecycleRepost time.Duration // a trigger's recycle request is reposted no sooner
 	Threshold     map[Kind]map[Rung]int
 	MaxRecycles   int // R: recycles of a started claim per seat
+
+	// RateLimitThreshold is how many turns in a row the provider must
+	// refuse with a rate limit before the refusals open an episode.
+	RateLimitThreshold int
+	// FreshConfirm is how long an episode stands, from the refusal that
+	// opened it, before it is confirmed (by a refusal of a nudge delivered
+	// after it opened) and may take its one fresh restart.
+	FreshConfirm time.Duration
+	// SeatFreshGap: no second fresh restart of a seat within this of its
+	// last; an episode confirmed inside it is exhausted instead.
+	SeatFreshGap time.Duration
+	// ProviderFreshGap: no fresh restart within this of another seat's on
+	// the same provider (Observation.ProviderFreshAt).
+	ProviderFreshGap time.Duration
+	// RateLimitEvidenceMaxAge: an open episode with no new answered
+	// refusal for this long (by the refusal's own end time) closes stale,
+	// and an older refusal answers nothing.
+	RateLimitEvidenceMaxAge time.Duration
 }
 
 // Action is one effect Decide asks the caller for.
@@ -170,10 +244,25 @@ type Alert struct {
 	Reason string
 }
 
-func (Nudge) isAction()   {}
-func (Recycle) isAction() {}
-func (Release) isAction() {}
-func (Alert) isAction()   {}
+// FreshRestart asks for the seat to be restarted in place on a new
+// conversation, keeping its claims (the caller writes the restart request in
+// the same CAS as the cell). It is the seat's, never a claim's: one per
+// rate-limit episode at most.
+type FreshRestart struct{}
+
+// RateLimitMove is one move of the seat's rate-limit episode, for the
+// caller to report (work.rate_limited).
+type RateLimitMove struct {
+	Transition RateLimitTransition
+	Cause      RateLimitCause
+}
+
+func (Nudge) isAction()         {}
+func (Recycle) isAction()       {}
+func (Release) isAction()       {}
+func (Alert) isAction()         {}
+func (FreshRestart) isAction()  {}
+func (RateLimitMove) isAction() {}
 
 // Alert reasons.
 const (
@@ -183,6 +272,23 @@ const (
 	AlertReleaseUnfinished      = "release_unfinished"
 	AlertReleaseRacedStart      = "release_raced_start"
 	AlertNudgeRefused           = "nudge_refused"
+
+	// AlertRateLimitedFreshRefused: the seat's fresh restart did not get it
+	// served (its new conversation was refused too, or the restart did not
+	// take).
+	AlertRateLimitedFreshRefused = "rate_limited_fresh_refused"
+	// AlertRateLimitedAgain: the seat was refused again within SeatFreshGap
+	// of its last fresh restart.
+	AlertRateLimitedAgain = "rate_limited_again"
+	// AlertRateLimitedHeld: a standing hold, or a block lasting past
+	// FreshConfirm + Cap, keeps the ladder from restarting the seat. It is
+	// the episode's one alert: how the episode ends after it (a fresh
+	// restart refused too, a spent quota) is reported only by its
+	// RateLimitMove.
+	AlertRateLimitedHeld = "rate_limited_held"
+	// AlertRateLimitedQuota: the provider refuses the seat on a spent usage
+	// quota, which no fresh restart gets past.
+	AlertRateLimitedQuota = "rate_limited_quota"
 )
 
 // Decision is Decide's answer: the cell to CAS (no write when !Changed) and
@@ -202,10 +308,19 @@ type Record struct {
 	// LastNudge is the seat's last nudge, about any of its work: the seat
 	// is nudged at most once per Base (WL3), whatever work comes and goes.
 	LastNudge time.Time
-	// RecycledGen is the generation the ladder last asked to recycle the
-	// seat at: the stop that recycle brings is the ladder's, whatever the
-	// switch says by then.
+	// RecycledGen is the generation the ladder last asked to recycle (or
+	// restart fresh) the seat at: the stop that brings is the ladder's,
+	// whatever the switch says by then.
 	RecycledGen int64
+	// Delivered is when the seat last took a nudge, about any of its work,
+	// in this generation: the start of the attempt that delivered it,
+	// direct or a notice the caller settled delivered. Zero until one
+	// lands; a new generation clears it.
+	Delivered time.Time
+	// RateLimit is the seat's rate-limit state: its episode, if one is
+	// open, and its last fresh restart. The zero value is neither. A new
+	// generation keeps it: the episode is about the conversation.
+	RateLimit RateLimit
 }
 
 // Entry is one outstanding piece of work's pacing.

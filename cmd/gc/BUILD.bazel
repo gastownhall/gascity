@@ -87,6 +87,7 @@ go_library(
         "bd_passthrough_config.go",
         "bd_relocated_classes.go",
         "bd_split_allowlist.go",
+        "bd_split_judged_files.go",
         "bd_split_judges.go",
         "bd_subject_route.go",
         "bd_wisp_tier.go",
@@ -699,6 +700,7 @@ go_library(
         "work_assignment.go",
         "work_ladder_lane.go",
         "work_ladder_notice.go",
+        "work_ladder_turns.go",
         "work_location.go",
         "work_query_failure.go",
         "work_query_probe.go",
@@ -1011,6 +1013,7 @@ go_test(
         "bd_passthrough_trims_test.go",
         "bd_relocated_classes_test.go",
         "bd_split_allowlist_realbd_integration_test.go",
+        "bd_split_judged_files_test.go",
         "bd_split_judges_test.go",
         "bd_testscript_test.go",
         "bd_wisp_tier_test.go",
@@ -2248,6 +2251,7 @@ go_test(
         "work_ladder_lane_test.go",
         "work_ladder_notice_test.go",
         "work_ladder_storeref_test.go",
+        "work_ladder_turns_test.go",
         "work_location_test.go",
         "work_query_failure_test.go",
         "work_query_probe_test.go",
@@ -2364,6 +2368,7 @@ go_test(
         "//internal/executionevent",
         "//internal/extmsg",
         "//internal/fanout/fanouttest",
+        "//internal/featureflags",
         "//internal/formula",
         "//internal/formulatest",
         "//internal/fsyncprobe",
@@ -2478,52 +2483,11 @@ go_test(
         "@net_pgregory_rapid//:rapid",
         "@org_golang_x_mod//semver",
     ] + select({
-        "@rules_go//go/platform:aix": [
-            "//internal/featureflags",
-        ],
         "@rules_go//go/platform:android": [
-            "//internal/featureflags",
             "//internal/pathdurability",
-        ],
-        "@rules_go//go/platform:darwin": [
-            "//internal/featureflags",
-        ],
-        "@rules_go//go/platform:dragonfly": [
-            "//internal/featureflags",
-        ],
-        "@rules_go//go/platform:freebsd": [
-            "//internal/featureflags",
-        ],
-        "@rules_go//go/platform:illumos": [
-            "//internal/featureflags",
-        ],
-        "@rules_go//go/platform:ios": [
-            "//internal/featureflags",
-        ],
-        "@rules_go//go/platform:js": [
-            "//internal/featureflags",
         ],
         "@rules_go//go/platform:linux": [
-            "//internal/featureflags",
             "//internal/pathdurability",
-        ],
-        "@rules_go//go/platform:netbsd": [
-            "//internal/featureflags",
-        ],
-        "@rules_go//go/platform:openbsd": [
-            "//internal/featureflags",
-        ],
-        "@rules_go//go/platform:osx": [
-            "//internal/featureflags",
-        ],
-        "@rules_go//go/platform:plan9": [
-            "//internal/featureflags",
-        ],
-        "@rules_go//go/platform:qnx": [
-            "//internal/featureflags",
-        ],
-        "@rules_go//go/platform:solaris": [
-            "//internal/featureflags",
         ],
         "//conditions:default": [],
     }),

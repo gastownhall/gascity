@@ -456,10 +456,10 @@ type startExecutionOptions struct {
 	// startPreparedStartCandidate's warm-reuse branch. Nil disables the nudge.
 	warmClaimProbe warmClaimTriggerProbe
 	// dispatchOptionSources are the reads a pool session launched before it
-	// claims needs to apply its trigger bead's opt_* pins: the trigger resolved
-	// through the city's residency contract (newWarmClaimTriggerResolver), and a
-	// claimed-work probe across every leg the session can claim from. The zero
-	// value reads the session store only.
+	// claims needs to apply its trigger bead's opt_* pins: the trigger read live
+	// from the work leg that owns it (legsTriggerResolver), and a claimed-work
+	// probe across every leg the session can claim from. The zero value reads the
+	// session store only.
 	dispatchOptionSources dispatchOptionSources
 	// capacityGuard gates starts per serving endpoint. Nil leaves every
 	// endpoint unguarded (legacy failure accounting).

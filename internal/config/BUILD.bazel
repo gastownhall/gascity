@@ -185,6 +185,7 @@ go_test(
         "testutil_test.go",
         "undecoded_test.go",
         "unhonored_pins_test.go",
+        "upstream_env_chain_test.go",
         "upstream_test.go",
         "validate_dolt_test.go",
         "validate_durations_test.go",

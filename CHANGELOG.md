@@ -535,6 +535,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its next pass, so a script need not retry. An operator on the controller
   host can still restart any session with `gc session reset <session>`.
 
+- **Delete any `[[orders.overrides]]` entry that names `wisp-compact`.** The
+  core pack no longer ships that order (see Fixed). An override naming an
+  order that no longer exists is a config error: `gc order` commands exit 1,
+  and the controller logs the error and skips every override after it.
+  `[orders] skip` entries that name `wisp-compact` stay valid; the order
+  scanner ignores names it does not find.
+
 ### Added
 
 - **`[events.mirror]` writes a copy of the city's event log outside `.gc`**
@@ -653,6 +660,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The core orphan-sweep order judges claims on graph steps in a
+  split-storage city.** On a city whose `[storage.classes]` serves the graph
+  class from a binding, `gc bd list` answers from a work store only, so the
+  order never listed a molecule step's claim: a step held by a dead session
+  stayed `in_progress`, and a claim it should keep was never named. It now
+  also reads claims with `gc ready --status in_progress` (the city store,
+  serving rigs and every class binding, across both storage tiers, so
+  wisp-plane claims too), judges each claim once, and declares a federated
+  read it could not complete as a partial outcome.
+
 - **Split cities now start sessions for binding-resident steps that carry
   worktree evidence.** On a split-storage city, a rig-rooted graph step lives
   in the relocated class binding, which the pool demand probe reads under the
@@ -697,6 +714,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   started for a bead its window served last or not at all. Demand is now
   named in the same canonical order, so the session started for a bead finds
   it at the head of its window. Single-store cities are unaffected.
+
+- **The core pack no longer ships the `wisp-compact` order, which never
+  selected a wisp.** The order's script picked its targets from `gc bd list
+  --json --all -n 0`, but every bd release gc supports (1.3.0 and later) omits
+  ephemeral rows from `bd list` unless `--include-infra` (or, from bd 1.3.1,
+  `--include-ephemeral`) is passed. Every hourly run therefore listed every
+  durable bead, found no wisp, and was recorded as a successful run that
+  changed nothing. Repairing the read would have deleted read mail after 24
+  hours and moved live wisps out of the ephemeral tier that agents query.
+  Closed and stale wisps are already handled elsewhere: on bd 1.3.1 and later,
+  the `reaper` order purges closed wisps-plane rows after its retention window
+  and keeps any a live bead still depends on, and reports stale open wisps;
+  `[mail]` retention covers read mail; and the controller wisp GC (`[daemon]
+  wisp_gc_interval` and `wisp_ttl`) collects expired wisps, including on
+  split-storage cities, where `gc bd` refuses the script's writes. (#4937)
+
+- **Sessions no longer inherit a native store open's temporary environment.**
+  While gc opens a native Dolt store it briefly rewrites its own process
+  environment: it clears the `BEADS_*` and `BD_*` variables and sets the
+  store's server, database and git-author variables. A session started in
+  that window (subprocess, acp, tmux and herdr setup commands, runtime
+  capability ops, and the nudge and submit pollers) copied those values for
+  its whole life. A rig worker could then read the city's database name on
+  the rig's server, see no work, and stall while demand kept rising; it
+  also lost `BD_BIN` and ran with `GIT_AUTHOR_NAME=gc`. These spawns now read
+  the process environment under the same lock the open holds, so a session
+  start waits for an in-flight open to restore the environment first.
 
 - **`gc prime --strict` fails on a `prompt_template` that does not render.**
   A `.template.md` (or `.md.tmpl`) prompt_template that failed to parse or
