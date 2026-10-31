@@ -11126,3 +11126,126 @@ func TestHasOpenWorkStrictIgnoresAForgedOrderRunLabel(t *testing.T) {
 		t.Fatalf("index summary %+v, want no run of digest", summary)
 	}
 }
+
+func TestShellExecRunnerDoesNotInheritSessionIdentity(t *testing.T) {
+	t.Setenv("GC_SESSION_ID", "gc-seat-123")
+	t.Setenv("GC_ALIAS", "some-seat")
+	t.Setenv("GC_AGENT", "some-seat")
+
+	out, err := shellExecRunner(context.Background(),
+		`printf 'sid=%s alias=%s agent=%s' "${GC_SESSION_ID:-unset}" "${GC_ALIAS:-unset}" "${GC_AGENT:-unset}"`,
+		t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("shellExecRunner() error = %v, output = %q", err, out)
+	}
+	if got, want := string(out), "sid=unset alias=unset agent=unset"; got != want {
+		t.Fatalf("order exec inherited the dispatcher's session identity: got %q, want %q", got, want)
+	}
+}
+
+// TestShellExecRunnerScrubsSessionScopedEnv drives the scrub from
+// managedDoltSessionScopedEnvKeys so a session-scoped key added to that list
+// later is covered for exec orders too.
+func TestShellExecRunnerScrubsSessionScopedEnv(t *testing.T) {
+	for _, key := range managedDoltSessionScopedEnvKeys {
+		t.Setenv(key, "leak-"+key)
+	}
+
+	out, err := shellExecRunner(context.Background(), "env", t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("shellExecRunner() error = %v, output = %q", err, out)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		key, _, ok := strings.Cut(line, "=")
+		if ok && containsString(managedDoltSessionScopedEnvKeys, key) {
+			t.Errorf("order exec env carries session-scoped %q", line)
+		}
+	}
+}
+
+func TestMergeOrderExecEnvExplicitAndUnrelatedKeysSurvive(t *testing.T) {
+	environ := []string{
+		"PATH=/usr/bin",
+		"HOME=/h",
+		"FOO=bar",
+		"GC_SESSION_ID=gc-seat-123",
+		"GC_ALIAS=seat",
+		"BEADS_ACTOR=seat",
+	}
+	env := []string{"GC_ALIAS=reporter", "BEADS_ACTOR=order:x"}
+
+	merged := mergeOrderExecEnv(environ, env)
+
+	counts := map[string]int{}
+	for _, entry := range merged {
+		counts[entry]++
+		if key, _, _ := strings.Cut(entry, "="); key == "GC_SESSION_ID" {
+			t.Errorf("seat identity survived merge: %q in %v", entry, merged)
+		}
+	}
+	for _, want := range []string{"GC_ALIAS=reporter", "BEADS_ACTOR=order:x"} {
+		if counts[want] != 1 {
+			t.Errorf("%q appears %d times, want once: %v", want, counts[want], merged)
+		}
+	}
+	for _, unwanted := range []string{"GC_ALIAS=seat", "BEADS_ACTOR=seat"} {
+		if counts[unwanted] != 0 {
+			t.Errorf("inherited %q survived alongside the explicit value: %v", unwanted, merged)
+		}
+	}
+	for _, want := range []string{"PATH=/usr/bin", "HOME=/h", "FOO=bar"} {
+		if counts[want] != 1 {
+			t.Errorf("unrelated %q appears %d times, want once: %v", want, counts[want], merged)
+		}
+	}
+}
+
+func TestOrderExecEnvMergeDropsSeatIdentityKeepsCuratedValues(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("BEADS_ACTOR", "some-seat")
+
+	cityDir := t.TempDir()
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+	a := orders.Order{Name: "digest", Trigger: "cooldown", Interval: "1m", Exec: "true"}
+
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError() error = %v", err)
+	}
+
+	merged := mergeOrderExecEnv([]string{
+		"PATH=/usr/bin",
+		"HOME=/h",
+		"FOO=bar",
+		"GC_SESSION_ID=gc-seat-123",
+		"GC_ALIAS=some-seat",
+		"GC_AGENT=some-seat",
+		"BEADS_ACTOR=some-seat",
+	}, envSlice)
+
+	got := map[string][]string{}
+	for _, entry := range merged {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			got[key] = append(got[key], value)
+		}
+	}
+	for key, want := range map[string]string{
+		"PATH":          "/usr/bin",
+		"HOME":          "/h",
+		"FOO":           "bar",
+		"BEADS_ACTOR":   "order:digest",
+		"GC_STORE_ROOT": cityDir,
+		"GC_RIG":        "",
+	} {
+		if values := got[key]; len(values) != 1 || values[0] != want {
+			t.Errorf("%s = %q, want exactly [%q]", key, values, want)
+		}
+	}
+	for _, key := range []string{"GC_SESSION_ID", "GC_ALIAS", "GC_AGENT"} {
+		if values, present := got[key]; present {
+			t.Errorf("seat identity %s=%q reached the order env", key, values)
+		}
+	}
+}
