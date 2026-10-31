@@ -187,6 +187,12 @@ func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTa
 	if err != nil {
 		return nil, fmt.Errorf("building order env for %s: %w", a.ScopedName(), err)
 	}
+	// The order's own city name, over the supervisor's ambient value, which
+	// names some other city when one supervisor runs several. Reserved, so
+	// [order.env] cannot repoint it.
+	if name := loadedCityName(cfg, cityPath); name != "" {
+		env["GC_CITY_NAME"] = name
+	}
 	env["GC_STORE_ROOT"] = target.ScopeRoot
 	env["GC_STORE_SCOPE"] = target.ScopeKind
 	env["GC_BEADS_PREFIX"] = target.Prefix

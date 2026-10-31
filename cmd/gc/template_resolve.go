@@ -358,6 +358,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	for key, value := range cityRuntimeEnvMapForCity(p.cityPath) {
 		agentEnv[key] = value
 	}
+	// The session's own city name. Without it a session inherits the tmux
+	// server's (and so the supervisor's) GC_CITY_NAME, which names some other
+	// city when one supervisor runs several.
+	if name := strings.TrimSpace(p.cityName); name != "" {
+		agentEnv["GC_CITY_NAME"] = name
+	}
 	// Override the city-uniform GC_CONTROL_DISPATCHER_TRACE_DEFAULT with a
 	// per-dispatcher path so each control-dispatcher writes to its own
 	// trace file (closes #1650). Goes in agentEnv (last in mergeEnv) so it

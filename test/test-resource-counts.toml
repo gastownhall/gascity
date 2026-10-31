@@ -990,7 +990,7 @@ calls = 2
 [[count]]
 path = "cmd/gc/order_dispatch_test.go"
 resource = "environment"
-calls = 6
+calls = 7
 
 [[count]]
 path = "cmd/gc/order_dispatch_test.go"
