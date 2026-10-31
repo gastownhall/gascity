@@ -11,10 +11,18 @@ bazel_dep(name = "rules_go", version = "0.63.0")
 # from golangci-lint's (a comment trailing `func f(...) {` attaches to the
 # body's first statement). This tree's directives were written against
 # golangci-lint, so the patch adds golangci-lint's ranges as well.
+#
+# The second patch feeds //tools/nogo:main_repo_data (the storeclass
+# baseline) to main-repository nogo actions only, through
+# GC_NOGO_MAIN_REPO_DATA, instead of compiling it into the nogo binary: a
+# baseline edit then re-lints gascity packages, not every external one.
 single_version_override(
     module_name = "rules_go",
     patch_strip = 1,
-    patches = ["//third_party/patches:rules_go_nogo_golangci_nolint.patch"],
+    patches = [
+        "//third_party/patches:rules_go_nogo_golangci_nolint.patch",
+        "//third_party/patches:rules_go_nogo_main_repo_data.patch",
+    ],
     version = "0.63.0",
 )
 bazel_dep(name = "gazelle", version = "0.53.0")

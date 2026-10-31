@@ -158,7 +158,9 @@ func CollectAttachments(parent beads.Bead, childQuerier BeadChildQuerier, stores
 func getFromStores(id string, stores []beads.Store) (beads.Bead, beads.Store, error) {
 	var hardErr, notFoundErr error
 	for _, s := range stores {
-		b, err := s.Get(id)
+		// A first-owner probe: the attachment lives in the graph store or,
+		// for a v1 poured molecule, in the work store, so a miss passes on.
+		b, err := beads.FederatedGet(s, id)
 		if err == nil {
 			return b, s, nil
 		}

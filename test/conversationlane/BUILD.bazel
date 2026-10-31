@@ -73,6 +73,7 @@ go_test(
         "inline_pass_test.go",
         "ladder_lane_test.go",
         "main_test.go",
+        "submit_lane_test.go",
         "testenv_import_test.go",
         "x12_evidence_guard_test.go",
         "x12_harness_test.go",

@@ -3513,6 +3513,9 @@
             "$ref": "#/components/schemas/StorageBindingOutcomePayload"
           },
           {
+            "$ref": "#/components/schemas/StorageRigPayload"
+          },
+          {
             "$ref": "#/components/schemas/StoreDiskCriticalPayload"
           },
           {
@@ -13892,6 +13895,42 @@
         ],
         "type": "object"
       },
+      "StorageRigPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "beads": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "binding": {
+            "type": "string"
+          },
+          "cleared": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "gates": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "rig": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "rig",
+          "binding",
+          "outcome",
+          "beads"
+        ],
+        "type": "object"
+      },
       "StoreDiskCriticalPayload": {
         "additionalProperties": false,
         "properties": {
@@ -14512,6 +14551,8 @@
             "storage.binding.not_configured": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingNotConfigured",
             "storage.binding.uncheckable": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingUncheckable",
             "storage.binding.unconverged": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingUnconverged",
+            "storage.rig_import": "#/components/schemas/TypedEventStreamEnvelopeStorageRigImport",
+            "storage.rig_residue": "#/components/schemas/TypedEventStreamEnvelopeStorageRigResidue",
             "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
             "supervisor.request": "#/components/schemas/TypedEventStreamEnvelopeSupervisorRequest",
             "supervisor.shutdown_requested": "#/components/schemas/TypedEventStreamEnvelopeSupervisorShutdownRequested",
@@ -14847,6 +14888,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingUnconverged"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeStorageRigImport"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeStorageRigResidue"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
@@ -16480,7 +16527,9 @@
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
                 "storage.binding.uncheckable",
-                "storage.binding.not_configured"
+                "storage.binding.not_configured",
+                "storage.rig_import",
+                "storage.rig_residue"
               ]
             },
             "type": "string"
@@ -21116,6 +21165,120 @@
         "title": "TypedEventStreamEnvelope storage.binding.unconverged",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeStorageRigImport": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StorageRigPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "storage.rig_import",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope storage.rig_import",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeStorageRigResidue": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StorageRigPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "storage.rig_residue",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope storage.rig_residue",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick": {
         "additionalProperties": false,
         "properties": {
@@ -22024,6 +22187,8 @@
             "storage.binding.not_configured": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured",
             "storage.binding.uncheckable": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingUncheckable",
             "storage.binding.unconverged": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingUnconverged",
+            "storage.rig_import": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageRigImport",
+            "storage.rig_residue": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageRigResidue",
             "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
             "supervisor.request": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorRequest",
             "supervisor.shutdown_requested": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested",
@@ -22359,6 +22524,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingUnconverged"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageRigImport"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageRigResidue"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
@@ -24095,7 +24266,9 @@
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
                 "storage.binding.uncheckable",
-                "storage.binding.not_configured"
+                "storage.binding.not_configured",
+                "storage.rig_import",
+                "storage.rig_residue"
               ]
             },
             "type": "string"
@@ -29054,6 +29227,128 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope storage.binding.unconverged",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeStorageRigImport": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StorageRigPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "storage.rig_import",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope storage.rig_import",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeStorageRigResidue": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StorageRigPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "storage.rig_residue",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope storage.rig_residue",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick": {

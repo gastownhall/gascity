@@ -41,8 +41,31 @@ are run; Bazel is the runner that enforces it.
 | Acceptance Tier A | `acceptance` (sharded) | `bazel test --config=acceptance //test/acceptance:acceptance_test` | `make test-acceptance` |
 | Integration-tagged packages outside `test/integration` | `integration-packages` (gating) | `bazel test --config=integration //test:integration_packages` | part of `make test-integration` |
 | `test/integration` | `integration` (evidence-only) | `bazel test --config=integration //test/integration:integration_test` | part of `make test-integration` |
+| Split-strict projection gate: violation-key ratchet (fixture rows bound to the tests that reach them) and known-failures check (every entry with a reason, a regenerated one `UNTRIAGED:` until someone classifies it; flakes only in `split_strict_known_flaky.list` with an owner bead, never retried; a failed TestMain guard fails it too), reported apart; nightly downward ratchet fails on unreached rows and now-passing known failures (`GC_TEST_SPLIT_STRICT=1`; `internal/beads/splittest/projection.go`, `gate.go`) | `split-strict` (evidence-only, allowed to fail; mode remote: nightly, dispatch, PRs touching the store layer or routing code: cmd/gc, api, session, sling, molecule, orders, dispatch, readywork, executionevent, mail, nudgequeue, sourceworkflow; every file a baseline row names) | `bazel test //cmd/gc:gc_split_strict_test //internal/api:api_split_strict_test`; regenerate inputs from two or more full runs with `scripts/split-strict-baseline` (refuses inconsistent tests); check with `scripts/split-strict-baseline --check` | none |
 | Docs sync | `unit` | `bazel test //test/docsync:docsync_test` | `make check-docs` |
 | Coverage (push to main) | `coverage` | `bazel coverage //... --combined_report=lcov` | none |
+
+Split-strict ratchet limit: a key names the offending function and its
+nearest caller in the package under test, and its caps count that function's
+and that caller's distinct lines. A NEW production path one level further up
+(another function calling the same baselined caller at an already-counted
+line) is absorbed by a `*`-scoped row: it changes neither the key nor a cap.
+The misroute, known-violation and relic rows that are `*`-scoped go as S3c
+and S4 fix the paths; fixture rows are bound to their tests and do not have
+this gap.
+
+Split-strict graph-apply limit: a graph plan is judged whole (a plan of the
+other side's class is flagged), but its references to rows that already exist
+(a node's `ParentID`, an edge's `FromID`/`ToID`) are not checked against the
+other side yet (`GraphApplyHandle` in `projection.go`), so a plan that wires a
+row to the wrong side's row passes the gate.
+
+Split-strict lane latency: `continue-on-error` keeps the lane's result out of
+the required `bazel test (side-by-side)` check, not its wall time. The lane is
+a leg of the matrix the gate job needs, so on a pull request that runs it the
+required check reports when it ends (about 5 minutes on a warm farm; 19 were
+seen cold). That keeps one copy of the lane's steps; give it its own job if
+the wait starts to matter.
 
 Narrow while iterating: `bazel test //internal/config:config_test`, or
 `bazel test //internal/beads/...` for a subtree;
@@ -345,8 +368,9 @@ this:
   keyed on its number, never share a queue entry's group.
 - **Advisory probes run beside, never inside, the required workflows.**
   `advisory-probes.yml` (the contract radar against beads main HEAD, MCP
-  mail conformance) runs on `ci.yml`'s events, `merge_group` included, but
-  none of its checks is required, so the queue never waits on it. It is not
+  mail conformance) runs on `ci.yml`'s events except `merge_group`: none of
+  its checks is required, so no queue entry waits on it, and the push to
+  `main` runs it on the commit the queue merges. It is not
   part of `ci.yml`, so a red probe never shares a run with `Check` and
   `CI / required`: every `ci.yml` job feeds `CI / required`
   (`scripts/ci_required_coverage_test.go`).
@@ -1553,6 +1577,7 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `scripts` package `scripts_test` | TestGoModDownloadRetryScriptRetriesTransientFailures: subprocess | ga-cp3hwi | the CI go mod download retry proof is a checked Medium subprocess owner; the one bash subprocess per case is confined to TestGoModDownloadRetryScriptRetriesTransientFailures, which exists to run .github/scripts/go-mod-download-retry.sh against a PATH-injected fake go: the retry loop and GOPROXY selection are shell, so only a real shell run can prove a transient proxy error is retried and a persistent one fails | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestGoModVerifyCacheDetectsTamperedModules: subprocess | ga-cp3hwi | the CI Go module cache verification proof is a checked Medium subprocess owner; the go and bash subprocesses are confined to TestGoModVerifyCacheDetectsTamperedModules, which exists to run .github/scripts/go-mod-download-retry.sh and .github/scripts/go-mod-verify-cache.sh with the real go command against a file:// module proxy and an isolated module cache, then tamper with the cached zip: the claim under test is the go command's own trust of a cached .ziphash, so only the real go command can prove the verify step catches what it accepts | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestProviderOverridesAndSuiteContractsCrossMakeIsolation: subprocess | ga-cp3hwi | Make/provider and suite-contract proof is a checked Medium owner; the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation | P0.1 | 2026-10-31 |
+| Medium owner | `tools/nogo/nolinttest` package `nolinttest_test` | TestNolintNeverSuppressesStoreclass: subprocess | ga-cp3hwi | the storeclass nolint-suppression proof is a checked Medium subprocess owner; the nogo subprocess per case is confined to TestNolintNeverSuppressesStoreclass, which exists to run the Bazel-built nogo binary over a fixture under every nolint spelling and placement: nolint handling lives in rules_go's patched nogo driver, not in the storeclass analyzer, so only a real nogo run can prove that no directive suppresses a storeclass finding | P0.4b | 2026-10-31 |
 | Small debt ratchet | `cmd/gc` untagged test source | cwd | ga-cp3hwi | untagged Small cmd/gc cwd call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; non-Medium lexical owners restore or eliminate every cwd mutation | D5/D6 | 2026-10-31 |
 | Small debt ratchet | `cmd/gc` untagged test source | environment | ga-cp3hwi | untagged Small cmd/gc environment call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; non-Medium lexical owners restore or eliminate every process-environment mutation | D5/D6/E6 | 2026-10-31 |
 | Small debt ratchet | `cmd/gc` untagged test source | slow_process_gate | ga-cp3hwi | untagged Small cmd/gc slow-process marker totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; each non-Medium marked caller retains an explicit process-suite migration owner | D5/D6/E6 | 2026-10-31 |
@@ -1577,6 +1602,7 @@ all-source audit while staying outside untagged and Small debt.
 | Source debt ratchet | all untagged test source | subprocess | ga-cp3hwi | untagged subprocess call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-31 |
 | Source debt ratchet | all untagged test source | syscall_listen | ga-cp3hwi | untagged syscall.Listen call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; each owning test closes its listening file descriptor and removes duplicate listener-backed coverage | P0.4c | 2026-10-31 |
 | Source debt ratchet | all untagged test source | tmux | ga-cp3hwi | untagged tmux dependency call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; each owning test confines tmux processes and sockets to its isolated namespace and cleanup | P0.4c-tmux | 2026-10-31 |
+| Source debt ratchet | build_targets | test_target | ga-4ag4p2.1 | declared go-test invocation sites in tracked build-orchestration files (Makefile, CI workflow YAML) cannot grow without an explicit, reviewed baseline update; each new test target's author declares it via a baseline bump with real ownership fields — same contract as every other resource dimension (ga-hpcma0) | n/a — preventive dimension, not paying down inherited debt | 2026-10-31 |
 
 | Reviewed hermetic body | Effective runnable size | Medium reason | Retained real composition owner |
 | --- | --- | --- | --- |

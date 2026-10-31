@@ -39,7 +39,8 @@ type OpsConfig struct {
 	// process start. With message listed in authoritative, a surface that
 	// proposes lane message ops (the API's submit and messages, a provider
 	// session create's initial message, extmsg member notices, gc session
-	// nudge, planner notices) is not governed by this gate.
+	// nudge, gc session submit, planner notices) is not governed by this
+	// gate.
 	ContentMode string `toml:"content,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
 	// Records interrupt (stop) and respond requests as ops. "auto" is the
 	// default. Left unset, it records only over a SQLite sessions store and
@@ -100,11 +101,12 @@ type OpsConfig struct {
 	// other way can leave its notice open. A ready wait's nudge is a lane
 	// notice from gc:wait to a session a lane host can type into, and its
 	// outcome finalizes the wait; for a session no lane serves, or a note the
-	// op store refuses, it keeps its legacy delivery. gc session submit's
-	// local fallback keeps its legacy delivery in this build; it answers
-	// from the API's lane op under its key rather than delivering again, on
-	// any sessions store, the content gate's builtin default
-	// notwithstanding.
+	// op store refuses, it keeps its legacy delivery. gc session submit sends
+	// the API its key whatever the content gate says; when the API call
+	// fails, it accepts the message as the API does, for every session the
+	// API accepts. It delivers inline only at an idle boundary of a
+	// keystroke-mode runtime, and never an interrupt_now, so a submit to a
+	// protocol-mode session waits for the controller.
 	// Listing interrupt switches the API's POST
 	// /v0/city/{cityName}/session/{id}/stop and run cancel onto the lane:
 	// each proposes interrupt ops the controller's lane host runs, and
@@ -130,8 +132,8 @@ type OpsConfig struct {
 	// lane host interrupts the session's running turn, then delivers the
 	// message at the boundary the interrupt leaves.
 	// A listed kind needs a sessions store with guarded batches. A change
-	// takes effect at the controller's next start; gc session nudge reads it
-	// at once.
+	// takes effect at the controller's next start; gc session nudge and gc
+	// session submit read it at once.
 	Authoritative []string `toml:"authoritative,omitempty" jsonschema:"enum=message,enum=interrupt,enum=respond"`
 }
 
