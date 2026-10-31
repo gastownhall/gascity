@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/bdflags"
 )
 
 // bdAssigneeShapeRefusal reports whether a `gc bd update` invocation carries
@@ -27,15 +29,21 @@ import (
 // misattribute one flag's value to another. Genuinely ambiguous argv still
 // fails closed downstream in bdMutationWriteIDs.
 func bdAssigneeShapeRefusal(args []string) (string, bool) {
-	if len(args) == 0 || args[0] != "update" {
+	// Find the verb with the shared splitter, not args[0]: bd accepts global
+	// flags before the subcommand (`--actor bob update <id> ...`, `-C <dir>
+	// update ...`), and keying off args[0] reads a global's value as the verb,
+	// silently no-opping this guard. The sibling refusals at this seam
+	// (bd_mistyped_metadata.go) resolve the verb the same way.
+	verb, verbArgs := bdflags.SplitGlobalFlags(args)
+	if verb != "update" {
 		return "", false
 	}
 	valueFlags := bdSubcmdValueFlags("update")
 	boolFlags := bdSubcmdBoolFlags("update")
 
 	positional := false
-	for i := 1; i < len(args); i++ {
-		arg := args[i]
+	for i := 0; i < len(verbArgs); i++ {
+		arg := verbArgs[i]
 		if positional {
 			continue
 		}
@@ -62,8 +70,8 @@ func bdAssigneeShapeRefusal(args []string) (string, bool) {
 
 		if valueFlags[longForm] || (len(flagName) == 1 && valueFlags[shortForm]) {
 			// Known value-consuming flag: its value is the next argument.
-			if isAssignee && i+1 < len(args) {
-				if msg, bad := bdAssigneeShapeInvalid(args[i+1]); bad {
+			if isAssignee && i+1 < len(verbArgs) {
+				if msg, bad := bdAssigneeShapeInvalid(verbArgs[i+1]); bad {
 					return msg, true
 				}
 			}
