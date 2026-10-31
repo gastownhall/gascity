@@ -38,3 +38,42 @@ func beadsDirContainsStore(fs fsys.FS, beadsPath string) (bool, error) {
 	}
 	return false, nil
 }
+
+// adoptedStorePrefix is the issue prefix an --adopt'ed store records, read
+// once during planning. prefix is "" when neither .beads/config.yaml nor the
+// store records one; err holds a failed or refused store read.
+type adoptedStorePrefix struct {
+	prefix string
+	err    error
+}
+
+// readAdoptedStorePrefix learns the issue prefix of the store an --adopt
+// registers. .beads/config.yaml wins when it records one. Otherwise, when the
+// store has a metadata.json and the caller can read stores, the store's own
+// config table is asked: bd keeps a store's prefix there and leaves
+// config.yaml a commented template. A missing metadata.json is left for the
+// adopt guard to report.
+//
+// A mixed-case prefix read from the store is refused rather than lowercased:
+// gc stores rig prefixes lowercase, and minting under a different case would
+// fork the store's bead ID series.
+func readAdoptedStorePrefix(deps Deps, rigPath string) adoptedStorePrefix {
+	if prefix, ok := ReadBeadsPrefix(deps.FS, rigPath); ok {
+		return adoptedStorePrefix{prefix: prefix}
+	}
+	if deps.ReadStorePrefix == nil {
+		return adoptedStorePrefix{}
+	}
+	if _, err := deps.FS.Stat(filepath.Join(rigPath, ".beads", "metadata.json")); err != nil {
+		return adoptedStorePrefix{}
+	}
+	prefix, err := deps.ReadStorePrefix(rigPath)
+	if err != nil {
+		return adoptedStorePrefix{err: err}
+	}
+	prefix = strings.TrimSpace(prefix)
+	if prefix != strings.ToLower(prefix) {
+		return adoptedStorePrefix{err: fmt.Errorf("the store at %s records issue prefix %q; gc stores rig prefixes in lowercase, so adopting it would fork its bead ID series", rigPath, prefix)}
+	}
+	return adoptedStorePrefix{prefix: prefix}
+}

@@ -97,6 +97,9 @@ func TestProvisionKeepsAdoptedBeadsStoreWhenInitFails(t *testing.T) {
 		return false, initErr
 	})
 	req.Adopt = true
+	// --adopt only runs store init under the bd store contract; without it the
+	// adopt never reaches the failing init this test exercises.
+	deps.StoreContract = func(string) bool { return true }
 	writePartialStore(t, req.Path)
 	if err := os.WriteFile(filepath.Join(req.Path, ".beads", "config.yaml"), []byte("issue_prefix: storerig\n"), 0o644); err != nil {
 		t.Fatal(err)
