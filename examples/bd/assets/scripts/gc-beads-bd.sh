@@ -2355,14 +2355,19 @@ check_read_only() {
 }
 
 load_health_check_from_gc() {
-    local gc_bin host output key value
+    local gc_bin host output key value health_db="${1:-}" health_data_dir="${2:-}"
     host=$(connect_host)
     gc_bin=$(resolve_gc_helper_bin)
     [ -n "$gc_bin" ] || return 1
-    output=$("$gc_bin" dolt-state health-check --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --check-read-only </dev/null 2>/dev/null) || return 1
+    set -- --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --check-read-only
+    [ -n "$health_db" ] && set -- "$@" --database "$health_db"
+    [ -n "$health_data_dir" ] && set -- "$@" --data-dir "$health_data_dir"
+    output=$("$gc_bin" dolt-state health-check "$@" </dev/null 2>/dev/null) || return 1
     GC_HEALTH_QUERY_READY="false"
     GC_HEALTH_READ_ONLY=""
     GC_HEALTH_CONNECTION_COUNT=""
+    GC_HEALTH_DATABASE_READY=""
+    GC_HEALTH_DATABASE_ERROR=""
     while IFS="$(printf '	')" read -r key value; do
         case "$key" in
             query_ready)
@@ -2374,11 +2379,61 @@ load_health_check_from_gc() {
             connection_count)
                 GC_HEALTH_CONNECTION_COUNT="$value"
                 ;;
+            database_ready)
+                GC_HEALTH_DATABASE_READY="$value"
+                ;;
+            database_error)
+                GC_HEALTH_DATABASE_ERROR="$value"
+                ;;
         esac
     done <<EOF
 $output
 EOF
     return 0
+}
+
+# city_health_database prints the city scope's Dolt database: the one every
+# city-level bead read and write goes through. A server can answer SQL while
+# this database is missing from its catalog or its default branch head will
+# not resolve, so health has to prove the database itself, not just the
+# server. Empty until the city scope names a database.
+city_health_database() {
+    read_existing_dolt_database "$GC_CITY_PATH/.beads/metadata.json"
+}
+
+# city_health_data_dir prints the data dir that must hold the city database's
+# repository on disk. Only a gc-managed local server keeps its data under
+# DATA_DIR; an external endpoint, loopback or not, keeps its databases
+# somewhere this script cannot see, so the on-disk check is skipped for it.
+city_health_data_dir() {
+    is_remote && return 0
+    [ "$(beads_config_value "$GC_CITY_PATH/.beads/config.yaml" gc.endpoint_origin)" = "managed_city" ] || return 0
+    printf '%s\n' "$DATA_DIR"
+}
+
+# check_city_database is the helper-less form of the database checks
+# `gc dolt-state health-check --database` runs: the repository is on disk
+# (managed servers only), the database is in the catalog, and its default
+# branch head resolves. Prints the failure and returns 1 when any fails.
+check_city_database() {
+    local db="$1" data_dir="$2" host output head
+    if [ -n "$data_dir" ] && [ ! -d "$data_dir/$db/.dolt" ]; then
+        echo "database \"$db\" absent from data dir $data_dir"
+        return 1
+    fi
+    host=$(connect_host)
+    if ! output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "USE $(quote_dolt_identifier "$db"); SELECT DOLT_HASHOF('HEAD') AS head" 2>&1); then
+        echo "database \"$db\" default branch head unresolvable: $(printf '%s' "$output" | tr '\n' ' ')"
+        return 1
+    fi
+    head=$(printf '%s\n' "$output" | tail -n 1 | tr -d '[:space:]')
+    case "$head" in
+        ''|*[!0-9a-v]*) ;;
+        *) [ "${#head}" -eq 32 ] && return 0 ;;
+    esac
+    echo "database \"$db\" default branch head unresolvable: unexpected head \"$head\""
+    return 1
 }
 
 load_wait_ready_from_gc() {
@@ -4643,16 +4698,25 @@ op_store_bridge() {
     return $?
 }
 op_health() {
-    local conn_count="" read_only_status
+    local conn_count="" read_only_status health_db health_data_dir db_failure
 
     # TCP check.
     if ! tcp_check; then
         die "dolt server not reachable on $(connect_host):$DOLT_PORT"
     fi
 
-    if load_health_check_from_gc; then
+    health_db=$(city_health_database)
+    health_data_dir=""
+    [ -n "$health_db" ] && health_data_dir=$(city_health_data_dir)
+
+    if load_health_check_from_gc "$health_db" "$health_data_dir"; then
         if [ "$GC_HEALTH_QUERY_READY" != "true" ]; then
             die "dolt query probe failed (information_schema.SCHEMATA)"
+        fi
+        # Fail closed: a requested database the helper did not report ready
+        # is unhealthy, whether it reported a failure or nothing at all.
+        if [ -n "$health_db" ] && [ "$GC_HEALTH_DATABASE_READY" != "true" ]; then
+            die "dolt city database unavailable: ${GC_HEALTH_DATABASE_ERROR:-health check did not report database \"$health_db\"}"
         fi
         if ! is_remote && [ "$GC_HEALTH_READ_ONLY" = "true" ]; then
             die "dolt server is in read-only mode"
@@ -4665,6 +4729,10 @@ op_health() {
         # Query probe.
         if ! do_query_probe; then
             die "dolt query probe failed (information_schema.SCHEMATA)"
+        fi
+
+        if [ -n "$health_db" ] && ! db_failure=$(check_city_database "$health_db" "$health_data_dir"); then
+            die "dolt city database unavailable: $db_failure"
         fi
 
         # Imposter detection disabled: TCP + query probe passed, server is

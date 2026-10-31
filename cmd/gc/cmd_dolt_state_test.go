@@ -3445,7 +3445,7 @@ func TestRecoverManagedDoltProcessReturnsWhenConcurrentStarterBecomesReady(t *te
 	oldReadOnlyDirect := managedDoltReadOnlyStateDirectFn
 	oldConnectionCountDirect := managedDoltConnectionCountDirectFn
 	managedDoltQueryProbeDirectFn = func(_, _, _ string) error { return nil }
-	managedDoltReadOnlyStateDirectFn = func(_, _, _ string) (string, error) { return "false", nil }
+	managedDoltReadOnlyStateDirectFn = func(_, _, _, _ string) (string, error) { return "false", nil }
 	managedDoltConnectionCountDirectFn = func(_, _, _ string) (string, error) { return "1", nil }
 	defer func() {
 		managedDoltQueryProbeDirectFn = oldQueryProbeDirect
@@ -3567,7 +3567,7 @@ esac
 		}
 		return nil
 	}
-	managedDoltReadOnlyStateDirectFn = func(_, port, _ string) (string, error) {
+	managedDoltReadOnlyStateDirectFn = func(_, port, _, _ string) (string, error) {
 		if port != strconv.Itoa(newPort) {
 			return "", fmt.Errorf("unexpected read-only probe port %s", port)
 		}

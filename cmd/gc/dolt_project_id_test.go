@@ -184,7 +184,7 @@ func TestManagedDoltHealthCheckWithPasswordUsesDirectHelpersAgainstRealServer(t 
 	_, port, _, cleanup := startPasswordedDoltServer(t, "")
 	defer cleanup()
 
-	report, err := managedDoltHealthCheck("0.0.0.0", fmt.Sprintf("%d", port), "root", true)
+	report, err := managedDoltHealthCheck("0.0.0.0", fmt.Sprintf("%d", port), "root")
 	if err != nil {
 		t.Fatalf("managedDoltHealthCheck() error = %v", err)
 	}
