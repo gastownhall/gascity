@@ -2408,62 +2408,76 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 	}
 	for _, template := range templateOrder {
 		seen := make(map[string]struct{})
+		var rows []beads.Bead
+		rowStoreKeys := make(map[string]string)
+		rowBindingResident := make(map[string]bool)
 		for _, group := range templateGroups[template] {
 			for _, b := range group.byTemplate[template] {
 				if _, dup := seen[b.ID]; dup {
 					continue
 				}
 				seen[b.ID] = struct{}{}
-				counts[template]++
-				entry := demand[template]
-				entry.Count++
-				entry.WorkBeadIDs = append(entry.WorkBeadIDs, b.ID)
-				if entry.Titles == nil {
-					entry.Titles = make(map[string]string)
-				}
-				entry.Titles[b.ID] = b.Title
-				if pack := strings.TrimSpace(b.Metadata[beadmeta.PackMetadataKey]); pack != "" {
-					if entry.Packs == nil {
-						entry.Packs = make(map[string]string)
-					}
-					entry.Packs[b.ID] = pack
-				}
-				if workspace := strings.TrimSpace(b.Metadata[beadmeta.PackWorkspaceMetadataKey]); workspace != "" {
-					if entry.Workspaces == nil {
-						entry.Workspaces = make(map[string]string)
-					}
-					entry.Workspaces[b.ID] = workspace
-				}
-				if entry.StoreRefs == nil {
-					entry.StoreRefs = make(map[string]string)
-				}
-				entry.StoreRefs[b.ID] = group.storeKey
-				if group.classBinding {
-					if entry.BindingResident == nil {
-						entry.BindingResident = make(map[string]bool)
-					}
-					entry.BindingResident[b.ID] = true
-				}
-				spec, specErr := worktreeSpecForBead(b, group.storeKey)
-				if specErr != nil {
-					if entry.WorktreeErrors == nil {
-						entry.WorktreeErrors = make(map[string]string)
-					}
-					entry.WorktreeErrors[b.ID] = specErr.Error()
-				} else if spec != nil {
-					if entry.WorktreeSpecs == nil {
-						entry.WorktreeSpecs = make(map[string]*worktree.Spec)
-					}
-					entry.WorktreeSpecs[b.ID] = spec
-				}
-				if parentSID := strings.TrimSpace(b.Metadata[beadmeta.BrainParentSIDMetadataKey]); parentSID != "" {
-					if entry.ParentSIDs == nil {
-						entry.ParentSIDs = make(map[string]string)
-					}
-					entry.ParentSIDs[b.ID] = parentSID
-				}
-				demand[template] = entry
+				rows = append(rows, b)
+				rowStoreKeys[b.ID] = group.storeKey
+				rowBindingResident[b.ID] = group.classBinding
 			}
+		}
+		// The claim reader merges these legs and serves them in the canonical
+		// ready order, bounded (routedReadyTierCommand); a concatenation of the
+		// legs is not that order. Name demand in the order the claim window
+		// serves it, so the seat placed for a bead finds it in its window.
+		beads.SortBeadsReadyOrder(rows)
+		for _, b := range rows {
+			storeKey := rowStoreKeys[b.ID]
+			counts[template]++
+			entry := demand[template]
+			entry.Count++
+			entry.WorkBeadIDs = append(entry.WorkBeadIDs, b.ID)
+			if entry.Titles == nil {
+				entry.Titles = make(map[string]string)
+			}
+			entry.Titles[b.ID] = b.Title
+			if pack := strings.TrimSpace(b.Metadata[beadmeta.PackMetadataKey]); pack != "" {
+				if entry.Packs == nil {
+					entry.Packs = make(map[string]string)
+				}
+				entry.Packs[b.ID] = pack
+			}
+			if workspace := strings.TrimSpace(b.Metadata[beadmeta.PackWorkspaceMetadataKey]); workspace != "" {
+				if entry.Workspaces == nil {
+					entry.Workspaces = make(map[string]string)
+				}
+				entry.Workspaces[b.ID] = workspace
+			}
+			if entry.StoreRefs == nil {
+				entry.StoreRefs = make(map[string]string)
+			}
+			entry.StoreRefs[b.ID] = storeKey
+			if rowBindingResident[b.ID] {
+				if entry.BindingResident == nil {
+					entry.BindingResident = make(map[string]bool)
+				}
+				entry.BindingResident[b.ID] = true
+			}
+			spec, specErr := worktreeSpecForBead(b, storeKey)
+			if specErr != nil {
+				if entry.WorktreeErrors == nil {
+					entry.WorktreeErrors = make(map[string]string)
+				}
+				entry.WorktreeErrors[b.ID] = specErr.Error()
+			} else if spec != nil {
+				if entry.WorktreeSpecs == nil {
+					entry.WorktreeSpecs = make(map[string]*worktree.Spec)
+				}
+				entry.WorktreeSpecs[b.ID] = spec
+			}
+			if parentSID := strings.TrimSpace(b.Metadata[beadmeta.BrainParentSIDMetadataKey]); parentSID != "" {
+				if entry.ParentSIDs == nil {
+					entry.ParentSIDs = make(map[string]string)
+				}
+				entry.ParentSIDs[b.ID] = parentSID
+			}
+			demand[template] = entry
 		}
 	}
 	return counts, demand, partialTemplates, errs
