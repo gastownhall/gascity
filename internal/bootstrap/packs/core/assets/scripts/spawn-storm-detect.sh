@@ -41,7 +41,7 @@ fi
 
 # Step 1: Find beads that were recently reset to pool.
 # Look for open beads that have been updated (recovery resets them to open + unassigned).
-OPEN_BEADS=$(gc bd list --status=open --assignee="" --json --limit=0 2>/dev/null) || exit 0
+OPEN_BEADS=$(gc bd list --status=open --no-assignee --json --limit=0 2>/dev/null) || exit 0
 if [ -z "$OPEN_BEADS" ] || [ "$OPEN_BEADS" = "[]" ]; then
     exit 0
 fi

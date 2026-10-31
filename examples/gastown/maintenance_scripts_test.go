@@ -6415,6 +6415,93 @@ exit 0
 	}
 }
 
+// runSpawnStormSweep runs one spawn-storm-detect sweep at threshold 1 against
+// the fake bd script and returns the saved ledger and the gc call log.
+func runSpawnStormSweep(t *testing.T, bdScript string) (map[string]int, string) {
+	t.Helper()
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), bdScript)
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CITY":               cityDir,
+		"GC_CITY_PATH":          cityDir,
+		"GC_PACK_STATE_DIR":     stateDir,
+		"GC_CALL_LOG":           gcLog,
+		"SPAWN_STORM_THRESHOLD": "1",
+		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+
+	ledgerData, err := os.ReadFile(filepath.Join(stateDir, "spawn-storm-counts.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(ledger): %v", err)
+	}
+	var counts map[string]int
+	if err := json.Unmarshal(ledgerData, &counts); err != nil {
+		t.Fatalf("Unmarshal(ledger): %v\n%s", err, ledgerData)
+	}
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	return counts, string(gcData)
+}
+
+// TestSpawnStormDetectSkipsAssignedOpenBeads pins that the sweep lists only
+// unassigned beads. The fake bd mirrors bd's list semantics: an empty
+// --assignee filters nothing, while --no-assignee keeps only unassigned beads.
+func TestSpawnStormDetectSkipsAssignedOpenBeads(t *testing.T) {
+	counts, gcLog := runSpawnStormSweep(t, `#!/bin/sh
+case "$1" in
+  list)
+    case " $* " in
+      *" --no-assignee "*)
+        printf '[{"id":"ga-pool","status":"open","metadata":{"recovered":"true"}}]\n'
+        ;;
+      *)
+        printf '[{"id":"ga-pool","status":"open","metadata":{"recovered":"true"}},{"id":"ga-held","status":"open","assignee":"refinery","metadata":{"rejection_reason":"PR head changed after refinery validation"}}]\n'
+        ;;
+    esac
+    ;;
+  show)
+    printf '[{"id":"%s","status":"open","title":"Looping bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+
+	if got, ok := counts["ga-held"]; ok {
+		t.Fatalf("ledger counted assigned bead ga-held = %d; want no entry\nledger: %v", got, counts)
+	}
+	if got := counts["ga-pool"]; got != 1 {
+		t.Fatalf("ledger count for ga-pool = %d, want 1\nledger: %v", got, counts)
+	}
+	if strings.Contains(gcLog, "ga-held") {
+		t.Fatalf("spawn storm sweep touched assigned bead ga-held:\n%s", gcLog)
+	}
+	if got := strings.Count(gcLog, "SPAWN_STORM: bead ga-pool reset 1x"); got != 1 {
+		t.Fatalf("SPAWN_STORM alerts for ga-pool = %d, want 1\ngc log:\n%s", got, gcLog)
+	}
+	var listCall string
+	for _, line := range strings.Split(gcLog, "\n") {
+		if strings.HasPrefix(line, "bd list ") {
+			listCall = line
+		}
+	}
+	if !strings.Contains(" "+listCall+" ", " --no-assignee ") || strings.Contains(listCall, "--assignee=") {
+		t.Fatalf("bd list call = %q, want --no-assignee and no --assignee=\ngc log:\n%s", listCall, gcLog)
+	}
+}
+
 func TestSpawnStormDetectPersistsCountWhenTitleLookupFails(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
