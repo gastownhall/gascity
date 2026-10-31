@@ -653,6 +653,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Generated Claude settings notice and updated editing guidance.**
+  `gc` now writes a `.gc/settings.json.README` notice explaining that runtime
+  settings are regenerated during initialization and session preparation, and
+  directs persistent customizations to city-root `.claude/settings.json`.
+  Documentation and `gc reload --soft` guidance now reference `.claude/settings.json`
+  instead of editing the generated runtime file.
+
 - **`gc prime --strict` fails on a `prompt_template` that does not render.**
   A `.template.md` (or `.md.tmpl`) prompt_template that failed to parse or
   execute, such as one calling an undefined function `{{base_branch}}`, was
