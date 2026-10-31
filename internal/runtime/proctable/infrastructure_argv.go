@@ -48,9 +48,10 @@ func IsCityInfrastructureArgv(argv []string) bool {
 // such a process as a root (so its children are not promoted to roots in its
 // place), and the callers that would terminate a scanned root — the orphan
 // sweep and a session's pre-start orphan kill — consult this first and leave
-// it alone. An unreadable argv reports false, which keeps those callers'
-// pre-fence behavior. Under `go test` without an injected procfs root it
-// reports false rather than read the host's live process table.
+// it alone, as does a canceled exec order before it signals a process group
+// one of its descendants started. An unreadable argv reports false, which
+// keeps those callers' pre-fence behavior. Under `go test` without an injected
+// procfs root it reports false rather than read the host's live process table.
 func IsCityInfrastructureRoot(pid int) bool {
 	if pid <= 0 {
 		return false

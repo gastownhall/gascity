@@ -269,9 +269,14 @@ func TestGcBdImportDryRunReportsAndSkipInfraNamesDependents(t *testing.T) {
 	}
 	read := func(string) (beads.Bead, bdReadResult) { return beads.Bead{}, bdReadNotFound }
 	g := bdClassFlipGuard(splitGuardTestCity(), scope, []string{"import", "a.jsonl", "--dry-run"}, splitTestDeps(nil, read))
-	if g.refusal != "" || !strings.Contains(g.notice, "dry run") || strings.Join(g.args, " ") != "import a.jsonl --dry-run" {
+	if g.refusal != "" || !strings.Contains(g.notice, "dry run") || len(g.args) != 3 || g.args[0] != "import" || g.args[2] != "--dry-run" {
 		t.Fatalf("dry run: refusal=%q notice=%q args=%v", g.refusal, g.notice, g.args)
 	}
+	// bd dry-runs a private copy of every row gc judged.
+	if copied, err := os.ReadFile(g.args[1]); err != nil || string(copied) != archive {
+		t.Fatalf("dry run: bd reads %q (err %v), want the whole archive", copied, err)
+	}
+	g.cleanup()
 	// The kept row depends on a left-out session row: the edge would cross
 	// stores, so even --skip-infra refuses it.
 	g = bdClassFlipGuard(splitGuardTestCity(), scope, []string{"import", "a.jsonl", "--skip-infra"}, splitTestDeps(nil, read))

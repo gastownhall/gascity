@@ -202,6 +202,16 @@ type MessageRequest struct {
 	// turn sighting, interrupt, start or send, and the result is Replayed.
 	// Ignored without a DeliveryKey.
 	Redelivery bool `json:"redelivery,omitempty"`
+	// QueueBehindPending is set by a caller that has already accepted the
+	// message, such as a session create's initial message: a session waiting
+	// on a pending interaction gets the message queued as a user turn for
+	// after the interaction is answered (Queued), where a plain request is
+	// refused with session.ErrPendingInteraction. A runtime-only handle has
+	// no queue and refuses either way. A deliver-now whose interrupt went
+	// out but whose replacement the interaction kept from being prepared
+	// (session.ErrReplacementNotPrepared) is refused all the same: the queue
+	// would deliver it as a plain message.
+	QueueBehindPending bool `json:"queue_behind_pending,omitempty"`
 }
 
 // MessageResult reports whether a worker turn was queued or delivered now.
@@ -316,7 +326,8 @@ type InterruptRequest struct {
 	// (TurnCapabilities.Replace restart or none), which is always so on a
 	// RuntimeHandle. A preparation that fails is an error wrapping
 	// session.ErrReplacementNotPrepared: the interrupt was sent and its
-	// turn settled.
+	// turn settled. So is one a pending interaction holds off, which sends
+	// none of its keys and also wraps session.ErrPendingInteraction.
 	ForReplacement bool `json:"for_replacement,omitempty"`
 	// AllowUnfenced lets a fenced request (Fence) go out without its fence
 	// where it cannot carry it, instead of being refused with
@@ -546,8 +557,10 @@ const (
 	// it; the caller must not queue it again.
 	NudgeQueuedHeld NudgeUndeliveredReason = "session_held_queued"
 	// NudgeQueued means the session could not take the nudge now (it is held,
-	// (ActorBackground) not running, or its agent is dead in a pane still up)
-	// and queued it itself; the caller must not queue it again.
+	// (ActorBackground) not running, its agent is dead in a pane still up, it
+	// runs a turn the nudge's submit keys would interrupt, or it waits on a
+	// pending interaction) and queued it itself; the caller must not queue
+	// it again.
 	NudgeQueued NudgeUndeliveredReason = "queued"
 	// NudgeUndeliveredAgentDead means the pane is up but its agent is dead (a
 	// crash the controller has not healed), or a fresh read could not vouch

@@ -154,6 +154,30 @@ func TestGcBdSplitShouldFixes(t *testing.T) {
 	}
 }
 
+// TestGcBdSplitConfigAdmitsTheIntegrationNamespace: bd documents custom.* as
+// the namespace for user-defined integration keys. No class route and no
+// create reads them, so a split city lets gc bd set and unset them, as a
+// single-store city does; every other key stays refused for both commands.
+func TestGcBdSplitConfigAdmitsTheIntegrationNamespace(t *testing.T) {
+	for _, enterprise := range []bool{false, true} {
+		runGuardCases(t, []guardCase{
+			{"config get a custom key", []string{"config", "get", "custom.example.owner", "--json"}, guardTask, bdReadFound, false, "", enterprise},
+			{"config set a custom key", []string{"config", "set", "custom.example.owner", `{"v":1}`}, guardTask, bdReadFound, false, "", enterprise},
+			{"config set another custom key", []string{"config", "set", "custom.example.marker", "x"}, guardTask, bdReadFound, false, "", enterprise},
+			{"config unset a custom key", []string{"config", "unset", "custom.example.owner"}, guardTask, bdReadFound, false, "", enterprise},
+			{"config unset an admitted exact key", []string{"config", "unset", "types.retained"}, guardTask, bdReadFound, false, "", enterprise},
+			{"config set the bare namespace", []string{"config", "set", "custom.", "x"}, guardTask, bdReadFound, true, "keys under custom.*", enterprise},
+			{"config set a dotless look-alike", []string{"config", "set", "custom", "x"}, guardTask, bdReadFound, true, "keys under custom.*", enterprise},
+			{"config set a look-alike prefix", []string{"config", "set", "customx.y", "x"}, guardTask, bdReadFound, true, "keys under custom.*", enterprise},
+			{"config unset without a key", []string{"config", "unset"}, guardTask, bdReadFound, true, "expected a key", enterprise},
+			{"config unset routing", []string{"config", "unset", "routing.mode"}, guardTask, bdReadFound, true, "only types.custom, types.infra, types.retained", enterprise},
+			{"config unset storage-class", []string{"config", "unset", "storage-class.task"}, guardTask, bdReadFound, true, "gc bd config unset storage-class.task", enterprise},
+			{"config unset dolt", []string{"config", "unset", "dolt.port"}, guardTask, bdReadFound, true, "redirect writes", enterprise},
+			{"config set-many stays refused", []string{"config", "set-many", "custom.a=1"}, guardTask, bdReadFound, true, "beyond get/set/unset/list/show", enterprise},
+		})
+	}
+}
+
 // TestGcBdSplitJudgesMetadataFiles: `--metadata @file` is read (relative to
 // the scope root, where bd runs) and judged like an inline body.
 func TestGcBdSplitJudgesMetadataFiles(t *testing.T) {

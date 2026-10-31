@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/steveyegge/beads/issueops"
 )
 
 const (
@@ -1385,12 +1386,18 @@ func isExactIDQueryable(id string) bool {
 	return true
 }
 
+// isBdClaimConflictMessage reports whether bd refused a claim because of the
+// bead's own state: another actor holds it, or its status is not claimable
+// (closed, deferred or blocked since the caller read it). bd prints the
+// latter as beads' ErrNotClaimable sentinel followed by the status, on both its
+// direct and proxied-server update paths. Either refusal wrote nothing.
 func isBdClaimConflictMessage(msg string) bool {
 	msg = strings.ToLower(msg)
 	return strings.Contains(msg, "already assigned") ||
 		strings.Contains(msg, "already claimed") ||
 		strings.Contains(msg, "claimed by") ||
-		strings.Contains(msg, "claim conflict")
+		strings.Contains(msg, "claim conflict") ||
+		strings.Contains(msg, strings.ToLower(issueops.ErrNotClaimable.Error()))
 }
 
 // mapBdStatus maps bd's statuses to Gas City's 3. bd uses: open,
@@ -1869,9 +1876,11 @@ func isBdSQLUnsupportedInEmbeddedMode(err error) bool {
 
 // Claim atomically claims an open bead through bd update --claim.
 //
-// It returns ok=false when bd reports that another actor won the claim race.
-// The caller controls the claim actor through the store's CommandRunner
-// environment, typically BEADS_ACTOR.
+// It returns ok=false with a nil error when bd refuses the claim because of
+// the bead's own state: another actor holds it, or its status is not claimable.
+// That is the conflict verdict SQLiteStore.Claim and NativeDoltStore.Claim
+// return for the same refusals. The caller controls the claim actor through the
+// store's CommandRunner environment, typically BEADS_ACTOR.
 func (s *BdStore) Claim(id string) (Bead, bool, error) {
 	out, err := s.runBDTransientWriteOutput("update", id, "--claim", "--json")
 	if err != nil {

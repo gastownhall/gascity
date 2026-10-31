@@ -20,7 +20,6 @@ none requires per-city configuration.
 | `order-tracking-sweep` | cooldown | Close stale order-tracking beads and prune expired tracking history |
 | `spawn-storm-detect` | cooldown | Detect beads repeatedly bouncing back to pool |
 | `prune-branches` | cooldown | Clean stale `gc/*` branches from all rigs |
-| `wisp-compact` | cooldown | TTL-based cleanup of expired ephemeral beads (wisps) |
 | **`nudge-on-route`** | **event `bead.updated`** | **Nudge the target session when a bead is routed to it** |
 | **`cascade-nudge-on-blocker-close`** | **event `bead.closed`** | **Nudge dependents' assignees or routed targets when a blocker bead closes** |
 | **`notify-on-human-gate-creation`** | **event `bead.created`** | **Mail + nudge the addressee when a human gate bead is created** |

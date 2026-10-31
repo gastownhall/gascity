@@ -199,11 +199,20 @@ func TestFenceTerminalNoReportUsesQuietWindowNotBoolAttach(t *testing.T) {
 		t.Fatalf("escalation class: %+v, want escalate, never proceed", v)
 	}
 
-	k8s, k8sFake := fakeProfile(runtime.ProfileK8s)
-	startRuntime(t, k8sFake, "rt_b", ours("b"))
-	if reason, _ := attachLeg(context.Background(), k8s, "rt_b", false, now); reason != fenceTerminalNotQuiet {
-		t.Fatalf("K8s leaf without quiet activity: L3 %q, want terminal-no-report's defer", reason)
+	// k8s reports error-bearing liveness but is not fresh-readable, so
+	// attachment still defers. ssh stays terminal-no-report because a human
+	// can attach to it (ssh -t).
+	for _, p := range []runtime.Profile{runtime.ProfileK8s, runtime.ProfileSSH} {
+		leaf, fake := fakeProfile(p)
+		startRuntime(t, fake, "rt_b", ours("b"))
+		if reason, escalate := attachLeg(context.Background(), leaf, "rt_b", false, now); reason != fenceTerminalNotQuiet || escalate {
+			t.Fatalf("%s leaf with no activity: L3 %q escalate=%v, want terminal-no-report's defer", p, reason, escalate)
+		}
+		if reason, escalate := attachLeg(context.Background(), leaf, "rt_b", true, now); reason != fenceTerminalNoReport || !escalate {
+			t.Fatalf("%s leaf, escalation class: L3 %q escalate=%v, want terminal-no-report's escalation", p, reason, escalate)
+		}
 	}
+
 	for _, tc := range []struct {
 		name    string
 		profile runtime.Profile

@@ -1427,6 +1427,15 @@ func normalizeWaitIdleNudgeSource(source string) string {
 	return source
 }
 
+// idleBoundaryOutOfReach takes the wait-idle nudge's pre-read before its idle
+// wait (runtime.IdleBoundaryNow): a session that reads busy, or whose input a
+// pending interaction owns, will not reach a boundary within the wait, so the
+// nudge is reported undelivered at once for its caller to queue. Any other
+// reading leaves the wait to decide.
+func (m *Manager) idleBoundaryOutOfReach(sessName string) bool {
+	return runtime.IdleBoundaryNow(m.sp, sessName).OutOfReach()
+}
+
 func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, by Actor, id string, b beads.Bead, source, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
 	if err := m.ensureDeliverable(ctx, by, id, b, sessName, resumeCommand, hints); errors.Is(err, ErrAgentDead) {
 		return false, nil // not delivered: the caller queues it for the healed agent
@@ -1444,6 +1453,9 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, by Actor, id strin
 	}
 	waiter, ok := m.sp.(runtime.IdleWaitProvider)
 	if !ok {
+		return false, nil
+	}
+	if m.idleBoundaryOutOfReach(sessName) {
 		return false, nil
 	}
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
@@ -1470,6 +1482,9 @@ func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Be
 	}
 	waiter, ok := m.sp.(runtime.IdleWaitProvider)
 	if !ok {
+		return false, nil
+	}
+	if m.idleBoundaryOutOfReach(sessName) {
 		return false, nil
 	}
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
@@ -1573,6 +1588,30 @@ func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.B
 	return false, nil
 }
 
+// queueBehindPendingInteractionLocked turns a send's pending-interaction
+// refusal (err wrapping ErrPendingInteraction: the manager's look, or the
+// runtime's own refusal to type into a prompt) into a deferred delivery of
+// message under source, delivered once the interaction is answered. Any
+// other answer passes through as queued and err. A refusal whose queueing
+// fails is not queued: its error wraps the refusal and the queue's failure.
+//
+// A runtime's refusal may come after it typed the message and before it
+// submitted it (tmux's last look before the submit key), leaving the text
+// unsent in the input box. tmux's delivery of the queued message clears the
+// input box before its paste, which removes that leftover, except while a
+// client is attached: it leaves the input box alone then, and the delivery
+// joins the leftover text.
+func (m *Manager) queueBehindPendingInteractionLocked(b beads.Bead, sessName, message, source string, queued bool, err error) (bool, error) {
+	if !errors.Is(err, ErrPendingInteraction) {
+		return queued, err
+	}
+	if qerr := m.enqueueDeferredSubmitLocked(b, sessName, message, source); qerr != nil {
+		return false, fmt.Errorf("%w; queueing the message behind it failed: %w", err, qerr)
+	}
+	log.Printf("session: %q: queued a message behind a pending interaction: %v", sessName, err)
+	return true, nil
+}
+
 func (m *Manager) send(ctx context.Context, by Actor, id, message, resumeCommand string, hints runtime.Config, immediate bool) (SubmitOutcome, error) {
 	if err := m.checkStarter(by); err != nil {
 		return SubmitOutcome{}, err
@@ -1584,6 +1623,12 @@ func (m *Manager) send(ctx context.Context, by Actor, id, message, resumeCommand
 			return err
 		}
 		outcome.Queued, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, immediate, deferredNudgeSource)
+		if !immediate {
+			// A send that may wait for a safe boundary waits behind a
+			// pending interaction too: queued for after it is answered,
+			// never refused and dropped. Only an immediate send refuses.
+			outcome.Queued, err = m.queueBehindPendingInteractionLocked(b, sessName, message, deferredNudgeSource, outcome.Queued, err)
+		}
 		outcome.Deferred = outcome.Queued
 		return err
 	})

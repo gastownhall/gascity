@@ -53,9 +53,13 @@
 #     on the runner with lookups in the anonymous read-only cache. A lane
 #     whose certificate the mint then refuses falls back to that cache too;
 #   - with rbe-west off (vars.RBE_WEST_WORKERS) runs take mode cache as well;
-#   - a fork repository's own CI (github.repository's owner is not
-#     gastownhall: a push to the fork, a PR within it) takes mode local:
-#     lanes execute on the runner with no rbe-cache lookups and no probes.
+#   - a fork repository's own CI (github.repository_owner_id is not
+#     gastownhall's, 255961667: a push to the fork, a PR within it) takes
+#     mode local: lanes execute on the runner with no rbe-cache lookups and
+#     no probes. The id, not the name, so an org rename never flips
+#     upstream into fork mode. Every job that runs in mode local runs on
+#     ubuntu-latest there (a fork has no Blacksmith: its jobs would queue
+#     for a day and never start), Blacksmith only in gastownhall;
 #     Fork PRs into gascity are unaffected (their runs have github.repository
 #     gastownhall/gascity), as is a contributor's own --config=fork-cache;
 #   - a fork run mints at most 4 rbe-fork certificates, one per lane:
@@ -135,7 +139,9 @@ permissions:
 jobs:
   rbe:
     name: execution mode
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    # Blacksmith in gastownhall only; a fork repository's own CI has none
+    # (mode local, ubuntu-latest: the header).
+    runs-on: ${{ github.repository_owner_id == '255961667' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -154,10 +160,12 @@ jobs:
       # same-repo path, mode remote (scripts/ci_merge_queue_test.go).
       # FORK_REPO: the run is a fork repository's own CI (a push to the fork,
       # a PR within it, a dispatch there): github.repository's owner is not
-      # gastownhall. It is mode local whatever else holds: no secrets, so it
-      # would otherwise take mode cache and read rbe-cache on every run, at
-      # the farm's cost (rbe-cache's daily request budget shut it on
-      # 2026-10-19, largely on fork CI runs), and it never asks the mint.
+      # gastownhall (its id, 255961667, so a rename of the org cannot turn
+      # upstream into a fork). It is mode local whatever else holds: no
+      # secrets, so it would otherwise take mode cache and read rbe-cache on
+      # every run, at the farm's cost (rbe-cache's daily request budget shut
+      # it on 2026-10-19, largely on fork CI runs), and it never asks the
+      # mint.
       # Fork PRs into gascity run with github.repository gastownhall/gascity,
       # so FORK_REPO is false for them and they keep fork-ro/fork-rw/cache.
       - name: Decide remote execution
@@ -168,7 +176,7 @@ jobs:
           RBE_INPUT_CACHE: ${{ inputs.rbe == 'cache' }}
           PULL_REQUEST: ${{ github.event_name == 'pull_request' }}
           FORK: ${{ github.event.pull_request.head.repo.fork == true }}
-          FORK_REPO: ${{ github.repository_owner != 'gastownhall' }}
+          FORK_REPO: ${{ github.repository_owner_id != '255961667' }}
           DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
           HAS_EXECUTOR: ${{ secrets.RBE_WEST_EXECUTOR != '' }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -415,8 +423,9 @@ jobs:
     # npm, Starlark) is CPU-bound and gates every action: analysis-only
     # measurements per lane (ga-vnycm2.8, seeded runner cache) took 34-58 s
     # on 2 vCPU, 23-34 s on 4 and 15-19 s on 8. Unit and acceptance are the
-    # critical lanes (ga-vnycm2.12).
-    runs-on: ${{ (matrix.lane == 'unit' || matrix.lane == 'acceptance') && 'blacksmith-8vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}
+    # critical lanes (ga-vnycm2.12). A fork repository's own CI (mode local)
+    # has no Blacksmith: ubuntu-latest.
+    runs-on: ${{ github.repository_owner_id != '255961667' && 'ubuntu-latest' || (matrix.lane == 'unit' || matrix.lane == 'acceptance') && 'blacksmith-8vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}
     # The split-strict lane is non-blocking twice over: evidence-only (its
     # bazel step exits 0) and, should any other step of it fail, allowed to
     # fail as a job, so the required gate's needs.lane.result never sees it.
@@ -1087,7 +1096,7 @@ jobs:
     name: bazel / test cache report
     needs: [rbe, lane]
     if: always() && needs.rbe.result == 'success' && needs.rbe.outputs.lanes != '[]'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository_owner_id == '255961667' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -1277,7 +1286,7 @@ jobs:
   sync-check:
     name: BUILD files in sync
     needs: rbe
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository_owner_id == '255961667' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -1352,7 +1361,7 @@ jobs:
   worker-host:
     name: rbe worker host
     needs: rbe
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository_owner_id == '255961667' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 25
     permissions:
       contents: read
@@ -1490,7 +1499,7 @@ jobs:
     name: bazel test (side-by-side)
     needs: [rbe, lane, sync-check, worker-host]
     if: always()
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository_owner_id == '255961667' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Evaluate

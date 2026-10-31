@@ -97,7 +97,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileExec:
 		return execProfile{core, b, b, b, b, b, timed, probeBudgetTrait{}}
 	case ProfileSSH:
-		return sshProfile{core, b, timed}
+		return sshProfile{core, b, b, b, timed}
 	case ProfileT3Bridge:
 		return t3bridgeProfile{core, b, b, b, b, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
 	}
@@ -144,7 +144,7 @@ var profileCapabilities = map[Profile]ProviderCapabilities{
 	ProfileACP:      {CanReportActivity: true},
 	ProfileHerdr:    {CanReportActivity: true, CanStream: true, CanAttachTTY: true, NeedsClaimBackstop: true},
 	ProfileK8s:      {CanReportActivity: true},
-	ProfileSSH:      {CanReportActivity: true},
+	ProfileSSH:      {CanReportActivity: true, CanAttachTTY: true},
 	ProfileT3Bridge: {CanReportActivity: true},
 }
 
@@ -249,6 +249,8 @@ type (
 	}
 	sshProfile struct {
 		Provider
+		AttachmentObserverWithError
+		LivenessObserverWithError
 		RelaunchProvider
 		sleepTrait
 	}
@@ -484,14 +486,19 @@ func (f FullFake) TurnRunning(name string) (bool, error) {
 }
 
 // RuntimeInventory implements [InventoryProvider]: every running session,
-// its attachment known, and its activity when one was set.
+// its attachment known, its activity when one was set, and, for a session
+// with an agent-pane row, its program status as ProgramStatus judges it.
 func (f FullFake) RuntimeInventory(context.Context) (map[string]InventoryEntry, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	inv := make(map[string]InventoryEntry, len(f.sessions))
 	for name := range f.sessions {
 		at := f.Activity[name]
-		inv[name] = InventoryEntry{AttachedKnown: true, Attached: f.Attached[name], ActivityKnown: !at.IsZero(), LastActivity: at}
+		e := InventoryEntry{AttachedKnown: true, Attached: f.Attached[name], ActivityKnown: !at.IsZero(), LastActivity: at}
+		if row, ok := f.ProgramPanes[name]; ok {
+			e.Program = JudgeProgramStatus(row)
+		}
+		inv[name] = e
 	}
 	return inv, nil
 }

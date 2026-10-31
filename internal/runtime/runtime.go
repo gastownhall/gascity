@@ -705,8 +705,13 @@ type IdleProbeBudgetProvider interface {
 // for ACP a prompt response is outstanding, while a pane scan found an
 // active-processing indicator string in its capture, usually the live
 // indicator but possibly a stale frame or transcript text.
+// Which provider families' busy readings count is the runtime's policy, not
+// its callers': a runtime that cannot vouch for a family's busy reading
+// reports it as [ErrIdleIndeterminate], never as (false, nil), so a caller
+// may act on every busy reading it gets.
 // [ErrIdleIndeterminate] means the observation was made but matched neither a
-// ready prompt nor a busy indicator, so it says neither idle nor busy. Any
+// ready prompt nor a busy indicator it trusts, so it says neither idle nor
+// busy. Any
 // other non-nil err means the observation could not be made (the caller must
 // not treat the session as idle on error); a session that has gone away is
 // reported as an error, not as idle.
@@ -740,10 +745,12 @@ var ErrWaitUnobserved = errors.New("wait observed no busy session")
 // there alone (tmux, for Codex: the rows right above the live composer), so
 // a busy row an earlier turn left in the scrollback is not a running turn.
 //
-// running=false with a nil err says no turn is running now. A non-nil err
-// means the look could not be made; the caller must not take the session as
-// idle. Composites do not implement it: it is read on the session's routed
-// leaf ([TurnRunningFor]).
+// running=false with a nil err says no turn is running now. An error
+// wrapping [ErrIdleIndeterminate] means the runtime cannot read this
+// session's provider family's turn: it says neither running nor not. Any
+// other non-nil err means the look could not be made; the caller must not
+// take the session as idle. Composites do not implement it: it is read on
+// the session's routed leaf ([TurnRunningFor]).
 type TurnRunningProvider interface {
 	TurnRunning(name string) (running bool, err error)
 }
@@ -860,6 +867,10 @@ type InventoryEntry struct {
 	// `gc handoff` set) as the batched read sees it. On tmux it is the
 	// marker's user-option mirror (#{@GC_RESTART_REQUESTED}).
 	RestartRequested bool
+	// Program is the session's agent-pane program-status reading
+	// ([ProgramStatusProvider]) taken in the same batch: Unread unless the
+	// runtime reads program status for this session.
+	Program ProgramStatus
 }
 
 // EnvironmentBatchProvider is an optional extension exposing a single-exec
@@ -1417,6 +1428,13 @@ type Config struct {
 	// start effect sets it (CONTRACT v5 S1, I24); legacy never does.
 	// Excluded from every fingerprint.
 	FreshOnly bool
+
+	// ProgramStatus is the session's OSC 7501 capture declaration, derived
+	// from the provider's program_status binding, the city switch and the
+	// transport. The zero value declares nothing. Excluded from every
+	// fingerprint: capture is applied at the leaf, and arming or healing it
+	// never restarts the agent.
+	ProgramStatus ProgramStatusArm
 }
 
 // OverlayProviderNames returns the effective provider overlay slots to stage for

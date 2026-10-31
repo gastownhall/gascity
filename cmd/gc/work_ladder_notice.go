@@ -444,7 +444,9 @@ func foldLadderNotices(r workladder.Record, outs []ladderNoticeResult) (workladd
 			continue
 		}
 		m, attempt := r.Entries[i].Notice, r.Entries[i].Attempts
-		next, alert, ok := workladder.SettleNotice(r, o.op, o.fate)
+		// The fold reads no delivery time yet, so the seat's Delivered
+		// stays as it is (a zero time moves nothing).
+		next, alert, ok := workladder.SettleNotice(r, o.op, o.fate, time.Time{})
 		if !ok {
 			continue
 		}
@@ -580,7 +582,7 @@ func ladderNoticeStuck(op opjournal.Op, now time.Time) bool {
 // (failed or withdrawn), by CAS.
 func (p *ladderPass) settleMark(id, op string, fate workladder.NoticeFate) {
 	p.settle(id, func(r workladder.Record) (workladder.Record, bool) {
-		out, _, ok := workladder.SettleNotice(r, op, fate)
+		out, _, ok := workladder.SettleNotice(r, op, fate, time.Time{}) // failed or withdrawn: never a delivery
 		return out, ok
 	})
 }

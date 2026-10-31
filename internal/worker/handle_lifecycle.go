@@ -415,6 +415,14 @@ func (h *SessionHandle) Message(ctx context.Context, by sessionpkg.Actor, req Me
 		ctx = runtime.WithNudgeDeliveryKey(ctx, req.DeliveryKey)
 	}
 	outcome, err := h.manager.Submit(ctx, by, id, req.Text, resumeCommand, h.runtimeHints(), submitIntent(req.Delivery))
+	if err != nil && req.QueueBehindPending && errors.Is(err, sessionpkg.ErrPendingInteraction) &&
+		!errors.Is(err, sessionpkg.ErrReplacementNotPrepared) {
+		if err = h.manager.QueueSubmit(id, req.Text); err != nil {
+			return MessageResult{}, err
+		}
+		result = MessageResult{Queued: true}
+		return result, nil
+	}
 	if err != nil {
 		return MessageResult{}, err
 	}

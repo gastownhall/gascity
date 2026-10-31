@@ -495,14 +495,20 @@ type pokeInfo struct {
 	prior time.Time // genuine GetSessionActivity immediately before the poke
 }
 
+// poke is pk in the shared discount's terms. The local tmux server stamps
+// activity on gc's own clock, so at locates the echo (Echo stays zero).
+func (pk pokeInfo) poke() runtime.Poke {
+	return runtime.Poke{At: pk.at, Prior: pk.prior}
+}
+
 const (
 	// pokeEcho is the window within which raw tmux activity is treated as the
 	// poke's own keystroke echo rather than agent output.
-	pokeEcho = 3 * time.Second
+	pokeEcho = runtime.PokeEcho
 	// pokeGrace is how long a just-poked agent still counts as active, so a
 	// responsive agent about to reply is not flipped to idle. After it elapses
 	// with no agent output, the poke is discounted.
-	pokeGrace = 15 * time.Second
+	pokeGrace = runtime.PokeGrace
 )
 
 type hiddenAttachClient struct {
@@ -3109,12 +3115,19 @@ func (t *Tmux) submitVerifyEligible(target string) bool {
 	if provider := t.providerEnv(target); provider != "" {
 		return submitVerifyEligibleFamily(sessionlog.ProviderFamily(provider))
 	}
+	return t.sniffVerifyEligibleFamily(target) != ""
+}
+
+// sniffVerifyEligibleFamily is the first submitVerifyEligibleFamilies entry
+// whose process target's pane runs, or "" when it runs none: how a pane
+// without GC_PROVIDER (ad hoc sessions, some test harnesses) is identified.
+func (t *Tmux) sniffVerifyEligibleFamily(target string) string {
 	for _, family := range submitVerifyEligibleFamilies {
 		if t.targetLooksLikeProvider(target, family) {
-			return true
+			return family
 		}
 	}
-	return false
+	return ""
 }
 
 // submitVerifyEligibleFamilies are the provider families whose busy indicator
@@ -3133,8 +3146,10 @@ func (t *Tmux) submitVerifyEligible(target string) bool {
 // indicator is unreadable would report every delivery as unconfirmed and burn
 // the queue's attempts re-pasting messages that already landed.
 //
-// Listing a family also widens BusyIndicatorReadable, so callers that wait out
-// a (false, nil) SnapshotIdle begin waiting on that family's indicator.
+// The list is also the leaf's busy-trust policy (busyReadingTrusted): only a
+// listed family's busy reading reaches SnapshotIdle and TurnRunning callers,
+// so listing a family makes callers that wait out a (false, nil) SnapshotIdle
+// begin waiting on that family's indicator.
 var submitVerifyEligibleFamilies = []string{"claude", "codex"}
 
 func submitVerifyEligibleFamily(family string) bool {
@@ -3146,18 +3161,37 @@ func submitVerifyEligibleFamily(family string) bool {
 	return false
 }
 
-// BusyIndicatorReadable reports whether family is one whose busy reading from
-// the pane scan behind SnapshotIdle callers may act on: the families listed in
-// submitVerifyEligibleFamilies. For those families a (false, nil) snapshot
-// means the capture contains a busy-indicator string, usually the live
-// indicator but possibly a stale frame or transcript text; a pane showing
-// neither that nor a ready prompt is [runtime.ErrIdleIndeterminate], not busy.
-// The list is policy, not a property of the scan, which does not tell
-// families apart: paneContainsBusyIndicator also matches Gemini's cancel and
-// shell-tool strings. Callers must not treat an unlisted family's (false, nil)
-// snapshot as busy.
-func BusyIndicatorReadable(family string) bool {
+// busyReadingTrusted reports whether family is one whose busy reading from the
+// pane scan this leaf reports to its callers: the families listed in
+// submitVerifyEligibleFamilies. For those families a busy reading means the
+// capture contains a busy-indicator string, usually the live indicator but
+// possibly a stale frame or transcript text. The list is policy, not a
+// property of the scan, which does not tell families apart:
+// paneContainsBusyIndicator also matches Gemini's cancel and shell-tool
+// strings. For every other family, and a pane whose family cannot be told,
+// SnapshotIdle and TurnRunning report [runtime.ErrIdleIndeterminate] instead
+// of a busy reading, so no caller needs to know which families are trusted.
+func busyReadingTrusted(family string) bool {
 	return submitVerifyEligibleFamily(family)
+}
+
+// busyTrustFamily is target's provider family for busyReadingTrusted,
+// resolved as submitVerifyEligible resolves it: the pane's GC_PROVIDER, else
+// the first submitVerifyEligibleFamilies entry its process runs, else "" for
+// a pane whose family cannot be told. SnapshotIdle and TurnRunning both take
+// it, so they trust the same panes. A GC_PROVIDER read that fails, rather
+// than finding the variable unset, is an error: the family is unknown, not
+// untrusted, so the reading is a failed observation, not
+// [runtime.ErrIdleIndeterminate].
+func (t *Tmux) busyTrustFamily(target string) (string, error) {
+	provider, err := t.GetEnvironment(target, "GC_PROVIDER")
+	if err != nil && !errors.Is(err, errEnvUnset) {
+		return "", fmt.Errorf("reading the provider family: %w", err)
+	}
+	if provider = strings.TrimSpace(provider); provider != "" {
+		return sessionlog.ProviderFamily(provider), nil
+	}
+	return t.sniffVerifyEligibleFamily(target), nil
 }
 
 // nudgeSubmitKeySequence resolves target's declared submit key sequence (see
@@ -4475,7 +4509,7 @@ func (t *Tmux) rawSessionActivity(session string) (time.Time, error) {
 		return time.Time{}, err
 	}
 
-	timestamp, err := latestActivityTimestamp(out)
+	timestamp, err := runtime.LatestTmuxWindowActivity(out)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -4539,60 +4573,18 @@ func (t *Tmux) pokePrior(session string) time.Time {
 }
 
 // discountPokeActivity resolves the genuine activity time from the raw tmux
-// window activity (wa), the last recorded gc poke (pk) and the current time.
-//
-// If wa is only the poke's own keystroke echo (within pokeEcho of the poke) AND
-// the grace window has elapsed with no later agent output, it returns the
-// activity seen before the poke — revealing that the agent never actually
-// responded. Otherwise wa stands (a real post-poke turn, or a still-in-grace
-// recent poke). Pure function for testability.
+// window activity (wa), the last recorded gc poke (pk) and the current time:
+// the discount shared with the providers that drive tmux in a box
+// ([runtime.DiscountPokeActivity]).
 func discountPokeActivity(wa time.Time, pk pokeInfo, now time.Time) time.Time {
-	if pk.at.IsZero() || pk.prior.IsZero() {
-		return wa
-	}
-	echoOnly := wa.Sub(pk.at).Abs() <= pokeEcho
-	graceElapsed := now.Sub(pk.at) >= pokeGrace
-	if echoOnly && graceElapsed {
-		return pk.prior
-	}
-	return wa
+	return runtime.DiscountPokeActivity(wa, pk.poke(), now)
 }
 
 // pokePriorBaseline selects the genuine activity to record as a new poke's
-// prior. When an earlier poke is still on record and the current raw window
-// activity is only that poke's own echo (raw within pokeEcho of the earlier
-// poke, i.e. no genuine agent output since), the last genuine activity is the
-// earlier poke's prior, so it is carried forward. This stops chained unanswered
-// nudges inside pokeGrace from recording gc's own earlier nudge echo as the new
-// baseline — which discountPokeActivity would otherwise later surface as
-// last_active, masking a stalled agent. Otherwise the freshly observed raw
-// activity is genuine and becomes the new prior. Pure function for testability.
+// prior, carrying an unanswered earlier poke's baseline forward
+// ([runtime.PokePriorBaseline]).
 func pokePriorBaseline(raw time.Time, pk pokeInfo, hasPoke bool) time.Time {
-	if hasPoke && !pk.at.IsZero() && !pk.prior.IsZero() && raw.Sub(pk.at).Abs() <= pokeEcho {
-		return pk.prior
-	}
-	return raw
-}
-
-func latestActivityTimestamp(out string) (int64, error) {
-	var latest int64
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		timestamp, err := strconv.ParseInt(line, 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("parsing window activity %q: %w", line, err)
-		}
-		if timestamp > latest {
-			latest = timestamp
-		}
-	}
-	if latest == 0 {
-		return 0, fmt.Errorf("parsing window activity: no timestamps found")
-	}
-	return latest, nil
+	return runtime.PokePriorBaseline(raw, pk.poke(), hasPoke)
 }
 
 // ZombieStatus describes the liveness state of a tmux agent session.
@@ -5431,11 +5423,28 @@ func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
 // boundary right now — a ready prompt with no active-processing indicator — in
 // a single non-blocking observation. It implements
 // [runtime.IdleSnapshotProvider]: (false, nil) means the capture contains a
-// busy-indicator string (see snapshotPaneIdleWithPrefix), and a pane showing
-// neither that nor the ready prompt returns [runtime.ErrIdleIndeterminate]. A
-// session that has gone away is reported as an error, not as idle.
+// busy-indicator string (see snapshotPaneIdleWithPrefix) and the session's
+// provider family is one whose busy reading this leaf trusts
+// (busyReadingTrusted). The same capture for any other family, and a pane
+// showing neither an indicator string nor the ready prompt, returns
+// [runtime.ErrIdleIndeterminate]; a busy capture whose family cannot be read
+// (busyTrustFamily) is an error, as a failed capture is. A session that has
+// gone away is reported as an error, not as idle.
 func (t *Tmux) SnapshotIdle(session string) (bool, error) {
-	return t.snapshotPaneIdle(session)
+	idle, err := t.snapshotPaneIdle(session)
+	if err != nil || idle {
+		return idle, err
+	}
+	// The family resolves only on a busy reading.
+	family, err := t.busyTrustFamily(session)
+	if err != nil {
+		return false, fmt.Errorf("session %q shows a busy indicator: %w", session, err)
+	}
+	if !busyReadingTrusted(family) {
+		return false, fmt.Errorf("session %q shows a busy indicator its provider family's scan cannot vouch for: %w",
+			session, runtime.ErrIdleIndeterminate)
+	}
+	return false, nil
 }
 
 // WaitForIdle polls until the agent appears to be at an idle prompt.
