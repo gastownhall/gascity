@@ -21,17 +21,11 @@ func waitForCityStoreQuiesce(*managedCity, io.Writer) (<-chan struct{}, error) {
 func stopBeadsProviderAfterQuiesceDrain(*managedCity, string, <-chan struct{}) {}
 
 // managedCityPlatformState is empty off Windows, where published cities carry
-// no generation. Publishing is routed through it so managedCity's embedded
-// field stays in use.
+// no generation.
 type managedCityPlatformState struct{}
 
-func (*managedCityPlatformState) markPublished() {}
-
-func markManagedCityPublished(_ string, mc *managedCity) {
-	if mc != nil {
-		mc.markPublished()
-	}
-}
+// markPublished records nothing off Windows.
+func (*managedCityPlatformState) markPublished(string) {}
 
 func trackRetiringBeadStoreHandle(*controllerState, beads.Store) func() {
 	return func() {}

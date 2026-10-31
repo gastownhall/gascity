@@ -77,10 +77,10 @@ cmd/gc/api_state.go	liveCloseOwner	raw-result	1
 cmd/gc/api_state.go	liveCloseOwner	read-marker	1
 cmd/gc/api_state.go	liveReadOwner	raw-param	1
 cmd/gc/api_state.go	liveReadOwner	raw-result	1
+cmd/gc/api_state.go	newBeadStoreCloseRequest	raw-param	1
 cmd/gc/api_state.go	primeThenStartReconciler	raw-param	1
 cmd/gc/api_state.go	relicStoreRef	raw-param	2
-cmd/gc/api_state.go	scheduleCloseBeadStoreHandle	raw-param	1
-cmd/gc/api_state.go	scheduleCloseReplacedBeadStoreHandles	raw-param	2
+cmd/gc/api_state.go	replacedBeadStoreCloseRequests	raw-param	2
 cmd/gc/api_state.go	storePointerKey	raw-param	1
 cmd/gc/api_state.go	uncachedBeadStore	cap-assert	1
 cmd/gc/api_state.go	uncachedBeadStore	raw-param	1

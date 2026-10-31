@@ -10,8 +10,8 @@ import (
 func configureProcessTableScan(runtime.Provider, *config.City) {}
 
 // processScanState is empty off Windows, where the process-table scan is not
-// scoped. The no-op refresh is declared on it so CityRuntime's promoted call
-// keeps the embedded field in use.
+// scoped.
 type processScanState struct{}
 
-func (*processScanState) refreshProcessTableScan(runtime.Provider, *config.City) {}
+// refreshProcessTableScan does nothing off Windows.
+func (*processScanState) refreshProcessTableScan(runtime.Provider, *config.City, *config.City) {}

@@ -31,22 +31,24 @@ func configureProcessTableScan(sp runtime.Provider, cfg *config.City) {
 	scoped.SetScanExecutables(cityRuntimeExecutables(cfg))
 }
 
-func (cr *CityRuntime) refreshProcessTableScan(sp runtime.Provider, cfg *config.City) {
-	if !cr.processScanScopeInitialized {
-		cr.processScanScope = cityRuntimeExecutables(cr.cfg)
-		cr.processScanScopeInitialized = true
+// refreshProcessTableScan widens the accumulated scan scope from the outgoing
+// config current to cover next, and hands it to sp.
+func (s *processScanState) refreshProcessTableScan(sp runtime.Provider, current, next *config.City) {
+	if !s.processScanScopeInitialized {
+		s.processScanScope = cityRuntimeExecutables(current)
+		s.processScanScopeInitialized = true
 	}
-	next := cityRuntimeExecutables(cfg)
-	if cr.processScanScope == nil || next == nil {
-		cr.processScanScope = nil
+	nextScope := cityRuntimeExecutables(next)
+	if s.processScanScope == nil || nextScope == nil {
+		s.processScanScope = nil
 	} else {
 		// Earlier sessions may outlive both their config entry and their provider.
-		cr.processScanScope = append(cr.processScanScope, next...)
-		slices.Sort(cr.processScanScope)
-		cr.processScanScope = slices.Compact(cr.processScanScope)
+		s.processScanScope = append(s.processScanScope, nextScope...)
+		slices.Sort(s.processScanScope)
+		s.processScanScope = slices.Compact(s.processScanScope)
 	}
 	if scoped, ok := sp.(interface{ SetScanExecutables([]string) }); ok {
-		scoped.SetScanExecutables(slices.Clone(cr.processScanScope))
+		scoped.SetScanExecutables(slices.Clone(s.processScanScope))
 	}
 }
 

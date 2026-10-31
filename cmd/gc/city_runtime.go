@@ -2938,7 +2938,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	// nor installed, so the lane keeps the controller's generation.
 	// Scope the provider's process-table scan before the provider is
 	// published; the refresh reads the outgoing config, so it runs first.
-	cr.refreshProcessTableScan(nextSp, nextCfg)
+	cr.refreshProcessTableScan(nextSp, cr.cfg, nextCfg)
 	if !cr.publishRuntimeConfig(nextCfg, nextSp, nextDops, result.Revision) {
 		return rejectSuperseded("during runtime publication")
 	}

@@ -1300,6 +1300,7 @@ func reloadSupervisorJSON(stdout, stderr io.Writer, jsonOut bool) int {
 
 // managedCity tracks a running CityRuntime inside the supervisor.
 type managedCity struct {
+	managedCityPlatformState
 	cr         *CityRuntime
 	name       string // city name at launch — used for name-drift detection
 	started    bool
@@ -1308,7 +1309,6 @@ type managedCity struct {
 	done       chan struct{} // closed when the city goroutine exits
 	closer     io.Closer     // FileRecorder (or nil); closed on city stop
 	tombstoned atomic.Bool   // set before Remove() in shutdown paths for teardown safety
-	managedCityPlatformState
 }
 
 // deleteManagedCityIfCurrent prevents a stale city goroutine from removing
@@ -2956,7 +2956,7 @@ func publishManagedCity(cr *cityRegistry, path string, mc *managedCity) bool {
 		// runs after that reconciliation completes.
 		mc.status = "starting_agents"
 		cities[path] = mc
-		markManagedCityPublished(path, mc)
+		mc.markPublished(path)
 		delete(initStatus, path)
 		delete(initFailures, path) // clear backoff on successful init
 	})

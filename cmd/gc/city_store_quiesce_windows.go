@@ -116,8 +116,8 @@ func stopBeadsProviderAfterQuiesceDrain(mc *managedCity, cityPath string, quiesc
 	}()
 }
 
-// managedCityPlatformState holds the generation markManagedCityPublished
-// assigns when the supervisor publishes a managed city.
+// managedCityPlatformState holds the generation markPublished assigns when the
+// supervisor publishes a managed city.
 type managedCityPlatformState struct {
 	generation uint64
 }
@@ -129,15 +129,13 @@ var managedCityGenerations = struct {
 	byPath: map[string]uint64{},
 }
 
-func markManagedCityPublished(path string, mc *managedCity) {
-	if mc == nil {
-		return
-	}
+// markPublished assigns the next generation for the city published at path.
+func (s *managedCityPlatformState) markPublished(path string) {
 	managedCityGenerations.Lock()
 	defer managedCityGenerations.Unlock()
 	generation := managedCityGenerations.byPath[path] + 1
 	managedCityGenerations.byPath[path] = generation
-	mc.generation = generation
+	s.generation = generation
 }
 
 func managedCityGenerationStillCurrent(path string, generation uint64) bool {

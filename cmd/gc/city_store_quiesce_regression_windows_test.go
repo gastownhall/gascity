@@ -65,7 +65,7 @@ func scheduleRetiredStoreForQuiesceTest(mc *managedCity, label string, store bea
 	if mc != nil && mc.cr != nil {
 		cs = mc.cr.cs
 	}
-	scheduleCloseBeadStoreHandle(cs, label, store).schedule()
+	newBeadStoreCloseRequest(cs, label, store).schedule()
 }
 
 func TestQuiesceWaitsForAStoreRetiredByReload(t *testing.T) {
@@ -204,7 +204,7 @@ func TestDeferredProviderStopSkipsNewerCityInstance(t *testing.T) {
 	done := make(chan struct{})
 	close(done)
 	mc := managedCityOverStore("owned", cached, cancelCity, done, "5s")
-	markManagedCityPublished(n.city, mc)
+	mc.markPublished(n.city)
 
 	deferredDone := make(chan struct{})
 	var deferredDoneOnce sync.Once
@@ -224,7 +224,7 @@ func TestDeferredProviderStopSkipsNewerCityInstance(t *testing.T) {
 	restartedDone := make(chan struct{})
 	close(restartedDone)
 	restarted := managedCityOverStore("owned", beads.NewCachingStoreForTest(beads.NewMemStore(), nil), func() {}, restartedDone, "5s")
-	markManagedCityPublished(n.city, restarted)
+	restarted.markPublished(n.city)
 
 	backing.unblock()
 	select {
