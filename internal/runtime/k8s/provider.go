@@ -25,9 +25,14 @@ import (
 
 // Compile-time interface checks.
 var (
-	_ runtime.Provider     = (*Provider)(nil)
-	_ runtime.ExecProvider = (*Provider)(nil)
+	_ runtime.Provider                  = (*Provider)(nil)
+	_ runtime.ExecProvider              = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError = (*Provider)(nil)
 )
+
+// livenessObservationTimeout bounds the Kubernetes API and pod-exec reads
+// used by ObserveLivenessWithError and identity metadata reads.
+const livenessObservationTimeout = 10 * time.Second
 
 // Provider is a native Kubernetes session provider using client-go.
 // Eliminates subprocess overhead by making direct API calls over reused
@@ -188,7 +193,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			// still be blocking the tmux server from starting. Don't delete
 			// pods that are still within the startup window.
 			if time.Since(pod.CreationTimestamp.Time) < startupGracePeriod {
-				return fmt.Errorf("%w: session %q (pod: %s)", runtime.ErrSessionInitializing, name, pod.Name)
+				return fmt.Errorf("%w: %w: session %q (pod: %s)", runtime.ErrSessionInitializing, runtime.ErrExistingSessionInitializing, name, pod.Name)
 			}
 			if !definitive {
 				// Past the grace period the next statement deletes this pod.
@@ -473,6 +478,52 @@ func (p *Provider) IsRunning(name string) bool {
 	return err == nil
 }
 
+// ObserveLivenessWithError reports pod and agent-process liveness without
+// collapsing Kubernetes API or pod-exec failures into confirmed absence.
+func (p *Provider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), livenessObservationTimeout)
+	defer cancel()
+
+	label := SanitizeLabel(name)
+	pods, err := p.ops.listPods(ctx, "gc-session="+label, "")
+	if err != nil {
+		return runtime.Liveness{}, fmt.Errorf("observing k8s session %q: listing pods: %w: %w", name, runtime.ErrRuntimeUnavailable, err)
+	}
+	if len(pods) == 0 {
+		return runtime.Liveness{}, nil
+	}
+	pod := firstRunningPod(pods)
+	if pod == nil {
+		return runtime.Liveness{}, nil
+	}
+
+	alive, definitive, probeErr := p.probeTmuxLiveness(ctx, pod)
+	if !definitive {
+		return runtime.Liveness{}, fmt.Errorf("observing k8s session %q: tmux probe: %w: %w", name, runtime.ErrRuntimeUnavailable, probeErr)
+	}
+	if !alive {
+		return runtime.Liveness{}, nil
+	}
+	if len(processNames) == 0 {
+		return runtime.Liveness{Running: true, Alive: true}, nil
+	}
+	for _, processName := range processNames {
+		if strings.TrimSpace(processName) == "" {
+			continue
+		}
+		_, err := p.ops.execInPod(ctx, pod.Name, "agent", []string{"pgrep", "-f", processName}, nil)
+		if err == nil {
+			return runtime.Liveness{Running: true, Alive: true}, nil
+		}
+		var exitErr execerr.ExitError
+		if errors.As(err, &exitErr) && exitErr.Exited() {
+			continue
+		}
+		return runtime.Liveness{Running: true}, fmt.Errorf("observing k8s session %q process %q: %w: %w", name, processName, runtime.ErrRuntimeUnavailable, err)
+	}
+	return runtime.Liveness{Running: true}, nil
+}
+
 // IsAttached reports whether a user terminal is connected to the tmux
 // session inside the pod.
 func (p *Provider) IsAttached(name string) bool {
@@ -609,6 +660,36 @@ func (p *Provider) SetMeta(name, key, value string) error {
 // GetMeta retrieves a metadata value from the tmux environment.
 func (p *Provider) GetMeta(name, key string) (string, error) {
 	ctx := context.Background()
+	if isPodIdentityKey(key) {
+		ctx, cancel := context.WithTimeout(ctx, livenessObservationTimeout)
+		defer cancel()
+		pods, err := p.ops.listPods(ctx, "gc-session="+SanitizeLabel(name), "")
+		if err != nil {
+			return "", fmt.Errorf("reading k8s session %q metadata %s: listing pods: %w: %w", name, key, runtime.ErrRuntimeUnavailable, err)
+		}
+		if len(pods) == 0 {
+			return "", runtime.ErrSessionNotFound
+		}
+		pod := firstRunningPod(pods)
+		if pod == nil {
+			return "", runtime.ErrSessionNotFound
+		}
+		for _, container := range pod.Spec.Containers {
+			if container.Name != "agent" {
+				continue
+			}
+			for _, value := range container.Env {
+				if value.Name != key {
+					continue
+				}
+				if value.ValueFrom != nil {
+					return "", fmt.Errorf("reading k8s session %q metadata %s: %w", name, key, runtime.ErrRuntimeUnavailable)
+				}
+				return value.Value, nil
+			}
+		}
+		return "", nil
+	}
 	podName, err := p.findPod(ctx, name)
 	if err != nil {
 		return "", nil
@@ -627,6 +708,27 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 		return val, nil
 	}
 	return "", nil
+}
+
+func isPodIdentityKey(key string) bool {
+	switch key {
+	case "GC_SESSION_ID", "GC_INSTANCE_TOKEN", "GC_RUNTIME_EPOCH":
+		return true
+	default:
+		return false
+	}
+}
+
+// firstRunningPod selects the same serving pod for liveness and identity
+// reads. Terminating and failed replacements must not supply stale identity
+// metadata for a different live pod.
+func firstRunningPod(pods []corev1.Pod) *corev1.Pod {
+	for i := range pods {
+		if pods[i].DeletionTimestamp == nil && pods[i].Status.Phase == corev1.PodRunning {
+			return &pods[i]
+		}
+	}
+	return nil
 }
 
 // RemoveMeta removes a metadata key from the tmux environment.

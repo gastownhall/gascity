@@ -7723,6 +7723,123 @@ func TestExecutePreparedStartWave_AlreadyRunningRejectsPendingCreateSessionIDMis
 	}
 }
 
+type existingSessionInitializingAfterDeadlineProvider struct {
+	*runtime.Fake
+	startCalls int
+}
+
+func (p *existingSessionInitializingAfterDeadlineProvider) Start(ctx context.Context, _ string, _ runtime.Config) error {
+	p.startCalls++
+	<-ctx.Done()
+	return runtime.ErrExistingSessionInitializing
+}
+
+func TestRunPreparedStartCandidate_ForeignOtherEpochDefersAfterRestoringPreWakeIdentity(t *testing.T) {
+	sp := &existingSessionInitializingAfterDeadlineProvider{Fake: runtime.NewFake()}
+	for key, value := range map[string]string{
+		"GC_SESSION_ID":     "gc-creating",
+		"GC_INSTANCE_TOKEN": "tok-old",
+		"GC_RUNTIME_EPOCH":  "1",
+	} {
+		if err := sp.SetMeta("test-agent", key, value); err != nil {
+			t.Fatalf("SetMeta %s: %v", key, err)
+		}
+	}
+
+	item := preparedStart{
+		candidate: startCandidate{
+			info: sessionpkg.Info{
+				ID:                         "gc-creating",
+				SessionName:                "test-agent",
+				SessionNameMetadata:        "test-agent",
+				Template:                   "worker",
+				Generation:                 "2",
+				ContinuationEpoch:          "2",
+				InstanceToken:              "tok-new",
+				PendingCreateClaim:         true,
+				PendingCreateClaimMetadata: "true",
+			},
+			tp: TemplateParams{Command: "worker", SessionName: "test-agent", TemplateName: "worker"},
+		},
+		cfg: runtime.Config{Command: "worker"},
+		preWakeUndo: preWakeUndo{
+			before: map[string]string{
+				"generation":         "1",
+				"instance_token":     "tok-old",
+				"continuation_epoch": "1",
+			},
+			written: sessionpkg.MetadataPatch{"instance_token": "tok-new"},
+		},
+	}
+
+	got := runPreparedStartCandidate(context.Background(), item, t.TempDir(), sp, nil, nil, 20*time.Millisecond, immediateStartStabilityWaiter, nil, nil)
+	if sp.startCalls != 1 {
+		t.Fatalf("provider Start calls = %d, want 1", sp.startCalls)
+	}
+	if got.outcome != TraceOutcomeDeferred {
+		t.Fatalf("outcome = %q, want deferred for the live other-epoch runtime", got.outcome)
+	}
+	if got.err != nil {
+		t.Fatalf("deferred result error = %v, want nil", got.err)
+	}
+	if !got.restorePreWakeIdentity {
+		t.Fatal("restorePreWakeIdentity = false, want the prior runtime token to be recognized")
+	}
+	if got.rollbackPending {
+		t.Fatal("rollbackPending = true, want the other epoch's live runtime to keep the pending create")
+	}
+	if !errors.Is(got.unattributedErr, runtime.ErrExistingSessionInitializing) {
+		t.Fatalf("unattributedErr = %v, want the initializing start error retained for the lifecycle trace", got.unattributedErr)
+	}
+}
+
+func TestExecutePreparedStartWave_AlreadyRunningRejectsPendingCreateSameIDTokenMismatch(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "test-agent", runtime.Config{}); err != nil {
+		t.Fatalf("Start existing session: %v", err)
+	}
+	for key, value := range map[string]string{
+		"GC_SESSION_ID":     "gc-creating",
+		"GC_INSTANCE_TOKEN": "tok-old",
+		"GC_RUNTIME_EPOCH":  "2",
+	} {
+		if err := sp.SetMeta("test-agent", key, value); err != nil {
+			t.Fatalf("SetMeta %s: %v", key, err)
+		}
+	}
+	item := preparedStart{
+		candidate: startCandidate{
+			info: sessionpkg.Info{
+				ID:                         "gc-creating",
+				SessionName:                "test-agent",
+				SessionNameMetadata:        "test-agent",
+				Template:                   "worker",
+				Generation:                 "2",
+				InstanceToken:              "tok-new",
+				PendingCreateClaim:         true,
+				PendingCreateClaimMetadata: "true",
+			},
+			tp: TemplateParams{Command: "claude", SessionName: "test-agent", TemplateName: "worker"},
+		},
+		cfg: runtime.Config{Command: "claude"},
+	}
+
+	results := executePreparedStartWaveForCity(context.Background(), []preparedStart{item}, t.TempDir(), sp, nil, nil, 10*time.Second, 1)
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want one", len(results))
+	}
+	got := results[0]
+	if !errors.Is(got.err, runtime.ErrSessionExists) {
+		t.Fatalf("result error = %v, want ErrSessionExists for the mismatched live incarnation", got.err)
+	}
+	if !got.rollbackPending {
+		t.Fatal("rollbackPending = false, want the create rejected without adopting the same-ID runtime")
+	}
+	if got.outcome != TraceOutcomeSessionExists {
+		t.Fatalf("outcome = %q, want session_exists", got.outcome)
+	}
+}
+
 func TestExecutePreparedStartWave_RuntimeOnlyStaleKeyUsesProcessAliveFallback(t *testing.T) {
 	city := t.TempDir()
 	sp := &falseNegativeAfterStartProvider{

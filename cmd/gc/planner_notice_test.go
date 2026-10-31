@@ -2022,7 +2022,11 @@ func TestWarmReuseRemindsWithTheClaimInstructionNotTheReprimePayload(t *testing.
 			f := newLaneFixture(t)
 			f.cfg.Agents = []config.Agent{{Name: "worker", Nudge: tc.nudge}}
 			newNoticeLaneHost(t, f, tc.kinds...)
-			warmBindLaneRow(t, f, "w-1")
+			trigger, err := f.store.Create(beads.Bead{Title: "work", Type: "task", Status: "open"})
+			if err != nil {
+				t.Fatalf("creating trigger work bead: %v", err)
+			}
+			warmBindLaneRow(t, f, trigger.ID)
 			item := preparedStart{
 				candidate: startCandidate{
 					info: sessionpkg.Info{ID: f.id, SessionName: f.name, SessionNameMetadata: f.name},
@@ -2042,15 +2046,15 @@ func TestWarmReuseRemindsWithTheClaimInstructionNotTheReprimePayload(t *testing.
 					t.Fatalf("open ops = %d, want none", n)
 				}
 			} else {
-				if op := f.get(t, f.laneStore(t), noticeOpID(t, f, warmBindNoticePurpose, "w-1", "", 1)); op.Payload != tc.want {
+				if op := f.get(t, f.laneStore(t), noticeOpID(t, f, warmBindNoticePurpose, trigger.ID, "", 1)); op.Payload != tc.want {
 					t.Fatalf("notice = %q, want the claim instruction %q alone", op.Payload, tc.want)
 				}
 				if n := len(f.nudges()); n != 0 {
 					t.Fatalf("direct nudges = %d, want 0", n)
 				}
 			}
-			if got := f.meta(t, warmBindNudgedForTriggerKey); got != "w-1" {
-				t.Fatalf("marker = %q, want w-1", got)
+			if got := f.meta(t, warmBindNudgedForTriggerKey); got != trigger.ID {
+				t.Fatalf("marker = %q, want %s", got, trigger.ID)
 			}
 		})
 	}

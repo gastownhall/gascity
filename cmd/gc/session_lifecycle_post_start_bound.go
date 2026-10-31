@@ -88,6 +88,11 @@ func observeRuntimeProviderLivenessBounded(ctx context.Context, cityPath string,
 // unverifiable like any other failed read, so the attribution comes out
 // unknown unless the reads that did answer already decide it.
 func readPendingCreateIdentityBounded(ctx context.Context, cityPath string, info sessionpkg.Info, sessionName string, sp runtime.Provider) pendingCreateIdentity {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, postStartObservationBound)
+	defer cancel()
 	return readPendingCreateIdentityVia(info, sp, func(key string) (string, error) {
 		return observeSessionBounded(ctx, cityPath, sessionName, func() (string, error) {
 			return sp.GetMeta(sessionName, key)

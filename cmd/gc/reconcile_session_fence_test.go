@@ -202,7 +202,22 @@ func TestFenceTerminalNoReportUsesQuietWindowNotBoolAttach(t *testing.T) {
 	k8s, k8sFake := fakeProfile(runtime.ProfileK8s)
 	startRuntime(t, k8sFake, "rt_b", ours("b"))
 	if reason, _ := attachLeg(context.Background(), k8s, "rt_b", false, now); reason != fenceTerminalNotQuiet {
-		t.Fatalf("unhardened leaf with no activity: L3 %q, want terminal-no-report's defer", reason)
+		t.Fatalf("K8s leaf without quiet activity: L3 %q, want terminal-no-report's defer", reason)
+	}
+	for _, tc := range []struct {
+		name    string
+		profile runtime.Profile
+	}{
+		{name: "ACP", profile: runtime.ProfileACP},
+		{name: "subprocess", profile: runtime.ProfileSubprocess},
+	} {
+		leaf, _ := fakeProfile(tc.profile)
+		if !runtime.FreshReadable(leaf) {
+			t.Fatalf("%s fake is not fresh-readable", tc.name)
+		}
+		if reason, escalate := attachLeg(context.Background(), leaf, "rt_c", false, now); reason != "" || escalate {
+			t.Errorf("%s no-terminal leaf: L3 (%q, %v), want pass", tc.name, reason, escalate)
+		}
 	}
 }
 
