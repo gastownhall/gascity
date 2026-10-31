@@ -1262,9 +1262,10 @@ func unclaimWorkAssignedToRetiredSessionBeadVia(
 	return out
 }
 
-// releaseDrainAckClaims gives back every in_progress WORK bead this session
-// still holds when it acknowledges drain, except the claims it keeps as the
-// seat's started work (releaseDrainAck's policy, PHASE1-2 §6.5).
+// releaseDrainAckClaims gives back in_progress WORK claims first, then raw
+// blocked holds without reopening them. Both clear obsolete session affinity.
+// In-progress claims named by the seat's started records remain held under releaseDrainAck's
+// policy (PHASE1-2 §6.5).
 //
 // Drain-ack means "I am done and I hold nothing." A session that reaches it
 // still holding an in_progress claim its started records do not name never
@@ -1273,8 +1274,9 @@ func unclaimWorkAssignedToRetiredSessionBeadVia(
 // turn holding an unexecuted claim" structurally unrepresentable at the one place
 // every ephemeral worker already terminates.
 //
-// It differs from unclaimWorkAssignedToRetiredSessionBead in exactly one way,
-// and the difference is load-bearing: only in_progress is swept. Continuation
+// Unlike unclaimWorkAssignedToRetiredSessionBead, it keeps ordinary raw-open
+// continuation preassignments. Normalized-open rows are probed for blocked
+// holds after the in_progress claims. Continuation
 // preassignment writes an assignee onto OPEN siblings so they stay with the live
 // context, and sweeping those would undo the preassignment the session's own
 // claim just made. Everything else — the residency-correct leg set, the CAS,
@@ -1342,8 +1344,8 @@ func logRelease(stderr io.Writer, kind, sessionID string, out ReleaseOutcome, er
 // claims before its slot close (owner ruling B1, CONTRACT C3 "Killed pool
 // seats", rule 2), and only when the seat holds no started work.
 //
-// It is D5's machinery with the status filter set to open, and the difference
-// from drain-ack is the point. A drain-ack says "I am done and I hold
+// It uses D5's release machinery but keeps all claims when any work is started.
+// A drain-ack says "I am done and I hold
 // nothing", so an in_progress claim at ack time was never executed. A kill
 // says nothing of the kind: it interrupts the seat, so in_progress work may be
 // half-done, and only the seat that started it may resume it. A seat holding
@@ -1351,7 +1353,7 @@ func logRelease(stderr io.Writer, kind, sessionID string, out ReleaseOutcome, er
 // or current_claim_bead_id) therefore survives: nothing is released, so it keeps
 // its whole context, including pre-assigned molecule siblings and their
 // gc.continuation_group, and the close's live work read refuses. Otherwise
-// every lane-visible open claim (laneDirect) is released, with the
+// every lane-visible open or raw-blocked claim (laneDirect) is released, with the
 // seat's fallback route, as the close cascade and the stranded repair release
 // it; a claim no lane would see stays assigned and keeps the seat. The gate
 // and the release set are sw's rows as read: a stale started row only keeps
