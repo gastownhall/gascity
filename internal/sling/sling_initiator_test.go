@@ -359,3 +359,131 @@ func TestSlingBatchOnFormulaStampsInitiatorOnChildWispRoots(t *testing.T) {
 		}
 	}
 }
+
+// Dispatch is the entry point gc sling and POST /sling share. Its plain-route
+// branch hands off through ExpandConvoy, which rebuilds SlingOpts from
+// RouteOpts; the initiator must survive that hop for a plain bead, a
+// --no-formula sling to a target with a default formula, and a plain convoy,
+// under both the typed Router and the shell sling_query runner.
+func TestDispatchPlainRouteStampsInitiatorBeforeRouting(t *testing.T) {
+	withDefault := slingWorker()
+	withDefault.DefaultSlingFormula = stringPtr("code-review")
+
+	cases := []struct {
+		name      string
+		target    config.Agent
+		noFormula bool
+		convoy    bool
+	}{
+		{name: "plain bead", target: slingWorker()},
+		{name: "no formula", target: withDefault, noFormula: true},
+		{name: "plain convoy", target: slingWorker(), convoy: true},
+	}
+	for _, tc := range cases {
+		for _, routing := range []string{"typed", "shell"} {
+			t.Run(tc.name+"/"+routing, func(t *testing.T) {
+				store := beads.NewMemStore()
+				var ids []string
+				beadID := ""
+				if tc.convoy {
+					beadID, ids = newInitiatorConvoy(t, store)
+				} else {
+					b, err := store.Create(beads.Bead{Title: "work", Type: "task", Status: "open"})
+					if err != nil {
+						t.Fatal(err)
+					}
+					beadID, ids = b.ID, []string{b.ID}
+				}
+				shell := &initiatorAtRouteRunner{store: store, ids: ids}
+				deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), shell.run)
+				deps.Store = store
+				typed := &initiatorAtRouteRouter{fallback: store}
+				if routing == "typed" {
+					deps.Router = typed
+				}
+				s, err := New(deps)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				opts := SlingOpts{Target: tc.target, BeadOrFormula: beadID, NoFormula: tc.noFormula, Initiator: testInitiator}
+				if _, err := s.Dispatch(context.Background(), opts, store); err != nil {
+					t.Fatalf("Dispatch: %v", err)
+				}
+				seen := shell.seen
+				if routing == "typed" {
+					seen = typed.seen
+				}
+				for _, id := range ids {
+					if got, ok := seen[id]; !ok || got != testInitiator {
+						t.Fatalf("%s routing saw %s %s = %q (routed=%v), want %q", routing, id, beadmeta.InitiatorMetadataKey, got, ok, testInitiator)
+					}
+					requireInitiator(t, store, id)
+				}
+			})
+		}
+	}
+}
+
+// The exported intent entry points carry the initiator through their option
+// structs, so none of them silently drops it.
+func TestIntentEntryPointsCarryInitiator(t *testing.T) {
+	newSling := func(t *testing.T, store beads.Store) (*Sling, *initiatorAtRouteRouter) {
+		t.Helper()
+		deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), newFakeRunner().run)
+		deps.Store = store
+		router := &initiatorAtRouteRouter{fallback: store}
+		deps.Router = router
+		s, err := New(deps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s, router
+	}
+	ctx := context.Background()
+
+	t.Run("RouteBead", func(t *testing.T) {
+		store := seededStore("BL-1")
+		s, router := newSling(t, store)
+		if _, err := s.RouteBead(ctx, "BL-1", slingWorker(), RouteOpts{Initiator: testInitiator}); err != nil {
+			t.Fatalf("RouteBead: %v", err)
+		}
+		if got := router.seen["BL-1"]; got != testInitiator {
+			t.Fatalf("Route saw %s = %q, want %q", beadmeta.InitiatorMetadataKey, got, testInitiator)
+		}
+	})
+	t.Run("ExpandConvoy", func(t *testing.T) {
+		store := beads.NewMemStore()
+		convoyID, children := newInitiatorConvoy(t, store)
+		s, router := newSling(t, store)
+		if _, err := s.ExpandConvoy(ctx, convoyID, slingWorker(), RouteOpts{Initiator: testInitiator}, store); err != nil {
+			t.Fatalf("ExpandConvoy: %v", err)
+		}
+		for _, id := range children {
+			if got := router.seen[id]; got != testInitiator {
+				t.Fatalf("Route saw child %s %s = %q, want %q", id, beadmeta.InitiatorMetadataKey, got, testInitiator)
+			}
+		}
+	})
+	t.Run("LaunchFormula", func(t *testing.T) {
+		store := beads.NewMemStore()
+		s, _ := newSling(t, store)
+		res, err := s.LaunchFormula(ctx, "code-review", slingWorker(), FormulaOpts{Initiator: testInitiator})
+		if err != nil {
+			t.Fatalf("LaunchFormula: %v", err)
+		}
+		requireInitiator(t, store, res.BeadID)
+	})
+	t.Run("AttachFormula", func(t *testing.T) {
+		store := seededStore("BL-1")
+		s, router := newSling(t, store)
+		res, err := s.AttachFormula(ctx, "code-review", "BL-1", slingWorker(), FormulaOpts{Initiator: testInitiator})
+		if err != nil {
+			t.Fatalf("AttachFormula: %v", err)
+		}
+		if got := router.seen["BL-1"]; got != testInitiator {
+			t.Fatalf("Route saw %s = %q, want %q", beadmeta.InitiatorMetadataKey, got, testInitiator)
+		}
+		requireInitiator(t, store, res.WispRootID)
+	})
+}

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,9 +48,9 @@ func newSignedCityHandler(t *testing.T, state State, srv *Server) signedCityHand
 	}
 }
 
-func (s signedCityHandler) do(method, path, body string) *httptest.ResponseRecorder {
+func (s signedCityHandler) post(path, body string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	s.h.ServeHTTP(rec, s.sign(method, path, []byte(body)))
+	s.h.ServeHTTP(rec, s.sign(http.MethodPost, path, []byte(body)))
 	return rec
 }
 
@@ -70,7 +71,7 @@ func TestBeadCreateStampsVerifiedInitiator(t *testing.T) {
 	store := state.stores["myrig"]
 	s := newSignedCityHandler(t, state, nil)
 
-	rec := s.do(http.MethodPost, cityURL(state, "/beads"), `{"rig":"myrig","title":"t","metadata":{"note":"x"}}`)
+	rec := s.post(cityURL(state, "/beads"), `{"rig":"myrig","title":"t","metadata":{"note":"x"}}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create status = %d, want 201; body = %s", rec.Code, rec.Body.String())
 	}
@@ -116,7 +117,7 @@ func TestBeadWriteRefusesClientInitiator(t *testing.T) {
 		before, _ := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
 		for name, rec := range map[string]*httptest.ResponseRecorder{
 			"unsigned": beadRequest(t, newTestCityHandler(t, state), http.MethodPost, cityURL(state, "/beads"), body),
-			"signed":   newSignedCityHandler(t, state, nil).do(http.MethodPost, cityURL(state, "/beads"), body),
+			"signed":   newSignedCityHandler(t, state, nil).post(cityURL(state, "/beads"), body),
 		} {
 			if rec.Code != http.StatusUnprocessableEntity {
 				t.Fatalf("%s create status = %d, want 422; body = %s", name, rec.Code, rec.Body.String())
@@ -202,7 +203,7 @@ func TestSlingStampsVerifiedInitiatorAndIgnoresClientVar(t *testing.T) {
 	s := newSignedCityHandler(t, state, srv)
 
 	body := `{"target":"myrig/worker","formula":"attr-work","attached_bead_id":"` + src.ID + `","vars":{"initiator":"mallory"}}`
-	rec := s.do(http.MethodPost, cityURL(state, "/sling"), body)
+	rec := s.post(cityURL(state, "/sling"), body)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("sling status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
@@ -243,6 +244,90 @@ func TestSlingWithoutPrincipalIgnoresClientInitiatorVar(t *testing.T) {
 	for _, id := range []string{src.ID, resp.MoleculeID} {
 		if got, ok := beadInitiator(t, store, id); ok {
 			t.Fatalf("%s carries %s=%q without a verified principal", id, beadmeta.InitiatorMetadataKey, got)
+		}
+	}
+}
+
+// A signed POST /sling that resolves to a plain route (a bead on a target with
+// no default formula, no_formula on a target that has one, or a plain convoy)
+// stamps the verified kid on every routed bead before it is routed, under both
+// the built-in router and a custom sling_query.
+func TestPlainSlingStampsVerifiedInitiatorBeforeRouting(t *testing.T) {
+	cases := []struct {
+		name           string
+		defaultFormula bool
+		noFormula      bool
+		convoy         bool
+	}{
+		{name: "plain bead"},
+		{name: "no formula", defaultFormula: true, noFormula: true},
+		{name: "plain convoy", convoy: true},
+	}
+	for _, tc := range cases {
+		for _, routing := range []string{"builtin", "sling_query"} {
+			t.Run(tc.name+"/"+routing, func(t *testing.T) {
+				state, srv := newInitiatorSlingServer(t)
+				store := state.stores["myrig"]
+				if tc.defaultFormula {
+					formula := "attr-work"
+					state.cfg.Agents[0].DefaultSlingFormula = &formula
+				}
+				var ids []string
+				slung := ""
+				if tc.convoy {
+					convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+					if err != nil {
+						t.Fatal(err)
+					}
+					for i := 0; i < 2; i++ {
+						child, err := store.Create(beads.Bead{Title: "child", Type: "task", Status: "open"})
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err := store.DepAdd(convoy.ID, child.ID, "tracks"); err != nil {
+							t.Fatal(err)
+						}
+						ids = append(ids, child.ID)
+					}
+					slung = convoy.ID
+				} else {
+					b, err := store.Create(beads.Bead{Title: "task", Type: "task"})
+					if err != nil {
+						t.Fatal(err)
+					}
+					slung, ids = b.ID, []string{b.ID}
+				}
+				seen := map[string]string{}
+				if routing == "sling_query" {
+					state.cfg.Agents[0].SlingQuery = "custom-route {}"
+					srv.SlingRunnerFunc = func(_ string, command string, _ map[string]string) (string, error) {
+						for _, id := range ids {
+							if strings.Contains(command, id) {
+								got, _ := beadInitiator(t, store, id)
+								seen[id] = got
+							}
+						}
+						return "", nil
+					}
+				}
+				s := newSignedCityHandler(t, state, srv)
+
+				body := fmt.Sprintf(`{"target":"myrig/worker","bead":%q,"no_formula":%t}`, slung, tc.noFormula)
+				rec := s.post(cityURL(state, "/sling"), body)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("sling status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+				}
+				for _, id := range ids {
+					if got, _ := beadInitiator(t, store, id); got != "k1" {
+						t.Fatalf("routed %s %s = %q, want k1", id, beadmeta.InitiatorMetadataKey, got)
+					}
+					if routing == "sling_query" {
+						if got, ok := seen[id]; !ok || got != "k1" {
+							t.Fatalf("sling_query saw %s %s = %q (ran=%v), want k1", id, beadmeta.InitiatorMetadataKey, got, ok)
+						}
+					}
+				}
+			})
 		}
 	}
 }
