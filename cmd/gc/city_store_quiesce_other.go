@@ -2,7 +2,11 @@
 
 package main
 
-import "io"
+import (
+	"io"
+
+	"github.com/gastownhall/gascity/internal/beads"
+)
 
 // quiesceCityStoreWork does nothing outside Windows: the city stop keeps its
 // upstream order.
@@ -29,10 +33,7 @@ func markManagedCityPublished(_ string, mc *managedCity) {
 	}
 }
 
-// trackRetiringBeadStoreHandle tracks nothing outside Windows. It takes the
-// retiring store as any because it never reads it, so the stub declares no
-// raw-store parameter.
-func trackRetiringBeadStoreHandle(*controllerState, any) func() {
+func trackRetiringBeadStoreHandle(*controllerState, beads.Store) func() {
 	return func() {}
 }
 

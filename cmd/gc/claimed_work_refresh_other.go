@@ -16,17 +16,16 @@ import (
 //
 // residency:allow — pass-through of the caller's own snapshot: it returns the
 // bead, store and store-ref slices it was handed, opens no store, and consults
-// no binding, namespace or leg order. It is generic over the store element so
-// the pass-through declares no raw-store parameter or result.
-func refreshDrainAckedOrExitedClaimedWorkForDemand[S any](
+// no binding, namespace or leg order.
+func refreshDrainAckedOrExitedClaimedWorkForDemand(
 	_ *config.City,
 	_ runtime.Provider,
 	assignedWorkBeads []beads.Bead,
-	assignedWorkStores []S,
+	assignedWorkStores []beads.Store,
 	assignedWorkStoreRefs []string,
 	readyAssigned map[storeScopedBeadKey]bool,
 	_ *sessionBeadSnapshot,
 	_ io.Writer,
-) ([]beads.Bead, []S, []string, map[storeScopedBeadKey]bool) {
+) ([]beads.Bead, []beads.Store, []string, map[storeScopedBeadKey]bool) {
 	return assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned
 }
