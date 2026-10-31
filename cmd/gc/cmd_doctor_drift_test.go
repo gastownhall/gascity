@@ -436,6 +436,41 @@ func TestDoltDriftCheckFixRestoresMissingPortMirror(t *testing.T) {
 	}
 }
 
+// TestDoltDriftCheckMissingPortMirrorBesideLiveRigLocalReportsOnlyCaseA pins
+// Case A's precedence over Case D: with a live rig-local Dolt holding the
+// rig, restoring the inherited mirror would point raw bd at the wrong server,
+// so the live listener stays the only finding, the auto-fix stays off, and
+// the mirror stays absent until the operator resolves ownership.
+func TestDoltDriftCheckMissingPortMirrorBesideLiveRigLocalReportsOnlyCaseA(t *testing.T) {
+	cityDir, rigDir, _, cfg := managedCityDriftFixture(t, "runner")
+	portFile := filepath.Join(rigDir, ".beads", "dolt-server.port")
+	if err := os.Remove(portFile); err != nil {
+		t.Fatal(err)
+	}
+	ln := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = ln.Close() })
+	// A live sql-server.info whose PID (this process) serves the recorded port.
+	writeSQLServerInfo(t, rigDir, os.Getpid(), ln.Addr().(*net.TCPAddr).Port)
+
+	check := newDoltDriftCheck(cityDir, cfg)
+	d := &doctor.Doctor{}
+	d.Register(check)
+	report := d.RunCollect(&doctor.CheckContext{CityPath: cityDir}, true)
+	if report.Failed != 1 || report.Fixed != 0 {
+		t.Fatalf("doctor --fix: failed=%d fixed=%d, want the Case A failure left unfixed; results=%v", report.Failed, report.Fixed, report.Results)
+	}
+	res := report.Results[0]
+	if len(res.Details) != 1 || !strings.Contains(res.Details[0], "endpoint_origin=inherited_city") {
+		t.Errorf("details = %v, want only the Case A live rig-local error", res.Details)
+	}
+	if check.CanFix() {
+		t.Error("CanFix() = true beside a live rig-local Dolt, want false (restoring the mirror would point raw bd at the wrong server)")
+	}
+	if _, err := os.Stat(portFile); !os.IsNotExist(err) {
+		t.Errorf("mirror should stay absent while rig-local ownership is unresolved, stat err = %v", err)
+	}
+}
+
 // TestDoltDriftCheckReportsUnclassifiableRigStorage pins the fail-closed arm of
 // the embedded skip: a rig whose metadata.json cannot be read is reported, not
 // guessed into either mode — skipping it as embedded would hide real drift, and
