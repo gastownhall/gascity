@@ -168,6 +168,10 @@ func isNameByte(c byte) bool {
 	return isAlnum(c) || c == '_' || c == '.' || c == '+' || c == '-'
 }
 
+// ValidApp reports whether app is a well-formed OSC 7501 app name,
+// [A-Za-z0-9_.+-]{1,32}.
+func ValidApp(app string) bool { return validApp(app) }
+
 // validApp reports whether app matches [A-Za-z0-9_.+-]{1,32}.
 func validApp(app string) bool {
 	if app == "" || len(app) > MaxApp {
