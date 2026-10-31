@@ -30,3 +30,4 @@ substitute. -->
 - [ ] Updated docs for user-facing changes
 - [ ] Updated the owning `AGENTS.md` if an invariant or boundary changed
 - [ ] Called out breaking changes or migration notes
+- [ ] `bazel run //cmd/gen-schema-baseline` and committed `internal/schemacontract/baseline.json` if a `schemas/**` result shape changed (a breaking change also bumps `schema_version`)
