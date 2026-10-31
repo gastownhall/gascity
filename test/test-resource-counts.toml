@@ -2515,6 +2515,12 @@ calls = 4
 tagged = true
 
 [[count]]
+path = "internal/runtime/tmux/program_capture_integration_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
 path = "internal/runtime/tmux/server_probe_test.go"
 resource = "fixed_sleep"
 calls = 1
