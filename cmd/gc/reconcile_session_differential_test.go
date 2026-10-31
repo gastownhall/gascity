@@ -72,6 +72,8 @@ type parityFixture struct {
 	Behaviors []string
 	Rows      []parityRow
 	Work      []parityRow
+	// Deps seeds the city leg's dependency edges on both copies.
+	Deps []beads.Dep
 	// Rig seeds the rig leg: census-only rows, which legacy's ticks read as a
 	// rig work store and v2's census as a leg (timeline fixtures only).
 	Rig      []parityRow
@@ -230,6 +232,10 @@ var parityFindings = map[string]parityEntry{
 	"drain-env-clears": {
 		"C6b2 (A4, v5 D5; owner to add a §12.2 row)", "legacy signals and finalizes a drain through the runtime's drain env (SetMeta GC_DRAIN_ACK, then RemoveMeta GC_DRAIN and GC_DRAIN_ACK, also on a runtime already gone); v2's acks and signal are row-bound (D1, D5), so its stop verb writes and removes no drain env",
 		nil,
+	},
+	"ack-row-finalize-clear": {
+		"A4's finalize (stopEndPatch; E3's row ack is v2's alone, CONTRACT v5 D5)", "both honor an agent's own ack and stop the seat; legacy acks through the runtime env and never reads or clears the row ack E3 writes in a v2 city, while v2's stop verb clears it with the request it finalizes",
+		[]string{session.DrainAckIncarnationKey, session.DrainAckAtKey},
 	},
 
 	"wait-sleep-lag": {
@@ -539,7 +545,7 @@ func newLegacyWorld(t testing.TB, f parityFixture, cityPath string, rows []beads
 	sim := &simProvider{Fake: runtime.NewFake(), rts: make(map[string]*simRuntime), changed: make(map[string]uint64), now: clk.Now}
 	f.place(sim)
 	w := &legacyWorld{
-		cfg: f.city(), cityPath: cityPath, store: beads.NewMemStoreFrom(0, rows, nil), sp: twinProvider{sim},
+		cfg: f.city(), cityPath: cityPath, store: beads.NewMemStoreFrom(0, rows, f.Deps), sp: twinProvider{sim},
 		clk: clk, rec: &memRecorder{}, dt: newDrainTracker(),
 	}
 	w.dops = newDrainOps(w.sp)
@@ -839,7 +845,7 @@ func newV2World(t *testing.T, f parityFixture, cityPath string, rows, rig []bead
 	s := newSim(t, 1, simOpts{rows: func(s *sim) ([]beads.Bead, []beads.Bead) {
 		f.place(s.sp)
 		return cloneDiffBeads(rows), cloneDiffBeads(rig)
-	}, arms: arms})
+	}, arms: arms, cityDeps: f.Deps})
 	s.lag, s.env.CityPath = false, cityPath
 	sp := twinProvider{s.sp}
 	cfg := f.city()
@@ -1013,8 +1019,27 @@ func parityFixtures() []parityFixture {
 		return poolRow("gc-1", "worker", 1, "awake", append([]string{"instance_token", "tok-gc-1", "last_woke_at", at(-time.Minute)}, meta...)...)
 	}
 	assigned := []parityRow{{ID: "gw-1", Title: "gw-1", Type: "task", Status: "in_progress", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}}}
+	// heldWork is open work gw-1, its metadata meta, assigned to gc-1 and
+	// waiting on the unmet dependency gw-0 (heldDeps), so the seat holds it
+	// with no wake reason to run it yet, beside the pool's ready routed work
+	// gw-2, which keeps a napping seat desired.
+	heldWork := func(meta map[string]string) []parityRow {
+		return []parityRow{
+			{ID: "gw-0", Title: "gw-0", Type: "task", Status: "open"},
+			{ID: "gw-1", Title: "gw-1", Type: "task", Status: "open", Assignee: "gc-1", Metadata: meta},
+			routedDemandBead("gw-2"),
+		}
+	}
+	heldDeps := []beads.Dep{{IssueID: "gw-1", DependsOnID: "gw-0", Type: "blocks"}}
 	napping := func() *config.City {
 		cfg := workerCity(3)
+		cfg.Agents[0].SleepAfterIdle = "5m"
+		return cfg
+	}
+	// nappingSeat is napping with one seat, so the work that makes it
+	// desired mints no second.
+	nappingSeat := func() *config.City {
+		cfg := workerCity(1)
 		cfg.Agents[0].SleepAfterIdle = "5m"
 		return cfg
 	}
@@ -1404,6 +1429,51 @@ func parityFixtures() []parityFixture {
 			// grace.
 			Name: "an unwanted row inside the wake grace is kept", Behaviors: []string{"INC-003"},
 			Rows: []parityRow{awake()}, Runtimes: []simRuntime{live},
+		},
+		{
+			// A pool seat idle past sleep_after_idle, desired for the pool's
+			// ready work, holding blocked work routed to its pool: both keep
+			// it from its idle drain (the held-work keep).
+			Name: "a pool seat holding blocked work is not idle-drained", City: nappingSeat,
+			Rows: []parityRow{awake("last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour))},
+			Work: heldWork(map[string]string{"gc.routed_to": "worker"}), Deps: heldDeps, Runtimes: []simRuntime{live}, Idle: []string{"gc-1"},
+			Explain: explain(nil),
+		},
+		{
+			// The same seat holding blocked work with no route, which v2's
+			// demand read does not carry: both keep it (its held-work read).
+			Name: "a pool seat holding unrouted blocked work is not idle-drained", City: nappingSeat,
+			Rows: []parityRow{awake("last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour))},
+			Work: heldWork(nil), Deps: heldDeps, Runtimes: []simRuntime{live}, Idle: []string{"gc-1"},
+			Explain: explain(nil),
+		},
+		{
+			// The routed seat's idle drain requested before the work was
+			// assigned: both cancel it.
+			Name: "a pool seat holding blocked work cancels its requested idle drain", City: nappingSeat,
+			Rows: []parityRow{awake("last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour))},
+			Work: heldWork(map[string]string{"gc.routed_to": "worker"}), Deps: heldDeps, Runtimes: []simRuntime{live}, Idle: []string{"gc-1"},
+			Drains: map[string]string{"gc-1": "idle"}, Explain: explain(nil),
+		},
+		{
+			// The unrouted seat's: both cancel it.
+			Name: "a pool seat holding unrouted blocked work cancels its requested idle drain", City: nappingSeat,
+			Rows: []parityRow{awake("last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour))},
+			Work: heldWork(nil), Deps: heldDeps, Runtimes: []simRuntime{live}, Idle: []string{"gc-1"},
+			Drains: map[string]string{"gc-1": "idle"}, Explain: explain(nil),
+		},
+		{
+			// The routed seat's requested idle drain, which its agent acked
+			// (after its runtime started) before a pass read the work: an ack
+			// is the agent's decision, which the held-work keep does not
+			// cancel (legacy's cancels only the controller's own ack), so
+			// both stop the seat.
+			Name: "a pool seat holding blocked work whose agent acked its idle drain stops", City: nappingSeat,
+			Rows: []parityRow{awake("last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour),
+				session.DrainAckIncarnationKey, "1", session.DrainAckAtKey, at(0))},
+			Work: heldWork(map[string]string{"gc.routed_to": "worker"}), Deps: heldDeps, Runtimes: []simRuntime{live}, Idle: []string{"gc-1"},
+			Drains: map[string]string{"gc-1": "idle"}, Acks: []string{"gc-1"},
+			Explain: explain(map[string]string{"provider:RemoveMeta s-gc-1": "drain-env-clears", "row:gc-1:*ack": "ack-row-finalize-clear"}),
 		},
 		{
 			// A suspended agent's row past the grace, with in-progress work:

@@ -139,13 +139,24 @@ func (p *effectPass) readWork(row session.Info, it intent) *txWork {
 // held (sessionHasAwakeAssignedWorkForReachableStore), under its release
 // scope; with none, an orphaned drain of a seat the live-claim veto covers
 // (liveClaimVetoApplies) reads the claim it stamped and whether it still
-// holds it (sessionOwnsLiveClaim). An error counts as work.
+// holds it (sessionOwnsLiveClaim), and a timer drain of a seat the held-work
+// keep covers (intent.HeldWork) reads the work the seat holds
+// (sessionHoldsAssignedWork), which an idle signal reads alone. Both
+// questions answer from the seat's one live read. An error counts as work.
 func (p *effectPass) readSignalWork(row session.Info, it intent) *txWork {
 	cfg := p.World.Env.Cfg
 	sw := seatWorkFor(p.reads.legs, releaseScope(row, cfg))
-	has, err := sessionHasAwakeAssignedWorkForReachableStore(sw, row)
-	if err == nil && !has && it.Reason == decideDrainSignal+drainOrphaned && liveClaimVetoApplies(p.World.CityPath, cfg, row, p.World.Suspension) {
+	var has bool
+	var err error
+	if it.Reason != decideDrainSignal+drainIdle {
+		has, err = sessionHasAwakeAssignedWorkForReachableStore(sw, row)
+	}
+	switch {
+	case err != nil || has:
+	case it.Reason == decideDrainSignal+drainOrphaned && liveClaimVetoApplies(p.World.CityPath, cfg, row, p.World.Suspension):
 		has, _, err = sessionOwnsLiveClaim(p.World.CityPath, cfg, p.reads.city, sw, row)
+	case it.HeldWork:
+		has, _, err = sessionHoldsAssignedWork(sw, row)
 	}
 	return &txWork{Free: !has && err == nil, Err: err}
 }

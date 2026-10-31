@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -85,6 +86,7 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 
 	v.AssignedWork, v.AssignedStores, v.AssignedStoreRefs, v.ReadyAssigned, v.StorePartial = collectAssignedWorkBeadsWithStores(
 		env.CityPath, env.Cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, env.Sessions, cache)
+	v.HeldWork, v.HeldWorkPartial = collectHeldWork(env, cache.demandReads())
 	c := &v.Collected
 	c.UnassignedRouted, _, c.UnassignedRoutedRefs, c.UnassignedRoutedPartial = collectOpenUnassignedRoutedWork(
 		env.CityPath, env.Cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, stderr, nil, reads)
@@ -123,4 +125,48 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 // the decide would read no count for it instead of a partial one.
 func noProbeEnv(string, *config.City, *config.Agent) (map[string]string, error) {
 	return nil, nil
+}
+
+// collectHeldWork is legacy's held-work read (sessionHoldsAssignedWork over
+// the tick's SeatWork) as a pass fact, so that A20's keep and A19's cancel
+// count the work legacy's keep counts. The demand read (AssignedWork) carries
+// an open bead only when it is routed, ready, or a molecule root. This read
+// carries every open or in-progress bead assigned to an identity on the
+// assigned-work collector's legs that heldWorkRow counts.
+//
+// It reads the collector's two lists, which a v2 pass's reads serve again
+// from their memo and recording, with no I/O of their own. Open is the
+// backing's raw status (RawOpen, the live read SeatWork's open list is), so
+// dependency-blocked work is in and status-parked work out. In progress is the
+// collector's cached list (Cached), where SeatWork's is live: a claim the
+// leg's cache has not absorbed yet is missing here. The signal's live read of
+// the seat's held work (intent.HeldWork) is the backstop: it refuses the
+// signal, and A19 cancels the request once a pass reads the work.
+//
+// A leg that fails or panics makes the read partial, which keeps every
+// eligible seat (fail closed), as legacy's keep does: a seat's work may live
+// on any leg, so every seat reads every leg (workLegsFromCensus), and a dark
+// leg leaves every seat's held work unknown. The collector's read of that leg
+// failed too, so the demand read is partial (StorePartial) as well, and the
+// decide retains every row on it.
+func collectHeldWork(env demandGatherEnv, reads demandReads) (rows []beads.Bead, partial bool) {
+	stores, err := censusStoreCandidates(env.CityPath, env.Cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, censusRefBare)
+	if err != nil {
+		return nil, true
+	}
+	keep := func(list []beads.Bead, err error) {
+		partial = partial || err != nil
+		for _, b := range list {
+			if strings.TrimSpace(b.Assignee) != "" && heldWorkRow(b) {
+				rows = append(rows, b)
+			}
+		}
+	}
+	for _, source := range stores {
+		keep(guardedRead(func() ([]beads.Bead, error) { return reads.RawOpen(source.store) }))
+		keep(guardedRead(func() ([]beads.Bead, error) {
+			return reads.Cached(source.store, beads.ListQuery{Status: "in_progress"})
+		}))
+	}
+	return rows, partial
 }

@@ -569,6 +569,13 @@ const timelineGoldenBaseline = "O7 baseline: legacy at 72115d84b4 (TL)"
 // every FingerprintExtra key.
 const timelineFingerprintV7 = "fix #8079 (mc-vg1pe): FingerprintVersion v7 moves the stored hash prefix only (owner ruling 2026-10-18; also mc-lmixa)"
 
+// timelineHeldWorkKeep admits legacy's held-work keep (#8534): a live pool
+// seat holding assigned work it has no wake reason to run is kept before its
+// timer drain begins, where the quarantined row's no-wake-reason drain began
+// every tick and its work vetoed it, so that drain's runtime metadata writes
+// are gone.
+const timelineHeldWorkKeep = "fix #8534 (mc-ye74r): legacy keeps a live pool seat holding assigned work before its timer drain begins"
+
 // timelineRulingRefs are the rulings a later entry may name: the owner's
 // O-rulings (O7 itself admits no change), CONTRACT §12.2 rows in the form
 // "§12.2 row N" (timelineSection122), and a legacy behavior change a
@@ -603,7 +610,9 @@ var timelineGoldenRulings = []goldenRuling{
 	{"a manual conversation crashes 31s after wake", "fix #7470 (mc-k1yy6): a committed manual conversation keeps its key and hash through the churn (#7470)", "b82abd57b861"},
 	{"a manual conversation crashes 31s after wake", timelineFingerprintV7, "2724ce744ac4"},
 	{"a live quarantined row 29s after wake", timelineGoldenBaseline, "f559e3fcf255"},
+	{"a live quarantined row 29s after wake", timelineHeldWorkKeep, "8987a49bd66b"},
 	{"a live quarantined row 31s after wake", timelineGoldenBaseline, "25811fbce399"},
+	{"a live quarantined row 31s after wake", timelineHeldWorkKeep, "af88c5e06ac3"},
 	{"a managed suspend drains, then wake", timelineGoldenBaseline, "48df08bf8396"},
 	{"a managed suspend drains, then wake", "fix #7417 (mc-esqo7)", "61f2ce80feb0"},
 	{"a managed suspend drains, then wake", "fix #7590 (mc-esqo7): the drain's sleep keeps suspended_at (the Sleep cell, NEW2-5)", "e6e0e6743019"},
@@ -1032,17 +1041,15 @@ func stabilityTimeline() []timelineFixture {
 	// quarantinedAt is a live, quarantined row ticked through to d after its
 	// wake, then seen a tick past it: past the 30s stability threshold both
 	// copies clear the wake failures and the quarantine (SESS-539).
-	// Meanwhile its quarantine keeps it from waking for its work, so legacy
-	// drains it each tick, and its work vetoes the drain.
+	// Meanwhile its quarantine keeps it from waking for its work, and the work
+	// it holds keeps it from its no-wake-reason drain in both copies:
+	// legacy's held-work keep, v2's assigned-work keep (DRAIN-046).
 	quarantinedAt := func(d time.Duration, per map[string]map[string]string) timelineFixture {
 		return tlFixture(fmt.Sprintf("a live quarantined row %s after wake", d), stable,
 			[]parityRow{row("wake_attempts", "2", "quarantined_until", tlAt(time.Hour))}, tlClaim("in_progress", "worker"), []simRuntime{tlLive("gc-1")},
 			[]parityStep{{Name: "seed", Ticks: 1, Restless: true}, {Name: "alive", At: d, Ticks: -1, Restless: true}, {Name: "settled", Ticks: 6}}, tlPol("gc-1"), per) // A7 takes its first pass: no lag
 	}
-	// drained is legacy's drain of the quarantined row, begun and vetoed in
-	// a tick and its follow-up; lagged, v2's current-bead stamp a pass after
-	// the stability clear.
-	drained := map[string]string{"provider:SetMeta s-gc-1": "drain-stop-lag", "provider:RemoveMeta s-gc-1": "drain-stop-lag"}
+	// lagged is v2's current-bead stamp a pass after the stability clear.
 	lagged := map[string]string{"row:gc-1:currently_processing_bead_id": "§12.2#37 current-bead-lag"}
 	return []timelineFixture{
 		crashAfter(29*time.Second, tlRestarted()),
@@ -1050,12 +1057,8 @@ func stabilityTimeline() []timelineFixture {
 		crashAfter(5*time.Minute, tlRestarted()),
 		manualCrashAfter(29 * time.Second),
 		manualCrashAfter(31 * time.Second),
-		quarantinedAt(29*time.Second, map[string]map[string]string{
-			"seed": drained, "alive": drained, "settled": tlMerged(drained, lagged),
-		}),
-		quarantinedAt(31*time.Second, map[string]map[string]string{
-			"seed": drained, "alive": tlMerged(drained, lagged),
-		}),
+		quarantinedAt(29*time.Second, map[string]map[string]string{"settled": lagged}),
+		quarantinedAt(31*time.Second, map[string]map[string]string{"alive": lagged}),
 	}
 }
 

@@ -884,3 +884,27 @@ func TestProjectControlDispatcherRoutesMatchesLegacyDeferredRows(t *testing.T) {
 		t.Error("the projection edited its input rows")
 	}
 }
+
+// Kills a panicking leg read memoized as an empty one, which every later
+// reader of the leg in the pass would take for a leg with no work: the panic
+// still reaches the reader that ran the read, and a later reader sees a failed
+// read the collectors mark partial.
+func TestV2DemandReadsMemoizesAPanickingReadAsFailed(t *testing.T) {
+	reads := newV2DemandReads(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC), nil)
+	key := demandLegRead{leg: beads.NewMemStore(), shape: "raw_open"}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("the panicking read returned to its reader")
+			}
+		}()
+		_, _ = reads.once(key, func() ([]beads.Bead, error) { panic("injected leg panic") })
+	}()
+	rows, err := reads.once(key, func() ([]beads.Bead, error) {
+		t.Fatal("the memoized read ran again")
+		return nil, nil
+	})
+	if len(rows) != 0 || !errors.Is(err, errDemandReadPanicked) || !beads.IsPartialResult(err) {
+		t.Fatalf("later read = %v, %v; want no rows and a partial errDemandReadPanicked", rows, err)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
@@ -134,6 +135,51 @@ func claimedWorkStillHeldBy(work beads.Bead, sessionID string) bool {
 		return false
 	}
 	return true
+}
+
+// sessionHoldsAssignedWork reports the first held-work bead (heldWorkRow)
+// assigned to info's ReleaseScope on sw's legs: work the seat holds but has no
+// wake reason to run yet. SeatWork lists open work by its raw status, so
+// dependency-blocked work is included and status-parked work (raw blocked or
+// deferred) is excluded, as on the sibling seat-work gates. It fails closed: a
+// leg that could not be read, with no confirmed hit elsewhere, reports held
+// with the read error.
+func sessionHoldsAssignedWork(sw *SeatWork, info sessionpkg.Info) (held bool, beadID string, err error) {
+	b, ok, err := sw.first(heldWorkQuery(releaseScope(info, sw.Legs().cfg)))
+	if !ok && err != nil {
+		return true, "", err
+	}
+	return ok, b.ID, nil
+}
+
+// heldWorkQuery is the held-work keep's question about scope's work: its open
+// or in-progress beads that heldWorkRow counts.
+func heldWorkQuery(scope workScope) seatWorkQuery {
+	return seatWorkQuery{scope: scope, statuses: seatWorkStatuses, row: heldWorkRow}
+}
+
+// heldWorkRow reports whether b, an open or in-progress bead assigned to a
+// seat, is work the held-work keep counts, on both reconcilers: not a session
+// or mail bead (as seatWorkQuery.accepts), and not open work parked on a
+// dispatch hold, which the seat's hook never serves (assignedOpenWorkHeld).
+// Held in-progress work still counts (ga-5736js).
+func heldWorkRow(b beads.Bead) bool {
+	return !sessionpkg.IsSessionBeadOrRepairable(b) && !beadmail.IsMessageBead(b) && !assignedOpenWorkHeld(b)
+}
+
+// heldWorkDrainReason reports whether reason is a timer drain that a seat
+// holding assigned work is kept out of.
+func heldWorkDrainReason(reason string) bool {
+	return reason == "idle" || reason == "no-wake-reason"
+}
+
+// heldWorkIntent reports whether info's sleep intent leaves its seat to the
+// held-work keep: none, or the idle probe's idle-stop-pending. An operator's
+// suspend, an agent's wait and an intent no cell writes stop the seat on
+// their own terms. Every keep site reads it, on both reconcilers.
+func heldWorkIntent(info sessionpkg.Info) bool {
+	d := sessionpkg.DispositionOfInfo(info)
+	return d.Operator != sessionpkg.OperatorSuspended && !d.WaitIntent && d.Unknown&sessionpkg.UnknownIntent == 0
 }
 
 // liveBeadRead reads one bead through the store's authoritative live handle,
