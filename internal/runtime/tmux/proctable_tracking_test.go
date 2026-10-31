@@ -119,6 +119,9 @@ func TestFindRuntimesBySessionIDWithNoRootsAsksTmuxNothing(t *testing.T) {
 }
 
 func TestFindRuntimesBySessionIDWithNoRootsStillReturnsScanError(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("the missing scan root only controls the Linux procfs scanner; Darwin reads ps")
+	}
 	proctable.SetScanRootForTesting(t, filepath.Join(t.TempDir(), "no-such-proc"))
 	fe := &fakeExecutor{}
 	p := NewProviderWithConfig(Config{SocketName: "x"})
