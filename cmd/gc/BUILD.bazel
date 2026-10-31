@@ -1802,6 +1802,7 @@ go_test(
         "providers_events_mirror_test.go",
         "providers_events_roles_test.go",
         "providers_events_rotation_test.go",
+        "providers_events_scan_budget_test.go",
         "providers_test.go",
         "quality_gate_fallback_test.go",
         "ready_federation_test.go",

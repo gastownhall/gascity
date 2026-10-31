@@ -81,6 +81,7 @@ go_test(
         "rotation_superseded_test.go",
         "rotation_test.go",
         "rotation_watcher_test.go",
+        "scan_budget_test.go",
         "stream_cursor_test.go",
         "testenv_import_test.go",
         "type_naming_test.go",
