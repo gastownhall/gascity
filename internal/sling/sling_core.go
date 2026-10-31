@@ -453,8 +453,9 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	// is the same one instantiated here — no redundant disk compile, and the
 	// isGraph/routing decision cannot drift from what is materialized.
 	mResult, err := InstantiateCompiledSlingFormula(context.Background(), recipe, opts.BeadOrFormula, molecule.Options{
-		Title: opts.Title,
-		Vars:  formulaVars,
+		Title:        opts.Title,
+		Vars:         formulaVars,
+		RootMetadata: opts.rootMetadata(),
 	}, "", opts.ScopeKind, opts.ScopeRef, a, deps, opts.Force)
 	if err != nil {
 		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
@@ -662,6 +663,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			mResult, err := InstantiateSlingFormula(context.Background(), formulaName, searchPaths, molecule.Options{
 				Title:            opts.Title,
 				Vars:             formulaVars,
+				RootMetadata:     opts.rootMetadata(),
 				PriorityOverride: BeadPriorityOverride(deps.Store, graphInv.InputConvoy),
 			}, "", opts.ScopeKind, opts.ScopeRef, a, deps, opts.Force)
 			if err != nil {
@@ -735,6 +737,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 		mResult, err := InstantiateSlingFormula(context.Background(), formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
 			Title:            opts.Title,
 			Vars:             formulaVars,
+			RootMetadata:     opts.rootMetadata(),
 			PriorityOverride: BeadPriorityOverride(querier, beadID),
 		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
@@ -768,6 +771,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 		mResult, err := InstantiateSlingFormula(context.Background(), formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
 			Title:            opts.Title,
 			Vars:             formulaVars,
+			RootMetadata:     opts.rootMetadata(),
 			PriorityOverride: BeadPriorityOverride(querier, beadID),
 		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
@@ -804,6 +808,19 @@ func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.Store, bead
 	if beadStore != nil && strings.TrimSpace(beadID) != "" {
 		if got, err := beadStore.Get(beadID); err == nil {
 			bead = got
+		}
+	}
+	// Record who launched this before routing, whichever router routes it:
+	// once routed the bead is claimable, and a claim must never see it
+	// unattributed.
+	if opts.Initiator != "" {
+		if bead.ID == "" {
+			result.MetadataErrors = append(result.MetadataErrors,
+				fmt.Sprintf("initiator not recorded: bead %s is not readable in its store", beadID))
+		} else if err := beadStore.SetMetadata(beadID, beadmeta.InitiatorMetadataKey, opts.Initiator); err != nil {
+			err = fmt.Errorf("recording initiator on %s: %w", beadID, err)
+			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
+			return result, err
 		}
 	}
 	slingEnv := ResolveSlingEnvForBead(a, deps, bead)
@@ -1754,6 +1771,7 @@ func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, chi
 		mResult, err := InstantiateSlingFormula(ctx, formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
 			Title:            opts.Title,
 			Vars:             childVars,
+			RootMetadata:     opts.rootMetadata(),
 			PriorityOverride: ClonePriorityPtr(child.Priority),
 		}, child.ID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
@@ -1781,6 +1799,7 @@ func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, chi
 		mResult, err := InstantiateSlingFormula(ctx, formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
 			Title:            opts.Title,
 			Vars:             childVars,
+			RootMetadata:     opts.rootMetadata(),
 			PriorityOverride: ClonePriorityPtr(child.Priority),
 		}, child.ID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
@@ -2135,6 +2154,19 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 			}
 		}
 
+		// As in finalizeInStore: stamp before either router can make the
+		// child claimable. The route writes deps.Store, so the stamp does too.
+		if opts.Initiator != "" {
+			if err := deps.Store.SetMetadata(child.ID, beadmeta.InitiatorMetadataKey, opts.Initiator); err != nil {
+				err = fmt.Errorf("recording initiator on %s: %w", child.ID, err)
+				childResult.fail(err)
+				batchResult.Children = append(batchResult.Children, childResult)
+				childErrors = append(childErrors, err)
+				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
+				failed++
+				continue
+			}
+		}
 		childEnv := ResolveSlingEnvForBead(a, deps, child)
 		rigDir := SlingDirForBead(deps.Cfg, deps.CityPath, child.ID)
 		if deps.Router != nil {

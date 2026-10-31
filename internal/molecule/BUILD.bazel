@@ -36,6 +36,7 @@ go_test(
         "cook_choosing_store_test.go",
         "molecule_test.go",
         "native_step_topology_test.go",
+        "root_metadata_test.go",
         "testenv_import_test.go",
         "tutorial_regression_test.go",
         "workflow_bead_test.go",

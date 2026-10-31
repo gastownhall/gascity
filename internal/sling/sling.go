@@ -70,6 +70,21 @@ type SlingOpts struct {
 	InlineText bool
 	ScopeKind  string
 	ScopeRef   string
+	// Initiator names who launched this sling: the verified principal of the
+	// API request (a write-grant key id). When set, sling records it as
+	// gc.initiator on every root it instantiates and on the bead it routes,
+	// before routing, so the stamp is present before any worker can claim
+	// the work. Empty stamps nothing.
+	Initiator string
+}
+
+// rootMetadata is the metadata sling asks molecule to write on every root it
+// instantiates for these options.
+func (o SlingOpts) rootMetadata() map[string]string {
+	if o.Initiator == "" {
+		return nil
+	}
+	return map[string]string{beadmeta.InitiatorMetadataKey: o.Initiator}
 }
 
 // AgentResolver resolves an agent name to a config.Agent.
