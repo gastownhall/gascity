@@ -736,6 +736,13 @@ func (p *Provider) StopBackgroundWork(ctx context.Context, name string) error {
 	return p.tm.StopBackgroundWork(ctx, name)
 }
 
+// HasBackgroundWork reports whether a Codex or Claude session has background
+// terminals or shells running outside its turn. It implements
+// [runtime.BackgroundWorkObserver]; see [Tmux.HasBackgroundWork].
+func (p *Provider) HasBackgroundWork(name string) (bool, error) {
+	return p.tm.HasBackgroundWork(name)
+}
+
 // ResetInterruptedTurn discards the just-interrupted Gemini user turn without
 // restarting the session.
 //

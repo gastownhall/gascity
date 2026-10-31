@@ -495,8 +495,16 @@ Preferred path:
 2. verify no hard wake reason currently applies,
 3. call `WaitForIdle(name, shortProbeTimeout)` if the provider supports
    it,
-4. immediately re-check wake reasons,
-5. only then begin or continue an idle drain.
+4. when the routed leaf implements `runtime.BackgroundWorkObserver`, ask
+   it whether the agent has work running outside its turn (a shell a
+   Claude Code turn started in the background, a Codex background
+   terminal), and treat the proof as failed while it reports some: such
+   an agent shows the ready prompt and no spinner, so `WaitForIdle`
+   succeeds, but the drain would kill that work
+   (`idleProofHeldByBackgroundWork`, read in `launchIdleProbes` and in
+   the v2 effect pass's `provedIdle`),
+5. immediately re-check wake reasons,
+6. only then begin or continue an idle drain.
 
 If `work`, `wait`, `attached`, or `pending` appears during or after the
 probe, abort the idle-sleep attempt for that tick.

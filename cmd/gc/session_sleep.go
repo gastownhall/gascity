@@ -52,6 +52,28 @@ func idleSleepProbeTimeoutFor(sp runtime.Provider, name string) time.Duration {
 	return min(max(bp.IdleProbeBudget(), idleSleepProbeTimeout), fenceProbeTimeout)
 }
 
+// idleProofHeldByBackgroundWork reports whether the routed leaf of sp says
+// name's agent has work running outside its turn (a background shell a Claude
+// Code turn started, a Codex background terminal), read through
+// runtime.BackgroundWorkObserver. Such an agent passes WaitForIdle: its pane
+// shows the ready prompt and no spinner. Both idle-proof call sites ask this
+// after a successful wait, and a held proof is not idle, so the idle sleep
+// does not stop a session whose work is still running; the next tick probes
+// again. A leaf without the observer, a provider it cannot read, or a read
+// error holds nothing: the proof stands as it did before.
+func idleProofHeldByBackgroundWork(sp runtime.Provider, name string) bool {
+	if sp == nil {
+		return false
+	}
+	leaf, _, _ := runtime.ResolveBackend(sp, name)
+	observer, ok := leaf.(runtime.BackgroundWorkObserver)
+	if !ok {
+		return false
+	}
+	has, err := observer.HasBackgroundWork(name)
+	return err == nil && has
+}
+
 func (p resolvedSessionSleepPolicy) enabled() bool {
 	return p.Effective != "" && p.Effective != config.SessionSleepOff
 }
