@@ -481,6 +481,48 @@ func TestStatusStoreWorkCountsWaitsForReadyResolutionCleanup(t *testing.T) {
 	}
 }
 
+// TestStatusReadyStoreWithTimeoutDoesNotPinOnCtxBlindResolution pins that a
+// scoped ready resolution that blocks before it observes ctx
+// (a store mutex held by the reconciler) must not hold the status rebuild
+// open. That rebuild is what replaces the stale-while-revalidate body, so
+// a multi-hour block showed up as a multi-hour cache age.
+func TestStatusReadyStoreWithTimeoutDoesNotPinOnCtxBlindResolution(t *testing.T) {
+	if statusReadyCleanupBudget <= 0 || statusReadyCleanupBudget > 5*time.Second {
+		t.Fatalf("statusReadyCleanupBudget = %s, want a short cap so a stuck resolution cannot pin status", statusReadyCleanupBudget)
+	}
+	oldTimeout := statusStoreReadTimeout
+	oldCleanup := statusReadyCleanupBudget
+	statusStoreReadTimeout = 50 * time.Millisecond
+	statusReadyCleanupBudget = 100 * time.Millisecond
+	t.Cleanup(func() {
+		statusStoreReadTimeout = oldTimeout
+		statusReadyCleanupBudget = oldCleanup
+	})
+
+	blocked := make(chan struct{})
+	t.Cleanup(func() { close(blocked) })
+	state := newFakeState(t)
+	state.scopedStoreFn = func(context.Context, beads.Store) (beads.Store, error) {
+		<-blocked
+		return nil, nil
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := statusReadyStoreWithTimeout(context.Background(), state, &legacyReadyStore{Store: beads.NewMemStore()})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("statusReadyStoreWithTimeout error = %v, want a timed-out error", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("statusReadyStoreWithTimeout still blocked on a resolver that has not observed ctx")
+	}
+}
+
 func TestStatusReadyStoreWithTimeoutBoundsSlowScopedStoreResolution(t *testing.T) {
 	oldTimeout := statusStoreReadTimeout
 	statusStoreReadTimeout = 200 * time.Millisecond
