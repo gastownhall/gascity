@@ -349,15 +349,29 @@ func disarmCommands(target string) [][]string {
 	}
 }
 
-// programStatusMode is the program-status switch this Tmux runs under:
-// shadow or on, and off for anything else.
+// programStatusMode is the program-status switch this Tmux runs and reads
+// under: shadow or on, and off for anything else. It is the mode
+// SetProgramStatusMode last published, else Config.ProgramStatus.
 func (t *Tmux) programStatusMode() runtime.ProgramStatusMode {
-	switch mode := t.cfg.ProgramStatus; mode {
+	mode := t.cfg.ProgramStatus
+	if live := t.programStatus.Load(); live != nil {
+		mode = *live
+	}
+	switch mode {
 	case runtime.ProgramStatusShadow, runtime.ProgramStatusOn:
 		return mode
 	default:
 		return runtime.ProgramStatusOff
 	}
+}
+
+// SetProgramStatusMode publishes the city's program-status switch to this
+// Tmux in place of Config.ProgramStatus, so a config reload reaches a tmux
+// the controller keeps serving its sessions, without rebuilding it: arming,
+// the read formats and every reading follow at their next use. Safe for
+// concurrent use.
+func (t *Tmux) SetProgramStatusMode(mode runtime.ProgramStatusMode) {
+	t.programStatus.Store(&mode)
 }
 
 // tmuxArgvList joins commands into one tmux argv, separated by bare ";"
