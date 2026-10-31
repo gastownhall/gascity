@@ -238,6 +238,13 @@ until the re-run finishes it.
 `gc storage status` exits non-zero while any rig awaits import, holds a pending
 clear, or holds rows written after its import.
 
+A rig whose store holds no infrastructure bead never needs this step: `gc rig
+add` (a new rig, `--adopt`, or a re-add) and the rig census the city runs at
+each boot record it `infra.rig.<rig>.clean` once the city binding has
+converged, so a rig added before a born-split city's first start, or an adopted
+store holding only work, does not wait for an import. A suspended rig is not
+censused at boot.
+
 The import refuses, before writing anything, a rig store another registered
 city also uses or that it cannot rule out as one (shared or company stores wait
 for the single-writer attestation; a Dolt rig whose endpoint does not resolve
