@@ -207,6 +207,12 @@ python3 scripts/worker_conformance_grid.py \
   Enforcement is the behavioral no-recall proof plus the per-epoch CLI HOME,
   which IS deleted because ZCode's own session database has no preservation
   contract and is the copy the CLI itself would reattach to.
+- The `zcode` adapter keeps each turn's prompt and reply in a per-process
+  scratch dir, `$XDG_STATE_HOME/gascity/zcode/work/<host>/<pid>`. Its TERM and
+  EXIT traps remove it; a SIGKILL (gc's escalation after an unanswered TERM)
+  runs neither, so every adapter start removes the dirs whose pid is no longer
+  running. A killed seat's scratch lasts until the next adapter start on that
+  host, not forever.
 - The zcode row is refreshed with `--provider zcode`, which rewrites only that
   provider's rows. A full regeneration writes every provider from the reports it
   is handed, so running it on a host that holds one provider's reports would
