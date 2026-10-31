@@ -773,6 +773,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `packs_after` or `pack_kb_after` keeps growing. See the troubleshooting
   guide's "Archive object maintenance".
 
+- **A failed step closed with `gc.work_outcome=blocked` no longer strands its
+  workflow.** The dependency veto kept every dependent out of `Ready`,
+  including the control beads (`workflow-finalize`, `ralph`, `retry`,
+  `scope-check` and the other control kinds) whose job is to read that
+  failure and settle the workflow. Never ready, the control was never offered
+  to the control dispatcher, and the workflow root stayed open with nothing
+  left that could close it; a drain waiting on that root never completed.
+  The next step was stranded the same way: a finalize step written to report
+  the failure, or the iteration a `ralph` check waits on, was never offered,
+  so the ralph waited on an iteration that could not start. A formula step
+  (a bead carrying `gc.step_ref`) is sequenced on `gc.outcome`, so its
+  `gc.work_outcome` no longer gates readiness at all, in every store; the
+  rule that exempted only a step that passed is gone. A plain work bead
+  closed blocked still withholds its dependents, and control beads behind
+  one (a `drain` on its child workflow roots) are still let through, on a
+  split city too, where that root is held in another store.
+
+- **A `ralph` or `retry` no longer runs a step again after its worker closed
+  it `gc.work_outcome=blocked`.** Once the control could run behind such a
+  step, it read any failure class other than `hard` as repairable and cloned
+  another iteration or attempt, up to `gc.max_attempts`. A step closed
+  `gc.outcome=fail` with `gc.work_outcome=blocked` is now a hard failure for
+  both, whatever its `gc.failure_class`: the control settles the step failed
+  and starts nothing more. This holds for every ralph shape, the loop driven
+  by a `check` control included.
+
+- **A deferred workflow root now holds its steps and controls out of
+  `Ready`.** Deferring a workflow's root, with or without a date, did not hold
+  the beads under it: they name their root in `gc.root_bead_id`, and bd holds
+  only the parent-child children of a parent deferred to a future date. A
+  step whose blockers closed was offered to the pool while its root stayed
+  deferred. Every store now leaves out a bead whose workflow root is
+  deferred, and offers it again when the root is undeferred. An undated hold
+  set as `status=deferred` holds on the memory, file, SQLite and exec stores,
+  which keep that status as written, as it does on the bd-backed stores.
+
 - **The core `orphan-sweep` order times out a minute before its next run is
   due.** The order declared no timeout, so it ran under the 300s exec
   default, equal to its 5m interval. The cooldown counts from when a run

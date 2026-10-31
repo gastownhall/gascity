@@ -540,18 +540,22 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 		return ctx.Err()
 	}
 
+	now := time.Now().UTC()
 	statusByID := make(map[string]string, len(m.beads))
 	workOutcomeByID := make(map[string]string, len(m.beads))
+	holdsByID := make(map[string]bool)
 	for _, bead := range m.beads {
 		if err := contextErr(); err != nil {
 			return nil, err
 		}
 		statusByID[bead.ID] = bead.Status
 		workOutcomeByID[bead.ID] = ReadinessWorkOutcome(bead.Metadata)
+		if WorkflowRootHolds(bead, now) {
+			holdsByID[bead.ID] = true
+		}
 	}
 
 	var result []Bead
-	now := time.Now().UTC()
 	for _, b := range m.beads {
 		if err := contextErr(); err != nil {
 			return nil, err
@@ -562,7 +566,11 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 		if q.Assignee != "" && b.Assignee != q.Assignee {
 			continue
 		}
+		if holdsByID[WorkflowRootID(b)] {
+			continue
+		}
 		blocked := false
+		gated := WorkOutcomeGatesDependent(b)
 		for _, dep := range m.deps {
 			if err := contextErr(); err != nil {
 				return nil, err
@@ -575,7 +583,11 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 			default:
 				continue
 			}
-			if !DependencySatisfied(statusByID[dep.DependsOnID], workOutcomeByID[dep.DependsOnID]) {
+			workOutcome := ""
+			if gated {
+				workOutcome = workOutcomeByID[dep.DependsOnID]
+			}
+			if !DependencySatisfied(statusByID[dep.DependsOnID], workOutcome) {
 				blocked = true
 				break
 			}

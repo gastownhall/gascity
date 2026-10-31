@@ -285,6 +285,7 @@ func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQ
 
 	statusByID := make(map[string]string, len(c.beads))
 	workOutcomeByID := make(map[string]string, len(c.beads))
+	holdsByID := make(map[string]bool)
 	openBeads := make([]Bead, 0, len(c.beads))
 	now := time.Now().UTC()
 	for _, b := range c.beads {
@@ -294,6 +295,9 @@ func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQ
 		}
 		statusByID[b.ID] = b.Status
 		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
+		if WorkflowRootHolds(b, now) {
+			holdsByID[b.ID] = true
+		}
 		if !IsReadyCandidateForTier(b, now, query.TierMode) {
 			continue
 		}
@@ -318,7 +322,7 @@ func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQ
 
 	// The maps above are a consistent snapshot, so sorting and dependency
 	// evaluation need not hold the cache lock or delay writers.
-	return cachedReadyRows(ctx, query, statusByID, workOutcomeByID, openBeads, depsByID, true, true)
+	return cachedReadyRows(ctx, query, statusByID, workOutcomeByID, holdsByID, openBeads, depsByID, true, true)
 }
 
 func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
@@ -329,11 +333,15 @@ func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
 
 	statusByID := make(map[string]string, len(c.beads))
 	workOutcomeByID := make(map[string]string, len(c.beads))
+	holdsByID := make(map[string]bool)
 	openBeads := make([]Bead, 0, len(c.beads))
 	now := time.Now().UTC()
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
 		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
+		if WorkflowRootHolds(b, now) {
+			holdsByID[b.ID] = true
+		}
 		if !IsReadyCandidateForTier(b, now, query.TierMode) {
 			continue
 		}
@@ -346,7 +354,7 @@ func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
 		openBeads = append(openBeads, cloneBead(b))
 	}
 	return cachedReadyRows(
-		context.Background(), query, statusByID, workOutcomeByID, openBeads, c.deps, c.depsComplete, c.state == cacheLive,
+		context.Background(), query, statusByID, workOutcomeByID, holdsByID, openBeads, c.deps, c.depsComplete, c.state == cacheLive,
 	)
 }
 
@@ -355,6 +363,7 @@ func cachedReadyRows(
 	query ReadyQuery,
 	statusByID map[string]string,
 	workOutcomeByID map[string]string,
+	holdsByID map[string]bool,
 	openBeads []Bead,
 	depsByID map[string][]Dep,
 	depsComplete bool,
@@ -388,7 +397,7 @@ func cachedReadyRows(
 		if !nonclosedStatusesComplete && !cachedReadyDependencyStatusesKnown(b, statusByID, deps) {
 			return nil, fmt.Errorf("reading ready dependency statuses from cache: %w", ErrCacheUnavailable)
 		}
-		if !cachedBeadReady(b, statusByID, workOutcomeByID, deps) {
+		if !cachedBeadReady(b, statusByID, workOutcomeByID, holdsByID, deps) {
 			continue
 		}
 		result = append(result, cloneBead(b))

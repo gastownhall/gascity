@@ -28,10 +28,12 @@ import (
 // A blocking edge (blocks, waits-for, conditional-blocks) whose target the
 // dependent's own store does not hold blocks until the target is closed — and
 // not closed blocked (beads.DependencySatisfied) — in EVERY store that holds
-// it. A target no store holds is unresolvable and blocks too; it never fails
-// the read. An "external:<id>" target names the bead <id> and is looked up as
-// such; an "external:<rig>:<capability>" target names no bead and never blocks,
-// exactly as bd treats it (beads.ExternalBlockerTarget).
+// it; a workflow control bead is released by a blocker closed blocked, as in
+// its own store (blockerVerdict.forDependent). A target no store holds is
+// unresolvable and blocks too; it never fails the read. An "external:<id>"
+// target names the bead <id> and is looked up as such; an
+// "external:<rig>:<capability>" target names no bead and never blocks, exactly
+// as bd treats it (beads.ExternalBlockerTarget).
 //
 // # Why the reader enforces it
 //
@@ -149,6 +151,22 @@ func verdictOfCopies(id string, copies []heldCopy) blockerVerdict {
 		status:    "closed",
 		satisfied: true,
 		reason:    fmt.Sprintf("blocker %s is closed in the %s store", id, strings.Join(holders, ", ")),
+	}
+}
+
+// forDependent is the verdict as dependent reads it. A blocker held only by
+// copies closed with gc.work_outcome=blocked releases a workflow control bead,
+// as every in-store ready path reads it (beads.WorkOutcomeGatesDependent): the
+// control settles the workflow, a failure included, and withheld it is never
+// offered to the control dispatcher.
+func (v blockerVerdict) forDependent(id string, dependent beads.Bead) blockerVerdict {
+	if v.status != BlockerClosedBlocked || beads.WorkOutcomeGatesDependent(dependent) {
+		return v
+	}
+	return blockerVerdict{
+		status:    "closed",
+		satisfied: true,
+		reason:    fmt.Sprintf("blocker %s is closed; its gc.work_outcome=blocked does not withhold the workflow control %s", id, dependent.ID),
 	}
 }
 
@@ -272,6 +290,7 @@ func (cs *crossStore) blockedRows(ctx context.Context, own int, rows []beads.Bea
 	leg := cs.legs[own]
 	stranding := strands(leg)
 	var pending []string
+	rowByID := make(map[string]beads.Bead, len(rows))
 	cs.mu.Lock()
 	for _, row := range rows {
 		if blocked, done := cs.blocked[legRow{own, row.ID}]; done {
@@ -279,6 +298,7 @@ func (cs *crossStore) blockedRows(ctx context.Context, own int, rows []beads.Bea
 			continue
 		}
 		pending = append(pending, row.ID)
+		rowByID[row.ID] = row
 	}
 	cs.mu.Unlock()
 	if len(pending) == 0 {
@@ -340,7 +360,7 @@ func (cs *crossStore) blockedRows(ctx context.Context, own int, rows []beads.Bea
 	}
 	blockedNow := make(map[string]bool, len(pending))
 	for _, e := range verify {
-		if !verdicts[e.target].satisfied {
+		if !verdicts[e.target].forDependent(e.target, rowByID[e.row]).satisfied {
 			blockedNow[e.row] = true
 		}
 	}

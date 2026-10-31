@@ -67,7 +67,7 @@ func (s counterMemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		if derr != nil {
 			return nil, derr
 		}
-		if !cachedBeadReady(b, statusByID, workOutcomeByID, deps) {
+		if !cachedBeadReady(b, statusByID, workOutcomeByID, nil, deps) {
 			continue
 		}
 		result = append(result, cloneBead(b))
@@ -836,7 +836,7 @@ func (s depStrippingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		if derr != nil {
 			return nil, derr
 		}
-		if !cachedBeadReady(b, statusByID, workOutcomeByID, deps) {
+		if !cachedBeadReady(b, statusByID, workOutcomeByID, nil, deps) {
 			continue
 		}
 		result = append(result, stripDepFields(cloneBead(b)))

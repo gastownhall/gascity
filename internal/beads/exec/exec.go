@@ -444,6 +444,14 @@ func (s *Store) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 			result = append(result, b)
 		}
 	}
+	// The script's ready answer knows dependencies, not gc.root_bead_id, so the
+	// workflow-root hold is applied here for every script (WorkflowRootHolds).
+	result, err = beads.FilterReadyByWorkflowRoot(result, now, func(ids []string) ([]beads.Bead, error) {
+		return s.List(beads.ListQuery{IDs: ids, TierMode: beads.TierBoth})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("exec beads ready: %w", err)
+	}
 	return beads.ApplyListQuery(result, beads.ListQuery{Assignee: q.Assignee, Limit: q.Limit, TierMode: q.TierMode}), nil
 }
 

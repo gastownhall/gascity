@@ -406,6 +406,9 @@ func classifyRetryAttempt(subject beads.Bead) retryEvalResult {
 		}
 		return retryEvalResult{Outcome: "pass"}
 	case beadmeta.OutcomeFail:
+		if failedWithBlockedWorkOutcome(subject) {
+			return retryEvalResult{Outcome: "hard", Reason: retryFailureReason(subject)}
+		}
 		switch strings.TrimSpace(subject.Metadata[beadmeta.FailureClassMetadataKey]) {
 		case beadmeta.FailureClassTransient:
 			return retryEvalResult{Outcome: "transient", Reason: retryFailureReason(subject)}

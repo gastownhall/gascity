@@ -1033,6 +1033,46 @@ func TestInProgressHoldsAClaimWhoseBlockerIsClosedBlockedInEveryCopy(t *testing.
 	}
 }
 
+// TestReadReleasesAControlBeadBehindACrossStoreBlockerClosedBlocked: a drain
+// in the binding waits on a child workflow root in the work store, which is not
+// a formula step. Closed with gc.work_outcome=blocked, the root releases the
+// drain, as every in-store ready path reads it (beads.WorkOutcomeGatesDependent),
+// and still holds a plain work row behind it. Both wait while the root is open.
+func TestReadReleasesAControlBeadBehindACrossStoreBlockerClosedBlocked(t *testing.T) {
+	work := splittest.NewWorkStore(t, "gc")
+	binding := sqliteBinding(t)
+	root := mustCreate(t, work, beads.Bead{Title: "child workflow root", Type: "task"})
+	drain := mustCreate(t, binding, beads.Bead{Title: "drain", Type: "task", Metadata: map[string]string{"gc.kind": "drain"}})
+	item := mustCreate(t, binding, beads.Bead{Title: "plain row", Type: "task"})
+	for _, id := range []string{drain.ID, item.ID} {
+		if err := binding.DepAdd(id, root.ID, "blocks"); err != nil {
+			t.Fatalf("writing the cross-store edge of %s into the binding: %v", id, err)
+		}
+	}
+	legs := splitLegs(work, binding)
+
+	if got := readyIDs(t, legs, Query{}); slices.Contains(got, drain.ID) || slices.Contains(got, item.ID) {
+		t.Fatalf("ready = %v served a row while its blocker %s is open", got, root.ID)
+	}
+	closeBlocked(t, work, root.ID)
+	got := readyIDs(t, legs, Query{})
+	if !slices.Contains(got, drain.ID) {
+		t.Errorf("ready = %v; the drain %s is held by %s closed blocked, which releases a control bead", got, drain.ID, root.ID)
+	}
+	if slices.Contains(got, item.ID) {
+		t.Errorf("ready = %v served %s; a blocker closed blocked still holds a plain row", got, item.ID)
+	}
+
+	setInProgress(t, binding, drain.ID, "control-dispatcher")
+	rows, err := Read(legs, Query{Status: StatusInProgress, Assignee: "control-dispatcher"})
+	if err != nil || len(rows) != 1 || len(rows[0].BlockedBy) != 1 {
+		t.Fatalf("Read in progress = %+v, %v; want %s with its one blocker", rows, err, drain.ID)
+	}
+	if b := rows[0].BlockedBy[0]; b.Status != "closed" || hasOpenBlocker(rows[0].BlockedBy) {
+		t.Errorf("drain blocker = %+v; want it closed, as the ready arm releases the drain", b)
+	}
+}
+
 // TestInProgressJudgesTheServingLegsCopyAgainstEveryOtherCopy (#8360 review):
 // the in-progress tier read a blocker its serving leg holds from that copy
 // alone, so a closed copy there hid an open copy in the binding (a migrated
