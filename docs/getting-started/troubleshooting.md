@@ -721,6 +721,31 @@ Scope and caveats:
   defaults, so a hand-edited unit at gc's service path stays journal-only
   only on hosts where gc never manages the unit.
 
+## Supervisor in a Container Stops Forking (`newosproc`, zombie `bd`)
+
+A container whose entrypoint is `gc supervisor run` makes gc PID 1. Every
+process whose parent exits is reparented to PID 1, and gc does not reap
+processes it did not start, so they stay as `<defunct>` (state `Z`) zombies.
+Most are `bd` and `dolt`. They use no CPU or memory, but each holds a PID,
+and once the cgroup `pids.max` or `ulimit -u` is reached gc cannot fork:
+
+```
+runtime: failed to create new OS thread (have 4 already; errno=11)
+runtime: may need to increase max user processes (ulimit -u)
+fatal error: newosproc
+```
+
+`gc supervisor run` prints a warning at startup when it is PID 1. Run it
+under an init that reaps orphans instead:
+
+```dockerfile
+# tini as PID 1, gc as its child (contrib/k8s/Dockerfile.controller uses this ENTRYPOINT)
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["gc", "supervisor", "run"]
+```
+
+or start the container with `docker run --init`.
+
 ## Delegating the Supervisor Lifecycle to an Operator-Managed systemd Unit
 
 By default `gc` owns the supervisor lifecycle: `gc start` installs and
