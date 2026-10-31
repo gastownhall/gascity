@@ -653,6 +653,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The core orphan-sweep order judges claims on graph steps in a
+  split-storage city.** On a city whose `[storage.classes]` serves the graph
+  class from a binding, `gc bd list` answers from a work store only, so the
+  order never listed a molecule step's claim: a step held by a dead session
+  stayed `in_progress`, and a claim it should keep was never named. It now
+  also reads claims with `gc ready --status in_progress` (the city store,
+  serving rigs and every class binding, across both storage tiers, so
+  wisp-plane claims too), judges each claim once, and declares a federated
+  read it could not complete as a partial outcome.
+
 - **Split cities now start sessions for binding-resident steps that carry
   worktree evidence.** On a split-storage city, a rig-rooted graph step lives
   in the relocated class binding, which the pool demand probe reads under the
