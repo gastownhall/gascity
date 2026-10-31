@@ -626,6 +626,11 @@ func probeControllerIdentity(cityPath string) controllerIdentityReply {
 // (tests use a short one); a zero window selects this default.
 const defaultConfigDebounce = 200 * time.Millisecond
 
+// configWatchBeforeRuntimeRegisterHook runs on the registration goroutine
+// before a directory found after startup is added to the watcher. Tests use
+// it to hold a registration open.
+var configWatchBeforeRuntimeRegisterHook = func(string) {}
+
 // watchConfigTargets starts an fsnotify watcher on the given config paths and
 // sets dirty to true after a debounce window. Config source directories are
 // watched shallowly to handle vim/emacs rename-swap atomic saves; pack and
@@ -801,6 +806,11 @@ func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duratio
 	eventLoopDone := make(chan struct{})
 	var registrationWG sync.WaitGroup
 	var enqueueMu sync.Mutex
+	// registered tells the event loop that a directory found after startup is
+	// now watched. Files written into it before that point fired no event, so
+	// the loop restarts the debounce as if they had, and the reload that
+	// follows reads them.
+	registered := make(chan struct{}, 1)
 	enqueueRecursiveWatch := func(root string, trackRoot bool) {
 		enqueueMu.Lock()
 		select {
@@ -816,8 +826,16 @@ func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duratio
 		enqueueMu.Unlock()
 		go func() {
 			defer registrationWG.Done()
-			if ok := registrar.addPath(root, true, done); !ok && trackRoot {
-				registrar.unmarkRecursiveRoot(root)
+			configWatchBeforeRuntimeRegisterHook(root)
+			if ok := registrar.addPath(root, true, done); !ok {
+				if trackRoot {
+					registrar.unmarkRecursiveRoot(root)
+				}
+				return
+			}
+			select {
+			case registered <- struct{}{}:
+			default:
 			}
 		}()
 	}
@@ -845,6 +863,15 @@ func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duratio
 				debounce.Stop()
 			}
 		}()
+		// Debounce: reset timer on each signal, fire after quiet period.
+		restartDebounce := func() {
+			if debounce != nil {
+				debounce.Stop()
+			}
+			debounce = time.AfterFunc(debounceDelay, func() {
+				markDirty()
+			})
+		}
 		for {
 			select {
 			case event, ok := <-watcher.Events:
@@ -866,13 +893,9 @@ func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duratio
 						}
 					}
 				}
-				// Debounce: reset timer on each event, fire after quiet period.
-				if debounce != nil {
-					debounce.Stop()
-				}
-				debounce = time.AfterFunc(debounceDelay, func() {
-					markDirty()
-				})
+				restartDebounce()
+			case <-registered:
+				restartDebounce()
 			case _, ok := <-watcher.Errors:
 				if !ok {
 					return
