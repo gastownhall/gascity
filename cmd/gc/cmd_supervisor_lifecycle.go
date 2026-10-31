@@ -67,6 +67,12 @@ var (
 		}
 		return false, launchdPrintReportsNotFound(err, detail), detail
 	}
+	// startSupervisorChild spawns the detached `gc supervisor run` child of
+	// `gc supervisor start`. It is a seam so a test can observe the
+	// environment that child is handed — the property that separates
+	// `gc supervisor start` from `gc supervisor install` as an apply step —
+	// without launching a real supervisor.
+	startSupervisorChild    = func(cmd *exec.Cmd) error { return cmd.Start() }
 	supervisorLaunchdActive = func(label string) bool {
 		out, err := exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).Output()
 		return err == nil && launchdPrintReportsRunning(out)
@@ -749,7 +755,7 @@ func startBareSupervisor(stdout, stderr io.Writer, jsonOut, joinRunning bool) in
 		fmt.Fprintln(stderr, warning) //nolint:errcheck // best-effort stderr
 	}
 
-	if err := child.Start(); err != nil {
+	if err := startSupervisorChild(child); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1845,7 +1851,7 @@ var supervisorServiceFixedEnvKeys = map[string]bool{
 
 func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 	env := make(map[string]string)
-	explicitEnvKeys := supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV"))
+	explicitEnvKeys := supervisorServiceExplicitEnvKeys(os.Getenv(supervisorEnvOptInVar))
 	explicitEnvKeySet := make(map[string]bool, len(explicitEnvKeys))
 	for _, key := range explicitEnvKeys {
 		explicitEnvKeySet[key] = true
@@ -1880,7 +1886,7 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 		if _, ok := env[key]; ok {
 			continue
 		}
-		if !shouldPersistSupervisorEnv(key) && !explicitEnvKeySet[key] {
+		if !supervisorForwardsEnvKey(key, explicitEnvKeySet) {
 			continue
 		}
 		env[key] = val
@@ -1966,19 +1972,53 @@ func supervisorSecretsEnvFilePath() string {
 // entry in the file is still returned. The caller still gates whatever is
 // returned on the persist allowlist or an explicit GC_SUPERVISOR_ENV opt-in.
 func supervisorSecretsEnvFileEntries() map[string]string {
+	entries, parseErrs, err := readSupervisorSecretsEnvFile()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gc: %v\n", err)
+		return nil
+	}
+	for _, parseErr := range parseErrs {
+		fmt.Fprintf(os.Stderr, "gc: parsing supervisor secrets file %q: %v\n", supervisorSecretsEnvFilePath(), parseErr)
+	}
+	return entries
+}
+
+// readSupervisorSecretsEnvFile is the shared core of the secrets-file read. A
+// missing file is the normal case and yields no entries and no error. A read
+// failure is returned as err, so a caller that reports rather than starts a
+// supervisor can say what install would silently ignore. Malformed lines are
+// returned as parseErrs alongside every entry that did parse: the supervisor
+// skips each bad line individually and keeps the rest of the file.
+func readSupervisorSecretsEnvFile() (entries map[string]string, parseErrs []error, err error) {
 	path := supervisorSecretsEnvFilePath()
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "gc: reading supervisor secrets file %q: %v\n", path, err)
+		if os.IsNotExist(err) {
+			return nil, nil, nil
 		}
-		return nil
+		return nil, nil, fmt.Errorf("reading supervisor secrets file %q: %w", path, err)
 	}
-	entries, errs := processenv.ParseEnvFile(string(data))
-	for _, parseErr := range errs {
-		fmt.Fprintf(os.Stderr, "gc: parsing supervisor secrets file %q: %v\n", path, parseErr)
+	entries, parseErrs = processenv.ParseEnvFile(string(data))
+	return entries, parseErrs, nil
+}
+
+// supervisorExplicitEnvKeySet returns the GC_SUPERVISOR_ENV opt-in set.
+func supervisorExplicitEnvKeySet() map[string]bool {
+	keys := supervisorServiceExplicitEnvKeys(os.Getenv(supervisorEnvOptInVar))
+	set := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		set[key] = true
 	}
-	return entries
+	return set
+}
+
+// supervisorForwardsEnvKey reports whether the generated service file will
+// carry key into the supervisor's environment: either it clears the persist
+// allow-list, or it is an explicit GC_SUPERVISOR_ENV opt-in. This is the one
+// predicate supervisorServiceExtraEnv gates on; callers that describe what the
+// supervisor will forward must use it rather than half of it.
+func supervisorForwardsEnvKey(key string, explicit map[string]bool) bool {
+	return shouldPersistSupervisorEnv(key) || explicit[key]
 }
 
 func supervisorServiceExplicitEnvKeys(raw string) []string {

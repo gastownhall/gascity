@@ -222,7 +222,8 @@
               "storage-repair-sequence",
               "runtime-workdir-export",
               "agent-is-foreign",
-              "storage-vouch-bd"
+              "storage-vouch-bd",
+              "provider-credentials"
             ]
           },
           "event_id": {
