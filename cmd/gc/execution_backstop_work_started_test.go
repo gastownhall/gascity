@@ -148,3 +148,66 @@ func TestExecutionBackstopReadsTheWorkStartedCell(t *testing.T) {
 		})
 	}
 }
+
+// TestExecutionBackstopAnAnswerToTheLastNudgeIsNotDrained (ga-uns4sw): the
+// seat answers the last claim nudge by running its claim hook, whose
+// work_started entry vetoes the drain — but the answer lands after the nudge
+// went out. A backstop that latches its drain on the first pass after the
+// last reserve drains the seat before the entry is read; the last nudge's
+// backoff is the window the answer has to land in, and once it has, the seat
+// is held as executing past the backoff, never drained or reported stalled.
+func TestExecutionBackstopAnAnswerToTheLastNudgeIsNotDrained(t *testing.T) {
+	const (
+		token    = "incarnation-2"
+		storeRef = "rig:gascity"
+	)
+	f := newExecutionBackstopFixture(t)
+	f.workStoreRef = "gascity" // AssignedWorkStoreRefs' bare rig name
+	f.setSessionMeta(t, map[string]string{
+		"instance_token": token,
+		"generation":     "2",
+		"last_woke_at":   f.now.Add(-20 * time.Minute).Format(time.RFC3339),
+	})
+	driveToLastNudge(t, f)
+	lastNudge := f.now
+
+	// A pass inside the backoff finds the last nudge unanswered.
+	f.now = lastNudge.Add(10 * time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 0 || f.stalledEvents() != 0 {
+		t.Fatalf("pass 10s after the last nudge: drains %v, stalled events %d; want the answer window still open; stdout=%s",
+			f.drained, f.stalledEvents(), f.stdout.String())
+	}
+
+	// The seat answers: its claim hook records the claim in work_started at
+	// the row's generation (CAS-seeded, as the hook writes it).
+	f.now = lastNudge.Add(20 * time.Second)
+	raw := fmt.Sprintf(`{"v":1,"claims":[{"store":%q,"bead":%q,"gen":2,"at":%q,"via":"claim"}]}`,
+		storeRef, f.work.ID, f.now.Format(time.RFC3339))
+	if ok, err := f.store.(*beads.MemStore).CompareAndSetMetadataKey(f.session.ID, sessionpkg.WorkStartedKey, "", raw); err != nil || !ok {
+		t.Fatalf("seeding %s: ok=%v err=%v", sessionpkg.WorkStartedKey, ok, err)
+	}
+
+	// The answer keeps the seat safe through the rest of the backoff.
+	f.now = lastNudge.Add(idleClaimNudgeBackoff - time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 0 || f.stalledEvents() != 0 {
+		t.Fatalf("pass inside the last nudge's backoff after the answer: drains %v, stalled events %d; want neither; stdout=%s",
+			f.drained, f.stalledEvents(), f.stdout.String())
+	}
+
+	// Past the backoff the answer vetoes the escalation: the seat is held as
+	// executing, never drained or reported stalled.
+	f.now = lastNudge.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 0 || f.stalledEvents() != 0 {
+		t.Fatalf("pass at the last nudge's backoff after the answer: drains %v, stalled events %d; want the answer to veto the escalation; stdout=%s",
+			f.drained, f.stalledEvents(), f.stdout.String())
+	}
+	if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldExecuting) {
+		t.Fatalf("hold breadcrumb = %q, want %s", got, executionHoldExecuting)
+	}
+}
