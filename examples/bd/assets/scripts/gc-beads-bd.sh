@@ -2768,12 +2768,16 @@ allocate_port() {
         return
     fi
 
-    # 3. The port a dead server recorded, when it is free. Running sessions pin
-    # the port they were spawned with, so a restart must come back on it.
+    # 3. The port a dead server recorded, when it is a valid TCP port (a
+    # decimal integer from 1 to 65535) and free. Running sessions pin the port
+    # they were spawned with, so a restart must come back on it.
     if [ -f "$STATE_FILE" ]; then
         local recorded_port
         recorded_port=$(load_state_field port)
-        if [ "${recorded_port:-0}" -gt 0 ] 2>/dev/null &&
+        case "$recorded_port" in
+            ''|*[!0-9]*|0*) recorded_port="" ;;
+        esac
+        if [ -n "$recorded_port" ] && [ "$recorded_port" -le 65535 ] &&
             ! run_lsof -nP -iTCP:"$recorded_port" -sTCP:LISTEN >/dev/null 2>&1; then
             echo "$recorded_port"
             return
