@@ -138,6 +138,7 @@ cmd_gc_integration_tests=(
   TestGcBdBurnJudgeCoversAProxiedServerCascade
   TestGcBdCreateGraphJudgeFactsRealBd
   TestGcBdMolWispRootOnlyMintsOneWorkBead
+  TestGcBdSplitJudgesMetadataAsTheStoresReadItBack
   TestInitializingARealEmbeddedRigLetsItCreateGcTypedBeads
   TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
   TestManagedBeadsNativeCLICompatibility
