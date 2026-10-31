@@ -21,8 +21,8 @@ import (
 type slowCleanupStore struct {
 	beads.Store
 	// closeAllPerID is how long CloseAll takes for each id it is given. A
-	// delay proportional to the batch is the faithful CachingStore model: it
-	// refreshes every id with a separate read.
+	// delay proportional to the batch is a slow-store model: a CloseAll's cost
+	// grows with the ids it closes.
 	closeAllPerID time.Duration
 	// writeDelay is how long each single-bead Get, Update, Close and
 	// SetMetadataBatch takes. The waits leg never issues them; the external

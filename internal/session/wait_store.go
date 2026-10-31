@@ -429,9 +429,9 @@ func (s *Store) RetryClosedWait(id, nextAttempt string, now time.Time) (WaitInfo
 }
 
 // waitCancelChunk is how many wait beads one CloseAll closes when CancelWaits
-// can be cut off by its context. A CachingStore refreshes each id with a
-// separate read, so the chunk is the most work that can finish after the
-// deadline has passed.
+// can be cut off by its context. A CloseAll's cost grows with its batch (a
+// CachingStore re-reads every closed id, batched where the backing allows), so
+// the chunk bounds the work that can still finish after the deadline has passed.
 const waitCancelChunk = 10
 
 // CancelWaits marks all non-terminal waits for the session canceled (closing the
