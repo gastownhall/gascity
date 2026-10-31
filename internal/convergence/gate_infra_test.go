@@ -83,3 +83,72 @@ func TestClassifyInfraBlind(t *testing.T) {
 		})
 	}
 }
+
+// TestIsGateConfigError pins that only a completed run exiting 78 is a
+// configuration error: the 75 protocol, ordinary verdicts, passes, and results
+// that never produced an exit status are all something else.
+func TestIsGateConfigError(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		result GateResult
+		want   bool
+	}{
+		{
+			name:   "config exit code",
+			result: GateResult{Outcome: GateFail, ExitCode: exitCode(GateConfigExitCode), Stderr: "python3 cannot import yaml"},
+			want:   true,
+		},
+		{
+			name:   "config exit code with no stderr",
+			result: GateResult{Outcome: GateFail, ExitCode: exitCode(GateConfigExitCode)},
+			want:   true,
+		},
+		{
+			name:   "tempfail is an infrastructure outcome, not a config error",
+			result: GateResult{Outcome: GateFail, ExitCode: exitCode(GateInfraExitCode)},
+			want:   false,
+		},
+		{
+			name:   "ordinary verdict",
+			result: GateResult{Outcome: GateFail, ExitCode: exitCode(1), Stderr: "front matter missing required fields"},
+			want:   false,
+		},
+		{
+			name:   "passing gate is never a config error",
+			result: GateResult{Outcome: GatePass, ExitCode: exitCode(0)},
+			want:   false,
+		},
+		{
+			name:   "gate error carries no exit status",
+			result: GateResult{Outcome: GateError, Stderr: "fork/exec: permission denied"},
+			want:   false,
+		},
+		{
+			name:   "gate error with a stale 78 is still a gate error",
+			result: GateResult{Outcome: GateError, ExitCode: exitCode(GateConfigExitCode)},
+			want:   false,
+		},
+		{
+			name:   "timeout is never a config error",
+			result: GateResult{Outcome: GateTimeout, ExitCode: exitCode(GateConfigExitCode)},
+			want:   false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsGateConfigError(tc.result); got != tc.want {
+				t.Fatalf("IsGateConfigError = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// The two protocols are disjoint: 78 must not also be reclassified as a
+	// blind read, or the dispatcher would have two lanes claiming one result.
+	if reason, blind := ClassifyInfraBlind(GateResult{Outcome: GateFail, ExitCode: exitCode(GateConfigExitCode)}); blind {
+		t.Fatalf("ClassifyInfraBlind treated exit 78 as blind (reason %q)", reason)
+	}
+}
