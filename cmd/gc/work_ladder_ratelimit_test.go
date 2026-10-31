@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -60,12 +61,15 @@ type rlSeat struct {
 // rlWorld is a ladderCity of one or more seats on a provider that refuses
 // with a rate limit. With lc set, seat 0's nudges are lane notices, which
 // the world delivers as soon as they are proposed (the attempt starts and
-// succeeds at the pass's time).
+// succeeds at the pass's time). runUntil passes every 30s, or every when
+// set: a step that does not divide an hour lands the passes ever later
+// after an hourly nudge's due time, as the lane's re-armed timer does.
 type rlWorld struct {
 	*ladderCity
 	lc    *ladderLaneCity
 	seats []*rlSeat
 	wakes int
+	every time.Duration
 }
 
 func alwaysRefuse(int64) bool { return true }
@@ -275,13 +279,14 @@ func (w *rlWorld) reconcile(s *rlSeat) {
 	w.sp.SetActivity(s.name, w.now)
 }
 
-// runUntil steps every 30s until done reports true or d has passed, and
-// reports whether done did.
+// runUntil steps every 30s (w.every, when set) until done reports true or d
+// has passed, and reports whether done did.
 func (w *rlWorld) runUntil(d time.Duration, done func() bool) bool {
-	for end := w.now.Add(d); w.now.Before(end); w.now = w.now.Add(30 * time.Second) {
+	every := cmp.Or(w.every, 30*time.Second)
+	for end := w.now.Add(d); w.now.Before(end); w.now = w.now.Add(every) {
 		w.step()
 		if done != nil && done() {
-			w.now = w.now.Add(30 * time.Second)
+			w.now = w.now.Add(every)
 			return true
 		}
 	}
@@ -838,8 +843,8 @@ func TestWorkLadderStaleEpisodeCloses(t *testing.T) {
 	}
 	// Within EvidenceMaxAge of acting passes: the seat's paced nudges keep it
 	// busy for a few minutes of each ten.
-	if d := w.now.Sub(checked); d < workladder.DefaultCap || d > workladder.DefaultCap+10*time.Minute {
-		t.Fatalf("closed %v after its last answered refusal", d)
+	if d, bound := w.now.Sub(checked), workladder.DefaultPolicy().RateLimitEvidenceMaxAge; d < bound || d > bound+10*time.Minute {
+		t.Fatalf("closed %v after its last answered refusal, want within 10m past %v", d, bound)
 	}
 	if got := w.transitions(s); !slices.Equal(got, []string{"opened", "closed(stale)"}) {
 		t.Fatalf("moves %v", got)
@@ -1121,5 +1126,253 @@ func TestWorkLadderClosedPayloadNamesTheClosedEpisode(t *testing.T) {
 	}
 	if closed.FreshAt == nil || restarted.FreshAt == nil || !closed.FreshAt.Equal(*restarted.FreshAt) {
 		t.Fatalf("closed fresh_at %v, want the closed episode's restart (%v)", closed.FreshAt, restarted.FreshAt)
+	}
+}
+
+// A claim waiting on a person that a later snapshot lacks (its store stopped
+// answering) still holds the seat's restart: the ladder carries its entry as
+// the wait it last saw, so the restart is held (awaiting a person) at once,
+// not left to the incomplete snapshot's block (review of #8624, Codex's
+// repro).
+func TestWorkLadderPartialSnapshotKeepsTheWaitsRestartHold(t *testing.T) {
+	since := stepsTestNow.Add(-6 * time.Minute)
+	c := refusedSeat(t, workladder.RateLimit{Phase: workladder.RateLimitOpen, Since: since, Checked: since})
+	active := c.claims[0]
+	waiting := c.claim("awaiting approval")
+	c.awaitHuman(waiting, c.seat)
+	c.pass() // the ladder sees the wait; the episode is not confirmed yet
+	if e := c.entry(waiting); !e.AwaitsHuman {
+		t.Fatalf("entry %+v, want the snapshot's wait on the cell", e)
+	}
+	c.partial, c.claims = true, []string{active}
+	c.now = since.Add(workladder.DefaultPausedCap + 30*time.Second)
+	c.pass()
+	if got := c.row().Metadata["restart_requested"]; got != "" {
+		t.Fatalf("restarted while claim %s still awaits a person: %q", waiting, got)
+	}
+	if got := rateLimitedMoves(t, c); !slices.Equal(got, []string{"held(awaiting_human)"}) || c.cell().RateLimit.Alerted != workladder.AlertRateLimitedHeld {
+		t.Fatalf("moves %v, cell %s: want the carried wait to hold the restart", got, c.row().Metadata[session.WorkLadderKey])
+	}
+}
+
+// A wait a live re-read finds, written after the planner's snapshot, holds
+// the seat's restart as one the snapshot shows: the restart's re-read of
+// every claim finds it, and the episode is held (awaiting a person) on that
+// pass, not blocked as an unread claim until FreshConfirm + Cap.
+func TestWorkLadderRestartHeldByAWaitOnlyAReReadFinds(t *testing.T) {
+	since := stepsTestNow.Add(-workladder.DefaultPausedCap - time.Minute)
+	c := refusedSeat(t, workladder.RateLimit{Phase: workladder.RateLimitOpen, Since: since, Checked: since})
+	waiting := c.claim("asked after the snapshot")
+	snapshot := c.summary
+	c.lane.summary = func() *allocSummary { // the snapshot predates the ask
+		s := snapshot()
+		for i := range s.AssignedWork {
+			delete(s.AssignedWork[i].Metadata, beadmeta.AwaitingHumanMetadataKey)
+		}
+		return s
+	}
+	c.awaitHuman(waiting, c.seat)
+	c.pass()
+	if got := c.row().Metadata["restart_requested"]; got != "" {
+		t.Fatalf("restarted while claim %s awaits a person: %q", waiting, got)
+	}
+	if got := rateLimitedMoves(t, c); !slices.Equal(got, []string{"held(awaiting_human)"}) {
+		t.Fatalf("moves %v, want the re-read's wait to hold the restart", got)
+	}
+}
+
+// A confirmed episode reads whether a person is attached even while its
+// work holds the restart: the pass's live re-read may find the claim the
+// planner's snapshot shows waiting gone (closed since the snapshot), and the
+// wait's hold with it. A person attached to the seat then still holds the
+// restart (review of #8624).
+func TestWorkLadderAttachedSeatHeldWhenItsWaitIsGone(t *testing.T) {
+	for _, tc := range []struct {
+		gone bool
+		want string
+	}{{false, "held(awaiting_human)"}, {true, "held(attached)"}} {
+		t.Run(fmt.Sprintf("the waiting claim gone live %v", tc.gone), func(t *testing.T) {
+			since := stepsTestNow.Add(-workladder.DefaultPausedCap - time.Minute)
+			c := refusedSeat(t, workladder.RateLimit{Phase: workladder.RateLimitOpen, Since: since, Checked: since})
+			waiting := c.claim("awaiting approval")
+			c.awaitHuman(waiting, c.seat)
+			r := c.cell()
+			r.Entries = append(r.Entries, workladder.Entry{ // its hourly nudge is due
+				Key: workladder.ClaimKey{Store: "city", Bead: waiting}, Kind: workladder.KindClaim, Rung: workladder.RungStarted,
+				Since: c.now.Add(-2 * time.Hour), Last: c.now.Add(-61 * time.Minute), Attempts: 1, AwaitsHuman: true,
+			})
+			c.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(r)})
+			c.sp.SetAttached(ladderSeatName, true)
+			snap := c.summary() // the planner's snapshot: the claim waits
+			c.lane.summary = func() *allocSummary { return snap }
+			if tc.gone {
+				closed := "closed"
+				if err := c.work.Update(waiting, beads.UpdateOpts{Status: &closed}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c.pass()
+			if got := c.row().Metadata["restart_requested"]; got != "" {
+				t.Fatalf("restarted fresh while a person is attached: %q, moves %v", got, rateLimitedMoves(t, c))
+			}
+			if got := rateLimitedMoves(t, c); !slices.Equal(got, []string{tc.want}) || c.cell().RateLimit.Alerted != workladder.AlertRateLimitedHeld {
+				t.Fatalf("moves %v, cell %s: want %s", got, c.row().Metadata[session.WorkLadderKey], tc.want)
+			}
+		})
+	}
+}
+
+// rateLimitedMoves are c's work.rate_limited moves, as transition(cause).
+func rateLimitedMoves(t *testing.T, c *ladderCity) []string {
+	t.Helper()
+	var out []string
+	for _, e := range c.events(events.WorkRateLimited) {
+		var p events.WorkRateLimitedPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		m := p.Transition
+		if p.Cause != "" {
+			m += "(" + p.Cause + ")"
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// An incomplete snapshot restarts no seat: the work it lacks may be a claim
+// the ladder never saw, waiting on a person. The seat's readable work is
+// still paced (paused, as the episode paces it), the block alerts held
+// (blocked) once past FreshConfirm + Cap, and once a snapshot lists all the
+// seat's work the restart lands, unless that work awaits a person.
+func TestWorkLadderPartialSnapshotHoldsTheRestart(t *testing.T) {
+	for _, waits := range []bool{true, false} {
+		t.Run(fmt.Sprintf("the unlisted claim waits on a person %v", waits), func(t *testing.T) {
+			w := newRLWorld(t, false, "claude")
+			s := w.seats[0]
+			s.restartAfter = 1 << 30
+			w.claimFor(s, "the step")
+			hidden := w.claimFor(s, "on a store the snapshot did not reach")
+			if waits {
+				if err := w.work.Update(hidden, beads.UpdateOpts{Metadata: map[string]string{beadmeta.AwaitingHumanMetadataKey: s.id}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			w.lane.summary = func() *allocSummary {
+				sum := w.summary()
+				sum.Partial = true
+				for i := len(sum.AssignedWork) - 1; i >= 0; i-- {
+					if sum.AssignedWork[i].ID == hidden {
+						sum.AssignedWork = slices.Delete(sum.AssignedWork, i, i+1)
+						sum.AssignedStores = slices.Delete(sum.AssignedStores, i, i+1)
+						sum.AssignedStoreRefs = slices.Delete(sum.AssignedStoreRefs, i, i+1)
+					}
+				}
+				return sum
+			}
+			if !w.runUntil(time.Hour, func() bool { return w.phaseOf(s) == workladder.RateLimitOpen }) {
+				t.Fatalf("no episode: %v", w.transitions(s))
+			}
+			since := w.cellOf(s).RateLimit.Since
+			before := len(s.delivered)
+			w.runUntil(since.Add(workladder.DefaultPausedCap+workladder.DefaultCap+15*time.Minute).Sub(w.now), nil)
+			reasons, _ := w.alertsOf(s)
+			if w.rowOf(s).Metadata["restart_requested"] != "" || !slices.Equal(w.transitions(s), []string{"opened", "held(blocked)"}) ||
+				!slices.Equal(reasons, []string{workladder.AlertRateLimitedHeld}) {
+				t.Fatalf("under an incomplete snapshot: moves %v, alerts %v, restart %q", w.transitions(s), reasons, w.rowOf(s).Metadata["restart_requested"])
+			}
+			took := s.delivered[before:]
+			if len(took) < 5 {
+				t.Fatalf("nudges taken under the incomplete snapshot %v: want the readable step paced on", took)
+			}
+			for i := 1; i < len(took); i++ {
+				if gap := took[i].Sub(took[i-1]); gap < workladder.DefaultPausedCap {
+					t.Fatalf("paused nudges %v apart", gap)
+				}
+			}
+			w.lane.summary = w.summary // every store answers again
+			restarted := w.runUntil(time.Hour, func() bool { return w.rowOf(s).Metadata["restart_requested"] == "true" })
+			if restarted == waits {
+				t.Fatalf("restarted %v once the snapshot listed every claim, want %v: moves %v", restarted, !waits, w.transitions(s))
+			}
+		})
+	}
+}
+
+// The answer to a wait on a person starts a turn of the seat. When the
+// seat's provider refuses that turn with a rate limit, the key still names
+// the seat: the ladder nudges the step hourly, the refusals open the seat's
+// episode, and the episode holds its restart (one held alert, awaiting a
+// person) for as long as the key names the seat, since a fresh restart would
+// drop the conversation the answer is in. Once the key is cleared, the
+// restart lands. The provider refuses within about a second of the prompt
+// and the lane's passes drift off any hourly grid, so most hourly nudges
+// find their pass later after the due time than the last refusal took: the
+// episode still stands across every hourly nudge (review of #8624), never
+// closing stale to reopen and raise another alert.
+func TestWorkLadderRefusedAnswerToAWaitIsNotRestarted(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		delay, every time.Duration
+	}{
+		{"a 2m refusal, passes on the hour", 2 * time.Minute, 30 * time.Second},
+		{"a 1s refusal, passes on the hour", time.Second, 30 * time.Second},
+		{"a 1s refusal, passes drifting off the hour", time.Second, 37 * time.Second},
+		{"a 2m refusal, passes drifting off the hour", 2 * time.Minute, 37 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newRLWorld(t, false, "claude")
+			w.every = tc.every
+			s := w.seats[0]
+			s.restartAfter, s.delay = 1<<30, tc.delay
+			id := w.claimFor(s, "Human review before merge")
+			if err := w.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.AwaitingHumanMetadataKey: s.id}}); err != nil {
+				t.Fatal(err)
+			}
+			w.runUntil(6*time.Hour, nil)
+			reasons, messages := w.alertsOf(s)
+			if w.rowOf(s).Metadata["restart_requested"] != "" || !slices.Equal(w.transitions(s), []string{"opened", "held(awaiting_human)"}) ||
+				!slices.Equal(reasons, []string{workladder.AlertRateLimitedHeld}) || !strings.Contains(messages[0], "awaiting a person") {
+				t.Fatalf("six hours refused while waiting: moves %v, alerts %v %q, restart %q", w.transitions(s), reasons, messages, w.rowOf(s).Metadata["restart_requested"])
+			}
+			if len(s.delivered) < 5 {
+				t.Fatalf("nudges %v: want the waiting step nudged hourly", s.delivered)
+			}
+			for i := 1; i < len(s.delivered); i++ {
+				if gap := s.delivered[i].Sub(s.delivered[i-1]); gap < workladder.DefaultCap || gap >= workladder.DefaultCap+tc.every {
+					t.Fatalf("nudges %v apart while waiting, want the first pass %v after the last: %v", gap, workladder.DefaultCap, s.delivered)
+				}
+			}
+			if len(w.posted) != 0 || len(w.events(events.WorkReleased)) != 0 {
+				t.Fatalf("a waiting step: drains %+v, releases %d", w.posted, len(w.events(events.WorkReleased)))
+			}
+			if err := w.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.AwaitingHumanMetadataKey: ""}}); err != nil {
+				t.Fatal(err)
+			}
+			if !w.runUntil(time.Hour, func() bool { return w.rowOf(s).Metadata["restart_requested"] == "true" }) {
+				t.Fatalf("not restarted once the wait ended: %v", w.transitions(s))
+			}
+		})
+	}
+}
+
+// A direct nudge the runtime delivered but whose turn it never saw start
+// (runtime.ErrNudgeDeliveredUnobserved; a provider that refuses the turn at
+// once is one cause) reached the seat: its refusals answer it, so the
+// episode opens, is confirmed and restarts the seat fresh, as after a
+// delivery that returned. Unstamped, the episode would never open.
+func TestWorkLadderUnobservedDeliveryAnswersItsRefusals(t *testing.T) {
+	w := newRLWorld(t, false, "claude")
+	s := w.seats[0]
+	w.sp.NudgeErrors = map[string]error{s.name: fmt.Errorf("%w: busy state never observed", runtime.ErrNudgeDeliveredUnobserved)}
+	w.claimFor(s, "the step")
+	if !w.runUntil(4*time.Hour, func() bool { return len(s.restarts) > 0 }) {
+		t.Fatalf("no fresh restart: moves %v, cell %s", w.transitions(s), w.rowOf(s).Metadata[session.WorkLadderKey])
+	}
+	if got := w.transitions(s); len(got) < 2 || !slices.Equal(got[:2], []string{"opened", "restarted"}) {
+		t.Fatalf("moves %v", got)
+	}
+	if n := len(w.events(events.WorkNudgeFailed)); n != 0 {
+		t.Fatalf("%d work.nudge_failed for nudges the runtime delivered", n)
 	}
 }

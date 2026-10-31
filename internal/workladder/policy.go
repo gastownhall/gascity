@@ -19,17 +19,19 @@ const (
 	DefaultStartedThreshold      = 6 // claim/started: then recycle, or escalate
 
 	// The rate-limit episode's bounds (RateLimit, ratelimit.go).
-	// FreshConfirm defaults to PausedCap, and SeatFreshGap and
-	// RateLimitEvidenceMaxAge to Cap.
+	// FreshConfirm defaults to PausedCap, SeatFreshGap to Cap, and
+	// RateLimitEvidenceMaxAge to Cap + PausedCap.
 	DefaultRateLimitThreshold = 2                // refused turns in a row that open an episode
 	DefaultProviderFreshGap   = 30 * time.Minute // fresh restarts on one provider no closer
 )
 
 // DefaultPolicy is OD7's: grace 90s, base 3m doubling to a 60m cap and then
 // hourly forever, a 10m cap while the provider is degraded, R = 1; and the
-// rate-limit episode's: 2 refusals in a row open one, confirmed after 10m,
-// one fresh restart per seat per hour and per provider per 30m, closed stale
-// after an hour without an answered refusal.
+// rate-limit episode's: 2 refusals in a row open one, confirmed after 10m
+// by a refusal of a nudge delivered since, one fresh restart per seat per
+// hour and per provider per 30m, and closed stale 70m after its newest
+// answered refusal ended (an older refusal answers nothing), so a step
+// waiting on a person, nudged hourly, keeps its episode standing.
 func DefaultPolicy() Policy {
 	return Policy{
 		Grace:         DefaultGrace,
@@ -48,7 +50,7 @@ func DefaultPolicy() Policy {
 		FreshConfirm:            DefaultPausedCap,
 		SeatFreshGap:            DefaultCap,
 		ProviderFreshGap:        DefaultProviderFreshGap,
-		RateLimitEvidenceMaxAge: DefaultCap,
+		RateLimitEvidenceMaxAge: DefaultCap + DefaultPausedCap,
 	}
 }
 
@@ -85,7 +87,7 @@ func (p Policy) withDefaults() Policy {
 	fill(&p.FreshConfirm, p.PausedCap)
 	fill(&p.SeatFreshGap, p.Cap)
 	fill(&p.ProviderFreshGap, d.ProviderFreshGap)
-	fill(&p.RateLimitEvidenceMaxAge, p.Cap)
+	fill(&p.RateLimitEvidenceMaxAge, p.Cap+p.PausedCap)
 	return p
 }
 

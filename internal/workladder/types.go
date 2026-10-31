@@ -63,6 +63,16 @@ const (
 type Work struct {
 	Key  ClaimKey
 	Kind Kind
+	// AwaitsHuman: the seat said it waits on a person's decision about this
+	// work (the caller reads it off the claim). Its entry is only nudged, a
+	// Cap apart, and never recycled or released, and its pacing raises none
+	// of AlertStartedRecycled, AlertStartedUnanswered and
+	// AlertReleaseUnfinished: no nudge can hurry a person, and one a Cap
+	// apart still re-drives a seat whose turn ended after the answer came
+	// but before the seat said the wait is over. A nudge the seat cannot
+	// take still counts toward AlertNudgeRefused, and a pending release that
+	// raced a start still raises AlertReleaseRacedStart.
+	AwaitsHuman bool
 }
 
 // Tri is a three-valued reading.
@@ -138,6 +148,13 @@ type Observation struct {
 	// another governed seat on this seat's provider, read off their saved
 	// cells; zero when there is none.
 	ProviderFreshAt time.Time
+	// Partial: the caller could not list all of the seat's work this pass
+	// (a store that did not answer), so Outstanding may lack some of it. A
+	// fresh restart drops every claim's conversation, and nothing proves
+	// the work it cannot see safe to drop (a claim waiting on a person), so
+	// no restart lands while it is set: it blocks the restart as Hold does,
+	// and paces nothing differently.
+	Partial bool
 }
 
 // TurnReading is one read of the seat's turns, reduced to what Decide
@@ -197,7 +214,8 @@ type Policy struct {
 	// refuse with a rate limit before the refusals open an episode.
 	RateLimitThreshold int
 	// FreshConfirm is how long an episode stands, from the refusal that
-	// opened it, before its one fresh restart.
+	// opened it, before it is confirmed (by a refusal of a nudge delivered
+	// after it opened) and may take its one fresh restart.
 	FreshConfirm time.Duration
 	// SeatFreshGap: no second fresh restart of a seat within this of its
 	// last; an episode confirmed inside it is exhausted instead.
@@ -207,7 +225,12 @@ type Policy struct {
 	ProviderFreshGap time.Duration
 	// RateLimitEvidenceMaxAge: an open episode with no new answered
 	// refusal for this long (by the refusal's own end time) closes stale,
-	// and an older refusal answers nothing.
+	// and an older refusal answers nothing. It must outlast the episode's
+	// slowest pace, a wait on a person nudged a Cap apart, with time to read
+	// the refusal of the next nudge (the default is Cap + PausedCap): at Cap
+	// or less, such a seat's episode closes stale on the very pass that
+	// sends each nudge, whenever that pass lands later than the last
+	// refusal took, and is never confirmed.
 	RateLimitEvidenceMaxAge time.Duration
 }
 
@@ -280,7 +303,10 @@ const (
 	// of its last fresh restart.
 	AlertRateLimitedAgain = "rate_limited_again"
 	// AlertRateLimitedHeld: a standing hold, or a block lasting past
-	// FreshConfirm + Cap, keeps the ladder from restarting the seat.
+	// FreshConfirm + Cap, keeps the ladder from restarting the seat. It is
+	// the episode's one alert: how the episode ends after it (a fresh
+	// restart refused too, a spent quota) is reported only by its
+	// RateLimitMove.
 	AlertRateLimitedHeld = "rate_limited_held"
 	// AlertRateLimitedQuota: the provider refuses the seat on a spent usage
 	// quota, which no fresh restart gets past.
@@ -327,7 +353,7 @@ type Entry struct {
 	Since     time.Time // the rung's (or the generation's) start
 	Attempts  int       // counted nudges on this rung, this generation
 	Paused    int       // nudges sent while the provider was degraded
-	Last      time.Time // the last nudge or recycle
+	Last      time.Time // the last nudge or recycle, or the start of a wait on a person
 	Next      time.Time // when the entry is next due if the seat stays quiet
 	Recycles  int       // across generations
 	Escalated bool      // the entry's alert was raised (cleared on a rung change)
@@ -344,6 +370,10 @@ type Entry struct {
 	// Notice is the asynchronous delivery of the entry's last nudge, until
 	// the caller settles it (SettleNotice); zero when there is none.
 	Notice NoticeMark
+	// AwaitsHuman: the entry's episode is a wait on a person
+	// (Work.AwaitsHuman). The wait's start and its end each begin a new
+	// episode, with a fresh count.
+	AwaitsHuman bool
 }
 
 // ReleaseMark is a release of an unstarted claim in flight. While it names a

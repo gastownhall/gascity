@@ -1513,14 +1513,14 @@ func TestWorkLadderPausedRefusalRecordsNothing(t *testing.T) {
 // Rule 2 (audit 4, lever 2; user-approved 2026-10-19). A claimed step whose
 // seat asked a person and waits for the answer says so: gc.awaiting_human
 // names the seat (the adopt-pr human-approval step, once its approval mail
-// is out). The ladder leaves it with its agent as it leaves a dispatch hold:
-// no nudge, recycle or release while the key names the seat, however long
-// the person takes, and no alert either. Once the seat clears it (the answer
+// is out). While the key names the seat, the ladder only nudges the step, an
+// hour after the ask and hourly after that, however long the person takes:
+// no recycle, no release, no alert. Once the seat clears it (the answer
 // came, and it works the step again), the ladder takes the step up on a
 // fresh grace. Without the rule, the step is nudged at +90s, +3 ... +48
 // minutes, recycled at about 154 minutes, then nudged hourly for as long as
 // the person takes.
-func TestWorkLadderLeavesAHumanWaitAlone(t *testing.T) {
+func TestWorkLadderNudgesAHumanWaitOnlyHourly(t *testing.T) {
 	c := newLadderCity(t)
 	id := c.claim("Human review before merge")
 	if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.SessionIDMetadataKey: c.seat}}); err != nil {
@@ -1531,16 +1531,22 @@ func TestWorkLadderLeavesAHumanWaitAlone(t *testing.T) {
 	if c.entry(id).Rung != workladder.RungStarted {
 		t.Fatalf("entry %+v, want the started claim paced before it asks", c.entry(id))
 	}
-	if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.AwaitingHumanMetadataKey: c.seat}}); err != nil {
-		t.Fatal(err)
+	c.awaitHuman(id, c.seat)
+	asked := c.now.Sub(c.start)
+	c.run(3*24*time.Hour, 5*time.Minute, nil)
+	if e := c.entry(id); !e.AwaitsHuman || e.Rung != workladder.RungStarted {
+		t.Fatalf("entry %+v, want the started claim kept, waiting on a person", e)
 	}
-	c.run(3*24*time.Hour, 5*time.Minute, func() {
-		if r := c.cell(); len(r.Entries) != 0 {
-			t.Fatalf("at %v the ladder paces a step waiting on a person: %s", c.now.Sub(c.start), c.row().Metadata[session.WorkLadderKey])
+	if len(c.nudgedAt) == 0 || c.nudgedAt[0] != asked+workladder.DefaultCap {
+		t.Fatalf("nudges %v, want the first a cap after the ask at %v", c.nudgedAt, asked)
+	}
+	for i := 1; i < len(c.nudgedAt); i++ {
+		if gap := c.nudgedAt[i] - c.nudgedAt[i-1]; gap != workladder.DefaultCap {
+			t.Fatalf("nudges %d and %d are %v apart, want %v: %v", i-1, i, gap, workladder.DefaultCap, c.nudgedAt)
 		}
-	})
-	if len(c.nudgedAt) != 0 || len(c.posted) != 0 || len(c.events(events.WorkReleased)) != 0 || len(escalations(c)) != 0 {
-		t.Fatalf("three days waiting on a person: nudges %v, recycles %+v, escalations %v", c.nudgedAt, c.posted, escalations(c))
+	}
+	if len(c.posted) != 0 || len(c.events(events.WorkReleased)) != 0 || len(escalations(c)) != 0 {
+		t.Fatalf("three days waiting on a person: recycles %+v, releases %d, escalations %v", c.posted, len(c.events(events.WorkReleased)), escalations(c))
 	}
 	if b, _ := c.work.Get(id); b.Status != "in_progress" || b.Assignee != c.seat {
 		t.Fatalf("the waiting step is %q %q, want it left with its agent", b.Status, b.Assignee)
@@ -1548,28 +1554,68 @@ func TestWorkLadderLeavesAHumanWaitAlone(t *testing.T) {
 	if v := c.row().Metadata["restart_requested"]; v != "" {
 		t.Fatalf("restart_requested %q on a seat waiting on a person", v)
 	}
-	if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.AwaitingHumanMetadataKey: ""}}); err != nil {
+	c.awaitHuman(id, "")
+	answered, before := c.now, len(c.nudgedAt)
+	c.run(5*time.Minute, 30*time.Second, nil)
+	if after := c.nudgedAt[before:]; len(after) == 0 || after[0] != answered.Add(workladder.DefaultGrace).Sub(c.start) {
+		t.Fatalf("after the answer at %v: nudges %v, want the first a grace later", answered.Sub(c.start), after)
+	}
+}
+
+// The wait ends in a turn of the seat: the one the person's answer starts,
+// which clears gc.awaiting_human (or closes the step). If that turn dies
+// first (a provider error, a usage limit), nothing outside the seat ends
+// the wait, so the ladder's hourly nudge is what takes the answered step up
+// again: within an hour of the ladder's last nudge, whatever the dead turn
+// did, with no recycle, release or alert meanwhile.
+func TestWorkLadderRedrivesAnAnswerWhoseTurnDied(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("Human review before merge")
+	if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.SessionIDMetadataKey: c.seat}}); err != nil {
 		t.Fatal(err)
 	}
-	answered := c.now
-	c.run(5*time.Minute, 30*time.Second, nil)
-	if len(c.nudgedAt) == 0 || c.nudgedAt[0] != answered.Add(workladder.DefaultGrace).Sub(c.start) {
-		t.Fatalf("after the answer at %v: nudges %v, want the first a grace later", answered.Sub(c.start), c.nudgedAt)
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+	c.awaitHuman(id, c.seat) // the step ran and asked
+	c.run(90*time.Minute, 30*time.Second, nil)
+	if want := []time.Duration{workladder.DefaultCap}; fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) {
+		t.Fatalf("nudges %v, want %v: one a cap after the ask", c.nudgedAt, want)
+	}
+	c.sp.SetActivity(ladderSeatName, c.now) // the answer came, and its turn died leaving the key set
+	c.run(time.Hour, 30*time.Second, nil)
+	if want := []time.Duration{workladder.DefaultCap, 2 * workladder.DefaultCap}; fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) {
+		t.Fatalf("nudges %v, want %v: the answered step taken up again within an hour of the last nudge", c.nudgedAt, want)
+	}
+	var last runtime.Call
+	for _, call := range c.sp.Calls {
+		if call.Method == "Nudge" {
+			last = call
+		}
+	}
+	if want := fmt.Sprintf(ladderStartedNudge, id); last.Message != want {
+		t.Fatalf("nudge text %q, want the started text %q", last.Message, want)
+	}
+	if len(c.posted) != 0 || len(c.events(events.WorkReleased)) != 0 || len(escalations(c)) != 0 {
+		t.Fatalf("an answered wait: recycles %+v, releases %d, escalations %v", c.posted, len(c.events(events.WorkReleased)), escalations(c))
+	}
+}
+
+// awaitHuman writes claim id's gc.awaiting_human: seat, the seat that asked
+// a person and waits on the answer, or "" once the wait is over.
+func (c *ladderCity) awaitHuman(id, seat string) {
+	c.t.Helper()
+	if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.AwaitingHumanMetadataKey: seat}}); err != nil {
+		c.t.Fatal(err)
 	}
 }
 
 // The wait is the asking seat's, read live wherever the ladder re-reads a
-// claim before it acts: written after the planner's snapshot, it keeps the
-// step from a nudge, from a release and from carried pacing. And it is only
-// that seat's: a step whose asker is gone, released and claimed by another
-// seat, is the new seat's work, paced as ever (it asks again itself).
+// claim before it acts. Written after the planner's snapshot, it holds the
+// step as it was (no nudge, no release, no carried pacing) until a snapshot
+// shows it; a wait the ladder already knows is carried as one under an
+// incomplete snapshot, and nudged hourly. And it is only that seat's: a step
+// whose asker is gone, released and claimed by another seat, is the new
+// seat's work, paced as ever (it asks again itself).
 func TestWorkLadderRereadsAHumanWait(t *testing.T) {
-	ask := func(c *ladderCity, id, seat string) {
-		c.t.Helper()
-		if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.AwaitingHumanMetadataKey: seat}}); err != nil {
-			c.t.Fatal(err)
-		}
-	}
 	t.Run("nudge", func(t *testing.T) {
 		c := newLadderCity(t)
 		id := c.claim("asked after the snapshot")
@@ -1582,10 +1628,10 @@ func TestWorkLadderRereadsAHumanWait(t *testing.T) {
 			return s
 		}
 		c.run(time.Minute, 30*time.Second, nil)
-		ask(c, id, c.seat)
+		c.awaitHuman(id, c.seat)
 		c.run(time.Hour, 30*time.Second, nil)
-		if len(c.nudgedAt) != 0 {
-			t.Fatalf("nudges %v about a step waiting on a person since the snapshot", c.nudgedAt)
+		if e := c.entry(id); len(c.nudgedAt) != 0 || e.AwaitsHuman || e.Attempts != 0 {
+			t.Fatalf("nudges %v, entry %+v: want a step asked about since the snapshot held as it was", c.nudgedAt, e)
 		}
 	})
 	t.Run("release", func(t *testing.T) {
@@ -1597,7 +1643,7 @@ func TestWorkLadderRereadsAHumanWait(t *testing.T) {
 			Key: workladder.ClaimKey{Store: "city", Bead: id}, Kind: workladder.KindClaim, Rung: workladder.RungClaimed,
 			Since: c.now.Add(-time.Hour), Attempts: 3, Last: c.now.Add(-time.Hour),
 		}}})})
-		ask(c, id, c.seat)
+		c.awaitHuman(id, c.seat)
 		c.pass()
 		if b, _ := c.work.Get(id); b.Status != "in_progress" || b.Assignee != c.seat {
 			t.Fatalf("a step waiting on a person is %q %q: released", b.Status, b.Assignee)
@@ -1610,22 +1656,93 @@ func TestWorkLadderRereadsAHumanWait(t *testing.T) {
 		c := newLadderCity(t)
 		id := c.claim("carried, then asked")
 		c.run(2*time.Minute, 30*time.Second, nil)
-		ask(c, id, c.seat)
+		c.awaitHuman(id, c.seat)
 		c.partial, c.claims = true, nil
 		before := len(c.nudgedAt)
 		c.run(2*time.Hour, 30*time.Second, nil)
-		if len(c.nudgedAt) != before || len(c.cell().Entries) != 0 {
-			t.Fatalf("carried human wait: nudges %v, cell %s", c.nudgedAt[before:], c.row().Metadata[session.WorkLadderKey])
+		if e := c.entry(id); len(c.nudgedAt) != before || e.AwaitsHuman || e.Attempts != 1 {
+			t.Fatalf("carried human wait: nudges %v, entry %+v: want it held as the ladder last saw it", c.nudgedAt[before:], e)
+		}
+	})
+	t.Run("carried while waiting", func(t *testing.T) {
+		c := newLadderCity(t)
+		id := c.claim("asked, then carried")
+		c.awaitHuman(id, c.seat)
+		c.run(time.Minute, 30*time.Second, nil) // the ladder sees the wait
+		c.partial, c.claims = true, nil
+		c.run(2*time.Hour, 30*time.Second, nil)
+		if want := []time.Duration{workladder.DefaultCap, 2 * workladder.DefaultCap}; fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) || !c.entry(id).AwaitsHuman {
+			t.Fatalf("nudges %v, entry %+v: want the wait carried and nudged hourly, %v", c.nudgedAt, c.entry(id), want)
 		}
 	})
 	t.Run("another seat asked", func(t *testing.T) {
 		c := newLadderCity(t)
 		id := c.claim("re-claimed after its asker died")
-		ask(c, id, "gcg-session-gone") // the seat that asked was closed; its claim was released and taken here
+		c.awaitHuman(id, "gcg-session-gone") // the seat that asked was closed; its claim was released and taken here
 		c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
 		c.run(5*time.Minute, 30*time.Second, nil)
 		if want := []time.Duration{workladder.DefaultGrace, halfPast(4)}; fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) {
 			t.Fatalf("nudges %v, want the new seat paced as ever %v", c.nudgedAt, want)
 		}
 	})
+}
+
+// The wait is read off the seat's own claim. The same bead ID can exist in
+// independent stores (a claim is its store and its ID,
+// newExecutionClaimSnapshot), so a bead of another store with the claim's
+// ID, later in the planner's snapshot, neither hides the claim's wait nor
+// lends it one: a waiting claim is still nudged a cap after the ask, and an
+// ordinary claim is still paced as ever beside a namesake whose key names
+// the seat.
+func TestWorkLadderReadsAHumanWaitOffItsOwnStore(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		waiting bool // the seat's claim waits on a person; else its namesake's key names the seat
+		watch   time.Duration
+		want    []time.Duration
+	}{
+		{"waiting beside a namesake that is not", true, 90 * time.Minute, []time.Duration{workladder.DefaultCap}},
+		{"ordinary beside a waiting namesake", false, 5 * time.Minute, []time.Duration{workladder.DefaultGrace, halfPast(4)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newLadderCity(t)
+			id := c.claim("the seat's step")
+			meta := map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
+			if tc.waiting {
+				c.awaitHuman(id, c.seat)
+			} else {
+				meta[beadmeta.AwaitingHumanMetadataKey] = c.seat
+			}
+			c.namesake(id, meta)
+			c.run(tc.watch, 30*time.Second, nil)
+			if e := c.entry(id); fmt.Sprint(c.nudgedAt) != fmt.Sprint(tc.want) || e.AwaitsHuman != tc.waiting || e.Key.Store != "city" {
+				t.Fatalf("nudges %v, entry %+v: want %v, the city claim waiting %v", c.nudgedAt, e, tc.want, tc.waiting)
+			}
+		})
+	}
+}
+
+// namesake adds to the planner's snapshot, after the seat's claims, a bead
+// of another rig's store with id and meta: in_progress, another seat's claim.
+func (c *ladderCity) namesake(id string, meta map[string]string) {
+	c.t.Helper()
+	other := beads.NewMemStore()
+	other.HonorExplicitIDs = true
+	if _, err := other.Create(beads.Bead{ID: id, Title: "another rig's step", Type: "task", Metadata: meta}); err != nil {
+		c.t.Fatal(err)
+	}
+	inProgress, assignee := "in_progress", "gcg-session-other"
+	if err := other.Update(id, beads.UpdateOpts{Status: &inProgress, Assignee: &assignee}); err != nil {
+		c.t.Fatal(err)
+	}
+	b, err := other.Get(id)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	snapshot := c.lane.summary
+	c.lane.summary = func() *allocSummary {
+		s := snapshot()
+		s.AssignedWork, s.AssignedStores, s.AssignedStoreRefs = append(s.AssignedWork, b), append(s.AssignedStores, other), append(s.AssignedStoreRefs, "other")
+		return s
+	}
 }

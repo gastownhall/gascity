@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -313,5 +314,58 @@ func TestWorkLadderReportsAnUnreadableSeatOnce(t *testing.T) {
 				t.Fatalf("reported %d times, want %d:\n%s", got, tc.want, stderr.String())
 			}
 		})
+	}
+}
+
+// workerLadderTurns is the turn source rule 1 reads its evidence through
+// (plannerRuntime.start installs it). It reads a pool seat's turns through
+// the seat's worker handle: the refusals its runtime records reach the
+// ladder's reading, and a read that fails, or a row the store does not
+// hold, is an error, never a reading.
+func TestWorkerLadderTurnsReadsAPoolSeat(t *testing.T) {
+	c := newLadderCity(t)
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), ladderSeatName, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	env := c.env
+	env.SP = runtime.NewFakeProfile(runtime.ProfileACP, runtime.FullFake{Fake: fake})
+	refused := func(id string, ago time.Duration) runtime.EndedTurn {
+		return runtime.EndedTurn{TurnID: id, StartedAt: c.now.Add(-ago - time.Second), EndedAt: c.now.Add(-ago), Status: runtime.TurnStatusFailed, Failure: coolingRefusal}
+	}
+	fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{ladderSeatName: {{
+		Start: runtime.TurnStartRecorded, End: runtime.TurnEndRecorded, Fence: runtime.TurnFenceAtomic, Link: runtime.TurnLinkExact, Lossless: true,
+	}}}
+	fake.TurnHistoryScripts = map[string][]runtime.TurnHistory{ladderSeatName: {{
+		ObservedAt: c.now, Recent: []runtime.EndedTurn{refused("t2", time.Minute), refused("t1", 3*time.Minute)},
+	}}}
+	read := workerLadderTurns(env)
+	row := c.row()
+	hist, err := read(context.Background(), row)
+	if err != nil {
+		t.Fatalf("reading a pool seat's turns: %v", err)
+	}
+	if r := ladderTurnReading(hist, rowConversation(row.Metadata)); r.Refused != 2 || !r.RefusedAt.Equal(c.now.Add(-time.Minute)) || ladderRefusal(hist) != coolingRefusal {
+		t.Fatalf("reading %+v (refusal %+v) of %+v: want the two refusals the runtime recorded", r, ladderRefusal(hist), hist)
+	}
+	fake.TurnHistoryErrors = map[string][]error{ladderSeatName: {runtime.ErrRuntimeUnavailable}}
+	if _, err := read(context.Background(), row); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("a read that failed: %v, want ErrRuntimeUnavailable", err)
+	}
+	if _, err := read(context.Background(), beads.Bead{ID: "gc-not-a-session"}); err == nil {
+		t.Fatal("a row the store does not hold read as turns")
+	}
+}
+
+// The planner's lane reads turns through the worker boundary: a started
+// lane's turn source is workerLadderTurns.
+func TestV2LaneReadsTurnsThroughTheWorkerBoundary(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, false)
+	rt := attachTestV2(t, cr)
+	rt.publishEnv()
+	rt.start(context.Background())
+	lane := rt.lane.Load()
+	if lane == nil || lane.turnReaderFor == nil || reflect.ValueOf(lane.turnReaderFor).Pointer() != reflect.ValueOf(workerLadderTurns).Pointer() {
+		t.Fatal("the started lane does not read turns through workerLadderTurns")
 	}
 }

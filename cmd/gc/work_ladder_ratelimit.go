@@ -19,10 +19,14 @@ package main
 // its delivering attempt), the provider gap (the newest fresh restart of
 // another governed seat on the same provider, read every pass off their
 // saved cells), and, only once a restart is due, what holds one: a person
-// attached to the seat, or work of the seat awaiting a person. Before a
-// decision that restarts the seat lands, every claim of the seat is re-read
-// live: one that cannot be read holds the restart, and one found awaiting a
-// person holds it standing.
+// attached to the seat, or work of the seat awaiting a person (a claim the
+// planner's snapshot shows waiting, one the ladder carries as waiting, or
+// one a live re-read finds waiting). Before a decision that restarts the
+// seat lands, every claim of the seat is re-read live: one that cannot be
+// read holds the restart, and one found awaiting a person holds it
+// standing. A pass whose snapshot did not list all the seat's work
+// (allocSummary.Partial) restarts no seat: the work it cannot see may be a
+// claim awaiting a person.
 //
 // Every move is reported as work.rate_limited (events.WorkRateLimitedPayload)
 // for a pack's provider policy: whether a provider's pool is refusing every
@@ -100,9 +104,10 @@ func (x ladderFreshIndex) others(provider, seat string) time.Time {
 	return newest
 }
 
-// noteHumanWait records that seat holds a claim whose seat asked a person
-// and waits on their decision: a fresh restart would lose that
-// conversation, so it holds the seat's restart (RestartHoldAwaitingHuman).
+// noteHumanWait records that a live re-read found a claim of seat waiting on
+// a person that the ladder's work does not show yet: a fresh restart would
+// lose that conversation, so it holds the seat's restart
+// (RestartHoldAwaitingHuman) for the pass.
 func (p *ladderPass) noteHumanWait(seat string) {
 	if p.humanWaits == nil {
 		p.humanWaits = map[string]bool{}
@@ -119,18 +124,26 @@ func (p *ladderPass) probeAttached(row beads.Bead) bool {
 }
 
 // restartHold is what holds seat id's fresh restart now, when the pass read
-// one is due (rt.restartDue): its work awaiting a person (read live, so a
-// claim found waiting by a re-read counts), else a person attached.
-func (p *ladderPass) restartHold(id string, rt ladderRuntime) workladder.RestartHold {
+// one is due (rt.restartDue): its work awaiting a person (seatAwaitsHuman),
+// else a person attached.
+func (p *ladderPass) restartHold(id string, targets []ladderTarget, rt ladderRuntime) workladder.RestartHold {
 	switch {
 	case !rt.restartDue:
 		return workladder.RestartHoldNone
-	case p.humanWaits[id]:
+	case p.seatAwaitsHuman(id, targets):
 		return workladder.RestartHoldAwaitingHuman
 	case rt.attached:
 		return workladder.RestartHoldAttached
 	}
 	return workladder.RestartHoldNone
+}
+
+// seatAwaitsHuman reports whether seat id holds work waiting on a person:
+// work its targets mark so (a claim the planner's snapshot shows waiting, or
+// an entry the ladder carries as waiting under an incomplete snapshot), or a
+// claim a live re-read found waiting this pass (noteHumanWait).
+func (p *ladderPass) seatAwaitsHuman(id string, targets []ladderTarget) bool {
+	return p.humanWaits[id] || slices.ContainsFunc(targets, func(t ladderTarget) bool { return t.work.AwaitsHuman })
 }
 
 // freshRestartOf reports whether d restarts its seat fresh.
@@ -250,7 +263,7 @@ func rateLimitAlertMessage(row beads.Bead, reason string, cause workladder.RateL
 		case workladder.RateLimitCauseAwaitingHuman:
 			why = "its work awaiting a person"
 		case workladder.RateLimitCauseBlocked:
-			why = "another seat's fresh restart on the provider, a pending nudge or release, or an unread claim"
+			why = "another seat's fresh restart on the provider, a pending nudge or release, or work the ladder could not read or list"
 		}
 		msg = fmt.Sprintf("provider %s refuses the seat with a rate limit, and %s keeps the work ladder from restarting it fresh", provider, why)
 	default:

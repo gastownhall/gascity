@@ -55,7 +55,7 @@ type RateLimitCause string
 const (
 	RateLimitCauseAttached            RateLimitCause = "attached"             // held: a person is attached
 	RateLimitCauseAwaitingHuman       RateLimitCause = "awaiting_human"       // held: work awaits a person
-	RateLimitCauseBlocked             RateLimitCause = "blocked"              // held: the provider gap, a pending notice or release, or an unread claim, past FreshConfirm + Cap
+	RateLimitCauseBlocked             RateLimitCause = "blocked"              // held: the provider gap, a pending notice or release, or work unread or unlisted, past FreshConfirm + Cap
 	RateLimitCauseFreshRefused        RateLimitCause = "fresh_refused"        // exhausted: the fresh conversation was refused too
 	RateLimitCauseRestartLost         RateLimitCause = "restart_lost"         // exhausted: refused after the restart, in the conversation it left
 	RateLimitCauseAgain               RateLimitCause = "again"                // exhausted: refused within SeatFreshGap of the last fresh restart
@@ -77,10 +77,11 @@ func clampRateLimit(rl RateLimit, now time.Time) RateLimit {
 	return rl
 }
 
-// RestartDue reports whether r's episode stands confirmed at now: open, and
-// FreshConfirm past the refusal that opened it. Only then may Decide restart
-// the seat fresh, so only then need the caller read what holds a restart
-// (Observation.RestartHold), which is not free to read.
+// RestartDue reports whether r's episode may stand confirmed at now: open,
+// and FreshConfirm past the refusal that opened it. Only then may Decide
+// restart the seat fresh (and only on a refusal of a nudge delivered after
+// the episode opened), so only then need the caller read what holds a
+// restart (Observation.RestartHold), which is not free to read.
 func RestartDue(r Record, now time.Time, p Policy) bool {
 	p = p.withDefaults()
 	return r.RateLimit.Phase == RateLimitOpen && now.Sub(r.RateLimit.Since) >= p.FreshConfirm
@@ -184,7 +185,10 @@ func (p Policy) rateLimit(d *Decision, obs Observation) bool {
 		alert(AlertRateLimitedFreshRefused)
 		move(RateLimitTransitionExhausted, cause)
 	case RateLimitOpen:
-		if now.Sub(rl.Since) < p.FreshConfirm {
+		// Confirmed only once it has stood FreshConfirm and a nudge
+		// delivered after it opened drew a refusal too: the refusal that
+		// opened it confirms nothing alone, however long ago it ended.
+		if now.Sub(rl.Since) < p.FreshConfirm || !d.Next.Delivered.After(rl.Since) {
 			return false
 		}
 		return p.confirmed(d, obs, alert, move)
@@ -192,16 +196,17 @@ func (p Policy) rateLimit(d *Decision, obs Observation) bool {
 	return false
 }
 
-// confirmed is an open episode's step once it stands confirmed (an answered
-// refusal, FreshConfirm past its opening): exhausted when no fresh restart
-// can help (a spent quota, a seat restarted fresh within SeatFreshGap),
-// held while a standing hold or a block applies, else restarted fresh.
+// confirmed is an open episode's step once it stands confirmed (FreshConfirm
+// past its opening, and an answered refusal of a nudge delivered since):
+// exhausted when no fresh restart can help (a spent quota, a seat restarted
+// fresh within SeatFreshGap), held while a standing hold or a block applies,
+// else restarted fresh.
 func (p Policy) confirmed(d *Decision, obs Observation, alert func(string) bool, move func(RateLimitTransition, RateLimitCause)) bool {
 	now := obs.Now
 	rl := &d.Next.RateLimit
 	providerFresh := minTime(obs.ProviderFreshAt, now)
 	blocked := (!providerFresh.IsZero() && now.Sub(providerFresh) < p.ProviderFreshGap) ||
-		anyMarked(d.Next) || d.Next.Release != nil || len(obs.Hold) > 0
+		anyMarked(d.Next) || d.Next.Release != nil || len(obs.Hold) > 0 || obs.Partial
 	switch {
 	case obs.Turns.Quota:
 		rl.Phase = RateLimitExhausted

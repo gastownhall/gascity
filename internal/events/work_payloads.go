@@ -41,7 +41,7 @@ const (
 const (
 	WorkRateLimitedCauseAttached            = "attached"             // held: a person is attached to the seat
 	WorkRateLimitedCauseAwaitingHuman       = "awaiting_human"       // held: work of the seat awaits a person
-	WorkRateLimitedCauseBlocked             = "blocked"              // held: another seat's fresh restart on the provider, a pending notice or release, or an unread claim, past its bound
+	WorkRateLimitedCauseBlocked             = "blocked"              // held: another seat's fresh restart on the provider, a pending notice or release, or work the ladder could not read or list, past its bound
 	WorkRateLimitedCauseFreshRefused        = "fresh_refused"        // exhausted: the fresh conversation was refused too
 	WorkRateLimitedCauseRestartLost         = "restart_lost"         // exhausted: refused after the restart, in the conversation it left
 	WorkRateLimitedCauseAgain               = "again"                // exhausted: refused again soon after the seat's last fresh restart

@@ -22,8 +22,15 @@ import (
 // it reads turns only on acting passes (90% readable), delivers nudges
 // directly (10% fail) or as notices settled later with a random fate,
 // restarts the seat fresh after 1 to 3 held passes (5% of restarts lose the
-// new conversation), and keeps two copies of every cell: one committed
-// through its text, one in memory (RL6).
+// new conversation, and 3% of requests are cleared with no restart at all),
+// and keeps two copies of every cell: one committed through its text, one
+// in memory (RL6). A seat may also stand for hours under an operator hold,
+// or hold no work for hours before its work comes back; in half the worlds
+// the lane then decides no seat that holds no work, no entry and no
+// release, so a workless seat's episode stands as it is until then. A
+// seat's claims may wait on a person, the wait beginning and ending at
+// random: such a seat's restart is held (awaiting a person), as the lane
+// holds it, and a waiting claim is nudged only a Cap apart.
 
 // rlPool is how the world's provider pool answers a turn.
 type rlPool uint8
@@ -64,6 +71,11 @@ type rlSim struct {
 	ops        int
 	delivered  time.Time // the newest delivery this generation, as the harness saw it
 	answeredAt time.Time // the end of the newest answered refusal the harness saw
+	// heldUntil ends an operator hold: the gate holds the seat for hours,
+	// keeping its generation. idleUntil ends a stretch with no work (a pool
+	// sibling took it), and parked is the work that comes back then.
+	heldUntil, idleUntil time.Time
+	parked               []Work
 	// episode bookkeeping (RL3)
 	epRestarts, epAlerts int
 	lastHeard            map[ClaimKey]time.Time
@@ -75,6 +87,7 @@ type rlWorld struct {
 	now       time.Time
 	pool      rlPool
 	quota     bool          // this world's refusing pool is a spent quota
+	laneSkips bool          // the lane decides no seat holding no work, no entry and no release
 	stuck     map[int]int64 // seat -> the newest conversation a sticky pool refuses
 	seats     []*rlSim
 	degraded  map[string]bool // per provider name
@@ -91,6 +104,13 @@ type rlWorld struct {
 var rlCoverage = struct {
 	moves    sync64Map
 	restarts atomic.Int64
+	// Acting passes reading a refusal of the last delivered nudge that is
+	// no evidence: past the evidence bound (old), standing alone in an open
+	// episode past FreshConfirm with no nudge delivered since it opened
+	// (unprobed), or from before a restarted episode's restart (preRestart).
+	old, unprobed, preRestart atomic.Int64
+	// Nudges of a claim waiting on a person while an episode stands.
+	waitNudged atomic.Int64
 }{moves: sync64Map{}}
 
 type sync64Map struct{ m [64]atomic.Int64 }
@@ -121,7 +141,7 @@ func newRLWorld(seed uint64, seats int) *rlWorld {
 		rng: rand.New(rand.NewPCG(seed, 0x726174656c696d)), now: t0, stuck: map[int]int64{},
 		degraded: map[string]bool{}, lastFresh: map[string]time.Time{},
 	}
-	w.quota = w.chance(20)
+	w.quota, w.laneSkips = w.chance(20), w.chance(50)
 	providers := []string{"p1"}
 	if seats > 1 && w.chance(50) {
 		providers = append(providers, "p2")
@@ -132,8 +152,10 @@ func newRLWorld(seed uint64, seats int) *rlWorld {
 			lastHeard: map[ClaimKey]time.Time{}, lastPaused: map[ClaimKey]time.Time{},
 		}
 		// Every seat holds a started claim; some hold more (RL3: the
-		// episode is the seat's however many claims it holds).
+		// episode is the seat's however many claims it holds). In some, the
+		// first claim waits on a person.
 		s.work = []Work{claim(fmt.Sprintf("s%d", i))}
+		s.work[0].AwaitsHuman = w.chance(20)
 		if w.chance(50) {
 			s.work = append(s.work, claim(fmt.Sprintf("t%d", i)), trig(fmt.Sprintf("u%d", i)))
 		}
@@ -235,14 +257,16 @@ func (w *rlWorld) step() {
 			w.poolRestarts, w.poolCloses = 0, 0
 		}
 	}
-	for name := range map[string]bool{"p1": true, "p2": true} {
+	for _, name := range []string{"p1", "p2"} { // in order: a seed is one world
 		if w.chance(4) {
 			w.degraded[name] = !w.degraded[name]
 		}
 	}
 	for i, s := range w.seats {
 		if s.restarting > 0 {
-			if s.restarting--; s.restarting == 0 {
+			// The restart lands in a new generation, unless its request
+			// was cleared with no restart at all.
+			if s.restarting--; s.restarting == 0 && !w.chance(3) {
 				s.gen++
 				if !w.chance(5) { // else the restart lost its new conversation
 					s.conv++
@@ -255,6 +279,22 @@ func (w *rlWorld) step() {
 		}
 		if w.chance(5) {
 			s.hold = RestartHold(w.rng.IntN(3))
+		}
+		if i := w.rng.IntN(len(s.work) + 1); i < len(s.work) && s.work[i].Kind == KindClaim {
+			if s.work[i].AwaitsHuman {
+				s.work[i].AwaitsHuman = !w.chance(10) // the seat works the step again and clears the key
+			} else {
+				s.work[i].AwaitsHuman = w.chance(1) // the seat asks a person
+			}
+		}
+		if !w.now.Before(s.heldUntil) && w.chance(1) { // an operator hold or a quarantine
+			s.heldUntil = w.now.Add(w.between(time.Hour, 4*time.Hour))
+		}
+		switch {
+		case !s.idleUntil.IsZero() && !w.now.Before(s.idleUntil): // the work comes back
+			s.work, s.parked, s.idleUntil = s.parked, nil, time.Time{}
+		case s.idleUntil.IsZero() && len(s.work) > 0 && w.chance(1): // a pool sibling takes the work
+			s.work, s.parked, s.idleUntil = nil, s.work, w.now.Add(w.between(30*time.Minute, 4*time.Hour))
 		}
 		if w.chance(3) && !s.running(w.now) { // the agent's own turn
 			w.startTurn(i, w.now.Add(-w.between(0, time.Minute)), 10*time.Second, 10*time.Minute)
@@ -274,10 +314,16 @@ func (w *rlWorld) observe(i int) Observation {
 		if wk.Kind == KindClaim {
 			o.Started[wk.Key] = SrcAgent
 		}
+		if wk.AwaitsHuman { // the lane holds the restart of a seat whose work waits (seatAwaitsHuman)
+			o.RestartHold = RestartHoldAwaitingHuman
+		}
 	}
-	if s.restarting > 0 {
+	switch {
+	case s.restarting > 0:
 		o.Gate = Gate{Held: true, Reason: "restart_pending"}
-	} else if w.chance(3) {
+	case w.now.Before(s.heldUntil):
+		o.Gate = Gate{Held: true, Reason: "operator_hold"}
+	case w.chance(3):
 		o.Gate = Gate{Held: true, Reason: "draining"}
 	}
 	if w.chance(2) {
@@ -294,6 +340,7 @@ func (w *rlWorld) observe(i int) Observation {
 			o.Hold[wk.Key] = true
 		}
 	}
+	o.Partial = w.chance(3) // a store that did not answer the planner's snapshot
 	var last time.Time
 	for _, t := range s.turns {
 		if t.conv == s.conv && !t.start.After(w.now) {
@@ -347,13 +394,18 @@ func maxTime(a, b time.Time) time.Time {
 	return a
 }
 
-// answered is the RL evidence computed apart from Decide: this pass's
-// reading shows the provider refused the seat after its last delivered
-// nudge of this generation, while it holds work.
-func answered(o Observation, delivered time.Time, entries int) bool {
+// refusedSince reports whether this pass's reading shows the provider
+// refused the seat after its last delivered nudge of this generation, while
+// it holds work, however long ago.
+func refusedSince(o Observation, delivered time.Time, entries int) bool {
 	t := o.Turns
-	return t.Read && t.Conv == o.Conv && entries > 0 && t.Refused >= DefaultRateLimitThreshold && !delivered.IsZero() && t.RefusedAt.After(delivered) &&
-		o.Now.Sub(t.RefusedAt) <= DefaultCap
+	return t.Read && t.Conv == o.Conv && entries > 0 && t.Refused >= DefaultRateLimitThreshold && !delivered.IsZero() && t.RefusedAt.After(delivered)
+}
+
+// answered is the RL evidence computed apart from Decide: refusedSince, the
+// refusal no longer than RateLimitEvidenceMaxAge ago.
+func answered(o Observation, delivered time.Time, entries int) bool {
+	return refusedSince(o, delivered, entries) && o.Now.Sub(o.Turns.RefusedAt) <= p.RateLimitEvidenceMaxAge
 }
 
 // alertMove is the move an episode's alert reason rides with.
@@ -370,6 +422,9 @@ func (w *rlWorld) pass(i, step int) error {
 	w.settleNotices(i)
 	if s.rec.Gen != s.gen && s.rec.V != 0 {
 		s.delivered = time.Time{}
+	}
+	if w.laneSkips && len(s.work) == 0 && len(s.rec.Entries) == 0 && s.rec.Release == nil {
+		return nil // the lane neither decides nor writes the seat
 	}
 	o := w.observe(i)
 	prev := s.rec
@@ -394,6 +449,17 @@ func (w *rlWorld) pass(i, step int) error {
 	ans := answered(o, s.delivered, len(d.Next.Entries))
 	prl := clampRateLimit(prev.RateLimit, o.Now)
 	nrl := d.Next.RateLimit
+	probed := s.delivered.After(prl.Since) // a nudge reached the seat after its episode opened
+	if acting && refusedSince(o, s.delivered, len(d.Next.Entries)) {
+		switch {
+		case !ans:
+			rlCoverage.old.Add(1)
+		case prl.Phase == RateLimitOpen && !probed && o.Now.Sub(prl.Since) >= DefaultPausedCap:
+			rlCoverage.unprobed.Add(1)
+		case prl.Phase == RateLimitRestarted && !o.Turns.RefusedAt.After(prl.FreshAt):
+			rlCoverage.preRestart.Add(1)
+		}
+	}
 
 	// RL1: an acting, healthy pass reading an answered refusal leaves an
 	// episode standing; an episode opens only on such a pass.
@@ -428,14 +494,30 @@ func (w *rlWorld) pass(i, step int) error {
 			return fail("RL2: restarted from %+v", prl)
 		case !ans || degraded || o.RestartHold != RestartHoldNone:
 			return fail("RL2: restarted with answered %v, degraded %v, hold %v", ans, degraded, o.RestartHold)
-		case anyMarked(d.Next) || d.Next.Release != nil || len(o.Hold) > 0:
-			return fail("RL2: restarted over a pending notice, release or unread claim")
+		case anyMarked(d.Next) || d.Next.Release != nil || len(o.Hold) > 0 || o.Partial:
+			return fail("RL2: restarted over a pending notice, release, unread claim or incomplete listing")
 		case !prl.LastFresh.IsZero() && o.Now.Sub(prl.LastFresh) < DefaultCap:
 			return fail("RL2: restarted %v after the seat's last", o.Now.Sub(prl.LastFresh))
 		case !o.ProviderFreshAt.IsZero() && o.Now.Sub(o.ProviderFreshAt) < DefaultProviderFreshGap:
 			return fail("RL2: restarted %v after another seat on the provider", o.Now.Sub(o.ProviderFreshAt))
 		case nudges > 0:
 			return fail("RL2: a nudge in the restart's pass")
+		}
+	}
+	// RL2: every move but opening and closing stands on evidence: an
+	// exhausted restart on a refusal after it, and a confirmed episode's
+	// move (its restart, hold or exhaustion) on an answered refusal of a
+	// nudge delivered after the episode opened, FreshConfirm past its
+	// opening. FreshConfirm is observed, never inferred from an old Since.
+	for _, m := range moves {
+		switch {
+		case m.Transition == RateLimitTransitionOpened || m.Transition == RateLimitTransitionClosed:
+		case prl.Phase == RateLimitRestarted:
+			if !ans || !o.Turns.RefusedAt.After(prl.FreshAt) {
+				return fail("RL2: %v on no refusal after the restart", m)
+			}
+		case !ans || !probed || o.Now.Sub(prl.Since) < DefaultPausedCap:
+			return fail("RL2: %v with answered %v, a nudge delivered since the episode opened %v", m, ans, probed)
 		}
 	}
 
@@ -467,13 +549,26 @@ func (w *rlWorld) pass(i, step int) error {
 		}
 	}
 
-	// RL4: paced paused while an episode stands.
+	// RL4: paced paused while an episode stands, and never slower than its
+	// evidence allows: every entry falls due again within
+	// RateLimitEvidenceMaxAge - PausedCap of its last nudge (or of its
+	// start), a wait on a person's Cap included, so each nudge's refusal has
+	// PausedCap to be read before the refusal the episode last read is too
+	// old to keep it standing.
 	if nrl.Phase != RateLimitClear {
+		for _, e := range d.Next.Entries {
+			if gap := p.dueAt(e, true).Sub(maxTime(e.Last, e.Since)); gap > p.RateLimitEvidenceMaxAge-p.PausedCap {
+				return fail("RL4: %v paced %v apart inside an episode whose evidence ages out after %v", e.Key, gap, p.RateLimitEvidenceMaxAge)
+			}
+		}
 		for _, a := range d.Actions {
 			switch a := a.(type) {
 			case Nudge:
 				if !a.Paused {
 					return fail("RL4: a counted nudge while rate limited")
+				}
+				if entryOrZero(d.Next, a.Key).AwaitsHuman {
+					rlCoverage.waitNudged.Add(1)
 				}
 				if pe, ok := entryOf(prev, a.Key); ok && prev.Gen == o.Gen && pe.Kind == a.Kind && pe.Since.Equal(entryOrZero(d.Next, a.Key).Since) &&
 					pe.Attempts+pe.Paused > 0 && o.Now.Sub(pe.Last) < DefaultPausedCap {
@@ -493,8 +588,10 @@ func (w *rlWorld) pass(i, step int) error {
 		}
 	}
 
-	// RL5: liveness.
-	if acting && ans && !degraded && nrl.Phase == RateLimitOpen && prl.Phase == RateLimitOpen && nrl.Since.Equal(prl.Since) &&
+	// RL5: liveness. An episode whose probe was refused has restarted or
+	// alerted by FreshConfirm + Cap, and Checked moves only on an answered
+	// refusal.
+	if acting && ans && probed && !degraded && nrl.Phase == RateLimitOpen && prl.Phase == RateLimitOpen && nrl.Since.Equal(prl.Since) &&
 		o.Now.Sub(nrl.Since) >= DefaultPausedCap+DefaultCap && nrl.Alerted == "" {
 		return fail("RL5: confirmed %v ago and neither restarted nor alerted", o.Now.Sub(nrl.Since))
 	}
@@ -503,8 +600,11 @@ func (w *rlWorld) pass(i, step int) error {
 	if ans && o.Turns.RefusedAt.After(s.answeredAt) {
 		s.answeredAt = minTime(o.Turns.RefusedAt, o.Now)
 	}
-	if acting && nrl.Phase != RateLimitClear && o.Now.Sub(s.answeredAt) > DefaultCap {
+	if acting && nrl.Phase != RateLimitClear && o.Now.Sub(s.answeredAt) > p.RateLimitEvidenceMaxAge {
 		return fail("RL5: no new answered refusal for %v and still open", o.Now.Sub(s.answeredAt))
+	}
+	if nrl.Phase != RateLimitClear && !nrl.Checked.Equal(prl.Checked) && !ans {
+		return fail("RL5: Checked moved to %v on no answered refusal", nrl.Checked.Sub(t0))
 	}
 	if t := o.Turns; acting && t.Read && t.Conv == o.Conv && prl.Phase != RateLimitClear {
 		ref := prl.Since
@@ -515,12 +615,13 @@ func (w *rlWorld) pass(i, step int) error {
 			return fail("RL5: served at %v and still open", t.ServedAt.Sub(t0))
 		}
 	}
-	// WL1 holds: every entry of a nudgeable seat hears from the ladder.
+	// WL1 holds: every entry of a nudgeable seat hears from the ladder. A
+	// wait on a person that begins is paced from its start.
 	eligible := acting
 	for _, e := range d.Next.Entries {
 		since, ok := s.lastHeard[e.Key]
 		switch {
-		case !eligible || !ok || o.Hold[e.Key] || prev.Gen != o.Gen || (d.Next.Release != nil && d.Next.Release.Key == e.Key):
+		case !eligible || !ok || o.Hold[e.Key] || prev.Gen != o.Gen || (d.Next.Release != nil && d.Next.Release.Key == e.Key) || entryOrZero(prev, e.Key).AwaitsHuman != e.AwaitsHuman:
 			s.lastHeard[e.Key] = o.Now
 		case o.Now.Sub(since) > DefaultCap+3*maxStep+2*DefaultBase:
 			return fail("WL1: %v of a quiet seat has not heard from the ladder for %v", e.Key, o.Now.Sub(since))
@@ -534,12 +635,18 @@ func (w *rlWorld) pass(i, step int) error {
 			s.lastHeard[a.Key] = o.Now
 		}
 	}
+	for k := range s.lastHeard { // work that left the cell starts afresh if it comes back
+		if _, ok := entryOf(d.Next, k); !ok {
+			delete(s.lastHeard, k)
+		}
+	}
 
-	// RL8: progress, as C1 judges it.
+	// RL8: progress, as C1 judges it. A wait on a person that begins or
+	// ends starts a new episode instead.
 	if prev.V != 0 && prev.Gen == o.Gen {
 		for _, e := range d.Next.Entries {
 			pe, ok := entryOf(prev, e.Key)
-			if !ok || pe.Kind != e.Kind || e.Rung != pe.Rung {
+			if !ok || pe.Kind != e.Kind || e.Rung != pe.Rung || pe.AwaitsHuman != e.AwaitsHuman {
 				continue
 			}
 			evidence := o.LastActivity
@@ -655,8 +762,22 @@ func rlCovered(t *testing.T) {
 			missing = append(missing, fmt.Sprintf("%s/%s", mv.Transition, mv.Cause))
 		}
 	}
-	if len(missing) > 0 || rlCoverage.restarts.Load() == 0 {
-		t.Fatalf("the sims never reached: %s (restarts %d)", strings.Join(missing, ", "), rlCoverage.restarts.Load())
+	for _, c := range []struct {
+		name string
+		n    *atomic.Int64
+	}{
+		{"a fresh restart", &rlCoverage.restarts},
+		{"a refusal past the evidence bound", &rlCoverage.old},
+		{"an unprobed refusal past FreshConfirm", &rlCoverage.unprobed},
+		{"a refusal from before the restart", &rlCoverage.preRestart},
+		{"a wait on a person nudged inside an episode", &rlCoverage.waitNudged},
+	} {
+		if c.n.Load() == 0 {
+			missing = append(missing, c.name)
+		}
+	}
+	if len(missing) > 0 {
+		t.Fatalf("the sims never reached: %s", strings.Join(missing, ", "))
 	}
 }
 
