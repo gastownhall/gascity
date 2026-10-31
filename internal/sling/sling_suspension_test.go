@@ -252,6 +252,44 @@ func TestDoSlingRuntimeResumeOverridesAuthoredSuspend(t *testing.T) {
 	}
 }
 
+func TestDoSlingWarnsPathBoundAgentInSuspendedRig(t *testing.T) {
+	cityPath := suspensionTestCityDir(t)
+	rigPath := filepath.Join(cityPath, "repos", "myrig")
+	writeRigSuspension(t, cityPath, "myrig", true)
+
+	cases := []struct {
+		name string
+		dir  string
+	}{
+		{name: "absolute_dir", dir: rigPath},
+		{name: "relative_dir", dir: filepath.Join("repos", "myrig")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := newFakeRunner()
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Rigs:      []config.Rig{{Name: "myrig", Path: rigPath}},
+			}
+			a := config.Agent{Name: "polecat", Dir: tc.dir, MaxActiveSessions: intPtr(1)}
+
+			deps := testDeps(cfg, runtime.NewFake(), runner.run)
+			deps.CityPath = cityPath
+			deps.Store = seededStore("my-1")
+
+			result, err := DoSling(testOpts(a, "my-1"), deps, nil)
+			if err != nil {
+				t.Fatalf("DoSling error: %v", err)
+			}
+			// The same path-aware resolution gc session wake / gc hook use:
+			// the rig is matched by configured path, not by bare name.
+			if result.SuspendedRig != "myrig" {
+				t.Errorf("SuspendedRig = %q, want myrig for a path-bound agent in a suspended rig", result.SuspendedRig)
+			}
+		})
+	}
+}
+
 func TestDoSlingCityAndRigBothSuspendedSetBothFields(t *testing.T) {
 	runner := newFakeRunner()
 	cfg := &config.City{
