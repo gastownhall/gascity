@@ -24,6 +24,12 @@ resource = "test_target"
 calls = 38
 
 [[count]]
+path = "cmd/gc-osc7501/e2e_test.go"
+resource = "subprocess"
+calls = 3
+tagged = true
+
+[[count]]
 path = "cmd/gc-write-mint/e2e_test.go"
 resource = "subprocess"
 calls = 1
