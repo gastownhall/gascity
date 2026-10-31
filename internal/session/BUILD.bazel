@@ -179,6 +179,7 @@ go_test(
         "nudge_delivery_key_test.go",
         "orphan_auto_test.go",
         "orphan_infrastructure_fence_linux_test.go",
+        "orphan_scan_bound_test.go",
         "overlay_test.go",
         "pending_create_lease_test.go",
         "pending_question_test.go",

@@ -639,7 +639,13 @@ type Manager struct {
 	staleKeyDetectionWaiter StaleKeyDetectionWaiter
 	leaseTTL                time.Duration       // the runtime lease records' TTL (WithRuntimeLeaseTTL)
 	deferredSubmits         DeferredSubmitQueue // injected deferred-submit queue (WithDeferredSubmitQueue)
+	orphanScanBudget        time.Duration       // longest the pre-start orphan scan may run before the start is deferred
 }
+
+// defaultOrphanScanBudget is how long a start waits for its pre-start orphan
+// scan. A healthy /proc walk takes milliseconds; one that has not finished by
+// then is wedged on a hung read.
+const defaultOrphanScanBudget = 10 * time.Second
 
 // PruneResult reports which sessions were pruned and which queued wait nudges
 // should be eagerly withdrawn afterward.
@@ -767,18 +773,31 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 // scan error is logged and treated as fail-closed (see FindRuntimesBySessionID):
 // the roots the scan did surface are still killed, and matching the started
 // replacement is impossible because it does not exist yet.
+//
+// The scan is bounded by the shorter of ctx and the manager's orphan-scan
+// budget. A scan that does not finish says nothing about what is running, so
+// nothing is terminated and the error wraps runtime.ErrRuntimeUnavailable: the
+// caller defers the start instead of failing it. Termination of an in-flight
+// root cannot be interrupted, but ctx is checked between roots; roots left
+// untouched when it is done are reported the same way.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
-	_ = ctx
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
 	if !ok || sessionID == "" {
 		return nil
 	}
-	found, err := scanner.FindRuntimesBySessionID(sessionID)
+	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
+	// Its own key space: it must not collide with the latch keys other bounded
+	// calls take for the same city and session.
+	scanKey := "orphan-scan\x00" + cityPath + "\x00" + sessionID
+	found, err := runtime.FindRuntimesBySessionIDBounded(ctx, scanner, scanKey, sessionID, m.orphanScanBudget)
+	if errors.Is(err, runtime.ErrProcessTableScanUnavailable) {
+		log.Printf("session: orphan scan for %s did not finish; deferring start: %v", sessionID, err)
+		return fmt.Errorf("orphan scan for %s: %w", sessionID, err)
+	}
 	if err != nil {
 		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(err))
 	}
-	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
-	var termErrs []error
+	var targets []runtime.LiveRuntime
 	for _, live := range found {
 		if live.IsTracked || live.SessionID != sessionID {
 			continue
@@ -794,6 +813,13 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		if proctable.IsCityInfrastructureRoot(live.PID) {
 			log.Printf("session: leaving process-table root for %s pid=%d alone: city infrastructure (managed Dolt watchdog or bd proxy)", sessionID, live.PID)
 			continue
+		}
+		targets = append(targets, live)
+	}
+	var termErrs []error
+	for i, live := range targets {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("%d orphaned runtime(s) not terminated: %w: %w", len(targets)-i, runtime.ErrRuntimeUnavailable, ctxErr)
 		}
 		if err := scanner.TerminateRuntime(live); err != nil {
 			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)
@@ -893,7 +919,7 @@ func WithClock(clk clock.Clock) ManagerOption {
 // session provider, applying any capability options. It is the canonical
 // constructor; the named NewManager* variants below are one-line presets.
 func NewManagerWithOptions(store beads.Store, sp runtime.Provider, opts ...ManagerOption) *Manager {
-	m := &Manager{store: store, sp: sp, staleKeyDetectionWaiter: waitForStaleKeyDetection}
+	m := &Manager{store: store, sp: sp, staleKeyDetectionWaiter: waitForStaleKeyDetection, orphanScanBudget: defaultOrphanScanBudget}
 	for _, opt := range opts {
 		opt(m)
 	}

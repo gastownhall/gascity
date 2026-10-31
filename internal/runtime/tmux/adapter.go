@@ -449,6 +449,11 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 // FindRuntimesBySessionID implements [runtime.ProcessTableScanner].
 func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	found, scanErr := proctable.ScanBySessionID(id)
+	if len(found) == 0 {
+		// Nothing to classify: tracking can only mark entries already in found,
+		// so skip the tmux round-trips (a list plus a meta read per session).
+		return found, scanErr
+	}
 	running, listErr := p.ListRunning("")
 	if listErr != nil {
 		// Fail CLOSED: without the live-session list we cannot prove which
