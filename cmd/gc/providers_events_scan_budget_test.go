@@ -12,7 +12,7 @@ import (
 
 // TestOpenCityEventsProviderAppliesScanBudgetConfig proves the [events.scan_budget]
 // TOML table actually reaches FileRecorder.ListNewestBounded's per-call archive
-// budget, end to end through openCityEventsProvider — not just that the config
+// budget, end to end through the rotation owner (newFileEventsRecorder) — not just that the config
 // struct decodes (that's covered in internal/config).
 func TestOpenCityEventsProviderAppliesScanBudgetConfig(t *testing.T) {
 	cityDir := t.TempDir()
@@ -48,13 +48,11 @@ max_archive_bytes_per_request = 1
 	}
 
 	var stderr strings.Builder
-	ep, code := openCityEventsProvider(&stderr, "test")
-	if code != 0 || ep == nil {
-		t.Fatalf("openCityEventsProvider() code = %d, provider nil = %t, stderr = %q", code, ep == nil, stderr.String())
-	}
-	rec, ok := ep.(*events.FileRecorder)
-	if !ok {
-		t.Fatalf("provider = %T, want *events.FileRecorder", ep)
+	// The rotation owner is the recorder that applies [events] config; the
+	// CLI's secondary recorders never rotate and carry no scan budget.
+	rec, err := newFileEventsRecorder(filepath.Join(cityDir, ".gc", "events.jsonl"), eventsProviderConfigWithWarnings(&stderr), &stderr)
+	if err != nil {
+		t.Fatalf("newFileEventsRecorder: %v (stderr = %q)", err, stderr.String())
 	}
 	defer rec.Close() //nolint:errcheck // test cleanup
 

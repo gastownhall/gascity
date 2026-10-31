@@ -1221,6 +1221,7 @@ func eventsFileRecorderOptions(eventsCfg config.EventsConfig, stderr io.Writer) 
 		events.WithRotationCheckRecords(settings.checkIntervalRecords),
 		events.WithRotationCheckInterval(settings.checkInterval),
 		events.WithArchiveRetainAge(settings.archiveRetainAge),
+		events.WithScanBudget(eventsCfg.ScanBudget.MaxArchiveBytesPerRequestOrDefault()),
 	}
 	if mirror, ok := eventsMirrorOptions(eventsCfg.Mirror, stderr); ok {
 		opts = append(opts, events.WithMirror(mirror))

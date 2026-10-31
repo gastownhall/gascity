@@ -1237,6 +1237,9 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	if fragMeta.IsDefined("events", "mirror") {
 		base.Events.Mirror = fragment.Events.Mirror
 	}
+	if fragMeta.IsDefined("events", "scan_budget") {
+		base.Events.ScanBudget = fragment.Events.ScanBudget
+	}
 	if fragMeta.IsDefined("usage") {
 		base.Usage = fragment.Usage
 	}

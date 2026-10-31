@@ -2191,11 +2191,15 @@ archive_retain_age = "720h"
 [events.mirror]
 path = "/var/log/gascity/root/events.jsonl"
 mode = "0600"
+
+[events.scan_budget]
+max_archive_bytes_per_request = 67108864
 `
 	fragments := map[string]string{
-		"provider": "[events]\nprovider = \"exec:/usr/local/bin/events-bridge\"\n",
-		"rotation": "[events.rotation]\nmax_size_bytes = 1024\n",
-		"mirror":   "[events.mirror]\npath = \"/var/log/gascity/fragment/events.jsonl\"\n",
+		"provider":    "[events]\nprovider = \"exec:/usr/local/bin/events-bridge\"\n",
+		"rotation":    "[events.rotation]\nmax_size_bytes = 1024\n",
+		"mirror":      "[events.mirror]\npath = \"/var/log/gascity/fragment/events.jsonl\"\n",
+		"scan_budget": "[events.scan_budget]\nmax_archive_bytes_per_request = 1048576\n",
 	}
 	rootCfg, err := Parse([]byte(root))
 	if err != nil {

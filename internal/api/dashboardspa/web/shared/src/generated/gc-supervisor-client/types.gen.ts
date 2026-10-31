@@ -1934,6 +1934,10 @@ export type ListBodyAgentPatch = {
      */
     partial_errors?: Array<string> | null;
     /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
+    /**
      * Total number of items matching the query.
      */
     total: number;
@@ -1956,6 +1960,10 @@ export type ListBodyAgentResponse = {
      * Human-readable errors from backends that failed during aggregation.
      */
     partial_errors?: Array<string> | null;
+    /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
     /**
      * Total number of items matching the query.
      */
@@ -1980,6 +1988,10 @@ export type ListBodyBead = {
      */
     partial_errors?: Array<string> | null;
     /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
+    /**
      * Total number of items matching the query.
      */
     total: number;
@@ -2002,6 +2014,10 @@ export type ListBodyCityPendingEntry = {
      * Human-readable errors from backends that failed during aggregation.
      */
     partial_errors?: Array<string> | null;
+    /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
     /**
      * Total number of items matching the query.
      */
@@ -2026,6 +2042,10 @@ export type ListBodyConversationOp = {
      */
     partial_errors?: Array<string> | null;
     /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
+    /**
      * Total number of items matching the query.
      */
     total: number;
@@ -2048,6 +2068,10 @@ export type ListBodyConversationTranscriptRecord = {
      * Human-readable errors from backends that failed during aggregation.
      */
     partial_errors?: Array<string> | null;
+    /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
     /**
      * Total number of items matching the query.
      */
@@ -2072,6 +2096,10 @@ export type ListBodyExtmsgAdapterInfo = {
      */
     partial_errors?: Array<string> | null;
     /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
+    /**
      * Total number of items matching the query.
      */
     total: number;
@@ -2094,6 +2122,10 @@ export type ListBodyProviderPatch = {
      * Human-readable errors from backends that failed during aggregation.
      */
     partial_errors?: Array<string> | null;
+    /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
     /**
      * Total number of items matching the query.
      */
@@ -2118,6 +2150,10 @@ export type ListBodyProviderResponse = {
      */
     partial_errors?: Array<string> | null;
     /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
+    /**
      * Total number of items matching the query.
      */
     total: number;
@@ -2140,6 +2176,10 @@ export type ListBodyRigPatch = {
      * Human-readable errors from backends that failed during aggregation.
      */
     partial_errors?: Array<string> | null;
+    /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
     /**
      * Total number of items matching the query.
      */
@@ -2164,6 +2204,10 @@ export type ListBodyRigResponse = {
      */
     partial_errors?: Array<string> | null;
     /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
+    /**
      * Total number of items matching the query.
      */
     total: number;
@@ -2186,6 +2230,10 @@ export type ListBodySessionBindingRecord = {
      * Human-readable errors from backends that failed during aggregation.
      */
     partial_errors?: Array<string> | null;
+    /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
     /**
      * Total number of items matching the query.
      */
@@ -2210,6 +2258,10 @@ export type ListBodySessionResponse = {
      */
     partial_errors?: Array<string> | null;
     /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
+    /**
      * Total number of items matching the query.
      */
     total: number;
@@ -2233,6 +2285,10 @@ export type ListBodyStatus = {
      */
     partial_errors?: Array<string> | null;
     /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
+    /**
      * Total number of items matching the query.
      */
     total: number;
@@ -2255,6 +2311,10 @@ export type ListBodyWireEvent = {
      * Human-readable errors from backends that failed during aggregation.
      */
     partial_errors?: Array<string> | null;
+    /**
+     * True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.
+     */
+    scan_truncated?: boolean;
     /**
      * Total number of items matching the query.
      */

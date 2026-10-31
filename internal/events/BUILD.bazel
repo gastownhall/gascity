@@ -29,6 +29,7 @@ go_library(
         "rotation.go",
         "rotation_archive.go",
         "rotation_payload.go",
+        "scan_budget.go",
         "stream_cursor.go",
         "supervisor_payloads.go",
         "watch_backfill.go",

@@ -68,7 +68,7 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 	// page) the boundary, ascending; the extra row is the has-more signal.
 	scanFilter := filter
 	scanFilter.BeforeSeq = beforeSeq
-	evts, scanned, err := fetchEventPageAscending(ctx, ep, scanFilter, limit, !filterIsEmpty(filter))
+	evts, scanned, truncated, reachedSeq, err := fetchEventPageAscending(ctx, ep, scanFilter, limit, !filterIsEmpty(filter))
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
@@ -114,8 +114,21 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 	// silently strand the rest of the walk. Anchoring on evts guarantees
 	// exactly `limit` seqs of progress per page regardless of projection
 	// failures — corrupt rows are skipped, never re-fetched, never wedge.
+	//
+	// truncated takes priority over hasMore: a bounded scan that hit its
+	// budget before finding a full page reports fewer than limit+1 events
+	// (so hasMore is false), but older matching history may still exist
+	// beyond where the scan stopped. reachedSeq is that resume boundary —
+	// it must be used instead of evts[0].Seq, which would re-scan the same
+	// budget-exhausted window forever (see events.BoundedScanProvider).
 	var nextCursor string
-	if hasMore {
+	switch {
+	case truncated:
+		nextCursor = encodeKeysetCursor(keysetCursor{
+			Kind: cursorKindSeq,
+			Seq:  reachedSeq,
+		})
+	case hasMore:
 		nextCursor = encodeKeysetCursor(keysetCursor{
 			Kind: cursorKindSeq,
 			Seq:  evts[0].Seq,
@@ -123,7 +136,7 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 	}
 	return &ListOutput[WireEvent]{
 		Index: index,
-		Body:  ListBody[WireEvent]{Items: wires, Total: total, NextCursor: nextCursor},
+		Body:  ListBody[WireEvent]{Items: wires, Total: total, NextCursor: nextCursor, ScanTruncated: truncated},
 	}, nil
 }
 
@@ -146,51 +159,85 @@ func parseEventBeforeSeq(cursor string) (uint64, error) {
 
 // fetchEventPageAscending fetches up to limit+1 matching events at or below the
 // filter's BeforeSeq boundary in ascending seq order; the extra row is the
-// has-more signal. It returns the fetched events and scanned — the best-effort
-// count of matching rows the read could see, used as the filtered Total.
+// has-more signal. It returns the fetched events, scanned — the best-effort
+// count of matching rows the read could see, used as the filtered Total — and
+// truncated/reachedSeq: set when the bounded-scan path (below) stopped short
+// of a full page because its byte budget ran out, not because history was
+// exhausted. reachedSeq is meaningless (0) unless truncated is true.
 //
 // ListTail is the fast path: a backward scan of the ACTIVE events.jsonl only,
 // never the .gz archives, so its result is trusted ONLY when it yields a full
 // limit+1 rows. The active file holds the newest events, so a full tail page
 // there IS the newest page below the boundary. Anything short cannot
 // distinguish "log exhausted" from "active file exhausted, older matches in
-// archives/rotation" and MUST fall through to the full scan — otherwise a
+// archives/rotation" and MUST fall through to a broader scan — otherwise a
 // rotation (or a selective filter) strands the older history behind an unminted
-// cursor. The scan uses the in-flight-aware read when the provider offers one
-// (listWithInFlight) so a just-rotated segment living only in a .rotating-* file
-// is not skipped; the BeforeSeq predicate keeps rotation/archive handling inside
-// the one battle-tested sequential reader instead of a bespoke reverse reader.
+// cursor.
 //
-// That full scan holds EVERY matching event below the boundary only to keep
-// the last limit+1, and it ignores ctx: right after a rotation, every request
-// holds the whole retained history, also after its client has gone. A
+// A filter with no lower bound (AfterSeq==0 && Since.IsZero()) has nothing for
+// a full scan to skip-fast on: a selective Type/Actor filter forces it to open
+// every retained archive just to find the newest matches. When the provider
+// offers [events.BoundedScanProvider], that case instead walks newest-to-oldest
+// over archives + any in-flight rotating segment (never the active file — the
+// tail fetched above already covers that window, reused here instead of
+// rediscovered) and stops at a provider-configured byte budget rather than
+// paying for a full-history scan. A query with a lower bound, or a provider
+// without the extension, falls through to the scans below.
+//
+// Those scans hold EVERY matching event below the boundary only to keep the
+// last limit+1, and the plain one ignores ctx: right after a rotation, every
+// request holds the whole retained history, also after its client has gone. A
 // provider that implements [events.HistoryTailProvider] (the file-backed log)
 // gives the same rows while holding at most limit+1 events, and stops when ctx
 // is done. countMatches asks it for the full scan's match count too, which is
-// the Total of a filtered read.
-func fetchEventPageAscending(ctx context.Context, ep events.Provider, filter events.Filter, limit int, countMatches bool) ([]events.Event, int, error) {
+// the Total of a filtered read. Otherwise the scan uses the in-flight-aware
+// read when the provider offers one (listWithInFlight) so a just-rotated
+// segment living only in a .rotating-* file is not skipped.
+func fetchEventPageAscending(ctx context.Context, ep events.Provider, filter events.Filter, limit int, countMatches bool) ([]events.Event, int, bool, uint64, error) {
 	fetch := limit + 1
+
+	var tail []events.Event
 	if tp, ok := ep.(events.TailProvider); ok {
-		tail, err := tp.ListTail(filter, fetch)
+		t, err := tp.ListTail(filter, fetch)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, false, 0, err
 		}
-		if len(tail) == fetch {
-			return tail, limit, nil
+		if len(t) == fetch {
+			return t, limit, false, 0, nil
+		}
+		tail = t
+	}
+	if filter.AfterSeq == 0 && filter.Since.IsZero() {
+		if bp, ok := ep.(events.BoundedScanProvider); ok {
+			// Fence the bounded read below the tail: the two reads are
+			// separate snapshots, so a rotation between them could otherwise
+			// surface tail rows again from a freshly promoted segment.
+			bounded := filter
+			if len(tail) > 0 && (bounded.BeforeSeq == 0 || tail[0].Seq < bounded.BeforeSeq) {
+				bounded.BeforeSeq = tail[0].Seq
+			}
+			older, truncated, reachedSeq, err := bp.ListNewestBounded(ctx, bounded, fetch-len(tail))
+			if err != nil {
+				return nil, 0, false, 0, err
+			}
+			older = append(older, tail...)
+			return older, len(older), truncated, reachedSeq, nil
 		}
 	}
+
 	if hp, ok := ep.(events.HistoryTailProvider); ok {
-		return hp.ListHistoryTail(ctx, filter, fetch, countMatches)
+		evts, matched, err := hp.ListHistoryTail(ctx, filter, fetch, countMatches)
+		return evts, matched, false, 0, err
 	}
 	all, err := listWithInFlight(ep, filter)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, 0, err
 	}
 	scanned := len(all)
 	if len(all) > fetch {
 		all = all[len(all)-fetch:]
 	}
-	return all, scanned, nil
+	return all, scanned, false, 0, nil
 }
 
 // listWithInFlight returns all events matching filter, folding in events still
