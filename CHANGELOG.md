@@ -653,6 +653,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A pool session no longer claims routed work bound to another session's
+  managed worktree.** When several ready beads for one pool each carried a
+  managed worktree (`gc.work_dir` with complete gc worktree ownership
+  metadata), the controller started a session inside each bead's worktree,
+  but `gc hook --claim` handed each session the first unassigned bead in the
+  routed window, so work ran in one checkout and on one branch while the bead
+  named another. The fresh-claim tier now skips, for a pool session, any
+  unassigned bead whose managed worktree is a different directory than the
+  session's own; that bead is left to the session started inside it. A pool
+  session running inside a managed worktree also leaves unassigned work that
+  names no managed worktree, which would otherwise run on another bead's
+  checkout and branch; the controller starts a session in the pool's own
+  directory for it. Plain `gc hook` leaves the same beads out of that
+  session's listing, so a prompt that lists work and then claims it by id
+  cannot take them either, and when these checks leave a session nothing to
+  claim, `gc hook --claim` names each such bead on stderr. A user-created
+  session row from before manual sessions were marked as such counts as
+  manual here, as it does for the controller. Named, manual and session-less
+  claimants and assigned work claim as before.
+
+- **Pool demand across stores names work in the order sessions claim it.**
+  In a city whose routed work spans more than one bead store, the
+  controller listed pool demand store by store, while `gc hook --claim`
+  reads the merged stores in the canonical ready order (priority, then
+  creation time, then id) through a bounded window. A new session could be
+  started for a bead its window served last or not at all. Demand is now
+  named in the same canonical order, so the session started for a bead finds
+  it at the head of its window. Single-store cities are unaffected.
+
 - **`gc prime --strict` fails on a `prompt_template` that does not render.**
   A `.template.md` (or `.md.tmpl`) prompt_template that failed to parse or
   execute, such as one calling an undefined function `{{base_branch}}`, was

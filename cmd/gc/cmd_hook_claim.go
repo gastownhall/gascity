@@ -24,8 +24,10 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 const hookClaimCommandName = "hook"
@@ -204,6 +206,13 @@ type hookClaimOptions struct {
 	// built for subprocesses, and its inherited-secret filter drops
 	// GC_INSTANCE_TOKEN.
 	StartedFence hookStartedFence
+	// PoolSeatWorkDir is the directory the controller started this pool seat
+	// in, read off the session row the claim fence verified
+	// (hookClaimPoolSeatWorkDir). It is empty for a named, manual or
+	// session-less claimant and whenever the fence did not read the row, and
+	// empty turns the seat checks of the fresh-claim tier off
+	// (hookClaimSeatLeaves).
+	PoolSeatWorkDir string
 }
 
 // continuationPinAssignee returns the identity a continuation sibling is pinned
@@ -274,6 +283,10 @@ type hookClaimOps struct {
 	// until this claim). Empty result means nothing is knowable and nothing is
 	// stamped.
 	ResolveSessionWorkDir hookResolveSessionWorkDirFunc
+	// SeatInManagedWorktree reports whether a pool seat's directory is a
+	// managed worktree: the controller started the seat inside a bead's
+	// verified worktree (hookClaimSeatInManagedWorktree).
+	SeatInManagedWorktree func(seatWorkDir string) bool
 	// StampWorkMeta writes the claim-time execution-identity metadata patch
 	// (gc.work_branch and/or the durable session back-reference gc.session_id /
 	// gc.session_name) onto the claimed bead in ONE update. Best-effort.
@@ -663,6 +676,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.ResolveSessionWorkDir == nil {
 		ops.ResolveSessionWorkDir = hookResolveSessionWorkDir
+	}
+	if ops.SeatInManagedWorktree == nil {
+		ops.SeatInManagedWorktree = hookClaimSeatInManagedWorktree
 	}
 	if ops.StampWorkMeta == nil {
 		ops.StampWorkMeta = hookStampWorkMetaWithBdStore
@@ -1060,7 +1076,21 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	defer cancel()
 	claimsErrored := false
 	now := ops.nowOrWallClock()
+	seatManaged := hookClaimLazySeatInManagedWorktree(opts.PoolSeatWorkDir, ops.SeatInManagedWorktree)
+	// The claimable candidates left to a session in another directory, named
+	// on stderr only if this tier then claims nothing.
+	var leftToAnotherSession []beads.Bead
 	for _, candidate := range candidates {
+		if hookClaimSeatLeaves(candidate, opts.PoolSeatWorkDir, seatManaged) {
+			// Work placed for another directory belongs to the seat the
+			// controller starts there; this seat would run it in the wrong
+			// checkout. Checked first so the opt-in stale reclaim below never
+			// frees a bead this seat would then have to skip.
+			if hookCandidateClaimable(candidate, opts.RouteTargets, now) {
+				leftToAnotherSession = append(leftToAnotherSession, candidate)
+			}
+			continue
+		}
 		reclaimedFrom := ""
 		if !hookCandidateClaimable(candidate, opts.RouteTargets, now) {
 			// ga-7rj87d FR1/FR2: a route-matched candidate whose ONLY claim
@@ -1192,6 +1222,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, hookClaimMinted, landedAt, stdout, stderr)}
 	}
 
+	reportHookClaimLeftToAnotherSession(leftToAnotherSession, opts.PoolSeatWorkDir, stderr)
 	return hookClaimResult{claimsErrored: claimsErrored}
 }
 
@@ -3068,6 +3099,131 @@ func hookClaimWorktreeEvidenceIsWholeOrAbsent(bead beads.Bead) bool {
 		}
 	}
 	return present == 0 || present == len(worktreeOwnershipEvidenceKeys)
+}
+
+// hookClaimManagedWorktreeDir returns the checkout a bead's complete
+// managed-worktree evidence names: one agreeing gc.work_dir / work_dir path,
+// gc.work_branch, and all eight ownership keys. That is exactly the shape
+// worktreeSpecForBead turns into the verified spec the controller starts a
+// pool seat inside (verifiedPoolTriggerWorkDir), and the only shape the
+// controller places a seat for, so any other shape (no path, a path with no or
+// partial evidence, disagreeing spellings) reports false. It is a pure read:
+// worktreeSpecForBead is not called because it logs on the legacy shapes,
+// which a hook would repeat on every invocation.
+func hookClaimManagedWorktreeDir(bead beads.Bead) (string, bool) {
+	canonical := strings.TrimSpace(bead.Metadata[beadmeta.WorkDirMetadataKey])
+	legacy := strings.TrimSpace(bead.Metadata[beadmeta.LegacyWorkDirMetadataKey])
+	if canonical != "" && legacy != "" && canonical != legacy {
+		return "", false
+	}
+	path := canonical
+	if path == "" {
+		path = legacy
+	}
+	if path == "" || strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) == "" {
+		return "", false
+	}
+	for _, key := range worktreeOwnershipEvidenceKeys {
+		if strings.TrimSpace(bead.Metadata[key]) == "" {
+			return "", false
+		}
+	}
+	return path, true
+}
+
+// hookClaimSeatLeaves reports whether a pool seat started in seatWorkDir leaves
+// candidate to a session the controller starts in another directory: the
+// candidate's own managed worktree when that is not the seat's
+// (hookClaimWorktreeHeldElsewhere), or the pool's own directory when the
+// candidate names no managed worktree and the seat runs inside one
+// (hookClaimUnboundWorkOutsideSeat). The fresh-claim tier, its stderr report
+// and plain `gc hook`'s listing (hookVisibility.leavesToAnotherSession) all ask
+// this one predicate, so the listing never shows work the claim would leave.
+func hookClaimSeatLeaves(candidate beads.Bead, seatWorkDir string, seatManaged func() bool) bool {
+	return hookClaimWorktreeHeldElsewhere(candidate, seatWorkDir) || hookClaimUnboundWorkOutsideSeat(candidate, seatWorkDir, seatManaged)
+}
+
+// reportHookClaimLeftToAnotherSession names on stderr each claimable bead the
+// fresh-claim tier left to a session in another directory, for a tier that
+// then claimed nothing. That is when the skip decided the outcome: work no
+// session is started for (its worktree was removed or moved, or the controller
+// refused its evidence) otherwise stays ready while every pool session drains
+// no_work without a word about it. A tier that claims stays quiet, as a seat
+// skipping its siblings' beads on the way to its own is the normal case.
+func reportHookClaimLeftToAnotherSession(left []beads.Bead, seatWorkDir string, stderr io.Writer) {
+	seatWorkDir = strings.TrimSpace(seatWorkDir)
+	for _, bead := range left {
+		if dir, managed := hookClaimManagedWorktreeDir(bead); managed {
+			fmt.Fprintf(stderr, "gc hook --claim: left %s to a session in its managed worktree %s; this session's work dir is %s\n", bead.ID, dir, seatWorkDir) //nolint:errcheck
+			continue
+		}
+		fmt.Fprintf(stderr, "gc hook --claim: left %s, which names no managed worktree, to a session in the pool's own directory; this session's work dir %s is a managed worktree\n", bead.ID, seatWorkDir) //nolint:errcheck
+	}
+}
+
+// hookClaimWorktreeHeldElsewhere reports whether a pool seat started in
+// seatWorkDir must leave candidate to another seat because the candidate's
+// complete managed-worktree evidence names a different checkout. For every
+// such bead it counts as demand, the controller starts a seat inside the
+// bead's own verified worktree, so that seat can claim it; a seat anywhere
+// else would run the bead's work in the wrong tree and on the wrong branch.
+// An empty seatWorkDir (not a pool seat, or a row the fence never read) turns
+// the check off.
+func hookClaimWorktreeHeldElsewhere(candidate beads.Bead, seatWorkDir string) bool {
+	seatWorkDir = strings.TrimSpace(seatWorkDir)
+	if seatWorkDir == "" {
+		return false
+	}
+	dir, managed := hookClaimManagedWorktreeDir(candidate)
+	return managed && !pathutil.SamePath(dir, seatWorkDir)
+}
+
+// hookClaimUnboundWorkOutsideSeat reports whether a pool seat must leave a
+// candidate that names no managed worktree because the seat runs inside one:
+// the controller started it in a bead's verified worktree, and it starts the
+// seat for work bound to no worktree in the pool's own directory
+// (poolTriggerWorkDir). seatManaged is asked only for such a candidate, and an
+// empty seatWorkDir turns the check off.
+func hookClaimUnboundWorkOutsideSeat(candidate beads.Bead, seatWorkDir string, seatManaged func() bool) bool {
+	if strings.TrimSpace(seatWorkDir) == "" {
+		return false
+	}
+	if _, managed := hookClaimManagedWorktreeDir(candidate); managed {
+		return false
+	}
+	return seatManaged()
+}
+
+// hookClaimLazySeatInManagedWorktree answers inManaged(seatWorkDir) at most
+// once per claim, and only when asked: a claim whose candidates all name a
+// managed worktree spends no git probe on it.
+func hookClaimLazySeatInManagedWorktree(seatWorkDir string, inManaged func(string) bool) func() bool {
+	var asked, answer bool
+	return func() bool {
+		if !asked {
+			asked = true
+			answer = inManaged != nil && inManaged(strings.TrimSpace(seatWorkDir))
+		}
+		return answer
+	}
+}
+
+// hookClaimSeatInManagedWorktree reports whether seatWorkDir is a managed
+// worktree: its private git directory holds the provenance a completed
+// `gc worktree ensure` published, which worktree.Verify checked before the
+// controller started a pool seat there (verifiedPoolTriggerWorkDir). A probe
+// that establishes nothing (no repository, no record, an undecodable record, a
+// git that timed out) answers false, which leaves unbound work claimable.
+func hookClaimSeatInManagedWorktree(seatWorkDir string) bool {
+	if strings.TrimSpace(seatWorkDir) == "" {
+		return false
+	}
+	gitDir, probe := hookClaimRunGit(seatWorkDir, "rev-parse", "--absolute-git-dir")
+	if probe != hookClaimProbeAnswered {
+		return false
+	}
+	provenance, err := worktree.ReadProvenanceAt(gitDir)
+	return err == nil && strings.TrimSpace(provenance.BeadID) != ""
 }
 
 func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {

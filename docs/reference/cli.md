@@ -2151,7 +2151,15 @@ and an error before the work query is built (no agent named, a city or config
 that cannot be loaded, an unknown agent), also exit 1.
 With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
 With --claim: runs the standard startup claim protocol for one work item. A
-failed work query is an error (nothing on stdout), never a drain result.
+failed work query is an error (nothing on stdout), never a drain result. A
+pool session does not claim unassigned routed work whose managed worktree
+(gc.work_dir with complete gc worktree ownership metadata) is a directory
+other than its own: the controller starts a session inside that worktree for
+it. A pool session running inside a managed worktree also leaves unassigned
+routed work that names no managed worktree: the controller starts a session
+in the pool's own directory for it. When that leaves the session nothing to
+claim, each such bead is named on stderr with where its session runs. Without
+--claim, that session's output leaves the same work out.
 
 A work query that gets no answer from the bead store (a connection error, a
 timeout, a killed query, a locked database, or bd's circuit breaker failing
