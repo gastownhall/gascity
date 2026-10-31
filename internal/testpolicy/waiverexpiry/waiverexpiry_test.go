@@ -41,3 +41,14 @@ func TestDatedWaiversAgainstToday(t *testing.T) {
 		t.Errorf("waiver clock: %s", fatal)
 	}
 }
+
+// TestDatedWaiversHoldPastOctoberRenewal pins the clock to the first UTC day
+// after the 2026-10-31 expiries and requires every dated waiver to still be
+// valid under the strict nightly audit.
+func TestDatedWaiversHoldPastOctoberRenewal(t *testing.T) {
+	now := time.Date(2026, time.November, 1, 0, 0, 0, 0, time.UTC)
+	report := waiverclock.Check(datedWaivers(), now, waiverclock.ModeStrict)
+	for _, fatal := range report.Fatal {
+		t.Errorf("waiver clock at %s: %s", now.Format("2006-01-02"), fatal)
+	}
+}
