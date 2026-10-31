@@ -26,7 +26,13 @@ var (
 
 // NewSeamBacked constructs a k8s provider served through the seams.
 func NewSeamBacked() (runtime.Provider, error) {
-	raw, err := NewProvider()
+	return NewSeamBackedWithSecretProjection(nil, nil)
+}
+
+// NewSeamBackedWithSecretProjection constructs a seam-backed K8s provider with
+// the city's configured Secret projections.
+func NewSeamBackedWithSecretProjection(secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount) (runtime.Provider, error) {
+	raw, err := NewProviderWithSecretProjection(secretEnv, secretMounts)
 	if err != nil {
 		return nil, err
 	}
