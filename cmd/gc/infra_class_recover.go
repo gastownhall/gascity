@@ -802,9 +802,19 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 			logPrefix, target.Binding, target.MarkerPath(), storageMigrationCommand)
 		return 1
 	}
+	// A marker that names another work store holds here as it holds the boot
+	// (B15): the repair would copy this work store's rows into a binding
+	// converged from another one, and record them in its manifest.
+	if _, _, hold := markerWorkStoreIdentityHold(request.CityPath, target, logPrefix, stderr); hold != nil {
+		hold.Target = target
+		fmt.Fprintln(stderr, infraMigrationOperatorAdvice(*hold, logPrefix)) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// A run that writes holds the controller lock throughout
-	// (storage_verb_exclusion.go); a dry run writes neither store.
+	// (storage_verb_exclusion.go), and under a shared-store attestation every
+	// co-tenant's lock too; a dry run writes neither store.
+	sharedAttested := false
 	if !opts.DryRun {
 		controllerLock, err := acquireStorageVerbExclusion(request, storageVerbScope{})
 		if err != nil {
@@ -812,11 +822,14 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 			return 1
 		}
 		defer controllerLock.Close() //nolint:errcheck // released last, after the guard
-		if _, err := sharedWorkStoreRefusal(request.CityPath, request.Force); err != nil {
+		shared, err := sharedWorkStoreRefusal(request.CityPath, request.Force)
+		if err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		recordStorageAttestation(request.CityPath, logPrefix, request.Force.hazards(), stderr)
+		defer shared.Release()
+		sharedAttested = shared.Attested
+		recordStorageAttestation(request.CityPath, logPrefix, request.Force.acceptedHazards(shared), stderr)
 	}
 	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
 		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city and is still writing infrastructure beads to the work store; a repair proven against a moving source proves nothing. Stop it (gc stop) and run this again\n", logPrefix, pid) //nolint:errcheck // best-effort stderr
@@ -882,6 +895,15 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	// One order for every pass below, so two runs over the same city report the
 	// same thing in the same sequence.
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	// A shared work store holds rows other cities own, and nothing below
+	// asks whose a row is: under the attestation a row another city's scope
+	// names refuses, as it does for the migration, before anything is written.
+	if sharedAttested {
+		if err := foreignScopeRowRefusal(rows, request.CityPath, request.Cfg); err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 	infraIDs := make(map[string]bool, len(rows))
 	for _, b := range rows {
 		infraIDs[b.ID] = true

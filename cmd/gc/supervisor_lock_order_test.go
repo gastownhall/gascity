@@ -262,6 +262,18 @@ func TestStartAfterDriftRestartAcceptsACityTheSupervisorIsInitializing(t *testin
 	if code := registerCityWithSupervisorNamed(cityPath, "", io.Discard, &stderr, "gc start", false); code == 0 || reached {
 		t.Fatal("a city whose supervisor init failed was treated as supervisor-managed while its lock is held")
 	}
+
+	// Nor is a queued one: the supervisor lists it before it takes the lock,
+	// so the held lock belongs to someone else (gc stop, a storage verb, a
+	// booting foreground controller) and both commands refuse at once.
+	status = cityInitStatusQueued
+	for _, cmd := range []string{"gc start", "gc register"} {
+		reached = false
+		stderr.Reset()
+		if code := registerCityWithSupervisorNamed(cityPath, "", io.Discard, &stderr, cmd, false); code == 0 || reached {
+			t.Fatalf("%s while the city is only queued and another process holds its lock = %d (reached=%v); want a refusal", cmd, code, reached)
+		}
+	}
 }
 
 // TestStartedCityKeepsItsControllerLockAndARestartAttemptLeavesIt pins two

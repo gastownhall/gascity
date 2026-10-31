@@ -5209,13 +5209,20 @@ gc storage migrate [flags]
 ## gc storage preflight
 
 Run every check gc storage migrate --from-work runs and report what it
-finds — without copying anything, creating anything, taking the migration guard,
-or publishing any event.
+finds — without copying anything, creating anything, taking the migration guard
+or any controller lock, or publishing any event.
 
 This is for deciding whether the window you are about to take will be spent
-migrating or spent reading a refusal. It runs against a LIVE city: a controller
-serving this city is reported by PID rather than refused, because stopping it is
-the next thing you were going to do anyway.
+migrating or spent reading a refusal. It runs against a LIVE city, so what
+stopping the city ends is reported rather than refused, because stopping it is
+the next thing you were going to do anyway: a controller serving this city (by
+PID), the city's registration with the supervisor, its running sessions, and,
+under a shared-store attestation, the other cities on the store, whose
+controller locks the migration takes.
+
+Pass the --force attestations you will pass to the migration. What they
+lift there is lifted here, and the command this prints for the window carries
+them.
 
 It resolves its destination from [storage.classes], so it has nothing to check
 until that section names a binding. On a city with no infrastructure split it
@@ -5230,8 +5237,12 @@ One condition is never checked here, because no process can check it:
 --fleet-stopped attests that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own.
 
 ```
-gc storage preflight
+gc storage preflight [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
 
 ## gc storage recover-stranded
 

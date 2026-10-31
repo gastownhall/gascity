@@ -354,14 +354,18 @@ func supervisorAlreadyManagesCity(cityPath string) bool {
 
 // supervisorInitializingCity reports that the supervisor lists the city as one
 // it is still bringing up (loading config, starting the bead store, building
-// the runtime, starting agents): listed, not running, and not failed. Since
-// S5-A the supervisor holds the city's controller lock through that whole
-// init and opens the controller socket only at its end, so a held lock with
-// no controller answering is the supervisor's own in that window.
+// the runtime, starting agents): listed, not running, not failed, and past
+// queued. Since S5-A the supervisor holds the city's controller lock through
+// that whole init and opens the controller socket only at its end, so a held
+// lock with no controller answering is the supervisor's own in that window. A
+// queued city is listed before the supervisor takes its lock (it publishes
+// its first init phase only once it holds it), so a lock held while the city
+// is queued is someone else's: gc stop, a storage verb, or a booting
+// foreground controller.
 func supervisorInitializingCity(cityPath string) bool {
 	running, status, known := supervisorCityRunningHook(cityPath)
 	status = strings.TrimSpace(status)
-	return known && !running && status != "" && status != "init_failed"
+	return known && !running && status != "" && status != "init_failed" && status != cityInitStatusQueued
 }
 
 func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stderr io.Writer, commandName string, showProgress bool) int {

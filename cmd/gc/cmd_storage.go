@@ -62,6 +62,14 @@ const (
 	// instruction naming a command this binary does not carry fails at the shell.
 	storageStopCommand = "gc stop"
 
+	// storageCoTenantStopCommand stops a co-tenant (another city that shares
+	// this city's store), with every other supervisor-hosted city, and keeps
+	// it registered. storageStopCommand would unregister it, and the
+	// shared-store check sees only registered cities. --wait returns once the
+	// supervisor has exited, so the cities' controller locks are free when the
+	// verb is run again.
+	storageCoTenantStopCommand = "gc supervisor stop --wait"
+
 	// storageFromBackupFlag names the second source the migrate verb takes:
 	// the retained-source backup a clear wrote, for re-copying a binding whose
 	// database is gone after the work store's copies were cleared.
@@ -472,12 +480,13 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city and is still writing to the work store. Stop it (%s) and run this again\n", logPrefix, pid, storageStopCommand) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	sharedAttested, err := sharedWorkStoreRefusal(request.CityPath, request.Force)
+	shared, err := sharedWorkStoreRefusal(request.CityPath, request.Force)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if sharedAttested && !request.FromBackup {
+	defer shared.Release() // the co-tenants stay stopped until the copy and the clear are done
+	if shared.Attested && !request.FromBackup {
 		if err := sharedStoreForeignRowRefusal(request.CityPath, request.Cfg); err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -489,7 +498,7 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 		return 1
 	}
 
-	recordStorageAttestation(request.CityPath, logPrefix, request.Force.hazards(), stderr)
+	recordStorageAttestation(request.CityPath, logPrefix, request.Force.acceptedHazards(shared), stderr)
 
 	guard, err := acquireStorageMigrationGuard(ctx, request.CityPath)
 	if err != nil {

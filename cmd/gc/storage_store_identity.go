@@ -20,8 +20,10 @@ package main
 // The tuple is read from files only. Boot cannot afford a server round trip
 // per process (the gate already runs in every one-shot CLI), and the files are
 // what a recreated `.beads` changes. The endpoint is resolved only for the
-// shared-store comparison, where a managed Dolt's port (which changes every
-// boot) is meaningful, and never for the boot comparison, where it is not.
+// shared-store comparison, never for the boot comparison. Even there a managed
+// Dolt is named by the data directory it serves, not by its port: the port can
+// change at every boot, and there is none while the city is stopped, which is
+// what every writing storage verb requires.
 //
 // The cross-city comparison (shared stores) is a different question and has
 // one implementation, shared with the rig importer: storeDoltIdentityOf,

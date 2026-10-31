@@ -339,9 +339,12 @@ func importRig(env rigImportEnv, rig config.Rig) (result rigImportResult) {
 	}
 	resuming := notePresent && !note.Complete
 
-	if err := rigImportSharedStoreRefusal(env, rig); err != nil {
+	shared, err := rigImportSharedStoreRefusal(env, rig)
+	if err != nil {
 		return refuse(err)
 	}
+	defer shared.Release() // the co-tenants stay stopped until the rig's import and clear are done
+	recordStorageAttestation(env.CityPath, rigImportLogPrefix, shared.hazards(), env.Stderr)
 	hashConf, err := rigImportHashConfigOpener(env.CityPath, env.Cfg, rig)
 	if err != nil {
 		return refuse(fmt.Errorf("rig %s: %w; nothing was written", rig.Name, err))
@@ -671,11 +674,11 @@ var rigImportCityWorkOpener = func(cityPath string) (beads.Store, error) { retur
 // rigImportSharedStoreRefusal refuses a rig whose store another registered
 // city also uses (findStoreSharers, storage_shared_store.go), unless the
 // operator attested --force=shared-store:<identity> for it and every
-// co-tenant city is stopped. A registry or config that cannot be read
-// refuses: absence of a sharer must be shown, not assumed.
-func rigImportSharedStoreRefusal(env rigImportEnv, rig config.Rig) error {
-	_, err := sharedStoreRefusal(env.CityPath, "rig "+rig.Name, rigStoreRoot(env.CityPath, rig), env.Force)
-	return err
+// co-tenant city is stopped; the returned exclusion keeps them stopped until
+// the caller releases it. A registry or config that cannot be read refuses:
+// absence of a sharer must be shown, not assumed.
+func rigImportSharedStoreRefusal(env rigImportEnv, rig config.Rig) (sharedStoreExclusion, error) {
+	return sharedStoreRefusal(env.CityPath, "rig "+rig.Name, rigStoreRoot(env.CityPath, rig), env.Force)
 }
 
 // rigImportPrepare removes the binding rows an interrupted earlier attempt
@@ -1421,9 +1424,12 @@ func deleteChunks(store beads.Store, chunks [][]string, between func() error) er
 	return nil
 }
 
+// rigImportLogPrefix prefixes what `gc storage migrate --from-rigs` reports.
+const rigImportLogPrefix = "gc storage migrate --from-rigs"
+
 // doStorageMigrateFromRigs is `gc storage migrate --from-rigs`.
 func doStorageMigrateFromRigs(ctx context.Context, request storageOperatorRequest, rigNames []string, stdout, stderr io.Writer) int {
-	const logPrefix = "gc storage migrate --from-rigs"
+	const logPrefix = rigImportLogPrefix
 	if err := config.ReservedPrefixSplitRefusal(request.Cfg); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1476,7 +1482,9 @@ func doStorageMigrateFromRigs(ctx context.Context, request storageOperatorReques
 			fmt.Fprintf(stderr, "%s: releasing the migration guard: %v\n", logPrefix, releaseErr) //nolint:errcheck // best-effort stderr
 		}
 	}()
-	recordStorageAttestation(request.CityPath, logPrefix, request.Force.hazards(), stderr)
+	// A shared-store attestation is recorded per rig, where it lifts that
+	// rig's refusal (importRig).
+	recordStorageAttestation(request.CityPath, logPrefix, request.Force.acceptedHazards(), stderr)
 	env := rigImportEnv{
 		CityPath: request.CityPath,
 		CityName: loadedCityName(request.Cfg, request.CityPath),

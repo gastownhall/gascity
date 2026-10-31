@@ -24,7 +24,9 @@ package main
 //     --force=remote-runtime, because remote hosts cannot use the split's
 //     infrastructure classes until CN-2 (owner decision O1);
 //   - on a work store another registered city also uses, without
-//     --force=shared-store:<identity> (owner decision O2);
+//     --force=shared-store:<identity> (owner decision O2), and under that
+//     attestation when no registered city uses it (the registry is all the
+//     check sees, and `gc stop` unregisters);
 //   - on a remote stage, which has no store of its own to migrate.
 //
 // Order: controller lock, then the migration guard (the verbs take the guard
@@ -47,6 +49,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -84,14 +87,28 @@ func (f storageForce) attestsSharedStore(token string) bool {
 	return false
 }
 
-// hazards lists the attested hazards, for the record.
-func (f storageForce) hazards() []string {
+// acceptedHazards lists, for the record, the attestations a run proceeds
+// under: remote-runtime as attested, and a shared-store attestation only where
+// it lifted a store's refusal: one that lifted nothing is not recorded.
+func (f storageForce) acceptedHazards(shared ...sharedStoreExclusion) []string {
 	var out []string
 	if f.RemoteRuntime {
 		out = append(out, storageHazardRemoteRuntime)
 	}
-	for _, s := range f.SharedStores {
-		out = append(out, storageHazardSharedStore+":"+s)
+	for _, s := range shared {
+		out = append(out, s.hazards()...)
+	}
+	return out
+}
+
+// flags spells the attestations as the --force flags that carry them.
+func (f storageForce) flags() []string {
+	var out []string
+	if f.RemoteRuntime {
+		out = append(out, "--"+storageForceFlag+"="+storageHazardRemoteRuntime)
+	}
+	for _, id := range f.SharedStores {
+		out = append(out, "--"+storageForceFlag+"="+storageHazardSharedStore+":"+id)
 	}
 	return out
 }
@@ -136,14 +153,22 @@ type storageVerbScope struct {
 // acquireStorageVerbExclusion takes the controller lock and runs the liveness
 // checks, returning the held lock (the caller closes it when it exits) or the
 // refusal.
+//
+// The checks that read and decide (storageVerbRemoteStageRefusal,
+// storageVerbCityRegistered, storageVerbSessionRefusal) are separate so that
+// `gc storage preflight` runs the same ones. It refuses on each that stopping
+// the city does not lift, and reports the rest: the registration and the
+// running sessions, which taking the window ends.
 func acquireStorageVerbExclusion(request storageOperatorRequest, scope storageVerbScope) (*os.File, error) {
 	cityPath := request.CityPath
-	if err := remoteStageStorageRefusal(cityPath); err != nil {
-		return nil, fmt.Errorf("%w. A remote stage has no store of its own to migrate", err)
+	if err := storageVerbRemoteStageRefusal(cityPath); err != nil {
+		return nil, err
 	}
-	if _, registered, err := registeredCityEntry(cityPath); err != nil {
-		return nil, fmt.Errorf("reading the supervisor registry to rule out a supervisor-hosted city: %w", err)
-	} else if registered {
+	registered, err := storageVerbCityRegistered(cityPath)
+	if err != nil {
+		return nil, err
+	}
+	if registered {
 		return nil, fmt.Errorf("this city is registered with the supervisor, which restarts it the moment its controller stops. Stop it with `%s` (it also unregisters the city) and run this again", storageStopCommand)
 	}
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -163,31 +188,77 @@ func acquireStorageVerbExclusion(request storageOperatorRequest, scope storageVe
 		}
 	}()
 
-	names, complete, err := storageVerbSessionInventory(request.Cfg, cityPath)
-	switch {
-	case err != nil && !request.Force.RemoteRuntime:
-		return nil, fmt.Errorf("listing this city's sessions to prove none is running: %w. Resolve it, or attest --%s=%s if the sessions run where this host cannot list them", err, storageForceFlag, storageHazardRemoteRuntime)
-	case len(names) > 0:
-		sort.Strings(names)
-		shown := names
-		if len(shown) > 10 {
-			shown = shown[:10]
-		}
-		return nil, fmt.Errorf("%d session(s) of this city are running (%s), and each can write to the work store. Stop the city with `%s` and run this again", len(names), strings.Join(shown, ", "), storageStopCommand)
-	case !complete && !request.Force.RemoteRuntime:
-		return nil, fmt.Errorf("the session runtime could not list every session of this city, so it cannot prove none is running. Resolve it, or attest --%s=%s if they run where this host cannot list them", storageForceFlag, storageHazardRemoteRuntime)
+	running, err := storageVerbSessionRefusal(request, scope)
+	if len(running) > 0 {
+		return nil, fmt.Errorf("%d session(s) of this city are running (%s), and each can write to the work store. Stop the city with `%s` and run this again", len(running), storageSessionList(running), storageStopCommand)
 	}
-	if scope.Splits && !request.Force.RemoteRuntime {
-		if name, remote := cityRunsRemoteSessions(request.Cfg); remote {
-			return nil, fmt.Errorf("this city runs sessions on a remote runtime ([session] provider %q). After the split those sessions refuse infrastructure-class commands (mail, nudges, session lookups) until worker-site transport (CN-2) exists, and an older gc on a remote host could still write infrastructure beads to the work store. Attest that with --%s=%s, or stay unsplit", name, storageForceFlag, storageHazardRemoteRuntime)
-		}
+	if err != nil {
+		return nil, err
 	}
 	held = nil
 	return lock, nil
 }
 
+// storageVerbRemoteStageRefusal refuses a remote stage, which has no store of
+// its own to migrate.
+func storageVerbRemoteStageRefusal(cityPath string) error {
+	if err := remoteStageStorageRefusal(cityPath); err != nil {
+		return fmt.Errorf("%w. A remote stage has no store of its own to migrate", err)
+	}
+	return nil
+}
+
+// storageVerbCityRegistered reports whether the city is registered with the
+// supervisor, which restarts it the moment its controller stops.
+func storageVerbCityRegistered(cityPath string) (bool, error) {
+	_, registered, err := registeredCityEntry(cityPath)
+	if err != nil {
+		return false, fmt.Errorf("reading the supervisor registry to rule out a supervisor-hosted city: %w", err)
+	}
+	return registered, nil
+}
+
+// storageVerbSessionRefusal lists the city's sessions. running is every
+// session the runtime lists, sorted; a writing verb refuses while any runs.
+// err is what stopping the city does not lift: an inventory that cannot prove
+// no session runs and, for a verb that splits, a remote runtime, each unless
+// --force=remote-runtime attests it.
+func storageVerbSessionRefusal(request storageOperatorRequest, scope storageVerbScope) ([]string, error) {
+	names, complete, err := storageVerbSessionInventory(request.Cfg, request.CityPath)
+	sort.Strings(names)
+	attested := request.Force.RemoteRuntime
+	switch {
+	case err != nil && !attested:
+		return names, fmt.Errorf("listing this city's sessions to prove none is running: %w. Resolve it, or attest --%s=%s if the sessions run where this host cannot list them", err, storageForceFlag, storageHazardRemoteRuntime)
+	case !complete && !attested:
+		return names, fmt.Errorf("the session runtime could not list every session of this city, so it cannot prove none is running. Resolve it, or attest --%s=%s if they run where this host cannot list them", storageForceFlag, storageHazardRemoteRuntime)
+	}
+	if scope.Splits && !attested {
+		if name, remote := cityRunsRemoteSessions(request.Cfg); remote {
+			return names, fmt.Errorf("this city runs sessions on a remote runtime ([session] provider %q). After the split those sessions refuse infrastructure-class commands (mail, nudges, session lookups) until worker-site transport (CN-2) exists, and an older gc on a remote host could still write infrastructure beads to the work store. Attest that with --%s=%s, or stay unsplit", name, storageForceFlag, storageHazardRemoteRuntime)
+		}
+	}
+	return names, nil
+}
+
+// storageSessionList names up to ten sessions, for a message.
+func storageSessionList(names []string) string {
+	shown := names
+	if len(shown) > 10 {
+		shown = shown[:10]
+	}
+	return strings.Join(shown, ", ")
+}
+
 // controllerLockHolderRefusal names who holds the controller lock.
 func controllerLockHolderRefusal(identity controllerIdentityReply) error {
+	return fmt.Errorf("%s holds this city's controller lock (.gc/controller.lock); a copy proven against a city something else owns proves nothing. Stop it with `%s` and run this again", controllerLockHolder(identity), storageStopCommand)
+}
+
+// controllerLockHolder names who may hold a city's controller lock: the
+// controller its socket identifies, or gc stop or a storage command, which
+// hold the lock without serving the socket.
+func controllerLockHolder(identity controllerIdentityReply) string {
 	authority := "a controller"
 	switch identity.HostingMode {
 	case controllerHostingStandalone:
@@ -198,7 +269,7 @@ func controllerLockHolderRefusal(identity controllerIdentityReply) error {
 	if identity.PID != 0 {
 		authority += fmt.Sprintf(" (PID %d)", identity.PID)
 	}
-	return fmt.Errorf("%s, gc stop, or another storage command holds this city's controller lock (.gc/controller.lock); a copy proven against a city something else owns proves nothing. Stop it with `%s` and run this again", authority, storageStopCommand)
+	return authority + ", gc stop, or another storage command"
 }
 
 // storageVerbSessionInventory lists the city's running sessions and whether
@@ -260,21 +331,40 @@ var execRuntimeDeclaresLocal = func(script string) bool {
 	return false
 }
 
+// sharedWorkStoreLabel names this city's work store in the shared-store
+// check's messages.
+const sharedWorkStoreLabel = "this city's work store"
+
 // sharedWorkStoreRefusal is the shared-store check for this city's work store
-// (storage_shared_store.go).
-func sharedWorkStoreRefusal(cityPath string, force storageForce) (attested bool, err error) {
-	return sharedStoreRefusal(cityPath, "this city's work store", cityPath, force)
+// (storage_shared_store.go). The caller releases the returned exclusion when
+// it exits.
+func sharedWorkStoreRefusal(cityPath string, force storageForce) (sharedStoreExclusion, error) {
+	return sharedStoreRefusal(cityPath, sharedWorkStoreLabel, cityPath, force)
 }
 
-// foreignCityRows returns the ids of rows whose scope names another city:
-// under a shared-store attestation they always refuse (unattributed rows are
+// foreignCityRows returns the ids of rows whose scope is not this city's: a
+// city:<name> ref naming another city, or a rig:<name> ref naming none of the
+// city's rigs (rigScopeIsForeign's rule, applied across the city). A
+// co-tenant's rig can live on this city's work store, and its rows name it.
+// Under a shared-store attestation they always refuse (unattributed rows are
 // taken as this city's, which is the attested part).
-func foreignCityRows(rows map[string]string, cityName string) []string {
+func foreignCityRows(rows map[string]string, cityName string, rigs []config.Rig) []string {
+	ownRigs := make(map[string]bool, len(rigs))
+	for _, rig := range rigs {
+		ownRigs[rigScopeRef(rig.Name)] = true
+	}
 	var ids []string
 	for id, ref := range rows {
 		ref = strings.TrimSpace(ref)
-		if strings.HasPrefix(ref, "city:") && cityName != "" && ref != "city:"+cityName {
-			ids = append(ids, id)
+		switch {
+		case strings.HasPrefix(ref, "city:"):
+			if cityName != "" && ref != "city:"+cityName {
+				ids = append(ids, id)
+			}
+		case strings.HasPrefix(ref, "rig:"):
+			if !ownRigs[ref] {
+				ids = append(ids, id)
+			}
 		}
 	}
 	sort.Strings(ids)
@@ -293,12 +383,19 @@ func sharedStoreForeignRowRefusal(cityPath string, cfg *config.City) error {
 	if err != nil {
 		return fmt.Errorf("censusing the work store for rows other cities own: %w", err)
 	}
-	refs := make(map[string]string, len(snapshot))
-	for _, b := range snapshot {
+	return foreignScopeRowRefusal(snapshot, cityPath, cfg)
+}
+
+// foreignScopeRowRefusal refuses a snapshot of the shared work store that
+// holds rows another city's scope names (foreignCityRows): the attestation
+// never makes them this city's to copy.
+func foreignScopeRowRefusal(rows []beads.Bead, cityPath string, cfg *config.City) error {
+	refs := make(map[string]string, len(rows))
+	for _, b := range rows {
 		refs[b.ID] = b.Metadata[beadmeta.RootStoreRefMetadataKey]
 	}
-	if ids := foreignCityRows(refs, loadedCityName(cfg, cityPath)); len(ids) > 0 {
-		return fmt.Errorf("%d infrastructure row(s) in the shared work store belong to another city's scope (%s); the shared-store attestation covers only rows that name no city, so nothing was written", len(ids), infraStrandedIDList(ids))
+	if ids := foreignCityRows(refs, loadedCityName(cfg, cityPath), cfg.Rigs); len(ids) > 0 {
+		return fmt.Errorf("%d infrastructure row(s) in the shared work store belong to another city's scope (%s); the shared-store attestation covers only rows that name this city, one of its rigs, or no scope, so nothing was written", len(ids), infraStrandedIDList(ids))
 	}
 	return nil
 }

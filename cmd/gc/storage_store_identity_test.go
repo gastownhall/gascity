@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -50,6 +53,125 @@ func TestReusedDirectoryWithRecreatedBeadsRefusesAsIdentityMismatch(t *testing.T
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal %q does not name %q", err, want)
 		}
+	}
+}
+
+// TestStaleBindingOfAnotherWorkStoreRefusesAsIdentityMismatch is B15 on a
+// stale binding: the marker records work store project A, the binding's
+// database is gone, and .beads was recreated (project B). The re-copy the
+// stale state prescribes would carry project A's retained rows into project
+// B's city and rewrite the marker with B's identity, after which nothing
+// shows the mismatch. So the boot refuses as identity-mismatch without
+// offering it, and both re-copies refuse without writing; the same work
+// store still gets, and can run, the backup re-copy.
+func TestStaleBindingOfAnotherWorkStoreRefusesAsIdentityMismatch(t *testing.T) {
+	source := stubInfraMigrationSource(t)
+	mustCreateInfraBead(t, source, beads.Bead{Title: "project A's session", Type: "session", Labels: []string{"gc:session"}})
+	cityPath := t.TempDir()
+	writeScopeProjectID(t, cityPath, "prj-original")
+	cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+	var log bytes.Buffer
+	if got := migrateInfraClasses(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("cutover = %s: %s", got.Outcome, log.String())
+	}
+	target := mustResolveInfraTarget(t, cityPath, cfg)
+	if backedUp, err := infraPathExists(target.RetainedBackupPath()); err != nil || !backedUp {
+		t.Fatalf("the cutover kept no retained backup (%v, %v); the re-copy under test is never offered", backedUp, err)
+	}
+	if err := os.RemoveAll(target.Dir); err != nil {
+		t.Fatal(err)
+	}
+	log.Reset()
+	if boot := checkInfraClassConvergence(cityPath, cfg, "gc start", &log); boot.Outcome != infraMigrationUncheckable || !strings.Contains(log.String(), "--"+storageFromBackupFlag) {
+		t.Fatalf("the control boot of the same work store = %s, want the stale binding's backup re-copy: %s", boot.Outcome, log.String())
+	}
+
+	writeScopeProjectID(t, cityPath, "prj-recreated")
+	log.Reset()
+	boot := checkInfraClassConvergence(cityPath, cfg, "gc start", &log)
+	advice := infraMigrationOperatorAdvice(boot, "gc start")
+	if boot.Outcome != infraMigrationIdentityMismatch {
+		t.Fatalf("boot over a stale binding of another work store = %s, want identity-mismatch: %s", boot.Outcome, log.String())
+	}
+	if strings.Contains(log.String()+advice, storageFromBackupFlag) {
+		t.Errorf("the boot offers --%s for another work store's binding: %s%s", storageFromBackupFlag, log.String(), advice)
+	}
+	markerBefore, err := os.ReadFile(target.MarkerPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, from := range []infraMigrationSource{infraMigrationFromBackup, infraMigrationFromWork} {
+		log.Reset()
+		if got := runInfraClassMigrationFrom(cityPath, target, from, "gc storage migrate", &log); got.Outcome != infraMigrationIdentityMismatch {
+			t.Fatalf("a re-copy (%v) for another work store = %s, want identity-mismatch: %s", from, got.Outcome, log.String())
+		}
+		if present, _ := infraPathExists(target.Database); present {
+			t.Fatalf("the refused re-copy (%v) rebuilt the binding's database", from)
+		}
+		if after, _ := os.ReadFile(target.MarkerPath()); !bytes.Equal(markerBefore, after) {
+			t.Fatalf("the refused re-copy (%v) rewrote the marker: %q -> %q", from, markerBefore, after)
+		}
+	}
+
+	writeScopeProjectID(t, cityPath, "prj-original")
+	log.Reset()
+	if got := runInfraClassMigrationFrom(cityPath, target, infraMigrationFromBackup, "gc storage migrate", &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("the backup re-copy for the work store the marker names = %s: %s", got.Outcome, log.String())
+	}
+}
+
+// TestStorageRecoverStrandedRefusesABindingOfAnotherWorkStore is B15 on the
+// repair: the binding was converged from work store project A, and .beads was
+// recreated (project B). Recovering would copy project B's rows into project
+// A's binding and record them in its manifest, so the repair holds as the boot
+// does, a dry run included, and writes nothing. The work store the marker
+// names still recovers the same row.
+func TestStorageRecoverStrandedRefusesABindingOfAnotherWorkStore(t *testing.T) {
+	cityPath := recoveryCityPath(t)
+	writeScopeProjectID(t, cityPath, "prj-original")
+	source := stubStrandedRecoverySource(t)
+	mustCreateInfraBead(t, source, beads.Bead{Title: "live session", Type: "session", Labels: []string{"gc:session"}})
+	cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+	var log bytes.Buffer
+	if got := migrateInfraClassesRetainingSource(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("cutover = %s: %s", got.Outcome, log.String())
+	}
+	target := mustResolveInfraTarget(t, cityPath, cfg)
+	stranded := mustCreateInfraBead(t, source, beads.Bead{Title: "an order vote", Type: "task", Labels: []string{"order-tracking"}})
+	if got := strandedIDs(t, cityPath, target); !slices.Contains(got, stranded.ID) {
+		t.Fatalf("the fixture did not strand %s (stranded: %v); the scenario under test was never created", stranded.ID, got)
+	}
+
+	writeScopeProjectID(t, cityPath, "prj-recreated")
+	sourceBefore := infraStoreFingerprint(t, source)
+	manifestBefore := manifestIDs(t, target)
+	bindingBefore := bindingFingerprint(t, target)
+	stubInfraControllerPing(t, 0)
+	request := storageOperatorRequest{CityPath: cityPath, Cfg: cfg, FleetStopped: true}
+	for _, dryRun := range []bool{true, false} {
+		var stdout, stderr bytes.Buffer
+		code := doStorageRecoverStranded(context.Background(), request, strandedRecoveryOptions{DryRun: dryRun}, &stdout, &stderr)
+		if code == 0 || !strings.Contains(stderr.String(), "different work store") || !strings.Contains(stderr.String(), "prj-recreated") {
+			t.Fatalf("recovery (dry run %v) into the binding of another work store = %d, output %q; want the identity-mismatch refusal", dryRun, code, stdout.String()+stderr.String())
+		}
+	}
+	if after := infraStoreFingerprint(t, source); !slices.Equal(sourceBefore, after) {
+		t.Errorf("the refused recovery changed the work store: before %v, after %v", sourceBefore, after)
+	}
+	if after := manifestIDs(t, target); !slices.Equal(manifestBefore, after) {
+		t.Errorf("the refused recovery changed the manifest: before %v, after %v", manifestBefore, after)
+	}
+	if after := bindingFingerprint(t, target); !slices.Equal(bindingBefore, after) {
+		t.Errorf("the refused recovery changed the binding: before %v, after %v", bindingBefore, after)
+	}
+
+	writeScopeProjectID(t, cityPath, "prj-original")
+	var stdout, stderr bytes.Buffer
+	if code := doStorageRecoverStranded(context.Background(), request, strandedRecoveryOptions{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("recovery for the work store the marker names = %d: %s%s", code, stdout.String(), stderr.String())
+	}
+	if got := manifestIDs(t, target); !slices.Contains(got, stranded.ID) {
+		t.Errorf("the recovery did not record %s in the manifest: %v", stranded.ID, got)
 	}
 }
 

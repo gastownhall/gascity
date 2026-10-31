@@ -2726,3 +2726,68 @@ func TestStartFailsClosedWhenTheRemoteStageRecordFails(t *testing.T) {
 		})
 	}
 }
+
+// TestRelaunchRecordsTheRemoteStageBeforeRespawning (S5-A): a warm pod an
+// older provider created carries neither the record nor the pod-spec
+// environment, and a respawned pane takes the tmux server's environment, not
+// the respawn command's. So Relaunch writes the record, naming the
+// controller's city and path, before it respawns the agent.
+func TestRelaunchRecordsTheRemoteStageBeforeRespawning(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.cityName = "bright-lights"
+	addRunningPod(fake, "s", "s")
+	hasSessionAlive(fake, "s")
+
+	cfg := runtime.Config{Command: "agent", Env: map[string]string{"GC_CITY": "/city", "LINUX_USERNAME": "dev"}}
+	if err := p.Relaunch(context.Background(), "s", cfg); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	record, respawn := -1, -1
+	for i, c := range fake.calls {
+		if c.method != "execInPod" {
+			continue
+		}
+		joined := strings.Join(c.cmd, " ")
+		if record < 0 && strings.Contains(joined, remoteStageRecordPath) {
+			record = i
+		}
+		if respawn < 0 && strings.Contains(joined, "respawn-pane") {
+			respawn = i
+		}
+	}
+	if record < 0 {
+		t.Fatalf("Relaunch wrote no remote-stage record among %d calls", len(fake.calls))
+	}
+	if respawn < 0 || record > respawn {
+		t.Fatalf("remote-stage record at call %d, respawn at call %d; the record must land before the agent respawns", record, respawn)
+	}
+	call, _ := remoteStageWrite(fake)
+	for _, want := range []string{`controller_city = "bright-lights"`, `controller_path = "/city"`} {
+		if !strings.Contains(call.stdin, want) {
+			t.Errorf("record %q lacks %q", call.stdin, want)
+		}
+	}
+}
+
+// TestRelaunchFailsClosedWhenTheRemoteStageRecordFails: a warm pod that
+// cannot be marked is not respawned into, and the error says why.
+func TestRelaunchFailsClosedWhenTheRemoteStageRecordFails(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "s", "s")
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) == 3 && cmd[0] == "sh" && strings.Contains(cmd[2], remoteStageRecordPath) {
+			return "", errors.New("read-only file system")
+		}
+		return "", nil
+	}
+
+	err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent", Env: map[string]string{"GC_CITY": "/city"}})
+	if err == nil || !strings.Contains(err.Error(), "remote stage") || !strings.Contains(err.Error(), "read-only file system") {
+		t.Fatalf("Relaunch with an unwritable record = %v, want a remote-stage failure", err)
+	}
+	if findExecCmd(fake, "respawn-pane") != nil {
+		t.Error("the agent was respawned into a pod that could not be marked")
+	}
+}

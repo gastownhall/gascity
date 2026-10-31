@@ -490,9 +490,11 @@ func runUnderEnvClearingSu(t *testing.T, command string, podEnv map[string]strin
 
 // TestLinuxUsernameAgentCarriesTheRemoteStageEnv: with LINUX_USERNAME the
 // agent's tmux starts through `su -`, a login shell that clears the
-// environment. The remote-stage variables must still reach it (and its tmux
-// server), in the entrypoint and in a respawn, prebaked or not, whatever
-// characters the values hold.
+// environment. The remote-stage variables must still reach it and its tmux
+// server, prebaked or not, whatever characters the values hold. A respawned
+// pane takes the server's environment, so the entrypoint is where they must
+// land; a relaunch writes the on-disk record instead
+// (TestRelaunchRecordsTheRemoteStageBeforeRespawning).
 func TestLinuxUsernameAgentCarriesTheRemoteStageEnv(t *testing.T) {
 	const ctrlCity = `/srv/my city/$HOME"x'`
 	p := newProviderWithOps(newFakeK8sOps())
@@ -521,7 +523,4 @@ func TestLinuxUsernameAgentCarriesTheRemoteStageEnv(t *testing.T) {
 			want(t, runUnderEnvClearingSu(t, pod.Spec.Containers[0].Args[0], podEnv))
 		})
 	}
-	t.Run("respawn", func(t *testing.T) {
-		want(t, runUnderEnvClearingSu(t, buildRespawnCommand(cfg, p.cityName), podEnv))
-	})
 }

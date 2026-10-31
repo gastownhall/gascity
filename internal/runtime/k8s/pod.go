@@ -87,12 +87,18 @@ func agentCommandB64(cfg runtime.Config) string {
 // the existing tmux "main" session (respawn-pane -k), reusing the warm pod. When
 // LINUX_USERNAME is set the entrypoint runs tmux under `su - <user>`, so the
 // respawn is wrapped in the same su to reach that user's tmux socket.
-func buildRespawnCommand(cfg runtime.Config, cityName string) string {
+//
+// The respawned agent's environment is the tmux server's, not this command's:
+// respawn-pane starts the pane from the server's global and session
+// environment. The server got the remote-stage variables when the entrypoint
+// started it (suRemoteStageExports for LINUX_USERNAME), and Relaunch writes the
+// on-disk record before respawning, which covers a pod created without them.
+func buildRespawnCommand(cfg runtime.Config) string {
 	cmdB64 := agentCommandB64(cfg)
 	if user := cfg.Env["LINUX_USERNAME"]; user != "" {
 		return fmt.Sprintf(
-			`CMD=$(echo '%s' | base64 -d) && su - %s -c "%scd %s && tmux respawn-pane -k -t %s \"$CMD\""`,
-			cmdB64, user, suRemoteStageExports(cityName, controllerCityPath(cfg.Env)), projectedPodWorkDir(cfg), tmuxSession,
+			`CMD=$(echo '%s' | base64 -d) && su - %s -c "cd %s && tmux respawn-pane -k -t %s \"$CMD\""`,
+			cmdB64, user, projectedPodWorkDir(cfg), tmuxSession,
 		)
 	}
 	return fmt.Sprintf(

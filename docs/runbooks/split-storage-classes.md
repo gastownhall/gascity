@@ -31,9 +31,10 @@ config, run one command, start the city.
   schedule the window, not inside it — but after Step 1, since it resolves its
   destination from `[storage.classes]` and has nothing to check until that
   section names a binding.
-- **Stop the city.** The migration refuses while a controller is live, and it
-  asks you to attest that nothing else is writing either. `gc stop` handles
-  the controller; the attestation is yours.
+- **Stop the city.** The migration refuses while a controller is live, while
+  the city is registered with the supervisor, and while any of its sessions
+  runs, and it asks you to attest that nothing else is writing either.
+  `gc stop` handles the city; the attestation is yours.
 - **Cities on an out-of-tree provider do not take this path.** A city born on
   a provider a downstream fork compiled in creates its binding at first boot
   and moves nothing. This command's one source is the work store.
@@ -93,20 +94,39 @@ gc storage preflight
 ```
 
 Runs every check the migration runs against a **live** city — and copies
-nothing, creates nothing, takes no migration guard, and publishes no event. It
-exists because the migration's refusals are all correct and all arrive at the
-worst possible moment: with the fleet stopped and a window running. It also
-reports, per rig, what `gc storage migrate --from-rigs` would do there (see
-"Step 4b: import each rig").
+nothing, creates nothing, takes no migration guard or controller lock, and
+publishes no event. It exists because the migration's refusals are all correct
+and all arrive at the worst possible moment: with the fleet stopped and a window
+running. It also reports, per rig, what `gc storage migrate --from-rigs` would
+do there (see "Step 4b: import each rig").
+
+Pass it the `--force` attestations you will pass to the migration (see "Step 4:
+run the migration"). What they lift there is lifted here, and the command
+preflight prints for the window carries them:
+
+```
+gc storage preflight --force=shared-store:<identity>
+```
 
 The checks that most often stop a real cutover, and what each wants from you:
 
 | Block | What it means | What to do |
 | --- | --- | --- |
+| `remote stage` | This directory is a remote stage of another city (a K8S pod or an SSH host). Its infrastructure classes are served by that city's controller host. | Run the migration on the controller host's city. |
+| `runtime` | The city runs its sessions on a remote runtime (`k8s`, `hybrid`, `ssh:`, `exec:`), or this host cannot list every session, so the migration cannot prove none is running. | Fix the listing, or accept that remote sessions refuse infrastructure-class commands (mail, nudges, session lookups) until worker-site transport exists, and attest it with `--force=remote-runtime`. |
+| `shared store` | Another registered city uses this city's work store. Under `--force=shared-store:<identity>` it still blocks on rows that name another city's scope, and on an attestation that finds no registered city on the store. | If this city is the only writer of what it migrates, attest the identity the block prints. Move rows that name another city's scope first: no attestation covers them. Register an unregistered co-tenant again (`gc register <path>`). |
 | `rig scopes` | A rig's graph rows have a shape the rig import cannot move without a cross-store edge (an open `tracks`/`parent-child` edge between a graph row and rig work, open work blocked by an open graph row), or a rig store cannot be read. | Do what the named fix says (close the workflow or convoy, finish the work, or remove the edge), or restore access to the rig. Rig history, closed or suspended, no longer blocks: each rig is a `[note]` with what its import would move. |
 | `served binding` | This city already served its infrastructure classes from a different binding. | Verify or recover that binding first. Removing the note is your attestation that you have. |
 | `edge payloads` | The work store cannot be asked what its dependency edges carry — `waits_for` gates store a payload there. | Nothing in your data: this city's work store runs on an engine that cannot report edge payloads, so this binary cannot split it. The block is permanent until the work store is on an engine that can (SQLite or native Dolt). |
 | `destination` | The binding already holds beads this migration did not write. | Find out whose they are before letting a copy overwrite them. |
+
+The `shared store` row judges the city as the migration will, with the city
+stopped. A store on the Dolt server gc manages for the city is named by the
+data directory that server serves (`<city>/.beads/dolt`), not by its port,
+which can change at every boot and is gone once the city stops. The identity
+preflight prints on the live city is the one the migration checks inside the
+window, and another city's managed server is never the same store, whatever its
+database is called.
 
 It exits non-zero when the migration would refuse for something you have to go
 and fix. **That is a different question from `gc storage status`**, which exits
@@ -114,13 +134,16 @@ non-zero whenever the city is not yet serving from its binding — the ordinary
 state of every city with a cutover still ahead of it. A city that preflight
 clears will still fail a `status` gate until it has actually migrated.
 
-Two things it reports rather than refuses. A **live controller** is named by PID
-and does not affect the exit code — stopping it is the next thing you were going
-to do anyway, and blocking would mean the command for planning a window could
-only be run from inside one. And `--fleet-stopped` is **never checked**, here or
-anywhere: it is an operator attestation precisely because no process can verify
-it, and preflight says so rather than letting a clean report read as broader
-than it is.
+It reports rather than refuses what stopping the city ends: a **live
+controller**, named by PID; the city's registration with the supervisor; its
+running sessions; and, under `--force=shared-store:`, the other cities on the
+store, whose controller locks the migration takes. None of them affects the
+exit code. Stopping them is the next thing you were going to do anyway, and
+blocking would mean the command for planning a window could only be run from
+inside one. And `--fleet-stopped` is **never checked**, here or anywhere: it is
+an operator attestation precisely because no process can verify it, and
+preflight says so rather than letting a clean report read as broader than it
+is.
 
 ## Step 4: run the migration
 
@@ -137,11 +160,39 @@ later cannot inherit this one's behavior by silence.
 controller is live on the city; it cannot prove anything about a stray `bd`,
 a rig-side script, or a second gc process, so it asks you to state it.
 
+`--force` attests a named hazard the command otherwise refuses over. It is
+repeatable, and a bare `--force` refuses:
+
+- **`--force=remote-runtime`**: the city runs sessions on a remote runtime, or
+  this host cannot list every session. After the split those sessions refuse
+  infrastructure-class commands until worker-site transport exists, and you
+  attest that no remote host writes infrastructure beads to the work store.
+- **`--force=shared-store:<identity>`**: another registered city uses this
+  city's work store, and this city is the only writer of what the migration
+  moves. The refusal prints the identity. Every other city on the store must be
+  stopped and **stay registered**: `gc supervisor stop --wait` stops every
+  supervisor-hosted city and keeps its registration. `gc stop` unregisters a
+  city, which hides it from this check, and an attestation that finds no
+  registered city on the store refuses. The migration holds each co-tenant's
+  `.gc/controller.lock` until it exits, so none of them restarts mid-copy, and
+  rows that name another city's scope refuse even under the attestation.
+
+The migration appends the attestations it runs under to
+`.gc/storage-attestations.log`.
+
+```
+gc storage migrate --from-work --fleet-stopped --force=shared-store:<identity>
+```
+
 What the command does, in order:
 
 1. Resolves the same plan boot resolves, so a layout boot would refuse is
    refused here first rather than migrated toward.
-2. Refuses if a controller answers the city's socket.
+2. Takes the city's `.gc/controller.lock` and holds it until it exits. It
+   refuses while something else holds the lock, while the city is registered
+   with the supervisor, while any of its sessions runs, on a remote stage, and,
+   without the matching `--force`, on a remote runtime or a shared work store.
+   It also refuses if a controller answers the city's socket.
 3. Takes a migration guard over the city, so a second migrator cannot run.
 4. Does not census rig scopes. A rig's graph rows stay readable through its
    relic legs and move with `gc storage migrate --from-rigs` once the binding
@@ -239,8 +290,9 @@ until the re-run finishes it.
 clear, or holds rows written after its import.
 
 The import refuses, before writing anything, a rig store another registered
-city also uses or that it cannot rule out as one (shared or company stores wait
-for the single-writer attestation; a Dolt rig whose endpoint does not resolve
+city also uses or that it cannot rule out as one (a shared or company store
+imports under `--force=shared-store:<identity>`, with every other city on it
+stopped and registered as in Step 4; a Dolt rig whose endpoint does not resolve
 and that pins no database name cannot be compared), rows scoped to another rig
 or city, open rows another city's agent claims, rows its manifest says it
 carried that the binding no longer holds, and a rig whose store cannot read the

@@ -379,8 +379,10 @@ func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cf
 // it does NOT recreate the pod here). Staging, city/beads init, and PreStart are
 // NOT re-run here (k8s treats PreStart as provision-half); env is provision-half
 // too (set in the pod spec at create time, not re-injected — respawn-pane carries
-// no env). NOTE: tmux diverges — as of the relaunch pre_start fix it re-runs
-// PreStart on Relaunch (launch-half), while k8s and ssh intentionally do not.
+// no env). The remote-stage record is the exception: it is written again before
+// the respawn, so a warm pod an older provider created is marked too. NOTE: tmux
+// diverges — as of the relaunch pre_start fix it re-runs PreStart on Relaunch
+// (launch-half), while k8s and ssh intentionally do not.
 //
 // CAVEAT (unverified on a real cluster — see the B3 design doc): for
 // LINUX_USERNAME pods the entrypoint runs tmux under `su - <user>`, so the
@@ -402,9 +404,20 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 		return fmt.Errorf("%w: session %q (pod %s has no live tmux session)", runtime.ErrSessionNotFound, name, podName)
 	}
 
+	// Record the warm pod as a remote stage before the agent respawns, as
+	// Start does before its ready sentinel (S5-A): a pod an older provider
+	// created carries neither the record nor the pod-spec environment, and
+	// the respawned agent must not run unmarked. A failed write fails the
+	// relaunch rather than respawning into an unmarked pod.
+	if ctrlCity := cfg.Env["GC_CITY"]; ctrlCity != "" {
+		if err := writeRemoteStageInPod(ctx, p.ops, podName, p.cityName, ctrlCity); err != nil {
+			return fmt.Errorf("k8s relaunch %q: recording pod %q as a remote stage of city %s (%s): %w; the agent was not respawned", name, podName, remoteStageCityName(p.cityName, ctrlCity), ctrlCity, err)
+		}
+	}
+
 	// Respawn the agent in the warm "main" session.
 	if _, err := p.ops.execInPod(ctx, podName, "agent",
-		[]string{"sh", "-c", buildRespawnCommand(cfg, p.cityName)}, nil); err != nil {
+		[]string{"sh", "-c", buildRespawnCommand(cfg)}, nil); err != nil {
 		return fmt.Errorf("k8s relaunch %q: respawn-pane: %w", name, err)
 	}
 
