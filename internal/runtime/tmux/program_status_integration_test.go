@@ -5,6 +5,7 @@ package tmux
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"syscall"
@@ -340,5 +341,52 @@ func TestProcessSnapshotReadsTapNonceUnderNarrowColumns(t *testing.T) {
 	}
 	if r, err := s.p.ProgramStatus(s.name); err != nil || !r.Running() {
 		t.Fatalf("ProgramStatus under COLUMNS=80 = %+v, %v; want a valid working reading", r, err)
+	}
+}
+
+// A disarm while the process table cannot be read, because ps fails or its
+// failure gate is still closed after a failure, keeps the nonce of a pane
+// whose pipe our live tap holds: heal and the sweep both defer, so the tap is
+// never orphaned. Once ps reads again, the sweep closes the pipe and the tap
+// ends, and when the switch is back on, heal arms the pane afresh and its next
+// report reads valid, with no session restart.
+func TestDisarmWhileProcessTableUnreadKeepsTheTapRecoverable(t *testing.T) {
+	s := startProgramSession(t, captureCompanionBin(t), captureEmitterBin(t), runtime.ProgramStatusOn,
+		runtime.ProgramStatusArm{Capture: true}, []string{"report state=working"})
+	eventually(t, "the tap to run", func() bool { return tapRunning(t, s.nonce) })
+	f, ok := s.p.cache.fetcher.(*tmuxFetcher)
+	if !ok {
+		t.Fatalf("state cache fetcher is %T, want *tmuxFetcher", s.p.cache.fetcher)
+	}
+	f.snapshot = func(context.Context) (processSnapshot, error) { return processSnapshot{}, errors.New("ps timed out") }
+	s.setMode(t, runtime.ProgramStatusOff)
+	if action, err := s.p.HealProgramCapture(s.name, runtime.ProgramStatusArm{}); err != nil || action != runtime.ProgramCaptureDeferred {
+		t.Fatalf("disarm with ps failing = %q, %v; want deferred", action, err)
+	}
+	// ps works again, but its failure gate is still closed.
+	f.snapshot = nil
+	if n, deferred, err := s.p.DisarmProgramCaptures(); err != nil || n != 0 || deferred != 1 {
+		t.Fatalf("DisarmProgramCaptures with the gate closed = %d, %d, %v; want the pane deferred", n, deferred, err)
+	}
+	if got := paneOption(t, s.p, s.name, programTapOption); got != s.nonce || s.paneFormat(t, "#{pane_pipe}") != "1" || !tapRunning(t, s.nonce) {
+		t.Fatalf("after disarms with the process table unread: nonce %q; want %s kept on the pipe our live tap holds", got, s.nonce)
+	}
+
+	f.snapshotGate.succeeded()
+	if n, deferred, err := s.p.DisarmProgramCaptures(); err != nil || n != 1 || deferred != 0 {
+		t.Fatalf("DisarmProgramCaptures once ps reads = %d, %d, %v; want the pane disarmed", n, deferred, err)
+	}
+	eventually(t, "our tap to end", func() bool { return !tapRunning(t, s.nonce) })
+	if got := s.paneFormat(t, "#{pane_pipe}"); got != "0" || paneOption(t, s.p, s.name, programTapOption) != "" {
+		t.Fatalf("after the disarm: pane_pipe %q, want our tap's pipe closed and the nonce unset", got)
+	}
+
+	s.setMode(t, runtime.ProgramStatusOn)
+	if action, err := s.p.HealProgramCapture(s.name, runtime.ProgramStatusArm{Capture: true}); err != nil || action != runtime.ProgramCaptureArmed {
+		t.Fatalf("heal back on = %q, %v; want armed", action, err)
+	}
+	s.emit(t, "report state=idle")
+	if r, err := s.p.ProgramStatus(s.name); err != nil || !r.Valid() || r.State != runtime.ProgramIdle {
+		t.Fatalf("re-armed reading = %+v, %v; want a valid idle reading", r, err)
 	}
 }

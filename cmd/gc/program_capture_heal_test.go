@@ -6,8 +6,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -128,25 +130,35 @@ func TestProgramCaptureHealNeeded(t *testing.T) {
 	}
 }
 
-// sweepLeaf is a leaf backend with a disarm sweep, counting its runs and
-// failing with *err.
+// sweepLeaf is a leaf backend with a disarm sweep that disarms one pane and
+// answers its script's deferred count and error, counting its runs.
 type sweepLeaf struct {
 	runtime.Provider
-	runs *int
-	err  *error
+	script *sweepScript
 }
 
-func (l sweepLeaf) DisarmProgramCaptures() (int, error) {
-	*l.runs++
-	return 1, *l.err
+// sweepScript is what a sweepLeaf's sweeps answer, and how many ran.
+type sweepScript struct {
+	runs     int
+	deferred int
+	err      error
 }
 
+func (l sweepLeaf) DisarmProgramCaptures() (int, int, error) {
+	l.script.runs++
+	return 1, l.script.deferred, l.script.err
+}
+
+// Kills a lane that sweeps on every pass under one config, never sweeps a
+// reloaded config, sweeps under shadow or on, latches a sweep that failed or
+// deferred a pane so the switch-off cleanup is never finished, or retries an
+// unfinished sweep on every pass instead of after a growing window.
 func TestInventoryLaneDisarmSweepsOncePerConfigLoadWhenSwitchOff(t *testing.T) {
-	runs := 0
-	var sweepErr error
-	sp := sweepLeaf{Provider: runtime.NewFake(), runs: &runs, err: &sweepErr}
+	script := &sweepScript{}
+	sp := sweepLeaf{Provider: runtime.NewFake(), script: script}
 	var stderr strings.Builder
-	lane := &runtimeInventoryLane{stderr: &stderr, logPrefix: "gc"}
+	clk := &clock.Fake{Time: time.Unix(1_800_000_000, 0)}
+	lane := &runtimeInventoryLane{clock: clk, stderr: &stderr, logPrefix: "gc"}
 	cr := &CityRuntime{}
 	off := &config.City{}
 	pass := func(cfg *config.City) inventoryPassReport {
@@ -155,43 +167,76 @@ func TestInventoryLaneDisarmSweepsOncePerConfigLoadWhenSwitchOff(t *testing.T) {
 		return report
 	}
 
-	if r := pass(off); runs != 1 || r.captureHeals.swept != 1 || !r.captureHeals.acted() {
-		t.Fatalf("first pass under off: %d sweeps, tally %+v; want one sweep", runs, r.captureHeals)
+	if r := pass(off); script.runs != 1 || r.captureHeals.swept != 1 || !r.captureHeals.acted() {
+		t.Fatalf("first pass under off: %d sweeps, tally %+v; want one sweep", script.runs, r.captureHeals)
 	}
 	pass(off)
 	pass(off)
-	if runs != 1 {
-		t.Fatalf("%d sweeps over one config load, want 1", runs)
+	if script.runs != 1 {
+		t.Fatalf("%d sweeps over one config load, want 1", script.runs)
 	}
 	reloaded := &config.City{}
 	pass(reloaded)
-	if runs != 2 {
-		t.Fatalf("%d sweeps after a config reload, want 2", runs)
+	if script.runs != 2 {
+		t.Fatalf("%d sweeps after a config reload, want 2", script.runs)
 	}
 	on := &config.City{Session: config.SessionConfig{ProgramStatus: "on"}}
-	if r := pass(on); runs != 2 || r.captureHeals.acted() {
-		t.Fatalf("a pass under on swept: %d sweeps, tally %+v", runs, r.captureHeals)
+	if r := pass(on); script.runs != 2 || r.captureHeals.acted() {
+		t.Fatalf("a pass under on swept: %d sweeps, tally %+v", script.runs, r.captureHeals)
 	}
 
-	sweepErr = errors.New("tmux: boom")
 	failing := &config.City{}
-	if r := pass(failing); runs != 3 || len(r.captureHeals.errs) != 1 || !strings.Contains(r.captureHeals.String(), "tmux: boom") {
-		t.Fatalf("a failed sweep: %d sweeps, tally %q", runs, r.captureHeals.String())
+	script.err = errors.New("tmux: boom")
+	if r := pass(failing); script.runs != 3 || len(r.captureHeals.errs) != 1 || !strings.Contains(r.captureHeals.String(), "tmux: boom") {
+		t.Fatalf("a failed sweep: %d sweeps, tally %q", script.runs, r.captureHeals.String())
 	}
 	if !strings.Contains(stderr.String(), "program-status capture heal") || !strings.Contains(stderr.String(), "tmux: boom") {
 		t.Fatalf("a failed sweep was not logged: %q", stderr.String())
 	}
-	// A failed sweep is not done: the next pass of the same load retries it,
-	// until one finishes clean.
+
+	// An unfinished sweep is retried under the same config once its window
+	// passes, the window doubling while sweeps stay unfinished, until one
+	// fails nothing and defers nothing.
 	pass(failing)
-	if runs != 4 {
-		t.Fatalf("%d sweeps after a failed one, want the next pass to retry it", runs)
+	if script.runs != 3 {
+		t.Fatalf("%d sweeps inside the retry window, want 3", script.runs)
 	}
-	sweepErr = nil
+	clk.Advance(captureSweepRetryBase)
+	script.err, script.deferred = nil, 1
+	if r := pass(failing); script.runs != 4 || r.captureHeals.sweepDeferred != 1 || !r.captureHeals.acted() ||
+		!strings.Contains(r.captureHeals.String(), "sweep_deferred=1") {
+		t.Fatalf("the retried sweep: %d sweeps, tally %q; want a fourth that deferred a pane", script.runs, r.captureHeals.String())
+	}
+	clk.Advance(captureSweepRetryBase)
 	pass(failing)
+	if script.runs != 4 {
+		t.Fatalf("%d sweeps before the doubled window passed, want 4", script.runs)
+	}
+	clk.Advance(captureSweepRetryBase)
+	script.deferred = 0
 	pass(failing)
-	if runs != 5 {
-		t.Fatalf("%d sweeps, want retries to stop once a sweep finishes clean", runs)
+	if script.runs != 5 {
+		t.Fatalf("%d sweeps once the doubled window passed, want 5", script.runs)
+	}
+	clk.Advance(captureSweepRetryMax)
+	pass(failing)
+	if script.runs != 5 {
+		t.Fatalf("%d sweeps after a complete sweep, want 5", script.runs)
+	}
+
+	// A complete sweep clears the window, and so does a pass under shadow or
+	// on: the next config load under off sweeps at once.
+	pass(&config.City{})
+	if script.runs != 6 {
+		t.Fatalf("%d sweeps after a reload that followed a complete sweep, want 6", script.runs)
+	}
+	script.err = errors.New("tmux: boom")
+	pass(&config.City{})
+	pass(on)
+	script.err = nil
+	pass(&config.City{})
+	if script.runs != 8 {
+		t.Fatalf("%d sweeps, want an unfinished sweep's window cleared by a pass under on", script.runs)
 	}
 }
 
@@ -200,10 +245,9 @@ func TestInventoryLaneDisarmSweepsOncePerConfigLoadWhenSwitchOff(t *testing.T) {
 // which the leaf now stamps shadow) and sweeps nothing, on->off sweeps once,
 // and off->on->off sweeps again.
 func TestInventoryLaneHealFollowsSwitchAcrossReloads(t *testing.T) {
-	runs := 0
-	var sweepErr error
-	sp := sweepLeaf{Provider: runtime.NewFake(), runs: &runs, err: &sweepErr}
-	lane := &runtimeInventoryLane{stderr: &strings.Builder{}, logPrefix: "gc"}
+	script := &sweepScript{}
+	sp := sweepLeaf{Provider: runtime.NewFake(), script: script}
+	lane := &runtimeInventoryLane{clock: &clock.Fake{Time: time.Unix(1_800_000_000, 0)}, stderr: &strings.Builder{}, logPrefix: "gc"}
 	cr := &CityRuntime{}
 	pass := func(set string) {
 		var report inventoryPassReport
@@ -216,8 +260,8 @@ func TestInventoryLaneHealFollowsSwitchAcrossReloads(t *testing.T) {
 		{"on", 0}, {"shadow", 0}, {"shadow", 0}, {"off", 1}, {"on", 1}, {"shadow", 1}, {"off", 2},
 	} {
 		pass(step.set)
-		if runs != step.sweep {
-			t.Fatalf("after a pass under %q: %d sweeps, want %d", step.set, runs, step.sweep)
+		if script.runs != step.sweep {
+			t.Fatalf("after a pass under %q: %d sweeps, want %d", step.set, script.runs, step.sweep)
 		}
 	}
 }

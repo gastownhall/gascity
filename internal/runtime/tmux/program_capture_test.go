@@ -321,6 +321,10 @@ func TestRespawnFailureIsReturned(t *testing.T) {
 	}
 }
 
+// An undeclared provider is never armed: its create reaches tmux without any
+// capture command, and its respawn runs only the removal of a capture an
+// armed incarnation left bound to the pane (while the switch is off,
+// disarmIfArmedCommands).
 func TestUndeclaredProviderIsNeverArmed(t *testing.T) {
 	for _, arm := range []runtime.ProgramStatusArm{{}, {App: "codex", Relay: true}} {
 		tm, rec, _, probes := captureTestTmux(t)
@@ -329,6 +333,7 @@ func TestUndeclaredProviderIsNeverArmed(t *testing.T) {
 		if err := tm.newSessionWithCommandAndEnv("gc-undeclared", "/w", "codex", env, arm); err != nil {
 			t.Fatal(err)
 		}
+		created := len(rec.calls)
 		if err := tm.respawnPaneWithWorkDir("%1", "/w", "codex", arm); err != nil {
 			t.Fatal(err)
 		}
@@ -336,8 +341,8 @@ func TestUndeclaredProviderIsNeverArmed(t *testing.T) {
 			t.Fatalf("arm %+v evaluated the capability gate", arm)
 		}
 		for _, needle := range []string{"pipe-pane", "@gc_ps", programstatus.CompanionName} {
-			if got := callsContaining(rec.calls, needle); len(got) != 0 {
-				t.Fatalf("arm %+v: %q reached tmux: %q", arm, needle, got)
+			if got := callsContaining(rec.calls[:created], needle); len(got) != 0 {
+				t.Fatalf("arm %+v: %q reached tmux on create: %q", arm, needle, got)
 			}
 		}
 		for _, line := range rec.staged {
@@ -345,11 +350,31 @@ func TestUndeclaredProviderIsNeverArmed(t *testing.T) {
 				t.Fatalf("arm %+v: staged a list: %q", arm, line)
 			}
 		}
+		want := append([]string{"-u"}, tmuxArgvList([][]string{
+			{"respawn-pane", "-k", "-t", "%1", "-c", "/w", "codex"},
+			{"display-message", "-p", "-t", "%1", "#{pane_id}"},
+			{"if-shell", "-F", "-t", "%1", "#{m:*.#{pane_id},#{@gc_ps_tap}}", offDisarmLine("%1")},
+		})...)
+		if respawn := rec.calls[created:]; len(respawn) != 1 || !slices.Equal(respawn[0], want) {
+			t.Fatalf("arm %+v: respawn calls\n got %q\nwant [%q]", arm, respawn, want)
+		}
 	}
 }
 
+// offDisarmLine is the command line the switch-off respawn's guard runs on
+// target: disarmCommands as one tmux command line.
+func offDisarmLine(target string) string {
+	return "'set-option' '-pu' '-t' '" + target + "' '@gc_ps_tap' ; " +
+		"'set-option' '-pu' '-t' '" + target + "' '@gc_ps' ; " +
+		"'set-option' '-pu' '-t' '" + target + "' '@gc_ps_text' ; " +
+		"'pipe-pane' '-t' '" + target + "'"
+}
+
 // With the switch off every runtime.Config carries the zero arm (the config
-// derivation's tests pin that), and the tmux command lines are today's.
+// derivation's tests pin that), and the tmux command lines are today's: a
+// create's byte for byte, and a respawn's respawn-pane, which the respawn
+// follows only with the removal of a capture bound to the pane
+// (TestRespawnUnderSwitchOffRemovesOnlyABoundCapture).
 func TestSwitchOffIsByteIdentical(t *testing.T) {
 	tm, rec, _, probes := captureTestTmux(t)
 	ops := newTmuxStartOps(tm, "", 0, runtime.Config{}, true)
@@ -367,11 +392,11 @@ func TestSwitchOffIsByteIdentical(t *testing.T) {
 		t.Fatalf("staged %q, want exactly %q", rec.staged, wantLine)
 	}
 	wantArgv := []string{"-u", "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "gc-off2", "-c", "/work", "-e", "GC_RIG=r", "codex"}
-	wantRespawn := []string{"-u", "respawn-pane", "-k", "-t", "%4", "-c", "/work", "codex"}
+	wantRespawn := []string{"-u", "respawn-pane", "-k", "-t", "%4", "-c", "/work", "codex", ";"}
 	var sawArgv, sawRespawn bool
 	for _, c := range rec.calls {
 		sawArgv = sawArgv || slices.Equal(c, wantArgv)
-		sawRespawn = sawRespawn || slices.Equal(c, wantRespawn)
+		sawRespawn = sawRespawn || (len(c) > len(wantRespawn) && slices.Equal(c[:len(wantRespawn)], wantRespawn))
 	}
 	if !sawArgv || !sawRespawn {
 		t.Fatalf("switch-off create/respawn argv changed (argv=%v respawn=%v): %q", sawArgv, sawRespawn, rec.calls)
@@ -806,19 +831,57 @@ func TestUnarmedRespawnUnderLiveSwitchRemovesCapture(t *testing.T) {
 }
 
 // A respawn that ran but whose capture removal failed is still a respawn:
-// the failure is logged, never returned.
+// the failure is logged, never returned, whatever the switch.
 func TestUnarmedRespawnDisarmFailureKeepsTheRespawn(t *testing.T) {
-	tm, rec, warnings, _ := captureTestTmux(t)
-	tm.cfg.ProgramStatus = runtime.ProgramStatusOn
-	rec.errs = []error{&tmuxOutputError{Stdout: "%5", Err: errors.New("tmux pipe-pane: target pane has exited")}}
-	if err := tm.respawnPaneWithWorkDir("%5", "", "codex", runtime.ProgramStatusArm{}); err != nil {
-		t.Fatalf("respawn whose disarm failed = %v, want nil (the marker proves it respawned)", err)
+	for _, mode := range []runtime.ProgramStatusMode{runtime.ProgramStatusOff, runtime.ProgramStatusOn} {
+		t.Run(string(mode), func(t *testing.T) {
+			tm, rec, warnings, _ := captureTestTmux(t)
+			tm.cfg.ProgramStatus = mode
+			rec.errs = []error{&tmuxOutputError{Stdout: "%5", Err: errors.New("tmux pipe-pane: target pane has exited")}}
+			if err := tm.respawnPaneWithWorkDir("%5", "", "codex", runtime.ProgramStatusArm{}); err != nil {
+				t.Fatalf("respawn whose disarm failed = %v, want nil (the marker proves it respawned)", err)
+			}
+			if !strings.Contains(warnings.String(), "removing program-status capture") {
+				t.Fatalf("disarm failure not logged: %q", warnings.String())
+			}
+			rec.errs, rec.idx = []error{ErrSessionNotFound}, 0
+			if err := tm.respawnPaneWithWorkDir("%5", "", "codex", runtime.ProgramStatusArm{}); !errors.Is(err, ErrSessionNotFound) {
+				t.Fatalf("err = %v, want the respawn's own failure", err)
+			}
+		})
 	}
-	if !strings.Contains(warnings.String(), "removing program-status capture") {
-		t.Fatalf("disarm failure not logged: %q", warnings.String())
-	}
-	rec.errs, rec.idx = []error{ErrSessionNotFound}, 0
-	if err := tm.respawnPaneWithWorkDir("%5", "", "codex", runtime.ProgramStatusArm{}); !errors.Is(err, ErrSessionNotFound) {
-		t.Fatalf("err = %v, want the respawn's own failure", err)
+}
+
+// An unarmed respawn while the switch is off (the provider undeclared, or
+// the capability gate refused) runs today's respawn-pane and then, after the
+// marker, removes the capture only from a pane bearing a nonce bound to it:
+// a capture armed before the switch went off cannot read valid for the new
+// program once the switch is back on, and a pane never armed keeps a pipe
+// of its own.
+func TestRespawnUnderSwitchOffRemovesOnlyABoundCapture(t *testing.T) {
+	for _, mode := range []runtime.ProgramStatusMode{"", runtime.ProgramStatusOff} {
+		for name, arm := range map[string]runtime.ProgramStatusArm{
+			"undeclared":   {},
+			"gate refused": {Capture: true},
+		} {
+			t.Run("switch "+string(mode)+"/"+name, func(t *testing.T) {
+				tm, rec, _, _ := captureTestTmux(t)
+				tm.cfg.ProgramStatus = mode
+				tm.capture.probe = func() (captureCapability, error) {
+					return captureCapability{}, errors.New("companion missing")
+				}
+				if err := tm.respawnPaneWithWorkDir("%5", "/w", "codex", arm); err != nil {
+					t.Fatalf("respawnPaneWithWorkDir: %v", err)
+				}
+				want := append([]string{"-u"}, tmuxArgvList([][]string{
+					{"respawn-pane", "-k", "-t", "%5", "-c", "/w", "codex"},
+					{"display-message", "-p", "-t", "%5", "#{pane_id}"},
+					{"if-shell", "-F", "-t", "%5", "#{m:*.#{pane_id},#{@gc_ps_tap}}", offDisarmLine("%5")},
+				})...)
+				if len(rec.calls) != 1 || !slices.Equal(rec.calls[0], want) {
+					t.Fatalf("respawn calls\n got %q\nwant [%q]", rec.calls, want)
+				}
+			})
+		}
 	}
 }

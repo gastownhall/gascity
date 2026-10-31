@@ -18,6 +18,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"golang.org/x/sync/singleflight"
 )
@@ -1117,10 +1118,11 @@ func fetchDarwinProcessSnapshot(ctx context.Context) (processSnapshot, error) {
 // processSnapshotCommand is the ps invocation of a process snapshot. ps cuts
 // each line to the terminal width, which it takes from COLUMNS when stdout is
 // no terminal: the snapshot runs with -ww and without COLUMNS, so args is
-// never cut short (a tap's nonce rides in its argv).
+// never cut short (a tap's nonce rides in its argv). Its env is read through
+// execenv.Environ, so an in-flight native beads store open never leaks into ps.
 func processSnapshotCommand(ctx context.Context, args []string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "ps", append([]string{"-ww"}, args...)...)
-	cmd.Env = slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "COLUMNS=") })
+	cmd.Env = slices.DeleteFunc(execenv.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "COLUMNS=") })
 	return cmd
 }
 

@@ -563,7 +563,8 @@ func TestSeamBackedTakesTheProgramStatusSwitch(t *testing.T) {
 }
 
 // Kills an arm that keeps the switch the Tmux was built with: a respawn
-// under a switch published off arms nothing and runs today's command line.
+// under a switch published off arms nothing and runs today's command line,
+// followed only by the removal of a capture bound to the pane.
 func TestRespawnFollowsPublishedSwitch(t *testing.T) {
 	tm, rec, _, _ := captureTestTmux(t)
 	tm.cfg.ProgramStatus = runtime.ProgramStatusOn
@@ -571,7 +572,11 @@ func TestRespawnFollowsPublishedSwitch(t *testing.T) {
 	if err := tm.respawnPaneWithWorkDir("%4", "/work", "codex", runtime.ProgramStatusArm{}); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"-u", "respawn-pane", "-k", "-t", "%4", "-c", "/work", "codex"}
+	want := append([]string{"-u"}, tmuxArgvList([][]string{
+		{"respawn-pane", "-k", "-t", "%4", "-c", "/work", "codex"},
+		{"display-message", "-p", "-t", "%4", "#{pane_id}"},
+		{"if-shell", "-F", "-t", "%4", "#{m:*.#{pane_id},#{@gc_ps_tap}}", offDisarmLine("%4")},
+	})...)
 	if len(rec.calls) != 1 || !slices.Equal(rec.calls[0], want) {
 		t.Fatalf("respawn under a switch published off = %q, want [%q]", rec.calls, want)
 	}

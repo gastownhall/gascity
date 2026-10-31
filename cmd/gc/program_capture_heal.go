@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -16,25 +17,60 @@ import (
 // the city switch is shadow or on, each listed session whose reading calls
 // for it (programCaptureHealNeeded) is healed through its routed leaf's
 // runtime.ProgramCaptureHealer toward the capture its config declares. While
-// the switch is off, the steady state reads nothing: one clean disarm sweep
-// per config load (programCaptureDisarmer) takes down whatever capture an
-// earlier switch left armed, a failed sweep running again at the next pass.
-// The leaf reads under the switch the controller published with the config
-// (publishProgramStatusMode), so on->shadow, shadow->on and off->on heal
-// from readings taken under the new switch.
+// the switch is off, the steady state reads nothing: a disarm sweep
+// (programCaptureDisarmer) takes down whatever capture an earlier switch left
+// armed, once per config load when it finishes; a sweep that failed or
+// deferred a pane is run again under the same config once captureSweepRetry
+// allows. The leaf reads under the switch the controller published with the
+// config (publishProgramStatusMode), so on->shadow, shadow->on and off->on
+// heal from readings taken under the new switch.
+
+// A disarm sweep that failed or deferred a pane is run again after
+// captureSweepRetryBase, the window doubling with each unfinished sweep up to
+// captureSweepRetryMax.
+const (
+	captureSweepRetryBase = 30 * time.Second
+	captureSweepRetryMax  = 10 * time.Minute
+)
 
 // programCaptureDisarmer is a leaf backend's disarm sweep for a city whose
-// program-status switch is off: tmux's DisarmProgramCaptures.
+// program-status switch is off: tmux's DisarmProgramCaptures, which reports
+// the panes it disarmed and those it deferred, keeping their nonce, until it
+// can close or leave their pipe without orphaning our tap.
 type programCaptureDisarmer interface {
-	DisarmProgramCaptures() (int, error)
+	DisarmProgramCaptures() (disarmed, deferred int, err error)
+}
+
+// captureSweepRetry paces the disarm sweeps of a switch-off cleanup that has
+// not finished: lane memory, held under the lane's passMu. The zero value
+// lets a sweep run at once.
+type captureSweepRetry struct {
+	failures int
+	next     time.Time
+}
+
+// due reports whether a sweep may run at now.
+func (r captureSweepRetry) due(now time.Time) bool { return !now.Before(r.next) }
+
+// failed records a sweep that failed or deferred a pane at now, and starts
+// the window before the next.
+func (r *captureSweepRetry) failed(now time.Time) {
+	window := captureSweepRetryBase << min(r.failures, 8)
+	if window > captureSweepRetryMax || window <= 0 {
+		window = captureSweepRetryMax
+	}
+	r.failures++
+	r.next = now.Add(window)
 }
 
 // programCaptureHealTally is what one pass's heal did: the actions taken,
-// by action, and the heals that failed.
+// by action, the panes the disarm sweep disarmed and deferred, and the heals
+// that failed.
 type programCaptureHealTally struct {
-	actions map[runtime.ProgramCaptureAction]int
-	swept   int
-	errs    []string
+	actions       map[runtime.ProgramCaptureAction]int
+	swept         int
+	sweepDeferred int
+	errs          []string
 }
 
 func (t *programCaptureHealTally) add(action runtime.ProgramCaptureAction) {
@@ -44,24 +80,35 @@ func (t *programCaptureHealTally) add(action runtime.ProgramCaptureAction) {
 	t.actions[action]++
 }
 
-// acted reports whether heal changed any pane or failed, which the pass
-// trace records.
+// acted reports whether heal changed any pane, failed, or left a disarm
+// sweep unfinished, which the pass trace records.
 func (t programCaptureHealTally) acted() bool {
-	return t.actions[runtime.ProgramCaptureArmed] > 0 || t.actions[runtime.ProgramCaptureDisarmed] > 0 || t.swept > 0 || len(t.errs) > 0
+	return t.actions[runtime.ProgramCaptureArmed] > 0 || t.actions[runtime.ProgramCaptureDisarmed] > 0 ||
+		t.swept > 0 || t.sweepDeferred > 0 || len(t.errs) > 0
+}
+
+// sweepFinished reports whether a disarm sweep failed nothing and deferred
+// nothing, so its config needs no further sweep.
+func (t programCaptureHealTally) sweepFinished() bool {
+	return t.sweepDeferred == 0 && len(t.errs) == 0
 }
 
 // String renders the tally for the pass trace: "armed=1,deferred=2,swept=0;
-// <errors>", "" when heal did nothing.
+// <errors>", with ",sweep_deferred=N" after swept when the sweep deferred
+// panes, and "" when heal did nothing.
 func (t programCaptureHealTally) String() string {
-	if len(t.actions) == 0 && t.swept == 0 && len(t.errs) == 0 {
+	if len(t.actions) == 0 && t.swept == 0 && t.sweepDeferred == 0 && len(t.errs) == 0 {
 		return ""
 	}
-	parts := make([]string, 0, len(t.actions)+1)
+	parts := make([]string, 0, len(t.actions)+2)
 	for action, n := range t.actions {
 		parts = append(parts, fmt.Sprintf("%s=%d", action, n))
 	}
 	sort.Strings(parts)
 	parts = append(parts, fmt.Sprintf("swept=%d", t.swept))
+	if t.sweepDeferred > 0 {
+		parts = append(parts, fmt.Sprintf("sweep_deferred=%d", t.sweepDeferred))
+	}
 	out := strings.Join(parts, ",")
 	if len(t.errs) > 0 {
 		out += "; " + strings.Join(t.errs, "; ")
@@ -144,8 +191,9 @@ func disarmProgramCaptures(sp runtime.Provider) programCaptureHealTally {
 		if !ok {
 			continue
 		}
-		n, err := d.DisarmProgramCaptures()
+		n, deferred, err := d.DisarmProgramCaptures()
 		tally.swept += n
+		tally.sweepDeferred += deferred
 		if err != nil {
 			tally.errs = append(tally.errs, fmt.Sprintf("disarm sweep %s: %v", inventoryLabelForTrace(leaf.label), err))
 		}
@@ -155,22 +203,24 @@ func disarmProgramCaptures(sp runtime.Provider) programCaptureHealTally {
 
 // healProgramCaptures is the pass's heal step (see the file comment). The
 // lane's passMu is held. Failures are logged and recorded in the pass trace;
-// the leaf's per-pane backoff paces retries.
+// the leaf's per-pane backoff paces heal retries, and captureSweepRetry the
+// re-runs of an unfinished disarm sweep.
 func (cr *CityRuntime) healProgramCaptures(lane *runtimeInventoryLane, cfg *config.City, sp runtime.Provider, report *inventoryPassReport) {
 	if cfg == nil || sp == nil {
 		return
 	}
 	if cfg.Session.ProgramStatusMode() == runtime.ProgramStatusOff {
-		if lane.captureSweptCfg != cfg {
+		now := lane.clock.Now()
+		if lane.captureSweptCfg != cfg && lane.captureSweep.due(now) {
 			report.captureHeals = disarmProgramCaptures(sp)
-			// Only a sweep that finished clean is done for this load: a
-			// failed one runs again at the next pass.
-			if len(report.captureHeals.errs) == 0 {
-				lane.captureSweptCfg = cfg
+			if report.captureHeals.sweepFinished() {
+				lane.captureSweptCfg, lane.captureSweep = cfg, captureSweepRetry{}
+			} else {
+				lane.captureSweep.failed(now)
 			}
 		}
 	} else {
-		lane.captureSweptCfg = nil
+		lane.captureSweptCfg, lane.captureSweep = nil, captureSweepRetry{}
 		report.captureHeals = healProgramCaptureReadings(sp, report.programs, func() (map[string]runtime.ProgramStatusArm, error) {
 			return cr.programCaptureWants(cfg)
 		})

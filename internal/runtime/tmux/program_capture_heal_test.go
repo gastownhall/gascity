@@ -37,6 +37,8 @@ type healServer struct {
 	pipeOpensBeforeAct bool
 	// ps fails the process-table read.
 	psFails bool
+	// psReads counts the process-table reads.
+	psReads int
 }
 
 var healArmRandRe = regexp.MustCompile(`'@gc_ps_tap' '([A-Za-z0-9_-]+)\.#\{pane_id\}'`)
@@ -118,7 +120,7 @@ func (s *healServer) run(cmd []string) (string, error) {
 		if slices.Contains(cmd, "-a") {
 			var rows []string
 			for _, p := range s.panes {
-				rows = append(rows, row(p.session, p.window, p.id, boolField(p.dead), p.tap, runtimeInventoryEnd))
+				rows = append(rows, row(p.session, p.window, p.id, boolField(p.dead), boolField(p.pipe), p.tap, runtimeInventoryEnd))
 			}
 			return strings.Join(rows, "\n"), nil
 		}
@@ -219,6 +221,7 @@ func healProvider(server *healServer, now *time.Time) *Provider {
 		return captureCapability{companion: testCompanion, tmux: testTmuxBin}, nil
 	}
 	snapshot := func(context.Context) (processSnapshot, error) {
+		server.psReads++
 		if server.psFails {
 			return processSnapshot{}, errors.New("ps timed out")
 		}
@@ -394,8 +397,8 @@ func TestHealDisarmsWhenSwitchOff(t *testing.T) {
 	}
 	mustHeal(t, p, "s", off, runtime.ProgramCaptureUnchanged)
 
-	// No live tap of ours: the open pipe may be foreign, so only the
-	// options are unset.
+	// The process table shows no tap of ours: the open pipe is not ours to
+	// close, so only the options are unset.
 	foreign := &healModelPane{session: "s", window: "@1", id: "%5", mark: "agent", tap: "0urs.%5", pipe: true}
 	server = &healServer{panes: []*healModelPane{foreign}}
 	p = healProvider(server, &now)
@@ -407,6 +410,44 @@ func TestHealDisarmsWhenSwitchOff(t *testing.T) {
 		if slices.Contains(c, "pipe-pane") {
 			t.Fatalf("disarm closed a pipe that may be foreign: %q", c)
 		}
+	}
+
+	// The process table cannot be read, because ps fails or because its
+	// failure gate is still closed after an earlier failure: the open pipe
+	// may be our live tap's, and unsetting the nonce that proves it ours
+	// would orphan the tap for good, so heal defers. Once the table reads,
+	// the disarm closes the pipe and a later declaration arms the pane
+	// afresh.
+	unread := &healModelPane{session: "s", window: "@1", id: "%5", mark: "agent", tap: "0urs.%5", pipe: true, record: "v1|x"}
+	server = &healServer{panes: []*healModelPane{unread}, taps: map[string]bool{"0urs.%5": true}, psFails: true}
+	p = healProvider(server, &now)
+	mustHeal(t, p, "s", off, runtime.ProgramCaptureDeferred)
+	server.psFails = false
+	mustHeal(t, p, "s", off, runtime.ProgramCaptureDeferred)
+	if server.psReads != 1 {
+		t.Fatalf("process-table reads = %d, want 1: the closed gate must defer without reading", server.psReads)
+	}
+	if unread.tap != "0urs.%5" || unread.record != "v1|x" || !unread.pipe || !server.taps["0urs.%5"] {
+		t.Fatalf("after a disarm with the process table unread: %+v, taps %v; want the nonce and record kept on the open pipe", unread, server.taps)
+	}
+	if muts := server.mutations(); len(muts) != 0 {
+		t.Fatalf("a disarm with the process table unread changed the pane: %q", muts)
+	}
+	p.cache.fetcher.(*tmuxFetcher).snapshotGate.succeeded()
+	mustHeal(t, p, "s", off, runtime.ProgramCaptureDisarmed)
+	if unread.tap != "" || unread.record != "" || unread.pipe || server.taps["0urs.%5"] {
+		t.Fatalf("after the table read: %+v, taps %v; want our tap's pipe closed and the options unset", unread, server.taps)
+	}
+	mustHeal(t, p, "s", healWant, runtime.ProgramCaptureArmed)
+
+	// No pipe attached: no tap can be orphaned, so the options are unset
+	// without reading the process table.
+	closed := &healModelPane{session: "s", window: "@1", id: "%5", mark: "agent", tap: "0urs.%5", record: "v1|x"}
+	server = &healServer{panes: []*healModelPane{closed}, psFails: true}
+	p = healProvider(server, &now)
+	mustHeal(t, p, "s", off, runtime.ProgramCaptureDisarmed)
+	if closed.tap != "" || closed.record != "" || closed.pipe || server.psReads != 0 {
+		t.Fatalf("after disarm: %+v, %d process-table reads; want the options unset without a read", closed, server.psReads)
 	}
 
 	// A pane that was never armed is left alone.
@@ -424,19 +465,25 @@ func TestDisarmSweepDisarmsOnlyOurPanes(t *testing.T) {
 	liveTap := &healModelPane{session: "a", window: "@1", id: "%1", tap: "l1ve.%1", pipe: true, record: "v1|x"}
 	lostTap := &healModelPane{session: "b", window: "@2", id: "%2", tap: "l0st.%2", pipe: true}
 	inherited := &healModelPane{session: "c", window: "@3", id: "%3", tap: "gl0bal.%42", pipe: true}
-	// A dead pane whose tap still runs: its options are unset, and its pipe,
-	// which pipe-pane refuses to touch on a dead pane, is left alone.
-	dead := &healModelPane{session: "d", window: "@4", id: "%4", tap: "d3ad.%4", pipe: true, record: "v1|y", text: "t", dead: true}
 	never := &healModelPane{session: "e", window: "@5", id: "%5"}
-	server := &healServer{panes: []*healModelPane{liveTap, lostTap, inherited, dead, never}, taps: map[string]bool{"l1ve.%1": true, "d3ad.%4": true}}
+	closed := &healModelPane{session: "f", window: "@6", id: "%6", tap: "cl0sed.%6", record: "v1|x"}
+	// Dead panes follow the live-tap rule too. One whose tap is gone, or
+	// whose pipe is closed, has its options unset. One whose live tap still
+	// holds its pipe, which pipe-pane refuses to close on a dead pane, keeps
+	// its nonce and is deferred: unsetting the nonce would leave the tap
+	// reading whatever a respawn runs there, orphaned.
+	deadLive := &healModelPane{session: "d", window: "@4", id: "%4", tap: "d3ad.%4", pipe: true, record: "v1|y", text: "t", dead: true}
+	deadLost := &healModelPane{session: "g", window: "@7", id: "%7", tap: "d3adl0st.%7", pipe: true, record: "v1|z", dead: true}
+	deadClosed := &healModelPane{session: "h", window: "@8", id: "%8", tap: "d3adcl0sed.%8", record: "v1|w", dead: true}
+	server := &healServer{
+		panes: []*healModelPane{liveTap, lostTap, inherited, deadLive, never, closed, deadLost, deadClosed},
+		taps:  map[string]bool{"l1ve.%1": true, "d3ad.%4": true},
+	}
 	p := healProvider(server, &now)
 
-	n, err := p.DisarmProgramCaptures()
-	if err != nil || n != 3 {
-		t.Fatalf("DisarmProgramCaptures = %d, %v, want 3 disarmed", n, err)
-	}
-	if dead.tap != "" || dead.record != "" || dead.text != "" {
-		t.Fatalf("dead pane: %+v, want its capture options unset", dead)
+	n, deferred, err := p.DisarmProgramCaptures()
+	if err != nil || n != 5 || deferred != 1 {
+		t.Fatalf("DisarmProgramCaptures = %d, %d, %v, want 5 disarmed and 1 deferred", n, deferred, err)
 	}
 	if got := callsContaining(server.calls, "pipe-pane"); len(got) != 1 || !slices.Contains(got[0], "=a:@1.%1") {
 		t.Fatalf("pipe-pane calls %q, want only the live tap's pane closed", got)
@@ -447,11 +494,85 @@ func TestDisarmSweepDisarmsOnlyOurPanes(t *testing.T) {
 	if lostTap.tap != "" || !lostTap.pipe {
 		t.Fatalf("lost tap's pane: %+v, want its options unset and its (maybe foreign) pipe left open", lostTap)
 	}
+	if closed.tap != "" || closed.record != "" {
+		t.Fatalf("pipe-less pane: %+v, want its options unset", closed)
+	}
+	if deadLive.tap != "d3ad.%4" || deadLive.record != "v1|y" || deadLive.text != "t" || !deadLive.pipe || !server.taps["d3ad.%4"] {
+		t.Fatalf("dead pane our live tap holds: %+v, want its nonce, record and pipe kept", deadLive)
+	}
+	if deadLost.tap != "" || deadLost.record != "" || !deadLost.pipe || deadClosed.tap != "" || deadClosed.record != "" {
+		t.Fatalf("dead panes no live tap of ours holds: %+v %+v, want their options unset and no pipe touched", deadLost, deadClosed)
+	}
 	if inherited.tap != "gl0bal.%42" {
 		t.Fatalf("the sweep touched an inherited value: %+v", inherited)
 	}
-	if got := len(callsContaining(server.calls, "list-panes")); got != 1 {
-		t.Fatalf("the sweep listed panes %d times, want once", got)
+	if got := len(callsContaining(server.calls, "list-panes")); got != 1 || server.psReads != 1 {
+		t.Fatalf("the sweep listed panes %d times and read the process table %d times, want once each", got, server.psReads)
+	}
+
+	// The deferred dead pane is revived by a respawn that does not remove its
+	// capture (any but gc's own, whose list removes it under off): the next
+	// sweep closes the pipe our live tap still holds, by the live-tap rule,
+	// and unsets the options, so the tap never reads the new program.
+	deadLive.dead = false
+	server.calls = nil
+	if n, deferred, err := p.DisarmProgramCaptures(); err != nil || n != 1 || deferred != 0 {
+		t.Fatalf("DisarmProgramCaptures after the revive = %d, %d, %v, want 1 disarmed and none deferred", n, deferred, err)
+	}
+	if deadLive.tap != "" || deadLive.record != "" || deadLive.pipe || server.taps["d3ad.%4"] {
+		t.Fatalf("revived pane: %+v, taps %v; want our tap's pipe closed and the options unset", deadLive, server.taps)
+	}
+	if n, deferred, err := p.DisarmProgramCaptures(); err != nil || n != 0 || deferred != 0 {
+		t.Fatalf("a sweep with nothing left = %d, %d, %v, want nothing to do", n, deferred, err)
+	}
+}
+
+// Kills a sweep that drops the nonce of a pane whose open pipe may still be
+// our live tap's while the process table cannot be read (ps fails, or its
+// failure gate is still closed): the orphaned tap would read the pane for
+// good, its guarded writes succeeding as no-ops, the sweep would report
+// nothing left to finish, and no later heal could prove the pipe ours to
+// re-arm it.
+func TestDisarmSweepDefersOpenPipesWhileProcessTableUnread(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	live := &healModelPane{session: "a", window: "@1", id: "%1", mark: "agent", tap: "l1ve.%1", pipe: true, record: "v1|x"}
+	closed := &healModelPane{session: "b", window: "@2", id: "%2", tap: "cl0sed.%2"}
+	server := &healServer{panes: []*healModelPane{live, closed}, taps: map[string]bool{"l1ve.%1": true}, psFails: true}
+	p := healProvider(server, &now)
+
+	n, deferred, err := p.DisarmProgramCaptures()
+	if err != nil || n != 1 || deferred != 1 {
+		t.Fatalf("DisarmProgramCaptures = %d, %d, %v, want 1 disarmed and 1 deferred", n, deferred, err)
+	}
+	if live.tap != "l1ve.%1" || live.record != "v1|x" || !live.pipe || !server.taps["l1ve.%1"] {
+		t.Fatalf("open pipe's pane: %+v, taps %v; want its nonce and record kept while the table is unread", live, server.taps)
+	}
+	if closed.tap != "" {
+		t.Fatalf("pipe-less pane: %+v, want its options unset", closed)
+	}
+
+	// ps works again, but its failure gate is still closed: the sweep defers
+	// without reading the table.
+	server.psFails = false
+	if n, deferred, err := p.DisarmProgramCaptures(); err != nil || n != 0 || deferred != 1 || server.psReads != 1 {
+		t.Fatalf("DisarmProgramCaptures with the gate closed = %d, %d, %v after %d table reads, want 1 deferred and no new read", n, deferred, err, server.psReads)
+	}
+	if live.tap != "l1ve.%1" || !live.pipe {
+		t.Fatalf("open pipe's pane with the gate closed: %+v, want its nonce kept", live)
+	}
+
+	// Once the table reads, the next sweep closes our tap's pipe, and a later
+	// declaration arms the pane afresh.
+	p.cache.fetcher.(*tmuxFetcher).snapshotGate.succeeded()
+	if n, deferred, err := p.DisarmProgramCaptures(); err != nil || n != 1 || deferred != 0 {
+		t.Fatalf("DisarmProgramCaptures after the table read = %d, %d, %v, want 1 disarmed and none deferred", n, deferred, err)
+	}
+	if live.tap != "" || live.record != "" || live.pipe || server.taps["l1ve.%1"] {
+		t.Fatalf("after the table read: %+v, taps %v; want our tap's pipe closed and the options unset", live, server.taps)
+	}
+	mustHeal(t, p, "a", healWant, runtime.ProgramCaptureArmed)
+	if !strings.HasSuffix(live.tap, ".%1") || live.tap == "l1ve.%1" || !live.pipe || !server.taps[live.tap] {
+		t.Fatalf("re-armed pane: %+v, taps %v; want a new nonce of %%1 and its tap on the pipe", live, server.taps)
 	}
 }
 

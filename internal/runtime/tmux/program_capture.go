@@ -32,9 +32,12 @@ import (
 // unarmed, its capture still armed. The relay runs the provider's command
 // with the shell tmux would have run it with.
 //
-// Nothing here runs for an undeclared session, which is every session while
-// the [session] program_status switch is off: those keep today's tmux
-// command lines byte for byte.
+// Nothing is armed for an undeclared session, which is every session while
+// the [session] program_status switch is off. Its create keeps today's tmux
+// command line byte for byte. Its respawn also removes the capture an armed
+// incarnation left on the pane (see Tmux.respawnPaneWithWorkDir); while the
+// switch is off only a capture bound to the pane is removed, so a pane never
+// armed is left exactly as it was.
 
 // The pane options of program-status capture. gc writes the nonce; only the
 // tap writes the record, guarded by the nonce.
@@ -413,6 +416,19 @@ func disarmCommands(target string) [][]string {
 	}
 }
 
+// paneArmedFormat is true for a pane bearing a tap nonce bound to its own
+// pane id ("<rand>.<pane_id>"), the nonce an arm sets. A value inherited from
+// window, session or global scope names another pane, as the read side's
+// nonce compare tells apart.
+const paneArmedFormat = "#{m:*.#{pane_id},#{" + programTapOption + "}}"
+
+// disarmIfArmedCommands is disarmCommands run only when target bears a nonce
+// bound to it (paneArmedFormat), in one if-shell -F: a pane never armed is
+// left exactly as it was, a pipe of its own included.
+func disarmIfArmedCommands(target string) [][]string {
+	return [][]string{{"if-shell", "-F", "-t", target, paneArmedFormat, tmuxCommandLines(disarmCommands(target))}}
+}
+
 // programStatusMode is the program-status switch this Tmux runs and reads
 // under: shadow or on, and off for anything else. It is the mode
 // SetProgramStatusMode last published, else Config.ProgramStatus.
@@ -484,7 +500,8 @@ const respawnMarkerFormat = "#{pane_id}"
 // respawnPaneList is the one respawn command list: respawn-pane -k on target,
 // a display-message marker proving it ran, then follow. Every command that
 // must reach the new process before tmux reads its output goes in follow
-// (capture's re-arm today; an identity-changing relaunch's input fence).
+// (capture's re-arm or removal today; an identity-changing relaunch's input
+// fence).
 func respawnPaneList(target, workDir, command string, follow [][]string) [][]string {
 	respawn := []string{"respawn-pane", "-k", "-t", target}
 	if workDir != "" {

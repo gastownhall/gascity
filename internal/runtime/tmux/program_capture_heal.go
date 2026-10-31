@@ -15,9 +15,11 @@ import (
 // Heal and disarm of program-status capture (design §5.4). Only the
 // controller calls these, on its runtime inventory lane's cadence. Each acts
 // on one agent pane at a time, judged from a fresh read of that pane: never
-// on a dead pane (pipe-pane refuses one), never on a pipe that is not
-// provably this runtime's tap (a foreign pipe is never taken over), and
-// never on a pane whose last attempt failed until its backoff has passed.
+// on a dead pane's pipe (pipe-pane refuses one), never on a pipe that is not
+// provably this runtime's tap (a foreign pipe is never taken over), never
+// unsetting the nonce of a pane whose open pipe may be our live tap's (the
+// nonce is the only proof the pipe is ours), and never on a pane whose last
+// attempt failed until its backoff has passed.
 
 // A pane whose heal keeps failing is retried after captureHealBackoffBase,
 // doubling each failure up to captureHealBackoffMax. The backoff is soft
@@ -36,12 +38,13 @@ const captureHealFormat = "#{pane_dead}\t#{window_id}\t" + programPaneFormat + "
 const captureHealFields = 2 + programPaneFields + 1
 
 // captureSweepFormat is the disarm sweep's list-panes -a row: the pane's
-// session, window and id, whether it is dead, and its sanitized tap nonce.
-const captureSweepFormat = "#{session_name}\t#{window_id}\t#{pane_id}\t#{pane_dead}\t" +
+// session, window and id, whether it is dead, whether a pipe is attached, and
+// its sanitized tap nonce.
+const captureSweepFormat = "#{session_name}\t#{window_id}\t#{pane_id}\t#{pane_dead}\t#{pane_pipe}\t" +
 	"#{s/" + programReadSanitizer + "//:" + programTapOption + "}\t" + runtimeInventoryEnd
 
 // captureSweepFields is the field count of captureSweepFormat.
-const captureSweepFields = 6
+const captureSweepFields = 7
 
 // captureHealBackoff is heal's per-pane backoff, keyed by pane id.
 type captureHealBackoff struct {
@@ -130,9 +133,11 @@ func (p programPane) ownNonce() bool {
 //     ours with its tap gone from the process table (tmux closes it at the
 //     pane's next output), is deferred; our live tap writing a codec this gc
 //     does not read is replaced; anything else is unchanged.
-//   - want declares nothing: a pane carrying our nonce is disarmed (its pipe
-//     closed only when the process table shows our tap holding it, then the
-//     capture options unset); any other pane is unchanged.
+//   - want declares nothing: a pane carrying our nonce is disarmed by
+//     disarmPipe's rule (its pipe closed only when the process table shows
+//     our tap holding it, then the capture options unset); while the table
+//     cannot be read, a pane whose pipe is open keeps its nonce and is
+//     deferred. Any other pane is unchanged.
 //
 // A dead pane, a session whose agent pane cannot be named, a failed
 // capability gate, or a pane inside its backoff after a failed heal is
@@ -152,7 +157,15 @@ func (p *Provider) HealProgramCapture(name string, want runtime.ProgramStatusArm
 			return runtime.ProgramCaptureUnchanged, nil
 		}
 		return p.healAct(pane, runtime.ProgramCaptureDisarmed, func() (bool, error) {
-			return true, p.tm.disarmPane(pane.target, p.captureTaps().liveness(pane.tap) == runtime.ProgramTapAlive)
+			liveness := runtime.ProgramTapUnknown
+			if pane.pipe {
+				liveness = p.captureTaps().liveness(pane.tap)
+			}
+			closePipe, ok := disarmPipe(pane.pipe, liveness)
+			if !ok {
+				return false, nil
+			}
+			return true, p.tm.disarmPane(pane.target, closePipe)
 		})
 	}
 	if pane.pipe {
@@ -177,9 +190,10 @@ func (p *Provider) HealProgramCapture(name string, want runtime.ProgramStatusArm
 }
 
 // healAct runs one heal mutation of pane unless the pane is inside its
-// backoff. act reports whether it acted (false: the gate failed or the pipe
-// was taken in between, which defers without counting as a failure). A
-// failure starts or extends the pane's backoff.
+// backoff. act reports whether it acted (false: the gate failed, the pipe
+// was taken in between, or a disarm waits for the process table, which
+// defers without counting as a failure). A failure starts or extends the
+// pane's backoff.
 func (p *Provider) healAct(pane healPane, done runtime.ProgramCaptureAction, act func() (bool, error)) (runtime.ProgramCaptureAction, error) {
 	if p.heal.waiting(pane.id) {
 		return runtime.ProgramCaptureDeferred, nil
@@ -276,6 +290,27 @@ func (t *Tmux) replaceTap(pane healPane, want runtime.ProgramStatusArm) (bool, e
 	return true, nil
 }
 
+// disarmPipe is the disarm rule for a pane bearing our nonce, from whether a
+// pipe is attached and the liveness of our tap: with no pipe, the capture
+// options are unset; a pipe our live tap holds is closed first; a pipe the
+// process table shows no tap of ours holding is not ours to close and stays
+// open. ok is false while a pipe is attached and the table was not read: the
+// pipe may be our live tap's, and unsetting the nonce that proves it ours
+// would orphan the tap for good (its guarded writes succeed as no-ops, and no
+// heal could prove the pipe ours again), so the disarm waits for a reading.
+func disarmPipe(pipe bool, liveness runtime.ProgramTapLiveness) (closePipe, ok bool) {
+	if !pipe {
+		return false, true
+	}
+	switch liveness {
+	case runtime.ProgramTapAlive:
+		return true, true
+	case runtime.ProgramTapGone:
+		return false, true
+	}
+	return false, false
+}
+
 // disarmPane unsets target's capture options, first closing its pipe when
 // closePipe says the pipe is our tap's. A pipe that may be foreign is never
 // closed.
@@ -320,45 +355,57 @@ func (p *Provider) captureTaps() programTaps {
 }
 
 // DisarmProgramCaptures is the controller's disarm sweep for a city whose
-// program-status switch is off, run once per config load: one list-panes -a
-// of every pane's tap nonce, then the disarm rule of [Provider.HealProgramCapture]
-// for each pane bearing a nonce bound to it. A dead pane has its capture
-// options unset and its pipe left alone (pipe-pane refuses a dead pane), so a
-// respawn into it never inherits the old nonce or record. It returns how many
-// panes it disarmed. With no server, or one holding no sessions, there is
+// program-status switch is off: one list-panes -a of every pane's pipe and
+// tap nonce, then the disarm rule of [Provider.HealProgramCapture]
+// (disarmPipe) for each pane bearing a nonce bound to it, the process table
+// read once and only when such a pane has a pipe open. A dead pane is
+// disarmed by the same rule, except that pipe-pane refuses a dead pane: one
+// whose pipe our live tap holds keeps its nonce and is deferred, since
+// unsetting the nonce would leave the tap reading whatever a respawn runs
+// there; a respawn under the switch off closes that pipe with the capture
+// (the respawn list's follow), and a sweep after any other revive closes it
+// by the live-tap rule. It returns how many panes it disarmed and how many
+// it deferred; the controller sweeps again until a sweep fails nothing and
+// defers nothing. With no server, or one holding no sessions, there is
 // nothing to disarm.
-func (p *Provider) DisarmProgramCaptures() (int, error) {
+func (p *Provider) DisarmProgramCaptures() (disarmed, deferred int, err error) {
 	out, err := p.tm.run("list-panes", "-a", "-F", captureSweepFormat)
 	if err != nil {
 		if errors.Is(err, ErrNoServer) {
-			return 0, nil
+			return 0, 0, nil
 		}
-		return 0, fmt.Errorf("listing panes for the program-capture disarm sweep: %w", err)
+		return 0, 0, fmt.Errorf("listing panes for the program-capture disarm sweep: %w", err)
 	}
 	type armed struct {
 		target, tap string
-		dead        bool
+		dead, pipe  bool
 	}
 	var panes []armed
+	piped := false
 	for _, line := range strings.Split(out, "\n") {
 		parts := strings.Split(line, "\t")
-		if len(parts) != captureSweepFields || parts[captureSweepFields-1] != runtimeInventoryEnd || (parts[3] != "0" && parts[3] != "1") {
+		if len(parts) != captureSweepFields || parts[captureSweepFields-1] != runtimeInventoryEnd ||
+			(parts[3] != "0" && parts[3] != "1") || (parts[4] != "0" && parts[4] != "1") {
 			continue
 		}
-		pane := programPane{id: parts[2], tap: parts[4]}
+		pane := programPane{id: parts[2], pipe: parts[4] == "1", tap: parts[5]}
 		if parts[0] == "" || !wellFormedTmuxID(parts[1], '@') || !pane.ownNonce() {
 			continue
 		}
-		panes = append(panes, armed{target: paneTarget(parts[0]) + parts[1] + "." + pane.id, tap: pane.tap, dead: parts[3] == "1"})
+		piped = piped || pane.pipe
+		panes = append(panes, armed{target: paneTarget(parts[0]) + parts[1] + "." + pane.id, tap: pane.tap, dead: parts[3] == "1", pipe: pane.pipe})
 	}
-	if len(panes) == 0 {
-		return 0, nil
+	var taps programTaps
+	if piped {
+		taps = p.captureTaps()
 	}
-	taps := p.captureTaps()
-	disarmed := 0
 	var errs []error
 	for _, pane := range panes {
-		closePipe := !pane.dead && taps.liveness(pane.tap) == runtime.ProgramTapAlive
+		closePipe, ok := disarmPipe(pane.pipe, taps.liveness(pane.tap))
+		if !ok || (pane.dead && closePipe) {
+			deferred++
+			continue
+		}
 		if err := p.tm.disarmPane(pane.target, closePipe); err != nil {
 			errs = append(errs, err)
 			continue
@@ -368,7 +415,7 @@ func (p *Provider) DisarmProgramCaptures() (int, error) {
 	if disarmed > 0 {
 		p.invalidateCache()
 	}
-	return disarmed, errors.Join(errs...)
+	return disarmed, deferred, errors.Join(errs...)
 }
 
 // ProgramCaptureFloor checks the capture capability floor (design §5.5) for

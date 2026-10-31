@@ -6114,20 +6114,26 @@ func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
 }
 
 // respawnPaneWithWorkDir is RespawnPaneWithWorkDir re-arming the pane's
-// program-status capture as arm declares (see program_capture.go). The zero
-// arm, and an arm the capability gate refuses, respawn exactly as
-// RespawnPaneWithWorkDir always has. An armed respawn runs one list
-// (respawnPaneList): respawn-pane, its marker, a new nonce, the previous
-// incarnation's record unset, and pipe-pane -O replacing the previous tap,
-// which reads EOF after its nonce is gone, so its last write cannot land.
-// The previous pipe is never closed ahead of the respawn: pipe-pane fails on
-// an exited pane, which would refuse to respawn a dead agent. A list that
-// fails after the marker printed respawned the pane: the arm failure is
-// logged and the respawn succeeds; heal re-arms the pane. While the
-// program-status switch is not off, an unarmed respawn (undeclared, or the
-// gate refused) runs the same list with the capture removed after the
-// marker (disarmCommands), so an earlier incarnation's tap can never vouch
-// for the new program.
+// program-status capture as arm declares (see program_capture.go). Every
+// respawn runs one list (respawnPaneList): respawn-pane, its marker, then
+// the capture commands. An armed respawn sets a new nonce, unsets the
+// previous incarnation's record and runs pipe-pane -O replacing the previous
+// tap, which reads EOF after its nonce is gone, so its last write cannot
+// land. The previous pipe is never closed ahead of the respawn: pipe-pane
+// fails on an exited pane, which would refuse to respawn a dead agent. A
+// list that fails after the marker printed respawned the pane: the capture
+// failure is logged and the respawn succeeds; heal re-arms the pane.
+//
+// An unarmed respawn (undeclared, the gate refused, or the switch off) runs
+// the command as RespawnPaneWithWorkDir always has and removes, after the
+// marker, the capture an earlier incarnation was armed with: tmux keeps a
+// pane's options and pipe across respawn-pane, so the old tap would vouch
+// for the new program under its nonce. While the switch is not off that is
+// whatever capture the pane carries (disarmCommands). While it is off it is
+// only a capture bound to the pane (disarmIfArmedCommands), so a pane never
+// armed is left as it was, a pipe of its own included, and a capture armed
+// before the switch went off is not read valid for the new program once the
+// switch is back on.
 func (t *Tmux) respawnPaneWithWorkDir(pane, workDir, command string, arm runtime.ProgramStatusArm) error {
 	target, err := t.agentPaneTarget(pane)
 	if err != nil {
@@ -6143,26 +6149,18 @@ func (t *Tmux) respawnPaneWithWorkDir(pane, workDir, command string, arm runtime
 		}
 		return nil
 	}
+	disarm := disarmIfArmedCommands(target)
 	if t.programStatusMode() != runtime.ProgramStatusOff {
-		// An unarmed respawn under a live switch: the previous incarnation's
-		// tap must not publish the new program under its nonce, so the
-		// capture is removed in the same list, after the respawn ran.
-		followErr, err := t.runRespawnList(target, workDir, t.wrapPaneCommand(command), disarmCommands(target))
-		if err != nil {
-			return err
-		}
-		if followErr != nil {
-			_, _ = fmt.Fprintf(captureWarningOut, "warning: pane %s: removing program-status capture: %v\n", target, followErr)
-		}
-		return nil
+		disarm = disarmCommands(target)
 	}
-	args := []string{"respawn-pane", "-k", "-t", target}
-	if workDir != "" {
-		args = append(args, "-c", workDir)
+	followErr, err := t.runRespawnList(target, workDir, t.wrapPaneCommand(command), disarm)
+	if err != nil {
+		return err
 	}
-	args = append(args, t.wrapPaneCommand(command))
-	_, err = t.run(args...)
-	return err
+	if followErr != nil {
+		_, _ = fmt.Fprintf(captureWarningOut, "warning: pane %s: removing program-status capture: %v\n", target, followErr)
+	}
+	return nil
 }
 
 // ClearHistory clears the scrollback history buffer for a pane.
