@@ -1615,6 +1615,45 @@ func replayedSubmitOutcome(body *genclient.AsyncAcceptedBody, intent session.Sub
 	}, true, nil
 }
 
+// CreateBeadRequest carries the parameters of a bead create for
+// Client.CreateBead. Title is required; Rig selects the rig store the bead is
+// created in (empty means the city store).
+type CreateBeadRequest struct {
+	Rig         string
+	Title       string
+	Description string
+	Type        string
+}
+
+// CreateBead creates a bead over the control plane
+// (POST /v0/city/{city}/beads) and returns the persisted bead. A remote client
+// attaches the X-GC-City-Write grant automatically for this mutating request
+// (gate G18); a remote error is non-fallbackable (gate G1).
+func (c *Client) CreateBead(req CreateBeadRequest) (beads.Bead, error) {
+	if err := c.requireCityScope(); err != nil {
+		return beads.Bead{}, err
+	}
+	body := genclient.CreateBeadJSONRequestBody{Title: req.Title}
+	setStrPtr(&body.Rig, req.Rig)
+	setStrPtr(&body.Description, req.Description)
+	setStrPtr(&body.Type, req.Type)
+	params := &genclient.CreateBeadParams{XGCRequest: "true"}
+	resp, err := c.cw.CreateBeadWithResponse(context.Background(), c.cityName, params, body)
+	if err != nil {
+		return beads.Bead{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return beads.Bead{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
+		return beads.Bead{}, err
+	}
+	if resp.JSON201 == nil {
+		return beads.Bead{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return beadFromGenPtr(resp.JSON201), nil
+}
+
 // SlingRequest carries the parameters of a sling mutation for Client.Sling.
 // It mirrors the SlingInput body: Target is required; exactly one of Bead or
 // Formula selects the work.

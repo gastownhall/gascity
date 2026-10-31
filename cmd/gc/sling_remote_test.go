@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/clientcontext"
 )
 
 func remoteTestClient(t *testing.T, url string) *api.Client {
@@ -83,10 +84,14 @@ func TestCmdSlingRemote_RefusesUnsupportedModes(t *testing.T) {
 		invoke func() int
 		want   string
 	}{
-		{"stdin", func() int {
+		{"stdin-dry-run", func() int {
 			var out, errb bytes.Buffer
-			return cmdSlingRemote(base(), remoteTestTarget(srv.URL), []string{"mayor"}, false, false, false, "", nil, "", false, false, false, "", false, true /*stdin*/, false, "", "", false, &out, &errb)
-		}, "stdin"},
+			return cmdSlingRemote(base(), remoteTestTarget(srv.URL), []string{"mayor"}, false, false, false, "", nil, "", false, false, false, "", false, true /*stdin*/, true /*dryRun*/, "", "", false, &out, &errb)
+		}, "dry-run"},
+		{"inline-dry-run", func() int {
+			var out, errb bytes.Buffer
+			return cmdSlingRemote(base(), remoteTestTarget(srv.URL), []string{"mayor", "write a readme"}, false, false, false, "", nil, "", false, false, false, "", false, false, true /*dryRun*/, "", "", false, &out, &errb)
+		}, "dry-run"},
 		{"dry-run", func() int {
 			var out, errb bytes.Buffer
 			return cmdSlingRemote(base(), remoteTestTarget(srv.URL), []string{"mayor", "BL-1"}, false, false, false, "", nil, "", false, false, false, "", false, false, true /*dryRun*/, "", "", false, &out, &errb)
@@ -99,10 +104,10 @@ func TestCmdSlingRemote_RefusesUnsupportedModes(t *testing.T) {
 			var out, errb bytes.Buffer
 			return cmdSlingRemote(base(), remoteTestTarget(srv.URL), []string{"BL-1"}, false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, &out, &errb)
 		}, "explicit target"},
-		{"inline-text", func() int {
+		{"multi-line-inline-text", func() int {
 			var out, errb bytes.Buffer
-			return cmdSlingRemote(base(), remoteTestTarget(srv.URL), []string{"mayor", "write a readme"}, false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, &out, &errb)
-		}, "inline text"},
+			return cmdSlingRemote(base(), remoteTestTarget(srv.URL), []string{"mayor", "BL-1\nBL-2"}, false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, &out, &errb)
+		}, "spans 2 lines"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -578,5 +583,230 @@ func TestCmdSlingRemote_OnAttachToOlderServerJSON(t *testing.T) {
 	}
 	if got.OK || got.Error.Code != "attached_to_container" || !strings.Contains(got.Error.Message, "convoy BL-c") {
 		t.Errorf("json = %+v, want an attached_to_container error naming convoy BL-c", got)
+	}
+}
+
+// remoteInlineCall is one request the inline-sling test server saw.
+type remoteInlineCall struct {
+	path  string
+	grant string
+	body  map[string]any
+}
+
+// newRemoteInlineServer answers a bead create with createdID and a sling with
+// slingStatus/slingResp, recording every request in order.
+func newRemoteInlineServer(t *testing.T, createdID string, slingStatus int, slingResp string) (*httptest.Server, *[]remoteInlineCall) {
+	t.Helper()
+	var calls []remoteInlineCall
+	srv := newRemoteTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		call := remoteInlineCall{path: r.URL.Path, grant: r.Header.Get("X-GC-City-Write")}
+		if len(b) > 0 {
+			if err := json.Unmarshal(b, &call.body); err != nil {
+				t.Errorf("request body %q: %v", b, err)
+			}
+		}
+		calls = append(calls, call)
+		switch r.URL.Path {
+		case "/v0/city/mc/beads":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"` + createdID + `","title":"x","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z"}`))
+		case "/v0/city/mc/sling":
+			if slingStatus != http.StatusOK {
+				w.Header().Set("Content-Type", "application/problem+json")
+			} else {
+				w.Header().Set("Content-Type", "application/json")
+			}
+			w.WriteHeader(slingStatus)
+			_, _ = w.Write([]byte(slingResp))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	return srv, &calls
+}
+
+// remoteGrantClient is a remote client whose fake grant minter hands out a
+// distinct grant per mutating request.
+func remoteGrantClient(t *testing.T, url string) *api.Client {
+	t.Helper()
+	n := 0
+	c, err := api.NewRemoteCityScopedClient(url, "mc", api.RemoteOptions{
+		Grant: func(api.GrantBinding) (string, error) {
+			n++
+			return "grant-" + string(rune('0'+n)), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// Inline text against a remote city creates the bead in the target's rig
+// store, then slings the new bead by ID; each mutation carries its own grant.
+func TestCmdSlingRemote_InlineTextCreatesThenSlings(t *testing.T) {
+	srv, calls := newRemoteInlineServer(t, "rg-abc1", http.StatusOK, `{"status":"routed","target":"rg/worker","bead":"rg-abc1"}`)
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteGrantClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"rg/worker", "write a readme"},
+		false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d; stderr=%q", code, errb.String())
+	}
+	if len(*calls) != 2 {
+		t.Fatalf("calls = %+v, want create then sling", *calls)
+	}
+	create, sl := (*calls)[0], (*calls)[1]
+	if create.path != "/v0/city/mc/beads" || sl.path != "/v0/city/mc/sling" {
+		t.Fatalf("order = %q, %q; want create then sling", create.path, sl.path)
+	}
+	if create.grant != "grant-1" || sl.grant != "grant-2" {
+		t.Errorf("grants = %q, %q; want a fresh grant per mutation", create.grant, sl.grant)
+	}
+	if create.body["rig"] != "rg" || create.body["title"] != "write a readme" || create.body["type"] != "task" {
+		t.Errorf("create body = %v", create.body)
+	}
+	if _, ok := create.body["description"]; ok {
+		t.Errorf("inline text has no description: %v", create.body)
+	}
+	if sl.body["bead"] != "rg-abc1" || sl.body["target"] != "rg/worker" {
+		t.Errorf("sling body = %v", sl.body)
+	}
+	if !strings.Contains(out.String(), `Created rg-abc1 — "write a readme"`) {
+		t.Errorf("stdout = %q, want the Created line", out.String())
+	}
+}
+
+// A city-scoped target (no rig qualifier) creates the bead in the city store.
+func TestCmdSlingRemote_InlineTextCityTargetSendsNoRig(t *testing.T) {
+	srv, calls := newRemoteInlineServer(t, "gc-abc1", http.StatusOK, `{"status":"routed","target":"overseer","bead":"gc-abc1"}`)
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteGrantClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"overseer", "plan the week"},
+		false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d; stderr=%q", code, errb.String())
+	}
+	if _, ok := (*calls)[0].body["rig"]; ok {
+		t.Errorf("city target must not send a rig: %v", (*calls)[0].body)
+	}
+}
+
+// --stdin reads the title (first line) and description (the rest), creates the
+// bead remotely, then slings it.
+func TestCmdSlingRemote_StdinCreatesThenSlings(t *testing.T) {
+	prev := slingStdin
+	slingStdin = func() io.Reader { return strings.NewReader("fix login\n\nsteps to reproduce\nmore\n") }
+	t.Cleanup(func() { slingStdin = prev })
+	srv, calls := newRemoteInlineServer(t, "rg-x2", http.StatusOK, `{"status":"routed","target":"rg/worker","bead":"rg-x2"}`)
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteGrantClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"rg/worker"},
+		false, false, false, "", nil, "", false, false, false, "", false, true /*stdin*/, false, "", "", false, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d; stderr=%q", code, errb.String())
+	}
+	if len(*calls) != 2 {
+		t.Fatalf("calls = %+v", *calls)
+	}
+	create := (*calls)[0]
+	if create.body["title"] != "fix login" || create.body["description"] != "steps to reproduce\nmore" || create.body["rig"] != "rg" {
+		t.Errorf("create body = %v", create.body)
+	}
+	if (*calls)[1].body["bead"] != "rg-x2" {
+		t.Errorf("sling body = %v", (*calls)[1].body)
+	}
+}
+
+// Empty --stdin is refused before anything is written.
+func TestCmdSlingRemote_StdinEmptyRefused(t *testing.T) {
+	prev := slingStdin
+	slingStdin = func() io.Reader { return strings.NewReader("\n") }
+	t.Cleanup(func() { slingStdin = prev })
+	srv, calls := newRemoteInlineServer(t, "unused", http.StatusOK, `{}`)
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteGrantClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"rg/worker"},
+		false, false, false, "", nil, "", false, false, false, "", false, true /*stdin*/, false, "", "", false, &out, &errb)
+	if code != 1 || len(*calls) != 0 || !strings.Contains(errb.String(), "no input") {
+		t.Fatalf("exit %d calls=%d stderr=%q", code, len(*calls), errb.String())
+	}
+}
+
+// The create and the sling are two requests, not one transaction: when the
+// sling fails after the create, the bead ID and a resume command are printed
+// and the exit is non-zero.
+func TestCmdSlingRemote_InlineSlingFailurePrintsResumeHint(t *testing.T) {
+	srv, calls := newRemoteInlineServer(t, "rg-abc1", http.StatusConflict, `{"status":409,"detail":"target busy"}`)
+	target := remoteTestTarget(srv.URL)
+	target.Ctx = &clientcontext.Context{Name: "shared"}
+	target.Source = remoteSourceContextFlag
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteGrantClient(t, srv.URL), target, []string{"rg/worker", "write a readme"},
+		false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, &out, &errb)
+	if code == 0 {
+		t.Fatal("a failed sling must exit non-zero")
+	}
+	if len(*calls) != 2 {
+		t.Fatalf("calls = %+v", *calls)
+	}
+	msg := errb.String()
+	if !strings.Contains(msg, "target busy") || !strings.Contains(msg, "rg-abc1") {
+		t.Errorf("stderr = %q, want the failure and the created bead id", msg)
+	}
+	if !strings.Contains(msg, "gc --context shared sling rg/worker rg-abc1") {
+		t.Errorf("stderr = %q, want the resume command", msg)
+	}
+}
+
+// The resume hint for an ad-hoc --city-url target names the URL and city.
+func TestCmdSlingRemote_InlineSlingFailureAdHocResumeHint(t *testing.T) {
+	srv, _ := newRemoteInlineServer(t, "rg-abc1", http.StatusConflict, `{"status":409,"detail":"target busy"}`)
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteGrantClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"rg/worker", "write a readme"},
+		false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", true /*json*/, &out, &errb)
+	if code == 0 {
+		t.Fatal("a failed sling must exit non-zero")
+	}
+	want := "gc --city-url " + srv.URL + " --city-name mc sling rg/worker rg-abc1"
+	if !strings.Contains(out.String(), "rg-abc1") || !strings.Contains(out.String()+errb.String(), want) {
+		t.Errorf("stdout=%q stderr=%q, want %q", out.String(), errb.String(), want)
+	}
+	if strings.Contains(out.String(), "Created rg-abc1") {
+		t.Errorf("--json must not print the human Created line: %q", out.String())
+	}
+}
+
+// A failed create stops before any sling.
+func TestCmdSlingRemote_InlineCreateFailureStops(t *testing.T) {
+	var paths []string
+	srv := newRemoteTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"status":400,"detail":"unknown rig"}`))
+	})
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteGrantClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"rg/worker", "write a readme"},
+		false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, &out, &errb)
+	if code != 1 || !slices.Equal(paths, []string{"/v0/city/mc/beads"}) || !strings.Contains(errb.String(), "unknown rig") {
+		t.Fatalf("exit %d paths=%v stderr=%q", code, paths, errb.String())
+	}
+}
+
+// Multi-line inline text is refused, as on the local path.
+func TestCmdSlingRemote_MultiLineInlineTextRefused(t *testing.T) {
+	srv, calls := newRemoteInlineServer(t, "unused", http.StatusOK, `{}`)
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteGrantClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"rg/worker", "rg-1\nrg-2"},
+		false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, &out, &errb)
+	if code != 1 || len(*calls) != 0 || !strings.Contains(errb.String(), "spans 2 lines") {
+		t.Fatalf("exit %d calls=%d stderr=%q", code, len(*calls), errb.String())
 	}
 }
