@@ -4697,6 +4697,48 @@ func TestProcessWorkflowFinalizeStopsSourceChainAtOpenBlockedSource(t *testing.T
 	})
 }
 
+func TestProcessWorkflowFinalizeClosesSourceChainPastUnblockedWorkOutcomes(t *testing.T) {
+	t.Parallel()
+
+	for _, workOutcome := range []string{
+		beadmeta.WorkOutcomeShipped,
+		beadmeta.WorkOutcomeNoOp,
+		beadmeta.WorkOutcomeAbandoned,
+		"",
+	} {
+		name := workOutcome
+		if name == "" {
+			name = "unset"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newSourceChainFinalizeFixture(t)
+			sourceMeta := map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass}
+			if workOutcome != "" {
+				sourceMeta[beadmeta.WorkOutcomeMetadataKey] = workOutcome
+			}
+			stampSourceChainFixture(t, f, "closed", sourceMeta, nil)
+
+			result, trace := finalizeSourceChainFixture(t, f, ProcessOptions{
+				ResolveStoreRef:      f.resolver,
+				SourceWorkflowStores: sourceChainFixtureStores(f),
+			})
+
+			if !result.Processed || result.Action != "workflow-pass" {
+				t.Fatalf("result = %+v, want processed workflow-pass", result)
+			}
+			parent := mustGetBead(t, f.cityStore, f.citySource.ID)
+			if parent.Status != "closed" || parent.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+				t.Fatalf("parent = status %q gc.outcome %q, want closed pass", parent.Status, parent.Metadata[beadmeta.OutcomeMetadataKey])
+			}
+			if strings.Contains(trace, "reason=blocked_source") {
+				t.Fatalf("trace stopped at blocked_source for gc.work_outcome %q:\n%s", workOutcome, trace)
+			}
+		})
+	}
+}
+
 type getErrorStore struct {
 	beads.Store
 	failID string
