@@ -9785,3 +9785,48 @@ func TestDoSlingForceSuppressesEffectiveSuspensionWarnings(t *testing.T) {
 	}
 	assertStoreRoutedTo(t, deps.Store, "my-1", "myrig/polecat")
 }
+
+// TestDoSlingBatchWarnsCitySuspendedOnFormulaAndConvoy runs gc sling's own
+// path (doSlingBatch, then Sling.Dispatch) into a suspended city for a
+// --formula launch and a convoy. Each builds a result of its own, and each
+// must still print the city warning.
+func TestDoSlingBatchWarnsCitySuspendedOnFormulaAndConvoy(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		target     string
+		isFormula  bool
+		wantStdout string
+	}{
+		{name: "formula", target: "code-review", isFormula: true, wantStdout: "formula"},
+		{name: "convoy", target: "CVY-1", wantStdout: "Slung 1/1 children"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := newFakeRunner()
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+			a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+			q := newFakeChildQuerier()
+			q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
+			q.childrenOf["CVY-1"] = []beads.Bead{{ID: "BL-1", Status: "open"}}
+
+			deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+			deps.CityPath = t.TempDir()
+			suspended := true
+			if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, deps.CityPath, &suspended); err != nil {
+				t.Fatalf("SetCitySuspended: %v", err)
+			}
+			opts := testOpts(a, tc.target)
+			opts.IsFormula = tc.isFormula
+			code := doSlingBatch(opts, deps, q, stdout, stderr)
+
+			if code != 0 {
+				t.Fatalf("doSlingBatch returned %d, want 0 (still launches); stderr = %q", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), tc.wantStdout) {
+				t.Errorf("stdout = %q, want %q from the %s path", stdout.String(), tc.wantStdout, tc.name)
+			}
+			if !strings.Contains(stderr.String(), citySuspendedWarning) {
+				t.Errorf("stderr = %q, want city suspended warning %q", stderr.String(), citySuspendedWarning)
+			}
+		})
+	}
+}
