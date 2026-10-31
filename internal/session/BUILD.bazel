@@ -238,6 +238,7 @@ go_test(
         "turn_observation_test.go",
         "turn_replacement_test.go",
         "tx_test.go",
+        "wait_cancel_ctx_test.go",
         "wait_idle_reminder_test.go",
         "wait_store_partial_test.go",
         "wait_store_test.go",
