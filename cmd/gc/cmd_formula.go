@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/spf13/cobra"
 )
@@ -1003,11 +1005,17 @@ city's work store, copy them into the binding with
 				// its own graph leg through resolveGraphStore, which already
 				// names the binding, and its work leg is only read for an input
 				// convoy this arm never mints.
-				result, err := molecule.Attach(cmd.Context(), attachStore, recipe, attach, molecule.AttachOptions{
-					Title:          title,
-					Vars:           cookVars,
-					IdempotencyKey: graphRootKey,
-				})
+				result, err := attachFormulaCookUnderSourceLock(cmd.Context(), cityPath, cfg, scope.storeRoot, attach, stderr,
+					func(res *sling.SlingResult) error {
+						return sling.CheckNoMoleculeChildrenAllowLiveWorkflow(attachStore, attach, attachStore, res)
+					},
+					func() (*molecule.AttachResult, error) {
+						return molecule.Attach(cmd.Context(), attachStore, recipe, attach, molecule.AttachOptions{
+							Title:          title,
+							Vars:           cookVars,
+							IdempotencyKey: graphRootKey,
+						})
+					})
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, err)
 				}
@@ -1292,6 +1300,31 @@ func ensureFormulaCookAttachDep(store beads.Store, attachBeadID, rootID string) 
 		return fmt.Errorf("wiring attach dependency %s -> %s: %w", attachBeadID, rootID, err)
 	}
 	return nil
+}
+
+// attachFormulaCookUnderSourceLock runs the non-graph --attach sequence under
+// the source-workflow lock, as the graph.v2 arm does: check is the
+// existing-attachment guard sling's own non-graph path runs first, then attach
+// materializes the sub-DAG. A target that already carries a live molecule is
+// refused by check, or has an idle one auto-burned, instead of accumulating a
+// second. The caller supplies both as closures over the attach store so this
+// helper holds no store of its own.
+func attachFormulaCookUnderSourceLock(ctx context.Context, cityPath string, cfg *config.City, storeRoot, attachBeadID string, stderr io.Writer, check func(*sling.SlingResult) error, attach func() (*molecule.AttachResult, error)) (*molecule.AttachResult, error) {
+	storeRef := workflowStoreRefForDir(storeRoot, cityPath, loadedCityName(cfg, cityPath), cfg)
+	var result *molecule.AttachResult
+	err := sourceworkflow.WithLock(ctx, cityPath, sourceWorkflowLockScopeForStoreRef(cityPath, cfg, storeRoot, storeRef), attachBeadID, func() error {
+		var checked sling.SlingResult
+		if err := check(&checked); err != nil {
+			return err
+		}
+		for _, id := range checked.AutoBurned {
+			_, _ = fmt.Fprintf(stderr, "Auto-burned stale molecule %s\n", id)
+		}
+		var err error
+		result, err = attach()
+		return err
+	})
+	return result, err
 }
 
 func formulaCookLiveInputConvoyGraphRoots(store beads.Store, inputConvoyID, allowedRootKey string) ([]beads.Bead, error) {
