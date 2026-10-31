@@ -796,6 +796,161 @@ func TestGetRejectsNonMessageType(t *testing.T) {
 	}
 }
 
+// TestIDAddressedOpsRejectNonMessageType covers gascity#8200: Read,
+// MarkRead, MarkUnread and Reply loaded an arbitrary bead ID and mutated its
+// mail labels/metadata without the type check Get already enforced. Every
+// ID-addressed op must reject a non-message bead and leave it unmutated,
+// matching Get's existing boundary.
+func TestIDAddressedOpsRejectNonMessageType(t *testing.T) {
+	newNonMessageBeads := func(t *testing.T, store beads.Store) (task, untyped beads.Bead) {
+		t.Helper()
+		var err error
+		task, err = store.Create(beads.Bead{Title: "task", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		untyped, err = store.Create(beads.Bead{Title: "legacy"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return task, untyped
+	}
+
+	assertUnmutated := func(t *testing.T, store beads.Store, id string, wantLabels []string, wantMeta map[string]string) {
+		t.Helper()
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("reload %s: %v", id, err)
+		}
+		if len(got.Labels) != len(wantLabels) {
+			t.Errorf("bead %s labels = %#v, want %#v (operation mutated a non-message bead)", id, got.Labels, wantLabels)
+		}
+		for _, l := range wantLabels {
+			if !hasLabel(got.Labels, l) {
+				t.Errorf("bead %s lost expected label %q", id, l)
+			}
+		}
+		for k, want := range wantMeta {
+			if got.Metadata[k] != want {
+				t.Errorf("bead %s metadata[%q] = %q, want %q (operation mutated a non-message bead)", id, k, got.Metadata[k], want)
+			}
+		}
+		if _, hasMailRead := got.Metadata["mail.read"]; hasMailRead && wantMeta["mail.read"] == "" {
+			t.Errorf("bead %s acquired mail.read metadata it should not have", id)
+		}
+	}
+
+	t.Run("Read", func(t *testing.T) {
+		store := beads.NewMemStore()
+		p := New(store)
+		task, untyped := newNonMessageBeads(t, store)
+
+		if _, err := p.Read(task.ID); err == nil {
+			t.Error("Read should reject non-message bead (Type=task)")
+		}
+		assertUnmutated(t, store, task.ID, nil, nil)
+
+		if _, err := p.Read(untyped.ID); err == nil {
+			t.Error("Read should reject bead with empty type")
+		}
+		assertUnmutated(t, store, untyped.ID, nil, nil)
+	})
+
+	t.Run("MarkRead", func(t *testing.T) {
+		store := beads.NewMemStore()
+		p := New(store)
+		task, untyped := newNonMessageBeads(t, store)
+
+		if err := p.MarkRead(task.ID); err == nil {
+			t.Error("MarkRead should reject non-message bead (Type=task)")
+		}
+		assertUnmutated(t, store, task.ID, nil, nil)
+
+		if err := p.MarkRead(untyped.ID); err == nil {
+			t.Error("MarkRead should reject bead with empty type")
+		}
+		assertUnmutated(t, store, untyped.ID, nil, nil)
+	})
+
+	t.Run("MarkUnread", func(t *testing.T) {
+		// Seed as already-"read" so an unexpected mutation (removing the
+		// label, flipping mail.read to "false") is visible.
+		store := beads.NewMemStore()
+		p := New(store)
+		task, err := store.Create(beads.Bead{
+			Title:    "task",
+			Type:     "task",
+			Labels:   []string{"read"},
+			Metadata: map[string]string{"mail.read": "true"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		untyped, err := store.Create(beads.Bead{
+			Title:    "legacy",
+			Labels:   []string{"read"},
+			Metadata: map[string]string{"mail.read": "true"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := p.MarkUnread(task.ID); err == nil {
+			t.Error("MarkUnread should reject non-message bead (Type=task)")
+		}
+		assertUnmutated(t, store, task.ID, []string{"read"}, map[string]string{"mail.read": "true"})
+
+		if err := p.MarkUnread(untyped.ID); err == nil {
+			t.Error("MarkUnread should reject bead with empty type")
+		}
+		assertUnmutated(t, store, untyped.ID, []string{"read"}, map[string]string{"mail.read": "true"})
+	})
+
+	t.Run("Reply", func(t *testing.T) {
+		// Reply does not mutate the original bead; the vulnerability is that
+		// it fabricates a new reply bead addressed to a non-message id. Give
+		// each non-message bead a From so sender-resolution succeeds
+		// unconditionally (from == "human" short-circuits resolveSenderRoute
+		// regardless of p.sessions), which is what let the bug through before:
+		// without that, the pre-fix code could reject for the unrelated
+		// "no sender to reply to" reason and mask whether the type guard ran.
+		store := beads.NewMemStore()
+		p := New(store)
+		task, err := store.Create(beads.Bead{Title: "task", Type: "task", From: "someone"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		untyped, err := store.Create(beads.Bead{Title: "legacy", From: "someone"})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		countOpen := func() int {
+			open, err := store.ListOpen()
+			if err != nil {
+				t.Fatalf("ListOpen: %v", err)
+			}
+			return len(open)
+		}
+
+		before := countOpen()
+		if _, err := p.Reply(task.ID, "human", "", "body"); err == nil {
+			t.Error("Reply should reject non-message bead (Type=task)")
+		}
+		if after := countOpen(); after != before {
+			t.Errorf("Reply to non-message bead created %d bead(s) (open count %d -> %d)", after-before, before, after)
+		}
+
+		before = countOpen()
+		if _, err := p.Reply(untyped.ID, "human", "", "body"); err == nil {
+			t.Error("Reply should reject bead with empty type")
+		}
+		if after := countOpen(); after != before {
+			t.Errorf("Reply to empty-type bead created %d bead(s) (open count %d -> %d)", after-before, before, after)
+		}
+	})
+}
+
 // --- Inbox ---
 
 func TestInboxEmpty(t *testing.T) {
