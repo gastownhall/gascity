@@ -652,6 +652,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// this runtime is the live owner of the city, so its shutdown() is the
 	// one allowed to tear the provider's shared server down.
 	cr.ownedCity.Store(true)
+	defer registerControllerCity(ctx, cr.cityPath)()
 	defer cr.shutdown()
 	if cr.runsV2() {
 		// Deferred after shutdown, so it runs first: the v2 planner is
@@ -4364,7 +4365,7 @@ func (cr *CityRuntime) ensureManagedDoltPublishedForTick(ctx context.Context) {
 	if !managedDoltPreflightWanted(cr.cityPath, cr.stderr, cr.logPrefix, ownedFn, portFn) {
 		return
 	}
-	flight := joinOrStartManagedDoltFlight(ctx, cr.cityPath, func(flightCtx context.Context) error {
+	flight := startGovernedManagedDoltFlight(ctx, cr.cityPath, func(flightCtx context.Context) error {
 		return cr.runManagedDoltPreflight(flightCtx, healthFn)
 	})
 	cr.awaitManagedDoltFlight(ctx, flight)
