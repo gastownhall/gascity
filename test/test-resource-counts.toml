@@ -2321,6 +2321,12 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "internal/runtime/k8s/pod_prompt_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
+
+[[count]]
 path = "internal/runtime/k8s/provider_test.go"
 resource = "fixed_sleep"
 calls = 1
