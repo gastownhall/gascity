@@ -5441,6 +5441,55 @@ func TestMailCheckInjectAsksASupervisorHostedCitysSupervisorNothing(t *testing.T
 	}
 }
 
+// TestMailCheckInjectStillAsksAStandaloneControllersAPIPort guards the other
+// half of TestMailCheckInjectAsksASupervisorHostedCitysSupervisorNothing: the
+// injecting check of a city a standalone controller runs still asks that
+// controller's [api] port whether the mailbox read is degraded, which is where
+// the degraded-read notice comes from, and asks no supervisor (ga-rxo15af). The
+// port serves a partial store-slow read, so the notice is the whole of the
+// injected output and the local read, which would inject the seat's mail, never
+// runs.
+func TestMailCheckInjectStillAsksAStandaloneControllersAPIPort(t *testing.T) {
+	realMailCheckAPIClient := mailCheckAPIClient
+	f := newHookBudgetFixture(t)
+	// The fixture stubs the client out; its cleanup restores the real one.
+	mailCheckAPIClient = realMailCheckAPIClient
+	f.sendMail(t, "status please")
+
+	srv := httptest.NewServer(partialStoreSlowMailCheckHandler(t))
+	defer srv.Close()
+	cityTOML := filepath.Join(f.cityDir, "city.toml")
+	base, err := os.ReadFile(cityTOML)
+	if err != nil {
+		t.Fatalf("ReadFile(city.toml): %v", err)
+	}
+	port := srv.URL[strings.LastIndex(srv.URL, ":")+1:]
+	if err := os.WriteFile(cityTOML, fmt.Appendf(base, "\n[api]\nport = %s\n", port), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	prevIdentity, prevClient, prevGrants := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook
+	t.Cleanup(func() {
+		apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook = prevIdentity, prevClient, prevGrants
+	})
+	apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
+		return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingStandalone}
+	}
+	apiRouteSupervisorGrantsHook = func() bool { return false }
+	apiRouteSupervisorClientHook = func(string) *api.Client {
+		t.Errorf("gc mail check --inject resolved the supervisor client for a city a standalone controller runs")
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdMailCheckWithFormat(nil, true, "", &stdout, &stderr); code != 0 {
+		t.Fatalf("gc mail check --inject = %d; stderr=%s", code, stderr.String())
+	}
+	if got, want := stdout.String(), expectedMailCheckDegradedInjectOutput(); got != want {
+		t.Fatalf("gc mail check --inject stdout = %q, want the degraded notice %q from the controller's [api] port\nstderr=%s", got, want, stderr.String())
+	}
+}
+
 func TestRenderMailCheckFromAPIInjectCodexUsesUserPromptSubmit(t *testing.T) {
 	cr := api.CachedRead[api.MailListView]{
 		Body: api.MailListView{
