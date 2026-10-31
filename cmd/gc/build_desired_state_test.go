@@ -45,7 +45,7 @@ type failingSessionBeadCreateStore struct {
 
 func (s *failingSessionBeadCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
 	if bead.Type == sessionBeadType {
-		return beads.Bead{}, errors.New("session bead create failed")
+		return beads.Bead{}, fmt.Errorf("session bead create failed: %w", beads.ErrStoreClosed)
 	}
 	return s.MemStore.Create(bead)
 }
@@ -5927,7 +5927,7 @@ type failingPoolCreateStore struct {
 
 func (s *failingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
 	if bead.Type == sessionBeadType && s.claimFailure() {
-		return beads.Bead{}, errors.New("injected pool create failure")
+		return beads.Bead{}, fmt.Errorf("injected pool create failure: %w", beads.ErrStoreClosed)
 	}
 	return s.MemStore.Create(bead)
 }
@@ -14670,6 +14670,281 @@ func TestBuildDesiredState_APICreatedAgentSessionBeadStaysDesired(t *testing.T) 
 			if tp.ConfiguredNamedIdentity != "" {
 				t.Fatalf("desired[%q].ConfiguredNamedIdentity = %q, want empty — the ad-hoc bead must not adopt the named session identity",
 					sessionName, tp.ConfiguredNamedIdentity)
+			}
+		})
+	}
+}
+
+// Eligible pools must receive all available fresh capacity regardless of where a
+// reusable or gated pool occurs in the serial request order.
+func TestPoolFairShareUsesEligibleCreates(t *testing.T) {
+	for _, limit := range []int{4, 5} {
+		for _, blocked := range []int{0, limit} {
+			for _, gate := range []string{"reuse", "partial", "provider", "slots", "trigger"} {
+				t.Run(fmt.Sprintf("cap%d/pool%d/%s", limit, blocked, gate), func(t *testing.T) {
+					cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+					if limit == 4 {
+						cfg.Daemon.MaxWakesPerTick = intPtr(limit)
+					}
+					store := beads.NewMemStore()
+					states := make([]PoolDesiredState, limit+1)
+					for i := range states {
+						name := fmt.Sprintf("pool%d", i)
+						cfg.Agents = append(cfg.Agents, config.Agent{Name: name, StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(10)})
+						states[i] = PoolDesiredState{Template: name, Requests: []SessionRequest{{Template: name, Tier: "new"}}}
+					}
+					var stderr bytes.Buffer
+					bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+					bp.sessionBeads = &sessionBeadSnapshot{}
+					name := states[blocked].Template
+					switch gate {
+					case "reuse":
+						row, err := store.Create(beads.Bead{Title: name + "-1", Type: sessionBeadType, Status: "open", Labels: []string{sessionBeadLabel}, Metadata: map[string]string{"template": name, "agent_name": name + "-1", "alias": name + "-1", "session_name": name + "-existing", "state": "awake", "pool_slot": "1", poolManagedMetadataKey: "true"}})
+						if err != nil {
+							t.Fatal(err)
+						}
+						bp.sessionBeads.addInfo(sessiontest.SeedBead(t, row))
+					case "partial":
+						bp.poolScaleCheckPartialTemplates = map[string]bool{name: true}
+					case "provider":
+						cfg.Agents[blocked].Provider = "unhealthy"
+						bp.providerHealthSnapshot = &providerHealthSnapshot{present: true, entries: map[string]bool{"unhealthy": false}}
+					case "slots":
+						cfg.Agents[blocked].MaxActiveSessions = intPtr(0)
+					case "trigger":
+						states[blocked].Requests[0].WorkBeadID = "invalid-work"
+						states[blocked].Requests[0].WorktreeError = "invalid trigger evidence"
+					}
+					desired := map[string]TemplateParams{}
+					poolSessionCreateFairShareCounter.Store(0)
+					inputs := make([]poolRealizeInput, len(states))
+					for i := range states {
+						inputs[i] = poolRealizeInput{agent: &cfg.Agents[i], state: states[i]}
+					}
+					stats := realizePoolDesiredSessionInputsAt(bp, inputs, time.Now().UTC(), desired, &stderr)
+					if stats.creates != limit {
+						t.Fatalf("fresh attempts=%d, want %d; stderr=%s", stats.creates, limit, stderr.String())
+					}
+					want := limit
+					if gate == "reuse" {
+						want++
+					}
+					if len(desired) != want {
+						t.Fatalf("desired=%d, want %d; stderr=%s", len(desired), want, stderr.String())
+					}
+				})
+			}
+		}
+	}
+}
+
+// A later failed claimed create must make capacity available to an earlier
+// denied pool, without retrying the failed request or claiming twice.
+func TestPoolFairShareReconsidersDeferredAfterRefund(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		t.Run(fmt.Sprint(reverse), func(t *testing.T) {
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Daemon: config.DaemonConfig{MaxWakesPerTick: intPtr(1)}, Agents: []config.Agent{
+				{Name: "alpha", StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(10)},
+				{Name: "zulu", StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(10)},
+			}}
+			store := &failingPoolCreateStore{MemStore: beads.NewMemStore(), failuresRemaining: 1}
+			var stderr bytes.Buffer
+			bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+			bp.sessionBeads = &sessionBeadSnapshot{}
+			inputs := []poolRealizeInput{}
+			for i := range cfg.Agents {
+				name := cfg.Agents[i].Name
+				inputs = append(inputs, poolRealizeInput{agent: &cfg.Agents[i], state: PoolDesiredState{Template: name, Requests: []SessionRequest{{Template: name, Tier: "new"}}}})
+			}
+			seed := uint64(0)
+			if reverse {
+				seed = 1
+			}
+			poolSessionCreateFairShareCounter.Store(seed)
+			desired := map[string]TemplateParams{}
+			stats := realizePoolDesiredSessionInputsAt(bp, inputs, time.Now().UTC(), desired, &stderr)
+			want := "zulu"
+			if reverse {
+				want = "alpha"
+			}
+			if stats.creates != 2 || stats.createErrors != 1 || len(desired) != 1 {
+				t.Fatalf("stats=%+v desired=%v stderr=%s", stats, desired, stderr.String())
+			}
+			for _, tp := range desired {
+				if tp.TemplateName != want {
+					t.Fatalf("template=%s want=%s", tp.TemplateName, want)
+				}
+			}
+			if bp.tryClaimPoolSessionCreate(want) {
+				t.Fatal("fresh capacity was double-refunded")
+			}
+		})
+	}
+}
+
+// poolFairShareFaultStore injects either a definite locked-census refusal or an
+// ambiguous row-write outcome. It keeps the underlying durable rows observable.
+type poolFairShareFaultStore struct {
+	beads.Store
+	mu       sync.Mutex
+	mode     string
+	failList bool
+	attempts map[string]int
+}
+
+func (s *poolFairShareFaultStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.mu.Lock()
+	fail := s.failList
+	s.failList = false
+	s.mu.Unlock()
+	if fail {
+		return nil, errors.New("injected locked census refusal")
+	}
+	return s.Store.List(q)
+}
+
+func (s *poolFairShareFaultStore) Create(row beads.Bead) (beads.Bead, error) {
+	if row.Type != sessionBeadType {
+		return s.Store.Create(row)
+	}
+	name := row.Metadata["template"]
+	s.mu.Lock()
+	s.attempts[name]++
+	s.mu.Unlock()
+	if name != "zulu" {
+		return s.Store.Create(row)
+	}
+	if s.mode == "uncertain" {
+		return beads.Bead{}, errors.New("write response unavailable")
+	}
+	created, err := s.Store.Create(row)
+	if err != nil {
+		return created, err
+	}
+	switch s.mode {
+	case "write_then_error":
+		return beads.Bead{}, errors.New("response lost after write")
+	case "write_panic":
+		panic("panic after write")
+	}
+	return created, nil
+}
+
+func TestPoolFairShareRetainsAmbiguousCreateCapacity(t *testing.T) {
+	for _, mode := range []string{"uncertain", "write_then_error", "write_panic"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Daemon: config.DaemonConfig{MaxWakesPerTick: intPtr(1)}, Agents: []config.Agent{
+				{Name: "alpha", StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(10)},
+				{Name: "zulu", StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(10)},
+			}}
+			store := &poolFairShareFaultStore{Store: beads.NewMemStore(), mode: mode, attempts: map[string]int{}}
+			var stderr bytes.Buffer
+			bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+			bp.sessionBeads = &sessionBeadSnapshot{}
+			inputs := []poolRealizeInput{}
+			for i := range cfg.Agents {
+				name := cfg.Agents[i].Name
+				inputs = append(inputs, poolRealizeInput{agent: &cfg.Agents[i], state: PoolDesiredState{Template: name, Requests: []SessionRequest{{Template: name, Tier: "new"}}}})
+			}
+			poolSessionCreateFairShareCounter.Store(1) // later zulu wins; earlier alpha defers
+			stats := realizePoolDesiredSessionInputsAt(bp, inputs, time.Now().UTC(), map[string]TemplateParams{}, &stderr)
+			if stats.creates != 1 || stats.createErrors != 1 || store.attempts["zulu"] != 1 || store.attempts["alpha"] != 0 {
+				t.Fatalf("stats=%+v attempts=%v stderr=%s", stats, store.attempts, stderr.String())
+			}
+			if bp.tryClaimPoolSessionCreate("alpha") {
+				t.Fatal("ambiguous write refunded fresh capacity")
+			}
+			rows, err := store.Store.List(beads.ListQuery{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := 1
+			if mode == "uncertain" {
+				want = 0
+			}
+			if len(rows) != want {
+				t.Fatalf("durable rows=%d want=%d", len(rows), want)
+			}
+		})
+	}
+}
+
+func TestPoolFairShareReconsidersAfterLockedCensusRefusal(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Daemon: config.DaemonConfig{MaxWakesPerTick: intPtr(1)}, Agents: []config.Agent{
+		{Name: "alpha", StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(10)},
+		{Name: "zulu", StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(10)},
+	}}
+	store := &poolFairShareFaultStore{Store: beads.NewMemStore(), failList: true, attempts: map[string]int{}}
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = &sessionBeadSnapshot{}
+	inputs := []poolRealizeInput{}
+	for i := range cfg.Agents {
+		name := cfg.Agents[i].Name
+		inputs = append(inputs, poolRealizeInput{agent: &cfg.Agents[i], state: PoolDesiredState{Template: name, Requests: []SessionRequest{{Template: name, Tier: "new"}}}})
+	}
+	poolSessionCreateFairShareCounter.Store(1)
+	desired := map[string]TemplateParams{}
+	stats := realizePoolDesiredSessionInputsAt(bp, inputs, time.Now().UTC(), desired, &stderr)
+	if stats.creates != 2 || stats.createErrors != 1 || store.attempts["zulu"] != 0 || store.attempts["alpha"] != 1 || len(desired) != 1 {
+		t.Fatalf("stats=%+v attempts=%v desired=%v stderr=%s", stats, store.attempts, desired, stderr.String())
+	}
+	if bp.tryClaimPoolSessionCreate("zulu") {
+		t.Fatal("locked-census refusal double-refunded")
+	}
+}
+
+func TestPoolFairSharePreservesFloorElasticAndRotation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		floor   bool
+		partial bool
+		seed    uint64
+		want    map[string]int
+	}{
+		{name: "rotation_zero", want: map[string]int{"pool0": 1, "pool1": 1, "pool2": 1, "pool3": 1}},
+		{name: "rotation_one", seed: 1, want: map[string]int{"pool1": 1, "pool2": 1, "pool3": 1, "pool4": 1}},
+		{name: "floor_and_elastic", floor: true, want: map[string]int{"pool0": 1, "pool1": 1, "pool2": 1, "pool5": 1}},
+		{name: "eligible_floors_only", floor: true, partial: true, want: map[string]int{"pool1": 1, "pool2": 1, "pool3": 1, "pool5": 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Daemon: config.DaemonConfig{MaxWakesPerTick: intPtr(4)}}
+			for i := 0; i < 6; i++ {
+				cfg.Agents = append(cfg.Agents, config.Agent{Name: fmt.Sprintf("pool%d", i), StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(10)})
+			}
+			store := beads.NewMemStore()
+			var stderr bytes.Buffer
+			bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+			bp.sessionBeads = &sessionBeadSnapshot{}
+			if tc.partial {
+				bp.poolScaleCheckPartialTemplates = map[string]bool{"pool0": true}
+			}
+			inputs := []poolRealizeInput{}
+			for i := range cfg.Agents {
+				name := cfg.Agents[i].Name
+				state := PoolDesiredState{Template: name}
+				for j := 0; j < 3; j++ {
+					state.Requests = append(state.Requests, SessionRequest{Template: name, Tier: "new", FloorGuarantee: tc.floor && i < 5 && j == 0})
+				}
+				inputs = append(inputs, poolRealizeInput{agent: &cfg.Agents[i], state: state})
+			}
+			poolSessionCreateFairShareCounter.Store(tc.seed)
+			desired := map[string]TemplateParams{}
+			stats := realizePoolDesiredSessionInputsAt(bp, inputs, time.Now().UTC(), desired, &stderr)
+			got := map[string]int{}
+			ids := map[string]bool{}
+			for _, tp := range desired {
+				got[tp.TemplateName]++
+				if ids[tp.SessionName] {
+					t.Fatal("duplicate desired session")
+				}
+				ids[tp.SessionName] = true
+			}
+			if stats.creates != 4 || !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("creates=%d counts=%v want=%v stderr=%s", stats.creates, got, tc.want, stderr.String())
+			}
+			if bp.tryClaimPoolSessionCreate("pool5") {
+				t.Fatal("all-spent budget admitted an extra create")
 			}
 		})
 	}
