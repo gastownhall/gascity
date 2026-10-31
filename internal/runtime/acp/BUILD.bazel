@@ -26,6 +26,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/citylayout",
+        "//internal/execenv",
         "//internal/fsys",
         "//internal/runtime",
         "//internal/runtime/proctable",

@@ -34,6 +34,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/citylayout",
+        "//internal/execenv",
         "//internal/execgrace",
         "//internal/overlay",
         "//internal/processenv",
@@ -115,6 +116,7 @@ go_test(
         "nudge_submit_key_sequence_integration_test.go",
         "nudge_submit_key_sequence_test.go",
         "pane_idle_scan_test.go",
+        "process_env_setup_test.go",
         "proctable_tracking_test.go",
         "respond_fence_integration_test.go",
         "respond_refusal_test.go",
@@ -160,6 +162,7 @@ go_test(
         "//internal/bazeltest",
         "//internal/beads",
         "//internal/citylayout",
+        "//internal/execenv",
         "//internal/runtime",
         "//internal/runtime/acp",
         "//internal/runtime/auto",
