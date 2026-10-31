@@ -446,6 +446,7 @@ go_test(
         "pagination_bounds_test.go",
         "pagination_dialect_guard_test.go",
         "pagination_test.go",
+        "pending_interaction_queue_test.go",
         "read_model_no_get_test.go",
         "readauth_test.go",
         "relic_census_state_test.go",

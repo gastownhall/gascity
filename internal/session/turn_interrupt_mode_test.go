@@ -99,15 +99,15 @@ func checkInterruptNow(t *testing.T, fam turnInterruptFamily, mgr *Manager, sp *
 func TestKeystrokeTurnInterruptKeepsProviderSequences(t *testing.T) {
 	golden := map[string]struct{ stop, now string }{
 		"claude": {
-			stop: "IsRunning IsRunning IsRunning Interrupt WaitForIdle ClearInput StopBackgroundWork",
-			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt WaitForIdle ClearInput IsRunning IsRunning Pending NudgeNow(msg)",
+			stop: "IsRunning IsRunning IsRunning Interrupt WaitForIdle Pending ClearInput StopBackgroundWork",
+			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt WaitForIdle Pending ClearInput IsRunning IsRunning Pending NudgeNow(msg)",
 		},
 		"codex": {
-			stop: "IsRunning IsRunning IsRunning SendKeys(Escape) WaitForIdle WaitForInterruptBoundary StopBackgroundWork",
+			stop: "IsRunning IsRunning IsRunning SendKeys(Escape) WaitForIdle WaitForInterruptBoundary Pending StopBackgroundWork",
 			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning SendKeys(Escape) WaitForIdle WaitForInterruptBoundary IsRunning IsRunning DismissKnownDialogs Pending NudgeNow(msg) DismissKnownDialogs",
 		},
 		"wrapped-codex": {
-			stop: "IsRunning IsRunning IsRunning SendKeys(Escape) WaitForInterruptBoundary StopBackgroundWork",
+			stop: "IsRunning IsRunning IsRunning SendKeys(Escape) WaitForInterruptBoundary Pending StopBackgroundWork",
 			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning SendKeys(Escape) WaitForInterruptBoundary IsRunning IsRunning DismissKnownDialogs Pending NudgeNow(msg) DismissKnownDialogs",
 		},
 		"kimi": {
@@ -116,11 +116,11 @@ func TestKeystrokeTurnInterruptKeepsProviderSequences(t *testing.T) {
 		},
 		"gemini": {
 			stop: "IsRunning IsRunning IsRunning Interrupt WaitForIdle",
-			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt WaitForIdle ResetInterruptedTurn SendKeys(C-u) IsRunning IsRunning Pending NudgeNow(msg)",
+			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt WaitForIdle Pending ResetInterruptedTurn SendKeys(C-u) IsRunning IsRunning Pending NudgeNow(msg)",
 		},
 		"wrapped-gemini": {
 			stop: "IsRunning IsRunning IsRunning SendKeys(Escape)",
-			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning SendKeys(Escape) ResetInterruptedTurn SendKeys(C-u) IsRunning IsRunning Pending NudgeNow(msg)",
+			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning SendKeys(Escape) Pending ResetInterruptedTurn SendKeys(C-u) IsRunning IsRunning Pending NudgeNow(msg)",
 		},
 		"pi": {
 			stop: "IsRunning IsRunning IsRunning Interrupt",
@@ -249,15 +249,15 @@ func TestKeystrokeTurnInterruptBehindCompositesKeepsProviderSequences(t *testing
 func TestProtocolTurnInterruptUsesInterruptForEveryFamily(t *testing.T) {
 	golden := map[string]struct{ stop, now string }{
 		"claude": {
-			stop: "IsRunning IsRunning IsRunning Interrupt WaitForIdle StopBackgroundWork",
+			stop: "IsRunning IsRunning IsRunning Interrupt WaitForIdle Pending StopBackgroundWork",
 			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt WaitForIdle IsRunning IsRunning Pending NudgeNow(msg)",
 		},
 		"codex": {
-			stop: "IsRunning IsRunning IsRunning Interrupt WaitForIdle WaitForInterruptBoundary StopBackgroundWork",
+			stop: "IsRunning IsRunning IsRunning Interrupt WaitForIdle WaitForInterruptBoundary Pending StopBackgroundWork",
 			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt WaitForIdle WaitForInterruptBoundary IsRunning IsRunning DismissKnownDialogs Pending NudgeNow(msg) DismissKnownDialogs",
 		},
 		"wrapped-codex": {
-			stop: "IsRunning IsRunning IsRunning Interrupt WaitForInterruptBoundary StopBackgroundWork",
+			stop: "IsRunning IsRunning IsRunning Interrupt WaitForInterruptBoundary Pending StopBackgroundWork",
 			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt WaitForInterruptBoundary IsRunning IsRunning DismissKnownDialogs Pending NudgeNow(msg) DismissKnownDialogs",
 		},
 		"kimi": {
@@ -266,11 +266,11 @@ func TestProtocolTurnInterruptUsesInterruptForEveryFamily(t *testing.T) {
 		},
 		"gemini": {
 			stop: "IsRunning IsRunning IsRunning Interrupt WaitForIdle",
-			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt WaitForIdle ResetInterruptedTurn IsRunning IsRunning Pending NudgeNow(msg)",
+			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt WaitForIdle Pending ResetInterruptedTurn IsRunning IsRunning Pending NudgeNow(msg)",
 		},
 		"wrapped-gemini": {
 			stop: "IsRunning IsRunning IsRunning Interrupt",
-			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt ResetInterruptedTurn IsRunning IsRunning Pending NudgeNow(msg)",
+			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt Pending ResetInterruptedTurn IsRunning IsRunning Pending NudgeNow(msg)",
 		},
 		"pi": {
 			stop: "IsRunning IsRunning IsRunning Interrupt",
