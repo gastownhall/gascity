@@ -339,3 +339,27 @@ func TestDoSlingWarnsPathBoundAgentInSuspendedRig(t *testing.T) {
 		}
 	}
 }
+
+func TestDoSlingForceSuppressesEffectiveSuspensionWarnings(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", SuspendedOnStart: true},
+		Rigs:      []config.Rig{{Name: "myrig", SuspendedOnStart: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1), Suspended: true}
+	deps := suspensionTestDeps(t, cfg, runner)
+	setCitySuspendedState(t, deps.CityPath, true)
+	setRigSuspendedState(t, deps.CityPath, true)
+	opts := testOpts(a, suspensionTestBead)
+	opts.Force = true
+
+	result, err := DoSling(opts, deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if result.CitySuspended || result.AgentSuspended || result.SuspendedRig != "" {
+		t.Errorf("CitySuspended = %v, AgentSuspended = %v, SuspendedRig = %q; want all zero with --force",
+			result.CitySuspended, result.AgentSuspended, result.SuspendedRig)
+	}
+	assertSlingRouted(t, result, runner)
+}
