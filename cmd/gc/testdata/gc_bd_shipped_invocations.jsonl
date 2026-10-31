@@ -299,7 +299,6 @@
 {"argv": ["update", "X", "--add-label", "delivered"], "src": "gascity-packs:oversight-rig/assets/scripts/deliver-rollup.sh:162"}
 {"argv": ["update", "X", "--append-notes", "Synthesized: X"], "src": "gascity:internal/bootstrap/packs/core/formulas/mol-prompt-synth.toml:146"}
 {"argv": ["update", "X", "--append-notes", "X"], "src": "gascity:internal/bootstrap/packs/core/formulas/mol-polecat-report.toml:166"}
-{"argv": ["update", "X", "--append-notes", "orphan-sweep: reset from assignee X -- no live session matched"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/orphan-sweep.sh:348"}
 {"argv": ["update", "X", "--assignee", "X"], "src": "maintainer-city:rig-packs/checkpoint-pipeline/scripts/cp.py:254"}
 {"argv": ["update", "X", "--assignee=", "--set-metadata", "merge_result=blocked", "--set-metadata", "gc.routed_to=human", "--set-metadata", "blocked_reason=X"], "src": "gascity-packs:gastown/formulas/mol-refinery-patrol.toml:687"}
 {"argv": ["update", "X", "--assignee=", "--set-metadata", "merge_result=blocked", "--set-metadata", "gc.routed_to=human", "--set-metadata", "halt_reason=target_branch_missing", "--set-metadata", "blocked_reason=X"], "src": "gascity-packs:gastown/formulas/mol-refinery-patrol.toml:384"}
@@ -357,6 +356,7 @@
 {"argv": ["update", "X", "--set-metadata", "gc.halt_chain=true", " ", "--set-metadata", "gc.escalate_to=mayor", " ", "--set-metadata", "summary_for_human=X"], "src": "gascity-packs:pr-review/formulas/mol-pr-iterate.formula.toml:49"}
 {"argv": ["update", "X", "--set-metadata", "gc.halt_chain=true"], "src": "gascity-packs:pr-pipeline/formulas/mol-pr-from-issue.formula.toml:361"}
 {"argv": ["update", "X", "--set-metadata", "gc.input_convoy_id=X", "--set-metadata", "gc.build.implementation_convoy_id=X"], "src": "gascity-packs:gascity/assets/workflows/build-base/decompose.md:21"}
+{"argv": ["update", "X", "--set-metadata", "gc.orphan_sweep_reason=orphan-sweep: reset from assignee X -- no live session matched"], "src": "gascity:internal/bootstrap/packs/core/assets/scripts/orphan-sweep.sh:423"}
 {"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=X", "--set-metadata", "gc.failure_reason=X", "--status", "closed"], "src": "workflows:formulas/mol-architecture-improvement-v1.toml:385"}
 {"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=$1", "--set-metadata", "gc.final_disposition=hard_fail", "--status", "closed"], "src": "workflows:formulas/mol-normalized-issue-pr-work-v1.toml:4108"}
 {"argv": ["update", "X", "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=hard", "--set-metadata", "gc.failure_reason=X", "--set-metadata", "gc.final_disposition=hard_fail", "--status", "closed"], "src": "workflows:formulas/mol-normalized-issue-pr-work-v1.toml:1829"}
