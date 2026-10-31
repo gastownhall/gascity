@@ -376,12 +376,15 @@ gc serves its own `release-if-current` itself.
   including a `--metadata @file`, which gc reads, and the labels bd copies
   from a `--parent` (unless `--no-inherit-labels`). bd copies the labels of
   the parent its own store holds, so a parent that store's read does not find
-  exactly is refused. An `--id` inside a class
-  binding's reserved namespace is refused. `create --graph`: gc reads the
+  exactly is refused. An `--id` inside a class binding's reserved namespace
+  is refused, and so is an `--id` the class binding holds: `gc storage
+  migrate` keeps a moved bead's id and clears the work store's copy, so bd
+  would mint that id again while every by-id `gc` command answers from the
+  binding's bead. `create --graph`: gc reads the
   plan (relative to the directory bd runs in) and judges it node by node, a
   dry run exactly like the live call. Each node's type, labels and metadata
   are classified as bd writes them (bd never copies a parent's labels onto a
-  graph node); a node `id` inside a class binding's reserved namespace, a
+  graph node); a node `id` refused for `--id` above, a
   class-deciding key in `metadata_refs`, a field outside bd's graph-plan
   schema, and a plan gc cannot read are refused.
 - `delete` (positionals and `--from-file`): every id must name exactly one

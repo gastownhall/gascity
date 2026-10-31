@@ -98,12 +98,10 @@ func judgeBdCreateGraph(in bdClassGuardInput, planPath string) bdClassGuard {
 		keys[n.Key] = true
 	}
 	classKeys := coordclass.ClassifierMetadataKeys()
-	var endpoints []string
+	var endpoints, ids []string
 	for _, n := range plan.Nodes {
 		node := fmt.Sprintf("%s node %q", who, n.Key)
-		if bdIDIsClassReserved(n.ID) { // residency:allow — refuses minting a NEW bead inside a reserved namespace; resolves no bead
-			return in.refuse("%s: refused on this split city: id %s is inside a class binding's reserved namespace, so the bead would answer to a store that never holds it. Nothing was written.", node, n.ID)
-		}
+		ids = append(ids, n.ID)
 		for k := range n.MetadataRefs {
 			if slices.Contains(classKeys, k) {
 				return in.refuse("%s: refused on this split city: its metadata_refs sets %s, a key that decides the bead's storage class. Nothing was written.", node, k)
@@ -133,6 +131,11 @@ func judgeBdCreateGraph(in bdClassGuardInput, planPath string) bdClassGuard {
 	}
 	for _, e := range plan.Edges {
 		endpoints = append(endpoints, e.FromID, e.ToID, e.SpawnerID, e.ThreadID)
+	}
+	// The node ids are judged after every node's static class checks, so a
+	// plan those refuse asks the binding nothing.
+	if why := in.mintIDRefusal(ids...); why != "" {
+		return in.refuse("%s: refused on this split city: a node's explicit id cannot be minted here: %s. Nothing was written.", who, why)
 	}
 	if refusal := in.checkEdgeEndpoints(endpoints...); refusal != "" {
 		return in.refuse("%s", refusal)

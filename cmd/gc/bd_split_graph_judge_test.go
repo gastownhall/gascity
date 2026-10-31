@@ -110,6 +110,8 @@ func TestGcBdSplitCreateGraphJudgesEveryNode(t *testing.T) {
 		{"gc.kind wisp", `{"nodes":[{"key":"a","title":"a","metadata":{"gc.kind":"wisp"}}]}`, true, "class"},
 		{"class key in metadata_refs", `{"nodes":[{"key":"a","title":"a"},{"key":"b","title":"b","metadata_refs":{"gc.root_bead_id":"a"}}]}`, true, "metadata_refs"},
 		{"reserved explicit id", `{"nodes":[{"key":"a","title":"a","id":"gcg-abc"}]}`, true, "reserved namespace"},
+		{"explicit id the class binding holds", `{"nodes":[{"key":"a","title":"a","id":"relic-1"}]}`, true, "class binding holds a bead with id relic-1"},
+		{"a second node's id the class binding holds", `{"nodes":[{"key":"a","title":"a","id":"demo-9"},{"key":"b","title":"b","id":"relic-1"}]}`, true, "relic-1"},
 		{"unknown node field", `{"nodes":[{"key":"a","title":"a","inherit_labels":true}]}`, true, "inherit_labels"},
 		{"unknown long-s node field", "{\"nodes\":[{\"key\":\"a\",\"title\":\"a\",\"ſtorage_class\":\"x\"}]}", true, "does not know"},
 		{"unknown edge field", `{"nodes":[{"key":"a","title":"a"},{"key":"b","title":"b"}],"edges":[{"from_key":"a","to_key":"b","weight":2}]}`, true, "weight"},
@@ -128,6 +130,7 @@ func TestGcBdSplitCreateGraphJudgesEveryNode(t *testing.T) {
 		{"parent_id naming a work bead", `{"nodes":[{"key":"a","title":"a","parent_id":"demo-2"}]}`, false, ""},
 		{"deps target that is a plan key", `{"nodes":[{"key":"a","title":"a"},{"key":"b","title":"b","deps":[{"target":"a"}]}]}`, false, ""},
 		{"external: dep", `{"nodes":[{"key":"a","title":"a","deps":[{"target":"external:p:cap"}]}]}`, false, ""},
+		{"free explicit id", `{"nodes":[{"key":"a","title":"a","id":"demo-9"}]}`, false, ""},
 	}
 	for _, c := range cases {
 		for _, inventory := range graphJudgeInventories {
