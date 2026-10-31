@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -37,6 +38,28 @@ func (r *primeCarryRecorder) String() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return fmt.Sprint(r.events)
+}
+
+// listHidingStore omits one id from every List while hiding is set, as a
+// listing that misses an alive row does.
+type listHidingStore struct {
+	Store
+	id     string
+	hiding atomic.Bool
+}
+
+func (s *listHidingStore) List(q ListQuery) ([]Bead, error) {
+	rows, err := s.Store.List(q)
+	if err != nil || !s.hiding.Load() {
+		return rows, err
+	}
+	kept := rows[:0:0]
+	for _, b := range rows {
+		if b.ID != s.id {
+			kept = append(kept, b)
+		}
+	}
+	return kept, nil
 }
 
 // TestCachingStorePrimeReplaceCarriesScanMissingOpenRows pins that a full
@@ -102,6 +125,55 @@ func TestCachingStorePrimeReplaceCarriesScanMissingOpenRows(t *testing.T) {
 				}
 				if got, err := cs.Get(seed.ID); err != nil || got.Status != "closed" {
 					t.Fatalf("Get(%s) = (%q, %v), want closed", seed.ID, got.Status, err)
+				}
+			})
+		}
+	})
+
+	t.Run("alive_missing_from_scan", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name string
+			// hiddenThrough keeps the row out of the reconciles' listings too.
+			hiddenThrough bool
+		}{
+			{"listed_again", false},
+			{"still_omitted", true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				mem := NewMemStore()
+				missed, err := mem.Create(Bead{Title: "alive, omitted by one listing"})
+				if err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				backing := &listHidingStore{Store: mem, id: missed.ID}
+				rec := newPrimeCarryRecorder()
+				cs := NewCachingStoreForTest(backing, rec.onChange)
+				if err := cs.Prime(ctx); err != nil {
+					t.Fatalf("Prime: %v", err)
+				}
+				if !reproHolds(cs, missed.ID) {
+					t.Fatalf("cache does not hold %s before the omitting Prime; the case is vacuous", missed.ID)
+				}
+				backing.hiding.Store(true)
+				if err := cs.Prime(ctx); err != nil {
+					t.Fatalf("Prime: %v", err)
+				}
+				backing.hiding.Store(tc.hiddenThrough)
+				if got, held, _ := cachedRowState(cs, missed.ID); !held || got.Status != "open" {
+					t.Fatalf("after the omitting Prime held=%v status=%q, want the row held open", held, got.Status)
+				}
+				cs.ReconcileNowForTest()
+				cs.ReconcileNowForTest()
+
+				if got, held, _ := cachedRowState(cs, missed.ID); !held || got.Status != "open" {
+					t.Fatalf("after the reconciles held=%v status=%q, want the row held open", held, got.Status)
+				}
+				for _, eventType := range []string{"bead.created", "bead.closed"} {
+					if got := rec.count(eventType, missed.ID); got != 0 {
+						t.Fatalf("%s for alive %s = %d, want 0; notifications=%s", eventType, missed.ID, got, rec)
+					}
 				}
 			})
 		}
