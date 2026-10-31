@@ -116,15 +116,26 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 	emitRigBannerAndWarnings(deps, req, plan, includes, hasGit, rigPath, resolvedDefaultBranch, defaultBranchOverride, defaultBranchRemote, emit)
 
 	// Step 13: beads-store init. Record whether the rig already had a .beads/
-	// first: init is the step that writes into the rig directory, and a failure
-	// partway through must not leave the store it created behind.
+	// first, and snapshot the store it holds: init is the step that writes into
+	// the rig directory, and a failure partway through must neither leave a
+	// store it created behind nor leave a store that was already there (an
+	// --adopt'ed or re-added one) rewritten.
 	beadsStorePreexisting, err := rigBeadsStoreExists(fs, rigPath)
 	if err != nil {
 		return config.Rig{}, result, err
 	}
+	var preexistingStore []FileSnapshot
+	if beadsStorePreexisting {
+		if preexistingStore, err = snapshotPreexistingStore(fs, rigPath); err != nil {
+			return config.Rig{}, result, err
+		}
+	}
 	deferred, err := initRigBeadsStore(deps, req, rigPath, plan.prefix, emit)
 	if err != nil {
-		return config.Rig{}, result, removePartialBeadsStore(fs, rigPath, beadsStorePreexisting, err)
+		if beadsStorePreexisting {
+			return config.Rig{}, result, restorePreexistingStore(fs, preexistingStore, err)
+		}
+		return config.Rig{}, result, removePartialBeadsStore(fs, rigPath, err)
 	}
 	result.Deferred = deferred
 
@@ -756,21 +767,59 @@ func rigBeadsStoreExists(fs fsys.FS, rigPath string) (bool, error) {
 }
 
 // removePartialBeadsStore deletes the .beads/ a failed store init created and
-// returns the init error for the caller to surface. A store that predates this
-// add is never touched, and neither is the rig directory itself — that is the
+// returns the init error for the caller to surface. It is only called for a
+// .beads/ that did not exist before this add (restorePreexistingStore covers a
+// store that did), and it never touches the rig directory itself — that is the
 // user's repo, not ours to delete.
 //
 // Without this, an init that wrote metadata.json before failing left a
 // directory that the next `gc rig add` reads as an initialized store and
 // refuses with "already contains a beads store", so the only way forward was
 // to hand-remove or hand-edit it (gas-4cu).
-func removePartialBeadsStore(fs fsys.FS, rigPath string, preexisting bool, cause error) error {
-	if preexisting {
-		return cause
-	}
+func removePartialBeadsStore(fs fsys.FS, rigPath string, cause error) error {
 	beadsPath := filepath.Join(rigPath, ".beads")
 	if err := fsys.RemoveAll(fs, beadsPath); err != nil {
 		return fmt.Errorf("%w (removing partial bead store %s: %w)", cause, beadsPath, err)
+	}
+	return cause
+}
+
+// snapshotPreexistingStore snapshots the scope files of the store a rig's
+// .beads/ already holds — one with metadata.json or config.yaml, the markers
+// the fresh-add guard reads — before init touches them. It returns nil when
+// .beads/ is not a directory or holds no store: what init writes there is left
+// in place, as before, and a git_url teardown reads the database init minted
+// from that metadata.json.
+func snapshotPreexistingStore(fs fsys.FS, rigPath string) ([]FileSnapshot, error) {
+	beadsPath := filepath.Join(rigPath, ".beads")
+	fi, err := fs.Stat(beadsPath)
+	if err != nil {
+		return nil, fmt.Errorf("checking %s: %w", beadsPath, err)
+	}
+	if !fi.IsDir() {
+		return nil, nil
+	}
+	holdsStore, err := beadsDirContainsStore(fs, beadsPath)
+	if err != nil || !holdsStore {
+		return nil, err
+	}
+	snapshots, err := snapshotScopeFiles(fs, rigPath)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot canonical files: %w", err)
+	}
+	return snapshots, nil
+}
+
+// restorePreexistingStore puts back the scope files a failed store init
+// rewrote in a store that predates this add, and returns the init error for the
+// caller to surface. Such a store — an --adopt'ed one, a re-added rig's — is
+// never deleted, but init canonicalizes its metadata.json and config.yaml
+// before the provider's init op runs, so without the restore a failed add left
+// the store rewritten for a city that never registered it. A failed restore is
+// reported with the init error, as rollbackError does.
+func restorePreexistingStore(fs fsys.FS, snapshots []FileSnapshot, cause error) error {
+	if restoreErr := RestoreSnapshots(fs, snapshots); restoreErr != nil {
+		return fmt.Errorf("%w (rollback failed: %w)", cause, restoreErr)
 	}
 	return cause
 }
