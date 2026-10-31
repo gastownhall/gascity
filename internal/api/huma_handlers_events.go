@@ -92,8 +92,10 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 
 	// Total: authoritative for unfiltered reads (the log is append-only and
 	// gap-free, so LatestSeq counts every event and stays constant across a
-	// walk). Filtered reads report a best-effort count — the matching rows
-	// this request's scan could see.
+	// walk). Filtered reads report the matching rows this request's scan saw
+	// at or below the page boundary: exact when no next_cursor is minted, a
+	// lower bound (never an over-count, always >= the page) when one is.
+	// next_cursor, not Total, is the has-more signal.
 	total := scanned
 	if filterIsEmpty(filter) {
 		if seq, seqErr := ep.LatestSeq(); seqErr == nil {
@@ -159,8 +161,9 @@ func parseEventBeforeSeq(cursor string) (uint64, error) {
 
 // fetchEventPageAscending fetches up to limit+1 matching events at or below the
 // filter's BeforeSeq boundary in ascending seq order; the extra row is the
-// has-more signal. It returns the fetched events, scanned — the best-effort
-// count of matching rows the read could see, used as the filtered Total — and
+// has-more signal. It returns the fetched events, scanned — the count of
+// matching rows the read saw, used as the filtered Total: exact only when the
+// caller mints no next_cursor, otherwise a lower bound — and
 // truncated/reachedSeq: set when the bounded-scan path (below) stopped short
 // of a full page because its byte budget ran out, not because history was
 // exhausted. reachedSeq is meaningless (0) unless truncated is true.
