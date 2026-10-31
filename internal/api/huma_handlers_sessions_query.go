@@ -345,12 +345,13 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 // structuredTranscriptFallback builds the degraded structured transcript from
 // info when no structured history is available. index is the caller's
 // handler-entry capture, taken before info was read, so it never covers an
-// event the body does not reflect.
+// event the body does not reflect. A running session reports unknown
+// activity: pane output alone does not show whether the agent is mid-turn.
 func (s *Server) structuredTranscriptFallback(index uint64, info session.Info, includeThinking bool) (*IndexOutput[sessionTranscriptGetResponse], error) {
 	activity := string(worker.TailActivityIdle)
 	output := ""
 	if info.State == session.StateActive && s.state.SessionProvider().IsRunning(info.SessionName) {
-		activity = string(worker.TailActivityInTurn)
+		activity = string(worker.TailActivityUnknown)
 		peekOutput, peekErr := s.state.SessionProvider().Peek(info.SessionName, 100)
 		if peekErr != nil {
 			return nil, apierr.Internal.Msg("peeking session: " + peekErr.Error())

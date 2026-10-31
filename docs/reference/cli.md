@@ -3709,16 +3709,16 @@ does; their work comes back when the rig is resumed. The city store and a
 relocated graph store are always read.
 
 When the city's controller is running, it answers the query from the stores it
-already holds open (GET /v0/city/&#123;cityName&#125;/work/ready), reading every store
-live, never from a cache, so the answer is the one this command would compute
-itself, without opening a store. That holds only while the controller's config
-is current, so it refuses while a config change is pending or being applied,
-and after a failed reload until one succeeds; a [storage] change fails every
-reload until it is reverted or the city restarts. The controller learns of an
-edit to the config files from its config watcher and answers under the config
-it holds until then. If the controller is not running, refuses, or does not
-answer within 10s, this command reads the stores itself. GC_NO_API=1 forces
-the local read.
+already holds open (GET /v0/city/&#123;cityName&#125;/work/ready), with the reader this
+command runs, reading every store live, never from a cache. It reads the rigs
+of the config the controller has loaded: a rig added, removed or rebound in the
+city's config takes effect in its answer at the controller's next config
+reload. It refuses while a config reload or an API config write is in
+progress, and after a failed reload until one succeeds; a [storage] change
+fails every reload until it is reverted or the city restarts. If the
+controller is not running, refuses, or does not answer within 10s, this command
+loads the config and reads the stores itself. GC_NO_API=1 forces the local
+read.
 
 ```
 gc ready [flags]
