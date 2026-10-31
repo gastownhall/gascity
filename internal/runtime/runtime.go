@@ -699,8 +699,13 @@ type IdleProbeBudgetProvider interface {
 // for ACP a prompt response is outstanding, while a pane scan found an
 // active-processing indicator string in its capture, usually the live
 // indicator but possibly a stale frame or transcript text.
+// Which provider families' busy readings count is the runtime's policy, not
+// its callers': a runtime that cannot vouch for a family's busy reading
+// reports it as [ErrIdleIndeterminate], never as (false, nil), so a caller
+// may act on every busy reading it gets.
 // [ErrIdleIndeterminate] means the observation was made but matched neither a
-// ready prompt nor a busy indicator, so it says neither idle nor busy. Any
+// ready prompt nor a busy indicator it trusts, so it says neither idle nor
+// busy. Any
 // other non-nil err means the observation could not be made (the caller must
 // not treat the session as idle on error); a session that has gone away is
 // reported as an error, not as idle.
@@ -734,10 +739,12 @@ var ErrWaitUnobserved = errors.New("wait observed no busy session")
 // there alone (tmux, for Codex: the rows right above the live composer), so
 // a busy row an earlier turn left in the scrollback is not a running turn.
 //
-// running=false with a nil err says no turn is running now. A non-nil err
-// means the look could not be made; the caller must not take the session as
-// idle. Composites do not implement it: it is read on the session's routed
-// leaf ([TurnRunningFor]).
+// running=false with a nil err says no turn is running now. An error
+// wrapping [ErrIdleIndeterminate] means the runtime cannot read this
+// session's provider family's turn: it says neither running nor not. Any
+// other non-nil err means the look could not be made; the caller must not
+// take the session as idle. Composites do not implement it: it is read on
+// the session's routed leaf ([TurnRunningFor]).
 type TurnRunningProvider interface {
 	TurnRunning(name string) (running bool, err error)
 }

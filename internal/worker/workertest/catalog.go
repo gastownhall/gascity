@@ -13,6 +13,7 @@ const ( //nolint:revive // exported requirement IDs are documented by the catalo
 	RequirementTranscriptUsage                     RequirementCode = "WC-TX-USAGE-001"
 	RequirementInvocationUsageCost                 RequirementCode = "WC-USAGE-COST-001"
 	RequirementInvocationUsageRecording            RequirementCode = "WC-USAGE-RECORD-001"
+	RequirementWaitIdleOutOfReachQueuesAtOnce      RequirementCode = "WC-NUDGE-001"
 	RequirementContinuationContinuity              RequirementCode = "WC-CONT-001"
 	RequirementFreshSessionIsolation               RequirementCode = "WC-CONT-002"
 	RequirementStartupOutcomeBound                 RequirementCode = "WC-BRINGUP-001"
@@ -104,6 +105,19 @@ func TelemetryHandleCatalog() []Requirement {
 			Code:        RequirementInvocationUsageRecording,
 			Group:       "telemetry",
 			Description: "A prompt operation on a transcript-backed SessionHandle records gc.agent.tokens.*; a runtime-only RuntimeHandle is permanently excluded (ga-tkvb31).",
+		},
+	}
+}
+
+// NudgeHandleCatalog returns worker-handle nudge-delivery requirements. Like
+// TelemetryHandleCatalog, these are handle-behavior rules enforced through
+// the exported worker API rather than the fixture-driven profile runner.
+func NudgeHandleCatalog() []Requirement {
+	return []Requirement{
+		{
+			Code:        RequirementWaitIdleOutOfReachQueuesAtOnce,
+			Group:       "nudge",
+			Description: "A wait-idle nudge to a non-ACP session whose one-look idle pre-read (runtime.IdleBoundaryNow) reads busy or pending is reported undelivered at once, without entering the idle wait and without typing, on a SessionHandle and a RuntimeHandle alike; a pre-read at the boundary waits for idle and delivers.",
 		},
 	}
 }

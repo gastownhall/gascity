@@ -87,15 +87,22 @@ func (t *Tmux) turnRunning(target, family string) (bool, error) {
 // from its agent pane the way the nudge's turn guard reads it before typing
 // (paneShowsRunningTurn): for Codex the status rows right above its live
 // composer, so a Working row an earlier turn left in the scrollback is not a
-// running turn; for every other family a busy indicator anywhere in the
-// capture, as SnapshotIdle reads it. A pane that cannot be resolved or
-// captured is an error, never a reading.
+// running turn; for Claude a busy indicator anywhere in the capture, as
+// SnapshotIdle reads it. A family whose busy reading this leaf does not trust
+// (busyReadingTrusted), and a pane whose family cannot be told, is
+// [runtime.ErrIdleIndeterminate] without a capture: the scan cannot say
+// whether its turn runs. A pane that cannot be resolved or captured is an
+// error, never a reading.
 func (t *Tmux) TurnRunning(session string) (bool, error) {
 	target, err := t.agentInputTarget(session)
 	if err != nil {
 		return false, err
 	}
-	return t.turnRunning(target, t.nudgeSubmitFamily(target))
+	family := t.nudgeSubmitFamily(target)
+	if !busyReadingTrusted(family) {
+		return false, fmt.Errorf("turn of session %q: provider family %q: %w", session, family, runtime.ErrIdleIndeterminate)
+	}
+	return t.turnRunning(target, family)
 }
 
 // codexTurnStatusRows bounds the rows read above Codex's live composer for

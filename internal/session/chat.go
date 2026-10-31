@@ -1408,6 +1408,15 @@ func normalizeWaitIdleNudgeSource(source string) string {
 	return source
 }
 
+// idleBoundaryOutOfReach takes the wait-idle nudge's one look before its idle
+// wait (runtime.IdleBoundaryNow): a session that reads busy, or whose input a
+// pending interaction owns, will not reach a boundary within the wait, so the
+// nudge is reported undelivered at once for its caller to queue. Any other
+// reading leaves the wait to decide.
+func (m *Manager) idleBoundaryOutOfReach(sessName string) bool {
+	return runtime.IdleBoundaryNow(m.sp, sessName).OutOfReach()
+}
+
 func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, by Actor, id string, b beads.Bead, source, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
 	if err := m.ensureDeliverable(ctx, by, id, b, sessName, resumeCommand, hints); errors.Is(err, ErrAgentDead) {
 		return false, nil // not delivered: the caller queues it for the healed agent
@@ -1425,6 +1434,9 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, by Actor, id strin
 	}
 	waiter, ok := m.sp.(runtime.IdleWaitProvider)
 	if !ok {
+		return false, nil
+	}
+	if m.idleBoundaryOutOfReach(sessName) {
 		return false, nil
 	}
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
@@ -1451,6 +1463,9 @@ func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Be
 	}
 	waiter, ok := m.sp.(runtime.IdleWaitProvider)
 	if !ok {
+		return false, nil
+	}
+	if m.idleBoundaryOutOfReach(sessName) {
 		return false, nil
 	}
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {

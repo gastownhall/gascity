@@ -68,6 +68,7 @@ go_test(
         "adapter_unit_test.go",
         "agent_slice_test.go",
         "attach_probe_test.go",
+        "busy_trust_test.go",
         "claude_background_stop_test.go",
         "claude_interrupt_test.go",
         "codex_background_stop_test.go",
