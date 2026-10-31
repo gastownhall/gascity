@@ -47,6 +47,9 @@ type Provider struct {
 	// unixListening reports whether a listener is bound to a unix socket
 	// path, for ServerConfirmedDead. Nil selects unixPathListening.
 	unixListening func(path string) (bool, error)
+	// heal is program-capture heal's per-pane backoff
+	// (program_capture_heal.go).
+	heal captureHealBackoff
 }
 
 var instanceTokenReader = rand.Reader
@@ -1171,11 +1174,16 @@ func (p *Provider) ListRunningComplete() bool { return true }
 
 // RuntimeInventory implements [runtime.InventoryProvider] with one
 // batched pane read. Delegates to [Tmux.listRuntimeInventory], and logs
-// malformed lines (see noteInventoryFaults).
+// malformed lines (see noteInventoryFaults). While the program-status switch
+// is not off, each entry's Program is its agent pane's reading, the tap's
+// liveness taken from the state cache's process table.
 func (p *Provider) RuntimeInventory(ctx context.Context) (map[string]runtime.InventoryEntry, error) {
-	entries, faults, err := p.tm.listRuntimeInventory(ctx)
+	entries, panes, faults, err := p.tm.listRuntimeInventory(ctx)
 	if len(faults.lines) > 0 || err == nil {
 		p.noteInventoryFaults(faults)
+	}
+	if mode := p.tm.programStatusMode(); err == nil && mode != runtime.ProgramStatusOff && len(entries) > 0 {
+		p.judgeInventoryPrograms(mode, entries, panes)
 	}
 	return entries, err
 }
@@ -1473,6 +1481,10 @@ type tmuxStartOps struct {
 	// budget. Nil means the real clock; tests inject a fake so the idle
 	// window is decided by what the command printed, not by host speed.
 	monitorClock execgrace.Clock
+	// programStatus is the session's program-status capture declaration
+	// (runtime.Config.ProgramStatus), armed on the agent pane at create and
+	// respawn. The zero value arms nothing.
+	programStatus runtime.ProgramStatusArm
 }
 
 // newTmuxStartOps builds the startup adapter for one session, deriving the
@@ -1506,6 +1518,7 @@ func newTmuxStartOps(tm *Tmux, runtimeDir string, setupMaxTimeout time.Duration,
 		setupMaxTimeout: setupMaxTimeout,
 		secrets:         runtime.SetupCommandSecrets(cfg.Env),
 		freshStart:      freshStart,
+		programStatus:   cfg.ProgramStatus,
 	}
 }
 
@@ -1525,7 +1538,7 @@ const (
 
 func (o *tmuxStartOps) createSession(name, workDir, command string, env map[string]string) error {
 	if command != "" || len(env) > 0 {
-		return o.tm.NewSessionWithCommandAndEnv(name, workDir, command, env)
+		return o.tm.newSessionWithCommandAndEnv(name, workDir, command, env, o.programStatus)
 	}
 	return o.tm.NewSession(name, workDir)
 }
@@ -1551,7 +1564,7 @@ func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[strin
 	// A warm box created before the agent-pane marker (or whose mark failed)
 	// is marked here while it still has only the agent's pane.
 	o.tm.adoptAgentPane(name)
-	if err := o.tm.RespawnPaneWithWorkDir(name, workDir, command); err != nil {
+	if err := o.tm.respawnPaneWithWorkDir(name, workDir, command, o.programStatus); err != nil {
 		return err
 	}
 	// The respawned process inherits the session environment's identity;

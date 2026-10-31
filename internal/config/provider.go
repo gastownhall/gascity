@@ -173,6 +173,10 @@ type ProviderSpec struct {
 	// the right names for this harness, so an upstream preset is portable across
 	// harnesses (claude → ANTHROPIC_*, codex → OPENAI_*).
 	UpstreamEnv UpstreamEnvBinding `toml:"upstream_env,omitempty"`
+	// ProgramStatus declares whether this harness's program reports its own
+	// state over the OSC 7501 Program Status Protocol and how gc captures the
+	// reports. Inert unless [session] program_status is "shadow" or "on".
+	ProgramStatus ProgramStatusBinding `toml:"program_status,omitempty"`
 	// PrintArgs are CLI arguments that enable one-shot non-interactive mode.
 	// The provider prints its response to stdout and exits. When empty, the
 	// provider does not support one-shot invocation.
@@ -257,6 +261,7 @@ type ResolvedProvider struct {
 	PermissionModes        map[string]string
 	OptionsSchema          []ProviderOption
 	UpstreamEnv            UpstreamEnvBinding
+	ProgramStatus          ProgramStatusBinding
 	PrintArgs              []string
 	TitleModel             string
 	ACPCommand             string
@@ -528,11 +533,27 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 			APIKey:    spec.UpstreamAPIKeyEnv,
 			AuthToken: spec.UpstreamAuthTokenEnv,
 		},
-		PrintArgs:  cloneStrings(spec.PrintArgs),
-		TitleModel: spec.TitleModel,
-		ACPCommand: spec.ACPCommand,
-		ACPArgs:    cloneStrings(spec.ACPArgs),
+		ProgramStatus: programStatusBindingFromWorker(spec),
+		PrintArgs:     cloneStrings(spec.PrintArgs),
+		TitleModel:    spec.TitleModel,
+		ACPCommand:    spec.ACPCommand,
+		ACPArgs:       cloneStrings(spec.ACPArgs),
 	}
+}
+
+// programStatusBindingFromWorker lifts a built-in profile's flat
+// program-status fields into the config binding. An unset relay stays nil so a
+// city layer can still inherit or override it.
+func programStatusBindingFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProgramStatusBinding {
+	b := ProgramStatusBinding{
+		Protocol: spec.ProgramStatusProtocol,
+		App:      spec.ProgramStatusApp,
+		Env:      cloneStringMap(spec.ProgramStatusEnv),
+	}
+	if spec.ProgramStatusRelay {
+		b.Relay = boolPtr(true)
+	}
+	return b
 }
 
 func providerOptionsFromWorker(options []workerbuiltin.BuiltinProviderOption) []ProviderOption {

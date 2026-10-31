@@ -102,6 +102,7 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) s
 		DisplayMs:          sc.DisplayMsOrDefault(),
 		SocketName:         socketName,
 		RuntimeDir:         runtimeDir,
+		ProgramStatus:      sc.ProgramStatusMode(),
 	}
 }
 

@@ -21,6 +21,8 @@ var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 		"IdleProbeBudgetProvider": {"deliberate", "the idle-proof budget is read on the routed leaf (cmd/gc/session_sleep.go idleSleepProbeTimeoutFor)", ""},
 		"InventoryProvider":       {"deliberate", "the inventory lane reads each backend's leaf through Backends (cmd/gc/runtime_inventory_lane.go)", ""},
 		"LocalTranscriptProvider": {"deliberate", "transcript locality is read on the routed leaf (runtime.LocalTranscriptsFor)", ""},
+		"ProgramCaptureHealer":    {"deliberate", "the controller heals capture on the routed leaf (runtime.ProgramCaptureHealerFor)", ""},
+		"ProgramStatusProvider":   {"deliberate", "the program-status reading is read on the routed leaf (runtime.ProgramStatusFor)", ""},
 		"TurnRunningProvider":     {"deliberate", "the live turn reading is read on the routed leaf (runtime.TurnRunningFor)", ""},
 	},
 	"hybrid": {
@@ -29,6 +31,8 @@ var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 		"IdleProbeBudgetProvider":     {"deliberate", "as auto's", ""},
 		"InventoryProvider":           {"deliberate", "as auto's", ""},
 		"LocalTranscriptProvider":     {"deliberate", "as auto's", ""},
+		"ProgramCaptureHealer":        {"deliberate", "as auto's", ""},
+		"ProgramStatusProvider":       {"deliberate", "as auto's", ""},
 		"TurnRunningProvider":         {"deliberate", "as auto's", ""},
 		"FreshLivenessObserver":       {"deliberate", "hybrid's read is its leaves' cached one, so a hop through it proves absence only by its attested listing (cmd/gc/reconcile_effect_runtime.go unlistedElsewhere)", ""},
 		"TransportCapabilityProvider": {"deliberate", "production's hybrid is tmux over k8s (cmd/gc/providers.go newHybridProvider), and neither has it", ""},

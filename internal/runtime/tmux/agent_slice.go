@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/runtime/programstatus"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -36,8 +37,10 @@ var agentSliceProbeTimeout = 5 * time.Second
 // wrapping. A wrapped pane reports the wrapper as pane_current_command for
 // the pane's whole lifetime, so command-wait and detection paths must treat
 // these like shells: the agent is identified through descendant inspection,
-// never by the pane command itself.
-var wrapperCommands = []string{"systemd-run"}
+// never by the pane command itself. gc-osc7501 is the program-status relay
+// (program_capture.go): it holds the pane's terminal and runs the agent on a
+// pty of its own.
+var wrapperCommands = []string{"systemd-run", programstatus.CompanionName}
 
 // isWrapperCommand reports whether cmd is a known pane-root wrapper binary
 // (see wrapperCommands).
