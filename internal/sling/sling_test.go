@@ -2989,6 +2989,74 @@ func TestRestampWorkBeadRoutingClearsStaleRoutedTo(t *testing.T) {
 	}
 }
 
+// failingRestampStore wraps a beads.Store and rejects the work-bead routing
+// restamp (gc.execution_routed_to) on one specific bead, so a graph.v2
+// attach can be observed soft-failing that write after its workflow has
+// already launched. Both metadata write methods are covered so the guard
+// holds regardless of which one the restamp uses, and the dual condition
+// (this bead AND this key) keeps unrelated launch writes succeeding.
+type failingRestampStore struct {
+	beads.Store
+	beadID string
+	err    error
+}
+
+func (f *failingRestampStore) SetMetadata(id, key, value string) error {
+	if id == f.beadID && key == beadmeta.ExecutionRoutedToMetadataKey {
+		return f.err
+	}
+	return f.Store.SetMetadata(id, key, value)
+}
+
+func (f *failingRestampStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if id == f.beadID {
+		if _, ok := kvs[beadmeta.ExecutionRoutedToMetadataKey]; ok {
+			return f.err
+		}
+	}
+	return f.Store.SetMetadataBatch(id, kvs)
+}
+
+// TestSlingAttachGraphFormulaReportsRestampWriteFailure guards the soft
+// failure policy of the routing restamp: when the store rejects the source's
+// gc.execution_routed_to write during a graph.v2 --on attach, the attach
+// still succeeds (the workflow is already launched), and the failure is
+// surfaced through SlingResult.MetadataErrors naming the bead and the store
+// error rather than silently dropped.
+func TestSlingAttachGraphFormulaReportsRestampWriteFailure(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2ConvoyFormula(t, formulaDir)
+	deps := testDeps(graphV2SlingTestConfig(t, formulaDir), runtime.NewFake(), newFakeRunner().run)
+	source, err := deps.Store.Create(beads.Bead{Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected restamp failure")
+	deps.Store = &failingRestampStore{Store: deps.Store, beadID: source.ID, err: injected}
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.AttachFormula(context.Background(), "graph-work", source.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+	if result.WorkflowID == "" {
+		t.Fatal("result.WorkflowID = empty, want the launched workflow root")
+	}
+	if _, err := deps.Store.Get(result.WorkflowID); err != nil {
+		t.Fatalf("Get(root %s): %v", result.WorkflowID, err)
+	}
+	if len(result.MetadataErrors) != 1 {
+		t.Fatalf("MetadataErrors = %v, want exactly the restamp failure", result.MetadataErrors)
+	}
+	entry := result.MetadataErrors[0]
+	if !strings.Contains(entry, source.ID) || !strings.Contains(entry, injected.Error()) {
+		t.Fatalf("MetadataErrors entry %q must name the source bead %s and the store error %q", entry, source.ID, injected.Error())
+	}
+}
+
 func TestSlingAttachGraphFormulaEmitsCurrentExecutionFacts(t *testing.T) {
 	formulaDir := t.TempDir()
 	writeGraphV2ConvoyFormula(t, formulaDir)
