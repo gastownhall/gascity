@@ -167,6 +167,11 @@ func TestCachingStoreRetainedWriteStampVerifiesLateEvent(t *testing.T) {
 			cache.ReconcileNowForTest()
 		}},
 		{"prime_drops_closed", func(t *testing.T, cache *CachingStore) {
+			// A live list installs the close first, so the cache holds the
+			// row closed — the row shape a full Prime drops.
+			if _, err := cache.List(ListQuery{AllowScan: true, IncludeClosed: true, Live: true}); err != nil {
+				t.Fatalf("live List: %v", err)
+			}
 			if err := cache.Prime(context.Background()); err != nil {
 				t.Fatalf("Prime: %v", err)
 			}

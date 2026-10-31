@@ -1682,30 +1682,14 @@ func (c *CachingStore) prime(ctx context.Context) error {
 				}
 				continue
 			}
-			// A row absent from the active-only scan that the cache still
-			// holds open, and that this cache instance has never itself
-			// locally written (no localBeadAt entry at all, not merely an
-			// old one — see below), survives the replace instead of being
-			// dropped. This is the controller-startup shape: PrimeActive's
-			// first scan populates the cache with rows this instance never
-			// wrote, so a close that lands behind it in the window before
-			// the full Prime has nothing else to protect it. Carrying the
-			// row over hands the question to the next reconcile pass's
-			// eviction cell, which already re-verifies a missing row per id
-			// and announces bead.closed correctly (gastownhall/gascity#8410).
-			//
-			// A row with ANY local-write history, aged out of
-			// recentLocalMutation's window or not, keeps the existing
-			// drop-on-replace behavior: several tests (e.g.
-			// TestCachingStorePrimeKeepsWriteRevisionsOfDroppedRows,
-			// TestCachingStoreGetAnswersRowDroppedByFullReplace) pin that an
-			// aged local write still drops here, and only its write
-			// revision survives through the separate writeSeq/writeAt
-			// retention path — broadening past "no local-write history at
-			// all" regresses that contract without evidence it is itself
-			// wrong.
-			_, everLocallyWritten := c.localBeadAt[id]
-			if current.Status != "closed" && (!everLocallyWritten || recentLocalMutation(c.localBeadAt[id], now)) {
+			// Absent from the scan is not a close: the listing is
+			// active-only, so a row closed, deleted, or merely omitted
+			// behind the cache looks the same here. Carry every non-closed
+			// row for the next cacheFullScanQuery reconcile, whose per-id
+			// re-verify (recoverMissingFromList) merges an alive row back,
+			// announces a verified close exactly once, or defers on error.
+			// Only a row the cache already holds closed is dropped.
+			if current.Status != "closed" {
 				nextBeads[id] = cloneBead(current)
 				if deps, ok := c.deps[id]; ok {
 					nextDeps[id] = cloneDeps(deps)
@@ -1736,9 +1720,10 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		c.deletedSeq = make(map[string]uint64)
 		// The replace dropped every beadSeq fence and the deletion fences;
 		// like an eviction, it keeps the write fences of the rows it drops
-		// for the next reconcile to retain. It runs only when no mutation
-		// followed startSeq, so every start below the current seq saw one
-		// and is refused wholesale (writeFencedLocked).
+		// (the ones it holds closed) for the next reconcile to retain. It
+		// runs only when no mutation followed startSeq, so every start below
+		// the current seq saw one and is refused wholesale
+		// (writeFencedLocked).
 		c.fenceFloor = c.mutationSeq
 	} else {
 		for id, b := range beadMap {
