@@ -1415,6 +1415,13 @@ type Config struct {
 	// start effect sets it (CONTRACT v5 S1, I24); legacy never does.
 	// Excluded from every fingerprint.
 	FreshOnly bool
+
+	// ProgramStatus is the session's OSC 7501 capture declaration, derived
+	// from the provider's program_status binding, the city switch and the
+	// transport. The zero value declares nothing. Excluded from every
+	// fingerprint: capture is applied at the leaf, and arming or healing it
+	// never restarts the agent.
+	ProgramStatus ProgramStatusArm
 }
 
 // OverlayProviderNames returns the effective provider overlay slots to stage for
