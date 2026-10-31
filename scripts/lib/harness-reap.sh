@@ -10,11 +10,14 @@
 #      killed), the test binary orphans to init and nothing reaps it.
 #   2. LITTER. Orphaned tmux servers accumulate across runs, each holding a
 #      test socket, at zero CPU.
+#   3. DISK. go leaves its go-build WORK dir behind when it is killed with
+#      SIGTERM or SIGKILL, up to ~1 GB per go process in flight.
 #
 # The runner already owns the process tree, so it is the right place to fix
-# both: gc_harness_run_supervised gives each product run its own process group
-# and kills the group on exit or signal, and gc_harness_sweep_stale_orphans
-# clears what earlier runs already stranded.
+# all three: gc_harness_run_supervised gives each product run its own process
+# group and kills the group on exit or signal, gc_harness_own_gotmpdir puts
+# everything go builds under one dir the run removes, and the sweeps clear
+# what earlier runs already stranded.
 #
 # Portability: macOS has no setsid(1), so process-group isolation is done with
 # bash job control (`set -m`), which is POSIX and works under bash 3.2 — the
@@ -375,6 +378,97 @@ gc_harness_sweep_stale_orphans() {
   fi
 
   (( reaped == 0 )) || printf 'harness sweep: reaped %s stale test process(es)\n' "$reaped" >&2
+  return 0
+}
+
+# The go command builds into a WORK dir (go-build<random>) under GOTMPDIR, or
+# under TMPDIR when GOTMPDIR is empty, and removes it when it exits on its own
+# or on SIGINT. SIGTERM and SIGKILL leave it behind, and one `go test` over the
+# whole module keeps up to ~1 GB of test binaries there. A run torn down from
+# outside (a timeout, a reaper, a killed parent chain) therefore strands one
+# WORK dir per go process it had in flight; a few dozen of them filled a shared
+# host's root disk.
+#
+# gc_harness_own_gotmpdir gives the run a private GOTMPDIR so everything go
+# writes sits under one dir the run can remove whole. The caller's EXIT and
+# signal traps remove it with gc_harness_remove_gotmpdir; a run killed too hard
+# to run its traps is swept by a later run (gc_harness_sweep_stale_gotmpdirs).
+#
+#   gc_harness_own_gotmpdir <go env GOTMPDIR> <min-age-seconds>
+#
+# The private dir is "<base>/gc-gotmp-<PID>-<random>", where base is the
+# caller's GOTMPDIR, else TMPDIR, else /var/tmp: the caller's choice of disk
+# still holds, and the name carries its creator's PID the way test/tmuxtest's
+# socket-parent dirs do. A nested runner (a shard under the parallel fan-out)
+# finds its GOTMPDIR is already such a dir and shares it rather than nesting
+# another; the outermost runner owns it. On return gc_harness_gotmpdir is the
+# dir to export as GOTMPDIR, and gc_harness_gotmpdir_owned is 1 when this run
+# created it.
+gc_harness_gotmpdir=""
+gc_harness_gotmpdir_owned=0
+
+gc_harness_own_gotmpdir() {
+  local base="${1:-}" min_age_seconds="${2:-3600}"
+  if [[ -n "$base" && "${base##*/}" =~ ^gc-gotmp-[0-9]+-[A-Za-z0-9]+$ && -d "$base" ]]; then
+    gc_harness_gotmpdir="$base"
+    gc_harness_gotmpdir_owned=0
+    return 0
+  fi
+  [[ -n "$base" ]] || base="${TMPDIR:-/var/tmp}"
+  gc_harness_sweep_stale_gotmpdirs "$base" "$min_age_seconds"
+  local dir
+  if ! dir="$(mktemp -d "${base%/}/gc-gotmp-$$-XXXXXX")"; then
+    printf 'harness: cannot create a private GOTMPDIR under %s\n' "$base" >&2
+    return 1
+  fi
+  gc_harness_gotmpdir="$dir"
+  gc_harness_gotmpdir_owned=1
+}
+
+# gc_harness_remove_gotmpdir removes the private GOTMPDIR this run created, and
+# leaves a shared one to its owner. Call it after the supervised run is torn
+# down, so no go process is still writing there. It is idempotent.
+gc_harness_remove_gotmpdir() {
+  (( gc_harness_gotmpdir_owned == 1 )) || return 0
+  gc_harness_gotmpdir_owned=0
+  [[ -n "$gc_harness_gotmpdir" ]] || return 0
+  rm -rf "$gc_harness_gotmpdir" 2>/dev/null || true
+}
+
+# gc_harness_sweep_stale_gotmpdirs removes the private GOTMPDIRs under base
+# that earlier runs left behind. A dir is stale only when all of these hold:
+#
+#   * it belongs to the invoking user and its creator PID is gone;
+#   * nothing in it changed for min_age_seconds. Killing the runner alone
+#     leaves its supervised tree running in a process group of its own, and
+#     that tree may still be building into the dir; the floor is the same go
+#     test budget gc_harness_sweep_stale_orphans uses for those processes;
+#   * no process holds a file, mapping or cwd in it, when lsof is available.
+#     A running test binary's executable lives in its WORK dir.
+#
+# A reused creator PID only keeps a stale dir around longer; it can never make
+# a live run's dir look stale. GC_TEST_NO_ORPHAN_SWEEP=1 skips this sweep too.
+gc_harness_sweep_stale_gotmpdirs() {
+  local base="${1:-}" min_age_seconds="${2:-3600}"
+  [[ "${GC_TEST_NO_ORPHAN_SWEEP:-0}" != "1" ]] || return 0
+  [[ -n "$base" && -d "$base" ]] || return 0
+  local min_age_minutes=$(( (min_age_seconds + 59) / 60 ))
+  local dir owner_pid recent
+  for dir in "${base%/}"/gc-gotmp-*; do
+    [[ -d "$dir" && ! -L "$dir" && -O "$dir" ]] || continue
+    [[ "${dir##*/}" =~ ^gc-gotmp-([0-9]+)-[A-Za-z0-9]+$ ]] || continue
+    owner_pid="${BASH_REMATCH[1]}"
+    if kill -0 "$owner_pid" 2>/dev/null; then
+      continue
+    fi
+    recent="$(find "$dir" -mmin "-${min_age_minutes}" -print 2>/dev/null | head -n 1)" || true
+    [[ -z "$recent" ]] || continue
+    if command -v lsof >/dev/null 2>&1 && lsof -t +D "$dir" >/dev/null 2>&1; then
+      continue
+    fi
+    printf 'harness sweep: removing stale GOTMPDIR %s (creator pid %s is gone)\n' "$dir" "$owner_pid" >&2
+    rm -rf "$dir" 2>/dev/null || true
+  done
   return 0
 }
 
