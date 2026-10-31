@@ -196,12 +196,11 @@ func judgeBdCreate(in bdClassGuardInput) bdClassGuard {
 		shape.Metadata = map[string]string{}
 		maps.Copy(shape.Metadata, fields)
 	}
-	if _, ok := in.args.Last("--graph"); ok {
-		// bd applies every node of the plan, each with its own type, labels
-		// and metadata (decoded as raw JSON), plus parent links and edges.
-		// No shipped workflow uses `gc bd create --graph`, so it is refused
-		// rather than re-derived node by node.
-		return in.refuse("gc bd %s --graph: refused on this split city: a graph plan mints one bead per node, each with its own type, labels, metadata and edges, and gc does not re-derive bd's reading of the plan here. Instead: %s. Nothing was written.", in.path, bdSplitAltSling)
+	// An empty --graph is bd's single create (bd tests graphFile != ""), so
+	// it falls through to the flag judgment below. pflag keeps the last value
+	// of a repeated --graph, as bd does.
+	if plan, ok := in.args.Last("--graph"); ok && plan != "" {
+		return judgeBdCreateGraph(in, plan)
 	}
 	var endpoints []string
 	endpoints = append(endpoints, bdDepsEndpoints(in.args.Values("--deps"))...)
