@@ -50,7 +50,8 @@ The default pack runs the complete task:
 3. Have a separate worker review the actual diff.
 4. Apply at most two repair rounds if review or verification fails.
 5. Test the approved commit, then integrate that exact commit locally.
-6. Close the source task and safely retire the integrated worktree.
+6. Safely retire the integrated worktree, then let native finalization close
+   the source task after all required stages pass.
 
 No push or pull request is part of this workflow. A failed check leaves useful
 evidence and recoverable work instead of calling the task complete.
@@ -65,7 +66,8 @@ gc status
 The tutorial prints the source task ID. While it is open, implementation,
 review or verification is still pending. On success, tutorial status verifies
 that the recorded integrated commit belongs to the local branch and prints its
-SHA. Inspect the result yourself:
+SHA. It also checks that the workflow passed and its owned worktree was
+cleaned up. Inspect the result yourself:
 
 ```bash
 cd projects/practice

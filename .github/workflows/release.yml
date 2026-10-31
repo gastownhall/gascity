@@ -212,6 +212,7 @@ jobs:
 
             depends_on "beads"
             depends_on "jq"
+            depends_on "python3"
             depends_on "tmux"
 
             on_macos do
@@ -229,6 +230,7 @@ jobs:
                   dolt        - beads storage (via beads)
                   flock       - file locking
                   jq          - JSON processing
+                  python3     - guided tutorial and pack scripts
                   tmux        - session management
 
                 Get started:

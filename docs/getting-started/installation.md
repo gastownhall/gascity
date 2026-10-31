@@ -29,6 +29,7 @@ for you; the other methods require manual installation.
 | dolt | Yes | 2.6.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) | Beads data plane |
 | bd (Beads CLI) | Yes | 1.3.0 minimum; 1.3.2 tested | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
 | flock | Yes | — | `brew install flock` | (built-in via util-linux) | File locking |
+| Python 3 | Guided quickstart and Python pack scripts | 3.11+ | `brew install python3` | `apt install python3` (Ubuntu 24.04+) | The guided quickstart uses the standard library; no pip packages are needed for its first task |
 | gh | Optional | — | `brew install gh` | [cli.github.com](https://cli.github.com/) | GitHub gate checks |
 | Go 1.27.3+ | Source only | 1.27.3 | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
 | make | Source only | — | (built-in) | `apt install make` (or `build-essential`) | Drives `make install` |

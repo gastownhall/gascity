@@ -30,8 +30,9 @@ is required. Idle means no model turns, including scheduled maintenance turns.
    sessions and dormant worker pools must consume no model tokens without work.
 4. Complete one local task end to end using existing native worktree machinery:
    isolated implementation, independent review, at most two repair rounds,
-   deterministic verification, local integration, then source-bead closure and
-   safe worker/worktree shutdown.
+   deterministic verification, local integration, guarded worktree cleanup, then
+   native workflow finalization and source-bead closure. Workers drain at their
+   claimed step boundaries.
 5. Preserve source continuity across dependent tasks, retry and stop/resume. Offer
    existing-repository/beads adoption with a preview and preserved history.
 6. Write the expanded quick start and continuous tutorials; introduce parallelism,
