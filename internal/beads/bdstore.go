@@ -1272,6 +1272,9 @@ func (b *bdIssue) normalizedDependencies() []Dep {
 // classifyBDExecResult falls back to the stdout envelope when stderr is empty,
 // which bd's --json error path increasingly is (see classifyBDExecResult); the
 // contract corpus pins this exact phrasing.
+//
+// Against a workspace attached to a bd serve over HTTP, a miss is none of those
+// phrasings but bd serve's structured refusal (bdServeNotFoundAnswer).
 func isBdNotFound(err error) bool {
 	if err == nil {
 		return false
@@ -1279,8 +1282,18 @@ func isBdNotFound(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "not found") ||
 		strings.Contains(msg, "no issue found") ||
-		strings.Contains(msg, "no issues found")
+		strings.Contains(msg, "no issues found") ||
+		strings.Contains(msg, bdServeNotFoundAnswer)
 }
+
+// bdServeNotFoundAnswer is how bd renders bd serve refusing a request with the
+// not_found problem code: "<op>: bd serve at <url> answered 404 not_found:
+// <detail>". The code is the server saying it holds no issue or wisp with the
+// requested id, and the detail ("no issue or wisp with that id") carries none of
+// bd's local not-found phrasings, so it is matched by the code. A 404 from
+// something in front of bd serve (a gateway or proxy) carries no code and
+// renders as a bare "answered 404", which this never matches.
+const bdServeNotFoundAnswer = " answered 404 not_found"
 
 // isBdNoIssueMatch reports whether err is bd's own "no issue(s) found"
 // answer, the narrow subset of isBdBeadNotFound that proves a lookup matched
