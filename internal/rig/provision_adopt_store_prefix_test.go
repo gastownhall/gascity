@@ -142,10 +142,48 @@ func TestProvisionAdoptRefusesAMixedCaseStorePrefix(t *testing.T) {
 	deps.ReadStorePrefix = (&storePrefixStub{}).reader("KitFlow", nil)
 
 	_, _, err := Provision(deps, req)
-	if err == nil || !strings.Contains(err.Error(), `"KitFlow"`) {
-		t.Fatalf("Provision err = %v, want a refusal naming the mixed-case prefix", err)
+	want := `--adopt: the store at ` + req.Path + ` records issue prefix "KitFlow"; gc stores rig prefixes in lowercase, so adopting it would fork its bead ID series; run "bd rename-prefix kitflow" in ` + req.Path + ` first`
+	if err == nil || err.Error() != want {
+		t.Fatalf("Provision err = %v, want %q", err, want)
 	}
 	assertCityTOMLUntouched(t, deps)
+}
+
+// A mixed-case prefix in config.yaml is refused under the same rule as one in
+// the store, with or without --prefix and on a re-add (whose adopt still runs
+// store init with the lowercased prefix): lowercasing it would pin a prefix the
+// store's beads do not carry. bd rename-prefix leaves config.yaml alone, so
+// the remedy names that file too.
+func TestProvisionAdoptRefusesAMixedCaseConfigYamlPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		prefix string
+		reAdd  bool
+	}{
+		{name: "without --prefix"},
+		{name: "with the lowercased --prefix", prefix: "kitflow"},
+		{name: "re-adding a rig city.toml pins lowercased", reAdd: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, req := adoptStoreFixture(t, "issue_prefix: KitFlow\n")
+			stub := &storePrefixStub{}
+			deps.ReadStorePrefix = stub.reader("kitflow", nil)
+			req.Prefix = tc.prefix
+			if tc.reAdd {
+				deps.Cfg = &config.City{Rigs: []config.Rig{{Name: "webapp", Path: req.Path, Prefix: "kitflow"}}}
+			}
+
+			_, _, err := Provision(deps, req)
+			want := `--adopt: the store at ` + req.Path + ` records issue prefix "KitFlow" in .beads/config.yaml; gc stores rig prefixes in lowercase, so adopting it would fork its bead ID series; run "bd rename-prefix kitflow" in ` + req.Path + ` first and change the prefix in .beads/config.yaml to kitflow`
+			if err == nil || err.Error() != want {
+				t.Fatalf("Provision err = %v, want %q", err, want)
+			}
+			if len(stub.calls) != 0 {
+				t.Errorf("ReadStorePrefix consulted although config.yaml records the prefix: %v", stub.calls)
+			}
+			assertCityTOMLUntouched(t, deps)
+		})
+	}
 }
 
 func TestProvisionAdoptPrefersConfigYamlPrefix(t *testing.T) {

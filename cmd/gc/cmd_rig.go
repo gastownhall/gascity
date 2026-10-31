@@ -645,8 +645,10 @@ var rigAdoptStorePrefix = readAdoptedStoreIssuePrefix
 // two kinds of scope: a proxied-server scope through the provider's projection
 // (bd refuses --readonly through its proxy), after refusing a clone whose store
 // is missing, because any bd command there would create an empty one; every
-// other scope through doctor's store projection with --readonly, so nothing is
-// started, migrated or written before adoption is decided.
+// other scope through doctor's store projection with --readonly, so on those
+// nothing is started, migrated or written before adoption is decided. The
+// proxied read is an ordinary bd command: it may start the workspace's proxy
+// and run bd's version-bump maintenance even when the adopt is then refused.
 func readAdoptedStoreIssuePrefix(cityPath, rigPath string) (string, error) {
 	metaPath := filepath.Join(rigPath, ".beads", "metadata.json")
 	backend, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, metaPath)

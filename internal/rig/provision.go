@@ -469,25 +469,15 @@ func validateAdoptAndBeadsStore(deps Deps, req ProvisionRequest, rigPath string,
 	name := req.Name
 	prefix := plan.prefix
 
-	if req.Adopt {
-		metaPath := filepath.Join(rigPath, ".beads", "metadata.json")
-		if _, err := fs.Stat(metaPath); err != nil {
-			return fmt.Errorf("--adopt requires .beads/metadata.json in %s", rigPath)
-		}
-		if plan.adopted.err != nil {
-			return fmt.Errorf("--adopt requires a valid issue_prefix in .beads/config.yaml in %s: reading the store's own issue_prefix: %w", rigPath, plan.adopted.err)
-		}
-		if plan.adopted.prefix == "" {
-			return fmt.Errorf("--adopt requires a valid issue_prefix in .beads/config.yaml in %s", rigPath)
-		}
-	}
-
 	// An --adopt compares against the prefix the store records (config.yaml or
-	// the store itself); every other path reads config.yaml only and never
-	// consults the store.
+	// the store itself) once its own guards pass; every other path reads
+	// config.yaml only and never consults the store.
 	existingPrefix, ok := ReadBeadsPrefix(fs, rigPath)
 	if req.Adopt {
-		existingPrefix, ok = plan.adopted.prefix, plan.adopted.prefix != ""
+		if err := validateAdoptedStore(fs, rigPath, plan.adopted); err != nil {
+			return err
+		}
+		existingPrefix, ok = plan.adopted.prefix, true
 	}
 	if ok && existingPrefix != prefix {
 		switch {
@@ -538,6 +528,22 @@ func validateAdoptAndBeadsStore(deps Deps, req ProvisionRequest, rigPath string,
 					rigPath, rigPath)
 			}
 		}
+	}
+	return nil
+}
+
+// validateAdoptedStore runs --adopt's own guards: the store needs a
+// metadata.json, and the prefix read during planning must be one gc can adopt.
+// A nil error means adopted.prefix is set.
+func validateAdoptedStore(fs fsys.FS, rigPath string, adopted adoptedStorePrefix) error {
+	if _, err := fs.Stat(filepath.Join(rigPath, ".beads", "metadata.json")); err != nil {
+		return fmt.Errorf("--adopt requires .beads/metadata.json in %s", rigPath)
+	}
+	if adopted.err != nil {
+		return adopted.err
+	}
+	if adopted.prefix == "" {
+		return fmt.Errorf("--adopt requires a valid issue_prefix in .beads/config.yaml in %s", rigPath)
 	}
 	return nil
 }
