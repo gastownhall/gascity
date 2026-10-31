@@ -225,6 +225,12 @@ func (m *Manager) StopTurnWith(ctx context.Context, id string, opts StopTurnOpti
 			report.Restarted = true
 			return nil
 		}
+		if stopSendsFollowOnKeys(b, mode, opts.ForReplacement) && m.inputHeldByPendingInteractionLocked(sessName, "follow-on keys") {
+			// The stop succeeded; its follow-on keys (the replacement's
+			// preparation, the input clear, the background-work stop) would
+			// land in the prompt, so none is sent.
+			return nil
+		}
 		if opts.ForReplacement {
 			return m.prepareReplacementLocked(ctx, b, id, sessName, mode)
 		}
@@ -244,6 +250,31 @@ func (m *Manager) StopTurnWith(ctx context.Context, id string, opts StopTurnOpti
 		return nil
 	})
 	return report, err
+}
+
+// stopSendsFollowOnKeys reports whether a settled stop of b's turn, sent as
+// mode, goes on to type keys: a replacement's preparation
+// (replacementSendsKeys), or else the restored-input clear and the
+// background-work stop.
+func stopSendsFollowOnKeys(b beads.Bead, mode runtime.TurnInterruptMode, forReplacement bool) bool {
+	if forReplacement {
+		return replacementSendsKeys(b, mode)
+	}
+	return restoresInterruptedInput(b) && mode == runtime.TurnInterruptKeystroke || stopsBackgroundWork(b)
+}
+
+// inputHeldByPendingInteractionLocked reports whether a pending interaction
+// (a permission prompt or a question) holds sessName's input once its turn
+// was interrupted, logging that the keys named by what are not sent: they
+// would land in the prompt and answer it. A look that fails holds nothing,
+// so the keys go out as before.
+func (m *Manager) inputHeldByPendingInteractionLocked(sessName, what string) bool {
+	err := m.pendingInteractionLocked(sessName)
+	if !errors.Is(err, ErrPendingInteraction) {
+		return false
+	}
+	log.Printf("session: interrupted the turn of %q but sent no %s: %v", sessName, what, err)
+	return true
 }
 
 // waitForInterruptSettleLocked runs a stop's own waits after its interrupt

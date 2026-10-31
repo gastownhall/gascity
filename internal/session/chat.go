@@ -1554,6 +1554,19 @@ func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.B
 	return false, nil
 }
 
+// queueBehindPendingInteractionLocked turns a send's pending-interaction
+// refusal (err wrapping ErrPendingInteraction: the manager's look, or the
+// runtime's own refusal to type into a prompt) into a deferred delivery of
+// message under source, delivered once the interaction is answered. Any
+// other answer passes through as queued and err.
+func (m *Manager) queueBehindPendingInteractionLocked(b beads.Bead, sessName, message, source string, queued bool, err error) (bool, error) {
+	if !errors.Is(err, ErrPendingInteraction) {
+		return queued, err
+	}
+	log.Printf("session: %q: queued a message behind a pending interaction: %v", sessName, err)
+	return true, m.enqueueDeferredSubmitLocked(b, sessName, message, source)
+}
+
 func (m *Manager) send(ctx context.Context, by Actor, id, message, resumeCommand string, hints runtime.Config, immediate bool) (SubmitOutcome, error) {
 	if err := m.checkStarter(by); err != nil {
 		return SubmitOutcome{}, err
@@ -1565,6 +1578,12 @@ func (m *Manager) send(ctx context.Context, by Actor, id, message, resumeCommand
 			return err
 		}
 		outcome.Queued, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, immediate, deferredNudgeSource)
+		if !immediate {
+			// A send that may wait for a safe boundary waits behind a
+			// pending interaction too: queued for after it is answered,
+			// never refused and dropped. Only an immediate send refuses.
+			outcome.Queued, err = m.queueBehindPendingInteractionLocked(b, sessName, message, deferredNudgeSource, outcome.Queued, err)
+		}
 		outcome.Deferred = outcome.Queued
 		return err
 	})

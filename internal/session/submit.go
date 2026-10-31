@@ -294,7 +294,7 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 			}
 			return false, err
 		}
-		return false, m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
+		return m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	interruptStartedAt := time.Now()
 	if err := m.stopTurnLocked(ctx, b, sessName, mode); err != nil {
@@ -311,7 +311,7 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 		if stopErr := runtime.StopForCleanup(m.sp, sessName); stopErr != nil {
 			return false, fmt.Errorf("stopping session after idle timeout: %w", stopErr)
 		}
-		return false, m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
+		return m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	if err := m.waitForInterruptBoundaryLocked(ctx, b, sessName, interruptStartedAt); err != nil {
 		if mode == runtime.TurnInterruptProtocol {
@@ -320,7 +320,15 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 		if stopErr := runtime.StopForCleanup(m.sp, sessName); stopErr != nil {
 			return false, fmt.Errorf("stopping session after interrupt boundary timeout: %w", stopErr)
 		}
-		return false, m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
+		return m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
+	}
+	// The turn is interrupted now, so the message is never dropped: a
+	// pending interaction that opened as the turn ended (the up-front
+	// refusal saw none) gets none of the reset or clear keys, which would
+	// land in it, and the message is queued for after it is answered.
+	// The send below looks again for a prompt that opens after these keys.
+	if replacementSendsKeys(b, mode) && m.inputHeldByPendingInteractionLocked(sessName, "reset or clear keys, and queued its replacement message") {
+		return true, m.enqueueDeferredSubmitLocked(b, sessName, message, nudgequeue.SourceSubmit)
 	}
 	if err := m.resetInterruptedTurnLocked(ctx, b, sessName); err != nil {
 		return false, err
@@ -330,30 +338,35 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 			return false, err
 		}
 	}
-	return m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true, nudgequeue.SourceSubmit)
+	queued, err := m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true, nudgequeue.SourceSubmit)
+	return m.queueBehindPendingInteractionLocked(b, sessName, message, nudgequeue.SourceSubmit, queued, err)
 }
 
 // restartAndSendLocked replaces the runtime the interrupt just stopped. The
 // hold was decided before the stop, so the restart does not re-read it: the
 // dead runtime would make a heartbeat or unreadable hold refuse, losing the
 // session and the message. Only an operator's resume consumes a user hold
-// (Actor.consumesHold).
-func (m *Manager) restartAndSendLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) error {
+// (Actor.consumesHold). It reports whether the message was queued: the
+// replacement runtime's refusal to type into a prompt it came up showing
+// queues the message for after the prompt is answered, as the outgoing turn
+// is already gone.
+func (m *Manager) restartAndSendLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
 	if err := m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, true); err != nil {
-		return err
+		return false, err
 	}
 	if err := m.waitUntilRunningLocked(ctx, id, sessName, 2*time.Second); err != nil {
-		return err
+		return false, err
 	}
 	if waiter, ok := m.sp.(runtime.IdleWaitProvider); ok && waitsForIdleAfterHardRestart(b) {
 		if err := waiter.WaitForIdle(ctx, sessName, 15*time.Second); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
-			return fmt.Errorf("waiting for restarted session to become idle: %w", err)
+			return false, fmt.Errorf("waiting for restarted session to become idle: %w", err)
 		}
 	}
 	// This is a fresh replacement turn after a hard restart. The previous run's
 	// pending-interaction state is irrelevant, and probing tmux immediately after
 	// the restart is race-prone for Claude-backed sessions.
-	return m.nudgeSession(ctx, sessName, message, true)
+	err := m.nudgeSession(ctx, sessName, message, true)
+	return m.queueBehindPendingInteractionLocked(b, sessName, message, nudgequeue.SourceSubmit, false, err)
 }
 
 func (m *Manager) waitUntilRunningLocked(ctx context.Context, id, sessName string, timeout time.Duration) error {
@@ -596,6 +609,13 @@ func shouldClearInterruptedInputBeforeSubmit(b beads.Bead) bool {
 	default:
 		return false
 	}
+}
+
+// replacementSendsKeys reports whether preparing b's session for the
+// message that replaces its interrupted turn, sent as mode, types keys:
+// Gemini's turn reset, or the input clear after a keystroke interrupt.
+func replacementSendsKeys(b beads.Bead, mode runtime.TurnInterruptMode) bool {
+	return requiresInterruptedTurnReset(b) || shouldClearInterruptedInputBeforeSubmit(b) && mode == runtime.TurnInterruptKeystroke
 }
 
 func (m *Manager) resetInterruptedTurnLocked(ctx context.Context, b beads.Bead, sessName string) error {

@@ -13,6 +13,7 @@ const ( //nolint:revive // exported requirement IDs are documented by the catalo
 	RequirementTranscriptUsage                     RequirementCode = "WC-TX-USAGE-001"
 	RequirementInvocationUsageCost                 RequirementCode = "WC-USAGE-COST-001"
 	RequirementInvocationUsageRecording            RequirementCode = "WC-USAGE-RECORD-001"
+	RequirementDeliveryQueuesBehindPending         RequirementCode = "WC-DELIVERY-001"
 	RequirementContinuationContinuity              RequirementCode = "WC-CONT-001"
 	RequirementFreshSessionIsolation               RequirementCode = "WC-CONT-002"
 	RequirementStartupOutcomeBound                 RequirementCode = "WC-BRINGUP-001"
@@ -104,6 +105,19 @@ func TelemetryHandleCatalog() []Requirement {
 			Code:        RequirementInvocationUsageRecording,
 			Group:       "telemetry",
 			Description: "A prompt operation on a transcript-backed SessionHandle records gc.agent.tokens.*; a runtime-only RuntimeHandle is permanently excluded (ga-tkvb31).",
+		},
+	}
+}
+
+// DeliveryHandleCatalog returns worker-handle delivery requirements. Like
+// the telemetry handle catalog, these are handle-behavior rules enforced by
+// driving the exported worker API, not by the fixture-driven profile runner.
+func DeliveryHandleCatalog() []Requirement {
+	return []Requirement{
+		{
+			Code:        RequirementDeliveryQueuesBehindPending,
+			Group:       "delivery",
+			Description: "A nudge that may wait for a safe boundary, sent to a session waiting on a pending interaction, is queued for delivery after the interaction is answered: nothing is typed and nothing is dropped. An immediate nudge is refused with the pending-interaction error.",
 		},
 	}
 }
