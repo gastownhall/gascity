@@ -1361,6 +1361,90 @@ func TestRoutineControlPending_IsNotBudgetedOrEscalated(t *testing.T) {
 	}
 }
 
+// TestStopCanceledFinalizerStaysOpenForRetry pins the stop window: a drain or
+// stop signals the dispatcher's children first, so a bd read in flight exits
+// "context canceled" while the dispatcher is still alive to handle it. That
+// store never answered, so the finalizer must stay open for the next dispatcher
+// instead of being quarantined and settling its root as failed.
+func TestStopCanceledFinalizerStaysOpenForRetry(t *testing.T) {
+	cases := []struct {
+		name  string
+		cause func(finID, rootID string) error
+	}{
+		{
+			name: "bd read cut short",
+			cause: func(finID, _ string) error {
+				return fmt.Errorf("%s: resolving workflow outcome: bd list both tiers: bd query: bd query (wisps): exit status 1: search count wisps: context canceled", finID)
+			},
+		},
+		{
+			name: "source workflow lock wait canceled",
+			cause: func(_, rootID string) error {
+				return fmt.Errorf("%s: closing source bead chain: %w", rootID, context.Canceled)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			// A Tier B mis-tiering would quarantine on the first refusal.
+			t.Setenv("GC_CONTROL_SEMANTIC_RETRY_BUDGET", "0s")
+
+			store := beads.NewMemStore()
+			root, err := store.Create(beads.Bead{Title: "workflow", Type: "task"})
+			if err != nil {
+				t.Fatalf("create root: %v", err)
+			}
+			fin, err := store.Create(beads.Bead{
+				Title: "Finalize workflow",
+				Type:  "task",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:       beadmeta.KindWorkflowFinalize,
+					beadmeta.RootBeadIDMetadataKey: root.ID,
+				},
+			})
+			if err != nil {
+				t.Fatalf("create finalizer: %v", err)
+			}
+
+			var stderr bytes.Buffer
+			got := handleControlDispatchError(t.TempDir(), t.TempDir(), store, fin, fin.ID, tc.cause(fin.ID, root.ID), &stderr)
+			if got == nil {
+				t.Fatal("handleControlDispatchError = nil, want the cause returned for retry (nil means quarantined)")
+			}
+			if !dispatch.IsTransientControllerError(got) {
+				t.Fatalf("handleControlDispatchError = %v, want a transient controller error", got)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want silence for a stop-canceled read", stderr.String())
+			}
+
+			for _, id := range []string{fin.ID, root.ID} {
+				after, err := store.Get(id)
+				if err != nil {
+					t.Fatalf("get %s: %v", id, err)
+				}
+				if after.Status != "open" {
+					t.Fatalf("%s status = %q, want open", id, after.Status)
+				}
+				if slices.Contains(after.Labels, "gc:control-quarantined") {
+					t.Fatalf("%s labels = %#v, want no gc:control-quarantined", id, after.Labels)
+				}
+				for _, key := range []string{
+					beadmeta.OutcomeMetadataKey,
+					beadmeta.FailureClassMetadataKey,
+					beadmeta.ControllerRetryFirstSeenMetadataKey,
+					beadmeta.ControllerRetryCountMetadataKey,
+				} {
+					if v := after.Metadata[key]; v != "" {
+						t.Fatalf("%s %s = %q, want empty (no write on a stop-canceled read)", id, key, v)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestPendingControlRefusal_FirstRefusalIsNotQuiet keeps the quiet marking from
 // swallowing the first report of a new problem: the sweep that discovers a
 // pending refusal must still count as activity so the serve loop reacts to it.
