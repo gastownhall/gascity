@@ -2097,7 +2097,7 @@ fi
 if [ "$*" = "bd show $ORPHAN_SWEEP_ORPHAN_ASSIGNEE --json" ]; then
   exit 1
 fi
-if [ "$*" = "bd update $ORPHAN_SWEEP_ORPHAN_ID --append-notes orphan-sweep: reset from assignee $ORPHAN_SWEEP_ORPHAN_ASSIGNEE -- no live session matched" ]; then
+if [ "$*" = "bd update $ORPHAN_SWEEP_ORPHAN_ID --set-metadata gc.orphan_sweep_reason=orphan-sweep: reset from assignee $ORPHAN_SWEEP_ORPHAN_ASSIGNEE -- no live session matched" ]; then
   exit 0
 fi
 case "$*" in
@@ -2606,9 +2606,11 @@ exit 1
 // TestOrphanSweepRecordsCauseNoteOnEveryReset covers ga-7p4aab fix 4 (the
 // bead's ask 1): every reset must leave a durable, one-line trace on the work
 // bead naming orphan-sweep as the actor and the assignee it was taken from.
-// Before the fix, reset_orphan_if_current called only gc bd
+// Before that fix, reset_orphan_if_current called only gc bd
 // release-if-current, which writes no note, no mail, and no gc metadata --
-// bd's events.actor was the only trace anywhere.
+// bd's events.actor was the only trace anywhere. The trace is the
+// gc.orphan_sweep_reason metadata stamp, a write every store serves
+// (ga-xeb16e.91): a class-owned graph step refuses notes writes.
 func TestOrphanSweepRecordsCauseNoteOnEveryReset(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -2696,11 +2698,9 @@ exit 1
 	if !strings.Contains(log, "bd release-if-current ga-genuinely-dead gastown.longgone") {
 		t.Fatalf("dead-assigned bead was not reset:\n%s", log)
 	}
-	if !strings.Contains(log, "bd update ga-genuinely-dead --append-notes") {
-		t.Fatalf("reset did not append a cause note to the bead via bd update --append-notes:\n%s", log)
-	}
-	if !strings.Contains(log, "orphan-sweep") {
-		t.Fatalf("cause note did not name orphan-sweep as the actor:\n%s", log)
+	wantStamp := "bd update ga-genuinely-dead --set-metadata gc.orphan_sweep_reason=orphan-sweep: reset from assignee gastown.longgone -- no live session matched"
+	if got := countExactLine(nonEmptyLogLines(log), wantStamp); got != 1 {
+		t.Fatalf("cause stamp count = %d, want 1 (%q):\n%s", got, wantStamp, log)
 	}
 }
 
@@ -12228,7 +12228,11 @@ fi
 // foreign-identity gate (orphanSweepGateStubArm). ORPHAN_SWEEP_GATE_EXIT makes
 // it answer "unknown" with that exit code instead, and ORPHAN_SWEEP_GATE_ABSENT
 // models a binary without the verb (exit 1, no JSON). ORPHAN_SWEEP_MAIL_EXIT
-// is the exit code of `mail send`.
+// is the exit code of `mail send`. ORPHAN_SWEEP_CLASS_OWNED_IDS lists ids (one
+// per line) that a split city's class binding owns: `bd update` of one refuses
+// --notes and --append-notes with exit 1, as gc bd's by-id door does, because
+// notes have no representation in the class store contract; every other update
+// exits 0.
 const orphanSweepSharedRigFakeGC = `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 if [ "$1" = "agent" ] && [ -n "${ORPHAN_SWEEP_GATE_ABSENT:-}" ]; then
@@ -12291,6 +12295,16 @@ EOF
       exit 0
     fi
     if [ "$2" = "update" ]; then
+      if [ -n "${ORPHAN_SWEEP_CLASS_OWNED_IDS:-}" ] && echo "$ORPHAN_SWEEP_CLASS_OWNED_IDS" | grep -Fxq -- "$3"; then
+        for arg; do
+          case "$arg" in
+            --notes | --notes=* | --append-notes | --append-notes=*)
+              echo "gc bd: $3 is owned by binding infra, and gc bd update is not served in process (${arg%%=*} has no representation in the class store contract); refusing rather than running it against the work store, which does not hold the authoritative copy" >&2
+              exit 1
+              ;;
+          esac
+        done
+      fi
       exit 0
     fi
     ;;
@@ -12695,6 +12709,35 @@ func TestOrphanSweepDeclaresAFederatedReadItCouldNotComplete(t *testing.T) {
 				t.Fatalf("outcome scopes = %+v, want one naming the failed federated read", outcome.Scopes)
 			}
 		})
+	}
+}
+
+// TestOrphanSweepRecordsTheResetCauseOnAClassOwnedStep (ga-xeb16e.91 triage
+// repro): on a split city a released claim can be a graph step the class
+// binding owns. gc bd serves an update of it in process and refuses --notes and
+// --append-notes whole, because notes have no representation in the class
+// store contract. The reset cause must still be recorded, with a write every
+// store serves.
+func TestOrphanSweepRecordsTheResetCauseOnAClassOwnedStep(t *testing.T) {
+	run := runOrphanSweepGateFixture(t, nil, nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d3", Status: "closed", IssueType: "session"}},
+		nil,
+		map[string]string{
+			"ORPHAN_SWEEP_FEDERATED_BEADS_JSON": orphanSweepGateJSON(t, []orphanSweepGateRow{inProgress("gcg-1027", "gc-d34d3")}),
+			"ORPHAN_SWEEP_CLASS_OWNED_IDS":      "gcg-1027",
+		})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if !run.released("gcg-1027") {
+		t.Fatalf("dead local claim on a graph step was not released\n%s", run.context())
+	}
+	if strings.Contains(run.out, "failed to record") {
+		t.Fatalf("the reset cause was not recorded on the class-owned step:\n%s", run.context())
+	}
+	want := "bd update gcg-1027 --set-metadata gc.orphan_sweep_reason=orphan-sweep: reset from assignee gc-d34d3 -- no live session matched"
+	if got := countExactLine(nonEmptyLogLines(run.log), want); got != 1 {
+		t.Fatalf("cause stamp count = %d, want 1 (%q)\n%s", got, want, run.context())
 	}
 }
 
