@@ -85,3 +85,54 @@ func TestDoSlingCitySuspendedWarnsEvenOnFailure(t *testing.T) {
 		t.Error("expected CitySuspended=true even when routing fails")
 	}
 }
+
+func TestDoSlingWarnsCitySuspendedOnStart(t *testing.T) {
+	cases := []struct {
+		name      string
+		workspace config.Workspace
+	}{
+		{name: "suspended_on_start", workspace: config.Workspace{Name: "test-city", SuspendedOnStart: true}},
+		{name: "deprecated_suspended", workspace: config.Workspace{Name: "test-city", Suspended: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := newFakeRunner()
+			cfg := &config.City{Workspace: tc.workspace}
+			a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+
+			deps := testDeps(cfg, runtime.NewFake(), runner.run)
+			// No runtime city entry: the authored default must apply on its own.
+			deps.CityPath = suspensionTestCityDir(t)
+			deps.Store = seededStore("my-1")
+
+			result, err := DoSling(testOpts(a, "my-1"), deps, nil)
+			if err != nil {
+				t.Fatalf("DoSling error: %v", err)
+			}
+			if !result.CitySuspended {
+				t.Error("expected CitySuspended=true from the authored workspace default")
+			}
+		})
+	}
+}
+
+func TestDoSlingCorruptSuspensionStateStillHonorsAuthoredCitySuspend(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city", SuspendedOnStart: true}}
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = suspensionTestCityDir(t)
+	if err := os.WriteFile(filepath.Join(deps.CityPath, ".gc", "runtime", "suspension-state.json"), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deps.Store = seededStore("my-1")
+
+	result, err := DoSling(testOpts(a, "my-1"), deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v (a corrupt state file must not fail the route)", err)
+	}
+	if !result.CitySuspended {
+		t.Error("expected CitySuspended=true: a corrupt state file degrades to the zero state so the authored default still applies")
+	}
+}

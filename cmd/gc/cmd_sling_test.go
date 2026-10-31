@@ -980,6 +980,27 @@ func TestSlingJSONWarningsCitySuspended(t *testing.T) {
 	}
 }
 
+func TestDoSlingWarnsCitySuspendedOnStart(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city", SuspendedOnStart: true}}
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	// No runtime city entry: the authored default must apply on its own.
+	deps.CityPath = slingSuspensionCityDir(t)
+	opts := testOpts(a, "my-1")
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0 (still routes)", code)
+	}
+	if !strings.Contains(stderr.String(), "warning: city is suspended") {
+		t.Errorf("stderr = %q, want city suspended warning", stderr.String())
+	}
+	assertStoreRoutedTo(t, deps.Store, "my-1", "worker")
+}
+
 func TestDoSlingMultiSessionMaxZeroWarns(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()

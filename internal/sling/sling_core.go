@@ -264,17 +264,24 @@ func rigSuspended(cfg *config.City, rigName string) bool {
 }
 
 // targetCitySuspended reports whether the city the sling runs in is
-// explicitly suspended in the runtime state file — the write `gc suspend`
-// performs. The pool reconciler skips a suspended city entirely, so a routed
-// bead stalls with no worker until `gc resume`. Empty CityPath skips the
-// disk read (Load would otherwise resolve a cwd-relative .gc/runtime file);
-// a read error degrades to not suspended.
+// effectively suspended: the runtime state file (what `gc suspend` /
+// `gc resume` write) wins, otherwise the workspace's authored
+// suspended_on_start default applies (aliasing the deprecated
+// `[workspace] suspended` field). The pool reconciler skips a suspended
+// city entirely, so a routed bead stalls with no worker until `gc resume`.
+// Empty CityPath skips the disk read (Load would otherwise resolve a
+// cwd-relative .gc/runtime file). A read or parse error degrades to the
+// zero State so the authored default still applies; sling never fails the
+// route because of suspension.
 func targetCitySuspended(fs fsys.FS, deps SlingDeps) bool {
-	if deps.CityPath == "" {
-		return false
+	var st suspensionstate.State
+	if deps.CityPath != "" {
+		st, _ = suspensionstate.Load(fs, deps.CityPath)
 	}
-	st, _ := suspensionstate.Load(fs, deps.CityPath)
-	return suspensionstate.IsCitySuspended(st)
+	if deps.Cfg == nil {
+		return suspensionstate.EffectiveCitySuspended(st, false)
+	}
+	return suspensionstate.EffectiveCitySuspended(st, deps.Cfg.Workspace.EffectiveSuspendedOnStart())
 }
 
 func shouldValidateExistingBead(opts SlingOpts) bool {
