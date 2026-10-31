@@ -2758,6 +2758,160 @@ func TestCmdWorkflowReopenSourcePreRoutesToRunTarget(t *testing.T) {
 	}
 }
 
+// TestCmdWorkflowReopenSourceDropsGraphExecutionRoute: a graph.v2 wrap leaves
+// the source carrying gc.execution_routed_to, which the detached-orphan sweep
+// reads as a workflow's bead and never re-routes. reopen-source hands the bead
+// back to the pool, so it drops that execution route in the write that routes
+// the bead: a route the bead loses once it is back in the pool is recovered as
+// usual. A route the caller wrote wins over the execution route.
+func TestCmdWorkflowReopenSourceDropsGraphExecutionRoute(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	prevCityFlag := cityFlag
+	cityFlag = ""
+	t.Cleanup(func() { cityFlag = prevCityFlag })
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	source, err := store.Create(beads.Bead{Title: "Source", Type: "task", Status: "closed"})
+	if err != nil {
+		t.Fatalf("Create(source): %v", err)
+	}
+	if err := store.SetMetadata(source.ID, "workflow_id", "wf-gone"); err != nil {
+		t.Fatalf("SetMetadata(workflow_id): %v", err)
+	}
+	if err := store.SetMetadata(source.ID, "gc.execution_routed_to", "myrig/voxist.reviewer"); err != nil {
+		t.Fatalf("SetMetadata(gc.execution_routed_to): %v", err)
+	}
+	// The caller writes the route before it reopens the bead (ga-20zd).
+	if err := store.SetMetadata(source.ID, "gc.routed_to", "myrig/voxist.executor"); err != nil {
+		t.Fatalf("SetMetadata(gc.routed_to): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowReopenSource(source.ID, sourceWorkflowStoreSelector{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWorkflowReopenSource returned %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	reloaded, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(reload): %v", err)
+	}
+	updated, err := reloaded.Get(source.ID)
+	if err != nil {
+		t.Fatalf("Get(source): %v", err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["gc.execution_routed_to"]); got != "" {
+		t.Fatalf("gc.execution_routed_to = %q, want cleared (the bead is back in the pool)", got)
+	}
+	if got := strings.TrimSpace(updated.Metadata["gc.routed_to"]); got != "myrig/voxist.executor" {
+		t.Fatalf("gc.routed_to = %q, want the caller's myrig/voxist.executor preserved over the execution route", got)
+	}
+	if updated.Status != "open" {
+		t.Fatalf("status = %q, want open", updated.Status)
+	}
+}
+
+// TestCmdWorkflowReopenSourcePreRoutesGraphWrappedSource: a graph.v2 wrap
+// moves the source's pool route to gc.execution_routed_to and clears
+// gc.routed_to and gc.run_target, the keys reopen-source pre-routes from
+// (FR-C0.1). Reopened after its workflow is cleaned up, with no route written
+// in between, the source must still go back to the pool it was routed to:
+// neither route recovery nor the detached-orphan sweep would route it again.
+func TestCmdWorkflowReopenSourcePreRoutesGraphWrappedSource(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	prevCityFlag := cityFlag
+	cityFlag = ""
+	t.Cleanup(func() { cityFlag = prevCityFlag })
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	source, err := store.Create(beads.Bead{Title: "Work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create(source): %v", err)
+	}
+
+	deps, slingStdout, slingStderr := testDeps(graphWorkSlingTestCity(t), runtime.NewFake(), newFakeRunner().run)
+	deps.Store = store
+	// The workflow is graph class: it goes to the graph store gc sling
+	// resolves for this city, the source stays in the work store.
+	deps.GraphStore = resolveGraphStore(cliStorageRoutes(cityDir), store, deps.Cfg, cityDir, nil)
+	maxPolecats := 5
+	a := config.Agent{Name: "polecat", MaxActiveSessions: &maxPolecats}
+
+	// Route the source to the pool, then wrap it in a graph.v2 workflow.
+	if code := doSling(testOpts(a, source.ID), deps, nil, slingStdout, slingStderr); code != 0 {
+		t.Fatalf("plain doSling returned %d, want 0; stderr: %s", code, slingStderr.String())
+	}
+	wrap := testOpts(a, source.ID)
+	wrap.OnFormula = "graph-work"
+	wrap.ScopeKind = "city"
+	wrap.ScopeRef = "test-city"
+	if code := doSling(wrap, deps, nil, slingStdout, slingStderr); code != 0 {
+		t.Fatalf("--on doSling returned %d, want 0; stderr: %s", code, slingStderr.String())
+	}
+	wrapped, err := store.Get(source.ID)
+	if err != nil {
+		t.Fatalf("Get(source) after the wrap: %v", err)
+	}
+	if got, exec := wrapped.Metadata["gc.routed_to"], wrapped.Metadata["gc.execution_routed_to"]; got != "" || exec != "polecat" {
+		t.Fatalf("precondition: after the wrap gc.routed_to = %q, gc.execution_routed_to = %q; want \"\" and polecat", got, exec)
+	}
+
+	// Clean up the workflow.
+	roots, err := deps.GraphStore.List(beads.ListQuery{Metadata: map[string]string{"gc.kind": "workflow"}, AllowScan: true})
+	if err != nil {
+		t.Fatalf("List(workflow roots): %v", err)
+	}
+	if len(roots) != 1 {
+		t.Fatalf("workflow roots = %d, want 1: %#v", len(roots), roots)
+	}
+	if _, err := sourceworkflow.CloseWorkflowSubtree(deps.GraphStore, roots[0].ID); err != nil {
+		t.Fatalf("CloseWorkflowSubtree(%s): %v", roots[0].ID, err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowReopenSource(source.ID, sourceWorkflowStoreSelector{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWorkflowReopenSource returned %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	reloaded, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(reload): %v", err)
+	}
+	updated, err := reloaded.Get(source.ID)
+	if err != nil {
+		t.Fatalf("Get(source): %v", err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["gc.routed_to"]); got != "polecat" {
+		t.Fatalf("gc.routed_to = %q, want polecat (pre-routed from the wrap's execution route)", got)
+	}
+	if got := strings.TrimSpace(updated.Metadata["gc.execution_routed_to"]); got != "" {
+		t.Fatalf("gc.execution_routed_to = %q, want cleared (the bead is back in the pool)", got)
+	}
+	if updated.Status != "open" {
+		t.Fatalf("status = %q, want open", updated.Status)
+	}
+	if updated.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty", updated.Assignee)
+	}
+}
+
 func TestCmdWorkflowReopenSourceConflictsWhenLiveRootExists(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {

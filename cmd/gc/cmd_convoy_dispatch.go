@@ -2588,11 +2588,22 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		// overwrites the route, and one to the same target still re-runs
 		// finalize via resolveConvoyRecovery, which sees the just-deleted
 		// workflow rather than short-circuiting as idempotent.
-		nextRoute := strings.TrimSpace(currentSource.Metadata[beadmeta.RunTargetMetadataKey])
-		if nextRoute == "" {
-			nextRoute = strings.TrimSpace(currentSource.Metadata[beadmeta.RoutedToMetadataKey])
-		}
-		if err := write.owning.store.SetMetadata(currentSource.ID, beadmeta.RoutedToMetadataKey, nextRoute); err != nil {
+		//
+		// A bead a graph workflow took over carries neither key: the wrap
+		// moved its route to gc.execution_routed_to and cleared both
+		// (restampWorkBeadRouting). That route is the last fallback. Without
+		// it such a bead would reopen unrouted and nothing would route it
+		// again: route recovery has no gc.run_target to read, and the
+		// detached-orphan sweep needs a session back-reference.
+		nextRoute := reopenSourceRoute(currentSource)
+		// The bead is back in the pool, so the execution route a graph
+		// workflow stamped on it goes in the same write. The detached-orphan
+		// sweep reads that route as a workflow's takeover and would never
+		// recover a route the bead loses from here on.
+		if err := write.owning.store.SetMetadataBatch(currentSource.ID, map[string]string{
+			beadmeta.RoutedToMetadataKey:          nextRoute,
+			beadmeta.ExecutionRoutedToMetadataKey: "",
+		}); err != nil {
 			return err
 		}
 		if err := clearSessionAffinityMetadataOnBead(write.owning.store, currentSource.ID); err != nil {
@@ -2619,6 +2630,18 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		return 1
 	}
 	return resultCode
+}
+
+// reopenSourceRoute is the pool route reopen-source pre-routes b to: its
+// gc.run_target, else the gc.routed_to it already carries, else the
+// gc.execution_routed_to a graph workflow's wrap moved its route to.
+func reopenSourceRoute(b beads.Bead) string {
+	for _, key := range []string{beadmeta.RunTargetMetadataKey, beadmeta.RoutedToMetadataKey, beadmeta.ExecutionRoutedToMetadataKey} {
+		if route := strings.TrimSpace(b.Metadata[key]); route != "" {
+			return route
+		}
+	}
+	return ""
 }
 
 // reopenTrackingConvoysForReopenedSource is the mirror image of

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -836,6 +837,7 @@ func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.Store, bead
 		}
 	}
 	telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, nil)
+	clearGraphTakeoverRoute(deps, bead, &result)
 
 	// Merge strategy metadata. With no --merge flag this falls back to the
 	// rig's configured default, so a bare sling on a rig that delivers through
@@ -990,7 +992,13 @@ func validateBuiltInRouteStoreReachable(deps SlingDeps, beadID string, a config.
 // pool's tier-3 claim query and the drain engine's own dispatch are two
 // uncoordinated authorities -- neither checks the bead's Assignee/the other's
 // lock field, so stamping gc.routed_to there is a structural double-dispatch
-// hazard, not merely an observability fix. The existing ExecutionRoutedToKey
+// hazard, not merely an observability fix. The same write clears any
+// gc.routed_to the bead already carried (for example from a plain sling before
+// the wrap) and its gc.run_target, the carried route the controller's route
+// recovery re-stamps gc.routed_to from, so the workflow's executable step is
+// the only demand unit. The detached-orphan sweep reads gc.execution_routed_to
+// as this takeover and leaves the bead alone too, whatever session
+// back-reference an earlier claim left on it. The existing ExecutionRoutedToKey
 // (gc.execution_routed_to) is already read by the graphroute resolver, convoy
 // dispatch, dashboard orders feed, and dispatch engine. Apply
 // NormalizePoolRouteTarget to the computed target so slot-suffixed pool
@@ -1008,9 +1016,36 @@ func restampWorkBeadRouting(deps SlingDeps, beadID string, a config.Agent, resul
 	if target == "" {
 		return
 	}
-	if err := deps.Store.SetMetadata(beadID, beadmeta.ExecutionRoutedToMetadataKey, target); err != nil {
+	if err := deps.Store.SetMetadataBatch(beadID, map[string]string{
+		beadmeta.ExecutionRoutedToMetadataKey: target,
+		beadmeta.RoutedToMetadataKey:          "",
+		beadmeta.RunTargetMetadataKey:         "",
+	}); err != nil {
 		result.MetadataErrors = append(result.MetadataErrors,
-			fmt.Sprintf("setting %s on %s: %v", beadmeta.ExecutionRoutedToMetadataKey, beadID, err))
+			fmt.Sprintf("restamping routing on %s (%s=%s, clearing %s and %s): %v",
+				beadID, beadmeta.ExecutionRoutedToMetadataKey, target, beadmeta.RoutedToMetadataKey, beadmeta.RunTargetMetadataKey, err))
+	}
+}
+
+// clearGraphTakeoverRoute drops the gc.execution_routed_to that
+// restampWorkBeadRouting left on b once a plain sling has routed b again: the
+// sling handed the bead back to the pool, so no graph workflow holds it. The
+// detached-orphan sweep reads that key on a bead outside any workflow as such a
+// takeover and never re-routes the bead, so a bead that kept it would be
+// stranded the next time it lost its route. A workflow member keeps the key:
+// its execution route is its workflow's own routing. The write goes to
+// deps.Store, the work store the restamp stamped the key in; a bead held
+// elsewhere (a --formula wisp root) is freshly minted and carries none.
+// Advisory like the merge-strategy stamp: the bead is already routed.
+func clearGraphTakeoverRoute(deps SlingDeps, b beads.Bead, result *SlingResult) {
+	if deps.Store == nil || b.ID == "" ||
+		strings.TrimSpace(b.Metadata[beadmeta.ExecutionRoutedToMetadataKey]) == "" ||
+		strings.TrimSpace(b.Metadata[beadmeta.RootBeadIDMetadataKey]) != "" {
+		return
+	}
+	if err := deps.Store.SetMetadata(b.ID, beadmeta.ExecutionRoutedToMetadataKey, ""); err != nil {
+		result.MetadataErrors = append(result.MetadataErrors,
+			fmt.Sprintf("clearing %s on %s: %v", beadmeta.ExecutionRoutedToMetadataKey, b.ID, err))
 	}
 }
 
@@ -1487,7 +1522,18 @@ func restoreBlockingWorkflowState(states []workflowRestoreState) error {
 	return restoreErr
 }
 
-func rollbackSourceWorkflowReplacement(launch pendingSourceWorkflowLaunch, store beads.Store, sourceBeadID, previousWorkflowID string, states []workflowRestoreState) error {
+// sourceRoutingSnapshot reads the routing keys restampWorkBeadRouting rewrites
+// on the source bead a graph workflow launches from, so a rolled-back launch
+// can put them back. An absent key reads as "", which restores it as cleared.
+func sourceRoutingSnapshot(b beads.Bead) map[string]string {
+	snapshot := make(map[string]string, 3)
+	for _, key := range []string{beadmeta.RoutedToMetadataKey, beadmeta.RunTargetMetadataKey, beadmeta.ExecutionRoutedToMetadataKey} {
+		snapshot[key] = b.Metadata[key]
+	}
+	return snapshot
+}
+
+func rollbackSourceWorkflowReplacement(launch pendingSourceWorkflowLaunch, store beads.Store, sourceBeadID, previousWorkflowID string, previousRouting map[string]string, states []workflowRestoreState) error {
 	var rollbackErr error
 	if launch.rollback != nil {
 		if err := launch.rollback(); err != nil {
@@ -1495,8 +1541,14 @@ func rollbackSourceWorkflowReplacement(launch pendingSourceWorkflowLaunch, store
 		}
 	}
 	if sourceBeadID != "" {
-		if err := store.SetMetadata(sourceBeadID, "workflow_id", previousWorkflowID); err != nil && !errors.Is(err, beads.ErrNotFound) {
-			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore source workflow_id on %s: %w", sourceBeadID, err))
+		// A launch repoints workflow_id and restamps the routing
+		// (restampWorkBeadRouting), so the rollback puts both back: a source
+		// left with the restamped routing would have no pool route and no
+		// live workflow to run it.
+		restore := map[string]string{"workflow_id": previousWorkflowID}
+		maps.Copy(restore, previousRouting)
+		if err := store.SetMetadataBatch(sourceBeadID, restore); err != nil && !errors.Is(err, beads.ErrNotFound) {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore source workflow_id and routing on %s: %w", sourceBeadID, err))
 		}
 	}
 	if err := restoreBlockingWorkflowState(states); err != nil {
@@ -1517,12 +1569,14 @@ func withSourceWorkflowLaunchLock(ctx context.Context, deps SlingDeps, sourceBea
 	var result SlingResult
 	err := sourceworkflow.WithLock(ctx, deps.CityPath, sourceWorkflowLockScope(deps), sourceBeadID, func() error {
 		previousWorkflowID := ""
+		var previousRouting map[string]string
 		sourceBead, err := deps.Store.Get(sourceBeadID)
 		if err != nil && !errors.Is(err, beads.ErrNotFound) {
 			return fmt.Errorf("get source bead %s: %w", sourceBeadID, err)
 		}
 		if err == nil {
 			previousWorkflowID = strings.TrimSpace(sourceBead.Metadata["workflow_id"])
+			previousRouting = sourceRoutingSnapshot(sourceBead)
 		}
 		roots, err := listSourceWorkflowRoots(deps, sourceBeadID)
 		if err != nil {
@@ -1558,7 +1612,7 @@ func withSourceWorkflowLaunchLock(ctx context.Context, deps SlingDeps, sourceBea
 		}
 		restoreState, err := snapshotBlockingWorkflowState(blockingRoots, launch)
 		if err != nil {
-			if rollbackErr := rollbackSourceWorkflowReplacement(launch, deps.Store, sourceBeadID, previousWorkflowID, nil); rollbackErr != nil {
+			if rollbackErr := rollbackSourceWorkflowReplacement(launch, deps.Store, sourceBeadID, previousWorkflowID, previousRouting, nil); rollbackErr != nil {
 				return errors.Join(err, rollbackErr)
 			}
 			return err
@@ -1569,7 +1623,7 @@ func withSourceWorkflowLaunchLock(ctx context.Context, deps SlingDeps, sourceBea
 					continue
 				}
 				if _, err := sourceworkflow.CloseWorkflowSubtree(root.store, root.root.ID); err != nil {
-					if rollbackErr := rollbackSourceWorkflowReplacement(launch, deps.Store, sourceBeadID, previousWorkflowID, restoreState); rollbackErr != nil {
+					if rollbackErr := rollbackSourceWorkflowReplacement(launch, deps.Store, sourceBeadID, previousWorkflowID, previousRouting, restoreState); rollbackErr != nil {
 						return errors.Join(fmt.Errorf("close superseded workflow %s for %s: %w", root.root.ID, sourceBeadID, err), rollbackErr)
 					}
 					return fmt.Errorf("close superseded workflow %s for %s: %w", root.root.ID, sourceBeadID, err)
@@ -1578,7 +1632,7 @@ func withSourceWorkflowLaunchLock(ctx context.Context, deps SlingDeps, sourceBea
 		}
 		result, err = launch.finalize()
 		if err != nil {
-			if rollbackErr := rollbackSourceWorkflowReplacement(launch, deps.Store, sourceBeadID, previousWorkflowID, restoreState); rollbackErr != nil {
+			if rollbackErr := rollbackSourceWorkflowReplacement(launch, deps.Store, sourceBeadID, previousWorkflowID, previousRouting, restoreState); rollbackErr != nil {
 				return errors.Join(err, rollbackErr)
 			}
 			return err
@@ -1601,13 +1655,14 @@ func withSourceWorkflowLaunchLock(ctx context.Context, deps SlingDeps, sourceBea
 			// warning — callers that rely on exactly-one-live-root will
 			// otherwise proceed with a phantom success. Run the same
 			// rollback the finalize-failure path uses so superseded
-			// roots are restored and the source bead's workflow_id is
-			// reverted to previousWorkflowID; otherwise we leave the
-			// system in a worse state than the one the invariant check
-			// was supposed to catch.
+			// roots are restored and the source bead's workflow_id and
+			// routing are reverted to previousWorkflowID and
+			// previousRouting; otherwise we leave the system in a worse
+			// state than the one the invariant check was supposed to
+			// catch.
 			invariantErr := fmt.Errorf("workflow %s not visible for source bead %s after launch", result.WorkflowID, sourceBeadID)
 			result = SlingResult{}
-			if rollbackErr := rollbackSourceWorkflowReplacement(launch, deps.Store, sourceBeadID, previousWorkflowID, restoreState); rollbackErr != nil {
+			if rollbackErr := rollbackSourceWorkflowReplacement(launch, deps.Store, sourceBeadID, previousWorkflowID, previousRouting, restoreState); rollbackErr != nil {
 				return errors.Join(invariantErr, rollbackErr)
 			}
 			return invariantErr
@@ -2177,6 +2232,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		}
 
 		telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, nil)
+		clearGraphTakeoverRoute(deps, child, &batchResult)
 		childResult.Routed = true
 		batchResult.Children = append(batchResult.Children, childResult)
 		routed++
