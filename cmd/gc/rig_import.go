@@ -406,8 +406,8 @@ func importRig(env rigImportEnv, rig config.Rig) (result rigImportResult) {
 		}
 		closeBinding()
 		if plan.Infra == 0 {
-			if fileExists(loc.InFlightPath()) {
-				return refuse(fmt.Errorf("rig %s holds no infrastructure row but an interrupted import's record %s is present: the binding may hold the only copy of rows it moved. Restore the rig store, or its records, then re-run", rig.Name, loc.InFlightPath()))
+			if err := rigCleanRecordRefusal(env, loc, rig); err != nil {
+				return refuse(err)
 			}
 			if err := loc.writeRecord(loc.CleanPath(), fmt.Sprintf("rig %s holds no infrastructure bead (census %s)", rig.Name, time.Now().UTC().Format(time.RFC3339)), storeRoot); err != nil {
 				return fail(fmt.Errorf("recording rig %s clean: %w", rig.Name, err))
@@ -763,6 +763,22 @@ func normalizeDoltHost(host string) (string, error) {
 // rigImportLookupHost resolves a host name; a test seam.
 var rigImportLookupHost = net.LookupHost
 
+// readOtherCityConfig reads another registered city's config for the
+// shared-store check, which wants its rigs. It skips the full loader's
+// application of that city's feature flags (formula v2, graph apply), which
+// are process-wide: the controller's boot census runs the check, and another
+// city must not switch this city's flags.
+func readOtherCityConfig(cityPath string) (*config.City, error) {
+	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), skipRevisionSnapshot)
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePackRuntimeRegistrations(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
 // rigImportSharedStoreRefusal refuses a rig whose store another registered
 // city also uses: the same scope root, or the same Dolt database. A shared
 // or company store holds rows another city owns, and is refused until S5's
@@ -781,7 +797,7 @@ func rigImportSharedStoreRefusal(env rigImportEnv, rig config.Rig) error {
 	// refused, rather than skipped.
 	noDatabase := self.Database == "" && !self.Unresolved
 	for _, otherPath := range others {
-		cfg, err := loadCityConfigWithoutBuiltinPackRefresh(otherPath, io.Discard)
+		cfg, err := readOtherCityConfig(otherPath)
 		if err == nil && cfg == nil {
 			err = errors.New("it loaded no configuration")
 		}
@@ -821,6 +837,28 @@ func rigImportSharedStoreRefusal(env rigImportEnv, rig config.Rig) error {
 		}
 	}
 	return nil
+}
+
+// rigCleanRecordRefusal says why rig, whose store holds no infrastructure
+// row, must not be recorded clean, or returns nil. Every writer of the clean
+// record asks it right before writing: importRig, and recordCensusClean for
+// gc rig add and the controller's boot census. An interrupted import's
+// in-flight record refuses: the binding may hold the only copy of rows it
+// moved. So does a store another registered city also uses, or one it cannot
+// rule out as one (rigImportSharedStoreRefusal): the record retires this
+// city's relic legs for the store, and the other city can still write graph
+// rows there. importRig also asks the shared-store question before it opens
+// the rig at all; asking it here as well keeps the record's gate whole for
+// every writer.
+func rigCleanRecordRefusal(env rigImportEnv, loc rigImportLocation, rig config.Rig) error {
+	inFlight, err := infraPathExists(loc.InFlightPath())
+	if err != nil {
+		return fmt.Errorf("checking rig %s's record %s: %w", rig.Name, loc.InFlightPath(), err)
+	}
+	if inFlight {
+		return fmt.Errorf("rig %s holds no infrastructure row but an interrupted import's record %s is present: the binding may hold the only copy of rows it moved. Restore the rig store, or its records, then re-run", rig.Name, loc.InFlightPath())
+	}
+	return rigImportSharedStoreRefusal(env, rig)
 }
 
 // rigImportPrepare removes the binding rows an interrupted earlier attempt

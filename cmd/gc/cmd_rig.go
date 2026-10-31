@@ -346,10 +346,6 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	if name == "" {
 		name = filepath.Base(rigPath)
 	}
-	// Captured before Provision writes anything: a rig already in the
-	// config is a re-add, and a re-add never gets a clean record.
-	existingRigs := configuredRigIdentities(cityPath, cfg)
-
 	deps := rig.Deps{
 		FS:           fs,
 		CityPath:     cityPath,
@@ -446,53 +442,26 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	} else if !provisioned.Deferred {
 		// An adopted store may predate migration 0059's fix (beads#7037).
 		rigAddRepairBlockedFlags(cityPath, reloaded, r.Name, stderr)
-		recordNewRigClean(cityPath, reloaded, r, adopt || existingRigs.holds(cityPath, r), stderr)
+		recordNewRigClean(cityPath, reloaded, r, stderr)
 	} else {
-		recordNewRigClean(cityPath, reloaded, r, adopt || existingRigs.holds(cityPath, r), stderr)
+		recordNewRigClean(cityPath, reloaded, r, stderr)
 	}
 	return r, 0
 }
 
-// configuredRigs is the rigs a city config declared before an add: names
-// and resolved scope roots.
-type configuredRigs struct {
-	names map[string]bool
-	roots map[string]bool
-}
-
-func configuredRigIdentities(cityPath string, cfg *config.City) configuredRigs {
-	out := configuredRigs{names: map[string]bool{}, roots: map[string]bool{}}
-	if cfg == nil {
-		return out
-	}
-	for _, r := range cfg.Rigs {
-		out.names[r.Name] = true
-		if strings.TrimSpace(r.Path) != "" {
-			out.roots[filepath.Clean(resolveStoreScopeRoot(cityPath, r.Path))] = true
-		}
-	}
-	return out
-}
-
-// holds reports whether r was already a rig of the city before the add.
-func (c configuredRigs) holds(cityPath string, r config.Rig) bool {
-	if c.names[r.Name] {
-		return true
-	}
-	return strings.TrimSpace(r.Path) != "" && c.roots[filepath.Clean(resolveStoreScopeRoot(cityPath, r.Path))]
-}
-
 // recordNewRigClean writes the S4 clean record for a rig `gc rig add` just
-// created on a split city: its store is new and holds no graph row, so its
-// readers need no relic leg (rigGraphRelicFree). notNew is true for an
-// adopted store or a re-add of a rig the config already declared: either may
-// hold pre-split history, so it stays awaiting import until `gc storage
-// migrate --from-rigs` censuses it. Even for a new rig the store must list
-// empty (a pre-existing .gc store at the path may hold rows), and any error
-// reading it writes nothing. A single-store city, or one whose binding has
-// not converged, writes nothing.
-func recordNewRigClean(cityPath string, cfg *config.City, r config.Rig, notNew bool, stderr io.Writer) {
-	if notNew || cfg == nil || !rigNameIsFileSafe(r.Name) || strings.TrimSpace(r.Path) == "" {
+// added, adopted or re-added on a split city whose binding has converged,
+// when a census of its store finds no infrastructure row (recordCensusClean):
+// the record `gc storage migrate --from-rigs` writes for such a rig, so its
+// readers need no relic leg (rigGraphRelicFree) and it never holds the deploy
+// gate. A store that holds an infrastructure row (pre-split history, an
+// adopted store's rows) stays awaiting import. So, with a warning, does one
+// the census cannot read, one another registered city also uses or that
+// cannot be ruled out as one, and one whose record cannot be written. A
+// single-store city, or one whose binding has not converged, writes nothing:
+// the controller's boot census records a rig added before then.
+func recordNewRigClean(cityPath string, cfg *config.City, r config.Rig, stderr io.Writer) {
+	if cfg == nil || !rigNameIsFileSafe(r.Name) || strings.TrimSpace(r.Path) == "" {
 		return
 	}
 	target, ok, err := resolveInfraBindingTarget(cityPath, cfg)
@@ -504,15 +473,21 @@ func recordNewRigClean(cityPath string, cfg *config.City, r config.Rig, notNew b
 	if state, err := readInfraConvergenceState(target); err != nil || state != infraConvergenceMarked {
 		return
 	}
-	loc := newRigImportLocation(target, cityPath, r.Name)
-	if fileExists(loc.MarkerPath()) || fileExists(loc.CleanPath()) {
-		return
+	// A scope with no store on disk holds no row; opening it would only
+	// create (or start a server for) the store being asked about.
+	row := rigCensusRow{Rig: r.Name, State: rigCensusAwaiting}
+	if !rigScopeHasNoStore(cityPath, r) {
+		row = censusRig(cityPath, loadedCityName(cfg, cityPath), cfg, target, r, false)
 	}
-	if !rigStoreListsEmpty(cityPath, r) {
-		return
-	}
-	if err := loc.writeRecord(loc.CleanPath(), fmt.Sprintf("rig %s created empty by gc rig add %s", r.Name, time.Now().UTC().Format(time.RFC3339)), rigStoreRoot(cityPath, r)); err != nil {
+	if _, err := recordCensusClean(cityPath, target, r, &row, "gc rig add"); err != nil {
 		fmt.Fprintf(stderr, "gc rig add: warning: recording rig %s clean for the split store: %v (run `%s` to record it)\n", r.Name, err, rigImportInstruction(r.Name)) //nolint:errcheck // best-effort stderr
+		return
+	}
+	switch {
+	case row.Err != nil:
+		fmt.Fprintf(stderr, "gc rig add: warning: rig %s stays awaiting import: its store could not be censused (%v); the controller's next boot census tries again\n", r.Name, row.Err) //nolint:errcheck // best-effort stderr
+	case row.State == rigCensusAwaiting && row.Why != "":
+		fmt.Fprintf(stderr, "gc rig add: warning: rig %s stays awaiting import, not recorded clean: %s\n", r.Name, row.Why) //nolint:errcheck // best-effort stderr
 	}
 }
 
