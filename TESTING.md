@@ -564,7 +564,10 @@ endpoints, credentials, timeouts, download and parallelism policy.
   unaffected.
 
 **Pre-push.** `.githooks/pre-push` runs the suite through
-`.githooks/lib/push-suite.sh` when a push changes Go sources. Mode by
+`.githooks/lib/push-suite.sh` when a push changes Go sources. A destination
+ref matching a `gascity.prePushSkipRef` glob (repeatable git config, matched
+against the full remote ref name, unset by default) is left out of that check,
+for branches another gate checks before they merge. Mode by
 `GC_PREPUSH_SUITE` (default `auto`):
 
 | `GC_PREPUSH_SUITE` | runs |
