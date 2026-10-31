@@ -408,8 +408,9 @@ func holdIs(s beads.Bead, reason string) bool {
 }
 
 // escalatesNext reports whether the engine's next action on s, given its
-// pacing, is the terminal escalation (exhausted): the attempts are spent, or a
-// nudge is due with no content to deliver, which the engine escalates at once.
+// pacing, is the terminal escalation (exhausted): the attempts are spent and
+// the last one's backoff has passed, or a nudge is due with no content to
+// deliver, which the engine escalates at once.
 // The second mirrors runNudgeBackstop's empty-content shortcut; change the two
 // in lockstep.
 func (p poolExecutionBackstop) escalatesNext(s beads.Bead, attempts int, last time.Time) bool {
