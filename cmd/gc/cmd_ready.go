@@ -65,16 +65,16 @@ does; their work comes back when the rig is resumed. The city store and a
 relocated graph store are always read.
 
 When the city's controller is running, it answers the query from the stores it
-already holds open (GET /v0/city/{cityName}/work/ready), reading every store
-live, never from a cache, so the answer is the one this command would compute
-itself, without opening a store. That holds only while the controller's config
-is current, so it refuses while a config change is pending or being applied,
-and after a failed reload until one succeeds; a [storage] change fails every
-reload until it is reverted or the city restarts. The controller learns of an
-edit to the config files from its config watcher and answers under the config
-it holds until then. If the controller is not running, refuses, or does not
-answer within 10s, this command reads the stores itself. GC_NO_API=1 forces
-the local read.`,
+already holds open (GET /v0/city/{cityName}/work/ready), with the reader this
+command runs, reading every store live, never from a cache. It reads the rigs
+of the config the controller has loaded: a rig added, removed or rebound in the
+city's config takes effect in its answer at the controller's next config
+reload. It refuses while a config reload or an API config write is in
+progress, and after a failed reload until one succeeds; a [storage] change
+fails every reload until it is reverted or the city restarts. If the
+controller is not running, refuses, or does not answer within 10s, this command
+loads the config and reads the stores itself. GC_NO_API=1 forces the local
+read.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdReady(flags, stdout, stderr) != 0 {
@@ -235,18 +235,20 @@ var readyAPITimeout = 10 * time.Second
 var readyAPIClient = supervisorFallthroughAPIClient
 
 // readyThroughController asks the controller holding this city's stores open
-// (GET /v0/city/{cityName}/work/ready) for the answer, which is the in-process
-// reader's answer over the controller's stores: same rows, same order, same
-// fields, read live (see controllerState.ReadyWork). The process then opens no
-// store at all.
+// (GET /v0/city/{cityName}/work/ready) for the answer. That answer is the
+// in-process reader's over the config the controller has published and the
+// stores it holds: the same rows in the same order with the same fields, read
+// live (see controllerState.ReadyWork). The process then opens no store at all.
+// It is not a fresh read of the config on disk: a rig added, removed or rebound
+// there takes effect in the controller's answer at its next config reload, and
+// in the in-process read at once.
 //
 // It answers false on ANY failure, and the caller reads in-process exactly as it
 // always has: no controller, a controller from before the endpoint existed, a
-// refused request (a config that is not current), a store the controller could
-// not read, a transport error or a timeout. The controller answers only while
-// its config is current, an edit on disk counting once its config watcher has
-// seen it, and then its answer is only a faster route to the same rows, so the
-// slower route is always the safe one. GC_NO_API forces it.
+// refused request (a reload or API config write in progress, or a failed
+// reload), a store the controller could not read, a transport error or a
+// timeout. That read is the one `gc ready` made before the endpoint existed, so
+// falling back to it is always safe. GC_NO_API forces it.
 func readyThroughController(cityPath string, q readywork.Query, stderr io.Writer) ([]readywork.ReadyBead, bool) {
 	client, reason := readyAPIClient(cityPath)
 	if client == nil {

@@ -927,10 +927,14 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 // otherwise, and the zero time for sessions the tracker has not observed. The
 // error is always nil — a tracker that cannot reach the server keeps its last
 // known state, and never-observed sessions read as unknown (zero), which every
-// consumer already treats as "no signal".
+// consumer already treats as "no signal". The tracker observes herdr's
+// registry, which holds herdrAgentName forms, so both the seed and the read
+// are keyed by the mapped name; gc names that map to the same registry name
+// read that one agent's activity.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
-	p.act.start(p, name)
-	return p.act.lastActivity(name), nil
+	hn := herdrAgentName(name)
+	p.act.start(p, hn)
+	return p.act.lastActivity(hn), nil
 }
 
 // ── best-effort / unsupported (the contract permits these) ───────────────────

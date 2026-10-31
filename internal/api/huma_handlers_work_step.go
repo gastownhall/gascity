@@ -24,11 +24,13 @@ var ErrActiveWorkStepScopeNotHeld = errors.New("the controller holds no store fo
 //     answer reflects every write committed before the request, whoever wrote it.
 //   - The work store is the one at the asked scope (the city, or the rig at that
 //     path), and the graph store is the one the city's class routing gives it.
-//   - It answers only under a config it can show is current, and otherwise
-//     returns ErrReadyWorkConfigNotCurrent; a scope it holds no store for is
+//   - The scope is resolved against the config the reader has published: a
+//     rig added or rebound on disk reaches the answer at the next config
+//     reload. It returns ErrReadyWorkConfigNotCurrent while a config reload
+//     or API config write is in progress or begins during the read, and after
+//     a failed reload until one succeeds; a scope it holds no store for is
 //     ErrActiveWorkStepScopeNotHeld. Either, and any failed read, sends the
-//     caller to its in-process read, which is the slower route to the same
-//     answer.
+//     caller to its in-process read.
 //
 // A nil step with a nil error is the answer "no current step".
 type ActiveWorkStepReader interface {
@@ -41,9 +43,9 @@ type ActiveWorkStepReader interface {
 // hook runs in process.
 //
 // A blank identity is 400: it would match every unassigned bead. A failed read
-// is 503 store-unavailable. A controller that does not serve the step, whose
-// config is not current, or that holds no store for the scope is 503
-// service-unavailable. The hook answers any of them by reading in process.
+// is 503 store-unavailable. A controller that does not serve the step, that is
+// mid-reload or after a failed reload, or that holds no store for the scope is
+// 503 service-unavailable. The hook answers any of them by reading in process.
 func (s *Server) humaHandleWorkActiveStep(ctx context.Context, input *WorkActiveStepInput) (*WorkActiveStepOutput, error) {
 	for _, assignee := range input.Assignee {
 		if strings.TrimSpace(assignee) == "" {
@@ -68,5 +70,5 @@ func (s *Server) humaHandleWorkActiveStep(ctx context.Context, input *WorkActive
 const workActiveStepDescription = "A session's current formula step, exactly the bead its step reminder names, read by the controller from the stores it already holds open. " +
 	"The work store is the one at `scope_root` (the city when omitted, else the rig at that path) and the graph store is the one the city's class routing gives it; both are read live at request time, never from a read cache. " +
 	"The identities are tried in the order given. `step` is absent when there is no current step. " +
-	"While a config change is pending or being applied, after a failed reload, or for a scope the controller holds no store for, the request is refused with 503 `service-unavailable`; a failed read is 503 `store-unavailable`. " +
+	"While a config reload or API config write is in progress, after a failed reload until one succeeds, or for a scope the controller holds no store for, the request is refused with 503 `service-unavailable`; a failed read is 503 `store-unavailable`. " +
 	"Either 503 means the caller should read the stores in-process instead."
