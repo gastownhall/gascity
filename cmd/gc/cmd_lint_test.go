@@ -805,6 +805,34 @@ func TestLintWarnsOncePerCityThatFailsToLoad(t *testing.T) {
 	}
 }
 
+// TestLintCityLoadWarningCarriesTheLoadError pins the half of the W1 warning
+// that says why: besides the city, the message carries the loader's own error,
+// collapsed to one line, so the operator can see what to fix.
+func TestLintCityLoadWarningCarriesTheLoadError(t *testing.T) {
+	f := writeLintNestedCityFixture(t, "[workspace\nname = \n")
+	_, loadErr := loadCityConfigAdvisory(f.nested)
+	if loadErr == nil {
+		t.Fatal("fixture nested city must fail to load")
+	}
+	want := strings.Join(strings.Fields(loadErr.Error()), " ")
+	if want == "" {
+		t.Fatal("fixture load error has no text to look for")
+	}
+
+	t.Chdir(f.nested)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"lint", "."}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc lint . = %d, want 0 (root city still composes the packs)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	lines := lintWarningLines(stderr.String(), f.nested)
+	if len(lines) != 1 {
+		t.Fatalf("want exactly one load warning naming %s, got %d:\n%s\nfull stderr:\n%s", f.nested, len(lines), strings.Join(lines, "\n"), stderr.String())
+	}
+	if !strings.Contains(lines[0], want) {
+		t.Errorf("load warning does not carry the load error\nwant it to contain: %s\ngot: %s", want, lines[0])
+	}
+}
+
 // TestLintWarnsWhenNoCityComposesPack: a loadable city that does not compose
 // the pack keeps the #6256 fallback (the city's whole pack set) and says so.
 func TestLintWarnsWhenNoCityComposesPack(t *testing.T) {
@@ -838,6 +866,41 @@ inject_fragments = ["footer"]
 	lines := lintWarningLines(stderr.String(), "not composed")
 	if len(lines) != 1 || !strings.Contains(lines[0], "orphan") || !strings.Contains(lines[0], root) {
 		t.Fatalf("want one warning naming the pack %q and city %s, got:\n%s\nfull stderr:\n%s", "orphan", root, strings.Join(lines, "\n"), stderr.String())
+	}
+}
+
+// TestLintNotComposedWarningNamesPackAndCity pins the text of the W2 warning.
+// The warning is located at the pack's pack.toml, and that path lies under the
+// city directory, so the location alone already contains the city and the
+// directory name; here the pack's name differs from its directory and only the
+// text after "warning: " is read.
+func TestLintNotComposedWarningNamesPackAndCity(t *testing.T) {
+	root := pathutil.NormalizePathForCompare(t.TempDir())
+	writeLintFile(t, filepath.Join(root, "city.toml"), `[[rigs]]
+name = "myrig"
+includes = ["packs/other"]
+`)
+	other := filepath.Join(root, "packs", "other")
+	writeLintPack(t, other, "other", "helper", "prompts/helper.template.md")
+	writeLintFile(t, filepath.Join(other, "prompts", "helper.template.md"), "hello {{.AgentName}}\n")
+	stray := filepath.Join(root, "packs", "stray-dir")
+	writeLintPack(t, stray, "stray-name", "worker", "prompts/worker.template.md")
+	writeLintFile(t, filepath.Join(stray, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"lint", stray}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc lint = %d, want 0 (the warning never fails the run)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	lines := lintWarningLines(stderr.String(), "not composed")
+	if len(lines) != 1 {
+		t.Fatalf("want exactly one not-composed warning, got %d:\n%s\nfull stderr:\n%s", len(lines), strings.Join(lines, "\n"), stderr.String())
+	}
+	_, message, _ := strings.Cut(lines[0], ": warning: ")
+	if !strings.Contains(message, `"stray-name"`) {
+		t.Errorf("warning text does not name the pack %q: %s", "stray-name", message)
+	}
+	if !strings.Contains(message, root) {
+		t.Errorf("warning text does not name the city %s: %s", root, message)
 	}
 }
 
