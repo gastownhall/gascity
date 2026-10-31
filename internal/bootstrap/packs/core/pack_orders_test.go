@@ -1,7 +1,11 @@
 package core
 
 import (
+	"encoding/json"
 	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -483,5 +487,130 @@ func TestCoreSQLOrdersDeclareRequiresBackendExceptHTTP(t *testing.T) {
 		if o.AppliesToBackend("http") {
 			t.Errorf("%s must not apply to an http scope", file)
 		}
+	}
+}
+
+// TestNotificationStatePersists runs each real notification script with jq and
+// an isolated gc fake. Empty state must become a usable delivery ledger even
+// on jq 1.6, whose -e accepts empty input.
+func TestNotificationStatePersists(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; notification scripts require it")
+	}
+	scripts := []struct {
+		name, key, delivery string
+		loudFailure         bool
+	}{
+		{"cascade-nudge-on-blocker-close", "ga-blk|ga-dep", "gc session nudge worker-1 ", false},
+		{"nudge-on-route", "ga-job|worker-1", "gc session nudge worker-1 ", false},
+		{"notify-on-human-gate-creation", "ga-gate", "gc mail send worker-1 ", true},
+		{"renudge-stale-human-gates", "ga-gate", "gc mail send worker-1 ", true},
+	}
+	const fake = `
+case "$1 $2 $3" in
+  'rig list --json') printf '%s\n' '{"rigs":[]}' ;;
+  'session list --json') printf '%s\n' '{"sessions":[]}' ;;
+  'events --type bead.updated')
+    [ "$NOTIFICATION_TEST_MODE" = no-input ] || printf '%s\n' '{"type":"bead.updated","payload":{"id":"ga-job","metadata":{"gc.routed_to":"worker-1"}}}' ;;
+  'events --type bead.closed')
+    [ "$NOTIFICATION_TEST_MODE" = no-input ] || printf '%s\n' '{"type":"bead.closed","payload":{"bead":{"id":"ga-blk","status":"closed"}}}' ;;
+  'events --type bead.created')
+    [ "$NOTIFICATION_TEST_MODE" = no-input ] || printf '%s\n' '{"type":"bead.created","payload":{"bead":{"id":"ga-gate","issue_type":"gate"}}}' ;;
+  'bd dep list')
+    printf '%s\n' '[{"id":"ga-dep","status":"open","assignee":"worker-1"}]' ;;
+  'bd gate list')
+    if [ "$NOTIFICATION_TEST_MODE" = no-input ]; then
+      printf '%s\n' '[]'
+    else
+      printf '%s\n' '[{"id":"ga-gate","status":"open","await_type":"human","created_at":"2020-01-01T00:00:00Z"}]'
+    fi ;;
+  'bd show ga-gate')
+    printf '%s\n' '[{"id":"ga-gate","status":"open","await_type":"human","assignee":"worker-1","title":"Fixture gate"}]' ;;
+  'session nudge worker-1'|'mail send worker-1')
+    [ "$NOTIFICATION_TEST_MODE" != fail ] ;;
+  *) printf 'unexpected gc call: %s\n' "$*" >&2; exit 97 ;;
+esac
+`
+	// Drop inherited city, state and trace settings before using the fake gc.
+	skipEnv := map[string]struct{}{"NOTIFICATION_TEST_MODE": {}}
+	for _, entry := range os.Environ() {
+		if key, _, ok := strings.Cut(entry, "="); ok && strings.HasPrefix(key, "GC_") {
+			skipEnv[key] = struct{}{}
+		}
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, script := range scripts {
+		t.Run(script.name, func(t *testing.T) {
+			states := []struct {
+				name, initial            string
+				missing, retained, retry bool
+			}{
+				{name: "missing", missing: true},
+				{name: "empty"},
+				{name: "newlines", initial: "\n\n"},
+				{name: "whitespace", initial: " \t\n"},
+				{name: "malformed", initial: "{oops"},
+				{name: "null", initial: "null"},
+				{name: "array", initial: "[]"},
+				{name: "scalar", initial: `"bad"`},
+				{name: "populated", initial: `{"keep":"` + now + `"}`, retained: true},
+				{name: "failed delivery retries", retry: true},
+			}
+			for _, state := range states {
+				t.Run(state.name, func(t *testing.T) {
+					binDir, logPath := fakeGCBin(t, fake)
+					stateDir := t.TempDir()
+					statePath := filepath.Join(stateDir, script.name+"-state.json")
+					if !state.missing {
+						if err := os.WriteFile(statePath, []byte(state.initial), 0o644); err != nil {
+							t.Fatal(err)
+						}
+					}
+					modes := []string{"normal", "normal", "no-input"}
+					if state.retry {
+						modes = []string{"fail", "normal", "normal", "no-input"}
+					}
+					for run, mode := range modes {
+						out, err := runPackScript(t, "assets/scripts/"+script.name+".sh", binDir, skipEnv,
+							[]string{"GC_PACK_STATE_DIR=" + stateDir, "NOTIFICATION_TEST_MODE=" + mode})
+						wantError := mode == "fail" && script.loudFailure
+						if (err != nil) != wantError {
+							t.Fatalf("run %d: error = %v, want error %v\n%s", run, err, wantError, out)
+						}
+						data, err := os.ReadFile(statePath)
+						if err != nil {
+							t.Fatal(err)
+						}
+						var ledger map[string]string
+						if err := json.Unmarshal(data, &ledger); err != nil {
+							t.Fatalf("invalid ledger: %v\n%s", err, data)
+						}
+						_, recorded := ledger[script.key]
+						if recorded != (mode != "fail") {
+							t.Fatalf("mode %s: recorded = %v\n%s", mode, recorded, data)
+						}
+						if recorded {
+							if _, err := time.Parse(time.RFC3339, ledger[script.key]); err != nil {
+								t.Fatalf("missing timestamp: %v\n%s", err, data)
+							}
+						}
+						if state.retained && ledger["keep"] != now {
+							t.Fatalf("unrelated entry changed: %s", data)
+						}
+						logged, err := os.ReadFile(logPath)
+						if err != nil {
+							t.Fatal(err)
+						}
+						wantAttempts := 1
+						if state.retry && run > 0 {
+							wantAttempts = 2
+						}
+						if count := strings.Count(string(logged), script.delivery); count != wantAttempts {
+							t.Fatalf("run %d: attempts = %d, want %d\n%s", run, count, wantAttempts, logged)
+						}
+					}
+				})
+			}
+		})
 	}
 }
