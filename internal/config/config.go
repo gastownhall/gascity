@@ -1444,7 +1444,8 @@ type BeadsConfig struct {
 	// defaults to "auto", except that a store that cannot fence (an exec
 	// store, or a bd without --if-revision) runs as "off" without a warning.
 	// GC_BEADS_CONDITIONAL_WRITES overrides it. Any other value fails config
-	// load.
+	// load. The arming path requires an explicit "require" for both
+	// conditional_writes and guarded_release.
 	ConditionalWrites string `toml:"conditional_writes,omitempty" jsonschema:"default=auto,enum=off,enum=auto,enum=require"`
 	// GuardedRelease selects the ownership-release discipline for work beads:
 	// "off" (legacy, owner-blind bd update/unclaim), "auto" (fence-guarded
