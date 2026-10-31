@@ -1,6 +1,7 @@
 package schemacontract
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -44,6 +45,32 @@ func wantProblem(t *testing.T, problems []string, parts ...string) {
 	t.Fatalf("no problem mentions all of %q; problems: %q", parts, problems)
 }
 
+// generatorCommand is the command every contract message must hand the
+// developer for the next step.
+const generatorCommand = "bazel run //cmd/gen-schema-baseline"
+
+// versionText is how a message must name a schema's version.
+func versionText(version string) string {
+	if version == "" {
+		return "unversioned"
+	}
+	return fmt.Sprintf("schema_version %q", version)
+}
+
+// wantBreaking asserts a BREAKING message that names the schema, its version
+// and the generator command, plus any extra parts.
+func wantBreaking(t *testing.T, problems []string, version string, parts ...string) {
+	t.Helper()
+	wantProblem(t, problems, append([]string{"BREAKING", schemaPath, versionText(version), generatorCommand}, parts...)...)
+}
+
+// wantAdditive asserts an additive-change message that names the schema, its
+// version and the generator command, plus any extra parts.
+func wantAdditive(t *testing.T, problems []string, version string, parts ...string) {
+	t.Helper()
+	wantProblem(t, problems, append([]string{"run the generator", schemaPath, versionText(version), generatorCommand}, parts...)...)
+}
+
 func wantClean(t *testing.T, problems []string) {
 	t.Helper()
 	if len(problems) != 0 {
@@ -76,7 +103,7 @@ func TestCheckBreakingMutants(t *testing.T) {
 				wantProblem(t, problems, "bump without entry")
 				return
 			}
-			wantProblem(t, problems, "BREAKING", schemaPath)
+			wantBreaking(t, problems, "1")
 		})
 	}
 }
@@ -84,13 +111,13 @@ func TestCheckBreakingMutants(t *testing.T) {
 func TestCheckConstChangedWithinVersionIsBreaking(t *testing.T) {
 	recorded := `{"type":"object","properties":{"schema_version":{"const":"1"},"kind":{"const":"a"}}}`
 	live := `{"type":"object","properties":{"schema_version":{"const":"1"},"kind":{"const":"b"}}}`
-	wantProblem(t, check(t, recorded, live), "BREAKING", "$.kind")
+	wantBreaking(t, check(t, recorded, live), "1", "$.kind")
 }
 
 func TestCheckConstDroppedIsBreaking(t *testing.T) {
 	recorded := `{"type":"object","properties":{"schema_version":{"const":"1"},"kind":{"const":"a"}}}`
 	live := `{"type":"object","properties":{"schema_version":{"const":"1"},"kind":{"type":"string"}}}`
-	wantProblem(t, check(t, recorded, live), "BREAKING", "$.kind")
+	wantBreaking(t, check(t, recorded, live), "1", "$.kind")
 }
 
 func TestCheckNarrowingIsGreen(t *testing.T) {
@@ -103,7 +130,7 @@ func TestCheckScalarUnionWideningIsBreaking(t *testing.T) {
 	recorded := doc("1", ``, `"n":{"oneOf":[{"type":"integer"},{"type":"null"}]}`)
 	widened := doc("1", ``, `"n":{"oneOf":[{"type":"integer"},{"type":"null"},{"type":"string"}]}`)
 	narrowed := doc("1", ``, `"n":{"type":"integer"}`)
-	wantProblem(t, check(t, recorded, widened), "BREAKING", "$.n")
+	wantBreaking(t, check(t, recorded, widened), "1", "$.n")
 	wantClean(t, check(t, recorded, narrowed))
 }
 
@@ -111,7 +138,7 @@ func TestCheckAdditiveFieldAsksForGenerator(t *testing.T) {
 	recorded := doc("1", `"a"`, `"a":{"type":"string"}`)
 	live := doc("1", `"a"`, `"a":{"type":"string"},"b":{"type":"integer"}`)
 	problems := check(t, recorded, live)
-	wantProblem(t, problems, "run the generator", schemaPath)
+	wantAdditive(t, problems, "1", "$.b")
 	for _, p := range problems {
 		if strings.Contains(p, "BREAKING") || strings.Contains(p, "bump") {
 			t.Fatalf("additive change must not demand a bump: %q", p)
@@ -122,7 +149,7 @@ func TestCheckAdditiveFieldAsksForGenerator(t *testing.T) {
 func TestCheckAllOfMergeAndBooleanSchema(t *testing.T) {
 	recorded := `{"allOf":[{"type":"object","required":["a"],"properties":{"a":{"type":"string"}}},{"properties":{"b":true}}]}`
 	removed := `{"allOf":[{"type":"object","required":["a"],"properties":{"a":{"type":"string"}}}]}`
-	wantProblem(t, check(t, recorded, removed), "BREAKING", "$.b")
+	wantBreaking(t, check(t, recorded, removed), "", "$.b")
 	wantClean(t, check(t, recorded, recorded))
 }
 
@@ -138,10 +165,10 @@ func TestCheckVariants(t *testing.T) {
 		"local":{"type":"object","properties":{"l":{"type":"string"}}},
 		"api":{"type":"object","properties":{"a":{"type":"string"}}},
 		"extra":{"type":"object","properties":{"e":{"type":"string"}}}}}`
-	wantProblem(t, check(t, recorded, removed), "BREAKING", "api")
-	wantProblem(t, check(t, recorded, renamed), "BREAKING", "api")
+	wantBreaking(t, check(t, recorded, removed), "", "api")
+	wantBreaking(t, check(t, recorded, renamed), "", "api")
 	problems := check(t, recorded, added)
-	wantProblem(t, problems, "run the generator", "extra")
+	wantAdditive(t, problems, "", "extra")
 	for _, p := range problems {
 		if strings.Contains(p, "BREAKING") {
 			t.Fatalf("adding a variant is additive: %q", p)
@@ -159,9 +186,9 @@ func TestCheckFramingChangeIsBreaking(t *testing.T) {
 	plain := `{"type":"object","properties":{"a":{"type":"string"}}}`
 	jsonl := `{"type":"object","x-gc-jsonl":{},"properties":{"a":{"type":"string"}}}`
 	raw := `{"type":"object","x-gc-raw-json":true,"properties":{"a":{"type":"string"}}}`
-	wantProblem(t, check(t, plain, jsonl), "BREAKING", "jsonl")
-	wantProblem(t, check(t, jsonl, plain), "BREAKING", "jsonl")
-	wantProblem(t, check(t, plain, raw), "BREAKING", "raw_json")
+	wantBreaking(t, check(t, plain, jsonl), "", "jsonl")
+	wantBreaking(t, check(t, jsonl, plain), "", "jsonl")
+	wantBreaking(t, check(t, plain, raw), "", "raw_json")
 }
 
 func TestCheckIfThenElseAreIgnored(t *testing.T) {
@@ -173,7 +200,7 @@ func TestCheckIfThenElseAreIgnored(t *testing.T) {
 func TestCheckMissingRecordAsksForGenerator(t *testing.T) {
 	live := map[string]Entry{schemaPath: mustExtract(t, doc("1", ``, `"a":{"type":"string"}`))}
 	problems := Check(Baseline{Format: 1, Schemas: map[string][]Entry{}}, live)
-	wantProblem(t, problems, schemaPath, "run the generator")
+	wantAdditive(t, problems, "1")
 }
 
 func completeEntry(t *testing.T, version, props string) Entry {
@@ -195,7 +222,7 @@ func TestCheckVersionBumpRules(t *testing.T) {
 		wantClean(t, Check(baselineOf(v1, v2), map[string]Entry{schemaPath: live2}))
 	})
 	t.Run("bump without an entry fails", func(t *testing.T) {
-		wantProblem(t, Check(baselineOf(v1), map[string]Entry{schemaPath: live2}), "bump without entry", "run the generator")
+		wantProblem(t, Check(baselineOf(v1), map[string]Entry{schemaPath: live2}), "bump without entry", schemaPath, versionText("2"), generatorCommand)
 	})
 	t.Run("version went backwards", func(t *testing.T) {
 		wantProblem(t, Check(baselineOf(v1, v2), map[string]Entry{schemaPath: live1}), "went backwards")
@@ -250,13 +277,13 @@ func TestCheckBreakingPersistsAgainstNewestEntryOnly(t *testing.T) {
 	// so merging it into the baseline would not hide it: Merge never rewrites.
 	v1 := mustExtract(t, doc("1", `"a"`, `"a":{"type":"string"},"b":{"type":"string"}`))
 	live := mustExtract(t, doc("1", `"a"`, `"a":{"type":"string"}`))
-	wantProblem(t, Check(baselineOf(v1), map[string]Entry{schemaPath: live}), "BREAKING", "$.b")
+	wantBreaking(t, Check(baselineOf(v1), map[string]Entry{schemaPath: live}), "1", "$.b")
 }
 
 func TestCheckOrphanedRecordFails(t *testing.T) {
 	v1 := mustExtract(t, doc("1", ``, `"a":{"type":"string"}`))
 	problems := Check(baselineOf(v1), map[string]Entry{})
-	wantProblem(t, problems, schemaPath, "schema removed", "BREAKING CHANGE:")
+	wantProblem(t, problems, schemaPath, "schema removed", "BREAKING CHANGE:", versionText("1"), "internal/schemacontract/baseline.json")
 }
 
 func TestCheckProblemsAreSorted(t *testing.T) {
