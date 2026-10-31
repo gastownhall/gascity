@@ -75,6 +75,7 @@ go_library(
         "attachment_metadata.go",
         "autoclose_fence.go",
         "autoclose_sweep.go",
+        "bd_assignee_shape.go",
         "bd_buildinfo.go",
         "bd_close_actor.go",
         "bd_close_events.go",
