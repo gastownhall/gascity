@@ -66,16 +66,25 @@ const (
 	ignoredCursorQuery = "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations"
 	cursorTableMain    = "schema_migrations"
 	cursorTableIgnored = "ignored_schema_migrations"
-	cursorExistsQuery  = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?"
+	// tablesQuery lists every table in the session's DATABASE(), once, and the
+	// session answers each existence question (both cursor tables, every
+	// sentinel table) from that one list.
+	//
+	// It replaces one information_schema.tables point read per table. Dolt does
+	// not push that view's predicate down, so each point read materializes every
+	// table of every database on the server before filtering — ~110-165 ms per
+	// read on a sql-server hosting 20 databases under load, eight per probe,
+	// against a SHOW TABLES that costs no more than SELECT 1. SHOW TABLES cannot
+	// fail on an absent object, so like the point reads it cannot poison the
+	// session's catalog snapshot.
+	tablesQuery = "SHOW TABLES"
 	// sentinelColumnQuery lists the ignored lane's sentinel column, if its
 	// table carries it. The LIKE narrows the rows; the Field comparison is the
 	// exact one, because '_' is a LIKE wildcard.
 	sentinelColumnQuery = "SHOW COLUMNS FROM " + IgnoredSentinelColumnTable + " LIKE '" + IgnoredSentinelColumnName + "'"
-	// cursorExistsWithHeadQuery is cursorExistsQuery with the database's HEAD
-	// commit hash riding along as a second column. It is the FIRST statement of
-	// every probe session (the main lane's existence check), so the HEAD
-	// observation costs no statement, no round trip and no session of its own
-	// (council pr2 D-F3).
+	// headQuery reads the database's HEAD commit hash. It is the FIRST statement
+	// of every probe session, so HEAD is observed before anything else the
+	// session reads (council pr2 D-F3).
 	//
 	// DOLT_HASHOF('HEAD') is a Dolt system function over the session's own
 	// DATABASE(), not a table read, so it can neither miss nor poison the
@@ -84,9 +93,8 @@ const (
 	// the server path (beads v1.3.0 internal/storage/dolt/versioned.go
 	// GetCurrentCommit, and schema/lock.go's fresh-bootstrap capture), so an
 	// engine that could not answer it is one the library does not support
-	// either. An aggregate beside a column-free scalar function is one row even
-	// when the table is absent, which is what keeps the existence answer intact.
-	cursorExistsWithHeadQuery = "SELECT COUNT(*), DOLT_HASHOF('HEAD') FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?"
+	// either.
+	headQuery = "SELECT DOLT_HASHOF('HEAD')"
 )
 
 // The IGNORED lane's sentinels, mirrored from the linked library.
@@ -349,9 +357,8 @@ type ProbeResult struct {
 	// ProbeServed. A gate must read it: see CursorReality.
 	Reality CursorReality
 	// Head is the database's HEAD commit hash at probe time, meaningful only
-	// for ProbeServed. It is read in the same statement as the main lane's
-	// existence check (cursorExistsWithHeadQuery), so a served probe always
-	// carries one.
+	// for ProbeServed. It is read on the session's first statement
+	// (headQuery), so a served probe always carries one.
 	//
 	// It is not schema evidence and no admission decision is made from it.
 	// It exists so a caller can re-read the same value AFTER opening the
@@ -765,17 +772,24 @@ func ReadCursorReportOverConn(ctx context.Context, conn *sql.Conn) (CursorReport
 		report CursorReport
 		err    error
 	)
-	if report.Cursors.Main, report.Head, err = readMainCursorAndHead(ctx, conn); err != nil {
+	if report.Head, err = readHead(ctx, conn); err != nil {
 		return report, err
 	}
-	if report.Cursors.Ignored, err = readCursor(ctx, conn, cursorTableIgnored, ignoredCursorQuery); err != nil {
+	tables, err := readTables(ctx, conn)
+	if err != nil {
+		return report, err
+	}
+	if report.Cursors.Main, err = readCursorVersion(ctx, conn, cursorTableMain, mainCursorQuery, tables.has(cursorTableMain)); err != nil {
+		return report, err
+	}
+	if report.Cursors.Ignored, err = readCursorVersion(ctx, conn, cursorTableIgnored, ignoredCursorQuery, tables.has(cursorTableIgnored)); err != nil {
 		return report, err
 	}
 	// The reality check is skipped for a cursor of zero, exactly as the library
 	// skips it: currentVersion returns before cursorRealityFloor when the cursor
 	// is 0, because there is no claim to contradict.
 	if report.Cursors.Ignored > 0 {
-		if report.Reality, err = readIgnoredReality(ctx, conn); err != nil {
+		if report.Reality, err = readIgnoredReality(ctx, conn, tables); err != nil {
 			return report, err
 		}
 	}
@@ -830,39 +844,32 @@ func (c *oneSessionConnector) closeUntaken() {
 }
 
 // readIgnoredReality asks the live schema how much of the ignored lane's cursor
-// it corroborates, over the SAME pinned connection as the cursor reads.
+// it corroborates, over the SAME pinned connection as the cursor reads, with
+// every table existence answered from the session's one SHOW TABLES list.
 //
 // The order is the library's: sentinel TABLES first, because they floor at zero
 // and short-circuit — nothing after them could lower that answer — then the
 // FLOORED sentinel tables, then the sentinel COLUMN, the lowest floor of any
 // absent one winning. Every statement is one that cannot fail on an absent
-// object — information_schema.tables point reads, and SHOW COLUMNS only once its
-// table is known to exist (readSentinelColumnPresent) — so none can poison the
-// session's catalog snapshot the way a bare SELECT against an absent table
-// would, short of a concurrent DROP of that table between its existence read
-// and SHOW COLUMNS: that statement then fails, pinning the session as any failed
-// read does, and the error is returned rather than a reality.
-func readIgnoredReality(ctx context.Context, conn *sql.Conn) (CursorReality, error) {
+// object — SHOW TABLES, and SHOW COLUMNS only once its table is known to exist
+// (readSentinelColumnPresent) — so none can poison the session's catalog
+// snapshot the way a bare SELECT against an absent table would, short of a
+// concurrent DROP of that table between the SHOW TABLES and SHOW COLUMNS: that
+// statement then fails, pinning the session as any failed read does, and the
+// error is returned rather than a reality.
+func readIgnoredReality(ctx context.Context, conn *sql.Conn, tables tableSet) (CursorReality, error) {
 	for _, table := range ignoredSentinelTables {
-		exists, err := readExistsCount(ctx, conn, cursorExistsQuery, table)
-		if err != nil {
-			return CursorReality{}, fmt.Errorf("probing ignored-lane sentinel table %s: %w", table, err)
-		}
-		if exists == 0 {
+		if !tables.has(table) {
 			return CursorReality{Limited: true, Floor: IgnoredSentinelTableFloor, Missing: table}, nil
 		}
 	}
 	var reality CursorReality
 	for _, floored := range ignoredSentinelFlooredTables {
-		exists, err := readExistsCount(ctx, conn, cursorExistsQuery, floored.Table)
-		if err != nil {
-			return CursorReality{}, fmt.Errorf("probing ignored-lane sentinel floored table %s: %w", floored.Table, err)
-		}
-		if exists == 0 {
+		if !tables.has(floored.Table) {
 			reality = reality.lowered(floored.Floor, floored.Table)
 		}
 	}
-	present, err := readSentinelColumnPresent(ctx, conn)
+	present, err := readSentinelColumnPresent(ctx, conn, tables)
 	if err != nil {
 		return CursorReality{}, fmt.Errorf("probing ignored-lane sentinel column %s.%s: %w",
 			IgnoredSentinelColumnTable, IgnoredSentinelColumnName, err)
@@ -883,8 +890,8 @@ func readIgnoredReality(ctx context.Context, conn *sql.Conn) (CursorReality, err
 // for SHOW COLUMNS (the linked library's own hasContentHashColumn avoids it for
 // the same reason). SHOW COLUMNS fails on an absent table, and a failing
 // statement pins a Dolt session to its pre-statement catalog, so the column's
-// table is first asked about with the same information_schema.tables point read
-// the sentinel tables use, and an absent table is an absent column.
+// table is first looked up in the session's SHOW TABLES list, and an absent
+// table is an absent column.
 //
 // The LIKE pattern's '_' is a wildcard, so the Field comparison is the exact
 // one, and case-sensitive, as Dolt's LIKE already is and as the library's own
@@ -893,10 +900,9 @@ func readIgnoredReality(ctx context.Context, conn *sql.Conn) (CursorReality, err
 // migration produces, therefore reads as absent and floors the lane, where the
 // linked v1.3.1 sentinel probe — information_schema.columns, which folds case —
 // would believe it: that disagreement refuses an open, and never admits one.
-func readSentinelColumnPresent(ctx context.Context, conn *sql.Conn) (bool, error) {
-	tableExists, err := readExistsCount(ctx, conn, cursorExistsQuery, IgnoredSentinelColumnTable)
-	if err != nil || tableExists == 0 {
-		return false, err
+func readSentinelColumnPresent(ctx context.Context, conn *sql.Conn, tables tableSet) (bool, error) {
+	if !tables.has(IgnoredSentinelColumnTable) {
+		return false, nil
 	}
 	rows, err := conn.QueryContext(ctx, sentinelColumnQuery)
 	if err != nil {
@@ -924,52 +930,51 @@ func readSentinelColumnPresent(ctx context.Context, conn *sql.Conn) (bool, error
 	return present, rows.Err()
 }
 
-// readExistsCount runs one information_schema COUNT(*) and returns it.
-func readExistsCount(ctx context.Context, conn *sql.Conn, query string, args ...any) (int, error) {
-	var count int
-	if err := conn.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
-		return 0, err
-	}
-	return count, nil
-}
+// tableSet is the session's SHOW TABLES answer, keyed by lower-cased name:
+// Dolt resolves table names without regard to case, and the
+// information_schema.tables point reads it replaces compared that way too.
+type tableSet map[string]bool
 
-// readMainCursorAndHead is readCursor for the main lane, with the database's
-// HEAD commit hash read as a second column of the SAME existence statement.
-//
-// It is the session's first statement, so HEAD is observed before anything
-// else this session reads and at no cost in statements: a probe session issues
-// exactly what it issued before the HEAD observation existed (council pr2
-// D-F3). A HEAD that cannot be read fails the session exactly as an unreadable
-// cursor does — the classifier sees a server error, not a connection-level one,
-// and reports ProbeUnknown, which admits nothing.
-func readMainCursorAndHead(ctx context.Context, conn *sql.Conn) (int, string, error) {
-	var exists int
-	var head sql.NullString
-	if err := conn.QueryRowContext(ctx, cursorExistsWithHeadQuery, cursorTableMain).Scan(&exists, &head); err != nil {
-		return 0, "", fmt.Errorf("probing %s existence and HEAD: %w", cursorTableMain, err)
-	}
-	version, err := readCursorVersion(ctx, conn, cursorTableMain, mainCursorQuery, exists)
+func (t tableSet) has(table string) bool { return t[strings.ToLower(table)] }
+
+// readTables lists the tables in the session's DATABASE() with one SHOW TABLES.
+func readTables(ctx context.Context, conn *sql.Conn) (tableSet, error) {
+	rows, err := conn.QueryContext(ctx, tablesQuery)
 	if err != nil {
-		return 0, "", err
+		return nil, fmt.Errorf("listing tables: %w", err)
 	}
-	return version, strings.TrimSpace(head.String), nil
+	defer rows.Close() //nolint:errcheck // read-only result set on the pinned connection
+	tables := tableSet{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("listing tables: %w", err)
+		}
+		tables[strings.ToLower(name)] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("listing tables: %w", err)
+	}
+	return tables, nil
 }
 
-// readCursor reads one cursor table's highest applied version, treating a table
-// that does not exist as version 0 — which is what it means: a database that
-// predates that lane has applied none of it.
-func readCursor(ctx context.Context, conn *sql.Conn, table, query string) (int, error) {
-	var exists int
-	if err := conn.QueryRowContext(ctx, cursorExistsQuery, table).Scan(&exists); err != nil {
-		return 0, fmt.Errorf("probing %s existence: %w", table, err)
+// readHead reads the database's HEAD commit hash. A HEAD that cannot be read
+// fails the session exactly as an unreadable cursor does — the classifier sees
+// a server error, not a connection-level one, and reports ProbeUnknown, which
+// admits nothing.
+func readHead(ctx context.Context, conn *sql.Conn) (string, error) {
+	var head sql.NullString
+	if err := conn.QueryRowContext(ctx, headQuery).Scan(&head); err != nil {
+		return "", fmt.Errorf("reading HEAD: %w", err)
 	}
-	return readCursorVersion(ctx, conn, table, query, exists)
+	return strings.TrimSpace(head.String), nil
 }
 
-// readCursorVersion is the second half of a cursor read: given the existence
-// count, the table's MAX(version), or 0 for a table that is not there.
-func readCursorVersion(ctx context.Context, conn *sql.Conn, table, query string, exists int) (int, error) {
-	if exists == 0 {
+// readCursorVersion reads one cursor table's highest applied version, treating a
+// table that does not exist as version 0 — which is what it means: a database
+// that predates that lane has applied none of it.
+func readCursorVersion(ctx context.Context, conn *sql.Conn, table, query string, exists bool) (int, error) {
+	if !exists {
 		return 0, nil
 	}
 	var version int
