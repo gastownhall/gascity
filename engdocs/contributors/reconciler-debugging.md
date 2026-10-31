@@ -110,6 +110,66 @@ These record types are usually the fastest path to the bug:
 - `operation`: scale check, start, interrupt, and drain boundary calls
 - `mutation`: bead or runtime writes that actually landed
 
+## Sessions Skipped In An Unknown State
+
+The reconciler skips, on purpose, any open session row whose raw `state` is
+one this gc version's controller does not manage, and never acts on it. The
+skip is a durable, throttled signal, not an error — but a session parked
+there holds its pool slot (or its named row) until someone releases it.
+
+**Symptoms.**
+
+- The trace decision `reconciler.session.skip_unknown_state` (reason
+  `unknown_state_skipped`, payload `state`) on the same session, every tick
+  that observes it.
+- The `session.unknown_state` event on first sight or on a state change, and
+  once more with `escalated=true` after the row has sat unrecognized for 30
+  minutes.
+- The session bead's `unknown_state_first_seen`, `unknown_state_value` and
+  `unknown_state_escalated_at` markers.
+- Under the v2 controller, the `reconciler.alert` of kind `unknown-state`, and
+  the boot refusal about enterprise-era session rows.
+
+**Listing them.**
+
+```bash
+gc doctor --check v2-session-migration --verbose   # runs in either mode; lists up to ten IDs per state
+```
+
+or read the `session.unknown_state` events.
+
+**Causes.**
+
+- A newer or older gc writer in a mixed-version fleet: the skip is what makes
+  forward-compatible rollback safe. A pre-#1912 build, for one, skips this
+  version's `failed-create` rows.
+- This version's own archived rows (retired named duplicates, removed named
+  sessions), parked open on purpose — their signal is expected.
+
+A close code of this version's own in `state` (`gc_swept`, `dead-runtime`,
+`duplicate`, …) on an open row is an interrupted close instead: the close's
+status write was lost on a store without the atomic close. The legacy
+reconciler finishes it, or rolls the row back to asleep, once the session's
+runtime is gone, so it signals only while the runtime still runs, and the
+wake and reset below do not refuse it. The doctor check counts it, and v2
+refuses to boot over one.
+
+**Recovery.**
+
+```bash
+gc session close <id>
+```
+
+A pool seat's slot is freed and the pool spawns a replacement; a configured
+named session gets a fresh canonical row. Or run the gc version that wrote
+the state. `gc session wake` and `gc session reset` (and the API wake and
+reset) refuse such rows by design, before writing anything, and name the
+close. `gc session kill` of an unnamed row whose runtime is already gone
+answers "session is not active" and names the close too. A kill of a
+configured named session, or of a row whose runtime still runs, acts: it
+stops the runtime and moves the row to asleep (`sleep_reason=killed`), which
+takes the row out of the skip.
+
 ## Acceptance And Integration Failures
 
 For acceptance or integration failures, keep baseline tracing as-is and collect trace artifacts on failure. Prefer template-scoped detail tracing only for tests that intentionally exercise reconciler or lifecycle behavior.

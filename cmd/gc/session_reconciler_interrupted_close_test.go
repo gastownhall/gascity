@@ -862,3 +862,70 @@ func TestInterruptedCloseFinishesARealInterruptedCommit(t *testing.T) {
 		t.Fatalf("stderr has %d %q lines, want 1; stderr:\n%s", n, warn, env.stderr.String())
 	}
 }
+
+// A row in a state the controller skips keeps the skip even when it carries
+// the operator's start and fresh-restart requests: the tick starts and stops
+// nothing, leaves the state, the status and both requests as they were, and
+// writes only the unknown-state markers. The reconciler stays action-free;
+// gc session wake and reset refuse such a row instead of recording requests
+// the controller would never act on.
+func TestReconcileSessionBeads_UnknownStateIgnoresWakeAndRestartRequests(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	rec := &capturingRecorder{}
+	env.rec = rec
+	b := env.createSessionBead("worker-held", "worker")
+	if err := env.store.SetMetadataBatch(b.ID, map[string]string{
+		"state":                      "future-state",
+		"wake_request":               "explicit",
+		"wake_requested_at":          env.clk.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+		"restart_requested":          "true",
+		"continuation_reset_pending": "true",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	before, err := env.store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("reload seed: %v", err)
+	}
+
+	for tick := 0; tick < 2; tick++ {
+		trace := env.interruptedCloseTick(t, env.sp, false)
+		skipped := false
+		for _, r := range trace.records {
+			if r.SessionName == "worker-held" && r.ReasonCode == TraceReasonUnknownStateSkipped {
+				skipped = true
+			}
+		}
+		if !skipped {
+			t.Fatalf("tick %d: no %s decision; records: %+v", tick, TraceReasonUnknownStateSkipped, trace.records)
+		}
+		env.clk.Advance(time.Minute)
+	}
+
+	got, err := env.store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got.Status != before.Status {
+		t.Fatalf("status = %q, want %q unchanged", got.Status, before.Status)
+	}
+	markers := map[string]bool{unknownStateFirstSeenKey: true, unknownStateValueKey: true, unknownStateEscalatedKey: true}
+	for k, v := range got.Metadata {
+		if !markers[k] && before.Metadata[k] != v {
+			t.Errorf("metadata %q = %q, want %q unchanged: the skip writes only its markers", k, v, before.Metadata[k])
+		}
+	}
+	for k := range before.Metadata {
+		if _, ok := got.Metadata[k]; !ok {
+			t.Errorf("metadata %q removed, want unchanged", k)
+		}
+	}
+	if events := unknownStateEventsFor(t, rec, b.ID); len(events) != 1 {
+		t.Fatalf("session.unknown_state events = %+v, want the first-sight signal", events)
+	}
+	for _, call := range env.sp.SnapshotCalls() {
+		if call.Method == "Start" || call.Method == "Stop" {
+			t.Fatalf("provider %s(%s) called, want no start or stop for a skipped row", call.Method, call.Name)
+		}
+	}
+}

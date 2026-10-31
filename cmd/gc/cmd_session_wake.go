@@ -266,7 +266,33 @@ func admitWake(op *cliOp, deps sessionWakeDeps, sessStore beads.Store, target st
 	if err := refuseClosedWakeTarget(op, sessStore, id); err != nil {
 		return "", 0, err
 	}
+	if err := refuseUnknownStateWakeTarget(sessStore, id); err != nil {
+		return "", 0, err
+	}
 	return id, op.retarget(id), nil
+}
+
+// refuseUnknownStateWakeTarget refuses, before its op is proposed and before
+// anything is written, a wake whose target is in a state the controller skips,
+// as gc session reset refuses one: the controller would never start it, and
+// the wake's writes (the explicit wake request, its cleared blockers and
+// archive stamp, its canceled waits) would take effect at once, and the
+// request would fire later, under a gc version that manages the state. A row
+// the wake refuses on its own (closed, closing, archived without continuity:
+// session.LifecycleWakeConflictState) keeps that answer, and a row that does
+// not read is left to the wake, which reports it.
+func refuseUnknownStateWakeTarget(sessStore beads.Store, id string) error {
+	info, row, err := sessionFrontDoor(sessStore).GetPersistedResponse(id)
+	if err != nil {
+		return nil
+	}
+	if _, conflict := session.LifecycleWakeConflictState(row.Status, row.Metadata); conflict {
+		return nil
+	}
+	if why := unknownStateRefusal(info); why != "" {
+		return fmt.Errorf("session %s cannot be woken: %s", id, why)
+	}
+	return nil
 }
 
 // refuseClosedWakeTarget refuses, before its op is proposed, a recorded wake
