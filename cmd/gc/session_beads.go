@@ -1674,10 +1674,12 @@ func reassignStateAssignedToRetiredSessionBead(store beads.Store, oldSessionID, 
 }
 
 // retiredSessionCleanupLegBudget bounds each leg (waits, then external
-// messaging) of cancelStateAssignedToRetiredSessionBead. A leg issues no new
-// store call once the budget has passed; a call already in flight finishes.
-// Whatever a cut-off leg leaves converges through the backstops named on the
-// helper.
+// messaging) of cancelStateAssignedToRetiredSessionBead. Once the budget has
+// passed, the waits leg issues no new store call and the external messaging
+// leg starts no new removal; work already in flight (one CloseAll chunk, or
+// one extmsg removal, which may itself make several store calls) finishes.
+// What a cut-off leg leaves converges only where a backstop exists; see the
+// helper's doc comment (participants and memberships have none).
 const retiredSessionCleanupLegBudget = 10 * time.Second
 
 // cancelStateAssignedToRetiredSessionBead cancels the waits and closes the
@@ -1691,7 +1693,8 @@ const retiredSessionCleanupLegBudget = 10 * time.Second
 // with an already-canceled one, yet the teardown must still run. A leg that
 // returns an error after its own budget ended logs one "cut off" line naming
 // the session, the leg and the budget; any other error keeps its ordinary line.
-// A cut-off leg writes no persisted state.
+// A cut-off leg writes no cut-off marker; the closes it completed before the
+// budget ended persist.
 //
 // What a cut-off leg leaves converges through these backstops:
 //   - waits: the wake-state session-closed pass in prepareWaitWakeStateHooked
