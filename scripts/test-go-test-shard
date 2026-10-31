@@ -236,7 +236,37 @@ join_regex() {
   printf '%s' "$*"
 }
 
-regex="^($(join_regex "${selected[@]}"))$"
+# The selected names travel to go test, and from go test to the test binary,
+# as a single -run argument. Linux caps one argv string at MAX_ARG_STRLEN
+# (128 KiB), and a cmd/gc shard's alternation alone exceeds it, failing the
+# exec with "Argument list too long" before any test runs (ga-f4ovjm.47). The
+# names are therefore packed in order into chunks whose anchored regex stays
+# within a byte budget, and each chunk is one go test invocation. A shard that
+# fits in one chunk runs exactly as before.
+run_regex_budget="${GO_TEST_RUN_REGEX_MAX_BYTES:-65536}"
+if ! [[ "$run_regex_budget" =~ ^[0-9]+$ ]] || (( run_regex_budget < 1 )); then
+  echo "GO_TEST_RUN_REGEX_MAX_BYTES must be a positive integer: ${run_regex_budget}" >&2
+  exit 1
+fi
+regex_chunks=()
+chunk_names=()
+chunk_bytes=0
+for name in "${selected[@]}"; do
+  # "^(" + ")$" is 4 bytes; each further name adds itself plus "|".
+  if (( ${#chunk_names[@]} > 0 && chunk_bytes + 1 + ${#name} > run_regex_budget )); then
+    regex_chunks+=("^($(join_regex "${chunk_names[@]}"))$")
+    chunk_names=()
+  fi
+  if (( ${#chunk_names[@]} == 0 )); then
+    chunk_bytes=$(( 4 + ${#name} ))
+  else
+    chunk_bytes=$(( chunk_bytes + 1 + ${#name} ))
+  fi
+  chunk_names+=("$name")
+done
+regex_chunks+=("^($(join_regex "${chunk_names[@]}"))$")
+chunk_total=${#regex_chunks[@]}
+
 echo "Running ${test_pkg} shard ${shard_index} of ${shard_total} (${#selected[@]} tests)"
 printf '  %s\n' "${selected[@]}"
 # External watchdog budget. `-timeout` bounds only the test binary, and only
@@ -259,10 +289,61 @@ if [[ "$watchdog_grace" != "off" ]]; then
 fi
 
 shard_label="${test_pkg#./} shard ${shard_index} of ${shard_total}"
-if [[ -n "${GO_TEST_TIMING_FILE:-}" ]]; then
-  gc_harness_run_supervised "$shard_label" "$watchdog_deadline" "$watchdog_quit_grace" -- \
-    run_observable_go_test "${go_test_args[@]}" "$test_pkg" -run "$regex"
-else
-  gc_harness_run_supervised "$shard_label" "$watchdog_deadline" "$watchdog_quit_grace" -- \
-    run_go_test "${go_test_args[@]}" "$test_pkg" -run "$regex"
+timing_file="${GO_TEST_TIMING_FILE:-}"
+chunk_timing_files=()
+
+# Each chunk is its own supervised run with the full watchdog budget, so the
+# per-run guarantee is unchanged. Every chunk runs even after one fails, as a
+# single invocation would have run every test; the shard exits with the first
+# failing chunk's status.
+shard_status=0
+for chunk_i in "${!regex_chunks[@]}"; do
+  chunk_label="$shard_label"
+  if (( chunk_total > 1 )); then
+    chunk_label+=" chunk $(( chunk_i + 1 )) of ${chunk_total}"
+    echo "Running ${chunk_label}"
+  fi
+  chunk_status=0
+  if [[ -n "$timing_file" ]]; then
+    if (( chunk_total > 1 )); then
+      GO_TEST_TIMING_FILE="${timing_file}.chunk-$(( chunk_i + 1 ))"
+      chunk_timing_files+=("$GO_TEST_TIMING_FILE")
+    fi
+    gc_harness_run_supervised "$chunk_label" "$watchdog_deadline" "$watchdog_quit_grace" -- \
+      run_observable_go_test "${go_test_args[@]}" "$test_pkg" -run "${regex_chunks[$chunk_i]}" || chunk_status=$?
+  else
+    gc_harness_run_supervised "$chunk_label" "$watchdog_deadline" "$watchdog_quit_grace" -- \
+      run_go_test "${go_test_args[@]}" "$test_pkg" -run "${regex_chunks[$chunk_i]}" || chunk_status=$?
+  fi
+  if (( chunk_status != 0 )); then
+    echo "${chunk_label}: FAIL status=${chunk_status}" >&2
+    if (( shard_status == 0 )); then
+      shard_status=$chunk_status
+    fi
+  fi
+done
+
+# Chunked timing is merged back into the one artifact the caller asked for, so
+# a chunked shard publishes the same file and shard identity as an unchunked
+# one. Like the per-run capture, this is advisory: it never changes the status.
+if [[ -n "$timing_file" ]] && (( chunk_total > 1 )); then
+  merged_timing=0
+  if command -v jq >/dev/null 2>&1 &&
+    timing_tmp="$(mktemp "${timing_file}.tmp.XXXXXX" 2>/dev/null)"; then
+    if jq -s -e '
+        .[0] + {units: ([.[].units[]] | sort_by([.unit_id, .kind, .outcome, .duration_seconds]))}
+      ' "${chunk_timing_files[@]}" >"$timing_tmp" 2>/dev/null &&
+      mv -f "$timing_tmp" "$timing_file"; then
+      merged_timing=1
+      echo "observable go test: timing=${timing_file} (merged ${chunk_total} chunks)" >&2
+    else
+      rm -f "$timing_tmp"
+    fi
+  fi
+  if (( merged_timing == 0 )); then
+    echo "observable go test: warning: could not merge ${chunk_total} chunk timing artifacts into ${timing_file}" >&2
+  fi
+  rm -f "${chunk_timing_files[@]}"
 fi
+
+exit "$shard_status"

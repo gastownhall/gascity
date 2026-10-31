@@ -24,6 +24,8 @@ type goTestShardFixture struct {
 	productEnvFile  string
 	allTestArgsFile string
 	probeFile       string
+	// listFile, when written, replaces the fake `go test -list` output.
+	listFile string
 }
 
 func newGoTestShardFixture(t *testing.T) goTestShardFixture {
@@ -44,6 +46,7 @@ func newGoTestShardFixtureWithExit(t *testing.T, productExit int) goTestShardFix
 	productEnvFile := filepath.Join(tmpDir, "product-env")
 	allTestArgsFile := filepath.Join(tmpDir, "all-test-args")
 	probeFile := filepath.Join(tmpDir, "metadata-probes")
+	listFile := filepath.Join(tmpDir, "test-list")
 	fakeGo := fmt.Sprintf(`#!/bin/sh
 set -eu
 case "${1:-}" in
@@ -71,6 +74,10 @@ case "${1:-}" in
       [ "$arg" != "-json" ] || is_json=1
     done
     if [ "$is_list" = 1 ]; then
+      if [ -f %q ]; then
+        cat %q
+        exit 0
+      fi
       printf '%%s\n' TestAlpha TestBeta TestGamma 'ok  github.com/gastownhall/gascity/example  0.001s'
       exit 0
     fi
@@ -84,11 +91,16 @@ case "${1:-}" in
         '{"Action":"pass","Package":"github.com/gastownhall/gascity/example","Test":"TestGamma","Elapsed":0.125}' \
         '{"Action":"fail","Package":"github.com/gastownhall/gascity/example","Elapsed":0.3}'
     fi
+    for arg in "$@"; do
+      case "$arg" in
+        *TestChunkFail*) exit 7 ;;
+      esac
+    done
     exit %d
     ;;
   *) exit 99 ;;
 esac
-`, filepath.Join(tmpDir, "gopath"), filepath.Join(tmpDir, "gocache"), filepath.Join(tmpDir, "gomodcache"), filepath.Join(tmpDir, "gotmp"), filepath.Join(tmpDir, "goroot"), probeFile, allTestArgsFile, productArgsFile, productEnvFile, productExit)
+`, filepath.Join(tmpDir, "gopath"), filepath.Join(tmpDir, "gocache"), filepath.Join(tmpDir, "gomodcache"), filepath.Join(tmpDir, "gotmp"), filepath.Join(tmpDir, "goroot"), probeFile, allTestArgsFile, listFile, listFile, productArgsFile, productEnvFile, productExit)
 	if err := os.WriteFile(filepath.Join(binDir, "go"), []byte(fakeGo), 0o755); err != nil {
 		t.Fatalf("write fake go: %v", err)
 	}
@@ -109,6 +121,7 @@ esac
 		productEnvFile:  productEnvFile,
 		allTestArgsFile: allTestArgsFile,
 		probeFile:       probeFile,
+		listFile:        listFile,
 	}
 }
 
@@ -798,5 +811,157 @@ func TestGoTestShardRunsWithoutPreservedProviderEnv(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("test-go-test-shard failed without preserved provider env: %v\n%s", err, out)
+	}
+}
+
+// productRunRegexes returns the -run argument of every product invocation the
+// fake go recorded, in invocation order.
+func productRunRegexes(t *testing.T, raw string) []string {
+	t.Helper()
+	lines := strings.Split(strings.TrimSuffix(raw, "\n"), "\n")
+	var regexes []string
+	for i, line := range lines {
+		if line == "-run" && i+1 < len(lines) {
+			regexes = append(regexes, lines[i+1])
+		}
+	}
+	return regexes
+}
+
+// runRegexNames splits an anchored "^(A|B|...)$" -run argument back into its
+// test names.
+func runRegexNames(t *testing.T, regex string) []string {
+	t.Helper()
+	if !strings.HasPrefix(regex, "^(") || !strings.HasSuffix(regex, ")$") {
+		t.Fatalf("-run argument %q is not an anchored alternation", regex)
+	}
+	return strings.Split(strings.TrimSuffix(strings.TrimPrefix(regex, "^("), ")$"), "|")
+}
+
+func TestGoTestShardChunksRunRegexUnderArgumentLimit(t *testing.T) {
+	t.Parallel()
+
+	// A cmd/gc-sized shard: one in six of these names is 3,000 tests whose
+	// single joined regex (~160 KB) exceeds Linux's 128 KiB MAX_ARG_STRLEN,
+	// the exec failure behind ga-f4ovjm.47.
+	const shardTotal = 6
+	var all []string
+	for i := range 18000 {
+		all = append(all, fmt.Sprintf("TestSyntheticCommandBehaviorWithADescriptiveName%05d", i))
+	}
+	var want []string
+	for i, name := range all {
+		if i%shardTotal == 0 {
+			want = append(want, name)
+		}
+	}
+	if joined := len("^(" + strings.Join(want, "|") + ")$"); joined <= 128*1024 {
+		t.Fatalf("fixture regex is only %d bytes; it must exceed the 128 KiB argument limit", joined)
+	}
+
+	fixture := newGoTestShardFixtureWithExit(t, 0)
+	if err := os.WriteFile(fixture.listFile, []byte(strings.Join(all, "\n")+"\nok  \texample\t0.1s\n"), 0o644); err != nil {
+		t.Fatalf("write test list: %v", err)
+	}
+	status, output := runShardCommand(t, fixture.commandForShard("1", fmt.Sprint(shardTotal)))
+	if status != 0 {
+		t.Fatalf("shard exit = %d, want 0\n%.4000s", status, output)
+	}
+
+	regexes := productRunRegexes(t, readFixtureFile(t, fixture.productArgsFile))
+	if len(regexes) < 2 {
+		t.Fatalf("shard ran %d go test invocations, want the selection split into several chunks", len(regexes))
+	}
+	var got []string
+	for i, regex := range regexes {
+		if len(regex) > 64*1024 {
+			t.Errorf("chunk %d -run argument is %d bytes, over the 64 KiB budget", i+1, len(regex))
+		}
+		got = append(got, runRegexNames(t, regex)...)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("chunks ran %d names, want each of the %d selected names exactly once in order", len(got), len(want))
+	}
+	if !strings.Contains(string(output), fmt.Sprintf("chunk %d of %d", len(regexes), len(regexes))) {
+		t.Fatalf("shard output does not label its chunks:\n%.4000s", output)
+	}
+}
+
+func TestGoTestShardChunkFailureFailsShardAfterRunningEveryChunk(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGoTestShardFixtureWithExit(t, 0)
+	manifest := writeGoTestManifest(t, fixture.tmpDir, "TestAlpha", "TestChunkFail", "TestGamma")
+	// "^(TestChunkFail)$" is the longest single-name regex at 17 bytes, so a
+	// 17-byte budget gives every name its own chunk.
+	status, output := runShardCommand(t, fixture.commandForShard("1", "1",
+		"GO_TEST_MANIFEST="+manifest, "GO_TEST_RUN_REGEX_MAX_BYTES=17"))
+	if status != 7 {
+		t.Fatalf("shard exit = %d, want the failing chunk's exit 7\n%s", status, output)
+	}
+	want := []string{"^(TestAlpha)$", "^(TestChunkFail)$", "^(TestGamma)$"}
+	if got := productRunRegexes(t, readFixtureFile(t, fixture.productArgsFile)); !slices.Equal(got, want) {
+		t.Fatalf("chunk -run arguments = %q, want %q", got, want)
+	}
+	if !strings.Contains(string(output), "chunk 2 of 3: FAIL status=7") {
+		t.Fatalf("shard output does not name the failing chunk:\n%s", output)
+	}
+}
+
+func TestGoTestShardRejectsInvalidRunRegexBudget(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGoTestShardFixture(t)
+	status, output := runShardCommand(t, fixture.command("GO_TEST_RUN_REGEX_MAX_BYTES=0"))
+	if status != 1 || !strings.Contains(string(output), "GO_TEST_RUN_REGEX_MAX_BYTES must be a positive integer") {
+		t.Fatalf("invalid budget: exit %d\n%s", status, output)
+	}
+	if _, err := os.Stat(fixture.productArgsFile); !os.IsNotExist(err) {
+		t.Fatalf("invalid budget still invoked the product run: err=%v", err)
+	}
+}
+
+func TestGoTestShardChunkedTimingMergesIntoRequestedArtifact(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGoTestShardFixture(t)
+	timingFile := filepath.Join(fixture.tmpDir, "timing.json")
+	// A 13-byte budget fits "^(TestAlpha)$" alone, splitting the shard's two
+	// selected tests into two observable runs.
+	status, output := runShardCommand(t, fixture.command(
+		"GO_TEST_TIMING_FILE="+timingFile,
+		"GO_TEST_TIMING_NAME=cmd-gc-process-1-of-2",
+		"GO_TEST_RUN_REGEX_MAX_BYTES=13",
+	))
+	if status != 23 {
+		t.Fatalf("shard exit = %d, want product exit 23\n%s", status, output)
+	}
+	want := []string{"^(TestAlpha)$", "^(TestGamma)$"}
+	if got := productRunRegexes(t, readFixtureFile(t, fixture.productArgsFile)); !slices.Equal(got, want) {
+		t.Fatalf("chunk -run arguments = %q, want %q", got, want)
+	}
+
+	data, err := os.ReadFile(timingFile)
+	if err != nil {
+		t.Fatalf("read merged timing artifact: %v\n%s", err, output)
+	}
+	var artifact observableTimingArtifact
+	if err := json.Unmarshal(data, &artifact); err != nil {
+		t.Fatalf("decode merged timing artifact: %v\n%s", err, data)
+	}
+	if artifact.ShardID != "cmd-gc-process-1-of-2" {
+		t.Fatalf("merged timing shard id = %q", artifact.ShardID)
+	}
+	// The fake go emits the same three terminal events per run, so the merge
+	// must carry both runs' units.
+	if len(artifact.Units) != 6 {
+		t.Fatalf("merged timing has %d units, want 6 (3 per chunk): %+v", len(artifact.Units), artifact.Units)
+	}
+	leftovers, err := filepath.Glob(timingFile + ".*")
+	if err != nil {
+		t.Fatalf("glob chunk artifacts: %v", err)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("chunk timing artifacts were not cleaned up: %v", leftovers)
 	}
 }
