@@ -117,6 +117,13 @@ type Fake struct {
 	// TurnHistoryErrors fail TurnHistory reads by session name, in order. A
 	// nil entry reads the script.
 	TurnHistoryErrors map[string][]error
+	// ScreenTurnRunning makes a FullFake's screen show a turn in progress by
+	// session name, as a pane whose busy indicator is drawn does: TurnRunning
+	// answers true and SnapshotIdle false. An absent entry shows no turn.
+	ScreenTurnRunning map[string]bool
+	// ScreenReadErrors fail a FullFake's TurnRunning by session name, as a
+	// screen that cannot be captured does.
+	ScreenReadErrors map[string]error
 }
 
 var (

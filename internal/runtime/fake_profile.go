@@ -463,23 +463,29 @@ func (f FullFake) GetAllEnvironment(name string) (map[string]string, error) {
 	return maps.Clone(f.meta[name]), nil
 }
 
-// SnapshotIdle implements [IdleSnapshotProvider]: a running session is idle.
+// SnapshotIdle implements [IdleSnapshotProvider]: a running session is idle
+// unless its screen shows a turn ([Fake.ScreenTurnRunning]).
 func (f FullFake) SnapshotIdle(name string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	_, running := f.sessions[name]
-	return running, nil
+	return running && !f.ScreenTurnRunning[name], nil
 }
 
-// TurnRunning implements [TurnRunningProvider]: a running session runs no
-// turn, and a session that is not running cannot be looked at.
+// TurnRunning implements [TurnRunningProvider]: a running session runs a turn
+// only while its screen shows one ([Fake.ScreenTurnRunning]), a screen read
+// fails as [Fake.ScreenReadErrors] says, and a session that is not running
+// cannot be looked at.
 func (f FullFake) TurnRunning(name string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, running := f.sessions[name]; !running {
 		return false, fmt.Errorf("turn of %q: %w", name, ErrSessionNotFound)
 	}
-	return false, nil
+	if err := f.ScreenReadErrors[name]; err != nil {
+		return false, err
+	}
+	return f.ScreenTurnRunning[name], nil
 }
 
 // RuntimeInventory implements [InventoryProvider]: every running session,
