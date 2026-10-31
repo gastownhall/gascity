@@ -402,7 +402,7 @@ func (c *client) listAgents(ctx context.Context) ([]agentInfo, error) {
 // screen (the liveness/fingerprint snapshot). On 0.7.5 the CLI prints the
 // text raw rather than in the JSON envelope, so this parses failures out of
 // an envelope only when one is present.
-func (c *client) paneRead(ctx context.Context, paneID, source string, lines int) (string, error) {
+func (c *client) paneRead(ctx context.Context, paneID, source string, lines int) (string, error) { //nolint:unparam // source mirrors the herdr CLI flag; callers read "visible" today
 	args := []string{"pane", "read", paneID, "--source", source}
 	if lines > 0 {
 		args = append(args, "--lines", strconv.Itoa(lines))

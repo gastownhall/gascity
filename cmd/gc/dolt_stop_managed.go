@@ -150,7 +150,7 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 	report.PID = targetPID
 	if managedStopPIDAlive(targetPID) {
 		killErr := platformKill(targetPID, syscall.SIGTERM)
-		if killErr != nil && killErr != syscall.ESRCH {
+		if killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
 			return report, fmt.Errorf("signal %d with SIGTERM: %w", targetPID, killErr)
 		}
 		if killErr == nil {
@@ -179,7 +179,7 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 		if strictTarget(targetPID) {
 			report.Forced = true
 			killErr := platformKill(targetPID, syscall.SIGKILL)
-			if killErr != nil && killErr != syscall.ESRCH {
+			if killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
 				return report, fmt.Errorf("signal %d with SIGKILL: %w", targetPID, killErr)
 			}
 			if killErr == nil {

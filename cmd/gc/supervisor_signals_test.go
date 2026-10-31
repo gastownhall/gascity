@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -104,7 +105,7 @@ func TestSupervisorReloadCommandIsTheSignalFreeReloadPath(t *testing.T) {
 			break
 		}
 		if readErr != nil {
-			if readErr == io.EOF {
+			if errors.Is(readErr, io.EOF) {
 				break
 			}
 			t.Fatalf("read reload reply: %v", readErr)

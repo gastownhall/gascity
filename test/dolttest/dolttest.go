@@ -7,7 +7,7 @@
 // Discovery is Linux-only via /proc and a no-op elsewhere, mirroring the
 // scan test/integration already uses (readProcessSnapshot); CI runs on Linux.
 // The matching, path, and run-dir logic is platform-neutral and is exercised
-// on every platform; only the process discovery and signalling primitives are
+// on every platform; only the process discovery and signaling primitives are
 // per-platform. See dolttest_unix.go and dolttest_windows.go.
 package dolttest
 

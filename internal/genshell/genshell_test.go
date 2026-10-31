@@ -330,12 +330,12 @@ func TestRunSendsBdAndGcToExec(t *testing.T) {
 			mu.Unlock()
 			switch p.Args[0] + " " + p.Args[1] {
 			case "bd list":
-				fmt.Fprint(p.Stdout, `[{"id":"ga-1","title":"<one> & two"}]`)
+				_, _ = fmt.Fprint(p.Stdout, `[{"id":"ga-1","title":"<one> & two"}]`)
 			case "gc ready":
-				fmt.Fprint(p.Stdout, `[]`)
+				_, _ = fmt.Fprint(p.Stdout, `[]`)
 			case "bd show":
-				fmt.Fprint(p.Stderr, "bd show noise")
-				fmt.Fprint(p.Stdout, `{"shown":true}`)
+				_, _ = fmt.Fprint(p.Stderr, "bd show noise")
+				_, _ = fmt.Fprint(p.Stdout, `{"shown":true}`)
 			}
 			return nil
 		},

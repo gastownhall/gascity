@@ -48,7 +48,7 @@ import (
 // machine working on the others.
 const PathLimit = pathLimit
 
-// PathTooLongError reports a pathname that cannot be bound or dialled on this
+// PathTooLongError reports a pathname that cannot be bound or dialed on this
 // platform. The kernel's own answer is EINVAL ("bind: invalid argument"), which
 // says nothing about which limit was hit, so callers that resolve their own
 // endpoint paths get told the number they exceeded and by how much.

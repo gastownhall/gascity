@@ -59,7 +59,7 @@ type Program struct {
 func Parse(command string) (Program, error) {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(command), "")
 	if err != nil {
-		return Program{}, fmt.Errorf("%w: %v", ErrUnsupported, err)
+		return Program{}, fmt.Errorf("%w: %w", ErrUnsupported, err)
 	}
 	if len(file.Stmts) != 1 {
 		return Program{}, fmt.Errorf("%w: %d commands, want 1", ErrUnsupported, len(file.Stmts))

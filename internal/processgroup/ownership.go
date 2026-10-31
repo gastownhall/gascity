@@ -15,7 +15,7 @@ var ErrNotOwned = errors.New("processgroup: command has no ownership boundary")
 // Persistence selects what happens to an owned process tree when the launching
 // process releases ownership — by calling ReleaseCommand or simply by exiting.
 //
-// The distinction is a product requirement, not a tuning knob. Cancelling a
+// The distinction is a product requirement, not a tuning knob. Canceling a
 // helper must reap the helper's whole tree, and detaching a UI from a long-lived
 // agent server must leave that server running.
 type Persistence int

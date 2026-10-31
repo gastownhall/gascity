@@ -56,7 +56,7 @@ func StartCommandInNewGroup(cmd *exec.Cmd) {
 // Persistence is accepted for a platform-neutral call shape and has no effect
 // here: a Unix process group already behaves both ways by construction. The
 // group outlives the parent, and cancellation reaches the whole tree by
-// signalling -pgid, so there is no handle whose closure could imply a kill.
+// signaling -pgid, so there is no handle whose closure could imply a kill.
 func StartCommand(cmd *exec.Cmd, _ Persistence) (int, error) {
 	if cmd == nil {
 		return 0, errors.New("processgroup: nil command")
@@ -125,7 +125,7 @@ func resolveGroupID(cmd *exec.Cmd, knownPGID int) (int, error) {
 	return resolved, nil
 }
 
-// unsafeGroup reports whether pgid must never be signalled: init, the
+// unsafeGroup reports whether pgid must never be signaled: init, the
 // nonpositive values kill(2) reads as broadcast or current-group, and the
 // caller's own group.
 func unsafeGroup(pgid int, opts Options) bool {

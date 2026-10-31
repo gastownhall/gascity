@@ -535,13 +535,14 @@ func copyCanonicalJSONFile(src, dst, relPath string) error {
 
 func shouldPreserveExistingOverlayFile(src, dst, relPath string) (bool, error) {
 	if !platformAdaptsPath(relPath) {
-		if _, err := os.Stat(dst); err == nil {
+		_, err := os.Stat(dst)
+		if err == nil {
 			return true, nil
-		} else if os.IsNotExist(err) {
-			return false, nil
-		} else {
-			return false, err
 		}
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
 	}
 	existing, err := os.ReadFile(dst)
 	if err == nil {
@@ -557,13 +558,14 @@ func shouldPreserveExistingOverlayFile(src, dst, relPath string) (bool, error) {
 	if os.IsNotExist(err) {
 		return false, nil
 	}
-	if _, statErr := os.Stat(dst); statErr == nil {
+	_, statErr := os.Stat(dst)
+	if statErr == nil {
 		return true, nil
-	} else if os.IsNotExist(statErr) {
-		return false, nil
-	} else {
-		return false, statErr
 	}
+	if os.IsNotExist(statErr) {
+		return false, nil
+	}
+	return false, statErr
 }
 
 func copyFileForPlatform(src, dst, relPath string) error {

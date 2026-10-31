@@ -4,7 +4,7 @@ package dashboardbff
 
 // Every case here installs a fake `bd` on the fixture PATH as a POSIX shell
 // script, and the cancellation case additionally orders its handshake with a
-// FIFO. Both are Unix file-system mechanisms with no direct Windows analogue,
+// FIFO. Both are Unix file-system mechanisms with no direct Windows analog,
 // so these live apart from the provider-neutral sampler tests rather than
 // being skipped at runtime. The parsing, refresh and transport tests in
 // samplers_test.go carry no such dependency and run everywhere.

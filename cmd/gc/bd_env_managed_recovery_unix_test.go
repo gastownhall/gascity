@@ -2,7 +2,7 @@
 
 package main
 
-// Managed dolt recovery is cancelled by tearing down a process group, which
+// Managed dolt recovery is canceled by tearing down a process group, which
 // is a POSIX construct. Windows confines a tree in a Job Object instead, and
 // managed dolt is gated off there entirely.
 import (

@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -286,9 +285,6 @@ func TestStopManagedDoltWaitsForLockReleaseAfterExit(t *testing.T) {
 // process that is not our managed dolt server is not — that is exactly the
 // reused-PID case the escalation must skip.
 func TestManagedDoltProcessControllableGatesForcedStopByOwnership(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX process semantics required")
-	}
 	city, _ := raceTestCity(t, "")
 	layout, err := resolveManagedDoltRuntimeLayout(city)
 	if err != nil {

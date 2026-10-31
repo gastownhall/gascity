@@ -2166,7 +2166,8 @@ func TestPassthroughEnvWithholdsControllerTokenFromChildProcess(t *testing.T) {
 	}
 	record := filepath.Join(t.TempDir(), "child-view")
 	cmd := exec.Command(exe)
-	cmd.Env = append(env, controllerTokenChildSpyPath+"="+record)
+	env = append(env, controllerTokenChildSpyPath+"="+record)
+	cmd.Env = env
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("running child: %v\n%s", err, out)
 	}
