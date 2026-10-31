@@ -1003,6 +1003,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Without `flock`, init refuses to reset an interrupted bootstrap and says
   how to install it (#5926).
 
+- **Work hidden by beads migration 0059 is dispatched again.** On the first
+  start under a new bd version, `gc start` (and the supervisor, and
+  `gc rig add` for the rig it adds) runs `bd recompute-blocked` once over each
+  gc-owned, Dolt-backed bd scope and
+  records the bd version in the scope's own bd config
+  (`custom.gascity.blocked_repair_bd_version`), so later starts skip it. This
+  clears the `is_blocked` flags migration 0059 set across relates-to,
+  discovered-from and other non-blocking edges on any store that crossed it
+  (beads#7037).
+- **Unchanged Dolt backup sync failures and reaper anomalies no longer mail
+  on every run.** `escalate.sh` takes `--incident-key` and `--fingerprint`:
+  an alert whose fingerprint matches its last delivered one stays quiet for
+  `GC_ESCALATE_REMINDER_SECONDS` (default one day), a changed fingerprint
+  alerts at once, and both orders pass `--resolve-incident` on a clean run so
+  the next failure alerts at once too. Deduplication is best-effort: when the
+  state under `.gc/incidents/` cannot be read or written the alert is sent
+  anyway, and a failed send is retried on the next run. The reaper's
+  fingerprint ignores only a measured backup age, so a backup that goes
+  missing alerts at once. The backup order's escalation reports each
+  database's first failed attempt instead of its last, with common credential
+  shapes redacted from every diagnostic. When `GC_ESCALATE_SEND_TIMEOUT_SECS`
+  cuts a send off before `gc mail send` reports the mail written,
+  `escalate.sh` now exits non-zero so callers that check the exit status can
+  retry it; keyed incidents also retry, because a failed send records no
+  incident state. A send cut off only after that report still counts as
+  delivered. The backup order's missing-`flock` and offsite-publication
+  alerts still mail on every run, and an `escalate.sh` override must accept
+  or ignore the new flags. One that rejects them as a usage error, as one
+  written for 1.5.0 does, is sent the alert again without them, so it keeps
+  alerting, undeduplicated (#8231).
+- **The controller no longer wakes an on-demand named session for a
+  deferred molecule or wisp root it cannot claim.** An assigned, open,
+  ephemeral/no-history/workflow molecule root counts as ready wake demand
+  (`appendOpenAssignedMoleculeWorkUnique`) so an on-demand session gets
+  woken for its actual next turn — but the check never looked at
+  `defer_until` or an indefinite defer, even though the hook
+  (`isFutureDeferredHookCandidate`) already refuses the same row while it
+  is deferred. The session woke, found nothing claimable, and drained;
+  the next pass counted the same root again. Deferring a molecule or wisp
+  root now actually pauses the session it would otherwise wake, the same
+  way deferring a plain task already does.
+
 - **`passthroughEnv` now honors `GC_SUPERVISOR_ENV` when deciding which
   non-`GC_`-prefixed variables reach a spawned agent session, not only which
   ones survive into the persisted service file.** The two allowlists used to
