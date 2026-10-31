@@ -71,6 +71,7 @@ go_test(
         "dialog_trust_selection_test.go",
         "envsecret_test.go",
         "fake_conformance_test.go",
+        "fake_contracts_test.go",
         "fake_profile_test.go",
         "fake_test.go",
         "fence_helpers_test.go",

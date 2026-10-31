@@ -9,6 +9,7 @@ go_library(
     name = "runtimetest",
     srcs = [
         "conformance.go",
+        "contracts.go",
         "dolt_env.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/runtimetest",
@@ -20,6 +21,7 @@ go_test(
     name = "runtimetest_test",
     srcs = [
         "conformance_test.go",
+        "contracts_test.go",
         "testenv_import_test.go",
     ],
     embed = [":runtimetest"],
