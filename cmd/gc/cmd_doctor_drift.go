@@ -145,6 +145,12 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 			// is not mirror drift the re-pin sync can repair.
 			continue
 		}
+		if liveRigLocal {
+			// Case A already names this rig's real problem, and restoring a
+			// managed port beside a listening rig-local server is the re-pin
+			// CanFix withholds.
+			continue
+		}
 		// Case D: the mirror raw bd resolves the managed port through is
 		// missing or blank, so every bd call in the rig resolves port 0.
 		c.repinnablePortDrift = true

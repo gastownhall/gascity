@@ -318,6 +318,36 @@ func TestDoltDriftCheckFixRestoresMissingPortMirror(t *testing.T) {
 	}
 }
 
+// TestDoltDriftCheckMissingPortMirrorBesideLiveRigLocalReportsOnlyCaseA pins
+// that a live rig-local Dolt (Case A) is the only finding for its rig: the
+// missing mirror is not reported, and --fix does not write a managed port
+// beside a server the operator still has to resolve.
+func TestDoltDriftCheckMissingPortMirrorBesideLiveRigLocalReportsOnlyCaseA(t *testing.T) {
+	cityDir, rigDir, _, cfg := managedCityDriftFixture(t, "runner")
+	portFile := removeRigPortMirror(t, rigDir)
+	ln := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = ln.Close() })
+	writeSQLServerInfo(t, rigDir, os.Getpid(), ln.Addr().(*net.TCPAddr).Port)
+
+	check := newDoltDriftCheck(cityDir, cfg)
+	d := &doctor.Doctor{}
+	d.Register(check)
+	report := d.RunCollect(&doctor.CheckContext{CityPath: cityDir}, true)
+	res := report.Results[0]
+	if res.Status != doctor.StatusError || len(res.Details) != 1 || !strings.Contains(res.Details[0], "rig-local Dolt pid") {
+		t.Fatalf("Run() = status %v details %v, want exactly the Case A live rig-local finding", res.Status, res.Details)
+	}
+	if check.CanFix() {
+		t.Error("CanFix() = true beside a live rig-local Dolt, want false")
+	}
+	if report.Fixed != 0 {
+		t.Errorf("doctor --fix fixed=%d, want 0 beside a live rig-local Dolt", report.Fixed)
+	}
+	if _, err := os.Stat(portFile); !os.IsNotExist(err) {
+		t.Errorf("rig port mirror stat err = %v, want it still absent", err)
+	}
+}
+
 // TestDoltDriftCheckCanFixGating pins the fix-eligibility decision: re-pinning
 // is offered only for port-file drift (Case B) and is suppressed when a live
 // rig-local Dolt (Case A) would make re-pinning point at the wrong server.
