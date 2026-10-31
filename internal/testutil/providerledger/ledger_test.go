@@ -1632,7 +1632,8 @@ func TestCatalogReturnsIndependentEntries(t *testing.T) {
 	first[0].Claims[0].Contract = ContractID("mutated.contract")
 	first[0].Claims[0].Proof.File = "mutated-proof.go"
 	first[0].Claims[0].Proof.AllowedCalls[0].Name = "MutatedCall"
-	first[4].Claims[0].Waiver.Owner = "mutated-owner"
+	// Catalog()[5] is k8s, an entry whose runtime.Provider claim is still waived.
+	first[5].Claims[0].Waiver.Owner = "mutated-owner"
 	first[len(first)-1].Source.Function = "mutatedSource"
 
 	second := Catalog()
@@ -1657,8 +1658,8 @@ func TestCatalogReturnsIndependentEntries(t *testing.T) {
 	if got := second[0].Claims[0].Proof.AllowedCalls[0].Name; got != "Sprintf" {
 		t.Errorf("Catalog() proof allowed call leaked mutation: %q", got)
 	}
-	if second[4].Claims[0].Waiver.Owner != runtimeContractWaiverOwner {
-		t.Errorf("Catalog() waiver leaked mutation: %q", second[4].Claims[0].Waiver.Owner)
+	if second[5].Claims[0].Waiver.Owner != runtimeContractWaiverOwner {
+		t.Errorf("Catalog() waiver leaked mutation: %q", second[5].Claims[0].Waiver.Owner)
 	}
 	if second[len(second)-1].Source.Function != "resolveSessionTransportProvider" {
 		t.Errorf("Catalog() source leaked mutation: %q", second[len(second)-1].Source.Function)
