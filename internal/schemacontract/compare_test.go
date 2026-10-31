@@ -49,8 +49,8 @@ func wantProblem(t *testing.T, problems []string, parts ...string) {
 // developer for the next step.
 const generatorCommand = "bazel run //cmd/gen-schema-baseline"
 
-// versionText is how a message must name a schema's version.
-func versionText(version string) string {
+// versionInMessage is how a message must name a schema's version.
+func versionInMessage(version string) string {
 	if version == "" {
 		return "unversioned"
 	}
@@ -61,14 +61,14 @@ func versionText(version string) string {
 // and the generator command, plus any extra parts.
 func wantBreaking(t *testing.T, problems []string, version string, parts ...string) {
 	t.Helper()
-	wantProblem(t, problems, append([]string{"BREAKING", schemaPath, versionText(version), generatorCommand}, parts...)...)
+	wantProblem(t, problems, append([]string{"BREAKING", schemaPath, versionInMessage(version), generatorCommand}, parts...)...)
 }
 
 // wantAdditive asserts an additive-change message that names the schema, its
 // version and the generator command, plus any extra parts.
 func wantAdditive(t *testing.T, problems []string, version string, parts ...string) {
 	t.Helper()
-	wantProblem(t, problems, append([]string{"run the generator", schemaPath, versionText(version), generatorCommand}, parts...)...)
+	wantProblem(t, problems, append([]string{"run the generator", schemaPath, versionInMessage(version), generatorCommand}, parts...)...)
 }
 
 func wantClean(t *testing.T, problems []string) {
@@ -222,7 +222,7 @@ func TestCheckVersionBumpRules(t *testing.T) {
 		wantClean(t, Check(baselineOf(v1, v2), map[string]Entry{schemaPath: live2}))
 	})
 	t.Run("bump without an entry fails", func(t *testing.T) {
-		wantProblem(t, Check(baselineOf(v1), map[string]Entry{schemaPath: live2}), "bump without entry", schemaPath, versionText("2"), generatorCommand)
+		wantProblem(t, Check(baselineOf(v1), map[string]Entry{schemaPath: live2}), "bump without entry", schemaPath, versionInMessage("2"), generatorCommand)
 	})
 	t.Run("version went backwards", func(t *testing.T) {
 		wantProblem(t, Check(baselineOf(v1, v2), map[string]Entry{schemaPath: live1}), "went backwards")
@@ -283,7 +283,7 @@ func TestCheckBreakingPersistsAgainstNewestEntryOnly(t *testing.T) {
 func TestCheckOrphanedRecordFails(t *testing.T) {
 	v1 := mustExtract(t, doc("1", ``, `"a":{"type":"string"}`))
 	problems := Check(baselineOf(v1), map[string]Entry{})
-	wantProblem(t, problems, schemaPath, "schema removed", "BREAKING CHANGE:", versionText("1"), "internal/schemacontract/baseline.json")
+	wantProblem(t, problems, schemaPath, "schema removed", "BREAKING CHANGE:", versionInMessage("1"), "internal/schemacontract/baseline.json")
 }
 
 func TestCheckProblemsAreSorted(t *testing.T) {
