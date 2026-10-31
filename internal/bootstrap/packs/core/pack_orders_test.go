@@ -150,11 +150,15 @@ func TestNotifyOnHumanGateCreationOrder(t *testing.T) {
 // silently (failures are best-effort and swallowed at runtime), so they are
 // pinned here:
 //
-//   - The bead.created payload does NOT carry await_type, so a human gate is
-//     indistinguishable from a timer/gh gate at the event alone. The script
-//     must re-fetch the bead via `gc bd show` and gate on await_type == "human"
-//     AND status == "open" — otherwise it would notify on every gate creation
-//     (or none).
+//   - The bead.created payload does NOT carry the gate type, so a human gate
+//     is indistinguishable from a timer/gh gate at the event alone. The script
+//     must re-fetch the bead via `gc bd show` and gate on a human type AND
+//     status == "open" — otherwise it would notify on every gate creation (or
+//     none). The type is bd's await_type for bd's own gates, else the
+//     gc.gate_type stamp a formula [steps.gate] writes (gc stores have no
+//     await_type column). Gates typed neither way are never mailed.
+//   - The resolve hint names `gc bd close`, which every store serves; a split
+//     city refuses `gc bd gate resolve` for a gate its class binding holds.
 //   - Addressee resolution must consult gc.deferred_assignee: formula/molecule
 //     gates strip the assignee to that metadata key at create time, so a naive
 //     `.assignee`-only lookup finds an empty addressee and misroutes to the
@@ -185,8 +189,10 @@ func TestNotifyOnHumanGateCreationScriptContract(t *testing.T) {
 	for _, want := range []string{
 		"(.payload.bead // .payload)", // normalize API-envelope vs local-fallback event shape
 		`$b.issue_type == "gate"`,     // filter events to gate creations
-		"gc bd show",                  // re-fetch (event lacks await_type)
-		`"$AWAIT_TYPE" = "human"`,     // human gates only
+		"gc bd show",                  // re-fetch (event lacks the gate type)
+		`"$GATE_TYPE" = "human"`,      // human gates only
+		`gc.gate_type`,                // formula gates' declared type
+		"gc bd close",                 // resolve hint every store serves
 		`"$STATUS" = "open"`,          // skip already-resolved gates
 		`gc.deferred_assignee`,        // formula/molecule addressee
 		"--notify",                    // mail + nudge, human-safe primitive
@@ -261,9 +267,13 @@ func TestRenudgeStaleHumanGatesOrder(t *testing.T) {
 //   - Enumeration is over OPEN gates (`gc bd gate list`, open-only by default)
 //     with `--limit 0` so a rig past the default 50-gate page is not silently
 //     truncated — a truncated page would drop stale gates from the sweep.
-//   - It re-nudges ONLY open human gates: await_type == "human" AND
-//     status == "open". The live town carries dozens of legacy await_type=null
-//     workflow gates that must never be mailed about.
+//   - It re-nudges ONLY open human gates: await_type == "human" or, for a
+//     gate a formula synthesized, gc.gate_type == "human", AND
+//     status == "open". Legacy untyped workflow gates must never be mailed
+//     about.
+//   - Formula gates are enumerated by `gc ready --status open` filtered on
+//     gc.gate_type: on a split city they live in the class binding, which no
+//     per-scope `gc bd gate list` reads.
 //   - Both the staleness threshold and the repeat interval are configurable
 //     (GC_STALE_GATE_THRESHOLD / GC_STALE_GATE_RENUDGE_INTERVAL) — the order's
 //     purpose is "open past a configurable threshold, repeating on the
@@ -295,7 +305,10 @@ func TestRenudgeStaleHumanGatesScriptContract(t *testing.T) {
 	for _, want := range []string{
 		"gc bd gate list",                // enumerate OPEN gates (not events)
 		"--limit 0",                      // no silent 50-gate truncation
-		`.await_type == "human"`,         // human gates only
+		`.await_type == "human"`,         // bd's human gates
+		"gc ready --status open",         // formula gates, incl. split binding
+		"gc.gate_type",                   // formula gates' declared type
+		"gc bd close",                    // resolve hint every store serves
 		`.status == "open"`,              // skip already-resolved gates
 		"GC_STALE_GATE_THRESHOLD",        // configurable staleness threshold
 		"GC_STALE_GATE_RENUDGE_INTERVAL", // configurable repeat interval

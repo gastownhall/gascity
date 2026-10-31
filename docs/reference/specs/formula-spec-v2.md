@@ -617,10 +617,13 @@ alias does not change the separate reservation of `gc.*` *metadata keys*.
 
 **Gates and waits_for.** A `[steps.gate]` table synthesizes a sibling gate
 bead (type `gate`, title `Gate: <type> <id>`) and a `blocks` edge from the
-gated step to it: the step stays blocked until the gate bead is closed.
-`waits_for` records a `gate:<value>` label on the cooked step bead and
-compiles a `waits-for` dependency edge on the spawner step, treated as
-readiness-blocking. The gate `type` vocabulary and the `waits_for` mode
+gated step to it: the step stays blocked until the gate bead is closed. The
+declared `type` is stamped verbatim on the gate bead as `gc.gate_type`
+metadata. The core pack's human-gate orders mail the addressee of a `human`
+gate when it is created and re-nudge it while it stays open; close it with
+`gc bd close <id>`. `waits_for` records a `gate:<value>` label on the cooked
+step bead and compiles a `waits-for` dependency edge on the spawner step,
+treated as readiness-blocking. Other gate types and the `waits_for` mode
 distinction have no runtime consumer (section 4).
 
 **Preview.** `gc formula show <name>` renders the compiled recipe. For the
@@ -1131,10 +1134,12 @@ them; they are documented to prevent silent surprise.
   Use `check` (section 3.1) for orchestrator-driven re-execution.
 - **Gate `type` vocabulary.** `[steps.gate]` synthesizes a real gate bead
   that blocks its step until the gate bead is closed (manually or by an
-  external watcher), but the `type` values `gh:run`, `gh:pr`, `timer`,
-  `human`, and `mail` are doc-comment vocabulary in
-  `internal/formula/types.go` — the parser never validates them and no
-  bundled watcher acts on them. Zero bundled formulas use `gate`.
+  external watcher), and records the declared `type` as `gc.gate_type`
+  metadata. The values `gh:run`, `gh:pr`, `timer`, `human`, and `mail` are
+  doc-comment vocabulary in `internal/formula/types.go` — the parser never
+  validates them. Only `human` has a bundled consumer: the core pack's
+  human-gate orders announce and re-nudge it. No bundled watcher resolves any
+  gate type. Zero bundled formulas use `gate`.
 - **`waits_for` gate modes.** `waits_for` compiles to a readiness-blocking
   `waits-for` dependency edge plus a recorded gate mode, but no current
   dispatcher logic interprets the `all-children` / `any-children`

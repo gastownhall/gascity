@@ -539,6 +539,9 @@ func flattenSteps(steps []*Step, parentID string, idMapping map[string]string, o
 					Timeout: step.Gate.Timeout,
 				},
 			}
+			if step.Gate.Type != "" {
+				gateStep.Metadata = map[string]string{beadmeta.GateTypeMetadataKey: step.Gate.Type}
+			}
 			defP := 2
 			gateStep.Priority = &defP
 			*out = append(*out, gateStep)

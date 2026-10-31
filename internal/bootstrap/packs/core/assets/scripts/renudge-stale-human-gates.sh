@@ -12,12 +12,19 @@
 # its short lookback window.
 #
 # Runs as a cooldown sweep. Each run:
-#   1. Enumerates OPEN gates across HQ and every rig (`gc bd gate list` is
-#      open-only by default), keeping only await_type == "human" gates.
+#   1. Enumerates OPEN human gates two ways: bd's own gates across HQ and
+#      every rig (`gc bd gate list` is open-only by default, filtered to
+#      await_type == "human"), and gates a formula [steps.gate] synthesized
+#      (`gc ready --status open` filtered to gc.gate_type == "human"; gc's
+#      stores have no await_type column, and on a split city these gates live
+#      in the class binding no bd scope lists). A gate both list is handled
+#      once.
 #   2. For each human gate whose age exceeds GC_STALE_GATE_THRESHOLD and whose
 #      last re-nudge is older than GC_STALE_GATE_RENUDGE_INTERVAL, re-fetches
 #      the gate (the list projection omits assignee/metadata), re-verifies it
 #      is still an open human gate, resolves the addressee and re-notifies.
+#      The hint names `gc bd close`, which every store serves; a split city
+#      refuses `gc bd gate resolve` for a gate its class binding holds.
 #
 # Addressee resolution (first non-empty wins), identical to the creation notify
 # so a gate is always re-nudged at the same address it was first notified:
@@ -44,9 +51,10 @@
 # cadence memory intact across a transient per-rig enumeration failure, so a
 # rig that briefly fails to list does not trigger an early re-nudge storm.
 #
-# Cross-rig: gates are enumerated per scope (HQ + each non-HQ rig), so the
+# Cross-rig: bd gates are enumerated per scope (HQ + each non-HQ rig), so the
 # owning rig is known without a prefix lookup; the re-fetch is scoped with
-# `--rig` (a gc flag, not a bd flag, so it routes through `gc bd`). Mail send is
+# `--rig` (a gc flag, not a bd flag, so it routes through `gc bd`). Formula
+# gates are re-fetched by id alone (see enumeration 2 below). Mail send is
 # city-scoped: recipients (mayor / human / coordinators) are city-level
 # identities.
 #
@@ -146,6 +154,83 @@ write_state() {
 
 RENUDGED=0
 FAILED=0
+# Gate ids already considered this sweep: a gate both enumerations list is
+# re-nudged at most once.
+SEEN=" "
+
+# renudge_gate <gate-id> <created_at> [--rig <rig>]: re-nudge one candidate if
+# it is past the staleness threshold and the re-nudge interval, after
+# re-fetching it to confirm it is still an open human gate.
+renudge_gate() {
+    gate_id="$1"
+    created_at="$2"
+    shift 2
+    case "$SEEN" in *" $gate_id "*) return 0 ;; esac
+    SEEN="$SEEN$gate_id "
+
+    # Age gate: only gates open past the staleness threshold.
+    created_epoch="$(iso_to_epoch "$created_at")"
+    [ -n "$created_epoch" ] || return 0
+    age=$(( NOW_EPOCH - created_epoch ))
+    [ "$age" -ge "$THRESHOLD_S" ] || return 0
+
+    # Cadence gate: skip if re-nudged within the interval. A missing entry
+    # (never re-nudged) is eligible immediately once past the threshold.
+    last_iso="$(echo "$STATE" | jq -r --arg k "$gate_id" '.[$k] // ""' 2>/dev/null)"
+    if [ -n "$last_iso" ]; then
+        last_epoch="$(iso_to_epoch "$last_iso")"
+        if [ -n "$last_epoch" ] && [ $(( NOW_EPOCH - last_epoch )) -lt "$RENUDGE_INTERVAL_S" ]; then
+            return 0
+        fi
+    fi
+
+    # Re-fetch: the list projection omits assignee/metadata, and re-reading
+    # closes the tiny window where the gate resolved since the list. Confirm
+    # it is still an open human gate before sending.
+    GATE_JSON="$(gc bd show "$gate_id" "$@" --json 2>/dev/null \
+        | jq -c 'if type == "array" then .[0] else . end' 2>/dev/null)" || return 0
+    [ -n "$GATE_JSON" ] && [ "$GATE_JSON" != "null" ] || return 0
+    GATE_TYPE="$(printf '%s' "$GATE_JSON" | jq -r \
+        'if (.await_type // "") != "" then .await_type else (.metadata."gc.gate_type" // "") end' 2>/dev/null)"
+    STATUS="$(printf '%s' "$GATE_JSON" | jq -r '.status // ""' 2>/dev/null)"
+    [ "$GATE_TYPE" = "human" ] || return 0
+    [ "$STATUS" = "open" ] || return 0
+
+    # Addressee: assignee -> gc.deferred_assignee -> escalation recipient.
+    # Both null and empty-string count as "unset" (a stripped assignee can
+    # land as "" rather than null).
+    ADDRESSEE="$(printf '%s' "$GATE_JSON" | jq -r \
+        '[.assignee, .metadata."gc.deferred_assignee"]
+         | map(select(. != null and . != "")) | (.[0] // "")' 2>/dev/null)"
+    [ -n "$ADDRESSEE" ] || ADDRESSEE="$ESCALATION_RECIPIENT"
+
+    TITLE="$(printf '%s' "$GATE_JSON" | jq -r '.title // ""' 2>/dev/null)"
+    DESC="$(printf '%s' "$GATE_JSON" | jq -r '.description // ""' 2>/dev/null)"
+    age_h=$(( age / 3600 ))
+    age_m=$(( (age % 3600) / 60 ))
+
+    SUBJECT="Reminder — human gate still open: $gate_id"
+    BODY="Human gate $gate_id has been open and unresolved for ${age_h}h${age_m}m and still awaits you."
+    [ -n "$TITLE" ] && BODY="$BODY
+Title: $TITLE"
+    [ -n "$DESC" ] && BODY="$BODY
+$DESC"
+    BODY="$BODY
+Resolve with: gc bd close $gate_id"
+
+    # Loud-fail: record the re-nudge only on a delivered send, so an
+    # undeliverable one surfaces and retries next sweep.
+    if gc mail send "$ADDRESSEE" -s "$SUBJECT" -m "$BODY" --notify >/dev/null 2>&1; then
+        STATE="$(echo "$STATE" | jq --arg k "$gate_id" --arg now "$NOW_ISO" '.[$k] = $now')"
+        write_state
+        RENUDGED=$((RENUDGED + 1))
+    else
+        echo "renudge-stale-human-gates: FAILED to re-notify addressee '$ADDRESSEE' of stale human gate $gate_id (will retry next sweep)" >&2
+        FAILED=$((FAILED + 1))
+    fi
+}
+
+# 1. bd's own human gates (await_type == "human"), listed per scope.
 while IFS= read -r scope; do
     RIG_ARG1=""
     RIG_ARG2=""
@@ -161,8 +246,6 @@ while IFS= read -r scope; do
     GATES_JSON="$(gc bd gate list ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} --limit 0 --json 2>/dev/null)" || continue
     [ -n "$GATES_JSON" ] && [ "$GATES_JSON" != "null" ] || continue
 
-    # Keep only human gates, emit "<id>\t<created_at>". Non-human gates (timer,
-    # gh, bead, and the legacy await_type=null workflow gates) are dropped here.
     HUMAN_GATES="$(printf '%s' "$GATES_JSON" \
         | jq -r '(if type == "array" then . else [.] end)[]
                  | select(.await_type == "human" and .status == "open")
@@ -171,70 +254,28 @@ while IFS= read -r scope; do
 
     while IFS="$(printf '\t')" read -r gate_id created_at; do
         [ -n "$gate_id" ] || continue
-
-        # Age gate: only gates open past the staleness threshold.
-        created_epoch="$(iso_to_epoch "$created_at")"
-        [ -n "$created_epoch" ] || continue
-        age=$(( NOW_EPOCH - created_epoch ))
-        [ "$age" -ge "$THRESHOLD_S" ] || continue
-
-        # Cadence gate: skip if re-nudged within the interval. A missing entry
-        # (never re-nudged) is eligible immediately once past the threshold.
-        last_iso="$(echo "$STATE" | jq -r --arg k "$gate_id" '.[$k] // ""' 2>/dev/null)"
-        if [ -n "$last_iso" ]; then
-            last_epoch="$(iso_to_epoch "$last_iso")"
-            if [ -n "$last_epoch" ] && [ $(( NOW_EPOCH - last_epoch )) -lt "$RENUDGE_INTERVAL_S" ]; then
-                continue
-            fi
-        fi
-
-        # Re-fetch: the list projection omits assignee/metadata, and re-reading
-        # closes the tiny window where the gate resolved since the list. Confirm
-        # it is still an open human gate before sending.
-        GATE_JSON="$(gc bd show "$gate_id" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} --json 2>/dev/null \
-            | jq -c 'if type == "array" then .[0] else . end' 2>/dev/null)" || continue
-        [ -n "$GATE_JSON" ] && [ "$GATE_JSON" != "null" ] || continue
-        AWAIT_TYPE="$(printf '%s' "$GATE_JSON" | jq -r '.await_type // ""' 2>/dev/null)"
-        STATUS="$(printf '%s' "$GATE_JSON" | jq -r '.status // ""' 2>/dev/null)"
-        [ "$AWAIT_TYPE" = "human" ] || continue
-        [ "$STATUS" = "open" ] || continue
-
-        # Addressee: assignee -> gc.deferred_assignee -> escalation recipient.
-        # Both null and empty-string count as "unset" (a stripped assignee can
-        # land as "" rather than null).
-        ADDRESSEE="$(printf '%s' "$GATE_JSON" | jq -r \
-            '[.assignee, .metadata."gc.deferred_assignee"]
-             | map(select(. != null and . != "")) | (.[0] // "")' 2>/dev/null)"
-        [ -n "$ADDRESSEE" ] || ADDRESSEE="$ESCALATION_RECIPIENT"
-
-        TITLE="$(printf '%s' "$GATE_JSON" | jq -r '.title // ""' 2>/dev/null)"
-        DESC="$(printf '%s' "$GATE_JSON" | jq -r '.description // ""' 2>/dev/null)"
-        age_h=$(( age / 3600 ))
-        age_m=$(( (age % 3600) / 60 ))
-
-        SUBJECT="Reminder — human gate still open: $gate_id"
-        BODY="Human gate $gate_id has been open and unresolved for ${age_h}h${age_m}m and still awaits you."
-        [ -n "$TITLE" ] && BODY="$BODY
-Title: $TITLE"
-        [ -n "$DESC" ] && BODY="$BODY
-$DESC"
-        BODY="$BODY
-Resolve with: gc bd gate resolve $gate_id"
-
-        # Loud-fail: record the re-nudge only on a delivered send, so an
-        # undeliverable one surfaces and retries next sweep.
-        if gc mail send "$ADDRESSEE" -s "$SUBJECT" -m "$BODY" --notify >/dev/null 2>&1; then
-            STATE="$(echo "$STATE" | jq --arg k "$gate_id" --arg now "$NOW_ISO" '.[$k] = $now')"
-            write_state
-            RENUDGED=$((RENUDGED + 1))
-        else
-            echo "renudge-stale-human-gates: FAILED to re-notify addressee '$ADDRESSEE' of stale human gate $gate_id (will retry next sweep)" >&2
-            FAILED=$((FAILED + 1))
-        fi
+        renudge_gate "$gate_id" "$created_at" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"}
     done <<INNER
 $HUMAN_GATES
 INNER
 done < "$SCOPES_FILE"
+
+# 2. Human gates a formula [steps.gate] synthesized (gc.gate_type == "human").
+# gc ready --status open lists them across the city store, the serving rigs
+# and, on a split city, the class binding that holds the graph, where no
+# bd scope can see them. The re-fetch takes no --rig: gc bd resolves the
+# owning store from the id, and a --rig pin is refused for a bead the
+# binding holds.
+FORMULA_GATES="$(gc ready --status open --metadata-field "gc.gate_type=human" --json 2>/dev/null \
+    | jq -r '(if type == "array" then . else [] end)[]
+             | select(.issue_type == "gate")
+             | "\(.id)\t\((.created_at // "") | sub("\\.[0-9]+"; ""))"' 2>/dev/null)" || FORMULA_GATES=""
+while IFS="$(printf '\t')" read -r gate_id created_at; do
+    [ -n "$gate_id" ] || continue
+    renudge_gate "$gate_id" "$created_at"
+done <<FORMULA
+$FORMULA_GATES
+FORMULA
 
 # Prune entries older than RETENTION so the state file stays bounded.
 RETENTION_S="$(duration_to_seconds "$RETENTION")"
