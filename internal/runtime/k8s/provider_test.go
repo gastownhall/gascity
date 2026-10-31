@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -17,9 +19,12 @@ import (
 
 	execerr "k8s.io/client-go/util/exec"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 func TestProviderImplementsInterface(_ *testing.T) {
@@ -2016,6 +2021,397 @@ func TestStartSkipsStagingWhenPrebaked(t *testing.T) {
 	}
 }
 
+func TestStartProjectsRigStateAfterCityInitAndBeforeReadyMarker(t *testing.T) {
+	cfg := rigProjectionTestFixture(t)
+	statePath := citylayout.SuspensionStateFile(cfg.Env["GC_CITY"])
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, []byte(`{"city":{"suspended":false},"rigs":{"gascity":{"suspended":false}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := newFakeK8sOps()
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 4 && cmd[0] == "sh" && strings.Contains(cmd[2], "__GC_SITE_BINDING_MISSING__") {
+			return siteBindingReadOutput("__GC_SITE_BINDING_MISSING__"), nil
+		}
+		if len(cmd) >= 3 && cmd[0] == "sh" && strings.Contains(cmd[2], "tar xf -") {
+			return "gc-stage-ok", nil
+		}
+		if len(cmd) >= 4 && cmd[0] == "env" && cmd[2] == "gc" && cmd[3] == "init" {
+			if err := os.WriteFile(statePath, []byte(`{"city":{"suspended":true},"rigs":{"gascity":{"suspended":true}}}`), 0o600); err != nil {
+				return "", err
+			}
+		}
+		return "", nil
+	}
+	p := newProviderWithOps(&drainingArchiveOps{fakeK8sOps: fake})
+	if err := p.Start(context.Background(), "rig-agent", cfg); err != nil {
+		t.Fatalf("Start rig session: %v", err)
+	}
+	initAt := findExecCall(fake.calls, func(cmd []string) bool {
+		return len(cmd) >= 4 && cmd[0] == "env" && cmd[2] == "gc" && cmd[3] == "init"
+	})
+	projectionAt := findExecCall(fake.calls, func(cmd []string) bool {
+		return len(cmd) >= 4 && cmd[0] == "sh" && cmd[3] == "gc-rig-projection"
+	})
+	readyAt := findExecCall(fake.calls, func(cmd []string) bool {
+		return len(cmd) >= 2 && cmd[0] == "touch" && strings.Contains(cmd[1], ".gc-workspace-ready")
+	})
+	rigReadyAt := findExecCall(fake.calls, func(cmd []string) bool {
+		return len(cmd) >= 2 && cmd[0] == "touch" && strings.Contains(cmd[1], "gc-rig-projection-ready-")
+	})
+	if initAt < 0 || projectionAt <= initAt || readyAt <= projectionAt || rigReadyAt <= projectionAt {
+		t.Fatalf("call order init=%d projection=%d workspace-ready=%d rig-ready=%d; want init < projection < both markers; calls=%#v", initAt, projectionAt, readyAt, rigReadyAt, fake.calls)
+	}
+	projectedState, err := base64.StdEncoding.DecodeString(fake.calls[projectionAt].cmd[5])
+	if err != nil {
+		t.Fatalf("decode projected suspension state: %v", err)
+	}
+	var state suspensionstate.State
+	if err := json.Unmarshal(projectedState, &state); err != nil {
+		t.Fatalf("decode projected suspension state JSON: %v", err)
+	}
+	if got := state.City.Suspended; got == nil || !*got {
+		t.Errorf("projected city suspension = %v, want latest true state", got)
+	}
+	if got := state.Rigs["gascity"].Suspended; got == nil || !*got {
+		t.Errorf("projected rig suspension = %v, want latest true state", got)
+	}
+}
+
+func TestStartProjectsRigStateBeforePrebakedEntrypoint(t *testing.T) {
+	cfg := rigProjectionTestFixture(t)
+	fake := newFakeK8sOps()
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 4 && cmd[0] == "sh" && strings.Contains(cmd[2], "__GC_SITE_BINDING_MISSING__") {
+			return siteBindingReadOutput("__GC_SITE_BINDING_MISSING__"), nil
+		}
+		return "", nil
+	}
+	p := newProviderWithOps(fake)
+	p.prebaked = true
+	if err := p.Start(context.Background(), "rig-agent", cfg); err != nil {
+		t.Fatalf("Start prebaked rig session: %v", err)
+	}
+
+	pod := fake.pods[SanitizeName("rig-agent")]
+	if pod == nil || len(pod.Spec.Containers) == 0 || len(pod.Spec.Containers[0].Args) == 0 {
+		t.Fatal("fake did not retain the rig-scoped prebaked pod entrypoint")
+	}
+	entrypoint := pod.Spec.Containers[0].Args[0]
+	if !strings.Contains(entrypoint, "gc-rig-projection-ready-") || strings.Contains(entrypoint, ".gc-workspace-ready") {
+		t.Fatalf("rig-scoped prebaked entrypoint should wait on its unique projection marker only: %s", entrypoint)
+	}
+	projectionAt := findExecCall(fake.calls, func(cmd []string) bool {
+		return len(cmd) >= 4 && cmd[0] == "sh" && cmd[3] == "gc-rig-projection"
+	})
+	readyAt := findExecCall(fake.calls, func(cmd []string) bool {
+		return len(cmd) >= 2 && cmd[0] == "touch" && strings.Contains(cmd[1], "gc-rig-projection-ready-")
+	})
+	if projectionAt < 0 || readyAt <= projectionAt {
+		t.Fatalf("call order projection=%d ready=%d; want projection before ready marker", projectionAt, readyAt)
+	}
+	for _, call := range fake.calls {
+		if len(call.cmd) >= 4 && call.cmd[0] == "env" && call.cmd[2] == "gc" && call.cmd[3] == "init" {
+			t.Fatal("prebaked Start must not run gc init")
+		}
+	}
+}
+
+func TestStartPrebakedRigProjectionWaitsForDynamicUser(t *testing.T) {
+	cfg := rigProjectionTestFixture(t)
+	cfg.Env["LINUX_USERNAME"] = "gcuser"
+	fake := newFakeK8sOps()
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 4 && cmd[0] == "sh" && strings.Contains(cmd[2], "__GC_SITE_BINDING_MISSING__") {
+			return siteBindingReadOutput("__GC_SITE_BINDING_MISSING__"), nil
+		}
+		return "", nil
+	}
+	p := newProviderWithOps(fake)
+	p.prebaked = true
+	if err := p.Start(context.Background(), "rig-agent", cfg); err != nil {
+		t.Fatalf("Start prebaked rig session with dynamic user: %v", err)
+	}
+
+	pod := fake.pods[SanitizeName("rig-agent")]
+	if pod == nil || len(pod.Spec.Containers) == 0 || len(pod.Spec.Containers[0].Args) == 0 {
+		t.Fatal("fake did not retain the rig-scoped prebaked pod entrypoint")
+	}
+	entrypoint := pod.Spec.Containers[0].Args[0]
+	userSetupAt := strings.Index(entrypoint, `useradd -m -s /bin/bash "gcuser"`)
+	markerWaitAt := strings.Index(entrypoint, "gc-rig-projection-ready-")
+	if userSetupAt < 0 || markerWaitAt <= userSetupAt {
+		t.Fatalf("prebaked entrypoint must create the dynamic user before waiting for projection: %s", entrypoint)
+	}
+
+	projectionAt := findExecCall(fake.calls, func(cmd []string) bool {
+		return len(cmd) >= 4 && cmd[0] == "sh" && cmd[3] == "gc-rig-projection"
+	})
+	if projectionAt < 0 {
+		t.Fatalf("Start did not apply rig projection; calls=%#v", fake.calls)
+	}
+	projectionScript := fake.calls[projectionAt].cmd[2]
+	userWaitAt := strings.Index(projectionScript, `until id "$5"`)
+	chownAt := strings.Index(projectionScript, `chown "$5"`)
+	if userWaitAt < 0 || chownAt <= userWaitAt || !strings.Contains(projectionScript, `[ "$attempts" -ge 30 ]`) {
+		t.Fatalf("projection must wait for the dynamic user before chown with a bounded retry: %s", projectionScript)
+	}
+	if got := fake.calls[projectionAt].cmd[8]; got != "gcuser" {
+		t.Fatalf("projection dynamic user = %q, want gcuser", got)
+	}
+}
+
+func TestRelaunchProjectsRigStateBeforeRespawn(t *testing.T) {
+	cfg := rigProjectionTestFixture(t)
+	fake := newFakeK8sOps()
+	name := "rig-agent"
+	podName := SanitizeName(name)
+	fake.pods[podName] = &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Labels: map[string]string{"gc-session": SanitizeLabel(name)}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "agent", Env: []corev1.EnvVar{
+			{Name: "GC_RIG", Value: "gascity"},
+			{Name: "GC_RIG_ROOT", Value: "/workspace/rigs/gascity"},
+		}}}},
+	}
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 4 && cmd[0] == "sh" && strings.Contains(cmd[2], "__GC_SITE_BINDING_MISSING__") {
+			return siteBindingReadOutput("__GC_SITE_BINDING_MISSING__"), nil
+		}
+		return "", nil
+	}
+	p := newProviderWithOps(fake)
+	if err := p.Relaunch(context.Background(), name, cfg); err != nil {
+		t.Fatalf("Relaunch rig session: %v", err)
+	}
+	projectionAt := findExecCall(fake.calls, func(cmd []string) bool {
+		return len(cmd) >= 4 && cmd[0] == "sh" && cmd[3] == "gc-rig-projection"
+	})
+	respawnAt := findExecCall(fake.calls, func(cmd []string) bool {
+		return len(cmd) >= 3 && cmd[0] == "sh" && strings.Contains(cmd[2], "respawn-pane -k")
+	})
+	if projectionAt < 0 || respawnAt <= projectionAt {
+		t.Fatalf("call order projection=%d respawn=%d; want projection before respawn", projectionAt, respawnAt)
+	}
+}
+
+func TestRelaunchRejectsStaleRigPodEnvironment(t *testing.T) {
+	cfg := rigProjectionTestFixture(t)
+	fake := newFakeK8sOps()
+	name := "rig-agent"
+	podName := SanitizeName(name)
+	fake.pods[podName] = &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Labels: map[string]string{"gc-session": SanitizeLabel(name)}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "agent", Env: []corev1.EnvVar{
+			{Name: "GC_RIG", Value: "gascity"},
+			{Name: "GC_RIG_ROOT", Value: "/workspace/rigs/old"},
+		}}}},
+	}
+	fake.setExecResult(podName, []string{"tmux", "has-session", "-t", "main"}, "", nil)
+	p := newProviderWithOps(fake)
+	err := p.Relaunch(context.Background(), name, cfg)
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("Relaunch error = %v, want ErrSessionNotFound for stale rig env", err)
+	}
+	for _, call := range fake.calls {
+		if len(call.cmd) >= 3 && call.cmd[0] == "sh" && strings.Contains(call.cmd[2], "respawn-pane -k") {
+			t.Fatalf("Relaunch respawned a pod with stale rig env: %#v", fake.calls)
+		}
+	}
+}
+
+func TestStartChecksLivePodBeforeRigProjection(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "rig-agent", "rig-agent")
+	fake.setExecResult("rig-agent", []string{"tmux", "has-session", "-t", "main"}, "", nil)
+	cfg := rigProjectionTestFixture(t)
+	cfg.Env["GC_RIG_ROOT"] = "/different/path"
+	err := p.Start(context.Background(), "rig-agent", cfg)
+	if !errors.Is(err, runtime.ErrSessionExists) {
+		t.Fatalf("Start error = %v, want ErrSessionExists despite invalid unused projection", err)
+	}
+	for _, call := range fake.calls {
+		if call.method == "createPod" || call.method == "deletePod" {
+			t.Fatalf("Start changed an existing live Pod: %#v", fake.calls)
+		}
+	}
+}
+
+func TestStartRigProjectionFailuresDoNotCreateOrLeakPod(t *testing.T) {
+	t.Run("build failure creates no pod", func(t *testing.T) {
+		cfg := rigProjectionTestFixture(t)
+		cfg.Env["GC_RIG_ROOT"] = "/outside/city"
+		fake := newFakeK8sOps()
+		p := newProviderWithOps(fake)
+		if err := p.Start(context.Background(), "rig-agent", cfg); err == nil {
+			t.Fatal("Start succeeded with an unmapped rig root")
+		}
+		for _, call := range fake.calls {
+			if call.method == "createPod" {
+				t.Fatalf("build failure created a pod: %#v", fake.calls)
+			}
+		}
+	})
+
+	t.Run("apply failure deletes created pod", func(t *testing.T) {
+		cfg := rigProjectionTestFixture(t)
+		fake := newFakeK8sOps()
+		fake.execFunc = func(_ string, cmd []string) (string, error) {
+			if len(cmd) >= 4 && cmd[0] == "sh" && strings.Contains(cmd[2], "__GC_SITE_BINDING_MISSING__") {
+				return siteBindingReadOutput("[[rig]\nname = \"gascity\"\npath = ["), nil
+			}
+			return "", nil
+		}
+		p := newProviderWithOps(fake)
+		p.prebaked = true
+		if err := p.Start(context.Background(), "rig-agent", cfg); err == nil {
+			t.Fatal("Start succeeded with malformed pod site TOML")
+		}
+		created, deleted := false, false
+		for _, call := range fake.calls {
+			created = created || call.method == "createPod"
+			deleted = deleted || call.method == "deletePod"
+		}
+		if !created || !deleted {
+			t.Fatalf("projection failure cleanup: created=%v deleted=%v calls=%#v", created, deleted, fake.calls)
+		}
+	})
+
+	t.Run("projection marker failure deletes created pod", func(t *testing.T) {
+		cfg := rigProjectionTestFixture(t)
+		fake := newFakeK8sOps()
+		fake.execFunc = func(_ string, cmd []string) (string, error) {
+			if len(cmd) >= 4 && cmd[0] == "sh" && strings.Contains(cmd[2], "__GC_SITE_BINDING_MISSING__") {
+				return siteBindingReadOutput("__GC_SITE_BINDING_MISSING__"), nil
+			}
+			if len(cmd) >= 2 && cmd[0] == "touch" && strings.Contains(cmd[1], "gc-rig-projection-ready-") {
+				return "", errors.New("marker write failed")
+			}
+			return "", nil
+		}
+		p := newProviderWithOps(fake)
+		p.prebaked = true
+		if err := p.Start(context.Background(), "rig-agent", cfg); err == nil || !strings.Contains(err.Error(), "marking rig projection ready") {
+			t.Fatalf("Start error = %v, want strict projection-marker failure", err)
+		}
+		deleted := false
+		for _, call := range fake.calls {
+			deleted = deleted || call.method == "deletePod"
+		}
+		if !deleted {
+			t.Fatalf("failed projection marker did not clean up Pod: %#v", fake.calls)
+		}
+	})
+}
+
+func TestRelaunchRigProjectionFailuresDoNotRespawn(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		badRoot   bool
+		readError error
+		readData  string
+	}{
+		{name: "build", badRoot: true},
+		{name: "read", readError: errors.New("permission denied")},
+		{name: "malformed TOML", readData: "[[rig]\nname = \"gascity\"\npath = ["},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := rigProjectionTestFixture(t)
+			if tc.badRoot {
+				cfg.Env["GC_RIG_ROOT"] = "/outside/city"
+			}
+			fake := newFakeK8sOps()
+			name := "rig-agent"
+			podName := SanitizeName(name)
+			fake.pods[podName] = &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: podName, Labels: map[string]string{"gc-session": SanitizeLabel(name)}},
+				Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "agent", Env: []corev1.EnvVar{
+					{Name: "GC_RIG", Value: "gascity"},
+					{Name: "GC_RIG_ROOT", Value: "/workspace/rigs/gascity"},
+				}}}},
+			}
+			fake.execFunc = func(_ string, cmd []string) (string, error) {
+				if len(cmd) >= 4 && cmd[0] == "sh" && strings.Contains(cmd[2], "__GC_SITE_BINDING_MISSING__") {
+					if tc.readError != nil {
+						return "", tc.readError
+					}
+					return siteBindingReadOutput(tc.readData), nil
+				}
+				return "", nil
+			}
+			p := newProviderWithOps(fake)
+			err := p.Relaunch(context.Background(), name, cfg)
+			if !errors.Is(err, runtime.ErrSessionNotFound) {
+				t.Fatalf("Relaunch error = %v, want ErrSessionNotFound", err)
+			}
+			for _, call := range fake.calls {
+				if len(call.cmd) >= 3 && call.cmd[0] == "sh" && strings.Contains(call.cmd[2], "respawn-pane -k") {
+					t.Fatalf("Relaunch issued respawn after projection failure: %#v", fake.calls)
+				}
+			}
+		})
+	}
+}
+
+func rigProjectionTestFixture(t *testing.T) runtime.Config {
+	t.Helper()
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, "rigs", "gascity"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[[rigs]]
+name = "gascity"
+path = "rigs/gascity"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return runtime.Config{
+		Command: "codex",
+		WorkDir: cityPath,
+		Env: map[string]string{
+			"GC_AGENT":    "gascity/codex",
+			"GC_CITY":     cityPath,
+			"GC_RIG":      "gascity",
+			"GC_RIG_ROOT": filepath.Join(cityPath, "rigs", "gascity"),
+		},
+	}
+}
+
+func siteBindingReadOutput(data string) string {
+	return config.SiteBindingPath(podWorkspaceRoot) + "\n" + data
+}
+
+func siteBindingReadOutputAt(path, data string) string {
+	return path + "\n" + data
+}
+
+func findExecCall(calls []fakeCall, match func([]string) bool) int {
+	for i, call := range calls {
+		if call.method == "execInPod" && match(call.cmd) {
+			return i
+		}
+	}
+	return -1
+}
+
+type drainingArchiveOps struct {
+	*fakeK8sOps
+}
+
+func (o *drainingArchiveOps) execInPod(ctx context.Context, pod, container string, cmd []string, stdin io.Reader) (string, error) {
+	if stdin != nil && len(cmd) >= 3 && cmd[0] == "sh" && strings.Contains(cmd[2], "tar xf -") {
+		if _, err := io.Copy(io.Discard, stdin); err != nil {
+			return "", err
+		}
+	}
+	return o.fakeK8sOps.execInPod(ctx, pod, container, cmd, nil)
+}
+
 func TestStartDetectsImmediateSessionDeath(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)
@@ -2578,6 +2974,305 @@ func TestInitCityInPodSkipsDolt(t *testing.T) {
 		if !found {
 			t.Errorf("gc init should run with %s; got cmd=%v", flag, gcInitCmd)
 		}
+	}
+}
+
+func TestBuildPodRigProjectionUsesPodPathAndEffectiveSuspension(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+suspended_on_start = true
+
+[[rigs]]
+name = "gascity"
+path = "rigs/gascity"
+suspended_on_start = true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc", "runtime"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// An explicit resume overrides the authored suspended_on_start default.
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "runtime", "suspension-state.json"), []byte(`{"city":{"suspended":false},"rigs":{"gascity":{"suspended":false},"other":{"suspended":true}},"agents":{"gascity/codex":{"suspended":true}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	projection, err := buildPodRigProjection(cityPath, runtime.Config{Env: map[string]string{
+		"GC_CITY":     cityPath,
+		"GC_RIG":      "gascity",
+		"GC_RIG_ROOT": filepath.Join(cityPath, "rigs", "gascity"),
+	}})
+	if err != nil {
+		t.Fatalf("buildPodRigProjection: %v", err)
+	}
+	if projection == nil {
+		t.Fatal("projection = nil, want rig projection")
+	}
+	if got, want := projection.binding.Path, "/workspace/rigs/gascity"; got != want {
+		t.Errorf("projected rig path = %q, want %q", got, want)
+	}
+	if suspensionstate.EffectiveCitySuspended(projection.suspension, true) {
+		t.Error("effective city suspension = true, want explicit resume state to override suspended_on_start")
+	}
+	if suspensionstate.EffectiveRigSuspended(projection.suspension, "gascity", true) {
+		t.Error("effective rig suspension = true, want explicit resume state to override suspended_on_start")
+	}
+	if got := projection.suspension.City.Suspended; got == nil || *got {
+		t.Errorf("projected city suspension override = %v, want explicit false", got)
+	}
+	if got := projection.suspension.Rigs["gascity"].Suspended; got == nil || *got {
+		t.Errorf("projected suspension override = %v, want explicit false", got)
+	}
+	if got := projection.suspension.Rigs["other"].Suspended; got == nil || !*got {
+		t.Errorf("other rig suspension = %v, want preserved true", got)
+	}
+	if got := projection.suspension.Agents["gascity/codex"].Suspended; got == nil || !*got {
+		t.Errorf("reserved agent suspension = %v, want preserved true", got)
+	}
+}
+
+func TestBuildPodRigProjectionKeepsSuspendedOnStartDefaults(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+suspended_on_start = true
+
+[[rigs]]
+name = "gascity"
+path = "rigs/gascity"
+suspended_on_start = true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := buildPodRigProjection(cityPath, runtime.Config{Env: map[string]string{
+		"GC_CITY":     cityPath,
+		"GC_RIG":      "gascity",
+		"GC_RIG_ROOT": filepath.Join(cityPath, "rigs", "gascity"),
+	}})
+	if err != nil {
+		t.Fatalf("buildPodRigProjection: %v", err)
+	}
+	if got := projection.suspension.City.Suspended; got == nil || !*got {
+		t.Errorf("city suspension = %v, want explicit true from suspended_on_start", got)
+	}
+	if got := projection.suspension.Rigs["gascity"].Suspended; got == nil || !*got {
+		t.Errorf("rig suspension = %v, want explicit true from suspended_on_start", got)
+	}
+}
+
+func TestRefreshPodRigSuspensionSnapshotUsesLatestState(t *testing.T) {
+	cityPath := t.TempDir()
+	statePath := citylayout.SuspensionStateFile(cityPath)
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, []byte(`{"city":{"suspended":true},"rigs":{"gascity":{"suspended":true},"other":{"suspended":true}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projection := &podRigProjection{
+		binding:              config.RigSiteBinding{Name: "gascity", Path: "/workspace/rigs/gascity"},
+		suspension:           suspensionstate.State{},
+		citySuspendedOnStart: false,
+		rigSuspendedOnStart:  false,
+	}
+	if err := refreshPodRigSuspensionSnapshot(cityPath, projection); err != nil {
+		t.Fatalf("refreshPodRigSuspensionSnapshot: %v", err)
+	}
+	if got := projection.suspension.City.Suspended; got == nil || !*got {
+		t.Errorf("refreshed city suspension = %v, want true", got)
+	}
+	if got := projection.suspension.Rigs["gascity"].Suspended; got == nil || !*got {
+		t.Errorf("refreshed rig suspension = %v, want true", got)
+	}
+	if got := projection.suspension.Rigs["other"].Suspended; got == nil || !*got {
+		t.Errorf("other rig suspension = %v, want preserved true", got)
+	}
+}
+
+func TestBuildPodRigProjectionUsesSchema2AbsoluteSiteBinding(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, "rigs", "gascity"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[[rigs]]
+name = "gascity"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte(`[pack]
+name = "city"
+schema = 2
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "site.toml"), []byte(fmt.Sprintf(`[[rig]]
+name = "gascity"
+path = %q
+`, filepath.Join(cityPath, "rigs", "gascity"))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := runtime.Config{WorkDir: filepath.Join(cityPath, "rigs", "gascity"), Env: map[string]string{
+		"GC_CITY":     cityPath + "/",
+		"GC_RIG":      "gascity",
+		"GC_RIG_ROOT": filepath.Join(cityPath, "rigs", ".", "gascity"),
+	}}
+	projection, err := buildPodRigProjection(controllerCityPath(cfg.Env), cfg)
+	if err != nil {
+		t.Fatalf("buildPodRigProjection from schema-2 site binding: %v", err)
+	}
+	if got := projection.binding.Path; got != "/workspace/rigs/gascity" {
+		t.Fatalf("projected path = %q, want /workspace/rigs/gascity", got)
+	}
+	pod, err := buildPod("rig-agent", cfg, newProviderWithOps(newFakeK8sOps()))
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	if got := projectedPodWorkDir(cfg); got != "/workspace/rigs/gascity" {
+		t.Fatalf("projected workdir = %q, want normalized /workspace path", got)
+	}
+	if got := podEnvValue(pod, "GC_RIG_ROOT"); got != "/workspace/rigs/gascity" {
+		t.Fatalf("pod GC_RIG_ROOT = %q, want normalized /workspace path", got)
+	}
+}
+
+func TestBuildPodRigProjectionRejectsUnpairedRigEnvironment(t *testing.T) {
+	for _, env := range []map[string]string{
+		{"GC_RIG": "gascity"},
+		{"GC_RIG_ROOT": "/city/rigs/gascity"},
+	} {
+		if _, err := buildPodRigProjection("/city", runtime.Config{Env: env}); err == nil || !strings.Contains(err.Error(), "requires both GC_RIG and GC_RIG_ROOT") {
+			t.Errorf("buildPodRigProjection(%v) error = %v, want paired environment error", env, err)
+		}
+	}
+}
+
+func TestBuildPodRigProjectionRejectsUnmappedRigPath(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[[rigs]]
+name = "gascity"
+path = "../outside"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := buildPodRigProjection(cityPath, runtime.Config{Env: map[string]string{
+		"GC_CITY":     cityPath,
+		"GC_RIG":      "gascity",
+		"GC_RIG_ROOT": filepath.Join(cityPath, "..", "outside"),
+	}})
+	if err == nil || !strings.Contains(err.Error(), "outside controller City") {
+		t.Fatalf("buildPodRigProjection error = %v, want unmapped rig path error", err)
+	}
+}
+
+func TestBuildPodRigProjectionRejectsGCPathThatDoesNotMatchConfiguredRig(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[[rigs]]
+name = "gascity"
+path = "rigs/gascity"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := buildPodRigProjection(cityPath, runtime.Config{Env: map[string]string{
+		"GC_CITY":     cityPath,
+		"GC_RIG":      "gascity",
+		"GC_RIG_ROOT": filepath.Join(cityPath, "rigs", "..", "other"),
+	}})
+	if err == nil || !strings.Contains(err.Error(), "does not match configured path") {
+		t.Fatalf("buildPodRigProjection error = %v, want GC_RIG_ROOT/configured path mismatch", err)
+	}
+}
+
+func TestApplyPodRigProjectionReplacesOnlyRelevantBindingAndState(t *testing.T) {
+	projection := &podRigProjection{
+		binding:       config.RigSiteBinding{Name: "gascity", Path: "/workspace/rigs/gascity"},
+		linuxUsername: "gcuser",
+		suspension: suspensionstate.State{
+			City: suspensionstate.Override{Suspended: boolPtr(false)},
+			Rigs: map[string]suspensionstate.Override{
+				"gascity": {Suspended: boolPtr(false)},
+			},
+		},
+	}
+	fake := newFakeK8sOps()
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 4 && cmd[0] == "sh" && strings.Contains(cmd[2], "__GC_SITE_BINDING_MISSING__") {
+			return siteBindingReadOutputAt("/workspace/.gc/site-target.toml", "workspace_name = \"workspace\"\nworkspace_prefix = \"ws\"\n[[rig]]\nname = \"old\"\npath = \"/workspace/rigs/old\"\ncustom = \"keep\"\n"), nil
+		}
+		return "", nil
+	}
+
+	if err := applyPodRigProjection(context.Background(), fake, "pod", projection); err != nil {
+		t.Fatalf("applyPodRigProjection: %v", err)
+	}
+	if len(fake.calls) != 2 {
+		t.Fatalf("exec calls = %d, want site read and atomic projection write", len(fake.calls))
+	}
+	write := fake.calls[1]
+	if write.method != "execInPod" || len(write.cmd) < 9 || write.cmd[0] != "sh" {
+		t.Fatalf("projection write command = %#v", write)
+	}
+	if got := write.cmd[6]; got != "/workspace/.gc/site-target.toml" {
+		t.Errorf("projection write target = %q, want resolved symlink target", got)
+	}
+	if got := write.cmd[8]; got != "gcuser" || !strings.Contains(write.cmd[2], `chown "$5"`) {
+		t.Errorf("projection writer should restore dynamic-user ownership; argv=%#v", write.cmd)
+	}
+	siteData, err := base64.StdEncoding.DecodeString(write.cmd[4])
+	if err != nil {
+		t.Fatalf("decode projected site binding: %v", err)
+	}
+	if !strings.Contains(string(siteData), `workspace_name = "workspace"`) || !strings.Contains(string(siteData), `workspace_prefix = "ws"`) || !strings.Contains(string(siteData), `name = "gascity"`) || !strings.Contains(string(siteData), `path = "/workspace/rigs/gascity"`) || !strings.Contains(string(siteData), `name = "old"`) || !strings.Contains(string(siteData), `custom = "keep"`) {
+		t.Fatalf("projected site binding did not preserve workspace identity and other rig data:\n%s", siteData)
+	}
+	stateData, err := base64.StdEncoding.DecodeString(write.cmd[5])
+	if err != nil {
+		t.Fatalf("decode projected suspension state: %v", err)
+	}
+	var state suspensionstate.State
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("decode projected suspension state JSON: %v", err)
+	}
+	if got := state.Rigs["gascity"].Suspended; got == nil || *got {
+		t.Fatalf("projected rig suspension = %v, want explicit false", got)
+	}
+	if got := state.City.Suspended; got == nil || *got {
+		t.Fatalf("projected city suspension = %v, want explicit false", got)
+	}
+	if len(state.Rigs) != 1 {
+		t.Fatalf("projected rig states = %#v, want only selected rig", state.Rigs)
+	}
+}
+
+func TestApplyPodRigProjectionCreatesMissingSiteBinding(t *testing.T) {
+	projection := &podRigProjection{
+		binding: config.RigSiteBinding{Name: "gascity", Path: "/workspace/rigs/gascity"},
+		suspension: suspensionstate.State{Rigs: map[string]suspensionstate.Override{
+			"gascity": {Suspended: boolPtr(false)},
+		}},
+	}
+	fake := newFakeK8sOps()
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 4 && cmd[0] == "sh" && strings.Contains(cmd[2], "__GC_SITE_BINDING_MISSING__") {
+			return siteBindingReadOutput("__GC_SITE_BINDING_MISSING__"), nil
+		}
+		return "", nil
+	}
+	if err := applyPodRigProjection(context.Background(), fake, "pod", projection); err != nil {
+		t.Fatalf("applyPodRigProjection with missing site.toml: %v", err)
+	}
+	if len(fake.calls) != 2 {
+		t.Fatalf("exec calls = %d, want site read and projection write", len(fake.calls))
+	}
+	write := fake.calls[1].cmd
+	siteData, err := base64.StdEncoding.DecodeString(write[4])
+	if err != nil {
+		t.Fatalf("decode projected site binding: %v", err)
+	}
+	if !strings.Contains(string(siteData), `name = "gascity"`) || !strings.Contains(string(siteData), `path = "/workspace/rigs/gascity"`) {
+		t.Fatalf("missing site binding did not produce selected rig binding:\n%s", siteData)
 	}
 }
 

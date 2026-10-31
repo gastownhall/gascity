@@ -1,7 +1,9 @@
 package k8s
 
 import (
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"maps"
 	"path/filepath"
@@ -52,16 +54,60 @@ func remapControllerPathToPod(val, ctrlCity string) string {
 	return val
 }
 
+func remapRigRootToPod(val, ctrlCity string) string {
+	val = strings.TrimSpace(val)
+	ctrlCity = strings.TrimSpace(ctrlCity)
+	if val == "" || ctrlCity == "" {
+		return val
+	}
+	if !filepath.IsAbs(ctrlCity) {
+		if abs, err := filepath.Abs(ctrlCity); err == nil {
+			ctrlCity = abs
+		}
+	}
+	if !filepath.IsAbs(val) {
+		val = filepath.Join(ctrlCity, val)
+	}
+	val, err := filepath.Abs(val)
+	if err != nil {
+		return val
+	}
+	ctrlCity = filepath.Clean(ctrlCity)
+	val = filepath.Clean(val)
+	rel, err := filepath.Rel(ctrlCity, val)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return val
+	}
+	return filepath.Clean(filepath.Join(podWorkspaceRoot, rel))
+}
+
 // projectedPodWorkDir maps the controller-side WorkDir onto its pod-side path.
 // For a pool or workflow worker this is a per-bead directory
 // (<rig>/<beadID>-<slug>) that does not exist until the entrypoint creates it.
 func projectedPodWorkDir(cfg runtime.Config) string {
+	return projectedPodWorkDirForCity(controllerCityPath(cfg.Env), cfg.WorkDir)
+}
+
+func projectedPodWorkDirForCity(ctrlCity, workDir string) string {
 	podWorkDir := podWorkspaceRoot
-	ctrlCity := controllerCityPath(cfg.Env)
-	if ctrlCity != "" && cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
-		if rel, ok := strings.CutPrefix(cfg.WorkDir, ctrlCity+"/"); ok {
-			podWorkDir = podWorkspaceRoot + "/" + rel
-		}
+	ctrlCity = strings.TrimSpace(ctrlCity)
+	if ctrlCity == "" || workDir == "" {
+		return podWorkDir
+	}
+	cityRoot, err := filepath.Abs(ctrlCity)
+	if err != nil {
+		return podWorkDir
+	}
+	if !filepath.IsAbs(workDir) {
+		workDir = filepath.Join(cityRoot, workDir)
+	}
+	workDir, err = filepath.Abs(workDir)
+	if err != nil {
+		return podWorkDir
+	}
+	rel, err := filepath.Rel(filepath.Clean(cityRoot), filepath.Clean(workDir))
+	if err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		podWorkDir = filepath.Join(podWorkspaceRoot, rel)
 	}
 	return podWorkDir
 }
@@ -228,6 +274,14 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	// Build the agent command (base64-encoded to avoid quoting issues) — shared
 	// with the relaunch path so the entrypoint and a respawn launch identically.
 	cmdB64 := agentCommandB64(cfg)
+	rigProjectionMarker := ""
+	if strings.TrimSpace(cfg.Env["GC_RIG"]) != "" {
+		var nonce [16]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return nil, fmt.Errorf("creating rig projection readiness marker: %w", err)
+		}
+		rigProjectionMarker = "/tmp/gc-rig-projection-ready-" + hex.EncodeToString(nonce[:])
+	}
 
 	// Pod entrypoint: wait for workspace ready → pre_start → tmux → keepalive.
 	// Each pre_start command is base64-encoded and decoded at runtime to prevent
@@ -262,7 +316,10 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	credCopy := `mkdir -p $HOME/.claude && cp -rL /tmp/claude-secret/. $HOME/.claude/ 2>/dev/null; git config --global --add safe.directory '*' 2>/dev/null; `
 	wsWait := ""
 	if !p.prebaked {
-		wsWait = `while [ ! -f /workspace/.gc-workspace-ready ]; do sleep 0.5; done; `
+		wsWait += `while [ ! -f /workspace/.gc-workspace-ready ]; do sleep 0.5; done; `
+	}
+	if rigProjectionMarker != "" {
+		wsWait += fmt.Sprintf("while [ ! -f %s ]; do sleep 0.5; done; ", shellquote.Quote(rigProjectionMarker))
 	}
 
 	// The pod spec's WorkingDir names the workspace root, because the kubelet
@@ -299,6 +356,9 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	env, err := buildPodEnv(cfg.Env, podWorkDir, p.managedServiceHost, p.managedServicePort)
 	if err != nil {
 		return nil, err
+	}
+	if rigProjectionMarker != "" {
+		env = append(env, corev1.EnvVar{Name: "GC_RIG_PROJECTION_MARKER", Value: rigProjectionMarker})
 	}
 
 	// Build volume mounts for the main container.
@@ -452,16 +512,17 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 	// GC_DOLT_MANAGED_LOCAL marks a controller-local target, which
 	// projectedPodDoltEnv rewrites to the in-cluster service.
 	skip := map[string]bool{
-		"GC_BEADS":               true,
-		"GC_SESSION":             true,
-		"GC_EVENTS":              true,
-		"GC_K8S_DOLT_HOST":       true,
-		"GC_K8S_DOLT_PORT":       true,
-		"GC_DOLT_HOST":           true,
-		"GC_DOLT_PORT":           true,
-		"GC_DOLT_MANAGED_LOCAL":  true,
-		"BEADS_DOLT_SERVER_HOST": true,
-		"BEADS_DOLT_SERVER_PORT": true,
+		"GC_BEADS":                 true,
+		"GC_RIG_PROJECTION_MARKER": true,
+		"GC_SESSION":               true,
+		"GC_EVENTS":                true,
+		"GC_K8S_DOLT_HOST":         true,
+		"GC_K8S_DOLT_PORT":         true,
+		"GC_DOLT_HOST":             true,
+		"GC_DOLT_PORT":             true,
+		"GC_DOLT_MANAGED_LOCAL":    true,
+		"BEADS_DOLT_SERVER_HOST":   true,
+		"BEADS_DOLT_SERVER_PORT":   true,
 	}
 
 	ctrlCity := controllerCityPath(cfgEnv)
@@ -484,7 +545,9 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 			val = podRuntimeDir
 		case "GC_CONTROL_DISPATCHER_TRACE_DEFAULT", "GC_PACK_STATE_DIR":
 			val = projectControllerRuntimePathToPod(val, ctrlCity, ctrlRuntimeDir, podRuntimeDir)
-		case "GC_STORE_ROOT", "GC_RIG_ROOT", "BEADS_DIR", "GT_ROOT", "GC_PACK_DIR":
+		case "GC_RIG_ROOT":
+			val = remapRigRootToPod(val, ctrlCity)
+		case "GC_STORE_ROOT", "BEADS_DIR", "GT_ROOT", "GC_PACK_DIR":
 			val = remapControllerPathToPod(val, ctrlCity)
 		}
 		env = append(env, corev1.EnvVar{Name: k, Value: val})
@@ -528,6 +591,18 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 	})
 
 	return env, nil
+}
+
+func podEnvValue(pod *corev1.Pod, name string) string {
+	if pod == nil || len(pod.Spec.Containers) == 0 {
+		return ""
+	}
+	for _, env := range pod.Spec.Containers[0].Env {
+		if env.Name == name {
+			return env.Value
+		}
+	}
+	return ""
 }
 
 // needsStaging returns true if the session config requires file staging
