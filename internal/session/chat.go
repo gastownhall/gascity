@@ -1408,7 +1408,7 @@ func normalizeWaitIdleNudgeSource(source string) string {
 	return source
 }
 
-// idleBoundaryOutOfReach takes the wait-idle nudge's one look before its idle
+// idleBoundaryOutOfReach takes the wait-idle nudge's pre-read before its idle
 // wait (runtime.IdleBoundaryNow): a session that reads busy, or whose input a
 // pending interaction owns, will not reach a boundary within the wait, so the
 // nudge is reported undelivered at once for its caller to queue. Any other

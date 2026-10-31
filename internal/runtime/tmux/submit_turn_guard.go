@@ -91,14 +91,18 @@ func (t *Tmux) turnRunning(target, family string) (bool, error) {
 // SnapshotIdle reads it. A family whose busy reading this leaf does not trust
 // (busyReadingTrusted), and a pane whose family cannot be told, is
 // [runtime.ErrIdleIndeterminate] without a capture: the scan cannot say
-// whether its turn runs. A pane that cannot be resolved or captured is an
-// error, never a reading.
+// whether its turn runs. The family is SnapshotIdle's (busyTrustFamily). A
+// pane that cannot be resolved or captured, or whose family cannot be read,
+// is an error, never a reading.
 func (t *Tmux) TurnRunning(session string) (bool, error) {
 	target, err := t.agentInputTarget(session)
 	if err != nil {
 		return false, err
 	}
-	family := t.nudgeSubmitFamily(target)
+	family, err := t.busyTrustFamily(target)
+	if err != nil {
+		return false, fmt.Errorf("turn of session %q: %w", session, err)
+	}
 	if !busyReadingTrusted(family) {
 		return false, fmt.Errorf("turn of session %q: provider family %q: %w", session, family, runtime.ErrIdleIndeterminate)
 	}

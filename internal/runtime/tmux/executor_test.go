@@ -704,6 +704,12 @@ func agentPaneID(tm *Tmux, name string) (string, error) {
 // running claude as pid 4242. ok is false for any other command, so a fake
 // executor can serve the lookup and script everything else.
 func fakeAgentPaneRow(args []string) (string, bool) {
+	return fakeAgentPaneRowWithPID(args, "4242")
+}
+
+// fakeAgentPaneRowWithPID is fakeAgentPaneRow for an agent pane whose process
+// is pid, for a test whose process sniff must find a known process or none.
+func fakeAgentPaneRowWithPID(args []string, pid string) (string, bool) {
 	if tmuxSubcommand(args) != "list-panes" {
 		return "", false
 	}
@@ -713,7 +719,7 @@ func fakeAgentPaneRow(args []string) (string, bool) {
 	}
 	return "agent\t" + strings.NewReplacer(
 		"#{window_id}", "@1", "#{pane_id}", "%1", "#{pane_current_command}", "claude",
-		"#{pane_pid}", "4242", "#{pane_dead}", "0", "#{pane_current_path}", "/w",
+		"#{pane_pid}", pid, "#{pane_dead}", "0", "#{pane_current_path}", "/w",
 	).Replace(fields), true
 }
 

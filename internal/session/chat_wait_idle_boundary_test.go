@@ -19,22 +19,25 @@ type idleSnapshotFake struct {
 
 func (f *idleSnapshotFake) SnapshotIdle(string) (bool, error) { return f.idle, f.err }
 
-// Both wait-idle nudges take one look first (runtime.IdleBoundaryNow): a
-// session that reads busy, or shows a pending interaction, is reported
-// undelivered at once, for its caller to queue, without entering the idle
-// wait and without typing. A look at the boundary, or one that cannot tell,
-// waits for idle and delivers as before.
+// Both wait-idle nudges take a pre-read first (runtime.IdleBoundaryNow): a
+// session that reads busy, or reads indeterminate while its runtime reports a
+// pending interaction (an open dialog), is reported undelivered at once, for
+// its caller to queue, without entering the idle wait and without typing. A
+// pre-read at the boundary, or one that cannot tell, waits for idle and
+// delivers as before.
 func TestChatWaitIdleBusySnapshotQueuesWithoutWaiting(t *testing.T) {
+	indeterminate := fmt.Errorf("scan: %w", runtime.ErrIdleIndeterminate)
 	for _, tc := range []struct {
 		name      string
 		idle      bool
 		err       error
+		pending   *runtime.PendingInteraction
 		delivered bool
 	}{
 		{name: "busy"},
-		{name: "pending", err: fmt.Errorf("dialog: %w: %w", runtime.ErrIdleIndeterminate, runtime.ErrPendingInteraction)},
+		{name: "pending", err: indeterminate, pending: &runtime.PendingInteraction{RequestID: "tmux-1", Kind: "approval", Prompt: "Allow Bash?"}},
 		{name: "at the boundary", idle: true, delivered: true},
-		{name: "indeterminate", err: fmt.Errorf("scan: %w", runtime.ErrIdleIndeterminate), delivered: true},
+		{name: "indeterminate", err: indeterminate, delivered: true},
 	} {
 		for path, deliver := range map[string]func(*Manager, Info, runtime.Config) (bool, error){
 			"TryWaitIdleNudge": func(m *Manager, i Info, h runtime.Config) (bool, error) {
@@ -56,6 +59,7 @@ func TestChatWaitIdleBusySnapshotQueuesWithoutWaiting(t *testing.T) {
 					t.Fatalf("CreateSession: %v", err)
 				}
 				fake.WaitForIdleErrors[info.SessionName] = nil
+				fake.SetPendingInteraction(info.SessionName, tc.pending)
 				before := len(fake.SnapshotCalls())
 
 				delivered, err := deliver(mgr, info, runtime.Config{WorkDir: info.WorkDir})

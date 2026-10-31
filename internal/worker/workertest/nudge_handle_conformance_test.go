@@ -26,19 +26,26 @@ type idleSnapshotProvider struct {
 
 func (p *idleSnapshotProvider) SnapshotIdle(string) (bool, error) { return p.idle, p.err }
 
-// waitIdleReading is one pre-read a wait-idle nudge may take, and whether the
+// waitIdleReading is one pre-read a wait-idle nudge may take (an idle
+// snapshot, and the pending interaction the runtime reports), and whether the
 // nudge must then wait for idle and deliver.
 type waitIdleReading struct {
 	name      string
 	idle      bool
 	err       error
+	pending   *runtime.PendingInteraction
 	delivered bool
 }
 
 var waitIdleReadings = []waitIdleReading{
 	{name: "busy"},
-	{name: "pending", err: fmt.Errorf("dialog: %w: %w", runtime.ErrIdleIndeterminate, runtime.ErrPendingInteraction)},
+	{
+		name:    "pending",
+		err:     fmt.Errorf("scan: %w", runtime.ErrIdleIndeterminate),
+		pending: &runtime.PendingInteraction{RequestID: "tmux-1", Kind: "approval", Prompt: "Allow Bash?"},
+	},
 	{name: "at the boundary", idle: true, delivered: true},
+	{name: "indeterminate with nothing pending", err: fmt.Errorf("scan: %w", runtime.ErrIdleIndeterminate), delivered: true},
 }
 
 // TestNudgeHandleConformance emits WC-NUDGE-001
@@ -89,7 +96,7 @@ func waitIdleOutOfReachResult(t *testing.T) Result {
 		return Fail(nudgeHandleProfile, RequirementWaitIdleOutOfReachQueuesAtOnce, strings.Join(violations, "; "))
 	}
 	return Pass(nudgeHandleProfile, RequirementWaitIdleOutOfReachQueuesAtOnce,
-		"busy and pending pre-reads queue at once on both handles; a boundary pre-read waits and delivers")
+		"busy and pending pre-reads queue at once on both handles; a boundary or indeterminate pre-read waits and delivers")
 }
 
 // sessionHandleWaitIdleNudge sends a wait-idle nudge through a claude
@@ -123,6 +130,7 @@ func sessionHandleWaitIdleNudge(t *testing.T, reading waitIdleReading) (worker.N
 		t.Fatalf("State: %v", err)
 	}
 	fake.WaitForIdleErrors[state.SessionName] = nil
+	fake.SetPendingInteraction(state.SessionName, reading.pending)
 	result, err := handle.Nudge(context.Background(), actor, worker.NudgeRequest{
 		Text:     "check deploy status",
 		Delivery: worker.NudgeDeliveryWaitIdle,
@@ -144,6 +152,7 @@ func runtimeHandleWaitIdleNudge(t *testing.T, reading waitIdleReading) (worker.N
 		t.Fatalf("Start: %v", err)
 	}
 	fake.WaitForIdleErrors[name] = nil
+	fake.SetPendingInteraction(name, reading.pending)
 	handle, err := worker.NewRuntimeHandle(worker.RuntimeHandleConfig{
 		Provider:     &idleSnapshotProvider{Fake: fake, idle: reading.idle, err: reading.err},
 		SessionName:  name,

@@ -2096,23 +2096,26 @@ type idleSnapshotFake struct {
 
 func (f *idleSnapshotFake) SnapshotIdle(string) (bool, error) { return f.idle, f.err }
 
-// A wait-idle nudge whose one-look pre-read (runtime.IdleBoundaryNow) shows
-// the session busy, or showing a pending interaction, is queued at once: it
-// reports no_idle_boundary without entering the 30 s idle wait and types
-// nothing. A pre-read at the boundary, or one that cannot tell, waits for
-// idle as before.
+// A wait-idle nudge whose pre-read (runtime.IdleBoundaryNow) shows the
+// session busy, or reads indeterminate while the runtime reports a pending
+// interaction (an open dialog), is queued at once: it reports
+// no_idle_boundary without entering the 30 s idle wait and types nothing. A
+// pre-read at the boundary, or one that cannot tell, waits for idle as
+// before.
 func TestRuntimeHandleWaitIdleBusySnapshotQueuesWithoutWaiting(t *testing.T) {
+	indeterminate := fmt.Errorf("scan: %w", runtime.ErrIdleIndeterminate)
 	for _, tc := range []struct {
 		name      string
 		idle      bool
 		err       error
+		pending   *runtime.PendingInteraction
 		wantWait  bool
 		delivered bool
 	}{
 		{name: "busy"},
-		{name: "pending", err: fmt.Errorf("dialog: %w: %w", runtime.ErrIdleIndeterminate, runtime.ErrPendingInteraction)},
+		{name: "pending", err: indeterminate, pending: &runtime.PendingInteraction{RequestID: "tmux-1", Kind: "approval", Prompt: "Allow Bash?"}},
 		{name: "at the boundary", idle: true, wantWait: true, delivered: true},
-		{name: "indeterminate", err: fmt.Errorf("scan: %w", runtime.ErrIdleIndeterminate), wantWait: true, delivered: true},
+		{name: "indeterminate", err: indeterminate, wantWait: true, delivered: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := runtime.NewFake()
@@ -2120,6 +2123,7 @@ func TestRuntimeHandleWaitIdleBusySnapshotQueuesWithoutWaiting(t *testing.T) {
 				t.Fatalf("Start: %v", err)
 			}
 			fake.WaitForIdleErrors["legacy-worker"] = nil
+			fake.SetPendingInteraction("legacy-worker", tc.pending)
 			handle, err := NewRuntimeHandle(RuntimeHandleConfig{
 				Provider:     &idleSnapshotFake{Fake: fake, idle: tc.idle, err: tc.err},
 				SessionName:  "legacy-worker",

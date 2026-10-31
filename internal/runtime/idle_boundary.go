@@ -9,7 +9,8 @@ type IdleBoundary uint8
 const (
 	// IdleBoundaryUnknown means the reading says neither: the runtime takes
 	// no idle snapshot of the session, the snapshot failed, or it was
-	// indeterminate. Callers keep the rule they would use without it.
+	// indeterminate and the runtime reported no pending interaction. Callers
+	// keep the rule they would use without it.
 	IdleBoundaryUnknown IdleBoundary = iota
 	// IdleBoundaryAt means the session reads idle at its input boundary.
 	IdleBoundaryAt
@@ -47,7 +48,11 @@ func (b IdleBoundary) OutOfReach() bool {
 // idle boundary within a short wait, so the delivery is queued at once
 // instead. Which provider families' busy readings count is the runtime's
 // policy: a runtime that does not trust a family's busy reading reports it
-// as [ErrIdleIndeterminate], which reads as [IdleBoundaryUnknown].
+// as [ErrIdleIndeterminate]. An open permission prompt or question dialog
+// reads indeterminate too, showing neither a ready prompt nor a busy
+// indicator, so an indeterminate reading is pending when the runtime reports
+// a pending interaction for the session ([InteractionProvider]); any other
+// indeterminate reading is [IdleBoundaryUnknown].
 func IdleBoundaryNow(p Provider, name string) IdleBoundary {
 	snap, ok := p.(IdleSnapshotProvider)
 	if !ok {
@@ -55,12 +60,27 @@ func IdleBoundaryNow(p Provider, name string) IdleBoundary {
 	}
 	idle, err := snap.SnapshotIdle(name)
 	switch {
-	case errors.Is(err, ErrPendingInteraction):
-		return IdleBoundaryPending
+	case errors.Is(err, ErrIdleIndeterminate):
+		if interactionPending(p, name) {
+			return IdleBoundaryPending
+		}
+		return IdleBoundaryUnknown
 	case err != nil:
 		return IdleBoundaryUnknown
 	case idle:
 		return IdleBoundaryAt
 	}
 	return IdleBoundaryBusy
+}
+
+// interactionPending reports whether p reports a pending interaction for
+// session name. A runtime without [InteractionProvider], or whose look
+// fails, reports none: the pre-read then cannot tell, and its caller waits.
+func interactionPending(p Provider, name string) bool {
+	ip, ok := p.(InteractionProvider)
+	if !ok {
+		return false
+	}
+	pending, err := ip.Pending(name)
+	return err == nil && pending != nil
 }
