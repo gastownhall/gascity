@@ -802,7 +802,7 @@ func ApplyDefaults(formula *Formula, values map[string]string) map[string]string
 // placeholder that would close a reference cycle, so the residual-var checks
 // still report it by name.
 func ApplyVarDefaults(defs map[string]*VarDef, values map[string]string) map[string]string {
-	result := make(map[string]string, len(values)+len(defs))
+	result := make(map[string]string, len(values))
 	for k, v := range values {
 		result[k] = v
 	}
