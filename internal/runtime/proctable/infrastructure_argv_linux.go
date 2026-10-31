@@ -25,9 +25,9 @@ func rootArgv(pid int) ([]string, error) {
 }
 
 func rootStartIdentity(pid int) string {
-	_, _, startTime, ok, err := readProcStatIdentity(filepath.Join(scanRoot, strconv.Itoa(pid), "stat"))
+	stat, ok, err := readProcStat(filepath.Join(scanRoot, strconv.Itoa(pid), "stat"))
 	if err != nil || !ok {
 		return ""
 	}
-	return startTime
+	return stat.startTime
 }

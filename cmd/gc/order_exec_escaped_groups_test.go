@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,9 +22,15 @@ func TestEscapedOrderGroups(t *testing.T) {
 	rec := func(pid, ppid, pgid int) proctable.ProcessRecord {
 		return proctable.ProcessRecord{PID: pid, PPID: ppid, PGID: pgid}
 	}
+	// sessionLeader is a process that called setsid: the leader of its own
+	// session and of its own group.
+	sessionLeader := func(pid, ppid int) proctable.ProcessRecord {
+		return proctable.ProcessRecord{PID: pid, PPID: ppid, PGID: pid, SessionLeader: true}
+	}
 	tests := []struct {
 		name    string
 		records []proctable.ProcessRecord
+		infra   []int // PIDs whose argv is city infrastructure
 		want    []int
 	}{
 		{
@@ -101,15 +108,92 @@ func TestEscapedOrderGroups(t *testing.T) {
 			},
 			want: []int{101},
 		},
+		{
+			// sh -c <order> -> timeout (own leader) -> gc bd -> bd, which
+			// cold-started the store: bd db-proxy-child (setsid) -> dolt in the
+			// proxy's group. The proxy outlives the call that started it and
+			// serves the whole city, so only timeout's group is the order's.
+			name: "store proxy a bounded bd call started",
+			records: []proctable.ProcessRecord{
+				rec(orderPID, ownPGID, orderPID),
+				rec(101, orderPID, 101),
+				rec(102, 101, 101),
+				rec(103, 102, 101),
+				sessionLeader(104, 103),
+				rec(105, 104, 104),
+			},
+			want: []int{101},
+		},
+		{
+			// Nothing a daemon started is the order's either, even a process
+			// leading its own group under it.
+			name: "groups under a session leader",
+			records: []proctable.ProcessRecord{
+				rec(orderPID, ownPGID, orderPID),
+				sessionLeader(101, orderPID),
+				rec(102, 101, 102),
+				rec(103, 102, 102),
+			},
+			want: []int{},
+		},
+		{
+			// sh -c <order> -> gc, which started the managed Dolt server: gc's
+			// scope watchdog only starts a group (Setpgid) and its Dolt server
+			// leads a group of its own. The watchdog's argv fences both.
+			name: "managed Dolt watchdog a gc call started",
+			records: []proctable.ProcessRecord{
+				rec(orderPID, ownPGID, orderPID),
+				rec(101, orderPID, orderPID),
+				rec(102, 101, 102),
+				rec(103, 102, 103),
+			},
+			infra: []int{102},
+			want:  []int{},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := escapedOrderGroups(tt.records, orderPID, orderPID, ownPGID)
+			isCityInfrastructure := func(pid int) bool { return slices.Contains(tt.infra, pid) }
+			got := escapedOrderGroups(tt.records, orderPID, orderPID, ownPGID, isCityInfrastructure)
 			if !slices.Equal(got, tt.want) {
 				t.Fatalf("escapedOrderGroups() = %v, want %v", got, tt.want)
 			}
 		})
 	}
+}
+
+func TestShellExecRunnerLeavesADaemonItsShellStartedRunning(t *testing.T) {
+	processgrouptest.RequireRealProcessSignals(t)
+
+	workDir := t.TempDir()
+	heartbeatPath := filepath.Join(workDir, "heartbeat")
+	daemonPIDPath := filepath.Join(workDir, "daemon.pid")
+	t.Cleanup(func() { processgrouptest.KillFromPIDFile(t, daemonPIDPath) })
+	oldWaitDelay := shellExecPostCancelWaitDelay
+	oldSignalGrace := shellExecSignalGrace
+	shellExecPostCancelWaitDelay = 100 * time.Millisecond
+	shellExecSignalGrace = 100 * time.Millisecond
+	t.Cleanup(func() {
+		shellExecPostCancelWaitDelay = oldWaitDelay
+		shellExecSignalGrace = oldSignalGrace
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// The order's shell starts a daemon in a session of its own, the way bd
+	// starts its db-proxy-child, and is still running when the order is
+	// canceled, so the daemon is still its child.
+	command := fmt.Sprintf("command -v setsid >/dev/null 2>&1 || { echo no-setsid; exit 0; }; setsid sh -c 'printf \"%%s\\n\" \"$$\" > %q; while :; do printf . >> %q; sleep 0.05; done' >/dev/null 2>&1 & sleep 60", daemonPIDPath, heartbeatPath)
+	out, err := shellExecRunner(ctx, command, workDir, nil)
+	if strings.Contains(string(out), "no-setsid") {
+		t.Skip("needs a setsid on PATH")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shellExecRunner() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+
+	size := processgrouptest.WaitForFileSize(t, heartbeatPath)
+	processgrouptest.WaitForFileGrowth(t, heartbeatPath, size)
 }
 
 func TestShellExecRunnerReportsAFailedProcessSnapshotAndStillKillsTheOrder(t *testing.T) {

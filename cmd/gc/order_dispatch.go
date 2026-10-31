@@ -197,9 +197,11 @@ func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]
 		return cleanupErr
 	}
 	cmd.Cancel = func() error {
-		// os/exec cancels only an unreaped command, so the shell's PID still
-		// names it: collect the groups its descendants started before anything
-		// is signaled and they are reparented away from it.
+		// Collect the groups the shell's descendants started before anything
+		// is signaled and they are reparented away from it. os/exec cancels
+		// before it reaps the shell, so its PID still names it, unless the
+		// shell's own exit races the context: its children have then already
+		// been reparented, and the walk finds none.
 		escaped, snapErr := snapshotEscapedOrderGroups(cmd)
 		cleanupMu.Lock()
 		canceled = true

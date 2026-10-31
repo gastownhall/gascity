@@ -15,7 +15,7 @@ import (
 
 // orderExecProcessSnapshot reads the process table for the exec-order cancel
 // path. A variable so a test can hand it a fixed table.
-var orderExecProcessSnapshot = proctable.SnapshotProcesses
+var orderExecProcessSnapshot = proctable.SnapshotProcessTree
 
 // escapedOrderGroups returns the process groups, other than the order's own,
 // that a descendant of the order's shell started for itself.
@@ -32,9 +32,18 @@ var orderExecProcessSnapshot = proctable.SnapshotProcesses
 // be the order's shell, so the caller reads the table while the shell is
 // unreaped.
 //
+// A descendant that detached from the order is not the order's, and neither is
+// anything it started: the walk neither returns nor descends into a session
+// leader (setsid is how a daemon detaches; GNU timeout only starts a group) or
+// a group leader isCityInfrastructure reports. While the bd or gc call that
+// started it is still running, the city's store is such a descendant: bd's
+// db-proxy-child, a session leader with the Dolt server under it, or gc's
+// managed-Dolt watchdog, a group leader whose Dolt server leads a group of its
+// own.
+//
 // The walk follows parent links, so it cannot reach a descendant that was
 // already orphaned (reparented away from the order's tree) before the cancel.
-func escapedOrderGroups(records []proctable.ProcessRecord, rootPID, orderPGID, ownPGID int) []int {
+func escapedOrderGroups(records []proctable.ProcessRecord, rootPID, orderPGID, ownPGID int, isCityInfrastructure func(pid int) bool) []int {
 	byPID := make(map[int]proctable.ProcessRecord, len(records))
 	children := make(map[int][]int, len(records))
 	for _, r := range records {
@@ -54,9 +63,13 @@ func escapedOrderGroups(records []proctable.ProcessRecord, rootPID, orderPGID, o
 				continue
 			}
 			seen[child] = true
-			queue = append(queue, child)
 			r := byPID[child]
-			if r.PGID == r.PID && r.PGID > 1 && r.PGID != orderPGID && r.PGID != ownPGID {
+			groupLeader := r.PGID == r.PID
+			if groupLeader && (r.SessionLeader || isCityInfrastructure(child)) {
+				continue
+			}
+			queue = append(queue, child)
+			if groupLeader && r.PGID > 1 && r.PGID != orderPGID && r.PGID != ownPGID {
 				groups[r.PGID] = true
 			}
 		}
@@ -79,7 +92,7 @@ func snapshotEscapedOrderGroups(cmd *exec.Cmd) ([]int, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listing the canceled order's processes: %w", err)
 	}
-	return escapedOrderGroups(records, cmd.Process.Pid, cmd.Process.Pid, syscall.Getpgrp()), nil
+	return escapedOrderGroups(records, cmd.Process.Pid, cmd.Process.Pid, syscall.Getpgrp(), proctable.IsCityInfrastructureRoot), nil
 }
 
 // terminateProcessGroups terminates every group at once, each with grace
