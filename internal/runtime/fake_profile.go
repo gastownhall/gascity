@@ -97,7 +97,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileExec:
 		return execProfile{core, b, b, b, b, b, timed, probeBudgetTrait{}}
 	case ProfileSSH:
-		return sshProfile{core, b, timed}
+		return sshProfile{core, b, b, b, timed}
 	case ProfileT3Bridge:
 		return t3bridgeProfile{core, b, b, b, b, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
 	}
@@ -248,6 +248,8 @@ type (
 	}
 	sshProfile struct {
 		Provider
+		AttachmentObserverWithError
+		LivenessObserverWithError
 		RelaunchProvider
 		sleepTrait
 	}

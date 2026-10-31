@@ -7,8 +7,9 @@ import (
 )
 
 // seamBackedProvider serves the legacy [runtime.Provider] through the
-// de-conflated seams (via [runtime.NewProviderFromSeams]), passing SleepCapability
-// through to the underlying *Provider. The early cut-over for the ssh provider.
+// de-conflated seams (via [runtime.NewProviderFromSeams]), passing SleepCapability,
+// Relaunch, and the error-bearing probes (attachment, liveness, Peek) through to
+// the underlying *Provider. The early cut-over for the ssh provider.
 //
 // ExecProvider is not passed through: ssh's Exec (over the connection) is what
 // the carrier drives over internally; no production caller type-asserts it.
@@ -18,14 +19,19 @@ type seamBackedProvider struct {
 }
 
 var (
-	_ runtime.Provider                = (*seamBackedProvider)(nil)
-	_ runtime.SleepCapabilityProvider = (*seamBackedProvider)(nil)
-	_ runtime.RelaunchProvider        = (*seamBackedProvider)(nil)
+	_ runtime.Provider                    = (*seamBackedProvider)(nil)
+	_ runtime.SleepCapabilityProvider     = (*seamBackedProvider)(nil)
+	_ runtime.RelaunchProvider            = (*seamBackedProvider)(nil)
+	_ runtime.AttachmentObserverWithError = (*seamBackedProvider)(nil)
+	_ runtime.LivenessObserverWithError   = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs an ssh provider for ep served through the seams.
 func NewSeamBacked(ep Endpoint) runtime.Provider {
-	raw := NewProvider(ep)
+	return newSeamBacked(NewProvider(ep))
+}
+
+func newSeamBacked(raw *Provider) runtime.Provider {
 	rt, tp := raw.Seams()
 	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}
 }
@@ -39,4 +45,25 @@ func (s *seamBackedProvider) SleepCapability(name string) runtime.SessionSleepCa
 // (respawn-pane over the ssh Conn; B2, RelaunchProvider).
 func (s *seamBackedProvider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
 	return s.raw.Relaunch(ctx, name, cfg)
+}
+
+// IsAttachedWithError passes through to the underlying provider's single
+// is-attached probe (non-seam). Without it, runtime.IsAttachedWithError would
+// fall back to the seam's IsAttached, which re-resolves the box through bool
+// IsRunning and drops a transport failure.
+func (s *seamBackedProvider) IsAttachedWithError(name string) (bool, error) {
+	return s.raw.IsAttachedWithError(name)
+}
+
+// ObserveLivenessWithError passes through to the underlying provider so an
+// unreachable box reads as runtime.ErrRuntimeUnavailable, not as absent.
+func (s *seamBackedProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	return s.raw.ObserveLivenessWithError(name, processNames)
+}
+
+// Peek passes through to the underlying provider: the seam resolves the box
+// through bool IsRunning first, which would turn a transport failure into an
+// empty pane.
+func (s *seamBackedProvider) Peek(name string, lines int) (string, error) {
+	return s.raw.Peek(name, lines)
 }

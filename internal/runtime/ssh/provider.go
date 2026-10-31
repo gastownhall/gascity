@@ -70,21 +70,42 @@ func paneTarget(name string) string {
 type Provider struct {
 	conn            *Conn
 	postStartSettle time.Duration      // settle before the post-start liveness recheck
+	verbTimeout     time.Duration      // bound on each context-free verb; 0 means defaultVerbTimeout
 	psDegraded      atomic.Bool        // ProcessAlive's degraded episode is logged once
+	aliveUnknown    atomic.Bool        // ProcessAlive's unreachable-box episode is logged once
 	pokes           runtime.PokeLedger // gc's own input, discounted from GetLastActivity
 	now             func() time.Time   // the poke ledger's clock; nil is time.Now
 }
 
 var (
-	_ runtime.Provider                = (*Provider)(nil)
-	_ runtime.ExecProvider            = (*Provider)(nil)
-	_ runtime.SleepCapabilityProvider = (*Provider)(nil)
+	_ runtime.Provider                    = (*Provider)(nil)
+	_ runtime.ExecProvider                = (*Provider)(nil)
+	_ runtime.SleepCapabilityProvider     = (*Provider)(nil)
+	_ runtime.AttachmentObserverWithError = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError   = (*Provider)(nil)
 )
 
 // defaultPostStartSettle is how long Start waits before re-checking that a
 // managed session survived startup (the box already exists, so a short settle
 // suffices to catch an agent that dies immediately, e.g. a stale --resume key).
 const defaultPostStartSettle = time.Second
+
+// defaultVerbTimeout bounds every Provider method that takes no context
+// (Stop, IsRunning, the meta and driving verbs, the probes): the remote calls
+// of one such verb share this deadline, so a box that stops answering
+// mid-call fails the verb with runtime.ErrRuntimeUnavailable instead of
+// hanging its caller.
+const defaultVerbTimeout = 30 * time.Second
+
+// verbContext returns the deadline-bound context a context-free verb runs its
+// remote calls under.
+func (p *Provider) verbContext() (context.Context, context.CancelFunc) {
+	timeout := p.verbTimeout
+	if timeout <= 0 {
+		timeout = defaultVerbTimeout
+	}
+	return context.WithTimeout(context.Background(), timeout)
+}
 
 // NewProvider returns an ssh Provider for the box at ep.
 func NewProvider(ep Endpoint) *Provider {
@@ -457,36 +478,79 @@ func (p *Provider) Stop(name string) error {
 	if err := checkName(name); err != nil {
 		return fmt.Errorf("ssh stop: %w", err)
 	}
-	if _, _, err := p.tmux(context.Background(), name, "kill-session", "-t", sessionTarget(name)); err != nil {
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	if _, _, err := p.tmux(ctx, name, "kill-session", "-t", sessionTarget(name)); err != nil {
 		return fmt.Errorf("ssh stop %q: %w", name, err)
 	}
 	return nil
 }
 
 // hasSession reports whether the tmux session exists, using the given context.
+// A box that cannot be reached reads false; [Provider.hasSessionWithError]
+// tells the two apart.
 func (p *Provider) hasSession(ctx context.Context, name string) bool {
+	running, err := p.hasSessionWithError(ctx, name)
+	return err == nil && running
+}
+
+// hasSessionWithError reports whether the tmux session exists, or an error
+// wrapping runtime.ErrRuntimeUnavailable when the box could not answer.
+func (p *Provider) hasSessionWithError(ctx context.Context, name string) (bool, error) {
 	if checkName(name) != nil {
-		return false
+		return false, nil
 	}
 	_, code, err := p.tmux(ctx, name, "has-session", "-t", sessionTarget(name))
-	return err == nil && code == 0
+	if err != nil {
+		return false, err
+	}
+	return code == 0, nil
 }
 
-// IsRunning reports whether the tmux session exists on the box.
+// IsRunning reports whether the tmux session exists on the box. A box that
+// cannot be reached reads false; [Provider.ObserveLivenessWithError] reports
+// that as an error instead.
 func (p *Provider) IsRunning(name string) bool {
-	return p.hasSession(context.Background(), name)
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	return p.hasSession(ctx, name)
 }
 
-// IsAttached reports whether a terminal is attached to the tmux session.
+// IsAttached reports whether a terminal is attached to the tmux session
+// (false when that cannot be told; see [Provider.IsAttachedWithError]).
 func (p *Provider) IsAttached(name string) bool {
-	if checkName(name) != nil {
-		return false
+	attached, err := p.IsAttachedWithError(name)
+	return err == nil && attached
+}
+
+// IsAttachedWithError implements [runtime.AttachmentObserverWithError]: one or
+// more clients is attached, none is, the session is missing (an error wrapping
+// runtime.ErrSessionNotFound), or the box could not answer (an error wrapping
+// runtime.ErrRuntimeUnavailable).
+func (p *Provider) IsAttachedWithError(name string) (bool, error) {
+	if err := checkName(name); err != nil {
+		return false, fmt.Errorf("ssh is-attached: %w", err)
 	}
-	out, code, err := p.tmux(context.Background(), name, "display-message", "-t", paneTarget(name), "-p", "#{session_attached}")
-	if err != nil || code != 0 {
-		return false
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	// The session name is echoed because tmux answers a missing target with an
+	// empty line and exit 0 (as the local provider's probe handles it).
+	out, code, err := p.tmux(ctx, name, "display-message", "-t", paneTarget(name), "-p", "#{session_name}|#{session_attached}")
+	if err != nil {
+		return false, fmt.Errorf("ssh is-attached %q: %w", name, err)
 	}
-	return strings.TrimSpace(out) == "1"
+	echoed, count, _ := strings.Cut(strings.TrimSpace(out), "|")
+	if code != 0 || echoed == "" {
+		return false, fmt.Errorf("%w: ssh session %q", runtime.ErrSessionNotFound, name)
+	}
+	if echoed != name {
+		return false, fmt.Errorf("%w: ssh session %q: probe answered for session %q", runtime.ErrRuntimeUnavailable, name, echoed)
+	}
+	clients, perr := strconv.Atoi(count)
+	if perr != nil {
+		return false, fmt.Errorf("%w: ssh session %q: unexpected #{session_attached} %q", runtime.ErrRuntimeUnavailable, name, count)
+	}
+	return clients > 0, nil
 }
 
 // Attach connects the local terminal to the remote tmux session over ssh -t.
@@ -511,8 +575,10 @@ func (p *Provider) Attach(name string) error {
 // and the box's process table (POSIX ps, so any remote OS). A missing session
 // is not alive; a process table that cannot be read while the session's panes
 // exist degrades to alive, as the local provider does, so a failed secondary
-// probe never triggers a reap. Returns true when processNames is empty (per
-// the interface contract).
+// probe never triggers a reap. A box that cannot be reached reads alive for
+// the same reason: could-not-tell is not dead, and
+// [Provider.ObserveLivenessWithError] reports it as an error. Returns true
+// when processNames is empty (per the interface contract).
 func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	names := proctable.ProcessNameSet(processNames)
 	if len(names) == 0 {
@@ -521,12 +587,56 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	if checkName(name) != nil {
 		return false
 	}
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	alive, err := p.processAlive(ctx, name, names)
+	if err != nil {
+		if !p.aliveUnknown.Swap(true) {
+			log.Printf("ssh provider %s: box unreachable, reporting ProcessAlive alive until it answers: %v", p.conn.ep.target(), err)
+		}
+		return true
+	}
+	p.aliveUnknown.Store(false)
+	return alive
+}
+
+// ObserveLivenessWithError implements [runtime.LivenessObserverWithError]:
+// whether the session exists and, given processNames, whether the agent runs
+// in it. A box that cannot be reached yields an error wrapping
+// runtime.ErrRuntimeUnavailable and a zero Liveness, never "absent".
+func (p *Provider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	if checkName(name) != nil {
+		return runtime.Liveness{}, nil
+	}
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	running, err := p.hasSessionWithError(ctx, name)
+	if err != nil {
+		return runtime.Liveness{}, fmt.Errorf("ssh observe %q: %w", name, err)
+	}
+	if !running {
+		return runtime.Liveness{}, nil
+	}
+	names := proctable.ProcessNameSet(processNames)
+	if len(names) == 0 {
+		return runtime.Liveness{Running: true, Alive: true}, nil
+	}
+	alive, err := p.processAlive(ctx, name, names)
+	if err != nil {
+		return runtime.Liveness{}, fmt.Errorf("ssh observe %q: %w", name, err)
+	}
+	return runtime.Liveness{Running: true, Alive: alive}, nil
+}
+
+// processAlive is ProcessAlive's remote probe for a checked name and a
+// non-empty names set; a transport failure is returned, not judged.
+func (p *Provider) processAlive(ctx context.Context, name string, names map[string]struct{}) (bool, error) {
 	// The exit code is not the verdict: a missing session prints no pane pids
 	// (|| exit 3) and reads dead below, while a failed ps must not read every
 	// session on the box dead.
-	out, _, err := p.conn.Exec(context.Background(), name, []string{"sh", "-c", processAliveScript(name)})
+	out, _, err := p.conn.Exec(ctx, name, []string{"sh", "-c", processAliveScript(name)})
 	if err != nil {
-		return false
+		return false, err
 	}
 	alive, degraded := paneTreeRunsNames(string(out), names)
 	if degraded {
@@ -536,7 +646,7 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	} else {
 		p.psDegraded.Store(false)
 	}
-	return alive
+	return alive, nil
 }
 
 // processAliveScript lists the session's pane pids, then the box's process
@@ -677,7 +787,8 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	if checkName(name) != nil {
 		return nil // best-effort; never reaches tmux
 	}
-	ctx := context.Background()
+	ctx, cancel := p.verbContext()
+	defer cancel()
 	if c, err := p.carrier(ctx, name); err == nil {
 		_ = p.poke(ctx, name, func() error { return c.Nudge(ctx, name, content) })
 	}
@@ -689,7 +800,8 @@ func (p *Provider) SendKeys(name string, keys ...string) error {
 	if checkName(name) != nil {
 		return nil // best-effort; never reaches tmux
 	}
-	ctx := context.Background()
+	ctx, cancel := p.verbContext()
+	defer cancel()
 	if c, err := p.carrier(ctx, name); err == nil {
 		_ = p.poke(ctx, name, func() error { return c.SendKeys(ctx, name, keys...) })
 	}
@@ -720,17 +832,26 @@ func (p *Provider) clock() time.Time {
 	return time.Now()
 }
 
-// Peek captures the last N lines of the session pane (best-effort: empty on failure).
+// Peek captures the last N lines of the session pane. A session without a
+// resolvable agent pane reads empty; a box that cannot be reached is an error
+// wrapping runtime.ErrRuntimeUnavailable, never an empty pane.
 func (p *Provider) Peek(name string, lines int) (string, error) {
 	if checkName(name) != nil {
 		return "", nil
 	}
-	ctx := context.Background()
+	ctx, cancel := p.verbContext()
+	defer cancel()
 	c, err := p.carrier(ctx, name)
 	if err != nil {
+		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			return "", fmt.Errorf("ssh peek %q: %w", name, err)
+		}
 		return "", nil
 	}
-	out, _ := c.Peek(ctx, name, lines)
+	out, err := c.Peek(ctx, name, lines)
+	if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		return "", fmt.Errorf("ssh peek %q: %w", name, err)
+	}
 	return out, nil
 }
 
@@ -739,7 +860,8 @@ func (p *Provider) Interrupt(name string) error {
 	if checkName(name) != nil {
 		return nil // best-effort; never reaches tmux
 	}
-	ctx := context.Background()
+	ctx, cancel := p.verbContext()
+	defer cancel()
 	if c, err := p.carrier(ctx, name); err == nil {
 		_ = c.Interrupt(ctx, name)
 	}
@@ -751,7 +873,8 @@ func (p *Provider) ClearScrollback(name string) error {
 	if checkName(name) != nil {
 		return nil // best-effort; never reaches tmux
 	}
-	ctx := context.Background()
+	ctx, cancel := p.verbContext()
+	defer cancel()
 	if c, err := p.carrier(ctx, name); err == nil {
 		_ = c.ClearScrollback(ctx, name)
 	}
@@ -764,33 +887,50 @@ func (p *Provider) ClearScrollback(name string) error {
 // box and applied with `source-file`, exactly as Start stages secret env, so it
 // reaches neither the local ssh client's argv nor the box's. SetMeta stays
 // best-effort, but a staging failure skips the write rather than falling back to
-// argv — that fallback is the leak.
+// argv — that fallback is the leak. A box that cannot be reached is an error
+// wrapping runtime.ErrRuntimeUnavailable; a tmux refusal (no such session) and
+// a staging script that ran but failed are not.
 func (p *Provider) SetMeta(name, key, value string) error {
 	if checkName(name) != nil {
 		return nil // best-effort; never reaches tmux
 	}
-	ctx := context.Background()
+	ctx, cancel := p.verbContext()
+	defer cancel()
 	args := []string{"set-environment", "-t", sessionTarget(name), key, value}
 	if !runtime.ArgvSecretEnvValue(key, value) {
-		_, _, _ = p.tmux(ctx, name, args...)
+		if _, _, err := p.tmux(ctx, name, args...); err != nil {
+			return fmt.Errorf("ssh set-meta %q %s: %w", name, key, err)
+		}
 		return nil
 	}
 	staged, err := p.stageSecretEnv(ctx, map[string]string{key: value}, args)
+	if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		return fmt.Errorf("ssh set-meta %q %s: %w", name, key, err)
+	}
 	if err != nil {
 		return nil // best-effort; never fall back to argv
 	}
 	defer p.cleanupStagedEnv(ctx, name, staged)
-	_, _, _ = p.tmux(ctx, name, "source-file", staged.tmuxPath)
+	if _, _, err := p.tmux(ctx, name, "source-file", staged.tmuxPath); err != nil {
+		return fmt.Errorf("ssh set-meta %q %s: %w", name, key, err)
+	}
 	return nil
 }
 
-// GetMeta retrieves a value from the tmux session environment ("" if unset).
+// GetMeta retrieves a value from the tmux session environment ("" if unset or
+// if tmux refuses the read). A box that cannot be reached is an error wrapping
+// runtime.ErrRuntimeUnavailable, so a failed read is never mistaken for unset.
 func (p *Provider) GetMeta(name, key string) (string, error) {
 	if checkName(name) != nil {
 		return "", nil
 	}
-	out, code, err := p.tmux(context.Background(), name, "show-environment", "-t", sessionTarget(name), key)
-	if err != nil || code != 0 {
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	out, code, err := p.tmux(ctx, name, "show-environment", "-t", sessionTarget(name), key)
+	if err != nil {
+		return "", fmt.Errorf("ssh get-meta %q %s: %w", name, key, err)
+	}
+	if code != 0 {
 		return "", nil
 	}
 	out = strings.TrimSpace(out)
@@ -803,18 +943,25 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 	return "", nil
 }
 
-// RemoveMeta removes a key from the tmux session environment.
+// RemoveMeta removes a key from the tmux session environment. A box that
+// cannot be reached is an error wrapping runtime.ErrRuntimeUnavailable.
 func (p *Provider) RemoveMeta(name, key string) error {
 	if checkName(name) != nil {
 		return nil
 	}
-	_, _, _ = p.tmux(context.Background(), name, "set-environment", "-t", sessionTarget(name), "-u", key)
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	if _, _, err := p.tmux(ctx, name, "set-environment", "-t", sessionTarget(name), "-u", key); err != nil {
+		return fmt.Errorf("ssh remove-meta %q %s: %w", name, key, err)
+	}
 	return nil
 }
 
 // ListRunning returns the names of tmux sessions whose names have the prefix.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
-	out, code, err := p.tmux(context.Background(), "", "list-sessions", "-F", "#{session_name}")
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	out, code, err := p.tmux(ctx, "", "list-sessions", "-F", "#{session_name}")
 	if err != nil {
 		return nil, err
 	}
@@ -840,7 +987,9 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	if checkName(name) != nil {
 		return time.Time{}, nil
 	}
-	return p.pokes.Discount(name, p.rawActivity(context.Background(), name), p.clock()), nil
+	ctx, cancel := p.verbContext()
+	defer cancel()
+	return p.pokes.Discount(name, p.rawActivity(ctx, name), p.clock()), nil
 }
 
 // rawActivity reads a (checked) session's raw activity clock, the newest

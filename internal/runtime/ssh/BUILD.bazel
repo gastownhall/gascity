@@ -28,6 +28,7 @@ go_test(
         "session_env_file_test.go",
         "ssh_localhost_integration_test.go",
         "ssh_test.go",
+        "transport_test.go",
         "testenv_import_test.go",
     ],
     embed = [":ssh"],
