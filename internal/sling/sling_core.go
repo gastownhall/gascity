@@ -15,10 +15,12 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -91,8 +93,14 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	if a.Suspended && !opts.Force {
 		result.AgentSuspended = true
 	}
-	if !opts.Force && rigSuspended(deps.Cfg, a.Dir) {
-		result.SuspendedRig = a.Dir
+	if !opts.Force {
+		suspState := loadSuspensionStateBestEffort(deps.CityPath)
+		if rigSuspended(deps.Cfg, suspState, a.Dir) {
+			result.SuspendedRig = a.Dir
+		}
+		if citySuspended(deps.Cfg, suspState) {
+			result.SuspendedCity = true
+		}
 	}
 	sp := agentutil.ScaleParamsFor(&a)
 	if sp.Max == 0 && !opts.Force {
@@ -243,19 +251,53 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 	return true, nil
 }
 
-// rigSuspended reports whether the named rig is marked suspended in config.
-// The pool reconciler skips suspended rigs entirely, so a bead routed into
-// one stalls silently — no worker ever spawns to claim it.
-func rigSuspended(cfg *config.City, rigName string) bool {
+// loadSuspensionStateBestEffort reads the city's runtime suspension state
+// (.gc/runtime/suspension-state.json), falling back to a zero State on any
+// read error or an empty cityPath. Suitable for the suspension predicates
+// below, where misclassifying as "not suspended" is no worse than the
+// deprecated-config-only behavior this replaces -- mirrors
+// loadSuspensionStateBestEffort in cmd/gc.
+func loadSuspensionStateBestEffort(cityPath string) suspensionstate.State {
+	if strings.TrimSpace(cityPath) == "" {
+		return suspensionstate.State{}
+	}
+	st, _ := suspensionstate.Load(fsys.OSFS{}, cityPath)
+	return st
+}
+
+// rigSuspended reports whether the named rig is EFFECTIVELY suspended: the
+// live runtime override written by `gc rig suspend`/`gc rig resume` (st),
+// merged with the rig's config-authored startup default
+// (Rig.EffectiveSuspendedOnStart, which folds in the deprecated `suspended`
+// field as an alias for `suspended_on_start`). Reading only the deprecated
+// config field here missed both the live runtime override and
+// `suspended_on_start` itself. The pool reconciler skips suspended rigs
+// entirely, so a bead routed into one stalls silently — no worker ever
+// spawns to claim it.
+func rigSuspended(cfg *config.City, st suspensionstate.State, rigName string) bool {
 	if cfg == nil || rigName == "" {
 		return false
 	}
 	for _, r := range cfg.Rigs {
 		if r.Name == rigName {
-			return r.Suspended
+			return suspensionstate.EffectiveRigSuspended(st, r.Name, r.EffectiveSuspendedOnStart())
 		}
 	}
 	return false
+}
+
+// citySuspended reports whether the whole city is EFFECTIVELY suspended: the
+// live runtime override written by `gc suspend`/`gc resume` (st), merged
+// with the workspace's config-authored startup default
+// (Workspace.EffectiveSuspendedOnStart). A bead sling'd into a suspended
+// city routes (gc.routed_to is set) but no agent will wake to claim it,
+// since the controller/reconciler quiesce the whole city — this had no
+// warning path at all before this check.
+func citySuspended(cfg *config.City, st suspensionstate.State) bool {
+	if cfg == nil {
+		return suspensionstate.EffectiveCitySuspended(st, false)
+	}
+	return suspensionstate.EffectiveCitySuspended(st, cfg.Workspace.EffectiveSuspendedOnStart())
 }
 
 func shouldValidateExistingBead(opts SlingOpts) bool {
