@@ -217,3 +217,122 @@ title = "Do work"
 		t.Fatalf("cold-pool demand after graph.v2 --on = %d, want 1 (work stranded if 0)", got)
 	}
 }
+
+// TestOnFormulaGraphV2RawRoutedThenWrappedIsSingleDemand covers a bead that a
+// plain `gc sling <pool> <bead>` routed before `--on` wrapped it in a graph.v2
+// workflow. The pre-wrap gc.routed_to must not survive the wrap: the source
+// would otherwise stay open + routed + unassigned next to the workflow's
+// executable step, and a cold pool would read demand 2 for one job.
+func TestOnFormulaGraphV2RawRoutedThenWrappedIsSingleDemand(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	maxPolecats := 5
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	applyFeatureFlags(cfg)
+	t.Cleanup(func() { applyFeatureFlags(&config.City{}) })
+	dir := testFormulaDir(t)
+	cfg.FormulaLayers.City = []string{dir}
+	graphFormula := `
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`
+	if err := os.WriteFile(filepath.Join(dir, "graph-work.toml"), []byte(graphFormula), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	store := beads.NewMemStoreFrom(1, []beads.Bead{
+		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
+	}, nil)
+	deps.Store = store
+	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "")
+
+	a := config.Agent{Name: "polecat", MaxActiveSessions: &maxPolecats}
+
+	// Plain sling first: the bead is routed with the claim key.
+	plain := testOpts(a, "BL-42")
+	if code := doSling(plain, deps, nil, stdout, stderr); code != 0 {
+		t.Fatalf("plain doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	routed, err := store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("get source after plain sling: %v", err)
+	}
+	if got := routed.Metadata["gc.routed_to"]; got != "polecat" {
+		t.Fatalf("precondition: source gc.routed_to after plain sling = %q, want polecat", got)
+	}
+
+	// Then wrap the routed bead in a graph.v2 workflow.
+	wrap := testOpts(a, "BL-42")
+	wrap.OnFormula = "graph-work"
+	wrap.ScopeKind = "city"
+	wrap.ScopeRef = "test-city"
+	if code := doSling(wrap, deps, nil, stdout, stderr); code != 0 {
+		t.Fatalf("--on doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	source, err := store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("get source: %v", err)
+	}
+	if got := source.Status; got != "open" {
+		t.Fatalf("source status = %q, want open", got)
+	}
+	if got := source.Assignee; got != "" {
+		t.Fatalf("source assignee = %q, want empty", got)
+	}
+
+	all, err := store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("list beads: %v", err)
+	}
+	var root beads.Bead
+	var demandUnits []string
+	for _, b := range all {
+		if b.Metadata["gc.kind"] == "workflow" && b.Metadata["gc.routed_to"] == "polecat" {
+			root = b
+			continue
+		}
+		if b.Metadata["gc.routed_to"] == "polecat" &&
+			b.Metadata["gc.kind"] != "workflow-finalize" &&
+			b.Status == "open" && b.Assignee == "" {
+			demandUnits = append(demandUnits, b.ID)
+		}
+	}
+	if root.ID == "" {
+		t.Fatalf("no routed workflow root found; beads=%#v", all)
+	}
+	if got := root.Status; got != "in_progress" {
+		t.Fatalf("workflow root status = %q, want in_progress", got)
+	}
+	if len(demandUnits) != 1 || demandUnits[0] == "BL-42" {
+		t.Fatalf("open+routed+unassigned beads = %v, want exactly the workflow's executable step", demandUnits)
+	}
+
+	counts, partials, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{
+		defaultScaleCheckTargetForAgent(sharedTestCityDir, cfg, &a, store, nil),
+	})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errors: %v", errs)
+	}
+	if len(partials) != 0 {
+		t.Fatalf("defaultScaleCheckCounts partials: %v", partials)
+	}
+	if got := counts["polecat"]; got != 1 {
+		t.Fatalf("cold-pool demand after plain sling then graph.v2 --on = %d, want 1 (one job)", got)
+	}
+
+	// The source keeps only the execution route; the claim key is gone.
+	if got := source.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("source gc.routed_to = %q after graph.v2 wrap, want cleared", got)
+	}
+	if got := source.Metadata["gc.execution_routed_to"]; got != "polecat" {
+		t.Fatalf("source gc.execution_routed_to = %q, want polecat", got)
+	}
+}
