@@ -559,3 +559,53 @@ func TestResolveTemplateScrubsControllerTokenFromOperatorEnv(t *testing.T) {
 		t.Errorf("OperatorEnv[%s] = %q, want empty (a config-authored literal must not survive into the fingerprint hash-preimage)", convergence.TokenEnvVar, val)
 	}
 }
+
+// staleDemandMarkerEnv seeds the controller process with demand markers a
+// prior demand-started process left behind. passthroughEnv forwards every
+// non-empty GC_* key, so resolution sees all of them.
+func staleDemandMarkerEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("GC_SPAWN_ORIGIN", "demand")
+	t.Setenv("GC_TRIGGER_BEAD_ID", "w-stale")
+	t.Setenv("GC_TRIGGER_WORK_BEAD_ID", "w-stale")
+	t.Setenv("GC_TRIGGER_BEAD_STORE_REF", "rig:stale")
+	t.Setenv("GC_TRIGGER_WORK_STORE_REF", "rig:stale")
+}
+
+func demandMarkerTestParams(t *testing.T) *agentBuildParams {
+	t.Helper()
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	return &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+}
+
+// A seat no trigger started must withhold every trigger key, not merely omit
+// it: the session env is an overlay on what the child inherits, and only an
+// explicit empty value becomes an unset (tmux `env -u`). An inherited
+// GC_SPAWN_ORIGIN=demand with a blank trigger id is what made the divergence
+// diagnostic report classification=unknown.
+func TestResolveTemplatePinsInheritedDemandMarkersEmpty(t *testing.T) {
+	staleDemandMarkerEnv(t)
+	params := demandMarkerTestParams(t)
+	agent := &config.Agent{Name: "worker"}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	for _, k := range triggerEnvKeys {
+		if v, ok := tp.Env[k]; !ok || v != "" {
+			t.Errorf("Env[%s] = %q (present=%v), want present and empty: a stale demand marker leaked into a no-trigger seat", k, v, ok)
+		}
+	}
+}
