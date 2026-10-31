@@ -2411,7 +2411,9 @@ func TestRewriteBdHeartbeatArgs(t *testing.T) {
 // segmented value through. Such a malformed value is invisible to both
 // standard discovery tiers (exact --assignee=<role> match and --unassigned),
 // so a bead written with it becomes silently unreachable -- the 2026-08-15
-// cairn incident this bead defends against.
+// cairn incident this bead defends against. The guard resolves the verb
+// through bdflags.SplitGlobalFlags, so a global flag before `update` (e.g.
+// `--actor bob update ...`) cannot bypass it.
 func TestBdAssigneeShapeRefusal(t *testing.T) {
 	// Fake bd that echoes its argv to stdout and exits 0 -- proves a case
 	// reached the exec.Command forward, as opposed to being refused first.
@@ -2434,6 +2436,9 @@ exit 0
 		{"bare-role-no-rig", []string{"update", "demo-abc", "--assignee=deep-investigator"}, false},
 		{"claim-passes-through", []string{"update", "demo-abc", "--claim"}, false},
 		{"non-update-subcommand-forwards", []string{"create", "x", "--assignee=cairn/"}, false},
+		{"global-value-flag-before-verb", []string{"--actor", "bob", "update", "demo-abc", "--assignee=cairn/"}, true},
+		{"global-bool-flag-before-verb", []string{"--json", "update", "demo-abc", "--assignee", "/pm"}, true},
+		{"global-inline-value-before-verb", []string{"--format=json", "update", "demo-abc", "-a=a//b"}, true},
 	}
 
 	for _, tc := range cases {
