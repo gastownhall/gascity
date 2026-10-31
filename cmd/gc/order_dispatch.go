@@ -1006,11 +1006,12 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 	// A condition order's verdict was already computed by the parallel pass;
 	// re-running it here would fork the check a second time.
 	var result orders.TriggerResult
-	if eventCursorUnavailable {
+	switch {
+	case eventCursorUnavailable:
 		result = orders.TriggerResult{Due: false, Reason: "event: log head unavailable, skipping tick"}
-	} else if cand.conditionResult != nil {
+	case cand.conditionResult != nil:
 		result = *cand.conditionResult
-	} else {
+	default:
 		result = orders.CheckTriggerWithOptions(a, now, lastRunFn, m.ep, cursorFn, triggerOpts)
 	}
 	if lastRunErr != nil {
