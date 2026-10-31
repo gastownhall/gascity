@@ -4878,6 +4878,56 @@ func TestProcessWorkflowFinalizeClosesSourceChainPastUnblockedWorkOutcomes(t *te
 	}
 }
 
+// TestProcessWorkflowFinalizeDoesNotResolveStoresAboveBlockedSource asserts
+// the blocked stop lands before the walk resolves the blocked source's own
+// parent store: a store that cannot open above a blocked source no longer
+// pends the finalizer, because the blocked outcome already decided the
+// parents stay open.
+func TestProcessWorkflowFinalizeDoesNotResolveStoresAboveBlockedSource(t *testing.T) {
+	t.Parallel()
+
+	f := newSourceChainFinalizeFixture(t)
+	mustStampSourceBead(t, f.rigStore, f.rigLaunch.ID, "closed", map[string]string{
+		"gc.outcome":      "pass",
+		"gc.work_outcome": "blocked",
+	})
+	var resolvedRefs []string
+	resolver := func(ref string) (beads.Store, error) {
+		resolvedRefs = append(resolvedRefs, ref)
+		if ref == "city:test" {
+			return nil, errors.New("city store unavailable")
+		}
+		return f.resolver(ref)
+	}
+
+	result, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{
+		ResolveStoreRef: resolver,
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-pass" {
+		t.Fatalf("workflow result = %+v, want processed workflow-pass", result)
+	}
+	finalizerAfter, err := f.rigStore.Get(f.finalizer.ID)
+	if err != nil {
+		t.Fatalf("get finalizer: %v", err)
+	}
+	if finalizerAfter.Status != "closed" {
+		t.Fatalf("finalizer status = %q, want closed", finalizerAfter.Status)
+	}
+	citySourceAfter, err := f.cityStore.Get(f.citySource.ID)
+	if err != nil {
+		t.Fatalf("get city source: %v", err)
+	}
+	if citySourceAfter.Status != "open" {
+		t.Fatalf("city source status = %q, want open above a blocked source", citySourceAfter.Status)
+	}
+	if slices.Contains(resolvedRefs, "city:test") {
+		t.Fatalf("resolver was asked for city:test (refs %q); the walk must stop at the blocked source before resolving its parent store", resolvedRefs)
+	}
+}
+
 func TestProcessWorkflowFinalizeClosesSourcesUnderProvidedLock(t *testing.T) {
 	t.Parallel()
 
