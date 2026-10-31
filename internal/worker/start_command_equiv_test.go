@@ -2,11 +2,14 @@ package worker
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
 // newStartCommandHandle builds an un-started session handle plus the persisted
@@ -160,5 +163,124 @@ func TestStartCommandResumeUsesSpecOverrides(t *testing.T) {
 	want := "spec-cmd --spec-resume " + info.SessionKey
 	if got != want {
 		t.Fatalf("startCommand() = %q, want %q", got, want)
+	}
+}
+
+func TestStartCommandStaleResumeKey(t *testing.T) {
+	tests := []struct {
+		name       string
+		provider   string
+		transcript bool
+		wantFlag   string
+	}{
+		{name: "probeable transcript absent", provider: "claude", wantFlag: "--session-id"},
+		{name: "probeable transcript present", provider: "claude", transcript: true, wantFlag: "--resume"},
+		{name: "provider not probeable", provider: "legacy-provider", wantFlag: "--resume"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			handle, store, info := newStartCommandHandle(t,
+				SessionSpec{
+					Template: "worker",
+					Command:  "mycmd",
+					Provider: tt.provider,
+					Resume: sessionpkg.ProviderResume{
+						ResumeFlag:    "--resume",
+						SessionIDFlag: "--session-id",
+					},
+				},
+				sessionpkg.ProviderResume{ResumeFlag: "--resume", SessionIDFlag: "--session-id"},
+				"mycmd",
+			)
+			handle.searchPaths = []string{root}
+			if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
+				t.Fatalf("SetMetadata(started_config_hash): %v", err)
+			}
+			if tt.transcript {
+				dir := filepath.Join(root, sessionlog.ProjectSlug(info.WorkDir))
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatalf("MkdirAll: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, info.SessionKey+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
+			}
+
+			got, err := handle.startCommand(info.ID)
+			if err != nil {
+				t.Fatalf("startCommand: %v", err)
+			}
+			want := "mycmd " + tt.wantFlag + " " + info.SessionKey
+			if got != want {
+				t.Fatalf("startCommand() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestStartCommandClaudeConfigDir(t *testing.T) {
+	tests := []struct {
+		name       string
+		configDir  func(string) string
+		transcript bool
+		wantFlag   string
+	}{
+		{name: "absolute transcript present", configDir: func(root string) string { return filepath.Join(root, "claude") }, transcript: true, wantFlag: "--resume"},
+		{name: "absolute transcript absent", configDir: func(root string) string { return filepath.Join(root, "claude") }, wantFlag: "--session-id"},
+		{name: "relative transcript present", configDir: func(string) string { return "claude" }, transcript: true, wantFlag: "--session-id"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			t.Chdir(root)
+			configDir := tt.configDir(root)
+			handle, store, info := newStartCommandHandle(t,
+				SessionSpec{
+					Template: "worker",
+					Command:  "mycmd",
+					Provider: "claude",
+					Env:      map[string]string{"CLAUDE_CONFIG_DIR": "  " + configDir + "  "},
+					Resume: sessionpkg.ProviderResume{
+						ResumeFlag:    "--resume",
+						SessionIDFlag: "--session-id",
+					},
+				},
+				sessionpkg.ProviderResume{ResumeFlag: "--resume", SessionIDFlag: "--session-id"},
+				"mycmd",
+			)
+			handle.searchPaths = []string{t.TempDir()}
+			if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
+				t.Fatalf("SetMetadata(started_config_hash): %v", err)
+			}
+			if tt.transcript {
+				dir := filepath.Join(configDir, "projects", sessionlog.ProjectSlug(info.WorkDir))
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatalf("MkdirAll: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, info.SessionKey+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
+			}
+
+			got, err := handle.startCommand(info.ID)
+			if err != nil {
+				t.Fatalf("startCommand: %v", err)
+			}
+			want := "mycmd " + tt.wantFlag + " " + info.SessionKey
+			if got != want {
+				t.Fatalf("startCommand() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestStartCommandWithSessionIDRequiresCommand(t *testing.T) {
+	_, err := startCommandWithSessionID(sessionpkg.Info{}, SessionSpec{})
+	want := "worker handle configuration is invalid: command is required to start session"
+	if err == nil || err.Error() != want {
+		t.Fatalf("startCommandWithSessionID() error = %v, want %q", err, want)
 	}
 }

@@ -491,6 +491,17 @@ resource_owner = "the six isolated Make invocations are confined to TestProvider
 migration_target = "P0.1"
 expires = "2026-10-31"
 
+[[medium]]
+package_dir = "tools/nogo/nolinttest"
+package_name = "nolinttest_test"
+owner = "TestNolintNeverSuppressesStoreclass"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the storeclass nolint-suppression proof is a checked Medium subprocess owner"
+resource_owner = "the nogo subprocess per case is confined to TestNolintNeverSuppressesStoreclass, which exists to run the Bazel-built nogo binary over a fixture under every nolint spelling and placement: nolint handling lives in rules_go's patched nogo driver, not in the storeclass analyzer, so only a real nogo run can prove that no directive suppresses a storeclass finding"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
 # A reviewed-hermetic-body row is narrower than a Small test declaration. It
 # proves that the exact untagged test body and statically reachable
 # receiverless same-package helpers contain none of the cataloged resources.

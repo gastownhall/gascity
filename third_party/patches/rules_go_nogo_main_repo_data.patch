@@ -1,0 +1,63 @@
+diff -ruN a/go/private/actions/compilepkg.bzl b/go/private/actions/compilepkg.bzl
+--- a/go/private/actions/compilepkg.bzl
++++ b/go/private/actions/compilepkg.bzl
+@@ -246,6 +246,16 @@
+     inputs_transitive = [sdk.tools, sdk.headers, go.stdlib.libs]
+     outputs = [out_diagnostics, out_facts]
+ 
++    # gascity third_party/patches: only a main-repository package's nogo action
++    # reads the main-repo data files (the storeclass baseline), found through
++    # GC_NOGO_MAIN_REPO_DATA, so an edit to them re-lints no external package.
++    env = go.env_for_path_mapping
++    main_repo_data = getattr(go, "nogo_main_repo_data", [])
++    if go.label.workspace_name == "" and main_repo_data:
++        inputs_direct = inputs_direct + main_repo_data
++        env = dict(env)
++        env["GC_NOGO_MAIN_REPO_DATA"] = ",".join([f.path for f in main_repo_data])
++
+     nogo_args = go.tool_args(go)
+     if cgo_go_srcs:
+         inputs_direct.append(cgo_go_srcs)
+@@ -278,7 +288,7 @@
+         mnemonic = "RunNogo",
+         executable = go.toolchain._builder,
+         arguments = ["nogo", shared_args, nogo_args],
+-        env = go.env_for_path_mapping,
++        env = env,
+         toolchain = GO_TOOLCHAIN_LABEL,
+         execution_requirements = SUPPORTS_PATH_MAPPING_REQUIREMENT,
+         progress_message = "Running nogo on %{label}",
+diff -ruN a/go/private/context.bzl b/go/private/context.bzl
+--- a/go/private/context.bzl
++++ b/go/private/context.bzl
+@@ -772,6 +772,10 @@
+         pathtype = pathtype,
+         cgo_tools = cgo_tools,
+         nogo = ctx.attr._nogo[DefaultInfo].files_to_run if hasattr(ctx.attr, "_nogo") else None,
++        # Files only main-repository nogo actions read (gascity
++        # third_party/patches: the storeclass baseline). External repositories'
++        # nogo actions never see them, so editing them re-lints none of those.
++        nogo_main_repo_data = getattr(go_context_info, "nogo_main_repo_data", []) if go_context_info else [],
+         coverdata = go_context_info.coverdata if go_context_info else None,
+         coverage_enabled = ctx.configuration.coverage_enabled,
+         coverage_instrumented = ctx.coverage_instrumented(),
+@@ -814,6 +818,7 @@
+     return [
+         GoContextInfo(
+             coverdata = ctx.attr.coverdata[0][GoArchive],
++            nogo_main_repo_data = ctx.files.nogo_main_repo_data,
+         ),
+         ctx.attr.stdlib[GoStdLib],
+         ctx.attr.go_config[GoConfigInfo],
+@@ -831,6 +836,11 @@
+             mandatory = True,
+             providers = [GoConfigInfo],
+         ),
++        # gascity third_party/patches: see nogo_main_repo_data in go_context.
++        "nogo_main_repo_data": attr.label_list(
++            allow_files = True,
++            default = [Label("@@//tools/nogo:main_repo_data")],
++        ),
+         "stdlib": attr.label(
+             mandatory = True,
+             providers = [GoStdLib],

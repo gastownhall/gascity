@@ -480,6 +480,17 @@ var bootstrapPolicy = Ledger{
 			MigrationTarget: "P0.1",
 			Expires:         "2026-10-31",
 		},
+		{
+			PackageDir:      "tools/nogo/nolinttest",
+			PackageName:     "nolinttest_test",
+			Owner:           "TestNolintNeverSuppressesStoreclass",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the storeclass nolint-suppression proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the nogo subprocess per case is confined to TestNolintNeverSuppressesStoreclass, which exists to run the Bazel-built nogo binary over a fixture under every nolint spelling and placement: nolint handling lives in rules_go's patched nogo driver, not in the storeclass analyzer, so only a real nogo run can prove that no directive suppresses a storeclass finding",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
 	},
 	ReviewedHermeticBody: []ReviewedHermeticBody{
 		{
