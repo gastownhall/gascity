@@ -21,8 +21,8 @@ func TestEventsMirrorOptionsUnsetAddsNothing(t *testing.T) {
 	if _, ok := eventsMirrorOptions(config.EventsMirrorConfig{}, &stderr); ok {
 		t.Fatal("eventsMirrorOptions enabled a mirror with no path")
 	}
-	if got := len(eventsFileRecorderOptions(config.EventsConfig{}, &stderr)); got != 4 {
-		t.Fatalf("eventsFileRecorderOptions returned %d options without a mirror, want the 4 rotation options", got)
+	if got := len(eventsFileRecorderOptions(config.EventsConfig{}, &stderr)); got != 5 {
+		t.Fatalf("eventsFileRecorderOptions returned %d options without a mirror, want the 4 rotation options and the scan budget", got)
 	}
 	if stderr.String() != "" {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
