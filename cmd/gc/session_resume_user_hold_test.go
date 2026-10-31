@@ -127,6 +127,71 @@ func TestUserHoldDrainReleasedOnceTheHoldIsConsumed(t *testing.T) {
 	}
 }
 
+// gastownhall/gascity#8411: a pass reads a held row and begins a user-hold
+// drain; `gc session wake` then consumes the hold, and the runtime exits
+// before the pass's Phase 2, which decides on the pass snapshot, so
+// userHoldDrainReleased still sees the hold and the drain completes. The
+// completion must not stamp sleep_reason=user-hold onto the woken row, which
+// has no sleep_intent and no held_until. Without the wake (the hold still on
+// the row) the completion keeps its user-hold reason.
+func TestUserHoldDrainCompletionFromAStaleSnapshotWritesNoHoldReason(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		wake       bool
+		wantReason string
+	}{
+		{"woken after the snapshot", true, ""},
+		{"still held", false, string(session.SleepReasonUserHold)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testCity := t.TempDir()
+			now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "s-worker", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			store := beads.NewMemStore()
+			b, err := store.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+				"session_name": "s-worker", "template": "worker", "generation": "1", "state": "active",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			front := sessionFrontDoor(store)
+			if _, err := front.OperatorSuspend(b.ID, now.Add(-2*time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			snapshot := mustGetBead(t, store, b.ID)
+			dt := newDrainTracker()
+			beginDrainForTest(t, store, dt, b.ID, "user-hold", now.Add(-time.Minute), now.Add(defaultDrainTimeout))
+			if tc.wake {
+				if _, err := front.WakeSession(b.ID, now, session.WakeOpts{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := sp.Stop("s-worker"); err != nil {
+				t.Fatal(err)
+			}
+
+			advanceSessionDrainsWithSessionsTraced(testCity, dt, sp, store, infoLookupFromBeadLookup(func(string) *beads.Bead {
+				return &snapshot
+			}), map[string]wakeEvaluation{}, &config.City{}, &clock.Fake{Time: now.Add(time.Second)}, nil)
+
+			got := mustGetBead(t, store, b.ID)
+			if dt.get(b.ID) != nil {
+				t.Fatal("drain still tracked after the runtime exited (test premise)")
+			}
+			if got.Metadata["sleep_reason"] != tc.wantReason {
+				t.Errorf("after the drain completed: sleep_reason=%q sleep_intent=%q held_until=%q, want sleep_reason %q",
+					got.Metadata["sleep_reason"], got.Metadata["sleep_intent"], got.Metadata["held_until"], tc.wantReason)
+			}
+			if tc.wake && session.DispositionOfInfo(sessionInfoFromBead(got)).OperatorDormant(now.Add(time.Second)) {
+				t.Error("the woken row reads OperatorDormant after the drain completed")
+			}
+		})
+	}
+}
+
 // tickOnStart runs one legacy tick right after the provider Start call,
 // before the resume confirms it: the mid-resume race.
 type tickOnStart struct {
