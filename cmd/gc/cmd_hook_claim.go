@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -204,6 +205,13 @@ type hookClaimOptions struct {
 	// built for subprocesses, and its inherited-secret filter drops
 	// GC_INSTANCE_TOKEN.
 	StartedFence hookStartedFence
+	// PoolSeatWorkDir is the directory the controller started this pool seat
+	// in, read off the session row the claim fence verified
+	// (hookClaimPoolSeatWorkDir). It is empty for a named, manual or
+	// session-less claimant and whenever the fence did not read the row, and
+	// empty turns the worktree check of the fresh-claim tier off
+	// (hookClaimWorktreeHeldElsewhere).
+	PoolSeatWorkDir string
 }
 
 // continuationPinAssignee returns the identity a continuation sibling is pinned
@@ -1061,6 +1069,13 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	claimsErrored := false
 	now := ops.nowOrWallClock()
 	for _, candidate := range candidates {
+		if hookClaimWorktreeHeldElsewhere(candidate, opts.PoolSeatWorkDir) {
+			// Work bound to another verified worktree belongs to the seat the
+			// controller starts inside that worktree; this seat would run it in
+			// the wrong checkout. Checked first so the opt-in stale reclaim
+			// below never frees a bead this seat would then have to skip.
+			continue
+		}
 		reclaimedFrom := ""
 		if !hookCandidateClaimable(candidate, opts.RouteTargets, now) {
 			// ga-7rj87d FR1/FR2: a route-matched candidate whose ONLY claim
@@ -3068,6 +3083,53 @@ func hookClaimWorktreeEvidenceIsWholeOrAbsent(bead beads.Bead) bool {
 		}
 	}
 	return present == 0 || present == len(worktreeOwnershipEvidenceKeys)
+}
+
+// hookClaimManagedWorktreeDir returns the checkout a bead's complete
+// managed-worktree evidence names: one agreeing gc.work_dir / work_dir path,
+// gc.work_branch, and all eight ownership keys. That is exactly the shape
+// worktreeSpecForBead turns into the verified spec the controller starts a
+// pool seat inside (verifiedPoolTriggerWorkDir), and the only shape the
+// controller places a seat for, so any other shape (no path, a path with no or
+// partial evidence, disagreeing spellings) reports false. It is a pure read:
+// worktreeSpecForBead is not called because it logs on the legacy shapes,
+// which a hook would repeat on every invocation.
+func hookClaimManagedWorktreeDir(bead beads.Bead) (string, bool) {
+	canonical := strings.TrimSpace(bead.Metadata[beadmeta.WorkDirMetadataKey])
+	legacy := strings.TrimSpace(bead.Metadata[beadmeta.LegacyWorkDirMetadataKey])
+	if canonical != "" && legacy != "" && canonical != legacy {
+		return "", false
+	}
+	path := canonical
+	if path == "" {
+		path = legacy
+	}
+	if path == "" || strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) == "" {
+		return "", false
+	}
+	for _, key := range worktreeOwnershipEvidenceKeys {
+		if strings.TrimSpace(bead.Metadata[key]) == "" {
+			return "", false
+		}
+	}
+	return path, true
+}
+
+// hookClaimWorktreeHeldElsewhere reports whether a pool seat started in
+// seatWorkDir must leave candidate to another seat because the candidate's
+// complete managed-worktree evidence names a different checkout. For every
+// such bead it counts as demand, the controller starts a seat inside the
+// bead's own verified worktree, so that seat can claim it; a seat anywhere
+// else would run the bead's work in the wrong tree and on the wrong branch.
+// An empty seatWorkDir (not a pool seat, or a row the fence never read) turns
+// the check off.
+func hookClaimWorktreeHeldElsewhere(candidate beads.Bead, seatWorkDir string) bool {
+	seatWorkDir = strings.TrimSpace(seatWorkDir)
+	if seatWorkDir == "" {
+		return false
+	}
+	dir, managed := hookClaimManagedWorktreeDir(candidate)
+	return managed && !pathutil.SamePath(dir, seatWorkDir)
 }
 
 func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {
