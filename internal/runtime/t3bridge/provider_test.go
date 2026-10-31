@@ -1247,22 +1247,18 @@ func newT3BridgeTestServerCore(t *testing.T, snapshot map[string]interface{}, st
 		value := map[string]interface{}{}
 		switch req.Tag {
 		case "orchestration.getSnapshot":
-			if ts.stateful {
-				value = ts.dynamicSnapshot()
-			} else {
-				ts.mu.Lock()
-				stalled := ts.stalled
-				ts.mu.Unlock()
-				if stalled {
-					_, _, _ = conn.ReadMessage() // unanswered: returns when the client leaves
-					return
-				}
-				snapshot, ok := ts.nextSnapshot()
-				if !ok {
-					return // an outage: the connection closes without an answer
-				}
-				value = snapshot
+			ts.mu.Lock()
+			stalled := ts.stalled
+			ts.mu.Unlock()
+			if stalled {
+				_, _, _ = conn.ReadMessage() // unanswered: returns when the client leaves
+				return
 			}
+			snapshot, ok := ts.nextSnapshot()
+			if !ok {
+				return // an outage: the connection closes without an answer
+			}
+			value = snapshot
 		case "orchestration.dispatchCommand":
 			var payload map[string]interface{}
 			if err := json.Unmarshal(req.Payload, &payload); err != nil {
@@ -1387,6 +1383,9 @@ func (ts *t3BridgeTestServer) closeCommands(n int, closeMessage []byte) {
 
 // nextSnapshot is the snapshot the next read answers; false for an outage.
 func (ts *t3BridgeTestServer) nextSnapshot() (map[string]interface{}, bool) {
+	if ts.stateful {
+		return ts.dynamicSnapshot(), true
+	}
 	ts.mu.Lock()
 	next, ok := ts.snapshot, true
 	if len(ts.snapshots) > 0 {
