@@ -44,6 +44,10 @@ type startConfig struct {
 	// state a runtime that copies work_dir elsewhere must leave behind.
 	// See [citylayout.MatchWorkDirExclude] for the pattern grammar.
 	WorkDirExclude []string `json:"work_dir_exclude,omitempty"`
+	// FreshOnly asks an observe.v1 script to refuse a name any box holds,
+	// live or dead (exit 73), and never to recycle, kill or reuse one. Only
+	// startFresh sets it.
+	FreshOnly bool `json:"fresh_only,omitempty"`
 }
 
 // marshalStartConfig converts a [runtime.Config] to JSON for the exec script.
@@ -68,6 +72,7 @@ func marshalStartConfig(cfg runtime.Config) ([]byte, error) {
 		PackOverlayDirs:    cfg.PackOverlayDirs,
 		OverlayDir:         cfg.OverlayDir,
 		CopyFiles:          cfs,
+		FreshOnly:          cfg.FreshOnly,
 	}
 	if cfg.WorkDir != "" {
 		sc.WorkDirExclude = citylayout.WorkDirExportExcludes()

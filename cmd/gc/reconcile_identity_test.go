@@ -290,10 +290,55 @@ func TestIdentityReadableLeaves(t *testing.T) {
 		"k8s":        {(*k8s.Provider)(nil), false},
 		"ssh":        {(*ssh.Provider)(nil), false},
 		"t3bridge":   {(*t3bridge.Provider)(nil), false},
+		// exec observes identity only once its handshake is v2-ready, whose
+		// protocol seeds identity before it reports a name (X3).
+		"exec profile":    {runtime.NewFakeProfile(runtime.ProfileExec, runtime.FullFake{Fake: runtime.NewFake()}), false},
+		"exec v2 profile": {runtime.NewFakeProfile(runtime.ProfileExecV2, runtime.FullFake{Fake: runtime.NewFake()}), true},
 	} {
 		if got := identityReadable(tc.leaf); got != tc.want {
 			t.Errorf("identityReadable(%s) = %v, want %v", name, got, tc.want)
 		}
+	}
+}
+
+// identityObserverLeaf observes identity as a v2-ready exec pack does, and
+// counts its reads.
+type identityObserverLeaf struct {
+	*runtime.Fake
+	ids   map[string]string
+	err   error
+	reads int
+}
+
+func (*identityObserverLeaf) IdentityObservable() bool { return true }
+
+func (l *identityObserverLeaf) ObserveIdentity(string) (map[string]string, error) {
+	l.reads++
+	return l.ids, l.err
+}
+
+// Kills (PAR-EXEC §13.5 4): an observed identity read twice, as a sidecar
+// is, or a read that could not tell (identity null, unknown) taken as a
+// known empty identity, which reads a starting box as ownerless.
+func TestReadIdentityEnvObservesOnce(t *testing.T) {
+	leaf := &identityObserverLeaf{Fake: runtime.NewFake(), ids: map[string]string{"GC_SESSION_ID": "gc-1", "GC_RUNTIME_EPOCH": "2", "GC_INSTANCE_TOKEN": " tok-1 ", "GT_PROCESS_NAMES": "claude, node"}}
+	id := readIdentityEnv(leaf, "s")
+	want := runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "2", Token: "tok-1", ProcessNames: []string{"claude", "node"}}
+	if id.Known != want.Known || id.SessionID != want.SessionID || id.Epoch != want.Epoch || id.Token != want.Token || strings.Join(id.ProcessNames, ",") != "claude,node" {
+		t.Fatalf("readIdentityEnv = %+v, want %+v", id, want)
+	}
+	if leaf.reads != 1 || len(leaf.Calls) != 0 {
+		t.Fatalf("%d observes and calls %v, want one observe and no GetMeta", leaf.reads, leaf.Calls)
+	}
+	for _, err := range []error{runtime.ErrRuntimeUnavailable, runtime.ErrSessionNotFound} {
+		leaf := &identityObserverLeaf{Fake: runtime.NewFake(), ids: map[string]string{}, err: err}
+		if id := readIdentityEnv(leaf, "s"); id.Known {
+			t.Errorf("ObserveIdentity %v: identity %+v, want not Known", err, id)
+		}
+	}
+	empty := &identityObserverLeaf{Fake: runtime.NewFake(), ids: map[string]string{}}
+	if id := readIdentityEnv(empty, "s"); !id.Known || id.SessionID != "" {
+		t.Errorf("a box with no gc identity: %+v, want Known and empty (ownerless)", id)
 	}
 }
 
