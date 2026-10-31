@@ -2915,7 +2915,8 @@ func TestRestampWorkBeadRoutingCollapsesPoolInstanceResolvedViaResolveAgent(t *t
 // that was routed by a plain sling (gc.routed_to=<pool>) keeping that claim key
 // after a graph.v2 workflow wraps it: the stale key makes the pool count the
 // source and the workflow's executable step as two units of demand. The clear
-// is unconditional and leaves gc.run_target untouched.
+// is unconditional and takes gc.run_target with it, the carried route that
+// route recovery would re-stamp gc.routed_to from.
 func TestRestampWorkBeadRoutingClearsStaleRoutedTo(t *testing.T) {
 	cfg := &config.City{
 		Rigs:   []config.Rig{{Name: "myrig"}},
@@ -2927,21 +2928,20 @@ func TestRestampWorkBeadRoutingClearsStaleRoutedTo(t *testing.T) {
 	}
 
 	tests := []struct {
-		name          string
-		metadata      map[string]string
-		wantRunTarget string
+		name     string
+		metadata map[string]string
 	}{
 		{name: "routed to the same target", metadata: map[string]string{beadmeta.RoutedToMetadataKey: "myrig/polecat"}},
 		{name: "routed to a different target", metadata: map[string]string{beadmeta.RoutedToMetadataKey: "otherrig/worker"}},
 		{name: "never routed"},
 		{
-			name: "run target is left alone",
+			name: "run target is cleared too",
 			metadata: map[string]string{
 				beadmeta.RoutedToMetadataKey:  "myrig/polecat",
 				beadmeta.RunTargetMetadataKey: "myrig/polecat",
 			},
-			wantRunTarget: "myrig/polecat",
 		},
+		{name: "run target without a route", metadata: map[string]string{beadmeta.RunTargetMetadataKey: "myrig/polecat"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2967,8 +2967,8 @@ func TestRestampWorkBeadRoutingClearsStaleRoutedTo(t *testing.T) {
 			if got := after.Metadata[beadmeta.RoutedToMetadataKey]; got != "" {
 				t.Fatalf("gc.routed_to = %q after graph.v2 wrap, want cleared (stale pre-wrap route doubles pool demand)", got)
 			}
-			if got := after.Metadata[beadmeta.RunTargetMetadataKey]; got != tt.wantRunTarget {
-				t.Fatalf("gc.run_target = %q, want %q (restamp must not touch it)", got, tt.wantRunTarget)
+			if got := after.Metadata[beadmeta.RunTargetMetadataKey]; got != "" {
+				t.Fatalf("gc.run_target = %q after graph.v2 wrap, want cleared (route recovery re-stamps gc.routed_to from it)", got)
 			}
 		})
 	}
@@ -3039,6 +3039,203 @@ func TestSlingAttachGraphFormulaReportsRestampWriteFailure(t *testing.T) {
 	entry := result.MetadataErrors[0]
 	if !strings.Contains(entry, source.ID) || !strings.Contains(entry, injected.Error()) {
 		t.Fatalf("MetadataErrors entry %q must name the source bead %s and the store error %q", entry, source.ID, injected.Error())
+	}
+}
+
+// TestPlainSlingClearsGraphTakeoverRoute: a bead a graph workflow took over
+// keeps the gc.execution_routed_to the restamp left after the workflow ends,
+// and the detached-orphan sweep reads that key on a bead outside any workflow
+// as the takeover, so it never re-routes the bead. A plain sling hands the bead
+// back to the pool, as a single bead or as a batch child, so it drops the key.
+// A workflow member keeps it: its execution route is its workflow's routing.
+func TestPlainSlingClearsGraphTakeoverRoute(t *testing.T) {
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		batch    bool
+		wantExec string
+	}{
+		{name: "taken over", metadata: map[string]string{beadmeta.ExecutionRoutedToMetadataKey: "mayor"}},
+		{name: "taken over batch child", metadata: map[string]string{beadmeta.ExecutionRoutedToMetadataKey: "mayor"}, batch: true},
+		{
+			name: "workflow member",
+			metadata: map[string]string{
+				beadmeta.ExecutionRoutedToMetadataKey: "mayor",
+				beadmeta.RootBeadIDMetadataKey:        "wf-1",
+			},
+			wantExec: "mayor",
+		},
+		{
+			name: "workflow member batch child",
+			metadata: map[string]string{
+				beadmeta.ExecutionRoutedToMetadataKey: "mayor",
+				beadmeta.RootBeadIDMetadataKey:        "wf-1",
+			},
+			batch:    true,
+			wantExec: "mayor",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := newFakeRunner()
+			deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+			bead := beads.Bead{Title: "work", Type: "task", Status: "open", Metadata: tt.metadata}
+			var result SlingResult
+			var err error
+			if tt.batch {
+				convoy, cerr := deps.Store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+				if cerr != nil {
+					t.Fatalf("create convoy: %v", cerr)
+				}
+				bead.ParentID = convoy.ID
+				if bead, err = deps.Store.Create(bead); err != nil {
+					t.Fatalf("create child: %v", err)
+				}
+				result, err = DoSlingBatch(SlingOpts{Target: a, BeadOrFormula: convoy.ID}, deps, deps.Store)
+			} else {
+				if bead, err = deps.Store.Create(bead); err != nil {
+					t.Fatalf("create bead: %v", err)
+				}
+				result, err = DoSling(testOpts(a, bead.ID), deps, deps.Store)
+			}
+			if err != nil {
+				t.Fatalf("sling: %v", err)
+			}
+			if len(runner.calls) != 1 {
+				t.Fatalf("runner calls = %#v, want the one plain route", runner.calls)
+			}
+			if len(result.MetadataErrors) != 0 {
+				t.Fatalf("MetadataErrors = %v, want none", result.MetadataErrors)
+			}
+			after, err := deps.Store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", bead.ID, err)
+			}
+			if got := after.Metadata[beadmeta.ExecutionRoutedToMetadataKey]; got != tt.wantExec {
+				t.Fatalf("gc.execution_routed_to = %q after the plain sling, want %q", got, tt.wantExec)
+			}
+		})
+	}
+}
+
+// TestPlainSlingReportsGraphTakeoverClearFailure pins the clear as advisory:
+// the bead is already routed, so a rejected write is reported in
+// MetadataErrors and the sling still succeeds.
+func TestPlainSlingReportsGraphTakeoverClearFailure(t *testing.T) {
+	runner := newFakeRunner()
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+	bead, err := deps.Store.Create(beads.Bead{
+		Title:    "work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.ExecutionRoutedToMetadataKey: "mayor"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected clear failure")
+	deps.Store = &failingRestampStore{Store: deps.Store, beadID: bead.ID, err: injected}
+
+	result, err := DoSling(testOpts(config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, bead.ID), deps, deps.Store)
+	if err != nil {
+		t.Fatalf("DoSling: %v, want nil (the clear is advisory)", err)
+	}
+	if len(result.MetadataErrors) != 1 {
+		t.Fatalf("MetadataErrors = %v, want exactly the clear failure", result.MetadataErrors)
+	}
+	if entry := result.MetadataErrors[0]; !strings.Contains(entry, bead.ID) || !strings.Contains(entry, injected.Error()) {
+		t.Fatalf("MetadataErrors entry %q must name the bead %s and the store error %q", entry, bead.ID, injected.Error())
+	}
+}
+
+// rootHidingStore hides root from every read once the launch has restamped
+// source's routing (written gc.execution_routed_to on it): a launch whose new
+// root never becomes visible after finalize.
+type rootHidingStore struct {
+	beads.Store
+	source, root string
+	hidden       bool
+}
+
+func (s *rootHidingStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if _, ok := kvs[beadmeta.ExecutionRoutedToMetadataKey]; ok && id == s.source {
+		s.hidden = true
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+func (s *rootHidingStore) Get(id string) (beads.Bead, error) {
+	if s.hidden && id == s.root {
+		return beads.Bead{}, beads.ErrNotFound
+	}
+	return s.Store.Get(id)
+}
+
+func (s *rootHidingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	got, err := s.Store.List(q)
+	if s.hidden {
+		got = slices.DeleteFunc(got, func(b beads.Bead) bool { return b.ID == s.root })
+	}
+	return got, err
+}
+
+// TestSourceWorkflowLaunchRollbackRestoresSourceRouting: a source workflow
+// launch restamps the source's routing in finalize. When the new root is still
+// not visible afterwards, the launch is rolled back, and the source must be the
+// pool demand it was before: left with the restamped routing it would sit
+// unrouted with no live workflow, and neither route recovery (no gc.run_target)
+// nor the detached-orphan sweep (it reads gc.execution_routed_to as a takeover)
+// would route it again.
+func TestSourceWorkflowLaunchRollbackRestoresSourceRouting(t *testing.T) {
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), newFakeRunner().run)
+	source, err := deps.Store.Create(beads.Bead{
+		Title:  "work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:  "polecat",
+			beadmeta.RunTargetMetadataKey: "polecat",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+	root, err := deps.Store.Create(beads.Bead{
+		Title:    "workflow",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	store := &rootHidingStore{Store: deps.Store, source: source.ID, root: root.ID}
+	deps.Store = store
+	a := config.Agent{Name: "polecat", MaxActiveSessions: intPtr(5)}
+
+	_, err = withSourceWorkflowLaunchLock(context.Background(), deps, source.ID, false, func() (pendingSourceWorkflowLaunch, error) {
+		return pendingGraphWorkflowLaunch(root.ID, source.ID, source.ID, "", a, "batch", "graph-work", deps), nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "not visible") {
+		t.Fatalf("launch error = %v, want the not-visible invariant violation", err)
+	}
+	if !store.hidden {
+		t.Fatal("precondition: the launch never restamped the source's routing")
+	}
+	after, err := store.Store.Get(source.ID)
+	if err != nil {
+		t.Fatalf("Get(source): %v", err)
+	}
+	for key, want := range map[string]string{
+		beadmeta.RoutedToMetadataKey:          "polecat",
+		beadmeta.RunTargetMetadataKey:         "polecat",
+		beadmeta.ExecutionRoutedToMetadataKey: "",
+		"workflow_id":                         "",
+	} {
+		if got := after.Metadata[key]; got != want {
+			t.Errorf("source %s = %q after the rollback, want %q", key, got, want)
+		}
 	}
 }
 
