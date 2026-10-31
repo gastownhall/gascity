@@ -45,6 +45,15 @@ const (
 	lanePendingUnknown = opjournal.PendingUnknown
 	// laneProbeBudget bounds one probe's runtime calls.
 	laneProbeBudget = 10 * time.Second
+	// laneScreenTurnQuietLimit is how long a keystroke runtime's pane may
+	// draw nothing while its screen shows a running turn before
+	// quietBoundary takes that reading as stale. A live turn redraws its
+	// status every second (Claude Code's spinner and timer, Codex's Working
+	// row), and the activity clock lags the pane by no more than the tmux
+	// state cache's stale window (30 s) while the session reads running, so
+	// a pane quiet this long runs no turn: what reads as one is a frozen
+	// frame or transcript text, which an idle pane never redraws.
+	laneScreenTurnQuietLimit = time.Minute
 )
 
 // laneExecDeps is what the live executor needs, for any host that runs it:
@@ -72,11 +81,12 @@ type laneExecDeps struct {
 
 // conversationLaneExec is the live opjournal.Executor for one conversation
 // over worker.Handle. A keystroke-mode runtime's boundary is the quiescence
-// rule; a protocol-mode one (t3bridge) is live when it reports its turns,
-// their starts included, and its boundary is CurrentTurn showing no turn in
-// progress (DES-T3I §14 item 6). It is built per pass from the session row
-// the pass's view came from, so Probe and Deliver act on the incarnation
-// that view names.
+// rule, which the agent's own screen confirms where the lane can read its
+// busy indicator (quietBoundary); a protocol-mode one (t3bridge) is live
+// when it reports its turns, their starts included, and its boundary is
+// CurrentTurn showing no turn in progress (DES-T3I §14 item 6). It is built
+// per pass from the session row the pass's view came from, so Probe and
+// Deliver act on the incarnation that view names.
 type conversationLaneExec struct {
 	deps laneExecDeps
 	info session.Info
@@ -330,13 +340,13 @@ type laneLook struct {
 // incarnation the row names, resolves its handle once and reads the pending
 // interaction through it, and, when some content may reach it, the
 // session's turns (with withTurns) and the boundary. The boundary is the
-// quiescence rule for a keystroke-mode runtime, and for a protocol-mode one
-// its turns: never the quiescence rule. Neither the content gate nor the
-// stop request holds control (DES-O1 I7, §10.5): a draining, held or
-// stop-requested session blocked on a prompt still has it read, so a
-// respond can answer it. A running live runtime of another incarnation
-// reads lanePendingUnknown: nothing looked, so a respond waits rather than
-// take the prompt for gone.
+// quiescence rule for a keystroke-mode runtime, confirmed on the agent's
+// screen (quietBoundary), and for a protocol-mode one its turns: never the
+// quiescence rule. Neither the content gate nor the stop request holds
+// control (DES-O1 I7, §10.5): a draining, held or stop-requested session
+// blocked on a prompt still has it read, so a respond can answer it. A
+// running live runtime of another incarnation reads lanePendingUnknown:
+// nothing looked, so a respond waits rather than take the prompt for gone.
 //
 // A draining or stop-requested row admits the drain notice, so its look
 // reads the boundary whatever its open ops are: the probe does not see
@@ -393,7 +403,7 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 	}
 	l.boundary = opjournal.TriNo
 	if e.idle(e.target, obs) {
-		l.boundary = e.quietBoundary()
+		l.boundary = e.quietBoundary(obs)
 	} else {
 		l.boundaryAt = e.quiescenceDeadline(obs)
 	}
@@ -401,15 +411,17 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 }
 
 // quietBoundary is a keystroke runtime's boundary once the quiescence rule
-// reads it quiet. The rule reads the activity clock, which over tmux comes
-// from a cached fleet snapshot in whole seconds, so a pane that redraws every
-// second can read quiet while its agent runs a turn; and the lane comes back
-// at the deadline the last look named (quiescenceDeadline), where the same
-// snapshot reads quiet by construction. The agent's own screen decides: a
-// turn running there keeps the boundary closed, with no deadline, so the busy
-// backoff paces the next look. A screen the look could not read is no
-// boundary either (noted). Without a screen reading the rule stands.
-func (e *conversationLaneExec) quietBoundary() opjournal.Tri {
+// reads it quiet in obs. The rule reads the activity clock, which over tmux
+// comes from a cached fleet snapshot in whole seconds, so a pane that redraws
+// every second can read quiet while its agent runs a turn; and the lane comes
+// back at the deadline the last look named (quiescenceDeadline), where the
+// same snapshot reads quiet by construction. The agent's own screen decides:
+// a turn running there keeps the boundary closed, with no deadline, so the
+// busy backoff paces the next look. A screen the look could not read is no
+// boundary either (noted). Without a screen reading the rule stands, and it
+// stands over a running turn the pane has drawn nothing of for
+// laneScreenTurnQuietLimit (noted): that reading is stale.
+func (e *conversationLaneExec) quietBoundary(obs worker.LiveObservation) opjournal.Tri {
 	running, known, err := e.turnOnScreen(e.target)
 	switch {
 	case !known:
@@ -417,11 +429,17 @@ func (e *conversationLaneExec) quietBoundary() opjournal.Tri {
 	case err != nil:
 		e.note("turn_on_screen", fmt.Errorf("reading session %s's screen for a running turn: %w", e.info.ID, err))
 		return opjournal.TriUnknown
-	case running:
-		return opjournal.TriNo
-	default:
+	case !running:
 		return opjournal.TriYes
+	case obs.LastActivity == nil || obs.LastActivity.IsZero():
+		return opjournal.TriNo
 	}
+	quiet := e.now().Sub(*obs.LastActivity)
+	if quiet < laneScreenTurnQuietLimit {
+		return opjournal.TriNo
+	}
+	e.note("turn_on_screen_stale", fmt.Errorf("session %s's screen shows a running turn, but its pane has drawn nothing for %s: taking the reading as stale", e.info.ID, quiet.Round(time.Second)))
+	return opjournal.TriYes
 }
 
 // laneTurnOnScreen reads, in one look at the agent's screen, whether the
@@ -429,7 +447,8 @@ func (e *conversationLaneExec) quietBoundary() opjournal.Tri {
 // takes before it types (runtime.TurnRunningProvider, on the routed leaf). It
 // is known only for a provider family whose busy indicator the pane scan
 // reads (tmux.BusyIndicatorReadable): an unlisted family's busy reading may
-// be transcript text, which would hold its boundary closed for good.
+// be transcript text, which would hold its boundary closed while no turn
+// runs.
 func laneTurnOnScreen(sp runtime.Provider, target nudgeTarget) (running, known bool, err error) {
 	if target.sessionName == "" || !tmux.BusyIndicatorReadable(strings.TrimSpace(target.providerFamily())) {
 		return false, false, nil
