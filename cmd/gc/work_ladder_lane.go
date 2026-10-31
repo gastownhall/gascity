@@ -7,12 +7,13 @@ package main
 // backoff to an hourly nudge, forever (internal/workladder).
 //
 // Per seat and pass: observe (the planner's last allocation, the row, the
-// runtime, provider health), decide (workladder.Decide, pure), re-read live
-// the work a nudge or a recycle would act on, commit the work_ladder cell by
-// a CAS on the row that decides again on the fresh read (UpdateRowFenced),
-// and only then act: nudge (a conversation-lane notice when the lane host
-// executes message, W5's work_ladder_notice.go; else today's delivery call),
-// post a recycle to
+// runtime, provider health, and on a pass that may act on the seat its own
+// turns, work_ladder_turns.go: a turn its provider failed is not progress),
+// decide (workladder.Decide, pure), re-read live the work a nudge or a
+// recycle would act on, commit the work_ladder cell by a CAS on the row that
+// decides again on the fresh read (UpdateRowFenced), and only then act:
+// nudge (a conversation-lane notice when the lane host executes message,
+// W5's work_ladder_notice.go; else today's delivery call), post a recycle to
 // the planner's inbox (arm A16), or release an unstarted claim. Every write
 // of the cell is a CAS (WL6); the old pacing keys are neither read nor
 // written (§6.7), so a deploy starts every seat from a fresh grace and no
@@ -100,6 +101,10 @@ type ladderPass struct {
 	noticesRead bool
 	ops         *opjournal.Store
 	opsErr      error
+	// ctx bounds the pass's reads; turnReader reads a seat's turns (nil:
+	// none).
+	ctx        context.Context
+	turnReader ladderTurnReader
 }
 
 // runWorkLadder is the step's body over the planner's last allocation s.
@@ -111,9 +116,13 @@ func (l *externalReadsLane) runWorkLadder(ctx context.Context, env externalReads
 	}
 	p := &ladderPass{
 		l: l, env: env, cfg: env.Cfg, now: l.now(), front: sessionFrontDoor(env.CityStore),
-		health: loadProviderHealthSnapshot(env.CityPath), partial: s.Partial,
+		health: loadProviderHealthSnapshot(env.CityPath), partial: s.Partial, ctx: ctx,
+	}
+	if l.turnReaderFor != nil {
+		p.turnReader = l.turnReaderFor(env)
 	}
 	work := p.outstanding(s, raw)
+	governed := make(map[string]bool)
 	for _, row := range raw {
 		if ctx.Err() != nil {
 			return
@@ -121,8 +130,10 @@ func (l *externalReadsLane) runWorkLadder(ctx context.Context, env externalReads
 		if !ladderGoverns(row) {
 			continue
 		}
+		governed[row.ID] = true
 		p.seat(row, work[row.ID])
 	}
+	l.ladderTurns.keep(governed)
 }
 
 // ladderGoverns is the seats the ladder paces: open pool-managed session
@@ -342,6 +353,7 @@ func (p *ladderPass) seat(row beads.Bead, targets []ladderTarget) {
 	// W5: the marks' fates, read live, folded in before deciding.
 	outs := p.noticeOutcomes(row, prev, gate)
 	folded, _ := foldLadderNotices(prev, outs)
+	live.turns = p.turns(row, live, gate, targets, folded.LastNudge)
 	hold := map[workladder.ClaimKey]bool{}
 	var d workladder.Decision
 	for range len(targets) + 1 { // each round settles a re-read: work gone is dropped, work unreadable waits
@@ -442,6 +454,9 @@ type ladderRuntime struct {
 	quiet    workladder.Quiet
 	activity time.Time
 	provider workladder.ProviderState
+	// turns is what the seat's turns said, on a pass that may act on it
+	// (turns); the zero value is no reading.
+	turns workladder.TurnReading
 }
 
 // observeRuntime reads row's runtime: running, quiet (sessionQuietHold's
@@ -484,12 +499,13 @@ func (p *ladderPass) observeRuntime(row beads.Bead) ladderRuntime {
 
 // observe is the seat's observation from its row (info, and its metadata
 // meta), its cell prev, its work, the work waiting on a live read, and its
-// runtime.
+// runtime, with the pass's reading of its turns: Decide discards a reading
+// whose conversation is not the row's (a reset landed since it was read).
 func (p *ladderPass) observe(info session.Info, meta map[string]string, prev workladder.Record, targets []ladderTarget, hold map[workladder.ClaimKey]bool, rt ladderRuntime) workladder.Observation {
 	gen := rowGeneration(meta)
 	obs := workladder.Observation{
 		Now: p.now, Gen: gen, Runtime: rt.running, Quiet: rt.quiet, LastActivity: rt.activity, Provider: rt.provider,
-		Gate: ladderGate(info, meta, p.now), Hold: hold,
+		Gate: ladderGate(info, meta, p.now), Hold: hold, Conv: rowConversation(meta), Turns: rt.turns,
 	}
 	for _, t := range targets {
 		obs.Outstanding = append(obs.Outstanding, t.work)
@@ -795,7 +811,11 @@ func (p *ladderPass) nudge(row beads.Bead, n workladder.Nudge, gen int64, refuse
 	}
 	p.event(events.WorkNudged, row, n.Key, gen, fields)
 	if refused > 0 {
-		p.settle(row.ID, func(r workladder.Record) (workladder.Record, bool) { return workladder.NudgeTaken(r, n.Key) })
+		// No delivery time is recorded yet (a zero time moves nothing): only
+		// the entry's refusals end.
+		p.settle(row.ID, func(r workladder.Record) (workladder.Record, bool) {
+			return workladder.NudgeDelivered(r, n.Key, gen, time.Time{})
+		})
 	}
 }
 

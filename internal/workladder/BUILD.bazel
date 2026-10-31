@@ -7,6 +7,7 @@ go_library(
         "decide.go",
         "notice.go",
         "policy.go",
+        "ratelimit.go",
         "types.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/workladder",
@@ -20,8 +21,11 @@ go_test(
         "codec_test.go",
         "decide_test.go",
         "notice_test.go",
+        "progress_test.go",
         "property_test.go",
         "purity_test.go",
+        "ratelimit_property_test.go",
+        "ratelimit_test.go",
         "table_test.go",
         "testenv_import_test.go",
     ],
@@ -30,6 +34,10 @@ go_test(
         exclude = ["BUILD.bazel"],
     ),
     embed = [":workladder"],
+    # The property sims (the ladder's and the rate-limit episode's) run
+    # 50 to 100 s each on one worker; 6 shards keep each well under the
+    # medium timeout.
+    shard_count = 6,
     deps = ["//internal/testenv"],
 )
 
