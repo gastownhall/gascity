@@ -169,12 +169,31 @@ func (s *beadPolicyStore) DepMetadata(issueID, dependsOnID string) (string, bool
 // The embedded Store interface does not promote optional capabilities, so
 // the delegation must be explicit. Inner stores without a Counter report
 // ErrCountUnsupported, signaling callers to fall back to List.
+//
+// The one carve-out is the closed-inclusive whole-ledger scan: tier expansion
+// is read-shaping for ACTIVE class reads, where the policy classes relocate
+// rows across tiers, but a whole-ledger denominator spans every tier by
+// definition. Expanding it anyway cost every policy-wrapped store its Counter
+// fast path — BdStore and DoltliteReadStore both answer exactly TierIssues —
+// so the store-health retained-row count fell back to hydrating the full
+// closed history inside its 1s budget on every controller-opened city
+// (gastownhall/gascity#7546). The caller's tier mode passes through unchanged
+// for that one shape.
 func (s *beadPolicyStore) Count(ctx context.Context, query beads.ListQuery, excludeTypes ...string) (int, error) {
 	counter, ok := s.Store.(beads.Counter)
 	if !ok {
 		return 0, fmt.Errorf("counting beads: policy-wrapped store: %w", beads.ErrCountUnsupported)
 	}
-	return counter.Count(ctx, expandPolicyReadTier(query), excludeTypes...)
+	if !beadPolicyWholeLedgerCountQuery(query) {
+		query = expandPolicyReadTier(query)
+	}
+	return counter.Count(ctx, query, excludeTypes...)
+}
+
+// beadPolicyWholeLedgerCountQuery reports whether query is the unfiltered,
+// unlimited, closed-inclusive scan whose answer is the whole retained ledger.
+func beadPolicyWholeLedgerCountQuery(query beads.ListQuery) bool {
+	return query.IncludesClosed() && !query.HasFilter() && query.Limit == 0
 }
 
 // DeleteBatch implements beads.BatchDeleter by forwarding to the wrapped store

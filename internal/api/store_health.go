@@ -131,9 +131,12 @@ func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
 // the count prefers the hydration-free beads.Counter path (the #1896
 // follow-up): hydrating tens of thousands of closed rows cannot finish inside
 // statusStoreReadTimeout on a long-lived city, which left store_health
-// permanently absent. The hydrating List fallback remains for stores without
-// a Counter and for shapes Count reports as unsupported; that path is the
-// store-health block's exposure to ga-cdmx6x's bd-child leak, covered by
+// permanently absent. BdStore answers this one shape via bd count --include-infra,
+// which bd documents as matching the hydrating list's cardinality
+// (gastownhall/gascity#7546); the hydrating List fallback remains for stores
+// without a Counter, for bd builds whose count verb is capability-absent, and
+// for shapes Count reports as unsupported; that path is the store-health
+// block's exposure to ga-cdmx6x's bd-child leak, covered by
 // statusListStoreWithTimeout's state.ScopedStoreLike wiring the same way as
 // the work-count fallback.
 func countBeadStoreRows(ctx context.Context, state State, store beads.Store) (int, error) {
