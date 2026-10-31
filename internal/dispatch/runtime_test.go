@@ -4739,6 +4739,36 @@ func TestProcessWorkflowFinalizeClosesSourceChainPastUnblockedWorkOutcomes(t *te
 	}
 }
 
+func TestProcessWorkflowFinalizeDoesNotResolveStoresAboveBlockedSource(t *testing.T) {
+	t.Parallel()
+
+	f := newSourceChainFinalizeFixture(t)
+	stampSourceChainFixture(t, f, "closed", map[string]string{
+		beadmeta.OutcomeMetadataKey:     beadmeta.OutcomePass,
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+	}, nil)
+	var asked []string
+	resolver := func(ref string) (beads.Store, error) {
+		asked = append(asked, ref)
+		if ref == "city:test" {
+			return nil, errors.New("city store unavailable")
+		}
+		return f.resolver(ref)
+	}
+
+	result, _ := finalizeSourceChainFixture(t, f, ProcessOptions{ResolveStoreRef: resolver})
+
+	if !result.Processed || result.Action != "workflow-pass" {
+		t.Fatalf("result = %+v, want processed workflow-pass", result)
+	}
+	if got := mustGetBead(t, f.rigStore, f.finalizer.ID); got.Status != "closed" {
+		t.Fatalf("finalizer status = %q, want closed", got.Status)
+	}
+	if slices.Contains(asked, "city:test") {
+		t.Fatalf("resolver asked for %q above the blocked source; asked = %q", "city:test", asked)
+	}
+}
+
 type getErrorStore struct {
 	beads.Store
 	failID string
