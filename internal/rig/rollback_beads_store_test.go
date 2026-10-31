@@ -252,3 +252,50 @@ func TestProvisionLeavesInitFilesInNonStoreBeadsDir(t *testing.T) {
 		t.Fatalf("metadata.json init wrote into a non-store .beads/ was removed: %v", err)
 	}
 }
+
+// An adopt whose init succeeds but whose guarded write window fails rolls the
+// adopted store back to its pre-init bytes, not the ones init left.
+func TestProvisionRollbackRestoresAdoptedStoreToPreInitBytes(t *testing.T) {
+	deps, req := provisionWithFailingStoreInit(t, func(_, dir, _ string) (bool, error) {
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("issue_prefix: storerig\ndolt.auto-start: false\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return false, nil
+	})
+	routesErr := errors.New("routes rejected")
+	deps.WriteRoutes = func(string, *config.City) error { return routesErr }
+	req.Adopt = true
+	req.Prefix = "storerig"
+	deps.StoreContract = func(string) bool { return true }
+	writePartialStore(t, req.Path)
+	cfgPath := filepath.Join(req.Path, ".beads", "config.yaml")
+	const yamlBefore = "issue-prefix: \"storerig\"\n"
+	if err := os.WriteFile(cfgPath, []byte(yamlBefore), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, provErr := Provision(deps, req)
+	if !errors.Is(provErr, routesErr) {
+		t.Fatalf("Provision error = %v, want the routes failure", provErr)
+	}
+	got, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != yamlBefore {
+		t.Errorf("config.yaml after rollback = %q, want %q", got, yamlBefore)
+	}
+	info, err := os.Stat(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("config.yaml mode after rollback = %v, want 0600", got)
+	}
+	cityTOML, err := os.ReadFile(filepath.Join(deps.CityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(cityTOML) != originalCityTOML {
+		t.Errorf("city.toml after rollback = %q, want it restored", cityTOML)
+	}
+}

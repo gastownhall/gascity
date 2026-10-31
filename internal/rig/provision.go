@@ -139,11 +139,15 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 	}
 	result.Deferred = deferred
 
-	// Step 14: snapshot the topology before the first config write.
+	// Step 14: snapshot the topology before the first config write. The
+	// pre-init snapshot of a store that was already there goes last:
+	// RestoreSnapshots restores in order, so a rollback returns that store to
+	// the bytes the add found, not the ones init left.
 	snapshots, err := SnapshotTopologyFiles(fs, cityPath, plan.nextCfg)
 	if err != nil {
 		return config.Rig{}, result, fmt.Errorf("snapshot canonical files: %w", err)
 	}
+	snapshots = append(snapshots, preexistingStore...)
 
 	// Panic-safety for the guarded write window: once the snapshot exists, a
 	// panic in an injected write func (or OnStep) must restore the filesystem
