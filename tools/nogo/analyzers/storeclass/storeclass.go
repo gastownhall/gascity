@@ -25,7 +25,10 @@
 //
 // A raw store is beads.Store itself, an interface that is one, or a concrete
 // store type (an engine such as *beads.CachingStore, or a wrapper); a struct
-// that is a store only through an embedded typed handle is not. A type
+// that is a store only through an embedded typed handle is not. A raw carrier
+// (Config.RawCarriers: storeref's legs, topology, bindings and mint options)
+// counts as raw too: it hands whoever holds it the stores inside it, and
+// storeref's mint turns those into handles of any class. A type
 // parameter constrained by a raw store, or by a union or ~ term over one, is
 // a raw-type finding, and so is an interface element that holds one. As[T]
 // with a store for T is an unwrap, and so is ConditionalWritesResolveTarget.
@@ -208,6 +211,7 @@ type Config struct {
 	UnwrapMethods    []string // handle methods that return the raw store
 	AsFuncs          []string // capability helpers (beads.As): an instance whose T is a store unwraps
 	MintFuncs        []string // functions that mint handles
+	RawCarriers      []string // named types that carry raw stores (storeref's legs, topology, bindings, mint options): holding one is raw
 	TestMintPackages []string // packages production code may not import
 	Markers          []string // federated/relic read marker functions
 	Allow            []Allow
@@ -740,7 +744,7 @@ func (c *checker) holds(t types.Type) bool {
 	case nil:
 		return false
 	case *types.Named:
-		if c.isStore(t) || c.isConcreteStore(t) {
+		if c.isStore(t) || c.isConcreteStore(t) || slices.Contains(c.cfg.RawCarriers, fullName(t)) {
 			return true
 		}
 		for a := range t.TypeArgs().Types() {

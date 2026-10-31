@@ -24,16 +24,15 @@ func cliSessionsRelocated(cityPath string) bool {
 // sweep watchdog at city_runtime.go routed while `gc order sweep-nudge-mail` did
 // not, so the same sweep read different stores depending on who ran it.
 //
-// Identity to the input store at the default single-store backend, so wrapping
-// is byte-identical until a nudges relocation is configured.
-func cliNudgesStore(store beads.Store, cfg *config.City, cityPath string) beads.NudgesStore {
-	return beads.NudgesStore{Store: resolveNudgesStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)}
+// The handle wraps the input store itself on a city that relocates nothing.
+func cliNudgesStore(store beads.Store, _ *config.City, cityPath string) beads.NudgesStore {
+	return cliStores(cityPath, store).Nudges()
 }
 
 // cliGraphStore routes a generic CLI one-shot work store to the graph
 // coordination-class store. Graph twin of cliSessionStore.
-func cliGraphStore(store beads.Store, cfg *config.City, cityPath string) beads.GraphStore {
-	return beads.GraphStore{Store: resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)}
+func cliGraphStore(store beads.Store, _ *config.City, cityPath string) beads.GraphStore {
+	return cliStores(cityPath, store).Graph()
 }
 
 // cliMailStore routes a generic CLI one-shot work store to the messaging
@@ -44,6 +43,6 @@ func cliGraphStore(store beads.Store, cfg *config.City, cityPath string) beads.G
 // split shape (storageSplitWhole) puts them in the same binding: a mail bead is
 // ClassMessaging, the mailbox identity it resolves against is ClassSessions, and
 // the two route independently.
-func cliMailStore(store beads.Store, cfg *config.City, cityPath string) beads.MailStore {
-	return beads.MailStore{Store: resolveMailMessagesStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)}
+func cliMailStore(store beads.Store, _ *config.City, cityPath string) beads.MailStore {
+	return cliStores(cityPath, store).Mail()
 }
