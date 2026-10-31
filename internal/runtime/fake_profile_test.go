@@ -649,3 +649,47 @@ func (b *profileBackgroundStopSpy) StopBackgroundWork(ctx context.Context, name 
 	b.calls++
 	return b.result
 }
+
+// corpseBackend is a full fake whose liveness read reports corpses.
+type corpseBackend struct {
+	runtime.FullFake
+	corpses map[string]bool
+	err     error
+}
+
+func (b corpseBackend) ObserveLivenessWithError(name string, pn []string) (runtime.Liveness, error) {
+	if b.err != nil {
+		return runtime.Liveness{}, b.err
+	}
+	if b.corpses[name] {
+		return runtime.Liveness{Corpse: true, ObjectID: "c", ObjectCreated: "t"}, nil
+	}
+	return b.FullFake.ObserveLivenessWithError(name, pn)
+}
+
+// Kills a v2 exec profile whose identity read disagrees with the exec
+// provider's: a dead box (a corpse its backend still lists) answers its
+// identity, an absent name ErrSessionNotFound, and a failed read
+// ErrRuntimeUnavailable; the profile that is not v2-ready reads none.
+func TestExecV2ProfileObservesACorpsesIdentity(t *testing.T) {
+	f := runtime.NewFake()
+	if err := f.SetMeta("dead", "GC_SESSION_ID", "gc-1"); err != nil {
+		t.Fatal(err)
+	}
+	b := corpseBackend{FullFake: runtime.FullFake{Fake: f}, corpses: map[string]bool{"dead": true}}
+	obs := runtime.NewFakeProfile(runtime.ProfileExecV2, b).(runtime.IdentityObserver)
+	if id, err := obs.ObserveIdentity("dead"); err != nil || id["GC_SESSION_ID"] != "gc-1" {
+		t.Errorf("corpse: %v, %v; want its identity", id, err)
+	}
+	if _, err := obs.ObserveIdentity("gone"); !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Errorf("absent: %v, want ErrSessionNotFound", err)
+	}
+	failing := b
+	failing.err = errors.New("backend down")
+	if _, err := runtime.NewFakeProfile(runtime.ProfileExecV2, failing).(runtime.IdentityObserver).ObserveIdentity("dead"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Errorf("failed read: %v, want ErrRuntimeUnavailable", err)
+	}
+	if _, err := runtime.NewFakeProfile(runtime.ProfileExec, b).(runtime.IdentityObserver).ObserveIdentity("dead"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Errorf("exec profile, not v2-ready: %v, want ErrRuntimeUnavailable", err)
+	}
+}

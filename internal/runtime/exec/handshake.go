@@ -20,19 +20,33 @@ var handshakeNow = time.Now
 // declared version and capabilities. A successful handshake runs once per
 // provider instance and is cached; a failed one is cached for
 // handshakeRetryAfter, so one transient failure does not leave the provider
-// on the zero-capability floor for its whole life. An executable without a
+// on the zero-capability floor for its whole life. The first handshake runs
+// under the lock, so every caller waits for its one answer; a retry runs
+// outside it, and other callers keep the cached failure meanwhile, so a slow
+// or hung `protocol` op never stalls them. An executable without a
 // `protocol` op (exit 2 → empty stdout) is version 0 with no optional
 // capabilities, so pre-handshake scripts remain fully valid
 // (RUNTIME-RPP-008 in internal/runtime/REQUIREMENTS.md).
 func (p *Provider) Protocol() (runtime.ProtocolInfo, error) {
 	p.handshakeMu.Lock()
-	defer p.handshakeMu.Unlock()
-	if p.handshakeRan && (p.handshakeErr == nil || handshakeNow().Sub(p.handshakeAt) < handshakeRetryAfter) {
+	if !p.handshakeRan {
+		defer p.handshakeMu.Unlock()
+		p.handshakeInfo, p.handshakeErr = p.queryProtocol(context.Background(), p.timeout)
+		p.handshakeRan, p.handshakeAt = true, handshakeNow()
 		return p.handshakeInfo, p.handshakeErr
 	}
-	p.handshakeInfo, p.handshakeErr = p.queryProtocol(context.Background(), p.timeout)
-	p.handshakeRan, p.handshakeAt = true, handshakeNow()
-	return p.handshakeInfo, p.handshakeErr
+	if p.handshakeErr == nil || p.handshakeRetrying || handshakeNow().Sub(p.handshakeAt) < handshakeRetryAfter {
+		defer p.handshakeMu.Unlock()
+		return p.handshakeInfo, p.handshakeErr
+	}
+	p.handshakeRetrying = true
+	p.handshakeMu.Unlock()
+
+	info, err := p.queryProtocol(context.Background(), p.timeout)
+	p.handshakeMu.Lock()
+	defer p.handshakeMu.Unlock()
+	p.handshakeInfo, p.handshakeErr, p.handshakeAt, p.handshakeRetrying = info, err, handshakeNow(), false
+	return info, err
 }
 
 func (p *Provider) queryProtocol(ctx context.Context, timeout time.Duration) (runtime.ProtocolInfo, error) {

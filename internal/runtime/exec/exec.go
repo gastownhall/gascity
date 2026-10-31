@@ -40,11 +40,12 @@ type Provider struct {
 	// handshake.go). A success is cached for the provider's life; an error
 	// is cached for handshakeRetryAfter, so a broken `protocol` op degrades
 	// probes to the zero-capability floor without re-running on every call.
-	handshakeMu   sync.Mutex
-	handshakeRan  bool
-	handshakeAt   time.Time
-	handshakeInfo runtime.ProtocolInfo
-	handshakeErr  error
+	handshakeMu       sync.Mutex
+	handshakeRan      bool
+	handshakeRetrying bool
+	handshakeAt       time.Time
+	handshakeInfo     runtime.ProtocolInfo
+	handshakeErr      error
 
 	// readyPrompts maps a session name to the ready-prompt prefix it was
 	// started with, so WaitForIdle scans for that agent's prompt (see idle.go).
@@ -292,7 +293,7 @@ func exitTwoIsFailure(op string) bool {
 // exit 2 is therefore a failure rather than the unknown-op no-op.
 func strictWhenReady(op string) bool {
 	switch op {
-	case "stop", "get-meta", "set-meta", "remove-meta", "is-running", "list-running":
+	case "stop", "get-meta", "set-meta", "remove-meta", "list-running":
 		return true
 	default:
 		return false
@@ -301,8 +302,9 @@ func strictWhenReady(op string) bool {
 
 // strictExitTwo is a v2-ready script's exit 2 from op: a stop that stopped
 // nothing ([runtime.ErrStopUnsupported]), a metadata op with no store
-// ([runtime.ErrMetaUnsupported]), a listing that listed nothing
-// ([runtime.ErrListUnsupported]), or, for is-running, base: no answer.
+// ([runtime.ErrMetaUnsupported]), or a listing that listed nothing
+// ([runtime.ErrListUnsupported]). (is-running needs no entry: its exit 2
+// already reads as no answer.)
 func strictExitTwo(op string, base error) error {
 	switch op {
 	case "stop":
@@ -374,21 +376,30 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 		return p.cleanupAfterStartFailure(name, err, foreignBox)
 	}
-	if err := p.publishInputFence(ctx, name, cfg); err != nil {
-		if startFailureKeepsBox(err, foreignBox) {
+	if fenced, err := p.finishStart(ctx, name, cfg); err != nil {
+		if !fenced && startFailureKeepsBox(err, foreignBox) {
 			// The box was up before the attempt and stays: its pane, unless
 			// the start op replaced its process, keeps the fence it held.
 			p.restoreInputFence(context.WithoutCancel(ctx), name, saved)
 		}
 		return p.cleanupAfterStartFailure(name, err, foreignBox)
 	}
-	p.publishReadyPrompt(ctx, name, cfg)
-
-	if err := p.dismissStartupDialogs(ctx, name, cfg); err != nil {
-		return p.cleanupAfterStartFailure(name, fmt.Errorf("exec provider: dismissing startup dialogs: %w", err), foreignBox)
-	}
-
 	return nil
+}
+
+// finishStart runs what follows a successful welded `start` op, for Start
+// and startFresh alike: it publishes the agent pane's input fence, then its
+// ready prompt, then dismisses startup dialogs. fenced reports that the new
+// fence was published, so a failure after it is not the publish's.
+func (p *Provider) finishStart(ctx context.Context, name string, cfg runtime.Config) (fenced bool, err error) {
+	if err := p.publishInputFence(ctx, name, cfg); err != nil {
+		return false, err
+	}
+	p.publishReadyPrompt(ctx, name, cfg)
+	if err := p.dismissStartupDialogs(ctx, name, cfg); err != nil {
+		return true, fmt.Errorf("exec provider: dismissing startup dialogs: %w", err)
+	}
+	return true, nil
 }
 
 // cleanupAfterStartFailure tears down the box the adapter may already have
@@ -467,8 +478,9 @@ func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Co
 // Start already launched). The launch is idempotent: it respawns the pane if the
 // session already exists (relaunch into a warm box) and otherwise creates it
 // (first launch after provision). A FreshOnly launch never respawns: an
-// existing session is [runtime.ErrSessionExists]. It then dismisses startup
-// dialogs — the same
+// existing agent session fails it, as an ordinary start failure, so
+// startFresh's token-gated cleanup removes the box it provisioned. It then
+// dismisses startup dialogs — the same
 // Go-side orchestration the welded Start runs. The `exec` op runs in the box's
 // working directory and the box env is set at provision time, so neither an
 // explicit -c nor -e is needed (workdir + env are provision-half). (Un-weld B3b.)
@@ -484,7 +496,7 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 	var argv []string
 	if _, code, _ := p.Exec(ctx, name, []string{"tmux", "has-session", "-t", execTmuxSession}); code == 0 {
 		if cfg.FreshOnly {
-			return fmt.Errorf("%w: exec provider: fresh launch in %q found an agent session", runtime.ErrSessionExists, name)
+			return fmt.Errorf("exec provider: fresh launch in %q found an existing agent session", name)
 		}
 		argv = []string{"tmux", "respawn-pane", "-k", "-t", execTmuxSession, command}
 	} else {
@@ -523,7 +535,6 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	if err := p.awaitAbsent(ctx, name); err != nil {
 		return err
 	}
-	cfg.FreshOnly = true
 	return p.startFresh(ctx, name, cfg)
 }
 

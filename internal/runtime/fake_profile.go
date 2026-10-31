@@ -348,7 +348,9 @@ func (t3bridgeProfile) TurnCapabilities(string) TurnCapabilities {
 
 // execObserveTrait is exec's observe.v1 surface, gated as the exec provider
 // gates it on its handshake. Ready (ProfileExecV2), the reads and kills are
-// the backend's and the identity is its GetMeta of the identity keys.
+// the backend's, and the identity is its GetMeta of the identity keys for a
+// name its liveness read shows present, a corpse included, as exec's
+// `observe` reports a dead box's identity.
 // Otherwise (ProfileExec) liveness is the IsRunning and ProcessAlive read
 // with a nil error, nothing reads fresh or observes identity, nothing is
 // killed, and readiness names both missing capabilities.
@@ -373,7 +375,11 @@ func (t execObserveTrait) ObserveIdentity(name string) (map[string]string, error
 	if !t.ready {
 		return nil, ErrRuntimeUnavailable
 	}
-	if !t.b.IsRunning(name) {
+	lv, err := t.b.ObserveLivenessWithError(name, nil)
+	if err != nil {
+		return nil, errors.Join(ErrRuntimeUnavailable, err)
+	}
+	if !lv.Present() {
 		return nil, ErrSessionNotFound
 	}
 	id := map[string]string{}
