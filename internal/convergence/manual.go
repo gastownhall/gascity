@@ -324,6 +324,23 @@ func (h *Handler) StopHandler(ctx context.Context, beadID, username, _ string) (
 			}
 		}
 		if activeWisp != "" && wispInfo.Status != "closed" {
+			// Close the wisp's own non-terminal children first, with the same
+			// reason, before closing the wisp root. A child step left open,
+			// assigned and routed stays claimable after stop — Ready() and the
+			// claim/route paths have no notion that its parent wisp or loop is
+			// no longer active (gastownhall/gascity#8386).
+			children, childErr := h.Store.Children(activeWisp)
+			if childErr != nil {
+				return HandlerResult{}, fmt.Errorf("listing children of active wisp %q for force-close: %w", activeWisp, childErr)
+			}
+			for _, child := range children {
+				if child.Status == "closed" {
+					continue
+				}
+				if err := h.Store.CloseBead(child.ID, CloseReasonManualSupersede); err != nil {
+					return HandlerResult{}, fmt.Errorf("force-closing wisp %q child %q: %w", activeWisp, child.ID, err)
+				}
+			}
 			if err := h.Store.CloseBead(activeWisp, CloseReasonManualSupersede); err != nil {
 				return HandlerResult{}, fmt.Errorf("force-closing active wisp %q: %w", activeWisp, err)
 			}
