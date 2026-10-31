@@ -17,6 +17,7 @@ import (
 var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 	"auto": {
 		"FreshByConstruction":     {"deliberate", "a leaf's own read; readRuntime judges it on the routed leaf (cmd/gc/reconcile_effect_runtime.go freshReadable)", ""},
+		"FreshActivityProvider":   {"deliberate", "the fresh activity read is read on the routed leaf (runtime.FreshActivityFor)", ""},
 		"IdentitySidecarProvider": {"deliberate", "identity is read on the routed leaf (cmd/gc/runtime_inventory_lane.go identityReadable)", ""},
 		"IdleProbeBudgetProvider": {"deliberate", "the idle-proof budget is read on the routed leaf (cmd/gc/session_sleep.go idleSleepProbeTimeoutFor)", ""},
 		"InventoryProvider":       {"deliberate", "the inventory lane reads each backend's leaf through Backends (cmd/gc/runtime_inventory_lane.go)", ""},
@@ -25,6 +26,7 @@ var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 	},
 	"hybrid": {
 		"FreshByConstruction":         {"deliberate", "as auto's", ""},
+		"FreshActivityProvider":       {"deliberate", "as auto's", ""},
 		"IdentitySidecarProvider":     {"deliberate", "as auto's", ""},
 		"IdleProbeBudgetProvider":     {"deliberate", "as auto's", ""},
 		"InventoryProvider":           {"deliberate", "as auto's", ""},
