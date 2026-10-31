@@ -1,11 +1,30 @@
 package main
 
 import (
+	"io"
 	"os"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/warmup"
 )
+
+// startWarmupOpts is the warm-up runner configuration `gc start` uses. The
+// failure mail goes to [doctor] warmup_mail_to, or to the runner's default
+// recipient when the city leaves it unset.
+func startWarmupOpts(cfg *config.City, checks []doctor.Check, mailer mail.Provider, stderr io.Writer) warmup.WarmupOpts {
+	opts := warmup.WarmupOpts{
+		Checks: checks,
+		Mailer: mailer,
+		Stderr: stderr,
+	}
+	if cfg != nil {
+		opts.MailTo = cfg.Doctor.WarmupMailTo
+	}
+	return opts
+}
 
 // defaultMailProvider builds the mailer `gc start` hands the warm-up runner,
 // for the city being started rather than the one discovery would find.

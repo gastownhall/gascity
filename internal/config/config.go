@@ -2686,6 +2686,12 @@ type DoctorConfig struct {
 	// unpushed commits, no stashes) — never by role identity.
 	NestedWorktreePrune bool `toml:"nested_worktree_prune,omitempty" jsonschema:"default=false"`
 
+	// WarmupMailTo is the mailbox that receives the mail `gc start` sends
+	// when its warm-up doctor scan finds failures: a session alias, session
+	// name or session ID. It is not resolved at start, when the recipient's
+	// session may not be running yet. Empty keeps the default, "mayor".
+	WarmupMailTo string `toml:"warmup_mail_to,omitempty" jsonschema:"default=mayor"`
+
 	// Checks holds city-local inline doctor checks declared via
 	// [[doctor.check]] in city.toml.
 	Checks []LocalDoctorCheck `toml:"check,omitempty"`
