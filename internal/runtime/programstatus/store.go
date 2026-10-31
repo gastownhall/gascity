@@ -37,13 +37,16 @@ type record struct {
 //     descendants, or every record when it has no id;
 //   - a prompt start (OSC 133;A) drops working and blocked records without
 //     counting a turn end;
-//   - TurnStarts counts the root entering working from a boundary (idle, done
-//     or error) or from no root; blocked pauses a turn without ending it, so
-//     blocked→working is not a start;
+//   - TurnStarts counts the root entering working or blocked from a boundary
+//     (idle, done or error) or from no root, so a turn that opens with a
+//     dialog counts its start; blocked pauses a turn without ending it, so
+//     working↔blocked is not a start;
 //   - TurnEnds counts the root leaving working or blocked for a boundary,
 //     and stamps QuietSince;
 //   - Since moves only when the root's state changes;
 //   - LastError, set by a root error report, survives clear;
+//   - Reported, set by the root's first report, survives clear and
+//     prompt start, so a removed root is told from one never reported;
 //   - Seq increments with every change to the encoded record ([Encode]).
 //
 // Children never start or end the root's turn. A Store is not safe for
@@ -57,6 +60,7 @@ type Store struct {
 	turnStarts uint32
 	turnEnds   uint32
 	probed     bool
+	reported   bool // the root reported this incarnation
 	lastError  bool
 	lastErrMsg string
 	seq        uint64
@@ -81,6 +85,9 @@ func (s *Store) Apply(r Report, now time.Time) {
 		s.dropSubtree(r.ID)
 	default:
 		s.put(r)
+	}
+	if r.ID == "" && !r.Clear {
+		s.reported = true
 	}
 	if r.ID == "" && r.State == runtime.ProgramError {
 		s.lastError, s.lastErrMsg = true, r.Msg
@@ -120,6 +127,7 @@ func (s *Store) Status() runtime.ProgramStatus {
 		TurnStarts: s.turnStarts,
 		TurnEnds:   s.turnEnds,
 		Probed:     s.probed,
+		Reported:   s.reported,
 		LastError:  s.lastError,
 	}
 	for id, rec := range s.records {
@@ -228,7 +236,7 @@ func (s *Store) rootChanged(prev runtime.ProgramState, now time.Time) {
 		return
 	}
 	s.since = now
-	if next == runtime.ProgramWorking && (prev == "" || boundary(prev)) {
+	if busy(next) && (prev == "" || boundary(prev)) {
 		s.turnStarts++
 	}
 	if busy(prev) && boundary(next) {

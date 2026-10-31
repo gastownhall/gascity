@@ -67,6 +67,12 @@ func TestStoreTurnCounters(t *testing.T) {
 		{"state=working", 3, 2, 6, 7},
 		{"state=error", 3, 3, 8, 8},
 		{"state=working", 4, 3, 8, 9},
+		{"state=idle", 4, 4, 10, 10},
+		{"state=blocked:kind=permission", 5, 4, 10, 11}, // a turn that opens with a dialog starts there
+		{"state=working", 5, 4, 10, 12},
+		{"state=done", 5, 5, 13, 13},
+		{"state=blocked:kind=question", 6, 5, 13, 14}, // a dialog answered back to idle is a whole turn
+		{"state=idle", 6, 6, 15, 15},
 	}
 	for i, step := range steps {
 		apply(t, s, step.body, at(i+1))
@@ -106,6 +112,35 @@ func TestStoreBlockedPausesTurnWithoutEndingIt(t *testing.T) {
 	apply(t, s, "state=done", at(6))
 	if got := s.Status(); got.TurnStarts != 1 || got.TurnEnds != 1 || !got.QuietSince.Equal(at(6)) {
 		t.Fatalf("blocked->done: %+v", got)
+	}
+}
+
+// Kills a start rule that counts only entries into working: a turn that opens
+// blocked, from no root or after a prompt start dropped the root, counts its
+// start, so ends never run ahead of starts.
+func TestStoreDialogLedTurnCountsItsStart(t *testing.T) {
+	s := NewStore(testNonce)
+	steps := []struct {
+		body         string
+		starts, ends uint32
+	}{
+		{"state=blocked:kind=auth", 1, 0},
+		{"state=working", 1, 0},
+		{"state=blocked:kind=permission", 1, 0},
+		{"state=done", 1, 1},
+	}
+	for i, step := range steps {
+		apply(t, s, step.body, at(i+1))
+		if got := s.Status(); got.TurnStarts != step.starts || got.TurnEnds != step.ends {
+			t.Fatalf("step %d %s: starts/ends %d/%d, want %d/%d", i, step.body, got.TurnStarts, got.TurnEnds, step.starts, step.ends)
+		}
+	}
+	apply(t, s, "state=working", at(5))
+	s.PromptStart()
+	apply(t, s, "state=blocked:kind=question", at(6))
+	apply(t, s, "state=idle", at(7))
+	if got := s.Status(); got.TurnStarts != 3 || got.TurnEnds != 2 {
+		t.Fatalf("blocked after a prompt start: starts/ends %d/%d, want 3/2", got.TurnStarts, got.TurnEnds)
 	}
 }
 
@@ -244,6 +279,33 @@ func TestStoreProbeAndSeq(t *testing.T) {
 	s2.PromptStart()
 	if got := s2.Status(); got.Seq != 0 {
 		t.Fatalf("no-op clear bumped Seq: %d", got.Seq)
+	}
+}
+
+// Kills a Reported set by a probe or a child, or lost when the root is
+// removed: it is set by the root's first report and survives clear and a
+// prompt start.
+func TestStoreReportedIsStickyAndRootOnly(t *testing.T) {
+	s := NewStore(testNonce)
+	s.Probe()
+	apply(t, s, "state=working:id=sub", at(1))
+	apply(t, s, "state=clear:id=sub", at(2))
+	apply(t, s, "state=clear", at(3))
+	if got := s.Status(); got.Reported {
+		t.Fatalf("a probe or child set Reported: %+v", got)
+	}
+	apply(t, s, "state=working", at(4))
+	if got := s.Status(); !got.Reported {
+		t.Fatalf("a root report left Reported unset: %+v", got)
+	}
+	s.PromptStart()
+	if got := s.Status(); !got.Reported || got.State != "" {
+		t.Fatalf("a prompt start dropped Reported: %+v", got)
+	}
+	apply(t, s, "state=idle", at(5))
+	apply(t, s, "state=clear", at(6))
+	if got := s.Status(); !got.Reported || got.State != "" {
+		t.Fatalf("clear dropped Reported: %+v", got)
 	}
 }
 

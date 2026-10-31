@@ -48,8 +48,8 @@ const (
 	ProgramStatusUnread     ProgramStatusValidity = ""            // switch off, or capability gate failed
 	ProgramStatusValid      ProgramStatusValidity = "valid"       // a root record under our nonce, its reader attached
 	ProgramStatusNotArmed   ProgramStatusValidity = "not_armed"   // no nonce of ours bound to this pane (incl. inherited values)
-	ProgramStatusSilent     ProgramStatusValidity = "silent"      // armed; nothing reported this incarnation
-	ProgramStatusCleared    ProgramStatusValidity = "cleared"     // root cleared (state=clear or OSC 133;A)
+	ProgramStatusSilent     ProgramStatusValidity = "silent"      // armed; the root has not reported this incarnation
+	ProgramStatusCleared    ProgramStatusValidity = "cleared"     // the root reported, then was removed (state=clear or OSC 133;A)
 	ProgramStatusReaderLost ProgramStatusValidity = "reader_lost" // pipe closed, or no live tap with our nonce
 	ProgramStatusExited     ProgramStatusValidity = "exited"      // pane dead, or the caller's liveness says the agent is gone
 )
@@ -69,7 +69,7 @@ type ProgramStatus struct {
 	QuietSince      time.Time // root last left working/blocked for a boundary; zero if never
 	Nonce           string    // "<rand>.<pane_id>"
 	Seq             uint64
-	TurnStarts      uint32 // entries into working from a boundary or no root; blocked→working is not a start
+	TurnStarts      uint32 // entries into working or blocked from a boundary or no root; working↔blocked is not a start
 	TurnEnds        uint32 // exits from working/blocked to a boundary
 	Children        int
 	WorkingChildren int

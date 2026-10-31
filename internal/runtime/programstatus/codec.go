@@ -18,8 +18,8 @@ import (
 //	@gc_ps      v1|<rand>.%N|seq|state|kind|since_ms|quiet_ms|starts|ends|progress|wchildren|children|flags|app
 //	@gc_ps_text v1|<rand>.%N|b64url(title)|b64url(msg)|b64url(last_error_msg)
 //
-// flags is a subset of "PE" in that order (P: probed, E: last error); an
-// absent progress is empty; a zero time is 0.
+// flags is a subset of "PER" in that order (P: probed, E: last error, R: root
+// reported); an absent progress is empty; a zero time is 0.
 const (
 	// CodecVersion is the codec version this package reads and writes.
 	CodecVersion = 1
@@ -60,8 +60,10 @@ func RecordForm(err error) runtime.ProgramRecordForm {
 }
 
 // Encode returns the @gc_ps value for s. Mode, Validity and ReaderVerified
-// are judged at read time and not encoded. It fails when a field cannot be
-// represented: an invalid nonce, an unknown state or kind, or an invalid app.
+// are judged at read time and not encoded. It fails for a record [Decode]
+// would reject: an invalid nonce, an unknown state or kind, a kind without
+// blocked, a progress outside 0-100 or without working or blocked, an invalid
+// app, or more working children than children.
 func Encode(s runtime.ProgramStatus) (string, error) {
 	if !ValidNonce(s.Nonce) {
 		return "", fmt.Errorf("encoding program status: invalid nonce %q", s.Nonce)
@@ -69,14 +71,14 @@ func Encode(s runtime.ProgramStatus) (string, error) {
 	if s.State != "" && !knownState(s.State) {
 		return "", fmt.Errorf("encoding program status: unknown state %q", s.State)
 	}
-	if !knownKind(s.Kind) {
-		return "", fmt.Errorf("encoding program status: unknown kind %q", s.Kind)
+	if !knownKind(s.Kind) || (s.Kind != runtime.ProgramBlockUnspecified && s.State != runtime.ProgramBlocked) {
+		return "", fmt.Errorf("encoding program status: kind %q with state %q", s.Kind, s.State)
 	}
 	if s.App != "" && !validApp(s.App) {
 		return "", fmt.Errorf("encoding program status: invalid app %q", s.App)
 	}
-	if s.Progress > 100 {
-		return "", fmt.Errorf("encoding program status: progress %d over 100", s.Progress)
+	if s.Progress < -1 || s.Progress > 100 || (s.Progress >= 0 && !busy(s.State)) {
+		return "", fmt.Errorf("encoding program status: progress %d with state %q", s.Progress, s.State)
 	}
 	if s.Children < 0 || s.WorkingChildren < 0 || s.WorkingChildren > s.Children {
 		return "", fmt.Errorf("encoding program status: %d working of %d children", s.WorkingChildren, s.Children)
@@ -89,13 +91,6 @@ func encodeFields(s runtime.ProgramStatus) string {
 	progress := ""
 	if s.Progress >= 0 {
 		progress = strconv.Itoa(s.Progress)
-	}
-	flags := ""
-	if s.Probed {
-		flags += "P"
-	}
-	if s.LastError {
-		flags += "E"
 	}
 	return strings.Join([]string{
 		codecTag,
@@ -110,17 +105,43 @@ func encodeFields(s runtime.ProgramStatus) string {
 		progress,
 		strconv.Itoa(s.WorkingChildren),
 		strconv.Itoa(s.Children),
-		flags,
+		encodeFlags(s),
 		s.App,
 	}, "|")
+}
+
+// encodeFlags returns s's flags in codec order: P (probed), E (last error),
+// R (root reported).
+func encodeFlags(s runtime.ProgramStatus) string {
+	flags := ""
+	if s.Probed {
+		flags += "P"
+	}
+	if s.LastError {
+		flags += "E"
+	}
+	if s.Reported {
+		flags += "R"
+	}
+	return flags
+}
+
+// decodeFlags sets s's flags from f and reports whether f is exactly what
+// encodeFlags writes for them.
+func decodeFlags(s *runtime.ProgramStatus, f string) bool {
+	s.Probed = strings.Contains(f, "P")
+	s.LastError = strings.Contains(f, "E")
+	s.Reported = strings.Contains(f, "R")
+	return encodeFlags(*s) == f
 }
 
 // Decode parses an @gc_ps value. It returns [ErrAbsent] for an empty value,
 // [ErrUnknownVersion] for another codec version, and an error wrapping
 // [ErrUndecodable] for anything else that is not exactly what [Encode]
 // writes: a wrong field count, a byte outside the alphabet, a non-canonical
-// number, an unknown state, kind or flag, a kind without blocked, a progress
-// without working or blocked, or more working children than children.
+// number, an unknown state or kind, flags not in "PER" order, a kind without
+// blocked, a progress without working or blocked, or more working children
+// than children.
 func Decode(v string) (runtime.ProgramStatus, error) {
 	f, err := splitValue(v, recordFields)
 	if err != nil {
@@ -173,15 +194,7 @@ func Decode(v string) (runtime.ProgramStatus, error) {
 		return bad("children", f[11])
 	}
 	s.WorkingChildren, s.Children = int(wchildren), int(children)
-	switch f[12] {
-	case "":
-	case "P":
-		s.Probed = true
-	case "E":
-		s.LastError = true
-	case "PE":
-		s.Probed, s.LastError = true, true
-	default:
+	if !decodeFlags(&s, f[12]) {
 		return bad("flags", f[12])
 	}
 	if f[13] != "" && !validApp(f[13]) {

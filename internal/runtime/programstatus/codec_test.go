@@ -3,6 +3,7 @@ package programstatus
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -44,6 +45,7 @@ func sampleStatus() runtime.ProgramStatus {
 		WorkingChildren: 1,
 		Probed:          true,
 		LastError:       true,
+		Reported:        true,
 	}
 }
 
@@ -52,9 +54,12 @@ func TestEncodeGoldenFormat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "v1|a1B2-c_3.%12|17|blocked|permission|1793408464412|1793408400000|3|2|40|1|2|PE|claude-code"
+	const want = "v1|a1B2-c_3.%12|17|blocked|permission|1793408464412|1793408400000|3|2|40|1|2|PER|claude-code"
 	if got != want {
 		t.Fatalf("Encode\n got %s\nwant %s", got, want)
+	}
+	if tag := fmt.Sprintf("v%d|", CodecVersion); !strings.HasPrefix(got, tag) {
+		t.Fatalf("Encode wrote %q, not the tag of CodecVersion %d", got, CodecVersion)
 	}
 	empty, err := Encode(runtime.ProgramStatus{Nonce: "r.%0", Progress: -1})
 	if err != nil {
@@ -72,6 +77,8 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		{Nonce: "r.%0", Progress: -1, State: runtime.ProgramIdle, App: "a+b.c_d-e", Since: time.UnixMilli(1), Seq: 1},
 		{Nonce: "r.%0", Progress: 0, State: runtime.ProgramWorking, Since: time.UnixMilli(5), Seq: 2, Probed: true},
 		{Nonce: "r.%0", Progress: -1, Seq: 9, LastError: true, TurnEnds: 4, TurnStarts: 4, QuietSince: time.UnixMilli(7)},
+		{Nonce: "r.%0", Progress: -1, Seq: 3, Probed: true, Reported: true, TurnEnds: 1, TurnStarts: 1, QuietSince: time.UnixMilli(7)},
+		{Nonce: "r.%0", Progress: -1, Seq: 2, Probed: true, Children: 1, WorkingChildren: 1},
 	}
 	for _, s := range statuses {
 		v, err := Encode(s)
@@ -169,8 +176,91 @@ func TestEncodeRejectsValuesOutsideTheAlphabet(t *testing.T) {
 	}
 }
 
+// Kills an Encode that writes a record its own Decode rejects as undecodable,
+// which every reader would judge silent while the writer saw success.
+func TestEncodeRejectsWhatDecodeRejects(t *testing.T) {
+	cases := map[string]func(*runtime.ProgramStatus){
+		"kind without blocked":   func(s *runtime.ProgramStatus) { s.State = runtime.ProgramWorking },
+		"kind with no root":      func(s *runtime.ProgramStatus) { s.State, s.Progress = "", -1 },
+		"progress on idle":       func(s *runtime.ProgramStatus) { s.State, s.Kind = runtime.ProgramIdle, "" },
+		"progress with no root":  func(s *runtime.ProgramStatus) { s.State, s.Kind = "", "" },
+		"progress below absent":  func(s *runtime.ProgramStatus) { s.Progress = -2 },
+		"progress over 100":      func(s *runtime.ProgramStatus) { s.Progress = 101 },
+		"more working than kids": func(s *runtime.ProgramStatus) { s.WorkingChildren = 3 },
+	}
+	for name, mut := range cases {
+		s := sampleStatus()
+		mut(&s)
+		if v, err := Encode(s); err == nil {
+			t.Errorf("%s: Encode wrote %q", name, v)
+		}
+	}
+}
+
+// Kills an Encode and a Decode that disagree on the cross-field rules: over
+// every state, kind, progress and flag combination, Encode succeeds exactly
+// when Decode would accept the result, and Decode returns what was encoded.
+func TestEncodeAndDecodeAgreeOnCrossFieldRules(t *testing.T) {
+	states := []runtime.ProgramState{"", runtime.ProgramIdle, runtime.ProgramWorking, runtime.ProgramDone, runtime.ProgramBlocked, runtime.ProgramError}
+	kinds := []runtime.ProgramBlockKind{runtime.ProgramBlockUnspecified, runtime.ProgramBlockPermission, runtime.ProgramBlockQuestion, runtime.ProgramBlockAuth}
+	for _, st := range states {
+		busy := st == runtime.ProgramWorking || st == runtime.ProgramBlocked
+		for _, kind := range kinds {
+			for _, progress := range []int{-2, -1, 0, 100, 101} {
+				for flags := range 8 {
+					s := runtime.ProgramStatus{
+						Nonce: testNonce, Seq: 3, State: st, Kind: kind, Progress: progress,
+						Probed: flags&1 != 0, LastError: flags&2 != 0, Reported: flags&4 != 0,
+					}
+					want := (kind == "" || st == runtime.ProgramBlocked) && (progress == -1 || (progress >= 0 && progress <= 100 && busy))
+					v, err := Encode(s)
+					if (err == nil) != want {
+						t.Errorf("Encode(state %q, kind %q, progress %d, flags %q) = %q, %v; want ok %v", st, kind, progress, encodeFlags(s), v, err, want)
+						continue
+					}
+					if err != nil {
+						continue
+					}
+					if got, err := Decode(v); err != nil || !sameStatus(got, s) {
+						t.Errorf("Decode(%q) = %+v, %v; want %+v", v, got, err, s)
+					}
+				}
+			}
+		}
+	}
+}
+
+// Kills a Decode that accepts a value Encode never writes: whatever Decode
+// accepts, Encode writes back byte for byte.
+func FuzzDecodeAcceptsOnlyWhatEncodeWrites(f *testing.F) {
+	for _, s := range []runtime.ProgramStatus{
+		sampleStatus(),
+		{Nonce: testNonce, Progress: -1},
+		{Nonce: testNonce, Progress: -1, Seq: 1, Probed: true},
+		{Nonce: testNonce, Progress: -1, Seq: 5, Reported: true, LastError: true, TurnStarts: 2, TurnEnds: 2},
+		{Nonce: testNonce, Progress: 0, State: runtime.ProgramWorking, Since: time.UnixMilli(5), Seq: 2, Reported: true},
+	} {
+		v, err := Encode(s)
+		if err != nil {
+			f.Fatalf("Encode(%+v): %v", s, err)
+		}
+		f.Add(v)
+	}
+	f.Add("v1|r.%1|1|idle||0|0|0|0|5|0|0|R|")
+	f.Add("v1|r.%1|1|||0|0|0|0||0|0|RP|")
+	f.Fuzz(func(t *testing.T, v string) {
+		s, err := Decode(v)
+		if err != nil {
+			return
+		}
+		if got, err := Encode(s); err != nil || got != v {
+			t.Fatalf("Decode(%q) = %+v, which Encode writes as %q, %v", v, s, got, err)
+		}
+	})
+}
+
 func TestDecodeRejectsForgedFields(t *testing.T) {
-	good := "v1|a1B2-c_3.%12|17|blocked|permission|1793408464412|1793408400000|3|2|40|1|2|PE|claude-code"
+	good := "v1|a1B2-c_3.%12|17|blocked|permission|1793408464412|1793408400000|3|2|40|1|2|PER|claude-code"
 	if _, err := Decode(good); err != nil {
 		t.Fatalf("good record: %v", err)
 	}
@@ -205,6 +295,8 @@ func TestDecodeRejectsForgedFields(t *testing.T) {
 		"unknown flag":              set(12, "X"),
 		"duplicate flag":            set(12, "PP"),
 		"flags out of order":        set(12, "EP"),
+		"root flag before error":    set(12, "PRE"),
+		"duplicate root flag":       set(12, "PERR"),
 		"app too long":              set(13, strings.Repeat("a", 33)),
 		"app outside charset":       set(13, "a=b"),
 		"lowercase version":         "V1" + strings.TrimPrefix(good, "v1"),
@@ -289,5 +381,107 @@ func TestStoreStatusEncodes(t *testing.T) {
 	}
 	if _, txt, err := DecodeText(tv); err != nil || txt.Msg != "answer?" {
 		t.Fatalf("text %+v %v", txt, err)
+	}
+}
+
+// judge publishes s's record and judges it as gc reads it: on the pane its
+// nonce names, armed, the pipe open and the tap alive, under on.
+func judge(t *testing.T, s *Store) runtime.ProgramStatus {
+	t.Helper()
+	v, err := Encode(s.Status())
+	if err != nil {
+		t.Fatalf("Encode(%+v): %v", s.Status(), err)
+	}
+	rec, err := Decode(v)
+	if err != nil {
+		t.Fatalf("Decode(%q): %v", v, err)
+	}
+	return runtime.JudgeProgramStatus(runtime.ProgramPaneRow{
+		Mode:        runtime.ProgramStatusOn,
+		CaptureGate: true,
+		PaneID:      "%3",
+		PanePipe:    true,
+		Tap:         testNonce,
+		TapLiveness: runtime.ProgramTapAlive,
+		RecordForm:  runtime.ProgramRecordDecoded,
+		Record:      rec,
+	})
+}
+
+// Kills a judge that reads a moved Seq as a cleared root: a probe or a child
+// report changes the published record, but only a root that reported and was
+// then removed reads cleared. The probe-only incarnation is what a program at
+// a login or trust screen publishes; it reads silent and keeps Probed for the
+// doctor.
+func TestStoreRecordJudgesSilentUntilTheRootReports(t *testing.T) {
+	cases := []struct {
+		name  string
+		drive func(*testing.T, *Store)
+		want  runtime.ProgramStatusValidity
+	}{
+		{"nothing reported", func(*testing.T, *Store) {}, runtime.ProgramStatusSilent},
+		{"probe only", func(_ *testing.T, s *Store) { s.Probe() }, runtime.ProgramStatusSilent},
+		{"child only", func(t *testing.T, s *Store) { apply(t, s, "state=working:id=sub", at(1)) }, runtime.ProgramStatusSilent},
+		{"children cleared, root never reported", func(t *testing.T, s *Store) {
+			apply(t, s, "state=working:id=sub", at(1))
+			apply(t, s, "state=clear", at(2))
+		}, runtime.ProgramStatusSilent},
+		{"probe then root", func(t *testing.T, s *Store) {
+			s.Probe()
+			apply(t, s, "state=idle", at(1))
+		}, runtime.ProgramStatusValid},
+		{"root cleared", func(t *testing.T, s *Store) {
+			apply(t, s, "state=idle", at(1))
+			apply(t, s, "state=clear", at(2))
+		}, runtime.ProgramStatusCleared},
+		{"root dropped by a prompt start", func(t *testing.T, s *Store) {
+			apply(t, s, "state=working", at(1))
+			s.PromptStart()
+		}, runtime.ProgramStatusCleared},
+		{"probe after a cleared root", func(t *testing.T, s *Store) {
+			apply(t, s, "state=idle", at(1))
+			apply(t, s, "state=clear", at(2))
+			s.Probe()
+		}, runtime.ProgramStatusCleared},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewStore(testNonce)
+			tc.drive(t, s)
+			got := judge(t, s)
+			if got.Validity != tc.want {
+				t.Fatalf("judged %q, want %q: %+v", got.Validity, tc.want, got)
+			}
+			if tc.want != runtime.ProgramStatusValid && got.State != "" {
+				t.Fatalf("%q reading carries state: %+v", got.Validity, got)
+			}
+		})
+	}
+	s := NewStore(testNonce)
+	s.Probe()
+	if st := s.Status(); st.Seq == 0 {
+		t.Fatalf("a probe left the published record unchanged: %+v", st)
+	}
+	if got := judge(t, s); !got.Probed {
+		t.Fatalf("probe-only reading lost the probe: %+v", got)
+	}
+}
+
+// Kills delivery evidence that disappears once a dialog-led turn ends: a
+// turn that opens blocked, then works and ends, is AdvancedPast the boundary
+// it started from.
+func TestStoreRecordCreditsADialogLedTurn(t *testing.T) {
+	s := NewStore(testNonce)
+	apply(t, s, "state=idle", at(1))
+	base := judge(t, s).Baseline()
+	apply(t, s, "state=blocked:kind=permission", at(2))
+	apply(t, s, "state=working", at(3))
+	apply(t, s, "state=done", at(4))
+	got := judge(t, s)
+	if !got.InputBoundary() || !got.AdvancedPast(base) {
+		t.Fatalf("finished dialog-led turn %+v is not AdvancedPast %+v", got, base)
+	}
+	if got.TurnEnds > got.TurnStarts {
+		t.Fatalf("ends ran ahead of starts: %+v", got)
 	}
 }
