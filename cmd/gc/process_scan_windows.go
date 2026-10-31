@@ -16,6 +16,13 @@ import (
 
 var unresolvedScanCommands sync.Map
 
+// processScanState holds the accumulated process-table scan scope on the
+// CityRuntime; Windows is the only platform that scopes the scan.
+type processScanState struct {
+	processScanScope            []string
+	processScanScopeInitialized bool
+}
+
 func configureProcessTableScan(sp runtime.Provider, cfg *config.City) {
 	scoped, ok := sp.(interface{ SetScanExecutables([]string) })
 	if !ok || cfg == nil {

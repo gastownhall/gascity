@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,17 @@ import (
 )
 
 const supervisorMaxCommandLineArguments = 8192
+
+// stopSupervisorConnJSON drives the stop protocol over an already dialed
+// supervisor connection without identifying the supervisor process, so --wait
+// ends once the control socket is gone.
+func stopSupervisorConnJSON(conn net.Conn, sockPath string, stdout, stderr io.Writer, wait bool, waitTimeout time.Duration, jsonOut bool) int {
+	return stopSupervisorConnForProcessJSON(conn, sockPath, 0, nil, stdout, stderr, wait, waitTimeout, jsonOut)
+}
+
+// driftRestartNoticeWriter receives the notice that a pre-session-preserving
+// supervisor's sessions will restart. Overridable for tests.
+var driftRestartNoticeWriter io.Writer = os.Stdout
 
 var readSupervisorCommandLineHook = func(pid int) (string, error) {
 	return proctable.ProcessCommandLine(pid, time.Time{})

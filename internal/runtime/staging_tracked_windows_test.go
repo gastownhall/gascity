@@ -187,31 +187,6 @@ func TestStageProviderOverlayDirDoesNotCreateWhenTrackednessUnknownOnWindows(t *
 	}
 }
 
-func TestStageProviderOverlayDirDoesNotUsePerFileTrackedProbeOnWindows(t *testing.T) {
-	workDir := initOverlayGitRepo(t)
-	src := writeCopilotOverlayFiles(t, map[string]string{
-		filepath.Join(".github", "copilot-instructions.md"): "gas city instructions\n",
-		filepath.Join(".github", "hooks", "gascity.json"):   "{}\n",
-	})
-
-	calls := 0
-	orig := probeOverlayTrackedStatus
-	probeOverlayTrackedStatus = func(string, string) overlayTrackedStatus {
-		calls++
-		return overlayTrackedNo
-	}
-	defer func() { probeOverlayTrackedStatus = orig }()
-
-	for i := 0; i < 2; i++ {
-		if err := StageProviderOverlayDir(src, workDir, []string{"copilot"}, io.Discard); err != nil {
-			t.Fatalf("StageProviderOverlayDir #%d: %v", i+1, err)
-		}
-	}
-	if calls != 0 {
-		t.Fatalf("per-file tracked probe calls = %d, want 0; tracked files must be checked in one batch per staging call", calls)
-	}
-}
-
 func TestStageProviderOverlayDirWarnsOnceForTrackedSkipOnWindows(t *testing.T) {
 	workDir := initOverlayGitRepo(t)
 	target := filepath.Join(workDir, ".github", "copilot-instructions.md")

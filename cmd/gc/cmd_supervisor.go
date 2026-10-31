@@ -886,13 +886,6 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 	return stopSupervisorConnForProcessJSON(conn, sockPath, pid, processAlive, stdout, stderr, wait, waitTimeout, jsonOut)
 }
 
-// stopSupervisorConnJSON drives the stop protocol over an already dialed
-// supervisor connection without identifying the supervisor process, so --wait
-// ends once the control socket is gone.
-func stopSupervisorConnJSON(conn net.Conn, sockPath string, stdout, stderr io.Writer, wait bool, waitTimeout time.Duration, jsonOut bool) int {
-	return stopSupervisorConnForProcessJSON(conn, sockPath, 0, nil, stdout, stderr, wait, waitTimeout, jsonOut)
-}
-
 // stopSupervisorConnForProcessJSON drives the stop protocol over conn; with
 // wait set it also waits for the process processAlive watches to exit.
 func stopSupervisorConnForProcessJSON(conn net.Conn, sockPath string, pid int, processAlive func() bool, stdout, stderr io.Writer, wait bool, waitTimeout time.Duration, jsonOut bool) int {
@@ -1314,8 +1307,8 @@ type managedCity struct {
 	cancel     context.CancelFunc
 	done       chan struct{} // closed when the city goroutine exits
 	closer     io.Closer     // FileRecorder (or nil); closed on city stop
-	generation uint64        // platform hook generation assigned when published
 	tombstoned atomic.Bool   // set before Remove() in shutdown paths for teardown safety
+	managedCityPlatformState
 }
 
 // deleteManagedCityIfCurrent prevents a stale city goroutine from removing

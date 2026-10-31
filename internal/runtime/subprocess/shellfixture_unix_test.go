@@ -17,9 +17,6 @@ const cmdSleepLong = "sleep 3600"
 // to a single-shot signal.
 const cmdSleepLongExec = "exec sleep 3600"
 
-// cmdSleepMedium outlives a conformance run.
-const cmdSleepMedium = "sleep 300"
-
 // cmdExitsImmediately succeeds and exits at once.
 const cmdExitsImmediately = "true"
 

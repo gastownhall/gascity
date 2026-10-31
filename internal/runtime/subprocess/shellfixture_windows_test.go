@@ -27,9 +27,6 @@ const cmdSleepLong = "Start-Sleep -Seconds 3600"
 // ends, and the owning Job Object reaps whatever the script started.
 const cmdSleepLongExec = cmdSleepLong
 
-// cmdSleepMedium outlives a conformance run.
-const cmdSleepMedium = "Start-Sleep -Seconds 300"
-
 // cmdExitsImmediately succeeds and exits at once.
 const cmdExitsImmediately = "exit 0"
 

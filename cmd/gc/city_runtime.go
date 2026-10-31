@@ -153,8 +153,7 @@ type CityRuntime struct {
 	buildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
 
-	processScanScope            []string
-	processScanScopeInitialized bool
+	processScanState
 
 	dops                    drainOps
 	ct                      crashTracker

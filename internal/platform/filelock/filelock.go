@@ -1,9 +1,10 @@
+// Package filelock takes advisory kernel file locks, shared or exclusive,
+// with nonblocking, timeout, and sidecar-file variants.
 package filelock
 
 import (
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"time"
 )
@@ -11,6 +12,7 @@ import (
 // Mode selects the lock sharing mode.
 type Mode int
 
+// Lock modes: Shared admits other shared holders; Exclusive admits none.
 const (
 	Shared Mode = iota
 	Exclusive
@@ -93,16 +95,6 @@ func AcquireAdvisoryFile(f *os.File, path string, opts Options) (*Lock, error) {
 // path.
 func AdvisoryLockPath(path string) string {
 	return path + ".lock"
-}
-
-// pathErrorCause drops the path an [fs.PathError] adds, which repeats the lock
-// file's path or names the probe file instead of it.
-func pathErrorCause(err error) error {
-	var pathErr *fs.PathError
-	if errors.As(err, &pathErr) {
-		return pathErr.Err
-	}
-	return err
 }
 
 // acquireSidecar takes the lock on the sidecar for path, creating it if

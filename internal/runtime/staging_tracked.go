@@ -23,7 +23,6 @@ const (
 
 var (
 	probeOverlayTrackedStatuses = gitOverlayTrackedStatuses
-	probeOverlayTrackedStatus   = gitOverlayTrackedStatus
 	trackedOverlayWarningsSeen  sync.Map
 )
 
@@ -47,18 +46,6 @@ func trackedOverlaySkip(dstDir string, relPaths []string, warnings io.Writer) fu
 		warnTrackedOverlaySkip(dstDir, clean, status, warnings)
 		return true
 	}
-}
-
-func gitOverlayTrackedStatus(dstDir, relPath string) overlayTrackedStatus {
-	statuses, enabled := gitOverlayTrackedStatuses(dstDir, []string{relPath})
-	if !enabled {
-		return overlayTrackedNo
-	}
-	status, ok := statuses[cleanOverlayRelPath(relPath)]
-	if !ok {
-		return overlayTrackedUnknown
-	}
-	return status
 }
 
 func gitOverlayTrackedStatuses(dstDir string, relPaths []string) (map[string]overlayTrackedStatus, bool) {

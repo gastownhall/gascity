@@ -116,6 +116,12 @@ func stopBeadsProviderAfterQuiesceDrain(mc *managedCity, cityPath string, quiesc
 	}()
 }
 
+// managedCityPlatformState holds the generation markManagedCityPublished
+// assigns when the supervisor publishes a managed city.
+type managedCityPlatformState struct {
+	generation uint64
+}
+
 var managedCityGenerations = struct {
 	sync.Mutex
 	byPath map[string]uint64

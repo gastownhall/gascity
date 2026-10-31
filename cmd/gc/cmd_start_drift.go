@@ -220,8 +220,6 @@ var restartHelpersHook = defaultRestartHelpers
 // readSupervisorExePathHook lets tests avoid platform-specific process image lookups.
 var readSupervisorExePathHook = readSupervisorExePath
 
-var driftRestartNoticeWriter io.Writer = os.Stdout
-
 // readProcExeLinkHook reads the raw /proc/<pid>/exe link target.
 // Overridable for tests.
 var readProcExeLinkHook = func(pid int) (string, error) {
@@ -535,9 +533,7 @@ func defaultRestartHelpers() restartHelpers {
 	return restartHelpers{
 		Systemctl: supervisorSystemctlRun,
 		Launchctl: supervisorLaunchctlRun,
-		Kill: func(pid int) error {
-			return platformDriftRestartKill(pid)
-		},
+		Kill:      platformDriftRestartKill,
 		WaitExit: func(pid int) error {
 			return waitForPIDExit(pid, driftKillTimeout, driftKillEscalateTimeout)
 		},

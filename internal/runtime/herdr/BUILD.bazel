@@ -82,6 +82,7 @@ go_test(
         "errorcode_test.go",
         "events_live_test.go",
         "events_test.go",
+        "fakeherdr_behavior_windows_test.go",
         "fakeherdr_other_test.go",
         "fakeherdr_test.go",
         "fakeherdr_windows_test.go",
