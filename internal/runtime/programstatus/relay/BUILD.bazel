@@ -4,9 +4,10 @@ go_library(
     name = "relay",
     srcs = [
         "bridge.go",
-        "die.go",
+        "die_darwin.go",
+        "die_exec.go",
         "die_linux.go",
-        "die_other.go",
+        "die_linux_other.go",
         "doc.go",
         "pty_darwin.go",
         "pty_linux.go",
@@ -105,6 +106,7 @@ go_test(
     name = "relay_test",
     srcs = [
         "bridge_test.go",
+        "die_exec_test.go",
         "helper_test.go",
         "relay_test.go",
         "testenv_import_test.go",
