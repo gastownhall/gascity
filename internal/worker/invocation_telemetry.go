@@ -83,6 +83,16 @@ func defaultPricingRegistry() *pricing.Registry {
 //     running under a different local timezone than this process — rollout
 //     filenames are local-time and parsed in gc's time.Local) silently
 //     record nothing: bounded best-effort by design.
+//   - grok: keyless by construction (the builtin profile has no
+//     SessionIDFlag, so every gc wake starts a NEW grok sid). The session
+//     directory ~/.grok/sessions/<url.PathEscape(cwd)>/<sid>/ is born at
+//     session start with a UUIDv7 name, so
+//     sessionlog.FindGrokSessionDirNear resolves it by cwd + the wake
+//     anchor window exactly as the keyless codex route does (two wakes in
+//     one cwd inside the window are refused as ambiguous). Usage is then
+//     read from the ONE shared ~/.grok/logs/unified.jsonl, filtered to the
+//     sid, by sessionlog.ExtractGrokTailUsage with the claude-style
+//     cursor-bounded growth loop.
 //
 // Families without a registered spec are skipped before any discovery —
 // their workdir-based fallbacks walk real session stores and no usage
@@ -334,12 +344,18 @@ var invocationUsageSpecs = map[string]invocationUsageSpec{
 		discover: discoverOpenCodeInvocationTranscript,
 		extract:  SessionLogAdapter.OpenCodeTailUsage,
 	},
+	"grok": {
+		discover: discoverGrokInvocationTranscript,
+		extract:  SessionLogAdapter.GrokTailUsage,
+	},
 }
 
 // invocationUsageFamily resolves a provider string to its registered
 // invocation-usage family key: claude-family providers (including
-// claude-eco) match by name, codex resolves through sessionlog.ProviderFamily,
-// and everything else returns "" (unregistered).
+// claude-eco) match by name, codex, opencode and grok resolve through
+// sessionlog.ProviderFamily, and everything else returns "" (unregistered).
+// An alias whose raw name carries no family marker reaches its family through
+// the builtin_ancestor rung of invocationUsageFamilyFromInfo.
 func invocationUsageFamily(provider string) string {
 	if strings.Contains(strings.ToLower(provider), "claude") {
 		return "claude"
@@ -349,6 +365,8 @@ func invocationUsageFamily(provider string) string {
 		return "codex"
 	case "opencode":
 		return "opencode"
+	case "grok":
+		return "grok"
 	}
 	return ""
 }
@@ -506,6 +524,30 @@ func discoverOpenCodeInvocationTranscript(h *SessionHandle, _ string, _ time.Tim
 	return sessionlog.FindOpenCodeSessionFileByID(h.adapter.SearchPaths, strings.TrimSpace(meta["session_key"]))
 }
 
+// discoverGrokInvocationTranscript resolves the grok session directory a gc
+// wake started. Grok sessions are keyless by construction (no SessionIDFlag,
+// so a session_key is never captured and every wake starts a new sid), so
+// discovery is always the bounded wake-anchored window lookup: the anchor is
+// the session's last_woke_at metadata, falling back to bead creation time,
+// and sessionlog.FindGrokSessionDirNear matches the UUIDv7-named directory
+// under <root>/sessions/<escaped work dir>/ created within
+// codexInvocationDiscoveryWindow of it. Ambiguous or out-of-window
+// directories yield "" — telemetry silently records nothing rather than
+// misattributing.
+func discoverGrokInvocationTranscript(h *SessionHandle, _ string, createdAt time.Time, meta map[string]string) string {
+	anchor := createdAt
+	if woke, err := time.Parse(time.RFC3339, strings.TrimSpace(meta["last_woke_at"])); err == nil {
+		anchor = woke
+	}
+	workDir := contract.WorkerDirFromMetadata(meta)
+	return sessionlog.FindGrokSessionDirNear(
+		h.adapter.SearchPaths,
+		workDir,
+		anchor,
+		codexInvocationDiscoveryWindow,
+	)
+}
+
 // usageIdentity returns the dedup identity of one invocation: the provider
 // message id when present (shared by every content-block entry of one API
 // response, stable across prompt-operation boundaries), falling back to the
@@ -631,6 +673,15 @@ func usagesSinceCursor(usages []sessionlog.TailUsage, cursor string) []sessionlo
 //     Widening it needs its own correctness argument rather than this one: the
 //     codex extractor collapses on cumulative totals rather than per-message
 //     identity, so the cursor is not a usable stop condition there.
+//   - grok: cursor-bounded growth over the ONE shared ~/.grok/logs/unified.jsonl,
+//     capped at 16MB like claude. SessionLogAdapter.GrokTailUsage routes to
+//     sessionlog.ExtractGrokTailUsage, whose window doubles from the 64KB tail
+//     until the persisted cursor is in view, the sid's "model changed" line
+//     (the start of the session) is in view, the whole file is in view, or
+//     the cap is reached. Because the log is shared by every grok session on
+//     the host, a cold cursor can read up to the full 16MB cap before the
+//     session's own start line comes into view; the stop on the start line
+//     keeps a warm session's scan proportional to its own output.
 //
 // Neither risk the old blanket "do not widen" ceiling cited survives
 // cursor-bounded growth, which is why claude was widened. The scan is not
@@ -666,9 +717,12 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 	}
 	path, scanClean, emptyIsPermanent := f.discoverSweepTranscript(family, id, meta, now)
 	keyless := strings.TrimSpace(meta["session_key"]) == ""
-	keylessCodex := family == "codex" && keyless
+	// Keyless codex and grok share the (cwd, wake-window) discovery route and so
+	// the same settle rules. Grok takes that route whether or not a key is
+	// present (discoverSweepTranscript never resolves grok by key).
+	keylessWindowed := family == "grok" || (family == "codex" && keyless)
 	keylessClaude := family == "claude" && keyless
-	if (keylessCodex || keylessClaude) && !scanClean {
+	if (keylessWindowed || keylessClaude) && !scanClean {
 		// The (cwd, wake-window) fallback hit a transient IO fault (a non-ENOENT
 		// readdir or a cwd-probe open failure — EMFILE/ESTALE). That clouds the whole
 		// scan whether or not a path was found: an empty result may have hidden the
@@ -684,8 +738,8 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 		return 0, false, nil
 	}
 	if path == "" {
-		if (keylessCodex || keylessClaude) && emptyIsPermanent {
-			// Clean, PERMANENT miss: the keyless codex workdir fallback found nothing
+		if (keylessWindowed || keylessClaude) && emptyIsPermanent {
+			// Clean, PERMANENT miss: the keyless codex/grok workdir fallback found nothing
 			// (ambiguity / out-of-window / TZ), or the claude lookup REFUSED a shared
 			// workdir it cannot disambiguate. Neither is resolved by a retry, so settle
 			// so compute can commit and the recently-closed window is not re-swept
@@ -732,17 +786,17 @@ func (f *Factory) DiscoverSweepTranscript(id string, meta map[string]string, now
 	}
 	path, scanClean, emptyIsPermanent := f.discoverSweepTranscript(family, id, meta, now)
 	keyless := strings.TrimSpace(meta["session_key"]) == ""
-	keylessCodex := family == "codex" && keyless
+	keylessWindowed := family == "grok" || (family == "codex" && keyless)
 	keylessClaude := family == "claude" && keyless
-	if (keylessCodex || keylessClaude) && !scanClean {
+	if (keylessWindowed || keylessClaude) && !scanClean {
 		return "", false
 	}
 	if path == "" {
 		// Match SweepSessionModelUsage settle: only a clean keyless miss that no retry
-		// can resolve (codex out-of-window/ambiguity, or the claude shared-workdir
+		// can resolve (codex/grok out-of-window/ambiguity, or the claude shared-workdir
 		// ambiguity refusal) memoizes as settled. A claude transcript that is merely
 		// not written yet stays unsettled so the live lane rediscovers it.
-		return "", (keylessCodex || keylessClaude) && emptyIsPermanent
+		return "", (keylessWindowed || keylessClaude) && emptyIsPermanent
 	}
 	return path, true
 }
@@ -917,6 +971,19 @@ func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]str
 		// transient — the export may not be mirrored yet.
 		return sessionlog.FindOpenCodeSessionFileByID(
 			f.searchPaths, strings.TrimSpace(meta["session_key"])), true, false
+	case "grok":
+		// Grok is keyless by construction: the same (cwd, wake-window) route as
+		// keyless codex, over the UUIDv7-named session directories.
+		workDir := contract.WorkerDirFromMetadata(meta)
+		notBefore, _ := sweepIntervalWindow(meta, now)
+		if workDir == "" || notBefore.IsZero() {
+			slog.Debug("model-usage sweep: grok has no workdir/anchor for discovery; skipping",
+				slog.String("session_id", id))
+			return "", true, true
+		}
+		scanPath, scanClean := sessionlog.FindGrokSessionDirNearScan(
+			f.searchPaths, workDir, notBefore, codexInvocationDiscoveryWindow)
+		return scanPath, scanClean, true
 	default:
 		path, lookup, terr := f.manager.TranscriptPathClassified(id, f.searchPaths)
 		if terr != nil {

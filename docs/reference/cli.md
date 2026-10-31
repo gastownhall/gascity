@@ -1407,6 +1407,13 @@ reflects facts only under the default "local" usage provider; with an "exec:"
 or "discard" provider the facts are forwarded out of process or dropped, so
 gc costs shows nothing local.
 
+Model facts are extracted per transcript family: claude (the session's
+~/.claude/projects JSONL transcript), codex (the ~/.codex/sessions rollout),
+opencode (the session's mirrored JSON export) and grok (the shared
+~/.grok/logs/unified.jsonl, filtered to the session id of the
+~/.grok/sessions/&lt;cwd&gt;/&lt;sid&gt;/ directory the wake started). Other provider
+families record no model facts.
+
 Cost is a list-price estimate for decision support, not an authoritative
 charge; invocations with no pricing are flagged "unpriced" and excluded from
 the cost total.
