@@ -4984,6 +4984,10 @@
               "null"
             ]
           },
+          "scan_truncated": {
+            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "type": "boolean"
+          },
           "total": {
             "description": "Total number of items matching the query.",
             "format": "int64",
@@ -5026,6 +5030,10 @@
               "array",
               "null"
             ]
+          },
+          "scan_truncated": {
+            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "type": "boolean"
           },
           "total": {
             "description": "Total number of items matching the query.",
@@ -5070,6 +5078,10 @@
               "null"
             ]
           },
+          "scan_truncated": {
+            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "type": "boolean"
+          },
           "total": {
             "description": "Total number of items matching the query.",
             "format": "int64",
@@ -5112,6 +5124,10 @@
               "array",
               "null"
             ]
+          },
+          "scan_truncated": {
+            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "type": "boolean"
           },
           "total": {
             "description": "Total number of items matching the query.",
@@ -5156,6 +5172,10 @@
               "null"
             ]
           },
+          "scan_truncated": {
+            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "type": "boolean"
+          },
           "total": {
             "description": "Total number of items matching the query.",
             "format": "int64",
@@ -5198,6 +5218,10 @@
               "array",
               "null"
             ]
+          },
+          "scan_truncated": {
+            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "type": "boolean"
           },
           "total": {
             "description": "Total number of items matching the query.",
@@ -5242,6 +5266,10 @@
               "null"
             ]
           },
+          "scan_truncated": {
+            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "type": "boolean"
+          },
           "total": {
             "description": "Total number of items matching the query.",
             "format": "int64",
@@ -5284,6 +5312,10 @@
               "array",
               "null"
             ]
+          },
+          "scan_truncated": {
+            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "type": "boolean"
           },
           "total": {
             "description": "Total number of items matching the query.",
@@ -5328,6 +5360,10 @@
               "null"
             ]
           },
+          "scan_truncated": {
+            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "type": "boolean"
+          },
           "total": {
             "description": "Total number of items matching the query.",
             "format": "int64",
@@ -5370,6 +5406,10 @@
               "array",
               "null"
             ]
+          },
+          "scan_truncated": {
+            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "type": "boolean"
           },
           "total": {
             "description": "Total number of items matching the query.",
@@ -5414,6 +5454,10 @@
               "null"
             ]
           },
+          "scan_truncated": {
+            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "type": "boolean"
+          },
           "total": {
             "description": "Total number of items matching the query.",
             "format": "int64",
@@ -5456,6 +5500,10 @@
               "array",
               "null"
             ]
+          },
+          "scan_truncated": {
+            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "type": "boolean"
           },
           "total": {
             "description": "Total number of items matching the query.",
@@ -5500,6 +5548,10 @@
               "null"
             ]
           },
+          "scan_truncated": {
+            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "type": "boolean"
+          },
           "total": {
             "description": "Total number of items matching the query.",
             "format": "int64",
@@ -5543,6 +5595,10 @@
               "null"
             ]
           },
+          "scan_truncated": {
+            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "type": "boolean"
+          },
           "total": {
             "description": "Total number of items matching the query.",
             "format": "int64",
@@ -5585,6 +5641,10 @@
               "array",
               "null"
             ]
+          },
+          "scan_truncated": {
+            "description": "True when the underlying scan stopped at a budget limit before exhausting matching history; Total is a lower bound and NextCursor should still be followed.",
+            "type": "boolean"
           },
           "total": {
             "description": "Total number of items matching the query.",
