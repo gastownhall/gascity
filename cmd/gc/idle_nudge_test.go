@@ -1001,13 +1001,25 @@ type liveTurnProvider struct {
 	*runtime.Fake
 	running bool
 	err     error
+	// turnLooks counts TurnRunning reads, so a test can assert a pass took
+	// exactly one look, or none.
+	turnLooks int
+	// script, when set, answers the looks in order in place of running, its
+	// last answer repeating: a turn that starts or ends between two looks.
+	script []bool
 }
 
 // SnapshotIdle is the capture scan's reading: busy.
 func (p *liveTurnProvider) SnapshotIdle(string) (bool, error) { return false, nil }
 
 // TurnRunning is the live screen's reading.
-func (p *liveTurnProvider) TurnRunning(string) (bool, error) { return p.running, p.err }
+func (p *liveTurnProvider) TurnRunning(string) (bool, error) {
+	p.turnLooks++
+	if len(p.script) > 0 {
+		return p.script[min(p.turnLooks, len(p.script))-1], p.err
+	}
+	return p.running, p.err
+}
 
 // Kills the claim backstop holding a stalled slot for good on an earlier
 // turn's busy row (PR #7944 review): its busy hold read the idle snapshot,

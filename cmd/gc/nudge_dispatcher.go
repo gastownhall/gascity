@@ -244,9 +244,12 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 		// adoption the snapshot denies waits for the next pass. A claim that
 		// is tried reads its own live census before it adopts, since the
 		// snapshot, or a census an earlier claim of the pass read, misses a
-		// session another process created after it.
+		// session another process created after it. The starvation check of a
+		// busy target judges with the snapshot census too, so holding a busy
+		// session back reads no store (nudgeTarget.starvationCensus).
 		ok := false
 		if nudgeTargetMayClaimPerSnapshot(queue, target, snapshotCensus, time.Now()) {
+			target.starvationCensus = snapshotCensus
 			ok, err = tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
 		}
 		if err != nil && firstErr == nil {
@@ -258,7 +261,10 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 		}
 		// Matched a live, running session, yet nothing was claimed/delivered
 		// this tick — e.g. the poller quiescence gate (pollerSessionIdleEnough)
-		// hasn't cleared, or claimDueQueuedNudgesForTarget found nothing
+		// hasn't cleared and the queue hasn't starved past
+		// queuedNudgeStarvedAfter yet (a busy session's next delivery waits
+		// only until it starves, then until a turn look, on a leaf that takes
+		// one, says idle), or claimDueQueuedNudgesForTarget found nothing
 		// claimable (already claimed by a concurrent drain path). Either way
 		// this is the class of skip ra-oudpha finding-3 could not otherwise
 		// distinguish from "not matched" or "not running" without a trace.
@@ -283,7 +289,8 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 // the open sessions of the pass's snapshot that still hold a nudge fence
 // (sessionHoldsNudgeFence), built at most once. The snapshot reads through the
 // controller's bead cache, which sees another process's session only after its
-// own reconcile pass, so it may skip a claim but never license an adoption
+// own reconcile pass, so it may skip a claim, or judge a busy target's
+// starvation (queuedNudgeStarvedForTarget), but never license an adoption
 // (nudgeTargetMayClaimPerSnapshot).
 func nudgeFenceCensusFromSnapshot(snapshot *sessionBeadSnapshot) func() (map[string]struct{}, bool) {
 	var once sync.Once
