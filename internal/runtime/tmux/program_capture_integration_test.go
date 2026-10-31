@@ -136,12 +136,23 @@ func armedNonce(t *testing.T, p *Provider, name string) string {
 // table.
 func tapRunning(t *testing.T, nonce string) bool {
 	t.Helper()
+	return len(tapPIDs(t, nonce)) > 0
+}
+
+// tapPIDs returns the pids of the taps holding nonce's rand.
+func tapPIDs(t *testing.T, nonce string) []int {
+	t.Helper()
 	r, _, _ := strings.Cut(nonce, ".")
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		t.Fatal(err)
 	}
+	var pids []int
 	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
 		cmdline, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
 		if err != nil {
 			continue
@@ -149,11 +160,11 @@ func tapRunning(t *testing.T, nonce string) bool {
 		args := strings.Split(string(cmdline), "\x00")
 		if len(args) > 1 && filepath.Base(args[0]) == programstatus.CompanionName && args[1] == "tap" {
 			if i := slices.Index(args, "-n"); i >= 0 && i+1 < len(args) && args[i+1] == r {
-				return true
+				pids = append(pids, pid)
 			}
 		}
 	}
-	return false
+	return pids
 }
 
 func emitterCommand(bin string, steps ...string) string {
