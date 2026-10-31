@@ -21,23 +21,26 @@ import (
 // RUNTIME-CONTRACT-017 on the real tmux: the runtimetest program-status
 // suite (PS-001…PS-014) against sessions whose agent pane runs the scripted
 // emitter, armed with the built companion, each on its own scratch server
-// (osc7501x-heal-<rand> for the heal cases PS-013 and PS-014). The relayed
-// fixture skips: the relay's tmux fixture lands with a later slice.
+// (osc7501x-heal-<rand> for the heal cases PS-013 and PS-014). The Relayed
+// fixture runs the emitter under the built companion's relay.
 func TestTmuxProgramStatusContract(t *testing.T) {
 	companion := captureCompanionBin(t)
 	emitter := captureEmitterBin(t)
-	start := func(t *testing.T, mode runtime.ProgramStatusMode, armed bool, script []string) *programSession {
-		return startProgramSession(t, companion, emitter, mode, armed, script)
+	start := func(t *testing.T, mode runtime.ProgramStatusMode, arm runtime.ProgramStatusArm, script []string) *programSession {
+		return startProgramSession(t, companion, emitter, mode, arm, script)
 	}
 	runtimetest.RunProgramStatusContract(t, runtimetest.ProgramStatusFixtures{
 		Armed: func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) runtimetest.ProgramStatusSession {
-			return start(t, mode, true, script).session()
+			return start(t, mode, runtime.ProgramStatusArm{Capture: true}, script).session()
 		},
 		Unarmed: func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) runtimetest.ProgramStatusSession {
-			return start(t, mode, false, script).session()
+			return start(t, mode, runtime.ProgramStatusArm{}, script).session()
+		},
+		Relayed: func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) runtimetest.ProgramStatusSession {
+			return start(t, mode, runtime.ProgramStatusArm{Capture: true, Relay: true}, script).session()
 		},
 		Inherited: func(t *testing.T, mode runtime.ProgramStatusMode) runtimetest.ProgramStatusSession {
-			s := start(t, mode, false, nil)
+			s := start(t, mode, runtime.ProgramStatusArm{}, nil)
 			s.inheritForeignCapture(t)
 			return s.session()
 		},
@@ -51,28 +54,26 @@ type programSession struct {
 	name    string
 	emitter string
 	cfg     runtime.Config
+	relay   bool   // the program runs under the relay
 	nonce   string // the armed incarnation's nonce; "" when unarmed
 	out     []byte // everything this incarnation's program wrote
 	stale   string // the record the incarnation before the last respawn published
 }
 
 // startProgramSession starts the emitter running script, then taking steps
-// typed into its pane, and waits until the capture has published what the
-// script wrote.
-func startProgramSession(t *testing.T, companion, emitter string, mode runtime.ProgramStatusMode, armed bool, script []string) *programSession {
+// typed into its pane, armed as arm declares (the zero arm: unarmed), and
+// waits until the capture has published what the script wrote.
+func startProgramSession(t *testing.T, companion, emitter string, mode runtime.ProgramStatusMode, arm runtime.ProgramStatusArm, script []string) *programSession {
 	t.Helper()
 	p := captureProvider(t, newScratchServer(t, programScratchKind(t)), companion)
 	p.tm.cfg.ProgramStatus, p.cfg.ProgramStatus = mode, mode
-	s := &programSession{p: p, name: "gc-ps-contract", emitter: emitter}
-	s.cfg = runtime.Config{Command: s.command(script), WorkDir: t.TempDir()}
-	if armed {
-		s.cfg.ProgramStatus = runtime.ProgramStatusArm{Capture: true}
-	}
+	s := &programSession{p: p, name: "gc-ps-contract", emitter: emitter, relay: arm.Relay}
+	s.cfg = runtime.Config{Command: s.command(script), WorkDir: t.TempDir(), ProgramStatus: arm}
 	if err := p.Start(context.Background(), s.name, s.cfg); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = p.Stop(s.name) })
-	if armed {
+	if arm.Capture {
 		s.nonce = armedNonce(t, p, s.name)
 	}
 	s.settle(t, script)
@@ -173,11 +174,17 @@ func (s *programSession) settle(t *testing.T, steps []string) {
 
 // run runs steps as the pane's program does, appending what it writes to
 // the incarnation's output, and reports whether they end the program. No
-// probe is answered, as tmux answers none.
+// probe is answered, as tmux answers none, unless the program runs under the
+// relay, which answers it.
 func (s *programSession) run(t *testing.T, steps []string) bool {
 	t.Helper()
 	if len(steps) == 0 {
 		return false
+	}
+	if s.relay {
+		out, ended := runtimetest.RelayedProgramOutput(t, steps...)
+		s.out = append(s.out, out...)
+		return ended
 	}
 	prog, err := emit.ParseLines(steps...)
 	if err != nil {
@@ -312,4 +319,26 @@ func (s *programSession) inheritForeignCapture(t *testing.T) {
 		t.Fatalf("pane reads tap %q, want the inherited %q", got, nonce)
 	}
 	s.p.cache.Invalidate()
+}
+
+// The process table the read path takes tap liveness from is read whole
+// even when the controller's environment carries COLUMNS=80 (a nudge
+// poller's shell does): ps would otherwise cut every line at 80 columns,
+// past which the tap's argv, and its nonce, would be lost, and a live tap
+// would read gone.
+func TestProcessSnapshotReadsTapNonceUnderNarrowColumns(t *testing.T) {
+	t.Setenv("COLUMNS", "80")
+	s := startProgramSession(t, captureCompanionBin(t), captureEmitterBin(t), runtime.ProgramStatusOn,
+		runtime.ProgramStatusArm{Capture: true}, []string{"report state=working"})
+	eventually(t, "the tap to run", func() bool { return tapRunning(t, s.nonce) })
+	snapshot, err := fetchProcessSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("fetchProcessSnapshot: %v", err)
+	}
+	if _, ok := tapNonces(snapshot)[s.nonce]; !ok {
+		t.Fatalf("the snapshot taken under COLUMNS=80 lost the tap of %s", s.nonce)
+	}
+	if r, err := s.p.ProgramStatus(s.name); err != nil || !r.Running() {
+		t.Fatalf("ProgramStatus under COLUMNS=80 = %+v, %v; want a valid working reading", r, err)
+	}
 }

@@ -133,27 +133,20 @@ func tapNonces(s processSnapshot) map[string]struct{} {
 	return nonces
 }
 
-// tapNonce returns the nonce a tap's argv carries: after its "tap" word,
-// "-n <rand>" and "-t <pane_id>" (the arm's tapCommand). The shell tmux runs
-// the command under carries the same words until it execs the tap, so a tap
-// being started counts as alive.
+// tapNonce returns the nonce a tap's argv carries: the words right after its
+// "tap" word, "-t <pane_id> -n <rand>", exactly as the arm's tapCommand
+// writes them ahead of every path. The shell tmux runs the command under
+// carries the same words until it execs the tap, so a tap being started
+// counts as alive.
 func tapNonce(args string) (string, bool) {
 	fields := strings.Fields(args)
 	at := slices.Index(fields, "tap")
-	if at < 0 {
+	if at < 0 || len(fields) < at+5 || fields[at+1] != "-t" || fields[at+3] != "-n" {
 		return "", false
 	}
-	var rand, pane string
-	for i := at + 1; i+1 < len(fields); i++ {
-		switch fields[i] {
-		case "-n":
-			rand = fields[i+1]
-		case "-t":
-			pane = fields[i+1]
-		}
-	}
+	pane, rand := fields[at+2], fields[at+4]
 	nonce := rand + "." + pane
-	if rand == "" || !wellFormedTmuxID(pane, '%') || !programstatus.ValidNonce(nonce) {
+	if !wellFormedTmuxID(pane, '%') || !programstatus.ValidNonce(nonce) {
 		return "", false
 	}
 	return nonce, true
@@ -172,17 +165,6 @@ func judgeProgramPane(mode runtime.ProgramStatusMode, gate bool, pane programPan
 		row.RecordForm, row.Record = programstatus.RecordForm(err), record
 	}
 	return runtime.JudgeProgramStatus(row)
-}
-
-// programStatusMode is the switch this Tmux reads under: shadow or on, and
-// off for anything else.
-func (t *Tmux) programStatusMode() runtime.ProgramStatusMode {
-	switch mode := t.cfg.ProgramStatus; mode {
-	case runtime.ProgramStatusShadow, runtime.ProgramStatusOn:
-		return mode
-	default:
-		return runtime.ProgramStatusOff
-	}
 }
 
 // programReadEnabled reports whether the read formats carry capture fields.
@@ -233,6 +215,20 @@ func (p *Provider) judgeInventoryPrograms(mode runtime.ProgramStatusMode, entrie
 		pane, named := panes[name]
 		e.Program = judgeProgramPane(mode, gate, pane, named, taps)
 		entries[name] = e
+	}
+}
+
+// SetProgramStatusMode publishes the city's program-status switch: the
+// switch this provider arms and reads under from now on. The controller
+// keeps a provider across a reload (rebuilding it would stop its sessions)
+// and publishes each accepted config's switch here. A changed switch drops
+// the state cache's snapshot, whose read format the old switch chose, so the
+// next reading is taken under the new one.
+func (p *Provider) SetProgramStatusMode(mode runtime.ProgramStatusMode) {
+	before := p.tm.programStatusMode()
+	p.tm.SetProgramStatusMode(mode)
+	if p.tm.programStatusMode() != before {
+		p.cache.Invalidate()
 	}
 }
 

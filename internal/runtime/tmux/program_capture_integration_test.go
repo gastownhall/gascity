@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/runtime/programstatus"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
@@ -336,4 +337,157 @@ func TestFencedInputThroughRelay(t *testing.T) {
 	if line := strings.TrimLeft(strings.TrimSuffix(got, "\r"), "\x15"); line != fenceTextE4 {
 		t.Fatalf("fenced text through the relay = %q, want %q", line, fenceTextE4)
 	}
+}
+
+// A respawn that does not arm while the switch is on removes the previous
+// incarnation's capture: the nonce and record are gone, the old tap ends,
+// and the new program's report is never published.
+func TestUnarmedRespawnRemovesPreviousCapture(t *testing.T) {
+	socket := newCaptureScratchServer(t)
+	p := captureProvider(t, socket, captureCompanionBin(t))
+	p.tm.cfg.ProgramStatus = runtime.ProgramStatusOn
+	emit := captureEmitterBin(t)
+	const name = "gc-ps-unarmed-respawn"
+	cfg := runtime.Config{
+		Command:       emitterCommand(emit, "report state=working", "hang"),
+		WorkDir:       t.TempDir(),
+		ProgramStatus: runtime.ProgramStatusArm{Capture: true},
+	}
+	if err := p.Start(context.Background(), name, cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop(name) })
+	first := armedNonce(t, p, name)
+	awaitRecord(t, p, name, first, runtime.ProgramWorking)
+
+	cfg.Command = emitterCommand(emit, "report state=idle", "hang")
+	cfg.ProgramStatus = runtime.ProgramStatusArm{}
+	if err := p.Relaunch(context.Background(), name, cfg); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	for _, opt := range []string{programTapOption, programStatusOption, programTextOption} {
+		if got := paneOption(t, p, name, opt); got != "" {
+			t.Fatalf("after an unarmed respawn %s = %q, want unset", opt, got)
+		}
+	}
+	// With no reader on the pane and the previous tap gone, nothing can
+	// publish the new program's report.
+	eventually(t, "the previous incarnation's tap to end", func() bool { return !tapRunning(t, first) })
+	target, err := p.tm.agentPaneTarget(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := p.tm.run("display-message", "-p", "-t", target, "#{pane_pipe}"); err != nil || strings.TrimSpace(out) != "0" {
+		t.Fatalf("pane_pipe = %q, %v after an unarmed respawn, want 0", out, err)
+	}
+	if got := paneOption(t, p, name, programStatusOption); got != "" {
+		t.Fatalf("the unarmed incarnation's report was published: %q", got)
+	}
+}
+
+// relayedStubbornCommand is a program that ignores SIGTERM, SIGHUP, SIGINT
+// and SIGQUIT and records its pid in file. Under the relay it leads a
+// session and process group of its own.
+func relayedStubbornCommand(file string) string {
+	return "trap '' TERM HUP INT QUIT; echo $$ > " + shellquote.Join([]string{file}) + "; while :; do sleep 0.2; done"
+}
+
+// startStubbornRelayed starts a relay-wrapped stubborn program in session
+// name, tagged with sessionID, and returns its pid.
+func startStubbornRelayed(t *testing.T, p *Provider, name, sessionID string) int {
+	t.Helper()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "pid")
+	cfg := runtime.Config{
+		Command:       relayedStubbornCommand(file),
+		WorkDir:       dir,
+		Env:           map[string]string{"GC_SESSION_ID": sessionID},
+		ProgramStatus: runtime.ProgramStatusArm{Capture: true, Relay: true},
+	}
+	if err := p.Start(context.Background(), name, cfg); err != nil {
+		t.Fatalf("Start %s: %v", name, err)
+	}
+	t.Cleanup(func() { _ = p.Stop(name) })
+	var pid int
+	eventually(t, "the relayed program's pid", func() bool {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return false
+		}
+		pid, err = strconv.Atoi(strings.TrimSpace(string(data)))
+		return err == nil && pid > 1
+	})
+	if cmd, err := p.tm.GetPaneCommand(name); err != nil || cmd != programstatus.CompanionName {
+		t.Fatalf("pane command = %q, %v; want the relay %s", cmd, err, programstatus.CompanionName)
+	}
+	return pid
+}
+
+// processGone reports whether pid has exited (gone or a zombie).
+func processGone(pid int) bool {
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return true
+	}
+	stat := string(data)
+	if i := strings.LastIndexByte(stat, ')'); i >= 0 && i+2 < len(stat) {
+		return stat[i+2] == 'Z'
+	}
+	return false
+}
+
+// uniqueSessionID is a GC_SESSION_ID no other process on the host carries.
+func uniqueSessionID(t *testing.T, prefix string) string {
+	t.Helper()
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		t.Fatal(err)
+	}
+	return prefix + "-" + hex.EncodeToString(b[:])
+}
+
+// The reaper's path: the process-table scan looks through the relay and
+// reports its program as the runtime's root, so TerminateRuntime signals the
+// program's own process group and a program that ignores the relay's
+// SIGTERM and hangup still dies.
+func TestReaperKillsRelayedProgramThatIgnoresTermAndHup(t *testing.T) {
+	socket := newCaptureScratchServer(t)
+	p := captureProvider(t, socket, captureCompanionBin(t))
+	sessionID := uniqueSessionID(t, "osc7501x-reap")
+	program := startStubbornRelayed(t, p, "gc-relay-reap", sessionID)
+
+	// The scan reads the live process table through a link, which the
+	// guard against reaping the host's agents admits; the unique session id
+	// confines it to this test's runtime.
+	procLink := filepath.Join(t.TempDir(), "proc")
+	if err := os.Symlink("/proc", procLink); err != nil {
+		t.Fatal(err)
+	}
+	proctable.SetScanRootForTesting(t, procLink)
+	roots, err := proctable.ScanBySessionID(sessionID)
+	if len(roots) != 1 {
+		t.Fatalf("scan roots = %+v (err %v), want exactly the relayed program", roots, err)
+	}
+	if roots[0].PID != program {
+		t.Fatalf("scan root pid %d (%s), want the relayed program %d, not the relay", roots[0].PID, roots[0].Name, program)
+	}
+	if err := p.TerminateRuntime(roots[0]); err != nil {
+		t.Fatalf("TerminateRuntime: %v", err)
+	}
+	if !processGone(program) {
+		t.Fatalf("relayed program %d survived TerminateRuntime", program)
+	}
+}
+
+// The stop path: a relayed program that ignores SIGTERM and the hangup is
+// killed by Stop.
+func TestStopKillsRelayedProgramThatIgnoresTermAndHup(t *testing.T) {
+	socket := newCaptureScratchServer(t)
+	p := captureProvider(t, socket, captureCompanionBin(t))
+	const name = "gc-relay-stop"
+	program := startStubbornRelayed(t, p, name, uniqueSessionID(t, "osc7501x-stop"))
+	if err := p.Stop(name); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	eventually(t, "the relayed program to die", func() bool { return processGone(program) })
 }
