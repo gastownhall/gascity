@@ -342,7 +342,11 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			}
 			var info session.Info
 			err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
-				if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, alias, "", configuredOwner); err != nil {
+				// Create re-reads the alias's and the session name's live
+				// holders under these locks, so only their config reservations
+				// and the concrete identity, which Create does not check, are
+				// checked here.
+				if err := session.EnsureAliasNotReservedByConfig(cfg, alias, configuredOwner); err != nil {
 					return err
 				}
 				if reserveConcreteIdentity && sessionQualifiedName != alias {
@@ -350,7 +354,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 						return err
 					}
 				}
-				if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessStore, cfg, explicitName, "", configuredOwner); err != nil {
+				if err := session.EnsureSessionNameNotReservedByConfig(cfg, explicitName, configuredOwner); err != nil {
 					return err
 				}
 				var createErr error
@@ -471,7 +475,10 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	}
 	var info session.Info
 	err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
-		if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, alias, "", configuredOwner); err != nil {
+		// Create re-reads the alias's and the session name's live holders
+		// under these locks, so only their config reservations and the
+		// concrete identity, which Create does not check, are checked here.
+		if err := session.EnsureAliasNotReservedByConfig(cfg, alias, configuredOwner); err != nil {
 			return err
 		}
 		if reserveConcreteIdentity && sessionQualifiedName != alias {
@@ -479,7 +486,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 				return err
 			}
 		}
-		if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessStore, cfg, explicitName, "", configuredOwner); err != nil {
+		if err := session.EnsureSessionNameNotReservedByConfig(cfg, explicitName, configuredOwner); err != nil {
 			return err
 		}
 		var createErr error
@@ -1764,7 +1771,8 @@ func cmdSessionSuspend(args []string, key string, stdout, stderr io.Writer, asJS
 	// suspend patch, session worker handle), so route the whole flow through the
 	// session coordination-class store for relocation-safety.
 	sessStore := cliSessionStore(store, cfg, cityPath)
-	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, args[0])
+	var loaded loadedSessionRecord
+	sessionID, err := resolveSessionIDWithOptions(cityPath, cfg, sessStore, args[0], namedSessionResolveOptions{loaded: loaded.set})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1812,7 +1820,13 @@ func cmdSessionSuspend(args []string, key string, stdout, stderr io.Writer, asJS
 		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, sp, cfg, sessionID)
+	factory, err := workerFactoryWithConfig(cityPath, sessStore, sp, cfg)
+	if err != nil {
+		op.finishErr(err)
+		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	handle, err := loaded.handle(factory, sessionID)
 	if err != nil {
 		op.finishErr(err)
 		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1894,7 +1908,8 @@ func cmdSessionClose(args []string, key string, stdout, stderr io.Writer, asJSON
 	// through the generic store and clears the session bead's claim back-channel
 	// in sessStore.
 	sessStore := cliSessionStore(store, cfg, cityPath)
-	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, args[0])
+	var loaded loadedSessionRecord
+	sessionID, err := resolveSessionIDWithOptions(cityPath, cfg, sessStore, args[0], namedSessionResolveOptions{loaded: loaded.set})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1905,7 +1920,12 @@ func cmdSessionClose(args []string, key string, stdout, stderr io.Writer, asJSON
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, sp, cfg, sessionID)
+	factory, err := workerFactoryWithConfig(cityPath, sessStore, sp, cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	handle, err := loaded.handle(factory, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1914,6 +1934,9 @@ func cmdSessionClose(args []string, key string, stdout, stderr io.Writer, asJSON
 	// identifiers (session_name, alias, etc.) for the post-close work-release
 	// pass. Lookup is best-effort: if the session bead is already missing we
 	// fall back to a synthetic shell carrying only the resolved session ID.
+	// The release writes work, so it reads the bead here rather than reusing
+	// the record resolution loaded: an identity changed since resolution must
+	// not release a successor's work or strand the closed session's.
 	closedSessionBead, sessionBeadErr := sessStore.Get(sessionID)
 	if sessionBeadErr != nil {
 		closedSessionBead = beads.Bead{ID: sessionID}

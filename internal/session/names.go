@@ -515,6 +515,19 @@ func ensureConfiguredSessionNameAvailable(store beads.Store, cfg *config.City, n
 			selfOwner = configuredNamedSessionOwnerForSessionName(cfg, self, name)
 		}
 	}
+	return EnsureSessionNameNotReservedByConfig(cfg, name, selfOwner)
+}
+
+// EnsureSessionNameNotReservedByConfig is the configuration half of
+// EnsureSessionNameAvailableWithConfigForOwner, which reads no store: it
+// rejects name when it is the runtime name a configured named session other
+// than selfOwner reserves. Manager.CreateSession re-checks the live holders of
+// a new session's name under its reservation lock but knows no config, so a
+// caller creating through it checks only this half.
+func EnsureSessionNameNotReservedByConfig(cfg *config.City, name, selfOwner string) error {
+	if cfg == nil || name == "" {
+		return nil
+	}
 	for _, named := range cfg.NamedSessions {
 		reserved := strings.TrimSpace(named.QualifiedName())
 		if reserved == "" {
@@ -683,20 +696,32 @@ func AliasConflictInfo(rows []Info, cfg *config.City, alias, selfID, selfOwner s
 		// Historical aliases are compatibility-only input and do not reserve
 		// namespace for new alias claims.
 	}
-	if cfg != nil {
-		for _, named := range cfg.NamedSessions {
-			reserved := strings.TrimSpace(named.QualifiedName())
-			if reserved == "" || reserved != alias {
-				continue
-			}
-			if selfOwner == "" && self != nil && IsNamedSessionInfo(*self) && NamedSessionIdentityInfo(*self) == reserved {
-				selfOwner = reserved
-			}
-			if selfOwner != "" && selfOwner == reserved {
-				return nil
-			}
-			return fmt.Errorf("%w: %q reserved for configured named session %s", ErrSessionAliasExists, alias, reserved)
+	if selfOwner == "" && self != nil && IsNamedSessionInfo(*self) && NamedSessionIdentityInfo(*self) == alias {
+		selfOwner = alias
+	}
+	return EnsureAliasNotReservedByConfig(cfg, alias, selfOwner)
+}
+
+// EnsureAliasNotReservedByConfig is the configuration half of
+// EnsureAliasAvailableWithConfigForOwner, which reads no store: it rejects
+// alias when a configured named session other than selfOwner reserves it.
+// Manager.CreateSession re-checks the live holders of a new session's alias
+// under its reservation lock but knows no config, so a caller creating through
+// it checks only this half.
+func EnsureAliasNotReservedByConfig(cfg *config.City, alias, selfOwner string) error {
+	alias = strings.TrimSpace(alias)
+	if cfg == nil || alias == "" {
+		return nil
+	}
+	for _, named := range cfg.NamedSessions {
+		reserved := strings.TrimSpace(named.QualifiedName())
+		if reserved == "" || reserved != alias {
+			continue
 		}
+		if selfOwner != "" && selfOwner == reserved {
+			return nil
+		}
+		return fmt.Errorf("%w: %q reserved for configured named session %s", ErrSessionAliasExists, alias, reserved)
 	}
 	return nil
 }
