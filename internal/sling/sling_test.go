@@ -2911,6 +2911,69 @@ func TestRestampWorkBeadRoutingCollapsesPoolInstanceResolvedViaResolveAgent(t *t
 	}
 }
 
+// TestRestampWorkBeadRoutingClearsStaleRoutedTo guards against a source bead
+// that was routed by a plain sling (gc.routed_to=<pool>) keeping that claim key
+// after a graph.v2 workflow wraps it: the stale key makes the pool count the
+// source and the workflow's executable step as two units of demand. The clear
+// is unconditional and leaves gc.run_target untouched.
+func TestRestampWorkBeadRoutingClearsStaleRoutedTo(t *testing.T) {
+	cfg := &config.City{
+		Rigs:   []config.Rig{{Name: "myrig"}},
+		Agents: []config.Agent{{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(4)}},
+	}
+	a, ok := agentutil.ResolveAgent(cfg, "myrig/polecat", agentutil.ResolveOpts{AllowPoolMembers: true})
+	if !ok {
+		t.Fatal("ResolveAgent(myrig/polecat) failed to resolve")
+	}
+
+	tests := []struct {
+		name          string
+		metadata      map[string]string
+		wantRunTarget string
+	}{
+		{name: "routed to the same target", metadata: map[string]string{beadmeta.RoutedToMetadataKey: "myrig/polecat"}},
+		{name: "routed to a different target", metadata: map[string]string{beadmeta.RoutedToMetadataKey: "otherrig/worker"}},
+		{name: "never routed"},
+		{
+			name: "run target is left alone",
+			metadata: map[string]string{
+				beadmeta.RoutedToMetadataKey:  "myrig/polecat",
+				beadmeta.RunTargetMetadataKey: "myrig/polecat",
+			},
+			wantRunTarget: "myrig/polecat",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			bead, err := store.Create(beads.Bead{Title: "work", Type: "task", Status: "open", Metadata: tt.metadata})
+			if err != nil {
+				t.Fatalf("store.Create: %v", err)
+			}
+
+			result := &SlingResult{}
+			restampWorkBeadRouting(SlingDeps{Store: store, Cfg: cfg}, bead.ID, a, result)
+
+			if len(result.MetadataErrors) != 0 {
+				t.Fatalf("MetadataErrors = %v, want none", result.MetadataErrors)
+			}
+			after, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("store.Get: %v", err)
+			}
+			if got := after.Metadata[beadmeta.ExecutionRoutedToMetadataKey]; got != "myrig/polecat" {
+				t.Fatalf("gc.execution_routed_to = %q, want myrig/polecat", got)
+			}
+			if got := after.Metadata[beadmeta.RoutedToMetadataKey]; got != "" {
+				t.Fatalf("gc.routed_to = %q after graph.v2 wrap, want cleared (stale pre-wrap route doubles pool demand)", got)
+			}
+			if got := after.Metadata[beadmeta.RunTargetMetadataKey]; got != tt.wantRunTarget {
+				t.Fatalf("gc.run_target = %q, want %q (restamp must not touch it)", got, tt.wantRunTarget)
+			}
+		})
+	}
+}
+
 func TestSlingAttachGraphFormulaEmitsCurrentExecutionFacts(t *testing.T) {
 	formulaDir := t.TempDir()
 	writeGraphV2ConvoyFormula(t, formulaDir)

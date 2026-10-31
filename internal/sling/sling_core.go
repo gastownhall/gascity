@@ -990,7 +990,10 @@ func validateBuiltInRouteStoreReachable(deps SlingDeps, beadID string, a config.
 // pool's tier-3 claim query and the drain engine's own dispatch are two
 // uncoordinated authorities -- neither checks the bead's Assignee/the other's
 // lock field, so stamping gc.routed_to there is a structural double-dispatch
-// hazard, not merely an observability fix. The existing ExecutionRoutedToKey
+// hazard, not merely an observability fix. The same write clears any
+// gc.routed_to the bead already carried (for example from a plain sling before
+// the wrap), so the workflow's executable step is the only demand unit. The
+// existing ExecutionRoutedToKey
 // (gc.execution_routed_to) is already read by the graphroute resolver, convoy
 // dispatch, dashboard orders feed, and dispatch engine. Apply
 // NormalizePoolRouteTarget to the computed target so slot-suffixed pool
@@ -1008,9 +1011,13 @@ func restampWorkBeadRouting(deps SlingDeps, beadID string, a config.Agent, resul
 	if target == "" {
 		return
 	}
-	if err := deps.Store.SetMetadata(beadID, beadmeta.ExecutionRoutedToMetadataKey, target); err != nil {
+	if err := deps.Store.SetMetadataBatch(beadID, map[string]string{
+		beadmeta.ExecutionRoutedToMetadataKey: target,
+		beadmeta.RoutedToMetadataKey:          "",
+	}); err != nil {
 		result.MetadataErrors = append(result.MetadataErrors,
-			fmt.Sprintf("setting %s on %s: %v", beadmeta.ExecutionRoutedToMetadataKey, beadID, err))
+			fmt.Sprintf("restamping routing on %s (%s=%s, clearing %s): %v",
+				beadID, beadmeta.ExecutionRoutedToMetadataKey, target, beadmeta.RoutedToMetadataKey, err))
 	}
 }
 
