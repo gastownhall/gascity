@@ -427,9 +427,15 @@ func (c *BinaryCheck) Run(_ *CheckContext) *CheckResult {
 
 	// Check version.
 	version, err := c.getVersion()
-	if err != nil {
-		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("found %s but could not determine version", path)
+	if err != nil || !deps.ValidVersion(version) {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("found %s but could not determine required version", path)
+		if err != nil {
+			r.Details = []string{err.Error()}
+		} else {
+			r.Details = []string{"version probe returned an unparseable version"}
+		}
+		r.FixHint = fmt.Sprintf("repair %s installation and rerun gc doctor (required version %s+)", c.binary, c.minVersion)
 		return r
 	}
 
@@ -3028,8 +3034,9 @@ func (c *DoltVersionCheck) Name() string { return "dolt-version" }
 
 // Run invokes `dolt version` and compares against the managed-Dolt minimum.
 func (c *DoltVersionCheck) Run(_ *CheckContext) *CheckResult {
-	r := &CheckResult{Name: c.Name()}
+	r := &CheckResult{Name: c.Name(), FixHint: "repair dolt installation and rerun gc doctor: https://docs.dolthub.com/introduction/installation"}
 	if c.skip || (c.cityPath != "" && !c.managedApplicable()) {
+		r.FixHint = ""
 		r.Status = StatusOK
 		r.Message = "skipped (file backend, external dolt endpoint, or GC_DOLT=skip)"
 		return r
@@ -3056,11 +3063,11 @@ func (c *DoltVersionCheck) Run(_ *CheckContext) *CheckResult {
 	out, err := getOutput()
 	if err != nil {
 		if errors.Is(err, exec.ErrNotFound) || strings.Contains(err.Error(), "executable file not found") {
-			r.Status = StatusWarning
+			r.Status = StatusError
 			r.Message = "dolt binary not in PATH"
 			return r
 		}
-		r.Status = StatusWarning
+		r.Status = StatusError
 		r.Message = fmt.Sprintf("invoke dolt version: %v", err)
 		return r
 	}
@@ -3078,11 +3085,12 @@ func (c *DoltVersionCheck) Run(_ *CheckContext) *CheckResult {
 		r.FixHint = "upgrade dolt: https://docs.dolthub.com/introduction/installation"
 		return r
 	case err != nil:
-		r.Status = StatusWarning
+		r.Status = StatusError
 		r.Message = fmt.Sprintf("parse dolt version: %v", err)
 		return r
 	}
 
+	r.FixHint = ""
 	r.Status = StatusOK
 	r.Message = fmt.Sprintf("dolt %s", info.Raw)
 	return r

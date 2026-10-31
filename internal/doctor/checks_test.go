@@ -794,8 +794,8 @@ func TestBinaryCheck_VersionUnknown(t *testing.T) {
 		return "", fmt.Errorf("parse error")
 	}, "")
 	r := c.Run(&CheckContext{})
-	if r.Status != StatusWarning {
-		t.Errorf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	if r.Status != StatusError {
+		t.Errorf("status = %d, want Error; msg = %s", r.Status, r.Message)
 	}
 }
 
@@ -4418,8 +4418,8 @@ func TestDoltVersionCheck_NotInstalled(t *testing.T) {
 	c := NewDoltVersionCheck()
 	c.versionOutput = func() (string, error) { return "", exec.ErrNotFound }
 	r := c.Run(&CheckContext{})
-	if r.Status != StatusWarning {
-		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
 	}
 	if !strings.Contains(r.Message, "not in PATH") {
 		t.Errorf("message = %q, want not-in-PATH text", r.Message)
@@ -4517,8 +4517,8 @@ func TestDoltVersionCheck_FreshManagedCityStillChecksLocalBinary(t *testing.T) {
 	if !called {
 		t.Fatal("versionOutput was not invoked for fresh managed city")
 	}
-	if r.Status != StatusWarning {
-		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
 	}
 	if !strings.Contains(r.Message, "not in PATH") {
 		t.Fatalf("message = %q, want not-in-PATH text", r.Message)
@@ -4543,11 +4543,11 @@ func TestDoltVersionCheck_Timeout(t *testing.T) {
 
 	c := NewDoltVersionCheck()
 	r := c.Run(&CheckContext{})
-	if r.Status != StatusWarning {
-		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
 	}
 	if !strings.Contains(r.Message, "timed out") {
-		t.Fatalf("message = %q, want timeout warning", r.Message)
+		t.Fatalf("message = %q, want timeout error", r.Message)
 	}
 }
 
@@ -4555,8 +4555,8 @@ func TestDoltVersionCheck_ParseError(t *testing.T) {
 	c := NewDoltVersionCheck()
 	c.versionOutput = func() (string, error) { return "not-a-version\n", nil }
 	r := c.Run(&CheckContext{})
-	if r.Status != StatusWarning {
-		t.Fatalf("status = %d, want Warning on parse error; msg = %s", r.Status, r.Message)
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error on parse error; msg = %s", r.Status, r.Message)
 	}
 }
 
@@ -4658,5 +4658,43 @@ func TestRigDoltServerCheck_NonDoltRigIsNotApplicable(t *testing.T) {
 	}
 	if !strings.Contains(r.Message, "not applicable") {
 		t.Fatalf("message = %q, want a not-applicable answer", r.Message)
+	}
+}
+
+// A dependency whose version cannot be verified must not establish health.
+func TestRequiredVersionFailuresBlockDoctor(t *testing.T) {
+	for _, tc := range []struct {
+		name, version string
+		err           error
+	}{
+		{name: "execution failure", err: errors.New("binary loader failed")},
+		{name: "empty output"},
+		{name: "malformed high version", version: "999.bad"},
+		{name: "unbounded components", version: "999.1.2.3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewVersionedBinaryCheck("bd", "", func(string) (string, error) { return "/tools/bd", nil }, "1.3.0", func() (string, error) { return tc.version, tc.err }, "")
+			r := c.Run(&CheckContext{})
+			if r.Status != StatusError || r.Severity != SeverityBlocking || r.FixHint == "" {
+				t.Fatalf("unverifiable required version: %+v", r)
+			}
+			var d Doctor
+			d.Register(c)
+			report := d.RunCollect(&CheckContext{}, false)
+			if report.BlockingFailed != 1 {
+				t.Fatalf("unverifiable dependency did not block doctor: %+v", report)
+			}
+		})
+	}
+}
+
+func TestBinaryCheck_AcceptsSupportedVersionFormats(t *testing.T) {
+	for _, version := range []string{"1.3.2", "v1.3.2", "V1.3.2", " 1.3.2 ", "1.3", "1.3.2+build.5", "1.3.2-rc.1"} {
+		t.Run(version, func(t *testing.T) {
+			c := NewVersionedBinaryCheck("bd", "", func(string) (string, error) { return "/tools/bd", nil }, "1.3.0", func() (string, error) { return version, nil }, "")
+			if r := c.Run(&CheckContext{}); r.Status != StatusOK {
+				t.Fatalf("supported version rejected: %+v", r)
+			}
+		})
 	}
 }
