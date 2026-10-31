@@ -148,7 +148,8 @@ var bdSplitAllowlist = map[string]bdSplitCommand{
 	"dolt stop":    {why: "stops the scope's server"},
 	"dolt push":    {why: "pushes to the remote; writes nothing into the store"},
 	"dolt commit":  {why: "commits the working set already written"},
-	"config set":   {judge: judgeBdConfigSet, why: "configuration, not bead rows; only the keys in bdSplitConfigSetKeys"},
+	"config set":   {judge: judgeBdConfigKey, why: "configuration, not bead rows; only the keys bdSplitConfigKeyAdmitted admits"},
+	"config unset": {judge: judgeBdConfigKey, why: "removes a configuration row; only the keys config set may write"},
 	"init": {
 		judge: judgeBdInit,
 		only:  []string{"--prefix", "--non-interactive", "--skip-hooks", "--skip-agents", "--init-if-missing", "--recreate-missing"},
@@ -252,7 +253,7 @@ var bdSplitRefusals = map[string]bdSplitRefusal{
 	"events":            {"not vetted", bdSplitAltRequest},
 	"audit":             {"not vetted", bdSplitAltRequest},
 	"kv":                {"not vetted", bdSplitAltRequest},
-	"config":            {"configuration changes beyond get/set/list/show are not vetted", bdSplitAltRequest},
+	"config":            {"configuration changes beyond get/set/unset/list/show are not vetted", bdSplitAltRequest},
 	"remember":          {"not vetted", bdSplitAltRequest},
 	"forget":            {"not vetted", bdSplitAltRequest},
 	"memories":          {"not vetted", bdSplitAltRequest},
@@ -369,16 +370,41 @@ var bdSplitReviewedPathFlags = map[string]string{
 	"--proxied-server":   "init server mode (not vetted for init)",
 }
 
-// bdSplitConfigSetKeys are the config keys `gc bd config set` may write on a
-// split city. Every other key is refused: storage-class.*, routing.*, dolt.*,
-// backup.*, sync.*, federation.* and the like redirect writes or change what
-// create does.
+// bdSplitConfigSetKeys are the config keys `gc bd config set` and `gc bd
+// config unset` may write on a split city, besides every key under a
+// namespace in bdSplitConfigNamespaces. Every other key is refused:
+// storage-class.*, routing.*, dolt.*, backup.*, sync.*, federation.* and the
+// like redirect writes or change what create does.
 var bdSplitConfigSetKeys = map[string]string{
 	"types.custom": "the custom bead types the store accepts (troubleshooting.md)",
 	"types.infra":  "which types list hides without --include-infra (troubleshooting.md)",
 	// The core reaper purges and prunes a scope that holds op rows only once
 	// its database names op here (reaper.sh op_rows_guard).
 	"types.retained": "the types a sweep without --retain-ids keeps, so closed op rows are not deleted untombstoned",
+}
+
+// bdSplitConfigNamespaces are the key prefixes under which `gc bd config set`
+// and `gc bd config unset` may write any key on a split city.
+var bdSplitConfigNamespaces = map[string]string{
+	// bd documents custom.* as the namespace for user-defined integration
+	// keys and stores them in the database's config table. No bd command
+	// reads them, and neither class routing nor create does.
+	"custom.": "user-defined integration keys: stored in the store's config table and read by no class route and no create",
+}
+
+// bdSplitConfigKeyAdmitted reports whether gc bd may set or unset key on a
+// split city: one of bdSplitConfigSetKeys, or a key under (never equal to) a
+// namespace in bdSplitConfigNamespaces.
+func bdSplitConfigKeyAdmitted(key string) bool {
+	if _, ok := bdSplitConfigSetKeys[key]; ok {
+		return true
+	}
+	for prefix := range bdSplitConfigNamespaces {
+		if len(key) > len(prefix) && strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // bdSplitRefusalFor returns the decision for a path that is not allowlisted:
