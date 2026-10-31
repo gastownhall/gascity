@@ -1768,6 +1768,11 @@ type SessionConfig struct {
 	// this pattern go to K8s; all others stay local (tmux).
 	// Overridden by the GC_HYBRID_REMOTE_MATCH env var if set.
 	RemoteMatch string `toml:"remote_match,omitempty"`
+	// ProgramStatus is the city switch for OSC 7501 program status. "off"
+	// (the default) changes nothing. "shadow" arms capture on declared
+	// providers ([providers.<p>.program_status]) and compares readings
+	// without changing any decision. "on" lets valid readings decide.
+	ProgramStatus string `toml:"program_status,omitempty" jsonschema:"enum=off,enum=shadow,enum=on,default=off"`
 }
 
 // durationOr parses raw as a Go duration, returning def when raw is empty or
@@ -5140,6 +5145,9 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	if err := validateOpsModes(cfg.Ops); err != nil {
+		return nil, err
+	}
+	if err := validateProgramStatus(&cfg); err != nil {
 		return nil, err
 	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class
