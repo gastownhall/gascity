@@ -290,6 +290,7 @@ func newOrderSweepTrackingCmd(stdout, stderr io.Writer) *cobra.Command {
 	dryRun := false
 	quiet := false
 	confirm := false
+	maxDelete := 0
 	cmd := &cobra.Command{
 		Use:   "sweep-tracking [order ...]",
 		Short: "Close stale and prune closed order-tracking beads",
@@ -302,6 +303,9 @@ Closed order-tracking history is deleted after
 always retaining at least the latest 10 closed tracking beads per order.
 The manual command runs to completion; controller startup and watchdog sweeps
 use bounded cleanup to avoid spending an unbounded tick on stale work.
+--max-delete caps how many closed tracking beads one run deletes; the run then
+exits 0 and the next run continues with what is left. The cap counts
+deletions only; it does not bound how long a run takes.
 
 Use --include-wisps for operator recovery of abandoned order-run wisp
 subtrees whose open descendants are also older than --stale-after. Pass one
@@ -314,7 +318,11 @@ proceed. This guard prevents accidental mass-deletes without an explicit
 operator acknowledgement.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdOrderSweepTrackingWithOptions(staleAfter, includeWisps, dryRun, quiet, confirm, args, stdout, stderr) != 0 {
+			if maxDelete < 0 {
+				fmt.Fprintln(stderr, "gc order sweep-tracking: --max-delete must not be negative") //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			if cmdOrderSweepTrackingWithOptions(staleAfter, includeWisps, dryRun, quiet, confirm, maxDelete, args, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -330,6 +338,7 @@ operator acknowledgement.`,
 	// construction time, which would make docs/reference/cli.md regenerate
 	// differently depending on the generator's environment.
 	cmd.Flags().BoolVar(&confirm, "confirm", false, fmt.Sprintf("confirm bulk deletion when eligible count > GC_BULK_DELETE_CONFIRM_THRESHOLD (default %d)", defaultBulkDeleteConfirmThreshold))
+	cmd.Flags().IntVar(&maxDelete, "max-delete", 0, "delete at most this many closed order-tracking beads in this run (0 = no limit)")
 	return cmd
 }
 
@@ -1936,7 +1945,9 @@ func bulkDeleteConfirmThreshold() int {
 	return defaultBulkDeleteConfirmThreshold
 }
 
-func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dryRun, quiet, confirm bool, orderNames []string, stdout, stderr io.Writer) int {
+// cmdOrderSweepTrackingWithOptions runs gc order sweep-tracking. maxDelete
+// caps the closed-history deletions of one run; <= 0 means no cap.
+func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dryRun, quiet, confirm bool, maxDelete int, orderNames []string, stdout, stderr io.Writer) int {
 	if staleAfter <= 0 {
 		fmt.Fprintln(stderr, "gc order sweep-tracking: --stale-after must be positive") //nolint:errcheck // best-effort stderr
 		return 1
@@ -1982,6 +1993,9 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 	// point stale-close has already run, so normal reporting still happens and
 	// the non-zero exit is deferred to the end of the function.
 	confirmGateBlocked := false
+	// Set when --max-delete stopped the retention sweep with eligible beads
+	// still left; the next run continues from them.
+	retentionCapped := false
 	if dryRun {
 		result, sweepErr = sweepStaleOrderTrackingAcrossStoresDryRun(stores, wispStore, now, staleAfter, onlyOrders, includeWisps)
 	} else {
@@ -2010,8 +2024,11 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 				eligible, threshold)
 			confirmGateBlocked = true
 		default:
-			retentionResult, retentionErr = sweepClosedOrderTrackingRetentionAcrossStores(stores, now, retentionPolicy, onlyOrders)
+			retentionResult, retentionErr = sweepClosedOrderTrackingRetentionAcrossStores(stores, now, retentionPolicy, onlyOrders, maxDelete)
 			result.trackingDeleted = retentionResult.deleted
+			if maxDelete > 0 && retentionResult.deleted >= maxDelete && eligible > retentionResult.deleted {
+				retentionCapped = true
+			}
 		}
 	}
 	if err := errors.Join(openErr, sweepErr, retentionErr); err != nil {
@@ -2027,6 +2044,9 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 	if !quiet {
 		verb := "closed"
 		deletedClause := fmt.Sprintf(", deleted %d closed order-tracking bead(s)", result.trackingDeleted)
+		if retentionCapped {
+			deletedClause += fmt.Sprintf(" (stopped at --max-delete %d; the rest is left for the next run)", maxDelete)
+		}
 		if dryRun {
 			verb = "would close"
 			deletedClause = ""
