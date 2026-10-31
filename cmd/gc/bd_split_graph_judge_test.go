@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -70,7 +71,8 @@ func writeGraphPlan(t *testing.T, body string) string {
 
 // TestGcBdSplitCreateGraphAdmitsAWorkOnlyPlan: a graph plan whose every node
 // is work-class and whose every edge is plan-local is forwarded to bd on a
-// split city, live and as a dry run, argv unchanged.
+// split city, live and as a dry run, with --graph pointed at a private copy of
+// the plan judged (bd_split_judged_files.go) and the argv otherwise unchanged.
 func TestGcBdSplitCreateGraphAdmitsAWorkOnlyPlan(t *testing.T) {
 	scope := writeGraphPlan(t, graphJudgeWorkOnlyPlan)
 	for _, inventory := range graphJudgeInventories {
@@ -84,8 +86,15 @@ func TestGcBdSplitCreateGraphAdmitsAWorkOnlyPlan(t *testing.T) {
 				t.Errorf("%s: gc bd %s refused: %q", inventory, strings.Join(argv, " "), g.refusal)
 				continue
 			}
-			if !slices.Equal(g.args, argv) {
-				t.Errorf("%s: gc bd %s forwarded %q, want argv unchanged", inventory, strings.Join(argv, " "), g.args)
+			read := bdReadsFile(t, bdflags.InventoryByName(inventory), scope, g.args, "--graph", "")
+			if len(g.args) != len(argv)+1 || !slices.Equal(g.args[:len(argv)], argv) || g.args[len(argv)] != "--graph="+read || read == filepath.Join(scope, "plan.json") {
+				t.Errorf("%s: gc bd %s forwarded %q, want the argv with --graph pointed at a private copy", inventory, strings.Join(argv, " "), g.args)
+			}
+			if got, err := os.ReadFile(read); err != nil || string(got) != graphJudgeWorkOnlyPlan {
+				t.Errorf("%s: gc bd %s: bd reads %q (err %v), want the plan judged", inventory, strings.Join(argv, " "), got, err)
+			}
+			if g.cleanup != nil {
+				g.cleanup()
 			}
 		}
 	}
@@ -106,6 +115,7 @@ func TestGcBdSplitCreateGraphJudgesEveryNode(t *testing.T) {
 		{"numeric gc.root_bead_id", `{"nodes":[` + kick + `,{"key":"c1","title":"c","metadata":{"gc.root_bead_id":7}}]}`, true, "graph-class"},
 		{"duplicate metadata objects merge", `{"nodes":[{"key":"a","title":"a","metadata":{"gc.root_bead_id":"x"},"metadata":{"note":"y"}}]}`, true, "graph-class"},
 		{"JSON null gc.root_bead_id, graph as a native Dolt store reads it", `{"nodes":[` + kick + `,{"key":"c1","title":"c","metadata":{"gc.root_bead_id":null}}]}`, true, "native Dolt store"},
+		{"JSON null on two class keys names the deciding one", `{"nodes":[{"key":"a","title":"a","metadata":{"gc.kind":null,"gc.root_bead_id":null}}]}`, true, "gc.root_bead_id differently"},
 		{"JSON null gc.root_bead_id beside a spliced metadata_ref", `{"nodes":[{"key":"a","title":"a"},{"key":"b","title":"b","metadata":{"gc.root_bead_id":null},"metadata_refs":{"kickoff_id":"a"}}]}`, true, "native Dolt store"},
 		{"JSON null session_id on an own-session gate", `{"nodes":[{"key":"a","title":"a","type":"gate","labels":["session:null"],"metadata":{"session_id":null}}]}`, true, "sessions-class"},
 		{"case-variant Labels", `{"nodes":[{"key":"a","title":"a","Labels":["gc:session"]}]}`, true, "sessions-class"},
@@ -117,7 +127,15 @@ func TestGcBdSplitCreateGraphJudgesEveryNode(t *testing.T) {
 		{"metadata_refs naming a minted id a label could name", `{"nodes":[{"key":"s","title":"s"},{"key":"w","title":"w","type":"gate","labels":["session:demo-7"],"metadata_refs":{"session_id":"s"}}]}`, true, "sessions-class"},
 		{"raw spelling only", `{"nodes":[{"key":"g","title":"g","type":"gate","labels":["session:S "],"metadata":{"session_id":"S "}}]}`, true, "sessions-class"},
 		{"plan id the class binding holds, named by an edge", `{"nodes":[{"key":"a","title":"a","id":"relic-1"},{"key":"b","title":"b"}],"edges":[{"from_key":"b","to_id":"relic-1"}]}`, true, "class binding holds a bead with id relic-1"},
-		{"padded id names no plan node", `{"nodes":[{"key":"a","title":"a","id":"demo-x1"},{"key":"b","title":"b"}],"edges":[{"from_key":"b","to_id":" demo-x1"}]}`, true, "never written"},
+		{"padded id names no plan node", `{"nodes":[{"key":"a","title":"a","id":"demo-x1"},{"key":"b","title":"b"}],"edges":[{"from_key":"b","to_id":" demo-x1"}]}`, true, "whitespace"},
+		{"padded to_id naming a work bead", `{"nodes":[{"key":"a","title":"a"}],"edges":[{"from_key":"a","to_id":" demo-1","type":"blocks"}]}`, true, "whitespace"},
+		{"padded from_id naming a work bead", `{"nodes":[{"key":"a","title":"a"}],"edges":[{"from_id":"demo-1 ","to_key":"a"}]}`, true, "whitespace"},
+		{"whitespace-only to_id", `{"nodes":[{"key":"a","title":"a"}],"edges":[{"from_key":"a","to_id":" "}]}`, true, "whitespace"},
+		{"padded parent_id naming a work bead", `{"nodes":[{"key":"a","title":"a","parent_id":"\tdemo-2"}]}`, true, "whitespace"},
+		{"padded deps target naming a work bead", `{"nodes":[{"key":"a","title":"a","deps":[{"target":"demo-1 "}]}]}`, true, "whitespace"},
+		{"whitespace-only deps target", `{"nodes":[{"key":"a","title":"a","deps":[{"target":" "}]}]}`, true, "whitespace"},
+		{"padded spawner_id naming a work bead", `{"nodes":[{"key":"a","title":"a"}],"edges":[{"from_key":"a","to_id":"demo-1","type":"waits-for","spawner_id":" demo-1"}]}`, true, "whitespace"},
+		{"padded thread_id naming a work bead", `{"nodes":[{"key":"a","title":"a"},{"key":"b","title":"b"}],"edges":[{"from_key":"a","to_key":"b","type":"replies-to","thread_id":" demo-1"}]}`, true, "whitespace"},
 		{"reserved explicit id", `{"nodes":[{"key":"a","title":"a","id":"gcg-abc"}]}`, true, "reserved namespace"},
 		{"explicit id the class binding holds", `{"nodes":[{"key":"a","title":"a","id":"relic-1"}]}`, true, "class binding holds a bead with id relic-1"},
 		{"a second node's id the class binding holds", `{"nodes":[{"key":"a","title":"a","id":"demo-9"},{"key":"b","title":"b","id":"relic-1"}]}`, true, "relic-1"},
@@ -139,6 +157,7 @@ func TestGcBdSplitCreateGraphJudgesEveryNode(t *testing.T) {
 		{"edge to a work bead", `{"nodes":[{"key":"a","title":"a"}],"edges":[{"from_key":"a","to_id":"demo-1"}]}`, false, ""},
 		{"parent_id naming a work bead", `{"nodes":[{"key":"a","title":"a","parent_id":"demo-2"}]}`, false, ""},
 		{"deps target that is a plan key", `{"nodes":[{"key":"a","title":"a"},{"key":"b","title":"b","deps":[{"target":"a"}]}]}`, false, ""},
+		{"deps target that is a padded plan key", `{"nodes":[{"key":" a","title":"a"},{"key":"b","title":"b","deps":[{"target":" a"}]}]}`, false, ""},
 		{"external: dep", `{"nodes":[{"key":"a","title":"a","deps":[{"target":"external:p:cap"}]}]}`, false, ""},
 		{"free explicit id", `{"nodes":[{"key":"a","title":"a","id":"demo-9"}]}`, false, ""},
 		{"deps target naming a plan id", `{"nodes":[{"key":"a","title":"a","id":"demo-x1"},{"key":"b","title":"b","deps":[{"target":"demo-x1"}]}]}`, false, ""},
@@ -244,10 +263,29 @@ func TestGcBdSplitCreateGraphFlagEdges(t *testing.T) {
 	}
 }
 
+// graphPlanPipe returns the /dev/fd path of a pipe holding body, as a shell
+// passes `<(...)`: it can be read once.
+func graphPlanPipe(t *testing.T, body string) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	if _, err := w.WriteString(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("/dev/fd/%d", r.Fd())
+}
+
 // TestGcBdSplitCreateGraphEndToEnd runs gc bd create --graph through doBd on a
-// split city: a work-only plan reaches bd unchanged, and a mixed plan is
-// refused before bd starts, with the node and class named and a gc_bd.refused
-// event recorded.
+// split city: a work-only plan, in a file or on a pipe, reaches bd as a
+// private copy of the plan judged, removed when gc bd returns, and a mixed
+// plan, or a graph plan on a pipe, is refused before bd starts, with the node
+// and class named and a gc_bd.refused event recorded.
 func TestGcBdSplitCreateGraphEndToEnd(t *testing.T) {
 	capture, cityDir := bdSQLRefusalCityDir(t, bdSQLRefusalSplitStorage)
 	dir := t.TempDir()
@@ -255,32 +293,47 @@ func TestGcBdSplitCreateGraphEndToEnd(t *testing.T) {
 	if err := os.WriteFile(work, []byte(graphJudgeWorkOnlyPlan), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	var stdout, stderr bytes.Buffer
-	if code := doBd([]string{"create", "--graph", work, "--json"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("work-only plan: exit %d; stderr=%q", code, stderr.String())
-	}
-	data, err := os.ReadFile(capture)
-	if err != nil || !strings.Contains(string(data), "create --graph "+work+" --json") {
-		t.Fatalf("bd did not receive the plan unchanged: %q (err %v)", data, err)
-	}
-	if err := os.Remove(capture); err != nil {
-		t.Fatal(err)
+	// A pipe reaches bd only when the node-by-node judge's read is the one
+	// that drains it.
+	for _, plan := range []string{work, graphPlanPipe(t, graphJudgeWorkOnlyPlan)} {
+		var stdout, stderr bytes.Buffer
+		if code := doBd([]string{"create", "--graph", plan, "--json"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("work-only plan %s: exit %d; stderr=%q", plan, code, stderr.String())
+		}
+		data, err := os.ReadFile(capture)
+		_, copyPath, ok := strings.Cut(string(data), "create --graph "+plan+" --json --graph=")
+		copyPath, _, _ = strings.Cut(copyPath, "\n")
+		if err != nil || !ok || copyPath == "" || copyPath == plan {
+			t.Fatalf("bd was not pointed at a private copy of the plan %s: %q (err %v)", plan, data, err)
+		}
+		if _, err := os.Stat(copyPath); !os.IsNotExist(err) {
+			t.Errorf("the copy %s outlived gc bd (stat err %v)", copyPath, err)
+		}
+		if err := os.Remove(capture); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	mixed := filepath.Join(dir, "mixed.json")
 	if err := os.WriteFile(mixed, []byte(`{"nodes":[{"key":"root","title":"r"},{"key":"s","title":"s","labels":["gc:session"],"parent_key":"root"}]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	stdout.Reset()
-	stderr.Reset()
-	if code := doBd([]string{"create", "--graph", mixed}, &stdout, &stderr); code != 1 {
-		t.Fatalf("mixed plan: exit %d, want 1; stderr=%q", code, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), `node "s"`) || !strings.Contains(stderr.String(), "sessions-class") {
-		t.Errorf("mixed plan refusal does not name the node and class: %q", stderr.String())
-	}
-	if _, err := os.Stat(capture); !os.IsNotExist(err) {
-		t.Fatalf("bd ran for a refused plan (stat err %v)", err)
+	for _, c := range []struct{ plan, node, class string }{
+		{mixed, `node "s"`, "sessions-class"},
+		// The relocated-class guard leaves a pipe unread, so the judge is
+		// the one that refuses a graph plan on it.
+		{graphPlanPipe(t, `{"nodes":[{"key":"root","title":"r","metadata":{"gc.root_bead_id":"gcg-abc123"}}]}`), `node "root"`, "graph-class"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := doBd([]string{"create", "--graph", c.plan}, &stdout, &stderr); code != 1 {
+			t.Fatalf("plan %s: exit %d, want 1; stderr=%q", c.plan, code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), c.node) || !strings.Contains(stderr.String(), c.class) {
+			t.Errorf("plan %s: the refusal does not name the %s and %s: %q", c.plan, c.node, c.class, stderr.String())
+		}
+		if _, err := os.Stat(capture); !os.IsNotExist(err) {
+			t.Fatalf("bd ran for refused plan %s (stat err %v)", c.plan, err)
+		}
 	}
 	events, err := os.ReadFile(filepath.Join(cityDir, ".gc", "events.jsonl"))
 	if err != nil {

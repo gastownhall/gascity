@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 
@@ -77,15 +75,12 @@ var (
 )
 
 // judgeBdCreateGraph judges `create --graph <planPath>` node by node and
-// forwards the argv unchanged when every node keeps its class and every edge
-// stays inside the work stores; bd re-reads the plan itself.
+// admits the write when every node keeps its class and every edge stays inside
+// the work stores. The plan is read through readJudgedFile, so bd is handed a
+// private copy of exactly the plan judged.
 func judgeBdCreateGraph(in bdClassGuardInput, planPath string) bdClassGuard {
 	who := fmt.Sprintf("gc bd %s --graph %s", in.path, planPath)
-	path := planPath
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(in.scopeRoot, path)
-	}
-	data, err := os.ReadFile(path)
+	data, err := in.readJudgedFile("--graph", "", planPath)
 	if err != nil {
 		return in.refuse("%s: refused on this split city: gc reads the plan to judge each bead it would mint, and could not (%v). Nothing was written.", who, err)
 	}
@@ -163,6 +158,13 @@ func judgeBdCreateGraph(in bdClassGuardInput, planPath string) bdClassGuard {
 		for _, id := range []string{e.FromID, e.ToID, e.SpawnerID, e.ThreadID} {
 			idNamed(id)
 		}
+	}
+	// bd writes an id-named endpoint exactly as spelled, while
+	// checkEdgeEndpoints looks it up trimmed, so a padded endpoint would pass
+	// as the bead its trimmed spelling names and bd would write an edge to no
+	// bead.
+	if i := slices.IndexFunc(endpoints, func(id string) bool { return id != strings.TrimSpace(id) }); i >= 0 {
+		return in.refuse("%s: refused on this split city: the endpoint %q has leading or trailing whitespace, which bd keeps as part of the id, so the edge would name no bead. Name the bead by its exact id. Nothing was written.", who, endpoints[i])
 	}
 	// The node ids are judged after every node's static class checks, so a
 	// plan those refuse asks the binding nothing.

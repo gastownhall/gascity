@@ -227,19 +227,27 @@ func (in bdClassGuardInput) bdMetadataReadings(value string) ([]map[string]strin
 
 // bdMetadataReadingsNote follows a class-flip refusal that reading i of a
 // write's metadata (bdMetadataReadings) produced and the bd CLI's reading,
-// reading 0, did not: it names the class-deciding key the two read
-// differently. It is "" for reading 0 and when the readings agree on every
-// such key.
+// reading 0, did not: it names every class-deciding key the two read
+// differently, since any of them may be the one that flips the class. It is
+// "" for reading 0 and when the readings agree on every such key.
 func bdMetadataReadingsNote(readings []map[string]string, i int) string {
 	if i <= 0 || i >= len(readings) {
 		return ""
 	}
+	var differ []string
 	for _, k := range coordclass.ClassifierMetadataKeys() {
 		if cli, other := readings[0][k], readings[i][k]; cli != other {
-			return fmt.Sprintf(" gc judges metadata as each store of this city reads it back, and they read %s differently (%q as the bd CLI reads it, %q as a native Dolt store reads it): write it as a JSON string, or leave it out.", k, cli, other)
+			differ = append(differ, fmt.Sprintf("%s differently (%q as the bd CLI reads it, %q as a native Dolt store reads it)", k, cli, other))
 		}
 	}
-	return ""
+	switch len(differ) {
+	case 0:
+		return ""
+	case 1:
+		return fmt.Sprintf(" gc judges metadata as each store of this city reads it back, and they read %s: write it as a JSON string, or leave it out.", differ[0])
+	default:
+		return fmt.Sprintf(" gc judges metadata as each store of this city reads it back, and they read %s: write each as a JSON string, or leave it out.", strings.Join(differ, " and "))
+	}
 }
 
 // judgeBdCreate classifies the bead `create` / `q` would mint and checks the

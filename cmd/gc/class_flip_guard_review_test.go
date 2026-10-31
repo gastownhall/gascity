@@ -225,6 +225,10 @@ func TestGcBdClassGuardJudgesMetadataAsEveryStoreReadsIt(t *testing.T) {
 			guardCase{"create null root", []string{"create", "--title", "x", "--metadata", `{"gc.root_bead_id":null}`}, beads.Bead{}, bdReadNotFound, true, "graph-class", enterprise},
 			guardCase{"create null root names the reading", []string{"create", "--title", "x", "--metadata", `{"gc.root_bead_id":null}`}, beads.Bead{}, bdReadNotFound, true, `"null" as a native Dolt store reads it`, enterprise},
 			guardCase{"update null root", []string{"update", "demo-1", "--metadata", `{"gc.root_bead_id":null}`}, guardTask, bdReadFound, true, `"null" as a native Dolt store reads it`, enterprise},
+			// gc.kind sorts first and is read differently too, but only
+			// gc.root_bead_id decides the class, so the note names each key.
+			guardCase{"create null on two class keys names the deciding one", []string{"create", "--title", "x", "--metadata", `{"gc.kind":null,"gc.root_bead_id":null}`}, beads.Bead{}, bdReadNotFound, true, "gc.root_bead_id differently", enterprise},
+			guardCase{"update null on two class keys names the deciding one", []string{"update", "demo-1", "--metadata", `{"gc.kind":null,"gc.root_bead_id":null}`}, guardTask, bdReadFound, true, "gc.root_bead_id differently", enterprise},
 			guardCase{"create null session_id on an own-session gate", []string{"create", "--title", "x", "--type", "gate", "--labels", "session:null", "--metadata", `{"session_id":null}`}, beads.Bead{}, bdReadNotFound, true, "sessions-class", enterprise},
 			guardCase{"update null session_id on an own-session gate", []string{"update", "demo-1", "--metadata", `{"session_id":null}`}, gate, bdReadFound, true, "sessions-class", enterprise},
 			guardCase{"null on keys no reading sets", []string{"create", "--title", "x", "--metadata", `{"gc.kind":null,"gc.formula_contract":null}`}, beads.Bead{}, bdReadNotFound, false, "", enterprise},
@@ -289,6 +293,9 @@ func TestGcBdImportJudgesMetadataAsEveryStoreReadsIt(t *testing.T) {
 		}
 	}
 	holds := workStoreClassHolds(splitGuardTestCity())
+	if _, problem := splitBdImportRows([]byte(`{"id":"demo-6","title":"x","issue_type":"task","metadata":{"gc.kind":null,"gc.root_bead_id":null}}`+"\n"), holds); !strings.Contains(problem, "gc.root_bead_id differently") {
+		t.Errorf("a row with nulls on two class keys: problem %q does not name gc.root_bead_id, the key that decides its class", problem)
+	}
 	split, problem := splitBdImportRows([]byte(`{"id":"demo-8","title":"x","issue_type":"task","metadata":{"gc.kind":null}}`+"\n"), holds)
 	if problem != "" || !slices.Equal(split.keptIDs, []string{"demo-8"}) {
 		t.Errorf("a null on a key no reading sets: kept %v, problem %q; want demo-8 kept", split.keptIDs, problem)
