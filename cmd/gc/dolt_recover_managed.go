@@ -30,6 +30,15 @@ type managedDoltRecoveryOps struct {
 	start            func(cityPath, host, port, user, logLevel string, timeout time.Duration) (managedDoltStartReport, error)
 	publish          func(cityPath string) error
 	failedCleanup    func(cityPath string, pid, port int, cause error) error
+
+	// classifyUnresponsive reports the managed PID when it is alive, owned,
+	// and its port still accepts TCP connections.
+	classifyUnresponsive func(cityPath, host, port string) (int, bool)
+	// now is the clock for the unresponsive window; nil means time.Now.
+	now func() time.Time
+	// unresponsiveRestartAfter is how long a live server may stay
+	// unresponsive before recovery stops it; zero stops on the first failure.
+	unresponsiveRestartAfter time.Duration
 }
 
 func defaultManagedDoltRecoveryOps() managedDoltRecoveryOps {

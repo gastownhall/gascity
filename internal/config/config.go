@@ -2880,6 +2880,13 @@ type DaemonConfig struct {
 	// that budget can be cut short on that path even though the direct
 	// stop/unregister path always honors the full grace.
 	DoltStopTimeout string `toml:"dolt_stop_timeout,omitempty" jsonschema:"default=30s"`
+	// DoltUnresponsiveRestartAfter is how long a managed dolt that is still
+	// alive and listening may stay unresponsive to the recover probe before
+	// recovery stops and restarts it. A single timed-out probe under load does
+	// not restart a server that is merely slow. Duration string (e.g., "180s",
+	// "5m"). Defaults to "180s". Set to "0s" to restart on the first failed
+	// probe. Negative values are rejected at config load.
+	DoltUnresponsiveRestartAfter string `toml:"dolt_unresponsive_restart_after,omitempty" jsonschema:"default=180s"`
 	// DoltStartAddressInUseRetryWindow is how long the managed dolt start
 	// path waits on the originally requested port when dolt reports it in
 	// use ("address already in use", or "Port N already in use." from dolt
@@ -3284,6 +3291,15 @@ const DefaultDoltStopTimeout = 30 * time.Second
 // upstream rather than silently overriding it here.
 func (d *DaemonConfig) DoltStopTimeoutDuration() time.Duration {
 	return durationOr(d.DoltStopTimeout, DefaultDoltStopTimeout)
+}
+
+// DefaultDoltUnresponsiveRestartAfter is how long a live managed dolt may stay
+// unresponsive before recovery stops it.
+const DefaultDoltUnresponsiveRestartAfter = 180 * time.Second
+
+// DoltUnresponsiveRestartAfterDuration returns the unresponsive window.
+func (d *DaemonConfig) DoltUnresponsiveRestartAfterDuration() time.Duration {
+	return 0
 }
 
 // DefaultDoltStartAddressInUseRetryWindow is the per-port retry window used

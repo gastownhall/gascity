@@ -13880,6 +13880,56 @@ func TestHealthBeadsProviderAllowsRecoverAfterCooldown(t *testing.T) {
 	}
 }
 
+// The recover cooldown must hold across processes: every `gc` invocation that
+// reaches this path (the beads-health order runs a fresh process each tick)
+// starts with an empty in-memory map.
+func TestHealthBeadsProviderBacksOffSecondRecoverAcrossProcesses(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMinimalCityToml(t, cityPath)
+	opsFile := writeBreakerAwarePreflightFakes(t, cityPath, "unhealthy")
+
+	cityKey := normalizePathForCompare(cityPath)
+	t.Cleanup(func() { lastBeadsProviderRecover.Delete(cityKey) })
+
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	now := t0
+	prevNow, prevCD := providerRecoverNow, providerRecoverCooldown
+	providerRecoverNow = func() time.Time { return now }
+	providerRecoverCooldown = func() time.Duration { return 30 * time.Second }
+	t.Cleanup(func() {
+		providerRecoverNow, providerRecoverCooldown = prevNow, prevCD
+	})
+
+	_ = healthBeadsProvider(cityPath)
+
+	// A new process: nothing in memory, 5s later.
+	lastBeadsProviderRecover.Delete(cityKey)
+	now = t0.Add(5 * time.Second)
+	_ = healthBeadsProvider(cityPath)
+
+	ops, readErr := os.ReadFile(opsFile)
+	if readErr != nil {
+		t.Fatalf("read provider ops: %v", readErr)
+	}
+	got := strings.Fields(strings.TrimSpace(string(ops)))
+	if h, r := countOps(got, "health", "recover"); h < 2 || r != 1 {
+		t.Fatalf("provider ops = %v; want health>=2 and recover==1 (cooldown persisted across processes)", got)
+	}
+
+	// And a new process past the cooldown may recover again.
+	lastBeadsProviderRecover.Delete(cityKey)
+	now = t0.Add(60 * time.Second)
+	_ = healthBeadsProvider(cityPath)
+	ops, readErr = os.ReadFile(opsFile)
+	if readErr != nil {
+		t.Fatalf("read provider ops: %v", readErr)
+	}
+	got = strings.Fields(strings.TrimSpace(string(ops)))
+	if _, r := countOps(got, "health", "recover"); r != 2 {
+		t.Fatalf("provider ops = %v; want recover==2 once the persisted cooldown has elapsed", got)
+	}
+}
+
 func countOps(ops []string, names ...string) (int, int) {
 	counts := make(map[string]int, len(names))
 	for _, op := range ops {
