@@ -321,6 +321,10 @@ func newReconcilerTestEnv(t testing.TB) *reconcilerTestEnv {
 		city:  t.TempDir(),
 		stops: &asyncStartTracker{},
 	}
+	// The staged-handoff release reads briefs through the mail handle; the
+	// default is the co-resident case, and a test that splits the classes
+	// appends its own withHandoffMailStore.
+	env.startOptions = append(env.startOptions, withHandoffMailStore(beads.MailStore{Store: env.store}))
 	// The drain-ack's async stops finish before the city is removed. The wait
 	// is unbounded: each stop ends by its own confirm-dead bound
 	// (drainAckStopConfirmDeadTimeout, bound at queue time), and a wait

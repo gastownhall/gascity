@@ -147,6 +147,9 @@ func TestFailedSelfHandoffRemainsProvisionalAndAuditable(t *testing.T) {
 			if !strings.Contains(stderr.String(), test.err.Error()) {
 				t.Fatalf("stderr = %q, want restart failure %q", stderr.String(), test.err)
 			}
+			if strings.Contains(strings.ToLower(stderr.String()), "sent mail") || !strings.Contains(stderr.String(), message.ID) {
+				t.Fatalf("stderr = %q, want it to name the held staged brief %s and not claim it was sent", stderr.String(), message.ID)
+			}
 		})
 	}
 }

@@ -387,7 +387,7 @@ func TestHandoffStagedArmLandsInTheBindingOnAMigratedCity(t *testing.T) {
 		t.Fatalf("get adopted session: %v", err)
 	}
 	rows := sessionpkg.ReconcileRowsFromBeads([]beads.Bead{adopted})
-	if released, failed := releaseStagedSelfHandoffs(sessStore, rows, cfg, clock.Real{}, events.NewFake()); released != 1 || failed != 0 {
+	if released, failed := releaseStagedSelfHandoffs(beads.MailStore{Store: msgStore}, beads.SessionStore{Store: sessStore}, rows, cfg, clock.Real{}, events.NewFake()); released != 1 || failed != 0 {
 		t.Fatalf("releaseStagedSelfHandoffs = (released=%d, failed=%d), want (1, 0)", released, failed)
 	}
 	visible, err := beadmail.NewWithStores(msgStore, sessStore).Check("worker")
