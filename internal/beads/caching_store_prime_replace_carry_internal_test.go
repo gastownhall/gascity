@@ -47,6 +47,39 @@ func (r *carryNoteRecorder) reset() {
 	r.notes = nil
 }
 
+// carryHeldOpen reports whether cs holds id and its status when it does.
+func carryHeldOpen(cs *CachingStore, id string) (string, bool) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	b, ok := cs.beads[id]
+	return b.Status, ok
+}
+
+// hideFromListStore wraps a Store and omits one id from every List while its
+// hide flag is set: a listing that drops an alive row.
+type hideFromListStore struct {
+	Store
+	hideID string
+	hide   bool
+}
+
+func (s *hideFromListStore) List(query ListQuery) ([]Bead, error) {
+	rows, err := s.Store.List(query)
+	if err != nil {
+		return nil, err
+	}
+	if !s.hide {
+		return rows, nil
+	}
+	kept := make([]Bead, 0, len(rows))
+	for _, b := range rows {
+		if b.ID != s.hideID {
+			kept = append(kept, b)
+		}
+	}
+	return kept, nil
+}
+
 func TestCachingStorePrimeReplaceCarriesScanMissingOpenRows(t *testing.T) {
 	// A row deleted behind the cache is absent from the scan like a closed
 	// one, and the reconcile after the Prime announces the same synthetic
@@ -134,6 +167,58 @@ func TestCachingStorePrimeReplaceCarriesScanMissingOpenRows(t *testing.T) {
 			}
 			if got, err := cs.Get(seed.ID); err != nil || got.Status != "closed" {
 				t.Errorf("Get(%s) = (%q, %v), want closed", seed.ID, got.Status, err)
+			}
+		})
+	}
+
+	// An alive row one listing merely omits is not a close: the Prime
+	// carries it, and a later reconcile that lists it again absorbs it back
+	// (or recovery merges it back while it stays omitted) with no
+	// bead.created and no bead.closed.
+	for _, tc := range []struct {
+		name                 string
+		hideThroughReconcile bool
+	}{
+		{"listed_again", false},
+		{"still_omitted", true},
+	} {
+		t.Run("alive_missing_from_scan/"+tc.name, func(t *testing.T) {
+			mem := NewMemStore()
+			seed, err := mem.Create(Bead{Title: "omitted by one listing"})
+			if err != nil {
+				t.Fatalf("Create seed: %v", err)
+			}
+			bystander, err := mem.Create(Bead{Title: "listed"})
+			if err != nil {
+				t.Fatalf("Create bystander: %v", err)
+			}
+			backing := &hideFromListStore{Store: mem, hideID: seed.ID}
+			rec := &carryNoteRecorder{}
+			cs := NewCachingStoreForTest(backing, rec.onChange)
+			if err := cs.Prime(context.Background()); err != nil {
+				t.Fatalf("Prime: %v", err)
+			}
+			backing.hide = true
+			if err := cs.Prime(context.Background()); err != nil {
+				t.Fatalf("second Prime: %v", err)
+			}
+			if status, held := carryHeldOpen(cs, seed.ID); !held || status != "open" {
+				t.Fatalf("after the omitting Prime, cache holds %s = (%q, %v), want carried open", seed.ID, status, held)
+			}
+			rec.reset()
+			backing.hide = tc.hideThroughReconcile
+			cs.ReconcileNowForTest()
+			cs.ReconcileNowForTest()
+			if status, held := carryHeldOpen(cs, seed.ID); !held || status != "open" {
+				t.Errorf("after the reconciles, cache holds %s = (%q, %v), want held open", seed.ID, status, held)
+			}
+			for _, note := range []string{"bead.created", "bead.closed"} {
+				if got := rec.count(note, seed.ID); got != 0 {
+					t.Errorf("%s for %s = %d, want 0 (an omitted alive row is not a transition)", note, seed.ID, got)
+				}
+			}
+			if got := rec.count("bead.closed", bystander.ID); got != 0 {
+				t.Errorf("bead.closed for bystander %s = %d, want 0", bystander.ID, got)
 			}
 		})
 	}
