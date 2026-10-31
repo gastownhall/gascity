@@ -148,6 +148,10 @@ type Handler struct {
 	StorePath string
 	Emitter   EventEmitter
 	Clock     func() time.Time // injectable for testing; defaults to time.Now
+	// CheckScriptEnv is the city's [check_script_env] table with
+	// values already expanded, handed to every gate and trigger condition
+	// this handler runs. Nil adds nothing to the condition environment.
+	CheckScriptEnv map[string]string
 }
 
 // HandleWispClosed processes a wisp_closed event for a convergence root bead.
@@ -742,13 +746,14 @@ func (h *Handler) evaluateGate(
 
 	cityPath := meta[FieldCityPath] // set during create
 	env := ConditionEnv{
-		BeadID:      rootBeadID,
-		Iteration:   iteration,
-		CityPath:    cityPath,
-		StorePath:   h.StorePath,
-		WispID:      wispID,
-		DocPath:     meta[VarPrefix+"doc_path"],
-		ArtifactDir: ArtifactDirFor(cityPath, rootBeadID, iteration),
+		BeadID:         rootBeadID,
+		Iteration:      iteration,
+		CityPath:       cityPath,
+		StorePath:      h.StorePath,
+		WispID:         wispID,
+		DocPath:        meta[VarPrefix+"doc_path"],
+		ArtifactDir:    ArtifactDirFor(cityPath, rootBeadID, iteration),
+		CheckScriptEnv: h.CheckScriptEnv,
 	}
 
 	// Compute durations for environment.

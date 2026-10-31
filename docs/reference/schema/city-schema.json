@@ -1278,6 +1278,13 @@
           "$ref": "#/$defs/ConvergenceConfig",
           "description": "Convergence configures convergence loop limits."
         },
+        "check_script_env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "CheckScriptEnv sets extra environment variables for the scripts the\ncontroller runs to grade [steps.check] steps and to evaluate convergence\ngate and trigger conditions. Those scripts run with HOME set to the city\ndirectory and a short PATH, so a tool that finds its inputs through the\nenvironment (Python's per-user site-packages, for instance) may need a\nvariable named here. Values may reference the controller's environment\nas $VAR; the controller expands them before the script runs. A key the\ncheck environment sets itself (HOME, PATH, BEADS_DIR, the GC_* variables\nit writes) or that a child process acts on before the script runs\n(BASH_ENV, XDG_*, LD_*, ...) is rejected at load. Order check commands\nand doctor checks are not affected."
+        },
         "doctor": {
           "$ref": "#/$defs/DoctorConfig",
           "description": "Doctor configures gc doctor thresholds and policy toggles\n(worktree size warnings, nested-worktree auto-prune)."

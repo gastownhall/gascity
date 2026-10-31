@@ -774,6 +774,48 @@ transient or missing class leaves the loop to iterate while attempts remain.
 `check` must not be combined with `loop`, `on_complete`, `gate`, `expand`,
 `assignee`, or `retry`.
 
+**The check environment.** The orchestrator runs a check script with an
+explicit environment, not the controller's: `HOME` is the city directory,
+`PATH` starts with a directory of links to the exact `gc`, `bd`, `dolt` and
+`jq` the city uses, then their directories, then `/usr/local/bin:/usr/bin:/bin`,
+`BEADS_DIR` names the store, and the `GC_*` variables describe the step
+(`GC_BEAD_ID`, `GC_ITERATION`, `GC_STORE_PATH`, `GC_WORK_DIR`,
+`GC_ARTIFACT_DIR` and the rest). The script runs as the same OS user, so this
+is not a filesystem boundary; what it prevents is implicit discovery, the way
+ssh, gpg, gh, git and others find their configuration and credentials under
+`$HOME` when nothing names them. Some tools a check runs locate their own
+inputs the same way: Python derives its per-user `site-packages` from `HOME`,
+so a module installed with `pip install --user` is invisible to a check even
+when the same interpreter finds it from the operator's shell. An operator
+hands such a tool exactly the variables it needs through `[check_script_env]`
+in `city.toml`:
+
+```toml
+[check_script_env]
+PYTHONUSERBASE = "$HOME/Library/Python/3.14"
+```
+
+The value to use is whatever `python3 -m site --user-base` prints for the
+interpreter the check `PATH` resolves; a user base belongs to one interpreter
+version. Values may reference the controller's environment as `$VAR` or
+`${VAR}`; the controller expands them before the script runs, so `$HOME` there
+is the operator's home, not the city. An unset variable expands to empty, and
+there is no escape for a literal `$`. The entries are appended to the
+environment above and can never replace a variable it already sets. Naming
+`HOME`, `PATH`, `BEADS_DIR`, a `GC_*` variable the orchestrator writes, a
+`BEADS_*` or `BD_*` selector bd reads, or a name a child process acts on
+before the script runs (`BASH_ENV`, `ENV`, `XDG_*`, `LD_*`, `DYLD_*`,
+`SSH_AUTH_SOCK`, `GNUPGHOME`, `GPG_AGENT_INFO`) is a configuration error: the
+city does not load, and a running city keeps its previous configuration when a
+reload sees one. The table may be set in `city.toml` or in any of its include
+fragments, local or remote; fragments add entries, and a fragment that
+redefines a name the city already set wins with a warning. Packs cannot set
+it. The same table reaches convergence gate and trigger conditions and the
+`gc converge test-gate` / `test-trigger` dry runs, which take it from the city
+the command runs in; the `gc doctor` gate-sandbox probe runs with it and lists
+the configured names. It does not apply to order `check` commands, which
+already run with the controller's environment, or to other doctor checks.
+
 **Infrastructure outcomes — exit 75.** A check script reports two different
 things with a nonzero exit: "the thing I verify is not true yet" (a verdict),
 and "I could not reach the infrastructure I need in order to tell" (a blind

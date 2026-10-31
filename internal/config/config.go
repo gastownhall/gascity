@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
@@ -291,6 +292,18 @@ type City struct {
 	SessionSleep SessionSleepConfig `toml:"session_sleep,omitempty"`
 	// Convergence configures convergence loop limits.
 	Convergence ConvergenceConfig `toml:"convergence,omitempty"`
+	// CheckScriptEnv sets extra environment variables for the scripts the
+	// controller runs to grade [steps.check] steps and to evaluate convergence
+	// gate and trigger conditions. Those scripts run with HOME set to the city
+	// directory and a short PATH, so a tool that finds its inputs through the
+	// environment (Python's per-user site-packages, for instance) may need a
+	// variable named here. Values may reference the controller's environment
+	// as $VAR; the controller expands them before the script runs. A key the
+	// check environment sets itself (HOME, PATH, BEADS_DIR, the GC_* variables
+	// it writes) or that a child process acts on before the script runs
+	// (BASH_ENV, XDG_*, LD_*, ...) is rejected at load. Order check commands
+	// and doctor checks are not affected.
+	CheckScriptEnv map[string]string `toml:"check_script_env,omitempty"`
 	// Doctor configures gc doctor thresholds and policy toggles
 	// (worktree size warnings, nested-worktree auto-prune).
 	Doctor DoctorConfig `toml:"doctor,omitempty"`
@@ -2764,6 +2777,15 @@ type ConvergenceConfig struct {
 	MaxTotal int `toml:"max_total,omitempty" jsonschema:"default=10"`
 }
 
+// ValidateCheckScriptEnv rejects a [check_script_env] table that names a
+// variable the check environment owns or a name that is not a valid
+// environment variable. Parse runs it on its single layer and
+// LoadWithIncludesOptions runs it again on the composed root, because a
+// fragment may supply the table.
+func (c *City) ValidateCheckScriptEnv() error {
+	return execenv.ValidateCheckScriptEnv(c.CheckScriptEnv)
+}
+
 // MaxPerAgentOrDefault returns MaxPerAgent, defaulting to 2.
 func (c ConvergenceConfig) MaxPerAgentOrDefault() int {
 	if c.MaxPerAgent <= 0 {
@@ -5140,6 +5162,9 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	if err := validateOpsModes(cfg.Ops); err != nil {
+		return nil, err
+	}
+	if err := cfg.ValidateCheckScriptEnv(); err != nil {
 		return nil, err
 	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class

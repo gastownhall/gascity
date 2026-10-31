@@ -43,9 +43,13 @@ type ProcessOptions struct {
 	CityPath           string
 	StorePath          string
 	FormulaSearchPaths []string
-	PrepareFragment    func(*formula.FragmentRecipe, beads.Bead) error
-	PrepareRecipe      func(*formula.Recipe, beads.Bead) error
-	RecycleSession     func(beads.Bead) error
+	// CheckScriptEnv is the city's [check_script_env] table with
+	// values already expanded, handed to every ralph check script. Nil adds
+	// nothing to the check environment.
+	CheckScriptEnv  map[string]string
+	PrepareFragment func(*formula.FragmentRecipe, beads.Bead) error
+	PrepareRecipe   func(*formula.Recipe, beads.Bead) error
+	RecycleSession  func(beads.Bead) error
 	// RequiredArtifactStat checks required-artifact files. When nil, the
 	// dispatcher uses os.Stat.
 	RequiredArtifactStat func(path string) (os.FileInfo, error)

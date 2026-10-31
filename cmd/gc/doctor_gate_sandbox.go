@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/doctor"
 )
@@ -19,7 +20,10 @@ import (
 const doctorGateSandboxReadTimeout = 5 * time.Second
 
 // gateSandboxEnv reproduces the environment convergence hands a gate command:
-// HOME sandboxed to the city and an explicit whitelist, nothing inherited.
+// HOME sandboxed to the city, an explicit whitelist, and the operator's
+// [check_script_env] entries; nothing else inherited. The probe
+// has to carry the operator entries too, or doctor would pass a sandbox the
+// real gates do not run in (and vice versa).
 //
 // One deliberate addition: BEADS_DOLT_AUTO_START=0. A gate inherits whatever
 // the controller has set, but a diagnostic must never start a Dolt server as a
@@ -31,8 +35,8 @@ const doctorGateSandboxReadTimeout = 5 * time.Second
 // and uses a 2s WaitDelay, neither of which a real gate gets. Both are harmless
 // for a read-only probe, but the contract this function reproduces is the
 // environment, not the runner.
-func gateSandboxEnv(cityPath string) []string {
-	gateEnv := convergence.ConditionEnv{CityPath: cityPath, StorePath: cityPath}.Environ()
+func gateSandboxEnv(cityPath string, checkScriptEnv map[string]string) []string {
+	gateEnv := convergence.ConditionEnv{CityPath: cityPath, StorePath: cityPath, CheckScriptEnv: checkScriptEnv}.Environ()
 	env := make([]string, 0, len(gateEnv)+1)
 	for _, entry := range gateEnv {
 		if name, _, ok := strings.Cut(entry, "="); ok && name == "BEADS_DOLT_AUTO_START" {
@@ -60,12 +64,15 @@ func gateSandboxEnv(cityPath string) []string {
 // the sandbox is blind, not that the store is down.
 type gateSandboxReadCheck struct {
 	cityPath string
+	// checkScriptEnv is the city's expanded [check_script_env],
+	// so the probe runs in the same environment the real gates do.
+	checkScriptEnv map[string]string
 	// probe performs the read. Injectable so tests never fork bd.
 	probe func(cityPath string, env []string) error
 }
 
-func newGateSandboxReadCheck(cityPath string) *gateSandboxReadCheck {
-	return &gateSandboxReadCheck{cityPath: cityPath, probe: defaultGateSandboxRead}
+func newGateSandboxReadCheck(cityPath string, cfg *config.City) *gateSandboxReadCheck {
+	return &gateSandboxReadCheck{cityPath: cityPath, checkScriptEnv: checkScriptEnvFromConfig(cfg), probe: defaultGateSandboxRead}
 }
 
 // gateSandboxCommandRunnerWithEnvContext is the bd runner the probe forks
@@ -133,12 +140,12 @@ func (c *gateSandboxReadCheck) Name() string { return "gate-sandbox-reads" }
 // Run performs a bead read under the gate environment and reports the result.
 func (c *gateSandboxReadCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	res := &doctor.CheckResult{Name: c.Name(), Severity: doctor.SeverityAdvisory}
-	env := gateSandboxEnv(c.cityPath)
+	env := gateSandboxEnv(c.cityPath, c.checkScriptEnv)
 	if err := c.probe(c.cityPath, env); err != nil {
 		res.Status = doctor.StatusError
 		res.Message = fmt.Sprintf("bead read failed inside the gate sandbox (the same read succeeded for the controller): %v", err)
-		res.Details = gateSandboxBlindDetails(env)
-		res.FixHint = "gate commands get HOME=<city> plus an explicit env whitelist, so anything gc/bd resolves from HOME must be threaded in: " +
+		res.Details = append(gateSandboxBlindDetails(env), gateSandboxCheckScriptEnvDetail(c.checkScriptEnv))
+		res.FixHint = "gate commands get HOME=<city> plus an explicit env whitelist (and the city's [check_script_env] entries), so anything gc/bd resolves from HOME must be threaded in: " +
 			"check that BEADS_CREDENTIALS_FILE and GC_HOME in the details above point at real, readable paths " +
 			"(gc threads the resolved beads credentials file into the gate env; set BEADS_CREDENTIALS_FILE in the controller's environment to override). " +
 			"Those four are not the whole delta — the controller's read is built by bdRuntimeEnvWithErrorRecoveryContext, so if they look right, " +
@@ -147,8 +154,18 @@ func (c *gateSandboxReadCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	}
 	res.Status = doctor.StatusOK
 	res.Message = "gate sandbox can read the bead store"
-	res.Details = gateSandboxDetails(env)
+	res.Details = append(gateSandboxDetails(env), gateSandboxCheckScriptEnvDetail(c.checkScriptEnv))
 	return res
+}
+
+// gateSandboxCheckScriptEnvDetail names the operator-supplied variables the
+// gate environment carries, by key only: a value may have expanded from a
+// controller secret, and the doctor report is meant to be shared.
+func gateSandboxCheckScriptEnvDetail(checkScriptEnv map[string]string) string {
+	if len(checkScriptEnv) == 0 {
+		return "check_script_env=(none configured)"
+	}
+	return "check_script_env=" + strings.Join(checkScriptEnvKeys(checkScriptEnv), ",")
 }
 
 // gateSandboxDetails reports the whitelisted values that decide whether a gate

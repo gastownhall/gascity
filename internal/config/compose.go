@@ -882,6 +882,12 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if err := validateOpsModes(root.Ops); err != nil {
 		return nil, nil, err
 	}
+	// Same reasoning for [check_script_env]: a fragment replaces the root's
+	// table in mergeFragment, so the composed root is the only place every
+	// reserved-key refusal is guaranteed to run.
+	if err := root.ValidateCheckScriptEnv(); err != nil {
+		return nil, nil, err
+	}
 
 	// Capture revision inputs after all config and pack discovery so callers
 	// can compare the loaded snapshot to future reloads without re-reading
@@ -1252,6 +1258,23 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	mergeSessionSleep(base, fragment, fragMeta, fragPath, prov)
 	if fragMeta.IsDefined("convergence") {
 		base.Convergence = fragment.Convergence
+	}
+	if fragMeta.IsDefined("check_script_env") {
+		// Entries merge additively, like provider env: a fragment that adds
+		// one variable must not drop the ones the root set. A fragment that
+		// redefines a name wins, with a warning so the override is visible.
+		merged := make(map[string]string, len(base.CheckScriptEnv)+len(fragment.CheckScriptEnv))
+		for k, v := range base.CheckScriptEnv {
+			merged[k] = v
+		}
+		for k, v := range fragment.CheckScriptEnv {
+			if _, exists := base.CheckScriptEnv[k]; exists {
+				prov.Warnings = append(prov.Warnings,
+					fmt.Sprintf("check_script_env.%s redefined by %q", k, fragPath))
+			}
+			merged[k] = v
+		}
+		base.CheckScriptEnv = merged
 	}
 	if fragMeta.IsDefined("maintenance") {
 		base.Maintenance = fragment.Maintenance

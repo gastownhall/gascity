@@ -513,7 +513,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			// of those the assertion would be false. On a stopped proxied city
 			// it is listed as not checked, like every other store read.
 			if storePreflightPassed || cityStoreStopped {
-				registerCityStoreCheck(newGateSandboxReadCheck(cityPath))
+				registerCityStoreCheck(newGateSandboxReadCheck(cityPath, cfg))
 			}
 		}
 	}

@@ -184,9 +184,10 @@ func (cr *CityRuntime) newConvergenceScope(rig string, store beads.Store, storeP
 		store:     store,
 		adapter:   adapter,
 		handler: &convergence.Handler{
-			Store:     adapter,
-			StorePath: storePath,
-			Emitter:   &convergenceEventEmitter{rec: cr.rec},
+			Store:          adapter,
+			StorePath:      storePath,
+			Emitter:        &convergenceEventEmitter{rec: cr.rec},
+			CheckScriptEnv: checkScriptEnvFromConfig(cr.cfg),
 		},
 	}
 }

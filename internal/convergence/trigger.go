@@ -91,6 +91,7 @@ func (h *Handler) HandleTrigger(ctx context.Context, rootBeadID string) (Handler
 	}
 
 	env := TriggerConditionEnv(meta, rootBeadID, cityPath, h.StorePath, nextIteration)
+	env.CheckScriptEnv = h.CheckScriptEnv
 
 	result := RunCondition(ctx, triggerConfig.Condition, env, gateConfig.Timeout, 0)
 	if result.Outcome != GatePass {

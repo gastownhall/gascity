@@ -18,6 +18,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/doltauth"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/gchome"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
@@ -187,21 +188,26 @@ type ConditionEnv struct {
 	AgentVerdict         string // normalized verdict, may be empty
 	AgentProvider        string // may be empty
 	AgentModel           string // may be empty
+	// CheckScriptEnv is the operator-supplied [check_script_env]
+	// table, values already expanded by the caller. Entries are appended to the
+	// whitelist Environ builds; a key the whitelist sets itself is never
+	// overridden (see check_script_env.go). Nil means no extra variables.
+	CheckScriptEnv map[string]string
 }
 
 // conditionBeadsCredentialsFile resolves the beads credentials file gate
 // commands must read.
 //
-// Gate commands run with HOME=<CityPath> so they cannot see the controller's
-// home directory. bd resolves its credentials file from HOME, so under the
-// sandbox its own default lands on <CityPath>/.config/beads/credentials — a
-// path that never exists — and every bd read inside a gate fails to
-// authenticate (gastownhall/gascity ga-pqlgh).
+// Gate commands run with HOME=<CityPath>, so nothing under the controller's
+// home directory is found by default. bd resolves its credentials file from
+// HOME, so under the sandbox its own default lands on
+// <CityPath>/.config/beads/credentials — a path that never exists — and every
+// bd read inside a gate fails to authenticate (gastownhall/gascity ga-pqlgh).
 //
 // The fix threads one explicit file path across the sandbox boundary instead of
-// widening HOME: the whitelist stays enumerable, .ssh/.gnupg stay invisible, and
-// no secret material is copied into the city directory (which is listable and
-// backed up). An ambient BEADS_CREDENTIALS_FILE wins, because operators already
+// widening HOME: the whitelist stays enumerable, .ssh/.gnupg are not discovered
+// by default, and no secret material is copied into the city directory (which
+// is listable and backed up). An ambient BEADS_CREDENTIALS_FILE wins, because operators already
 // use it to select scoped stores. Otherwise the OS default resolved against the
 // controller's real home is used, and only when it exists — exporting a path
 // that does not resolve would mask bd's own fallback for no gain.
@@ -222,11 +228,16 @@ func conditionBeadsCredentialsFile() string {
 
 // Environ returns the environment variable slice for exec.Cmd.
 // Only whitelisted variables: PATH (safe default), HOME, TMPDIR, convergence
-// vars, Dolt/Beads connection env, the resolved beads credentials file, and
-// GC_INTEGRATION_REAL_BD when present for integration-test bd shims.
+// vars, Dolt/Beads connection env, the resolved beads credentials file,
+// GC_INTEGRATION_REAL_BD when present for integration-test bd shims, and the
+// operator's [check_script_env] entries, which can add variables
+// but never replace one listed here.
 func (ce ConditionEnv) Environ() []string {
-	// Use CityPath as HOME to sandbox gate scripts from the
-	// controller's home directory (which may contain .ssh, .gnupg, etc).
+	// HOME is the city directory, not the controller's home. Gate scripts run
+	// as the same OS user, so this is not a filesystem boundary: an absolute
+	// path into the real home still resolves. What it prevents is implicit
+	// discovery, the way ssh, gpg, gh, git, aws and friends find their
+	// configuration and credentials under $HOME when nothing names them.
 	home := ce.CityPath
 	if home == "" {
 		home = os.TempDir()
@@ -298,7 +309,7 @@ func (ce ConditionEnv) Environ() []string {
 		}
 	}
 
-	return env
+	return execenv.AppendCheckScriptEnv(env, ce.CheckScriptEnv)
 }
 
 // containedIn reports whether absPath is the same as or nested under root.

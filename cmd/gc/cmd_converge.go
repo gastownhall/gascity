@@ -490,16 +490,22 @@ func newConvergeTestGateCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 
 			cityPath := rctx.CityPath
+			checkEnv, err := convergeTestCheckScriptEnv(cityPath)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc converge test-gate: %v\n", err) //nolint:errcheck
+				return errExit
+			}
 			iter, _ := convergence.DecodeInt(meta[convergence.FieldIteration])
 			maxIter, _ := convergence.DecodeInt(meta[convergence.FieldMaxIterations])
 			env := convergence.ConditionEnv{
-				BeadID:        beadID,
-				Iteration:     iter,
-				MaxIterations: maxIter,
-				WispID:        meta[convergence.FieldActiveWisp],
-				CityPath:      cityPath,
-				StorePath:     storePath,
-				DocPath:       meta[convergence.VarPrefix+"doc_path"],
+				BeadID:         beadID,
+				Iteration:      iter,
+				MaxIterations:  maxIter,
+				WispID:         meta[convergence.FieldActiveWisp],
+				CityPath:       cityPath,
+				StorePath:      storePath,
+				DocPath:        meta[convergence.VarPrefix+"doc_path"],
+				CheckScriptEnv: checkEnv,
 			}
 
 			if !jsonOutput {
@@ -609,6 +615,16 @@ func newConvergeTestTriggerCmd(stdout, stderr io.Writer) *cobra.Command {
 				cityPath = rctx.CityPath
 			}
 			env := convergence.TriggerConditionEnv(meta, beadID, cityPath, storePath, nextIteration)
+			// The operator table comes from the city this command runs in,
+			// never from the bead's recorded city path: the live handler
+			// takes it from the controller's own config, and a bead must not
+			// be able to point the dry run at another directory's table.
+			checkEnv, err := convergeTestCheckScriptEnv(rctx.CityPath)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc converge test-trigger: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			env.CheckScriptEnv = checkEnv
 
 			if !jsonOutput {
 				fmt.Fprintf(stdout, "Testing trigger: %s\n", triggerConfig.Condition) //nolint:errcheck
