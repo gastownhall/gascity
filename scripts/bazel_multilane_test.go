@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -571,8 +572,10 @@ func TestBazelMultiLaneWorkflowShape(t *testing.T) {
 	// Unit and acceptance run on 8 vCPU, every other lane on 4: a remote
 	// lane's client-side loading and analysis is CPU-bound (ga-vnycm2.8:
 	// 23-34 s on 4 vCPU, 15-19 s on 8), and every other mode executes here,
-	// or may (a fork lane's fallback to the read-only cache).
-	if want := "${{ (matrix.lane == 'unit' || matrix.lane == 'acceptance') && 'blacksmith-8vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}"; lane.RunsOn != want {
+	// or may (a fork lane's fallback to the read-only cache). A fork
+	// repository's own CI has no Blacksmith: ubuntu-latest
+	// (TestBazelForkRepositoryFromEventContext).
+	if want := "${{ github.repository_owner_id != '" + gastownhallOwnerID + "' && 'ubuntu-latest' || (matrix.lane == 'unit' || matrix.lane == 'acceptance') && 'blacksmith-8vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}"; lane.RunsOn != want {
 		t.Errorf("lane runs-on = %q, want %q", lane.RunsOn, want)
 	}
 
@@ -1055,8 +1058,179 @@ func TestBazelMultiLaneDecide(t *testing.T) {
 }
 
 // multiLaneForkRepoValue: the decide step's (and review-formulas.yml's mode
-// step's) fork-repository test: true in a fork repository's own CI.
-const multiLaneForkRepoValue = "${{ github.repository_owner != 'gastownhall' }}"
+// step's) fork-repository test: true in a fork repository's own CI. It reads
+// the owner's id, not its name, so renaming the org cannot turn upstream's
+// own runs into fork runs.
+const multiLaneForkRepoValue = "${{ github.repository_owner_id != '" + gastownhallOwnerID + "' }}"
+
+// gastownhallOwnerID: the gastownhall org's account id (gh api
+// orgs/gastownhall --jq .id), github.repository_owner_id in its runs.
+const gastownhallOwnerID = "255961667"
+
+// ghEventContext: a typed expression context for one run, as GitHub builds
+// it: the github.* fields given, and the event payload (JSON, as the
+// webhook delivers it) flattened under github.event. vars and secrets are
+// whatever extra names (none for a fork pull_request run).
+func ghEventContext(t *testing.T, github map[string]any, event string, extra map[string]any) map[string]any {
+	t.Helper()
+	var payload any
+	if err := json.Unmarshal([]byte(event), &payload); err != nil {
+		t.Fatalf("event payload: %v", err)
+	}
+	ctx := map[string]any{}
+	var flatten func(prefix string, v any)
+	flatten = func(prefix string, v any) {
+		if m, ok := v.(map[string]any); ok {
+			for k, sub := range m {
+				flatten(prefix+"."+k, sub)
+			}
+			return
+		}
+		ctx[prefix] = v
+	}
+	flatten("github.event", payload)
+	for k, v := range github {
+		ctx["github."+k] = v
+	}
+	maps.Copy(ctx, extra)
+	return ctx
+}
+
+// forkRepoEventCases: real event contexts for the fork-repository decision.
+// A fork PR into gascity runs in gastownhall/gascity (FORK_REPO false, even
+// though its head repo is a fork); a PR within a fork has a fork head too,
+// but runs in the fork. upstream: the run's repository is gastownhall's.
+var forkRepoEventCases = []struct {
+	name     string
+	upstream bool
+	github   map[string]any
+	event    string
+	extra    map[string]any
+	mode     string // bazel.yml decide (mint answering ro)
+	rfMode   string // review-formulas.yml's mode step
+}{
+	{
+		name: "fork PR into gastownhall/gascity", upstream: true,
+		github: map[string]any{"event_name": "pull_request", "repository": "gastownhall/gascity", "repository_owner": "gastownhall", "repository_owner_id": gastownhallOwnerID, "actor": "someone", "ref": "refs/pull/6969/merge"},
+		event:  `{"action": "synchronize", "number": 6969, "pull_request": {"number": 6969, "user": {"login": "someone"}, "head": {"ref": "fix", "repo": {"full_name": "someone/gascity", "fork": true}}, "base": {"ref": "main", "repo": {"full_name": "gastownhall/gascity", "fork": false}}}, "repository": {"full_name": "gastownhall/gascity", "fork": false, "default_branch": "main", "owner": {"login": "gastownhall", "id": 255961667}}}`,
+		mode:   "fork-ro", rfMode: "cache",
+	},
+	{
+		name: "same-repo PR in gastownhall/gascity", upstream: true,
+		github: map[string]any{"event_name": "pull_request", "repository": "gastownhall/gascity", "repository_owner": "gastownhall", "repository_owner_id": gastownhallOwnerID, "actor": "maintainer", "ref": "refs/pull/6969/merge"},
+		event:  `{"action": "opened", "number": 6969, "pull_request": {"number": 6969, "user": {"login": "maintainer"}, "head": {"ref": "fix", "repo": {"full_name": "gastownhall/gascity", "fork": false}}, "base": {"ref": "main", "repo": {"full_name": "gastownhall/gascity", "fork": false}}}, "repository": {"full_name": "gastownhall/gascity", "fork": false, "default_branch": "main", "owner": {"login": "gastownhall", "id": 255961667}}}`,
+		extra:  map[string]any{"vars.RBE_WEST_WORKERS": "true", "secrets.RBE_WEST_EXECUTOR": "grpcs://executor.invalid"},
+		mode:   "remote", rfMode: "remote",
+	},
+	{
+		name: "push to main, org renamed (same id)", upstream: true,
+		github: map[string]any{"event_name": "push", "repository": "gastowntown/gascity", "repository_owner": "gastowntown", "repository_owner_id": gastownhallOwnerID, "actor": "maintainer", "ref": "refs/heads/main"},
+		event:  `{"ref": "refs/heads/main", "repository": {"full_name": "gastowntown/gascity", "fork": false, "default_branch": "main", "owner": {"login": "gastowntown", "id": 255961667}}}`,
+		extra:  map[string]any{"vars.RBE_WEST_WORKERS": "true", "secrets.RBE_WEST_EXECUTOR": "grpcs://executor.invalid"},
+		mode:   "remote", rfMode: "remote",
+	},
+	{
+		name: "PR within a fork", upstream: false,
+		github: map[string]any{"event_name": "pull_request", "repository": "someone/gascity", "repository_owner": "someone", "repository_owner_id": "31337", "actor": "someone", "ref": "refs/pull/12/merge"},
+		event:  `{"action": "opened", "number": 6969, "pull_request": {"number": 6969, "user": {"login": "someone"}, "head": {"ref": "fix", "repo": {"full_name": "someone/gascity", "fork": true}}, "base": {"ref": "main", "repo": {"full_name": "someone/gascity", "fork": true}}}, "repository": {"full_name": "someone/gascity", "fork": true, "default_branch": "main", "owner": {"login": "someone", "id": 31337}}}`,
+		mode:   "local", rfMode: "local",
+	},
+	{
+		name: "push to a fork's main, a gastownhall-named owner", upstream: false,
+		github: map[string]any{"event_name": "push", "repository": "gastownhall/gascity-fork", "repository_owner": "gastownhall", "repository_owner_id": "31337", "actor": "someone", "ref": "refs/heads/main"},
+		event:  `{"ref": "refs/heads/main", "repository": {"full_name": "gastownhall/gascity-fork", "fork": true, "default_branch": "main", "owner": {"login": "gastownhall", "id": 31337}}}`,
+		extra:  map[string]any{"vars.RBE_WEST_WORKERS": "true", "secrets.RBE_WEST_EXECUTOR": "grpcs://executor.invalid"},
+		mode:   "local", rfMode: "local",
+	},
+}
+
+// TestBazelForkRepositoryFromEventContext evaluates bazel.yml's decide step
+// env, every bazel.yml job's runs-on and review-formulas.yml's mode step env
+// on real event contexts (ghEventContext), then runs the steps: a fork PR
+// into gastownhall/gascity keeps the fork modes (FORK_REPO false: the run's
+// repository is gastownhall's), a fork repository's own CI is mode local
+// whatever its owner's name, and gastownhall's own runs stay upstream after
+// an org rename (the owner's id decides). Upstream, every job runs on
+// Blacksmith; in a fork (no Blacksmith), every job that can run in mode
+// local runs on ubuntu-latest, or it would queue for a day and never start.
+func TestBazelForkRepositoryFromEventContext(t *testing.T) {
+	wf := readMultiLaneWorkflow(t)
+	decide := multiLaneRBEStep(t, wf, "decide")
+	rf := readCriticalPathWorkflow(t, "review-formulas.yml")
+	var rfMode *ciCriticalPathStep
+	for i, s := range rf.Jobs["gate"].Steps {
+		if s.ID == "mode" {
+			rfMode = &rf.Jobs["gate"].Steps[i]
+		}
+	}
+	if rfMode == nil {
+		t.Fatal("review-formulas.yml gate job has no mode step")
+	}
+	for _, c := range forkRepoEventCases {
+		ctx := ghEventContext(t, c.github, c.event, c.extra)
+		repo := c.github["repository"].(string)
+
+		env := map[string]string{"BAZEL_TEST_MINT": "ro", "GITHUB_REPOSITORY": repo}
+		for k, v := range decide.Env {
+			env[k] = interpolateGHTyped(t, v, ctx)
+		}
+		mode, _, summary, curlLog, err := multiLaneDecideFull(t, decide.Run, env)
+		if err != nil {
+			t.Errorf("%s: decide failed: %v", c.name, err)
+			continue
+		}
+		if mode != c.mode {
+			t.Errorf("%s: mode %q, want %q (decide env %v)", c.name, mode, c.mode, env)
+		}
+		if said := strings.Contains(summary, "Fork repository's own CI ("+repo+")"); said == c.upstream {
+			t.Errorf("%s: summary %q; want the fork-repository line exactly outside gastownhall", c.name, summary)
+		}
+		if !c.upstream && curlLog != "" {
+			t.Errorf("%s: a fork repository's own CI asked the mint: %q", c.name, curlLog)
+		}
+
+		// Runners, with the jobs' ifs evaluated in the decided mode.
+		jobCtx := maps.Clone(ctx)
+		maps.Copy(jobCtx, map[string]any{
+			"needs.rbe.outputs.mode": mode, "needs.rbe.outputs.lanes": `["unit"]`,
+			"needs.rbe.outputs.rrc": "off", "needs.rbe.result": "success",
+		})
+		for _, id := range slices.Sorted(maps.Keys(wf.Jobs)) {
+			job := wf.Jobs[id]
+			if v, err := evalGHExprTyped(job.If, jobCtx); job.If != "" && (err != nil || !ghTruthy(v)) {
+				if err != nil {
+					t.Errorf("%s: job %s if %q: %v", c.name, id, job.If, err)
+				}
+				continue // never starts in this run: needs no runner
+			}
+			for _, lane := range []string{"unit", "acceptance", "integration-smoke"} {
+				jobCtx["matrix.lane"] = lane
+				got := interpolateGHTyped(t, job.RunsOn, jobCtx)
+				if c.upstream && !strings.HasPrefix(got, "blacksmith-") {
+					t.Errorf("%s: job %s (lane %s) runs-on %q, want a Blacksmith label upstream", c.name, id, lane, got)
+				}
+				if !c.upstream && got != "ubuntu-latest" {
+					t.Errorf("%s: job %s (lane %s) runs-on %q in mode %s, want ubuntu-latest (no Blacksmith in a fork)", c.name, id, lane, got, mode)
+				}
+			}
+		}
+
+		// review-formulas.yml decides alike.
+		dir := t.TempDir()
+		output := filepath.Join(dir, "output")
+		rfEnv := map[string]string{"GITHUB_OUTPUT": output, "GITHUB_STEP_SUMMARY": filepath.Join(dir, "summary")}
+		for k, v := range rfMode.Env {
+			rfEnv[k] = interpolateGHTyped(t, v, ctx)
+		}
+		if out, err := runWorkflowStepScript(t, dir, rfMode.Run, rfEnv); err != nil {
+			t.Errorf("%s: review-formulas mode step: %v\n%s", c.name, err, out)
+			continue
+		}
+		if got, _ := readStepOutput(t, output, "mode"); got != c.rfMode {
+			t.Errorf("%s: review-formulas mode %q, want %q (env %v)", c.name, got, c.rfMode, rfEnv)
+		}
+	}
+}
 
 // TestBazelMultiLaneForkFallback: a fork lane (mode fork-ro/fork-rw) whose
 // rbe-fork certificate the mint refuses after the rbe job saw it open falls
@@ -1384,8 +1558,11 @@ func TestBazelLaneHasNoOwnMeasureStep(t *testing.T) {
 // --config=fork-cache and runs its probes), the lanes' zstd and remote repo
 // contents cache probe steps and the fork-cache fallback do not run, and
 // BUILD files in sync passes no --config=fork-cache to make bazel-sync. Mode
-// cache keeps the read-only cache everywhere it had it.
+// cache keeps the read-only cache everywhere it had it. The local half holds
+// for every setup-bazel step in every workflow (forkRepositorySetupBazelSweep).
 func TestForkRepositoryCINeverReadsRBECache(t *testing.T) {
+	forkRepositorySetupBazelSweep(t)
+
 	wf := readMultiLaneWorkflow(t)
 	ctx := func(mode, pinRemote string) map[string]string {
 		return map[string]string{
@@ -1506,6 +1683,127 @@ func TestForkRepositoryCINeverReadsRBECache(t *testing.T) {
 		got := interpolateGH(t, setup.Env["BAZEL_FORK_CACHE"], map[string]string{"needs.gate.outputs.mode": mode})
 		if want := map[string]string{"remote": "", "cache": "true", "local": ""}[mode]; got != want {
 			t.Errorf("%s: review-formulas mode %s BAZEL_FORK_CACHE = %q, want %q", c.name, mode, got, want)
+		}
+	}
+}
+
+// forkLocalCtx: every fact a workflow's setup-bazel step (or a step passing
+// BAZEL_SYNC_FLAGS) may read, in mode local: each workflow's mode output
+// (bazel.yml's rbe job, review-formulas.yml's gate job) says local, and the
+// rest is adversarial (the first setup-bazel failed, so a fallback would run
+// if its condition let it).
+var forkLocalCtx = map[string]string{
+	"needs.rbe.outputs.mode":             "local",
+	"needs.rbe.outputs.tier":             "",
+	"needs.rbe.outputs.rrc":              "off",
+	"needs.gate.outputs.mode":            "local",
+	"matrix.lane":                        "unit",
+	"steps.pin.outputs.remote":           "false",
+	"steps.worker-env.outputs.pin-moved": "false",
+	"steps.bazel.outcome":                "failure",
+	"steps.bazel-fallback.outcome":       "skipped",
+	"github.event.pull_request.number":   "6969",
+}
+
+// ghStartsWithCall: startsWith(<identifier>, '<literal>'), the one function
+// the setup-bazel steps' expressions call.
+var ghStartsWithCall = regexp.MustCompile(`startsWith\(\s*([A-Za-z0-9_.-]+)\s*,\s*'([^']*)'\s*\)`)
+
+// forkRepositorySetupBazelSweep: in every workflow, every setup-bazel step
+// that runs in mode local gets no BAZEL_FORK_CACHE and no BAZEL_FORK_REMOTE,
+// and no step's BAZEL_SYNC_FLAGS names --config=fork-cache. Every fact
+// those expressions (and the steps' ifs) read must be in forkLocalCtx: an
+// unknown one would evaluate as null and could pass by accident, so it
+// fails until it is added there with its mode-local value.
+func forkRepositorySetupBazelSweep(t *testing.T) {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(repoRoot(t), ".github", "workflows", "*.y*ml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	type sweepStep struct {
+		ID   string            `yaml:"id"`
+		Name string            `yaml:"name"`
+		If   string            `yaml:"if"`
+		Uses string            `yaml:"uses"`
+		Env  map[string]string `yaml:"env"`
+	}
+	// eval resolves startsWith against forkLocalCtx and checks that every
+	// identifier in expr (a value with ${{ }}, or a bare if) is known.
+	eval := func(where, expr string, bare bool) string {
+		expr = ghStartsWithCall.ReplaceAllStringFunc(expr, func(call string) string {
+			m := ghStartsWithCall.FindStringSubmatch(call)
+			return strconv.FormatBool(strings.HasPrefix(strings.ToLower(forkLocalCtx[m[1]]), strings.ToLower(m[2])))
+		})
+		bodies := []string{expr}
+		if !bare {
+			bodies = nil
+			for _, m := range ghInterpolation.FindAllStringSubmatch(expr, -1) {
+				bodies = append(bodies, m[1])
+			}
+		}
+		for _, body := range bodies {
+			toks, err := ghTokenize(ghStatusFuncs.Replace(body))
+			if err != nil {
+				t.Fatalf("%s: %q: %v", where, expr, err)
+			}
+			for _, tok := range toks {
+				if tok.kind != "ident" || slices.Contains([]string{"true", "false", "null"}, tok.val) {
+					continue
+				}
+				if _, err := strconv.ParseFloat(tok.val, 64); err == nil {
+					continue
+				}
+				if _, ok := forkLocalCtx[tok.val]; !ok {
+					t.Errorf("%s reads %s, which forkLocalCtx does not know; add its mode-local value", where, tok.val)
+				}
+			}
+		}
+		return expr
+	}
+	setups := map[string]int{}
+	for _, path := range paths {
+		file := filepath.Base(path)
+		var wf struct {
+			Jobs map[string]struct {
+				Steps []sweepStep `yaml:"steps"`
+			} `yaml:"jobs"`
+		}
+		if err := yaml.Unmarshal([]byte(readFile(t, filepath.Dir(path), file)), &wf); err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		for _, id := range slices.Sorted(maps.Keys(wf.Jobs)) {
+			for _, s := range wf.Jobs[id].Steps {
+				where := file + " " + id + " step " + s.Name + s.ID
+				flags, syncFlags := s.Env["BAZEL_SYNC_FLAGS"]
+				if s.Uses != setupBazelUses && !syncFlags {
+					continue
+				}
+				cond := strings.TrimSpace(s.If)
+				cond = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(cond, "${{"), "}}"))
+				if cond != "" && !evalGHIf(t, eval(where+" if", cond, true), forkLocalCtx) {
+					continue
+				}
+				if s.Uses == setupBazelUses {
+					setups[file]++
+					for _, k := range []string{"BAZEL_FORK_CACHE", "BAZEL_FORK_REMOTE"} {
+						if got := interpolateGH(t, eval(where+" "+k, s.Env[k], false), forkLocalCtx); got != "" {
+							t.Errorf("mode local: %s %s = %q, want empty (no rbe-cache, no rbe-fork in a fork repository's own CI)", where, k, got)
+						}
+					}
+				}
+				if syncFlags {
+					if got := interpolateGH(t, eval(where+" BAZEL_SYNC_FLAGS", flags, false), forkLocalCtx); strings.Contains(got, "fork-cache") {
+						t.Errorf("mode local: %s BAZEL_SYNC_FLAGS = %q, want no --config=fork-cache", where, got)
+					}
+				}
+			}
+		}
+	}
+	// The sweep saw the callers it exists for.
+	for _, file := range []string{"bazel.yml", "review-formulas.yml"} {
+		if setups[file] == 0 {
+			t.Errorf("the setup-bazel sweep found no step running in mode local in %s (saw %v)", file, setups)
 		}
 	}
 }

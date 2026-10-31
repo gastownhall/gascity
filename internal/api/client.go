@@ -632,8 +632,17 @@ func NewCityScopedClient(baseURL, cityName string) *Client {
 	return newClient(baseURL, cityName)
 }
 
+// NewCityScopedClientWithHTTPClient is NewCityScopedClient with the caller's
+// HTTP client, so a test can serve the city in-process.
+func NewCityScopedClientWithHTTPClient(baseURL, cityName string, hc *http.Client) *Client {
+	return newClientWithHTTPClient(baseURL, cityName, hc)
+}
+
 func newClient(baseURL, cityName string) *Client {
-	httpClient := &http.Client{Timeout: defaultClientTimeout}
+	return newClientWithHTTPClient(baseURL, cityName, &http.Client{Timeout: defaultClientTimeout})
+}
+
+func newClientWithHTTPClient(baseURL, cityName string, httpClient *http.Client) *Client {
 	cw, err := genclient.NewClientWithResponses(
 		baseURL,
 		genclient.WithHTTPClient(httpClient),

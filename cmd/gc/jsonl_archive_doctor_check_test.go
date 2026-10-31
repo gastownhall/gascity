@@ -108,6 +108,90 @@ func TestJsonlArchiveDoctorCheck_LocalOnlyWarning(t *testing.T) {
 	}
 }
 
+func TestJsonlArchiveDoctorCheck_LocalPathOriginStillWarns(t *testing.T) {
+	for _, remote := range []string{
+		filepath.Join(t.TempDir(), "archive.git"),
+		"file://" + filepath.Join(t.TempDir(), "archive.git"),
+		"../archive.git",
+	} {
+		t.Run(remote, func(t *testing.T) {
+			cityDir := t.TempDir()
+			archiveDir := filepath.Join(cityDir, "archive")
+			initBareArchiveRepo(t, archiveDir, false)
+			runGit(t, archiveDir, "remote", "add", "origin", remote)
+
+			result := runJsonlArchiveCheck(t, cityDir, map[string]string{
+				"GC_JSONL_ARCHIVE_REPO": archiveDir,
+			})
+			if result.Status != doctor.StatusWarning {
+				t.Fatalf("status = %v, want Warning; result=%#v", result.Status, result)
+			}
+			if !strings.Contains(result.Message, "off-box backup disabled") {
+				t.Fatalf("message = %q", result.Message)
+			}
+		})
+	}
+}
+
+func TestArchiveRemoteIsOffBox(t *testing.T) {
+	for _, tc := range []struct {
+		remote string
+		want   bool
+	}{
+		{`C:\x`, false},
+		{"c:/x", false},
+		{"~/x", false},
+		{"./x", false},
+		{"FILE://x", false},
+		{"/abs", false},
+		{"", false},
+		{"git@host:x", true},
+		{"ssh://host/x", true},
+		{"https://h/x", true},
+	} {
+		if got := archiveRemoteIsOffBox(tc.remote); got != tc.want {
+			t.Errorf("archiveRemoteIsOffBox(%q) = %v, want %v", tc.remote, got, tc.want)
+		}
+	}
+}
+
+func TestJsonlArchiveDoctorCheck_LocalPushURLWarnsDespiteRemoteFetchURL(t *testing.T) {
+	cityDir := t.TempDir()
+	archiveDir := filepath.Join(cityDir, "archive")
+	initBareArchiveRepo(t, archiveDir, true)
+	runGit(t, archiveDir, "remote", "set-url", "--push", "origin", filepath.Join(t.TempDir(), "archive.git"))
+
+	result := runJsonlArchiveCheck(t, cityDir, map[string]string{
+		"GC_JSONL_ARCHIVE_REPO": archiveDir,
+	})
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want Warning; result=%#v", result.Status, result)
+	}
+	if !strings.Contains(result.Message, "off-box backup disabled") {
+		t.Fatalf("message = %q", result.Message)
+	}
+}
+
+func TestJsonlArchiveDoctorCheck_PushFailuresWinOverLocalPathOrigin(t *testing.T) {
+	cityDir := t.TempDir()
+	stateDir := t.TempDir()
+	archiveDir := filepath.Join(cityDir, "archive")
+	initBareArchiveRepo(t, archiveDir, false)
+	runGit(t, archiveDir, "remote", "add", "origin", filepath.Join(t.TempDir(), "archive.git"))
+	writeArchiveState(t, stateDir, `{"consecutive_push_failures":2}`)
+
+	result := runJsonlArchiveCheck(t, cityDir, map[string]string{
+		"GC_PACK_STATE_DIR":     stateDir,
+		"GC_JSONL_ARCHIVE_REPO": archiveDir,
+	})
+	if result.Status != doctor.StatusError {
+		t.Fatalf("status = %v, want Error; result=%#v", result.Status, result)
+	}
+	if !strings.Contains(result.Message, "2 consecutive push failure") {
+		t.Fatalf("message = %q", result.Message)
+	}
+}
+
 // TestJsonlArchiveDoctorCheck_ArchiveHasOriginIgnoresPoisonedGitEnv proves the
 // archive remote query resolves from the archive repo passed via -C even when
 // git-locating environment variables point at an unrelated repository. Running
