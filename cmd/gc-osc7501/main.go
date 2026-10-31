@@ -5,6 +5,7 @@
 // Usage:
 //
 //	gc-osc7501 tap -x <tmux-bin> -S <socket-path> -t <pane-id> -n <rand> [-a <app>]
+//	gc-osc7501 relay -- <argv...>
 //	gc-osc7501 version
 //
 // tap runs under tmux pipe-pane -O, which gc arms on each declared agent
@@ -12,6 +13,15 @@
 // root record to the pane options @gc_ps and @gc_ps_text, every write
 // guarded by the pane's nonce "<rand>.<pane-id>" (@gc_ps_tap). It exits 0 on
 // EOF and 1 when writes keep failing.
+//
+// relay runs argv on a pty of its own and relays bytes verbatim between it
+// and the pane, answering the program's OSC 7501 support probe so a program
+// that gates its reports on the answer reports under tmux (package
+// internal/runtime/programstatus/relay documents what happens when either
+// side ends). It ends with the program's exit status, or dies by the
+// program's fatal signal. With no terminal on stdin it execs argv directly.
+// It writes nothing of its own to the pane, except one stderr line and exit
+// status 127 when the program cannot be started.
 //
 // version prints "gc-osc7501 <version> codec=N relay=N"; gc arms a pane only
 // when the codec matches its own.
@@ -24,10 +34,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"runtime"
 	"runtime/debug"
 
 	"github.com/gastownhall/gascity/internal/runtime/programstatus"
+	"github.com/gastownhall/gascity/internal/runtime/programstatus/relay"
 	"github.com/gastownhall/gascity/internal/runtime/programstatus/tap"
 )
 
@@ -36,17 +48,21 @@ import (
 var version = "dev"
 
 // relayVersion is the relay protocol this build implements; 0: no relay.
-const relayVersion = 0
+const relayVersion = 1
 
 // Exit codes.
 const (
 	exitOK      = 0
 	exitFailure = 1
 	exitUsage   = 2
+	// exitStart is the relay's status when the program could not be
+	// started, as a shell reports a command it cannot run.
+	exitStart = 127
 )
 
 const usage = `usage:
   gc-osc7501 tap -x <tmux-bin> -S <socket-path> -t <pane-id> -n <rand> [-a <app>]
+  gc-osc7501 relay -- <argv...>
   gc-osc7501 version
 `
 
@@ -76,6 +92,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, environ []str
 	switch args[0] {
 	case "tap":
 		return runTap(args[1:], stdin, stderr, environ)
+	case "relay":
+		return runRelay(args[1:], stderr, environ)
 	case "version":
 		if len(args) != 1 {
 			diag(stderr, "%s", usage)
@@ -154,6 +172,47 @@ func runTap(args []string, stdin io.Reader, stderr io.Writer, environ []string) 
 		return exitFailure
 	}
 	return exitOK
+}
+
+// parseRelayArgs returns the program the relay runs: everything after the
+// optional "--".
+func parseRelayArgs(args []string, stderr io.Writer) ([]string, error) {
+	fs := flag.NewFlagSet("gc-osc7501 relay", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
+	if fs.NArg() == 0 {
+		return nil, errors.New("no program to run")
+	}
+	return fs.Args(), nil
+}
+
+// runRelay relays the process's own terminal to the program and ends the
+// process as the program ended; it returns only on a usage or start failure.
+func runRelay(args []string, stderr io.Writer, environ []string) int {
+	argv, err := parseRelayArgs(args, stderr)
+	if err != nil {
+		if !errors.Is(err, flag.ErrHelp) {
+			diag(stderr, "gc-osc7501 relay: %v\n%s", err, usage)
+		}
+		return exitUsage
+	}
+	// Subscribe before the program starts, so no signal meant for it is
+	// lost or takes the relay down instead.
+	sigs := make(chan os.Signal, 16)
+	signal.Notify(sigs, relay.Signals...)
+	st, err := relay.Run(relay.Options{Argv: argv, Env: environ, Stdin: os.Stdin, Stdout: os.Stdout, Signals: sigs})
+	if errors.Is(err, relay.ErrNotTerminal) {
+		signal.Reset(relay.Signals...)
+		err = relay.Exec(argv, environ)
+	}
+	if err != nil {
+		diag(stderr, "gc-osc7501 relay: %v\n", err)
+		return exitStart
+	}
+	relay.Exit(st)
+	return exitFailure // unreachable: Exit ends the process
 }
 
 // diag writes a diagnostic to stderr. A failed stderr write has nowhere left
