@@ -512,7 +512,7 @@ func TestPurgeStrandedLeavesOtherStrandedRowsAndNonStrandedMessages(t *testing.T
 // under the same (id, created_at) is never deleted.
 func TestPurgeGuardRefusesARowTheBindingHoldsAsTheSameBead(t *testing.T) {
 	city := newConvergedPurgeCity(t)
-	binding := openMigratedDestination(t, city.target)
+	binding := beads.MailStore{Store: openMigratedDestination(t, city.target)}
 	if err := refuseInfraPurgeOfBindingRows(binding, []beads.Bead{city.reusedOriginal}); err == nil || !strings.Contains(err.Error(), mcReusedID) {
 		t.Fatalf("the guard let a row the binding holds as the same bead through: %v", err)
 	}

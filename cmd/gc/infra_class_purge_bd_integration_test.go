@@ -352,8 +352,13 @@ func TestRestorePurgePutsAParentBackOnARealBdWorkStore(t *testing.T) {
 		if got, err := store.Get(mail); err != nil || got.ParentID != task {
 			t.Errorf("%s came back with parent %q, want %q (err %v)", mail, got.ParentID, task, err)
 		}
+		stores, err := openInfraPurgeStores(city.cityPath, city.target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer stores.closeWork()
 		for _, edge := range []infraBackupEdge{{IssueID: mail, DependsOnID: task, Type: "parent-child"}, {IssueID: other, DependsOnID: task, Type: "blocks"}} {
-			if diff, err := infraPurgeEdgeDifference(store, edge); err != nil || diff != "" {
+			if diff, err := infraPurgeEdgeDifference(stores, edge); err != nil || diff != "" {
 				t.Errorf("the edge %s did not come back: %s (err %v)", edge, diff, err)
 			}
 		}

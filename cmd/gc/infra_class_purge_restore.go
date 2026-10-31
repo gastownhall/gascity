@@ -31,7 +31,7 @@ package main
 //     the purge refuses it;
 //   - an edge carrying a payload needs a store that can write one, and rows to
 //     import need a store that imports verbatim, each decided on the store
-//     under the policy wrapper (infraPurgeStoreUnderPolicy), so --dry-run
+//     under the policy wrapper (infraPurgeStores.underPolicy), so --dry-run
 //     refuses where the restore would.
 //
 // It restores only what a purge deleted: the backup must be one the ledger
@@ -40,13 +40,12 @@ package main
 // class, and every edge must touch its record's row. A hand-built file
 // therefore cannot use this to write arbitrary rows under fixed ids, or an
 // edge between rows the purge never touched. This is the only sanctioned
-// caller of
-// beads.VerbatimImporter (it needs the storeclass allowlist row when T1
-// lands): verbatim import bypasses id minting, and that is safe only for rows
-// the store itself held before. The backup is matched to its ledger record by
-// location, not by spelling: the ledger names it under the binding root's
-// canonical spelling, and on macOS an operator's /private/var/... path names
-// the ledger's /var/....
+// caller of beads.VerbatimImporter, reached through beads.As on the handle
+// openInfraPurgeStores mints: verbatim import bypasses id minting, and that is
+// safe only for rows the store itself held before. The backup is matched to
+// its ledger record by location, not by spelling: the ledger names it under
+// the binding root's canonical spelling, and on macOS an operator's
+// /private/var/... path names the ledger's /var/....
 //
 // While a purge run is interrupted, only that run's backup is restored: rows
 // of another run put back now would be selected again by the interrupted
@@ -97,12 +96,12 @@ func doStorageRestorePurge(ctx context.Context, request storageOperatorRequest, 
 		fmt.Fprintf(stderr, "%s: %v. Nothing was written\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := infraPurgeRestoreBindingRefusal(session.target, run, records); err != nil {
+	if err := infraPurgeRestoreBindingRefusal(session.stores, session.target, run, records); err != nil {
 		fmt.Fprintf(stderr, "%s: %v. Nothing was written\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	pending, interrupted := infraPurgePendingRun(ledger)
-	plan, err := planInfraPurgeRestore(session.source, records, interrupted && pending.Run == run.Run)
+	plan, err := planInfraPurgeRestore(session.stores, records, interrupted && pending.Run == run.Run)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v. Nothing was written\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -113,7 +112,7 @@ func doStorageRestorePurge(ctx context.Context, request storageOperatorRequest, 
 		fmt.Fprintln(stdout, "dry-run: nothing was written") //nolint:errcheck // best-effort stdout
 		return 0
 	}
-	if err := applyInfraPurgeRestore(session.source, records, plan); err != nil {
+	if err := applyInfraPurgeRestore(session.stores, records, plan); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -168,12 +167,12 @@ func infraPurgeRunOfBackup(ledger []infraPurgeLedgerRecord, path string) (infraP
 // hand, so the binding serves it. The restore writes only the work store, so
 // it would put the row's edges back on the work store's copy, which status
 // counts as a retained copy, and never where the city reads them.
-func infraPurgeRestoreBindingRefusal(target infraBindingTarget, run infraPurgeLedgerRecord, records []infraRecoverChoiceRecord) error {
-	binding, err := openInfraBindingReadOnly(target)
+func infraPurgeRestoreBindingRefusal(stores *infraPurgeStores, target infraBindingTarget, run infraPurgeLedgerRecord, records []infraRecoverChoiceRecord) error {
+	binding, closeBinding, err := stores.openBinding()
 	if err != nil {
 		return fmt.Errorf("opening binding %s: %w", target.Database, err)
 	}
-	defer closeBeadStoreHandle(binding) //nolint:errcheck // best-effort close
+	defer closeBinding()
 	rows := make([]beads.Bead, 0, len(records))
 	for _, record := range records {
 		rows = append(rows, record.Entry.Bead)
@@ -209,9 +208,9 @@ type infraPurgeRestorePlan struct {
 // planInfraPurgeRestore decides what the restore of records writes, or names
 // why it refuses before writing anything. interrupted is whether records are
 // the interrupted run's backup, which decides the step a refusal names.
-func planInfraPurgeRestore(source beads.Store, records []infraRecoverChoiceRecord, interrupted bool) (infraPurgeRestorePlan, error) {
+func planInfraPurgeRestore(stores *infraPurgeStores, records []infraRecoverChoiceRecord, interrupted bool) (infraPurgeRestorePlan, error) {
 	var plan infraPurgeRestorePlan
-	all, err := source.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	all, err := stores.work.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
 	if err != nil {
 		return plan, fmt.Errorf("listing work store: %w", err)
 	}
@@ -248,23 +247,22 @@ func planInfraPurgeRestore(source beads.Store, records []infraRecoverChoiceRecor
 		return plan, fmt.Errorf("%d backed-up edge(s) point at a row that is neither in the backup nor in the work store, so they cannot be put back: %s", len(missing), strings.Join(missing, "; "))
 	}
 	if len(plan.edges) > 0 {
-		if err := infraPurgeRelationListingRefusal(source, plan.edges[0].IssueID); err != nil {
+		if err := infraPurgeRelationListingRefusal(stores.work, plan.edges[0].IssueID); err != nil {
 			return plan, err
 		}
 	}
-	under := infraPurgeStoreUnderPolicy(source)
-	if writer, ok := under.(beads.DepMetadataWriter); ok {
+	if writer, ok := beads.As[beads.DepMetadataWriter](stores.underPolicy); ok {
 		plan.writer = writer
 	}
 	for _, edge := range plan.edges {
 		if edge.Carried && plan.writer == nil {
-			return plan, fmt.Errorf("edge %s carries a payload and the work store %T cannot write one", edge, under)
+			return plan, fmt.Errorf("edge %s carries a payload and the work store %s cannot write one", edge, stores.engine)
 		}
 	}
-	if importer, ok := under.(beads.VerbatimImporter); ok {
+	if importer, ok := beads.As[beads.VerbatimImporter](stores.underPolicy); ok {
 		plan.importer = importer
 	} else if len(plan.toImport) > 0 {
-		return plan, fmt.Errorf("the work store %T cannot import rows verbatim; restore with raw bd instead (docs/runbooks/split-storage-classes.md, \"Restoring purged mail\")", under)
+		return plan, fmt.Errorf("the work store %s cannot import rows verbatim; restore with raw bd instead (docs/runbooks/split-storage-classes.md, \"Restoring purged mail\")", stores.engine)
 	}
 	return plan, nil
 }
@@ -302,7 +300,7 @@ func infraPurgeRestoreCollisionRefusal(reminted, changed []string, interrupted b
 // the purge refuses too (infraPurgeInboundEdges). Any other probe error is
 // left to the reads themselves, as newSourceDepReader leaves it: a moment's
 // failure is no evidence about the store.
-func infraPurgeRelationListingRefusal(source beads.Store, probeID string) error {
+func infraPurgeRelationListingRefusal(source beads.WorkStore, probeID string) error {
 	if _, err := source.DepList(probeID, "down"); infraRelationCapabilityRefusal(err) {
 		return fmt.Errorf("the work store refuses relation listing (%w), and the restore reads every edge it writes back through it; restore with raw bd instead (docs/runbooks/split-storage-classes.md, \"Restoring purged mail\")", err)
 	}
@@ -312,7 +310,7 @@ func infraPurgeRelationListingRefusal(source beads.Store, probeID string) error 
 // applyInfraPurgeRestore imports the plan's rows and proves them, then adds
 // the plan's edges and proves them, and the rows again with their edges. Its
 // error says what is already back.
-func applyInfraPurgeRestore(source beads.Store, records []infraRecoverChoiceRecord, plan infraPurgeRestorePlan) error {
+func applyInfraPurgeRestore(stores *infraPurgeStores, records []infraRecoverChoiceRecord, plan infraPurgeRestorePlan) error {
 	if len(plan.toImport) > 0 {
 		if err := plan.importer.ImportVerbatim(plan.toImport); err != nil {
 			if errors.Is(err, beads.ErrVerbatimImportUnsupported) {
@@ -322,7 +320,7 @@ func applyInfraPurgeRestore(source beads.Store, records []infraRecoverChoiceReco
 		}
 	}
 	// The rows, proven before any edge touches them.
-	differ, err := infraPurgeRowsNotBack(source, records, restoredRowDifferenceBeforeEdges)
+	differ, err := infraPurgeRowsNotBack(stores.work, records, restoredRowDifferenceBeforeEdges)
 	if err != nil {
 		return err
 	}
@@ -331,7 +329,7 @@ func applyInfraPurgeRestore(source beads.Store, records []infraRecoverChoiceReco
 	}
 
 	for _, edge := range plan.edges {
-		diff, err := infraPurgeEdgeDifference(source, edge)
+		diff, err := infraPurgeEdgeDifference(stores, edge)
 		if err != nil {
 			return fmt.Errorf("reading edge %s: %w", edge, err)
 		}
@@ -341,7 +339,7 @@ func applyInfraPurgeRestore(source beads.Store, records []infraRecoverChoiceReco
 		if edge.Carried {
 			err = plan.writer.DepAddWithMetadata(edge.IssueID, edge.DependsOnID, edge.Type, edge.Payload)
 		} else {
-			err = source.DepAdd(edge.IssueID, edge.DependsOnID, edge.Type)
+			err = stores.work.DepAdd(edge.IssueID, edge.DependsOnID, edge.Type)
 		}
 		if err != nil {
 			return fmt.Errorf("adding edge %s: %w. Run this again; edges already back are skipped", edge, err)
@@ -349,7 +347,7 @@ func applyInfraPurgeRestore(source beads.Store, records []infraRecoverChoiceReco
 	}
 	var lost []string
 	for _, edge := range plan.edges {
-		diff, err := infraPurgeEdgeDifference(source, edge)
+		diff, err := infraPurgeEdgeDifference(stores, edge)
 		if err != nil {
 			return fmt.Errorf("reading edge %s: %w", edge, err)
 		}
@@ -361,7 +359,7 @@ func applyInfraPurgeRestore(source beads.Store, records []infraRecoverChoiceReco
 		return fmt.Errorf("%d edge(s) do not read back after the restore: %s", len(lost), strings.Join(lost, "; "))
 	}
 	// The rows again, whole, now that their edges are back.
-	differ, err = infraPurgeRowsNotBack(source, records, restoredEntryDifference)
+	differ, err = infraPurgeRowsNotBack(stores.work, records, restoredEntryDifference)
 	if err != nil {
 		return err
 	}
@@ -373,7 +371,7 @@ func applyInfraPurgeRestore(source beads.Store, records []infraRecoverChoiceReco
 
 // infraPurgeRowsNotBack re-reads the work store and names every row of records
 // it does not hold, or holds other than as backed up by differ.
-func infraPurgeRowsNotBack(source beads.Store, records []infraRecoverChoiceRecord, differ func(infraBackupEntry, beads.Bead) string) ([]string, error) {
+func infraPurgeRowsNotBack(source beads.WorkStore, records []infraRecoverChoiceRecord, differ func(infraBackupEntry, beads.Bead) string) ([]string, error) {
 	rows, err := source.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
 	if err != nil {
 		return nil, fmt.Errorf("re-reading the work store: %w", err)
