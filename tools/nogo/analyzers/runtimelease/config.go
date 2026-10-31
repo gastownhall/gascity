@@ -99,9 +99,9 @@ var allowed = map[string]Allowance{
 		Callers: []string{"Manager.ensureRunningOn", "Manager.ensureRunningRuntimeOnly"},
 	},
 	session + ":Manager.ensureRunningRuntimeOnly": {Reason: "the legacy start's runtime bring-up, under the candidate's lease", Callers: []string{"Manager.StartRuntimeOnly"}},
-	session + ":Manager.killOrphanPass": {
-		Reason:  "a start's pre-start orphan kill (one killExistingOrphans pass), under the start's lease",
-		Callers: []string{"Manager.killExistingOrphans"},
+	session + ":Manager.killExistingOrphans": {
+		Reason:  "a start's pre-start orphan kill, under the start's lease",
+		Callers: []string{"Manager.createStarted", "Manager.ensureRunningOn", "Manager.ensureRunningRuntimeOnly", "Manager.retryFreshStartAfterStaleKey"},
 	},
 	session + ":Manager.createStarted":                     {Reason: "CreateSession's first start of a new row: takes the runtime lease (leaseCreatedRuntime) before it", Callers: []string{"Manager.CreateSession"}},
 	session + ":Manager.Suspend":                           {Reason: "a suspend takes the lease (leaseForStop); the city stop's sweep (ActorSweep) takes none"},

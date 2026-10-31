@@ -800,7 +800,7 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 	}
 	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
 	for pass := 1; ; pass++ {
-		terminated, err := m.killOrphanPass(scanner, sessionID, cityPath)
+		terminated, err := m.killOrphanPass(scanner, scanner.TerminateRuntime, sessionID, cityPath)
 		if err != nil {
 			return err
 		}
@@ -819,8 +819,10 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 const maxOrphanPasses = 3
 
 // killOrphanPass scans once for sessionID's untracked roots in cityPath and
-// terminates each, reporting how many it terminated.
-func (m *Manager) killOrphanPass(scanner runtime.ProcessTableScanner, sessionID, cityPath string) (int, error) {
+// terminates each with terminate, reporting how many it terminated.
+// killExistingOrphans passes the scanner's TerminateRuntime, so the runtime
+// verb is referenced, and lease-checked, in killExistingOrphans itself.
+func (m *Manager) killOrphanPass(scanner runtime.ProcessTableScanner, terminate func(runtime.LiveRuntime) error, sessionID, cityPath string) (int, error) {
 	found, scanErr := scanner.FindRuntimesBySessionID(sessionID)
 	if scanErr != nil && !orphanScanErrorsRefuseStart {
 		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(scanErr))
@@ -856,7 +858,7 @@ func (m *Manager) killOrphanPass(scanner runtime.ProcessTableScanner, sessionID,
 			log.Printf("session: leaving process-table root for %s pid=%d alone: city infrastructure (managed Dolt watchdog or bd proxy)", sessionID, live.PID)
 			continue
 		}
-		if err := scanner.TerminateRuntime(live); err != nil {
+		if err := terminate(live); err != nil {
 			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)
 			termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))
 			continue
