@@ -361,6 +361,21 @@ func TestDoltDriftCheckReportsMissingOrEmptyInheritedRigPortMirror(t *testing.T)
 				t.Fatal(err)
 			}
 		}},
+		{name: "empty", wantWord: "empty", write: func(t *testing.T, portFile string) {
+			if err := os.WriteFile(portFile, []byte(""), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "newline only", wantWord: "empty", write: func(t *testing.T, portFile string) {
+			if err := os.WriteFile(portFile, []byte("\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "whitespace only", wantWord: "empty", write: func(t *testing.T, portFile string) {
+			if err := os.WriteFile(portFile, []byte(" \t\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cityDir, rigDir, managedPort, cfg := managedCityDriftFixture(t, "severed")
