@@ -267,6 +267,7 @@ func knownTOMLKeys() []string {
 		reflect.TypeOf(ProviderSpec{}),
 		reflect.TypeOf(UpstreamSpec{}),
 		reflect.TypeOf(UpstreamEnvBinding{}),
+		reflect.TypeOf(ProgramStatusBinding{}),
 		reflect.TypeOf(AgentPatch{}),
 		reflect.TypeOf(AgentOverride{}),
 		reflect.TypeOf(BeadsConfig{}),

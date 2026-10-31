@@ -20,6 +20,22 @@ builds:
     goarch:
       - amd64
       - arm64
+  # gc-osc7501, the OSC 7501 capture companion, ships in the same archive and
+  # is installed next to gc. The gc build above keeps the default id: release
+  # workflows read dist/gascity_linux_amd64_v1/gc.
+  - id: gc-osc7501
+    main: ./cmd/gc-osc7501
+    binary: gc-osc7501
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{ .Tag }}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
 
 archives:
   - id: gc-archive
