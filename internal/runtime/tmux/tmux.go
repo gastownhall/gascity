@@ -184,6 +184,10 @@ type Config struct {
 	// capture arms with. Empty resolves it at each arm: next to the running
 	// executable, else on PATH. Tests set it to the binary they built.
 	ProgramStatusBin string
+	// ProgramStatus is the city's [session] program_status switch, the mode
+	// every program-status reading is taken under. Off (or empty) reads
+	// nothing: the read formats stay today's and every reading is Unread.
+	ProgramStatus runtime.ProgramStatusMode
 }
 
 // DefaultConfig returns a Config with the original hardcoded values.
@@ -1332,10 +1336,22 @@ func buildProcessKillPlan(rootPID int, records []proctable.ProcessRecord, exclud
 	// owned group, members outside that tree are its init/subreaper-adopted tail.
 	// Order each orphan tree deepest-first and resolve disconnected/cyclic
 	// components by PID.
-	if root.PGID == root.PID {
+	//
+	// The same proof holds for every captured descendant that leads its own
+	// group: the program-status relay runs its program in a session and group
+	// of its own (as any setsid'd child does), and that group's
+	// reparented members are the program's, never the pane leader's. An
+	// excluded descendant's group stays as preserved as its leader.
+	owned := make(map[int]bool)
+	for pid := range visited {
+		if record := byPID[pid]; record.PGID == pid && (pid == rootPID || !exclude[pid]) {
+			owned[pid] = true
+		}
+	}
+	if len(owned) > 0 {
 		extra := make(map[int]bool)
 		for pid, record := range byPID {
-			if !visited[pid] && record.PGID == root.PGID && record.PPID > 0 {
+			if !visited[pid] && owned[record.PGID] && record.PPID > 0 {
 				extra[pid] = true
 			}
 		}
@@ -6050,7 +6066,11 @@ func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
 // The previous pipe is never closed ahead of the respawn: pipe-pane fails on
 // an exited pane, which would refuse to respawn a dead agent. A list that
 // fails after the marker printed respawned the pane: the arm failure is
-// logged and the respawn succeeds; heal re-arms the pane.
+// logged and the respawn succeeds; heal re-arms the pane. While the
+// program-status switch is not off, an unarmed respawn (undeclared, or the
+// gate refused) runs the same list with the capture removed after the
+// marker (disarmCommands), so an earlier incarnation's tap can never vouch
+// for the new program.
 func (t *Tmux) respawnPaneWithWorkDir(pane, workDir, command string, arm runtime.ProgramStatusArm) error {
 	target, err := t.agentPaneTarget(pane)
 	if err != nil {
@@ -6063,6 +6083,19 @@ func (t *Tmux) respawnPaneWithWorkDir(pane, workDir, command string, arm runtime
 		}
 		if followErr != nil {
 			_, _ = fmt.Fprintf(captureWarningOut, "warning: pane %s: re-arming program-status capture: %v\n", target, followErr)
+		}
+		return nil
+	}
+	if t.programStatusMode() != runtime.ProgramStatusOff {
+		// An unarmed respawn under a live switch: the previous incarnation's
+		// tap must not publish the new program under its nonce, so the
+		// capture is removed in the same list, after the respawn ran.
+		followErr, err := t.runRespawnList(target, workDir, t.wrapPaneCommand(command), disarmCommands(target))
+		if err != nil {
+			return err
+		}
+		if followErr != nil {
+			_, _ = fmt.Fprintf(captureWarningOut, "warning: pane %s: removing program-status capture: %v\n", target, followErr)
 		}
 		return nil
 	}
