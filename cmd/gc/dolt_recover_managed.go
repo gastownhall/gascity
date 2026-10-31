@@ -54,13 +54,16 @@ func defaultManagedDoltRecoveryOps() managedDoltRecoveryOps {
 		start: func(cityPath, host, port, user, logLevel string, timeout time.Duration) (managedDoltStartReport, error) {
 			return startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel, -1, timeout, false)
 		},
-		publish:       publishManagedDoltRuntimeStateIfOwned,
-		failedCleanup: cleanupFailedManagedDoltRecovery,
+		publish:              publishManagedDoltRuntimeStateIfOwned,
+		failedCleanup:        cleanupFailedManagedDoltRecovery,
+		classifyUnresponsive: classifyManagedDoltUnresponsive,
 	}
 }
 
 func recoverManagedDoltProcess(cityPath, host, port, user, logLevel string, timeout time.Duration) (managedDoltRecoverReport, error) {
-	return recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel, timeout, defaultManagedDoltRecoveryOps())
+	ops := defaultManagedDoltRecoveryOps()
+	ops.unresponsiveRestartAfter = resolveManagedDoltUnresponsiveRestartAfter(cityPath)
+	return recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel, timeout, ops)
 }
 
 func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel string, timeout time.Duration, ops managedDoltRecoveryOps) (managedDoltRecoverReport, error) {
@@ -143,10 +146,19 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 		}
 	}
 
-	if err := ops.queryProbe(host, port, user); err == nil {
+	var stopReason string
+	var unresponsiveFor time.Duration
+	probeErr := ops.queryProbe(host, port, user)
+	if probeErr == nil {
+		// The server answers, so any unresponsive streak is over.
+		if err := removeManagedDoltTimestamp(managedDoltUnresponsiveSincePath(layout)); err != nil {
+			return report, fmt.Errorf("clear managed dolt unresponsive state: %w", err)
+		}
+		stopReason = "health-not-ready"
 		health, healthErr := ops.healthCheck(host, port, user)
 		if healthErr == nil && health.ReadOnly == "true" {
 			report.DiagnosedReadOnly = true
+			stopReason = "read-only"
 		} else if healthErr == nil && health.QueryReady && health.ReadOnly == "false" {
 			report.Ready = true
 			report.Healthy = true
@@ -159,7 +171,14 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 			recoverManagedDoltPopulateReportFromRuntimeState(cityPath, port, &report)
 			return report, nil
 		}
+	} else {
+		reason, elapsed, deferErr := managedDoltRecoverUnresponsiveGate(cityPath, host, port, layout, ops, probeErr, &report)
+		if deferErr != nil {
+			return report, deferErr
+		}
+		stopReason, unresponsiveFor = reason, elapsed
 	}
+	logManagedDoltRecoverDecision(layout, "stop", stopReason, report.PID, port, probeErr, unresponsiveFor, recoverNow(ops))
 
 	stopReport, stopErr := ops.stop(cityPath, port)
 	report.HadPID = stopReport.HadPID
@@ -205,6 +224,14 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 		return report, ops.failedCleanup(cityPath, report.PID, report.Port, fmt.Errorf("publish managed dolt runtime state: %w", err))
 	}
 	return report, nil
+}
+
+// recoverNow reads the recovery clock, which tests replace through ops.now.
+func recoverNow(ops managedDoltRecoveryOps) time.Time {
+	if ops.now != nil {
+		return ops.now()
+	}
+	return time.Now()
 }
 
 func cleanupFailedManagedDoltRecovery(cityPath string, pid, port int, cause error) error {

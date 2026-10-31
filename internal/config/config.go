@@ -3274,12 +3274,17 @@ func (d *DaemonConfig) DoltStopTimeoutDuration() time.Duration {
 }
 
 // DefaultDoltUnresponsiveRestartAfter is how long a live managed dolt may stay
-// unresponsive before recovery stops it.
+// unresponsive to the recover probe before recovery stops it. It is several
+// times the 5s probe timeout and the 30s recover cooldown, so one probe lost
+// to load never restarts a server, while a wedged one is still replaced.
 const DefaultDoltUnresponsiveRestartAfter = 180 * time.Second
 
-// DoltUnresponsiveRestartAfterDuration returns the unresponsive window.
+// DoltUnresponsiveRestartAfterDuration returns the unresponsive window as a
+// time.Duration. Defaults to DefaultDoltUnresponsiveRestartAfter (180s) when
+// empty or unparseable. Zero is allowed and means restart on the first failed
+// probe.
 func (d *DaemonConfig) DoltUnresponsiveRestartAfterDuration() time.Duration {
-	return 0
+	return durationOr(d.DoltUnresponsiveRestartAfter, DefaultDoltUnresponsiveRestartAfter)
 }
 
 // DefaultDoltStartAddressInUseRetryWindow is the per-port retry window used

@@ -138,6 +138,7 @@ func ValidateDurations(cfg *City, source string) []string {
 	check("[daemon]", "drift_drain_timeout", cfg.Daemon.DriftDrainTimeout)
 	check("[daemon]", "start_ready_timeout", cfg.Daemon.StartReadyTimeout)
 	check("[daemon]", "dolt_stop_timeout", cfg.Daemon.DoltStopTimeout)
+	check("[daemon]", "dolt_unresponsive_restart_after", cfg.Daemon.DoltUnresponsiveRestartAfter)
 	check("[daemon]", "dolt_start_address_in_use_retry_window", cfg.Daemon.DoltStartAddressInUseRetryWindow)
 	check("[dolt]", "dolt_lock_release_timeout", cfg.Dolt.DoltLockReleaseTimeout)
 
@@ -254,6 +255,9 @@ func ValidateNonNegativeDurations(cfg *City, source string) error {
 	}
 
 	if err := checkNonNegative("[daemon]", "dolt_stop_timeout", cfg.Daemon.DoltStopTimeout); err != nil {
+		return err
+	}
+	if err := checkNonNegative("[daemon]", "dolt_unresponsive_restart_after", cfg.Daemon.DoltUnresponsiveRestartAfter); err != nil {
 		return err
 	}
 	if err := checkNonNegative("[daemon]", "dolt_start_address_in_use_retry_window", cfg.Daemon.DoltStartAddressInUseRetryWindow); err != nil {
