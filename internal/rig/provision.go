@@ -142,10 +142,11 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 	// Step 14: snapshot the topology before the first config write. The
 	// pre-init snapshot of a store that was already there goes last:
 	// RestoreSnapshots restores in order, so a rollback returns that store to
-	// the bytes the add found, not the ones init left.
+	// the bytes the add found, not the ones init left. No rollback covers this
+	// step itself, so its failure restores that store directly.
 	snapshots, err := SnapshotTopologyFiles(fs, cityPath, plan.nextCfg)
 	if err != nil {
-		return config.Rig{}, result, fmt.Errorf("snapshot canonical files: %w", err)
+		return config.Rig{}, result, restorePreexistingStore(fs, preexistingStore, fmt.Errorf("snapshot canonical files: %w", err))
 	}
 	snapshots = append(snapshots, preexistingStore...)
 
@@ -814,13 +815,15 @@ func snapshotPreexistingStore(fs fsys.FS, rigPath string) ([]FileSnapshot, error
 	return snapshots, nil
 }
 
-// restorePreexistingStore puts back the scope files a failed store init
-// rewrote in a store that predates this add, and returns the init error for the
-// caller to surface. Such a store — an --adopt'ed one, a re-added rig's — is
-// never deleted, but init canonicalizes its metadata.json and config.yaml
-// before the provider's init op runs, so without the restore a failed add left
-// the store rewritten for a city that never registered it. A failed restore is
-// reported with the init error, as rollbackError does.
+// restorePreexistingStore puts back the scope files store init rewrote in a
+// store that predates this add, when the add fails before the topology rollback
+// covers them (in init itself, or in the topology snapshot after it), and
+// returns cause for the caller to surface. Such a store — an --adopt'ed one, a
+// re-added rig's — is never deleted, but init canonicalizes its metadata.json
+// and config.yaml before the provider's init op runs, so without the restore a
+// failed add left the store rewritten for a city that never registered it. With
+// no snapshot (no store predated the add) cause comes back unchanged; a failed
+// restore is reported with cause, as rollbackError does.
 func restorePreexistingStore(fs fsys.FS, snapshots []FileSnapshot, cause error) error {
 	if restoreErr := RestoreSnapshots(fs, snapshots); restoreErr != nil {
 		return fmt.Errorf("%w (rollback failed: %w)", cause, restoreErr)

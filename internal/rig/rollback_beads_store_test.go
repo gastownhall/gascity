@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -297,5 +298,105 @@ func TestProvisionRollbackRestoresAdoptedStoreToPreInitBytes(t *testing.T) {
 	}
 	if string(cityTOML) != originalCityTOML {
 		t.Errorf("city.toml after rollback = %q, want it restored", cityTOML)
+	}
+}
+
+// An adopt whose init rewrites the store and succeeds, but whose topology
+// snapshot then fails, returns the adopted store to its pre-init bytes and
+// modes: the rollback of the guarded write window is not installed yet, so the
+// snapshot failure must restore the store itself.
+func TestProvisionRestoresAdoptedStoreWhenTopologySnapshotFails(t *testing.T) {
+	deps, req := provisionWithFailingStoreInit(t, func(_, dir, _ string) (bool, error) {
+		beads := filepath.Join(dir, ".beads")
+		if err := os.WriteFile(filepath.Join(beads, "config.yaml"), []byte("issue_prefix: storerig\ndolt.auto-start: false\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beads, "metadata.json"), []byte(`{"backend":"dolt","dolt_database":"storerig","dolt_mode":"server"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beads, "dolt-server.port"), []byte("3307\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return false, nil
+	})
+	req.Adopt = true
+	req.Prefix = "storerig"
+	deps.StoreContract = func(string) bool { return true }
+	// A city scope file the topology snapshot cannot read.
+	if err := os.MkdirAll(filepath.Join(deps.CityPath, ".beads", "config.yaml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writePartialStore(t, req.Path)
+	beads := filepath.Join(req.Path, ".beads")
+	const yamlBefore = "issue-prefix: \"storerig\"\n"
+	if err := os.WriteFile(filepath.Join(beads, "config.yaml"), []byte(yamlBefore), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(beads, "metadata.json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	metaBefore, err := os.ReadFile(filepath.Join(beads, "metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, provErr := Provision(deps, req)
+	if !errors.Is(provErr, syscall.EISDIR) || !strings.HasPrefix(provErr.Error(), "snapshot canonical files: ") {
+		t.Fatalf("Provision error = %v, want the topology snapshot failure", provErr)
+	}
+	if strings.Contains(provErr.Error(), "rollback failed") {
+		t.Errorf("a clean restore was reported as failed: %v", provErr)
+	}
+	for name, want := range map[string]string{"config.yaml": yamlBefore, "metadata.json": string(metaBefore)} {
+		path := filepath.Join(beads, name)
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != want {
+			t.Errorf("%s after failed adopt = %q, want %q", name, got, want)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Errorf("%s mode after restore = %v, want 0600", name, got)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(beads, "dolt-server.port")); !os.IsNotExist(err) {
+		t.Errorf("dolt-server.port init wrote survived (stat err = %v)", err)
+	}
+}
+
+// A restore that cannot put the adopted store's file back after the topology
+// snapshot failed is reported with the snapshot error rather than swallowed.
+func TestProvisionReportsFailedRestoreWhenTopologySnapshotFails(t *testing.T) {
+	deps, req := provisionWithFailingStoreInit(t, func(_, dir, _ string) (bool, error) {
+		// The topology snapshot fails to read config.yaml, and the restore
+		// cannot write over it.
+		cfg := filepath.Join(dir, ".beads", "config.yaml")
+		if err := os.Remove(cfg); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(cfg, "blocker"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return false, nil
+	})
+	req.Adopt = true
+	req.Prefix = "storerig"
+	deps.StoreContract = func(string) bool { return true }
+	writePartialStore(t, req.Path)
+	if err := os.WriteFile(filepath.Join(req.Path, ".beads", "config.yaml"), []byte("issue_prefix: storerig\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, provErr := Provision(deps, req)
+	if !errors.Is(provErr, syscall.EISDIR) || !strings.HasPrefix(provErr.Error(), "snapshot canonical files: ") {
+		t.Fatalf("Provision error = %v, want the topology snapshot failure", provErr)
+	}
+	if !strings.Contains(provErr.Error(), "(rollback failed: ") {
+		t.Fatalf("failed restore not reported: %v", provErr)
 	}
 }
