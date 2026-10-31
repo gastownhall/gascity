@@ -370,6 +370,7 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // resolvers — they go through mail.Provider. The two out-of-file callers
 // (cmd_handoff.go, prime_auto_handoff_inject.go) already hold a routed sessStore.
 var sessionRelocationRoutedFiles = []string{
+	"cmd_beads_state.go",
 	"cmd_session_wake.go",
 	"cmd_session_pin.go",
 	"cmd_skill.go",
