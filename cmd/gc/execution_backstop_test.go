@@ -684,9 +684,10 @@ func TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured(t *testing.T
 	}
 }
 
-// driveToEscalation spends the attempt budget on the fixture's claim and
-// confirms the escalation drained the session exactly once.
-func driveToEscalation(t *testing.T, f *executionBackstopFixture) {
+// driveToLastNudge observes the fixture's claim, spends the whole attempt
+// budget on it and leaves the clock at the moment the last nudge was
+// reserved.
+func driveToLastNudge(t *testing.T, f *executionBackstopFixture) {
 	t.Helper()
 	f.idleFor(t, 10*time.Minute)
 	f.tick(t)
@@ -695,6 +696,14 @@ func driveToEscalation(t *testing.T, f *executionBackstopFixture) {
 		f.idleFor(t, 10*time.Minute)
 		f.tick(t)
 	}
+}
+
+// driveToEscalation spends the attempt budget on the fixture's claim, waits
+// out the last attempt's backoff, and confirms the escalation drained the
+// session exactly once.
+func driveToEscalation(t *testing.T, f *executionBackstopFixture) {
+	t.Helper()
+	driveToLastNudge(t, f)
 	f.now = f.now.Add(idleClaimNudgeBackoff)
 	f.idleFor(t, 10*time.Minute)
 	f.tick(t)
@@ -1524,5 +1533,91 @@ func TestExecutionBackstopNeverDrainsAStartedSeatWhoseStampDidNotPersist(t *test
 	}
 	if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldExecuting+" ") {
 		t.Fatalf("hold breadcrumb = %q, want %s", got, executionHoldExecuting)
+	}
+}
+
+// TestExecutionBackstopTheLastNudgeGetsItsFullBackoff (ga-uns4sw): every
+// earlier nudge gets idleClaimNudgeBackoff to be answered before the engine
+// takes its next step, so the last one must too. A drain latched on the first
+// pass after the last nudge is reserved leaves the seat no time to answer it
+// by running its claim hook, whose work_started entry vetoes the drain. Inside
+// the backoff there is no latch, no event, no drain and no further nudge; at
+// the backoff the escalation lands exactly once, and later passes add none.
+func TestExecutionBackstopTheLastNudgeGetsItsFullBackoff(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	driveToLastNudge(t, f)
+	lastNudge := f.now
+	nudges := f.nudgeCount()
+
+	// Inside the last nudge's backoff: its answer window is still open.
+	for _, d := range []time.Duration{10 * time.Second, idleClaimNudgeBackoff - time.Second} {
+		f.now = lastNudge.Add(d)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+		if len(f.drained) != 0 || f.stalledEvents() != 0 || f.sessionMeta(t, executionClaimNudgeStalledKey) != "" {
+			t.Fatalf("pass %s after the last nudge (inside its %s backoff): drains %v, stalled events %d, latch %q; want none of any; stdout=%s",
+				d, idleClaimNudgeBackoff, f.drained, f.stalledEvents(), f.sessionMeta(t, executionClaimNudgeStalledKey), f.stdout.String())
+		}
+		if got := f.nudgeCount(); got != nudges {
+			t.Fatalf("delivered nudges after the pass %s after the last nudge = %d, want no further delivery (%d)", d, got, nudges)
+		}
+	}
+
+	// At the backoff the window closed unanswered: escalate exactly once.
+	f.now = lastNudge.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 1 || f.drained[0] != f.sessName || f.stalledEvents() != 1 {
+		t.Fatalf("pass at the last nudge's backoff: drains %v, stalled events %d; want exactly one drain of %s and one event; stdout=%s",
+			f.drained, f.stalledEvents(), f.sessName, f.stdout.String())
+	}
+
+	// Later passes inside the latch window add nothing.
+	f.now = lastNudge.Add(idleClaimNudgeBackoff + 5*time.Minute)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 1 || f.stalledEvents() != 1 || f.nudgeCount() != nudges {
+		t.Fatalf("passes after the escalation: drains %v, stalled events %d, nudges %d; want no change; stdout=%s",
+			f.drained, f.stalledEvents(), f.nudgeCount(), f.stdout.String())
+	}
+}
+
+// TestExecutionBackstopReproLastNudgeGetsItsFullBackoff (ga-uns4sw): every
+// earlier nudge gets idleClaimNudgeBackoff to be answered before the next
+// step, so the last one must too. A drain requested seconds after the last
+// nudge goes out leaves the seat no time to answer it by running its claim
+// hook.
+func TestExecutionBackstopReproLastNudgeGetsItsFullBackoff(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
+		t.Fatalf("delivered nudges = %d, want the attempt cap %d; stdout=%s", got, idleClaimNudgeMaxAttempts, f.stdout.String())
+	}
+	lastNudge := f.now
+
+	// The next controller pass, well inside the last nudge's backoff.
+	f.now = lastNudge.Add(30 * time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests %s after the last nudge (inside its %s backoff) = %v, want none; stdout=%s",
+			f.now.Sub(lastNudge), idleClaimNudgeBackoff, f.drained, f.stdout.String())
+	}
+	if got := f.stalledEvents(); got != 0 {
+		t.Fatalf("execution.step_stalled events inside the last nudge's backoff = %d, want 0", got)
+	}
+
+	// Once the backoff has passed unanswered, it escalates exactly once.
+	f.now = lastNudge.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 1 || f.drained[0] != f.sessName {
+		t.Fatalf("drain requests after the last nudge's backoff = %v, want exactly one for %s", f.drained, f.sessName)
 	}
 }

@@ -1521,8 +1521,9 @@ func TestRunNudgeBackstopExhaustedSkipsTheReadOnceTheLastNoticeIsPastDue(t *test
 }
 
 // TestRunNudgeBackstopFailedHoldReadDoesNotHoldTheTerminalAction: a journal
-// that cannot be read while the last notice may still be due logs once and
-// lets the terminal action run, so an outage never parks the backstop.
+// that cannot be read while the last notice may still be in flight under its
+// lease logs once and lets the terminal action run, so an outage never parks
+// the backstop.
 func TestRunNudgeBackstopFailedHoldReadDoesNotHoldTheTerminalAction(t *testing.T) {
 	store := &failingOpListStore{laneTestStore: newLaneTestStore()}
 	f := newLaneFixtureOver(t, store)
@@ -1531,7 +1532,7 @@ func TestRunNudgeBackstopFailedHoldReadDoesNotHoldTheTerminalAction(t *testing.T
 	calls := 0
 	pred := noticeTestBackstop{target: backstopTarget{ID: "wb-1"}, text: "claim wb-1", exhaustedCalls: &calls}
 	var out bytes.Buffer
-	rows := backstopRows(t, f, idleClaimNudgeMaxAttempts, f.clk.Now().Add(-30*time.Second))
+	rows := backstopRows(t, f, idleClaimNudgeMaxAttempts, f.clk.Now().Add(-idleClaimNudgeBackoff-time.Second))
 	runNoticeBackstop(f, rows, pred, &out)
 	runNoticeBackstop(f, rows, pred, &out)
 	if calls != 2 {

@@ -65,7 +65,9 @@ type backstopPredicate interface {
 	// write exactly what it is given.
 	reserve(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool
 
-	// exhausted is invoked once attempts reach the shared max attempts.
+	// exhausted is invoked once the shared max attempts are spent and the
+	// last one's backoff has passed, or at once when a due nudge has no
+	// content.
 	exhausted(store beads.Store, s *beads.Bead, stdout io.Writer)
 
 	// clear wipes persisted state once nothing is outstanding, and reports
@@ -193,12 +195,13 @@ const (
 )
 
 // decideBackstopAction is the observe(grace) → nudge → backoff → give-up
-// timing rule shared by every backstop predicate, extracted unchanged from
-// nudgeStalledPoolClaims. attempts is the number of delivery attempts already
-// reserved for the current assignment; last is the time of the last attempt,
-// or of first observation when attempts is 0. Pacing reuses the exact constants
-// proven by the pool-claim backstop (idleClaimNudgeGrace/Backoff/MaxAttempts,
-// idle_nudge.go).
+// timing rule shared by every backstop predicate. attempts is the number of
+// delivery attempts already reserved for the current assignment; last is the
+// time of the last attempt, or of first observation when attempts is 0. The
+// give-up waits out the last attempt's backoff like every retry before it, so
+// the final nudge keeps its full answer window. Pacing reuses the exact
+// constants proven by the pool-claim backstop
+// (idleClaimNudgeGrace/Backoff/MaxAttempts, idle_nudge.go).
 func decideBackstopAction(attempts int, last, now time.Time) backstopAction {
 	switch {
 	case attempts == 0:
@@ -206,6 +209,9 @@ func decideBackstopAction(attempts int, last, now time.Time) backstopAction {
 			return backstopActionWait // still inside the observe-first grace
 		}
 	case attempts >= idleClaimNudgeMaxAttempts:
+		if now.Sub(last) < idleClaimNudgeBackoff {
+			return backstopActionWait // the last attempt gets its backoff too
+		}
 		return backstopActionExhausted // gave up; manual re-nudge is the escape hatch
 	default:
 		if now.Sub(last) < idleClaimNudgeBackoff {
@@ -460,15 +466,16 @@ func proposeBackstopNotice(
 
 // backstopLastNoticeStands reports whether an exhausted backstop's terminal
 // action must wait: the controller's lane host executes message ops for
-// store and label's last notice for target is still open and due, so the
-// last reminder has not yet had its chance at the session's boundary. Once
-// a backoff has passed since the last reservation (last) the last notice is
-// past its start_by, so only one the lane is still delivering (executing or
-// settling) holds the action, and for at most one lease more, the lease the
-// conversation lane takes it under (opjournal.DefaultLeaseTTL). Past that it
-// is no longer read: an exhausted backstop whose terminal action leaves it
-// exhausted pays no listing per tick. A failed read does not hold the
-// terminal action; it is logged at most once per laneErrorLogInterval.
+// store and label's last notice for target is still being delivered, so the
+// last reminder has not yet had its chance at the session's boundary. It is
+// reached only once the last attempt's backoff has passed, so the last
+// notice is past its start_by, and only one the lane is still delivering
+// (executing or settling) holds the action, and for at most one lease more,
+// the lease the conversation lane takes it under (opjournal.DefaultLeaseTTL).
+// Past that it is no longer read: an exhausted backstop whose terminal
+// action leaves it exhausted pays no listing per tick. A failed read does
+// not hold the terminal action; it is logged at most once per
+// laneErrorLogInterval.
 func backstopLastNoticeStands(store beads.Store, s *beads.Bead, target backstopTarget, last, now time.Time, label string, stdout io.Writer) bool {
 	if !now.Before(last.Add(idleClaimNudgeBackoff + opjournal.DefaultLeaseTTL)) {
 		return false
