@@ -1310,8 +1310,34 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 
 	// Remove the rig and every block that would dangle without it (#3666).
 	if !cfg.RemoveRig(rigName) {
-		fmt.Fprintln(stderr, rigNotFoundMsg("gc rig remove", rigName, cfg)) //nolint:errcheck // best-effort stderr
-		return 1
+		// city.toml has no entry, but .gc/site.toml may still carry a
+		// machine-local binding orphaned by an out-of-band city.toml edit
+		// (a hand edit, a git pull, or a regeneration script never touches
+		// the machine-local file). Clean that up instead of just erroring,
+		// since the command's own help text promises it removes the site
+		// binding too (#8337).
+		binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc rig remove: loading site binding: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		hasOrphanBinding := false
+		for _, r := range binding.Rigs {
+			if r.Name == rigName {
+				hasOrphanBinding = true
+				break
+			}
+		}
+		if !hasOrphanBinding {
+			fmt.Fprintln(stderr, rigNotFoundMsg("gc rig remove", rigName, cfg)) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if err := config.WriteCityAndRigSiteBindingsForEditRemovingRigs(fsys.OSFS{}, tomlPath, cfg, rigName); err != nil {
+			fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		fmt.Fprintf(stdout, "Rig '%s' is not declared in city.toml; removed its orphaned .gc/site.toml binding\n", rigName) //nolint:errcheck // best-effort stdout
+		return 0
 	}
 
 	// Detach before changing city.toml. If its write fails, the configured rig
