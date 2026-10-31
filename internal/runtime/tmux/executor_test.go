@@ -671,6 +671,12 @@ func agentPaneID(tm *Tmux, name string) (string, error) {
 // running claude as pid 4242. ok is false for any other command, so a fake
 // executor can serve the lookup and script everything else.
 func fakeAgentPaneRow(args []string) (string, bool) {
+	return fakeAgentPaneRowWithPID(args, "4242")
+}
+
+// fakeAgentPaneRowWithPID is fakeAgentPaneRow for an agent pane whose process
+// is pid, for a test whose process sniff must find a known process or none.
+func fakeAgentPaneRowWithPID(args []string, pid string) (string, bool) {
 	if tmuxSubcommand(args) != "list-panes" {
 		return "", false
 	}
@@ -680,7 +686,7 @@ func fakeAgentPaneRow(args []string) (string, bool) {
 	}
 	return "agent\t" + strings.NewReplacer(
 		"#{window_id}", "@1", "#{pane_id}", "%1", "#{pane_current_command}", "claude",
-		"#{pane_pid}", "4242", "#{pane_dead}", "0", "#{pane_current_path}", "/w",
+		"#{pane_pid}", pid, "#{pane_dead}", "0", "#{pane_current_path}", "/w",
 	).Replace(fields), true
 }
 
@@ -1345,16 +1351,24 @@ func TestSnapshotIdleSeparatesBusyFromIndeterminate(t *testing.T) {
 			fe := &fakeExecutor{
 				agentPane: true,
 				// show-environment finds no configured prefix, so the scan
-				// looks for DefaultReadyPromptPrefix.
-				outs: []string{"", tc.pane},
+				// looks for DefaultReadyPromptPrefix. A busy reading then
+				// reads the pane's provider family, a claude pane here, whose
+				// busy reading the leaf trusts (busyReadingTrusted).
+				outs: []string{"", tc.pane, "GC_PROVIDER=claude"},
 				errs: []error{errors.New("unknown variable: GC_READY_PROMPT_PREFIX"), tc.captureErr},
 			}
 			tm := &Tmux{cfg: Config{SocketName: "x"}, exec: fe}
 
 			idle, err := tm.SnapshotIdle("sess")
 
-			if len(fe.calls) != 3 || !slices.Contains(fe.calls[1], "list-panes") || !slices.Contains(fe.calls[2], "capture-pane") {
-				t.Fatalf("tmux calls = %q, want show-environment, the agent-pane lookup, then one capture-pane", fe.calls)
+			busy := !tc.wantIdle && !tc.wantIndeterminate && tc.captureErr == nil
+			wantCalls := 3
+			if busy {
+				wantCalls = 4
+			}
+			if len(fe.calls) != wantCalls || !slices.Contains(fe.calls[1], "list-panes") || !slices.Contains(fe.calls[2], "capture-pane") ||
+				(busy && !slices.Contains(fe.calls[3], "GC_PROVIDER")) {
+				t.Fatalf("tmux calls = %q, want show-environment, the agent-pane lookup, one capture-pane, and for a busy reading the family lookup", fe.calls)
 			}
 			if idle != tc.wantIdle {
 				t.Errorf("idle = %t, want %t", idle, tc.wantIdle)

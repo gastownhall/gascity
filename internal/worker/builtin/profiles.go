@@ -77,6 +77,15 @@ type BuiltinProviderSpec struct {
 	UpstreamBaseURLEnv   string
 	UpstreamAPIKeyEnv    string
 	UpstreamAuthTokenEnv string
+	// Program-status declaration (OSC 7501), mirrored flat because this
+	// package cannot import config: ProgramStatusProtocol is "osc7501" to
+	// declare, ProgramStatusApp names the reporting program,
+	// ProgramStatusRelay wraps the agent in the probe-answering relay, and
+	// ProgramStatusEnv is forced into the session env when capture is armed.
+	ProgramStatusProtocol string
+	ProgramStatusApp      string
+	ProgramStatusRelay    bool
+	ProgramStatusEnv      map[string]string
 }
 
 func boolPtr(b bool) *bool { return &b }
@@ -252,6 +261,12 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ForkFlag:      "--fork-session",
 		PrintArgs:     []string{"-p"},
 		TitleModel:    "haiku",
+		// Claude Code (2.1.295+, verified on 2.1.311) reports OSC 7501 only
+		// after the terminal answers its support probe, which tmux never
+		// does, so capture runs it under the probe-answering relay.
+		ProgramStatusProtocol: "osc7501",
+		ProgramStatusApp:      "claude-code",
+		ProgramStatusRelay:    true,
 		// Config-facing names map to current CLI values: Claude Code rejects the
 		// legacy "auto-edit"/"full-auto" it used to accept (GH#4602).
 		PermissionModes: map[string]string{
@@ -328,6 +343,10 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ResumeStyle:       "subcommand",
 		PrintArgs:         []string{"exec"},
 		TitleModel:        "o4-mini",
+		// Codex (verified on 0.165.0) reports OSC 7501 unprompted, so the
+		// pane-output tap alone captures it.
+		ProgramStatusProtocol: "osc7501",
+		ProgramStatusApp:      "codex",
 		PermissionModes: map[string]string{
 			"suggest":      "--ask-for-approval on-request --sandbox read-only",
 			"auto-edit":    "--sandbox workspace-write --ask-for-approval never",
@@ -660,13 +679,18 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// multiple unsupported dialog classes with independent timeouts, so the
 		// first can exhaust the managed startup lease while OpenCode is working.
 		AcceptStartupDialogs: boolPtr(false),
-		Env:                  map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
-		SupportsACP:          true,
-		SupportsHooks:        true,
-		InstructionsFile:     "AGENTS.md",
-		ResumeFlag:           "--session",
-		ResumeStyle:          "flag",
-		ACPArgs:              []string{"acp"},
+		// OpenCode merges OPENCODE_PERMISSION over every config file, so this
+		// catch-all also overrides a project opencode.json's permission rules.
+		// An agent keeps those rules with env OPENCODE_PERMISSION = "" (see
+		// docs/guides/harness-recipes.md). The cerebras and groq presets share
+		// this default.
+		Env:              map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
+		SupportsACP:      true,
+		SupportsHooks:    true,
+		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--session",
+		ResumeStyle:      "flag",
+		ACPArgs:          []string{"acp"},
 		OptionsSchema: []BuiltinProviderOption{
 			modelOption(
 				modelChoice("opencode/deepseek-v4-flash-free", "DeepSeek V4 Flash Free"),
@@ -986,6 +1010,7 @@ func cloneBuiltinProviderSpec(spec BuiltinProviderSpec) BuiltinProviderSpec {
 	spec.PrintArgs = cloneStrings(spec.PrintArgs)
 	spec.OptionsSchema = cloneBuiltinOptions(spec.OptionsSchema)
 	spec.ACPArgs = cloneStrings(spec.ACPArgs)
+	spec.ProgramStatusEnv = cloneStringMap(spec.ProgramStatusEnv)
 	return spec
 }
 

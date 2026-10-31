@@ -256,19 +256,18 @@ func TestDecideHolds(t *testing.T) {
 	}
 }
 
-// Activity ProgressReset past the last nudge restarts the count, on any
-// pass where the runtime is alive, whether the ladder saw the seat busy or
-// not (a gate, an outage, the ladder off): its grace restarts from the
-// activity. A runtime not proven alive proves no progress.
+// Activity ProgressReset past the last nudge restarts the count, on a pass
+// that may act on the seat (gate open, runtime alive, seat quiet), whether
+// or not the ladder saw the seat busy in between (a gate, an outage, the
+// ladder off): its grace restarts from the activity. A pass that cannot act
+// judges nothing, and a runtime not proven alive proves no progress.
 func TestDecideProgressReset(t *testing.T) {
 	last := t0.Add(10 * time.Minute)
 	prev := rec(1, Entry{Key: key("s"), Kind: KindClaim, Rung: RungClaimed, Since: t0, Attempts: 3, Paused: 1, Last: last, Unreleased: true})
 	now := last.Add(40 * time.Minute)
 	act := last.Add(DefaultProgressReset)
 	for name, mut := range map[string]func(*Observation){
-		"busy":         func(o *Observation) { o.Quiet = Quiet{State: NotQuiet} },
 		"quiet now":    func(*Observation) {},
-		"behind gate":  func(o *Observation) { o.Gate = Gate{Held: true} },
 		"degraded now": func(o *Observation) { o.Provider.Degraded = true },
 	} {
 		o := quiet(now, 1, claim("s"))
@@ -285,6 +284,17 @@ func TestDecideProgressReset(t *testing.T) {
 			if _, ok := a.(Release); ok {
 				t.Fatalf("%s: released on a count the seat's progress reset", name)
 			}
+		}
+	}
+	for name, mut := range map[string]func(*Observation){
+		"busy":        func(o *Observation) { o.Quiet = Quiet{State: NotQuiet} },
+		"behind gate": func(o *Observation) { o.Gate = Gate{Held: true} },
+	} {
+		o := quiet(now, 1, claim("s"))
+		o.LastActivity = act
+		mut(&o)
+		if d := Decide(prev, o, p); entry(t, d, "s").Attempts != 3 || d.Changed {
+			t.Fatalf("%s: a pass that cannot act judged progress: %+v", name, entry(t, d, "s"))
 		}
 	}
 	o := quiet(now, 1, claim("s"))
@@ -811,12 +821,12 @@ func TestDecideRefusedNudgesBackOff(t *testing.T) {
 	if e := r.Entries[0]; e.Attempts != 0 || e.Rung != RungStarted || e.Recycles != 0 {
 		t.Fatalf("entry %+v: refusals moved it toward escalation", e)
 	}
-	got, ok := NudgeTaken(r, key("s"))
-	if !ok || got.Entries[0].Refused != 0 {
-		t.Fatalf("NudgeTaken = %+v, %v", got.Entries[0], ok)
+	got, ok := NudgeDelivered(r, key("s"), r.Gen, time.Time{})
+	if !ok || got.Entries[0].Refused != 0 || !got.Delivered.IsZero() {
+		t.Fatalf("NudgeDelivered = %+v, %v", got, ok)
 	}
-	if _, ok := NudgeTaken(got, key("s")); ok {
-		t.Fatal("NudgeTaken wrote with no refusals")
+	if _, ok := NudgeDelivered(got, key("s"), r.Gen, time.Time{}); ok {
+		t.Fatal("NudgeDelivered wrote with no refusals and no delivery time")
 	}
 	if _, _, ok := NudgeRefused(r, key("s"), 99, t0); ok {
 		t.Fatal("NudgeRefused re-counted an attempt the cell no longer holds")
@@ -870,7 +880,7 @@ func TestDecideProgressClearsRefusals(t *testing.T) {
 	last := t0.Add(10 * time.Minute)
 	prev := rec(1, Entry{Key: key("s"), Kind: KindClaim, Rung: RungStarted, Since: t0, Paused: 2, Refused: 2, Last: last})
 	o := quiet(last.Add(30*time.Minute), 1, claim("s"))
-	o.Quiet, o.LastActivity = Quiet{State: NotQuiet}, last.Add(DefaultProgressReset)
+	o.LastActivity = last.Add(DefaultProgressReset)
 	if e := entry(t, Decide(prev, o, p), "s"); e.Refused != 0 {
 		t.Fatalf("entry %+v, want refusals cleared by progress", e)
 	}

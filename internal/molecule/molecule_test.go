@@ -4019,3 +4019,32 @@ contract = "graph.v2"
 		}
 	}
 }
+
+func TestInstantiateResolvesDefaultReferencingSuppliedVar(t *testing.T) {
+	store := beads.NewMemStore()
+	def := "{{rig_name}}/reviewer"
+	recipe := &formula.Recipe{
+		Name: "nested-default",
+		Steps: []formula.RecipeStep{
+			{ID: "nested-default", Title: "Root", Type: "molecule", IsRoot: true},
+			{ID: "nested-default.step", Title: "Review by {{reviewer}}", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "nested-default.step", DependsOnID: "nested-default", Type: "parent-child"},
+		},
+		Vars: map[string]*formula.VarDef{
+			"reviewer": {Default: &def},
+		},
+	}
+	result, err := Instantiate(context.Background(), store, recipe, Options{Vars: map[string]string{"rig_name": "r1"}})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	step, err := store.Get(result.IDMapping["nested-default.step"])
+	if err != nil {
+		t.Fatalf("Get step: %v", err)
+	}
+	if step.Title != "Review by r1/reviewer" {
+		t.Fatalf("title = %q, want %q", step.Title, "Review by r1/reviewer")
+	}
+}

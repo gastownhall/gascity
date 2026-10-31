@@ -106,7 +106,7 @@ duration_to_seconds() {
 
 # Parse an ISO-8601 UTC timestamp (e.g. 2026-07-22T13:54:16Z) to epoch seconds.
 # Empty on failure so callers can skip an unparseable gate rather than misage it.
-# Portable across GNU and BSD/macOS date, matching wisp-compact.sh: GNU `date -d`
+# Portable across GNU and BSD/macOS date: GNU `date -d`
 # first, then BSD `date -ju -f` (forcing UTC to match GNU), with a no-Z layout
 # for older timestamps. Without the BSD fallbacks every gate would be skipped on
 # macOS (BSD date rejects -d), silently disabling the whole sweep.

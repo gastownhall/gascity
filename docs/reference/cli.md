@@ -1913,6 +1913,15 @@ city and rig pack layers, the city's own formulas/ directory, and the
 rig-local formulas_dir directory. Later layers win for same-named
 formulas.
 
+With --rig, only that rig's scope is listed: the city layers beneath the
+rig's own, the same search paths "gc formula show --rig" compiles against
+and the supervisor's formulas route serves for scope_kind=rig. Without
+--rig, every city and rig layer is listed.
+
+Examples:
+  gc formula list
+  gc formula list --rig mo --json
+
 ```
 gc formula list [flags]
 ```
@@ -3709,16 +3718,16 @@ does; their work comes back when the rig is resumed. The city store and a
 relocated graph store are always read.
 
 When the city's controller is running, it answers the query from the stores it
-already holds open (GET /v0/city/&#123;cityName&#125;/work/ready), reading every store
-live, never from a cache, so the answer is the one this command would compute
-itself, without opening a store. That holds only while the controller's config
-is current, so it refuses while a config change is pending or being applied,
-and after a failed reload until one succeeds; a [storage] change fails every
-reload until it is reverted or the city restarts. The controller learns of an
-edit to the config files from its config watcher and answers under the config
-it holds until then. If the controller is not running, refuses, or does not
-answer within 10s, this command reads the stores itself. GC_NO_API=1 forces
-the local read.
+already holds open (GET /v0/city/&#123;cityName&#125;/work/ready), with the reader this
+command runs, reading every store live, never from a cache. It reads the rigs
+of the config the controller has loaded: a rig added, removed or rebound in the
+city's config takes effect in its answer at the controller's next config
+reload. It refuses while a config reload or an API config write is in
+progress, and after a failed reload until one succeeds; a [storage] change
+fails every reload until it is reverted or the city restarts. If the
+controller is not running, refuses, or does not answer within 10s, this command
+loads the config and reads the stores itself. GC_NO_API=1 forces the local
+read.
 
 ```
 gc ready [flags]
@@ -3896,7 +3905,9 @@ Use --start-suspended to add the rig in a suspended state (dormant-by-default).
 The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
 Use --adopt to register a directory that already has a fully initialized
-.beads/ directory (must include both metadata.json and config.yaml).
+.beads/ directory (must include metadata.json). The rig takes the store's own
+issue prefix, from .beads/config.yaml or, when that records none (as bd init
+leaves it), from the store; --prefix, if given, must match.
 For managed-Dolt rigs, runs an idempotent config sync (registers types.custom
 and other config into the DB, never destructively reinitializes). The git repo
 check remains informational.
@@ -3929,7 +3940,7 @@ gc rig add /path/to/existing --adopt
 | `--include` | stringArray |  | pack to import into the rig: a source, a pack name, or &lt;binding&gt;=&lt;source&gt; (repeatable) |
 | `--json` | bool |  | Output in JSONL format |
 | `--name` | string |  | rig name (default: directory basename, or git URL basename for --git-url) |
-| `--prefix` | string |  | bead ID prefix (default: derived from name) |
+| `--prefix` | string |  | bead ID prefix (default: derived from name; with --adopt, the store's) |
 | `--request-id` | string |  | idempotency key for a remote --git-url add; reuse it to resume/retry a provision |
 | `--start-suspended` | bool |  | add rig in suspended state (dormant-by-default) |
 
