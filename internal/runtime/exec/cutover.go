@@ -15,6 +15,11 @@ import (
 // the error-bearing attachment probe, and the image-checker (CheckImage) — through to the
 // underlying *Provider. The early cut-over for the exec provider.
 //
+// The observe.v1 interfaces (the error-bearing liveness read, fresh reads,
+// identity, exact object kills, v2 readiness) are forwarded too, and Start
+// routes a FreshOnly start to the raw provider's: an optional interface the
+// cut-over does not forward does not exist in production.
+//
 // ExecProvider is deliberately NOT passed through: exec's Exec op is the
 // connection the carrier drives over INTERNALLY (no production caller
 // type-asserts it), so seam-backed driving reaches it through the provider's own
@@ -34,14 +39,81 @@ var (
 	_ runtime.IdleWaitProvider            = (*seamBackedProvider)(nil)
 	_ runtime.AttachmentObserverWithError = (*seamBackedProvider)(nil)
 	_ runtime.IdleProbeBudgetProvider     = (*seamBackedProvider)(nil)
+
+	_ runtime.LivenessObserverWithError = (*seamBackedProvider)(nil)
+	_ runtime.FreshByConstruction       = (*seamBackedProvider)(nil)
+	_ runtime.IdentityObserver          = (*seamBackedProvider)(nil)
+	_ runtime.SessionObjectKiller       = (*seamBackedProvider)(nil)
+	_ runtime.V2ReadinessReporter       = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked wraps an exec provider for the given script so it is served
 // through the seams.
 func NewSeamBacked(script string) runtime.Provider {
-	raw := NewProvider(script)
+	return seamBacked(NewProvider(script))
+}
+
+// NewSeamBackedForCity is NewSeamBacked for a provider serving one city: every
+// op carries GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH (NewProviderForCity).
+func NewSeamBackedForCity(script, cityName, cityPath string) runtime.Provider {
+	return seamBacked(NewProviderForCity(script, cityName, cityPath))
+}
+
+func seamBacked(raw *Provider) *seamBackedProvider {
 	rt, tp := raw.Seams()
 	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}
+}
+
+// Start serves a FreshOnly start from the raw provider's startFresh, which
+// never respawns into a box the seams' Provision then Launch would find;
+// every other start goes through the seams.
+func (s *seamBackedProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if cfg.FreshOnly {
+		return s.raw.startFresh(ctx, name, cfg)
+	}
+	return s.Provider.Start(ctx, name, cfg)
+}
+
+// ObserveLivenessWithError passes a v2-ready pack's fresh `observe` through;
+// otherwise it is the read runtime.ObserveLivenessWithError made through the
+// seams before this provider had the capability.
+func (s *seamBackedProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	if !s.raw.v2Ready() {
+		return runtime.ObserveLiveness(s.Provider, name, processNames), nil
+	}
+	return s.raw.ObserveLivenessWithError(name, processNames)
+}
+
+// LivenessReadsFresh passes through to the underlying provider. Safe on a nil
+// provider.
+func (s *seamBackedProvider) LivenessReadsFresh() bool {
+	return s != nil && s.raw.LivenessReadsFresh()
+}
+
+// IdentityObservable passes through to the underlying provider. Safe on a nil
+// provider.
+func (s *seamBackedProvider) IdentityObservable() bool {
+	return s != nil && s.raw.IdentityObservable()
+}
+
+// ObserveIdentity passes through to the underlying provider's `observe`.
+func (s *seamBackedProvider) ObserveIdentity(name string) (map[string]string, error) {
+	return s.raw.ObserveIdentity(name)
+}
+
+// KillCorpseObject passes through to the underlying provider's `kill-object`.
+func (s *seamBackedProvider) KillCorpseObject(name, objectID, created string) (runtime.SessionObjectKillResult, error) {
+	return s.raw.KillCorpseObject(name, objectID, created)
+}
+
+// KillZombieObject passes through to the underlying provider's `kill-object`.
+func (s *seamBackedProvider) KillZombieObject(name, objectID, created, panePID string) (runtime.SessionObjectKillResult, error) {
+	return s.raw.KillZombieObject(name, objectID, created, panePID)
+}
+
+// V2Readiness passes through to the underlying provider's handshake.
+func (s *seamBackedProvider) V2Readiness() ([]string, error) {
+	return s.raw.V2Readiness()
 }
 
 // DismissKnownDialogs implements [runtime.DialogProvider] (non-seam passthrough).

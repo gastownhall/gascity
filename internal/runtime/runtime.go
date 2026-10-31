@@ -873,6 +873,28 @@ type IdentitySidecarProvider interface {
 	LocalIdentitySidecar() bool
 }
 
+// IdentityObserver is an optional extension for providers that read a
+// session's identity env (GC_SESSION_ID, GC_RUNTIME_EPOCH,
+// GC_INSTANCE_TOKEN, GT_PROCESS_NAMES) in one fresh answer, without
+// [EnvironmentBatchProvider]'s adoption and API side effects. A provider
+// whose identity is not readable now reports IdentityObservable false.
+// ObserveIdentity returns [ErrSessionNotFound] for an absent name and an
+// error wrapping [ErrRuntimeUnavailable] while the identity cannot be read;
+// an empty map is a box with no gc identity.
+type IdentityObserver interface {
+	IdentityObservable() bool
+	ObserveIdentity(name string) (map[string]string, error)
+}
+
+// V2ReadinessReporter is an optional extension for providers whose fitness
+// for reconciler v2 depends on what their backend declares (an exec
+// script's handshake). V2Readiness returns the capabilities v2 needs that
+// the backend lacks, nil when it has them all, or the error that kept it
+// from asking.
+type V2ReadinessReporter interface {
+	V2Readiness() (missing []string, err error)
+}
+
 // TransportCapabilityProvider is an optional extension for providers that can
 // report whether they support starting sessions with a specific transport.
 //
