@@ -1457,12 +1457,17 @@ func TestCachingStoreRevisionEpochPerInstance(t *testing.T) {
 
 // TestCachingStorePrimeKeepsWriteRevisionsOfDroppedRows pins that a wholesale
 // prime keeps the write revision of every row, the ones it drops included, for
-// the next reconcile to retain.
+// the next reconcile to retain — and that dropping a row the cache itself
+// closed announces nothing further for it.
 func TestCachingStorePrimeKeepsWriteRevisionsOfDroppedRows(t *testing.T) {
 	t.Parallel()
 
 	backing := NewMemStore()
-	cache := newConditionalCacheForTest(t, backing)
+	rec := &carryNoteRecorder{}
+	cache := NewCachingStoreForTest(backing, rec.onChange)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
 	kept, err := cache.Create(Bead{Title: "kept"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -1488,10 +1493,17 @@ func TestCachingStorePrimeKeepsWriteRevisionsOfDroppedRows(t *testing.T) {
 	_, droppedRow := cache.beads[dropped.ID]
 	cache.mu.RUnlock()
 	if droppedRow {
-		t.Fatal("prime kept the out-of-band closed row; the drop was not exercised")
+		t.Fatal("prime kept the row it holds closed; the drop was not exercised")
 	}
 	if !keptRev || !droppedRev || !droppedAt {
 		t.Fatalf("after prime writeSeq kept=%v dropped=%v, writeAt dropped=%v; want all true", keptRev, droppedRev, droppedAt)
+	}
+	cache.ReconcileNowForTest()
+	if got := rec.count("bead.closed", dropped.ID); got != 1 {
+		t.Fatalf("bead.closed for %s = %d after prime and reconcile, want exactly the one the cache's own Close emitted", dropped.ID, got)
+	}
+	if got := rec.count("bead.closed", kept.ID); got != 0 {
+		t.Fatalf("bead.closed for open %s = %d, want 0", kept.ID, got)
 	}
 }
 
