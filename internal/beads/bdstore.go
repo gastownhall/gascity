@@ -3626,24 +3626,22 @@ func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
 // leg with a blocking dependency — and that dominated gc ready's wall clock
 // (ga-ntr7gn). bd show resolves exactly the requested IDs instead, in one call.
 //
-// bd show only queries the issues table, the same gap Get already works
-// around: a blocking dependency can target a wisp/ephemeral-tier bead, which
-// bd show can never see no matter how it's called. Any id bd show didn't
-// return falls back to a per-id exact wisp-tier query (getEphemeralByExactID),
-// which also reaches the dotted child IDs molecule steps carry ("ga-abc.1"),
-// and the verdict follows Get's: only a bead-level miss (bd saying the bead
-// does not exist, isBdBeadNotFound) counts as absent. A blocker absent from
-// both tiers is the no-evidence-of-blocking degrade filterReadyByWorkOutcome
-// documents. A lookup that failed (bd or its database unreachable, an
+// bd show only queries the issues table, so a blocking dependency on a
+// wisp/ephemeral-tier bead is never in its reply. Nor is an omitted ID
+// evidence that the issues table lacks it: bd show skips an ID whose own fetch
+// failed (printing the error to stderr) and still exits 0 when any other ID
+// resolves, and a failure carrying only bd's not-found envelope (a remote bd
+// serve, or a lookup that failed against Dolt; see isBdNotFoundEnvelope) proves
+// nothing either. Every ID bd show did not return is therefore confirmed with
+// the both-tier exact-ID bd query bdShowMissError uses, which also reaches the
+// dotted child IDs molecule steps carry ("ga-abc.1"). Only a bead-level miss
+// from that query (isBdNoIssueMatch, isBdBeadNotFound) or an empty result
+// counts as absent, and a blocker absent from both tiers is the
+// no-evidence-of-blocking degrade filterReadyByWorkOutcome documents. A lookup
+// that failed (bd or its database unreachable, a query bd does not support, an
 // undecodable reply, an ID no exact query can carry) proves nothing about the
 // blocker, and serving the dependent on it would fail the
 // gc.work_outcome=blocked veto open, so it fails the whole lookup instead.
-//
-// A bd show that fails with only bd's not-found envelope on stdout (a remote
-// bd serve, or a lookup that failed against Dolt; see isBdNotFoundEnvelope)
-// has not proven the issues table holds none of the ids. Each id is then
-// confirmed with the both-tier exact-ID bd query bdShowMissError uses, and
-// only an id that query does not return goes on to the wisp-tier leg.
 //
 // ids come from dependency rows that agents can write, so they follow "--":
 // one that begins with "-" must reach bd as an argument, not as a flag.
@@ -3651,7 +3649,6 @@ func (s *BdStore) blockerStatuses(ids []string) (statusByID, workOutcomeByID map
 	statusByID = make(map[string]string, len(ids))
 	workOutcomeByID = make(map[string]string, len(ids))
 	found := make(map[string]bool, len(ids))
-	envelopeOnly := false
 
 	args := append([]string{"show", "--json", "--"}, ids...)
 	out, showErr := s.runBDTransientRead(args...)
@@ -3668,14 +3665,12 @@ func (s *BdStore) blockerStatuses(ids []string) (statusByID, workOutcomeByID map
 			found[b.ID] = true
 		}
 	case isBdBeadNotFound(showErr):
-		// None of the requested IDs are in the issues table; every one falls
-		// through to the wisp-tier fallback below. An infrastructure failure
-		// whose text merely says "not found" is not this case: it takes the
-		// default arm.
+		// bd show resolved none of the requested IDs; each is confirmed below.
+		// An infrastructure failure whose text merely says "not found" is not
+		// this case: it takes the default arm.
 	case isBdNotFoundEnvelope(out):
 		// bd show resolved nothing, but the envelope alone does not prove the
 		// issues table lacks these IDs; each is confirmed below.
-		envelopeOnly = true
 	default:
 		return nil, nil, fmt.Errorf("bd show (blockers): %w", showErr)
 	}
@@ -3692,63 +3687,26 @@ func (s *BdStore) blockerStatuses(ids []string) (statusByID, workOutcomeByID map
 		if !isExactIDQueryable(id) {
 			return nil, nil, fmt.Errorf("blocker %q cannot be looked up: no exact bd query can carry its ID", id)
 		}
-		if envelopeOnly {
-			// isExactIDQueryable admits only printable ASCII without '"' or
-			// '\', which strconv.Quote leaves unescaped, so this is exactly
-			// id="<id>".
-			qout, qerr := s.runBDTransientRead("query", "--json", "id="+strconv.Quote(id), "--all", "--limit", "1")
-			if qerr != nil {
-				return nil, nil, fmt.Errorf("confirming blocker %q after bd show: bd query: %w", id, qerr)
-			}
-			issues, parseErr := parseIssuesTolerant(extractJSON(qout))
-			if parseErr != nil {
-				return nil, nil, fmt.Errorf("confirming blocker %q after bd show: %w", id, parseErr)
-			}
-			for _, issue := range issues {
-				if b := issue.toBead(); b.ID == id {
-					record(b)
-				}
-			}
-			if found[id] {
+		// isExactIDQueryable admits only printable ASCII without '"' or '\',
+		// which strconv.Quote leaves unescaped, so this is exactly id="<id>".
+		qout, qerr := s.runBDTransientRead("query", "--json", "id="+strconv.Quote(id), "--all", "--limit", "1")
+		if qerr != nil {
+			if isBdNoIssueMatch(qerr) || isBdBeadNotFound(qerr) {
 				continue
 			}
+			return nil, nil, fmt.Errorf("confirming blocker %q: bd query: %w", id, qerr)
 		}
-		wisps, wispErr := s.getEphemeralByExactID(id)
-		if wispErr != nil && !isBdBeadNotFound(wispErr) {
-			return nil, nil, fmt.Errorf("wisp-tier lookup of blocker %q: %w", id, wispErr)
+		issues, parseErr := parseIssuesTolerant(extractJSON(qout))
+		if parseErr != nil {
+			return nil, nil, fmt.Errorf("confirming blocker %q: %w", id, parseErr)
 		}
-		for _, b := range wisps {
-			if b.ID == id {
+		for _, issue := range issues {
+			if b := issue.toBead(); b.ID == id {
 				record(b)
 			}
 		}
 	}
 	return statusByID, workOutcomeByID, nil
-}
-
-// getEphemeralByExactID is getEphemeralByID with the ID quoted as an exact
-// id="<id>" clause, so it also reaches IDs getEphemeralByID's bare clause
-// cannot carry, such as dotted child IDs ("ga-abc.1"). id must satisfy
-// isExactIDQueryable. A miss reads as no rows; any other failure is returned.
-func (s *BdStore) getEphemeralByExactID(id string) ([]Bead, error) {
-	clause := "ephemeral=true AND id=" + strconv.Quote(id)
-	out, err := s.runBDTransientRead("query", "--json", clause, "--all", "--limit", "1")
-	if err != nil {
-		if isBdQueryUnsupported(err) || isBdNoIssueMatch(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("bd query (wisp by exact id): %w", err)
-	}
-	issues, parseErr := parseIssuesTolerant(extractJSON(out))
-	result := make([]Bead, len(issues))
-	for i := range issues {
-		result[i] = issues[i].toBead()
-		result[i].Ephemeral = true
-	}
-	if parseErr != nil {
-		return result, fmt.Errorf("bd query (wisp by exact id): %w", parseErr)
-	}
-	return result, nil
 }
 
 func bdReadyArgs(q ReadyQuery, includeEphemeral bool) []string {

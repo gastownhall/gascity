@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -81,6 +82,14 @@ func (f *fakeBdLedger) run(_, name string, args ...string) ([]byte, error) {
 		return nil, errors.New(f.closedReadRefusal)
 	case args[0] == "list":
 		return f.renderRows(func(r bdLedgerRow) bool { return !r.ephemeral && (all || !r.closed) && !r.offscope })
+	case args[0] == "query" && len(args) > 2 && strings.HasPrefix(args[2], `id="`):
+		// The exact-ID clause BdStore.blockerStatuses confirms a blocker with
+		// carries no ephemeral=true, so it matches across both tiers.
+		id, err := strconv.Unquote(strings.TrimPrefix(args[2], "id="))
+		if err != nil {
+			return nil, fmt.Errorf("fake bd query: bad id clause %q: %w", args[2], err)
+		}
+		return f.renderRows(func(r bdLedgerRow) bool { return r.id == id && (all || !r.closed) && !r.offscope })
 	case args[0] == "query":
 		return f.renderRows(func(r bdLedgerRow) bool { return r.ephemeral && (all || !r.closed) && !r.offscope })
 	case args[0] == "ready":
