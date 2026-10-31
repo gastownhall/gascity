@@ -10,7 +10,6 @@ import (
 	"maps"
 	"math"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -154,14 +153,20 @@ func bdDepsEndpoints(values []string) []string {
 }
 
 // bdMetadataObject decodes a --metadata value as bd reads it back: an inline
-// JSON object, or @file (read relative to the scope root, where bd runs).
+// JSON object, or @file (read relative to the scope root, where bd runs). bd
+// reads a file only for a value that starts with "@"; gc also judges the file
+// a space-padded "@" names, which bd rejects as JSON, but hands bd no copy of
+// it.
 func (in bdClassGuardInput) bdMetadataObject(value string) (map[string]string, string) {
 	body := []byte(value)
 	if path, isFile := strings.CutPrefix(strings.TrimSpace(value), "@"); isFile {
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(in.scopeRoot, path)
+		var data []byte
+		var err error
+		if strings.HasPrefix(value, "@") {
+			data, err = in.readJudgedFile("--metadata", "@", path)
+		} else {
+			data, err = in.readScopeFile(path)
 		}
-		data, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Sprintf("--metadata %s cannot be read to judge it (%v)", value, err)
 		}
@@ -490,10 +495,7 @@ func judgeBdBatch(in bdClassGuardInput) bdClassGuard {
 	var err error
 	out := in.pass()
 	if path, ok := in.args.Last("--file"); ok {
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(in.scopeRoot, path)
-		}
-		script, err = os.ReadFile(path)
+		script, err = in.readJudgedFile("--file", "", path)
 	} else {
 		script, err = io.ReadAll(in.stdin)
 		out.stdin = bytes.NewReader(script)
@@ -543,11 +545,7 @@ func judgeBdImport(in bdClassGuardInput) bdClassGuard {
 	if source == "-" {
 		data, err = io.ReadAll(in.stdin)
 	} else {
-		path := source
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(in.scopeRoot, path)
-		}
-		data, err = os.ReadFile(path)
+		data, err = in.readScopeFile(source)
 	}
 	if err != nil {
 		return in.refuse("gc bd import: refused on this split city: gc must read %s to check which classes it holds, and could not: %v. Nothing was written.", source, err)
@@ -567,50 +565,38 @@ func judgeBdImport(in bdClassGuardInput) bdClassGuard {
 		}
 	}
 	out := bdClassGuard{args: args}
-	if split.skipped == 0 {
-		if source == "-" {
-			out.stdin = bytes.NewReader(data)
-		}
-		return out
-	}
-	if dryRun && !skipInfra {
-		if source == "-" {
-			out.stdin = bytes.NewReader(data)
-		}
+	// body is what bd imports: every row, or with --skip-infra only the
+	// rows this store holds.
+	body := data
+	switch {
+	case split.skipped == 0:
+	case dryRun && !skipInfra:
 		out.notice = fmt.Sprintf("gc bd import: dry run: %s holds %d row(s) of a class this store does not hold (%s); on this split city the real import is refused unless re-run with %s, which imports the %d other row(s) only\n",
 			source, split.skipped, formatClassCounts(split.byClass), bdImportSkipInfraFlag, len(split.keep))
-		return out
+	default:
+		body = bytes.Join(split.keep, []byte("\n"))
+		if len(body) > 0 {
+			body = append(body, '\n')
+		}
+		out.notice = fmt.Sprintf("gc bd import: %s: importing %d row(s); left out %d row(s) of a class this store does not hold (%s), which this split city keeps in its class store\n",
+			source, len(split.keep), split.skipped, formatClassCounts(split.byClass))
 	}
-	filtered := bytes.Join(split.keep, []byte("\n"))
-	if len(filtered) > 0 {
-		filtered = append(filtered, '\n')
-	}
-	out.notice = fmt.Sprintf("gc bd import: %s: importing %d row(s); left out %d row(s) of a class this store does not hold (%s), which this split city keeps in its class store\n",
-		source, len(split.keep), split.skipped, formatClassCounts(split.byClass))
 	if source == "-" {
-		out.stdin = bytes.NewReader(filtered)
+		out.stdin = bytes.NewReader(body)
 		return out
 	}
-	tmp, err := os.CreateTemp("", "gc-bd-import-work-*.jsonl")
-	if err == nil {
-		_, err = tmp.Write(filtered)
-		if closeErr := tmp.Close(); err == nil {
-			err = closeErr
-		}
-	}
+	// bd re-opens a named source, so it is handed a private copy of exactly
+	// the rows judged (bd_split_judged_files.go).
+	name, err := bdWriteJudgedCopy(body, "gc-bd-import-work-*.jsonl")
 	if err != nil {
-		if tmp != nil {
-			_ = os.Remove(tmp.Name())
-		}
-		return in.refuse("gc bd import: refused: could not write the filtered copy of %s: %v. Nothing was written.", source, err)
+		return in.refuse("gc bd import: refused: could not write the judged copy of %s: %v. Nothing was written.", source, err)
 	}
-	redirected, ok := bdImportRedirect(args, source, tmp.Name())
+	redirected, ok := bdImportRedirect(args, source, name)
 	if !ok {
-		_ = os.Remove(tmp.Name())
-		return in.refuse("gc bd import: refused on this split city: gc could not point bd at the filtered copy of %s (spell the source as a plain argument or --input <file>). Nothing was written.", source)
+		_ = os.Remove(name)
+		return in.refuse("gc bd import: refused on this split city: gc could not point bd at the judged copy of %s (spell the source as a plain argument or --input <file>). Nothing was written.", source)
 	}
 	out.args = redirected
-	name := tmp.Name()
 	out.cleanup = func() { _ = os.Remove(name) }
 	return out
 }
@@ -636,13 +622,16 @@ func (in bdClassGuardInput) checkImportEdges(split bdImportSplit) string {
 	return ""
 }
 
-// bdImportRedirect points the one token of argv that names source (the
+// bdImportRedirect points the token of argv that names source (the
 // positional, `-i x`, `-ix`, `-i=x`, `--input x`, `--input=x`) at path,
 // re-reading argv with import's flags so a flag value that happens to equal
-// source is never rewritten.
+// source is never rewritten. --input is a string flag, whose last value pflag
+// keeps, so when it is given more than once the last one is the one bd reads
+// and the one pointed at path.
 func bdImportRedirect(argv []string, source, path string) ([]string, bool) {
 	out := slices.Clone(argv)
 	verbSeen := false
+	at, spelling := -1, ""
 	for i := 0; i < len(out); i++ {
 		tok := out[i]
 		if !strings.HasPrefix(tok, "-") || tok == "-" {
@@ -661,16 +650,17 @@ func bdImportRedirect(argv []string, source, path string) ([]string, bool) {
 		case name == "--input" || name == "-i":
 			switch {
 			case inline:
-				out[i] = name + "=" + path
+				at, spelling = i, name+"="
 			case i+1 < len(out):
-				out[i+1] = path
+				i++
+				at, spelling = i, ""
 			default:
 				return nil, false
 			}
-			return out, true
+			continue
 		case strings.HasPrefix(tok, "-i") && !strings.HasPrefix(tok, "--"):
-			out[i] = "-i" + path
-			return out, true
+			at, spelling = i, "-i"
+			continue
 		}
 		// Import's other flags are bools or globals; a global value flag
 		// consumes the next token.
@@ -678,7 +668,11 @@ func bdImportRedirect(argv []string, source, path string) ([]string, bool) {
 			i++
 		}
 	}
-	return nil, false
+	if at < 0 {
+		return nil, false
+	}
+	out[at] = spelling + path
+	return out, true
 }
 
 // bdImportGlobalTakesValue reports whether a global flag consumes the next
@@ -708,11 +702,7 @@ func judgeBdDelete(in bdClassGuardInput) bdClassGuard {
 	}
 	ids := slices.Clone(in.args.positionals)
 	for _, f := range in.args.Values("--from-file") {
-		path := f
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(in.scopeRoot, path)
-		}
-		data, err := os.ReadFile(path)
+		data, err := in.readJudgedFile("--from-file", "", f)
 		if err != nil {
 			return in.refuse("gc bd delete: refused on this split city: gc must read %s to check the beads it deletes, and could not: %v. Nothing was written.", f, err)
 		}
