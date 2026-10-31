@@ -18,7 +18,8 @@ import (
 //	@gc_ps      v1|<rand>.%N|seq|state|kind|since_ms|quiet_ms|starts|ends|progress|wchildren|children|flags|app
 //	@gc_ps_text v1|<rand>.%N|b64url(title)|b64url(msg)|b64url(last_error_msg)
 //
-// flags is a subset of "PE" in that order (P: probed, E: last error); an
+// flags is a subset of "PER" in that order (P: probed, E: last error, R: a
+// root was reported); an
 // absent progress is empty; a zero time is 0.
 const (
 	// CodecVersion is the codec version this package reads and writes.
@@ -97,6 +98,9 @@ func encodeFields(s runtime.ProgramStatus) string {
 	if s.LastError {
 		flags += "E"
 	}
+	if s.Reported {
+		flags += "R"
+	}
 	return strings.Join([]string{
 		codecTag,
 		s.Nonce,
@@ -173,15 +177,7 @@ func Decode(v string) (runtime.ProgramStatus, error) {
 		return bad("children", f[11])
 	}
 	s.WorkingChildren, s.Children = int(wchildren), int(children)
-	switch f[12] {
-	case "":
-	case "P":
-		s.Probed = true
-	case "E":
-		s.LastError = true
-	case "PE":
-		s.Probed, s.LastError = true, true
-	default:
+	if !decodeFlags(f[12], &s) {
 		return bad("flags", f[12])
 	}
 	if f[13] != "" && !validApp(f[13]) {
@@ -189,6 +185,21 @@ func Decode(v string) (runtime.ProgramStatus, error) {
 	}
 	s.App = f[13]
 	return s, nil
+}
+
+// decodeFlags sets s's flags from v, a subset of "PER" in that order, and
+// reports whether v is one.
+func decodeFlags(v string, s *runtime.ProgramStatus) bool {
+	rest := v
+	for _, f := range []struct {
+		c   byte
+		set *bool
+	}{{'P', &s.Probed}, {'E', &s.LastError}, {'R', &s.Reported}} {
+		if rest != "" && rest[0] == f.c {
+			*f.set, rest = true, rest[1:]
+		}
+	}
+	return rest == ""
 }
 
 // EncodeText returns the @gc_ps_text value for nonce and t, truncating each
