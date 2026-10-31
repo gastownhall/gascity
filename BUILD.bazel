@@ -335,6 +335,7 @@ filegroup(
     srcs = [
         "//cmd:bazel_repo_srcs",
         "//cmd/gc:bazel_repo_srcs",
+        "//cmd/gc-osc7501:bazel_repo_srcs",
         "//cmd/gc-write-mint:bazel_repo_srcs",
         "//cmd/gen-client:bazel_repo_srcs",
         "//cmd/gen-command-census:bazel_repo_srcs",
@@ -489,6 +490,7 @@ filegroup(
         "//internal/runtime/k8s:bazel_repo_srcs",
         "//internal/runtime/proctable:bazel_repo_srcs",
         "//internal/runtime/programstatus:bazel_repo_srcs",
+        "//internal/runtime/programstatus/tap:bazel_repo_srcs",
         "//internal/runtime/registry:bazel_repo_srcs",
         "//internal/runtime/rppcheck:bazel_repo_srcs",
         "//internal/runtime/runtimecapability:bazel_repo_srcs",
@@ -612,6 +614,7 @@ filegroup(
     srcs = [
         "//cmd:bazel_go_srcs",
         "//cmd/gc:bazel_go_srcs",
+        "//cmd/gc-osc7501:bazel_go_srcs",
         "//cmd/gc-write-mint:bazel_go_srcs",
         "//cmd/gen-client:bazel_go_srcs",
         "//cmd/gen-command-census:bazel_go_srcs",
@@ -766,6 +769,7 @@ filegroup(
         "//internal/runtime/k8s:bazel_go_srcs",
         "//internal/runtime/proctable:bazel_go_srcs",
         "//internal/runtime/programstatus:bazel_go_srcs",
+        "//internal/runtime/programstatus/tap:bazel_go_srcs",
         "//internal/runtime/registry:bazel_go_srcs",
         "//internal/runtime/rppcheck:bazel_go_srcs",
         "//internal/runtime/runtimecapability:bazel_go_srcs",
@@ -886,6 +890,7 @@ filegroup(
     srcs = [
         "//cmd:bazel_go_test_srcs",
         "//cmd/gc:bazel_go_test_srcs",
+        "//cmd/gc-osc7501:bazel_go_test_srcs",
         "//cmd/gc-write-mint:bazel_go_test_srcs",
         "//cmd/gen-client:bazel_go_test_srcs",
         "//cmd/gen-command-census:bazel_go_test_srcs",
@@ -1040,6 +1045,7 @@ filegroup(
         "//internal/runtime/k8s:bazel_go_test_srcs",
         "//internal/runtime/proctable:bazel_go_test_srcs",
         "//internal/runtime/programstatus:bazel_go_test_srcs",
+        "//internal/runtime/programstatus/tap:bazel_go_test_srcs",
         "//internal/runtime/registry:bazel_go_test_srcs",
         "//internal/runtime/rppcheck:bazel_go_test_srcs",
         "//internal/runtime/runtimecapability:bazel_go_test_srcs",
