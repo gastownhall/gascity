@@ -1150,3 +1150,88 @@ func TestSyntheticInputConvoyIsWorkClassAndCoResidentWithItsTarget(t *testing.T)
 		t.Fatalf("input convoy %s does not track target %s", convoyID, target.ID)
 	}
 }
+
+func TestPrepareInvocationResolvesDefaultReferencingRoutingVar(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeFormula(t, dir, "work.formula.toml", `
+formula = "work"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[vars.review_target]
+default = "{{binding_prefix}}reviewer"
+
+[[steps]]
+id = "review"
+title = "Review {{convoy_id}}"
+metadata = { "gc.run_target" = "{{review_target}}" }
+`)
+	store := beads.NewMemStore()
+	target, err := store.Create(beads.Bead{Title: "target", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+	inv, err := PrepareInvocation(context.Background(), store, "work", []string{dir}, target.ID, map[string]string{"binding_prefix": "ops."})
+	if err != nil {
+		t.Fatalf("PrepareInvocation: %v", err)
+	}
+	if got := inv.Vars["review_target"]; got != "ops.reviewer" {
+		t.Fatalf("vars[review_target] = %q, want ops.reviewer", got)
+	}
+}
+
+const convoyIDDefaultFormula = `
+formula = "work"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[vars.subject]
+default = "{{convoy_id}}"
+
+[[steps]]
+id = "inspect"
+title = "Inspect {{subject}}"
+`
+
+func TestPrepareInvocationResolvesDefaultReferencingConvoyID(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeFormula(t, dir, "work.formula.toml", convoyIDDefaultFormula)
+	store := beads.NewMemStore()
+	target, err := store.Create(beads.Bead{Title: "target", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+	inv, err := PrepareInvocation(context.Background(), store, "work", []string{dir}, target.ID, nil)
+	if err != nil {
+		t.Fatalf("PrepareInvocation: %v", err)
+	}
+	if inv.InputConvoy == "" {
+		t.Fatal("InputConvoy is empty, want a resolved convoy")
+	}
+	if got := inv.Vars["subject"]; got != inv.InputConvoy {
+		t.Fatalf("vars[subject] = %q, want input convoy %q", got, inv.InputConvoy)
+	}
+}
+
+func TestPreparePreviewInvocationResolvesDefaultReferencingConvoyID(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeFormula(t, dir, "work.formula.toml", convoyIDDefaultFormula)
+	store := beads.NewMemStore()
+	target, err := store.Create(beads.Bead{Title: "target", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+	inv, err := PreparePreviewInvocation(context.Background(), store, "work", []string{dir}, target.ID, false, nil)
+	if err != nil {
+		t.Fatalf("PreparePreviewInvocation: %v", err)
+	}
+	want := previewInputConvoyPrefix + target.ID
+	if got := inv.Vars["subject"]; got != want {
+		t.Fatalf("vars[subject] = %q, want %q", got, want)
+	}
+}

@@ -3802,3 +3802,25 @@ func TestProcessDrainReHoldsItsItemWhenAReleasedBlockerClosesBlocked(t *testing.
 		t.Fatalf("gates = %+v; want the one gate reopened as an ordinary open gate", gates)
 	}
 }
+
+func TestDrainItemRuntimeVarsResolvesDefaultsReferencingParentAndConvoyVars(t *testing.T) {
+	reviewDefault := "{{binding_prefix}}reviewer"
+	subjectDefault := "unit {{convoy_id}}"
+	recipe := &formula.Recipe{Vars: map[string]*formula.VarDef{
+		"review_target": {Default: &reviewDefault},
+		"subject":       {Default: &subjectDefault},
+	}}
+	got := drainItemRuntimeVars(recipe, map[string]string{
+		"binding_prefix":    "ops.",
+		graphv2.ConvoyIDVar: "unit-1",
+	})
+	if got["review_target"] != "ops.reviewer" {
+		t.Fatalf("review_target = %q, want ops.reviewer", got["review_target"])
+	}
+	if got["subject"] != "unit unit-1" {
+		t.Fatalf("subject = %q, want %q", got["subject"], "unit unit-1")
+	}
+	if got := drainItemRuntimeVars(nil, nil); got == nil || len(got) != 0 {
+		t.Fatalf("drainItemRuntimeVars(nil, nil) = %v, want empty non-nil map", got)
+	}
+}

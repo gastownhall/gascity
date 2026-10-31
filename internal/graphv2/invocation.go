@@ -110,12 +110,13 @@ func PrepareInvocation(ctx context.Context, store beads.Store, formulaName strin
 	if err := ValidateNoReservedUserVars(inv.Vars); err != nil {
 		return Invocation{}, err
 	}
-	inv.Vars = EffectiveRuntimeVars(resolved, inv.Vars)
+	provided := inv.Vars
+	inv.Vars = EffectiveRuntimeVars(resolved, provided)
 	formulaRequiresTarget, err := formula.GraphV2FormulaReferencesInputConvoyTransitively(resolved, parser)
 	if err != nil {
 		return Invocation{}, err
 	}
-	recipe, err := compileValidationRecipe(ctx, formulaName, searchPaths, inv.Vars)
+	recipe, err := compileValidationRecipe(ctx, formulaName, searchPaths, provided)
 	if err != nil {
 		return Invocation{}, err
 	}
@@ -146,10 +147,11 @@ func PrepareInvocation(ctx context.Context, store beads.Store, formulaName strin
 	if err := formula.ValidateGraphV2RecipeReservedSymbols(recipe, true); err != nil {
 		return Invocation{}, err
 	}
-	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: varsWithConvoyPlaceholder(inv.Vars)}); err != nil {
+	validationVars := EffectiveRuntimeVars(resolved, varsWithConvoyPlaceholder(provided))
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: validationVars}); err != nil {
 		return Invocation{}, err
 	}
-	if err := validateDrainItemFormulas(formulaName, searchPaths, recipe, inv.Vars); err != nil {
+	if err := validateDrainItemFormulas(formulaName, searchPaths, recipe, validationVars); err != nil {
 		return Invocation{}, err
 	}
 	if store == nil {
@@ -160,7 +162,7 @@ func PrepareInvocation(ctx context.Context, store beads.Store, formulaName strin
 		return Invocation{}, err
 	}
 	inv.InputConvoy = convoyID
-	inv.Vars[ConvoyIDVar] = convoyID
+	provided[ConvoyIDVar] = convoyID
 	if len(legacyRefs) > 0 {
 		memberID, err := ResolveLegacyIssueAlias(store, convoyID)
 		if err != nil {
@@ -174,8 +176,11 @@ func PrepareInvocation(ctx context.Context, store beads.Store, formulaName strin
 			CloseSyntheticInputConvoy(store, convoyID, targetID)
 			return Invocation{}, fmt.Errorf("resolving deprecated issue alias for v2 formula %q: %w", formulaName, err)
 		}
-		inv.Vars[LegacyIssueVar] = memberID
+		provided[LegacyIssueVar] = memberID
 	}
+	// Re-resolve the defaults now that the runtime-injected vars are known, so
+	// a default that references {{convoy_id}} or {{issue}} sees the real value.
+	inv.Vars = EffectiveRuntimeVars(resolved, provided)
 	return inv, nil
 }
 
@@ -251,22 +256,7 @@ func varsWithConvoyPlaceholder(vars map[string]string) map[string]string {
 // mirrors molecule instantiation's runtime var view so graph.v2 metadata and
 // root keys use the same effective inputs that template substitution sees.
 func EffectiveRuntimeVars(f *formula.Formula, vars map[string]string) map[string]string {
-	out := make(map[string]string, len(vars))
-	if f != nil {
-		for name, def := range f.Vars {
-			if def == nil || def.Default == nil {
-				continue
-			}
-			out[name] = *def.Default
-		}
-	}
-	for key, value := range vars {
-		out[key] = value
-	}
-	if len(out) == 0 {
-		return map[string]string{}
-	}
-	return out
+	return formula.ApplyDefaults(f, vars)
 }
 
 func compileValidationRecipe(ctx context.Context, formulaName string, searchPaths []string, vars map[string]string) (*formula.Recipe, error) {
@@ -479,12 +469,16 @@ func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaNam
 	if err := ValidateNoReservedUserVars(userVars); err != nil {
 		return Invocation{}, err
 	}
-	inv.Vars = EffectiveRuntimeVars(resolved, inv.Vars)
+	provided := inv.Vars
+	if provided == nil {
+		provided = make(map[string]string, 2)
+	}
+	inv.Vars = EffectiveRuntimeVars(resolved, provided)
 	formulaRequiresTarget, err := formula.GraphV2FormulaReferencesInputConvoyTransitively(resolved, parser)
 	if err != nil {
 		return Invocation{}, err
 	}
-	recipe, err := compileValidationRecipe(ctx, formulaName, searchPaths, inv.Vars)
+	recipe, err := compileValidationRecipe(ctx, formulaName, searchPaths, provided)
 	if err != nil {
 		return Invocation{}, err
 	}
@@ -522,10 +516,7 @@ func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaNam
 	}
 	inv.Targeted = true
 	inv.InputConvoy = inputConvoyID
-	if inv.Vars == nil {
-		inv.Vars = make(map[string]string, 1)
-	}
-	inv.Vars[ConvoyIDVar] = inputConvoyID
+	provided[ConvoyIDVar] = inputConvoyID
 	legacyRefs := formula.GraphV2LegacyIssueRefsTransitively(resolved, parser)
 	if len(legacyRefs) == 0 {
 		legacyRefs = formula.GraphV2RecipeLegacyIssueRefs(recipe)
@@ -536,8 +527,9 @@ func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaNam
 		if err != nil {
 			return Invocation{}, fmt.Errorf("resolving deprecated issue alias for v2 formula %q: %w", formulaName, err)
 		}
-		inv.Vars[LegacyIssueVar] = memberID
+		provided[LegacyIssueVar] = memberID
 	}
+	inv.Vars = EffectiveRuntimeVars(resolved, provided)
 	if err := validateDrainItemFormulas(formulaName, searchPaths, recipe, inv.Vars); err != nil {
 		return Invocation{}, err
 	}

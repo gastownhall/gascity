@@ -2776,3 +2776,33 @@ func TestSessionStepMarksAreTheSessionPackages(t *testing.T) {
 		t.Fatalf("marks %q %q %q, want session's %q %q %q", sessionStepType, sessionStepLabel, startupHealthStepType, session.BeadType, session.LabelSession, session.StartupHealthEpisodeType)
 	}
 }
+
+func TestCompileConditionSeesDefaultBuiltFromProvidedVar(t *testing.T) {
+	dir := t.TempDir()
+	formulaContent := `
+formula = "conditional-ref"
+version = 1
+
+[vars.review_target]
+default = "{{binding_prefix}}reviewer"
+
+[[steps]]
+id = "always"
+title = "Always runs"
+
+[[steps]]
+id = "bound-only"
+title = "Only for the ops binding"
+condition = "{{review_target}} == ops.reviewer"
+`
+	if err := os.WriteFile(filepath.Join(dir, "conditional-ref.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recipe, err := Compile(context.Background(), "conditional-ref", []string{dir}, map[string]string{"binding_prefix": "ops."})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if len(recipe.Steps) != 3 {
+		t.Fatalf("len(Steps) = %d, want 3 (root, always, bound-only)", len(recipe.Steps))
+	}
+}
