@@ -34,6 +34,11 @@ farm_test_seconds: 0 for the runtime suite.
 admission: local-heavy, 40 GiB floor, cap 3; actual admission records retained under each run. No limits changed.
 heavy_mode: none.
 
+test_bd: isolated-test-run:   pinned test bd (gm-i3csn7): GASCITY_TEST_BD version=v1.3.2 bin=/home/jaword/.local/bd-versions/v1.3.2/bd reports='bd version 1.3.2 (9b65b9e19: HEAD@9b65b9e198ac)' ref_check=match:9b65b9e19 origin=preexisting pin_source=/var/tmp/gc-merge-validate.akfxxfq.5p1xc3mx/deps.env displaces='bd version 1.3.2 (9b65b9e19)'
+diff_owned_evidence: `/var/tmp/deploy-ga-akfxxfq-resume.9z31vwbe/owned-explain.txt`; by-name owned assertion result: `/var/tmp/deploy-ga-akfxxfq-resume.9z31vwbe/unit-owned-by-name.txt`.
+not_owned_skip_evidence: `/var/tmp/deploy-ga-akfxxfq-resume.9z31vwbe/required-suite-skip-sites-proof.txt` and `/var/tmp/deploy-ga-akfxxfq-resume.9z31vwbe/required-native-skip-sites-proof.txt`; unchanged site, printed reason and shared-hunk review are bound by the inventory pointer below.
+skip_justification: Every non-owned skip site is unchanged, and this test-only diff changes no linked production path; missing optional prerequisites and deliberate suite partitions remain inventoried. Environment-absence parents received the required native top-ups. The owned namespace skip is paired with an actual mapped-group assertion PASS.
+
 | Phase | Bazel actions | Original exit | Top-level PASS/FAIL/SKIP | Original target verdicts |
 |---|---:|---:|---|---|
 | unit | 378 | 2 | 35617/4/184 | {"FAILED": 4, "PASSED": 363, "TIMEOUT": 11} |
