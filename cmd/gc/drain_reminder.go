@@ -539,11 +539,12 @@ func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info session
 // never replay an unbounded stream. A nudge error still spends the attempt
 // (the write-ahead is what bounds the loop, and unwinding it would let a
 // permanently input-dead pane re-send forever) and records that nothing
-// ARRIVED, so the escalation reports what actually happened. The one
-// exception is a deferral (runtime.ErrSessionBusy): the runtime typed nothing
+// ARRIVED, so the escalation reports what actually happened. The exception
+// is a deferral (drainReminderDeferralHold): the runtime typed nothing
 // because the session was running a turn its submit keys would have
-// interrupted, so nothing was attempted and the marker is restored to what it
-// held, under the busy hold.
+// interrupted, or was waiting on a pending interaction its text would have
+// answered, so nothing was attempted and the marker is restored to what it
+// held, under the busy or pending hold.
 func deliverDrainReminder(sp runtime.Provider, store beads.Store, info sessions.Info, name string, due drainReminderDue, stdout io.Writer) drainReminderOutcome {
 	failed := due.failed
 	journalPrior := func() {}
@@ -568,9 +569,9 @@ func deliverDrainReminder(sp runtime.Provider, store beads.Store, info sessions.
 		return drainReminderSkipped
 	}
 	err := nudgeDrainReminder(sp, name, info)
-	if errors.Is(err, runtime.ErrSessionBusy) {
+	if hold := drainReminderDeferralHold(err); hold != "" {
 		writeDrainReminderMarker(store, info, due.row, due.drainID, due.attempts, due.failed, due.settled, due.last, stdout)
-		noteDrainReminderHold(store, info, drainReminderHoldBusy)
+		noteDrainReminderHold(store, info, hold)
 		return drainReminderHeld
 	}
 	journalPrior()
@@ -590,6 +591,21 @@ func deliverDrainReminder(sp runtime.Provider, store beads.Store, info sessions.
 		"%s: drain reminder %d/%d delivered to %s (stop-pending, unacked)\n",
 		drainReminderLabel, due.attempts+1, drainReminderMaxAttempts, name)
 	return drainReminderDelivered
+}
+
+// drainReminderDeferralHold is the hold a reminder delivery's err puts the
+// row under when the runtime typed nothing and the attempt is not spent, or
+// "": a session running a turn its submit keys would interrupt
+// (runtime.ErrSessionBusy), or one waiting on a pending interaction its
+// text would answer, which opened after the hold's own look.
+func drainReminderDeferralHold(err error) string {
+	switch {
+	case errors.Is(err, runtime.ErrSessionBusy):
+		return drainReminderHoldBusy
+	case nudgeRefusedBehindPendingInteraction(err):
+		return drainReminderHoldPending
+	}
+	return ""
 }
 
 // nudgeDrainReminder types the reminder into the session directly: with
