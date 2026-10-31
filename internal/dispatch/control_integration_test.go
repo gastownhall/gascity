@@ -2382,3 +2382,93 @@ func findAttemptByRef(t *testing.T, store beads.Store, _, stepRef string) beads.
 	}
 	return beads.Bead{}
 }
+
+// A pool-routed, session-affine attempt is pinned to the live session holding
+// its workflow root, so no other pool session can take it before the lane does.
+func TestSpawnNextAttemptPinsAffineAttemptToRootHolder(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		rootHolder string
+		want       string
+	}{
+		{"held root", "gc-wisp-holder", "gc-wisp-holder"},
+		{"unheld root", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cityPath := t.TempDir()
+			if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = true
+
+[[agent]]
+name = "lane"
+max_active_sessions = 4
+
+[[agent]]
+name = "control-dispatcher"
+max_active_sessions = 1
+`), 0o644); err != nil {
+				t.Fatalf("write city.toml: %v", err)
+			}
+			store := beads.NewMemStore()
+			spec := &formula.Step{
+				ID:    "review",
+				Title: "Review",
+				Type:  "task",
+				Retry: &formula.RetrySpec{MaxAttempts: 3},
+				Metadata: map[string]string{
+					"gc.session_affinity":   "require",
+					"gc.continuation_group": "main",
+					"gc.run_target":         "lane",
+				},
+			}
+			specJSON, err := json.Marshal(spec)
+			if err != nil {
+				t.Fatalf("marshal step spec: %v", err)
+			}
+			root := mustCreate(t, store, beads.Bead{
+				Title:    "workflow",
+				Metadata: map[string]string{"gc.kind": "workflow"},
+			})
+			status, assignee := "in_progress", tc.rootHolder
+			if err := store.Update(root.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+				t.Fatalf("hold root: %v", err)
+			}
+			control := mustCreate(t, store, beads.Bead{
+				Title: "review retry",
+				Metadata: map[string]string{
+					"gc.kind":             "retry",
+					"gc.root_bead_id":     root.ID,
+					"gc.step_ref":         "mol-test.review",
+					"gc.step_id":          "review",
+					"gc.max_attempts":     "3",
+					"gc.source_step_spec": string(specJSON),
+					"gc.control_epoch":    "1",
+				},
+			})
+			attempt1 := makeAttemptBead(t, store, root.ID, "mol-test.review.attempt.1", 1, map[string]string{
+				"gc.outcome":        "fail",
+				"gc.failure_class":  "transient",
+				"gc.failure_reason": "timeout",
+			})
+			mustDep(t, store, control.ID, attempt1.ID, "blocks")
+
+			if _, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{CityPath: cityPath}); err != nil {
+				t.Fatalf("processRetryControl: %v", err)
+			}
+			attempt2 := findAttemptByRef(t, store, root.ID, "mol-test.review.attempt.2")
+			if attempt2.ID == "" {
+				t.Fatal("attempt 2 not created")
+			}
+			if attempt2.Assignee != tc.want {
+				t.Errorf("attempt 2 assignee = %q, want %q", attempt2.Assignee, tc.want)
+			}
+		})
+	}
+}
