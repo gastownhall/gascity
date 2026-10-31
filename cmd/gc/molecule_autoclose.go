@@ -40,6 +40,7 @@ func newMoleculeCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 	}
 	cmd.AddCommand(newMoleculeAutocloseCmd(stdout, stderr))
+	cmd.AddCommand(newMoleculeReapOrphansCmd(stdout))
 	return cmd
 }
 
