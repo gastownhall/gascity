@@ -389,7 +389,8 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 		defer r.ops.end()
 	}
 
-	if err := staged.findSuperseded(msgStore, sessStore); err != nil {
+	msgHandles, sessHandles := beads.HandlesFor(msgStore), beads.HandlesFor(sessStore)
+	if err := staged.findSuperseded(msgHandles, sessHandles); err != nil {
 		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
 		return handoffOutcome{code: 1}
 	}
@@ -418,12 +419,16 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 		return handoffOutcome{code: 0}
 	}
 
-	if err := staged.commit(msgStore, sessStore, rec, sessionAddress, b.ID, stderr); err != nil {
+	if err := staged.commit(msgHandles, sessHandles, rec, sessionAddress, b.ID, stderr); err != nil {
 		return handoffOutcome{code: 1}
 	}
 
 	if err := r.recordRestart(); err != nil {
-		fmt.Fprintf(stderr, "gc handoff: sent mail %s; %s\n", b.ID, r.notRecorded(err)) //nolint:errcheck // best-effort stderr
+		if staged.active {
+			fmt.Fprintf(stderr, "gc handoff: staged brief %s is held, not delivered; %s\n", b.ID, r.notRecorded(err)) //nolint:errcheck // best-effort stderr
+		} else {
+			fmt.Fprintf(stderr, "gc handoff: sent mail %s; %s\n", b.ID, r.notRecorded(err)) //nolint:errcheck // best-effort stderr
+		}
 		staged.restartFailed(rec, sessionAddress, r.notRecorded(err))
 		return handoffOutcome{code: 1}
 	}
@@ -468,11 +473,11 @@ func (s *stagedHandoff) forToken() string {
 // findSuperseded looks up the outstanding staged brief. A session holds at
 // most one, so this staging replaces it. Look it up before creating anything:
 // a refusal must not leave a new bead behind.
-func (s *stagedHandoff) findSuperseded(msgStore, sessStore beads.Store) error {
+func (s *stagedHandoff) findSuperseded(msgs, sessions beads.StoreHandles) error {
 	if !s.active {
 		return nil
 	}
-	id, err := outstandingStagedHandoff(msgStore, sessStore, s.sessionID, s.token)
+	id, err := outstandingStagedHandoff(msgs, sessions, s.sessionID, s.token)
 	if err != nil {
 		return err
 	}
@@ -485,11 +490,11 @@ func (s *stagedHandoff) findSuperseded(msgStore, sessStore beads.Store) error {
 // staging also starts a new release lifecycle: the controller skips any row
 // carrying the release-attempt marker, so one left by an earlier timeout would
 // leave this brief unreleasable. It reports its own failure on stderr.
-func (s *stagedHandoff) commit(msgStore, sessStore beads.Store, rec events.Recorder, sessionAddress, briefID string, stderr io.Writer) error {
+func (s *stagedHandoff) commit(msgs, sessions beads.StoreHandles, rec events.Recorder, sessionAddress, briefID string, stderr io.Writer) error {
 	if !s.active {
 		return nil
 	}
-	if err := sessStore.SetMetadataBatch(s.sessionID, map[string]string{
+	if err := sessions.Writer.SetMetadataBatch(s.sessionID, map[string]string{
 		handoffStageCommittedAtKey:   time.Now().UTC().Format(time.RFC3339),
 		handoffStagedMessageIDKey:    briefID,
 		handoffReleaseAttemptedAtKey: "",
@@ -500,7 +505,7 @@ func (s *stagedHandoff) commit(msgStore, sessStore beads.Store, rec events.Recor
 	if s.supersededID != "" {
 		// Close and stamp in one call. The old brief keeps mail.staged=true on
 		// purpose: that flag is what keeps it unreadable on every mail surface.
-		_, err := msgStore.CloseAll([]string{s.supersededID}, map[string]string{mail.SupersededByMetadataKey: briefID})
+		_, err := msgs.Writer.CloseAll([]string{s.supersededID}, map[string]string{mail.SupersededByMetadataKey: briefID})
 		if err != nil && !errors.Is(err, beads.ErrNotFound) {
 			fmt.Fprintf(stderr, "gc handoff: staged brief %s is recorded, but the brief it supersedes, %s, could not be closed and remains an orphan: %v\n", briefID, s.supersededID, err) //nolint:errcheck // best-effort stderr
 		}
@@ -708,18 +713,18 @@ func sessionRestartableByController(sessStore beads.Store, sessionName string) (
 // should receive, and only the controller releases. A written-off brief is dead,
 // so it is superseded whatever its token; refusing there would wedge the
 // session behind a brief the controller will never release.
-func outstandingStagedHandoff(msgStore, sessStore beads.Store, sessionID, instanceToken string) (string, error) {
-	session, err := sessStore.Get(sessionID)
+func outstandingStagedHandoff(msgs, sessions beads.StoreHandles, sessionID, instanceToken string) (string, error) {
+	sessionRow, err := sessions.Live.Get(sessionID)
 	if err != nil {
 		return "", fmt.Errorf("loading session %q: %w", sessionID, err)
 	}
-	priorID := strings.TrimSpace(session.Metadata[handoffStagedMessageIDKey])
+	priorID := strings.TrimSpace(sessionRow.Metadata[handoffStagedMessageIDKey])
 	if priorID == "" {
 		return "", nil
 	}
 	// Read live: a cached Get can answer not-found from a stale tombstone for a
 	// brief that is still open, which would strand it.
-	prior, err := beads.HandlesFor(msgStore).Live.Get(priorID)
+	prior, err := msgs.Live.Get(priorID)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return "", nil
@@ -729,7 +734,7 @@ func outstandingStagedHandoff(msgStore, sessStore beads.Store, sessionID, instan
 	if prior.Status == "closed" || prior.Metadata[mail.StagedMetadataKey] != "true" {
 		return "", nil
 	}
-	writtenOff := strings.TrimSpace(session.Metadata[handoffReleaseAttemptedAtKey]) != ""
+	writtenOff := strings.TrimSpace(sessionRow.Metadata[handoffReleaseAttemptedAtKey]) != ""
 	if !writtenOff && prior.Metadata[mail.StagedForTokenMetadataKey] != instanceToken {
 		return "", fmt.Errorf("staged handoff %s is still awaiting release to this session incarnation; retry once the controller has delivered it", priorID)
 	}

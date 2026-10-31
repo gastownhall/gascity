@@ -2093,7 +2093,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// failed once the no-successor timeout elapses. A no-op for the common
 	// case (no session in rows has a staged handoff).
 	phaseStart = time.Now()
-	releasedHandoffs, failedHandoffs := releaseStagedSelfHandoffs(store, rows, cfg, clk, rec)
+	releasedHandoffs, failedHandoffs := releaseStagedSelfHandoffs(reconcileOpts.handoffMail, sessStore, rows, cfg, clk, rec)
 	recordPhase(TraceSiteSessionReconcileHandoffRelease, "session_reconcile.handoff_release", phaseStart, map[string]any{
 		"released_count": releasedHandoffs,
 		"failed_count":   failedHandoffs,

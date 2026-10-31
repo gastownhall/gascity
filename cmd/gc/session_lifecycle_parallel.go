@@ -467,6 +467,12 @@ type startExecutionOptions struct {
 	// onDeathGate holds names whose on_death hook is queued or running;
 	// their starts wait. Nil holds nothing.
 	onDeathGate *onDeathGate
+	// handoffMail is the messaging-class handle a staged self-handoff brief is
+	// released through. It is a different store from the session rows' whenever
+	// the messaging class is relocated, so it is supplied explicitly. A zero
+	// value releases nothing: releaseStagedSelfHandoffs logs each staged row it
+	// had to skip.
+	handoffMail beads.MailStore
 }
 
 type startExecutionOption func(*startExecutionOptions)
@@ -604,6 +610,14 @@ func withPrepareBudget(d time.Duration) startExecutionOption {
 func withDeferSessionClosesOnBoot() startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.deferSessionClosesOnBoot = true
+	}
+}
+
+// withHandoffMailStore supplies the messaging-class handle the reconciler
+// releases staged self-handoff briefs through (releaseStagedSelfHandoffs).
+func withHandoffMailStore(store beads.MailStore) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.handoffMail = store
 	}
 }
 

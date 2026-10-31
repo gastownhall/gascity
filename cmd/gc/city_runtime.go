@@ -3476,6 +3476,9 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		withWarmClaimProbe(cr.warmClaimTriggerProbe(triggerResolver)),
 		// The launch-time opt_* lookup reads a pool slot's trigger bead through the same residency reader.
 		withTriggerBeadResolver(triggerResolver),
+		// Staged self-handoff briefs live in the messaging class, which may be a
+		// different store from the session rows the tick reads.
+		withHandoffMailStore(cr.mailBeadStore()),
 	}
 	if bootReconcile {
 		// #3288: skip the per-session orphan/failed-create session-bead closes on
@@ -4321,6 +4324,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
 		withOnDeathGate(cr.onDeathGate()),
 		withPrepareBudget(defaultStartPrepareBudget),
+		withHandoffMailStore(cr.mailBeadStore()),
 	)
 	cr.requestDeferredDrainFollowUpTick()
 }

@@ -15,17 +15,22 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
-// newDistinctHandoffStores returns a message store and a session store that
-// hold different beads under different IDs. Padding the message store keeps
-// the two stores' ID counters apart, so a read or write sent to the wrong
-// store misses instead of landing on an unrelated bead that shares an ID.
+// newDistinctHandoffStores returns a message store and a session store whose
+// beads get disjoint IDs. The session store burns its first IDs on padding it
+// then deletes, so the session row is not gc-1 and the message in the other
+// store is: a read or write sent to the wrong store misses instead of landing
+// on an unrelated bead that shares an ID.
 func newDistinctHandoffStores(t *testing.T) (msgStore, sessStore beads.Store) {
 	t.Helper()
 	msgStore = beads.NewMemStore()
 	sessStore = beads.NewMemStore()
 	for i := 0; i < 3; i++ {
-		if _, err := msgStore.Create(beads.Bead{Title: "padding"}); err != nil {
-			t.Fatalf("pad message store: %v", err)
+		padding, err := sessStore.Create(beads.Bead{Title: "padding"})
+		if err != nil {
+			t.Fatalf("pad session store: %v", err)
+		}
+		if err := sessStore.Delete(padding.ID); err != nil {
+			t.Fatalf("remove padding %s: %v", padding.ID, err)
 		}
 	}
 	return msgStore, sessStore
@@ -169,7 +174,19 @@ func TestReleaseStagedSelfHandoffsReadsEachSideFromItsOwnStore(t *testing.T) {
 // and the brief it releases lives in another, supplied by withHandoffMailStore.
 func TestReconcileReleasesStagedHandoffAcrossDistinctStores(t *testing.T) {
 	env, sessionBead := newHandoffReconcileSession(t, "successor-instance")
-	msgStore, _ := newDistinctHandoffStores(t)
+	// The reconciler env's store already holds the session row and the fixtures
+	// around it, so burn a long run of the message store's IDs to keep the two
+	// ID spaces disjoint.
+	msgStore := beads.NewMemStore()
+	for i := 0; i < 100; i++ {
+		padding, err := msgStore.Create(beads.Bead{Title: "padding"})
+		if err != nil {
+			t.Fatalf("pad message store: %v", err)
+		}
+		if err := msgStore.Delete(padding.ID); err != nil {
+			t.Fatalf("remove padding %s: %v", padding.ID, err)
+		}
+	}
 	message, _, err := beadmail.New(msgStore).SendHandoff(mail.HandoffIntent{
 		From:        "worker",
 		To:          "worker",
