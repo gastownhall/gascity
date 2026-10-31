@@ -189,7 +189,8 @@ type Config struct {
 	// nothing: the read formats stay today's and every reading is Unread.
 	ProgramStatus runtime.ProgramStatusMode
 	// ComparisonSink receives the shadow-mode comparisons the leaf's
-	// decision points record. It is used only while ProgramStatus is shadow;
+	// decision points record. It is used only while the live switch
+	// (ProgramStatus, or the one SetProgramStatusMode published) is shadow;
 	// nil records nothing. It must not block.
 	ComparisonSink runtime.ProgramStatusComparisonSink
 }

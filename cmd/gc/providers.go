@@ -92,10 +92,11 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) s
 	if cityPath != "" {
 		runtimeDir = citylayout.RuntimePath(cityPath)
 	}
-	// The shadow sink exists only under the shadow switch and for a city:
-	// off and on record nothing.
+	// Every city's leaf gets the shadow sink; the leaf hands it out only
+	// while its live switch is shadow (a reload publishes the switch to a
+	// leaf it keeps), so off and on record nothing.
 	var comparisons runtime.ProgramStatusComparisonSink
-	if sc.ProgramStatusMode() == runtime.ProgramStatusShadow && cityPath != "" {
+	if cityPath != "" {
 		comparisons = programStatusShadowSink(cityPath)
 	}
 	return sessiontmux.Config{

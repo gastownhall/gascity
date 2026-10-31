@@ -126,6 +126,27 @@ func TestShadowSinkOnlyUnderShadow(t *testing.T) {
 	}
 }
 
+// Kills a shadow sink that keeps the switch the leaf was built with: a
+// reload publishing shadow starts recording, and one publishing off or on
+// stops it.
+func TestShadowSinkFollowsPublishedSwitch(t *testing.T) {
+	sink := func(runtime.ProgramStatusComparison) {}
+	for _, built := range []runtime.ProgramStatusMode{runtime.ProgramStatusOff, runtime.ProgramStatusOn} {
+		p := &Provider{tm: &Tmux{cfg: Config{ProgramStatus: built, ComparisonSink: sink}}}
+		if p.ProgramStatusShadowSink() != nil {
+			t.Fatalf("built under %s: a sink is handed out", built)
+		}
+		p.tm.SetProgramStatusMode(runtime.ProgramStatusShadow)
+		if p.ProgramStatusShadowSink() == nil {
+			t.Fatalf("built under %s, published shadow: no sink handed out", built)
+		}
+		p.tm.SetProgramStatusMode(built)
+		if p.ProgramStatusShadowSink() != nil {
+			t.Fatalf("published %s again: a sink is still handed out", built)
+		}
+	}
+}
+
 // Kills a shadowing idle wait that decides differently from the switch off,
 // sends the scan any other command, or records the wrong comparison: the
 // scan's verdict beside the record's, the record followed to time its veto.

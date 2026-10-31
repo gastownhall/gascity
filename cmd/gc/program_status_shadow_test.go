@@ -237,16 +237,17 @@ func TestShadowSinkNeverBlocks(t *testing.T) {
 	}
 }
 
-// Kills a tmux config that records under any switch but shadow.
-func TestTmuxConfigComparisonSinkOnlyUnderShadow(t *testing.T) {
+// Kills a tmux config whose shadow sink depends on the switch it was built
+// under: a reload that publishes shadow to a leaf built under off or on must
+// find the sink there (the leaf hands it out only under shadow; tmux
+// TestShadowSinkFollowsPublishedSwitch). A process with no city records
+// nothing.
+func TestTmuxConfigComparisonSinkForEveryCity(t *testing.T) {
 	city := t.TempDir()
-	for _, set := range []string{"", "off", "on"} {
-		if cfg := tmuxConfigFromSession(config.SessionConfig{ProgramStatus: set}, "city", city); cfg.ComparisonSink != nil {
-			t.Errorf("program_status %q: a comparison sink is configured", set)
+	for _, set := range []string{"", "off", "on", "shadow"} {
+		if cfg := tmuxConfigFromSession(config.SessionConfig{ProgramStatus: set}, "city", city); cfg.ComparisonSink == nil {
+			t.Errorf("program_status %q: no comparison sink for the city", set)
 		}
-	}
-	if cfg := tmuxConfigFromSession(config.SessionConfig{ProgramStatus: "shadow"}, "city", city); cfg.ComparisonSink == nil {
-		t.Error("program_status shadow: no comparison sink")
 	}
 	if cfg := tmuxConfigFromSession(config.SessionConfig{ProgramStatus: "shadow"}, "city", ""); cfg.ComparisonSink != nil {
 		t.Error("program_status shadow with no city: a comparison sink is configured")
