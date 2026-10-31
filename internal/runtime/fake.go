@@ -128,6 +128,10 @@ type Fake struct {
 	// ProgramCaptureHealErrors fail a FullFake's HealProgramCapture by
 	// session name.
 	ProgramCaptureHealErrors map[string]error
+	// ProgramShadowSink is the comparison sink a FullFake hands out as a
+	// shadowing leaf ([ProgramStatusShadowProvider]); nil, as under a switch
+	// that is not shadow, records nothing.
+	ProgramShadowSink ProgramStatusComparisonSink
 	// programArms counts the captures HealProgramCapture armed, naming each
 	// one's nonce.
 	programArms int

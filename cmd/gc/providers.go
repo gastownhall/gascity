@@ -92,7 +92,14 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) s
 	if cityPath != "" {
 		runtimeDir = citylayout.RuntimePath(cityPath)
 	}
+	// The shadow sink exists only under the shadow switch and for a city:
+	// off and on record nothing.
+	var comparisons runtime.ProgramStatusComparisonSink
+	if sc.ProgramStatusMode() == runtime.ProgramStatusShadow && cityPath != "" {
+		comparisons = programStatusShadowSink(cityPath)
+	}
 	return sessiontmux.Config{
+		ComparisonSink:     comparisons,
 		SetupTimeout:       sc.SetupTimeoutDuration(),
 		SetupMaxTimeout:    sc.SetupMaxTimeoutDuration(),
 		NudgeReadyTimeout:  sc.NudgeReadyTimeoutDuration(),

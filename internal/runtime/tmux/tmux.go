@@ -188,6 +188,10 @@ type Config struct {
 	// every program-status reading is taken under. Off (or empty) reads
 	// nothing: the read formats stay today's and every reading is Unread.
 	ProgramStatus runtime.ProgramStatusMode
+	// ComparisonSink receives the shadow-mode comparisons the leaf's
+	// decision points record. It is used only while ProgramStatus is shadow;
+	// nil records nothing. It must not block.
+	ComparisonSink runtime.ProgramStatusComparisonSink
 }
 
 // DefaultConfig returns a Config with the original hardcoded values.
@@ -472,6 +476,10 @@ type Tmux struct {
 	// capture is the program-status capture capability gate (see
 	// program_capture.go).
 	capture captureGate
+
+	// shadow is the program-status shadow mode's soft state (see
+	// program_status_shadow.go).
+	shadow programShadow
 
 	// serverSocketObserver observes the server socket only after tmux reports
 	// ErrNoServer, during the new-session preflight or a liveness observation
@@ -3496,6 +3504,9 @@ func (t *Tmux) nudgeSession(
 	// (the lock wait alone can take seconds): nothing may be typed into it.
 	prompt := &nudgePromptGuard{session: session, target: target, look: noPendingPrompt}
 	if err := prompt.check(); err != nil {
+		if noPendingPrompt != nil && t.shadowing() {
+			t.shadowTypingGateNow(session, err)
+		}
 		return err
 	}
 
@@ -3545,8 +3556,21 @@ func (t *Tmux) nudgeSession(
 	// 2. Send text in literal mode with retry on transient errors, after a
 	// last look for a permission prompt: the clear and the survey check above
 	// take time, and a paste into a prompt is read as menu input.
-	if err := prompt.check(); err != nil {
-		return err
+	lookErr := prompt.check()
+	// Under the shadow switch, the program's record is read once here: it
+	// is the typing gate's comparison and the baseline its delivery is
+	// confirmed against.
+	shadowBase, shadowed := runtime.ProgramBaseline{}, false
+	if t.shadowing() {
+		if s, ok := t.shadowRead(session); ok {
+			if noPendingPrompt != nil {
+				t.shadowTypingGate(session, lookErr, s)
+			}
+			shadowBase, shadowed = s.Baseline(), lookErr == nil
+		}
+	}
+	if lookErr != nil {
+		return lookErr
 	}
 	// The provider's own record of this delivery is read from here on (see
 	// unobservedSubmitVerdict).
@@ -3619,8 +3643,18 @@ func (t *Tmux) nudgeSession(
 			family := t.nudgeSubmitFamily(target)
 			busy = func() (bool, error) { return t.turnRunning(target, family) }
 			mayResend = func() (bool, error) { return t.submitStillWaiting(target, family) }
+			if shadowed {
+				mayResend = t.shadowResendLook(session, shadowBase, mayResend)
+			}
 		}
 		confirmed, sawIdle, sent, err := submitAndConfirm(sendSubmit, wake, busy, mayResend, time.Sleep)
+		if shadowed && err == nil && sent > 0 {
+			verdict := runtime.ProgramVerdictUnconfirmed
+			if confirmed {
+				verdict = runtime.ProgramVerdictConfirmed
+			}
+			t.shadowSubmit(session, shadowBase, verdict, time.Now())
+		}
 		if isLookRefusal(err) {
 			delivered = prompt.submitsSent > 0
 			return prompt.refused(err)
@@ -3718,6 +3752,9 @@ func (t *Tmux) nudgeSession(
 		// 7. Wake again so the submitted turn is processed promptly.
 		wake()
 		delivered = true
+		if shadowed {
+			t.shadowSubmit(session, shadowBase, runtime.ProgramVerdictNone, time.Now())
+		}
 		t.recordUnconfirmedSubmit(session, message)
 		return nil
 	}
@@ -5537,7 +5574,22 @@ func (t *Tmux) SnapshotIdle(session string) (bool, error) {
 // Its twin is the exec provider's waitForPaneIdle loop
 // (internal/runtime/exec/idle.go), which runs the same check over the exec
 // connection; change the two together.
+//
+// With the program-status switch at shadow, the wait's outcome is recorded
+// beside the program's own record (shadowWaitForIdle) after it is decided;
+// the outcome returned is the scan's alone.
 func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Duration) error {
+	if !t.shadowing() {
+		return t.waitForIdle(ctx, session, timeout)
+	}
+	started := time.Now()
+	err := t.waitForIdle(ctx, session, timeout)
+	t.shadowWaitForIdle(session, started, time.Now(), err)
+	return err
+}
+
+// waitForIdle is WaitForIdle's scan.
+func (t *Tmux) waitForIdle(ctx context.Context, session string, timeout time.Duration) error {
 	// Resolved once, outside the poll loop: the prefix cannot change mid-wait,
 	// and re-reading it per tick would add a tmux show-environment exec to
 	// every 200ms poll.
@@ -5614,7 +5666,31 @@ func waitForIdlePoll(ctx context.Context) error {
 // that is the session's own rollout recording no running turn
 // (waitForCodexInterruptBoundary), which a session interrupted between turns
 // does at once.
+//
+// With the program-status switch at shadow, a wait that ran is recorded as
+// the interrupt's settle beside the program's own record (shadowSettle);
+// the outcome returned is the rollout's alone.
 func (t *Tmux) WaitForInterruptBoundary(ctx context.Context, session string, since time.Time, timeout time.Duration) error {
+	if !t.shadowing() {
+		return t.waitForInterruptBoundary(ctx, session, since, timeout)
+	}
+	mark, marked := t.takeShadowInterrupt(session, time.Now())
+	if !marked {
+		// No interrupt of gc's own was noted (a soft Escape interrupt sends
+		// keys, not Interrupt): the position now stands in for it.
+		if s, ok := t.shadowRead(session); ok {
+			mark, marked = shadowInterrupt{baseline: s.Baseline(), at: since}, true
+		}
+	}
+	err := t.waitForInterruptBoundary(ctx, session, since, timeout)
+	if marked && !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		t.shadowSettleFrom(session, mark, time.Now(), err)
+	}
+	return err
+}
+
+// waitForInterruptBoundary is WaitForInterruptBoundary's rollout wait.
+func (t *Tmux) waitForInterruptBoundary(ctx context.Context, session string, since time.Time, timeout time.Duration) error {
 	provider, _ := t.GetEnvironment(session, "GC_PROVIDER")
 	switch strings.TrimSpace(provider) {
 	case "", "codex":

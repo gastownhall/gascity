@@ -60,6 +60,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"ProcessTableScanner":             reflect.TypeFor[runtime.ProcessTableScanner](),
 	"ProgramCaptureHealer":            reflect.TypeFor[runtime.ProgramCaptureHealer](),
 	"ProgramStatusProvider":           reflect.TypeFor[runtime.ProgramStatusProvider](),
+	"ProgramStatusShadowProvider":     reflect.TypeFor[runtime.ProgramStatusShadowProvider](),
 	"RelaunchProvider":                reflect.TypeFor[runtime.RelaunchProvider](),
 	"Router":                          reflect.TypeFor[runtime.Router](),
 	"ServerDeathConfirmer":            reflect.TypeFor[runtime.ServerDeathConfirmer](),

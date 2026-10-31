@@ -626,6 +626,9 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 	if !ok {
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredProviderUnsupported}, nil
 	}
+	// Under the program-status shadow switch, the pre-read a wait-idle
+	// delivery would take is recorded beside the record; nothing reads it.
+	runtime.ShadowWaitIdlePreread(h.provider, h.sessionName, "", h.providerName, time.Now())
 	if err := waiter.WaitForIdle(ctx, h.sessionName, runtimeHandleWaitIdleTimeout); err != nil {
 		// A provider type can implement the idle wait while the runtime behind
 		// it cannot (an exec pack that does not declare an idle boundary, or a

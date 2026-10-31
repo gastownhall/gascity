@@ -21,9 +21,34 @@ var (
 	_ runtime.InteractionProvider = (*Provider)(nil)
 )
 
-// Pending delegates to the underlying Tmux instance.
+// Pending delegates to the underlying Tmux instance. With the
+// program-status switch at shadow, a pending read is recorded beside the
+// program's own record (shadowPending); the answer is the parsers' alone.
 func (p *Provider) Pending(name string) (*runtime.PendingInteraction, error) {
-	return p.tm.Pending(name)
+	pending, err := p.tm.Pending(name)
+	if err == nil && p.tm.shadowing() {
+		p.shadowPending(name, pending)
+	}
+	return pending, err
+}
+
+// shadowPending records a pending read (pending): the parsers' verdict beside
+// the record's pending verdict from the state cache's reading, the reading a
+// kind-only pending interaction would come from. It records on change only
+// (the sink filters).
+func (p *Provider) shadowPending(name string, pending *runtime.PendingInteraction) {
+	scrape := runtime.ProgramVerdictNone
+	if pending != nil {
+		scrape = runtime.ProgramVerdictPending
+	}
+	now := time.Now()
+	p.tm.shadowGo(func() {
+		s, err := p.ProgramStatus(name)
+		if err != nil || s.Mode != runtime.ProgramStatusShadow {
+			return
+		}
+		p.tm.shadowEmit(name, runtime.ProgramPointPending, scrape, runtime.ProgramPendingVerdict(s, time.Time{}, now), s, 0, false)
+	})
 }
 
 // Respond delegates to the underlying Tmux instance.

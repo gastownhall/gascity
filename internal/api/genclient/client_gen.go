@@ -831,6 +831,261 @@ func (e SessionPendingClearedPayloadReason) Valid() bool {
 	}
 }
 
+// Defines values for SessionProgramStatusShadowPayloadKind.
+const (
+	Auth       SessionProgramStatusShadowPayloadKind = "auth"
+	Permission SessionProgramStatusShadowPayloadKind = "permission"
+	Question   SessionProgramStatusShadowPayloadKind = "question"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadKind enum.
+func (e SessionProgramStatusShadowPayloadKind) Valid() bool {
+	switch e {
+	case Auth:
+		return true
+	case Permission:
+		return true
+	case Question:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProgramStatusShadowPayloadPoint.
+const (
+	SessionProgramStatusShadowPayloadPointClaimNudgeHold    SessionProgramStatusShadowPayloadPoint = "claim_nudge_hold"
+	SessionProgramStatusShadowPayloadPointDrainReminder     SessionProgramStatusShadowPayloadPoint = "drain_reminder"
+	SessionProgramStatusShadowPayloadPointEscapeResend      SessionProgramStatusShadowPayloadPoint = "escape_resend"
+	SessionProgramStatusShadowPayloadPointExecutionBackstop SessionProgramStatusShadowPayloadPoint = "execution_backstop"
+	SessionProgramStatusShadowPayloadPointInterruptSettle   SessionProgramStatusShadowPayloadPoint = "interrupt_settle"
+	SessionProgramStatusShadowPayloadPointObservation       SessionProgramStatusShadowPayloadPoint = "observation"
+	SessionProgramStatusShadowPayloadPointPending           SessionProgramStatusShadowPayloadPoint = "pending"
+	SessionProgramStatusShadowPayloadPointProvedIdle        SessionProgramStatusShadowPayloadPoint = "proved_idle"
+	SessionProgramStatusShadowPayloadPointQueuedDelivery    SessionProgramStatusShadowPayloadPoint = "queued_delivery"
+	SessionProgramStatusShadowPayloadPointReadiness         SessionProgramStatusShadowPayloadPoint = "readiness"
+	SessionProgramStatusShadowPayloadPointStartupLadder     SessionProgramStatusShadowPayloadPoint = "startup_ladder"
+	SessionProgramStatusShadowPayloadPointSubmitConfirm     SessionProgramStatusShadowPayloadPoint = "submit_confirm"
+	SessionProgramStatusShadowPayloadPointTypingGate        SessionProgramStatusShadowPayloadPoint = "typing_gate"
+	SessionProgramStatusShadowPayloadPointWaitForIdle       SessionProgramStatusShadowPayloadPoint = "wait_for_idle"
+	SessionProgramStatusShadowPayloadPointWaitIdlePreread   SessionProgramStatusShadowPayloadPoint = "wait_idle_preread"
+	SessionProgramStatusShadowPayloadPointWorkLadder        SessionProgramStatusShadowPayloadPoint = "work_ladder"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadPoint enum.
+func (e SessionProgramStatusShadowPayloadPoint) Valid() bool {
+	switch e {
+	case SessionProgramStatusShadowPayloadPointClaimNudgeHold:
+		return true
+	case SessionProgramStatusShadowPayloadPointDrainReminder:
+		return true
+	case SessionProgramStatusShadowPayloadPointEscapeResend:
+		return true
+	case SessionProgramStatusShadowPayloadPointExecutionBackstop:
+		return true
+	case SessionProgramStatusShadowPayloadPointInterruptSettle:
+		return true
+	case SessionProgramStatusShadowPayloadPointObservation:
+		return true
+	case SessionProgramStatusShadowPayloadPointPending:
+		return true
+	case SessionProgramStatusShadowPayloadPointProvedIdle:
+		return true
+	case SessionProgramStatusShadowPayloadPointQueuedDelivery:
+		return true
+	case SessionProgramStatusShadowPayloadPointReadiness:
+		return true
+	case SessionProgramStatusShadowPayloadPointStartupLadder:
+		return true
+	case SessionProgramStatusShadowPayloadPointSubmitConfirm:
+		return true
+	case SessionProgramStatusShadowPayloadPointTypingGate:
+		return true
+	case SessionProgramStatusShadowPayloadPointWaitForIdle:
+		return true
+	case SessionProgramStatusShadowPayloadPointWaitIdlePreread:
+		return true
+	case SessionProgramStatusShadowPayloadPointWorkLadder:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProgramStatusShadowPayloadProgram.
+const (
+	SessionProgramStatusShadowPayloadProgramBusy          SessionProgramStatusShadowPayloadProgram = "busy"
+	SessionProgramStatusShadowPayloadProgramConfirmed     SessionProgramStatusShadowPayloadProgram = "confirmed"
+	SessionProgramStatusShadowPayloadProgramHold          SessionProgramStatusShadowPayloadProgram = "hold"
+	SessionProgramStatusShadowPayloadProgramIdle          SessionProgramStatusShadowPayloadProgram = "idle"
+	SessionProgramStatusShadowPayloadProgramIndeterminate SessionProgramStatusShadowPayloadProgram = "indeterminate"
+	SessionProgramStatusShadowPayloadProgramNoHold        SessionProgramStatusShadowPayloadProgram = "no_hold"
+	SessionProgramStatusShadowPayloadProgramNoResend      SessionProgramStatusShadowPayloadProgram = "no_resend"
+	SessionProgramStatusShadowPayloadProgramNone          SessionProgramStatusShadowPayloadProgram = "none"
+	SessionProgramStatusShadowPayloadProgramNotReady      SessionProgramStatusShadowPayloadProgram = "not_ready"
+	SessionProgramStatusShadowPayloadProgramPending       SessionProgramStatusShadowPayloadProgram = "pending"
+	SessionProgramStatusShadowPayloadProgramReady         SessionProgramStatusShadowPayloadProgram = "ready"
+	SessionProgramStatusShadowPayloadProgramResend        SessionProgramStatusShadowPayloadProgram = "resend"
+	SessionProgramStatusShadowPayloadProgramSettled       SessionProgramStatusShadowPayloadProgram = "settled"
+	SessionProgramStatusShadowPayloadProgramUnconfirmed   SessionProgramStatusShadowPayloadProgram = "unconfirmed"
+	SessionProgramStatusShadowPayloadProgramUnsettled     SessionProgramStatusShadowPayloadProgram = "unsettled"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadProgram enum.
+func (e SessionProgramStatusShadowPayloadProgram) Valid() bool {
+	switch e {
+	case SessionProgramStatusShadowPayloadProgramBusy:
+		return true
+	case SessionProgramStatusShadowPayloadProgramConfirmed:
+		return true
+	case SessionProgramStatusShadowPayloadProgramHold:
+		return true
+	case SessionProgramStatusShadowPayloadProgramIdle:
+		return true
+	case SessionProgramStatusShadowPayloadProgramIndeterminate:
+		return true
+	case SessionProgramStatusShadowPayloadProgramNoHold:
+		return true
+	case SessionProgramStatusShadowPayloadProgramNoResend:
+		return true
+	case SessionProgramStatusShadowPayloadProgramNone:
+		return true
+	case SessionProgramStatusShadowPayloadProgramNotReady:
+		return true
+	case SessionProgramStatusShadowPayloadProgramPending:
+		return true
+	case SessionProgramStatusShadowPayloadProgramReady:
+		return true
+	case SessionProgramStatusShadowPayloadProgramResend:
+		return true
+	case SessionProgramStatusShadowPayloadProgramSettled:
+		return true
+	case SessionProgramStatusShadowPayloadProgramUnconfirmed:
+		return true
+	case SessionProgramStatusShadowPayloadProgramUnsettled:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProgramStatusShadowPayloadScrape.
+const (
+	SessionProgramStatusShadowPayloadScrapeBusy          SessionProgramStatusShadowPayloadScrape = "busy"
+	SessionProgramStatusShadowPayloadScrapeConfirmed     SessionProgramStatusShadowPayloadScrape = "confirmed"
+	SessionProgramStatusShadowPayloadScrapeHold          SessionProgramStatusShadowPayloadScrape = "hold"
+	SessionProgramStatusShadowPayloadScrapeIdle          SessionProgramStatusShadowPayloadScrape = "idle"
+	SessionProgramStatusShadowPayloadScrapeIndeterminate SessionProgramStatusShadowPayloadScrape = "indeterminate"
+	SessionProgramStatusShadowPayloadScrapeNoHold        SessionProgramStatusShadowPayloadScrape = "no_hold"
+	SessionProgramStatusShadowPayloadScrapeNoResend      SessionProgramStatusShadowPayloadScrape = "no_resend"
+	SessionProgramStatusShadowPayloadScrapeNone          SessionProgramStatusShadowPayloadScrape = "none"
+	SessionProgramStatusShadowPayloadScrapeNotReady      SessionProgramStatusShadowPayloadScrape = "not_ready"
+	SessionProgramStatusShadowPayloadScrapePending       SessionProgramStatusShadowPayloadScrape = "pending"
+	SessionProgramStatusShadowPayloadScrapeReady         SessionProgramStatusShadowPayloadScrape = "ready"
+	SessionProgramStatusShadowPayloadScrapeResend        SessionProgramStatusShadowPayloadScrape = "resend"
+	SessionProgramStatusShadowPayloadScrapeSettled       SessionProgramStatusShadowPayloadScrape = "settled"
+	SessionProgramStatusShadowPayloadScrapeUnconfirmed   SessionProgramStatusShadowPayloadScrape = "unconfirmed"
+	SessionProgramStatusShadowPayloadScrapeUnsettled     SessionProgramStatusShadowPayloadScrape = "unsettled"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadScrape enum.
+func (e SessionProgramStatusShadowPayloadScrape) Valid() bool {
+	switch e {
+	case SessionProgramStatusShadowPayloadScrapeBusy:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeConfirmed:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeHold:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeIdle:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeIndeterminate:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeNoHold:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeNoResend:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeNone:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeNotReady:
+		return true
+	case SessionProgramStatusShadowPayloadScrapePending:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeReady:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeResend:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeSettled:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeUnconfirmed:
+		return true
+	case SessionProgramStatusShadowPayloadScrapeUnsettled:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProgramStatusShadowPayloadState.
+const (
+	SessionProgramStatusShadowPayloadStateBlocked SessionProgramStatusShadowPayloadState = "blocked"
+	SessionProgramStatusShadowPayloadStateDone    SessionProgramStatusShadowPayloadState = "done"
+	SessionProgramStatusShadowPayloadStateError   SessionProgramStatusShadowPayloadState = "error"
+	SessionProgramStatusShadowPayloadStateIdle    SessionProgramStatusShadowPayloadState = "idle"
+	SessionProgramStatusShadowPayloadStateWorking SessionProgramStatusShadowPayloadState = "working"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadState enum.
+func (e SessionProgramStatusShadowPayloadState) Valid() bool {
+	switch e {
+	case SessionProgramStatusShadowPayloadStateBlocked:
+		return true
+	case SessionProgramStatusShadowPayloadStateDone:
+		return true
+	case SessionProgramStatusShadowPayloadStateError:
+		return true
+	case SessionProgramStatusShadowPayloadStateIdle:
+		return true
+	case SessionProgramStatusShadowPayloadStateWorking:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProgramStatusShadowPayloadValidity.
+const (
+	Cleared    SessionProgramStatusShadowPayloadValidity = "cleared"
+	Exited     SessionProgramStatusShadowPayloadValidity = "exited"
+	NotArmed   SessionProgramStatusShadowPayloadValidity = "not_armed"
+	ReaderLost SessionProgramStatusShadowPayloadValidity = "reader_lost"
+	Silent     SessionProgramStatusShadowPayloadValidity = "silent"
+	Unread     SessionProgramStatusShadowPayloadValidity = "unread"
+	Valid      SessionProgramStatusShadowPayloadValidity = "valid"
+)
+
+// Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadValidity enum.
+func (e SessionProgramStatusShadowPayloadValidity) Valid() bool {
+	switch e {
+	case Cleared:
+		return true
+	case Exited:
+		return true
+	case NotArmed:
+		return true
+	case ReaderLost:
+		return true
+	case Silent:
+		return true
+	case Unread:
+		return true
+	case Valid:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SessionStreamStructuredMessageEventOperation.
 const (
 	Reset    SessionStreamStructuredMessageEventOperation = "reset"
@@ -1181,19 +1436,19 @@ func (e SessionTurnCapabilitiesLink) Valid() bool {
 
 // Defines values for SessionTurnCapabilitiesStart.
 const (
-	Boundary SessionTurnCapabilitiesStart = "boundary"
-	None     SessionTurnCapabilitiesStart = "none"
-	Recorded SessionTurnCapabilitiesStart = "recorded"
+	SessionTurnCapabilitiesStartBoundary SessionTurnCapabilitiesStart = "boundary"
+	SessionTurnCapabilitiesStartNone     SessionTurnCapabilitiesStart = "none"
+	SessionTurnCapabilitiesStartRecorded SessionTurnCapabilitiesStart = "recorded"
 )
 
 // Valid indicates whether the value is a known member of the SessionTurnCapabilitiesStart enum.
 func (e SessionTurnCapabilitiesStart) Valid() bool {
 	switch e {
-	case Boundary:
+	case SessionTurnCapabilitiesStartBoundary:
 		return true
-	case None:
+	case SessionTurnCapabilitiesStartNone:
 		return true
-	case Recorded:
+	case SessionTurnCapabilitiesStartRecorded:
 		return true
 	default:
 		return false
@@ -1721,22 +1976,22 @@ func (e GetV0CityByCityNameWorkReadyParamsSort) Valid() bool {
 
 // Defines values for GetV0CityByCityNameWorkReadyParamsStatus.
 const (
-	Blocked    GetV0CityByCityNameWorkReadyParamsStatus = "blocked"
-	Closed     GetV0CityByCityNameWorkReadyParamsStatus = "closed"
-	InProgress GetV0CityByCityNameWorkReadyParamsStatus = "in_progress"
-	Open       GetV0CityByCityNameWorkReadyParamsStatus = "open"
+	GetV0CityByCityNameWorkReadyParamsStatusBlocked    GetV0CityByCityNameWorkReadyParamsStatus = "blocked"
+	GetV0CityByCityNameWorkReadyParamsStatusClosed     GetV0CityByCityNameWorkReadyParamsStatus = "closed"
+	GetV0CityByCityNameWorkReadyParamsStatusInProgress GetV0CityByCityNameWorkReadyParamsStatus = "in_progress"
+	GetV0CityByCityNameWorkReadyParamsStatusOpen       GetV0CityByCityNameWorkReadyParamsStatus = "open"
 )
 
 // Valid indicates whether the value is a known member of the GetV0CityByCityNameWorkReadyParamsStatus enum.
 func (e GetV0CityByCityNameWorkReadyParamsStatus) Valid() bool {
 	switch e {
-	case Blocked:
+	case GetV0CityByCityNameWorkReadyParamsStatusBlocked:
 		return true
-	case Closed:
+	case GetV0CityByCityNameWorkReadyParamsStatusClosed:
 		return true
-	case InProgress:
+	case GetV0CityByCityNameWorkReadyParamsStatusInProgress:
 		return true
-	case Open:
+	case GetV0CityByCityNameWorkReadyParamsStatusOpen:
 		return true
 	default:
 		return false
@@ -5252,6 +5507,72 @@ type SessionPoolSlotRetiredAtDrainDeadlinePayload struct {
 	Template *string `json:"template,omitempty"`
 }
 
+// SessionProgramStatusShadowPayload defines model for SessionProgramStatusShadowPayload.
+type SessionProgramStatusShadowPayload struct {
+	// Agree Whether the two readings agree.
+	Agree bool `json:"agree"`
+
+	// Dropped Comparisons this process dropped since its last recorded one.
+	Dropped *int64 `json:"dropped,omitempty"`
+
+	// Family The session's provider family (resolved built-in ancestor).
+	Family *string `json:"family,omitempty"`
+
+	// HoldLive Whether a hold derived from the record is still within its bound.
+	HoldLive bool `json:"hold_live"`
+
+	// Kind The blocked state's kind.
+	Kind *SessionProgramStatusShadowPayloadKind `json:"kind,omitempty"`
+
+	// LatencyMs Program signal minus scrape signal, in milliseconds (timed points only).
+	LatencyMs *int64 `json:"latency_ms,omitempty"`
+
+	// Point The decision point.
+	Point SessionProgramStatusShadowPayloadPoint `json:"point"`
+
+	// Program What the program-status record would decide.
+	Program SessionProgramStatusShadowPayloadProgram `json:"program"`
+
+	// ReaderVerified Whether the process table confirmed the capture reader.
+	ReaderVerified bool `json:"reader_verified"`
+
+	// RecordAgeMs How long the record's root has been in its state, in milliseconds.
+	RecordAgeMs int64 `json:"record_age_ms"`
+
+	// Scrape Today's screen reading, which decided.
+	Scrape SessionProgramStatusShadowPayloadScrape `json:"scrape"`
+
+	// SessionId The session's bead id, when the decision point knows it.
+	SessionId *string `json:"session_id,omitempty"`
+
+	// State The record's root state (valid readings only).
+	State *SessionProgramStatusShadowPayloadState `json:"state,omitempty"`
+
+	// Timed Whether latency_ms was measured.
+	Timed *bool `json:"timed,omitempty"`
+
+	// Validity The record reading's validity.
+	Validity SessionProgramStatusShadowPayloadValidity `json:"validity"`
+}
+
+// SessionProgramStatusShadowPayloadKind The blocked state's kind.
+type SessionProgramStatusShadowPayloadKind string
+
+// SessionProgramStatusShadowPayloadPoint The decision point.
+type SessionProgramStatusShadowPayloadPoint string
+
+// SessionProgramStatusShadowPayloadProgram What the program-status record would decide.
+type SessionProgramStatusShadowPayloadProgram string
+
+// SessionProgramStatusShadowPayloadScrape Today's screen reading, which decided.
+type SessionProgramStatusShadowPayloadScrape string
+
+// SessionProgramStatusShadowPayloadState The record's root state (valid readings only).
+type SessionProgramStatusShadowPayloadState string
+
+// SessionProgramStatusShadowPayloadValidity The record reading's validity.
+type SessionProgramStatusShadowPayloadValidity string
+
 // SessionRawMessageFrame Provider-native transcript frame. Gas City forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific and can be any JSON value. The producing provider is identified by the Provider field on the enclosing envelope; consumers dispatch per-provider frame parsing keyed by that identifier.
 type SessionRawMessageFrame = interface{}
 
@@ -8622,6 +8943,22 @@ type TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline struct {
 	Workflow         *WorkflowEventProjection                     `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionProgramStatusShadow defines model for TypedEventStreamEnvelopeSessionProgramStatusShadow.
+type TypedEventStreamEnvelopeSessionProgramStatusShadow struct {
+	Actor            string                            `json:"actor"`
+	DependsOnStepIds *[]string                         `json:"depends_on_step_ids,omitempty"`
+	Message          *string                           `json:"message,omitempty"`
+	Payload          SessionProgramStatusShadowPayload `json:"payload"`
+	RunId            *string                           `json:"run_id,omitempty"`
+	Seq              int64                             `json:"seq"`
+	SessionId        *string                           `json:"session_id,omitempty"`
+	StepId           *string                           `json:"step_id,omitempty"`
+	Subject          *string                           `json:"subject,omitempty"`
+	Ts               time.Time                         `json:"ts"`
+	Type             string                            `json:"type"`
+	Workflow         *WorkflowEventProjection          `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionQuarantined defines model for TypedEventStreamEnvelopeSessionQuarantined.
 type TypedEventStreamEnvelopeSessionQuarantined struct {
 	Actor            string                   `json:"actor"`
@@ -10683,6 +11020,23 @@ type TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline struct 
 	Ts               time.Time                                    `json:"ts"`
 	Type             string                                       `json:"type"`
 	Workflow         *WorkflowEventProjection                     `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow defines model for TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow.
+type TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow struct {
+	Actor            string                            `json:"actor"`
+	City             string                            `json:"city"`
+	DependsOnStepIds *[]string                         `json:"depends_on_step_ids,omitempty"`
+	Message          *string                           `json:"message,omitempty"`
+	Payload          SessionProgramStatusShadowPayload `json:"payload"`
+	RunId            *string                           `json:"run_id,omitempty"`
+	Seq              int64                             `json:"seq"`
+	SessionId        *string                           `json:"session_id,omitempty"`
+	StepId           *string                           `json:"step_id,omitempty"`
+	Subject          *string                           `json:"subject,omitempty"`
+	Ts               time.Time                         `json:"ts"`
+	Type             string                            `json:"type"`
+	Workflow         *WorkflowEventProjection          `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionQuarantined defines model for TypedTaggedEventStreamEnvelopeSessionQuarantined.
@@ -14337,6 +14691,32 @@ func (t *EventPayload) FromSessionPoolSlotRetiredAtDrainDeadlinePayload(v Sessio
 
 // MergeSessionPoolSlotRetiredAtDrainDeadlinePayload performs a merge with any union data inside the EventPayload, using the provided SessionPoolSlotRetiredAtDrainDeadlinePayload
 func (t *EventPayload) MergeSessionPoolSlotRetiredAtDrainDeadlinePayload(v SessionPoolSlotRetiredAtDrainDeadlinePayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionProgramStatusShadowPayload returns the union data inside the EventPayload as a SessionProgramStatusShadowPayload
+func (t EventPayload) AsSessionProgramStatusShadowPayload() (SessionProgramStatusShadowPayload, error) {
+	var body SessionProgramStatusShadowPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionProgramStatusShadowPayload overwrites any union data inside the EventPayload as the provided SessionProgramStatusShadowPayload
+func (t *EventPayload) FromSessionProgramStatusShadowPayload(v SessionProgramStatusShadowPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionProgramStatusShadowPayload performs a merge with any union data inside the EventPayload, using the provided SessionProgramStatusShadowPayload
+func (t *EventPayload) MergeSessionProgramStatusShadowPayload(v SessionProgramStatusShadowPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -19060,6 +19440,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionPoolSlotR
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionProgramStatusShadow returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionProgramStatusShadow
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionProgramStatusShadow() (TypedEventStreamEnvelopeSessionProgramStatusShadow, error) {
+	var body TypedEventStreamEnvelopeSessionProgramStatusShadow
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionProgramStatusShadow overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionProgramStatusShadow
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionProgramStatusShadow(v TypedEventStreamEnvelopeSessionProgramStatusShadow) error {
+	v.Type = "session.program_status_shadow"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionProgramStatusShadow performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionProgramStatusShadow
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionProgramStatusShadow(v TypedEventStreamEnvelopeSessionProgramStatusShadow) error {
+	v.Type = "session.program_status_shadow"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionQuarantined returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionQuarantined
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionQuarantined() (TypedEventStreamEnvelopeSessionQuarantined, error) {
 	var body TypedEventStreamEnvelopeSessionQuarantined
@@ -20206,6 +20614,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionPendingCleared()
 	case "session.pool_slot_retired_at_drain_deadline":
 		return t.AsTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline()
+	case "session.program_status_shadow":
+		return t.AsTypedEventStreamEnvelopeSessionProgramStatusShadow()
 	case "session.quarantined":
 		return t.AsTypedEventStreamEnvelopeSessionQuarantined()
 	case "session.reset_stalled":
@@ -22779,6 +23189,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow() (TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow(v TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow) error {
+	v.Type = "session.program_status_shadow"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow(v TypedTaggedEventStreamEnvelopeSessionProgramStatusShadow) error {
+	v.Type = "session.program_status_shadow"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionQuarantined returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionQuarantined
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionQuarantined() (TypedTaggedEventStreamEnvelopeSessionQuarantined, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionQuarantined
@@ -23925,6 +24363,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionPendingCleared()
 	case "session.pool_slot_retired_at_drain_deadline":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline()
+	case "session.program_status_shadow":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionProgramStatusShadow()
 	case "session.quarantined":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionQuarantined()
 	case "session.reset_stalled":
