@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestResolveTemplatePrependsGCBinDirToPATH(t *testing.T) {
@@ -606,6 +607,39 @@ func TestResolveTemplatePinsInheritedDemandMarkersEmpty(t *testing.T) {
 	for _, k := range triggerEnvKeys {
 		if v, ok := tp.Env[k]; !ok || v != "" {
 			t.Errorf("Env[%s] = %q (present=%v), want present and empty: a stale demand marker leaked into a no-trigger seat", k, v, ok)
+		}
+	}
+}
+
+// A trigger row stamps its own markers over the pin, and a row without a
+// store ref withholds the store-ref keys instead of pairing its fresh id with
+// an inherited ref.
+func TestResolveTemplateForSessionBeadInfoStampsOverInheritedDemandMarkers(t *testing.T) {
+	staleDemandMarkerEnv(t)
+	params := demandMarkerTestParams(t)
+	agent := &config.Agent{Name: "worker"}
+
+	for _, c := range []struct {
+		name, storeRef, wantRef string
+	}{
+		{"no store ref", "", ""},
+		{"fresh store ref", "rig:fresh", "rig:fresh"},
+	} {
+		tp, err := resolveTemplateForSessionBeadInfo(params, agent, agent.QualifiedName(), nil,
+			session.Info{SessionNameMetadata: "worker-1", TriggerBeadID: "w-new", TriggerBeadStoreRef: c.storeRef})
+		if err != nil {
+			t.Fatalf("%s: resolveTemplateForSessionBeadInfo: %v", c.name, err)
+		}
+		for k, want := range map[string]string{
+			"GC_SPAWN_ORIGIN":           "demand",
+			"GC_TRIGGER_BEAD_ID":        "w-new",
+			"GC_TRIGGER_WORK_BEAD_ID":   "w-new",
+			"GC_TRIGGER_BEAD_STORE_REF": c.wantRef,
+			"GC_TRIGGER_WORK_STORE_REF": c.wantRef,
+		} {
+			if v, ok := tp.Env[k]; !ok || v != want {
+				t.Errorf("%s: Env[%s] = %q (present=%v), want present and %q", c.name, k, v, ok, want)
+			}
 		}
 	}
 }
