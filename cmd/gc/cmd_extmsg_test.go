@@ -150,6 +150,9 @@ func TestExtMsgClientRoutesToSupervisor(t *testing.T) {
 	}
 
 	legacyHosted := func(string) controllerIdentityReply { return controllerIdentityReply{PID: 4242} }
+	supervisorHosted := func(string) controllerIdentityReply {
+		return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
+	}
 
 	cases := []struct {
 		name         string
@@ -167,6 +170,18 @@ func TestExtMsgClientRoutesToSupervisor(t *testing.T) {
 			name:         "alive-unknown-mode-no-api-port-routes-to-supervisor",
 			gcNoAPI:      "",
 			identity:     legacyHosted,
+			supervisor:   func(string) *api.Client { return sentinel },
+			toml:         "name = \"t\"\n",
+			wantSentinel: true,
+		},
+		{
+			// The supervisor hosting this city requires signed city grants.
+			// apiClient returns nil on its general route (it mints no grant),
+			// but these verbs have no local fallback, so the fall-through
+			// asks the supervisor and reports a refusal like any API error.
+			name:         "supervisor-hosted-requiring-grants-routes-to-supervisor",
+			gcNoAPI:      "",
+			identity:     supervisorHosted,
 			supervisor:   func(string) *api.Client { return sentinel },
 			toml:         "name = \"t\"\n",
 			wantSentinel: true,
