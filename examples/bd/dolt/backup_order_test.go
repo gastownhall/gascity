@@ -772,6 +772,33 @@ func TestBackupOrderHonorsDatabaseFilter(t *testing.T) {
 	}
 }
 
+// A filter larger than a pipe buffer whose selected database is listed first
+// must still select it. A `printf | grep -q` membership check under pipefail
+// reads as a miss here: grep exits on the early match while printf is still
+// writing, and printf's SIGPIPE fails the pipeline.
+func TestBackupOrderDatabaseFilterMatchesEarlyEntryInLargeList(t *testing.T) {
+	cityPath := resolvedTempDir(t)
+	binDir := t.TempDir()
+	_ = writeBackupFakeGC(t, binDir)
+
+	filter := []string{"apidb"}
+	for i := 0; i < 6000; i++ {
+		filter = append(filter, fmt.Sprintf("unrelated_db_%05d", i))
+	}
+	out := mustRunBackupOrder(t, binDir, cityPath,
+		`FAKE_RIG_LIST_JSON={"rigs":[{"name":"api","hq":false}]}`,
+		"FAKE_SCOPE_DBS=city=prod rig:api=apidb",
+		"FAKE_CONFIGURED_DBS=prod apidb",
+		"GC_BACKUP_DATABASES="+strings.Join(filter, ","),
+	)
+	if !strings.Contains(out, "synced: 1/1") {
+		t.Fatalf("unexpected backup summary:\n%s", out)
+	}
+	if got := syncAttempts(t, binDir, "apidb"); got == 0 {
+		t.Fatalf("apidb is first in GC_BACKUP_DATABASES but was not synced:\n%s", out)
+	}
+}
+
 func TestBackupOrderEscalatesOffsiteFailureWithConfiguredBound(t *testing.T) {
 	cityPath := resolvedTempDir(t)
 	offsiteDir := filepath.Join(t.TempDir(), "offsite")

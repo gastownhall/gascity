@@ -77,7 +77,7 @@ while IFS= read -r bead; do
     fi
 
     # Promote if has comments, keep label, or non-closed.
-    if [ "$comment_count" -gt 0 ] || echo "$labels" | grep -q '^keep$' || [ "$status" != "closed" ]; then
+    if [ "$comment_count" -gt 0 ] || grep -q '^keep$' <<<"$labels" || [ "$status" != "closed" ]; then
         REASON="proven value"
         [ "$status" != "closed" ] && REASON="open past TTL (stuck detection)"
         gc bd update "$id" --persistent 2>/dev/null || true
