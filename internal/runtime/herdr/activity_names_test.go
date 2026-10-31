@@ -55,10 +55,14 @@ func TestActivitySeedRetryKeyedByRegistryName(t *testing.T) {
 	activitySeedRetryBudget = 10 * time.Second
 	activitySeedRetryInterval = 10 * time.Millisecond
 
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		f.setAgents(agentInfo{Name: herdrAgentName(name), PaneID: "%1", AgentStatus: "working", Revision: 1})
-	}()
+	// The agent registers between the first seed poll and its retry.
+	f.mu.Lock()
+	f.onList = func(call int) {
+		if call == 2 {
+			f.setAgents(agentInfo{Name: herdrAgentName(name), PaneID: "%1", AgentStatus: "working", Revision: 1})
+		}
+	}
+	f.mu.Unlock()
 
 	start := time.Now()
 	got := lastActivity(t, p, name)
@@ -146,6 +150,15 @@ func TestSessionEventStreamRelistAttributesGCSessionName(t *testing.T) {
 	f, sock := newFakeHerdrServer(t)
 	f.setAgents(agentInfo{Name: herdrAgentName(name), PaneID: "w1:p1"})
 	p := eventTestProvider(t, sock)
+	// Call 1 is the cycle-start listing; call 2 is the debounced re-list.
+	relisted := make(chan struct{})
+	f.mu.Lock()
+	f.onList = func(call int) {
+		if call == 2 {
+			close(relisted)
+		}
+	}
+	f.mu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -162,6 +175,14 @@ func TestSessionEventStreamRelistAttributesGCSessionName(t *testing.T) {
 	stream.push(t, `{"data":{"agent":"claude","pane_id":"w1:p1","type":"pane_agent_detected"},"event":"pane_agent_detected"}`)
 	recvEvent(t, ch, 2*time.Second) // attributed by the pre-binding listing; arms the re-list
 
+	select {
+	case <-relisted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("pane_agent_detected never triggered the debounced re-list")
+	}
+	// The re-list request has been answered; the stream applies it before it
+	// reads its next frame, so each pushed frame is a round trip through the
+	// read loop and attribution flips within a frame or two.
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		stream.push(t, `{"data":{"pane_id":"w1:p1","type":"pane_exited"},"event":"pane_exited"}`)
@@ -172,7 +193,6 @@ func TestSessionEventStreamRelistAttributesGCSessionName(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("after re-list: Session %q, want %q", ev.Session, name)
 		}
-		time.Sleep(50 * time.Millisecond)
 	}
 }
 
