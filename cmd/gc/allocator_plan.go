@@ -234,7 +234,8 @@ func withoutSuppressedRoutes(c collectedDemand, projected []beads.Bead) (map[str
 // in-flight demand is census ∪ the in-flight map).
 func (p *decidePass) computePoolDesired() {
 	rows := p.decidable
-	if standIns := p.inFlightStandIns(); len(standIns) > 0 {
+	standIns := p.inFlightStandIns()
+	if len(standIns) > 0 {
 		rows = append(slices.Clip(p.decidable), standIns...)
 	}
 	p.poolWork = filterAssignedWorkBeadsForPoolDemandAt(p.cfg, p.in.CityPath, p.in.Demand.RelocatedClaimRefs,
@@ -250,7 +251,8 @@ func (p *decidePass) computePoolDesired() {
 		}
 		poolCfg = &clone
 	}
-	p.poolStates = computePoolDesiredStatesAt(poolCfg, p.poolWork, rows, p.merged.ScaleCheckCounts, p.merged.ScaleCheckDemand, p.in.Now, nil)
+	p.parked = p.parkSeats(standIns)
+	p.poolStates = computePoolDesiredStatesParkedAt(poolCfg, p.poolWork, rows, p.merged.ScaleCheckCounts, p.merged.ScaleCheckDemand, p.in.Now, p.parked, nil)
 	p.poolDesired = retainScaleCheckPartialPoolDesired(p.cfg, PoolDesiredCounts(p.poolStates),
 		p.decidableSnapshot(), p.merged.PoolPartialRetention)
 	if p.poolDesired == nil {
@@ -258,6 +260,16 @@ func (p *decidePass) computePoolDesired() {
 	}
 	mergeNamedSessionDemand(p.poolDesired, p.named.workReady, p.cfg)
 	p.snap.PoolDesired = p.poolDesired
+}
+
+// parkSeats is the pass's park verdicts (parkSeats) over the rows that hold
+// a slot: occupancy, and the in-flight creates' stand-ins, from the demand's
+// assigned work and its store-scoped readiness. A partial work read parks
+// nothing: it cannot tell blocked from ready.
+func (p *decidePass) parkSeats(standIns []session.Info) parkedSeats {
+	d := p.in.Demand
+	return parkSeatsForDemand(p.cfg, [][]session.Info{p.occupancy, standIns}, d.AssignedWork, d.AssignedStoreRefs, d.ReadyAssigned,
+		d.StorePartial || len(p.snap.Partial.Global) > 0, p.in.Now)
 }
 
 // decidableSnapshot is the decidable rows' snapshot, built on first use.
@@ -500,7 +512,9 @@ func (p *decidePass) selectPoolRow(cfgAgent *config.Agent, info session.Info, sl
 	// moves to the session key that applies it). Unusable evidence leaves a
 	// start candidate out of desired, as legacy skips the item; refused
 	// evidence (#34) is unusable while its verdict stands. A live row, or one
-	// whose liveness is unknown, keeps its selection and gets no binding.
+	// whose liveness is unknown, keeps its selection and gets no binding. A
+	// parked seat's resume keeps its recorded work dir (KeptWorkDir), which
+	// the PreWake verifies as it verifies a worktree.
 	if p.snap.Entries[k].Liveness.startCandidate() {
 		workDir, err := verifiedPoolTriggerWorkDir(p.bp, cfgAgent, ref.QualifiedInstance, request)
 		if err == nil && p.worktreeRefused(request) {
@@ -510,9 +524,10 @@ func (p *decidePass) selectPoolRow(cfgAgent *config.Agent, info session.Info, sl
 			p.refuse(cfgAgent.QualifiedName(), ref.QualifiedInstance, k, gateWorktreeRefused)
 			return
 		}
-		if patch := computePoolTriggerBindingPatch(info, request, workDir); len(patch) > 0 {
+		patch := computePoolTriggerBindingPatch(info, request, workDir)
+		if kept := parkedWorkDirKept(info, request, workDir); len(patch) > 0 || kept != "" {
 			sel.binding = bindingOf(request, workDir)
-			sel.binding.Patch = patch
+			sel.binding.Patch, sel.binding.KeptWorkDir = patch, kept
 		}
 	}
 	p.selected[k] = sel
