@@ -1,5 +1,3 @@
-//go:build darwin
-
 package proctable
 
 import "testing"
@@ -98,5 +96,88 @@ func TestDarwinOrphanCandidatesKeepOnlyReparentedRoots(t *testing.T) {
 	got := orphanCandidates(scanRecordsBySessionID(records, ""), 0)
 	if len(got) != 1 || got[0].SessionID != "gc-orphan" {
 		t.Fatalf("orphan candidates %+v, want gc-orphan only", got)
+	}
+}
+
+// psSnapshot parses ps lines, as psRecords reads them, into records keyed by
+// pid.
+func psSnapshot(t *testing.T, lines ...string) map[int]psRecord {
+	t.Helper()
+	records := make(map[int]psRecord, len(lines))
+	for _, line := range lines {
+		record, ok := parsePSRecord(line)
+		if !ok {
+			t.Fatalf("parsePSRecord(%q) refused a well-formed line", line)
+		}
+		records[record.pid] = record
+	}
+	return records
+}
+
+// The relay is told from the tap its companion also runs by argv[1], the
+// second word of ps's command column. A one-element argv's second word is
+// its first environment entry, which no verb matches.
+func TestParsePSRecordKeepsArgvOne(t *testing.T) {
+	relay, ok := parsePSRecord("  401   400 /opt/gc/bin/gc-osc7501 relay -- /bin/zsh -c claude GC_SESSION_ID=ga-relayed")
+	if !ok || relay.pid != 401 || relay.ppid != 400 || relay.command != "/opt/gc/bin/gc-osc7501" || relay.arg1 != "relay" ||
+		relay.env["GC_SESSION_ID"] != "ga-relayed" {
+		t.Fatalf("parsePSRecord(relay line) = %+v, %v; want pid 401, ppid 400, the companion path, arg1 relay and the session env", relay, ok)
+	}
+	program, ok := parsePSRecord("  402   401 claude GC_SESSION_ID=ga-relayed")
+	if !ok || program.command != "claude" || program.arg1 != "GC_SESSION_ID=ga-relayed" {
+		t.Fatalf("parsePSRecord(one-element argv) = %+v, %v; want command claude and the first environment entry as arg1", program, ok)
+	}
+	for _, line := range []string{"", "   ", "401 400", "pid 400 claude", "401 ppid claude"} {
+		if record, ok := parsePSRecord(line); ok {
+			t.Errorf("parsePSRecord(%q) = %+v, accepted a line that is not <pid> <ppid> <command>", line, record)
+		}
+	}
+}
+
+// The relay runs its program in a session and process group of its own, so
+// a kill of the relay's group never reaches the program. The Darwin scan
+// looks through the relay as the Linux scan does
+// (TestScanWithRootLooksThroughProgramStatusRelay): the program is the root,
+// attributed to the relay's tmux server exactly as the relay would have been.
+func TestScanRecordsBySessionIDLooksThroughProgramStatusRelay(t *testing.T) {
+	records := psSnapshot(t,
+		"  400     1 tmux: server GC_SESSION_ID=ga-relayed",
+		"  401   400 /opt/gc/bin/gc-osc7501 relay -- /bin/zsh -c claude GC_SESSION_ID=ga-relayed",
+		"  402   401 claude GC_SESSION_ID=ga-relayed",
+		"  403   402 node GC_SESSION_ID=ga-relayed", // the program's own child: inside its envelope
+	)
+
+	got := scanRecordsBySessionID(records, "ga-relayed")
+	if len(got) != 1 || got[0].PID != 402 {
+		t.Fatalf("scanRecordsBySessionID = %+v, want only the relay's program pid 402", got)
+	}
+	if got[0].PPID != 400 || !got[0].ParentIsProviderInfrastructure {
+		t.Fatalf("relayed root PPID=%d ParentIsProviderInfrastructure=%v, want the relay's tmux server 400 and true",
+			got[0].PPID, got[0].ParentIsProviderInfrastructure)
+	}
+	for pid, want := range map[int]bool{400: false, 401: false, 402: true, 403: false} {
+		if got := isRecordScanRoot(records, records[pid]); got != want {
+			t.Errorf("isRecordScanRoot(%d) = %v, want %v", pid, got, want)
+		}
+	}
+}
+
+// An orphaned relay (its tmux server gone) leaves its program as the orphan
+// the sweep must find: the program reads as reparented to launchd, as on
+// Linux (TestOrphanCandidateScanLooksThroughOrphanedRelay).
+func TestDarwinOrphanCandidatesLookThroughOrphanedRelay(t *testing.T) {
+	records := psSnapshot(t,
+		"    1     0 /sbin/launchd",
+		"  501     1 /opt/gc/bin/gc-osc7501 relay -- /bin/zsh -c claude GC_SESSION_ID=ga-orphan-relay",
+		"  502   501 claude GC_SESSION_ID=ga-orphan-relay",
+		// A relay still under its tmux server is no orphan.
+		"  600     1 tmux: server",
+		"  601   600 /opt/gc/bin/gc-osc7501 relay -- /bin/zsh -c claude GC_SESSION_ID=ga-live-relay",
+		"  602   601 claude GC_SESSION_ID=ga-live-relay",
+	)
+
+	got := orphanCandidates(scanRecordsBySessionID(records, ""), 0)
+	if len(got) != 1 || got[0].PID != 502 || got[0].PPID != 1 || got[0].ParentIsProviderInfrastructure {
+		t.Fatalf("orphan candidates %+v, want only the orphaned relay's program 502 reading as reparented to launchd", got)
 	}
 }

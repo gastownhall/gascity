@@ -26,9 +26,15 @@ type kernelSigaction struct {
 // sig's disposition to the default in the kernel (the Go runtime would
 // otherwise catch it, and turn a fatal signal such as SIGQUIT or SIGSEGV
 // into a traceback and exit status 2) and sends it to the process, with
-// core dumps off. It returns when sig's default action does not end the
-// process.
+// core dumps off. SIGKILL, which nothing can catch and whose disposition
+// the kernel refuses to change, is sent as it is. It returns when sig's
+// default action does not end the process.
 func dieBySignal(sig syscall.Signal) {
+	if sig == unix.SIGKILL {
+		_ = unix.Kill(unix.Getpid(), sig)
+		time.Sleep(deathWait) // returns only if the signal did not end the process
+		return
+	}
 	dfl := kernelSigaction{} // handler SIG_DFL, no flags, empty mask
 	_, _, errno := unix.RawSyscall6(unix.SYS_RT_SIGACTION, uintptr(sig), uintptr(unsafe.Pointer(&dfl)), 0, unsafe.Sizeof(dfl.mask), 0, 0)
 	if errno != 0 {

@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,6 +20,9 @@ import (
 const (
 	testCompanion = "/opt/gc/bin/gc-osc7501"
 	testTmuxBin   = "/usr/bin/tmux"
+	// testShell is the server default-shell the test gate reports: not
+	// /bin/sh, so a relay that ignores it shows.
+	testShell = "/usr/local/bin/bash"
 	// testSecret is not on the argv allow list, so it forces the command
 	// file: the primary path, because every managed session carries one.
 	testSecretKey = "ANTHROPIC_AUTH_TOKEN"
@@ -48,8 +52,9 @@ func (r *stagedRecorder) executeCtx(_ context.Context, args []string) (string, e
 }
 
 // captureTestTmux returns a Tmux whose capability gate passes without a
-// companion or a server, its executor, and the capture warnings it logs.
-// probes counts gate evaluations.
+// companion or a server (the companion runs gc's relay protocol, the server's
+// default-shell is testShell), its executor, and the capture warnings it
+// logs. probes counts gate evaluations.
 func captureTestTmux(t *testing.T) (tm *Tmux, rec *stagedRecorder, warnings *strings.Builder, probes *int) {
 	t.Helper()
 	rec = &stagedRecorder{fakeExecutor: &fakeExecutor{}}
@@ -58,7 +63,7 @@ func captureTestTmux(t *testing.T) (tm *Tmux, rec *stagedRecorder, warnings *str
 	probes = new(int)
 	tm.capture.probe = func() (captureCapability, error) {
 		*probes++
-		return captureCapability{companion: testCompanion, tmux: testTmuxBin}, nil
+		return captureCapability{companion: testCompanion, relay: programstatus.RelayVersion, tmux: testTmuxBin, shell: testShell}, nil
 	}
 	warnings = captureWarnings(t)
 	return tm, rec, warnings, probes
@@ -274,7 +279,7 @@ func TestRespawnRearmsTapAndClearsRecordInOneList(t *testing.T) {
 		if !programstatus.ValidNonce(r + ".%5") {
 			t.Fatalf("nonce rand %q is not codec-valid", r)
 		}
-		relayed := shellquote.Join([]string{testCompanion, "relay", "--", "/bin/sh", "-c", "claude --x"})
+		relayed := shellquote.Join([]string{testCompanion, "relay", "--", testShell, "-c", "claude --x"})
 		want := append([]string{"-u"}, tmuxArgvList([][]string{
 			{"respawn-pane", "-k", "-t", "%5", "-c", "/w", relayed},
 			{"display-message", "-p", "-t", "%5", "#{pane_id}"},
@@ -378,7 +383,9 @@ func TestSwitchOffIsByteIdentical(t *testing.T) {
 
 // The relay sits inside the env -u withholding (the relay and the agent both
 // start without withheld credentials) and inside the GC_AGENT_SLICE scope
-// (the slice wraps the pane's whole command).
+// (the slice wraps the pane's whole command). The slice runs the command
+// with sh -c, so the relay runs it with /bin/sh there, not the server's
+// default-shell.
 func TestRelayWrapInsideEnvUnsetInsideSlice(t *testing.T) {
 	t.Setenv(AgentSliceEnv, "gascity-agents.slice")
 	tm, rec, _, _ := captureTestTmux(t)
@@ -433,6 +440,169 @@ func TestWaitForCommandTreatsRelayAsWrapper(t *testing.T) {
 	tm.exec = exec
 	if err := tm.WaitForCommand(context.Background(), "gc-test-relay-wait", supportedShells, 250*time.Millisecond); err == nil {
 		t.Fatal("WaitForCommand returned on sight of the relay; want it to wait for the agent descendant")
+	}
+}
+
+// A relay-declared provider whose companion does not run gc's relay protocol
+// (relay=0: a build without the relay; a later version gc does not speak) is
+// never launched under it: create and respawn start the program as they
+// would unarmed, its capture still armed, and the cause is logged once.
+func TestRelayDeclaredWithoutCompanionRelayStartsUnwrapped(t *testing.T) {
+	for _, relay := range []int{0, programstatus.RelayVersion + 1} {
+		t.Run(fmt.Sprintf("relay=%d", relay), func(t *testing.T) {
+			tm, rec, warnings, _ := captureTestTmux(t)
+			tm.capture.probe = func() (captureCapability, error) {
+				return captureCapability{companion: testCompanion, relay: relay, tmux: testTmuxBin, shell: testShell}, nil
+			}
+			rec.outs = []string{"%2"}
+			arm := runtime.ProgramStatusArm{Capture: true, App: "claude-code", Relay: true}
+			if err := tm.newSessionWithCommandAndEnv("gc-norelay", "/w", "claude --x", map[string]string{"GC_RIG": "r"}, arm); err != nil {
+				t.Fatalf("newSessionWithCommandAndEnv: %v", err)
+			}
+			create := rec.calls[0]
+			i := slices.Index(create, programTapOption)
+			if i < 0 {
+				t.Fatalf("create did not arm capture: %q", create)
+			}
+			r := strings.TrimSuffix(create[i+1], ".#{pane_id}")
+			wantCreate := append([]string{"-u"}, tmuxArgvList([][]string{
+				{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "gc-norelay", "-c", "/w", "-e", "GC_RIG=r", "claude --x"},
+				{"set-option", "-p", "-F", "-t", "=gc-norelay:", programTapOption, r + ".#{pane_id}"},
+				{"pipe-pane", "-O", "-t", "=gc-norelay:", wantTapCommand(r, "claude-code")},
+			})...)
+			if !slices.Equal(create, wantCreate) {
+				t.Fatalf("create\n got %q\nwant %q", create, wantCreate)
+			}
+
+			rec.calls = nil
+			if err := tm.respawnPaneWithWorkDir("%2", "/w", "claude --x", arm); err != nil {
+				t.Fatalf("respawnPaneWithWorkDir: %v", err)
+			}
+			if len(rec.calls) != 1 {
+				t.Fatalf("respawn ran %d tmux invocations, want one list: %q", len(rec.calls), rec.calls)
+			}
+			respawn := rec.calls[0]
+			i = slices.Index(respawn, programTapOption)
+			if i < 0 {
+				t.Fatalf("respawn did not re-arm capture: %q", respawn)
+			}
+			r = strings.TrimSuffix(respawn[i+1], ".#{pane_id}")
+			wantRespawn := append([]string{"-u"}, tmuxArgvList([][]string{
+				{"respawn-pane", "-k", "-t", "%2", "-c", "/w", "claude --x"},
+				{"display-message", "-p", "-t", "%2", "#{pane_id}"},
+				{"set-option", "-p", "-F", "-t", "%2", programTapOption, r + ".#{pane_id}"},
+				{"set-option", "-pu", "-t", "%2", programStatusOption},
+				{"set-option", "-pu", "-t", "%2", programTextOption},
+				{"pipe-pane", "-O", "-t", "%2", wantTapCommand(r, "claude-code")},
+			})...)
+			if !slices.Equal(respawn, wantRespawn) {
+				t.Fatalf("respawn\n got %q\nwant %q", respawn, wantRespawn)
+			}
+			if n := strings.Count(warnings.String(), "warning:"); n != 1 || !strings.Contains(warnings.String(), fmt.Sprintf("reports relay=%d", relay)) {
+				t.Fatalf("relay warnings = %d, want 1 naming relay=%d: %q", n, relay, warnings.String())
+			}
+		})
+	}
+}
+
+// gateTmux returns a Tmux whose capability gate runs for real against a fake
+// companion answering `version` with line, and an executor that answers the
+// gate's tmux reads (version and socket path, then default-shell) and the
+// create's pane id. The tap publishes through a fake tmux on PATH.
+func gateTmux(t *testing.T, line, defaultShell string) (tm *Tmux, rec *stagedRecorder, companion, runs string) {
+	t.Helper()
+	companion, runs = writeFakeCompanion(t, line)
+	pathDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(pathDir, "tmux"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", pathDir)
+	cfg := DefaultConfig()
+	cfg.ProgramStatusBin = companion
+	tm = NewTmuxWithConfig(cfg)
+	rec = &stagedRecorder{fakeExecutor: &fakeExecutor{outs: []string{"3.4|/tmp/s", defaultShell, "%1"}}}
+	tm.exec = rec
+	return tm, rec, companion, runs
+}
+
+// The gate keeps what the companion's version handshake reported: a
+// companion running gc's relay protocol launches the relay-declared program
+// under it, a tap-only one (relay=0) arms capture without it, and either is
+// asked once.
+func TestCapabilityGateCarriesCompanionRelayVersion(t *testing.T) {
+	for _, tc := range []struct {
+		relay   int
+		relayed int    // of create and respawn, the launches under the relay
+		warning string // the one warning logged; "" for none
+	}{
+		{relay: programstatus.RelayVersion, relayed: 2},
+		{relay: 0, relayed: 0, warning: "reports relay=0"},
+	} {
+		t.Run(fmt.Sprintf("relay=%d", tc.relay), func(t *testing.T) {
+			warnings := captureWarnings(t)
+			tm, rec, bin, runs := gateTmux(t, fmt.Sprintf("gc-osc7501 dev codec=%d relay=%d", programstatus.CodecVersion, tc.relay), testShell)
+			arm := runtime.ProgramStatusArm{Capture: true, Relay: true}
+			if err := tm.newSessionWithCommandAndEnv("gc-relayver", "", "claude", nil, arm); err != nil {
+				t.Fatal(err)
+			}
+			if err := tm.respawnPaneWithWorkDir("%1", "", "claude", arm); err != nil {
+				t.Fatal(err)
+			}
+			if got := callsContaining(rec.calls, "pipe-pane"); len(got) != 2 {
+				t.Fatalf("armed %d panes, want create and respawn: %q", len(got), rec.calls)
+			}
+			relayed := shellquote.Join([]string{bin, "relay", "--", testShell, "-c", "claude"})
+			if got := len(callsContaining(rec.calls, relayed)); got != tc.relayed {
+				t.Fatalf("%d of create and respawn ran under the relay, want %d: %q", got, tc.relayed, rec.calls)
+			}
+			if n := countLines(t, runs); n != 1 {
+				t.Fatalf("companion probed %d times, want once per path", n)
+			}
+			n := strings.Count(warnings.String(), "warning:")
+			if (tc.warning == "" && n != 0) || (tc.warning != "" && (n != 1 || !strings.Contains(warnings.String(), tc.warning))) {
+				t.Fatalf("warnings %q, want %q", warnings.String(), tc.warning)
+			}
+		})
+	}
+}
+
+// The relay runs the pane's command with the shell tmux would have run it
+// with: tmux runs a single-string pane command as `<default-shell> -c
+// <command>`, so the gate reads the server's default-shell once, with its
+// tmux check, and create and respawn both wrap with it. A command written
+// for a bash or zsh default-shell then means the same under the relay. With
+// no absolute path read, the relay falls back to /bin/sh, as tmux does.
+func TestRelayShellIsServerDefaultShell(t *testing.T) {
+	for _, tc := range []struct{ reported, want string }{
+		{reported: testShell, want: testShell},
+		{reported: "", want: "/bin/sh"},
+	} {
+		t.Run("default-shell="+tc.reported, func(t *testing.T) {
+			captureWarnings(t)
+			tm, rec, bin, _ := gateTmux(t, fmt.Sprintf("gc-osc7501 dev codec=%d relay=%d", programstatus.CodecVersion, programstatus.RelayVersion), tc.reported)
+			const command = "[[ -n $GC_RIG ]] && claude"
+			arm := runtime.ProgramStatusArm{Capture: true, Relay: true}
+			if err := tm.newSessionWithCommandAndEnv("gc-shell", "", command, nil, arm); err != nil {
+				t.Fatal(err)
+			}
+			if err := tm.respawnPaneWithWorkDir("%1", "", command, arm); err != nil {
+				t.Fatal(err)
+			}
+			relayed := shellquote.Join([]string{bin, "relay", "--", tc.want, "-c", command})
+			if got := callsContaining(rec.calls, relayed); len(got) != 2 {
+				t.Fatalf("create and respawn did not both run %q: %q", relayed, rec.calls)
+			}
+			read := []string{"-u", "start-server", ";", "show-options", "-gv", "default-shell"}
+			n := 0
+			for _, c := range rec.calls {
+				if slices.Equal(c, read) {
+					n++
+				}
+			}
+			if n != 1 {
+				t.Fatalf("default-shell read %d times, want once with the tmux check: %q", n, rec.calls)
+			}
+		})
 	}
 }
 
@@ -572,12 +742,14 @@ func TestCaptureNonceRandIsCodecValid(t *testing.T) {
 }
 
 func TestTapCommandEscapesFormatAndShellCharacters(t *testing.T) {
+	// pipe-pane runs its command through strftime as well as format
+	// expansion: a literal '%' is doubled like a literal '#'.
 	p := &capturePlan{
-		capability: captureCapability{companion: "/opt/a#b/my bin/gc-osc7501", tmux: "/usr/bin/tmux"},
+		capability: captureCapability{companion: "/opt/a#b/my bin/100%/gc-osc7501", tmux: "/usr/local/%Y/tmux"},
 		app:        "claude-code",
 		rand:       "r_1-x",
 	}
-	want := `exec '/opt/a##b/my bin/gc-osc7501' tap -t #{pane_id} -n r_1-x -x /usr/bin/tmux -S #{socket_path} -a claude-code`
+	want := `exec '/opt/a##b/my bin/100%%/gc-osc7501' tap -t #{pane_id} -n r_1-x -x /usr/local/%%Y/tmux -S #{socket_path} -a claude-code`
 	if got := p.tapCommand(); got != want {
 		t.Fatalf("tapCommand = %q, want %q", got, want)
 	}

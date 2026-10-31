@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -37,17 +35,6 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	return withStartIdentities(roots), nil
 }
 
-// orphanCandidates keeps the roots reparented to init or subreaperPID.
-func orphanCandidates(roots []runtime.LiveRuntime, subreaperPID int) []runtime.LiveRuntime {
-	out := roots[:0]
-	for _, r := range roots {
-		if OrphanCandidate(r.PPID, subreaperPID) {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
 // withStartIdentities fills each root's StartIdentity and StartedAt from the
 // kernel's start time (ProcessIdentity: nanoseconds since the epoch). A root
 // whose identity cannot be read keeps both empty.
@@ -65,62 +52,6 @@ func withStartIdentities(roots []runtime.LiveRuntime) []runtime.LiveRuntime {
 	return roots
 }
 
-// scanRecordsBySessionID is the pure half of ScanBySessionID, over an
-// already-read process table.
-func scanRecordsBySessionID(records map[int]psRecord, id string) []runtime.LiveRuntime {
-	var out []runtime.LiveRuntime
-	for _, record := range records {
-		if record.pid <= 1 {
-			continue
-		}
-		// A process that is itself infrastructure is never an agent root,
-		// whoever its parent is. The tmux server a session's first new-session
-		// call founded inherits that session's GC_SESSION_ID and reparents to
-		// launchd, so the parent-envelope test below cannot exclude it; reported
-		// as a root, it is handed to the orphan sweep, which kills the one server
-		// every agent in the city shares — one socket per city is the default
-		// topology, so that is the whole city (gastownhall/gascity#5392).
-		if isInfrastructureCommand(record.command) {
-			continue
-		}
-		sessionID := record.env["GC_SESSION_ID"]
-		if sessionID == "" {
-			continue
-		}
-		if id != "" && sessionID != id {
-			continue
-		}
-		parent, hasParent := records[record.ppid]
-		if hasParent && parent.env["GC_SESSION_ID"] == sessionID && !isInfrastructureCommand(parent.command) {
-			continue
-		}
-		epoch, _ := strconv.Atoi(record.env["GC_RUNTIME_EPOCH"])
-		city := record.env["GC_CITY_PATH"]
-		if city == "" {
-			city = record.env["GC_CITY"]
-		}
-		out = append(out, runtime.LiveRuntime{
-			SessionID: sessionID,
-			City:      city,
-			Epoch:     epoch,
-			PID:       record.pid,
-			PPID:      record.ppid,
-			// A parent that is not in the snapshot at all (it exited, or ps
-			// could not report it) is not provider infrastructure: this field
-			// only ever reports what the scan positively saw.
-			ParentIsProviderInfrastructure: hasParent && isInfrastructureCommand(parent.command),
-			Name:                           filepath.Base(strings.TrimSpace(record.command)),
-		})
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].PID < out[j].PID
-	})
-	if out == nil {
-		out = []runtime.LiveRuntime{}
-	}
-	return out
-}
-
 // ScanBySessionIDSince returns the Darwin session-ID scan. Darwin collects one
 // complete ps snapshot, so it has no per-process inspection failures to bound.
 func ScanBySessionIDSince(id string, _ time.Time) ([]runtime.LiveRuntime, error) {
@@ -128,10 +59,11 @@ func ScanBySessionIDSince(id string, _ time.Time) ([]runtime.LiveRuntime, error)
 }
 
 // IsScanRoot reports whether pid should be treated as an agent root. A root
-// carries a GC_SESSION_ID, is not itself infrastructure — a tmux server or
-// client is never a root, whoever its parent is — and sits outside its
-// parent's envelope: the parent is gone, carries a different GC_SESSION_ID,
-// or is infrastructure.
+// carries a GC_SESSION_ID, is neither infrastructure nor the program-status
+// relay — a tmux server or client is never a root, whoever its parent is,
+// and the relay is looked through — and sits outside its parent's envelope:
+// the parent is gone, carries a different GC_SESSION_ID, or is
+// infrastructure or the relay.
 func IsScanRoot(pid int) bool {
 	if err := liveScanGuard(); err != nil {
 		return false
@@ -156,28 +88,6 @@ func IsScanRoot(pid int) bool {
 	return isRecordScanRoot(records, record)
 }
 
-// isRecordScanRoot is the pure half of IsScanRoot. Infrastructure is never a
-// root (see scanRecordsBySessionID), so a kill path that asks about the tmux
-// server is told no.
-func isRecordScanRoot(records map[int]psRecord, record psRecord) bool {
-	if isInfrastructureCommand(record.command) {
-		return false
-	}
-	sessionID := record.env["GC_SESSION_ID"]
-	if sessionID == "" {
-		return false
-	}
-	parent, ok := records[record.ppid]
-	return !ok || parent.env["GC_SESSION_ID"] != sessionID || isInfrastructureCommand(parent.command)
-}
-
-type psRecord struct {
-	pid     int
-	ppid    int
-	command string
-	env     map[string]string
-}
-
 func psRecords() (map[int]psRecord, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), processSnapshotTimeout)
 	defer cancel()
@@ -187,40 +97,9 @@ func psRecords() (map[int]psRecord, error) {
 	}
 	records := make(map[int]psRecord)
 	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 3 {
-			continue
-		}
-		pid, err := strconv.Atoi(fields[0])
-		if err != nil {
-			continue
-		}
-		ppid, err := strconv.Atoi(fields[1])
-		if err != nil {
-			continue
-		}
-		records[pid] = psRecord{
-			pid:     pid,
-			ppid:    ppid,
-			command: darwinPSCommand(fields),
-			env:     parseInlineEnv(fields[2:]),
+		if record, ok := parsePSRecord(line); ok {
+			records[record.pid] = record
 		}
 	}
 	return records, nil
-}
-
-func parseInlineEnv(fields []string) map[string]string {
-	env := make(map[string]string)
-	for _, field := range fields {
-		key, value, ok := strings.Cut(field, "=")
-		if !ok || key == "" {
-			continue
-		}
-		env[key] = value
-	}
-	return env
 }

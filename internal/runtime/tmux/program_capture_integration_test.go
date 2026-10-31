@@ -227,6 +227,48 @@ func TestRelayedProbeGatedReportIsCaptured(t *testing.T) {
 	}
 }
 
+// The relay runs the provider's command with the server's default-shell, as
+// tmux runs an unwrapped pane command: a command only bash understands
+// starts through the relay under a bash default-shell, on create and on
+// respawn. Under /bin/sh (dash) "[[" is not found and the program never
+// starts.
+func TestRelayedCommandRunsUnderServerDefaultShell(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not installed")
+	}
+	socket := newCaptureScratchServer(t)
+	p := captureProvider(t, socket, captureCompanionBin(t))
+	if _, err := p.tm.run("set-option", "-g", "default-shell", bash); err != nil {
+		t.Fatalf("setting default-shell %s: %v", bash, err)
+	}
+	emit := captureEmitterBin(t)
+	bashOnly := func(state string) string {
+		return "[[ -n " + state + " ]] && exec " + emitterCommand(emit, "probe-gated 5s", "report state="+state, "hang")
+	}
+	const name = "gc-ps-shell"
+	cfg := runtime.Config{
+		Command:       bashOnly("working"),
+		WorkDir:       t.TempDir(),
+		ProgramStatus: runtime.ProgramStatusArm{Capture: true, Relay: true},
+	}
+	if err := p.Start(context.Background(), name, cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop(name) })
+	if st := awaitRecord(t, p, name, armedNonce(t, p, name), runtime.ProgramWorking); !st.Probed {
+		t.Fatalf("record %+v does not show the relay's probe answer", st)
+	}
+
+	cfg.Command = bashOnly("idle")
+	if err := p.Relaunch(context.Background(), name, cfg); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	if st := awaitRecord(t, p, name, armedNonce(t, p, name), runtime.ProgramIdle); !st.Probed {
+		t.Fatalf("respawned record %+v does not show the relay's probe answer", st)
+	}
+}
+
 // startRawCatRelayed is startRawCat with capture and the relay armed: the
 // pane runs the relay, which runs rawCatCommand on its own pty.
 func startRawCatRelayed(t *testing.T, p *Provider, name string, f runtime.InputFence) string {

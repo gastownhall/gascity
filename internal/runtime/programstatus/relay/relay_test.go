@@ -357,7 +357,7 @@ func TestRelayPropagatesExitCodeAndSignal(t *testing.T) {
 			t.Fatalf("status %+v, want exit 7", st)
 		}
 	})
-	for _, sig := range []syscall.Signal{unix.SIGUSR1, unix.SIGTERM, unix.SIGQUIT, unix.SIGSEGV} {
+	for _, sig := range []syscall.Signal{unix.SIGUSR1, unix.SIGTERM, unix.SIGQUIT, unix.SIGSEGV, unix.SIGKILL} {
 		t.Run(unix.SignalName(sig), func(t *testing.T) {
 			h := startRelay(t, harnessOptions{}, "die", strconv.Itoa(int(sig)))
 			if st := h.status(); st != (Status{Signal: sig}) {

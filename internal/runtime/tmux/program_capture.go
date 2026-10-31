@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -26,7 +27,10 @@ import (
 // pane id by set-option -F) and a pipe-pane -O into `gc-osc7501 tap`. tmux
 // reads pane output only after a command list completes, so the tap sees the
 // program's first byte. A relay-declared provider also runs inside
-// `gc-osc7501 relay`, which answers the program's support probe.
+// `gc-osc7501 relay`, which answers the program's support probe, when the
+// companion runs gc's relay protocol; otherwise it starts as it would
+// unarmed, its capture still armed. The relay runs the provider's command
+// with the shell tmux would have run it with.
 //
 // Nothing here runs for an undeclared session, which is every session while
 // the [session] program_status switch is off: those keep today's tmux
@@ -66,23 +70,28 @@ var captureWarningOut io.Writer = os.Stderr
 // captureCapability is what a passed capability gate resolved.
 type captureCapability struct {
 	companion string // the gc-osc7501 binary
+	relay     int    // the relay protocol it runs; 0: none
 	tmux      string // the tmux binary the tap publishes through
+	shell     string // the server's default-shell, which runs a pane's command
 }
 
 // capturePlan is one arm of one pane: the capability, the session's
-// declaration and a fresh nonce rand.
+// declaration and a fresh nonce rand. shell is the shell the relay runs the
+// pane's command with, set when relay is.
 type capturePlan struct {
 	capability captureCapability
 	app        string
 	relay      bool
+	shell      string
 	rand       string
 }
 
 // captureGate is a Tmux's cached capability state (design §5.5). The
 // companion is resolved at every arm, because an upgrade can remove a
 // resolved path, and its version handshake is cached per path; the tmux
-// check is cached per Tmux once tmux answers it. A failure leaves the
-// session unarmed and is logged once per cause; heal arms the pane later.
+// check, with the server's default-shell, is cached per Tmux once tmux
+// answers it. A failure leaves the session unarmed and is logged once per
+// cause; heal arms the pane later.
 type captureGate struct {
 	// probe replaces the whole gate. Nil selects Tmux.probeCapture; tests
 	// inject a capability without a companion or a server.
@@ -92,13 +101,24 @@ type captureGate struct {
 	tmuxDone  bool  // the tmux check answered
 	tmuxErr   error // its definitive verdict
 	tmuxBin   string
-	companion map[string]error // version verdict per companion path
-	warned    map[string]bool  // gate failures already logged
+	tmuxShell string
+	companion map[string]companionVerdict // version handshake per companion path
+	warned    map[string]bool             // gate failures already logged
+}
+
+// companionVerdict is a companion's answered version handshake: its report,
+// and the codec mismatch that refuses it.
+type companionVerdict struct {
+	version programstatus.CompanionVersion
+	err     error
 }
 
 // planCapture returns the arm plan for a session declaring arm, or nil when
 // arm declares no capture or the capability gate fails (logged once per
-// cause). It never fails the session.
+// cause). A relay-declared arm whose companion does not run gc's relay
+// protocol is planned without the relay (logged once per cause): the program
+// starts as it would unarmed, and only its capture is armed. It never fails
+// the session.
 func (t *Tmux) planCapture(arm runtime.ProgramStatusArm) *capturePlan {
 	if !arm.Capture {
 		return nil
@@ -117,7 +137,37 @@ func (t *Tmux) planCapture(arm runtime.ProgramStatusArm) *capturePlan {
 		_, _ = fmt.Fprintf(captureWarningOut, "warning: program-status capture not armed: %v\n", err)
 		return nil
 	}
-	return &capturePlan{capability: capability, app: arm.App, relay: arm.Relay, rand: r}
+	plan := &capturePlan{capability: capability, app: arm.App, rand: r}
+	if t.relayRuns(arm, capability) {
+		plan.relay, plan.shell = true, t.paneShell(capability.shell)
+	}
+	return plan
+}
+
+// relayRuns reports whether arm's program starts under the relay: arm
+// declares it and the companion runs gc's relay protocol. A declared relay
+// the companion does not run is logged once.
+func (t *Tmux) relayRuns(arm runtime.ProgramStatusArm, capability captureCapability) bool {
+	if !arm.Relay {
+		return false
+	}
+	if capability.relay != programstatus.RelayVersion {
+		t.warnCaptureOnce(fmt.Sprintf("program-status relay not used: %s reports relay=%d, gc needs relay=%d; the program starts without the relay",
+			capability.companion, capability.relay, programstatus.RelayVersion))
+		return false
+	}
+	return true
+}
+
+// paneShell is the shell that runs a pane's command unwrapped, for the relay
+// to run it with: /bin/sh under the GC_AGENT_SLICE wrapper, which runs the
+// command with sh -c; otherwise the server's default-shell, or /bin/sh,
+// tmux's own fallback, when the gate read no absolute path.
+func (t *Tmux) paneShell(defaultShell string) string {
+	if t.agentSlice.active(os.Getenv(AgentSliceEnv)) || !filepath.IsAbs(defaultShell) {
+		return "/bin/sh"
+	}
+	return defaultShell
 }
 
 // warnCaptureOnce logs msg the first time this Tmux sees it.
@@ -156,64 +206,74 @@ func (t *Tmux) probeCapture() (captureCapability, error) {
 			return captureCapability{}, err
 		}
 	}
-	if err := t.checkCompanion(companion); err != nil {
-		return captureCapability{}, err
-	}
-	tmuxBin, err := t.checkCaptureTmux()
+	version, err := t.checkCompanion(companion)
 	if err != nil {
 		return captureCapability{}, err
 	}
-	return captureCapability{companion: companion, tmux: tmuxBin}, nil
+	tmuxBin, shell, err := t.checkCaptureTmux()
+	if err != nil {
+		return captureCapability{}, err
+	}
+	return captureCapability{companion: companion, relay: version.Relay, tmux: tmuxBin, shell: shell}, nil
 }
 
-// checkCompanion runs the version handshake. A companion that answers with
-// this gc's codec, or with another codec, is not asked again; one that does
-// not answer is asked again at the next arm.
-func (t *Tmux) checkCompanion(path string) error {
+// checkCompanion runs the version handshake and returns the companion's
+// report. A companion that answers with this gc's codec, or with another
+// codec, is not asked again; one that does not answer is asked again at the
+// next arm.
+func (t *Tmux) checkCompanion(path string) (programstatus.CompanionVersion, error) {
 	g := &t.capture
 	g.mu.Lock()
 	verdict, done := g.companion[path]
 	g.mu.Unlock()
 	if done {
-		return verdict
+		return verdict.version, verdict.err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), captureProbeTimeout)
 	defer cancel()
-	_, err := programstatus.ProbeCompanion(ctx, path)
+	version, err := programstatus.ProbeCompanion(ctx, path)
 	if err != nil && !errors.Is(err, programstatus.ErrCompanionCodec) {
-		return err
+		return programstatus.CompanionVersion{}, err
 	}
 	g.mu.Lock()
 	if g.companion == nil {
-		g.companion = make(map[string]error)
+		g.companion = make(map[string]companionVerdict)
 	}
-	g.companion[path] = err
+	g.companion[path] = companionVerdict{version: version, err: err}
 	g.mu.Unlock()
-	return err
+	return version, err
 }
 
-// checkCaptureTmux checks the city's tmux server once it answers. A server
-// that is not running yet is started by the check (start-server), exactly as
-// the new-session it precedes would start it.
-func (t *Tmux) checkCaptureTmux() (string, error) {
+// checkCaptureTmux checks the city's tmux server once it answers, and reads
+// the server's default-shell, the shell tmux runs a pane's command with. A
+// server that is not running yet is started by each read (start-server),
+// exactly as the new-session it precedes would start it.
+func (t *Tmux) checkCaptureTmux() (bin, shell string, err error) {
 	g := &t.capture
 	g.mu.Lock()
 	if g.tmuxDone {
-		bin, err := g.tmuxBin, g.tmuxErr
+		bin, shell, err = g.tmuxBin, g.tmuxShell, g.tmuxErr
 		g.mu.Unlock()
-		return bin, err
+		return bin, shell, err
 	}
 	g.mu.Unlock()
 
 	out, err := t.run("start-server", ";", "display-message", "-p", "#{version}|#{socket_path}")
 	if err != nil {
-		return "", fmt.Errorf("reading tmux version and socket path: %w", err)
+		return "", "", fmt.Errorf("reading tmux version and socket path: %w", err)
 	}
 	bin, verdict := captureTmuxVerdict(strings.TrimSpace(out))
+	if verdict == nil {
+		// A read of its own: the shell is a path, which can hold the '|' the
+		// version line is split on.
+		if shell, err = t.run("start-server", ";", "show-options", "-gv", "default-shell"); err != nil {
+			return "", "", fmt.Errorf("reading tmux default-shell: %w", err)
+		}
+	}
 	g.mu.Lock()
-	g.tmuxDone, g.tmuxBin, g.tmuxErr = true, bin, verdict
+	g.tmuxDone, g.tmuxBin, g.tmuxShell, g.tmuxErr = true, bin, shell, verdict
 	g.mu.Unlock()
-	return bin, verdict
+	return bin, shell, verdict
 }
 
 // captureTmuxVerdict judges display-message's "<version>|<socket_path>" and
@@ -272,24 +332,28 @@ func newCaptureRand() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b[:]), nil
 }
 
-// wrapRelay returns command run under `gc-osc7501 relay`, as tmux would have
-// run it (/bin/sh -c), when the plan declares the relay; otherwise command.
-// The wrap is the leaf's: it never reaches runtime.Config.Command, so the
-// launch fingerprint does not see it. Nil-safe.
+// wrapRelay returns command run under `gc-osc7501 relay`, as the pane would
+// have run it unwrapped (p.shell -c), when the plan runs the relay;
+// otherwise command. The wrap is the leaf's: it never reaches
+// runtime.Config.Command, so the launch fingerprint does not see it.
+// Nil-safe.
 func (p *capturePlan) wrapRelay(command string) string {
 	if p == nil || !p.relay || command == "" {
 		return command
 	}
-	return shellquote.Join([]string{p.capability.companion, "relay", "--", "/bin/sh", "-c", command})
+	return shellquote.Join([]string{p.capability.companion, "relay", "--", p.shell, "-c", command})
 }
 
 // tapCommand is the pipe-pane command: the tap reading the pane's output.
-// tmux expands its formats (#{socket_path}, #{pane_id}) when it runs it, so
-// every literal '#' is doubled. The nonce's words ("-t <pane_id> -n <rand>")
-// come first after "tap", ahead of the paths, so a process listing that cuts
-// long argv short still carries them whole.
+// tmux expands its formats (#{socket_path}, #{pane_id}) and its strftime
+// conversions when it runs it, so every literal '#' and '%' is doubled. The
+// nonce's words ("-t <pane_id> -n <rand>") come first after "tap", ahead of
+// the paths, so a process listing that cuts long argv short still carries
+// them whole.
 func (p *capturePlan) tapCommand() string {
-	literal := func(s string) string { return strings.ReplaceAll(shellquote.Join([]string{s}), "#", "##") }
+	literal := func(s string) string {
+		return strings.NewReplacer("#", "##", "%", "%%").Replace(shellquote.Join([]string{s}))
+	}
 	var b strings.Builder
 	b.WriteString("exec ")
 	b.WriteString(literal(p.capability.companion))

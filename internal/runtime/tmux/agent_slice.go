@@ -96,8 +96,20 @@ type agentSliceWrapper struct {
 // when slice is empty, command is empty, or transient user scopes are
 // unavailable on this host.
 func (w *agentSliceWrapper) wrap(slice, command string) string {
-	if slice == "" || command == "" {
+	if command == "" || !w.active(slice) {
 		return command
+	}
+	return shellquote.Join([]string{
+		"systemd-run", "--user", "--scope", "--slice=" + slice,
+		"--collect", "--quiet", "--", "sh", "-c", command,
+	})
+}
+
+// active reports whether pane commands are wrapped for the given slice: it
+// is set and transient user scopes are available on this host.
+func (w *agentSliceWrapper) active(slice string) bool {
+	if slice == "" {
+		return false
 	}
 	w.once.Do(func() {
 		probe := w.probe
@@ -116,13 +128,7 @@ func (w *agentSliceWrapper) wrap(slice, command string) string {
 		}
 		w.ok = true
 	})
-	if !w.ok {
-		return command
-	}
-	return shellquote.Join([]string{
-		"systemd-run", "--user", "--scope", "--slice=" + slice,
-		"--collect", "--quiet", "--", "sh", "-c", command,
-	})
+	return w.ok
 }
 
 // wrapPaneCommand applies the GC_AGENT_SLICE systemd user-scope wrapper to a
