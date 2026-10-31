@@ -780,7 +780,8 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 		bp.assignedWorkBeads = poolWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
-		poolDesiredStates := ComputePoolDesiredStatesWithDemandTracedAt(
+		liveExternalWorkDirs := liveExternalWorkDirSet(cfg, sessionBeads, stderr)
+		poolDesiredStates := ComputePoolDesiredStatesWithLivenessTracedAt(
 			cfg,
 			poolWorkBeads,
 			sessionBeads.OpenInfos(),
@@ -788,6 +789,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 			scaleCheckDemandByTemplate,
 			poolDecisionTime,
 			trace,
+			liveExternalWorkDirs,
 		)
 		bp.configurePoolSessionCreateFairShare(poolDesiredStates)
 		recordDemandSubPhase(trace, "demand_snapshot.compute_pool_desired", subPhaseStart, map[string]any{
