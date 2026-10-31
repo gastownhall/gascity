@@ -557,14 +557,35 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 // The pane resolves through the sidecar binding when the name is gone — the
 // earlier "sleep leak" was exactly this gap: name lost ⇒ pane never found ⇒
 // closePane never issued ⇒ panes piled up across witness sleep cycles.
+//
+// A session herdr answers it does not have (no agent, no live bound pane, or a
+// pane gone before its close) is stopped: nil. A herdr that cannot answer —
+// the pane lookup or the close fails at the transport — is an error, and the
+// sidecar is kept so a retried Stop still finds the pane (RUNTIME-CONTRACT-003:
+// runtime.StopForCleanup propagates it rather than certify the session gone).
 func (p *Provider) Stop(name string) error {
 	ctx := context.Background()
 	pid, err := p.paneID(ctx, name)
-	if err == nil && pid != "" {
-		_ = p.c.closePane(ctx, pid)
+	if err != nil {
+		return fmt.Errorf("herdr: stopping %q: resolving its pane: %w", name, err)
 	}
-	_ = p.clearMeta(name)
+	if pid != "" {
+		if err := p.c.closePane(ctx, pid); err != nil && !paneGone(err) {
+			return fmt.Errorf("herdr: stopping %q: closing pane %s: %w", name, pid, err)
+		}
+	}
+	if err := p.clearMeta(name); err != nil {
+		return fmt.Errorf("herdr: stopping %q: clearing its metadata: %w", name, err)
+	}
 	return nil
+}
+
+// paneGone reports whether err is herdr answering that the pane does not
+// exist (pane_not_found, or any *_not_found code), read from herdr's typed
+// answer rather than the error text.
+func paneGone(err error) bool {
+	code := herdrCodeAnyShape(err)
+	return code == "not_found" || strings.HasSuffix(code, "_not_found")
 }
 
 // Interrupt sends a soft ctrl+c to the agent (herdr exposes no signal API).
