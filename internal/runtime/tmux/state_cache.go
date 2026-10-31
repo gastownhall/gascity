@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1094,7 +1095,7 @@ func fetchProcessSnapshot(ctx context.Context) (processSnapshot, error) {
 	if goruntime.GOOS == "darwin" {
 		return fetchDarwinProcessSnapshot(ctx)
 	}
-	out, err := exec.CommandContext(ctx, "ps", processSnapshotPSArgs()...).Output()
+	out, err := processSnapshotCommand(ctx, processSnapshotPSArgs()).Output()
 	if err != nil {
 		return processSnapshot{}, fmt.Errorf("fetching process snapshot: %w", err)
 	}
@@ -1102,15 +1103,25 @@ func fetchProcessSnapshot(ctx context.Context) (processSnapshot, error) {
 }
 
 func fetchDarwinProcessSnapshot(ctx context.Context) (processSnapshot, error) {
-	argsOut, err := exec.CommandContext(ctx, "ps", processSnapshotPSArgs()...).Output()
+	argsOut, err := processSnapshotCommand(ctx, processSnapshotPSArgs()).Output()
 	if err != nil {
 		return processSnapshot{}, fmt.Errorf("fetching Darwin process args snapshot: %w", err)
 	}
-	commOut, err := exec.CommandContext(ctx, "ps", darwinCommandSnapshotPSArgs()...).Output()
+	commOut, err := processSnapshotCommand(ctx, darwinCommandSnapshotPSArgs()).Output()
 	if err != nil {
 		return processSnapshot{}, fmt.Errorf("fetching Darwin process command snapshot: %w", err)
 	}
 	return parseDarwinProcessSnapshot(string(argsOut), string(commOut)), nil
+}
+
+// processSnapshotCommand is the ps invocation of a process snapshot. ps cuts
+// each line to the terminal width, which it takes from COLUMNS when stdout is
+// no terminal: the snapshot runs with -ww and without COLUMNS, so args is
+// never cut short (a tap's nonce rides in its argv).
+func processSnapshotCommand(ctx context.Context, args []string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "ps", append([]string{"-ww"}, args...)...)
+	cmd.Env = slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "COLUMNS=") })
+	return cmd
 }
 
 // processSnapshotPSArgs returns the platform-appropriate `ps` arguments for

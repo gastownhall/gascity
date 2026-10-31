@@ -230,6 +230,43 @@ func TestRunProgramStatusContractSkipsWithoutFixtures(t *testing.T) {
 	RunProgramStatusContract(t, ProgramStatusFixtures{})
 }
 
+// Kills a case that passes having checked only part of its claim: a missing
+// optional fixture or hook reports a skip naming what went unchecked.
+func TestProgramStatusContractSkipsMissingOptionalHooks(t *testing.T) {
+	strip := func(edit func(*ProgramStatusSession)) ProgramStatusFixtures {
+		f := FakeProgramStatusFixtures()
+		armed := f.Armed
+		f.Armed = func(t *testing.T, m runtime.ProgramStatusMode, script ...string) ProgramStatusSession {
+			s := armed(t, m, script...)
+			edit(&s)
+			return s
+		}
+		return f
+	}
+	noUnarmed := FakeProgramStatusFixtures()
+	noUnarmed.Unarmed = nil
+	noRelayed := FakeProgramStatusFixtures()
+	noRelayed.Relayed = nil
+	for _, tc := range []struct {
+		code string
+		f    ProgramStatusFixtures
+	}{
+		{"PS-001", strip(func(s *ProgramStatusSession) { s.SetMode = nil })},
+		{"PS-003", noUnarmed},
+		{"PS-004", noRelayed},
+		{"PS-005", strip(func(s *ProgramStatusSession) { s.PublishStale = nil })},
+		{"PS-006", strip(func(s *ProgramStatusSession) { s.KillReader = nil })},
+		{"PS-014", strip(func(s *ProgramStatusSession) { s.ClosePipe = nil })},
+		{"PS-014", strip(func(s *ProgramStatusSession) { s.SetMode = nil })},
+	} {
+		err := caseNamed(t, tc.code).run(t, tc.f)
+		var s skipError
+		if !errors.As(err, &s) || !strings.Contains(s.reason, "unchecked") {
+			t.Errorf("%s with an optional hook missing = %v, want a skip naming what went unchecked", tc.code, err)
+		}
+	}
+}
+
 // Kills a Relayed fixture whose relay does not answer the probe: PS-004's
 // relay half then fails, so the fake's passing relay half is the relay's
 // doing, not the fixture's.

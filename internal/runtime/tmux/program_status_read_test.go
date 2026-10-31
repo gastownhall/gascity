@@ -89,7 +89,7 @@ func inventoryRows(session string, panes ...capturePane) []string {
 // tapArgs is a running tap's argv as ps prints it.
 func tapArgs(nonce string) string {
 	rand, pane, _ := strings.Cut(nonce, ".")
-	return "/usr/local/bin/gc-osc7501 tap -x /usr/bin/tmux -S /tmp/tmux-1000/city -t " + pane + " -n " + rand
+	return "/usr/local/bin/gc-osc7501 tap -t " + pane + " -n " + rand + " -x /usr/bin/tmux -S /tmp/tmux-1000/city"
 }
 
 // tapTable is a process table holding a tap for each nonce, beside an
@@ -420,13 +420,18 @@ func TestTapNonceReadsOnlyTapArgv(t *testing.T) {
 		args, nonce string
 	}{
 		{tapArgs(readNonce), readNonce},
-		{"/usr/local/bin/gc-osc7501 tap -x /usr/bin/tmux -S /tmp/s -t %12 -n x_Y-z -a codex", "x_Y-z.%12"},
-		{"sh -c exec /usr/local/bin/gc-osc7501 tap -x /usr/bin/tmux -S /tmp/s -t %3 -n abc", "abc.%3"},
+		{"/usr/local/bin/gc-osc7501 tap -t %12 -n x_Y-z -x /usr/bin/tmux -S /tmp/s -a codex", "x_Y-z.%12"},
+		{"sh -c exec /usr/local/bin/gc-osc7501 tap -t %3 -n abc -x /usr/bin/tmux -S /tmp/s", "abc.%3"},
+		// A listing that cut the argv short after the nonce still names it.
+		{"/usr/local/bin/gc-osc7501 tap -t %3 -n abc -x /usr/bi", "abc.%3"},
 		{"/usr/local/bin/gc-osc7501 relay -- /bin/sh -c codex", ""},
 		{"vim -n notes -t %3", ""},
-		{"/usr/local/bin/gc-osc7501 tap -x /usr/bin/tmux -S /tmp/s -t 3 -n abc", ""},
-		{"/usr/local/bin/gc-osc7501 tap -x /usr/bin/tmux -S /tmp/s -t %3 -n bad!rand", ""},
-		{"/usr/local/bin/gc-osc7501 tap -x /usr/bin/tmux -S /tmp/s -t %3", ""},
+		{"vim tap -n notes -t %3", ""},
+		{"/usr/local/bin/gc-osc7501 tap -t 3 -n abc -x /usr/bin/tmux -S /tmp/s", ""},
+		{"/usr/local/bin/gc-osc7501 tap -t %3 -n bad!rand -x /usr/bin/tmux -S /tmp/s", ""},
+		{"/usr/local/bin/gc-osc7501 tap -t %3", ""},
+		// Only the arm's word order names a nonce.
+		{"/usr/local/bin/gc-osc7501 tap -x /usr/bin/tmux -S /tmp/s -t %3 -n abc", ""},
 	} {
 		got, ok := tapNonce(tc.args)
 		if got != tc.nonce || ok != (tc.nonce != "") {
@@ -464,5 +469,110 @@ func TestFoldProgramPaneNeverGuesses(t *testing.T) {
 		if got.id != tc.want || named != tc.named {
 			t.Errorf("%s: fold = %q, %t; want %q, %t", tc.name, got.id, named, tc.want, tc.named)
 		}
+	}
+}
+
+// Kills a provider that keeps the switch it was built with: the controller
+// keeps the tmux provider across a reload and publishes each accepted
+// config's switch to it, and the readings follow in every direction.
+func TestProgramStatusFollowsPublishedSwitch(t *testing.T) {
+	table := tapTable(readNonce)
+	armed := fetchRows(armedPane(psRecord(t, readNonce, runtime.ProgramWorking)))
+	read := func(t *testing.T, p *Provider) runtime.ProgramStatus {
+		t.Helper()
+		r, err := p.ProgramStatus("s")
+		if err != nil {
+			t.Fatalf("ProgramStatus: %v", err)
+		}
+		return r
+	}
+
+	t.Run("off to shadow and on", func(t *testing.T) {
+		for _, mode := range []runtime.ProgramStatusMode{runtime.ProgramStatusShadow, runtime.ProgramStatusOn} {
+			p, fe := readProvider(runtime.ProgramStatusOff, armed, &table)
+			// The cache holds a snapshot read under off: no capture fields.
+			fe.outs = []string{"s\t0\temitter\t100\t0\t1700000000\t$1\t1700000000"}
+			if !p.cache.IsRunning("s") {
+				t.Fatal("the off snapshot does not hold the session")
+			}
+			if r := read(t, p); r.Validity != runtime.ProgramStatusUnread {
+				t.Fatalf("under off: %+v, want Unread", r)
+			}
+			p.SetProgramStatusMode(mode)
+			if r := read(t, p); r.Mode != mode || !r.Running() {
+				t.Fatalf("published %s: %+v, want a working reading stamped %s", mode, r, mode)
+			}
+			if got := callsContaining(fe.calls, programPaneFormat); len(got) != 1 {
+				t.Fatalf("published %s: %d reads carried the capture fields, want 1: %q", mode, len(got), fe.calls)
+			}
+		}
+	})
+
+	t.Run("on to off", func(t *testing.T) {
+		p, _ := readProvider(runtime.ProgramStatusOn, armed, &table)
+		if r := read(t, p); !r.Decides() {
+			t.Fatalf("under on: %+v, want a deciding reading", r)
+		}
+		p.SetProgramStatusMode(runtime.ProgramStatusOff)
+		if r := read(t, p); r != (runtime.ProgramStatus{Mode: runtime.ProgramStatusOff}) {
+			t.Fatalf("published off: %+v, want Unread under off", r)
+		}
+		if p.tm.programReadEnabled() {
+			t.Fatal("published off: the read formats still carry capture fields")
+		}
+	})
+
+	t.Run("on to shadow and back", func(t *testing.T) {
+		p, _ := readProvider(runtime.ProgramStatusOn, armed, &table)
+		if r := read(t, p); !r.Decides() {
+			t.Fatalf("under on: %+v, want a deciding reading", r)
+		}
+		p.SetProgramStatusMode(runtime.ProgramStatusShadow)
+		if r := read(t, p); r.Mode != runtime.ProgramStatusShadow || !r.Running() || r.Decides() {
+			t.Fatalf("published shadow: %+v, want an advisory working reading", r)
+		}
+		p.SetProgramStatusMode(runtime.ProgramStatusOn)
+		if r := read(t, p); !r.Decides() {
+			t.Fatalf("published on again: %+v, want a deciding reading", r)
+		}
+	})
+
+	t.Run("an unknown switch reads off", func(t *testing.T) {
+		p, _ := readProvider(runtime.ProgramStatusOn, armed, &table)
+		p.SetProgramStatusMode("sideways")
+		if r := read(t, p); r.Validity != runtime.ProgramStatusUnread || r.Mode != runtime.ProgramStatusOff {
+			t.Fatalf("published an unknown switch: %+v, want Unread under off", r)
+		}
+	})
+}
+
+// Kills a seam-backed provider (the one the controller builds) that hides
+// the switch publication its raw provider takes.
+func TestSeamBackedTakesTheProgramStatusSwitch(t *testing.T) {
+	p := NewSeamBackedWithConfig(Config{ProgramStatus: runtime.ProgramStatusOn})
+	setter, ok := p.(interface {
+		SetProgramStatusMode(runtime.ProgramStatusMode)
+	})
+	if !ok {
+		t.Fatal("the seam-backed tmux provider does not take the published program-status switch")
+	}
+	setter.SetProgramStatusMode(runtime.ProgramStatusOff)
+	if mode := p.(*seamBackedProvider).tm.programStatusMode(); mode != runtime.ProgramStatusOff {
+		t.Fatalf("published off reads %q", mode)
+	}
+}
+
+// Kills an arm that keeps the switch the Tmux was built with: a respawn
+// under a switch published off arms nothing and runs today's command line.
+func TestRespawnFollowsPublishedSwitch(t *testing.T) {
+	tm, rec, _, _ := captureTestTmux(t)
+	tm.cfg.ProgramStatus = runtime.ProgramStatusOn
+	tm.SetProgramStatusMode(runtime.ProgramStatusOff)
+	if err := tm.respawnPaneWithWorkDir("%4", "/work", "codex", runtime.ProgramStatusArm{}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"-u", "respawn-pane", "-k", "-t", "%4", "-c", "/work", "codex"}
+	if len(rec.calls) != 1 || !slices.Equal(rec.calls[0], want) {
+		t.Fatalf("respawn under a switch published off = %q, want [%q]", rec.calls, want)
 	}
 }

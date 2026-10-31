@@ -472,6 +472,10 @@ type Tmux struct {
 	// capture is the program-status capture capability gate (see
 	// program_capture.go).
 	capture captureGate
+	// programStatus is the live program-status switch: nil until
+	// SetProgramStatusMode first publishes one, and then it overrides
+	// cfg.ProgramStatus (see program_capture.go).
+	programStatus atomic.Pointer[runtime.ProgramStatusMode]
 
 	// serverSocketObserver observes the server socket only after tmux reports
 	// ErrNoServer, during the new-session preflight or a liveness observation
