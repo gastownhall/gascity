@@ -154,8 +154,11 @@ fi
 if [[ -n "${GO_TEST_COUNT:-}" ]]; then
   go_test_args=(-count="$GO_TEST_COUNT" "${go_test_args[@]}")
 fi
-if [[ -n "${GO_TEST_COVERPROFILE:-}" ]]; then
-  go_test_args+=(-coverpkg=./... -coverprofile "$GO_TEST_COVERPROFILE")
+cover_profile="${GO_TEST_COVERPROFILE:-}"
+if [[ -n "$cover_profile" ]]; then
+  # Each product run names its own -coverprofile below: go test truncates that
+  # file when it starts, so the chunks of one shard cannot share it.
+  go_test_args+=(-coverpkg=./...)
 fi
 
 tests=()
@@ -242,8 +245,10 @@ join_regex() {
 # exec with "Argument list too long" before any test runs (ga-f4ovjm.47). The
 # names are therefore packed in order into chunks whose anchored regex stays
 # within a byte budget, and each chunk is one go test invocation. A shard that
-# fits in one chunk runs exactly as before.
-run_regex_budget="${GO_TEST_RUN_REGEX_MAX_BYTES:-65536}"
+# fits in one chunk runs exactly as before. The default budget, 120 KiB, stays
+# 8 KiB under the cap: go test hands the regex on as "-test.run=<regex>", and
+# ${#name} counts characters, which a non-ASCII name exceeds in bytes.
+run_regex_budget="${GO_TEST_RUN_REGEX_MAX_BYTES:-122880}"
 if ! [[ "$run_regex_budget" =~ ^[0-9]+$ ]] || (( run_regex_budget < 1 )); then
   echo "GO_TEST_RUN_REGEX_MAX_BYTES must be a positive integer: ${run_regex_budget}" >&2
   exit 1
@@ -291,6 +296,27 @@ fi
 shard_label="${test_pkg#./} shard ${shard_index} of ${shard_total}"
 timing_file="${GO_TEST_TIMING_FILE:-}"
 chunk_timing_files=()
+chunk_cover_profiles=()
+
+# A chunked shard publishes the requested coverage profile and timing artifact
+# only by merging its chunks' files after the last chunk, so stale ones from an
+# earlier run are removed first, as go test and go-test-observable do before a
+# single run: a profile that cannot be removed stops the shard, as go test stops
+# when it cannot create one, while timing capture is only disabled.
+merge_chunk_timing=0
+if (( chunk_total > 1 )); then
+  if [[ -n "$cover_profile" ]]; then
+    rm -f "$cover_profile"
+  fi
+  if [[ -n "$timing_file" ]]; then
+    if rm -f "$timing_file"; then
+      merge_chunk_timing=1
+    else
+      echo "observable go test: warning: cannot remove stale timing artifact ${timing_file}; capture disabled" >&2
+      GO_TEST_TIMING_FILE=""
+    fi
+  fi
+fi
 
 # Each chunk is its own supervised run with the full watchdog budget, so the
 # per-run guarantee is unchanged. Every chunk runs even after one fails, as a
@@ -299,21 +325,30 @@ chunk_timing_files=()
 shard_status=0
 for chunk_i in "${!regex_chunks[@]}"; do
   chunk_label="$shard_label"
+  chunk_args=("${go_test_args[@]}")
+  chunk_cover_profile="$cover_profile"
   if (( chunk_total > 1 )); then
     chunk_label+=" chunk $(( chunk_i + 1 )) of ${chunk_total}"
     echo "Running ${chunk_label}"
-  fi
-  chunk_status=0
-  if [[ -n "$timing_file" ]]; then
-    if (( chunk_total > 1 )); then
+    if [[ -n "$cover_profile" ]]; then
+      chunk_cover_profile="${cover_profile}.chunk-$(( chunk_i + 1 ))"
+      chunk_cover_profiles+=("$chunk_cover_profile")
+    fi
+    if (( merge_chunk_timing == 1 )); then
       GO_TEST_TIMING_FILE="${timing_file}.chunk-$(( chunk_i + 1 ))"
       chunk_timing_files+=("$GO_TEST_TIMING_FILE")
     fi
+  fi
+  if [[ -n "$chunk_cover_profile" ]]; then
+    chunk_args+=(-coverprofile "$chunk_cover_profile")
+  fi
+  chunk_status=0
+  if [[ -n "$timing_file" ]]; then
     gc_harness_run_supervised "$chunk_label" "$watchdog_deadline" "$watchdog_quit_grace" -- \
-      run_observable_go_test "${go_test_args[@]}" "$test_pkg" -run "${regex_chunks[$chunk_i]}" || chunk_status=$?
+      run_observable_go_test "${chunk_args[@]}" "$test_pkg" -run "${regex_chunks[$chunk_i]}" || chunk_status=$?
   else
     gc_harness_run_supervised "$chunk_label" "$watchdog_deadline" "$watchdog_quit_grace" -- \
-      run_go_test "${go_test_args[@]}" "$test_pkg" -run "${regex_chunks[$chunk_i]}" || chunk_status=$?
+      run_go_test "${chunk_args[@]}" "$test_pkg" -run "${regex_chunks[$chunk_i]}" || chunk_status=$?
   fi
   if (( chunk_status != 0 )); then
     echo "${chunk_label}: FAIL status=${chunk_status}" >&2
@@ -323,10 +358,24 @@ for chunk_i in "${!regex_chunks[@]}"; do
   fi
 done
 
+# Chunked coverage is merged back into the one profile the caller asked for.
+# Coverage is what a cover run exists to produce, so unlike timing, chunk
+# profiles that cannot be merged fail the shard rather than leave it partial.
+if (( ${#chunk_cover_profiles[@]} > 0 )); then
+  if ! "$repo_root/scripts/merge-coverprofiles" "$cover_profile" "${chunk_cover_profiles[@]}"; then
+    rm -f "$cover_profile"
+    echo "${shard_label}: FAIL could not merge ${chunk_total} chunk coverage profiles into ${cover_profile}" >&2
+    if (( shard_status == 0 )); then
+      shard_status=1
+    fi
+  fi
+  rm -f "${chunk_cover_profiles[@]}"
+fi
+
 # Chunked timing is merged back into the one artifact the caller asked for, so
 # a chunked shard publishes the same file and shard identity as an unchunked
 # one. Like the per-run capture, this is advisory: it never changes the status.
-if [[ -n "$timing_file" ]] && (( chunk_total > 1 )); then
+if (( ${#chunk_timing_files[@]} > 0 )); then
   merged_timing=0
   if command -v jq >/dev/null 2>&1 &&
     timing_tmp="$(mktemp "${timing_file}.tmp.XXXXXX" 2>/dev/null)"; then

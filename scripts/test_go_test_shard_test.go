@@ -69,9 +69,15 @@ case "${1:-}" in
     printf '%%s\n' "$@" >> %q
     is_list=0
     is_json=0
+    run_regex=''
+    cover_profile=''
+    previous=''
     for arg in "$@"; do
       [ "$arg" != "-list" ] || is_list=1
       [ "$arg" != "-json" ] || is_json=1
+      [ "$previous" != "-run" ] || run_regex="$arg"
+      [ "$previous" != "-coverprofile" ] || cover_profile="$arg"
+      previous="$arg"
     done
     if [ "$is_list" = 1 ]; then
       if [ -f %q ]; then
@@ -84,18 +90,35 @@ case "${1:-}" in
     printf '%%s\n' "$@" >> %q
     env | LC_ALL=C sort >> %q
     if [ "$is_json" = 1 ]; then
-      printf '%%s\n' \
-        '{"Action":"run","Package":"github.com/gastownhall/gascity/example","Test":"TestAlpha"}' \
-        '{"Action":"fail","Package":"github.com/gastownhall/gascity/example","Test":"TestAlpha","Elapsed":0.25}' \
-        '{"Action":"run","Package":"github.com/gastownhall/gascity/example","Test":"TestGamma"}' \
-        '{"Action":"pass","Package":"github.com/gastownhall/gascity/example","Test":"TestGamma","Elapsed":0.125}' \
-        '{"Action":"fail","Package":"github.com/gastownhall/gascity/example","Elapsed":0.3}'
-    fi
-    for arg in "$@"; do
-      case "$arg" in
-        *TestChunkFail*) exit 7 ;;
+      case "$run_regex" in
+        *TestNoEvents*) ;;
+        *)
+          printf '%%s\n' \
+            '{"Action":"run","Package":"github.com/gastownhall/gascity/example","Test":"TestAlpha"}' \
+            '{"Action":"fail","Package":"github.com/gastownhall/gascity/example","Test":"TestAlpha","Elapsed":0.25}' \
+            '{"Action":"run","Package":"github.com/gastownhall/gascity/example","Test":"TestGamma"}' \
+            '{"Action":"pass","Package":"github.com/gastownhall/gascity/example","Test":"TestGamma","Elapsed":0.125}' \
+            '{"Action":"fail","Package":"github.com/gastownhall/gascity/example","Elapsed":0.3}'
+          ;;
       esac
-    done
+    fi
+    # One block per test the -run regex selects, so a merged profile shows
+    # which runs it holds.
+    if [ -n "$cover_profile" ]; then
+      case "$run_regex" in
+        *TestNoCover*) ;;
+        *)
+          printf 'mode: set\n' > "$cover_profile"
+          printf '%%s\n' "$run_regex" | sed -e 's/^\^(//' -e 's/)\$$//' | tr '|' '\n' |
+            while IFS= read -r name; do
+              printf 'github.com/gastownhall/gascity/example/%%s.go:1.1,2.2 1 1\n' "$name"
+            done >> "$cover_profile"
+          ;;
+      esac
+    fi
+    case "$run_regex" in
+      *TestChunkFail*) exit 7 ;;
+    esac
     exit %d
     ;;
   *) exit 99 ;;
@@ -841,6 +864,8 @@ func runRegexNames(t *testing.T, regex string) []string {
 func TestGoTestShardChunksRunRegexUnderArgumentLimit(t *testing.T) {
 	t.Parallel()
 
+	// Linux's MAX_ARG_STRLEN bounds every argv string, NUL included.
+	const maxArgStrlen = 128 * 1024
 	// A cmd/gc-sized shard: one in six of these names is 3,000 tests whose
 	// single joined regex (~160 KB) exceeds Linux's 128 KiB MAX_ARG_STRLEN,
 	// the exec failure behind ga-f4ovjm.47.
@@ -855,7 +880,7 @@ func TestGoTestShardChunksRunRegexUnderArgumentLimit(t *testing.T) {
 			want = append(want, name)
 		}
 	}
-	if joined := len("^(" + strings.Join(want, "|") + ")$"); joined <= 128*1024 {
+	if joined := len("^(" + strings.Join(want, "|") + ")$"); joined <= maxArgStrlen {
 		t.Fatalf("fixture regex is only %d bytes; it must exceed the 128 KiB argument limit", joined)
 	}
 
@@ -874,8 +899,9 @@ func TestGoTestShardChunksRunRegexUnderArgumentLimit(t *testing.T) {
 	}
 	var got []string
 	for i, regex := range regexes {
-		if len(regex) > 64*1024 {
-			t.Errorf("chunk %d -run argument is %d bytes, over the 64 KiB budget", i+1, len(regex))
+		// go test hands the regex to the test binary as "-test.run=<regex>".
+		if size := len("-test.run=") + len(regex) + 1; size > maxArgStrlen {
+			t.Errorf("chunk %d reaches the test binary as a %d-byte argument, over the %d-byte MAX_ARG_STRLEN", i+1, size, maxArgStrlen)
 		}
 		got = append(got, runRegexNames(t, regex)...)
 	}
@@ -957,11 +983,134 @@ func TestGoTestShardChunkedTimingMergesIntoRequestedArtifact(t *testing.T) {
 	if len(artifact.Units) != 6 {
 		t.Fatalf("merged timing has %d units, want 6 (3 per chunk): %+v", len(artifact.Units), artifact.Units)
 	}
-	leftovers, err := filepath.Glob(timingFile + ".*")
+	assertNoChunkArtifacts(t, timingFile)
+}
+
+// assertNoChunkArtifacts fails when a chunk's file outlived the shard beside
+// the artifact it was merged into.
+func assertNoChunkArtifacts(t *testing.T, artifact string) {
+	t.Helper()
+	leftovers, err := filepath.Glob(artifact + ".*")
 	if err != nil {
 		t.Fatalf("glob chunk artifacts: %v", err)
 	}
 	if len(leftovers) != 0 {
-		t.Fatalf("chunk timing artifacts were not cleaned up: %v", leftovers)
+		t.Fatalf("chunk artifacts were not cleaned up: %v", leftovers)
 	}
+}
+
+func TestGoTestShardSingleChunkCoverageWritesRequestedProfile(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGoTestShardFixtureWithExit(t, 0)
+	coverProfile := filepath.Join(fixture.tmpDir, "coverage.txt")
+	status, output := runShardCommand(t, fixture.command("GO_TEST_COVERPROFILE="+coverProfile))
+	if status != 0 {
+		t.Fatalf("shard exit = %d, want 0\n%s", status, output)
+	}
+
+	wantArgs := "test\n-timeout\n1m\n-coverpkg=./...\n-coverprofile\n" + coverProfile + "\n./example\n-run\n^(TestAlpha|TestGamma)$\n"
+	if got := readFixtureFile(t, fixture.productArgsFile); got != wantArgs {
+		t.Fatalf("single-chunk coverage product argv:\n%s\nwant:\n%s", got, wantArgs)
+	}
+	wantProfile := "mode: set\n" +
+		"github.com/gastownhall/gascity/example/TestAlpha.go:1.1,2.2 1 1\n" +
+		"github.com/gastownhall/gascity/example/TestGamma.go:1.1,2.2 1 1\n"
+	if got := readFixtureFile(t, coverProfile); got != wantProfile {
+		t.Fatalf("coverage profile:\n%s\nwant:\n%s", got, wantProfile)
+	}
+}
+
+func TestGoTestShardChunkedCoverageMergesEveryChunkIntoRequestedProfile(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGoTestShardFixtureWithExit(t, 0)
+	manifest := writeGoTestManifest(t, fixture.tmpDir, "TestAlpha", "TestBeta", "TestGamma")
+	coverProfile := filepath.Join(fixture.tmpDir, "coverage.txt")
+	if err := os.WriteFile(coverProfile, []byte("mode: set\ngithub.com/gastownhall/gascity/example/TestStale.go:1.1,2.2 1 1\n"), 0o644); err != nil {
+		t.Fatalf("write stale coverage profile: %v", err)
+	}
+	// A 13-byte budget fits "^(TestAlpha)$" alone, so every name is a chunk.
+	status, output := runShardCommand(t, fixture.commandForShard("1", "1",
+		"GO_TEST_MANIFEST="+manifest,
+		"GO_TEST_COVERPROFILE="+coverProfile,
+		"GO_TEST_RUN_REGEX_MAX_BYTES=13",
+	))
+	if status != 0 {
+		t.Fatalf("shard exit = %d, want 0\n%s", status, output)
+	}
+
+	// go test truncates its -coverprofile when it starts, so each chunk writes
+	// its own while every chunk keeps the shared -coverpkg instrumentation.
+	var wantArgs strings.Builder
+	for i, name := range []string{"TestAlpha", "TestBeta", "TestGamma"} {
+		fmt.Fprintf(&wantArgs, "test\n-timeout\n1m\n-coverpkg=./...\n-coverprofile\n%s.chunk-%d\n./example\n-run\n^(%s)$\n", coverProfile, i+1, name)
+	}
+	if got := readFixtureFile(t, fixture.productArgsFile); got != wantArgs.String() {
+		t.Fatalf("chunked coverage product argv:\n%s\nwant:\n%s", got, wantArgs.String())
+	}
+	wantProfile := "mode: set\n" +
+		"github.com/gastownhall/gascity/example/TestAlpha.go:1.1,2.2 1 1\n" +
+		"github.com/gastownhall/gascity/example/TestBeta.go:1.1,2.2 1 1\n" +
+		"github.com/gastownhall/gascity/example/TestGamma.go:1.1,2.2 1 1\n"
+	if got := readFixtureFile(t, coverProfile); got != wantProfile {
+		t.Fatalf("merged coverage profile:\n%s\nwant every chunk's blocks:\n%s", got, wantProfile)
+	}
+	assertNoChunkArtifacts(t, coverProfile)
+}
+
+func TestGoTestShardChunkedCoverageMergeFailureFailsShard(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGoTestShardFixtureWithExit(t, 0)
+	manifest := writeGoTestManifest(t, fixture.tmpDir, "TestAlpha", "TestNoCover")
+	coverProfile := filepath.Join(fixture.tmpDir, "coverage.txt")
+	if err := os.WriteFile(coverProfile, []byte("mode: set\ngithub.com/gastownhall/gascity/example/TestStale.go:1.1,2.2 1 1\n"), 0o644); err != nil {
+		t.Fatalf("write stale coverage profile: %v", err)
+	}
+	// "^(TestNoCover)$" is 15 bytes, so each name is a chunk, and the fake go
+	// writes no profile for the TestNoCover chunk.
+	status, output := runShardCommand(t, fixture.commandForShard("1", "1",
+		"GO_TEST_MANIFEST="+manifest,
+		"GO_TEST_COVERPROFILE="+coverProfile,
+		"GO_TEST_RUN_REGEX_MAX_BYTES=15",
+	))
+	if status != 1 {
+		t.Fatalf("shard exit = %d, want 1 for an incomplete coverage profile\n%s", status, output)
+	}
+	if !strings.Contains(string(output), "could not merge 2 chunk coverage profiles into "+coverProfile) {
+		t.Fatalf("shard output does not report the failed coverage merge:\n%s", output)
+	}
+	if _, err := os.Stat(coverProfile); !os.IsNotExist(err) {
+		t.Fatalf("shard left a coverage profile it could not complete: err=%v", err)
+	}
+	assertNoChunkArtifacts(t, coverProfile)
+}
+
+func TestGoTestShardChunkedTimingRemovesStaleArtifactWhenMergeFails(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGoTestShardFixtureWithExit(t, 0)
+	manifest := writeGoTestManifest(t, fixture.tmpDir, "TestAlpha", "TestNoEvents")
+	timingFile := filepath.Join(fixture.tmpDir, "timing.json")
+	if err := os.WriteFile(timingFile, []byte(`{"schema":1,"shard_id":"earlier-run","units":[]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write stale timing artifact: %v", err)
+	}
+	// "^(TestNoEvents)$" is 16 bytes, so each name is a chunk, and the fake go
+	// emits no test events, hence no timing artifact, for the TestNoEvents one.
+	status, output := runShardCommand(t, fixture.commandForShard("1", "1",
+		"GO_TEST_MANIFEST="+manifest,
+		"GO_TEST_TIMING_FILE="+timingFile,
+		"GO_TEST_RUN_REGEX_MAX_BYTES=16",
+	))
+	if status != 0 {
+		t.Fatalf("shard exit = %d, want 0: timing is advisory\n%s", status, output)
+	}
+	if !strings.Contains(string(output), "could not merge 2 chunk timing artifacts into "+timingFile) {
+		t.Fatalf("shard output does not report the failed timing merge:\n%s", output)
+	}
+	if data, err := os.ReadFile(timingFile); !os.IsNotExist(err) {
+		t.Fatalf("an earlier run's timing artifact survived as this shard's: err=%v\n%s", err, data)
+	}
+	assertNoChunkArtifacts(t, timingFile)
 }
