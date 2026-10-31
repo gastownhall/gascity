@@ -3059,7 +3059,7 @@
         },
         "socket": {
           "type": "string",
-          "description": "Socket specifies the tmux socket name for per-city isolation.\nWhen set, all tmux commands use \"tmux -L \u003csocket\u003e\" to connect to\na dedicated server. When empty, defaults to the city name\n(workspace.name) — giving every city its own tmux server\nautomatically. Set explicitly to override."
+          "description": "Socket specifies the tmux socket name for per-city isolation.\nWhen set, tmux commands connect to a dedicated server: \"tmux -L\n\u003csocket\u003e\" normally, or \"tmux -S \u003cpath\u003e\" with the path pinned from\n$TMUX when gc runs in a pane of that same server, so a pane whose\nTMUX_TMPDIR differs from the controller's still reaches the server\nhosting it. When empty, defaults to the city name (workspace.name) —\ngiving every city its own tmux server automatically. Set explicitly\nto override."
         },
         "remote_match": {
           "type": "string",
