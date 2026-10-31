@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/extmsg"
 )
 
@@ -120,5 +121,85 @@ func TestPrintExtMsgBindingOutputs(t *testing.T) {
 		if !strings.Contains(human, want) {
 			t.Fatalf("human output = %q, want it to contain %q", human, want)
 		}
+	}
+}
+
+// TestExtMsgClientRoutesToSupervisor pins the routing of the client that
+// gc extmsg bind, handoff and unbind use. Conversation bindings have no local
+// fallback, so where apiClient returns nil for a caller's local fallback
+// extMsgClient takes the supervisor-managed client, and when no endpoint is
+// usable its failure names the routing reason. The fall-through never consults
+// the supervisor's grant requirement. (ga-qr4s5g, PR #7825)
+func TestExtMsgClientRoutesToSupervisor(t *testing.T) {
+	sentinel := api.NewClient("http://supervisor.sentinel:1")
+	origIdentity, origSup, origGrants := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook
+	t.Cleanup(func() {
+		apiRouteControllerIdentityHook = origIdentity
+		apiRouteSupervisorClientHook = origSup
+		apiRouteSupervisorGrantsHook = origGrants
+	})
+	apiRouteSupervisorGrantsHook = func() bool {
+		t.Errorf("supervisor grant requirement consulted on the extmsg fall-through path")
+		return true
+	}
+	supervisorClient := func(*testing.T) func(string) *api.Client {
+		return func(string) *api.Client { return sentinel }
+	}
+	identity := func(reply controllerIdentityReply) func(*testing.T) func(string) controllerIdentityReply {
+		return func(*testing.T) func(string) controllerIdentityReply {
+			return func(string) controllerIdentityReply { return reply }
+		}
+	}
+
+	cases := []struct {
+		name       string
+		noAPI      string
+		toml       string
+		identity   func(*testing.T) func(string) controllerIdentityReply
+		supervisor func(*testing.T) func(string) *api.Client
+		wantClient bool
+		wantStderr []string
+	}{
+		{
+			// AC-1: a live controller of unknown hosting mode (a supervisor
+			// predating identify) with no [api] port.
+			name:       "alive-unknown-mode-no-api-port-routes-to-supervisor",
+			toml:       "name = \"t\"\n",
+			identity:   identity(controllerIdentityReply{PID: 4242}),
+			supervisor: supervisorClient,
+			wantClient: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_NO_API", tc.noAPI)
+			apiRouteControllerIdentityHook = tc.identity(t)
+			apiRouteSupervisorClientHook = tc.supervisor(t)
+			dir := writeCityTOMLForRoute(t, t.TempDir(), tc.toml)
+			withCityFlag(t, dir)
+
+			var stderr bytes.Buffer
+			c, cityPath, ok := extMsgClient("bind", &stderr)
+			if tc.wantClient {
+				if !ok || c != sentinel {
+					t.Fatalf("extMsgClient = (%p, ok=%v), want supervisor sentinel %p; stderr: %s", c, ok, sentinel, stderr.String())
+				}
+				if cityPath == "" {
+					t.Fatalf("extMsgClient cityPath empty, want the resolved city")
+				}
+				if stderr.Len() != 0 {
+					t.Fatalf("extMsgClient stderr = %q, want empty", stderr.String())
+				}
+				return
+			}
+			if ok || c != nil {
+				t.Fatalf("extMsgClient = (%p, ok=%v), want (nil, false)", c, ok)
+			}
+			for _, want := range tc.wantStderr {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("extMsgClient stderr = %q, want it to contain %q", stderr.String(), want)
+				}
+			}
+		})
 	}
 }

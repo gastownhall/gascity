@@ -100,14 +100,19 @@ func (f *extMsgConversationFlags) conversationRefIfSet(cityPath string) (*extmsg
 }
 
 // extMsgClient resolves the city and returns its API client, failing with
-// a uniform message when the API is unavailable.
+// a uniform message when the API is unavailable. Conversation bindings have
+// no local fallback, so it routes through supervisorFallthroughAPIClient:
+// a supervisor-hosted city whose supervisor requires city grants, and a live
+// controller of unknown hosting mode without a usable [api] port, get the
+// supervisor-managed client where apiClient would return nil for a local
+// fallback these verbs do not have.
 func extMsgClient(verb string, stderr io.Writer) (*api.Client, string, bool) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc extmsg %s: %v\n", verb, err) //nolint:errcheck // best-effort stderr
 		return nil, "", false
 	}
-	c := apiClient(cityPath)
+	c, _ := supervisorFallthroughAPIClient(cityPath)
 	if c == nil {
 		fmt.Fprintf(stderr, "gc extmsg %s: requires the city API server (no local fallback for conversation bindings)\n", verb) //nolint:errcheck // best-effort stderr
 		return nil, "", false
