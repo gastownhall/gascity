@@ -208,6 +208,27 @@ func hookClaimPoolSeatWorkDir(info *session.Info, a *config.Agent) string {
 	return strings.TrimSpace(info.WorkDir)
 }
 
+// hookClaimPoolSeatFor returns where the controller placed the pool seat whose
+// row the claim fence verified, info, for the session's agent a in the city at
+// cityPath: the row's work dir (hookClaimPoolSeatWorkDir) and the pool's own
+// configured directory for this session, which the controller expands for the
+// session's instance (poolTriggerWorkDir). The instance is the one the
+// controller recorded on the row (sessionBeadQualifiedNameInfo), because a pool
+// work_dir names a directory per instance. It is the zero hookPoolSeat when
+// info is not a pool seat's row, and PoolDir is "" when the work_dir does not
+// expand, as the controller then places no session in it either.
+func hookClaimPoolSeatFor(cityPath, cityName string, rigs []config.Rig, info *session.Info, a *config.Agent) hookPoolSeat {
+	workDir := hookClaimPoolSeatWorkDir(info, a)
+	if workDir == "" {
+		return hookPoolSeat{}
+	}
+	poolDir, err := resolveConfiguredWorkDirPathUnvalidated(cityPath, cityName, sessionBeadQualifiedNameInfo(cityPath, a, rigs, *info), a, rigs)
+	if err != nil {
+		poolDir = ""
+	}
+	return hookPoolSeat{WorkDir: workDir, PoolDir: strings.TrimSpace(poolDir)}
+}
+
 // The started write (PHASE1-2 §6.4, W1). At hand-over, `gc hook --claim`
 // records the claim in its own session row's work_started cell, by a CAS on
 // the whole row (UpdateRowFenced), so it and the controller's release of an

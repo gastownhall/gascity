@@ -4579,6 +4579,15 @@ func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedN
 	if err != nil || strings.TrimSpace(base) == "" {
 		return ""
 	}
+	return poolWorkDirUnder(base, request)
+}
+
+// poolWorkDirUnder routes request's work under base, the pool session's
+// configured directory: a pack's work to the pack's directory beside base, and
+// an explicit workspace to its own subdirectory. `gc hook --claim` routes a
+// candidate the same way to tell whether the controller starts that work's
+// session in the claiming seat's directory (hookPoolSeat.unboundWorkDir).
+func poolWorkDirUnder(base string, request SessionRequest) string {
 	if pack := strings.TrimSpace(request.WorkPack); pack != "" {
 		packDir := filepath.Join(filepath.Dir(base), pack)
 		if workspace := packWorkspaceSlug(request); workspace != "" {

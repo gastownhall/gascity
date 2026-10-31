@@ -676,13 +676,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session running inside a managed worktree also leaves unassigned work that
   names no managed worktree, which would otherwise run on another bead's
   checkout and branch; the controller starts a session in the pool's own
-  directory for it. Plain `gc hook` leaves the same beads out of that
-  session's listing, so a prompt that lists work and then claims it by id
-  cannot take them either, and when these checks leave a session nothing to
-  claim, `gc hook --claim` names each such bead on stderr. A user-created
-  session row from before manual sessions were marked as such counts as
-  manual here, as it does for the controller. Named, manual and session-less
-  claimants and assigned work claim as before.
+  directory for it, and a session already there takes it, even when that
+  directory is inside a managed worktree. Plain `gc hook` leaves the same
+  beads out of that session's listing and, like the claim, moves on to a
+  later store when a store holds only such beads, so a prompt that lists work
+  and then claims it by id cannot take them either. When these checks leave
+  a session nothing to claim from any store, `gc hook --claim` names each
+  such bead on stderr. A worktree probe that cannot tell (git timed out, or a
+  provenance record that cannot be read) is named on stderr by both commands
+  and counts as no managed worktree. A user-created session row from before
+  manual sessions were marked as such counts as manual here, as it does for
+  the controller. Named, manual and session-less claimants and assigned work
+  claim as before.
 
 - **Pool demand across stores names work in the order sessions claim it.**
   In a city whose routed work spans more than one bead store, the
