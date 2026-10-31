@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
@@ -421,9 +422,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 				register(doctor.ErrorCheck("session-provider", err.Error()))
 				sessionSPErr = err
 			} else {
-				register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp))
+				registry := doctorSessionRegistry(cityPath, cfg)
+				register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp, registry))
 				register(doctor.NewZombieSessionsCheck(cfg, cityName, st, sp))
-				register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
+				register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp, registry))
 				sessionSP = sp
 			}
 		}
@@ -1204,5 +1206,32 @@ func perRunStoreFactory(open func(string) (beads.Store, error)) func(string) (be
 func openStoreResultForCity(cityPath string) func(string) (beads.StoreOpenResult, error) {
 	return func(dirPath string) (beads.StoreOpenResult, error) {
 		return openStoreResultAtForCity(dirPath, cityPath)
+	}
+}
+
+// doctorSessionRegistry returns the session registry reader the
+// agent-sessions and orphan-sessions checks use: each open session row's
+// runtime session name mapped to the agent it runs, resolved the way the
+// runtime resolves it. Unlike doctorLiveSessionSinks, a store failure is
+// returned, so a check that cannot read the registry says so instead of
+// reporting every pool instance and bead-named session as orphaned.
+func doctorSessionRegistry(cityPath string, cfg *config.City) doctor.SessionRegistry {
+	return func() (map[string]string, error) {
+		store, err := openSessionProviderStore(cityPath)
+		if err != nil {
+			return nil, err
+		}
+		infos, err := session.NewStore(beads.SessionStore{Store: cliSessionStore(store, cfg, cityPath)}).ListLabeledSessionInfosUnfiltered()
+		if err != nil {
+			return nil, err
+		}
+		names := make(map[string]string, len(infos))
+		for _, info := range infos {
+			if info.SessionName == "" {
+				continue
+			}
+			names[info.SessionName] = resolvedSessionTemplateInfo(info, cfg)
+		}
+		return names, nil
 	}
 }
