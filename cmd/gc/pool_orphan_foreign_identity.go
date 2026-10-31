@@ -159,11 +159,23 @@ func newForeignClaimGate(cfg *config.City, sessionStore beads.SessionStore) *for
 // recorded as protected, or a live open session answers to it.
 // liveAssignee is the sweep's per-assignee memo for that live probe.
 func (g *foreignClaimGate) claimMayStillBeHeld(assignee, workID string, liveAssignee map[string]bool) bool {
+	if g.claimIsUnobservable(assignee, workID) {
+		return true
+	}
+	return memoizedLiveOpenSessionAssignmentExists(liveAssignee, assignee, g.sessionStore.Store, assignee)
+}
+
+// claimIsUnobservable is the foreign-claim half of claimMayStillBeHeld alone:
+// it reports whether this city cannot observe assignee, recording the claim on
+// workID as protected when so. The route-away release (sr-wz8.3) uses it to
+// keep the foreign-claim protection in force while skipping the live-session
+// probe, which would only ever find the still-live source session.
+func (g *foreignClaimGate) claimIsUnobservable(assignee, workID string) bool {
 	if !g.observable(assignee) {
 		g.protected.add(assignee, workID)
 		return true
 	}
-	return memoizedLiveOpenSessionAssignmentExists(liveAssignee, assignee, g.sessionStore.Store, assignee)
+	return false
 }
 
 func (g *foreignClaimGate) observable(assignee string) bool {
