@@ -9,9 +9,11 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -72,6 +74,105 @@ func TestHandleSessionSubmitResumesOnlyWithResumeTrue(t *testing.T) {
 			}
 		})
 	}
+}
+
+// launchEnvState is a controller that rebuilds a resumed session's launch
+// env: its resolver answers env and err, and records each session it
+// resolved and the config snapshot it was built from.
+type launchEnvState struct {
+	*fakeState
+	env map[string]string
+	err error
+
+	mu       sync.Mutex
+	resolved []string
+	cfgs     []*config.City
+}
+
+func (s *launchEnvState) LaunchEnvResolver(cfg *config.City) func(session.Info, string, map[string]string) (map[string]string, error) {
+	return func(info session.Info, _ string, _ map[string]string) (map[string]string, error) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.resolved = append(s.resolved, info.ID)
+		s.cfgs = append(s.cfgs, cfg)
+		return s.env, s.err
+	}
+}
+
+// TestHandleSessionSubmitResumeRebuildsLaunchEnv is #8184 on the API: a
+// submit with resume: true that starts a session whose runtime is gone
+// launches the replacement with the launch env the State's resolver
+// rebuilds from the server's config snapshot, under the session's persisted
+// identity, and a launch env that cannot be built refuses the start. Kills
+// an API worker factory that drops the State's resolver (the reduced-env
+// resume of #8184) and a resume that starts without the env.
+func TestHandleSessionSubmitResumeRebuildsLaunchEnv(t *testing.T) {
+	resume := func(t *testing.T, state *launchEnvState) (info session.Info, starts int, success *SessionSubmitSucceededPayload, failure *RequestFailedPayload) {
+		t.Helper()
+		fs := state.fakeState
+		h := newTestCityHandler(t, state)
+		info = createTestSession(t, fs.cityBeadStore, fs.sp, "Resume Me")
+		if err := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
+			t.Fatalf("Suspend: %v", err)
+		}
+		startsBefore := fs.sp.CountCalls("Start", info.SessionName)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/session/")+info.ID+"/submit", strings.NewReader(`{"message":"hello","resume":true}`)))
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("submit status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+		}
+		var accepted asyncAcceptedBody
+		if err := json.NewDecoder(rec.Body).Decode(&accepted); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		success, failure = waitForSessionSubmitResult(t, fs.eventProv, accepted.RequestID)
+		return info, fs.sp.CountCalls("Start", info.SessionName) - startsBefore, success, failure
+	}
+
+	t.Run("the rebuilt env starts the replacement", func(t *testing.T) {
+		state := &launchEnvState{fakeState: newSessionFakeState(t), env: map[string]string{
+			"GC_RIG":        "myrig",
+			"BEADS_DIR":     "/tmp/myrig/.beads",
+			"GC_SESSION_ID": "rebuilt-forged",
+		}}
+		info, starts, success, failure := resume(t, state)
+		if success == nil {
+			t.Fatalf("resume failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+		}
+		start := state.sp.LastStartConfig(info.SessionName)
+		if starts != 1 || start == nil {
+			t.Fatalf("the resume started %d runtimes, want one", starts)
+		}
+		for key, want := range map[string]string{"GC_RIG": "myrig", "BEADS_DIR": "/tmp/myrig/.beads", "GC_SESSION_ID": info.ID} {
+			if got := start.Env[key]; got != want {
+				t.Errorf("start env[%s] = %q, want %q", key, got, want)
+			}
+		}
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		if !slices.Equal(state.resolved, []string{info.ID}) {
+			t.Errorf("resolved sessions = %v, want only the resumed %s", state.resolved, info.ID)
+		}
+		for _, cfg := range state.cfgs {
+			if cfg != state.cfg {
+				t.Errorf("resolver built from config %p, want the server's snapshot %p", cfg, state.cfg)
+			}
+		}
+	})
+
+	t.Run("a launch env that cannot be built refuses the start", func(t *testing.T) {
+		state := &launchEnvState{fakeState: newSessionFakeState(t), err: errors.New("backend projection unavailable")}
+		info, starts, success, failure := resume(t, state)
+		if success != nil {
+			t.Fatalf("resume succeeded (queued %v) on a launch env that cannot be built", success.Queued)
+		}
+		if !strings.Contains(failure.ErrorMessage, info.ID) || !strings.Contains(failure.ErrorMessage, "backend projection unavailable") {
+			t.Errorf("failure = %s: %q, want it to name session %s and the cause", failure.ErrorCode, failure.ErrorMessage, info.ID)
+		}
+		if starts != 0 {
+			t.Errorf("Provider.Start called %d times, want none", starts)
+		}
+	})
 }
 
 func TestHandleSessionSubmitUsesImmediateDefaultForCodex(t *testing.T) {
