@@ -454,6 +454,10 @@ github.com/fxamacker/cbor/v2 v2.9.0 h1:NpKPmjDBgUfBms6tr6JZkTHtfFGcMKsw3eGcmD/sa
 github.com/fxamacker/cbor/v2 v2.9.0/go.mod h1:vM4b+DJCtHn+zz7h3FFp/hDAI9WNWCsZj23V5ytsSxQ=
 github.com/gastownhall/gascity-packs v0.3.1-0.20261029224322-cb6a612882b8 h1:P2OT4xBAGGXU5mUChbHZlwY4z/8TqTkmQkrkoisIg54=
 github.com/gastownhall/gascity-packs v0.3.1-0.20261029224322-cb6a612882b8/go.mod h1:OHqPd055b+3Q93mZqxdwTk2/3sz+xxCBUWlggvuRnMk=
+github.com/gastownhall/gascity-packs v0.4.1-0.20261031154036-0a5b8249f42b h1:5WlaoKjFNVooVW5A9j0EyeNrDNQWtkqTv3qs2bJg96k=
+github.com/gastownhall/gascity-packs v0.4.1-0.20261031154036-0a5b8249f42b/go.mod h1:OHqPd055b+3Q93mZqxdwTk2/3sz+xxCBUWlggvuRnMk=
+github.com/gastownhall/gascity-packs v0.4.1-0.20261031154824-4fcf37600776 h1:mZKrVGAAyAKM9nf91pE8yybOtvtxDCCS0etr35bHk4E=
+github.com/gastownhall/gascity-packs v0.4.1-0.20261031154824-4fcf37600776/go.mod h1:OHqPd055b+3Q93mZqxdwTk2/3sz+xxCBUWlggvuRnMk=
 github.com/ghodss/yaml v1.0.0/go.mod h1:4dBDuWmgqj2HViK6kFavaiC9ZROes6MMH2rRYeMEF04=
 github.com/gin-contrib/sse v0.1.0/go.mod h1:RHrZQHXnP2xjPF+u1gW/2HnVO7nvIa9PG3Gm+fLHvGI=
 github.com/gin-gonic/gin v1.6.3/go.mod h1:75u5sXoLsGZoRN5Sgbi1eraJ4GU3++wFwWzhwvtwp4M=

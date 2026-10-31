@@ -20,7 +20,6 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
@@ -757,16 +756,29 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 		doctor.PrintSummary(stdout, report)
 	}
 
-	if report.BlockingFailed > 0 {
-		return doctorBlockingFailureExitCode
-	}
-	return 0
+	_, _, exitCode := doctorReportFailure(report)
+	return exitCode
 }
 
 // doctorBlockingFailureExitCode is the exit code gc doctor returns when any
 // blocking check fails. The --json failure record carries it as
 // error.exit_code, so the record and the process agree.
 const doctorBlockingFailureExitCode = 1
+
+// doctorReportFailure keeps the process exit and JSON verdict consistent.
+// An incomplete observation cannot establish health, even when the check
+// could not return its severity. Confirmed blocking failures take precedence.
+func doctorReportFailure(report *doctor.Report) (code, message string, exitCode int) {
+	if report.BlockingFailed > 0 {
+		return doctorBlockingFailedErrorCode, fmt.Sprintf("%d blocking check(s) failed", report.BlockingFailed), doctorBlockingFailureExitCode
+	}
+	for _, result := range report.Results {
+		if result.TimedOut {
+			return "doctor_incomplete", "health checks incomplete; inspect timed-out results and rerun", 2
+		}
+	}
+	return "", "", 0
+}
 
 // maxDoctorCheckSuggestions bounds the "did you mean" list so one typo cannot
 // print most of the registry inline. The full list still follows in text mode.
@@ -794,11 +806,11 @@ type doctorUnknownCheckFailure struct {
 const doctorBlockingFailedErrorCode = "doctor_blocking_failed"
 
 // doctorBlockingFailure is the --json payload for a run with blocking
-// failures. It is the shared failure envelope (schemas/failure.schema.json),
+// failures or incomplete checks. It is the shared failure envelope (schemas/failure.schema.json),
 // so ok:false always arrives with an error object, and the full report rides
 // along under the schema's additionalProperties so the caller still sees
 // which checks failed. Advisory-only failures keep the report shape and
-// ok:true, matching the zero exit code.
+// ok:true when every check completed, matching the zero exit code.
 type doctorBlockingFailure struct {
 	jsonSchemaErrorPayload
 	doctorJSONReport
@@ -1116,15 +1128,15 @@ func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
 			Payload:      r.Payload,
 		})
 	}
-	if report.BlockingFailed > 0 {
+	if code, message, exitCode := doctorReportFailure(report); exitCode != 0 {
 		return writeCLIJSONLine(w, doctorBlockingFailure{
 			jsonSchemaErrorPayload: jsonSchemaErrorPayload{
 				SchemaVersion: "1",
 				OK:            false,
 				Error: jsonSchemaErrorDetail{
-					Code:     doctorBlockingFailedErrorCode,
-					Message:  fmt.Sprintf("%d blocking check(s) failed", report.BlockingFailed),
-					ExitCode: doctorBlockingFailureExitCode,
+					Code:     code,
+					Message:  message,
+					ExitCode: exitCode,
 				},
 			},
 			doctorJSONReport: out,
@@ -1221,7 +1233,7 @@ func doctorSessionRegistry(cityPath string, cfg *config.City) doctor.SessionRegi
 		if err != nil {
 			return nil, err
 		}
-		infos, err := session.NewStore(beads.SessionStore{Store: cliSessionStore(store, cfg, cityPath)}).ListLabeledSessionInfosUnfiltered()
+		infos, err := cliSessionFrontDoor(store, cfg, cityPath).ListLabeledSessionInfosUnfiltered()
 		if err != nil {
 			return nil, err
 		}

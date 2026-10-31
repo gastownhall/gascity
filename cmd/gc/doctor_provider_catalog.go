@@ -96,6 +96,37 @@ func (c *providerCatalogReadinessAdvisoryCheck) Run(_ *doctor.CheckContext) *doc
 		r.Severity = doctor.SeverityAdvisory
 		return r
 	}
+	// Catalog discovery is advisory; failure of a provider this city actually
+	// references is not. Reuse onboarding probe identity without starting a
+	// billable model turn, and keep unselected local CLIs out of this gate.
+	var unavailable []string
+	for _, ref := range explicitProviderRefs(cfg) {
+		probeName := providerReadinessProbeName(ref, cfg)
+		if probeName == "" {
+			continue
+		}
+		item, ok := items[probeName]
+		if ok && item.Status == api.ProbeStatusConfigured {
+			continue
+		}
+		status := item.Status
+		if !ok {
+			status = api.ProbeStatusProbeError
+		}
+		detail := fmt.Sprintf("%s %s", ref, providerStatusSummary(status))
+		if item.Detail != "" {
+			detail += ": " + item.Detail
+		}
+		unavailable = append(unavailable, detail)
+	}
+	if len(unavailable) > 0 {
+		r.Status = doctor.StatusError
+		r.Severity = doctor.SeverityBlocking
+		r.Message = fmt.Sprintf("%d selected provider(s) not ready", len(unavailable))
+		r.Details = unavailable
+		r.FixHint = "restore the listed provider executable, configuration or login, then rerun gc doctor"
+		return r
+	}
 	var missing []string
 	for _, name := range names {
 		item, ok := items[name]

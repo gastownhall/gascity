@@ -12,6 +12,10 @@ agent; formulas and orders hand the wheel to the orchestrator.
 For the conceptual model underneath, start with the [six
 primitives](/getting-started/how-gas-city-works).
 
+Start with the [guided quickstart](/getting-started/quickstart) for a complete
+local change with independent review and verified integration. Then keep that
+same city and practice repository while following these tutorials.
+
 Follow them in order:
 
 1. [Cities and Rigs](/tutorials/01-cities-and-rigs) — create a city, add a project as a rig, and sling your first work to an agent.

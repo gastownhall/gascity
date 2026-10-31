@@ -2492,6 +2492,7 @@ gc init [path] [flags]
 ```
 gc init
 gc init ~/my-city
+gc init --experience beginner --default-provider claude ~/my-city
 gc init --default-provider codex ~/my-city
 gc init --template gastown --default-provider codex ~/my-city
 gc init --providers claude,codex --default-provider codex ~/my-city
@@ -2517,6 +2518,7 @@ gc init --template gascity --default-provider claude \
 | `--dolt-port` | string |  | external/hosted Dolt port (or GC_DOLT_PORT); required with --dolt-host |
 | `--dolt-project-id` | string |  | authoritative beads project_id for the identity handshake (or GC_BEADS_PROJECT_ID); derived from a bd_&lt;id&gt; --dolt-database when omitted |
 | `--dolt-user` | string |  | external/hosted Dolt user (or GC_DOLT_USER); optional |
+| `--experience` | string |  | optional guided experience: beginner (uses the gascity template) |
 | `--file` | string |  | path to a TOML file to use as city.toml |
 | `--from` | string |  | path to an example city directory to copy |
 | `--json` | bool |  | emit JSON summary |

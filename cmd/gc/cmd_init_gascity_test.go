@@ -210,3 +210,77 @@ func TestInitTemplateHelpAndErrorAdvertiseAcceptedTemplates(t *testing.T) {
 		}
 	}
 }
+
+// The beginner experience is an init option over the existing default pack.
+func TestInitBeginnerExperienceFlag(t *testing.T) {
+	cmd := newInitCmd(&bytes.Buffer{}, &bytes.Buffer{})
+	if err := cmd.ParseFlags([]string{"--experience", "beginner", "--default-provider", "claude"}); err != nil {
+		t.Fatalf("beginner experience must be selectable: %v", err)
+	}
+}
+
+func TestDoInitBeginnerUsesDefaultPackWithoutIdleModelDemand(t *testing.T) {
+	f := fsys.NewFake()
+	wiz := wizardConfig{configName: "gascity", experience: "beginner", defaultProvider: "claude", providers: []string{"claude"}}
+	var stdout, stderr bytes.Buffer
+	if code := doInit(f, "/guided", wiz, "", &stdout, &stderr, false); code != 0 {
+		t.Fatalf("init=%d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "gc gc tutorial start") {
+		t.Fatalf("missing guided next step: %s", stdout.String())
+	}
+	pack, err := config.Parse(f.Files["/guided/pack.toml"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pack.Imports["gc"].Source != config.PublicGascityPackSource {
+		t.Fatalf("beginner must use the existing default pack: %v", pack.Imports)
+	}
+	if len(pack.NamedSessions) == 0 {
+		t.Fatal("missing on-demand session")
+	}
+	for _, session := range pack.NamedSessions {
+		if session.Mode != "on_demand" {
+			t.Errorf("idle model demand: %+v", session)
+		}
+	}
+	city, err := config.Parse(f.Files["/guided/city.toml"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if city.Workspace.MaxActiveSessions == nil || *city.Workspace.MaxActiveSessions != 2 {
+		t.Fatalf("missing bounded session budget: %+v", city.Workspace.MaxActiveSessions)
+	}
+	if len(city.Orders.Skip) != 1 || city.Orders.Skip[0] != "mol-dog-stale-db" {
+		t.Fatalf("background model maintenance enabled: %+v", city.Orders)
+	}
+	if canBootstrapExistingCity(wiz) {
+		t.Fatal("experience must not rewrite an existing city")
+	}
+}
+
+func TestInitBeginnerFlagValidation(t *testing.T) {
+	for _, tc := range []struct {
+		experience, template string
+		wantError            bool
+	}{
+		{"beginner", "gascity", false},
+		{"beginner", "minimal", true},
+		{"beginner", "gastown", true},
+		{"unknown", "gascity", true},
+	} {
+		t.Run(tc.experience+"/"+tc.template, func(t *testing.T) {
+			cmd := newInitCmd(io.Discard, io.Discard)
+			if err := cmd.ParseFlags([]string{"--experience", tc.experience, "--template", tc.template, "--default-provider", "claude"}); err != nil {
+				t.Fatal(err)
+			}
+			wiz, _, err := initWizardConfigFromFlags(cmd, "", "claude", nil, tc.template, "", hostedDoltInitOptions{}, true)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("err=%v, wantError=%v", err, tc.wantError)
+			}
+			if err == nil && wiz.experience != "beginner" {
+				t.Fatalf("lost experience: %+v", wiz)
+			}
+		})
+	}
+}

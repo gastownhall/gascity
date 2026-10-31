@@ -81,6 +81,7 @@ const defaultInitTemplate = "gascity"
 // wizardConfig carries the results of the interactive init wizard (or defaults
 // for non-interactive paths). doInit uses it to decide which config to write.
 type wizardConfig struct {
+	experience       string // optional beginner journey over the default pack
 	interactive      bool   // true if the wizard ran with user interaction
 	configName       string // canonical values: "minimal", "gastown", "gascity", "custom", or "empty"
 	defaultProvider  string // selected default provider key
@@ -99,7 +100,7 @@ func defaultWizardConfig() wizardConfig {
 }
 
 func canBootstrapExistingCity(wiz wizardConfig) bool {
-	return !wiz.interactive &&
+	return !wiz.interactive && wiz.experience == "" &&
 		(wiz.configName == "minimal" || wiz.configName == defaultInitTemplate) &&
 		wizardDefaultProvider(wiz) == "" &&
 		len(wiz.providers) == 0 &&
@@ -151,10 +152,12 @@ func runWizard(stdin io.Reader, stdout io.Writer) wizardConfig {
 	fmt.Fprintln(stdout, "  2. minimal   — default coding agent")                            //nolint:errcheck // best-effort stdout
 	fmt.Fprintln(stdout, "  3. gastown   — multi-agent orchestration pack")                  //nolint:errcheck // best-effort stdout
 	fmt.Fprintln(stdout, "  4. custom    — empty workspace, configure it yourself")          //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, "  5. beginner   — guided local task, review and integration")      //nolint:errcheck // best-effort stdout
 	fmt.Fprintf(stdout, "Template [1]: ")                                                    //nolint:errcheck // best-effort stdout
 
 	configChoice := readLine(br)
 	configName := defaultInitTemplate
+	experience := ""
 
 	switch configChoice {
 	case "", "1", "gascity":
@@ -163,6 +166,9 @@ func runWizard(stdin io.Reader, stdout io.Writer) wizardConfig {
 		configName = "minimal"
 	case "3", "gastown":
 		configName = "gastown"
+	case "5", "beginner":
+		configName = defaultInitTemplate
+		experience = "beginner"
 	case "4", "custom":
 		configName = "custom"
 	default:
@@ -212,8 +218,12 @@ func runWizard(stdin io.Reader, stdout io.Writer) wizardConfig {
 		}
 	}
 
+	if experience == "beginner" {
+		providers = []string{defaultProvider}
+	}
 	return wizardConfig{
 		interactive:     true,
+		experience:      experience,
 		configName:      configName,
 		defaultProvider: defaultProvider,
 		providers:       providers,
@@ -320,6 +330,7 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 	var fromFlag string
 	var nameFlag string
 	var templateFlag string
+	var experienceFlag string
 	var providerFlag string
 	var providersFlag []string
 	var defaultProviderFlag string
@@ -354,6 +365,7 @@ agent prompt files in the target directory (useful when bootstrapping a
 committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 		Example: `  gc init
   gc init ~/my-city
+  gc init --experience beginner --default-provider claude ~/my-city
   gc init --default-provider codex ~/my-city
   gc init --template gastown --default-provider codex ~/my-city
   gc init --providers claude,codex --default-provider codex ~/my-city
@@ -409,6 +421,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().StringVar(&providerFlag, "provider", "", "deprecated alias for --default-provider")
 	cmd.Flags().StringVar(&defaultProviderFlag, "default-provider", "", "default readiness-aware provider to select from --providers")
 	cmd.Flags().StringArrayVar(&providersFlag, "providers", nil, "readiness-aware providers to write to city.toml (repeatable or comma-separated)")
+	cmd.Flags().StringVar(&experienceFlag, "experience", "", "optional guided experience: beginner (uses the gascity template)")
 	cmd.Flags().StringVar(&templateFlag, "template", "", "non-interactive template to write: minimal, gastown, gascity, custom, or empty")
 	cmd.Flags().StringVar(&bootstrapProfileFlag, "bootstrap-profile", "", "bootstrap profile to apply for hosted/container defaults")
 	cmd.Flags().StringVar(&doltHostFlag, "dolt-host", "", "external/hosted Dolt host for the city beads ledger (or "+envDoltHost+"); pins the city to an external endpoint instead of bootstrapping a managed-local Dolt")
@@ -424,6 +437,8 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().BoolVar(&preserveExisting, "preserve-existing", false, "keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	cmd.Flags().BoolVar(&assumeYesForSupervisorCycle, "yes", false, "bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail)")
+	cmd.MarkFlagsMutuallyExclusive("experience", "file")
+	cmd.MarkFlagsMutuallyExclusive("experience", "from")
 	cmd.MarkFlagsMutuallyExclusive("file", "from")
 	cmd.MarkFlagsMutuallyExclusive("provider", "file")
 	cmd.MarkFlagsMutuallyExclusive("provider", "from")
@@ -612,13 +627,18 @@ func initWizardConfig(providerFlag, bootstrapProfileFlag string, skipProviderRea
 }
 
 func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProviderFlag string, providersFlag []string, templateFlag, bootstrapProfileFlag string, hosted hostedDoltInitOptions, skipProviderReadiness bool) (wizardConfig, string, error) {
+	experience, _ := cmd.Flags().GetString("experience")
+	experience = strings.TrimSpace(experience)
+	if experience != "" && experience != "beginner" {
+		return wizardConfig{}, "", fmt.Errorf("unknown experience %q (expected beginner)", experience)
+	}
 	legacyChanged := cmd.Flags().Changed("provider")
 	defaultChanged := cmd.Flags().Changed("default-provider")
 	providersChanged := cmd.Flags().Changed("providers")
 	templateChanged := cmd.Flags().Changed("template")
 	bootstrapChanged := strings.TrimSpace(bootstrapProfileFlag) != ""
 
-	if !legacyChanged && !defaultChanged && !providersChanged && !templateChanged && !bootstrapChanged && !hosted.enabled() && strings.TrimSpace(hosted.Transport) == "" && strings.TrimSpace(hosted.Target) == "" {
+	if experience == "" && !legacyChanged && !defaultChanged && !providersChanged && !templateChanged && !bootstrapChanged && !hosted.enabled() && strings.TrimSpace(hosted.Transport) == "" && strings.TrimSpace(hosted.Target) == "" {
 		return wizardConfig{}, "", nil
 	}
 	if err := hosted.validate(); err != nil {
@@ -638,6 +658,9 @@ func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProvider
 	template, err := normalizeInitTemplate(templateFlag, templateChanged)
 	if err != nil {
 		return wizardConfig{}, "", err
+	}
+	if experience == "beginner" && template != defaultInitTemplate {
+		return wizardConfig{}, "", fmt.Errorf("--experience beginner requires the gascity template")
 	}
 	defaultProvider, err := normalizeInitProvider(defaultProviderFlag, skipProviderReadiness)
 	if err != nil {
@@ -672,6 +695,7 @@ func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProvider
 		mode = "template"
 	}
 	return wizardConfig{
+		experience:       experience,
 		configName:       template,
 		defaultProvider:  defaultProvider,
 		providers:        providers,
@@ -1409,7 +1433,11 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	case wiz.configName == "gastown":
 		cfg = config.GastownCityWithProviders(cityName, defaultProvider, providers)
 	case wiz.configName == "gascity":
-		cfg = config.GascityCityWithProviders(cityName, defaultProvider, providers)
+		if wiz.experience == "beginner" {
+			cfg = config.GascityBeginnerCityWithProviders(cityName, defaultProvider, providers)
+		} else {
+			cfg = config.GascityCityWithProviders(cityName, defaultProvider, providers)
+		}
 	case defaultProvider != "" || len(providers) > 0:
 		cfg = config.WizardCityWithProviders(cityName, defaultProvider, providers)
 	case wiz.startCommand != "":
@@ -1545,6 +1573,10 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	}
 
 	switch {
+	case wiz.experience == "beginner":
+		fmt.Fprintf(stdout, "Initialized beginner experience in %q using the default Gas City pack.\n", cityName) //nolint:errcheck // best-effort stdout
+		fmt.Fprintln(stdout, "After startup, run: gc gc tutorial start")                                          //nolint:errcheck // best-effort stdout
+		fmt.Fprintln(stdout, "No model session starts until you submit work or explicitly request one.")          //nolint:errcheck // best-effort stdout
 	case wiz.interactive:
 		fmt.Fprintf(stdout, "Created %s config (Level 1) in %q.\n", wiz.configName, cityName) //nolint:errcheck // best-effort stdout
 	case wiz.configName == "empty":

@@ -8663,3 +8663,15 @@ func TestDefaultDoltReadTimeoutMillisPreservesOuterDeadlineHeadroom(t *testing.T
 			DefaultDoltReadTimeoutMillis, DefaultDoltWriteTimeoutMillis)
 	}
 }
+
+func TestBeginnerClaudeDefaultsBoundFirstTaskCost(t *testing.T) {
+	city := GascityBeginnerCityWithProviders("guided", "claude", []string{"claude"})
+	provider := city.Providers["claude"]
+	if provider.OptionDefaults["model"] != "sonnet" || provider.OptionDefaults["effort"] != "medium" {
+		t.Fatalf("beginner Claude defaults must be explicit and bounded: %+v", provider.OptionDefaults)
+	}
+	normal := GascityCityWithProviders("normal", "claude", []string{"claude"})
+	if len(normal.Providers["claude"].OptionDefaults) != 0 {
+		t.Fatal("guided choices must not change ordinary template defaults")
+	}
+}

@@ -5267,3 +5267,25 @@ func applyDaemonFormulaV2Default(cfg *City, md toml.MetaData) {
 	// Neither set: leave FormulaV2 nil so it stays default-on (via
 	// FormulaV2Enabled) and is omitted from any generated/round-tripped config.
 }
+
+// GascityBeginnerCityWithProviders configures the existing default pack for a
+// guided local journey. No model session starts without work or an explicit
+// request; token-free controller and store maintenance remain available.
+func GascityBeginnerCityWithProviders(name, defaultProvider string, providers []string) City {
+	city := GascityCityWithProviders(name, defaultProvider, providers)
+	for i := range city.NamedSessions {
+		city.NamedSessions[i].Mode = "on_demand"
+	}
+	for i := range city.Agents {
+		city.Agents[i].IdleTimeout = "1m"
+	}
+	if defaultProvider == "claude" {
+		provider := city.Providers[defaultProvider]
+		provider.OptionDefaults = map[string]string{"model": "sonnet", "effort": "medium"}
+		city.Providers[defaultProvider] = provider
+	}
+	limit := 2
+	city.Workspace.MaxActiveSessions = &limit
+	city.Orders.Skip = append(city.Orders.Skip, "mol-dog-stale-db")
+	return city
+}

@@ -1,70 +1,100 @@
 ---
 title: Quickstart
-description: Create a city, add a rig, and route work in a few minutes.
+description: Complete one local change with implementation, independent review, tests, and integration.
 ---
 
-<Note>
-This guide assumes you have already installed Gas City and its
-prerequisites. If you haven't, start with the
-[Installation](/getting-started/installation) page.
-</Note>
-
-You will need `gc`, `tmux`, `git`, `jq`, and a beads provider (`bd` + `dolt`
-by default, or set `GC_BEADS=file` to skip them).
+Start with [Installation](/getting-started/installation). You need `gc`, Git,
+Python 3, the documented runtime dependencies, and one authenticated coding
+provider. This walkthrough uses Claude Code. You do not need GitHub, a remote
+repository, or the `gh` CLI.
 
 <Tip>
-Oh My Zsh's `git` plugin defines a `gc` alias for `git commit --verbose`. If
-`gc version` or `gc init` opens git commit instead of Gas City, use
-`command gc ...` temporarily and remove the alias after Oh My Zsh loads.
-See [Troubleshooting](/getting-started/troubleshooting#oh-my-zsh-git-plugin-hides-gc).
+Oh My Zsh can alias `gc` to `git commit`. If `gc version` opens Git, use
+`command gc` and remove that alias after Oh My Zsh loads. See
+[Troubleshooting](/getting-started/troubleshooting#oh-my-zsh-git-plugin-hides-gc).
 </Tip>
 
-## 1. Create a City
+## 1. Choose the beginner experience
+
+Authenticate Claude Code using its login flow, then run:
 
 ```bash
-gc init ~/bright-lights
+gc init --experience beginner --default-provider claude ~/bright-lights
 cd ~/bright-lights
 ```
 
-`gc init` bootstraps the city directory, registers it with the supervisor, and
-starts the orchestrator. The city is running as soon as init completes.
+Init checks your provider, registers the city, and starts the orchestrator.
+The beginner choice uses the default Gas City pack. It starts model sessions
+on demand, uses Sonnet with medium effort for Claude, and bounds concurrent
+sessions. The orchestrator and token-free maintenance can run while idle;
+model work begins when you submit a task or explicitly request a session.
 
-## 2. Add a Rig
+If preflight reports a missing dependency or login, fix the named problem and
+run `gc start` from the city. Keep the existing city and its data.
 
-```bash
-mkdir ~/hello-world && cd ~/hello-world && git init && cd -
-gc rig add ~/hello-world
-```
-
-A rig is an external project directory registered with the city. It gets its
-own beads database, hook installation, and routing context.
-
-## 3. Sling Work
+## 2. Submit your first local task
 
 ```bash
-cd ~/hello-world
-gc sling claude "Create a script that prints hello world"
+gc gc tutorial start
 ```
 
-`gc sling` creates a work item (a bead) and routes it to an agent. Gas City
-starts a session, delivers the task, and the agent executes it.
+This creates a small practice repository at `projects/practice`, registers it
+as a rig, and records one task: fix a greeting function with two failing tests.
+It records registration infrastructure before pinning the task input. It
+refuses an unrelated existing practice directory and preserves retries.
 
-This is the smallest possible job: one bead, one agent. Gas City's real power
-is orchestration -- you write a **formula** (the method for getting a job done)
-and the **orchestrator** runs it as a graph: decomposing the work into beads,
-fanning the ready ones out to many agents at once, gating each step on its
-dependencies, retrying failures, and driving the whole thing to completion
-outside your session. See [Formulas](/tutorials/05-formulas) and
-[Orders](/tutorials/07-orders).
+The default pack runs the complete task:
 
-## 4. Watch an Agent Work
+1. Pin the input commit and create an owned, isolated worktree.
+2. Implement and commit the fix.
+3. Have a separate worker review the actual diff.
+4. Apply at most two repair rounds if review or verification fails.
+5. Test the approved commit, then integrate that exact commit locally.
+6. Close the source task and safely retire the integrated worktree.
+
+No push or pull request is part of this workflow. A failed check leaves useful
+evidence and recoverable work instead of calling the task complete.
+
+## 3. Watch and verify the result
 
 ```bash
-gc bd show <bead-id> --watch
+gc gc tutorial status
+gc status
 ```
 
-For a fuller walkthrough of cities and rigs, continue to
-[Tutorial 01](/tutorials/01-cities-and-rigs). To see Gas City do the thing it
-exists for -- the orchestrator running a formula as a graph across many agents --
-jump to [Formulas](/tutorials/05-formulas) and then
-[Orders](/tutorials/07-orders), which trigger formulas on a schedule or event.
+The tutorial prints the source task ID. While it is open, implementation,
+review or verification is still pending. On success, tutorial status verifies
+that the recorded integrated commit belongs to the local branch and prints its
+SHA. Inspect the result yourself:
+
+```bash
+cd projects/practice
+python3 -m unittest discover -s tests -v
+git log --oneline -3
+```
+
+Both greeting tests should pass. The source task closes after local integration;
+a closed workflow step alone is not a delivered change.
+
+## 4. Pause and resume
+
+From the city directory:
+
+```bash
+gc stop
+gc start
+```
+
+Work and commit evidence persist across sessions. Stop when you want the city
+paused; start it to resume. A failed stage remains visible for diagnosis. Do not
+delete a worktree or close source work to clear an error. Use the source task
+ID printed by the tutorial with `gc bd show <task-id>` to inspect it.
+
+## Continue with the same city
+
+Keep `bright-lights` and its practice repository. Continue with
+[Cities and Rigs](/tutorials/01-cities-and-rigs) to learn what you just used,
+then work through tutorials 2–7 for agents, sessions, communication, formulas,
+beads and orders. You can add your own repositories, parallel workers and
+optional GitHub publication as you learn; there is no new starter pack to
+install or migrate away from.

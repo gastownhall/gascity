@@ -4,13 +4,22 @@ sidebarTitle: 01 - Cities and Rigs
 description: Create a city, add a project as a rig, and sling your first work to an agent.
 ---
 
+## Continuing from the guided quickstart
+
+If you completed the [quickstart](/getting-started/quickstart), keep your existing
+city and `practice` rig. Run `cd ~/bright-lights` and `gc start` if you paused it.
+You can read the setup and creation sections below without repeating them.
+Use `gc rig list` to see your registered practice repository, then continue
+learning the city and rig commands. Tutorials 2–7 build on this same city;
+there is no reset or separate starter pack.
+
 ## Setup
 
 Install at least one CLI coding agent (Gas City calls these "providers") and
 put it on the PATH. Gas City supports many, including Claude Code (`claude`),
 Codex (`codex`), Gemini (`gemini`), Grok Build (`grok`), OpenCode (`opencode`),
 Groq (`groq`), and Cerebras (`cerebras`). Configure each with its token or API
-key so it can run — the more the merrier.
+key so it can run. One authenticated provider is enough to begin.
 
 Then install the Gas City CLI and put it on the PATH:
 
