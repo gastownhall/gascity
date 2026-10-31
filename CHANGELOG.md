@@ -544,6 +544,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The work ladder leaves a step alone while its seat waits on a person.**
+  With `[daemon] work_ladder` on (the default), a claimed step whose metadata
+  `gc.awaiting_human` names the session holding it (the seat asked a person
+  and waits on their decision, such as an approval asked by mail) gets no
+  nudge, recycle or release, and no alert, however long the person takes.
+  The ladder checks the key in the planner's snapshot and again in every live
+  re-read before it acts (a nudge, a release, pacing carried under an
+  incomplete snapshot), so a wait written after the snapshot is honoured.
+  Once the seat clears the key, the ladder takes the step up on a fresh
+  grace. The key names the seat, not the step: a step released and
+  re-claimed by another seat is paced as usual. Pack formulas write and clear
+  the key; gc only reads it.
+
 - **`[events.mirror]` writes a copy of the city's event log outside `.gc`**
   for a log shipper that may not enter `.gc` (which gc keeps at `0700`). The
   city's controller tails `.gc/events.jsonl` and appends every event line to

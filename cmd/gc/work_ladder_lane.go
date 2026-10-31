@@ -196,7 +196,10 @@ func (l *externalReadsLane) standDownLadder(env externalReadsEnv, raw []beads.Be
 // continuation pinned to it; and the in_progress claims it holds under a
 // current identity. Work on a dispatch hold (hold:mayor, hold:external) is
 // not the ladder's (owner ruling 2026-10-18): it stays with its agent,
-// unnudged, until the hold lifts, and then the ladder takes it up afresh.
+// unnudged, until the hold lifts, and then the ladder takes it up afresh. So
+// is a claim whose seat asked a person and waits on their decision
+// (awaitsHuman): no nudge can hurry a person, and no recycle or release may
+// cut the wait short.
 func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][]ladderTarget {
 	out := make(map[string][]ladderTarget)
 	held := make(map[string]bool)
@@ -204,6 +207,10 @@ func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][
 		if beadmeta.HasDispatchHold(b.Labels) {
 			held[b.ID] = true
 		}
+	}
+	claimed := make(map[string]beads.Bead, len(s.AssignedWork))
+	for _, b := range s.AssignedWork {
+		claimed[b.ID] = b
 	}
 	claimWork := slices.Concat(s.AssignedWork, s.ReadyRouted)
 	refs := make([]string, len(claimWork))
@@ -235,16 +242,22 @@ func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][
 			})
 		}
 		for _, c := range claims.forIdentities(currentSessionAssigneeIdentities(row)) {
-			if held[c.BeadID] {
+			if held[c.BeadID] || awaitsHuman(claimed[c.BeadID], row.ID) {
 				continue
 			}
-			target := backstopTarget{ID: c.BeadID, Assignee: c.Assignee, Store: c.Store}
+			target, seat := backstopTarget{ID: c.BeadID, Assignee: c.Assignee, Store: c.Store}, row.ID
 			ts = append(ts, ladderTarget{
 				// c.StoreRef is claimStoreRef's: the claim's residence, as the
 				// hook's work_started entry and the backstop key it.
 				work:         workladder.Work{Key: workladder.ClaimKey{Store: c.StoreRef, Bead: c.BeadID}, Kind: workladder.KindClaim},
 				claimSession: c.SessionID != "" && c.SessionID == strings.TrimSpace(row.ID),
-				recheck:      func() backstopResolution { return unlessHeld(revalidateExecutionClaim(target)) },
+				recheck: func() backstopResolution {
+					res, b := revalidateExecutionClaim(target)
+					if res == backstopResolutionOutstanding && awaitsHuman(b, seat) {
+						return backstopResolutionClear
+					}
+					return unlessHeld(res, b)
+				},
 			})
 		}
 		if len(ts) > 0 {
@@ -303,6 +316,13 @@ func unlessHeld(res backstopResolution, b beads.Bead) backstopResolution {
 	return res
 }
 
+// awaitsHuman reports whether claim b's seat (seat, its session ID) asked a
+// person and waits on their decision (gc.awaiting_human names it): not the
+// ladder's until the seat works the step again and clears it.
+func awaitsHuman(b beads.Bead, seat string) bool {
+	return beadmeta.AwaitsHuman(b.Metadata, seat)
+}
+
 // carriedRecheck re-reads, live through the store that owns it, work the
 // seat's ladder carries under an incomplete snapshot: still what its kind
 // says (a trigger open and unclaimed; a continuation open and pinned to the
@@ -317,6 +337,8 @@ func (p *ladderPass) carriedRecheck(row beads.Bead, w workladder.Work) func() ba
 		case err != nil:
 			return backstopResolutionHold
 		case !found || !slices.Contains(currentSessionAssigneeIdentities(row), strings.TrimSpace(b.Assignee)) || beadmeta.HasDispatchHold(b.Labels):
+			return backstopResolutionClear
+		case w.Kind == workladder.KindClaim && awaitsHuman(b, row.ID):
 			return backstopResolutionClear
 		}
 		status := "in_progress"
@@ -930,6 +952,8 @@ func (p *ladderPass) release(row beads.Bead, key workladder.ClaimKey, gen int64)
 		outcome, why = ladderReleaseKept, fmt.Sprintf("%d live hits", len(hits))
 	case beadmeta.HasDispatchHold(hits[0].bead.Labels):
 		outcome = ladderReleaseGone // parked on a hold since the snapshot: not the ladder's
+	case awaitsHuman(hits[0].bead, row.ID):
+		outcome = ladderReleaseGone // its seat asked a person since the snapshot: not the ladder's
 	case strings.TrimSpace(hits[0].bead.Metadata[beadmeta.SessionIDMetadataKey]) == strings.TrimSpace(row.ID):
 		// The live read of gc.session_id, which commit's CAS takes from the
 		// snapshot: the guard for a claim the hook stamped after it was read.
