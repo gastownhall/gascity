@@ -228,3 +228,90 @@ func warmNativeFakeBd(t *testing.T, n *nativeBdTest) {
 		t.Fatalf("warming the fake bd: %v: %s", err, out)
 	}
 }
+
+func TestRetiringStoreTrackingKeysByTheCachingStoreBehindItsWrappers(t *testing.T) {
+	cached := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+	cs := &controllerState{}
+	t.Cleanup(func() {
+		retiringCityStores.Lock()
+		delete(retiringCityStores.byController, cs)
+		retiringCityStores.Unlock()
+	})
+
+	untrackRaw := trackRetiringBeadStoreHandle(cs, cached)
+	untrackWrapped := trackRetiringBeadStoreHandle(cs, wrapStoreWithBeadPolicies(cached, nil))
+	untrackPlain := trackRetiringBeadStoreHandle(cs, beads.NewMemStore())
+
+	retiringCityStores.Lock()
+	byStore := retiringCityStores.byController[cs]
+	keys, count := len(byStore), byStore[cached]
+	retiringCityStores.Unlock()
+	if keys != 1 || count != 2 {
+		t.Fatalf("retiring stores = %d key(s), count for the caching store = %d; want 1 key counted twice", keys, count)
+	}
+	got := retiringCityCachingStores(cs)
+	if len(got) != 1 || got[0] != cached {
+		t.Fatalf("retiringCityCachingStores = %v; want only the caching store", got)
+	}
+
+	untrackPlain()
+	untrackRaw()
+	if got := retiringCityCachingStores(cs); len(got) != 1 || got[0] != cached {
+		t.Fatalf("after one untrack, retiringCityCachingStores = %v; want the caching store still held", got)
+	}
+	untrackWrapped()
+	if got := retiringCityCachingStores(cs); got != nil {
+		t.Fatalf("after both untracks, retiringCityCachingStores = %v; want nil", got)
+	}
+	retiringCityStores.Lock()
+	_, tracked := retiringCityStores.byController[cs]
+	retiringCityStores.Unlock()
+	if tracked {
+		t.Fatal("controller state still tracked after its last retiring store was released")
+	}
+}
+
+func TestQuiesceStopsEachCurrentAndRetiringCachingStoreOnce(t *testing.T) {
+	current := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+	rig := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+	retired := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+	mc := managedCityOverStore("identity", wrapStoreWithBeadPolicies(current, nil), func() {}, nil, "")
+	mc.cr.cs.beadStores = map[string]beads.Store{"rig": rig, "plain": beads.NewMemStore()}
+	release := []func(){
+		trackRetiringBeadStoreHandle(mc.cr.cs, current),
+		trackRetiringBeadStoreHandle(mc.cr.cs, wrapStoreWithBeadPolicies(retired, nil)),
+	}
+	t.Cleanup(func() {
+		for _, untrack := range release {
+			untrack()
+		}
+	})
+
+	stores := managedCityCachingStores(mc)
+	want := []reconcilerStopper{current, rig, retired}
+	if len(stores) != len(want) {
+		t.Fatalf("managedCityCachingStores = %v; want %v", stores, want)
+	}
+	for _, w := range want {
+		found := 0
+		for _, s := range stores {
+			if s == w {
+				found++
+			}
+		}
+		if found != 1 {
+			t.Fatalf("managedCityCachingStores = %v; want %v exactly once", stores, w)
+		}
+	}
+
+	if err := quiesceCityStoreWork(mc, io.Discard); err != nil {
+		t.Fatalf("quiesceCityStoreWork: %v", err)
+	}
+	for _, store := range []*beads.CachingStore{current, rig, retired} {
+		select {
+		case <-store.Stopped():
+		default:
+			t.Fatalf("caching store %p was not stopped", store)
+		}
+	}
+}

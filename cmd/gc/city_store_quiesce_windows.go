@@ -149,9 +149,9 @@ func managedCityGenerationStillCurrent(path string, generation uint64) bool {
 
 var retiringCityStores = struct {
 	sync.Mutex
-	byController map[*controllerState]map[*beads.CachingStore]int
+	byController map[*controllerState]map[reconcilerStopper]int
 }{
-	byController: map[*controllerState]map[*beads.CachingStore]int{},
+	byController: map[*controllerState]map[reconcilerStopper]int{},
 }
 
 func trackRetiringBeadStoreHandle(cs *controllerState, store beads.Store) func() {
@@ -165,7 +165,7 @@ func trackRetiringBeadStoreHandle(cs *controllerState, store beads.Store) func()
 	retiringCityStores.Lock()
 	byStore := retiringCityStores.byController[cs]
 	if byStore == nil {
-		byStore = map[*beads.CachingStore]int{}
+		byStore = map[reconcilerStopper]int{}
 		retiringCityStores.byController[cs] = byStore
 	}
 	byStore[cached]++
@@ -189,7 +189,7 @@ func trackRetiringBeadStoreHandle(cs *controllerState, store beads.Store) func()
 	}
 }
 
-func retiringCityCachingStores(cs *controllerState) []*beads.CachingStore {
+func retiringCityCachingStores(cs *controllerState) []reconcilerStopper {
 	if cs == nil {
 		return nil
 	}
@@ -199,7 +199,7 @@ func retiringCityCachingStores(cs *controllerState) []*beads.CachingStore {
 	if len(byStore) == 0 {
 		return nil
 	}
-	out := make([]*beads.CachingStore, 0, len(byStore))
+	out := make([]reconcilerStopper, 0, len(byStore))
 	for store := range byStore {
 		out = append(out, store)
 	}
@@ -208,7 +208,7 @@ func retiringCityCachingStores(cs *controllerState) []*beads.CachingStore {
 
 // managedCityCachingStores returns the caching stores behind mc's current and
 // retiring city and rig bead stores.
-func managedCityCachingStores(mc *managedCity) []*beads.CachingStore {
+func managedCityCachingStores(mc *managedCity) []reconcilerStopper {
 	if mc == nil || mc.cr == nil || mc.cr.cs == nil {
 		return nil
 	}
@@ -221,8 +221,8 @@ func managedCityCachingStores(mc *managedCity) []*beads.CachingStore {
 	}
 	retiring := retiringCityCachingStores(cs)
 	cs.mu.RUnlock()
-	var out []*beads.CachingStore
-	seen := map[*beads.CachingStore]bool{}
+	var out []reconcilerStopper
+	seen := map[reconcilerStopper]bool{}
 	for _, store := range candidates {
 		if cached := cachingStoreBehind(store); cached != nil && !seen[cached] {
 			seen[cached] = true
@@ -238,16 +238,24 @@ func managedCityCachingStores(mc *managedCity) []*beads.CachingStore {
 	return out
 }
 
-// cachingStoreBehind unwraps bead-policy wrappers down to a caching store, or
-// returns nil when store is not one.
-func cachingStoreBehind(store beads.Store) *beads.CachingStore {
+// reconcilerStopper is the caching-store capability quiesce needs: stopping
+// the background reconciler and waiting for a pass in flight. Its dynamic
+// value is the *beads.CachingStore itself, so two stoppers are equal exactly
+// when they are the same caching store.
+type reconcilerStopper interface {
+	StopReconciler()
+}
+
+// cachingStoreBehind unwraps bead-policy wrappers down to a caching store and
+// returns its reconcilerStopper, or nil when store is not one.
+func cachingStoreBehind(store beads.Store) reconcilerStopper {
 	for store != nil {
 		if base, _, ok := unwrapBeadPolicyStore(store); ok {
 			store = base
 			continue
 		}
-		cached, _ := store.(*beads.CachingStore)
-		return cached
+		stopper, _ := beads.As[reconcilerStopper](store)
+		return stopper
 	}
 	return nil
 }

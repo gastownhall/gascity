@@ -412,7 +412,7 @@ type claimedWorkIDRefresher interface {
 }
 
 func readClaimedWorkIDsTargeted(store beads.Store, ids []string) ([]beads.Bead, error) {
-	if refresher, ok := store.(claimedWorkIDRefresher); ok {
+	if refresher, ok := beads.As[claimedWorkIDRefresher](store); ok {
 		return refresher.RefreshIDs(ids)
 	}
 	rows := make([]beads.Bead, 0, len(ids))
