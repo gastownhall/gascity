@@ -60,9 +60,13 @@ func (in bdClassGuardInput) checkIDs(ids []string, variants ...coordclass.Mutati
 		if refusal := in.readRefusal(id, result); refusal != "" {
 			return in.refuse("%s", refusal)
 		}
-		for _, m := range variants {
+		for i, m := range variants {
 			if flip := coordclass.CheckFlip(before, m.Apply(before), in.holds); flip != nil {
-				return in.refuse("%s", classFlipRefusalText(fmt.Sprintf("gc bd %s %s", in.path, id), flip))
+				note := ""
+				if i >= in.flipNoteFrom {
+					note = in.flipNote
+				}
+				return in.refuse("%s%s", classFlipRefusalText(fmt.Sprintf("gc bd %s %s", in.path, id), flip), note)
 			}
 		}
 	}
@@ -191,12 +195,15 @@ func bdDepsEndpoints(values []string) []string {
 	return out
 }
 
-// bdMetadataObject decodes a --metadata value as bd reads it back: an inline
-// JSON object, or @file (read relative to the scope root, where bd runs). bd
-// reads a file only for a value that starts with "@"; gc also judges the file
-// a space-padded "@" names, which bd rejects as JSON, but hands bd no copy of
-// it.
-func (in bdClassGuardInput) bdMetadataObject(value string) (map[string]string, string) {
+// bdMetadataReadings decodes a --metadata value as bd reads it (an inline JSON
+// object, or @file read relative to the scope root, where bd runs) into each
+// reading this city's stores give the object once bd has stored it
+// (beads.MetadataReadings). A write is judged under every reading: the bd CLI
+// reads a JSON null on gc.root_bead_id as "", but a native Dolt store reads it
+// as the text "null", a graph marker. bd reads a file only for a value that
+// starts with "@"; gc also judges the file a space-padded "@" names, which bd
+// rejects as JSON, but hands bd no copy of it.
+func (in bdClassGuardInput) bdMetadataReadings(value string) ([]map[string]string, string) {
 	body := []byte(value)
 	if path, isFile := strings.CutPrefix(strings.TrimSpace(value), "@"); isFile {
 		var data []byte
@@ -211,11 +218,28 @@ func (in bdClassGuardInput) bdMetadataObject(value string) (map[string]string, s
 		}
 		body = data
 	}
-	var fields beads.StringMap
-	if err := json.Unmarshal(body, &fields); err != nil {
+	readings, err := beads.MetadataReadings(body)
+	if err != nil {
 		return nil, fmt.Sprintf("--metadata is not a JSON object (%v)", err)
 	}
-	return fields, ""
+	return readings, ""
+}
+
+// bdMetadataReadingsNote follows a class-flip refusal that reading i of a
+// write's metadata (bdMetadataReadings) produced and the bd CLI's reading,
+// reading 0, did not: it names the class-deciding key the two read
+// differently. It is "" for reading 0 and when the readings agree on every
+// such key.
+func bdMetadataReadingsNote(readings []map[string]string, i int) string {
+	if i <= 0 || i >= len(readings) {
+		return ""
+	}
+	for _, k := range coordclass.ClassifierMetadataKeys() {
+		if cli, other := readings[0][k], readings[i][k]; cli != other {
+			return fmt.Sprintf(" gc judges metadata as each store of this city reads it back, and they read %s differently (%q as the bd CLI reads it, %q as a native Dolt store reads it): write it as a JSON string, or leave it out.", k, cli, other)
+		}
+	}
+	return ""
 }
 
 // judgeBdCreate classifies the bead `create` / `q` would mint and checks the
@@ -234,13 +258,12 @@ func judgeBdCreate(in bdClassGuardInput) bdClassGuard {
 		shape.Type = strings.TrimSpace(t)
 	}
 	shape.Labels = normalizeBdLabels(append(slices.Clone(in.args.Values("--labels")), in.args.Values("--label")...))
+	readings := []map[string]string{nil}
 	if v, ok := in.args.Last("--metadata"); ok {
-		fields, problem := in.bdMetadataObject(v)
-		if problem != "" {
+		var problem string
+		if readings, problem = in.bdMetadataReadings(v); problem != "" {
 			return in.refuse("gc bd %s: refused: %s. Nothing was written.", in.path, problem)
 		}
-		shape.Metadata = map[string]string{}
-		maps.Copy(shape.Metadata, fields)
 	}
 	// An empty --graph is bd's single create (bd tests graphFile != ""), so
 	// it falls through to the flag judgment below. pflag keeps the last value
@@ -268,8 +291,11 @@ func judgeBdCreate(in bdClassGuardInput) bdClassGuard {
 		}
 		shape.Labels = normalizeBdLabels(append(shape.Labels, p.Labels...))
 	}
-	if flip := coordclass.CheckFlip(beads.Bead{}, shape, in.holds); flip != nil {
-		return in.refuse("%s", classFlipRefusalText("gc bd "+in.path, flip))
+	for i, metadata := range readings {
+		shape.Metadata = metadata
+		if flip := coordclass.CheckFlip(beads.Bead{}, shape, in.holds); flip != nil {
+			return in.refuse("%s%s", classFlipRefusalText("gc bd "+in.path, flip), bdMetadataReadingsNote(readings, i))
+		}
 	}
 	return in.pass()
 }
@@ -277,7 +303,7 @@ func judgeBdCreate(in bdClassGuardInput) bdClassGuard {
 // judgeBdUpdate judges `gc bd update`: its class-field writes against the
 // bead, and a reparent as an edge.
 func judgeBdUpdate(in bdClassGuardInput) bdClassGuard {
-	variants, problem := in.bdUpdateMutation()
+	variants, readings, problem := in.bdUpdateMutation()
 	if problem != "" {
 		return in.refuse("gc bd update: refused on this split city: %s. Nothing was written.", problem)
 	}
@@ -286,62 +312,75 @@ func judgeBdUpdate(in bdClassGuardInput) bdClassGuard {
 			return in.refuse("%s", refusal)
 		}
 	}
+	// Variants of the bd CLI's reading come first; a refusal from a later one
+	// says why (bdMetadataReadingsNote).
+	in.flipNote, in.flipNoteFrom = bdMetadataReadingsNote(readings, 1), len(variants)/len(readings)
 	return in.checkIDs(in.args.positionals, variants...)
 }
 
 // bdUpdateMutation states a parsed `bd update` as the write it makes, in bd's
 // order (labels: replace, add, remove; metadata: merge/set, then unset — see
-// coordclass.Mutation.Apply). `--set-metadata k=null` is stored differently by
-// the bd builds the fleet runs (bd 1.3.2: JSON null, read back absent; 1.3.0
-// Enterprise: the string "null"), so it comes back as two variants and the
-// write must pass both.
-func (in bdClassGuardInput) bdUpdateMutation() ([]coordclass.Mutation, string) {
-	var m coordclass.Mutation
+// coordclass.Mutation.Apply), once for each reading this city's stores give a
+// --metadata object (bdMetadataReadings), which it also returns.
+// `--set-metadata k=null` is stored differently by the bd builds the fleet
+// runs (bd 1.3.2: JSON null, read back absent through the bd CLI and as the
+// text "null" from a native Dolt store; 1.3.0 Enterprise: the string "null"),
+// so each reading comes back as two variants and the write must pass all of
+// them.
+func (in bdClassGuardInput) bdUpdateMutation() ([]coordclass.Mutation, []map[string]string, string) {
+	var base coordclass.Mutation
 	if t, ok := in.args.Last("--type"); ok {
 		v := strings.TrimSpace(t)
-		m.Type = &v
+		base.Type = &v
 	}
-	m.AddLabels = normalizeBdLabels(in.args.Values("--add-label"))
-	m.RemoveLabels = normalizeBdLabels(in.args.Values("--remove-label"))
+	base.AddLabels = normalizeBdLabels(in.args.Values("--add-label"))
+	base.RemoveLabels = normalizeBdLabels(in.args.Values("--remove-label"))
 	if set, ok := in.args.flags["--set-labels"]; ok {
-		m.ReplaceLabels = true
-		m.SetLabels = normalizeBdLabels(set)
+		base.ReplaceLabels = true
+		base.SetLabels = normalizeBdLabels(set)
 	}
-	var nullKeys []string
+	readings := []map[string]string{nil}
 	if v, ok := in.args.Last("--metadata"); ok {
-		fields, problem := in.bdMetadataObject(v)
-		if problem != "" {
-			return nil, problem
-		}
-		m.SetMetadata = map[string]string{}
-		maps.Copy(m.SetMetadata, fields)
-	}
-	for _, kv := range in.args.Values("--set-metadata") {
-		key, v, ok := strings.Cut(kv, "=")
-		if !ok || strings.TrimSpace(key) == "" {
-			return nil, fmt.Sprintf("--set-metadata %q is not key=value", kv)
-		}
-		if m.SetMetadata == nil {
-			m.SetMetadata = map[string]string{}
-		}
-		m.SetMetadata[key] = v
-		if v == "null" {
-			nullKeys = append(nullKeys, key)
+		var problem string
+		if readings, problem = in.bdMetadataReadings(v); problem != "" {
+			return nil, nil, problem
 		}
 	}
-	m.UnsetMetadata = slices.Clone(in.args.Values("--unset-metadata"))
-	variants := []coordclass.Mutation{m}
-	if len(nullKeys) > 0 {
-		absent := m
-		absent.SetMetadata = maps.Clone(m.SetMetadata)
-		absent.UnsetMetadata = slices.Clone(m.UnsetMetadata)
-		for _, k := range nullKeys {
-			delete(absent.SetMetadata, k)
-			absent.UnsetMetadata = append(absent.UnsetMetadata, k)
+	sets := in.args.Values("--set-metadata")
+	for _, kv := range sets {
+		if key, _, ok := strings.Cut(kv, "="); !ok || strings.TrimSpace(key) == "" {
+			return nil, nil, fmt.Sprintf("--set-metadata %q is not key=value", kv)
 		}
-		variants = append(variants, absent)
 	}
-	return variants, ""
+	var variants []coordclass.Mutation
+	for _, reading := range readings {
+		m := base
+		m.SetMetadata = maps.Clone(reading)
+		var nullKeys []string
+		for _, kv := range sets {
+			key, v, _ := strings.Cut(kv, "=")
+			if m.SetMetadata == nil {
+				m.SetMetadata = map[string]string{}
+			}
+			m.SetMetadata[key] = v
+			if v == "null" {
+				nullKeys = append(nullKeys, key)
+			}
+		}
+		m.UnsetMetadata = slices.Clone(in.args.Values("--unset-metadata"))
+		variants = append(variants, m)
+		if len(nullKeys) > 0 {
+			absent := m
+			absent.SetMetadata = maps.Clone(m.SetMetadata)
+			absent.UnsetMetadata = slices.Clone(m.UnsetMetadata)
+			for _, k := range nullKeys {
+				delete(absent.SetMetadata, k)
+				absent.UnsetMetadata = append(absent.UnsetMetadata, k)
+			}
+			variants = append(variants, absent)
+		}
+	}
+	return variants, readings, ""
 }
 
 // judgeBdEdgeVerb applies the cross-store edge rule to the commands whose job

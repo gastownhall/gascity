@@ -190,6 +190,7 @@ go_test(
         "memstore_test.go",
         "metadata_cas_operation_test.go",
         "metadata_empty_clear_conformance_test.go",
+        "metadata_readings_test.go",
         "namespace_census_test.go",
         "native_dolt_events_journal_read_test.go",
         "native_dolt_events_journal_test.go",

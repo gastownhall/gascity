@@ -405,11 +405,11 @@ func splitBdImportRows(data []byte, holds []coordclass.Class) (bdImportSplit, st
 			continue
 		}
 		var row struct {
-			ID           string           `json:"id"`
-			Type         string           `json:"issue_type"`
-			Labels       []string         `json:"labels"`
-			Metadata     *beads.StringMap `json:"metadata"`
-			Parent       string           `json:"parent"`
+			ID           string          `json:"id"`
+			Type         string          `json:"issue_type"`
+			Labels       []string        `json:"labels"`
+			Metadata     json.RawMessage `json:"metadata"`
+			Parent       string          `json:"parent"`
 			Dependencies []struct {
 				DependsOnID string `json:"depends_on_id"`
 			} `json:"dependencies"`
@@ -417,13 +417,32 @@ func splitBdImportRows(data []byte, holds []coordclass.Class) (bdImportSplit, st
 		if err := json.Unmarshal(raw, &row); err != nil {
 			return bdImportSplit{}, fmt.Sprintf("line %d is not a JSON object gc can classify (%v)", line, err)
 		}
-		b := beads.Bead{Type: row.Type, Labels: row.Labels}
-		if row.Metadata != nil {
-			b.Metadata = map[string]string(*row.Metadata)
+		// The row is classified under every reading this city's stores give
+		// its stored metadata (beads.MetadataReadings): the bd CLI reads a
+		// JSON null on gc.root_bead_id as "", a work row, and a native Dolt
+		// store as the text "null", a graph row.
+		readings := []map[string]string{nil}
+		if len(row.Metadata) > 0 && string(row.Metadata) != "null" {
+			var err error
+			if readings, err = beads.MetadataReadings(row.Metadata); err != nil {
+				return bdImportSplit{}, fmt.Sprintf("line %d is not a JSON object gc can classify (metadata: %v)", line, err)
+			}
 		}
-		if class := coordclass.Classify(b); !slices.Contains(holds, class) {
+		var classes []coordclass.Class
+		held := true
+		for _, metadata := range readings {
+			class := coordclass.Classify(beads.Bead{Type: row.Type, Labels: row.Labels, Metadata: metadata})
+			if !slices.Contains(classes, class) {
+				classes = append(classes, class)
+			}
+			held = held && slices.Contains(holds, class)
+		}
+		if !held {
+			if len(classes) > 1 {
+				return bdImportSplit{}, fmt.Sprintf("line %d (%s) is %s class as the bd CLI reads its metadata back and %s class as a native Dolt store reads it, so no store of this city holds it under both readings.%s Edit the row and import again", line, row.ID, classes[0], classes[1], bdMetadataReadingsNote(readings, 1))
+			}
 			split.skipped++
-			split.byClass[class]++
+			split.byClass[classes[0]]++
 			continue
 		}
 		split.keep = append(split.keep, keepLine)

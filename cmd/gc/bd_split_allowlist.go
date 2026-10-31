@@ -622,6 +622,11 @@ type bdClassGuardInput struct {
 	// judged collects the caller-named files the judge read
 	// (readJudgedFile); an admitted write is pointed at private copies.
 	judged *bdJudgedFiles
+	// flipNote follows a class-flip refusal checkIDs writes for a variant at
+	// or after index flipNoteFrom: why that reading of the write was judged
+	// (bdMetadataReadingsNote), or "".
+	flipNote     string
+	flipNoteFrom int
 	bdClassGuardDeps
 }
 
