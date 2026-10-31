@@ -156,14 +156,23 @@ func TestLaneExecQuietBoundaryScreenReadings(t *testing.T) {
 			t.Fatalf("noted %v; want the screen read's error once", noted)
 		}
 	})
-	t.Run("a family without a readable busy indicator", func(t *testing.T) {
-		if tmux.BusyIndicatorReadable("gemini") {
-			t.Skip("gemini's busy indicator became readable; pick another family")
-		}
+	t.Run("a family whose busy reading the runtime does not trust", func(t *testing.T) {
+		// The tmux leaf answers runtime.ErrIdleIndeterminate for a family
+		// whose busy indicator it does not read (gemini, cursor, ...).
 		f, deps, _ := newScreenTurnFixture(t, "gemini")
 		f.showTurn(true)
+		f.sp.ScreenReadErrors = map[string]error{f.name: fmt.Errorf("turn of %q: %w", f.name, runtime.ErrIdleIndeterminate)}
+		var noted []error
+		deps.note = func(stage string, err error) {
+			if stage == "turn_on_screen" {
+				noted = append(noted, err)
+			}
+		}
 		if p := probeQuiet(t, f, deps); p.Boundary != opjournal.TriYes {
-			t.Fatalf("boundary %v for a family whose busy reading the lane does not trust, want the quiescence rule's yes", p.Boundary)
+			t.Fatalf("boundary %v for a family whose busy reading the runtime does not trust, want the quiescence rule's yes", p.Boundary)
+		}
+		if len(noted) != 0 {
+			t.Fatalf("noted %v; an indeterminate reading is no screen failure", noted)
 		}
 	})
 }

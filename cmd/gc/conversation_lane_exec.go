@@ -13,7 +13,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -110,9 +109,9 @@ type conversationLaneExec struct {
 	// turnOnScreen is the agent's own screen's reading of whether it is
 	// running a turn now, taken once the quiescence rule reads a keystroke
 	// runtime quiet: production reads runtime.TurnRunningProvider on the
-	// session's routed leaf, for a provider family whose busy indicator the
-	// pane scan reads (tmux.BusyIndicatorReadable). known is false where no
-	// such reading exists, which leaves the quiescence rule alone.
+	// session's routed leaf. known is false where no such reading exists,
+	// including the leaf's runtime.ErrIdleIndeterminate for a family whose
+	// busy reading it does not trust, which leaves the quiescence rule alone.
 	turnOnScreen func(nudgeTarget) (running, known bool, err error)
 	// paneActivity is the session's last activity read from its runtime
 	// now, after turnOnScreen showed a turn, not from the snapshot the
@@ -487,12 +486,12 @@ func (e *conversationLaneExec) staleTurnBoundary(obs worker.LiveObservation) opj
 // laneTurnOnScreen reads, in one look at the agent's screen, whether the
 // session target names is running a turn: the reading the runtime's own nudge
 // takes before it types (runtime.TurnRunningProvider, on the routed leaf). It
-// is known only for a provider family whose busy indicator the pane scan
-// reads (tmux.BusyIndicatorReadable): an unlisted family's busy reading may
-// be transcript text, which would hold its boundary closed while no turn
-// runs.
+// is unknown where the leaf takes no such reading, and where the leaf answers
+// runtime.ErrIdleIndeterminate because it does not trust the busy reading of
+// the session's family: that reading may be transcript text, which would hold
+// the boundary closed while no turn runs.
 func laneTurnOnScreen(sp runtime.Provider, target nudgeTarget) (running, known bool, err error) {
-	if target.sessionName == "" || !tmux.BusyIndicatorReadable(strings.TrimSpace(target.providerFamily())) {
+	if target.sessionName == "" {
 		return false, false, nil
 	}
 	tr, ok := runtime.TurnRunningFor(sp, target.sessionName)
@@ -500,6 +499,9 @@ func laneTurnOnScreen(sp runtime.Provider, target nudgeTarget) (running, known b
 		return false, false, nil
 	}
 	running, err = tr.TurnRunning(target.sessionName)
+	if errors.Is(err, runtime.ErrIdleIndeterminate) {
+		return false, false, nil
+	}
 	return running, true, err
 }
 
