@@ -77,7 +77,8 @@ type ladderTarget struct {
 	// gc.session_id, the hook's hand-over stamp (a seed).
 	claimSession bool
 	// recheck re-reads the work live before the ladder acts on it: clear
-	// when it is gone, hold when the read cannot tell.
+	// when it is gone, hold when the read cannot tell, or when it finds a
+	// claim's seat waiting on a person that work does not show yet.
 	recheck func() backstopResolution
 }
 
@@ -185,10 +186,13 @@ func (l *externalReadsLane) standDownLadder(env externalReadsEnv, raw []beads.Be
 // continuation pinned to it; and the in_progress claims it holds under a
 // current identity. Work on a dispatch hold (hold:mayor, hold:external) is
 // not the ladder's (owner ruling 2026-10-18): it stays with its agent,
-// unnudged, until the hold lifts, and then the ladder takes it up afresh. So
-// is a claim whose seat asked a person and waits on their decision
-// (awaitsHuman): no nudge can hurry a person, and no recycle or release may
-// cut the wait short.
+// unnudged, until the hold lifts, and then the ladder takes it up afresh. A
+// claim whose seat asked a person and waits on their decision
+// (beadmeta.AwaitsHuman, read off the claim's own bead: the same bead ID can
+// exist in another store) is the ladder's only to nudge, an hour apart
+// (workladder.Work.AwaitsHuman): no nudge can hurry a person, and no recycle
+// or release may cut the wait short, but a turn that died after the answer
+// came must not leave the step silent for good.
 func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][]ladderTarget {
 	out := make(map[string][]ladderTarget)
 	held := make(map[string]bool)
@@ -196,10 +200,6 @@ func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][
 		if beadmeta.HasDispatchHold(b.Labels) {
 			held[b.ID] = true
 		}
-	}
-	claimed := make(map[string]beads.Bead, len(s.AssignedWork))
-	for _, b := range s.AssignedWork {
-		claimed[b.ID] = b
 	}
 	claimWork := slices.Concat(s.AssignedWork, s.ReadyRouted)
 	refs := make([]string, len(claimWork))
@@ -231,29 +231,33 @@ func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][
 			})
 		}
 		for _, c := range claims.forIdentities(currentSessionAssigneeIdentities(row)) {
-			if held[c.BeadID] || awaitsHuman(claimed[c.BeadID], row.ID) {
-				continue
+			if !held[c.BeadID] {
+				ts = append(ts, claimTarget(c, row.ID))
 			}
-			target, seat := backstopTarget{ID: c.BeadID, Assignee: c.Assignee, Store: c.Store}, row.ID
-			ts = append(ts, ladderTarget{
-				// c.StoreRef is claimStoreRef's: the claim's residence, as the
-				// hook's work_started entry and the backstop key it.
-				work:         workladder.Work{Key: workladder.ClaimKey{Store: c.StoreRef, Bead: c.BeadID}, Kind: workladder.KindClaim},
-				claimSession: c.SessionID != "" && c.SessionID == strings.TrimSpace(row.ID),
-				recheck: func() backstopResolution {
-					res, b := revalidateExecutionClaim(target)
-					if res == backstopResolutionOutstanding && awaitsHuman(b, seat) {
-						return backstopResolutionClear
-					}
-					return unlessHeld(res, b)
-				},
-			})
 		}
 		if len(ts) > 0 {
 			out[row.ID] = ts
 		}
 	}
 	return out
+}
+
+// claimTarget is claim c of seat (its session ID) as ladder work, waiting on
+// a person when the planner's snapshot of it says so, re-read live before
+// the ladder acts on it.
+func claimTarget(c executionClaim, seat string) ladderTarget {
+	target := backstopTarget{ID: c.BeadID, Assignee: c.Assignee, Store: c.Store}
+	waiting := beadmeta.AwaitsHuman(c.AwaitingHuman, seat)
+	return ladderTarget{
+		// c.StoreRef is claimStoreRef's: the claim's residence, as the
+		// hook's work_started entry and the backstop key it.
+		work:         workladder.Work{Key: workladder.ClaimKey{Store: c.StoreRef, Bead: c.BeadID}, Kind: workladder.KindClaim, AwaitsHuman: waiting},
+		claimSession: c.SessionID != "" && c.SessionID == strings.TrimSpace(seat),
+		recheck: func() backstopResolution {
+			res, b := revalidateExecutionClaim(target)
+			return unlessAsked(unlessHeld(res, b), b, seat, waiting)
+		},
+	}
 }
 
 // trigger is row's own trigger bead when the snapshot holds it open and
@@ -306,10 +310,22 @@ func unlessHeld(res backstopResolution, b beads.Bead) backstopResolution {
 }
 
 // awaitsHuman reports whether claim b's seat (seat, its session ID) asked a
-// person and waits on their decision (gc.awaiting_human names it): not the
-// ladder's until the seat works the step again and clears it.
+// person and waits on their decision (gc.awaiting_human names it): the
+// ladder only nudges it, an hour apart, until the seat works the step again
+// and clears it.
 func awaitsHuman(b beads.Bead, seat string) bool {
-	return beadmeta.AwaitsHuman(b.Metadata, seat)
+	return beadmeta.AwaitsHuman(b.Metadata[beadmeta.AwaitingHumanMetadataKey], seat)
+}
+
+// unlessAsked is res, a live re-read's verdict on a claim of seat (b, the
+// bead it found), except that a wait on a person the ladder's work does not
+// show (waiting false) holds the claim: whatever was due for it, nothing is
+// done until a read the ladder decides on shows the wait.
+func unlessAsked(res backstopResolution, b beads.Bead, seat string, waiting bool) backstopResolution {
+	if res == backstopResolutionOutstanding && !waiting && awaitsHuman(b, seat) {
+		return backstopResolutionHold
+	}
+	return res
 }
 
 // carriedRecheck re-reads, live through the store that owns it, work the
@@ -327,8 +343,6 @@ func (p *ladderPass) carriedRecheck(row beads.Bead, w workladder.Work) func() ba
 			return backstopResolutionHold
 		case !found || !slices.Contains(currentSessionAssigneeIdentities(row), strings.TrimSpace(b.Assignee)) || beadmeta.HasDispatchHold(b.Labels):
 			return backstopResolutionClear
-		case w.Kind == workladder.KindClaim && awaitsHuman(b, row.ID):
-			return backstopResolutionClear
 		}
 		status := "in_progress"
 		if w.Kind == workladder.KindContinuation {
@@ -336,6 +350,9 @@ func (p *ladderPass) carriedRecheck(row beads.Bead, w workladder.Work) func() ba
 		}
 		if !strings.EqualFold(strings.TrimSpace(b.Status), status) {
 			return backstopResolutionClear
+		}
+		if w.Kind == workladder.KindClaim {
+			return unlessAsked(backstopResolutionOutstanding, b, row.ID, w.AwaitsHuman)
 		}
 		return backstopResolutionOutstanding
 	}
@@ -366,7 +383,7 @@ func (p *ladderPass) seat(row beads.Bead, targets []ladderTarget) {
 	folded, _ := foldLadderNotices(prev, outs)
 	hold := map[workladder.ClaimKey]bool{}
 	var d workladder.Decision
-	for range len(targets) + 1 { // each round settles a re-read: work gone is dropped, work unreadable waits
+	for range len(targets) + 1 { // each round settles a re-read: work gone is dropped, work unreadable or newly asked about waits
 		d = decideWorkLadder(folded, p.observe(info, row.Metadata, folded, targets, hold, live))
 		gone, held := recheckActed(d, targets, hold)
 		if len(gone) == 0 && len(held) == 0 {
@@ -403,12 +420,13 @@ func ladderNudgeOf(d workladder.Decision) (workladder.Nudge, bool) {
 
 // carryLadderWork adds to targets, under an incomplete snapshot, every work
 // the seat's ladder holds that the snapshot lacks, so a store that did not
-// answer neither drops a ladder nor resets its count. Carried work is re-read
-// live (carriedRecheck) before any nudge or recycle about it.
+// answer neither drops a ladder nor resets its count. Carried work is what
+// the ladder last saw it as, a wait on a person included, and is re-read live
+// (carriedRecheck) before any nudge or recycle about it.
 func (p *ladderPass) carryLadderWork(row beads.Bead, targets []ladderTarget, prev workladder.Record) []ladderTarget {
 	for _, e := range prev.Entries {
 		if !slices.ContainsFunc(targets, func(t ladderTarget) bool { return t.work.Key == e.Key }) {
-			w := workladder.Work{Key: e.Key, Kind: e.Kind}
+			w := workladder.Work{Key: e.Key, Kind: e.Kind, AwaitsHuman: e.AwaitsHuman}
 			targets = append(targets, ladderTarget{work: w, recheck: p.carriedRecheck(row, w)})
 		}
 	}
@@ -933,7 +951,7 @@ func (p *ladderPass) release(row beads.Bead, key workladder.ClaimKey, gen int64)
 	case beadmeta.HasDispatchHold(hits[0].bead.Labels):
 		outcome = ladderReleaseGone // parked on a hold since the snapshot: not the ladder's
 	case awaitsHuman(hits[0].bead, row.ID):
-		outcome = ladderReleaseGone // its seat asked a person since the snapshot: not the ladder's
+		outcome = ladderReleaseGone // its seat asked a person since the snapshot: never released
 	case strings.TrimSpace(hits[0].bead.Metadata[beadmeta.SessionIDMetadataKey]) == strings.TrimSpace(row.ID):
 		// The live read of gc.session_id, which commit's CAS takes from the
 		// snapshot: the guard for a claim the hook stamped after it was read.

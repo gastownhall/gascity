@@ -17,7 +17,10 @@ import (
 // whose live read could not tell (obs.Hold) waits, kept as it is, and so
 // does an entry whose last nudge's delivery is unsettled (a NoticeMark),
 // which also holds the seat's nudge slot (WN1). A mark ends with its episode:
-// a new generation, a rung rise and a progress reset clear it.
+// a new generation, a rung rise and a progress reset clear it. Work whose
+// seat waits on a person (Work.AwaitsHuman) is only ever nudged, a Cap after
+// its wait began and a Cap apart after that, and its pending release is
+// dropped: the wait's start and its end each begin a new episode.
 func Decide(prev Record, obs Observation, p Policy) Decision {
 	p = p.withDefaults()
 	now := obs.Now
@@ -55,6 +58,12 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 				}
 			}
 		}
+		if e.AwaitsHuman != w.AwaitsHuman { // a wait on a person begins or ends: a new episode
+			e.AwaitsHuman, e.Attempts, e.Paused, e.Since, e.Escalated, e.Unreleased, e.Refused, e.Notice = w.AwaitsHuman, 0, 0, now, false, false, 0, NoticeMark{}
+			if e.AwaitsHuman {
+				e.Last = now // the wait is paced from its start (dueAt)
+			}
+		}
 		e = p.progressReset(e, obs)
 		entries = append(entries, e)
 	}
@@ -62,14 +71,15 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 	idx := func(k ClaimKey) int { return slices.IndexFunc(next.Entries, func(e Entry) bool { return e.Key == k }) }
 
 	// 3. A pending release: re-emit while the claim is still outstanding and
-	// unstarted, clear it once it is gone, alarm if it raced a start.
+	// unstarted, clear it once it is gone or its seat waits on a person,
+	// alarm if it raced a start.
 	if r := prev.Release; r != nil {
 		i := idx(r.Key)
 		_, named := obs.Started[r.Key]
 		switch {
 		case obs.StartedRead && (named || (i >= 0 && next.Entries[i].Rung >= RungStarted)):
 			acts = append(acts, Alert{Key: r.Key, Reason: AlertReleaseRacedStart})
-		case i < 0 || next.Entries[i].Kind != KindClaim:
+		case i < 0 || next.Entries[i].Kind != KindClaim || next.Entries[i].AwaitsHuman:
 		case !obs.StartedRead: // cannot re-prove unstarted; hold the mark, so the hook still refuses it
 			next.Release = r
 		default:
@@ -119,7 +129,7 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 			if !nudged {
 				nudge(true)
 			}
-		case e.Rung == RungEscalated || e.Attempts < t:
+		case e.AwaitsHuman || e.Rung == RungEscalated || e.Attempts < t: // a wait on a person is only ever nudged
 			if !nudged {
 				nudge(false)
 			}
@@ -219,8 +229,14 @@ func minTime(t, now time.Time) time.Time {
 // (or its generation, or its last progress) started, else the backoff after
 // its last nudge. While the provider is degraded the backoff is PausedCap,
 // both floor and cap: delivery goes on, at a steady pace. While the seat
-// refuses nudges (Refused) PausedCap is the floor.
+// refuses nudges (Refused) PausedCap is the floor. A wait on a person is due
+// a Cap after it began or after its last nudge (Last holds either), whatever
+// a rung rise, a new generation, the seat's progress or the provider's health
+// do meanwhile: it paces a person, not the seat or the provider.
 func (p Policy) dueAt(e Entry, degraded bool) time.Time {
+	if e.AwaitsHuman {
+		return e.Last.Add(p.Cap)
+	}
 	if e.Attempts == 0 && e.Paused == 0 && !e.Unreleased {
 		return e.Since.Add(p.Grace)
 	}
@@ -263,7 +279,8 @@ func sameRecord(a, b Record) bool {
 		y := b.Entries[i]
 		if x.Key != y.Key || x.Kind != y.Kind || x.Rung != y.Rung || x.Attempts != y.Attempts || x.Paused != y.Paused ||
 			x.Recycles != y.Recycles || x.Escalated != y.Escalated || x.Seed != y.Seed || x.Unreleased != y.Unreleased ||
-			x.Refused != y.Refused || !sameMark(x.Notice, y.Notice) || !x.Since.Equal(y.Since) || !x.Last.Equal(y.Last) || !x.Next.Equal(y.Next) || !x.RecycleAt.Equal(y.RecycleAt) {
+			x.Refused != y.Refused || !sameMark(x.Notice, y.Notice) || x.AwaitsHuman != y.AwaitsHuman ||
+			!x.Since.Equal(y.Since) || !x.Last.Equal(y.Last) || !x.Next.Equal(y.Next) || !x.RecycleAt.Equal(y.RecycleAt) {
 			return false
 		}
 	}

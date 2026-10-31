@@ -44,6 +44,8 @@ func TestDecisionTable(t *testing.T) {
 		{"claim/started, >= 6, recycles 0 < R", ent(KindClaim, RungStarted, 6, nil), nil},
 		{"claim/started, >= 6, recycles 1 = R", ent(KindClaim, RungStarted, 6, func(e *Entry) { e.Recycles = 1 }), nil},
 		{"claim/escalated", ent(KindClaim, RungEscalated, 9, func(e *Entry) { e.Recycles, e.Escalated = 1, true }), nil},
+		{"claim/claimed, attempts >= 3, its seat waits on a person", ent(KindClaim, RungClaimed, 3, func(e *Entry) { e.AwaitsHuman = true }), nil},
+		{"claim/started, >= 6, recycles 0 < R, its seat waits on a person", ent(KindClaim, RungStarted, 6, func(e *Entry) { e.AwaitsHuman = true }), nil},
 		{"claim/started, attempts < 6, its notice pending", ent(KindClaim, RungStarted, 5, func(e *Entry) { e.Notice = NoticeMark{Op: "op", At: now} }), nil},
 		{"claim/claimed, attempts >= 3, its notice pending", ent(KindClaim, RungClaimed, 3, func(e *Entry) { e.Notice = NoticeMark{Op: "op", At: now} }), nil},
 		{"claim/started, attempts < 6, another's notice pending", ent(KindClaim, RungStarted, 5, nil), pendingOther(now)},
@@ -71,7 +73,7 @@ func TestDecisionTable(t *testing.T) {
 	for _, r := range rows {
 		fmt.Fprintf(&b, "| %s |", r.name)
 		for _, c := range cols {
-			o := quiet(now, 1, Work{Key: r.e.Key, Kind: r.e.Kind})
+			o := quiet(now, 1, Work{Key: r.e.Key, Kind: r.e.Kind, AwaitsHuman: r.e.AwaitsHuman})
 			if r.e.Rung >= RungStarted {
 				o.Started[r.e.Key] = SrcAgent
 			}

@@ -1498,7 +1498,7 @@
             "on",
             "off"
           ],
-          "description": "WorkLadder selects how the v2 reconciler paces outstanding work on pool\nseats. \"on\" (default) runs the work-progress ladder: nudges back off from\n3 to 60 minutes and never stop, a started claim is recycled at most once\nand then escalated, and an unstarted claim is released after its third\nunanswered nudge (a nudge the seat could not take, such as one held at\na permission prompt, does not count). A claim whose metadata\ngc.awaiting_human names its seat (the seat asked a person and waits on\ntheir decision) is not nudged, recycled or released. \"off\" runs the\nthree backstops it replaced (idle-claim, continuation, execution)\ninstead: the rollback. Read on every pass, so a config reload applies.\nLegacy ignores it.",
+          "description": "WorkLadder selects how the v2 reconciler paces outstanding work on pool\nseats. \"on\" (default) runs the work-progress ladder: nudges back off from\n3 to 60 minutes and never stop, a started claim is recycled at most once\nand then escalated, and an unstarted claim is released after its third\nunanswered nudge (a nudge the seat could not take, such as one held at\na permission prompt, does not count). A claim whose metadata\ngc.awaiting_human names its seat (the seat asked a person and waits on\ntheir decision) is nudged only hourly, and never recycled or released.\n\"off\" runs the three backstops it replaced (idle-claim, continuation,\nexecution) instead: the rollback. Read on every pass, so a config\nreload applies. Legacy ignores it.",
           "default": "on"
         },
         "auto_restart_on_drift": {

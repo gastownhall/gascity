@@ -82,6 +82,9 @@ type wireEntry struct {
 	Refused    int    `json:"refused,omitempty"`
 	// Notice is the entry's notice mark; older builds ignore the field.
 	Notice *wireNotice `json:"notice,omitempty"`
+	// AwaitsHuman marks an entry whose episode is a wait on a person; older
+	// builds ignore the field.
+	AwaitsHuman bool `json:"awaits_human,omitempty"`
 }
 
 type wireNotice struct {
@@ -128,6 +131,7 @@ func EncodeLadder(r Record) string {
 			Since: fmtTime(e.Since), Attempts: e.Attempts, Paused: e.Paused, Last: fmtTime(e.Last),
 			Next: fmtTime(e.Next), Recycles: e.Recycles, Escalated: e.Escalated, Seed: seed,
 			RecycleAt: fmtTime(e.RecycleAt), Unreleased: e.Unreleased, Refused: e.Refused, Notice: encodeNotice(e.Notice),
+			AwaitsHuman: e.AwaitsHuman,
 		})
 	}
 	if r.Release != nil {
@@ -171,7 +175,10 @@ func DecodeLadder(raw string) (Record, error) {
 	r.LastNudge = lastNudge
 	seen := map[ClaimKey]bool{}
 	for i, we := range w.Entries {
-		e := Entry{Key: ClaimKey{Store: we.Store, Bead: we.Bead}, Attempts: we.Attempts, Paused: we.Paused, Recycles: we.Recycles, Escalated: we.Escalated, Unreleased: we.Unreleased, Refused: we.Refused}
+		e := Entry{
+			Key: ClaimKey{Store: we.Store, Bead: we.Bead}, Attempts: we.Attempts, Paused: we.Paused, Recycles: we.Recycles,
+			Escalated: we.Escalated, Unreleased: we.Unreleased, Refused: we.Refused, AwaitsHuman: we.AwaitsHuman,
+		}
 		if e.Key.Bead == "" {
 			return bad("entry %d: empty bead", i)
 		}
