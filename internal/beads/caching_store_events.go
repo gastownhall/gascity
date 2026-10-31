@@ -481,8 +481,7 @@ func (c *CachingStore) updateEventDepsLocked(eventType string, b Bead, fields ma
 		if c.clearReadyProjectionLocked(b.ID) {
 			mutated = true
 		}
-		if c.depsComplete {
-			c.depsComplete = false
+		if c.markDepsIncompleteLocked("bead.updated patch omits dependencies") {
 			mutated = true
 		}
 		return mutated
@@ -490,16 +489,41 @@ func (c *CachingStore) updateEventDepsLocked(eventType string, b Bead, fields ma
 	if _, ok := c.deps[b.ID]; ok {
 		return false
 	}
-	if eventType == "bead.updated" && c.depsComplete {
-		c.depsComplete = false
-		c.recordProblemLocked("apply bead.updated event", fmt.Errorf("dependency cache marked complete but missing deps for %s", b.ID))
-		return true
+	if depsAuthoritative || eventType == "bead.closed" {
+		// No entry under complete coverage means no edges. A snapshot carries
+		// every edge it has (omitempty drops only an empty set), and a close
+		// changes none, so neither leaves this row's coverage unknown. The
+		// cache's own CloseAll echo lands here for every edge-less row it
+		// closes: reading it as unknown cleared depsComplete, wiped every
+		// cached verdict, and the next reconcile re-announced the whole store.
+		return false
 	}
+	return c.markDepsIncompleteLocked(fmt.Sprintf("%s patch: missing deps for %s", eventType, b.ID))
+}
+
+// markDepsIncompleteLocked clears depsComplete, the store-wide claim that each
+// cached row's deps entry, or its absence, is its whole edge set, and reports
+// whether it was set. While it is clear, readiness reads go live and a status
+// change may invalidate every cached verdict, so each flip is counted and
+// logged, rate-limited per reason. Caller must hold c.mu in write mode.
+func (c *CachingStore) markDepsIncompleteLocked(reason string) bool {
 	if !c.depsComplete {
 		return false
 	}
 	c.depsComplete = false
+	c.stats.DepsCoverageLost++
+	c.recordProblemLocked("dependency coverage lost", errors.New(reason))
 	return true
+}
+
+// setDepsCompleteLocked installs a scan's coverage verdict, clearing through
+// markDepsIncompleteLocked. Caller must hold c.mu in write mode.
+func (c *CachingStore) setDepsCompleteLocked(complete bool, reason string) {
+	if complete {
+		c.depsComplete = true
+		return
+	}
+	c.markDepsIncompleteLocked(reason)
 }
 
 func (c *CachingStore) setEventDepsLocked(id string, deps []Dep) bool {
@@ -583,22 +607,26 @@ func (c *CachingStore) clearDependentReadyProjectionsLocked(dependsOnID string) 
 	if dependsOnID == "" {
 		return false
 	}
-	if !c.depsComplete {
+	// Without depsComplete a row with no deps entry may depend on dependsOnID
+	// unseen. When the backing's rows carry their edges, every entry was
+	// installed from such a row and still answers for it, so only the
+	// entry-less rows are unknown. Otherwise an entry may be a guess derived
+	// from fields that omit edges, and every verdict goes.
+	if !c.depsComplete && !c.backingRowsCarryDependencies() {
 		return c.clearAllReadyProjectionsLocked()
 	}
 	cleared := make([]string, 0)
-	for id, deps := range c.deps {
-		if _, ok := c.beads[id]; !ok {
+	for id := range c.beads {
+		deps, known := c.deps[id]
+		if known && !depsBlockOn(deps, dependsOnID) {
 			continue
 		}
-		for _, dep := range deps {
-			if dep.DependsOnID != dependsOnID || !isReadyBlockingDependencyType(dep.Type) {
-				continue
-			}
-			if c.clearReadyProjectionLocked(id) {
-				cleared = append(cleared, id)
-			}
-			break
+		if !known && c.depsComplete {
+			// No entry under complete coverage means no edges.
+			continue
+		}
+		if c.clearReadyProjectionLocked(id) {
+			cleared = append(cleared, id)
 		}
 	}
 	if len(cleared) == 0 {
@@ -606,6 +634,16 @@ func (c *CachingStore) clearDependentReadyProjectionsLocked(dependsOnID string) 
 	}
 	c.noteMutationLocked(cleared...)
 	return true
+}
+
+// depsBlockOn reports whether deps hold a ready-blocking edge to dependsOnID.
+func depsBlockOn(deps []Dep, dependsOnID string) bool {
+	for _, dep := range deps {
+		if dep.DependsOnID == dependsOnID && isReadyBlockingDependencyType(dep.Type) {
+			return true
+		}
+	}
+	return false
 }
 
 func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) Bead {

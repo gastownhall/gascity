@@ -468,6 +468,9 @@ type CacheStats struct {
 	CadenceDriver string
 	// ReconcileRequests counts RequestReconcile calls.
 	ReconcileRequests int64
+	// DepsCoverageLost counts the times the cache stopped vouching for its
+	// dependency coverage (markDepsIncompleteLocked).
+	DepsCoverageLost int64
 }
 
 const (
@@ -1705,7 +1708,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		}
 		c.beads = nextBeads
 		c.deps = nextDeps
-		c.depsComplete = depsComplete && depErr == nil
+		c.setDepsCompleteLocked(depsComplete && depErr == nil, "prime: dependency read incomplete")
 		c.dirty = nextDirty
 		c.beadSeq = nextBeadSeq
 		c.localBeadAt = nextLocalBeadAt
@@ -1736,7 +1739,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 			}
 			c.absorbFreshLocked(id, b, now, opts)
 		}
-		c.depsComplete = false
+		c.markDepsIncompleteLocked("prime raced a write: rows kept from the cache")
 	}
 	c.state = cacheLive
 	c.syncFailures = 0
