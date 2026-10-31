@@ -1,27 +1,42 @@
 package exec
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+// handshakeRetryAfter is how long a failed handshake is cached before the
+// next caller re-runs it. A success is cached for the provider's life.
+const handshakeRetryAfter = 30 * time.Second
+
+// handshakeNow is the handshake cache's clock.
+var handshakeNow = time.Now
+
 // Protocol performs the RPP handshake (`script protocol`) and returns the
-// declared version and capabilities. The handshake runs once per provider
-// instance and is cached, including its error. An executable without a
+// declared version and capabilities. A successful handshake runs once per
+// provider instance and is cached; a failed one is cached for
+// handshakeRetryAfter, so one transient failure does not leave the provider
+// on the zero-capability floor for its whole life. An executable without a
 // `protocol` op (exit 2 → empty stdout) is version 0 with no optional
 // capabilities, so pre-handshake scripts remain fully valid
 // (RUNTIME-RPP-008 in internal/runtime/REQUIREMENTS.md).
 func (p *Provider) Protocol() (runtime.ProtocolInfo, error) {
-	p.handshakeOnce.Do(func() {
-		p.handshakeInfo, p.handshakeErr = p.queryProtocol()
-	})
+	p.handshakeMu.Lock()
+	defer p.handshakeMu.Unlock()
+	if p.handshakeRan && (p.handshakeErr == nil || handshakeNow().Sub(p.handshakeAt) < handshakeRetryAfter) {
+		return p.handshakeInfo, p.handshakeErr
+	}
+	p.handshakeInfo, p.handshakeErr = p.queryProtocol(context.Background(), p.timeout)
+	p.handshakeRan, p.handshakeAt = true, handshakeNow()
 	return p.handshakeInfo, p.handshakeErr
 }
 
-func (p *Provider) queryProtocol() (runtime.ProtocolInfo, error) {
-	out, err := p.run(nil, "protocol")
+func (p *Provider) queryProtocol(ctx context.Context, timeout time.Duration) (runtime.ProtocolInfo, error) {
+	out, err := p.runWithContext(ctx, timeout, nil, "protocol")
 	if err != nil {
 		return runtime.ProtocolInfo{}, err
 	}
