@@ -407,6 +407,49 @@ The first standardization wave may still choose to normalize existing JSON
 surfaces when the benefit is high, but that choice must be visible and
 reviewable. Hidden JSON shape changes are not acceptable.
 
+## Schema Baseline Gate
+
+CI enforces the compatibility note above for the shape of every built-in
+`schemas/**/*.schema.json`. `internal/schemacontract/baseline.json` is the
+committed record of each schema's contract: per schema, a list of version
+entries, each holding the shape (path, type, `const`, required-ness) the
+schema had at that `schema_version`. `TestSchemaContractBaseline` extracts the
+live shape of every schema and compares it with the newest entry.
+
+- **Version.** A schema's version is its root `properties.schema_version.const`.
+  A schema without one is unversioned (`""`) and is still recorded and gated.
+- **Breaking changes need a bump.** Removing or renaming a field, widening a
+  type, changing or dropping a `const`, relaxing `required`, removing a
+  `oneOf`/`anyOf` variant, or changing the JSONL or raw-JSON framing fails the
+  test until the schema's `schema_version` const changes. A bumped schema must
+  carry a new baseline entry with a non-empty `note` and an `issue` or `pr`
+  reference. The first version of a schema needs neither.
+- **Additive changes** (new field or variant) and tightening (narrower type,
+  newly required, narrower `const`) do not need a bump. The test asks you to
+  run the generator, which appends the new records to the existing entry.
+- **Enums are not recorded.** Only `const` is. Adding or removing an enum
+  value is not detected by the gate; a change in what a value means is not
+  detected either. If you change the meaning of an existing field without
+  changing its shape, declare it: bump `schema_version` and add the entry by
+  hand. The gate checks shape, not semantics.
+- **The note is the release note.** Write it for the consumer reading the
+  changelog: what changed, and what a script must do about it. A PR that bumps
+  a version marks its commit with `!` or a `BREAKING CHANGE:` footer.
+- **Removing a schema** is itself breaking and fails with the same marker
+  requirement until the schema's baseline record is deleted deliberately.
+
+Regenerate with `bazel run //cmd/gen-schema-baseline` from the repository
+root. The generator seeds schemas that have no record, adds an entry when the
+version changed, and appends records for additions. It never edits or removes
+an existing record, so it cannot hide a breaking change; a reviewer reads the
+baseline diff next to the schema diff.
+
+This is a guard against accidental drift, not a security boundary. The same PR
+that changes a schema can edit the baseline, so the gate makes a contract
+change visible and deliberate. Review of the baseline diff, with
+`.github/CODEOWNERS` coverage of `internal/schemacontract/baseline.json`
+where the maintainers adopt it, is what makes it binding.
+
 ## Extensibility
 
 New built-in CLI commands should pick up JSON support through a shared local pattern rather than inventing command-specific output plumbing.

@@ -138,6 +138,8 @@ Violating any fails the build. Details live in the linked files.
   types; the OpenAPI spec is generated (`TestOpenAPISpecInSync`); every
   event type has a registered payload
   (`TestEveryKnownEventTypeHasRegisteredPayload`).
+- **CLI JSON baseline.** Breaking `schemas/**` changes bump `schema_version`
+  (`internal/schemacontract/AGENTS.md`).
 - **Vendor-neutral hosted-service wire.** Commercial policy is never a wire
   field (`internal/cliauth/AGENTS.md`, `scripts/check-core-boundary.sh`).
 - **Worker boundary (active migration).** Production `cmd/gc` code reaches
