@@ -78,6 +78,18 @@ nothing is claimed or served, GC_HOOK_STORE_UNAVAILABLE is printed on stderr
 with the refusal, the hook exits 2, and the event says the fence failed
 closed.
 
+A bead whose gc.exclude_claimants metadata names this session is never
+claimed, adopted or pre-assigned by it, even when the bead is routed to its
+pool. The value is a comma-separated list of fully qualified identities,
+matched exactly against $GC_ALIAS, $GC_AGENT and the session's own
+identities, so an eligible session in the same pool claims the bead instead.
+--claim enforces this on every claim tier and again on the store's canonical
+readback, so a custom work_query cannot bypass it. The default work query
+also drops excluded beads before it picks one to serve, so an excluded bead
+at the head of the queue never hides the work behind it. An exclusion does
+not take back a claim the session already started: with --drain-ack it is
+still the started claim the session must finish.
+
 The agent is determined from $GC_AGENT or a positional argument.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {

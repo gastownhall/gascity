@@ -24,6 +24,7 @@ func TestAssignedInProgressTierFederatesOnSplitTopology(t *testing.T) {
 		got := assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true})
 		want := `r=$(gc ready --status in_progress --assignee="$` + shellVar + `" --exclude-label "hold:mayor" --exclude-label "hold:external" --until-unblocked --json --limit=20)` +
 			workQueryReadFailure("gc ready --status in_progress") + `; ` +
+			excludeClaimantsFilterScript("r") +
 			servableInProgressRowsScript(1)
 		if got != want {
 			t.Errorf("federated tier-0 for $%s =\n  %q\nwant\n  %q", shellVar, got, want)
@@ -55,7 +56,8 @@ func TestAssignedInProgressTierOnSingleStore(t *testing.T) {
 	for _, shellVar := range []string{"id", "cand"} {
 		got := assignedInProgressTierCommand(shellVar, QueryTopology{})
 		want := `r=$(bd list --status in_progress --assignee="$` + shellVar + `" --json --limit=1)` +
-			workQueryReadFailure("bd list --status in_progress") + `; `
+			workQueryReadFailure("bd list --status in_progress") + `; ` +
+			excludeClaimantsFilterScript("r")
 		if got != want {
 			t.Errorf("single-store tier-0 for $%s =\n  %q\nwant\n  %q", shellVar, got, want)
 		}
