@@ -118,7 +118,7 @@ func judgeBdCreateGraph(in bdClassGuardInput, planPath string) bdClassGuard {
 	}
 	for _, n := range plan.Nodes {
 		node := fmt.Sprintf("%s node %q", who, n.Key)
-		meta, err := bdGraphNodeMetadata(n.Metadata)
+		readings, err := bdGraphNodeMetadata(n.Metadata)
 		if err != nil {
 			return in.refuse("%s: refused on this split city: its metadata cannot be read (%v). Nothing was written.", node, err)
 		}
@@ -126,16 +126,24 @@ func judgeBdCreateGraph(in bdClassGuardInput, planPath string) bdClassGuard {
 		// class-free), and gc's readers keep them as stored, so the raw
 		// spelling is the bead's class. The trimmed spelling is a conservative
 		// second reading. Each spelling, with every metadata bd could leave
-		// once it splices the node's metadata_refs, must keep the bead's class.
-		readings := bdGraphSplicedMetadata(meta, n.MetadataRefs, explicit, n.Labels)
-		for _, shape := range []beads.Bead{
+		// once it splices the node's metadata_refs, under every store's reading
+		// of the node's metadata, must keep the bead's class.
+		spellings := []beads.Bead{
 			{Type: n.Type, Labels: n.Labels},
 			{Type: strings.TrimSpace(n.Type), Labels: normalizeBdLabels(n.Labels)},
-		} {
-			for _, m := range readings {
-				shape.Metadata = m
-				if flip := coordclass.CheckFlip(beads.Bead{}, shape, in.holds); flip != nil {
-					return in.refuse("%s", classFlipRefusalText(node, flip))
+		}
+		// The splice values depend on the refs and labels, not on the
+		// metadata, so splice j of every reading is the same write; a
+		// reading's refusal names what it reads differently from the bd
+		// CLI's splice j.
+		cli := bdGraphSplicedMetadata(readings[0], n.MetadataRefs, explicit, n.Labels)
+		for i, reading := range readings {
+			for j, m := range bdGraphSplicedMetadata(reading, n.MetadataRefs, explicit, n.Labels) {
+				for _, shape := range spellings {
+					shape.Metadata = m
+					if flip := coordclass.CheckFlip(beads.Bead{}, shape, in.holds); flip != nil {
+						return in.refuse("%s%s", classFlipRefusalText(node, flip), bdMetadataReadingsNote([]map[string]string{cli[j], m}, min(i, 1)))
+					}
 				}
 			}
 		}
@@ -218,21 +226,17 @@ func bdGraphSplicedMetadata(meta map[string]string, refs, explicit map[string]st
 	return out
 }
 
-// bdGraphNodeMetadata coerces a node's raw metadata values to strings the way
-// gc reads them back (beads.StringMap).
-func bdGraphNodeMetadata(raw map[string]json.RawMessage) (map[string]string, error) {
+// bdGraphNodeMetadata returns each reading this city's stores give a node's
+// metadata once bd has stored it (beads.MetadataReadings): the bd CLI's first.
+func bdGraphNodeMetadata(raw map[string]json.RawMessage) ([]map[string]string, error) {
 	if len(raw) == 0 {
-		return nil, nil
+		return []map[string]string{nil}, nil
 	}
 	body, err := json.Marshal(raw)
 	if err != nil {
 		return nil, err
 	}
-	var fields beads.StringMap
-	if err := json.Unmarshal(body, &fields); err != nil {
-		return nil, err
-	}
-	return fields, nil
+	return beads.MetadataReadings(body)
 }
 
 // bdGraphPlanUnvettedField returns a description of the first field of the

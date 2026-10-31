@@ -401,6 +401,15 @@ gc serves its own `release-if-current` itself.
   judged against the bead its id resolves to. If the id resolves to no bead,
   to a different bead (a short or partial id), or cannot be read, a write that
   touches type, labels or metadata is refused.
+- Metadata (`create` and `update --metadata`, `update --set-metadata`, the
+  nodes of a `create --graph` plan, the rows of an `import`) is classified as
+  each of the city's stores reads it back once bd has stored it. They agree on
+  a string value, but a JSON null reads as empty to the bd CLI and as the text
+  `null` to a native Dolt store, and `gc.root_bead_id` set to `null` is a
+  graph marker. A write is refused when either reading moves the bead out of
+  the classes its store holds, and an import row the two readings place in
+  different classes is refused even with `--skip-infra`. Write such a key as a
+  string, leave it out, or clear it with `update --unset-metadata`.
 - `label propagate`: a class-marker label is refused.
 - `import`: rows of a class the store does not hold are refused, or left out
   with `--skip-infra`. gc reads the file the way bd's import does: a line

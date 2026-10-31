@@ -593,6 +593,11 @@ type bdClassGuardInput struct {
 	gcFlag    bool
 	holds     []coordclass.Class
 	scopeRoot string
+	// flipNote follows a class-flip refusal checkIDs writes for a variant at
+	// or after index flipNoteFrom: why that reading of the write was judged
+	// (bdMetadataReadingsNote), or "".
+	flipNote     string
+	flipNoteFrom int
 	bdClassGuardDeps
 }
 
