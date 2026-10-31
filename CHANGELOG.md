@@ -16,14 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lane host, as if all three were listed. `gc session nudge`, `gc session
   submit`, mail `--notify`, sling `--nudge`, the hook-claim continuation,
   planner notices, wait nudges and the API's submit, messages, stop and
-  respond routes then write lane ops instead of nudge-queue items. Any other
-  city (bd, native Dolt, the file provider, an exec provider) keeps legacy
-  delivery in this release; `gc doctor` says which one a city runs. To roll a
-  SQLite city back for this release, set `[ops] authoritative = []` and
-  restart the controller; the rollback is warned, and it goes away with
-  legacy delivery in the next release. Queue items written before the
-  upgrade still drain through the legacy deliverers. On such a city with the
-  list unset, this release also changes:
+  respond routes then write lane ops instead of nudge-queue items. Lanes
+  need a split store: any other city (bd-served, DoltLite, an exec provider,
+  native Dolt, the file provider) keeps legacy delivery, and `gc doctor`'s
+  `legacy-delivery` check says which one a city runs. A city whose sessions
+  store cannot host lanes (bd-served, DoltLite, exec) gets a warning to split
+  its storage (`docs/runbooks/split-storage-classes.md`, `gc storage
+  migrate`); an unsplit native-Dolt city gets a note that splitting moves
+  lane records to SQLite, which is cheaper. To roll a SQLite city back, set
+  `[ops] authoritative = []` and restart the controller; the rollback is
+  warned, and it goes away when legacy delivery is removed. Queue items
+  written before the upgrade still drain through the legacy deliverers. On
+  such a city with the list unset, this release also changes:
   - **Messages over 16 KiB are refused.** `gc session nudge` and `gc session
     submit` refuse them, and the API's submit and messages routes and a
     provider `POST .../sessions` initial message answer 422
@@ -765,15 +769,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Legacy delivery.** The nudge queue (`.gc/runtime/nudges/state.json`),
   its `gc nudge poll` sidecars and the supervisor's nudge dispatcher are
-  removed in the next release, once every city runs the conversation lane.
+  removed in a future release: one release after `gc init` creates split
+  cities by default. From then on a city whose sessions store cannot host
+  conversation lanes must split its storage (`gc storage migrate`) before
+  it can start; split now with `docs/runbooks/split-storage-classes.md`.
   Where the lane runs, the controller warns once at start about each of
   `[daemon] nudge_dispatcher`, `[session] nudge_poll_interval`, `[ops]
   content` and `[ops] control` still set, and about `[ops] authoritative =
-  []`. Leave those keys set until the next release: they still govern the
-  legacy deliverers that drain queue items written before the upgrade and
-  serve sessions without a row, and removing `nudge_dispatcher =
-  "supervisor"` now would restart the per-session pollers. `gc nudge drain`
-  without `--inject` is deprecated; the prompt hook's `gc nudge drain
+  []`. Leave those keys set until legacy delivery is removed: they still
+  govern the legacy deliverers that drain queue items written before the
+  upgrade and serve sessions without a row, and removing `nudge_dispatcher
+  = "supervisor"` now would restart the per-session pollers. `gc nudge
+  drain` without `--inject` is deprecated; the prompt hook's `gc nudge drain
   --inject` stays.
 
 ### Fixed

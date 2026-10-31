@@ -699,7 +699,7 @@ func doNudgeDrop(cityPath string, ids []string, jsonOutput bool, stdout, stderr 
 
 // nudgeDrainPlainDeprecation is the warning gc nudge drain without --inject
 // prints: only the hook's --inject form outlives legacy delivery.
-const nudgeDrainPlainDeprecation = "gc nudge drain: warning: drain without --inject is deprecated and is removed with legacy delivery in the next release; the conversation lane host and the prompt hook (gc nudge drain --inject) deliver queued messages"
+const nudgeDrainPlainDeprecation = "gc nudge drain: warning: drain without --inject is deprecated and is removed with legacy delivery in a future release; the conversation lane host and the prompt hook (gc nudge drain --inject) deliver queued messages"
 
 // classifyQueuedNudgeIDs reports, for each of the given IDs, whether it is
 // currently droppable (pending or in-flight), already dead-lettered, or not
