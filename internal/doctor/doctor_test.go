@@ -895,6 +895,13 @@ func TestRunCheckTimeoutBoundsFix(t *testing.T) {
 	if got.Status != StatusError || got.Severity != SeverityBlocking {
 		t.Fatalf("result = %+v, want the original blocking failure preserved", got)
 	}
+	// A wedged fix leaves the remediation unconfirmed exactly like a wedged
+	// Run or verification re-run: TimedOut must be true so callers that gate
+	// on it (e.g. gc doctor's incomplete-observation check) see this as an
+	// incomplete result, not a settled advisory failure.
+	if !got.TimedOut {
+		t.Fatalf("result.TimedOut = false, want true; the fix was abandoned and never confirmed")
+	}
 	if report.Failed != 1 || report.BlockingFailed != 1 {
 		t.Fatalf("report = %+v, want the unfixed check counted as a blocking failure", report)
 	}
