@@ -540,7 +540,7 @@ func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info session
 // (the write-ahead is what bounds the loop, and unwinding it would let a
 // permanently input-dead pane re-send forever) and records that nothing
 // ARRIVED, so the escalation reports what actually happened. The exception
-// is a deferral (drainReminderDeferralHold): the runtime typed nothing
+// is a deferral (drainReminderDeferralHold): the runtime submitted nothing
 // because the session was running a turn its submit keys would have
 // interrupted, or was waiting on a pending interaction its text would have
 // answered, so nothing was attempted and the marker is restored to what it
@@ -594,8 +594,8 @@ func deliverDrainReminder(sp runtime.Provider, store beads.Store, info sessions.
 }
 
 // drainReminderDeferralHold is the hold a reminder delivery's err puts the
-// row under when the runtime typed nothing and the attempt is not spent, or
-// "": a session running a turn its submit keys would interrupt
+// row under when the runtime submitted nothing and the attempt is not
+// spent, or "": a session running a turn its submit keys would interrupt
 // (runtime.ErrSessionBusy), or one waiting on a pending interaction its
 // text would answer, which opened after the hold's own look.
 func drainReminderDeferralHold(err error) string {

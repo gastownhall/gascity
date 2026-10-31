@@ -263,7 +263,12 @@ func (m *Manager) supportsFollowUpLocked(b beads.Bead) bool {
 // interruptAndSubmitLocked runs after submit's actor check. It reports
 // whether its send queued the message: a dead agent's (sendLocked, on
 // ensureDeliverable's fresh read) takes no interrupt keys and queues it for
-// the incarnation the controller's heal brings up.
+// the incarnation the controller's heal brings up, and a send refused
+// behind a pending interaction that opened after the session was prepared
+// for it is queued for after the interaction is answered. A preparation
+// that fails, or that a pending interaction holds off, is an error wrapping
+// ErrReplacementNotPrepared (prepareReplacementLocked): the interrupt was
+// sent, and the message is neither sent nor queued.
 func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
 	// A row whose drain-ack stop is pending belongs to the controller's stop:
 	// no interrupt keys, no hard-restart stop (as ensureRunning refuses it).
@@ -338,21 +343,14 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 		}
 		return m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
-	// The turn is interrupted now, so the message is never dropped: a
-	// pending interaction that opened as the turn ended (the up-front
-	// refusal saw none) gets none of the reset or clear keys, which would
-	// land in it, and the message is queued for after it is answered.
-	// The send below looks again for a prompt that opens after these keys.
-	if replacementSendsKeys(b, mode) && m.inputHeldByPendingInteractionLocked(sessName, "reset or clear keys, and queued its replacement message") {
-		return true, m.enqueueDeferredSubmitLocked(b, sessName, message, nudgequeue.SourceSubmit)
-	}
-	if err := m.resetInterruptedTurnLocked(ctx, b, sessName); err != nil {
+	// The turn is interrupted now. A pending interaction that opened as it
+	// ended (the up-front refusal saw none) gets none of the preparation's
+	// keys, which would land in it, and the message is refused, not queued:
+	// a queued delivery would not prepare the session for it. One that
+	// opens after the preparation refuses the send below, and the prepared
+	// message is queued for after it is answered, never dropped.
+	if err := m.prepareReplacementLocked(ctx, b, id, sessName, mode); err != nil {
 		return false, err
-	}
-	if shouldClearInterruptedInputBeforeSubmit(b) && mode == runtime.TurnInterruptKeystroke {
-		if err := m.clearInterruptedInputLocked(ctx, b, sessName); err != nil {
-			return false, err
-		}
 	}
 	queued, err := m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true, nudgequeue.SourceSubmit)
 	return m.queueBehindPendingInteractionLocked(b, sessName, message, nudgequeue.SourceSubmit, queued, err)

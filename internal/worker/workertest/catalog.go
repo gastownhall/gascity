@@ -118,7 +118,7 @@ func DeliveryHandleCatalog() []Requirement {
 		{
 			Code:        RequirementDeliveryQueuesBehindPending,
 			Group:       "delivery",
-			Description: "A nudge that may wait for a safe boundary, sent to a session waiting on a pending interaction, is queued for delivery after the interaction is answered: nothing is typed and nothing is dropped. An immediate nudge is refused with the pending-interaction error.",
+			Description: "A default-delivery nudge (NudgeDeliveryDefault), sent to a session waiting on a pending interaction, is queued for delivery after the interaction is answered: nothing is typed and nothing is dropped. An immediate nudge is refused with the pending-interaction error. A wait-idle nudge is not queued by the handle: it comes back undelivered, or refused with the pending-interaction error, for its caller to queue.",
 		},
 		{
 			Code:        RequirementAcceptedMessageQueuesBehindPending,

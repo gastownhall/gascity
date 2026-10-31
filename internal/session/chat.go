@@ -1558,13 +1558,24 @@ func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.B
 // refusal (err wrapping ErrPendingInteraction: the manager's look, or the
 // runtime's own refusal to type into a prompt) into a deferred delivery of
 // message under source, delivered once the interaction is answered. Any
-// other answer passes through as queued and err.
+// other answer passes through as queued and err. A refusal whose queueing
+// fails is not queued: its error wraps the refusal and the queue's failure.
+//
+// A runtime's refusal may come after it typed the message and before it
+// submitted it (tmux's last look before the submit key), leaving the text
+// unsent in the input box. tmux's delivery of the queued message clears the
+// input box before its paste, which removes that leftover, except while a
+// client is attached: it leaves the input box alone then, and the delivery
+// joins the leftover text.
 func (m *Manager) queueBehindPendingInteractionLocked(b beads.Bead, sessName, message, source string, queued bool, err error) (bool, error) {
 	if !errors.Is(err, ErrPendingInteraction) {
 		return queued, err
 	}
+	if qerr := m.enqueueDeferredSubmitLocked(b, sessName, message, source); qerr != nil {
+		return false, fmt.Errorf("%w; queueing the message behind it failed: %w", err, qerr)
+	}
 	log.Printf("session: %q: queued a message behind a pending interaction: %v", sessName, err)
-	return true, m.enqueueDeferredSubmitLocked(b, sessName, message, source)
+	return true, nil
 }
 
 func (m *Manager) send(ctx context.Context, by Actor, id, message, resumeCommand string, hints runtime.Config, immediate bool) (SubmitOutcome, error) {

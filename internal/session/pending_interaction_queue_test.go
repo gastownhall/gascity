@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -146,36 +147,73 @@ func TestQueueSubmitQueuesAUserTurn(t *testing.T) {
 	}
 }
 
-// TestInterruptNowQueuesWhenDialogAppearsAfterInterrupt (rows A21, B3): the
-// up-front refusal saw no prompt, the interrupt went out, and a permission
-// prompt opened as the turn ended. The turn is already interrupted, so the
-// message is queued for after the prompt is answered rather than dropped,
-// and the input-box clear that would land in the prompt is not sent.
-func TestInterruptNowQueuesWhenDialogAppearsAfterInterrupt(t *testing.T) {
-	sp := &dialogAfterInterruptProvider{Fake: runtime.NewFake()}
-	mgr, info, cityPath := newPendingQueueSession(t, sp, "claude")
+// TestInterruptNowRefusesAnUnpreparedReplacementBehindALatePrompt (rows A21,
+// B3): the up-front refusal saw no prompt, the interrupt went out, and a
+// permission prompt opened as the turn ended. None of the replacement's
+// preparation keys (Claude's input clear, Gemini's turn reset and clear) is
+// typed into the prompt, and the replacement is refused with an error
+// wrapping ErrReplacementNotPrepared and ErrPendingInteraction, not queued:
+// the queue would deliver it later as a plain message, onto a session never
+// prepared for it.
+func TestInterruptNowRefusesAnUnpreparedReplacementBehindALatePrompt(t *testing.T) {
+	for _, provider := range []string{"claude", "gemini"} {
+		t.Run(provider, func(t *testing.T) {
+			sp := &dialogAfterInterruptProvider{Fake: runtime.NewFake()}
+			mgr, info, cityPath := newPendingQueueSession(t, sp, provider)
 
-	out, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
-	if err != nil || !out.Queued {
-		t.Fatalf("Submit(interrupt_now) = %+v, %v; want the message queued behind the new prompt", out, err)
+			out, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
+			if !errors.Is(err, ErrReplacementNotPrepared) || !errors.Is(err, ErrPendingInteraction) || out.Queued {
+				t.Fatalf("Submit(interrupt_now) = %+v, %v; want ErrReplacementNotPrepared wrapping ErrPendingInteraction, nothing queued", out, err)
+			}
+			if got := callMethods(inputCalls(sp.Calls, info.SessionName)); !slices.Equal(got, []string{"Interrupt"}) {
+				t.Fatalf("sent %v, want only the interrupt: no preparation key and no message into the pending prompt", got)
+			}
+			if items := queuedMessages(t, cityPath, info.ID); len(items) != 0 {
+				t.Fatalf("queued %+v, want the unprepared replacement not queued", items)
+			}
+		})
 	}
-	if sp.CountCalls("Interrupt", info.SessionName) == 0 {
-		t.Fatalf("calls = %v, want the interrupt sent", callMethods(sp.Calls))
-	}
-	for _, method := range []string{"ClearInput", "NudgeNow", "Nudge"} {
-		if got := sp.CountCalls(method, info.SessionName); got != 0 {
-			t.Fatalf("calls = %v, want no %s into the pending prompt", callMethods(sp.Calls), method)
-		}
-	}
-	items := queuedMessages(t, cityPath, info.ID)
-	if len(items) != 1 || items[0].Message != "replace the turn" || items[0].Source != nudgequeue.SourceSubmit {
-		t.Fatalf("queued %+v, want the replacement queued as a submit", items)
+}
+
+// TestInterruptNowRefusesAReplacementWhosePreparationMeetsAPrompt (row A21):
+// a prompt that opens after the post-interrupt look refuses the
+// preparation's own keys instead (Gemini's reset types /rewind through the
+// runtime's prompt-guarded immediate nudge). That replacement is not
+// prepared either: it is refused with ErrReplacementNotPrepared, nothing is
+// typed after the refusal, and nothing is queued.
+func TestInterruptNowRefusesAReplacementWhosePreparationMeetsAPrompt(t *testing.T) {
+	refusal := fmt.Errorf("%w: approval open", runtime.ErrPendingInteraction)
+	for _, tc := range []struct {
+		provider string
+		refuse   func(sp *runtime.Fake, name string)
+		sent     []string // the input calls, the refused preparation key last
+	}{
+		{"gemini", func(sp *runtime.Fake, name string) { sp.ResetTurnErrors[name] = refusal }, []string{"Interrupt", "ResetInterruptedTurn"}},
+		{"claude", func(sp *runtime.Fake, name string) { sp.ClearInputErrors[name] = refusal }, []string{"Interrupt", "ClearInput"}},
+	} {
+		t.Run(tc.provider, func(t *testing.T) {
+			sp := runtime.NewFake()
+			mgr, info, cityPath := newPendingQueueSession(t, sp, tc.provider)
+			tc.refuse(sp, info.SessionName)
+
+			out, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
+			if !errors.Is(err, ErrReplacementNotPrepared) || !errors.Is(err, ErrPendingInteraction) || out.Queued {
+				t.Fatalf("Submit(interrupt_now) = %+v, %v; want ErrReplacementNotPrepared wrapping ErrPendingInteraction, nothing queued", out, err)
+			}
+			if got := callMethods(inputCalls(sp.Calls, info.SessionName)); !slices.Equal(got, tc.sent) {
+				t.Fatalf("sent %v, want %v: nothing typed after the refused preparation", got, tc.sent)
+			}
+			if items := queuedMessages(t, cityPath, info.ID); len(items) != 0 {
+				t.Fatalf("queued %+v, want the unprepared replacement not queued", items)
+			}
+		})
 	}
 }
 
 // TestInterruptNowQueuesWhenFinalSendRefusedBehindPending (row A21): a
-// prompt that opens after the post-interrupt look is refused by the runtime
-// at the final send; the message is queued, not dropped.
+// prompt that opens after the preparation is refused by the runtime at the
+// final send; the message is queued, not dropped. The preparation ran
+// before the send, so the queued replacement needs none later.
 func TestInterruptNowQueuesWhenFinalSendRefusedBehindPending(t *testing.T) {
 	sp := runtime.NewFake()
 	mgr, info, cityPath := newPendingQueueSession(t, sp, "claude")
@@ -185,8 +223,50 @@ func TestInterruptNowQueuesWhenFinalSendRefusedBehindPending(t *testing.T) {
 	if err != nil || !out.Queued {
 		t.Fatalf("Submit(interrupt_now) = %+v, %v; want queued behind the refusal", out, err)
 	}
+	if i, j := callIndex(sp.Calls, "ClearInput", info.SessionName), callIndex(sp.Calls, "NudgeNow", info.SessionName); i < 0 || j < i {
+		t.Fatalf("calls = %v, want the input cleared before the refused send", callMethods(sp.Calls))
+	}
 	if items := queuedMessages(t, cityPath, info.ID); len(items) != 1 || items[0].Message != "replace the turn" {
 		t.Fatalf("queued %+v, want the replacement queued", items)
+	}
+}
+
+// TestPendingRefusalWhoseQueueingFailsIsNotQueued: a message refused behind
+// a pending interaction whose queueing then fails is reported neither queued
+// nor deferred, and its error carries the refusal beside the queue's
+// failure, so the caller learns it went nowhere. Nothing logs it as queued.
+func TestPendingRefusalWhoseQueueingFailsIsNotQueued(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		send func(mgr *Manager, info Info) (SubmitOutcome, error)
+	}{
+		{"send", func(mgr *Manager, info Info) (SubmitOutcome, error) {
+			return mgr.Send(context.Background(), testActor(mgr, ActorBackground), info.ID, "you have mail", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+		}},
+		{"interrupt_now", func(mgr *Manager, info Info) (SubmitOutcome, error) {
+			return mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubSubmitPoller(t)
+			logs := captureLog(t)
+			full := errors.New("queue full")
+			sp := runtime.NewFake()
+			mgr := newTestManager(t, beads.NewMemStore(), sp, WithDeferredSubmitQueue(&recordingDeferredQueue{err: full}))
+			info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			sp.NudgeErrors = map[string]error{info.SessionName: fmt.Errorf("%w: approval open", runtime.ErrNudgeRefusedPendingInteraction)}
+
+			out, err := tc.send(mgr, info)
+			if out.Queued || out.Deferred || !errors.Is(err, ErrPendingInteraction) || !errors.Is(err, full) {
+				t.Fatalf("%s = %+v, %v; want neither queued nor deferred, and an error wrapping the refusal and the queue's failure", tc.name, out, err)
+			}
+			if strings.Contains(logs.String(), "queued a message") {
+				t.Fatalf("log = %q, want nothing logged as queued", logs.String())
+			}
+		})
 	}
 }
 
@@ -253,6 +333,36 @@ func TestStopTurnSkipsKeysBehindPending(t *testing.T) {
 			}
 			if !strings.Contains(logs.String(), "pending interaction") {
 				t.Fatalf("log = %q, want the skipped follow-on keys logged", logs.String())
+			}
+		})
+	}
+}
+
+// TestStopTurnForReplacementBehindPendingIsNotPrepared (row B4): a stop for
+// a replacement whose turn settled with a permission prompt open (it opened
+// on the interrupt) types none of the preparation's keys, which would land
+// in the prompt, and reports the session not prepared, as a failed
+// preparation is: an error wrapping ErrReplacementNotPrepared and
+// ErrPendingInteraction, never success. The lane then records
+// failed{replacement_not_prepared} instead of typing the message onto an
+// unprepared session once the prompt is answered. A plain stop still
+// succeeds (TestStopTurnSkipsKeysBehindPending).
+func TestStopTurnForReplacementBehindPendingIsNotPrepared(t *testing.T) {
+	for _, provider := range []string{"claude", "gemini"} {
+		t.Run(provider, func(t *testing.T) {
+			logs := captureLog(t)
+			sp := runtime.NewFake()
+			mgr, info, _ := newFencedStopSessionOn(t, &dialogAfterInterruptProvider{Fake: sp}, sp, provider, nil, runtime.TurnInterruptKeystroke)
+
+			_, err := mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{ForReplacement: true})
+			if !errors.Is(err, ErrReplacementNotPrepared) || !errors.Is(err, ErrPendingInteraction) || errors.Is(err, runtime.ErrTurnNotEnded) {
+				t.Fatalf("StopTurnWith(replacement, prompt open) = %v, want ErrReplacementNotPrepared wrapping ErrPendingInteraction", err)
+			}
+			if got := callMethods(inputCalls(sp.SnapshotCalls(), info.SessionName)); !slices.Equal(got, []string{"Interrupt"}) {
+				t.Fatalf("sent %v, want only the interrupt: no preparation key into the pending prompt", got)
+			}
+			if !strings.Contains(logs.String(), "pending interaction") {
+				t.Fatalf("log = %q, want the skipped preparation logged", logs.String())
 			}
 		})
 	}

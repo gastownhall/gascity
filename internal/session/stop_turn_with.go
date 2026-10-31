@@ -42,9 +42,11 @@ type StopTurnOptions struct {
 	// runtime clears the input box for the message where the family leaves
 	// input in it (Claude, Gemini). Without it a stop only clears a draft
 	// Claude restores, best effort. A failed preparation is an error
-	// wrapping ErrReplacementNotPrepared, the interrupt already settled. As
-	// with Still, whether the runtime runs is a fresh liveness read's
-	// (StopTurnWith).
+	// wrapping ErrReplacementNotPrepared, the interrupt already settled; so
+	// is a pending interaction that holds the input once the turn settled,
+	// which gets none of the preparation's keys and is also wrapped
+	// (ErrPendingInteraction). As with Still, whether the runtime runs is a
+	// fresh liveness read's (StopTurnWith).
 	ForReplacement bool
 	// Restart, when set, replaces the runtime when the interrupt was sent
 	// and its turn was not seen to end: an interrupt op's on_failure:
@@ -225,14 +227,14 @@ func (m *Manager) StopTurnWith(ctx context.Context, id string, opts StopTurnOpti
 			report.Restarted = true
 			return nil
 		}
-		if stopSendsFollowOnKeys(b, mode, opts.ForReplacement) && m.inputHeldByPendingInteractionLocked(sessName, "follow-on keys") {
-			// The stop succeeded; its follow-on keys (the replacement's
-			// preparation, the input clear, the background-work stop) would
-			// land in the prompt, so none is sent.
-			return nil
-		}
 		if opts.ForReplacement {
 			return m.prepareReplacementLocked(ctx, b, id, sessName, mode)
+		}
+		if stopSendsFollowOnKeys(b, mode) && m.inputHeldByPendingInteractionLocked(sessName, "follow-on keys") != nil {
+			// The stop succeeded; its follow-on keys (the input clear, the
+			// background-work stop) would land in the prompt, so none is
+			// sent.
+			return nil
 		}
 		if restoresInterruptedInput(b) && mode == runtime.TurnInterruptKeystroke {
 			// The stop already succeeded. A draft that will not clear is
@@ -252,29 +254,27 @@ func (m *Manager) StopTurnWith(ctx context.Context, id string, opts StopTurnOpti
 	return report, err
 }
 
-// stopSendsFollowOnKeys reports whether a settled stop of b's turn, sent as
-// mode, goes on to type keys: a replacement's preparation
-// (replacementSendsKeys), or else the restored-input clear and the
+// stopSendsFollowOnKeys reports whether a settled plain stop of b's turn
+// (not one for a replacement, which prepareReplacementLocked decides), sent
+// as mode, goes on to type keys: the restored-input clear and the
 // background-work stop.
-func stopSendsFollowOnKeys(b beads.Bead, mode runtime.TurnInterruptMode, forReplacement bool) bool {
-	if forReplacement {
-		return replacementSendsKeys(b, mode)
-	}
+func stopSendsFollowOnKeys(b beads.Bead, mode runtime.TurnInterruptMode) bool {
 	return restoresInterruptedInput(b) && mode == runtime.TurnInterruptKeystroke || stopsBackgroundWork(b)
 }
 
-// inputHeldByPendingInteractionLocked reports whether a pending interaction
-// (a permission prompt or a question) holds sessName's input once its turn
-// was interrupted, logging that the keys named by what are not sent: they
-// would land in the prompt and answer it. A look that fails holds nothing,
-// so the keys go out as before.
-func (m *Manager) inputHeldByPendingInteractionLocked(sessName, what string) bool {
+// inputHeldByPendingInteractionLocked returns the pending interaction (a
+// permission prompt or a question) that holds sessName's input once its
+// turn was interrupted, as an error wrapping ErrPendingInteraction, logging
+// that the keys named by what are not sent: they would land in the prompt
+// and answer it. It is nil when none is pending, and when the look fails:
+// that holds nothing, so the keys go out as before.
+func (m *Manager) inputHeldByPendingInteractionLocked(sessName, what string) error {
 	err := m.pendingInteractionLocked(sessName)
 	if !errors.Is(err, ErrPendingInteraction) {
-		return false
+		return nil
 	}
 	log.Printf("session: interrupted the turn of %q but sent no %s: %v", sessName, what, err)
-	return true
+	return err
 }
 
 // waitForInterruptSettleLocked runs a stop's own waits after its interrupt
@@ -380,12 +380,22 @@ func (m *Manager) restartAfterFailedInterruptLocked(ctx context.Context, by Acto
 	return nil
 }
 
-// prepareReplacementLocked is StopTurnOptions.ForReplacement's preparation,
-// the steps interruptAndSubmitLocked runs between a settled interrupt and its
-// message.
-// A failure is an error wrapping ErrReplacementNotPrepared: the interrupt
-// was sent and its turn settled.
+// prepareReplacementLocked prepares b's session, its turn interrupted as
+// mode and settled, for the message that replaces that turn: the steps
+// interruptAndSubmitLocked runs between its interrupt and its message, and
+// StopTurnOptions.ForReplacement's preparation. A failure is an error
+// wrapping ErrReplacementNotPrepared: the interrupt was sent and its turn
+// settled. So is a pending interaction that holds the input by then (it
+// opened as the turn ended): none of the preparation's keys is sent, since
+// they would land in it, and the error also wraps ErrPendingInteraction.
+// The replacing message is then neither sent nor queued, as a queued
+// delivery would not prepare the session.
 func (m *Manager) prepareReplacementLocked(ctx context.Context, b beads.Bead, id, sessName string, mode runtime.TurnInterruptMode) error {
+	if replacementSendsKeys(b, mode) {
+		if err := m.inputHeldByPendingInteractionLocked(sessName, "replacement preparation keys"); err != nil {
+			return fmt.Errorf("session %s: %w: %w", id, ErrReplacementNotPrepared, err)
+		}
+	}
 	if err := m.resetInterruptedTurnLocked(ctx, b, sessName); err != nil {
 		return fmt.Errorf("session %s: %w: %w", id, ErrReplacementNotPrepared, err)
 	}
@@ -398,10 +408,13 @@ func (m *Manager) prepareReplacementLocked(ctx context.Context, b beads.Bead, id
 }
 
 // ErrReplacementNotPrepared reports a stop for a replacement
-// (StopTurnOptions.ForReplacement) whose interrupt was sent and whose turn
-// settled, but whose preparation for the replacing message failed. Whatever
-// else the error wraps (a fence miss on the input clear, say) is the
-// preparation's, not the interrupt's: the interrupt was not "nothing sent".
+// (StopTurnOptions.ForReplacement), or an interrupt_now submit, whose
+// interrupt was sent and whose turn settled, but whose preparation for the
+// replacing message failed, a pending interaction that holds the input
+// (ErrPendingInteraction) among the causes. Whatever else the error wraps
+// (a fence miss on the input clear, say) is the preparation's, not the
+// interrupt's: the interrupt was not "nothing sent". An interrupt_now
+// submit neither sends nor queues its message then.
 var ErrReplacementNotPrepared = errors.New("the interrupted turn settled but the session could not be prepared for its replacement")
 
 // ErrInterruptOutcomeUnknown reports an interrupt that was sent, or may have
