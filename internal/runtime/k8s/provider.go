@@ -319,9 +319,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 // entrypoint launches the agent) and Relaunch (after the respawn). k8s does not
 // run SessionLive (RunLive is a no-op), matching the pre-un-weld behavior.
 func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cfg runtime.Config) {
-	// Enable pane logging for diagnostics.
+	// Enable pane logging for diagnostics. No -o: the pipe survives
+	// respawn-pane -k, and -o would toggle it off on every other Relaunch;
+	// plain pipe-pane replaces any existing pipe, so this is idempotent.
 	_, _ = p.ops.execInPod(ctx, podName, "agent",
-		[]string{"tmux", "pipe-pane", "-t", tmuxSession, "-o", "cat >> /tmp/agent-output.log"}, nil)
+		[]string{"tmux", "pipe-pane", "-t", tmuxSession, "cat >> /tmp/agent-output.log"}, nil)
 
 	// Run session_setup commands inside the pod.
 	for _, cmd := range cfg.SessionSetup {
