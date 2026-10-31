@@ -256,6 +256,11 @@ func Phase1Profiles() []Profile {
 				RecallResponseContains: "Pi phase 1 validates the tmux CLI transcript contract.",
 				ResetResponseContains:  "I cannot repeat the earlier Pi summary because this session started fresh.",
 			},
+			ProgramStatus: ProgramStatusExpectation{
+				Declared: true,
+				Capture:  "testdata/program_status/pi-1.4.0.bin",
+				Program:  "pi 1.4.0 (npm @earendil-works/pi-coding-agent)",
+			},
 		},
 		{
 			ID:       ProfileAntigravityTmuxCLI,

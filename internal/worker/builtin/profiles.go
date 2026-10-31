@@ -90,6 +90,11 @@ type BuiltinProviderSpec struct {
 
 func boolPtr(b bool) *bool { return &b }
 
+// programStatusOSC7501 mirrors config.ProgramStatusProtocolOSC7501. This
+// package sits below config and cannot import it; every builtin binding is
+// validated by config.TestBuiltinProgramStatusBindingsValidate.
+const programStatusOSC7501 = "osc7501"
+
 // optionValuePlaceholder mirrors config.OptionValuePlaceholder. This package
 // sits below config and cannot import it, so the token is duplicated here and
 // pinned by config.TestBuiltinTemplatesUseConfigPlaceholder.
@@ -516,6 +521,19 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				modelChoice("grok-4.7", "Grok 4.7"),
 			),
 		},
+
+		// Grok Build 1.0.52+ reports OSC 7501 as app "grok-build". Its default
+		// auto mode sends no support probe inside tmux and falls back to Rex's
+		// REX_SESSION; with it set, grok writes its reports wrapped in tmux DCS
+		// passthrough, which tmux drops unless allow-passthrough is on and the
+		// capture reader unwraps. The config.toml switch
+		// [ui.notifications] program_status = "on" has no env equivalent
+		// (GROK_CONFIG overlays drop the ui table). Verified with grok 1.0.70
+		// (ga-f4ovjm.38). Its first idle report follows TUI init (model list
+		// loaded, or its fetch timed out), not the ready delay above.
+		ProgramStatusProtocol: programStatusOSC7501,
+		ProgramStatusApp:      "grok-build",
+		ProgramStatusEnv:      map[string]string{"REX_SESSION": "1"},
 	},
 	"kimi": {
 		DisplayName: "Kimi Code CLI",
@@ -839,6 +857,14 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				FlagArgs: []string{"--provider", "ollama-cloud", "--model", "gpt-oss:20b"},
 			}),
 		},
+
+		// pi 1.1.0+ reports OSC 7501 only after the terminal answers its
+		// support probe, which tmux never does; PI_PROGRAM_STATUS=1 forces
+		// reports on and skips the probe. Verified with pi 1.4.0
+		// (ga-f4ovjm.38).
+		ProgramStatusProtocol: programStatusOSC7501,
+		ProgramStatusApp:      "pi",
+		ProgramStatusEnv:      map[string]string{"PI_PROGRAM_STATUS": "1"},
 	},
 	"omp": {
 		DisplayName:      "Oh My Pi (OMP)",
@@ -850,6 +876,12 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		InstructionsFile: "AGENTS.md",
 		ResumeFlag:       "--resume",
 		ResumeStyle:      "flag",
+
+		// omp 18.8.7+ reports OSC 7501 on any TTY without a probe while its
+		// terminal.programStatus setting is on (the default). Verified with
+		// omp 18.14.1 (ga-f4ovjm.38).
+		ProgramStatusProtocol: programStatusOSC7501,
+		ProgramStatusApp:      "omp",
 	},
 	"antigravity": {
 		DisplayName: "Antigravity",
@@ -995,6 +1027,7 @@ func cloneBuiltinProviderSpec(spec BuiltinProviderSpec) BuiltinProviderSpec {
 	spec.PrintArgs = cloneStrings(spec.PrintArgs)
 	spec.OptionsSchema = cloneBuiltinOptions(spec.OptionsSchema)
 	spec.ACPArgs = cloneStrings(spec.ACPArgs)
+	spec.ProgramStatusEnv = cloneStringMap(spec.ProgramStatusEnv)
 	return spec
 }
 

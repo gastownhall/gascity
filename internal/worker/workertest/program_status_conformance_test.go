@@ -1,28 +1,37 @@
 package workertest
 
 import (
+	"os"
 	"slices"
 	"strings"
 	"testing"
+
+	workerbuiltin "github.com/gastownhall/gascity/internal/worker/builtin"
 )
 
 // programStatusChecks are the checks of the landed WC-PSTAT rows, by code. A
 // row joins this map in the change that removes it from programStatusPending.
-var programStatusChecks = map[RequirementCode]func(t *testing.T, profile Profile) Result{}
+var programStatusChecks = map[RequirementCode]func(t *testing.T, profile Profile) Result{
+	RequirementProgramStatusSurfaces: checkProgramStatusSurfaces,
+}
 
-// providerDataDeclaresProgramStatus reports whether gc's provider data
-// declares OSC 7501 program status for profile's family. No family declares
-// it yet: the provider binding lands with ga-f4ovjm.13 and the per-family
-// declarations with ga-f4ovjm.18 and ga-f4ovjm.38, which make this read
-// that binding.
-func providerDataDeclaresProgramStatus(Profile) bool { return false }
+// programStatusProtocolOSC7501 is the builtin binding's declaring protocol
+// (config.ProgramStatusProtocolOSC7501).
+const programStatusProtocolOSC7501 = "osc7501"
+
+// providerDataDeclaresProgramStatus reports whether gc's builtin provider
+// data declares OSC 7501 program status for profile's family.
+func providerDataDeclaresProgramStatus(profile Profile) bool {
+	spec, ok := workerbuiltin.BuiltinProviders()[ProfileFamily(profile)]
+	return ok && spec.ProgramStatusProtocol == programStatusProtocolOSC7501
+}
 
 // TestProgramStatusConformance runs the WC-PSTAT rows for every profile: a
 // declaration that drifts fails, an undeclared profile and a pending row
 // are recorded and skipped, and a landed row runs its check.
 func TestProgramStatusConformance(t *testing.T) {
 	reporter := NewSuiteReporter(t, "program_status", map[string]string{"tier": "worker-core"})
-	profiles, err := selectedProfiles()
+	profiles, err := filterProfiles(ProgramStatusProfiles())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,5 +124,37 @@ func TestProgramStatusGate(t *testing.T) {
 	t.Cleanup(func() { programStatusPending[code] = slice })
 	if r, run := ProgramStatusGate(declared, code, true); !run || r.Status != "" {
 		t.Fatalf("declared, row landed: %+v run=%t, want the row run", r, run)
+	}
+}
+
+// Kills a builtin family declared without a WC-PSTAT profile (its
+// declaration would never be held to the rows), a declared profile without a
+// readable capture, and a family listed twice.
+func TestEveryDeclaredBuiltinHasProgramStatusProfile(t *testing.T) {
+	byFamily := map[string]Profile{}
+	for _, profile := range ProgramStatusProfiles() {
+		family := ProfileFamily(profile)
+		if _, dup := byFamily[family]; dup {
+			t.Errorf("family %q has two program-status profiles", family)
+		}
+		byFamily[family] = profile
+		if !profile.ProgramStatus.Declared {
+			continue
+		}
+		if profile.ProgramStatus.Capture == "" || profile.ProgramStatus.Program == "" {
+			t.Errorf("%s: declared without a capture and its program", profile.ID)
+			continue
+		}
+		if _, err := os.Stat(profile.ProgramStatus.Capture); err != nil {
+			t.Errorf("%s: capture: %v", profile.ID, err)
+		}
+	}
+	for family, spec := range workerbuiltin.BuiltinProviders() {
+		if spec.ProgramStatusProtocol != programStatusProtocolOSC7501 {
+			continue
+		}
+		if profile, ok := byFamily[family]; !ok || !profile.ProgramStatus.Declared {
+			t.Errorf("builtin %q declares program status but no WC-PSTAT profile expects it", family)
+		}
 	}
 }
