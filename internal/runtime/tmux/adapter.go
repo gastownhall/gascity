@@ -47,6 +47,9 @@ type Provider struct {
 	// unixListening reports whether a listener is bound to a unix socket
 	// path, for ServerConfirmedDead. Nil selects unixPathListening.
 	unixListening func(path string) (bool, error)
+	// heal is program-capture heal's per-pane backoff
+	// (program_capture_heal.go).
+	heal captureHealBackoff
 }
 
 var instanceTokenReader = rand.Reader

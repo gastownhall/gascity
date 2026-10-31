@@ -92,6 +92,9 @@ type runtimeInventoryLane struct {
 	envWindowRefreshes int
 	lastSignature      string
 	alerted            map[string]time.Time
+	// captureSweptCfg is the config the last program-capture disarm sweep
+	// ran under (healProgramCaptures): one sweep per config load.
+	captureSweptCfg *config.City
 	// poolDeathPrev holds the on_death handler names listed and not yet
 	// proven gone (detectPoolDeathEdges).
 	poolDeathPrev map[string]poolDeathSighting
@@ -355,6 +358,9 @@ func (cr *CityRuntime) runInventoryPass(ctx context.Context, reason string) {
 	if report.snapshot != nil {
 		cr.detectPoolDeaths(lane, &report)
 	}
+	if result == inventoryResultPublished {
+		cr.healProgramCaptures(lane, cfg, sp, &report)
+	}
 	finished := lane.clock.Now()
 	report.duration = finished.Sub(started)
 
@@ -395,9 +401,10 @@ func (l *runtimeInventoryLane) publish(ctx context.Context, listing inventoryLis
 	enrichCtx, cancel := context.WithTimeout(ctx, inventoryEnrichBound-reserve)
 	defer cancel()
 	phase := l.clock.Now()
-	attrs, hosts, enrichErrs := l.enrich(enrichCtx, listing.leaves, backends)
+	attrs, hosts, programs, enrichErrs := l.enrich(enrichCtx, listing.leaves, backends)
 	report.enrich = l.clock.Now().Sub(phase)
 	report.enrichErrors = enrichErrs
+	report.programs = programs
 
 	phase = l.clock.Now()
 	report.envReads, report.envBacklog = l.readIdentities(ctx, attrs, hosts)
@@ -622,10 +629,12 @@ func classifyInventoryBackend(leaf inventoryBackend) BackendPass {
 // which record their enrichment facts as unsupported; names whose backend's
 // inventory failed, or that the inventory omits, get none and keep theirs.
 // hosts maps each enriched name to its backend, for the identity read and
-// the process probe.
-func (l *runtimeInventoryLane) enrich(ctx context.Context, leaves []inventoryBackend, backends []BackendPass) (attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, errs []string) {
+// the process probe; programs holds each enriched name's program-status
+// reading, for program-capture heal.
+func (l *runtimeInventoryLane) enrich(ctx context.Context, leaves []inventoryBackend, backends []BackendPass) (attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, programs map[string]runtime.ProgramStatus, errs []string) {
 	attrs = make(map[string]InventoryAttrs)
 	hosts = make(map[string]runtime.Provider)
+	programs = make(map[string]runtime.ProgramStatus)
 	claimed := make(map[string]bool)
 	for i, leaf := range leaves {
 		if backends[i].Outcome == OutcomeFailed {
@@ -670,9 +679,10 @@ func (l *runtimeInventoryLane) enrich(ctx context.Context, leaves []inventoryBac
 				RestartRequested: e.RestartRequested,
 			}
 			hosts[name] = leaf.provider
+			programs[name] = e.Program
 		}
 	}
-	return attrs, hosts, errs
+	return attrs, hosts, programs, errs
 }
 
 // readIdentities fills the identity of every enriched name on a backend
@@ -1243,6 +1253,10 @@ type inventoryPassReport struct {
 	// attrs is the pass's enrichment, and gone the names it proved gone.
 	attrs map[string]InventoryAttrs
 	gone  []string
+	// programs is each enriched name's program-status reading, and
+	// captureHeals what program-capture heal did with them.
+	programs     map[string]runtime.ProgramStatus
+	captureHeals programCaptureHealTally
 }
 
 // traceDue reports whether a pass is worth a trace record: a flip, a change
@@ -1255,7 +1269,7 @@ func (l *runtimeInventoryLane) traceDue(r *inventoryPassReport) bool {
 	}
 	changed := signature != l.lastSignature
 	l.lastSignature = signature
-	return changed || r.flips > 0 || len(r.alerts) > 0 || r.seq%inventoryTraceHeartbeatPasses == 0
+	return changed || r.flips > 0 || len(r.alerts) > 0 || r.captureHeals.acted() || r.seq%inventoryTraceHeartbeatPasses == 0
 }
 
 // traceInventoryPass records one pass in its own trace cycle, like an
@@ -1317,6 +1331,7 @@ func inventoryPassFields(r *inventoryPassReport) map[string]any {
 		"inventory_probe_ms":      r.processProbe.Milliseconds(),
 		"inventory_enrich_errors": strings.Join(r.enrichErrors, "; "),
 		"inventory_health_alerts": strings.Join(r.alerts, ","),
+		"inventory_capture_heals": r.captureHeals.String(),
 	}
 	if s := r.snapshot; s != nil {
 		addInventorySnapshotFields(fields, s)

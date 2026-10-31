@@ -53,6 +53,12 @@ func captureEmitterBin(t *testing.T) string {
 // socket, and the client environment carries no TMUX.
 func newCaptureScratchServer(t *testing.T) string {
 	t.Helper()
+	return newScratchServer(t, "arm")
+}
+
+// newScratchServer is newCaptureScratchServer on socket osc7501x-<kind>-<rand>.
+func newScratchServer(t *testing.T, kind string) string {
+	t.Helper()
 	if !hasTmux() {
 		t.Skip("tmux not installed")
 	}
@@ -60,7 +66,7 @@ func newCaptureScratchServer(t *testing.T) string {
 	if _, err := rand.Read(b[:]); err != nil {
 		t.Fatal(err)
 	}
-	socket := "osc7501x-arm-" + hex.EncodeToString(b[:])
+	socket := "osc7501x-" + kind + "-" + hex.EncodeToString(b[:])
 	scratch := func(args ...string) *exec.Cmd {
 		cmd := exec.Command("tmux", append([]string{"-L", socket, "-f", "/dev/null"}, args...)...)
 		cmd.Env = slices.DeleteFunc(os.Environ(), func(kv string) bool {
