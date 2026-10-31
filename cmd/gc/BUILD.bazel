@@ -1898,6 +1898,7 @@ go_test(
         "remote_gate_test.go",
         "remote_target_test.go",
         "repro_ga_rble9w_test.go",
+        "repro_sling_diagnostic_swallowed_test.go",
         "residency_leg_agreement_test.go",
         "residency_namespace_test.go",
         "residency_topology_test.go",
