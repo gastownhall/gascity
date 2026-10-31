@@ -3,18 +3,20 @@
 package schemacontract
 
 import (
+	_ "embed" // EmbeddedBaseline is the committed baseline file.
 	"encoding/json"
-	"errors"
-	"io/fs"
 )
 
 // BaselinePath is the repository-relative path of the committed baseline.
 const BaselinePath = "internal/schemacontract/baseline.json"
 
-// EmbeddedBaseline holds the committed baseline bytes.
-var EmbeddedBaseline []byte
+// baselineFormat is the only baseline layout this package reads and writes.
+const baselineFormat = 1
 
-var errNotImplemented = errors.New("schemacontract: not implemented")
+// EmbeddedBaseline holds the committed baseline bytes.
+//
+//go:embed baseline.json
+var EmbeddedBaseline []byte
 
 // Field is the contract record of one field path in a schema.
 type Field struct {
@@ -26,19 +28,19 @@ type Field struct {
 
 // Entry is the contract of one schema at one schema_version.
 type Entry struct {
-	SchemaVersion string
-	Note          string
-	Issue         string
-	PR            string
-	JSONL         bool
-	RawJSON       bool
-	Variants      map[string][]Field
+	SchemaVersion string             `json:"schema_version"`
+	Note          string             `json:"note,omitempty"`
+	Issue         string             `json:"issue,omitempty"`
+	PR            string             `json:"pr,omitempty"`
+	JSONL         bool               `json:"jsonl"`
+	RawJSON       bool               `json:"raw_json"`
+	Variants      map[string][]Field `json:"variants"`
 }
 
 // Baseline is the committed record of every schema's contract history.
 type Baseline struct {
-	Format  int
-	Schemas map[string][]Entry
+	Format  int                `json:"format"`
+	Schemas map[string][]Entry `json:"schemas"`
 }
 
 // MergeSummary counts what Merge changed.
@@ -46,26 +48,4 @@ type MergeSummary struct {
 	Seeded          int
 	EntriesAdded    int
 	RecordsAppended int
-}
-
-// Extract derives the contract entry of one schema document.
-func Extract(_ []byte) (Entry, error) { return Entry{}, errNotImplemented }
-
-// ExtractAll extracts every *.schema.json under fsys, keyed by relative path.
-func ExtractAll(_ fs.FS) (map[string]Entry, error) { return nil, errNotImplemented }
-
-// Check compares the live schemas against the baseline and returns one
-// message per violation.
-func Check(_ Baseline, _ map[string]Entry) []string { return nil }
-
-// ParseBaseline strictly decodes baseline bytes.
-func ParseBaseline(_ []byte) (Baseline, error) { return Baseline{}, errNotImplemented }
-
-// Marshal renders a baseline as deterministic bytes.
-func Marshal(_ Baseline) ([]byte, error) { return nil, errNotImplemented }
-
-// Merge appends what the live schemas add to the baseline without rewriting
-// or deleting anything.
-func Merge(_ Baseline, _ map[string]Entry) (Baseline, MergeSummary, error) {
-	return Baseline{}, MergeSummary{}, errNotImplemented
 }

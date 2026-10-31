@@ -49,6 +49,7 @@ go_library(
     srcs = ["main.go"],
     importpath = "github.com/gastownhall/gascity/cmd/gen-schema-baseline",
     visibility = ["//visibility:private"],
+    deps = ["//internal/schemacontract"],
 )
 
 go_binary(
