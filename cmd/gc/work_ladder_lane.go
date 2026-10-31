@@ -421,7 +421,7 @@ func (p *ladderPass) seat(row beads.Bead, targets []ladderTarget) {
 	if _, nudges := ladderNudgeOf(d); nudges {
 		route = p.route(row)
 	}
-	landed, ok := p.commit(row, targets, hold, live, outs, route)
+	landed, ok := p.commit(row, targets, hold, live, outs, route, freshRestartOf(d))
 	if !ok {
 		return
 	}
@@ -680,7 +680,14 @@ func ladderGate(info session.Info, meta map[string]string, now time.Time) workla
 // another, its key is held and the decision taken again, and a release that
 // decision newly writes is re-proved like any other. A route that could not
 // be read lands its nudge unmarked, for act to report unsent.
-func (p *ladderPass) commit(row beads.Bead, targets []ladderTarget, hold map[workladder.ClaimKey]bool, rt ladderRuntime, outs []ladderNoticeResult, route *ladderRoute) (ladderLanded, bool) {
+//
+// restarted is whether the pass's own decision restarted the seat fresh: only
+// then did the pass re-read every claim (recheckActed) and what holds a
+// restart (rt.restartDue). A decision on the fresh row that restarts the seat
+// when the pass's did not (an episode confirmed only on this revision, or a
+// block another write lifted) holds all its work for the pass, and the
+// restart with it: the next pass reads what it needs and decides again.
+func (p *ladderPass) commit(row beads.Bead, targets []ladderTarget, hold map[workladder.ClaimKey]bool, rt ladderRuntime, outs []ladderNoticeResult, route *ladderRoute, restarted bool) (ladderLanded, bool) {
 	id := row.ID
 	landed := ladderLanded{row: row}
 	wrote, err := p.front.UpdateRowFenced(id, workLadderCommitAttempts, func(fresh session.Info, resp session.PersistedResponse) (session.RowPatch, bool) {
@@ -691,16 +698,18 @@ func (p *ladderPass) commit(row beads.Bead, targets []ladderTarget, hold map[wor
 		stored, _ := decodeLadderCell(resp.Metadata)
 		prev, settled := foldLadderNotices(stored, outs)
 		hold := maps.Clone(hold)
-		if !rt.restartDue && workladder.RestartDue(prev, p.now, workladder.DefaultPolicy()) {
-			// The episode stands confirmed on this revision but did not on
-			// the pass's read, so nothing that holds its restart was read:
-			// its work waits the pass out, and the restart with it.
-			for _, t := range targets {
-				hold[t.work.Key] = true
+		obs := p.observe(fresh, resp.Metadata, prev, targets, hold, rt) // obs.Hold is hold: a key held below is held there
+		decide := func() workladder.Decision {
+			d := decideWorkLadder(prev, obs)
+			if freshRestartOf(d) && !restarted {
+				for _, t := range targets {
+					hold[t.work.Key] = true
+				}
+				d = decideWorkLadder(prev, obs)
 			}
+			return d
 		}
-		obs := p.observe(fresh, resp.Metadata, prev, targets, hold, rt)
-		d := decideWorkLadder(prev, obs)
+		d := decide()
 		freshRow := row
 		freshRow.Metadata = resp.Metadata
 		var mark workladder.NoticeMark
@@ -724,7 +733,7 @@ func (p *ladderPass) commit(row beads.Bead, targets []ladderTarget, hold map[wor
 					// claim: keep it.
 					if src, seeded := ladderSeed(resp.Metadata, targets[i]); seeded {
 						obs.Started[k] = src // started after all: decide it so
-						d = decideWorkLadder(prev, obs)
+						d = decide()
 						continue
 					}
 				}
@@ -745,7 +754,7 @@ func (p *ladderPass) commit(row beads.Bead, targets []ladderTarget, hold map[wor
 				fmt.Fprintf(p.l.stderr, "work-ladder: %s: deriving its notice about %s: %v\n", id, n.Key.Bead, err) //nolint:errcheck // best-effort stderr
 			}
 			hold[n.Key] = true // no route resolved for this row, or no op id for its notice: no nudge this pass
-			d = decideWorkLadder(prev, obs)
+			d = decide()
 		}
 		landed = ladderLanded{d: d, row: freshRow, settled: settled, dropped: droppedMarks(prev, d.Next), mark: mark, before: prev.RateLimit}
 		if !d.Changed && len(settled) == 0 {
@@ -885,6 +894,12 @@ func recycleReason(r workladder.Recycle) string {
 func (p *ladderPass) nudge(row beads.Bead, n workladder.Nudge, gen int64) {
 	text := p.nudgeText(row, n)
 	fields := workLadderEventFields{Kind: n.Kind.String(), Rung: n.Rung.String(), Attempt: n.Attempt, Paused: n.Paused}
+	// The delivery's time is its attempt's start, read before the call: a
+	// delivery returns only once the runtime confirms the submit (a tmux
+	// nudge, seconds), and a provider refuses within a second of the
+	// prompt, so a refusal answering this nudge can end before the call
+	// returns.
+	at := p.l.now()
 	err := ladderDeliver(p.env.SP, strings.TrimSpace(row.Metadata["session_name"]), text)
 	if err != nil {
 		fields.Reason = err.Error()
@@ -896,10 +911,8 @@ func (p *ladderPass) nudge(row beads.Bead, n workladder.Nudge, gen int64) {
 		return
 	}
 	p.event(events.WorkNudged, row, n.Key, gen, fields)
-	// The seat took it: its Delivered moves to the lane's clock right after
-	// the call (a refusal ending later answers it), and the entry's
-	// refusals end.
-	at := p.l.now()
+	// The seat took it: its Delivered moves to the attempt's start (a
+	// refusal ending later answers it), and the entry's refusals end.
 	p.settle(row.ID, func(r workladder.Record) (workladder.Record, bool) {
 		return workladder.NudgeDelivered(r, n.Key, gen, at)
 	})
