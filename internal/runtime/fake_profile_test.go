@@ -58,6 +58,8 @@ var optionalInterfaces = map[string]reflect.Type{
 	"LivenessObserver":                reflect.TypeFor[runtime.LivenessObserver](),
 	"LivenessObserverWithError":       reflect.TypeFor[runtime.LivenessObserverWithError](),
 	"ProcessTableScanner":             reflect.TypeFor[runtime.ProcessTableScanner](),
+	"ProgramCaptureHealer":            reflect.TypeFor[runtime.ProgramCaptureHealer](),
+	"ProgramStatusProvider":           reflect.TypeFor[runtime.ProgramStatusProvider](),
 	"RelaunchProvider":                reflect.TypeFor[runtime.RelaunchProvider](),
 	"Router":                          reflect.TypeFor[runtime.Router](),
 	"ServerDeathConfirmer":            reflect.TypeFor[runtime.ServerDeathConfirmer](),
