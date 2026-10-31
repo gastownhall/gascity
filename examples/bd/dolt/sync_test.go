@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -44,8 +45,7 @@ func runSync(t *testing.T, binDir, cityPath string, extraEnv []string, args ...s
 	script := filepath.Join(root, syncScript)
 	dataDir := filepath.Join(cityPath, "data")
 
-	cmd := exec.Command("sh", append([]string{script}, args...)...)
-	cmd.Env = append(syncFilteredEnv(),
+	return execSyncScript(script, append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -53,8 +53,16 @@ func runSync(t *testing.T, binDir, cityPath string, extraEnv []string, args ...s
 		"GC_DOLT_PORT=1",
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
-	)
-	cmd.Env = append(cmd.Env, extraEnv...)
+	), extraEnv, args)
+}
+
+// execSyncScript is the one place a sync test spawns the sync script. The
+// resource census counts subprocess call sites, so the CLI-mode and proxied
+// runners share this call instead of each carrying its own. env is the
+// runner's base environment and extraEnv is appended after it.
+func execSyncScript(script string, env, extraEnv, args []string) (string, error) {
+	cmd := exec.Command("sh", append([]string{script}, args...)...)
+	cmd.Env = slices.Concat(env, extraEnv)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

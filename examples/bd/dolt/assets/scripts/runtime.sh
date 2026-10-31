@@ -344,9 +344,10 @@ managed_runtime_port() (
 
 # On a bd-owned proxied scope there is no gc-managed Dolt server: bd starts,
 # supervises and stops it. Every command in this pack is a typed no-op there,
-# and there is no managed runtime port to resolve. A command that shapes its
-# own output (health, cleanup) sets GC_DOLT_PROXIED_HANDLED=1 before sourcing
-# this file and emits its own skip document instead.
+# and there is no managed runtime port to resolve. A command that handles the
+# scope itself sets GC_DOLT_PROXIED_HANDLED=1 before sourcing this file: health
+# and cleanup emit their own skip document, and sync pushes each scope through
+# gc bd.
 #
 # The guard runs before the commands parse their own flags, so it has to
 # honour --json itself: status, cleanup, compact and sync all have machine

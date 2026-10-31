@@ -132,6 +132,7 @@ go_test(
         "stale_db_formula_test.go",
         "status_test.go",
         "sync_ffclassify_test.go",
+        "sync_proxied_test.go",
         "sync_test.go",
         "testenv_import_test.go",
     ],
