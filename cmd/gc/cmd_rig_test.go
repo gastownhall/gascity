@@ -2972,13 +2972,13 @@ func TestDoRigAdd_AdoptRejectsEmptyConfigYaml(t *testing.T) {
 	}
 }
 
-func TestDoRigAdd_AdoptWithoutPrefixMismatch(t *testing.T) {
-	cityPath := t.TempDir()
+// adoptXRStore lays out an adoptable rig "mismatch-rig" (which derives a
+// prefix other than its store's) whose config.yaml records prefix "xr".
+func adoptXRStore(t *testing.T) (cityPath, rigPath string) {
+	t.Helper()
+	cityPath = t.TempDir()
 	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
-
-	// Create rig whose directory basename ("mismatch-rig") derives a prefix
-	// ("mismatchrig") that differs from config.yaml's prefix ("xr").
-	rigPath := filepath.Join(t.TempDir(), "mismatch-rig")
+	rigPath = filepath.Join(t.TempDir(), "mismatch-rig")
 	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2986,17 +2986,38 @@ func TestDoRigAdd_AdoptWithoutPrefixMismatch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "metadata.json"), []byte(meta), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	configYaml := "issue_prefix: xr\n"
-	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte(configYaml), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("issue_prefix: xr\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BEADS", "file")
+	return cityPath, rigPath
+}
 
-	// No --prefix: derived prefix from basename "mismatch-rig" won't match "xr".
+// TestDoRigAdd_AdoptWithoutPrefixTakesTheStoresPrefix: with no --prefix, an
+// adopted rig takes its store's prefix rather than one derived from its name.
+func TestDoRigAdd_AdoptWithoutPrefixTakesTheStoresPrefix(t *testing.T) {
+	cityPath, rigPath := adoptXRStore(t)
+
 	var stdout, stderr bytes.Buffer
 	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd --adopt returned %d, stderr: %s", code, stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `prefix = "xr"`) {
+		t.Errorf("city.toml does not pin the adopted store's prefix:\n%s", data)
+	}
+}
+
+func TestDoRigAdd_AdoptExplicitPrefixMismatchRefused(t *testing.T) {
+	cityPath, rigPath := adoptXRStore(t)
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "zz", "", false, true, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("expected prefix mismatch failure, got code %d, stdout: %s", code, stdout.String())
 	}
@@ -3546,4 +3567,197 @@ func TestRigAddRollbackRestoresThroughCityTomlSymlink(t *testing.T) {
 		t.Fatalf("restoreSnapshots: %v", err)
 	}
 	assertCityTomlSymlinkRestored(t, link, target, symlinkedCityTomlOriginal)
+}
+
+// installAdoptPrefixFakeBd puts a fake `bd` first on PATH that records its
+// argv, working directory and BEADS_DIR (one per line) to the returned log and
+// answers `config get --json issue_prefix` with prefix "hv". exitCode != 0
+// makes it fail instead.
+func installAdoptPrefixFakeBd(t *testing.T, exitCode int) string {
+	t.Helper()
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	script := fmt.Sprintf(`#!/bin/sh
+{
+  echo "argv=$*"
+  echo "cwd=$(pwd -P)"
+  echo "beads_dir=$BEADS_DIR"
+} >> %q
+if [ %d -ne 0 ]; then
+  echo "bd: no beads database found" >&2
+  exit %d
+fi
+echo '{"key":"issue_prefix","schema_version":1,"value":"hv"}'
+`, logPath, exitCode, exitCode)
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_BIN", "")
+	return logPath
+}
+
+func readAdoptPrefixFakeBdLog(t *testing.T, logPath string) string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// writeAdoptPrefixStore lays out a bd-init store at rigPath: metadata.json
+// with the given body and config.yaml as bd's commented template.
+func writeAdoptPrefixStore(t *testing.T, rigPath, metadata string) {
+	t.Helper()
+	beadsDir := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("# Beads configuration\n# issue-prefix: \"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReadAdoptedStoreIssuePrefixAsksBdReadonly(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	rigPath := filepath.Join(t.TempDir(), "webapp")
+	writeAdoptPrefixStore(t, rigPath, `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"hv"}`)
+	logPath := installAdoptPrefixFakeBd(t, 0)
+
+	prefix, err := readAdoptedStoreIssuePrefix(cityPath, rigPath)
+	if err != nil {
+		t.Fatalf("readAdoptedStoreIssuePrefix: %v", err)
+	}
+	if prefix != "hv" {
+		t.Fatalf("prefix = %q, want hv", prefix)
+	}
+	resolvedRig, err := filepath.EvalSymlinks(rigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := readAdoptPrefixFakeBdLog(t, logPath)
+	for _, want := range []string{
+		"argv=--readonly config get --json issue_prefix\n",
+		"cwd=" + resolvedRig + "\n",
+		"beads_dir=" + filepath.Join(rigPath, ".beads") + "\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("bd invocation log missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestReadAdoptedStoreIssuePrefixRefusesAStorelessProxiedClone(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	rigPath := filepath.Join(t.TempDir(), "webapp")
+	writeAdoptPrefixStore(t, rigPath, `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hv"}`)
+	logPath := installAdoptPrefixFakeBd(t, 0)
+
+	_, err := readAdoptedStoreIssuePrefix(cityPath, rigPath)
+	if err == nil || !strings.Contains(err.Error(), "proxied-server") {
+		t.Fatalf("err = %v, want a refusal naming proxied-server", err)
+	}
+	if got := readAdoptPrefixFakeBdLog(t, logPath); got != "" {
+		t.Errorf("bd ran against a storeless proxied clone:\n%s", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(rigPath, ".beads", "dolt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("a store appeared under the proxied clone (stat err = %v)", statErr)
+	}
+}
+
+func TestReadAdoptedStoreIssuePrefixReadsAProxiedStoreThroughBd(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	rigPath := filepath.Join(t.TempDir(), "webapp")
+	writeAdoptPrefixStore(t, rigPath, `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hv"}`)
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := installAdoptPrefixFakeBd(t, 0)
+
+	prefix, err := readAdoptedStoreIssuePrefix(cityPath, rigPath)
+	if err != nil {
+		t.Fatalf("readAdoptedStoreIssuePrefix: %v", err)
+	}
+	if prefix != "hv" {
+		t.Fatalf("prefix = %q, want hv", prefix)
+	}
+	got := readAdoptPrefixFakeBdLog(t, logPath)
+	if !strings.Contains(got, "argv=config get --json issue_prefix\n") {
+		t.Errorf("bd was not asked for the prefix without --readonly (bd refuses --readonly through its proxy):\n%s", got)
+	}
+}
+
+func TestReadAdoptedStoreIssuePrefixSkipsMetadataWithoutBackend(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	rigPath := filepath.Join(t.TempDir(), "webapp")
+	writeAdoptPrefixStore(t, rigPath, `{"name":"webapp"}`)
+	logPath := installAdoptPrefixFakeBd(t, 0)
+
+	prefix, err := readAdoptedStoreIssuePrefix(cityPath, rigPath)
+	if err != nil || prefix != "" {
+		t.Fatalf("readAdoptedStoreIssuePrefix = (%q, %v), want (\"\", nil)", prefix, err)
+	}
+	if got := readAdoptPrefixFakeBdLog(t, logPath); got != "" {
+		t.Errorf("bd ran for metadata that names no backend:\n%s", got)
+	}
+}
+
+func TestReadAdoptedStoreIssuePrefixSurfacesBdFailure(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	rigPath := filepath.Join(t.TempDir(), "webapp")
+	writeAdoptPrefixStore(t, rigPath, `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"hv"}`)
+	installAdoptPrefixFakeBd(t, 1)
+
+	_, err := readAdoptedStoreIssuePrefix(cityPath, rigPath)
+	if err == nil || !strings.Contains(err.Error(), "issue_prefix") {
+		t.Fatalf("err = %v, want a wrapped bd failure naming issue_prefix", err)
+	}
+}
+
+func TestDoRigAdd_AdoptBdInitStoreWithoutConfigYamlPrefix(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	rigPath := filepath.Join(t.TempDir(), "webapp")
+	writeAdoptPrefixStore(t, rigPath, `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"hv"}`)
+
+	orig := rigAdoptStorePrefix
+	t.Cleanup(func() { rigAdoptStorePrefix = orig })
+	var asked []string
+	rigAdoptStorePrefix = func(_, p string) (string, error) {
+		asked = append(asked, p)
+		return "hv", nil
+	}
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd --adopt returned %d, stderr: %s", code, stderr.String())
+	}
+	if len(asked) != 1 {
+		t.Errorf("store prefix asked %d times, want once: %v", len(asked), asked)
+	}
+	if !strings.Contains(stdout.String(), "Prefix: hv") {
+		t.Errorf("output does not announce the store's prefix: %s", stdout.String())
+	}
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `prefix = "hv"`) {
+		t.Errorf("city.toml does not pin the store's prefix:\n%s", data)
+	}
 }

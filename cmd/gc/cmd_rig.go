@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -121,7 +124,9 @@ Use --start-suspended to add the rig in a suspended state (dormant-by-default).
 The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
 Use --adopt to register a directory that already has a fully initialized
-.beads/ directory (must include both metadata.json and config.yaml).
+.beads/ directory (must include metadata.json). The rig takes the store's own
+issue prefix, from .beads/config.yaml or, when that records none (as bd init
+leaves it), from the store; --prefix, if given, must match.
 For managed-Dolt rigs, runs an idempotent config sync (registers types.custom
 and other config into the DB, never destructively reinitializes). The git repo
 check remains informational.`,
@@ -233,7 +238,7 @@ check remains informational.`,
 	}
 	cmd.Flags().StringArrayVar(&includes, "include", nil, "pack to import into the rig: a source, a pack name, or <binding>=<source> (repeatable)")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "rig name (default: directory basename, or git URL basename for --git-url)")
-	cmd.Flags().StringVar(&prefixFlag, "prefix", "", "bead ID prefix (default: derived from name)")
+	cmd.Flags().StringVar(&prefixFlag, "prefix", "", "bead ID prefix (default: derived from name; with --adopt, the store's)")
 	cmd.Flags().StringVar(&defaultBranchFlag, "default-branch", "", "mainline branch (default: auto-detect from a remote HEAD — origin preferred — or the current branch)")
 	cmd.Flags().BoolVar(&startSuspended, "start-suspended", false, "add rig in suspended state (dormant-by-default)")
 	cmd.Flags().BoolVar(&adoptFlag, "adopt", false, "adopt existing .beads/ directory (skip init)")
@@ -361,7 +366,10 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		NormalizeScopes: func(cp string, c *config.City) error {
 			return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)
 		},
-		PrepareAdopt:  prepareRigAdoptProviderState,
+		PrepareAdopt: prepareRigAdoptProviderState,
+		ReadStorePrefix: func(p string) (string, error) {
+			return rigAdoptStorePrefix(cityPath, p)
+		},
 		StoreContract: cityUsesBdStoreContract,
 		DoltSkip:      gcDoltSkip,
 		PostProvision: func(pc rig.ProvisionContext) error {
@@ -621,6 +629,66 @@ func prepareRigAdoptProviderState(cityPath, rigPath string) error {
 		return nil
 	}
 	return ensurePersistedScopeLocalFileStore(rigPath)
+}
+
+// rigAdoptStorePrefix is the --adopt store-prefix reader rig.Deps wires in.
+// It is a var so tests can stand in for bd.
+var rigAdoptStorePrefix = readAdoptedStoreIssuePrefix
+
+// readAdoptedStoreIssuePrefix asks bd for the issue_prefix the store at rigPath
+// records in its own config table. bd keeps a store's prefix there and leaves
+// .beads/config.yaml a commented template, so this is how --adopt learns the
+// prefix of a store bd created. Metadata that names no backend is not a bd
+// store this can ask, and reports ("", nil) without running bd.
+//
+// bd is aimed at the rig's store the same way gc registers types.custom on the
+// two kinds of scope: a proxied-server scope through the provider's projection
+// (bd refuses --readonly through its proxy), after refusing a clone whose store
+// is missing, because any bd command there would create an empty one; every
+// other scope through doctor's store projection with --readonly, so on those
+// nothing is started, migrated or written before adoption is decided. The
+// proxied read is an ordinary bd command: it may start the workspace's proxy
+// and run bd's version-bump maintenance even when the adopt is then refused.
+func readAdoptedStoreIssuePrefix(cityPath, rigPath string) (string, error) {
+	metaPath := filepath.Join(rigPath, ".beads", "metadata.json")
+	backend, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, metaPath)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", metaPath, err)
+	}
+	if !ok {
+		return "", nil
+	}
+	mode, _, err := contract.ReadDoltMode(fsys.OSFS{}, metaPath)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", metaPath, err)
+	}
+
+	var env map[string]string
+	args := []string{"--readonly", "config", "get", "--json", "issue_prefix"}
+	if contract.IsProxiedDoltMode(backend, mode) {
+		if err := validateProviderOwnedProxiedScopeStore(cityPath, rigPath); err != nil {
+			return "", err
+		}
+		env, err = providerOwnedScopeCustomTypesEnv(cityPath, rigPath)
+		args = args[1:]
+	} else {
+		env, err = embeddedScopeCustomTypesEnv(cityPath, rigPath)
+	}
+	if err != nil {
+		return "", fmt.Errorf("preparing bd environment for %s: %w", rigPath, err)
+	}
+
+	out, err := beads.ExecCommandRunnerWithEnv(env)(rigPath, "bd", args...)
+	if err != nil {
+		return "", fmt.Errorf("bd config get issue_prefix in %s: %w", rigPath, err)
+	}
+	var row struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(out, &row); err != nil {
+		return "", fmt.Errorf("parsing bd config get issue_prefix output in %s: %w", rigPath, err)
+	}
+	return strings.TrimSpace(row.Value), nil
 }
 
 // findEnclosingRig returns the rig whose path is a prefix of dir. It does

@@ -186,9 +186,13 @@ type rigMutationPlan struct {
 	reAdd                 bool
 	reAddNeedsConfigWrite bool
 	existingRig           *config.Rig
-	explicitRigImports    []config.BoundImport
-	defaultRigImports     []config.BoundImport
-	commitRigImports      func() error
+	// adopted is the prefix the --adopt'ed store records (zero when not
+	// adopting), read once so the prefix default, the stored prefix and the
+	// mismatch guard agree and bd is consulted at most once.
+	adopted            adoptedStorePrefix
+	explicitRigImports []config.BoundImport
+	defaultRigImports  []config.BoundImport
+	commitRigImports   func() error
 }
 
 // planRigMutation runs steps 5-9: it detects a re-add, derives and
@@ -209,8 +213,14 @@ func planRigMutation(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBr
 	}
 
 	// Step 6: prefix resolution + collision checks. It runs before import
-	// resolution so a colliding prefix never reaches the network.
-	prefix, err := resolveRigPrefix(cfg, req, name, reAdd, existingRig)
+	// resolution so a colliding prefix never reaches the network. An --adopt
+	// learns the store's own prefix first (after re-add detection, so a name
+	// collision fails before the store is consulted).
+	var adopted adoptedStorePrefix
+	if req.Adopt {
+		adopted = readAdoptedStorePrefix(deps, rigPath)
+	}
+	prefix, err := resolveRigPrefix(cfg, req, name, reAdd, existingRig, adopted.prefix)
 	if err != nil {
 		return rigMutationPlan{}, err
 	}
@@ -228,7 +238,7 @@ func planRigMutation(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBr
 
 	// Step 8: build nextCfg.
 	needsValidation := !reAdd || reAddNeedsConfigWrite
-	nextCfg, defaultRigImports, commitRigImports, err := buildNextRigConfig(deps, req, rigPath, resolvedDefaultBranch, reAdd, reAddNeedsConfigWrite, existingRigIdx, explicitRigImports, commitRigImports)
+	nextCfg, defaultRigImports, commitRigImports, err := buildNextRigConfig(deps, req, rigPath, resolvedDefaultBranch, adopted.prefix, reAdd, reAddNeedsConfigWrite, existingRigIdx, explicitRigImports, commitRigImports)
 	if err != nil {
 		return rigMutationPlan{}, err
 	}
@@ -252,6 +262,7 @@ func planRigMutation(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBr
 		reAdd:                 reAdd,
 		reAddNeedsConfigWrite: reAddNeedsConfigWrite,
 		existingRig:           existingRig,
+		adopted:               adopted,
 		explicitRigImports:    explicitRigImports,
 		defaultRigImports:     defaultRigImports,
 		commitRigImports:      commitRigImports,
@@ -286,16 +297,19 @@ func detectRigReAdd(cfg *config.City, name, cityPath, rigPath string) (reAdd, ne
 }
 
 // resolveRigPrefix derives the rig's bead prefix — the existing rig's on a
-// re-add, the lowercased --prefix override, or one derived from the name — and,
+// re-add, the lowercased --prefix override, the adopted store's own prefix on
+// --adopt, or one derived from the name — and,
 // for a fresh add, rejects a prefix that collides with HQ or another rig with
 // the byte-identical CLI text.
-func resolveRigPrefix(cfg *config.City, req ProvisionRequest, name string, reAdd bool, existingRig *config.Rig) (string, error) {
+func resolveRigPrefix(cfg *config.City, req ProvisionRequest, name string, reAdd bool, existingRig *config.Rig, adoptedPrefix string) (string, error) {
 	var prefix string
 	switch {
 	case reAdd:
 		prefix = existingRig.EffectivePrefix()
 	case req.Prefix != "":
 		prefix = strings.ToLower(req.Prefix)
+	case req.Adopt && adoptedPrefix != "":
+		prefix = adoptedPrefix
 	default:
 		prefix = config.DeriveBeadsPrefix(name)
 	}
@@ -317,10 +331,12 @@ func resolveRigPrefix(cfg *config.City, req ProvisionRequest, name string, reAdd
 // buildNextRigConfig materializes the config to write. A re-add that needs a
 // write copies the city and backfills the existing rig's path/default branch; a
 // fresh add appends a new rig (installing default-rig imports when no explicit
-// --include set them, which may reassign commitRigImports). A plain re-add
+// --include set them, which may reassign commitRigImports) and pins the
+// --prefix override or, on --adopt without one, the adopted store's prefix
+// (adoptedPrefix) so the city mints under the store's identity. A plain re-add
 // returns the caller's config unchanged. It returns the next config, any
 // default-rig imports it resolved, and the (possibly updated) packs.lock commit.
-func buildNextRigConfig(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBranch string, reAdd, reAddNeedsConfigWrite bool, existingRigIdx int, explicitRigImports []config.BoundImport, commitRigImports func() error) (*config.City, []config.BoundImport, func() error, error) {
+func buildNextRigConfig(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBranch, adoptedPrefix string, reAdd, reAddNeedsConfigWrite bool, existingRigIdx int, explicitRigImports []config.BoundImport, commitRigImports func() error) (*config.City, []config.BoundImport, func() error, error) {
 	fs := deps.FS
 	cfg := deps.Cfg
 	cityPath := deps.CityPath
@@ -340,8 +356,11 @@ func buildNextRigConfig(deps Deps, req ProvisionRequest, rigPath, resolvedDefaul
 		nextCfg = &next
 	} else if !reAdd {
 		storedPrefix := ""
-		if req.Prefix != "" {
+		switch {
+		case req.Prefix != "":
 			storedPrefix = strings.ToLower(req.Prefix)
+		case req.Adopt:
+			storedPrefix = adoptedPrefix
 		}
 		addedRig := config.Rig{
 			Name:             name,
@@ -440,7 +459,8 @@ func createRigDirIfMissing(fs fsys.FS, rigPath string, rigPathExists bool) error
 }
 
 // validateAdoptAndBeadsStore runs step 11's fatal guards against the on-disk
-// .beads store: --adopt requires an initialized store with a valid prefix; an
+// .beads store: --adopt requires an initialized store with a valid prefix
+// (recorded in config.yaml or, failing that, in the store itself); an
 // existing store whose prefix disagrees with the resolved one is rejected with
 // role-specific recovery text; and a fresh add refuses to run over a directory
 // that already holds a store. All returned texts are byte-identical to the CLI.
@@ -449,17 +469,17 @@ func validateAdoptAndBeadsStore(deps Deps, req ProvisionRequest, rigPath string,
 	name := req.Name
 	prefix := plan.prefix
 
+	// An --adopt compares against the prefix the store records (config.yaml or
+	// the store itself) once its own guards pass; every other path reads
+	// config.yaml only and never consults the store.
+	existingPrefix, ok := ReadBeadsPrefix(fs, rigPath)
 	if req.Adopt {
-		metaPath := filepath.Join(rigPath, ".beads", "metadata.json")
-		if _, err := fs.Stat(metaPath); err != nil {
-			return fmt.Errorf("--adopt requires .beads/metadata.json in %s", rigPath)
+		if err := validateAdoptedStore(fs, rigPath, plan.adopted); err != nil {
+			return err
 		}
-		if _, ok := ReadBeadsPrefix(fs, rigPath); !ok {
-			return fmt.Errorf("--adopt requires a valid issue_prefix in .beads/config.yaml in %s", rigPath)
-		}
+		existingPrefix, ok = plan.adopted.prefix, true
 	}
-
-	if existingPrefix, ok := ReadBeadsPrefix(fs, rigPath); ok && existingPrefix != prefix {
+	if ok && existingPrefix != prefix {
 		switch {
 		case plan.reAdd:
 			// On re-add, --prefix is ignored (we use the existing rig's
@@ -508,6 +528,22 @@ func validateAdoptAndBeadsStore(deps Deps, req ProvisionRequest, rigPath string,
 					rigPath, rigPath)
 			}
 		}
+	}
+	return nil
+}
+
+// validateAdoptedStore runs --adopt's own guards: the store needs a
+// metadata.json, and the prefix read during planning must be one gc can adopt.
+// A nil error means adopted.prefix is set.
+func validateAdoptedStore(fs fsys.FS, rigPath string, adopted adoptedStorePrefix) error {
+	if _, err := fs.Stat(filepath.Join(rigPath, ".beads", "metadata.json")); err != nil {
+		return fmt.Errorf("--adopt requires .beads/metadata.json in %s", rigPath)
+	}
+	if adopted.err != nil {
+		return adopted.err
+	}
+	if adopted.prefix == "" {
+		return fmt.Errorf("--adopt requires a valid issue_prefix in .beads/config.yaml in %s", rigPath)
 	}
 	return nil
 }
