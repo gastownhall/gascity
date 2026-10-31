@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -468,6 +469,134 @@ func TestDoltDriftCheckMissingPortMirrorBesideLiveRigLocalReportsOnlyCaseA(t *te
 	}
 	if _, err := os.Stat(portFile); !os.IsNotExist(err) {
 		t.Errorf("mirror should stay absent while rig-local ownership is unresolved, stat err = %v", err)
+	}
+}
+
+// journalProviderOwnedScope records a ready provider-ownership journal entry
+// for scopeRoot, the durable artifact of a scope whose bd lifecycle the exec
+// provider's script owns.
+func journalProviderOwnedScope(t *testing.T, cityPath, scopeRoot string) {
+	t.Helper()
+	if err := writeProviderScopeOwnershipJournal(cityPath, providerScopeOwnershipJournal{
+		Version: 1,
+		Scopes: map[string]providerScopeOwnershipEntry{
+			providerScopeOwnershipKey(cityPath, scopeRoot): {
+				ScopePath:      scopeRoot,
+				LifecycleOwner: providerScopeLifecycleOwner,
+				State:          providerScopeReady,
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// publishProviderDoltStateForFixture copies the fixture's published managed
+// Dolt runtime state to the provider publication path, so the resolvable
+// managed port survives topologies whose published-state path answers "not
+// gc's to serve".
+func publishProviderDoltStateForFixture(t *testing.T, cityDir string) {
+	t.Helper()
+	state, err := readDoltRuntimeStateFile(managedDoltStatePath(cityDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDoltRuntimeStateFile(providerManagedDoltStatePath(cityDir), state); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDoltDriftCheckPortMirrorParityWithSync is the alignment pin between
+// Case D detection and the sync that repairs it: for every topology where
+// syncConfiguredDoltPortFiles declines to pin an inherited rig's mirror,
+// dolt-drift must also decline (no finding, no --fix offer), and where the
+// sync writes the managed port, the check must report the missing mirror.
+// Each row then runs the real sync and asserts it did exactly what the row
+// predicted, so a future skip added to one side but not the other fails here.
+func TestDoltDriftCheckPortMirrorParityWithSync(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		arrange   func(t *testing.T, cityDir, rigDir string)
+		wantCaseD bool
+	}{
+		{name: "pinned rig", arrange: func(*testing.T, string, string) {}, wantCaseD: true},
+		{name: "proxied-server city", arrange: func(t *testing.T, cityDir, _ string) {
+			publishProviderDoltStateForFixture(t, cityDir)
+			writeScopeMetadata(t, cityDir, map[string]string{
+				"database":      "dolt",
+				"backend":       "dolt",
+				"dolt_mode":     "proxied-server",
+				"dolt_database": "gc",
+			})
+		}},
+		{name: "provider-owned city", arrange: func(t *testing.T, cityDir, _ string) {
+			publishProviderDoltStateForFixture(t, cityDir)
+			journalProviderOwnedScope(t, cityDir, cityDir)
+			if owned, err := scopeProviderOwned(cityDir, cityDir); err != nil || !owned {
+				t.Fatalf("arrange: scopeProviderOwned(city) = %t, %v, want true", owned, err)
+			}
+		}},
+		{name: "storage-bound city", arrange: func(t *testing.T, cityDir, _ string) {
+			publishProviderDoltStateForFixture(t, cityDir)
+			writeScopeMetadata(t, cityDir, map[string]string{
+				"backend":          "dolt",
+				"storage_endpoint": "opaque-remote",
+				"storage_database": "work",
+			})
+		}},
+		{name: "provider-owned rig", arrange: func(t *testing.T, cityDir, rigDir string) {
+			journalProviderOwnedScope(t, cityDir, rigDir)
+			if owned, err := scopeProviderOwned(cityDir, rigDir); err != nil || !owned {
+				t.Fatalf("arrange: scopeProviderOwned(rig) = %t, %v, want true", owned, err)
+			}
+		}},
+		{name: "storage-bound rig", arrange: func(t *testing.T, _, rigDir string) {
+			writeScopeMetadata(t, rigDir, map[string]string{
+				"backend":          "dolt",
+				"storage_endpoint": "opaque-remote",
+				"storage_database": "work",
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir, rigDir, managedPort, cfg := managedCityDriftFixture(t, "parity")
+			tc.arrange(t, cityDir, rigDir)
+			portFile := filepath.Join(rigDir, ".beads", "dolt-server.port")
+
+			// A row whose managed port does not resolve would pass its
+			// negative assertion for the wrong reason, so pin it first.
+			if got := currentResolvableManagedDoltPort(cityDir); got != managedPort {
+				t.Fatalf("currentResolvableManagedDoltPort = %q, want the live managed port %q", got, managedPort)
+			}
+
+			if err := os.Remove(portFile); err != nil {
+				t.Fatal(err)
+			}
+			check := newDoltDriftCheck(cityDir, cfg)
+			r := check.Run(&doctor.CheckContext{CityPath: cityDir})
+			joined := strings.Join(r.Details, " ")
+			if hasCaseD := strings.Contains(joined, "dolt-server.port is missing"); hasCaseD != tc.wantCaseD {
+				t.Errorf("Case D detail reported = %t (details %q), want %t", hasCaseD, joined, tc.wantCaseD)
+			}
+			if check.CanFix() != tc.wantCaseD {
+				t.Errorf("CanFix() = %t, want %t", check.CanFix(), tc.wantCaseD)
+			}
+
+			if err := syncConfiguredDoltPortFiles(cityDir, cfg.Dolt, config.EffectiveHQPrefix(cfg), cfg.Rigs, io.Discard); err != nil {
+				t.Fatalf("syncConfiguredDoltPortFiles: %v", err)
+			}
+			if tc.wantCaseD {
+				got, err := os.ReadFile(portFile)
+				if err != nil {
+					t.Fatalf("read mirror after sync: %v", err)
+				}
+				if strings.TrimSpace(string(got)) != managedPort {
+					t.Errorf("sync left mirror = %q, want it pinned to the managed port %s", got, managedPort)
+				}
+			} else if _, err := os.Stat(portFile); !os.IsNotExist(err) {
+				t.Errorf("mirror should stay absent after the sync in this topology, stat err = %v", err)
+			}
+		})
 	}
 }
 
