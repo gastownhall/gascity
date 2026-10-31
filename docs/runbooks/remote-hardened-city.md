@@ -109,6 +109,31 @@ public hostname in `[supervisor] allowed_hosts` or every request dies **421**.
 The standalone `gc controller` allows any host (the network front is the
 boundary), so it needs no `allowed_hosts`.
 
+**Rotating keys without a restart (supervisor only).** On a `gc supervisor`
+deployment, add, rotate, or revoke a key by editing
+`[supervisor] write_auth_verify_key` in `$GC_HOME/supervisor.toml`, then run:
+
+```bash
+gc supervisor reload    # or: kill -HUP <supervisor pid>
+```
+
+The supervisor re-reads the key list and swaps it in place. Cities and their
+sessions keep running, and the supervisor logs the kids it added and removed.
+To rotate with no gap, list the old and new keys together
+(`k1:<old>,k2:<new>`), move every minter to `k2`, then drop `k1` and reload
+again. A removed kid's new grants fail at once; a grant it already minted stays
+valid until it expires (at most 2 minutes). A reload keeps the current keys and
+logs why when:
+
+- the new key list is malformed or empty;
+- write-auth was off at startup (a reload cannot turn it on or off; restart
+  instead);
+- `GC_CITY_WRITE_PUBKEY` is set (the env overrides the file, so manage keys in
+  one place).
+
+The standalone `gc controller` reads its key only at startup; restart it to
+change keys.
+
 ## 4. Configure the client context
 
 ```bash

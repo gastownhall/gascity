@@ -1056,3 +1056,100 @@ func TestResolveWriteAuthVerifier_WarnsOnKeyWithoutCID(t *testing.T) {
 		}
 	})
 }
+
+// postWithGrant drives h with a CSRF-carrying POST bearing token and returns
+// the response status.
+func postWithGrant(t *testing.T, h http.Handler, token string) int {
+	t.Helper()
+	body := []byte(`{"name":"worker"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v0/city/acme/agents", bytes.NewReader(body))
+	req.Header.Set(writeAuthHeader, token)
+	req.Header.Set(csrfHeaderName, "1")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Code
+}
+
+func TestReloadWriteAuthKeys_SwapsKeysOnInstalledVerifier(t *testing.T) {
+	t.Setenv("GC_CITY_WRITE_PUBKEY", "")
+	now := time.Now()
+	pub1, priv1 := mustKeypair(t)
+	pub2, priv2 := mustKeypair(t)
+	sm := NewSupervisorMux(nil, nil, false, "test", "", now).
+		WithAnyHostAllowed().
+		WithWriteAuth(newTestWriteVerifier(t, pub1, now))
+	var seen bool
+	var got []byte
+	// The middleware captures the verifier pointer once, exactly as Handler()
+	// does; a reload must take effect through that same pointer.
+	h := writeAuthMiddleware(sm.writeAuth, false, echoNext(&seen, &got))
+
+	body := []byte(`{"name":"worker"}`)
+	g2 := grantFor(now, "acme", http.MethodPost, "/v0/city/acme/agents", body, "jti-k2-before")
+	g2.Kid = "k2"
+	if code := postWithGrant(t, h, mintToken(t, priv2, g2)); code != http.StatusForbidden {
+		t.Fatalf("k2 before reload: status=%d want 403", code)
+	}
+
+	added, removed, err := ReloadWriteAuthKeys(sm, "k2:"+base64.StdEncoding.EncodeToString(pub2))
+	if err != nil {
+		t.Fatalf("ReloadWriteAuthKeys: %v", err)
+	}
+	if strings.Join(added, ",") != "k2" || strings.Join(removed, ",") != "k1" {
+		t.Fatalf("added=%v removed=%v, want [k2] [k1]", added, removed)
+	}
+
+	g2.JTI = "jti-k2-after"
+	if code := postWithGrant(t, h, mintToken(t, priv2, g2)); code != http.StatusOK || !seen {
+		t.Fatalf("k2 after reload: status=%d seen=%v want 200 true", code, seen)
+	}
+	g1 := grantFor(now, "acme", http.MethodPost, "/v0/city/acme/agents", body, "jti-k1-after")
+	if code := postWithGrant(t, h, mintToken(t, priv1, g1)); code != http.StatusForbidden {
+		t.Fatalf("removed k1 after reload: status=%d want 403", code)
+	}
+}
+
+func TestReloadWriteAuthKeys_RefusesAndKeepsKeys(t *testing.T) {
+	now := time.Now()
+	pub1, _ := mustKeypair(t)
+	pub2, _ := mustKeypair(t)
+	good := "k2:" + base64.StdEncoding.EncodeToString(pub2)
+
+	cases := []struct {
+		name      string
+		envKey    string
+		configKey string
+		install   bool
+		wantErr   string
+	}{
+		{name: "malformed", configKey: "k2:not-base64!", install: true, wantErr: "k2"},
+		{name: "empty", configKey: "  ", install: true, wantErr: "no verifying keys"},
+		{name: "not installed", configKey: good, install: false, wantErr: "not enabled at startup"},
+		{name: "env override", envKey: "k1:" + base64.StdEncoding.EncodeToString(pub1), configKey: good, install: true, wantErr: "GC_CITY_WRITE_PUBKEY"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_CITY_WRITE_PUBKEY", tc.envKey)
+			sm := NewSupervisorMux(nil, nil, false, "test", "", now).WithAnyHostAllowed()
+			if tc.install {
+				sm.WithWriteAuth(newTestWriteVerifier(t, pub1, now))
+			}
+			added, removed, err := ReloadWriteAuthKeys(sm, tc.configKey)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("ReloadWriteAuthKeys err=%v, want containing %q", err, tc.wantErr)
+			}
+			if len(added) != 0 || len(removed) != 0 {
+				t.Fatalf("refused reload reported changes: added=%v removed=%v", added, removed)
+			}
+			if !tc.install {
+				if sm.writeAuth != nil {
+					t.Fatal("refused reload must not enable write-auth")
+				}
+				return
+			}
+			if got := strings.Join(sm.writeAuth.KeyIDs(), ","); got != "k1" {
+				t.Fatalf("keys after refused reload = %q, want k1", got)
+			}
+		})
+	}
+}

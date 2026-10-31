@@ -60,9 +60,13 @@
 // path-resident name to bind a grant to. With no key configured the middleware
 // is not installed and mutations follow the prior CSRF/read-only guards.
 //
-// Because this package mints nothing, the in-tree callers carry no grant: the
-// bundled gc API client and dashboard SPA send only the CSRF header. Enabling
-// the gate therefore turns their direct city mutations away fail-closed; a
-// deployment that gates writes fronts mutations through the external trusted
-// authority that mints grants, not through those first-party clients.
+// This package mints nothing. The in-city gc client and the dashboard SPA mint
+// no grant and send only the CSRF header, so enabling the gate turns their
+// direct city mutations away fail-closed. A remote gc context with a
+// grant_command does mint: gc runs that command (an external trusted
+// authority such as gc-write-mint) to sign a grant for each mutation.
+//
+// The verifying key set can be replaced at runtime with [Verifier.SetKeys];
+// the supervisor does so on reload so enrolling, rotating, or revoking a key
+// needs no restart.
 package citywriteauth

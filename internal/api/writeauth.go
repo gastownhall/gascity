@@ -26,10 +26,11 @@ import (
 // it is fail-closed — every city-scoped mutation must present a valid grant
 // minted by the configured trusted authority.
 //
-// The bundled first-party callers (the gc API client and dashboard SPA) send
-// only the CSRF header and mint no grant, so enabling the gate turns their
-// direct city mutations away with a clear 401; an authority-fronted deployment
-// supplies grants out of band rather than minting them in this process.
+// The in-city gc client and the dashboard SPA send only the CSRF header and
+// mint no grant, so enabling the gate turns their direct city mutations away
+// with a clear 401. A remote gc context with a grant_command does mint: gc runs
+// that external authority to sign a grant per mutation. This process never
+// mints grants.
 const (
 	writeAuthHeader = "X-GC-City-Write"
 
@@ -443,4 +444,62 @@ func InstallWriteAuth(sm *SupervisorMux, configKey string, configRequired bool, 
 		sm.WithWriteAuth(v)
 	}
 	return nil
+}
+
+// ErrWriteAuthNotEnabled is returned by ReloadWriteAuthKeys when no write-auth
+// verifier was installed at startup. A reload only rotates keys; enabling
+// write-auth requires a restart with write_auth_verify_key set.
+var ErrWriteAuthNotEnabled = errors.New("write-auth was not enabled at startup; a reload cannot enable it (restart with write_auth_verify_key set)")
+
+// ReloadWriteAuthKeys replaces the verifying key set of the write-auth verifier
+// already installed on sm with the keys parsed from configKey (the
+// write_auth_verify_key config value), returning the kids it added and
+// removed. The verifier itself is kept, so its replay guard and epoch floor
+// carry over and the installed middleware picks up the new keys immediately.
+//
+// A reload only rotates keys; it can neither enable nor disable write-auth.
+// It returns an error and leaves the current keys untouched when write-auth
+// was not installed at startup (ErrWriteAuthNotEnabled), when GC_CITY_WRITE_PUBKEY is set (the env
+// value overrides the config file, so a file edit cannot take effect), or when
+// configKey does not parse to at least one well-formed key.
+func ReloadWriteAuthKeys(sm *SupervisorMux, configKey string) (added, removed []string, err error) {
+	v := sm.writeAuth
+	if v == nil {
+		return nil, nil, ErrWriteAuthNotEnabled
+	}
+	if strings.TrimSpace(os.Getenv("GC_CITY_WRITE_PUBKEY")) != "" {
+		return nil, nil, errors.New("GC_CITY_WRITE_PUBKEY is set and overrides write_auth_verify_key; unset it and restart to manage keys through the config file")
+	}
+	keys, err := parseVerifyKeys(configKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parsing write_auth_verify_key: %w", err)
+	}
+	before := v.KeyIDs()
+	if err := v.SetKeys(keys); err != nil {
+		return nil, nil, fmt.Errorf("installing write-auth keys: %w", err)
+	}
+	added, removed = diffKeyIDs(before, v.KeyIDs())
+	return added, removed, nil
+}
+
+// diffKeyIDs returns the ids present only in after (added) and only in before
+// (removed), each in the order they appear in its input.
+func diffKeyIDs(before, after []string) (added, removed []string) {
+	inBefore := make(map[string]bool, len(before))
+	for _, id := range before {
+		inBefore[id] = true
+	}
+	inAfter := make(map[string]bool, len(after))
+	for _, id := range after {
+		inAfter[id] = true
+		if !inBefore[id] {
+			added = append(added, id)
+		}
+	}
+	for _, id := range before {
+		if !inAfter[id] {
+			removed = append(removed, id)
+		}
+	}
+	return added, removed
 }

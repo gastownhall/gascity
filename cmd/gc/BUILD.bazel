@@ -1368,6 +1368,7 @@ go_test(
         "cmd_supervisor_status_json_test.go",
         "cmd_supervisor_test.go",
         "cmd_supervisor_unit_ownership_test.go",
+        "cmd_supervisor_writeauth_reload_test.go",
         "cmd_suspend_test.go",
         "cmd_trace_test.go",
         "cmd_version_test.go",

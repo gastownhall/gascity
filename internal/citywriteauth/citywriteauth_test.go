@@ -804,3 +804,130 @@ func TestVerify_ArrayShapedClaimsRejected(t *testing.T) {
 		}
 	})
 }
+
+// grantForKid returns a valid grant (and matching Expect) signed under kid,
+// with a distinct jti so successive calls are not replays of one another.
+func grantForKid(now time.Time, kid, jti string) (Grant, Expect) {
+	body := []byte(`{"name":"worker"}`)
+	digest := ReqDigest("POST", "/v0/city/acme/agents", "", body)
+	g := Grant{
+		Kid: kid, Aud: "gc-city-write", City: "acme", Epoch: 7,
+		IAT: now.Unix(), Exp: now.Add(30 * time.Second).Unix(), JTI: jti, Req: digest,
+	}
+	return g, Expect{City: "acme", ReqDigest: digest}
+}
+
+func TestSetKeys_AddsAndRemovesKids(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	v, priv1, _, _ := fixture(t, now)
+	pub2, priv2 := newTestKeypair(t)
+
+	// Before SetKeys the new kid is unknown.
+	g2, expect := grantForKid(now, "k2", "jti-k2-before")
+	if _, err := v.Verify(mintFor(t, priv2, g2), expect); !errors.Is(err, ErrUnknownKey) {
+		t.Fatalf("Verify k2 before SetKeys: got %v, want ErrUnknownKey", err)
+	}
+
+	// Rotate: k1 removed, k2 added.
+	if err := v.SetKeys(map[string]ed25519.PublicKey{"k2": pub2}); err != nil {
+		t.Fatalf("SetKeys: %v", err)
+	}
+	g2, expect = grantForKid(now, "k2", "jti-k2-after")
+	if _, err := v.Verify(mintFor(t, priv2, g2), expect); err != nil {
+		t.Fatalf("Verify k2 after SetKeys: %v", err)
+	}
+	g1, expect := grantForKid(now, "k1", "jti-k1-after")
+	if _, err := v.Verify(mintFor(t, priv1, g1), expect); !errors.Is(err, ErrUnknownKey) {
+		t.Fatalf("Verify removed k1 after SetKeys: got %v, want ErrUnknownKey", err)
+	}
+	if got := strings.Join(v.KeyIDs(), ","); got != "k2" {
+		t.Fatalf("KeyIDs after SetKeys = %q, want %q", got, "k2")
+	}
+}
+
+func TestSetKeys_ReplayGuardSurvivesKeySwap(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	pub1, priv := newTestKeypair(t)
+	v, err := New(Options{
+		Aud:        "gc-city-write",
+		Keys:       map[string]ed25519.PublicKey{"k1": pub1},
+		EpochFloor: 1,
+		MaxTTL:     60 * time.Second,
+		Skew:       5 * time.Second,
+		Now:        func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	g, expect := grantForKid(now, "k1", "jti-replay")
+	token := mintFor(t, priv, g)
+	if _, err := v.Verify(token, expect); err != nil {
+		t.Fatalf("first Verify: %v", err)
+	}
+
+	// Re-install the same key alongside a new one: the consumed jti must stay
+	// consumed, because SetKeys swaps only the key set, never the replay guard.
+	pub2, _ := newTestKeypair(t)
+	if err := v.SetKeys(map[string]ed25519.PublicKey{"k1": pub1, "k2": pub2}); err != nil {
+		t.Fatalf("SetKeys: %v", err)
+	}
+	if _, err := v.Verify(token, expect); !errors.Is(err, ErrReplay) {
+		t.Fatalf("Verify replay after SetKeys: got %v, want ErrReplay", err)
+	}
+}
+
+func TestSetKeys_EpochFloorSurvivesKeySwap(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	v, _, _, _ := fixture(t, now) // EpochFloor: 1
+	pub2, priv2 := newTestKeypair(t)
+	if err := v.SetKeys(map[string]ed25519.PublicKey{"k2": pub2}); err != nil {
+		t.Fatalf("SetKeys: %v", err)
+	}
+	g, expect := grantForKid(now, "k2", "jti-epoch")
+	g.Epoch = 0
+	if _, err := v.Verify(mintFor(t, priv2, g), expect); !errors.Is(err, ErrEpoch) {
+		t.Fatalf("Verify below epoch floor after SetKeys: got %v, want ErrEpoch", err)
+	}
+}
+
+func TestSetKeys_RejectsBadInputAndKeepsOldKeys(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	pub2, _ := newTestKeypair(t)
+	cases := map[string]map[string]ed25519.PublicKey{
+		"nil":        nil,
+		"empty":      {},
+		"empty kid":  {"": pub2},
+		"short key":  {"k2": pub2[:16]},
+		"mixed good": {"k2": pub2, "k3": ed25519.PublicKey{1, 2, 3}},
+	}
+	for name, keys := range cases {
+		t.Run(name, func(t *testing.T) {
+			v, priv, g, expect := fixture(t, now)
+			if err := v.SetKeys(keys); err == nil {
+				t.Fatal("SetKeys: want error, got nil")
+			}
+			if _, err := v.Verify(mintFor(t, priv, g), expect); err != nil {
+				t.Fatalf("Verify with original key after rejected SetKeys: %v", err)
+			}
+		})
+	}
+}
+
+func TestSetKeys_DeepCopiesKeys(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	v, _, _, _ := fixture(t, now)
+	pub2, priv2 := newTestKeypair(t)
+	callerKey := append(ed25519.PublicKey(nil), pub2...)
+	keys := map[string]ed25519.PublicKey{"k2": callerKey}
+	if err := v.SetKeys(keys); err != nil {
+		t.Fatalf("SetKeys: %v", err)
+	}
+	for i := range callerKey {
+		callerKey[i] ^= 0xFF
+	}
+	delete(keys, "k2")
+	g, expect := grantForKid(now, "k2", "jti-copy")
+	if _, err := v.Verify(mintFor(t, priv2, g), expect); err != nil {
+		t.Fatalf("Verify after caller mutated its key map: %v", err)
+	}
+}

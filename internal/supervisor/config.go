@@ -49,7 +49,9 @@ type Section struct {
 	// every mutating request to an already-registered city (the per-city routes
 	// under /v0/city/{cityName}); city registry creation (POST /v0/city) stays
 	// on the supervisor-registry guards. See config.APIConfig for the key format
-	// and full semantics.
+	// and full semantics. `gc supervisor reload` (or SIGHUP) re-reads
+	// WriteAuthVerifyKey and swaps the verifying keys without a restart; it
+	// cannot turn write-auth on or off, and GC_CITY_WRITE_PUBKEY blocks it.
 	WriteAuthVerifyKey string `toml:"write_auth_verify_key,omitempty"`
 	WriteAuthRequired  bool   `toml:"write_auth_required,omitempty"`
 	// WriteAuthAllowUnverified acknowledges a non-loopback bind with

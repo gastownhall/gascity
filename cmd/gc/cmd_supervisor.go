@@ -338,6 +338,32 @@ var supervisorShutdownSettleDelay = 50 * time.Millisecond
 
 var supervisorSignalNotify = signal.Notify
 
+// reloadSupervisorWriteAuthKeys re-reads supervisor.toml and swaps the
+// write-auth verifying keys installed on apiMux for its write_auth_verify_key
+// entries, so enrolling, rotating, or revoking a grant key needs no supervisor
+// restart. Any failure (unreadable config, malformed keys, write-auth off at
+// startup, or a GC_CITY_WRITE_PUBKEY override) is logged and keeps the current
+// keys. A supervisor that has write-auth off and no key configured reloads
+// silently. Other supervisor.toml changes still require a restart.
+func reloadSupervisorWriteAuthKeys(apiMux *api.SupervisorMux, stderr io.Writer) {
+	cfg, err := supervisorLoadConfig(supervisor.ConfigPath())
+	if err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: reload: write-auth keys unchanged: config: %v\n", err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	configKey := cfg.Supervisor.WriteAuthVerifyKey
+	added, removed, err := api.ReloadWriteAuthKeys(apiMux, configKey)
+	switch {
+	case errors.Is(err, api.ErrWriteAuthNotEnabled) && strings.TrimSpace(configKey) == "":
+		return
+	case err != nil:
+		fmt.Fprintf(stderr, "gc supervisor: reload: write-auth keys unchanged: %v\n", err) //nolint:errcheck // best-effort stderr
+	default:
+		fmt.Fprintf(stderr, "gc supervisor: reload: write-auth keys reloaded: %d added %v, %d removed %v\n", //nolint:errcheck // best-effort stderr
+			len(added), added, len(removed), removed)
+	}
+}
+
 // supervisorLoadConfig follows the package's test-double convention; tests
 // that replace it must not run in parallel.
 var supervisorLoadConfig = supervisor.LoadConfig
@@ -1798,6 +1824,10 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			// Ticker and initial reconciles are not reloads and must
 			// not emit RELOADING.
 			notifySdState(stderr, sdnotify.Reloading)
+			// Rotate write-auth verifying keys from the current
+			// supervisor.toml. Only the key set changes; cities and their
+			// sessions are untouched.
+			reloadSupervisorWriteAuthKeys(apiMux, stderr)
 			safeReconcile()
 			// Also poke all running cities so they immediately reconcile
 			// their agents (e.g. after a child process was killed).
