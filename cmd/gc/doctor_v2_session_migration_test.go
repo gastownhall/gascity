@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -16,9 +17,11 @@ import (
 
 // Kills: a per-leg count that is not first-leg-wins (gc-a0's migrated copy on
 // the city leg read as a second row), samples that list a lone slot row or more
-// than ten IDs, a not-checked or failed leg that reads as a clean census or
-// does not block under v2, a legacy not-checked leg that fails the sweep,
-// and a refusal that warns under legacy or passes under v2.
+// than ten IDs, a not-checked or failed leg that reads as a clean census, a
+// leg that failed to open or read that does not block under v2, a leg with no
+// read-only open that blocks under v2, a legacy not-checked leg that fails the
+// sweep, a refusal that warns under legacy or passes under v2, and a v2 refusal
+// that an unchecked leg hides behind the lower-bound warning.
 func TestV2SessionMigrationCheckCountsPerLeg(t *testing.T) {
 	cfg := chatCity("always")
 	cfg.Agents = append(cfg.Agents, allocPoolAgent("worker", 3))
@@ -32,6 +35,7 @@ func TestV2SessionMigrationCheckCountsPerLeg(t *testing.T) {
 	binding := censusStore(append(archived, slotRow("gc-s1"))...)
 	city := censusStore(poolRow("gc-a0", "worker", 1, "archived"), slotRow("gc-s2"), poolRow("gc-k1", "worker", 3, "active"))
 	readErr := errors.New("bd: connection refused")
+	proxiedLeg := v2SessionLeg{ref: "rig:fixture", notChecked: "proxied-server Dolt, where bd refuses --readonly", noReadOnlyOpen: true}
 	for _, tc := range []struct {
 		name    string
 		mode    string
@@ -66,17 +70,34 @@ func TestV2SessionMigrationCheckCountsPerLeg(t *testing.T) {
 			message: "1 open session row(s): 0 in a state main does not know, 0 shared pool-slot session name(s), 0 named session(s) claimed by more than one row",
 		},
 		{
-			name:   "not checked blocks under v2",
-			mode:   config.SessionReconcilerV2,
-			legs:   []v2SessionLeg{{ref: "rig:fixture", notChecked: "proxied-server Dolt, where bd refuses --readonly"}},
-			status: doctor.StatusError,
-		},
-		{
-			name:    "not checked warns under legacy",
-			legs:    []v2SessionLeg{{ref: "city", store: censusStore()}, {ref: "rig:fixture", notChecked: "proxied-server Dolt, where bd refuses --readonly"}},
+			name:    "no read-only open warns under v2",
+			mode:    config.SessionReconcilerV2,
+			legs:    []v2SessionLeg{{ref: "city", store: censusStore()}, proxiedLeg},
 			status:  doctor.StatusWarning,
 			message: "0 open session row(s): 0 in a state main does not know, 0 shared pool-slot session name(s), 0 named session(s) claimed by more than one row; 1 leg(s) not checked, counts are a lower bound",
 			details: []string{"leg city: 0 open session row(s)", "leg rig:fixture: not checked (no read-only open): proxied-server Dolt, where bd refuses --readonly"},
+		},
+		{
+			name:    "open failed blocks under v2",
+			mode:    config.SessionReconcilerV2,
+			legs:    []v2SessionLeg{{ref: "binding", notChecked: "binding \"infra\": no such provider"}, proxiedLeg},
+			status:  doctor.StatusError,
+			message: "0 open session row(s): 0 in a state main does not know, 0 shared pool-slot session name(s), 0 named session(s) claimed by more than one row; 2 leg(s) not checked, counts are a lower bound",
+			details: []string{"leg binding: not checked (open failed): binding \"infra\": no such provider", "leg rig:fixture: not checked (no read-only open): proxied-server Dolt, where bd refuses --readonly"},
+		},
+		{
+			name:    "not checked warns under legacy",
+			legs:    []v2SessionLeg{{ref: "city", store: censusStore()}, proxiedLeg, {ref: "binding", notChecked: "binding \"infra\": no such provider"}},
+			status:  doctor.StatusWarning,
+			message: "0 open session row(s): 0 in a state main does not know, 0 shared pool-slot session name(s), 0 named session(s) claimed by more than one row; 2 leg(s) not checked, counts are a lower bound",
+			details: []string{"leg city: 0 open session row(s)", "leg rig:fixture: not checked (no read-only open): proxied-server Dolt, where bd refuses --readonly", "leg binding: not checked (open failed): binding \"infra\": no such provider"},
+		},
+		{
+			name:    "v2 refusal leads an unchecked leg",
+			mode:    config.SessionReconcilerV2,
+			legs:    []v2SessionLeg{{ref: "binding:infra", store: binding}, proxiedLeg},
+			status:  doctor.StatusWarning,
+			message: "12 open session row(s): 11 in a state main does not know, 0 shared pool-slot session name(s), 0 named session(s) claimed by more than one row; v2 refuses to boot over them (session reconciler: v2 (set by [daemon] session_reconciler)); 1 leg(s) not checked, counts are a lower bound",
 		},
 		{
 			name:    "failed read blocks under v2",
@@ -89,7 +110,7 @@ func TestV2SessionMigrationCheckCountsPerLeg(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := *cfg
 			c.Daemon.SessionReconciler = tc.mode
-			check := &v2SessionMigrationCheck{cfg: &c, cityName: "test-city", openLegs: func() []v2SessionLeg { return tc.legs }}
+			check := &v2SessionMigrationCheck{cfg: &c, cityName: "test-city", openLegs: func() []v2SessionLeg { return tc.legs }, lookupEnv: noEnv}
 			r := check.Run(&doctor.CheckContext{})
 			if r.Status != tc.status || r.Severity != doctor.SeverityBlocking {
 				t.Errorf("status = %v severity %v, want %v blocking: %s %q", r.Status, r.Severity, tc.status, r.Message, r.Details)
@@ -226,5 +247,121 @@ func TestV2SessionMigrationBindingLegIsReadOnly(t *testing.T) {
 	}
 	if !bytes.Equal(before, after) {
 		t.Error("the binding database changed across a read-only census")
+	}
+}
+
+// A city born split on gc init's default work store: the sessions and graph
+// classes on the sqlite-beads binding, so an unset session_reconciler resolves
+// to v2, and the city and rig scopes on bd's proxied-server Dolt, which bd
+// will not open --readonly. Those legs go unchecked because of this check's
+// read path, not because anything is wrong with the city. Kills: grading a
+// leg whose backend has no read-only open as a blocking failure, which made
+// gc doctor exit 1 on every such city.
+func TestV2SessionMigrationCheckDoesNotFailADefaultSplitCity(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(t.TempDir(), "r1")
+	for _, scope := range []string{cityPath, rigPath} {
+		if err := os.MkdirAll(filepath.Join(scope, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(scopeMetadataJSONPath(scope), []byte(`{"backend":"dolt","dolt_mode":"proxied-server"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := v2DefaultCity(func(c *config.City) {
+		c.Workspace.Name = "demo"
+		c.Rigs = []config.Rig{{Name: "r1", Path: rigPath}}
+	})
+	// The binding database exists, as after the first boot, and holds no row.
+	target, ok, err := resolveInfraBindingTarget(cityPath, cfg)
+	if err != nil || !ok {
+		t.Fatalf("resolveInfraBindingTarget = %v, %v", ok, err)
+	}
+	prefix, err := infraBindingIDPrefix()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, err := beads.OpenSQLiteStore(target.Dir, beads.WithSQLiteStoreIDPrefix(prefix))
+	if err != nil {
+		t.Fatalf("open binding: %v", err)
+	}
+	if err := closeBeadStoreHandle(writer); err != nil {
+		t.Fatalf("close binding: %v", err)
+	}
+
+	check := newV2SessionMigrationCheck(cfg, cityPath)
+	check.lookupEnv = noEnv
+	d := &doctor.Doctor{}
+	d.Register(check)
+	report := d.RunCollect(&doctor.CheckContext{CityPath: cityPath}, false)
+	r := report.Results[0]
+	if report.BlockingFailed != 0 || r.Status != doctor.StatusWarning {
+		t.Fatalf("status %v, blocking_failed %d, want a warning that does not fail gc doctor: %s %q", r.Status, report.BlockingFailed, r.Message, r.Details)
+	}
+	want := []string{
+		"leg binding:infra: 0 open session row(s)",
+		"leg city: not checked (no read-only open): proxied-server Dolt, where bd refuses --readonly",
+		"leg rig:r1: not checked (no read-only open): proxied-server Dolt, where bd refuses --readonly",
+		"session reconciler: v2 (default: session_reconciler is unset)",
+	}
+	if !slices.Equal(r.Details, want) {
+		t.Errorf("details = %q, want %q", r.Details, want)
+	}
+	if !strings.HasSuffix(r.Message, "; 2 leg(s) not checked, counts are a lower bound") {
+		t.Errorf("message = %q, want the lower-bound note", r.Message)
+	}
+}
+
+// Kills: a scope leg whose metadata cannot be read graded as a backend with no
+// read-only open (it would only warn under v2), even when its provider is also
+// one bd does not read, and a proxied-server scope graded as a fault (it would
+// block every default split city).
+func TestV2SessionScopeLegGradesItsGap(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_BACKEND", "")
+	const proxied = "proxied-server Dolt, where bd refuses --readonly"
+	for _, tc := range []struct {
+		name           string
+		cityTOML       string
+		metadata       string // "" makes metadata.json a directory, which no read opens
+		noReadOnlyOpen bool
+		notChecked     string // "" wants the metadata read error, not a refusal
+	}{
+		{name: "proxied-server", metadata: `{"backend":"dolt","dolt_mode":"proxied-server"}`, noReadOnlyOpen: true, notChecked: proxied},
+		{name: "unreadable metadata"},
+		{name: "unreadable metadata under a provider bd does not read", cityTOML: "[beads]\nprovider = \"exec:/opt/custom-beads-store\"\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			if tc.cityTOML != "" {
+				if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(tc.cityTOML), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			scope := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(scope, ".beads"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.metadata == "" {
+				if err := os.Mkdir(scopeMetadataJSONPath(scope), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(scopeMetadataJSONPath(scope), []byte(tc.metadata), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			leg := openV2SessionScopeLeg(cityPath, &config.City{}, "rig:r1", scope, func(string, string, ...string) ([]byte, error) {
+				t.Fatal("a not-checked leg ran bd")
+				return nil, nil
+			})
+			if leg.store != nil || leg.notChecked == "" || leg.noReadOnlyOpen != tc.noReadOnlyOpen {
+				t.Fatalf("leg = %+v, want not checked with noReadOnlyOpen %v", leg, tc.noReadOnlyOpen)
+			}
+			if tc.notChecked != "" && leg.notChecked != tc.notChecked {
+				t.Errorf("notChecked = %q, want %q", leg.notChecked, tc.notChecked)
+			}
+			if tc.notChecked == "" && !strings.Contains(leg.notChecked, "metadata.json") {
+				t.Errorf("notChecked = %q, want the metadata read error", leg.notChecked)
+			}
+		})
 	}
 }
