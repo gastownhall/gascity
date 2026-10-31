@@ -41,6 +41,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"FreshByConstruction":             reflect.TypeFor[runtime.FreshByConstruction](),
 	"FencedInputProvider":             reflect.TypeFor[runtime.FencedInputProvider](),
 	"FencedInteractionProvider":       reflect.TypeFor[runtime.FencedInteractionProvider](),
+	"FreshActivityProvider":           reflect.TypeFor[runtime.FreshActivityProvider](),
 	"FreshLivenessObserver":           reflect.TypeFor[runtime.FreshLivenessObserver](),
 	"IdentitySidecarProvider":         reflect.TypeFor[runtime.IdentitySidecarProvider](),
 	"IdleProbeBudgetProvider":         reflect.TypeFor[runtime.IdleProbeBudgetProvider](),
@@ -325,6 +326,37 @@ func TestFullFakeScreenShowsTheTurnItsKnobsSet(t *testing.T) {
 	f.ScreenReadErrors = map[string]error{"s": runtime.ErrRuntimeUnavailable}
 	if _, err := b.TurnRunning("s"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
 		t.Fatalf("ScreenReadErrors: TurnRunning error = %v, want ErrRuntimeUnavailable", err)
+	}
+}
+
+// Kills a full fake whose fresh activity read ignores its knobs: it reads the
+// Activity GetLastActivity serves until PaneActivity moves the session's own
+// clock past it, while GetLastActivity keeps the older one; PaneActivityErrors
+// fails the read; an unstarted session cannot be read.
+func TestFullFakeFreshActivityReadsThePaneClock(t *testing.T) {
+	f := runtime.NewFake()
+	b := runtime.FullFake{Fake: f}
+	if _, err := b.FreshActivity("s"); !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("unstarted FreshActivity error = %v, want ErrSessionNotFound", err)
+	}
+	if err := f.Start(t.Context(), "s", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cached, drawn := time.Unix(1000, 0), time.Unix(1060, 0)
+	f.SetActivity("s", cached)
+	if at, err := b.FreshActivity("s"); err != nil || !at.Equal(cached) {
+		t.Fatalf("no knob: FreshActivity = %v, %v; want the Activity %v", at, err, cached)
+	}
+	f.PaneActivity = map[string]time.Time{"s": drawn}
+	if at, err := b.FreshActivity("s"); err != nil || !at.Equal(drawn) {
+		t.Fatalf("PaneActivity: FreshActivity = %v, %v; want %v", at, err, drawn)
+	}
+	if at, err := b.GetLastActivity("s"); err != nil || !at.Equal(cached) {
+		t.Fatalf("PaneActivity: GetLastActivity = %v, %v; want the cached %v", at, err, cached)
+	}
+	f.PaneActivityErrors = map[string]error{"s": runtime.ErrRuntimeUnavailable}
+	if _, err := b.FreshActivity("s"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("PaneActivityErrors: FreshActivity error = %v, want ErrRuntimeUnavailable", err)
 	}
 }
 

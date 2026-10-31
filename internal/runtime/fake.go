@@ -124,6 +124,13 @@ type Fake struct {
 	// ScreenReadErrors fail a FullFake's TurnRunning by session name, as a
 	// screen that cannot be captured does.
 	ScreenReadErrors map[string]error
+	// PaneActivity is the activity a FullFake's FreshActivity reads by
+	// session name, the session's own clock where it has moved past the
+	// Activity that GetLastActivity serves, as a pane that drew after the
+	// tmux fleet snapshot was taken has. An absent entry reads Activity.
+	PaneActivity map[string]time.Time
+	// PaneActivityErrors fail a FullFake's FreshActivity by session name.
+	PaneActivityErrors map[string]error
 }
 
 var (

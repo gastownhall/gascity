@@ -121,6 +121,27 @@ func TestNudgeSessionClearsPastClaudeQueuedHintUnderCursor(t *testing.T) {
 	})
 }
 
+// TestNudgeSessionClaudeOneLetterDraftStaysUnconfirmed: a one-letter draft
+// left in Claude's input box after the submit, the cursor drawn after it, is
+// typed text, not the queued hint under the cursor. The composer did not
+// drain, so the submit stays unconfirmed and a retrying caller still learns
+// the message may not have gone.
+func TestNudgeSessionClaudeOneLetterDraftStaysUnconfirmed(t *testing.T) {
+	const session, message = "busy-claude-one-letter-draft", "blocker gc-1 closed — routed dependent gc-2 may be ready to claim"
+	t.Cleanup(func() { sessionNudgeLocks.Delete(session) })
+	synctest.Test(t, func(t *testing.T) {
+		ex := &queuedBehindTurnExecutor{
+			agentPaneExecutor: &agentPaneExecutor{session: session, provider: "claude", attached: "0"},
+			before:            slices.Concat(claudeLongTurn, []string{claudeInputRule, "❯ \x1b[7m "}, claudeLongTurnFooter),
+			after:             slices.Concat(claudeLongTurn, []string{claudeInputRule, "❯ \x1b[0mP\x1b[7m "}, claudeLongTurnFooter),
+		}
+		tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+		if err := tm.NudgeSession(session, message); !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+			t.Fatalf("NudgeSession = %v, want ErrNudgeSubmitUnconfirmed: a typed P left in the input box is a draft, not Claude's queued hint", err)
+		}
+	})
+}
+
 // TestReadClaudeInputCursorOnPlaceholder: the reverse-video cursor cell that
 // starts a dim placeholder is part of the placeholder; a cursor cell anywhere
 // in typed text is part of the text.
