@@ -268,30 +268,53 @@ func TestPreflightSaysSoWhenNoControllerIsLive(t *testing.T) {
 // repaired by any command this binary carries — the operator has to move rows
 // by hand. Finding that out inside a stopped-city window is the worst possible
 // time, and it is exactly what this verb exists to move earlier.
-func TestPreflightBlocksOnRigResidueByName(t *testing.T) {
+func TestPreflightReportsRigHistoryWithoutBlocking(t *testing.T) {
+	rigPath := t.TempDir()
+	request, cfg, _ := preflightReadyCity(t, 1)
+	cfg.Rigs = []config.Rig{{Name: "alpha", Prefix: "ga", Path: rigPath, Suspended: true}}
+
+	rig := beads.NewMemStore()
+	rig.IDPrefix = "ga"
+	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a closed session in a suspended rig", Type: "session"})
+	if err := rig.Close(stray.ID); err != nil {
+		t.Fatal(err)
+	}
+	mustCreateInfraBead(t, rig, beads.Bead{Title: "ordinary rig work", Type: "task"})
+	stubStorageScopeStore(t, rigPath, func() beads.Store { return rig })
+
+	var stdout, stderr bytes.Buffer
+	if code := doStoragePreflight(request, &stdout, &stderr); code != 0 {
+		t.Fatalf("preflight blocked over closed history in a suspended rig: %q", stdout.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "rig alpha") || !strings.Contains(out, "would import 1 bead(s) (0 open, 1 closed)") || !strings.Contains(out, "gc storage migrate --from-rigs --rig alpha --fleet-stopped") {
+		t.Errorf("preflight does not report the rig's importable rows and the command: %q", out)
+	}
+}
+
+// TestPreflightBlocksOnAnUncodableRigEdgeByName: what the rig import refuses,
+// preflight blocks on, naming both beads and the fix.
+func TestPreflightBlocksOnAnUncodableRigEdgeByName(t *testing.T) {
 	rigPath := t.TempDir()
 	request, cfg, _ := preflightReadyCity(t, 1)
 	cfg.Rigs = []config.Rig{{Name: "alpha", Prefix: "ga", Path: rigPath}}
 
 	rig := beads.NewMemStore()
-	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a session in a rig", Type: "session"})
-	mustCreateInfraBead(t, rig, beads.Bead{Title: "ordinary rig work", Type: "task"})
-	prev := openStorageScopeStore
-	openStorageScopeStore = func(storePath, cityPath string) (beads.Store, error) {
-		if storePath == rigPath {
-			return rig, nil
-		}
-		return prev(storePath, cityPath)
+	rig.IDPrefix = "ga"
+	member := mustCreateInfraBead(t, rig, beads.Bead{Title: "an open drained step", Type: "task", Metadata: beads.StringMap{"gc.kind": "task", "gc.root_bead_id": "ga-root"}})
+	convoy := mustCreateInfraBead(t, rig, beads.Bead{Title: "an open work convoy", Type: "task"})
+	if err := rig.DepAdd(convoy.ID, member.ID, "tracks"); err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { openStorageScopeStore = prev })
+	stubStorageScopeStore(t, rigPath, func() beads.Store { return rig })
 
 	var stdout, stderr bytes.Buffer
 	if code := doStoragePreflight(request, &stdout, &stderr); code == 0 {
-		t.Fatal("preflight cleared a city whose migration would refuse by name")
+		t.Fatalf("preflight cleared a rig whose import would refuse: %q", stdout.String())
 	}
-	out := stdout.String() + stderr.String()
-	if !strings.Contains(out, stray.ID) || !strings.Contains(out, "rig alpha") {
-		t.Errorf("preflight blocks without naming the bead and its rig, so it says a migration would fail without saying what to move: %q", out)
+	out := stdout.String()
+	if !strings.Contains(out, member.ID) || !strings.Contains(out, convoy.ID) || !strings.Contains(out, "membership edge") || !strings.Contains(out, "rig alpha") {
+		t.Errorf("preflight blocks without naming both beads and the fix: %q", out)
 	}
 }
 
@@ -556,6 +579,7 @@ func TestPreflightNamesRigResidueOnAConvergedCityWithoutBlocking(t *testing.T) {
 	// exist: the migration would have refused it otherwise.
 	cfg.Rigs = []config.Rig{{Name: "alpha", Prefix: "ga", Path: rigPath}}
 	rig := beads.NewMemStore()
+	rig.IDPrefix = "ga"
 	stray := mustCreateInfraBead(t, rig, beads.Bead{Title: "a session written after the cutover", Type: "session"})
 	prev := openStorageScopeStore
 	openStorageScopeStore = func(storePath, cityPath string) (beads.Store, error) {

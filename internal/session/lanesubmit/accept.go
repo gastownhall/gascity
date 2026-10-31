@@ -78,7 +78,8 @@ type Request struct {
 	// Pending is the projection's front-door refusal of a message to
 	// session id while the session waits on a pending interaction. Accept
 	// calls it only for a request no op under its key answers, before
-	// anything is written. Its error is Accept's, as is.
+	// anything is written. Its error is Accept's, as is. Every projection
+	// runs its runtime's look through CheckPending, the one bounded rule.
 	Pending func(ctx context.Context, id string) error
 }
 

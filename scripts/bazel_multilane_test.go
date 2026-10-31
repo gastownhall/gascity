@@ -262,7 +262,13 @@ var multiLaneCommands = map[string]string{
 	"integration":          "test --config=ci --config=integration --keep_going //test/integration:integration_test",
 	"integration-packages": "test --config=ci --config=integration-packages --keep_going //test:integration_packages",
 	"integration-smoke":    "test --config=ci --config=integration --keep_going //test/integration:integration_smoke_test",
+	"split-strict":         "test --config=ci --keep_going //cmd/gc:gc_split_strict_test //internal/api:api_split_strict_test",
 }
+
+// multiLaneEvidenceOnly are the lanes whose failure never fails the run:
+// integration until G3, and the split-strict projection gate until split is
+// the default for new cities.
+var multiLaneEvidenceOnly = map[string]bool{"integration": true, "split-strict": true}
 
 // multiLaneFreshTargets are the targets the nightly fresh run adds to a lane
 // before --config=fresh: the timer-bound acceptance tests at their real
@@ -320,7 +326,7 @@ func TestBazelMultiLaneWorkflowTriggersAndPermissions(t *testing.T) {
 		t.Errorf("top-level permissions = %v, want %v", wf.Permissions, readOnly)
 	}
 	wantJobs := map[string]map[string]string{
-		"rbe": {"contents": "read", "actions": "write"}, // dispatches rbe-worker-pool.yml
+		"rbe": {"contents": "read", "actions": "write", "pull-requests": "read"}, // dispatches rbe-worker-pool.yml; lists a PR's files (split-strict)
 		// The worker-env preflight lists drift issues (tools/rbe/worker-env-drift).
 		"lane":        {"contents": "read", "issues": "read"},
 		"coverage":    {"contents": "read", "issues": "read"},
@@ -380,14 +386,19 @@ func readStepOutput(t *testing.T, path, name string) (string, bool) {
 // multiLaneLanes runs the rbe job's Lanes step for an event, a mode and
 // fresh-test-results ("true" or "false") and returns its raw lanes output
 // (the string the lane job's if compares).
-func multiLaneLanes(t *testing.T, script, event, mode, fresh string) (string, error) {
+func multiLaneLanes(t *testing.T, script, event, mode, fresh string, splitPaths ...string) (string, error) {
 	t.Helper()
 	dir := t.TempDir()
 	output := filepath.Join(dir, "output")
+	paths := ""
+	if len(splitPaths) > 0 {
+		paths = splitPaths[0]
+	}
 	out, err := runWorkflowStepScript(t, dir, script, map[string]string{
 		"EVENT":               event,
 		"MODE":                mode,
 		"FRESH":               fresh,
+		"SPLIT_STRICT_PATHS":  paths,
 		"GITHUB_OUTPUT":       output,
 		"GITHUB_STEP_SUMMARY": filepath.Join(dir, "summary"),
 	})
@@ -411,8 +422,15 @@ var (
 	multiLaneModes  = []string{"remote", "fork-ro", "fork-rw", "cache", "local"}
 )
 
-// wantMultiLanes: the lanes each (event, mode) starts, in order.
-func wantMultiLanes(event, _ string) []string {
+// wantMultiLanes: the lanes each (event, mode) starts, in order, for a pull
+// request that does not touch the split-strict storage paths.
+func wantMultiLanes(event, mode string) []string {
+	return wantMultiLanesPaths(event, mode, "false")
+}
+
+// wantMultiLanesPaths is wantMultiLanes with the Split-strict paths step's
+// answer for a pull request ("" off pull requests).
+func wantMultiLanesPaths(event, mode, splitPaths string) []string {
 	// Every mode tests (the gate fails a run with no lane). Acceptance and
 	// the gating integration lanes run in every mode, the fork pool's
 	// (fork-ro: no network) included: gc init no longer clones gascity-packs
@@ -423,21 +441,28 @@ func wantMultiLanes(event, _ string) []string {
 	if event == "workflow_dispatch" || event == "schedule" {
 		lanes = append(lanes, "integration")
 	}
+	// The split-strict gate runs remotely only (no fork certificate, no
+	// local re-execution of two whole suites): nightly, on dispatch, and on
+	// pull requests that touch the storage paths.
+	if mode == "remote" && (event == "schedule" || event == "workflow_dispatch" || (event == "pull_request" && splitPaths == "true")) {
+		lanes = append(lanes, "split-strict")
+	}
 	return lanes
 }
 
 // TestBazelMultiLaneLaneList runs the rbe job's Lanes step for every event
 // and mode and checks the lane job's matrix it yields: the lanes that start,
-// each lane's exact command, evidence-only on integration alone, and at most
+// each lane's exact command, evidence-only on integration and split-strict, and at most
 // multiLaneForkCertificates lanes (one rbe-fork certificate each) for a fork
 // PR.
 func TestBazelMultiLaneLaneList(t *testing.T) {
 	wf := readMultiLaneWorkflow(t)
 	step := multiLaneRBEStep(t, wf, "lanes")
 	wantEnv := map[string]string{
-		"EVENT": "${{ github.event_name }}",
-		"MODE":  "${{ steps.decide.outputs.mode }}",
-		"FRESH": "${{ inputs.fresh-test-results }}",
+		"EVENT":              "${{ github.event_name }}",
+		"MODE":               "${{ steps.decide.outputs.mode }}",
+		"FRESH":              "${{ inputs.fresh-test-results }}",
+		"SPLIT_STRICT_PATHS": "${{ steps.splitpaths.outputs.touched }}",
 	}
 	if step.If != "" || !reflect.DeepEqual(step.Env, wantEnv) {
 		t.Errorf("Lanes step: if %q, env %v; want it unconditional with env %v", step.If, step.Env, wantEnv)
@@ -449,45 +474,51 @@ func TestBazelMultiLaneLaneList(t *testing.T) {
 	for _, event := range multiLaneEvents {
 		for _, mode := range multiLaneModes {
 			for _, fresh := range []string{"false", "true"} {
-				raw, err := multiLaneLanes(t, step.Run, event, mode, fresh)
-				if err != nil {
-					t.Errorf("Lanes step (event %s, mode %s, fresh %s) failed: %v\n%s", event, mode, fresh, err, raw)
-					continue
-				}
-				want := wantMultiLanes(event, mode)
-				var entries []map[string]any
-				if err := json.Unmarshal([]byte(raw), &entries); err != nil {
-					t.Errorf("event %s, mode %s, fresh %s: lanes %q is not a JSON array of objects: %v", event, mode, fresh, raw, err)
-					continue
-				}
-				got := []string{}
-				for _, entry := range entries {
-					name, _ := entry["lane"].(string)
-					got = append(got, name)
-					wantCmd := multiLaneCommands[name]
-					if fresh == "true" {
-						wantCmd += multiLaneFreshTargets[name] + " --config=fresh"
+				for _, splitPaths := range []string{"false", "true"} {
+					if splitPaths == "true" && event != "pull_request" {
+						continue
 					}
-					if cmd, _ := entry["cmd"].(string); cmd != wantCmd {
-						t.Errorf("event %s, mode %s, fresh %s: lane %s cmd %q, want %q", event, mode, fresh, name, cmd, wantCmd)
+					raw, err := multiLaneLanes(t, step.Run, event, mode, fresh, splitPaths)
+					if err != nil {
+						t.Errorf("Lanes step (event %s, mode %s, fresh %s) failed: %v\n%s", event, mode, fresh, err, raw)
+						continue
 					}
-					// Evidence-only (exit 0 on failure) is integration's alone, until G3.
-					ev, set := entry["evidence-only"]
-					if (name == "integration") != (set && ev == true) {
-						t.Errorf("event %s, mode %s, fresh %s: lane %s evidence-only %v; want true on integration only", event, mode, fresh, name, ev)
+					want := wantMultiLanesPaths(event, mode, splitPaths)
+					var entries []map[string]any
+					if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+						t.Errorf("event %s, mode %s, fresh %s: lanes %q is not a JSON array of objects: %v", event, mode, fresh, raw, err)
+						continue
 					}
-					for key := range entry {
-						if key != "lane" && key != "cmd" && key != "evidence-only" {
-							t.Errorf("event %s, mode %s, fresh %s: lane %s: unexpected matrix key %q", event, mode, fresh, name, key)
+					got := []string{}
+					for _, entry := range entries {
+						name, _ := entry["lane"].(string)
+						got = append(got, name)
+						wantCmd := multiLaneCommands[name]
+						if fresh == "true" {
+							wantCmd += multiLaneFreshTargets[name] + " --config=fresh"
+						}
+						if cmd, _ := entry["cmd"].(string); cmd != wantCmd {
+							t.Errorf("event %s, mode %s, fresh %s: lane %s cmd %q, want %q", event, mode, fresh, name, cmd, wantCmd)
+						}
+						// Evidence-only (exit 0 on failure): integration until G3,
+						// split-strict until split is the default.
+						ev, set := entry["evidence-only"]
+						if multiLaneEvidenceOnly[name] != (set && ev == true) {
+							t.Errorf("event %s, mode %s, fresh %s: lane %s evidence-only %v; want true on integration and split-strict only", event, mode, fresh, name, ev)
+						}
+						for key := range entry {
+							if key != "lane" && key != "cmd" && key != "evidence-only" {
+								t.Errorf("event %s, mode %s, fresh %s: lane %s: unexpected matrix key %q", event, mode, fresh, name, key)
+							}
 						}
 					}
-				}
-				if !reflect.DeepEqual(got, want) {
-					t.Errorf("event %s, mode %s, fresh %s: lanes %v, want %v", event, mode, fresh, got, want)
-				}
-				// The decide step reaches a fork mode on pull_request runs only.
-				if event == "pull_request" && strings.HasPrefix(mode, "fork-") && len(got) > multiLaneForkCertificates {
-					t.Errorf("event %s, mode %s, fresh %s: %d lanes; a fork run mints at most %d rbe-fork certificates", event, mode, fresh, len(got), multiLaneForkCertificates)
+					if !reflect.DeepEqual(got, want) {
+						t.Errorf("event %s, mode %s, fresh %s: lanes %v, want %v", event, mode, fresh, got, want)
+					}
+					// The decide step reaches a fork mode on pull_request runs only.
+					if event == "pull_request" && strings.HasPrefix(mode, "fork-") && len(got) > multiLaneForkCertificates {
+						t.Errorf("event %s, mode %s, fresh %s: %d lanes; a fork run mints at most %d rbe-fork certificates", event, mode, fresh, len(got), multiLaneForkCertificates)
+					}
 				}
 			}
 		}
@@ -1475,6 +1506,74 @@ func TestForkRepositoryCINeverReadsRBECache(t *testing.T) {
 		got := interpolateGH(t, setup.Env["BAZEL_FORK_CACHE"], map[string]string{"needs.gate.outputs.mode": mode})
 		if want := map[string]string{"remote": "", "cache": "true", "local": ""}[mode]; got != want {
 			t.Errorf("%s: review-formulas mode %s BAZEL_FORK_CACHE = %q, want %q", c.name, mode, got, want)
+		}
+	}
+}
+
+// splitStrictPathPatterns is the case pattern list the Split-strict paths
+// step matches a PR's files against.
+func splitStrictPathPatterns(t *testing.T) []string {
+	t.Helper()
+	run := multiLaneRBEStep(t, readMultiLaneWorkflow(t), "splitpaths").Run
+	m := regexp.MustCompile(`(?s)case "\$f" in\s*(.*?)\)\s*\n\s*touched=true`).FindStringSubmatch(run)
+	if m == nil {
+		t.Fatalf("the splitpaths step has no case pattern list:\n%s", run)
+	}
+	var out []string
+	for _, p := range strings.Split(strings.ReplaceAll(m[1], "\\\n", ""), "|") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// caseGlobMatch is a shell case glob match: "*" matches any run of
+// characters, slashes included.
+func caseGlobMatch(pattern, name string) bool {
+	re := "^" + strings.ReplaceAll(regexp.QuoteMeta(pattern), `\*`, ".*") + "$"
+	return regexp.MustCompile(re).MatchString(name)
+}
+
+// TestSplitStrictLaneRunsOnTheRoutingCode: the split-strict lane runs on PRs
+// touching any code whose store routing it judges (cmd/gc, the session,
+// sling, molecule, orders, dispatch, readywork and api packages, the store
+// layer), and not on unrelated changes.
+func TestSplitStrictLaneRunsOnTheRoutingCode(t *testing.T) {
+	patterns := splitStrictPathPatterns(t)
+	touched := func(f string) bool {
+		for _, p := range patterns {
+			if caseGlobMatch(p, f) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, f := range []string{
+		"cmd/gc/cmd_sling.go", "cmd/gc/testdata/split_strict_baseline.tsv",
+		"internal/session/manager.go", "internal/sling/sling_core.go", "internal/molecule/molecule.go",
+		"internal/orders/store_reads.go", "internal/dispatch/dispatch.go", "internal/readywork/ready.go",
+		"internal/api/huma_handlers_beads.go", "internal/beads/memstore.go", "internal/storeref/resolve.go",
+	} {
+		if !touched(f) {
+			t.Errorf("a PR touching %s does not run the split-strict lane", f)
+		}
+	}
+	for _, f := range []string{"docs/reference/cli.md", "internal/runtime/tmux/tmux.go", ".github/workflows/ci.yml"} {
+		if touched(f) {
+			t.Errorf("a PR touching only %s runs the split-strict lane", f)
+		}
+	}
+	// Every file a baseline row names is code the gate judges: a PR changing
+	// it must run the lane, or a fix (or a new misroute) there goes unseen.
+	for _, baseline := range []string{"cmd/gc/testdata/split_strict_baseline.tsv", "internal/api/testdata/split_strict_baseline.tsv"} {
+		for _, line := range strings.Split(readFile(t, repoRoot(t), baseline), "\n") {
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			if f, _, _ := strings.Cut(line, "\t"); !touched(f) {
+				t.Errorf("%s names %s, but a PR touching it does not run the split-strict lane", baseline, f)
+			}
 		}
 	}
 }

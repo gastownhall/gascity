@@ -1435,7 +1435,7 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 	t.Run("control dispatcher graph store", func(t *testing.T) {
 		cityPath, cfg := fencedMigratedOneShotCLICity(t, "require")
 		captureCLIStorageStderr(t)
-		graph := scopeGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
+		graph := controlGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
 
 		writer, _, err := beads.ResolveConditionalWriter(graph)
 		if _, emitting := writer.(*emittingClassStore); err != nil || !emitting {
@@ -1482,7 +1482,7 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 	t.Run("fenced molecule attach through the dispatcher's graph store", func(t *testing.T) {
 		cityPath, cfg := fencedMigratedOneShotCLICity(t, "auto")
 		captureCLIStorageStderr(t)
-		graph := scopeGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
+		graph := controlGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
 
 		root, err := graph.Create(beads.Bead{Title: "workflow", Type: "task", Status: "open", Metadata: map[string]string{
 			beadmeta.KindMetadataKey: "workflow", "gc.formula_contract": "graph.v2",

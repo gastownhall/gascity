@@ -12,9 +12,11 @@ name: Advisory probes
 # feeds CI / required (scripts/ci_required_coverage_test.go); an advisory job
 # belongs here.
 #
-# The triggers, runners and shared path filter are ci.yml's
-# (scripts/advisory_probes_workflow_test.go), and RC Gate calls this
-# workflow beside ci.yml.
+# The runners and shared path filter are ci.yml's, and the triggers are
+# ci.yml's except merge_group (scripts/advisory_probes_workflow_test.go).
+# RC Gate calls this workflow beside ci.yml. The probes never run in the
+# merge queue: no queue entry waits on them, and the push to main runs
+# them on the commit the queue merges.
 on:
   workflow_call:
     inputs:
@@ -31,10 +33,6 @@ on:
       - reopened
       - synchronize
       - ready_for_review
-  # A queue entry runs the probes its change selects, as on a PR; none is a
-  # required check, so the queue never waits on them.
-  merge_group:
-    types: [checks_requested]
 
 permissions:
   contents: read
@@ -67,16 +65,15 @@ jobs:
           FORCE_BLACKSMITH: ${{ inputs.force_blacksmith }}
         run: |
           python3 .github/workflows/scripts/runner_policy.py
-      # As in ci.yml: a merge group diffs merge_group.base_sha to head_sha
-      # (empty on every other event, the action's defaults), and token: ''
-      # detects a pull request's changes with git instead of the pulls/files
-      # API on the repository's shared installation rate limit.
+      # As in ci.yml, token: '' detects a pull request's changes with git
+      # instead of the pulls/files API on the repository's shared
+      # installation rate limit. ci.yml's merge_group base and ref are left
+      # out: the probes run on no merge group, and the action's defaults
+      # serve every event they run on.
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         id: filter
         with:
           token: ''
-          base: ${{ github.event.merge_group.base_sha }}
-          ref: ${{ github.event.merge_group.head_sha }}
           filters: |
             mail:
               - 'internal/mail/**'

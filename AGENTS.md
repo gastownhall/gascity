@@ -143,6 +143,9 @@ Violating any fails the build. Details live in the linked files.
 - **Worker boundary (active migration).** Production `cmd/gc` code reaches
   sessions through `worker.Handle`
   (`TestGCNonTestFilesStayOnWorkerBoundary`; `internal/worker/AGENTS.md`).
+- **Typed store boundary (active migration).** Outside the residency
+  layer, code takes typed class handles, not a raw `beads.Store`, and uses
+  `beads.As` for capabilities (`storeclass` lint, shrink-only baseline).
 - **Agent config field sync.** A new `config.Agent` field is wired in every
   copy and merge site (`TestAgentFieldSync` and siblings;
   `internal/config/AGENTS.md`).

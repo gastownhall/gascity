@@ -177,7 +177,15 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 				query.SeekAfter = seek
 			}
 			pa.attempt()
-			list, err := leg.store.List(query)
+			// One leg of the /beads fan-out (work legs, then the class
+			// binding): each lists only its own rows, so a type or label the
+			// other legs own misses here by design.
+			var list []beads.Bead
+			err := beads.FederatedRead(func() error {
+				var listErr error
+				list, listErr = leg.store.List(query)
+				return listErr
+			})
 			if err != nil {
 				if leg.graph {
 					// The graph leg is the execution DAG, not a rig: any degraded
