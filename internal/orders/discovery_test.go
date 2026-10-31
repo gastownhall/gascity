@@ -296,3 +296,46 @@ func TestDiscoverRootReturnsUnreadableRootError(t *testing.T) {
 		t.Fatalf("error = %v, want readable root context", err)
 	}
 }
+
+func TestCheckLayoutReportsLegacyLayoutsLikeScanRoots(t *testing.T) {
+	fs := fsys.NewFake()
+	for _, dir := range []string{
+		"/base/orders/alpha",
+		"/base/formulas/orders/beta",
+		"/pack/orders/gamma",
+	} {
+		fs.Dirs[dir] = true
+		fs.Files[dir+"/order.toml"] = []byte("[order\nformula = ")
+	}
+	roots := []ScanRoot{
+		{Dir: "/base/orders", FormulaLayer: "/base/formulas"},
+		{Dir: "/pack/orders", FormulaLayer: "/pack/formulas"},
+	}
+
+	err := CheckLayout(fs, roots)
+	if err == nil {
+		t.Fatal("CheckLayout succeeded, want hard error for legacy subdirectory layouts")
+	}
+	_, scanErr := ScanRoots(fs, roots, nil)
+	if scanErr == nil || err.Error() != scanErr.Error() {
+		t.Fatalf("CheckLayout error = %v, want the same finding as ScanRoots: %v", err, scanErr)
+	}
+}
+
+func TestCheckLayoutDoesNotParseFlatOrders(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/pack/orders/broken.toml"] = []byte("[order\nformula = ")
+
+	if err := CheckLayout(fs, []ScanRoot{{Dir: "/pack/orders", FormulaLayer: "/pack/formulas"}}); err != nil {
+		t.Fatalf("CheckLayout = %v, want a malformed flat order left to ScanRoots", err)
+	}
+	if _, err := ScanRoots(fs, []ScanRoot{{Dir: "/pack/orders", FormulaLayer: "/pack/formulas"}}, nil); err == nil {
+		t.Fatal("ScanRoots succeeded on a malformed flat order, want its parse error")
+	}
+}
+
+func TestCheckLayoutMissingRootsAreFine(t *testing.T) {
+	if err := CheckLayout(fsys.NewFake(), []ScanRoot{{Dir: "/none/orders", FormulaLayer: "/none/formulas"}}); err != nil {
+		t.Fatalf("CheckLayout = %v, want nil for roots that do not exist", err)
+	}
+}

@@ -85,6 +85,33 @@ func ScanRoots(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, error) {
 	return result, nil
 }
 
+// CheckLayout reports the deprecated PackV1 order layouts under roots, with
+// the same finding ScanRoots returns for them, without reading or parsing any
+// flat order file. It is the check for callers that only need the layout
+// rejected (config load); parse errors surface where orders are scanned.
+func CheckLayout(fs fsys.FS, roots []ScanRoot) error {
+	var legacyFindings []legacyOrderLayoutFinding
+	for _, root := range roots {
+		findings, err := findLegacySubdirectoryOrders(fs, root.Dir, "rename to orders/%s.toml")
+		if err != nil {
+			return err
+		}
+		legacyFindings = append(legacyFindings, findings...)
+		legacyDir := legacyOrdersDir(root.FormulaLayer)
+		if legacyDir != "" && filepath.Clean(legacyDir) != filepath.Clean(root.Dir) {
+			findings, err := findLegacySubdirectoryOrders(fs, legacyDir, "move to orders/%s.toml")
+			if err != nil {
+				return err
+			}
+			legacyFindings = append(legacyFindings, findings...)
+		}
+	}
+	if len(legacyFindings) > 0 {
+		return legacyOrderLayoutError{findings: legacyFindings}
+	}
+	return nil
+}
+
 func hasSkippedAlias(a Order, skipSet map[string]bool) bool {
 	for _, alias := range a.skipAliases {
 		if skipSet[alias] {
