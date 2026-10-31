@@ -248,13 +248,13 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 // targetScopeSuspension reports whether the city is effectively suspended
 // and, when the target agent belongs to a suspended rig, that rig's name. For
 // each scope the runtime suspension state that gc suspend / gc rig suspend and
-// their resume commands write wins over the authored default ([workspace]
-// suspended_on_start for the city, the rig's deprecated suspended field for a
-// rig). The pool reconciler spawns no workers in a suspended scope, so a bead
-// routed into one stalls silently. An empty CityPath skips the disk read (Load
-// would otherwise resolve a cwd-relative .gc/runtime file). A state read or
-// parse error is traced and degrades to the zero State: sling warns about
-// suspension but never fails a route because of it.
+// their resume commands write wins over the authored suspended_on_start
+// default, which also honors the deprecated suspended field. The pool
+// reconciler spawns no workers in a suspended scope, so a bead routed into one
+// stalls silently. An empty CityPath skips the disk read (Load would otherwise
+// resolve a cwd-relative .gc/runtime file). A state read or parse error is
+// traced and degrades to the zero State: sling warns about suspension but
+// never fails a route because of it.
 func targetScopeSuspension(fs fsys.FS, deps SlingDeps, a config.Agent) (city bool, rig string) {
 	if deps.Cfg == nil {
 		return false, ""
@@ -273,7 +273,7 @@ func targetScopeSuspension(fs fsys.FS, deps SlingDeps, a config.Agent) (city boo
 		return city, ""
 	}
 	for _, r := range deps.Cfg.Rigs {
-		if r.Name == a.Dir && suspensionstate.EffectiveRigSuspended(st, r.Name, r.Suspended) {
+		if r.Name == a.Dir && suspensionstate.EffectiveRigSuspended(st, r.Name, r.EffectiveSuspendedOnStart()) {
 			return city, r.Name
 		}
 	}
