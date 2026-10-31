@@ -15,7 +15,7 @@ import (
 func TestStopTargetsBoundedUsesWorkerBoundaryForKnownSession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := newSessionManagerWithConfig("", store, sp, nil)
+	mgr := newSessionManagerWithConfig(t.TempDir(), store, sp, nil) // the create's start leases in its city
 	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -49,7 +49,7 @@ func TestStopTargetsBoundedUsesWorkerBoundaryForKnownSession(t *testing.T) {
 func TestInterruptTargetsBoundedStopsPoolManagedSessionsThroughWorkerBoundary(t *testing.T) {
 	sp := runtime.NewFake()
 	store := beads.NewMemStore()
-	mgr := newSessionManagerWithConfig("", store, sp, nil)
+	mgr := newSessionManagerWithConfig(t.TempDir(), store, sp, nil) // the create's start leases in its city
 	if err := sp.Start(context.Background(), "human-worker", runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
@@ -81,4 +81,62 @@ func TestInterruptTargetsBoundedStopsPoolManagedSessionsThroughWorkerBoundary(t 
 	if !sp.IsRunning("human-worker") {
 		t.Fatal("human-worker should still be running after interrupt")
 	}
+}
+
+// TestInterruptTargetsBoundedFollowsRuntimeTurnInterruptMode pins the
+// graceful interrupt pass of gc stop and restart to the runtime's
+// turn-interrupt mode: a protocol runtime (t3bridge) gets one Interrupt for
+// a codex session instead of an Escape it drops, and a runtime-only target
+// on a runtime that cannot interrupt the turn is sent nothing and not
+// counted as interrupted.
+func TestInterruptTargetsBoundedFollowsRuntimeTurnInterruptMode(t *testing.T) {
+	t.Run("protocol", func(t *testing.T) {
+		sp := runtime.NewFake()
+		sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
+		store := beads.NewMemStore()
+		mgr := newSessionManagerWithConfig(t.TempDir(), store, sp, nil) // the create's start leases in its city
+		info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		sp.Calls = nil
+		var stderr bytes.Buffer
+		sent := interruptTargetsBounded([]stopTarget{{sessionID: info.ID, name: info.SessionName, template: "worker", resolved: true}}, nil, store, sp, &stderr)
+		if sent != 1 {
+			t.Fatalf("sent = %d, want 1; stderr: %s", sent, stderr.String())
+		}
+		var interrupts int
+		for _, call := range sp.Calls {
+			if call.Method == "SendKeys" {
+				t.Fatalf("calls = %#v, want no SendKeys on a protocol runtime", sp.Calls)
+			}
+			if call.Method == "Interrupt" && call.Name == info.SessionName {
+				interrupts++
+			}
+		}
+		if interrupts != 1 {
+			t.Fatalf("Interrupt calls = %d, want 1; calls = %#v", interrupts, sp.Calls)
+		}
+		if !sp.IsRunning(info.SessionName) {
+			t.Fatal("the interrupt pass stopped the session; want only its turn interrupted")
+		}
+	})
+	t.Run("unsupported runtime-only target", func(t *testing.T) {
+		sp := runtime.NewFake()
+		sp.TurnInterruptModeValue = runtime.TurnInterruptUnsupported
+		if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+		sp.Calls = nil
+		var stderr bytes.Buffer
+		sent := interruptTargetsBounded([]stopTarget{{name: "legacy-worker", template: "worker", resolved: true}}, nil, beads.NewMemStore(), sp, &stderr)
+		if sent != 0 {
+			t.Fatalf("sent = %d, want 0; stderr: %s", sent, stderr.String())
+		}
+		for _, call := range sp.Calls {
+			if call.Method == "Interrupt" || call.Method == "SendKeys" {
+				t.Fatalf("calls = %#v, want nothing sent", sp.Calls)
+			}
+		}
+	})
 }

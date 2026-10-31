@@ -15,8 +15,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -139,13 +141,53 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		}
 	})
 
-	t.Run("Stop_Idempotent_NotRunning", func(t *testing.T) {
-		sp, _, _ := newSession(t)
-		if err := sp.Stop("never-started-conformance-session"); err != nil {
-			t.Errorf("Stop on never-started session: %v", err)
+	// Optional capability: a provider that reports liveness with an error must
+	// answer a session it stopped as confirmed absent, never as "unknown".
+	t.Run("ObserveLivenessWithError_StoppedIsAbsent", func(t *testing.T) {
+		sp, cfg, name := newSession(t)
+		observer, ok := sp.(runtime.LivenessObserverWithError)
+		if !ok {
+			return
+		}
+		startOrSkip(t, opts, sp, name, cfg, "Start")
+		if err := sp.Stop(name); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+		obs, err := observer.ObserveLivenessWithError(name, nil)
+		if err != nil {
+			t.Fatalf("ObserveLivenessWithError after Stop: %v, want confirmed absence (nil error)", err)
+		}
+		if obs.Running || obs.Alive {
+			t.Errorf("ObserveLivenessWithError after Stop = %+v, want absent", obs)
 		}
 	})
 
+	// Stop answers a missing session with nil only while the provider can see
+	// its inventory. The running sentinel holds the provider's backend up, so
+	// the never-started name is a missing session on a responsive provider.
+	t.Run("Stop_Idempotent_NotRunning", func(t *testing.T) {
+		sp, cfg, sentinel := newSession(t)
+		startOrSkip(t, opts, sp, sentinel, cfg, "Start sentinel")
+		if err := sp.Stop("never-started-conformance-session"); err != nil {
+			t.Errorf("Stop on never-started session beside running %q: %v", sentinel, err)
+		}
+	})
+
+	// A provider whose backend is not running at all may report that from
+	// Stop rather than certify absence — tmux does when it has no server — so
+	// the never-started case on a fresh provider is the teardown contract:
+	// runtime.StopForCleanup must find nothing left to fail on.
+	t.Run("StopForCleanup_NeverStarted", func(t *testing.T) {
+		sp, _, _ := newSession(t)
+		if err := runtime.StopForCleanup(sp, "never-started-conformance-session"); err != nil {
+			t.Errorf("StopForCleanup on never-started session: %v", err)
+		}
+	})
+
+	// Both Stops are held to the strict contract. Stopping a provider's last
+	// session must leave its backend responsive — tmux keeps an empty server up
+	// (exit-empty off) — so the second Stop meets a missing session on a
+	// responsive provider.
 	t.Run("Stop_Idempotent_AlreadyStopped", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
 		startOrSkip(t, opts, sp, name, cfg, "Start")
@@ -394,6 +436,128 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 			}
 		}
 	})
+
+	// --- Group 7: Fenced input (optional capability) ---
+
+	runFencedInputTests(t, newSession, opts)
+}
+
+// fencedStart starts name with an injected incarnation identity and
+// returns its fence. It skips when sp cannot fence name's input.
+func fencedStart(t *testing.T, opts Options, sp runtime.Provider, name string, cfg runtime.Config) runtime.InputFence {
+	t.Helper()
+	if runtime.InputFencingFor(sp, name) == runtime.InputFencingNone {
+		t.Skip("provider cannot fence session input")
+	}
+	fence := runtime.InputFence{Generation: 2, Epoch: 3, Token: "conformance-" + name}
+	env := make(map[string]string, len(cfg.Env)+3)
+	for k, v := range cfg.Env {
+		env[k] = v
+	}
+	env[runtime.RuntimeEpochEnv] = "2"
+	env[runtime.ContinuationEpochEnv] = "3"
+	env[runtime.InstanceTokenEnv] = fence.Token
+	cfg.Env = env
+	startOrSkip(t, opts, sp, name, cfg, "Start fenced session")
+	return fence
+}
+
+// peekBarrierWait bounds how long peekBarrier waits for its marker.
+const peekBarrierWait = 2 * time.Second
+
+// peekBarrier nudges a marker unfenced (NudgeNow when sp has it) and waits
+// for Peek to show it, returning that output. Input sent before the barrier
+// has reached the session by then, so a case can confirm delivery or
+// non-delivery from it. False when sp's Peek never shows nudged text (a
+// runtime with no visible input), so the case cannot confirm by peeking; the
+// log then names the input fencing the case relied on instead.
+func peekBarrier(t *testing.T, sp runtime.Provider, name string) (string, bool) {
+	t.Helper()
+	marker := "barrier-" + name
+	send := sp.Nudge
+	if now, ok := sp.(runtime.ImmediateNudgeProvider); ok {
+		send = now.NudgeNow
+	}
+	if err := send(name, runtime.TextContent(marker)); err != nil {
+		t.Logf("barrier nudge: %v; delivery not confirmed by Peek, only by the fenced calls' results (input fencing %q)", err, runtime.InputFencingFor(sp, name))
+		return "", false
+	}
+	deadline := time.Now().Add(peekBarrierWait)
+	for {
+		out, err := sp.Peek(name, 0)
+		if err == nil && strings.Contains(out, marker) {
+			return out, true
+		}
+		if time.Now().After(deadline) {
+			t.Logf("Peek never showed the barrier nudge; delivery not confirmed by Peek, only by the fenced calls' results (input fencing %q)", runtime.InputFencingFor(sp, name))
+			return "", false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// runFencedInputTests is the fenced-input group: a provider that can fence a
+// session's input (runtime.FencedInputProvider) delivers under the fence of
+// the incarnation it started, and refuses every input under another fence or
+// to a session it does not host.
+func runFencedInputTests(t *testing.T, newSession Factory, opts Options) {
+	t.Helper()
+
+	t.Run("FencedInput_MatchingFenceDelivers", func(t *testing.T) {
+		sp, cfg, name := newSession(t)
+		fence := fencedStart(t, opts, sp, name, cfg)
+		fp := sp.(runtime.FencedInputProvider)
+		ctx := context.Background()
+		text := "fenced-in-" + name
+		if err := fp.NudgeFenced(ctx, name, runtime.TextContent(text), runtime.FencedNudge{Fence: fence, Immediate: true}); err != nil {
+			t.Errorf("NudgeFenced under the session's fence: %v", err)
+		}
+		if err := fp.SendKeysFenced(ctx, name, fence, "Enter"); err != nil {
+			t.Errorf("SendKeysFenced under the session's fence: %v", err)
+		}
+		if out, ok := peekBarrier(t, sp, name); ok && !strings.Contains(out, text) {
+			t.Errorf("Peek after the fenced nudge and a later unfenced one = %q, want the fenced text %q delivered", out, text)
+		}
+	})
+
+	t.Run("FencedInput_MismatchedFenceRefusesEveryInput", func(t *testing.T) {
+		sp, cfg, name := newSession(t)
+		fence := fencedStart(t, opts, sp, name, cfg)
+		fp := sp.(runtime.FencedInputProvider)
+		ctx := context.Background()
+		other := fence
+		other.Token += "-other"
+		stale := "fenced-stale-" + name
+		for op, err := range map[string]error{
+			"NudgeFenced":     fp.NudgeFenced(ctx, name, runtime.TextContent(stale), runtime.FencedNudge{Fence: other, Immediate: true}),
+			"SendKeysFenced":  fp.SendKeysFenced(ctx, name, other, "Enter"),
+			"InterruptFenced": fp.InterruptFenced(ctx, name, other),
+		} {
+			if !errors.Is(err, runtime.ErrFenceMismatch) || runtime.IsSessionGone(err) {
+				t.Errorf("%s under another fence = %v, want ErrFenceMismatch, not gone", op, err)
+			}
+		}
+		if out, ok := peekBarrier(t, sp, name); ok && strings.Contains(out, stale) {
+			t.Errorf("Peek after a refused nudge and a later unfenced one = %q, want nothing of the refused text %q", out, stale)
+		}
+	})
+
+	// Self-contained: a sibling session keeps the runtime up, so the probe
+	// asks a live runtime about a name it does not host. With no runtime
+	// server at all a provider answers ErrRuntimeUnavailable instead
+	// (FencedInputProvider), which this case does not test.
+	t.Run("FencedInput_AbsentSessionRefuses", func(t *testing.T) {
+		sp, cfg, name := newSession(t)
+		_ = fencedStart(t, opts, sp, name, cfg)
+		absent := name + "-absent"
+		fp := sp.(runtime.FencedInputProvider)
+		fence := runtime.InputFence{Generation: 1, Epoch: 1, Token: "conformance-absent"}
+		err := fp.NudgeFenced(context.Background(), absent, runtime.TextContent("hello"), runtime.FencedNudge{Fence: fence, Immediate: true})
+		var miss *runtime.FenceMismatchError
+		if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent {
+			t.Errorf("NudgeFenced to a session never started = %v, want a mismatch finding %s", err, runtime.FenceFoundAbsent)
+		}
+	})
 }
 
 func startOrSkip(t *testing.T, opts Options, sp runtime.Provider, name string, cfg runtime.Config, label string) {
@@ -492,6 +656,30 @@ func RunSessionTests(t *testing.T, sp runtime.Provider, cfg runtime.Config, name
 		}
 	})
 
+	// An empty value is a value, not a delete. Providers translate SetMeta
+	// rather than storing it verbatim — tmux maps it onto `set-environment`,
+	// where set-empty and unset are distinct states — so a caller that blanks a
+	// key to retract what it says must be able to rely on the blank landing.
+	// gc's drain-ack binding does exactly that: a pane that cannot prove its
+	// incarnation writes an empty stamp over whatever the previous occupant
+	// left, and if the old value survived it would pair with the new
+	// acknowledgement and read as proof of residue.
+	t.Run("SetMeta_EmptyValueOverwrites", func(t *testing.T) {
+		if err := sp.SetMeta(name, "empty-me", "prior-value"); err != nil {
+			t.Fatalf("SetMeta prior: %v", err)
+		}
+		if err := sp.SetMeta(name, "empty-me", ""); err != nil {
+			t.Fatalf("SetMeta empty: %v", err)
+		}
+		val, err := sp.GetMeta(name, "empty-me")
+		if err != nil {
+			t.Fatalf("GetMeta: %v", err)
+		}
+		if val != "" {
+			t.Errorf("GetMeta after SetMeta to empty = %q, want empty", val)
+		}
+	})
+
 	t.Run("SetMeta_OverwritesPrevious", func(t *testing.T) {
 		if err := sp.SetMeta(name, "key", "v1"); err != nil {
 			t.Fatalf("SetMeta v1: %v", err)
@@ -554,6 +742,24 @@ func RunSessionTests(t *testing.T, sp runtime.Provider, cfg runtime.Config, name
 		}
 	})
 
+	// Optional capability: an error-bearing attachment probe separates "no
+	// client" from "could not tell", so on a healthy runtime it must not error.
+	if observer, ok := sp.(runtime.AttachmentObserverWithError); ok {
+		t.Run("IsAttachedWithError_UnattachedSession", func(t *testing.T) {
+			attached, err := observer.IsAttachedWithError(name)
+			if err != nil || attached {
+				t.Errorf("IsAttachedWithError = (%v, %v), want (false, nil)", attached, err)
+			}
+		})
+
+		t.Run("IsAttachedWithError_MissingSession", func(t *testing.T) {
+			attached, err := observer.IsAttachedWithError("nonexistent-conformance-session")
+			if attached || (err != nil && !errors.Is(err, runtime.ErrSessionNotFound)) {
+				t.Errorf("IsAttachedWithError on missing session = (%v, %v), want (false, nil) or ErrSessionNotFound", attached, err)
+			}
+		})
+	}
+
 	// --- Group 4b: CopyTo (best-effort) ---
 
 	t.Run("CopyTo_NoError", func(t *testing.T) {
@@ -585,8 +791,8 @@ func RunSessionTests(t *testing.T, sp runtime.Provider, cfg runtime.Config, name
 	})
 
 	t.Run("Interrupt_MissingSession", func(t *testing.T) {
-		if err := sp.Interrupt("nonexistent-conformance-session"); err != nil {
-			t.Errorf("Interrupt on missing session should not error: %v", err)
+		if err := sp.Interrupt("nonexistent-conformance-session"); err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
+			t.Errorf("Interrupt on missing session error = %v, want nil or ErrSessionNotFound", err)
 		}
 	})
 

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -116,5 +117,48 @@ func TestRestoreSnapshotsAggregatesAcrossFiles(t *testing.T) {
 	gb, _ := os.ReadFile(b)
 	if string(ga) != "a=1\n" || string(gb) != "b=1\n" {
 		t.Fatalf("restore did not recover both files: a=%q b=%q", ga, gb)
+	}
+}
+
+// The rig-add topology rollback restores packs.lock with a temp-file +
+// rename, so it must snapshot the resolved symlink target: restoring at the
+// link path would replace a symlinked packs.lock with a regular file.
+func TestSnapshotTopologyFilesPreservesSymlinkedPacksLock(t *testing.T) {
+	fs := fsys.OSFS{}
+	cityDir := t.TempDir()
+	checkoutDir := t.TempDir()
+	target := filepath.Join(checkoutDir, "packs.lock")
+	if err := os.WriteFile(target, []byte("schema = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(cityDir, "packs.lock")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	snaps, err := SnapshotTopologyFiles(fs, cityDir, &config.City{})
+	if err != nil {
+		t.Fatalf("SnapshotTopologyFiles: %v", err)
+	}
+	if err := os.WriteFile(target, []byte("schema = 1\n\n[packs.\"x\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreSnapshots(fs, snaps); err != nil {
+		t.Fatalf("RestoreSnapshots: %v", err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat packs.lock link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("packs.lock symlink was replaced by mode %v", info.Mode())
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "schema = 1\n" {
+		t.Fatalf("packs.lock target not restored, got %q", got)
 	}
 }

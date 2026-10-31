@@ -12,12 +12,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/runproj"
 )
 
@@ -850,7 +854,9 @@ func TestRunStepsEndpoint(t *testing.T) {
 
 // TestRunStepsClampsCompletedRun proves the typed /steps endpoint honors run
 // terminality: a completed run whose steps lost their close events must report each
-// lingering step terminal (completed / skipped), never eternally active.
+// lingering step terminal, never eternally active. It reads skipped, started or
+// not: that is what the finalizer's sweep writes for a member still open when the
+// root settles.
 func TestRunStepsClampsCompletedRun(t *testing.T) {
 	root := runRootBead("runc", "mol-adopt-pr-v2", "closed")
 	root.Metadata["gc.outcome"] = "pass"
@@ -874,18 +880,18 @@ func TestRunStepsClampsCompletedRun(t *testing.T) {
 	if byID["runc.step1"].Status != RunStepStatusCompleted {
 		t.Errorf("step1 = %q, want completed", byID["runc.step1"].Status)
 	}
-	if byID["runc.step2"].Status != RunStepStatusCompleted {
-		t.Errorf("lost-close step2 = %q, want completed (run is completed)", byID["runc.step2"].Status)
+	if byID["runc.step2"].Status != RunStepStatusSkipped {
+		t.Errorf("lost-close step2 = %q, want skipped (run is completed)", byID["runc.step2"].Status)
 	}
 	if byID["runc.step3"].Status != RunStepStatusSkipped {
 		t.Errorf("never-started step3 = %q, want skipped (never started under a completed run)", byID["runc.step3"].Status)
 	}
 }
 
-// TestRunStepsClampsFailedRunToCanceled proves the failure family: a failed run
-// cancels its lingering active steps (rather than completing them) and skips its
-// never-started ones, while a recorded step outcome is preserved.
-func TestRunStepsClampsFailedRunToCanceled(t *testing.T) {
+// TestRunStepsClampsFailedRunToSkipped proves the failure family: a failed run
+// skips its lingering steps, active or never started (the finalizer's sweep
+// closes them skipped), while a recorded step outcome is preserved.
+func TestRunStepsClampsFailedRunToSkipped(t *testing.T) {
 	root := runRootBead("runx", "mol-adopt-pr-v2", "closed")
 	root.Metadata["gc.outcome"] = "fail"
 	s := newRunServer(t,
@@ -905,8 +911,8 @@ func TestRunStepsClampsFailedRunToCanceled(t *testing.T) {
 	for _, st := range out.Body.Steps {
 		byID[st.ID] = st
 	}
-	if byID["runx.step1"].Status != RunStepStatusCanceled {
-		t.Errorf("lost-close step1 = %q, want canceled (run failed)", byID["runx.step1"].Status)
+	if byID["runx.step1"].Status != RunStepStatusSkipped {
+		t.Errorf("lost-close step1 = %q, want skipped (run failed)", byID["runx.step1"].Status)
 	}
 	if byID["runx.step2"].Status != RunStepStatusSkipped {
 		t.Errorf("never-started step2 = %q, want skipped", byID["runx.step2"].Status)
@@ -1131,5 +1137,151 @@ func TestRunStepsNotFound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "run not found") {
 		t.Errorf("error = %q, want run-not-found detail", err.Error())
+	}
+}
+
+// formulaV1RunTOML is a minimal formula-v1 recipe: two plain steps, the second
+// needing the first. It declares no compiler requirement, so it compiles and
+// instantiates as a v1 molecule whatever the formula_v2 flag says.
+const formulaV1RunTOML = `
+formula = "mol-v1-run"
+version = 1
+
+[[steps]]
+id = "load"
+title = "Load context"
+
+[[steps]]
+id = "work"
+title = "Do the work"
+needs = ["load"]
+`
+
+// runEventLog records the bead.* events a caching store emits, in order, as
+// the city event log the run projection folds in production.
+type runEventLog struct {
+	mu   sync.Mutex
+	evts []events.Event
+}
+
+func (l *runEventLog) onChange(eventType, _ string, payload json.RawMessage) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.evts = append(l.evts, events.Event{
+		Seq:     uint64(len(l.evts) + 1),
+		Type:    eventType,
+		Payload: append(json.RawMessage(nil), payload...),
+	})
+}
+
+func (l *runEventLog) snapshot() []events.Event {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]events.Event(nil), l.evts...)
+}
+
+// TestRunsReportFormulaV1Steps pins GET /runs, GET /runs/{id} and
+// GET /runs/{id}/steps for a formula-v1 run built the way production builds
+// one: the formula compiled and instantiated through a caching store, whose
+// bead.* events are the event log the run projection folds. v1 instantiation
+// types each untyped or "task"-typed non-root step "step" and links it to the
+// root by ParentID alone, so the run must list those steps and read active once
+// a step is claimed or closed, instead of pending with no steps.
+func TestRunsReportFormulaV1Steps(t *testing.T) {
+	ctx := context.Background()
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "mol-v1-run.toml"), []byte(formulaV1RunTOML), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	recipe, err := formula.Compile(ctx, "mol-v1-run", []string{formulaDir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	eventLog := &runEventLog{}
+	store := beads.NewCachingStoreForTest(beads.NewMemStore(), eventLog.onChange)
+	result, err := molecule.Instantiate(ctx, store, recipe, molecule.Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	rootID := result.RootID
+	loadID := result.IDMapping["mol-v1-run.load"]
+	workID := result.IDMapping["mol-v1-run.work"]
+	for _, id := range []string{loadID, workID} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if b.Type != "step" || b.ParentID != rootID || b.Metadata[beadmeta.RootBeadIDMetadataKey] != "" {
+			t.Fatalf("step %s: type %q, parent %q, gc.root_bead_id %q; want the formula-v1 step shape: type step, parent %s, no root id",
+				id, b.Type, b.ParentID, b.Metadata[beadmeta.RootBeadIDMetadataKey], rootID)
+		}
+	}
+
+	inProgress := "in_progress"
+	if err := store.Update(loadID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("claim %s: %v", loadID, err)
+	}
+	assertFormulaV1Run(t, eventLog.snapshot(), rootID, map[string]RunStepStatus{
+		loadID: RunStepStatusActive,
+		workID: RunStepStatusPending,
+	})
+
+	if err := store.Close(loadID); err != nil {
+		t.Fatalf("close %s: %v", loadID, err)
+	}
+	assertFormulaV1Run(t, eventLog.snapshot(), rootID, map[string]RunStepStatus{
+		loadID: RunStepStatusCompleted,
+		workID: RunStepStatusPending,
+	})
+}
+
+// assertFormulaV1Run folds evts into a fresh run server and checks that the
+// run rooted at rootID is listed active, with exactly wantSteps as its steps.
+func assertFormulaV1Run(t *testing.T, evts []events.Event, rootID string, wantSteps map[string]RunStepStatus) {
+	t.Helper()
+	ctx := context.Background()
+	s := newRunServer(t, evts...)
+	city := CityScope{CityName: "test-city"}
+
+	list, err := s.humaHandleRunsList(ctx, &RunsListInput{CityScope: city})
+	if err != nil {
+		t.Fatalf("humaHandleRunsList: %v", err)
+	}
+	if len(list.Body.Runs) != 1 || list.Body.Runs[0].RunID != rootID {
+		t.Fatalf("runs = %+v, want only the v1 run %s", list.Body.Runs, rootID)
+	}
+	if got := list.Body.Runs[0].Status; got != RunStatusActive {
+		t.Fatalf("listed run status = %q, want %q once a step has started", got, RunStatusActive)
+	}
+	if got := list.Body.StatusCounts; got != (RunStatusCounts{Active: 1}) {
+		t.Fatalf("status_counts = %+v, want one active run", got)
+	}
+
+	run, err := s.humaHandleRunGet(ctx, &RunGetInput{CityScope: city, RunID: rootID})
+	if err != nil {
+		t.Fatalf("humaHandleRunGet: %v", err)
+	}
+	if run.Body.Status != RunStatusActive {
+		t.Fatalf("run status = %q, want %q", run.Body.Status, RunStatusActive)
+	}
+
+	steps, err := s.humaHandleRunSteps(ctx, &RunStepsInput{CityScope: city, RunID: rootID})
+	if err != nil {
+		t.Fatalf("humaHandleRunSteps: %v", err)
+	}
+	got := make(map[string]RunStepStatus, len(steps.Body.Steps))
+	for _, step := range steps.Body.Steps {
+		if step.Kind != "step" {
+			t.Errorf("step %s kind = %q, want step", step.ID, step.Kind)
+		}
+		got[step.ID] = step.Status
+	}
+	if len(got) != len(wantSteps) {
+		t.Fatalf("steps = %+v, want %v", steps.Body.Steps, wantSteps)
+	}
+	for id, want := range wantSteps {
+		if got[id] != want {
+			t.Fatalf("step %s status = %q, want %q (steps %v)", id, got[id], want, got)
+		}
 	}
 }

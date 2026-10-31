@@ -157,7 +157,10 @@ func defaultGCHome() string {
 	if v := strings.TrimSpace(os.Getenv("GC_HOME")); v != "" {
 		return v
 	}
-	if strings.HasSuffix(os.Args[0], ".test") {
+	// Bazel test binaries drop the .test suffix but export TEST_SRCDIR and
+	// name the binary <target>_test; testscript re-invocations rename it
+	// (e.g. "gc"), so require both markers.
+	if (os.Getenv("TEST_SRCDIR") != "" && strings.HasSuffix(filepath.Base(os.Args[0]), "_test")) || strings.HasSuffix(os.Args[0], ".test") {
 		return ""
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {

@@ -236,7 +236,7 @@ func initGitRepoOnBranch(t *testing.T, branch string) string {
 	return dir
 }
 
-func runGitForRigRootBranchTest(t *testing.T, dir string, args ...string) {
+func runGitForRigRootBranchTest(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
@@ -244,4 +244,5 @@ func runGitForRigRootBranchTest(t *testing.T, dir string, args ...string) {
 	if err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
+	return string(out)
 }

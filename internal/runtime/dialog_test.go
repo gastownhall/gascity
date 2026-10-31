@@ -51,6 +51,11 @@ func TestContainsWorkspaceTrustDialog(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "codex 0.156 trust dialog",
+			content: codex0156TrustDialog,
+			want:    true,
+		},
+		{
 			name:    "gemini trust dialog",
 			content: "Do you trust the files in this folder?\n1. Trust folder",
 			want:    true,
@@ -91,6 +96,32 @@ func TestAcceptStartupDialogsAcceptsCodexTrustDialog(t *testing.T) {
 				return "Do you trust the contents of this directory?", nil
 			}
 			return "user@host $", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Enter"}) {
+		t.Fatalf("sent keys = %v, want [Enter]", sent)
+	}
+}
+
+func TestAcceptStartupDialogsAcceptsCodex0156TrustDialogDespitePrompt(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			if len(sent) == 0 {
+				return codex0156TrustDialog, nil
+			}
+			return "› Ask Codex to do anything", nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)
@@ -972,6 +1003,35 @@ func TestAcceptStartupDialogsFromStreamAcceptsTrustDialog(t *testing.T) {
 	}
 }
 
+// TestAcceptStartupDialogsFromStreamAcceptsCodex0156TrustDialog covers the
+// exec provider's stream path with the trust row pre-selected: the frame
+// shows the cursor on the trust row, so the stream confirms it with Enter
+// even though the composer line above the dialog reads as a ready prompt.
+func TestAcceptStartupDialogsFromStreamAcceptsCodex0156TrustDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	var sent []string
+	snapshots := make(chan string, 2)
+	snapshots <- codex0156TrustDialog
+	snapshots <- "› Ask Codex to do anything"
+	close(snapshots)
+
+	observed, err := AcceptStartupDialogsFromStreamWithStatus(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStreamWithStatus() error = %v", err)
+	}
+	if !observed || !reflect.DeepEqual(sent, []string{"Enter"}) {
+		t.Fatalf("observed = %v sent keys = %v, want observed with [Enter]", observed, sent)
+	}
+}
+
 func TestAcceptWorkspaceTrustDialogFromStreamPreservesEarlierSnapshots(t *testing.T) {
 	stream := &replayableSnapshotStream{update: make(chan struct{})}
 	stream.publish("Do you trust the contents of this directory?")
@@ -1705,6 +1765,32 @@ func TestContainsProviderRateLimitScreen(t *testing.T) {
 				t.Errorf("ContainsProviderRateLimitScreen(%q) = %v, want %v", tt.content, got, tt.want)
 			}
 		})
+	}
+}
+
+// Kills a resume-refusal classifier that misses claude's refusal of the
+// resumed key, in an error's last pane output or a dead pane's screen, or
+// that fires on anything else: the picker's "No conversations found", the
+// refusal of another key, the phrase split from the key, the phrase in the
+// conversation's history, other startup deaths, and no key (mc-bm1af).
+func TestProviderResumeRefusalReason(t *testing.T) {
+	const key = "0f9c2a1e-77aa-4b1d-9e0f-1a2b3c4d5e6f"
+	for _, c := range []struct {
+		name, content, key, want string
+	}{
+		{"the refusal in the last pane output", "session \"s\" died during startup; last pane output:\nNo conversation found with session ID: " + key, key, "conversation_not_found"},
+		{"the refusal, any case", "no conversation found with session id: " + strings.ToUpper(key) + "\n", key, "conversation_not_found"},
+		{"the picker", "No conversations found", key, ""},
+		{"the picker beside the key", "No conversations found matching " + key, key, ""},
+		{"another key's refusal", "No conversation found with session ID: 11111111-2222-3333-4444-555555555555", key, ""},
+		{"the phrase and the key on different lines", "No conversation found with session ID:\n" + key, key, ""},
+		{"the phrase in history", "> why does it say No conversation found?\nkilled: out of memory", key, ""},
+		{"another death", "Error: model not found", key, ""},
+		{"no key", "No conversation found with session ID: " + key, "", ""},
+	} {
+		if got := ProviderResumeRefusalReason(c.content, c.key); got != c.want {
+			t.Errorf("%s: ProviderResumeRefusalReason = %q, want %q", c.name, got, c.want)
+		}
 	}
 }
 

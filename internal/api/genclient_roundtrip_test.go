@@ -173,7 +173,7 @@ func TestGenClientRoundTripFormulaList(t *testing.T) {
 
 func TestGenClientRoundTripMailSend(t *testing.T) {
 	client, state := newRoundTripClient(t)
-	from := "tester"
+	from := "human"
 	body := "hello from round-trip"
 	mail := genclient.SendMailJSONRequestBody{
 		To:      "worker",

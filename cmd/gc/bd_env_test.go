@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -17,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func mustBdRuntimeEnv(t *testing.T, cityPath string) map[string]string {
@@ -127,6 +130,69 @@ func TestBdCommandRunnerForCityCompleteStorageBindingSkipsManagedRetry(t *testin
 	}
 	if got := countBdShimInvocations(t, invocations); got != 1 {
 		t.Errorf("bd invocations = %d, want 1: a bound scope's failed command must not be retried", got)
+	}
+}
+
+func TestBdContextCommandRunnerForCityPinsCanonicalGCBinary(t *testing.T) {
+	t.Setenv("GC_BIN", "/tmp/stale-gc")
+	cityPath := t.TempDir()
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$GC_BIN\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(fmt.Sprintf("[workspace]\nname = \"bound\"\n[workspace.env]\nBD_BIN = %q\n", bdPath)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeBoundCityFixture(t, cityPath)
+	gcBin := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(gcBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldResolve := resolveInvokingExecutable
+	resolveInvokingExecutable = func() (string, error) { return gcBin, nil }
+	t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
+	want, err := filepath.EvalSymlinks(gcBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := bdCommandRunnerForCity(cityPath)(cityPath, "bd", "status")
+	if err != nil {
+		t.Fatalf("bd context runner: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Fatalf("child GC_BIN = %q, want canonical %q", got, want)
+	}
+}
+
+func TestBeadsCommandRunnerWithContextPinsCanonicalGCBinary(t *testing.T) {
+	t.Setenv("GC_BIN", "/tmp/stale-gc")
+	cityPath := t.TempDir()
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$GC_BIN\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gcBin := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(gcBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldResolve := resolveInvokingExecutable
+	resolveInvokingExecutable = func() (string, error) { return gcBin, nil }
+	t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
+	env := map[string]string{"BD_BIN": bdPath}
+	runner, err := beadsCommandRunnerWithContextForHostedCity(context.Background(), cityPath, env)
+	if err != nil {
+		t.Fatalf("context runner: %v", err)
+	}
+	out, err := runner(cityPath, "bd", "status")
+	if err != nil {
+		t.Fatalf("context runner invocation: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(gcBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Fatalf("child GC_BIN = %q, want canonical %q", got, want)
 	}
 }
 
@@ -540,6 +606,35 @@ func TestRecoverManagedBDCommandCarriesWorkspaceBDBinaryPin(t *testing.T) {
 	}
 }
 
+// Recovering the legacy managed server is the path an in-place gc upgrade most
+// needs to keep working: the supervisor that calls it is already running, and an
+// upgrade that removed the directory /proc/self/exe resolved through leaves it
+// unable to canonicalize its own binary. main pinned no GC_BIN here at all, so
+// refusing turned a bounded staleness into a recover that can never run — and
+// with it, a managed Dolt nothing stops on SIGTERM. The pin degrades instead.
+func TestRecoverManagedBDCommandRunsWhenGCBinaryResolutionFails(t *testing.T) {
+	cityPath := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "recover-ran")
+	scriptPath := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\ntouch "+capture+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	original := resolveProviderLifecycleGCBinary
+	resolveProviderLifecycleGCBinary = func() (string, error) { return "", errors.New("unavailable") }
+	t.Cleanup(func() { resolveProviderLifecycleGCBinary = original })
+
+	if err := recoverManagedBDCommand(cityPath); err != nil {
+		t.Fatalf("recoverManagedBDCommand() = %v, want the recover to run anyway", err)
+	}
+	if _, statErr := os.Stat(capture); statErr != nil {
+		t.Fatalf("recover child never ran: %v", statErr)
+	}
+}
+
 func TestBdStoreForCityResolvesIDPrefixFromScopeConfig(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
@@ -787,6 +882,51 @@ func TestBdRuntimeEnvForRigNoRecoveryMatchesRecoveryForExternalTarget(t *testing
 	}
 	if got := env["GC_RIG"]; got != "repo" {
 		t.Errorf("GC_RIG = %q, want repo", got)
+	}
+}
+
+// TestRigManagedRuntimeUnavailableReportsAStoppedManagedRuntime pins the probe
+// gc hook asks after a rig leg's read failed (hookRigRuntimeUnavailable): a rig
+// inheriting the city's managed Dolt runtime reports it unavailable while that
+// runtime is not running, without starting or publishing one, and available
+// once it runs; a rig whose store is not the managed bd contract never does.
+func TestRigManagedRuntimeUnavailableReportsAStoppedManagedRuntime(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "bd")
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "repo")
+	for dir, yaml := range map[string]string{
+		cityDir: "issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n",
+		rigDir:  "issue_prefix: repo\ngc.endpoint_origin: inherited_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n",
+	} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte(yaml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}
+
+	if !rigManagedRuntimeUnavailable(cityDir, cfg, rigDir) {
+		t.Fatal("rigManagedRuntimeUnavailable = false with the city's managed runtime stopped")
+	}
+	if !hookRigRuntimeUnavailable(cityDir, cfg, "repo") {
+		t.Fatal("hookRigRuntimeUnavailable = false with the city's managed runtime stopped")
+	}
+	if _, err := os.Stat(managedDoltStatePath(cityDir)); !os.IsNotExist(err) {
+		t.Fatalf("the probe published managed runtime state (stat err = %v); it must start nothing", err)
+	}
+
+	t.Setenv("GC_BEADS", "file")
+	if hookRigRuntimeUnavailable(cityDir, cfg, "repo") {
+		t.Fatal("hookRigRuntimeUnavailable = true for a rig whose store is not the managed bd contract")
+	}
+	t.Setenv("GC_BEADS", "bd")
+
+	writeReachableManagedDoltState(t, cityDir)
+	if rigManagedRuntimeUnavailable(cityDir, cfg, rigDir) {
+		t.Fatal("rigManagedRuntimeUnavailable = true with the city's managed runtime running")
 	}
 }
 
@@ -5074,10 +5214,10 @@ func TestBdRuntimeEnvDisablesAutoExport(t *testing.T) {
 	}
 }
 
-// TestScopeIsGCManagedRecognizesExplicitAutoOff verifies that a config with
+// TestScopeJSONLIsReapableRecognizesExplicitAutoOff verifies that a config with
 // export.auto:false is recognized as gc-managed even when gc.endpoint_origin
 // is absent. This is the steady-state signal post-PR-1965.
-func TestScopeIsGCManagedRecognizesExplicitAutoOff(t *testing.T) {
+func TestScopeJSONLIsReapableRecognizesExplicitAutoOff(t *testing.T) {
 	scope := t.TempDir()
 	beadsDir := filepath.Join(scope, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -5088,17 +5228,17 @@ func TestScopeIsGCManagedRecognizesExplicitAutoOff(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if !scopeIsGCManaged(scope) {
-		t.Fatalf("scopeIsGCManaged = false, want true for explicit export.auto:false")
+	if !scopeJSONLIsReapable(fsys.OSFS{}, scope) {
+		t.Fatalf("scopeJSONLIsReapable = false, want true for explicit export.auto:false")
 	}
 }
 
-// TestScopeIsGCManagedRecognizesManagedOrigin verifies that a long-lived
+// TestScopeJSONLIsReapableRecognizesManagedOrigin verifies that a long-lived
 // city whose config still pre-dates PR 1965 (export.auto absent) is still
 // recognized as gc-managed because gc.endpoint_origin proves it. This is
 // the transitional signal — without it the jsonl reaper would refuse to
 // clean up samtown-style cities until they hit a canonicalization event.
-func TestScopeIsGCManagedRecognizesManagedOrigin(t *testing.T) {
+func TestScopeJSONLIsReapableRecognizesManagedOrigin(t *testing.T) {
 	scope := t.TempDir()
 	beadsDir := filepath.Join(scope, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -5109,16 +5249,32 @@ func TestScopeIsGCManagedRecognizesManagedOrigin(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if !scopeIsGCManaged(scope) {
-		t.Fatalf("scopeIsGCManaged = false, want true for gc.endpoint_origin: managed_city")
+	if !scopeJSONLIsReapable(fsys.OSFS{}, scope) {
+		t.Fatalf("scopeJSONLIsReapable = false, want true for gc.endpoint_origin: managed_city")
 	}
 }
 
-// TestScopeIsGCManagedDoesNotClaimExplicitOptOut verifies the carve-out
+func TestScopeJSONLIsReapableHonorsCityAutoExportOptOut(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\nexport.auto: true\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if scopeJSONLIsReapable(fsys.OSFS{}, scope) {
+		t.Fatalf("scopeJSONLIsReapable = true, want false for city export.auto:true opt-out")
+	}
+}
+
+// TestScopeJSONLIsReapableDoesNotClaimExplicitOptOut verifies the carve-out
 // for rigs that deliberately keep JSONL-based sharing. Per PR 1965 docs,
 // gc.endpoint_origin: explicit is the supported opt-out path; issues.jsonl
-// there is load-bearing, not stale, so scopeIsGCManaged must return false.
-func TestScopeIsGCManagedDoesNotClaimExplicitOptOut(t *testing.T) {
+// there is load-bearing, not stale, so scopeJSONLIsReapable must return false.
+func TestScopeJSONLIsReapableDoesNotClaimExplicitOptOut(t *testing.T) {
 	scope := t.TempDir()
 	beadsDir := filepath.Join(scope, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -5129,19 +5285,19 @@ func TestScopeIsGCManagedDoesNotClaimExplicitOptOut(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if scopeIsGCManaged(scope) {
-		t.Fatalf("scopeIsGCManaged = true, want false for explicit opt-out")
+	if scopeJSONLIsReapable(fsys.OSFS{}, scope) {
+		t.Fatalf("scopeJSONLIsReapable = true, want false for explicit opt-out")
 	}
 }
 
-// TestScopeIsGCManagedExplicitOptOutBeatsExportAutoFalse verifies the
+// TestScopeJSONLIsReapableExplicitOptOutBeatsExportAutoFalse verifies the
 // precedence contract: when a scope has gc.endpoint_origin: explicit
 // (deliberate opt-out, JSONL is load-bearing) AND also has export.auto:
 // false (left over from a prior canonicalization, or hand-set), the
 // endpoint_origin signal wins. Without this ordering, a stale
 // export.auto value could trick the reaper into deleting issues.jsonl
 // on an opt-out rig.
-func TestScopeIsGCManagedExplicitOptOutBeatsExportAutoFalse(t *testing.T) {
+func TestScopeJSONLIsReapableExplicitOptOutBeatsExportAutoFalse(t *testing.T) {
 	scope := t.TempDir()
 	beadsDir := filepath.Join(scope, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -5152,8 +5308,8 @@ func TestScopeIsGCManagedExplicitOptOutBeatsExportAutoFalse(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if scopeIsGCManaged(scope) {
-		t.Fatalf("scopeIsGCManaged = true, want false for explicit opt-out (export.auto:false must not override endpoint_origin)")
+	if scopeJSONLIsReapable(fsys.OSFS{}, scope) {
+		t.Fatalf("scopeJSONLIsReapable = true, want false for explicit opt-out (export.auto:false must not override endpoint_origin)")
 	}
 }
 
@@ -5181,6 +5337,123 @@ func TestReapStaleBdExportJSONLRemovesFileOnManagedScope(t *testing.T) {
 
 	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
 		t.Fatalf("jsonl present after reap; stat err = %v, want IsNotExist", err)
+	}
+}
+
+func TestReapStaleBdExportJSONLLeavesFileOnCityAutoExportOptOut(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"_type":"issue","id":"zz-1"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\nexport.auto: true\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	reapStaleBdExportJSONL(scope)
+
+	if _, err := os.Stat(jsonlPath); err != nil {
+		t.Fatalf("jsonl removed despite city export.auto:true opt-out; stat err = %v", err)
+	}
+}
+
+// TestReapStaleBdExportJSONLRemovesFileWhenTrueDuplicatesFalse pins the
+// runbook's warning: appending export.auto: true below the canonical
+// export.auto: false is not an opt-in. gc honors the first key, so the
+// managed scope's stale export is still reaped.
+func TestReapStaleBdExportJSONLRemovesFileWhenTrueDuplicatesFalse(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"_type":"issue","id":"zz-1"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\nexport.auto: false\nexport.auto: true\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	reapStaleBdExportJSONL(scope)
+
+	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
+		t.Fatalf("jsonl present after reap despite a duplicate export.auto key; stat err = %v, want IsNotExist", err)
+	}
+}
+
+// configReadFaultFS fails the listed ReadFile calls (1-based) of one
+// config.yaml and passes every other call through to the real filesystem. A
+// fault that clears between two reads is the window in which an export.auto
+// opt-in could be misread as absent.
+type configReadFaultFS struct {
+	fsys.OSFS
+	path      string
+	failCalls map[int]bool
+	calls     int
+}
+
+func (f *configReadFaultFS) ReadFile(name string) ([]byte, error) {
+	if name == f.path {
+		f.calls++
+		if f.failCalls[f.calls] {
+			return nil, fmt.Errorf("injected read failure of %s (call %d)", name, f.calls)
+		}
+	}
+	return f.OSFS.ReadFile(name)
+}
+
+// TestScopeJSONLIsReapableFailsClosedOnUnreadableExportAuto verifies that an
+// export.auto read failure leaves the JSONL alone even when the endpoint
+// origin reads fine a moment later: the value that could not be read may be
+// the city's explicit true. The quoted spelling is valid YAML that bd honors
+// but the line scanner cannot read, so the fault must not be retried through
+// it.
+func TestScopeJSONLIsReapableFailsClosedOnUnreadableExportAuto(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath,
+		[]byte("issue_prefix: zz\nexport.auto: \"true\"\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	// ReadExportAuto's read fails; any later read succeeds.
+	fs := &configReadFaultFS{path: configPath, failCalls: map[int]bool{1: true}}
+
+	if scopeJSONLIsReapable(fs, scope) {
+		t.Fatalf("scopeJSONLIsReapable = true, want false when export.auto could not be read")
+	}
+	if fs.calls < 1 {
+		t.Fatalf("injected fault never reached ReadExportAuto (%d config reads)", fs.calls)
+	}
+}
+
+// TestScopeJSONLIsReapableReapsUnparseableManagedConfig verifies that only a
+// read failure fails closed. A config.yaml that reads but does not parse, with
+// no export.auto line, holds no opt-in to protect, so a managed scope's stale
+// export is still reaped (sa-41j3kp).
+func TestScopeJSONLIsReapableReapsUnparseableManagedConfig(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\ngc.endpoint_origin: managed_city\n: not yaml\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if !scopeJSONLIsReapable(fsys.OSFS{}, scope) {
+		t.Fatalf("scopeJSONLIsReapable = false, want true for an unparseable managed_city config without export.auto")
 	}
 }
 
@@ -5492,6 +5765,124 @@ func TestMirrorBeadsDoltScopeEnvReadsAmbientTLSViaNativeOpenGuard(t *testing.T) 
 	if got := env["BEADS_DOLT_SERVER_TLS"]; got != "guarded-tls" {
 		t.Fatalf("external BEADS_DOLT_SERVER_TLS = %q, want %q (from the mutex-guarded ambient read)", got, "guarded-tls")
 	}
+}
+
+// stubAmbientNativeDoltOpenEnv replaces the guarded ambient reader with one that
+// answers from ambient, the restored ambient environment. Paired with t.Setenv
+// of a different value, standing in for the transient projection a concurrent
+// scope's native open holds in the process env, it shows which read an env build
+// took: a bare os.Getenv sees the projection, the guarded read sees ambient.
+func stubAmbientNativeDoltOpenEnv(t *testing.T, ambient map[string]string) {
+	t.Helper()
+	orig := ambientNativeDoltOpenEnv
+	ambientNativeDoltOpenEnv = func(key string) string { return ambient[key] }
+	t.Cleanup(func() { ambientNativeDoltOpenEnv = orig })
+}
+
+// TestScopeEnvBuildReadsAmbientBeadsEnvViaNativeOpenGuard pins that every
+// ambient BEADS_* fallback on the scope env-build path, and the ambient BD_BIN
+// pin, reads through the native-open env guard. gc ready opens its rig stores
+// concurrently, and a native open projects its scope's socket, credential
+// command and credentials file into the process env under nativeDoltOpenEnvMu
+// for the whole library open; a proxied native open withholds every BD_* key
+// for that window instead. A bare os.Getenv in a second scope's concurrent env
+// build would adopt the first scope's endpoint or credentials, or lose the
+// operator's bd pin. Each BEADS_* case holds another scope's projection in the
+// process env and asserts the build carries this scope's own ambient value, or
+// nothing when there is none.
+func TestScopeEnvBuildReadsAmbientBeadsEnvViaNativeOpenGuard(t *testing.T) {
+	const (
+		otherSocket    = "/run/other-rig/dolt.sock"
+		operatorSocket = "/run/operator/dolt.sock"
+		otherHelper    = "/run/other-rig/credential-helper"
+		operatorHelper = "/opt/operator/credential-helper"
+	)
+	type ambientCase struct{ name, value string }
+	writeCredentials := func(t *testing.T, password string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "credentials")
+		if err := os.WriteFile(path, []byte("[127.0.0.1:3307]\npassword="+password+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	for _, ambient := range []ambientCase{{"no ambient socket", ""}, {"ambient socket", operatorSocket}} {
+		t.Run("external override/"+ambient.name, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_SERVER_SOCKET", otherSocket)
+			t.Setenv("GC_DOLT_HOST", "")
+			t.Setenv("GC_DOLT_PORT", "")
+			stubAmbientNativeDoltOpenEnv(t, map[string]string{"BEADS_DOLT_SERVER_SOCKET": ambient.value})
+			target, ok := externalDoltEnvOverrideTarget()
+			if ok != (ambient.value != "") || target.Socket != ambient.value {
+				t.Fatalf("externalDoltEnvOverrideTarget() = %+v, %v; want socket %q (another scope's projected socket is not an override)", target, ok, ambient.value)
+			}
+		})
+		t.Run("pending provider endpoint/"+ambient.name, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_SERVER_SOCKET", otherSocket)
+			t.Setenv("GC_DOLT_HOST", "")
+			t.Setenv("GC_DOLT_PORT", "")
+			stubAmbientNativeDoltOpenEnv(t, map[string]string{"BEADS_DOLT_SERVER_SOCKET": ambient.value})
+			env := map[string]string{}
+			applyPendingProviderExternalEndpoint(t.TempDir(), providerScopeIntent{}, env)
+			if got := env["BEADS_DOLT_SERVER_SOCKET"]; got != ambient.value {
+				t.Fatalf("BEADS_DOLT_SERVER_SOCKET = %q, want %q (another scope's projected socket is not a retry input)", got, ambient.value)
+			}
+		})
+	}
+	for _, ambient := range []ambientCase{{"no ambient helper", ""}, {"ambient helper", operatorHelper}} {
+		t.Run("credential command/"+ambient.name, func(t *testing.T) {
+			t.Setenv("GC_DOLT_CRED_CMD", "")
+			t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", otherHelper)
+			stubAmbientNativeDoltOpenEnv(t, map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": ambient.value})
+			hostedEnv := map[string]string{}
+			if err := applyHostedBeadsCredentialEnv(hostedEnv, t.TempDir()); err != nil {
+				t.Fatal(err)
+			}
+			mirroredEnv := map[string]string{}
+			mirrorBeadsDoltServerEnv(mirroredEnv, false)
+			for name, env := range map[string]map[string]string{"applyHostedBeadsCredentialEnv": hostedEnv, "mirrorBeadsDoltServerEnv": mirroredEnv} {
+				if got := env["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != ambient.value {
+					t.Errorf("%s: BEADS_DOLT_CREDENTIAL_COMMAND = %q, want %q (another scope's projected helper is not this scope's)", name, got, ambient.value)
+				}
+			}
+		})
+	}
+	for _, ambient := range []ambientCase{{"no ambient credentials file", ""}, {"ambient credentials file", "operator"}} {
+		t.Run("scoped auth/"+ambient.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("GC_DOLT_USER", "")
+			t.Setenv("GC_DOLT_PASSWORD", "")
+			t.Setenv("BEADS_DOLT_PASSWORD", "")
+			t.Setenv("BEADS_CREDENTIALS_FILE", writeCredentials(t, "other-rig-secret"))
+			ambientFile, wantPassword := "", ""
+			if ambient.value != "" {
+				ambientFile, wantPassword = writeCredentials(t, "operator-secret"), "operator-secret"
+			}
+			stubAmbientNativeDoltOpenEnv(t, map[string]string{"BEADS_CREDENTIALS_FILE": ambientFile})
+			env := map[string]string{"GC_DOLT_HOST": "127.0.0.1", "GC_DOLT_PORT": "3307"}
+			applyResolvedDoltAuthEnv(env, t.TempDir(), "root")
+			if got := env["BEADS_CREDENTIALS_FILE"]; got != ambientFile {
+				t.Errorf("BEADS_CREDENTIALS_FILE = %q, want %q", got, ambientFile)
+			}
+			if got := env["GC_DOLT_PASSWORD"]; got != wantPassword {
+				t.Errorf("GC_DOLT_PASSWORD = %q, want %q (resolved from another scope's projected credentials file)", got, wantPassword)
+			}
+		})
+	}
+	t.Run("workspace bd pin/withheld by a proxied open", func(t *testing.T) {
+		cityDir, _, _ := writeAmbientBdBinCity(t, "")
+		operatorBd := filepath.Join(t.TempDir(), "bd")
+		writeExecutable(t, operatorBd, "#!/bin/sh\nexit 0\n")
+		t.Setenv("BD_BIN", "")
+		stubAmbientNativeDoltOpenEnv(t, map[string]string{"BD_BIN": operatorBd})
+		env := map[string]string{}
+		if err := applyWorkspacePinnedBdBinary(env, cityDir); err != nil {
+			t.Fatal(err)
+		}
+		if got := env["BD_BIN"]; got != operatorBd {
+			t.Fatalf("BD_BIN = %q, want the operator's pin %q (a proxied open withholding BD_* is not an unset pin)", got, operatorBd)
+		}
+	})
 }
 
 // TestBeadsDoltServerTLSIsPassthroughNotProjected documents the intentional
@@ -5817,4 +6208,261 @@ func TestResolveBdBinaryForScope(t *testing.T) {
 			t.Fatalf("resolveBdBinaryForScope(city, rig) = %q, want ambient %q: a doltlite rig's runtime env carries no BD_BIN", got, ambient)
 		}
 	})
+}
+
+func TestApplyCanonicalDoltTargetEnvUnixSocket(t *testing.T) {
+	env := map[string]string{"GC_DOLT_HOST": "stale", "GC_DOLT_PORT": "3306", "BEADS_DOLT_SERVER_SOCKET": "stale.sock"}
+	applyCanonicalDoltTargetEnv(env, contract.DoltConnectionTarget{Socket: "/tmp/dolt.sock", External: true})
+	if env["BEADS_DOLT_SERVER_SOCKET"] != "/tmp/dolt.sock" || env["GC_DOLT_HOST"] != "" || env["GC_DOLT_PORT"] != "" {
+		t.Fatalf("env = %#v", env)
+	}
+}
+
+// TestBdStoreForCityWithConfigSkipsLoad pins the city-scope bd open split:
+// bdStoreForCityWithConfig reads the issue prefix and store options from the
+// cfg it is handed (a nil cfg still loads), the one-shot bd opener reuses the
+// caller's cfg, and the shared openBdStoreAtWithConfig keeps reloading because
+// long-lived callers (order dispatch, API) can hand it a stale or empty cfg.
+//
+// Not parallel: loadCityConfigCalls is process-wide.
+func TestBdStoreForCityWithConfigSkipsLoad(t *testing.T) {
+	cityDir := t.TempDir()
+	toml := "[workspace]\nname = \"t\"\nprefix = \"mc\"\n\n[beads]\nbd_compatibility = \"bd-1.0.5\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	before := loadCityConfigCalls.Load()
+	store := bdStoreForCityWithConfig(cityDir, cityDir, cfg)
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("bdStoreForCityWithConfig re-parsed city config %d times despite a non-nil cfg", grew)
+	}
+	if got := store.IDPrefix(); got != "mc" {
+		t.Fatalf("IDPrefix() = %q, want the supplied config's prefix mc", got)
+	}
+	if !store.ListSkipLabelsEnabled() {
+		t.Fatal("bdStoreForCityWithConfig dropped the supplied config's bd-1.0.5 store options")
+	}
+
+	before = loadCityConfigCalls.Load()
+	if _, err := openOneShotBdStoreAtWithConfig(cityDir, cityDir, cfg, beads.NativeTransportUnset); err != nil {
+		t.Fatalf("openOneShotBdStoreAtWithConfig(cfg): %v", err)
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("openOneShotBdStoreAtWithConfig re-parsed city config %d times at the city scope despite a non-nil cfg", grew)
+	}
+
+	// The shared path must ignore even an empty stand-in cfg (what the order
+	// dispatcher substitutes for nil) and read the prefix from disk.
+	before = loadCityConfigCalls.Load()
+	shared, err := openBdStoreAtWithConfig(cityDir, cityDir, &config.City{}, beads.NativeTransportUnset)
+	if err != nil {
+		t.Fatalf("openBdStoreAtWithConfig(empty cfg): %v", err)
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
+		t.Fatalf("shared openBdStoreAtWithConfig parsed city config %d times at the city scope, want exactly 1: long-lived callers must keep the reload", grew)
+	}
+	if bd, ok := shared.(*beads.BdStore); ok && bd.IDPrefix() != "mc" {
+		t.Fatalf("shared open IDPrefix() = %q, want mc from disk, not the empty cfg", bd.IDPrefix())
+	}
+
+	before = loadCityConfigCalls.Load()
+	store = bdStoreForCityWithConfig(cityDir, cityDir, nil)
+	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
+		t.Fatalf("bdStoreForCityWithConfig(nil cfg) parsed city config %d times, want exactly 1 (fallback load)", grew)
+	}
+	if got := store.IDPrefix(); got != "mc" {
+		t.Fatalf("IDPrefix() after fallback load = %q, want mc", got)
+	}
+}
+
+// TestSharedStoreOpenKeepsBdCityReload pins the split one layer up, through
+// the full store open: openStoreAtForCityWithConfig is what the order
+// dispatcher calls (controller tick, API webhook) with the controller's
+// possibly stale cfg, so a bd city-scope open there must still reload config
+// from disk. openCityStoreAtWithConfig (the one-shot entry point used by gc
+// ready, gc hook, drain-ack) must not.
+//
+// Not parallel: loadCityConfigCalls is process-wide.
+func TestSharedStoreOpenKeepsBdCityReload(t *testing.T) {
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// Skip native preflight so the open goes straight to the bd store.
+	t.Setenv("GC_BEADS_FORCE_FALLBACK", "1")
+	t.Setenv("GC_BEADS", "")
+
+	cityDir := t.TempDir()
+	toml := "[workspace]\nname = \"t\"\nprefix = \"mc\"\n\n[beads]\nprovider = \"bd\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	before := loadCityConfigCalls.Load()
+	if _, err := openStoreAtForCityWithConfig(cityDir, cityDir, cfg); err != nil {
+		t.Fatalf("openStoreAtForCityWithConfig(cfg): %v", err)
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
+		t.Fatalf("shared openStoreAtForCityWithConfig parsed city config %d times on a bd city scope, want exactly 1: the order dispatcher's open must keep re-reading config from disk", grew)
+	}
+
+	before = loadCityConfigCalls.Load()
+	if _, err := openCityStoreAtWithConfig(cityDir, cfg); err != nil {
+		t.Fatalf("openCityStoreAtWithConfig(cfg): %v", err)
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("one-shot openCityStoreAtWithConfig parsed city config %d times on a bd city scope, want 0", grew)
+	}
+}
+
+// captureAmbientBdBinWarnings redirects the ignored-ambient-BD_BIN warning to
+// a buffer and resets its per-process dedupe so each test sees its own line.
+func captureAmbientBdBinWarnings(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	old := ambientBdBinWarnOut
+	ambientBdBinWarnOut = &buf
+	ambientBdBinWarned.Clear()
+	t.Cleanup(func() {
+		ambientBdBinWarnOut = old
+		ambientBdBinWarned.Clear()
+	})
+	return &buf
+}
+
+// writeAmbientBdBinCity writes a managed city (no bound store) whose
+// city.toml carries extraTOML, and puts a working bd that records its
+// invocation on a PATH containing only that bd. It returns the city dir, the
+// PATH bd, and the marker file the PATH bd writes when run.
+func writeAmbientBdBinCity(t *testing.T, extraTOML string) (cityDir, pathBd, marker string) {
+	t.Helper()
+	cityDir = t.TempDir()
+	binDir := t.TempDir()
+	pathBd = filepath.Join(binDir, "bd")
+	marker = filepath.Join(t.TempDir(), "path-bd-ran")
+	writeExecutable(t, pathBd, "#!/bin/sh\nprintf ran > \""+marker+"\"\n")
+	t.Setenv("PATH", binDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"+extraTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return cityDir, pathBd, marker
+}
+
+// TestAmbientInvalidBdBinIsIgnoredNotFatal pins ga-weekw: an inherited
+// BD_BIN that is relative, or absolute but stale, is not a declared workspace
+// pin. It must not take the city scope offline; the resolver ignores it with a
+// one-line warning naming the value, the managed child env masks it with an
+// empty BD_BIN, and the exec runner therefore runs the PATH bd instead of
+// exec'ing the stale inherited path.
+func TestAmbientInvalidBdBinIsIgnoredNotFatal(t *testing.T) {
+	for _, ambient := range []string{"bd", "./bin/bd", "/nonexistent/bin/bd"} {
+		t.Run(ambient, func(t *testing.T) {
+			warnings := captureAmbientBdBinWarnings(t)
+			cityDir, pathBd, marker := writeAmbientBdBinCity(t, "")
+			t.Setenv("BD_BIN", ambient)
+
+			got, err := resolveBdBinaryForScope(cityDir, cityDir)
+			if err != nil {
+				t.Fatalf("resolveBdBinaryForScope(city) error = %v, want PATH bd", err)
+			}
+			if got != pathBd {
+				t.Fatalf("resolveBdBinaryForScope(city) = %q, want PATH bd %q", got, pathBd)
+			}
+			if err := requireBdBinaryForCity(cityDir); err != nil {
+				t.Fatalf("requireBdBinaryForCity() error = %v, want nil", err)
+			}
+			env := map[string]string{}
+			if err := applyWorkspacePinnedBdBinary(env, cityDir); err != nil {
+				t.Fatalf("applyWorkspacePinnedBdBinary() error = %v, want nil", err)
+			}
+			if v, ok := env["BD_BIN"]; !ok || v != "" {
+				t.Fatalf("env[BD_BIN] = %q (present=%v), want present and empty to mask the inherited value", v, ok)
+			}
+			if _, err := beads.ExecCommandRunnerWithEnv(env)(cityDir, "bd", "version"); err != nil {
+				t.Fatalf("exec bd with composed env: %v (stale ambient BD_BIN must not be exec'd)", err)
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Fatalf("PATH bd did not run: %v", err)
+			}
+
+			msg := warnings.String()
+			if strings.Count(msg, "\n") != 1 {
+				t.Fatalf("warning output = %q, want exactly one line across all resolutions", msg)
+			}
+			if !strings.Contains(msg, strconv.Quote(ambient)) || !strings.Contains(msg, "BD_BIN") {
+				t.Fatalf("warning = %q, want it to name ignored BD_BIN %q", msg, ambient)
+			}
+		})
+	}
+}
+
+// TestWorkspacePathWithoutBdStillFailsClosedWithValidAmbientBdBin pins that
+// the ga-weekw relaxation is ambient-only: a declared workspace.env PATH that
+// contains no bd stays a configuration error even when a perfectly valid
+// ambient BD_BIN is available, so gc never substitutes a different bd for the
+// declared one.
+func TestWorkspacePathWithoutBdStillFailsClosedWithValidAmbientBdBin(t *testing.T) {
+	warnings := captureAmbientBdBinWarnings(t)
+	emptyDir := t.TempDir()
+	cityDir, _, _ := writeAmbientBdBinCity(t, "[workspace.env]\nPATH = "+strconv.Quote(emptyDir)+"\n")
+	validAmbient := filepath.Join(t.TempDir(), "bd")
+	writeExecutable(t, validAmbient, "#!/bin/sh\nexit 0\n")
+	t.Setenv("BD_BIN", validAmbient)
+
+	got, err := resolveBdBinaryForScope(cityDir, cityDir)
+	if err == nil || !strings.Contains(err.Error(), "workspace.env PATH is configured but contains no executable bd") {
+		t.Fatalf("resolveBdBinaryForScope(city) = %q, %v; want workspace.env PATH error", got, err)
+	}
+	if err := requireBdBinaryForCity(cityDir); err == nil {
+		t.Fatal("requireBdBinaryForCity() = nil, want workspace.env PATH error")
+	}
+	if warnings.Len() != 0 {
+		t.Fatalf("unexpected ambient warning %q: the declared workspace PATH wins", warnings.String())
+	}
+}
+
+// TestInvalidWorkspaceBdBinStillFailsClosed pins that a declared
+// workspace.env BD_BIN that is relative or not executable is still an error,
+// even with a valid ambient BD_BIN and a bd on PATH: only the ambient value is
+// relaxed by ga-weekw.
+func TestInvalidWorkspaceBdBinStillFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		value   string
+		wantErr string
+	}{
+		{name: "relative", value: "./bin/bd", wantErr: "workspace.env BD_BIN must be an absolute executable path"},
+		{name: "missing", value: "/nonexistent/bin/bd", wantErr: "workspace.env BD_BIN \"/nonexistent/bin/bd\" is not executable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			captureAmbientBdBinWarnings(t)
+			cityDir, _, _ := writeAmbientBdBinCity(t, "[workspace.env]\nBD_BIN = "+strconv.Quote(tc.value)+"\n")
+			validAmbient := filepath.Join(t.TempDir(), "bd")
+			writeExecutable(t, validAmbient, "#!/bin/sh\nexit 0\n")
+			t.Setenv("BD_BIN", validAmbient)
+
+			if _, err := resolveBdBinaryForScope(cityDir, cityDir); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("resolveBdBinaryForScope(city) error = %v, want %q", err, tc.wantErr)
+			}
+			if err := requireBdBinaryForCity(cityDir); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("requireBdBinaryForCity() error = %v, want %q", err, tc.wantErr)
+			}
+			if err := applyWorkspacePinnedBdBinary(map[string]string{}, cityDir); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("applyWorkspacePinnedBdBinary() error = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
 }

@@ -205,22 +205,33 @@ Stored config hashes carry a `vN:` prefix. The version literal comes from
 `runtime.FingerprintVersion` in
 [`internal/runtime/fingerprint.go`](https://github.com/gastownhall/gascity/blob/main/internal/runtime/fingerprint.go).
 `ConfigFingerprint`, `CoreFingerprint`, and `LiveFingerprint` all emit
-`<FingerprintVersion>:<sha256-hex>`. The current version is `v5`.
+`<FingerprintVersion>:<sha256-hex>`. The current version is `v7`.
 
-The reconciler treats two stored-hash cases as silent rebaseline rather than
-drift:
+The reconciler treats three stored-hash cases as silent rebaseline rather
+than drift:
 
 1. The stored hash has no version prefix, which means it was written by a
    pre-versioning binary.
-2. The stored hash has a prefix that differs from the current
-   `runtime.FingerprintVersion`.
+2. The stored hash has a prefix other than `v6` that differs from the
+   current `runtime.FingerprintVersion`.
+3. The stored hash is `v6` and equals the hash the `v6` binary computes from
+   the current config (`runtime.IsCoreHashArtifact`, and
+   `runtime.IsLiveHashArtifact` for a live hash). `v7` stopped hashing the
+   non-Restart `FingerprintExtra` keys, and `v6` is the one older version
+   still checked against config: a `v6` hash of other config is drift, so a
+   session whose config changed while `v6` ran still drains or restarts
+   once. Once no stored hash is `v6`, the check can go and `v6` joins case 2.
 
-Silent rebaseline atomically overwrites `started_config_hash`,
-`started_live_hash`, `live_hash`, and `core_hash_breakdown` with values from
-the current binary. The session keeps running, no `SessionDraining` event is
-recorded, and the supervisor log shows one info line for the affected session.
-The `core_hash_breakdown` JSON shape is part of the same upgrade contract: a
-shape change must be paired with a fingerprint version bump.
+Silent rebaseline atomically overwrites the six fingerprint keys,
+`started_config_hash`, `started_provision_hash`, `started_launch_hash`,
+`started_live_hash`, `live_hash`, and `core_hash_breakdown`, with values from
+the current binary. A `v6` core hash moves the core baseline alone and leaves
+`started_live_hash` and `live_hash` to the live check, so a `session_live`
+change made since the start is still applied. The session keeps running, no
+`SessionDraining` event is recorded, and the supervisor log shows one info
+line for the affected session. The `core_hash_breakdown` JSON shape is part
+of the same upgrade contract: a shape change must be paired with a
+fingerprint version bump.
 
 Implementation references:
 [`internal/runtime/fingerprint.go`](https://github.com/gastownhall/gascity/blob/main/internal/runtime/fingerprint.go)
@@ -272,6 +283,8 @@ For PRs that touch `internal/runtime/fingerprint.go`:
 |---|---|---|
 | `v1` | 2026-04-27 | Initial introduction of the `vN:` prefix. Pre-existing unversioned hashes are silently rebaselined to `v1` on the first reconciler tick after upgrade. |
 | `v5` | 2026-07-01 | Operational/host-tooling scripts (`city-*.sh`, `update-*.sh`) excluded from the `.gc/scripts` probed CopyFiles content hash, so editing one no longer flips every agent's fingerprint into a fleet-wide drift. Existing hashes rebaseline silently on upgrade. (#3840) |
+| `v6` | 2026-09-12 | Operator-authored config env gets its own Launch-tier identity field (`Config.OperatorEnv`), separate from `Env` and `FingerprintExtra`. Existing hashes rebaseline silently on upgrade. (#6321) |
+| `v7` | 2026-10-18 | `FingerprintExtra` hashes only its Restart-policy keys (`runtime.FingerprintExtraChangePolicy`), so a pool sizing, skill or `wake_mode` edit no longer drains the sessions it reaches. A `v6` hash rebaselines silently only for config unchanged since; a session whose config changed while `v6` ran drains once. (#8079) |
 
 ## Known Limitations
 

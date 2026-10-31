@@ -56,6 +56,84 @@ func buildAwakeInputFromReconcilerWithObservationErrors(
 	sp runtime.Provider,
 	clk time.Time,
 ) (AwakeInput, map[string]error) {
+	// Load runtime suspension state once against the in-scope city path so
+	// suspension resolves against the controlled city rather than the
+	// process cwd.
+	suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
+	input := newAwakeInputFromSnapshot(
+		cfg,
+		func(a *config.Agent) bool { return isAgentEffectivelySuspendedWith(cfg, cityPath, a, suspState) },
+		sessionInfos, poolDesired, namedSessionDemand, namedRoutedDemand, workSet, readyWaitSet,
+		assignedWorkBeads, readyAssignedFlags, clk,
+	)
+	observationErrors := make(map[string]error)
+
+	// Runtime liveness comes from wakeTargets. Attachment is probed only when
+	// it can affect the awake decision; the common active desired-session path
+	// is already awake and has no idle reference to suppress. Index the typed
+	// snapshot by (unique) session ID for the per-target reads — keying by ID is
+	// order-independent, so it does not disturb the SessionName last-write-wins
+	// ordering the session scan above depends on. Every wakeTarget's bead is one
+	// of the sessionInfos (both derive from the reconciler's `ordered` set), so a
+	// miss yields a zero Info whose empty SessionNameMetadata skips the target —
+	// the same skip the former empty-session_name read produced.
+	infoBy := make(map[string]session.Info, len(sessionInfos))
+	for _, in := range sessionInfos {
+		infoBy[in.ID] = in
+	}
+	for _, target := range wakeTargets {
+		info := infoBy[target.info.ID]
+		name := strings.TrimSpace(info.SessionNameMetadata)
+		if name == "" {
+			continue
+		}
+		if target.alive {
+			input.RunningSessions[name] = true
+		}
+		if shouldProbeAttachmentForAwakeInput(info, target.alive, cfg, sp, poolDesired) {
+			attached, err := workerSessionTargetAttachedWithConfig("", nil, sp, nil, name)
+			if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				input.AttachedSessions[name] = true
+				observationErrors[name] = err
+			} else if err == nil && attached {
+				input.AttachedSessions[name] = true
+			}
+		}
+		// Only a live runtime can raise an interaction. Probing dead targets
+		// would let an outage turn asleep sessions into wake candidates.
+		if !target.alive {
+			continue
+		}
+		switch answer, err := pendingInteractionProbe(sp, name); answer {
+		case pendingInteractionYes:
+			input.PendingSessions[name] = true
+		case pendingInteractionUnknown:
+			input.PendingSessions[name] = true
+			observationErrors[name] = err
+		}
+	}
+
+	return input, observationErrors
+}
+
+// newAwakeInputFromSnapshot builds every part of AwakeInput that comes from
+// config, demand and the session rows: everything but the runtime maps, which
+// the caller fills. agentSuspended reports an agent's effective suspension.
+// It does no I/O, so the v2 allocator builds its awake input with it inside
+// its pure pass.
+func newAwakeInputFromSnapshot(
+	cfg *config.City,
+	agentSuspended func(*config.Agent) bool,
+	sessionInfos []session.Info,
+	poolDesired map[string]int,
+	namedSessionDemand map[string]bool,
+	namedRoutedDemand map[string]bool,
+	workSet map[string]bool,
+	readyWaitSet map[string]bool,
+	assignedWorkBeads []beads.Bead,
+	readyAssignedFlags []bool,
+	clk time.Time,
+) AwakeInput {
 	input := AwakeInput{
 		ScaleCheckCounts:         poolDesired,
 		NamedSessionDemand:       cloneBoolMap(namedSessionDemand),
@@ -69,17 +147,13 @@ func buildAwakeInputFromReconcilerWithObservationErrors(
 		ManualGracePeriod:        cfg.ChatSessions.GracePeriodDuration(),
 		Now:                      clk,
 	}
-	observationErrors := make(map[string]error)
 
-	// Agents. Load runtime suspension state once against the in-scope
-	// city path so suspension resolves against the controlled city
-	// rather than the process cwd.
-	suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
+	// Agents.
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
 		agent := AwakeAgent{
 			QualifiedName:     a.QualifiedName(),
-			Suspended:         isAgentEffectivelySuspendedWith(cfg, cityPath, a, suspState),
+			Suspended:         agentSuspended(a),
 			SleepAfterIdle:    parseSleepDuration(a.SleepAfterIdle),
 			MinActiveSessions: a.EffectiveMinActiveSessions(),
 		}
@@ -162,6 +236,7 @@ func buildAwakeInputFromReconcilerWithObservationErrors(
 			ExplicitWake:           lifecycle.HasWakeCause(session.WakeCauseExplicit),
 			DependencyOnly:         info.DependencyOnly,
 			NamedIdentity:          lifecycle.NamedIdentity,
+			Alias:                  stableAssignmentAliasForConfigInfo(info, cfg),
 			ConfiguredNamedSession: isNamedSessionInfo(info),
 			Pinned:                 lifecycle.HasWakeCause(session.WakeCausePinned),
 			Drained:                lifecycle.BaseState == session.BaseStateDrained,
@@ -198,46 +273,10 @@ func buildAwakeInputFromReconcilerWithObservationErrors(
 		input.NamedSessionWorkQ[ns.Identity] = true
 	}
 
-	// Runtime liveness comes from wakeTargets. Attachment is probed only when
-	// it can affect the awake decision; the common active desired-session path
-	// is already awake and has no idle reference to suppress. Index the typed
-	// snapshot by (unique) session ID for the per-target reads — keying by ID is
-	// order-independent, so it does not disturb the SessionName last-write-wins
-	// ordering the session scan above depends on. Every wakeTarget's bead is one
-	// of the sessionInfos (both derive from the reconciler's `ordered` set), so a
-	// miss yields a zero Info whose empty SessionNameMetadata skips the target —
-	// the same skip the former empty-session_name read produced.
-	infoBy := make(map[string]session.Info, len(sessionInfos))
-	for _, in := range sessionInfos {
-		infoBy[in.ID] = in
-	}
-	for _, target := range wakeTargets {
-		info := infoBy[target.info.ID]
-		name := strings.TrimSpace(info.SessionNameMetadata)
-		if name == "" {
-			continue
-		}
-		if target.alive {
-			input.RunningSessions[name] = true
-		}
-		if shouldProbeAttachmentForAwakeInput(info, target.alive, cfg, poolDesired) {
-			attached, err := workerSessionTargetAttachedWithConfig("", nil, sp, nil, name)
-			if errors.Is(err, runtime.ErrRuntimeUnavailable) {
-				input.AttachedSessions[name] = true
-				observationErrors[name] = err
-			} else if err == nil && attached {
-				input.AttachedSessions[name] = true
-			}
-		}
-		if pendingInteractionReady(sp, name) {
-			input.PendingSessions[name] = true
-		}
-	}
-
-	return input, observationErrors
+	return input
 }
 
-func shouldProbeAttachmentForAwakeInput(info session.Info, alive bool, cfg *config.City, poolDesired map[string]int) bool {
+func shouldProbeAttachmentForAwakeInput(info session.Info, alive bool, cfg *config.City, sp runtime.Provider, poolDesired map[string]int) bool {
 	if !alive {
 		return false
 	}
@@ -256,8 +295,24 @@ func shouldProbeAttachmentForAwakeInput(info session.Info, alive bool, cfg *conf
 	if template == "" {
 		template = info.Template
 	}
-	if template != "" && poolDesired[template] > 0 {
-		return false
+	// A row carrying the reconciler's idle-stop-pending marker is probed
+	// whatever its class: the marker outranks pool demand, and only an
+	// attachment cancels the idle drain it records
+	// (wakeDemandOverridesSleepSuppression).
+	if template != "" && poolDesired[template] > 0 && !session.DispositionOfInfo(info).IdleStop {
+		// Otherwise pool demand keeps a non-interactive session awake over
+		// its idle latch, and a session whose effective sleep policy is off
+		// has no idle window, so the attachment of either does not change
+		// the decision. The effective policy is the one the suppression
+		// reads: it is also off for an interactive template on a runtime
+		// without full sleep capability (interactive_capability_insufficient).
+		// An interactive session that can idle-sleep honors its idle window
+		// against pool demand, and only an attachment holds it then: probe
+		// it.
+		policy := resolveSessionSleepPolicyInfo(info, cfg, sp)
+		if policy.Class == config.SessionSleepNonInteractive || !policy.enabled() {
+			return false
+		}
 	}
 	return true
 }
@@ -295,10 +350,12 @@ func awakeSetToWakeEvals(decisions map[string]AwakeDecision, sessionBeads []Awak
 			}
 		}
 		evals[bead.ID] = wakeEvaluation{
-			Reasons:          reasons,
-			Reason:           d.Reason,
-			ConfigSuppressed: d.Reason == "idle-sleep",
-			HasAssignedWork:  d.HasAssignedWork,
+			Reasons:             reasons,
+			Reason:              d.Reason,
+			ConfigSuppressed:    d.Reason == "idle-sleep",
+			HasAssignedWork:     d.HasAssignedWork,
+			AssignedWorkBeadID:  d.AssignedWorkBeadID,
+			AssignedWorkClaimed: d.AssignedWorkClaimed,
 		}
 	}
 	return evals

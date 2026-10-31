@@ -159,6 +159,14 @@ func TestAPIBeadCloseEnforcesWorkRecord(t *testing.T) {
 			meta:    map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
 			enforce: true,
 		},
+		{
+			name: "a workflow step closes untouched",
+			meta: map[string]string{
+				beadmeta.StepIDMetadataKey:  "mol-do-work.drain",
+				beadmeta.StepRefMetadataKey: "mol-do-work.drain",
+			},
+			enforce: true,
+		},
 	}
 
 	for _, spelling := range closeSpellings() {

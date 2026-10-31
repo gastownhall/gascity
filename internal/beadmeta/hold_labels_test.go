@@ -24,3 +24,23 @@ func TestDispatchHoldLabelsMatchCanonicalHoldValues(t *testing.T) {
 		}
 	}
 }
+
+func TestHasDispatchHold(t *testing.T) {
+	cases := []struct {
+		name   string
+		labels []string
+		want   bool
+	}{
+		{"nil", nil, false},
+		{"unrelated", []string{"mysql-cutover", "needs-mayor", "mpr-human-hold"}, false},
+		{"other hold value", []string{"hold:polecat"}, false},
+		{"hold external", []string{"x", HoldExternalLabel}, true},
+		{"hold mayor", []string{HoldMayorLabel}, true},
+		{"case and space folded", []string{"  Hold:External "}, true},
+	}
+	for _, tc := range cases {
+		if got := HasDispatchHold(tc.labels); got != tc.want {
+			t.Errorf("%s: HasDispatchHold(%q) = %v, want %v", tc.name, tc.labels, got, tc.want)
+		}
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -256,8 +257,11 @@ func TestSQLiteStoreGraphSequenceFloorSurvivesReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read graph.seqfloor: %v", err)
 	}
-	if string(bytes) != "41\n" {
-		t.Fatalf("graph.seqfloor = %q, want 41\\n", bytes)
+	// The floor leads the allocator: the first mint reserved a whole block
+	// past the operator floor before handing out gcg-42.
+	wantFloor := strconv.FormatInt(41+sqliteSequenceBlockSize, 10) + "\n"
+	if string(bytes) != wantFloor {
+		t.Fatalf("graph.seqfloor = %q, want %q", bytes, wantFloor)
 	}
 	reopened, err := OpenSQLiteStore(dir, WithSQLiteStoreIDPrefix("gcg"))
 	if err != nil {
@@ -269,8 +273,10 @@ func TestSQLiteStoreGraphSequenceFloorSurvivesReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create after reopen: %v", err)
 	}
-	if second.ID != "gcg-43" {
-		t.Fatalf("second id after reopen = %q, want gcg-43", second.ID)
+	// Reopen resumes past the whole reserved block, never inside it: ids in a
+	// block a previous process reserved may have escaped without a row.
+	if want := "gcg-" + strconv.FormatInt(41+sqliteSequenceBlockSize+1, 10); second.ID != want {
+		t.Fatalf("second id after reopen = %q, want %q", second.ID, want)
 	}
 }
 

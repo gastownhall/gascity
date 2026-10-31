@@ -41,6 +41,6 @@ a feature branch, commits a file, and hands off to the refinery.
 ### 4. Watch it run
 
 ```bash
-bd show <bead-id> --watch
+gc bd show <bead-id> --watch
 gc session list
 ```

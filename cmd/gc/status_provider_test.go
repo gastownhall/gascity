@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -136,5 +137,72 @@ func TestStatusProviderTimeoutMarksPartial(t *testing.T) {
 	}
 	if !statusProviderPartial(wrapped) {
 		t.Fatal("statusProviderPartial = false, want true after runtime probe timeout")
+	}
+}
+
+// attachProbeProvider answers IsAttachedWithError from fixed values, held at
+// gate when it is set.
+type attachProbeProvider struct {
+	runtime.Provider
+	attached bool
+	err      error
+	gate     <-chan struct{}
+}
+
+func (p *attachProbeProvider) IsAttachedWithError(string) (bool, error) {
+	if p.gate != nil {
+		<-p.gate
+	}
+	return p.attached, p.err
+}
+
+// Both cmd/gc wrappers serve display paths only (gc status, gc session list),
+// but they still forward the capability so a reader that asks for the error
+// sees the base probe's failure instead of the bool IsAttached's "detached".
+func TestCmdProviderWrappersForwardAttachProbeError(t *testing.T) {
+	origTimeout := statusProviderCallTimeout
+	t.Cleanup(func() { statusProviderCallTimeout = origTimeout })
+	// Unbounded, so the statusProvider row forwards the probe instead of
+	// racing its timeout.
+	statusProviderCallTimeout = 0
+
+	probeErr := fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
+	base := &attachProbeProvider{Provider: runtime.NewFake(), err: probeErr}
+	for _, tc := range []struct {
+		name string
+		sp   runtime.Provider
+	}{
+		{name: "statusProvider", sp: newBoundedStatusProvider(base)},
+		{name: "attachmentCachingProvider", sp: &attachmentCachingProvider{Provider: base, cache: map[string]bool{"other": true}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			attached, err := runtime.IsAttachedWithError(tc.sp, "worker")
+			if attached || !errors.Is(err, probeErr) {
+				t.Fatalf("IsAttachedWithError = (%v, %v), want (false, %v)", attached, err, probeErr)
+			}
+		})
+	}
+}
+
+func TestStatusProviderAttachTimeoutIsUnavailable(t *testing.T) {
+	origTimeout := statusProviderCallTimeout
+	origWarn := statusProviderTimeoutWarning
+	t.Cleanup(func() {
+		statusProviderCallTimeout = origTimeout
+		statusProviderTimeoutWarning = origWarn
+	})
+	statusProviderCallTimeout = 10 * time.Millisecond
+	statusProviderTimeoutWarning = func() {}
+
+	gate := make(chan struct{})
+	t.Cleanup(func() { close(gate) })
+	wrapped := newBoundedStatusProvider(&attachProbeProvider{Provider: runtime.NewFake(), attached: true, gate: gate})
+
+	attached, err := runtime.IsAttachedWithError(wrapped, "worker")
+	if attached || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("IsAttachedWithError = (%v, %v), want (false, runtime unavailable) on timeout", attached, err)
+	}
+	if !statusProviderPartial(wrapped) {
+		t.Fatal("statusProviderPartial = false, want true after attachment timeout")
 	}
 }

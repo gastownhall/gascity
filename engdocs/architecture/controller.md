@@ -19,8 +19,20 @@ automations, and garbage-collects expired wisps.
 
 - **Controller Loop**: The persistent `select` loop in `controllerLoop()`
   that fires on a configurable ticker (default 30s) and on config file
-  changes. Each tick runs the full reconciliation, wisp GC, and order
-  dispatch pipeline. Implemented in `cmd/gc/controller.go`.
+  changes. Each tick runs the full reconciliation and wisp GC pipeline.
+  Implemented in `cmd/gc/controller.go`.
+
+- **Orders Lane**: Order dispatch runs on its own goroutine
+  (`cmd/gc/orders_lane.go`), not in the tick. Each tick wakes the lane.
+  A wake runs a pass at once if the lane has idled as long as its previous
+  pass ran, and otherwise as soon as it has, so the lane is busy at most
+  half the time while a pass fits in the patrol interval (a longer pass is
+  followed by one interval idle) and never runs back to back. A timer
+  reset after every pass runs a pass one patrol interval after the last
+  one ended if nothing else has (the backstop for a wedged tick). A reload
+  stages the rebuilt dispatcher under an order-set generation, so a lane rescan of older config cannot
+  overwrite it. A forced shutdown that overlaps a running pass skips the
+  order drain. See [Orders](orders.md#data-flow).
 
 - **Config Reload**: The debounced mechanism by which filesystem changes
   to `city.toml` and pack directories trigger a full config re-parse.
@@ -64,31 +76,40 @@ The hidden standalone compatibility flow still proceeds as follows:
 gc start --foreground
   │
   ├─ 1. Require an initialized city
-  ├─ 2. Fetch remote packs
-  ├─ 3. LoadWithIncludes(city.toml)  →  *config.City + Provenance
-  ├─ 4. ensureBeadsProvider()        →  start dolt server if bd backend
-  ├─ 5. ValidateRigs() + resolve paths
-  ├─ 6. initAllRigBeads()           →  per-rig .beads/ databases + routes
-  ├─ 7. MaterializeSystemFormulas()  →  embed system formulas as Layer 0
-  ├─ 8. ResolveFormulas()            →  symlinks in .beads/formulas/
-  ├─ 9. ValidateAgents() + hooks
-  ├─10. newSessionProvider()         →  tmux / exec / k8s / subprocess
-  ├─11. runController()
-  │     ├─ acquireControllerLock()   →  flock LOCK_EX|LOCK_NB
+  ├─ 2. acquireControllerLock()      →  flock LOCK_EX|LOCK_NB, held until exit
+  ├─ 3. Fetch remote packs
+  ├─ 4. LoadWithIncludes(city.toml)  →  *config.City + Provenance
+  ├─ 5. ensureBeadsProvider()        →  start dolt server if bd backend
+  ├─ 6. ValidateRigs() + resolve paths
+  ├─ 7. initAllRigBeads()           →  per-rig .beads/ databases + routes
+  ├─ 8. MaterializeSystemFormulas()  →  embed system formulas as Layer 0
+  ├─ 9. ResolveFormulas()            →  symlinks in .beads/formulas/
+  ├─10. ValidateAgents() + hooks
+  ├─11. newSessionProvider()         →  tmux / exec / k8s / subprocess
+  ├─12. runController()  (lock already held)
   │     ├─ startControllerSocket()   →  Unix socket for IPC
   │     ├─ build trackers (crash, idle, wisp GC, order)
   │     └─ controllerLoop()
   │           ├─ watchConfigDirs()   →  fsnotify on config + pack dirs
+  │           ├─ startup order dispatch (once, synchronous)
+  │           ├─ startOrdersLane()   →  orders lane goroutine (below)
   │           ├─ initial reconciliation
   │           └─ ticker loop:
-  │                 ├─ if dirty: tryReloadConfig() + rebuild trackers
+  │                 ├─ if dirty: tryReloadConfig() + stage order dispatcher
+  │                 ├─ wake orders lane  (no dispatch in the tick)
   │                 ├─ buildAgents(cfg)  →  evaluate pools in parallel
   │                 ├─ reconcileSessionBeads()
-  │                 ├─ wispGC.runGC()
-  │                 └─ orderDispatcher.dispatch()
+  │                 └─ wispGC.runGC()
+  │
+  │     orders lane (own goroutine; wake after a duty-cycle gap, or backstop):
+  │           ├─ FS-pressure gate + managed-Dolt preflight
+  │           ├─ rescan; install staged dispatcher; watchdogs
+  │           └─ orderDispatcher.dispatch()
   │
   └─ shutdown:
+        ├─ stop + join orders lane
         ├─ orderDispatcher.drain(ctx) →  wait for in-flight order goroutines
+        │                               (skipped if a forced stop overlaps a pass)
         ├─ gracefulStopAll()         →  interrupt → wait → kill
         ├─ record controller.stopped event
         └─ release lock + remove socket + pid
@@ -120,10 +141,12 @@ Each tick of `controllerLoop()` (`cmd/gc/controller.go:268-320`) performs:
    `wisp_ttl` both set), queries closed molecules via `bd list` and
    deletes those older than the TTL cutoff.
 
-5. **Order dispatch** (`ad.dispatch()`): Evaluates trigger conditions
-   for all non-manual orders. See
-   [Health Patrol](health-patrol.md) for trigger evaluation and dispatch
-   details.
+5. **Orders lane wake**: The tick does not dispatch orders. It wakes the
+   orders lane, which evaluates trigger conditions for all non-manual
+   orders on its own goroutine, paced by its duty cycle and backstop
+   timer. It also records the age of the lane's last pass that reached
+   dispatch on the tick trace. See
+   [Orders](orders.md#data-flow) for the lane and for trigger evaluation.
 
 ### Key Types
 
@@ -133,7 +156,8 @@ Each tick of `controllerLoop()` (`cmd/gc/controller.go:268-320`) performs:
   trackers, event recorder, and I/O writers.
 
 - **`runController()`** (`cmd/gc/controller.go:335`): The top-level
-  orchestrator. Acquires the flock, opens the Unix socket, builds
+  orchestrator. Holds the flock (acquiring it unless the caller already
+  did, as `gc start --foreground` does), opens the Unix socket, builds
   trackers, enters the loop, and performs graceful shutdown on exit.
 
 - **`tryReloadConfig()`** (`cmd/gc/controller.go:137`): Config reload
@@ -158,7 +182,18 @@ indicate bugs.
   controller runs per city
   directory. Enforced by `flock(LOCK_EX|LOCK_NB)` on
   `.gc/controller.lock`. A second `gc start --foreground` fails
-  immediately with "controller already running."
+  immediately with "controller already running." It takes the lock before
+  it starts the bead-store provider, so a start that loses the lock (to a
+  running controller, or to a `gc stop` retiring the provider) leaves the
+  provider alone.
+
+- **`gc stop` keeps the controller lock through bead-store shutdown**:
+  once the controller has stopped (acknowledged `stop`, or the supervisor
+  stopped it during unregister), `gc stop` takes `.gc/controller.lock` and
+  holds it until the bead-store provider is retired, releasing it on every
+  exit path (and before any unregister rollback). A supervisor restart or a
+  second `gc start` therefore cannot bring a controller up against a
+  provider that is being torn down; it fails the lock instead.
 
 - **Config reload preserves city identity**: `tryReloadConfig()` rejects
   any reload where `workspace.name` changes. The city name is locked at
@@ -366,6 +401,9 @@ testing philosophy and tier boundaries.
 
 - [Health Patrol](health-patrol.md) -- reconciliation state machine,
   crash loop quarantine, idle tracking, and order dispatch details
+- [Session Reconciler v2](reconciler-v2.md) -- the keyed reconciler
+  behind `[daemon] session_reconciler`: queue, router, exclusivity, the
+  per-tick `reconcile_queue` record, and the A1-A17 guarantees
 - [Architecture glossary](glossary.md) -- authoritative definitions
   of controller, pool, provider, rig, and other terms used in this doc
 - [Config struct definitions](https://github.com/gastownhall/gascity/blob/main/internal/config/config.go) --

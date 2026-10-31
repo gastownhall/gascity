@@ -276,6 +276,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		Requires:    cloneRequirements(formula.Requires),
 		Type:        formula.Type,
 		Source:      formula.Source,
+		ContentHash: formula.ContentHash,
 		Phase:       formula.Phase,
 		Pour:        formula.Pour,
 		Vars:        make(map[string]*VarDef),
@@ -370,6 +371,9 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 	setFormulaCompilerConstraints(merged, compilerConstraints)
 
 	if err := merged.Validate(); err != nil {
+		return nil, err
+	}
+	if err := validateScopeMembership(merged); err != nil {
 		return nil, err
 	}
 	if err := validateResolvedGraphV2DescriptionFiles(merged); err != nil {

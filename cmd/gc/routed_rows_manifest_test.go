@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -25,11 +24,7 @@ var sixRowMatrixMarkers = []string{
 // guard cannot be silently disabled by a marker rename even when only `go test`
 // runs (not the shell lint).
 func TestRoutedRowsManifestFullyCovered(t *testing.T) {
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
+	repoRoot := gcRepoRootFromEnv()
 	files := readRoutedRowsManifest(t, filepath.Join(repoRoot, "scripts", "routed-test-rows.manifest"))
 	if len(files) == 0 {
 		t.Fatal("routed-test-rows.manifest lists no files — the six-row guard would police nothing")

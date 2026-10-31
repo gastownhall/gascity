@@ -66,6 +66,9 @@ func TestRecordOnceWritesOneImmutableEventAndConservativeQuotaWithoutScanning(t 
 	deps := defaultTestServiceDependencies(home, 2)
 	deps.newUUID = uuidSequence(t, testEventIDOne)
 	deps.now = func() time.Time { return testRecordHour }
+	deps.withDeadline = func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	var enumerations int
 	deps.storageHooks.beforeStep = func(step storageStep) error {
 		if step == storageStepEnumerate {
@@ -118,6 +121,62 @@ func TestRecordOnceWritesOneImmutableEventAndConservativeQuotaWithoutScanning(t 
 	}
 	if len(entries) != 1 {
 		t.Fatalf("event files after second attempt = %d", len(entries))
+	}
+}
+
+// TestRecordOnceRealLockContentionDoesNotExpireFrozenClockBudget proves a real
+// state.lock hold longer than defaultRecordDecisionBudget cannot expire the
+// frozen-clock decision budget, because the fixture's injected deadline builder
+// follows the same clock model as the injected now: a genuine 200 ms hold must
+// not make RecordOnce drop the event.
+func TestRecordOnceRealLockContentionDoesNotExpireFrozenClockBudget(t *testing.T) {
+	home, service, permit := newRecordServiceFixture(t, testEventIDOne)
+
+	holder := mustOpenMutableRoot(t, home)
+	defer func() { _ = holder.Close() }()
+	lock, err := holder.acquireLock(context.Background(), stateLockName)
+	if err != nil {
+		t.Fatalf("acquire contending lock: %v", err)
+	}
+
+	const holdDuration = 200 * time.Millisecond
+	if holdDuration <= defaultRecordDecisionBudget {
+		t.Fatalf("test hold %v must exceed defaultRecordDecisionBudget %v", holdDuration, defaultRecordDecisionBudget)
+	}
+	var wait sync.WaitGroup
+	wait.Add(1)
+	go func() {
+		defer wait.Done()
+		time.Sleep(holdDuration)
+		_ = lock.Release()
+	}()
+	t.Cleanup(wait.Wait)
+
+	if got := service.RecordOnce(permit, CommandHelp); got != RecordStored {
+		t.Fatalf("RecordOnce = %v, want stored (a real %v lock hold must not defeat the frozen-clock %v decision budget)", got, holdDuration, defaultRecordDecisionBudget)
+	}
+}
+
+// TestOpenWithDependenciesDefaultWithDeadlineUsesRealWallClockBudget covers the
+// non-fixture side of the decision-budget contract: with no withDeadline
+// override, openWithDependencies defaults it to context.WithTimeout
+// (service.go:403-404), and spool.go:215 calls it as
+// service.deps.withDeadline(context.Background(), remaining). This calls it
+// the same way, with no manufactured delay, so it cannot flake.
+func TestOpenWithDependenciesDefaultWithDeadlineUsesRealWallClockBudget(t *testing.T) {
+	home := newMetricsTestHome(t)
+	deps := defaultTestServiceDependencies(home, 2)
+	service := mustOpenTestService(t, deps)
+
+	ctx, cancel := service.deps.withDeadline(context.Background(), defaultRecordDecisionBudget)
+	defer cancel()
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("unoverridden withDeadline default did not attach a deadline to the context")
+	}
+	if remaining := time.Until(deadline); remaining <= 0 || remaining > defaultRecordDecisionBudget {
+		t.Fatalf("time.Until(deadline) = %v, want in (0, %v] (the unoverridden default must carry a real wall-clock deadline)", remaining, defaultRecordDecisionBudget)
 	}
 }
 
@@ -540,6 +599,9 @@ func TestRecordOnceSpentBudgetAfterReservationLeavesOnlySafeOvercount(t *testing
 	start := testRecordHour
 	current := start
 	deps.now = func() time.Time { return current }
+	deps.withDeadline = func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	deps.beforeRecordOperation = func(operation recordOperation) {
 		if operation == recordOperationQueueOpen {
 			current = start.Add(defaultRecordDecisionBudget + time.Nanosecond)
@@ -10074,6 +10136,9 @@ func TestEventInstallCrashWindowCannotLeaveTwoNamesForOneReservation(t *testing.
 	deps := defaultTestServiceDependencies(home, 2)
 	deps.newUUID = uuidSequence(t, testEventIDTwo)
 	deps.now = func() time.Time { return testRecordHour }
+	deps.withDeadline = func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	secondService := mustOpenTestService(t, deps)
 	secondPermit := secondService.RecordingPermit(recordableInvocationAt(testRecordHour))
 	secondResult := secondService.RecordOnce(secondPermit, CommandVersion)
@@ -11071,6 +11136,9 @@ func newRecordServiceFixture(t *testing.T, eventID string) (gchome.ProductUsageH
 	deps := defaultTestServiceDependencies(home, 2)
 	deps.newUUID = uuidSequence(t, eventID)
 	deps.now = func() time.Time { return testRecordHour }
+	deps.withDeadline = func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	service := mustOpenTestService(t, deps)
 	permit := service.RecordingPermit(recordableInvocationAt(testRecordHour))
 	if !permit.Valid() {

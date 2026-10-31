@@ -17,3 +17,10 @@ export function formatElapsed(ageMs: number): string {
   if (hours < 48) return `${hours}h`;
   return `${Math.round(hours / 24)}d`;
 }
+
+/** Like formatElapsed but with minute resolution under an hour ("8m", "3h"). */
+export function formatElapsedFine(ageMs: number): string {
+  const minutes = Math.round(ageMs / (60 * 1000));
+  if (minutes < 60) return `${Math.max(1, minutes)}m`;
+  return formatElapsed(ageMs);
+}

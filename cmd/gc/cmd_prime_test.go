@@ -226,6 +226,134 @@ func TestPrimeInjectMailContentSurfacesUnreadMailForPromptlessWake(t *testing.T)
 	}
 }
 
+// SessionStart hands the ordinary-mail read the provider it already built, so
+// the read must use it as is rather than resolving a city and reopening stores.
+func TestPrimeUnreadMailInjectionUsesProvidedProviderWithoutOpeningCity(t *testing.T) {
+	clearGCEnv(t)
+	missingCity := filepath.Join(t.TempDir(), "missing-city")
+	t.Setenv("GC_CITY", missingCity)
+	t.Setenv("GC_CITY_PATH", missingCity)
+	t.Setenv("GC_ALIAS", "worker")
+	provider := mail.NewFake()
+	if _, err := provider.Send("boss", "worker", "ready", "review the result"); err != nil {
+		t.Fatalf("seed mail: %v", err)
+	}
+
+	got := primeUnreadMailInjectionWithProvider(nil, provider)
+
+	if !strings.Contains(got, "review the result") {
+		t.Fatalf("injection = %q, want mail from the provided provider", got)
+	}
+	if standalone := primeUnreadMailInjection(nil); standalone != "" {
+		t.Fatalf("standalone injection against a missing city = %q, want empty", standalone)
+	}
+}
+
+// The ordinary-mail provider built beside the auto-handoff read must be the one
+// openCityMailProvider would build: [mail] provider from city.toml, overridden
+// by GC_MAIL.
+func TestSessionStartAutoHandoffCarriesConfiguredOrdinaryMailProvider(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		envProvider string
+		wantErr     bool
+	}{
+		{name: "config provider", wantErr: true},
+		{name: "environment override", envProvider: "fake", wantErr: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			cityDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n[mail]\nprovider = \"fail\"\n"), 0o644); err != nil {
+				t.Fatalf("write city.toml: %v", err)
+			}
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+			t.Setenv("GC_CITY", cityDir)
+			t.Setenv("GC_CITY_PATH", cityDir)
+			t.Setenv("GC_MAIL", tc.envProvider)
+
+			_, _, provider := sessionStartAutoHandoffInjection(io.Discard)
+
+			if provider == nil {
+				t.Fatal("ordinary mail provider = nil, want the configured provider")
+			}
+			_, err := provider.Check("worker")
+			if got := err != nil; got != tc.wantErr {
+				t.Fatalf("Check error = %v, want error=%v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// A SessionStart that already proved its live session against the city store
+// reuses that handle: the auto-handoff read, its archive acknowledgement, and
+// the ordinary-mail provider all work without resolving the city again.
+func TestSessionStartAutoHandoffUsesProvidedStoreWithoutOpeningCity(t *testing.T) {
+	clearGCEnv(t)
+	store := beads.NewMemStore()
+	sessionInfo, err := store.Create(beads.Bead{
+		Title:  "gastown--worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"agent_name":   "worker",
+			"session_name": "gastown--worker",
+			"state":        "active",
+			"template":     "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	auto, ok := createHandoffMail(store, store, events.Discard, sessionInfo.ID, sessionInfo.ID,
+		[]string{"context cycle", "continue from the provided store"}, "context cycle",
+		[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, io.Discard)
+	if !ok {
+		t.Fatal("createHandoffMail(auto) failed")
+	}
+	ordinary, ok := createHandoffMail(store, store, events.Discard, "boss", sessionInfo.ID,
+		[]string{"ordinary note", "read me too"}, "ordinary note", nil, io.Discard)
+	if !ok {
+		t.Fatal("createHandoffMail(ordinary) failed")
+	}
+
+	// The caller's city is real, but ambient resolution points somewhere that
+	// does not exist, so anything that re-resolved the city would come up empty.
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	missingCity := filepath.Join(t.TempDir(), "missing-city")
+	t.Setenv("GC_CITY", missingCity)
+	t.Setenv("GC_CITY_PATH", missingCity)
+	t.Setenv("GC_SESSION_ID", sessionInfo.ID)
+
+	injection, ids, provider := sessionStartAutoHandoffInjectionWithStore(store, cityDir, io.Discard)
+
+	for _, want := range []string{auto.ID, auto.Subject, auto.Body} {
+		if !strings.Contains(injection.text, want) {
+			t.Fatalf("injection = %q, want auto-handoff substring %q", injection.text, want)
+		}
+	}
+	if !ids[auto.ID] || ids[ordinary.ID] {
+		t.Fatalf("rendered IDs = %#v, want only auto-handoff %q", ids, auto.ID)
+	}
+	if provider == nil {
+		t.Fatal("ordinary mail provider = nil, want a provider over the provided store")
+	}
+	ordinaryText := primeUnreadMailInjectionWithProvider(ids, provider)
+	if !strings.Contains(ordinaryText, ordinary.Body) || strings.Contains(ordinaryText, auto.Body) {
+		t.Fatalf("ordinary injection = %q, want ordinary mail without the rendered auto-handoff", ordinaryText)
+	}
+	if injection.afterDelivery == nil {
+		t.Fatal("afterDelivery = nil, want archive acknowledgement")
+	}
+	injection.afterDelivery()
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
+}
+
 func TestDoPrimeScopesRigPackFragmentsByCurrentRig(t *testing.T) {
 	clearGCEnv(t)
 

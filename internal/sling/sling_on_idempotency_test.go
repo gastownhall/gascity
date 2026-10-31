@@ -170,7 +170,10 @@ func TestResolveIdempotentShortCircuitWarnsWhenOnFormulaSkippedForClaim(t *testi
 	opts := SlingOpts{OnFormula: "mol-tdd-build", BeadOrFormula: "BL-1", Target: config.Agent{Name: "worker"}, NoConvoy: true}
 
 	var result SlingResult
-	shortCircuited := resolveIdempotentShortCircuit(opts, opts.Target, deps, store, &result)
+	shortCircuited, err := resolveIdempotentShortCircuit(opts, opts.Target, deps, store, &result)
+	if err != nil {
+		t.Fatalf("resolveIdempotentShortCircuit: %v", err)
+	}
 
 	if !shortCircuited || !result.Idempotent {
 		t.Fatalf("claimed bead, no molecule, --on: expected idempotent short-circuit, got shortCircuited=%v result=%+v", shortCircuited, result)

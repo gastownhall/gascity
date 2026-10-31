@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,13 +18,32 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessions "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
-	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // errTokenMismatch indicates the running session's instance token
 // doesn't match the expected one — the session was re-woken by a
 // different incarnation and this drain/stop is stale.
 var errTokenMismatch = errors.New("instance token mismatch")
+
+// errTokenUnverifiable indicates the running session's instance token could
+// not be read, so a kill by name cannot be proven to hit the intended
+// incarnation. The stop is skipped and retried, never treated as stale.
+var errTokenUnverifiable = errors.New("instance token unverifiable")
+
+// tokenUnverifiableError is verifiedStop's errTokenUnverifiable. Its message
+// omits the read error's text, which may match runtime.IsSessionGone (tmux's
+// "no tmux server running") and so read "could not verify" as "gone". The
+// sentinel and the cause stay reachable through errors.Is.
+type tokenUnverifiableError struct {
+	sessionID string
+	cause     error
+}
+
+func (e *tokenUnverifiableError) Error() string {
+	return fmt.Sprintf("%v for session %s (token_unverifiable)", errTokenUnverifiable, e.sessionID)
+}
+
+func (e *tokenUnverifiableError) Unwrap() []error { return []error{errTokenUnverifiable, e.cause} }
 
 // preWakeCommit persists a new incarnation (generation + token) BEFORE
 // starting the process. This is Phase 1 of the two-phase wake protocol.
@@ -38,14 +58,96 @@ func preWakeCommit(
 	sessFront *sessions.Store,
 	clk clock.Clock,
 ) (newGen int, token string, fold sessions.MetadataPatch, err error) {
+	return preWakeCommitWith(info, clk, func(batch sessions.MetadataPatch) error {
+		return sessFront.ApplyPatch(info.ID, batch)
+	})
+}
+
+// errPreWakeSuperseded refuses a PreWake whose row moved since it was read.
+var errPreWakeSuperseded = errors.New("pre-wake refused: the session row moved since it was read, or its runtime lease was taken over")
+
+// preWakeCommitUnder is preWakeCommit as the row's incarnation mint
+// (sessions.Store.MintIncarnation, I-MINT): PreWakePatch lands with the new
+// generation and token only on a re-read row whose lifecycle facts,
+// generation and token are still info's and that still records lease, fenced
+// at that read's revision, with g+1 computed from that read. The patch, the
+// continuation reset it consumes and the wake trace are decided on that read
+// too, never on info: a reset marker that a writer outside the in-process
+// mutation lock records or clears after info was read is consumed whole or
+// not at all. A moved or closed row writes nothing and returns
+// errPreWakeSuperseded. Without a conditional writer the check is the re-read
+// alone. It returns the minted incarnation, which the runtime-only start runs
+// under, and the batch it wrote.
+func preWakeCommitUnder(
+	info sessions.Info,
+	sessFront *sessions.Store,
+	clk clock.Clock,
+	lease *sessions.RuntimeLease,
+) (inc sessions.Incarnation, fold sessions.MetadataPatch, err error) {
+	name := info.SessionNameMetadata
+	if !sessions.IsSessionNameSyntaxValid(name) {
+		return sessions.Incarnation{}, nil, fmt.Errorf("invalid session_name %q", name)
+	}
+	now := clk.Now()
+	var resetPrior map[string]string
+	freshWake := false
+	inc, err = sessFront.MintIncarnation(context.Background(), lease, sessions.MintRequest{
+		Expect: info,
+		By:     sessions.ActorController,
+		Now:    now,
+		// The mint's generation, token, epoch and last_woke_at win over the
+		// patch's, which are decided on the same read.
+		Patch: func(fresh sessions.Info, _ sessions.Incarnation) sessions.MetadataPatch {
+			_, _, batch, class := preWakePatch(fresh, now, "")
+			fold = class.Into(fresh.ID, batch)
+			resetPrior = freshWakeResetPriorValues(fresh)
+			freshWake = fresh.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(fresh)
+			return fold
+		},
+		FreshContext: shouldBumpContinuationEpoch,
+	})
+	switch {
+	case errors.Is(err, sessions.ErrMintSuperseded) || errors.Is(err, sessions.ErrMintClosed):
+		return sessions.Incarnation{}, nil, fmt.Errorf("pre-wake metadata commit: %w: %w", errPreWakeSuperseded, err)
+	case err != nil:
+		return sessions.Incarnation{}, nil, fmt.Errorf("pre-wake metadata commit: %w", err)
+	}
+	maps.Copy(fold, inc.IdentityPatch())
+	traceFreshWakeMetadataReset(name, resetPrior, fold, freshWake)
+	return inc, fold, nil
+}
+
+func preWakeCommitWith(
+	info sessions.Info,
+	clk clock.Clock,
+	write func(sessions.MetadataPatch) error,
+) (newGen int, token string, fold sessions.MetadataPatch, err error) {
 	name := info.SessionNameMetadata
 	if !sessions.IsSessionNameSyntaxValid(name) {
 		return 0, "", nil, fmt.Errorf("invalid session_name %q", name)
 	}
 
+	newGen, token, batch, class := preWakePatch(info, clk.Now(), sessions.NewInstanceToken())
+	batch = class.Into(info.ID, batch)
+	freshWake := info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)
+	if writeErr := write(batch); writeErr != nil {
+		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
+	}
+	traceFreshWakeMetadataReset(name, freshWakeResetPriorValues(info), batch, freshWake)
+
+	return newGen, token, batch, nil
+}
+
+// preWakePatch is the PreWakePatch preWakeCommit writes for info at now with
+// token as the new instance token, the generation it advances to, and the
+// disposition's PreWake cell (class) beside it: the idle stop's and a wait's
+// intent and a soft suspend go; an operator's suspend refuses it, and the
+// controller never starts that row (errStartUserHeld). The v2 start effect
+// decides the same patch in its PreWake CAS (CONTRACT v5 S1). It mints
+// nothing: the writer puts class in its write.
+func preWakePatch(info sessions.Info, now time.Time, token string) (newGen int, _ string, batch sessions.MetadataPatch, class sessions.DispositionPatch) {
 	gen, _ := strconv.Atoi(info.Generation)
 	newGen = gen + 1
-	token = sessions.NewInstanceToken()
 	continuationEpoch, _ := strconv.Atoi(info.ContinuationEpoch)
 	if continuationEpoch <= 0 {
 		continuationEpoch = sessions.DefaultContinuationEpoch
@@ -61,21 +163,38 @@ func preWakeCommit(
 		sleepReason = string(sessions.SleepReasonIdleTimeout)
 	}
 
-	freshWake := info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)
-	batch := sessions.PreWakePatch(sessions.PreWakePatchInput{
+	batch = sessions.PreWakePatch(sessions.PreWakePatchInput{
 		Generation:        newGen,
 		InstanceToken:     token,
 		ContinuationEpoch: continuationEpoch,
-		Now:               clk.Now(),
+		Now:               now,
 		SleepReason:       sleepReason,
-		FreshWake:         freshWake,
+		FreshWake:         info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info),
+		// A retry of a claimed pending create continues its episode, so the
+		// stale-create bound must keep measuring from the episode start.
+		EpisodePendingCreateStartedAt: pendingCreateEpisodeStartedAt(info),
 	})
-	if writeErr := sessFront.ApplyPatch(info.ID, batch); writeErr != nil {
-		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
-	}
-	traceFreshWakeMetadataReset(name, freshWakeResetPriorValues(info), batch, freshWake)
+	return newGen, token, batch, sessions.CellInfo(info, sessions.ActorController, sessions.DispEvent{Kind: sessions.EvPreWake}, now)
+}
 
-	return newGen, token, batch, nil
+// pendingCreateEpisodeStartedAt returns the pending_create_started_at a wake
+// must carry forward, or "" when the wake opens a new episode and should stamp
+// a fresh one.
+//
+// Only a held pending_create_claim continues an episode. Every site that sets
+// the claim (bead creation, named-session reopen, wake requests) stamps a
+// fresh marker in the same write, so while the claim is held the marker is the
+// start of the current episode. Claimed rows are also the only ones whose
+// stale-create rollback checks the configured start lease first, so keeping an
+// old marker cannot make an in-flight start look stale. A claimless wake keeps
+// the per-attempt stamp: the lifecycle projection ages a claimless creating
+// row out on that marker alone, and an inherited one could project a healthy
+// start asleep mid-spawn.
+func pendingCreateEpisodeStartedAt(info sessions.Info) string {
+	if !info.PendingCreateClaim {
+		return ""
+	}
+	return info.PendingCreateStartedAt
 }
 
 // freshWakeResetPriorValues reconstructs the pre-reset values of the fresh-wake
@@ -93,11 +212,13 @@ func freshWakeResetPriorValues(info sessions.Info) map[string]string {
 		// values come off the verbatim raw Info mirrors — otherwise the trace's
 		// before[key] lookup reads "" and the cleared list omits them even though
 		// FreshWakeConversationResetKeys() clears them. Written as raw string keys
-		// (matching the sibling entries) so this read-only prior-value map is not
-		// mistaken for a store write by the compared-key write-site gate.
+		// to match the sibling entries.
 		"primed_at":            info.PrimedAtMetadata,
 		"priming_attempted_at": info.PrimingAttemptedAtMetadata,
 		"prompt_hash":          info.PromptHashMetadata,
+		// The resume backstop's run is cleared with the conversation (mc-bm1af).
+		"resume_failures": info.ResumeFailures,
+		"resume_launch":   info.ResumeLaunch,
 	}
 }
 
@@ -172,7 +293,7 @@ func validateWorkDir(dir string) error {
 // due to a transient store failure) before any signal reaches the process.
 // Without this, a single bad tick can interrupt a working agent mid-tool-call.
 //
-// It reads only session_name, generation, and id — all carried verbatim on Info.
+// info is the row the drain decides on: it becomes the drain's basis.
 func beginSessionDrainInfo(
 	info sessions.Info,
 	_ runtime.Provider, // kept for caller compatibility; interrupt deferred to advanceSessionDrainsWithSessionsTraced
@@ -195,6 +316,7 @@ func beginSessionDrainInfo(
 		deadline:   clk.Now().Add(timeout),
 		reason:     reason,
 		generation: gen,
+		basis:      sessions.Decide(info, sessions.FactsLegacyStopPending),
 	})
 
 	if os.Getenv("GC_TMUX_TRACE") == "1" {
@@ -224,19 +346,67 @@ const executionStalledDrainReason = "execution-stalled"
 
 func drainReasonCancelable(reason string) bool {
 	return reason != "config-drift" && reason != "orphaned" && reason != "suspended" &&
-		reason != executionStalledDrainReason
+		reason != executionStalledDrainReason && reason != idleRespawnDrainReason
 }
 
 func pendingDrainReasonCancelable(reason string) bool {
 	return reason != "orphaned" && reason != "suspended" && reason != executionStalledDrainReason
 }
 
+// liveClaimDrainReasonCancelable is the live-claim cancel lens: the in-flight
+// drain reasons that a live claim held by the session (sessionOwnsLiveClaim)
+// may cancel. Only "orphaned": it is a demand-class verdict that a one-tick
+// stale view (an out-of-process claim the cache has not seen) can produce, so
+// it must be revisable once the claim is visible. Every other non-cancelable
+// reason is operator or agent intent (suspended, config-drift,
+// execution-stalled, idle-respawn) and stays final; the caller additionally
+// requires liveClaimVetoApplies, so an orphaned drain of a removed or
+// suspended agent is never canceled either.
+func liveClaimDrainReasonCancelable(reason string) bool {
+	return reason == "orphaned"
+}
+
+// orphanedDrainInFlightInfo reports whether the session has a reconciler-owned
+// "orphaned" drain in flight, either tracked in memory or recovered from the
+// runtime's reconciler drain-ack metadata (e.g. after a controller restart).
+// Agent-sourced drain acks are never reported: those are the agent's intent.
+func orphanedDrainInFlightInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker, name string) bool {
+	if dt != nil {
+		if ds := dt.get(info.ID); ds != nil && liveClaimDrainReasonCancelable(ds.reason) {
+			return true
+		}
+	}
+	reason, ok := reconcilerDrainAckMatchesSessionInfo(info, sp, name)
+	return ok && liveClaimDrainReasonCancelable(reason)
+}
+
+// cancelOrphanedDrainForLiveClaimInfo cancels an in-flight reconciler-owned
+// "orphaned" drain — the tracked drain and/or its published drain ack — once the
+// session is known to hold a live claim. It reports whether anything was
+// canceled.
+func cancelOrphanedDrainForLiveClaimInfo(info sessions.Info, sp runtime.Provider, dt *drainTracker, name string) bool {
+	canceled := dt != nil && cancelSessionDrainIfInfo(info, sp, dt, liveClaimDrainReasonCancelable)
+	if reason, ok := reconcilerDrainAckMatchesSessionInfo(info, sp, name); ok && liveClaimDrainReasonCancelable(reason) {
+		_ = clearReconcilerDrainAckMetadata(sp, name)
+		if !canceled {
+			telemetry.RecordDrainTransition(context.Background(), name, reason, "cancel")
+		}
+		canceled = true
+	}
+	return canceled
+}
+
 const (
-	reconcilerDrainAckSourceKey     = "GC_DRAIN_ACK_SOURCE"
-	reconcilerDrainAckSourceValue   = "reconciler"
-	drainAckSourceAgentValue        = "agent"
-	reconcilerDrainAckReasonKey     = "GC_DRAIN_REASON"
-	reconcilerDrainAckGenerationKey = "GC_DRAIN_GENERATION"
+	reconcilerDrainAckSourceKey   = "GC_DRAIN_ACK_SOURCE"
+	reconcilerDrainAckSourceValue = "reconciler"
+	drainAckSourceAgentValue      = "agent"
+	// drainAckRequesterInstanceTokenKey binds an agent acknowledgement to the
+	// incarnation that wrote it. Pane environment is per-CHAIR state and pool
+	// chairs are recycled under the same name, so without this an ack outlives
+	// its author and the next occupant inherits it.
+	drainAckRequesterInstanceTokenKey = "GC_DRAIN_ACK_REQUESTER_INSTANCE_TOKEN"
+	reconcilerDrainAckReasonKey       = "GC_DRAIN_REASON"
+	reconcilerDrainAckGenerationKey   = "GC_DRAIN_GENERATION"
 )
 
 func setReconcilerDrainAckMetadata(sp runtime.Provider, name string, ds *drainState) error {
@@ -255,6 +425,12 @@ func setReconcilerDrainAckMetadata(sp runtime.Provider, name string, ds *drainSt
 		return err
 	}
 	if err := sp.SetMeta(name, "GC_DRAIN_ACK", "1"); err != nil {
+		if runtime.OnlyMetadataNotMirrored(err) {
+			// An ack that landed is an ack; only the runtime's view of it lags,
+			// and the log reports that.
+			log.Printf("session wake: setting reconciler drain ack metadata GC_DRAIN_ACK for %s: %v", name, err)
+			return nil
+		}
 		_ = clearReconcilerDrainAckMetadata(sp, name)
 		return err
 	}
@@ -266,10 +442,23 @@ func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) error {
 		return fmt.Errorf("session provider is nil")
 	}
 	var errs []error
-	for _, key := range []string{"GC_DRAIN_ACK", reconcilerDrainAckSourceKey, reconcilerDrainAckReasonKey, reconcilerDrainAckGenerationKey} {
+	for _, key := range []string{
+		"GC_DRAIN_ACK",
+		reconcilerDrainAckSourceKey,
+		// Cleared with the source it belongs to: a requester stamp that outlives
+		// its acknowledgement is residue waiting for a later source to make it
+		// look like evidence.
+		drainAckRequesterInstanceTokenKey,
+		reconcilerDrainAckReasonKey,
+		reconcilerDrainAckGenerationKey,
+	} {
 		if err := sp.RemoveMeta(name, key); err != nil {
 			log.Printf("session wake: clearing reconciler drain ack metadata %s for %s: %v", key, name, err)
-			errs = append(errs, fmt.Errorf("removing %s: %w", key, err))
+			// A removal that landed is a removal; only the runtime's view of it
+			// lags, and the log above reports that.
+			if !runtime.OnlyMetadataNotMirrored(err) {
+				errs = append(errs, fmt.Errorf("removing %s: %w", key, err))
+			}
 		}
 	}
 	return errors.Join(errs...)
@@ -383,6 +572,38 @@ func reconcilerDrainAckMatchesSession(session beads.Bead, sp runtime.Provider, n
 		return "", false
 	}
 	return reason, true
+}
+
+// drainAckOwner is whose decision a runtime's drain ack is, as its source
+// metadata says.
+type drainAckOwner uint8
+
+const (
+	// drainAckOwnerUnknown: the source could not be read. Defer: neither
+	// void the drain nor clear its ack.
+	drainAckOwnerUnknown drainAckOwner = iota
+	// drainAckOwnerAgent: any source but the controller's (the agent's own
+	// `gc runtime drain-ack`, or a bare ack). Decided on the row as it is.
+	drainAckOwnerAgent
+	// drainAckOwnerController: the controller's own ack, which its drain's
+	// basis decides.
+	drainAckOwnerController
+)
+
+// drainAckOwnerOf reads name's drain-ack source. Without a provider there is
+// no controller ack.
+func drainAckOwnerOf(sp runtime.Provider, name string) drainAckOwner {
+	if sp == nil || name == "" {
+		return drainAckOwnerAgent
+	}
+	source, err := sp.GetMeta(name, reconcilerDrainAckSourceKey)
+	switch {
+	case err != nil:
+		return drainAckOwnerUnknown
+	case source == reconcilerDrainAckSourceValue:
+		return drainAckOwnerController
+	}
+	return drainAckOwnerAgent
 }
 
 // reconcilerDrainAckMatchesSessionInfo is the session.Info sibling of
@@ -509,7 +730,15 @@ func cancelRecoveredDrainForAssignedWorkInfo(info sessions.Info, sp runtime.Prov
 	return true
 }
 
+// userHoldDrainReleased reports a user-hold drain whose row no longer carries
+// the operator's suspend (Disposition.KeepsSlot): a resume consumed the hold
+// after the drain began.
+func userHoldDrainReleased(reason string, info sessions.Info) bool {
+	return reason == string(sessions.SleepReasonUserHold) && !sessions.DispositionOfInfo(info).KeepsSlot()
+}
+
 func advanceSessionDrainsWithSessionsTraced(
+	cityPath string,
 	dt *drainTracker,
 	sp runtime.Provider,
 	store beads.Store,
@@ -561,6 +790,21 @@ func advanceSessionDrainsWithSessionsTraced(
 			continue
 		}
 
+		// An operator's resume consumed the hold this drain was for: cancel
+		// it, so neither its ack nor its completion acts on the resumed row.
+		if userHoldDrainReleased(ds.reason, info) {
+			dt.clearIdleProbe(id)
+			if ds.ackSet {
+				_ = clearReconcilerDrainAckMetadata(sp, name)
+			}
+			dt.remove(id)
+			telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "cancel")
+			if trace != nil {
+				trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), name, nil)
+			}
+			continue
+		}
+
 		// Check if process exited.
 		running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, info.ID)
 		if err != nil {
@@ -583,6 +827,32 @@ func advanceSessionDrainsWithSessionsTraced(
 				})
 			}
 			continue
+		}
+
+		// Idle-respawn is a recovery action, not permission to interrupt a
+		// session that resumed work after the probe completed. Revalidate both
+		// the assigned-work premise and runtime activity immediately before the
+		// reconciler publishes its drain acknowledgement. Observation failures
+		// fail closed and leave the session running.
+		if ds.reason == idleRespawnDrainReason {
+			eval, exists := wakeEvals[info.ID]
+			lastActivity, activityErr := workerSessionTargetLastActivityWithConfig("", store, sp, cfg, name)
+			if !exists || !idleRespawnEligible(info, eval, clk.Now()) || activityErr != nil || lastActivity.After(ds.startedAt) {
+				dt.clearIdleProbe(id)
+				if ds.ackSet {
+					_ = clearReconcilerDrainAckMetadata(sp, name)
+				}
+				dt.remove(id)
+				telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "cancel")
+				if trace != nil {
+					fields := traceRecordPayload{"activity_resumed": lastActivity.After(ds.startedAt)}
+					if activityErr != nil {
+						fields["activity_error"] = activityErr.Error()
+					}
+					trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), name, fields)
+				}
+				continue
+			}
 		}
 
 		if eval, ok := wakeEvals[info.ID]; ok &&
@@ -667,20 +937,30 @@ func advanceSessionDrainsWithSessionsTraced(
 		// Pending-interaction guards and wake-based cancellation run before this
 		// timeout path. Preserve that ordering if this block is refactored.
 		if clk.Now().After(ds.deadline) {
-			// Drain timed out — force stop.
-			if err := verifiedStop(info, store, sp, cfg); err != nil {
-				if errors.Is(err, errTokenMismatch) {
-					// Session was re-woken by a different incarnation.
-					// This drain is stale — cancel it.
+			// Drain timed out — force stop, on the drain's basis.
+			if err := verifiedStop(cityPath, ds.basis, store, sp, cfg); err != nil {
+				if owner := drainAckOwnerOf(sp, name); owner != drainAckOwnerUnknown &&
+					(errors.Is(err, errTokenMismatch) || errors.Is(err, sessions.ErrKillPremiseMoved)) {
+					// Session was re-woken by a different incarnation, or the
+					// row left the basis the drain began on (a resume, a
+					// suspend, a request). This drain is stale — cancel it.
+					// Only the controller's own ack goes with it; an agent's
+					// ack is the agent's decision. An ack whose source cannot
+					// be read keeps the drain for the next tick.
 					dt.clearIdleProbe(id)
+					if ds.ackSet && owner == drainAckOwnerController {
+						_ = clearReconcilerDrainAckMetadata(sp, name)
+					}
 					dt.remove(id)
 				}
-				// Other errors (transient stop failure): keep drain
+				// Other errors (transient stop failure, unverifiable token): keep drain
 				// active for retry on next tick.
 				if trace != nil {
-					trace.RecordDecision(TraceSiteDrainTimeout, TraceReasonCode(ds.reason), TraceOutcomeRetry, normalizedSessionTemplateInfo(info, cfg), name, traceRecordPayload{
-						"error": err.Error(),
-					})
+					payload := traceRecordPayload{"error": err.Error()}
+					if errors.Is(err, errTokenUnverifiable) {
+						payload["token"] = "token_unverifiable"
+					}
+					trace.RecordDecision(TraceSiteDrainTimeout, TraceReasonCode(ds.reason), TraceOutcomeRetry, normalizedSessionTemplateInfo(info, cfg), name, payload)
 				}
 				continue
 			}
@@ -722,46 +1002,31 @@ func completeDrain(info sessions.Info, sessFront *sessions.Store, ds *drainState
 		return
 	}
 	batch := sessions.CompleteDrainPatch(clk.Now(), ds.reason, info.WakeMode == "fresh")
-	_ = sessFront.ApplyPatch(info.ID, batch)
+	_, _ = sessFront.ApplySleep(info.ID, batch)
 }
 
-// verifiedStop stops a session after verifying the instance_token matches.
+// verifiedStop stops the session d decided on after verifying the
+// instance_token matches, while the row still carries d's facts.
 // Prevents stale drain operations from targeting a re-woken session.
-// Returns errTokenMismatch if the running process has a different token.
+// Returns errTokenMismatch if the running process has a different token,
+// errTokenUnverifiable if its token cannot be read, and
+// sessions.ErrKillPremiseMoved if the row moved.
 //
 // NOTE: On composite providers (auto/hybrid), GetMeta and Stop may route
 // to different backends if the route table is stale. This is a pre-existing
 // routing limitation — when the reconciler is wired in, consider a
 // provider-level VerifiedStop that atomically verifies+stops on the same backend.
-func verifiedStop(info sessions.Info, store beads.Store, sp runtime.Provider, cfg *config.City) error {
+func verifiedStop(cityPath string, d sessions.Decided, store beads.Store, sp runtime.Provider, cfg *config.City) error {
+	info := d.Info()
 	name := info.SessionNameMetadata
 	expectedToken := info.InstanceToken
 	if expectedToken != "" {
-		actualToken, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
-		if actualToken != "" && actualToken != expectedToken {
+		switch verdict, err := readRuntimeInstanceToken(sp, name, expectedToken); verdict {
+		case runtimeTokenMismatch:
 			return fmt.Errorf("%w for session %s", errTokenMismatch, info.ID)
+		case runtimeTokenUnverifiable:
+			return &tokenUnverifiableError{sessionID: info.ID, cause: err}
 		}
 	}
-	handle, err := workerHandleForSessionWithConfig("", store, sp, cfg, info.ID)
-	if err != nil {
-		return err
-	}
-	return handle.Kill(context.Background())
-}
-
-// verifiedInterrupt sends an interrupt signal after verifying instance_token.
-func verifiedInterrupt(session beads.Bead, store beads.Store, sp runtime.Provider, cfg *config.City) error {
-	name := session.Metadata["session_name"]
-	expectedToken := session.Metadata["instance_token"]
-	if expectedToken != "" {
-		actualToken, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
-		if actualToken != "" && actualToken != expectedToken {
-			return fmt.Errorf("%w for session %s", errTokenMismatch, session.ID)
-		}
-	}
-	handle, err := workerHandleForSessionWithConfig("", store, sp, cfg, session.ID)
-	if err != nil {
-		return err
-	}
-	return handle.Interrupt(context.Background(), worker.InterruptRequest{})
+	return legacyAct{cityPath: cityPath, store: store, sp: sp, cfg: cfg}.Stop(d)
 }

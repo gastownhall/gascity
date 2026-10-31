@@ -19,6 +19,7 @@ func TestImplicitGCHomeAvoidsSharedTempFallback(t *testing.T) {
 	os.Args[0] = "gc"
 	defer func() { os.Args[0] = orig }()
 
+	t.Setenv("TEST_SRCDIR", "") // simulate a non-bazel, non-test binary
 	t.Setenv("GC_HOME", "")
 	t.Setenv("HOME", "") // forces os.UserHomeDir() to fail on unix
 

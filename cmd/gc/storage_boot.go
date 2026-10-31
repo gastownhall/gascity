@@ -51,6 +51,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -62,6 +63,7 @@ import (
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storebinding"
+	"github.com/gastownhall/gascity/internal/storebinding/beadsworkspace"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -95,6 +97,10 @@ type storageRoutes struct {
 	// its CachingStore stays the only emitter on that side — see
 	// class_store_emit.go for why the two must not both emit.
 	emitCityPath string
+	// caches are the CachingStores the controller put over these routes'
+	// engines (withControllerCache). close stops their background work before
+	// the engines they read go away.
+	caches []*beads.CachingStore
 	// relics records, per binding store, whether the boot-time census found a
 	// bead — open or closed — outside the namespaces that binding declares.
 	//
@@ -104,8 +110,13 @@ type storageRoutes struct {
 	//
 	// Keying a map on beads.Store is safe here for the same confined reason
 	// residencyBindingsFromRoutes gives: every key comes from this struct's own
-	// stores map, which holds what storage boot opened.
+	// stores map, which holds what storage boot opened. The keys are the bare
+	// engines the census read.
 	relics map[beads.Store]bool
+	// rigMarkers locates the per-rig import records the S4 relic-free
+	// predicate reads (rigGraphRelicFree). Nil means unknown, and unknown keeps
+	// every rig's relic leg.
+	rigMarkers *rigGraphMarkers
 }
 
 // hasLegacyResidents reports the boot census's verdict for a binding store.
@@ -116,6 +127,12 @@ type storageRoutes struct {
 func (r *storageRoutes) hasLegacyResidents(store beads.Store) bool {
 	if r == nil {
 		return true
+	}
+	// The controller's class accessors hand out its cache over the engine the
+	// census read, so the lookup goes under it. Only the cache: the one-shot
+	// funnel's emitter is left as it is.
+	if cache, ok := store.(*beads.CachingStore); ok {
+		store = cache.Backing()
 	}
 	verdict, censused := r.relics[store]
 	if !censused {
@@ -184,10 +201,37 @@ func (r *storageRoutes) storeFor(class coordclass.Class) (beads.Store, bool) {
 	return store, ok
 }
 
-// close releases every engine these routes opened, in reverse open order.
+// distinctEngines returns each store these routes serve once, in class order:
+// one binding engine serves every class assigned to it, so a per-class walk
+// would report it once per class.
+//
+// residency:allow — the binding engines themselves, for the conditional-writes
+// preflight and status rows; resolves no bead.
+func (r *storageRoutes) distinctEngines() []beads.Store {
+	if r == nil {
+		return nil
+	}
+	var engines []beads.Store
+	seen := make(map[beads.Store]bool, 1)
+	for _, class := range coordclass.Classes() {
+		store, ok := r.stores[class]
+		if !ok || store == nil || seen[store] {
+			continue
+		}
+		seen[store] = true
+		engines = append(engines, store)
+	}
+	return engines
+}
+
+// close releases every engine these routes opened, in reverse open order,
+// after stopping the caches over them.
 func (r *storageRoutes) close() error {
 	if r == nil {
 		return nil
+	}
+	for _, cache := range r.caches {
+		cache.StopReconciler()
 	}
 	var errs []error
 	for i := len(r.closers) - 1; i >= 0; i-- {
@@ -284,6 +328,13 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	if shape == storageSplitUnsupported {
 		return nil, fmt.Errorf("%s: [storage.classes] describe an arrangement this build cannot serve. %s", logPrefix, storageSupportedTopologyStatement)
 	}
+	// A split whose HQ or rig prefix is a reserved class prefix shares the
+	// binding's id namespace (split-default audit R10). Refused here, before a
+	// plan is resolved or a binding opened or created; a city that relocates
+	// nothing never reaches this line and keeps the advisory warning.
+	if err := config.ReservedPrefixSplitRefusal(cfg); err != nil {
+		return nil, fmt.Errorf("%s: %w", logPrefix, err)
+	}
 
 	// Resolved once, for both shapes: an unknown provider, a defined reserved
 	// binding, an unreferenced binding or an unusable Work pin is a refusal
@@ -335,12 +386,16 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 		// and proves the one invariant the work store alone can prove.
 		target = infraBindingTarget{Binding: binding}
 		// A provider that opens no bead engine cannot serve regardless of
-		// what the work store holds. Refusing here, before any outcome is
-		// recorded, keeps the event stream honest: a permanently unservable
-		// binding must not publish converged on every boot.
+		// what the work store holds, and native transport "off" refuses one
+		// that opens native Dolt. Refusing here, before any outcome is
+		// recorded, keeps the event stream honest: a binding the config
+		// cannot serve must not publish converged on every boot.
 		if opener := plannedBindingOpener(plan, binding); opener == nil {
 			return nil, fmt.Errorf("%s: binding %q is served by provider %q, which does not open a bead engine, so the classes assigned to it cannot be served; %s",
 				logPrefix, binding, storage.Bindings[binding].Provider, contract.BackendNotOpenedGuarantee)
+		}
+		if err := nativeTransportBindingRefusal(binding, storebinding.ProviderID(storage.Bindings[binding].Provider), cfg); err != nil {
+			return nil, fmt.Errorf("%s: %w", logPrefix, err)
 		}
 		location, err := servedBindingLocation(plan, binding, storage.Bindings[binding])
 		if err != nil {
@@ -360,7 +415,19 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 			advice = fmt.Sprintf("%s: binding %q cannot be served and the reason was not reported (%s)", logPrefix, target.Binding, report.Outcome)
 		}
 		recordStorageBindingOutcome(rec, report, advice)
+		if report.Transient {
+			return nil, storageGateTransientFault{err: errors.New(advice)}
+		}
 		return nil, errors.New(advice)
+	}
+	// A rig whose import was interrupted during its clear holds twins: the
+	// same bead in the rig store and in the binding. File reads only, per rig
+	// (rig_import_census.go); a rig merely awaiting import serves, its relic
+	// legs keeping it readable, and the controller's boot census names it.
+	if target.Root != "" {
+		if err := rigBootRefusal(cityPath, target); err != nil {
+			return nil, fmt.Errorf("%s: %w", logPrefix, err)
+		}
 	}
 	// The serving outcome is published before the binding opens, so a boot
 	// whose open then fails has already reported converged. That ordering
@@ -368,7 +435,7 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	// stream reports the verdict this gate reached, and the open's own failure
 	// is what the caller prints.
 	recordStorageBindingOutcome(rec, report, "")
-	routes, err := openStorageRoutes(plan, target)
+	routes, err := openStorageRoutes(plan, target, cfg, cityPath, rec)
 	if err != nil {
 		return nil, err
 	}
@@ -383,6 +450,23 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	return routes, nil
 }
 
+// storageGateTransientFault marks a gate refusal that rests on a read that
+// failed (infraMigrationReport.Transient), not on a verdict about the city.
+// The refusal stands for this attempt — a check that could not run is not
+// permission to serve — but it is not memoized, and the drain fence does not
+// fail closed on it.
+type storageGateTransientFault struct{ err error }
+
+func (e storageGateTransientFault) Error() string { return e.err.Error() }
+func (e storageGateTransientFault) Unwrap() error { return e.err }
+
+// isTransientStorageGateFault reports whether err carries a transient gate
+// fault anywhere in its chain.
+func isTransientStorageGateFault(err error) bool {
+	var fault storageGateTransientFault
+	return errors.As(err, &fault)
+}
+
 // revertHoldingNote reports whether a city pointing its classes back at the
 // work binding is held by a note saying it has served them somewhere else.
 //
@@ -392,6 +476,20 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 func revertHoldingNote(shape storageSplitShape, cityPath string) (infraMigrationReport, bool) {
 	if shape != storageSplitNone {
 		return infraMigrationReport{}, false
+	}
+	// A cleared work store holds no infrastructure state at all, so a revert
+	// there would start the city empty. It is held first, because its remedy —
+	// restoring the backup — is the one that does not lose the pre-cutover rows.
+	if note, present, err := readInfraClearedNote(cityPath); present {
+		if err != nil {
+			note = infraClearedNote{Backup: "(the note is unreadable: " + err.Error() + ")"}
+		}
+		return infraMigrationReport{
+			Outcome:        infraMigrationGenesisBlocked,
+			Cleared:        &note,
+			ServedNotePath: infraClearedNotePath(cityPath),
+			Target:         infraBindingTarget{Binding: config.StorageWorkBinding},
+		}, true
 	}
 	blocked, held := servedBindingNoteHold(cityPath, config.StorageWorkBinding, "", "")
 	if !held {
@@ -606,13 +704,13 @@ func checkBornSplitDiscipline(cityPath string, logPrefix string, stderr io.Write
 	source, err := openInfraMigrationSource(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: born-split check: opening the work store: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return infraMigrationReport{Outcome: infraMigrationUncheckable, Fault: fmt.Errorf("born-split check: opening the work store: %w", err)}
+		return infraMigrationReport{Outcome: infraMigrationUncheckable, Fault: fmt.Errorf("born-split check: opening the work store: %w", err), Transient: isTransientStoreFault(err)}
 	}
 	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
 	infra, err := readInfraSnapshot(source)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: born-split check: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return infraMigrationReport{Outcome: infraMigrationUncheckable, Fault: fmt.Errorf("born-split check: %w", err)}
+		return infraMigrationReport{Outcome: infraMigrationUncheckable, Fault: fmt.Errorf("born-split check: %w", err), Transient: isTransientStoreFault(err)}
 	}
 	if len(infra) == 0 {
 		return infraMigrationReport{Outcome: infraMigrationConverged}
@@ -644,6 +742,27 @@ func plannedBindingOpener(plan *storebinding.StoragePlan, name string) storebind
 	return nil
 }
 
+// nativeTransportBindingRefusal returns why the named binding must not open
+// for this city under native transport "off", or nil when it may. Only
+// beads-workspace is refused: it opens native Dolt, while other providers that
+// open a bead engine, such as sqlite-beads, never use native transport. The
+// deprecated GC_BEADS_FORCE_FALLBACK alias is checked first because it
+// overrides every city's value, and it is the only cause a nil cfg can carry.
+func nativeTransportBindingRefusal(binding string, provider storebinding.ProviderID, cfg *config.City) error {
+	if provider != beadsworkspace.ProviderID {
+		return nil
+	}
+	if beads.ForceNativeFallbackActive() {
+		return fmt.Errorf("binding %q is served by provider %q, which opens native transport, and GC_BEADS_FORCE_FALLBACK is set: the deprecated alias forces native_transport \"off\" for every city in this process (unset GC_BEADS_FORCE_FALLBACK, or remove this binding, to proceed)",
+			binding, provider)
+	}
+	if resolvedNativeTransportMode(cfg) == beads.NativeTransportOff {
+		return fmt.Errorf("binding %q is served by provider %q, which opens native transport, and this city sets beads.native_transport = \"off\" (set native_transport to \"auto\", or remove this binding, to proceed)",
+			binding, provider)
+	}
+	return nil
+}
+
 // storageBindingEventTypes maps a migration outcome to the event that reports
 // it. Every outcome has one, and TestEveryMigrationOutcomeReachesARegisteredEventType
 // keeps it that way: an unmapped outcome publishes nothing and does so silently,
@@ -662,6 +781,7 @@ var storageBindingEventTypes = map[infraMigrationOutcome]string{
 	infraMigrationStranded:         events.StorageBindingUnconverged,
 	infraMigrationBornSplitBlocked: events.StorageBindingUnconverged,
 	infraMigrationGenesisBlocked:   events.StorageBindingUnconverged,
+	infraMigrationRetained:         events.StorageBindingUnconverged,
 	infraMigrationUncheckable:      events.StorageBindingUncheckable,
 }
 
@@ -679,11 +799,12 @@ func recordStorageBindingOutcome(rec events.Recorder, report infraMigrationRepor
 		return
 	}
 	raw, err := json.Marshal(storebinding.StorageBindingOutcomePayload{
-		Binding:     report.Target.Binding,
-		Database:    report.Target.Database,
-		Outcome:     report.Outcome.String(),
-		Invariant:   invariant,
-		ProvenBeads: report.ProvenBeads,
+		Binding:        report.Target.Binding,
+		Database:       report.Target.Database,
+		Outcome:        report.Outcome.String(),
+		Invariant:      invariant,
+		ProvenBeads:    report.ProvenBeads,
+		LostCrossEdges: report.LostCrossEdges,
 	})
 	if err != nil {
 		return
@@ -705,30 +826,18 @@ func recordStorageBindingOutcome(rec events.Recorder, report infraMigrationRepor
 // nothing here changes. A planned binding whose provider does not implement it
 // is a refusal that names the provider — never a fall-through to the work
 // store, which would serve a relocated class out of the ledger it was moved off.
-func openStorageRoutes(plan *storebinding.StoragePlan, target infraBindingTarget) (*storageRoutes, error) {
-	if plan == nil {
-		return nil, errors.New("storage routing: no resolved plan")
-	}
-	var planned storebinding.PlannedBinding
-	found := false
-	for _, binding := range plan.Bindings() {
-		if string(binding.Name) == target.Binding {
-			planned = binding
-			found = true
-			break
-		}
-	}
-	if !found {
-		return nil, fmt.Errorf("storage routing: the resolved plan carries no binding %q", target.Binding)
-	}
-	opener, ok := storebinding.EngineOpenerFor(planned)
-	if !ok {
-		return nil, fmt.Errorf("storage routing: binding %q is served by provider %q, which does not open a bead engine, so the classes assigned to it cannot be served; %s",
-			target.Binding, planned.ProviderID, contract.BackendNotOpenedGuarantee)
-	}
-	store, closer, err := opener.OpenEngine(planned.Spec, planned.AssignedClasses)
+//
+// The engine is stamped with the city's beads.conditional_writes mode here,
+// because no store factory opened it: unstamped, every fenced write to a
+// relocated class resolves as legacy and lands unconditionally. An auto
+// degrade goes to rec when the caller holds one (the controller) and to the
+// city's event log otherwise. A nil cfg leaves the engine unstamped, which
+// only the read-only census may ask for: unstamped resolves as legacy, and it
+// never writes.
+func openStorageRoutes(plan *storebinding.StoragePlan, target infraBindingTarget, cfg *config.City, cityPath string, rec events.Recorder) (*storageRoutes, error) {
+	store, closer, planned, err := openPlannedBindingEngine(plan, target.Binding, cfg, cityPath, rec)
 	if err != nil {
-		return nil, fmt.Errorf("storage routing: opening binding %q: %w", target.Binding, err)
+		return nil, err
 	}
 	routes := &storageRoutes{
 		stores:  make(map[coordclass.Class]beads.Store, len(planned.AssignedClasses.Classes())),
@@ -738,7 +847,68 @@ func openStorageRoutes(plan *storebinding.StoragePlan, target infraBindingTarget
 	for _, class := range planned.AssignedClasses.Classes() {
 		routes.stores[class] = store
 	}
+	if target.Root != "" {
+		markers := &rigGraphMarkers{bindingRoot: target.Root, cityPath: cityPath}
+		if cfg != nil {
+			markers.rigs = append([]config.Rig(nil), cfg.Rigs...)
+		}
+		routes.rigMarkers = markers
+	}
 	return routes, nil
+}
+
+// openPlannedBindingEngine opens the named binding of a resolved plan through
+// its provider's EngineOpener and stamps it with the city's
+// beads.conditional_writes mode, exactly as the runtime serves it: under the
+// binding's mint prefix and its namespace fence. openStorageRoutes routes the
+// classes through it, and `gc storage migrate`'s re-lowering step writes
+// through it, so both reach the same database the same way. The caller closes
+// the returned closer. A nil cfg leaves the engine unstamped (see
+// openStorageRoutes).
+func openPlannedBindingEngine(plan *storebinding.StoragePlan, binding string, cfg *config.City, cityPath string, rec events.Recorder) (beads.Store, io.Closer, storebinding.PlannedBinding, error) {
+	if plan == nil {
+		return nil, nil, storebinding.PlannedBinding{}, errors.New("storage routing: no resolved plan")
+	}
+	var planned storebinding.PlannedBinding
+	found := false
+	for _, b := range plan.Bindings() {
+		if string(b.Name) == binding {
+			planned = b
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, nil, storebinding.PlannedBinding{}, fmt.Errorf("storage routing: the resolved plan carries no binding %q", binding)
+	}
+	opener, ok := storebinding.EngineOpenerFor(planned)
+	if !ok {
+		return nil, nil, storebinding.PlannedBinding{}, fmt.Errorf("storage routing: binding %q is served by provider %q, which does not open a bead engine, so the classes assigned to it cannot be served; %s",
+			binding, planned.ProviderID, contract.BackendNotOpenedGuarantee)
+	}
+	// The boot gate refuses this before it records an outcome, and the
+	// read-only census before it opens with a nil cfg; this check covers
+	// every other caller.
+	if err := nativeTransportBindingRefusal(binding, planned.ProviderID, cfg); err != nil {
+		return nil, nil, storebinding.PlannedBinding{}, fmt.Errorf("storage routing: %w", err)
+	}
+	store, closer, err := opener.OpenEngine(planned.Spec, planned.AssignedClasses)
+	if err != nil {
+		return nil, nil, storebinding.PlannedBinding{}, fmt.Errorf("storage routing: opening binding %q: %w", binding, err)
+	}
+	if cfg != nil {
+		storeID := "binding/" + binding
+		flags, resolved := resolvedConditionalWritesFlags(cfg)
+		onDegrade := lazyConditionalWritesDegradeEmitter(cityPath, storeID, flags, resolved)
+		if rec != nil {
+			onDegrade = conditionalWritesDegradedRecorder(rec, flags, storeID)
+		}
+		kind := conditionalWritesEventStoreKind(beads.InspectConditionalWrites(store).StoreKind)
+		if err := beads.StampOpenedStore(store, kind, flags.BeadsConditionalWrites(), resolved && conditionalWritesDefaultAuto(flags), onDegrade, slog.Default()); err != nil {
+			return nil, nil, storebinding.PlannedBinding{}, errors.Join(fmt.Errorf("storage routing: binding %q: %w", binding, err), closer.Close())
+		}
+	}
+	return store, closer, planned, nil
 }
 
 // newStorageRegistryForPlan is the compiled registry this file resolves plans

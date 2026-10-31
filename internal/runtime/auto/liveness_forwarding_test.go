@@ -2,6 +2,7 @@ package auto
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -79,6 +80,35 @@ func TestProvider_ForwardsLivenessObservationErrorFromRoutedBackend(t *testing.T
 		}
 		if got != (runtime.Liveness{}) {
 			t.Errorf("ObserveLivenessWithError(%q) = %+v, want zero while routed result is unknown", name, got)
+		}
+	}
+}
+
+// TestAutoForwardsIsAttachedWithError proves auto forwards the error-bearing
+// attachment probe to the routed backend. Without the forward, the error is
+// lost behind the bool IsAttached and a probe failure reads "not attached".
+func TestAutoForwardsIsAttachedWithError(t *testing.T) {
+	def, acp := runtime.NewFake(), runtime.NewFake()
+	defErr := fmt.Errorf("default probe: %w", runtime.ErrRuntimeUnavailable)
+	acpErr := fmt.Errorf("acp probe: %w", runtime.ErrRuntimeUnavailable)
+	def.AttachedErrors["plain"] = defErr
+	acp.AttachedErrors["acpsess"] = acpErr
+	def.SetAttached("attached", true)
+	p := New(def, acp)
+	p.RouteACP("acpsess")
+
+	for _, tc := range []struct {
+		name    string
+		want    bool
+		wantErr error
+	}{
+		{"plain", false, defErr},
+		{"acpsess", false, acpErr},
+		{"attached", true, nil},
+	} {
+		got, err := runtime.IsAttachedWithError(p, tc.name)
+		if got != tc.want || !errors.Is(err, tc.wantErr) {
+			t.Errorf("IsAttachedWithError(%q) = (%v, %v), want (%v, %v)", tc.name, got, err, tc.want, tc.wantErr)
 		}
 	}
 }

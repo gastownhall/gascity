@@ -13,7 +13,7 @@ func TestGCNonTestFilesStayOnWorkerBoundary(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	dir := filepath.Dir(currentFile)
+	dir := gcCallerDir(currentFile)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("ReadDir(%q): %v", dir, err)

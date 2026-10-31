@@ -16,16 +16,21 @@ import (
 // reports corrupt entries and returning partial-result errors when backing
 // history cannot be fully read.
 func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
+	query = c.listTier(query)
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
 	if query.Live || query.ParentID != "" {
 		c.mu.RLock()
-		startSeq := c.mutationSeq
+		startSeq, startScan := c.mutationSeq, c.scanGen
 		c.mu.RUnlock()
 		items, err := c.backing.List(query)
 		if err == nil {
-			items = c.refreshCachedBeads(query, startSeq, items)
+			items = c.refreshCachedBeads(query, startSeq, startScan, items)
+			// A live list is often the first reader to see a close or a
+			// claim made by another process (bd close, gc hook --claim);
+			// announce what it installed.
+			c.announceReadInstalls()
 		}
 		return items, err
 	}
@@ -109,6 +114,7 @@ func liveListQuery(query ListQuery) ListQuery {
 // queries are unsupported because Count must match List cardinality, including
 // List's post-sort limit cap.
 func (c *CachingStore) Count(ctx context.Context, query ListQuery, excludeTypes ...string) (int, error) {
+	query = c.listTier(query)
 	if !query.HasFilter() && !query.AllowScan {
 		return 0, fmt.Errorf("counting beads: %w", ErrQueryRequiresScan)
 	}
@@ -212,6 +218,7 @@ func (c *CachingStore) cachedCountContext(ctx context.Context, query ListQuery, 
 // that already fall back to the backing store (List/Count/Ready), where a
 // refresh-and-serve is invisible to callers.
 func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
+	query = c.listTier(query)
 	if query.IncludesClosed() {
 		return nil, false
 	}
@@ -228,6 +235,7 @@ func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
 // performs backing-store I/O. The stamp fences only this process's cache
 // projection; it does not certify durable-store lineage or event delivery.
 func (c *CachingStore) ObservedList(query ListQuery) ([]Bead, CacheObservation, bool) {
+	query = c.listTier(query)
 	if query.Validate() != nil ||
 		(!query.HasFilter() && !query.AllowScan) ||
 		query.Live ||
@@ -241,7 +249,31 @@ func (c *CachingStore) ObservedList(query ListQuery) ([]Bead, CacheObservation, 
 	if !c.observationAdmissibleLocked() {
 		return nil, CacheObservation{}, false
 	}
-	return c.collectCachedListLocked(query), CacheObservation{owner: c, revision: c.observationRevision}, true
+	return c.collectCachedListLocked(query), CacheObservation{
+		owner:    c,
+		revision: c.observationRevision,
+		cacheRev: CacheRevision{Epoch: c.epoch, Seq: c.mutationSeq},
+	}, true
+}
+
+// WriteRev reports the cache revision of the latest local write to id. Read it
+// after a write made through this CachingStore reports success: every clean
+// census taken after the write returns whose CacheRev covers it reflects that
+// write, within the known limits listed on CacheRevision. It says nothing about
+// writes made around the cache. A later local write to id raises it, and so do
+// failed conditional writes, including a CompareAndSetMetadataKey that lost
+// (false, nil). With no write to id on record — never written here, or
+// dropped from the cache more than recentWriteVerifyWindow ago — it is the
+// current mutation sequence, which no clean census can precede. Epochs are
+// process-local and restart at 1 in each process.
+func (c *CachingStore) WriteRev(id string) CacheRevision {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	seq, ok := c.writeSeq[id]
+	if !ok {
+		seq = c.mutationSeq
+	}
+	return CacheRevision{Epoch: c.epoch, Seq: seq}
 }
 
 // WithCurrentObservation runs publish while holding the originating cache's
@@ -301,31 +333,33 @@ func (c *CachingStore) cacheServableForListQueryLocked(query ListQuery) bool {
 	return slices.Contains(partialPrimeStatuses, query.Status)
 }
 
-func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, items []Bead) []Bead {
+func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq, startScan uint64, items []Bead) []Bead {
 	refreshedParents := make(map[string]Bead)
 	removedParents := make(map[string]struct{})
 	refreshedLiveMissing := make(map[string]Bead)
 	removedLiveMissing := make(map[string]struct{})
-	for _, id := range c.staleParentCacheIDs(query.ParentID, items) {
-		fresh, err := c.backing.Get(id)
+	staleParents := c.staleParentCacheIDs(query.ParentID, items)
+	for i, read := range c.readBackingRows(staleParents) {
+		id := staleParents[i]
 		switch {
-		case err == nil:
-			refreshedParents[id] = cloneBead(fresh)
-		case errors.Is(err, ErrNotFound):
+		case read.err == nil:
+			refreshedParents[id] = cloneBead(read.bead)
+		case errors.Is(read.err, ErrNotFound):
 			removedParents[id] = struct{}{}
 		default:
-			c.recordProblem("refresh parent cache during list", fmt.Errorf("%s: %w", id, err))
+			c.recordProblem("refresh parent cache during list", fmt.Errorf("%s: %w", id, read.err))
 		}
 	}
-	for _, id := range c.staleLiveCacheIDs(query, items) {
-		fresh, err := c.backing.Get(id)
+	staleLive := c.staleLiveCacheIDs(query, items)
+	for i, read := range c.readBackingRows(staleLive) {
+		id := staleLive[i]
 		switch {
-		case err == nil:
-			refreshedLiveMissing[id] = cloneBead(fresh)
-		case errors.Is(err, ErrNotFound):
+		case read.err == nil:
+			refreshedLiveMissing[id] = cloneBead(read.bead)
+		case errors.Is(read.err, ErrNotFound):
 			removedLiveMissing[id] = struct{}{}
 		default:
-			c.recordProblem("refresh live cache during list", fmt.Errorf("%s: %w", id, err))
+			c.recordProblem("refresh live cache during list", fmt.Errorf("%s: %w", id, read.err))
 		}
 	}
 	if len(items) == 0 && len(refreshedParents) == 0 && len(removedParents) == 0 &&
@@ -337,16 +371,23 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 	if c.state != cacheLive && c.state != cachePartial {
 		return items
 	}
-	now := time.Now()
+	now := c.clockNow()
 	refreshed := make([]Bead, 0, len(items))
 	for _, item := range items {
 		if c.deletedSeq[item.ID] > startSeq {
 			continue
 		}
-		if c.beadSeq[item.ID] > startSeq {
+		if c.refetchFencedLocked(item.ID, startSeq) {
 			current, ok := c.beads[item.ID]
 			if ok && query.Matches(current) {
 				refreshed = append(refreshed, cloneBead(current))
+			}
+			continue
+		}
+		if c.scanRacedLocked(item.ID, startScan, item, true) {
+			// The list's row answers, uninstalled.
+			if query.Matches(item) {
+				refreshed = append(refreshed, cloneBead(item))
 			}
 			continue
 		}
@@ -362,62 +403,76 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 				continue
 			}
 		}
+		// A list never reads DepList: a row that omits its edges leaves any
+		// mark on the cached ones, as do the refreshes below.
 		c.absorbFreshLocked(item.ID, item, now, absorbOpts{
-			depsMode:   depsFromFieldsIfCarried,
-			seqMode:    seqClearGuarded,
-			clearDirty: true,
+			depsMode:     depsFromFieldsIfCarried,
+			seqMode:      seqClearGuarded,
+			clearDirty:   c.rowAnswersEdges(item),
+			announceRead: true,
 		})
 		if query.Matches(item) {
 			refreshed = append(refreshed, cloneBead(item))
 		}
 	}
 	for id, bead := range refreshedParents {
-		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
+		if c.refetchFencedLocked(id, startSeq) || c.scanRacedLocked(id, startScan, bead, true) {
 			continue
 		}
 		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
 			continue
 		}
 		c.absorbFreshLocked(id, bead, now, absorbOpts{
-			depsMode:   depsFromFieldsIfCarried,
-			seqMode:    seqClearGuarded,
-			clearDirty: true,
+			depsMode:     depsFromFieldsIfCarried,
+			seqMode:      seqClearGuarded,
+			clearDirty:   c.rowAnswersEdges(bead),
+			announceRead: true,
 		})
 	}
 	for id := range removedParents {
-		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
+		if c.refetchFencedLocked(id, startSeq) || c.scanRacedLocked(id, startScan, Bead{}, false) {
 			continue
 		}
 		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
 			continue
 		}
-		c.evictLocked(id)
+		c.evictListedGoneLocked(id)
 	}
 	for id, bead := range refreshedLiveMissing {
-		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
+		if c.refetchFencedLocked(id, startSeq) || c.scanRacedLocked(id, startScan, bead, true) {
 			continue
 		}
 		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
 			continue
 		}
 		c.absorbFreshLocked(id, bead, now, absorbOpts{
-			depsMode:   depsFromFieldsIfCarried,
-			seqMode:    seqClearGuarded,
-			clearDirty: true,
+			depsMode:     depsFromFieldsIfCarried,
+			seqMode:      seqClearGuarded,
+			clearDirty:   c.rowAnswersEdges(bead),
+			announceRead: true,
 		})
 	}
 	for id := range removedLiveMissing {
-		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
+		if c.refetchFencedLocked(id, startSeq) || c.scanRacedLocked(id, startScan, Bead{}, false) {
 			continue
 		}
 		if current, ok := c.beads[id]; ok && current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
 			continue
 		}
-		c.evictLocked(id)
+		c.evictListedGoneLocked(id)
 	}
-	c.markFreshLocked(time.Now())
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 	return refreshed
+}
+
+// evictListedGoneLocked evicts id, which a list refresh's point read found
+// gone, and stamps it as RefreshRow's not-found eviction does, so a scan or
+// Prime whose listing predates the read cannot reinstall the row. Caller must
+// hold c.mu in write mode.
+func (c *CachingStore) evictListedGoneLocked(id string) {
+	c.evictLocked(id)
+	c.noteMutationLocked(id)
 }
 
 func (c *CachingStore) staleParentCacheIDs(parentID string, fresh []Bead) []string {
@@ -473,6 +528,17 @@ func (c *CachingStore) staleLiveCacheIDs(query ListQuery, fresh []Bead) []string
 		if !query.Matches(bead) {
 			continue
 		}
+		// Matches compares the folded status, but a bd-backed store matches a
+		// named status against the one it recorded: a NativeDoltStore Live
+		// "open" is bd's raw open (nativeListPushesRawOpen), as is BdStore's
+		// --status. A row last read with another recorded status is absent by
+		// design, and re-reading it would only fold it back to "open" on every
+		// call. If another process closes or claims such a parked row, the
+		// cache holds it as "open" until that change's event or the next
+		// reconcile installs it; this sweep does not.
+		if query.Status != "" && bead.SourceStatus != "" && bead.SourceStatus != query.Status {
+			continue
+		}
 		stale = append(stale, id)
 	}
 	return stale
@@ -489,6 +555,9 @@ func (c *CachingStore) ListOpen(status ...string) ([]Bead, error) {
 
 // Get returns a single bead by ID from the cache or backing store.
 func (c *CachingStore) Get(id string) (Bead, error) {
+	// Deferred so it runs after every unlock below: a dirty-row refresh can be
+	// the first reader to see a close or a claim made by another process.
+	defer c.announceReadInstalls()
 	c.mu.RLock()
 	if _, deleted := c.deletedSeq[id]; deleted {
 		c.mu.RUnlock()
@@ -504,22 +573,35 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 	}
 	if c.state == cacheLive || c.state == cachePartial {
 		if _, ok := c.dirty[id]; ok {
-			startSeq := c.mutationSeq
+			startSeq, startScan := c.mutationSeq, c.scanGen
 			c.mu.RUnlock()
 			fresh, err := c.backing.Get(id)
 			if err != nil {
 				return Bead{}, err
+			}
+			var freshDeps []Dep
+			depsFromBacking := false
+			if !c.rowAnswersEdges(fresh) {
+				deps, depErr := c.backing.DepList(id, "down")
+				if depErr != nil {
+					// The row carries no edges, so installing it would clear
+					// the mark on the cached (possibly pre-write) edge set.
+					// Answer with the backing row and leave the mark.
+					c.recordProblem("refresh deps on dirty get", fmt.Errorf("%s: %w", id, depErr))
+					return fresh, nil
+				}
+				freshDeps, depsFromBacking = deps, true
 			}
 			c.mu.Lock()
 			if c.state != cacheLive && c.state != cachePartial {
 				c.mu.Unlock()
 				return fresh, nil
 			}
-			switch {
-			case c.deletedSeq[id] > startSeq:
-				c.mu.Unlock()
-				return Bead{}, ErrNotFound
-			case c.beadSeq[id] > startSeq:
+			if c.refetchFencedLocked(id, startSeq) {
+				if c.deletedSeq[id] > startSeq {
+					c.mu.Unlock()
+					return Bead{}, ErrNotFound
+				}
 				if _, stillDirty := c.dirty[id]; stillDirty {
 					c.mu.Unlock()
 					return c.backing.Get(id)
@@ -528,15 +610,28 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 					c.mu.Unlock()
 					return cloneBead(current), nil
 				}
+				// Nothing newer is cached (a full Prime replace can drop the
+				// row): the backing read answers, uninstalled.
 				c.mu.Unlock()
-				return Bead{}, ErrNotFound
+				return fresh, nil
 			}
-			c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
-				depsMode:   depsFromFields,
-				seqMode:    seqClearBeadSeqOnly,
-				clearDirty: true,
-			})
-			c.markFreshLocked(time.Now())
+			if c.scanRacedLocked(id, startScan, fresh, true) {
+				// The backing read answers, uninstalled; a mark it left
+				// sends the next Get back to the backing.
+				c.mu.Unlock()
+				return fresh, nil
+			}
+			opts := absorbOpts{
+				depsMode:     depsFromFieldsIfCarried,
+				seqMode:      seqClearBeadSeqOnly,
+				clearDirty:   true,
+				announceRead: true,
+			}
+			if depsFromBacking {
+				opts.depsMode, opts.deps = depsExplicit, freshDeps
+			}
+			c.absorbFreshLocked(id, fresh, c.clockNow(), opts)
+			c.markFreshLocked(c.clockNow())
 			c.updateStatsLocked()
 			c.mu.Unlock()
 			return fresh, nil
@@ -552,11 +647,361 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 	return c.backing.Get(id)
 }
 
+// refetchFencedLocked reports whether a mutation or deletion newer than
+// startSeq touched id, so a backing read begun after startSeq may be older
+// than the cache and must not be installed. writeSeq covers a local write
+// whose beadSeq fence a later refetch already cleared, and the fence floor a
+// full Prime replace that dropped the per-row fences. Caller must hold c.mu.
+func (c *CachingStore) refetchFencedLocked(id string, startSeq uint64) bool {
+	return c.beadSeq[id] > startSeq || c.writeFencedLocked(id, startSeq)
+}
+
+// scanRacedLocked is the install gate a refetch applies after
+// refetchFencedLocked: startScan is the scanGen it captured with its
+// startSeq, fresh its backing read of id, and found false when that read
+// found no row. It reports false when no scan merged since, and the caller
+// installs as usual. Otherwise a scan may have installed or evicted id
+// unfenced, or seen it change and kept it for a recent local write, so the
+// caller installs nothing. The scan's read and the refetch's are unordered,
+// so either may be the newer: when the refetch's disagrees with what the
+// cache holds, settleUnorderedReadLocked marks id dirty, and the next refetch
+// no scan overlaps settles it. When they agree, the cache already holds what
+// the refetch read. Caller must hold c.mu in write mode.
+func (c *CachingStore) scanRacedLocked(id string, startScan uint64, fresh Bead, found bool) bool {
+	if c.scanGen == startScan {
+		return false
+	}
+	c.settleUnorderedReadLocked(id, fresh, found)
+	return true
+}
+
+// settleUnorderedReadLocked handles a backing read of id (fresh, or no row
+// when found is false) that it cannot order against the read that installed
+// or evicted id's cached state. If the two disagree, it marks id dirty, so no
+// clean census serves either, and stamps id, so no scan that started before
+// the mark can clear it with a read older still. A tombstoned id needs no
+// mark. Caller must hold c.mu in write mode.
+func (c *CachingStore) settleUnorderedReadLocked(id string, fresh Bead, found bool) {
+	if !c.rowReadDisagreesLocked(id, fresh, found) {
+		return
+	}
+	if _, deleted := c.deletedSeq[id]; deleted {
+		return
+	}
+	c.noteMutationLocked(id)
+	c.markDirtyLocked(id)
+}
+
+// rowReadDisagreesLocked reports whether a backing read of id disagrees with
+// what the cache holds for it. A scan holds no closed row, so an uncached id
+// agrees with a closed read or none. The ready verdict, labels and edge
+// fields are not compared on the row, since a list row and a point read carry
+// them differently; edges are compared with the cached set when the read
+// carries them. Caller must hold c.mu.
+func (c *CachingStore) rowReadDisagreesLocked(id string, fresh Bead, found bool) bool {
+	cached, held := c.beads[id]
+	switch {
+	case !held:
+		return found && fresh.Status != "closed"
+	case !found:
+		return true
+	}
+	if beadCarriesDependencyFields(fresh) && depsChanged(c.deps[id], depsFromBeadFields(fresh)) {
+		return true
+	}
+	fresh.IsBlocked = cached.IsBlocked
+	fresh.Needs, fresh.Dependencies = cached.Needs, cached.Dependencies
+	return beadChanged(cached, fresh, true)
+}
+
+// RefreshRow reads id from the backing store and installs what it found,
+// whether the cached copy is clean, dirty or absent: v2 lag repair's targeted
+// live read (CONTRACT C5.15). Unlike Get it never answers from the cache, and
+// it installs an uncached row. A create found by an instance_token lookup is
+// refreshed by the id the lookup returned.
+//
+// On a nil error the returned row is the one now cached, closed or open.
+// Otherwise nothing was installed:
+//   - ErrNotFound: the backing has no row, and a cached copy or dirty mark
+//     was evicted;
+//   - ErrRowRefreshFenced: a write, deletion or event newer than the read
+//     owns the row (refetchFencedLocked), or a reconcile, full Prime or
+//     PrimeActive merged since the read began (scanGen); retry. With
+//     RowRefreshOptions.YieldToLocalWrites it is ErrRowRefreshYielded
+//     while a local write that may touch the row is in flight; retry once
+//     the write has returned;
+//   - ErrCacheUnavailable: the cache is neither live nor partial, or id is
+//     outside the namespaces this cache owns (ownsBeadID);
+//   - any other error: the backing read of the row or its edges failed.
+//
+// A row whose cached state changed, and a not-found eviction, is stamped as
+// an applied event is, so a scan or list read begun before this read cannot
+// roll it back or reinstall it. A changed row notifies as a re-scan would:
+// bead.created for a new open row, bead.updated for a changed open row,
+// bead.closed for a row held open that closed or is gone. A new row, or a
+// held row whose status changed or that is gone, drops its dependents' ready
+// verdicts, as an applied event does. An unchanged row stamps and notifies
+// nothing.
+//
+// It is on *CachingStore only, with no optional interface: the caller needs
+// the leg's cache itself, as it does for ObservedList, and unwraps a policy
+// layer to reach it.
+//
+// RefreshRow never announces the close of a row the cache did not hold; see
+// RefreshRowReport for the caller that has evidence such a close is recent.
+func (c *CachingStore) RefreshRow(id string) (Bead, error) {
+	rep, err := c.RefreshRowReport(id, RowRefreshOptions{})
+	if err != nil {
+		return Bead{}, err
+	}
+	return rep.Bead, nil
+}
+
+// RowRefreshOptions adjusts RefreshRowReport.
+type RowRefreshOptions struct {
+	// AnnounceUnheldClose announces, as bead.closed (ChangeRefresh), a closed
+	// row the refresh installs that the cache did not hold, unless a closing
+	// write of this cache is in flight for it (that write announces it) or
+	// this cache announced this close within recentWriteVerifyWindow
+	// (announcedCloses): its closing write, a re-scan or a refresh announced
+	// it, and a re-scan or full Prime then dropped the closed row. A close
+	// the cache never announced is announced, however recently the cache
+	// wrote the row: a full Prime drops a row closed out of band silently.
+	// So is the close of a row the cache holds closed only because a path
+	// that announces no close installed it over no cached row (a write that
+	// only refreshed the row, a conditional write's refetch, an applied
+	// event, a list read; silentCloses): for the announcement the row counts
+	// as unheld, and is reported so (RowRefresh.Held).
+	// Pass it with YieldToLocalWrites: a closing write of this cache can drop
+	// its row before it announces the close, and without the yield a refresh
+	// in between announces the close too. Pass it only with evidence the row
+	// closed recently: a re-scan holds no closed rows, so without it a
+	// long-closed row would be announced again every time a read installed
+	// it.
+	AnnounceUnheldClose bool
+	// YieldToLocalWrites refuses with ErrRowRefreshYielded, installing and
+	// notifying nothing, while a local write of this cache that may touch
+	// the row is in flight: one naming id, a create while the cache does not
+	// hold the row (a create makes a row the cache does not hold), or any
+	// other write whose rows its backing call decides (Tx, a graph apply). Between that write's backing
+	// commit and its absorb the backing read would see the write before the
+	// cache holds it, and the refresh would announce the cache's own write.
+	// The write absorbs and announces it; a refresh after it returns finds
+	// nothing new of the write's, though it still announces an out-of-band
+	// close the write absorbed without announcing (AnnounceUnheldClose). The refresh checks before its backing read, so one that
+	// starts while the write is in flight reads nothing, and again after
+	// the read, for a write that started during it.
+	// A caller that passes it must retry a yielded row for as long as the
+	// write may run: a graph apply holds the fence for seconds.
+	YieldToLocalWrites bool
+	// SeenOpen tells the refresh the caller saw the row open recently (a
+	// journal page's open post-image), so a closed row it reads may be a new
+	// close. It implies AnnounceUnheldClose, and also announces the close of
+	// a row the cache holds closed already, unless the cache holds this very
+	// version of the row (the same nonzero Revision). Without a revision to
+	// compare, the announced-close record does not cover the row, however
+	// its updated_at compares: a whole-second updated_at cannot tell a
+	// reopen and close inside one second from the close it ties, while the
+	// duplicate announcing may cost (this cache's own close of a row the
+	// caller saw open) is what at-least-once delivery allows. A row the cache
+	// holds closed at an older revision than the backing's, installed from a
+	// bus event (which carries none) or a lagged read, has its close
+	// announced again, a duplicate too. Pass it with YieldToLocalWrites.
+	SeenOpen bool
+}
+
+// RowRefresh reports what one RefreshRowReport did.
+type RowRefresh struct {
+	// Bead is the installed row. On ErrNotFound it is the evicted copy,
+	// marked closed as its notification was, or the zero Bead when the cache
+	// held none.
+	Bead Bead
+	// Found reports whether the backing has the row.
+	Found bool
+	// Held reports whether the cache held the row before the refresh. A
+	// closed row held only because an install that announced no close put
+	// it there, whose close the refresh announced, is reported unheld: the
+	// cache held it no more than it holds an uncached row.
+	Held bool
+	// Event is the notification the refresh emitted: "", "bead.created",
+	// "bead.updated" or "bead.closed".
+	Event string
+	// Reclosed reports the announced close of a row the cache held closed
+	// already, which opts.SeenOpen showed reopened since.
+	Reclosed bool
+}
+
+// RefreshRowReport is RefreshRow, reporting what the refresh found and what
+// it notified, for a caller that acts on whether anything changed (the
+// controller's journal feed). Errors are RefreshRow's; on ErrNotFound the
+// report is filled in too. opts.AnnounceUnheldClose and opts.SeenOpen are the
+// differences in behavior (RowRefreshOptions).
+func (c *CachingStore) RefreshRowReport(id string, opts RowRefreshOptions) (RowRefresh, error) {
+	if !c.ownsBeadID(id) {
+		return RowRefresh{}, fmt.Errorf("refresh %s: not this cache's id: %w", id, ErrCacheUnavailable)
+	}
+	c.mu.RLock()
+	live := c.state == cacheLive || c.state == cachePartial
+	startSeq, startScan := c.mutationSeq, c.scanGen
+	_, heldAtStart := c.beads[id]
+	c.mu.RUnlock()
+	if !live {
+		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrCacheUnavailable)
+	}
+	if opts.YieldToLocalWrites && c.localWrites.mayTouch(id, heldAtStart) {
+		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrRowRefreshYielded)
+	}
+	fresh, readErr := c.backing.Get(id)
+	if readErr != nil && !errors.Is(readErr, ErrNotFound) {
+		return RowRefresh{}, readErr
+	}
+	found := readErr == nil
+	var freshDeps []Dep
+	depsFromBacking := false
+	if found && !c.rowAnswersEdges(fresh) {
+		deps, err := c.backing.DepList(id, "down")
+		if err != nil {
+			return RowRefresh{}, fmt.Errorf("refresh %s deps: %w", id, err)
+		}
+		freshDeps, depsFromBacking = deps, true
+	}
+
+	c.mu.Lock()
+	if c.state != cacheLive && c.state != cachePartial {
+		c.mu.Unlock()
+		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrCacheUnavailable)
+	}
+	// The yield is checked before the fences: a write still in flight that
+	// absorbed during the read owns the row, and a yield, unlike a fence,
+	// costs the caller no retry.
+	cached, held := c.beads[id]
+	if opts.YieldToLocalWrites && c.localWrites.mayTouch(id, held) {
+		c.mu.Unlock()
+		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrRowRefreshYielded)
+	}
+	if c.refetchFencedLocked(id, startSeq) || c.scanGen != startScan {
+		c.mu.Unlock()
+		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrRowRefreshFenced)
+	}
+	cachedDeps := c.deps[id]
+	announceClose := found && c.announcesCloseLocked(id, opts, cached, held, fresh)
+	// A close announced over a row held only silently (heldSilentlyLocked) is
+	// the close of an unheld row, and is reported as one.
+	announcedUnheld := announceClose && (!held || c.heldSilentlyLocked(id, cached))
+	var installed Bead
+	evicted := false
+	if found {
+		absorb := absorbOpts{depsMode: depsFromFieldsIfCarried, seqMode: seqKeep, clearDirty: true}
+		// RefreshRowReport announces the close of a row it held open itself
+		// (rowRefreshChange), and of an unheld or reclosed row when asked to
+		// (announcesCloseLocked), so no close is queued as well.
+		absorb.closeAnnounced = (held && cached.Status != "closed" && fresh.Status == "closed") || announceClose
+		if depsFromBacking {
+			absorb.depsMode, absorb.deps = depsExplicit, freshDeps
+		}
+		c.absorbFreshLocked(id, fresh, c.clockNow(), absorb)
+		installed = cloneBead(c.beads[id])
+	} else if _, dirty := c.dirty[id]; held || dirty {
+		c.evictLocked(id)
+		evicted = true
+	}
+	eventType, changed := rowRefreshChange(held, cached, cachedDeps, found, installed, c.deps[id])
+	if announceClose {
+		eventType, changed = "bead.closed", true
+	}
+	if eventType == "bead.closed" {
+		c.noteCloseAnnouncedLocked(id)
+	}
+	if changed || evicted {
+		// The eviction dropped the row's beadSeq, a dirty uncached row's
+		// included, so it is stamped anew.
+		c.noteMutationLocked(id)
+		if (found && !held) || (held && (!found || cached.Status != installed.Status)) {
+			c.clearDependentReadyProjectionsLocked(id)
+		}
+		c.markFreshLocked(c.clockNow())
+		c.updateStatsLocked()
+	}
+	c.mu.Unlock()
+
+	rep := RowRefresh{Found: found, Held: held && !announcedUnheld, Event: eventType, Reclosed: announceClose && !announcedUnheld}
+	if !found {
+		if held {
+			rep.Bead = cloneBead(cached)
+			if eventType != "" {
+				setBeadStatus(&rep.Bead, "closed")
+				c.notifyChange(ChangeRefresh, eventType, rep.Bead)
+			}
+		}
+		return rep, readErr
+	}
+	rep.Bead = installed
+	if eventType != "" {
+		c.notifyChange(ChangeRefresh, eventType, installed)
+	}
+	return rep, nil
+}
+
+// rowRefreshChange decides whether RefreshRow changed id's cached state and
+// which notification a re-scan would emit for it (reconcileMergeDecision):
+// a re-scan holds no closed rows, so a closed row notifies only as the close
+// of a row held open.
+func rowRefreshChange(held bool, cached Bead, cachedDeps []Dep, found bool, installed Bead, installedDeps []Dep) (string, bool) {
+	switch {
+	case !found:
+		if !held {
+			return "", false
+		}
+		if cached.Status == "closed" {
+			return "", true
+		}
+		return "bead.closed", true
+	case held && !beadChanged(cached, installed, true) && !depsChanged(cachedDeps, installedDeps):
+		return "", false
+	case installed.Status == "closed":
+		if held && cached.Status != "closed" {
+			return "bead.closed", true
+		}
+		return "", true
+	case !held:
+		return "bead.created", true
+	}
+	return "bead.updated", true
+}
+
 // Ready returns open beads whose blocking deps are all closed.
 func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
-	if readyQueryFromArgs(query) != (ReadyQuery{}) {
-		return c.backing.Ready(query...)
+	if !readyQueryFromArgs(query).IsZero() {
+		return c.backing.Ready(c.readyArgsTier(query)...)
 	}
+	if rows, ok := c.readyFromCache(c.readyTier(ReadyQuery{})); ok {
+		return rows, nil
+	}
+	return c.backing.Ready(c.readyArgsTier(query)...)
+}
+
+// ReadyPreferCache answers any ready query (tier, assignee, limit) from the
+// cache when the cache can vouch for it, under exactly the rules the
+// zero-query Ready applies: a fully live, dependency-complete cache whose
+// ready projection is not degraded, with dirty rows refreshed through the
+// bounded overlay first. When the cache is cold, partial, invalidated past the
+// overlay, or cannot vouch for one candidate's verdict, it reads the backing
+// with the caller's query, as Live.Ready does.
+//
+// It is a separate entry rather than a widening of Ready because Ready with
+// arguments has always meant "authoritative" to its existing callers; the
+// native Ready endpoint opts in explicitly.
+func (c *CachingStore) ReadyPreferCache(query ReadyQuery) ([]Bead, error) {
+	query = c.readyTier(query)
+	if rows, ok := c.readyFromCache(query); ok {
+		return rows, nil
+	}
+	return c.backing.Ready(query)
+}
+
+// readyFromCache computes query's ready set from the cache, reporting false
+// when the cache cannot answer and the caller must read the backing.
+func (c *CachingStore) readyFromCache(query ReadyQuery) ([]Bead, bool) {
 	var (
 		statusByID      map[string]string
 		workOutcomeByID map[string]string
@@ -583,14 +1028,18 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 					continue
 				}
 				statusByID[b.ID] = b.Status
-				workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
-				if IsReadyCandidate(b, now) {
-					if c.readyProjectionUnknownLocked(b.ID) {
-						unanswerable = true
-						return
-					}
-					openBeads = append(openBeads, cloneBead(b))
+				workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
+				if !IsReadyCandidateForTier(b, now, query.TierMode) {
+					continue
 				}
+				if query.Assignee != "" && b.Assignee != query.Assignee {
+					continue
+				}
+				if c.readyProjectionUnknownLocked(b.ID) {
+					unanswerable = true
+					return
+				}
+				openBeads = append(openBeads, cloneBead(b))
 			}
 			depsByID = make(map[string][]Dep, len(openBeads))
 			for _, b := range openBeads {
@@ -598,12 +1047,12 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 			}
 		},
 	); err != nil {
-		return c.backing.Ready(query...)
+		return nil, false
 	}
 	if unanswerable {
 		// One candidate whose verdict the cache cannot vouch for costs this
 		// read the cache, not correctness: the live scan is slower and right.
-		return c.backing.Ready(query...)
+		return nil, false
 	}
 
 	var result []Bead
@@ -616,7 +1065,10 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	// call; impose the canonical ready order so cache-served results
 	// match the SQL-backed ready readers (#3208).
 	sortBeadsReadyOrder(result)
-	return result, nil
+	if query.Limit > 0 && len(result) > query.Limit {
+		result = result[:query.Limit]
+	}
+	return result, true
 }
 
 // ReadyContext answers only from the dependency-complete active cache. It
@@ -627,7 +1079,7 @@ func (c *CachingStore) ReadyContext(ctx context.Context, query ...ReadyQuery) ([
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	rows, err := c.cachedReadyCompleteOnly(ctx, readyQueryFromArgs(query))
+	rows, err := c.cachedReadyCompleteOnly(ctx, c.readyTier(readyQueryFromArgs(query)))
 	if err != nil {
 		return rows, err
 	}
@@ -661,8 +1113,8 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	now := time.Now().UTC()
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
-		workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
-		if IsReadyCandidate(b, now) {
+		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
+		if IsReadyCandidateForTier(b, now, c.readTier(TierIssues)) {
 			if c.readyProjectionUnknownLocked(b.ID) {
 				return nil, false
 			}
@@ -772,6 +1224,7 @@ func (c *CachingStore) Children(parentID string, opts ...QueryOpt) ([]Bead, erro
 		ParentID:      parentID,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedAsc,
+		TierMode:      TierModeFromOpts(opts),
 	})
 }
 

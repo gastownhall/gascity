@@ -9,15 +9,16 @@
 #   PATH     — must include gc and bd binaries
 
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/bead-id.sh"
 cd "$GC_CITY"
 
 while true; do
     # Check inbox for dispatch requests
     inbox=$(gc mail inbox "$GC_AGENT" 2>/dev/null || true)
 
-    if echo "$inbox" | grep -q "^gc-"; then
+    if echo "$inbox" | bead_id_rows | grep -q .; then
         # Process each message
-        echo "$inbox" | grep "^gc-" | while read -r line; do
+        echo "$inbox" | bead_id_rows | while read -r line; do
             msg_id=$(echo "$line" | awk '{print $1}')
 
             # Read the dispatch request

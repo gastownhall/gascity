@@ -22,8 +22,8 @@ var blindGateCases = []struct {
 		script: "#!/bin/bash\nexit 75\n",
 	},
 	{
-		name:   "native store unavailable",
-		script: "#!/bin/bash\necho 'WARN native_store_unavailable scope=/city' >&2\nexit 1\n",
+		name:   "unresolvable gc home",
+		script: "#!/bin/bash\necho 'no GC_HOME available' >&2\nexit 1\n",
 	},
 	{
 		name:   "uncached pack import",
@@ -32,6 +32,32 @@ var blindGateCases = []struct {
 	{
 		name:   "credential refusal",
 		script: "#!/bin/bash\necho \"Error 1045 (28000): Access denied for user 'root'@'localhost'\" >&2\nexit 1\n",
+	},
+}
+
+// verdictGateCases are gate scripts whose stderr carries a string that looks
+// infrastructural but that the read recovered from, or that is remediation
+// advice rather than an error. They failed for their own reason, so they are
+// verdicts and must keep burning attempts. Reclassifying them would spend the
+// whole infra budget (and ~5 minutes of dead time) on the first genuine gate
+// failure in any city that emits them — the incident shape the budget exists
+// to prevent.
+var verdictGateCases = []struct {
+	name   string
+	script string
+}{
+	{
+		// internal/beads/factory.go logs this and then falls back to bd, so
+		// the read succeeded; in a native-ineligible city it prints on every
+		// store-open.
+		name:   "native store unavailable is a recovered path",
+		script: "#!/bin/bash\necho 'WARN native_store_unavailable scope=/city' >&2\necho 'review verdict is reject' >&2\nexit 1\n",
+	},
+	{
+		// The remediation every pack-cache error carries, and `gc import
+		// install`'s own error prefix.
+		name:   "gc import install is remediation advice",
+		script: "#!/bin/bash\necho 'gc import install: pack \"core\" failed checksum verification' >&2\nexit 1\n",
 	},
 }
 
@@ -68,6 +94,39 @@ func TestProcessRalphCheckBlindReadDoesNotBurnAttempt(t *testing.T) {
 			}
 			if got.Status == "closed" {
 				t.Errorf("check bead should stay open for the re-run, got closed")
+			}
+		})
+	}
+}
+
+// TestProcessRalphCheckVerdictMarkerStillBurnsAttempt is the counterpart
+// control to the table above: a gate whose stderr merely mentions an
+// infrastructure string is still a verdict. It must burn a semantic attempt and
+// must not touch the shared infra-retry budget.
+func TestProcessRalphCheckVerdictMarkerStillBurnsAttempt(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range verdictGateCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cityPath := t.TempDir()
+			checkPath := writeCheckScript(t, cityPath, "verdict-check.sh", tc.script)
+			store, _, run1, check1 := newSimpleRalphLoop(t, "implement", checkPath, 3)
+			if err := store.Close(run1.ID); err != nil {
+				t.Fatalf("close run1: %v", err)
+			}
+			check1 = mustGetBead(t, store, check1.ID)
+
+			result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+			if err != nil {
+				t.Fatalf("ProcessControl: %v", err)
+			}
+			if !result.Processed || result.Action != "retry" {
+				t.Fatalf("result = %+v, want processed retry (this gate produced a verdict and must burn an attempt)", result)
+			}
+			if r := mustGetBead(t, store, check1.ID).Metadata[beadmeta.CheckInfraRetryMetadataKey]; r != "" {
+				t.Errorf("gc.check_infra_retry = %q, want empty — a verdict must not spend the infra budget", r)
 			}
 		})
 	}
@@ -123,5 +182,70 @@ func TestProcessRalphCheckOrdinaryFailureStillBurnsAttempt(t *testing.T) {
 	}
 	if r := mustGetBead(t, store, check1.ID).Metadata[beadmeta.CheckInfraRetryMetadataKey]; r != "" {
 		t.Errorf("gc.check_infra_retry = %q, want empty for an ordinary gate failure", r)
+	}
+}
+
+// TestProcessRalphControlBlindReadDoesNotBurnIteration carries ga-pqlgh to the
+// compiled kind=ralph lane (formula-spec-v2 §3.1): a check that exits 75, or
+// exits nonzero with a typed infrastructure string on stderr, produced no
+// verdict and re-runs attempt-free under the infrastructure budget.
+func TestProcessRalphControlBlindReadDoesNotBurnIteration(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range blindGateCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cityPath := t.TempDir()
+			checkPath := writeCheckScript(t, cityPath, "blind-check.sh", tc.script)
+			store, control := newUnlaunchableCheckRalphControl(t, checkPath)
+			beadsBefore := countAllBeads(t, store)
+
+			result, err := ProcessControl(store, control, ProcessOptions{CityPath: cityPath})
+			if !errors.Is(err, ErrControlPending) {
+				t.Fatalf("ProcessControl on a blind read = (%+v, %v), want ErrControlPending (re-run without spending the iteration)", result, err)
+			}
+			assertRalphControlInfraRetryPending(t, store, control.ID, "1", beadsBefore)
+		})
+	}
+}
+
+// TestProcessRalphControlVerdictStillBurnsIteration is the compiled-lane
+// counterpart of the blind-read table: an ordinary nonzero exit, and a stderr
+// that merely mentions an infrastructure string, are verdicts. They spend the
+// iteration and never touch the infrastructure budget.
+func TestProcessRalphControlVerdictStillBurnsIteration(t *testing.T) {
+	t.Parallel()
+
+	cases := append([]struct {
+		name   string
+		script string
+	}{{name: "plain exit 1", script: "#!/bin/sh\necho 'tests failed' >&2\nexit 1\n"}}, verdictGateCases...)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cityPath := t.TempDir()
+			checkPath := writeCheckScript(t, cityPath, "verdict-check.sh", tc.script)
+			store, control := newUnlaunchableCheckRalphControl(t, checkPath)
+
+			result, err := ProcessControl(store, control, ProcessOptions{CityPath: cityPath})
+			if err != nil {
+				t.Fatalf("ProcessControl: %v", err)
+			}
+			if !result.Processed || result.Action != "fail" {
+				t.Fatalf("result = %+v, want processed fail (a verdict spends the only iteration)", result)
+			}
+			got := mustGet(t, store, control.ID)
+			if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+				t.Fatalf("control status=%q outcome=%q, want closed fail", got.Status, got.Metadata[beadmeta.OutcomeMetadataKey])
+			}
+			if fa := got.Metadata[beadmeta.FailedAttemptMetadataKey]; fa != "1" {
+				t.Errorf("gc.failed_attempt = %q, want 1", fa)
+			}
+			if r := got.Metadata[beadmeta.CheckInfraRetryMetadataKey]; r != "" {
+				t.Errorf("gc.check_infra_retry = %q, want empty — a verdict must not spend the infra budget", r)
+			}
+		})
 	}
 }

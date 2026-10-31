@@ -76,6 +76,12 @@ type Server struct {
 	// idem caches responses for Idempotency-Key replay on create endpoints.
 	idem *idempotencyCache
 
+	// ops is the operation-journal state of the O0 shadow ops: the per-gate
+	// recorders over the city's shared in-flight registry, and the lazily
+	// opened op store (session_ops.go). Built once, after bootFlags is
+	// latched.
+	ops *serverOps
+
 	// rigIdem is the in-process live index + request_id state machine backing
 	// async server-side rig-create (POST /v0/city/{n}/rigs with a git_url). It
 	// starts empty at boot and is authoritative for admission (G13). One index
@@ -93,6 +99,9 @@ type Server struct {
 	// and is threaded into each factory; otherwise every poll re-parses an
 	// unchanged mirror.
 	activityMemo *worker.DerivedActivityMemo
+	// formulaMemo remembers the formula each acting bead belongs to across the
+	// per-request worker factories (usage attribution).
+	formulaMemo *worker.FormulaNameMemo
 
 	// agentVisibilityWaitTimeout overrides the POST /agents visibility wait
 	// in tests. Zero uses defaultAgentVisibilityWaitTimeout.
@@ -103,6 +112,12 @@ type Server struct {
 	// nothing material has changed.
 	responseCacheMu      sync.Mutex
 	responseCacheEntries map[string]responseCacheEntry
+
+	// responseCacheCfg and responseCacheCfgGen (guarded by responseCacheMu)
+	// track the config snapshot config-derived cache entries were built
+	// from. See configGeneration in response_cache.go.
+	responseCacheCfg    *config.City
+	responseCacheCfgGen uint64
 
 	// responseRefreshing tracks response-cache keys with a background
 	// stale-while-revalidate refresh already in flight (ra-4u2eqc), guarded
@@ -179,6 +194,12 @@ type Server struct {
 	// operator config, never attacker input, so the set is bounded by config.
 	webhookAccessFaultMu     sync.Mutex
 	webhookAccessFaultLogged map[string]struct{}
+
+	// suspensionStateFault is the suspension-state read fault the active-bead
+	// lookup last logged, "" while the file reads; see
+	// suspensionStateFaultChanged.
+	suspensionStateFaultMu sync.Mutex
+	suspensionStateFault   string
 
 	// webhookMaxBody overrides the /hook/ request body cap in tests. Zero uses
 	// defaultMaxWebhookBodyBytes.
@@ -262,6 +283,19 @@ func NewReadOnly(state State) *Server {
 }
 
 func newServer(state State, readOnly bool) *Server {
+	return newServerFor(state, readOnly, nil)
+}
+
+// newCityServer is New or NewReadOnly over city, the operation-journal state
+// the process shares across every Server it builds for the city (session_ops.go).
+func newCityServer(state State, readOnly bool, city *cityOps) *Server {
+	syncFeatureFlags(state.Config())
+	return newServerFor(state, readOnly, city)
+}
+
+// newServerFor builds a Server over city's shared op state; nil gives the
+// Server a city state of its own.
+func newServerFor(state State, readOnly bool, city *cityOps) *Server {
 	mux := http.NewServeMux()
 	s := &Server{
 		state:          state,
@@ -272,6 +306,7 @@ func newServer(state State, readOnly bool) *Server {
 		webhookDedup:   newWebhookDedupCache(defaultWebhookDedupTTL),
 		webhookLimiter: newWebhookRateLimiter(),
 		activityMemo:   worker.NewDerivedActivityMemo(),
+		formulaMemo:    worker.NewFormulaNameMemo(),
 	}
 	// Latch the rollout snapshot once: prefer the State's boot latch (the
 	// production controllerState); fall back to resolving from Config() for
@@ -284,6 +319,7 @@ func newServer(state State, readOnly bool) *Server {
 	} else if cfg := state.Config(); cfg != nil {
 		s.bootFlags, _ = rollout.Resolve(cfg, rollout.ResolveOptions{})
 	}
+	s.ops = newServerOps(s, city)
 	mux.HandleFunc("/svc/", s.handleServiceProxy)
 	// /hook/* webhook receiver — the fourth sanctioned non-Huma surface. Like
 	// /svc/* it is a raw-body pass-through (HMAC/ed25519 sign the exact bytes),

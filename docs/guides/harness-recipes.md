@@ -33,7 +33,7 @@ Two things hold for every recipe:
 | Grok | `grok` | — · `XAI_API_KEY` | yes |
 | Kimi Code | `kimi` | `KIMI_BASE_URL` · `KIMI_API_KEY` | yes |
 | Kiro | `kiro` | — · `KIRO_API_KEY` | — |
-| Cursor Agent | `cursor` | — · `CURSOR_API_KEY` | — |
+| Cursor Agent | `cursor` | — · `CURSOR_API_KEY` | yes |
 | GitHub Copilot | `copilot` | `COPILOT_PROVIDER_BASE_URL` · `COPILOT_PROVIDER_API_KEY` / `COPILOT_GITHUB_TOKEN` | — |
 | Sourcegraph AMP | `amp` | `AMP_URL` · `AMP_API_KEY` | — |
 | OpenCode | `opencode` | gateway (per-upstream) | yes |
@@ -66,7 +66,9 @@ bearer-token gateways).
 # Direct: your existing Claude login or ambient ANTHROPIC_API_KEY
 # agents/dev/agent.toml
 provider        = "claude"
-option_defaults = { model = "sonnet" }     # opus · sonnet · haiku · opus-4-7 · fable-5
+option_defaults = { model = "sonnet", effort = "high" }
+# model:  opus · sonnet · haiku · opus-4-7 · fable-5
+# effort: low · medium · high · xhigh · max (builtin default: max)
 ```
 
 ```toml
@@ -89,8 +91,14 @@ Reads `OPENAI_BASE_URL` and `OPENAI_API_KEY`.
 ```toml
 # Direct
 provider        = "codex"
-option_defaults = { model = "gpt-5.5" }    # gpt-5.6-sol · gpt-5.6-terra · gpt-5.6-luna · gpt-5.5 · gpt-5.3-codex · o3 · o4-mini
+option_defaults = { model = "gpt-5.5" }    # any Codex model id; omit to use ~/.codex/config.toml
 ```
+
+With no `model` or `effort` set, `codex` runs on the model and reasoning
+effort from your own Codex configuration; Gas City passes no `--model` or
+`model_reasoning_effort` flag. Which models are available depends on how Codex
+is logged in (a ChatGPT-account login serves a different set than an API key),
+so pin a model only when you know the account can use it.
 
 ```toml
 # Custom endpoint (an OpenAI-compatible proxy / Azure OpenAI / vLLM)
@@ -136,7 +144,9 @@ Reads `XAI_API_KEY` (key only — no standard base-URL var).
 
 ```toml
 provider        = "grok"
-option_defaults = { model = "grok-build" }  # grok-build · grok-composer-2.5 · grok-composer-2.5-fast
+option_defaults = { model = "grok-4.6" }  # grok-4.7 · grok-4.6 · grok-build · grok-composer-2.5 · grok-composer-2.5-fast
+# `model` and `effort` are open: an id not listed above is passed through to the
+# CLI rather than dropped, so a newly released model works without a gc upgrade.
 
 # direct: just set XAI_API_KEY in the controller environment
 [upstreams.xai]
@@ -148,11 +158,16 @@ api_key = "$XAI_API_KEY"
 
 ### Cursor Agent — `provider = "cursor"`
 
-Reads `CURSOR_API_KEY` (`cursor-agent`; no built-in `model` option — Cursor picks
-the model).
+Reads `CURSOR_API_KEY` (`cursor-agent`).
 
 ```toml
-provider = "cursor"
+provider        = "cursor"
+option_defaults = { model = "auto" }  # auto · composer-2.5 · gpt-5.3-codex · cursor-grok-4.6-high · claude-opus-5-thinking-high · claude-sonnet-5-thinking-high
+# `model` is open: an id not listed above is passed through to the CLI rather
+# than dropped. Cursor's catalog is account-scoped — run `cursor-agent
+# --list-models` to see yours — and accepts parameterized ids such as
+# `claude-opus-4-8[context=1m,effort=high]`.
+
 [upstreams.cursor]
 api_key = "$CURSOR_API_KEY"
 ```

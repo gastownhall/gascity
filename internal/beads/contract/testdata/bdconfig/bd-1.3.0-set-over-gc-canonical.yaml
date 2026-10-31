@@ -1,0 +1,13 @@
+issue_prefix: ex
+issue-prefix: ex
+dolt.auto-start: false
+dolt:
+    disable-event-flush: true
+    user: root
+export.auto: false
+backup.enabled: false
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.host: 127.0.0.1
+dolt.port: 3310
+types.custom: molecule

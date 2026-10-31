@@ -1,12 +1,19 @@
 package resilience
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // OpClassBd is the operation class for bd CLI transport operations
 // (subprocess invocations against the managed Dolt backend). All bd
 // subprocess traffic for a scope shares one breaker so any chokepoint's
 // transport failures protect every other chokepoint.
 const OpClassBd = "bd"
+
+// OpClassSessionStart is the operation class for session starts gated by a
+// shared serving endpoint's capacity.
+const OpClassSessionStart = "session-start"
 
 // Key identifies a breaker: a store scope (canonical scope root path)
 // plus an operation class.
@@ -22,6 +29,8 @@ type Registry struct {
 	mu       sync.Mutex
 	settings Settings
 	onChange func(Transition)
+	// jitter, when set, replaces full jitter on every breaker (tests only).
+	jitter   func(capDur time.Duration) time.Duration
 	breakers map[Key]*Breaker
 }
 
@@ -60,8 +69,33 @@ func (r *Registry) Breaker(scope, opClass string) *Breaker {
 		return b
 	}
 	b := newBreaker(scope, opClass, r.settings, r.onChange)
+	if r.jitter != nil {
+		b.jitter = r.jitter
+	}
 	r.breakers[key] = b
 	return b
+}
+
+// Remove forgets the breaker for (scope, opClass). A later Breaker call
+// creates a fresh closed one. Callers use it to drop scopes that no longer
+// exist; it never fires the transition callback.
+func (r *Registry) Remove(scope, opClass string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.breakers, Key{Scope: scope, OpClass: opClass})
+}
+
+// SetJitterForTest replaces full jitter with fn on the registry's existing
+// and future breakers, so tests can pin or seed backoff deadlines.
+func (r *Registry) SetJitterForTest(fn func(capDur time.Duration) time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.jitter = fn
+	for _, b := range r.breakers {
+		b.mu.Lock()
+		b.jitter = fn
+		b.mu.Unlock()
+	}
 }
 
 // States returns a snapshot of every breaker's current state, for
@@ -76,6 +110,23 @@ func (r *Registry) States() map[Key]State {
 	out := make(map[Key]State, len(breakers))
 	for k, b := range breakers {
 		out[k] = b.State()
+	}
+	return out
+}
+
+// Statuses returns a snapshot of every breaker's Status, for traces and
+// diagnostics surfaces. Like Breaker.Status, it must not be called from a
+// transition callback.
+func (r *Registry) Statuses() map[Key]Status {
+	r.mu.Lock()
+	breakers := make(map[Key]*Breaker, len(r.breakers))
+	for k, b := range r.breakers {
+		breakers[k] = b
+	}
+	r.mu.Unlock()
+	out := make(map[Key]Status, len(breakers))
+	for k, b := range breakers {
+		out[k] = b.Status()
 	}
 	return out
 }

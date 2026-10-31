@@ -467,3 +467,53 @@ func TestHandleProviderPatchDelete_NotFound(t *testing.T) {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
 	}
 }
+
+// Regression for ga-8hk1fe: config composition applies [patches] and then
+// clears them from the composed config, so patch reads must come from the raw
+// (pre-composition) config the patches are declared in. Before the fix every
+// patch read answered 404/empty even though the patch had taken effect, and
+// the unset map/struct fields of a patch serialized as null where the spec
+// declares non-nullable objects.
+func TestPatchReadsServeRawConfigPatchesClearedByComposition(t *testing.T) {
+	fs := newFakeState(t)
+	suspended := true
+	branch := "trunk"
+	command := "patched-cli"
+	raw := *fs.cfg
+	raw.Patches = config.Patches{
+		Agents:    []config.AgentPatch{{Dir: "rig1", Name: "worker", Suspended: &suspended}},
+		Rigs:      []config.RigPatch{{Name: "myrig", DefaultBranch: &branch}},
+		Providers: []config.ProviderPatch{{Name: "claude", Command: &command}},
+	}
+	fs.rawCfg = &raw
+	fs.cfg.Patches = config.Patches{} // composition cleared them after applying
+	h := newTestCityHandler(t, fs)
+
+	for _, path := range []string{
+		"/patches/agents", "/patches/agent/rig1/worker",
+		"/patches/rigs", "/patches/rig/myrig",
+		"/patches/providers", "/patches/provider/claude",
+	} {
+		req := httptest.NewRequest("GET", cityURL(fs, path), nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("GET %s status = %d, want 200; body = %s", path, w.Code, w.Body.String())
+			continue
+		}
+		// The spec declares the map and struct-pointer patch fields as
+		// non-nullable objects; unset ones must be omitted, not sent as null.
+		for _, field := range []string{"Env", "OptionDefaults", "Pool", "ContextAdvisory", "FormulaVars"} {
+			if strings.Contains(w.Body.String(), `"`+field+`":null`) {
+				t.Errorf("GET %s serialized unset %s as null: %s", path, field, w.Body.String())
+			}
+		}
+		if strings.HasSuffix(path, "s") {
+			var resp listResponse
+			json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
+			if resp.Total != 1 {
+				t.Errorf("GET %s total = %d, want 1", path, resp.Total)
+			}
+		}
+	}
+}

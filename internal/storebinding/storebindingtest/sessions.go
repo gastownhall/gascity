@@ -121,14 +121,14 @@ func RunSessionsStoreTests(r Runner, suite SessionsSuite) {
 		store := suite.NewStore(r)
 		created := mustCreateSession(r, store, "closable", nil)
 		now := time.Now().UTC()
-		closed, err := store.Close(created.ID, "done", now)
+		closed, err := store.Close(created, "done", now)
 		if err != nil {
 			r.Fatalf("Close: %v", err)
 		}
 		if !closed {
 			r.Fatalf("the first Close of an open session reported no transition")
 		}
-		again, err := store.Close(created.ID, "done", now)
+		again, err := store.Close(created, "done", now)
 		if err != nil {
 			r.Fatalf("second Close: %v", err)
 		}

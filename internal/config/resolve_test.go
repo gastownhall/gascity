@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -172,10 +173,9 @@ func TestResolveProviderWorkspaceProvider(t *testing.T) {
 		t.Errorf("CommandString() = %q, want %q", rp.CommandString(), "codex")
 	}
 	defaultArgs := rp.ResolveDefaultArgs()
+	// No model or effort flags: codex uses the user's own config for both.
 	codexWantArgs := []string{
 		"--dangerously-bypass-approvals-and-sandbox",
-		"--model", "gpt-5.5",
-		"-c", "model_reasoning_effort=xhigh",
 	}
 	if len(defaultArgs) != len(codexWantArgs) {
 		t.Errorf("ResolveDefaultArgs() = %v, want %v", defaultArgs, codexWantArgs)
@@ -865,9 +865,17 @@ func TestResolveProviderAgentArgsOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
-	// Agent-level args override replaces provider args entirely.
-	if len(rp.Args) != 2 || rp.Args[1] != "--verbose" {
-		t.Errorf("Args = %v, want [--dangerously-skip-permissions --verbose]", rp.Args)
+	// Agent-level args replace provider args entirely. A schema-managed
+	// flag moves out of Args into the option it selects, so the launch
+	// still carries it, once.
+	if !slices.Equal(rp.Args, []string{"--verbose"}) {
+		t.Errorf("Args = %v, want [--verbose]", rp.Args)
+	}
+	if got := rp.EffectiveDefaults["permission_mode"]; got != "unrestricted" {
+		t.Errorf("EffectiveDefaults[permission_mode] = %q, want unrestricted", got)
+	}
+	if got := rp.ResolveDefaultArgs(); !slices.Contains(got, "--dangerously-skip-permissions") {
+		t.Errorf("ResolveDefaultArgs() = %v, want --dangerously-skip-permissions", got)
 	}
 }
 
@@ -1416,40 +1424,236 @@ func TestResolveProviderChainSchemaOnlyChildArgsReplaceInheritedArgs(t *testing.
 	}
 }
 
+// codexSuggestArgShapes are codex args that ask for suggest's approvals.
+// Every shape strips to nothing, so the inferred permission_mode is the only
+// thing standing between the session and the unrestricted default. The
+// shapes without a read-only sandbox match no grouped choice and need a
+// one-group suggest alias.
+var codexSuggestArgShapes = []struct {
+	name string
+	args []string
+}{
+	{name: "retired untrusted spelling", args: []string{"--ask-for-approval", "untrusted", "--sandbox", "read-only"}},
+	{name: "retired untrusted spelling reversed", args: []string{"--sandbox", "read-only", "--ask-for-approval", "untrusted"}},
+	{name: "lone retired untrusted", args: []string{"--ask-for-approval", "untrusted"}},
+	{name: "retired untrusted with workspace-write", args: []string{"--ask-for-approval", "untrusted", "--sandbox", "workspace-write"}},
+	{name: "current suggest flags", args: []string{"--ask-for-approval", "on-request", "--sandbox", "read-only"}},
+	{name: "lone on-request", args: []string{"--ask-for-approval", "on-request"}},
+	{name: "on-request with workspace-write", args: []string{"--ask-for-approval", "on-request", "--sandbox", "workspace-write"}},
+	{name: "workspace-write before on-request", args: []string{"--sandbox", "workspace-write", "--ask-for-approval", "on-request"}},
+}
+
+// assertCodexSuggestPermissionFlags fails unless line carries codex's suggest
+// permission flags once and no flag from another permission choice.
+func assertCodexSuggestPermissionFlags(t *testing.T, source, line string) {
+	t.Helper()
+	if strings.Contains(line, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Fatalf("%s = %q, kept the unrestricted bypass flag", source, line)
+	}
+	// Suggest sends the on-request flags stock codex accepts, never the
+	// retired "untrusted" policy.
+	if !strings.Contains(line, "--ask-for-approval on-request --sandbox read-only") {
+		t.Fatalf("%s = %q, missing suggest permission flags", source, line)
+	}
+	if strings.Contains(line, "untrusted") {
+		t.Fatalf("%s = %q, passes the retired untrusted policy to codex", source, line)
+	}
+	if strings.Count(line, "--sandbox read-only") != 1 {
+		t.Fatalf("%s = %q, want one read-only sandbox flag sequence", source, line)
+	}
+	// No choice pairs on-request with workspace-write, so that request
+	// narrows to suggest's read-only sandbox.
+	if strings.Contains(line, "workspace-write") {
+		t.Fatalf("%s = %q, want suggest's read-only sandbox only", source, line)
+	}
+}
+
 func TestResolveProviderChainCodexSuggestArgsReplaceInheritedUnrestricted(t *testing.T) {
 	builtinCodex := "builtin:codex"
-	providers := map[string]ProviderSpec{
-		"codex-suggest": {
-			Base: &builtinCodex,
-			Args: []string{
-				"--ask-for-approval",
-				"untrusted",
-				"--sandbox",
-				"read-only",
-			},
+	for _, tt := range codexSuggestArgShapes {
+		t.Run(tt.name, func(t *testing.T) {
+			providers := map[string]ProviderSpec{
+				"codex-suggest": {Base: &builtinCodex, Args: tt.args},
+			}
+
+			resolved, err := ResolveProviderChain("codex-suggest", providers["codex-suggest"], providers)
+			if err != nil {
+				t.Fatalf("ResolveProviderChain: %v", err)
+			}
+			if len(resolved.Args) != 0 {
+				t.Fatalf("Args = %v, want schema-managed args stripped", resolved.Args)
+			}
+			if got := resolved.EffectiveDefaults["permission_mode"]; got != "suggest" {
+				t.Fatalf("EffectiveDefaults[permission_mode] = %q, want suggest", got)
+			}
+			assertCodexSuggestPermissionFlags(t, "ResolveDefaultArgs()", strings.Join(resolved.ResolveDefaultArgs(), " "))
+		})
+	}
+}
+
+func TestResolveProviderCodexAgentSuggestArgsReplaceUnrestrictedDefault(t *testing.T) {
+	// Agent args are the leaf layer, and every schema flag in these shapes
+	// belongs to permission_mode, which they select, so they are normalized
+	// like provider args. The launch builder strips every schema flag group
+	// before it appends the effective defaults, so a shape that left
+	// permission_mode at the unrestricted default would launch with the
+	// bypass flag in place of the approvals the agent asked for.
+	for _, tt := range codexSuggestArgShapes {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := &Agent{Name: "scout", Provider: "codex", Args: tt.args}
+			rp, err := ResolveProvider(agent, nil, explicitBuiltins("codex"), lookPathOnly("codex"))
+			if err != nil {
+				t.Fatalf("ResolveProvider: %v", err)
+			}
+			if len(rp.Args) != 0 {
+				t.Fatalf("Args = %v, want schema-managed agent args stripped", rp.Args)
+			}
+			if got := rp.EffectiveDefaults["permission_mode"]; got != "suggest" {
+				t.Fatalf("EffectiveDefaults[permission_mode] = %q, want suggest", got)
+			}
+			launch, err := BuildProviderLaunchCommand("", rp, nil, "")
+			if err != nil {
+				t.Fatalf("BuildProviderLaunchCommand: %v", err)
+			}
+			assertCodexSuggestPermissionFlags(t, "BuildProviderLaunchCommand()", launch.Command)
+			// Session templates join the command and default args without
+			// the launch builder's strip, so both compositions must agree.
+			templateLine := rp.CommandString() + " " + strings.Join(rp.ResolveDefaultArgs(), " ")
+			assertCodexSuggestPermissionFlags(t, "CommandString()+ResolveDefaultArgs()", templateLine)
+		})
+	}
+}
+
+func TestResolveProviderCodexAgentNeverArgsStayAsWritten(t *testing.T) {
+	// --ask-for-approval never is one group of the auto-edit pair, so without
+	// --sandbox workspace-write it selects no permission_mode. Stripped, it
+	// would leave the unrestricted default to launch the bypass flag, beside
+	// a --sandbox read-only that the bypass overrides. Kept as written, it
+	// sits beside the bypass flag in the session template, and codex refuses
+	// to start with both. That holds for the session template only: the
+	// launch builder, which gc session new and API-created sessions use,
+	// still strips every schema flag group and launches the bypass flag
+	// (ga-kg2mqb), so its line is deliberately not asserted here.
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "lone never", args: []string{"--ask-for-approval", "never"}},
+		{name: "never with read-only", args: []string{"--ask-for-approval", "never", "--sandbox", "read-only"}},
+		{name: "read-only before never", args: []string{"--sandbox", "read-only", "--ask-for-approval", "never"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := &Agent{Name: "scout", Provider: "codex", Args: tt.args}
+			rp, err := ResolveProvider(agent, nil, explicitBuiltins("codex"), lookPathOnly("codex"))
+			if err != nil {
+				t.Fatalf("ResolveProvider: %v", err)
+			}
+			if !slices.Equal(rp.Args, tt.args) {
+				t.Fatalf("Args = %v, want the agent args kept as written %v", rp.Args, tt.args)
+			}
+			if got := rp.EffectiveDefaults["permission_mode"]; got != "unrestricted" {
+				t.Fatalf("EffectiveDefaults[permission_mode] = %q, want the unrestricted default", got)
+			}
+			// --sandbox read-only selects sandbox on its own, but the args
+			// are kept whole, so nothing is inferred from them.
+			if got := rp.EffectiveDefaults["sandbox"]; got != "" {
+				t.Fatalf("EffectiveDefaults[sandbox] = %q, want nothing inferred from args kept as written", got)
+			}
+			templateLine := rp.CommandString() + " " + strings.Join(rp.ResolveDefaultArgs(), " ")
+			if !strings.Contains(templateLine, "--ask-for-approval never") {
+				t.Fatalf("CommandString()+ResolveDefaultArgs() = %q, dropped --ask-for-approval never from beside the bypass flag", templateLine)
+			}
+		})
+	}
+}
+
+func TestResolveProviderAgentArgsOverrideSameLayerOptionDefaults(t *testing.T) {
+	tests := []struct {
+		name           string
+		args           []string
+		optionDefaults map[string]string
+		wantArgs       []string
+		wantMode       string
+	}{
+		{
+			name:           "args override the agent's permission_mode default",
+			args:           []string{"--ask-for-approval", "on-request"},
+			optionDefaults: map[string]string{"permission_mode": "auto-edit"},
+			wantMode:       "suggest",
+		},
+		{
+			name:           "agent default applies when args name no option",
+			args:           []string{"--search"},
+			optionDefaults: map[string]string{"permission_mode": "auto-edit"},
+			wantArgs:       []string{"--search"},
+			wantMode:       "auto-edit",
+		},
+		{
+			// The default sets permission_mode, but the args alone select
+			// nothing, so they are not normalized against it.
+			name:           "args that select no option stay as written beside the agent default",
+			args:           []string{"--ask-for-approval", "never"},
+			optionDefaults: map[string]string{"permission_mode": "auto-edit"},
+			wantArgs:       []string{"--ask-for-approval", "never"},
+			wantMode:       "auto-edit",
+		},
+		{
+			name:     "args with no schema flag keep the provider default",
+			args:     []string{"--search"},
+			wantArgs: []string{"--search"},
+			wantMode: "unrestricted",
 		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := &Agent{Name: "scout", Provider: "codex", Args: tt.args, OptionDefaults: tt.optionDefaults}
+			rp, err := ResolveProvider(agent, nil, explicitBuiltins("codex"), lookPathOnly("codex"))
+			if err != nil {
+				t.Fatalf("ResolveProvider: %v", err)
+			}
+			if !slices.Equal(rp.Args, tt.wantArgs) {
+				t.Fatalf("Args = %v, want %v", rp.Args, tt.wantArgs)
+			}
+			if got := rp.EffectiveDefaults["permission_mode"]; got != tt.wantMode {
+				t.Fatalf("EffectiveDefaults[permission_mode] = %q, want %q", got, tt.wantMode)
+			}
+			// The caller's map is configuration; inference must not write
+			// into it.
+			if tt.optionDefaults != nil && tt.optionDefaults["permission_mode"] != "auto-edit" {
+				t.Fatalf("agent OptionDefaults mutated to %v", tt.optionDefaults)
+			}
+		})
+	}
+}
 
-	resolved, err := ResolveProviderChain("codex-suggest", providers["codex-suggest"], providers)
-	if err != nil {
-		t.Fatalf("ResolveProviderChain: %v", err)
-	}
-	if len(resolved.Args) != 0 {
-		t.Fatalf("Args = %v, want schema-managed args stripped", resolved.Args)
-	}
-	if got := resolved.EffectiveDefaults["permission_mode"]; got != "suggest" {
-		t.Fatalf("EffectiveDefaults[permission_mode] = %q, want suggest", got)
-	}
-	defaultArgs := resolved.ResolveDefaultArgs()
-	defaultLine := strings.Join(defaultArgs, " ")
-	if strings.Contains(defaultLine, "--dangerously-bypass-approvals-and-sandbox") {
-		t.Fatalf("ResolveDefaultArgs() = %v, preserved inherited unrestricted flag", defaultArgs)
-	}
-	if !strings.Contains(defaultLine, "--ask-for-approval untrusted --sandbox read-only") {
-		t.Fatalf("ResolveDefaultArgs() = %v, missing suggest permission flags", defaultArgs)
-	}
-	if strings.Count(defaultLine, "--sandbox read-only") != 1 {
-		t.Fatalf("ResolveDefaultArgs() = %v, want one read-only sandbox flag sequence", defaultArgs)
+func TestResolveProviderChainCodexResumeApprovalPolicyBlocksBypassDefault(t *testing.T) {
+	// codex refuses --dangerously-bypass-approvals-and-sandbox beside
+	// --ask-for-approval, so a resume_command that names an approval policy
+	// already carries permission_mode and must not get the unrestricted
+	// default inserted. The match is on the flag, so a policy that selects
+	// no choice, or that codex retired, is kept as written too.
+	builtinCodex := "builtin:codex"
+	for _, policy := range []string{"on-request", "never", "untrusted"} {
+		t.Run(policy, func(t *testing.T) {
+			providers := map[string]ProviderSpec{
+				"codex-ask": {
+					Base:          &builtinCodex,
+					ResumeCommand: "codex resume {{.SessionKey}} --ask-for-approval " + policy,
+				},
+			}
+
+			resolved, err := ResolveProviderChain("codex-ask", providers["codex-ask"], providers)
+			if err != nil {
+				t.Fatalf("ResolveProviderChain: %v", err)
+			}
+			if strings.Contains(resolved.ResumeCommand, "--dangerously-bypass-approvals-and-sandbox") {
+				t.Fatalf("ResumeCommand = %q, inserted the bypass default beside an explicit approval policy", resolved.ResumeCommand)
+			}
+			if !strings.Contains(resolved.ResumeCommand, "{{.SessionKey}} --ask-for-approval "+policy) {
+				t.Fatalf("ResumeCommand = %q, lost the explicit approval policy", resolved.ResumeCommand)
+			}
+		})
 	}
 }
 

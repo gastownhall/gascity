@@ -4,10 +4,15 @@ import (
 	"bytes"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/BurntSushi/toml"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 const testCommit = "abcdef123456abcdef123456abcdef123456abcd"
@@ -85,7 +90,10 @@ func TestGascityBundledSubpathsExistInWorkingTree(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed; cannot locate repo root")
 	}
-	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
+	repoRoot := bazeltest.OverrideRoot()
+	if repoRoot == "" {
+		repoRoot = filepath.Join(filepath.Dir(thisFile), "..", "..")
+	}
 	for _, pack := range All() {
 		if pack.Subpath == "" {
 			continue
@@ -408,6 +416,9 @@ func writeFile(t *testing.T, path, data string) {
 
 func testRepoRoot(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
@@ -665,5 +676,108 @@ func TestManifestForPackMatchesUncached(t *testing.T) {
 				t.Fatalf("pack %s: memoized manifest differs for %s", pack.Name, rel)
 			}
 		}
+	}
+}
+
+// TestBundledSubpacksLiveInsideTheirParent pins the bundled-subpack contract
+// (ga-73eoo). A registered subpack must sit inside its parent's embedded tree
+// as a real pack (pack.toml whose [pack].name is the subpack's name), follow
+// its parent's pin, and add no synthetic layout of its own: the parent's
+// materialization, file-set validation and content hash already cover its
+// files, so registering one must not change cache keys or the cache tree.
+func TestBundledSubpacksLiveInsideTheirParent(t *testing.T) {
+	if len(bundledSubpacks()) == 0 {
+		t.Fatal("no bundled subpacks registered; gascity/roles (ga-73eoo) must stay bundled")
+	}
+	for _, sub := range bundledSubpacks() {
+		parent, ok := ByName(sub.Parent)
+		if !ok {
+			t.Fatalf("subpack %q: parent %q is not a bundled pack", sub.Name, sub.Parent)
+		}
+		if _, ok := ByName(sub.Name); ok {
+			t.Errorf("subpack %q must not also be a bundled pack name (All/Source/CanonicalImportSource stay unchanged)", sub.Name)
+		}
+		data, err := fs.ReadFile(parent.FS, path.Join(sub.Dir, "pack.toml"))
+		if err != nil {
+			t.Fatalf("subpack %q: parent %q embeds no %s/pack.toml: %v (did gascity-packs move it? update bundledSubpacks and config.PublicGascityRolesPackSource together)", sub.Name, sub.Parent, sub.Dir, err)
+		}
+		var meta struct {
+			Pack struct {
+				Name string `toml:"name"`
+			} `toml:"pack"`
+		}
+		if _, err := toml.Decode(string(data), &meta); err != nil {
+			t.Fatalf("subpack %q: parsing %s/pack.toml: %v", sub.Name, sub.Dir, err)
+		}
+		if meta.Pack.Name != sub.Name {
+			t.Errorf("subpack registered as %q but %s/pack.toml names %q", sub.Name, sub.Dir, meta.Pack.Name)
+		}
+		if got := PinnedWith(sub.Name); got != sub.Parent {
+			t.Errorf("PinnedWith(%q) = %q, want parent %q", sub.Name, got, sub.Parent)
+		}
+		placed := 0
+		for _, layout := range subpackLayouts() {
+			if layout.Name != sub.Name {
+				continue
+			}
+			placed++
+			if !KnownRepository(layout.Repository) {
+				t.Errorf("subpack %q placed in unknown repository %q", sub.Name, layout.Repository)
+			}
+		}
+		if placed == 0 {
+			t.Errorf("subpack %q has no placement: its parent %q has no synthetic layout with a subpath", sub.Name, sub.Parent)
+		}
+		for _, layout := range syntheticPackLayouts() {
+			if layout.Pack.Name == sub.Name {
+				t.Errorf("subpack %q must not be a synthetic layout (it would be materialized and hashed twice)", sub.Name)
+			}
+		}
+	}
+	if got := PinnedWith("gascity"); got != "gascity" {
+		t.Errorf("PinnedWith(gascity) = %q, want itself", got)
+	}
+}
+
+// TestSourceLayoutRecognizesOnlyRegisteredSubpacks pins what ga-73eoo makes
+// bundled: exactly the registered nested subpack, in every spelling the
+// parent's own source is recognized in, reported under its own name. Other
+// paths under the parent are not packs and stay ordinary remote imports, and
+// the subpack never answers to the parent's name (the gascity-pack-binding
+// doctor check depends on that).
+func TestSourceLayoutRecognizesOnlyRegisteredSubpacks(t *testing.T) {
+	cases := []struct {
+		src  string
+		name string
+		ok   bool
+	}{
+		{"https://github.com/gastownhall/gascity-packs/tree/main/gascity/roles", "gc-roles", true},
+		{"https://github.com/gastownhall/gascity-packs/tree/main/gascity/roles/", "gc-roles", true},
+		{"https://github.com/gastownhall/gascity-packs.git//gascity/roles", "gc-roles", true},
+		{"https://github.com/gastownhall/gascity-packs//gascity/roles", "gc-roles", true},
+		{"github.com/gastownhall/gascity-packs//gascity/roles", "gc-roles", true},
+		{"https://github.com/gastownhall/gascity-packs.git//gascity/roles#main", "gc-roles", true},
+		{"https://github.com/gastownhall/gascity-packs/tree/main/gascity", "gascity", true},
+		{"https://github.com/gastownhall/gascity-packs/tree/main/gascity/formulas", "", false},
+		{"https://github.com/gastownhall/gascity-packs/tree/main/gascity/roles/agents", "", false},
+		{"https://github.com/gastownhall/gascity-packs/tree/main/gascity/rolesx", "", false},
+		{"https://github.com/gastownhall/gascity-packs/tree/main/gastown/roles", "", false},
+		{"https://github.com/gastownhall/gascity-packs/tree/main/roles", "", false},
+		{"https://github.com/gastownhall/gascity.git//gascity/roles", "", false},
+		{"https://github.com/example/gascity-packs/tree/main/gascity/roles", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.src, func(t *testing.T) {
+			name, repository, ok := SourceLayout(tc.src)
+			if ok != tc.ok || name != tc.name {
+				t.Fatalf("SourceLayout(%q) = (%q, %q, %v), want (%q, _, %v)", tc.src, name, repository, ok, tc.name, tc.ok)
+			}
+			if ok && repository != PublicRepository {
+				t.Fatalf("SourceLayout(%q) repository = %q, want %q", tc.src, repository, PublicRepository)
+			}
+			if got := IsSource(tc.src); got != tc.ok {
+				t.Fatalf("IsSource(%q) = %v, want %v", tc.src, got, tc.ok)
+			}
+		})
 	}
 }

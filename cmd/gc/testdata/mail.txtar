@@ -17,7 +17,7 @@ cd $WORK/bright-lights
 
 # Human sends a durable message to the configured agent.
 exec gc mail send mayor 'hey, are you still there?'
-stdout 'Sent message gc-1 to mayor'
+stdout 'Sent message bl-1 to mayor'
 
 exec gc mail check mayor
 
@@ -28,7 +28,7 @@ stdout 'hey, are you still there?'
 # The configured agent can reply and a fresh human process sees it.
 env GC_ALIAS=mayor
 exec gc mail send human 'yes, still working'
-stdout 'Sent message gc-2 to human'
+stdout 'Sent message bl-2 to human'
 
 env GC_ALIAS=
 exec gc mail inbox

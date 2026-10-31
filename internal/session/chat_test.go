@@ -1,6 +1,8 @@
 package session
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -395,7 +397,7 @@ func TestSessionMutationLocksSerializeSameSession(t *testing.T) {
 // republishes the pre-reset conversation identity.
 func TestCommitPendingContinuationResetBumpsAndClears(t *testing.T) {
 	store := beads.NewMemStore()
-	m := NewManagerWithOptions(store, runtime.NewFake())
+	m := newTestManager(t, store, runtime.NewFake())
 	b, err := store.Create(beads.Bead{Title: "session", Metadata: map[string]string{
 		"continuation_epoch":         "3",
 		"continuation_reset_pending": "true",
@@ -442,7 +444,7 @@ func TestCommitPendingContinuationResetBumpsAndClears(t *testing.T) {
 // would rotate on one entry path and not the other.
 func TestRequestFreshRestartRecordsIntentAndConsumerRotatesOnce(t *testing.T) {
 	store := beads.NewMemStore()
-	m := NewManagerWithOptions(store, runtime.NewFake())
+	m := newTestManager(t, store, runtime.NewFake())
 	b, err := store.Create(beads.Bead{Title: "session", Type: BeadType, Metadata: map[string]string{
 		"state":              string(StateActive),
 		"continuation_epoch": "2",
@@ -498,5 +500,36 @@ func TestPendingConversationRestartDefersDelivery(t *testing.T) {
 		if got := pendingConversationRestart(beads.Bead{Metadata: meta}); got != want {
 			t.Errorf("%s: pendingConversationRestart = %v, want %v", name, got, want)
 		}
+	}
+}
+
+// A resumed or respawned session pushes over SSH just like a freshly created
+// one, so both chat.go start sites must inject the keepalive that
+// createStarted does. Without it a long pre-push hook idles the transport
+// until the push dies with SIGPIPE (ga-2i5).
+func TestResumeInjectsSSHKeepalive(t *testing.T) {
+	for name, start := range map[string]func(*Manager, Info) error{
+		"Start": func(m *Manager, info Info) error {
+			return m.Start(context.Background(), testActor(m, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+		},
+		"StartRuntimeOnly": func(m *Manager, info Info) error {
+			return startRuntimeOnly(t, m, info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("GIT_SSH_COMMAND", "")
+			mgr, sp, info := seedSuspendedResumeTarget(t)
+
+			if err := start(mgr, info); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			cfg := sp.LastStartConfig(info.SessionName)
+			if cfg == nil {
+				t.Fatalf("Start call not recorded; events = %v", sp.events)
+			}
+			if !strings.Contains(cfg.Env["GIT_SSH_COMMAND"], "ServerAliveInterval") {
+				t.Fatalf("GIT_SSH_COMMAND = %q, want SSH keepalive", cfg.Env["GIT_SSH_COMMAND"])
+			}
+		})
 	}
 }

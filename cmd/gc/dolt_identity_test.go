@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -108,5 +110,60 @@ func TestStoreIdentityHold(t *testing.T) {
 		if probed != tc.wantProbed {
 			t.Errorf("%s: identity probed = %v, want %v (probe must be gated to a pending drain)", name, probed, tc.wantProbed)
 		}
+	}
+}
+
+// TestManagedDoltServingDataDirWithPasswordUsesDirectQuery pins that a
+// configured managed password sends the @@datadir read through the pooled
+// driver connection, not the dolt CLI, where a `default` dolt profile's
+// password would outrank DOLT_CLI_PASSWORD (see runManagedDoltSQLContext).
+func TestManagedDoltServingDataDirWithPasswordUsesDirectQuery(t *testing.T) {
+	doltInvocations := installFailingDoltRecorder(t)
+	t.Setenv("GC_DOLT_PASSWORD", "secret")
+	restore := managedDoltServingDataDirDirectFn
+	t.Cleanup(func() { managedDoltServingDataDirDirectFn = restore })
+	var gotPort string
+	managedDoltServingDataDirDirectFn = func(_ context.Context, port string) (string, error) {
+		gotPort = port
+		return "/srv/dolt", nil
+	}
+
+	got, err := managedDoltServingDataDir(context.Background(), "3311")
+	if err != nil {
+		t.Fatalf("managedDoltServingDataDir() error = %v", err)
+	}
+	if got != "/srv/dolt" || gotPort != "3311" {
+		t.Fatalf("managedDoltServingDataDir() = %q from port %q, want /srv/dolt from the direct read on 3311", got, gotPort)
+	}
+	if invocations := doltInvocations(); invocations != "" {
+		t.Fatalf("dolt CLI ran with GC_DOLT_PASSWORD set: %s", invocations)
+	}
+}
+
+// TestManagedDoltServingDataDirWithPasswordAgainstRealServer reads @@datadir
+// from a real passworded server while a failing dolt is first on PATH, so the
+// read can only have gone over the driver connection. Dolt 2.1.x reports an
+// empty @@datadir however the server is started, so the returned value is
+// pinned by TestManagedDoltServingDataDirWithPasswordUsesDirectQuery; this test
+// pins that the passworded read succeeds and never reports a mismatch.
+func TestManagedDoltServingDataDirWithPasswordAgainstRealServer(t *testing.T) {
+	realDolt, err := exec.LookPath("dolt")
+	if err != nil {
+		t.Skip("dolt not installed")
+	}
+	t.Setenv("GC_DOLT_REAL_BINARY", realDolt)
+	doltInvocations := installFailingDoltRecorder(t)
+	repoDir, port, _, cleanup := startPasswordedDoltServer(t, "")
+	defer cleanup()
+
+	got, err := managedDoltServingDataDir(context.Background(), strconv.Itoa(port))
+	if err != nil {
+		t.Fatalf("managedDoltServingDataDir() error = %v", err)
+	}
+	if dataDirIsMismatch(got, repoDir) {
+		t.Fatalf("managedDoltServingDataDir() = %q, a mismatch with the server's data dir %q", got, repoDir)
+	}
+	if invocations := doltInvocations(); invocations != "" {
+		t.Fatalf("dolt CLI ran with GC_DOLT_PASSWORD set: %s", invocations)
 	}
 }

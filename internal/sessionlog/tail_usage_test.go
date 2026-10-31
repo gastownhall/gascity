@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExtractTailUsageReturnsEntriesInFileOrder(t *testing.T) {
@@ -146,6 +147,99 @@ func TestExtractTailUsageCollapsesContentBlockEntriesByMessageID(t *testing.T) {
 	for i, w := range want {
 		if usages[i] != w {
 			t.Errorf("usages[%d] = %+v, want %+v", i, usages[i], w)
+		}
+	}
+}
+
+func TestExtractTailUsageCapturesEntryTimestamp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+
+	writeTailJSONL(t, path, []map[string]any{
+		{
+			"type":      "assistant",
+			"uuid":      "u1",
+			"timestamp": "2026-08-31T12:34:56.789Z",
+			"message": map[string]any{
+				"role":  "assistant",
+				"model": "claude-opus-4-7",
+				"usage": map[string]any{"input_tokens": 100, "output_tokens": 50},
+			},
+		},
+		// No timestamp field — Timestamp stays zero rather than defaulting to now.
+		{
+			"type": "assistant",
+			"uuid": "u2",
+			"message": map[string]any{
+				"role":  "assistant",
+				"model": "claude-opus-4-7",
+				"usage": map[string]any{"input_tokens": 7, "output_tokens": 3},
+			},
+		},
+	})
+
+	usages, err := ExtractTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractTailUsage: %v", err)
+	}
+	if len(usages) != 2 {
+		t.Fatalf("ExtractTailUsage = %d entries, want 2: %+v", len(usages), usages)
+	}
+	want := time.Date(2026, 8, 31, 12, 34, 56, 789000000, time.UTC)
+	if !usages[0].Timestamp.Equal(want) {
+		t.Errorf("usages[0].Timestamp = %v, want %v", usages[0].Timestamp, want)
+	}
+	if !usages[1].Timestamp.IsZero() {
+		t.Errorf("usages[1].Timestamp = %v, want zero", usages[1].Timestamp)
+	}
+}
+
+// TestExtractTailUsageToleratesOffFormatTimestamp pins that an off-format
+// timestamp costs only the timestamp, never the entry. tailEntry is the
+// shared decoder, so a strict time.Time field would fail json.Unmarshal for
+// the whole line and drop the usage with it.
+func TestExtractTailUsageToleratesOffFormatTimestamp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+
+	entry := func(uuid string, timestamp any, in, out int) map[string]any {
+		return map[string]any{
+			"type":      "assistant",
+			"uuid":      uuid,
+			"timestamp": timestamp,
+			"message": map[string]any{
+				"role":  "assistant",
+				"id":    "msg-" + uuid,
+				"model": "claude-opus-4-7",
+				"usage": map[string]any{"input_tokens": in, "output_tokens": out},
+			},
+		}
+	}
+
+	writeTailJSONL(t, path, []map[string]any{
+		entry("u1", 1770000000, 100, 50),            // numeric epoch
+		entry("u2", "", 200, 60),                    // empty string
+		entry("u3", "2026-08-31 12:34:56", 300, 70), // space-separated, not RFC3339
+	})
+
+	usages, err := ExtractTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractTailUsage: %v", err)
+	}
+	if len(usages) != 3 {
+		t.Fatalf("ExtractTailUsage = %d entries, want 3 (an off-format timestamp must not drop the entry): %+v", len(usages), usages)
+	}
+	wantInput := []int{100, 200, 300}
+	wantOutput := []int{50, 60, 70}
+	for i, u := range usages {
+		if u.InputTokens != wantInput[i] || u.OutputTokens != wantOutput[i] {
+			t.Errorf("usages[%d] tokens = (%d, %d), want (%d, %d)", i, u.InputTokens, u.OutputTokens, wantInput[i], wantOutput[i])
+		}
+		if u.Model != "claude-opus-4-7" {
+			t.Errorf("usages[%d].Model = %q, want claude-opus-4-7", i, u.Model)
+		}
+		if !u.Timestamp.IsZero() {
+			t.Errorf("usages[%d].Timestamp = %v, want zero (unparseable)", i, u.Timestamp)
 		}
 	}
 }

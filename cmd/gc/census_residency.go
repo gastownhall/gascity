@@ -122,6 +122,57 @@ func routedWorkStoreCandidates(
 	return censusLegCandidates(storeref.RoutedWork{}, storeref.PlaneRuntime, cityPath, cfg, leading, rigStores, suspendedRigPaths, style)
 }
 
+// routedWorkCityDemandLegs resolves the CITY-SCOPE legs the default pool-demand
+// probe counts a city-scope route over: Plan(RoutedWork) on the reconcile plane
+// — the work ledger, then every relocated class binding — with the rig legs
+// dropped, because a pool's own rig leg is its own target and other rigs were
+// never part of its default probe.
+//
+// It is NOT routedWorkStoreCandidates. That one narrows to the runtime plane
+// (the bindings) on the ruling that routed work never lives in the work ledger;
+// `gc sling` and formula dispatch stamp gc.routed_to on work-class beads that do
+// live there, and `gc ready` — the reader a seat claims through — federates the
+// unnarrowed plan and serves them. A count that skips the ledger leg is a
+// claimable bead counted by nobody, so the pool never spawns for it (#6019).
+// The leg order is the plan's, so a bead co-resident in the ledger and the
+// binding resolves to the ledger's row here exactly as it does on the claim side.
+//
+// It returns nil for a city that relocates nothing (no class leg survives the
+// plan's dedupe): the probe's one city target is already the whole answer there,
+// and a single-store city must not gain a read on the tick. An unplannable
+// topology returns its error; the caller keeps the legacy single target and
+// marks it partial with that error.
+func routedWorkCityDemandLegs(
+	cityPath string,
+	cfg *config.City,
+	leading beads.Store,
+	rigStores map[string]beads.Store,
+	suspendedRigPaths map[string]bool,
+) ([]classStoreCandidate, error) {
+	legs, err := censusLegCandidates(storeref.RoutedWork{}, storeref.PlaneReconcile, cityPath, cfg, leading, rigStores, suspendedRigPaths, censusRefScoped)
+	if err != nil {
+		return nil, err
+	}
+	var cityLegs []classStoreCandidate
+	relocated := false
+	for _, leg := range legs {
+		if leg.store == nil {
+			continue
+		}
+		if rig, _ := storeref.ScopeRigContext(leg.ref); rig != "" {
+			continue
+		}
+		if storeref.IsClassRef(leg.ref) {
+			relocated = true
+		}
+		cityLegs = append(cityLegs, leg)
+	}
+	if !relocated {
+		return nil, nil
+	}
+	return cityLegs, nil
+}
+
 // sessionCensusStoreCandidates resolves the SESSION census leg set. It differs
 // from the work census in one way that matters: the sessions binding LEADS.
 //
@@ -245,6 +296,8 @@ func censusCityName(cfg *config.City) string {
 }
 
 // servingRigStores is the suspension FRAME: the rig legs a census may read.
+// `gc ready` opens exactly this frame (readyServingRigs), so a row the census
+// counts is a row a seat can claim, and a suspended rig's row is neither.
 //
 // It keeps the pre-resolver rule exactly — a rig is a leg when it is DECLARED in
 // cfg.Rigs, its store is open, and its path is not suspended — so an entry in

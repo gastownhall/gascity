@@ -44,7 +44,7 @@ func TestReleaseOrphanedPoolAssignments_RetainsProtectedWakeWork(t *testing.T) {
 		store, beads.SessionStore{Store: store}, testPoolReleaseConfig(), "", nil,
 		[]beads.Bead{work}, []beads.Store{store}, nil, nil,
 		map[storeScopedBeadKey]struct{}{{ID: work.ID}: {}},
-		nil,
+		nil, nil,
 	)
 	if len(released) != 0 {
 		t.Fatalf("released %v — protected wake work was reopened; the release arm ran ahead of the wake arm it must yield to", released)
@@ -68,7 +68,7 @@ func TestReleaseOrphanedPoolAssignments_EmptyProtectedSetStillReleases(t *testin
 		store, beads.SessionStore{Store: store}, testPoolReleaseConfig(), "", nil,
 		[]beads.Bead{work}, []beads.Store{store}, nil, nil,
 		nil,
-		nil,
+		nil, nil,
 	)
 	if len(released) != 1 || released[0].ID != work.ID {
 		t.Fatalf("released = %v, want exactly the dead-assignee bead %s", released, work.ID)
@@ -108,7 +108,7 @@ func TestReleaseOrphanedPoolAssignments_ProtectsAliasAssignedRigWork(t *testing.
 		cityStore, beads.SessionStore{Store: cityStore}, testPoolReleaseConfig(), "", nil,
 		[]beads.Bead{work}, []beads.Store{ownerStore}, nil, nil,
 		map[storeScopedBeadKey]struct{}{{ID: work.ID}: {}},
-		nil,
+		nil, nil,
 	)
 	if len(released) != 0 {
 		t.Fatalf("released %v — alias-assigned rig-store work was reopened despite wake protection", released)
@@ -166,7 +166,7 @@ func TestReleaseOrphanedPoolAssignments_ProtectionDoesNotCrossStoreIDCollision(t
 		storeA, beads.SessionStore{Store: storeA}, testPoolReleaseConfig(), "", nil,
 		[]beads.Bead{aWork, bWork}, []beads.Store{storeA, storeB}, []string{"", "rig:b"}, nil,
 		protectedWakeWorkKeys([]beads.Bead{aWork}, []string{""}),
-		nil,
+		nil, nil,
 	)
 	if len(released) != 1 || released[0].ID != bWork.ID {
 		t.Fatalf("released = %v, want exactly storeB's %s — storeA's wake candidate shielded a same-ID bead in another store", released, bWork.ID)

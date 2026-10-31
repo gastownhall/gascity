@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -600,6 +602,35 @@ func (s *projectionConflictStore) WaitForParentProjection(_ context.Context, _, 
 	return beads.ErrParentProjectionSuperseded
 }
 
+type projectionWaitErrorStore struct {
+	beads.Store
+	err         error
+	hasDeadline bool
+	// budget is the time left before the wait's deadline when it started.
+	budget time.Duration
+}
+
+func (s *projectionWaitErrorStore) WaitForParentProjection(ctx context.Context, _, _, _ string) error {
+	var deadline time.Time
+	deadline, s.hasDeadline = ctx.Deadline()
+	s.budget = time.Until(deadline)
+	return s.err
+}
+
+// projectionWaitClientGoneStore models a client that disconnects mid-wait
+// after a backend read had already failed with its own timeout: the returned
+// error carries both context errors.
+type projectionWaitClientGoneStore struct {
+	beads.Store
+	disconnect func()
+}
+
+func (s *projectionWaitClientGoneStore) WaitForParentProjection(ctx context.Context, id, _, _ string) error {
+	s.disconnect()
+	<-ctx.Done()
+	return fmt.Errorf("updating bead %q: waiting for parent projection: %w (last check error: %w)", id, ctx.Err(), fmt.Errorf("bd list: %w", context.DeadlineExceeded))
+}
+
 // TestBeadListBoundedReadIsStableOrderedPrefixAcrossRigs pins the #3208
 // contract: a limit-bounded GET /beads returns a deterministic prefix of one
 // global (created_at DESC, id DESC) total order across rig stores — not a
@@ -973,49 +1004,6 @@ func TestBeadListInProgressUsesLiveLookup(t *testing.T) {
 	}
 	if resp.Total != 1 || len(resp.Items) != 1 || resp.Items[0].ID != work.ID {
 		t.Fatalf("in_progress beads = %+v, want only %s", resp.Items, work.ID)
-	}
-}
-
-func TestBeadReadyUsesLiveLookup(t *testing.T) {
-	state := newFakeState(t)
-	backing := beads.NewMemStore()
-	blocker, err := backing.Create(beads.Bead{Title: "blocker"})
-	if err != nil {
-		t.Fatalf("Create(blocker): %v", err)
-	}
-	ready, err := backing.Create(beads.Bead{Title: "ready"})
-	if err != nil {
-		t.Fatalf("Create(ready): %v", err)
-	}
-	if err := backing.DepAdd(ready.ID, blocker.ID, "blocks"); err != nil {
-		t.Fatalf("DepAdd: %v", err)
-	}
-	cache := beads.NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-	state.stores["myrig"] = cache
-	if err := backing.Close(blocker.ID); err != nil {
-		t.Fatalf("Close(blocker): %v", err)
-	}
-
-	h := newTestCityHandler(t, state)
-	req := httptest.NewRequest("GET", cityURL(state, "/beads/ready"), nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-
-	var resp struct {
-		Items []beads.Bead `json:"items"`
-		Total int          `json:"total"`
-	}
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Total != 1 || len(resp.Items) != 1 || resp.Items[0].ID != ready.ID {
-		t.Fatalf("ready beads = %+v, want only %s", resp.Items, ready.ID)
 	}
 }
 
@@ -1405,6 +1393,68 @@ func TestBeadUpdateSkipsParentProjectionWaitForClosedBead(t *testing.T) {
 	}
 }
 
+// TestBeadUpdateParentProjectionWaitSkipsOnlyAnUpdateThatCloses pins the wait
+// gate to the update's own close intent, spelled as the close gate reads it:
+// reparenting a bead that is already closed still waits, since the stores'
+// projection checks count closed children, and a closing status in any case
+// skips the wait just as it takes the close gate.
+func TestBeadUpdateParentProjectionWaitSkipsOnlyAnUpdateThatCloses(t *testing.T) {
+	for name, tc := range map[string]struct {
+		closeFirst bool
+		status     string
+		wantWaits  int
+	}{
+		"reparenting an already-closed bead": {closeFirst: true, wantWaits: 1},
+		"closing in another case":            {status: "Closed ", wantWaits: 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			state := newFakeState(t)
+			store := newLaggyParentProjectionStore()
+			state.stores["myrig"] = store
+			parent, err := store.Create(beads.Bead{Title: "Parent"})
+			if err != nil {
+				t.Fatalf("Create(parent): %v", err)
+			}
+			child, err := store.Create(beads.Bead{Title: "Child"})
+			if err != nil {
+				t.Fatalf("Create(child): %v", err)
+			}
+			if tc.closeFirst {
+				if err := store.Close(child.ID); err != nil {
+					t.Fatalf("Close(child): %v", err)
+				}
+			}
+			h := newTestCityHandler(t, state)
+
+			fields := map[string]string{"parent": parent.ID}
+			if tc.status != "" {
+				fields["status"] = tc.status
+			}
+			body, err := json.Marshal(fields)
+			if err != nil {
+				t.Fatalf("Marshal(body): %v", err)
+			}
+			req := newPostRequest(cityURL(state, "/bead/")+child.ID+"/update", bytes.NewReader(body))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("update status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			got, err := store.Get(child.ID)
+			if err != nil {
+				t.Fatalf("Get(child): %v", err)
+			}
+			if got.ParentID != parent.ID {
+				t.Fatalf("parent after update = %q, want %q", got.ParentID, parent.ID)
+			}
+			if store.waitCalls != tc.wantWaits {
+				t.Fatalf("waitCalls = %d, want %d", store.waitCalls, tc.wantWaits)
+			}
+		})
+	}
+}
+
 func TestBeadUpdateReturnsConflictWhenParentProjectionIsSuperseded(t *testing.T) {
 	state := newFakeState(t)
 	store := &projectionConflictStore{Store: beads.NewMemStore()}
@@ -1428,6 +1478,89 @@ func TestBeadUpdateReturnsConflictWhenParentProjectionIsSuperseded(t *testing.T)
 	}
 	if store.waitCalls != 1 {
 		t.Fatalf("waitCalls = %d, want 1", store.waitCalls)
+	}
+}
+
+func TestBeadUpdateParentProjectionWaitHasDeadlineAndMapsErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		waitErr    error
+		wantStatus int
+	}{
+		{name: "deleted", waitErr: beads.ErrNotFound, wantStatus: http.StatusConflict},
+		{name: "timed out", waitErr: context.DeadlineExceeded, wantStatus: http.StatusGatewayTimeout},
+		// The shape the backend waiters return: the deadline plus the last
+		// failed check, both wrapped.
+		{name: "timed out after failed check", waitErr: fmt.Errorf("updating bead %q: waiting for parent projection: %w (last check error: %w)", "b", context.DeadlineExceeded, errors.New("bd list: invalid connection")), wantStatus: http.StatusGatewayTimeout},
+		{name: "canceled", waitErr: fmt.Errorf("updating bead %q: waiting for parent projection: %w", "b", context.Canceled), wantStatus: http.StatusServiceUnavailable},
+		{name: "failed", waitErr: errors.New("bd list: invalid connection"), wantStatus: http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			defer captureLog(t, &logs)()
+			state := newFakeState(t)
+			store := &projectionWaitErrorStore{Store: beads.NewMemStore(), err: tc.waitErr}
+			state.stores["myrig"] = store
+			parent, err := store.Create(beads.Bead{Title: "Parent"})
+			if err != nil {
+				t.Fatalf("Create(parent): %v", err)
+			}
+			child, err := store.Create(beads.Bead{Title: "Child"})
+			if err != nil {
+				t.Fatalf("Create(child): %v", err)
+			}
+			h := newTestCityHandler(t, state)
+			req := newPostRequest(cityURL(state, "/bead/")+child.ID+"/update", bytes.NewBufferString(`{"parent":"`+parent.ID+`"}`))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d, body: %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if !store.hasDeadline {
+				t.Fatal("parent projection wait had no deadline")
+			}
+			// The lower bound only rules out a much shorter wait; it leaves
+			// room for a slow test host.
+			if store.budget <= beadParentProjectionWaitTimeout/2 || store.budget > beadParentProjectionWaitTimeout {
+				t.Fatalf("parent projection wait budget = %v, want at most %v and more than half of it", store.budget, beadParentProjectionWaitTimeout)
+			}
+			if tc.wantStatus == http.StatusConflict {
+				return
+			}
+			// Every non-409 failure is logged: the 503/504 bodies are fixed
+			// sentences, so the log is where an operator sees why the wait
+			// stopped.
+			if !slices.ContainsFunc(strings.Split(logs.String(), "\n"), func(line string) bool {
+				return strings.Contains(line, child.ID) && strings.Contains(line, tc.waitErr.Error())
+			}) {
+				t.Fatalf("log = %q, want a line with bead %s and the waiter error %q", logs.String(), child.ID, tc.waitErr)
+			}
+		})
+	}
+}
+
+// The status comes from why this request's wait stopped, not from an earlier
+// backend timeout that the waiter's error also carries.
+func TestBeadUpdateClientDisconnectDuringWaitIs503(t *testing.T) {
+	state := newFakeState(t)
+	reqCtx, disconnect := context.WithCancel(t.Context())
+	defer disconnect()
+	store := &projectionWaitClientGoneStore{Store: beads.NewMemStore(), disconnect: disconnect}
+	state.stores["myrig"] = store
+	parent, err := store.Create(beads.Bead{Title: "Parent"})
+	if err != nil {
+		t.Fatalf("Create(parent): %v", err)
+	}
+	child, err := store.Create(beads.Bead{Title: "Child"})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	h := newTestCityHandler(t, state)
+	req := newPostRequest(cityURL(state, "/bead/")+child.ID+"/update", bytes.NewBufferString(`{"parent":"`+parent.ID+`"}`)).WithContext(reqCtx)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 for a client that went away, body: %s", rec.Code, rec.Body.String())
 	}
 }
 
