@@ -2079,6 +2079,15 @@ formulas_dir = "beta-formulas"
 		t.Errorf("formulas without --rig = %v, want every layer %v", got, want)
 	}
 
+	t.Setenv("GC_RIG", "beta")
+	got, err = list("")
+	if err != nil {
+		t.Fatalf("formula list with GC_RIG=beta: %v", err)
+	}
+	if want := []string{"alpha-work", "beta-work", "city-work"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("GC_RIG must not narrow bare list: got %v, want %v", got, want)
+	}
+
 	if _, err := list("nope"); err == nil || !strings.Contains(err.Error(), `rig "nope" not found`) {
 		t.Errorf("--rig nope error = %v, want rig not found", err)
 	}
