@@ -210,8 +210,8 @@ type hookClaimOptions struct {
 	// in, read off the session row the claim fence verified
 	// (hookClaimPoolSeatWorkDir). It is empty for a named, manual or
 	// session-less claimant and whenever the fence did not read the row, and
-	// empty turns the worktree check of the fresh-claim tier off
-	// (hookClaimWorktreeHeldElsewhere).
+	// empty turns the seat checks of the fresh-claim tier off
+	// (hookClaimSeatLeaves).
 	PoolSeatWorkDir string
 }
 
@@ -1077,12 +1077,18 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	claimsErrored := false
 	now := ops.nowOrWallClock()
 	seatManaged := hookClaimLazySeatInManagedWorktree(opts.PoolSeatWorkDir, ops.SeatInManagedWorktree)
+	// The claimable candidates left to a session in another directory, named
+	// on stderr only if this tier then claims nothing.
+	var leftToAnotherSession []beads.Bead
 	for _, candidate := range candidates {
-		if hookClaimWorktreeHeldElsewhere(candidate, opts.PoolSeatWorkDir) || hookClaimUnboundWorkOutsideSeat(candidate, opts.PoolSeatWorkDir, seatManaged) {
+		if hookClaimSeatLeaves(candidate, opts.PoolSeatWorkDir, seatManaged) {
 			// Work placed for another directory belongs to the seat the
 			// controller starts there; this seat would run it in the wrong
 			// checkout. Checked first so the opt-in stale reclaim below never
 			// frees a bead this seat would then have to skip.
+			if hookCandidateClaimable(candidate, opts.RouteTargets, now) {
+				leftToAnotherSession = append(leftToAnotherSession, candidate)
+			}
 			continue
 		}
 		reclaimedFrom := ""
@@ -1216,6 +1222,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, hookClaimMinted, landedAt, stdout, stderr)}
 	}
 
+	reportHookClaimLeftToAnotherSession(leftToAnotherSession, opts.PoolSeatWorkDir, stderr)
 	return hookClaimResult{claimsErrored: claimsErrored}
 }
 
@@ -3122,6 +3129,36 @@ func hookClaimManagedWorktreeDir(bead beads.Bead) (string, bool) {
 		}
 	}
 	return path, true
+}
+
+// hookClaimSeatLeaves reports whether a pool seat started in seatWorkDir leaves
+// candidate to a session the controller starts in another directory: the
+// candidate's own managed worktree when that is not the seat's
+// (hookClaimWorktreeHeldElsewhere), or the pool's own directory when the
+// candidate names no managed worktree and the seat runs inside one
+// (hookClaimUnboundWorkOutsideSeat). The fresh-claim tier, its stderr report
+// and plain `gc hook`'s listing (hookVisibility.leavesToAnotherSession) all ask
+// this one predicate, so the listing never shows work the claim would leave.
+func hookClaimSeatLeaves(candidate beads.Bead, seatWorkDir string, seatManaged func() bool) bool {
+	return hookClaimWorktreeHeldElsewhere(candidate, seatWorkDir) || hookClaimUnboundWorkOutsideSeat(candidate, seatWorkDir, seatManaged)
+}
+
+// reportHookClaimLeftToAnotherSession names on stderr each claimable bead the
+// fresh-claim tier left to a session in another directory, for a tier that
+// then claimed nothing. That is when the skip decided the outcome: work no
+// session is started for (its worktree was removed or moved, or the controller
+// refused its evidence) otherwise stays ready while every pool session drains
+// no_work without a word about it. A tier that claims stays quiet, as a seat
+// skipping its siblings' beads on the way to its own is the normal case.
+func reportHookClaimLeftToAnotherSession(left []beads.Bead, seatWorkDir string, stderr io.Writer) {
+	seatWorkDir = strings.TrimSpace(seatWorkDir)
+	for _, bead := range left {
+		if dir, managed := hookClaimManagedWorktreeDir(bead); managed {
+			fmt.Fprintf(stderr, "gc hook --claim: left %s to a session in its managed worktree %s; this session's work dir is %s\n", bead.ID, dir, seatWorkDir) //nolint:errcheck
+			continue
+		}
+		fmt.Fprintf(stderr, "gc hook --claim: left %s, which names no managed worktree, to a session in the pool's own directory; this session's work dir %s is a managed worktree\n", bead.ID, seatWorkDir) //nolint:errcheck
+	}
 }
 
 // hookClaimWorktreeHeldElsewhere reports whether a pool seat started in

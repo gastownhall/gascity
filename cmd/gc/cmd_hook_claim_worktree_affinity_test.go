@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/internal/worktree"
@@ -305,35 +308,44 @@ func TestHookClaimWorktreeHeldElsewhereComparesResolvedPaths(t *testing.T) {
 	}
 }
 
-// Only a pool seat's own row turns the check on.
+// Only a pool seat's own row turns the check on. Manual is read for the
+// session's agent, as the controller reads it.
 func TestHookClaimPoolSeatWorkDirReadsOnlyAPoolSeatsRow(t *testing.T) {
+	three, one := 3, 1
+	pool := &config.Agent{Name: "dev", MaxActiveSessions: &three}
+	single := &config.Agent{Name: "dev", MaxActiveSessions: &one}
 	for _, tc := range []struct {
-		name string
-		info *session.Info
-		want string
+		name  string
+		info  *session.Info
+		agent *config.Agent
+		want  string
 	}{
-		{"no fenced row", nil, ""},
-		{"pool seat placed in a verified worktree", &session.Info{PoolManaged: true, WorkDirCanonical: "/wt/r1/r1-b", WorkDir: "/wt/r1/r1-b"}, "/wt/r1/r1-b"},
-		{"pool seat with only the legacy key", &session.Info{PoolManaged: true, WorkDir: "/slots/dev-3"}, "/slots/dev-3"},
-		{"pool slot row", &session.Info{PoolSlot: "3", WorkDirCanonical: "/slots/dev-3"}, "/slots/dev-3"},
-		{"named session", &session.Info{PoolManaged: true, ConfiguredNamedSession: true, WorkDirCanonical: "/agents/dev"}, ""},
-		{"manual session", &session.Info{PoolSlot: "1", SessionOrigin: "manual", WorkDirCanonical: "/home/me"}, ""},
-		{"not a pool seat", &session.Info{WorkDirCanonical: "/agents/dev"}, ""},
+		{"no fenced row", nil, pool, ""},
+		{"pool seat placed in a verified worktree", &session.Info{PoolManaged: true, WorkDirCanonical: "/wt/r1/r1-b", WorkDir: "/wt/r1/r1-b"}, pool, "/wt/r1/r1-b"},
+		{"pool seat with only the legacy key", &session.Info{PoolManaged: true, WorkDir: "/slots/dev-3"}, pool, "/slots/dev-3"},
+		{"pool slot row", &session.Info{PoolSlot: "3", WorkDirCanonical: "/slots/dev-3"}, pool, "/slots/dev-3"},
+		{"named session", &session.Info{PoolManaged: true, ConfiguredNamedSession: true, WorkDirCanonical: "/agents/dev"}, pool, ""},
+		{"manual session", &session.Info{PoolSlot: "1", SessionOrigin: "manual", WorkDirCanonical: "/home/me"}, pool, ""},
+		// A user-created row persisted before the manual-origin backfill:
+		// ephemeral origin and no pool_managed, pool_slot or dependency_only.
+		{"legacy manual row of a multi-session agent", &session.Info{SessionOrigin: "ephemeral", WorkDirCanonical: "/home/me"}, pool, ""},
+		{"ephemeral row of a single-session agent", &session.Info{SessionOrigin: "ephemeral", WorkDirCanonical: "/agents/dev"}, single, "/agents/dev"},
+		{"not a pool seat", &session.Info{WorkDirCanonical: "/agents/dev"}, pool, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := hookClaimPoolSeatWorkDir(tc.info); got != tc.want {
+			if got := hookClaimPoolSeatWorkDir(tc.info, tc.agent); got != tc.want {
 				t.Fatalf("hookClaimPoolSeatWorkDir() = %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
-// `gc hook --claim` reads the pool seat's directory off the session row its
-// claim fence verified. A seat whose row places it in /wt/r1/r1-b leaves the
-// only ready work, bound to /wt/r1/r1-a, to the seat started there and drains
-// no_work without attempting the claim. The cases above drive doHookClaim with
-// PoolSeatWorkDir already set; this one proves cmdHookWithOptions sets it.
-func TestHookClaimCommandLeavesWorkBoundToAnotherWorktreeToItsSeat(t *testing.T) {
+// affinityHookCity writes a file-store city whose pool agent "dev" serves
+// candidates through its work_query, creates one session row carrying
+// seatMeta, and points the process env at that row the way the controller
+// starts a seat.
+func affinityHookCity(t *testing.T, candidates []beads.Bead, seatMeta map[string]string) {
+	t.Helper()
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "file")
@@ -341,14 +353,15 @@ func TestHookClaimCommandLeavesWorkBoundToAnotherWorktreeToItsSeat(t *testing.T)
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	bound := managedWorktreeCandidate("r1-a", "/wt/r1/r1-a")
-	bound.Metadata["gc.routed_to"] = "dev"
-	candidates, err := json.Marshal([]beads.Bead{bound})
+	for _, c := range candidates {
+		c.Metadata["gc.routed_to"] = "dev"
+	}
+	raw, err := json.Marshal(candidates)
 	if err != nil {
 		t.Fatal(err)
 	}
 	candidatesPath := filepath.Join(cityDir, "candidates.json")
-	if err := os.WriteFile(candidatesPath, candidates, 0o644); err != nil {
+	if err := os.WriteFile(candidatesPath, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cityToml := `[workspace]
@@ -367,19 +380,20 @@ work_query = "cat '` + candidatesPath + `'"
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
+	meta := map[string]string{
+		"session_name":   "dev-2",
+		"template":       "dev",
+		"state":          string(session.StateActive),
+		"instance_token": "live-token",
+	}
+	for k, v := range seatMeta {
+		meta[k] = v
+	}
 	seat, err := store.Create(beads.Bead{
-		Title:  "dev",
-		Type:   session.BeadType,
-		Labels: []string{"gc:session", "agent:dev"},
-		Metadata: map[string]string{
-			"session_name":                    "dev-2",
-			"template":                        "dev",
-			"pool_slot":                       "2",
-			"state":                           string(session.StateActive),
-			"instance_token":                  "live-token",
-			beadmeta.WorkDirMetadataKey:       "/wt/r1/r1-b",
-			beadmeta.LegacyWorkDirMetadataKey: "/wt/r1/r1-b",
-		},
+		Title:    "dev",
+		Type:     session.BeadType,
+		Labels:   []string{"gc:session", "agent:dev"},
+		Metadata: meta,
 	})
 	if err != nil {
 		t.Fatalf("create session bead: %v", err)
@@ -392,15 +406,38 @@ work_query = "cat '` + candidatesPath + `'"
 	t.Setenv("GC_SESSION_NAME", "dev-2")
 	t.Setenv("GC_SESSION_ORIGIN", "ephemeral")
 	t.Setenv("GC_INSTANCE_TOKEN", "live-token")
+}
 
+// affinityPoolSeatIn is the row of a pool seat the controller started in dir.
+func affinityPoolSeatIn(dir string) map[string]string {
+	return map[string]string{
+		"pool_slot":                       "2",
+		beadmeta.WorkDirMetadataKey:       dir,
+		beadmeta.LegacyWorkDirMetadataKey: dir,
+	}
+}
+
+func runHookClaimCommand(t *testing.T) (hookClaimJSONResult, string) {
+	t.Helper()
 	var stdout, stderr bytes.Buffer
 	_ = cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
 	var result hookClaimJSONResult
 	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
 		t.Fatalf("stdout is not a JSON claim result: %v\n%s; stderr=%s", err, stdout.String(), stderr.String())
 	}
-	if result.Action != "drain" || result.Reason != "no_work" {
-		t.Fatalf("result = %+v, want a no_work drain: the seat in /wt/r1/r1-b must leave r1-a to the seat in its own worktree; stderr=%s", result, stderr.String())
+	return result, stderr.String()
+}
+
+// `gc hook --claim` reads the pool seat's directory off the session row its
+// claim fence verified. A seat whose row places it in /wt/r1/r1-b leaves the
+// only ready work, bound to /wt/r1/r1-a, to the seat started there and drains
+// no_work without attempting the claim. The cases above drive doHookClaim with
+// PoolSeatWorkDir already set; this one proves cmdHookWithOptions sets it.
+func TestHookClaimCommandLeavesWorkBoundToAnotherWorktreeToItsSeat(t *testing.T) {
+	affinityHookCity(t, []beads.Bead{managedWorktreeCandidate("r1-a", "/wt/r1/r1-a")}, affinityPoolSeatIn("/wt/r1/r1-b"))
+	result, stderr := runHookClaimCommand(t)
+	if result.Action != "drain" || result.Reason != hookClaimReasonNoWork {
+		t.Fatalf("result = %+v, want a no_work drain: the seat in /wt/r1/r1-b must leave r1-a to the seat in its own worktree; stderr=%s", result, stderr)
 	}
 }
 
@@ -576,73 +613,280 @@ func TestHookClaimSeatInManagedWorktreeReadsEnsureProvenance(t *testing.T) {
 // pool's own directory and drains no_work. This drives the default probe and
 // the PoolSeatWorkDir wiring end to end.
 func TestHookClaimCommandSeatInManagedWorktreeLeavesUnboundWork(t *testing.T) {
-	clearGCEnv(t)
-	disableManagedDoltRecoveryForTest(t)
-	t.Setenv("GC_BEADS", "file")
 	_, _, managed := ensureAffinityWorktree(t)
-	cityDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
+	affinityHookCity(t, []beads.Bead{unboundRoutedCandidate("r1-z")}, affinityPoolSeatIn(managed))
+	result, stderr := runHookClaimCommand(t)
+	if result.Action != "drain" || result.Reason != hookClaimReasonNoWork {
+		t.Fatalf("result = %+v, want a no_work drain: the seat in a managed worktree must leave unbound work to a seat in the pool's own directory; stderr=%s", result, stderr)
 	}
-	unbound := unboundRoutedCandidate("r1-z")
-	unbound.Metadata["gc.routed_to"] = "dev"
-	candidates, err := json.Marshal([]beads.Bead{unbound})
-	if err != nil {
-		t.Fatal(err)
-	}
-	candidatesPath := filepath.Join(cityDir, "candidates.json")
-	if err := os.WriteFile(candidatesPath, candidates, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cityToml := `[workspace]
-name = "test-city"
+}
 
-[[agent]]
-name = "dev"
-scope = "city"
-max_active_sessions = 3
-work_query = "cat '` + candidatesPath + `'"
-`
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt: %v", err)
-	}
-	seat, err := store.Create(beads.Bead{
-		Title:  "dev",
-		Type:   session.BeadType,
-		Labels: []string{"gc:session", "agent:dev"},
-		Metadata: map[string]string{
-			"session_name":                    "dev-2",
-			"template":                        "dev",
-			"pool_slot":                       "2",
-			"state":                           string(session.StateActive),
-			"instance_token":                  "live-token",
-			beadmeta.WorkDirMetadataKey:       managed,
-			beadmeta.LegacyWorkDirMetadataKey: managed,
-		},
+// A user-created row persisted before the manual-origin backfill is manual for
+// a multi-session agent, so its claim attempts the bound bead, as every manual
+// claimant does, rather than leaving it.
+func TestHookClaimCommandLegacyManualRowClaimsAsBefore(t *testing.T) {
+	affinityHookCity(t, []beads.Bead{managedWorktreeCandidate("r1-a", "/wt/r1/r1-a")}, map[string]string{
+		"session_origin":                  "ephemeral",
+		beadmeta.WorkDirMetadataKey:       "/home/me",
+		beadmeta.LegacyWorkDirMetadataKey: "/home/me",
 	})
-	if err != nil {
-		t.Fatalf("create session bead: %v", err)
+	result, stderr := runHookClaimCommand(t)
+	if result.Reason == hookClaimReasonNoWork || strings.Contains(stderr, "left r1-a") {
+		t.Fatalf("result = %+v; want the claim of r1-a attempted, not left to another worktree; stderr=%s", result, stderr)
 	}
-	t.Setenv("GC_CITY", cityDir)
-	t.Setenv("GC_TEMPLATE", "dev")
-	t.Setenv("GC_ALIAS", "dev-2")
-	t.Setenv("GC_AGENT", "dev-2")
-	t.Setenv("GC_SESSION_ID", seat.ID)
-	t.Setenv("GC_SESSION_NAME", "dev-2")
-	t.Setenv("GC_SESSION_ORIGIN", "ephemeral")
-	t.Setenv("GC_INSTANCE_TOKEN", "live-token")
+}
 
+// When the seat checks leave the seat nothing to claim, each bead they left is
+// named with where its session runs, so a bound step no seat is started for
+// does not starve silently. Only claimable beads are named: one held by another
+// seat was never this seat's to take.
+func TestHookClaimNamesWorkLeftToAnotherWorktreeWhenItClaimsNothing(t *testing.T) {
+	held := managedWorktreeCandidate("r1-c", "/wt/r1/r1-c")
+	held.Assignee = "r1/dev-3"
+	var claimed, reclaimed []string
+	ops := affinityClaimOps(t, []beads.Bead{managedWorktreeCandidate("r1-a", "/wt/r1/r1-a"), held}, &claimed, &reclaimed)
 	var stdout, stderr bytes.Buffer
-	_ = cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
-	var result hookClaimJSONResult
-	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
-		t.Fatalf("stdout is not a JSON claim result: %v\n%s; stderr=%s", err, stdout.String(), stderr.String())
+	doHookClaim("query", "/rigs/r1", affinitySeatOpts("/wt/r1/r1-b"), ops, &stdout, &stderr)
+	if !strings.Contains(stdout.String(), `"reason":"no_work"`) {
+		t.Fatalf("result = %s, want a no_work drain", stdout.String())
 	}
-	if result.Action != "drain" || result.Reason != "no_work" {
-		t.Fatalf("result = %+v, want a no_work drain: the seat in a managed worktree must leave unbound work to a seat in the pool's own directory; stderr=%s", result, stderr.String())
+	want := "gc hook --claim: left r1-a to a session in its managed worktree /wt/r1/r1-a; this session's work dir is /wt/r1/r1-b\n"
+	if !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
 	}
+	if strings.Contains(stderr.String(), "r1-c") {
+		t.Fatalf("stderr = %q names r1-c, which another seat holds", stderr.String())
+	}
+}
+
+// A seat inside a managed worktree that leaves unbound work and claims nothing
+// names that work and the pool's own directory, where its session runs.
+func TestHookClaimNamesUnboundWorkLeftToThePoolsDirectoryWhenItClaimsNothing(t *testing.T) {
+	var claimed, reclaimed []string
+	ops := affinityClaimOps(t, []beads.Bead{unboundRoutedCandidate("r1-u")}, &claimed, &reclaimed)
+	ops.SeatInManagedWorktree = func(string) bool { return true }
+	var stdout, stderr bytes.Buffer
+	doHookClaim("query", "/rigs/r1", affinitySeatOpts("/wt/r1/r1-a"), ops, &stdout, &stderr)
+	if len(claimed) != 0 || !strings.Contains(stdout.String(), `"reason":"no_work"`) {
+		t.Fatalf("claimed %v, result = %s; want a no_work drain", claimed, stdout.String())
+	}
+	want := "gc hook --claim: left r1-u, which names no managed worktree, to a session in the pool's own directory; this session's work dir /wt/r1/r1-a is a managed worktree\n"
+	if !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+	}
+}
+
+// A seat that skips its siblings' beads on the way to its own says nothing.
+func TestHookClaimSaysNothingOfLeftWorkWhenItClaims(t *testing.T) {
+	var claimed, reclaimed []string
+	ops := affinityClaimOps(t, []beads.Bead{
+		managedWorktreeCandidate("r1-a", "/wt/r1/r1-a"),
+		managedWorktreeCandidate("r1-b", "/wt/r1/r1-b"),
+	}, &claimed, &reclaimed)
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("query", "/rigs/r1", affinitySeatOpts("/wt/r1/r1-b"), ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "left r1-a") {
+		t.Fatalf("stderr = %q; a seat that claims its own bead must not report the ones it left", stderr.String())
+	}
+}
+
+// filteredHookIDs runs candidates through plain `gc hook`'s visibility filter
+// and returns the ids it keeps, in order.
+func filteredHookIDs(t *testing.T, candidates []beads.Bead, visibility hookVisibility) string {
+	t.Helper()
+	raw, err := json.Marshal(candidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept []beads.Bead
+	if err := json.Unmarshal([]byte(filterForeignHookCandidates(string(raw), visibility)), &kept); err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, 0, len(kept))
+	for _, b := range kept {
+		ids = append(ids, b.ID)
+	}
+	return strings.Join(ids, ",")
+}
+
+// affinitySeatVisibility is a pool seat's plain `gc hook` visibility: its
+// directory and whether that directory is a managed worktree.
+func affinitySeatVisibility(seatWorkDir string, inManaged bool) hookVisibility {
+	return hookVisibility{
+		Identities:            []string{"r1/dev-2", "s-2"},
+		RouteTargets:          []string{affinityRoute},
+		PoolSeatWorkDir:       func() string { return seatWorkDir },
+		SeatInManagedWorktree: func() bool { return inManaged },
+	}
+}
+
+// Plain `gc hook` from a pool seat lists what `gc hook --claim` would take:
+// work the seat checks leave to another session is left out, so a prompt that
+// lists work and then claims it by id cannot run it in this seat's checkout.
+// The seat's own assignment stays: the claim's assigned tiers serve it.
+func TestFilterForeignHookCandidatesLeavesWorkTheClaimLeaves(t *testing.T) {
+	assigned := managedWorktreeCandidate("r1-c", "/wt/r1/r1-c")
+	assigned.Assignee = "r1/dev-2"
+	assignedUnbound := unboundRoutedCandidate("r1-d")
+	assignedUnbound.Assignee = "r1/dev-2"
+	candidates := []beads.Bead{
+		managedWorktreeCandidate("r1-a", "/wt/r1/r1-a"),
+		managedWorktreeCandidate("r1-b", "/wt/r1/r1-b"),
+		unboundRoutedCandidate("r1-u"),
+		assigned,
+		assignedUnbound,
+	}
+	for _, tc := range []struct {
+		name      string
+		seat      string
+		inManaged bool
+		want      string
+	}{
+		{"seat in a managed worktree", "/wt/r1/r1-b", true, "r1-b,r1-c,r1-d"},
+		{"seat in the pool's own directory", "/rigs/r1/.gc/slots/dev-2", false, "r1-u,r1-c,r1-d"},
+		{"not a pool seat", "", true, "r1-a,r1-b,r1-u,r1-c,r1-d"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := filteredHookIDs(t, candidates, affinitySeatVisibility(tc.seat, tc.inManaged)); got != tc.want {
+				t.Fatalf("kept %q, want %q", got, tc.want)
+			}
+		})
+	}
+	if got := filteredHookIDs(t, candidates, hookVisibility{Identities: []string{"r1/dev-2"}, RouteTargets: []string{affinityRoute}}); got != "r1-a,r1-b,r1-u,r1-c,r1-d" {
+		t.Fatalf("kept %q without a seat resolver, want every visible candidate", got)
+	}
+}
+
+// Plain `gc hook` is a status-line hot path: the seat's row is read only for an
+// unassigned candidate, and the git probe only for one bound to no worktree.
+func TestFilterForeignHookCandidatesResolvesTheSeatOnlyWhenACandidateNeedsIt(t *testing.T) {
+	ownAssignment := unboundRoutedCandidate("r1-e")
+	ownAssignment.Assignee = "r1/dev-2"
+	for _, tc := range []struct {
+		name                  string
+		candidates            []beads.Bead
+		wantReads, wantProbes int
+	}{
+		{"only assigned work", []beads.Bead{ownAssignment}, 0, 0},
+		{"only bound work", []beads.Bead{managedWorktreeCandidate("r1-a", "/wt/r1/r1-a"), managedWorktreeCandidate("r1-f", "/wt/r1/r1-f")}, 1, 0},
+		{"unbound work", []beads.Bead{unboundRoutedCandidate("r1-v"), unboundRoutedCandidate("r1-w")}, 1, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reads, probes := 0, 0
+			visibility := hookVisibility{
+				Identities:            []string{"r1/dev-2"},
+				RouteTargets:          []string{affinityRoute},
+				PoolSeatWorkDir:       sync.OnceValue(func() string { reads++; return "/wt/r1/r1-b" }),
+				SeatInManagedWorktree: sync.OnceValue(func() bool { probes++; return false }),
+			}
+			filteredHookIDs(t, tc.candidates, visibility)
+			if reads != tc.wantReads || probes != tc.wantProbes {
+				t.Fatalf("seat row read %d times and probed %d times, want %d and %d", reads, probes, tc.wantReads, tc.wantProbes)
+			}
+		})
+	}
+}
+
+// The discovery door reads the row the claim fence verifies, and only for a
+// session the controller could have started as a pool seat.
+func TestHookDiscoveryPoolSeatWorkDirReadsTheFencedRow(t *testing.T) {
+	three := 3
+	pool := &config.Agent{Name: "dev", MaxActiveSessions: &three}
+	seatRow := beads.Bead{
+		ID:     "s-2",
+		Type:   session.BeadType,
+		Status: "open",
+		Title:  "dev",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":                     string(session.StateActive),
+			"instance_token":            "live-token",
+			"pool_slot":                 "2",
+			beadmeta.WorkDirMetadataKey: "/wt/r1/r1-b",
+		},
+	}
+	for _, tc := range []struct {
+		name, origin, token string
+		frontErr            error
+		wantDir, wantStderr string
+		wantReads           int
+	}{
+		{name: "pool seat", origin: "ephemeral", token: "live-token", wantDir: "/wt/r1/r1-b", wantReads: 1},
+		{name: "named session", origin: "named", token: "live-token"},
+		{name: "manual session", origin: "manual", token: "live-token"},
+		{name: "tokenless runtime", origin: "ephemeral"},
+		{name: "superseded token", origin: "ephemeral", token: "old-token", wantReads: 1},
+		{name: "store unavailable", origin: "ephemeral", token: "live-token", frontErr: errors.New("store down"), wantReads: 1, wantStderr: "gc hook: session row unavailable for s-2: opening session store: store down; listing work the claim would leave to another session unfiltered\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			t.Setenv("GC_SESSION_ID", "s-2")
+			t.Setenv("GC_SESSION_ORIGIN", tc.origin)
+			t.Setenv("GC_INSTANCE_TOKEN", tc.token)
+			reads := 0
+			front := func() (*session.Store, error) {
+				reads++
+				if tc.frontErr != nil {
+					return nil, tc.frontErr
+				}
+				return session.NewStore(beads.SessionStore{Store: beads.NewMemStoreFrom(1, []beads.Bead{seatRow}, nil)}), nil
+			}
+			var stderr bytes.Buffer
+			if got := hookDiscoveryPoolSeatWorkDir(front, pool, &stderr); got != tc.wantDir {
+				t.Fatalf("hookDiscoveryPoolSeatWorkDir() = %q, want %q; stderr=%s", got, tc.wantDir, stderr.String())
+			}
+			if reads != tc.wantReads {
+				t.Fatalf("session front opened %d times, want %d", reads, tc.wantReads)
+			}
+			if stderr.String() != tc.wantStderr {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.wantStderr)
+			}
+		})
+	}
+}
+
+// The command proves the discovery door reads the seat's row: the seat in
+// /wt/r1/r1-b lists r1-u and not r1-a, exactly what its claim would take, and
+// with only r1-a ready it reports no work.
+func TestHookDiscoveryLeavesWorkTheClaimLeavesToAnotherSession(t *testing.T) {
+	runDiscovery := func(t *testing.T) (int, string, string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		code := cmdHookWithOptions(nil, hookCommandOptions{}, &stdout, &stderr)
+		return code, stdout.String(), stderr.String()
+	}
+	t.Run("bound work beside unbound work", func(t *testing.T) {
+		affinityHookCity(t, []beads.Bead{managedWorktreeCandidate("r1-a", "/wt/r1/r1-a"), unboundRoutedCandidate("r1-u")}, affinityPoolSeatIn("/wt/r1/r1-b"))
+		code, stdout, stderr := runDiscovery(t)
+		if code != 0 || strings.Contains(stdout, `"r1-a"`) || !strings.Contains(stdout, `"r1-u"`) {
+			t.Fatalf("discovery = exit %d stdout %s; want exit 0 listing r1-u and not r1-a; stderr=%s", code, stdout, stderr)
+		}
+	})
+	t.Run("only bound work", func(t *testing.T) {
+		affinityHookCity(t, []beads.Bead{managedWorktreeCandidate("r1-a", "/wt/r1/r1-a")}, affinityPoolSeatIn("/wt/r1/r1-b"))
+		code, stdout, stderr := runDiscovery(t)
+		if code != 1 || strings.Contains(stdout, `"r1-a"`) {
+			t.Fatalf("discovery = exit %d stdout %s; want exit 1 without r1-a; stderr=%s", code, stdout, stderr)
+		}
+	})
+	t.Run("unbound work from a seat in a managed worktree", func(t *testing.T) {
+		_, _, managed := ensureAffinityWorktree(t)
+		affinityHookCity(t, []beads.Bead{unboundRoutedCandidate("r1-z")}, affinityPoolSeatIn(managed))
+		code, stdout, stderr := runDiscovery(t)
+		if code != 1 || strings.Contains(stdout, `"r1-z"`) {
+			t.Fatalf("discovery = exit %d stdout %s; want exit 1 without r1-z; stderr=%s", code, stdout, stderr)
+		}
+	})
+	// No instance token: the claim door has no fenced row and claims r1-a, so
+	// the discovery door lists it too.
+	t.Run("tokenless runtime", func(t *testing.T) {
+		affinityHookCity(t, []beads.Bead{managedWorktreeCandidate("r1-a", "/wt/r1/r1-a")}, affinityPoolSeatIn("/wt/r1/r1-b"))
+		t.Setenv("GC_INSTANCE_TOKEN", "")
+		code, stdout, stderr := runDiscovery(t)
+		if code != 0 || !strings.Contains(stdout, `"r1-a"`) {
+			t.Fatalf("discovery = exit %d stdout %s; want exit 0 listing r1-a; stderr=%s", code, stdout, stderr)
+		}
+	})
 }

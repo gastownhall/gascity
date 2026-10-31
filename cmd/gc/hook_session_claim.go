@@ -187,16 +187,19 @@ func sessionStampableWorkDir(info session.Info) string {
 
 // hookClaimPoolSeatWorkDir returns the directory the controller started a pool
 // seat in, read off the session row the claim fence verified, or "" when info is
-// nil (no fence ran, or it failed open) or names a named or manual session. It is
-// sessionStampableWorkDir's complement: that one refuses a pool row's directory
-// because a slot label must never become worktree evidence on a bead, while the
-// fresh-claim tier needs exactly that directory to tell whether a candidate's
-// verified worktree is this seat's own (hookClaimWorktreeHeldElsewhere). A pool
+// nil (no fence ran, or it failed open) or names a named or manual session.
+// Manual is decided for the session's agent a, as the controller decides it
+// (isManualSessionInfoForAgent), so a user-created row persisted before the
+// manual-origin backfill (ephemeral origin, no pool marker) is manual here too.
+// It is sessionStampableWorkDir's complement: that one refuses a pool row's
+// directory because a slot label must never become worktree evidence on a bead,
+// while the fresh-claim tier needs exactly that directory to tell whether a
+// candidate's verified worktree is this seat's own (hookClaimSeatLeaves). A pool
 // seat started for a bead with managed-worktree evidence has gc.work_dir set to
 // the verified path (poolTriggerMetadata, computePoolTriggerBindingPatch); the
 // legacy key is the fallback for rows written before the canonical one.
-func hookClaimPoolSeatWorkDir(info *session.Info) string {
-	if info == nil || !isPoolManagedSessionInfo(*info) || isNamedSessionInfo(*info) || isManualSessionInfo(*info) {
+func hookClaimPoolSeatWorkDir(info *session.Info, a *config.Agent) string {
+	if info == nil || !isPoolManagedSessionInfo(*info) || isNamedSessionInfo(*info) || isManualSessionInfoForAgent(*info, a) {
 		return ""
 	}
 	if dir := strings.TrimSpace(info.WorkDirCanonical); dir != "" {

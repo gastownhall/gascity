@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -49,7 +50,9 @@ pool session does not claim unassigned routed work whose managed worktree
 other than its own: the controller starts a session inside that worktree for
 it. A pool session running inside a managed worktree also leaves unassigned
 routed work that names no managed worktree: the controller starts a session
-in the pool's own directory for it.
+in the pool's own directory for it. When that leaves the session nothing to
+claim, each such bead is named on stderr with where its session runs. Without
+--claim, that session's output leaves the same work out.
 
 A work query that gets no answer from the bead store (a connection error, a
 timeout, a killed query, a locked database, or bd's circuit breaker failing
@@ -592,16 +595,51 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			// queryEnv has GC_INSTANCE_TOKEN filtered out.
 			StartedFence: hookStartedFenceOf(os.Environ()),
 			// The fenced row, so the worktree check costs no extra read.
-			PoolSeatWorkDir: hookClaimPoolSeatWorkDir(fencedSession),
+			PoolSeatWorkDir: hookClaimPoolSeatWorkDir(fencedSession, &a),
 		}
 		return claimHookWork(city, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
+	// The seat's row is read, and its directory probed, at most once and only
+	// when a candidate needs them, so a listing of assigned work costs nothing.
+	seatWorkDir := sync.OnceValue(func() string { return hookDiscoveryPoolSeatWorkDir(city.sessionFront, &a, stderr) })
 	return hookDiscover(workQuery, workDir, false, hookDiscoveryOptions(assignee, identityCandidates, queryEnv, opts, strictDrainAck), city.claimOps(), runner, stdout, stderr, hookVisibility{
-		Identities:   identityCandidates,
-		RouteTargets: routeTargets,
+		Identities:            identityCandidates,
+		RouteTargets:          routeTargets,
+		PoolSeatWorkDir:       seatWorkDir,
+		SeatInManagedWorktree: sync.OnceValue(func() bool { return hookClaimSeatInManagedWorktree(seatWorkDir()) }),
 	})
+}
+
+// hookDiscoveryPoolSeatWorkDir is the discovery door's hookClaimPoolSeatWorkDir.
+// It reads the row the claim door's fence verifies (fenceHookClaimSession: the
+// process env's GC_SESSION_ID, matched by GC_INSTANCE_TOKEN), so both doors turn
+// the seat checks on for the same sessions, and returns "" whenever the claim
+// door would have no fenced row: no session id or token, a row that is not
+// claim-eligible, or a read that failed. A failed read is named on stderr,
+// because the listing then includes work the claim door may leave to another
+// session. A session the controller started as named or manual
+// (GC_SESSION_ORIGIN) is never a pool seat, so its row is not read: plain
+// `gc hook` runs on every status-line refresh.
+func hookDiscoveryPoolSeatWorkDir(front sessionFrontGetter, a *config.Agent, stderr io.Writer) string {
+	switch strings.TrimSpace(os.Getenv("GC_SESSION_ORIGIN")) {
+	case "named", "manual":
+		return ""
+	}
+	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
+	token := strings.TrimSpace(os.Getenv("GC_INSTANCE_TOKEN"))
+	if sessionID == "" || token == "" {
+		return ""
+	}
+	verdict, reason, info := classifyHookClaimSessionVia(front, sessionID, token)
+	if verdict == hookClaimSessionStoreUnavailable {
+		fmt.Fprintf(stderr, "gc hook: session row unavailable for %s: %s; listing work the claim would leave to another session unfiltered\n", sessionID, reason) //nolint:errcheck
+	}
+	if verdict != hookClaimSessionEligible {
+		return ""
+	}
+	return hookClaimPoolSeatWorkDir(info, a)
 }
 
 // hookClaimSessionVerdict classifies a runtime session's fitness to claim routed
@@ -1305,6 +1343,31 @@ func workQueryEnvForDir(env []string, dir string) []string {
 type hookVisibility struct {
 	Identities   []string
 	RouteTargets []string
+	// PoolSeatWorkDir returns the directory the controller started this pool
+	// session in (hookDiscoveryPoolSeatWorkDir), or "" for any other claimant.
+	// Nil or "" turns the seat checks of the claim door (hookClaimSeatLeaves)
+	// off. It is called only for an unassigned candidate.
+	PoolSeatWorkDir func() string
+	// SeatInManagedWorktree reports whether that directory is a managed
+	// worktree (hookClaimSeatInManagedWorktree). It is called only for an
+	// unassigned candidate bound to no worktree, and nil answers false.
+	SeatInManagedWorktree func() bool
+}
+
+// leavesToAnotherSession reports whether a pool session's listing leaves
+// candidate out because `gc hook --claim` would leave it to a session the
+// controller starts in another directory (hookClaimSeatLeaves). Assigned
+// candidates stay: this filter keeps them visible only for this session's own
+// identities, and the claim's assigned tiers serve them.
+func (v hookVisibility) leavesToAnotherSession(candidate beads.Bead) bool {
+	if v.PoolSeatWorkDir == nil || strings.TrimSpace(candidate.Assignee) != "" {
+		return false
+	}
+	seatManaged := v.SeatInManagedWorktree
+	if seatManaged == nil {
+		seatManaged = func() bool { return false }
+	}
+	return hookClaimSeatLeaves(candidate, v.PoolSeatWorkDir(), seatManaged)
 }
 
 // hookStoreUnavailableToken is the stderr token gc hook prints, with exit code
@@ -1667,12 +1730,15 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 // foreign work at, so under native-store schema skew (gc.routed_to's own
 // store-side predicate silently no-ops - ga-lmy6yj) it would otherwise
 // display another agent's in-flight or routed work as if it were this
-// session's own (ga-1xaqgo.2). Fails open at every decode step -
-// unparseable output, non-array output, non-object items, and items that
-// fail to decode as a beads.Bead all pass through unchanged - and is a
-// no-op entirely when visibility carries no identity/route context, since a
-// filter that can silently empty an agent's queue is a worse outage than
-// the over-serving it replaces.
+// session's own (ga-1xaqgo.2). For a pool session it also drops unassigned
+// work the claim's seat checks leave to a session in another directory
+// (hookVisibility.leavesToAnotherSession), so a prompt that lists work and
+// then claims it by id cannot run it in the wrong checkout. Fails open at
+// every decode step - unparseable output, non-array output, non-object items,
+// and items that fail to decode as a beads.Bead all pass through unchanged -
+// and is a no-op entirely when visibility carries no identity/route context,
+// since a filter that can silently empty an agent's queue is a worse outage
+// than the over-serving it replaces.
 func filterForeignHookCandidates(output string, visibility hookVisibility) string {
 	if output == "" {
 		return output
@@ -1701,6 +1767,9 @@ func filterForeignHookCandidates(output string, visibility hookVisibility) strin
 			continue
 		}
 		if !hookCandidateVisible(candidate, visibility.Identities, visibility.RouteTargets) {
+			continue
+		}
+		if visibility.leavesToAnotherSession(candidate) {
 			continue
 		}
 		filtered = append(filtered, obj)
