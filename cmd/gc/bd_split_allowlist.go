@@ -157,7 +157,7 @@ var bdSplitAllowlist = map[string]bdSplitCommand{
 	},
 
 	// Writes judged by the class-must-not-flip guard.
-	"create":          {judge: judgeBdCreate, why: "judged: the bead's type, labels and metadata are classified"},
+	"create":          {judge: judgeBdCreate, why: "judged: the bead's type, labels and metadata are classified; a --graph plan is judged node by node"},
 	"q":               {judge: judgeBdCreate, why: "judged: the bead's type and labels are classified"},
 	"update":          {judge: judgeBdUpdate, why: "judged: type/label/metadata writes are classified against the bead they land on"},
 	"label add":       {judge: judgeBdLabelAddRemove, why: "judged against the bead"},
