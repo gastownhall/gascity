@@ -17,6 +17,28 @@ var nudgeUnconfirmedDiagnosticFiles = []string{
 	"startup-nudge-unconfirmed.log",
 }
 
+// LiveSessionNamesFunc returns the tmux session names of every session that is
+// still live (not closed), which is also the directory name its diagnostics
+// are written under.
+type LiveSessionNamesFunc func() (map[string]struct{}, error)
+
+// NudgeUnconfirmedOption configures a NudgeUnconfirmedCheck.
+type NudgeUnconfirmedOption func(*NudgeUnconfirmedCheck)
+
+// WithLiveSessionNames scopes the check to sessions that are still live. The
+// diagnostic files are never cleared, so without this the warning also counts
+// every session that ever wrote one -- a number that only grows as sessions
+// close, whatever the current delivery health is. Diagnostics of sessions
+// outside the returned set are reported as a skipped count, not as findings.
+//
+// If fn returns an error the check cannot tell live from closed, so it counts
+// every session directory and says why in the details.
+func WithLiveSessionNames(fn LiveSessionNamesFunc) NudgeUnconfirmedOption {
+	return func(c *NudgeUnconfirmedCheck) {
+		c.liveSessions = fn
+	}
+}
+
 // NudgeUnconfirmedCheck surfaces sessions whose most recent nudge or
 // startup-nudge submit could not be confirmed delivered. tmux's fallback
 // nudge path has no busy-state indicator to confirm delivery against, so it
@@ -24,18 +46,31 @@ var nudgeUnconfirmedDiagnosticFiles = []string{
 // writes a diagnostic file. This check is the reconciliation that reads that
 // file back so the unconfirmed outcome reaches an operator instead of being
 // silently dropped.
-type NudgeUnconfirmedCheck struct{}
+type NudgeUnconfirmedCheck struct {
+	liveSessions LiveSessionNamesFunc
+}
 
 // NewNudgeUnconfirmedCheck creates a check for unconfirmed nudge deliveries.
-func NewNudgeUnconfirmedCheck() *NudgeUnconfirmedCheck {
-	return &NudgeUnconfirmedCheck{}
+// Without WithLiveSessionNames every session directory is counted.
+func NewNudgeUnconfirmedCheck(opts ...NudgeUnconfirmedOption) *NudgeUnconfirmedCheck {
+	c := &NudgeUnconfirmedCheck{}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // Name returns the check identifier.
 func (c *NudgeUnconfirmedCheck) Name() string { return "nudge-unconfirmed" }
 
+// nudgeDiagnostic is one diagnostic file found under a session directory.
+type nudgeDiagnostic struct {
+	session  string
+	filename string
+}
+
 // Run scans the city's runtime sessions directory for unconfirmed-nudge
-// diagnostic files and warns when any are present.
+// diagnostic files and warns when any belong to a live session.
 func (c *NudgeUnconfirmedCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 
@@ -56,9 +91,8 @@ func (c *NudgeUnconfirmedCheck) Run(ctx *CheckContext) *CheckResult {
 		return r
 	}
 
-	var details []string
+	var found []nudgeDiagnostic
 	var malformed []string
-	sessions := make(map[string]struct{})
 	for _, entry := range entries {
 		name := entry.Name()
 		if !entry.IsDir() {
@@ -72,8 +106,7 @@ func (c *NudgeUnconfirmedCheck) Run(ctx *CheckContext) *CheckResult {
 		for _, filename := range nudgeUnconfirmedDiagnosticFiles {
 			path := filepath.Join(sessionsDir, name, filename)
 			if _, statErr := os.Stat(path); statErr == nil {
-				details = append(details, fmt.Sprintf("session %q: %s", name, filename))
-				sessions[name] = struct{}{}
+				found = append(found, nudgeDiagnostic{session: name, filename: filename})
 			} else if !os.IsNotExist(statErr) {
 				r.Status = StatusError
 				r.Severity = SeverityAdvisory
@@ -83,9 +116,31 @@ func (c *NudgeUnconfirmedCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
+	// The live set is only worth resolving when there is something to scope.
+	var (
+		liveErr error
+		closed  map[string]struct{}
+	)
+	if len(found) > 0 && c.liveSessions != nil {
+		var live map[string]struct{}
+		if live, liveErr = c.liveSessions(); liveErr == nil {
+			found, closed = splitLiveDiagnostics(found, live)
+		}
+	}
+
+	var details []string
+	sessions := make(map[string]struct{})
+	for _, d := range found {
+		details = append(details, fmt.Sprintf("session %q: %s", d.session, d.filename))
+		sessions[d.session] = struct{}{}
+	}
+
 	if len(details) == 0 && len(malformed) == 0 {
 		r.Status = StatusOK
 		r.Message = "no unconfirmed nudge deliveries"
+		if len(closed) > 0 {
+			r.Message = fmt.Sprintf("no unconfirmed nudge deliveries for live sessions (%d closed session(s) skipped)", len(closed))
+		}
 		return r
 	}
 
@@ -93,6 +148,9 @@ func (c *NudgeUnconfirmedCheck) Run(ctx *CheckContext) *CheckResult {
 	sort.Strings(malformed)
 	for _, name := range malformed {
 		details = append(details, fmt.Sprintf("unexpected non-directory entry %q under %s", name, sessionsDir))
+	}
+	if liveErr != nil {
+		details = append(details, fmt.Sprintf("cannot list live sessions, so closed sessions are counted too: %v", liveErr))
 	}
 
 	r.Status = StatusWarning
@@ -107,8 +165,25 @@ func (c *NudgeUnconfirmedCheck) Run(ctx *CheckContext) *CheckResult {
 			r.Message += fmt.Sprintf("; %d unexpected non-directory entry(ies) under %s", len(malformed), sessionsDir)
 		}
 	}
+	if len(closed) > 0 {
+		r.Message += fmt.Sprintf("; %d closed session(s) skipped", len(closed))
+	}
 	r.Details = details
 	return r
+}
+
+// splitLiveDiagnostics keeps the diagnostics of sessions in live and returns
+// the distinct names of the sessions it dropped.
+func splitLiveDiagnostics(found []nudgeDiagnostic, live map[string]struct{}) (kept []nudgeDiagnostic, closed map[string]struct{}) {
+	closed = make(map[string]struct{})
+	for _, d := range found {
+		if _, ok := live[d.session]; ok {
+			kept = append(kept, d)
+			continue
+		}
+		closed[d.session] = struct{}{}
+	}
+	return kept, closed
 }
 
 // CanFix returns false because an unconfirmed delivery requires an operator
