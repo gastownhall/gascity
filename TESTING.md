@@ -1819,7 +1819,7 @@ golangci-lint; staticcheck findings are suppressed by check name
 | --- | --- |
 | `make lint` (= `make vet`) | `bazel build --keep_going --output_groups=nogo_fix //...`: every package's nogo analysis, no linking. |
 | `make lint-changed` | The same for the Bazel packages of changed Go files (`LINT_CHANGED_SCOPE=staged\|tracked\|worktree`); pre-commit uses `staged`. |
-| `make lint-golangci`, `make vet-go` | golangci-lint and `go vet` outside Bazel, for the macOS quality job (darwin-only files the Linux nogo build does not compile). |
+| `make lint-golangci`, `make vet-go` | golangci-lint and `go vet` outside Bazel, for the macOS quality job (darwin-only files the Linux nogo build does not compile). golangci-lint's result cache lives at `.cache/golangci-lint` inside the checkout (`GOLANGCI_LINT_CACHE` overrides it): a cache shared across checkouts replays issue paths from the tree that produced them, and once that tree is deleted every `//nolint` suppression stops applying. |
 
 `tools/nogo/config.json` scopes the analyzers the way golangci-lint saw the
 tree (no external repos, generated `_gen.go` files, testdata) and carries the

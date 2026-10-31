@@ -137,6 +137,7 @@ go_test(
         "harness_reap_test.go",
         "integration_packages_shards_test.go",
         "integration_shards_test.go",
+        "lint_cache_contract_test.go",
         "lint_readonly_contract_test.go",
         "mac_regression_required_test.go",
         "makefile_bazel_primary_test.go",
