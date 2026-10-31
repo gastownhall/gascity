@@ -363,3 +363,30 @@ func TestFormulaWrite_RejectsInvalidNameLikeUpsert(t *testing.T) {
 		}
 	}
 }
+
+// TestFormulaWrite_UpsertRefusesAnEpisodeStep (mc-lp7zb): a step typed
+// startup-health-episode is refused with 400 and not persisted, and the
+// message says "formula validation failed:" once, for formula.Validate's
+// error as for the handler's own (the #7723 review).
+func TestFormulaWrite_UpsertRefusesAnEpisodeStep(t *testing.T) {
+	for name, c := range map[string]struct{ body, want string }{
+		"an episode step": {"formula = \"e\"\n[[steps]]\nid = \"s\"\ntitle = \"S\"\ntype = \"startup-health-episode\"\n", "makes a startup-health episode"},
+		"a name mismatch": {"formula = \"other\"\n", "does not match path name"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fs := newFakeFormulaState(t)
+			h := newTestCityHandler(t, fs)
+			req := httptest.NewRequest("PUT", cityURL(fs, "/formulas/e"), strings.NewReader(c.body))
+			req.Header.Set("X-GC-Request", "true")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			body := w.Body.String()
+			if w.Code != http.StatusBadRequest || !strings.Contains(body, c.want) || strings.Count(body, "formula validation failed:") != 1 {
+				t.Fatalf("PUT status=%d body=%s: want 400 naming %q, prefixed once", w.Code, body, c.want)
+			}
+			if _, ok := fs.formulas["e"]; ok {
+				t.Fatal("refused formula must not be persisted")
+			}
+		})
+	}
+}

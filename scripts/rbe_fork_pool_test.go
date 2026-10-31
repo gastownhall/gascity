@@ -15,71 +15,23 @@ import (
 
 // rbe-west's fork pool (infra nativelink-cas/west README "rbe-fork"): Blacksmith
 // workers for the fork scheduler, instance oss-fork, which executes untrusted
-// fork and Dependabot PR actions. rbe-fork-pool.yml runs blacksmith-worker.sh
-// with WORKER_TIER=fork: isolation always on, every action in its own network
-// namespace with loopback only (NETNS=1), no action cache, and the fork CA's
-// worker certificate (CN=rbe-fork-worker), which reaches only the fork
-// scheduler and the CAS. These tests pin that, and the id-based allowlist the
-// fork mint reads for the rw tier.
+// fork and Dependabot PR actions. rbe-fork-pool.yml runs the pinned
+// gastownhall/rbe-worker's blacksmith-worker.sh with WORKER_TIER=fork:
+// isolation always on, every action in its own network namespace with
+// loopback only (NETNS=1), no action cache, and the fork CA's worker
+// certificate (CN=rbe-fork-worker), which reaches only the fork scheduler and
+// the CAS. These tests pin the workflow's half of that (what the script does
+// with WORKER_TIER=fork is rbe-worker's to test), and the id-based allowlist
+// the fork mint reads for the rw tier.
 
 const (
-	rbeForkPoolWorkflow   = ".github/workflows/rbe-fork-pool.yml"
-	rbeForkAllowlist      = ".github/rbe-fork-allowlist.txt"
-	rbeForkCredential     = "tools/rbe/fork-credential.sh"
+	rbeForkPoolWorkflow = ".github/workflows/rbe-fork-pool.yml"
+	rbeForkAllowlist    = ".github/rbe-fork-allowlist.txt"
+	// setup-bazel's, a byte copy of beads' (TestSetupBazelIsBeadsByteCopy).
+	rbeForkCredential     = ".github/actions/setup-bazel/fork-credential.sh"
 	blacksmithAllowlist   = ".github/blacksmith-allowlist.txt"
 	rbeForkPoolMaxMinutes = 120
 )
-
-// The tier gate sits right after RBE_ACTION_ISOLATION is validated and before
-// the canary picks a mode, so a fork worker refuses 0 and canary alike, and
-// before anything is installed. NETNS is set here and nowhere else.
-func TestRBEWorkerScriptForkTier(t *testing.T) {
-	script := readFile(t, repoRoot(t), rbeWorkerScript)
-	const gate = "WORKER_TIER=${WORKER_TIER:-oss}\n" +
-		"case \"$WORKER_TIER\" in\n" +
-		"oss) NETNS=0 ;;\n" +
-		"fork)\n" +
-		"\t# Untrusted actions never run unisolated, and never with a network.\n" +
-		"\t[ \"$ACTION_ISOLATION\" = 1 ] || { echo \"WORKER_TIER=fork needs RBE_ACTION_ISOLATION=1\" >&2; exit 2; }\n" +
-		"\tNETNS=1\n" +
-		"\t;;\n" +
-		"*) echo \"WORKER_TIER must be oss or fork\" >&2; exit 2 ;;\n" +
-		"esac\n"
-	at := 0
-	for _, want := range []string{
-		"ACTION_ISOLATION=${RBE_ACTION_ISOLATION:-1}\n",
-		`*) echo "RBE_ACTION_ISOLATION must be 0, 1 or canary" >&2; exit 2 ;;`,
-		gate,
-		"RBE_WEST_PORT=${RBE_WEST_PORT:-443}\n",
-		// zstd needs the dedicated zread host: the worker's own endpoint
-		// answers compressed reads with InvalidArgument (no fallback), so the
-		// worker exits before installing anything rather than register.
-		`if [ "$wire_zstd" = true ] && [ "$ZSTD_READ_URL" = "grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT}" ]; then`,
-		"\texit 2\nfi\n",
-		"sudo DEBIAN_FRONTEND=noninteractive",
-		`if [ "$ACTION_ISOLATION" = canary ]; then`,
-		"\t\tNETNS=${NETNS:-0}\n",
-	} {
-		i := strings.Index(script[at:], want)
-		if i < 0 {
-			t.Fatalf("%s: %q missing or out of order", rbeWorkerScript, want)
-		}
-		at += i + len(want)
-	}
-	if n := len(regexp.MustCompile(`(?m)^\s*(?:oss\) )?NETNS=`).FindAllString(script, -1)); n != 3 {
-		t.Errorf("%s assigns NETNS %d times, want 3 (oss, fork, rbe-action.env)", rbeWorkerScript, n)
-	}
-	// render runs without the preamble too (the canary harness): it defaults
-	// the tier and port itself, to the OSS ones.
-	for _, want := range []string{
-		`--arg host "grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT:-443}"`,
-		`--arg tier "${WORKER_TIER:-oss}"`,
-	} {
-		if !strings.Contains(script, want) {
-			t.Errorf("%s render missing %q", rbeWorkerScript, want)
-		}
-	}
-}
 
 type rbeForkPoolWorkflowFile struct {
 	On          map[string]any    `yaml:"on"`
@@ -105,7 +57,8 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	}
 
 	// Started only by rbe-west's fork pool scaler (or an operator): a dispatch
-	// with the scaler's two inputs, never a PR, push or schedule.
+	// with the scaler's inputs, never a PR, push or schedule. The third input,
+	// role, only names the run (TestRBEPoolWorkflowsNameTheirRole).
 	if len(wf.On) != 1 || wf.On["workflow_dispatch"] == nil {
 		t.Errorf("on: %v, want workflow_dispatch only", rbeSortedKeys(wf.On))
 	}
@@ -117,16 +70,18 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 			t.Errorf("workflow_dispatch input %s = %v, want a string defaulting to %q", name, in, def)
 		}
 	}
-	if len(inputs) != 2 {
-		t.Errorf("workflow_dispatch inputs %v, want idle_minutes and max_minutes (what the scaler sends)", rbeSortedKeys(inputs))
+	if len(inputs) != 3 || inputs["role"] == nil {
+		t.Errorf("workflow_dispatch inputs %v, want idle_minutes, max_minutes and role (what the scaler sends)", rbeSortedKeys(inputs))
 	}
 	if len(wf.Permissions) != 1 || wf.Permissions["contents"] != "read" {
 		t.Errorf("permissions %v, want contents: read only", wf.Permissions)
 	}
 
+	// The worker-env drift jobs beside it, and its measure step, are
+	// TestRBEPoolWorkflowsReportDriftWhileServing's.
 	job, ok := wf.Jobs["worker"]
-	if !ok || len(wf.Jobs) != 1 {
-		t.Fatalf("%s: jobs %v, want worker alone", rbeForkPoolWorkflow, rbeSortedKeys(wf.Jobs))
+	if !ok || len(wf.Jobs) != 3 {
+		t.Fatalf("%s: jobs %v, want worker, await-drift and report-drift", rbeForkPoolWorkflow, rbeSortedKeys(wf.Jobs))
 	}
 	// Blacksmith donates this compute for our OSS repos' workflows; the
 	// default branch only, as rbe-worker-pool.yml.
@@ -150,14 +105,17 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 				t.Errorf("checkout must set persist-credentials: false, got %v", step.With["persist-credentials"])
 			}
 		}
-		if strings.TrimSpace(step.Run) != rbeWorkerScript {
+		// The step runs "$RBE_WORKER_DIR/blacksmith-worker.sh", the pinned
+		// rbe-worker the fetch step checked out.
+		run := strings.TrimSpace(step.Run)
+		if run != `"$RBE_WORKER_DIR/blacksmith-worker.sh"` || step.Env["WORKER_MODE"] == "measure" {
 			continue
 		}
 		worker = true
 		// Exactly these: isolation is not the repository variable (no
 		// rollback to 0, no canary), the fork CA's worker certificate and the
-		// fork endpoint, nothing more (no CACHE_DIR: no sticky disk shared
-		// across fork workers).
+		// fork endpoint, nothing more (no sticky disk shared across fork
+		// workers: the only warm start is the read-only warm set).
 		want := map[string]string{
 			"RBE_WORKER_TLS_CERT":  "${{ secrets.RBE_FORK_WORKER_TLS_CERT }}",
 			"RBE_WORKER_TLS_KEY":   "${{ secrets.RBE_FORK_WORKER_TLS_KEY }}",
@@ -169,12 +127,19 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 			"POOL_MAX_MINUTES":     "${{ inputs.max_minutes }}",
 			"WORKER_NAME":          "gha-fork-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}",
 			"RBE_ACTION_ISOLATION": "1",
+			// The fetch step's outputs.
+			"RBE_WORKER_DIR":      "${{ steps.rbe-worker.outputs.dir }}",
+			"RBE_WORKER_REVISION": "${{ steps.rbe-worker.outputs.sha }}",
 			// zstd fetches only (blacksmith-worker.sh keeps uploads identity),
 			// off unless the repository variable says 1: merging changes
 			// nothing, and rollback is the variable.
 			"RBE_WIRE_ZSTD": "${{ vars.RBE_FORK_WIRE_ZSTD || '0' }}",
 			// The dedicated zread host; the worker refuses zstd without it.
 			"RBE_WIRE_ZSTD_READ_URL": "${{ vars.RBE_FORK_WIRE_ZSTD_READ_URL || '' }}",
+			// The read-only warm set (no writable cache shared with any tier):
+			// off unless the repository variable names it; one run in N.
+			"RBE_WARM_URL":   "${{ vars.RBE_FORK_WARM_URL || '' }}",
+			"RBE_WARM_EVERY": "${{ vars.RBE_FORK_WARM_EVERY || '1' }}",
 		}
 		for k, v := range want {
 			if step.Env[k] != v {
@@ -192,8 +157,10 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	}
 
 	// No secret but the fork worker certificate (never the OSS worker's, which
-	// writes AC_OSS), and no repository variables but RBE_FORK_WIRE_ZSTD and
-	// RBE_FORK_WIRE_ZSTD_READ_URL (pinned above): none can turn isolation down.
+	// writes AC_OSS), and no repository variables but RBE_FORK_WIRE_ZSTD,
+	// RBE_FORK_WIRE_ZSTD_READ_URL, RBE_FORK_WARM_URL and RBE_FORK_WARM_EVERY
+	// (pinned above): none can turn isolation down, and none picks the worker
+	// code (always the pin).
 	secrets := map[string]bool{}
 	for _, m := range regexp.MustCompile(`secrets\.([A-Za-z0-9_]+)`).FindAllStringSubmatch(text, -1) {
 		secrets[m[1]] = true
@@ -201,11 +168,63 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	if got := rbeSortedKeys(secrets); strings.Join(got, ",") != "RBE_FORK_WORKER_TLS_CERT,RBE_FORK_WORKER_TLS_KEY" {
 		t.Errorf("%s uses secrets %v, want RBE_FORK_WORKER_TLS_CERT and RBE_FORK_WORKER_TLS_KEY only", rbeForkPoolWorkflow, got)
 	}
-	if n := strings.Count(text, "vars."); n != 2 || !strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD ") ||
-		!strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD_READ_URL ") {
-		t.Errorf("%s reads repository variables %d times; want vars.RBE_FORK_WIRE_ZSTD and vars.RBE_FORK_WIRE_ZSTD_READ_URL once each, nothing else", rbeForkPoolWorkflow, n)
+	if n := strings.Count(text, "vars."); n != 4 || !strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD ") ||
+		!strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD_READ_URL ") || !strings.Contains(text, "vars.RBE_FORK_WARM_URL ") ||
+		!strings.Contains(text, "vars.RBE_FORK_WARM_EVERY ") {
+		t.Errorf("%s reads repository variables %d times; want RBE_FORK_WIRE_ZSTD, RBE_FORK_WIRE_ZSTD_READ_URL, RBE_FORK_WARM_URL and RBE_FORK_WARM_EVERY once each, nothing else", rbeForkPoolWorkflow, n)
 	}
 }
+
+// rbe-west's pool scalers count floor workers by run name (infra
+// nativelink-cas/west oss-pool-scaler.py ROLE_TITLE, README "Pool scalers:
+// floor and burst roles"): each pool workflow takes input role, a choice of
+// burst (the default: CI pre-warm and hand dispatches) or floor, and puts it
+// and idle_minutes in run-name. The worker never reads role; idle_minutes is
+// what changes its behavior.
+func TestRBEPoolWorkflowsNameTheirRole(t *testing.T) {
+	for _, tc := range []struct{ path, name string }{
+		{rbeWorkerWorkflow, "rbe-worker-pool"},
+		{rbeForkPoolWorkflow, "rbe-fork-pool"},
+		{rbeWorkerLegacyWorkflow, "rbe-worker-legacy"},
+	} {
+		text := readFile(t, repoRoot(t), tc.path)
+		var wf struct {
+			Name    string         `yaml:"name"`
+			RunName string         `yaml:"run-name"`
+			On      map[string]any `yaml:"on"`
+		}
+		if err := yaml.Unmarshal([]byte(text), &wf); err != nil {
+			t.Fatalf("parse %s: %v", tc.path, err)
+		}
+		if want := "${{ format('" + tc.name + " ({0}, idle {1}m)', inputs.role || 'burst', inputs.idle_minutes) }}"; wf.Name != tc.name || wf.RunName != want {
+			t.Errorf("%s: name %q run-name %q, want %q and %q", tc.path, wf.Name, wf.RunName, tc.name, want)
+		}
+		dispatch, _ := wf.On["workflow_dispatch"].(map[string]any)
+		inputs, _ := dispatch["inputs"].(map[string]any)
+		role, _ := inputs["role"].(map[string]any)
+		opts, _ := role["options"].([]any)
+		if role == nil || role["type"] != "choice" || role["default"] != "burst" || len(opts) != 2 || opts[0] != "burst" || opts[1] != "floor" {
+			t.Errorf("%s: workflow_dispatch input role = %v, want a choice of burst (default) or floor", tc.path, role)
+		}
+		// run-name alone reads role: no other reference (inputs.role,
+		// inputs['role'], github.event.inputs.role) and no whole-inputs
+		// exposure (toJSON(inputs), toJSON(github.event), toJSON(github),
+		// github.event.inputs) a step could read. Expressions ignore case
+		// (Inputs.Role, toJson), so the patterns do too.
+		refs := rbeRoleInputRef.FindAllStringIndex(text, -1)
+		if len(refs) != 1 || !strings.HasPrefix(text[strings.LastIndex(text[:refs[0][0]], "\n")+1:], "run-name: ") {
+			t.Errorf("%s: input role referenced %d times, want once, in run-name (the worker never reads it)", tc.path, len(refs))
+		}
+		if m := rbeWholeInputs.FindString(text); m != "" {
+			t.Errorf("%s: %q exposes every input, role included, beyond run-name", tc.path, m)
+		}
+	}
+}
+
+var (
+	rbeRoleInputRef = regexp.MustCompile(`(?i)inputs\s*(\.\s*role\b|\[\s*['"]role['"]\s*\])`)
+	rbeWholeInputs  = regexp.MustCompile(`(?i)toJSON\(\s*(github(\s*\.\s*event(\s*\.\s*inputs)?)?|inputs)\s*\)|github\s*\.\s*event\s*\.\s*inputs`)
+)
 
 func rbeSortedKeys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
@@ -255,41 +274,7 @@ func TestRBEForkAllowlistIsIDBased(t *testing.T) {
 	}
 }
 
-// A fork VM runs untrusted actions: user namespaces (the usual first step of a
-// kernel escape from an unprivileged process) are off on it before any action
-// runs, set inside isolate() after the render and before the selftest, so the
-// selftest and the probe run with the limit in place, and the probe action
-// checks it cannot make one. Nothing on the worker needs them: the launcher's
-// unshare runs as root with pid/mount/ipc/net namespaces only.
-func TestRBEWorkerScriptForkNoUserNamespaces(t *testing.T) {
-	root := repoRoot(t)
-	script := readFile(t, root, rbeWorkerScript)
-	at := 0
-	for _, want := range []string{
-		"isolate() {\n",
-		"\tphase render\n\trender\n",
-		"\tif [ \"$WORKER_TIER\" = fork ]; then\n\t\tphase userns\n" +
-			"\t\tsudo sysctl -q -w user.max_user_namespaces=0\n" +
-			"\t\t[ \"$(cat /proc/sys/user/max_user_namespaces)\" = 0 ] || fail \"user.max_user_namespaces is not 0\"\n\tfi\n",
-		"\tphase selftest\n",
-		"\t\t[ \"$2\" = fork ] && unshare --user true >/dev/null 2>&1 && echo \"LEAK userns\"\n",
-		"' probe \"$ROOT/pki/worker.key\" \"$WORKER_TIER\" 2>&1) || true\n",
-	} {
-		i := strings.Index(script[at:], want)
-		if i < 0 {
-			t.Fatalf("%s: %q missing or out of order", rbeWorkerScript, want)
-		}
-		at += i + len(want)
-	}
-	for _, f := range []string{"tools/rbe/rbe-action-launch", "tools/rbe/rbe-action-entry.c", "tools/rbe/rbe-action-selftest", "tools/rbe/rbe-action-sweep"} {
-		if regexp.MustCompile(`unshare[^\n]*(--user|\s-U\b)|CLONE_NEWUSER`).MatchString(readFile(t, root, f)) {
-			t.Errorf("%s creates a user namespace; fork VMs run with user.max_user_namespaces=0", f)
-		}
-	}
-}
-
-// fork-credential.sh is a byte copy of beads' setup-bazel one (keep in sync,
-// like tools/rbe/rbe-action-*). Whatever the mint answers, a build only ever
+// fork-credential.sh is beads' setup-bazel one, byte for byte. Whatever the mint answers, a build only ever
 // goes to the fork endpoint, with ro on oss-fork or rw on oss, and its key is
 // PKCS#8 (Bazel's TLS refuses SEC1).
 func TestRBEForkCredentialPins(t *testing.T) {
@@ -395,7 +380,7 @@ echo "error=$(grep -o 'mint refused (HTTP [0-9]*)' out.txt || true)" >>.bazelrc.
 			t.Fatal(err)
 		}
 		mintLog := filepath.Join(t.TempDir(), "mint.log")
-		got := runBazelRCConfigStep(t, step, map[string]string{
+		got, _ := runBazelRCLocalStep(t, step, map[string]string{
 			"PATH":                bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"GITHUB_OUTPUT":       ".bazelrc.local",
 			"RBE_TEST_SCRIPT":     filepath.Join(repoRoot(t), rbeForkCredential),

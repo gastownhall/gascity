@@ -20,6 +20,12 @@ func NewAtomicCloseMemStore() Store {
 	return &atomicCloseMemStore{MemStore: NewMemStore()}
 }
 
+// AtomicCloserOver is m's atomic terminal close, for a test whose store must
+// stay a plain *MemStore (a simulator's backing) yet close atomically.
+func AtomicCloserOver(m *MemStore) AtomicConditionalCloser {
+	return &atomicCloseMemStore{MemStore: m}
+}
+
 // CloseWithMetadataIfMatch merges metadata and closes one open bead while its
 // revision remains expectedRevision. Both changes share one MemStore lock and
 // one fresh revision.
@@ -52,13 +58,18 @@ func (m *MemStore) closeWithMetadataIfMatch(id string, expectedRevision int64, m
 	if m.beads[i].Revision != expectedRevision {
 		return Bead{}, &PreconditionFailedError{ID: id, Expected: expectedRevision, Current: m.beads[i].Revision}
 	}
+	m.noteSession(m.beads[i], metadata)
 	if m.beads[i].Metadata == nil {
 		m.beads[i].Metadata = make(StringMap, len(metadata))
 	}
 	for key, value := range metadata {
 		m.beads[i].Metadata[key] = value
 	}
+	wasClosed := m.beads[i].Status == "closed"
 	setBeadStatus(&m.beads[i], "closed")
+	if !wasClosed {
+		recordCloseReason(&m.beads[i])
+	}
 	m.beads[i].UpdatedAt = time.Now()
 	m.beads[i].Revision++
 	return cloneBead(m.beads[i]), nil

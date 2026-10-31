@@ -270,6 +270,247 @@ func TestRetryLifecycleTransientThenPass(t *testing.T) {
 	}
 }
 
+// closedRootRetryControl returns a retry control whose attempt 1 failed
+// transiently, under a workflow root that is already closed, so the attempt
+// Attach mints next is rooted at the control and reached only through the
+// control's dependency edges.
+func closedRootRetryControl(t *testing.T, store beads.Store) beads.Bead {
+	t.Helper()
+	spec := &formula.Step{
+		ID:    "review",
+		Title: "Review",
+		Type:  "task",
+		Retry: &formula.RetrySpec{MaxAttempts: 3},
+	}
+	root, control := makeRetryControl(t, store, "mol-test.review", spec, 3)
+	attempt1 := makeAttemptBead(t, store, root.ID, "mol-test.review.attempt.1", 1, map[string]string{
+		beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
+		beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassTransient,
+		beadmeta.FailureReasonMetadataKey: "rate_limited",
+	})
+	mustDep(t, store, control.ID, attempt1.ID, "blocks")
+	mustClose(t, store, root.ID)
+	return control
+}
+
+// retryIntoPassedSecondAttempt processes a closedRootRetryControl control once,
+// which must retry into attempt 2, then closes attempt 2 as passed.
+func retryIntoPassedSecondAttempt(t *testing.T, store beads.Store, controlID string) beads.Bead {
+	t.Helper()
+	result, err := processRetryControl(store, mustGet(t, store, controlID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl attempt 1: %v", err)
+	}
+	if result.Action != "retry" || result.Created != 1 {
+		t.Fatalf("attempt 1 result = %+v, want one retry", result)
+	}
+
+	attempt2 := findAttemptByRef(t, store, controlID, "mol-test.review.attempt.2")
+	if attempt2.ID == "" {
+		t.Fatal("attempt 2 was not created under the retry control")
+	}
+	if err := store.SetMetadataBatch(attempt2.ID, map[string]string{
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass,
+	}); err != nil {
+		t.Fatalf("set attempt 2 outcome: %v", err)
+	}
+	mustClose(t, store, attempt2.ID)
+	return attempt2
+}
+
+// requireSecondAttemptEvaluated processes the control again and requires it to
+// evaluate the passed attempt 2: a pass that closes the control.
+func requireSecondAttemptEvaluated(t *testing.T, store beads.Store, controlID string) {
+	t.Helper()
+	result, err := processRetryControl(store, mustGet(t, store, controlID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl attempt 2: %v", err)
+	}
+	if result.Action != "pass" {
+		t.Fatalf("closed workflow root retried attempt 2 instead of evaluating it: result=%+v", result)
+	}
+	control := mustGet(t, store, controlID)
+	if control.Status != "closed" || control.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Fatalf("control after attempt 2 = status %q outcome %q, want closed with outcome pass",
+			control.Status, control.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+}
+
+func TestRetryLifecycleClosedWorkflowRootEvaluatesSecondAttemptOnce(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	control := closedRootRetryControl(t, store)
+	retryIntoPassedSecondAttempt(t, store, control.ID)
+	requireSecondAttemptEvaluated(t, store, control.ID)
+
+	control = mustGet(t, store, control.ID)
+	if err := spawnNextAttempt(t.Context(), store, control, 2, ProcessOptions{}); err != nil {
+		t.Fatalf("replay spawnNextAttempt attempt 2: %v", err)
+	}
+	all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("list attempts: %v", err)
+	}
+	count := 0
+	for _, candidate := range all {
+		if candidate.Metadata[beadmeta.StepRefMetadataKey] == "mol-test.review.attempt.2" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("duplicate attempt 2 after closed-root replay: got %d copies, want 1", count)
+	}
+}
+
+// TestRetryLifecycleClosedWorkflowRootSkipsDanglingDependency pins that a
+// dependency edge whose target no longer exists does not stop a closed-root
+// control from evaluating attempt 2. An absent bead cannot be the latest
+// attempt; failing the walk on it, or answering with the root's attempt 1
+// instead, would retry the control on every pass.
+func TestRetryLifecycleClosedWorkflowRootSkipsDanglingDependency(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	control := closedRootRetryControl(t, store)
+	mustDep(t, store, control.ID, "gc-vanished", "blocks")
+
+	retryIntoPassedSecondAttempt(t, store, control.ID)
+	requireSecondAttemptEvaluated(t, store, control.ID)
+}
+
+// TestRetryLifecycleClosedWorkflowRootNeverReadsExternalDependency pins that
+// the closed-root dependency walk skips an "external:" target without reading
+// it: the reference has no bead to read, so the walk must not depend on how a
+// store answers a read of one.
+func TestRetryLifecycleClosedWorkflowRootNeverReadsExternalDependency(t *testing.T) {
+	t.Parallel()
+	const externalRef = "external:upstream:capability"
+	base := beads.NewMemStore()
+	store := failGetStore{Store: base, failID: externalRef, err: errors.New("read an external reference")}
+	control := closedRootRetryControl(t, store)
+	mustDep(t, store, control.ID, externalRef, "blocks")
+
+	retryIntoPassedSecondAttempt(t, store, control.ID)
+	requireSecondAttemptEvaluated(t, store, control.ID)
+}
+
+// TestRetryLifecycleClosedWorkflowRootReturnsDependencyReadError pins that a
+// failed read of a closed-root control's dependency is the pass's error, still
+// classified as the store being unavailable, and is not answered with the
+// root's attempt 1: that answer retries a control whose attempt 2 passed.
+func TestRetryLifecycleClosedWorkflowRootReturnsDependencyReadError(t *testing.T) {
+	t.Parallel()
+	base := beads.NewMemStore()
+	control := closedRootRetryControl(t, base)
+	attempt2 := retryIntoPassedSecondAttempt(t, base, control.ID)
+
+	readErr := errors.New("connection refused")
+	store := failGetStore{Store: base, failID: attempt2.ID, err: readErr}
+	before := mustGet(t, base, control.ID)
+	_, err := processRetryControl(store, before, ProcessOptions{})
+	if !errors.Is(err, readErr) {
+		t.Fatalf("processRetryControl attempt 2 error = %v, want the dependency read error", err)
+	}
+	if tier := ClassifyControllerError(err); tier != TierAvailability {
+		t.Fatalf("ClassifyControllerError(%v) = %v, want %v", err, tier, TierAvailability)
+	}
+	after := mustGet(t, base, control.ID)
+	wantEpoch := before.Metadata[beadmeta.ControlEpochMetadataKey]
+	if after.Status != "open" || after.Metadata[beadmeta.ControlEpochMetadataKey] != wantEpoch {
+		t.Fatalf("control after failed read = status %q epoch %q, want open at epoch %q",
+			after.Status, after.Metadata[beadmeta.ControlEpochMetadataKey], wantEpoch)
+	}
+	if attempt3 := findAttemptByRef(t, base, control.ID, "mol-test.review.attempt.3"); attempt3.ID != "" {
+		t.Fatalf("failed dependency read spawned attempt 3 %s", attempt3.ID)
+	}
+}
+
+func TestNestedRalphUnderRetryAdvancesPastSecondIterationThroughProcessControl(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	opts := testProcessOptionsWithControlDispatcher("")
+	const storeRef = "city:test-city"
+	spec := &formula.Step{
+		ID:    "outer",
+		Title: "Outer",
+		Type:  "task",
+		Retry: &formula.RetrySpec{MaxAttempts: 3},
+		Children: []*formula.Step{{
+			ID:    "inner",
+			Title: "Inner",
+			Type:  "task",
+			Ralph: &formula.RalphSpec{MaxAttempts: 4, Check: &formula.RalphCheckSpec{Mode: "exec", Path: "unused.sh"}},
+		}},
+	}
+	root, outer := makeRetryControl(t, store, "mol-test.outer", spec, 3)
+	for _, id := range []string{root.ID, outer.ID} {
+		if err := store.SetMetadata(id, beadmeta.RootStoreRefMetadataKey, storeRef); err != nil {
+			t.Fatalf("set root store ref on %s: %v", id, err)
+		}
+	}
+	outerAttempt1 := makeAttemptBead(t, store, root.ID, "mol-test.outer.attempt.1", 1, map[string]string{
+		beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
+		beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassTransient,
+		beadmeta.FailureReasonMetadataKey: "rate_limited",
+	})
+	mustDep(t, store, outer.ID, outerAttempt1.ID, "blocks")
+
+	result, err := ProcessControl(store, mustGet(t, store, outer.ID), opts)
+	if err != nil {
+		t.Fatalf("ProcessControl outer: %v", err)
+	}
+	if result.Action != "retry" || result.Created != 1 {
+		t.Fatalf("outer result = %+v, want one retry", result)
+	}
+	if got := mustGet(t, store, root.ID).Status; got != "open" {
+		t.Fatalf("workflow root status = %q, want open", got)
+	}
+
+	inner := findAttemptByRef(t, store, root.ID, "mol-test.outer.attempt.2.inner")
+	if inner.ID == "" {
+		t.Fatal("outer attempt 2 did not create the inner ralph control")
+	}
+	if inner.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindRalph {
+		t.Fatalf("inner control kind = %q, want ralph", inner.Metadata[beadmeta.KindMetadataKey])
+	}
+	if got := inner.Metadata[beadmeta.RootStoreRefMetadataKey]; got != storeRef {
+		t.Fatalf("inner control %s = %q, want %q", beadmeta.RootStoreRefMetadataKey, got, storeRef)
+	}
+	if got := beadmeta.ResolveRunID(inner.Metadata, inner.ID, ""); got != root.ID {
+		t.Fatalf("inner control run id = %q, want workflow root %s", got, root.ID)
+	}
+
+	for iteration := 1; iteration <= 2; iteration++ {
+		ref := fmt.Sprintf("mol-test.outer.attempt.2.inner.iteration.%d", iteration)
+		current := findAttemptByRef(t, store, root.ID, ref)
+		if current.ID == "" {
+			t.Fatalf("inner iteration %d (%s) was not created", iteration, ref)
+		}
+		if got := beadmeta.ResolveRunID(current.Metadata, current.ID, ""); got != root.ID {
+			t.Fatalf("inner iteration %d run id = %q, want workflow root %s", iteration, got, root.ID)
+		}
+		if err := store.SetMetadata(current.ID, beadmeta.OutcomeMetadataKey, beadmeta.OutcomeFail); err != nil {
+			t.Fatalf("fail inner iteration %d: %v", iteration, err)
+		}
+		mustClose(t, store, current.ID)
+
+		result, err := ProcessControl(store, mustGet(t, store, inner.ID), opts)
+		if err != nil {
+			t.Fatalf("ProcessControl inner after iteration %d: %v", iteration, err)
+		}
+		if result.Action != "retry" || result.Created != 1 {
+			t.Fatalf("inner after iteration %d = %+v, want a retry spawning iteration %d", iteration, result, iteration+1)
+		}
+	}
+
+	third := findAttemptByRef(t, store, root.ID, "mol-test.outer.attempt.2.inner.iteration.3")
+	if third.ID == "" {
+		t.Fatal("inner ralph did not advance past iteration 2")
+	}
+	if got := mustGet(t, store, inner.ID); got.Status != "open" || got.Metadata[beadmeta.ControlEpochMetadataKey] != "3" {
+		t.Fatalf("inner control after iteration 2 = status %q epoch %q, want open/3", got.Status, got.Metadata[beadmeta.ControlEpochMetadataKey])
+	}
+}
+
 // TestRetryLifecycleAttachedAttemptExemptFromFalseScopeAbort reproduces
 // gc-yydp6f end to end: an Attach-spawned retry attempt that bare-closes with
 // a typed deliverable disposition (no flat gc.outcome) must carry

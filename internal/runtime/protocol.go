@@ -31,6 +31,14 @@ const (
 	// exit 2 at the exec-connection seam. exec stays optional; an executable that
 	// omits this capability is driven via the dedicated ops (the fallback path).
 	ProtocolCapabilityConnectionExec = "proc.exec"
+	// ProtocolCapabilityInputFence declares that the box's tmux can take
+	// fenced input (RUNTIME-CONTRACT-009): tmux 3.0 or later, the `main`
+	// session present when `start` returns, and `sh`. Declared with
+	// proc.exec, it makes gc publish each agent pane's input fence and guard
+	// fenced input over the exec connection (InputFencingAtomic); without it
+	// the pack reports InputFencingNone, and starts and launches touch no
+	// fence.
+	ProtocolCapabilityInputFence = "input-fence"
 	// The proc.* / tty.* tokens below form the connection-plane capability
 	// family — a dotted namespace parallel to the env.* family, distinct from
 	// the flat session-control tokens above. They are reserved now and gain

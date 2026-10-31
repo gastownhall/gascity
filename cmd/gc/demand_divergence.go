@@ -134,7 +134,9 @@ func classifyDemandTrigger(triggerID, dir string, opts hookClaimOptions, ops hoo
 		return status, classifyDemandTriggerBlockedness(triggerID, dir, opts, ops)
 	default:
 		// Deferred: gated by defer_until (or bd's indefinite deferral), a fresh
-		// bead-local field, so draining past it is correct pull.
+		// bead-local field, so draining past it is correct pull. Held rows are
+		// already benign through demandRowServable above; demandRowHeld lands
+		// here for the same reason.
 		return status, events.DemandClaimBenign
 	}
 }

@@ -364,7 +364,7 @@ func TestPhase2ComputeAwakeSet_PinRespectsHardBlockers(t *testing.T) {
 }
 
 func TestPhase2ReconcileSessionBeads_PinWakesThroughSessionSleepSuppression(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		SessionSleep: config.SessionSleepConfig{
 			InteractiveResume: "60s",

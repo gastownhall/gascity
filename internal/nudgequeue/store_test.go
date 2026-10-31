@@ -599,3 +599,87 @@ func TestNilStoreIsNoOp(t *testing.T) {
 		t.Errorf("FindIncludingTerminal on nil store = (%+v,%v,%v), want (zero,false,nil)", shadow, ok, err)
 	}
 }
+
+// TestIsTerminalStateCoversDeliveredUnobserved pins injected_unobserved as a
+// terminal state: it is the ack for a submit that drained but whose busy state
+// was never observed, which is proven delivery.
+func TestIsTerminalStateCoversDeliveredUnobserved(t *testing.T) {
+	for _, state := range []string{"accepted_for_injection", "injected", "injected_unobserved", "expired", "failed", "superseded"} {
+		if !IsTerminalState(state) {
+			t.Errorf("IsTerminalState(%q) = false, want true", state)
+		}
+	}
+	for _, state := range []string{"", "queued", "in_flight"} {
+		if IsTerminalState(state) {
+			t.Errorf("IsTerminalState(%q) = true, want false", state)
+		}
+	}
+}
+
+// TestFindIncludingTerminalReturnsNewestDeliveredUnobservedPastLookupCap proves
+// a nudge id with more closed injected_unobserved shadows than the lookup cap
+// resolves to the newest one instead of failing with a LookupLimitError, so a
+// wait that has already looped re-enqueueing its nudge finalizes on the next pass.
+func TestFindIncludingTerminalReturnsNewestDeliveredUnobservedPastLookupCap(t *testing.T) {
+	mem := beads.NewMemStore()
+	const nudgeID = "nudge-unobserved"
+	for i := 0; i < NudgeLookupLimit+1; i++ {
+		b, err := mem.Create(beads.Bead{
+			Title:  "nudge:" + nudgeID,
+			Labels: []string{nudgeBeadLabel, "nudge:" + nudgeID},
+			Metadata: map[string]string{
+				"nudge_id":        nudgeID,
+				"state":           "injected_unobserved",
+				"commit_boundary": "provider-nudge-return",
+			},
+		})
+		if err != nil {
+			t.Fatalf("create shadow %d: %v", i, err)
+		}
+		if err := mem.Close(b.ID); err != nil {
+			t.Fatalf("close shadow %d: %v", i, err)
+		}
+	}
+	newest, err := mem.List(beads.ListQuery{Label: "nudge:" + nudgeID, IncludeClosed: true, Sort: beads.SortCreatedDesc})
+	if err != nil || len(newest) != NudgeLookupLimit+1 {
+		t.Fatalf("List shadows = (%d,%v), want %d", len(newest), err, NudgeLookupLimit+1)
+	}
+
+	shadow, ok, err := NewStore(beads.NudgesStore{Store: mem}).FindIncludingTerminal(nudgeID)
+	if err != nil {
+		t.Fatalf("FindIncludingTerminal err = %v, want nil (not a lookup-limit error)", err)
+	}
+	if !ok {
+		t.Fatal("FindIncludingTerminal ok = false, want true")
+	}
+	if shadow.BeadID != newest[0].ID || shadow.State != "injected_unobserved" {
+		t.Fatalf("shadow = %s/%q, want newest %s/injected_unobserved", shadow.BeadID, shadow.State, newest[0].ID)
+	}
+}
+
+// TestClassifyTerminalStateIsTheTerminalPredicate pins the canonical outcome of
+// every nudge lifecycle state code and guards that IsTerminalState accepts
+// exactly the states that classify to a terminal outcome, so a new terminal
+// state cannot be added to one list and missed by consumers of the other.
+func TestClassifyTerminalStateIsTheTerminalPredicate(t *testing.T) {
+	want := map[string]TerminalOutcome{
+		"":                       OutcomeNotTerminal,
+		"queued":                 OutcomeNotTerminal,
+		"in_flight":              OutcomeNotTerminal,
+		"gc-swept":               OutcomeNotTerminal,
+		"accepted_for_injection": OutcomeDelivered,
+		"injected":               OutcomeDelivered,
+		"injected_unobserved":    OutcomeDelivered,
+		"expired":                OutcomeFailed,
+		"failed":                 OutcomeFailed,
+		"superseded":             OutcomeSuperseded,
+	}
+	for state, outcome := range want {
+		if got := ClassifyTerminalState(state); got != outcome {
+			t.Errorf("ClassifyTerminalState(%q) = %v, want %v", state, got, outcome)
+		}
+		if got, wantTerminal := IsTerminalState(state), outcome != OutcomeNotTerminal; got != wantTerminal {
+			t.Errorf("IsTerminalState(%q) = %v, want %v (outcome %v)", state, got, wantTerminal, outcome)
+		}
+	}
+}

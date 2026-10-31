@@ -21,7 +21,11 @@
         "sessionID": "ses_opencode_phase1",
         "role": "assistant",
         "parentID": "msg_user_1",
-        "time": {"created": 1770000001000}
+        "modelID": "deepseek/deepseek-v4.1-flash",
+        "providerID": "openrouter",
+        "tokens": {"total": 150, "input": 100, "output": 40, "reasoning": 0, "cache": {"read": 10, "write": 0}},
+        "cost": 0.0002,
+        "time": {"created": 1770000001000, "completed": 1770000002000}
       },
       "parts": [
         {"id": "part_assistant_1", "type": "text", "text": "OpenCode phase 1 validates the tmux CLI transcript contract."}

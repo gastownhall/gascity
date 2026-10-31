@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { UsageBody } from 'gas-city-dashboard-shared/gc-supervisor';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import type { RunSummarySubscription } from '../runs/runSummarySubscription';
 import { invalidate } from '../api/cache';
 import { CockpitHomePage } from './CockpitHome';
@@ -28,11 +28,7 @@ vi.mock('../runs/runSummarySubscription', () => ({
   useRunSummary: () => mocks.runSummary() as RunSummarySubscription,
 }));
 
-const router = (children: React.ReactNode) => (
-  <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
-    {children}
-  </MemoryRouter>
-);
+const router = (children: React.ReactNode) => <MemoryRouter>{children}</MemoryRouter>;
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;

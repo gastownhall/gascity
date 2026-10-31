@@ -61,10 +61,7 @@ func conditionalReleaseUnprovable(t *testing.T, format string, args ...any) {
 }
 
 // TestBdStoreReleaseIfCurrentAgainstRealBd executes the conditional-release CAS
-// against a REAL bd binary in EMBEDDED mode — the mode where `bd sql` is
-// rejected outright ("'bd sql' is not yet supported in embedded mode"), so the
-// raw-SQL path this conversion replaces could only reach it by shelling
-// separately to `dolt sql`.
+// against a REAL bd binary in EMBEDDED mode.
 //
 // It is the authoritative guard for the two facts the unit tests can only
 // assume about bd: that the flag spelling still exists, and that a rejected
@@ -75,20 +72,21 @@ func conditionalReleaseUnprovable(t *testing.T, format string, args ...any) {
 //
 // It is homed on the contract matrix's "current" cell, whose bd is built from
 // deps.env BD_CURRENT_REF. That is a choice, not a capability limit: deps.env
-// BD_VERSION is v1.3.0, which carries the flags, so the shards that
+// BD_VERSION is v1.3.2, which carries the flags, so the shards that
 // install BD_VERSION could run this row too. It stays here as the single home
 // for the contract, and this cell sets requireConditionalReleaseEnv so every
-// exit short of a full run is a failure (conditionalReleaseUnprovable). A bd at
-// the floor (BD_PREV_VERSION, 1.0.4) still cannot run it, and still skips.
+// exit short of a full run is a failure (conditionalReleaseUnprovable). The
+// floor (BD_PREV_VERSION, v1.3.0) carries the flags too; only an off-pin bd
+// older than the supported floor skips.
 func TestBdStoreReleaseIfCurrentAgainstRealBd(t *testing.T) {
 	store, scope := newConditionalIntegrationBdStore(t)
 	if !bdParsesConditionalReleaseFlags(t, scope) {
 		conditionalReleaseUnprovable(t, "installed bd does not advertise --if-assignee/--if-status "+
-			"(pre-beads#5008): the store latches to the raw-SQL fallback, which embedded mode rejects "+
-			"outright, so this row cannot exercise the verb at all. Both deps.env BD_VERSION "+
-			"(v1.3.0) and BD_CURRENT_REF carry the flags, so a bd this old is the floor "+
-			"(BD_PREV_VERSION, 1.0.4) or something off-pin; the row is homed on the source-built "+
-			"BD_CURRENT_REF cell (make test-bd-conditional-release-contract).")
+			"(pre-beads#5008): ReleaseIfCurrent refuses it with ErrConditionalReleaseUnsupported, "+
+			"so this row cannot exercise the verb at all. deps.env BD_PREV_VERSION, BD_VERSION and "+
+			"BD_CURRENT_REF all carry the flags, so a bd this old is below the supported 1.3.0 "+
+			"floor and off-pin; the row is homed on the BD_CURRENT_REF cell "+
+			"(make test-bd-conditional-release-contract).")
 	}
 
 	created, err := store.Create(beads.Bead{Title: "conditional release row", Type: "task"})
@@ -233,11 +231,10 @@ func TestBdStoreReleaseIfCurrentAgainstRealBd(t *testing.T) {
 //
 // The signal is POSITIVE — the flags appear in `bd update --help`, the same
 // shape the production four-verb probe uses for --if-revision
-// (conditionalWritesCapable). Deciding from an error string instead cannot work
-// here: on a flagless bd the store latches to the raw-SQL path, embedded mode
-// rejects `bd sql`, and the dolt fallback then SUCCEEDS with released=false for
-// a wisp (it names the `issues` table), so no error ever surfaces to classify
-// and the row hard-fails instead of skipping.
+// (conditionalWritesCapable) — so the skip decision never rests on the code
+// under test. Skipping on ReleaseIfCurrent's own
+// ErrConditionalReleaseUnsupported would let a misread unknown-flag error skip
+// the row this test exists to run.
 func bdParsesConditionalReleaseFlags(t *testing.T, scope string) bool {
 	t.Helper()
 	out, err := newConditionalIntegrationRunner(t, scope)(scope, "bd", "update", "--help")

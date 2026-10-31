@@ -1903,8 +1903,11 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	opencodeHooks := string(fs.Files["/work/.opencode/plugins/gascity.js"])
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 6",
+		"const GC_OPENCODE_HOOK_VERSION = 8",
 		"pending.child.stdin?.end();",
+		"appendVolatileSystem",
+		"const turns = new Map()",
+		"state.userMessageIDs.has(messageID)",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		`"experimental.session.compacting"`,
@@ -1933,7 +1936,11 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	mimocodeHooks := string(fs.Files["/work/.mimocode/plugin/gascity.js"])
 	for _, want := range []string{
 		"Gas City hooks for MiMo Code.",
-		"const GC_MIMOCODE_HOOK_VERSION = 2",
+		"const GC_MIMOCODE_HOOK_VERSION = 4",
+		"pending.child.stdin?.end();",
+		"appendVolatileSystem",
+		"const turns = new Map()",
+		"state.userMessageIDs.has(messageID)",
 		`process.env.GC_BIN || "gc"`,
 		"process.env.GC_MIMOCODE_TRANSCRIPT_DIR || defaultTranscriptDir()",
 		`path.join(home, ".local", "share", "gascity", "mimocode-transcripts")`,
@@ -2101,7 +2108,8 @@ func TestInstallPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
 		`pi.on("before_agent_start"`,
-		"const GC_PI_HOOK_VERSION = 9",
+		"const GC_PI_HOOK_VERSION = 10",
+		`const GC_BIN = process.env.GC_BIN || "gc"`,
 		"gc hook --inject",
 		`run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "SessionStart"))`,
 		`run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "PreCompact"))`,
@@ -2119,6 +2127,15 @@ func TestInstallPiHookUsesCurrentExtensionAPI(t *testing.T) {
 	} {
 		if !strings.Contains(data, want) {
 			t.Errorf("Pi hook missing current extension API marker %q:\n%s", want, data)
+		}
+	}
+	for _, unwanted := range []string{
+		`execFileSync("gc", args`,
+		"const PATH_PREFIX =",
+		"PATH: PATH_PREFIX",
+	} {
+		if strings.Contains(data, unwanted) {
+			t.Errorf("Pi hook must preserve the configured gc and runtime PATH; found %q:\n%s", unwanted, data)
 		}
 	}
 	for _, legacy := range []string{
@@ -2167,7 +2184,8 @@ func TestPiHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 // gc prime --hook
 // gc hook --inject
 // gc handoff --auto
-const GC_PI_HOOK_VERSION = 9;
+const GC_PI_HOOK_VERSION = 10;
+const GC_BIN = process.env.GC_BIN || "gc";
 pendingPrimeContext = run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "SessionStart"));
 run(["hook", "--inject"], ctx.cwd);
 run(["handoff", "--auto", "context cycle"], ctx.cwd);
@@ -2179,13 +2197,15 @@ GC_HOOK_EVENT_NAME;
 stdio: ["ignore", "pipe", "inherit"];
 function providerSessionEnv(ctx) {}
 `)
-	stale := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 9"), []byte("GC_PI_HOOK_VERSION = 8"), 1)
-	future := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 9"), []byte("GC_PI_HOOK_VERSION = 10"), 1)
+	stale := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 10"), []byte("GC_PI_HOOK_VERSION = 9"), 1)
+	future := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 10"), []byte("GC_PI_HOOK_VERSION = 11"), 1)
 	missingStderrForward := bytes.Replace(current, []byte(`stdio: ["ignore", "pipe", "inherit"];
 `), nil, 1)
 	missingManagedHookMarkers := bytes.Replace(current, []byte(`GC_MANAGED_SESSION_HOOK;
 `), nil, 1)
 	missingPendingPrimeContext := bytes.Replace(current, []byte("pendingPrimeContext = "), nil, 1)
+	missingGCBin := bytes.Replace(current, []byte(`const GC_BIN = process.env.GC_BIN || "gc";
+`), nil, 1)
 
 	if !piHookNeedsUpgrade(stale) {
 		t.Fatal("stale Pi hook version did not request upgrade")
@@ -2204,6 +2224,9 @@ function providerSessionEnv(ctx) {}
 	}
 	if !piHookNeedsUpgrade(missingPendingPrimeContext) {
 		t.Fatal("Pi hook that discards the SessionStart prime output did not request upgrade")
+	}
+	if !piHookNeedsUpgrade(missingGCBin) {
+		t.Fatal("Pi hook without GC_BIN selection did not request upgrade")
 	}
 }
 
@@ -2325,8 +2348,11 @@ export default async function gascityPlugin() {
 		t.Fatal("stale OpenCode managed plugin was preserved; expected managed upgrade")
 	}
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 6",
+		"const GC_OPENCODE_HOOK_VERSION = 8",
 		"pending.child.stdin?.end();",
+		"appendVolatileSystem",
+		"const turns = new Map()",
+		"state.userMessageIDs.has(messageID)",
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		`"experimental.session.compacting"`,
@@ -2348,7 +2374,7 @@ export default async function gascityPlugin() {
 
 func TestOpenCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for OpenCode.
-const GC_OPENCODE_HOOK_VERSION = 6;
+const GC_OPENCODE_HOOK_VERSION = 8;
 const GC_BIN = process.env.GC_BIN || "gc";
 const PATH_PREFIX =
   "/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:";
@@ -2363,11 +2389,17 @@ output.context.push(handoff);
 GC_PROVIDER_SESSION_ID;
 GC_PROVIDER_SESSION_ID_REQUIRED;
 pending.child.stdin?.end();
+function appendVolatileSystem(system, volatile) {}
+const turns = new Map();
+if (state.userMessageIDs.has(messageID)) {}
 `)
-	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 6"), []byte("GC_OPENCODE_HOOK_VERSION = 5"), 1)
-	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 6"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
+	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 8"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
+	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 8"), []byte("GC_OPENCODE_HOOK_VERSION = 9"), 1)
 	missingStderrLog := bytes.Replace(current, []byte("logRunStderr(stderr);\n"), nil, 1)
 	openStdin := bytes.Replace(current, []byte("pending.child.stdin?.end();\n"), nil, 1)
+	volatileInHeader := bytes.Replace(current, []byte("function appendVolatileSystem(system, volatile) {}\n"), nil, 1)
+	sharedTurnState := bytes.Replace(current, []byte("const turns = new Map();\n"), []byte("let drainedTurnID = null;\n"), 1)
+	idOrderTurnGate := bytes.Replace(current, []byte("if (state.userMessageIDs.has(messageID)) {}\n"), []byte("if (messageID <= state.currentTurnID) {}\n"), 1)
 
 	if !opencodeHookNeedsUpgrade(stale) {
 		t.Fatal("stale OpenCode hook version did not request upgrade")
@@ -2383,6 +2415,15 @@ pending.child.stdin?.end();
 	}
 	if !opencodeHookNeedsUpgrade(openStdin) {
 		t.Fatal("OpenCode hook leaving child stdin open did not request upgrade")
+	}
+	if !opencodeHookNeedsUpgrade(volatileInHeader) {
+		t.Fatal("OpenCode hook that folds the clock line into system[0] did not request upgrade")
+	}
+	if !opencodeHookNeedsUpgrade(sharedTurnState) {
+		t.Fatal("OpenCode hook with directory-wide turn state did not request upgrade")
+	}
+	if !opencodeHookNeedsUpgrade(idOrderTurnGate) {
+		t.Fatal("OpenCode hook that opens turns by message-id order did not request upgrade")
 	}
 }
 
@@ -2406,14 +2447,26 @@ func TestInstallOpenCodeHookPreservesUserAuthoredPlugin(t *testing.T) {
 
 func TestMimoCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for MiMo Code.
-const GC_MIMOCODE_HOOK_VERSION = 2;
+const GC_MIMOCODE_HOOK_VERSION = 4;
 const GC_BIN = process.env.GC_BIN || "gc";
+pending.child.stdin?.end();
+function appendVolatileSystem(system, volatile) {}
+const turns = new Map();
+if (state.userMessageIDs.has(messageID)) {}
 `)
 	versionless := []byte(`// Gas City hooks for MiMo Code.
 const GC_BIN = process.env.GC_BIN || "gc";
+pending.child.stdin?.end();
+function appendVolatileSystem(system, volatile) {}
+const turns = new Map();
+if (state.userMessageIDs.has(messageID)) {}
 `)
-	stale := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 2"), []byte("GC_MIMOCODE_HOOK_VERSION = 1"), 1)
-	future := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 2"), []byte("GC_MIMOCODE_HOOK_VERSION = 3"), 1)
+	stale := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 4"), []byte("GC_MIMOCODE_HOOK_VERSION = 3"), 1)
+	future := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 4"), []byte("GC_MIMOCODE_HOOK_VERSION = 5"), 1)
+	openStdin := bytes.Replace(current, []byte("pending.child.stdin?.end();\n"), nil, 1)
+	volatileInHeader := bytes.Replace(current, []byte("function appendVolatileSystem(system, volatile) {}\n"), nil, 1)
+	sharedTurnState := bytes.Replace(current, []byte("const turns = new Map();\n"), []byte("let drainedTurnID = null;\n"), 1)
+	idOrderTurnGate := bytes.Replace(current, []byte("if (state.userMessageIDs.has(messageID)) {}\n"), []byte("if (messageID <= state.currentTurnID) {}\n"), 1)
 
 	if !mimocodeHookNeedsUpgrade(versionless) {
 		t.Fatal("versionless managed MiMo Code hook did not request upgrade")
@@ -2426,6 +2479,18 @@ const GC_BIN = process.env.GC_BIN || "gc";
 	}
 	if mimocodeHookNeedsUpgrade(future) {
 		t.Fatal("newer MiMo Code hook version requested downgrade")
+	}
+	if !mimocodeHookNeedsUpgrade(openStdin) {
+		t.Fatal("MiMo Code hook leaving child stdin open did not request upgrade")
+	}
+	if !mimocodeHookNeedsUpgrade(volatileInHeader) {
+		t.Fatal("MiMo Code hook that folds the clock line into system[0] did not request upgrade")
+	}
+	if !mimocodeHookNeedsUpgrade(sharedTurnState) {
+		t.Fatal("MiMo Code hook with directory-wide turn state did not request upgrade")
+	}
+	if !mimocodeHookNeedsUpgrade(idOrderTurnGate) {
+		t.Fatal("MiMo Code hook that opens turns by message-id order did not request upgrade")
 	}
 }
 
@@ -2446,7 +2511,7 @@ export default async function gascityPlugin() {
 	if data == string(legacy) {
 		t.Fatal("stale MiMo Code managed plugin was preserved; expected managed upgrade")
 	}
-	if !strings.Contains(data, "const GC_MIMOCODE_HOOK_VERSION = 2") {
+	if !strings.Contains(data, "const GC_MIMOCODE_HOOK_VERSION = 4") {
 		t.Errorf("upgraded MiMo Code plugin missing version marker:\n%s", data)
 	}
 	backup := string(fs.Files["/work/.mimocode/plugin/gascity.js.bak"])
@@ -2717,5 +2782,50 @@ func TestInstallEmpty(t *testing.T) {
 	}
 	if len(fs.Files) != 0 {
 		t.Errorf("Install(nil) should not write files; got %v", fs.Files)
+	}
+}
+
+// TestInstalledWorkDirPathsMatchesInstall pins InstalledWorkDirPaths to what
+// Install really writes into the work dir, provider by provider: the overlay
+// staging caller skips exactly these paths to leave them to the installer, so
+// a path Install writes but the set omits would get two writers, and a path
+// the set names but Install never writes would get none on the tick.
+func TestInstalledWorkDirPathsMatchesInstall(t *testing.T) {
+	for _, provider := range SupportedProviders() {
+		t.Run(provider, func(t *testing.T) {
+			fs := fsys.NewFake()
+			if err := Install(fs, "/city", "/work", []string{provider}); err != nil {
+				t.Fatalf("Install(%s): %v", provider, err)
+			}
+			written := make(map[string]bool)
+			for p := range fs.Files {
+				if rel, ok := strings.CutPrefix(filepath.ToSlash(p), "/work/"); ok {
+					written[rel] = true
+				}
+			}
+			got := InstalledWorkDirPaths([]string{provider}, nil)
+			for rel := range written {
+				if !got[rel] {
+					t.Errorf("Install(%s) wrote %q, missing from InstalledWorkDirPaths %v", provider, rel, got)
+				}
+			}
+			for rel := range got {
+				if !written[rel] {
+					t.Errorf("InstalledWorkDirPaths(%s) names %q, which Install did not write (wrote %v)", provider, rel, written)
+				}
+			}
+		})
+	}
+	if got := InstalledWorkDirPaths([]string{"no-such-provider"}, nil); len(got) != 0 {
+		t.Errorf("InstalledWorkDirPaths(unsupported) = %v, want empty", got)
+	}
+	resolver := func(name string) string {
+		if name == "my-codex" {
+			return "codex"
+		}
+		return ""
+	}
+	if got := InstalledWorkDirPaths([]string{"my-codex"}, resolver); !got[".codex/hooks.json"] {
+		t.Errorf("InstalledWorkDirPaths(my-codex -> codex) = %v, want .codex/hooks.json", got)
 	}
 }

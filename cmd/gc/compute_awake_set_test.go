@@ -532,6 +532,26 @@ func TestNamedOnDemand_RoutedDemandWakesDrainedSessionDespiteBlockedNamedDemand(
 	assertReason(t, result, "hello-world--refinery", "routed-demand")
 }
 
+// TestNamedOnDemand_RoutedDemandLabelsAsleepHolderDespiteBlockedNamedDemand
+// pins the same combined case on a holder that is asleep but NOT drained (the
+// idle latch): the reason must still read routed-demand, because the
+// reconciler's and the allocator's sleep-suppression override key off that
+// label. A named-demand label from blocked work would leave the latched
+// holder asleep while alias suppression keeps the standby at zero.
+func TestNamedOnDemand_RoutedDemandLabelsAsleepHolderDespiteBlockedNamedDemand(t *testing.T) {
+	result := computeAwakeSetChecked(t, AwakeInput{
+		Agents:                   []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions:            []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
+		SessionBeads:             []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "asleep", NamedIdentity: "hello-world/refinery"}},
+		WorkBeads:                []AwakeWorkBead{{ID: "w-1", Assignee: "hello-world/refinery", Status: "in_progress", Blocked: true}},
+		NamedSessionDemand:       map[string]bool{"hello-world/refinery": true},
+		NamedSessionRoutedDemand: map[string]bool{"hello-world/refinery": true},
+		Now:                      now,
+	})
+	assertAwake(t, result, "hello-world--refinery")
+	assertReason(t, result, "hello-world--refinery", "routed-demand")
+}
+
 // TestNamedOnDemand_WorkQueryDoesNotWakeDrainedSession is the negative/
 // regression guard for the same fix: "work-query" is deliberately NOT
 // exempted from the Drained gate (ga-j4lqwa.1 acceptance criteria) because it
@@ -1239,6 +1259,30 @@ func TestReadyWait_NotReady_StaysAsleep(t *testing.T) {
 		Now:          now,
 	})
 	assertAsleep(t, result, "s-mc-1")
+}
+
+// A ready wait relabels an attached wake "wait-ready" but keeps the attach on
+// the decision, where the idle latch's override reads it. A wait hold blocks
+// the attached wake, so a held waiter's ready wait carries no attach.
+func TestReadyWait_KeepsAttach(t *testing.T) {
+	result := computeAwakeSetChecked(t, AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "gascity/claude"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-1", SessionName: "s-mc-1", Template: "gascity/claude", State: "active"},
+			{ID: "mc-2", SessionName: "s-mc-2", Template: "gascity/claude", State: "asleep", WaitHold: true},
+		},
+		AttachedSessions: map[string]bool{"s-mc-1": true, "s-mc-2": true},
+		ReadyWaitSet:     map[string]bool{"mc-1": true, "mc-2": true},
+		Now:              now,
+	})
+	assertReason(t, result, "s-mc-1", "wait-ready")
+	if !result["s-mc-1"].Attached {
+		t.Error("attached session whose wait turned ready lost its attach")
+	}
+	assertReason(t, result, "s-mc-2", "wait-ready")
+	if result["s-mc-2"].Attached {
+		t.Error("wait-held session whose wait turned ready reads as attached")
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -67,32 +67,5 @@ func SubscribeSessionEventSources(ctx context.Context, a, b SessionEventSource) 
 // already honors the [SessionEventProvider] contract (opening resync, loss
 // coalesced into resync), so the merged stream does too.
 func MergeSessionEvents(ctx context.Context, a, b <-chan SessionEvent) <-chan SessionEvent {
-	out := make(chan SessionEvent)
-	go func() {
-		defer close(out)
-		for a != nil || b != nil {
-			var ev SessionEvent
-			var ok bool
-			select {
-			case <-ctx.Done():
-				return
-			case ev, ok = <-a:
-				if !ok {
-					a = nil
-					continue
-				}
-			case ev, ok = <-b:
-				if !ok {
-					b = nil
-					continue
-				}
-			}
-			select {
-			case out <- ev:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-	return out
+	return mergeStreams(ctx, a, b)
 }

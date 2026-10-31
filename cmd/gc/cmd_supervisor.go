@@ -30,10 +30,10 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/logutil"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sdnotify"
-	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/transcriptmeta"
@@ -99,16 +99,23 @@ func newSupervisorStopCmd(stdout, stderr io.Writer) *cobra.Command {
 
 By default, returns as soon as the supervisor acknowledges the stop
 request — shutdown continues asynchronously. Pass --wait to block
-until the supervisor socket is no longer answering, which is what
-most callers that need deterministic cleanup want (e.g., integration
-tests that then expect to remove temp directories without racing
-against lingering supervisor / controller subprocesses).
+until the supervisor process has exited and released its
+single-instance lock, which is what most callers that need
+deterministic cleanup want (e.g., integration tests that then expect
+to remove temp directories without racing against lingering
+supervisor / controller subprocesses, or a 'gc supervisor start'
+right after the stop). --wait waits for the control socket to stop
+answering and then for the process to exit, within --wait-timeout,
+except that the process always gets at least 10s after its socket
+closes to finish shutting down. A supervisor process this host
+cannot see (one in another PID namespace) is waited for only until
+its socket stops answering.
 
 Stopping the supervisor also stops the platform service that manages
 it, and stop exits non-zero when that fails; with --wait, gc further
 verifies on macOS that the launchd job is really gone before
-returning, sharing the same --wait-timeout deadline as the socket
-wait, and fails when it cannot confirm that. An operator stop also
+returning, sharing the same --wait-timeout deadline, and fails when
+it cannot confirm that. An operator stop also
 disables the launchd job, so it will not come back at the next login
 until 'gc supervisor install' — or 'gc start', which routes through
 install — re-enables it.
@@ -127,8 +134,8 @@ not manage it), and stop with nothing running still exits 1.`,
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&wait, "wait", false, "Wait for the supervisor to finish stopping all managed cities and release its socket before returning")
-	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Second, "Maximum time to wait when --wait is set (in delegated mode, bounds the synchronous systemctl stop regardless of --wait)")
+	cmd.Flags().BoolVar(&wait, "wait", false, "Wait for the supervisor to finish stopping all managed cities and for its process to exit before returning")
+	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Second, "Maximum time to wait when --wait is set, except that the supervisor process gets at least 10s to exit after its socket closes (in delegated mode, bounds the synchronous systemctl stop regardless of --wait)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
 	return cmd
 }
@@ -238,10 +245,17 @@ func acquireSupervisorLock() (*os.File, error) {
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close() //nolint:errcheck
-		return nil, fmt.Errorf("supervisor already running")
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, errSupervisorLockHeld
+		}
+		return nil, fmt.Errorf("locking supervisor lock: %w", err)
 	}
 	return f, nil
 }
+
+// errSupervisorLockHeld is acquireSupervisorLock's error when another
+// supervisor instance holds the single-instance lock.
+var errSupervisorLockHeld = errors.New("supervisor already running")
 
 func guardSupervisorSocketDir(dir string) {
 	if !isTestBinary() {
@@ -841,10 +855,16 @@ func stopSupervisorViaSocket(stdout, stderr io.Writer, wait bool, waitTimeout ti
 }
 
 func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeout time.Duration, jsonOut bool) int {
-	sockPath, _ := runningSupervisorSocket()
+	sockPath, pid := runningSupervisorSocket()
 	if sockPath == "" {
 		fmt.Fprintln(stderr, "gc supervisor stop: supervisor is not running") //nolint:errcheck
 		return 1
+	}
+	// Identify the process now, while it is alive, so --wait can tell when
+	// that process — not a recycled PID — has exited.
+	var processAlive func() bool
+	if wait {
+		processAlive = supervisorProcessWatch(pid)
 	}
 	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
 	if err != nil {
@@ -895,19 +915,7 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 				fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
 				return 1
 			}
-			if serviceErr != nil {
-				fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
-				return 1
-			}
-			if err := verifySupervisorServiceStoppedHook(deadline); err != nil {
-				fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", err) //nolint:errcheck
-				return 1
-			}
-			if jsonOut {
-				return writeSupervisorStopSuccess(stdout, stderr, wait)
-			}
-			fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
-			return 0
+			return finishSupervisorStopWait(stdout, stderr, pid, processAlive, deadline, serviceErr, jsonOut)
 		case strings.HasPrefix(line, "done:err:"):
 			fmt.Fprintf(stderr, "gc supervisor stop: %s\n", strings.TrimPrefix(line, "done:err:")) //nolint:errcheck
 			return 1
@@ -933,19 +941,96 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 		fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	return finishSupervisorStopWait(stdout, stderr, pid, processAlive, deadline, serviceErr, jsonOut)
+}
+
+// supervisorStopProcessExitGrace is the least time stop --wait gives the
+// supervisor process to exit once its control socket is gone, however little
+// of the --wait-timeout deadline is left. The process outlives its socket:
+// after done:ok it keeps the socket for 0.5s, then drains HTTP streams for up
+// to 5s and stops pprof for up to 2s before it exits and frees its
+// single-instance lock. The stop command's help text, and
+// docs/reference/cli.md generated from it, state this grace as 10s. A
+// variable so tests can shorten it.
+var supervisorStopProcessExitGrace = 10 * time.Second
+
+// finishSupervisorStopWait completes stop --wait once the supervisor's control
+// socket is gone: it waits for the supervisor process to exit, confirms the
+// platform service stopped, and reports the stop. stopSupervisorViaSocketJSON
+// calls it only when wait is set, so its JSON result always has "wait": true.
+func finishSupervisorStopWait(stdout, stderr io.Writer, pid int, processAlive func() bool, deadline time.Time, serviceErr error, jsonOut bool) int {
+	processDeadline := deadline
+	if graceEnd := time.Now().Add(supervisorStopProcessExitGrace); graceEnd.After(processDeadline) {
+		processDeadline = graceEnd
+	}
+	if err := waitForSupervisorProcessExitUntil(pid, processAlive, processDeadline); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	if serviceErr != nil {
 		fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
 		return 1
 	}
+	// The launchd check keeps the --wait-timeout deadline, as the stop help
+	// says; once the grace has run past it, the check gets one probe
+	// (ga-zfb3bd).
 	if err := verifySupervisorServiceStoppedHook(deadline); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	if jsonOut {
-		return writeSupervisorStopSuccess(stdout, stderr, wait)
+		return writeSupervisorStopSuccess(stdout, stderr, true)
 	}
 	fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
 	return 0
+}
+
+// supervisorProcessWatch identifies the supervisor process pid while it is
+// alive and returns a probe that reports whether that same process is still
+// running. It returns nil — nothing to wait for — when pid is not a running
+// `gc supervisor run` process this host can see (a supervisor in another PID
+// namespace answering on a shared socket, a PID already gone). A variable so
+// tests can model a supervisor's exit.
+var supervisorProcessWatch = func(pid int) func() bool {
+	if pid <= 0 {
+		return nil
+	}
+	if !pidutil.AliveWithCmdline(pid, func(argv []string) bool {
+		return pidutil.ArgvContainsSequence(argv, "supervisor", "run")
+	}) {
+		return nil
+	}
+	startTime, err := pidutil.StartTime(pid)
+	if err != nil {
+		return nil
+	}
+	return func() bool { return pidutil.AliveWithStartTime(pid, startTime) }
+}
+
+// waitForSupervisorProcessExitUntil waits for the supervisor process to exit.
+// Its control socket closes before it has finished shutting down — the HTTP
+// server still drains open streams, and the single-instance lock is released
+// only when the process exits — so a stop that returned on the socket alone
+// let the next `gc supervisor start` find the lock held. alive is
+// supervisorProcessWatch's probe; nil means there is nothing to wait for.
+func waitForSupervisorProcessExitUntil(pid int, alive func() bool, deadline time.Time) error {
+	if alive == nil {
+		return nil
+	}
+	start := time.Now()
+	for alive() {
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("timed out after %s waiting for supervisor PID %d to exit", time.Since(start).Round(time.Millisecond), pid)
+		}
+		sleep := 50 * time.Millisecond
+		if remaining := time.Until(deadline); remaining < sleep {
+			sleep = remaining
+		}
+		if sleep > 0 {
+			time.Sleep(sleep)
+		}
+	}
+	return nil
 }
 
 func writeSupervisorStopSuccess(stdout, stderr io.Writer, wait bool) int {
@@ -1012,13 +1097,20 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 			running, pidSource = true, "api"
 		}
 	}
-	// Unit ownership only makes sense when we have a real live PID to compare
-	// against the unit's MainPID (ga-9pjtoy) -- the service_manager/api
-	// fallback paths above confirm liveness without ever learning a PID.
+	// Unit ownership only makes sense when we have a real live PID to match
+	// against the unit's MainPID and its descendants (ga-9pjtoy) -- the
+	// service_manager/api fallback paths above confirm liveness without ever
+	// learning a PID.
 	var ownership supervisorUnitOwnershipStatus
 	if pid > 0 {
 		ownership = supervisorDetermineUnitOwnership(pid)
 	}
+	// A live process is not proof of supervision: on macOS the stop path
+	// leaves a persistent launchd override behind, so the supervisor can
+	// answer every liveness probe while nothing restarts it after logout.
+	// pid is the socket answer start's already-running check reads, so it
+	// decides whether the remedy has to stop the supervisor first.
+	supervisionWarning := supervisorLaunchdSupervisionWarning(pid > 0)
 	if asJSON {
 		payload := map[string]any{
 			"schema_version": "1",
@@ -1044,11 +1136,13 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 				payload["supervisor_unit"] = ownership.Unit
 			}
 		}
+		addSupervisorSupervisionJSON(payload, supervisionWarning)
 		if err := writeCLIJSONLine(stdout, payload); err != nil {
 			return 1
 		}
 		return 0
 	}
+	printSupervisorSupervisionWarning(stderr, supervisionWarning)
 	switch {
 	case pid > 0:
 		fmt.Fprintf(stdout, "Supervisor is running (PID %d)\n", pid) //nolint:errcheck
@@ -1056,9 +1150,12 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 		case "owned":
 			fmt.Fprintf(stdout, "Owned by systemd unit %s\n", ownership.Unit) //nolint:errcheck
 		case "outside_unit":
-			if ownership.UnitActive {
+			switch {
+			case ownership.ProbeErr != nil:
+				fmt.Fprintf(stdout, "Warning: could not verify that systemd unit %s owns the supervisor: %v\n", ownership.Unit, ownership.ProbeErr) //nolint:errcheck
+			case ownership.UnitActive:
 				fmt.Fprintf(stdout, "Warning: running outside systemd unit %s (unit is active but tracking a different process)\n", ownership.Unit) //nolint:errcheck
-			} else {
+			default:
 				fmt.Fprintf(stdout, "Warning: running outside systemd unit %s (unit is installed but inactive)\n", ownership.Unit) //nolint:errcheck
 			}
 		}
@@ -1070,6 +1167,28 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 		fmt.Fprintln(stdout, "Supervisor is not running") //nolint:errcheck
 		return 1
 	}
+}
+
+// addSupervisorSupervisionJSON adds a launchd supervision problem to the
+// status payload. The keys are present only when status found one, so
+// supervised is never true: its absence means launchd is supervising, the
+// host is not macOS, the agent is not installed or its plist cannot be read,
+// or launchd could not answer.
+func addSupervisorSupervisionJSON(payload map[string]any, warning string) {
+	if warning == "" {
+		return
+	}
+	payload["supervised"] = false
+	payload["supervision_warning"] = warning
+}
+
+// printSupervisorSupervisionWarning reports a launchd supervision problem on
+// stderr, leaving the liveness report on stdout and the exit code unchanged.
+func printSupervisorSupervisionWarning(stderr io.Writer, warning string) {
+	if warning == "" {
+		return
+	}
+	fmt.Fprintf(stderr, "gc supervisor status: warning: %s\n", warning) //nolint:errcheck
 }
 
 func newSupervisorReloadCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -1692,7 +1811,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 					fmt.Fprintf(stderr, "gc supervisor: reload: city '%s': state %T has no controller wake; not poked\n", v.Name, v.cs) //nolint:errcheck // best-effort stderr
 					continue
 				}
-				cs.wakeOf().Enqueue(routeReasonSupervisor, reconcilekey.Allocator()) // reload: re-plan each city
+				cs.wakeOf().Enqueue(wakeReasonSupervisor, reconcilekey.Allocator()) // reload: re-plan each city
 			}
 			// Per sd_notify(3) a reload ends with READY=1.
 			notifySdState(stderr, sdnotify.Ready)
@@ -2155,6 +2274,15 @@ func startOneCity(
 		})
 	}
 
+	// A worker site's city is the remote controller's: the supervisor builds
+	// no runtime for it, whichever city the supervisor itself was started in.
+	// Each attempt re-reads the descriptor, so removing a stray one clears it.
+	if err := refuseCityStartOnWorkerSite(path); err != nil {
+		emitPendingCityCreateFailure(cr, path, name, "city_init_failed", err, stderr)
+		recordInitFailure(name, err.Error())
+		return
+	}
+
 	if err := ensureLegacyNamedPacksCached(path); err != nil {
 		emitPendingCityCreateFailure(cr, path, name, "pack_cache_failed", err, stderr)
 		recordInitFailure(name, fmt.Sprintf("fetching packs: %v", err))
@@ -2182,7 +2310,9 @@ func startOneCity(
 
 	// Latch the session reconciler before any init: a refused city must not
 	// start its bead store or open its event log.
-	wiring, wiringErr := newControllerWiring(cfg, reconcilerModeLookupEnv, stderr)
+	var reconcilerBoot strings.Builder
+	wiring, wiringErr := newControllerWiringLoggingTo(cfg, reconcilerModeLookupEnv, stderr, &reconcilerBoot)
+	logSupervisorReconcilerBoot(stderr, path, cityName, reconcilerBoot.String())
 	if wiringErr != nil {
 		emitPendingCityCreateFailure(cr, path, cityName, "session_reconciler_refused", wiringErr, stderr)
 		recordInitFailure(cityName, wiringErr.Error())
@@ -2320,6 +2450,13 @@ func startOneCity(
 		}))
 		return runtimeErr
 	}); err != nil {
+		// The recorder is this city's rotation owner: left open, its
+		// [events.mirror] copier would hold the mirror lock for the life of
+		// the supervisor, and every retry's copier would wait on it.
+		cityCancel()
+		if fr != nil {
+			fr.Close() //nolint:errcheck
+		}
 		emitPendingCityCreateFailure(cr, path, cityName, "city_runtime_failed", err, stderr)
 		recordInitFailure(cityName, fmt.Sprintf("city runtime: %v", err))
 		return
@@ -2357,10 +2494,7 @@ func startOneCity(
 	// restart (ga-n2d Gap C). Best-effort, mirrors runController — a sweep
 	// failure must never block city startup.
 	_ = runPostPrepareStep("releasing_stale_name_claims", func() error {
-		if cs.cityBeadStore == nil {
-			return nil
-		}
-		if released, err := sessionpkg.ReleaseStaleConfiguredNameClaims(cs.cityBeadStore, cfg, cityName); err != nil {
+		if released, err := releaseStaleNameClaimsAtStartup(cs, cfg, cityName); err != nil {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': stale name-claim sweep: %v\n", cityName, err) //nolint:errcheck
 		} else if released > 0 {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': released %d stale configured name claim(s) at startup\n", cityName, released) //nolint:errcheck
@@ -2371,6 +2505,8 @@ func startOneCity(
 	_ = runPostPrepareStep("starting_bead_event_watcher", func() error {
 		cs.startBeadEventWatcher(cityCtx)
 		cs.startAutocloseSweep(cityCtx)
+		cs.startOpSweep(cityCtx)
+		cs.startConversationLaneHost(cityCtx, wiring.mode)
 		cs.startMaintenanceLoop(cityCtx)
 		return nil
 	})
@@ -2408,6 +2544,9 @@ func startOneCity(
 	// where an early panic deletes a non-existent entry, leaving a
 	// zombie after the post-launch insertion.
 	alreadyRunning := publishManagedCity(cr, path, mc)
+	if !alreadyRunning {
+		forgetSupervisorReconcilerBoot(path)
+	}
 	if alreadyRunning {
 		cr.BatchUpdate(func(
 			_ map[string]*managedCity,
@@ -2575,8 +2714,8 @@ func startOneCity(
 				if err := shutdownBeadsProvider(p); err != nil {
 					fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", n, err) //nolint:errcheck
 				}
-				// Close the file recorder (only on panic — normal exit
-				// leaves it for the external caller via mc.closer).
+				// Close the file recorder. A normal exit leaves it to the
+				// stop that removed the city (mc.closer), unless none did.
 				if cityFr != nil {
 					cityFr.Close() //nolint:errcheck
 				}
@@ -2610,6 +2749,7 @@ func startOneCity(
 			} else {
 				// Normal exit (context canceled) — reset panic counter
 				// and remove from map in a single critical section.
+				removed := false
 				cr.BatchUpdate(func(
 					cities map[string]*managedCity,
 					_ map[string]cityInitProgress,
@@ -2617,8 +2757,17 @@ func startOneCity(
 					panicHistory map[string]*panicRecord,
 				) {
 					delete(panicHistory, p)
-					deleteManagedCityIfCurrent(cities, p, mc)
+					removed = deleteManagedCityIfCurrent(cities, p, mc)
 				})
+				// A stop removes the city from the map before it cancels
+				// it, then closes the recorder via mc.closer. A city canceled
+				// in place (its controller socket's stop) removed itself
+				// just now, so no stop will: close the recorder here, outside
+				// the registry lock, or its [events.mirror] copier holds the
+				// mirror lock for the life of the supervisor.
+				if removed && cityFr != nil {
+					cityFr.Close() //nolint:errcheck
+				}
 			}
 			// Signal completion last — ensures all cleanup is done before
 			// waiters (shutdown/unregister paths) proceed.
@@ -2649,6 +2798,7 @@ func startOneCity(
 	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
 	telemetry.RecordControllerLifecycle(context.Background(), "started")
 	fmt.Fprintf(stdout, "Launching city '%s' (%s)\n", cityName, path) //nolint:errcheck
+	warnBdInventoryAtControllerStart(path, cfg, rec)
 }
 
 func emitPendingCityCreateResult(cr *cityRegistry, path, cityName string, stderr io.Writer) {

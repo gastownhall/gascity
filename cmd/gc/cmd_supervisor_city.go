@@ -161,7 +161,13 @@ func registeredCityEntry(cityPath string) (supervisor.CityEntry, bool, error) {
 	return supervisor.CityEntry{}, false, nil
 }
 
+// cityUsesManagedReconciler reports whether a controller manages cityPath. A
+// worker site is managed by definition: its controller is remote, so the
+// answer is true without probing a socket.
 func cityUsesManagedReconciler(cityPath string) bool {
+	if onWorkerSite(cityPath) {
+		return true
+	}
 	if controllerAlive(cityPath) != 0 {
 		return true
 	}
@@ -348,6 +354,12 @@ func supervisorAlreadyManagesCity(cityPath string) bool {
 
 func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stderr io.Writer, commandName string, showProgress bool) int {
 	cityPath = normalizePathForCompare(cityPath)
+	// Registering hands the city to a local supervisor, which would build its
+	// runtime; a worker site's city is the remote controller's.
+	if err := refuseControllerOnWorkerSite(cityPath); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	// Only the registry-mutating intent commands gate interactively on
 	// cross-city impact. Operational entry points (gc start) and any future
 	// caller warn-and-proceed: the guard still prints the audit warning but
@@ -486,7 +498,7 @@ func reloadSupervisorNoWait() error {
 	if sockPath == "" {
 		return errors.New("supervisor is not running; start it with 'gc supervisor start'")
 	}
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	conn, err := dialGCSocket(sockPath, 2*time.Second)
 	if err != nil {
 		return fmt.Errorf("connecting to supervisor reload socket: %w", err)
 	}
@@ -934,6 +946,24 @@ func supervisorCityAPIClient(cityPath string) *api.Client {
 		return nil
 	}
 	return api.NewCityScopedClient(baseURL, entry.EffectiveName())
+}
+
+// supervisorRequiresCityGrants reports whether supervisor.toml makes the
+// supervisor require a signed grant on its per-city routes: a write-auth or
+// read-auth verify key, or write_auth_required/read_auth_required, under
+// which the supervisor either gates those routes with a key from its
+// environment or refuses to boot. A key set only through the supervisor's
+// GC_CITY_WRITE_PUBKEY or GC_CITY_READ_PUBKEY environment is invisible here.
+// An unreadable supervisor.toml reports false: supervisorCityAPIClient cannot
+// resolve the supervisor's address from it either.
+func supervisorRequiresCityGrants() bool {
+	cfg, err := supervisor.LoadConfig(supervisor.ConfigPath())
+	if err != nil {
+		return false
+	}
+	s := cfg.Supervisor
+	return strings.TrimSpace(s.WriteAuthVerifyKey) != "" || s.WriteAuthRequired ||
+		strings.TrimSpace(s.ReadAuthVerifyKey) != "" || s.ReadAuthRequired
 }
 
 func supervisorCityRunning(cityPath string) (running bool, status string, known bool) {

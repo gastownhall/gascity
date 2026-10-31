@@ -96,9 +96,9 @@ routing with `--on` satisfies that, because the sling normalizes the target into
 an **input convoy**, creating a one-item convoy that tracks your bead when the
 target is not already a convoy. That input convoy is not optional: `--no-convoy`
 suppresses only the ordinary routing auto-convoy, not the v2 input convoy. To run
-the workflow against a convoy you already have, pass that convoy as the target
-(`gc formula cook <formula> --attach <convoy-id>`). Launching such a formula bare
-with `-f` is rejected.
+the workflow against a convoy you already have, pass that convoy as the bead
+(`gc sling <agent> <convoy-id> --on <formula>`): a convoy target is used as the
+input convoy as is. Launching such a formula bare with `-f` is rejected.
 
 ## Formulas
 
@@ -294,7 +294,7 @@ gc convoy list                                        # List active convoys
 gc convoy status <id>                                 # Show convoy progress + metadata
 gc convoy add <id> <bead-ids...>                      # Add beads to convoy
 gc convoy close <id>                                  # Close convoy
-gc convoy check                                       # MUTATING: scans ALL open convoys city-wide and auto-closes any where all children are resolved
+gc convoy check                                       # MUTATING: auto-closes open convoys city-wide whose children are all resolved (a suspended rig's convoys wait until it resumes)
 gc convoy stranded                                    # Find convoys with no progress
 gc convoy autoclose <id>                              # Internal: invoked by bd's on_close hook to auto-close a closed bead's completed convoys
 ```

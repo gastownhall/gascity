@@ -137,7 +137,7 @@ func (e *closeOrphanEnv) tick(t *testing.T, desired map[string]TemplateParams) [
 	if desired == nil {
 		desired = map[string]TemplateParams{}
 	}
-	cr.beadReconcileTick(context.Background(), DesiredStateResult{
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), DesiredStateResult{
 		State:             desired,
 		AssignedWorkBeads: []beads.Bead{e.work},
 	}, sessionBeads, cycle, false)

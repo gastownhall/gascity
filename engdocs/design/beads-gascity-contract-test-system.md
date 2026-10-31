@@ -21,6 +21,12 @@
 > reach the same upstream commit by two routes, and gc links the same beads it
 > shells out to.
 >
+> **Floor raised — 2026-10-17.** `BD_PREV_VERSION` moved from v1.0.4 to v1.3.0,
+> the first tested bd release with the `--if-assignee`/`--if-status`
+> conditional-release flags (beads#5008; bd v1.2.2 re-released v1.1.2 without
+> them). The matrix floor cell is now `@bd_bin_v1_3_0`, `bdMinVersion` is 1.3.0,
+> and BdStore's raw-SQL `ReleaseIfCurrent` fallback was deleted with it.
+>
 > The **mechanism** this doc specifies is unchanged and was followed by both
 > bumps: the corpus re-vendor rides in the same PR as the pin move.
 
@@ -199,7 +205,9 @@ and the diff anchor only moves on a *real* wire change.
   anchor instead — `BD_CURRENT_VERSION` (`v1.1.0-rc.1`, a release-candidate with
   **no** release tarball) built from beads source at the SHA-pinned
   `BD_CURRENT_REF` by the `contract-acceptance-current` job, with
-  `contract-radar-bd-head` as the non-required radar. So the three `deps.env`
+  `contract-radar-bd-head` as the non-required radar (since ga-ylpbsy.55 in
+  its own workflow, `advisory-probes.yml`, so a red radar never shares a run
+  with the required checks). So the three `deps.env`
   bd anchors map onto the matrix as: `BD_PREV_VERSION` = the min-supported floor
   cell (tarball), `BD_VERSION` = the installable default the floor tracks
   (tarball), and `BD_CURRENT_VERSION`/`BD_CURRENT_REF` = the source-built `current`

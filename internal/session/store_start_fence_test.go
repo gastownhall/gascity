@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -39,20 +40,19 @@ func TestStartAndRollbackHoldMutationLockAcrossReadAndWrite(t *testing.T) {
 		if entry == nil {
 			t.Fatal("session mutation lock not acquired")
 		}
-		if entry.mu.TryLock() {
-			entry.mu.Unlock()
+		if !sessionMutationLockEntryHeld(entry) {
 			t.Fatal("session mutation lock released before the operation")
 		}
 	}
 	front := NewStore(beads.SessionStore{Store: store})
 	expected := Info{ID: b.ID, MetadataState: "creating", PendingCreateClaim: true, Generation: "2", InstanceToken: "token-2"}
-	if applied, err := front.WithPendingCreateRollback(expected, func() error {
+	if applied, err := front.WithPendingCreateRollback(context.Background(), expected, func() error {
 		store.check(b.ID)
 		return nil
 	}); err != nil || !applied {
 		t.Fatalf("rollback: applied=%v err=%v", applied, err)
 	}
-	if applied, err := front.CommitStartedIfCurrent(expected, MetadataPatch{"state": "active", "pending_create_claim": ""}); err != nil || !applied {
+	if applied, err := front.CommitStartedIfCurrent(context.Background(), expected, MetadataPatch{"state": "active", "pending_create_claim": ""}); err != nil || !applied {
 		t.Fatalf("completion: applied=%v err=%v", applied, err)
 	}
 	if store.reads != 2 || store.writes != 1 {

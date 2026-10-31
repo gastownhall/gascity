@@ -154,10 +154,12 @@ func probeExec(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, 
 // exec-able so the controller can launch the agent over exec. Optional (absent
 // = SKIP): a welded start pack that launches the agent in one shot does not
 // implement provision and is driven through start instead.
-func probeProvision(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, string) {
+func probeProvision(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
 	name := r.nextName()
 	prov := r.provision(ctx, name)
 	switch {
+	case prov.unsupported && hs.Has(runtime.ProtocolCapabilityProvision):
+		return StatusFail, "provision returned exit 2 although the handshake declares proc.provision; a declared op cannot be unknown"
 	case prov.unsupported:
 		return StatusSkip, "provision not implemented (exit 2) — optional; a welded start pack launches the agent in one shot"
 	case prov.err != nil:

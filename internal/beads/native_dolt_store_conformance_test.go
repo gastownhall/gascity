@@ -9,6 +9,13 @@ import (
 
 func TestNativeDoltStoreConformance(t *testing.T) {
 	beadstest.RunStoreTests(t, beads.NewNativeDoltStoreForConformance)
+	beadstest.RunCloseReasonTests(t, beads.NewNativeDoltStoreForConformance)
+	beadstest.RunCloseNotificationTests(t, func(*testing.T) beads.Store { return beads.NewNativeDoltStoreForConformance() })
+	// The fence fixture with no namespaces is the unfenced store whose backing
+	// honors pinned ids, which this row needs.
+	beadstest.RunPinnedIDDuplicateConformance(t, func(*testing.T) beads.Store {
+		return beads.NewNativeDoltStoreForPinnedIDFenceConformance("kitn")
+	})
 }
 
 // TestNativeDoltStorePinnedIDFenceConformance runs the shared fenced-Create
@@ -50,4 +57,14 @@ func TestNativeDoltStoreIsAForeignIDCreator(t *testing.T) {
 	if _, ok := store.(beads.ForeignIDCreator); !ok {
 		t.Fatalf("%T is not a beads.ForeignIDCreator; the two conformance rows that depend on it are skipping, and a skip reports as a pass", store)
 	}
+}
+
+// TestNativeDoltStoreGuardedBatchConformance runs the guarded-batch contract
+// against the native store over an in-memory storage whose batch applier keeps
+// the issueops.BatchApplier contract (all or nothing, typed item refusals,
+// per-item row versions).
+func TestNativeDoltStoreGuardedBatchConformance(t *testing.T) {
+	beadstest.RunGuardedBatchConformance(t, "NativeDoltStore", func(*testing.T) beads.Store {
+		return beads.NewNativeDoltStoreForGuardedBatchConformance()
+	})
 }

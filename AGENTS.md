@@ -27,6 +27,7 @@ next to that code; read the matching file before changing it.
 | `internal/api/`, `internal/events/`, `internal/extmsg/`, CLI code that constructs events or calls the API client, the OpenAPI spec, or the dashboard | `internal/api/AGENTS.md` |
 | `internal/config/` (agent or rig config fields) | `internal/config/AGENTS.md` |
 | `internal/session/` | `internal/session/AGENTS.md` |
+| `internal/sessionlog/` | `internal/sessionlog/AGENTS.md` |
 | `internal/runtime/acp/` | `internal/runtime/acp/AGENTS.md` |
 | Session creation or lifecycle from `cmd/gc` or `internal/api` | `internal/worker/AGENTS.md` |
 | `internal/cliauth/`, `gc login`, `gc whoami` | `internal/cliauth/AGENTS.md` |
@@ -43,17 +44,18 @@ next to that code; read the matching file before changing it.
 
 ## How work flows here
 
-- **GitHub Issues is the public tracker, and every pull request links a
-  documented issue.** The issue carries the context reviewers and future
-  readers need: for a bug, the reproduction, impact, and evidence; for a
-  change, the motivation, impact, risk, and verification plan. File it before
-  or alongside the pull request; it does not need maintainer approval first.
-  The pull request says `Closes #<issue>` and shows end-to-end evidence that
-  the change works. See `CONTRIBUTING.md`.
-- **Agents:** if no issue exists for your change, file one using the bug or
-  feature form fields, filling each from evidence and answering
-  `NOT_ENOUGH_INFO` where the evidence runs out, then link it from the pull
-  request.
+- **GitHub Issues is the public tracker; use an issue when it adds
+  context.** Open or link one for a user-visible bug, a behavior or design
+  change that needs discussion, or work that spans several pull requests:
+  the issue carries the reproduction, impact, and evidence for a bug, or the
+  motivation, risk, and verification plan for a change. A small,
+  self-explanatory fix (a typo, a flake, a refactor, a CI or docs tweak) can
+  go straight to a pull request whose description covers the why. Every pull
+  request shows end-to-end evidence that the change works; when an issue
+  exists, the pull request says `Closes #<issue>`. See `CONTRIBUTING.md`.
+- **Agents:** when you do file an issue, use the bug or feature form fields,
+  fill each from evidence, and answer `NOT_ENOUGH_INFO` where the evidence
+  runs out.
 - Branch from `main` (`fix/*`, `feat/*`, `refactor/*`, `docs/*`), use
   Conventional Commits, and push to your branch — never to `main`.
 - A fix that changes an invariant or boundary updates the owning `AGENTS.md`
@@ -141,6 +143,9 @@ Violating any fails the build. Details live in the linked files.
 - **Worker boundary (active migration).** Production `cmd/gc` code reaches
   sessions through `worker.Handle`
   (`TestGCNonTestFilesStayOnWorkerBoundary`; `internal/worker/AGENTS.md`).
+- **Typed store boundary (active migration).** Outside the residency
+  layer, code takes typed class handles, not a raw `beads.Store`, and uses
+  `beads.As` for capabilities (`storeclass` lint, shrink-only baseline).
 - **Agent config field sync.** A new `config.Agent` field is wired in every
   copy and merge site (`TestAgentFieldSync` and siblings;
   `internal/config/AGENTS.md`).
@@ -244,42 +249,103 @@ becoming more useful as models improve — it becomes LESS useful instead.
 
 ## Build and test
 
-- `TESTING.md` — testing philosophy, tier boundaries, and sharded local
-  runners. Read before writing any test. For broad local sweeps, prefer the
-  documented shard targets (`make test-fast-parallel`,
-  `make test-cmd-gc-process-parallel`, `make test-integration-shards-parallel`,
-  `make test-local-full-parallel`) over raw `go test`.
-- **Bazel runs side by side** with `go build` / `make`, which stay
-  authoritative. Prefer `bazel test //pkg/...` for repeated build+test cycles
-  (remote-cached). After changing imports or adding packages run
-  `make bazel-sync` and commit the result — the `BUILD files are in sync` CI
-  gate fails otherwise. Never commit machine-specific endpoints; they belong
-  in `.bazelrc.local`. Details: `engdocs/bazel-quickstart.md`.
-- **Optional shared cache (opt-in).** `--config=fork-cache` reads the
-  project's anonymous, read-only Bazel cache, so results CI already computed
-  are hits and nothing is uploaded. It is off by default; when setting up a
-  dev environment, ask your human before adding `build --config=fork-cache`
-  to `.bazelrc.local`.
+**Bazel is the build and test system, and `bazel test` is authoritative:**
+it is what CI gates on (`.github/workflows/bazel.yml`). Agents run tests
+only with `bazel test`, also while iterating on one package. Do not run
+`go test`: it skips nogo lint/vet, formatting, generated-artifact and policy
+targets, and a green `go test` is not evidence a change passes CI.
+
+| Tier | Command (`make` alias) |
+|---|---|
+| Unit + nogo + format + generated + policy | `bazel test //...` (`make test`) |
+| One package while iterating | `bazel test //internal/config:config_test` |
+| Acceptance (Tier A) | `bazel test --config=acceptance //test/acceptance:acceptance_test` (`make test-acceptance`) |
+| Integration-tagged packages (gating) | `bazel test --config=integration //test:integration_packages` |
+| `test/integration` (evidence-only in CI) | `bazel test --config=integration //test/integration:integration_test` |
+| Docs sync | `bazel test //test/docsync:docsync_test` (`make check-docs`) |
+
+- **Targets.** A package's default test target is `//<dir>:<leaf>_test`,
+  `<leaf>` being the last element of `<dir>` (`//cmd/gc:gc_test`); a subtree
+  is `//internal/beads/...`. Some packages add targets the default does not
+  cover, such as `//test/integration:integration_unsharded_test` and cmd/gc's
+  `gc_sim_*` corpus: the package's `BUILD.bazel` lists them. Bazel runs only
+  the test files `BUILD.bazel` lists; run `make bazel-sync` after adding one.
+- **Flags.** `go test`'s `-run X` is `--test_filter=X` (one per invocation,
+  for every target named), `-v` is
+  `--test_env=GO_TEST_WRAP_TESTV=1 --test_output=all` (rules_go's test
+  wrapper then runs the binary with `-test.v`, and the log and `test.xml`
+  list every test that ran), `-count=N` is `--test_arg=-test.count=N`
+  (`--runs_per_test=N` runs N separate actions instead), `VAR=x go test` is
+  `--test_env=VAR=x` and `-tags integration` is `--config=integration`. On a
+  sharded target, `--test_sharding_strategy=disabled` runs a narrow filter
+  as one action.
+- **Evidence.** Results are cached by input: an unchanged target returns its
+  cached result, which is the same evidence, so do not add
+  `--nocache_test_results` to re-prove a pass (timing runs are the
+  exception: TESTING.md "Timing objectives and resource ratchets"). A target
+  also passes when its filter matches nothing, its tests skip, or its
+  `BUILD.bazel` omits a test file: when a filtered run is your evidence, run
+  it with `--test_env=GO_TEST_WRAP_TESTV=1 --test_output=all` and check the
+  log for `--- PASS: <TestName>`. Re-run with the same flags: `--test_output`
+  and `--test_summary` only change what is printed, but any other change to
+  `--test_arg`, `--test_env` or `--test_filter` is a new cache key, and
+  `--test_arg=-test.v` keys the same verbose run apart from everyone else's.
+- **Regenerating checked files** (`-update`, `-update-golden`,
+  `UPDATE_GOLDEN=1`) is not a test run: `bazel test` runs the test in a
+  sandbox, so `--test_arg=-update` can pass while changing nothing. Run the
+  generator with `bazel run` from the repository root (its own flag in place
+  of `-update` below, or its environment switch, such as `UPDATE_GOLDEN=1`,
+  in front), check that `git status` lists every new and changed file, then
+  `bazel test` the result:
+
+  ```bash
+  GC_TEST_REPO_ROOT="$PWD" bazel run --test_sharding_strategy=disabled \
+    //<dir>:<leaf>_test -- -test.run='^<TestName>$' -update
+  ```
+
+  A relative write reaches your checkout only through a runfiles link, and
+  those exist only for files already there: `touch` each new golden first,
+  or the generator writes it under `bazel-out` and the run still passes.
+
+- **Where it runs.** Agent hosts' `~/.bazelrc` names rbe-west's executor, so
+  plain `bazel test` executes remotely. Contributors use
+  `--config=fork-cache` (anonymous read-only cache, local execution of
+  misses); maintainers with an rbe-west client certificate use
+  `--config=remote-exec` (ask your human before adding either to
+  `.bazelrc.local`). Details: TESTING.md "Bazel cache tiers" and
+  `engdocs/bazel-quickstart.md`.
+- **BUILD files.** After changing imports or adding packages or files, run
+  `make bazel-sync` and commit the result; the `BUILD files in sync` CI gate
+  fails otherwise. Never commit machine-specific endpoints; they belong in
+  `.bazelrc.local`.
+- **Go-native twins** (the `-go` make targets and the sharded runners of
+  TESTING.md "Cross-category runners, timing, and resource isolation") are
+  for humans working offline and for hosts Bazel does not serve: the macOS
+  CI jobs, and Linux hosts that cannot load the pinned ICU runtime
+  (TESTING.md). An agent runs them only on such a host.
 - **Never run `go clean -cache`** — it corrupts shared build caches.
   `go clean -testcache` is fine. Maintainers on the shared build hosts: read
   `engdocs/contributors/maintainer-environment.md` before touching `GOCACHE`
   or `TMPDIR`.
 - **Git hooks:** `make setup` installs `.githooks` as `core.hooksPath`;
-  `make check-hooks` verifies it. Beads' installer can silently take the path
-  over and skip every gate — see "Git hook ownership" in `CONTRIBUTING.md`.
+  `make check-hooks` verifies it. Pre-commit runs nogo on staged packages;
+  pre-push runs `bazel test //...` and says loudly when it falls back to
+  `go test`. Beads' installer can silently take the path over and skip every
+  gate — see "Git hook ownership" in `CONTRIBUTING.md`.
 
 ## Code quality gates
 
 Before considering any task complete:
 
-- Fast unit baseline passes (`make test`, or `make test-fast-parallel` on
-  machines where sharding is useful)
-- Broader process/integration coverage uses the sharded targets documented in
-  `TESTING.md` instead of one monolithic `go test ./...` sweep
-- `go vet ./...` clean
+- `make check` passes (`bazel test //...` plus the shell guards; nogo is
+  lint and vet)
+- Acceptance or integration behavior changed: the matching `--config` tier
+  above passes
 - `.githooks/pre-commit` is active locally (verify with `make check-hooks`)
   and has run for the staged change
-- `make dashboard-ci` passes and the dashboard serves locally for any change
+- `make dashboard-check` passes (the dashboard's Bazel targets: typecheck,
+  Vitest, build, and drift checks, which `bazel test //...` also runs) and the
+  dashboard serves locally (a manual `npm run preview` step) for any change
   touching the API, the OpenAPI spec, or the dashboard
   (`internal/api/AGENTS.md`)
 - Every exported function has a doc comment

@@ -62,6 +62,19 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 	if body.Bead != "" && body.AttachedBeadID != "" {
 		return nil, apierr.InvalidRequest.Msg("bead and attached_bead_id are mutually exclusive")
 	}
+	// A sling writes its bead (route, assignee, attached workflow): never a
+	// controller-owned row (architecture B). An unresolved id is sling's own
+	// missing-bead answer.
+	for _, ref := range []struct{ where, id string }{{"body.bead", body.Bead}, {"body.attached_bead_id", body.AttachedBeadID}} {
+		if ref.id == "" {
+			continue
+		}
+		if _, b, err := s.resolveBeadOwner(ref.id); err == nil {
+			if err := refuseOwned(ref.id, "slings", ref.where, b); err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	workflowLaunchOptions := body.AttachedBeadID != "" ||
 		len(body.Vars) > 0 ||
@@ -130,6 +143,11 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 		if status >= http.StatusInternalServerError {
 			return nil, apierr.Internal.Msg(message)
 		}
+		if code == "molecule_attached" {
+			// The bead already carries a live molecule another formula poured;
+			// attaching would double up on work in progress.
+			return nil, apierr.ConflictWrongState.Msg(message)
+		}
 		if code == "missing_bead" {
 			return nil, apierr.SlingMissingBead.Msg(message)
 		}
@@ -143,11 +161,10 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 	}
 
 	// Successful sling: surface a dashboard deep link when this process also
-	// hosts the dashboard. This endpoint never produces batch shapes (no
-	// DoSlingBatch call), so resp.WorkflowID alone discriminates the single
+	// hosts the dashboard. resp.WorkflowID alone discriminates the single
 	// graph-workflow launch (run detail) from every other successful shape
-	// (wisps, plain bead routes, idempotent skips → runs list), matching the
-	// CLI's link policy.
+	// (wisps, plain bead routes, per-child convoy batches, idempotent skips →
+	// runs list), matching the CLI's link policy.
 	resp.DashboardURL = s.slingDashboardURL(input.CityName, resp.WorkflowID)
 
 	// Point the caller at the canonical Run resource. A graph-workflow launch has

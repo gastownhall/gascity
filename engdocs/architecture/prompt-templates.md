@@ -94,8 +94,9 @@ prompt dynamically customized to its deployment context.
 - **`PromptContext`** — template data struct. Defined in
   `cmd/gc/prompt.go`.
 - **`renderPrompt()`** — reads, parses, and renders a template.
-  Returns empty string if template path is empty or file doesn't
-  exist. Defined in `cmd/gc/prompt.go`.
+  Returns an empty string, silently, if the template path is empty,
+  and an empty string after a stderr warning if a declared template
+  cannot be read. Defined in `cmd/gc/prompt.go`.
 - **`buildTemplateData()`** — merges Env with SDK fields. SDK fields
   override Env keys. Defined in `cmd/gc/prompt.go`.
 - **`promptFuncMap()`** — template function registration. Defined in
@@ -111,8 +112,13 @@ prompt dynamically customized to its deployment context.
    wins.
 3. **Graceful fallback on error.** Parse or execute errors produce the
    raw template text, not an empty string. Agents always get a prompt.
-4. **Missing template returns empty.** If `prompt_template` is empty or
-   the file doesn't exist, `renderPrompt()` returns `""` without error.
+4. **Missing template returns empty.** If `prompt_template` is empty,
+   `renderPrompt()` returns `""` silently.
+   If a declared template cannot be read, it returns `""` after a
+   `gc: prompt_template …` warning to stderr: session resolution ships
+   the beacon alone, and a non-strict `gc prime` serves the built-in
+   default. Parse or execute errors still return the raw text
+   (invariant 3).
 5. **Shared templates load from sibling directory.** Canonical
    `.template.md` files and legacy `.md.tmpl` files in the `shared/`
    subdirectory next to the template are loaded. Canonical files win on
@@ -134,6 +140,7 @@ prompt dynamically customized to its deployment context.
 |---|---|
 | `cmd/gc/cmd_prime.go` | `gc prime` outputs rendered prompt |
 | `cmd/gc/providers.go` | Rendered prompt passed to agent on start |
+| `cmd/gc/doctor_prompt_delivery_budget.go` | `gc doctor` renders each agent's prompt to check its delivery budget and reports the render's stderr warnings |
 | Agent hooks | Hook calls `gc prime` to get the prompt |
 
 ## Code Map

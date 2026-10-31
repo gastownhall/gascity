@@ -27,6 +27,13 @@ type City struct {
 	usedSupervisor bool
 	cmd            *exec.Cmd
 	logFile        *os.File
+	// tornDown records that an end-of-test cleanup has already stopped and
+	// unregistered the city. Init, RigAdd and StartWithSupervisor each
+	// register a best-effort teardown, so a test ran three or four in a row,
+	// and every one after the first ran a gc stop that found nothing to stop.
+	// Cleanups only: test code may start the city again behind the helper's
+	// back, cleanup code does not.
+	tornDown bool
 }
 
 // NewCity creates a temp directory for a city and returns the DSL handle.
@@ -63,7 +70,8 @@ func NewCityAt(t *testing.T, env *Env, cityDir string) *City {
 	return &City{t: t, Dir: cityDir, Env: env}
 }
 
-// Init runs gc init with the given provider (non-interactive).
+// Init runs gc init with the given provider (non-interactive), retrying once
+// on pinned bd's proxy-open stall (runInit).
 func (c *City) Init(provider string) {
 	c.t.Helper()
 	args := []string{"init", "--skip-provider-readiness"}
@@ -71,7 +79,7 @@ func (c *City) Init(provider string) {
 		args = append(args, "--provider", provider)
 	}
 	args = append(args, c.Dir)
-	out, err := RunGC(c.Env, "", args...)
+	out, err := c.runInit(args...)
 	if err != nil {
 		c.t.Fatalf("gc init failed: %v\n%s", err, out)
 	}
@@ -80,7 +88,8 @@ func (c *City) Init(provider string) {
 	})
 }
 
-// InitNoStart runs gc init without registering or starting the city.
+// InitNoStart runs gc init without registering or starting the city, retrying
+// once on pinned bd's proxy-open stall (runInit).
 func (c *City) InitNoStart(provider string) {
 	c.t.Helper()
 	args := []string{"init", "--skip-provider-readiness", "--no-start"}
@@ -88,7 +97,7 @@ func (c *City) InitNoStart(provider string) {
 		args = append(args, "--provider", provider)
 	}
 	args = append(args, c.Dir)
-	out, err := RunGC(c.Env, "", args...)
+	out, err := c.runInit(args...)
 	if err != nil {
 		c.t.Fatalf("gc init --no-start failed: %v\n%s", err, out)
 	}
@@ -97,10 +106,11 @@ func (c *City) InitNoStart(provider string) {
 	})
 }
 
-// InitFrom runs gc init --from to copy an example city directory.
+// InitFrom runs gc init --from to copy an example city directory, retrying
+// once on pinned bd's proxy-open stall (runInit).
 func (c *City) InitFrom(srcDir string) {
 	c.t.Helper()
-	out, err := RunGC(c.Env, "", "init", "--from", srcDir, "--skip-provider-readiness", c.Dir)
+	out, err := c.runInit("init", "--from", srcDir, "--skip-provider-readiness", c.Dir)
 	if err != nil {
 		c.t.Fatalf("gc init --from %s failed: %v\n%s", srcDir, err, out)
 	}
@@ -109,10 +119,11 @@ func (c *City) InitFrom(srcDir string) {
 	})
 }
 
-// InitFromNoStart runs gc init --from without registering or starting the city.
+// InitFromNoStart runs gc init --from without registering or starting the city,
+// retrying once on pinned bd's proxy-open stall (runInit).
 func (c *City) InitFromNoStart(srcDir string) {
 	c.t.Helper()
-	out, err := RunGC(c.Env, "", "init", "--from", srcDir, "--skip-provider-readiness", "--no-start", c.Dir)
+	out, err := c.runInit("init", "--from", srcDir, "--skip-provider-readiness", "--no-start", c.Dir)
 	if err != nil {
 		c.t.Fatalf("gc init --from %s --no-start failed: %v\n%s", srcDir, err, out)
 	}
@@ -227,15 +238,23 @@ func (c *City) StartExpectingFatal(t *testing.T) string {
 
 // Stop runs gc stop.
 func (c *City) Stop() {
+	c.stop()
+}
+
+// stop is Stop, reporting whether it stopped and unregistered the city: gc
+// stop succeeded and gc unregister ran.
+func (c *City) stop() bool {
 	if !c.started {
-		return
+		return false
 	}
 	c.started = false
 	// Best-effort stop — don't fail the test on cleanup errors.
-	RunGC(c.Env, c.Dir, "stop", c.Dir) //nolint:errcheck
+	_, stopErr := RunGC(c.Env, c.Dir, "stop", c.Dir)
+	tornDown := false
 	if c.usedSupervisor {
 		RunGC(c.Env, c.Dir, "unregister", c.Dir) //nolint:errcheck
 		c.usedSupervisor = false
+		tornDown = stopErr == nil
 	}
 	if c.cmd != nil {
 		done := make(chan struct{})
@@ -257,15 +276,13 @@ func (c *City) Stop() {
 		_ = c.logFile.Close()
 		c.logFile = nil
 	}
+	return tornDown
 }
 
 func (c *City) cleanupRuntime() {
 	c.t.Helper()
-	if out, err := RunGC(c.Env, c.Dir, "stop", c.Dir); err != nil {
-		c.t.Logf("cleanup: gc stop %s: %v\n%s", c.Dir, err, out)
-	}
-	if out, err := RunGC(c.Env, c.Dir, "unregister", c.Dir); err != nil {
-		c.t.Logf("cleanup: gc unregister %s: %v\n%s", c.Dir, err, out)
+	if !c.tornDown {
+		c.teardown()
 	}
 	if out, err := RunGC(c.Env, "", "supervisor", "stop", "--wait"); err != nil {
 		c.t.Logf("cleanup: gc supervisor stop --wait: %v\n%s", err, out)
@@ -274,17 +291,31 @@ func (c *City) cleanupRuntime() {
 
 func (c *City) cleanupScaffoldOnly() {
 	c.t.Helper()
-	if out, err := RunGC(c.Env, c.Dir, "stop", c.Dir); err != nil {
+	if !c.tornDown {
+		c.teardown()
+	}
+}
+
+// teardown stops and unregisters the city, best effort, and records a clean
+// stop in tornDown so the cleanups registered after it skip theirs.
+func (c *City) teardown() {
+	c.t.Helper()
+	out, err := RunGC(c.Env, c.Dir, "stop", c.Dir)
+	if err != nil {
 		c.t.Logf("cleanup: gc stop %s: %v\n%s", c.Dir, err, out)
 	}
 	if out, err := RunGC(c.Env, c.Dir, "unregister", c.Dir); err != nil {
 		c.t.Logf("cleanup: gc unregister %s: %v\n%s", c.Dir, err, out)
 	}
+	c.tornDown = err == nil
 }
 
-// CleanupRuntime tears down supervisor-backed runtime state for manually initialized test cities.
+// CleanupRuntime tears down supervisor-backed runtime state for manually
+// initialized test cities. It always stops the city: a test may call it
+// after starting the city behind the helper's back.
 func (c *City) CleanupRuntime() {
 	c.t.Helper()
+	c.tornDown = false
 	c.cleanupRuntime()
 }
 

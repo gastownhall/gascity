@@ -1,8 +1,10 @@
 package herdr
 
 import (
+	"os"
 	"path/filepath"
-	"runtime"
+	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -11,34 +13,29 @@ import (
 // binds: serverAlive() then always reads false against a healthy server
 // ("did not become ready"), and every retry launches a redundant herdr
 // server contending for the same pane ("agent_pane_busy") — ga-nqlb8q.
-// Verified empirically against the herdr binary itself: `XDG_CONFIG_HOME=X
-// herdr --help` prints "Config: X/herdr/config.toml" regardless of $HOME,
-// and with XDG_CONFIG_HOME unset it falls back to "$HOME/.config/herdr/…" —
-// standard XDG Base Directory precedence, which os.UserConfigDir()
-// implements and the old os.UserHomeDir()+".config" join did not: a sandbox
-// that sets XDG_CONFIG_HOME to the real user's config dir while redirecting
-// $HOME elsewhere (this fleet's agent sandboxes do exactly that) made the
-// old code compute a path no herdr process ever binds.
-//
-// Both tests below are Linux-only: os.UserConfigDir() on darwin ignores
-// XDG_CONFIG_HOME entirely and always resolves under
-// "$HOME/Library/Application Support" (see the Go stdlib implementation),
-// so asserting an XDG- or ".config"-rooted path is only valid on the
-// platforms os.UserConfigDir() treats as XDG-following (this repo's
-// non-Windows, non-Darwin default case). Whether herdr's own binary uses
-// pure-XDG resolution on macOS too is unverified here — the empirical
-// check above was run on Linux only — so the tests skip rather than assert
-// an unconfirmed cross-platform contract.
+// herdr resolves that directory by one rule on every platform it ships
+// for — $XDG_CONFIG_HOME, else $HOME/.config (herdr src/config/io.rs
+// config_dir) — verified empirically against the herdr binary on Linux
+// (ga-nqlb8q) and against herdr 0.8.2 on macOS (#5770): with
+// XDG_CONFIG_HOME set, `herdr --help` prints "Config: <dir>/herdr/config.toml"
+// regardless of $HOME, and with it unset, "$HOME/.config/herdr/…". The
+// tests below assert that contract on every platform, with no skip:
+// os.UserConfigDir() is not that rule — on darwin it ignores XDG_CONFIG_HOME
+// and resolves under "$HOME/Library/Application Support", a directory herdr
+// never binds in, which is what made every start time out on macOS (#5770).
 
-func skipUnlessXDGPlatform(t *testing.T) {
+// unsetEnv makes key absent for the rest of the test; t.Setenv's cleanup
+// restores the inherited value. Setting it to "" is not the same thing:
+// herdr counts a variable that is set but empty as set.
+func unsetEnv(t *testing.T, key string) {
 	t.Helper()
-	if runtime.GOOS != "linux" {
-		t.Skipf("os.UserConfigDir() does not follow XDG_CONFIG_HOME on %s; herdr's own resolution on this platform is unverified (see ga-nqlb8q)", runtime.GOOS)
+	t.Setenv(key, "")
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unsetting %s: %v", key, err)
 	}
 }
 
 func TestSocketPathHonorsXDGConfigHomeOverHome(t *testing.T) {
-	skipUnlessXDGPlatform(t)
 	xdg := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	t.Setenv("HOME", t.TempDir()) // deliberately different; must be ignored
@@ -55,13 +52,118 @@ func TestSocketPathHonorsXDGConfigHomeOverHome(t *testing.T) {
 }
 
 func TestSocketPathFallsBackToHomeConfigWhenXDGUnset(t *testing.T) {
-	skipUnlessXDGPlatform(t)
-	t.Setenv("XDG_CONFIG_HOME", "")
+	unsetEnv(t, "XDG_CONFIG_HOME")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
 	c := newClient("hometest", "")
 	if got, want := c.socketPath(), filepath.Join(home, ".config", "herdr", "sessions", "hometest", "herdr.sock"); got != want {
 		t.Errorf("socketPath() = %q; want %q", got, want)
+	}
+}
+
+// Environments where os.UserConfigDir() fails — a relative XDG_CONFIG_HOME,
+// or neither XDG_CONFIG_HOME nor HOME set — must still resolve the socket
+// the way herdr does: herdr uses a relative XDG_CONFIG_HOME as-is, and with
+// neither variable set it roots under the temp dir. A resolver that
+// discards the os.UserConfigDir() error joins onto an empty config root and
+// dials the cwd-relative "herdr/sessions/<name>/herdr.sock".
+func TestSocketPathMatchesHerdrWhereUserConfigDirFails(t *testing.T) {
+	t.Run("relative_xdg", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", "rel")
+		t.Setenv("HOME", t.TempDir())
+
+		c := newClient("reltest", "")
+		if got, want := c.socketPath(), filepath.Join("rel", "herdr", "sessions", "reltest", "herdr.sock"); got != want {
+			t.Errorf("socketPath() = %q; want %q", got, want)
+		}
+	})
+	t.Run("no_xdg_no_home", func(t *testing.T) {
+		unsetEnv(t, "XDG_CONFIG_HOME")
+		unsetEnv(t, "HOME")
+
+		c := newClient("tmptest", "")
+		if got, want := c.socketPath(), filepath.Join(os.TempDir(), "herdr", "sessions", "tmptest", "herdr.sock"); got != want {
+			t.Errorf("socketPath() = %q; want %q", got, want)
+		}
+	})
+}
+
+// herdr reads XDG_CONFIG_HOME and HOME with std::env::var, which returns a
+// variable that is set but empty as Ok(""), and joins that like any other
+// value: PathBuf::from("").join("herdr") is the relative "herdr". The XDG
+// Base Directory spec's empty-means-unset rule is not herdr's, so it must not
+// be socketPath's either.
+func TestSocketPathCountsSetButEmptyVariablesAsSet(t *testing.T) {
+	t.Run("empty_xdg", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", "")
+		t.Setenv("HOME", t.TempDir()) // must be ignored: XDG_CONFIG_HOME is set
+
+		c := newClient("emptyxdg", "")
+		if got, want := c.socketPath(), filepath.Join("herdr", "sessions", "emptyxdg", "herdr.sock"); got != want {
+			t.Errorf("socketPath() = %q; want %q", got, want)
+		}
+	})
+	t.Run("no_xdg_empty_home", func(t *testing.T) {
+		unsetEnv(t, "XDG_CONFIG_HOME")
+		t.Setenv("HOME", "")
+
+		c := newClient("emptyhome", "")
+		if got, want := c.socketPath(), filepath.Join(".config", "herdr", "sessions", "emptyhome", "herdr.sock"); got != want {
+			t.Errorf("socketPath() = %q; want %q", got, want)
+		}
+	})
+}
+
+// A relative socket path resolves against the working directory of whichever
+// process uses it: the herdr server runs in the city root, while gc and the
+// herdr CLI calls run in gc's own. startServer must refuse one before it
+// dials, unlinks or launches anything, with an error that names the variables
+// to fix and both directories.
+func TestStartServerRefusesRelativeSocketPath(t *testing.T) {
+	gcDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	standaloneHome := regexp.MustCompile(`\bHOME\b`) // not the HOME inside XDG_CONFIG_HOME
+	for _, tc := range []struct {
+		name string
+		env  func(t *testing.T)
+	}{
+		{"relative_xdg", func(t *testing.T) { t.Setenv("XDG_CONFIG_HOME", "rel") }},
+		{"empty_xdg", func(t *testing.T) { t.Setenv("XDG_CONFIG_HOME", "") }},
+		{"no_xdg_empty_home", func(t *testing.T) {
+			unsetEnv(t, "XDG_CONFIG_HOME")
+			t.Setenv("HOME", "")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			tc.env(t)
+			fake := newFakeHerdr(t, filepath.Join(t.TempDir(), "unused-probe"))
+			cityRoot := t.TempDir()
+			c := newClient("reltest", cityRoot)
+			c.bin = fake.bin
+			sock := c.socketPath()
+			if filepath.IsAbs(sock) {
+				t.Fatalf("test setup: socketPath() = %q; want a relative path", sock)
+			}
+
+			err := c.startServer()
+			if err == nil {
+				t.Fatal("startServer() = nil for a relative socket path; want a refusal")
+			}
+			for _, want := range []string{sock, "XDG_CONFIG_HOME", cityRoot, gcDir} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("startServer() error %q does not name %q", err, want)
+				}
+			}
+			if !standaloneHome.MatchString(err.Error()) {
+				t.Errorf("startServer() error %q does not name HOME", err)
+			}
+			if calls := fake.logLines(t); len(calls) != 0 {
+				t.Errorf("startServer() ran herdr %q; want no launch", calls)
+			}
+		})
 	}
 }

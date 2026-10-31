@@ -13,9 +13,17 @@ func loadSuspensionState(fs fsys.FS, cityPath string) (suspensionstate.State, er
 	return suspensionstate.Load(fs, cityPath)
 }
 
-// saveSuspensionState writes the runtime suspension state to disk.
-func saveSuspensionState(fs fsys.FS, cityPath string, st suspensionstate.State) error {
-	return suspensionstate.Save(fs, cityPath, st)
+// updateRigSuspension applies apply (suspendRigInState or
+// resumeRigInState) to the rig through [suspensionstate.Update], so the
+// read and the write hold the suspension fence together, and reports
+// whether apply changed the state. An unchanged state is not rewritten.
+func updateRigSuspension(fs fsys.FS, cityPath, rigName string, apply func(*suspensionstate.State, string) bool) (bool, error) {
+	changed := false
+	err := suspensionstate.Update(fs, cityPath, func(st *suspensionstate.State) bool {
+		changed = apply(st, rigName)
+		return changed
+	})
+	return changed, err
 }
 
 // loadSuspensionStateBestEffort returns the runtime suspension state,
@@ -72,6 +80,9 @@ func isRigSuspendedInState(st suspensionstate.State, name string) bool {
 // files with `suspended = true` continue to start rigs suspended.
 func buildEffectiveSuspendedRigNames(cfg *config.City, st suspensionstate.State) map[string]bool {
 	names := make(map[string]bool)
+	if cfg == nil {
+		return names
+	}
 	for i := range cfg.Rigs {
 		r := &cfg.Rigs[i]
 		if suspensionstate.EffectiveRigSuspended(st, r.Name, r.EffectiveSuspendedOnStart()) {

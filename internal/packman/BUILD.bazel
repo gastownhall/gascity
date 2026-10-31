@@ -81,6 +81,7 @@ go_test(
         "cache_compat_test.go",
         "cache_test.go",
         "check_test.go",
+        "embedded_pin_hash_test.go",
         "install_test.go",
         "lockfile_test.go",
         "network_git_args_test.go",
@@ -114,6 +115,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

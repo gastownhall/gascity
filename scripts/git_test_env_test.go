@@ -3,6 +3,7 @@ package scripts_test
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -109,6 +110,56 @@ func TestShardTestEnvsIgnoreUserGitConfiguration(t *testing.T) {
 				if got := strings.Count(content, "\nexport gc_test_gitconfig\n"); got != 1 {
 					t.Errorf("%s must export gc_test_gitconfig for the xargs fan-out workers (found %d)", path, got)
 				}
+			}
+		})
+	}
+}
+
+// shellAssignment finds a SHELL assignment in an env -i allowlist. The leading
+// guard keeps names such as GIT_SHELL from matching, and the value stops at
+// whitespace or the line-continuation backslash.
+var shellAssignment = regexp.MustCompile(`(?:^|[^A-Za-z0-9_])SHELL=([^\s\\]*)`)
+
+// forwardedShell finds every spelling that copies the caller's SHELL into a
+// nested environment: a make $$SHELL, a shell $SHELL, or ${SHELL:-...}. A make
+// $(SHELL) is not one.
+var forwardedShell = regexp.MustCompile(`\$\$?\{?SHELL\b`)
+
+// TestRunnerTestEnvsPinPaneShell guards ga-yghhjf. A test that starts a tmux or
+// herdr pane runs the environment's SHELL in it. Forward the invoking user's
+// zsh into a fresh HOME and the pane opens zsh's new-user wizard, which
+// swallows the text the test types. Every allowlist that builds a test
+// environment therefore pins SHELL=/bin/sh once and never forwards the caller's
+// value. The four are mirrored copies of one allowlist and change together
+// (scripts/AGENTS.md).
+func TestRunnerTestEnvsPinPaneShell(t *testing.T) {
+	repoRoot := repoRoot(t)
+	for _, path := range []string{
+		"Makefile",
+		"scripts/test-local-parallel",
+		"scripts/test-go-test-shard",
+		"scripts/test-integration-shard",
+	} {
+		t.Run(path, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(repoRoot, path))
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+			var pins []string
+			for _, line := range strings.Split(string(data), "\n") {
+				// A comment may explain the pin; only live text counts.
+				if strings.HasPrefix(strings.TrimSpace(line), "#") {
+					continue
+				}
+				if forwardedShell.MatchString(line) {
+					t.Errorf("%s forwards the caller's SHELL: %s", path, strings.TrimSpace(line))
+				}
+				for _, m := range shellAssignment.FindAllStringSubmatch(line, -1) {
+					pins = append(pins, m[1])
+				}
+			}
+			if len(pins) != 1 || pins[0] != "/bin/sh" {
+				t.Errorf("%s assigns SHELL %q, want exactly one assignment, to /bin/sh", path, pins)
 			}
 		})
 	}

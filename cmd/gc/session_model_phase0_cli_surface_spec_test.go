@@ -33,13 +33,13 @@ func TestPhase0CLISessionTargetingSurfaces_RejectTemplateFactoryTargets(t *testi
 		{
 			name: "gc session wake",
 			run: func(stdout, stderr *bytes.Buffer) int {
-				return cmdSessionWake([]string{"template:worker"}, stdout, stderr)
+				return cmdSessionWake([]string{"template:worker"}, "", stdout, stderr, false)
 			},
 		},
 		{
 			name: "gc session suspend",
 			run: func(stdout, stderr *bytes.Buffer) int {
-				return cmdSessionSuspend([]string{"template:worker"}, stdout, stderr)
+				return cmdSessionSuspend([]string{"template:worker"}, "", stdout, stderr, false)
 			},
 		},
 		{
@@ -57,7 +57,7 @@ func TestPhase0CLISessionTargetingSurfaces_RejectTemplateFactoryTargets(t *testi
 		{
 			name: "gc session close",
 			run: func(stdout, stderr *bytes.Buffer) int {
-				return cmdSessionClose([]string{"template:worker"}, stdout, stderr)
+				return cmdSessionClose([]string{"template:worker"}, "", stdout, stderr, false)
 			},
 		},
 		{
@@ -69,7 +69,7 @@ func TestPhase0CLISessionTargetingSurfaces_RejectTemplateFactoryTargets(t *testi
 		{
 			name: "gc session nudge",
 			run: func(stdout, stderr *bytes.Buffer) int {
-				return cmdSessionNudge([]string{"template:worker", "hello"}, nudgeDeliveryImmediate, false, stdout, stderr)
+				return cmdSessionNudge([]string{"template:worker", "hello"}, nudgeDeliveryImmediate, "", false, stdout, stderr)
 			},
 		},
 	}
@@ -119,13 +119,13 @@ func TestPhase0CLISessionTargetingSurfaces_BareConfigNameDoesNotMaterializeOrdin
 		{
 			name: "gc session wake",
 			run: func(stdout, stderr *bytes.Buffer) int {
-				return cmdSessionWake([]string{"worker"}, stdout, stderr)
+				return cmdSessionWake([]string{"worker"}, "", stdout, stderr, false)
 			},
 		},
 		{
 			name: "gc session suspend",
 			run: func(stdout, stderr *bytes.Buffer) int {
-				return cmdSessionSuspend([]string{"worker"}, stdout, stderr)
+				return cmdSessionSuspend([]string{"worker"}, "", stdout, stderr, false)
 			},
 		},
 		{
@@ -143,7 +143,7 @@ func TestPhase0CLISessionTargetingSurfaces_BareConfigNameDoesNotMaterializeOrdin
 		{
 			name: "gc session close",
 			run: func(stdout, stderr *bytes.Buffer) int {
-				return cmdSessionClose([]string{"worker"}, stdout, stderr)
+				return cmdSessionClose([]string{"worker"}, "", stdout, stderr, false)
 			},
 		},
 		{
@@ -155,7 +155,7 @@ func TestPhase0CLISessionTargetingSurfaces_BareConfigNameDoesNotMaterializeOrdin
 		{
 			name: "gc session nudge",
 			run: func(stdout, stderr *bytes.Buffer) int {
-				return cmdSessionNudge([]string{"worker", "hello"}, nudgeDeliveryImmediate, false, stdout, stderr)
+				return cmdSessionNudge([]string{"worker", "hello"}, nudgeDeliveryImmediate, "", false, stdout, stderr)
 			},
 		},
 	}
@@ -237,7 +237,7 @@ mode = "always"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdSessionClose([]string{"worker"}, &stdout, &stderr)
+	code := cmdSessionClose([]string{"worker"}, "", &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("cmdSessionClose(worker) = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}

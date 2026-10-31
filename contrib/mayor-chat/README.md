@@ -99,5 +99,5 @@ input during a turn. **A bot frontend must serialize turns itself** — queue
 per conversation, or run one transport per conversation.
 
 Call `transport.close()` when done. It ends the prompt iterable *and* calls
-`Query.close()`, which terminates the `claude` CLI subprocess; ending the
-iterable alone leaves an in-flight generation running.
+`Query.close()`, which terminates the SDK-managed Claude Code subprocess;
+ending the iterable alone leaves an in-flight generation running.

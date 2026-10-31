@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -228,7 +229,17 @@ func runAdoptionBarrier(
 		// stopping this runtime (ga-lfr06j). An empty result is the
 		// existing "cannot verify identity" signal and fails that fence
 		// open, matching sessions adopted with no known token at all.
-		liveInstanceToken, _ := sp.GetMeta(sessionName, "GC_INSTANCE_TOKEN")
+		//
+		// A runtime that answers with no token gets one minted for the row
+		// and, once the row exists, stamped on the runtime (LL5, v5 O2), so
+		// the adopted runtime is never half-identified. An unreadable token
+		// mints nothing: it may be a live token this cannot see.
+		liveInstanceToken, tokenErr := sp.GetMeta(sessionName, "GC_INSTANCE_TOKEN")
+		mintedToken := ""
+		if tokenErr == nil && strings.TrimSpace(liveInstanceToken) == "" {
+			mintedToken = sessionpkg.NewInstanceToken()
+			liveInstanceToken = mintedToken
+		}
 
 		// Build bead metadata. Config/live hashes are left empty —
 		// syncSessionBeads populates them from built agent objects.
@@ -250,9 +261,11 @@ func runAdoptionBarrier(
 		}
 
 		alreadyHadBead := false
+		rowID := ""
 		createSessionBead := func() error {
 			meta["synced_at"] = clk.Now().UTC().Format("2006-01-02T15:04:05Z07:00")
-			_, err := sessFront.CreateSession(sessionpkg.CreateSpec{
+			var err error
+			rowID, err = sessFront.CreateSession(sessionpkg.CreateSpec{
 				Title:     detail.AgentName,
 				AgentName: detail.AgentName,
 				Metadata:  meta,
@@ -286,11 +299,86 @@ func runAdoptionBarrier(
 		}
 		result.Adopted++
 		result.Details = append(result.Details, detail)
+		stampErr := tokenErr
+		if stampErr == nil {
+			stampErr = stampAdoptedRuntime(sp, sessionName, rowID, strconv.Itoa(sessionpkg.DefaultGeneration), mintedToken)
+		}
+		if stampErr != nil {
+			fmt.Fprintf(stderr, "adoption barrier: %s adopted as %s, identity not stamped: %v\n", sessionName, rowID, stampErr) //nolint:errcheck
+		}
 	}
 
 	// Step 4: Barrier gate — all running sessions must have beads.
 	passed := result.Skipped == 0 && !partialList
 	return result, passed
+}
+
+// stampAdoptedRuntime writes an adopted runtime's identity to the runtime
+// (LL5, v5 O2), outside any identifier lock. A minted token is written only
+// while a fresh read still finds none; on a tmux leaf BEADS_HOLDER_TOKEN goes
+// beside it when absent, as tmux starts keep the two aligned. A failed token
+// write stamps nothing more: a runtime with the row's ID and no token reads
+// as ours to legacy's pending-create attribution after a restart, which
+// consults the epoch only on a token mismatch. A runtime with no
+// GC_SESSION_ID then gets its GC_RUNTIME_EPOCH and sessionID, the ID only
+// once the epoch landed, so that attribution reads a stale stamped
+// incarnation as another generation, never as its own. A runtime that
+// already names a session keeps it: the row holds the runtime's token, which
+// reads Current whatever the session ID, and a runtime still naming a closed
+// row stays visible to reapRuntimesBoundToClosedBeads exactly as before. The
+// caller only reports the error: the row exists either way.
+func stampAdoptedRuntime(sp runtime.Provider, name, sessionID, generation, mintedToken string) error {
+	var errs []error
+	if mintedToken != "" {
+		switch current, err := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); {
+		case err != nil:
+			return fmt.Errorf("re-reading GC_INSTANCE_TOKEN: %w", err)
+		case strings.TrimSpace(current) != "":
+			return errors.New("the runtime gained a GC_INSTANCE_TOKEN after it was read")
+		}
+		if err := sp.SetMeta(name, "GC_INSTANCE_TOKEN", mintedToken); err != nil {
+			return fmt.Errorf("stamping GC_INSTANCE_TOKEN: %w", err)
+		}
+		if leaf, _, _ := runtime.ResolveBackend(sp, name); isSessionEnvLeaf(leaf) {
+			if err := stampIfAbsent(sp, name, "BEADS_HOLDER_TOKEN", mintedToken); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	switch current, err := sp.GetMeta(name, "GC_SESSION_ID"); {
+	case err != nil:
+		errs = append(errs, fmt.Errorf("reading GC_SESSION_ID: %w", err))
+	case strings.TrimSpace(current) == "":
+		if err := sp.SetMeta(name, "GC_RUNTIME_EPOCH", generation); err != nil {
+			errs = append(errs, fmt.Errorf("stamping GC_RUNTIME_EPOCH: %w", err))
+		} else if err := sp.SetMeta(name, "GC_SESSION_ID", sessionID); err != nil {
+			errs = append(errs, fmt.Errorf("stamping GC_SESSION_ID: %w", err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// isSessionEnvLeaf reports whether leaf keeps its metadata in a session
+// environment that new processes inherit (tmux, the one
+// EnvironmentBatchProvider), rather than in a sidecar only gc reads.
+func isSessionEnvLeaf(leaf runtime.Provider) bool {
+	_, ok := leaf.(runtime.EnvironmentBatchProvider)
+	return ok
+}
+
+// stampIfAbsent writes key on the runtime when a read finds it unset.
+func stampIfAbsent(sp runtime.Provider, name, key, value string) error {
+	current, err := sp.GetMeta(name, key)
+	switch {
+	case err != nil:
+		return fmt.Errorf("reading %s: %w", key, err)
+	case strings.TrimSpace(current) != "":
+		return nil
+	}
+	if err := sp.SetMeta(name, key, value); err != nil {
+		return fmt.Errorf("stamping %s: %w", key, err)
+	}
+	return nil
 }
 
 func openSessionBeadExists(sessFront *sessionpkg.Store, sessionName string) (bool, error) {

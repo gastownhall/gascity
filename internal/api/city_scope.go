@@ -299,9 +299,7 @@ func cityScopeName[I any](input *I) string {
 func (sm *SupervisorMux) resolveCityServer(name string) *Server {
 	state := sm.resolver.CityState(name)
 	if state == nil {
-		sm.cacheMu.Lock()
-		delete(sm.cache, name)
-		sm.cacheMu.Unlock()
+		sm.dropCityServer(name)
 		return nil
 	}
 	return sm.getCityServer(name, state)

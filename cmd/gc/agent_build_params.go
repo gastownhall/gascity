@@ -1,15 +1,18 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/poolplan"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -32,6 +35,10 @@ type agentBuildParams struct {
 	rigs            []config.Rig
 	sessionTemplate string
 	beaconTime      time.Time
+	// decisionTime is this build's clock for time-dependent pool decisions
+	// (kill-fence grace, alias-retry backoff); see now. Legacy sets it to the
+	// build's poolDecisionTime, because its beaconTime is fixed at gc start.
+	decisionTime    time.Time
 	packDirs        []string
 	packOverlayDirs []string
 	rigOverlayDirs  map[string][]string
@@ -108,12 +115,31 @@ type agentBuildParams struct {
 	// named create (AM-N3): the work dir is resolved without mkdir, Claude
 	// settings are validated and pointed at, never projected, and skill
 	// snapshots are not written. Start and adopt resolve side-effecting.
+	// A read-only desired-state build (gc start --dry-run) also skips
+	// overlay staging and hook installation (resolveTemplatePrepared,
+	// installAgentSideEffects).
 	readOnly bool
+
+	// gitLatch records that a default-branch probe missed its deadline, so
+	// the build's remaining probes are skipped. It is a pointer because build
+	// params are copied by value and every copy must share one latch.
+	// newAgentBuildParams sets it; params built as literals leave it nil,
+	// which never latches.
+	gitLatch *gitProbeLatch
+
+	// gitProbeDeadline bounds one default-branch probe. Zero means
+	// defaultGitProbeTimeout; tests set it small.
+	gitProbeDeadline time.Duration
 
 	// realizeProbe times and counts pool realization for the realize_pools
 	// trace record. Set by buildDesiredState around its realization loop only;
 	// nil elsewhere, which disables the counters.
 	realizeProbe *poolRealizeProbe
+
+	// realizeMemo is the v2 allocator's per-pass realization index for one
+	// pool agent (allocator_index.go). Legacy never sets it: nil is legacy's
+	// path, unchanged.
+	realizeMemo *poolRealizeMemo
 
 	// beadNames caches qualifiedName → session_name mappings resolved
 	// during this build cycle. Populated lazily by resolveSessionName.
@@ -130,6 +156,9 @@ type agentBuildParams struct {
 	// skillCatalogFromCache reports whether skillCatalog came from the
 	// last-good cache rather than the current LoadCityCatalog result.
 	skillCatalogFromCache bool
+	// skillCatalogFailed reports a city catalog load that failed with no
+	// cached catalog to fall back on: skills contribute nothing this cycle.
+	skillCatalogFailed bool
 	// rigSkillCatalogs caches rig-specific shared catalogs. Each entry
 	// includes city-shared skills plus any rig-import shared catalogs.
 	rigSkillCatalogs map[string]*materialize.CityCatalog
@@ -167,9 +196,23 @@ func (p *agentBuildParams) hasCompleteSessionSnapshot() bool {
 	return p.sessionBeads != nil && p.sessionBeads.LoadError() == nil
 }
 
+// now is the build's decision clock: decisionTime when the caller set it,
+// else beaconTime, which the v2 allocator sets to its pass time. The pool
+// decide reads no wall clock (allocator_decide_purity_test.go).
+func (p *agentBuildParams) now() time.Time {
+	if p == nil {
+		return time.Time{}
+	}
+	if !p.decisionTime.IsZero() {
+		return p.decisionTime
+	}
+	return p.beaconTime
+}
+
 // newAgentBuildParams constructs agentBuildParams from the common startup values.
 func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime.Provider, beaconTime time.Time, store beads.Store, stderr io.Writer) *agentBuildParams {
 	params := baseAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
+	params.gitLatch = &gitProbeLatch{}
 	if store != nil {
 		params.poolSessionCreateBudget = poolplan.NewCreateBudget(cfg.Daemon.MaxWakesPerTickOrDefault())
 	}
@@ -192,8 +235,11 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 			if stderr != nil {
 				fmt.Fprintf(stderr, "buildDesiredState: LoadCityCatalog %v (using cached catalog to avoid drift)\n", cityCatalog.Err) //nolint:errcheck // best-effort stderr
 			}
-		} else if stderr != nil {
-			fmt.Fprintf(stderr, "buildDesiredState: LoadCityCatalog %v (no cached catalog; skills will not contribute to fingerprints this tick)\n", cityCatalog.Err) //nolint:errcheck // best-effort stderr
+		} else {
+			params.skillCatalogFailed = true
+			if stderr != nil {
+				fmt.Fprintf(stderr, "buildDesiredState: LoadCityCatalog %v (no cached catalog; skills will not contribute to fingerprints this tick)\n", cityCatalog.Err) //nolint:errcheck // best-effort stderr
+			}
 		}
 	} else {
 		catCopy := cityCatalog.Catalog
@@ -363,4 +409,73 @@ func resolveTmuxAliasForAgentIn(cityPath, cityName string, rigs []config.Rig, ag
 		return "", fmt.Errorf("resolving tmux_alias for %q: %w", agent.QualifiedName(), err)
 	}
 	return resolved, nil
+}
+
+// defaultGitProbeTimeout bounds one default-branch probe on the build path.
+const defaultGitProbeTimeout = 10 * time.Second
+
+// gitProbeLatch records that a default-branch probe did not complete within
+// its deadline. The zero value is ready to use; a nil latch never trips.
+type gitProbeLatch struct {
+	mu  sync.Mutex
+	err error
+}
+
+// tripped reports whether a probe has failed to complete.
+func (l *gitProbeLatch) tripped() bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.err != nil
+}
+
+// trip records err and reports whether this call was the first to do so.
+func (l *gitProbeLatch) trip(err error) bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	first := l.err == nil
+	if first {
+		l.err = err
+	}
+	return first
+}
+
+// gitProbeTimeout returns the deadline for one default-branch probe.
+func (p *agentBuildParams) gitProbeTimeout() time.Duration {
+	if p == nil || p.gitProbeDeadline <= 0 {
+		return defaultGitProbeTimeout
+	}
+	return p.gitProbeDeadline
+}
+
+// defaultBranch returns the default branch a prompt renders for an agent in
+// dir: the rig's recorded value when set, "main" for an unset dir, otherwise a
+// git probe bounded by gitProbeTimeout. A probe that does not complete
+// returns "" (never a guessed "main") and latches the build, so one wedged
+// repository costs one deadline per build rather than one per agent.
+func (p *agentBuildParams) defaultBranch(rigName, dir string) string {
+	if branch := recordedDefaultBranch(rigName, p.rigs); branch != "" {
+		return branch
+	}
+	if dir == "" {
+		return "main"
+	}
+	if p.gitLatch.tripped() {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), p.gitProbeTimeout())
+	defer cancel()
+	branch, err := git.New(dir).DefaultBranchCtx(ctx)
+	if err != nil {
+		if p.gitLatch.trip(err) && p.stderr != nil {
+			fmt.Fprintf(p.stderr, "buildDesiredState: default-branch probe in %s did not complete (deadline %s) (%v); the build's remaining probes are skipped and DefaultBranch renders empty\n", dir, p.gitProbeTimeout(), err) //nolint:errcheck // best-effort stderr
+		}
+		return ""
+	}
+	return branch
 }

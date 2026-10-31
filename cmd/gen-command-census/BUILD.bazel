@@ -25,8 +25,10 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
-        "//:repo_source_tree",
+        "//:schemas/metrics/example/result.schema.json",
+        "//cmd/gc:metrics_census_gen.go",
         "//cmd/gc:productmetrics_command_census.json",
+        "//internal/productmetrics:command_ids_gen.go",
     ],
     embed = [":gen-command-census_lib"],
     deps = [
@@ -44,6 +46,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

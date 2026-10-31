@@ -7,7 +7,7 @@ Run these before considering docs work complete. They are ordered cheapest-first
 ```bash
 # 1. Docs sync: nav<->file consistency + local markdown links resolve.
 #    This is the gate the pre-commit hook runs for docs changes.
-make check-docs            # == go test ./test/docsync
+make check-docs            # == bazel test //test/docsync:docsync_test
 
 # 2. Diagrams: re-render any changed Excalidraw source to SVG (idempotent).
 make diagrams-excalidraw

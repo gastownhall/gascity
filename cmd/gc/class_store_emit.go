@@ -123,6 +123,72 @@ func (r *storageRoutes) withCLIEmission(cityPath string) *storageRoutes {
 	return r
 }
 
+// withMainStoreEmission is withCLIEmission for the session class of a city
+// that relocates nothing: the one-shot CLI's session writes land in the city's
+// own store, and they must be announced just as a split city's are (mc-03yxh).
+// Nothing else tells the controller's cache about them — gc no longer installs
+// the bd event hooks — so a cache-served session census (the legacy patrol
+// tick, v2's census) missed a `gc session new` until a poke's live read ran.
+//
+// The city store reaches here inside the bead-policy layer, which every store
+// open applies outermost (openStoreResultAtForCityScoped). The emitter goes
+// directly on the engine beneath it and the policy layer is rebuilt over the
+// emitter, so the policy stays outermost and a row is appended only after the
+// engine write lands.
+//
+// Only the engines the wrapper is pinned against are wrapped
+// (TestEmittingClassStoreKeepsEveryEngineCapability; see mainStoreEmissionEngine).
+// Any other store is returned untouched: a bd subprocess store may run hooks
+// that already emit and carries capabilities the wrapper does not forward, a
+// CachingStore emits through its own notifyChange, and a relocated class store
+// the funnel wrapped already emits.
+func withMainStoreEmission(store beads.Store, cityPath string) beads.Store {
+	cityPath = strings.TrimSpace(cityPath)
+	if cityPath == "" {
+		return store
+	}
+	engine, policy, underPolicy := unwrapBeadPolicyStore(store)
+	if !mainStoreEmissionEngine(engine) {
+		return store
+	}
+	emitting := &emittingClassStore{Store: engine, cityPath: cityPath}
+	if !underPolicy {
+		return emitting
+	}
+	return wrapStoreWithBeadPolicies(emitting, policy.cfg)
+}
+
+// mainStoreEmissionEngine reports whether store is an engine the one-shot
+// emitter may wrap on the main store: the SQLite and native Dolt engines. They
+// run no bd hooks (the store factory refuses the native store while executable
+// bd hooks exist), so nothing else announces their writes, and the wrapper
+// forwards every capability they declare.
+func mainStoreEmissionEngine(store beads.Store) bool {
+	switch store.(type) {
+	case *beads.SQLiteStore, *beads.NativeDoltStore:
+		return true
+	default:
+		return false
+	}
+}
+
+// storeEngine strips the layers a one-shot store open puts over a bead engine —
+// the bead-policy layer and the emitting wrapper — and returns the engine, for
+// callers that compare stores by what serves them.
+func storeEngine(store beads.Store) beads.Store {
+	for {
+		if inner, _, ok := unwrapBeadPolicyStore(store); ok {
+			store = inner
+			continue
+		}
+		emitting, ok := store.(*emittingClassStore)
+		if !ok {
+			return store
+		}
+		store = emitting.Store
+	}
+}
+
 // emittingClassStore is a relocated class store that appends a bead.* event
 // after each successful mutation. The embedded Store carries the required
 // surface; every optional capability either bead engine declares is forwarded
@@ -130,6 +196,9 @@ func (r *storageRoutes) withCLIEmission(cityPath string) *storageRoutes {
 type emittingClassStore struct {
 	beads.Store
 	cityPath string
+	// deferredRings, when set, queues the controller doorbells for
+	// journal-row writes for the caller to ring (deferJournalRings).
+	deferredRings *journalRingQueue
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +209,10 @@ type emittingClassStore struct {
 type classStoreEmission struct {
 	eventType string
 	bead      beads.Bead
+	// synthesized marks a row built from the write itself after a read miss
+	// rather than re-read from the store. It is not the row's whole state,
+	// so its empty metadata must not be written as an explicit {}.
+	synthesized bool
 }
 
 // emit appends one row per emission to the city's journal through a single
@@ -151,7 +224,11 @@ type classStoreEmission struct {
 // running it here would race that recorder mid-rotation. It does not make the open free — NewFileRecorder reads
 // the log directory either way, to continue the sequence past the archives —
 // only unraced.
+//
+// An operation-journal row journals nothing: the controller is rung to
+// announce it (ringJournalEmissions).
 func (s *emittingClassStore) emit(emissions ...classStoreEmission) {
+	emissions = s.ringJournalEmissions(emissions)
 	if len(emissions) == 0 {
 		return
 	}
@@ -172,6 +249,9 @@ func (s *emittingClassStore) emit(emissions ...classStoreEmission) {
 			continue
 		}
 		payload = withExplicitEdges(payload, emission.bead)
+		if !emission.synthesized && emission.eventType != events.BeadDeleted {
+			payload = withExplicitMetadata(payload, emission.bead)
+		}
 		stepID := emission.bead.Metadata[beadmeta.StepIDMetadataKey]
 		rec.Record(events.Event{
 			Type:             emission.eventType,
@@ -206,18 +286,25 @@ func (s *emittingClassStore) snapshot(id string) (beads.Bead, bool) {
 	if err != nil || strings.TrimSpace(bead.ID) == "" {
 		return beads.Bead{}, false
 	}
+	return s.withConfirmedEdges(bead), true
+}
+
+// withConfirmedEdges is snapshot's edge half, for a caller that already holds
+// the post-write row (a claim's canonical readback): a row that carries its
+// edges is used as is, and one that carries none is confirmed with DepList.
+func (s *emittingClassStore) withConfirmedEdges(bead beads.Bead) beads.Bead {
 	if len(bead.Dependencies) > 0 {
 		bead.Needs = nil
-		return bead, true
+		return bead
 	}
-	if deps, err := s.DepList(id, "down"); err == nil {
+	if deps, err := s.DepList(bead.ID, "down"); err == nil {
 		bead.Dependencies = deps
 		if bead.Dependencies == nil {
 			bead.Dependencies = []beads.Dep{}
 		}
 		bead.Needs = nil
 	}
-	return bead, true
+	return bead
 }
 
 // withExplicitEdges adds "dependencies":[] to a payload whose bead has a
@@ -231,6 +318,28 @@ func withExplicitEdges(payload []byte, bead beads.Bead) []byte {
 		return payload
 	}
 	fields["dependencies"] = json.RawMessage("[]")
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return payload
+	}
+	return out
+}
+
+// withExplicitMetadata adds "metadata":{} to the payload of a row that holds no
+// metadata, which the Bead encoding would otherwise omit. emit applies it only
+// to a re-read row (not a synthesized one, and not a delete), so the payload is a
+// fresh snapshot, so an empty map is the row's real state: without the key, a
+// peer cache reads the event as "metadata not reported" and keeps a key the
+// write just removed (an unset of the row's last key).
+func withExplicitMetadata(payload []byte, bead beads.Bead) []byte {
+	if len(bead.Metadata) > 0 {
+		return payload
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return payload
+	}
+	fields["metadata"] = json.RawMessage("{}")
 	out, err := json.Marshal(fields)
 	if err != nil {
 		return payload
@@ -279,11 +388,19 @@ func (s *emittingClassStore) emitUpdated(id string) {
 // carried one, so a committed close still rides bead.closed with a non-empty
 // status, and skipped otherwise.
 func (s *emittingClassStore) emitAfterUpdate(id string, opts beads.UpdateOpts, wasClosed bool) {
+	if emission, ok := s.afterUpdateEmission(id, opts, wasClosed); ok {
+		s.emit(emission)
+	}
+}
+
+// afterUpdateEmission is emitAfterUpdate's row, for a caller that records
+// several in one journal open.
+func (s *emittingClassStore) afterUpdateEmission(id string, opts beads.UpdateOpts, wasClosed bool) (classStoreEmission, bool) {
 	bead, ok := s.snapshot(id)
 	if !ok {
 		if opts.Status == nil {
 			warnClassStoreEmit(fmt.Errorf("bead.updated skipped: %s could not be re-read after the update", id))
-			return
+			return classStoreEmission{}, false
 		}
 		bead = beads.Bead{ID: id, Status: *opts.Status, Metadata: maps.Clone(opts.Metadata)}
 	}
@@ -291,7 +408,7 @@ func (s *emittingClassStore) emitAfterUpdate(id string, opts beads.UpdateOpts, w
 	if !wasClosed && beadStatusIsClosed(bead.Status) {
 		eventType = events.BeadClosed
 	}
-	s.emit(classStoreEmission{eventType: eventType, bead: bead})
+	return classStoreEmission{eventType: eventType, bead: bead, synthesized: !ok}, true
 }
 
 // emitClosed records bead.closed for a close this store proved committed.
@@ -305,7 +422,7 @@ func (s *emittingClassStore) emitClosed(id string) {
 		bead = beads.Bead{ID: id}
 	}
 	bead.Status = beadStatusClosed
-	s.emit(classStoreEmission{eventType: events.BeadClosed, bead: bead})
+	s.emit(classStoreEmission{eventType: events.BeadClosed, bead: bead, synthesized: !ok})
 }
 
 // emitClosedBead records bead.closed from the committed row an atomic fenced
@@ -489,10 +606,17 @@ func (s *emittingClassStore) DepRemove(issueID, dependsOnID string) error {
 // beads package publishes for it, or with the zero value where the question is
 // a capability question and the honest answer is "no".
 
+// CreateWithStorage forwards a storage-class create. The wrapper carries the
+// method for every engine, so a caller's StorageCreateStore assertion always
+// matches it, including over the native Dolt engine, which has no such
+// capability. Over such an engine it does what that caller does for a store
+// without one (createWithStoragePolicy): the storage class rides the bead's
+// own flags through the plain create, which still emits (mc-03yxh: refusing
+// broke `gc session new` on every single-store native Dolt city).
 func (s *emittingClassStore) CreateWithStorage(bead beads.Bead, storage beads.StorageClass) (beads.Bead, error) {
 	creator, ok := s.Store.(beads.StorageCreateStore)
 	if !ok {
-		return beads.Bead{}, fmt.Errorf("creating with a storage class: %T does not support it", s.Store)
+		return s.Create(applyStorageClass(bead, storage))
 	}
 	created, err := creator.CreateWithStorage(bead, storage)
 	s.emitCreated(created, err)
@@ -571,6 +695,17 @@ func (s *emittingClassStore) AtomicConditionalCloserHandle() (beads.AtomicCondit
 	return s, true
 }
 
+// ConditionalWritesModeSource points the conditional-writes resolver at the
+// stamped engine for the mode, liveness, capability and degrade latch, while
+// the writer it resolves stays this wrapper. A resolve TARGET would hand back
+// the bare engine as the writer, and every fenced CLI write would land
+// event-dark; declaring nothing would read the wrapper's missing stamp as
+// unset, and every fenced CLI write on a split city would fall back to the
+// unconditional legacy write.
+func (s *emittingClassStore) ConditionalWritesModeSource() beads.Store {
+	return s.Store
+}
+
 // HasResidentOutside forwards the relic census to the backing capability. It
 // exists because TestEmittingClassStoreKeepsEveryEngineCapability holds this
 // wrapper to every engine method, and a wrapper that carries the method must
@@ -639,7 +774,7 @@ func (s *emittingClassStore) Claim(id, assignee string) (beads.Bead, bool, error
 		Claim(string, string) (beads.Bead, bool, error)
 	})
 	if !ok {
-		return beads.Bead{}, false, beads.ErrConditionalWriteUnsupported
+		return beads.Bead{}, false, beads.ErrClaimUnsupported
 	}
 	bead, claimed, err := claimer.Claim(id, assignee)
 	if err == nil && claimed {
@@ -660,6 +795,18 @@ func (s *emittingClassStore) ReleaseIfCurrent(id, expectedAssignee string) (bool
 	return released, err
 }
 
+func (s *emittingClassStore) TransferIfCurrent(id, fromAssignee, toAssignee string) (bool, error) {
+	mover, ok := s.Store.(beads.ConditionalAssigneeTransferer)
+	if !ok {
+		return false, beads.ErrConditionalTransferUnsupported
+	}
+	moved, err := mover.TransferIfCurrent(id, fromAssignee, toAssignee)
+	if err == nil && moved {
+		s.emitUpdated(id)
+	}
+	return moved, err
+}
+
 func (s *emittingClassStore) DeleteBatch(ids []string) error {
 	deleter, ok := s.Store.(beads.BatchDeleter)
 	if !ok {
@@ -671,6 +818,62 @@ func (s *emittingClassStore) DeleteBatch(ids []string) error {
 	}
 	s.emitDeleted(snapshots)
 	return nil
+}
+
+// GetExactBatch forwards the engine's exact batch read (beads.ExactBatchGetter).
+// It exists for the reason DepListBatch does: a silent wrapper would send every
+// by-id verdict read (beads.GetMany) of a CLI-held binding one Get at a time.
+// An engine without one (SQLite) reports beads.ErrExactBatchGetUnsupported, and
+// the caller reads per id, as over a wrapper without the method.
+func (s *emittingClassStore) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	getter, ok := s.Store.(beads.ExactBatchGetter)
+	if !ok {
+		return nil, nil, beads.ErrExactBatchGetUnsupported
+	}
+	return getter.GetExactBatch(ids)
+}
+
+// DepListBatch forwards the batched dep-edge read.
+//
+// It emits nothing because it writes nothing — but it has to exist, because the
+// embedded Store interface does not promote an optional capability and this
+// wrapper is what a class-routed caller holds. Without it the batch is invisible
+// and the caller silently pays a round trip per anchor (ga-50tsx).
+func (s *emittingClassStore) DepListBatch(ids []string) (map[string][]beads.Dep, error) {
+	batch, ok := beads.DepListBatchFor(s.Store)
+	if !ok {
+		return nil, beads.ErrDepListBatchUnsupported
+	}
+	return batch.DepListBatch(ids)
+}
+
+// StrandsAbsentTargets answers for the wrapped engine
+// (beads.AbsentBlockedReader): true over SQLite, false over native Dolt, which
+// reads an absent target as external and strands nothing.
+func (s *emittingClassStore) StrandsAbsentTargets() bool {
+	_, ok := beads.ReadyBlockedByAbsentFor(s.Store)
+	return ok
+}
+
+// ReadyBlockedByAbsent forwards the absent-blocker listing
+// (beads.AbsentBlockedReader). It emits nothing because it writes nothing, and
+// it exists for the reason DepListBatch does: without it `gc ready` could not
+// see a graph row the SQLite binding strands behind a blocker held in the work
+// store, so that row would wait forever after its blocker closed.
+func (s *emittingClassStore) ReadyBlockedByAbsent(query beads.ReadyQuery) ([]beads.Bead, error) {
+	reader, ok := beads.ReadyBlockedByAbsentFor(s.Store)
+	if !ok {
+		return nil, nil
+	}
+	return reader.ReadyBlockedByAbsent(query)
+}
+
+// ReadyOrdered forwards a bounded ordered ready read (beads.OrderedReadyReader).
+// It emits nothing because it writes nothing, and it exists for the reason
+// DepListBatch does: a silent wrapper would send every bounded ready read of a
+// class binding down the whole-set path.
+func (s *emittingClassStore) ReadyOrdered(query beads.ReadyQuery, order beads.ReadyOrder) ([]beads.Bead, bool, error) {
+	return beads.ReadyOrdered(s.Store, query, order)
 }
 
 func (s *emittingClassStore) ApplyGraphPlan(ctx context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
@@ -878,14 +1081,15 @@ func (classStoreEmitWarnWriter) Write(p []byte) (int, error) {
 // classStoreEmitWarn is the emission-diagnostic sink. It is a package variable
 // so a test can capture what would otherwise be a one-line warning; the default
 // prints the first diagnostic and suppresses the rest, so a broken event log is
-// neither silent nor a flood in a worker's stderr.
+// neither silent nor a flood in a worker's stderr. The hook's work-store
+// announcements and gc bd's close announcements report through it too.
 var classStoreEmitWarn = warnClassStoreEmitOncePerProcess()
 
 func warnClassStoreEmitOncePerProcess() func(error) {
 	var once sync.Once
 	return func(err error) {
 		once.Do(func() {
-			fmt.Fprintf(os.Stderr, "gc: class-store event emission: %v (further emission errors suppressed)\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(os.Stderr, "gc: bead event emission: %v (further emission errors suppressed)\n", err) //nolint:errcheck // best-effort stderr
 		})
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -77,33 +78,33 @@ func (c *holdLabelConventionsCheck) Run(_ *doctor.CheckContext) *doctor.CheckRes
 		return res
 	}
 
+	// One listing of the store's non-closed beads, matched against the
+	// retired labels in memory, instead of one read per label (two bd forks
+	// each on a bd-backed store). The query is the one
+	// v2-routed-to-namespace lists, so within a doctor run the bd read memo
+	// answers it without another fork.
+	items, err := store.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		res.Status = doctor.StatusWarning
+		res.Message = fmt.Sprintf("hold-label conventions unknown for %s: listing beads: %v", c.label, err)
+		return res
+	}
 	var details []string
-	var queryErrs []string
-	for _, label := range retiredHoldLabels {
-		found, err := store.ListByLabel(label, 0)
-		if err != nil {
-			queryErrs = append(queryErrs, fmt.Sprintf("querying label %q: %v", label, err))
-			continue
-		}
-		for _, b := range found {
-			details = append(details, fmt.Sprintf("retired label %q on %s %q", label, b.ID, b.Title))
+	for _, b := range items {
+		for _, label := range retiredHoldLabels {
+			if slices.Contains(b.Labels, label) {
+				details = append(details, fmt.Sprintf("retired label %q on %s %q", label, b.ID, b.Title))
+			}
 		}
 	}
 	sort.Strings(details)
-	sort.Strings(queryErrs)
 
-	switch {
-	case len(details) > 0:
+	if len(details) > 0 {
 		res.Status = doctor.StatusError
 		res.Message = fmt.Sprintf("%d retired hold/blocked label use(s) found in %s", len(details), c.label)
-		details = append(details, queryErrs...)
 		res.Details = details
 		res.FixHint = holdLabelConventionsFixHint
-	case len(queryErrs) > 0:
-		res.Status = doctor.StatusWarning
-		res.Message = fmt.Sprintf("hold-label conventions check for %s hit %d label-query error(s)", c.label, len(queryErrs))
-		res.Details = queryErrs
-	default:
+	} else {
 		res.Status = doctor.StatusOK
 		res.Message = fmt.Sprintf("no retired hold/blocked labels found in %s", c.label)
 	}

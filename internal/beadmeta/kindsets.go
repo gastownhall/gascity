@@ -75,10 +75,11 @@ func IsControlKind(kind string) bool {
 //     definition site; control beads are never worker-executed, so none of
 //     these kinds can honor gc.output_json_required.
 //
-// Drain controls reconcile their enclosing scope on terminal close
-// (reconcileClosedDrainScope in internal/dispatch/drain.go), matching the
-// fanout/retry/ralph close-time behavior, so exemption from scope-check
-// pairing never strands a scope latch.
+// Fanout and drain controls settle their enclosing scope at terminal close,
+// before the control itself closes (closeScopedControl in
+// internal/dispatch/scope_settle.go), so the still-open control re-drives an
+// interrupted settle and exemption from scope-check pairing never strands a
+// scope latch.
 var ScopeCheckExemptKinds = []string{
 	KindScope,
 	KindScopeCheck,

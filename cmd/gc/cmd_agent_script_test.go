@@ -1032,6 +1032,30 @@ func TestAgentScriptHookBeadReportsHookFailureWithEmptyOutput(t *testing.T) {
 	}
 }
 
+// TestAgentScriptHookBeadReportsStoreUnavailableAsFailure pins that the no-work
+// heuristic does not swallow a store-unavailable hook. bd can fail with nothing
+// but a warning-shaped line; gc hook still classifies it, prints the token and
+// exits 2, and that is a failed read, not an empty queue.
+func TestAgentScriptHookBeadReportsStoreUnavailableAsFailure(t *testing.T) {
+	var stderr bytes.Buffer
+	_, hasWork, err := agentScriptHookBeadWithRunner(&stderr,
+		func(_ []string, _ bool, _ string, _ io.Writer, hookStderr io.Writer) int {
+			return reportWorkQueryFailure("gc hook", errors.New("running work query \"bd ready --json\": exit status 1: warning: auto-import from issues.jsonl failed: dial tcp 127.0.0.1:3307: connect: connection refused"), hookStderr)
+		})
+	if err == nil {
+		t.Fatal("agentScriptHookBeadWithRunner succeeded, want hook failure for an unavailable store")
+	}
+	if hasWork {
+		t.Fatal("agentScriptHookBeadWithRunner reported work on hook failure")
+	}
+	if !strings.Contains(err.Error(), "gc hook failed") {
+		t.Fatalf("error = %q, want hook failure", err.Error())
+	}
+	if got := stderr.String(); !strings.Contains(got, hookStoreUnavailableToken) {
+		t.Fatalf("stderr = %q, want forwarded %s line", got, hookStoreUnavailableToken)
+	}
+}
+
 func TestAgentScriptHookBeadTreatsEmptyHookAsNoWork(t *testing.T) {
 	var stderr bytes.Buffer
 	bead, hasWork, err := agentScriptHookBeadWithRunner(&stderr,

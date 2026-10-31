@@ -64,22 +64,19 @@ func TestExecutePreparedStartWaveUsesWorkerBoundaryForKnownSession(t *testing.T)
 		t.Fatalf("Get bead: %v", err)
 	}
 
-	results := executePreparedStartWave(
-		context.Background(),
-		[]preparedStart{{
-			candidate: startCandidate{
-				info: sessiontest.SeedBead(t, bead),
-				tp:   TemplateParams{TemplateName: "worker"},
-			},
-			cfg: runtime.Config{
-				Command: "claude --resume seeded-session",
-				WorkDir: info.WorkDir,
-			},
-		}},
-		sp,
-		store,
-		10*time.Second,
-	)
+	city := t.TempDir()
+	item, release := leasedStart(t, city, preparedStart{
+		candidate: startCandidate{
+			info: sessiontest.SeedBead(t, bead),
+			tp:   TemplateParams{TemplateName: "worker"},
+		},
+		cfg: runtime.Config{
+			Command: "claude --resume seeded-session",
+			WorkDir: info.WorkDir,
+		},
+	})
+	defer release()
+	results := executePreparedStartWaveForCity(context.Background(), []preparedStart{item}, city, sp, store, nil, 10*time.Second, 1)
 	if len(results) != 1 {
 		t.Fatalf("len(results) = %d, want 1", len(results))
 	}
@@ -107,6 +104,7 @@ func TestExecutePreparedStartWaveUsesWorkerBoundaryForKnownSession(t *testing.T)
 }
 
 func TestStartPreparedStartCandidateUsesWorkerBoundaryForRuntimeOnlyTarget(t *testing.T) {
+	city := t.TempDir()
 	sp := runtime.NewFake()
 
 	usedWorker, err := startPreparedStartCandidate(
@@ -121,7 +119,7 @@ func TestStartPreparedStartCandidateUsesWorkerBoundaryForRuntimeOnlyTarget(t *te
 				WorkDir: t.TempDir(),
 			},
 		},
-		"",
+		city,
 		nil,
 		sp,
 		nil,
@@ -215,6 +213,7 @@ func TestStartPreparedStartCandidateDoesNotKillSessionSuspendedDuringSpawn(t *te
 }
 
 func TestStartPreparedStartCandidateDefersWhenLivenessUnavailable(t *testing.T) {
+	testCity := t.TempDir()
 	sp := &startUnavailableLivenessProvider{Fake: runtime.NewFake()}
 
 	started, err := startPreparedStartCandidate(
@@ -226,7 +225,7 @@ func TestStartPreparedStartCandidateDefersWhenLivenessUnavailable(t *testing.T) 
 			},
 			cfg: runtime.Config{Command: "claude", WorkDir: t.TempDir()},
 		},
-		"",
+		testCity,
 		nil,
 		sp,
 		nil,
@@ -249,6 +248,7 @@ func TestStartPreparedStartCandidateDefersWhenLivenessUnavailable(t *testing.T) 
 }
 
 func TestStartPreparedStartCandidateConvergesFromConfirmedAbsence(t *testing.T) {
+	city := t.TempDir()
 	sp := &startConfirmedAbsentProvider{Fake: runtime.NewFake()}
 	started, err := startPreparedStartCandidate(
 		context.Background(),
@@ -259,7 +259,8 @@ func TestStartPreparedStartCandidateConvergesFromConfirmedAbsence(t *testing.T) 
 			},
 			cfg: runtime.Config{Command: "claude", WorkDir: t.TempDir()},
 		},
-		"", nil, sp, nil, nil, nil, nil,
+		city,
+		nil, sp, nil, nil, nil, nil,
 	)
 	if err != nil || !started {
 		t.Fatalf("startPreparedStartCandidate = (%v, %v), want started without error", started, err)
@@ -299,7 +300,7 @@ func TestExecutePreparedStartWaveDefersUnavailableWithoutRollbackOrWakeFailure(t
 				t.Fatalf("Create session: %v", err)
 			}
 			sp := &startUnavailableLivenessProvider{Fake: runtime.NewFake()}
-			results := executePreparedStartWave(
+			results := executePreparedStartWaveForCity(
 				context.Background(),
 				[]preparedStart{{
 					candidate: startCandidate{
@@ -308,9 +309,11 @@ func TestExecutePreparedStartWaveDefersUnavailableWithoutRollbackOrWakeFailure(t
 					},
 					cfg: runtime.Config{Command: "claude", WorkDir: t.TempDir()},
 				}},
+				t.TempDir(),
 				sp,
 				store,
-				10*time.Second,
+				nil,
+				10*time.Second, 1,
 			)
 			if len(results) != 1 {
 				t.Fatalf("len(results) = %d, want 1", len(results))
@@ -342,5 +345,68 @@ func TestExecutePreparedStartWaveDefersUnavailableWithoutRollbackOrWakeFailure(t
 				t.Fatalf("Stop calls = %d, want 0", stops)
 			}
 		})
+	}
+}
+
+// TestStartPreparedStartCandidateRuntimeOnlyBorrowsTheCandidateLease: a
+// bead-less legacy start runs its runtime-only handle under the candidate's
+// lease (the name's flock the start already holds), instead of taking that
+// flock a second time and failing on itself. Without the candidate's lease,
+// a flock another holder has defers the controller's start at once.
+func TestStartPreparedStartCandidateRuntimeOnlyBorrowsTheCandidateLease(t *testing.T) {
+	cityPath := t.TempDir()
+	const name = "worker-1"
+	item := func(lease *sessionpkg.RuntimeLease) preparedStart {
+		return preparedStart{
+			candidate: startCandidate{
+				info:  sessionpkg.Info{SessionName: name, SessionNameMetadata: name},
+				tp:    TemplateParams{TemplateName: "worker"},
+				lease: lease,
+			},
+			cfg: runtime.Config{Command: "claude", WorkDir: t.TempDir()},
+		}
+	}
+	lease, release, err := tryRuntimeLease(nil, cityPath, name, "", 0)
+	if err != nil {
+		t.Fatalf("taking the candidate's flock: %v", err)
+	}
+	sp := runtime.NewFake()
+	began := time.Now()
+	if _, err := startPreparedStartCandidate(context.Background(), item(lease), cityPath, nil, sp, &config.City{}, nil, nil, nil); err != nil {
+		t.Fatalf("start under the candidate's lease = %v, want started", err)
+	}
+	if sp.CountCalls("Start", name) != 1 || time.Since(began) > 2*time.Second {
+		t.Fatalf("provider Starts = %d after %v, want one at once", sp.CountCalls("Start", name), time.Since(began))
+	}
+	if err := sp.Stop(name); err != nil {
+		t.Fatal(err)
+	}
+	began = time.Now()
+	_, err = startPreparedStartCandidate(context.Background(), item(nil), cityPath, nil, sp, &config.City{}, nil, nil, nil)
+	if !errors.Is(err, sessionpkg.ErrRuntimeLeaseBusy) || errors.Is(err, sessionpkg.ErrSessionStarting) || time.Since(began) > 2*time.Second {
+		t.Fatalf("start without the lease under another holder's flock = %v after %v, want ErrRuntimeLeaseBusy at once", err, time.Since(began))
+	}
+	if sp.CountCalls("Start", name) != 1 {
+		t.Fatal("the refused start reached the provider")
+	}
+	release()
+}
+
+// TestStartLeaseNameIsTheStartsName: a start's lease names the runtime the
+// start starts: the candidate's own name, or, with none, the row's resolved
+// one.
+func TestStartLeaseNameIsTheStartsName(t *testing.T) {
+	for _, c := range []struct {
+		meta, resolved, want string
+	}{
+		{"worker-1", "worker-1", "worker-1"},
+		{"worker-1", "s-gc-1", "worker-1"},
+		{"", "s-gc-1", "s-gc-1"},
+		{"", "", ""},
+	} {
+		cand := startCandidate{info: sessionpkg.Info{SessionNameMetadata: c.meta, SessionName: c.resolved}}
+		if got := startLeaseName(cand); got != c.want {
+			t.Errorf("startLeaseName(meta %q, resolved %q) = %q, want %q", c.meta, c.resolved, got, c.want)
+		}
 	}
 }

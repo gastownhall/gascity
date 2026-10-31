@@ -1,146 +1,266 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "gc session list --json result",
-  "description": "One JSONL record listing durable Gas City sessions and summary counts.",
+  "description": "One JSON document listing durable Gas City sessions, in one of two renderings (local or API); exactly one variant matches.",
   "type": "object",
-  "additionalProperties": false,
   "required": [
     "schema_version",
-    "ok",
-    "filters",
-    "sessions",
-    "summary"
+    "ok"
   ],
   "properties": {
     "schema_version": {
-      "type": "string",
+      "const": "1",
       "description": "Schema version for this command output."
     },
     "ok": {
       "const": true
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/local"
     },
-    "filters": {
+    {
+      "$ref": "#/$defs/api"
+    }
+  ],
+  "$defs": {
+    "local": {
       "type": "object",
       "additionalProperties": false,
+      "description": "Local rendering: the city's own session records, read from its store.",
+      "required": [
+        "schema_version",
+        "ok",
+        "filters",
+        "sessions",
+        "summary"
+      ],
       "properties": {
-        "state": {
-          "type": "string",
-          "description": "State filter requested by the caller, when present."
+        "schema_version": {
+          "const": "1",
+          "description": "Schema version for this command output."
         },
-        "template": {
-          "type": "string",
-          "description": "Template filter requested by the caller, when present."
-        }
-      }
-    },
-    "sessions": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "id",
-          "template",
-          "state",
-          "created_at",
-          "last_active",
-          "attached",
-          "closed"
-        ],
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          },
-          "template": {
-            "type": "string"
-          },
-          "provider": {
-            "type": "string"
-          },
-          "state": {
-            "type": "string"
-          },
-          "title": {
-            "type": "string"
-          },
-          "rig": {
-            "type": "string"
-          },
-          "alias": {
-            "type": "string"
-          },
-          "agent_name": {
-            "type": "string"
-          },
-          "transport": {
-            "type": "string"
-          },
-          "command": {
-            "type": "string"
-          },
-          "work_dir": {
-            "type": "string"
-          },
-          "session_name": {
-            "type": "string"
-          },
-          "session_key": {
-            "type": "string"
-          },
-          "resume_flag": {
-            "type": "string"
-          },
-          "resume_style": {
-            "type": "string"
-          },
-          "resume_command": {
-            "type": "string"
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "last_active": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "last_nudge_delivered_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "attached": {
-            "type": "boolean"
-          },
-          "closed": {
-            "type": "boolean"
+        "ok": {
+          "const": true
+        },
+        "filters": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "type": "string",
+              "description": "State filter requested by the caller, when present."
+            },
+            "template": {
+              "type": "string",
+              "description": "Template filter requested by the caller, when present."
+            }
+          }
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "template",
+              "state",
+              "created_at",
+              "last_active",
+              "attached",
+              "closed"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "template": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "rig": {
+                "type": "string"
+              },
+              "alias": {
+                "type": "string"
+              },
+              "agent_name": {
+                "type": "string"
+              },
+              "transport": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "work_dir": {
+                "type": "string"
+              },
+              "worker_dir": {
+                "type": "string"
+              },
+              "session_name": {
+                "type": "string"
+              },
+              "session_key": {
+                "type": "string"
+              },
+              "resume_flag": {
+                "type": "string"
+              },
+              "resume_style": {
+                "type": "string"
+              },
+              "resume_command": {
+                "type": "string"
+              },
+              "created_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "last_active": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "last_nudge_delivered_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "attached": {
+                "type": "boolean"
+              },
+              "closed": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "total",
+            "active",
+            "suspended",
+            "closed"
+          ],
+          "properties": {
+            "total": {
+              "type": "integer"
+            },
+            "active": {
+              "type": "integer"
+            },
+            "suspended": {
+              "type": "integer"
+            },
+            "closed": {
+              "type": "integer"
+            }
           }
         }
       }
     },
-    "summary": {
+    "api": {
       "type": "object",
       "additionalProperties": false,
+      "description": "API rendering: the sessions a controller or supervisor API reports, served for a remote target and for a city whose API answers the read.",
       "required": [
-        "total",
-        "active",
-        "suspended",
-        "closed"
+        "schema_version",
+        "ok",
+        "_cache_age_s",
+        "sessions"
       ],
       "properties": {
-        "total": {
-          "type": "integer"
+        "schema_version": {
+          "const": "1",
+          "description": "Schema version for this command output."
         },
-        "active": {
-          "type": "integer"
+        "ok": {
+          "const": true
         },
-        "suspended": {
-          "type": "integer"
+        "_cache_age_s": {
+          "type": "number",
+          "description": "Age in seconds of the API response the sessions were read from."
         },
-        "closed": {
-          "type": "integer"
+        "sessions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "template",
+              "state",
+              "reason",
+              "title",
+              "alias",
+              "session_name",
+              "work_dir",
+              "created_at",
+              "last_active",
+              "attached",
+              "running",
+              "last_output"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "template": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "alias": {
+                "type": "string"
+              },
+              "session_name": {
+                "type": "string"
+              },
+              "work_dir": {
+                "type": "string"
+              },
+              "created_at": {
+                "type": "string",
+                "description": "RFC 3339 timestamp as the API reports it; may be empty."
+              },
+              "last_active": {
+                "type": "string",
+                "description": "RFC 3339 timestamp as the API reports it; empty when the session has not been active."
+              },
+              "attached": {
+                "type": "boolean"
+              },
+              "running": {
+                "type": "boolean",
+                "description": "Whether the session's process is running now, as the API reports it."
+              },
+              "last_output": {
+                "type": "string"
+              }
+            }
+          }
         }
       }
     }

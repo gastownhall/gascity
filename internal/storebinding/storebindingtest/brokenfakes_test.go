@@ -159,12 +159,25 @@ func TestNudgesSuiteRejectsBrokenQueues(t *testing.T) {
 		{
 			name:   "a claim that ignores the session fence",
 			defect: NudgesDefectClaimIgnoresFence,
-			want:   []string{"ClaimDueHonorsTheSessionFence"},
+			want:   []string{"ClaimDueAdoptsANudgeFencedToASupersededSession", "ClaimDueHonorsTheSessionFence"},
 		},
 		{
 			name:   "a failure report that includes the retried items",
 			defect: NudgesDefectRecordFailureReportsEveryItem,
-			want:   []string{"RecordFailureReportsOnlyDeadLetters"},
+			want:   []string{"RecordFailureRejectionUnpins", "RecordFailureReportsOnlyDeadLetters"},
+		},
+		{
+			name:   "a batch claim that resumes a pinned batch in part",
+			defect: NudgesDefectClaimBatchSplits,
+			want: []string{
+				"ClaimBatchAdoptsASupersededSessionsBatch",
+				"ClaimBatchHonorsTheMemberFence",
+				"ClaimBatchNeverClaimsAStrictSubset",
+				"ClaimBatchResumesAPinnedBatchWhole",
+				"ClaimBatchWaitsOnASplitBatch",
+				"RecordFailureRejectionUnpins",
+				"ReleaseClaimsHonorsNotBefore",
+			},
 		},
 	}
 
@@ -176,6 +189,51 @@ func TestNudgesSuiteRejectsBrokenQueues(t *testing.T) {
 					return NewBrokenNudgeFrontDoors(ReferenceNudgeFrontDoors(tb), testCase.defect)
 				},
 				Capability: ReferenceCapability,
+			})
+			assertRejected(t, recorder, testCase.want)
+		})
+	}
+}
+
+// TestNudgesSuitePolicyCasesCutBothWays proves the declared legacy policy is
+// load-bearing in both directions. A queue that keeps a legacy behavior passes
+// when it declares it and fails exactly the matching case when it does not; a
+// queue that keeps the contract fails exactly that case when it claims the
+// legacy behavior.
+func TestNudgesSuitePolicyCasesCutBothWays(t *testing.T) {
+	const (
+		agesOut     = "MaintainAgesDeadLettersOut"
+		staysRetire = "MaintainNeverResurrectsRetiredRecords"
+	)
+	verbsMaintain := NudgeQueuePolicy{VerbsMaintain: true}
+	forgets := NudgeQueuePolicy{ForgetsRetiredIDs: true}
+	legacy := NudgeQueuePolicy{VerbsMaintain: true, ForgetsRetiredIDs: true}
+	cases := []struct {
+		name     string
+		keeps    NudgeQueuePolicy
+		declares NudgeQueuePolicy
+		want     []string
+	}{
+		{name: "a legacy queue that declares its behaviors", keeps: legacy, declares: legacy},
+		// Undeclared, verb maintenance also expires items inside Enqueue,
+		// before the expired-item case can claim them, and re-dues a lapsed
+		// lease at the wall clock inside ReleaseClaims, after the case's now.
+		{name: "a queue whose verbs maintain, undeclared", keeps: verbsMaintain, want: []string{agesOut, "ReleaseClaimsLeavesALapsedLeaseAlone", "TouchingAnExpiredItemDeadLettersIt"}},
+		{name: "a queue that forgets retired ids, undeclared", keeps: forgets, want: []string{staysRetire}},
+		{name: "a contract queue that claims its verbs maintain", declares: verbsMaintain, want: []string{agesOut}},
+		{name: "a contract queue that claims to forget retired ids", declares: forgets, want: []string{staysRetire}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			recorder := NewRecorder(t.TempDir())
+			RunNudgeFrontDoorTests(recorder, NudgesSuite{
+				NewFrontDoors: func(tb TB) storebinding.NudgeFrontDoors {
+					fronts := ReferenceNudgeFrontDoors(tb)
+					fronts.Queue = NewMemoryNudgeQueueWithPolicy(testCase.keeps)
+					return fronts
+				},
+				Capability: ReferenceCapability,
+				Policy:     testCase.declares,
 			})
 			assertRejected(t, recorder, testCase.want)
 		})

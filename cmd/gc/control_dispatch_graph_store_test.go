@@ -182,19 +182,6 @@ func TestControlDispatchSingleStoreUsesTheOneStore(t *testing.T) {
 	}
 }
 
-// resetControlReadyCache clears the per-dir readiness snapshot registry so a
-// test observes a fresh scan rather than one memoized inside controlReadyCacheTTL.
-func resetControlReadyCache(t *testing.T) {
-	t.Helper()
-	flush := func() {
-		controlReadyCacheRegistry.mu.Lock()
-		defer controlReadyCacheRegistry.mu.Unlock()
-		controlReadyCacheRegistry.byDir = make(map[string]*controlReadyCacheEntry)
-	}
-	flush()
-	t.Cleanup(flush)
-}
-
 // newRoutedControlBead writes a control bead routed to the control dispatcher,
 // so the readiness scan's route filter admits it.
 func newRoutedControlBead(t *testing.T, store beads.Store, rootID, route string) beads.Bead {
@@ -212,8 +199,7 @@ func newRoutedControlBead(t *testing.T, store beads.Store, rootID, route string)
 // comes from, for a control dispatcher whose scope directory is dir.
 func controlReadyScan(t *testing.T, dir string, agentCfg config.Agent, beadsCfg config.BeadsConfig) []string {
 	t.Helper()
-	resetControlReadyCache(t)
-	queue, handled, err := tryControlReadyFromCacheOrFallback(
+	queue, handled, err := tryControlReadyScan(
 		workflowServeControlReadyQueryForBeads(agentCfg, beadsCfg), dir, nil)
 	if err != nil {
 		t.Fatalf("control-ready scan: %v", err)
@@ -232,7 +218,7 @@ func controlReadyScan(t *testing.T, dir string, agentCfg config.Agent, beadsCfg 
 // side of the control dispatcher against the same ledger the consumer mutates.
 //
 // The dispatch hop is only half a fix. The serve loop's queue comes from
-// nextWorkflowServeBeads -> tryControlReadyFromCacheOrFallback, and if that scan
+// nextWorkflowServeBeads -> tryControlReadyScan, and if that scan
 // keeps reading the work store while the dispatch closes the binding's copy, the
 // retained work copy stays open and ready forever: it is re-offered on every
 // tick, ProcessControl no-ops on the already-closed binding copy, and
@@ -241,11 +227,9 @@ func controlReadyScan(t *testing.T, dir string, agentCfg config.Agent, beadsCfg 
 // the binding, which a work-store scan never reads, so the workflow cannot
 // advance past its first hop.
 //
-// Both arms of the scan are covered, because they reach the store by different
-// routes: the cached arm wraps a CachingStore around the resolved class store,
-// and the fallback arm (taken under bd-1.0.5 compatibility, which needs a tier
-// CachedReady cannot serve) would otherwise shell `bd ready` in a directory that
-// no longer holds the class.
+// Both bd compatibility modes are covered: the scan must read the resolved
+// class store in-process under either, rather than shell `bd ready` in a
+// directory that no longer holds the class.
 func TestControlReadyScanEnumeratesTheGraphBindingOnSplitCity(t *testing.T) {
 	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName}
 	route := agentCfg.QualifiedName()
@@ -254,8 +238,8 @@ func TestControlReadyScanEnumeratesTheGraphBindingOnSplitCity(t *testing.T) {
 		name  string
 		beads config.BeadsConfig
 	}{
-		{name: "cached arm", beads: config.BeadsConfig{}},
-		{name: "fallback arm", beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}},
+		{name: "bd-1.0.4 compatibility", beads: config.BeadsConfig{}},
+		{name: "bd-1.0.5 compatibility", beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cityPath := t.TempDir()
@@ -349,28 +333,26 @@ func TestControlReadyScanStopsOfferingAControlBeadTheDispatchClosed(t *testing.T
 	}
 }
 
-// TestControlDispatchRigScopeStaysOnItsOwnStore guards the scope half of the
-// class hop.
+// TestControlDispatchRigScopeTakesTheBindingAndDispatchesRelicsInPlace guards
+// the scope half of the class hop under the S4 placement rule.
 //
-// There is no per-scope graph binding: resolveClassStore holds one city-level
-// store per class, and `gc storage migrate` copies only the CITY work store, so
-// a rig's control beads were never carried into the binding. Redirecting a rig
-// scope there would look up every rig-scoped control bead in a database that has
-// never held it — "bead not found", which IsTransientControllerError does not
-// match, so drainWorkflowServeWork returns it as fatal and the dispatcher
-// session exits and crash-loops.
-func TestControlDispatchRigScopeStaysOnItsOwnStore(t *testing.T) {
+// A split city creates every graph root in the binding at every scope, so a
+// rig dispatcher's primary graph ledger is the binding. A rig-resident control
+// bead — a tree the rig minted before S4 — is still found, through the relic
+// leg, and dispatched where it lives: "bead not found" there would be fatal to
+// the drain loop (IsTransientControllerError does not match it).
+func TestControlDispatchRigScopeTakesTheBindingAndDispatchesRelicsInPlace(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rigs", "fixture")
 	rigStore := beads.NewMemStore()
-	graphStore := beads.NewMemStore()
+	graphStore := beads.NewMemStoreFrom(100, nil, nil)
 	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(graphStore))
 
-	if got := controlGraphStore(cityPath, rigPath, nil, rigStore); got != beads.Store(rigStore) {
-		t.Fatalf("controlGraphStore for a rig scope returned %T(%p), want the rig's own store %p; the city binding never held this rig's beads", got, got, rigStore)
+	if got := controlGraphStore(cityPath, rigPath, nil, rigStore); !sameStorePtr(got, graphStore) {
+		t.Fatalf("controlGraphStore for a split rig scope returned %T(%p), want the city binding; new rig trees are born there", got, got)
 	}
-	if controlGraphRelocated(cityPath, rigPath) {
-		t.Fatal("controlGraphRelocated for a rig scope = true; the readiness scan would go in-process against a binding with none of this rig's beads")
+	if !controlGraphRelocated(cityPath, rigPath) {
+		t.Fatal("controlGraphRelocated for a split rig scope = false; the readiness scan would read only the rig store and miss every tree born since S4")
 	}
 
 	// End to end: a rig-scoped control bead dispatches against the rig store,

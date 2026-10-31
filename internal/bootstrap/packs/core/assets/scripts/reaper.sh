@@ -52,6 +52,55 @@ resolve_escalate_script() {
 
 ESCALATE_SCRIPT="$(resolve_escalate_script)"
 
+# escalate_refused_incident_flags RC STDERR is true when an escalate.sh override
+# refused the incident flags as a usage error, as one written before them (the
+# 1.5.0 contract) does: with exit 2, the usage-error status (the 1.5.0
+# escalate.sh, argparse, Go's flag package), or with a message that names the
+# flag (getopt-style parsers exit 1). The core escalate.sh next to this script
+# takes the flags, so no failure of it is read as a refusal.
+escalate_refused_incident_flags() {
+    [ "$1" -ne 0 ] || return 1
+    if [ "$ESCALATE_SCRIPT" -ef "$SCRIPT_DIR/escalate.sh" ]; then
+        return 1
+    fi
+    [ "$1" -ne 2 ] || return 0
+    case "$2" in
+        *incident-key*|*--fingerprint*|*resolve-incident*) return 0 ;;
+    esac
+    return 1
+}
+
+# raise_incident KEY FINGERPRINT SUBJECT MESSAGE escalates MESSAGE as incident
+# KEY, which escalate.sh keeps quiet while FINGERPRINT is unchanged. An override
+# that refuses the incident flags is sent the alert again without them, so it
+# keeps alerting, undeduplicated, rather than losing the alert.
+raise_incident() {
+    local rc=0 err
+    # stdout passes through; stderr is held to tell a refusal from a failure.
+    { err=$("$ESCALATE_SCRIPT" --subject "$3" --message "$4" \
+        --incident-key "$1" --fingerprint "$2" 2>&1 >&3 3>&-); } 3>&1 || rc=$?
+    if ! escalate_refused_incident_flags "$rc" "$err"; then
+        [ -z "$err" ] || printf '%s\n' "$err" >&2
+        return "$rc"
+    fi
+    echo "reaper: $ESCALATE_SCRIPT predates incident keys (exit $rc on --incident-key); sent the alert without them, so it is not deduplicated" >&2
+    "$ESCALATE_SCRIPT" --subject "$3" --message "$4"
+}
+
+# resolve_incident KEY tells escalate.sh that incident KEY cleared, so its next
+# occurrence alerts at once. An override that refuses the flag keeps no
+# incidents, so there is nothing to clear.
+resolve_incident() {
+    local rc=0 err
+    err=$("$ESCALATE_SCRIPT" --resolve-incident "$1" 2>&1 >/dev/null) || rc=$?
+    if escalate_refused_incident_flags "$rc" "$err"; then
+        echo "reaper: $ESCALATE_SCRIPT predates incident keys (exit $rc on --resolve-incident); its alerts are not deduplicated" >&2
+        return 0
+    fi
+    [ -z "$err" ] || printf '%s\n' "$err" >&2
+    return "$rc"
+}
+
 maintenance_done() {
     local summary="$1"
     local target="${GC_MAINTENANCE_DONE_TARGET:-}"
@@ -79,12 +128,41 @@ WORKFLOW_ROOT_CLOSE_STATUSES="'open', 'hooked', 'in_progress'"
 WORKFLOW_ROOT_LIVE_STATUSES="'open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing'"
 WORKFLOW_ROOT_DESCENDANT_DEP_TYPES="'parent-child', 'tracks', 'blocks'"
 WORKFLOW_ROOT_CLOSE_REASON="stale inactive workflow root auto-closed by reaper"
+# Candidate workflow roots one Step 2 census query checks for descendants.
+# Keep it small: a batch as large as the candidate set walks every candidate's
+# subtree in one query again.
+WORKFLOW_ROOT_BATCH_SIZE="${GC_REAPER_WORKFLOW_ROOT_BATCH_SIZE:-1}"
+if ! [[ "$WORKFLOW_ROOT_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+    WORKFLOW_ROOT_BATCH_SIZE=1
+fi
+# Wall-clock window (seconds) for the Step 2 census, so a large census cannot
+# starve the later steps and scopes. It opens at the run's first census and
+# runs on through everything after it: the purge, the later steps and the
+# later scopes spend it too. Once it has closed, each census checks one page.
+WORKFLOW_ROOT_BUDGET_SECS="${GC_REAPER_WORKFLOW_ROOT_BUDGET_SECS:-300}"
+case "$WORKFLOW_ROOT_BUDGET_SECS" in ''|*[!0-9]*) WORKFLOW_ROOT_BUDGET_SECS=300 ;; esac
+WORKFLOW_ROOT_DEADLINE=""
+# Each census starts at a random candidate and wraps around (see
+# reap_workflow_roots). GC_REAPER_WORKFLOW_ROOT_CENSUS_START pins the start to
+# that 0-based position in id order, modulo the candidate count, for tests.
+WORKFLOW_ROOT_CENSUS_START="${GC_REAPER_WORKFLOW_ROOT_CENSUS_START:-}"
+if ! [[ "$WORKFLOW_ROOT_CENSUS_START" =~ ^(0|[1-9][0-9]{0,8})$ ]]; then
+    WORKFLOW_ROOT_CENSUS_START=""
+fi
 STALE_WISP_CLOSE_REASON="stale wisp whose owning parent or root is closed, auto-closed by reaper"
 # Step 3 purges the whole wisps plane (including --no-history rows, which is
 # where gc keeps order-tracking beads) and relies on gc bd purge to keep a closed
 # wisp that an open, hooked or in-progress wisp still depends on through
 # parent-child, tracks or blocks.
 PURGE_PLANE_FLAG="${GC_REAPER_PURGE_PLANE_FLAG:---wisps-plane}"
+# Op-journal rows (issue_type op) are no-history rows whose ids are
+# idempotency keys. The purge's wisps plane and the session prune both select
+# closed no-history rows, and bd deletes them with no tombstone unless it
+# honors types.retained and the scope's database names op there. So on a
+# scope that holds op rows both are held back until then (op_rows_guard). The
+# doctor's ops-recording check applies the same rule (cmd/gc/reaper_op_rows.go).
+OP_ROW_TYPE="op"
+RETAINED_TYPES_KEY="types.retained"
 # Closed wisps deleted per bd purge call, and the wall-clock budget (seconds,
 # shared by every scope) the purge step may spend per run. Both keep a large
 # backlog from outrunning the order timeout.
@@ -128,7 +206,11 @@ TOTAL_MAIL_WISPS=0
 TOTAL_WORKFLOW_ROOTS_CLOSED=0
 TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS=0
 TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=0
+# Candidate workflow issue roots in non-city scopes, which Step 2 counts but
+# does not close.
 TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED=0
+TOTAL_WORKFLOW_ROOT_CANDIDATES=0
+TOTAL_WORKFLOW_ROOTS_CHECKED=0
 TOTAL_ISSUES_CLOSED=0
 TOTAL_STALE_ISSUES_SKIPPED=0
 TOTAL_EXPIRED_ISSUES_CLOSED=0
@@ -251,6 +333,69 @@ get_sql_rows() {
     SQL_ROWS_RESULT=$(printf '%s\n' "$output" | tail -n +2 | tr -d '\r' | sed '/^[[:space:]]*$/d')
 }
 
+# retained_types_name_op reads `gc bd config get --json` output on stdin and
+# reports whether its types.retained value names the op row type. It parses the
+# value as bd's sweep does (ParseTypeList): a JSON array of type names, else a
+# comma list, each name trimmed. So a mis-spelled list such as [op] or "op"
+# names no op here, as for bd. The doctor reads the setting the same way
+# (cmd/gc/reaper_op_rows.go).
+retained_types_name_op() {
+    jq -e --arg type "$OP_ROW_TYPE" '
+        def trimmed: sub("^\\s+"; "") | sub("\\s+$"; "");
+        (.value // "" | trimmed) as $value
+        | (if $value | startswith("[") then $value | try fromjson catch null else null end) as $list
+        | if ($list | type) == "array" and all($list[]; type == "string" or type == "null")
+          then $list | map(values)
+          else $value | split(",")
+          end
+        | any(.[]; trimmed == $type)
+    ' >/dev/null 2>&1
+}
+
+# op_rows_guard VERB reports whether VERB (purge or prune) may delete closed
+# rows on the current scope. It may when the scope holds no op row, or when
+# the scope's bd honors types.retained (VERB's help names the setting) and the
+# database's types.retained names op, so bd itself keeps the op rows. Anything
+# else holds VERB back, a census that cannot be read included, and
+# OP_ROWS_GUARD_REASON says why.
+OP_ROWS_GUARD_REASON=""
+op_rows_guard() {
+    local verb="$1"
+    local help
+    local setting
+
+    OP_ROWS_GUARD_REASON=""
+    if ! get_sql_count "op row" "
+        SELECT COUNT(*) FROM (
+            SELECT id FROM (SELECT id FROM \`$SCOPE_DB\`.wisps WHERE issue_type = '$OP_ROW_TYPE' LIMIT 1) AS op_wisp
+            UNION ALL
+            SELECT id FROM (SELECT id FROM \`$SCOPE_DB\`.issues WHERE issue_type = '$OP_ROW_TYPE' LIMIT 1) AS op_issue
+        ) AS op_row_census
+    "; then
+        OP_ROWS_GUARD_REASON="op rows could not be counted"
+        return 1
+    fi
+    [ "$SQL_COUNT_RESULT" -gt 0 ] || return 0
+    if ! help=$(scope_bd "$verb" --help 2>/dev/null) || [[ "$help" != *"$RETAINED_TYPES_KEY"* ]]; then
+        OP_ROWS_GUARD_REASON="holds op rows and its bd does not honor $RETAINED_TYPES_KEY"
+        return 1
+    fi
+    if ! setting=$(scope_bd config get --json "$RETAINED_TYPES_KEY" 2>/dev/null) ||
+        ! printf '%s' "$setting" | retained_types_name_op; then
+        OP_ROWS_GUARD_REASON="holds op rows and $RETAINED_TYPES_KEY does not name $OP_ROW_TYPE"
+        return 1
+    fi
+    return 0
+}
+
+# op_rows_hold_back STEP records that STEP did not run on the current scope
+# because op_rows_guard held it back.
+op_rows_hold_back() {
+    local reason="$1 skipped: $OP_ROWS_GUARD_REASON"
+    echo "reaper: $SCOPE_LABEL: $reason"
+    order_outcome_scope_skipped "$SCOPE_LABEL" "$reason"
+}
+
 count_lines() {
     if [ -z "$1" ]; then
         printf '0\n'
@@ -317,7 +462,10 @@ close_ids_by_mode() {
     CLOSE_IDS_FAILED="${failed}${failed:+ }${SCOPE_CHUNK_FAILED_IDS}"
 }
 
-workflow_root_candidates_cte() {
+# workflow_root_candidate_ctes prints the non-recursive CTEs that select the
+# candidate workflow roots: ${candidate_cte}_base (old, unassigned, open
+# topology roots) and $candidate_cte (those whose store ref is local).
+workflow_root_candidate_ctes() {
     local db="$1"
     local candidate_cte="$2"
     local table="$3"
@@ -325,13 +473,13 @@ workflow_root_candidates_cte() {
     local issue_type_exclusions="$5"
 
     cat <<SQL
-        WITH RECURSIVE ${candidate_cte}_base(id) AS (
+${candidate_cte}_base(id) AS (
             SELECT $alias.id FROM \`$db\`.$table $alias
             WHERE $alias.status IN ($WORKFLOW_ROOT_CLOSE_STATUSES)
             AND $alias.issue_type NOT IN ($issue_type_exclusions)
             AND COALESCE($alias.assignee, '') = ''
-            AND $alias.created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
-            AND COALESCE($alias.updated_at, $alias.created_at) < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
+            AND $alias.created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $MAX_AGE_H HOUR)
+            AND COALESCE($alias.updated_at, $alias.created_at) < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $MAX_AGE_H HOUR)
             AND (
                 JSON_UNQUOTE(JSON_EXTRACT($alias.metadata, '$."gc.kind"')) = 'workflow'
                 OR JSON_UNQUOTE(JSON_EXTRACT($alias.metadata, '$."gc.formula_contract"')) = 'graph.v2'
@@ -345,29 +493,60 @@ workflow_root_candidates_cte() {
             WHERE (
 $(workflow_root_store_ref_local_condition "$db" "$alias")
             )
+        )
+SQL
+}
+
+# workflow_root_candidates_cte prints the WITH RECURSIVE clause for one census
+# page: page_limit candidate roots after after_id in id order ('' for the first
+# page, which every id sorts after) and, when until_id is set, up to and
+# including until_id, and the live and recent descendants of those roots only.
+workflow_root_candidates_cte() {
+    local db="$1"
+    local candidate_cte="$2"
+    local table="$3"
+    local alias="$4"
+    local issue_type_exclusions="$5"
+    local page_limit="$6"
+    local after_id="$7"
+    local until_id="${8:-}"
+    local until_condition=""
+
+    if [ -n "$until_id" ]; then
+        until_condition="
+            AND id <= '$until_id'"
+    fi
+    cat <<SQL
+        WITH RECURSIVE $(workflow_root_candidate_ctes "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions"),
+        ${candidate_cte}_page(id) AS (
+            SELECT id
+            FROM $candidate_cte
+            WHERE id > '$after_id'$until_condition
+            ORDER BY id
+            LIMIT $page_limit
         ),
         workflow_descendants(root_id, id) AS (
             SELECT root.id, child_wisp.id
-            FROM $candidate_cte root
+            FROM ${candidate_cte}_page root
             INNER JOIN \`$db\`.wisps child_wisp
                 ON child_wisp.id != root.id
                 AND JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$."gc.root_bead_id"')) = root.id
             UNION
             SELECT root.id, child_issue.id
-            FROM $candidate_cte root
+            FROM ${candidate_cte}_page root
             INNER JOIN \`$db\`.issues child_issue
                 ON child_issue.id != root.id
                 AND JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$."gc.root_bead_id"')) = root.id
             UNION
             SELECT root.id, child_dep.issue_id
-            FROM $candidate_cte root
+            FROM ${candidate_cte}_page root
             INNER JOIN \`$db\`.wisp_dependencies child_dep
                 ON child_dep.type IN ($WORKFLOW_ROOT_DESCENDANT_DEP_TYPES)
                 AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
                 AND child_dep.issue_id != root.id
             UNION
             SELECT root.id, child_dep.issue_id
-            FROM $candidate_cte root
+            FROM ${candidate_cte}_page root
             INNER JOIN \`$db\`.dependencies child_dep
                 ON child_dep.type IN ($WORKFLOW_ROOT_DESCENDANT_DEP_TYPES)
                 AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
@@ -404,7 +583,7 @@ $(workflow_root_store_ref_local_condition "$db" "$alias")
                 descendant_wisp.created_at,
                 descendant_issue.updated_at,
                 descendant_issue.created_at
-            ) >= DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
+            ) >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL $MAX_AGE_H HOUR)
         )
 SQL
 }
@@ -417,52 +596,208 @@ workflow_root_store_ref_skipped_count_query() {
     local issue_type_exclusions="$5"
 
     cat <<SQL
-$(workflow_root_candidates_cte "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
+        WITH $(workflow_root_candidate_ctes "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
         SELECT COUNT(*) FROM ${candidate_cte}_base base
         LEFT JOIN $candidate_cte candidate ON candidate.id = base.id
         WHERE candidate.id IS NULL
 SQL
 }
 
-workflow_root_closeable_select() {
-    local candidate_cte="$1"
+workflow_root_candidate_count_query() {
+    local db="$1"
+    local candidate_cte="$2"
+    local table="$3"
+    local alias="$4"
+    local issue_type_exclusions="$5"
 
     cat <<SQL
-        SELECT DISTINCT root.id
-        FROM $candidate_cte root
+        WITH $(workflow_root_candidate_ctes "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
+        SELECT COUNT(*) FROM $candidate_cte
+SQL
+}
+
+# workflow_root_candidate_at_query <db> <candidate_cte> <table> <alias>
+# <issue_type_exclusions> <position> selects the id of the candidate root at
+# 0-based position in id order.
+workflow_root_candidate_at_query() {
+    local db="$1"
+    local candidate_cte="$2"
+    local table="$3"
+    local alias="$4"
+    local issue_type_exclusions="$5"
+    local position="$6"
+
+    cat <<SQL
+        WITH $(workflow_root_candidate_ctes "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
+        SELECT id FROM $candidate_cte
+        ORDER BY id
+        LIMIT 1 OFFSET $position
+SQL
+}
+
+# workflow_root_page_query <db> <candidate_cte> <table> <alias>
+# <issue_type_exclusions> <page_limit> <after_id> [until_id] selects one census
+# page: each candidate root after after_id (and up to until_id), in id order,
+# with "close" when no descendant is live or recent and "keep" otherwise.
+workflow_root_page_query() {
+    local candidate_cte="$2"
+
+    cat <<SQL
+SELECT id, verdict FROM (
+$(workflow_root_candidates_cte "$@")
+        SELECT root.id AS id,
+            CASE WHEN live.root_id IS NULL AND recent.root_id IS NULL THEN 'close' ELSE 'keep' END AS verdict
+        FROM ${candidate_cte}_page root
         LEFT JOIN roots_with_live_descendants live ON live.root_id = root.id
         LEFT JOIN roots_with_recent_descendants recent ON recent.root_id = root.id
-        WHERE live.root_id IS NULL
-        AND recent.root_id IS NULL
+) workflow_root_page
+ORDER BY id
 SQL
 }
 
-workflow_root_count_query() {
-    local db="$1"
+# close_workflow_roots <wisp|issue> <ids> closes one census page's stale
+# workflow roots. Wisp roots are stamped with the skipped outcome first: a
+# crash between the two verbs leaves an open root that a later census selects
+# again.
+close_workflow_roots() {
+    local kind="$1"
+    local ids="$2"
+    local count
+    local ids_file
+
+    count=$(count_lines "$ids")
+    [ "$count" -gt 0 ] || return 0
+    if [ -n "$DRY_RUN" ]; then
+        TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS=$((TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS + count))
+        return 0
+    fi
+    if [ "$kind" = "wisp" ]; then
+        ids_file=$(mktemp)
+        printf '%s\n' "$ids" >"$ids_file"
+        scope_bd_each_chunk "$VERB_BATCH" "$ids_file" update \
+            --set-metadata "gc.outcome=skipped" \
+            --set-metadata "close_reason=$WORKFLOW_ROOT_CLOSE_REASON"
+        rm -f "$ids_file"
+        if [ "$SCOPE_CHUNK_FAILED" -gt 0 ]; then
+            scope_anomaly "stamping stale workflow wisp roots failed for $SCOPE_CHUNK_FAILED bead(s) in $SCOPE_DB: $(sanitize_output "$SCOPE_CHUNK_ERRORS")"
+        fi
+        [ "$SCOPE_CHUNK_OK" -gt 0 ] || return 0
+    fi
+    close_ids "closing stale inactive workflow $kind roots" "$ids" "$WORKFLOW_ROOT_CLOSE_REASON"
+    TOTAL_WORKFLOW_ROOTS_CLOSED=$((TOTAL_WORKFLOW_ROOTS_CLOSED + CLOSE_IDS_OK))
+}
+
+# reap_workflow_roots <wisp|issue> <candidate_cte> <table> <alias>
+# <issue_type_exclusions> runs the Step 2 census of one kind of workflow root
+# in the current scope. It counts the candidates, then checks them
+# WORKFLOW_ROOT_BATCH_SIZE at a time in id order, so no single query walks the
+# subtrees of every candidate, and closes each page's stale roots before it
+# reads the next: a page's verdicts do not depend on any other page, and a
+# census cut short keeps what it closed. Pages are keyed on the last id read,
+# so closing a page cannot shift the next one. Each census starts at a random
+# candidate, pages to the last one, then wraps around to the first and stops
+# at its start, so censuses that are cut short run after run still reach
+# every candidate: the roots a census keeps cannot pin the next run's census
+# to the same page. A failed count, start lookup or page, or an unreadable row,
+# stops the census with an anomaly; the run budget and the census window stop
+# it with a skipped-scope declaration, and a later run checks what is left.
+WORKFLOW_ROOT_CENSUS_CUT=0
+reap_workflow_roots() {
+    local kind="$1"
     local candidate_cte="$2"
     local table="$3"
     local alias="$4"
     local issue_type_exclusions="$5"
+    local label="workflow $kind root"
+    local candidates
+    local checked=0
+    local pages=0
+    local offset=0
+    local start=""
+    local after=""
+    local until=""
+    local rows
+    local size
 
-    cat <<SQL
-$(workflow_root_candidates_cte "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
-        SELECT COUNT(*) FROM (
-$(workflow_root_closeable_select "$candidate_cte")
-        ) closeable_workflow_roots
-SQL
-}
+    if ! get_sql_count "$label candidate" "$(workflow_root_candidate_count_query "$SCOPE_DB" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")"; then
+        scope_anomaly "$label census incomplete: candidate count failed"
+        return 0
+    fi
+    candidates=$SQL_COUNT_RESULT
+    if [ -z "$WORKFLOW_ROOT_DEADLINE" ]; then
+        WORKFLOW_ROOT_DEADLINE=$(( $(date +%s) + WORKFLOW_ROOT_BUDGET_SECS ))
+    fi
+    if [ "$candidates" -gt 1 ]; then
+        if [ -n "$WORKFLOW_ROOT_CENSUS_START" ]; then
+            offset=$((WORKFLOW_ROOT_CENSUS_START % candidates))
+        else
+            # Random, not derived from the clock: the order runs on a fixed
+            # cooldown, so a clock-derived start could repeat every run.
+            # RANDOM is 15 bits; two draws cover any realistic census.
+            offset=$(( (RANDOM << 15 | RANDOM) % candidates ))
+        fi
+    fi
+    if [ "$offset" -gt 0 ]; then
+        # The census pages on from the candidate just before its start, which
+        # is also where it stops after the wrap. The id becomes a SQL bound.
+        if ! get_sql_rows "$label census start" "$(workflow_root_candidate_at_query "$SCOPE_DB" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions" "$((offset - 1))")"; then
+            scope_anomaly "$label census incomplete: start lookup failed"
+            TOTAL_WORKFLOW_ROOT_CANDIDATES=$((TOTAL_WORKFLOW_ROOT_CANDIDATES + candidates))
+            return 0
+        fi
+        start=$SQL_ROWS_RESULT
+        if ! [[ "$start" =~ ^([A-Za-z0-9._-]+)?$ ]]; then
+            scope_anomaly "$label census stopped at an unreadable start row: $(sanitize_output "$start")"
+            TOTAL_WORKFLOW_ROOT_CANDIDATES=$((TOTAL_WORKFLOW_ROOT_CANDIDATES + candidates))
+            return 0
+        fi
+        after=$start
+    fi
 
-workflow_root_ids_query() {
-    local db="$1"
-    local candidate_cte="$2"
-    local table="$3"
-    local alias="$4"
-    local issue_type_exclusions="$5"
-
-    cat <<SQL
-$(workflow_root_candidates_cte "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
-$(workflow_root_closeable_select "$candidate_cte")
-SQL
+    while [ "$checked" -lt "$candidates" ]; do
+        run_budget_exhausted && break
+        if [ "$pages" -gt 0 ] && [ "$(date +%s)" -ge "$WORKFLOW_ROOT_DEADLINE" ]; then
+            if [ "$WORKFLOW_ROOT_CENSUS_CUT" -eq 0 ]; then
+                WORKFLOW_ROOT_CENSUS_CUT=1
+                order_outcome_scope_skipped "$SCOPE_LABEL" "workflow-root census remains after this run's census budget"
+            fi
+            break
+        fi
+        if ! get_sql_rows "$label page after ${after:-the first root}" "$(workflow_root_page_query "$SCOPE_DB" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions" "$WORKFLOW_ROOT_BATCH_SIZE" "$after" "$until")"; then
+            scope_anomaly "$label census incomplete: page after ${after:-the first root} failed"
+            break
+        fi
+        rows=$SQL_ROWS_RESULT
+        # The last id becomes the next page's SQL cursor, so every row must be
+        # a bead id and a verdict.
+        if printf '%s\n' "$rows" | awk -F, 'NF && (NF != 2 || $1 !~ /^[A-Za-z0-9._-]+$/ || ($2 != "close" && $2 != "keep")) { bad = 1 } END { exit !bad }'; then
+            scope_anomaly "$label census stopped at an unreadable page row after ${after:-the first root}: $(sanitize_output "$rows")"
+            break
+        fi
+        size=$(count_lines "$rows")
+        close_workflow_roots "$kind" "$(printf '%s\n' "$rows" | awk -F, '$2 == "close" { print $1 }')"
+        checked=$((checked + size))
+        pages=$((pages + 1))
+        if [ -n "$start" ] && [ -z "$until" ] &&
+            { [ "$size" -lt "$WORKFLOW_ROOT_BATCH_SIZE" ] || [ "$checked" -ge $((candidates - offset)) ]; }; then
+            # The census reached the last candidate: wrap around to the first.
+            after=""
+            until=$start
+            continue
+        fi
+        if [ "$size" -lt "$WORKFLOW_ROOT_BATCH_SIZE" ]; then
+            # The page ran out of candidates (after the wrap, it reached the
+            # start): the census is complete.
+            candidates=$checked
+            break
+        fi
+        after=$(printf '%s\n' "$rows" | tail -n 1 | cut -d, -f1)
+    done
+    # A root that aged into the candidates after the count is checked and
+    # counted if its page is read; otherwise the next run's count picks it up.
+    [ "$checked" -le "$candidates" ] || candidates=$checked
+    TOTAL_WORKFLOW_ROOT_CANDIDATES=$((TOTAL_WORKFLOW_ROOT_CANDIDATES + candidates))
+    TOTAL_WORKFLOW_ROOTS_CHECKED=$((TOTAL_WORKFLOW_ROOTS_CHECKED + checked))
 }
 
 # stale_wisp_subtree_query selects, for Step 1, every stale open wisp whose
@@ -485,7 +820,7 @@ stale_wisp_subtree_query() {
             LEFT JOIN \`$db\`.wisps parent_wisp ON d.depends_on_wisp_id = parent_wisp.id
             LEFT JOIN \`$db\`.issues parent_issue ON d.depends_on_issue_id = parent_issue.id
             WHERE w.status IN ('open', 'hooked', 'in_progress')
-            AND w.created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
+            AND w.created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $MAX_AGE_H HOUR)
             AND (
                 parent_wisp.status = 'closed'
                 OR parent_issue.status = 'closed'
@@ -515,7 +850,7 @@ stale_wisp_subtree_query() {
         SELECT t.id, t.owner_id, t.depth,
             CASE WHEN w.id IS NOT NULL
                 AND w.status IN ('open', 'hooked', 'in_progress')
-                AND w.created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
+                AND w.created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $MAX_AGE_H HOUR)
             THEN 'ok' ELSE 'keep' END,
             CASE WHEN COALESCE(w.assignee, '') = '' THEN 'bare' ELSE 'force' END
         FROM reap_tree t
@@ -614,7 +949,7 @@ reap_scope() {
         SELECT COUNT(*) FROM \`$DB\`.wisps
         WHERE status IN ('open', 'hooked', 'in_progress')
         AND issue_type NOT IN ('message')
-        AND created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
+        AND created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $MAX_AGE_H HOUR)
     " || true
     stale_wisp_count=$SQL_COUNT_RESULT
     TOTAL_STALE_WISPS=$((TOTAL_STALE_WISPS + stale_wisp_count))
@@ -671,55 +1006,27 @@ reap_scope() {
     # gc.root_store_ref for another store are skipped; cross-store subtrees
     # need cross-store traversal before reaping can be safe. Wisp roots are
     # closed in every scope; issue roots are city issues and close only in the
-    # city scope.
+    # city scope, so other scopes only count them. reap_workflow_roots closes
+    # each census page's stale roots as it goes; the census window leaves time
+    # for the later steps and scopes, and each census starts at a random
+    # candidate, so the censuses it cuts short still reach every root.
+    WORKFLOW_ROOT_CENSUS_CUT=0
     if get_sql_count "workflow wisp roots skipped by root store ref" "$(workflow_root_store_ref_skipped_count_query "$DB" "workflow_wisp_root_candidates" "wisps" "w" "'message'")"; then
         TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=$((TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED + SQL_COUNT_RESULT))
     fi
+    reap_workflow_roots wisp "workflow_wisp_root_candidates" "wisps" "w" "'message'"
 
-    if get_sql_rows "stale inactive workflow wisp root" "$(workflow_root_ids_query "$DB" "workflow_wisp_root_candidates" "wisps" "w" "'message'")"; then
-        ids=$SQL_ROWS_RESULT
-        count=$(count_lines "$ids")
-        if [ "$count" -gt 0 ]; then
-            if [ -n "$DRY_RUN" ]; then
-                TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS=$((TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS + count))
-            else
-                # Stamp the skipped outcome first: a crash between the two
-                # verbs leaves an open root that the next run selects again.
-                local ids_file
-                ids_file=$(mktemp)
-                printf '%s\n' "$ids" >"$ids_file"
-                scope_bd_each_chunk "$VERB_BATCH" "$ids_file" update \
-                    --set-metadata "gc.outcome=skipped" \
-                    --set-metadata "close_reason=$WORKFLOW_ROOT_CLOSE_REASON"
-                rm -f "$ids_file"
-                if [ "$SCOPE_CHUNK_FAILED" -gt 0 ]; then
-                    scope_anomaly "stamping stale workflow wisp roots failed for $SCOPE_CHUNK_FAILED bead(s) in $DB: $(sanitize_output "$SCOPE_CHUNK_ERRORS")"
-                fi
-                if [ "$SCOPE_CHUNK_OK" -gt 0 ]; then
-                    close_ids "closing stale inactive workflow wisp roots" "$ids" "$WORKFLOW_ROOT_CLOSE_REASON"
-                    TOTAL_WORKFLOW_ROOTS_CLOSED=$((TOTAL_WORKFLOW_ROOTS_CLOSED + CLOSE_IDS_OK))
-                fi
-            fi
-        fi
-    fi
+    run_budget_exhausted && return 0
 
     if get_sql_count "workflow issue roots skipped by root store ref" "$(workflow_root_store_ref_skipped_count_query "$DB" "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'")"; then
         TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=$((TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED + SQL_COUNT_RESULT))
     fi
-
-    if get_sql_rows "stale inactive workflow issue root" "$(workflow_root_ids_query "$DB" "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'")"; then
-        ids=$SQL_ROWS_RESULT
-        count=$(count_lines "$ids")
-        if [ "$count" -gt 0 ]; then
-            if [ "$SCOPE_KIND" != "city" ]; then
-                TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED=$((TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED + count))
-            elif [ -n "$DRY_RUN" ]; then
-                TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS=$((TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS + count))
-            else
-                close_ids "closing stale inactive workflow issue roots" "$ids" "$WORKFLOW_ROOT_CLOSE_REASON"
-                TOTAL_WORKFLOW_ROOTS_CLOSED=$((TOTAL_WORKFLOW_ROOTS_CLOSED + CLOSE_IDS_OK))
-            fi
+    if [ "$SCOPE_KIND" != "city" ]; then
+        if get_sql_count "workflow issue root candidate" "$(workflow_root_candidate_count_query "$DB" "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'")"; then
+            TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED=$((TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED + SQL_COUNT_RESULT))
         fi
+    else
+        reap_workflow_roots issue "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'"
     fi
 
     run_budget_exhausted && return 0
@@ -801,7 +1108,7 @@ reap_scope() {
         SELECT id, CASE WHEN COALESCE(assignee, '') = '' THEN 'bare' ELSE 'force' END
         FROM \`$DB\`.issues
         WHERE status IN ('open', 'in_progress')
-        AND updated_at < DATE_SUB(NOW(), INTERVAL $STALE_AGE_H HOUR)
+        AND updated_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $STALE_AGE_H HOUR)
         AND priority > 1
         AND issue_type != 'epic'
         AND (
@@ -854,7 +1161,7 @@ reap_scope() {
         SELECT COUNT(*) FROM \`$DB\`.wisps
         WHERE status IN ('open', 'hooked', 'in_progress')
         AND issue_type NOT IN ('message')
-        AND created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
+        AND created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $MAX_AGE_H HOUR)
     "; then
         if [ "$SQL_COUNT_RESULT" -gt "$ALERT_THRESHOLD" ]; then
             scope_anomaly "$SQL_COUNT_RESULT stale open wisps (threshold: $ALERT_THRESHOLD, age: ${MAX_AGE})"
@@ -883,6 +1190,10 @@ reap_scope_purge() {
     local batches=0
     local purge_args=(purge "$PURGE_PLANE_FLAG" --older-than "$PURGE_AGE" --json)
 
+    if ! op_rows_guard purge; then
+        op_rows_hold_back purge
+        return 0
+    fi
     if [ -n "$DRY_RUN" ]; then
         purge_args+=(--dry-run)
     else
@@ -1018,10 +1329,67 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
     SCOPE_DB="$CITY_DB"
     if [ -n "$SESSION_BEAD_PATTERN" ]; then
         # ── gc bd prune path (pattern-configurable) ──────────────────────────────
+        # The pattern is checked first, then the prune's own candidates are
+        # counted; the backup-age and type-scope gates guard only a prune that
+        # has something to delete.
         SESSION_PRUNE_ANOMALY_SCOPE="session"
         case "$SESSION_BEAD_PATTERN" in
             *-*) SESSION_PRUNE_ANOMALY_SCOPE="${SESSION_BEAD_PATTERN%%-*}" ;;
         esac
+        _PRUNE_SKIP=0
+
+        # Pattern-validity gate: SESSION_BEAD_PATTERN is spliced into the SQL
+        # LIKE literals below (candidate count, type-scope gate) and passed as
+        # bd's own --pattern flag. A value outside this charset (e.g. a single
+        # quote) would corrupt those COUNT queries -- id LIKE 'x' OR '1'='1'
+        # always matches, silently defeating the guard. Fail closed before any
+        # SQL is built.
+        case "$SESSION_BEAD_PATTERN" in
+            ''|*[!A-Za-z0-9_.*?-]*)
+                record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: SESSION_BEAD_PATTERN='$SESSION_BEAD_PATTERN' contains characters outside the allowed pattern charset (letters, digits, . _ - * ?); refusing to build SQL from it (type scope guard)"
+                _PRUNE_SKIP=1
+                ;;
+        esac
+
+        # Glob -> SQL LIKE: simple prefix globs only (e.g. gm-*). A literal %
+        # or _ in a custom pattern would not round-trip. An age not given in
+        # hours (e.g. 30d) counts every closed match: more than bd prunes,
+        # never less.
+        _PRUNE_LIKE=$(printf '%s' "$SESSION_BEAD_PATTERN" | sed 's/\*/%/g; s/?/_/g')
+        _PRUNE_AGE_H=$(printf '%s' "$SESSION_PURGE_AGE" | sed 's/h$//')
+        case "$_PRUNE_AGE_H" in ''|*[!0-9]*) _PRUNE_AGE_H=0 ;; esac
+
+        # Candidate count: `gc bd prune` deletes closed, non-ephemeral beads
+        # that match the pattern and closed before its cutoff, in the issues
+        # table and among the no-history rows of the wisps table. This counts
+        # every closed match in both tables, which covers that set. With none,
+        # the prune would delete nothing, so the gates below have nothing to
+        # protect: skip them and the prune without an anomaly. A count that
+        # cannot be computed is recorded by get_sql_count, and the gates
+        # decide as before.
+        if [ "$_PRUNE_SKIP" -eq 0 ] && get_sql_count "session prune candidate" "
+            SELECT COUNT(*) FROM (
+                SELECT id FROM \`$CITY_DB\`.issues
+                WHERE id LIKE '$_PRUNE_LIKE'
+                AND status = 'closed'
+                AND closed_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $_PRUNE_AGE_H HOUR)
+                UNION ALL
+                SELECT id FROM \`$CITY_DB\`.wisps
+                WHERE id LIKE '$_PRUNE_LIKE'
+                AND status = 'closed'
+                AND closed_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $_PRUNE_AGE_H HOUR)
+            ) AS session_prune_candidates
+        " && [ "$SQL_COUNT_RESULT" -eq 0 ]; then
+            echo "reaper: session prune: nothing to prune (no closed bead matching $SESSION_BEAD_PATTERN is older than $SESSION_PURGE_AGE)"
+            _PRUNE_SKIP=1
+        fi
+
+        # Op-row gate: the prune selects closed no-history rows too, which is
+        # where op rows live (see op_rows_guard).
+        if [ "$_PRUNE_SKIP" -eq 0 ] && ! op_rows_guard prune; then
+            op_rows_hold_back "session prune"
+            _PRUNE_SKIP=1
+        fi
 
         # Backup-age gate: skip bulk prune unless bd reports a backup of the
         # city store newer than the threshold. bd owns the backup (the dolt
@@ -1033,84 +1401,71 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
         # JSONL-era backup state must not open the gate while the Dolt backup
         # is stale or never ran); only a scope with no Dolt destination is
         # judged on bd's legacy backup state.
-        _PRUNE_MAX_AGE="${GC_REAPER_BACKUP_MAX_AGE:-${GC_BACKUP_MAX_AGE_FOR_BULK_DELETE:-86400}}"
-        case "$_PRUNE_MAX_AGE" in ''|*[!0-9]*) _PRUNE_MAX_AGE=86400 ;; esac
-        _PRUNE_SKIP=0
-        _PRUNE_SKIP_REASON=""
-        _PRUNE_BACKUP_UNSUPPORTED=0
-        _BACKUP_TS=""
-        _BACKUP_ERR_FILE=$(mktemp)
-        if _BACKUP_STATUS=$(scope_bd backup status --json 2>"$_BACKUP_ERR_FILE"); then
-            _BACKUP_TS=$(printf '%s' "$_BACKUP_STATUS" | jq -r '
-                (if (.dolt.configured // false) == true
-                 then (.dolt.last_sync // empty)
-                 else (.backup.timestamp // empty) end)
-                | select(type == "string" and . != "" and (startswith("0001-") | not))' 2>/dev/null || true)
-            if [ -z "$_BACKUP_TS" ]; then
-                _PRUNE_SKIP_REASON="source=bd-backup-status age=absent"
-                _PRUNE_SKIP=1
-            fi
-        else
-            _BACKUP_STATUS="$(cat "$_BACKUP_ERR_FILE" 2>/dev/null) $_BACKUP_STATUS"
-            case "$_BACKUP_STATUS" in
-                *'"proxy.backup.unsupported"'* | *"not supported in proxied-server mode"*)
-                    # This bd cannot back up the city scope's transport, so no
-                    # backup evidence can exist yet. The prune waits; the run
-                    # reports it without escalating every cooldown.
-                    _PRUNE_BACKUP_UNSUPPORTED=1
-                    ;;
-            esac
-            _PRUNE_SKIP_REASON="source=bd-backup-status unavailable: $(sanitize_output "$_BACKUP_STATUS")"
-            _PRUNE_SKIP=1
-        fi
-        rm -f "$_BACKUP_ERR_FILE"
         if [ "$_PRUNE_SKIP" -eq 0 ]; then
-            case "$_BACKUP_TS" in
-                [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]*) ;;
-                *)
-                    _PRUNE_SKIP_REASON="source=bd-backup-status age=unparseable ($_BACKUP_TS)"
-                    _PRUNE_SKIP=1
-                    ;;
-            esac
-        fi
-        if [ "$_PRUNE_SKIP" -eq 0 ]; then
-            # bd timestamps are RFC3339 (possibly with fractional seconds).
-            # Truncate to whole seconds, as Step 4's SQL does.
-            case "$_BACKUP_TS" in *.*) _BACKUP_TS="${_BACKUP_TS%%.*}Z" ;; esac
-            _BACKUP_EPOCH=$(date -u -d "$_BACKUP_TS" '+%s' 2>/dev/null \
-                || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$_BACKUP_TS" '+%s' 2>/dev/null \
-                || echo "")
-            if [ -z "$_BACKUP_EPOCH" ]; then
-                _PRUNE_SKIP_REASON="source=bd-backup-status age=unparseable ($_BACKUP_TS)"
-                _PRUNE_SKIP=1
-            else
-                _BACKUP_AGE=$(( $(date -u '+%s') - _BACKUP_EPOCH ))
-                if [ "$_BACKUP_AGE" -gt "$_PRUNE_MAX_AGE" ]; then
-                    _PRUNE_SKIP_REASON="source=bd-backup-status age=${_BACKUP_AGE}s"
+            _PRUNE_MAX_AGE="${GC_REAPER_BACKUP_MAX_AGE:-${GC_BACKUP_MAX_AGE_FOR_BULK_DELETE:-86400}}"
+            case "$_PRUNE_MAX_AGE" in ''|*[!0-9]*) _PRUNE_MAX_AGE=86400 ;; esac
+            _PRUNE_SKIP_REASON=""
+            _PRUNE_BACKUP_UNSUPPORTED=0
+            _BACKUP_TS=""
+            _BACKUP_ERR_FILE=$(mktemp)
+            if _BACKUP_STATUS=$(scope_bd backup status --json 2>"$_BACKUP_ERR_FILE"); then
+                _BACKUP_TS=$(printf '%s' "$_BACKUP_STATUS" | jq -r '
+                    (if (.dolt.configured // false) == true
+                     then (.dolt.last_sync // empty)
+                     else (.backup.timestamp // empty) end)
+                    | select(type == "string" and . != "" and (startswith("0001-") | not))' 2>/dev/null || true)
+                if [ -z "$_BACKUP_TS" ]; then
+                    _PRUNE_SKIP_REASON="source=bd-backup-status age=absent"
                     _PRUNE_SKIP=1
                 fi
+            else
+                _BACKUP_STATUS="$(cat "$_BACKUP_ERR_FILE" 2>/dev/null) $_BACKUP_STATUS"
+                case "$_BACKUP_STATUS" in
+                    *'"proxy.backup.unsupported"'* | *"not supported in proxied-server mode"*)
+                        # This bd cannot back up the city scope's transport, so no
+                        # backup evidence can exist yet. The prune waits; the run
+                        # reports it without escalating every cooldown.
+                        _PRUNE_BACKUP_UNSUPPORTED=1
+                        ;;
+                esac
+                _PRUNE_SKIP_REASON="source=bd-backup-status unavailable: $(sanitize_output "$_BACKUP_STATUS")"
+                _PRUNE_SKIP=1
             fi
-        fi
-
-        if [ "$_PRUNE_BACKUP_UNSUPPORTED" -eq 1 ]; then
-            order_outcome_scope_skipped "city" "session prune skipped: bd-backup-unsupported"
-        elif [ "$_PRUNE_SKIP" -eq 1 ]; then
-            record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent ($_PRUNE_SKIP_REASON threshold=${_PRUNE_MAX_AGE}s)"
-            order_outcome_scope_skipped "city" "session prune skipped: no fresh backup"
-        fi
-
-        # Pattern-validity gate: SESSION_BEAD_PATTERN is spliced into a SQL
-        # LIKE literal below (type-scope gate) and passed as bd's own --pattern
-        # flag. A value outside this charset (e.g. a single quote) would corrupt
-        # the guard's own COUNT query -- id LIKE 'x' OR '1'='1' always matches,
-        # silently defeating the guard. Fail closed before any SQL is built.
-        if [ "$_PRUNE_SKIP" -eq 0 ]; then
-            case "$SESSION_BEAD_PATTERN" in
-                ''|*[!A-Za-z0-9_.*?-]*)
-                    record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: SESSION_BEAD_PATTERN='$SESSION_BEAD_PATTERN' contains characters outside the allowed pattern charset (letters, digits, . _ - * ?); refusing to build SQL from it (type scope guard)"
+            rm -f "$_BACKUP_ERR_FILE"
+            if [ "$_PRUNE_SKIP" -eq 0 ]; then
+                case "$_BACKUP_TS" in
+                    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]*) ;;
+                    *)
+                        _PRUNE_SKIP_REASON="source=bd-backup-status age=unparseable ($_BACKUP_TS)"
+                        _PRUNE_SKIP=1
+                        ;;
+                esac
+            fi
+            if [ "$_PRUNE_SKIP" -eq 0 ]; then
+                # bd timestamps are RFC3339 (possibly with fractional seconds).
+                # Truncate to whole seconds, as Step 4's SQL does.
+                case "$_BACKUP_TS" in *.*) _BACKUP_TS="${_BACKUP_TS%%.*}Z" ;; esac
+                _BACKUP_EPOCH=$(date -u -d "$_BACKUP_TS" '+%s' 2>/dev/null \
+                    || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$_BACKUP_TS" '+%s' 2>/dev/null \
+                    || echo "")
+                if [ -z "$_BACKUP_EPOCH" ]; then
+                    _PRUNE_SKIP_REASON="source=bd-backup-status age=unparseable ($_BACKUP_TS)"
                     _PRUNE_SKIP=1
-                    ;;
-            esac
+                else
+                    _BACKUP_AGE=$(( $(date -u '+%s') - _BACKUP_EPOCH ))
+                    if [ "$_BACKUP_AGE" -gt "$_PRUNE_MAX_AGE" ]; then
+                        _PRUNE_SKIP_REASON="source=bd-backup-status age=${_BACKUP_AGE}s"
+                        _PRUNE_SKIP=1
+                    fi
+                fi
+            fi
+
+            if [ "$_PRUNE_BACKUP_UNSUPPORTED" -eq 1 ]; then
+                order_outcome_scope_skipped "city" "session prune skipped: bd-backup-unsupported"
+            elif [ "$_PRUNE_SKIP" -eq 1 ]; then
+                record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent ($_PRUNE_SKIP_REASON threshold=${_PRUNE_MAX_AGE}s)"
+                order_outcome_scope_skipped "city" "session prune skipped: no fresh backup"
+            fi
         fi
 
         # Type-scope gate: bd's prune has no issue_type filter (only ID glob +
@@ -1120,16 +1475,11 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
         # rows, and fail closed on a nonzero hit or on a count that could not
         # be computed.
         if [ "$_PRUNE_SKIP" -eq 0 ]; then
-            # Glob -> SQL LIKE: simple prefix globs only (e.g. gm-*). A
-            # literal % or _ in a custom pattern would not round-trip.
-            _TYPE_GUARD_LIKE=$(printf '%s' "$SESSION_BEAD_PATTERN" | sed 's/\*/%/g; s/?/_/g')
-            _TYPE_GUARD_AGE_H=$(printf '%s' "$SESSION_PURGE_AGE" | sed 's/h$//')
-            case "$_TYPE_GUARD_AGE_H" in ''|*[!0-9]*) _TYPE_GUARD_AGE_H=0 ;; esac
             if ! get_sql_count "type scope guard" "
                 SELECT COUNT(*) FROM \`$CITY_DB\`.issues
-                WHERE id LIKE '$_TYPE_GUARD_LIKE'
+                WHERE id LIKE '$_PRUNE_LIKE'
                 AND status = 'closed'
-                AND closed_at < DATE_SUB(NOW(), INTERVAL $_TYPE_GUARD_AGE_H HOUR)
+                AND closed_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $_PRUNE_AGE_H HOUR)
                 AND issue_type != 'session'
             "; then
                 record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: type-scope guard count could not be computed (type scope guard); set GC_REAPER_SESSION_BEAD_PATTERN=\"\" to use the type-safe session-only path"
@@ -1175,13 +1525,13 @@ if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
         SESSION_AGE_H=$(printf '%s' "$SESSION_PURGE_AGE" | sed 's/h$//')
         case "$SESSION_AGE_H" in ''|*[!0-9]*) SESSION_AGE_H=720 ;; esac
         if [ -n "$DRY_RUN" ]; then
-            if get_sql_count "type-safe session prune" "SELECT COUNT(*) FROM \`$CITY_DB\`.issues WHERE issue_type='session' AND status='closed' AND closed_at < DATE_SUB(NOW(), INTERVAL ${SESSION_AGE_H} HOUR)"; then
+            if get_sql_count "type-safe session prune" "SELECT COUNT(*) FROM \`$CITY_DB\`.issues WHERE issue_type='session' AND status='closed' AND closed_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL ${SESSION_AGE_H} HOUR)"; then
                 TOTAL_SESSIONS_PRUNED=$SQL_COUNT_RESULT
             fi
         else
             TOTAL=0
             while true; do
-                get_sql_rows "type-safe session prune" "SELECT id FROM \`$CITY_DB\`.issues WHERE issue_type='session' AND status='closed' AND closed_at < DATE_SUB(NOW(), INTERVAL ${SESSION_AGE_H} HOUR) LIMIT 500" || break
+                get_sql_rows "type-safe session prune" "SELECT id FROM \`$CITY_DB\`.issues WHERE issue_type='session' AND status='closed' AND closed_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL ${SESSION_AGE_H} HOUR) LIMIT 500" || break
                 BATCH_COUNT=$(count_lines "$SQL_ROWS_RESULT")
                 [ "$BATCH_COUNT" -gt 0 ] || break
                 run_budget_exhausted && break
@@ -1234,14 +1584,19 @@ if [ "$TOTAL_SCOPES" -eq 0 ]; then
 fi
 order_outcome_write
 
-# Report.
+# Report. Only a measured age (age=<seconds>s) is normalized out of the
+# fingerprint, so a stale backup that merely grows older stays one incident
+# while a change of state (age=absent, age=unparseable) notifies at once. A
+# clean run resolves the incident so its next occurrence notifies at once.
 if [ -n "$ANOMALIES" ]; then
-    "$ESCALATE_SCRIPT" \
-        --subject "ESCALATION: Reaper anomalies detected [MEDIUM]" \
-        --message "$ANOMALIES" 2>/dev/null || true
+    ANOMALY_FINGERPRINT=$(printf '%s' "$ANOMALIES" | sed -E 's/age=[0-9]+s/age=<dynamic>/g')
+    raise_incident "reaper:anomalies" "$ANOMALY_FINGERPRINT" \
+        "ESCALATION: Reaper anomalies detected [MEDIUM]" "$ANOMALIES" || true
+else
+    resolve_incident "reaper:anomalies" || true
 fi
 
-SUMMARY="reaper — scopes:$TOTAL_SCOPES, stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, held_wisps:$TOTAL_HELD_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
+SUMMARY="reaper — scopes:$TOTAL_SCOPES, stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, held_wisps:$TOTAL_HELD_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, workflow_root_census:$TOTAL_WORKFLOW_ROOTS_CHECKED/$TOTAL_WORKFLOW_ROOT_CANDIDATES, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
 if [ -n "$DRY_RUN" ]; then
     SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_close_workflow_roots:$TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS, would_purge:$TOTAL_WOULD_PURGE, would_expire:$TOTAL_WOULD_EXPIRE (dry run)"
 fi

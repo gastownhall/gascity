@@ -3,6 +3,7 @@
 package tmux
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -30,7 +31,7 @@ func TestSendNudgeSubmitSequenceSendsEachKeyInOrder(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 	time.Sleep(300 * time.Millisecond)
 
-	if err := tm.sendNudgeSubmitSequence(sessionName, []string{"Escape", "Enter"}); err != nil {
+	if err := tm.sendNudgeSubmitSequence(context.Background(), sessionName, []string{"Escape", "Enter"}); err != nil {
 		t.Fatalf("sendNudgeSubmitSequence: %v", err)
 	}
 	time.Sleep(300 * time.Millisecond)

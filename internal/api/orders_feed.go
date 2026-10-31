@@ -99,12 +99,22 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 			openChildrenByRoot[rootID] = append(openChildrenByRoot[rootID], bead)
 		}
 
-		roots, err := info.store.List(beads.ListQuery{
-			Metadata: map[string]string{
-				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
-				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
-			},
-			IncludeClosed: true,
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// One leg of the workflowStores federation (graph, city, rigs): each
+		// leg lists only the roots it holds.
+		var roots []beads.Bead
+		err = beads.RelicRead(func() error {
+			var listErr error
+			roots, listErr = info.store.List(beads.ListQuery{
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+					beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+				},
+				IncludeClosed: true,
+			})
+			return listErr
 		})
 		if err != nil {
 			log.Printf("api: workflow run projection closed-root list failed for %s: %v", info.ref, err)
@@ -222,18 +232,28 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 			openChildrenByRoot[rootID] = append(openChildrenByRoot[rootID], bead)
 		}
 
-		roots, err := info.store.List(beads.ListQuery{
-			Metadata: map[string]string{
-				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
-				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
-			},
-			IncludeClosed: true,
-			// The root-only projection reads only id/status/created/metadata,
-			// never labels, so skip the per-root label hydration on this
-			// closed-history scan — same rows and order, less work per root
-			// (gascity#3253). Bounding this scan further is not contract-safe
-			// because the feed orders by computed status rank, not created_at.
-			SkipLabels: true,
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// One leg of the workflowStores federation (graph, city, rigs): each
+		// leg lists only the roots it holds.
+		var roots []beads.Bead
+		err = beads.RelicRead(func() error {
+			var listErr error
+			roots, listErr = info.store.List(beads.ListQuery{
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+					beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+				},
+				IncludeClosed: true,
+				// The root-only projection reads only id/status/created/metadata,
+				// never labels, so skip the per-root label hydration on this
+				// closed-history scan — same rows and order, less work per root
+				// (gascity#3253). Bounding this scan further is not contract-safe
+				// because the feed orders by computed status rank, not created_at.
+				SkipLabels: true,
+			})
+			return listErr
 		})
 		if err != nil {
 			if requestedScopeErr == nil && info.scopeKind == requestedScopeKind && info.scopeRef == requestedScopeRef {
@@ -359,7 +379,17 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 			continue
 		}
 		front := orders.NewStore(beads.OrdersStore{Store: info.store})
-		runs, err := front.ListTracking(limit)
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// One leg of the order-feed federation (graph, orders binding, and
+		// the city and rig scopes for pre-cutover history).
+		var runs []orders.OrderRun
+		err := beads.RelicRead(func() error {
+			var listErr error
+			runs, listErr = front.ListTracking(limit)
+			return listErr
+		})
 		if err != nil {
 			if requestedScopeErr == nil && info.scopeKind == requestedScopeKind && info.scopeRef == requestedScopeRef {
 				requestedScopeErr = err

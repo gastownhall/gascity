@@ -18,6 +18,7 @@ owner = "sample-org"
 repo = "sample-repo"
 base_branches = ["main", "release"]
 rig = "sample"
+authors = ["octocat", "hubot"]
 notify = ["addr-a", "addr-b"]
 repair_route = "route-a"
 webhook_secret_env = "SAMPLE_GITHUB_WEBHOOK_SECRET"
@@ -43,6 +44,9 @@ merge_queue = "repair"
 	}
 	if got.Rig != "sample" {
 		t.Errorf("Rig = %q, want sample", got.Rig)
+	}
+	if len(got.Authors) != 2 || got.Authors[0] != "octocat" || got.Authors[1] != "hubot" {
+		t.Errorf("Authors = %v, want [octocat hubot]", got.Authors)
 	}
 	if len(got.Notify) != 2 || got.Notify[0] != "addr-a" || got.Notify[1] != "addr-b" {
 		t.Errorf("Notify = %v, want [addr-a addr-b]", got.Notify)
@@ -102,6 +106,19 @@ func TestValidateGitHubPRMonitorsRejectsMissingRepoAndRoute(t *testing.T) {
 				Rig:          "sample",
 			},
 			want: "repair_route is required",
+		},
+		{
+			name: "empty author entry",
+			monitor: GitHubPRMonitor{
+				Name:         "bad",
+				Owner:        "sample-org",
+				Repo:         "sample-repo",
+				BaseBranches: []string{"main"},
+				Rig:          "sample",
+				RepairRoute:  "route-a",
+				Authors:      []string{"alice", "  "},
+			},
+			want: "authors contains an empty login",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -250,5 +267,24 @@ merge_queue = "observe"
 	}
 	if len(mainMonitor.Notify) != 1 || mainMonitor.Notify[0] != "ops" {
 		t.Errorf("patched Notify = %v, want [ops]", mainMonitor.Notify)
+	}
+}
+
+func TestGitHubPRMonitorAllowedAuthorSet(t *testing.T) {
+	// No authors configured means no restriction (nil set).
+	if got := (GitHubPRMonitor{}).AllowedAuthorSet(); got != nil {
+		t.Fatalf("AllowedAuthorSet() = %v, want nil for no authors", got)
+	}
+	// Only blank entries collapse to no restriction rather than an empty gate
+	// that would reject every PR.
+	if got := (GitHubPRMonitor{Authors: []string{"", "  "}}).AllowedAuthorSet(); got != nil {
+		t.Fatalf("AllowedAuthorSet() = %v, want nil for blank-only authors", got)
+	}
+	set := (GitHubPRMonitor{Authors: []string{" alice ", "bob", "alice"}}).AllowedAuthorSet()
+	if len(set) != 2 || !set["alice"] || !set["bob"] {
+		t.Fatalf("AllowedAuthorSet() = %v, want trimmed deduped {alice,bob}", set)
+	}
+	if set["Alice"] {
+		t.Fatal("AllowedAuthorSet() must be case-sensitive; Alice should not match alice")
 	}
 }

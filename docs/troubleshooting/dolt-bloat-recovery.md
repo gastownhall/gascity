@@ -12,9 +12,12 @@ new chunks have accumulated since the last GC, which means a database that
 bloated once during an agent storm and then went quiet will not auto-GC on
 its own — it sits at its peak size indefinitely.
 
+In production cities, the `mol-dog-compactor` order handles compaction
+automatically — see [Dolt Storage Maintenance](/runbooks/dolt-compact).
+
 This runbook walks an operator through recovering such a database: stopping
-writers, taking a safety backup, running a full GC with archive compression,
-and verifying the result.
+writers, taking a safety backup, running a full GC that writes classic table
+files, and verifying the result.
 
 ## Symptoms
 
@@ -34,14 +37,18 @@ and verifying the result.
 - **Free disk space.** Dolt GC rewrites chunks into a new store before
   swapping; budget at least **2× the current `.dolt/` size** in free space
   on the same filesystem.
-- **Final Dolt 2.1.0 or newer.** This matches the floor enforced by Gas
+- **Final Dolt 2.6.0 or newer.** This matches the floor enforced by Gas
   City's managed Dolt tooling. Releases before 1.86.2 also have the upstream
   GC/writer deadlock fixed in dolthub/dolt commit `ccf7bde206`, which can hang
   `dolt_backup sync` under heavy write load. Check with
-  `dolt version`. If your binary rejects `--archive-level=1` (rare on
-  modern releases), drop the flag and run plain
-  `dolt gc` — archive compression is default-on in 1.75+ so the flag is
-  an optimization, not a requirement.
+  `dolt version`.
+- **Always pass `--archive-level=0` to `dolt gc`.** Dolt 2.3.3 through 2.5.1
+  default to a SimpleArchive that duplicates its zstd dictionaries once an
+  archive holds more than 256 of them, and each duplicate pins about 137 KB of
+  C memory for the whole GC, so a large store runs out of memory mid-GC. Level
+  `0` writes classic table files. To check a store, run `dolt admin storage`
+  in its directory: it prints a "Dictionary Count" per archive, and a count
+  past 256 is the bad state.
 
 ## Recovery Procedure
 
@@ -53,9 +60,9 @@ gc stop <cityPath>
 cd <cityPath>/.beads/dolt/<database>
 cp -a .dolt .dolt.bak-$(date +%Y%m%d-%H%M%S)
 
-# 3. Run a full GC with archive compression. This is the step that actually
+# 3. Run a full GC with archives disabled. This is the step that actually
 #    reclaims space. On a 120 GB store expect this to take tens of minutes.
-dolt gc --archive-level=1
+dolt gc --full --archive-level=0
 
 # 4. Restart the city and verify.
 cd <cityPath>
@@ -86,8 +93,8 @@ Use the operator-invoked reclaim path to recover such a database without waiting
 for its commit count to climb back over the threshold:
 
 ```bash
-# Reclaim one stranded database. Runs CALL DOLT_GC('--full') with no flatten,
-# bypassing the commit-count threshold.
+# Reclaim one stranded database. Runs CALL DOLT_GC('--full', '--archive-level=0')
+# with no flatten, bypassing the commit-count threshold.
 gc dolt compact --gc-only --only-db <database>
 
 # Preview first, mutating nothing.
@@ -96,10 +103,67 @@ gc dolt compact --gc-only --only-db <database> --dry-run
 
 `--gc-only` refuses any database under an integrity-quarantine marker; resolve
 the underlying reason (see **Compact Quarantine Reasons** below) before
-reclaiming. Unlike the full `dolt gc --archive-level=1` procedure above,
+reclaiming. Like the offline `dolt gc --archive-level=0` procedure above,
+it writes classic table files. Unlike that procedure,
 `--gc-only` runs against the live managed server and does not require stopping
 the city — though quiescing writers still makes the GC faster and more
 thorough.
+
+### A full GC canceled at the read timeout
+
+Running against the live managed server has one ceiling of its own. The
+listener's `read_timeout_millis` bounds any statement that produces no rows for
+that long, and `CALL DOLT_GC('--full', '--archive-level=0')` produces none until
+it finishes, so a
+reclaim that outruns the ceiling is killed by the server and reported as:
+
+```
+compact: db=<database> ... DOLT_GC failed rc=1 duration=21s
+compact: db=<database> error on line 1 for query CALL DOLT_GC('--full', '--archive-level=0'): Error 1105 (HY000): Error in SaveHashes call: SaveHashes, error calling getManyCompressed: context canceled
+compact: db=<database> the managed sql-server ended DOLT_GC after 15s at its listener.read_timeout_millis=15000 ceiling in <runtime>/packs/dolt/dolt-config.yaml — ...
+```
+
+The same kill can also read `connection was closed` or `row read wait bigger
+than connection timeout`. Nothing is wrong with the store. The compactor blames
+the ceiling only when the GC itself ran that long. A GC canceled sooner gets a
+line saying the timeout did not end it; look in the server log for a stop or
+restart instead. Without a readable server config the compactor cannot compare
+the two, so it names the ceiling as the most likely cause. Only the full GC gets
+this line; a failed bare `CALL DOLT_GC('--archive-level=0')` prints the server
+error without it.
+
+A failed post-flatten GC leaves a pending-GC marker that retries
+`DOLT_GC('--full', '--archive-level=0')` on every later run. When the compactor
+blamed the ceiling,
+every retry hits the same ceiling until the ceiling moves; when it said the
+timeout did not end the GC, the marker still retries, but moving
+`read_timeout_millis` is not the remedy. `--gc-only` writes no marker, so rerun
+it after raising the ceiling. Raise the value in `city.toml` past the longest GC
+you have seen; the GC's run time in the compactor's line is the floor. Releases
+through v1.4.2 ship `15000`, the value in the example above; v1.5.0 and later
+default to `120000`, so `120000` is the right first value for a city still on
+`15000`. A city already at `120000` needs a larger number.
+
+```toml
+[dolt]
+read_timeout_millis = 120000
+```
+
+then `gc dolt restart` and retry. Every connection shares this ceiling, and it
+is also the server's only idle-connection reaper, so keep it under half of
+`write_timeout_millis` (default `300000`). To go past `150000`, raise
+`write_timeout_millis` with it, or raise it only for the reclaim and put it
+back afterward. The compactor also caps each call at
+`GC_DOLT_COMPACT_CALL_TIMEOUT_SECS` (default `1800`); a GC that outruns that
+fails with `rc=124` and no server error. A reclaim that needs longer than the
+live server can give it belongs offline: follow the **Recovery Procedure** above
+with `dolt gc --full --archive-level=0` as step 3, which no listener timeout
+bounds and which also rewrites `oldgen`.
+
+The tell that you are looking at this and not a real disconnect is the server
+log: the `client connection went away` line that precedes the failure carries
+`i/o timeout`, not `EOF`, and lands exactly `read_timeout_millis` after the
+connection opened.
 
 ## Compacting a city whose Dolt remote is uncredentialed
 
@@ -158,8 +222,14 @@ usable later; `.no-sync` states that it never will.
 
 ## History protection
 
-`gc dolt compact` only squashes history that this city grew. Two rules
-enforce this.
+`gc dolt compact` protects two kinds of history: history that may be shared
+with other clones through a Dolt remote, and history that existed before
+compact first saw the database. Two rules enforce this.
+
+The protection is by position in the history, not by author. Every commit
+after the watermark is squashed, whoever wrote it, so a database that several
+cities write to needs extra care. See
+[Shared and non-local databases](#shared-and-non-local-databases).
 
 ### Databases with remotes
 
@@ -173,7 +243,7 @@ every other clone. Instead, compact logs:
 compact: db=<database> remote=<remote> remotes=<n> — history may be shared with other clones; skipping flatten and remote push ...
 ```
 
-It then runs a bare `CALL DOLT_GC()`, which reclaims journal and working-set
+It then runs a bare `CALL DOLT_GC('--archive-level=0')`, which reclaims journal and working-set
 garbage without touching history. `.no-sync`, `--skip-fetch`, and `--dry-run`
 do not bypass this guard.
 
@@ -260,9 +330,11 @@ compact: db=<database> REFUSING flatten: gc-compact-base=<hash> is not an ancest
   gc dolt sql -q "USE <database>; CALL DOLT_TAG('-d', 'gc-compact-base')"
   ```
 
-- If the whole history was grown by this city and should be fully compactable,
-  run `touch <cityPath>/.beads/dolt/<database>/.compact-full-history` before
-  deleting the tag. The next run then sets the tag at root.
+- To make the whole history compactable, run
+  `touch <cityPath>/.beads/dolt/<database>/.compact-full-history` before
+  deleting the tag. The next run then sets the tag at root. Do this only if no
+  other city, clone, or client outside this city has ever written to the
+  database, including before this city started using it.
 
 A database adopted from **another** Gas City city whose compactor already
 flattened it has a flatten commit right after root. Compact treats that
@@ -271,35 +343,193 @@ limited to what the source city's compactor would have squashed anyway. To
 keep it, create the tag at HEAD before the first compact run:
 `CALL DOLT_TAG('gc-compact-base', 'HEAD')`.
 
+## Shared and non-local databases
+
+What the compactor does to a database depends on how each city reaches that
+database. A city's own Gas City–managed server is compacted however
+`GC_DOLT_HOST` addresses it, a non-loopback name such as `host.docker.internal`
+included. An external endpoint, meaning a Dolt server the city is configured
+to reach but does not run, is compacted only when its host is loopback: empty,
+`localhost`, `127.x.x.x`, `::1`, or `[::1]`, or the wildcard `0.0.0.0`, `::`,
+or `[::]`. Compact skips an external endpoint on any other host before it
+connects.
+
+| How a city reaches the database | What its compactor does |
+|---|---|
+| Its own bd-owned proxied store (the default for cities created by Gas City 1.5 and later) | Nothing: `gc dolt compact` prints `dolt lifecycle is owned by bd for proxied scopes; nothing to do` |
+| Its own Gas City–managed server, written only by this city | Flattens commits after the watermark, then runs a full GC |
+| Its own managed server or a loopback external endpoint, and other cities write to the same database (shared host, SSH tunnel, port forward) | Flattens **every** city's commits after the watermark into one commit |
+| An external endpoint on a non-loopback host (a remote or cloud-hosted Dolt server) | Nothing: no flatten, no GC, no watermark |
+| Either flattening row above, when the database has any Dolt remote | Bare `CALL DOLT_GC('--archive-level=0')` only, unless `GC_DOLT_COMPACT_ALLOW_FEDERATED=1`. A `compact-pending-gc/<database>` marker left by an earlier run still gets its local full GC (see [Databases with remotes](#databases-with-remotes)) |
+
+Both flattening rows wait for the commit-count threshold. A run flattens only
+once at least `GC_DOLT_COMPACT_THRESHOLD_COMMITS` (default 2000) commits
+follow the watermark; below that it logs `below_threshold` and does not
+flatten (see [Reclaiming a database stranded below the compaction
+threshold](#reclaiming-a-database-stranded-below-the-compaction-threshold)).
+
+The compactor never filters by author: every commit after the watermark is
+squashed, whoever wrote it. Authorship would not tell the cities apart anyway.
+Gas City sets no per-city commit author on the databases the compactor
+flattens, so bd commits as `beads` unless the writer's environment sets
+`GIT_AUTHOR_NAME`, and the history does not reliably say which city wrote a
+commit.
+
+### A database several cities write to
+
+If you don't want one city to squash the others' history, keep the shared
+database out of the compactor in every city that would flatten it: the city
+whose own managed server holds it, and every city that reaches it as a
+loopback external endpoint.
+
+The narrow fix lists the databases the compactor may touch and leaves the
+shared one out. The city's other databases are still compacted:
+
+```toml
+# city.toml
+[[orders.overrides]]
+name = "mol-dog-compactor"
+env = { GC_DOLT_COMPACT_ONLY_DBS = "<database>,<database>" }
+```
+
+The list is an allowlist. A database left off it is never compacted, so add
+each new rig's database when you add the rig. `gc dolt compact --dry-run`
+prints a `compact: db=<database> ...` line for every database it finds. The
+override applies only to the scheduled order. A `gc dolt compact` you run by
+hand does not see it, so pass `--only-db` there.
+
+To stop compaction in a city altogether, disable the order. This stops the
+flatten and the GC for every database in that city, not only the shared one:
+
+```toml
+# city.toml
+[[orders.overrides]]
+name = "mol-dog-compactor"
+enabled = false
+```
+
+A city that reaches the database only as an external endpoint on a
+non-loopback host needs no change; its compactor already skips it. This does
+not cover the city whose own managed server holds the database, which compacts
+it whatever host name the others use.
+
+### A non-loopback endpoint grows without bound
+
+For an external endpoint on a non-loopback host, `gc dolt compact` logs a
+`compact: GC_DOLT_HOST=<host> is not a local ... — skip` line and exits 0
+without connecting, so the order run reports success. `gc doctor`'s
+`dolt-noms-size` check also skips external endpoints. Nothing warns you while
+the history grows.
+
+Every bd write is a Dolt commit, and garbage collection cannot reclaim history
+that is still reachable. In a 2,002-commit replay of the `bd compact` squash,
+recorded in [#7993](https://github.com/gastownhall/gascity/pull/7993), a full
+GC left the database at 4,952 KB while the old history was still reachable,
+and at 548 KB once that history was squashed. Turning on `[maintenance.dolt]`
+does not shorten history either. Automatic compaction for shared and
+cloud-hosted databases is tracked in
+[#7896](https://github.com/gastownhall/gascity/issues/7896).
+
+### Bound history on a shared or non-local database by hand
+
+`bd compact` squashes commits older than a retention window into one commit
+and keeps the recent ones. It rebuilds the branch from a snapshot of the log
+and then hard-resets `main` to the result, with no protection against
+concurrent writers. A write that lands while it runs is lost, so every writer
+must be stopped first.
+
+This needs bd 1.3.0 or newer; check with `gc bd version`. Older bd follows the
+squash with a generational GC only, which reclaims little or no disk space.
+
+1. Agree on a retention window (`<N>` days) with every city that writes to the
+   database.
+2. Run `gc stop` in every city that shares the database, and close any other
+   `bd` or `dolt sql` client connected to it.
+3. Work from the city whose own Dolt server holds the database, or from any of
+   them if no city manages that server. Make sure the server is up before
+   step 4. How depends on who runs it:
+
+   - **That city's Gas City–managed server**: `gc stop` stopped it, and
+     `gc bd` does not start it. Run `gc dolt restart` in that city;
+     `gc dolt start` cannot find a stopped server's port. Do not run
+     `gc start` before step 6: it also restarts the city's agents and orders.
+   - **That city's bd-owned proxied store**: start nothing. bd starts the
+     proxy and its Dolt server on the first `gc bd` command in step 4. Do not
+     run `gc dolt start`, which only prints the proxied no-op line, or
+     `bd dolt start`, which bd 1.3.1 and later refuse in proxied mode.
+   - **A server no city manages** (a shared host or a cloud-hosted Dolt
+     server): `gc stop` did not stop it. If it is down, start it with whatever
+     runs it. Do not run `gc dolt start`; it does not start that server.
+4. Preview, delete the `gc-compact-base` tag if the database has one, then
+   compact. Name the store explicitly so `gc bd` does not pick one from your
+   working directory: `--rig <rig>` for a rig's store, or `--city <city-path>`
+   for the city's own store.
+
+   ```bash
+   gc bd --rig <rig> compact --days <N> --dry-run
+   gc bd --rig <rig> sql "SELECT tag_name FROM dolt_tags"
+   gc bd --rig <rig> sql "CALL DOLT_TAG('-d', 'gc-compact-base')"  # only if listed
+   gc bd --rig <rig> compact --days <N> --force
+   ```
+
+5. Check that the space came back. The `--force` run should print
+   `Running full Dolt GC` and no `dolt gc after compact failed` warning. When
+   bd measures the store, it also prints `Store: <before> → <after>`; the size
+   should have dropped. If the GC failed, run it again:
+
+   ```bash
+   gc bd --rig <rig> sql "CALL DOLT_GC('--full', '--archive-level=0')"
+   ```
+
+   The server's read timeout can cancel this GC too (see
+   [A full GC canceled at the read timeout](#a-full-gc-canceled-at-the-read-timeout)).
+   If it does and you can reach the database's files, follow the
+   [Recovery Procedure](#recovery-procedure) with
+   `dolt gc --full --archive-level=0` as step 3.
+6. Restart every city with `gc start`.
+
+`bd compact` squashes everything older than the window, including history from
+before the `gc-compact-base` watermark. A tag left on a squashed commit keeps
+that commit and all history before it reachable, so the GC cannot reclaim it
+(bd warns that a tag still anchors old history). A later `gc dolt compact` also
+refuses to flatten the database, because the tag is no longer an ancestor of
+`HEAD`. Once the tag is deleted, the next compactor run that sees the database
+sets it again by the first-sight rule.
+
+`bd compact` does not push. If the database has a Dolt remote, the remote keeps
+the full history, the local branch has diverged from it, and each fetch brings
+the old history back into the local store. Announce a compaction window to
+every clone, force-push the rewritten branch, and have every other clone
+re-clone or hard-reset.
+
 ## Expected Outcome
 
-DoltHub's archive format typically delivers ~30% compression on top of
-normal GC ([DoltHub blog, archive storage](https://www.dolthub.com/blog/)).
-Combined with reclamation of orphan chunks from agent churn, a 120 GB
-pre-GC store typically drops to somewhere between **5 GB and 20 GB** —
-depending on how much of the pre-GC size was live data versus orphan
-chunks.
+Reclaiming the orphan chunks that agent churn leaves behind typically takes a
+120 GB pre-GC store down to somewhere between **5 GB and 20 GB** — depending on
+how much of the pre-GC size was live data versus orphan chunks.
 
 If GC finishes but the size barely moves, the chunks are nearly all live
 (no garbage to collect). See **When to Escalate** below.
 
 ## Prevention
 
-- **Keep Dolt at a final 2.1.0 or newer.** This matches Gas City's
-  managed-Dolt floor; newer releases ship improved auto-GC heuristics and
-  default archive compression.
+- **Keep Dolt at a final 2.6.0 or newer.** This matches Gas City's
+  managed-Dolt floor; newer releases ship improved auto-GC heuristics.
 - **Let the dolt pack's `mol-dog-compactor` order run continuously.**
   It ships embedded in the dolt pack and runs `gc dolt compact` every two
   hours. A database without remotes is flattened once the commits after its
   `gc-compact-base` watermark cross the threshold, and then gets
-  `CALL DOLT_GC('--full')`. A database with remotes gets a bare
-  `CALL DOLT_GC()` and is never flattened (see **History protection** above).
+  `CALL DOLT_GC('--full', '--archive-level=0')`. A database with remotes gets a
+  bare `CALL DOLT_GC('--archive-level=0')` and is never flattened (see **History protection** above).
   Under the `GC_DOLT_COMPACT_ALLOW_FEDERATED=1` opt-in, compaction fetches the
   remote, flattens, and force-pushes the rewritten branch. Dolt does not
   support an atomic `DOLT_PUSH('--force-with-lease', ...)`, so the script
   fetches again and compares the remote head immediately before its force
   push. That check catches known drift, but a remote write can still land in
-  the short window between fetch and push.
+  the short window between fetch and push. The order does nothing for a
+  bd-owned proxied store or an external endpoint on a non-loopback host, and a
+  database that several cities share needs care (see **Shared and non-local
+  databases** above).
 - **Mind `orders.max_timeout` if you set one.** The compactor order asks
   for a 24-hour timeout to accommodate serialized full-GC runs on large
   stores. A city-level `orders.max_timeout` below 24h will cap the

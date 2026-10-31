@@ -51,6 +51,8 @@ type Provider struct {
 	priorityClassName  string              // GC_K8S_PRIORITY_CLASS_NAME
 	postStartSettle    time.Duration       // settle time before post-start liveness check
 	stderr             io.Writer           // warning output (default os.Stderr)
+	pokes              runtime.PokeLedger  // gc's own input, discounted from GetLastActivity
+	now                func() time.Time    // the poke ledger's clock; nil is time.Now
 }
 
 type schedulingFields struct {
@@ -319,9 +321,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 // entrypoint launches the agent) and Relaunch (after the respawn). k8s does not
 // run SessionLive (RunLive is a no-op), matching the pre-un-weld behavior.
 func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cfg runtime.Config) {
-	// Enable pane logging for diagnostics.
+	// Enable pane logging for diagnostics. No -o: the pipe survives
+	// respawn-pane -k, and -o would toggle it off on every other Relaunch;
+	// plain pipe-pane replaces any existing pipe, so this is idempotent.
 	_, _ = p.ops.execInPod(ctx, podName, "agent",
-		[]string{"tmux", "pipe-pane", "-t", tmuxSession, "-o", "cat >> /tmp/agent-output.log"}, nil)
+		[]string{"tmux", "pipe-pane", "-t", tmuxSession, "cat >> /tmp/agent-output.log"}, nil)
 
 	// Run session_setup commands inside the pod.
 	for _, cmd := range cfg.SessionSetup {
@@ -541,19 +545,48 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 
 // Nudge types a message into the tmux session followed by Enter.
 // Uses -l (literal mode) so tmux key names in the message text are not
-// interpreted as keystrokes. Content blocks are flattened to text.
+// interpreted as keystrokes. Content blocks are flattened to text. The
+// delivery is a poke whose keystroke echo GetLastActivity discounts (see
+// [Provider.poke]).
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	return p.carrier().Nudge(context.Background(), name, content)
+	ctx := context.Background()
+	return p.poke(ctx, name, func() error { return p.carrier().Nudge(ctx, name, content) })
 }
 
-// SendKeys sends bare keystrokes to the tmux session. Best-effort on a
-// missing session (contract: no-op), but a genuine transport failure to a
-// live pod is propagated (#4389).
+// SendKeys sends bare keystrokes to the tmux session, as a poke whose
+// keystroke echo GetLastActivity discounts (see [Provider.poke]).
+// Best-effort on a missing session (contract: no-op), but a genuine
+// transport failure to a live pod is propagated (#4389).
 func (p *Provider) SendKeys(name string, keys ...string) error {
-	if err := p.carrier().SendKeys(context.Background(), name, keys...); err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
+	ctx := context.Background()
+	if err := p.poke(ctx, name, func() error { return p.carrier().SendKeys(ctx, name, keys...) }); err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
 		return err
 	}
 	return nil
+}
+
+// poke runs send, gc's own input to the session, and records it in the poke
+// ledger: tmux counts gc's keystrokes as window activity even when the agent
+// never answers, so GetLastActivity discounts their echo. The session's raw
+// activity is read before send types anything, the genuine baseline, and
+// again once send has delivered, the echo: the pod stamps both on its own
+// clock, so the echo is matched there and only the grace runs on the
+// provider's ([runtime.PokeLedger]).
+func (p *Provider) poke(ctx context.Context, name string, send func() error) error {
+	commit := p.pokes.Begin(name, p.rawActivity(ctx, name))
+	if err := send(); err != nil {
+		return err
+	}
+	commit(p.clock(), p.rawActivity(ctx, name))
+	return nil
+}
+
+// clock is the poke ledger's time source.
+func (p *Provider) clock() time.Time {
+	if p.now != nil {
+		return p.now()
+	}
+	return time.Now()
 }
 
 // RunLive re-applies session_live commands. Not yet supported for K8s.
@@ -646,27 +679,24 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 // is listed too and can mask this city's session dying.
 func (p *Provider) ListRunningComplete() bool { return true }
 
-// GetLastActivity returns the time of the last I/O in the tmux session.
+// GetLastActivity returns the time of the last I/O in the tmux session (zero
+// if unknown), read as the local tmux provider reads it: the newest
+// #{window_activity} of the session's windows, less the keystroke echo of
+// gc's own nudges and keys (see [Provider.poke]). #{session_activity} is
+// pinned at creation/attach time for a detached session and does not advance
+// when the agent prints output.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
-	ctx := context.Background()
-	podName, err := p.findRunningPod(ctx, name)
+	return p.pokes.Discount(name, p.rawActivity(context.Background(), name), p.clock()), nil
+}
+
+// rawActivity reads the session's raw activity clock, the newest
+// #{window_activity} of the in-pod tmux session's windows (zero if unknown).
+func (p *Provider) rawActivity(ctx context.Context, name string) time.Time {
+	activity, err := runtime.ReadTmuxWindowActivity(ctx, p, name, tmuxSession)
 	if err != nil {
-		return time.Time{}, nil
+		return time.Time{}
 	}
-	output, err := p.ops.execInPod(ctx, podName, "agent",
-		[]string{"tmux", "display-message", "-t", tmuxSession, "-p", "#{session_activity}"}, nil)
-	if err != nil {
-		return time.Time{}, nil
-	}
-	epoch := strings.TrimSpace(output)
-	if epoch == "" {
-		return time.Time{}, nil
-	}
-	secs, err := strconv.ParseInt(epoch, 10, 64)
-	if err != nil {
-		return time.Time{}, nil
-	}
-	return time.Unix(secs, 0), nil
+	return activity
 }
 
 // ClearScrollback clears the tmux scrollback buffer (best-effort).
@@ -676,7 +706,7 @@ func (p *Provider) ClearScrollback(name string) error {
 }
 
 // Capabilities reports K8s provider capabilities. The K8s provider
-// supports activity tracking via tmux session_activity but does not
+// supports activity tracking via tmux window_activity but does not
 // support attachment detection from the controller host.
 func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{
@@ -914,7 +944,15 @@ func waitForTmux(ctx context.Context, ops k8sOps, name string, timeout time.Dura
 
 // initCityInPod copies the city directory and runs gc init inside the pod.
 func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity string) error {
-	// Copy city dir (excluding .gc/) into the pod.
+	// Streaming may leave a partial directory if the source or pod exec fails.
+	// Use a bounded cleanup context even when the caller has been canceled.
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_, _ = ops.execInPod(cleanupCtx, podName, "agent", []string{"rm", "-rf", "/tmp/city-src"}, nil)
+	}()
+
+	// Copy the city directory into the pod, including its current .gc state.
 	if err := copyDirToPod(ctx, ops, podName, "agent", ctrlCity, "/tmp/city-src"); err != nil {
 		return err
 	}
@@ -926,9 +964,6 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity string) er
 	if err != nil {
 		return err
 	}
-	// Clean up.
-	_, _ = ops.execInPod(ctx, podName, "agent",
-		[]string{"rm", "-rf", "/tmp/city-src"}, nil)
 	return nil
 }
 

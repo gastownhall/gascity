@@ -130,22 +130,6 @@ func derefStr(p *string) string {
 	return *p
 }
 
-// TestWorkAssignmentOpenAssignedToBasic_ByteIdenticalQuery asserts the no-flags
-// List variant (used by releaseWorkFromClosedSessionBead) emits exactly
-// {Assignee,Status} — no Live, no TierMode — matching the raw probe.
-func TestWorkAssignmentOpenAssignedToBasic_ByteIdenticalQuery(t *testing.T) {
-	rec := newRecordingWriteWorkStore()
-	wa := workAssignmentForStore(beads.WorkStore{Store: rec})
-
-	if _, err := wa.OpenAssignedToBasic("agent-1", "in_progress"); err != nil {
-		t.Fatalf("OpenAssignedToBasic: %v", err)
-	}
-	want := beads.ListQuery{Assignee: "agent-1", Status: "in_progress"}
-	if len(rec.listQueries) != 1 || !reflect.DeepEqual(rec.listQueries[0], want) {
-		t.Fatalf("List query mismatch:\n got %#v\n want %#v", rec.listQueries, want)
-	}
-}
-
 // TestWorkAssignmentReleaseWorkBead_OpenStaysOpen asserts that releasing an
 // already-open bead writes {Assignee:"", Metadata:<clearedAffinity>} with NO
 // Status change (status reset is only for in_progress), the raw release op's
@@ -250,9 +234,10 @@ func TestWorkAssignmentReleaseWorkBead_RunTargetFallbackSkippedWhenRouted(t *tes
 }
 
 // TestWorkAssignmentReassignWorkBead_ByteIdentical asserts reassign emits only
-// Update{Assignee:&new}, byte-identical to the raw retire-reassign op. The bead
-// is seeded live because the reassign is conditional on the snapshot: an
-// unseeded fixture verifies as stale and emits no write at all.
+// Assignee=&new, the fields of the raw retire-reassign op, delivered as a
+// write fenced on the snapshot. The bead is seeded live because the reassign
+// is conditional on the snapshot: an unseeded fixture verifies as stale and
+// emits no write at all.
 func TestWorkAssignmentReassignWorkBead_ByteIdentical(t *testing.T) {
 	rec := newRecordingWriteWorkStore()
 	item := beads.Bead{ID: "w-1", Status: "in_progress", Assignee: "retired-session"}
@@ -271,6 +256,9 @@ func TestWorkAssignmentReassignWorkBead_ByteIdentical(t *testing.T) {
 	}
 	if got.opts.Status != nil || got.opts.Metadata != nil {
 		t.Fatalf("reassign must not touch Status/Metadata, got %#v", got.opts)
+	}
+	if !got.fenced {
+		t.Fatalf("reassign = %#v, want a write fenced on the snapshot (UpdateIfMatch), not a blind Update", got)
 	}
 }
 
@@ -301,8 +289,5 @@ func TestWorkAssignmentWrite_NilStoreSafe(t *testing.T) {
 	}
 	if err := wa.ClearDetachedProbe("x"); err != nil { // must not panic
 		t.Fatalf("nil store ClearDetachedProbe: %v", err)
-	}
-	if _, err := wa.OpenAssignedToBasic("a", "open"); err != nil {
-		t.Fatalf("nil store OpenAssignedToBasic: %v", err)
 	}
 }
