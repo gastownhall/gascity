@@ -722,7 +722,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	if err != nil {
 		return nil, err
 	}
-	resumeCommand := firstNonEmptyGCString(resolved.ResumeCommand, info.ResumeCommand)
+	resumeCommand := resolvedWorkerResumeCommand(resolved, info)
 	if overrides, err := session.ParseTemplateOverrides(metadata); err == nil && strings.TrimSpace(resumeCommand) != "" {
 		resumeProvider := *resolved
 		resumeProvider.ResumeCommand = resumeCommand
@@ -1050,6 +1050,28 @@ func workerNudgeDeliveryForMode(mode nudgeDeliveryMode) (worker.NudgeDelivery, b
 	default:
 		return "", false
 	}
+}
+
+// resolvedWorkerResumeCommand picks the resume command to use for a resumed
+// session: the freshly resolved value when present, else the stored one from
+// info — but only when the provider hasn't changed. A cross-provider switch
+// (gc-8539) can legitimately resolve ResumeCommand to empty (e.g. switching
+// to a builtin-named provider, where BuiltinAncestor == Name); falling back
+// to info.ResumeCommand in that case would replay a resume command built for
+// the OLD provider. The fallback is kept for the same-provider case, where an
+// empty resolved value really does mean a transient resolution failure and
+// the stored value should survive it.
+func resolvedWorkerResumeCommand(resolved *config.ResolvedProvider, info session.Info) string {
+	if resolved == nil {
+		return info.ResumeCommand
+	}
+	if resolved.ResumeCommand != "" {
+		return resolved.ResumeCommand
+	}
+	if strings.TrimSpace(info.Provider) == strings.TrimSpace(resolved.Name) {
+		return info.ResumeCommand
+	}
+	return ""
 }
 
 func firstNonEmptyGCString(values ...string) string {
