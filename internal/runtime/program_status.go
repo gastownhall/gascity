@@ -75,6 +75,7 @@ type ProgramStatus struct {
 	WorkingChildren int
 	Probed          bool // the program sent the support probe this incarnation (doctor)
 	LastError       bool // an error report was seen; sticky across clear (annotation only)
+	Reported        bool // a root report was seen this incarnation: no root then reads cleared, not silent
 	ReaderVerified  bool // the process table confirmed the tap; false when the snapshot was unavailable
 }
 
@@ -114,9 +115,11 @@ func (st ProgramState) boundary() bool {
 const ProgramStatusHoldLimit = 10 * time.Minute
 
 // HoldLive reports whether a Running/Blocked/WorkingChildren hold may still
-// count: the reading is valid and now - max(Since, lastActivity) <
+// count: the reading is valid and 0 <= now - max(Since, lastActivity) <
 // ProgramStatusHoldLimit. Past the bound a caller must act as if no record
-// existed. It never reads idle.
+// existed. It never reads idle. A Since or lastActivity later than now (a
+// forged or skewed record, a clock stepped back) is no evidence and holds
+// nothing, so no hold outlasts the bound.
 func (s ProgramStatus) HoldLive(lastActivity, now time.Time) bool {
 	if !s.Valid() {
 		return false
@@ -125,7 +128,7 @@ func (s ProgramStatus) HoldLive(lastActivity, now time.Time) bool {
 	if lastActivity.After(from) {
 		from = lastActivity
 	}
-	if from.IsZero() {
+	if from.IsZero() || from.After(now) {
 		return false
 	}
 	return now.Sub(from) < ProgramStatusHoldLimit
@@ -286,10 +289,13 @@ type ProgramPaneRow struct {
 //  5. a record of an unknown codec version under a live tap: reader_lost;
 //     otherwise an absent or undecodable record, one whose nonce is not Tap
 //     exactly, or one with an unknown root word: silent (treated as absent);
-//  6. no root: silent if nothing was ever reported (Seq 0), else cleared;
+//  6. no root: silent if no root was ever reported this incarnation (a
+//     probe or child reports alone leave it silent), else cleared;
 //  7. valid, ReaderVerified when the process table confirmed the tap.
 //
-// Only a valid reading carries state.
+// Only a valid reading carries state. The others carry none of the record's
+// claims, only its annotations (LastError under rule 3; Probed, Reported and
+// LastError under rule 6).
 func JudgeProgramStatus(row ProgramPaneRow) ProgramStatus {
 	mode := row.Mode
 	if mode != ProgramStatusShadow && mode != ProgramStatusOn {
@@ -314,22 +320,40 @@ func JudgeProgramStatus(row ProgramPaneRow) ProgramStatus {
 	if !ours {
 		return ProgramStatus{Mode: mode, Validity: ProgramStatusSilent, Nonce: row.Tap}
 	}
-	s := row.Record
-	s.Mode = mode
-	s.ReaderVerified = row.TapLiveness == ProgramTapAlive
-	switch {
-	case s.State == "" && s.Seq == 0:
-		s.Validity = ProgramStatusSilent
-	case s.State == "":
-		s.Validity = ProgramStatusCleared
-	default:
-		s.Validity = ProgramStatusValid
-		if s.State != ProgramBlocked {
-			s.Kind = ProgramBlockUnspecified
-		}
-		return s
+	if row.Record.State == "" {
+		return judgeNoRoot(mode, row.Record)
 	}
-	s.ReaderVerified = false
-	s.State, s.Kind = "", ProgramBlockUnspecified
+	s := row.Record
+	s.Mode, s.Validity = mode, ProgramStatusValid
+	s.ReaderVerified = row.TapLiveness == ProgramTapAlive
+	s.Kind = blockKind(s.State, s.Kind)
 	return s
+}
+
+// judgeNoRoot judges a record of ours with no root (rule 6). It keeps the
+// incarnation's annotations and none of the record's claims: Probed is what
+// doctor reads to tell a probe that went unanswered from a program that never
+// probed, and Reported is what tells cleared from silent.
+func judgeNoRoot(mode ProgramStatusMode, rec ProgramStatus) ProgramStatus {
+	s := ProgramStatus{
+		Mode:      mode,
+		Validity:  ProgramStatusSilent,
+		Nonce:     rec.Nonce,
+		Probed:    rec.Probed,
+		LastError: rec.LastError,
+		Reported:  rec.Reported,
+	}
+	if rec.Reported {
+		s.Validity = ProgramStatusCleared
+	}
+	return s
+}
+
+// blockKind is the kind a judged root carries: k on a blocked root when spec
+// rev 0.4 names it, otherwise unspecified.
+func blockKind(st ProgramState, k ProgramBlockKind) ProgramBlockKind {
+	if st == ProgramBlocked && (k == ProgramBlockPermission || k == ProgramBlockQuestion || k == ProgramBlockAuth) {
+		return k
+	}
+	return ProgramBlockUnspecified
 }

@@ -2,6 +2,7 @@ package runtime_test
 
 import (
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -30,6 +31,7 @@ func armedRow() runtime.ProgramPaneRow {
 			TurnStarts: 1,
 			Probed:     true,
 			LastError:  true,
+			Reported:   true,
 		},
 	}
 }
@@ -148,7 +150,11 @@ func TestJudgeProgramStatusFirstMatchingRuleWins(t *testing.T) {
 		{"absent", func(r *runtime.ProgramPaneRow) { r.RecordForm = runtime.ProgramRecordAbsent }, runtime.ProgramStatusSilent, runtime.ProgramStatusOn, false, false},
 		{"unknown record form", func(r *runtime.ProgramPaneRow) { r.RecordForm = "v9" }, runtime.ProgramStatusSilent, runtime.ProgramStatusOn, false, false},
 		{"unknown root word", func(r *runtime.ProgramPaneRow) { r.Record.State = "sleeping" }, runtime.ProgramStatusSilent, runtime.ProgramStatusOn, false, false},
-		{"no root, never reported", func(r *runtime.ProgramPaneRow) { r.Record.State, r.Record.Seq = "", 0 }, runtime.ProgramStatusSilent, runtime.ProgramStatusOn, false, true},
+		{"no root, never reported", func(r *runtime.ProgramPaneRow) { r.Record.State, r.Record.Seq, r.Record.Reported = "", 0, false }, runtime.ProgramStatusSilent, runtime.ProgramStatusOn, false, true},
+		{"probed only, no root ever reported", func(r *runtime.ProgramPaneRow) { r.Record.State, r.Record.Seq, r.Record.Reported = "", 1, false }, runtime.ProgramStatusSilent, runtime.ProgramStatusOn, false, true},
+		{"child reports only, no root ever reported", func(r *runtime.ProgramPaneRow) {
+			r.Record.State, r.Record.Reported, r.Record.Children, r.Record.WorkingChildren = "", false, 1, 1
+		}, runtime.ProgramStatusSilent, runtime.ProgramStatusOn, false, true},
 		{"no root after reports", func(r *runtime.ProgramPaneRow) { r.Record.State = "" }, runtime.ProgramStatusCleared, runtime.ProgramStatusOn, false, true},
 	}
 	for _, tc := range cases {
@@ -171,21 +177,72 @@ func TestJudgeProgramStatusFirstMatchingRuleWins(t *testing.T) {
 				}
 				return
 			}
-			if got.State != "" || got.Kind != "" || got.Valid() {
-				t.Errorf("%q reading carries state: %+v", got.Validity, got)
+			// Past its mode, validity, nonce and annotations, a reading that
+			// is not valid is zero: it carries none of the record's claims.
+			claims := got
+			claims.Mode, claims.Validity, claims.Nonce = "", "", ""
+			claims.Probed, claims.LastError, claims.Reported = false, false, false
+			if claims != (runtime.ProgramStatus{}) {
+				t.Errorf("%q reading carries the record's claims: %+v", got.Validity, got)
 			}
 		})
 	}
 }
 
-// Kills a judged record that keeps a block kind its state does not take.
+// Kills a rule 6 that tells silent from cleared by Seq, which a probe or a
+// child report bumps, and a reading with no root that carries the record's
+// claims: it is silent until a root was reported this incarnation, then
+// cleared, and keeps only Probed (doctor), Reported and LastError.
+func TestJudgeProgramStatusNoRootCarriesNoClaims(t *testing.T) {
+	t0 := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		rec  runtime.ProgramStatus
+		want runtime.ProgramStatusValidity
+	}{
+		{"nothing reported", runtime.ProgramStatus{}, runtime.ProgramStatusSilent},
+		{"probed only", runtime.ProgramStatus{Seq: 1, Probed: true}, runtime.ProgramStatusSilent},
+		{"child reports only", runtime.ProgramStatus{
+			Seq: 3, App: "codex", Progress: -1, Children: 2, WorkingChildren: 1, Probed: true,
+		}, runtime.ProgramStatusSilent},
+		{"root cleared after reports", runtime.ProgramStatus{
+			Seq: 9, App: "codex", Progress: 40, Since: t0, QuietSince: t0, TurnStarts: 2, TurnEnds: 2,
+			Children: 2, WorkingChildren: 1, Probed: true, LastError: true, Reported: true,
+		}, runtime.ProgramStatusCleared},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			row := armedRow()
+			row.Record = tc.rec
+			row.Record.Nonce = row.Tap
+			want := runtime.ProgramStatus{
+				Mode:      runtime.ProgramStatusOn,
+				Validity:  tc.want,
+				Nonce:     row.Tap,
+				Probed:    tc.rec.Probed,
+				LastError: tc.rec.LastError,
+				Reported:  tc.rec.Reported,
+			}
+			if got := runtime.JudgeProgramStatus(row); got != want {
+				t.Fatalf("judged %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+// Kills a judged record that keeps a block kind its state does not take, or
+// one spec rev 0.4 does not name.
 func TestJudgeProgramStatusKeepsKindOnlyWithBlocked(t *testing.T) {
 	row := armedRow()
 	row.Record.State, row.Record.Kind = runtime.ProgramBlocked, runtime.ProgramBlockAuth
 	if got := runtime.JudgeProgramStatus(row); !got.Blocked() || got.Kind != runtime.ProgramBlockAuth {
 		t.Fatalf("blocked reading %+v, want blocked:auth", got)
 	}
-	row.Record.State = runtime.ProgramIdle
+	row.Record.Kind = "dialog"
+	if got := runtime.JudgeProgramStatus(row); !got.Blocked() || got.Kind != runtime.ProgramBlockUnspecified {
+		t.Fatalf("blocked reading of an unknown kind %+v, want blocked, kind unspecified", got)
+	}
+	row.Record.State, row.Record.Kind = runtime.ProgramIdle, runtime.ProgramBlockAuth
 	if got := runtime.JudgeProgramStatus(row); got.Kind != runtime.ProgramBlockUnspecified {
 		t.Fatalf("idle reading kept kind %q", got.Kind)
 	}
@@ -289,7 +346,8 @@ func TestBaselineRecordsStateOnlyFromAValidReading(t *testing.T) {
 }
 
 // Kills a hold bound measured from the earlier of the record's Since and the
-// pane's last output, or one that counts an invalid reading.
+// pane's last output, one that counts an invalid reading, or one that a Since
+// or activity later than now keeps live past the bound.
 func TestHoldLiveUsesLaterOfSinceAndActivity(t *testing.T) {
 	t0 := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
 	limit := runtime.ProgramStatusHoldLimit
@@ -328,6 +386,27 @@ func TestHoldLiveUsesLaterOfSinceAndActivity(t *testing.T) {
 	s.Validity = runtime.ProgramStatusReaderLost
 	if s.HoldLive(time.Time{}, t0.Add(time.Minute)) {
 		t.Fatal("an invalid reading held")
+	}
+	// A Since or activity later than now is no evidence: a forged since_ms,
+	// a skewed capture host or a clock stepped back holds nothing.
+	for _, tc := range []struct {
+		name            string
+		since, activity time.Time
+	}{
+		{"future Since", t0.Add(time.Hour), time.Time{}},
+		{"future Since beside recent activity", t0.Add(time.Hour), t0},
+		{"future activity", t0, t0.Add(time.Hour)},
+		{"Since at the end of time", time.UnixMilli(math.MaxInt64), time.Time{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := valid(runtime.ProgramWorking, 1, 1)
+			f.Since = tc.since
+			for _, now := range []time.Time{t0.Add(time.Minute), t0.AddDate(1, 0, 0)} {
+				if f.HoldLive(tc.activity, now) {
+					t.Fatalf("HoldLive(activity %v, now %v) with Since %v held", tc.activity, now, tc.since)
+				}
+			}
+		})
 	}
 }
 
