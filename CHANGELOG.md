@@ -653,6 +653,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Split cities now start sessions for binding-resident steps that carry
+  worktree evidence.** On a split-storage city, a rig-rooted graph step lives
+  in the relocated class binding, which the pool demand probe reads under the
+  city key. The pool-trigger worktree evidence guard compared the step's
+  owner (`gc.root_store_ref`, e.g. `rig:alpha`) with that city key and
+  refused the step on every tick, silently, so no session ever started for a
+  step stamped by `gc worktree ensure`. Rows read from the class binding now
+  take their owner from their own `gc.root_store_ref`, which
+  `worktree.Verify` still checks against the on-disk provenance; work-ledger,
+  rig-store and cross-rig rows keep the strict store comparison (ga-8tpvb).
+
 - **`gc prime --strict` fails on a `prompt_template` that does not render.**
   A `.template.md` (or `.md.tmpl`) prompt_template that failed to parse or
   execute, such as one calling an undefined function `{{base_branch}}`, was
