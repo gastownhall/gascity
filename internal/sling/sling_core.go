@@ -94,9 +94,9 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	if a.Suspended && !opts.Force {
 		result.AgentSuspended = true
 	}
-	citySuspended, suspendedRig := targetScopeSuspension(fsys.OSFS{}, deps, a)
-	result.CitySuspended = citySuspended
 	if !opts.Force {
+		citySuspended, suspendedRig := targetScopeSuspension(fsys.OSFS{}, deps, a)
+		result.CitySuspended = citySuspended
 		result.SuspendedRig = suspendedRig
 	}
 	sp := agentutil.ScaleParamsFor(&a)

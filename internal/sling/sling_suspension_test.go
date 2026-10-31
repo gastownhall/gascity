@@ -290,6 +290,37 @@ func TestDoSlingWarnsPathBoundAgentInSuspendedRig(t *testing.T) {
 	}
 }
 
+func TestDoSlingForceSuppressesEffectiveSuspensionWarnings(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig"}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = suspensionTestCityDir(t)
+	deps.Store = seededStore("my-1")
+	writeCitySuspension(t, deps.CityPath, true)
+	writeRigSuspension(t, deps.CityPath, "myrig", true)
+
+	opts := testOpts(a, "my-1")
+	opts.Force = true
+	result, err := DoSling(opts, deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if result.CitySuspended {
+		t.Error("expected CitySuspended=false with --force")
+	}
+	if result.SuspendedRig != "" {
+		t.Errorf("SuspendedRig = %q, want empty with --force", result.SuspendedRig)
+	}
+	if result.AgentSuspended {
+		t.Error("expected AgentSuspended=false with --force")
+	}
+}
+
 func TestDoSlingCityAndRigBothSuspendedSetBothFields(t *testing.T) {
 	runner := newFakeRunner()
 	cfg := &config.City{
