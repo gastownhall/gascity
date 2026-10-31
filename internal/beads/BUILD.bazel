@@ -293,6 +293,7 @@ go_test(
         "unread_store_notice_test.go",
         "update_reporting_test.go",
         "updated_at_store_test.go",
+        "verbatim_import_test.go",
     ],
     data = glob(
         ["**"],
