@@ -307,16 +307,76 @@ database_selected() {
     printf '%s\n' "$DATABASE_FILTER" | grep -qxF "$1"
 }
 
+# norm_utc_rfc3339 reduces a UTC RFC3339 stamp to YYYY-MM-DDTHH:MM:SS so two
+# stamps compare lexicographically. Fractional seconds are ignored. Non-UTC
+# offsets fail; bd writes Z and +00:00.
+norm_utc_rfc3339() {
+    local s="$1"
+    case "$s" in
+        *Z) s="${s%Z}" ;;
+        *+00:00) s="${s%+00:00}" ;;
+        *-00:00) s="${s%-00:00}" ;;
+        *) return 1 ;;
+    esac
+    s="${s%%.*}"
+    case "$s" in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9])
+            printf '%s' "$s"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# suspended_backup_needs_sync is true when a suspended rig's on-disk last
+# sync predates suspended_at (or there is no readable last sync). The
+# comparison reads dolt-backup-state.json and does not call bd: a bd call
+# would restart the rig's retired proxy. A missing suspended_at means the
+# rig is cold without a known instant (suspended_on_start); leave it cold.
+suspended_backup_needs_sync() {
+    local rig_path="$1"
+    local suspended_at="$2"
+    local state last_sync suspend_norm last_norm
+    [ -n "$suspended_at" ] || return 1
+    [ -n "$rig_path" ] || return 0
+    state="$rig_path/.beads/dolt-backup-state.json"
+    if [ ! -f "$state" ]; then
+        return 0
+    fi
+    last_sync=$(jq -r '.last_sync // empty' "$state" 2>/dev/null || true)
+    [ -n "$last_sync" ] || return 0
+    suspend_norm=$(norm_utc_rfc3339 "$suspended_at" || true)
+    last_norm=$(norm_utc_rfc3339 "$last_sync" || true)
+    if [ -z "$suspend_norm" ] || [ -z "$last_norm" ]; then
+        return 0
+    fi
+    if [[ "$suspend_norm" > "$last_norm" ]]; then
+        return 0
+    fi
+    return 1
+}
+
 SCOPE_SPECS="city"
 if RIG_LIST=$(cd "$CITY_ABS" && run_bounded "$BACKUP_BD_TIMEOUT_SECS" gc rig list --json 2>/dev/null); then
     while IFS= read -r rig_name; do
         [ -n "$rig_name" ] || continue
         SCOPE_SPECS="$SCOPE_SPECS
 rig $rig_name"
-    # Suspended rigs are left cold: any bd call restarts a suspended scope's
-    # retired proxy and Dolt, and nothing writes to it while it is suspended,
-    # so its backup waits for it to resume.
     done < <(printf '%s\n' "$RIG_LIST" | jq -r '.rigs[]? | select((.hq // false) == false and (.suspended // false) == false) | .name // empty' 2>/dev/null)
+    # A suspended rig is left cold once its last sync is at or after
+    # suspension. Until then, sync it once: writes made before suspension
+    # must not stay unbacked, and the next run sees the stamp bd writes.
+    while IFS="$(printf '\t')" read -r rig_name rig_path suspended_at; do
+        [ -n "$rig_name" ] || continue
+        if suspended_backup_needs_sync "$rig_path" "$suspended_at"; then
+            echo "backup: rig:$rig_name suspended after its last sync; syncing once" >&2
+            SCOPE_SPECS="$SCOPE_SPECS
+rig $rig_name"
+        elif [ -n "$suspended_at" ]; then
+            echo "backup: rig:$rig_name suspended; last sync covers suspension; left cold" >&2
+        else
+            echo "backup: rig:$rig_name suspended without a suspension instant; left cold" >&2
+        fi
+    done < <(printf '%s\n' "$RIG_LIST" | jq -r '.rigs[]? | select((.hq // false) == false and (.suspended // false) == true) | [(.name // ""), (.path // ""), (.suspended_at // "")] | @tsv' 2>/dev/null)
 else
     echo "backup: gc rig list failed; backing up the city scope only" >&2
     outcome_scope_skipped "rigs" "rig list unavailable"
