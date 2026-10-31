@@ -1594,11 +1594,12 @@ func workQueryHasReadyWork(output string) bool {
 }
 
 // filterUnreadyHookCandidates strips beads from work_query output that fail
-// bd ready semantics: future defer_until, any open blocking dep in the row's
-// blocked_by array, the row's own is_blocked / status=="blocked" marker, or a
-// canonical dispatch hold label. The work_query is expected to gate these, but
-// defensive filtering here prevents a single broken query from cascading into
-// agent action on a bead it cannot progress.
+// bd ready semantics: bd's deferred status (dated or not) or a future
+// defer_until, any open blocking dep in the row's blocked_by array, the row's
+// own is_blocked / status=="blocked" marker, or a canonical dispatch hold
+// label. The work_query is expected to gate these, but defensive filtering
+// here prevents a single broken query from cascading into agent action on a
+// bead it cannot progress.
 // Pure function over JSON; takes time.Time so tests stay deterministic.
 func filterUnreadyHookCandidates(output string, now time.Time) string {
 	if output == "" {
@@ -1622,7 +1623,7 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 		if isClosedHookCandidate(obj) {
 			continue
 		}
-		if isFutureDeferredHookCandidate(obj, now) {
+		if isStoreDeferredHookCandidate(obj) || isFutureDeferredHookCandidate(obj, now) {
 			continue
 		}
 		if isDepBlockedHookCandidate(obj) {
@@ -1720,6 +1721,16 @@ func decodeHookCandidateBead(obj map[string]any) (beads.Bead, bool) {
 		return beads.Bead{}, false
 	}
 	return candidate, true
+}
+
+// isStoreDeferredHookCandidate reports whether item is a row bd records
+// deferred. bd's ready query filters on the raw status, so such a row is not
+// work whatever its defer_until says: an elapsed date only means bd's own
+// sweep may lift the deferral, and the row is work once the store records
+// that (#6207).
+func isStoreDeferredHookCandidate(item map[string]any) bool {
+	status, ok := item["status"].(string)
+	return ok && strings.EqualFold(strings.TrimSpace(status), "deferred")
 }
 
 func isFutureDeferredHookCandidate(item map[string]any, now time.Time) bool {

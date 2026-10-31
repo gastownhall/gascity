@@ -801,10 +801,11 @@ func recordDrainAckAssignedWorkEvent(
 //     drained correctly. The open/claimable arm
 //     (firstOpenClaimableAssignedWorkBeadForReachableStore) walks the seat's
 //     OpenAssignedTo rows (status=open) and suppresses a row ONLY when it is
-//     provably non-claimable: deferred (fresh bead-local defer_until), or blocked
-//     confirmed against LIVE deps — never on bd's denormalized is_blocked
-//     projection, which can read stale-true and would otherwise silence a strand
-//     whose deps are actually met, and which production reads do not carry at all.
+//     provably non-claimable: deferred (a fresh bead-local defer_until, or bd's
+//     deferred status), or blocked confirmed against LIVE deps — never on bd's
+//     denormalized is_blocked projection, which can read stale-true and would
+//     otherwise silence a strand whose deps are actually met, and which
+//     production reads do not carry at all.
 //     It does NOT borrow the beads.Ready projection, whose
 //     type/label exclusions (step, molecule, gate, gc:order-tracking, …) encode
 //     "not pull-claimable", not "not stranded" — so an OPEN step or other
@@ -5710,9 +5711,9 @@ func firstOpenClaimableAssignedWorkBeadForReachableStore(sw *SeatWork, info sess
 // also answers with) names WHY a row is not claimable, and each cause gets the
 // treatment its evidence deserves:
 //
-//   - deferred — defer_until and bd's indefinite deferral are fresh bead-local
-//     fields, never stale, so this is PROOF: no worker could have claimed the row
-//     and draining past it was correct pull.
+//   - deferred — a future defer_until and bd's deferred status (dated or not)
+//     are fresh bead-local fields, never stale, so this is PROOF: no worker
+//     could have claimed the row and draining past it was correct pull.
 //   - held — a canonical dispatch hold label (beadmeta.HasDispatchHold) is a
 //     fresh bead-local field too, and the hook refuses to serve a held row on
 //     every path, so this is PROOF as well: draining past it was correct pull.
