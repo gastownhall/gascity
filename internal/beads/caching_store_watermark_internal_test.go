@@ -1471,8 +1471,10 @@ func TestCachingStorePrimeKeepsWriteRevisionsOfDroppedRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := backing.Close(dropped.ID); err != nil {
-		t.Fatalf("backing Close: %v", err)
+	// Closed through the cache, so the cache holds the row closed — the row
+	// shape a full Prime drops.
+	if err := cache.Close(dropped.ID); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 	ageLocalWrite(cache, kept.ID)
 	ageLocalWrite(cache, dropped.ID)
