@@ -153,6 +153,7 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 	}
 
 	sessFront := sessionFrontDoor(sessStore)
+	suspendPending := wakeCancelsPendingSuspend(sessFront, deps.sp, id)
 	res, err := sessFront.WakeSession(id, deps.now().UTC(), session.WakeOpts{})
 	if err != nil {
 		if state, conflict := session.WakeConflictState(err); conflict {
@@ -170,6 +171,9 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 			fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
 		}
 		return 1
+	}
+	if suspendPending {
+		fmt.Fprintf(stderr, "gc session wake: session %s was suspended but its runtime had not stopped yet; this wake canceled the pending suspend and the runtime keeps running\n", id) //nolint:errcheck
 	}
 	nudgeIDs := res.NudgeIDs
 	agent := sessionWakeResolveAgentInfo(res.Info, deps.cfg)
@@ -256,6 +260,20 @@ func noteSessionWakePoke(stderr io.Writer, row session.Info, refused bool, pokeE
 	if pokeErr != nil && !noteWorkerSitePoke(stderr, "gc session wake", pokeErr) {
 		fmt.Fprintf(stderr, "gc session wake: warning: poke failed: %v\n", pokeErr) //nolint:errcheck
 	}
+}
+
+// wakeCancelsPendingSuspend reports whether waking id cancels a managed
+// suspend whose drain has not stopped the runtime yet: the row reads
+// suspended while its runtime still runs. A nil provider reports false.
+func wakeCancelsPendingSuspend(sessFront *session.Store, sp runtime.Provider, id string) bool {
+	if sp == nil {
+		return false
+	}
+	info, err := sessFront.Get(id)
+	if err != nil || info.State != session.StateSuspended || info.SessionName == "" {
+		return false
+	}
+	return sp.IsRunning(info.SessionName)
 }
 
 // errWakeNotAdmitted stops a wake's resolution from reopening a closed named

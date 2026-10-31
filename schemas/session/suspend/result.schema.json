@@ -10,6 +10,7 @@
     "session_id": { "type": "string", "minLength": 1 },
     "state": { "type": "string" },
     "mode": { "enum": ["managed", "direct"] },
+    "runtime_stop": { "enum": ["pending", "done"] },
     "op_id": { "type": "string", "minLength": 1 },
     "key": { "type": "string", "minLength": 1 },
     "replayed": { "type": "boolean" }
