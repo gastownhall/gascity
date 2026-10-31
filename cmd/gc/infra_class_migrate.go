@@ -1983,8 +1983,19 @@ type infraEdgePayload struct {
 func infraReadEdgePayload(store beads.Store, issueID, dependsOnID string) (infraEdgePayload, error) {
 	reader, ok := store.(beads.DepMetadataReader)
 	if !ok {
-		return infraEdgePayload{}, fmt.Errorf("store %T cannot report the payload on dep %s -> %s, and an unanswerable store is not an empty one", store, issueID, dependsOnID)
+		return infraEdgePayload{}, infraEdgePayloadUnanswerable(fmt.Sprintf("%T", store), issueID, dependsOnID)
 	}
+	return infraReadEdgePayloadFrom(reader, issueID, dependsOnID)
+}
+
+// infraEdgePayloadUnanswerable is infraReadEdgePayload's refusal of a store,
+// of type engine, that has no payload read.
+func infraEdgePayloadUnanswerable(engine, issueID, dependsOnID string) error {
+	return fmt.Errorf("store %s cannot report the payload on dep %s -> %s, and an unanswerable store is not an empty one", engine, issueID, dependsOnID)
+}
+
+// infraReadEdgePayloadFrom is infraReadEdgePayload on a store's payload read.
+func infraReadEdgePayloadFrom(reader beads.DepMetadataReader, issueID, dependsOnID string) (infraEdgePayload, error) {
 	payload, carried, err := reader.DepMetadata(issueID, dependsOnID)
 	if err != nil {
 		return infraEdgePayload{}, fmt.Errorf("reading the payload on dep %s -> %s: %w", issueID, dependsOnID, err)
