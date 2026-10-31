@@ -758,8 +758,41 @@ func TestCmdSlingRemote_InlineSlingFailurePrintsResumeHint(t *testing.T) {
 	if !strings.Contains(msg, "target busy") || !strings.Contains(msg, "rg-abc1") {
 		t.Errorf("stderr = %q, want the failure and the created bead id", msg)
 	}
-	if !strings.Contains(msg, "gc --context shared sling rg/worker rg-abc1") {
+	if !strings.Contains(msg, "gc --context shared sling 'rg/worker' 'rg-abc1'") {
 		t.Errorf("stderr = %q, want the resume command", msg)
+	}
+}
+
+// The resume hint reproduces the original invocation's sling flags, shell-quoted,
+// so re-running it does the same sling: dropping --no-formula would launch the
+// target's default formula, and dropping --on would never attach the formula.
+func TestCmdSlingRemote_InlineSlingFailureResumeHintKeepsFlags(t *testing.T) {
+	srv, _ := newRemoteInlineServer(t, "rg-abc1", http.StatusConflict, `{"status":409,"detail":"target busy"}`)
+	target := remoteTestTarget(srv.URL)
+	target.Ctx = &clientcontext.Context{Name: "shared"}
+	target.Source = remoteSourceContextFlag
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteGrantClient(t, srv.URL), target, []string{"rg/worker", "write a readme"},
+		false, false, true /*force*/, "it's a title", []string{"pr=12", "who=a b"}, "mr", true /*noConvoy*/, false, true, /*reassign*/
+		"code-review", false, false, false, "rig", "rg", false, &out, &errb)
+	if code == 0 {
+		t.Fatal("a failed sling must exit non-zero")
+	}
+	want := "gc --context shared sling 'rg/worker' 'rg-abc1' --on 'code-review' --title 'it'\\''s a title'" +
+		" --var 'pr=12' --var 'who=a b' --merge 'mr' --no-convoy --reassign --force --scope-kind 'rig' --scope-ref 'rg'"
+	if !strings.Contains(errb.String(), want) {
+		t.Errorf("stderr = %q\nwant resume %q", errb.String(), want)
+	}
+
+	errb.Reset()
+	code = cmdSlingRemote(remoteGrantClient(t, srv.URL), target, []string{"rg/worker", "write a readme"},
+		false, false, false, "", nil, "", false, true /*owned*/, false, "", true /*noFormula*/, false, false, "", "", false, &out, &errb)
+	if code == 0 {
+		t.Fatal("a failed sling must exit non-zero")
+	}
+	if want := "sling 'rg/worker' 'rg-abc1' --owned --no-formula\n"; !strings.Contains(errb.String(), want) {
+		t.Errorf("stderr = %q\nwant resume ending %q", errb.String(), want)
 	}
 }
 
@@ -773,7 +806,7 @@ func TestCmdSlingRemote_InlineSlingFailureAdHocResumeHint(t *testing.T) {
 	if code == 0 {
 		t.Fatal("a failed sling must exit non-zero")
 	}
-	want := "gc --city-url " + srv.URL + " --city-name mc sling rg/worker rg-abc1"
+	want := "gc --city-url " + srv.URL + " --city-name mc sling 'rg/worker' 'rg-abc1' --json"
 	if !strings.Contains(out.String(), "rg-abc1") || !strings.Contains(out.String()+errb.String(), want) {
 		t.Errorf("stdout=%q stderr=%q, want %q", out.String(), errb.String(), want)
 	}

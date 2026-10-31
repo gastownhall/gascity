@@ -127,8 +127,15 @@ func cmdSlingRemote(c *api.Client, target *remoteTarget, args []string, isFormul
 		if createdID != "" {
 			// The create and the sling are two requests, not one transaction: the
 			// bead exists, so name it and how to route it instead of re-creating.
+			// The resume command repeats the original sling flags so it does the
+			// same sling; only the inline text is replaced by the created bead.
+			resume := remoteSlingResumeCommand(target, args[0], createdID, remoteSlingResumeFlags{
+				onFormula: onFormula, title: title, vars: vars, merge: merge,
+				noConvoy: noConvoy, owned: owned, reassign: reassign, force: force,
+				noFormula: noFormula, scopeKind: scopeKind, scopeRef: scopeRef, jsonOutput: jsonOutput,
+			})
 			return fail("sling_failed", fmt.Sprintf("gc sling: %v\ngc sling: created bead %s was not routed; resume with: %s",
-				err, createdID, remoteSlingResumeCommand(target, args[0], createdID)))
+				err, createdID, resume))
 		}
 		return fail("sling_failed", "gc sling: "+err.Error())
 	}
@@ -154,15 +161,46 @@ func createRemoteInlineBead(c *api.Client, slingTarget, title, description strin
 	})
 }
 
+// remoteSlingResumeFlags are the sling flags of an invocation whose created
+// bead was not routed, reproduced in its resume command.
+type remoteSlingResumeFlags struct {
+	onFormula, title, merge, scopeKind, scopeRef            string
+	vars                                                    []string
+	noConvoy, owned, reassign, force, noFormula, jsonOutput bool
+}
+
 // remoteSlingResumeCommand is the command that slings an already-created bead
-// to slingTarget on the same remote city: by context name when one supplied
-// the target, else by URL and city name.
-func remoteSlingResumeCommand(target *remoteTarget, slingTarget, beadID string) string {
-	sel := "--city-url " + target.BaseURL + " --city-name " + target.CityName
-	if target.Ctx != nil {
-		sel = "--context " + target.Ctx.Name
+// to slingTarget on the same remote city with the original invocation's sling
+// flags, so re-running it does the same sling. Every interpolated value is
+// shell-quoted.
+func remoteSlingResumeCommand(target *remoteTarget, slingTarget, beadID string, f remoteSlingResumeFlags) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "gc %s sling %s %s", remoteInvocationFlags(target), shellSingleQuote(slingTarget), shellSingleQuote(beadID))
+	value := func(flag, v string) {
+		if v != "" {
+			fmt.Fprintf(&b, " --%s %s", flag, shellSingleQuote(v))
+		}
 	}
-	return "gc " + sel + " sling " + slingTarget + " " + beadID
+	toggle := func(flag string, set bool) {
+		if set {
+			b.WriteString(" --" + flag)
+		}
+	}
+	value("on", f.onFormula)
+	value("title", f.title)
+	for _, kv := range f.vars {
+		value("var", kv)
+	}
+	value("merge", f.merge)
+	toggle("no-convoy", f.noConvoy)
+	toggle("owned", f.owned)
+	toggle("reassign", f.reassign)
+	toggle("force", f.force)
+	toggle("no-formula", f.noFormula)
+	value("scope-kind", f.scopeKind)
+	value("scope-ref", f.scopeRef)
+	toggle("json", f.jsonOutput)
+	return b.String()
 }
 
 // checkRemoteOnAttach catches a remote server older than this client
