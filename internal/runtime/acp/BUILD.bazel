@@ -49,6 +49,7 @@ go_test(
         "meta_privacy_test.go",
         "permission_test.go",
         "pipe_error_test.go",
+        "process_env_projection_test.go",
         "proctable_integration_test.go",
         "proctable_linux_test.go",
         "protocol_conformance_test.go",
@@ -80,6 +81,7 @@ go_test(
     }),
     deps = [
         "//internal/bazeltest",
+        "//internal/execenv",
         "//internal/runtime",
         "//internal/runtime/auto",
         "//internal/runtime/hybrid",
