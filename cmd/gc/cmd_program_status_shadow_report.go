@@ -134,8 +134,8 @@ type programShadowCell struct {
 	AgreePct float64 `json:"agree_pct"`
 	// TimeWeightedAgreePct weighs each valid comparison of a change point
 	// by how long it stood (until the next comparison of its session and
-	// point, or the newest comparison in the report); -1 when not a change
-	// point or with no valid time.
+	// point, or the session's last comparison at any point); -1 when not a
+	// change point or with no valid time.
 	TimeWeightedAgreePct float64 `json:"time_weighted_agree_pct"`
 	// DisagreeByValidity counts the comparisons whose readings disagree, by
 	// the record reading's validity.
@@ -158,14 +158,16 @@ func summarizeProgramShadow(records []programShadowRecord) programShadowReport {
 	copy(sorted, records)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].At.Before(sorted[j].At) })
 
-	var end time.Time
+	// Each change-point comparison stands until the next one of its session
+	// and point. A session's last one stands until the session's last
+	// comparison at any point, the last time it was seen: never to the end
+	// of the report, which may be long after the session ended.
+	lastSeen := map[string]time.Time{}
 	for _, r := range sorted {
-		if r.At.After(end) {
-			end = r.At
+		if r.At.After(lastSeen[r.Session]) {
+			lastSeen[r.Session] = r.At
 		}
 	}
-	// Each change-point comparison stands until the next one of its session
-	// and point.
 	standing := make([]time.Duration, len(sorted))
 	next := map[[2]string]int{}
 	for i := len(sorted) - 1; i >= 0; i-- {
@@ -173,7 +175,7 @@ func summarizeProgramShadow(records []programShadowRecord) programShadowReport {
 		if j, ok := next[key]; ok {
 			standing[i] = sorted[j].At.Sub(sorted[i].At)
 		} else {
-			standing[i] = end.Sub(sorted[i].At)
+			standing[i] = lastSeen[sorted[i].Session].Sub(sorted[i].At)
 		}
 		next[key] = i
 	}

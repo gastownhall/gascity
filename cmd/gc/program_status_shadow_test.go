@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"slices"
 	"strings"
@@ -375,5 +376,193 @@ func TestShadowReportAgreementTable(t *testing.T) {
 	}
 	if _, ok := cells["pending/unknown"]; !ok {
 		t.Fatalf("a comparison with no family is not reported as unknown: %+v", report.Rows)
+	}
+}
+
+// ctxCapturingLeaf is a shadow leaf that keeps the context its idle wait
+// was called with.
+type ctxCapturingLeaf struct {
+	runtime.FullFake
+	waitCtx context.Context
+}
+
+func (l *ctxCapturingLeaf) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
+	l.waitCtx = ctx
+	return l.FullFake.WaitForIdle(ctx, name, timeout)
+}
+
+// Kills an idle proof whose leaf wait records a wait_for_idle of its own
+// beside proved_idle (R1B M1): the proof marks the wait's context as
+// recorded by its caller, and proved_idle records only when its pair
+// changes, so a busy seat's failed proofs are one comparison, not hundreds.
+func TestProvedIdleMarksItsWaitCallerRecorded(t *testing.T) {
+	c := &eventCollector{}
+	sink, r := shadowRecorderUnder(t, c)
+	shadow, _ := shadowLeaf(t, runtime.ProgramStatusShadow)
+	shadow.ProgramShadowSink = sink
+	shadow.WaitForIdleErrors["s"] = errors.New("busy")
+	leaf := &ctxCapturingLeaf{FullFake: shadow}
+	for range 400 {
+		if provedIdle(context.Background(), leaf, "s", time.Now()) {
+			t.Fatal("a failing wait proved idle")
+		}
+		if !runtime.ShadowCallerRecords(leaf.waitCtx) {
+			t.Fatal("the idle proof's wait is not marked as recorded by its caller")
+		}
+	}
+	if !r.flush(5 * time.Second) {
+		t.Fatal("flush timed out")
+	}
+	got := c.payloads(t)
+	if len(got) != 1 || got[0].Point != string(runtime.ProgramPointProvedIdle) {
+		t.Fatalf("400 failed proofs recorded %+v, want one proved_idle", got)
+	}
+}
+
+// Kills a hold comparison whose recorded hold_live is not the one its rule
+// judged with (R1B M3): a turn past the hold bound by its record's age but
+// with fresh runtime activity holds, and is recorded hold_live=true.
+func TestShadowHoldLiveIsTheRulesOwn(t *testing.T) {
+	f := runtime.NewFake()
+	if err := f.Start(context.Background(), "s", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	f.Activity = map[string]time.Time{"s": now.Add(-time.Minute)}
+	f.SetProgramPane("s", runtime.ProgramPaneRow{
+		Mode: runtime.ProgramStatusShadow, CaptureGate: true, PaneID: "%3", PanePipe: true, Tap: "r1.%3",
+		TapLiveness: runtime.ProgramTapAlive, RecordForm: runtime.ProgramRecordDecoded,
+		Record: runtime.ProgramStatus{State: runtime.ProgramWorking, Nonce: "r1.%3", Seq: 2, TurnStarts: 1, Progress: -1, Reported: true, Since: now.Add(-15 * time.Minute)},
+	})
+	var got []runtime.ProgramStatusComparison
+	f.ProgramShadowSink = func(c runtime.ProgramStatusComparison) { got = append(got, c) }
+	shadowHold(runtime.FullFake{Fake: f}, "s", "gc-1", "claude", runtime.ProgramPointClaimNudgeHold, false, now, runtime.ProgramHoldVerdict)
+	if len(got) != 1 || got[0].Program != runtime.ProgramVerdictHold {
+		t.Fatalf("recorded %+v, want one record hold", got)
+	}
+	// The payload is written later, as the drain gets to it.
+	p := programShadowPayload(got[0], 0, now.Add(2*time.Second))
+	if !p.HoldLive || p.Program != string(runtime.ProgramVerdictHold) {
+		t.Fatalf("payload program %q hold_live %v, want hold beside hold_live=true", p.Program, p.HoldLive)
+	}
+}
+
+// Kills an exit flush that returns while the leaf is still judging a
+// comparison (R1B M2): the flush waits for the leaf's background work, then
+// for the queue, so a short-lived process records what it decided.
+func TestShadowExitFlushWaitsForLeafWork(t *testing.T) {
+	c := &eventCollector{}
+	sink, _ := shadowRecorderUnder(t, c)
+	done := programShadowBeginWork()
+	release := make(chan struct{})
+	go func() {
+		<-release
+		sink(comparison("s", runtime.ProgramPointWaitForIdle, runtime.ProgramVerdictIdle, runtime.ProgramVerdictBusy))
+		done()
+	}()
+	flushed := make(chan struct{})
+	go func() {
+		flushProgramStatusShadow(5 * time.Second)
+		close(flushed)
+	}()
+	select {
+	case <-flushed:
+		t.Fatal("the exit flush returned while the leaf was still judging a comparison")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	<-flushed
+	if got := c.payloads(t); len(got) != 1 || got[0].Point != string(runtime.ProgramPointWaitForIdle) {
+		t.Fatalf("after the exit flush recorded %+v, want the comparison the leaf was judging", got)
+	}
+	if n := programShadowWork.Load(); n != 0 {
+		t.Fatalf("%d pieces of shadow work counted after they ended", n)
+	}
+}
+
+// Kills a tmux config that lets a short-lived process follow comparisons
+// up, or hides the leaf's background work from the exit flush.
+func TestTmuxConfigShadowFollowUpsOnlyLongLived(t *testing.T) {
+	prev := programShadowLongLived.Load()
+	t.Cleanup(func() { programShadowLongLived.Store(prev) })
+	cfg := tmuxConfigFromSession(config.SessionConfig{ProgramStatus: "shadow"}, "city", t.TempDir())
+	if cfg.ComparisonFollowUps == nil || cfg.ComparisonWork == nil {
+		t.Fatal("a city's tmux config has no follow-up gate or work count")
+	}
+	programShadowLongLived.Store(false)
+	if cfg.ComparisonFollowUps() {
+		t.Fatal("a short-lived process follows comparisons up")
+	}
+	markProgramShadowLongLived()
+	if !cfg.ComparisonFollowUps() {
+		t.Fatal("a long-lived process does not follow comparisons up")
+	}
+	done := programShadowBeginWork()
+	done()
+	done()
+	if n := programShadowWork.Load(); n != 0 {
+		t.Fatalf("ending one piece of work twice left the count at %d", n)
+	}
+}
+
+// panickingRecorder panics on its first write, then records.
+type panickingRecorder struct {
+	eventCollector
+	panicked bool
+}
+
+func (p *panickingRecorder) Record(e events.Event) {
+	if !p.panicked {
+		p.panicked = true
+		panic("events log bug")
+	}
+	p.eventCollector.Record(e)
+}
+
+// Kills a drain whose panic stops the city's shadow recording (the
+// supervisor hosts several cities): the panicking write is counted as
+// dropped and the next comparison is still written.
+func TestShadowDrainRecoversPanic(t *testing.T) {
+	rec := &panickingRecorder{}
+	prev := programShadowOpen
+	programShadowOpen = func(string) events.Recorder { return rec }
+	t.Cleanup(func() { programShadowOpen = prev })
+	city := t.TempDir()
+	sink := programStatusShadowSink(city)
+	v, _ := programShadowRecorders.Load(city)
+	r := v.(*programShadowRecorder)
+	sink(comparison("s", runtime.ProgramPointWaitForIdle, runtime.ProgramVerdictIdle, runtime.ProgramVerdictIdle))
+	sink(comparison("s", runtime.ProgramPointWaitForIdle, runtime.ProgramVerdictIdle, runtime.ProgramVerdictBusy))
+	if !r.flush(5 * time.Second) {
+		t.Fatal("flush timed out after a panicking write")
+	}
+	got := rec.payloads(t)
+	if len(got) != 1 || got[0].Dropped != 1 || got[0].Program != string(runtime.ProgramVerdictBusy) {
+		t.Fatalf("recorded %+v, want the second comparison carrying the panicked one as dropped", got)
+	}
+}
+
+// Kills a summarizer that stretches a session's last change record to the
+// end of the report: it stands only until the session was last seen.
+func TestShadowReportDoesNotStretchLastRecord(t *testing.T) {
+	t0 := time.Date(2026, 11, 2, 8, 0, 0, 0, time.UTC)
+	rec := func(sec int, session, point string, agree bool) programShadowRecord {
+		return programShadowRecord{At: t0.Add(time.Duration(sec) * time.Second), Session: session, Payload: events.SessionProgramStatusShadowPayload{
+			Point: point, Family: "claude", Validity: "valid", Agree: agree,
+		}}
+	}
+	report := summarizeProgramShadow([]programShadowRecord{
+		// Session a agrees 10 s, then its last backstop record disagrees and
+		// stands until a's last sign of life at 30 s: 20 s.
+		rec(0, "a", "execution_backstop", true),
+		rec(10, "a", "execution_backstop", false),
+		rec(30, "a", "wait_for_idle", true),
+		// Another session keeps the report open for an hour.
+		rec(3600, "b", "wait_for_idle", true),
+	})
+	for _, c := range report.Rows {
+		if c.Point == "execution_backstop" && c.TimeWeightedAgreePct != 33.3 {
+			t.Fatalf("backstop time-weighted agreement %v, want 33.3 (10 s of 30 s, not stretched to the report end)", c.TimeWeightedAgreePct)
+		}
 	}
 }

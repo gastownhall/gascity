@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -23,6 +24,9 @@ type shadowExecutor struct {
 	// record returns the nth program read's published record.
 	record func(n int) string
 	reads  int
+	// order is every command in the order sent, a program read as
+	// "program-read".
+	order []string
 }
 
 func (e *shadowExecutor) execute(args []string) (string, error) {
@@ -35,10 +39,12 @@ func (e *shadowExecutor) execute(args []string) (string, error) {
 			rec = e.record(e.reads)
 		}
 		e.reads++
+		e.order = append(e.order, "program-read")
 		return strings.Join([]string{"0", "agent", "%5", "1", readNonce, rec, runtimeInventoryEnd}, "\t"), nil
 	case tmuxSubcommand(args) == "show-environment" && strings.HasPrefix(args[len(args)-1], "="):
 		return "GC_PROVIDER=claude\nGC_SESSION_ID=gc-7\nSECRET=x", nil
 	}
+	e.order = append(e.order, strings.Join(args, " "))
 	return e.inner.execute(args)
 }
 
@@ -88,11 +94,13 @@ func (c *shadowCollector) wait(t *testing.T, n int) []runtime.ProgramStatusCompa
 }
 
 // shadowTmux is a Tmux over inner under mode, its capture gate passed, its
-// program reads answered by record, comparisons going to sink.
+// program reads answered by record, comparisons going to sink, in a process
+// that follows timed comparisons up.
 func shadowTmux(mode runtime.ProgramStatusMode, inner executor, record func(int) string, sink runtime.ProgramStatusComparisonSink) (*Tmux, *shadowExecutor) {
 	ex := &shadowExecutor{inner: inner, record: record}
 	cfg := DefaultConfig()
 	cfg.ProgramStatus, cfg.ComparisonSink = mode, sink
+	cfg.ComparisonFollowUps = func() bool { return true }
 	tm := &Tmux{cfg: cfg, exec: ex}
 	tm.capture.probe = passGate
 	return tm, ex
@@ -257,6 +265,9 @@ func TestShadowNudgeDecisionIdenticalToOff(t *testing.T) {
 			// bubble must make its own.
 			sessionNudgeLocks.Delete(session)
 			calls, reads = inner.calls, ex.programReads()
+			if mode == runtime.ProgramStatusShadow {
+				assertShadowReadBeforeLastLook(t, ex.order)
+			}
 		})
 		return calls, reads, err
 	}
@@ -442,5 +453,187 @@ func TestShadowReadiness(t *testing.T) {
 	if len(got) != 1 || got[0].Point != runtime.ProgramPointReadiness || got[0].Scrape != runtime.ProgramVerdictReady ||
 		got[0].Program != runtime.ProgramVerdictReady || !got[0].Timed || got[0].LatencyMs >= 0 {
 		t.Fatalf("comparisons %+v, want one readiness ready/ready, timed, the record earlier", got)
+	}
+}
+
+// assertShadowReadBeforeLastLook fails unless a nudge's record read comes
+// before the last prompt look ahead of the paste: a read between that look
+// and the paste would widen the window a prompt can appear in unseen.
+func assertShadowReadBeforeLastLook(t *testing.T, order []string) {
+	t.Helper()
+	paste := slices.IndexFunc(order, func(c string) bool {
+		return strings.Contains(c, "send-keys") && strings.Contains(c, "-l")
+	})
+	if paste < 0 {
+		t.Fatalf("no paste in %q", order)
+	}
+	lastLook, read := -1, -1
+	for i, c := range order[:paste] {
+		switch {
+		case c == "program-read":
+			read = i
+		case strings.Contains(c, "capture-pane"):
+			lastLook = i
+		}
+	}
+	if read < 0 || lastLook < 0 || read > lastLook {
+		t.Fatalf("record read at %d, last prompt look at %d, paste at %d: the read must precede the look\n%q", read, lastLook, paste, order[:paste+1])
+	}
+}
+
+// bigShadowCollector is a shadowCollector that holds n wake-ups unread.
+func bigShadowCollector(n int) *shadowCollector { return &shadowCollector{ch: make(chan struct{}, n)} }
+
+// idleProofsPerHour is the maintainer-city rate of failed idle proofs on a
+// busy fleet (R1B review M1).
+const idleProofsPerHour = 400
+
+// Kills an idle proof that records a tmux-level wait_for_idle beside its own
+// proved_idle: an hour of failed proofs on a busy seat records nothing at
+// the leaf, takes no record read and holds no background slot.
+func TestShadowIdleProofRecordsNoWaitForIdle(t *testing.T) {
+	// Each failed wait sleeps one idle poll; the bubble's clock makes an
+	// hour of them take no wall time.
+	synctest.Test(t, func(t *testing.T) {
+		col := bigShadowCollector(idleProofsPerHour)
+		working := psRecord(t, readNonce, runtime.ProgramWorking, liveSince)
+		tm, ex := shadowTmux(runtime.ProgramStatusShadow, &paneScriptExecutor{captures: []scriptedCapture{{out: busyPane}}},
+			func(int) string { return working }, col.sink)
+		ctx := runtime.WithShadowCallerRecords(context.Background())
+		for range idleProofsPerHour {
+			if err := tm.WaitForIdle(ctx, "s", time.Millisecond); !errors.Is(err, ErrIdleTimeout) {
+				t.Fatalf("WaitForIdle = %v, want the busy scan's timeout", err)
+			}
+		}
+		synctest.Wait()
+		if n, reads, held := len(col.got), ex.programReads(), len(tm.shadow.slots); n != 0 || reads != 0 || held != 0 {
+			t.Fatalf("an hour of idle proofs recorded %d comparisons, took %d record reads, holds %d slots; want none", n, reads, held)
+		}
+		// One unmarked wait (no follow-up, so it ends) shows the leaf was
+		// shadowing all along.
+		tm.cfg.ComparisonFollowUps = nil
+		_ = tm.WaitForIdle(context.Background(), "s", time.Millisecond)
+		synctest.Wait()
+		if len(col.got) != 1 || col.got[0].Point != runtime.ProgramPointWaitForIdle {
+			t.Fatalf("the unmarked wait recorded %+v, want one wait_for_idle", col.got)
+		}
+	})
+}
+
+// Kills a timed point that follows every decision up: with its session busy,
+// an hour of idle waits at one session holds one follow-up, records every
+// other decision untimed at once, drops nothing and leaves the slots free.
+func TestShadowFollowUpOnePerSessionPoint(t *testing.T) {
+	stubShadowFollow(t)
+	synctest.Test(t, func(t *testing.T) {
+		col := bigShadowCollector(idleProofsPerHour)
+		var ended atomic.Bool
+		working := psRecord(t, readNonce, runtime.ProgramWorking, liveSince)
+		quiet := psRecord(t, readNonce, runtime.ProgramIdle, liveSince, func(s *runtime.ProgramStatus) {
+			s.Seq, s.TurnStarts, s.TurnEnds, s.QuietSince = 3, 1, 1, time.Now()
+		})
+		tm, _ := shadowTmux(runtime.ProgramStatusShadow, &fakeExecutor{}, func(int) string {
+			if ended.Load() {
+				return quiet
+			}
+			return working
+		}, col.sink)
+		following := func() int {
+			tm.shadow.mu.Lock()
+			defer tm.shadow.mu.Unlock()
+			return len(tm.shadow.following)
+		}
+		now := time.Now()
+		tm.shadowWaitForIdle("s", now, now, nil)
+		synctest.Wait()
+		if following() != 1 {
+			t.Fatal("the first wait started no follow-up")
+		}
+		for i := 1; i < idleProofsPerHour; i++ {
+			tm.shadowWaitForIdle("s", now, time.Now(), nil)
+			col.wait(t, i)
+		}
+		synctest.Wait()
+		if f, held := following(), len(tm.shadow.slots); f != 1 || held != 1 {
+			t.Fatalf("%d follow-ups outstanding holding %d slots, want one of each", f, held)
+		}
+		for _, c := range col.wait(t, idleProofsPerHour-1) {
+			if c.Timed || c.Dropped != 0 || c.Program != runtime.ProgramVerdictBusy {
+				t.Fatalf("comparison %+v recorded beside an outstanding follow-up, want untimed busy, nothing dropped", c)
+			}
+		}
+		ended.Store(true)
+		last := col.wait(t, idleProofsPerHour)[idleProofsPerHour-1]
+		if !last.Timed || last.Program != runtime.ProgramVerdictBusy {
+			t.Fatalf("the followed wait recorded %+v, want timed busy", last)
+		}
+		synctest.Wait()
+		if f, held := following(), len(tm.shadow.slots); f != 0 || held != 0 {
+			t.Fatalf("follow-up not released: %d outstanding, %d slots held", f, held)
+		}
+	})
+}
+
+// workSignal is a Config.ComparisonWork hook counting begun work and
+// signaling each end on ended.
+func workSignal(begun *atomic.Int64, ended chan<- struct{}) func() func() {
+	return func() func() {
+		begun.Add(1)
+		return func() { ended <- struct{}{} }
+	}
+}
+
+// Kills a short-lived process that follows a timed comparison past its
+// decision, where its exit would lose it uncounted: without follow-ups the
+// decision-time verdict is recorded untimed after one record read, as work
+// the process is told of.
+func TestShadowNoFollowUpInShortLivedProcess(t *testing.T) {
+	stubShadowFollow(t)
+	col := newShadowCollector()
+	working := psRecord(t, readNonce, runtime.ProgramWorking, liveSince)
+	tm, ex := shadowTmux(runtime.ProgramStatusShadow, &fakeExecutor{}, func(int) string { return working }, col.sink)
+	tm.cfg.ComparisonFollowUps = nil
+	var begun atomic.Int64
+	ended := make(chan struct{}, 1)
+	tm.cfg.ComparisonWork = workSignal(&begun, ended)
+	now := time.Now()
+	tm.shadowWaitForIdle("s", now, now, nil)
+	select {
+	case <-ended:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the process was never told the shadow work ended")
+	}
+	got := col.wait(t, 1)[0]
+	if got.Timed || got.Program != runtime.ProgramVerdictBusy || got.Scrape != runtime.ProgramVerdictIdle {
+		t.Fatalf("comparison %+v, want idle/busy untimed", got)
+	}
+	if reads := ex.programReads(); reads != 1 {
+		t.Fatalf("%d record reads, want the one judging read", reads)
+	}
+	if begun.Load() != 1 {
+		t.Fatalf("work begun %d times, want 1", begun.Load())
+	}
+}
+
+// Kills background shadow work whose panic escapes: the goroutine recovers,
+// frees its slot, and counts the lost comparison as dropped.
+func TestShadowGoRecoversPanic(t *testing.T) {
+	col := newShadowCollector()
+	tm, _ := shadowTmux(runtime.ProgramStatusShadow, &fakeExecutor{}, nil, col.sink)
+	var begun atomic.Int64
+	ended := make(chan struct{}, 1)
+	tm.cfg.ComparisonWork = workSignal(&begun, ended)
+	tm.shadowGo(func() { panic("shadow bug") })
+	select {
+	case <-ended:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a panicking shadow goroutine never ended its work")
+	}
+	if held := len(tm.shadow.slots); held != 0 {
+		t.Fatalf("a panicking shadow goroutine kept its slot (%d held)", held)
+	}
+	tm.shadowEmit("s", runtime.ProgramPointPending, runtime.ProgramVerdictNone, runtime.ProgramVerdictNone, runtime.ProgramStatus{}, 0, false)
+	if got := col.wait(t, 1)[0]; got.Dropped != 1 {
+		t.Fatalf("next comparison Dropped = %d, want the panicked one", got.Dropped)
 	}
 }

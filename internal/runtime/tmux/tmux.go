@@ -193,6 +193,16 @@ type Config struct {
 	// (ProgramStatus, or the one SetProgramStatusMode published) is shadow;
 	// nil records nothing. It must not block.
 	ComparisonSink runtime.ProgramStatusComparisonSink
+	// ComparisonFollowUps reports whether the process lives long enough to
+	// follow a timed point's comparison past its decision. Nil, or false,
+	// records each decision-time verdict untimed with no follow-up: a
+	// short-lived CLI process may exit before a follow-up ends, and a
+	// comparison it never hands over is lost without a count.
+	ComparisonFollowUps func() bool
+	// ComparisonWork, when set, is called as each piece of background shadow
+	// work starts and returns the call that ends it, so an exiting process
+	// can wait for the comparisons still being judged.
+	ComparisonWork func() (done func())
 }
 
 // DefaultConfig returns a Config with the original hardcoded values.
@@ -3606,18 +3616,23 @@ func (t *Tmux) nudgeSession(
 	// 2. Send text in literal mode with retry on transient errors, after a
 	// last look for a permission prompt: the clear and the survey check above
 	// take time, and a paste into a prompt is read as menu input.
-	lookErr := prompt.check()
-	// Under the shadow switch, the program's record is read once here: it
-	// is the typing gate's comparison and the baseline its delivery is
-	// confirmed against.
-	shadowBase, shadowed := runtime.ProgramBaseline{}, false
+	//
+	// Under the shadow switch, the program's record is read once, just
+	// before that last look so the read never widens the gap between the
+	// look and the paste: it is the typing gate's comparison and the
+	// baseline the delivery is confirmed against.
+	var shadowReading runtime.ProgramStatus
+	shadowReadOK := false
 	if t.shadowing() {
-		if s, ok := t.shadowRead(session); ok {
-			if noPendingPrompt != nil {
-				t.shadowTypingGate(session, lookErr, s)
-			}
-			shadowBase, shadowed = s.Baseline(), lookErr == nil
+		shadowReading, shadowReadOK = t.shadowRead(session)
+	}
+	lookErr := prompt.check()
+	shadowBase, shadowed := runtime.ProgramBaseline{}, false
+	if shadowReadOK {
+		if noPendingPrompt != nil {
+			t.shadowTypingGate(session, lookErr, shadowReading)
 		}
+		shadowBase, shadowed = shadowReading.Baseline(), lookErr == nil
 	}
 	if lookErr != nil {
 		return lookErr
@@ -5601,15 +5616,22 @@ func (t *Tmux) SnapshotIdle(session string) (bool, error) {
 // connection; change the two together.
 //
 // With the program-status switch at shadow, the wait's outcome is recorded
-// beside the program's own record (shadowWaitForIdle) after it is decided;
-// the outcome returned is the scan's alone.
+// beside the program's own record (shadowWaitForIdle) after it is decided,
+// unless ctx carries [runtime.WithShadowCallerRecords]; the outcome returned
+// is the scan's alone.
 func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Duration) error {
 	if !t.shadowing() {
 		return t.waitForIdle(ctx, session, timeout)
 	}
 	started := time.Now()
 	err := t.waitForIdle(ctx, session, timeout)
-	t.shadowWaitForIdle(session, started, time.Now(), err)
+	decidedAt := time.Now()
+	// A caller recording this decision at its own point (an idle proof's
+	// proved_idle) gets no wait_for_idle beside it.
+	if !runtime.ShadowCallerRecords(ctx) {
+		t.shadowWaitForIdle(session, started, decidedAt, err)
+	}
+	t.shadowSettle(session, decidedAt, err)
 	return err
 }
 

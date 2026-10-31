@@ -89,7 +89,45 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	core, timed := profileProvider{b, profileCapabilities[p]}, sleepTrait{SessionSleepCapabilityTimedOnly}
 	switch p {
 	case ProfileTmux:
-		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}, steerTrait{SteerKeystroke}}
+		// Keyed, one interface per line: a branch adding an interface then
+		// merges with another branch adding one without a silent miscount.
+		return tmuxProfile{
+			Provider:                      core,
+			AttachmentObserverWithError:   b,
+			BackgroundWorkStopper:         b,
+			DeadRuntimeSessionChecker:     b,
+			DialogProvider:                b,
+			EnvironmentBatchProvider:      b,
+			FencedInputProvider:           b,
+			FencedInteractionProvider:     b,
+			FreshActivityProvider:         b,
+			FreshLivenessObserver:         b,
+			IdleSnapshotProvider:          b,
+			IdleWaitProvider:              b,
+			ImmediateNudgeProvider:        b,
+			InputClearProvider:            b,
+			InteractionProvider:           b,
+			InterruptBoundaryWaitProvider: b,
+			InterruptedTurnResetProvider:  b,
+			InventoryProvider:             b,
+			ListingAttestation:            b,
+			LivenessObserver:              b,
+			LivenessObserverWithError:     b,
+			ProcessTableScanner:           b,
+			ProgramCaptureHealer:          b,
+			ProgramStatusProvider:         b,
+			ProgramStatusShadowProvider:   b,
+			RelaunchProvider:              b,
+			ServerDeathConfirmer:          b,
+			ServerLifecycleProvider:       b,
+			SessionObjectKiller:           b,
+			SessionRosterProvider:         b,
+			TurnRunningProvider:           b,
+			UnattendedSessionStopper:      b,
+			sleepTrait:                    sleepTrait{SessionSleepCapabilityFull},
+			localTranscriptTrait:          localTranscriptTrait{},
+			steerTrait:                    steerTrait{SteerKeystroke},
+		}
 	case ProfileACP:
 		return acpProfile{core, b, b, b, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}, localTranscriptTrait{}}
 	case ProfileSubprocess:

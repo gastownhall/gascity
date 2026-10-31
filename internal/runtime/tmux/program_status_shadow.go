@@ -22,6 +22,13 @@ import (
 // program's own signal, the hand-off to the sink) runs on a bounded
 // background goroutine, and a point whose work finds no free slot is
 // dropped and counted, never waited for.
+//
+// A timed point follows its record past the decision only in a process that
+// lives long enough (Config.ComparisonFollowUps), and only one follow-up per
+// session and point is outstanding at a time: a decision that finds one
+// running records its decision-time verdict untimed instead, so a point that
+// repeats while its session stays busy can neither flood the log with
+// overlapping samples nor fill the slots.
 
 const (
 	// shadowSlots bounds the background shadow work one Tmux runs at once.
@@ -69,6 +76,14 @@ type programShadow struct {
 	// taps returns the state cache's process-table account of capture
 	// readers without refreshing it; nil reads tap liveness as unknown.
 	taps func() programTaps
+	// following holds the session points with a follow-up outstanding.
+	following map[shadowFollowKey]struct{}
+}
+
+// shadowFollowKey is one session's timed decision point.
+type shadowFollowKey struct {
+	session string
+	point   runtime.ProgramStatusPoint
 }
 
 // shadowIdentity is a session's family and bead id as its environment named
@@ -127,7 +142,10 @@ func (p *Provider) ProgramStatusShadowSink() runtime.ProgramStatusComparisonSink
 var _ runtime.ProgramStatusShadowProvider = (*Provider)(nil)
 
 // shadowGo runs fn on a background goroutine when a slot is free, and
-// otherwise drops it, counting the drop against the next comparison.
+// otherwise drops it, counting the drop against the next comparison. The
+// process is told of the work (Config.ComparisonWork) so its exit can wait
+// for it. A panic in fn is contained (a supervisor process hosts several
+// cities) and counted as a drop.
 func (t *Tmux) shadowGo(fn func()) {
 	sh := &t.shadow
 	sh.slotsOnce.Do(func() { sh.slots = make(chan struct{}, shadowSlots) })
@@ -137,10 +155,51 @@ func (t *Tmux) shadowGo(fn func()) {
 		sh.dropped.Add(1)
 		return
 	}
+	done := func() {}
+	if t.cfg.ComparisonWork != nil {
+		done = t.cfg.ComparisonWork()
+	}
 	go func() {
+		defer done()
 		defer func() { <-sh.slots }()
+		defer func() {
+			if recover() != nil {
+				sh.dropped.Add(1)
+			}
+		}()
 		fn()
 	}()
+}
+
+// shadowFollowsUp reports whether the process follows timed comparisons
+// past their decision (Config.ComparisonFollowUps).
+func (t *Tmux) shadowFollowsUp() bool {
+	return t.cfg.ComparisonFollowUps != nil && t.cfg.ComparisonFollowUps()
+}
+
+// claimShadowFollow claims session's point for one follow-up and returns
+// the call that releases it, or false when the process does not follow up
+// or a follow-up of that session and point is already outstanding.
+func (t *Tmux) claimShadowFollow(session string, point runtime.ProgramStatusPoint) (func(), bool) {
+	if !t.shadowFollowsUp() {
+		return nil, false
+	}
+	sh := &t.shadow
+	key := shadowFollowKey{session: session, point: point}
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	if _, busy := sh.following[key]; busy {
+		return nil, false
+	}
+	if sh.following == nil {
+		sh.following = make(map[shadowFollowKey]struct{})
+	}
+	sh.following[key] = struct{}{}
+	return func() {
+		sh.mu.Lock()
+		defer sh.mu.Unlock()
+		delete(sh.following, key)
+	}, true
 }
 
 // programFreshFormat reads every pane of a session for a fresh judgement:
@@ -228,12 +287,25 @@ func (t *Tmux) shadowEmit(session string, point runtime.ProgramStatusPoint, scra
 	sink(c)
 }
 
-// shadowFollow reads session's record after a decision until reached
-// reports the program's own signal time, the reading stops being valid, or
-// limit passes. It returns the last reading, the signal time, and whether
-// the signal was seen. It runs on a shadow goroutine, never on a decision
-// path.
-func (t *Tmux) shadowFollow(session string, s runtime.ProgramStatus, limit time.Duration, reached func(runtime.ProgramStatus) (time.Time, bool)) (runtime.ProgramStatus, time.Time, bool) {
+// shadowFollow reads session's record after a decision at point until
+// reached reports the program's own signal time, the reading stops being
+// valid, or limit passes. It returns the last reading, the signal time, and
+// whether the signal was seen. A reading that has not reached the signal is
+// followed only when claimShadowFollow grants the point a follow-up;
+// otherwise it is returned as is, unseen, and the decision is recorded
+// untimed. It runs on a shadow goroutine, never on a decision path.
+func (t *Tmux) shadowFollow(session string, point runtime.ProgramStatusPoint, s runtime.ProgramStatus, limit time.Duration, reached func(runtime.ProgramStatus) (time.Time, bool)) (runtime.ProgramStatus, time.Time, bool) {
+	if at, ok := reached(s); ok {
+		return s, at, true
+	}
+	if !s.Valid() {
+		return s, time.Time{}, false
+	}
+	release, ok := t.claimShadowFollow(session, point)
+	if !ok {
+		return s, time.Time{}, false
+	}
+	defer release()
 	start := time.Now()
 	for {
 		if at, ok := reached(s); ok {
@@ -267,7 +339,8 @@ func laterOf(a, b time.Time) time.Time {
 // scrape's verdict at decidedAt beside the record's idle verdict. A record
 // not yet at a boundary is followed, up to the hold bound, to time when it
 // would have let the wait return: the veto lag. A wait that ended on its
-// context or a gone session decided nothing and records nothing.
+// context or a gone session decided nothing and records nothing. The settle
+// of an interrupt the wait follows is recorded apart (shadowSettle).
 func (t *Tmux) shadowWaitForIdle(session string, started, decidedAt time.Time, err error) {
 	var scrape runtime.ProgramVerdict
 	switch {
@@ -290,7 +363,7 @@ func (t *Tmux) shadowWaitForIdle(session string, started, decidedAt time.Time, e
 		if program == runtime.ProgramVerdictIdle {
 			at, seen = laterOf(s.BoundaryAt(), started), true
 		} else {
-			final, at, seen = t.shadowFollow(session, s, runtime.ProgramStatusHoldLimit, func(r runtime.ProgramStatus) (time.Time, bool) {
+			final, at, seen = t.shadowFollow(session, runtime.ProgramPointWaitForIdle, s, runtime.ProgramStatusHoldLimit, func(r runtime.ProgramStatus) (time.Time, bool) {
 				if !r.InputBoundary() {
 					return time.Time{}, false
 				}
@@ -299,7 +372,6 @@ func (t *Tmux) shadowWaitForIdle(session string, started, decidedAt time.Time, e
 		}
 		t.shadowEmit(session, runtime.ProgramPointWaitForIdle, scrape, program, final, at.Sub(decidedAt), seen)
 	})
-	t.shadowSettle(session, decidedAt, err)
 }
 
 // shadowNoteInterrupt keeps the record's position as gc interrupts session,
@@ -372,7 +444,7 @@ func (t *Tmux) shadowSettleFrom(session string, mark shadowInterrupt, decidedAt 
 			}
 			return laterOf(r.BoundaryAt(), mark.at), true
 		}
-		final, at, seen := t.shadowFollow(session, s, shadowConfirmFollowLimit, settled)
+		final, at, seen := t.shadowFollow(session, runtime.ProgramPointInterruptSettle, s, shadowConfirmFollowLimit, settled)
 		t.shadowEmit(session, runtime.ProgramPointInterruptSettle, scrape, program, final, at.Sub(decidedAt), seen)
 	})
 }
@@ -423,7 +495,7 @@ func (t *Tmux) shadowSubmit(session string, baseline runtime.ProgramBaseline, sc
 			}
 			return time.Time{}, true
 		}
-		final, at, seen := t.shadowFollow(session, s, shadowConfirmFollowLimit, advanced)
+		final, at, seen := t.shadowFollow(session, runtime.ProgramPointSubmitConfirm, s, shadowConfirmFollowLimit, advanced)
 		timed := seen && !at.IsZero()
 		t.shadowEmit(session, runtime.ProgramPointSubmitConfirm, scrape, program, final, at.Sub(decidedAt), timed)
 	})
@@ -487,7 +559,7 @@ func (t *Tmux) shadowReadiness(session string, decidedAt time.Time, err error) {
 		}
 		final, at, seen := s, first, known
 		if !s.Valid() {
-			final, at, seen = t.shadowFollow(session, s, shadowReadyFollowLimit, func(r runtime.ProgramStatus) (time.Time, bool) {
+			final, at, seen = t.shadowFollow(session, runtime.ProgramPointReadiness, s, shadowReadyFollowLimit, func(r runtime.ProgramStatus) (time.Time, bool) {
 				if !r.Valid() {
 					return time.Time{}, false
 				}

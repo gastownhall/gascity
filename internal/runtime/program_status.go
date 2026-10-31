@@ -235,6 +235,24 @@ type ProgramStatusComparison struct {
 	LatencyMs int64              // program signal minus scrape signal; meaningful only when Timed
 	Timed     bool
 	Dropped   int // comparisons the emitter dropped, under pressure, since its last one
+	// HoldActivity is the runtime's last activity the rule judged hold
+	// liveness with ([ProgramStatus.HoldLive]); zero when it used none.
+	HoldActivity time.Time
+	// JudgedAt is when the rule judged; zero means when the comparison is
+	// recorded. With HoldActivity it makes the recorded hold liveness the
+	// rule's own.
+	JudgedAt time.Time
+}
+
+// HoldLive is the hold liveness the comparison's rule judged with: the
+// reading's [ProgramStatus.HoldLive] under HoldActivity at JudgedAt, or at
+// recordedAt when JudgedAt is zero.
+func (c ProgramStatusComparison) HoldLive(recordedAt time.Time) bool {
+	at := c.JudgedAt
+	if at.IsZero() {
+		at = recordedAt
+	}
+	return c.Status.HoldLive(c.HoldActivity, at)
 }
 
 // ProgramStatusComparisonSink receives shadow comparisons. Implementations

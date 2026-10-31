@@ -290,3 +290,51 @@ func TestProgramStatusShadowFor(t *testing.T) {
 		t.Fatal("a failed read shadowed")
 	}
 }
+
+// Kills a hold comparison that does not carry the activity and time its rule
+// judged with, so a long turn kept live by fresh activity is recorded as a
+// dead hold, and one that reads the activity clock while not shadowing.
+func TestShadowCompareHoldCarriesTheRulesHold(t *testing.T) {
+	f := runtime.NewFake()
+	if err := f.Start(t.Context(), "s", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	f.Activity = map[string]time.Time{"s": now.Add(-time.Minute)}
+	row := armedRow()
+	row.Mode = runtime.ProgramStatusShadow
+	row.Record.Since = now.Add(-15 * time.Minute)
+	f.SetProgramPane("s", row)
+	var got []runtime.ProgramStatusComparison
+	f.ProgramShadowSink = func(c runtime.ProgramStatusComparison) { got = append(got, c) }
+	runtime.ShadowCompareHold(runtime.FullFake{Fake: f}, "s", "gc-1", "claude", runtime.ProgramPointExecutionBackstop, runtime.ProgramVerdictNoHold, now, runtime.ProgramHoldVerdict)
+	if len(got) != 1 || got[0].Program != runtime.ProgramVerdictHold {
+		t.Fatalf("recorded %+v, want one hold", got)
+	}
+	if c := got[0]; !c.HoldActivity.Equal(now.Add(-time.Minute)) || !c.JudgedAt.Equal(now) || !c.HoldLive(now.Add(time.Hour)) {
+		t.Fatalf("comparison activity %v at %v, hold live %v; want the rule's activity and time, live", c.HoldActivity, c.JudgedAt, c.HoldLive(now.Add(time.Hour)))
+	}
+	if (runtime.ProgramStatusComparison{Status: got[0].Status}).HoldLive(now) {
+		t.Fatal("the record alone is live past the hold bound: the test does not exercise the activity")
+	}
+	off := runtime.NewFake()
+	if err := off.Start(t.Context(), "s", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	runtime.ShadowCompareHold(runtime.FullFake{Fake: off}, "s", "", "", runtime.ProgramPointExecutionBackstop, runtime.ProgramVerdictNoHold, now, runtime.ProgramHoldVerdict)
+	for _, c := range off.Calls {
+		if c.Method == "GetLastActivity" {
+			t.Fatal("a leaf not shadowing had its activity clock read")
+		}
+	}
+}
+
+// Kills a caller-records mark that leaks into an unmarked context.
+func TestShadowCallerRecords(t *testing.T) {
+	if runtime.ShadowCallerRecords(t.Context()) {
+		t.Fatal("an unmarked context reads as caller-recorded")
+	}
+	if !runtime.ShadowCallerRecords(runtime.WithShadowCallerRecords(t.Context())) {
+		t.Fatal("a marked context does not read as caller-recorded")
+	}
+}

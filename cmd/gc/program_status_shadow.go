@@ -27,8 +27,14 @@ import (
 // counts it into the next recorded payload's dropped. One goroutine per city
 // drains the queue into the city's events log as
 // session.program_status_shadow, opening the recorder lazily on the first
-// comparison and keeping it for the process. A CLI process flushes the
-// queue at exit, bounded by programShadowFlushTimeout.
+// comparison and keeping it for the process.
+//
+// Only a long-lived process (the supervisor, a foreground controller:
+// markProgramShadowLongLived) follows a timed comparison past its decision.
+// A short-lived CLI process records each decision-time verdict untimed, so
+// nothing it decides waits on a follow-up it may exit before; at exit it
+// waits, bounded by programShadowFlushTimeout, for the leaf's background
+// work still judging a comparison and then for its queues.
 
 const (
 	// programShadowQueueSize bounds each city's comparison queue.
@@ -44,6 +50,31 @@ const (
 
 // programShadowRecorders holds each city's recorder, by city path.
 var programShadowRecorders sync.Map
+
+// programShadowLongLived is set by a process that runs for the life of a
+// city (markProgramShadowLongLived): only such a process follows timed
+// comparisons past their decision.
+var programShadowLongLived atomic.Bool
+
+// programShadowWork counts the leaf's background shadow work in flight in
+// this process: comparisons still being judged, not yet offered.
+var programShadowWork atomic.Int64
+
+// markProgramShadowLongLived declares the process long-lived: the
+// supervisor and a foreground controller call it before they serve a city.
+func markProgramShadowLongLived() { programShadowLongLived.Store(true) }
+
+// programShadowFollowUps reports whether this process follows timed
+// comparisons past their decision (tmux Config.ComparisonFollowUps).
+func programShadowFollowUps() bool { return programShadowLongLived.Load() }
+
+// programShadowBeginWork counts one piece of the leaf's background shadow
+// work and returns the call that ends it (tmux Config.ComparisonWork).
+func programShadowBeginWork() func() {
+	programShadowWork.Add(1)
+	var once sync.Once
+	return func() { once.Do(func() { programShadowWork.Add(-1) }) }
+}
 
 // programShadowOpen opens the events recorder comparisons are written to. A
 // var so tests read the events back.
@@ -125,15 +156,30 @@ func (r *programShadowRecorder) offer(c runtime.ProgramStatusComparison) {
 func (r *programShadowRecorder) drain() {
 	var rec events.Recorder
 	for c := range r.queue {
-		if rec == nil {
-			rec = programShadowOpen(r.cityPath)
-		}
-		dropped := int(r.dropped.Swap(0)) + c.Dropped
-		if ev, ok := programShadowEvent(c, dropped, time.Now()); ok {
-			rec.Record(ev)
-		}
-		r.inflight.Add(-1)
+		rec = r.write(rec, c)
 	}
+}
+
+// write writes one queued comparison through rec, opening it on first use,
+// and returns the recorder for the next. A panic while writing is contained
+// (a supervisor process hosts several cities) and the comparison counted as
+// dropped, so the drain keeps serving the city.
+func (r *programShadowRecorder) write(rec events.Recorder, c runtime.ProgramStatusComparison) (out events.Recorder) {
+	out = rec
+	defer r.inflight.Add(-1)
+	defer func() {
+		if recover() != nil {
+			r.dropped.Add(1)
+		}
+	}()
+	if out == nil {
+		out = programShadowOpen(r.cityPath)
+	}
+	dropped := int(r.dropped.Swap(0)) + c.Dropped
+	if ev, ok := programShadowEvent(c, dropped, time.Now()); ok {
+		out.Record(ev)
+	}
+	return out
 }
 
 // flush waits, up to timeout, for every comparison offered so far to be
@@ -149,10 +195,19 @@ func (r *programShadowRecorder) flush(timeout time.Duration) bool {
 	return true
 }
 
-// flushProgramStatusShadow flushes every city's shadow recorder, bounded by
-// timeout overall. A process that never shadowed returns at once.
+// flushProgramStatusShadow waits for the leaf's background shadow work and
+// then flushes every city's shadow recorder, bounded by timeout overall. A
+// process that never shadowed returns at once. Work still judging a
+// comparison at the deadline (a long-lived process's follow-up) is lost;
+// the count is said on stderr, where the process's operator reads.
 func flushProgramStatusShadow(timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
+	for programShadowWork.Load() > 0 && time.Now().Before(deadline) {
+		time.Sleep(programShadowFlushPoll)
+	}
+	if cut := programShadowWork.Load(); cut > 0 {
+		fmt.Fprintf(os.Stderr, "gc: program-status shadow: %d comparisons still being judged at exit are not recorded\n", cut) //nolint:errcheck // best-effort stderr
+	}
 	programShadowRecorders.Range(func(_, v any) bool {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -166,22 +221,15 @@ func flushProgramStatusShadow(timeout time.Duration) {
 // shadowHold records a hold point's comparison (execution_backstop,
 // claim_nudge_hold, work_ladder, queued_delivery, drain_reminder) for sp's
 // session sessName: held is today's verdict, rule the record's, judged with
-// the runtime's last activity at now. It does nothing unless the leaf serving
-// the session is shadowing, and never feeds the decision.
+// the runtime's last activity at now; the comparison carries both, so its
+// hold_live is the rule's own. It does nothing unless the leaf serving the
+// session is shadowing, and never feeds the decision.
 func shadowHold(sp runtime.Provider, sessName, sessionID, family string, point runtime.ProgramStatusPoint, held bool, now time.Time, rule func(runtime.ProgramStatus, time.Time, time.Time) runtime.ProgramVerdict) {
 	scrape := runtime.ProgramVerdictNoHold
 	if held {
 		scrape = runtime.ProgramVerdictHold
 	}
-	runtime.ShadowCompare(sp, sessName, sessionID, family, point, scrape, func(s runtime.ProgramStatus) runtime.ProgramVerdict {
-		// An unreadable activity clock leaves the hold bound on the record's
-		// own age, which is what a zero lastActivity means to HoldLive.
-		last, err := sp.GetLastActivity(sessName)
-		if err != nil {
-			last = time.Time{}
-		}
-		return rule(s, last, now)
-	})
+	runtime.ShadowCompareHold(sp, sessName, sessionID, family, point, scrape, now, rule)
 }
 
 // programShadowFamily is the shape a family token must have to be recorded:
@@ -199,7 +247,7 @@ func programShadowPayload(c runtime.ProgramStatusComparison, dropped int, now ti
 		Program:        string(c.Program),
 		Agree:          c.Scrape == c.Program,
 		Validity:       string(s.Validity),
-		HoldLive:       s.HoldLive(time.Time{}, now),
+		HoldLive:       c.HoldLive(now),
 		ReaderVerified: s.ReaderVerified,
 		Dropped:        dropped,
 	}

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"time"
 )
@@ -292,6 +293,52 @@ func ShadowCompare(p Provider, name, sessionID, family string, point ProgramStat
 		Session: name, SessionID: sessionID, Family: family, Point: point,
 		Scrape: scrape, Program: rule(s), Status: s,
 	})
+}
+
+// ShadowCompareHold is [ShadowCompare] for a hold rule judged with the
+// runtime's last activity at now (claim and backstop holds, the ladder,
+// queued delivery, the drain reminder). The activity is read only while the
+// leaf is shadowing, and the comparison carries it with now, so the hold
+// liveness recorded beside the verdict is the one the rule used. An
+// unreadable activity clock judges on the record's own age, which is what a
+// zero activity means to [ProgramStatus.HoldLive].
+func ShadowCompareHold(p Provider, name, sessionID, family string, point ProgramStatusPoint, scrape ProgramVerdict, now time.Time, rule func(s ProgramStatus, lastActivity, now time.Time) ProgramVerdict) {
+	if p == nil || name == "" {
+		return
+	}
+	s, sink, ok := ProgramStatusShadowFor(p, name)
+	if !ok {
+		return
+	}
+	last, err := p.GetLastActivity(name)
+	if err != nil {
+		last = time.Time{}
+	}
+	sink(ProgramStatusComparison{
+		Session: name, SessionID: sessionID, Family: family, Point: point,
+		Scrape: scrape, Program: rule(s, last, now), Status: s,
+		HoldActivity: last, JudgedAt: now,
+	})
+}
+
+// shadowCallerRecordsKey marks a context whose caller records its own
+// decision point for the leaf wait it calls.
+type shadowCallerRecordsKey struct{}
+
+// WithShadowCallerRecords marks ctx: the caller records the decision it
+// makes with a leaf wait at its own point (provedIdle's proved_idle), so the
+// leaf records no comparison of its own for that wait. A busy seat's idle
+// proof fails hundreds of times an hour; each would otherwise be a second,
+// non-independent wait_for_idle sample with a follow-up of its own.
+func WithShadowCallerRecords(ctx context.Context) context.Context {
+	return context.WithValue(ctx, shadowCallerRecordsKey{}, true)
+}
+
+// ShadowCallerRecords reports whether ctx was marked by
+// [WithShadowCallerRecords].
+func ShadowCallerRecords(ctx context.Context) bool {
+	marked, _ := ctx.Value(shadowCallerRecordsKey{}).(bool)
+	return marked
 }
 
 // ShadowWaitIdlePreread records the wait-idle pre-read (wait_idle_preread)
