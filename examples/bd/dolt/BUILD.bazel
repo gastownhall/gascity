@@ -165,42 +165,62 @@ go_test(
         "//internal/fsys",
         "//internal/orders",
         "//internal/testenv",
-        "//internal/testutil",
         "//internal/workdir",
-        "//test/toolhome",
     ] + select({
         "@rules_go//go/platform:aix": [
             "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
         ],
         "@rules_go//go/platform:android": [
             "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
         ],
         "@rules_go//go/platform:darwin": [
             "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
         ],
         "@rules_go//go/platform:dragonfly": [
             "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
         ],
         "@rules_go//go/platform:freebsd": [
             "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
         ],
         "@rules_go//go/platform:illumos": [
             "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
         ],
         "@rules_go//go/platform:ios": [
             "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
         ],
         "@rules_go//go/platform:linux": [
             "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
         ],
         "@rules_go//go/platform:netbsd": [
             "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
         ],
         "@rules_go//go/platform:openbsd": [
             "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
         ],
         "@rules_go//go/platform:solaris": [
             "//internal/formula",
+            "//internal/testutil",
+            "//test/toolhome",
         ],
         "//conditions:default": [],
     }),
