@@ -201,8 +201,8 @@ func TestConversationResetsEndTheResumeRun(t *testing.T) {
 	}
 	for name, reset := range map[string]session.MetadataPatch{
 		"gc session reset":           session.RestartRequestPatch("", gatherNow),
-		"a wake failure's reset":     session.ConversationResetPatch(true),
-		"a churn reset":              session.ConversationResetPatch(false),
+		"a wake failure's reset":     session.ConversationResetPatch(true, gatherNow),
+		"a churn reset":              session.ConversationResetPatch(false, gatherNow),
 		"the stale-key clear":        stale,
 		"the fresh-wake reset":       freshWake,
 		"legacy's dead-runtime heal": legacyHeal(healInfo),

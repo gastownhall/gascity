@@ -907,7 +907,7 @@ func recordWakeFailure(info sessionpkg.Info, transcriptRoots []string, sessFront
 			if backstop && rec != nil && manual {
 				rec.Record(resumeFailedConversationResetEvent(info, agentIdentity))
 			}
-			patch = sessionpkg.ConversationResetPatch(true)
+			patch = sessionpkg.ConversationResetPatch(true, clk.Now().UTC())
 			maps.Copy(patch, resumeFailuresPatch(info, 0))
 		}
 		if len(patch) > 0 {
@@ -1059,7 +1059,7 @@ func recordChurn(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Cl
 	// an explicit reset. Best-effort store write (error ignored, as before)
 	// with an unconditional Info fold.
 	if info.SessionKey != "" && !sessionpkg.HasStartedManualConversation(info) {
-		reset := sessionpkg.ConversationResetPatch(false)
+		reset := sessionpkg.ConversationResetPatch(false, clk.Now().UTC())
 		_ = sessFront.ApplyPatch(info.ID, reset)
 		info = info.ApplyPatch(reset)
 	}
@@ -1271,6 +1271,7 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 				batch["session_key"] = ""
 				batch["started_config_hash"] = ""
 				batch["continuation_reset_pending"] = "true"
+				batch[sessionpkg.ResetCommittedAtKey] = now.UTC().Format(time.RFC3339)
 				// Priming markers share started_config_hash's lifetime (S19
 				// Stage 2): this asleep continuation reset re-primes.
 				batch[sessionpkg.PrimedAtMetadataKey] = ""
