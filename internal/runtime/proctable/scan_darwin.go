@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -32,16 +33,16 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	}
 	roots := scanRecordsBySessionID(records, id)
 	if id == "" {
-		roots = orphanCandidates(roots, 0)
+		roots = orphanCandidates(roots, pidutil.Subreapers{})
 	}
 	return withStartIdentities(roots), nil
 }
 
-// orphanCandidates keeps the roots reparented to init or subreaperPID.
-func orphanCandidates(roots []runtime.LiveRuntime, subreaperPID int) []runtime.LiveRuntime {
+// orphanCandidates keeps the roots reparented to init or one of subreapers.
+func orphanCandidates(roots []runtime.LiveRuntime, subreapers pidutil.Subreapers) []runtime.LiveRuntime {
 	out := roots[:0]
 	for _, r := range roots {
-		if OrphanCandidate(r.PPID, subreaperPID) {
+		if OrphanCandidate(r.PPID, subreapers) {
 			out = append(out, r)
 		}
 	}

@@ -109,9 +109,10 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 )
 
-// drainAckDetectSubreaperPID resolves the `systemd --user` child-subreaper pid
-// for this session, or 0 on a plain-init host. It is a package var so tests can
-// model a subreaper topology without a real user manager.
+// drainAckDetectSubreapers resolves the subreapers that adopt this
+// controller's orphans besides init — its own ancestors
+// (pidutil.DetectSubreapers) — or the empty set on a plain-init host. It is a
+// package var so tests can model a subreaper topology without a real one.
 //
 // It must be read on the RECONCILE goroutine and the value threaded down, never
 // re-read from the detached termination goroutine: that goroutine outlives its
@@ -119,7 +120,7 @@ import (
 // (the same hazard the confirm-dead bounds and the poke seam already bind at
 // queue time). It also walks the parent chain, so once per escalation is the
 // right cost, not once per scan hit.
-var drainAckDetectSubreaperPID = func() int { return pidutil.DetectUserSubreaperPID(os.Getpid()) }
+var drainAckDetectSubreapers = func() pidutil.Subreapers { return pidutil.DetectSubreapers(os.Getpid()) }
 
 // drainAckEscalationLabel prefixes this pass's journal lines so a terminal kill
 // is greppable next to the reminder lines that preceded it.
@@ -451,7 +452,7 @@ func escalateWedgedDrainAckStopPending(
 
 	// The event is emitted from the goroutine, at the point an outcome is known
 	// — see recordDrainAckEscalation.
-	queueDrainAckForcedTermination(cityPath, store, sp, cfg, info, name, reason, attempt, now, processNames, drainAckDetectSubreaperPID(), done, rec, stderr)
+	queueDrainAckForcedTermination(cityPath, store, sp, cfg, info, name, reason, attempt, now, processNames, drainAckDetectSubreapers(), done, rec, stderr)
 	return true
 }
 
@@ -476,7 +477,7 @@ func queueDrainAckForcedTermination(
 	attempt int,
 	now time.Time,
 	processNames []string,
-	subreaperPID int,
+	subreapers pidutil.Subreapers,
 	done func(),
 	rec events.Recorder,
 	stderr io.Writer,
@@ -491,7 +492,7 @@ func queueDrainAckForcedTermination(
 	// time, for the reason documented on queueDrainAckAsyncStop: this goroutine
 	// outlives its reconcile invocation, so re-reading them from inside it races
 	// a test swapping them and lets one test's goroutine poke another test's
-	// counter. drainAckDetectSubreaperPID is bound the same way, by the caller.
+	// counter. drainAckDetectSubreapers is bound the same way, by the caller.
 	poke := drainAckAsyncStopPokeController
 	confirmTimeout, confirmPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
 	go func() {
@@ -550,7 +551,7 @@ func queueDrainAckForcedTermination(
 			fmt.Fprintf(stderr, "%s: %s skipped its process kill: the row moved since the escalation was decided\n", drainAckEscalationLabel, name) //nolint:errcheck
 			return
 		}
-		outcome := terminateDrainAckRuntimeByProcessTable(cityPath, sp, sessionID, name, expectedToken, subreaperPID, now, stderr)
+		outcome := terminateDrainAckRuntimeByProcessTable(cityPath, sp, sessionID, name, expectedToken, subreapers, now, stderr)
 		release()
 		recordDrainAckEscalation(cfg, info, name, reason, outcome, attempt, rec)
 		_ = poke(cityPath, reconcilekey.SessionRef(sessionID, name))
@@ -574,7 +575,7 @@ func terminateDrainAckRuntimeByProcessTable(
 	cityPath string,
 	sp runtime.Provider,
 	sessionID, name, expectedToken string,
-	subreaperPID int,
+	subreapers pidutil.Subreapers,
 	now time.Time,
 	stderr io.Writer,
 ) string {
@@ -614,7 +615,7 @@ func terminateDrainAckRuntimeByProcessTable(
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: scanning process table for %s: %v\n", drainAckEscalationLabel, name, err) //nolint:errcheck
 	}
-	targets, skipped := drainAckForceTerminationTargets(found, sessionID, cityPath, name, subreaperPID, stderr)
+	targets, skipped := drainAckForceTerminationTargets(found, sessionID, cityPath, name, subreapers, stderr)
 	if len(targets) == 0 {
 		fmt.Fprintf(stderr, //nolint:errcheck
 			"%s: %s survived its stop but no process was attributable to this seat (%d scan hit(s) refused); slot stays occupied\n",
@@ -672,9 +673,9 @@ func terminateDrainAckRuntimeByProcessTable(
 // made to fail closed. Recognizing a reparent destination means knowing which
 // pid is the child subreaper, and that is NOT always pid 1: under a
 // user@UID.service, `systemd --user` sets PR_SET_CHILD_SUBREAPER, so orphans
-// reparent to the USER MANAGER and carry a large LIVE ppid. The user manager's
-// pid can only be DETECTED, by walking a parent chain — and the chain available
-// here is the CONTROLLER's, used as a proxy for the target's. When the two
+// reparent to the USER MANAGER and carry a large LIVE ppid. The subreapers can
+// only be DETECTED, by walking a parent chain — and the chain available here is
+// the CONTROLLER's, used as a proxy for the target's. When the two
 // diverge (a controller restarted from an ssh shell or a system unit while the
 // tmux server descends from the user manager) detection returns nothing, every
 // `ppid <= 1` style test reads the orphaned watchdog as a live owned child, and
@@ -705,7 +706,7 @@ func terminateDrainAckRuntimeByProcessTable(
 func drainAckForceTerminationTargets(
 	found []runtime.LiveRuntime,
 	sessionID, cityPath, name string,
-	subreaperPID int,
+	subreapers pidutil.Subreapers,
 	stderr io.Writer,
 ) ([]runtime.LiveRuntime, int) {
 	normalizedCity := normalizePathForCompare(strings.TrimSpace(cityPath))
@@ -741,7 +742,7 @@ func drainAckForceTerminationTargets(
 			skipped++
 			fmt.Fprintf(stderr, "%s: %s skipping pid=%d: not bound to this runtime name (provider=%q tracked=%v)\n", //nolint:errcheck
 				drainAckEscalationLabel, name, live.PID, strings.TrimSpace(live.ProviderName), live.IsTracked)
-		case pidutil.IsReparentedOrphan(live.PPID, subreaperPID):
+		case pidutil.IsReparentedOrphan(live.PPID, subreapers):
 			skipped++
 			fmt.Fprintf(stderr, //nolint:errcheck
 				"%s: %s skipping pid=%d (%s): reparented to a subreaper (ppid=%d), so it only INHERITED this "+

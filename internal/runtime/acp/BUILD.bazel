@@ -88,9 +88,11 @@ go_test(
     ] + select({
         "@rules_go//go/platform:android": [
             "//internal/runtime/proctable",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:linux": [
             "//internal/runtime/proctable",
+            "@org_golang_x_sys//unix",
         ],
         "//conditions:default": [],
     }),

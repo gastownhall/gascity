@@ -3891,12 +3891,12 @@ func processRootIncarnationOver(live runtime.LiveRuntime, snapshot, store proces
 // processRootReapable is the orphan sweep's process guard (CONTRACT C4): the
 // root is not this controller, it carries a start identity the kill can bind
 // to, and it was reparented away from every tmux server, to init (PPID exactly
-// 1) or to the user subreaper, with no scanned tmux parent. An agent pane, or a
+// 1) or to a subreaper ancestor of this controller, with no scanned tmux parent. An agent pane, or a
 // detached handoff in its own tmux session, still has its tmux server as
 // parent and is never reaped; a PPID of 0 is unreported and proves nothing.
-func processRootReapable(live runtime.LiveRuntime, selfPID, subreaperPID int) bool {
+func processRootReapable(live runtime.LiveRuntime, selfPID int, subreapers pidutil.Subreapers) bool {
 	return live.PID != selfPID && live.StartIdentity != "" &&
-		!live.ParentIsProviderInfrastructure && pidutil.IsReparentedOrphan(live.PPID, subreaperPID)
+		!live.ParentIsProviderInfrastructure && pidutil.IsReparentedOrphan(live.PPID, subreapers)
 }
 
 // processScanErrorLogRepeat is how often the orphan sweep repeats a scan
@@ -3991,7 +3991,7 @@ func sweepProcessTableOrphans(
 	fenced := make(map[string]struct{})
 	defer fencedInfrastructureRoots.put(cityPath, fenced)
 	selfPID := os.Getpid()
-	subreaperPID := pidutil.DetectUserSubreaperPID(selfPID)
+	subreapers := pidutil.DetectSubreapers(selfPID)
 	reaped := 0
 	for _, live := range found {
 		live.SessionID = strings.TrimSpace(live.SessionID)
@@ -4009,7 +4009,7 @@ func sweepProcessTableOrphans(
 		if cityPath != "" && normalizePathForCompare(strings.TrimSpace(live.City)) != cityPath {
 			continue
 		}
-		if !processRootReapable(live, selfPID, subreaperPID) {
+		if !processRootReapable(live, selfPID, subreapers) {
 			continue
 		}
 		// The second read must be independent of the snapshot, and a cached

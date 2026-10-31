@@ -2139,6 +2139,12 @@ resource = "subprocess"
 calls = 4
 
 [[count]]
+path = "internal/pidutil/subreaper_linux_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
 path = "internal/processgroup/processgroup_unix_test.go"
 resource = "subprocess"
 calls = 1
@@ -2215,6 +2221,12 @@ calls = 1
 path = "internal/runtime/acp/interrupt_test.go"
 resource = "subprocess"
 calls = 1
+
+[[count]]
+path = "internal/runtime/acp/proctable_linux_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
 
 [[count]]
 path = "internal/runtime/dialog_test.go"

@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -114,7 +115,7 @@ func TestControllerStopSequencesDeferOnABusyLease(t *testing.T) {
 			} else {
 				done, _ := tracker.startDrainAckStop("escalate:sess-1")
 				queueDrainAckForcedTermination(city, beads.NewMemStore(), sp, &config.City{}, sessionpkg.Info{ID: "sess-1"}, "worker",
-					"agent_acked_runtime_survived", 1, time.Now(), nil, 0, done, nil, &stderr)
+					"agent_acked_runtime_survived", 1, time.Now(), nil, pidutil.Subreapers{}, done, nil, &stderr)
 			}
 			if !tracker.wait(5 * time.Second) {
 				t.Fatal("the stop sequence never finished")
@@ -154,7 +155,7 @@ func TestControllerStopSequencesRefuseWithoutACity(t *testing.T) {
 				} else {
 					done, _ := tracker.startDrainAckStop("escalate:sess-1")
 					queueDrainAckForcedTermination(city, store, sp, &config.City{}, gen.Info(), "worker",
-						"agent_acked_runtime_survived", 1, time.Now(), []string{"claude"}, 0, done, nil, &stderr)
+						"agent_acked_runtime_survived", 1, time.Now(), []string{"claude"}, pidutil.Subreapers{}, done, nil, &stderr)
 				}
 				if !tracker.wait(5 * time.Second) {
 					t.Fatal("the stop sequence never finished")
@@ -474,7 +475,7 @@ func TestDrainAckEscalationSparesAMovedRow(t *testing.T) {
 	tracker := &asyncStartTracker{}
 	done, _ := tracker.startDrainAckStop("escalate:sess-1")
 	queueDrainAckForcedTermination(city, store, sp, &config.City{}, d.Info(), "worker",
-		"agent_acked_runtime_survived", 1, time.Now(), nil, 0, done, nil, &stderr)
+		"agent_acked_runtime_survived", 1, time.Now(), nil, pidutil.Subreapers{}, done, nil, &stderr)
 	if !tracker.wait(5 * time.Second) {
 		t.Fatal("the escalation never finished")
 	}
@@ -502,7 +503,7 @@ func TestDrainAckEscalationRechecksBeforeItsProcessKill(t *testing.T) {
 	tracker := &asyncStartTracker{}
 	done, _ := tracker.startDrainAckStop("escalate:gc-worker")
 	queueDrainAckForcedTermination(city, store, sp, &config.City{}, d.Info(), "worker",
-		"agent_acked_runtime_survived", 1, time.Now(), []string{"claude"}, 0, done, nil, &stderr)
+		"agent_acked_runtime_survived", 1, time.Now(), []string{"claude"}, pidutil.Subreapers{}, done, nil, &stderr)
 	if !tracker.wait(5 * time.Second) {
 		t.Fatal("the escalation never finished")
 	}

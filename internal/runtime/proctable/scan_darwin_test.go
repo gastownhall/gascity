@@ -2,7 +2,11 @@
 
 package proctable
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/pidutil"
+)
 
 // A tmux server founded by a session's first new-session call inherits that
 // session's GC_SESSION_ID and reparents to launchd. The parent-envelope test
@@ -95,7 +99,7 @@ func TestDarwinOrphanCandidatesKeepOnlyReparentedRoots(t *testing.T) {
 		300: {pid: 300, ppid: 1, command: "bash"},
 		102: {pid: 102, ppid: 300, command: "agent", env: map[string]string{"GC_SESSION_ID": "gc-paned"}},
 	}
-	got := orphanCandidates(scanRecordsBySessionID(records, ""), 0)
+	got := orphanCandidates(scanRecordsBySessionID(records, ""), pidutil.Subreapers{})
 	if len(got) != 1 || got[0].SessionID != "gc-orphan" {
 		t.Fatalf("orphan candidates %+v, want gc-orphan only", got)
 	}

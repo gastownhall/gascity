@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/session"
@@ -156,34 +157,36 @@ func TestProcessRootIncarnationOver(t *testing.T) {
 
 // Kills: reaping the controller itself, a root with no start identity to bind
 // the kill to, a root whose parent is live or unreported (PPID 0), a root
-// under tmux, or missing the user-subreaper topology.
+// under tmux, or missing the subreaper topology.
 func TestProcessRootReapable(t *testing.T) {
 	const self, subreaper = 77, 900
+	detected, none := pidutil.NewSubreapers(subreaper), pidutil.Subreapers{}
 	root := func(pid, ppid int, identity string, tmuxParent bool) runtime.LiveRuntime {
 		return runtime.LiveRuntime{PID: pid, PPID: ppid, StartIdentity: identity, ParentIsProviderInfrastructure: tmuxParent}
 	}
 	cases := []struct {
-		name      string
-		live      runtime.LiveRuntime
-		subreaper int
-		want      bool
+		name       string
+		live       runtime.LiveRuntime
+		subreapers pidutil.Subreapers
+		want       bool
 	}{
-		{"reparented to init", root(10, 1, "s", false), 0, true},
-		{"reparented to the user subreaper", root(10, subreaper, "s", false), subreaper, true},
-		{"parent unreported", root(10, 0, "s", false), 0, false},
-		{"parent unreported, subreaper detected", root(10, 0, "s", false), subreaper, false},
-		{"live non-subreaper parent", root(10, 4242, "s", false), subreaper, false},
-		{"live parent, no subreaper detected", root(10, subreaper, "s", false), 0, false},
-		{"tmux parent", root(10, 4242, "s", true), subreaper, false},
-		{"tmux parent misdetected as the subreaper", root(10, subreaper, "s", true), subreaper, false},
-		{"tmux mark on an init parent", root(10, 1, "s", true), 0, false},
-		{"no start identity", root(10, 1, "", false), 0, false},
-		{"the controller itself", root(self, 1, "s", false), 0, false},
+		{"reparented to init", root(10, 1, "s", false), none, true},
+		{"reparented to the subreaper", root(10, subreaper, "s", false), detected, true},
+		{"reparented to the farther of two subreapers", root(10, 2001, "s", false), pidutil.NewSubreapers(subreaper, 2001), true},
+		{"parent unreported", root(10, 0, "s", false), none, false},
+		{"parent unreported, subreaper detected", root(10, 0, "s", false), detected, false},
+		{"live non-subreaper parent", root(10, 4242, "s", false), detected, false},
+		{"live parent, no subreaper detected", root(10, subreaper, "s", false), none, false},
+		{"tmux parent", root(10, 4242, "s", true), detected, false},
+		{"tmux parent misdetected as the subreaper", root(10, subreaper, "s", true), detected, false},
+		{"tmux mark on an init parent", root(10, 1, "s", true), none, false},
+		{"no start identity", root(10, 1, "", false), none, false},
+		{"the controller itself", root(self, 1, "s", false), none, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := processRootReapable(tc.live, self, tc.subreaper); got != tc.want {
-				t.Fatalf("processRootReapable(%+v, self=%d, subreaper=%d) = %v, want %v", tc.live, self, tc.subreaper, got, tc.want)
+			if got := processRootReapable(tc.live, self, tc.subreapers); got != tc.want {
+				t.Fatalf("processRootReapable(%+v, self=%d, subreapers=%v) = %v, want %v", tc.live, self, tc.subreapers, got, tc.want)
 			}
 		})
 	}

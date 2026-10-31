@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -45,9 +46,9 @@ type escalationEnv struct {
 	cityPath string
 	name     string
 	now      time.Time
-	// subreaperPID models the `systemd --user` child-subreaper pid this session
-	// runs under; 0 means a plain-init host.
-	subreaperPID int
+	// subreapers models the child subreapers (a `systemd --user` manager) this
+	// session runs under; the empty set means a plain-init host.
+	subreapers pidutil.Subreapers
 	// poke counts controller pokes. It is a pointer so escalationEnv stays
 	// copyable (the constructor assigns through *env).
 	poke *callCounter
@@ -121,9 +122,9 @@ func newEscalationEnv(t *testing.T) *escalationEnv {
 	sp.StopLeavesRunning = map[string]bool{name: true}
 
 	env := &escalationEnv{}
-	prevSubreaper := drainAckDetectSubreaperPID
-	drainAckDetectSubreaperPID = func() int { return env.subreaperPID }
-	t.Cleanup(func() { drainAckDetectSubreaperPID = prevSubreaper })
+	prevSubreapers := drainAckDetectSubreapers
+	drainAckDetectSubreapers = func() pidutil.Subreapers { return env.subreapers }
+	t.Cleanup(func() { drainAckDetectSubreapers = prevSubreapers })
 
 	// Keep the confirm-dead loop short; production bounds would add 6s per test.
 	prevTimeout, prevPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
@@ -512,7 +513,7 @@ func TestEscalationDefersOnUnverifiableToken(t *testing.T) {
 	}
 
 	// The re-check immediately before the destructive act holds on its own.
-	if got := terminateDrainAckRuntimeByProcessTable(e.cityPath, e.sp, e.bead.ID, e.name, "tok-a", 0, e.now, e.out); got != "token_unverifiable" {
+	if got := terminateDrainAckRuntimeByProcessTable(e.cityPath, e.sp, e.bead.ID, e.name, "tok-a", pidutil.Subreapers{}, e.now, e.out); got != "token_unverifiable" {
 		t.Fatalf("force-terminate outcome = %q, want token_unverifiable", got)
 	}
 	if e.terminateCalls() != 0 {
@@ -809,7 +810,7 @@ const fakeUserSubreaperPID = 3117
 // This fleet does not run that topology: under a user@UID.service,
 // `systemd --user` sets PR_SET_CHILD_SUBREAPER, so an orphan reparents to the
 // USER MANAGER and its ppid is a large LIVE pid. The repo already knows this —
-// internal/workspacesvc's orphan sweep matches `ppid == 1 || ppid == subreaperPID`
+// internal/workspacesvc's orphan sweep matches init or a detected subreaper
 // for exactly this reason.
 //
 // So the watchdog's real production shape is: spawning `gc` exits, watchdog
@@ -821,7 +822,7 @@ const fakeUserSubreaperPID = 3117
 func TestEscalationNeverTerminatesASubreaperReparentedInheritedEnvDaemon(t *testing.T) {
 	const watchdogPID = 9998
 	e := newEscalationEnv(t)
-	e.subreaperPID = fakeUserSubreaperPID
+	e.subreapers = pidutil.NewSubreapers(fakeUserSubreaperPID)
 	e.seedInheritedEnvDaemonWithParent(watchdogPID, fakeUserSubreaperPID, "gc")
 
 	e.finalize()
@@ -903,7 +904,7 @@ func TestEscalationRecoversAPanicInTheDetachedTermination(t *testing.T) {
 	d := drainAckStopPendingForTest(t, store, "sess-1", "worker", "")
 	queueDrainAckForcedTermination(
 		t.TempDir(), store, sp, &config.City{}, d.Info(), "worker",
-		"agent_acked_runtime_survived", 1, time.Now(), nil, 0, done, nil, &stderr,
+		"agent_acked_runtime_survived", 1, time.Now(), nil, pidutil.Subreapers{}, done, nil, &stderr,
 	)
 
 	select {
@@ -926,11 +927,11 @@ func TestEscalationRecoversAPanicInTheDetachedTermination(t *testing.T) {
 
 // The watchdog pin, with subreaper DETECTION FAILING.
 //
-// drainAckDetectSubreaperPID walks the CONTROLLER's own ancestry as a proxy for
+// drainAckDetectSubreapers walks the CONTROLLER's own ancestry as a proxy for
 // the target's reparent destination. The two diverge whenever the controller was
 // (re)started outside the `systemd --user` tree — an ssh shell, a system unit —
 // while the tmux server and its agents descend from the user manager. Detection
-// then answers 0, the orphaned watchdog carries a large LIVE ppid that matches
+// then answers nothing, the orphaned watchdog carries a large LIVE ppid that matches
 // no known subreaper, and every reparent test phrased as "is this ppid a
 // subreaper I recognize" says no.
 //
@@ -940,7 +941,7 @@ func TestEscalationNeverTerminatesAnOrphanWhoseSubreaperWentUndetected(t *testin
 	const watchdogPID = 9997
 	e := newEscalationEnv(t)
 	// Detection failed — this is the whole point of the case.
-	e.subreaperPID = 0
+	e.subreapers = pidutil.Subreapers{}
 	e.seedInheritedEnvDaemonWithParent(watchdogPID, fakeUserSubreaperPID, "gc")
 
 	e.finalize()
