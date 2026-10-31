@@ -154,6 +154,9 @@ type paneRun struct {
 	mu   sync.Mutex
 	n    int64  // bytes the pane received
 	out  []byte // the first outKeep of them
+	// eof is closed when the pane's read ends: every holder of the pty's
+	// other side closed it, and the pane has received all they wrote.
+	eof chan struct{}
 }
 
 const outKeep = 64 << 10
@@ -173,13 +176,14 @@ func runRelayOnPane(t *testing.T, argv ...string) *paneRun {
 		t.Fatal(err)
 	}
 	_ = tty.Close() // the relay holds its own copies
-	r := &paneRun{t: t, cmd: cmd, pane: pane}
+	r := &paneRun{t: t, cmd: cmd, pane: pane, eof: make(chan struct{})}
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		_ = pane.Close()
 	})
 	go func() {
+		defer close(r.eof)
 		buf := make([]byte, 64<<10)
 		for {
 			n, err := pane.Read(buf)
@@ -201,6 +205,20 @@ func (r *paneRun) received() (int64, []byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.n, bytes.Clone(r.out)
+}
+
+// drained waits until the pane has received everything written to it,
+// which is only once the relay and its program have exited, and returns it.
+func (r *paneRun) drained() []byte {
+	r.t.Helper()
+	select {
+	case <-r.eof:
+	case <-time.After(20 * time.Second):
+		_, out := r.received()
+		r.t.Fatalf("pane read did not end; pane %q", out)
+	}
+	_, out := r.received()
+	return out
 }
 
 // waitFor waits until the pane shows s.
@@ -295,7 +313,7 @@ func TestRelayBinaryStartFailureExits127(t *testing.T) {
 	if ws := r.wait(); !ws.Exited() || ws.ExitStatus() != exitStart {
 		t.Fatalf("relay ended %#x, want exit %d", ws, exitStart)
 	}
-	if _, out := r.received(); !bytes.Contains(out, []byte("/nonexistent/agent")) || bytes.Count(out, []byte("\n")) != 1 {
+	if out := r.drained(); !bytes.Contains(out, []byte("/nonexistent/agent")) || bytes.Count(out, []byte("\n")) != 1 {
 		t.Fatalf("pane got %q, want one line naming the program", out)
 	}
 }
