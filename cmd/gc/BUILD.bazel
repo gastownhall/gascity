@@ -2142,6 +2142,7 @@ go_test(
         "split_strict_gate_test.go",
         "split_topology_conformance_test.go",
         "split_topology_env_test.go",
+        "split_worktree_evidence_test.go",
         "sql_open_guard_test.go",
         "stage1_plan_test.go",
         "start_output_test.go",
