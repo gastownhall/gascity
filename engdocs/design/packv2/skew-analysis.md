@@ -195,6 +195,7 @@ No expansion of `[agent_defaults]` surface in this wave.
 |--------|-------|----------|--------------------|
 | 🟢 | `source` | Present | **Keep.** |
 | 🟢 | `version` | Present | **Keep.** |
+| 🟢 | `agents_exclude` | Present | **Keep.** Per-edge local agent selectors; invalid names fail and valid unmatched names warn. |
 | 🟢 | `export` | Present | **Keep for the current rollout.** If `engdocs/design/pack-import-export-surface.md` is accepted, this becomes a legacy field during that deprecation window and is removed only after behavior-preserving explicit `[[exports]]` migration tooling ships. |
 | 🟢 | `transitive` | Present | **Keep for the current rollout.** If `engdocs/design/pack-import-export-surface.md` is accepted, this becomes a legacy field during that deprecation window and is removed only after generated explicit exports preserve currently leaked public surfaces or report intentional narrowing. |
 | 🟢 | `shadow` | Present | **Keep.** The explicit-export proposal does not replace `shadow`; preserve it unless a separate override/collision design deprecates it in its own documented wave. |
