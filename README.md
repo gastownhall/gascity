@@ -66,14 +66,13 @@ gc init ~/my-city --template gascity --default-provider claude
 dashboard is at `http://127.0.0.1:8372/`. Use `--default-provider codex` (or
 `gemini`) to run a different agent CLI.
 
-The city takes a few minutes to warm up after it starts. During that time these
-are expected and need no action, so go on to step 4:
+A new city takes a few minutes to finish setting up. Until it does, these
+signals are normal and need no action, so go on to step 4:
 
-- `gc init`'s output can end at `Adopting sessions...` without a final
-  "City started" line.
+- `gc init`'s output can end at `Adopting sessions...`.
 - `gc status` can list agents as `unknown (partial status)` and print
   `bead cache unavailable` or `session snapshot timed out`.
-- `gc doctor` can report the store as not running and suggest a proxy fix.
+- `gc doctor` can report the store as not running.
 
 **4. Add a project.** A project Gas City works on is a **rig**. Use one of your
 own repositories, or make a sample one:
@@ -93,10 +92,9 @@ gc sling hello-world/claude "Create hello.sh that prints hello world and commit 
 ```
 
 `gc sling` prints a `Dashboard:` link to the formula run, for example
-`http://127.0.0.1:8372/city/my-city/runs/hw-4up`. (Its `Attached workflow`
-line names the run ID twice; the run ID is the one in the link.) Open the link
-to watch the agent work; while the city is still warming up the page can say
-"run projection is warming", so refresh after a minute. To check from the terminal, pass the run ID (the last part of the link)
+`http://127.0.0.1:8372/city/my-city/runs/hw-4up`. Open the link to watch the
+agent work; while the city is still setting up, the page can say "run
+projection is warming", so refresh after a minute. To check from the terminal, pass the run ID (the last part of the link)
 to `gc bd show`; it reports `CLOSED` when the run is done, usually within a
 minute or two, and `hello.sh` is committed in `~/hello-world`:
 
