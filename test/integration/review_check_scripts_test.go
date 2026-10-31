@@ -195,6 +195,7 @@ func TestReviewCheckScriptsPreferNewestVerdictWhenListOrderIsStale(t *testing.T)
 		t.Run(tc.name, func(t *testing.T) {
 			fakeDir := t.TempDir()
 			writeFakeBDCommand(t, filepath.Join(fakeDir, "bd"), tc)
+			writeReviewCheckGCShim(t, fakeDir, true)
 
 			env := newIsolatedToolEnv(t, false)
 			envMap := parseEnvList(env)
@@ -308,6 +309,9 @@ func checkScriptEnv(t *testing.T, cityDir, beadID string) []string {
 	t.Helper()
 
 	env := commandEnvForDir(cityDir, false)
+	shimDir := t.TempDir()
+	writeReviewCheckGCShim(t, shimDir, false)
+	env = replaceEnv(env, "PATH", prependPath(shimDir, parseEnvList(env)["PATH"]))
 	env = filterEnvMany(env,
 		"GC_BEAD_ID",
 		"GC_BEADS",
@@ -390,6 +394,7 @@ func TestReviewCheckScriptsStripBeadsRoleWarningFromStdout(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeDir := t.TempDir()
 			writeFakeBDCommandWithWarning(t, filepath.Join(fakeDir, "bd"), tc)
+			writeReviewCheckGCShim(t, fakeDir, true)
 
 			env := newIsolatedToolEnv(t, false)
 			envMap := parseEnvList(env)
@@ -420,6 +425,7 @@ func TestReviewCheckScriptsRetryTransientBeadShowFailure(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeDir := t.TempDir()
 			writeFakeBDCommandWithTransientShowFailure(t, filepath.Join(fakeDir, "bd"), tc)
+			writeReviewCheckGCShim(t, fakeDir, true)
 
 			env := newIsolatedToolEnv(t, false)
 			envMap := parseEnvList(env)
@@ -450,6 +456,7 @@ func TestReviewCheckScriptsSurfaceVerdictOutage(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeDir := t.TempDir()
 			writeFakeBDCommandWithVerdictOutage(t, filepath.Join(fakeDir, "bd"))
+			writeReviewCheckGCShim(t, fakeDir, true)
 
 			env := newIsolatedToolEnv(t, false)
 			envMap := parseEnvList(env)
@@ -624,5 +631,51 @@ esac
 
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake bd command: %v", err)
+	}
+}
+
+// writeReviewCheckGCShim writes a `gc` into dir for the review check scripts.
+//
+// The scripts read the check bead with `gc bd show` and the molecule with a
+// `gc ready --metadata-field gc.root_bead_id=<root> --status <s>` union, so
+// they work on a split-store city where the steps live in the class binding.
+// These tests run against a file-provider city or a fake bd, and real `gc bd`
+// refuses file-backed scopes. The shim forwards `gc bd ...` to the bd on PATH
+// (the harness's file bd, or the test's fake). `gc ready` goes to the real gc,
+// which reads the file store itself, or, when readyFromBDList is set (the
+// fake-bd tests, which have no store), answers the open leg with the fake
+// bd's `list` output and every other leg with [].
+func writeReviewCheckGCShim(t *testing.T, dir string, readyFromBDList bool) {
+	t.Helper()
+
+	readyBlock := ""
+	if readyFromBDList {
+		readyBlock = `if [ "${1:-}" = "ready" ]; then
+  status=""
+  prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--status" ]; then
+      status="$arg"
+    fi
+    prev="$arg"
+  done
+  if [ "$status" = "open" ]; then
+    exec bd list --json
+  fi
+  printf '%s\n' '[]'
+  exit 0
+fi
+`
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+if [ "${1:-}" = "bd" ]; then
+  shift
+  exec bd "$@"
+fi
+%sexec %q "$@"
+`, readyBlock, gcBinary)
+	if err := os.WriteFile(filepath.Join(dir, "gc"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write gc shim: %v", err)
 	}
 }

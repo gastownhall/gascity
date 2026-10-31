@@ -94,6 +94,27 @@ func NewClassStore(t *testing.T, class string) beads.Store {
 	return newStrictMemLeaf(t, prefix, SQLiteSemantics, config.ReservedClassPrefixesFor(class)...)
 }
 
+// NewBindingStore returns the strict leaf for the one class binding a
+// whole-split city serves: minting under the graph class's prefix ("gcg-"),
+// on SQLiteSemantics, and FENCED to the union of every infrastructure class's
+// namespaces, as storebinding's OpenEngine fences the binding a whole-split
+// boot opens. It holds all five infrastructure classes, so a session, a mail
+// message or an order-tracking row created there is where it belongs; a work
+// row is not. Use it where a fixture routes every infrastructure class to one
+// store; NewClassStore is the narrower per-class leaf.
+func NewBindingStore(t *testing.T) beads.Store {
+	t.Helper()
+	prefix, err := classPrefix(config.BeadClassGraph)
+	if err != nil {
+		t.Fatalf("splittest.NewBindingStore: %v", err)
+	}
+	var namespaces []string
+	for _, class := range []string{config.BeadClassGraph, config.BeadClassMessaging, config.BeadClassSessions, config.BeadClassOrders, config.BeadClassNudges} {
+		namespaces = append(namespaces, config.ReservedClassPrefixesFor(class)...)
+	}
+	return newStrictMemLeaf(t, prefix, SQLiteSemantics, namespaces...)
+}
+
 // classPrefix resolves a relocated coordination class to the id prefix its
 // store mints under. Split out of NewClassStore so the rejection rule is
 // testable without a failing *testing.T.
@@ -126,6 +147,23 @@ func NewWorkStore(t *testing.T, prefix string) beads.Store {
 		t.Fatalf("splittest.NewWorkStore: %v", err)
 	}
 	return newStrictMemLeaf(t, p, BdSemantics)
+}
+
+// NewSingleStore returns the strict leaf for the one store of a city that
+// relocates nothing: minted under a work prefix, on BdSemantics like
+// NewWorkStore, but holding EVERY class, so its class residence goes
+// unpoliced. A single-store city keeps sessions, molecules and mail in its
+// work ledger, so a create of any class there is correct; a fixture modeling
+// that city with NewWorkStore would be told otherwise.
+func NewSingleStore(t *testing.T, prefix string) beads.Store {
+	t.Helper()
+	store := NewWorkStore(t, prefix)
+	if strict, ok := store.(splitRecorder); ok {
+		if s, ok := strict.(interface{ strictLeaf() *StrictStore }); ok {
+			s.strictLeaf().classes = nil
+		}
+	}
+	return store
 }
 
 // workPrefix normalizes and validates a work-store id prefix. Split out of

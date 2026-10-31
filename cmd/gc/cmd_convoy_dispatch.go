@@ -1274,7 +1274,12 @@ func findBeadScopeAcrossStores(cityPath, beadID string, warningWriter io.Writer)
 	if err != nil {
 		return nil, "", fmt.Errorf("opening city store: %w", err)
 	}
-	if _, err := cityStore.Get(beadID); err == nil {
+	// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+	// rows only as pre-split copies, so beads.RelicRead counts the read as
+	// debt; on the class binding the same read is legitimate.
+	// A scope probe (city, then rigs, then the graph binding below): a miss
+	// moves to the next scope.
+	if _, err := beads.RelicGet(cityStore, beadID); err == nil {
 		return cityStore, cityPath, nil
 	} else if !errors.Is(err, beads.ErrNotFound) {
 		return nil, "", fmt.Errorf("getting bead %q from %s: %w", beadID, cityPath, err)
@@ -1286,12 +1291,20 @@ func findBeadScopeAcrossStores(cityPath, beadID string, warningWriter io.Writer)
 		return nil, "", fmt.Errorf("getting bead %q: not in city store, and config unavailable: %w", beadID, err)
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
+	routes := cliStorageRoutes(cityPath)
 	for _, rig := range cfg.Rigs {
+		// A rig proven relic-free holds no control bead (S4b); the binding
+		// leg below answers for its scope.
+		if splitRigGraphRelicFree(routes, rig.Name) {
+			continue
+		}
 		store, err := openControlStoreAtForCity(rig.Path, cityPath, cfg)
 		if err != nil {
 			return nil, "", fmt.Errorf("opening rig store %q: %w", rig.Name, err)
 		}
-		if _, err := store.Get(beadID); err != nil {
+		// Relic leg (S4 debt): a rig store holds graph control beads only as
+		// rows written before the split or by rig-scope writers S4 moves.
+		if _, err := beads.RelicGet(store, beadID); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
@@ -1893,9 +1906,24 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 		fmt.Fprintf(stderr, "gc workflow delete: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	routes := cliStorageRoutes(cityPath)
 	for _, info := range stores {
+		// A rig proven relic-free holds no workflow bead (S4b).
+		if rigViewRelicFree(routes, cityPath, info) {
+			continue
+		}
 		label := workflowDeleteStoreLabelForView(cfg, cityPath, info)
-		found, err := findWorkflowBeads(info.store, workflowID)
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// One view of the federated sweep (scope stores and the binding):
+		// each holds only its own rows of the workflow.
+		var found []beads.Bead
+		err := beads.RelicRead(func() error {
+			var findErr error
+			found, findErr = findWorkflowBeads(info.store, workflowID)
+			return findErr
+		})
 		if err != nil {
 			fmt.Fprintf(stderr, "gc workflow delete: %v\n", refusePartialSweep("scanning", label, err)) //nolint:errcheck // best-effort stderr
 			return 1
@@ -3084,12 +3112,25 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 	c.visited[visitKey] = struct{}{}
 	c.attemptedStores[index] = struct{}{}
 
-	roots, err := sourceworkflow.ListLiveRootsInCity(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
-	if err != nil {
-		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing live source workflows", err)
-	}
-	if err := c.mergeRootMatches(info, roots); err != nil {
-		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow beads", err)
+	// A rig proven relic-free holds no workflow root (S4b): its roots live in
+	// the binding view. Its work children are still walked below.
+	if !rigViewRelicFree(cliStorageRoutes(c.cityPath), c.cityPath, info) {
+		// Relic leg (S4 debt): the walk's root probe reads every view (scope
+		// stores and the binding), and a scope store holds graph roots only as
+		// rows written before the split; beads.RelicRead counts it as debt. The
+		// child-source listing below is not covered: it is ratcheted as it is.
+		var roots []beads.Bead
+		err := beads.RelicRead(func() error {
+			var listErr error
+			roots, listErr = sourceworkflow.ListLiveRootsInCity(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
+			return listErr
+		})
+		if err != nil {
+			return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing live source workflows", err)
+		}
+		if err := c.mergeRootMatches(info, roots); err != nil {
+			return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow beads", err)
+		}
 	}
 	children, err := sourceWorkflowChildSources(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
 	if err != nil {
@@ -3238,10 +3279,19 @@ func assessZeroMatchSourceWorkflowScan(scans []sourceWorkflowStoreScan, sourceBe
 
 	blockingSet := make(map[string]struct{})
 	for _, view := range successfulViews {
-		roots, err := beads.HandlesFor(view.store).Live.List(beads.ListQuery{
-			Metadata: map[string]string{
-				beadmeta.FormulaVarPrefix + graphv2.LegacyIssueVar: sourceBeadID,
-			},
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// One view of the zero-match re-scan; each holds only its own roots.
+		var roots []beads.Bead
+		err := beads.RelicRead(func() error {
+			var listErr error
+			roots, listErr = beads.HandlesFor(view.store).Live.List(beads.ListQuery{
+				Metadata: map[string]string{
+					beadmeta.FormulaVarPrefix + graphv2.LegacyIssueVar: sourceBeadID,
+				},
+			})
+			return listErr
 		})
 		if err != nil {
 			return zeroMatchSourceWorkflowScan{

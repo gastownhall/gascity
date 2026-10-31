@@ -76,6 +76,13 @@ type MemStore struct {
 	// TestMemStoreHonorExplicitIDsMatchesSQLiteStore.
 	HonorExplicitIDs bool
 
+	// mintPrefixFor, when set, picks the prefix a store-minted id takes for
+	// each bead ("" falls back to IDPrefix). One physical store then mints the
+	// way a split city's stores do together: infrastructure beads under the
+	// class binding's prefix, work beads under the work prefix. Guarded by mu;
+	// set it with SetMintPrefixFunc.
+	mintPrefixFor func(Bead) string
+
 	// localStrings holds clone-local key-value data set via SetLocalString,
 	// keyed by bead ID then key. Deliberately excluded from
 	// restoreFrom/snapshot so FileStore's disk persistence never touches it.
@@ -167,7 +174,7 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 		}
 		b.ID = explicit
 	} else {
-		b.ID = m.mintIDLocked()
+		b.ID = m.mintIDLocked(m.mintPrefixLocked(b))
 	}
 	// Set directly rather than through setBeadStatus: create is not a status
 	// transition over an existing bead, so a caller-supplied
@@ -202,15 +209,39 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 	return cloneBead(stored), nil
 }
 
-// mintIDLocked returns a store-generated ID that is free in this store,
-// advancing past any suffix already taken. SQLiteStore's mintUniqueIDTx does the
-// same re-check on every auto-minted id, because a sequence that lags the rows
+// SetMintPrefixFunc installs fn as the per-bead mint prefix: a store-minted id
+// takes the prefix fn returns for the bead being created, and IDPrefix when fn
+// returns "" (or fn is nil, which removes the hook). Pinned ids are untouched.
+// It takes the store's lock, so it is safe on a store other goroutines are
+// already using; the split-strict test gate installs it that way to mint
+// infrastructure beads under the class binding's prefix.
+func (m *MemStore) SetMintPrefixFunc(fn func(Bead) string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.mintPrefixFor = fn
+}
+
+// mintPrefixLocked returns the prefix the mint hook picks for b, or "" for the
+// store's own. The caller must hold m.mu.
+func (m *MemStore) mintPrefixLocked(b Bead) string {
+	if m.mintPrefixFor == nil {
+		return ""
+	}
+	return m.mintPrefixFor(b)
+}
+
+// mintIDLocked returns a store-generated ID under prefix ("" for IDPrefix)
+// that is free in this store, advancing past any suffix already taken.
+// SQLiteStore's mintUniqueIDTx does the same re-check on every auto-minted id,
+// because a sequence that lags the rows
 // actually present — a store seeded by NewMemStoreFrom, or one that honored a
 // pinned id — would otherwise re-issue an id that is already there, and MemStore
 // is slice-backed, so a duplicate aliases rather than conflicts. The caller must
 // hold m.mu.
-func (m *MemStore) mintIDLocked() string {
-	prefix := m.IDPrefix
+func (m *MemStore) mintIDLocked(prefix string) string {
+	if prefix == "" {
+		prefix = m.IDPrefix
+	}
 	if prefix == "" {
 		prefix = "gc"
 	}

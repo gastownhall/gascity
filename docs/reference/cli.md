@@ -11,7 +11,7 @@ description: "Every gc command, flag, and example, generated from the CLI defini
 |------|------|---------|-------------|
 | `--city` | string |  | path to the city directory (default: walk up from cwd) |
 | `--city-name` | string |  | remote city name for --city-url (does not overload --city) |
-| `--city-url` | string |  | operate a REMOTE city at this base URL (https; requires --city-name) |
+| `--city-url` | string |  | operate a REMOTE city at this base URL (https, or http on a loopback host; requires --city-name). A remote target is served by the API, so --json prints the API rendering where a command has two (see gc session list --help) |
 | `--context` | string |  | operate the REMOTE city named by this context (~/.gc/contexts.toml) |
 | `--json-schema` | string |  | emit JSON Schema for this command; optional value: result or failure |
 | `--rig` | string |  | rig name or path (default: discover from cwd) |
@@ -4556,6 +4556,21 @@ gc session kill <session-id-or-alias> [flags]
 
 List all chat sessions. By default shows active and suspended sessions.
 
+With --json the output is one JSON document that validates against
+"gc session list --json-schema=result". It has one of two renderings, and
+the route a command takes decides which one it gets:
+
+  - Local rendering (a supervisor-hosted city, a city with no reachable
+    API, or GC_NO_API set for a local target; a remote target rejects
+    GC_NO_API): filters, sessions and summary. Each row carries closed, and
+    agent_name when the session has one, and no liveness.
+  - API rendering (a remote target such as --city-url, a standalone
+    controller's [api] port, or a supervisor serving a city that has no
+    controller): _cache_age_s and sessions. Each row carries running, and no
+    agent_name or closed.
+
+Both carry schema_version "1" and ok true, and an empty list renders as [].
+
 ```
 gc session list [flags]
 ```
@@ -5152,6 +5167,13 @@ refuses such a city and names this command.
 --from-backup re-copies a binding whose database is gone from that backup
 instead of from the work store, which no longer holds the slice.
 
+--from-rigs moves each rig's graph and infrastructure beads (closed history,
+wisps and steps included) out of the rig's own store and into the city
+binding, keeping their ids and stamping each with gc.root_store_ref=rig:&lt;name&gt;;
+a rig store then holds only work. It runs per rig (--rig narrows it), is
+resumable at every step, and refuses, by bead and with the fix, the edge shapes
+it cannot carry without a cross-store edge. It needs a converged city binding.
+
 Last, on the converged binding, each open deliver-now unit the copy carried in
 is re-lowered under the binding's id prefix: its derived interrupt is re-created
 at the id a lowering there gives it, with its state, and the old row is closed
@@ -5173,9 +5195,12 @@ gc storage migrate [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--abandon-rig-store` | bool |  | with --from-rigs --rig X, record X's clear complete without its store, once the binding is proven to hold every row X's import recorded (for a rig store that is permanently gone) |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--from-backup` | bool |  | re-copy a binding whose database is gone from the retained-source backup |
+| `--from-rigs` | bool |  | import each rig's graph and infrastructure beads into the city binding |
 | `--from-work` | bool |  | migrate the infrastructure classes out of this city's work store |
+| `--rig` | stringSlice |  | with --from-rigs, import only this rig (repeatable) |
 
 ## gc storage preflight
 
