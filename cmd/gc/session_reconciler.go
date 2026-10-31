@@ -3123,7 +3123,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// infoPostZombie stays byte-identical throughout. Guarded by
 		// TestReconcileSessionBeads_ZombieTerminalErrorReflectedOnSnapshot.
 		infoPostZombie := infoByID[id]
-		if alive && shouldRollbackPendingCreateInfo(infoPostZombie) {
+		// A row its start committed active is no pending create, whatever its
+		// claim says: the rollback's fence refuses it (rollbackable), so a
+		// rollback decided here never lands, and deferring or holding one
+		// would skip the row's drain-ack, idle and drift handling on every
+		// tick. Its claim is the residue of a commit that stopped part way,
+		// which the pass clears below: recoverRunningPendingCreate does, or a
+		// drain-ack's stop-pending mark. Until then heal leaves the row
+		// active, so a clear that waits for the runtime lease keeps the row
+		// out of this rollback on the next tick too.
+		if alive && shouldRollbackPendingCreateInfo(infoPostZombie) && rollbackable(infoPostZombie) {
 			identity := readPendingCreateIdentity(infoPostZombie, name, sp)
 			switch identity.attribution() {
 			case pendingCreateRuntimeForeign:
