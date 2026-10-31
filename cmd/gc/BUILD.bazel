@@ -1553,6 +1553,7 @@ go_test(
         "gc_beads_bd_journal_recovery_test.go",
         "gc_beads_bd_lint_test.go",
         "gc_beads_bd_server_reachable_test.go",
+        "gc_beads_bd_test_parent_watchdog_test.go",
         "gc_beads_bd_trace_lint_test.go",
         "gc_permissions_test.go",
         "gitcred_fakegit_test.go",
