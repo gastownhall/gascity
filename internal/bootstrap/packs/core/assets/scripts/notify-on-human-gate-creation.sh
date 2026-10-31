@@ -139,7 +139,10 @@ GATE_IDS="$(printf '%s\n' "$EVENTS" \
 # Load dedup state (object mapping "<gate-id>" -> ISO timestamp). A missing or
 # corrupt file resets to an empty object rather than failing.
 STATE="$(cat "$STATE_FILE" 2>/dev/null || true)"
-[ -n "$STATE" ] && echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
+case "$STATE" in
+    *[![:space:]]*) echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}' ;;
+    *) STATE='{}' ;;
+esac
 
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 NOTIFIED=0

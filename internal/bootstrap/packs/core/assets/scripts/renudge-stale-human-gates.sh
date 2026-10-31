@@ -133,7 +133,10 @@ fi
 # Load dedup state (object mapping "<gate-id>" -> ISO timestamp of last
 # re-nudge). A missing or corrupt file resets to an empty object.
 STATE="$(cat "$STATE_FILE" 2>/dev/null || true)"
-[ -n "$STATE" ] && echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
+case "$STATE" in
+    *[![:space:]]*) echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}' ;;
+    *) STATE='{}' ;;
+esac
 
 # Atomic write of $STATE to disk: temp file in the same dir, then rename.
 # Called after EVERY successful send (not just once at exit) so a process
