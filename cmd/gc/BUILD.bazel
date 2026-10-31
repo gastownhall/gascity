@@ -2116,6 +2116,7 @@ go_test(
         "session_wpool_twins_test.go",
         "session_wtick_twins_test.go",
         "setup_timeout_advisory_test.go",
+        "skill_appendix_name_test.go",
         "skill_catalog_cache_test.go",
         "skill_install_dir_test.go",
         "skill_integration_family_test.go",
