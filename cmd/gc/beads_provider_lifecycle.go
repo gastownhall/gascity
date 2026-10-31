@@ -1465,29 +1465,26 @@ func runProviderOwnedScopesLifecycleOpReportingFailures(parent context.Context, 
 		return nil, err
 	}
 	everyScope := providerOwnedOpVisitsEveryScope(op)
+	fan := providerFanOutFor(parent, op)
 	var failures []error
-	var failed []string
-	for _, scopeRoot := range scopes {
-		owned, err := scopeProviderOwned(cityPath, scopeRoot)
-		if err == nil && !owned {
+	var failed, notProbed []string
+	for _, scopeRoot := range fan.rotate(scopes) {
+		visit, err := visitProviderOwnedScope(parent, cityPath, scopeRoot, op, fan)
+		if visit == scopeDeferred {
+			notProbed = append(notProbed, scopeRoot)
 			continue
 		}
-		if err == nil && op == "health" && beadsScopeIdleRetired(scopeRoot) {
-			// The proxy retired on its idle timeout. That is healthy, and a
-			// ping would only restart it for another idle period.
+		if visit == scopeSkipped || err == nil {
 			continue
-		}
-		if err == nil {
-			err = runProviderOwnedScopeLifecycleOpContext(parent, cityPath, scopeRoot, op)
-			if err == nil {
-				continue
-			}
 		}
 		failed = append(failed, scopeRoot)
 		err = fmt.Errorf("provider-owned scope %q %s: %w", scopeRoot, op, err)
 		if !everyScope {
 			return failed, err
 		}
+		failures = append(failures, err)
+	}
+	if err := fan.recordSweep(notProbed); err != nil {
 		failures = append(failures, err)
 	}
 	return failed, errors.Join(failures...)
@@ -1508,16 +1505,17 @@ func runProviderOwnedScopeRootsLifecycleOp(parent context.Context, cityPath stri
 }
 
 // recoverUnhealthyProviderOwnedScopes recovers only the scopes whose health
-// failed and then re-checks only those. It returns the joined error of whatever
-// is still unhealthy.
+// failed and then re-checks only those that it recovered. Every started
+// recover, whether it failed or succeeded, gets its confirming probe. It
+// returns the joined error of whatever is still unhealthy, including a scope
+// whose recover failed or whose recovery was skipped by its cooldown or the
+// call's fan-out budget, and a sweep that left scopes unprobed.
 func recoverUnhealthyProviderOwnedScopes(ctx context.Context, cityPath string, unhealthy []string) error {
-	if len(unhealthy) == 0 {
-		return nil
-	}
-	if err := runProviderOwnedScopeRootsLifecycleOp(ctx, cityPath, unhealthy, "recover"); err != nil {
-		return err
-	}
-	return runProviderOwnedScopeRootsLifecycleOp(ctx, cityPath, unhealthy, "health")
+	fan := providerFanOutFor(ctx, "health")
+	started, skips, failures := startProviderOwnedRecovers(ctx, cityPath, unhealthy, fan)
+	confirmErr := runProviderOwnedScopeRootsLifecycleOp(ctx, cityPath, started, "health")
+	errs := append(append(failures, skips...), confirmErr, fan.incompleteErr())
+	return errors.Join(errs...)
 }
 
 // hasProviderOwnedRigScope reports whether any non-city scope op would visit
@@ -2401,6 +2399,7 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	ctx = withProviderFanOut(ctx, cityPath)
 	if owned, err := cityScopeProviderOwned(cityPath); err != nil {
 		return err
 	} else if owned {
