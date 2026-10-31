@@ -279,11 +279,11 @@ func (s *seededState) SessionsBeadStore() beads.SessionStore {
 }
 
 func (s *seededState) GraphBeadStore() beads.GraphStore {
-	return s.classStores().Graph(storeref.WorkRef)
+	return s.classStores().Graph()
 }
 
 func (s *seededState) OrdersBeadStore() beads.OrdersStore {
-	return s.classStores().Orders(storeref.WorkRef)
+	return s.classStores().Orders()
 }
 
 // ClassBindingHasLegacyResidents answers true for everything: a seeded city

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -3928,36 +3929,6 @@ func TestOrderRunRigQualifiesPool(t *testing.T) {
 	}
 	if got := results[0].Metadata["gc.routed_to"]; got != "demo-repo/polecat" {
 		t.Fatalf("gc.routed_to = %q, want demo-repo/polecat", got)
-	}
-}
-
-func TestOpenCityOrderStoreUsesProviderAwareStore(t *testing.T) {
-	resetFlags(t)
-	t.Setenv("GC_BEADS", "file")
-
-	cityDir := setupCity(t, "orders-city")
-	store, err := openScopeLocalFileStore(cityDir)
-	if err != nil {
-		t.Fatalf("openScopeLocalFileStore(city): %v", err)
-	}
-	created, err := store.Create(beads.Bead{Title: "digest run", Labels: []string{"order-run:digest"}})
-	if err != nil {
-		t.Fatalf("store.Create(): %v", err)
-	}
-
-	setCwd(t, cityDir)
-	t.Setenv("GC_CITY_PATH", cityDir)
-	var stderr bytes.Buffer
-	resolved, code := openCityOrderStore(&stderr, "gc order history")
-	if code != 0 {
-		t.Fatalf("openCityOrderStore() = %d, stderr = %s", code, stderr.String())
-	}
-	results, err := resolved.ListByLabel("order-run:digest", 0)
-	if err != nil {
-		t.Fatalf("resolved.ListByLabel(): %v", err)
-	}
-	if len(results) != 1 || results[0].ID != created.ID {
-		t.Fatalf("order history results = %#v, want bead %q", results, created.ID)
 	}
 }
 

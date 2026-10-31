@@ -23,7 +23,6 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
-	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 func newFormulaCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -1201,8 +1200,8 @@ func emitFormulaCookExecutionFacts(graphStore, workStore beads.Store, cityPath s
 }
 
 func emitAttachedFormulaCookExecutionFacts(store beads.Store, _ *config.City, cityPath, workflowRootID string, stderr io.Writer) {
-	stores := cliStores(cityPath, storeref.Leg{Store: store})
-	if err := executionevent.EmitCurrent(openCityRecorderAt(cityPath, stderr), stores.Graph(storeref.WorkRef), stores.Work(), workflowRootID, "formula-cook"); err != nil {
+	stores := cliStores(cityPath, store)
+	if err := executionevent.EmitCurrent(openCityRecorderAt(cityPath, stderr), stores.Graph(), stores.Work(), workflowRootID, "formula-cook"); err != nil {
 		fmt.Fprintf(stderr, "warning: gc formula cook: projecting execution facts for %s: %v\n", workflowRootID, err) //nolint:errcheck // successful attach is preserved
 	}
 }

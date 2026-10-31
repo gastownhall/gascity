@@ -35,7 +35,6 @@ import (
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/processgroup"
-	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
@@ -2262,7 +2261,7 @@ func (m *memoryOrderDispatcher) ordersStoreFor(store beads.Store) beads.Store {
 // are the same bead in the same database by construction rather than by each
 // call site remembering to route.
 func (m *memoryOrderDispatcher) orderFrontDoorFor(store beads.Store) *orders.Store {
-	return orders.NewStore(scopeStores(m.cityPath, m.storageRoutes, storeref.Leg{Store: store}).Orders(storeref.WorkRef))
+	return orders.NewStore(scopeStores(m.cityPath, m.storageRoutes, store).Orders())
 }
 
 // graphStoreKey is the gate/cooldown cache key for the graph store. It names the

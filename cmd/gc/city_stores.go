@@ -5,129 +5,179 @@ package main
 //
 // Every class handle this package hands out is minted by storeref.NewStores
 // from a topology built here, from the routes this process opened and the work
-// stores it holds. The mapping is resolveClassStore's, moved into storeref:
-// the worker-site refusal, else the routes' binding, else the work store the
-// scope holds, seen through the split-strict gate's class view. The topology
-// is assembled from the opened routes exactly as residency plans are
-// (residency_topology.go), so a handle and a plan cannot disagree about where
-// a class lives.
+// store it holds, and every raw class store resolveClassStore hands out is
+// storeref.Place over the same topology. The mapping is storeref's: the
+// worker-site refusal, else the routes' binding, else the work store, seen
+// through the split-strict gate's class view. This is the one cmd/gc file the
+// storeclass lint lets call NewStores and Place.
 //
 // # One epoch, re-minted when its inputs change
 //
-// A controller swaps its city and rig stores on reload, under its lock, and a
-// Stores is a value over one set of them. Rather than re-mint at every place a
-// store field is assigned, a holder keeps the Stores beside the inputs it was
-// minted from and re-mints on the first read after any of them changed. A
-// reader therefore always gets the handles of the stores the holder serves at
-// that moment, as the per-call wrappers this replaced did, without paying for
-// a mint per call.
+// A holder keeps one Stores beside the inputs it was minted from and re-mints
+// on the first read after any of them changed: the city work store, the routes
+// pointer, and the store the routes hand each class. The last is what makes an
+// IN-PLACE rewrite of the routes visible, and the controller makes one:
+// withControllerCache replaces each binding engine with its CachingStore under
+// the same pointer. Keying on the pointer alone would keep handles over the
+// uncached engine, whose reads bypass the cache and whose writes skip its
+// event emission.
 
 import (
 	"sync/atomic"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
-// mintCityStores mints the class handles over topo, whose bindings must be
-// the ones residencyBindingsFromRoutes derives from routes; every caller here
-// builds it with cityStoresTopology.
-func mintCityStores(cityPath string, routes *storageRoutes, topo storeref.Topology) storeref.Stores {
-	return storeref.NewStores(topo, cityStoresOptions(cityPath, routes))
+// mintClasses is the class order the bindings memo records the routes in.
+var mintClasses = infrastructureClasses()
+
+// routesBindings is the class bindings derived from one state of a routes
+// value: the store it handed each class, in mintClasses order, and the
+// bindings and refusal grouped from them. The router reads a binding's store
+// and classes only, so no census is asked for.
+type routesBindings struct {
+	stores   []beads.Store
+	bindings []storeref.ClassBinding
+	refused  error
 }
 
-// cityStoresOptions are this plane's own inputs to the mint: the worker-site
-// refusal per class, judged against the binding name each class resolves to,
-// and the split-strict projection.
-func cityStoresOptions(cityPath string, routes *storageRoutes) storeref.StoresOptions {
-	opts := storeref.StoresOptions{Projection: splitStrictSeam}
-	for _, class := range coordclass.Classes() {
-		if !class.IsInfrastructure() {
-			continue
+// noRoutesBindings is the answer for nil routes: nothing relocated.
+var noRoutesBindings = &routesBindings{stores: make([]beads.Store, len(mintClasses))}
+
+// current reports whether r still hands every class the store m was derived
+// from. It reads the routes and allocates nothing.
+func (m *routesBindings) current(r *storageRoutes) bool {
+	for i, class := range mintClasses {
+		store, _ := r.storeFor(class) // residency:allow — compares the store each class routes to with the memo's, to notice an in-place rewrite; resolves no bead
+		if !sameBeadStore(store, m.stores[i]) {
+			return false
 		}
-		// This agrees with the funnel's Classes.BindingFor only because the
-		// one served split shape, storageSplitWhole, relocates every class to
-		// the one routes.binding; a per-class shape must name the class's own
-		// binding here.
-		binding := config.StorageWorkBinding
-		if _, relocated := routes.storeFor(class); relocated { // residency:allow — asks only whether the class is relocated, to name the binding the worker-site check compares; resolves no bead
-			binding = routes.binding
-		}
-		refusal := workerSiteClassRefusal(cityPath, class.String(), binding)
-		if refusal == nil {
-			continue
-		}
-		if opts.ClassRefusals == nil {
-			opts.ClassRefusals = make(map[coordclass.Class]storeref.RefusingClassStore, 1)
-		}
-		opts.ClassRefusals[class] = refusedClassStore{err: standingStorageRefusal{err: refusal}}
 	}
-	return opts
+	return true
 }
 
-// cityStoresTopology is the topology a Stores is minted over: the opened
-// routes' bindings, the city work leg and the rig legs the holder serves.
-//
-// The rig set is every rig the holder holds open, a suspended one included,
-// because that is the set its class accessors hand out. Plans are built over
-// the serving frame instead (CityRuntime.residencyTopology), which is why a
-// Stores exposes no plan topology.
-func cityStoresTopology(routes *storageRoutes, work storeref.Leg, rigs []storeref.Leg) storeref.Topology {
-	bindings, refused := residencyBindingsFromRoutes(routes)
-	work.Ref = storeref.WorkRef
-	return storeref.Topology{Work: work, Rigs: rigs, Bindings: bindings, Refused: refused}
+// mintBindings returns the bindings for r's current class stores, derived once
+// per state of the routes.
+func (r *storageRoutes) mintBindings() *routesBindings {
+	if r == nil {
+		return noRoutesBindings
+	}
+	if m := r.mint.Load(); m != nil && m.current(r) {
+		return m
+	}
+	m := &routesBindings{stores: make([]beads.Store, len(mintClasses))}
+	order := make([]beads.Store, 0, 1)
+	byStore := map[beads.Store][]coordclass.Class{}
+	for i, class := range mintClasses {
+		store, relocated := r.storeFor(class) // residency:allow — groups the routes' class stores into the bindings the router mints over; resolves no bead
+		m.stores[i] = store
+		if !relocated || store == nil {
+			continue
+		}
+		if _, seen := byStore[store]; !seen {
+			order = append(order, store)
+		}
+		byStore[store] = append(byStore[store], class)
+	}
+	m.bindings, m.refused = storeref.BuildBindings(order, byStore, storeref.BindingOptions{})
+	r.mint.Store(m)
+	return m
 }
 
-// scopeStores mints the handles a caller holding one opened scope store and
-// the routes gets: the scope store is the work leg, so a relocated class
-// answers from the binding at every scope and an unrelocated one from that
-// scope store. It is the frame every per-call class resolver has always
-// taken, and it mints per call; a holder with an epoch uses its Stores.
-func scopeStores(cityPath string, routes *storageRoutes, scope storeref.Leg) storeref.Stores {
-	return mintCityStores(cityPath, routes, cityStoresTopology(routes, scope, nil))
+// classRefusal is the worker-site refusal for class, judged against the name of
+// the binding the routes resolve it to, as a refusing store; nil when the class
+// is not refused.
+func classRefusal(cityPath string, routes *storageRoutes, class coordclass.Class) storeref.RefusingClassStore {
+	// This agrees with the funnel's Classes.BindingFor only because the one
+	// served split shape, storageSplitWhole, relocates every class to the one
+	// routes.binding; a per-class shape must name the class's own binding here.
+	binding := config.StorageWorkBinding
+	if _, relocated := routes.storeFor(class); relocated { // residency:allow — asks only whether the class is relocated, to name the binding the worker-site check compares; resolves no bead
+		binding = routes.binding
+	}
+	refusal := workerSiteClassRefusal(cityPath, class.String(), binding)
+	if refusal == nil {
+		return nil
+	}
+	return refusedClassStore{err: standingStorageRefusal{err: refusal}}
 }
 
-// cliStores is scopeStores for a one-shot command: the routes come from the
-// one-shot funnel, resolved per call so an unsettled answer is re-read on its
-// own schedule, as it was.
-func cliStores(cityPath string, scope storeref.Leg) storeref.Stores {
+// cityTopology is the topology the router reads over routes: the work store
+// and the bindings.
+func cityTopology(routes *storageRoutes, work beads.Store) storeref.Topology {
+	b := routes.mintBindings()
+	return storeref.Topology{Work: storeref.Leg{Ref: storeref.WorkRef, Store: work}, Bindings: b.bindings, Refused: b.refused}
+}
+
+// mintCityStores mints the class handles over work and routes.
+func mintCityStores(cityPath string, routes *storageRoutes, work beads.Store) storeref.Stores {
+	opts := storeref.StoresOptions{Projection: splitStrictSeam}
+	for _, class := range mintClasses {
+		if refusal := classRefusal(cityPath, routes, class); refusal != nil {
+			if opts.ClassRefusals == nil {
+				opts.ClassRefusals = make(map[coordclass.Class]storeref.RefusingClassStore, 1)
+			}
+			opts.ClassRefusals[class] = refusal
+		}
+	}
+	return storeref.NewStores(cityTopology(routes, work), opts)
+}
+
+// placeClass is the store class lives in over work and routes, for the
+// callers that still take a raw store (resolveClassStore). It judges the
+// worker-site refusal for class alone.
+func placeClass(cityPath string, routes *storageRoutes, work beads.Store, class coordclass.Class) beads.Store {
+	opts := storeref.StoresOptions{Projection: splitStrictSeam}
+	if class.IsInfrastructure() {
+		if refusal := classRefusal(cityPath, routes, class); refusal != nil {
+			opts.ClassRefusals = map[coordclass.Class]storeref.RefusingClassStore{class: refusal}
+		}
+	}
+	return storeref.Place(cityTopology(routes, work), opts, class)
+}
+
+// scopeStores mints the handles for a caller holding one opened scope store and
+// the routes: the scope store is the work store, so a relocated class answers
+// from the binding and an unrelocated one from that scope store. It is the
+// frame every per-call class resolver has always taken. It mints per call; a
+// holder with an epoch uses its Stores.
+func scopeStores(cityPath string, routes *storageRoutes, scope beads.Store) storeref.Stores {
+	return mintCityStores(cityPath, routes, scope)
+}
+
+// cliStores is scopeStores for a one-shot command, over the one-shot funnel's
+// routes. The funnel memoizes the routes per city, and the routes memoize their
+// bindings, so a command that reaches several class resolvers groups its
+// bindings once; an unsettled funnel answer is re-read on its own schedule,
+// and brings its own bindings with it.
+func cliStores(cityPath string, scope beads.Store) storeref.Stores {
 	return scopeStores(cityPath, cliStorageRoutes(cityPath), scope)
 }
 
 // storesEpoch is one minted Stores and the inputs it was minted from.
 type storesEpoch struct {
-	routes *storageRoutes
-	work   storeref.Leg
-	rigs   []storeref.Leg
-	stores storeref.Stores
+	cityPath string
+	routes   *storageRoutes
+	bindings *routesBindings
+	work     beads.Store
+	stores   storeref.Stores
 }
 
 // storesEpochCache holds a holder's current epoch.
 type storesEpochCache struct{ current atomic.Pointer[storesEpoch] }
 
-// get returns the Stores for work and rigs over routes, minting it when the
-// cached epoch was minted from different stores.
-func (c *storesEpochCache) get(cityPath string, routes *storageRoutes, work storeref.Leg, rigs []storeref.Leg) storeref.Stores {
-	if e := c.current.Load(); e != nil && e.routes == routes && sameStoresLegs(e.work, e.rigs, work, rigs) {
+// get returns the Stores over work and routes, minting it when the cached
+// epoch was minted from a different city path, work store, routes pointer,
+// or class store. A cache hit reads the routes and allocates nothing.
+func (c *storesEpochCache) get(cityPath string, routes *storageRoutes, work beads.Store) storeref.Stores {
+	bindings := routes.mintBindings()
+	if e := c.current.Load(); e != nil && e.cityPath == cityPath && e.routes == routes && e.bindings == bindings && sameBeadStore(e.work, work) {
 		return e.stores
 	}
-	e := &storesEpoch{routes: routes, work: work, rigs: rigs}
-	e.stores = mintCityStores(cityPath, routes, cityStoresTopology(routes, work, rigs))
+	e := &storesEpoch{cityPath: cityPath, routes: routes, bindings: bindings, work: work, stores: mintCityStores(cityPath, routes, work)}
 	c.current.Store(e)
 	return e.stores
-}
-
-// sameStoresLegs reports whether two leg sets name the same stores. The
-// bindings are derived from the routes, which the caller compares by pointer.
-func sameStoresLegs(aWork storeref.Leg, aRigs []storeref.Leg, bWork storeref.Leg, bRigs []storeref.Leg) bool {
-	if !sameBeadStore(aWork.Store, bWork.Store) || len(aRigs) != len(bRigs) {
-		return false
-	}
-	for i := range aRigs {
-		if aRigs[i].Ref != bRigs[i].Ref || !sameBeadStore(aRigs[i].Store, bRigs[i].Store) {
-			return false
-		}
-	}
-	return true
 }
