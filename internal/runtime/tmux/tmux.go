@@ -835,6 +835,153 @@ func (t *Tmux) markSessionEnvRemoved(session string, keys []string) error {
 	return nil
 }
 
+// launchEnvKeysOption is the session user option that lists the keys a launch
+// set in the session environment, so a later relaunch can tell a key its config
+// no longer sets from one put there by other means (SetMeta, update-environment).
+// A user option, not an environment entry, so no agent process inherits it.
+const launchEnvKeysOption = "@gc_launch_env_keys"
+
+// launchIdentityEnvKeys name the session incarnation. A relaunch keeps the
+// incarnation, so it never rewrites them: the session environment is where
+// GetMeta and the input fence read them back.
+var launchIdentityEnvKeys = map[string]bool{
+	runtime.InstanceTokenEnv:     true,
+	runtime.RuntimeEpochEnv:      true,
+	runtime.ContinuationEpochEnv: true,
+	"BEADS_HOLDER_TOKEN":         true,
+}
+
+// launchSetKeys returns the sorted keys of env with a non-empty value: the
+// ones a launch puts in the session environment.
+func launchSetKeys(env map[string]string) []string {
+	var keys []string
+	for k, v := range env {
+		if v != "" {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// recordLaunchEnvKeys records which keys env set in session's environment.
+// Best-effort, as markAgentPane. A box with no record (its create-time write
+// failed, or it predates the record) still gets changed values on relaunch,
+// but nothing is removed from it until its first relaunch writes a record: a
+// key its config dropped by then stays until a full restart. A missing record
+// never exposes a withheld key; those are withheld by the command's `env -u`
+// prefix and the session's -r marks, neither of which reads the record.
+func (t *Tmux) recordLaunchEnvKeys(session string, env map[string]string) {
+	if err := t.writeLaunchEnvKeys(session, launchSetKeys(env)); err != nil {
+		_, _ = fmt.Fprintf(agentPaneWarningOut, "warning: session %q: recording launch env keys: %v\n", session, err)
+	}
+}
+
+// writeLaunchEnvKeys sets session's launch-key record to keys.
+func (t *Tmux) writeLaunchEnvKeys(session string, keys []string) error {
+	_, err := t.run("set-option", "-t", paneTarget(session), launchEnvKeysOption, strings.Join(keys, " "))
+	return err
+}
+
+// launchEnvKeysLine prefixes the record's line in readLaunchEnvState's output.
+// No session environment line can start with it: those are KEY=value or -KEY,
+// and "@" starts no environment variable name.
+const launchEnvKeysLine = launchEnvKeysOption + "="
+
+// readLaunchEnvState reads session's environment and its launch-key record in
+// one tmux invocation (show-environment, then the record printed by
+// display-message on a line of its own), so a relaunch costs a single read and
+// sees the two as one snapshot. Output without the record's line is read as no
+// record, the same as a box created before the record existed: the relaunch
+// then removes nothing.
+func (t *Tmux) readLaunchEnvState(session string) (map[string]string, []string, error) {
+	out, err := t.run("show-environment", "-t", sessionTarget(session), ";",
+		"display-message", "-p", "-t", paneTarget(session), launchEnvKeysLine+"#{"+launchEnvKeysOption+"}")
+	if err != nil {
+		return nil, nil, err
+	}
+	var recorded []string
+	var envLines []string
+	for _, line := range strings.Split(out, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), launchEnvKeysLine); ok {
+			recorded = strings.Fields(rest)
+			continue
+		}
+		envLines = append(envLines, line)
+	}
+	return parseShowEnvironment(strings.Join(envLines, "\n")), recorded, nil
+}
+
+// applyLaunchEnv makes session's environment hold what a fresh start with env
+// would have put there, before a relaunch respawns the agent into it.
+//
+// respawn-pane takes no env argument: the respawned process inherits the
+// SESSION environment, so a launch-only change to the env (an operator env
+// value, an upstream's serving env) reaches the agent only through this. A
+// changed or new value is set; a key the last launch set that env now pins
+// empty or no longer names is unset, so the server's global value shows
+// through exactly as it would for a session created without it (a pinned-empty
+// key is also withheld from the respawned command, see respawnAgent). The
+// incarnation keys are left alone (launchIdentityEnvKeys), as is anything the
+// last launch did not set. Secret values never reach argv (SetEnvironment).
+//
+// The writes are not atomic, and a failure returns before the respawn, leaving
+// the old agent running in a box that may be part rewritten. That box stays
+// relaunchable and the next attempt converges, because nothing is written
+// until the read succeeded, and the record is widened to every key this call
+// may set BEFORE the first of them is set: a retry, with this env or a later
+// one, still knows each key a failed attempt may have left behind. The exact
+// record is written only after every write succeeded. The caller falls back
+// to a full restart on the error.
+func (t *Tmux) applyLaunchEnv(session string, env map[string]string) error {
+	if err := validateUnsetEnvKeys(env); err != nil {
+		return err
+	}
+	current, recorded, err := t.readLaunchEnvState(session)
+	if err != nil {
+		return fmt.Errorf("reading session %q env: %w", session, err)
+	}
+	want := launchSetKeys(env)
+	if widened := mergeSortedKeys(recorded, want); !slices.Equal(widened, recorded) {
+		if err := t.writeLaunchEnvKeys(session, widened); err != nil {
+			return fmt.Errorf("recording launch env keys for session %q: %w", session, err)
+		}
+	}
+	for _, k := range want {
+		if launchIdentityEnvKeys[k] {
+			continue
+		}
+		if have, ok := current[k]; ok && have == env[k] {
+			continue
+		}
+		if err := t.SetEnvironment(session, k, env[k]); err != nil {
+			return fmt.Errorf("setting %s in session %q env: %w", k, session, err)
+		}
+	}
+	for _, k := range recorded {
+		if launchIdentityEnvKeys[k] || env[k] != "" {
+			continue
+		}
+		if _, ok := current[k]; !ok || !validEnvNameRe.MatchString(k) {
+			continue
+		}
+		if err := t.RemoveEnvironment(session, k); err != nil {
+			return fmt.Errorf("unsetting %s in session %q env: %w", k, session, err)
+		}
+	}
+	if !slices.Equal(want, recorded) {
+		t.recordLaunchEnvKeys(session, env)
+	}
+	return nil
+}
+
+// mergeSortedKeys returns the sorted, de-duplicated union of a and b.
+func mergeSortedKeys(a, b []string) []string {
+	out := slices.Concat(a, b)
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
 // NewSessionWithCommandAndEnv creates a new detached tmux session with environment
 // variables set via -e flags. This ensures the initial shell process inherits the
 // correct environment from the session, rather than inheriting from the tmux server
@@ -910,6 +1057,7 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	if err := t.markSessionEnvRemoved(name, durableWithholdKeys(env)); err != nil {
 		return err
 	}
+	t.recordLaunchEnvKeys(name, env)
 	_ = t.ConfigureServer()
 	// tmux 3.3+: reset window-size from manual to latest (see NewSession).
 	t.run("set-option", "-wt", name, "window-size", "latest") //nolint:errcheck // best-effort
@@ -4870,7 +5018,12 @@ func (t *Tmux) getAllEnvironmentCtx(ctx context.Context, session string) (map[st
 	if err != nil {
 		return nil, err
 	}
+	return parseShowEnvironment(out), nil
+}
 
+// parseShowEnvironment parses show-environment's output into the variables
+// it sets.
+func parseShowEnvironment(out string) map[string]string {
 	env := make(map[string]string)
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
@@ -4883,7 +5036,7 @@ func (t *Tmux) getAllEnvironmentCtx(ctx context.Context, session string) (map[st
 			env[parts[0]] = parts[1]
 		}
 	}
-	return env, nil
+	return env
 }
 
 // RenameSession renames a session.

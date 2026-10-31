@@ -283,10 +283,13 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 // (respawn-pane -k) and the post-launch orchestration re-run. This is the
 // agent-half of the runtime/transport un-weld (B1) — it lets the reconciler apply
 // a launch-only config change without the full reprovision a Stop+Start forces.
-// Unlike Start it does NOT regenerate the instance token, re-inject env hints, or
-// re-stage files (those are provision-half and unchanged on a launch-only change),
-// and on failure it leaves the warm box in place rather than tearing it down.
+// Unlike Start it does NOT regenerate the instance token or re-stage files
+// (those are provision-half and unchanged on a launch-only change), and on
+// failure it leaves the warm box in place rather than tearing it down. The
+// session environment is brought to what Start would set for cfg (the runtime
+// hints included), since the respawned agent inherits it.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	cfg.Env = injectSessionRuntimeHintsEnv(cfg.Env, cfg)
 	// The runtime dir is what makes the startup-nudge and start-crash
 	// diagnostics reachable. Relaunch and RunLive passed "" here, so an
 	// unconfirmed startup nudge on this path was suppressed by
@@ -1532,12 +1535,15 @@ func (o *tmuxStartOps) createSession(name, workDir, command string, env map[stri
 
 // respawnAgent relaunches the agent command in the session's existing agent
 // pane (respawn-pane -k on the agentPaneTarget pane, never the active one),
-// reusing the warm box and its session environment. The launch-half of the
-// un-weld relaunch path.
+// reusing the warm box. The launch-half of the un-weld relaunch path.
 //
 // respawn-pane takes no env argument: the new process inherits the tmux server's
-// global environment as filtered by the SESSION environment, so a withheld
-// credential has to already be marked removed there. NewSessionWithCommandAndEnv
+// global environment as filtered by the SESSION environment. So env is applied
+// there first (applyLaunchEnv), or a launch-only env change would respawn the
+// agent on the values the box was created with, and the keys env pins empty are
+// withheld from the command with the same `env -u` prefix a created session's
+// command gets. A withheld credential also has to be marked removed in the
+// session environment. NewSessionWithCommandAndEnv
 // does that at provision time, and this re-asserts it because a warm box is
 // explicitly long-lived — one provisioned by an older gc, whose create path only
 // built the one-shot `env -u` prefix, would otherwise hand the respawned agent
@@ -1545,7 +1551,14 @@ func (o *tmuxStartOps) createSession(name, workDir, command string, env map[stri
 // already marked is a no-op, and only controller-scope keys are marked, so a
 // relaunch that withholds no credential costs no extra tmux call at all.
 func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[string]string) error {
+	if err := o.tm.applyLaunchEnv(name, env); err != nil {
+		return err
+	}
 	if err := o.tm.markSessionEnvRemoved(name, durableWithholdKeys(env)); err != nil {
+		return err
+	}
+	command, err := withEnvUnsetPrefix(command, sessionEnvUnsetKeys(env))
+	if err != nil {
 		return err
 	}
 	// A warm box created before the agent-pane marker (or whose mark failed)

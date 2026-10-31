@@ -350,5 +350,12 @@ func TestRelaunchAgentForLaunchDrift_AbortClearsSpeculativeResumeKey(t *testing.
 		if got := strings.TrimSpace(env.sessionInfo(session.ID).SessionKey); got != priorKey {
 			t.Errorf("stored session_key = %q, want preserved %q", got, priorKey)
 		}
+		// The failed relaunch must not rebaseline: a hash moved to the new
+		// config would hide the drift from the next tick, leaving the agent on
+		// whatever the failed attempt left in its box.
+		b, _ := env.store.Get(session.ID)
+		if got := b.Metadata["started_config_hash"]; got == currentHash {
+			t.Errorf("stored started_config_hash = %q, the relaunch config's: a failed relaunch rebaselined", got)
+		}
 	})
 }
