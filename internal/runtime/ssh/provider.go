@@ -806,11 +806,14 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 }
 
 // GetLastActivity returns the session's last-activity time (zero if unknown).
+// It reads the pane-output clock #{window_activity}, matching the local tmux
+// provider: #{session_activity} is pinned at creation/attach time for a
+// detached session and does not advance when the agent prints output.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	if checkName(name) != nil {
 		return time.Time{}, nil
 	}
-	out, code, err := p.tmux(context.Background(), name, "display-message", "-t", paneTarget(name), "-p", "#{session_activity}")
+	out, code, err := p.tmux(context.Background(), name, "display-message", "-t", paneTarget(name), "-p", "#{window_activity}")
 	if err != nil || code != 0 {
 		return time.Time{}, nil
 	}
@@ -828,13 +831,13 @@ func (p *Provider) CopyTo(_, _, _ string) error { return nil }
 func (p *Provider) RunLive(_ string, _ runtime.Config) error { return nil }
 
 // Capabilities reports what this provider can observe. Activity is reported
-// via tmux #{session_activity}. Attachment is observable (IsAttached queries
+// via tmux #{window_activity}. Attachment is observable (IsAttached queries
 // #{session_attached}) but — matching the Kubernetes provider — is left
 // undeclared so idle-sleep resolves to timed-only on a remote box; revisit
 // once attachment-aware sleep is validated against a real remote.
 func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{
-		CanReportActivity: true, // tmux #{session_activity}
+		CanReportActivity: true, // tmux #{window_activity}
 	}
 }
 

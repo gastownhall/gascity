@@ -647,6 +647,9 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 func (p *Provider) ListRunningComplete() bool { return true }
 
 // GetLastActivity returns the time of the last I/O in the tmux session.
+// It reads the pane-output clock #{window_activity}, matching the local tmux
+// provider: #{session_activity} is pinned at creation/attach time for a
+// detached session and does not advance when the agent prints output.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	ctx := context.Background()
 	podName, err := p.findRunningPod(ctx, name)
@@ -654,7 +657,7 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 		return time.Time{}, nil
 	}
 	output, err := p.ops.execInPod(ctx, podName, "agent",
-		[]string{"tmux", "display-message", "-t", tmuxSession, "-p", "#{session_activity}"}, nil)
+		[]string{"tmux", "display-message", "-t", tmuxSession, "-p", "#{window_activity}"}, nil)
 	if err != nil {
 		return time.Time{}, nil
 	}
@@ -676,7 +679,7 @@ func (p *Provider) ClearScrollback(name string) error {
 }
 
 // Capabilities reports K8s provider capabilities. The K8s provider
-// supports activity tracking via tmux session_activity but does not
+// supports activity tracking via tmux window_activity but does not
 // support attachment detection from the controller host.
 func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{

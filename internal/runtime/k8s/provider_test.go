@@ -537,10 +537,15 @@ func TestGetLastActivity(t *testing.T) {
 
 	addRunningPod(fake, "gc-test-agent", "gc-test-agent")
 
-	// Configure fake to return epoch timestamp.
+	// Detached tmux advances #{window_activity} on pane output but pins
+	// #{session_activity} at creation/attach time, so the output clock is the
+	// one GetLastActivity must read.
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "display-message", "-t", "main", "-p", "#{window_activity}"},
+		"1709300000\n", nil)
 	fake.setExecResult("gc-test-agent",
 		[]string{"tmux", "display-message", "-t", "main", "-p", "#{session_activity}"},
-		"1709300000\n", nil)
+		"1600000000\n", nil)
 
 	activity, err := p.GetLastActivity("gc-test-agent")
 	if err != nil {
