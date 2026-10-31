@@ -660,13 +660,18 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// multiple unsupported dialog classes with independent timeouts, so the
 		// first can exhaust the managed startup lease while OpenCode is working.
 		AcceptStartupDialogs: boolPtr(false),
-		Env:                  map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
-		SupportsACP:          true,
-		SupportsHooks:        true,
-		InstructionsFile:     "AGENTS.md",
-		ResumeFlag:           "--session",
-		ResumeStyle:          "flag",
-		ACPArgs:              []string{"acp"},
+		// OpenCode merges OPENCODE_PERMISSION over every config file, so this
+		// catch-all also overrides a project opencode.json's permission rules.
+		// An agent keeps those rules with env OPENCODE_PERMISSION = "" (see
+		// docs/guides/harness-recipes.md). The cerebras and groq presets share
+		// this default.
+		Env:              map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
+		SupportsACP:      true,
+		SupportsHooks:    true,
+		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--session",
+		ResumeStyle:      "flag",
+		ACPArgs:          []string{"acp"},
 		OptionsSchema: []BuiltinProviderOption{
 			modelOption(
 				modelChoice("opencode/deepseek-v4-flash-free", "DeepSeek V4 Flash Free"),
