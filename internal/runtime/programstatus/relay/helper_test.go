@@ -34,6 +34,7 @@ var helperModes = map[string]func(args []string) int{
 	"emit":        helperEmit,
 	"exit":        helperExit,
 	"die":         helperDie,
+	"die-exec":    helperDieExec,
 	"transparent": helperTransparent,
 	"winsize":     helperWinsize,
 	"signals":     helperSignals,
@@ -57,11 +58,14 @@ func runHelper() int {
 	return mode(os.Args[2:])
 }
 
+// helperFailCode is the exit code of a helper that reported a failure.
+const helperFailCode = 99
+
 // helperFail reports a helper failure on its terminal, where the test sees
 // it, and returns the failure exit code.
 func helperFail(format string, a ...any) int {
 	_, _ = fmt.Fprintf(os.Stdout, "\r\nHELPER-FAIL "+format+"\r\n", a...) // the exit code reports it too
-	return 99
+	return helperFailCode
 }
 
 // makeRaw puts the helper's terminal in raw mode.
@@ -111,6 +115,21 @@ func helperDie(args []string) int {
 		return helperFail("%v", err)
 	}
 	dieBySignal(syscall.Signal(n))
+	return helperFail("survived signal %d", n)
+}
+
+// helperDieExec dies by the signal number given through dieByExec, the
+// path dieBySignal takes off linux/amd64 and linux/arm64. With "ignored" it
+// ignores the signal first, as a relay started with it ignored would.
+func helperDieExec(args []string) int {
+	n, err := strconv.Atoi(args[0])
+	if err != nil {
+		return helperFail("%v", err)
+	}
+	if len(args) > 1 && args[1] == "ignored" {
+		signal.Ignore(syscall.Signal(n))
+	}
+	dieByExec(syscall.Signal(n))
 	return helperFail("survived signal %d", n)
 }
 
