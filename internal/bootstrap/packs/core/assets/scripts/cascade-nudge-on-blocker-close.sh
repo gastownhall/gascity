@@ -142,7 +142,7 @@ BLOCKERS="$(printf '%s\n' "$EVENTS" \
 
 # Load dedup state (object mapping "<blocker>|<dependent>" -> ISO timestamp).
 STATE="$(cat "$STATE_FILE" 2>/dev/null || true)"
-echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
+[ -n "$STATE" ] && echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
 
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 NUDGED=0
