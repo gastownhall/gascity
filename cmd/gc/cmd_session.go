@@ -1739,8 +1739,13 @@ func newSessionSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "suspend <session-id-or-alias>",
 		Short: "Suspend a session (save state, free resources)",
-		Long: `Suspend an active session by stopping its runtime process.
-The session bead persists and can be resumed later.
+		Long: `Suspend an active session. The session bead persists and can be resumed later.
+
+When a controller manages the city, suspend records an operator hold and
+returns without waiting: the controller stops the runtime process when it
+drains the hold, so the runtime can still be running when the command exits.
+A "gc session wake" before that stop cancels the suspend and the runtime keeps
+running. Without a controller, suspend stops the runtime process itself.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
@@ -1849,19 +1854,33 @@ func cmdSessionSuspend(args []string, key string, stdout, stderr io.Writer, asJS
 
 // emitSessionSuspendResult prints a suspend's success output. mode is managed
 // or direct; a replay, which does not know which path ran, leaves it empty.
+// A managed suspend has only recorded the hold: its output says the runtime
+// stop is still pending, since the controller stops the runtime later.
 func emitSessionSuspendResult(stdout, stderr io.Writer, asJSON bool, sessionID, mode string, op *cliOp) int {
+	runtimeStop := ""
+	switch mode {
+	case "managed":
+		runtimeStop = "pending"
+	case "direct":
+		runtimeStop = "done"
+	}
 	if asJSON {
 		result := sessionActionResult{
-			Action:    "suspend",
-			SessionID: sessionID,
-			Mode:      mode,
-			State:     "suspended",
+			Action:      "suspend",
+			SessionID:   sessionID,
+			Mode:        mode,
+			State:       "suspended",
+			RuntimeStop: runtimeStop,
 		}
 		op.annotate(&result)
 		if err := writeSessionActionJSON(stdout, result); err != nil {
 			fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		return 0
+	}
+	if runtimeStop == "pending" {
+		fmt.Fprintf(stdout, "Session %s suspended; the controller stops its runtime when it drains the hold. Resume with: gc session wake %s\n", sessionID, sessionID) //nolint:errcheck // best-effort stdout
 		return 0
 	}
 	fmt.Fprintf(stdout, "Session %s suspended. Resume with: gc session wake %s\n", sessionID, sessionID) //nolint:errcheck // best-effort stdout

@@ -4831,8 +4831,13 @@ gc session submit mayor "stop and do this instead" --intent interrupt_now
 
 ## gc session suspend
 
-Suspend an active session by stopping its runtime process.
-The session bead persists and can be resumed later.
+Suspend an active session. The session bead persists and can be resumed later.
+
+When a controller manages the city, suspend records an operator hold and
+returns without waiting: the controller stops the runtime process when it
+drains the hold, so the runtime can still be running when the command exits.
+A "gc session wake" before that stop cancels the suspend and the runtime keeps
+running. Without a controller, suspend stops the runtime process itself.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
