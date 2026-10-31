@@ -6,6 +6,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -3861,5 +3862,93 @@ func TestValidateVarsChecksResolvedDefault(t *testing.T) {
 	}}
 	if err := ValidateVars(f, map[string]string{"binding_prefix": "ops."}); err != nil {
 		t.Fatalf("ValidateVars: %v", err)
+	}
+}
+
+func TestDefaultsReferencing(t *testing.T) {
+	tests := []struct {
+		name   string
+		defs   map[string]*VarDef
+		values map[string]string
+		want   []string
+	}{
+		{
+			name: "default references a named var",
+			defs: map[string]*VarDef{
+				"subject": {Default: StringPtr("unit {{convoy_id}}")},
+				"member":  {Default: StringPtr("{{issue}}")},
+			},
+			values: map[string]string{"convoy_id": "gc-1", "issue": "gc-2"},
+			want:   []string{"member", "subject"},
+		},
+		{
+			name:   "named var need not be supplied",
+			defs:   map[string]*VarDef{"subject": {Default: StringPtr("{{convoy_id}}")}},
+			values: nil,
+			want:   []string{"subject"},
+		},
+		{
+			name: "default reaches a named var through other defaults",
+			defs: map[string]*VarDef{
+				"subject": {Default: StringPtr("{{convoy_id}}")},
+				"title":   {Default: StringPtr("Review {{subject}}")},
+				"label":   {Default: StringPtr("{{title}} by {{reviewer}}")},
+			},
+			values: map[string]string{"reviewer": "ops"},
+			want:   []string{"label", "subject", "title"},
+		},
+		{
+			name: "supplied var is never included and passes no reference on",
+			defs: map[string]*VarDef{
+				"subject": {Default: StringPtr("{{convoy_id}}")},
+				"title":   {Default: StringPtr("Review {{subject}}")},
+			},
+			values: map[string]string{"subject": "manual", "convoy_id": "gc-1"},
+			want:   nil,
+		},
+		{
+			name: "defaults referencing no named var are not included",
+			defs: map[string]*VarDef{
+				"review_target": {Default: StringPtr("{{binding_prefix}}reviewer")},
+				"mode":          {Default: StringPtr("fast")},
+			},
+			values: map[string]string{"binding_prefix": "ops."},
+			want:   nil,
+		},
+		{
+			name: "cycle reaching a named var is included",
+			defs: map[string]*VarDef{
+				"a": {Default: StringPtr("{{b}}{{convoy_id}}")},
+				"b": {Default: StringPtr("{{a}}")},
+			},
+			want: []string{"a", "b"},
+		},
+		{
+			name: "cycle reaching no named var is not included",
+			defs: map[string]*VarDef{
+				"a": {Default: StringPtr("{{b}}")},
+				"b": {Default: StringPtr("{{a}}")},
+			},
+			want: nil,
+		},
+		{
+			name: "nil def and nil default are skipped",
+			defs: map[string]*VarDef{"nil_def": nil, "no_default": {}},
+			want: nil,
+		},
+		{
+			name:   "nil defs",
+			defs:   nil,
+			values: map[string]string{"convoy_id": "gc-1"},
+			want:   nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DefaultsReferencing(tt.defs, tt.values, "convoy_id", "issue")
+			if names := slices.Sorted(maps.Keys(got)); !slices.Equal(names, tt.want) {
+				t.Fatalf("DefaultsReferencing = %v, want %v", names, tt.want)
+			}
+		})
 	}
 }

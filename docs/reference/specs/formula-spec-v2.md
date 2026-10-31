@@ -914,6 +914,15 @@ at runtime.
 | `continuation_group` | Shared execution group suffix; valid only with `context = "shared"` |
 | `item.single_lane` | Must be `true` for shared drains |
 
+The item formula receives the parent's runtime variables as caller values:
+the values the parent was invoked with and its resolved defaults, so they
+take precedence over the item formula's own defaults. Its `{{convoy_id}}` is
+its unit convoy, and the deprecated `{{issue}}` resolves to the unit's member.
+A parent default derived from the parent's input convoy (one that references
+`{{convoy_id}}` or `{{issue}}`, directly or through another default) is not
+passed on: an item formula that needs the value declares the same default and
+derives it from its unit convoy.
+
 A `blocks` edge is satisfied by its predecessor's close whatever
 `gc.outcome` that close carries, but a drain does not expand when a direct
 blocking predecessor in the same workflow closed with a failed outcome: it

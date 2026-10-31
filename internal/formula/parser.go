@@ -806,16 +806,7 @@ func ApplyVarDefaults(defs map[string]*VarDef, values map[string]string) map[str
 	for k, v := range values {
 		result[k] = v
 	}
-	pending := make(map[string]string, len(defs))
-	for name, def := range defs {
-		if def == nil || def.Default == nil {
-			continue
-		}
-		if _, provided := result[name]; provided {
-			continue
-		}
-		pending[name] = *def.Default
-	}
+	pending := pendingVarDefaults(defs, values)
 	const (
 		resolving = 1
 		resolved  = 2
@@ -854,6 +845,49 @@ func ApplyVarDefaults(defs map[string]*VarDef, values map[string]string) map[str
 		resolve(name)
 	}
 	return result
+}
+
+// DefaultsReferencing returns the names of the vars ApplyVarDefaults fills
+// from a default whose template references one of names, directly or through
+// another default it fills. A var that values supplies is never included: its
+// value is used verbatim, so it references nothing.
+func DefaultsReferencing(defs map[string]*VarDef, values map[string]string, names ...string) map[string]bool {
+	pending := pendingVarDefaults(defs, values)
+	found := make(map[string]bool, len(pending))
+	references := func(raw string) bool {
+		for _, match := range varPattern.FindAllStringSubmatch(raw, -1) {
+			if found[match[1]] || slices.Contains(names, match[1]) {
+				return true
+			}
+		}
+		return false
+	}
+	for grew := true; grew; {
+		grew = false
+		for name, raw := range pending {
+			if !found[name] && references(raw) {
+				found[name] = true
+				grew = true
+			}
+		}
+	}
+	return found
+}
+
+// pendingVarDefaults returns the default template of every var in defs that
+// values does not supply.
+func pendingVarDefaults(defs map[string]*VarDef, values map[string]string) map[string]string {
+	pending := make(map[string]string, len(defs))
+	for name, def := range defs {
+		if def == nil || def.Default == nil {
+			continue
+		}
+		if _, provided := values[name]; provided {
+			continue
+		}
+		pending[name] = *def.Default
+	}
+	return pending
 }
 
 // resolveDescriptionFiles walks all steps and replaces DescriptionFile

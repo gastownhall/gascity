@@ -3810,17 +3810,127 @@ func TestDrainItemRuntimeVarsResolvesDefaultsReferencingParentAndConvoyVars(t *t
 		"review_target": {Default: &reviewDefault},
 		"subject":       {Default: &subjectDefault},
 	}}
-	got := drainItemRuntimeVars(recipe, map[string]string{
+	vars := map[string]string{
 		"binding_prefix":    "ops.",
 		graphv2.ConvoyIDVar: "unit-1",
-	})
+	}
+	got := drainItemRuntimeVars(recipe, vars)
 	if got["review_target"] != "ops.reviewer" {
 		t.Fatalf("review_target = %q, want ops.reviewer", got["review_target"])
 	}
-	if got["subject"] != "unit unit-1" {
-		t.Fatalf("subject = %q, want %q", got["subject"], "unit unit-1")
+	// subject derives from the unit's convoy: it stays out of the item root's
+	// key and persisted runtime vars, and instantiation derives it.
+	if subject, ok := got["subject"]; ok {
+		t.Fatalf("subject = %q, want the convoy-derived default left out", subject)
+	}
+	if subject := formula.ApplyVarDefaults(recipe.Vars, got)["subject"]; subject != "unit unit-1" {
+		t.Fatalf("subject derived from the runtime vars = %q, want %q", subject, "unit unit-1")
 	}
 	if got := drainItemRuntimeVars(nil, nil); got == nil || len(got) != 0 {
 		t.Fatalf("drainItemRuntimeVars(nil, nil) = %v, want empty non-nil map", got)
+	}
+}
+
+func TestProcessDrainItemDerivesConvoyDefaultFromItsUnitConvoy(t *testing.T) {
+	tests := []struct {
+		name       string
+		callerVars map[string]string
+		// wantSubject is the subject every item binds; empty means the
+		// item's own unit convoy.
+		wantSubject string
+	}{
+		{name: "parent default derived from its convoy is not inherited"},
+		{
+			name:        "caller-supplied parent value is inherited",
+			callerVars:  map[string]string{"subject": "manual"},
+			wantSubject: "manual",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			formulatest.EnableV2ForTest(t)
+			dir := t.TempDir()
+			writeConvoySubjectDrainFormulas(t, dir)
+			store, drain := seedDrainWorkflow(t)
+			root := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
+			parentConvoyID := root.Metadata["gc.input_convoy_id"]
+			// Persist the parent's runtime vars the way sling stamps them on
+			// the workflow root.
+			inv, err := graphv2.PrepareInvocation(context.Background(), store, "parent", []string{dir}, parentConvoyID, tt.callerVars)
+			if err != nil {
+				t.Fatalf("PrepareInvocation(parent): %v", err)
+			}
+			if raw := graphv2.RuntimeVarsMetadata(inv.Vars); raw != "" {
+				if err := store.SetMetadata(root.ID, graphv2.RuntimeVarsMetadataKey, raw); err != nil {
+					t.Fatalf("SetMetadata(runtime vars): %v", err)
+				}
+			}
+
+			if _, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}}); err != nil {
+				t.Fatalf("ProcessControl(drain expand): %v", err)
+			}
+			manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+			if len(manifest.Rows) == 0 {
+				t.Fatal("drain expanded no rows")
+			}
+			for _, row := range manifest.Rows {
+				subject := tt.wantSubject
+				if subject == "" {
+					subject = row.UnitConvoyID
+				}
+				if got, want := mustFindDrainItemWorkStep(t, store, row.ItemRootID).Title, "Work on "+subject; got != want {
+					t.Fatalf("item work step title = %q, want %q (parent convoy %s)", got, want, parentConvoyID)
+				}
+				itemRoot := mustGetBead(t, store, row.ItemRootID)
+				itemVars, err := graphv2.ParseRuntimeVarsMetadata(itemRoot.Metadata[graphv2.RuntimeVarsMetadataKey])
+				if err != nil {
+					t.Fatalf("ParseRuntimeVarsMetadata(item root): %v", err)
+				}
+				if got, want := itemVars["subject"], tt.callerVars["subject"]; got != want {
+					t.Fatalf("item root runtime vars subject = %q, want %q", got, want)
+				}
+			}
+		})
+	}
+}
+
+func writeConvoySubjectDrainFormulas(t *testing.T, dir string) {
+	t.Helper()
+	files := map[string]string{
+		"parent.formula.toml": `
+formula = "parent"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[vars.subject]
+default = "{{convoy_id}}"
+
+[[steps]]
+id = "drain"
+title = "Drain {{subject}}"
+
+[steps.drain]
+context = "separate"
+formula = "drain-item"
+`,
+		"drain-item.formula.toml": `
+formula = "drain-item"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[vars.subject]
+default = "{{convoy_id}}"
+
+[[steps]]
+id = "work"
+title = "Work on {{subject}}"
+`,
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(strings.TrimSpace(content)+"\n"), 0o644); err != nil {
+			t.Fatalf("write formula %s: %v", name, err)
+		}
 	}
 }
