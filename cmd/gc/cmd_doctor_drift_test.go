@@ -403,6 +403,39 @@ func TestDoltDriftCheckReportsMissingOrEmptyInheritedRigPortMirror(t *testing.T)
 	}
 }
 
+// TestDoltDriftCheckFixRestoresMissingPortMirror drives `gc doctor --fix
+// --check dolt-drift` through the doctor framework for a Case-D rig: the fix
+// is the same port-file sync `gc start` runs, so the missing mirror comes
+// back holding the managed port and the framework's verifying re-run goes
+// green.
+func TestDoltDriftCheckFixRestoresMissingPortMirror(t *testing.T) {
+	cityDir, rigDir, managedPort, cfg := managedCityDriftFixture(t, "severed")
+	portFile := filepath.Join(rigDir, ".beads", "dolt-server.port")
+	if err := os.Remove(portFile); err != nil {
+		t.Fatal(err)
+	}
+
+	check := newDoltDriftCheck(cityDir, cfg)
+	d := &doctor.Doctor{}
+	d.Register(check)
+	report := d.RunCollect(&doctor.CheckContext{CityPath: cityDir}, true)
+	if report.Fixed != 1 || report.Failed != 0 {
+		res := report.Results[0]
+		t.Fatalf("doctor --fix: fixed=%d failed=%d, want the missing mirror restored; status=%v details=%v fixErr=%q", report.Fixed, report.Failed, res.Status, res.Details, res.FixError)
+	}
+	res := report.Results[0]
+	if res.Status != doctor.StatusOK || !res.Fixed {
+		t.Errorf("verifying re-run = status %v fixed=%t, want StatusOK fixed=true", res.Status, res.Fixed)
+	}
+	got, err := os.ReadFile(portFile)
+	if err != nil {
+		t.Fatalf("read restored port mirror: %v", err)
+	}
+	if strings.TrimSpace(string(got)) != managedPort {
+		t.Errorf("rig port file = %q, want it restored to the managed port %s", got, managedPort)
+	}
+}
+
 // TestDoltDriftCheckReportsUnclassifiableRigStorage pins the fail-closed arm of
 // the embedded skip: a rig whose metadata.json cannot be read is reported, not
 // guessed into either mode — skipping it as embedded would hide real drift, and
