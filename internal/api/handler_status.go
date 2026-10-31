@@ -34,6 +34,15 @@ type (
 
 var statusStoreReadTimeout = time.Second
 
+// statusReadyCleanupBudget is how long a status ready read waits for scoped
+// resolution to finish cleanup after the read deadline. A resolver that has
+// observed cancellation must reap its bd child before the caller returns.
+// A resolver blocked on a mutex before it observes ctx will not finish; this
+// cap stops that wait from pinning the status rebuild — and the
+// stale-while-revalidate entry that is not replaced until the rebuild stores
+// — for as long as the lock is held.
+var statusReadyCleanupBudget = 2 * time.Second
+
 // statusResponseTTLFloor lets non-blocking status requests reuse a recently
 // built body after the time-bucket entry has rolled over. The shared
 // time-bucket cache (responseCacheTimeBucket / timeBucketResponseCacheTTL in
@@ -1064,26 +1073,49 @@ func statusReadyStoreWithTimeout(ctx context.Context, state State, store beads.S
 		capabilityErr = err
 	}
 
-	// ScopedStoreLike is part of the context-aware read contract: resolution
-	// must finish its own cleanup before returning after reqCtx cancellation.
-	// Keep it synchronous so the status deadline cannot abandon a resolver
-	// goroutine after the response has returned.
-	scoped, err := state.ScopedStoreLike(reqCtx, store)
-	if err != nil {
-		return nil, statusReadyError(fmt.Errorf("resolving scoped store: %w", err))
+	// Scoped resolution runs off this goroutine. A resolver that observes
+	// cancellation still finishes cleanup before we return, so a bd child is
+	// dead when the caller continues. A resolver blocked on a mutex before it
+	// selects on ctx used to pin this call, the status rebuild, and the
+	// stale-while-revalidate body for the life of the lock. The
+	// post-deadline wait is capped at statusReadyCleanupBudget.
+	type readyResult struct {
+		rows []beads.Bead
+		err  error
 	}
-	if scoped == nil {
-		if capabilityErr == nil {
-			capabilityErr = fmt.Errorf("reading canonical ready projection: %w", beads.ErrReadyContextUnsupported)
+	done := make(chan readyResult, 1)
+	go func() {
+		scoped, err := state.ScopedStoreLike(reqCtx, store)
+		if err != nil {
+			done <- readyResult{err: fmt.Errorf("resolving scoped store: %w", err)}
+			return
 		}
-		return nil, capabilityErr
+		if scoped == nil {
+			err = capabilityErr
+			if err == nil {
+				err = fmt.Errorf("reading canonical ready projection: %w", beads.ErrReadyContextUnsupported)
+			}
+			done <- readyResult{err: err}
+			return
+		}
+		rows, err := beads.HandlesFor(scoped).Live.Ready()
+		done <- readyResult{rows: rows, err: err}
+	}()
+
+	select {
+	case result := <-done:
+		return result.rows, statusReadyError(result.err)
+	case <-reqCtx.Done():
 	}
 
-	// ScopedStoreLike guarantees the clone and its legacy Ready operation are
-	// bound to reqCtx, including child-process cleanup, so no outer goroutine is
-	// needed to enforce the deadline.
-	rows, err := beads.HandlesFor(scoped).Live.Ready()
-	return rows, statusReadyError(err)
+	cleanup := time.NewTimer(statusReadyCleanupBudget)
+	defer cleanup.Stop()
+	select {
+	case result := <-done:
+		return result.rows, statusReadyError(result.err)
+	case <-cleanup.C:
+		return nil, statusReadyError(context.DeadlineExceeded)
+	}
 }
 
 func statusReadyError(err error) error {
