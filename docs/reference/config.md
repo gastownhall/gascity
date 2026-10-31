@@ -675,6 +675,7 @@ PackRigDefaults holds the [defaults.rig] block — defaults applied to rigs crea
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `default_sling_target` | string |  |  | DefaultSlingTarget names a rig-scoped agent in this pack. On a rig import, the loader qualifies it with the actual rig and import binding. Explicit rig targets win; ambiguous inherited targets are rejected. |
 | `imports` | map[string]Import |  |  |  |
 
 ## Patches

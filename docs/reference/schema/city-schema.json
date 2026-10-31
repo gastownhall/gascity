@@ -2341,6 +2341,10 @@
     },
     "PackRigDefaults": {
       "properties": {
+        "default_sling_target": {
+          "type": "string",
+          "description": "DefaultSlingTarget names a rig-scoped agent in this pack. On a rig\nimport, the loader qualifies it with the actual rig and import binding.\nExplicit rig targets win; ambiguous inherited targets are rejected."
+        },
         "imports": {
           "additionalProperties": {
             "$ref": "#/$defs/Import"

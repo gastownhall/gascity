@@ -25,7 +25,8 @@ cd ~/bright-lights
 
 Init checks your provider, registers the city, and starts the orchestrator.
 The beginner choice uses the default Gas City pack. It starts model sessions
-on demand and preserves your normal provider and capacity choices. The orchestrator and token-free maintenance can run while idle;
+on demand and preserves your normal provider and capacity choices.
+The orchestrator and token-free maintenance can run while idle;
 model work begins when you submit a task or explicitly request a session.
 
 If preflight reports a missing dependency or login, fix the named problem and
@@ -90,6 +91,40 @@ Work and commit evidence persist across sessions. Stop when you want the city
 paused; start it to resume. A failed stage remains visible for diagnosis. Do not
 delete a worktree or close source work to clear an error. Use the source task
 ID printed by the tutorial with `gc bd show <task-id>` to inspect it.
+
+## Use your own repository
+
+You can take the delivery path directly to an existing project; the practice
+repository is optional. From the city directory, register a clean checkout:
+
+```bash
+gc rig add ~/code/my-project --name project --prefix proj
+```
+
+Gas City records the repository's default branch. Check out that branch before
+submitting work. Review the registration changes with Git and commit the
+infrastructure files you want tracked; task setup refuses a dirty checkout.
+If the project already has a beads database, use `gc rig add --adopt` instead
+and preserve a backup of the queue before adoption.
+
+Create a task with specific acceptance criteria, then submit its printed ID:
+
+```bash
+gc --rig project bd create "Fix the reported bug" --description "Describe the failing behavior and required result"
+gc sling <task-id> --var verify_command="your project's verification command"
+```
+
+Choose a real verification command, such as `npm test` or the project's Bazel
+target. The imported pack supplies the delivery route and workflow; no pack
+editing or coordinator conversation is required. Missing verification input
+is an error rather than permission to skip tests.
+
+The workflow fetches the configured default branch from `origin` when present.
+It includes commits already integrated locally, even if they are not pushed.
+Diverged branches or a failed fetch stop setup visibly; reconcile them explicitly
+and retain the task. A repository without `origin` uses its local default branch.
+Review, verification, integration and cleanup follow the same rules as the
+practice task. Publication remains a separate choice.
 
 ## Continue with the same city
 

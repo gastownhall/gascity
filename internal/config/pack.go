@@ -83,7 +83,11 @@ type PackDefaults struct {
 // PackRigDefaults holds the [defaults.rig] block — defaults applied
 // to rigs created from this pack.
 type PackRigDefaults struct {
-	Imports map[string]Import `toml:"imports,omitempty"`
+	// DefaultSlingTarget names a rig-scoped agent in this pack. On a rig
+	// import, the loader qualifies it with the actual rig and import binding.
+	// Explicit rig targets win; ambiguous inherited targets are rejected.
+	DefaultSlingTarget string            `toml:"default_sling_target,omitempty"`
+	Imports            map[string]Import `toml:"imports,omitempty"`
 }
 
 // ExpandPacks resolves pack references on all rigs. For each rig
@@ -138,6 +142,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 			}
 		}
 
+		var inheritedSlingTarget string
 		var rigAgents []Agent
 		var rigNamedSessions []NamedSession
 		var rigTopoDirs []string
@@ -386,6 +391,29 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				if err != nil {
 					return fmt.Errorf("rig %q import %q: parsing %s: %w", rig.Name, bindingName, impPath, err)
 				}
+				if rig.DefaultSlingTarget == "" && len(rig.DefaultSlingTargets) == 0 {
+					var importedPack PackConfig
+					if _, err := toml.Decode(string(impData), &importedPack); err != nil {
+						return fmt.Errorf("rig %q import %q: parsing defaults: %w", rig.Name, bindingName, err)
+					}
+					if target := importedPack.Defaults.Rig.DefaultSlingTarget; target != "" {
+						found := false
+						for _, agent := range agents {
+							if agent.Name == target && agent.Scope != "city" {
+								found = true
+								break
+							}
+						}
+						if !found {
+							return fmt.Errorf("rig %q import %q: default_sling_target %q must name a rig agent in the import", rig.Name, bindingName, target)
+						}
+						qualified := rig.Name + "/" + bindingName + "." + target
+						if inheritedSlingTarget != "" && inheritedSlingTarget != qualified {
+							return fmt.Errorf("rig %q inherits conflicting default sling targets %q and %q; set the rig default_sling_target explicitly", rig.Name, inheritedSlingTarget, qualified)
+						}
+						inheritedSlingTarget = qualified
+					}
+				}
 				for i := range agents {
 					if agents[i].PackName == "" {
 						agents[i].PackName = packName
@@ -484,6 +512,10 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				cfg.RigImportPackDirs = make(map[string][]string)
 			}
 			cfg.RigImportPackDirs[rig.Name] = rigImportPackDirs
+		}
+
+		if rig.DefaultSlingTarget == "" && len(rig.DefaultSlingTargets) == 0 {
+			rig.DefaultSlingTarget = inheritedSlingTarget
 		}
 
 		// Collect overlay/ dirs from rig pack dirs.
