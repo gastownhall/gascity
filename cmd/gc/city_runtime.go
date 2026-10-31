@@ -242,9 +242,10 @@ type CityRuntime struct {
 	// serviceStateMu and read through cityBeadStore/rigBeadStores. Only the
 	// controller goroutine writes them.
 	standaloneCityStore beads.Store // non-nil when API disabled; for chat auto-suspend
-	// stores is the class handles over the runtime's work and rig stores and
-	// its routes, re-minted when they change (city_stores.go).
-	stores              storesEpochCache
+	// standaloneStores is the class handles over standaloneCityStore and the
+	// runtime's routes, for a runtime with no controllerState; re-minted when
+	// they change (city_stores.go).
+	standaloneStores    storesEpochCache
 	standaloneRigStores map[string]beads.Store
 
 	// storageRoutes is the opened non-work storage binding this process
@@ -4286,7 +4287,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		filteredCfg,
 		cr.sp,
 		sessionsStore.Store,
-		cr.rigBeadStores(), // residency:allow — the desired-state build's per-rig work tail, the map workBeadStores handed it before T2; the build plans its legs
+		cr.rigBeadStores(), // residency:allow — the open rig frame the demand build and session reconciler plan their census and demand legs over; resolves no bead
 		sessionBeads,
 		nil,
 		cr.stderr,
@@ -4350,7 +4351,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		sw,
 		cr.dops,
 		nil,
-		cr.rigBeadStores(), // residency:allow — the desired-state build's per-rig work tail, the map workBeadStores handed it before T2; the build plans its legs
+		cr.rigBeadStores(), // residency:allow — the open rig frame the demand build and session reconciler plan their census and demand legs over; resolves no bead
 		nil,                // control-dispatcher ticks only need ownership continuity, not main-tick assigned/ready snapshots
 		cr.sessionDrains,
 		cr.providerHealthGate,
@@ -4683,7 +4684,7 @@ func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trac
 	sessionsStore := cr.sessionsBeadStore()
 	var result DesiredStateResult
 	if cr.buildFnWithSessionBeads != nil {
-		result = cr.buildFnWithSessionBeads(cr.cfg, cr.sp, sessionsStore.Store, cr.rigBeadStores(), sessionBeads, trace) // residency:allow — the desired-state build's per-rig work tail, the map workBeadStores handed it before T2; the build plans its legs
+		result = cr.buildFnWithSessionBeads(cr.cfg, cr.sp, sessionsStore.Store, cr.rigBeadStores(), sessionBeads, trace) // residency:allow — the open rig frame the demand build and session reconciler plan their census and demand legs over; resolves no bead
 	} else {
 		result = cr.buildFn(cr.cfg, cr.sp, sessionsStore.Store)
 	}

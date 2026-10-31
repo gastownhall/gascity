@@ -17,7 +17,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
-	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 type (
@@ -93,21 +92,6 @@ func (s orderTrackingSweepScopedStore) orderTrackingSweepLabel() string {
 
 func (s orderTrackingSweepScopedStore) orderTrackingSweepKey() string {
 	return s.key
-}
-
-func openCityOrderStore(stderr io.Writer, cmdName string) (beads.OrdersStore, int) {
-	cityPath, err := resolveCity()
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-		return beads.OrdersStore{}, 1
-	}
-	store, err := openStoreAtForCity(cityPath, cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
-		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
-		return beads.OrdersStore{}, 1
-	}
-	return beads.OrdersStore{Store: store}, 0
 }
 
 func openOrderStoreForOrder(cityPath string, cfg *config.City, a orders.Order, stderr io.Writer, cmdName string) (beads.OrdersStore, int) {
@@ -696,7 +680,7 @@ func relocatedOrdersClassStore(cityPath string, cfg *config.City) beads.Store {
 // routes here. On a city that relocates nothing this returns a front door over
 // the exact store value it was handed.
 func orderTrackingFrontDoor(cityPath string, _ *config.City, scopeStore beads.OrdersStore) *orders.Store {
-	return orders.NewStore(cliStores(cityPath, storeref.Leg{Store: scopeStore.Store}).Orders(storeref.WorkRef))
+	return orders.NewStore(cliStores(cityPath, scopeStore.Store).Orders())
 }
 
 // appendOrdersSweepStore adds the orders-class binding to a tracking sweep's

@@ -26,16 +26,25 @@ import (
 // wrapped+cached store the call site already used, never a re-wrapped
 // instance, and optional capabilities reached through beads.As keep working.
 
-// Stores returns the controller's class handles for its current stores: the
-// city work store, every rig store it holds, and the routes it opened at boot.
-// See storesEpochCache for when it is re-minted.
+// Stores returns the controller's class handles for its current city work
+// store and the routes it opened at boot. See storesEpochCache for when it is
+// re-minted.
 func (cs *controllerState) Stores() storeref.Stores {
 	cs.mu.RLock()
 	cityPath, routes := cs.cityPath, cs.storageRoutes
-	work := storeref.Leg{Store: cs.cityBeadStore}
-	rigs := storeref.RigLegs(cs.beadStores)
 	cs.mu.RUnlock()
-	return cs.stores.get(cityPath, routes, work, rigs)
+	return cs.storesOver(cityPath, routes)
+}
+
+// storesOver is Stores over the state's city work store with the routes and
+// city path a caller names. Its runtime names its own, which are the state's
+// in production (newControllerStateWithRoutes is handed them), so both share
+// the one epoch.
+func (cs *controllerState) storesOver(cityPath string, routes *storageRoutes) storeref.Stores {
+	cs.mu.RLock()
+	work := cs.cityBeadStore
+	cs.mu.RUnlock()
+	return cs.stores.get(cityPath, routes, work)
 }
 
 // graphBeadStore returns the store that owns graph (workflow/v2) beads. It
@@ -81,31 +90,23 @@ func (cs *controllerState) cityWorkStore() beads.WorkStore {
 	return cs.Stores().Work()
 }
 
-// cityStores returns the runtime's class handles. With a controllerState the
-// work and rig stores are the state's; without one they are the runtime's
-// standalone stores. The routes are always the runtime's own, which are the
-// state's too: newControllerStateWithRoutes is handed them.
+// cityStores returns the runtime's class handles over its routes: with a
+// controllerState, the state's epoch over the state's city work store; else an
+// epoch over its standalone city store.
 func (cr *CityRuntime) cityStores() storeref.Stores {
-	var work storeref.Leg
-	var rigs []storeref.Leg
 	if cr.cs != nil {
-		cr.cs.mu.RLock()
-		work = storeref.Leg{Store: cr.cs.cityBeadStore}
-		rigs = storeref.RigLegs(cr.cs.beadStores)
-		cr.cs.mu.RUnlock()
-	} else {
-		cr.serviceStateMu.RLock()
-		work = storeref.Leg{Store: cr.standaloneCityStore}
-		rigs = storeref.RigLegs(cr.standaloneRigStores)
-		cr.serviceStateMu.RUnlock()
+		return cr.cs.storesOver(cr.cityPath, cr.storageRoutes)
 	}
-	return cr.stores.get(cr.cityPath, cr.storageRoutes, work, rigs)
+	cr.serviceStateMu.RLock()
+	work := cr.standaloneCityStore
+	cr.serviceStateMu.RUnlock()
+	return cr.standaloneStores.get(cr.cityPath, cr.storageRoutes, work)
 }
 
 // graphBeadStore returns the runtime's graph (workflow/v2) bead store: the
 // binding when the routes relocate graph, else the city work store.
 func (cr *CityRuntime) graphBeadStore() beads.GraphStore {
-	return cr.cityStores().Graph(storeref.WorkRef)
+	return cr.cityStores().Graph()
 }
 
 // sessionsBeadStore returns the runtime's session/session-wait bead store: the
@@ -124,7 +125,7 @@ func (cr *CityRuntime) sessionsBeadStore() beads.SessionStore {
 // belong to the reaper order, so the purge must see nothing there.
 func (cr *CityRuntime) infraSessionLedger() beads.SessionStore {
 	sessions := cr.sessionsBeadStore()
-	if relocatedSQLiteSessionLedger(cr.storageRoutes, sessions.Store, cr.cityBeadStore()) == nil {
+	if !isRelocatedSQLiteSessionLedger(cr.storageRoutes, sessions.Store, cr.cityBeadStore()) {
 		return beads.SessionStore{}
 	}
 	return sessions
@@ -147,7 +148,7 @@ func (cr *CityRuntime) nudgesBeadStore() beads.NudgesStore {
 // The scope argument is not read; per-order scope resolution flows through
 // resolveOrderStoreTarget in the federated dispatch/sweep paths.
 func (cr *CityRuntime) ordersBeadStore(_ string) beads.OrdersStore {
-	return cr.cityStores().Orders(storeref.WorkRef)
+	return cr.cityStores().Orders()
 }
 
 // relocatedOrdersStore returns the runtime's ORDERS-class binding store when
@@ -197,7 +198,7 @@ func (s *beadPolicyGraphStore) graphApplierFor(_ coordclass.Class) beads.GraphAp
 // resolveClassStore returns the beads.Store backing a coordination class at
 // the scope workStore serves, for the callers that still take a raw store. It
 // is the router's own rule (storeref.Place, which storeref.NewStores mints
-// every handle from) over the topology cityStoresTopology builds from routes,
+// every handle from) over the topology placeClass builds from routes,
 // so a raw caller and a handle holder cannot disagree. A caller that can hold a
 // handle takes it from a Stores instead (city_stores.go).
 //
@@ -221,8 +222,7 @@ func (s *beadPolicyGraphStore) graphApplierFor(_ coordclass.Class) beads.GraphAp
 // the box holds no copy of it that is the city's (DES-CN §4.4). The refusal is
 // standing, as the funnel's is (workerSiteStorageRefusal).
 func resolveClassStore(routes *storageRoutes, workStore beads.Store, _ *config.City, cityPath, class string, _ events.Recorder) beads.Store {
-	topo := cityStoresTopology(routes, storeref.Leg{Store: workStore}, nil)
-	return storeref.Place(topo, cityStoresOptions(cityPath, routes), coordclassFor(class), storeref.WorkRef)
+	return placeClass(cityPath, routes, workStore, coordclassFor(class))
 }
 
 // coordclassFor maps a config class name to its coordination class. An
@@ -449,7 +449,7 @@ func newCityMailProvider(routes *storageRoutes, workStore beads.Store, cfg *conf
 // than not having it. Refusing surfaces the cause on every operation instead.
 func newCityExtMsgServices(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) *extmsg.Services {
 	msgStore := resolveMailMessagesStore(routes, workStore, cfg, cityPath, rec)
-	stores := scopeStores(cityPath, routes, storeref.Leg{Store: workStore})
+	stores := scopeStores(cityPath, routes, workStore)
 	svc, err := extmsg.NewServicesWithSessionDirectory(msgStore, session.NewStore(stores.Sessions()))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "api: external messaging services: %v\n", err) //nolint:errcheck // best-effort stderr

@@ -4,7 +4,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
-	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // cliSessionsRelocated reports whether the city at cityPath binds the sessions
@@ -27,13 +26,13 @@ func cliSessionsRelocated(cityPath string) bool {
 //
 // The handle wraps the input store itself on a city that relocates nothing.
 func cliNudgesStore(store beads.Store, _ *config.City, cityPath string) beads.NudgesStore {
-	return cliStores(cityPath, storeref.Leg{Store: store}).Nudges()
+	return cliStores(cityPath, store).Nudges()
 }
 
 // cliGraphStore routes a generic CLI one-shot work store to the graph
 // coordination-class store. Graph twin of cliSessionStore.
 func cliGraphStore(store beads.Store, _ *config.City, cityPath string) beads.GraphStore {
-	return cliStores(cityPath, storeref.Leg{Store: store}).Graph(storeref.WorkRef)
+	return cliStores(cityPath, store).Graph()
 }
 
 // cliMailStore routes a generic CLI one-shot work store to the messaging
@@ -45,5 +44,5 @@ func cliGraphStore(store beads.Store, _ *config.City, cityPath string) beads.Gra
 // ClassMessaging, the mailbox identity it resolves against is ClassSessions, and
 // the two route independently.
 func cliMailStore(store beads.Store, _ *config.City, cityPath string) beads.MailStore {
-	return cliStores(cityPath, storeref.Leg{Store: store}).Mail()
+	return cliStores(cityPath, store).Mail()
 }

@@ -45,7 +45,6 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/ssrf"
-	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/usage"
@@ -107,8 +106,8 @@ type controllerState struct {
 	cacheCtx      context.Context
 	beadStores    map[string]beads.Store
 	cityBeadStore beads.Store // city-level store for session beads
-	// stores is the class handles over cityBeadStore, beadStores and
-	// storageRoutes, re-minted when they change (city_stores.go).
+	// stores is the class handles over cityBeadStore and storageRoutes,
+	// re-minted when they change (city_stores.go).
 	stores storesEpochCache
 	// storageRoutes is the opened non-work storage binding the city runtime
 	// resolved at boot: a constructor input, written once in
@@ -2378,14 +2377,14 @@ func (cs *controllerState) SessionsBeadStore() beads.SessionStore {
 // controller's CachingStore over the binding is the emitter
 // (class_store_cache.go); the one-shot CLI's is class_store_emit.go.
 func (cs *controllerState) GraphBeadStore() beads.GraphStore {
-	return cs.Stores().Graph(storeref.WorkRef)
+	return cs.Stores().Graph()
 }
 
 // OrdersBeadStore returns the store backing orders-class beads: the binding
 // when the routes relocate orders, else the city work store. It is the store
 // the order dispatcher creates every tracking bead in.
 func (cs *controllerState) OrdersBeadStore() beads.OrdersStore {
-	return cs.Stores().Orders(storeref.WorkRef)
+	return cs.Stores().Orders()
 }
 
 // ClassBindingHasLegacyResidents replays the boot census for one binding store.
