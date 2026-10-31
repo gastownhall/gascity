@@ -18,10 +18,6 @@ import (
 	gcruntime "github.com/gastownhall/gascity/internal/runtime"
 )
 
-type retiringStoreScheduler interface {
-	scheduleCloseBeadStoreHandle(label string, store beads.Store)
-}
-
 type retiredBdReadStore struct {
 	beads.Store
 	entered     chan struct{}
@@ -65,13 +61,11 @@ func (s *retiredBdReadStore) unblock() {
 }
 
 func scheduleRetiredStoreForQuiesceTest(mc *managedCity, label string, store beads.Store) {
-	if mc != nil && mc.cr != nil && mc.cr.cs != nil {
-		if scheduler, ok := interface{}(mc.cr.cs).(retiringStoreScheduler); ok {
-			scheduler.scheduleCloseBeadStoreHandle(label, store)
-			return
-		}
+	var cs *controllerState
+	if mc != nil && mc.cr != nil {
+		cs = mc.cr.cs
 	}
-	scheduleCloseBeadStoreHandle(label, store)
+	scheduleCloseBeadStoreHandle(cs, label, store).schedule()
 }
 
 func TestQuiesceWaitsForAStoreRetiredByReload(t *testing.T) {
