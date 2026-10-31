@@ -258,9 +258,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// prebaked alike (S5-A): on a split city its infrastructure-class
 	// commands then refuse instead of creating a pod-local empty binding. A
 	// direct write, so it works whatever gc the pod image carries. The pod
-	// spec's remote-stage environment already covers every process from its
-	// start; the record is the durable copy for tools that read the
-	// directory. Failing to write it fails the start: a pod that cannot be
+	// spec's remote-stage environment already covers the processes started
+	// from it (remoteStageEnv); the record is the durable copy, and the only
+	// cover for a process started with a cleared environment. Failing to write it fails the start: a pod that cannot be
 	// marked is not one this controller hands work to.
 	if ctrlCity != "" {
 		if err := writeRemoteStageInPod(ctx, p.ops, podName, p.cityName, ctrlCity); err != nil {
@@ -400,7 +400,7 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 
 	// Respawn the agent in the warm "main" session.
 	if _, err := p.ops.execInPod(ctx, podName, "agent",
-		[]string{"sh", "-c", buildRespawnCommand(cfg)}, nil); err != nil {
+		[]string{"sh", "-c", buildRespawnCommand(cfg, p.cityName)}, nil); err != nil {
 		return fmt.Errorf("k8s relaunch %q: respawn-pane: %w", name, err)
 	}
 
@@ -977,8 +977,12 @@ func remoteStageCityName(cityName, ctrlCity string) string {
 	return cityName
 }
 
-// remoteStageEnv marks every process of a pod as a remote stage of ctrlCity,
-// or nothing without a controller city.
+// remoteStageEnv marks the processes started from a pod's environment as a
+// remote stage of ctrlCity, or nothing without a controller city: the
+// entrypoint, the agent and its tmux server (re-exported through su for
+// LINUX_USERNAME pods: suRemoteStageExports), and kubectl exec'd commands. A
+// process started with a deliberately cleared environment relies on the
+// on-disk record.
 func remoteStageEnv(cityName, ctrlCity string) []corev1.EnvVar {
 	if strings.TrimSpace(ctrlCity) == "" {
 		return nil

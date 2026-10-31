@@ -306,10 +306,13 @@ case "$op" in
       end
     ')
 
-    # Remote stage (S5-A): every process in the pod is a remote stage of the
-    # controller's city from the container's first instruction, so no gc
-    # command there can create a pod-local storage binding before the
-    # on-disk record below exists. Names match cmd/gc/remote_stage.go.
+    # Remote stage (S5-A): processes started from the pod's environment (the
+    # entrypoint, the agent and its tmux server, kubectl exec'd commands) are
+    # a remote stage of the controller's city from the container's first
+    # instruction, so none of them can create a pod-local storage binding
+    # before the on-disk record below exists. This script never switches
+    # users, so the agent inherits the environment. Names match
+    # cmd/gc/remote_stage.go.
     stage_city_name=""
     if [ -n "$ctrl_city" ]; then
       stage_city_name=$(remote_stage_city_name "$ctrl_city")

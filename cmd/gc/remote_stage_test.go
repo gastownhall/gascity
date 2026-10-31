@@ -254,3 +254,34 @@ func TestRemoteStageEnvRefusesBeforeAnyRecordExists(t *testing.T) {
 		t.Fatalf("the pod created a local binding before its record existed: %v", statErr)
 	}
 }
+
+// TestRemoteStageUnmarkRefusesInAPod: in a pod the environment marks the
+// process a remote stage, so unmark would remove the record and change
+// nothing; it refuses, says why, and leaves the record.
+func TestRemoteStageUnmarkRefusesInAPod(t *testing.T) {
+	city := t.TempDir()
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(remoteStageSplitSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeRemoteStage(city, remoteStage{ControllerCity: "template", ControllerPath: "/srv/city"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", city)
+	t.Chdir(city)
+	t.Setenv(remoteStageControllerEnv, "/srv/city")
+	t.Setenv(remoteStageCityEnv, "template")
+	var stdout, stderr bytes.Buffer
+	cmd := newStorageCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"remote-stage", "unmark"})
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("unmark in a pod reported success: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), remoteStageControllerEnv) || !strings.Contains(stderr.String(), "left in place") {
+		t.Errorf("stderr %q does not say the environment still marks it", stderr.String())
+	}
+	if _, err := os.Stat(remoteStagePath(city)); err != nil {
+		t.Errorf("the record was removed: %v", err)
+	}
+}

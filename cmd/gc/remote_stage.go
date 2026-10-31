@@ -53,10 +53,14 @@ func remoteStagePath(cityPath string) string {
 	return filepath.Join(cityPath, ".gc", remoteStageFileName)
 }
 
-// The remote-stage environment. A pod's spec sets these for every process in
-// it (internal/runtime/k8s remoteStageEnv, and gc-session-k8s's manifest), so
-// a gc process in a pod is a remote stage from its first instruction, before
-// and regardless of the on-disk record. Keep the names in step with those.
+// The remote-stage environment. A pod's spec sets these (internal/runtime/k8s
+// remoteStageEnv, and gc-session-k8s's manifest), so a gc process started from
+// the pod's environment is a remote stage from its first instruction, before
+// and regardless of the on-disk record. That covers the entrypoint, the agent
+// and its tmux server (the k8s provider re-exports them through su for
+// LINUX_USERNAME pods), and kubectl exec'd commands. A process started with a
+// deliberately cleared environment (another su -, env -i) is not covered by
+// it and relies on the on-disk record. Keep the names in step with those.
 const (
 	remoteStageControllerEnv = "GC_REMOTE_STAGE_CONTROLLER"
 	remoteStageCityEnv       = "GC_REMOTE_STAGE_CITY"
@@ -247,6 +251,14 @@ host's city directory with this command.`,
 			cityPath, err := resolveCity()
 			if err != nil {
 				fmt.Fprintf(stderr, "gc storage remote-stage unmark: %v\n", err) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			// In a pod the environment marks this process a remote stage
+			// whatever the directory holds, so removing the record would
+			// unmark nothing: refuse and say so rather than report success.
+			if stage, ok := remoteStageFromEnv(); ok {
+				fmt.Fprintf(stderr, "gc storage remote-stage unmark: this process's environment (%s=%s, set by its pod spec) marks it a remote stage of city %s, and that stays true whatever the directory holds; the record at %s was left in place. Unmarking is for directories marked with `mark`, outside a pod\n", //nolint:errcheck // best-effort stderr
+					remoteStageControllerEnv, stage.ControllerPath, stage.ControllerCity, remoteStagePath(cityPath))
 				return errExit
 			}
 			if err := os.Remove(remoteStagePath(cityPath)); err != nil && !errors.Is(err, fs.ErrNotExist) {
