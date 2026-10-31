@@ -4033,6 +4033,8 @@ func realizePoolDesiredSessionsAt(
 					// the error because a stalled slot is only diagnosable if
 					// the operator can see who is sitting on the name.
 					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (slot stalled on its own runtime name; retrying next tick)\n", qualifiedName, err) //nolint:errcheck
+				case errors.Is(err, errPoolTriggerWorktreeEvidence):
+					noticePoolWorktreeEvidenceSkip(stderr, qualifiedName, "", request.WorkBeadID, err)
 				default:
 					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
 				}
@@ -4166,12 +4168,13 @@ func realizePoolDesiredSessionsAt(
 				// Unusable ownership evidence is not a partial bind: a reused
 				// session left in desired would restart against its previous
 				// binding's work dir.
-				fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (skipping)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
+				noticePoolWorktreeEvidenceSkip(stderr, qualifiedName, sbInfo.ID, item.request.WorkBeadID, err)
 				continue
 			}
 			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (continuing without trigger env)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
 		} else {
 			sbInfo = bound
+			clearPoolWorktreeEvidenceSkipNotice(item.request.WorkBeadID)
 		}
 		segmentStart = bp.realizeNow()
 		fpExtra := buildFingerprintExtra(resolveAgent)
@@ -4449,6 +4452,41 @@ var errPoolTriggerWorktreeEvidence = errors.New("pool trigger worktree evidence"
 
 // errPlanOnlyEffect refuses an effect attempted with planOnly build params.
 var errPlanOnlyEffect = errors.New("plan-only build params refuse effects")
+
+// poolWorktreeEvidenceSkipNoticed records, per work bead, the error text of
+// the last pool-starvation notice logged for it. A bead whose worktree
+// evidence is unusable is skipped on every tick until someone repairs its
+// metadata, so the notice logs once per state change rather than per tick.
+// A bead's entry is forgotten when it binds to a session.
+var poolWorktreeEvidenceSkipNoticed sync.Map // work bead ID -> error text
+
+// noticePoolWorktreeEvidenceSkip reports that a pool request was skipped
+// because its work bead's worktree evidence is unusable. The skip leaves
+// ready work unclaimed for as long as the evidence stays bad, so the line
+// carries a distinctive tag, names the work bead, and gives the command to
+// inspect it. sessionID is empty when the skip happened before a session
+// was chosen.
+func noticePoolWorktreeEvidenceSkip(stderr io.Writer, qualifiedName, sessionID, workBeadID string, err error) {
+	if stderr == nil || err == nil {
+		return
+	}
+	msg := err.Error()
+	if prev, loaded := poolWorktreeEvidenceSkipNoticed.Swap(workBeadID, msg); loaded && prev == msg {
+		return
+	}
+	sessionField := ""
+	if sessionID != "" {
+		sessionField = " session " + sessionID
+	}
+	fmt.Fprintf(stderr, "POOL-STARVATION-SKIP: pool %q%s work bead %s: %v (no session runs this bead until its worktree evidence is repaired or cleared; inspect with 'bd show %s')\n", //nolint:errcheck
+		qualifiedName, sessionField, workBeadID, err, workBeadID)
+}
+
+// clearPoolWorktreeEvidenceSkipNotice forgets a work bead's notice state once
+// it binds, so a later relapse logs again.
+func clearPoolWorktreeEvidenceSkipNotice(workBeadID string) {
+	poolWorktreeEvidenceSkipNoticed.Delete(workBeadID)
+}
 
 func verifiedPoolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) (string, error) {
 	if strings.TrimSpace(request.WorktreeError) != "" {

@@ -1076,6 +1076,7 @@ go_test(
         "build_desired_state_named_trigger_bind_test.go",
         "build_desired_state_overlay_preserve_test.go",
         "build_desired_state_pool_info_immutability_test.go",
+        "build_desired_state_pool_starvation_notice_test.go",
         "build_desired_state_session_stamp_test.go",
         "build_desired_state_test.go",
         "build_desired_state_trigger_bind_test.go",
