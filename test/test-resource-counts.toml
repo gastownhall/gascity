@@ -2449,6 +2449,11 @@ resource = "subprocess"
 calls = 2
 
 [[count]]
+path = "internal/runtime/tmux/busy_trust_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/tmux/dialog_feedback_survey_integration_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -3127,6 +3132,12 @@ tagged = true
 path = "test/conversationlane/bddolt_gating_test.go"
 resource = "subprocess"
 calls = 1
+tagged = true
+
+[[count]]
+path = "test/conversationlane/busy_turn_lane_test.go"
+resource = "fixed_sleep"
+calls = 3
 tagged = true
 
 [[count]]

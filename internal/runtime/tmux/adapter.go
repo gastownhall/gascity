@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -73,6 +74,7 @@ var (
 	_ runtime.SessionObjectKiller           = (*Provider)(nil)
 	_ runtime.FreshLivenessObserver         = (*Provider)(nil)
 	_ runtime.TurnRunningProvider           = (*Provider)(nil)
+	_ runtime.FreshActivityProvider         = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -1248,6 +1250,15 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	return p.tm.GetSessionActivity(name)
 }
 
+// FreshActivity returns the time of the last I/O activity in the named
+// session, read from its own windows now ([Tmux.GetSessionActivity]: one
+// `list-windows`, poke discount applied), never from the fleet snapshot
+// GetLastActivity serves for the snapshot's TTL. It implements
+// [runtime.FreshActivityProvider].
+func (p *Provider) FreshActivity(name string) (time.Time, error) {
+	return p.tm.GetSessionActivity(name)
+}
+
 // GetAllEnvironment returns all environment variables for a session,
 // satisfying [runtime.EnvironmentBatchProvider]. Delegates to
 // [Tmux.GetAllEnvironment].
@@ -1787,6 +1798,9 @@ func (o *tmuxStartOps) disableMouseAndActivity(name string) error {
 }
 
 func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error {
+	// Read the base env before arming the deadline: execenv.Environ waits out
+	// an in-flight native store open, and that wait is not the command's.
+	baseEnv := execenv.Environ()
 	// Deadline shape: with setupMaxTimeout unset (the default) the command
 	// gets the historical fixed wall-clock deadline. With it set, the budget
 	// is activity-aware instead — timeout bounds output SILENCE and
@@ -1809,7 +1823,7 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 	if workDir := strings.TrimSpace(env["GC_DIR"]); workDir != "" {
 		c.Dir = workDir
 	}
-	c.Env = os.Environ()
+	c.Env = baseEnv
 	for k, v := range env {
 		c.Env = append(c.Env, k+"="+v)
 	}

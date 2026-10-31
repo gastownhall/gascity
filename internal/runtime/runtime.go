@@ -699,8 +699,13 @@ type IdleProbeBudgetProvider interface {
 // for ACP a prompt response is outstanding, while a pane scan found an
 // active-processing indicator string in its capture, usually the live
 // indicator but possibly a stale frame or transcript text.
+// Which provider families' busy readings count is the runtime's policy, not
+// its callers': a runtime that cannot vouch for a family's busy reading
+// reports it as [ErrIdleIndeterminate], never as (false, nil), so a caller
+// may act on every busy reading it gets.
 // [ErrIdleIndeterminate] means the observation was made but matched neither a
-// ready prompt nor a busy indicator, so it says neither idle nor busy. Any
+// ready prompt nor a busy indicator it trusts, so it says neither idle nor
+// busy. Any
 // other non-nil err means the observation could not be made (the caller must
 // not treat the session as idle on error); a session that has gone away is
 // reported as an error, not as idle.
@@ -734,10 +739,12 @@ var ErrWaitUnobserved = errors.New("wait observed no busy session")
 // there alone (tmux, for Codex: the rows right above the live composer), so
 // a busy row an earlier turn left in the scrollback is not a running turn.
 //
-// running=false with a nil err says no turn is running now. A non-nil err
-// means the look could not be made; the caller must not take the session as
-// idle. Composites do not implement it: it is read on the session's routed
-// leaf ([TurnRunningFor]).
+// running=false with a nil err says no turn is running now. An error
+// wrapping [ErrIdleIndeterminate] means the runtime cannot read this
+// session's provider family's turn: it says neither running nor not. Any
+// other non-nil err means the look could not be made; the caller must not
+// take the session as idle. Composites do not implement it: it is read on
+// the session's routed leaf ([TurnRunningFor]).
 type TurnRunningProvider interface {
 	TurnRunning(name string) (running bool, err error)
 }
@@ -749,6 +756,30 @@ func TurnRunningFor(p Provider, name string) (TurnRunningProvider, bool) {
 	leaf, _, _ := ResolveBackend(p, name)
 	tr, ok := leaf.(TurnRunningProvider)
 	return tr, ok
+}
+
+// FreshActivityProvider is an optional extension for runtimes whose
+// [Provider.GetLastActivity] may answer from a cached snapshot (tmux: the
+// fleet snapshot, kept for its TTL): FreshActivity reads session name's last
+// activity from the session itself, so a read taken after another
+// observation, such as a [TurnRunningProvider] look at its screen, reflects
+// the session no earlier than that observation. The snapshot's activity can
+// predate it: a turn that started after the snapshot was taken is not in it.
+//
+// It discounts gc's own input as [Provider.GetLastActivity] does. A non-nil
+// err means the read could not be made. Composites do not implement it: it
+// is read on the session's routed leaf ([FreshActivityFor]).
+type FreshActivityProvider interface {
+	FreshActivity(name string) (time.Time, error)
+}
+
+// FreshActivityFor returns the [FreshActivityProvider] of the backend serving
+// session name, the leaf [ResolveBackend] names, and false when that backend
+// takes no such read.
+func FreshActivityFor(p Provider, name string) (FreshActivityProvider, bool) {
+	leaf, _, _ := ResolveBackend(p, name)
+	fa, ok := leaf.(FreshActivityProvider)
+	return fa, ok
 }
 
 // ExecProvider is an optional extension for runtimes that expose the RPP

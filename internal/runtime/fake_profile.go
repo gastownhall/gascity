@@ -50,6 +50,7 @@ type ProfileBackend interface {
 	EnvironmentBatchProvider
 	FencedInputProvider
 	FencedInteractionProvider
+	FreshActivityProvider
 	FreshLivenessObserver
 	IdleSnapshotProvider
 	IdleWaitProvider
@@ -85,7 +86,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	core, timed := profileProvider{b, profileCapabilities[p]}, sleepTrait{SessionSleepCapabilityTimedOnly}
 	switch p {
 	case ProfileTmux:
-		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}, steerTrait{SteerKeystroke}}
+		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}, steerTrait{SteerKeystroke}}
 	case ProfileACP:
 		return acpProfile{core, b, b, b, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}, localTranscriptTrait{}}
 	case ProfileSubprocess:
@@ -97,7 +98,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileExec:
 		return execProfile{core, b, b, b, b, b, timed, probeBudgetTrait{}}
 	case ProfileSSH:
-		return sshProfile{core, b, timed}
+		return sshProfile{core, b, b, b, timed}
 	case ProfileT3Bridge:
 		return t3bridgeProfile{core, b, b, b, b, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
 	}
@@ -144,7 +145,7 @@ var profileCapabilities = map[Profile]ProviderCapabilities{
 	ProfileACP:      {CanReportActivity: true},
 	ProfileHerdr:    {CanReportActivity: true, CanStream: true, CanAttachTTY: true, NeedsClaimBackstop: true},
 	ProfileK8s:      {CanReportActivity: true},
-	ProfileSSH:      {CanReportActivity: true},
+	ProfileSSH:      {CanReportActivity: true, CanAttachTTY: true},
 	ProfileT3Bridge: {CanReportActivity: true},
 }
 
@@ -167,6 +168,7 @@ type (
 		EnvironmentBatchProvider
 		FencedInputProvider
 		FencedInteractionProvider
+		FreshActivityProvider
 		FreshLivenessObserver
 		IdleSnapshotProvider
 		IdleWaitProvider
@@ -248,6 +250,8 @@ type (
 	}
 	sshProfile struct {
 		Provider
+		AttachmentObserverWithError
+		LivenessObserverWithError
 		RelaunchProvider
 		sleepTrait
 	}
@@ -463,23 +467,49 @@ func (f FullFake) GetAllEnvironment(name string) (map[string]string, error) {
 	return maps.Clone(f.meta[name]), nil
 }
 
-// SnapshotIdle implements [IdleSnapshotProvider]: a running session is idle.
+// SnapshotIdle implements [IdleSnapshotProvider]: a running session is idle
+// unless its screen shows a turn ([Fake.ScreenTurnRunning]).
 func (f FullFake) SnapshotIdle(name string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	_, running := f.sessions[name]
-	return running, nil
+	return running && !f.ScreenTurnRunning[name], nil
 }
 
-// TurnRunning implements [TurnRunningProvider]: a running session runs no
-// turn, and a session that is not running cannot be looked at.
+// TurnRunning implements [TurnRunningProvider]: a running session runs a turn
+// only while its screen shows one ([Fake.ScreenTurnRunning]), a screen read
+// fails as [Fake.ScreenReadErrors] says, and a session that is not running
+// cannot be looked at.
 func (f FullFake) TurnRunning(name string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, running := f.sessions[name]; !running {
 		return false, fmt.Errorf("turn of %q: %w", name, ErrSessionNotFound)
 	}
-	return false, nil
+	if err := f.ScreenReadErrors[name]; err != nil {
+		return false, err
+	}
+	return f.ScreenTurnRunning[name], nil
+}
+
+// FreshActivity implements [FreshActivityProvider]: a running session's
+// [Fake.PaneActivity], else its Activity; a read fails as
+// [Fake.PaneActivityErrors] says, and a session that is not running cannot be
+// read. Each read is recorded.
+func (f FullFake) FreshActivity(name string) (time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "FreshActivity", Name: name})
+	if _, running := f.sessions[name]; !running {
+		return time.Time{}, fmt.Errorf("activity of %q: %w", name, ErrSessionNotFound)
+	}
+	if err := f.PaneActivityErrors[name]; err != nil {
+		return time.Time{}, err
+	}
+	if at, ok := f.PaneActivity[name]; ok {
+		return at, nil
+	}
+	return f.Activity[name], nil
 }
 
 // RuntimeInventory implements [InventoryProvider]: every running session,

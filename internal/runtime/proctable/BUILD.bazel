@@ -52,6 +52,7 @@ go_library(
 go_test(
     name = "proctable_test",
     srcs = [
+        "descendants_snapshot_test.go",
         "descendants_test.go",
         "environ_darwin_test.go",
         "environ_linux_test.go",

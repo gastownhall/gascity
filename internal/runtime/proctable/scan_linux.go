@@ -236,8 +236,8 @@ func scanProcEntry(root, entryName, id string, incarnationStartedAt time.Time) (
 	if city == "" {
 		city = env["GC_CITY"]
 	}
-	ppid, _, startIdentity, _, _ := readProcStatIdentity(filepath.Join(root, entryName, "stat"))
-	ppid = effectiveParent(root, ppid)
+	stat, _, _ := readProcStat(filepath.Join(root, entryName, "stat"))
+	ppid := effectiveParent(root, stat.ppid)
 	comm, _ := os.ReadFile(filepath.Join(root, entryName, "comm"))
 	return runtime.LiveRuntime{
 		SessionID: sessionID,
@@ -255,7 +255,7 @@ func scanProcEntry(root, entryName, id string, incarnationStartedAt time.Time) (
 		ParentIsProviderInfrastructure: ppid > 1 && isInfrastructureProcess(root, ppid),
 		// The same token ProcessIdentity and RootStartIdentity read, so a
 		// killer can re-check it against the live process.
-		StartIdentity: startIdentity,
+		StartIdentity: stat.startTime,
 		Name:          strings.TrimSpace(string(comm)),
 	}, true, nil
 }
@@ -689,46 +689,59 @@ func isInfrastructureProcess(root string, pid int) bool {
 }
 
 func readParentPID(path string) (int, bool, error) {
-	ppid, _, _, ok, err := readProcStatIdentity(path)
-	return ppid, ok, err
+	stat, ok, err := readProcStat(path)
+	return stat.ppid, ok, err
 }
 
-func readProcStatIdentity(path string) (ppid, pgid int, startTime string, ok bool, err error) {
+// procStat is what the scanner and the snapshots read from one
+// /proc/<pid>/stat record.
+type procStat struct {
+	ppid      int
+	pgid      int
+	sid       int // session ID: the PID of the session's leader
+	startTime string
+}
+
+func readProcStat(path string) (procStat, bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return 0, 0, "", false, nil
+			return procStat{}, false, nil
 		}
-		return 0, 0, "", false, err
+		return procStat{}, false, err
 	}
-	ppid, pgid, startTime, ok, err = parseProcStatIdentity(string(data))
+	stat, err := parseProcStat(string(data))
 	if err != nil {
-		return 0, 0, "", false, fmt.Errorf("parsing %s: %w", path, err)
+		return procStat{}, false, fmt.Errorf("parsing %s: %w", path, err)
 	}
-	return ppid, pgid, startTime, ok, nil
+	return stat, true, nil
 }
 
-func parseProcStatIdentity(text string) (ppid, pgid int, startTime string, ok bool, err error) {
+func parseProcStat(text string) (procStat, error) {
 	closeParen := strings.LastIndexByte(text, ')')
 	if closeParen < 0 || closeParen+1 >= len(text) {
-		return 0, 0, "", false, fmt.Errorf("malformed proc stat record")
+		return procStat{}, fmt.Errorf("malformed proc stat record")
 	}
 	fields := strings.Fields(text[closeParen+1:])
 	const startTimeIndexAfterComm = 19
 	if len(fields) <= startTimeIndexAfterComm {
-		return 0, 0, "", false, fmt.Errorf("malformed proc stat record: got %d post-comm fields", len(fields))
+		return procStat{}, fmt.Errorf("malformed proc stat record: got %d post-comm fields", len(fields))
 	}
-	ppid, err = strconv.Atoi(fields[1])
+	ppid, err := strconv.Atoi(fields[1])
 	if err != nil {
-		return 0, 0, "", false, fmt.Errorf("parsing proc stat ppid: %w", err)
+		return procStat{}, fmt.Errorf("parsing proc stat ppid: %w", err)
 	}
-	pgid, err = strconv.Atoi(fields[2])
+	pgid, err := strconv.Atoi(fields[2])
 	if err != nil {
-		return 0, 0, "", false, fmt.Errorf("parsing proc stat pgid: %w", err)
+		return procStat{}, fmt.Errorf("parsing proc stat pgid: %w", err)
 	}
-	startTime = fields[startTimeIndexAfterComm]
+	sid, err := strconv.Atoi(fields[3])
+	if err != nil {
+		return procStat{}, fmt.Errorf("parsing proc stat session: %w", err)
+	}
+	startTime := fields[startTimeIndexAfterComm]
 	if startTime == "" {
-		return 0, 0, "", false, fmt.Errorf("proc stat start time is empty")
+		return procStat{}, fmt.Errorf("proc stat start time is empty")
 	}
-	return ppid, pgid, startTime, true, nil
+	return procStat{ppid: ppid, pgid: pgid, sid: sid, startTime: startTime}, nil
 }

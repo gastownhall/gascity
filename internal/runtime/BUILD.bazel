@@ -17,6 +17,7 @@ go_library(
         "fence.go",
         "fingerprint.go",
         "fingerprint_partition.go",
+        "idle_boundary.go",
         "import_trust.go",
         "interaction_fence.go",
         "liveness.go",
@@ -85,6 +86,7 @@ go_test(
         "fingerprint_partition_test.go",
         "fingerprint_policy_test.go",
         "fingerprint_test.go",
+        "idle_boundary_test.go",
         "import_boundary_test.go",
         "import_trust_test.go",
         "interaction_fence_test.go",
@@ -96,6 +98,7 @@ go_test(
         "nudge_delivery_test.go",
         "privatedir_test.go",
         "probe_test.go",
+        "process_env_guard_test.go",
         "process_table_scanner_test.go",
         "program_status_fingerprint_test.go",
         "program_status_test.go",
@@ -123,7 +126,10 @@ go_test(
     data = glob(
         ["**"],
         exclude = ["BUILD.bazel"],
-    ),
+    ) + [
+        "//:go.mod",
+        "//:repo_go_srcs",
+    ],
     embed = [":runtime"],
     deps = [
         "//internal/runtime/acp",
