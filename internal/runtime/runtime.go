@@ -854,6 +854,10 @@ type InventoryEntry struct {
 	// `gc handoff` set) as the batched read sees it. On tmux it is the
 	// marker's user-option mirror (#{@GC_RESTART_REQUESTED}).
 	RestartRequested bool
+	// Program is the session's agent-pane program-status reading
+	// ([ProgramStatusProvider]) taken in the same batch: Unread unless the
+	// runtime reads program status for this session.
+	Program ProgramStatus
 }
 
 // EnvironmentBatchProvider is an optional extension exposing a single-exec
