@@ -84,6 +84,10 @@ type ExternalInboundMessage struct {
 	Attachments       []ExternalAttachment `json:"attachments,omitempty"`
 	DedupKey          string               `json:"dedup_key,omitempty"`
 	ReceivedAt        time.Time            `json:"received_at"`
+	// Attribution contains adapter-defined string assertions about the
+	// message's origin. It is trusted only as far as the submitting adapter;
+	// Gas City transports it without interpreting authority.
+	Attribution map[string]string `json:"attribution,omitempty" doc:"Adapter-defined attribution strings, asserted by the adapter; not independently verified."`
 }
 
 // BindingStatus represents the lifecycle state of a session binding.
@@ -250,6 +254,7 @@ type ConversationTranscriptRecord struct {
 	Provenance        TranscriptProvenance
 	ProviderMessageID string
 	Actor             ExternalActor
+	Attribution       map[string]string `json:"attribution,omitempty" doc:"Original adapter-asserted attribution strings; trusted only as far as the submitting adapter."`
 	Text              string
 	ExplicitTarget    string
 	ReplyToMessageID  string
@@ -476,6 +481,7 @@ type AppendTranscriptInput struct {
 	Provenance        TranscriptProvenance
 	ProviderMessageID string
 	Actor             ExternalActor
+	Attribution       map[string]string
 	Text              string
 	ExplicitTarget    string
 	ReplyToMessageID  string
@@ -532,6 +538,9 @@ type ListTranscriptInput struct {
 	Conversation  ConversationRef
 	AfterSequence int64
 	Limit         int
+	// ProviderMessageID selects one exact message within Conversation using
+	// the persisted provider-message index. The sequence cursor still applies.
+	ProviderMessageID string
 	// Order controls newest-first vs oldest-first traversal. Empty defaults to
 	// TranscriptOrderAsc for backwards compatibility.
 	Order TranscriptOrder

@@ -363,6 +363,7 @@ go_test(
         "handler_events_keyset_test.go",
         "handler_events_test.go",
         "handler_extmsg_agent_binding_test.go",
+        "handler_extmsg_attribution_test.go",
         "handler_extmsg_default_route_test.go",
         "handler_extmsg_test.go",
         "handler_formula_write_test.go",

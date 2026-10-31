@@ -38,6 +38,7 @@ go_test(
     name = "extmsg_test",
     srcs = [
         "agent_binding_test.go",
+        "attribution_test.go",
         "binding_survival_test.go",
         "default_route_test.go",
         "extmsg_test.go",

@@ -809,6 +809,7 @@ export const zExternalAttachment = z.object({
 export const zExternalInboundMessage = z.object({
     actor: zExternalActor,
     attachments: z.array(zExternalAttachment).nullish(),
+    attribution: z.record(z.string(), z.string()).optional(),
     conversation: zConversationRef,
     dedup_key: z.string().optional(),
     explicit_target: z.string().optional(),
@@ -3742,7 +3743,8 @@ export const zConversationTranscriptRecord = z.object({
     SchemaVersion: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     Sequence: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     SourceSessionID: z.string(),
-    Text: z.string()
+    Text: z.string(),
+    attribution: z.record(z.string(), z.string()).optional()
 });
 
 export const zInboundResult = z.object({
@@ -9801,6 +9803,7 @@ export const zGetV0CityByCityNameExtmsgTranscriptQuery = z.object({
     provider: z.string().optional(),
     account_id: z.string().optional(),
     conversation_id: z.string().optional(),
+    provider_message_id: z.string().optional(),
     parent_conversation_id: z.string().optional(),
     kind: z.string().optional(),
     after_sequence: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),

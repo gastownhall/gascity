@@ -2814,6 +2814,9 @@ type ConversationTranscriptRecord struct {
 	Sequence          int64                `json:"Sequence"`
 	SourceSessionID   string               `json:"SourceSessionID"`
 	Text              string               `json:"Text"`
+
+	// Attribution Original adapter-asserted attribution strings; trusted only as far as the submitting adapter.
+	Attribution *map[string]string `json:"attribution,omitempty"`
 }
 
 // ConvoyAddInputBody defines model for ConvoyAddInputBody.
@@ -3202,15 +3205,18 @@ type ExternalAttachment struct {
 
 // ExternalInboundMessage defines model for ExternalInboundMessage.
 type ExternalInboundMessage struct {
-	Actor             ExternalActor         `json:"actor"`
-	Attachments       *[]ExternalAttachment `json:"attachments,omitempty"`
-	Conversation      ConversationRef       `json:"conversation"`
-	DedupKey          *string               `json:"dedup_key,omitempty"`
-	ExplicitTarget    *string               `json:"explicit_target,omitempty"`
-	ProviderMessageId string                `json:"provider_message_id"`
-	ReceivedAt        time.Time             `json:"received_at"`
-	ReplyToMessageId  *string               `json:"reply_to_message_id,omitempty"`
-	Text              string                `json:"text"`
+	Actor       ExternalActor         `json:"actor"`
+	Attachments *[]ExternalAttachment `json:"attachments,omitempty"`
+
+	// Attribution Adapter-defined attribution strings, asserted by the adapter; not independently verified.
+	Attribution       *map[string]string `json:"attribution,omitempty"`
+	Conversation      ConversationRef    `json:"conversation"`
+	DedupKey          *string            `json:"dedup_key,omitempty"`
+	ExplicitTarget    *string            `json:"explicit_target,omitempty"`
+	ProviderMessageId string             `json:"provider_message_id"`
+	ReceivedAt        time.Time          `json:"received_at"`
+	ReplyToMessageId  *string            `json:"reply_to_message_id,omitempty"`
+	Text              string             `json:"text"`
 }
 
 // ExtmsgAdapterInfo defines model for ExtmsgAdapterInfo.
@@ -12035,6 +12041,9 @@ type GetV0CityByCityNameExtmsgTranscriptParams struct {
 
 	// ConversationId Conversation ID.
 	ConversationId *string `form:"conversation_id,omitempty" json:"conversation_id,omitempty"`
+
+	// ProviderMessageId Exact provider message ID within the conversation. Returns at most one persisted entry, including its adapter-asserted attribution; the sequence cursor still applies.
+	ProviderMessageId *string `form:"provider_message_id,omitempty" json:"provider_message_id,omitempty"`
 
 	// ParentConversationId Parent conversation ID.
 	ParentConversationId *string `form:"parent_conversation_id,omitempty" json:"parent_conversation_id,omitempty"`
@@ -31131,6 +31140,22 @@ func NewGetV0CityByCityNameExtmsgTranscriptRequest(server string, cityName strin
 		if params.ConversationId != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "conversation_id", *params.ConversationId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ProviderMessageId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "provider_message_id", *params.ProviderMessageId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

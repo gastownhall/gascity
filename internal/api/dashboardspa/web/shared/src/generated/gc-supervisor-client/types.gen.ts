@@ -1187,6 +1187,12 @@ export type ConversationTranscriptRecord = {
     Sequence: number;
     SourceSessionID: string;
     Text: string;
+    /**
+     * Original adapter-asserted attribution strings; trusted only as far as the submitting adapter.
+     */
+    attribution?: {
+        [key: string]: string;
+    };
 };
 
 export type ConvoyAddInputBody = {
@@ -1672,6 +1678,12 @@ export type ExternalAttachment = {
 export type ExternalInboundMessage = {
     actor: ExternalActor;
     attachments?: Array<ExternalAttachment> | null;
+    /**
+     * Adapter-defined attribution strings, asserted by the adapter; not independently verified.
+     */
+    attribution?: {
+        [key: string]: string;
+    };
     conversation: ConversationRef;
     dedup_key?: string;
     explicit_target?: string;
@@ -15311,6 +15323,10 @@ export type GetV0CityByCityNameExtmsgTranscriptData = {
          * Conversation ID.
          */
         conversation_id?: string;
+        /**
+         * Exact provider message ID within the conversation. Returns at most one persisted entry, including its adapter-asserted attribution; the sequence cursor still applies.
+         */
+        provider_message_id?: string;
         /**
          * Parent conversation ID.
          */
