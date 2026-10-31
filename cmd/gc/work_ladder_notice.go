@@ -5,8 +5,8 @@ package main
 //
 // When the controller's lane host for the sessions store executes message
 // ([ops] authoritative lists message) and serves the seat (servesNotice: a
-// keystroke-mode runtime, or a protocol-mode one whose runtime row stamps a
-// host serving message), every nudge the ladder decides is one planner
+// runtime its live executor serves, laneServesLive, or one whose runtime row
+// stamps a host serving message), every nudge the ladder decides is one planner
 // notice from gc:planner/work-ladder (proposePlannerNotice, OJ-14's helper)
 // instead of a keystroke: message{notice, boundary, live_only}, scoped to the
 // row's generation, caused by the work bead, keyed

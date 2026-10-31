@@ -80,10 +80,13 @@ type laneInjectEntry struct {
 // <prefix><file>:<func> (or <prefix><file>:var <name> for a package-level
 // declaration), that may type input into a runtime, interrupt its turn or
 // answer its prompt, with its class and why (DES-O1 §9). The executors and
-// wrappers are permanent; OJ-21 deletes every unlisted entry, and every
-// fallback entry but the excused ones (a session with no row or a
-// protocol-mode session, which no lane serves; the drain reminder the gate
-// holds, which runs only under the legacy reconciler).
+// wrappers are permanent. Protocol-mode sessions whose turn starts are
+// recorded (t3bridge) are lane sessions (laneServesLive, OJ-21 21p); the
+// fallbacks' "no lane serves" is a protocol-mode runtime whose turn starts
+// are not recorded, which none in tree is. OJ-21 deletes every unlisted
+// entry and every fallback: a target with no session row then gets no
+// notice, and the drain reminder the gate holds, which never used the queue
+// and runs only under the legacy reconciler, becomes lifecycle.
 var laneInjectAllowlist = map[string]laneInjectEntry{
 	// The conversation lane's live executor.
 	"conversation_lane_exec.go:conversationLaneExec.Deliver":          {laneInjectExecutor, "lane executor: content"},
@@ -109,14 +112,14 @@ var laneInjectAllowlist = map[string]laneInjectEntry{
 	"internal/api/session_resolution.go:Server.sendBackgroundMessageToSession": {laneInjectUnlisted, "extmsg member notices (M11); with message listed they are lane notices"},
 	"internal/api/session_resolution.go:Server.submitMessageToSessionFor":      {laneInjectUnlisted, "POST /submit, /messages and a create's initial message (POST /sessions) deliver through handle.Message (M5, I-f); with message listed they propose lane ops"},
 	// Fallbacks: they run while their kind is listed.
-	"cmd_nudge.go:deliverSessionNudgeLegacy":      {laneInjectFallback, "gc session nudge to a target with no session row, or a protocol-mode session no lane serves (excused at OJ-21)"},
-	"cmd_nudge.go:deliverMailNotifyLegacy":        {laneInjectFallback, "mail --notify (M7): with message listed, only for a session with no row in the city's sessions store, or one no lane serves (protocol mode)"},
+	"cmd_nudge.go:deliverSessionNudgeLegacy":      {laneInjectFallback, "gc session nudge to a target with no session row (unreachable: resolution materializes the row or fails), or a runtime no lane serves (protocol mode, turn starts not recorded)"},
+	"cmd_nudge.go:deliverMailNotifyLegacy":        {laneInjectFallback, "mail --notify (M7): with message listed, only for a session with no row in the city's sessions store, or a runtime no lane serves (protocol mode, turn starts not recorded)"},
 	"cmd_nudge.go:tryDeliverQueuedNudgesByPoller": {laneInjectFallback, "the legacy queue's poller (M12): with message listed it delivers only what the fallback producers queue for a session no lane serves or a notice the op store refuses, and items queued before the flip"},
-	"cmd_sling.go:deliverSlingNudge":              {laneInjectFallback, "sling --nudge (M8): with message listed, only for a session with no row in the city's sessions store, or one no lane serves (protocol mode)"},
-	"drain_reminder.go:nudgeDrainReminder":        {laneInjectFallback, "the drain reminder the gate holds, or for a session no lane serves; legacy reconciler only (excused at OJ-21)"},
-	"nudge_backstop.go:runNudgeBackstop":          {laneInjectFallback, "planner notice for a session no lane serves (protocol mode; excused at OJ-21)"},
-	"warm_bind_nudge.go:nudgeWarmBindSlot":        {laneInjectFallback, "planner notice for a session no lane serves (protocol mode; excused at OJ-21)"},
-	"work_ladder_lane.go:ladderDeliver":           {laneInjectFallback, "the work ladder's nudge for a session no lane serves (protocol mode; excused at OJ-21), or with message not listed"},
+	"cmd_sling.go:deliverSlingNudge":              {laneInjectFallback, "sling --nudge (M8): with message listed, only for a session with no row in the city's sessions store, or a runtime no lane serves (protocol mode, turn starts not recorded)"},
+	"drain_reminder.go:nudgeDrainReminder":        {laneInjectFallback, "the drain reminder the gate holds (the drain protocol's own; lifecycle at OJ-21), or for a runtime no lane serves (protocol mode, turn starts not recorded); legacy reconciler only"},
+	"nudge_backstop.go:runNudgeBackstop":          {laneInjectFallback, "planner notice for a runtime no lane serves (protocol mode, turn starts not recorded), or with no lane host for the sessions store"},
+	"warm_bind_nudge.go:nudgeWarmBindSlot":        {laneInjectFallback, "planner notice for a runtime no lane serves (protocol mode, turn starts not recorded), or with no lane host for the sessions store"},
+	"work_ladder_lane.go:ladderDeliver":           {laneInjectFallback, "the work ladder's nudge for a runtime no lane serves (protocol mode, turn starts not recorded), or with message not listed"},
 }
 
 // laneInjectFallbackPin is how many fallback entries laneInjectAllowlist
