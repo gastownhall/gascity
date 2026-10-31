@@ -1484,16 +1484,16 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 			}
 			if loaded.Status == "closed" {
 				opts.tracef("close-source-chain root=%s skip reason=already_closed source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
-				if sourceHoldsChain(loaded) {
-					opts.tracef("close-source-chain root=%s stop reason=blocked_source source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
-					stopWalk = true
+			} else {
+				if err := closeSourceBeadPreservingOutcome(nextStore, loaded); err != nil {
+					return fmt.Errorf("closing source bead %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
 				}
-				return nil
+				opts.tracef("close-source-chain root=%s closed source=%s ref=%s preserved_outcome=%t", rootID, nextID, sourceChainStoreLabel(effectiveRef), strings.TrimSpace(loaded.Metadata[beadmeta.OutcomeMetadataKey]) != "")
 			}
-			if err := closeSourceBeadPreservingOutcome(nextStore, loaded); err != nil {
-				return fmt.Errorf("closing source bead %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
+			if sourceHoldsChain(loaded) {
+				opts.tracef("close-source-chain root=%s stop reason=blocked_source source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
+				stopWalk = true
 			}
-			opts.tracef("close-source-chain root=%s closed source=%s ref=%s preserved_outcome=%t", rootID, nextID, sourceChainStoreLabel(effectiveRef), strings.TrimSpace(loaded.Metadata[beadmeta.OutcomeMetadataKey]) != "")
 			return nil
 		}
 		if mutate && opts.SourceWorkflowLock != nil {

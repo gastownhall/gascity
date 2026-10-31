@@ -4635,6 +4635,68 @@ func TestProcessWorkflowFinalizeStopsSourceChainAtClosedBlockedSource(t *testing
 	}
 }
 
+func TestProcessWorkflowFinalizeStopsSourceChainAtOpenBlockedSource(t *testing.T) {
+	t.Parallel()
+
+	for _, formula := range []string{"mol-do-work", "mol-polecat-report"} {
+		t.Run(formula+" root", func(t *testing.T) {
+			t.Parallel()
+
+			f := newSourceChainFinalizeFixture(t)
+			stampSourceChainFixture(t, f, "open", map[string]string{
+				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+			}, map[string]string{
+				beadmeta.FormulaNameMetadataKey: formula,
+				"pr_review.verdict":             "approve",
+			})
+
+			result, trace := finalizeSourceChainFixture(t, f, ProcessOptions{
+				ResolveStoreRef:      f.resolver,
+				SourceWorkflowStores: sourceChainFixtureStores(f),
+			})
+
+			assertSourceChainHeldAtBlockedSource(t, f, result, trace)
+		})
+	}
+
+	t.Run("live sibling workflow keeps precedence", func(t *testing.T) {
+		t.Parallel()
+
+		f := newSourceChainFinalizeFixture(t)
+		stampSourceChainFixture(t, f, "open", map[string]string{
+			beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+		}, nil)
+		sibling := mustCreateWorkflowBead(t, f.rigStore, beads.Bead{
+			Title: "second live workflow",
+			Type:  "task",
+			Metadata: map[string]string{
+				"gc.kind":             "workflow",
+				"gc.formula_contract": "graph.v2",
+				"gc.source_bead_id":   f.rigLaunch.ID,
+				"gc.source_store_ref": "rig:test",
+			},
+		})
+
+		result, trace := finalizeSourceChainFixture(t, f, ProcessOptions{
+			ResolveStoreRef:      f.resolver,
+			SourceWorkflowStores: sourceChainFixtureStores(f),
+		})
+
+		if !result.Processed || result.Action != "workflow-pass" {
+			t.Fatalf("result = %+v, want processed workflow-pass", result)
+		}
+		if got := mustGetBead(t, f.rigStore, f.rigLaunch.ID); got.Status != "open" {
+			t.Fatalf("blocked source status = %q, want open while %s is live", got.Status, sibling.ID)
+		}
+		if got := mustGetBead(t, f.cityStore, f.citySource.ID); got.Status != "open" {
+			t.Fatalf("parent of blocked source status = %q, want open", got.Status)
+		}
+		if want := "stop reason=live_child_workflow source=" + f.rigLaunch.ID; !strings.Contains(trace, want) {
+			t.Fatalf("trace missing %q:\n%s", want, trace)
+		}
+	})
+}
+
 type getErrorStore struct {
 	beads.Store
 	failID string
