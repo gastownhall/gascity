@@ -1208,6 +1208,7 @@ go_test(
         "cmd_events_scope_test.go",
         "cmd_events_test.go",
         "cmd_extmsg_test.go",
+        "cmd_formula_attach_guard_test.go",
         "cmd_formula_test.go",
         "cmd_formula_tutorial_regression_test.go",
         "cmd_formula_version_check_test.go",
