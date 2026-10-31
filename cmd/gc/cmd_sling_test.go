@@ -9650,3 +9650,21 @@ func TestAttachedRootOnlyWispIsNotEphemeralOnABd105City(t *testing.T) {
 		t.Fatalf("standalone root-only wisp is not ephemeral on a bd-1.0.5 city: %+v", rows)
 	}
 }
+
+func TestDoSlingWarnsCitySuspendedOnStart(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city", SuspendedOnStart: true}}
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = t.TempDir()
+	code := doSling(testOpts(a, "my-1"), deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0 (still routes); stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), citySuspendedWarning) {
+		t.Errorf("stderr = %q, want city suspended warning %q", stderr.String(), citySuspendedWarning)
+	}
+	assertStoreRoutedTo(t, deps.Store, "my-1", "worker")
+}

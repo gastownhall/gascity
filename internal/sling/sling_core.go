@@ -248,9 +248,9 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 	return true, nil
 }
 
-// targetScopeSuspension reports whether the city is effectively suspended,
-// using the runtime suspension state that gc suspend and gc resume write. The
-// pool reconciler spawns no workers in a suspended city, so a bead routed into
+// targetScopeSuspension reports whether the city is effectively suspended:
+// the runtime suspension state that gc suspend and gc resume write wins over
+// the authored [workspace] suspended_on_start default. The pool reconciler spawns no workers in a suspended city, so a bead routed into
 // it stalls silently. An empty CityPath skips the disk read (Load would
 // otherwise resolve a cwd-relative .gc/runtime file). A state read or parse
 // error is traced and degrades to the zero State: sling warns about
@@ -265,7 +265,7 @@ func targetScopeSuspension(fs fsys.FS, deps SlingDeps) bool {
 			st = loaded
 		}
 	}
-	return suspensionstate.EffectiveCitySuspended(st, false)
+	return deps.Cfg != nil && suspensionstate.EffectiveCitySuspended(st, deps.Cfg.Workspace.EffectiveSuspendedOnStart())
 }
 
 // rigSuspended reports whether the named rig is marked suspended in config.
