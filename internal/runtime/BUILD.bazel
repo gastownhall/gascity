@@ -93,6 +93,7 @@ go_test(
         "nudge_delivery_test.go",
         "privatedir_test.go",
         "probe_test.go",
+        "process_env_guard_test.go",
         "process_table_scanner_test.go",
         "provider_core_test.go",
         "redact_test.go",
@@ -118,7 +119,10 @@ go_test(
     data = glob(
         ["**"],
         exclude = ["BUILD.bazel"],
-    ),
+    ) + [
+        "//:go.mod",
+        "//:repo_go_srcs",
+    ],
     embed = [":runtime"],
     deps = [
         "//internal/runtime/acp",

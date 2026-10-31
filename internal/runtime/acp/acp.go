@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -257,7 +258,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 
 	// Build environment: inherit parent env + apply overrides. Empty overrides
 	// withhold inherited variables, as they do for the other session runtimes.
-	env := os.Environ()
+	// The parent env is read through execenv.Environ so a native beads store
+	// open projecting its scope's BEADS_* variables cannot leak into the session.
+	env := execenv.Environ()
 	if len(cfg.Env) > 0 {
 		keys := make([]string, 0, len(cfg.Env))
 		for k := range cfg.Env {
