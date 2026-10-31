@@ -77,6 +77,15 @@ type BuiltinProviderSpec struct {
 	UpstreamBaseURLEnv   string
 	UpstreamAPIKeyEnv    string
 	UpstreamAuthTokenEnv string
+	// Program-status declaration (OSC 7501), mirrored flat because this
+	// package cannot import config: ProgramStatusProtocol is "osc7501" to
+	// declare, ProgramStatusApp names the reporting program,
+	// ProgramStatusRelay wraps the agent in the probe-answering relay, and
+	// ProgramStatusEnv is forced into the session env when capture is armed.
+	ProgramStatusProtocol string
+	ProgramStatusApp      string
+	ProgramStatusRelay    bool
+	ProgramStatusEnv      map[string]string
 }
 
 func boolPtr(b bool) *bool { return &b }
@@ -660,13 +669,18 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// multiple unsupported dialog classes with independent timeouts, so the
 		// first can exhaust the managed startup lease while OpenCode is working.
 		AcceptStartupDialogs: boolPtr(false),
-		Env:                  map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
-		SupportsACP:          true,
-		SupportsHooks:        true,
-		InstructionsFile:     "AGENTS.md",
-		ResumeFlag:           "--session",
-		ResumeStyle:          "flag",
-		ACPArgs:              []string{"acp"},
+		// OpenCode merges OPENCODE_PERMISSION over every config file, so this
+		// catch-all also overrides a project opencode.json's permission rules.
+		// An agent keeps those rules with env OPENCODE_PERMISSION = "" (see
+		// docs/guides/harness-recipes.md). The cerebras and groq presets share
+		// this default.
+		Env:              map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
+		SupportsACP:      true,
+		SupportsHooks:    true,
+		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--session",
+		ResumeStyle:      "flag",
+		ACPArgs:          []string{"acp"},
 		OptionsSchema: []BuiltinProviderOption{
 			modelOption(
 				modelChoice("opencode/deepseek-v4-flash-free", "DeepSeek V4 Flash Free"),

@@ -2,7 +2,10 @@ package sessionlog
 
 import (
 	"errors"
+	"strconv"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 const (
@@ -32,7 +35,7 @@ func TestScanTurnsCodexFixtures(t *testing.T) {
 		}},
 		{"error.jsonl", func(t *testing.T) TurnScan {
 			return TurnScan{Recent: []ScannedTurn{
-				{ID: codexT1, StartedAt: turnTime(t, ts("22:22.191")), EndedAt: turnTime(t, ts("22:24.999")), Status: TurnStatusFailed},
+				{ID: codexT1, StartedAt: turnTime(t, ts("22:22.191")), EndedAt: turnTime(t, ts("22:24.999")), Status: TurnStatusFailed, Failure: TurnFailure{Code: "server_overloaded", Message: "Selected model is at capacity."}},
 			}}
 		}},
 		{"missing_ids.jsonl", func(t *testing.T) TurnScan {
@@ -139,6 +142,68 @@ func TestScanTurnsCodexLateEnds(t *testing.T) {
 		Current: ScannedTurn{ID: "t2", StartedAt: turnTime(t, "2026-10-08T02:22:25.000Z")},
 		Recent: []ScannedTurn{
 			{ID: "t1", StartedAt: turnTime(t, "2026-10-08T02:22:22.191Z"), EndedAt: turnTime(t, "2026-10-08T02:22:26.000Z"), Status: TurnStatusCancelled},
+		},
+	})
+}
+
+// TestScanTurnsCodexFailedTurnKeepsItsError: a task_complete that carries an
+// error ends its turn failed on that error, as Codex classified it: the
+// codex_error_info variant, the HTTP status a variant carries, and the
+// message. RateLimited reads the variant or the status, never the message: a
+// usage limit, or a 429 that spent Codex's own retries, is a rate limit; a 429
+// named only in the text is not. A late end for a turn a newer start closed
+// keeps its error too.
+func TestScanTurnsCodexFailedTurnKeepsItsError(t *testing.T) {
+	clock := func(s string) string { return "2026-10-08T02:22:" + s + "Z" }
+	started := func(s, id string) string {
+		return `{"timestamp":"` + clock(s) + `","type":"event_msg","payload":{"type":"task_started","turn_id":"` + id + `"}}`
+	}
+	complete := func(s, id, errField string) string {
+		return `{"timestamp":"` + clock(s) + `","type":"event_msg","payload":{"type":"task_complete","turn_id":"` + id + `","error":` + errField + `}}`
+	}
+	long := strings.Repeat("é", MaxTurnFailureMessage) // two bytes a rune: cut on a rune boundary
+	path := writeTurnLines(t, "rollout.jsonl",
+		started("01.000", "t1"), complete("01.500", "t1", `{"message":"You've hit your usage limit.","codex_error_info":"usage_limit_exceeded"}`),
+		started("02.000", "t2"), complete("02.500", "t2", `{"message":"exceeded retry limit, last status: 429 Too Many Requests","codex_error_info":{"response_too_many_failed_attempts":{"http_status_code":429}}}`),
+		started("03.000", "t3"), complete("03.500", "t3", `{"message":"stream disconnected","codex_error_info":{"http_connection_failed":{"http_status_code":503}}}`),
+		started("04.000", "t4"), complete("04.500", "t4", `"a bare error"`),
+		started("05.000", "t5"), complete("05.500", "t5", `{"message":"429 Too Many Requests","codex_error_info":"other"}`),
+		started("06.000", "t6"), complete("06.500", "t6", strconv.Quote(long)),
+		started("07.000", "t7"), complete("07.500", "t7", `null`),
+	)
+	got, err := ScanTurns("codex", path)
+	if err != nil {
+		t.Fatalf("ScanTurns: %v", err)
+	}
+	ended := func(id, start, end string, status TurnStatus, failure TurnFailure) ScannedTurn {
+		return ScannedTurn{ID: id, StartedAt: turnTime(t, clock(start)), EndedAt: turnTime(t, clock(end)), Status: status, Failure: failure}
+	}
+	assertTurnScan(t, got, TurnScan{Recent: []ScannedTurn{
+		ended("t7", "07.000", "07.500", TurnStatusCompleted, TurnFailure{}),
+		ended("t6", "06.000", "06.500", TurnStatusFailed, TurnFailure{Message: long[:MaxTurnFailureMessage]}),
+		ended("t5", "05.000", "05.500", TurnStatusFailed, TurnFailure{Code: "other", Message: "429 Too Many Requests"}),
+		ended("t4", "04.000", "04.500", TurnStatusFailed, TurnFailure{Message: "a bare error"}),
+		ended("t3", "03.000", "03.500", TurnStatusFailed, TurnFailure{Code: "http_connection_failed", Status: 503, Message: "stream disconnected"}),
+		ended("t2", "02.000", "02.500", TurnStatusFailed, TurnFailure{Code: "response_too_many_failed_attempts", Status: 429, RateLimited: true, Message: "exceeded retry limit, last status: 429 Too Many Requests"}),
+		ended("t1", "01.000", "01.500", TurnStatusFailed, TurnFailure{Code: "usage_limit_exceeded", RateLimited: true, Message: "You've hit your usage limit."}),
+	}})
+	if !utf8.ValidString(got.Recent[1].Failure.Message) {
+		t.Errorf("message cut mid-rune: %q", got.Recent[1].Failure.Message)
+	}
+
+	late := writeTurnLines(t, "late.jsonl",
+		started("01.000", "t1"), started("02.000", "t2"),
+		complete("02.500", "t1", `{"message":"You've hit your usage limit.","codex_error_info":"usage_limit_exceeded"}`),
+	)
+	got, err = ScanTurns("codex", late)
+	if err != nil {
+		t.Fatalf("ScanTurns: %v", err)
+	}
+	assertTurnScan(t, got, TurnScan{
+		Open:    true,
+		Current: ScannedTurn{ID: "t2", StartedAt: turnTime(t, clock("02.000"))},
+		Recent: []ScannedTurn{
+			ended("t1", "01.000", "02.500", TurnStatusFailed, TurnFailure{Code: "usage_limit_exceeded", RateLimited: true, Message: "You've hit your usage limit."}),
 		},
 	})
 }

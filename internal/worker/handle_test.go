@@ -767,6 +767,47 @@ func TestSessionHandleMessageInterruptNowUsesWorkerBoundary(t *testing.T) {
 	}
 }
 
+// A deliver-now whose interrupt went out but whose replacement a pending
+// interaction kept from being prepared is returned, not queued, even to a
+// caller that queues behind a pending interaction (QueueBehindPending): the
+// queue would deliver it as a plain message, onto a session never prepared
+// for it.
+func TestSessionHandleMessageDoesNotQueueAnUnpreparedReplacement(t *testing.T) {
+	handle, _, sp, mgr := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	by := handleActor(t, handle, sessionpkg.ActorAgent)
+	if err := handle.Start(context.Background(), by); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := mgr.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get(%q): %v", handle.sessionID, err)
+	}
+	sp.WaitForIdleErrors[info.SessionName] = nil
+	// A permission prompt opened as the turn ended, after the manager's
+	// look: the input clear is refused behind it.
+	sp.ClearInputErrors[info.SessionName] = fmt.Errorf("%w: approval open", runtime.ErrPendingInteraction)
+
+	startCalls := len(sp.Calls)
+	result, err := handle.Message(context.Background(), by, MessageRequest{
+		Text:               "replacement task",
+		Delivery:           DeliveryIntentInterruptNow,
+		QueueBehindPending: true,
+	})
+	if !errors.Is(err, sessionpkg.ErrReplacementNotPrepared) || !errors.Is(err, sessionpkg.ErrPendingInteraction) || result.Queued {
+		t.Fatalf("Message(interrupt_now, QueueBehindPending) = %+v, %v; want ErrReplacementNotPrepared wrapping ErrPendingInteraction, nothing queued", result, err)
+	}
+	if lastCall(sp.Calls[startCalls:], "NudgeNow") != nil || lastCall(sp.Calls[startCalls:], "Nudge") != nil {
+		t.Fatalf("calls = %v, want the unprepared replacement not typed", sp.Calls[startCalls:])
+	}
+}
+
 func TestSessionHandleNudgeImmediateUsesWorkerBoundary(t *testing.T) {
 	handle, _, sp, mgr := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileClaudeTmuxCLI,

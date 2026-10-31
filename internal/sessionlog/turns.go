@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"slices"
 	"strings"
@@ -148,6 +149,60 @@ type ScannedTurn struct {
 	// Status is how the turn ended; empty while it is open or when only a
 	// newer turn closed it.
 	Status TurnStatus
+	// Failure is the provider error a failed turn ended on, as the source
+	// recorded it; zero for a turn that did not fail, and for a family whose
+	// transcript records no such error.
+	Failure TurnFailure
+}
+
+// MaxTurnFailureMessage bounds TurnFailure.Message, in bytes.
+const MaxTurnFailureMessage = 512
+
+// TurnFailure is the provider error a turn ended on, as the transcript's
+// source classified it when it wrote the error. Nothing in it is read out of
+// the error's text.
+type TurnFailure struct {
+	// Code is the source's own class for the error, verbatim (Claude Code:
+	// "rate_limit", "server_error", ...; Codex: its codex_error_info variant,
+	// "usage_limit_exceeded", "http_connection_failed", ...); empty when it
+	// recorded none.
+	Code string
+	// Status is the HTTP status the source recorded; 0 when it recorded
+	// none.
+	Status int
+	// RateLimited reports that the provider refused the turn with a rate
+	// limit: HTTP 429, or the family's own rate-limit class (Claude Code's
+	// "rate_limit", Codex's "usage_limit_exceeded"). Each family classifies
+	// its own codes, so one family's class never reads as another's.
+	RateLimited bool
+	// Message is the error's text, cut on a rune boundary to at most
+	// MaxTurnFailureMessage bytes. It is for people: nothing classifies it.
+	Message string
+}
+
+// newTurnFailure is the failure a family's transcript recorded: its class,
+// its HTTP status, whether the class is the family's rate-limit class, and
+// its text, cut to MaxTurnFailureMessage.
+func newTurnFailure(code string, status int, rateLimitClass bool, message string) TurnFailure {
+	return TurnFailure{
+		Code:        code,
+		Status:      status,
+		RateLimited: rateLimitClass || status == http.StatusTooManyRequests,
+		Message:     cutTurnFailureMessage(message),
+	}
+}
+
+// cutTurnFailureMessage is s cut on a rune boundary to at most
+// MaxTurnFailureMessage bytes.
+func cutTurnFailureMessage(s string) string {
+	if len(s) <= MaxTurnFailureMessage {
+		return s
+	}
+	n := MaxTurnFailureMessage
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // TurnScan is one read of a transcript's current and recent turns.
@@ -160,6 +215,16 @@ type TurnScan struct {
 	Open bool
 	// Current is the open turn when Open is set, else the zero value.
 	Current ScannedTurn
+	// Stopped is, while Open, Current as it ended if it stopped at its latest
+	// record, when that record is a provider error the turn has not
+	// recovered from (Claude: an API error with no reply, tool result or
+	// prompt of the turn after it): failed on that error, at the error, as
+	// the source records the turn once the next one starts. The zero value
+	// otherwise. The transcript cannot tell an agent that stopped there, idle
+	// or dead, from one still retrying the error within the turn, so it
+	// leaves the turn open; the caller, which can read the session, infers
+	// the end (TI-2b's idle overlay).
+	Stopped ScannedTurn
 	// Recent holds ended turns, newest first, at most MaxRecentTurns.
 	Recent []ScannedTurn
 	// MissingIDs reports that the source recorded a turn boundary without a
@@ -348,12 +413,18 @@ func (l *turnLedger) noteTime(ok bool) {
 
 // close ends the open turn, if any.
 func (l *turnLedger) close(at time.Time, status TurnStatus) {
+	l.closeFailed(at, status, TurnFailure{})
+}
+
+// closeFailed ends the open turn, if any, with the error it failed on.
+func (l *turnLedger) closeFailed(at time.Time, status TurnStatus, failure TurnFailure) {
 	if !l.open {
 		return
 	}
 	t := l.current
 	t.EndedAt = at
 	t.Status = status
+	t.Failure = failure
 	l.open = false
 	l.current = ScannedTurn{}
 	l.pushEnded(t)

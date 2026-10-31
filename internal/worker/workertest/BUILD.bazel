@@ -33,6 +33,7 @@ go_test(
     srcs = [
         "actor_helpers_test.go",
         "catalog_phase2_data_test.go",
+        "delivery_handle_conformance_test.go",
         "hangbudget_test.go",
         "nocity_guard_test.go",
         "nudge_handle_conformance_test.go",
@@ -63,6 +64,7 @@ go_test(
         "//internal/bazeltest",
         "//internal/beads",
         "//internal/events",
+        "//internal/nudgequeue",
         "//internal/runtime",
         "//internal/session",
         "//internal/sessionlog",

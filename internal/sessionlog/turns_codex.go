@@ -36,6 +36,8 @@ type codexTurnRecord struct {
 	at     time.Time
 	timed  bool
 	failed bool
+	// failure is a failed task_complete's error.
+	failure TurnFailure
 }
 
 // codexTurnContextType is the envelope type of a rollout's turn_context line.
@@ -71,13 +73,43 @@ func parseCodexTurnRecord(line []byte) (codexTurnRecord, bool) {
 		rec.kind = codexRecordStart
 	case payload.Type == "task_complete":
 		rec.kind = codexRecordComplete
-		rec.failed = codexErrorPresent(payload.Error)
+		if failure, ok := codexTaskCompleteError(payload.Error); ok {
+			rec.failed, rec.failure = true, codexTurnFailure(failure)
+		}
 	case payload.Type == "turn_aborted":
 		rec.kind = codexRecordAborted
 	default:
 		return codexTurnRecord{}, false
 	}
 	return rec, true
+}
+
+// codexUsageLimitClass is the codex_error_info variant Codex gives a turn the
+// provider refused because the account's usage limit is spent.
+const codexUsageLimitClass = "usage_limit_exceeded"
+
+// codexTurnFailure is a failed task_complete's error as Codex classified it:
+// its codex_error_info variant, the HTTP status the variant carries, and the
+// message, cut to MaxTurnFailureMessage.
+func codexTurnFailure(e codexEventMsg) TurnFailure {
+	code := codexErrorInfoCode(e.CodexErrorInfo)
+	return newTurnFailure(code, codexErrorInfoStatus(e.CodexErrorInfo), code == codexUsageLimitClass, e.Message)
+}
+
+// codexErrorInfoStatus is the HTTP status a codex_error_info variant with
+// data carries ({"http_connection_failed":{"http_status_code":429}}); 0 for
+// a variant without one.
+func codexErrorInfoStatus(raw json.RawMessage) int {
+	var variant map[string]struct {
+		HTTPStatusCode int `json:"http_status_code"`
+	}
+	if json.Unmarshal(bytes.TrimSpace(raw), &variant) != nil || len(variant) != 1 {
+		return 0
+	}
+	for _, data := range variant {
+		return data.HTTPStatusCode
+	}
+	return 0
 }
 
 // codexErrorPresent reports whether a task_complete error field holds an
@@ -167,25 +199,27 @@ func (f *codexTurnFold) addRecord(rec codexTurnRecord) {
 func (f *codexTurnFold) end(rec codexTurnRecord, id string, ok bool) {
 	l := &f.ledger
 	status := TurnStatusCompleted
+	var failure TurnFailure
 	switch {
 	case rec.kind == codexRecordAborted:
 		status = TurnStatusCancelled
 	case rec.failed:
-		status = TurnStatusFailed
+		status, failure = TurnStatusFailed, rec.failure
 	}
 	if !ok || l.isCurrent(id) {
-		l.close(rec.at, status)
+		l.closeFailed(rec.at, status, failure)
 		return
 	}
 	if i := l.endedIndex(id); i >= 0 {
 		if l.recent[i].Status == "" {
 			l.recent[i].Status = status
 			l.recent[i].EndedAt = rec.at
+			l.recent[i].Failure = failure
 		}
 		return
 	}
 	if f.startUnseen && !l.open {
-		l.pushEnded(ScannedTurn{ID: id, EndedAt: rec.at, Status: status})
+		l.pushEnded(ScannedTurn{ID: id, EndedAt: rec.at, Status: status, Failure: failure})
 	}
 }
 

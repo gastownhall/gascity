@@ -1,0 +1,296 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/workladder"
+)
+
+// A reading reduces the seat's turns to what the ladder judges progress by:
+// whether the newest ended turn failed (whatever the cause, with no turn
+// open), and when the newest turn the provider completed ended.
+func TestLadderTurnReading(t *testing.T) {
+	at := stepsTestNow
+	completed := runtime.EndedTurn{TurnID: "ok", EndedAt: at.Add(-time.Hour), Status: runtime.TurnStatusCompleted}
+	limited := runtime.EndedTurn{TurnID: "429", EndedAt: at, Status: runtime.TurnStatusFailed, Failure: runtime.TurnFailure{Code: "rate_limit", HTTPStatus: 429, RateLimited: true}}
+	gateway := runtime.EndedTurn{TurnID: "524", EndedAt: at, Status: runtime.TurnStatusFailed, Failure: runtime.TurnFailure{HTTPStatus: 524}}
+	noStatus := runtime.EndedTurn{TurnID: "gemini", EndedAt: at}
+	canceled := runtime.EndedTurn{TurnID: "esc", EndedAt: at, Status: runtime.TurnStatusCancelled}
+	open := runtime.TurnState{TurnID: "open"}
+	for _, tc := range []struct {
+		name string
+		hist runtime.TurnHistory
+		want workladder.TurnReading
+	}{
+		{"newest completed", runtime.TurnHistory{Recent: []runtime.EndedTurn{completed}}, workladder.TurnReading{Read: true, Conv: 3, ServedAt: completed.EndedAt}},
+		{"newest refused (429), served behind it", runtime.TurnHistory{Recent: []runtime.EndedTurn{limited, completed}}, workladder.TurnReading{Read: true, Conv: 3, LastFailed: true, ServedAt: completed.EndedAt}},
+		{"newest failed (524), never served", runtime.TurnHistory{Recent: []runtime.EndedTurn{gateway, limited}}, workladder.TurnReading{Read: true, Conv: 3, LastFailed: true}},
+		{"no status (Gemini) is no failure", runtime.TurnHistory{Recent: []runtime.EndedTurn{noStatus, limited}}, workladder.TurnReading{Read: true, Conv: 3}},
+		{"canceled is neither", runtime.TurnHistory{Recent: []runtime.EndedTurn{canceled}}, workladder.TurnReading{Read: true, Conv: 3}},
+		{"a turn open has no failure yet", runtime.TurnHistory{Current: open, Recent: []runtime.EndedTurn{limited, completed}}, workladder.TurnReading{Read: true, Conv: 3, ServedAt: completed.EndedAt}},
+		{"nothing yet", runtime.TurnHistory{}, workladder.TurnReading{Read: true, Conv: 3}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ladderTurnReading(tc.hist, 3); got != tc.want {
+				t.Fatalf("reading = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// fakeLadderTurns is a turn source over a seat's history, counting reads.
+type fakeLadderTurns struct {
+	hist  runtime.TurnHistory
+	err   error
+	reads int
+}
+
+func (f *fakeLadderTurns) install(c *ladderCity) {
+	c.lane.turnReaderFor = func(externalReadsEnv) ladderTurnReader {
+		return func(context.Context, beads.Bead) (runtime.TurnHistory, error) {
+			f.reads++
+			return f.hist, f.err
+		}
+	}
+}
+
+// answerDelay is how long after a nudge answeredSeat's seat ends the turn
+// that answers it: a slow turn, ending past ProgressReset.
+const answerDelay = 12 * time.Minute
+
+// answeredSeat is a started seat whose every nudge is answered, answerDelay
+// later, by a turn that ends with status (and failure), its end the seat's
+// newest activity; its turns are read when read is set. It runs until the
+// ladder recycles the seat, or for eight hours.
+func answeredSeat(t *testing.T, status runtime.TurnStatus, failure runtime.TurnFailure, read bool) *ladderCity {
+	t.Helper()
+	c := newLadderCity(t)
+	id := c.claim("the step")
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+	turns := &fakeLadderTurns{}
+	if read {
+		turns.install(c)
+	}
+	for end := c.now.Add(8 * time.Hour); c.now.Before(end) && len(c.posted) == 0; c.now = c.now.Add(30 * time.Second) {
+		turns.hist = runtime.TurnHistory{}
+		for _, n := range c.nudgedAt {
+			at := c.start.Add(n + answerDelay)
+			if at.After(c.now) {
+				continue
+			}
+			turn := runtime.EndedTurn{TurnID: fmt.Sprint(n), EndedAt: at, Status: status}
+			if status == runtime.TurnStatusFailed {
+				turn.Failure = failure
+			}
+			turns.hist.Recent = append([]runtime.EndedTurn{turn}, turns.hist.Recent...)
+			c.sp.SetActivity(ladderSeatName, at)
+		}
+		c.pass()
+	}
+	return c
+}
+
+// C1. A seat whose every answer is a turn its provider failed, ending 12
+// minutes after the nudge it answers (a slow 429, a slow Cloudflare 524), is
+// not making progress: it climbs the ladder to its recycle. Rolled back (no
+// turn reads), each failure is activity past the reset and the seat is
+// nudged forever, never recycled or escalated.
+func TestWorkLadderFailedTurnIsNotProgress(t *testing.T) {
+	for name, failure := range map[string]runtime.TurnFailure{
+		"429": {Code: "rate_limit", HTTPStatus: 429, RateLimited: true, Message: "API Error: Request rejected (429)"},
+		"524": {HTTPStatus: 524, Message: "API Error: 524"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := answeredSeat(t, runtime.TurnStatusFailed, failure, true)
+			if len(c.posted) != 1 {
+				t.Fatalf("nudged at %v, recycles posted %+v: want the seat recycled, its failed turns no progress", c.nudgedAt, c.posted)
+			}
+			if got := escalations(c); len(got) != 1 || got[0] != workladder.AlertStartedRecycled {
+				t.Fatalf("work.escalated reasons = %v, want the recycle's alert", got)
+			}
+			old := answeredSeat(t, runtime.TurnStatusFailed, failure, false)
+			if len(old.posted) != 0 {
+				t.Fatalf("with no turn reads: recycles posted %+v; the replay assumes each failure resets the count", old.posted)
+			}
+		})
+	}
+}
+
+// A seat whose turns the provider completes, as slowly, is making progress:
+// its count restarts after each answer, and it is never recycled.
+func TestWorkLadderCompletedTurnIsProgress(t *testing.T) {
+	c := answeredSeat(t, runtime.TurnStatusCompleted, runtime.TurnFailure{}, true)
+	if len(c.posted) != 0 || len(escalations(c)) != 0 {
+		t.Fatalf("recycles %+v, alerts %v: a served seat is making progress", c.posted, escalations(c))
+	}
+}
+
+// A family whose turns carry no outcome (Gemini records no turn end), and a
+// read that fails, leave progress to the activity clock: a working seat is
+// never recycled for want of a completed turn.
+func TestWorkLadderNoStatusFamilyKeepsActivityProgress(t *testing.T) {
+	t.Run("no status", func(t *testing.T) {
+		c := answeredSeat(t, "", runtime.TurnFailure{}, true)
+		if len(c.posted) != 0 || len(escalations(c)) != 0 {
+			t.Fatalf("recycles %+v, alerts %v: turns with no status are judged on the activity clock", c.posted, escalations(c))
+		}
+	})
+	t.Run("the read fails", func(t *testing.T) {
+		c := newLadderCity(t)
+		id := c.claim("the step")
+		c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+		turns := &fakeLadderTurns{err: errors.New("transcript not found")}
+		turns.install(c)
+		for end := c.now.Add(8 * time.Hour); c.now.Before(end); c.now = c.now.Add(30 * time.Second) {
+			for _, n := range c.nudgedAt {
+				if at := c.start.Add(n + answerDelay); !at.After(c.now) {
+					c.sp.SetActivity(ladderSeatName, at)
+				}
+			}
+			c.pass()
+		}
+		if turns.reads == 0 || len(c.posted) != 0 || len(escalations(c)) != 0 {
+			t.Fatalf("reads %d, recycles %+v, alerts %v: an unreadable seat is judged on its activity", turns.reads, c.posted, escalations(c))
+		}
+	})
+}
+
+// Progress is judged only on a pass that may act on the seat. A busy pass,
+// or one behind a gate, writes nothing, though the seat worked long past its
+// last nudge; the first pass that may act restarts the count.
+func TestWorkLadderJudgesProgressOnlyWhenActing(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("the step")
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+	c.run(5*time.Minute, 30*time.Second, nil) // nudged at 1m30s and 4m30s
+	e := c.entry(id)
+	if e.Attempts != 2 {
+		t.Fatalf("entry %+v, want two counted nudges", e)
+	}
+	c.now = e.Last.Add(30 * time.Minute)
+	c.sp.SetActivity(ladderSeatName, c.now.Add(-10*time.Second)) // busy: inside the quiet grace
+	before := c.row().Metadata[session.WorkLadderKey]
+	c.pass()
+	if got := c.row().Metadata[session.WorkLadderKey]; got != before {
+		t.Fatalf("busy pass wrote the cell:\n%s\nwant\n%s", got, before)
+	}
+
+	c.now = c.now.Add(5 * time.Minute) // quiet again, behind an agent's wait
+	c.setRow(map[string]string{"wait_hold": "true"})
+	c.pass()
+	if got := c.row().Metadata[session.WorkLadderKey]; got != before {
+		t.Fatalf("gated pass wrote the cell:\n%s\nwant\n%s", got, before)
+	}
+
+	c.setRow(map[string]string{"wait_hold": ""})
+	c.pass()
+	if got := c.entry(id); got.Since.Equal(e.Since) || got.Attempts > 1 {
+		t.Fatalf("acting pass: entry %+v, want the count restarted by the seat's work", got)
+	}
+}
+
+// The ladder reads a seat's turns only on a pass that may act on it (a
+// running, quiet seat, its gate open, with work outstanding), and reads it
+// again only when the seat moves (its generation, conversation, activity or
+// the ladder's last nudge) or the reading is ladderTurnsMaxAge old.
+func TestWorkLadderReadsTurnsOnlyWhenActing(t *testing.T) {
+	c := newLadderCity(t)
+	turns := &fakeLadderTurns{}
+	turns.install(c)
+	c.pass()
+	if turns.reads != 0 {
+		t.Fatalf("read %d times with no work outstanding", turns.reads)
+	}
+	c.claim("the step")
+	c.sp.SetActivity(ladderSeatName, c.now.Add(-10*time.Second))
+	c.pass()
+	if turns.reads != 0 {
+		t.Fatalf("read %d times on a busy seat", turns.reads)
+	}
+	c.sp.SetActivity(ladderSeatName, c.now.Add(-time.Hour))
+	c.setRow(map[string]string{"wait_hold": "true"})
+	c.pass()
+	if turns.reads != 0 {
+		t.Fatalf("read %d times behind a gate", turns.reads)
+	}
+	c.setRow(map[string]string{"wait_hold": ""})
+	if err := c.sp.Stop(ladderSeatName); err != nil {
+		t.Fatal(err)
+	}
+	c.pass()
+	if turns.reads != 0 {
+		t.Fatalf("read %d times on a stopped runtime", turns.reads)
+	}
+	if err := c.sp.Start(context.Background(), ladderSeatName, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	c.sp.SetActivity(ladderSeatName, c.now.Add(-time.Hour))
+
+	c.pass()
+	if turns.reads != 1 {
+		t.Fatalf("reads = %d on an acting pass, want 1", turns.reads)
+	}
+	c.now = c.now.Add(30 * time.Second)
+	c.pass()
+	if turns.reads != 1 {
+		t.Fatalf("reads = %d, want the reading cached while the seat has not moved", turns.reads)
+	}
+	c.sp.SetActivity(ladderSeatName, c.now.Add(-5*time.Minute))
+	c.pass()
+	if turns.reads != 2 {
+		t.Fatalf("reads = %d, want a re-read when the seat's activity moved", turns.reads)
+	}
+	c.setRow(map[string]string{"continuation_epoch": "2"})
+	c.pass()
+	if turns.reads != 3 {
+		t.Fatalf("reads = %d, want a re-read in a new conversation", turns.reads)
+	}
+	c.now = c.now.Add(ladderTurnsMaxAge)
+	c.pass()
+	if turns.reads != 4 {
+		t.Fatalf("reads = %d, want a re-read once the reading is %v old", turns.reads, ladderTurnsMaxAge)
+	}
+}
+
+// A seat whose turns cannot be read is reported once per conversation and
+// error, not every pass; a family that records no turns is not reported.
+func TestWorkLadderReportsAnUnreadableSeatOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"a read that fails", errors.New("transcript not found"), 2},
+		{"no turn identity", fmt.Errorf("claude: %w", runtime.ErrTurnIdentityUnsupported), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newLadderCity(t)
+			var stderr bytes.Buffer
+			c.lane.stderr = &stderr
+			id := c.claim("the step")
+			c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+			turns := &fakeLadderTurns{err: tc.err}
+			turns.install(c)
+			c.run(30*time.Minute, time.Minute, nil)
+			before := turns.reads
+			c.setRow(map[string]string{"continuation_epoch": "2"})
+			c.run(30*time.Minute, time.Minute, nil)
+			if before < 2 || turns.reads-before < 2 {
+				t.Fatalf("reads = %d, want the seat read again and again", turns.reads)
+			}
+			if got := strings.Count(stderr.String(), "reading its turns"); got != tc.want {
+				t.Fatalf("reported %d times, want %d:\n%s", got, tc.want, stderr.String())
+			}
+		})
+	}
+}
