@@ -306,3 +306,36 @@ func TestDoSlingRuntimeResumeOverridesAuthoredSuspend(t *testing.T) {
 		})
 	}
 }
+
+func TestDoSlingWarnsPathBoundAgentInSuspendedRig(t *testing.T) {
+	for _, dirForm := range []string{"absolute", "relative"} {
+		for _, suspension := range []string{"runtime", "authored"} {
+			t.Run(dirForm+"/"+suspension, func(t *testing.T) {
+				runner := newFakeRunner()
+				cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+				deps := suspensionTestDeps(t, cfg, runner)
+				rig := config.Rig{Name: "myrig", Path: filepath.Join(deps.CityPath, "repos", "myrig")}
+				if suspension == "authored" {
+					rig.SuspendedOnStart = true
+				} else {
+					setRigSuspendedState(t, deps.CityPath, true)
+				}
+				cfg.Rigs = []config.Rig{rig}
+				dir := rig.Path
+				if dirForm == "relative" {
+					dir = filepath.Join("repos", "myrig")
+				}
+				a := config.Agent{Name: "polecat", Dir: dir, MaxActiveSessions: intPtr(1)}
+
+				result, err := DoSling(testOpts(a, suspensionTestBead), deps, nil)
+				if err != nil {
+					t.Fatalf("DoSling error: %v", err)
+				}
+				if result.SuspendedRig != "myrig" {
+					t.Errorf("SuspendedRig = %q, want %q for an agent bound to the rig by path %q", result.SuspendedRig, "myrig", dir)
+				}
+				assertSlingRouted(t, result, runner)
+			})
+		}
+	}
+}

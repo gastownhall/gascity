@@ -9728,3 +9728,27 @@ func TestDoSlingRuntimeResumeOverridesAuthoredSuspend(t *testing.T) {
 	}
 	assertStoreRoutedTo(t, deps.Store, "my-1", "myrig/polecat")
 }
+
+func TestDoSlingWarnsPathBoundAgentInSuspendedRig(t *testing.T) {
+	runner := newFakeRunner()
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "repos", "myrig")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", Path: rigPath, SuspendedOnStart: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: rigPath, MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = cityPath
+	deps.StoreRef = "rig:myrig"
+	code := doSling(testOpts(a, "my-1"), deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0 (still routes); stderr = %q", code, stderr.String())
+	}
+	want := `rig "myrig" is suspended — bead routed but no worker will spawn until 'gc rig resume myrig'`
+	if !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want suspended-rig warning %q", stderr.String(), want)
+	}
+}
