@@ -889,7 +889,8 @@ func TestProvider_IdleAndPendingReadAgentPaneNotFocusedHumanPrompt(t *testing.T)
 	}
 	captured(human, "❯")
 
-	// The agent is busy.
+	// The agent, a claude whose busy reading the leaf trusts, is busy.
+	f.mustRun(t, "set-environment", "-t", f.name, "GC_PROVIDER", "claude")
 	show(f.agent, "✻ Thinking… (12s · esc to interrupt)")
 	captured(f.agent, "esc to interrupt")
 	if idle, err := tm.SnapshotIdle(f.name); err != nil || idle {

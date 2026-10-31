@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -621,9 +622,9 @@ func (p poolClaimBackstop) clearHold(store beads.Store, s *beads.Bead, stdout io
 //
 //   - activity the runtime observed within idleClaimNudgeGrace holds, as does
 //     an activity read that fails;
-//   - for a busy-readable provider family off ACP (executionSnapshotVetoApplies)
-//     a turn the screen shows running holds, as does a look that fails
-//     (turnHoldFor).
+//   - off ACP (executionSnapshotVetoApplies) a turn the screen shows running
+//     holds, as does a look that fails; a family whose turn the runtime
+//     cannot read holds nothing (turnHoldFor).
 //
 // Unlike sessionQuietHold, a runtime that reports no activity at all (zero
 // time) does not hold by itself: holding on it would leave a slot on an
@@ -649,7 +650,10 @@ const claimHoldTurnRunning = "turn_running"
 // turnHoldFor asks the backend serving sp's session sessName whether its agent
 // is running a turn now, the reading its own nudge takes before it types
 // (runtime.TurnRunningProvider): a running turn holds (claimHoldTurnRunning),
-// as does a look that fails (executionHoldSnapshotError). That reading counts
+// as does a look that fails (executionHoldSnapshotError). A runtime that
+// cannot read the session's family's turn says so with
+// runtime.ErrIdleIndeterminate, which holds nothing: the activity clock
+// decides, as it does for an indeterminate idle snapshot. That reading counts
 // only the live screen where it can place the turn's status (a Codex
 // composer's status rows), so a busy row an earlier turn left in the
 // scrollback holds nothing. A backend that takes no such reading answers with
@@ -661,6 +665,8 @@ func turnHoldFor(sp runtime.Provider, sessName string) string {
 	}
 	running, err := tr.TurnRunning(sessName)
 	switch {
+	case errors.Is(err, runtime.ErrIdleIndeterminate):
+		return ""
 	case err != nil:
 		return executionHoldSnapshotError
 	case running:

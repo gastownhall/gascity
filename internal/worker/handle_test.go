@@ -2086,6 +2086,73 @@ func TestRuntimeHandleNudgeWaitIdleInteractionUnsupportedReturnsProviderUnsuppor
 	}
 }
 
+// idleSnapshotFake is a Fake whose one-look idle snapshot answers idle and
+// err (runtime.IdleSnapshotProvider).
+type idleSnapshotFake struct {
+	*runtime.Fake
+	idle bool
+	err  error
+}
+
+func (f *idleSnapshotFake) SnapshotIdle(string) (bool, error) { return f.idle, f.err }
+
+// A wait-idle nudge whose one-look pre-read (runtime.IdleBoundaryNow) shows
+// the session busy, or showing a pending interaction, is queued at once: it
+// reports no_idle_boundary without entering the 30 s idle wait and types
+// nothing. A pre-read at the boundary, or one that cannot tell, waits for
+// idle as before.
+func TestRuntimeHandleWaitIdleBusySnapshotQueuesWithoutWaiting(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		idle      bool
+		err       error
+		wantWait  bool
+		delivered bool
+	}{
+		{name: "busy"},
+		{name: "pending", err: fmt.Errorf("dialog: %w: %w", runtime.ErrIdleIndeterminate, runtime.ErrPendingInteraction)},
+		{name: "at the boundary", idle: true, wantWait: true, delivered: true},
+		{name: "indeterminate", err: fmt.Errorf("scan: %w", runtime.ErrIdleIndeterminate), wantWait: true, delivered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := runtime.NewFake()
+			if err := fake.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			fake.WaitForIdleErrors["legacy-worker"] = nil
+			handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+				Provider:     &idleSnapshotFake{Fake: fake, idle: tc.idle, err: tc.err},
+				SessionName:  "legacy-worker",
+				ProviderName: "claude",
+			})
+			if err != nil {
+				t.Fatalf("NewRuntimeHandle: %v", err)
+			}
+
+			result, err := handle.Nudge(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), NudgeRequest{
+				Text:     "check deploy status",
+				Delivery: NudgeDeliveryWaitIdle,
+				Source:   "mail",
+			})
+			if err != nil {
+				t.Fatalf("Nudge(wait_idle): %v", err)
+			}
+			if result.Delivered != tc.delivered {
+				t.Fatalf("Nudge(wait_idle) = %+v, want delivered=%t", result, tc.delivered)
+			}
+			if !tc.delivered && result.Undelivered != NudgeUndeliveredNoIdleBoundary {
+				t.Fatalf("Nudge(wait_idle) = %+v, want undelivered %q", result, NudgeUndeliveredNoIdleBoundary)
+			}
+			if waited := fake.CountCalls("WaitForIdle", "legacy-worker") != 0; waited != tc.wantWait {
+				t.Fatalf("waited for idle = %t, want %t", waited, tc.wantWait)
+			}
+			if typed := fake.CountCalls("NudgeNow", "legacy-worker") != 0; typed != tc.delivered {
+				t.Fatalf("typed = %t, want %t", typed, tc.delivered)
+			}
+		})
+	}
+}
+
 func TestRuntimeHandleNudgeWaitIdleUnsupportedProviderReturnsUndelivered(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
