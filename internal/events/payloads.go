@@ -12,8 +12,10 @@ import (
 // loop and its CLI/API projections (beads ga-e3s, ga-zn8, ga-p5n).
 
 // StoreMaintenanceDonePayload is the typed payload for
-// gc.store.maintenance.done events. Emitted after a successful
-// maintenance cycle (backup snapshot + CALL DOLT_GC + smoke test).
+// gc.store.maintenance.done events. Emitted when a maintenance cycle
+// finishes without error, including a cycle the disk pre-flight skipped.
+// The production loop is observe-only for now (no backup snapshot, no
+// CALL DOLT_GC), so the event does not mean the store was compacted.
 type StoreMaintenanceDonePayload struct {
 	DurationSeconds float64 `json:"duration_s"`
 	BeforeBytes     int64   `json:"before_bytes"`

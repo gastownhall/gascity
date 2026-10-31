@@ -360,14 +360,14 @@ func (sm *SupervisorMux) registerCityRoutes() {
 			"When some children were routed and others failed, the sling has already changed state, so it answers 200 with status \"partial\" and the per-child outcomes (failed children carry a reason, and a conflict naming the blocking workflows when a live source workflow refused them) rather than an error; do not retry such a request as a whole. "+
 			"A convoy sling that routed no child and failed at least one is an error, as before."))
 
-	// Maintenance (Dolt store gc + snapshot).
+	// Maintenance (the Dolt store maintenance loop, observe-only for now).
 	cityGet(sm, "/maintenance/status", (*Server).humaHandleMaintenanceStatus, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "trigger-maintenance-dolt-gc",
 		Method:        http.MethodPost,
 		Path:          "/maintenance/dolt-gc",
 		Summary:       "Trigger a Dolt store maintenance run",
-		Description:   "Trigger a one-off maintenance cycle (dolt backup + CALL DOLT_GC + smoke test). Default async (202); ?wait=true blocks until completion (200). Returns 409 when a run is already in flight.",
+		Description:   "Trigger a one-off maintenance cycle. The loop is observe-only for now: the cycle runs the disk-space pre-flight and records run history and events, but takes no backup snapshot and runs no CALL DOLT_GC, so a completed run does not mean the store was compacted. Default async (202); ?wait=true blocks until completion (200). Returns 409 when a run is already in flight.",
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleMaintenanceTriggerDoltGC)
