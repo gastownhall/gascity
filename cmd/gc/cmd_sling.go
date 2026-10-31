@@ -553,6 +553,7 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		},
 	}
 
+	inheritSlingInitiator(&opts, deps, os.Getenv, stderr)
 	return doSlingBatchWithJSON(opts, deps, store, jsonOutput, humanStdout, stdout, stderr)
 }
 
