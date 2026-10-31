@@ -184,6 +184,10 @@ type Config struct {
 	// capture arms with. Empty resolves it at each arm: next to the running
 	// executable, else on PATH. Tests set it to the binary they built.
 	ProgramStatusBin string
+	// ProgramStatus is the city's [session] program_status switch, the mode
+	// every program-status reading is taken under. Off (or empty) reads
+	// nothing: the read formats stay today's and every reading is Unread.
+	ProgramStatus runtime.ProgramStatusMode
 }
 
 // DefaultConfig returns a Config with the original hardcoded values.
@@ -1619,7 +1623,16 @@ func (t *Tmux) listSessionNames() ([]string, error) {
 // runtimeInventoryEnd. The marker is read as a comparison, never its value:
 // tmux prints a user option raw, so a tab or newline in it could forge
 // fields or another session's line.
-const runtimeInventoryFormat = "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{window_index}.#{pane_index}\t#{pane_dead}\t#{pane_pid}\t#{window_activity}\t#{!=:#{" + restartRequestedOption + "},}\t" + runtimeInventoryEnd
+const runtimeInventoryFormat = runtimeInventoryPaneFormat + "\t" + runtimeInventoryEnd
+
+// runtimeInventoryPaneFormat is a runtimeInventoryFormat line's fields before
+// its terminator.
+const runtimeInventoryPaneFormat = "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{window_index}.#{pane_index}\t#{pane_dead}\t#{pane_pid}\t#{window_activity}\t#{!=:#{" + restartRequestedOption + "},}"
+
+// programRuntimeInventoryFormat is runtimeInventoryFormat with each pane's
+// capture fields (programPaneFormat) before its terminator, read while the
+// program-status switch is not off.
+const programRuntimeInventoryFormat = runtimeInventoryPaneFormat + "\t" + programPaneFormat + "\t" + runtimeInventoryEnd
 
 // runtimeInventoryEnd ends every runtimeInventoryFormat line, so the
 // executor's trim cannot drop an empty last field (#7871) and a line cut
@@ -1634,6 +1647,10 @@ const runtimeInventoryEnd = "gc-eol"
 // runtimeInventoryFields is the field count of a runtimeInventoryFormat line.
 const runtimeInventoryFields = 10
 
+// programRuntimeInventoryFields is the field count of a
+// programRuntimeInventoryFormat line.
+const programRuntimeInventoryFields = runtimeInventoryFields + programPaneFields
+
 // inventoryFaults is what parseRuntimeInventory could not read.
 type inventoryFaults struct {
 	lines    []string // the malformed lines
@@ -1646,21 +1663,28 @@ type inventoryFaults struct {
 // inventory, as in [tmuxFetcher.FetchState]; an unreachable server
 // (ErrNoServer) is an error. A malformed line costs only its session, which
 // is omitted (see parseRuntimeInventory) and reported in faults; output that
-// leaves no session is an error.
-func (t *Tmux) listRuntimeInventory(ctx context.Context) (entries map[string]runtime.InventoryEntry, faults inventoryFaults, err error) {
-	out, err := t.runCtx(ctx, "list-panes", "-a", "-F", runtimeInventoryFormat)
+// leaves no session is an error. While the program-status switch is not off
+// the read also carries each pane's capture fields, and panes holds each
+// session's agent pane that could be named (see foldProgramPane).
+func (t *Tmux) listRuntimeInventory(ctx context.Context) (entries map[string]runtime.InventoryEntry, panes map[string]programPane, faults inventoryFaults, err error) {
+	program := t.programReadEnabled()
+	format := runtimeInventoryFormat
+	if program {
+		format = programRuntimeInventoryFormat
+	}
+	out, err := t.runCtx(ctx, "list-panes", "-a", "-F", format)
 	if err != nil {
 		if errors.Is(err, ErrNoCurrentTarget) {
-			return map[string]runtime.InventoryEntry{}, faults, nil
+			return map[string]runtime.InventoryEntry{}, nil, faults, nil
 		}
-		return nil, faults, err
+		return nil, nil, faults, err
 	}
-	entries, faults, wellFormed := parseRuntimeInventory(out)
+	entries, panes, faults, wellFormed := parseRuntimeInventory(out, program)
 	if len(entries) == 0 && len(faults.lines) > 0 {
 		if wellFormed == 0 {
-			return nil, faults, fmt.Errorf("tmux list-panes: no well-formed inventory line; first malformed line %q", faults.lines[0])
+			return nil, nil, faults, fmt.Errorf("tmux list-panes: no well-formed inventory line; first malformed line %q", faults.lines[0])
 		}
-		return nil, faults, fmt.Errorf("tmux list-panes: every session omitted for a malformed inventory line: %q", faults.sessions)
+		return nil, nil, faults, fmt.Errorf("tmux list-panes: every session omitted for a malformed inventory line: %q", faults.sessions)
 	}
 	for name, e := range entries {
 		if e.ActivityKnown { // the poke discount GetLastActivity applies
@@ -1668,7 +1692,7 @@ func (t *Tmux) listRuntimeInventory(ctx context.Context) (entries map[string]run
 			entries[name] = e
 		}
 	}
-	return entries, faults, nil
+	return entries, panes, faults, nil
 }
 
 // inventoryFirstPane tracks a session's lowest window.pane index while
@@ -1688,10 +1712,19 @@ type inventoryFirstPane struct {
 // line under the rest of the name: it reads as a session of its own, or folds
 // into a real session of that name, whose liveness and other facts can then
 // read wrong.
-func parseRuntimeInventory(out string) (entries map[string]runtime.InventoryEntry, faults inventoryFaults, wellFormed int) {
+//
+// program says the lines are programRuntimeInventoryFormat's; a line whose
+// capture fields do not parse is malformed like any other. panes holds each
+// session's agent pane that could be named.
+func parseRuntimeInventory(out string, program bool) (entries map[string]runtime.InventoryEntry, panes map[string]programPane, faults inventoryFaults, wellFormed int) {
 	entries = make(map[string]runtime.InventoryEntry)
 	first := make(map[string]inventoryFirstPane)
 	omitted := make(map[string]bool)
+	want := runtimeInventoryFields
+	if program {
+		want = programRuntimeInventoryFields
+	}
+	programRows := make(map[string][]programPane)
 	for _, line := range strings.Split(out, "\n") {
 		if line == "" {
 			continue
@@ -1699,7 +1732,8 @@ func parseRuntimeInventory(out string) (entries map[string]runtime.InventoryEntr
 		fields := strings.Split(line, "\t")
 		name := fields[0]
 		var window, pane int
-		ok := len(fields) == runtimeInventoryFields && fields[runtimeInventoryFields-1] == runtimeInventoryEnd && name != "" &&
+		var capture programPane
+		ok := len(fields) == want && fields[want-1] == runtimeInventoryEnd && name != "" &&
 			(fields[8] == "0" || fields[8] == "1")
 		if ok {
 			windowText, paneText, _ := strings.Cut(fields[4], ".")
@@ -1707,6 +1741,9 @@ func parseRuntimeInventory(out string) (entries map[string]runtime.InventoryEntr
 			window, wErr = strconv.Atoi(windowText)
 			pane, pErr = strconv.Atoi(paneText)
 			ok = wErr == nil && pErr == nil
+		}
+		if ok && program {
+			capture, ok = parseProgramPane(fields[runtimeInventoryFields-1:want-1], fields[5] == "1")
 		}
 		if !ok {
 			faults.lines = append(faults.lines, line)
@@ -1755,12 +1792,23 @@ func parseRuntimeInventory(out string) (entries map[string]runtime.InventoryEntr
 			entry.Incarnation = incarnation
 		}
 		entries[name] = entry
+		if program {
+			programRows[name] = append(programRows[name], capture)
+		}
 	}
 	for _, name := range faults.sessions {
 		delete(entries, name)
 	}
 	sort.Strings(faults.sessions)
-	return entries, faults, wellFormed
+	if program {
+		panes = make(map[string]programPane)
+		for name := range entries {
+			if capture, named := foldProgramPane(programRows[name]); named {
+				panes[name] = capture
+			}
+		}
+	}
+	return entries, panes, faults, wellFormed
 }
 
 // ListSessions returns all session names. An unreachable tmux server is

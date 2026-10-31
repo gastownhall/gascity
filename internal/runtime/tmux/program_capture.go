@@ -107,9 +107,8 @@ func (t *Tmux) planCapture(arm runtime.ProgramStatusArm) *capturePlan {
 		t.warnCaptureOnce(fmt.Sprintf("program-status app %q is not a codec app name; capture not armed", arm.App))
 		return nil
 	}
-	capability, err := t.captureCapability()
-	if err != nil {
-		t.warnCaptureOnce(fmt.Sprintf("program-status capture not armed: %v", err))
+	capability, ok := t.passCaptureGate()
+	if !ok {
 		return nil
 	}
 	r, err := newCaptureRand()
@@ -118,6 +117,25 @@ func (t *Tmux) planCapture(arm runtime.ProgramStatusArm) *capturePlan {
 		return nil
 	}
 	return &capturePlan{capability: capability, app: arm.App, relay: arm.Relay, rand: r}
+}
+
+// passCaptureGate runs the capability gate, logging a failure once per
+// cause. Arming and reading share it: while it fails nothing is armed and
+// every reading is Unread.
+func (t *Tmux) passCaptureGate() (captureCapability, bool) {
+	capability, err := t.captureCapability()
+	if err != nil {
+		t.warnCaptureOnce(fmt.Sprintf("program-status capture unavailable: %v", err))
+		return captureCapability{}, false
+	}
+	return capability, true
+}
+
+// captureGatePassed reports whether the capability gate passes (see
+// passCaptureGate).
+func (t *Tmux) captureGatePassed() bool {
+	_, ok := t.passCaptureGate()
+	return ok
 }
 
 // warnCaptureOnce logs msg the first time this Tmux sees it.

@@ -18,6 +18,7 @@ go_library(
         "process_group_windows.go",
         "process_signal.go",
         "program_capture.go",
+        "program_status_read.go",
         "seams.go",
         "server_socket_probe.go",
         "server_socket_probe_darwin.go",
@@ -120,6 +121,8 @@ go_test(
         "proctable_tracking_test.go",
         "program_capture_integration_test.go",
         "program_capture_test.go",
+        "program_status_integration_test.go",
+        "program_status_read_test.go",
         "respond_fence_integration_test.go",
         "respond_refusal_test.go",
         "runtime_inventory_integration_test.go",
@@ -163,8 +166,9 @@ go_test(
         "//conditions:default": [],
     }),
     embed = [":tmux"],
-    # program_capture_integration_test.go arms capture with the built
-    # companion and drives it with the scripted emitter.
+    # program_capture_integration_test.go and
+    # program_status_integration_test.go arm capture with the built companion
+    # and drive it with the scripted emitter.
     env = select({
         "//:gotags_integration": {
             "GC_TEST_OSC7501_BIN": "$(rootpath //cmd/gc-osc7501)",
@@ -197,6 +201,8 @@ go_test(
         ],
         "@rules_go//go/platform:android": [
             "//internal/execgrace",
+            "//internal/runtime/programstatus/tap",
+            "//internal/runtime/runtimetest/osc7501emitter/emit",
         ],
         "@rules_go//go/platform:darwin": [
             "//internal/execgrace",
@@ -218,6 +224,8 @@ go_test(
         ],
         "@rules_go//go/platform:linux": [
             "//internal/execgrace",
+            "//internal/runtime/programstatus/tap",
+            "//internal/runtime/runtimetest/osc7501emitter/emit",
         ],
         "@rules_go//go/platform:netbsd": [
             "//internal/execgrace",
