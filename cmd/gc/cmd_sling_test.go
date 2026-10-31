@@ -9668,3 +9668,32 @@ func TestDoSlingWarnsCitySuspendedOnStart(t *testing.T) {
 	}
 	assertStoreRoutedTo(t, deps.Store, "my-1", "worker")
 }
+
+func TestDoSlingWarnsRigSuspendedByRuntimeState(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig"}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = t.TempDir()
+	// Rig-scoped agents read their rig's store; match it so the
+	// cross-store route guard does not trip before the rig check.
+	deps.StoreRef = "rig:myrig"
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, deps.CityPath, "myrig", &suspended); err != nil {
+		t.Fatalf("SetRigSuspended: %v", err)
+	}
+	code := doSling(testOpts(a, "my-1"), deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0 (still routes); stderr = %q", code, stderr.String())
+	}
+	want := `rig "myrig" is suspended — bead routed but no worker will spawn until 'gc rig resume myrig'`
+	if !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want suspended-rig warning %q", stderr.String(), want)
+	}
+	assertStoreRoutedTo(t, deps.Store, "my-1", "myrig/polecat")
+}

@@ -16,7 +16,7 @@ import (
 // suspensionTestDeps returns sling deps rooted at a private city directory so
 // runtime suspension state written by a test never leaks into other tests.
 // suspensionTestBead is the bead every suspension test slings.
-const suspensionTestBead = "BL-1"
+const suspensionTestBead = "my-1"
 
 func suspensionTestDeps(t *testing.T, cfg *config.City, runner *fakeRunner) SlingDeps {
 	t.Helper()
@@ -162,5 +162,74 @@ func writeCorruptSuspensionState(t *testing.T, cityPath string) {
 	}
 	if err := os.WriteFile(p, []byte("{"), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func setRigSuspendedState(t *testing.T, cityPath, rig string, suspended bool) {
+	t.Helper()
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityPath, rig, &suspended); err != nil {
+		t.Fatalf("SetRigSuspended(%q, %v): %v", rig, suspended, err)
+	}
+}
+
+func TestDoSlingWarnsRigSuspendedByRuntimeState(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig"}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+	deps := suspensionTestDeps(t, cfg, runner)
+	setRigSuspendedState(t, deps.CityPath, "myrig", true)
+
+	result, err := DoSling(testOpts(a, suspensionTestBead), deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if result.SuspendedRig != "myrig" {
+		t.Errorf("SuspendedRig = %q, want %q for a rig suspended in runtime state", result.SuspendedRig, "myrig")
+	}
+	if result.CitySuspended {
+		t.Error("CitySuspended = true, want false: only the rig is suspended")
+	}
+	assertSlingRouted(t, result, runner)
+}
+
+func TestDoSlingWarnsCityAndRigBothSuspended(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig"}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+	deps := suspensionTestDeps(t, cfg, runner)
+	setCitySuspendedState(t, deps.CityPath, true)
+	setRigSuspendedState(t, deps.CityPath, "myrig", true)
+
+	result, err := DoSling(testOpts(a, suspensionTestBead), deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if !result.CitySuspended || result.SuspendedRig != "myrig" {
+		t.Errorf("CitySuspended = %v, SuspendedRig = %q; want both the city and %q reported", result.CitySuspended, result.SuspendedRig, "myrig")
+	}
+}
+
+func TestDoSlingCityTargetIgnoresOtherSuspendedRig(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", SuspendedOnStart: true}},
+	}
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+	deps := suspensionTestDeps(t, cfg, runner)
+	setRigSuspendedState(t, deps.CityPath, "myrig", true)
+
+	result, err := DoSling(testOpts(a, suspensionTestBead), deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if result.SuspendedRig != "" {
+		t.Errorf("SuspendedRig = %q, want empty for a city-scoped target", result.SuspendedRig)
 	}
 }

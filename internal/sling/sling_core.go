@@ -94,10 +94,7 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		result.AgentSuspended = true
 	}
 	if !opts.Force {
-		result.CitySuspended = targetScopeSuspension(fsys.OSFS{}, deps)
-		if rigSuspended(deps.Cfg, a.Dir) {
-			result.SuspendedRig = a.Dir
-		}
+		result.CitySuspended, result.SuspendedRig = targetScopeSuspension(fsys.OSFS{}, deps, a)
 	}
 	sp := agentutil.ScaleParamsFor(&a)
 	if sp.Max == 0 && !opts.Force {
@@ -248,14 +245,20 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 	return true, nil
 }
 
-// targetScopeSuspension reports whether the city is effectively suspended:
-// the runtime suspension state that gc suspend and gc resume write wins over
-// the authored [workspace] suspended_on_start default. The pool reconciler spawns no workers in a suspended city, so a bead routed into
-// it stalls silently. An empty CityPath skips the disk read (Load would
-// otherwise resolve a cwd-relative .gc/runtime file). A state read or parse
-// error is traced and degrades to the zero State: sling warns about
+// targetScopeSuspension reports whether the city is effectively suspended
+// and, when the target agent belongs to a suspended rig, that rig's name. For
+// each scope the runtime suspension state that gc suspend / gc rig suspend and
+// their resume commands write wins over the authored default ([workspace]
+// suspended_on_start for the city, the rig's deprecated suspended field for a
+// rig). The pool reconciler spawns no workers in a suspended scope, so a bead
+// routed into one stalls silently. An empty CityPath skips the disk read (Load
+// would otherwise resolve a cwd-relative .gc/runtime file). A state read or
+// parse error is traced and degrades to the zero State: sling warns about
 // suspension but never fails a route because of it.
-func targetScopeSuspension(fs fsys.FS, deps SlingDeps) bool {
+func targetScopeSuspension(fs fsys.FS, deps SlingDeps, a config.Agent) (city bool, rig string) {
+	if deps.Cfg == nil {
+		return false, ""
+	}
 	var st suspensionstate.State
 	if deps.CityPath != "" {
 		loaded, err := suspensionstate.Load(fs, deps.CityPath)
@@ -265,22 +268,16 @@ func targetScopeSuspension(fs fsys.FS, deps SlingDeps) bool {
 			st = loaded
 		}
 	}
-	return deps.Cfg != nil && suspensionstate.EffectiveCitySuspended(st, deps.Cfg.Workspace.EffectiveSuspendedOnStart())
-}
-
-// rigSuspended reports whether the named rig is marked suspended in config.
-// The pool reconciler skips suspended rigs entirely, so a bead routed into
-// one stalls silently — no worker ever spawns to claim it.
-func rigSuspended(cfg *config.City, rigName string) bool {
-	if cfg == nil || rigName == "" {
-		return false
+	city = suspensionstate.EffectiveCitySuspended(st, deps.Cfg.Workspace.EffectiveSuspendedOnStart())
+	if a.Dir == "" {
+		return city, ""
 	}
-	for _, r := range cfg.Rigs {
-		if r.Name == rigName {
-			return r.Suspended
+	for _, r := range deps.Cfg.Rigs {
+		if r.Name == a.Dir && suspensionstate.EffectiveRigSuspended(st, r.Name, r.Suspended) {
+			return city, r.Name
 		}
 	}
-	return false
+	return city, ""
 }
 
 func shouldValidateExistingBead(opts SlingOpts) bool {
