@@ -279,15 +279,19 @@ const (
 	RootStoreRefMetadataKey          = "gc.root_store_ref"
 	RouteQuarantineMetadataKey       = "gc.route_recovery_quarantined"
 	RouteQuarantineReasonMetadataKey = "gc.route_recovery_quarantine_reason"
-	RoutedToMetadataKey              = "gc.routed_to"
-	RunTargetMetadataKey             = "gc.run_target"
-	RuntimeVarsMetadataKey           = "gc.graphv2_vars.v1"
-	ScopeKindMetadataKey             = "gc.scope_kind"
-	ScopeNameMetadataKey             = "gc.scope_name"
-	ScopeRefMetadataKey              = "gc.scope_ref"
-	ScopeRoleMetadataKey             = "gc.scope_role"
-	SessionAffinityMetadataKey       = "gc.session_affinity"
-	SessionIDMetadataKey             = "gc.session_id"
+	// RoutedAtMetadataKey records WHEN gc.routed_to was last stamped by a handoff,
+	// so a route-away release can require the route to have settled before it
+	// treats a live owning session as the stale source (sr-wz8.3).
+	RoutedAtMetadataKey        = "gc.routed_at"
+	RoutedToMetadataKey        = "gc.routed_to"
+	RunTargetMetadataKey       = "gc.run_target"
+	RuntimeVarsMetadataKey     = "gc.graphv2_vars.v1"
+	ScopeKindMetadataKey       = "gc.scope_kind"
+	ScopeNameMetadataKey       = "gc.scope_name"
+	ScopeRefMetadataKey        = "gc.scope_ref"
+	ScopeRoleMetadataKey       = "gc.scope_role"
+	SessionAffinityMetadataKey = "gc.session_affinity"
+	SessionIDMetadataKey       = "gc.session_id"
 	// StrandedMetadataKey ("true"), StrandedSessionMetadataKey (the closed
 	// session's bead ID) and StrandedAssigneeMetadataKey (the claim's assignee
 	// when it was kept) mark a claim a close kept because no lane serves it
@@ -677,6 +681,7 @@ var KnownMetadataKeys = []string{
 	RootStoreRefMetadataKey,
 	RouteQuarantineMetadataKey,
 	RouteQuarantineReasonMetadataKey,
+	RoutedAtMetadataKey,
 	RoutedToMetadataKey,
 	RunTargetMetadataKey,
 	RuntimeVarsMetadataKey,
