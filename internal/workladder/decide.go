@@ -9,14 +9,15 @@ import (
 // obs and p give the same Decision (WL7).
 //
 // The steps, in order: reconcile the entries with obs.Outstanding (rungs only
-// rise; a rise resets the count); reset counts on a new generation, and on
-// progress the seat made since its last nudge, whether or not the ladder saw
-// it; settle a pending release; then, only with the gate open, the runtime
-// alive and the seat quiet, act on the due entries, earliest first: at most
-// one Nudge per pass, and none within Base of the seat's last (WL3). An entry
-// whose live read could not tell (obs.Hold) waits, kept as it is, and so
-// does an entry whose last nudge's delivery is unsettled (a NoticeMark),
-// which also holds the seat's nudge slot (WN1). A mark ends with its episode:
+// rise; a rise resets the count); reset counts on a new generation, and, on
+// a pass that may act on the entry, on progress the seat made since its last
+// nudge, whether or not the ladder saw it (a turn the provider failed is not
+// progress); settle a pending release; then, only with the gate open, the
+// runtime alive and the seat quiet, act on the due entries, earliest first:
+// at most one Nudge per pass, and none within Base of the seat's last (WL3).
+// An entry whose live read could not tell (obs.Hold) waits, kept as it is,
+// and so does an entry whose last nudge's delivery is unsettled (a
+// NoticeMark), which also holds the seat's nudge slot (WN1). A mark ends with its episode:
 // a new generation, a rung rise and a progress reset clear it.
 func Decide(prev Record, obs Observation, p Policy) Decision {
 	p = p.withDefaults()
@@ -189,16 +190,39 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 
 // progressReset restarts e's count when the seat made progress at least
 // ProgressReset after e's last nudge, observed now or not (an outage, a
-// hold, the ladder off): its activity clock is the evidence, read on any
-// pass where the runtime is alive. The entry's grace restarts from that
-// activity.
+// hold, the ladder off). Progress is judged only on a pass that may act on
+// e (acts); its evidence is progressAt's. The entry's grace restarts from
+// that progress.
 func (p Policy) progressReset(e Entry, obs Observation) Entry {
-	if obs.Runtime != TriTrue || e.Last.IsZero() || (e.Attempts == 0 && e.Paused == 0 && !e.Unreleased) ||
-		obs.LastActivity.Before(e.Last.Add(p.ProgressReset)) {
+	if !obs.acts(e.Key) || e.Last.IsZero() || (e.Attempts == 0 && e.Paused == 0 && !e.Unreleased) {
 		return e
 	}
-	e.Attempts, e.Paused, e.Unreleased, e.Refused, e.Since, e.Notice = 0, 0, false, 0, minTime(obs.LastActivity, obs.Now), NoticeMark{}
+	at := obs.progressAt()
+	if at.Before(e.Last.Add(p.ProgressReset)) {
+		return e
+	}
+	e.Attempts, e.Paused, e.Unreleased, e.Refused, e.Since, e.Notice = 0, 0, false, 0, minTime(at, obs.Now), NoticeMark{}
 	return e
+}
+
+// acts reports whether the pass may act on the entry keyed k: the gate open,
+// the runtime alive, the seat quiet, and k's live read told. A pass that
+// cannot act judges no progress: a busy seat's newest activity may be a turn
+// still running toward a failure.
+func (obs Observation) acts(k ClaimKey) bool {
+	return !obs.Gate.Held && obs.Runtime == TriTrue && obs.Quiet.State == Quiescent && !obs.Hold[k]
+}
+
+// progressAt is the seat's newest progress. A turn the provider failed is
+// not progress: when this conversation's reading shows the newest ended turn
+// failed, it is the newest turn the provider completed (zero when none).
+// Otherwise it is the activity clock: a family whose turns carry no outcome
+// (Gemini records no turn end), a read that failed, or no read at all.
+func (obs Observation) progressAt() time.Time {
+	if t := obs.Turns; t.Read && t.Conv == obs.Conv && t.LastFailed {
+		return t.ServedAt
+	}
+	return obs.LastActivity
 }
 
 // clampEntry pulls e's times from a clock that ran ahead back to now, so a

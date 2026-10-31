@@ -20,6 +20,7 @@ go_test(
         "codec_test.go",
         "decide_test.go",
         "notice_test.go",
+        "progress_test.go",
         "property_test.go",
         "purity_test.go",
         "table_test.go",
