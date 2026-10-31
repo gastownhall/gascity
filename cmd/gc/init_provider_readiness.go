@@ -390,6 +390,13 @@ func seedDeferredManagedBeadsBeforeProviderReadiness(cityPath string, cfg *confi
 	return nil
 }
 
+// providerReadinessProbeName maps a provider reference to the readiness probe
+// for the CLI that provider launches, or "" when that CLI has no probe. The
+// launched CLI comes from the provider's resolved inheritance chain -- the
+// leaf-most layer that sets path_check, else the leaf-most layer that sets
+// command -- never from the reference's own name. A provider whose effective
+// command is inherited from a custom ancestor, or is a multiword command line,
+// is therefore attributed by the binary it runs.
 func providerReadinessProbeName(ref string, cfg *config.City) string {
 	spec, hasSpec := cfg.Providers[ref]
 	if !hasSpec {
@@ -398,46 +405,81 @@ func providerReadinessProbeName(ref string, cfg *config.City) string {
 		}
 		return ""
 	}
-	candidate := strings.TrimSpace(spec.PathCheck)
-	if candidate == "" {
-		command := strings.TrimSpace(spec.Command)
-		if command != "" && !strings.ContainsAny(command, " \t") {
-			candidate = command
+	resolved, ok := config.ResolvedProviderCached(cfg, ref)
+	if !ok {
+		var err error
+		resolved, err = config.ResolveProviderChain(ref, spec, cfg.Providers)
+		if err != nil {
+			return ""
 		}
 	}
-	if candidate != "" {
-		if base := filepath.Base(candidate); api.SupportsProviderReadiness(base) {
-			return base
+	layers := providerLaunchLayers(resolved.Chain, cfg.Providers, config.BuiltinFamily(ref, cfg.Providers))
+
+	binary, owner := effectiveProviderLaunchField(layers, func(s config.ProviderSpec) string {
+		return strings.TrimSpace(s.PathCheck)
+	})
+	if binary == "" {
+		var command string
+		command, owner = effectiveProviderLaunchField(layers, func(s config.ProviderSpec) string {
+			return strings.TrimSpace(s.Command)
+		})
+		binary = config.BinaryName(command)
+	}
+	if binary == "" {
+		return ""
+	}
+	// A built-in layer's own default binary can differ from its probe name
+	// (the antigravity built-in launches "agy"), so attribute it to the
+	// built-in that owns it.
+	if owner != "" && api.SupportsProviderReadiness(owner) {
+		return owner
+	}
+	if base := filepath.Base(binary); api.SupportsProviderReadiness(base) {
+		return base
+	}
+	return ""
+}
+
+// providerLaunchLayer is one layer of a provider's resolved inheritance chain.
+// builtin names the built-in the layer comes from, and is empty for a layer
+// declared in [providers.*].
+type providerLaunchLayer struct {
+	spec    config.ProviderSpec
+	builtin string
+}
+
+// providerLaunchLayers lists the specs that contribute to a provider's launch
+// binary, leaf first. A provider with no declared base inherits the built-in
+// it shadows or whose command it names; family is that built-in, and it is
+// appended as the last layer when the chain does not already reach one.
+func providerLaunchLayers(chain []config.HopIdentity, custom map[string]config.ProviderSpec, family string) []providerLaunchLayer {
+	builtins := config.BuiltinProviders()
+	layers := make([]providerLaunchLayer, 0, len(chain)+1)
+	reachesBuiltin := false
+	for _, hop := range chain {
+		if hop.Kind == "builtin" {
+			layers = append(layers, providerLaunchLayer{spec: builtins[hop.Name], builtin: hop.Name})
+			reachesBuiltin = true
+			continue
 		}
-		// An explicit command/path_check override that isn't itself a
-		// known readiness target must not be probed under its own
-		// canonical name either -- e.g. a Kiro provider declared
-		// directly as [providers.claude] with command = "kiro-cli" is
-		// not the claude CLI, even though "claude" itself has a probe.
-		return ""
+		layers = append(layers, providerLaunchLayer{spec: custom[hop.Name]})
 	}
-	// The leaf spec has no own PathCheck/Command override. ref may be a
-	// canonical readiness-supported name declared with no override (pure
-	// default), or a bare alias like [providers.claude-fast] base =
-	// "builtin:claude": fall back to the already-resolved base chain to
-	// find the built-in it derives from. Only trust that fallback when
-	// the resolved command/path_check actually originates from the
-	// builtin layer itself.
-	if api.SupportsProviderReadiness(ref) {
-		return ref
+	if !reachesBuiltin && family != "" {
+		layers = append(layers, providerLaunchLayer{spec: builtins[family], builtin: family})
 	}
-	resolved, ok := cfg.ResolvedProviders[ref]
-	if !ok || !api.SupportsProviderReadiness(resolved.BuiltinAncestor) {
-		return ""
+	return layers
+}
+
+// effectiveProviderLaunchField returns the value of the field from the
+// leaf-most layer that sets it, plus the built-in that layer comes from (empty
+// when a [providers.*] layer sets it).
+func effectiveProviderLaunchField(layers []providerLaunchLayer, field func(config.ProviderSpec) string) (value, builtin string) {
+	for _, layer := range layers {
+		if v := field(layer.spec); v != "" {
+			return v, layer.builtin
+		}
 	}
-	layer, layerSet := resolved.Provenance.FieldLayer["path_check"]
-	if !layerSet {
-		layer, layerSet = resolved.Provenance.FieldLayer["command"]
-	}
-	if layerSet && !strings.HasPrefix(layer, config.BasePrefixBuiltin) {
-		return ""
-	}
-	return resolved.BuiltinAncestor
+	return "", ""
 }
 
 func providerStatusSummary(status string) string {

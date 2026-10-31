@@ -241,8 +241,11 @@ func newProviderLocalAuthCheck(cityPath string) *providerLocalAuthCheck {
 func (c *providerLocalAuthCheck) Name() string { return "provider-local-auth" }
 
 func (c *providerLocalAuthCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
-	// Severity is set up front: SeverityBlocking is CheckSeverity's zero value,
-	// so an unset severity on a warning would gate `gc doctor` outright.
+	// A logged-out provider is reported as StatusWarning, which doctor only
+	// counts in Report.Warned; it never contributes to BlockingFailed. The
+	// severity is still declared advisory up front because SeverityBlocking is
+	// CheckSeverity's zero value, so this check stays non-gating if a path is
+	// ever changed to report StatusError.
 	r := &doctor.CheckResult{Name: c.Name(), Severity: doctor.SeverityAdvisory}
 	cfg, err := loadCityConfigAllowMissingProviderReferences(c.cityPath)
 	if err != nil {
