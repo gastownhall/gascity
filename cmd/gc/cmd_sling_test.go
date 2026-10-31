@@ -9697,3 +9697,34 @@ func TestDoSlingWarnsRigSuspendedByRuntimeState(t *testing.T) {
 	}
 	assertStoreRoutedTo(t, deps.Store, "my-1", "myrig/polecat")
 }
+
+func TestDoSlingRuntimeResumeOverridesAuthoredSuspend(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Suspended: true},
+		Rigs:      []config.Rig{{Name: "myrig", Suspended: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = t.TempDir()
+	// Rig-scoped agents read their rig's store; match it so the
+	// cross-store route guard does not trip before the rig check.
+	deps.StoreRef = "rig:myrig"
+	resumed := false
+	if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, deps.CityPath, &resumed); err != nil {
+		t.Fatalf("SetCitySuspended: %v", err)
+	}
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, deps.CityPath, "myrig", &resumed); err != nil {
+		t.Fatalf("SetRigSuspended: %v", err)
+	}
+	code := doSling(testOpts(a, "my-1"), deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "suspended") {
+		t.Errorf("stderr = %q, want no suspension warning after an explicit runtime resume", stderr.String())
+	}
+	assertStoreRoutedTo(t, deps.Store, "my-1", "myrig/polecat")
+}
