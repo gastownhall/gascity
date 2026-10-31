@@ -5279,13 +5279,6 @@ func GascityBeginnerCityWithProviders(name, defaultProvider string, providers []
 	for i := range city.Agents {
 		city.Agents[i].IdleTimeout = "1m"
 	}
-	if defaultProvider == "claude" {
-		provider := city.Providers[defaultProvider]
-		provider.OptionDefaults = map[string]string{"model": "sonnet", "effort": "medium"}
-		city.Providers[defaultProvider] = provider
-	}
-	limit := 2
-	city.Workspace.MaxActiveSessions = &limit
 	city.Orders.Skip = append(city.Orders.Skip, "mol-dog-stale-db")
 	return city
 }

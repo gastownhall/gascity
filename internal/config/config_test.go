@@ -8664,14 +8664,13 @@ func TestDefaultDoltReadTimeoutMillisPreservesOuterDeadlineHeadroom(t *testing.T
 	}
 }
 
-func TestBeginnerClaudeDefaultsBoundFirstTaskCost(t *testing.T) {
+func TestBeginnerPreservesProviderAndCapacityDefaults(t *testing.T) {
 	city := GascityBeginnerCityWithProviders("guided", "claude", []string{"claude"})
-	provider := city.Providers["claude"]
-	if provider.OptionDefaults["model"] != "sonnet" || provider.OptionDefaults["effort"] != "medium" {
-		t.Fatalf("beginner Claude defaults must be explicit and bounded: %+v", provider.OptionDefaults)
-	}
 	normal := GascityCityWithProviders("normal", "claude", []string{"claude"})
-	if len(normal.Providers["claude"].OptionDefaults) != 0 {
-		t.Fatal("guided choices must not change ordinary template defaults")
+	if !reflect.DeepEqual(city.Providers, normal.Providers) {
+		t.Fatal("beginner experience must preserve normal provider choices")
+	}
+	if !reflect.DeepEqual(city.Workspace.MaxActiveSessions, normal.Workspace.MaxActiveSessions) {
+		t.Fatal("beginner experience must preserve normal factory capacity")
 	}
 }
