@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -94,6 +95,13 @@ type conversationLaneExec struct {
 	matches func(nudgeTarget, worker.LiveObservation) (bool, error)
 	handle  func(nudgeTarget) (worker.Handle, error)
 	idle    func(nudgeTarget, worker.LiveObservation) bool
+	// turnOnScreen is the agent's own screen's reading of whether it is
+	// running a turn now, taken once the quiescence rule reads a keystroke
+	// runtime quiet: production reads runtime.TurnRunningProvider on the
+	// session's routed leaf, for a provider family whose busy indicator the
+	// pane scan reads (tmux.BusyIndicatorReadable). known is false where no
+	// such reading exists, which leaves the quiescence rule alone.
+	turnOnScreen func(nudgeTarget) (running, known bool, err error)
 	// steerable says whether a session row takes a steer from a runtime
 	// that steers in a mode; production reads session.SupportsSteerForInfo,
 	// the source session responses read too.
@@ -192,6 +200,9 @@ func newConversationLaneExec(deps laneExecDeps, row laneRow) *conversationLaneEx
 	}
 	e.idle = func(t nudgeTarget, obs worker.LiveObservation) bool {
 		return pollerSessionIdleEnough(t, e.deps.sp, defaultNudgePollQuiescence, obs)
+	}
+	e.turnOnScreen = func(t nudgeTarget) (bool, bool, error) {
+		return laneTurnOnScreen(e.deps.sp, t)
 	}
 	e.steerable = session.SupportsSteerForInfo
 	e.sessionTurns = func(id string) (worker.TurnHandle, error) {
@@ -382,11 +393,53 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 	}
 	l.boundary = opjournal.TriNo
 	if e.idle(e.target, obs) {
-		l.boundary = opjournal.TriYes
+		l.boundary = e.quietBoundary()
 	} else {
 		l.boundaryAt = e.quiescenceDeadline(obs)
 	}
 	return l, nil
+}
+
+// quietBoundary is a keystroke runtime's boundary once the quiescence rule
+// reads it quiet. The rule reads the activity clock, which over tmux comes
+// from a cached fleet snapshot in whole seconds, so a pane that redraws every
+// second can read quiet while its agent runs a turn; and the lane comes back
+// at the deadline the last look named (quiescenceDeadline), where the same
+// snapshot reads quiet by construction. The agent's own screen decides: a
+// turn running there keeps the boundary closed, with no deadline, so the busy
+// backoff paces the next look. A screen the look could not read is no
+// boundary either (noted). Without a screen reading the rule stands.
+func (e *conversationLaneExec) quietBoundary() opjournal.Tri {
+	running, known, err := e.turnOnScreen(e.target)
+	switch {
+	case !known:
+		return opjournal.TriYes
+	case err != nil:
+		e.note("turn_on_screen", fmt.Errorf("reading session %s's screen for a running turn: %w", e.info.ID, err))
+		return opjournal.TriUnknown
+	case running:
+		return opjournal.TriNo
+	default:
+		return opjournal.TriYes
+	}
+}
+
+// laneTurnOnScreen reads, in one look at the agent's screen, whether the
+// session target names is running a turn: the reading the runtime's own nudge
+// takes before it types (runtime.TurnRunningProvider, on the routed leaf). It
+// is known only for a provider family whose busy indicator the pane scan
+// reads (tmux.BusyIndicatorReadable): an unlisted family's busy reading may
+// be transcript text, which would hold its boundary closed for good.
+func laneTurnOnScreen(sp runtime.Provider, target nudgeTarget) (running, known bool, err error) {
+	if target.sessionName == "" || !tmux.BusyIndicatorReadable(strings.TrimSpace(target.providerFamily())) {
+		return false, false, nil
+	}
+	tr, ok := runtime.TurnRunningFor(sp, target.sessionName)
+	if !ok {
+		return false, false, nil
+	}
+	running, err = tr.TurnRunning(target.sessionName)
+	return running, true, err
 }
 
 // quiescenceDeadline is the instant a keystroke runtime that e.idle found

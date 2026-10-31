@@ -288,6 +288,48 @@ func TestFullFakeAnswersFromItsState(t *testing.T) {
 	}
 }
 
+// Kills a full fake whose screen readings ignore its busy-turn knobs: a
+// running session shows no turn and reads idle until ScreenTurnRunning names
+// it, then shows the turn and reads busy; ScreenReadErrors fails the turn
+// reading; an unstarted session cannot be looked at.
+func TestFullFakeScreenShowsTheTurnItsKnobsSet(t *testing.T) {
+	f := runtime.NewFake()
+	b := runtime.FullFake{Fake: f}
+	if _, err := b.TurnRunning("s"); !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("unstarted TurnRunning error = %v, want ErrSessionNotFound", err)
+	}
+	if err := f.Start(t.Context(), "s", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	read := func() (bool, bool) {
+		t.Helper()
+		running, err := b.TurnRunning("s")
+		if err != nil {
+			t.Fatalf("TurnRunning: %v", err)
+		}
+		idle, err := b.SnapshotIdle("s")
+		if err != nil {
+			t.Fatalf("SnapshotIdle: %v", err)
+		}
+		return running, idle
+	}
+	if running, idle := read(); running || !idle {
+		t.Fatalf("no knob: running %v idle %v; want no turn, idle", running, idle)
+	}
+	f.ScreenTurnRunning = map[string]bool{"s": true}
+	if running, idle := read(); !running || idle {
+		t.Fatalf("ScreenTurnRunning: running %v idle %v; want a turn, busy", running, idle)
+	}
+	f.ScreenTurnRunning["s"] = false
+	if running, idle := read(); running || !idle {
+		t.Fatalf("turn ended: running %v idle %v; want no turn, idle", running, idle)
+	}
+	f.ScreenReadErrors = map[string]error{"s": runtime.ErrRuntimeUnavailable}
+	if _, err := b.TurnRunning("s"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("ScreenReadErrors: TurnRunning error = %v, want ErrRuntimeUnavailable", err)
+	}
+}
+
 // A profiled tmux must preserve composer clearing, including its caller's
 // cancellation context and the backend's refusal to clear protected input.
 func TestTmuxProfileForwardsInputClear(t *testing.T) {
