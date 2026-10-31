@@ -126,7 +126,7 @@ func TestRunPoolOnBootHooksRespectsConcurrencyBound(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		runPoolOnBootHooks(hooks, runner, io.Discard)
+		runPoolOnBootHooks(hooks, runner, io.Discard, nil)
 		close(done)
 	}()
 
@@ -172,7 +172,7 @@ func TestRunPoolOnBootHooksEmitsEachHooksOutputAsOneBlock(t *testing.T) {
 	}
 
 	var stderr chunkWriter
-	runPoolOnBootHooks(hooks, runner, &stderr)
+	runPoolOnBootHooks(hooks, runner, &stderr, nil)
 
 	chunks := stderr.all()
 	if len(chunks) != 2 {
@@ -218,7 +218,7 @@ func TestRunPoolOnBootHooksRunsEveryHookWhenOneFails(t *testing.T) {
 	}
 
 	var stderr chunkWriter
-	runPoolOnBootHooks(hooks, runner, &stderr)
+	runPoolOnBootHooks(hooks, runner, &stderr, nil)
 
 	for _, hook := range hooks {
 		if !ran[hook.dir] {
@@ -255,7 +255,7 @@ func TestRunPoolOnBootHooksSurvivesAPanickingHook(t *testing.T) {
 	}
 
 	var stderr chunkWriter
-	runPoolOnBootHooks(hooks, runner, &stderr)
+	runPoolOnBootHooks(hooks, runner, &stderr, nil)
 
 	for _, hook := range hooks {
 		if !ran[hook.dir] {
@@ -290,7 +290,7 @@ func TestRunPoolOnBootHooksReleasesItsSlotWhenAHookPanics(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		runPoolOnBootHooks(onBootHooks(names...), runner, &chunkWriter{})
+		runPoolOnBootHooks(onBootHooks(names...), runner, &chunkWriter{}, nil)
 		close(done)
 	}()
 	select {
