@@ -4,10 +4,15 @@ package relay
 
 import (
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
+
+// deathWait bounds how long dieBySignal waits for a signal it sent its own
+// process to land: delivery to another thread is asynchronous.
+const deathWait = time.Second
 
 // kernelSigaction is the kernel's struct sigaction on amd64 and arm64.
 type kernelSigaction struct {
@@ -38,5 +43,5 @@ func dieBySignal(sig syscall.Signal) {
 	set.Val[0] = 1 << (uint(sig) - 1)
 	_ = unix.PthreadSigmask(unix.SIG_UNBLOCK, &set, nil) // Go threads run with it unblocked already
 	_ = unix.Kill(unix.Getpid(), sig)
-	awaitDeath()
+	time.Sleep(deathWait) // returns only if the signal did not end the process
 }
