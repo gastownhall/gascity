@@ -3141,6 +3141,85 @@ func TestDoRigAdd_AdoptWithBdContractProvider_NonAdoptControlInvokesInit(t *test
 	}
 }
 
+// An --adopt whose provider init op fails must leave the adopted store as it
+// found it: the init path canonicalizes the store's metadata.json and
+// config.yaml before the op runs, and a city that never registered the rig
+// must not leave those rewrites behind.
+func TestDoRigAdd_AdoptFailedInitLeavesStoreFilesAsFound(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	cityTOMLBefore, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const initErrText = "managed Dolt server unreachable while inspecting existing store 'ar'"
+	provider := filepath.Join(cityPath, "gc-beads-bd")
+	script := "#!/bin/sh\nif [ \"$1\" = init ]; then echo \"" + initErrText + "\" >&2; exit 1; fi\nexit 0\n"
+	if err := os.WriteFile(provider, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+provider)
+	t.Setenv("GC_DOLT", "")
+
+	origEnsure := initDirIfReadyEnsureBeadsProvider
+	origWait := initDirIfReadyWaitForManagedDolt
+	t.Cleanup(func() {
+		initDirIfReadyEnsureBeadsProvider = origEnsure
+		initDirIfReadyWaitForManagedDolt = origWait
+	})
+	initDirIfReadyEnsureBeadsProvider = func(string) error { return nil }
+	initDirIfReadyWaitForManagedDolt = func(string, time.Duration) error { return nil }
+
+	rigPath := filepath.Join(t.TempDir(), "adopted-rig")
+	beads := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// bd creates both files 0600.
+	before := map[string]string{
+		"metadata.json": `{"backend":"dolt","database":"dolt","dolt_database":"ar","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":21658}`,
+		"config.yaml":   "# bd template\nissue-prefix: \"ar\"\n",
+	}
+	for name, data := range before {
+		if err := os.WriteFile(filepath.Join(beads, name), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "ar", "", false, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doRigAdd = %d, want 1 (stdout=%q stderr=%q)", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), initErrText) {
+		t.Errorf("stderr = %q, want the init failure %q", stderr.String(), initErrText)
+	}
+	for name, want := range before {
+		path := filepath.Join(beads, name)
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != want {
+			t.Errorf("%s after failed adopt:\n%s\nwant:\n%s", name, got, want)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("%s mode after failed adopt = %v, want 0600", name, perm)
+		}
+	}
+	cityTOMLAfter, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(cityTOMLAfter) != string(cityTOMLBefore) {
+		t.Errorf("city.toml changed by a failed adopt:\n%s\nwant:\n%s", cityTOMLAfter, cityTOMLBefore)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Six-row read-path routing matrix for `gc rig list` (ADR 0001, ga-h6w).
 // ---------------------------------------------------------------------------
