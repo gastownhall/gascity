@@ -973,3 +973,20 @@ func TestMessageWithoutTranscriptEmitsNothing(t *testing.T) {
 		t.Fatalf("cursor metadata = %q, want empty", got)
 	}
 }
+
+// TestSweepIntervalWindowEndsAtUsageClose pins the closed interval's discovery
+// window: a session closed straight from a live state has no slept_at inside
+// the interval, so the window ends at usage_closed_at rather than at now.
+func TestSweepIntervalWindowEndsAtUsageClose(t *testing.T) {
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	closedAt := start.Add(10 * time.Minute)
+	now := start.Add(48 * time.Hour)
+	meta := map[string]string{"awake_started_at": start.Format(time.RFC3339)}
+	for k, v := range sessionpkg.UsageClosePatch(closedAt) {
+		meta[k] = v
+	}
+	notBefore, notAfter := sweepIntervalWindow(meta, now)
+	if !notBefore.Equal(start) || !notAfter.Equal(closedAt) {
+		t.Fatalf("window = [%s, %s], want [%s, %s]", notBefore, notAfter, start, closedAt)
+	}
+}

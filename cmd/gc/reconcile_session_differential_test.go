@@ -140,7 +140,7 @@ var parityAccepted = map[string]parityEntry{
 	"§12.2#38 start-meta-clears":   {"CONTRACT v5 §12.2 #38 (A18, C5a1)", "legacy's start clears stale runtime metadata (RemoveMeta) on the runtime it starts; v2's FreshOnly start creates a runtime without any and removes nothing", nil},
 	"§12.2#27 held-slot-kept": {
 		"CONTRACT v5 §12.2 #27 (A10 v5.7, A21; C5c1 review ruling)", "an undesired pool row parked by a deliberate hold (user-hold, wait-hold, a future held_until or quarantined_until) keeps its slot until the hold ends; legacy's MAINT-051 sweep keeps an operator's suspend (closeAllowed's KeepsSlot, R9-C) and closes it under any other hold",
-		[]string{"status", "state", "close_reason", "closed_at", "synced_at"},
+		append([]string{"status", "state", "close_reason", "closed_at", "synced_at"}, parityUsageCloseKeys...),
 	},
 	"§12.2#43 close-after-hold-heal": {
 		"CONTRACT v5 §12.2 #43 (A6, A21)", "v2 heals an unwanted workless pool row's expired hold one pass before A21 closes it; legacy's MAINT-051 sweep closes it first and leaves the expired held_until and sleep_reason on the closed row",
@@ -156,7 +156,7 @@ var parityAccepted = map[string]parityEntry{
 	"§12.2#41 close-removes-corpse": {"CONTRACT v5 §12.2 #41 (C3 step 1, M1; C5c1)", "A21's close removes the corpse it counts as stopped, by exact session object; legacy's sweep closes the row and leaves the dead pane listed", nil},
 	"§12.2#42 orphan-claim-release-unconfigured": {
 		"CONTRACT v5 §12.2 #42 (C3 step 3, SESS-082, NEW-5; C5c1)", "an unwanted row whose agent was removed and which holds a served claim: legacy's sync close (SESS-722) refuses on the work and the reconciler's release (SESS-082) never runs for it, so seat and claim wedge; v2's A21 releases the claim (bead.dead_assignee_reopened), closes the row, and the freed demand creates a fresh seat",
-		[]string{"status", "state", "close_reason", "closed_at", "synced_at"},
+		append([]string{"status", "state", "close_reason", "closed_at", "synced_at"}, parityUsageCloseKeys...),
 	},
 	"§12.2#3 R16": {
 		"CONTRACT v5 §12.2 #3 (ruling 4)", "a resume voids a suspended drain; legacy signals, stops and restarts the row",
@@ -167,6 +167,12 @@ var parityAccepted = map[string]parityEntry{
 		nil,
 	},
 }
+
+// parityUsageCloseKeys are the usage close marker session.ClosePatch writes
+// beside closed_at (failed-create excepted): a close one copy makes and the
+// other does not, makes a pass later, or makes as a failed create shows on
+// them as it does on closed_at.
+var parityUsageCloseKeys = []string{session.MetadataKeyUsageClosePending, session.MetadataKeyUsageClosedAt}
 
 // parityStartKeys are the row keys a legacy start writes.
 var parityStartKeys = []string{
@@ -196,7 +202,7 @@ var parityFindings = map[string]parityEntry{
 
 	"pending-create-swept": {
 		"CONTRACT v5 A10, C3; BEHAVIORS MAINT-051, SESS-050..052", "an undesired pool pending create past its never-started deadline: legacy's MAINT-051 sweep closes it first as gc_swept, its claim keys left on the closed row, so its rollback never runs; v2 does not run the sweep, and A10 rolls it back (failed-create, the claim cleared). §12.2 #17 covers only the orphan close's reason",
-		[]string{"state", "close_reason", "pending_create_claim", "pending_create_started_at"},
+		append([]string{"state", "close_reason", "pending_create_claim", "pending_create_started_at"}, parityUsageCloseKeys...),
 	},
 	"rollback-stops-nothing": {"CONTRACT v5 C3, C8.8; BEHAVIORS SESS-052", "legacy stops a bead-scoped pool name before its rollback whether or not anything runs under it (releaseRowOwnedRuntime); v2 stops only a runtime its fresh read finds, whose absence that read has confirmed. §12.2 does not list it", nil},
 	"rollback-replacement-slot": {
@@ -218,8 +224,8 @@ var parityFindings = map[string]parityEntry{
 		append([]string{"sleep_reason", "slept_at"}, parityStartKeys...),
 	},
 	"recycle-by-object":  {"CONTRACT v5 S5, F2 (C5a3)", "v2's start recycle removes the row's own dead runtime by exact session object (KillZombieObject, KillCorpseObject) after re-checking it; legacy's start recycle stops it by name, and a death that accrues legacy leaves listed until its next start. §12.2 does not list it", nil},
-	"mislabelled-close":  {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
-	"idle-respawn-drain": {"C6d (D2's idle-respawn row; v5 D2: the finalize sleeps, never closes; §12.2 #63), BEHAVIORS SESS-614", "legacy drains a pool row awake only for ready, unclaimed assigned work, idle past its sleep time, stops it in the tick, retires its slot and starts a fresh seat for the work; v2's A20 begins the idle-respawn drain with its attempt, signals it a patrol later after revalidating claim and activity, and its stop verb finalizes the row asleep, never closed, so resume-on-ready restarts the same row", []string{"sleep_intent", "drain_at", "state", "state_reason", "status", "close_reason", "closed_at", "synced_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}},
+	"mislabelled-close":  {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", append([]string{"status", "state", "close_reason", "closed_at"}, parityUsageCloseKeys...)},
+	"idle-respawn-drain": {"C6d (D2's idle-respawn row; v5 D2: the finalize sleeps, never closes; §12.2 #63), BEHAVIORS SESS-614", "legacy drains a pool row awake only for ready, unclaimed assigned work, idle past its sleep time, stops it in the tick, retires its slot and starts a fresh seat for the work; v2's A20 begins the idle-respawn drain with its attempt, signals it a patrol later after revalidating claim and activity, and its stop verb finalizes the row asleep, never closed, so resume-on-ready restarts the same row", append([]string{"sleep_intent", "drain_at", "state", "state_reason", "status", "close_reason", "closed_at", "synced_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityUsageCloseKeys...)},
 	"drain-stop-lag":     {"C6b1, C6b2 (A20, A4; D1-D4; owner to add a §12.2 row)", "legacy signals a drain through the runtime's drain env the tick after its begin, then stops and finalizes it; v2's begin (A20), its signal a patrol later (C6b1) and the stop verb (A4) each take a pass, so the stop, its events and the finalize land a pass or more after legacy's, with legacy's outcome", []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, "drain_at", "sleep_intent", "slept_at", "state_reason"}},
 	"idle-sleep-lag":     {"C6b1, C6b2 (A20, A4 with D4's idle builder; owner to add a §12.2 row)", "legacy idle-sleeps a row in the tick its probe answers idle (begin, signal, stop and SleepPatch(idle) with the latch); v2's begin (A20), signal (C6b1) and stop verb (A4, finalizing with SleepPatch(idle)) reach the same sleep a pass or more later. An always-named session's idle sleep waits for C6a2b's activity fact (#7586), so v2 leaves its runtime up", append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...)},
 
@@ -1101,7 +1107,7 @@ func parityFixtures() []parityFixture {
 	// verb (A4) land a pass or more later.
 	driftDrained := map[string]string{"row:gc-1:*stop": "drain-stop-lag", "row:gc-2": "drain-stop-lag"}
 	for _, k := range []string{
-		"row:gc-1:state", "row:gc-1:status", "row:gc-1:closed_at", "row:gc-1:close_reason",
+		"row:gc-1:state", "row:gc-1:status", "row:gc-1:closed_at", "row:gc-1:close_reason", "row:gc-1:usage_close_pending", "row:gc-1:usage_closed_at",
 		"provider:SetMeta s-gc-1", "provider:RemoveMeta s-gc-1", "provider:Stop s-gc-1", "provider:Start worker-gc-2", "provider:RemoveMeta worker-gc-2",
 		"event:session.stopped worker [reason session_id template]", "event:session.woke worker-1 []",
 	} {
