@@ -1365,6 +1365,7 @@ go_test(
         "cmd_version_test.go",
         "cmd_wait_family_test.go",
         "cmd_wait_partial_test.go",
+        "cmd_wait_rearm_test.go",
         "cmd_wait_test.go",
         "cmd_worktree_test.go",
         "codex_default_model_test.go",
