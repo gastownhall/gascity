@@ -187,6 +187,11 @@ func resolveWorkerSpec(cfg *config.City, spec runtime.WorkerSpec, sc config.Sess
 	if onWorkerSite(cityPath) {
 		return guard.New(), nil
 	}
+	// A generated agent Pod holds no Kubernetes credentials. Its provider acts
+	// only on the Pod's own session metadata; the controller owns the rest.
+	if isK8sManagedWorker(spec.Runtime) {
+		return sessionk8s.NewWorkerProvider(), nil
+	}
 	reg, err := runtimeRegistryForCity(cfg)
 	if err != nil {
 		return nil, err
@@ -1381,6 +1386,15 @@ func openCityEventsProviderWithConfig(providerConfig func() config.EventsConfig,
 	return p, 0
 }
 
+// k8sPodSecurityFromConfig returns the pod identity settings for generated pods.
+func k8sPodSecurityFromConfig(cfg config.K8sConfig) sessionk8s.PodSecurityConfig {
+	return sessionk8s.PodSecurityConfig{
+		RunAsUser:  cfg.RunAsUser,
+		RunAsGroup: cfg.RunAsGroup,
+		FSGroup:    cfg.FSGroup,
+	}
+}
+
 // newHybridProvider constructs a composite provider that routes sessions to
 // tmux (local) or k8s (remote) based on session name. The GC_HYBRID_REMOTE_MATCH
 // env var controls which sessions go to k8s. If unset, all sessions route to
@@ -1404,15 +1418,15 @@ func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runt
 
 func k8sProviderFromSession(cfg config.K8sConfig, cityName string) (runtime.Provider, error) {
 	secretEnv, secretMounts := k8sSecretProjectionFromConfig(cfg)
-	return newSeamBackedK8sProvider(secretEnv, secretMounts, cityName)
+	return newSeamBackedK8sProvider(k8sPodSecurityFromConfig(cfg), secretEnv, secretMounts, cityName)
 }
 
 // newSeamBackedK8sProvider keeps provider construction behind the same narrow
 // seam for builtin and hybrid routing, and lets wiring tests verify the exact
 // projections and city name passed to the K8s provider without creating a
 // cluster client.
-var newSeamBackedK8sProvider = func(secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount, cityName string) (runtime.Provider, error) {
-	return sessionk8s.NewSeamBackedWithSecretProjection(secretEnv, secretMounts, sessionk8s.WithCityName(cityName))
+var newSeamBackedK8sProvider = func(podSecurity sessionk8s.PodSecurityConfig, secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount, cityName string) (runtime.Provider, error) {
+	return sessionk8s.NewSeamBackedWithConfig(podSecurity, secretEnv, secretMounts, sessionk8s.WithCityName(cityName))
 }
 
 func k8sSecretProjectionFromConfig(cfg config.K8sConfig) ([]runtime.K8sSecretEnv, []runtime.K8sSecretMount) {

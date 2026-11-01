@@ -4,9 +4,10 @@ import (
 	"testing"
 )
 
-// clearDoltAndCityEnv empties the GC_DOLT_* / GC_K8S_DOLT_* / GC_CITY_PATH /
-// GC_BIN / GC_STORE_ROOT env vars for the duration of the test so the child
-// scripts spawned via runControllerScriptDeploy and runBeadsScript (which
+// clearDoltAndCityEnv empties the GC_DOLT_* / GC_K8S_DOLT_* /
+// GC_K8S_RUN_AS_* / GC_K8S_FS_GROUP / GC_CITY_PATH / GC_BIN /
+// GC_STORE_ROOT env vars for the duration of the test so the child scripts
+// spawned via runControllerScriptDeploy and runBeadsScript (which
 // inherit the test process's env through `os.Environ()`) do not observe leaks
 // from the developer's shell or an enclosing gc city. Each test's opts.Env
 // continues to declare its own desired state, which overrides the emptied
@@ -33,6 +34,9 @@ func clearDoltAndCityEnv(t *testing.T) {
 		"GC_DOLT_PORT",
 		"GC_K8S_DOLT_HOST",
 		"GC_K8S_DOLT_PORT",
+		"GC_K8S_RUN_AS_USER",
+		"GC_K8S_RUN_AS_GROUP",
+		"GC_K8S_FS_GROUP",
 		"GC_CITY_PATH",
 		"GC_BIN",
 		"GC_STORE_ROOT",

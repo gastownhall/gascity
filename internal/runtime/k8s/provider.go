@@ -21,42 +21,64 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	execerr "k8s.io/client-go/util/exec"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // Compile-time interface checks.
 var (
-	_ runtime.Provider     = (*Provider)(nil)
-	_ runtime.ExecProvider = (*Provider)(nil)
+	_ runtime.Provider                  = (*Provider)(nil)
+	_ runtime.ExecProvider              = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError = (*Provider)(nil)
 )
+
+// livenessObservationTimeout bounds the Kubernetes API and pod-exec reads
+// used by ObserveLivenessWithError and identity metadata reads.
+const livenessObservationTimeout = 10 * time.Second
 
 // Provider is a native Kubernetes session provider using client-go.
 // Eliminates subprocess overhead by making direct API calls over reused
 // HTTP/2 connections. Pod manifests are compatible with gc-session-k8s.
 type Provider struct {
-	ops                k8sOps
-	namespace          string
-	image              string
-	k8sContext         string
-	managedServiceHost string
-	managedServicePort string
-	cpuRequest         string
-	memRequest         string
-	cpuLimit           string
-	memLimit           string
-	serviceAccount     string              // pod service account name (GC_K8S_SERVICE_ACCOUNT)
-	prebaked           bool                // skip staging + init container for prebaked images
-	cityName           string              // the controller's city name, for the pod's remote-stage record
-	nodeSelector       map[string]string   // GC_K8S_NODE_SELECTOR (JSON)
-	tolerations        []corev1.Toleration // GC_K8S_TOLERATIONS (JSON)
-	affinity           *corev1.Affinity    // GC_K8S_AFFINITY (JSON)
-	priorityClassName  string              // GC_K8S_PRIORITY_CLASS_NAME
-	secretEnv          []runtime.K8sSecretEnv
-	secretMounts       []runtime.K8sSecretMount
-	postStartSettle    time.Duration      // settle time before post-start liveness check
-	stderr             io.Writer          // warning output (default os.Stderr)
-	pokes              runtime.PokeLedger // gc's own input, discounted from GetLastActivity
-	now                func() time.Time   // the poke ledger's clock; nil is time.Now
+	ops                  k8sOps
+	namespace            string
+	image                string
+	k8sContext           string
+	managedServiceHost   string
+	managedServicePort   string
+	cpuRequest           string
+	memRequest           string
+	cpuLimit             string
+	memLimit             string
+	serviceAccount       string              // pod service account name (GC_K8S_SERVICE_ACCOUNT)
+	prebaked             bool                // skip staging + init container for prebaked images
+	cityName             string              // the controller's city name, for the pod's remote-stage record
+	podSecurity          PodSecurityConfig   // optional pod-level UID/GID/fsGroup
+	nodeSelector         map[string]string   // GC_K8S_NODE_SELECTOR (JSON)
+	tolerations          []corev1.Toleration // GC_K8S_TOLERATIONS (JSON)
+	affinity             *corev1.Affinity    // GC_K8S_AFFINITY (JSON)
+	priorityClassName    string              // GC_K8S_PRIORITY_CLASS_NAME
+	secretEnv            []runtime.K8sSecretEnv
+	secretMounts         []runtime.K8sSecretMount
+	postStartSettle      time.Duration      // settle time before post-start liveness check
+	startupDialogTimeout time.Duration      // bounded pane polling budget for startup dialogs
+	stderr               io.Writer          // warning output (default os.Stderr)
+	pokes                runtime.PokeLedger // gc's own input, discounted from GetLastActivity
+	now                  func() time.Time   // the poke ledger's clock; nil is time.Now
+}
+
+// PodSecurityConfig supplies optional numeric identities for generated agent
+// pods. Unset fields are left to the image or Kubernetes admission policy.
+// Gas City does not allocate UIDs.
+type PodSecurityConfig struct {
+	RunAsUser  *int64
+	RunAsGroup *int64
+	FSGroup    *int64
 }
 
 type schedulingFields struct {
@@ -74,6 +96,7 @@ type schedulingFields struct {
 //   - GC_K8S_SERVICE_ACCOUNT — pod service account name (default: namespace default)
 //   - GC_K8S_CPU_REQUEST, GC_K8S_MEM_REQUEST — resource requests
 //   - GC_K8S_CPU_LIMIT, GC_K8S_MEM_LIMIT — resource limits
+//   - GC_K8S_RUN_AS_USER, GC_K8S_RUN_AS_GROUP, GC_K8S_FS_GROUP — optional pod identity overrides
 //
 // The in-cluster Dolt service alias defaults to the provider defaults
 // (dolt.gc.svc.cluster.local:3307). Pods receive projected GC_DOLT_* env;
@@ -83,13 +106,30 @@ type schedulingFields struct {
 // Uses rest.InClusterConfig() when running in a pod, falls back to
 // clientcmd.BuildConfigFromFlags() for local development.
 func NewProvider() (*Provider, error) {
-	return NewProviderWithSecretProjection(nil, nil)
+	return NewProviderWithConfig(PodSecurityConfig{}, nil, nil)
 }
 
 // NewProviderWithSecretProjection creates a provider with optional,
 // configuration-backed Kubernetes Secret projections. Existing GC_K8S_*
 // environment settings retain their normal behavior.
 func NewProviderWithSecretProjection(secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount) (*Provider, error) {
+	return NewProviderWithConfig(PodSecurityConfig{}, secretEnv, secretMounts)
+}
+
+// NewProviderWithSecurityConfig creates a K8s session provider using optional
+// pod identity values from config. GC_K8S_RUN_AS_USER, GC_K8S_RUN_AS_GROUP,
+// and GC_K8S_FS_GROUP override their corresponding config values when set.
+func NewProviderWithSecurityConfig(config PodSecurityConfig) (*Provider, error) {
+	return NewProviderWithConfig(config, nil, nil)
+}
+
+// NewProviderWithConfig creates a provider with optional pod identity and
+// Secret projections.
+func NewProviderWithConfig(config PodSecurityConfig, secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount) (*Provider, error) {
+	podSecurity, err := resolvePodSecurityConfig(config)
+	if err != nil {
+		return nil, err
+	}
 	namespace := envOrDefault("GC_K8S_NAMESPACE", "gc")
 	image := os.Getenv("GC_K8S_IMAGE")
 	k8sContext := os.Getenv("GC_K8S_CONTEXT")
@@ -120,26 +160,93 @@ func NewProviderWithSecretProjection(secretEnv []runtime.K8sSecretEnv, secretMou
 			restConfig: restConfig,
 			namespace:  namespace,
 		},
-		namespace:          namespace,
-		image:              image,
-		k8sContext:         k8sContext,
-		managedServiceHost: managedServiceHost,
-		managedServicePort: managedServicePort,
-		cpuRequest:         envOrDefault("GC_K8S_CPU_REQUEST", "500m"),
-		memRequest:         envOrDefault("GC_K8S_MEM_REQUEST", "1Gi"),
-		cpuLimit:           envOrDefault("GC_K8S_CPU_LIMIT", "2"),
-		memLimit:           envOrDefault("GC_K8S_MEM_LIMIT", "4Gi"),
-		serviceAccount:     os.Getenv("GC_K8S_SERVICE_ACCOUNT"),
-		prebaked:           os.Getenv("GC_K8S_PREBAKED") == "true",
-		postStartSettle:    3 * time.Second,
-		stderr:             os.Stderr,
-		nodeSelector:       scheduling.nodeSelector,
-		tolerations:        scheduling.tolerations,
-		affinity:           scheduling.affinity,
-		priorityClassName:  scheduling.priorityClassName,
-		secretEnv:          append([]runtime.K8sSecretEnv(nil), secretEnv...),
-		secretMounts:       append([]runtime.K8sSecretMount(nil), secretMounts...),
+		namespace:            namespace,
+		image:                image,
+		k8sContext:           k8sContext,
+		managedServiceHost:   managedServiceHost,
+		managedServicePort:   managedServicePort,
+		cpuRequest:           envOrDefault("GC_K8S_CPU_REQUEST", "500m"),
+		memRequest:           envOrDefault("GC_K8S_MEM_REQUEST", "1Gi"),
+		cpuLimit:             envOrDefault("GC_K8S_CPU_LIMIT", "2"),
+		memLimit:             envOrDefault("GC_K8S_MEM_LIMIT", "4Gi"),
+		serviceAccount:       os.Getenv("GC_K8S_SERVICE_ACCOUNT"),
+		prebaked:             os.Getenv("GC_K8S_PREBAKED") == "true",
+		podSecurity:          podSecurity,
+		postStartSettle:      3 * time.Second,
+		startupDialogTimeout: runtime.StartupDialogTimeout(),
+		stderr:               os.Stderr,
+		nodeSelector:         scheduling.nodeSelector,
+		tolerations:          scheduling.tolerations,
+		affinity:             scheduling.affinity,
+		priorityClassName:    scheduling.priorityClassName,
+		secretEnv:            append([]runtime.K8sSecretEnv(nil), secretEnv...),
+		secretMounts:         append([]runtime.K8sSecretMount(nil), secretMounts...),
 	}, nil
+}
+
+func resolvePodSecurityConfig(config PodSecurityConfig) (PodSecurityConfig, error) {
+	runAsUser, err := resolvePodID(
+		"GC_K8S_RUN_AS_USER", "session.k8s.run_as_user", config.RunAsUser,
+		os.Getenv("GC_K8S_RUN_AS_USER"), 1,
+	)
+	if err != nil {
+		return PodSecurityConfig{}, err
+	}
+	runAsGroup, err := resolvePodID(
+		"GC_K8S_RUN_AS_GROUP", "session.k8s.run_as_group", config.RunAsGroup,
+		os.Getenv("GC_K8S_RUN_AS_GROUP"), 0,
+	)
+	if err != nil {
+		return PodSecurityConfig{}, err
+	}
+	fsGroup, err := resolvePodID(
+		"GC_K8S_FS_GROUP", "session.k8s.fs_group", config.FSGroup,
+		os.Getenv("GC_K8S_FS_GROUP"), 0,
+	)
+	if err != nil {
+		return PodSecurityConfig{}, err
+	}
+	return PodSecurityConfig{RunAsUser: runAsUser, RunAsGroup: runAsGroup, FSGroup: fsGroup}, nil
+}
+
+func resolvePodID(envName, configName string, configured *int64, envValue string, minimum int64) (*int64, error) {
+	value := configured
+	source := configName
+	if raw := strings.TrimSpace(envValue); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parsing %s %q as an integer: %w", envName, raw, err)
+		}
+		value = &parsed
+		source = envName
+	}
+	if value == nil {
+		return nil, nil
+	}
+	if *value < minimum {
+		if minimum == 1 {
+			return nil, fmt.Errorf("%s must be greater than zero", source)
+		}
+		return nil, fmt.Errorf("%s must not be negative", source)
+	}
+	resolved := *value
+	return &resolved, nil
+}
+
+// ValidateStaticConfig checks provider settings that do not need Kubernetes
+// credentials or a live API client. A managed worker dispatcher uses it before
+// deferring client construction to the controller.
+func ValidateStaticConfig(config PodSecurityConfig) error {
+	if _, err := resolvePodSecurityConfig(config); err != nil {
+		return err
+	}
+	if _, _, err := managedServiceAlias(); err != nil {
+		return err
+	}
+	if _, err := parseSchedulingEnv(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func parseSchedulingEnv() (schedulingFields, error) {
@@ -166,16 +273,17 @@ func parseSchedulingEnv() (schedulingFields, error) {
 // newProviderWithOps creates a provider with a custom k8sOps (for testing).
 func newProviderWithOps(ops k8sOps) *Provider {
 	return &Provider{
-		ops:                ops,
-		namespace:          "test-ns",
-		image:              "test-image:latest",
-		managedServiceHost: podManagedDoltHost,
-		managedServicePort: podManagedDoltPort,
-		cpuRequest:         "500m",
-		memRequest:         "1Gi",
-		cpuLimit:           "2",
-		memLimit:           "4Gi",
-		stderr:             io.Discard,
+		ops:                  ops,
+		namespace:            "test-ns",
+		image:                "test-image:latest",
+		managedServiceHost:   podManagedDoltHost,
+		managedServicePort:   podManagedDoltPort,
+		cpuRequest:           "500m",
+		memRequest:           "1Gi",
+		cpuLimit:             "2",
+		memLimit:             "4Gi",
+		startupDialogTimeout: time.Millisecond,
+		stderr:               io.Discard,
 	}
 }
 
@@ -184,12 +292,26 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if p.image == "" {
 		return fmt.Errorf("starting session %q: GC_K8S_IMAGE is required", name)
 	}
+	ctrlCity := controllerCityPath(cfg.Env)
+	if _, err := resolvePodHostedDoltIdentity(cfg.Env, "", p.managedServiceHost, p.managedServicePort); err != nil {
+		return fmt.Errorf("resolving scoped store identity for session %q: %w", name, err)
+	}
+	var cityIdentity *podHostedDoltIdentity
+	if !p.prebaked && ctrlCity != "" {
+		identity, err := resolvePodHostedDoltIdentity(cfg.Env, "GC_K8S_CITY_", p.managedServiceHost, p.managedServicePort)
+		if err != nil {
+			return fmt.Errorf("resolving City store identity for session %q: %w", name, err)
+		}
+		cityIdentity = identity
+	}
 	podName := SanitizeName(name)
 	label := SanitizeLabel(name)
 
-	// Check for existing pod (any phase).
+	// Check for an existing pod first so rig-projection errors cannot mask a live
+	// session's normal ErrSessionExists or ErrSessionInitializing result.
 	existing, err := p.ops.listPods(ctx, "gc-session="+label, "")
-	if err == nil && len(existing) > 0 {
+	haveExisting := err == nil && len(existing) > 0
+	if haveExisting {
 		pod := &existing[0]
 		if pod.Status.Phase == corev1.PodRunning {
 			// Stale-pod detection: is the session's tmux server alive?
@@ -201,7 +323,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			// still be blocking the tmux server from starting. Don't delete
 			// pods that are still within the startup window.
 			if time.Since(pod.CreationTimestamp.Time) < startupGracePeriod {
-				return fmt.Errorf("%w: session %q (pod: %s)", runtime.ErrSessionInitializing, name, pod.Name)
+				return fmt.Errorf("%w: %w: session %q (pod: %s)", runtime.ErrSessionInitializing, runtime.ErrExistingSessionInitializing, name, pod.Name)
 			}
 			if !definitive {
 				// Past the grace period the next statement deletes this pod.
@@ -216,11 +338,20 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			}
 			// Stale pod — tmux definitively dead and past grace period, recreate.
 		}
-		// Clean up existing pod.
-		_ = p.ops.deletePod(ctx, pod.Name, 5)
-		_ = waitForDeletion(ctx, p.ops, pod.Name, 30*time.Second)
 	}
 
+	// Validate rig projection before deleting a stale pod. Hosted identity
+	// validation above retains the #8158 fail-closed startup boundary.
+	rigProjection, err := buildPodRigProjection(ctrlCity, cfg)
+	if err != nil {
+		return fmt.Errorf("preparing rig state for session %q: %w", name, err)
+	}
+
+	if haveExisting {
+		// Clean up existing pod only after all projection and identity checks pass.
+		_ = p.ops.deletePod(ctx, existing[0].Name, 5)
+		_ = waitForDeletion(ctx, p.ops, existing[0].Name, 30*time.Second)
+	}
 	// Build and create pod.
 	pod, err := buildPod(name, cfg, p)
 	if err != nil {
@@ -240,19 +371,14 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		_ = p.ops.deletePod(cleanupCtx, podName, 5)
 	}
 
-	ctrlCity := cfg.Env["GC_CITY"]
 	workDirStaged := false
-
-	if !p.prebaked {
-		// Stage files via init container if needed.
-		if needsStaging(cfg, ctrlCity) {
-			staged, err := stageFiles(ctx, p.ops, podName, cfg, ctrlCity, p.stderr)
-			if err != nil {
-				cleanup("staging failed")
-				return fmt.Errorf("staging files for session %q: %w", name, err)
-			}
-			workDirStaged = staged
+	if !p.prebaked && needsStaging(cfg, ctrlCity) {
+		staged, err := stageFiles(ctx, p.ops, podName, cfg, ctrlCity, p.stderr)
+		if err != nil {
+			cleanup("staging failed")
+			return fmt.Errorf("staging files for session %q: %w", name, err)
 		}
+		workDirStaged = staged
 	}
 
 	// Wait for main container to be running.
@@ -261,24 +387,16 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("waiting for pod %q: %w", podName, err)
 	}
 
-	if !p.prebaked {
-		// Initialize the city inside the pod.
-		if ctrlCity != "" {
-			skipRel := cityTemplateSkipRel(workDirStaged, ctrlCity, cfg.WorkDir)
-			if err := initCityInPod(ctx, p.ops, podName, ctrlCity, skipRel); err != nil {
-				fmt.Fprintf(p.stderr, "gc: warning: initCityInPod for %s: %v\n", podName, err) //nolint:errcheck
-			}
+	if !p.prebaked && ctrlCity != "" {
+		// Initialize the city with its canonical hosted-store identity.
+		skipRel := cityTemplateSkipRel(workDirStaged, ctrlCity, cfg.WorkDir)
+		if err := initCityInPod(ctx, p.ops, podName, ctrlCity, skipRel, cityIdentity); err != nil {
+			cleanup("City initialization failed")
+			return fmt.Errorf("initializing City in pod for session %q: %w", name, err)
 		}
 	}
 
-	// Record the pod as a remote stage of the controller's city, staged and
-	// prebaked alike (S5-A): on a split city its infrastructure-class
-	// commands then refuse instead of creating a pod-local empty binding. A
-	// direct write, so it works whatever gc the pod image carries. The pod
-	// spec's remote-stage environment already covers the processes started
-	// from it (remoteStageEnv); the record is the durable copy, and the only
-	// cover for a process started with a cleared environment. Failing to write it fails the start: a pod that cannot be
-	// marked is not one this controller hands work to.
+	// Record the remote stage before releasing the workspace to pre_start.
 	if ctrlCity != "" {
 		if err := writeRemoteStageInPod(ctx, p.ops, podName, p.cityName, ctrlCity); err != nil {
 			cleanup("remote stage record")
@@ -286,19 +404,43 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 	}
 
-	if !p.prebaked {
-		// Signal entrypoint to proceed.
-		if _, err := p.ops.execInPod(ctx, podName, "agent",
-			[]string{"touch", "/workspace/.gc-workspace-ready"}, nil); err != nil {
-			fmt.Fprintf(p.stderr, "gc: warning: touch .gc-workspace-ready in %s: %v\n", podName, err) //nolint:errcheck
+	// The selected scope's hosted identity must be initialized and verified
+	// before the entrypoint can run pre_start or start tmux.
+	podWorkDir := projectedPodWorkDir(cfg)
+	if err := initBeadsInPod(ctx, p.ops, podName, cfg, podWorkDir, p.managedServiceHost, p.managedServicePort); err != nil {
+		cleanup("scoped beads initialization failed")
+		return fmt.Errorf("initializing scoped beads in pod for session %q: %w", name, err)
+	}
+
+	if rigProjection != nil {
+		if err := refreshPodRigSuspensionSnapshot(ctrlCity, rigProjection); err != nil {
+			cleanup("rig suspension refresh failed")
+			return fmt.Errorf("refreshing rig suspension state for session %q: %w", name, err)
+		}
+		if err := applyPodRigProjection(ctx, p.ops, podName, rigProjection); err != nil {
+			cleanup("rig state projection failed")
+			return fmt.Errorf("projecting rig state for session %q: %w", name, err)
 		}
 	}
 
-	// Ensure .beads/ inside the pod. This remains warning-only so older staged
-	// or prebaked workspaces can self-heal instead of failing session startup.
-	podWorkDir := projectedPodWorkDir(cfg)
-	if err := initBeadsInPod(ctx, p.ops, podName, cfg, podWorkDir, p.managedServiceHost, p.managedServicePort); err != nil {
-		fmt.Fprintf(p.stderr, "gc: warning: initBeadsInPod for %s: %v\n", podName, err) //nolint:errcheck
+	if !p.prebaked {
+		// Entry point must remain blocked until City, hosted scope, and rig state
+		// have all been initialized and verified.
+		if _, err := p.ops.execInPod(ctx, podName, "agent", []string{"touch", "/workspace/.gc-workspace-ready"}, nil); err != nil {
+			cleanup("workspace readiness signal failed")
+			return fmt.Errorf("signaling workspace ready for session %q: %w", name, err)
+		}
+	}
+	if rigProjection != nil {
+		marker := podEnvValue(pod, "GC_RIG_PROJECTION_MARKER")
+		if marker == "" {
+			cleanup("rig projection marker missing")
+			return fmt.Errorf("pod for rig session %q has no rig projection readiness marker", name)
+		}
+		if _, err := p.ops.execInPod(ctx, podName, "agent", []string{"touch", marker}, nil); err != nil {
+			cleanup("rig projection marker failed")
+			return fmt.Errorf("marking rig projection ready for session %q: %w", name, err)
+		}
 	}
 
 	// Wait for tmux session.
@@ -309,6 +451,25 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 
 	// Enable pane logging + run session setup (shared with the relaunch tail).
 	p.runPodPostLaunchSetup(ctx, podName, cfg)
+
+	if runtime.ShouldAcceptStartupDialogs(cfg) {
+		carrier := p.carrier()
+		err := runtime.AcceptStartupDialogsWithTimeout(ctx, p.startupDialogTimeout,
+			func(lines int) (string, error) {
+				return carrier.Peek(ctx, name, lines)
+			},
+			func(keys ...string) error {
+				return carrier.SendKeys(ctx, name, keys...)
+			},
+		)
+		if err != nil {
+			fmt.Fprintf(p.stderr, "gc: warning: accepting startup dialogs for %s: %v\n", podName, err) //nolint:errcheck
+			if ctx.Err() != nil {
+				cleanup("startup dialog handling canceled")
+				return fmt.Errorf("accepting startup dialogs for session %q: %w", name, ctx.Err())
+			}
+		}
+	}
 
 	requiresPostStartLiveness := k8sRequiresPostStartLiveness(cfg)
 
@@ -383,21 +544,19 @@ func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cf
 }
 
 // Relaunch re-launches the agent inside the already-running (warm) pod without
-// recreating it: it respawns the in-pod tmux "main" pane (respawn-pane -k) with
-// the (possibly changed) command over execInPod, then re-runs the post-launch
-// setup tail. The pod stays warm via the entrypoint's `sleep infinity`, so a
-// launch-only config change reaches the live pod without a full reprovision —
-// the k8s half of the runtime/transport un-weld (B3a, mirroring tmux B1 / ssh).
+// recreating it: it refreshes any rig-scoped site and suspension projection,
+// respawns the in-pod tmux "main" pane (respawn-pane -k) with the (possibly
+// changed) command over execInPod, then re-runs the post-launch setup tail. The
+// pod stays warm via the entrypoint's `sleep infinity`, so a launch-only config
+// change reaches the live pod without a full reprovision — the k8s half of the
+// runtime/transport un-weld (B3a, mirroring tmux B1 / ssh).
 //
-// The pod must be Running with a live tmux "main" session, else
-// [runtime.ErrSessionNotFound] (the reconciler decides whether to Start fresh —
-// it does NOT recreate the pod here). Staging, city/beads init, and PreStart are
-// NOT re-run here (k8s treats PreStart as provision-half); env is provision-half
-// too (set in the pod spec at create time, not re-injected — respawn-pane carries
-// no env). The remote-stage record is the exception: it is written again before
-// the respawn, so a warm pod an older provider created is marked too. NOTE: tmux
-// diverges — as of the relaunch pre_start fix it re-runs PreStart on Relaunch
-// (launch-half), while k8s and ssh intentionally do not.
+// The pod must be Running with a live tmux "main" session and matching rig
+// environment, else [runtime.ErrSessionNotFound]. Rig projection failures also
+// wrap that error so the reconciler can provision a fresh Pod. Staging,
+// city/beads init, and PreStart are not re-run on Relaunch; the remote-stage
+// record is rewritten before respawn so an older warm pod is marked too. NOTE:
+// tmux re-runs PreStart on Relaunch, while k8s and ssh intentionally do not.
 //
 // CAVEAT (unverified on a real cluster — see the B3 design doc): for
 // LINUX_USERNAME pods the entrypoint runs tmux under `su - <user>`, so the
@@ -408,15 +567,26 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	podName, err := p.findRunningPod(ctx, name)
+	pod, err := p.findRunningPodObject(ctx, name)
 	if err != nil {
 		return fmt.Errorf("%w: session %q (no running pod to relaunch into)", runtime.ErrSessionNotFound, name)
 	}
+	podName := pod.Name
 	// The tmux server + "main" session must be alive to respawn into; a dead
 	// session means the box is not warm enough — reprovision, don't respawn.
 	if _, err := p.ops.execInPod(ctx, podName, "agent",
 		[]string{"tmux", "has-session", "-t", tmuxSession}, nil); err != nil {
 		return fmt.Errorf("%w: session %q (pod %s has no live tmux session)", runtime.ErrSessionNotFound, name, podName)
+	}
+	if projection, projectionErr := buildPodRigProjection(controllerCityPath(cfg.Env), cfg); projectionErr != nil {
+		return fmt.Errorf("preparing rig state for session %q: %w: %w", name, runtime.ErrSessionNotFound, projectionErr)
+	} else if projection != nil {
+		if podEnvValue(pod, "GC_RIG") != projection.binding.Name || podEnvValue(pod, "GC_RIG_ROOT") != projection.binding.Path {
+			return fmt.Errorf("%w: session %q pod has stale rig environment", runtime.ErrSessionNotFound, name)
+		}
+		if err := applyPodRigProjection(ctx, p.ops, podName, projection); err != nil {
+			return fmt.Errorf("projecting rig state for session %q: %w: %w", name, runtime.ErrSessionNotFound, err)
+		}
 	}
 
 	// Record the warm pod as a remote stage before the agent respawns, as
@@ -424,7 +594,7 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	// created carries neither the record nor the pod-spec environment, and
 	// the respawned agent must not run unmarked. A failed write fails the
 	// relaunch rather than respawning into an unmarked pod.
-	if ctrlCity := cfg.Env["GC_CITY"]; ctrlCity != "" {
+	if ctrlCity := controllerCityPath(cfg.Env); ctrlCity != "" {
 		if err := writeRemoteStageInPod(ctx, p.ops, podName, p.cityName, ctrlCity); err != nil {
 			return fmt.Errorf("k8s relaunch %q: recording pod %q as a remote stage of city %s (%s): %w; the agent was not respawned", name, podName, remoteStageCityName(p.cityName, ctrlCity), ctrlCity, err)
 		}
@@ -518,6 +688,52 @@ func (p *Provider) IsRunning(name string) bool {
 	_, err = p.ops.execInPod(ctx, podName, "agent",
 		[]string{"tmux", "has-session", "-t", tmuxSession}, nil)
 	return err == nil
+}
+
+// ObserveLivenessWithError reports pod and agent-process liveness without
+// collapsing Kubernetes API or pod-exec failures into confirmed absence.
+func (p *Provider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), livenessObservationTimeout)
+	defer cancel()
+
+	label := SanitizeLabel(name)
+	pods, err := p.ops.listPods(ctx, "gc-session="+label, "")
+	if err != nil {
+		return runtime.Liveness{}, fmt.Errorf("observing k8s session %q: listing pods: %w: %w", name, runtime.ErrRuntimeUnavailable, err)
+	}
+	if len(pods) == 0 {
+		return runtime.Liveness{}, nil
+	}
+	pod := firstRunningPod(pods)
+	if pod == nil {
+		return runtime.Liveness{}, nil
+	}
+
+	alive, definitive, probeErr := p.probeTmuxLiveness(ctx, pod)
+	if !definitive {
+		return runtime.Liveness{}, fmt.Errorf("observing k8s session %q: tmux probe: %w: %w", name, runtime.ErrRuntimeUnavailable, probeErr)
+	}
+	if !alive {
+		return runtime.Liveness{}, nil
+	}
+	if len(processNames) == 0 {
+		return runtime.Liveness{Running: true, Alive: true}, nil
+	}
+	for _, processName := range processNames {
+		if strings.TrimSpace(processName) == "" {
+			continue
+		}
+		_, err := p.ops.execInPod(ctx, pod.Name, "agent", []string{"pgrep", "-f", processName}, nil)
+		if err == nil {
+			return runtime.Liveness{Running: true, Alive: true}, nil
+		}
+		var exitErr execerr.ExitError
+		if errors.As(err, &exitErr) && exitErr.Exited() {
+			continue
+		}
+		return runtime.Liveness{Running: true}, fmt.Errorf("observing k8s session %q process %q: %w: %w", name, processName, runtime.ErrRuntimeUnavailable, err)
+	}
+	return runtime.Liveness{Running: true}, nil
 }
 
 // IsAttached reports whether a user terminal is connected to the tmux
@@ -656,6 +872,36 @@ func (p *Provider) SetMeta(name, key, value string) error {
 // GetMeta retrieves a metadata value from the tmux environment.
 func (p *Provider) GetMeta(name, key string) (string, error) {
 	ctx := context.Background()
+	if isPodIdentityKey(key) {
+		ctx, cancel := context.WithTimeout(ctx, livenessObservationTimeout)
+		defer cancel()
+		pods, err := p.ops.listPods(ctx, "gc-session="+SanitizeLabel(name), "")
+		if err != nil {
+			return "", fmt.Errorf("reading k8s session %q metadata %s: listing pods: %w: %w", name, key, runtime.ErrRuntimeUnavailable, err)
+		}
+		if len(pods) == 0 {
+			return "", runtime.ErrSessionNotFound
+		}
+		pod := firstRunningPod(pods)
+		if pod == nil {
+			return "", runtime.ErrSessionNotFound
+		}
+		for _, container := range pod.Spec.Containers {
+			if container.Name != "agent" {
+				continue
+			}
+			for _, value := range container.Env {
+				if value.Name != key {
+					continue
+				}
+				if value.ValueFrom != nil {
+					return "", fmt.Errorf("reading k8s session %q metadata %s: %w", name, key, runtime.ErrRuntimeUnavailable)
+				}
+				return value.Value, nil
+			}
+		}
+		return "", nil
+	}
 	podName, err := p.findPod(ctx, name)
 	if err != nil {
 		return "", nil
@@ -674,6 +920,27 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 		return val, nil
 	}
 	return "", nil
+}
+
+func isPodIdentityKey(key string) bool {
+	switch key {
+	case "GC_SESSION_ID", "GC_INSTANCE_TOKEN", "GC_RUNTIME_EPOCH":
+		return true
+	default:
+		return false
+	}
+}
+
+// firstRunningPod selects the same serving pod for liveness and identity
+// reads. Terminating and failed replacements must not supply stale identity
+// metadata for a different live pod.
+func firstRunningPod(pods []corev1.Pod) *corev1.Pod {
+	for i := range pods {
+		if pods[i].DeletionTimestamp == nil && pods[i].Status.Phase == corev1.PodRunning {
+			return &pods[i]
+		}
+	}
+	return nil
 }
 
 // RemoveMeta removes a metadata key from the tmux environment.
@@ -887,15 +1154,23 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 // failure reaching a pod that does exist — the same distinction Relaunch
 // already draws at its own call site.
 func (p *Provider) findRunningPod(ctx context.Context, name string) (string, error) {
-	label := SanitizeLabel(name)
-	pods, err := p.ops.listPods(ctx, "gc-session="+label, "status.phase=Running")
+	pod, err := p.findRunningPodObject(ctx, name)
 	if err != nil {
 		return "", err
 	}
-	if len(pods) == 0 {
-		return "", fmt.Errorf("%w: no running pod for session %q", runtime.ErrSessionNotFound, name)
+	return pod.Name, nil
+}
+
+func (p *Provider) findRunningPodObject(ctx context.Context, name string) (*corev1.Pod, error) {
+	label := SanitizeLabel(name)
+	pods, err := p.ops.listPods(ctx, "gc-session="+label, "status.phase=Running")
+	if err != nil {
+		return nil, err
 	}
-	return pods[0].Name, nil
+	if len(pods) == 0 {
+		return nil, fmt.Errorf("%w: no running pod for session %q", runtime.ErrSessionNotFound, name)
+	}
+	return pods[0].DeepCopy(), nil
 }
 
 // findPod finds a pod by session label (any phase).
@@ -989,8 +1264,37 @@ func waitForTmux(ctx context.Context, ops k8sOps, name string, timeout time.Dura
 	return fmt.Errorf("tmux session not ready in pod %s after %s", name, timeout)
 }
 
+type podHostedDoltIdentity struct {
+	ProjectID string
+	Prefix    string
+	Database  string
+	Host      string
+	Port      string
+}
+
+func resolvePodHostedDoltIdentity(env map[string]string, prefix, managedHost, managedPort string) (*podHostedDoltIdentity, error) {
+	projectKey, prefixKey, databaseKey := "GC_BEADS_PROJECT_ID", "GC_BEADS_PREFIX", "GC_DOLT_DATABASE"
+	if prefix != "" {
+		projectKey, prefixKey, databaseKey = prefix+"BEADS_PROJECT_ID", prefix+"BEADS_PREFIX", prefix+"DOLT_DATABASE"
+	}
+	projected, err := validateProjectedHostedStoreIdentity(env, prefix, managedHost, managedPort)
+	if err != nil {
+		return nil, err
+	}
+	if len(projected) == 0 {
+		return nil, nil
+	}
+	return &podHostedDoltIdentity{
+		ProjectID: strings.TrimSpace(env[projectKey]),
+		Prefix:    strings.TrimSpace(env[prefixKey]),
+		Database:  strings.TrimSpace(env[databaseKey]),
+		Host:      projected["GC_DOLT_HOST"],
+		Port:      projected["GC_DOLT_PORT"],
+	}, nil
+}
+
 // initCityInPod copies the city directory and runs gc init inside the pod.
-func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity, skipRel string) error {
+func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity, skipRel string, identity *podHostedDoltIdentity) error {
 	// Streaming may leave a partial directory if the source or pod exec fails.
 	// Use a bounded cleanup context even when the caller has been canceled.
 	defer func() {
@@ -1003,11 +1307,30 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity, skipRel s
 	if err := copyDirToPodSkipping(ctx, ops, podName, "agent", ctrlCity, "/tmp/city-src", skipRel); err != nil {
 		return err
 	}
-	// Run gc init --from with GC_DOLT=skip so gc init does not attempt to
-	// start a local Dolt server. Pod sessions consume the projected GC_DOLT_*
-	// connection target through env; they do not rewrite canonical .beads files.
-	_, err := ops.execInPod(ctx, podName, "agent",
-		[]string{"env", "GC_DOLT=skip", "gc", "init", "--from", "/tmp/city-src", "/workspace", "--no-start", "--skip-provider-readiness"}, nil)
+	// Run gc init --from with GC_DOLT=skip so it does not start a local Dolt
+	// server. Hosted City identity is passed explicitly because init's scope
+	// validation requires the controller-owned project identity.
+	// exec inherits the agent container's selected-scope environment, which may
+	// describe a hosted rig store rather than the HQ City being initialized.
+	// Keep only the runtime environment needed to find gc and its home config,
+	// plus the remote-stage identity that fences storage genesis before the
+	// on-disk record exists; HQ hosted identity is supplied below through
+	// explicit init flags.
+	args := []string{
+		"sh", "-c",
+		`exec env -i PATH="$PATH" HOME="$HOME" GC_DOLT=skip GC_REMOTE_STAGE_CONTROLLER="$GC_REMOTE_STAGE_CONTROLLER" GC_REMOTE_STAGE_CITY="$GC_REMOTE_STAGE_CITY" "$0" "$@"`,
+		"gc", "init", "--from", "/tmp/city-src", "/workspace",
+	}
+	if identity != nil {
+		args = append(args,
+			"--dolt-host", identity.Host,
+			"--dolt-port", identity.Port,
+			"--dolt-database", identity.Database,
+			"--dolt-project-id", identity.ProjectID,
+		)
+	}
+	args = append(args, "--no-start", "--skip-provider-readiness")
+	_, err := ops.execInPod(ctx, podName, "agent", args, nil)
 	if err != nil {
 		return err
 	}
@@ -1065,60 +1388,274 @@ func writeRemoteStageInPod(ctx context.Context, ops k8sOps, podName, cityName, c
 	return err
 }
 
-// initBeadsInPod ensures the pod workspace has usable .beads state. It keeps
-// the older warning-only self-heal behavior for prebaked or older staged
-// workspaces by patching existing metadata and bootstrapping missing state.
+type podRigProjection struct {
+	binding              config.RigSiteBinding
+	suspension           suspensionstate.State
+	linuxUsername        string
+	citySuspendedOnStart bool
+	rigSuspendedOnStart  bool
+}
+
+// buildPodRigProjection makes a launch-time snapshot of the selected rig's
+// binding and effective city/rig suspension state. A running Pod does not
+// receive later suspension changes through this snapshot until Relaunch
+// refreshes it. This snapshot does not provide live suspend, no-new-claims, or
+// bounded drain for running Pods; that behavior is unverified and tracked in
+// #8241.
+func buildPodRigProjection(ctrlCity string, cfg runtime.Config) (*podRigProjection, error) {
+	rigName := strings.TrimSpace(cfg.Env["GC_RIG"])
+	rigRoot := strings.TrimSpace(cfg.Env["GC_RIG_ROOT"])
+	if rigName == "" && rigRoot == "" {
+		return nil, nil
+	}
+	if rigName == "" || rigRoot == "" {
+		return nil, fmt.Errorf("rig-scoped session requires both GC_RIG and GC_RIG_ROOT")
+	}
+	ctrlCity = strings.TrimSpace(ctrlCity)
+	if ctrlCity == "" {
+		return nil, fmt.Errorf("rig-scoped session has no controller City path")
+	}
+	ctrlCity, err := filepath.Abs(ctrlCity)
+	if err != nil {
+		return nil, fmt.Errorf("resolving controller City path: %w", err)
+	}
+	ctrlCity = filepath.Clean(ctrlCity)
+
+	cityCfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(ctrlCity, "city.toml"), config.LoadOptions{SkipRevisionSnapshot: true})
+	if err != nil {
+		return nil, fmt.Errorf("loading controller City config: %w", err)
+	}
+	if _, err := config.ApplySiteBindings(fsys.OSFS{}, ctrlCity, cityCfg); err != nil {
+		return nil, fmt.Errorf("loading controller City site bindings: %w", err)
+	}
+	var rig *config.Rig
+	for i := range cityCfg.Rigs {
+		if cityCfg.Rigs[i].Name == rigName {
+			rig = &cityCfg.Rigs[i]
+			break
+		}
+	}
+	if rig == nil {
+		return nil, fmt.Errorf("rig %q is not declared in controller City config", rigName)
+	}
+	if strings.TrimSpace(rig.Path) == "" {
+		return nil, fmt.Errorf("rig %q has no configured path in controller City config or site binding", rigName)
+	}
+	configuredRigRoot, err := resolveControllerPath(ctrlCity, rig.Path)
+	if err != nil {
+		return nil, fmt.Errorf("resolving configured path for rig %q: %w", rigName, err)
+	}
+	requestedRigRoot, err := resolveControllerPath(ctrlCity, rigRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolving GC_RIG_ROOT for rig %q: %w", rigName, err)
+	}
+	if requestedRigRoot != configuredRigRoot {
+		return nil, fmt.Errorf("GC_RIG_ROOT %q does not match configured path for rig %q (%q)", requestedRigRoot, rigName, configuredRigRoot)
+	}
+	rel, err := filepath.Rel(ctrlCity, requestedRigRoot)
+	if err != nil {
+		return nil, fmt.Errorf("mapping rig %q into pod workspace: %w", rigName, err)
+	}
+	podRigRoot := filepath.Clean(filepath.Join(podWorkspaceRoot, rel))
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || !strings.HasPrefix(podRigRoot, podWorkspaceRoot+"/") {
+		// K8s workers only mount the controller City at /workspace. An external
+		// rig root cannot be projected into that namespace, so fail closed rather
+		// than start with GC_RIG_ROOT pointing at a different directory.
+		return nil, fmt.Errorf("rig path %q is outside controller City %q and cannot be mapped under /workspace", requestedRigRoot, ctrlCity)
+	}
+	suspension, err := suspensionstate.Load(fsys.OSFS{}, ctrlCity)
+	if err != nil {
+		return nil, fmt.Errorf("loading controller rig suspension state: %w", err)
+	}
+	effectiveCitySuspended := suspensionstate.EffectiveCitySuspended(suspension, cityCfg.Workspace.EffectiveSuspendedOnStart())
+	effectiveSuspended := suspensionstate.EffectiveRigSuspended(suspension, rigName, rig.EffectiveSuspendedOnStart())
+	// Preserve other rig and reserved agent overrides from the source file,
+	// while projecting effective values for the selected city and rig.
+	podSuspension := suspension
+	podSuspension.City = suspensionstate.Override{Suspended: &effectiveCitySuspended}
+	if podSuspension.Rigs == nil {
+		podSuspension.Rigs = make(map[string]suspensionstate.Override)
+	}
+	podSuspension.Rigs[rigName] = suspensionstate.Override{Suspended: &effectiveSuspended}
+	return &podRigProjection{
+		binding:              config.RigSiteBinding{Name: rigName, Path: podRigRoot},
+		suspension:           podSuspension,
+		linuxUsername:        strings.TrimSpace(cfg.Env["LINUX_USERNAME"]),
+		citySuspendedOnStart: cityCfg.Workspace.EffectiveSuspendedOnStart(),
+		rigSuspendedOnStart:  rig.EffectiveSuspendedOnStart(),
+	}, nil
+}
+
+// refreshPodRigSuspensionSnapshot rereads runtime suspension state immediately
+// before projection so a suspend issued while the Pod is being prepared is not
+// overwritten by the earlier validation snapshot.
+func refreshPodRigSuspensionSnapshot(ctrlCity string, projection *podRigProjection) error {
+	if projection == nil {
+		return nil
+	}
+	suspension, err := suspensionstate.Load(fsys.OSFS{}, ctrlCity)
+	if err != nil {
+		return fmt.Errorf("loading controller rig suspension state: %w", err)
+	}
+	effectiveCitySuspended := suspensionstate.EffectiveCitySuspended(suspension, projection.citySuspendedOnStart)
+	effectiveRigSuspended := suspensionstate.EffectiveRigSuspended(suspension, projection.binding.Name, projection.rigSuspendedOnStart)
+	projection.suspension = suspension
+	projection.suspension.City = suspensionstate.Override{Suspended: &effectiveCitySuspended}
+	if projection.suspension.Rigs == nil {
+		projection.suspension.Rigs = make(map[string]suspensionstate.Override)
+	}
+	projection.suspension.Rigs[projection.binding.Name] = suspensionstate.Override{Suspended: &effectiveRigSuspended}
+	return nil
+}
+
+func applyPodRigProjection(ctx context.Context, ops k8sOps, podName string, projection *podRigProjection) error {
+	if projection == nil {
+		return nil
+	}
+	sitePath := config.SiteBindingPath(podWorkspaceRoot)
+	readSiteScript := `set -eu
+target=$(readlink -f "$1" 2>/dev/null || printf '%s' "$1")
+if [ -e "$1" ]; then printf '%s\n' "$target"; cat "$1"; else printf '%s\n%s' "$target" '__GC_SITE_BINDING_MISSING__'; fi
+`
+	readOutput, err := ops.execInPod(ctx, podName, "agent", []string{"sh", "-c", readSiteScript, "gc-read-site-binding", sitePath}, nil)
+	if err != nil {
+		return fmt.Errorf("reading pod-local site binding: %w", err)
+	}
+	siteTarget, siteData, found := strings.Cut(readOutput, "\n")
+	if !found || strings.TrimSpace(siteTarget) == "" {
+		return fmt.Errorf("reading pod-local site binding returned no target path")
+	}
+	if siteData == "__GC_SITE_BINDING_MISSING__" {
+		siteData = ""
+	}
+	projectedSite, err := config.ProjectRigSiteBinding([]byte(siteData), projection.binding)
+	if err != nil {
+		return fmt.Errorf("projecting pod-local site binding: %w", err)
+	}
+	projectedSuspension, err := json.MarshalIndent(projection.suspension, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding pod-local rig suspension state: %w", err)
+	}
+	writeCommand := podRigProjectionWriteCommand(
+		projectedSite,
+		projectedSuspension,
+		siteTarget,
+		citylayout.SuspensionStateFile(podWorkspaceRoot),
+		projection.linuxUsername,
+	)
+	_, err = ops.execInPod(ctx, podName, "agent", writeCommand, nil)
+	if err != nil {
+		return fmt.Errorf("writing pod-local rig binding and suspension state: %w", err)
+	}
+	return nil
+}
+
+func podRigProjectionWriteCommand(projectedSite, projectedSuspension []byte, sitePath, suspensionPath, linuxUsername string) []string {
+	writeScript := `set -eu
+umask 022
+mkdir -p "$(dirname "$3")" "$(dirname "$4")"
+site_mode=$(stat -c '%a' "$3" 2>/dev/null || printf '%s' '644')
+printf '%s' "$1" | base64 -d > "$3.tmp"
+chmod "$site_mode" "$3.tmp"
+mv "$3.tmp" "$3"
+printf '%s' "$2" | base64 -d > "$4.tmp"
+chmod 600 "$4.tmp"
+mv "$4.tmp" "$4"
+if [ -n "$5" ]; then
+  attempts=0
+  until id "$5" >/dev/null 2>&1; do
+    attempts=$((attempts + 1))
+    if [ "$attempts" -ge 30 ]; then
+      echo "timed out waiting for dynamic user $5" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+  chown "$5" "$3" "$4" "$(dirname "$3")" "$(dirname "$4")"
+fi
+`
+	return []string{
+		"sh", "-c", writeScript, "gc-rig-projection",
+		base64.StdEncoding.EncodeToString(projectedSite),
+		base64.StdEncoding.EncodeToString(projectedSuspension),
+		sitePath,
+		suspensionPath,
+		linuxUsername,
+	}
+}
+
+func resolveControllerPath(ctrlCity, path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("path is empty")
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(ctrlCity, path)
+	}
+	resolved, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(resolved), nil
+}
+
+// initBeadsInPod verifies the existing canonical hosted-Dolt scope before
+// updating only the pod-local server endpoint mirror. Missing or conflicting
+// state fails closed without initializing or mutating the hosted store.
 func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, workDir, managedServiceHost, managedServicePort string) error {
-	projected, err := projectedPodDoltEnv(cfg.Env, managedServiceHost, managedServicePort)
+	identity, err := resolvePodHostedDoltIdentity(cfg.Env, "", managedServiceHost, managedServicePort)
 	if err != nil {
 		return err
 	}
-	if len(projected) == 0 {
+	if identity == nil {
 		return nil
 	}
-	doltHost := projected["GC_DOLT_HOST"]
-	doltPort := projected["GC_DOLT_PORT"]
 	storeRoot := projectedPodStoreRoot(cfg, workDir)
-	prefix := strings.TrimSpace(cfg.Env["GC_BEADS_PREFIX"])
-	if prefix == "" {
-		return fmt.Errorf("missing projected GC_BEADS_PREFIX")
-	}
-
-	portNum, err := strconv.Atoi(doltPort)
+	identityPath := shellquote.Quote(contract.ProjectIdentityPath(""))
+	portNum, err := strconv.Atoi(identity.Port)
 	if err != nil {
-		return fmt.Errorf("invalid projected GC_DOLT_PORT %q: %w", doltPort, err)
+		return fmt.Errorf("invalid projected GC_DOLT_PORT %q: %w", identity.Port, err)
 	}
 	patchJSON, err := json.Marshal(map[string]any{
-		"dolt_server_host": doltHost,
+		"dolt_server_host": identity.Host,
 		"dolt_server_port": portNum,
 	})
 	if err != nil {
 		return fmt.Errorf("marshaling beads patch: %w", err)
 	}
 	patchB64 := base64.StdEncoding.EncodeToString(patchJSON)
-	prefixB64 := base64.StdEncoding.EncodeToString([]byte(prefix))
+	projectIDB64 := base64.StdEncoding.EncodeToString([]byte(identity.ProjectID))
+	prefixB64 := base64.StdEncoding.EncodeToString([]byte(identity.Prefix))
+	databaseB64 := base64.StdEncoding.EncodeToString([]byte(identity.Database))
+	doltHostB64 := base64.StdEncoding.EncodeToString([]byte(identity.Host))
+	doltPortB64 := base64.StdEncoding.EncodeToString([]byte(identity.Port))
 	storeRootB64 := base64.StdEncoding.EncodeToString([]byte(storeRoot))
 
-	patchCmd := fmt.Sprintf(
-		`WD=$(echo '%s' | base64 -d) && cd "$WD" && PATCH=$(echo '%s' | base64 -d) && `+
-			`if [ -f .beads/metadata.json ]; then `+
-			`python3 -c "import json,sys; `+
-			`m=json.load(open('.beads/metadata.json')); `+
-			`p=json.loads(sys.argv[1]); m.update(p); m.pop('project_id', None); `+
+	initCmd := fmt.Sprintf(
+		`WD=$(echo '%s' | base64 -d) && PROJECT_ID=$(echo '%s' | base64 -d) && PREFIX=$(echo '%s' | base64 -d) && `+
+			`DATABASE=$(echo '%s' | base64 -d) && DOLT_HOST=$(echo '%s' | base64 -d) && DOLT_PORT=$(echo '%s' | base64 -d) && `+
+			`PATCH=$(echo '%s' | base64 -d) && cd "$WD" || exit 1; `+
+			`test -f .beads/metadata.json && test -f `+identityPath+` && test -f .beads/config.yaml || `+
+			`{ echo 'hosted Dolt scoped beads files are incomplete' >&2; exit 1; }; `+
+			`grep -Fqx "id = \"$PROJECT_ID\"" `+identityPath+` || `+
+			`{ echo 'hosted Dolt project identity does not match session scope' >&2; exit 1; }; `+
+			`python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); `+
+			`assert str(m.get("dolt_database", "")).strip() == sys.argv[2]; `+
+			`assert str(m.get("project_id", "")).strip() == sys.argv[3]' `+
+			`.beads/metadata.json "$DATABASE" "$PROJECT_ID" || `+
+			`{ echo 'hosted Dolt database or project identity does not match session scope' >&2; exit 1; }; `+
+			`GOT_PREFIX=$(BEADS_DIR="$WD/.beads" bd config get issue_prefix 2>/dev/null) || exit 1; `+
+			`[ "$GOT_PREFIX" = "$PREFIX" ] || { echo 'hosted Dolt beads prefix does not match session scope' >&2; exit 1; }; `+
+			`python3 -c "import json,sys; m=json.load(open('.beads/metadata.json')); `+
+			`p=json.loads(sys.argv[1]); m.update(p); `+
 			`json.dump(m,open('.beads/metadata.json','w'),indent=2)" "$PATCH" 2>/dev/null || `+
 			`printf '%%s' "$PATCH" | python3 -c "import json,sys; `+
 			`m=json.load(open('.beads/metadata.json')); `+
-			`p=json.loads(sys.stdin.read()); m.update(p); m.pop('project_id', None); `+
-			`json.dump(m,open('.beads/metadata.json','w'),indent=2)"; `+
-			`else PREFIX=$(echo '%s' | base64 -d) && `+
-			`DOLT_HOST=$(echo '%s' | base64 -d) && `+
-			`DOLT_PORT=$(echo '%s' | base64 -d) && `+
-			`yes | BEADS_DIR="$WD/.beads" bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" -p "$PREFIX" --skip-hooks --skip-agents; fi`,
-		storeRootB64, patchB64, prefixB64,
-		base64.StdEncoding.EncodeToString([]byte(doltHost)),
-		base64.StdEncoding.EncodeToString([]byte(doltPort)),
+			`p=json.loads(sys.stdin.read()); m.update(p); `+
+			`json.dump(m,open('.beads/metadata.json','w'),indent=2)"`,
+		storeRootB64, projectIDB64, prefixB64, databaseB64, doltHostB64, doltPortB64, patchB64,
 	)
-	_, err = ops.execInPod(ctx, podName, "agent", []string{"sh", "-c", patchCmd}, nil)
+	_, err = ops.execInPod(ctx, podName, "agent", []string{"sh", "-c", initCmd}, nil)
 	return err
 }
 
