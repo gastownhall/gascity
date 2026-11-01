@@ -3125,9 +3125,10 @@ func reapStaleSessionBeads(
 		if !info.PendingCreateClaim && strings.TrimSpace(info.LastWokeAt) != "" {
 			continue
 		}
-		// Startup grace: don't reap beads younger than the creating-state
-		// timeout. Use the latest known start boundary, not just CreatedAt,
-		// because a long-lived bead may have been woken moments ago.
+		// Startup grace: don't reap until the creating-state timeout has elapsed
+		// from the latest known start boundary. Consider CreatedAt, the effective
+		// pending-create marker (pending_create_started_at), and last_woke_at so a
+		// long-lived bead is not reaped just after its pending-create episode or wake.
 		// Zero CreatedAt means unknown age — skip conservatively.
 		startedAt, ok := staleReapStartBoundaryInfo(info)
 		if !ok {
@@ -4134,13 +4135,19 @@ func stopRuntimeBeforeSessionBeadMutationInfo(
 // WI-6 R1: raw form is now oracle-only — reapStaleSessionBeads reads via
 // staleReapStartBoundaryInfo. It survives solely as the raw side of the
 // TestSessionClassifierInfoEquivalence timeBoolChecks "staleReapStartBoundary"
-// row; delete it together with that row (whose recent-wake fixture pins the
-// last_woke_at-upgrade branch on both forms).
+// row; delete it together with that row. The future marker in the
+// "fresh-creating" fixture exercises raw/typed parity; the recent-wake fixture
+// pins the last_woke_at boundary update on both forms.
 func staleReapStartBoundary(b beads.Bead) (time.Time, bool) {
 	if b.CreatedAt.IsZero() {
 		return time.Time{}, false
 	}
 	startedAt := b.CreatedAt
+	if raw := strings.TrimSpace(b.Metadata["pending_create_started_at"]); raw != "" {
+		if attemptAt, err := time.Parse(time.RFC3339, raw); err == nil && attemptAt.After(startedAt) {
+			startedAt = attemptAt
+		}
+	}
 	if raw := strings.TrimSpace(b.Metadata["last_woke_at"]); raw != "" {
 		if wokeAt, err := time.Parse(time.RFC3339, raw); err == nil && wokeAt.After(startedAt) {
 			startedAt = wokeAt
@@ -4150,14 +4157,19 @@ func staleReapStartBoundary(b beads.Bead) (time.Time, bool) {
 }
 
 // staleReapStartBoundaryInfo is the session.Info sibling of staleReapStartBoundary:
-// it computes the reap start boundary from Info.CreatedAt and the raw last_woke_at
-// mirror (Info.LastWokeAt), identical to the raw form. Equivalence is pinned by
-// TestSessionClassifierInfoEquivalence.
+// it computes the reap start boundary from Info.CreatedAt and the raw
+// pending_create_started_at / last_woke_at mirrors, identical to the raw form.
+// Equivalence is pinned by TestSessionClassifierInfoEquivalence.
 func staleReapStartBoundaryInfo(i session.Info) (time.Time, bool) {
 	if i.CreatedAt.IsZero() {
 		return time.Time{}, false
 	}
 	startedAt := i.CreatedAt
+	if raw := strings.TrimSpace(i.PendingCreateStartedAt); raw != "" {
+		if attemptAt, err := time.Parse(time.RFC3339, raw); err == nil && attemptAt.After(startedAt) {
+			startedAt = attemptAt
+		}
+	}
 	if raw := strings.TrimSpace(i.LastWokeAt); raw != "" {
 		if wokeAt, err := time.Parse(time.RFC3339, raw); err == nil && wokeAt.After(startedAt) {
 			startedAt = wokeAt
