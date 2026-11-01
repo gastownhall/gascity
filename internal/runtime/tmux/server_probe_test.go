@@ -445,6 +445,150 @@ func TestNewSessionErrNoServerReprobeWithoutAnswerFailsClosed(t *testing.T) {
 	}
 }
 
+// reprobeDeadlineExecutor is a context-aware scripted executor: fakeExecutor
+// ignores the context it is given, so deadline sharing between the first
+// probe, the observation and the re-probe needs one that records
+// ctx.Deadline() and can wait on ctx.Done(). The first has-session reports
+// ErrNoServer; the second returns secondErr, or waits for the context to end
+// when block is set.
+type reprobeDeadlineExecutor struct {
+	calls     [][]string
+	deadlines []time.Time
+	secondErr error
+	block     bool
+}
+
+func (e *reprobeDeadlineExecutor) execute(args []string) (string, error) {
+	return e.executeCtx(context.Background(), args)
+}
+
+func (e *reprobeDeadlineExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
+	cp := make([]string, len(args))
+	copy(cp, args)
+	e.calls = append(e.calls, cp)
+	if dl, ok := ctx.Deadline(); ok {
+		e.deadlines = append(e.deadlines, dl)
+	}
+	if !firstArgsContainHasSession(args) {
+		return "", nil
+	}
+	if len(e.calls) == 1 {
+		return "", ErrNoServer
+	}
+	if e.block {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	return "", e.secondErr
+}
+
+// TestProbeServerAliveReprobeSharesPreflightDeadline pins the budget of the
+// reconciliation: the observation and the re-probe run inside the original
+// preflight deadline, never a fresh one. An exhausted budget refuses without
+// issuing a second request, and an in-flight re-probe is canceled by that
+// same deadline.
+func TestProbeServerAliveReprobeSharesPreflightDeadline(t *testing.T) {
+	t.Run("observation and re-probe share the preflight deadline", func(t *testing.T) {
+		exec := &reprobeDeadlineExecutor{secondErr: ErrSessionNotFound}
+		var observerDeadlines []time.Time
+		tm := &Tmux{
+			cfg:  Config{SocketName: "gc-test"},
+			exec: exec,
+			serverSocketObserver: func(ctx context.Context, _ string) error {
+				if dl, ok := ctx.Deadline(); ok {
+					observerDeadlines = append(observerDeadlines, dl)
+				}
+				return fmt.Errorf("path=/tmux/gc-test inode=97 peer_pid=4242 reason=live-unix-socket")
+			},
+		}
+
+		if err := tm.probeServerAlive(); err != nil {
+			t.Fatalf("probeServerAlive after an answered re-probe: %v", err)
+		}
+		if len(exec.calls) != 2 {
+			t.Fatalf("executor calls = %#v, want the preflight probe twice", exec.calls)
+		}
+		if len(exec.deadlines) != 2 || len(observerDeadlines) != 1 {
+			t.Fatalf("recorded deadlines: exec=%v observer=%v, want one per request and one observation", exec.deadlines, observerDeadlines)
+		}
+		if !exec.deadlines[0].Equal(exec.deadlines[1]) || !exec.deadlines[0].Equal(observerDeadlines[0]) {
+			t.Fatalf("deadlines differ: first=%s reprobe=%s observation=%s, want the shared preflight deadline",
+				exec.deadlines[0], exec.deadlines[1], observerDeadlines[0])
+		}
+	})
+
+	t.Run("exhausted budget refuses without a second request", func(t *testing.T) {
+		prev := newSessionProbeTimeout
+		newSessionProbeTimeout = 100 * time.Millisecond
+		t.Cleanup(func() { newSessionProbeTimeout = prev })
+
+		exec := &reprobeDeadlineExecutor{secondErr: ErrNoServer}
+		tm := &Tmux{
+			cfg:  Config{SocketName: "gc-test"},
+			exec: exec,
+			serverSocketObserver: func(ctx context.Context, _ string) error {
+				<-ctx.Done()
+				return ctx.Err()
+			},
+		}
+
+		start := time.Now()
+		err := tm.probeServerAlive()
+		elapsed := time.Since(start)
+
+		if !errors.Is(err, ErrServerDegraded) {
+			t.Fatalf("err = %v, want ErrServerDegraded", err)
+		}
+		if errors.Is(err, ErrNoServer) {
+			t.Fatalf("err = %v, must not wrap ErrNoServer", err)
+		}
+		if !strings.Contains(err.Error(), "reprobe="+context.DeadlineExceeded.Error()) {
+			t.Fatalf("err = %q, want the expired-budget error as the re-probe result", err)
+		}
+		if len(exec.calls) != 1 {
+			t.Fatalf("executor calls = %#v, want only the initial probe once the budget was exhausted", exec.calls)
+		}
+		if elapsed > 2*time.Second {
+			t.Fatalf("probe took %s, want < 2s (timeout should be ~100ms)", elapsed)
+		}
+	})
+
+	t.Run("in-flight re-probe is canceled by the original deadline", func(t *testing.T) {
+		prev := newSessionProbeTimeout
+		newSessionProbeTimeout = 100 * time.Millisecond
+		t.Cleanup(func() { newSessionProbeTimeout = prev })
+
+		exec := &reprobeDeadlineExecutor{block: true}
+		tm := &Tmux{
+			cfg:  Config{SocketName: "gc-test"},
+			exec: exec,
+			serverSocketObserver: func(context.Context, string) error {
+				return fmt.Errorf("path=/tmux/gc-test inode=97 peer_pid=4242 reason=live-unix-socket")
+			},
+		}
+
+		start := time.Now()
+		err := tm.probeServerAlive()
+		elapsed := time.Since(start)
+
+		if !errors.Is(err, ErrServerDegraded) {
+			t.Fatalf("err = %v, want ErrServerDegraded", err)
+		}
+		if !strings.Contains(err.Error(), "reprobe="+context.DeadlineExceeded.Error()) {
+			t.Fatalf("err = %q, want the deadline error as the re-probe result", err)
+		}
+		if len(exec.calls) != 2 {
+			t.Fatalf("executor calls = %#v, want the probe and the canceled re-probe", exec.calls)
+		}
+		if len(exec.deadlines) == 2 && !exec.deadlines[0].Equal(exec.deadlines[1]) {
+			t.Fatalf("re-probe deadline %s differs from the preflight deadline %s", exec.deadlines[1], exec.deadlines[0])
+		}
+		if elapsed > 2*time.Second {
+			t.Fatalf("probe took %s, want < 2s (timeout should be ~100ms)", elapsed)
+		}
+	})
+}
+
 type socketModeFileInfo struct{ os.FileInfo }
 
 func (info socketModeFileInfo) Mode() os.FileMode { return info.FileInfo.Mode() | os.ModeSocket }

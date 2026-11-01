@@ -713,9 +713,12 @@ func (t *Tmux) probeServerAlive() error {
 		// live socket. Reconcile with exactly one identical request; only a
 		// server that answers — success, session not found, or no current
 		// target — proves new-session will attach rather than clobber.
-		_, reprobeErr := t.runCtx(ctx, "has-session", "-t", "="+probeSessionName)
-		if reprobeErr == nil || errors.Is(reprobeErr, ErrSessionNotFound) || errors.Is(reprobeErr, ErrNoCurrentTarget) {
-			return nil
+		reprobeErr := ctx.Err()
+		if reprobeErr == nil {
+			_, reprobeErr = t.runCtx(ctx, "has-session", "-t", "="+probeSessionName)
+			if reprobeErr == nil || errors.Is(reprobeErr, ErrSessionNotFound) || errors.Is(reprobeErr, ErrNoCurrentTarget) {
+				return nil
+			}
 		}
 		// Do not wrap ErrNoServer here (reprobeErr is rendered as text for
 		// the same reason): callers such as EnsureSessionFresh must not retry
