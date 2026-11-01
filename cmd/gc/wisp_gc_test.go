@@ -3191,3 +3191,23 @@ func TestWispGC_SessionPurgeCursorSurvivesReload(t *testing.T) {
 		})
 	}
 }
+
+func TestWispGC_ReloadCarryFollowsEnablement(t *testing.T) {
+	lastRun := time.Now()
+	ran := &memoryWispGC{interval: time.Hour, ttl: time.Hour, lastRun: lastRun}
+
+	if got := carryWispGCState(ran, newWispGC(0, time.Hour, 0)); got != nil {
+		t.Fatalf("carry into a disabled GC = %#v, want an untyped nil interface", got)
+	}
+	if got := carryWispGCState(ran, (*memoryWispGC)(nil)); got == nil {
+		t.Fatal("carry into a typed-nil tracker returned an untyped nil; want next unchanged")
+	}
+	var typedNil *memoryWispGC
+	for _, prev := range []wispGC{nil, typedNil} {
+		next := newWispGC(time.Hour, time.Hour, 0)
+		got := carryWispGCState(prev, next)
+		if got != next || !got.shouldRun(lastRun) {
+			t.Fatalf("carry from a disabled GC (%#v) = %#v, want next due on its first tick", prev, got)
+		}
+	}
+}
