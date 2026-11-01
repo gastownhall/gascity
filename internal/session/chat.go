@@ -958,6 +958,20 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 		}
 	}()
 	if !converged {
+		// The start launches a new process, so it gets the generated launch
+		// env its creator built, not only the hints the caller holds. One
+		// that cannot be built refuses the start before anything is killed
+		// or minted.
+		if m.launchEnvResolver != nil {
+			launchEnv, err := m.launchEnvResolver(infoFromPersistedBead(b), maps.Clone(b.Metadata))
+			if err != nil {
+				if unroute != nil {
+					unroute()
+				}
+				return fmt.Errorf("session %s: building launch env: %w", id, err)
+			}
+			cfg.Env = mergeEnv(cfg.Env, launchEnv)
+		}
 		// Refuse to resume if a prior escaped process for this session could
 		// not be confirmed dead: a survivor would race this replacement for
 		// the same work bead (duplicate bd close). This is the
