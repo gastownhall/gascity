@@ -216,36 +216,39 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 	}
 	if info.MetadataState == "asleep" {
 		// A one_shot pool's own exit is expected completion, not a crash to
-		// avoid resuming: nothing closes its bead (the reconciler does not
-		// actually implement the "closes orphaned asleep beads" behavior this
-		// file's callers assume), so blanket-excluding every asleep session
-		// leaves it open forever holding the identity's runtime session_name
-		// — the next tick's fresh create then fails closed on that same name
-		// (derivePoolSessionName -> errPoolSessionNameUnavailable) until an
-		// operator manually closes it. A freeable-asleep (idle/idle-timeout/
+		// avoid resuming, and a persistent canonical singleton
+		// (UsesCanonicalSingletonPoolIdentity) has no other identity to mint:
+		// claimFreshPoolSlotInfo counts its open asleep row as the canonical
+		// holder. Blanket-excluding every asleep session leaves such a row
+		// open holding the identity, and the next tick's fresh create fails
+		// closed on it (errPoolSessionNameUnavailable) until an operator
+		// manually closes it. A freeable-asleep (idle/idle-timeout/
 		// city-stop/failed-create/runtime-missing/provider-terminal-error/
 		// max-session-age/killed without an honored kill fence — see
-		// isPoolSessionSlotFreeableInfo) one_shot exit carries no deliberate
-		// hold, so it is reused instead: the ordinary wake path retires the
-		// exit and remints the identity in place. Persistent pools keep
-		// today's behavior (a genuine crash gets a fresh identity rather than
-		// resuming a possibly-corrupt conversation); their freeable rows are
-		// closed by the reconciler's pool-slot close instead.
-		if cfgAgent.Lifecycle != config.AgentLifecycleOneShot || !isPoolSessionSlotFreeableInfo(info, bp.now()) {
+		// isPoolSessionSlotFreeableInfo) row of either shape carries no
+		// deliberate hold, so it is reused instead: the ordinary wake path
+		// retires the sleep and remints the identity in place. Other
+		// persistent pools never reuse an asleep row (a genuine crash gets a
+		// fresh identity rather than resuming a possibly-corrupt
+		// conversation); their freeable rows are left to the reconciler's
+		// pool-slot close.
+		wakeReusable := cfgAgent.Lifecycle == config.AgentLifecycleOneShot ||
+			cfgAgent.UsesCanonicalSingletonPoolIdentity()
+		if !wakeReusable || !isPoolSessionSlotFreeableInfo(info, bp.now()) {
 			return false
 		}
-		// A one_shot exit that still holds an open/in-progress assigned work
+		// An asleep row that still holds an open/in-progress assigned work
 		// bead under any of its identities is not a clean exit: the bounded
 		// unit of work never finished, so waking/reusing it here hands the
 		// step no real execution turn — the reused session drains and lands
 		// orphaned ~45-55s later, and the step stays pinned in_progress on
-		// the dead name with retry control never re-attempting it. Fall
-		// through to fresh-identity creation instead (the pre-6f1ee854b
-		// behavior for this case), which claims the step properly. Uses the
-		// wider by-any-identity match (including actor alias) because
-		// claimed work is commonly assigned under GC_ALIAS/BEADS_ACTOR, not
-		// necessarily the raw SessionNameMetadata the narrower
-		// sessionBeadHasAssignedWorkInfo check below matches.
+		// the dead name with retry control never re-attempting it. Excluding
+		// it from anonymous reuse leaves it to the concrete resume tier or
+		// fresh-identity creation. Uses the wider by-any-identity match
+		// (including actor alias) because claimed work is commonly assigned
+		// under GC_ALIAS/BEADS_ACTOR, not necessarily the raw
+		// SessionNameMetadata the narrower sessionBeadHasAssignedWorkInfo
+		// check below matches.
 		if sessionBeadHasAssignedWorkByAnyIdentityInfo(bp.assignedWorkBeads, info) {
 			return false
 		}

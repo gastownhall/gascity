@@ -296,8 +296,8 @@ func (r *rowFacts) startHealed(heal intent) intent {
 }
 
 // asleepStranded reports a persistent pool seat with no work assigned, which
-// AL1 never wakes asleep (reusablePoolSessionInfo); legacy's pool-slot close
-// replaces it. Until A21 does (C5c1), its death restarts it in place, and
+// AL1 wakes asleep only for a canonical singleton with a freeable sleep
+// (reusablePoolSessionInfo); otherwise legacy's pool-slot close replaces it. Until A21 does (C5c1), its death restarts it in place, and
 // the fallback that leaves it asleep for good is not its (staging J23).
 func (r *rowFacts) asleepStranded() bool {
 	info := r.row.Info

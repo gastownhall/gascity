@@ -341,13 +341,14 @@ func TestReusablePoolSessionInfo_OneShotAsleepFreeableIsReusable(t *testing.T) {
 			"want false — a deliberately held sleep must still block reuse")
 	}
 
-	// Control: a persistent (non-one_shot) pool keeps today's behavior — an
-	// asleep session is never reused, even when freeable, so a genuine crash
-	// gets a fresh identity instead of resuming a possibly-corrupt conversation.
+	// Control: a persistent (non-one_shot) pool that is not a canonical
+	// singleton never reuses an asleep session, even when freeable, so a
+	// genuine crash gets a fresh identity instead of resuming a
+	// possibly-corrupt conversation.
 	persistentAgent := &config.Agent{Name: "claude-sonnet-one-shot", Dir: "fable-nomad"}
 	if got := reusablePoolSessionInfo(bp, persistentAgent, template, asleepFreeable, nil); got {
 		t.Fatalf("reusablePoolSessionInfo(persistent, asleep, sleep_reason=idle) = true; " +
-			"want false — the freeable-asleep reuse carve-out is scoped to lifecycle=one_shot")
+			"want false — freeable-asleep reuse is scoped to lifecycle=one_shot and canonical singletons")
 	}
 }
 
@@ -404,6 +405,70 @@ func TestReusablePoolSessionInfo_OneShotAsleepFreeableWithOpenAssignedWorkNotReu
 			"want false — an asleep one_shot exit that still holds in-progress assigned work must fall "+
 			"through to fresh-identity creation, not be wake-reused (session %s)",
 			asleepFreeableWithWork.ID)
+	}
+}
+
+// persistentSingletonAsleepFixture is a persistent pool agent with
+// max_active_sessions=1 (the canonical singleton identity) and its open
+// asleep session row, eligible for reuse apart from the asleep-lifecycle rule.
+func persistentSingletonAsleepFixture(t *testing.T) (*config.Agent, string, session.Info) {
+	t.Helper()
+	one := 1
+	cfgAgent := &config.Agent{Name: "worker", Dir: "rig", MaxActiveSessions: &one}
+	if !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		t.Fatal("precondition: agent must use the canonical singleton pool identity")
+	}
+	template := cfgAgent.QualifiedName()
+	return cfgAgent, template, session.Info{
+		ID:                  "session-singleton-asleep",
+		Template:            template,
+		SessionNameMetadata: "rig--worker",
+		AgentName:           template,
+		Alias:               template,
+		AliasHistory:        []string{"rig/worker-old"},
+		PoolManaged:         true,
+		MetadataState:       "asleep",
+		SleepReason:         string(session.SleepReasonCityStop),
+		SleptAt:             "2026-11-01T16:00:00Z",
+	}
+}
+
+// TestReusablePoolSessionInfo_PersistentSingletonAsleepFreeableIsReusable
+// guards gastownhall/gascity#8364: a persistent pool with
+// max_active_sessions=1 has one canonical identity, and claimFreshPoolSlotInfo
+// counts its open asleep row as that identity's holder. A freeable sleep with
+// no assigned work must therefore be reusable through the wake path, or the
+// pool can neither reuse nor create a session.
+func TestReusablePoolSessionInfo_PersistentSingletonAsleepFreeableIsReusable(t *testing.T) {
+	t.Parallel()
+
+	cfgAgent, template, base := persistentSingletonAsleepFixture(t)
+	tests := []struct {
+		name   string
+		mutate func(*session.Info)
+		work   []beads.Bead
+	}{
+		{name: "idle", mutate: func(i *session.Info) { i.SleepReason = string(session.SleepReasonIdle) }},
+		{name: "city-stop", mutate: func(*session.Info) {}},
+		{name: "runtime-missing", mutate: func(i *session.Info) { i.SleepReason = string(session.SleepReasonRuntimeMissing) }},
+		{name: "empty reason with slept_at", mutate: func(i *session.Info) { i.SleepReason = "" }},
+		{
+			name:   "closed assigned work",
+			mutate: func(*session.Info) {},
+			work:   []beads.Bead{{ID: "work-done", Status: "closed", Assignee: base.Alias}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			info := base
+			tc.mutate(&info)
+			bp := &agentBuildParams{assignedWorkBeads: tc.work}
+			if got := reusablePoolSessionInfo(bp, cfgAgent, template, info, nil); !got {
+				t.Fatalf("reusablePoolSessionInfo(persistent singleton, asleep, sleep_reason=%q) = false; "+
+					"want true — claimFreshPoolSlotInfo still counts this row as the canonical holder", info.SleepReason)
+			}
+		})
 	}
 }
 

@@ -129,8 +129,9 @@ func oracleCity(t *testing.T, seed int64) allocInputs {
 		}
 		future := allocNow.Add(time.Hour).Format(time.RFC3339)
 		if state == "asleep" && rng.Intn(2) == 0 {
-			// Freeable: a one_shot pool reuses it unless it holds work
-			// under any identity, its alias history included.
+			// Freeable: a one_shot or canonical singleton pool reuses it
+			// unless it holds work under any identity, its alias history
+			// included.
 			meta = append(meta, "sleep_reason", "idle", "slept_at", ago(time.Minute), "alias_history", "old-"+id)
 		}
 		switch rng.Intn(12) {
