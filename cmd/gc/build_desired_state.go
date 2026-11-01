@@ -248,27 +248,24 @@ var (
 // contending pools so stable template sort order does not always win.
 var poolSessionCreateFairShareCounter atomic.Uint64
 
-func (bp *agentBuildParams) configurePoolSessionCreateFairShare(states []PoolDesiredState) {
+func (bp *agentBuildParams) configurePoolSessionCreateFairShare(items []poolRealizeWorkItem, pending []int, seed uint64) {
 	if bp == nil || bp.poolSessionCreateBudget == nil {
 		return
 	}
-	demands := make([]poolplan.Demand, 0, len(states))
-	for _, state := range states {
-		demand := poolplan.Demand{Template: state.Template}
-		for _, request := range state.Requests {
-			// Requests with a session bead ID represent in-flight capacity and
-			// must not reserve fresh-create budget for this template.
-			if request.Tier != "new" || request.SessionBeadID != "" {
-				continue
-			}
-			demand.FreshCreates++
-			demand.HasFloor = demand.HasFloor || request.FloorGuarantee
+	demands := make([]poolplan.Demand, 0)
+	byTemplate := make(map[string]int)
+	for _, idx := range pending {
+		item := &items[idx]
+		template := item.pool.agent.QualifiedName()
+		i, ok := byTemplate[template]
+		if !ok {
+			i = len(demands)
+			byTemplate[template] = i
+			demands = append(demands, poolplan.Demand{Template: template})
 		}
-		if demand.FreshCreates > 0 {
-			demands = append(demands, demand)
-		}
+		demands[i].FreshCreates++
+		demands[i].HasFloor = demands[i].HasFloor || item.request.FloorGuarantee
 	}
-	seed := poolSessionCreateFairShareCounter.Add(1) - 1
 	bp.poolSessionCreateBudget.ConfigureFairShare(demands, seed)
 }
 
@@ -797,7 +794,6 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 			poolDecisionTime,
 			trace,
 		)
-		bp.configurePoolSessionCreateFairShare(poolDesiredStates)
 		recordDemandSubPhase(trace, "demand_snapshot.compute_pool_desired", subPhaseStart, map[string]any{
 			"pools":      len(poolDesiredStates),
 			"work_beads": len(poolWorkBeads),
@@ -808,6 +804,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 		var realized poolRealizeStats
 		probe := &poolRealizeProbe{now: trace.demandNow}
 		bp.realizeProbe = probe
+		inputs := make([]poolRealizeInput, 0, len(poolDesiredStates))
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
 			if cfgAgent == nil {
@@ -817,8 +814,9 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 			if agentInSuspendedRig(cityPath, cfgAgent, cfg.Rigs, suspendedRigPaths) {
 				continue
 			}
-			realized.add(realizePoolDesiredSessionsAt(bp, cfgAgent, poolState, poolDecisionTime, desired, stderr))
+			inputs = append(inputs, poolRealizeInput{agent: cfgAgent, state: poolState})
 		}
+		realized = realizePoolDesiredSessionInputsAt(bp, inputs, poolDecisionTime, desired, stderr)
 		bp.realizeProbe = nil
 		recordDemandSubPhase(trace, "demand_snapshot.realize_pools", subPhaseStart, map[string]any{
 			"pools":             len(poolDesiredStates),
@@ -3985,6 +3983,20 @@ func (bp *agentBuildParams) realizeNow() time.Time {
 	return bp.realizeProbe.now()
 }
 
+// poolRealizeInput keeps a pool's configured agent and ordered requests together.
+type poolRealizeInput struct {
+	agent *config.Agent
+	state PoolDesiredState
+}
+
+// poolRealizeSelection owns the maps shared by one pool's serial selection
+// and finalization; other pools never share its slot or reuse reservations.
+type poolRealizeSelection struct {
+	agent     *config.Agent
+	used      map[string]bool
+	usedSlots map[int]bool
+}
+
 // poolRealizeWorkItem holds the per-request state threaded across the
 // three-phase realizePoolDesiredSessions pipeline. Phase A (serial) populates
 // either sessionInfo+slot (reuse path) or plan+slot (create path); Phase B
@@ -3993,6 +4005,7 @@ func (bp *agentBuildParams) realizeNow() time.Time {
 // typed session.Info the create/reuse path now returns directly (W-pool), so the
 // realize loop carries Info end to end with no raw pool-loop projection.
 type poolRealizeWorkItem struct {
+	pool        *poolRealizeSelection
 	request     SessionRequest
 	skip        bool
 	plan        *poolSessionCreatePlan
@@ -4019,79 +4032,88 @@ func realizePoolDesiredSessionsAt(
 	desired map[string]TemplateParams,
 	stderr io.Writer,
 ) poolRealizeStats {
-	stats := poolRealizeStats{requests: len(poolState.Requests)}
-	qualifiedName := cfgAgent.QualifiedName()
-	if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedName); err != nil {
-		fmt.Fprintf(stderr, "buildDesiredState: pool %q: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
-		return stats
-	}
-	segmentStart := bp.realizeNow()
-	used := make(map[string]bool)
-	usedSlots := make(map[int]bool)
+	return realizePoolDesiredSessionInputsAt(bp, []poolRealizeInput{{agent: cfgAgent, state: poolState}}, poolDecisionTime, desired, stderr)
+}
 
-	// Phase A (serial, fast): select an existing session bead to reuse OR
-	// reserve an (alias, slot) for a fresh create. Mutates used/usedSlots
-	// under serial control so dedup and slot allocation remain deterministic.
-	items := make([]poolRealizeWorkItem, 0, len(poolState.Requests))
-	for _, request := range poolState.Requests {
-		// planItem runs the per-request selection and returns the work item;
-		// any early-out (skip path) sets item.skip and returns. The single
-		// append below keeps slice growth in one place.
-		planItem := func() poolRealizeWorkItem {
-			item := poolRealizeWorkItem{request: request}
-			var prefer *session.Info
-			if request.SessionBeadID != "" {
-				if candidate, ok := bp.sessionBeads.FindInfoByID(request.SessionBeadID); ok {
-					// Defense in depth: ComputePoolDesiredStates filters out
-					// named-session beads from pool resume requests. If one
-					// slipped through, materializing it here would create a
-					// phantom "{name}-N" sibling to the canonical named session.
-					if isNamedSessionInfo(candidate) {
-						fmt.Fprintf(stderr, "buildDesiredState: pool %q: refusing to materialize named-session bead %s as pool instance (would create phantom %q-N sibling)\n", qualifiedName, candidate.ID, cfgAgent.Name) //nolint:errcheck
-						item.skip = true
-						return item
-					}
-					prefer = &candidate
-				}
-			}
-			sessionInfo, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, request, poolDecisionTime, used, usedSlots)
-			if err != nil {
-				switch {
-				case errors.Is(err, errPoolSessionCreateBudgetExhausted):
-					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (fresh create deferred)\n", qualifiedName, err) //nolint:errcheck
-				case errors.Is(err, errPoolSessionCreatePartial):
-					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (partial demand read, fresh create blocked)\n", qualifiedName, err) //nolint:errcheck
-				case errors.Is(err, errPoolSessionCreateProviderRed):
-					// debug-level: fires every tick during a red episode; not operator noise
-					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (provider red, fresh create blocked)\n", qualifiedName, err) //nolint:errcheck
-				case errors.Is(err, errPoolSessionNameUnavailable):
-					// The slot's runtime name is a function of its identity, so
-					// it cannot be worked around by minting another one — that
-					// is exactly the leak this replaced. The holder is named in
-					// the error because a stalled slot is only diagnosable if
-					// the operator can see who is sitting on the name.
-					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (slot stalled on its own runtime name; retrying next tick)\n", qualifiedName, err) //nolint:errcheck
-				default:
-					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
-				}
-				item.skip = true
-				return item
-			}
-			if plan != nil {
-				item.plan = plan
-				item.slot = plan.poolSlot
-				return item
-			}
-			if used[sessionInfo.ID] {
-				item.skip = true
-				return item
-			}
-			used[sessionInfo.ID] = true
-			item.sessionInfo = sessionInfo
-			item.slot = slot
-			return item
+// realizePoolDesiredSessionInputsAt selects across every pool before dividing
+// fresh-create capacity. Only plans that passed reuse and eligibility checks
+// compete, and each claimed plan is attempted at most once in this build.
+func realizePoolDesiredSessionInputsAt(bp *agentBuildParams, inputs []poolRealizeInput, poolDecisionTime time.Time, desired map[string]TemplateParams, stderr io.Writer) poolRealizeStats {
+	stats := poolRealizeStats{}
+	segmentStart := bp.realizeNow()
+	items := make([]poolRealizeWorkItem, 0)
+	for _, input := range inputs {
+		cfgAgent, poolState := input.agent, input.state
+		stats.requests += len(poolState.Requests)
+		qualifiedName := cfgAgent.QualifiedName()
+		if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedName); err != nil {
+			fmt.Fprintf(stderr, "buildDesiredState: pool %q: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
+			continue
 		}
-		items = append(items, planItem())
+		pool := &poolRealizeSelection{agent: cfgAgent, used: make(map[string]bool), usedSlots: make(map[int]bool)}
+		used, usedSlots := pool.used, pool.usedSlots
+
+		// Phase A (serial, fast): select an existing session bead to reuse OR
+		// reserve an (alias, slot) for a fresh create. Mutates used/usedSlots
+		// under serial control so dedup and slot allocation remain deterministic.
+		for _, request := range poolState.Requests {
+			// planItem runs the per-request selection and returns the work item;
+			// any early-out (skip path) sets item.skip and returns. The single
+			// append below keeps slice growth in one place.
+			planItem := func() poolRealizeWorkItem {
+				item := poolRealizeWorkItem{pool: pool, request: request}
+				var prefer *session.Info
+				if request.SessionBeadID != "" {
+					if candidate, ok := bp.sessionBeads.FindInfoByID(request.SessionBeadID); ok {
+						// Defense in depth: ComputePoolDesiredStates filters out
+						// named-session beads from pool resume requests. If one
+						// slipped through, materializing it here would create a
+						// phantom "{name}-N" sibling to the canonical named session.
+						if isNamedSessionInfo(candidate) {
+							fmt.Fprintf(stderr, "buildDesiredState: pool %q: refusing to materialize named-session bead %s as pool instance (would create phantom %q-N sibling)\n", qualifiedName, candidate.ID, cfgAgent.Name) //nolint:errcheck
+							item.skip = true
+							return item
+						}
+						prefer = &candidate
+					}
+				}
+				sessionInfo, slot, plan, err := planPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, request, poolDecisionTime, used, usedSlots)
+				if err != nil {
+					switch {
+					case errors.Is(err, errPoolSessionCreatePartial):
+						fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (partial demand read, fresh create blocked)\n", qualifiedName, err) //nolint:errcheck
+					case errors.Is(err, errPoolSessionCreateProviderRed):
+						// debug-level: fires every tick during a red episode; not operator noise
+						fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (provider red, fresh create blocked)\n", qualifiedName, err) //nolint:errcheck
+					case errors.Is(err, errPoolSessionNameUnavailable):
+						// The slot's runtime name is a function of its identity, so
+						// it cannot be worked around by minting another one — that
+						// is exactly the leak this replaced. The holder is named in
+						// the error because a stalled slot is only diagnosable if
+						// the operator can see who is sitting on the name.
+						fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (slot stalled on its own runtime name; retrying next tick)\n", qualifiedName, err) //nolint:errcheck
+					default:
+						fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
+					}
+					item.skip = true
+					return item
+				}
+				if plan != nil {
+					item.plan = plan
+					item.slot = plan.poolSlot
+					return item
+				}
+				if used[sessionInfo.ID] {
+					item.skip = true
+					return item
+				}
+				used[sessionInfo.ID] = true
+				item.sessionInfo = sessionInfo
+				item.slot = slot
+				return item
+			}
+			items = append(items, planItem())
+		}
 	}
 	stats.plan = bp.realizeNow().Sub(segmentStart)
 
@@ -4106,12 +4128,30 @@ func realizePoolDesiredSessionsAt(
 			pending = append(pending, idx)
 		}
 	}
-	stats.creates = len(pending)
+	seed := poolSessionCreateFairShareCounter.Add(1) - 1
 	segmentStart = bp.realizeNow()
-	if len(pending) > 0 {
+	for len(pending) > 0 {
+		bp.configurePoolSessionCreateFairShare(items, pending, seed)
+		wave := make([]int, 0, len(pending))
+		deferred := make([]int, 0, len(pending))
+		for _, idx := range pending {
+			if bp.tryClaimPoolSessionCreate(items[idx].pool.agent.QualifiedName()) {
+				wave = append(wave, idx)
+			} else {
+				deferred = append(deferred, idx)
+			}
+		}
+		if len(wave) == 0 {
+			for _, idx := range deferred {
+				items[idx].skip = true
+				fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (fresh create deferred)\n", items[idx].pool.agent.QualifiedName(), errPoolSessionCreateBudgetExhausted) //nolint:errcheck
+			}
+			break
+		}
+		stats.creates += len(wave)
 		workerCount := poolRealizeParallelism
-		if workerCount > len(pending) {
-			workerCount = len(pending)
+		if workerCount > len(wave) {
+			workerCount = len(wave)
 		}
 		jobs := make(chan int)
 		var wg sync.WaitGroup
@@ -4120,41 +4160,33 @@ func realizePoolDesiredSessionsAt(
 			go func() {
 				defer wg.Done()
 				for idx := range jobs {
-					// Recover per job: a dead worker would leave the
-					// sender blocked on jobs.
-					func() {
-						defer recoverLeg(&items[idx].createErr, "pool "+qualifiedName+" create", stderr)
-						plan := *items[idx].plan
-						info, err := executePlannedPoolSessionBeadCreate(bp, cfgAgent, qualifiedName, plan)
-						if err != nil {
-							items[idx].createErr = err
-							return
-						}
-						items[idx].sessionInfo = info
-					}()
+					item := &items[idx]
+					item.sessionInfo, item.createErr = executePlannedPoolSessionBeadCreate(bp, item.pool.agent, item.pool.agent.QualifiedName(), *item.plan)
 				}
 			}()
 		}
-		for _, idx := range pending {
+		for _, idx := range wave {
 			jobs <- idx
 		}
 		close(jobs)
 		wg.Wait()
+		// All refunds have settled before the same seed divides remaining capacity.
+		// Attempted plans leave pending permanently, including failed creates.
+		pending = deferred
 	}
 	stats.create = bp.realizeNow().Sub(segmentStart)
 
 	// Phase C (serial, fast): finalize results in original request order.
-	// Failed creates release their reserved slot here, at end-of-cycle —
-	// unlike the original serial loop, which freed a failed slot before the
-	// next request was planned, letting a same-tick later request reclaim it.
-	// With Phase A planning all requests up front, that intra-tick reuse no
-	// longer happens: a failed create leaves a slot gap for this cycle and the
-	// slot is reclaimed on the next build tick. The pool's active-session
-	// count converges identically; only the transient slot numbering differs.
+	// Definite no-write failures release their slots at end-of-cycle. All
+	// requests were already planned, so those gaps are reclaimed next tick.
+	// Ambiguous writes retain both their slot reservation and create token.
 	// Template resolution + installAgentSideEffects (hooks.InstallWithResolver
 	// + autoSP.RouteACP) remain serial pending an audit of their thread-safety.
 	for i := range items {
 		item := &items[i]
+		cfgAgent := item.pool.agent
+		qualifiedName := cfgAgent.QualifiedName()
+		used, usedSlots := item.pool.used, item.pool.usedSlots
 		if item.skip {
 			continue
 		}
@@ -4162,7 +4194,9 @@ func realizePoolDesiredSessionsAt(
 			if item.createErr != nil {
 				stats.createErrors++
 				fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, item.createErr) //nolint:errcheck
-				delete(usedSlots, item.plan.slot)
+				if poolSessionCreateFailedWithoutWrite(item.createErr) {
+					delete(usedSlots, item.plan.slot)
+				}
 				continue
 			}
 			if used[item.sessionInfo.ID] {
@@ -5264,7 +5298,9 @@ func selectOrCreatePoolSessionBead(
 	}
 	info, err = executePlannedPoolSessionBeadCreate(bp, cfgAgent, template, *plan)
 	if err != nil {
-		delete(usedSlots, plan.slot)
+		if poolSessionCreateFailedWithoutWrite(err) {
+			delete(usedSlots, plan.slot)
+		}
 		return info, 0, err
 	}
 	return info, plan.poolSlot, nil
@@ -5293,6 +5329,17 @@ func selectOrPlanPoolSessionBead(
 	used map[string]bool,
 	usedSlots map[int]bool,
 ) (session.Info, int, *poolSessionCreatePlan, error) {
+	info, slot, plan, err := planPoolSessionBead(bp, cfgAgent, template, preferred, request, decisionTime, used, usedSlots)
+	if err == nil && plan != nil && !bp.tryClaimPoolSessionCreate(template) {
+		delete(usedSlots, plan.slot)
+		return session.Info{}, 0, nil, errPoolSessionCreateBudgetExhausted
+	}
+	return info, slot, plan, err
+}
+
+// planPoolSessionBead selects reuse or reserves an eligible fresh identity;
+// budget admission happens only after all contending requests are classified.
+func planPoolSessionBead(bp *agentBuildParams, cfgAgent *config.Agent, template string, preferred *session.Info, request SessionRequest, decisionTime time.Time, used map[string]bool, usedSlots map[int]bool) (session.Info, int, *poolSessionCreatePlan, error) {
 	if cfgAgent == nil {
 		cfgAgent = findAgentByTemplate(&config.City{Agents: bp.agents}, template)
 	}
@@ -5377,11 +5424,6 @@ func selectOrPlanPoolSessionBead(
 	if healthy, present := bp.providerHealthSnapshot.check(provName); present && !healthy {
 		delete(usedSlots, slot)
 		return session.Info{}, 0, nil, errPoolSessionCreateProviderRed
-	}
-
-	if !bp.tryClaimPoolSessionCreate(template) {
-		delete(usedSlots, slot)
-		return session.Info{}, 0, nil, errPoolSessionCreateBudgetExhausted
 	}
 
 	plan := &poolSessionCreatePlan{
@@ -5645,12 +5687,33 @@ func executePlannedPoolSessionBeadCreate(
 	cfgAgent *config.Agent,
 	template string,
 	plan poolSessionCreatePlan,
-) (session.Info, error) {
-	info, err := createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, template, plan.qualifiedInstance, plan.slot, plan.metadata)
-	if err != nil {
-		bp.releasePoolSessionCreate()
+) (info session.Info, err error) {
+	writing := false
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("pool %s create panic: %v", template, r)
+			if writing {
+				err = poolCreateWriteError{err: err}
+			}
+		}
+		if err != nil && poolSessionCreateFailedWithoutWrite(err) {
+			bp.releasePoolSessionCreate()
+		}
+	}()
+	if bp == nil || bp.planOnly {
+		return session.Info{}, errPlanOnlyEffect
 	}
-	return info, err
+	view := poolCreateViewOf(bp)
+	view.beforeWrite = func(string) error { writing = true; return nil }
+	return createPoolSessionBeadWithGuardedAliasUsingLock(view, cfgAgent, template, plan.qualifiedInstance, plan.slot, plan.metadata, session.WithCitySessionIdentifierLocks)
+}
+
+// poolSessionCreateFailedWithoutWrite follows the existing create-effect
+// classification: write errors are ambiguous unless the store proves refusal,
+// and an error after a durable row always consumes its create token.
+func poolSessionCreateFailedWithoutWrite(err error) bool {
+	var written poolCreateWriteError
+	return !errors.As(err, &written) || (!written.landed && createWriteRefused(err))
 }
 
 func beadIdentifiesAsCanonical(bead beads.Bead, canonical string) bool {
