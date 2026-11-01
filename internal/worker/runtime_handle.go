@@ -626,6 +626,12 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 	if !ok {
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredProviderUnsupported}, nil
 	}
+	// A pre-read first: a session that reads busy, or whose input a pending
+	// interaction owns, will not reach a boundary within the wait, so the
+	// caller queues it now instead of blocking for runtimeHandleWaitIdleTimeout.
+	if runtime.IdleBoundaryNow(h.provider, h.sessionName).OutOfReach() {
+		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredNoIdleBoundary}, nil
+	}
 	if err := waiter.WaitForIdle(ctx, h.sessionName, runtimeHandleWaitIdleTimeout); err != nil {
 		// A provider type can implement the idle wait while the runtime behind
 		// it cannot (an exec pack that does not declare an idle boundary, or a

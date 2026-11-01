@@ -46,6 +46,7 @@ import (
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
@@ -409,8 +410,8 @@ func importRig(env rigImportEnv, rig config.Rig) (result rigImportResult) {
 		}
 		closeBinding()
 		if plan.Infra == 0 {
-			if fileExists(loc.InFlightPath()) {
-				return refuse(fmt.Errorf("rig %s holds no infrastructure row but an interrupted import's record %s is present: the binding may hold the only copy of rows it moved. Restore the rig store, or its records, then re-run", rig.Name, loc.InFlightPath()))
+			if err := rigCleanRecordRefusal(env, loc, rig); err != nil {
+				return refuse(err)
 			}
 			if err := loc.writeRecord(loc.CleanPath(), fmt.Sprintf("rig %s holds no infrastructure bead (census %s)", rig.Name, time.Now().UTC().Format(time.RFC3339)), storeRoot); err != nil {
 				return fail(fmt.Errorf("recording rig %s clean: %w", rig.Name, err))
@@ -671,6 +672,22 @@ func probeElsewhere(env rigImportEnv, rig config.Rig, ids []string) (map[string]
 // rigImportCityWorkOpener opens the city work store for the blocker probe.
 var rigImportCityWorkOpener = func(cityPath string) (beads.Store, error) { return openInfraMigrationSource(cityPath) }
 
+// readOtherCityConfig reads another registered city's config for the
+// shared-store check, which wants its rigs. It skips the full loader's
+// application of that city's feature flags (formula v2, graph apply), which
+// are process-wide: the controller's boot census runs the check, and another
+// city must not switch this city's flags.
+func readOtherCityConfig(cityPath string) (*config.City, error) {
+	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), skipRevisionSnapshot)
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePackRuntimeRegistrations(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
 // rigImportSharedStoreRefusal refuses a rig whose store another registered
 // city also uses (findStoreSharers, storage_shared_store.go), unless the
 // operator attested --force=shared-store:<identity> for it and every
@@ -679,6 +696,31 @@ var rigImportCityWorkOpener = func(cityPath string) (beads.Store, error) { retur
 // absence of a sharer must be shown, not assumed.
 func rigImportSharedStoreRefusal(env rigImportEnv, rig config.Rig) (sharedStoreExclusion, error) {
 	return sharedStoreRefusal(env.CityPath, "rig "+rig.Name, rigStoreRoot(env.CityPath, rig), env.Force)
+}
+
+// rigCleanRecordRefusal says why rig, whose store holds no infrastructure
+// row, must not be recorded clean, or returns nil. Every writer of the clean
+// record asks it right before writing: importRig, and recordCensusClean for
+// gc rig add and the controller's boot census. An interrupted import's
+// in-flight record refuses: the binding may hold the only copy of rows it
+// moved. So does a store another registered city also uses, or one it cannot
+// rule out as one (findSharedStore): the record retires this city's relic
+// legs for the store, and the other city can still write graph rows there.
+// Only an import's --force=shared-store:<identity> lifts that, and only while
+// importRig holds the co-tenants stopped; this check takes no lock, since a
+// second take of a lock importRig holds would refuse. importRig also asks the
+// shared-store question before it opens the rig at all; asking it here as
+// well keeps the record's gate whole for every writer.
+func rigCleanRecordRefusal(env rigImportEnv, loc rigImportLocation, rig config.Rig) error {
+	inFlight, err := infraPathExists(loc.InFlightPath())
+	if err != nil {
+		return fmt.Errorf("checking rig %s's record %s: %w", rig.Name, loc.InFlightPath(), err)
+	}
+	if inFlight {
+		return fmt.Errorf("rig %s holds no infrastructure row but an interrupted import's record %s is present: the binding may hold the only copy of rows it moved. Restore the rig store, or its records, then re-run", rig.Name, loc.InFlightPath())
+	}
+	_, err = findSharedStore(env.CityPath, "rig "+rig.Name, rigStoreRoot(env.CityPath, rig), env.Force)
+	return err
 }
 
 // rigImportPrepare removes the binding rows an interrupted earlier attempt

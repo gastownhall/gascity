@@ -263,6 +263,27 @@ func TestGcBdSingleStoreForwardsEveryCommandUnchanged(t *testing.T) {
 	}
 }
 
+// TestGcBdSingleStoreForwardsFileOperandsUnchanged: a single-store city runs
+// no class judge, so a file operand bd reads is forwarded as the caller named
+// it, with no private copy to remove.
+func TestGcBdSingleStoreForwardsFileOperandsUnchanged(t *testing.T) {
+	scope := t.TempDir()
+	for name, body := range map[string]string{
+		"ops.txt": "create task 2 hello there\n",
+		"a.jsonl": `{"id":"demo-1","title":"w","issue_type":"task"}` + "\n",
+	} {
+		if err := os.WriteFile(filepath.Join(scope, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, argv := range [][]string{{"batch", "--file", "ops.txt"}, {"import", "a.jsonl"}} {
+		g := bdClassFlipGuard(&config.City{}, scope, argv, bdClassGuardDeps{})
+		if g.refusal != "" || !slices.Equal(g.args, argv) || g.cleanup != nil {
+			t.Errorf("gc bd %q on a single-store city: refusal=%q args=%q cleanup set=%v", argv, g.refusal, g.args, g.cleanup != nil)
+		}
+	}
+}
+
 // TestGcBdSplitAllowlistIsDocumented keeps the "gc bd on split cities" docs
 // section in step with the allowlist.
 func TestGcBdSplitAllowlistIsDocumented(t *testing.T) {
@@ -323,7 +344,7 @@ func TestGcBdImportSkipInfraWritesAWorkOnlyCopy(t *testing.T) {
 	}
 	read := func(string) (beads.Bead, bdReadResult) { return beads.Bead{}, bdReadNotFound }
 
-	for _, argv := range [][]string{{"import", "a.jsonl", "--skip-infra"}, {"import", "--skip-infra", "-i", "a.jsonl"}, {"import", "--input=a.jsonl", "--skip-infra"}} {
+	for _, argv := range [][]string{{"import", "a.jsonl", "--skip-infra"}, {"import", "--skip-infra", "-i", "a.jsonl"}, {"import", "--input=a.jsonl", "--skip-infra"}, {"import", "--input", "other.jsonl", "--input=a.jsonl", "--skip-infra"}} {
 		g := bdClassFlipGuard(splitGuardTestCity(), scope, argv, splitTestDeps(nil, read))
 		if g.refusal != "" {
 			t.Fatalf("%v refused: %s", argv, g.refusal)

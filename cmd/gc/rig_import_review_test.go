@@ -729,9 +729,10 @@ func TestReviewTwoRigsOnOneDatabaseRefuse(t *testing.T) {
 
 // Re-review should-fix: openPhysicalScopeStore (through openStorageScopeStore)
 // reads rows of every class, past the split-strict work view, so its callers
-// are pinned: only the rig importer's opener and its census's emptiness check.
+// are pinned: only the rig importer's opener, which the census and gc rig
+// add's census share.
 func TestReviewPhysicalScopeOpenerCallersArePinned(t *testing.T) {
-	want := map[string]int{"rig_import.go": 1, "rig_import_census.go": 1}
+	want := map[string]int{"rig_import.go": 1}
 	got := map[string]int{}
 	files, err := filepath.Glob("*.go")
 	if err != nil {

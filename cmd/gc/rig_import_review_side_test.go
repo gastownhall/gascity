@@ -66,30 +66,100 @@ func rigAddSplitCity(t *testing.T, cityPath, rigsToml, siteToml string) infraBin
 	return target
 }
 
-// TestRigAddWritesACleanRecordOnlyForAGenuinelyNewEmptyRig: re-running `gc
-// rig add` on an existing rig, or adding a rig whose store already holds a
-// graph row, must not record the rig clean (that would retire its relic legs
-// before an import censused it). A truly new, empty rig is recorded clean.
-func TestRigAddWritesACleanRecordOnlyForAGenuinelyNewEmptyRig(t *testing.T) {
+// rigAddSeedFileStore writes rows into the file store at rigPath/.gc/beads.json.
+func rigAddSeedFileStore(t *testing.T, rigPath, prefix string, rows ...beads.Bead) {
+	t.Helper()
+	store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(rigPath, ".gc", "beads.json"), beads.WithFileStoreIDPrefix(prefix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range rows {
+		if _, err := store.Create(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// rigAddGraphRow is a pre-S4 rig graph row: a workflow step.
+func rigAddGraphRow(prefix string) beads.Bead {
+	return beads.Bead{Title: "a pre-S4 step", Type: "task", Metadata: beads.StringMap{"gc.kind": "task", "gc.root_bead_id": prefix + "-root"}}
+}
+
+// rigAddWorkRow is plain rig work.
+func rigAddWorkRow() beads.Bead { return beads.Bead{Title: "some work", Type: "task"} }
+
+// TestRigAddWritesACleanRecordOnlyWhenItsCensusFindsNoInfrastructureRow: `gc
+// rig add` (new, re-add or --adopt) on a converged split city records a rig
+// clean exactly when a census of its store finds no infrastructure row. A
+// store holding a graph row must not be recorded clean: that would retire its
+// relic legs before an import moved the row.
+func TestRigAddWritesACleanRecordOnlyWhenItsCensusFindsNoInfrastructureRow(t *testing.T) {
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BEADS", "file")
 
-	t.Run("re-add of an existing rig", func(t *testing.T) {
-		cityPath := t.TempDir()
-		rigPath := filepath.Join(t.TempDir(), "old-rig")
-		if err := os.MkdirAll(rigPath, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		target := rigAddSplitCity(t, cityPath, "\n[[rigs]]\nname = \"old-rig\"\nprefix = \"or\"\n",
-			fmt.Sprintf("workspace_name = \"test-city\"\n\n[[rig]]\nname = \"old-rig\"\npath = %q\n", rigPath))
-		var stdout, stderr bytes.Buffer
-		if code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr); code != 0 {
-			t.Fatalf("re-add = %d: %s", code, stderr.String())
-		}
-		if fileExists(newRigImportLocation(target, cityPath, "old-rig").CleanPath()) {
-			t.Error("a re-add recorded an existing rig clean")
-		}
-	})
+	for _, tc := range []struct {
+		name      string
+		seed      []beads.Bead
+		wantClean bool
+	}{
+		{name: "re-add of an existing rig whose store holds a graph row", seed: []beads.Bead{rigAddWorkRow(), rigAddGraphRow("or")}},
+		{name: "re-add of an existing rig with nothing to import", seed: []beads.Bead{rigAddWorkRow()}, wantClean: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			rigPath := filepath.Join(t.TempDir(), "old-rig")
+			if err := os.MkdirAll(rigPath, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			rigAddSeedFileStore(t, rigPath, "or", tc.seed...)
+			target := rigAddSplitCity(t, cityPath, "\n[[rigs]]\nname = \"old-rig\"\nprefix = \"or\"\n",
+				fmt.Sprintf("workspace_name = \"test-city\"\n\n[[rig]]\nname = \"old-rig\"\npath = %q\n", rigPath))
+			var stdout, stderr bytes.Buffer
+			if code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr); code != 0 {
+				t.Fatalf("re-add = %d: %s", code, stderr.String())
+			}
+			if got := fileExists(newRigImportLocation(target, cityPath, "old-rig").CleanPath()); got != tc.wantClean {
+				t.Errorf("re-add recorded clean = %v, want %v: %s", got, tc.wantClean, stderr.String())
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name      string
+		seed      []beads.Bead
+		wantClean bool
+	}{
+		{name: "adopted store holding only work", seed: []beads.Bead{rigAddWorkRow()}, wantClean: true},
+		{name: "adopted store holding a graph row", seed: []beads.Bead{rigAddWorkRow(), rigAddGraphRow("ad")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			rigPath := filepath.Join(t.TempDir(), "adopted-rig")
+			if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(rigPath, ".beads", "metadata.json"), []byte(`{"name":"adopted-rig","issue_prefix":"ad"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("issue_prefix: ad\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			rigAddSeedFileStore(t, rigPath, "ad", tc.seed...)
+			target := rigAddSplitCity(t, cityPath, "", "")
+			// Scoped file roots: the adopted rig is served from its own
+			// .gc/beads.json, not the city's.
+			if err := ensureScopedFileStoreLayout(cityPath); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "ad", "", false, true, &stdout, &stderr); code != 0 {
+				t.Fatalf("add --adopt = %d: %s", code, stderr.String())
+			}
+			if got := fileExists(newRigImportLocation(target, cityPath, "adopted-rig").CleanPath()); got != tc.wantClean {
+				t.Errorf("adopt recorded clean = %v, want %v: %s", got, tc.wantClean, stderr.String())
+			}
+		})
+	}
 
 	t.Run("new rig whose store already holds a graph row", func(t *testing.T) {
 		cityPath := t.TempDir()

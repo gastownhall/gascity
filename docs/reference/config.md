@@ -702,6 +702,17 @@ PoolOverride modifies legacy [pool] fields that map to session scaling.
 | `on_death` | string |  |  | OnDeath overrides the on_death command template. Supports the same Go template placeholders as Agent.on_death. |
 | `on_boot` | string |  |  | OnBoot overrides the on_boot command template. Supports the same Go template placeholders as Agent.on_boot. |
 
+## ProgramStatusBinding
+
+ProgramStatusBinding is a provider's program-status declaration: whether its program reports state over OSC 7501 and how gc captures those reports.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `protocol` | string |  |  | Protocol declares the status protocol: "osc7501" declares, "none" explicitly undeclares an inherited declaration, and "" inherits. Enum: `osc7501`, `none` |
+| `app` | string |  |  | App is the program name the capture reader accepts reports from; reports naming another program are dropped. Empty accepts any program name. |
+| `relay` | boolean |  |  | Relay wraps the agent in the probe-answering relay, for programs that only report after their support probe is answered. Unset inherits. |
+| `env` | map[string]string |  |  | Env is forced into the session environment when capture is armed (for example PI_PROGRAM_STATUS = "1"). It is not part of the launch fingerprint, so changing it does not relaunch running agents: keys gc sets itself (GC_*, BEADS_*, BD_*, GT_ROOT) are rejected. Keys merge per layer; an empty value withholds the variable. |
+
 ## ProviderOption
 
 ProviderOption declares a single configurable option for a provider.
@@ -771,6 +782,7 @@ ProviderSpec defines a named provider's startup parameters.
 | `option_defaults` | map[string]string |  |  | OptionDefaults overrides the Default value in OptionsSchema entries without redefining the schema itself. Keys are option keys (e.g., "permission_mode"), values are choice values (e.g., "unrestricted"). city.toml users set this to customize provider behavior without touching Args or OptionsSchema. |
 | `options_schema` | []ProviderOption |  |  | OptionsSchema declares the configurable options this provider supports. Each option maps to CLI args via its Choices[].FlagArgs field. Serialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side. |
 | `upstream_env` | UpstreamEnvBinding |  |  | UpstreamEnv is this harness's serving-env contract (Phase C — the Upstream axis): the env-var NAMES this CLI reads for the model-serving base URL and credential. It lets the resolver render an abstract [upstreams.&lt;name&gt;] onto the right names for this harness, so an upstream preset is portable across harnesses (claude → ANTHROPIC_*, codex → OPENAI_*). |
+| `program_status` | ProgramStatusBinding |  |  | ProgramStatus declares whether this harness's program reports its own state over the OSC 7501 Program Status Protocol and how gc captures the reports. Inert unless [session] program_status is "shadow" or "on". |
 | `print_args` | []string |  |  | PrintArgs are CLI arguments that enable one-shot non-interactive mode. The provider prints its response to stdout and exits. When empty, the provider does not support one-shot invocation. Examples: ["-p"] (claude, gemini), ["exec"] (codex), ["--quiet", "--prompt"] (kimi) |
 | `title_model` | string |  |  | TitleModel is the OptionsSchema model key used for title generation. Resolved via the "model" option in OptionsSchema to get FlagArgs. Defaults to the cheapest/fastest model for each provider. Examples: "haiku" (claude), "o4-mini" (codex), "gemini-2.5-flash" (gemini) |
 | `acp_command` | string |  |  | ACPCommand overrides Command when the session transport is ACP. When empty, Command is used for both tmux and ACP transports. |
@@ -882,6 +894,7 @@ SessionConfig holds session provider settings.
 | `claim_holder_stall_timeout` | string |  |  | ClaimHolderStallTimeout, when set, enables progress-aware recycling of a desired, alive session that holds in-progress work but has stopped making progress. Because recycling a claim-holder interrupts work, set this above the longest legitimate quiet period. Values below 5m are clamped to 5m. Duration string (e.g. "20m"). Unset/zero disables it. Legacy only: deprecated and ignored under the v2 reconciler, whose work ladder replaces it. |
 | `socket` | string |  |  | Socket specifies the tmux socket name for per-city isolation. When set, all tmux commands use "tmux -L &lt;socket&gt;" to connect to a dedicated server. When empty, defaults to the city name (workspace.name) — giving every city its own tmux server automatically. Set explicitly to override. |
 | `remote_match` | string |  |  | RemoteMatch is a substring pattern for the hybrid provider to route sessions to the remote (K8s) backend. Sessions whose names contain this pattern go to K8s; all others stay local (tmux). Overridden by the GC_HYBRID_REMOTE_MATCH env var if set. |
+| `program_status` | string |  | `off` | ProgramStatus is the city switch for OSC 7501 program status. "off" (the default) changes nothing. "shadow" arms capture on declared providers ([providers.&lt;p&gt;.program_status]) and compares readings without changing any decision. "on" lets valid readings decide. Enum: `off`, `shadow`, `on` |
 
 ## SessionSleepConfig
 

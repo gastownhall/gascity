@@ -147,6 +147,29 @@ func TestRigImportSharedStoreAttestationKeepsTheCoTenantStopped(t *testing.T) {
 	after.Close() //nolint:errcheck // test cleanup
 }
 
+// TestAttestedImportRecordsASharedWorkOnlyRigClean: the attestation that
+// lifts the importer's refusal lifts the clean record's gate too. A shared
+// rig store holding no infrastructure row is recorded clean while the import
+// still holds its co-tenant stopped: the gate (rigCleanRecordRefusal) asks
+// the shared-store question again and must not take that lock a second time.
+func TestAttestedImportRecordsASharedWorkOnlyRigClean(t *testing.T) {
+	f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
+	f.seed("packs", []beads.Bead{workRow("gp-1", "open"), workRow("gp-2", "closed")}, nil)
+	other := otherCityWithRig(t, filepath.Join(t.TempDir(), "elsewhere"))
+	f.otherCities = []string{other}
+	stubStoreIdentity(t, storeDoltIdentity{Database: "packs", Endpoint: "loopback:3399"})
+	f.request.Force = storageForce{SharedStores: []string{"packs@loopback:3399"}}
+
+	if code, _, stderr := f.importRigs(); code != 0 || !fileExists(f.loc("packs").CleanPath()) || !f.relicFree("packs") {
+		t.Fatalf("an attested import of a shared work-only rig store = %d, want it recorded clean: %s", code, stderr)
+	}
+	after, err := acquireControllerLock(other)
+	if err != nil {
+		t.Fatalf("the import left co-tenant %s's controller lock held: %v", other, err)
+	}
+	after.Close() //nolint:errcheck // test cleanup
+}
+
 // TestRigStoreIsComparedWithOtherCitiesCityStores: a rig store that is
 // another city's CITY store (not one of its rigs) is a shared store.
 func TestRigStoreIsComparedWithOtherCitiesCityStores(t *testing.T) {

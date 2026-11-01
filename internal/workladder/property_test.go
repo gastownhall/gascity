@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -25,7 +26,12 @@ func sequences() int {
 // workers, failing on the lowest failing seed.
 func forEachSequence(t *testing.T, check func(seed uint64) error) {
 	t.Helper()
-	n := sequences()
+	forEachN(t, sequences(), check)
+}
+
+// forEachN runs check on seeds 0..n-1 as forEachSequence does.
+func forEachN(t *testing.T, n int, check func(seed uint64) error) {
+	t.Helper()
 	workers := min(runtime.GOMAXPROCS(0), 8)
 	errs := make([]error, n)
 	var wg sync.WaitGroup
@@ -67,6 +73,13 @@ type sim struct {
 	marks bool
 	ops   int
 	seed  uint64
+	// turns: the caller reads the seat's turns on some passes (a reading
+	// that may show the newest turn failed, service, or nothing).
+	turns bool
+	// served is when the seat's newest completed turn ended, and lastFailed
+	// whether its newest ended turn failed.
+	served     time.Time
+	lastFailed bool
 }
 
 var simKeys = []ClaimKey{key("a"), key("b"), key("c")}
@@ -144,6 +157,12 @@ func (s *sim) step() Observation {
 	s.obs.StartedRead = !s.event(3)
 	if s.event(4) { // the seat did some work
 		s.activity = s.now.Add(-time.Duration(s.rng.IntN(120)) * time.Second)
+		if s.turns { // its turn ended: the provider completed it, or failed it
+			s.lastFailed = s.chance(50)
+			if !s.lastFailed {
+				s.served = s.activity
+			}
+		}
 	}
 	s.obs.LastActivity = s.activity
 	s.obs.Hold = nil
@@ -158,6 +177,9 @@ func (s *sim) step() Observation {
 
 	o := s.obs
 	o.Now, o.Gen, o.Outstanding, o.Started = s.now, s.gen, nil, map[ClaimKey]StartSource{}
+	if s.turns {
+		o.Conv, o.Turns = 1, s.reading()
+	}
 	seeding := s.rec.V == 0 || s.rec.Gen != s.gen
 	for _, k := range simKeys {
 		kind, ok := s.kinds[k]
@@ -175,6 +197,18 @@ func (s *sim) step() Observation {
 		}
 	}
 	return o
+}
+
+// reading is the caller's reading of the seat's turns: now and then none
+// (a read that failed), or one of another conversation (it moved since).
+func (s *sim) reading() TurnReading {
+	switch {
+	case s.chance(10):
+		return TurnReading{}
+	case s.chance(5):
+		return TurnReading{Read: true, Conv: 2, LastFailed: true}
+	}
+	return TurnReading{Read: true, Conv: 1, LastFailed: s.lastFailed, ServedAt: s.served}
 }
 
 func countNudges(d Decision) int {
@@ -209,7 +243,7 @@ func (s *sim) settleMarks() {
 		if e.Notice.IsZero() || (s.chance(30) && s.now.Sub(e.Notice.At) < 5*time.Minute) {
 			continue
 		}
-		if r, _, ok := SettleNotice(s.rec, e.Notice.Op, NoticeFate(1+s.rng.IntN(4))); ok {
+		if r, _, ok := SettleNotice(s.rec, e.Notice.Op, NoticeFate(1+s.rng.IntN(4)), time.Time{}); ok {
 			s.rec = r
 		}
 	}
@@ -268,6 +302,30 @@ func (s *sim) run() error {
 				delete(lastTrigger, e.Key)
 				if !ok {
 					delete(recycles, e.Key)
+				}
+			}
+		}
+
+		// Progress: an entry's count restarts exactly on a pass that may
+		// act on it whose evidence (the newest completed turn when the
+		// newest ended turn failed, else the activity clock) is at least
+		// ProgressReset past its last nudge. A failed turn is never
+		// progress, and a pass that cannot act judges nothing.
+		if prev.V != 0 && prev.Gen == o.Gen {
+			for _, e := range d.Next.Entries {
+				pe, ok := entryOf(prev, e.Key)
+				if !ok || pe.Kind != e.Kind || (e.Rung != pe.Rung && e.Rung != RungEscalated) {
+					continue
+				}
+				acting := !o.Gate.Held && o.Runtime == TriTrue && o.Quiet.State == Quiescent && !o.Hold[e.Key]
+				evidence := o.LastActivity
+				if o.Turns.Read && o.Turns.Conv == o.Conv && o.Turns.LastFailed {
+					evidence = o.Turns.ServedAt
+				}
+				counted := !pe.Last.IsZero() && (pe.Attempts > 0 || pe.Paused > 0 || pe.Unreleased)
+				want := acting && counted && !evidence.Before(pe.Last.Add(DefaultProgressReset))
+				if got := !e.Since.Equal(pe.Since); got != want {
+					return fail("progress: %v reset %v, want %v (acting %v, evidence %v, last %v)", e.Key, got, want, acting, evidence.Sub(t0), pe.Last.Sub(t0))
 				}
 			}
 		}
@@ -423,8 +481,11 @@ func (s *sim) run() error {
 }
 
 // WL8: whatever a row carried before the ladder first sees it (no cell, or
-// a cell for another generation with any counts), no recycle or release
-// lands within Grace + Base + 2·Base of continuous quiet.
+// a cell for another generation with any counts, or one an earlier build
+// wrote with its per-claim rate-limit flags), no recycle, release or fresh
+// restart lands within Grace + Base + 2·Base of continuous quiet, however
+// many refusals its transcript already holds (RL7): a refusal is an answer
+// only to a nudge delivered in this generation.
 func TestNoDrainWave(t *testing.T) {
 	window := DefaultGrace + DefaultBase + 2*DefaultBase
 	forEachSequence(t, func(seq uint64) error {
@@ -453,9 +514,21 @@ func TestNoDrainWave(t *testing.T) {
 				})
 			}
 		}
+		if prev.V != 0 && rng.IntN(2) == 0 { // written by a per-claim-flag build
+			text := strings.ReplaceAll(EncodeLadder(prev), `"recycle_at":`, `"rate_limit_alerted":true,"fresh_recycled":true,"fresh_served":false,"fresh_queued":true,"recycle_at":`)
+			var err error
+			if prev, err = DecodeLadder(text); err != nil {
+				return fmt.Errorf("an earlier build's cell: %w", err)
+			}
+		}
+		refusals := TurnReading{Read: true, Conv: 1}
+		if n := rng.IntN(5); n > 0 {
+			refusals = TurnReading{Read: true, Conv: 1, LastFailed: true, Refused: n, RefusedAt: t0.Add(-time.Duration(rng.IntN(600)) * time.Second)}
+		}
 		r := prev
 		for now := t0; now.Sub(t0) < window; now = now.Add(time.Duration(1+rng.IntN(60)) * time.Second) {
 			o := quiet(now, 42, work...)
+			o.Conv, o.Turns = 1, refusals
 			if r.V == 0 || r.Gen != 42 {
 				o.Started = started
 			} else {
@@ -469,12 +542,17 @@ func TestNoDrainWave(t *testing.T) {
 			d := Decide(r, o, p)
 			for _, a := range d.Actions {
 				switch a.(type) {
-				case Recycle, Release:
+				case Recycle, Release, FreshRestart, RateLimitMove:
 					return fmt.Errorf("%T at %v after deploy (prev %s)", a, now.Sub(t0), EncodeLadder(prev))
 				}
 			}
 			if d.Changed {
 				r = d.Next
+			}
+			for _, a := range d.Actions {
+				if n, ok := a.(Nudge); ok {
+					r, _ = NudgeDelivered(r, n.Key, 42, now)
+				}
 			}
 		}
 		return nil

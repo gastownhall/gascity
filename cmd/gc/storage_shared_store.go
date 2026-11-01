@@ -37,7 +37,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/url"
 	"os"
@@ -331,7 +330,7 @@ func findStoreSharers(cityPath, label, selfRoot string) (string, []storeSharer, 
 	noDatabase := self.Database == "" && !self.Unresolved
 	var sharers []storeSharer
 	for _, otherPath := range others {
-		cfg, err := loadCityConfigWithoutBuiltinPackRefresh(otherPath, io.Discard)
+		cfg, err := readOtherCityConfig(otherPath)
 		if err == nil && cfg == nil {
 			err = errors.New("it loaded no configuration")
 		}

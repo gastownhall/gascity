@@ -777,6 +777,7 @@ func doStorageStatusCity(request storageOperatorRequest, stdout, stderr io.Write
 	}
 	fmt.Fprintf(stdout, "converged: yes\n  proven copy: %d bead(s)\n  stranded:    %d\n  retained copies: %d\n", //nolint:errcheck // best-effort stdout
 		manifest.Len(), len(gap.Stranded), len(gap.Retained))
+	purgeSettled := reportInfraPurgeLedger(target, stdout)
 	if len(gap.Stranded) > 0 {
 		fmt.Fprintf(stdout, "  stranded ids: %s\n", strings.Join(gap.Stranded, ", ")) //nolint:errcheck // best-effort stdout
 		// The exit code is the deploy gate; the remedy is what an operator does
@@ -791,8 +792,15 @@ func doStorageStatusCity(request storageOperatorRequest, stdout, stderr io.Write
 		}
 		// Split by why each id is stranded (infraStrandedAdvice): a held
 		// different bead and a presumed-reused row need a per-id choice, and
-		// only an absent row is told to copy it in.
-		fmt.Fprintf(stdout, "blocking invariant: %s\n", infraStrandedAdvice(gap.Stranded, gap.HeldDifferent, gap.PresumedReused)) //nolint:errcheck // best-effort stdout
+		// only an absent row is told to copy it in. While the purge ledger is
+		// unsettled, its own remedy above is the only one: recover-stranded
+		// refuses until then (infraPurgeUnsettledRefusal).
+		if purgeSettled {
+			fmt.Fprintf(stdout, "blocking invariant: %s\n", infraStrandedAdvice(gap.Stranded, gap.HeldDifferent, gap.PresumedReused)) //nolint:errcheck // best-effort stdout
+		}
+		return 1
+	}
+	if !purgeSettled {
 		return 1
 	}
 	note, notePresent, err := readInfraClearedNote(request.CityPath)
