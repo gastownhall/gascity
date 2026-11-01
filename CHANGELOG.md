@@ -639,6 +639,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The core orphan-sweep order records why it reset a claim in the bead's
+  `gc.orphan_sweep_reason` metadata instead of its notes.** On a
+  split-storage city a graph step is updated in process, where notes have no
+  representation and `--append-notes` is refused, so the sweep logged
+  `failed to record cause note` and recorded nothing. Every store serves the
+  metadata write. The text is unchanged; read it with `gc bd show <id>
+  --json`. A later reset overwrites it.
+
 - **Go toolchain 1.27.3.** The `go.mod` floor, the Bazel `go_sdk`, the nogo
   analyzers' module and the `contrib/k8s` Go build images move to Go 1.27.3,
   the toolchain Dolt 2.6.0 and beads `main` build with. Building from source
