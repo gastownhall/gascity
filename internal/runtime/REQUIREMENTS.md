@@ -151,9 +151,11 @@ differs, fix code and prove the row with a test.
 
 ### Planned (not yet enforced)
 
-Rows here are intent from `engdocs/design/runtime-provider-packs.md`. They
-move into the ledger above only together with the tests that prove them.
+Rows here are intent from design docs (`engdocs/design/runtime-provider-packs.md`,
+`engdocs/design/osc7501-program-status.md`). They move into the ledger above
+only together with the tests that prove them.
 
 | ID | Scenario | Required behavior | Tracking |
 |---|---|---|---|
 | RUNTIME-PLAN-005 | Staging relocation | `staging.go` moves out of the contract package (or overlay staging becomes protocol data) and the import-boundary exemption is deleted. | `ga-1symz6` epic |
+| RUNTIME-PLAN-006 | Program-status reading (lands as RUNTIME-CONTRACT-017) | `ProgramStatusProvider.ProgramStatus` reports the agent pane program's own OSC 7501 root record. It is `valid` only under a nonce this runtime armed for that exact pane, with the pane alive, the capture reader attached and a root present. A switch-off reading is `Unread` and carries no state. Every hold derived from it is bounded (10 minutes past the later of the record's change and the pane's last output) and never reads as idle. It is positive-only, and only a mode-`on` reading may change a decision. The full row text is in the design doc, §6.3. | `ga-f4ovjm.11` (moves with the conformance suite); `engdocs/design/osc7501-program-status.md` §6.3 |
