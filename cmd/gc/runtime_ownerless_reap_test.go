@@ -560,7 +560,7 @@ func TestNewOwnerlessReapIsTheTicks(t *testing.T) {
 // missing without it.
 func TestOwnerlessLookupNeedsEveryRigStore(t *testing.T) {
 	city, cfg, sessions, _ := ownerlessRigCity(t)
-	owners := sessionOwnerLookup(city, cfg, sessions, map[string]beads.Store{})
+	owners := sessionOwnerLookup(city, cfg, sessions, map[string]beads.Store{}, nil)
 	if owners.err == nil || owners.notFound("gc-nowhere") {
 		t.Fatalf("lookup %+v, want it failed and proving nothing", owners)
 	}
@@ -580,5 +580,127 @@ func TestOwnerlessFinalCheckReadsNow(t *testing.T) {
 	} // the check's clock reads the runtime a minute old
 	if n := reapRuntimesBoundToClosedBeadsWith(c.store, c.snapshot, nil, c.sp, nil, c.city, o, &c.stderr); n != 0 {
 		t.Fatalf("reaped %d, want the final check's own clock to hold it", n)
+	}
+}
+
+// ownerlessSuspendedRigCase is newOwnerlessCase in a city with two rigs:
+// "live", whose store holds session row gc-live, and "dormant", which the
+// doctor's store gate leaves cold as suspended when suspended is set. A
+// second dead runtime of this city, "live-1", is bound to gc-live. open is
+// the gate's store factory; opened counts the opens of dormant's store.
+func ownerlessSuspendedRigCase(t *testing.T, suspended bool) (c *ownerlessCase, cfg *config.City, open func(string) (beads.Store, error), opened *int) {
+	t.Helper()
+	c = newOwnerlessCase(t)
+	c.sp.visible["live-1"] = true
+	c.sp.dead["live-1"] = true
+	c.sp.created["live-1"] = ownerlessT0.Add(-time.Hour)
+	for k, v := range map[string]string{"GC_SESSION_ID": "gc-live", "GC_CITY_PATH": c.city} {
+		if err := c.sp.SetMeta("live-1", k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	livePath, dormantPath := t.TempDir(), t.TempDir()
+	cfg = &config.City{Workspace: config.Workspace{Name: "c"}, Rigs: []config.Rig{{Name: "live", Path: livePath}, {Name: "dormant", Path: dormantPath}}}
+	stores := map[string]beads.Store{
+		c.city:      c.store,
+		livePath:    beads.NewMemStoreFrom(1, []beads.Bead{{ID: "gc-live", Status: "open", Type: "session", Labels: []string{"gc:session"}}}, nil),
+		dormantPath: beads.NewMemStore(),
+	}
+	oldScope, oldNotRunning := doctorProxiedStoreScope, doctorProxiedStoreNotRunning
+	t.Cleanup(func() { doctorProxiedStoreScope, doctorProxiedStoreNotRunning = oldScope, oldNotRunning })
+	doctorProxiedStoreScope = func(string) bool { return true }
+	doctorProxiedStoreNotRunning = func(string) bool { return false }
+	gate := newDoctorStoreGate(true, func(root string) bool { return suspended && root == dormantPath })
+	opened = new(int)
+	open = gate.StoreFactory(func(path string) (beads.Store, error) {
+		if path == dormantPath {
+			*opened++
+		}
+		return stores[path], nil
+	})
+	return c, cfg, open, opened
+}
+
+// TestOwnerlessDoctorCheckSkipsASuspendedRig: a suspended rig the store
+// gate leaves cold does not abort the scan. A runtime whose owner a read
+// store holds is owned; one whose owner no read store holds is unprovable,
+// naming the rig not checked, never ownerless or reapable; and the
+// suspended rig's store is never opened.
+func TestOwnerlessDoctorCheckSkipsASuspendedRig(t *testing.T) {
+	c, cfg, open, opened := ownerlessSuspendedRigCase(t, true)
+	res := newOwnerlessRuntimesCheck(cfg, c.city, open, c.sp, nil).Run(nil)
+	got := strings.Join(res.Details, "\n")
+	if res.Status != doctor.StatusWarning || strings.Contains(res.Message, "skipping the ownerless-runtime scan") {
+		t.Fatalf("result %+v, want the scan run, not skipped", res)
+	}
+	if !strings.Contains(res.Message, "(rig dormant not checked: suspended)") {
+		t.Errorf("message %q, want it to name the rig not checked", res.Message)
+	}
+	if strings.Contains(got, "live-1") {
+		t.Errorf("findings %q name live-1, whose owner the live rig holds", got)
+	}
+	if len(res.Details) != 1 || !strings.Contains(got, "named-1: session bead gc-gone") || !strings.Contains(got, "unprovable (rig dormant not checked: suspended)") {
+		t.Errorf("findings %q, want named-1 unprovable with rig dormant not checked", got)
+	}
+	if strings.Contains(got, "reaps it") {
+		t.Errorf("findings %q call an unprovable runtime reapable", got)
+	}
+	if *opened != 0 {
+		t.Errorf("opened the suspended rig's store %d time(s), want it left cold", *opened)
+	}
+}
+
+// TestOwnerlessDoctorCheckWithNoSkippedRig: with every rig read, a runtime
+// whose owner no store holds is ownerless as before.
+func TestOwnerlessDoctorCheckWithNoSkippedRig(t *testing.T) {
+	c, cfg, open, _ := ownerlessSuspendedRigCase(t, false)
+	res := newOwnerlessRuntimesCheck(cfg, c.city, open, c.sp, nil).Run(nil)
+	got := strings.Join(res.Details, "\n")
+	if res.Status != doctor.StatusWarning || len(res.Details) != 1 || !strings.Contains(got, "named-1: session bead gc-gone not found (dead: the controller reaps it)") {
+		t.Fatalf("result %+v, want named-1 ownerless and reapable", res)
+	}
+}
+
+// TestOwnerlessDoctorCheckAbortsOnARealOpenError: a rig store that fails to
+// open, as opposed to one the gate skips, still aborts the scan, with a
+// suspended rig beside it too.
+func TestOwnerlessDoctorCheckAbortsOnARealOpenError(t *testing.T) {
+	c, cfg, open, _ := ownerlessSuspendedRigCase(t, true)
+	cfg.Rigs = append(cfg.Rigs, config.Rig{Name: "locked", Path: "/rigs/locked"})
+	failing := func(path string) (beads.Store, error) {
+		if path == "/rigs/locked" {
+			return nil, errors.New("rig store locked")
+		}
+		return open(path)
+	}
+	res := newOwnerlessRuntimesCheck(cfg, c.city, failing, c.sp, nil).Run(nil)
+	if res.Status != doctor.StatusWarning || !strings.Contains(res.Message, "skipping the ownerless-runtime scan") || !strings.Contains(res.Message, "rig store locked") || len(res.Details) != 0 {
+		t.Fatalf("result %+v, want the scan skipped over the locked rig, naming no runtime", res)
+	}
+}
+
+// TestOwnerlessLookupRecordsASkippedRig: a rig the caller skipped on purpose
+// is recorded with why, not an error. The owner of a runtime is then
+// provably missing from no read, so the tick's reap stops nothing.
+func TestOwnerlessLookupRecordsASkippedRig(t *testing.T) {
+	city, cfg, sessions, rigs := ownerlessRigCity(t)
+	cfg.Rigs = append(cfg.Rigs, config.Rig{Name: "dormant", Path: t.TempDir()})
+	owners := sessionOwnerLookup(city, cfg, sessions, rigs, map[string]error{"dormant": errDoctorStoreSuspended})
+	if owners.err != nil || len(owners.skipped) != 1 || owners.skipped[0] != "rig dormant not checked: suspended" {
+		t.Fatalf("lookup %+v, want dormant recorded as skipped and no error", owners)
+	}
+	if owners.notFound("gc-nowhere") || !owners.absentFromRead("gc-nowhere") || owners.absentFromRead("gc-rig") {
+		t.Fatalf("lookup %+v: want gc-nowhere absent from the read but not proven missing, gc-rig found", owners)
+	}
+
+	c := newOwnerlessCase(t)
+	skipped := ownerLookup{stores: []beads.Store{c.store}, skipped: []string{"rig dormant not checked: suspended"}}
+	for i := range 3 {
+		now := ownerlessT0.Add(time.Duration(i) * ownerlessReapConfirmAfter)
+		o := &ownerlessReap{sightings: c.sightings, owners: skipped, rec: c.rec, gap: c.gap, grace: time.Minute, now: now, clock: func() time.Time { return now }}
+		reapRuntimesBoundToClosedBeadsWith(c.store, c.snapshot, nil, c.sp, nil, c.city, o, &c.stderr)
+	}
+	if c.sp.stopCalls["named-1"] != 0 {
+		t.Fatalf("stopped %d time(s) with a rig skipped; want it left running", c.sp.stopCalls["named-1"])
 	}
 }

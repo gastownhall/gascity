@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -39,23 +40,31 @@ func (c *ownerlessRuntimesCheck) WarmupEligible() bool { return false }
 func (c *ownerlessRuntimesCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 // ownerLookup is every store a session row of the city can live in, as the
-// tick's reap reads them (sessionOwnerLookup): a rig store that will not
-// open leaves the lookup unable to prove any owner missing.
+// tick's reap reads them (sessionOwnerLookup). A rig store the doctor's
+// store gate leaves unread (suspended, or stopped and not to be started) is
+// skipped, so an owner missing from every store read is unprovable, not
+// ownerless; a rig store that fails to open leaves the lookup unable to
+// prove any owner missing.
 func (c *ownerlessRuntimesCheck) ownerLookup(city beads.Store) ownerLookup {
 	rigs := map[string]beads.Store{}
+	skipped := map[string]error{}
 	if c.cfg != nil {
 		for _, rig := range c.cfg.Rigs {
 			if strings.TrimSpace(rig.Path) == "" {
 				continue
 			}
 			store, err := c.newStore(rig.Path)
-			if err != nil {
+			switch {
+			case errors.Is(err, errDoctorStoreSuspended), errors.Is(err, errDoctorStoreNotRunning):
+				skipped[rig.Name] = err
+				continue
+			case err != nil:
 				return ownerLookup{err: fmt.Errorf("opening rig %s's store: %w", rig.Name, err)}
 			}
 			rigs[rig.Name] = store
 		}
 	}
-	return sessionOwnerLookup(c.cityPath, c.cfg, city, rigs)
+	return sessionOwnerLookup(c.cityPath, c.cfg, city, rigs, skipped)
 }
 
 func (c *ownerlessRuntimesCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
@@ -77,7 +86,11 @@ func (c *ownerlessRuntimesCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 	if len(findings) == 0 {
 		return okCheck(c.Name(), "every runtime has an owning session row")
 	}
-	return warnCheck(c.Name(), fmt.Sprintf("%d runtime(s) no session row owns", len(findings)),
+	msg := fmt.Sprintf("%d runtime(s) no session row owns", len(findings))
+	if len(owners.skipped) > 0 {
+		msg = fmt.Sprintf("%d runtime(s) no session row read owns (%s)", len(findings), strings.Join(owners.skipped, ", "))
+	}
+	return warnCheck(c.Name(), msg,
 		"the controller reaps a dead one of this city; inspect any other (gc session attach, or your provider's tools) and stop it if it is no longer wanted",
 		findings)
 }
