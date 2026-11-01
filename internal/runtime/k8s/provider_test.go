@@ -103,6 +103,66 @@ func TestParseSchedulingEnvHappyPath(t *testing.T) {
 	}
 }
 
+func TestResolvePodSecurityConfigDefaultsAndEnvironmentOverrides(t *testing.T) {
+	clearSchedulingEnv(t)
+	base := PodSecurityConfig{}
+	resolved, err := resolvePodSecurityConfig(base)
+	if err != nil {
+		t.Fatalf("resolvePodSecurityConfig: %v", err)
+	}
+	if resolved.RunAsUser != nil || resolved.RunAsGroup != nil || resolved.FSGroup != nil {
+		t.Fatalf("unset identity config = %+v, want all fields unset", resolved)
+	}
+
+	configuredUser, configuredGroup, configuredFSGroup := int64(1111), int64(0), int64(2222)
+	base = PodSecurityConfig{RunAsUser: &configuredUser, RunAsGroup: &configuredGroup, FSGroup: &configuredFSGroup}
+	resolved, err = resolvePodSecurityConfig(base)
+	if err != nil {
+		t.Fatalf("resolvePodSecurityConfig with TOML values: %v", err)
+	}
+	if resolved.RunAsUser == nil || *resolved.RunAsUser != configuredUser ||
+		resolved.RunAsGroup == nil || *resolved.RunAsGroup != configuredGroup ||
+		resolved.FSGroup == nil || *resolved.FSGroup != configuredFSGroup {
+		t.Fatalf("configured identity = %+v, want user=%d group=%d fsGroup=%d", resolved, configuredUser, configuredGroup, configuredFSGroup)
+	}
+
+	t.Setenv("GC_K8S_RUN_AS_USER", "23456")
+	t.Setenv("GC_K8S_RUN_AS_GROUP", "0")
+	t.Setenv("GC_K8S_FS_GROUP", "34567")
+	resolved, err = resolvePodSecurityConfig(base)
+	if err != nil {
+		t.Fatalf("resolvePodSecurityConfig with environment overrides: %v", err)
+	}
+	if resolved.RunAsUser == nil || *resolved.RunAsUser != 23456 ||
+		resolved.RunAsGroup == nil || *resolved.RunAsGroup != 0 ||
+		resolved.FSGroup == nil || *resolved.FSGroup != 34567 {
+		t.Fatalf("environment-overridden identity = %+v, want user=23456 group=0 fsGroup=34567", resolved)
+	}
+}
+
+func TestResolvePodSecurityConfigRejectsInvalidIDs(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "non-numeric UID", key: "GC_K8S_RUN_AS_USER", value: "user"},
+		{name: "root UID", key: "GC_K8S_RUN_AS_USER", value: "0"},
+		{name: "negative UID", key: "GC_K8S_RUN_AS_USER", value: "-1"},
+		{name: "negative GID", key: "GC_K8S_RUN_AS_GROUP", value: "-1"},
+		{name: "invalid fsGroup", key: "GC_K8S_FS_GROUP", value: "x"},
+		{name: "negative fsGroup", key: "GC_K8S_FS_GROUP", value: "-2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearSchedulingEnv(t)
+			t.Setenv(tc.key, tc.value)
+			if _, err := resolvePodSecurityConfig(PodSecurityConfig{}); err == nil || !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("resolvePodSecurityConfig error = %v, want an error mentioning %s", err, tc.key)
+			}
+		})
+	}
+}
+
 func TestParseSchedulingEnvRejectsMalformedJSON(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -186,6 +246,9 @@ func clearSchedulingEnv(t *testing.T) {
 		"GC_K8S_TOLERATIONS",
 		"GC_K8S_AFFINITY",
 		"GC_K8S_PRIORITY_CLASS_NAME",
+		"GC_K8S_RUN_AS_USER",
+		"GC_K8S_RUN_AS_GROUP",
+		"GC_K8S_FS_GROUP",
 	} {
 		t.Setenv(key, "")
 	}
@@ -1093,6 +1156,7 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 		"GC_PACK_STATE_DIR":                   "/host/city/.gc/runtime/packs/rlm",
 		"GC_PACK_DIR":                         "/host/city/packs/maintenance",
 		"GC_SESSION":                          "exec:gc-session-k8s",
+		"GC_K8S_WORKER_POD":                   "spoofed",
 		"GC_BEADS":                            "exec:something",
 		"GC_EVENTS":                           "exec:other",
 		"GC_DOLT_HOST":                        "",
@@ -1113,8 +1177,15 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 	env := mustBuildPodEnv(t, cfgEnv, "/workspace/rig", podManagedDoltHost, podManagedDoltPort)
 
 	envMap := map[string]string{}
+	workerMarkerCount := 0
 	for _, e := range env {
 		envMap[e.Name] = e.Value
+		if e.Name == "GC_K8S_WORKER_POD" {
+			workerMarkerCount++
+		}
+	}
+	if workerMarkerCount != 1 || envMap["GC_K8S_WORKER_POD"] != "true" {
+		t.Fatalf("generated Kubernetes worker marker = (%d, %q), want (1, true)", workerMarkerCount, envMap["GC_K8S_WORKER_POD"])
 	}
 
 	// GC_CITY should be remapped to /workspace.

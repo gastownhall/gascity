@@ -1972,7 +1972,9 @@ func (a *ACPSessionConfig) OutputBufferLinesOrDefault() int {
 	return a.OutputBufferLines
 }
 
-// K8sConfig holds native K8s session provider settings.
+// K8sConfig holds native K8s session provider settings; identity fields
+// run_as_user, run_as_group, and fs_group cannot be combined with LINUX_USERNAME,
+// including through GC_K8S_* environment overrides.
 // Env vars (GC_K8S_*) override TOML values.
 type K8sConfig struct {
 	// Namespace is the K8s namespace for agent pods. Default: "gc".
@@ -1981,6 +1983,19 @@ type K8sConfig struct {
 	Image string `toml:"image,omitempty"`
 	// Context is the kubectl/kubeconfig context. Default: current.
 	Context string `toml:"context,omitempty"`
+	// RunAsUser is an optional numeric UID for generated agent pods. When unset,
+	// Kubernetes admission may assign a UID; otherwise the image's numeric
+	// non-root fallback is used. Gas City does not allocate UIDs.
+	RunAsUser *int64 `toml:"run_as_user,omitempty"`
+	// RunAsGroup is an optional primary GID for generated agent pods. When unset,
+	// the image or cluster policy supplies the group identity. For a nonzero
+	// value, generated pods also join supplementary group 0 so image-layer HOME
+	// and prebaked workspace paths remain writable without changing the primary
+	// GID.
+	RunAsGroup *int64 `toml:"run_as_group,omitempty"`
+	// FSGroup is an optional supplemental filesystem GID. It lets kubelet make
+	// mounted workspace volumes writable by the pod's non-root identity.
+	FSGroup *int64 `toml:"fs_group,omitempty"`
 	// CPURequest is the pod CPU request. Default: "500m".
 	CPURequest string `toml:"cpu_request,omitempty" jsonschema:"default=500m"`
 	// MemRequest is the pod memory request. Default: "1Gi".
@@ -1992,6 +2007,25 @@ type K8sConfig struct {
 	// Prebaked skips init container staging and EmptyDir volumes when true.
 	// Use with images built by `gc build-image` that have city content baked in.
 	Prebaked bool `toml:"prebaked,omitempty"`
+	// SecretEnv projects Kubernetes Secret keys into named container env vars.
+	// A non-empty list replaces the default GITHUB_TOKEN projection.
+	SecretEnv []K8sSecretEnv `toml:"secret_env,omitempty"`
+	// SecretMounts mounts Kubernetes Secrets read-only into the agent container.
+	// A non-empty list replaces the default claude-credentials mount.
+	SecretMounts []K8sSecretMount `toml:"secret_mounts,omitempty"`
+}
+
+// K8sSecretEnv describes a Secret key projected into a container environment variable.
+type K8sSecretEnv struct {
+	Name   string `toml:"name" jsonschema:"required"`
+	Secret string `toml:"secret" jsonschema:"required"`
+	Key    string `toml:"key" jsonschema:"required"`
+}
+
+// K8sSecretMount describes a Secret mounted read-only into an agent container.
+type K8sSecretMount struct {
+	Secret    string `toml:"secret" jsonschema:"required"`
+	MountPath string `toml:"mount_path" jsonschema:"required"`
 }
 
 // MailConfig holds mail provider settings.

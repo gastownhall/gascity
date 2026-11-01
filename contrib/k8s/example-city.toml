@@ -43,6 +43,17 @@ namespace = "gc"
 # cpu_limit = "2"
 # mem_limit = "4Gi"
 # prebaked = true                  # skip init container + staging (use with gc build-image)
+# run_as_user = 23456              # optional UID; unset lets cluster admission choose
+# run_as_group = 0                  # optional primary GID
+# fs_group = 34567                  # optional volume group for staged workspace EmptyDirs
+
+# Agent pods use Restricted-compatible security settings by default. The image
+# runs as numeric UID:GID 1001:0 when the cluster does not assign an identity;
+# writable image paths are group-writable by GID 0. For mounted staged
+# workspaces, leave fs_group unset when cluster policy assigns one, or set it
+# here for clusters that require an explicit volume group. Gas City does not
+# allocate pod UIDs. LINUX_USERNAME retains its legacy root/useradd/chown/su
+# startup and therefore cannot be admitted by Restricted Pod Security.
 
 [mail]
 provider = "exec:gc-mail-mcp-agent-mail"

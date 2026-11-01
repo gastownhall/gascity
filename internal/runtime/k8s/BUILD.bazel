@@ -10,13 +10,16 @@ go_library(
         "provider.go",
         "seams.go",
         "staging.go",
+        "worker.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/k8s",
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/citylayout",
+        "//internal/config",
         "//internal/pathutil",
         "//internal/runtime",
+        "//internal/runtime/guard",
         "//internal/shellquote",
         "@io_k8s_api//core/v1:core",
         "@io_k8s_apimachinery//pkg/api/errors",
@@ -46,6 +49,7 @@ go_test(
         "staging_test.go",
         "testenv_helpers_test.go",
         "testenv_import_test.go",
+        "worker_test.go",
     ],
     data = glob(
         ["**"],
@@ -58,6 +62,7 @@ go_test(
     deps = [
         "//internal/bazeltest",
         "//internal/runtime",
+        "//internal/runtime/guard",
         "//internal/runtime/runtimetest",
         "//internal/shellquote",
         "//internal/testenv",
