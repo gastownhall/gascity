@@ -999,6 +999,7 @@ go_test(
         "api_state_rig_rollback_test.go",
         "api_state_rollout_test.go",
         "api_state_storage_routes_test.go",
+        "api_state_store_degraded_test.go",
         "api_state_test.go",
         "api_state_wake_refusal_test.go",
         "apiroute_test.go",

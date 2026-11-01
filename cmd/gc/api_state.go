@@ -2435,7 +2435,24 @@ func (cs *controllerState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
 		return nil
 	}
 	diag := *cs.cityBeadsDiagnostic
+	// Computed at READ time from the live store, not captured at open time, so
+	// status surfaces reflect the current cache state.
+	diag.Degraded = cs.cityStoreDegraded()
 	return &diag
+}
+
+// degradedReporter is the CachingStore capability that answers whether the
+// cache is serving degraded data.
+type degradedReporter interface{ Degraded() bool }
+
+// cityStoreDegraded reports whether the (possibly policy-wrapped) city store
+// is serving last-good cached data because the backing store is unreachable or
+// the cache itself has degraded. Unwraps the policy layer so the question
+// reaches the CachingStore that can actually answer it.
+func (cs *controllerState) cityStoreDegraded() bool {
+	base, _, _ := unwrapBeadPolicyStore(cs.cityBeadStore)
+	d, ok := beads.As[degradedReporter](base)
+	return ok && d.Degraded()
 }
 
 // Orders scans formula layers and returns active orders.
