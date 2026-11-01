@@ -1162,7 +1162,12 @@ func (cr *CityRuntime) startupReadinessWatchdog(ctx context.Context, ready <-cha
 type tickDebouncer struct {
 	mu     sync.Mutex
 	timer  *time.Timer
+	gen    uint64
 	fireCh chan struct{}
+	// beforeFire, when set, runs in the timer callback after the timer
+	// fires and before the fire is published, without holding mu. Tests
+	// park the callback there. Production leaves it nil.
+	beforeFire func()
 }
 
 // newTickDebouncer allocates a tickDebouncer with a cap=1 fire channel.
@@ -1189,10 +1194,23 @@ func (d *tickDebouncer) arm(delay time.Duration) {
 	if d.timer != nil {
 		return // already pending — burst collapse
 	}
+	// gen identifies this arm. cancelPending bumps it so an AfterFunc that
+	// already started — Stop does not wait for the callback — cannot publish
+	// after the drain. A later arm() gets a new gen, so the stale callback
+	// also must not clear that newer timer.
+	d.gen++
+	gen := d.gen
+	hook := d.beforeFire
 	d.timer = time.AfterFunc(delay, func() {
+		if hook != nil {
+			hook()
+		}
 		d.mu.Lock()
+		defer d.mu.Unlock()
+		if d.gen != gen {
+			return
+		}
 		d.timer = nil
-		d.mu.Unlock()
 		select {
 		case d.fireCh <- struct{}{}:
 		default:
@@ -1203,15 +1221,21 @@ func (d *tickDebouncer) arm(delay time.Duration) {
 // cancelPending stops an armed timer and discards a queued fire, if
 // any, and reports whether it did either. Used when a higher-priority
 // tick (e.g. the periodic patrol) supersedes whatever caused the pending
-// fire.
+// fire. An AfterFunc that has already started is invalidated via gen so
+// it cannot publish after this returns.
 func (d *tickDebouncer) cancelPending() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	pending := false
 	if d.timer != nil {
-		pending = d.timer.Stop()
+		// A false Stop means the callback already started and is about
+		// to publish; the gen bump below drops that fire, so it counts
+		// as pending here too.
+		d.timer.Stop()
 		d.timer = nil
+		pending = true
 	}
+	d.gen++
 	select {
 	case <-d.fireCh:
 		pending = true
