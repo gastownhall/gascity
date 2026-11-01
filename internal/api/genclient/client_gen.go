@@ -5755,28 +5755,31 @@ type SessionResponse struct {
 	Activity   *string `json:"activity,omitempty"`
 
 	// ActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
-	ActivitySource         *SessionResponseActivitySource `json:"activity_source,omitempty"`
-	AgentKind              *string                        `json:"agent_kind,omitempty"`
-	Alias                  *string                        `json:"alias,omitempty"`
-	Attached               bool                           `json:"attached"`
-	ConfiguredNamedSession *bool                          `json:"configured_named_session,omitempty"`
-	ContextPct             *int64                         `json:"context_pct,omitempty"`
-	ContextWindow          *int64                         `json:"context_window,omitempty"`
-	CreatedAt              string                         `json:"created_at"`
-	DisplayName            *string                        `json:"display_name,omitempty"`
-	Id                     string                         `json:"id"`
-	Kind                   *string                        `json:"kind,omitempty"`
-	LastActive             *string                        `json:"last_active,omitempty"`
-	LastNudgeDeliveredAt   *string                        `json:"last_nudge_delivered_at,omitempty"`
-	LastOutput             *string                        `json:"last_output,omitempty"`
-	Metadata               *map[string]string             `json:"metadata,omitempty"`
-	Model                  *string                        `json:"model,omitempty"`
-	Options                *map[string]string             `json:"options,omitempty"`
-	Pool                   *string                        `json:"pool,omitempty"`
-	ProgramStatus          *SessionProgramStatus          `json:"program_status,omitempty"`
-	Provider               string                         `json:"provider"`
-	Reason                 *string                        `json:"reason,omitempty"`
-	Rig                    *string                        `json:"rig,omitempty"`
+	ActivitySource *SessionResponseActivitySource `json:"activity_source,omitempty"`
+	AgentKind      *string                        `json:"agent_kind,omitempty"`
+
+	// AgentName The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Empty when the session records none.
+	AgentName              *string               `json:"agent_name,omitempty"`
+	Alias                  *string               `json:"alias,omitempty"`
+	Attached               bool                  `json:"attached"`
+	ConfiguredNamedSession *bool                 `json:"configured_named_session,omitempty"`
+	ContextPct             *int64                `json:"context_pct,omitempty"`
+	ContextWindow          *int64                `json:"context_window,omitempty"`
+	CreatedAt              string                `json:"created_at"`
+	DisplayName            *string               `json:"display_name,omitempty"`
+	Id                     string                `json:"id"`
+	Kind                   *string               `json:"kind,omitempty"`
+	LastActive             *string               `json:"last_active,omitempty"`
+	LastNudgeDeliveredAt   *string               `json:"last_nudge_delivered_at,omitempty"`
+	LastOutput             *string               `json:"last_output,omitempty"`
+	Metadata               *map[string]string    `json:"metadata,omitempty"`
+	Model                  *string               `json:"model,omitempty"`
+	Options                *map[string]string    `json:"options,omitempty"`
+	Pool                   *string               `json:"pool,omitempty"`
+	ProgramStatus          *SessionProgramStatus `json:"program_status,omitempty"`
+	Provider               string                `json:"provider"`
+	Reason                 *string               `json:"reason,omitempty"`
+	Rig                    *string               `json:"rig,omitempty"`
 
 	// Running Whether the session's runtime was live when this response was built, in any open state. It observes the runtime, not the agent: on tmux it is true while the session has a pane whose process has not exited, so a pane still running a launch wrapper or shell before the agent starts reads true, and a pane kept by remain-on-exit after its process exited reads false. GET /session/{id} and GET /sessions read the same probe, which tmux serves from a fleet snapshot refreshed at most every 2 s. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles.
 	Running                bool                    `json:"running"`
@@ -5785,8 +5788,14 @@ type SessionResponse struct {
 	SubmissionCapabilities *SubmissionCapabilities `json:"submission_capabilities,omitempty"`
 	Template               string                  `json:"template"`
 	Title                  string                  `json:"title"`
-	Turn                   *SessionTurn            `json:"turn,omitempty"`
-	WorkDir                *string                 `json:"work_dir,omitempty"`
+
+	// Transport How gc drives the session runtime, for example tmux or acp. Empty when unknown.
+	Transport *string      `json:"transport,omitempty"`
+	Turn      *SessionTurn `json:"turn,omitempty"`
+	WorkDir   *string      `json:"work_dir,omitempty"`
+
+	// WorkerDir The agent process's canonical working directory (a per-bead worktree when it has one), which work_dir may not be.
+	WorkerDir *string `json:"worker_dir,omitempty"`
 }
 
 // SessionResponseActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.

@@ -29,10 +29,13 @@ type sessionResponse struct {
 	Reason      string `json:"reason,omitempty"`
 	Title       string `json:"title"`
 	Alias       string `json:"alias,omitempty"`
+	AgentName   string `json:"agent_name,omitempty" doc:"The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Empty when the session records none."`
 	Provider    string `json:"provider"`
+	Transport   string `json:"transport,omitempty" doc:"How gc drives the session runtime, for example tmux or acp. Empty when unknown."`
 	DisplayName string `json:"display_name,omitempty"`
 	SessionName string `json:"session_name"`
 	WorkDir     string `json:"work_dir,omitempty"`
+	WorkerDir   string `json:"worker_dir,omitempty" doc:"The agent process's canonical working directory (a per-bead worktree when it has one), which work_dir may not be."`
 	CreatedAt   string `json:"created_at"`
 	LastActive  string `json:"last_active,omitempty"`
 	// LastNudgeDeliveredAt is the most recent successful nudge delivery
@@ -152,10 +155,13 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 		State:       state,
 		Title:       info.Title,
 		Alias:       info.Alias,
+		AgentName:   info.AgentName,
 		Provider:    provider,
+		Transport:   info.Transport,
 		DisplayName: displayName,
 		SessionName: info.SessionName,
 		WorkDir:     info.WorkDir,
+		WorkerDir:   strings.TrimSpace(info.WorkerDir),
 		CreatedAt:   info.CreatedAt.Format(time.RFC3339),
 		Attached:    info.Attached,
 		Rig:         rig,

@@ -3706,6 +3706,7 @@ export const zSessionResponse = z.object({
     activity: z.string().optional(),
     activity_source: z.enum(['program', 'transcript']).optional(),
     agent_kind: z.string().optional(),
+    agent_name: z.string().optional(),
     alias: z.string().optional(),
     attached: z.boolean(),
     configured_named_session: z.boolean().optional(),
@@ -3732,8 +3733,10 @@ export const zSessionResponse = z.object({
     submission_capabilities: zSubmissionCapabilities.optional(),
     template: z.string(),
     title: z.string(),
+    transport: z.string().optional(),
     turn: zSessionTurn.optional(),
-    work_dir: z.string().optional()
+    work_dir: z.string().optional(),
+    worker_dir: z.string().optional()
 });
 
 export const zListBodySessionResponse = z.object({
