@@ -435,18 +435,32 @@ func (p *Provider) InboxRecipients(recipients []string) ([]mail.Message, error) 
 	return p.filterMessagesForRecipients(recipients, false)
 }
 
+// getMessageBead loads the bead at id and enforces the message-type boundary
+// and removed-message visibility that every ID-addressed mail operation
+// (Get, Read, MarkRead, MarkUnread, Reply) must honor identically. Factored
+// out so that boundary can't drift between callers the way it did before:
+// Get checked b.Type != messageBeadType but Read/MarkRead/MarkUnread did not,
+// letting a task/session/other bead be loaded and mutated as mail.
+func (p *Provider) getMessageBead(operation, id string) (beads.Bead, error) {
+	b, err := p.store.Get(id)
+	if err != nil {
+		return beads.Bead{}, beadmailError(operation, err)
+	}
+	if b.Type != messageBeadType {
+		return beads.Bead{}, fmt.Errorf("beadmail %s: bead %s is type %q, not message", operation, id, b.Type)
+	}
+	if isRemovedMessageBead(b) {
+		return beads.Bead{}, beadmailError(operation, beads.ErrNotFound)
+	}
+	return b, nil
+}
+
 // Get retrieves a message by ID without marking it read.
 // Returns an error if the bead is not a message type.
 func (p *Provider) Get(id string) (mail.Message, error) {
-	b, err := p.store.Get(id)
+	b, err := p.getMessageBead("get", id)
 	if err != nil {
-		return mail.Message{}, beadmailError("get", err)
-	}
-	if b.Type != messageBeadType {
-		return mail.Message{}, fmt.Errorf("beadmail get: bead %s is type %q, not message", id, b.Type)
-	}
-	if isRemovedMessageBead(b) {
-		return mail.Message{}, beadmailError("get", beads.ErrNotFound)
+		return mail.Message{}, err
 	}
 	return beadToMessage(b), nil
 }
@@ -454,12 +468,9 @@ func (p *Provider) Get(id string) (mail.Message, error) {
 // Read retrieves a message by ID and marks it as read (adds "read" label).
 // The message remains in the store (not closed).
 func (p *Provider) Read(id string) (mail.Message, error) {
-	b, err := p.store.Get(id)
+	b, err := p.getMessageBead("read", id)
 	if err != nil {
-		return mail.Message{}, beadmailError("read", err)
-	}
-	if isRemovedMessageBead(b) {
-		return mail.Message{}, beadmailError("read", beads.ErrNotFound)
+		return mail.Message{}, err
 	}
 	if !hasLabel(b.Labels, "read") {
 		if err := p.store.Update(id, beads.UpdateOpts{
@@ -477,12 +488,8 @@ func (p *Provider) Read(id string) (mail.Message, error) {
 
 // MarkRead marks a message as read (adds "read" label).
 func (p *Provider) MarkRead(id string) error {
-	b, err := p.store.Get(id)
-	if err != nil {
-		return beadmailError("mark-read", err)
-	}
-	if isRemovedMessageBead(b) {
-		return beadmailError("mark-read", beads.ErrNotFound)
+	if _, err := p.getMessageBead("mark-read", id); err != nil {
+		return err
 	}
 	if err := p.store.Update(id, beads.UpdateOpts{
 		Labels:   []string{"read"},
@@ -496,12 +503,8 @@ func (p *Provider) MarkRead(id string) error {
 
 // MarkUnread marks a message as unread (removes "read" label).
 func (p *Provider) MarkUnread(id string) error {
-	b, err := p.store.Get(id)
-	if err != nil {
-		return beadmailError("mark-unread", err)
-	}
-	if isRemovedMessageBead(b) {
-		return beadmailError("mark-unread", beads.ErrNotFound)
+	if _, err := p.getMessageBead("mark-unread", id); err != nil {
+		return err
 	}
 	return p.store.Update(id, beads.UpdateOpts{
 		RemoveLabels: []string{"read"},
@@ -861,12 +864,9 @@ func (p *Provider) CheckAutoHandoffs(recipients []string) ([]mail.Message, error
 // original, sets ReplyTo to the original's ID. Reply is addressed to the
 // original sender.
 func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
-	original, err := p.store.Get(id)
+	original, err := p.getMessageBead("reply", id)
 	if err != nil {
-		return mail.Message{}, beadmailError("reply", err)
-	}
-	if isRemovedMessageBead(original) {
-		return mail.Message{}, beadmailError("reply", beads.ErrNotFound)
+		return mail.Message{}, err
 	}
 	toSessionID := strings.TrimSpace(original.Metadata[fromSessionIDMetadataKey])
 	to := toSessionID
