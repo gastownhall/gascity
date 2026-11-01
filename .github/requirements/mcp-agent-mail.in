@@ -20,6 +20,12 @@ mcp-agent-mail @ https://github.com/Dicklesworthstone/mcp_agent_mail/archive/327
 # create_submodule clones before validating the submodule path). There is no
 # 3.1.x backport, but mcp-agent-mail never creates or updates submodules, so the
 # advisory is unreachable and is waived in .trivyignore.yaml for this release.
+# 3.2.0 is likewise the only fix for GHSA-23mf-xhv8-69c2 (Head.checkout),
+# GHSA-f9j4-qggq-h239 (Remote.pull) and GHSA-w8jc-g24h-crhw (Git.ls_remote,
+# Repo.merge_base, IndexFile.move), none of which mcp-agent-mail calls, and for
+# GHSA-m64x-33q8-m5h7 (parse_actor_and_date regex DoS), which IS reachable and is
+# waived only for the shipped contrib/k8s/mcp-mail-deployment.yaml, which mounts
+# no workspace repos. All four are waived in .trivyignore.yaml for this release.
 # Lift the ceiling once a GitPython release fixes the commit-latency regression.
 gitpython>=3.1.62,<3.2
 
