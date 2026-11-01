@@ -2695,10 +2695,19 @@ find_dolt_pid() {
     if [ -f "$PID_FILE" ]; then
         local file_pid
         file_pid=$(cat "$PID_FILE" 2>/dev/null)
-        if [ -n "$file_pid" ] && kill -0 "$file_pid" 2>/dev/null; then
-            echo "$file_pid"
-            return
-        fi
+        # Only a positive decimal is a PID, so check that before kill -0. In
+        # POSIX mode bash 5.3 (/bin/sh on Fedora 44) kill -0 exits 0 for an
+        # operand that is not a PID, and kill -0 0 or -1 signals a whole
+        # process group in every shell: either would read as a live Dolt.
+        case "$file_pid" in
+            ''|0*|*[!0-9]*) ;;
+            *)
+                if kill -0 "$file_pid" 2>/dev/null; then
+                    echo "$file_pid"
+                    return
+                fi
+                ;;
+        esac
         # Stale PID file — clean up.
         rm -f "$PID_FILE"
     fi
@@ -2727,7 +2736,8 @@ find_dolt_pid() {
 # Resolution order:
 #   1. State file has a reachable port + PID is alive → reuse it
 #   2. GC_DOLT_PORT env var (initial/operator override) → use it
-#   3. Hash GC_CITY_PATH into range 10000–60000, probe with lsof, increment until free
+#   3. State file has a port nothing listens on (its server died) → reuse it
+#   4. Hash GC_CITY_PATH into range 10000–60000, probe with lsof, increment until free
 allocate_port() {
     local gc_bin helper_port
     gc_bin=$(resolve_gc_helper_bin)
@@ -2758,7 +2768,23 @@ allocate_port() {
         return
     fi
 
-    # 3. Deterministic hash of city path, probe until free.
+    # 3. The port a dead server recorded, when it is a valid TCP port (a
+    # decimal integer from 1 to 65535) and free. Running sessions pin the port
+    # they were spawned with, so a restart must come back on it.
+    if [ -f "$STATE_FILE" ]; then
+        local recorded_port
+        recorded_port=$(load_state_field port)
+        case "$recorded_port" in
+            ''|*[!0-9]*|0*) recorded_port="" ;;
+        esac
+        if [ -n "$recorded_port" ] && [ "$recorded_port" -le 65535 ] &&
+            ! run_lsof -nP -iTCP:"$recorded_port" -sTCP:LISTEN >/dev/null 2>&1; then
+            echo "$recorded_port"
+            return
+        fi
+    fi
+
+    # 4. Deterministic hash of city path, probe until free.
     local hash_val
     hash_val=$(printf '%s' "$GC_CITY_PATH" | cksum | awk '{print $1 % 50000 + 10000}')
     local port="$hash_val"

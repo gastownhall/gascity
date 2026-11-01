@@ -470,6 +470,41 @@ func TestPreWakeFoldsVerifiedBinding(t *testing.T) {
 	}
 }
 
+// Kills a parked resume's kept work dir applied unverified at the PreWake:
+// a kept dir that still hosts the resume stays the row's work dir and the
+// launch's, and one that is gone binds the derived dir instead.
+func TestPreWakeVerifiesAParkedResumesKeptWorkDir(t *testing.T) {
+	derived := filepath.Join(t.TempDir(), "worker-1")
+	for _, gone := range []bool{false, true} {
+		kept := t.TempDir()
+		k, leaf := launchKit(t, "asleep", beadmeta.WorkDirMetadataKey, kept, beadmeta.LegacyWorkDirMetadataKey, kept)
+		if gone {
+			if err := os.RemoveAll(kept); err != nil {
+				t.Fatal(err)
+			}
+		}
+		k.p.Alloc.Snapshot.Entries[k.it.Key] = &selectionEntry{Binding: &bindingTarget{WorkDir: derived, KeptWorkDir: kept, Patch: session.MetadataPatch{beadmeta.TriggerBeadIDMetadataKey: "w-1"}}}
+		want := kept
+		if gone {
+			want = derived
+		}
+		if s := k.runKind(); s.Outcome != settledLanded || len(leaf.cfgs) != 1 {
+			t.Fatalf("gone=%v: settlement %+v, want one launch", gone, s)
+		}
+		for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+			if got := k.meta(key); got != want {
+				t.Errorf("gone=%v: row %s %q, want %q", gone, key, got, want)
+			}
+		}
+		if got := leaf.cfgs[0].WorkDir; got != want {
+			t.Errorf("gone=%v: launched in %q, want %q", gone, got, want)
+		}
+		if got := k.meta(beadmeta.TriggerBeadIDMetadataKey); got != "w-1" {
+			t.Errorf("gone=%v: trigger %q, want the binding's w-1", gone, got)
+		}
+	}
+}
+
 // Kills a concrete-pool work_dir repair left to prepare, which fails after
 // PreWake on every attempt (the generation climbs): the PreWake CAS carries
 // it, and the launch starts in the concrete dir.

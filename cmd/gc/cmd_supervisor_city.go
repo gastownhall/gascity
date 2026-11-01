@@ -352,6 +352,22 @@ func supervisorAlreadyManagesCity(cityPath string) bool {
 	return known && running
 }
 
+// supervisorInitializingCity reports that the supervisor lists the city as one
+// it is still bringing up (loading config, starting the bead store, building
+// the runtime, starting agents): listed, not running, not failed, and past
+// queued. Since S5-A the supervisor holds the city's controller lock through
+// that whole init and opens the controller socket only at its end, so a held
+// lock with no controller answering is the supervisor's own in that window. A
+// queued city is listed before the supervisor takes its lock (it publishes
+// its first init phase only once it holds it), so a lock held while the city
+// is queued is someone else's: gc stop, a storage verb, or a booting
+// foreground controller.
+func supervisorInitializingCity(cityPath string) bool {
+	running, status, known := supervisorCityRunningHook(cityPath)
+	status = strings.TrimSpace(status)
+	return known && !running && status != "" && status != "init_failed" && status != cityInitStatusQueued
+}
+
 func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stderr io.Writer, commandName string, showProgress bool) int {
 	cityPath = normalizePathForCompare(cityPath)
 	// Registering hands the city to a local supervisor, which would build its
@@ -371,7 +387,13 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 		return 1
 	}
 	if !supervisorAlreadyManagesCity(cityPath) {
-		if pid, err := ensureNoStandaloneController(cityPath); err != nil {
+		pid, err := ensureNoStandaloneController(cityPath)
+		if errors.Is(err, errControllerHostingUnknown) && pid == 0 && supervisorInitializingCity(cityPath) {
+			// The lock is held and no controller answers: the supervisor
+			// that lists this city as initializing holds it.
+			err = nil
+		}
+		if err != nil {
 			switch {
 			case errors.Is(err, errControllerAlreadyRunning):
 				writeStandaloneControllerConflict(stderr, commandName, cityPath, pid)

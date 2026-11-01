@@ -133,6 +133,12 @@ func agentCommandB64(cfg runtime.Config) string {
 // the existing tmux "main" session (respawn-pane -k), reusing the warm pod. When
 // LINUX_USERNAME is set the entrypoint runs tmux under `su - <user>`, so the
 // respawn is wrapped in the same su to reach that user's tmux socket.
+//
+// The respawned agent's environment is the tmux server's, not this command's:
+// respawn-pane starts the pane from the server's global and session
+// environment. The server got the remote-stage variables when the entrypoint
+// started it (suRemoteStageExports for LINUX_USERNAME), and Relaunch writes the
+// on-disk record before respawning, which covers a pod created without them.
 func buildRespawnCommand(cfg runtime.Config) string {
 	cmdB64 := agentCommandB64(cfg)
 	if user := cfg.Env["LINUX_USERNAME"]; user != "" {
@@ -339,11 +345,15 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 		// Run tmux session as the dynamic user via su. userSetup already created
 		// and chowned podWorkDir as root; enterWorkDir is idempotent and is what
 		// puts pre_start in the right directory.
+		// su - is a login shell and clears the environment, so the
+		// remote-stage variables the pod spec sets would not reach the agent
+		// (nor the tmux server, whose environment every pane inherits). They
+		// are exported again inside the su command (suRemoteStageExports).
 		tmuxCmd = fmt.Sprintf(
 			"%s%s%s%s%sCMD=$(echo '%s' | base64 -d) && "+
-				`su - %s -c "cd %s && tmux new-session -d -s %s \"$CMD\" && sleep infinity"`,
+				`su - %s -c "%scd %s && tmux new-session -d -s %s \"$CMD\" && sleep infinity"`,
 			userSetup, credCopy, wsWait, enterWorkDir, preStartCmds, cmdB64,
-			linuxUsername, podWorkDir, tmuxSession,
+			linuxUsername, suRemoteStageExports(p.cityName, ctrlCity), podWorkDir, tmuxSession,
 		)
 	} else {
 		tmuxCmd = fmt.Sprintf(
@@ -357,6 +367,13 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	if err != nil {
 		return nil, err
 	}
+	// The pod's processes are a remote stage of the controller's city from
+	// the container's first instruction (S5-A): gc honors these from process
+	// start, so no gc command started from the pod's environment, the agent's
+	// first one included (also under LINUX_USERNAME, where su - clears the
+	// environment and the launch re-exports them), can run storage genesis
+	// before the on-disk record exists.
+	env = append(env, remoteStageEnv(p.cityName, controllerCityPath(cfg.Env))...)
 	if rigProjectionMarker != "" {
 		env = append(env, corev1.EnvVar{Name: "GC_RIG_PROJECTION_MARKER", Value: rigProjectionMarker})
 	}
@@ -667,3 +684,22 @@ func buildResources(p *Provider) (corev1.ResourceRequirements, error) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// suRemoteStageExports re-exports the remote-stage environment inside a
+// `su - <user> -c "..."` command string, or returns "" without a controller
+// city. su - starts a login shell with a cleared environment, so without this
+// the agent run as LINUX_USERNAME (and its tmux server) would not carry the
+// variables that mark it a remote stage from its first instruction.
+//
+// The string is embedded inside the double-quoted -c argument of an outer sh,
+// so values are passed base64-encoded and decoded by the inner shell: the
+// outer shell sees only \$, \" and base64 characters, and the inner shell
+// gets each value verbatim whatever characters it contains.
+func suRemoteStageExports(cityName, ctrlCity string) string {
+	var out strings.Builder
+	for _, e := range remoteStageEnv(cityName, ctrlCity) {
+		b64 := base64.StdEncoding.EncodeToString([]byte(e.Value))
+		fmt.Fprintf(&out, `export %s=\"\$(echo '%s' | base64 -d)\"; `, e.Name, b64)
+	}
+	return out.String()
+}

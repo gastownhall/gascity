@@ -264,7 +264,7 @@ Table-form fields:
 | Field | Type | Purpose |
 |---|---|---|
 | `description` | string | What the variable is for; shown by `gc formula show` |
-| `default` | string | Value used when none is provided. An explicit empty string is a valid default |
+| `default` | string | Value used when none is provided. An explicit empty string is a valid default. A default may reference other variables with `{{name}}`: values supplied for the invocation (explicit `--var`, rig `formula_vars`, the routing variables `gc sling` injects, and `{{convoy_id}}`) or other defaults. Supplied values are used verbatim and never re-expanded |
 | `required` | bool | The variable must be provided at instantiation. Declaring `required = true` together with a `default` fails validation: `vars.<name>: cannot have both required:true and default` |
 | `enum` | []string | Allowed values; enforced at instantiation |
 | `pattern` | string | Regex the value must match; enforced at instantiation |
@@ -914,6 +914,15 @@ at runtime.
 | `continuation_group` | Shared execution group suffix; valid only with `context = "shared"` |
 | `item.single_lane` | Must be `true` for shared drains |
 
+The item formula receives the parent's runtime variables as caller values:
+the values the parent was invoked with and its resolved defaults, so they
+take precedence over the item formula's own defaults. Its `{{convoy_id}}` is
+its unit convoy, and the deprecated `{{issue}}` resolves to the unit's member.
+A parent default derived from the parent's input convoy (one that references
+`{{convoy_id}}` or `{{issue}}`, directly or through another default) is not
+passed on: an item formula that needs the value declares the same default and
+derives it from its unit convoy.
+
 A `blocks` edge is satisfied by its predecessor's close whatever
 `gc.outcome` that close carries, but a drain does not expand when a direct
 blocking predecessor in the same workflow closed with a failed outcome: it
@@ -1065,6 +1074,56 @@ the only bead that could clear the blocker is the one being refused. The
 compiler rejects any recipe that contains one. Downstream ordering is
 unaffected: the scope-check still blocks on its member, and the finalizer
 still blocks on every graph sink including the scope body.
+
+**Scope membership across `extends`.** A step joins a scope through its own
+metadata (`gc.scope_ref`, `gc.scope_role`), and `extends` merges steps by ID:
+an override replaces the parent's step wholesale, with no per-step metadata
+merge, while a step the child never mentions passes through unchanged,
+metadata included. Three rules follow.
+
+1. Declare the scope body once, at the common ancestor, and mark its members
+   there. Every extending formula inherits the body, and the membership of
+   each step it does not override.
+2. An override of a scope member redeclares its `gc.scope_ref` and
+   `gc.scope_role`, or leaves the scope on purpose by setting
+   `gc.scope_ref = ""`. Mentioning the key states the decision; the empty
+   value is the explicit opt-out.
+3. A terminal or joining step the child adds declares fresh membership,
+   pointing at the inherited body. Only members are stopped by
+   `abort_scope`: a member's scope-check closes with `gc.outcome = pass`
+   however the member ended, and a downstream step's dependency on that
+   member is rewritten to the scope-check, so a step outside the scope still
+   runs after the scope aborts.
+
+The rules are authoring guidance, and the compiler checks only that every
+`gc.scope_ref` resolves. When a formula that uses `extends` is resolved, each
+`gc.scope_ref` must name a step with `gc.kind = "scope"` and
+`gc.scope_role = "body"`, and every step whose reference does not is reported
+at once. A `gc.scope_ref` that holds a `{{variable}}` placeholder is not
+checked, because cook substitutes it after the formula is resolved.
+
+The compiler does not yet check rules 2 and 3. An override that drops its
+parent's `gc.scope_ref` takes that step out of the scope, and a terminal step
+that declares no membership still runs after the scope aborts. Both resolve
+without a diagnostic, so apply the rules above when you override or add steps.
+
+A formula that names no scope is unaffected, and so is one without
+`extends`: the check guards a merge.
+
+`[requires] formula_compiler` gates compiler capability, not the content of a
+base formula that an extender depends on, and a new `[requires]` axis would
+not help: a scope body is bundle content, not compiler capability. An
+extender whose base lacks the body it names is therefore caught by the
+`gc.scope_ref` check above, not by `[requires]`, and should ship only once the
+deployed bundle provides that body.
+
+The `mol-polecat-*` formulas have the shape these rules exist for. The base
+runs `load-context`, `workspace-setup`, `preflight-tests`, `implement` and
+`self-review`; `mol-polecat-commit` overrides only `workspace-setup` and adds
+a terminal `commit-and-push`; `mol-polecat-report` overrides four of the base
+steps and adds a terminal `write-report`. Marking the base's members once
+covers every step a variant leaves alone, and only the overrides and the new
+terminal steps restate membership.
 
 ## 4. Accepted But Inert
 
