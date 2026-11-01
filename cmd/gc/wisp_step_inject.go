@@ -517,7 +517,8 @@ func (r stepResolution) rootViaRoutedBridgeIn(assignees []string) (*beads.Bead, 
 }
 
 // claimableBridgeSources returns, in order, the open routed candidates that
-// carry a molecule_id and that a claim could take now: not deferred, not on a
+// carry a molecule_id and that a claim could take now: unassigned, not deferred
+// (including gc.budget_deferred_until, hookCandidateBudgetDeferred), not on a
 // dispatch hold (beadmeta.HasDispatchHold, the hook's isHeldHookCandidate), and
 // with every ready-blocking dependency satisfied. Readiness is read only for
 // the candidates that would bridge, from the work store they live in.
@@ -525,7 +526,11 @@ func (r stepResolution) claimableBridgeSources(candidates []beads.Bead) []beads.
 	now := time.Now()
 	var sources []beads.Bead
 	for _, c := range candidates {
-		if strings.TrimSpace(c.Metadata[beadmeta.MoleculeIDMetadataKey]) == "" || beads.IsDeferred(c, now) || beadmeta.HasDispatchHold(c.Labels) {
+		if strings.TrimSpace(c.Metadata[beadmeta.MoleculeIDMetadataKey]) == "" ||
+			strings.TrimSpace(c.Assignee) != "" ||
+			beads.IsDeferred(c, now) ||
+			hookCandidateBudgetDeferred(c, now) ||
+			beadmeta.HasDispatchHold(c.Labels) {
 			continue
 		}
 		sources = append(sources, c)
