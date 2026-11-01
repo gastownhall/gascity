@@ -121,6 +121,7 @@ go_test(
         "//internal/processgroup/processgrouptest",
         "//internal/sourceworkflow",
         "//internal/testenv",
+        "@com_github_fsnotify_fsnotify//:fsnotify",
     ] + select({
         "@rules_go//go/platform:aix": [
             "//internal/processgroup",
