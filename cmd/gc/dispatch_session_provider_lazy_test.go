@@ -13,6 +13,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/guard"
+	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 )
 
 // TestControlDispatchBuildsNoSessionProviderUnlessARetryRecycles pins
@@ -148,4 +150,217 @@ func TestControlDispatcherReportsABrokenSessionProviderConfigAtStartup(t *testin
 	if scans == 0 {
 		t.Fatal("dispatcher with a working provider never scanned")
 	}
+}
+
+// A marked Kubernetes worker has no Kubernetes credentials of its own. It
+// validates the static city settings but leaves client construction to the controller.
+func TestK8sWorkerDispatcherSkipsLiveProviderConstruction(t *testing.T) {
+	clearGCEnv(t)
+	clearKubernetesClientConfigForDispatchTest(t)
+	t.Setenv("GC_SESSION_ID", "de-wisp-test")
+	t.Setenv(config.K8sWorkerPodMarkerEnv, "true")
+
+	cfg := &config.City{}
+	cfg.Session.Provider = "k8s"
+	built := 0
+	prevBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		built++
+		return nil, errors.New("live provider construction should be skipped")
+	}
+	t.Cleanup(func() { buildSessionProviderByName = prevBuild })
+
+	if err := validateDispatchSessionProviderConfig(cfg, t.TempDir()); err != nil {
+		t.Fatalf("marked K8s worker validation without API credentials: %v", err)
+	}
+	if built != 0 {
+		t.Fatalf("live provider construction called %d times, want 0", built)
+	}
+}
+
+func TestK8sWorkerControlDispatcherServesWithoutKubernetesClient(t *testing.T) {
+	clearGCEnv(t)
+	clearKubernetesClientConfigForDispatchTest(t)
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	cityConfig := "[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n\n[session]\nprovider = \"k8s\"\n" + testControlDispatcherAgentTOML("")
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfig), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_SESSION_ID", "de-wisp-test")
+	t.Setenv("GC_SESSION_NAME", "test-city/control-dispatcher")
+	t.Setenv(config.K8sWorkerPodMarkerEnv, "true")
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevBuild := buildSessionProviderByName
+	cityFlag = ""
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		buildSessionProviderByName = prevBuild
+	})
+	scans := 0
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		scans++
+		return nil, nil
+	}
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		t.Fatal("marked Kubernetes worker attempted live provider construction")
+		return nil, nil
+	}
+
+	if err := runWorkflowServe("control-dispatcher", false, io.Discard, io.Discard); err != nil {
+		t.Fatalf("runWorkflowServe without Kubernetes API credentials: %v", err)
+	}
+	if scans == 0 {
+		t.Fatal("marked Kubernetes worker did not serve any control scan")
+	}
+}
+
+func TestK8sWorkerMarkerDoesNotSkipSessionProviderOverride(t *testing.T) {
+	clearGCEnv(t)
+	clearKubernetesClientConfigForDispatchTest(t)
+	t.Setenv("GC_SESSION_ID", "de-wisp-test")
+	t.Setenv(config.K8sWorkerPodMarkerEnv, "true")
+	t.Setenv("GC_SESSION", "tmux")
+
+	cfg := &config.City{}
+	cfg.Session.Provider = "k8s"
+	built := 0
+	prevBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(_ *config.City, name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
+		built++
+		if name != "tmux" {
+			t.Fatalf("provider selected = %q, want GC_SESSION override tmux", name)
+		}
+		return runtime.NewFake(), nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = prevBuild })
+
+	if err := validateDispatchSessionProviderConfig(cfg, t.TempDir()); err != nil {
+		t.Fatalf("validate overridden provider: %v", err)
+	}
+	if built != 1 {
+		t.Fatalf("provider construction called %d times, want 1", built)
+	}
+}
+
+func TestLocalManagedDispatcherStillConstructsConfiguredProvider(t *testing.T) {
+	clearGCEnv(t)
+	clearKubernetesClientConfigForDispatchTest(t)
+	t.Setenv("GC_SESSION_ID", "de-wisp-test")
+	t.Setenv(config.K8sWorkerPodMarkerEnv, "")
+
+	cfg := &config.City{}
+	cfg.Session.Provider = "k8s"
+	err := validateDispatchSessionProviderConfig(cfg, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "building K8s config") {
+		t.Fatalf("local managed dispatcher validation error = %v, want ordinary K8s client-config validation", err)
+	}
+}
+
+func TestK8sWorkerDispatcherRejectsInvalidStaticProviderConfig(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*testing.T, *config.City)
+		want      string
+	}{
+		{
+			name: "invalid pod identity",
+			configure: func(_ *testing.T, cfg *config.City) {
+				invalid := int64(-1)
+				cfg.Session.K8s.RunAsUser = &invalid
+			},
+			want: "must be greater than zero",
+		},
+		{
+			name: "invalid scheduling JSON",
+			configure: func(t *testing.T, _ *config.City) {
+				t.Setenv("GC_K8S_NODE_SELECTOR", "{")
+			},
+			want: "parsing GC_K8S_NODE_SELECTOR",
+		},
+		{
+			name: "invalid Secret projection",
+			configure: func(_ *testing.T, cfg *config.City) {
+				cfg.Session.K8s.SecretEnv = []config.K8sSecretEnv{{Name: "bad-name", Secret: "token", Key: "key"}}
+			},
+			want: "not a valid environment variable name",
+		},
+		{
+			name: "reserved worker marker projection",
+			configure: func(_ *testing.T, cfg *config.City) {
+				cfg.Session.K8s.SecretEnv = []config.K8sSecretEnv{{Name: config.K8sWorkerPodMarkerEnv, Secret: "token", Key: "key"}}
+			},
+			want: "reserved for the Kubernetes worker marker",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearGCEnv(t)
+			clearKubernetesClientConfigForDispatchTest(t)
+			t.Setenv("GC_SESSION_ID", "de-wisp-test")
+			t.Setenv(config.K8sWorkerPodMarkerEnv, "true")
+			cfg := &config.City{}
+			cfg.Session.Provider = "k8s"
+			tt.configure(t, cfg)
+			err := validateDispatchSessionProviderConfig(cfg, t.TempDir())
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("marked K8s worker validation error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestK8sSessionProviderConstructionStillRequiresClientConfig(t *testing.T) {
+	clearGCEnv(t)
+	clearKubernetesClientConfigForDispatchTest(t)
+	_, err := k8sProviderFromSession(config.K8sConfig{}, "test-city")
+	if err == nil || !strings.Contains(err.Error(), "building K8s config") {
+		t.Fatalf("K8s provider construction error = %v, want missing client config", err)
+	}
+}
+
+func TestK8sWorkerResolvesClientFreeSessionProvider(t *testing.T) {
+	clearGCEnv(t)
+	clearKubernetesClientConfigForDispatchTest(t)
+	t.Setenv("GC_SESSION_ID", "de-wisp-test")
+	t.Setenv("GC_SESSION_NAME", "own")
+	t.Setenv(config.K8sWorkerPodMarkerEnv, "true")
+
+	cfg := &config.City{}
+	cfg.Session.Provider = "k8s"
+	sp, err := resolveWorkerSpec(cfg, runtime.WorkerSpec{Runtime: "k8s"}, cfg.Session, "test-city", t.TempDir())
+	if err != nil {
+		t.Fatalf("resolveWorkerSpec in a marked worker without API credentials: %v", err)
+	}
+	if _, ok := sp.(*sessionk8s.WorkerProvider); !ok {
+		t.Fatalf("provider = %T, want *k8s.WorkerProvider", sp)
+	}
+	if err := sp.Stop("own"); !errors.Is(err, guard.ErrControllerOwnedRuntime) {
+		t.Fatalf("worker Stop error = %v, want ErrControllerOwnedRuntime", err)
+	}
+}
+
+func TestUnmarkedK8sProviderResolutionStillRequiresClientConfig(t *testing.T) {
+	clearGCEnv(t)
+	clearKubernetesClientConfigForDispatchTest(t)
+	t.Setenv("GC_SESSION_ID", "de-wisp-test")
+
+	cfg := &config.City{}
+	cfg.Session.Provider = "k8s"
+	_, err := resolveWorkerSpec(cfg, runtime.WorkerSpec{Runtime: "k8s"}, cfg.Session, "test-city", t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "building K8s config") {
+		t.Fatalf("unmarked K8s resolution error = %v, want missing client config", err)
+	}
+}
+
+func clearKubernetesClientConfigForDispatchTest(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "missing-kubeconfig"))
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "")
 }
