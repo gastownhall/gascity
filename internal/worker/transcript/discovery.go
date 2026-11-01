@@ -2,6 +2,7 @@
 package transcript
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -157,6 +158,32 @@ func isProvisionalGCSessionID(sessionID string) bool {
 		}
 	}
 	return true
+}
+
+// KeyedProbeRoots is the roots a keyed probe of provider searches. A
+// claude-family probe searches the roots exactly as given, adding no default
+// of its own, so an empty list means the defaults rather than nothing. Every
+// other family probes the defaults alone, on top of which its reader adds
+// its own default roots: [daemon] observe_paths are Claude roots, and pi
+// walks every root it is given recursively.
+func KeyedProbeRoots(searchPaths []string, provider string) []string {
+	if len(searchPaths) == 0 || !strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude") {
+		return sessionlog.DefaultSearchPaths()
+	}
+	return searchPaths
+}
+
+// ClaudeConfigProjectsRoot is the projects root an absolute CLAUDE_CONFIG_DIR
+// in env adds to a keyed probe: <dir>/projects, the one root such a launch
+// reads its claude transcripts from. A relative or ~ value is resolved by the
+// provider against its own working dir and home, which a probe cannot
+// reproduce, so it adds no root; so does a missing or blank value.
+func ClaudeConfigProjectsRoot(env map[string]string) (string, bool) {
+	dir := strings.TrimSpace(env["CLAUDE_CONFIG_DIR"])
+	if dir == "" || !filepath.IsAbs(dir) {
+		return "", false
+	}
+	return filepath.Join(dir, "projects"), true
 }
 
 // HasKeyedTranscript reports whether the per-session ("keyed") transcript that

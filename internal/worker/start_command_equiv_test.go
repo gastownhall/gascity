@@ -194,9 +194,12 @@ func TestStartCommandStaleResumeKey(t *testing.T) {
 				sessionpkg.ProviderResume{ResumeFlag: "--resume", SessionIDFlag: "--session-id"},
 				"mycmd",
 			)
-			handle.searchPaths = []string{root}
-			if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
-				t.Fatalf("SetMetadata(started_config_hash): %v", err)
+			handle.adapter.SearchPaths = []string{root}
+			// A confirmed creation with nothing committed since — the row a
+			// restart handoff leaves — keeps the row off the first-start
+			// branch while leaving started_config_hash empty.
+			if err := store.SetMetadata(info.ID, "creation_complete_at", "2026-01-01T00:00:00Z"); err != nil {
+				t.Fatalf("SetMetadata(creation_complete_at): %v", err)
 			}
 			if tt.transcript {
 				dir := filepath.Join(root, sessionlog.ProjectSlug(info.WorkDir))
@@ -251,9 +254,12 @@ func TestStartCommandClaudeConfigDir(t *testing.T) {
 				sessionpkg.ProviderResume{ResumeFlag: "--resume", SessionIDFlag: "--session-id"},
 				"mycmd",
 			)
-			handle.searchPaths = []string{t.TempDir()}
-			if err := store.SetMetadata(info.ID, "started_config_hash", "hash-abc"); err != nil {
-				t.Fatalf("SetMetadata(started_config_hash): %v", err)
+			handle.adapter.SearchPaths = []string{t.TempDir()}
+			// A confirmed creation with nothing committed since — the row a
+			// restart handoff leaves — keeps the row off the first-start
+			// branch while leaving started_config_hash empty.
+			if err := store.SetMetadata(info.ID, "creation_complete_at", "2026-01-01T00:00:00Z"); err != nil {
+				t.Fatalf("SetMetadata(creation_complete_at): %v", err)
 			}
 			if tt.transcript {
 				dir := filepath.Join(configDir, "projects", sessionlog.ProjectSlug(info.WorkDir))

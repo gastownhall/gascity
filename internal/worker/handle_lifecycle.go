@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -820,19 +819,38 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if resumeCommand := strings.TrimSpace(h.session.Resume.ResumeCommand); resumeCommand != "" {
 		resumeInfo.ResumeCommand = resumeCommand
 	}
-	isClaude := strings.Contains(strings.ToLower(strings.TrimSpace(resumeInfo.Provider)), "claude")
-	probePaths := h.searchPaths
-	if len(probePaths) == 0 || !isClaude {
-		probePaths = DefaultSearchPaths()
-	}
-	if dir := strings.TrimSpace(h.session.Env["CLAUDE_CONFIG_DIR"]); isClaude && filepath.IsAbs(dir) {
-		probePaths = MergeSearchPaths(append(append([]string(nil), probePaths...), filepath.Join(dir, "projects")))
-	}
-	present, probeable := workertranscript.HasKeyedTranscript(probePaths, resumeInfo.Provider, resumeInfo.WorkDir, resumeInfo.SessionKey)
-	if probeable && !present && h.session.Resume.SessionIDFlag != "" {
+	if h.unlaunchedSessionKey(resumeInfo) {
 		return startCommandWithSessionID(resumeInfo, h.session)
 	}
 	return sessionpkg.BuildResumeCommand(resumeInfo), nil
+}
+
+// unlaunchedSessionKey reports whether resumeInfo's session key names a
+// conversation the provider never started, so the resume the start would
+// build reattaches to nothing: the provider exits at once and the pane stays
+// blank. The probe is the one the reconciler's own start applies — the roots
+// a keyed probe of this provider searches (the handle's launch roots, plus
+// the projects root an absolute CLAUDE_CONFIG_DIR in the launch env names),
+// the provider transcript reads dispatch on (historyProvider: kind over
+// name), and the launch's work dir. A provider whose keyed transcripts
+// cannot be probed, or a transcript the probe finds, keeps the resume path.
+func (h *SessionHandle) unlaunchedSessionKey(resumeInfo sessionpkg.Info) bool {
+	if h.session.Resume.SessionIDFlag == "" || strings.TrimSpace(resumeInfo.SessionKey) == "" {
+		return false
+	}
+	hints := h.runtimeHints()
+	workDir := strings.TrimSpace(hints.WorkDir)
+	if workDir == "" {
+		workDir = resumeInfo.WorkDir
+	}
+	provider := h.historyProvider(resumeInfo)
+	launchRoots := h.adapter.SearchPaths
+	if root, ok := workertranscript.ClaudeConfigProjectsRoot(hints.Env); ok {
+		launchRoots = MergeSearchPaths(append(append([]string(nil), launchRoots...), root))
+	}
+	present, probeable := workertranscript.HasKeyedTranscript(
+		workertranscript.KeyedProbeRoots(launchRoots, provider), provider, workDir, resumeInfo.SessionKey)
+	return probeable && !present
 }
 
 func startCommandWithSessionID(info sessionpkg.Info, spec SessionSpec) (string, error) {
