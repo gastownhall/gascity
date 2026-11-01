@@ -263,6 +263,142 @@ func TestGcBdSplitCreateGraphFlagEdges(t *testing.T) {
 	}
 }
 
+// TestBdCreateFileSelectionUsesTheFinalOccurrence covers file selection without
+// reinterpreting separated flag operands as flags.
+func TestBdCreateFileSelectionUsesTheFinalOccurrence(t *testing.T) {
+	for _, tc := range []struct {
+		name, manifest string
+		args           []string
+		form           fileCreateForm
+		path           string
+	}{
+		{"argv only", "create", []string{"--title", "x"}, fileCreateNone, ""},
+		{"separated graph replaces graph", "create", []string{"--graph", "infra.json", "--graph", "work.json"}, fileCreateGraph, "work.json"},
+		{"inline graph replaces graph", "create", []string{"--graph=infra.json", "--graph=work.json"}, fileCreateGraph, "work.json"},
+		{"separated graph replaces inline", "create", []string{"--graph=infra.json", "--graph", "work.json"}, fileCreateGraph, "work.json"},
+		{"inline empty graph", "create", []string{"--graph", "infra.json", "--graph="}, fileCreateGraph, ""},
+		{"separated empty graph", "create", []string{"--graph", "infra.json", "--graph", ""}, fileCreateGraph, ""},
+		{"missing final graph operand", "create", []string{"--graph", "infra.json", "--graph"}, fileCreateGraph, ""},
+		{"bulk replaces graph", "create", []string{"--graph", "work.json", "--file", "issues.md"}, fileCreateBulk, "issues.md"},
+		{"inline bulk replaces graph", "create", []string{"--graph", "work.json", "--file=issues.md"}, fileCreateBulk, "issues.md"},
+		{"attached bulk replaces graph", "create", []string{"--graph", "work.json", "-fissues.md"}, fileCreateBulk, "issues.md"},
+		{"short bulk replaces graph", "create", []string{"--graph", "work.json", "-f", "issues.md"}, fileCreateBulk, "issues.md"},
+		{"graph replaces bulk", "create", []string{"-fold.md", "--graph=work.json"}, fileCreateGraph, "work.json"},
+		{"bulk replaces bulk", "create", []string{"--file", "old.md", "-fnew.md"}, fileCreateBulk, "new.md"},
+		{"graph operand resembles bulk flag", "create", []string{"--graph", "old.json", "--graph", "--file"}, fileCreateGraph, "--file"},
+		{"bulk operand resembles graph flag", "create", []string{"--file", "--graph", "--graph=work.json"}, fileCreateGraph, "work.json"},
+		{"title operand resembles graph flag", "create", []string{"--graph=work.json", "--title", "--graph"}, fileCreateGraph, "work.json"},
+		{"title operand resembles bulk flag", "create", []string{"--title", "-f", "--graph=work.json"}, fileCreateGraph, "work.json"},
+		{"verb has no file form", "q", []string{"--graph", "work.json", "--file=issues.md", "-fmore.md"}, fileCreateNone, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			form, path := bdRelocatedClassCreateFileForm(tc.manifest, tc.args)
+			if form != tc.form || path != tc.path {
+				t.Fatalf("file selection = (%v, %q), want (%v, %q)", form, path, tc.form, tc.path)
+			}
+		})
+	}
+}
+
+// finalGraphFlagCity records the forwarded argv and the bytes bd reads from
+// the judge's private copy, while that copy still exists.
+func finalGraphFlagCity(t *testing.T) (capture, cityDir string) {
+	t.Helper()
+	capture, cityDir = bdSQLRefusalCityDir(t, bdSQLRefusalSplitStorage)
+	for name, body := range map[string]string{
+		"infra.json": `{"nodes":[{"key":"s","title":"session","labels":["gc:session"]}]}`,
+		"work.json":  graphJudgeWorkOnlyPlan,
+	} {
+		if err := os.WriteFile(filepath.Join(cityDir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	binDir := t.TempDir()
+	stub := `#!/bin/sh
+case "$1" in version) echo 'bd version 1.3.2 (test)'; exit 0 ;; esac
+printf '%s\n' "$*" >> "$CAPTURE_PATH"
+for arg in "$@"; do
+  case "$arg" in
+    --graph=?*)
+      copy_path="${arg#--graph=}"
+      printf 'COPY %s\n' "$copy_path" >> "$CAPTURE_PATH"
+      cat "$copy_path" >> "$CAPTURE_PATH" || exit 1
+      ;;
+  esac
+done
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return capture, cityDir
+}
+
+// TestGcBdSplitCreateGraphUsesTheFinalWorkPayload proves final payload selection
+// and the private-copy lifetime across the doBd subprocess boundary.
+func TestGcBdSplitCreateGraphUsesTheFinalWorkPayload(t *testing.T) {
+	capture, cityDir := finalGraphFlagCity(t)
+	var stdout, stderr bytes.Buffer
+	if code := doBd([]string{"create", "--graph", "infra.json", "--graph", "work.json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("final work plan: exit %d, want 0; stderr=%q", code, stderr.String())
+	}
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv, copyRecord, ok := strings.Cut(string(data), "\nCOPY ")
+	copyPath, payload, hasPayload := strings.Cut(copyRecord, "\n")
+	if !ok || !hasPayload || copyPath == "" || argv != "create --graph infra.json --graph work.json --graph="+copyPath {
+		t.Fatalf("bd did not receive the original argv followed by a private-copy override: %q", data)
+	}
+	if !filepath.IsAbs(copyPath) {
+		copyPath = filepath.Join(cityDir, copyPath)
+	}
+	if copyPath == filepath.Join(cityDir, "infra.json") || copyPath == filepath.Join(cityDir, "work.json") {
+		t.Fatalf("bd read the caller's file %q instead of a private copy", copyPath)
+	}
+	if payload != graphJudgeWorkOnlyPlan {
+		t.Errorf("bd read %q, want the final work.json bytes", payload)
+	}
+	if _, err := os.Stat(copyPath); !os.IsNotExist(err) {
+		t.Errorf("private copy outlived doBd: stat %q: %v", copyPath, err)
+	}
+}
+
+// TestGcBdSplitCreateGraphRefusesTheFinalSessionNode identifies the refused node
+// before invoking bd, even when an earlier file is work-only.
+func TestGcBdSplitCreateGraphRefusesTheFinalSessionNode(t *testing.T) {
+	capture, _ := finalGraphFlagCity(t)
+	var stdout, stderr bytes.Buffer
+	if code := doBd([]string{"create", "--graph", "work.json", "--graph", "infra.json"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("final session plan: exit %d, want 1; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `node "s"`) || !strings.Contains(stderr.String(), "sessions-class") {
+		t.Errorf("refusal must identify the disallowed sessions-class node: %q", stderr.String())
+	}
+	if _, err := os.Stat(capture); !os.IsNotExist(err) {
+		t.Errorf("bd was invoked for a refused plan: stat %q: %v", capture, err)
+	}
+}
+
+// TestGcBdSplitCreateEmptyFinalGraphUsesTheArgvShape keeps an empty final graph
+// from inheriting the superseded file's storage class.
+func TestGcBdSplitCreateEmptyFinalGraphUsesTheArgvShape(t *testing.T) {
+	capture, _ := finalGraphFlagCity(t)
+	args := []string{"create", "--graph", "infra.json", "--graph=", "--title", "x"}
+	var stdout, stderr bytes.Buffer
+	if code := doBd(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("empty final graph with a work-shaped argv: exit %d, want 0; stderr=%q", code, stderr.String())
+	}
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != strings.Join(args, " ")+"\n" {
+		t.Fatalf("bd received %q, want the argv-shaped create forwarded verbatim", data)
+	}
+}
+
 // graphPlanPipe returns the /dev/fd path of a pipe holding body, as a shell
 // passes `<(...)`: it can be read once.
 func graphPlanPipe(t *testing.T, body string) string {
