@@ -299,11 +299,13 @@ session_bead_candidates() {
         printf 'mc-%s\n' "${assignee##*-mc-}"
     fi
 
+    # The stamped gc.session_name is deliberately absent: it is a runtime
+    # name, not a bead id, and session_bead_shows_live_assignment decides it
+    # after these bead-id candidates have been read.
     printf '%s\n' "$work_json" | jq -r "$first_bead_jq | [
         .metadata[\"gc.session_id\"],
         .metadata[\"gc.session_bead_id\"],
-        .metadata[\"session_id\"],
-        .metadata[\"gc.session_name\"]
+        .metadata[\"session_id\"]
     ] | .[]? | select(. != null and . != \"\")" 2>/dev/null || true
 
     printf '%s\n' "$assignee" | grep -Eo '[[:alnum:]]+-wisp-[[:alnum:]][[:alnum:]-]*$' || true
@@ -357,49 +359,129 @@ session_probe_failure_is_unverifiable() {
     return 1
 }
 
+# session_live_match prints the id of the live session bead record_json holds
+# for candidate, if any: any live session bead at a probed candidate preserves
+# the work. The CLI does not expose every Go-side identity field, so the
+# fail-safe direction is to treat candidate liveness as sufficient. Prints
+# nothing when the record is not a live session for the holder; returns
+# non-zero when the response cannot be parsed.
+session_live_match() {
+    local assignee="$1"
+    local candidate="$2"
+    printf '%s\n' "$3" | jq -r --arg assignee "$assignee" --arg session_id "$candidate" "
+        $first_bead_jq
+        | select((.issue_type // \"\") == \"session\")
+        | select((.status // \"\") != \"closed\")
+        | ((.metadata.state // \"\") | ascii_downcase) as \$state
+        | select(\$state != \"closed\" and \$state != \"orphaned\" and \$state != \"failed-create\" and \$state != \"failed_create\")
+        | select(((.metadata.closed // \"\") | tostring | ascii_downcase) != \"true\")
+        | select(
+            (.id // \"\") == \$assignee
+            or (.id // \"\") == \$session_id
+            or (.metadata.session_name // \"\") == \$assignee
+            or (.metadata.alias // \"\") == \$assignee
+            or (.metadata.agent_name // \"\") == \$assignee
+            or (\$assignee | contains(\$session_id))
+        )
+        | .id // empty
+    " 2>/dev/null
+}
+
+# session_record_names_terminal prints the candidate when record_json is a
+# session bead filed under exactly that id that the live match did not report
+# live: a terminal session record actually on file. A stamped pool runtime
+# name ending in "-<candidate>" resolves through it.
+session_record_names_terminal() {
+    printf '%s\n' "$2" | jq -r --arg session_id "$1" "
+        $first_bead_jq
+        | select((.id // \"\") == \$session_id and (.issue_type // \"\") == \"session\")
+        | .id // empty
+    " 2>/dev/null
+}
+
+# stamped_name_resolves_through_terminal_record answers whether stamped_name
+# ends in "-<candidate>" for one of the terminal session beads terminal_ids
+# holds: PoolSessionName's "<sanitized template>-<session bead id>" runtime
+# name. The candidate is quoted in the match, so no glob character in a bead
+# id can widen it.
+stamped_name_resolves_through_terminal_record() {
+    local stamped_name="$1"
+    local candidate
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] || continue
+        if [ "${stamped_name%-"$candidate"}" != "$stamped_name" ]; then
+            return 0
+        fi
+    done <<<"$2"
+    return 1
+}
+
+# session_bead_shows_live_assignment answers whether any session record the
+# claim names shows a live holder. The bead-id candidates
+# (session_bead_candidates) are probed first, exactly as before. The stamped
+# gc.session_name is decided only after every candidate has been read: `gc
+# hook` stamps it with the claiming session's runtime name, which for a pool
+# seat is PoolSessionName(template, beadID) -- "<sanitized template>-<session
+# bead id>", never a bead id -- so probing it as one always failed and, the
+# name differing from the assignee, poisoned an otherwise dead claim as
+# unverifiable (gastownhall/gascity#7686). Now: a name that is a candidate
+# already probed adds nothing (classification depends only on the value and
+# the assignee); a name that resolves through a terminal session bead read
+# this pass adds nothing; anything else is probed as a legacy record id,
+# because a legacy pool seat's session bead id can be its runtime name. Any
+# live read still protects the claim, and a failed read of the name alone is
+# evidence of nothing either way.
+# Returns 0 when a live session record holds the claim, 1 when every read
+# resolves dead, 2 when a read could not be performed and the holder is
+# unverifiable.
 session_bead_shows_live_assignment() {
     local assignee="$1"
     local work_json="$2"
     local session_id
     local session_json
     local live_match
+    local terminal_match
+    local stamped_name
+    local probed_ids=""
+    local terminal_session_ids=""
     local probe_failed=0
+
+    stamped_name=$(printf '%s\n' "$work_json" | jq -r "$first_bead_jq | .metadata[\"gc.session_name\"] // empty" 2>/dev/null) || stamped_name=""
 
     while IFS= read -r session_id; do
         [ -n "$session_id" ] || continue
+        probed_ids="${probed_ids}${session_id}"$'\n'
         if ! session_json=$(gc bd show "$session_id" --json 2>/dev/null); then
             if session_probe_failure_is_unverifiable "$session_id" "$assignee"; then
                 probe_failed=1
             fi
             continue
         fi
-        # Any live session bead at a probed candidate preserves the work. The
-        # CLI does not expose every Go-side identity field, so the fail-safe
-        # direction is to treat candidate liveness as sufficient.
-        if ! live_match=$(printf '%s\n' "$session_json" | jq -r --arg assignee "$assignee" --arg session_id "$session_id" "
-            $first_bead_jq
-            | select((.issue_type // \"\") == \"session\")
-            | select((.status // \"\") != \"closed\")
-            | ((.metadata.state // \"\") | ascii_downcase) as \$state
-            | select(\$state != \"closed\" and \$state != \"orphaned\" and \$state != \"failed-create\" and \$state != \"failed_create\")
-            | select(((.metadata.closed // \"\") | tostring | ascii_downcase) != \"true\")
-            | select(
-                (.id // \"\") == \$assignee
-                or (.id // \"\") == \$session_id
-                or (.metadata.session_name // \"\") == \$assignee
-                or (.metadata.alias // \"\") == \$assignee
-                or (.metadata.agent_name // \"\") == \$assignee
-                or (\$assignee | contains(\$session_id))
-            )
-            | .id // empty
-        " 2>/dev/null); then
+        if ! live_match=$(session_live_match "$assignee" "$session_id" "$session_json"); then
             probe_failed=1
             continue
         fi
         if [ -n "$live_match" ]; then
             return 0
         fi
+        if terminal_match=$(session_record_names_terminal "$session_id" "$session_json") && [ -n "$terminal_match" ]; then
+            terminal_session_ids="${terminal_session_ids}${terminal_match}"$'\n'
+        fi
     done < <(session_bead_candidates "$assignee" "$work_json")
+
+    if [ -n "$stamped_name" ] &&
+        ! grep -Fxq -- "$stamped_name" <<<"$probed_ids" &&
+        ! stamped_name_resolves_through_terminal_record "$stamped_name" "$terminal_session_ids"; then
+        if ! session_json=$(gc bd show "$stamped_name" --json 2>/dev/null); then
+            if session_probe_failure_is_unverifiable "$stamped_name" "$assignee"; then
+                probe_failed=1
+            fi
+        elif ! live_match=$(session_live_match "$assignee" "$stamped_name" "$session_json"); then
+            probe_failed=1
+        elif [ -n "$live_match" ]; then
+            return 0
+        fi
+    fi
 
     [ "$probe_failed" -eq 0 ] || return 2
     return 1
