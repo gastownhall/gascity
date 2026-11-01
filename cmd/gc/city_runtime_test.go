@@ -9019,3 +9019,16 @@ func TestCityRuntimeReloadWispGCIntervalCountsFromLastRun(t *testing.T) {
 		})
 	}
 }
+
+func TestCityRuntimeReloadKeepsWispGCSessionPurgeCursor(t *testing.T) {
+	cr, tomlPath := newWispGCReloadRuntime(t, "\n[daemon]\nwisp_gc_interval = \"1h\"\nwisp_ttl = \"24h\"\n")
+	prev := stampWispGCLastRun(t, cr, time.Now())
+	cursor := &beads.SeekBoundary{CreatedAt: time.Now().Add(-48 * time.Hour), ID: "gcg-session-p"}
+	prev.sessionPurgeCursor = cursor
+
+	applyWispGCReload(t, cr, tomlPath, "\n[daemon]\nwisp_gc_interval = \"1h\"\nwisp_ttl = \"24h\"\nshutdown_timeout = \"1s\"\n")
+
+	if got := rebuiltWispGC(t, cr, prev).sessionPurgeCursor; got != cursor {
+		t.Fatalf("session purge cursor after reload = %+v, want %+v (resume after the last examined candidate)", got, cursor)
+	}
+}
