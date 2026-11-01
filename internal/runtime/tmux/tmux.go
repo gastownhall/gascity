@@ -5458,6 +5458,9 @@ func menuOptionNumber(s string) (int, bool) {
 
 // WaitForRuntimeReady polls until the agent runtime's ready prompt appears in
 // the pane. Falls back to a fixed delay when prompt detection is unavailable.
+// The bottom-most prompt line decides (see paneShowsReadyPrompt): a numbered
+// menu whose cursor row carries the prompt glyph is a pending choice, not a
+// ready composer, so the wait keeps polling while one is on screen.
 func (t *Tmux) WaitForRuntimeReady(ctx context.Context, session string, rc *RuntimeConfig, timeout time.Duration) error {
 	if rc == nil || rc.Tmux == nil {
 		return nil
@@ -5508,11 +5511,10 @@ func (t *Tmux) WaitForRuntimeReady(ctx context.Context, session string, rc *Runt
 			}
 			continue
 		}
-		// Look for runtime prompt indicator at start of line
-		for _, line := range lines {
-			if matchesPromptPrefix(line, rc.Tmux.ReadyPromptPrefix) {
-				return nil
-			}
+		// The bottom-most prompt line is the live composer; a numbered
+		// menu's cursor row is a pending choice, not a ready prompt.
+		if paneShowsReadyPrompt(lines, rc.Tmux.ReadyPromptPrefix) {
+			return nil
 		}
 		select {
 		case <-ctx.Done():
