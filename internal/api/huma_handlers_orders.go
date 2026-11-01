@@ -342,7 +342,7 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 			Name:          name,
 			ScopedName:    scopedName,
 			Rig:           rig,
-			CreatedAt:     b.CreatedAt.Format(time.RFC3339),
+			CreatedAt:     b.CreatedAt.Format(time.RFC3339Nano),
 			Labels:        b.Labels,
 			CaptureOutput: auto != nil && auto.IsExec(),
 		}
