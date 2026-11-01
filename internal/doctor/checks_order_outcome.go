@@ -32,7 +32,24 @@ const (
 	// after a supervisor start, exec orders fail spuriously because dispatch
 	// begins before pack staging completes. 2x margin on the observed window.
 	orderOutcomeStartGrace = 10 * time.Minute
+
+	// orderOutcomeEventTailLimit caps the contiguous order.completed and
+	// order.failed tail one Run reads.
+	orderOutcomeEventTailLimit = 2000
 )
+
+// OrderOutcomeRecentRunsFunc lists an order's newest persisted runs, newest
+// first, at most limit of them. Implementations MUST be safe for concurrent use.
+type OrderOutcomeRecentRunsFunc func(order orders.Order, limit int) ([]orders.OrderRun, error)
+
+// OrderOutcomeHealthyOption configures the repeated-order-failure check.
+type OrderOutcomeHealthyOption func(*OrderOutcomeHealthyCheck)
+
+// WithOrderOutcomeRecentRunsFunc supplies the store-backed history the check
+// consults for an order its bounded event tail cannot settle.
+func WithOrderOutcomeRecentRunsFunc(fn OrderOutcomeRecentRunsFunc) OrderOutcomeHealthyOption {
+	return func(c *OrderOutcomeHealthyCheck) { c.recentRuns = fn }
+}
 
 // nearControllerStart reports whether ts falls within grace after any controller
 // start. Every start is checked, not just the newest: two restarts with no
@@ -140,16 +157,26 @@ type OrderOutcomeHealthyCheck struct {
 	cityPath  string
 	threshold int
 	grace     time.Duration
+
+	recentRuns     OrderOutcomeRecentRunsFunc
+	historyTimeout time.Duration
+	readEvents     orderFiringEventReadFunc
 }
 
 // NewOrderOutcomeHealthyCheck creates the repeated-order-failure check.
-func NewOrderOutcomeHealthyCheck(cfg *config.City, cityPath string) *OrderOutcomeHealthyCheck {
-	return &OrderOutcomeHealthyCheck{
-		cfg:       cfg,
-		cityPath:  cityPath,
-		threshold: orderOutcomeFailureThreshold,
-		grace:     orderOutcomeStartGrace,
+func NewOrderOutcomeHealthyCheck(cfg *config.City, cityPath string, opts ...OrderOutcomeHealthyOption) *OrderOutcomeHealthyCheck {
+	check := &OrderOutcomeHealthyCheck{
+		cfg:            cfg,
+		cityPath:       cityPath,
+		threshold:      orderOutcomeFailureThreshold,
+		grace:          orderOutcomeStartGrace,
+		historyTimeout: orderFiringHistoryTimeout,
+		readEvents:     events.ReadFilteredTail,
 	}
+	for _, opt := range opts {
+		opt(check)
+	}
+	return check
 }
 
 // Name returns the check identifier shown by gc doctor.
