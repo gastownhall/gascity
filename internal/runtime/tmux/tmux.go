@@ -5377,13 +5377,40 @@ func paneShowsReadyPrompt(lines []string, promptPrefix string) bool {
 // the ready prefix although the pane is waiting for a choice. Keys typed into
 // it are menu input, and Enter picks the highlighted option. The dialog layer
 // applies the same rule to its prompt scan (runtime.isNumberedMenuRow).
+//
+// The row's label must be "N. " and the nearest non-blank line above or below
+// must be option N-1 or N+1 (unselected options carry no glyph: "  2. Quit"),
+// so a composer draft that merely starts with "1. " still reads as a prompt.
+// A two-line numbered draft ("› 1. foo" over "  2. bar") reads as a menu.
 func isMenuCursorRow(lines []string, i int, promptPrefix string) bool {
 	rest, ok := promptLineRest(lines[i], promptPrefix)
 	if !ok {
 		return false
 	}
-	_, ok = menuOptionNumber(rest)
-	return ok
+	n, ok := menuOptionNumber(rest)
+	if !ok {
+		return false
+	}
+	for _, step := range []int{-1, 1} {
+		for j := i + step; j >= 0 && j < len(lines); j += step {
+			row := menuRowText(lines[j])
+			if row == "" {
+				continue
+			}
+			if m, ok := menuOptionNumber(row); ok && (m == n-1 || m == n+1) {
+				return true
+			}
+			break
+		}
+	}
+	return false
+}
+
+// menuRowText normalizes a captured menu row the way promptLineRest normalizes
+// a prompt line: NBSP becomes a space, surrounding space is trimmed, and a
+// leading │/┃ box border is stripped.
+func menuRowText(line string) string {
+	return stripLeadingBoxBorder(strings.TrimSpace(strings.ReplaceAll(line, "\u00a0", " ")))
 }
 
 // menuOptionNumber parses a numbered menu label at the start of s: a run of

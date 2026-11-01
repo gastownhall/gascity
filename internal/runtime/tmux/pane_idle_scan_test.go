@@ -1,8 +1,11 @@
 package tmux
 
 import (
+	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -98,6 +101,44 @@ func TestPaneShowsIdlePromptMenuBelowEchoedTurnIsNotIdle(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if PaneShowsIdlePrompt(tt.lines, "› ") {
 				t.Errorf("PaneShowsIdlePrompt(%q, %q) = true, want false: the bottom-most prompt line is a menu cursor row", tt.lines, "› ")
+			}
+		})
+	}
+}
+
+// A menu cursor row is the selected option of a numbered menu: its label is
+// "N. " and its nearest non-blank neighbor is option N-1 or N+1. Both
+// ready-prompt scans, the idle boundary (PaneShowsIdlePrompt) and startup
+// readiness (WaitForRuntimeReady), read such a row at the bottom-most prompt
+// line as not ready, and every other bottom-most prompt line as a composer.
+// Kills: a menu check without the neighbor test (a composer draft starting
+// with "1. " reads as a menu).
+func TestMenuCursorRowIsNotAReadyPrompt(t *testing.T) {
+	tests := []struct {
+		name      string
+		lines     []string
+		prefix    string
+		wantReady bool
+	}{
+		{"bare composer", []string{"› "}, "› ", true},
+		{"composer placeholder above status line", []string{"› Ask Codex to do anything", "", "  gpt-5.4 high · 100% left · ~/repo"}, "› ", true},
+		{"draft starting with a number", []string{"› 1. fix the flake"}, "› ", true},
+		{"draft whose neighbor is not the adjacent option", []string{"› 1. foo", "  3. baz"}, "› ", true},
+		{"numbered transcript list above composer", []string{"  1. First", "  2. Second", "", "› "}, "› ", true},
+		{"echoed numbered turn above composer", []string{"› 1. first", "  2. second", "", "› "}, "› ", true},
+		{"stale menu frame above composer", append(append([]string{}, codexFolderTrustMenu...), "", "› "), "› ", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := PaneShowsIdlePrompt(tt.lines, tt.prefix); got != tt.wantReady {
+				t.Errorf("PaneShowsIdlePrompt(%q, %q) = %v, want %v", tt.lines, tt.prefix, got, tt.wantReady)
+			}
+			tm := scriptedTmux(scriptedCapture{out: strings.Join(tt.lines, "\n")})
+			err := tm.WaitForRuntimeReady(context.Background(), "w", &RuntimeConfig{
+				Tmux: &RuntimeTmuxConfig{ReadyPromptPrefix: tt.prefix},
+			}, 300*time.Millisecond)
+			if gotReady := err == nil; gotReady != tt.wantReady {
+				t.Errorf("WaitForRuntimeReady(%q, %q) = %v, want ready=%v", tt.lines, tt.prefix, err, tt.wantReady)
 			}
 		})
 	}
