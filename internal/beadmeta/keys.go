@@ -43,8 +43,24 @@ const Namespace = "gc."
 // cmd/. Keep this block sorted by identifier; the Go compiler rejects duplicate
 // identifiers, giving us a free compile-time uniqueness guarantee.
 const (
-	AttemptLogMetadataKey     = "gc.attempt_log"
-	AttemptMetadataKey        = "gc.attempt"
+	AttemptLogMetadataKey = "gc.attempt_log"
+	AttemptMetadataKey    = "gc.attempt"
+	// AwaitingHumanMetadataKey, on a claimed work bead, names the session
+	// (its ID) whose claim asked a person and is waiting on their decision:
+	// an approval asked by mail. While the key names the seat holding the
+	// claim (AwaitsHuman), the work ladder only nudges it, an hour after the
+	// ask and hourly after that: it never recycles or releases it, and raises
+	// none of the escalations its pacing would (started_recycled,
+	// started_unanswered, release_unfinished). A nudge the seat cannot take
+	// still counts toward nudge_refused, and a release already in flight that
+	// raced the claim's start still raises release_raced_start. The asking
+	// agent writes it with its request and clears it when it works the step
+	// again: the wait ends in a turn of the seat (or when the claim closes),
+	// and the hourly nudge is what takes up an answer whose turn died before
+	// it could clear the key. It names its seat, not the step: a claim
+	// released and taken by another seat is that seat's work, whatever the
+	// key still says, and no dispatch path reads it.
+	AwaitingHumanMetadataKey  = "gc.awaiting_human"
 	BondMetadataKey           = "gc.bond"
 	BondVarsMetadataKey       = "gc.bond_vars"
 	BoundStepIDMetadataKey    = "gc.bound_step_id"
@@ -353,7 +369,13 @@ const (
 	// copied into a binding with the name of the binding it came from, so a
 	// resumed attempt can tell a row it wrote from content the destination
 	// already owned.
-	InfraMigratedFromMetadataKey   = "gc.infra_migrated_from"
+	InfraMigratedFromMetadataKey = "gc.infra_migrated_from"
+	// MigratedCrossEdgesMetadataKey records, on a bead the rig importer moved
+	// into the city binding, the cross-boundary edges it did not copy: a JSON
+	// list of {dir, type, other, other_status_at_import, payload, action}. No
+	// cross-store edge is ever written, so this keeps the history readable;
+	// the rig's retained-source backup is authoritative for a reverse.
+	MigratedCrossEdgesMetadataKey  = "gc.migrated_cross_edges"
 	TriggerBeadStoreRefMetadataKey = "gc.trigger_bead_store_ref"
 	TruncatedMetadataKey           = "gc.truncated"
 	WorkBranchMetadataKey          = "gc.work_branch"
@@ -380,6 +402,16 @@ const (
 	// workflowTopologyIsNonExecutable in cmd/gc (#5900).
 	WorkflowExpandedMetadataKey = "gc.workflow_expanded"
 )
+
+// InitiatorMetadataKey records who launched a piece of work: the key id (kid)
+// of the verified write grant on the API request that created a run root, a
+// routed bead or a generic bead. The kid names the key that signed the grant,
+// so it identifies a person only when each principal signs with a key of
+// their own, and the same launcher's work carries a new value after a key
+// rotation. It is server-owned. The generic bead API refuses a client-supplied
+// value, and nothing is stamped when the request carried no verified
+// principal.
+const InitiatorMetadataKey = "gc.initiator"
 
 // Work-record metadata keys (ADR-0009). These bind a work bead to its claim
 // and its outcome so observability/eval can answer "what work was done, by
@@ -539,6 +571,7 @@ const OptionMetadataPrefix = "opt_"
 var KnownMetadataKeys = []string{
 	AttemptLogMetadataKey,
 	AttemptMetadataKey,
+	AwaitingHumanMetadataKey,
 	BondMetadataKey,
 	BondVarsMetadataKey,
 	BoundStepIDMetadataKey,
@@ -624,6 +657,7 @@ var KnownMetadataKeys = []string{
 	GCExemptMetadataKey,
 	Graphv2RootKeyMetadataKey,
 	IdempotencyKeyMetadataKey,
+	InitiatorMetadataKey,
 	InputConvoyIDMetadataKey,
 	InstantiatingMetadataKey,
 	IterationMetadataKey,
@@ -704,6 +738,7 @@ var KnownMetadataKeys = []string{
 	TerminalMetadataKey,
 	TriggerBeadIDMetadataKey,
 	InfraMigratedFromMetadataKey,
+	MigratedCrossEdgesMetadataKey,
 	TriggerBeadStoreRefMetadataKey,
 	TruncatedMetadataKey,
 	WorkBranchMetadataKey,

@@ -151,6 +151,12 @@ func runControlDispatcher(beadID string, stdout, stderr io.Writer) error {
 	return runControlDispatcherWithStore(cityPath, storePath, store, beadID, stdout, stderr)
 }
 
+// errControlNotProcessed is what the serve-drain dispatch returns when
+// ProcessControl made no change: a nil error with Processed false, such as a
+// control bead that is no longer open. The drain counts it as a skip, neither
+// progress nor pending; the one-shot path translates it back to nil.
+var errControlNotProcessed = errors.New("control bead not processed")
+
 // openControlStoreForDispatch is the test seam for the scope-store open in
 // runControlDispatcherInStore, following the package's var-seam idiom (cf.
 // controlDispatcherServe, dispatch_runtime.go). Production always uses
@@ -159,7 +165,9 @@ var openControlStoreForDispatch = openControlStoreAtForCity
 
 // runControlDispatcherInStore dispatches one control bead for the serve drain.
 // When emits is non-nil, the execution-fact projection for a control that
-// created no steps is deferred to it; nil projects synchronously.
+// created no steps is deferred to it; nil projects synchronously. A nil return
+// means the control bead was processed; errControlNotProcessed means
+// ProcessControl made no change to it.
 func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, stderr io.Writer, emits *executionEmitDeferral) error {
 	if cityPath == "" {
 		var err error
@@ -213,13 +221,21 @@ func runControlDispatcherWithStore(cityPath, storePath string, store beads.Store
 // above resolve a SCOPE and hand it over; a bead value resolved alongside that
 // scope comes from an unrouted store, and gating on it while writing elsewhere
 // re-runs a control kind the graph store had already finished.
+//
+// A control ProcessControl made no change to returns nil here, as a processed
+// one does: the one-shot command reports only failures.
 func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store beads.Store, beadID string, cfg *config.City, stdout, stderr io.Writer) error {
-	return runControlDispatcherDeferringEmits(cityPath, storePath, store, beadID, cfg, stdout, stderr, nil)
+	err := runControlDispatcherDeferringEmits(cityPath, storePath, store, beadID, cfg, stdout, stderr, nil)
+	if errors.Is(err, errControlNotProcessed) {
+		return nil
+	}
+	return err
 }
 
 // runControlDispatcherDeferringEmits is runControlDispatcherWithStoreAndConfig
 // for the serve drain: a non-nil emits receives the execution-fact projection
-// of a control that created no steps instead of running it inline.
+// of a control that created no steps instead of running it inline. It returns
+// errControlNotProcessed when ProcessControl made no change.
 func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.Store, beadID string, cfg *config.City, stdout, stderr io.Writer, emits *executionEmitDeferral) error {
 	restoreTraceWarnings := useWorkflowTraceWarnings(stderr)
 	defer restoreTraceWarnings()
@@ -335,31 +351,32 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 	if err != nil {
 		return handleControlDispatchError(cityPath, storePath, graphStore, bead, beadID, err, stderr)
 	}
-	if result.Processed {
-		if rootID := controlRootID(bead.Metadata); rootID != "" {
-			switch {
-			case emits != nil && result.Created == 0:
-				// Nothing new to define: the serve drain projects this root
-				// once, after its last queued control (executionEmitDeferral).
-				emits.add(rootID, relicGraphLeg)
-			default:
-				if emits != nil {
-					emits.forget(rootID)
-				}
-				if err := emitExecutionFacts(cityPath, store, []executionEmitTarget{{rootID: rootID, graphStore: graphStore}}, stderr); err != nil {
-					fmt.Fprintf(stderr, "warning: control dispatch: projecting execution facts for %s: %v\n", rootID, err) //nolint:errcheck // successful control processing is preserved
-				}
+	if !result.Processed {
+		return errControlNotProcessed
+	}
+	if rootID := controlRootID(bead.Metadata); rootID != "" {
+		switch {
+		case emits != nil && result.Created == 0:
+			// Nothing new to define: the serve drain projects this root
+			// once, after its last queued control (executionEmitDeferral).
+			emits.add(rootID, relicGraphLeg)
+		default:
+			if emits != nil {
+				emits.forget(rootID)
+			}
+			if err := emitExecutionFacts(cityPath, store, []executionEmitTarget{{rootID: rootID, graphStore: graphStore}}, stderr); err != nil {
+				fmt.Fprintf(stderr, "warning: control dispatch: projecting execution facts for %s: %v\n", rootID, err) //nolint:errcheck // successful control processing is preserved
 			}
 		}
-		_, _ = fmt.Fprintf(stdout, "control dispatch: bead=%s action=%s", beadID, result.Action)
-		if result.Created > 0 {
-			_, _ = fmt.Fprintf(stdout, " created=%d", result.Created)
-		}
-		if result.Skipped > 0 {
-			_, _ = fmt.Fprintf(stdout, " skipped=%d", result.Skipped)
-		}
-		fmt.Fprintln(stdout) //nolint:errcheck
 	}
+	_, _ = fmt.Fprintf(stdout, "control dispatch: bead=%s action=%s", beadID, result.Action)
+	if result.Created > 0 {
+		_, _ = fmt.Fprintf(stdout, " created=%d", result.Created)
+	}
+	if result.Skipped > 0 {
+		_, _ = fmt.Fprintf(stdout, " skipped=%d", result.Skipped)
+	}
+	fmt.Fprintln(stdout) //nolint:errcheck
 	return nil
 }
 
@@ -1274,7 +1291,12 @@ func findBeadScopeAcrossStores(cityPath, beadID string, warningWriter io.Writer)
 	if err != nil {
 		return nil, "", fmt.Errorf("opening city store: %w", err)
 	}
-	if _, err := cityStore.Get(beadID); err == nil {
+	// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+	// rows only as pre-split copies, so beads.RelicRead counts the read as
+	// debt; on the class binding the same read is legitimate.
+	// A scope probe (city, then rigs, then the graph binding below): a miss
+	// moves to the next scope.
+	if _, err := beads.RelicGet(cityStore, beadID); err == nil {
 		return cityStore, cityPath, nil
 	} else if !errors.Is(err, beads.ErrNotFound) {
 		return nil, "", fmt.Errorf("getting bead %q from %s: %w", beadID, cityPath, err)
@@ -1286,12 +1308,20 @@ func findBeadScopeAcrossStores(cityPath, beadID string, warningWriter io.Writer)
 		return nil, "", fmt.Errorf("getting bead %q: not in city store, and config unavailable: %w", beadID, err)
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
+	routes := cliStorageRoutes(cityPath)
 	for _, rig := range cfg.Rigs {
+		// A rig proven relic-free holds no control bead (S4b); the binding
+		// leg below answers for its scope.
+		if splitRigGraphRelicFree(routes, rig.Name) {
+			continue
+		}
 		store, err := openControlStoreAtForCity(rig.Path, cityPath, cfg)
 		if err != nil {
 			return nil, "", fmt.Errorf("opening rig store %q: %w", rig.Name, err)
 		}
-		if _, err := store.Get(beadID); err != nil {
+		// Relic leg (S4 debt): a rig store holds graph control beads only as
+		// rows written before the split or by rig-scope writers S4 moves.
+		if _, err := beads.RelicGet(store, beadID); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
@@ -1893,9 +1923,24 @@ func cmdWorkflowDelete(workflowID string, force, deleteBeads bool, stdout, stder
 		fmt.Fprintf(stderr, "gc workflow delete: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	routes := cliStorageRoutes(cityPath)
 	for _, info := range stores {
+		// A rig proven relic-free holds no workflow bead (S4b).
+		if rigViewRelicFree(routes, cityPath, info) {
+			continue
+		}
 		label := workflowDeleteStoreLabelForView(cfg, cityPath, info)
-		found, err := findWorkflowBeads(info.store, workflowID)
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// One view of the federated sweep (scope stores and the binding):
+		// each holds only its own rows of the workflow.
+		var found []beads.Bead
+		err := beads.RelicRead(func() error {
+			var findErr error
+			found, findErr = findWorkflowBeads(info.store, workflowID)
+			return findErr
+		})
 		if err != nil {
 			fmt.Fprintf(stderr, "gc workflow delete: %v\n", refusePartialSweep("scanning", label, err)) //nolint:errcheck // best-effort stderr
 			return 1
@@ -3084,12 +3129,25 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 	c.visited[visitKey] = struct{}{}
 	c.attemptedStores[index] = struct{}{}
 
-	roots, err := sourceworkflow.ListLiveRootsInCity(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
-	if err != nil {
-		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing live source workflows", err)
-	}
-	if err := c.mergeRootMatches(info, roots); err != nil {
-		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow beads", err)
+	// A rig proven relic-free holds no workflow root (S4b): its roots live in
+	// the binding view. Its work children are still walked below.
+	if !rigViewRelicFree(cliStorageRoutes(c.cityPath), c.cityPath, info) {
+		// Relic leg (S4 debt): the walk's root probe reads every view (scope
+		// stores and the binding), and a scope store holds graph roots only as
+		// rows written before the split; beads.RelicRead counts it as debt. The
+		// child-source listing below is not covered: it is ratcheted as it is.
+		var roots []beads.Bead
+		err := beads.RelicRead(func() error {
+			var listErr error
+			roots, listErr = sourceworkflow.ListLiveRootsInCity(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
+			return listErr
+		})
+		if err != nil {
+			return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing live source workflows", err)
+		}
+		if err := c.mergeRootMatches(info, roots); err != nil {
+			return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow beads", err)
+		}
 	}
 	children, err := sourceWorkflowChildSources(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
 	if err != nil {
@@ -3238,10 +3296,19 @@ func assessZeroMatchSourceWorkflowScan(scans []sourceWorkflowStoreScan, sourceBe
 
 	blockingSet := make(map[string]struct{})
 	for _, view := range successfulViews {
-		roots, err := beads.HandlesFor(view.store).Live.List(beads.ListQuery{
-			Metadata: map[string]string{
-				beadmeta.FormulaVarPrefix + graphv2.LegacyIssueVar: sourceBeadID,
-			},
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// One view of the zero-match re-scan; each holds only its own roots.
+		var roots []beads.Bead
+		err := beads.RelicRead(func() error {
+			var listErr error
+			roots, listErr = beads.HandlesFor(view.store).Live.List(beads.ListQuery{
+				Metadata: map[string]string{
+					beadmeta.FormulaVarPrefix + graphv2.LegacyIssueVar: sourceBeadID,
+				},
+			})
+			return listErr
 		})
 		if err != nil {
 			return zeroMatchSourceWorkflowScan{

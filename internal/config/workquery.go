@@ -196,6 +196,22 @@ func excludeHoldLabelsJQClause() string {
 	return excludeLabelsJQClause(beadmeta.DispatchHoldLabels)
 }
 
+// mailMessageBeadType is the issue_type every mail bead carries
+// (internal/mail/beadmail). Mail is read, never claimed as work (#4419).
+const mailMessageBeadType = "message"
+
+// excludeMailMessagesJQClause returns a jq select(...) clause dropping mail
+// beads, for the jq filters over reads that can return them: the ephemeral
+// `bd query` snapshots, which bd's own ready-path message exclusion never
+// reaches, and the federated in_progress window (servableInProgressRowsScript).
+// The type is trimmed and case-folded the way the
+// hook's hookClaimCandidateIsMessage compares it, so no tier serves a row the
+// hook is certain to refuse; tostring keeps a non-string type from erroring
+// the filter, which its discarded stderr would read as an empty tier.
+func excludeMailMessagesJQClause() string {
+	return ` | select(((.issue_type // .type // "") | tostring | gsub("^\\s+|\\s+$"; "") | ascii_downcase) != "` + mailMessageBeadType + `")`
+}
+
 // heldLabelCountJQ counts how many beadmeta.DispatchHoldLabels values the FIRST
 // row of a work-query result carries. The in_progress serve gate reads it off
 // the candidate row it already holds, so the hold check costs no extra bd call.
@@ -353,15 +369,20 @@ func ephemeralStatusSnapshotShell(shellVar, status string) string {
 
 // ephemeralReadyBaseSelectorJQ composes the selector clauses shared by every
 // ephemeral ready-tier filter: the caller's own assignee/routing selector,
-// plus the epic exclusion and, when excludeServeLabels is set, the exclusion of
-// every label the routed pool-demand tier refuses
+// plus the epic exclusion, the mail exclusion and, when excludeServeLabels is
+// set, the exclusion of every label the routed pool-demand tier refuses
 // (PoolDemandServeRules.ExcludeLabels). Only the route-scoped tier sets it.
+// Mail is excluded before any tier truncates: a mail bead is ephemeral and
+// assigned to its recipient, so an assigned tier that served it as its only
+// row would exit before the routed tier ran, and the hook refuses it (#4419,
+// #5815). bd's own ready path already omits messages; this jq path is the
+// bd-1.0.4 stand-in for it.
 // Dependency gating is layered on top by each caller, since `bd query --json`
 // exposes only a `dependency_count` scalar — never a `dependencies` array —
 // which is precise enough to prove "definitely no dependencies" but not to
 // resolve whether a nonzero count is still open.
 func ephemeralReadyBaseSelectorJQ(selector string, excludeServeLabels bool) string {
-	body := selector + ` | select(((.issue_type // .type // "") != "epic"))`
+	body := selector + ` | select(((.issue_type // .type // "") != "epic"))` + excludeMailMessagesJQClause()
 	if excludeServeLabels {
 		body += excludeLabelsJQClause(PoolDemandServeRulesForQuery().ExcludeLabels)
 	}
@@ -710,12 +731,17 @@ const inProgressCandidatesLimit = 20
 // through inProgressBlockedByEnrichmentScript, which falls back to `bd show`
 // for a row that carries no blocked_by.
 //
+// It also drops mail the way the hook refuses it. The read already drops type
+// message (assignedInProgressRead), but its match is exact, so a padded or
+// differently cased spelling reaches this script, which must not serve a row
+// the hook refuses (#5815).
+//
 // It fails open like the gate. Output jq cannot parse leaves $r as the reader
 // printed it, and the gate then serves it unchanged; a window with no servable
 // row becomes "[]", so the tier falls through to the ready tiers, as it did when
 // its one row was blocked.
 func servableInProgressRowsScript(limit int) string {
-	filter := `[.[] | select(((.blocked_by // []) | ` + openBlockerCountJQ + `) == 0)` + excludeHoldLabelsJQClause() + `]`
+	filter := `[.[] | select(((.blocked_by // []) | ` + openBlockerCountJQ + `) == 0)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `]`
 	if limit > 0 {
 		filter += ` | .[:` + strconv.Itoa(limit) + `]`
 	}
@@ -726,10 +752,19 @@ func servableInProgressRowsScript(limit int) string {
 // assignedInProgressRead is the crash-recovery tier's in_progress read for one
 // identity, with args after the assignee, bounded to limit rows. The failure
 // clause names the reader alone, whatever args the read carries.
+//
+// The federated read drops mail itself (--exclude-type=message). It lists both
+// storage tiers, so it holds the session's mail wisps, and a --status read
+// applies no infra-type exclusion, unlike bd's ready path and `bd list`. The
+// reader drops the type before its bound and its --until-unblocked cut, which a
+// filter on its answer cannot do: a claimed mail wisp has no blocker and sorts
+// ahead of a newer claim, so the cut would end the answer at the mail and the
+// claim behind it would never be read (#5815).
 func assignedInProgressRead(shellVar string, topo QueryTopology, args string, limit int) string {
 	reader := bdListInProgressCommand
 	if topo.FederatedReady {
 		reader = gcReadyCommand + ` --status in_progress`
+		args = ` --exclude-type=` + mailMessageBeadType + args
 	}
 	return `r=$(` + reader + ` --assignee="$` + shellVar + `"` + args + ` --json --limit=` + strconv.Itoa(limit) + `)` +
 		workQueryReadFailure(reader) + `; `
@@ -998,12 +1033,14 @@ func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
 // re-served on every hook tick (ga-qjozkw).
 func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology) string {
 	_ = topo
-	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `] | .[:1]`
+	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `] | .[:1]`
 	// federated=false: this row comes from `bd query`, which never carries a
 	// resolved blocked_by, so the carried-lookup branch would only ever fall
 	// through to bd show — skip straight to it. checkHold=false: the filter
 	// above already excludes held candidates before the `.[:1]` truncation, so
-	// the post-truncation nheld check here would always read zero.
+	// the post-truncation nheld check here would always read zero. Mail is
+	// dropped there too: a claimed mail wisp is never work, so it must not hold
+	// the crash-recovery slot (#5815).
 	return ephemeralStatusSnapshotShell("in_progress_ephemeral", "in_progress") +
 		`r=$(printf "%s" "$in_progress_ephemeral" | ` +
 		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
@@ -1014,7 +1051,7 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 
 func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string, topo QueryTopology) string {
 	_ = topo
-	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `]`
+	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `]`
 	return ephemeralStatusSnapshotShell("gc_open_ephemeral_in_progress", "in_progress") +
 		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:1]`) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
@@ -1234,6 +1271,13 @@ func (a *Agent) effectiveQuery(kind queryKind, topo QueryTopology) string {
 // The assigned-ready tier skips dispatch-held rows (never the human label),
 // in its ready read and in its bd-1.0.4 wisp probe alike, so a held assignment
 // is neither served nor able to mask other work.
+//
+// Mail (issue_type=message) is withheld from every tier: it is read, never
+// claimed (#4419). bd's ready path and `bd list` omit it natively, the
+// federated in_progress read passes --exclude-type=message, and the
+// jq-filtered tiers drop it before they truncate, so a recipient's mail wisp
+// cannot stand in for that tier's only row and end the query before the
+// routed tier runs (#5815).
 //
 // When the reconciler runs the query for demand detection (no session
 // context), all identity vars are empty → assignee tiers skip → only

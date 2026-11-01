@@ -152,7 +152,9 @@ func graphResidenceForTree(placement, relic beads.Store, id string, accept func(
 	if err == nil || relic == nil || relic == placement || !errors.Is(err, beads.ErrNotFound) {
 		return b, placement, err
 	}
-	rb, rerr := relic.Get(id)
+	// Relic leg (S4 debt): a rig ledger holds graph rows only until the rig
+	// is imported (gc storage migrate --from-rigs); the leg retires with it.
+	rb, rerr := beads.RelicGet(relic, id)
 	switch {
 	case rerr == nil:
 		return rb, relic, nil
@@ -197,6 +199,11 @@ type rigGraphMarkers struct {
 // city's infra.migrated once a rig's graph rows are proven copied.
 func rigGraphImportMarkerName(rig string) string { return "infra.rig." + rig + ".migrated" }
 
+// rigGraphInFlightName is the record an import writes before it touches the
+// binding and removes after its marker (S4b): while it exists the rig is
+// never relic-free, and boot refuses.
+func rigGraphInFlightName(rig string) string { return "infra.rig." + rig + ".importing" }
+
 // rigGraphCleanMarkerName is the per-rig record S4b writes when a census found
 // no infrastructure row in the rig's store at all (and `gc rig add` writes for
 // a new, empty rig store on a split city).
@@ -212,7 +219,10 @@ func rigGraphClearedNotePath(cityPath, rig string) string {
 // graph row any more, so readers may stop consulting it as a relic leg:
 //
 //   - its clean record exists (a census found no infrastructure row); or
-//   - its import marker exists AND its cleared note says the clear completed.
+//   - its import marker exists AND its cleared note says the clear completed;
+//
+// and the record names the store the rig resolves to now, and no import of
+// it is in flight.
 //
 // Everything else — no records, a marker with a pending or unreadable note, a
 // routes value that does not know where the records live, a rig name that
@@ -227,13 +237,27 @@ func (r *storageRoutes) rigGraphRelicFree(rig string) bool {
 	if m.bindingRoot == "" || !rigNameIsFileSafe(rig) {
 		return false
 	}
-	if fileExists(filepath.Join(m.bindingRoot, rigGraphCleanMarkerName(rig))) {
-		return true
-	}
-	if !fileExists(filepath.Join(m.bindingRoot, rigGraphImportMarkerName(rig))) {
+	if m.cityPath == "" {
 		return false
 	}
-	if m.cityPath == "" {
+	// A record speaks only for the store it names (S4b): a new store under a
+	// reused rig name keeps its relic legs until it is censused itself.
+	storeRoot := ""
+	for _, r := range m.rigs {
+		if r.Name == rig && strings.TrimSpace(r.Path) != "" {
+			storeRoot = resolveStoreScopeRoot(m.cityPath, r.Path)
+		}
+	}
+	if storeRoot == "" {
+		return false
+	}
+	if fileExists(filepath.Join(m.bindingRoot, rigGraphInFlightName(rig))) {
+		return false
+	}
+	if rigRecordSpeaksFor(filepath.Join(m.bindingRoot, rigGraphCleanMarkerName(rig)), storeRoot) {
+		return true
+	}
+	if !rigRecordSpeaksFor(filepath.Join(m.bindingRoot, rigGraphImportMarkerName(rig)), storeRoot) {
 		return false
 	}
 	note, found, err := readInfraClearedNoteAt(rigGraphClearedNotePath(m.cityPath, rig))

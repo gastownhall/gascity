@@ -767,6 +767,47 @@ func TestSessionHandleMessageInterruptNowUsesWorkerBoundary(t *testing.T) {
 	}
 }
 
+// A deliver-now whose interrupt went out but whose replacement a pending
+// interaction kept from being prepared is returned, not queued, even to a
+// caller that queues behind a pending interaction (QueueBehindPending): the
+// queue would deliver it as a plain message, onto a session never prepared
+// for it.
+func TestSessionHandleMessageDoesNotQueueAnUnpreparedReplacement(t *testing.T) {
+	handle, _, sp, mgr := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	by := handleActor(t, handle, sessionpkg.ActorAgent)
+	if err := handle.Start(context.Background(), by); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := mgr.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get(%q): %v", handle.sessionID, err)
+	}
+	sp.WaitForIdleErrors[info.SessionName] = nil
+	// A permission prompt opened as the turn ended, after the manager's
+	// look: the input clear is refused behind it.
+	sp.ClearInputErrors[info.SessionName] = fmt.Errorf("%w: approval open", runtime.ErrPendingInteraction)
+
+	startCalls := len(sp.Calls)
+	result, err := handle.Message(context.Background(), by, MessageRequest{
+		Text:               "replacement task",
+		Delivery:           DeliveryIntentInterruptNow,
+		QueueBehindPending: true,
+	})
+	if !errors.Is(err, sessionpkg.ErrReplacementNotPrepared) || !errors.Is(err, sessionpkg.ErrPendingInteraction) || result.Queued {
+		t.Fatalf("Message(interrupt_now, QueueBehindPending) = %+v, %v; want ErrReplacementNotPrepared wrapping ErrPendingInteraction, nothing queued", result, err)
+	}
+	if lastCall(sp.Calls[startCalls:], "NudgeNow") != nil || lastCall(sp.Calls[startCalls:], "Nudge") != nil {
+		t.Fatalf("calls = %v, want the unprepared replacement not typed", sp.Calls[startCalls:])
+	}
+}
+
 func TestSessionHandleNudgeImmediateUsesWorkerBoundary(t *testing.T) {
 	handle, _, sp, mgr := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileClaudeTmuxCLI,
@@ -2086,6 +2127,77 @@ func TestRuntimeHandleNudgeWaitIdleInteractionUnsupportedReturnsProviderUnsuppor
 	}
 }
 
+// idleSnapshotFake is a Fake whose one-look idle snapshot answers idle and
+// err (runtime.IdleSnapshotProvider).
+type idleSnapshotFake struct {
+	*runtime.Fake
+	idle bool
+	err  error
+}
+
+func (f *idleSnapshotFake) SnapshotIdle(string) (bool, error) { return f.idle, f.err }
+
+// A wait-idle nudge whose pre-read (runtime.IdleBoundaryNow) shows the
+// session busy, or reads indeterminate while the runtime reports a pending
+// interaction (an open dialog), is queued at once: it reports
+// no_idle_boundary without entering the 30 s idle wait and types nothing. A
+// pre-read at the boundary, or one that cannot tell, waits for idle as
+// before.
+func TestRuntimeHandleWaitIdleBusySnapshotQueuesWithoutWaiting(t *testing.T) {
+	indeterminate := fmt.Errorf("scan: %w", runtime.ErrIdleIndeterminate)
+	for _, tc := range []struct {
+		name      string
+		idle      bool
+		err       error
+		pending   *runtime.PendingInteraction
+		wantWait  bool
+		delivered bool
+	}{
+		{name: "busy"},
+		{name: "pending", err: indeterminate, pending: &runtime.PendingInteraction{RequestID: "tmux-1", Kind: "approval", Prompt: "Allow Bash?"}},
+		{name: "at the boundary", idle: true, wantWait: true, delivered: true},
+		{name: "indeterminate", err: indeterminate, wantWait: true, delivered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := runtime.NewFake()
+			if err := fake.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			fake.WaitForIdleErrors["legacy-worker"] = nil
+			fake.SetPendingInteraction("legacy-worker", tc.pending)
+			handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+				Provider:     &idleSnapshotFake{Fake: fake, idle: tc.idle, err: tc.err},
+				SessionName:  "legacy-worker",
+				ProviderName: "claude",
+			})
+			if err != nil {
+				t.Fatalf("NewRuntimeHandle: %v", err)
+			}
+
+			result, err := handle.Nudge(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), NudgeRequest{
+				Text:     "check deploy status",
+				Delivery: NudgeDeliveryWaitIdle,
+				Source:   "mail",
+			})
+			if err != nil {
+				t.Fatalf("Nudge(wait_idle): %v", err)
+			}
+			if result.Delivered != tc.delivered {
+				t.Fatalf("Nudge(wait_idle) = %+v, want delivered=%t", result, tc.delivered)
+			}
+			if !tc.delivered && result.Undelivered != NudgeUndeliveredNoIdleBoundary {
+				t.Fatalf("Nudge(wait_idle) = %+v, want undelivered %q", result, NudgeUndeliveredNoIdleBoundary)
+			}
+			if waited := fake.CountCalls("WaitForIdle", "legacy-worker") != 0; waited != tc.wantWait {
+				t.Fatalf("waited for idle = %t, want %t", waited, tc.wantWait)
+			}
+			if typed := fake.CountCalls("NudgeNow", "legacy-worker") != 0; typed != tc.delivered {
+				t.Fatalf("typed = %t, want %t", typed, tc.delivered)
+			}
+		})
+	}
+}
+
 func TestRuntimeHandleNudgeWaitIdleUnsupportedProviderReturnsUndelivered(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
@@ -2514,7 +2626,8 @@ func TestSessionHandleStartResolvedUsesProvidedRuntime(t *testing.T) {
 }
 
 func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *testing.T) {
-	handle, _, sp, _ := newTestSessionHandle(t, SessionSpec{
+	searchBase := t.TempDir()
+	handle, _, sp, manager := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileClaudeTmuxCLI,
 		Template: "probe",
 		Title:    "Probe",
@@ -2541,6 +2654,18 @@ func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *tes
 	}
 	if strings.Contains(firstCommand, "--resume") {
 		t.Fatalf("first start command = %q, want no --resume", firstCommand)
+	}
+	info, err := manager.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", handle.sessionID, err)
+	}
+	handle.searchPaths = []string{searchBase}
+	transcriptDir := filepath.Join(searchBase, sessionlog.ProjectSlug(info.WorkDir))
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(transcriptDir, info.SessionKey+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
 	}
 
 	if err := handle.Stop(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {

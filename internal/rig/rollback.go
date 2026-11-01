@@ -10,13 +10,18 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-// FileSnapshot captures a file's contents (or its absence) so a failed
-// multi-file provisioning step can be rolled back atomically. It is the unit of
-// the rig-add / rig set-endpoint topology rollback.
+// FileSnapshot captures a file's contents and permission bits (or its absence)
+// so a failed multi-file provisioning step can be rolled back atomically. It is
+// the unit of the rig-add / rig set-endpoint topology rollback.
 type FileSnapshot struct {
 	Path   string
 	Data   []byte
 	Exists bool
+	// Mode is the file's permission bits when it existed. bd creates
+	// .beads/config.yaml and metadata.json 0600, so a restore must put that
+	// mode back rather than widen the file to the 0644 default. Zero means the
+	// default.
+	Mode os.FileMode
 }
 
 // SnapshotResolvedFile snapshots path for rollback through any symlink chain:
@@ -49,7 +54,11 @@ func SnapshotOptionalFile(fs fsys.FS, path string) (FileSnapshot, error) {
 		return FileSnapshot{}, err
 	}
 	cp := append([]byte(nil), data...)
-	return FileSnapshot{Path: path, Data: cp, Exists: true}, nil
+	snap := FileSnapshot{Path: path, Data: cp, Exists: true}
+	if info, err := fs.Stat(path); err == nil && info.Mode().IsRegular() {
+		snap.Mode = info.Mode().Perm()
+	}
+	return snap, nil
 }
 
 // RestoreSnapshots restores every snapshot, best-effort: it attempts all of them
@@ -75,5 +84,9 @@ func restoreSnapshot(fs fsys.FS, snap FileSnapshot) error {
 		}
 		return nil
 	}
-	return fsys.WriteFileAtomic(fs, snap.Path, snap.Data, 0o644)
+	perm := snap.Mode
+	if perm == 0 {
+		perm = 0o644
+	}
+	return fsys.WriteFileAtomic(fs, snap.Path, snap.Data, perm)
 }

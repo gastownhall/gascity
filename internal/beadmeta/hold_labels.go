@@ -56,8 +56,24 @@ var DispatchHoldLabels = []string{HoldMayorLabel, HoldExternalLabel}
 // assigned to an agent. Route-scoped, unassigned dispatch excludes it all the
 // same, for the reason it excludes a hold: a worker cannot advance a bead that
 // is waiting on a person, and serving it back on every tick burns a turn each
-// time (ga-7yfnyv). The assignee-scoped tiers stay transparent to it.
+// time (ga-7yfnyv). The assignee-scoped tiers stay transparent to it. The
+// dead-assignee sweep (releaseOrphanedPoolAssignments) skips it too: released,
+// it would be served to no one, and its holder may be a person, whom no session
+// answers to.
 const HumanLabel = "human"
+
+// HasHumanLabel reports whether labels carry HumanLabel. It compares the way
+// the route-scoped serve filter does (bd's --exclude-label, mirrored by the
+// controller's demand predicate): trimmed and exact, so a "Human" bead is
+// served as ordinary work and is not a person's bead here either.
+func HasHumanLabel(labels []string) bool {
+	for _, label := range labels {
+		if strings.TrimSpace(label) == HumanLabel {
+			return true
+		}
+	}
+	return false
+}
 
 // HasDispatchHold reports whether labels carry one of DispatchHoldLabels. It is
 // the label comparison the hold-aware WORK-SERVING decisions answer with: the

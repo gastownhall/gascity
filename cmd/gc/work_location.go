@@ -21,6 +21,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -258,9 +259,11 @@ type workScope interface {
 }
 
 // ReleaseScope is the narrow set: the bead ID, session_name, the configured
-// named identity and the stable alias (sessionAssignmentIdentifiersForConfig).
-// It is the only set work is released under, and it gates closing a seat
-// whose runtime is dead. A transient pool slot alias is never in it.
+// named identity, the stable alias, and a requalified named session's prior
+// bare identity and its named session's runtime name
+// (sessionAssignmentIdentifiersForConfig). It is the only set work is
+// released under, and it gates closing a seat whose runtime is dead. A
+// transient pool slot alias is never in it.
 type ReleaseScope struct{ ids []string }
 
 // RefuseScope is the wide set: ReleaseScope plus the current alias and the
@@ -325,4 +328,24 @@ func refuseScope(info sessionpkg.Info, cfg *config.City) RefuseScope {
 		}
 	}
 	return RefuseScope{ids: drainAckAssigneeIdentities(info, cfg)}
+}
+
+// legsTriggerResolver reads a bead by id from the store that owns it among
+// legs (WorkLegs.readLive: the class binding, the serving rigs, the city work
+// store), for the start path's trigger reads. nil when legs are unusable (a
+// refused city, or no work store), which keeps the sessions-store read.
+func legsTriggerResolver(legs WorkLegs) warmClaimTriggerResolver {
+	if legs.unusable() != nil {
+		return nil
+	}
+	return func(id string) (beads.Bead, error) {
+		b, found, err := legs.readLive(id)
+		switch {
+		case err != nil:
+			return beads.Bead{}, err
+		case !found:
+			return beads.Bead{}, fmt.Errorf("bead %q: %w", id, beads.ErrNotFound)
+		}
+		return b, nil
+	}
 }

@@ -567,3 +567,78 @@ func TestPreassignHookContinuationGroupSkipsHeldSiblings(t *testing.T) {
 		})
 	}
 }
+
+// TestDoHookClaimTreatsBdNotClaimableRefusalAsALostClaim drives the production
+// bd claim op against bd's refusal for a candidate whose status changed after
+// the work query read it (here it was closed). The refusal wrote nothing and
+// nothing is left for this session to resolve, so it is a lost claim: the
+// routed tier must drain a healthy no_work without recording a claim failure,
+// and the assigned tier must not fail the whole hook.
+func TestDoHookClaimTreatsBdNotClaimableRefusalAsALostClaim(t *testing.T) {
+	cases := []struct {
+		name     string
+		assignee string
+	}{
+		{name: "routed candidate", assignee: ""},
+		{name: "ready assignment", assignee: "worker-1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			originalRunner := hookClaimCommandRunnerWithEnvContext
+			t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+			hookClaimCommandRunnerWithEnvContext = func(context.Context, map[string]string) beads.CommandRunner {
+				return func(_ string, name string, args ...string) ([]byte, error) {
+					switch {
+					case name == "bd" && reflect.DeepEqual(args, []string{"update", "work-1", "--claim", "--json"}):
+						return nil, errors.New("exit status 1: Error updating work-1: issue not claimable: status closed\n" +
+							`{"error":"1 of 1 issues failed to update","failed":[{"id":"work-1","error":"updating issue: issue not claimable: status closed"}],"schema_version":1}`)
+					case name == "bd" && reflect.DeepEqual(args, []string{"show", "--json", "work-1"}):
+						return []byte(`[{"id":"work-1","title":"work","status":"closed","issue_type":"task","assignee":"` + tc.assignee + `","created_at":"2026-10-31T00:00:00Z","metadata":{"gc.routed_to":"worker"}}]`), nil
+					default:
+						t.Fatalf("unexpected command: %s %q", name, args)
+						return nil, nil
+					}
+				}
+			}
+			candidate, err := json.Marshal([]beads.Bead{{
+				ID: "work-1", Status: "open", Assignee: tc.assignee,
+				Metadata: map[string]string{"gc.routed_to": "worker"},
+			}})
+			if err != nil {
+				t.Fatalf("marshal candidate: %v", err)
+			}
+			var claimFailed []string
+			ops := hookClaimOps{
+				Runner:            func(string, string) (string, error) { return string(candidate), nil },
+				DrainAck:          func(io.Writer) error { return nil },
+				EmitClaimFailed:   func(beadID string, _ hookClaimOptions, _ error) { claimFailed = append(claimFailed, beadID) },
+				EmitClaimRejected: func(string, string, string) {},
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := doHookClaim("query", "/rig", hookClaimOptions{
+				Assignee:           "worker-1",
+				IdentityCandidates: []string{"worker-1"},
+				RouteTargets:       []string{"worker"},
+				DrainAck:           true,
+				JSON:               true,
+			}, ops, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("doHookClaim() = %d, want 0; stderr=%s", code, stderr.String())
+			}
+			var result hookClaimJSONResult
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("stdout is not JSON: %v\nraw: %s\nstderr: %s", err, stdout.String(), stderr.String())
+			}
+			if result.Action != "drain" || result.Reason != hookClaimReasonNoWork {
+				t.Fatalf("claim result = %+v, want drain/%s; stderr=%s", result, hookClaimReasonNoWork, stderr.String())
+			}
+			if len(claimFailed) != 0 {
+				t.Fatalf("claim_failed recorded for %q: a status refusal is a lost claim, not a failed write", claimFailed)
+			}
+			if strings.Contains(stderr.String(), "skipping") {
+				t.Fatalf("stderr reports a skipped claim for a lost one: %s", stderr.String())
+			}
+		})
+	}
+}

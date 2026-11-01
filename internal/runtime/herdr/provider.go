@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
@@ -467,6 +468,9 @@ func (p *Provider) runPreStart(ctx context.Context, cfg runtime.Config) error {
 // (the workDir a pre_start may itself be creating — so it is intentionally read
 // from env rather than cfg.WorkDir), process env plus cfg.Env.
 func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[string]string) error {
+	// Read the base env before arming the deadline: execenv.Environ waits out
+	// an in-flight native store open, and that wait is not the command's.
+	baseEnv := execenv.Environ()
 	timeout := p.setupTimeout
 	if timeout <= 0 {
 		timeout = defaultSetupTimeout
@@ -502,7 +506,7 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 			c.Dir = p.c.cityRoot
 		}
 	}
-	c.Env = os.Environ()
+	c.Env = baseEnv
 	for k, v := range env {
 		c.Env = append(c.Env, k+"="+v)
 	}
@@ -553,14 +557,49 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 // The pane resolves through the sidecar binding when the name is gone — the
 // earlier "sleep leak" was exactly this gap: name lost ⇒ pane never found ⇒
 // closePane never issued ⇒ panes piled up across witness sleep cycles.
+//
+// A session herdr answers it does not have (no agent, no live bound pane, or a
+// pane gone before its close) is stopped: nil. So is a session whose pane could
+// not be reached because the herdr server is confirmed dead
+// (serverConfirmedDead): its panes died with it, and dropping the sidecar
+// keeps a restarted server's recycled pane id from resolving to this session.
+// Otherwise a herdr that cannot answer (the pane lookup, an exited agent's
+// reap or the close fails) is an error, and the sidecar is kept so a retried
+// Stop still finds the pane (RUNTIME-CONTRACT-003: runtime.StopForCleanup
+// propagates it rather than certify the session gone).
 func (p *Provider) Stop(name string) error {
 	ctx := context.Background()
-	pid, err := p.paneID(ctx, name)
-	if err == nil && pid != "" {
-		_ = p.c.closePane(ctx, pid)
+	if err := p.closeSessionPane(ctx, name); err != nil && !p.c.serverConfirmedDead(ctx) {
+		return fmt.Errorf("herdr: stopping %q: %w", name, err)
 	}
-	_ = p.clearMeta(name)
+	if err := p.clearMeta(name); err != nil {
+		return fmt.Errorf("herdr: stopping %q: clearing its metadata: %w", name, err)
+	}
 	return nil
+}
+
+// closeSessionPane resolves name's pane and closes it. No pane, or a pane herdr
+// answers is gone by the close, is nil.
+func (p *Provider) closeSessionPane(ctx context.Context, name string) error {
+	pid, err := p.paneID(ctx, name)
+	if err != nil {
+		return fmt.Errorf("resolving its pane: %w", err)
+	}
+	if pid == "" {
+		return nil
+	}
+	if err := p.c.closePane(ctx, pid); err != nil && !paneGone(err) {
+		return fmt.Errorf("closing pane %s: %w", pid, err)
+	}
+	return nil
+}
+
+// paneGone reports whether err is herdr answering that the pane does not
+// exist (pane_not_found, or any *_not_found code), read from herdr's typed
+// answer rather than the error text.
+func paneGone(err error) bool {
+	code := herdrCodeAnyShape(err)
+	return code == "not_found" || strings.HasSuffix(code, "_not_found")
 }
 
 // Interrupt sends a soft ctrl+c to the agent (herdr exposes no signal API).
@@ -927,10 +966,14 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 // otherwise, and the zero time for sessions the tracker has not observed. The
 // error is always nil — a tracker that cannot reach the server keeps its last
 // known state, and never-observed sessions read as unknown (zero), which every
-// consumer already treats as "no signal".
+// consumer already treats as "no signal". The tracker observes herdr's
+// registry, which holds herdrAgentName forms, so both the seed and the read
+// are keyed by the mapped name; gc names that map to the same registry name
+// read that one agent's activity.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
-	p.act.start(p, name)
-	return p.act.lastActivity(name), nil
+	hn := herdrAgentName(name)
+	p.act.start(p, hn)
+	return p.act.lastActivity(hn), nil
 }
 
 // ── best-effort / unsupported (the contract permits these) ───────────────────

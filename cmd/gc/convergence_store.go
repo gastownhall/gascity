@@ -90,7 +90,14 @@ func (a *convergenceStoreAdapter) list(query beads.ListQuery) ([]beads.Bead, err
 	if a.relic == nil {
 		return out, nil
 	}
-	relicRows, err := a.relic.List(query)
+	// Relic leg (S4 debt): the rig's own store holds convergence loops only
+	// from before S4a, until the rig is imported.
+	var relicRows []beads.Bead
+	err = beads.RelicRead(func() error {
+		var listErr error
+		relicRows, listErr = a.relic.List(query)
+		return listErr
+	})
 	if err != nil {
 		return nil, fmt.Errorf("listing the rig's own store for pre-S4 convergence loops: %w", err)
 	}
@@ -251,6 +258,21 @@ func (a *convergenceStoreAdapter) CloseBead(id, reason string) error {
 	}
 	if a.activeIndex != nil {
 		delete(a.activeIndex, id)
+	}
+	return nil
+}
+
+// CloseOpenDescendants closes the open members of id's molecule subtree, but
+// not id itself, through the molecule subtree primitive: closed intermediates
+// are walked, controller-owned rows are skipped, and each closed bead is
+// stamped gc.outcome=skipped with reason as its close_reason.
+func (a *convergenceStoreAdapter) CloseOpenDescendants(id, reason string) error {
+	_, err := molecule.CloseSubtreeWithMetadataExcept(a.store, id, map[string]string{
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+		"close_reason":              reason,
+	}, func(b beads.Bead) bool { return b.ID == id })
+	if err != nil {
+		return fmt.Errorf("closing open descendants of %q: %w", id, err)
 	}
 	return nil
 }

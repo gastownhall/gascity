@@ -92,7 +92,7 @@ func (f s4RigFixture) runtime() *CityRuntime {
 // import: the marker beside the binding and a complete cleared note.
 func (f s4RigFixture) markImported(t *testing.T, rig string, complete bool) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(f.markers, rigGraphImportMarkerName(rig)), []byte("ok\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(f.markers, rigGraphImportMarkerName(rig)), rigTestRecord(f.cityPath, f.rigPath(rig)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	path := rigGraphClearedNotePath(f.cityPath, rig)
@@ -167,7 +167,7 @@ func TestRigGraphRelicFreePredicate(t *testing.T) {
 		t.Error("graphRelicLegForScope still keeps the leg for an imported rig")
 	}
 
-	if err := os.WriteFile(filepath.Join(f.markers, rigGraphCleanMarkerName("rb")), nil, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(f.markers, rigGraphCleanMarkerName("rb")), rigTestRecord(f.cityPath, f.rigPath("rb")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if !f.routes.rigGraphRelicFree("rb") {
@@ -177,7 +177,7 @@ func TestRigGraphRelicFreePredicate(t *testing.T) {
 	if err := os.WriteFile(rigGraphClearedNotePath(f.cityPath, "rc"), []byte("{not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(f.markers, rigGraphImportMarkerName("rc")), nil, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(f.markers, rigGraphImportMarkerName("rc")), rigTestRecord(f.cityPath, f.rigPath("rc")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if f.routes.rigGraphRelicFree("rc") {
@@ -220,7 +220,7 @@ func TestOpenStorageRoutesLocatesTheRigRecords(t *testing.T) {
 	if routes.rigMarkers == nil || routes.rigMarkers.bindingRoot != target.Root || len(routes.rigMarkers.rigs) != 1 {
 		t.Fatalf("openStorageRoutes rigMarkers = %+v, want the binding root %q and the city's rig", routes.rigMarkers, target.Root)
 	}
-	if err := os.WriteFile(filepath.Join(target.Root, rigGraphCleanMarkerName("ra")), nil, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(target.Root, rigGraphCleanMarkerName("ra")), rigTestRecord(root, cfg.Rigs[0].Path), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if !splitRigGraphRelicFree(routes, "ra") {
@@ -319,4 +319,10 @@ func writeS4FileCityTOML(t *testing.T, f s4RigFixture) {
 		t.Fatal(err)
 	}
 	t.Setenv("GC_BEADS", "file")
+}
+
+// rigTestRecord is a rig record's body naming the store at rigPath, as S4b's
+// importer writes it.
+func rigTestRecord(cityPath, rigPath string) []byte {
+	return []byte("ok\n" + rigRecordStorePrefix + resolveStoreScopeRoot(cityPath, rigPath) + "\n")
 }

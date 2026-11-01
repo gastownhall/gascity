@@ -538,21 +538,7 @@ func substituteTargetPlaceholders(s string, target *Step) string {
 // mergeVars merges formula default vars with rule overrides.
 // Override values take precedence over defaults.
 func mergeVars(formula *Formula, overrides map[string]string) map[string]string {
-	result := make(map[string]string)
-
-	// Start with formula defaults
-	for name, def := range formula.Vars {
-		if def.Default != nil {
-			result[name] = *def.Default
-		}
-	}
-
-	// Apply overrides (these win)
-	for name, value := range overrides {
-		result[name] = value
-	}
-
-	return result
+	return ApplyDefaults(formula, overrides)
 }
 
 // buildStepMap creates a map of step ID to step (recursive).

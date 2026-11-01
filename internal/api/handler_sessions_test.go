@@ -502,9 +502,11 @@ func seedQueuedWaitNudge(t *testing.T, fs *fakeState, wait beads.Bead, agentName
 		t.Fatalf("set wait nudge_id: %v", err)
 	}
 	if _, err := fs.cityBeadStore.Create(beads.Bead{
-		Type:   "nudge",
-		Title:  "nudge:" + nudgeID,
-		Labels: []string{"nudge:" + nudgeID},
+		Type:  "nudge",
+		Title: "nudge:" + nudgeID,
+		// gc:nudge is what every real shadow bead carries (cmd/gc
+		// nudge_beads.go), and what makes it nudges-class rather than work.
+		Labels: []string{"gc:nudge", "nudge:" + nudgeID},
 		Metadata: map[string]string{
 			"nudge_id": nudgeID,
 			"state":    "queued",
@@ -569,7 +571,7 @@ func createSessionCloseWaitOverflowWithQueuedNudges(t *testing.T, fs *fakeState,
 		if _, err := fs.cityBeadStore.Create(beads.Bead{
 			Type:   "nudge",
 			Title:  "nudge:" + nudgeID,
-			Labels: []string{"nudge:" + nudgeID},
+			Labels: []string{"gc:nudge", "nudge:" + nudgeID},
 			Metadata: map[string]string{
 				"nudge_id": nudgeID,
 				"state":    "queued",

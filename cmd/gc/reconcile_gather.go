@@ -511,6 +511,17 @@ func newTemplateResolver(bp *agentBuildParams) templateResolver {
 			if !ok || spec.Agent == nil {
 				return templateResolution{Err: fmt.Errorf("configured named session %q not found", identity)}
 			}
+			// A row still stamped with the identity's prior (bare) form is this
+			// same named session awaiting its in-place rename
+			// (gastownhall/gascity#5957): resolve the template under the
+			// requalified identity so the arms' identity write renames the row
+			// instead of re-stamping the stale form — and orphan detection
+			// stops draining a live seat for a config that never went away.
+			if qualified := spec.Named.QualifiedName(); qualified != identity {
+				if qspec, qok := findNamedSessionSpec(cfg, bp.cityName, qualified); qok && session.NamedSessionIdentityIsPriorForm(qspec, identity) {
+					spec, identity = qspec, qualified
+				}
+			}
 			tp, err := resolveConfiguredNamedSessionTemplate(&row, spec, identity, info)
 			return templateResolution{TP: tp, Agent: spec.Agent, Err: err}
 		}
@@ -619,7 +630,11 @@ func (m *gatherMemo) refresh(e gatherEnv, env *reconcileEnv, now time.Time, rows
 	next := make(map[templateMemoKey]templateResolution, len(rows))
 	missed := false
 	for _, row := range rows {
-		if mislabelled[row.Key] || findAgentByTemplate(env.Cfg, resolvedSessionTemplateInfo(row.Info, env.Cfg)) == nil {
+		// A configured named row resolves through its spec, not its stored
+		// template: requalification leaves the template in the identity's
+		// prior form, matching no agent, and skipping the row would leave
+		// A7 without a resolution to rename it under (gastownhall/gascity#5957).
+		if mislabelled[row.Key] || (findAgentByTemplate(env.Cfg, resolvedSessionTemplateInfo(row.Info, env.Cfg)) == nil && !row.Info.ConfiguredNamedSession) {
 			continue
 		}
 		k := templateMemoKeyOf(row.Info)

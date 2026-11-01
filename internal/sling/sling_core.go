@@ -453,8 +453,9 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	// is the same one instantiated here — no redundant disk compile, and the
 	// isGraph/routing decision cannot drift from what is materialized.
 	mResult, err := InstantiateCompiledSlingFormula(context.Background(), recipe, opts.BeadOrFormula, molecule.Options{
-		Title: opts.Title,
-		Vars:  formulaVars,
+		Title:        opts.Title,
+		Vars:         formulaVars,
+		RootMetadata: opts.rootMetadata(),
 	}, "", opts.ScopeKind, opts.ScopeRef, a, deps, opts.Force)
 	if err != nil {
 		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
@@ -662,6 +663,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			mResult, err := InstantiateSlingFormula(context.Background(), formulaName, searchPaths, molecule.Options{
 				Title:            opts.Title,
 				Vars:             formulaVars,
+				RootMetadata:     opts.rootMetadata(),
 				PriorityOverride: BeadPriorityOverride(deps.Store, graphInv.InputConvoy),
 			}, "", opts.ScopeKind, opts.ScopeRef, a, deps, opts.Force)
 			if err != nil {
@@ -735,13 +737,14 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 		mResult, err := InstantiateSlingFormula(context.Background(), formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
 			Title:            opts.Title,
 			Vars:             formulaVars,
+			RootMetadata:     opts.rootMetadata(),
 			PriorityOverride: BeadPriorityOverride(querier, beadID),
 		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
 			return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 		}
 		wispRootID := mResult.RootID
-		if mResult.GraphWorkflow || IsGraphWorkflowAttachment(deps.graphStore(), wispRootID) {
+		if mResult.GraphWorkflow || graphWorkflowAttachmentInGraphStore(deps.graphStore(), wispRootID) {
 			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, beadID, beadID, SlingMergeStrategy(opts.Merge, beadID, deps, a), a, method, deps)
 			wfResult.FormulaName = formulaName
 			return wfResult, wfErr
@@ -768,6 +771,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 		mResult, err := InstantiateSlingFormula(context.Background(), formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
 			Title:            opts.Title,
 			Vars:             formulaVars,
+			RootMetadata:     opts.rootMetadata(),
 			PriorityOverride: BeadPriorityOverride(querier, beadID),
 		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
@@ -801,9 +805,25 @@ func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.Store, bead
 
 	// Execute routing -- prefer typed Router, fall back to shell Runner.
 	var bead beads.Bead
+	var readErr error
 	if beadStore != nil && strings.TrimSpace(beadID) != "" {
 		if got, err := beadStore.Get(beadID); err == nil {
 			bead = got
+		} else {
+			readErr = err
+		}
+	}
+	// Record who launched this before routing, whichever router routes it:
+	// once routed the bead is claimable, and a claim must never see it
+	// unattributed.
+	if opts.Initiator != "" {
+		warning, err := recordInitiatorBeforeRoute(opts, beadStore, beadID, bead, readErr)
+		if err != nil {
+			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
+			return result, err
+		}
+		if warning != "" {
+			result.MetadataErrors = append(result.MetadataErrors, warning)
 		}
 	}
 	slingEnv := ResolveSlingEnvForBead(a, deps, bead)
@@ -967,6 +987,34 @@ func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.Store, bead
 	}
 
 	return result, nil
+}
+
+// recordInitiatorBeforeRoute stamps opts.Initiator on the bead finalizeInStore
+// is about to route, through the writer of the store that holds it. bead and
+// readErr are the read finalizeInStore made of it. The write is skipped only
+// when that read shows the bead already carries this initiator, as a root
+// minted with RootMetadata does. Any other failure to read or stamp the bead
+// is returned, so the caller never routes it unattributed. The one exception
+// is a forced sling of a bead its store does not hold, which routes
+// best-effort by design: that is returned as a warning instead.
+func recordInitiatorBeforeRoute(opts SlingOpts, writer beads.Writer, beadID string, bead beads.Bead, readErr error) (string, error) {
+	if writer == nil {
+		return "", fmt.Errorf("recording initiator on %s: no store holds the bead", beadID)
+	}
+	forcedMissing := func(err error) bool { return opts.Force && errors.Is(err, beads.ErrNotFound) }
+	if readErr != nil && !forcedMissing(readErr) {
+		return "", fmt.Errorf("recording initiator on %s: reading the bead: %w", beadID, readErr)
+	}
+	if readErr == nil && bead.Metadata[beadmeta.InitiatorMetadataKey] == opts.Initiator {
+		return "", nil
+	}
+	if err := writer.SetMetadata(beadID, beadmeta.InitiatorMetadataKey, opts.Initiator); err != nil {
+		if forcedMissing(err) {
+			return fmt.Sprintf("initiator not recorded on %s: %v", beadID, err), nil
+		}
+		return "", fmt.Errorf("recording initiator on %s: %w", beadID, err)
+	}
+	return "", nil
 }
 
 func validateBuiltInRouteStoreReachable(deps SlingDeps, beadID string, a config.Agent) error {
@@ -1206,7 +1254,17 @@ func (c *sourceWorkflowRootCollector) scanStore(index int, info SourceWorkflowSt
 		c.bindingStore = info.Store
 		c.bindingRef = rootStoreRef
 	}
-	matches, err := sourceworkflow.ListLiveRoots(info.Store, c.sourceBeadID, c.sourceStoreRef, rootStoreRef)
+	// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+	// rows only as pre-split copies, so beads.RelicRead counts the read as
+	// debt; on the class binding the same read is legitimate.
+	// One leg of the source-workflow federation (graph binding, city, rigs):
+	// each leg lists only the roots it holds.
+	var matches []beads.Bead
+	err := beads.RelicRead(func() error {
+		var listErr error
+		matches, listErr = sourceworkflow.ListLiveRoots(info.Store, c.sourceBeadID, c.sourceStoreRef, rootStoreRef)
+		return listErr
+	})
 	if err != nil {
 		return c.recordScanFailure(index, info, err)
 	}
@@ -1744,12 +1802,13 @@ func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, chi
 		mResult, err := InstantiateSlingFormula(ctx, formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
 			Title:            opts.Title,
 			Vars:             childVars,
+			RootMetadata:     opts.rootMetadata(),
 			PriorityOverride: ClonePriorityPtr(child.Priority),
 		}, child.ID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
 			return SlingResult{}, fmt.Errorf("instantiating %s %q on %s: %w", formulaLabel, formulaName, child.ID, err)
 		}
-		if mResult.GraphWorkflow || IsGraphWorkflowAttachment(deps.graphStore(), mResult.RootID) {
+		if mResult.GraphWorkflow || graphWorkflowAttachmentInGraphStore(deps.graphStore(), mResult.RootID) {
 			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, child.ID, child.ID, SlingMergeStrategy(opts.Merge, child.ID, deps, a), a, method, deps)
 			wfResult.FormulaName = formulaName
 			return wfResult, wfErr
@@ -1771,6 +1830,7 @@ func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, chi
 		mResult, err := InstantiateSlingFormula(ctx, formulaName, SlingFormulaSearchPaths(deps, a), molecule.Options{
 			Title:            opts.Title,
 			Vars:             childVars,
+			RootMetadata:     opts.rootMetadata(),
 			PriorityOverride: ClonePriorityPtr(child.Priority),
 		}, child.ID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
@@ -2125,6 +2185,19 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 			}
 		}
 
+		// As in finalizeInStore: stamp before either router can make the
+		// child claimable. The route writes deps.Store, so the stamp does too.
+		if opts.Initiator != "" {
+			if err := deps.Store.SetMetadata(child.ID, beadmeta.InitiatorMetadataKey, opts.Initiator); err != nil {
+				err = fmt.Errorf("recording initiator on %s: %w", child.ID, err)
+				childResult.fail(err)
+				batchResult.Children = append(batchResult.Children, childResult)
+				childErrors = append(childErrors, err)
+				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
+				failed++
+				continue
+			}
+		}
 		childEnv := ResolveSlingEnvForBead(a, deps, child)
 		rigDir := SlingDirForBead(deps.Cfg, deps.CityPath, child.ID)
 		if deps.Router != nil {

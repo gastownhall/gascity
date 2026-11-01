@@ -19,6 +19,7 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/runtime/herdr",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/execenv",
         "//internal/execgrace",
         "//internal/runtime",
         "//internal/runtime/proctable",
@@ -30,6 +31,7 @@ go_test(
     name = "herdr_test",
     srcs = [
         "activity_live_test.go",
+        "activity_names_test.go",
         "activity_test.go",
         "agent_info_test.go",
         "agent_name_taken_test.go",
@@ -37,6 +39,7 @@ go_test(
         "claude_text_test.go",
         "client_test.go",
         "conformance_test.go",
+        "contracts_test.go",
         "dial_bound_test.go",
         "effectiveworkdir_test.go",
         "errorcode_test.go",
@@ -53,6 +56,7 @@ go_test(
         "panebinding_test.go",
         "placement_test.go",
         "prestart_test.go",
+        "process_env_setup_test.go",
         "processtree_test.go",
         "provider_live_test.go",
         "redaction_test.go",
@@ -65,12 +69,14 @@ go_test(
     ],
     embed = [":herdr"],
     deps = [
+        "//internal/execenv",
         "//internal/runtime",
         "//internal/runtime/herdr/herdrtest",
         "//internal/runtime/proctable",
         "//internal/runtime/runtimetest",
         "//internal/shellquote",
         "//internal/testenv",
+        "//internal/testutil",
     ],
 )
 
