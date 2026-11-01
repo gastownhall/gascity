@@ -322,6 +322,7 @@ func (g *claimStallGuard) observeSeat(b beads.Bead, closed bool, at time.Time) [
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.sweep(at)
+	_, known := g.seats[b.ID]
 	seat := g.seatFor(b.ID, template)
 	seat.seen = at
 	if !b.CreatedAt.IsZero() {
@@ -337,6 +338,11 @@ func (g *claimStallGuard) observeSeat(b beads.Bead, closed bool, at time.Time) [
 	}
 	var alerts []events.Event
 	if claimedAt, claimed := claimStallNewestClaim(b.Metadata[session.WorkStartedKey]); claimed {
+		if known {
+			// A seat the guard watched claim: the claim is news now, on
+			// the controller's clock, whatever the hook's clock says.
+			claimedAt = at
+		}
 		alerts = append(alerts, g.claimedLocked(seat, claimedAt)...)
 	}
 	if closed && !seat.closed {
@@ -380,12 +386,14 @@ func (g *claimStallGuard) observeWork(evt events.Event) []events.Event {
 		return nil
 	}
 	// The claim's first write sets the assignee to the seat's session id;
-	// gc.session_id follows in a second write.
-	seat := g.seats[strings.TrimSpace(firstNonEmpty(b.Metadata[beadmeta.SessionIDMetadataKey], evt.SessionID, b.Assignee))]
-	if seat == nil {
-		return nil
+	// gc.session_id follows in a second write, and a release leaves the
+	// previous claimer's there, so the assignee is asked first.
+	for _, id := range []string{b.Assignee, b.Metadata[beadmeta.SessionIDMetadataKey], evt.SessionID} {
+		if seat := g.seats[strings.TrimSpace(id)]; seat != nil {
+			return g.claimedLocked(seat, g.eventTime(evt))
+		}
 	}
-	return g.claimedLocked(seat, g.eventTime(evt))
+	return nil
 }
 
 // claimStallNewestClaim is when the newest claim a work_started cell names
@@ -601,7 +609,7 @@ func (g *claimStallGuard) stalledEvent(template string, ep *claimStallEpisode, c
 	}
 	return events.Event{
 		Type:    events.AgentClaimsStalled,
-		Ts:      at.UTC(),
+		Ts:      claimStallLater(at, g.now()).UTC(),
 		Actor:   "controller",
 		Subject: template,
 		Message: fmt.Sprintf("Agent %s stopped claiming its work on %s: %s (since %s). No new seats are spawned for its routed work until %s, then one probe seat; a claim ends the stall (a custom scale_check count is not withheld).",
@@ -627,7 +635,7 @@ func (g *claimStallGuard) resumedEvent(template string, ep *claimStallEpisode, c
 	}
 	return events.Event{
 		Type:    events.AgentClaimsResumed,
-		Ts:      at.UTC(),
+		Ts:      claimStallLater(at, g.now()).UTC(),
 		Actor:   "controller",
 		Subject: template,
 		Message: fmt.Sprintf("Agent %s %s; the stall that began %s (%d seats failed) is over and its routed work counts as demand again.",

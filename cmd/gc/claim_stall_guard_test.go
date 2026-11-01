@@ -113,10 +113,11 @@ func (h *claimStallHarness) close(s stallSeat, state string, awake time.Time) {
 	h.seatEvent(events.BeadClosed, s.id, s.template, s.created, md)
 }
 
-// failCreate is a seat that failed to start: created and closed failed-create.
-func (h *claimStallHarness) failCreate(template, trigger string) {
+// failCreate is a seat of the stalling template that failed to start:
+// created and closed failed-create.
+func (h *claimStallHarness) failCreate(trigger string) {
 	h.t.Helper()
-	s := h.spawn(template, trigger)
+	s := h.spawn(stallTemplate, trigger)
 	h.close(s, "failed-create", time.Time{})
 }
 
@@ -249,13 +250,13 @@ func TestClaimStallGuardABurstIsOneEvent(t *testing.T) {
 	h.demand[stallTemplate] = []string{"step-1"}
 	h.pass(stallTemplate)
 	for range 6 {
-		h.failCreate(stallTemplate, "step-1")
+		h.failCreate("step-1")
 	}
 	if len(h.stalls()) != 0 {
 		t.Fatal("a one-tick burst of failed creates tripped a stall")
 	}
 	h.advance(claimStallMinSpan)
-	h.failCreate(stallTemplate, "step-1")
+	h.failCreate("step-1")
 	if len(h.stalls()) != 1 {
 		t.Fatalf("stalls = %d after failures spread over %v, want one", len(h.stalls()), claimStallMinSpan)
 	}
@@ -623,12 +624,10 @@ func TestClaimStallGuardAnAssigneeClaimCounts(t *testing.T) {
 func TestClaimStallGuardHoldsFromNow(t *testing.T) {
 	h := newClaimStallHarness(t)
 	h.demand[stallTemplate] = []string{"step-1", "step-2", "step-3"}
-	var seats []stallSeat
 	for _, trigger := range h.demand[stallTemplate] {
 		s := h.spawn(stallTemplate, trigger)
 		h.advance(time.Minute)
 		h.wake(s)
-		seats = append(seats, s)
 	}
 	h.pass(stallTemplate)
 	h.advance(claimStallDeadline + claimStallHoldBase)
@@ -640,7 +639,9 @@ func TestClaimStallGuardHoldsFromNow(t *testing.T) {
 	if p := stallPayload(t, stalls[0]); p.Until == nil || !p.Until.After(h.now) {
 		t.Fatalf("stall %+v at %v: the hold was already over when it was raised", p, h.now)
 	}
-	_ = seats
+	if !stalls[0].Ts.Equal(h.now) {
+		t.Fatalf("stall recorded at %v, want when the guard noticed it (%v): a gc events --since reader must see it", stalls[0].Ts, h.now)
+	}
 }
 
 // A held template whose demand this pass is empty (the claim-loop guard
@@ -657,5 +658,67 @@ func TestClaimStallGuardSpendsNoProbeOnNothing(t *testing.T) {
 	h.demand[stallTemplate] = []string{"step-1"}
 	if got := h.pass(stallTemplate); len(got) != 1 {
 		t.Fatalf("demand %v, want the probe admitted when there is work for it", got)
+	}
+}
+
+// The streak window is the newest failure's: a failure that arrives late but
+// is dated more than claimStallWindow before the newest does not complete a
+// streak with the fresh ones.
+func TestClaimStallGuardWindowIsTheNewestFailures(t *testing.T) {
+	h := newClaimStallHarness(t)
+	h.demand[stallTemplate] = []string{"step-1", "step-2", "step-3"}
+	h.pass(stallTemplate)
+	old := h.spawn(stallTemplate, "step-3")
+	h.advance(30 * time.Second)
+	h.wake(old)
+	woke := h.now
+	h.advance(claimStallWindow + 5*time.Minute)
+	h.failCreate("step-1")
+	h.advance(3 * time.Minute)
+	h.failCreate("step-2")
+	// The old seat's close arrives now, dated by the event; its overdue
+	// failure is dated at its deadline, long before the window.
+	h.guard.mu.Lock()
+	alerts := h.guard.failedLocked(h.guard.seats[old.id], woke.Add(claimStallDeadline))
+	h.guard.mu.Unlock()
+	if len(alerts) != 0 || len(h.stalls()) != 0 {
+		t.Fatalf("a failure dated %v before the newest completed a streak", h.now.Sub(woke.Add(claimStallDeadline)))
+	}
+}
+
+// A partial pass keeps the other templates' waiting work, and the index that
+// follows work beads covers it too: a waiting bead of an unprobed template
+// that closes no longer waits.
+func TestClaimStallGuardAPartialPassKeepsTheIndex(t *testing.T) {
+	h := newClaimStallHarness(t)
+	h.demand[stallTemplate] = []string{"step-1"}
+	h.pass(stallTemplate)
+	h.guard.withhold(map[string]int{"core.control-dispatcher": 1}, map[string]scaleCheckDemand{"core.control-dispatcher": {Count: 1, WorkBeadIDs: []string{"ctl-1"}}})
+	h.workEvent(events.BeadClosed, "step-1", "closed", "")
+	h.guard.mu.Lock()
+	waits := h.guard.templates[stallTemplate].waits("step-1")
+	h.guard.mu.Unlock()
+	if waits {
+		t.Fatal("a closed bead of an unprobed template still waits: the partial pass dropped it from the index")
+	}
+}
+
+// A seat the guard watched that claims just after it was counted overdue (a
+// slow claim, or a claim the journal reports late) answers its own failure.
+// Its claim is news when the guard sees it, whatever the hook's clock said.
+func TestClaimStallGuardALateClaimAnswersItsOwnFailure(t *testing.T) {
+	h := newClaimStallHarness(t)
+	h.demand[stallTemplate] = []string{"step-1", "step-2", "step-3"}
+	h.overdueSeat("step-1")
+	h.overdueSeat("step-2")
+	late := h.overdueSeat("step-3")
+	if len(h.stalls()) != 1 {
+		t.Fatal("no stall")
+	}
+	h.advance(10 * time.Second)
+	skewed := fmt.Sprintf(`{"v":1,"claims":[{"store":"city","bead":"step-3","gen":2,"at":%q,"via":"claim"}]}`, h.now.Add(-30*time.Minute).Format(time.RFC3339Nano))
+	h.seatEvent(events.BeadUpdated, late.id, late.template, late.created, map[string]string{beadmeta.TriggerBeadIDMetadataKey: "step-3", "state": "awake", session.WorkStartedKey: skewed})
+	if resumed := h.ofType(events.AgentClaimsResumed); len(resumed) != 1 {
+		t.Fatalf("resumed %v, want the watched seat's late claim to end the stall despite its lagging clock", resumed)
 	}
 }
