@@ -1480,21 +1480,21 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 				stopWalk = true
 				return nil
 			}
-			if !mutate {
-				return nil
-			}
-			if err := propagateSourceBeadTerminalMetadata(nextStore, loaded, current.Metadata); err != nil {
-				return fmt.Errorf("propagating source bead metadata %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
-			}
-			if loaded.Status == "closed" {
-				opts.tracef("close-source-chain root=%s skip reason=already_closed source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
-			} else {
-				if err := closeSourceBeadPreservingOutcome(nextStore, loaded); err != nil {
-					return fmt.Errorf("closing source bead %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
+			holds := sourceHoldsChain(loaded)
+			if mutate {
+				if err := propagateSourceBeadTerminalMetadata(nextStore, loaded, current.Metadata); err != nil {
+					return fmt.Errorf("propagating source bead metadata %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
 				}
-				opts.tracef("close-source-chain root=%s closed source=%s ref=%s preserved_outcome=%t", rootID, nextID, sourceChainStoreLabel(effectiveRef), strings.TrimSpace(loaded.Metadata[beadmeta.OutcomeMetadataKey]) != "")
+				if loaded.Status == "closed" {
+					opts.tracef("close-source-chain root=%s skip reason=already_closed source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
+				} else {
+					if err := closeSourceBeadPreservingOutcome(nextStore, loaded); err != nil {
+						return fmt.Errorf("closing source bead %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
+					}
+					opts.tracef("close-source-chain root=%s closed source=%s ref=%s preserved_outcome=%t", rootID, nextID, sourceChainStoreLabel(effectiveRef), strings.TrimSpace(loaded.Metadata[beadmeta.OutcomeMetadataKey]) != "")
+				}
 			}
-			if sourceHoldsChain(loaded) {
+			if holds {
 				opts.tracef("close-source-chain root=%s stop reason=blocked_source source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
 				stopWalk = true
 			}
