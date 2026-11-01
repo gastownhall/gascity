@@ -1308,6 +1308,8 @@ var managedDoltSessionScopedEnvKeys = []string{
 // city-infrastructure process gc spawns (managed Dolt, its scope watchdog, a
 // drift-respawned supervisor) goes through it, because a reparented process
 // carrying an agent's GC_SESSION_ID is that session's orphan-sweep target.
+// Exec orders go through it too (mergeOrderExecEnv): an order acts for the
+// city, not for the seat that started the controller.
 func withoutSessionIdentityEnv(env []string) []string {
 	for _, key := range managedDoltSessionScopedEnvKeys {
 		env = removeEnvKey(env, key)
