@@ -44,6 +44,7 @@ func (p Profile) String() string {
 type ProfileBackend interface {
 	Provider
 	AttachmentObserverWithError
+	BackgroundWorkObserver
 	BackgroundWorkStopper
 	DeadRuntimeSessionChecker
 	DialogProvider
@@ -94,6 +95,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 		return tmuxProfile{
 			Provider:                      core,
 			AttachmentObserverWithError:   b,
+			BackgroundWorkObserver:        b,
 			BackgroundWorkStopper:         b,
 			DeadRuntimeSessionChecker:     b,
 			DialogProvider:                b,
@@ -203,6 +205,7 @@ type (
 	tmuxProfile struct {
 		Provider
 		AttachmentObserverWithError
+		BackgroundWorkObserver
 		BackgroundWorkStopper
 		DeadRuntimeSessionChecker
 		DialogProvider
@@ -554,6 +557,18 @@ func (f FullFake) FreshActivity(name string) (time.Time, error) {
 		return at, nil
 	}
 	return f.Activity[name], nil
+}
+
+// HasBackgroundWork implements [BackgroundWorkObserver]: a running session has no
+// background work, and a session that is not running cannot be looked at.
+func (f FullFake) HasBackgroundWork(name string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "HasBackgroundWork", Name: name})
+	if _, running := f.sessions[name]; !running {
+		return false, fmt.Errorf("background work of %q: %w", name, ErrSessionNotFound)
+	}
+	return false, nil
 }
 
 // RuntimeInventory implements [InventoryProvider]: every running session,

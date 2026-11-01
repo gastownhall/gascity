@@ -2139,6 +2139,7 @@ go_test(
         "session_scaffold_staging_test.go",
         "session_sleep_acp_idle_probe_test.go",
         "session_sleep_attached_test.go",
+        "session_sleep_background_work_test.go",
         "session_sleep_exec_test.go",
         "session_sleep_probe_budget_test.go",
         "session_sleep_test.go",
