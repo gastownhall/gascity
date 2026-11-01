@@ -57,11 +57,13 @@ func testTmux() *Tmux {
 	return NewTmuxWithConfig(cfg)
 }
 
-// noServerPreflightExecutor makes only the first has-session preflight report
-// ErrNoServer, then delegates every other operation to real tmux. It models a
-// stale protocol observation while retaining the real socket boundary.
+// noServerPreflightExecutor makes every has-session preflight against the
+// bogus probe target report ErrNoServer, and delegates every other operation
+// to real tmux. It models a persistent protocol refusal while retaining the
+// real socket boundary: the reconciliation re-probe must also see no-server,
+// so a genuinely live server is never clobbered.
 type noServerPreflightExecutor struct {
-	used bool
+	preflights int
 }
 
 func (e *noServerPreflightExecutor) execute(args []string) (string, error) {
@@ -69,9 +71,33 @@ func (e *noServerPreflightExecutor) execute(args []string) (string, error) {
 }
 
 func (e *noServerPreflightExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
-	if !e.used && firstArgsContainHasSession(args) {
-		e.used = true
+	if tmuxSubcommand(args) == "has-session" && slices.Contains(args, "="+probeSessionName) {
+		e.preflights++
 		return "", ErrNoServer
+	}
+	return realExecutor{}.executeCtx(ctx, args)
+}
+
+// siblingBoundaryExecutor delegates everything to real tmux, counting
+// has-session preflights against the bogus probe target and capturing the
+// first one's result so a test can prove it was a genuine no-server answer.
+type siblingBoundaryExecutor struct {
+	preflights int
+	firstErr   error
+}
+
+func (e *siblingBoundaryExecutor) execute(args []string) (string, error) {
+	return realExecutor{}.execute(args)
+}
+
+func (e *siblingBoundaryExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
+	if tmuxSubcommand(args) == "has-session" && slices.Contains(args, "="+probeSessionName) {
+		e.preflights++
+		out, err := realExecutor{}.executeCtx(ctx, args)
+		if e.preflights == 1 {
+			e.firstErr = err
+		}
+		return out, err
 	}
 	return realExecutor{}.executeCtx(ctx, args)
 }
@@ -352,7 +378,8 @@ func TestNewSessionNoServerProbeDoesNotClobberLiveNamedSocket(t *testing.T) {
 		}
 
 		guarded := NewProviderWithConfig(tm.cfg)
-		guarded.Tmux().exec = &noServerPreflightExecutor{}
+		preflight := &noServerPreflightExecutor{}
+		guarded.Tmux().exec = preflight
 		err = guarded.Start(context.Background(), original, runtimepkg.Config{
 			Command: "sleep 600",
 			Env:     map[string]string{"GC_INSTANCE_TOKEN": instanceToken},
@@ -372,6 +399,9 @@ func TestNewSessionNoServerProbeDoesNotClobberLiveNamedSocket(t *testing.T) {
 			if !strings.Contains(err.Error(), want) {
 				t.Fatalf("Provider.Start error = %q, want %q", err, want)
 			}
+		}
+		if preflight.preflights != 2 {
+			t.Fatalf("preflight probes = %d, want 2 (initial + persistent-refusal re-probe)", preflight.preflights)
 		}
 
 		hasOriginal, err := tm.HasSession(original)
@@ -401,6 +431,93 @@ func TestNewSessionNoServerProbeDoesNotClobberLiveNamedSocket(t *testing.T) {
 		}
 		if !os.SameFile(beforeSocket, afterSocket) {
 			t.Fatalf("socket inode changed: before=%s after=%s", socketInode(beforeSocket), socketInode(afterSocket))
+		}
+	})
+
+	t.Run("sibling-start-after-no-server-probe-attaches", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, ".tmux.conf"), []byte("set-option -g exit-empty off\n"), 0o600); err != nil {
+			t.Fatalf("write isolated tmux config: %v", err)
+		}
+		t.Setenv("HOME", home)
+		t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+		socketRoot, err := os.MkdirTemp("/tmp", "gc-tmux-sibling-")
+		if err != nil {
+			t.Fatalf("create isolated tmux socket root: %v", err)
+		}
+		t.Setenv("TMUX_TMPDIR", socketRoot)
+		// The observer starts the sibling server synchronously inside the
+		// guarded probe's budget; widen it for that process startup only —
+		// the unit tests pin the deadline semantics.
+		prev := newSessionProbeTimeout
+		newSessionProbeTimeout = 10 * time.Second
+		t.Cleanup(func() { newSessionProbeTimeout = prev })
+
+		cfg := DefaultConfig()
+		cfg.SocketName = newSocketName("sibling")
+		sibling := NewTmuxWithConfig(cfg)
+		guarded := NewProviderWithConfig(cfg)
+		socketPath := namedSocketPath(cfg.SocketName)
+		t.Cleanup(func() {
+			_ = sibling.KillServer()
+			_ = os.Remove(socketPath)
+			_ = os.RemoveAll(socketRoot)
+		})
+
+		var siblingSession, siblingPID string
+		var siblingSocket os.FileInfo
+		probeExec := &siblingBoundaryExecutor{}
+		guarded.Tmux().exec = probeExec
+		guarded.Tmux().serverSocketObserver = func(ctx context.Context, path string) error {
+			// The race's hinge: the guarded probe already got a genuine
+			// no-server answer, and the sibling's new-session binds the
+			// socket now, before the observation samples it.
+			siblingSession = fmt.Sprintf("gc-sibling-first-%d", time.Now().UnixNano())
+			if err := sibling.NewSession(siblingSession, ""); err != nil {
+				return fmt.Errorf("create sibling session at the observation boundary: %w", err)
+			}
+			rawPID, err := sibling.run("display-message", "-p", "#{pid}")
+			if err != nil {
+				return fmt.Errorf("read sibling server pid: %w", err)
+			}
+			siblingPID = rawPID
+			info, err := os.Lstat(path)
+			if err != nil {
+				return fmt.Errorf("lstat sibling socket: %w", err)
+			}
+			siblingSocket = info
+			return observeNamedSocket(ctx, path)
+		}
+
+		started := fmt.Sprintf("gc-sibling-attach-%d", time.Now().UnixNano())
+		if err := guarded.Start(context.Background(), started, runtimepkg.Config{Command: "sleep 600"}); err != nil {
+			t.Fatalf("Provider.Start after a sibling bound the socket mid-probe: %v (preflights=%d)", err, probeExec.preflights)
+		}
+		if probeExec.preflights != 2 {
+			t.Fatalf("preflight probes = %d, want 2 (initial + re-probe)", probeExec.preflights)
+		}
+		if !errors.Is(probeExec.firstErr, ErrNoServer) {
+			t.Fatalf("first preflight error = %v, want a genuine ErrNoServer from real tmux", probeExec.firstErr)
+		}
+		for _, session := range []string{siblingSession, started} {
+			has, err := sibling.HasSession(session)
+			if err != nil || !has {
+				t.Fatalf("session %q present = %t, err = %v; both must sit on the sibling's server", session, has, err)
+			}
+		}
+		afterPID, err := sibling.run("display-message", "-p", "#{pid}")
+		if err != nil {
+			t.Fatalf("read server pid after guarded start: %v", err)
+		}
+		if afterPID != siblingPID {
+			t.Fatalf("server pid changed: before=%s after=%s; the guarded start must attach, not rebind", siblingPID, afterPID)
+		}
+		afterSocket, err := os.Lstat(socketPath)
+		if err != nil {
+			t.Fatalf("lstat socket after guarded start: %v", err)
+		}
+		if !os.SameFile(siblingSocket, afterSocket) {
+			t.Fatalf("socket inode changed: before=%s after=%s", socketInode(siblingSocket), socketInode(afterSocket))
 		}
 	})
 
