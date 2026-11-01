@@ -110,9 +110,10 @@ func assertSessionListRendering(t *testing.T, payload map[string]any, want strin
 }
 
 // TestSessionListJSONRouteConformance runs the real `gc session list --json`
-// command through each route the ladder can take and checks that the route
-// decides the rendering, that each rendering validates against the shared
-// schema, and that the route audit line names the route taken. The decision
+// command through each route the ladder can take and checks that every route
+// prints the one shape, plus the API-only fields exactly when the API served
+// the read, that each payload validates against the schema, and that the
+// route audit line names the route taken. The decision
 // table itself is TestSessionListAPIClientRouting's; this test pins what each
 // decision prints.
 func TestSessionListJSONRouteConformance(t *testing.T) {
@@ -154,23 +155,24 @@ func TestSessionListJSONRouteConformance(t *testing.T) {
 		escapeHatch bool
 		pid         int
 		mode        controllerHostingMode
-		supervisor  bool // the supervisor client resolves to supervisorClient; on a row that must stay local it proves the route, not a nil client, kept it off the API
+		supervisor  bool // the supervisor client resolves to supervisorClient; on the escape-hatch rows it proves the route, not a nil client, kept the read off the API
 		grants      bool
 		args        []string
 		rendering   string
 		empty       bool
 		route       string
 	}{
-		{name: "supervisor-hosted", city: h.cityPath, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, rendering: "local", route: "route=fallback reason=supervisor-hosted"},
-		{name: "supervisor-hosted-requiring-grants", city: h.cityPath, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, grants: true, rendering: "local", route: "route=fallback reason=supervisor-hosted"},
-		{name: "supervisor-hosted-with-api-port", city: apiCity, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, rendering: "local", empty: true, route: "route=fallback reason=supervisor-hosted"},
+		{name: "supervisor-hosted", city: h.cityPath, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, rendering: "api", route: toAPI},
+		{name: "supervisor-hosted-requiring-grants", city: h.cityPath, pid: 4242, mode: controllerHostingSupervisor, grants: true, rendering: "local", route: "route=fallback reason=grant-required"},
+		{name: "supervisor-hosted-with-api-port", city: apiCity, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, rendering: "api", route: toAPI},
+		{name: "supervisor-hosted-supervisor-unavailable", city: h.cityPath, pid: 4242, mode: controllerHostingSupervisor, rendering: "local", route: "route=fallback reason=controller-down"},
 		{name: "standalone-with-api-port", city: apiCity, pid: 4242, mode: controllerHostingStandalone, rendering: "api", route: toAPI},
 		{name: "unknown-hosting-with-api-port", city: apiCity, pid: 4242, mode: controllerHostingUnknown, rendering: "api", route: toAPI},
 		{name: "no-controller-supervisor-reachable", city: h.cityPath, supervisor: true, rendering: "api", route: toAPI},
 		{name: "no-controller-supervisor-unreachable", city: h.cityPath, rendering: "local", route: "route=fallback reason=controller-down"},
 		{name: "escape-hatch", city: h.cityPath, escapeHatch: true, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, rendering: "local", route: "route=fallback reason=escape-hatch"},
 		{name: "api-empty-list", city: h.cityPath, supervisor: true, args: []string{noMatch}, rendering: "api", empty: true, route: toAPI},
-		{name: "local-empty-list", city: h.cityPath, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, args: []string{noMatch}, rendering: "local", empty: true, route: "route=fallback reason=supervisor-hosted"},
+		{name: "local-empty-list", city: h.cityPath, escapeHatch: true, supervisor: true, pid: 4242, mode: controllerHostingSupervisor, args: []string{noMatch}, rendering: "local", empty: true, route: "route=fallback reason=escape-hatch"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

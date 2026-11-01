@@ -468,14 +468,12 @@ func TestCityStatusAPIClientRoutesToSupervisor(t *testing.T) {
 	})
 }
 
-// TestSessionListAPIClientRouting covers the client gc session list resolves.
-// A supervisor-hosted city lists its sessions locally, with or without an
-// [api] port and whatever the supervisor's grant requirement, and the
-// supervisor client is never resolved for it: the local rows carry the
-// session list contract (agent_name, closed, the summary) that the API's rows
-// do not, and the API fills each active session's active bead by reading every
-// rig store, a suspended rig's included. Every other shape routes as apiClient
-// does. (#5262)
+// TestSessionListAPIClientRouting covers the client gc session list resolves:
+// it routes exactly as apiClient does (#8453). A supervisor-hosted city lists
+// through the supervisor API, with or without an [api] port; a supervisor that
+// requires grants, or a supervisor client that cannot be resolved, sends the
+// listing local. The supervisor client is never resolved under a grant
+// requirement or the GC_NO_API escape hatch.
 func TestSessionListAPIClientRouting(t *testing.T) {
 	sentinel := api.NewClient("http://supervisor.sentinel:1")
 	origIdentity, origSup, origGrants := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook
@@ -497,14 +495,18 @@ func TestSessionListAPIClientRouting(t *testing.T) {
 		// supervisor is whether the supervisor client may be resolved; it is
 		// the sentinel when it may.
 		supervisor bool
-		grants     bool
-		toml       string
-		want       string // "supervisor", "standalone" or "" (nil)
-		wantReason string
+		// supervisorNil makes the supervisor client hook return nil: no
+		// supervisor-managed client is available.
+		supervisorNil bool
+		grants        bool
+		toml          string
+		want          string // "supervisor", "standalone" or "" (nil)
+		wantReason    string
 	}{
-		{name: "supervisor-hosted-lists-locally", pid: 4242, mode: controllerHostingSupervisor, toml: noAPIPort, wantReason: "supervisor-hosted"},
-		{name: "supervisor-hosted-with-api-port-lists-locally", pid: 4242, mode: controllerHostingSupervisor, toml: apiPort, wantReason: "supervisor-hosted"},
-		{name: "supervisor-hosted-requiring-grants-lists-locally", pid: 4242, mode: controllerHostingSupervisor, grants: true, toml: noAPIPort, wantReason: "supervisor-hosted"},
+		{name: "supervisor-hosted-uses-supervisor", pid: 4242, mode: controllerHostingSupervisor, supervisor: true, toml: noAPIPort, want: "supervisor"},
+		{name: "supervisor-hosted-with-api-port-uses-supervisor", pid: 4242, mode: controllerHostingSupervisor, supervisor: true, toml: apiPort, want: "supervisor"},
+		{name: "supervisor-hosted-requiring-grants-lists-locally", pid: 4242, mode: controllerHostingSupervisor, grants: true, toml: noAPIPort, wantReason: "grant-required"},
+		{name: "supervisor-hosted-supervisor-unavailable-lists-locally", pid: 4242, mode: controllerHostingSupervisor, supervisor: true, supervisorNil: true, toml: noAPIPort, wantReason: "controller-down"},
 		{name: "standalone-with-api-port-uses-standalone", pid: 4242, mode: controllerHostingStandalone, toml: apiPort, want: "standalone"},
 		{name: "unknown-with-api-port-uses-standalone", pid: 4242, mode: controllerHostingUnknown, toml: apiPort, want: "standalone"},
 		{name: "standalone-no-api-port-lists-locally", pid: 4242, mode: controllerHostingStandalone, toml: noAPIPort, wantReason: "controller-down"},
@@ -526,6 +528,9 @@ func TestSessionListAPIClientRouting(t *testing.T) {
 			apiRouteSupervisorClientHook = func(string) *api.Client {
 				if !tc.supervisor {
 					t.Errorf("supervisor client resolved for gc session list")
+				}
+				if tc.supervisorNil {
+					return nil
 				}
 				return sentinel
 			}

@@ -11,7 +11,7 @@ description: "Every gc command, flag, and example, generated from the CLI defini
 |------|------|---------|-------------|
 | `--city` | string |  | path to the city directory (default: walk up from cwd) |
 | `--city-name` | string |  | remote city name for --city-url (does not overload --city) |
-| `--city-url` | string |  | operate a REMOTE city at this base URL (https, or http on a loopback host; requires --city-name). A remote target is served by the API, so --json prints the API rendering where a command has two (see gc session list --help) |
+| `--city-url` | string |  | operate a REMOTE city at this base URL (https, or http on a loopback host; requires --city-name). A remote target is served by the API, so --json prints the API rendering where a command has two |
 | `--context` | string |  | operate the REMOTE city named by this context (~/.gc/contexts.toml) |
 | `--json-schema` | string |  | emit JSON Schema for this command; optional value: result or failure |
 | `--rig` | string |  | rig name or path (default: discover from cwd) |
@@ -4579,22 +4579,25 @@ gc session kill <session-id-or-alias> [flags]
 
 ## gc session list
 
-List all chat sessions. By default shows active and suspended sessions.
+List all chat sessions. By default lists every open session; --state
+closed or --state all also lists closed ones.
 
 With --json the output is one JSON document that validates against
-"gc session list --json-schema=result". It has one of two renderings, and
-the route a command takes decides which one it gets:
+"gc session list --json-schema=result" and has the same shape on every
+route: schema_version "1", ok true, filters, sessions ([] when empty) and
+summary. Each row carries id, template, state, created_at, last_active,
+attached and closed. A closed session has state "closed" and closed true.
+last_active is "" for a session that has not been active. Timestamps are
+RFC 3339 in UTC.
 
-  - Local rendering (a supervisor-hosted city, a city with no reachable
-    API, or GC_NO_API set for a local target; a remote target rejects
-    GC_NO_API): filters, sessions and summary. Each row carries closed, and
-    agent_name when the session has one, and no liveness.
-  - API rendering (a remote target such as --city-url, a standalone
-    controller's [api] port, or a supervisor serving a city that has no
-    controller): _cache_age_s and sessions. Each row carries running, and no
-    agent_name or closed.
-
-Both carry schema_version "1" and ok true, and an empty list renders as [].
+When the city's API serves the read (a supervisor-hosted city, a standalone
+controller's [api] port, or a remote target such as --city-url), the
+document also carries _cache_age_s, and each row carries running (the
+server's own observation) plus reason and program_status when the server
+reports them. A local read (GC_NO_API set for a local target, or no API
+reachable) omits those fields; the CLI never computes running itself. The
+API does not report command, session_key or the resume_* fields, so only a
+local read carries them.
 
 ```
 gc session list [flags]

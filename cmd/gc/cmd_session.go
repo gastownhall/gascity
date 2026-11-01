@@ -760,22 +760,25 @@ func newSessionListCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List chat sessions",
-		Long: `List all chat sessions. By default shows active and suspended sessions.
+		Long: `List all chat sessions. By default lists every open session; --state
+closed or --state all also lists closed ones.
 
 With --json the output is one JSON document that validates against
-"gc session list --json-schema=result". It has one of two renderings, and
-the route a command takes decides which one it gets:
+"gc session list --json-schema=result" and has the same shape on every
+route: schema_version "1", ok true, filters, sessions ([] when empty) and
+summary. Each row carries id, template, state, created_at, last_active,
+attached and closed. A closed session has state "closed" and closed true.
+last_active is "" for a session that has not been active. Timestamps are
+RFC 3339 in UTC.
 
-  - Local rendering (a supervisor-hosted city, a city with no reachable
-    API, or GC_NO_API set for a local target; a remote target rejects
-    GC_NO_API): filters, sessions and summary. Each row carries closed, and
-    agent_name when the session has one, and no liveness.
-  - API rendering (a remote target such as --city-url, a standalone
-    controller's [api] port, or a supervisor serving a city that has no
-    controller): _cache_age_s and sessions. Each row carries running, and no
-    agent_name or closed.
-
-Both carry schema_version "1" and ok true, and an empty list renders as [].`,
+When the city's API serves the read (a supervisor-hosted city, a standalone
+controller's [api] port, or a remote target such as --city-url), the
+document also carries _cache_age_s, and each row carries running (the
+server's own observation) plus reason and program_status when the server
+reports them. A local read (GC_NO_API set for a local target, or no API
+reachable) omits those fields; the CLI never computes running itself. The
+API does not report command, session_key or the resume_* fields, so only a
+local read carries them.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdSessionList(stateFilter, templateFilter, jsonOutput, stdout, stderr) != 0 {
@@ -791,12 +794,18 @@ Both carry schema_version "1" and ok true, and an empty list renders as [].`,
 }
 
 // sessionListAPIClient returns (client, "") when the API path is available,
-// or (nil, reason) when the caller should fall back. A supervisor-hosted city
-// always falls back: the local listing is the session list contract
-// (localWhenSupervisorHostedAPIClient). Indirected through a var so tests
+// or (nil, reason) when the caller should fall back. It routes as apiClient
+// does: a supervisor-hosted city lists through the supervisor API, and a
+// supervisor that requires grants sends the listing local. Both routes print
+// the same document (writeSessionListJSON). Indirected through a var so tests
 // inject a client pointed at httptest.Server or force a specific fallback
 // reason without spinning up a real controller.
-var sessionListAPIClient = localWhenSupervisorHostedAPIClient
+var sessionListAPIClient = func(cityPath string) (*api.Client, string) {
+	if c := apiClient(cityPath); c != nil {
+		return c, ""
+	}
+	return nil, apiClientFallbackReason(cityPath)
+}
 
 // routeSessionList dispatches `session list` to the API when
 // sessionListAPIClient resolved a client; otherwise falls back to the local
